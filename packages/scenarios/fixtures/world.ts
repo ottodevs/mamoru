@@ -1,16 +1,15 @@
 import { encodeFunctionData, getAddress, parseEventLogs, type Hex } from 'viem'
 import type { PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
-import { address, nonfungiblePositionManagerAbi, safeAbi, safeProxyFactoryAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { address, nonfungiblePositionManagerAbi, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { computeCaps, instantiateGrant, type Caps, type GrantName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   OPERATION_CALL,
-  configureSharedSigner,
   createProxyCall,
   execTransactionData,
   multiSendCallOnly,
-  packVerifiers,
   signSafeTx,
+  webAuthnSigner,
   type MultiSendCall,
   type SafeTx,
 } from '@mamoru/account/safe'
@@ -137,11 +136,14 @@ function nextSalt(world: World): Hex {
 async function deployAccount(lab: Lab, relayer: PrivateKeyAccount, label: string, backupIndex: number, sessionIndex: number, scalar: Hex, saltNonce: bigint): Promise<AccountFixture> {
   const backupOwner = devAccount(backupIndex)
   const passkey = new SoftwarePasskey(scalar)
+  // The passkey is configured inside Safe.setup, so the Safe address commits to it.
+  const webauthn = webAuthnSigner(passkey.x, passkey.y)
   const call = createProxyCall({
     owners: [address('SafeWebAuthnSharedSigner'), backupOwner.address],
     threshold: 1n,
     validators: [{ module: address('SmartSession'), initData: '0x' }],
     saltNonce,
+    webauthn,
   })
   const r = await lab.send(relayer, call.to, call.data)
   must(r, `${label} deploy`)
@@ -159,8 +161,8 @@ async function deployAccount(lab: Lab, relayer: PrivateKeyAccount, label: string
     ledger: new SessionLedger(),
     signedOwnerTxs: [],
   }
-  const cfg = configureSharedSigner(passkey.x, passkey.y, packVerifiers(0x100, address('P256Verifier')))
-  must(await ownerExec(lab, relayer, acct, cfg), `${label} passkey configure`)
+  const bound = await lab.client.readContract({ address: address('SafeWebAuthnSharedSigner'), abi: safeWebAuthnSharedSignerAbi, functionName: 'getConfiguration', args: [safe] })
+  if (bound.x !== webauthn.x || bound.y !== webauthn.y || bound.verifiers !== webauthn.verifiers) throw new Error(`fixture step failed: ${label} passkey not bound at deploy`)
   must(await ownerBatch(lab, relayer, acct, registryTrustCalls(safe)), `${label} registry trust`)
   return acct
 }

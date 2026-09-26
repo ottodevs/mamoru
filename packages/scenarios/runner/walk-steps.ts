@@ -1,12 +1,13 @@
 import { readdirSync } from 'node:fs'
 import { decodeFunctionResult, encodeFunctionData, keccak256, parseEventLogs, stringToHex, toEventSelector, type Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, erc20Abi, nonfungiblePositionManagerAbi, safe7579Abi, safeAbi, safeProxyFactoryAbi, smartSessionAbi } from '@mamoru/registry'
+import { address, erc20Abi, nonfungiblePositionManagerAbi, safe7579Abi, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi, smartSessionAbi } from '@mamoru/registry'
 import type { PrivateKeyAccount } from 'viem/accounts'
-import { OPERATION_CALL, execTransactionData, multiSendCallOnly, signSafeTx, type MultiSendCall, type SafeTx } from '@mamoru/account/safe'
+import { OPERATION_CALL, execTransactionData, multiSendCallOnly, webAuthnSigner, type MultiSendCall, type SafeTx } from '@mamoru/account/safe'
 import { WALKAWAY_TOKENS, walkawayCalls, type WalkawayPosition } from '@mamoru/account/owner'
 import { deployCallFromKit, recoveryKit, type RecoveryKit } from '@mamoru/account/recovery'
 import { devAccount } from '../fixtures/lab.ts'
+import { signSafeTxWithPasskey } from '../webauthn/index.ts'
 import { WHALE, ownerBatch, ownerSignature, type AccountFixture, type OwnerSigner, type World } from '../fixtures/world.ts'
 import { processCmdline, writeJson, type StepResult } from '../report/index.ts'
 import type { ScenarioCtx, StepHandler } from './context.ts'
@@ -123,7 +124,7 @@ const ownerWalkaway: StepHandler = async (ctx, args) => {
   const owners = await c.readContract({ address: acct.safe, abi: safeAbi, functionName: 'getOwners' })
   const kit = await downloadKit(
     ctx,
-    recoveryKit({ chainId: w.lab.chainId, owners: [...owners], saltNonce: 1n, permissionIds: acct.grants.map((g) => g.permissionId), tokenIds: acct.managedTokenIds }),
+    recoveryKit({ chainId: w.lab.chainId, owners: [...owners], saltNonce: 1n, webauthn: webAuthnSigner(acct.passkey.x, acct.passkey.y), permissionIds: acct.grants.map((g) => g.permissionId), tokenIds: acct.managedTokenIds }),
   )
   out.push(check('recovery kit names the account', kit.address.toLowerCase() === acct.safe.toLowerCase() && kit.chainId === w.lab.chainId, `${kit.address} on ${kit.chainId}`))
 
@@ -203,12 +204,20 @@ const counterfactualWalkaway: StepHandler = async (ctx, args) => {
   const out: StepResult[] = []
   const engineCalls = forwarded(ctx)
   const owner = w.a1.backupOwner
+  const passkey = w.a1.passkey
   const deposit = BigInt((args.usdc as number | undefined) ?? 1_000_000_000)
 
   // fx-owners with a salt no fixture has used: fx-safe, counterfactual variant.
   const kit = await downloadKit(
     ctx,
-    recoveryKit({ chainId: w.lab.chainId, owners: [address('SafeWebAuthnSharedSigner'), owner.address], saltNonce: BigInt((args.saltNonce as number | undefined) ?? 4), permissionIds: [], tokenIds: [] }),
+    recoveryKit({
+      chainId: w.lab.chainId,
+      owners: [address('SafeWebAuthnSharedSigner'), owner.address],
+      saltNonce: BigInt((args.saltNonce as number | undefined) ?? 4),
+      webauthn: webAuthnSigner(passkey.x, passkey.y),
+      permissionIds: [],
+      tokenIds: [],
+    }),
   )
   const codeBefore = await c.getCode({ address: kit.address })
   out.push(check('the kit address has no code yet', !codeBefore || codeBefore === '0x', `${kit.address} on ${kit.chainId}`))
@@ -240,15 +249,21 @@ const counterfactualWalkaway: StepHandler = async (ctx, args) => {
     sessions
   out.push(check('the deployed Safe has the kit owners and modules', setupOk, `owners ${owners.length}, threshold ${threshold}, Safe7579 ${adapter}, SmartSession ${sessions}`))
 
-  // The owner withdraws with one Safe transaction it signs and sends itself.
+  // The passkey was bound by the deploy itself: the kit's x, y and verifiers are in SafeWebAuthnSharedSigner.
+  const bound = await c.readContract({ address: address('SafeWebAuthnSharedSigner'), abi: safeWebAuthnSharedSignerAbi, functionName: 'getConfiguration', args: [safe] })
+  const kitSigner = kit.webauthn
+  const boundOk = !!kitSigner && bound.x.toString() === kitSigner.x && bound.y.toString() === kitSigner.y && bound.verifiers.toString() === kitSigner.verifiers
+  out.push(check('the deploy bound the kit passkey as owner', boundOk, `x ${bound.x === 0n ? 'unset' : 'set'}, verifiers ${bound.verifiers}`))
+
+  // The owner withdraws with one Safe transaction the passkey signs; the development account sends it.
   const ownerBefore = await w.lab.balanceOf('USDC', owner.address)
   const nonce = await c.readContract({ address: safe, abi: safeAbi, functionName: 'nonce' })
   const tx = { to: address('USDC'), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [owner.address, deposit] }), operation: OPERATION_CALL as 0, nonce }
-  const signature = await signSafeTx(owner, safe, w.lab.chainId, tx)
+  const signature = signSafeTxWithPasskey(passkey, safe, w.lab.chainId, tx)
   const r = await w.lab.send(owner, safe, execTransactionData(tx, signature))
   const ownerAfter = await w.lab.balanceOf('USDC', owner.address)
   const left = await w.lab.balanceOf('USDC', safe)
-  out.push(check('the owner withdraws the USDC', r.ok && ownerAfter - ownerBefore === deposit && left === 0n, `owner received ${ownerAfter - ownerBefore} USDC; account holds ${left}`))
+  out.push(check('the passkey owner withdraws the USDC', r.ok && ownerAfter - ownerBefore === deposit && left === 0n, `owner received ${ownerAfter - ownerBefore} USDC; account holds ${left}`))
   out.push(check('deploy and withdrawal made no call through the engine port', forwarded(ctx) === engineCalls, `${forwarded(ctx) - engineCalls} engine calls`))
   return out
 }
