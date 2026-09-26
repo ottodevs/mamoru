@@ -20,9 +20,11 @@ export async function checksum(s: string): Promise<Hex0x | null> {
   return isAddress(s, { strict: false }) ? (getAddress(s) as Hex0x) : null
 }
 
+// Resolved by the app API (mainnet RPC pool with fallback), so no browser-side RPC or CORS is involved.
 export async function resolveName(name: string): Promise<Hex0x | null> {
-  const { client, normalize } = await load()
-  return (await client.getEnsAddress({ name: normalize(name) })) as Hex0x | null
+  const res = await fetch(`/api/ens?name=${encodeURIComponent(name)}`, { headers: { accept: 'application/json' } })
+  if (!res.ok) throw new Error(`ens ${res.status}`)
+  return ((await res.json()) as { address: Hex0x | null }).address
 }
 
 /** Debounced destination resolution for the withdraw form. */
