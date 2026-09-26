@@ -1,0 +1,656 @@
+{
+  "id": "TAPE-HARVEST",
+  "title": "Dev tape: harvest",
+  "summary": "Test fixture, not a recorded run.",
+  "savingsAsset": "USDC",
+  "chainId": 31337,
+  "forkOf": "Base",
+  "forkBlock": 36000000,
+  "recordedAt": "2026-09-26T22:00:00.000Z",
+  "frames": [
+    {
+      "t": 0,
+      "block": 36000000,
+      "key": true,
+      "title": "Position opened",
+      "note": "Mamoru opened a USDC/WETH position around the pool price.",
+      "pool": {
+        "name": "USDC / WETH 0.05%",
+        "tick": -195996,
+        "price": "3001.20",
+        "liquidity": "4211339000000000"
+      },
+      "position": {
+        "tokenId": "912004",
+        "tickLower": -196600,
+        "tickUpper": -195400,
+        "lowerPrice": "2985.00",
+        "upperPrice": "3030.00",
+        "inRange": true,
+        "principalValue": "1000.10",
+        "feesValue": "0.0000"
+      },
+      "cost": {
+        "baseFeeGwei": "0.012",
+        "opCost": "0.0210",
+        "threshold": "0.1050",
+        "factorBps": 50000
+      },
+      "decision": {
+        "kind": "enter",
+        "code": "DECIDE_ENTER",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "risk",
+            "verdict": "GO",
+            "reason": "RISK_OK"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "GO",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+      },
+      "tx": {
+        "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3e8",
+        "label": "Mint position",
+        "ok": true
+      }
+    },
+    {
+      "t": 12,
+      "block": 36000006,
+      "key": false,
+      "title": "Block 36000006",
+      "note": "Price stayed in range; fees are still below the harvest line.",
+      "pool": {
+        "name": "USDC / WETH 0.05%",
+        "tick": -195986,
+        "price": "3004.80",
+        "liquidity": "4211339000000000"
+      },
+      "position": {
+        "tokenId": "912004",
+        "tickLower": -196600,
+        "tickUpper": -195400,
+        "lowerPrice": "2985.00",
+        "upperPrice": "3030.00",
+        "inRange": true,
+        "principalValue": "1000.38",
+        "feesValue": "0.0120"
+      },
+      "cost": {
+        "baseFeeGwei": "0.012",
+        "opCost": "0.0230",
+        "threshold": "0.1150",
+        "factorBps": 50000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HARVEST_BELOW_COST",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "risk",
+            "verdict": "GO",
+            "reason": "RISK_OK"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "SKIP",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2"
+      },
+      "tx": null
+    },
+    {
+      "t": 24,
+      "block": 36000012,
+      "key": false,
+      "title": "Block 36000012",
+      "note": "Price stayed in range; fees are still below the harvest line.",
+      "pool": {
+        "name": "USDC / WETH 0.05%",
+        "tick": -196006,
+        "price": "2998.10",
+        "liquidity": "4211339000000000"
+      },
+      "position": {
+        "tokenId": "912004",
+        "tickLower": -196600,
+        "tickUpper": -195400,
+        "lowerPrice": "2985.00",
+        "upperPrice": "3030.00",
+        "inRange": true,
+        "principalValue": "999.85",
+        "feesValue": "0.0260"
+      },
+      "cost": {
+        "baseFeeGwei": "0.012",
+        "opCost": "0.0250",
+        "threshold": "0.1250",
+        "factorBps": 50000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HARVEST_BELOW_COST",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "risk",
+            "verdict": "GO",
+            "reason": "RISK_OK"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "SKIP",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3"
+      },
+      "tx": null
+    },
+    {
+      "t": 36,
+      "block": 36000018,
+      "key": false,
+      "title": "Block 36000018",
+      "note": "Price stayed in range; fees are still below the harvest line.",
+      "pool": {
+        "name": "USDC / WETH 0.05%",
+        "tick": -195968,
+        "price": "3010.50",
+        "liquidity": "4211339000000000"
+      },
+      "position": {
+        "tokenId": "912004",
+        "tickLower": -196600,
+        "tickUpper": -195400,
+        "lowerPrice": "2985.00",
+        "upperPrice": "3030.00",
+        "inRange": true,
+        "principalValue": "1000.84",
+        "feesValue": "0.0410"
+      },
+      "cost": {
+        "baseFeeGwei": "0.012",
+        "opCost": "0.0210",
+        "threshold": "0.1050",
+        "factorBps": 50000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HARVEST_BELOW_COST",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "risk",
+            "verdict": "GO",
+            "reason": "RISK_OK"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "SKIP",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4"
+      },
+      "tx": null
+    },
+    {
+      "t": 48,
+      "block": 36000024,
+      "key": false,
+      "title": "Block 36000024",
+      "note": "Price stayed in range; fees are still below the harvest line.",
+      "pool": {
+        "name": "USDC / WETH 0.05%",
+        "tick": -195954,
+        "price": "3015.20",
+        "liquidity": "4211339000000000"
+      },
+      "position": {
+        "tokenId": "912004",
+        "tickLower": -196600,
+        "tickUpper": -195400,
+        "lowerPrice": "2985.00",
+        "upperPrice": "3030.00",
+        "inRange": true,
+        "principalValue": "1001.22",
+        "feesValue": "0.0570"
+      },
+      "cost": {
+        "baseFeeGwei": "0.012",
+        "opCost": "0.0230",
+        "threshold": "0.1150",
+        "factorBps": 50000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HARVEST_BELOW_COST",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "risk",
+            "verdict": "GO",
+            "reason": "RISK_OK"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "SKIP",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5"
+      },
+      "tx": null
+    },
+    {
+      "t": 60,
+      "block": 36000030,
+      "key": true,
+      "title": "Fees below cost",
+      "note": "Price stayed in range; fees are still below the harvest line.",
+      "pool": {
+        "name": "USDC / WETH 0.05%",
+        "tick": -195935,
+        "price": "3021.70",
+        "liquidity": "4211339000000000"
+      },
+      "position": {
+        "tokenId": "912004",
+        "tickLower": -196600,
+        "tickUpper": -195400,
+        "lowerPrice": "2985.00",
+        "upperPrice": "3030.00",
+        "inRange": true,
+        "principalValue": "1001.74",
+        "feesValue": "0.0710"
+      },
+      "cost": {
+        "baseFeeGwei": "0.012",
+        "opCost": "0.0250",
+        "threshold": "0.1250",
+        "factorBps": 50000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HARVEST_BELOW_COST",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "risk",
+            "verdict": "GO",
+            "reason": "RISK_OK"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "SKIP",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6"
+      },
+      "tx": null
+    },
+    {
+      "t": 72,
+      "block": 36000036,
+      "key": false,
+      "title": "Block 36000036",
+      "note": "Price stayed in range; fees are still below the harvest line.",
+      "pool": {
+        "name": "USDC / WETH 0.05%",
+        "tick": -195963,
+        "price": "3012.30",
+        "liquidity": "4211339000000000"
+      },
+      "position": {
+        "tokenId": "912004",
+        "tickLower": -196600,
+        "tickUpper": -195400,
+        "lowerPrice": "2985.00",
+        "upperPrice": "3030.00",
+        "inRange": true,
+        "principalValue": "1000.98",
+        "feesValue": "0.0860"
+      },
+      "cost": {
+        "baseFeeGwei": "0.012",
+        "opCost": "0.0210",
+        "threshold": "0.1050",
+        "factorBps": 50000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HARVEST_BELOW_COST",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "risk",
+            "verdict": "GO",
+            "reason": "RISK_OK"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "SKIP",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa7"
+      },
+      "tx": null
+    },
+    {
+      "t": 84,
+      "block": 36000042,
+      "key": false,
+      "title": "Block 36000042",
+      "note": "Price stayed in range; fees are still below the harvest line.",
+      "pool": {
+        "name": "USDC / WETH 0.05%",
+        "tick": -195979,
+        "price": "3006.90",
+        "liquidity": "4211339000000000"
+      },
+      "position": {
+        "tokenId": "912004",
+        "tickLower": -196600,
+        "tickUpper": -195400,
+        "lowerPrice": "2985.00",
+        "upperPrice": "3030.00",
+        "inRange": true,
+        "principalValue": "1000.55",
+        "feesValue": "0.1020"
+      },
+      "cost": {
+        "baseFeeGwei": "0.012",
+        "opCost": "0.0230",
+        "threshold": "0.1150",
+        "factorBps": 50000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HARVEST_BELOW_COST",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "risk",
+            "verdict": "GO",
+            "reason": "RISK_OK"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "SKIP",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa8"
+      },
+      "tx": null
+    },
+    {
+      "t": 96,
+      "block": 36000048,
+      "key": false,
+      "title": "Block 36000048",
+      "note": "Price stayed in range; fees are still below the harvest line.",
+      "pool": {
+        "name": "USDC / WETH 0.05%",
+        "tick": -195945,
+        "price": "3018.40",
+        "liquidity": "4211339000000000"
+      },
+      "position": {
+        "tokenId": "912004",
+        "tickLower": -196600,
+        "tickUpper": -195400,
+        "lowerPrice": "2985.00",
+        "upperPrice": "3030.00",
+        "inRange": true,
+        "principalValue": "1001.47",
+        "feesValue": "0.1190"
+      },
+      "cost": {
+        "baseFeeGwei": "0.012",
+        "opCost": "0.0250",
+        "threshold": "0.1250",
+        "factorBps": 50000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HARVEST_BELOW_COST",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "risk",
+            "verdict": "GO",
+            "reason": "RISK_OK"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "SKIP",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa9"
+      },
+      "tx": null
+    },
+    {
+      "t": 108,
+      "block": 36000054,
+      "key": true,
+      "title": "Harvest",
+      "note": "Fees passed the harvest line, so Mamoru collected them.",
+      "pool": {
+        "name": "USDC / WETH 0.05%",
+        "tick": -195928,
+        "price": "3024.10",
+        "liquidity": "4211339000000000"
+      },
+      "position": {
+        "tokenId": "912004",
+        "tickLower": -196600,
+        "tickUpper": -195400,
+        "lowerPrice": "2985.00",
+        "upperPrice": "3030.00",
+        "inRange": true,
+        "principalValue": "1001.93",
+        "feesValue": "0.1340"
+      },
+      "cost": {
+        "baseFeeGwei": "0.012",
+        "opCost": "0.0210",
+        "threshold": "0.1050",
+        "factorBps": 50000
+      },
+      "decision": {
+        "kind": "harvest",
+        "code": "DECIDE_HARVEST",
+        "reason": "OBS_FEES_ABOVE_COST",
+        "trail": [
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "risk",
+            "verdict": "GO",
+            "reason": "RISK_OK"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "GO",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "tx": {
+        "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3f1",
+        "label": "Collect fees",
+        "ok": true
+      }
+    },
+    {
+      "t": 120,
+      "block": 36000060,
+      "key": false,
+      "title": "Block 36000060",
+      "note": "Price stayed in range; fees are still below the harvest line.",
+      "pool": {
+        "name": "USDC / WETH 0.05%",
+        "tick": -195941,
+        "price": "3019.60",
+        "liquidity": "4211339000000000"
+      },
+      "position": {
+        "tokenId": "912004",
+        "tickLower": -196600,
+        "tickUpper": -195400,
+        "lowerPrice": "2985.00",
+        "upperPrice": "3030.00",
+        "inRange": true,
+        "principalValue": "1001.57",
+        "feesValue": "0.0040"
+      },
+      "cost": {
+        "baseFeeGwei": "0.012",
+        "opCost": "0.0230",
+        "threshold": "0.1150",
+        "factorBps": 50000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HARVEST_BELOW_COST",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "risk",
+            "verdict": "GO",
+            "reason": "RISK_OK"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "SKIP",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
+      },
+      "tx": null
+    },
+    {
+      "t": 132,
+      "block": 36000066,
+      "key": true,
+      "title": "Out of range",
+      "note": "Price left the range; the position stopped earning.",
+      "pool": {
+        "name": "USDC / WETH 0.05%",
+        "tick": -195951,
+        "price": "3036.40",
+        "liquidity": "4211339000000000"
+      },
+      "position": {
+        "tokenId": "912004",
+        "tickLower": -196600,
+        "tickUpper": -195400,
+        "lowerPrice": "2985.00",
+        "upperPrice": "3030.00",
+        "inRange": false,
+        "principalValue": "1001.30",
+        "feesValue": "0.0180"
+      },
+      "cost": {
+        "baseFeeGwei": "0.012",
+        "opCost": "0.0250",
+        "threshold": "0.1250",
+        "factorBps": 50000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "OBS_POSITION_OUT_OF_RANGE",
+        "trail": [
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "risk",
+            "verdict": "GO",
+            "reason": "RISK_OK"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "SKIP",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac"
+      },
+      "tx": null
+    }
+  ]
+}
