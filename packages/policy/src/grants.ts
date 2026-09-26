@@ -214,7 +214,7 @@ export function manageAnyGrants(p: PairSpec, usage: { manage: number; convert: n
     signature: COLLECT,
     params: [{ field: 'recipient', index: 1, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' }],
   } as const
-  return [
+  const templates: GrantTemplate[] = [
     {
       name: 'manage-any',
       perPosition: false,
@@ -284,4 +284,5 @@ export function manageAnyGrants(p: PairSpec, usage: { manage: number; convert: n
       ],
     },
   ]
+  return p.pool ? templates.map((t) => ({ ...t, pool: p.pool })) : templates
 }

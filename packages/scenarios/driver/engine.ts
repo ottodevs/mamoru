@@ -4,7 +4,7 @@ import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { amountsOf, decide, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
 import { hasManageAny, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
-import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { isSafeAndCanonical, observe, principalOwedBefore, readUserOpEvent, rpcClient, simulateFromEntryPoint, type Simulation } from '@mamoru/rpc'
 import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
 import { SessionLedger, precheck } from '@mamoru/account/precheck'
@@ -55,9 +55,9 @@ export type EngineHooks = {
   waitBlock: () => Promise<void>
   /**
    * The owner activates `manage:<tokenId>` for a position that enter-mint minted (plan §12.4).
-   * Not called under a policy with the live `manage-any` grant, enabled at activation.
+   * Not called under a policy with the live `manage-any` grants, enabled at activation.
    */
-  requestManageGrant?: (tokenId: bigint) => Promise<EngineSession>
+  requestManageGrant?: (tokenId: bigint, pool: string) => Promise<EngineSession>
 }
 
 export type ReviewResult =
@@ -91,6 +91,8 @@ export class Engine {
   readonly historyFromBlock: bigint
   depositsAfter: bigint
   lastObservation?: Observation
+  /** Live: premises the bundler rejected as unincludable, held back until `until` (block timestamp, seconds). */
+  private readonly backoff: { premiseHash: string; key: string; until: bigint }[] = []
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. */
   lastRerangeAt: bigint | null = null
   private readonly client: PublicClient
@@ -347,7 +349,7 @@ export class Engine {
       if (!this.allowedTokenIds.includes(minted.args.tokenId)) this.allowedTokenIds.push(minted.args.tokenId)
       if (!hasManageAny(this.cfg.policy)) {
         if (!this.hooks.requestManageGrant) throw new Error(`${op.opId}: policy ${this.cfg.policy.policyId} needs a manage grant per position`)
-        this.addSession(await this.hooks.requestManageGrant(minted.args.tokenId))
+        this.addSession(await this.hooks.requestManageGrant(minted.args.tokenId, proposal.pool))
       }
     }
     if (proposal.kind === 'rerange') {

@@ -5,7 +5,7 @@ import type { AccountContext, Address, FundingView, OpView, OwnerSignature, Owne
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import { simulateCalls, type SimCallResult } from '@mamoru/rpc'
-import { MANAGE_ANY_GRANTS, computeCaps, hasManageAny, instantiateGrant, type GrantName, type PolicyVersion } from '@mamoru/policy'
+import { POLICIES, computeCaps, grantKey, hasManageAny, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -118,6 +118,8 @@ const ENGINE_STEP: Record<OpRecord['kind'], Progress['step']> = {
   close_position: 'reranging',
   harvest: 'rebalancing',
   convert: 'rebalancing',
+  rerange: 'reranging',
+  reduce: 'rebalancing',
 }
 
 /** Accounts activated before the operator stored a policy id per account ran this policy. */
@@ -313,10 +315,9 @@ export class Operator {
     const caps = computeCaps(policy, LIVE_CAP_USDC, prices)
     const block = await this.client.getBlock({ blockNumber: r.block })
     const t = Number(block.timestamp)
-    // Live manage grants (owner decision 2026-09-26): re-range, reduce and harvest any position of the pair, in the same passkey.
-    const names: GrantName[] = ['enter-swap', 'enter-mint', ...(hasManageAny(policy) ? MANAGE_ANY_GRANTS : [])]
-    const grants = names.map((name) =>
-      instantiateGrant(policy, name, {
+    const keys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
+    const grants = keys.map((key) =>
+      instantiateGrant(policy, key, {
         account: live.safe,
         sessionKey,
         chainId: this.cfg.chainId,

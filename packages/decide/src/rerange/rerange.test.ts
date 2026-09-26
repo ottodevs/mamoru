@@ -105,10 +105,10 @@ describe('rerange (manage-any)', () => {
     expect((d.proposal as { amountIn: bigint }).amountIn).toBeLessThan(1_000_000_000n)
   })
 
-  test('re-entry mints with manage-any', () => {
-    const d = decide(obs({ balances: { USDC: 1_000_000_000n, cbBTC: 247_750_000_000n, WETH: 0n } }), live)
-    expect(d.kind).toBe('enter_mint')
-    expect(d.proposal).toMatchObject({ grant: 'manage-any' })
+  test('first entry mints with enter-mint; a re-mint after a re-range with manage-any', () => {
+    const o = obs({ balances: { USDC: 1_000_000_000n, cbBTC: 247_750_000_000n, WETH: 0n } })
+    expect(decide(o, live).proposal).toMatchObject({ kind: 'enter_mint', grant: 'enter-mint' })
+    expect(decide({ ...o, lastRerangeAt: 5_000n }, live).proposal).toMatchObject({ kind: 'enter_mint', grant: 'manage-any' })
   })
 
   test('harvest under manage-any uses convert-any', () => {

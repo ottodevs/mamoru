@@ -1,6 +1,7 @@
 import { keccak256, stringToHex, type Hex } from 'viem'
 import type { ReasonCode } from '@mamoru/domain'
-import { hasManageAny, policyHash, type PolicyVersion } from '@mamoru/policy'
+import { grantKeyFor, hasManageAny, policyHash, type PolicyVersion } from '@mamoru/policy'
+import { allocate } from './allocate/index.ts'
 import { enterBucket, safeSavings } from './enter/index.ts'
 import { ehgPreliminary, purgaIdentity } from './gates/index.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
@@ -10,7 +11,8 @@ import type { Decision, GateStep, Observation, Proposal, ShadowNote } from './ty
 export type * from './types.ts'
 export { estimateFees } from './harvest/index.ts'
 export { safeSavings } from './enter/index.ts'
-export { inSavings, volatileOf } from './value.ts'
+export { amountsForLiquidity, inSavings, volatileOf } from './value.ts'
+export { allocate, widthOf, type Allocation, type BucketValue } from './allocate/index.ts'
 export { amountsOf, bucketValues, positionValue, rerangeOf, reduceOf, EDGE_BPS, DRIFT_BPS } from './rerange/index.ts'
 
 const PROPOSAL_CODE = {
@@ -58,6 +60,8 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
   const harvests: Proposal[] = []
   const reranges: Proposal[] = []
   const manageAny = hasManageAny(policy)
+  // After a re-range, re-mints go through manage-any: enter-mint's cumulative cap covers the first entry only.
+  const remint = manageAny && (obs.lastRerangeAt ?? null) !== null
   let managedInRange = 0
   let managedOutOfRange = 0
   for (const p of obs.positions) {
@@ -78,7 +82,7 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
         if (r.proposal) reranges.push(r.proposal)
         const h = harvestOf(p, pool, policy, est)
         codes.push(h.code)
-        if (h.proposal) harvests.push(manageAny ? { ...h.proposal, grant: 'convert-any' } : h.proposal)
+        if (h.proposal) harvests.push(manageAny ? { ...h.proposal, grant: anyKey(policy, 'convert-any', pool.name) } : h.proposal)
       }
     }
     positions.push({ tokenId: p.tokenId, codes })
@@ -95,7 +99,7 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
       enterEvaluated = true
       const pool = obs.pools.find((x) => x.name === a.proposal!.pool)!
       trail.push(purgaIdentity(pool), { gate: 'strategy', verdict: 'GO', reason: 'STRATEGY_PREFERENCE_DEVIATION' }, { gate: 'eny', verdict: 'SKIP', reason: 'ENY_SHADOW' })
-      entries.push(a.proposal)
+      entries.push(remint && a.proposal.kind === 'enter_mint' ? { ...a.proposal, grant: anyKey(policy, 'manage-any', a.proposal.pool) } : a.proposal)
     }
   } else for (const b of policy.buckets) {
     const poolName = b.pools[0]
@@ -121,7 +125,7 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
     }
     const convert = ratioConvertOf(obs, policy, b.preference, pool, safeSavings(obs, policy))
     const e = convert ? { code: 'DECIDE_CONVERT' as const, proposal: convert } : enterBucket(obs, policy, b.preference, pool)
-    if (manageAny && e.proposal?.kind === 'enter_mint') e.proposal = { ...e.proposal, grant: 'manage-any' }
+    if (remint && e.proposal?.kind === 'enter_mint') e.proposal = { ...e.proposal, grant: anyKey(policy, 'manage-any', pool.name) }
     buckets.push({ bucket: b.id, code: e.code })
     if (e.proposal) {
       enterEvaluated = true

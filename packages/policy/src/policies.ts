@@ -123,6 +123,13 @@ function pairOf(prefix: string, pool: string, stable: string, volatile: string, 
     },
     { enterSwap: 16, enterMint: 16, manage: 64 },
   )
+  // Live manage grants (owner decision 2026-09-26): re-range, reduce and harvest any position of this pair.
+  grants.push(
+    ...manageAnyGrants(
+      { stable, volatile, token0, token1, fee, pool, caps: { stableSwapPerCall: n('SwapPerCall'), stableSwapTotal: n('SwapTotal'), mint0: n('Mint0'), mint1: n('Mint1'), volatileConvertPerCall: n('ConvertPerCall'), volatileConvertTotal: n('ConvertTotal') } },
+      { manage: 256, convert: 64 },
+    ),
+  )
   return { caps, grants }
 }
 
@@ -148,7 +155,7 @@ export const conservadorLiveV2: PolicyVersion = {
     { id: 'btc-usdc', preference: 4000, pools: ['pool:USDC/cbBTC/500'] },
     { id: 'risk', preference: 1000, pools: ['pool:WETH/USDC/3000'] },
   ],
-  range: { ...conservadorV1.range, widthTicksByPool: { 'pool:USDC/USDT/100': 40 } },
+  range: { ...conservadorLiveV1.range, widthTicksByPool: { 'pool:USDC/USDT/100': 40 } },
   allocation: 'target-weights',
   minEntry: 100_000n,
   rebalanceBandBps: 300,
