@@ -29,6 +29,8 @@ export type ArmedActivation = {
   /** The grants this tx enables, with their permissionIds. */
   grants: StoredGrant[]
   armedAt: string
+  /** Failed execution attempts so far; the watcher retries until ARM_MAX_TRIES. */
+  tries?: number
 }
 
 export type AccountState = {

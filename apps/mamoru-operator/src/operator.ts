@@ -39,6 +39,8 @@ import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp }
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
 /** An owner op whose receipt poll failed after the tx was sent: the tx may still have landed. */
 const RECEIPT_UNKNOWN = 'OWNER_TX_ERROR'
+/** Armed activations retry this many times across watcher passes before failing visibly. */
+const ARM_MAX_TRIES = 20
 /** Minimum gap between two receipt reconciliation passes of one account. */
 const RECONCILE_EVERY_MS = 20_000
 /** Base produces a block every 2 s; used to place a failure time on the chain when no tx hash was kept. */
@@ -695,8 +697,13 @@ export class Operator {
     try {
       await this.execute(acc, live, p, a.signature, op)
     } catch (e) {
-      console.error(`[armed] ${op.opId} ${(e as Error).message.split('\n')[0]}`)
-      this.patchOp(acc, op.opId, { state: 'failed', code: 'OWNER_TX_ERROR' })
+      // Transient RPC/relay failures keep the signed activation armed; the watcher retries it on the next pass.
+      const tries = (a.tries ?? 0) + 1
+      console.error(`[armed] ${op.opId} attempt ${tries}: ${(e as Error).message.split('\n')[0]}`)
+      if (tries < ARM_MAX_TRIES && !acc.active) {
+        acc.armed = { ...a, tries }
+        this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
+      } else if (!acc.active) this.patchOp(acc, op.opId, { state: 'failed', code: 'OWNER_TX_ERROR' })
     }
   }
 
