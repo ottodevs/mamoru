@@ -1,8 +1,9 @@
-import type { FundingView, Hex0x, OpView } from '@mamoru/domain'
+import type { FundingView, Hex0x, OpView, WithdrawAsset } from '@mamoru/domain'
 import { useMutation } from '@tanstack/react-query'
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { useApi } from '../api/client.ts'
-import { APY_REFRESH_MS, useApy, useFunding, useOps, usePools } from '../api/queries.ts'
+import { APY_REFRESH_MS, useApy, useFunding, useOps, usePools, useWithdrawAssets } from '../api/queries.ts'
+import { AssetPicker } from '../components/asset-picker.tsx'
 import { TokenMark } from '../components/token-mark.tsx'
 import { BasescanLink, Brand, Modal, Waiting } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
@@ -12,6 +13,7 @@ import { cbbtcPrice, humanMessage, split, usd, usdInput, type Split } from '../l
 import { activationLive, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { localTime } from '../lib/time.ts'
+import { receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
 import { DepositDetails, hasMoney } from './add-money.tsx'
 
 export const homeCopy = {
@@ -248,8 +250,11 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
   const flow = useOwnerAction(accountKey, 'transfer')
   const [amount, setAmount] = useState('')
   const [to, setTo] = useState('')
+  const [asset, setAsset] = useState<WithdrawAsset>('USDC')
   const [invalid, setInvalid] = useState<string | null>(null)
   const dest = useDestination(to)
+  const assetsQ = useWithdrawAssets(accountKey, open)
+  const options = withdrawOptions(assetsQ.data?.assets)
   const close = () => {
     flow.reset()
     setInvalid(null)
@@ -260,9 +265,10 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
     const raw = parseUsdc(amount)
     if (raw === null) return setInvalid('Enter an amount above zero.')
     if (BigInt(raw) > s.total) return setInvalid(`You can withdraw up to ${usd(s.maxWithdraw)} USDC right now.`)
-    if (dest.state !== 'ok') return setInvalid(dest.state === 'invalid' ? dest.message : 'Enter where the USDC should go.')
+    if (dest.state !== 'ok') return setInvalid(dest.state === 'invalid' ? dest.message : `Enter where the ${asset} should go.`)
+    if (!options.find((o) => o.asset === asset)?.available) return setInvalid(`${asset} is not available right now.`)
     setInvalid(null)
-    await flow.prepare({ to: dest.address as Hex0x, amountUsdc: raw })
+    await flow.prepare({ to: dest.address as Hex0x, amountUsdc: raw, ...(asset === 'USDC' ? {} : { asset }) })
   }
   const error = flow.error ? humanMessage(flow.error, s.maxWithdraw) : null
   const done = flow.result !== null
@@ -288,6 +294,15 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
           <p className="m-0 text-[2rem] leading-none text-emerald tabular-nums">
             {usd(BigInt(parseUsdc(amount) ?? '0'))} <span className="text-[0.9rem] tracking-[0.12em] text-stone">USDC</span>
           </p>
+          {flow.prepared.receive && flow.prepared.receive.asset !== 'USDC' ? (
+            <div className="grid gap-1" data-testid="receive">
+              <p className="m-0 flex items-center gap-2 text-[1.05rem]">
+                <TokenMark symbol={flow.prepared.receive.asset} size={20} />
+                {receiveLine(flow.prepared.receive)}
+              </p>
+              <p className="m-0 font-mono text-[0.8rem] text-stone">{flow.prepared.receive.route}</p>
+            </div>
+          ) : null}
           {dest.state === 'ok' ? (
             <div className="grid gap-1">
               <p className="kicker">To</p>
@@ -312,6 +327,11 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
             </button>
           </div>
           <p className="m-0 text-[0.85rem] text-stone">{usd(s.maxWithdraw)} USDC available</p>
+          <div className="mt-2 grid gap-[0.35rem] text-[0.88rem]">
+            <span>Receive as</span>
+            <AssetPicker value={asset} options={options} onChange={setAsset} />
+            {asset !== 'USDC' ? <p className="m-0 text-[0.8rem] text-stone">Mamoru swaps the USDC to {asset} on Uniswap. You see the quote before your passkey.</p> : null}
+          </div>
           <label className="mt-2 grid gap-[0.35rem] text-[0.88rem]">
             <span>To</span>
             <input className="field mono" value={to} onChange={(e) => setTo(e.target.value)} placeholder="0x… or name.eth" autoComplete="off" spellCheck={false} autoCapitalize="off" />

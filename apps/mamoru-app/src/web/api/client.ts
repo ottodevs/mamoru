@@ -14,6 +14,7 @@ import type {
   SessionView,
   TransferPlan,
   TransferRequest,
+  WithdrawAsset,
 } from '@mamoru/domain'
 
 // Every call goes to same-origin /api (FR-DSH-019). The SPA never reaches RPC, bundler or MultiBaas.
@@ -32,6 +33,7 @@ export type ApiClient = {
   ops(accountKey: string): Promise<{ ops: OpView[] }>
   activatePrepare(accountKey: string): Promise<OwnerTxToSign>
   activate(accountKey: string, sig: OwnerSignature): Promise<OpView>
+  withdrawAssets(accountKey: string): Promise<{ assets: { asset: WithdrawAsset; available: boolean; reason?: string }[] }>
   transferPrepare(accountKey: string, body: TransferRequest): Promise<TransferPlan>
   transfer(accountKey: string, sig: OwnerSignature): Promise<OpView>
   stopPrepare(accountKey: string): Promise<OwnerTxToSign>
@@ -87,6 +89,7 @@ export const httpClient: ApiClient = {
   ops: (k) => request<{ ops: OpView[] }>(acct(k, 'ops')),
   activatePrepare: (k) => post<OwnerTxToSign>(acct(k, 'activate/prepare')),
   activate: (k, sig) => post<OpView>(acct(k, 'activate'), sig),
+  withdrawAssets: (k) => request<{ assets: { asset: WithdrawAsset; available: boolean; reason?: string }[] }>(acct(k, 'withdraw-assets')),
   transferPrepare: (k, body) => post<TransferPlan>(acct(k, 'transfer/prepare'), body),
   transfer: (k, sig) => post<OpView>(acct(k, 'transfer'), sig),
   stopPrepare: (k) => post<OwnerTxToSign>(acct(k, 'stop/prepare')),

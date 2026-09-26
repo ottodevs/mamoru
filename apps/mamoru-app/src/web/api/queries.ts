@@ -9,6 +9,7 @@ export const queryKeys = {
   apy: ['apy'] as const,
   funding: (accountKey: string) => ['funding', accountKey] as const,
   ops: (accountKey: string) => ['ops', accountKey] as const,
+  withdrawAssets: (accountKey: string) => ['withdraw-assets', accountKey] as const,
 }
 
 const TERMINAL = new Set(['confirmed', 'failed'])
@@ -64,5 +65,17 @@ export function useOps(accountKey: string | undefined, enabled: boolean) {
     queryFn: () => api.ops(accountKey as string),
     enabled: enabled && accountKey !== undefined,
     refetchInterval: (q) => (q.state.data?.ops.some((op) => !TERMINAL.has(op.state)) ? 4_000 : false),
+  })
+}
+
+/** Which assets a withdraw can pay out in. A failure is not retried: the dialog falls back to a static list. */
+export function useWithdrawAssets(accountKey: string | undefined, enabled: boolean) {
+  const api = useApi()
+  return useQuery({
+    queryKey: queryKeys.withdrawAssets(accountKey ?? ''),
+    queryFn: () => api.withdrawAssets(accountKey as string),
+    enabled: enabled && accountKey !== undefined,
+    retry: false,
+    staleTime: 60_000,
   })
 }

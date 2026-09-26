@@ -317,6 +317,75 @@
     padding: 0.2rem 0.55rem;
     cursor: pointer;
   }
+  .tok-dd {
+    position: relative;
+  }
+  .tok-now {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    width: 100%;
+    height: 100%;
+    border: 1px solid var(--color-wash);
+    background: transparent;
+    color: var(--color-ink);
+    padding: 0.45rem 0.7rem;
+    cursor: pointer;
+    font: inherit;
+  }
+  .tok-now::after {
+    content: '▾';
+    margin-left: auto;
+    padding-left: 0.4rem;
+    color: var(--color-stone);
+  }
+  .tok-now:disabled {
+    cursor: default;
+  }
+  .tok-list {
+    position: absolute;
+    z-index: 3;
+    left: 0;
+    min-width: 100%;
+    width: max-content;
+    max-width: min(20rem, calc(100vw - 3rem));
+    top: calc(100% + 0.3rem);
+    margin: 0;
+    padding: 0.25rem;
+    list-style: none;
+    border: 1px solid var(--color-wash);
+    background: var(--color-paper);
+  }
+  .tok-opt {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: var(--color-ink);
+    padding: 0.5rem 0.55rem;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+  }
+  .tok-opt:hover:not(:disabled),
+  .tok-opt[aria-selected='true'] {
+    background: color-mix(in srgb, var(--color-wash) 45%, transparent);
+  }
+  .tok-opt:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+  .tok-sym {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    letter-spacing: 0.06em;
+  }
+  .tok-why {
+    font-size: 0.75rem;
+    color: var(--color-stone);
+  }
   .err {
     margin: 0;
     color: var(--color-alert-ink);

@@ -3,6 +3,7 @@ import type { TokenHolding } from '@mamoru/domain'
 type Symbol = TokenHolding['token']
 
 // Ported from the designer's TokenMark. cbBTC uses the BTC mark in Coinbase blue.
+// EURC and JPYC follow the same flat disc: issuer colour, white glyph.
 export function TokenMark({ symbol, size = 28 }: { symbol: Symbol | string; size?: number }) {
   return (
     <span className="inline-grid shrink-0 place-items-center" title={symbol} style={{ width: size, height: size }}>
@@ -23,6 +24,18 @@ export function TokenMark({ symbol, size = 28 }: { symbol: Symbol | string; size
           <path fill="#fff" d="M16.1 25.5v-4.1L10 17z" />
           <path fill="#fff" fillOpacity=".4" d="M16.1 19.3 22.1 16.6 16.1 13.9z" />
           <path fill="#fff" fillOpacity=".8" d="M10 16.6l6.1 2.7V13.9z" />
+        </svg>
+      ) : symbol === 'EURC' ? (
+        <svg viewBox="0 0 32 32" aria-hidden="true" className="block h-full w-full">
+          <circle cx="16" cy="16" r="16" fill="#2775CA" />
+          <path fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" d="M20.6 10.6a6.4 6.4 0 1 0 0 10.8" />
+          <path fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" d="M9.6 14.4h8.2M9.6 17.6h8.2" />
+        </svg>
+      ) : symbol === 'JPYC' || symbol === 'JPY' ? (
+        <svg viewBox="0 0 32 32" aria-hidden="true" className="block h-full w-full">
+          <circle cx="16" cy="16" r="16" fill="#1D3B8B" />
+          <path fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" d="M10.8 8.6 16 16l5.2-7.4M16 16v8" />
+          <path fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" d="M11.6 17.4h8.8M11.6 20.6h8.8" />
         </svg>
       ) : symbol === 'cbBTC' ? (
         <svg viewBox="0 0 32 32" aria-hidden="true" className="block h-full w-full">

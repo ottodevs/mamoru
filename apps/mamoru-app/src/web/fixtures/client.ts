@@ -1,4 +1,4 @@
-import { PRODUCTION_BANNER, type AppConfig, type FundingView, type OpView, type OwnerResponse, type OwnerTxToSign, type SessionView } from '@mamoru/domain'
+import { PRODUCTION_BANNER, type AppConfig, type FundingView, type OpView, type OwnerResponse, type OwnerTxToSign, type SessionView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
 import type { ApiClient } from '../api/client.ts'
 import { emptyAccount, FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from './empty-account.ts'
 import { poolsResponse } from './pools.ts'
@@ -75,6 +75,19 @@ function fixtureOp(kind: OpView['kind'], after: () => void): OpView {
   return op
 }
 
+// Fixed quotes per 1 USDC (base units of the output asset), 0.5% slippage floor.
+const FIXTURE_QUOTE: Record<Exclude<WithdrawAsset, 'USDC'>, { perUsdc: bigint; decimals: number; route: string }> = {
+  EURC: { perUsdc: 921_000n, decimals: 6, route: 'Uniswap v3 · USDC → EURC 0.05% · Base' },
+  ETH: { perUsdc: 384_615_384_615_384n, decimals: 18, route: 'Uniswap v3 · USDC → WETH 0.05% · unwrapped to ETH · Base' },
+  JPYC: { perUsdc: 147_300_000_000_000_000_000n, decimals: 18, route: 'Uniswap v4 · USDC → JPYC · Base' },
+}
+
+export function fixtureReceive(asset: Exclude<WithdrawAsset, 'USDC'>, amountUsdc: bigint): NonNullable<TransferPlan['receive']> {
+  const q = FIXTURE_QUOTE[asset]
+  const quoted = (amountUsdc * q.perUsdc) / 1_000_000n
+  return { asset, quoted: String(quoted), minimum: String((quoted * 995n) / 1000n), decimals: q.decimals, route: q.route }
+}
+
 export const fixtureClient: ApiClient = {
   config: () => delay(liveGate ? { ...fixtureConfig, fundsGate: 'live', dryRun: false, capUsdc: '25000000' } : fixtureConfig),
   session: () => delay(liveState.owner ? fixtureSession : null),
@@ -127,10 +140,20 @@ export const fixtureClient: ApiClient = {
       }),
     )
   },
+  withdrawAssets: () =>
+    delay({
+      assets: [
+        { asset: 'USDC' as const, available: true },
+        { asset: 'EURC' as const, available: true },
+        { asset: 'ETH' as const, available: true },
+        { asset: 'JPYC' as const, available: false, reason: 'Not available on Base yet' },
+      ],
+    }),
   transferPrepare: (_k, body) =>
     delay({
       reduce: BigInt(body.amountUsdc) > BigInt(liveState.funding.usdc) ? [{ tokenId: '4242', liquidityBps: 5000 }] : [],
-      ownerTx: fixtureTx([`Transfer ${Number(body.amountUsdc) / 1e6} USDC to ${body.to}`]),
+      ...(body.asset && body.asset !== 'USDC' ? { receive: fixtureReceive(body.asset, BigInt(body.amountUsdc)) } : {}),
+      ownerTx: fixtureTx([`Transfer ${Number(body.amountUsdc) / 1e6} USDC to ${body.to}${body.asset && body.asset !== 'USDC' ? ` as ${body.asset}` : ''}`]),
     }),
   transfer: () =>
     delay(

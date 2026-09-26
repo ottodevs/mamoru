@@ -1,4 +1,4 @@
-import type { Hex0x, OpView, OwnerTxToSign, TransferPlan } from '@mamoru/domain'
+import type { Hex0x, OpView, OwnerTxToSign, TransferPlan, TransferRequest } from '@mamoru/domain'
 import { useQueryClient } from '@tanstack/react-query'
 import { useCallback, useState } from 'react'
 import { ApiRequestError, useApi, type ApiClient } from '../api/client.ts'
@@ -33,7 +33,7 @@ export function errorText(e: unknown): string {
 }
 
 export type OwnerKind = 'activate' | 'transfer' | 'stop'
-type Prepared = { tx: OwnerTxToSign; reduce?: TransferPlan['reduce'] }
+type Prepared = { tx: OwnerTxToSign; reduce?: TransferPlan['reduce']; receive?: TransferPlan['receive'] }
 
 const SUBMIT: Record<OwnerKind, (api: ApiClient) => ApiClient['activate']> = {
   activate: (api) => api.activate,
@@ -54,7 +54,7 @@ export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind) 
   const [result, setResult] = useState<OpView | null>(null)
 
   const prepare = useCallback(
-    async (body?: { to: Hex0x; amountUsdc: string }) => {
+    async (body?: TransferRequest) => {
       if (!accountKey) return null
       setError(null)
       setBusy('preparing')
@@ -63,7 +63,7 @@ export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind) 
         if (kind === 'transfer') {
           if (!body) throw new Error('Enter an address and an amount.')
           const plan = await api.transferPrepare(accountKey, body)
-          p = { tx: plan.ownerTx, reduce: plan.reduce }
+          p = { tx: plan.ownerTx, reduce: plan.reduce, receive: plan.receive }
         } else {
           p = { tx: kind === 'activate' ? await api.activatePrepare(accountKey) : await api.stopPrepare(accountKey) }
         }
