@@ -1,0 +1,16 @@
+{
+  "catalog": "catalog-v1",
+  "note": "LAB-03 input: catalog-v1 with one altered nibble in the block hash.",
+  "fork": {
+    "block": 51811000,
+    "blockHash": "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423fe",
+    "timestamp": 1790411347,
+    "chainId": 31337,
+    "secondChainId": 31338
+  },
+  "anvil": {
+    "version": "1.7.1",
+    "commit": "4072e48705af9d93e3c0f6e29e93b5e9a40caed8",
+    "slotsInAnEpoch": 2
+  }
+}

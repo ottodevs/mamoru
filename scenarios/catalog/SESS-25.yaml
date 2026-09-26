@@ -1,0 +1,19 @@
+id: SESS-25
+requirements: [FR-ACC-010]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: sess
+order: last
+fixtures: [fx-owners, fx-safe, fx-gas, fx-usdc, fx-lp-direct, fx-sessions, fx-owner-position, fx-second-account, fx-whale]
+notes: >
+  T001 accepts SESS-25 on the attack batches of SESS-01 to SESS-23 and on the
+  fixture batches. The engine batches of M02 to M14 are added when the motor exists.
+steps:
+  - precheck-parity:
+      scenarios: [SESS-01, SESS-02, SESS-03, SESS-04, SESS-05, SESS-06, SESS-07, SESS-08, SESS-09, SESS-10, SESS-11, SESS-13, SESS-14, SESS-15, SESS-16, SESS-17, SESS-18, SESS-19, SESS-20, SESS-21, SESS-22, SESS-23]
+expect: {}
+invariants: [INV-CODES]

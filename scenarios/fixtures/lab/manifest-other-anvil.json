@@ -1,0 +1,16 @@
+{
+  "catalog": "catalog-v1",
+  "note": "LAB-04 input: catalog-v1 pinned to an anvil version that is not the one installed.",
+  "fork": {
+    "block": 51811000,
+    "blockHash": "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff",
+    "timestamp": 1790411347,
+    "chainId": 31337,
+    "secondChainId": 31338
+  },
+  "anvil": {
+    "version": "1.7.0",
+    "commit": "",
+    "slotsInAnEpoch": 2
+  }
+}

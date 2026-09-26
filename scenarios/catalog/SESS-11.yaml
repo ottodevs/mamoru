@@ -1,0 +1,21 @@
+id: SESS-11
+requirements: [FR-ACC-006]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: sess
+fixtures: [fx-owners, fx-safe, fx-gas, fx-usdc, fx-lp-direct, fx-sessions, fx-owner-position, fx-second-account, fx-whale]
+steps:
+  - owner-revoke: { grants: [enter-swap, enter-mint, manage] }
+  - session-op: { grant: enter-swap, batch: valid-swap, expect: { chain: CHAIN_REJECTED_VALIDATION, precheck: SESSION_REVOKED, failedOp: account-validation } }
+  - session-op: { grant: manage, batch: valid-collect, expect: { chain: CHAIN_REJECTED_VALIDATION, precheck: SESSION_REVOKED, failedOp: account-validation } }
+  - owner-replay: { which: activation }
+  - engine-reactivate: { grant: enter-swap }
+  - owner-renew: { grant: enter-swap }
+  - session-op: { grant: enter-swap, batch: valid-swap, expect: { chain: INCLUDED, precheck: ACCEPT, state: changed } }
+expect:
+  codes: [SESSION_REVOKED, CHAIN_REJECTED_VALIDATION, SESSION_PERMISSION_ID_REUSED, INCLUDED]
+invariants: [INV-RECIPIENT, INV-TARGETS, INV-ETH-GAS, INV-CODES, INV-FORK-CHAIN]

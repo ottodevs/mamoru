@@ -3,6 +3,7 @@ import type { Address } from '@mamoru/domain'
 import {
   address,
   baseRegistry,
+  entryPointV07Abi,
   erc20Abi,
   nameOf,
   nonfungiblePositionManagerAbi,
@@ -25,6 +26,7 @@ async function accountDigest(w: World, a: AccountFixture, out: Digest): Promise<
   const c = w.lab.client
   const p = `${a.label}.`
   out[`${p}eth`] = String(await c.getBalance({ address: a.safe }))
+  out[`${p}entryPointDeposit`] = String(await c.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'balanceOf', args: [a.safe] }))
   const spenders: Record<string, Address> = { router: address('SwapRouter02'), npm: address('NonfungiblePositionManager'), attacker: w.attacker.address, permit2: PERMIT2 }
   for (const t of ['USDC', 'cbBTC', 'WETH']) {
     out[`${p}${t}`] = String(await w.lab.balanceOf(t, a.safe))

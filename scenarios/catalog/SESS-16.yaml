@@ -1,0 +1,19 @@
+id: SESS-16
+requirements: [FR-ACC-004, FR-ACC-006]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: sess
+fixtures: [fx-owners, fx-safe, fx-gas, fx-usdc, fx-lp-direct, fx-sessions, fx-owner-position, fx-second-account, fx-whale]
+steps:
+  - session-op: { grant: enter-swap, batch: smartsession-enableSessions, otherGrants: reject, expect: { chain: CHAIN_REJECTED_VALIDATION, precheck: POLICY_DENIED_TARGET, failedOp: account-validation } }
+  - session-op: { grant: enter-swap, batch: smartsession-enableActionPolicies, otherGrants: reject, expect: { chain: CHAIN_REJECTED_VALIDATION, precheck: POLICY_DENIED_TARGET, failedOp: account-validation } }
+  - session-op: { grant: enter-swap, batch: smartsession-enableUserOpPolicies, otherGrants: reject, expect: { chain: CHAIN_REJECTED_VALIDATION, precheck: POLICY_DENIED_TARGET, failedOp: account-validation } }
+  # a userOp signed in ENABLE mode
+  - session-op: { grant: enter-swap, batch: valid-swap, options: { signatureMode: enable }, expect: { chain: CHAIN_REJECTED_VALIDATION, precheck: POLICY_DENIED_TARGET, failedOp: account-validation } }
+expect:
+  codes: [POLICY_DENIED_TARGET, CHAIN_REJECTED_VALIDATION]
+invariants: [INV-RECIPIENT, INV-TARGETS, INV-ETH-GAS, INV-CODES, INV-FORK-CHAIN]

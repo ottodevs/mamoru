@@ -43,9 +43,12 @@ export async function secondFork(
     forkBlock: manifest.fork.block,
     chainId: opts.chainId,
     slotsInAnEpoch: manifest.anvil.slotsInAnEpoch,
-    loadStatePath: opts.statePath,
     logPath: opts.logPath,
   })
   await postStartChecks(handle.client, { chainId: opts.chainId, block: manifest.fork.block, blockHash: manifest.fork.blockHash, anvil: manifest.anvil })
+  // anvil_dumpState is gzip; --load-state only reads JSON, so the dump goes back through RPC.
+  const dump = Buffer.from(await Bun.file(opts.statePath).arrayBuffer())
+  const loaded = await handle.client.request({ method: 'anvil_loadState' as never, params: [`0x${dump.toString('hex')}`] as never })
+  if (loaded !== true) throw new Error('anvil_loadState did not load the dump')
   return handle
 }

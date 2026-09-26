@@ -1,0 +1,22 @@
+id: LAB-01
+requirements: [FR-LAB-003]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: none
+fixtures: []
+steps:
+  - load-scenario: { file: scenarios/fixtures/lab/chain-8453.yaml, expect: LAB_CHAIN_ID_FORBIDDEN }
+  - load-scenario: { file: scenarios/fixtures/lab/chain-84532.yaml, expect: LAB_CHAIN_ID_FORBIDDEN }
+  # Refused before anvil is spawned: anvil never receives 8453 or 84532.
+  - start-fork: { chainId: 8453, expect: LAB_CHAIN_ID_FORBIDDEN }
+  - start-fork: { chainId: 84532, expect: LAB_CHAIN_ID_FORBIDDEN }
+  # anvil answers a chain id that is not the scenario's.
+  - start-fork: { chainId: 31338, expect: LAB_CHAIN_ID_FORBIDDEN }
+  - start-fork: { rewriteChainId: 8453, expect: LAB_CHAIN_ID_FORBIDDEN }
+expect:
+  codes: [LAB_CHAIN_ID_FORBIDDEN]
+invariants: [INV-CODES]

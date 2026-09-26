@@ -129,8 +129,7 @@ export function decodeEntryPointError(data: Hex | undefined): { name: string; re
   try {
     const d = decodeErrorResult({ abi: entryPointV07Abi, data })
     if (d.errorName === 'FailedOp') return { name: 'FailedOp', reason: d.args[1] }
-    if (d.errorName === 'FailedOpWithRevert') return { name: 'FailedOpWithRevert', reason: d.args[1], inner: d.args[2] }
-    return { name: d.errorName }
+    return { name: 'FailedOpWithRevert', reason: d.args[1], inner: d.args[2] }
   } catch {
     return { name: 'unknown' }
   }

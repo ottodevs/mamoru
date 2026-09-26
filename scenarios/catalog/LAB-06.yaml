@@ -1,0 +1,25 @@
+id: LAB-06
+requirements: [FR-LAB-007, FR-OPS-004, FR-OPS-006, FR-ACC-007]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: basic
+order: last
+fixtures: [fx-owners, fx-safe, fx-gas, fx-usdc]
+notes: >
+  The journal blob part of LAB-06 (persisted session key is not the clear key)
+  needs the journal and is accepted by T004. This run covers argv, the process
+  list, artifacts and logs.
+steps:
+  - argv-guard: { url: env, expect: LAB_KEY_IN_ARGV }
+  - argv-guard: { url: keyed-sample, expect: LAB_KEY_IN_ARGV }
+  - start-fork: { forkUrl: env, expect: LAB_KEY_IN_ARGV }
+  - start-fork: { forkUrl: keyed-samples, expect: LAB_KEY_IN_ARGV }
+  - process-list: {}
+  - secret-scan: {}
+expect:
+  codes: [LAB_KEY_IN_ARGV]
+invariants: [INV-CODES, INV-FORK-CHAIN]

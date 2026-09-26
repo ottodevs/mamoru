@@ -1,0 +1,15 @@
+# LAB-01 input: a scenario that asks for Base Sepolia's chain id. The runner must refuse it before the first step.
+id: LAB-01-input-84532
+requirements: [FR-LAB-003]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 84532
+policy: conservador-lab-v1
+world: none
+fixtures: []
+steps:
+  - noop: {}
+expect: {}
+invariants: []

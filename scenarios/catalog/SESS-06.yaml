@@ -1,0 +1,28 @@
+id: SESS-06
+requirements: [FR-ACC-003]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: sess
+fixtures: [fx-owners, fx-safe, fx-gas, fx-usdc, fx-lp-direct, fx-sessions, fx-owner-position, fx-second-account, fx-whale]
+notes: >
+  Cumulative USDC cap 5,000 USDC; fx-lp-direct already swapped 2,000. Two swaps of
+  1,200 fit (residue of THR-04, recipient the account). The third passes the cap.
+steps:
+  - session-op:
+      grant: enter-swap
+      batch: valid-swap
+      params: { amount: "1200000000" }
+      repeat: 2
+      expect: { chain: INCLUDED, precheck: ACCEPT, state: changed }
+  - session-op:
+      grant: enter-swap
+      batch: valid-swap
+      params: { amount: "1200000000" }
+      expect: { chain: CHAIN_REJECTED_VALIDATION, precheck: POLICY_DENIED_CUMULATIVE, failedOp: account-validation }
+expect:
+  codes: [INCLUDED, POLICY_DENIED_CUMULATIVE, CHAIN_REJECTED_VALIDATION]
+invariants: [INV-RECIPIENT, INV-TARGETS, INV-ETH-GAS, INV-CODES, INV-FORK-CHAIN]

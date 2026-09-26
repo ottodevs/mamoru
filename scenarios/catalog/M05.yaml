@@ -1,0 +1,27 @@
+id: M05
+titan26: s05-scenario-fixture
+requirements: [FR-LAB-002, FR-LAB-004, FR-LAB-005, FR-LAB-006, FR-LAB-012]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: basic
+fixtures: [fx-owners, fx-safe, fx-gas, fx-usdc]
+steps:
+  # 1. fixtures applied, snapshot S1 in this run
+  - snapshot: { name: S1 }
+  - check-fixture-balances: {}
+  # 2. change the state and go back to S1
+  - mutate-state: {}
+  - restore: { name: S1 }
+  # 3. another run tries to use S1
+  - restore-foreign: { name: S1, fromRun: R2, expect: LAB_SNAPSHOT_FOREIGN }
+  # 4. anvil_setBalance through the engine port
+  - engine-port-call: { method: anvil_setBalance }
+  # 5. dump, load in another anvil of the same version, observe again
+  - repro: {}
+expect:
+  codes: [LAB_SNAPSHOT_FOREIGN, LAB_REPRO_OK]
+invariants: [INV-CODES, INV-FORK-CHAIN, INV-NO-ANVIL-IN-ENGINE]

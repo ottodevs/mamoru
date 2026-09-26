@@ -307,6 +307,28 @@ export async function buildSessWorld(lab: Lab, policy: PolicyVersion, engineNow:
   return world
 }
 
+type AccountState = Pick<AccountFixture, 'grants' | 'managedTokenIds' | 'ownerTokenIds' | 'ledger' | 'signedOwnerTxs'>
+
+/** The in-memory side of a chain snapshot: grants, positions and the engine ledger. The op log is kept across scenarios. */
+export type WorldCheckpoint = Partial<Record<'a1' | 'a2', AccountState>>
+
+function accountState(a: AccountFixture): AccountState {
+  return { grants: [...a.grants], managedTokenIds: [...a.managedTokenIds], ownerTokenIds: [...a.ownerTokenIds], ledger: a.ledger.clone(), signedOwnerTxs: [...a.signedOwnerTxs] }
+}
+
+export function checkpointWorld(w: World): WorldCheckpoint {
+  const cp: WorldCheckpoint = {}
+  for (const k of ['a1', 'a2'] as const) if (w[k]) cp[k] = accountState(w[k])
+  return cp
+}
+
+export function restoreWorld(w: World, cp: WorldCheckpoint): void {
+  for (const k of ['a1', 'a2'] as const) {
+    const s = cp[k]
+    if (s && w[k]) Object.assign(w[k], accountState({ ...w[k], ...s }))
+  }
+}
+
 /** M05 world: fx-owners, fx-safe, fx-gas and fx-usdc only. */
 export async function buildBasicWorld(lab: Lab, policy: PolicyVersion, engineNow: () => Promise<number>): Promise<World> {
   const relayer = devAccount(0)
@@ -330,8 +352,4 @@ export async function buildBasicWorld(lab: Lab, policy: PolicyVersion, engineNow
   await lab.whaleTransfer('USDC', WHALE, world.a1.safe, DEPOSIT_USDC)
   world.fixtures.push('fx-owners', 'fx-safe', 'fx-gas', 'fx-usdc')
   return world
-}
-
-export function encodeOwnerCall(to: Address, abi: readonly unknown[], functionName: string, args: unknown[]): MultiSendCall {
-  return { to, value: 0n, data: encodeFunctionData({ abi: abi as never, functionName: functionName as never, args: args as never }) }
 }
