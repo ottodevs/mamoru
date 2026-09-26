@@ -7,6 +7,8 @@ import { DeviceSessionAuth } from './auth/device-session.ts'
 import { sameOrigin } from './middleware/origin.ts'
 import { onboarding } from './onboarding/routes.ts'
 import { accountOfUser } from './accounts/store.ts'
+import { accounts } from './accounts/routes.ts'
+import { pools } from './pools/routes.ts'
 
 export type AppOptions = { now?: () => Date }
 
@@ -50,7 +52,13 @@ export function createApp(options: AppOptions = {}) {
   })
 
   app.route('/api/onboarding', onboarding)
+  app.route('/api/accounts', accounts)
+  app.route('/api/pools', pools)
 
   app.all('/api/*', (c) => apiError(c, 404, 'No such API route.'))
+  app.onError((err, c) => {
+    console.error('api error', err instanceof Error ? err.message : String(err))
+    return apiError(c, 500, 'Something failed on our side. Try again.')
+  })
   return app
 }
