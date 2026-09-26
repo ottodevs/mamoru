@@ -7,7 +7,8 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { toHex, type Hex } from 'viem'
-import type { AccountContext, FundingView, OpView, OwnerSignature, OwnerTxToSign, TransferPlan } from '@mamoru/domain'
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
+import type { AccountContext, FundingView, OpView, OwnerSignature, OwnerTxToSign, TransferPlan, WithdrawAsset } from '@mamoru/domain'
 import { address } from '@mamoru/registry'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
@@ -30,6 +31,7 @@ if (!process.env.RPC_URL && process.env.BASE_RPC_URL) process.env.RPC_URL = proc
 
 const DEPOSIT = 10_000_000n
 const TRANSFER = 2_000_000n
+const WITHDRAW = 1_000_000n
 const SINK = '0x000000000000000000000000000000000000dEaD' as const
 const t0 = Date.now()
 const log = (m: string) => console.log(`[e2e +${((Date.now() - t0) / 1000).toFixed(0)}s] ${m}`)
@@ -145,11 +147,15 @@ try {
       await Bun.sleep(1_000)
     }
   }
+  let lastPlan: TransferPlan | undefined
   async function ownerAction(kind: 'activate' | 'transfer' | 'stop', prepareBody?: unknown): Promise<OpView> {
     const prep = await call<OwnerTxToSign | TransferPlan>('POST', `${base}/${kind}/prepare`, prepareBody)
     if (prep.status !== 200) throw new Error(`E2E FAILED: ${kind}/prepare ${prep.status} ${JSON.stringify(prep.json)}`)
     const tx = 'ownerTx' in prep.json ? prep.json.ownerTx : prep.json
-    if ('reduce' in prep.json) log(`transfer plan reduce ${JSON.stringify(prep.json.reduce)}`)
+    if ('reduce' in prep.json) {
+      lastPlan = prep.json
+      log(`transfer plan reduce ${JSON.stringify(prep.json.reduce)} receive ${JSON.stringify(prep.json.receive)}`)
+    }
     log(`${kind} to sign: ${tx.summary.join(' | ')}`)
     const res = await call<OpView>('POST', `${base}/${kind}`, browserSign(tx))
     if (res.status !== 200) throw new Error(`E2E FAILED: ${kind} ${res.status} ${JSON.stringify(res.json)}`)
@@ -198,13 +204,32 @@ try {
   const tooMuch = await call<{ code: string; error: string }>('POST', `${base}/transfer/prepare`, { to: SINK, amountUsdc: '100000000' })
   check(tooMuch.status === 409, `a transfer the Safe cannot cover is refused before signing: ${tooMuch.json.code} ${tooMuch.json.error}`)
 
+  // --- withdraw in EURC and in native ETH to fresh addresses --------------------
+  const assets = (await call<{ assets: { asset: WithdrawAsset; available: boolean; reason?: string }[] }>('GET', `${base}/withdraw-assets`)).json.assets
+  const av = (a: WithdrawAsset) => assets.find((x) => x.asset === a)
+  check(!!av('USDC')?.available && !!av('EURC')?.available && !!av('ETH')?.available && av('JPYC')?.available === false && !!av('JPYC')?.reason, `withdraw-assets: ${assets.map((a) => `${a.asset}=${a.available}${a.reason ? ` (${a.reason})` : ''}`).join(', ')}`)
+  const jpy = await call<{ code: string }>('POST', `${base}/transfer/prepare`, { to: SINK, amountUsdc: WITHDRAW.toString(), asset: 'JPYC' })
+  check(jpy.status === 409 && jpy.json.code === 'ASSET_UNAVAILABLE', 'a JPYC withdraw is refused before signing')
+  const received: string[] = []
+  for (const asset of ['EURC', 'ETH'] as const) {
+    const dest = privateKeyToAccount(generatePrivateKey()).address
+    const bal = () => (asset === 'ETH' ? lab.client.getBalance({ address: dest }) : lab.balanceOf('EURC', dest))
+    const before = await bal()
+    await ownerAction('transfer', { to: dest, amountUsdc: WITHDRAW.toString(), asset })
+    const got = (await bal()) - before
+    const plan = lastPlan!
+    check(plan.receive?.asset === asset && got >= BigInt(plan.receive.minimum) && BigInt(plan.receive.minimum) > 0n, `${asset} withdraw of ${WITHDRAW} USDC units: ${dest} received ${got} (quoted ${plan.receive?.quoted}, minimum ${plan.receive?.minimum}, ${plan.receive?.route})`)
+    received.push(`${asset} ${got}`)
+  }
+  log(`withdraw amounts received: ${received.join(', ')}`)
+
   // --- stop -------------------------------------------------------------------
   const stop = await ownerAction('stop')
   const f3 = await funding()
   const cbbtcValueCap = 10_000n // dust: < ~$10 at any sane BTC price is not the claim; we assert < 0.0001 BTC
   check(!f3.active && f3.positions.length === 0 && BigInt(f3.cbbtc) < cbbtcValueCap, `after stop: inactive, no positions, cbBTC ${f3.cbbtc} units (dust), USDC ${f3.usdc}, ETH ${f3.eth}`)
   const usdcAfter = BigInt(f3.usdc)
-  check(usdcAfter > DEPOSIT - TRANSFER - big - 100_000n, `Safe holds ${usdcAfter} USDC units after round trip (deposit ${DEPOSIT} - transfers ${TRANSFER + big}, costs within 0.1 USDC)`)
+  check(usdcAfter > DEPOSIT - TRANSFER - big - 2n * WITHDRAW - 100_000n, `Safe holds ${usdcAfter} USDC units after round trip (deposit ${DEPOSIT} - transfers ${TRANSFER + big + 2n * WITHDRAW}, costs within 0.1 USDC)`)
 
   const all = await ops()
   const txs = new Set(all.filter((o) => o.txHash).map((o) => o.txHash))

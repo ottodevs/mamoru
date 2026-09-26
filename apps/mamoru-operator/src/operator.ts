@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto'
-import { decodeErrorResult, decodeFunctionResult, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { decodeErrorResult, decodeFunctionResult, encodeFunctionData, parseAbi, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import type { AccountContext, Address, FundingView, OpView, OwnerSignature, OwnerTxToSign, TransferPlan, TransferRequest } from '@mamoru/domain'
-import { address, erc20Abi, nonfungiblePositionManagerAbi } from '@mamoru/registry'
+import type { AccountContext, Address, FundingView, OpView, OwnerSignature, OwnerTxToSign, TransferPlan, TransferRequest, WithdrawAsset } from '@mamoru/domain'
+import { address, entry, erc20Abi, nonfungiblePositionManagerAbi } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import { simulateCalls, type SimCallResult } from '@mamoru/rpc'
 import { computeCaps, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
@@ -20,6 +20,7 @@ import {
   transferBatch,
   type LiveAccount,
   type LivePosition,
+  type LiveReceive,
   type LiveSwap,
   type SafeTx,
 } from '@mamoru/account/live'
@@ -259,6 +260,10 @@ export class Operator {
       throw new HttpError(400, 'BAD_REQUEST', 'amountUsdc must be an integer string')
     }
     if (amount <= 0n) throw new HttpError(400, 'BAD_REQUEST', 'amountUsdc must be positive')
+    const asset: WithdrawAsset = req.asset ?? 'USDC'
+    const avail = WITHDRAW_ASSETS.find((a) => a.asset === asset)
+    if (!avail) throw new HttpError(400, 'BAD_REQUEST', 'asset must be USDC, EURC, ETH or JPYC')
+    if (!avail.available) throw new HttpError(409, 'ASSET_UNAVAILABLE', avail.reason ?? `${asset} is not available`)
     const to = getAddress(req.to)
     if (to.toLowerCase() === live.safe.toLowerCase()) throw new HttpError(400, 'BAD_REQUEST', 'recipient is the Safe itself')
     const r = await readSafe(this.client, live.safe)
@@ -271,16 +276,71 @@ export class Operator {
       reduce = plan.reduce
       swap = plan.swap
     }
+    const out = asset === 'USDC' ? undefined : await this.receiveQuote(asset, amount, r.block, slip)
     const deadline = (await this.client.getBlock()).timestamp + 1800n
-    const calls = transferBatch({ account: live.safe, to, amountUsdc: amount, reduce: reduce.map((x) => x.lp), swapCbbtc: swap, deadline })
-    await this.simulateFromSafe(live.safe, calls, r.block)
+    const calls = transferBatch({ account: live.safe, to, amountUsdc: amount, reduce: reduce.map((x) => x.lp), swapCbbtc: swap, deadline, receive: out?.receive })
+    const probe = out ? balanceProbe(asset, to) : undefined
+    const sim = await this.simulateFromSafe(live.safe, calls, r.block, probe)
+    if (out && probe) {
+      const delta = probe.decode(sim.after!) - probe.decode(sim.before!)
+      if (delta < out.receive.amountOutMinimum) throw new HttpError(409, 'SIMULATION_FAILED', `the recipient would receive ${delta} ${asset} units, less than the minimum ${out.receive.amountOutMinimum}`)
+    }
+    const short = `${to.slice(0, 6)}…${to.slice(-4)}`
     const summary = [
       ...reduce.map((x) => `Withdraw ${(x.bps / 100).toFixed(2)}% of position #${x.pos.tokenId} (USDC/cbBTC 0.05%)`),
       ...(swap ? [`Swap ${swap.amountIn} cbBTC units to at least ${fmtUsdc(swap.amountOutMinimum)} USDC`] : []),
-      `Send ${fmtUsdc(amount)} USDC from your Safe to ${to}`,
+      ...(out
+        ? [
+            `Swap ${fmtUsdc(amount)} USDC from your Safe on ${out.route}`,
+            `Receive at least ${fmtUnits(out.receive.amountOutMinimum, out.decimals)} ${asset} at ${short} (${to})`,
+          ]
+        : [`Send ${fmtUsdc(amount)} USDC from your Safe to ${to}`]),
     ]
     const ownerTx = await this.hold(acc, live, 'transfer', calls, summary)
-    return { reduce: reduce.map((x) => ({ tokenId: x.pos.tokenId.toString(), liquidityBps: x.bps })), ownerTx }
+    return {
+      reduce: reduce.map((x) => ({ tokenId: x.pos.tokenId.toString(), liquidityBps: x.bps })),
+      ...(out
+        ? { receive: { asset, quoted: out.quoted.toString(), minimum: out.receive.amountOutMinimum.toString(), decimals: out.decimals, route: out.route } }
+        : { receive: { asset, quoted: amount.toString(), minimum: amount.toString(), decimals: 6, route: 'Direct USDC transfer' } }),
+      ownerTx,
+    }
+  }
+
+  /** GET withdraw-assets: what a withdraw can pay out in, with the reason when it cannot. */
+  async withdrawAssets(): Promise<{ assets: { asset: WithdrawAsset; available: boolean; reason?: string }[] }> {
+    const block = await this.client.getBlockNumber()
+    const assets = await Promise.all(
+      WITHDRAW_ASSETS.map(async (a) => {
+        if (!a.available || a.asset === 'USDC') return a
+        try {
+          await this.receiveQuote(a.asset as 'EURC' | 'ETH', 1_000_000n, block, this.cfg.policy.execution.slippageBps)
+          return a
+        } catch (e) {
+          return { asset: a.asset, available: false, reason: `No Uniswap quote for ${a.asset} right now (${(e as Error).message.split('\n')[0]})` }
+        }
+      }),
+    )
+    return { assets }
+  }
+
+  /** QuoterV2 at the prepare block over every registered pool for the asset; the best output wins. */
+  private async receiveQuote(asset: WithdrawAsset, amountIn: bigint, blockNumber: bigint, slip: number): Promise<{ receive: LiveReceive; quoted: bigint; decimals: number; route: string }> {
+    const routes = RECEIVE_ROUTES[asset as 'EURC' | 'ETH']
+    if (!routes) throw new HttpError(409, 'ASSET_UNAVAILABLE', `${asset} is not available`)
+    let best: { pool: string; fee: number; out: bigint } | undefined
+    for (const pool of routes.pools) {
+      const fee = entry(pool).fee!
+      try {
+        const out = await quoteExactInputSingle(this.client, { tokenIn: address('USDC'), tokenOut: address(routes.tokenOut), fee, amountIn, blockNumber })
+        if (!best || out > best.out) best = { pool, fee, out }
+      } catch {
+        // an empty or broken pool only drops out of the route set
+      }
+    }
+    if (!best) throw new HttpError(503, 'QUOTE_UNAVAILABLE', `no Uniswap v3 quote for USDC -> ${asset}`)
+    const pair = asset === 'ETH' ? 'USDC/WETH' : `USDC/${asset}`
+    const route = `Uniswap v3 ${pair} ${(best.fee / 10_000).toFixed(2)}%${asset === 'ETH' ? ' + unwrap' : ''}`
+    return { receive: { asset: asset as 'EURC' | 'ETH', fee: best.fee, amountOutMinimum: minOut(best.out, slip) }, quoted: best.out, decimals: entry(routes.tokenOut).decimals!, route }
   }
 
   /** Proportional decrease of the pool positions plus a cbBTC->USDC swap, sized from a simulated decrease+collect at the prepare block. */
@@ -330,10 +390,19 @@ export class Operator {
    * Every call of the owner batch, in order, from the Safe (what MultiSendCallOnly does under delegatecall), with
    * eth_simulateV1 at `block`. Refuses before the owner is asked to sign if any call reverts.
    */
-  private async simulateFromSafe(safe: Address, calls: { to: Address; data: Hex }[], block: bigint): Promise<SimCallResult[]> {
-    let res: SimCallResult[]
+  private async simulateFromSafe(safe: Address, calls: { to: Address; data: Hex }[], block: bigint): Promise<SimCallResult[]>
+  private async simulateFromSafe(safe: Address, calls: { to: Address; data: Hex }[], block: bigint, probe: Probe | undefined): Promise<SimCallResult[] & { before?: Hex; after?: Hex }>
+  private async simulateFromSafe(safe: Address, calls: { to: Address; data: Hex }[], block: bigint, probe?: Probe): Promise<SimCallResult[] & { before?: Hex; after?: Hex }> {
+    let res: SimCallResult[] & { before?: Hex; after?: Hex }
     try {
-      res = await simulateCalls(this.client, calls.map((c) => ({ from: safe, to: c.to, data: c.data })), block)
+      const batch = calls.map((c) => ({ from: safe, to: c.to, data: c.data }))
+      const read = probe ? [{ from: safe, to: probe.to, data: probe.data }] : []
+      const all = await simulateCalls(this.client, [...read, ...batch, ...read], block)
+      if (probe) {
+        const [before, after] = [all[0]!, all[all.length - 1]!]
+        if (before.status !== 'success' || after.status !== 'success') throw new Error('recipient balance read failed')
+        res = Object.assign(all.slice(1, -1), { before: before.returnData, after: after.returnData })
+      } else res = all
     } catch (e) {
       throw new HttpError(503, 'SIMULATION_UNAVAILABLE', (e as Error).message.split('\n')[0] ?? 'simulation unavailable')
     }
@@ -688,6 +757,39 @@ function revertReason(e: unknown): string {
     } catch {}
   }
   return data ?? (e as Error).message.split('\n')[0] ?? 'reverted'
+}
+
+type Probe = { to: Address; data: Hex; decode: (ret: Hex) => bigint }
+
+const multicall3Abi = parseAbi(['function getEthBalance(address addr) view returns (uint256 balance)'])
+
+/** A read of the recipient's balance of `asset`, run before and after the batch in the same simulation. */
+function balanceProbe(asset: WithdrawAsset, holder: Address): Probe {
+  if (asset === 'ETH') {
+    return { to: address('Multicall3'), data: encodeFunctionData({ abi: multicall3Abi, functionName: 'getEthBalance', args: [holder] }), decode: (d) => decodeFunctionResult({ abi: multicall3Abi, functionName: 'getEthBalance', data: d }) }
+  }
+  return { to: address(asset), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [holder] }), decode: (d) => decodeFunctionResult({ abi: erc20Abi, functionName: 'balanceOf', data: d }) }
+}
+
+/** Registered pools a withdraw may route through, best quote wins. */
+const RECEIVE_ROUTES: Record<'EURC' | 'ETH', { tokenOut: string; pools: string[] }> = {
+  EURC: { tokenOut: 'EURC', pools: ['pool:EURC/USDC/500'] },
+  ETH: { tokenOut: 'WETH', pools: ['pool:WETH/USDC/500', 'pool:WETH/USDC/3000'] },
+}
+
+/** JPYC: no yen stablecoin on Base has a Uniswap pool worth routing through (checked 2026-09-26: "JPYC" on Base is an unofficial token priced far off 1 JPY). */
+export const WITHDRAW_ASSETS: { asset: WithdrawAsset; available: boolean; reason?: string }[] = [
+  { asset: 'USDC', available: true },
+  { asset: 'EURC', available: true },
+  { asset: 'ETH', available: true },
+  { asset: 'JPYC', available: false, reason: 'No yen stablecoin with enough liquidity on Base yet' },
+]
+
+/** Raw units rounded down for a minimum: 2 decimals for 6-decimal stablecoins, 6 for ETH. */
+function fmtUnits(v: bigint, decimals: number): string {
+  const s = v.toString().padStart(decimals + 1, '0')
+  const frac = s.slice(-decimals).slice(0, decimals > 6 ? 6 : 2).replace(/0+$/, '')
+  return frac ? `${s.slice(0, -decimals)}.${frac}` : s.slice(0, -decimals)
 }
 
 function fmtUsdc(v: bigint): string {

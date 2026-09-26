@@ -14,7 +14,7 @@ function decodeContext(header: string): AccountContext {
   return ctx
 }
 
-const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop)$/
+const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop)$/
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -57,6 +57,8 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
         switch (route) {
           case 'GET funding':
             return json(200, await op.funding(ctx))
+          case 'GET withdraw-assets':
+            return json(200, await op.withdrawAssets())
           case 'GET ops':
             return json(200, op.ops(ctx, url.searchParams.get('after')))
           case 'POST activate/prepare':

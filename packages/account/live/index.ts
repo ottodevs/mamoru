@@ -2,7 +2,7 @@ import { concat, encodeAbiParameters, encodeFunctionData, hashTypedData, hexToBi
 import type { AccountContext, Address, Hex, OwnerSignature } from '@mamoru/domain'
 import { address, erc20Abi, safeAbi } from '@mamoru/registry'
 import type { SessionGrant } from '@mamoru/policy'
-import { approve, burn, collect, decreaseLiquidity, exactInputSingle } from '@mamoru/uniswap-v3'
+import { approve, burn, collect, decreaseLiquidity, exactInputSingle, exactInputSingleTo, swapToEth } from '@mamoru/uniswap-v3'
 import {
   OPERATION_CALL,
   createProxyCall,
@@ -27,6 +27,8 @@ export type LiveAccount = { safe: Address; chainId: number; owners: Address[]; s
 
 export type LivePosition = { tokenId: bigint; liquidity: bigint; amount0Min: bigint; amount1Min: bigint }
 export type LiveSwap = { amountIn: bigint; amountOutMinimum: bigint }
+/** What the recipient receives instead of USDC: a USDC swap on SwapRouter02 whose output goes straight to them. */
+export type LiveReceive = { asset: 'EURC' | 'ETH'; fee: number; amountOutMinimum: bigint }
 
 /** Rebuilds the account from the stored context and refuses it if the counterfactual address does not match. */
 export function liveAccountFromContext(ctx: AccountContext): LiveAccount {
@@ -114,6 +116,7 @@ export function transferBatch(i: {
   reduce: LivePosition[]
   swapCbbtc?: LiveSwap
   deadline: bigint
+  receive?: LiveReceive
 }): MultiSendCall[] {
   if (i.amountUsdc <= 0n) throw new Error('amountUsdc must be positive')
   if (i.to.toLowerCase() === i.account.toLowerCase()) throw new Error('recipient must not be the account')
@@ -121,8 +124,17 @@ export function transferBatch(i: {
   return [
     ...i.reduce.flatMap((p) => closeCalls(i.account, p, i.deadline, false)),
     ...(i.swapCbbtc ? swapCbbtcCalls(i.account, i.swapCbbtc) : []),
-    { to: address('USDC'), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [i.to, i.amountUsdc] }) },
+    ...(i.receive ? receiveCalls(i.to, i.amountUsdc, i.receive, i.deadline) : [{ to: address('USDC'), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [i.to, i.amountUsdc] }) }]),
   ]
+}
+
+/** Exact USDC approve to SwapRouter02, the swap with `to` as the output recipient (ETH: unwrapped in the router), approve 0. */
+function receiveCalls(to: Address, amountUsdc: bigint, r: LiveReceive, deadline: bigint): MultiSendCall[] {
+  const swap =
+    r.asset === 'ETH'
+      ? swapToEth({ recipient: to, tokenIn: 'USDC', fee: r.fee, amountIn: amountUsdc, amountOutMinimum: r.amountOutMinimum, deadline })
+      : exactInputSingleTo({ recipient: to, tokenIn: 'USDC', tokenOut: r.asset, fee: r.fee, amountIn: amountUsdc, amountOutMinimum: r.amountOutMinimum })
+  return [approve('USDC', 'SwapRouter02', amountUsdc), swap, approve('USDC', 'SwapRouter02', 0n)].map(strip)
 }
 
 /** Stop allocation: revoke every grant, close and burn every position, swap cbBTC -> USDC. USDC stays in the Safe. */

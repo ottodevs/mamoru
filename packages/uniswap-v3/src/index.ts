@@ -118,3 +118,38 @@ export function collect(p: { account: Address; tokenId: bigint }): V3Call {
 export function burn(tokenId: bigint): V3Call {
   return call('NonfungiblePositionManager', encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'burn', args: [tokenId] }))
 }
+
+/** SwapRouter02 Constants.ADDRESS_THIS: the router keeps the output (then unwrapWETH9 / sweepToken). */
+export const ROUTER_ADDRESS_THIS: Address = '0x0000000000000000000000000000000000000002'
+
+/** Owner withdraw: SwapRouter02.exactInputSingle with an explicit recipient (the destination, or ROUTER_ADDRESS_THIS). */
+export function exactInputSingleTo(p: {
+  recipient: Address
+  tokenIn: RegistryName
+  tokenOut: RegistryName
+  fee: number
+  amountIn: bigint
+  amountOutMinimum: bigint
+}): V3Call {
+  if (p.amountOutMinimum <= 0n) throw new Error('amountOutMinimum must be positive')
+  return call(
+    'SwapRouter02',
+    encodeFunctionData({
+      abi: swapRouter02Abi,
+      functionName: 'exactInputSingle',
+      args: [{ tokenIn: token(p.tokenIn), tokenOut: token(p.tokenOut), fee: p.fee, recipient: p.recipient, amountIn: p.amountIn, amountOutMinimum: p.amountOutMinimum, sqrtPriceLimitX96: 0n }],
+    }),
+  )
+}
+
+/**
+ * Owner withdraw in native ETH: SwapRouter02.multicall(deadline, [exactInputSingle(USDC->WETH, recipient
+ * ADDRESS_THIS), unwrapWETH9(amountMinimum, recipient)]). The router never holds funds across calls.
+ */
+export function swapToEth(p: { recipient: Address; tokenIn: RegistryName; fee: number; amountIn: bigint; amountOutMinimum: bigint; deadline: bigint }): V3Call {
+  if (p.amountOutMinimum <= 0n) throw new Error('amountOutMinimum must be positive')
+  if (p.deadline <= 0n) throw new Error('deadline must be set')
+  const swap = exactInputSingleTo({ recipient: ROUTER_ADDRESS_THIS, tokenIn: p.tokenIn, tokenOut: 'WETH', fee: p.fee, amountIn: p.amountIn, amountOutMinimum: p.amountOutMinimum })
+  const unwrap = encodeFunctionData({ abi: swapRouter02Abi, functionName: 'unwrapWETH9', args: [p.amountOutMinimum, p.recipient] })
+  return call('SwapRouter02', encodeFunctionData({ abi: swapRouter02Abi, functionName: 'multicall', args: [p.deadline, [swap.data, unwrap]] }))
+}
