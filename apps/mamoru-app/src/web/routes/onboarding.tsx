@@ -3,10 +3,10 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { useState, type ReactNode } from 'react'
 import { useApi } from '../api/client.ts'
-import { queryKeys, useConfig } from '../api/queries.ts'
+import { queryKeys, useConfig, useSession } from '../api/queries.ts'
 import { HexValue } from '../components/hex.tsx'
 import { ScopeContext } from '../components/scope.tsx'
-import { ErrorNotice } from '../components/section.tsx'
+import { ErrorNotice, Skeleton } from '../components/section.tsx'
 import { errors, GUIDE_URL } from '../copy/dashboard.ts'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { createOwnerPasskey, PasskeyError } from '../lib/passkey.ts'
@@ -32,7 +32,7 @@ function Step({ n, title, done, children }: { n: number; title: string; done: bo
         <strong className="mono-label text-[0.8rem] font-normal">
           {n}. {title}
         </strong>
-        <span className="rounded-full border border-wash px-2 py-[0.15rem] font-mono text-[0.7rem] uppercase tracking-[0.06em] text-stone">
+        <span className="shrink-0 whitespace-nowrap rounded-full border border-wash px-2 py-[0.15rem] font-mono text-[0.7rem] uppercase tracking-[0.06em] text-stone">
           {done ? 'Done' : `Step ${n}`}
         </span>
       </div>
@@ -126,9 +126,24 @@ function message(e: unknown, fallback: string): string {
   return e instanceof PasskeyError ? e.message : e instanceof DOMException && e.name === 'NotAllowedError' ? 'The passkey prompt was closed. Try again.' : fallback
 }
 
+function ExistingAccount() {
+  return (
+    <div className="sheet grid gap-3 px-[1.1rem] py-4" data-testid="existing-account">
+      <p className="m-0 leading-[1.45]">
+        This browser already has a Mamoru account. Its owner passkey is set, so there is nothing to create here. Your recovery kit is on the
+        dashboard, under Leave without Mamoru.
+      </p>
+      <Link to="/dashboard" className="btn btn-primary">
+        Open dashboard
+      </Link>
+    </div>
+  )
+}
+
 export function OnboardingPage() {
   const api = useApi()
   const config = useConfig()
+  const session = useSession()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const [kitDownloaded, setKitDownloaded] = useState(false)
@@ -143,10 +158,14 @@ export function OnboardingPage() {
   })
   const ack = useMutation({ mutationFn: (o: OwnerResponse) => api.ackRecovery(o.accountKey) })
   const o = owner.data ?? null
+  const returning = o === null && session.data?.accountKey !== undefined
 
   return (
     <main className="flex flex-1 justify-center px-[clamp(1rem,5vw,4rem)] pt-[clamp(1.5rem,5vh,3.5rem)] pb-12">
       <div className="flex w-full max-w-[34rem] flex-col gap-4">
+        <p className="m-0 w-fit rounded-full border border-wash px-3 py-1 font-mono text-[0.7rem] uppercase tracking-[0.06em] text-emerald">
+          {config.data?.mode === 'lab' ? 'Verification plane · Base fork' : 'Base · simulation mode'}
+        </p>
         <p className="kicker text-[0.75rem] tracking-[0.06em]">
           <Link to="/" className="no-underline">
             Home
@@ -157,20 +176,26 @@ export function OnboardingPage() {
         <p className="m-0 leading-[1.45] text-stone">
           Create the passkey that owns your account, see its address on Base, save your recovery kit, then review what Mamoru may do.
         </p>
-        <OnboardingView
-          mode={config.data?.mode ?? 'production'}
-          owner={o}
-          kitDownloaded={kitDownloaded}
-          acked={ack.isSuccess}
-          createOwner={{
-            run: () => owner.mutate(),
-            pending: owner.isPending,
-            error: owner.error ? message(owner.error, "Mamoru's API did not create your account. Try again.") : null,
-          }}
-          downloadKit={{ run: () => o && kit.mutate(o), pending: kit.isPending, error: kit.error ? errors.kit : null }}
-          ack={{ run: () => o && ack.mutate(o), pending: ack.isPending, error: ack.error ? "Mamoru's API did not record your backup. Try again." : null }}
-          onFinish={() => navigate({ to: '/dashboard' })}
-        />
+        {session.isPending ? (
+          <Skeleton lines={4} />
+        ) : returning ? (
+          <ExistingAccount />
+        ) : (
+          <OnboardingView
+            mode={config.data?.mode ?? 'production'}
+            owner={o}
+            kitDownloaded={kitDownloaded}
+            acked={ack.isSuccess}
+            createOwner={{
+              run: () => owner.mutate(),
+              pending: owner.isPending,
+              error: owner.error ? message(owner.error, "Mamoru's API did not create your account. Try again.") : null,
+            }}
+            downloadKit={{ run: () => o && kit.mutate(o), pending: kit.isPending, error: kit.error ? errors.kit : null }}
+            ack={{ run: () => o && ack.mutate(o), pending: ack.isPending, error: ack.error ? "Mamoru's API did not record your backup. Try again." : null }}
+            onFinish={() => navigate({ to: '/dashboard' })}
+          />
+        )}
       </div>
     </main>
   )

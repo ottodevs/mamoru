@@ -19,7 +19,7 @@ export function HexValue({ hex, kind, full = false, linkLabel }: HexProps) {
   }
   return (
     <span className="inline-flex min-w-0 max-w-full flex-wrap items-baseline gap-x-3 gap-y-1">
-      <code className="min-w-0 max-w-full font-mono text-[0.85rem] break-all" title={hex}>
+      <code className={`min-w-0 max-w-full font-mono break-all ${full ? 'text-[0.76rem] sm:text-[0.85rem]' : 'text-[0.85rem]'}`} title={hex}>
         {full ? hex : shortHex(hex)}
       </code>
       <button type="button" className="font-mono text-[0.7rem] uppercase tracking-wider text-stone hover:text-ink" onClick={copy}>

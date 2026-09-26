@@ -96,4 +96,9 @@ test('a new owner onboards with a passkey and lands on the simulation dashboard'
   await expect(page.getByRole('button', { name: /deposit/i })).toHaveCount(0)
   await expect(page.getByRole('link', { name: /deposit/i })).toHaveCount(0)
   await shot(page, '5-dashboard')
+
+  // The session now owns an account: onboarding points back to it instead of offering a second passkey.
+  await page.goto('/onboarding')
+  await expect(page.getByTestId('existing-account')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Create passkey' })).toHaveCount(0)
 })

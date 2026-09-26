@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { PRODUCTION_BANNER } from '@mamoru/domain'
+import { PRODUCTION_BANNER, type SessionView } from '@mamoru/domain'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router'
 import { ApiContext } from '../../src/web/api/client.ts'
@@ -11,10 +11,10 @@ import { buildRouter } from '../../src/web/router.tsx'
 import { render } from './render.ts'
 
 // Route-level render with the query cache primed from fixtures, as the browser would see it after the API answers.
-async function renderRoute(path: string) {
+async function renderRoute(path: string, session: SessionView | null = fixtureSession) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   queryClient.setQueryData(queryKeys.config, fixtureConfig)
-  queryClient.setQueryData(queryKeys.session, fixtureSession)
+  queryClient.setQueryData(queryKeys.session, session)
   queryClient.setQueryData(queryKeys.dashboard(FIXTURE_ACCOUNT_KEY), emptyAccount)
   queryClient.setQueryData(queryKeys.pools, poolsResponse)
   const router = buildRouter(createMemoryHistory({ initialEntries: [path] }))
@@ -38,12 +38,20 @@ describe('routes', () => {
   })
 
   test('/onboarding shows the four steps and closed deposits', async () => {
-    const { text } = await renderRoute('/onboarding')
+    const { text } = await renderRoute('/onboarding', null)
     expect(text).toContain(PRODUCTION_BANNER)
+    expect(text).toContain('Base · simulation mode')
     expect(text).toContain('Create passkey')
     expect(text).toContain('Save your recovery kit')
     expect(text).toContain('Conservador is the only preset in v1')
     expect(text).toContain('Deposits are closed')
+  })
+
+  test('/onboarding in a browser that already has an account points to the dashboard', async () => {
+    const { html, text } = await renderRoute('/onboarding')
+    expect(text).toContain('This browser already has a Mamoru account.')
+    expect(html).toContain('href="/dashboard"')
+    expect(text).not.toContain('Create passkey')
   })
 
   test('/dashboard paints the payload in the §3 order', async () => {

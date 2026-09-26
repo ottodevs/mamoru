@@ -31,7 +31,7 @@ export function Brand() {
 
 export function NotFound() {
   return (
-    <main className="mx-auto flex w-full max-w-[34rem] flex-col gap-4 px-4 py-12">
+    <main className="mx-auto flex w-[min(34rem,calc(100%-3rem))] flex-col gap-4 py-12">
       <Brand />
       <h1 className="m-0 text-[2rem] font-normal">Page not found</h1>
       <p className="m-0 text-stone">This page does not exist. Mamoru has three pages: home, onboarding and the dashboard.</p>
