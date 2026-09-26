@@ -32,7 +32,7 @@ import { LIVE_POOL, amountsForLiquidity, cbbtcInUsdc, readSafe, type PoolPositio
 import { Lock } from './lock.ts'
 import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
-import type { AccountState, ArmedActivation, StateStore, StoredGrant } from './state.ts'
+import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
 
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
 const PREPARE_TTL_MS = 5 * 60_000
@@ -78,7 +78,7 @@ type Prepared = {
   revokes?: Hex[]
 }
 
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; epoch: number; seen: Map<string, string> }
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -183,11 +183,12 @@ export class Operator {
 
   ops(ctx: AccountContext, after: string | null): { ops: OpView[] } {
     const { acc } = this.account(ctx)
-    if (!after) return { ops: acc.ops }
-    const i = acc.ops.findIndex((o) => o.opId === after)
-    if (i >= 0) return { ops: acc.ops.slice(i + 1) }
+    const all = collapseFailed(acc.ops)
+    if (!after) return { ops: all }
+    const i = all.findIndex((o) => o.opId === after)
+    if (i >= 0) return { ops: all.slice(i + 1) }
     const t = Date.parse(after)
-    return { ops: Number.isNaN(t) ? acc.ops : acc.ops.filter((o) => Date.parse(o.updatedAt) > t) }
+    return { ops: Number.isNaN(t) ? all : all.filter((o) => Date.parse(o.updatedAt) > t) }
   }
 
   // ---- owner side: prepare -------------------------------------------------
@@ -650,6 +651,10 @@ export class Operator {
   private startLoop(acc: AccountState): void {
     this.stopLoop(acc.accountKey)
     if (!acc.sessionKey) throw new Error(`${acc.accountKey} has no session key`)
+    acc.runs = (acc.runs ?? 0) + 1
+    this.store.save()
+    const prefix = `eng-${acc.epoch}-`
+    const priorIncluded = acc.ops.filter((o) => o.opId.startsWith(prefix) && o.state === 'confirmed' && o.permissionId && o.calls).map((o) => ({ permissionId: o.permissionId!, calls: o.calls! }))
     const sessions: EngineSession[] = [...acc.grants.map((g) => ({ name: g.name, grant: g.grant, permissionId: g.permissionId })), ...acc.managedTokenIds.map((id) => this.manageSession(acc, BigInt(id)))]
     const engine = new Engine(
       {
@@ -665,6 +670,7 @@ export class Operator {
         depositsAfter: BigInt(acc.depositsAfter),
         historyFromBlock: BigInt(acc.historyFromBlock),
         sessions,
+        priorIncluded,
         maxWaitBlocks: this.cfg.maxWaitBlocks,
       },
       {
@@ -677,7 +683,7 @@ export class Operator {
       },
     )
     this.revokeManage(engine)
-    const runner: Runner = { engine, timer: null, stopped: false, epoch: acc.epoch, seen: new Map() }
+    const runner: Runner = { engine, timer: null, stopped: false, epoch: acc.epoch, run: acc.runs, seen: new Map(), alias: new Map() }
     this.runners.set(acc.accountKey, runner)
     const tick = async () => {
       if (runner.stopped) return
@@ -725,8 +731,9 @@ export class Operator {
     for (const o of runner.engine.journal.ops) {
       const state = ENGINE_STATE[o.state]
       if (!state) continue
-      const opId = `eng-${runner.epoch}-${o.opId}-${o.kind}`
-      const view: OpView = {
+      const own = `eng-${runner.epoch}-${runner.run}-${o.opId}-${o.kind}`
+      const opId = runner.alias.get(own) ?? own
+      const view: StoredOp = {
         opId,
         kind: engineKind(o.kind),
         state,
@@ -734,17 +741,49 @@ export class Operator {
         txHash: o.included?.txHash,
         block: o.included ? Number(o.included.blockNumber) : undefined,
         updatedAt: now(),
+        ...(o.state === 'confirmed' && o.permissionId && o.calls ? { permissionId: o.permissionId, calls: o.calls } : {}),
       }
       const sig = `${view.state}|${view.code}|${view.txHash ?? ''}`
-      if (runner.seen.get(opId) === sig) continue
-      runner.seen.set(opId, sig)
+      if (runner.seen.get(own) === sig) continue
+      runner.seen.set(own, sig)
       const existing = acc.ops.find((x) => x.opId === opId)
-      if (existing) Object.assign(existing, view)
-      else acc.ops.push(view)
+      if (existing) {
+        Object.assign(existing, view)
+      } else {
+        // An identical failure right after the last one (same kind and code, nothing in between) bumps its count instead of a new row.
+        const last = acc.ops.at(-1)
+        if (view.state === 'failed' && last && last.opId.startsWith('eng-') && last.state === 'failed' && last.kind === view.kind && last.code === view.code) {
+          runner.alias.set(own, last.opId)
+          Object.assign(last, { updatedAt: view.updatedAt, count: (last.count ?? 1) + 1 })
+        } else acc.ops.push(view)
+      }
       changed = true
     }
     if (changed) this.store.save()
   }
+}
+
+/** GET /ops: failed engine ops with the same kind and code collapse into the newest one, with the summed count. */
+export function collapseFailed(ops: StoredOp[]): OpView[] {
+  const newest = new Map<string, number>()
+  const counts = new Map<string, number>()
+  const keyOf = (o: StoredOp) => (o.opId.startsWith('eng-') && o.state === 'failed' ? `${o.kind}|${o.code ?? ''}` : null)
+  ops.forEach((o, i) => {
+    const k = keyOf(o)
+    if (!k) return
+    newest.set(k, i)
+    counts.set(k, (counts.get(k) ?? 0) + (o.count ?? 1))
+  })
+  const out: OpView[] = []
+  ops.forEach((o, i) => {
+    const k = keyOf(o)
+    const { permissionId: _p, calls: _c, ...view } = o
+    if (!k) return void out.push(view)
+    if (newest.get(k) !== i) return
+    const n = counts.get(k)!
+    out.push(n > 1 ? { ...view, count: n } as OpView : view)
+  })
+  return out
 }
 
 const COLLECT_SELECTOR = toFunctionSelector('collect((uint256,address,uint128,uint128))')

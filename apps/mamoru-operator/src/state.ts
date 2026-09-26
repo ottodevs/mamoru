@@ -3,6 +3,10 @@ import { join } from 'node:path'
 import type { AccountContext, Hex, OpView } from '@mamoru/domain'
 import type { SessionGrant } from '@mamoru/policy'
 import type { SafeTx } from '@mamoru/account/live'
+import type { Execution } from '@mamoru/account/safe'
+
+/** An op as GET /ops serves it, plus what the operator keeps: repeat count of an identical failure, and for a confirmed engine op the session and calls it used (ledger replay on restart). */
+export type StoredOp = OpView & { count?: number; permissionId?: Hex; calls?: Execution[] }
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */
 export type StoredGrant = { name: string; grant: SessionGrant; permissionId: Hex }
@@ -34,7 +38,9 @@ export type AccountState = {
   historyFromBlock: string
   /** Bumped at each activation so engine op ids stay unique across runs. */
   epoch: number
-  ops: OpView[]
+  /** Engine loops started in this epoch; part of engine op ids so a restart never reuses one. */
+  runs?: number
+  ops: StoredOp[]
   seq: number
   /** Signed activation waiting for the first USDC deposit. */
   armed?: ArmedActivation
