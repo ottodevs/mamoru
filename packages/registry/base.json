@@ -29,6 +29,14 @@
       "codeHash": "0x8a3a1f6a9f9dce633117adee5b458245835a8645a8c8726a26382a4622508b1c"
     },
     {
+      "name": "EURC",
+      "kind": "token",
+      "role": "retirada en euros (Circle)",
+      "address": "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42",
+      "decimals": 6,
+      "codeHash": "0xdc7d03167b2b33566fa1cf50046e5bf4828f6d401678ed832d2cd7973ea17380"
+    },
+    {
       "name": "UniswapV3Factory",
       "kind": "uniswap",
       "role": "factory V3",
@@ -77,6 +85,28 @@
       "fee": 3000,
       "tickSpacing": 60,
       "codeHash": "0x71ff5f428af7891e7cbce51d4dadacef1e8eb0c1e454342413066bbd8a0d344c"
+    },
+    {
+      "name": "pool:EURC/USDC/500",
+      "kind": "pool",
+      "role": "retirada USDC->EURC",
+      "address": "0x7279c08A36333e12c3Fc81747963264c100D66fB",
+      "token0": "EURC",
+      "token1": "USDC",
+      "fee": 500,
+      "tickSpacing": 10,
+      "codeHash": "0x783259a5fb598bdabc68828275917dc9b2dfe6617f25792e7d5ab9e9ccaef7b1"
+    },
+    {
+      "name": "pool:WETH/USDC/500",
+      "kind": "pool",
+      "role": "retirada USDC->ETH",
+      "address": "0xd0b53D9277642d899DF5C87A3966A349A798F224",
+      "token0": "WETH",
+      "token1": "USDC",
+      "fee": 500,
+      "tickSpacing": 10,
+      "codeHash": "0xcd06f61c6db6a1d8317548aaaa0aa83254624aec741534c51815810e977587ae"
     },
     {
       "name": "EntryPointV07",

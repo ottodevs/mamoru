@@ -113,8 +113,9 @@ describe('operator proxy', () => {
       expect((await h.post(`/api/accounts/${k}/${p}`, {}, { cookie })).status).toBe(200)
     }
     expect((await h.request(`/api/accounts/${k}/funding`, { cookie })).status).toBe(200)
+    expect((await h.request(`/api/accounts/${k}/withdraw-assets`, { cookie })).status).toBe(200)
     expect(op.seen.map((s) => new URL(s.url).pathname.split('/').slice(4).join('/'))).toEqual([
-      'activate/prepare', 'activate', 'transfer/prepare', 'transfer', 'stop/prepare', 'stop', 'funding',
+      'activate/prepare', 'activate', 'transfer/prepare', 'transfer', 'stop/prepare', 'stop', 'funding', 'withdraw-assets',
     ])
   })
 
