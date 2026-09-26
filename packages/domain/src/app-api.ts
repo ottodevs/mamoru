@@ -47,6 +47,10 @@ export type FundingView = {
   usdc: string            // base units
   eth: string             // wei
   capUsdc: string         // hard cap per account, base units
+  cbbtc: string           // base units
+  gasReserveWei: string   // the relayer tops the Safe up to this at activation
+  active: boolean         // engine grants enabled and the engine loop running
+  positions: { tokenId: string; pool: string; liquidity: string; inRange: boolean; amountUsdc: string; amountCbbtc: string }[]
 }
 
 // POST /api/accounts/:accountKey/activate/prepare -> OwnerTxToSign
