@@ -10,8 +10,10 @@ import { accountOfUser } from './accounts/store.ts'
 import { accounts } from './accounts/routes.ts'
 import { pools } from './pools/routes.ts'
 import { operatorRoutes, type OperatorFetch } from './accounts/operator.ts'
+import { apyRoutes } from './apy/routes.ts'
+import type { ApyCache, Fetcher } from './apy/source.ts'
 
-export type AppOptions = { now?: () => Date; operatorFetch?: OperatorFetch }
+export type AppOptions = { now?: () => Date; operatorFetch?: OperatorFetch; apyFetch?: Fetcher; apyCache?: () => ApyCache | null }
 
 /** Hard cap per account in live mode, USDC base units (25 USDC). */
 export const LIVE_CAP_USDC = '25000000'
@@ -61,6 +63,7 @@ export function createApp(options: AppOptions = {}) {
   app.route('/api/accounts', operatorRoutes(options.operatorFetch ?? ((input, init) => fetch(input, init))))
   app.route('/api/accounts', accounts)
   app.route('/api/pools', pools)
+  app.route('/api/apy', apyRoutes(options.apyFetch ?? ((input, init) => fetch(input, init)), options.apyCache))
 
   app.all('/api/*', (c) => apiError(c, 404, 'No such API route.'))
   app.onError((err, c) => {

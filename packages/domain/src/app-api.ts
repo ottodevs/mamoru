@@ -101,3 +101,15 @@ export type AccountContext = {
   saltNonce: string       // decimal
   passkey: { credentialId: string; x: Hex0x; y: Hex0x }
 }
+
+// Pool-level fee APR of the plan's live pool (public, no session).
+// GET  /api/apy                                      -> ApyView
+export type ApyView = {
+  pool: string
+  currentPct: number | null
+  currentWindow: '1h' | '24h'
+  currentSource: string
+  monthlyPct: number | null
+  monthlySource: string
+  asOf: string
+}
