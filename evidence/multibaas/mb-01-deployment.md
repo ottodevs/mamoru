@@ -23,7 +23,7 @@ Addresses match `packages/registry/base.json`.
 ## Observed
 
 - Event queries on the pool return `Swap` rows.
-- Transaction events lookup (`GET /api/v0/events?tx_hash=`, MBQ-06) returns events.
+- Transaction events lookup (`GET /api/v0/events?tx_hash=`, MBQ-06) answers, but returned an empty list for a pool `Swap` transaction (see `mb-02-04-results.md`).
 
 ## Refused by the plan
 
@@ -31,6 +31,6 @@ Addresses match `packages/registry/base.json`.
 - The Free plan caps indexing at 2 events per second and 30,000 calls per month.
 - Consequence: history before the link block is read from Base RPC logs and labeled as fallback (`MB_BEFORE_START_BLOCK`, "before MultiBaas start").
 
-## Not yet recorded
+## Next
 
-- Which of MBQ-01 to MBQ-05 and MBQ-08 reach `PROJ_RECONCILED` against Base RPC (MB-02 to MB-04): [PENDING L4].
+Query results: [`mb-02-04-results.md`](mb-02-04-results.md).
