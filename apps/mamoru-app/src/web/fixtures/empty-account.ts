@@ -68,7 +68,7 @@ export const emptyAccount: DashboardPayload = {
       },
       { token: 'ETH', role: 'gas', amount: zero('ETH'), value: zero('USDC', at('estimate', { blockNumber: FIXTURE_BLOCK })) },
     ],
-    positions: { managed: 0, unmanaged: 0, value: zero('USDC', at('estimate', { blockNumber: FIXTURE_BLOCK })) },
+    positions: { managed: fig(0, rpc()), unmanaged: fig(0, rpc()), value: zero('USDC', at('estimate', { blockNumber: FIXTURE_BLOCK })) },
     allocation: [
       { bucket: 'stables', preference: 5000, actual: fig(0, rpc()), code: 'PLAN_BUCKET_NO_EXECUTABLE_POOL' },
       { bucket: 'btc-usdc', preference: 4000, actual: fig(0, rpc()), code: 'STRATEGY_PREFERENCE' },

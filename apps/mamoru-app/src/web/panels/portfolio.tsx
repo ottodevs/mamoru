@@ -7,7 +7,8 @@ import { formatBps, formatInteger } from '../lib/format.ts'
 
 export function PortfolioPanel({ data }: { data: DashboardPayload }) {
   const p = data.portfolio
-  const noPositions = p.positions.managed === 0 && p.positions.unmanaged === 0
+  // only an observed zero on both counts means no positions
+  const noPositions = p.positions.managed.value === 0 && p.positions.unmanaged.value === 0
   return (
     <Section id="portfolio" title="Portfolio" question="What is in my smart account on Base and what is it worth?">
       <ul className="m-0 grid list-none gap-2 p-0">
@@ -37,7 +38,8 @@ export function PortfolioPanel({ data }: { data: DashboardPayload }) {
           ) : (
             <span className="grid gap-1">
               <span>
-                {formatInteger(p.positions.managed)} managed, {formatInteger(p.positions.unmanaged)} not managed
+                <FigureValue figure={p.positions.managed} format={formatInteger} /> managed,{' '}
+                <FigureValue figure={p.positions.unmanaged} format={formatInteger} /> not managed
               </span>
               <FigureValue figure={p.positions.value} />
             </span>

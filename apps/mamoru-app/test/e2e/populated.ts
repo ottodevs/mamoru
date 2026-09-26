@@ -35,7 +35,7 @@ const position: PositionView = {
 export function populatedAccount(): DashboardPayload {
   const d = structuredClone(emptyAccount)
   d.pools.positions = [position]
-  d.portfolio.positions = { managed: 1, unmanaged: 0, value: position.value }
+  d.portfolio.positions = { managed: { value: 1, provenance: position.value.provenance }, unmanaged: { value: 0, provenance: position.value.provenance }, value: position.value }
   d.currentAction.op = { opId: 'op_2', kind: 'harvest', state: 'discarded', code: 'DRY_RUN_STOP', updatedAt: FIXTURE_OBSERVED_AT }
   d.currentAction.decision = {
     decisionId: 'dec_1',

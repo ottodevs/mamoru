@@ -150,7 +150,7 @@ export function buildDashboard(input: DashboardInput, now: Date): DashboardPaylo
     },
     portfolio: {
       tokens,
-      positions: { managed: 0, unmanaged: 0, value: miss('chain_rpc', 'USDC') },
+      positions: { managed: miss<number>('journal'), unmanaged: miss<number>('chain_rpc'), value: miss('chain_rpc', 'USDC') },
       allocation: conservadorV1.buckets.map((b) => ({ bucket: b.id, preference: b.preference, actual: miss<number>('estimate'), code: 'STRATEGY_PREFERENCE' as const })),
       unmanaged: [],
       total: totalValue,
