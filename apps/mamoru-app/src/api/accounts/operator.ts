@@ -12,7 +12,7 @@ import { ownedAccount, ownersOf, type AccountRow } from './store.ts'
 export type OperatorFetch = (input: string, init: RequestInit) => Promise<Response>
 
 export const MAX_BODY_BYTES = 8 * 1024
-export const OPERATOR_TIMEOUT_MS = 20_000
+export const OPERATOR_TIMEOUT_MS = 90_000
 
 export function accountContext(row: AccountRow): AccountContext {
   return {
