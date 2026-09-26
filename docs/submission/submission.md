@@ -15,11 +15,11 @@ Text for every field of the project form (rules in `requirements.md`). Voice rul
 
 Option A (93 characters):
 
-> Non-custodial savings account on Base. Passkey Safe, scoped Uniswap session, simulation mode.
+> Non-custodial savings account on Base. Passkey Safe, scoped Uniswap session, live to 25 USDC.
 
-Option B (89 characters):
+Option B (94 characters):
 
-> A passkey Safe on Base that plans Uniswap savings moves, simulates them, and never signs.
+> A passkey Safe on Base that runs a scoped Uniswap session live, capped at 25 USDC per account.
 
 ## 3. Description (min 280 characters)
 
@@ -27,11 +27,11 @@ Mamoru is a non-custodial savings account on Base. You own a Safe smart account 
 
 A session key can act for the account only inside a written policy: it may call Uniswap v3 on Base, on registry addresses, with the account as recipient and a positive minimum on every swap and mint. You can revoke it at any time, and you can leave without Mamoru: with the kit and your passkey, you revoke the sessions, close the position and withdraw, with our engine, app and indexer all off.
 
-In v1 production, Mamoru runs in simulation mode. It plans and simulates, and it does not sign or send transactions. Deposits are closed.
+As of 26 September 2026, the app runs a live path on Base with a hard cap of 25 USDC per account. Your passkey signs starting the allocation, transferring funds out and stopping it; a relayer sends those signed transactions. Once started, the engine enters and manages a Uniswap v3 position for you with a session key, bundling its own userOps to EntryPoint v0.7. Above the cap, and for the session-key attacks and the harvest, everything is still only demonstrated on a Base fork.
 
 The dashboard shows Base only. Every figure carries its chain id and its source, as a chip such as "Base · block N" or "MultiBaas · Base · checked at block N". It shows what the account holds, what needs your decision, what Mamoru would do next and why, and the live state of the Uniswap pool in the plan, read from Base every 2 minutes.
 
-The full cycle is verified on a Base fork pinned at block 51811000 with chain id 31337. Fork results are not capital and do not use MultiBaas. The last full run passed 42 of 42 scenarios: 24 session attacks with a leaked key, 3 walkaway scenarios, 6 engine scenarios from deposit to harvest, and 9 checks of the verification plane itself.
+The full cycle is verified on a Base fork pinned at block 51811000 with chain id 31337. Fork results are not capital and do not use MultiBaas. The last full run passed 45 of 45 scenarios: 24 session attacks with a leaked key, 3 walkaway scenarios, 9 engine scenarios from deposit through harvest plus the live-path receipt and bundle checks, and 9 checks of the verification plane itself.
 
 Live app: https://app.mamoru.lol. Repo: https://github.com/ottodevs/mamoru.
 
@@ -44,6 +44,8 @@ Account. The account is a Safe 1.4.1 with the Safe7579 adapter, so it uses ERC-7
 Sessions. packages/account/sessions/index.ts (toSmartSession, line 103) encodes a Rhinestone Smart Session. The grants in packages/policy name the allowed contracts and selectors and add argument rules through UniActionPolicy, plus time and usage limits. A session cannot install modules, change owners, approve an attacker or pay anyone but the account.
 
 Uniswap. packages/uniswap-v3/src/index.ts builds SwapRouter02.exactInputSingle (line 24) with the account as recipient and a positive amountOutMinimum, and NonfungiblePositionManager mint (line 54) with ticks on the pool spacing and positive minimums, plus decreaseLiquidity, collect and burn. quote.ts quotes through QuoterV2 at a fixed block and derives the minimum. v1 uses one pool, USDC/cbBTC 0.05% on Base. In production the engine reads its slot0, liquidity, a TWAP and one hour of Swap, Mint and Burn at the safe block.
+
+Live path. apps/mamoru-operator is a Bun service, separate from the two Cloudflare Workers, gated by MAMORU_LIVE=1 and a 25 USDC per account cap. It holds a relayer key that sends the owner's passkey-signed Safe transactions (start, transfer out, stop) and bundles the engine's own ERC-4337 userOps to EntryPoint v0.7 with the same handleOps call the fork scenarios use.
 
 MultiBaas. The engine Worker reads the pool's Swap, Mint and Burn events from a Curvegrid MultiBaas deployment on Base, with a read-only key, and checks every row against Base RPC logs before it stores it; a probe matched 10 of 10 rows with nothing missing on either side. Rows older than the index start block come from Base RPC logs and are labeled. The browser never calls MultiBaas.
 
@@ -73,7 +75,9 @@ How are you using this protocol:
 
 > Mamoru's capital side is Uniswap v3 on Base. packages/uniswap-v3/src/index.ts builds SwapRouter02.exactInputSingle with the account as recipient and a positive amountOutMinimum, and NonfungiblePositionManager mint with ticks on the pool spacing and positive minimums, plus decreaseLiquidity, collect and burn. packages/uniswap-v3/src/quote.ts quotes through QuoterV2 at a fixed block. Addresses are pinned in packages/registry/base.json and checked by code hash at Base block 51811000.
 >
-> A session key may only call those selectors on those addresses, with argument rules. On a Base fork pinned at block 51811000 (chain id 31337), 24 scenarios use a leaked session key to swap or mint to an attacker, approve max, collect a foreign position or exceed caps, and the chain rejects every one. The engine scenarios enter the USDC/cbBTC 0.05% pool with a swap and a mint, check that the minimum recomputed from QuoterV2 equals the signed one, and harvest: collect the fees and swap the cbBTC part to USDC through SwapRouter02, leaving no allowance. In production the engine reads that pool on Base every 2 minutes for the dashboard. v1 production runs in simulation mode and does not sign or send.
+> A session key may only call those selectors on those addresses, with argument rules. On a Base fork pinned at block 51811000 (chain id 31337), 24 scenarios use a leaked session key to swap or mint to an attacker, approve max, collect a foreign position or exceed caps, and the chain rejects every one. The engine scenarios enter the USDC/cbBTC 0.05% pool with a swap and a mint, check that the minimum recomputed from QuoterV2 equals the signed one, and harvest: collect the fees and swap the cbBTC part to USDC through SwapRouter02, leaving no allowance. In production the engine reads that pool on Base every 2 minutes for the dashboard, and, since 26 September 2026 and within a 25 USDC per account cap, the same session key signs these swap and mint calls live on Base; a relayer bundles them to EntryPoint v0.7. Above the cap, and for the harvest and the attacks, v1 still only demonstrates on the fork.
+>
+> First live transactions on Base (Basescan, filled in by L0 after the run): swap `TX_SWAP`, mint `TX_MINT`.
 
 Proof link: https://github.com/ottodevs/mamoru/blob/main/packages/uniswap-v3/src/index.ts#L24
 
@@ -89,7 +93,7 @@ How are you using this protocol:
 
 > Mamoru's production dashboard on Base answers four questions for one smart account: what it holds, what needs the owner's decision, what Mamoru would do next and why, and what is happening in the Uniswap pool in its plan. The dashboard shows Base only. Every figure carries its chain id and its source, shown as a chip. Live at https://app.mamoru.lol.
 >
-> Mamoru links the Uniswap V3 pool it uses, the NonfungiblePositionManager and EntryPoint v0.7 on Base in MultiBaas. The engine Worker reads the pool's Swap, Mint and Burn events through MultiBaas event queries that Mamoru's server checks against Base RPC before showing them (probe: 10 of 10 rows reconciled). Rows older than the index start block come from Base RPC logs and are labeled. The key is read-only in the DApp User group; the browser never calls MultiBaas. In v1 production, Mamoru runs in simulation mode. It plans and simulates, and it does not sign or send transactions. Not covered: DAO votes, vesting schedules and RWA ownership analytics.
+> Mamoru links the Uniswap V3 pool it uses, the NonfungiblePositionManager and EntryPoint v0.7 on Base in MultiBaas. The engine Worker reads the pool's Swap, Mint and Burn events through MultiBaas event queries that Mamoru's server checks against Base RPC before showing them (probe: 10 of 10 rows reconciled). Rows older than the index start block come from Base RPC logs and are labeled. The key is read-only in the DApp User group; the browser never calls MultiBaas, and MultiBaas itself never signs or sends anything. Since 26 September 2026, the account it dashboards can run live on Base up to a 25 USDC per account cap, signed by the owner's passkey and sent by a relayer; above that cap, and for the adversarial and harvest scenarios, the account is demonstrated on a fork. Not covered: DAO votes, vesting schedules and RWA ownership analytics.
 
 Proof link: https://github.com/ottodevs/mamoru#how-multibaas-was-used
 
@@ -107,7 +111,8 @@ Brais and Otto decide (grants, accelerators).
 
 | Claim | Evidence |
 |---|---|
-| 42 of 42, 24 session attacks, 3 walkaway, 6 engine, 9 lab | `evidence/scenarios/fork-run-20260926T185126Z-84632e.md` |
-| QuoterV2 minimum equals the signed one; receipt matches `UserOperationEvent`; harvest credited to the Savings Log | same file, T003 section |
+| 45 of 45, 24 session attacks, 3 walkaway, 9 engine (deposit through harvest plus the live-path receipt and bundle checks), 9 lab | `evidence/scenarios/` (L0 records the run) |
+| QuoterV2 minimum equals the signed one; receipt matches `UserOperationEvent`; owner passkey execTransaction matches what the live operator sends; harvest credited to the Savings Log | same run, T003 and live-path sections |
 | MultiBaas 10 of 10 reconciled; formats; plan limits | `evidence/multibaas/mb-02-04-results.md`, `evidence/multibaas/mb-01-deployment.md` |
 | Pool read every 2 minutes | `apps/mamoru-engine/wrangler.jsonc` (cron `*/2 * * * *`) |
+| First live transactions on Base, 25 USDC per account cap | Basescan: `TX_ACTIVATE`, `TX_SWAP`, `TX_MINT`, `TX_TRANSFER`, `TX_STOP` (filled in by L0 after the run) |

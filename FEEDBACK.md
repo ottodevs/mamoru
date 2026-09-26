@@ -2,7 +2,9 @@
 
 ETHGlobal Tokyo 2026. Project: Mamoru. Repository: https://github.com/ottodevs/mamoru, branch `main`.
 
-Mamoru v1 is a non-custodial savings account on Base. In production it runs in simulation mode: it plans and simulates, and it does not sign or send transactions. Every Uniswap call below is either encoded and checked in unit tests, or executed on a local Anvil fork of Base pinned at block 51811000 with chain id 31337. Nothing here touched Base mainnet with funds.
+Mamoru v1 is a non-custodial savings account on Base. As of 26 September 2026, within a 25 USDC per account cap, it runs live: the account's own session key signs the Uniswap calls below and a relayer sends them on Base. Above the cap, every attack on the session key and the harvest are checked in unit tests or executed on a local Anvil fork of Base pinned at block 51811000 with chain id 31337, not on Base mainnet with funds.
+
+First live transactions on Base (Basescan, filled in after the run): swap `TX_SWAP`, mint `TX_MINT`.
 
 ## What we used
 
@@ -37,4 +39,4 @@ Mamoru v1 is a non-custodial savings account on Base. In production it runs in s
 
 - We did not use v4 or the Uniswap API. v1 is v3 only, by design: one pool that we could verify on Base at a fixed block.
 - The fork uses a loopback bundler that speaks the standard ERC-4337 methods, not a production bundler. Alto is pinned but was not installed.
-- In production v1 runs in simulation mode, so none of these calls is sent on Base.
+- In production, only the swap and mint calls run live on Base, within the 25 USDC per account cap; decreaseLiquidity, collect and burn also run live for transfer out and stop. Above the cap, everything runs only on the fork.
