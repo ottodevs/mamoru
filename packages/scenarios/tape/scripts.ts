@@ -70,7 +70,7 @@ async function outOfRange(s: TapeSession): Promise<ScenarioTape> {
       await s.review(),
       (f) =>
         out
-          ? { key: true, title: 'Price leaves the range', note: `Selling pushes the price to ${usd(f.pool.price)}, below the range. The position stops earning and the engine holds: no transaction, principal ${usd(f.position!.principalValue)} intact.` }
+          ? { key: true, title: 'Price leaves the range', note: `Heavy cbBTC buying pushes the price to ${usd(f.pool.price)}, above the range. The position stops earning and the engine holds: no transaction, principal ${usd(f.position!.principalValue)} intact.` }
           : { title: 'Price falls', note: `Heavy selling moves the price to ${usd(f.pool.price)}, still inside the range. Holding.` },
       [out ? 'OBS_POSITION_OUT_OF_RANGE' : 'DECIDE_IN_RANGE'],
     )
@@ -84,14 +84,14 @@ async function outOfRange(s: TapeSession): Promise<ScenarioTape> {
   }
   await s.swap('cbBTC', bought)
   await s.pinBaseFee(HIGH_GWEI)
-  s.push(await s.review(), (f) => ({ key: true, title: 'Back in range', note: `Buyers return and the price recovers to ${usd(f.pool.price)}, inside the range again.` }), ['DECIDE_IN_RANGE'])
+  s.push(await s.review(), (f) => ({ key: true, title: 'Back in range', note: `Sellers return and the price comes back to ${usd(f.pool.price)}, inside the range again.` }), ['DECIDE_IN_RANGE'])
   for (let i = 0; i < 3; i++) {
     await s.feeRound(tickLower)
     await s.warp(900)
     await s.pinBaseFee(HIGH_GWEI)
     s.push(await s.review(), (f) => ({ key: i === 2, title: i === 2 ? 'Fees resume' : 'Earning again', note: `Swaps cross the range again. Fees ${usd(f.position!.feesValue)}.` }), ['DECIDE_IN_RANGE'])
   }
-  return s.tape('TAPE-OUT-OF-RANGE', 'Price leaves the range', 'A large sale pushes the pool price below the range. The engine holds with no transaction and the principal intact; when the price comes back, the position earns again.')
+  return s.tape('TAPE-OUT-OF-RANGE', 'Price leaves the range', 'A burst of cbBTC buying pushes the price above the range. The engine holds with no transaction and the principal intact; when the price comes back, the position earns again.')
 }
 
 async function poolShock(s: TapeSession): Promise<ScenarioTape> {
@@ -109,7 +109,7 @@ async function poolShock(s: TapeSession): Promise<ScenarioTape> {
   await s.pinBaseFee(LOW_GWEI)
   s.push(
     await s.observe(),
-    (f) => ({ key: true, title: 'Pool shock', note: `A sudden sale moves the price ${Math.abs(f.pool.tick - before)} ticks to ${usd(f.pool.price)}, far from its 30-minute average. The health gate refuses the entry: EHG_PRICE_DIVERGENCE.` }),
+    (f) => ({ key: true, title: 'Pool shock', note: `A sudden burst of buying moves the price ${Math.abs(f.pool.tick - before)} ticks to ${usd(f.pool.price)}, far from its 30-minute average. The health gate refuses the entry: EHG_PRICE_DIVERGENCE.` }),
     ['EHG_PRICE_DIVERGENCE'],
   )
   let refused = true

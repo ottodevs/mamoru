@@ -263,7 +263,7 @@
       "block": 51811014,
       "key": true,
       "title": "Pool shock",
-      "note": "A sudden sale moves the price 486 ticks to 88,250.63 USDC, far from its 30-minute average. The health gate refuses the entry: EHG_PRICE_DIVERGENCE.",
+      "note": "A sudden burst of buying moves the price 486 ticks to 88,250.63 USDC, far from its 30-minute average. The health gate refuses the entry: EHG_PRICE_DIVERGENCE.",
       "pool": {
         "name": "USDC/cbBTC/500",
         "tick": -67832,

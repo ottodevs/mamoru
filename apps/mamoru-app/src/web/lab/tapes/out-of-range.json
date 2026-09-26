@@ -1,7 +1,7 @@
 {
   "id": "TAPE-OUT-OF-RANGE",
   "title": "Price leaves the range",
-  "summary": "A large sale pushes the pool price below the range. The engine holds with no transaction and the principal intact; when the price comes back, the position earns again.",
+  "summary": "A burst of cbBTC buying pushes the price above the range. The engine holds with no transaction and the principal intact; when the price comes back, the position earns again.",
   "savingsAsset": "USDC",
   "chainId": 31337,
   "forkOf": "Base",
@@ -271,7 +271,7 @@
       "block": 51811045,
       "key": true,
       "title": "Price leaves the range",
-      "note": "Selling pushes the price to 94,481.28 USDC, below the range. The position stops earning and the engine holds: no transaction, principal 4,099.92 USDC intact.",
+      "note": "Heavy cbBTC buying pushes the price to 94,481.28 USDC, above the range. The position stops earning and the engine holds: no transaction, principal 4,099.92 USDC intact.",
       "pool": {
         "name": "USDC/cbBTC/500",
         "tick": -68514,
@@ -443,7 +443,7 @@
       "block": 51811054,
       "key": true,
       "title": "Back in range",
-      "note": "Buyers return and the price recovers to 84,078.31 USDC, inside the range again.",
+      "note": "Sellers return and the price comes back to 84,078.31 USDC, inside the range again.",
       "pool": {
         "name": "USDC/cbBTC/500",
         "tick": -67347,
