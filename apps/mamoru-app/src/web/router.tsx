@@ -1,9 +1,9 @@
-import { createRootRoute, createRoute, createRouter, redirect, type RouterHistory } from '@tanstack/react-router'
+import { createRootRoute, createRoute, createRouter, lazyRouteComponent, redirect, type RouterHistory } from '@tanstack/react-router'
 import { AddMoneyPage } from './routes/add-money.tsx'
 import { IndexPage } from './routes/index.tsx'
 import { NotFound, RootLayout } from './routes/root.tsx'
 
-// Client-only routes. "/" is onboarding or Home; "/add" waits for the first deposit.
+// Client-only routes. "/" is onboarding or Home; "/add" waits for the first deposit; "/lab" replays recorded fork runs.
 export function buildRouter(history?: RouterHistory) {
   const rootRoute = createRootRoute({ component: RootLayout, notFoundComponent: NotFound })
   const home = () => {
@@ -12,6 +12,7 @@ export function buildRouter(history?: RouterHistory) {
   const routeTree = rootRoute.addChildren([
     createRoute({ getParentRoute: () => rootRoute, path: '/', component: IndexPage }),
     createRoute({ getParentRoute: () => rootRoute, path: '/add', component: AddMoneyPage }),
+    createRoute({ getParentRoute: () => rootRoute, path: '/lab', component: lazyRouteComponent(() => import('./lab/page.tsx'), 'LabPage') }),
     createRoute({ getParentRoute: () => rootRoute, path: '/onboarding', beforeLoad: home }),
     createRoute({ getParentRoute: () => rootRoute, path: '/dashboard', beforeLoad: home }),
   ])
