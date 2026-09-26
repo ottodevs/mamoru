@@ -3,10 +3,16 @@ import type {
   ApiError,
   AppConfig,
   DashboardPayload,
+  FundingView,
+  OpView,
   OwnerRequest,
+  OwnerSignature,
+  OwnerTxToSign,
   OwnerResponse,
   PoolsResponse,
   SessionView,
+  TransferPlan,
+  TransferRequest,
 } from '@mamoru/domain'
 
 // Every call goes to same-origin /api (FR-DSH-019). The SPA never reaches RPC, bundler or MultiBaas.
@@ -19,6 +25,15 @@ export type ApiClient = {
   createOwner(body: OwnerRequest): Promise<OwnerResponse>
   recoveryKit(accountKey: string): Promise<unknown>
   ackRecovery(accountKey: string): Promise<{ ok: true }>
+  // Live happy path (fundsGate 'live'). Owner actions are prepared by the API and signed by the passkey here.
+  funding(accountKey: string): Promise<FundingView>
+  ops(accountKey: string): Promise<{ ops: OpView[] }>
+  activatePrepare(accountKey: string): Promise<OwnerTxToSign>
+  activate(accountKey: string, sig: OwnerSignature): Promise<OpView>
+  transferPrepare(accountKey: string, body: TransferRequest): Promise<TransferPlan>
+  transfer(accountKey: string, sig: OwnerSignature): Promise<OpView>
+  stopPrepare(accountKey: string): Promise<OwnerTxToSign>
+  stop(accountKey: string, sig: OwnerSignature): Promise<OpView>
 }
 
 export class ApiRequestError extends Error {
@@ -45,6 +60,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T
 }
 
+const acct = (k: string, rest: string) => `/api/accounts/${encodeURIComponent(k)}/${rest}`
+const post = <T>(path: string, body?: unknown) =>
+  request<T>(path, { method: 'POST', body: JSON.stringify(body ?? {}) })
+
 export const httpClient: ApiClient = {
   config: () => request<AppConfig>('/api/config'),
   session: async () => {
@@ -61,6 +80,14 @@ export const httpClient: ApiClient = {
   recoveryKit: (accountKey) => request<unknown>(`/api/onboarding/kit?accountKey=${encodeURIComponent(accountKey)}`),
   ackRecovery: (accountKey) =>
     request<{ ok: true }>('/api/onboarding/recovery-ack', { method: 'POST', body: JSON.stringify({ accountKey }) }),
+  funding: (k) => request<FundingView>(acct(k, 'funding')),
+  ops: (k) => request<{ ops: OpView[] }>(acct(k, 'ops')),
+  activatePrepare: (k) => post<OwnerTxToSign>(acct(k, 'activate/prepare')),
+  activate: (k, sig) => post<OpView>(acct(k, 'activate'), sig),
+  transferPrepare: (k, body) => post<TransferPlan>(acct(k, 'transfer/prepare'), body),
+  transfer: (k, sig) => post<OpView>(acct(k, 'transfer'), sig),
+  stopPrepare: (k) => post<OwnerTxToSign>(acct(k, 'stop/prepare')),
+  stop: (k, sig) => post<OpView>(acct(k, 'stop'), sig),
 }
 
 export const ApiContext = createContext<ApiClient>(httpClient)

@@ -10,6 +10,7 @@ import { ErrorNotice, Skeleton } from '../components/section.tsx'
 import { errors, GUIDE_URL } from '../copy/dashboard.ts'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { createOwnerPasskey, PasskeyError } from '../lib/passkey.ts'
+import { rememberCredential } from '../lib/passkey-sign.ts'
 import { chainName } from '../lib/provenance.ts'
 
 type Pending = { pending: boolean; error: string | null }
@@ -149,7 +150,12 @@ export function OnboardingPage() {
   const [kitDownloaded, setKitDownloaded] = useState(false)
 
   const owner = useMutation({
-    mutationFn: async () => api.createOwner({ passkey: await createOwnerPasskey() }),
+    mutationFn: async () => {
+      const passkey = await createOwnerPasskey()
+      const created = await api.createOwner({ passkey })
+      rememberCredential(created.accountKey, passkey.credentialId)
+      return created
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.session }),
   })
   const kit = useMutation({

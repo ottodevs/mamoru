@@ -1,11 +1,13 @@
 import { useMutation } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { useApi } from '../api/client.ts'
-import { useDashboard, usePools, useSession } from '../api/queries.ts'
+import { useConfig, useDashboard, usePools, useSession } from '../api/queries.ts'
+import { ScopeContext } from '../components/scope.tsx'
 import { ErrorNotice, Skeleton } from '../components/section.tsx'
 import { errors } from '../copy/dashboard.ts'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { DashboardView } from '../panels/dashboard-view.tsx'
+import { LivePanel } from '../panels/live.tsx'
 import type { PlanPools } from '../panels/pools.tsx'
 import { Brand } from './root.tsx'
 
@@ -40,6 +42,7 @@ function NoAccount({ signedIn }: { signedIn: boolean }) {
 export function DashboardPage() {
   const api = useApi()
   const session = useSession()
+  const config = useConfig()
   const accountKey = session.data?.accountKey
   const dashboard = useDashboard(accountKey)
   const pools = usePools()
@@ -88,6 +91,11 @@ export function DashboardPage() {
   return (
     <Shell>
       {dashboard.isError ? <ErrorNotice message={errors.header} onRetry={() => dashboard.refetch()} /> : null}
+      {config.data?.fundsGate === 'live' ? (
+        <ScopeContext.Provider value={{ mode: data.mode, chains: data.chains }}>
+          <LivePanel accountKey={accountKey} />
+        </ScopeContext.Provider>
+      ) : null}
       <DashboardView
         data={data}
         plan={plan}
