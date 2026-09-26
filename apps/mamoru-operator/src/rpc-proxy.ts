@@ -7,22 +7,57 @@ type Req = { jsonrpc: '2.0'; id: unknown; method: string; params?: any[] }
  * keyed URL inside this process (viem errors echo the URL they called) and
  * splits eth_getLogs into ranges the provider accepts (Alchemy free tier: 10 blocks).
  */
+const FALLBACKS = (process.env.MAMORU_RPC_FALLBACKS ?? 'https://base-rpc.publicnode.com,https://base.drpc.org,https://mainnet.base.org').split(',').filter(Boolean)
+
+function isLoopback(url: string): boolean {
+  const h = new URL(url).hostname
+  return h === '127.0.0.1' || h === 'localhost' || h === '[::1]'
+}
+
+/** Rate or capacity refusals that are worth a retry or another provider, not a real answer. */
+function retriable(status: number, body: any): boolean {
+  if (status === 429 || status >= 500) return true
+  const e = body?.error
+  if (!e) return false
+  return e.code === 429 || e.code === -32005 || /rate|capacity|limit exceeded|compute units|too many|throughput|timeout|temporar/i.test(String(e.message))
+}
+
+function wellFormed(body: any): boolean {
+  return !!body && typeof body === 'object' && ('result' in body || (body.error && typeof body.error === 'object'))
+}
+
 export function startRpcProxy(upstream: string, maxLogRange = Number(process.env.MAMORU_LOG_RANGE ?? 10)): { url: string; stop: () => void } {
   let id = 0
-  async function raw(body: unknown): Promise<any> {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        const res = await fetch(upstream, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-        if (res.status === 429 && attempt < 5) {
-          await Bun.sleep(300 * (attempt + 1))
-          continue
+  const local = isLoopback(upstream)
+  // Chunk getLogs for Alchemy (free tier: 10 blocks) or when MAMORU_LOG_RANGE is set; otherwise the range goes as is.
+  const chunkLogs = /alchemy/i.test(new URL(upstream).hostname) || !!process.env.MAMORU_LOG_RANGE
+  const providers = local ? [upstream] : [upstream, ...FALLBACKS.filter((f) => f !== upstream)]
+  async function post(url: string, body: unknown): Promise<{ status: number; json: any }> {
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) })
+    let json: any = null
+    try {
+      json = await res.json()
+    } catch {}
+    return { status: res.status, json }
+  }
+  /** Primary with 3 backoff retries on rate/capacity errors, then each fallback once. Always returns a result/error object. */
+  async function raw(body: any): Promise<any> {
+    let last: any = null
+    for (const [pi, url] of providers.entries()) {
+      const tries = pi === 0 ? 4 : 1
+      for (let attempt = 0; attempt < tries; attempt++) {
+        try {
+          const r = await post(url, body)
+          if (wellFormed(r.json) && !retriable(r.status, r.json)) return r.json
+          last = r.json?.error ?? { code: -32603, message: `upstream HTTP ${r.status}` }
+        } catch (e) {
+          last = { code: -32603, message: (e as Error).message.split('\n')[0] }
         }
-        return await res.json()
-      } catch (e) {
-        if (attempt >= 3) throw e
-        await Bun.sleep(300 * (attempt + 1))
+        if (attempt + 1 < tries) await Bun.sleep(400 * 2 ** attempt)
       }
+      if (pi === 0 && providers.length > 1) console.log(`[rpc] ${body?.method} falling back after: ${String(last?.message).slice(0, 120)}`)
     }
+    return { jsonrpc: '2.0', id: body?.id ?? null, error: { code: typeof last?.code === 'number' ? last.code : -32603, message: String(last?.message ?? 'upstream unavailable') } }
   }
   async function one(method: string, params: unknown[]): Promise<any> {
     const r = await raw({ jsonrpc: '2.0', id: ++id, method, params })
@@ -40,7 +75,7 @@ export function startRpcProxy(upstream: string, maxLogRange = Number(process.env
     if (filter.blockHash) return one('eth_getLogs', [filter])
     const from = await toNum(filter.fromBlock ?? 'latest')
     const to = await toNum(filter.toBlock ?? 'latest')
-    if (to - from + 1n <= BigInt(maxLogRange)) return one('eth_getLogs', [{ ...filter, fromBlock: `0x${from.toString(16)}`, toBlock: `0x${to.toString(16)}` }])
+    if (!chunkLogs || to - from + 1n <= BigInt(maxLogRange)) return one('eth_getLogs', [{ ...filter, fromBlock: `0x${from.toString(16)}`, toBlock: `0x${to.toString(16)}` }])
     const ranges: [bigint, bigint][] = []
     for (let a = from; a <= to; a += BigInt(maxLogRange)) {
       const b = a + BigInt(maxLogRange) - 1n
@@ -67,7 +102,12 @@ export function startRpcProxy(upstream: string, maxLogRange = Number(process.env
         return { jsonrpc: '2.0', id: msg.id, result: await one('eth_getBlockByNumber', [`0x${(await head()).toString(16)}`, msg.params?.[1] ?? false]) }
       }
       if (msg.method === 'eth_getLogs') return { jsonrpc: '2.0', id: msg.id, result: await getLogs(msg) }
-      const r = await raw({ ...msg })
+      let r = await raw({ ...msg })
+      // A block by number that this node does not have yet comes back null: ask again (a fallback may have it).
+      for (let i = 0; i < 3 && msg.method.startsWith('eth_getBlockBy') && r && 'result' in r && r.result === null; i++) {
+        await Bun.sleep(700)
+        r = await raw({ ...msg })
+      }
       return { ...r, id: msg.id }
     } catch (e) {
       const rpc = (e as any).rpc ?? { code: -32603, message: (e as Error).message.split('\n')[0] }

@@ -37,7 +37,7 @@ export function cbbtcInUsdc(amount1: bigint, sqrtPriceX96: bigint): bigint {
 
 /** Everything the Safe holds at one block: balances and its positions in pool:USDC/cbBTC/500. */
 export async function readSafe(client: PublicClient, safe: Address): Promise<SafeRead> {
-  const blockNumber = await client.getBlockNumber()
+  const blockNumber = await client.getBlockNumber({ cacheTime: 0 })
   const at = { blockNumber } as const
   const npm = address('NonfungiblePositionManager')
   const pool = entry(LIVE_POOL)

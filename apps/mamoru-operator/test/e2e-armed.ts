@@ -87,6 +87,7 @@ try {
 
   // --- operator, live on "8453" ------------------------------------------------
   process.env.MAMORU_LIVE = '1'
+  process.env.MAMORU_HEAD_LAG = '0' // anvil is one node
   const secret = randomBytes(32).toString('hex')
   let op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100 })
   stopOperator = () => op.stop()
