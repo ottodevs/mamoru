@@ -543,7 +543,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       {f && s ? (
         <>
           <Modal open={dialog === 'add'} onClose={() => setDialog(null)} title={homeCopy.add}>
-            <DepositDetails address={f.address} capUsdc={f.capUsdc} />
+            <DepositDetails address={f.address} />
           </Modal>
           <WithdrawDialog accountKey={accountKey} s={s} open={dialog === 'withdraw'} onClose={() => setDialog(null)} />
           <StopDialog accountKey={accountKey} s={s} open={dialog === 'stop'} onClose={() => setDialog(null)} />
