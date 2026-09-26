@@ -51,7 +51,7 @@ export function AssetPicker({ value, options, onChange }: { value: WithdrawAsset
                 <TokenMark symbol={o.asset} size={24} />
                 <span className="grid">
                   <span className="tok-sym">{assetLabel(o.asset)}</span>
-                  {o.reason ? <span className="tok-why">{o.reason}</span> : null}
+                  {!o.available && o.reason ? <span className="tok-why">{o.reason}</span> : null}
                 </span>
               </button>
             </li>

@@ -14,7 +14,7 @@ import { activationLive, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, positionAmounts, positionTokens, progressLine } from '../lib/positions.ts'
 import { localTime } from '../lib/time.ts'
-import { receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
+import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
 import { DepositDetails, hasMoney } from './add-money.tsx'
 
 export const homeCopy = {
@@ -353,7 +353,7 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
           {asset !== 'USDC' ? (
             <p className="m-0 flex items-center gap-2 text-[0.88rem]" data-testid="receive-estimate">
               <TokenMark symbol={asset} size={16} />
-              You receive {asset}. Mamoru swaps on Uniswap and shows the quote before your passkey.
+              You receive {asset === 'JPYC' ? 'JPY*' : asset}. Mamoru swaps on Uniswap and shows the quote before your passkey.
             </p>
           ) : null}
           <label className="mt-2 grid gap-[0.35rem] text-[0.88rem]">
@@ -369,6 +369,7 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
               {flow.busy === 'preparing' ? 'Preparing' : homeCopy.withdraw}
             </button>
           </div>
+          {asset === 'JPYC' ? <p className="m-0 text-[0.78rem] text-stone">* {JPYT_CAPTION}</p> : null}
         </form>
       )}
     </Modal>
