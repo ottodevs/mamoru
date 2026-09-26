@@ -2,11 +2,15 @@
 
 Public product repo. GitHub `ottodevs/mamoru` is the only push remote. Forgejo is fetch-only.
 
-This checkout is in spec phase. The closed architecture is `inputs/mamoru-spec-v1.md`. Do not reopen it.
+The closed architecture is `inputs/mamoru-spec-v1.md`. Do not reopen it. Work on `main`. Do not open a feature branch.
 
 ## Now
 
-The spec pack in `specs/001-mamoru-v1/` is closed. Codex marked it APTO on 2026-09-26. The next implementation commit is T001 only, from `specs/001-mamoru-v1/tasks.md`. Do not skip ahead. Do not deploy. Do not push Forgejo. Publishing to GitHub is Ot's call per the task rules.
+T001 is on `main` at `82774c7`. Do not start the next task until Ot says so. The next task, when it starts, is T002 only, from `specs/001-mamoru-v1/tasks.md`. Do not skip ahead. Do not deploy. Do not push Forgejo.
+
+## One unit
+
+Implement one task. One short commit. Review that commit. Fix it or approve it. Fast-forward `main`. Only then start the next task. Do not stack a phase of unreviewed commits.
 
 ## Read before writing a spec
 
@@ -18,3 +22,5 @@ The spec pack in `specs/001-mamoru-v1/` is closed. Codex marked it APTO on 2026-
 ## Verify
 
 A spec change is done when `specs/` and `.specify/memory/constitution.md` exist, tasks do not say "implement now", and `git status` shows no `src/` or `package.json` created by the spec pass.
+
+An implementation unit is done when its commit is on `main` and the accepting scenarios for that task pass.
