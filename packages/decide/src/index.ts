@@ -1,0 +1,147 @@
+import { keccak256, stringToHex, type Hex } from 'viem'
+import type { ReasonCode } from '@mamoru/domain'
+import { policyHash, type PolicyVersion } from '@mamoru/policy'
+import { enterBucket } from './enter/index.ts'
+import { ehgPreliminary, purgaIdentity } from './gates/index.ts'
+import { estimateFees, harvestOf } from './harvest/index.ts'
+import type { Decision, GateStep, Observation, Proposal, ShadowNote } from './types.ts'
+
+export type * from './types.ts'
+export { estimateFees } from './harvest/index.ts'
+export { safeSavings } from './enter/index.ts'
+export { inSavings, volatileOf } from './value.ts'
+
+/** Deterministic JSON: sorted keys, bigints as decimal strings. */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_k, v) => {
+    if (typeof v === 'bigint') return v.toString()
+    if (v && typeof v === 'object' && !Array.isArray(v)) return Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]]))
+    return v
+  })
+}
+
+function hashOf(value: unknown): Hex {
+  return keccak256(stringToHex(canonicalJson(value)))
+}
+
+function inRange(tick: number, lower: number, upper: number): boolean {
+  return tick >= lower && tick < upper
+}
+
+/**
+ * FR-DEC-001: pure and deterministic. The same observation and policy give
+ * the same decision, codes and trail, byte for byte.
+ */
+export function decide(obs: Observation, policy: PolicyVersion): Decision {
+  const observationCodes: ReasonCode[] = ['OBS_OK']
+  const unsafeDeposit = obs.deposits.some((d) => !d.safe)
+  if (obs.deposits.some((d) => d.safe)) observationCodes.push('OBS_DEPOSIT_DETECTED')
+  if (unsafeDeposit) observationCodes.push('OBS_DEPOSIT_UNSAFE')
+
+  const trail: GateStep[] = [{ gate: 'observation', verdict: 'GO', reason: 'OBS_OK' }]
+  const shadow: ShadowNote[] = []
+  const buckets: Decision['buckets'] = []
+  const positions: Decision['positions'] = []
+  const policyPools = new Set(policy.buckets.flatMap((b) => b.pools))
+
+  // Plan §9, step 10 and FR-DEC-009: annotations for every position, harvest only for managed ones.
+  const harvests: Proposal[] = []
+  let managedInRange = 0
+  let managedOutOfRange = 0
+  for (const p of obs.positions) {
+    const codes: ReasonCode[] = []
+    const pool = p.pool ? obs.pools.find((x) => x.name === p.pool) : undefined
+    const managed = p.managed && !!pool && policyPools.has(pool.name)
+    if (!managed) codes.push('OBS_UNMANAGED_ASSET')
+    if (pool) {
+      const within = inRange(pool.tick, p.tickLower, p.tickUpper)
+      if (!within) codes.push('OBS_POSITION_OUT_OF_RANGE')
+      const est = estimateFees(obs, policy, p, pool)
+      if (est.aboveCost) codes.push('OBS_FEES_ABOVE_COST')
+      if (managed) {
+        if (within) managedInRange++
+        else managedOutOfRange++
+        const h = harvestOf(p, pool, policy, est)
+        codes.push(h.code)
+        if (h.proposal) harvests.push(h.proposal)
+      }
+    }
+    positions.push({ tokenId: p.tokenId, codes })
+  }
+
+  // Plan §9, step 7: entry, bucket by bucket.
+  const entries: Proposal[] = []
+  let enterEvaluated = false
+  for (const b of policy.buckets) {
+    const poolName = b.pools[0]
+    const pool = poolName ? obs.pools.find((x) => x.name === poolName) : undefined
+    if (!pool) {
+      buckets.push({ bucket: b.id, code: 'PLAN_BUCKET_NO_EXECUTABLE_POOL' })
+      continue
+    }
+    const entered = obs.positions.some((p) => p.managed && p.pool === pool.name)
+    if (entered) {
+      buckets.push({ bucket: b.id, code: 'STRATEGY_PREFERENCE' })
+      continue
+    }
+    const purga = purgaIdentity(pool)
+    if (purga.verdict !== 'GO') {
+      trail.push(purga)
+      buckets.push({ bucket: b.id, code: purga.reason })
+      continue
+    }
+    if (unsafeDeposit) {
+      buckets.push({ bucket: b.id, code: 'OBS_DEPOSIT_UNSAFE' })
+      continue
+    }
+    const e = enterBucket(obs, policy, b.preference, pool)
+    buckets.push({ bucket: b.id, code: e.code })
+    if (e.proposal) {
+      enterEvaluated = true
+      trail.push(purga, { gate: 'strategy', verdict: 'GO', reason: 'STRATEGY_PREFERENCE' }, { gate: 'eny', verdict: 'SKIP', reason: 'ENY_SHADOW' })
+      entries.push(e.proposal)
+    }
+  }
+  if (enterEvaluated && policy.shadow.includes('packaging:eny')) {
+    shadow.push({ code: 'ENY_SHADOW', note: 'packaging:eny is not evaluated in v1 and has no effect on the decision' })
+  }
+
+  // Plan §9, steps 2, 4 and 8: slot, pause, then one proposal in FR-DEC-011 order.
+  let proposal: Proposal | null = null
+  let reason: ReasonCode
+  if (obs.slot) {
+    reason = 'DECIDE_SLOT_BUSY'
+  } else if (obs.intents.paused) {
+    reason = 'DECIDE_PAUSED'
+  } else {
+    proposal = harvests[0] ?? entries[0] ?? null
+    reason = proposal ? (proposal.kind === 'harvest' ? 'DECIDE_HARVEST' : 'DECIDE_ENTER') : holdReason()
+  }
+
+  // Plan §9, step 9: a preliminary NO GO drops the proposal with its code.
+  if (proposal) {
+    const pool = obs.pools.find((x) => x.name === proposal!.pool)!
+    const gate = ehgPreliminary(obs, policy, pool, proposal.grant)
+    trail.push(gate)
+    if (gate.verdict !== 'GO') {
+      proposal = null
+      reason = gate.reason
+    }
+  }
+
+  function holdReason(): ReasonCode {
+    if (unsafeDeposit) return 'OBS_DEPOSIT_UNSAFE'
+    if (managedOutOfRange > 0) return 'OBS_POSITION_OUT_OF_RANGE'
+    if (managedInRange > 0) return 'DECIDE_IN_RANGE'
+    const blocking = buckets.find((b) => b.code !== 'PLAN_BUCKET_NO_EXECUTABLE_POOL')
+    return blocking?.code ?? 'PLAN_BUCKET_NO_EXECUTABLE_POOL'
+  }
+
+  const kind = proposal?.kind ?? 'hold'
+  const code = kind === 'hold' ? 'DECIDE_HOLD' : kind === 'harvest' ? 'DECIDE_HARVEST' : 'DECIDE_ENTER'
+  const policyRef = { policyId: policy.policyId, version: policy.version, hash: policyHash(policy) }
+  const body = { policyRef, observationCodes, kind, code, reason, trail, proposal, shadow, buckets, positions } as const
+  const observationRef = { block: obs.block.number, hash: obs.block.hash }
+  const premiseHash = hashOf(body)
+  return { decisionId: hashOf({ observationRef, premiseHash }), premiseHash, observationRef, ...body } as Decision
+}

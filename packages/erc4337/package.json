@@ -1,11 +1,10 @@
 {
-  "name": "@mamoru/uniswap-v3",
+  "name": "@mamoru/erc4337",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./quote": "./src/quote.ts"
+    ".": "./src/index.ts"
   },
   "dependencies": {
     "@mamoru/domain": "workspace:*",
