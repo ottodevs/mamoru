@@ -27,8 +27,8 @@ export type LiveAccount = { safe: Address; chainId: number; owners: Address[]; s
 
 export type LivePosition = { tokenId: bigint; liquidity: bigint; amount0Min: bigint; amount1Min: bigint }
 export type LiveSwap = { amountIn: bigint; amountOutMinimum: bigint }
-/** What the recipient receives instead of USDC: a USDC swap on SwapRouter02 whose output goes straight to them. */
-export type LiveReceive = { asset: 'EURC' | 'ETH'; fee: number; amountOutMinimum: bigint }
+/** What the recipient receives instead of USDC: a USDC swap on SwapRouter02 whose output goes straight to them. `asset` is the registry token out (the app's JPYC slot pays out JPYT). */
+export type LiveReceive = { asset: 'EURC' | 'ETH' | 'JPYT'; fee: number; amountOutMinimum: bigint }
 
 /** Rebuilds the account from the stored context and refuses it if the counterfactual address does not match. */
 export function liveAccountFromContext(ctx: AccountContext): LiveAccount {

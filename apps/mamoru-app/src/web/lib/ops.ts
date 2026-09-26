@@ -7,7 +7,7 @@ export function opLine(op: OpView): string {
     case 'activate':
       if (failed) return 'Start did not go through'
       if (op.state === 'confirmed') return 'Mamoru started'
-      return op.code === 'ARMED' || op.state === 'proposed' ? 'Approved. Starts when USDC lands' : 'Starting Mamoru'
+      return op.code === 'ARMED' || op.state === 'proposed' ? 'Start approved' : 'Starting Mamoru'
     case 'enter':
       if (failed) return 'Could not open the USDC/cbBTC position'
       return op.state === 'confirmed' ? 'Opened USDC/cbBTC position' : 'Opening USDC/cbBTC position'

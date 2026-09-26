@@ -29,6 +29,8 @@ export type AccountState = {
   /** Registry trust calls already ran on this Safe (first activation). */
   trusted: boolean
   active: boolean
+  /** Policy of the last activation (absent: activated before it was stored, conservador-live-v1). */
+  policyId?: string
   /** Engine session key. Private, 0600 state file only, never logged. */
   sessionKey?: Hex
   grants: StoredGrant[]

@@ -7,7 +7,7 @@ function workersCache(): ApyCache | null {
   return (globalThis as { caches?: { default?: ApyCache } }).caches?.default ?? null
 }
 
-// Public: pool-level fee APR of the plan's live pool, sourced upstream; nulls when a source fails.
+// Public: plan-weighted reference APY (current + 30-day), sourced upstream; nulls when every source fails.
 export function apyRoutes(fetcher: Fetcher, cache: () => ApyCache | null = workersCache) {
   const apy = new Hono<AppEnv>()
   apy.get('/', async (c) => c.json(await apyView(fetcher, cache(), c.var.now())))

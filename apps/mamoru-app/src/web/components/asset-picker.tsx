@@ -1,6 +1,6 @@
 import type { WithdrawAsset } from '@mamoru/domain'
 import { useEffect, useRef, useState } from 'react'
-import type { WithdrawAssetOption } from '../lib/withdraw-assets.ts'
+import { assetLabel, type WithdrawAssetOption } from '../lib/withdraw-assets.ts'
 import { TokenMark } from './token-mark.tsx'
 
 /** Token dropdown from the mockup's transfer modal: current token face, ▾, a list of marks. */
@@ -28,9 +28,9 @@ export function AssetPicker({ value, options, onChange }: { value: WithdrawAsset
 
   return (
     <div className="tok-dd" ref={root}>
-      <button type="button" className="tok-now" aria-haspopup="listbox" aria-expanded={open} aria-label={`Receive ${value}`} onClick={() => setOpen((o) => !o)}>
+      <button type="button" className="tok-now" aria-haspopup="listbox" aria-expanded={open} aria-label={`Receive as ${assetLabel(value)}`} onClick={() => setOpen((o) => !o)}>
         <TokenMark symbol={value} size={20} />
-        <span className="tok-sym">{value}</span>
+        <span className="tok-sym">{assetLabel(value)}</span>
       </button>
       {open ? (
         <ul className="tok-list" role="listbox" aria-label="Asset to receive">
@@ -50,8 +50,8 @@ export function AssetPicker({ value, options, onChange }: { value: WithdrawAsset
               >
                 <TokenMark symbol={o.asset} size={24} />
                 <span className="grid">
-                  <span className="tok-sym">{o.asset}</span>
-                  {!o.available && o.reason ? <span className="tok-why">{o.reason}</span> : null}
+                  <span className="tok-sym">{assetLabel(o.asset)}</span>
+                  {o.reason ? <span className="tok-why">{o.reason}</span> : null}
                 </span>
               </button>
             </li>

@@ -319,6 +319,7 @@
   }
   .tok-dd {
     position: relative;
+    display: flex;
   }
   .tok-now {
     display: flex;
@@ -628,5 +629,36 @@
   .apr-fade {
     animation: apr-fade 400ms ease-out !important;
     animation-duration: 400ms !important;
+  }
+}
+
+/* Working capital progress line: one mono label with a tiny pulsing dot while something is in flight. */
+.progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.2rem;
+  font-size: 0.7rem;
+}
+.progress-dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: var(--color-emerald);
+  animation: progress-pulse 1.6s ease-in-out infinite;
+}
+@keyframes progress-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-dot {
+    animation: none !important;
+    opacity: 0.8;
   }
 }

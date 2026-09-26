@@ -93,6 +93,79 @@ export function withTestOverrides(policy: PolicyVersion, env: Record<string, str
   return { ...policy, range: { ...policy.range, cooldownSeconds: Number(env.MAMORU_TEST_RERANGE_COOLDOWN_S) } }
 }
 
+/** One pair of a multi-pool policy: caps named `<prefix>…`, sized in bps of the account cap. */
+function pairOf(prefix: string, pool: string, stable: string, volatile: string, token0: string, token1: string, fee: number, bps: { swapPerCall: number; swapTotal: number; mint: number }) {
+  const n = (s: string) => `${prefix}${s}`
+  const caps: CapFormula[] = [
+    { name: n('SwapPerCall'), asset: stable, bpsOfDeposit: bps.swapPerCall },
+    { name: n('SwapTotal'), asset: stable, bpsOfDeposit: bps.swapTotal },
+    { name: n('Mint0'), asset: token0, bpsOfDeposit: bps.mint },
+    { name: n('Mint1'), asset: token1, bpsOfDeposit: bps.mint },
+    { name: n('ConvertPerCall'), asset: volatile, bpsOfDeposit: bps.mint },
+    { name: n('ConvertTotal'), asset: volatile, bpsOfDeposit: bps.mint },
+  ]
+  const grants = pairGrants(
+    {
+      stable,
+      volatile,
+      token0,
+      token1,
+      fee,
+      pool,
+      caps: {
+        stableSwapPerCall: n('SwapPerCall'),
+        stableSwapTotal: n('SwapTotal'),
+        mint0: n('Mint0'),
+        mint1: n('Mint1'),
+        volatileConvertPerCall: n('ConvertPerCall'),
+        volatileConvertTotal: n('ConvertTotal'),
+      },
+    },
+    { enterSwap: 16, enterMint: 16, manage: 64 },
+  )
+  // Live manage grants (owner decision 2026-09-26): re-range, reduce and harvest any position of this pair.
+  grants.push(
+    ...manageAnyGrants(
+      { stable, volatile, token0, token1, fee, pool, caps: { stableSwapPerCall: n('SwapPerCall'), stableSwapTotal: n('SwapTotal'), mint0: n('Mint0'), mint1: n('Mint1'), volatileConvertPerCall: n('ConvertPerCall'), volatileConvertTotal: n('ConvertTotal') } },
+      { manage: 256, convert: 64 },
+    ),
+  )
+  return { caps, grants }
+}
+
+const stablesPair = pairOf('stables', 'pool:USDC/USDT/100', 'USDC', 'USDT', 'USDC', 'USDT', 100, { swapPerCall: 5000, swapTotal: 10000, mint: 10000 })
+const btcPair = pairOf('btc', 'pool:USDC/cbBTC/500', 'USDC', 'cbBTC', 'USDC', 'cbBTC', 500, { swapPerCall: 4000, swapTotal: 8000, mint: 8000 })
+const riskPair = pairOf('risk', 'pool:WETH/USDC/3000', 'USDC', 'WETH', 'WETH', 'USDC', 3000, { swapPerCall: 2000, swapTotal: 4000, mint: 4000 })
+
+/**
+ * Conservador v2 for the live demo (sprint 2026-09-26): the three buckets on three Uniswap v3 pools of Base,
+ * target weights of the whole account value, re-balanced from idle capital at every review.
+ * - stables 50%: USDC/USDT 0.01%, the deepest stable/stable v3 pool with USDC on Base (range +-0.2%);
+ * - btc-usdc 40%: USDC/cbBTC 0.05%;
+ * - risk 10%: WETH/USDC 0.3% (deeper than 0.05% in active liquidity).
+ * One enter-swap and one enter-mint grant per pair, all enabled by the one owner activation. Caps are bps of the
+ * account cap (LIVE_CAP_USDC) with room for one entry per pool plus top-ups; usage limits leave 16 ops per grant.
+ */
+export const conservadorLiveV2: PolicyVersion = {
+  ...conservadorLiveV1,
+  policyId: 'conservador-live-v2',
+  version: '2.0.0',
+  buckets: [
+    { id: 'stables', preference: 5000, pools: ['pool:USDC/USDT/100'] },
+    { id: 'btc-usdc', preference: 4000, pools: ['pool:USDC/cbBTC/500'] },
+    { id: 'risk', preference: 1000, pools: ['pool:WETH/USDC/3000'] },
+  ],
+  range: { ...conservadorLiveV1.range, widthTicksByPool: { 'pool:USDC/USDT/100': 40 } },
+  allocation: 'target-weights',
+  minEntry: 100_000n,
+  rebalanceBandBps: 300,
+  session: {
+    ...conservadorV1.session,
+    caps: [...stablesPair.caps, ...btcPair.caps, ...riskPair.caps],
+    grants: [...stablesPair.grants, ...btcPair.grants, ...riskPair.grants],
+  },
+}
+
 /** Scenario policy for M07: LP on WETH/USDC 0.3%, only in the lab. */
 export const labWethUsdcV1: PolicyVersion = {
   ...conservadorV1,
@@ -139,5 +212,6 @@ export const POLICIES: Record<string, PolicyVersion> = {
   [conservadorV1.policyId]: conservadorV1,
   [conservadorLabV1.policyId]: conservadorLabV1,
   [conservadorLiveV1.policyId]: conservadorLiveV1,
+  [conservadorLiveV2.policyId]: conservadorLiveV2,
   [labWethUsdcV1.policyId]: labWethUsdcV1,
 }

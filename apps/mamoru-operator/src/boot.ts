@@ -30,7 +30,7 @@ export async function bootOperator(o: BootOptions) {
   const client = createPublicClient({ transport: http(o.rpcUrl, { batch: true, timeout: 60_000 }) })
   const chainId = await client.getChainId()
   const live = chainId === BASE_CHAIN_ID && process.env.MAMORU_LIVE === '1'
-  const named = POLICIES[o.policyId ?? 'conservador-live-v1']
+  const named = POLICIES[o.policyId ?? 'conservador-live-v2']
   if (!named) throw new Error(`unknown policy ${o.policyId}`)
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
   const policy = withTestOverrides(named, process.env)

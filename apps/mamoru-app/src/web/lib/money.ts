@@ -31,7 +31,8 @@ export function split(f: FundingView, price: bigint | null): Split {
   const workingCbbtc = f.positions.reduce((a, p) => a + BigInt(p.amountCbbtc), 0n)
   const idleUsdc = BigInt(f.usdc)
   const idleCbbtc = BigInt(f.cbbtc)
-  const working = workingUsdc + cbbtcToUsdc(workingCbbtc, price)
+  // valueUsdc covers every pool (USDT, WETH too); older views fall back to the USDC + cbBTC legs.
+  const working = f.positions.reduce((a, p) => a + (p.valueUsdc !== undefined ? BigInt(p.valueUsdc) : BigInt(p.amountUsdc) + cbbtcToUsdc(BigInt(p.amountCbbtc), price)), 0n)
   const idle = idleUsdc + cbbtcToUsdc(idleCbbtc, price)
   const total = working + idle
   const margin = (total * 99n) / 100n
@@ -43,7 +44,7 @@ export function split(f: FundingView, price: bigint | null): Split {
     workingCbbtc,
     idleUsdc,
     idleCbbtc,
-    priced: price !== null || workingCbbtc + idleCbbtc === 0n,
+    priced: price !== null || (f.positions.every((p) => p.valueUsdc !== undefined || p.amountCbbtc === '0') && idleCbbtc === 0n),
     maxWithdraw: (margin / 10_000n) * 10_000n,
   }
 }

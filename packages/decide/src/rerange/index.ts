@@ -1,11 +1,16 @@
 import type { ReasonCode } from '@mamoru/domain'
-import { hasManageAny, type PolicyVersion } from '@mamoru/policy'
+import { grantKeyFor, hasManageAny, type PolicyVersion } from '@mamoru/policy'
 import type { RegistryName } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import type { EnterSwapProposal, Observation, PoolObs, PositionObs, RerangeProposal, ReduceProposal } from '../types.ts'
 import { inSavings, opCostInSavings, volatileOf } from '../value.ts'
 
 const Q96 = 1n << 96n
+
+/** Session key of a live manage grant for `pool`: `name`, or `name:<pool>` on a multi-pool policy. */
+export function anyKey<N extends 'manage-any' | 'convert-any'>(policy: PolicyVersion, name: N, pool: string): N | `${N}:${string}` {
+  return grantKeyFor(policy, name, pool) as N | `${N}:${string}`
+}
 /** Re-range when the price is within this share of the width from an edge. */
 export const EDGE_BPS = 1000
 /** Reduce a bucket that sits more than this many basis points of total value above its target. */
@@ -45,7 +50,8 @@ export function positionValue(p: PositionObs, pool: PoolObs, savings: RegistryNa
  * the next review's entry mints a new centred range from the freed tokens.
  */
 export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionObs, pool: PoolObs): { code: ReasonCode | null; proposal: RerangeProposal | null } {
-  if (!hasManageAny(policy) || policy.range.adjust !== 'on_out_of_range') return { code: null, proposal: null }
+  // A position with no liquidity has no range to keep: its tokens are only owed, not at risk of the price.
+  if (!hasManageAny(policy) || policy.range.adjust !== 'on_out_of_range' || p.liquidity === 0n) return { code: null, proposal: null }
   const width = p.tickUpper - p.tickLower
   const outside = pool.tick < p.tickLower || pool.tick >= p.tickUpper
   const edge = Math.min(pool.tick - p.tickLower, p.tickUpper - pool.tick)
@@ -53,7 +59,7 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
   if (!outside && !near) return { code: null, proposal: null }
   const last = obs.lastRerangeAt ?? null
   if (last !== null && obs.block.timestamp - last < BigInt(policy.range.cooldownSeconds)) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
-  return { code: 'DECIDE_RANGE_ADJUST', proposal: { kind: 'rerange', grant: 'manage-any', pool: pool.name, tokenId: p.tokenId, liquidity: p.liquidity } }
+  return { code: 'DECIDE_RANGE_ADJUST', proposal: { kind: 'rerange', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity: p.liquidity } }
 }
 
 export type BucketValue = { bucket: string; target: bigint; value: bigint; pool: RegistryName | null }
@@ -113,7 +119,7 @@ export function reduceOf(obs: Observation, policy: PolicyVersion, policyPools: R
     const pv = positionValue(p, pool, policy.savingsAsset)
     const liquidity = pv === 0n ? 0n : (p.liquidity * (excess < pv ? excess : pv)) / pv
     if (liquidity === 0n) continue
-    return { code: 'STRATEGY_PREFERENCE_DEVIATION', proposal: { kind: 'reduce', grant: 'manage-any', pool: pool.name, tokenId: p.tokenId, liquidity } }
+    return { code: 'STRATEGY_PREFERENCE_DEVIATION', proposal: { kind: 'reduce', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity } }
   }
   return { code: null, proposal: null }
 }
@@ -137,5 +143,5 @@ export function ratioConvertOf(obs: Observation, policy: PolicyVersion, preferen
   if (value * 2n <= half * 3n || free >= half) return null
   const amountIn = (held * (value - half)) / value
   if (amountIn === 0n) return null
-  return { kind: 'enter_swap', grant: 'convert-any', pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn }
+  return { kind: 'enter_swap', grant: anyKey(policy, 'convert-any', pool.name), pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn }
 }

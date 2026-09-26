@@ -50,7 +50,13 @@ export type FundingView = {
   cbbtc: string           // base units
   gasReserveWei: string   // the relayer tops the Safe up to this at activation
   active: boolean         // engine grants enabled and the engine loop running
-  positions: { tokenId: string; pool: string; liquidity: string; inRange: boolean; amountUsdc: string; amountCbbtc: string }[]
+  positions: {
+    tokenId: string; pool: string; liquidity: string; inRange: boolean; amountUsdc: string; amountCbbtc: string
+    amounts?: { token: string; amount: string; decimals: number }[]   // both sides of any pool, base units
+    valueUsdc?: string                                                  // position value in USDC base units
+  }[]
+  // What the engine is doing right now, for a subtle progress line in Working capital.
+  progress?: { step: 'deploying' | 'activating' | 'swapping' | 'opening' | 'rebalancing' | 'reranging' | 'closing' | 'withdrawing'; pool?: string; since: string } | null
 }
 
 // POST /api/accounts/:accountKey/activate/prepare -> OwnerTxToSign
@@ -110,7 +116,8 @@ export type AccountContext = {
   passkey: { credentialId: string; x: Hex0x; y: Hex0x }
 }
 
-// Pool-level fee APR of the plan's live pool (public, no session).
+// One current and one monthly APY for the account (public, no session). Until positions earn
+// fees: the plan's pools' APYs weighted by the policy bucket weights. `pool` = the plan's policyId.
 // GET  /api/apy                                      -> ApyView
 export type ApyView = {
   pool: string

@@ -8,10 +8,11 @@ import { TokenMark } from '../components/token-mark.tsx'
 import { BasescanLink, Brand, Modal, Waiting } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
-import { formatUnits, shortHex } from '../lib/format.ts'
+import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
 import { cbbtcPrice, humanMessage, split, usd, usdInput, type Split } from '../lib/money.ts'
 import { activationLive, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
+import { pairLabel, poolAddress, positionAmounts, positionTokens, progressLine } from '../lib/positions.ts'
 import { localTime } from '../lib/time.ts'
 import { receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
 import { DepositDetails, hasMoney } from './add-money.tsx'
@@ -20,7 +21,6 @@ export const homeCopy = {
   total: 'Total balance',
   apy: 'Current APY',
   month: 'Monthly average',
-  week: '7-day average',
   add: 'Add capital',
   withdraw: 'Withdraw',
   stop: 'Stop allocation',
@@ -30,7 +30,6 @@ export const homeCopy = {
   history: 'Savings history',
   notRunning: 'Mamoru is not running on this money yet.',
   armFirst: 'Approve once. Mamoru starts when your money lands.',
-  starting: 'Approved. Mamoru starts on this deposit shortly.',
   stopBody: 'Mamoru closes every position and swaps back to USDC. Your USDC stays in your account.',
   confirm: 'Confirm with passkey',
 }
@@ -47,24 +46,23 @@ const pct = (v: number | null | undefined) => (v === null || v === undefined ? '
 /** Short caption from the source line: "Pool fees, last hour · GeckoTerminal" -> "GeckoTerminal · 1h". */
 const caption = (source: string, window: string) => `${source.split(' · ').at(-1) ?? source} · ${window}`
 
-/** Pool-level fee APR of the plan's live pool (Uniswap v3 USDC/cbBTC 0.05% on Base), sourced upstream. */
+/** One current and one monthly APY: the plan's pools weighted by bucket weights until positions earn fees. */
 function ApyTiles() {
   const { data, dataUpdatedAt } = useApy()
-  const weekly = data?.monthlySource.startsWith('7-day') ?? false
   return (
     <>
       <li className="apr apr-live flex-1" title={data?.currentSource}>
         <span className="apr-label whitespace-nowrap">{homeCopy.apy}</span>
-        <strong key={dataUpdatedAt} className="apr-fade" data-testid="apy-current">
+        <strong key={`v-${dataUpdatedAt}`} className="apr-fade" data-testid="apy-current">
           {pct(data?.currentPct)}
         </strong>
         {data && <span className="apr-src">{caption(data.currentSource, data.currentWindow)}</span>}
-        {data && <span key={dataUpdatedAt} className="apr-tick" style={{ animationDuration: `${APY_REFRESH_MS}ms` }} aria-hidden="true" />}
+        {data && <span key={`t-${dataUpdatedAt}`} className="apr-tick" style={{ animationDuration: `${APY_REFRESH_MS}ms` }} aria-hidden="true" />}
       </li>
       <li className="apr flex-1" title={data?.monthlySource}>
-        <span className="apr-label whitespace-nowrap">{weekly ? homeCopy.week : homeCopy.month}</span>
+        <span className="apr-label whitespace-nowrap">{homeCopy.month}</span>
         <strong data-testid="apy-month">{pct(data?.monthlyPct)}</strong>
-        {data && <span className="apr-src">{caption(data.monthlySource, weekly ? '7d' : '30d')}</span>}
+        {data && <span className="apr-src">{caption(data.monthlySource, '30d')}</span>}
       </li>
     </>
   )
@@ -101,7 +99,8 @@ export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () =
 
 export function Working({ f, s, onStop }: { f: FundingView; s: Split; onStop: (() => void) | null }) {
   const n = f.positions.length
-  const assets = ['USDC', ...(s.workingCbbtc > 0n || s.idleCbbtc > 0n ? ['cbBTC'] : [])]
+  const assets = [...new Set([...positionTokens(f), ...(s.idleCbbtc > 0n ? ['cbBTC'] : [])])]
+  const line = progressLine(f.progress)
   return (
     <details className="card fold">
       <summary>
@@ -110,6 +109,12 @@ export function Working({ f, s, onStop }: { f: FundingView; s: Split; onStop: ((
             <span className="title heavy">{homeCopy.working}</span>
             <span className="title heavy text-emerald">{usd(s.working)} USDC</span>
           </span>
+          {line ? (
+            <span className="progress mono-label text-stone" role="status" aria-live="polite" data-testid="progress">
+              <span className="progress-dot" aria-hidden="true" />
+              {line}
+            </span>
+          ) : null}
           <span className="sub">{plural(n, 'open position', 'open positions')}</span>
         </span>
         {onStop ? (
@@ -142,31 +147,49 @@ export function Working({ f, s, onStop }: { f: FundingView; s: Split; onStop: ((
           <p className="m-0 text-[0.92rem] text-stone">Nothing in a pool right now.</p>
         ) : (
           <ul className="m-0 grid list-none gap-[0.4rem] p-0">
-            {f.positions.map((p) => (
-              <li key={p.tokenId} className="grid grid-cols-1 items-center gap-1 border-t border-wash pt-[0.45rem] min-[761px]:grid-cols-[auto_1fr_auto] min-[761px]:gap-[0.7rem]">
-                <span className="flex items-center">
-                  <TokenMark symbol="USDC" />
-                  <span className="-ml-[0.45rem]">
-                    <TokenMark symbol="cbBTC" />
+            {f.positions.map((p) => {
+              const legs = positionAmounts(p)
+              const addr = poolAddress(p.pool)
+              return (
+                <li key={p.tokenId} data-testid="position" className="grid grid-cols-1 items-center gap-1 border-t border-wash pt-[0.45rem] min-[761px]:grid-cols-[auto_1fr_auto] min-[761px]:gap-[0.7rem]">
+                  <span className="flex items-center">
+                    {legs.map((l, i) => (
+                      <span key={l.token} className={i > 0 ? '-ml-[0.45rem]' : undefined}>
+                        <TokenMark symbol={l.token} />
+                      </span>
+                    ))}
                   </span>
-                </span>
-                <span className="flex min-w-0 flex-col gap-[0.05rem]">
-                  <span className="text-base">Uniswap v3 · USDC / cbBTC</span>
-                  <a className="truncate font-mono text-[0.78rem] text-stone no-underline hover:text-emerald" href={`https://basescan.org/address/${p.pool}`} target="_blank" rel="noreferrer">
-                    Base · {shortHex(p.pool)}
-                  </a>
-                  <span className={`font-mono text-[0.78rem] ${p.inRange ? 'text-stone' : 'text-alert-ink'}`}>{p.inRange ? 'In range' : 'Out of range'}</span>
-                </span>
-                <span className="font-mono text-[0.85rem] font-medium text-emerald">
-                  {usd(p.amountUsdc)} USDC{BigInt(p.amountCbbtc) > 0n ? ` + ${formatUnits(p.amountCbbtc, 'cbBTC')} cbBTC` : ''}
-                </span>
-              </li>
-            ))}
+                  <span className="flex min-w-0 flex-col gap-[0.05rem]">
+                    <span className="text-base">{pairLabel(p.pool, p.amounts)}</span>
+                    {addr ? (
+                      <a className="truncate font-mono text-[0.78rem] text-stone no-underline hover:text-emerald" href={`https://basescan.org/address/${addr}`} target="_blank" rel="noreferrer">
+                        Uniswap v3 · Base · {shortHex(addr)}
+                      </a>
+                    ) : null}
+                    <span className={`font-mono text-[0.78rem] ${p.inRange ? 'text-stone' : 'text-alert-ink'}`}>{p.inRange ? 'In range' : 'Out of range'}</span>
+                  </span>
+                  <span className="flex flex-col font-mono text-[0.85rem] min-[761px]:items-end">
+                    {p.valueUsdc !== undefined ? <span className="font-medium text-emerald">${usd(p.valueUsdc)}</span> : null}
+                    <span className={p.valueUsdc !== undefined ? 'text-[0.78rem] text-stone' : 'font-medium text-emerald'}>
+                      {legs.map((l) => `${tokenAmount(l.amount, l.token, l.decimals)} ${l.token}`).join(' + ')}
+                    </span>
+                  </span>
+                </li>
+              )
+            })}
           </ul>
         )}
       </div>
     </details>
   )
+}
+
+/** Base units to a short amount: registry decimals, capped at 6 fraction digits (8 for cbBTC). */
+function tokenAmount(raw: string, token: string, decimals: number): string {
+  if (decimalsOf(token) !== undefined) return token === 'USDC' || token === 'USDT' || token === 'EURC' ? usd(raw) : formatUnits(raw, token)
+  const s = raw.padStart(decimals + 1, '0')
+  const frac = s.slice(-decimals).slice(0, 6).replace(/0+$/, '')
+  return `${s.slice(0, -decimals) || '0'}${frac ? `.${frac}` : ''}`
 }
 
 export function Idle({ s }: { s: Split }) {
@@ -264,7 +287,7 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
     e.preventDefault()
     const raw = parseUsdc(amount)
     if (raw === null) return setInvalid('Enter an amount above zero.')
-    if (BigInt(raw) > s.total) return setInvalid(`You can withdraw up to ${usd(s.maxWithdraw)} USDC right now.`)
+    if (BigInt(raw) > s.total) return setInvalid(`You can withdraw up to $${usd(s.maxWithdraw)} right now.`)
     if (dest.state !== 'ok') return setInvalid(dest.state === 'invalid' ? dest.message : `Enter where the ${asset} should go.`)
     if (!options.find((o) => o.asset === asset)?.available) return setInvalid(`${asset} is not available right now.`)
     setInvalid(null)
@@ -292,7 +315,7 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
           onApprove={() => void flow.approve()}
         >
           <p className="m-0 text-[2rem] leading-none text-emerald tabular-nums">
-            {usd(BigInt(parseUsdc(amount) ?? '0'))} <span className="text-[0.9rem] tracking-[0.12em] text-stone">USDC</span>
+            ${usd(BigInt(parseUsdc(amount) ?? '0'))}
           </p>
           {flow.prepared.receive && flow.prepared.receive.asset !== 'USDC' ? (
             <div className="grid gap-1" data-testid="receive">
@@ -314,24 +337,25 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
       ) : (
         <form className="grid gap-[0.55rem]" onSubmit={submit}>
           <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-stretch gap-2">
-            <span className="flex items-center gap-2 border border-ink bg-paper px-3 font-mono tracking-[0.1em]">
-              <TokenMark symbol="USDC" size={20} />
-              USDC
-            </span>
-            <label className="block min-w-0">
-              <span className="sr-only">Amount</span>
-              <input className="field" value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" placeholder="0.00" autoComplete="off" />
+            <AssetPicker value={asset} options={options} onChange={setAsset} />
+            <label className="relative block min-w-0">
+              <span className="sr-only">Amount in USD</span>
+              <span aria-hidden="true" className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-stone">
+                $
+              </span>
+              <input className="field pl-7" value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" placeholder="0.00" autoComplete="off" />
             </label>
             <button type="button" className="chipbtn" onClick={() => setAmount(usdInput(s.maxWithdraw))}>
               Max
             </button>
           </div>
-          <p className="m-0 text-[0.85rem] text-stone">{usd(s.maxWithdraw)} USDC available</p>
-          <div className="mt-2 grid gap-[0.35rem] text-[0.88rem]">
-            <span>Receive as</span>
-            <AssetPicker value={asset} options={options} onChange={setAsset} />
-            {asset !== 'USDC' ? <p className="m-0 text-[0.8rem] text-stone">Mamoru swaps the USDC to {asset} on Uniswap. You see the quote before your passkey.</p> : null}
-          </div>
+          <p className="m-0 text-[0.85rem] text-stone">${usd(s.maxWithdraw)} available</p>
+          {asset !== 'USDC' ? (
+            <p className="m-0 flex items-center gap-2 text-[0.88rem]" data-testid="receive-estimate">
+              <TokenMark symbol={asset} size={16} />
+              You receive {asset}. Mamoru swaps on Uniswap and shows the quote before your passkey.
+            </p>
+          ) : null}
           <label className="mt-2 grid gap-[0.35rem] text-[0.88rem]">
             <span>To</span>
             <input className="field mono" value={to} onChange={(e) => setTo(e.target.value)} placeholder="0x… or name.eth" autoComplete="off" spellCheck={false} autoCapitalize="off" />
@@ -442,11 +466,6 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       ) : (
         <>
           {!f.active && !inFlight && !armed ? <StartRow accountKey={accountKey} funded={hasMoney(f)} /> : null}
-          {hasMoney(f) && !f.active && armed ? (
-            <section className="card">
-              <Waiting>{homeCopy.starting}</Waiting>
-            </section>
-          ) : null}
           <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} />
           <Idle s={s as Split} />
           <History ops={opList} />

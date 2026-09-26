@@ -46,14 +46,14 @@ export function useApy() {
   return useQuery({ queryKey: queryKeys.apy, queryFn: () => api.apy(), refetchInterval: APY_REFRESH_MS, refetchIntervalInBackground: false })
 }
 
-/** What the Safe holds now. Polls every 6 s by default, 4 s while waiting for a deposit. */
+/** What the Safe holds now. Polls every 6 s by default, 4 s while waiting for a deposit or while the engine reports progress. */
 export function useFunding(accountKey: string | undefined, enabled: boolean, intervalMs = 6_000) {
   const api = useApi()
   return useQuery({
     queryKey: queryKeys.funding(accountKey ?? ''),
     queryFn: () => api.funding(accountKey as string),
     enabled: enabled && accountKey !== undefined,
-    refetchInterval: intervalMs,
+    refetchInterval: (q) => (q.state.data?.progress ? Math.min(4_000, intervalMs) : intervalMs),
   })
 }
 

@@ -101,7 +101,7 @@ describe('helpers', () => {
   test('ops read as one plain line', () => {
     const op = (o: Partial<OpView>): OpView => ({ opId: 'x', kind: 'enter', state: 'confirmed', updatedAt: '2026-09-26T20:00:00Z', ...o })
     expect(opLine(op({}))).toBe('Opened USDC/cbBTC position')
-    expect(opLine(op({ kind: 'activate', state: 'proposed', code: 'ARMED' }))).toBe('Approved. Starts when USDC lands')
+    expect(opLine(op({ kind: 'activate', state: 'proposed', code: 'ARMED' }))).toBe('Start approved')
     expect(activationLive([op({ kind: 'activate', state: 'failed' })])).toBe(false)
     const { html } = render(<History ops={[op({ txHash: `0x${'b'.repeat(64)}` })]} />)
     expect(html).toContain(`https://basescan.org/tx/0x${'b'.repeat(64)}`)

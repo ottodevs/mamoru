@@ -55,9 +55,9 @@ export type EngineHooks = {
   waitBlock: () => Promise<void>
   /**
    * The owner activates `manage:<tokenId>` for a position that enter-mint minted (plan §12.4).
-   * Not called under a policy with the live `manage-any` grant, enabled at activation.
+   * Not called under a policy with the live `manage-any` grants, enabled at activation.
    */
-  requestManageGrant?: (tokenId: bigint) => Promise<EngineSession>
+  requestManageGrant?: (tokenId: bigint, pool: string) => Promise<EngineSession>
 }
 
 export type ReviewResult =
@@ -349,7 +349,7 @@ export class Engine {
       if (!this.allowedTokenIds.includes(minted.args.tokenId)) this.allowedTokenIds.push(minted.args.tokenId)
       if (!hasManageAny(this.cfg.policy)) {
         if (!this.hooks.requestManageGrant) throw new Error(`${op.opId}: policy ${this.cfg.policy.policyId} needs a manage grant per position`)
-        this.addSession(await this.hooks.requestManageGrant(minted.args.tokenId))
+        this.addSession(await this.hooks.requestManageGrant(minted.args.tokenId, proposal.pool))
       }
     }
     if (proposal.kind === 'rerange') {
