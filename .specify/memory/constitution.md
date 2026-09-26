@@ -129,7 +129,7 @@ Se comprueba con LAB-06 y OPS-01.
 
 ### XVIII. Método
 
-El ciclo es el de GitHub Spec Kit: constitución, spec, plan y tareas. Se para antes de implementar. Cada requisito tiene id. Cada tarea cita requisitos, nombra el escenario que la acepta y dice lo que no debe hacer. Cada escenario cita requisitos. Ninguna tarea despliega ni sube versiones a Cloudflare. Ninguna abre la puerta de fondos ni desactiva el dry-run. La implementación sale en commits cortos y revisados, sin el historial de Titan26.
+El ciclo es el de GitHub Spec Kit: constitución, spec, plan y tareas. Se para antes de implementar. Cada requisito tiene id. Cada tarea cita requisitos, nombra el escenario que la acepta y dice lo que no debe hacer. Cada escenario cita requisitos. Ninguna tarea despliega ni sube versiones a Cloudflare. Ninguna abre la puerta de fondos ni desactiva el dry-run. La implementación sale en commits cortos y revisados, sin historial ajeno al proyecto.
 
 ## Pruebas que tumban el plan
 

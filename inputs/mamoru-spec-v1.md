@@ -11,7 +11,6 @@ related:
   - "[[mamoru-diagramas]]"
   - "[[2026-09-25-sin-aqua-ni-1inch]]"
   - "[[2026-09-26-superficie]]"
-  - "[[titan-26-packaging]]"
   - "[[packaging-delta-2026-09-11]]"
 ---
 
@@ -19,7 +18,7 @@ related:
 
 Plan definitivo del 2026-09-26. Consejo: Grok 4.7 xhigh, Cursor `claude-opus-5-5-high`, Codex `gpt-6-astra` high. La landing Astro queda fuera. Decisión: [[2026-09-26-arquitectura-v1]].
 
-Nada de esto se copia al repo público en este paso. La implementación sale después, en commits cortos, sin el historial de Titan26.
+Nada de esto se copia al repo público en este paso. La implementación sale después, en commits cortos, sin historial ajeno al proyecto.
 
 ## Invariantes
 
@@ -60,7 +59,7 @@ Estados de una operación: propuesta, descartada, preparada, simulada, firmada, 
 
 Safe con módulo ERC-7579 y Smart Sessions de Rhinestone. El owner es el passkey del usuario, con un owner de respaldo suyo antes del depósito. La sesión del servidor es explícita: contratos, selectores, argumentos, tokens, importe, destinatario igual a la propia cuenta, posición, caducidad y revocación. No instala módulos, no cambia owners y no se amplía. Sin política por defecto y sin cañón de intents hacia el Orchestrator.
 
-La prueba que tumba esta elección, en fork, con la session key tratada como comprometida: desviar el destinatario, pasar el gasto, ampliar approvals, tocar otra posición, esconder llamadas en un batch, reusar una sesión revocada, o salir por intents. También la tumba que el usuario no pueda revocar y retirar con su owner mientras Mamoru, el login y MultiBaas están apagados. Hasta que esa prueba pase, T-000025 sigue cerrado. thirdweb se queda en Titan26.
+La prueba que tumba esta elección, en fork, con la session key tratada como comprometida: desviar el destinatario, pasar el gasto, ampliar approvals, tocar otra posición, esconder llamadas en un batch, reusar una sesión revocada, o salir por intents. También la tumba que el usuario no pueda revocar y retirar con su owner mientras Mamoru, el login y MultiBaas están apagados. Hasta que esa prueba pase, T-000025 sigue cerrado. thirdweb queda fuera de este alcance.
 
 El login de producto es Google, passkey o email, recuperable antes del depósito. Abrir la vista de una cuenta exige una prueba ERC-1271 de esa cuenta, o ERC-6492 si el Safe aún no está desplegado. Esa prueba no sustituye al owner. Better Auth es candidato del login, no una pieza cerrada.
 
@@ -70,7 +69,7 @@ Anvil corre en la máquina de trabajo, en CI y en el portátil de la demo. Nunca
 
 El panel, con el runtime en fork, usa el mismo dashboard (Portfolio, Savings, Current Action, Savings Log) y una banda fija: simulación, fork de Base, bloque, no es capital. Esos datos no se cuelan en la vista de producción. No enlazan a Basescan.
 
-El catálogo de Mamoru reescribe la cobertura del harness de Titan26, con bloque fijo. Archivos de origen: `s01` observe, `s02` deposit, `s03` swap, `s04` harvest, `s05` fixture, `s06` mainnet, `s07` LP V3, `s08a` cerrar posición, `s09` y `s10` ERC-7540, `s11` loop ETH, `s12` tres buckets, `s13` dry-run, `s14` ajuste de rango. Se suman prioridad de puertas, permisos, reintento y aislamiento. Los resultados esperados son códigos de razón y estados, no umbrales.
+El catálogo de Mamoru cubre el ciclo con bloque fijo. Archivos de origen: `s01` observe, `s02` deposit, `s03` swap, `s04` harvest, `s05` fixture, `s06` mainnet, `s07` LP V3, `s08a` cerrar posición, `s09` y `s10` ERC-7540, `s11` loop ETH, `s12` tres buckets, `s13` dry-run, `s14` ajuste de rango. Se suman prioridad de puertas, permisos, reintento y aislamiento. Los resultados esperados son códigos de razón y estados, no umbrales.
 
 ## MultiBaas
 

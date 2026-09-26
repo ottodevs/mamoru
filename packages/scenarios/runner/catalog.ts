@@ -8,7 +8,6 @@ export type Step = Record<string, Record<string, unknown>>
 export type Scenario = {
   id: string
   requirements: string[]
-  titan26?: string
   fork: { source: string; block: number; blockHash: Hex; chainId: number }
   policy: string
   world: 'sess' | 'basic' | 'none'

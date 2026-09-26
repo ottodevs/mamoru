@@ -14,7 +14,7 @@ T017 empieza cuando existen la reconciliación del diario (T005) y el cliente de
 1. **Qué cita cada tarea.** Requisitos, archivos que puede crear, escenarios que la aceptan y lo que no debe hacer.
 2. **Cuándo está hecha.** Cuando sus escenarios pasan en local con el runner, el informe queda guardado con su manifiesto, y los escenarios de tareas anteriores siguen en verde.
 3. **Archivos de tareas anteriores.** Una tarea puede modificarlos si sus requisitos lo exigen, sin romper escenarios ya aceptados.
-4. **Commits.** Cortos y revisados, sin el historial de Titan26. La tarea no hace push: publicar es decisión de Ot.
+4. **Commits.** Cortos y revisados, sin historial ajeno al proyecto. La tarea no hace push: publicar es decisión de Ot.
 5. **Prohibido en todas las tareas:**
    - desplegar, subir versiones o crear recursos remotos en Cloudflare (`wrangler deploy`, `wrangler versions upload`, `wrangler secret put` contra la cuenta, D1 o colas remotas);
    - desactivar el dry-run o poner `CORE_DRY_RUN` distinto de `true` en la configuración de producción;
@@ -25,7 +25,7 @@ T017 empieza cuando existen la reconciliación del diario (T005) y el cliente de
    - poner claves o URL con clave en archivos del repo, argv, logs, D1 o artefactos;
    - añadir una dependencia que no esté en el plan sin actualizar antes el plan;
    - usar Trading API, LP API, UniswapX, hooks v4, CoW, Tenderly, Aqua o 1inch en el camino del capital;
-   - tocar el repo de Titan26 o la bóveda Noema;
+   - tocar otros repositorios o la bóveda Noema;
    - contratar un plan Pro de zona o una segunda suscripción de Workers, o tocar Billing;
    - crear `wrangler.toml`.
 6. **Pruebas que tumban el plan.** Si una tarea las dispara (`threats.md` §3), se para y se avisa a Ot. No se parchea el escenario.

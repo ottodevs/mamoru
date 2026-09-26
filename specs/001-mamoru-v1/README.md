@@ -24,7 +24,7 @@ El producto de v1 es el dashboard de producción en Base: una vista de la smart 
 | 2 | `specs/001-mamoru-v1/spec.md` | Historias priorizadas con Dado, Cuando y Entonces, requisitos FR, entidades, catálogo de códigos de razón, casos límite y criterios de éxito. US8 es el dashboard de producción y FR-PRZ el mapa del premio |
 | 3 | `specs/001-mamoru-v1/plan.md` | Módulos, puertos, registro de Base verificado, máquina de estados, diario del Durable Object, política de sesión, secuencias, persistencia, fallos, Cloudflare, plano de verificación, mapa de archivos y, en §23, el plan de consultas del dashboard |
 | 4 | `specs/001-mamoru-v1/dashboard.md` | El dashboard de producción: vistas, procedencia con chain, modelo de lectura sobre MultiBaas y la RPC, Actions, payload, mapa del premio y README del premio |
-| 5 | `specs/001-mamoru-v1/scenarios.md` | Catálogo de escenarios con bloque de fork obligatorio: reescritura de Titan26 s01 a s14, abuso de sesión, walkaway, diario, reintentos, puertas, aislamiento, webhook, dashboard, plano de verificación y pruebas en Base de solo lectura, más la matriz de trazabilidad |
+| 5 | `specs/001-mamoru-v1/scenarios.md` | Catálogo de escenarios con bloque de fork obligatorio: ciclo M01 a M14, abuso de sesión, walkaway, diario, reintentos, puertas, aislamiento, webhook, dashboard, plano de verificación y pruebas en Base de solo lectura, más la matriz de trazabilidad |
 | 6 | `specs/001-mamoru-v1/threats.md` | Pruebas que tumban el plan, amenazas THR-01 a THR-20, riesgos residuales y respuesta a incidentes |
 | 7 | `specs/001-mamoru-v1/tasks.md` | Tareas T001 a T019 para una sesión posterior, con su orden de trabajo, y cada una con requisitos, archivos, escenarios que la aceptan y lo que no debe hacer |
 
@@ -67,7 +67,7 @@ El producto de v1 es el dashboard de producción en Base: una vista de la smart 
 | `SC-001` a `SC-022` | Criterios de éxito | `spec.md` |
 | `ReasonCode` | Códigos de razón | `spec.md` |
 | `MBQ-01` a `MBQ-08` | Event queries del dashboard | `dashboard.md` §6.4 |
-| `M01` a `M14` | Reescritura de Titan26 | `scenarios.md` |
+| `M01` a `M14` | Escenarios de ciclo | `scenarios.md` |
 | `SESS`, `WALK`, `JRNL`, `RETRY`, `GATE`, `EXIT`, `PAUSE`, `DEP`, `ONB`, `TEN`, `HOOK`, `REORG`, `DASH`, `UI`, `LAB`, `DRY`, `CYCLE`, `MB`, `BASE`, `OPS`, `DOC` | Escenarios | `scenarios.md` |
 | `INV-*` | Invariantes comunes de los escenarios | `scenarios.md` |
 | `KT-1` a `KT-5` | Pruebas que tumban el plan | `threats.md` |

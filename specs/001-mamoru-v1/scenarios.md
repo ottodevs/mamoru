@@ -10,7 +10,6 @@ Los escenarios son la capa de verificación que Spec Kit no trae. Cada tarea de 
 
 1. **Un archivo por escenario.** Cada escenario de este documento será un archivo `scenarios/catalog/<id>.yaml` con estos campos:
    - `id` y `requirements`;
-   - `titan26`, si reescribe uno;
    - `fork`, con `source`, `block`, `blockHash` y `chainId`;
    - `policy`, `fixtures`, `steps`, `expect` e `invariants`.
 2. **El bloque de fork es obligatorio.** El runner rechaza un escenario sin `fork.block` (`LAB_BLOCK_REQUIRED`), con un hash que no coincide (`LAB_BLOCK_HASH_MISMATCH`) o con chain id 8453 u 84532 (`LAB_CHAIN_ID_FORBIDDEN`).
@@ -83,9 +82,9 @@ El runner los comprueba después de cada paso de cada escenario de fork, salvo q
 | `crash-at` y `hold-at` | Acción `crash` o `hold` en un punto de fallo con nombre (plan §20) |
 | `do-evict` | Reinicia el proceso local del motor. El SQLite del Durable Object persiste |
 
-## 4. Cobertura de Titan26
+## 4. Cobertura del ciclo
 
-Titan26 tenía catorce escenarios de fork, del s01 al s14, más la variante s08a. Mamoru los reescribe con estas reglas:
+El catálogo cubre catorce escenarios de fork, del s01 al s14, más la variante s08a, con estas reglas:
 
 - bloque fijo y chain id del fork;
 - Uniswap V3 como única ejecución;
@@ -93,30 +92,29 @@ Titan26 tenía catorce escenarios de fork, del s01 al s14, más la variante s08a
 
 Los escenarios que usaban vaults ERC-4626 o ERC-7540 (s02, s04, s09 y s10) conservan su propósito estructural. Las llamadas a vaults pasan a ser rechazos: SESS-10 esconde un `deposit` de ERC-4626 en un lote y `INV-TARGETS` corre en todos los escenarios.
 
-| Titan26 | Qué cubría | Mamoru | Qué cambia |
-|---|---|---|---|
-| s01-observe | Observación sin capital | M01 | Observación a bloque fijo y código por bucket |
-| s02-deposit | Depósito y asignación a vaults | M02 | Asignación en V3: `enter_swap` y `enter_mint`. Buckets sin pool con `PLAN_BUCKET_NO_EXECUTABLE_POOL` |
-| s03-swap | Swap desde la cuenta | M03 | Swap por la sesión, con mínimo desde QuoterV2 y approve exacto |
-| s04-harvest | Harvest de un vault | M04 | Harvest de comisiones V3 a USDC con crédito solo de comisiones |
-| s05-scenario-fixture | Fixtures y snapshots del harness | M05 | Autoprueba del runner: snapshot por ejecución, reproducción y sin anvil en el motor |
-| s06-mainnet | Observación en red principal | M06 | Guarda de chain y activos fuera de la política |
-| s07-uniswap-v3-lp | LP V3 | M07 | LP en WETH/USDC 0.3% con la política de escenario y ticks múltiplos de 60 |
-| s08a-close-position | Cierre de posición | M08 | Cierre en un lote, fila `close` sin crédito |
-| s09-erc7540-redeem | Estado pendiente entre revisiones y reinicio | M09 | Salida retenida por el bundler, timeout, reinicio y reenvío con el mismo nonce |
-| s10-erc7540-harvest | Harvest con inclusión inmediata o retrasada | M10 | Slot ocupado y crédito solo en `confirmed` |
-| s11-conservador-eth-loop | Rechazos previos, gas y estado estable | M11 | Manipulación de precio sin envío, ETH solo para gas, ciclo estable |
-| s12-conservador-three-buckets | Tres buckets | M12 | Tres buckets con uno ejecutable y shadow sin efecto |
-| s13-dry-run-plan | Plan en dry-run | M13 | Dry-run en dos fases con cadena intacta |
-| s14-range-adjust | Reajuste de rango | M14 | Cierre por rango, reentrada con `tokenId` nuevo y variante con premisa vieja |
+| Escenario | Qué cubre | Qué resuelve Mamoru |
+|---|---|---|
+| M01 | Observación sin capital | Observación a bloque fijo y código por bucket |
+| M02 | Depósito y asignación a vaults | Asignación en V3: `enter_swap` y `enter_mint`. Buckets sin pool con `PLAN_BUCKET_NO_EXECUTABLE_POOL` |
+| M03 | Swap desde la cuenta | Swap por la sesión, con mínimo desde QuoterV2 y approve exacto |
+| M04 | Harvest de un vault | Harvest de comisiones V3 a USDC con crédito solo de comisiones |
+| M05 | Fixtures y snapshots del harness | Autoprueba del runner: snapshot por ejecución, reproducción y sin anvil en el motor |
+| M06 | Observación en red principal | Guarda de chain y activos fuera de la política |
+| M07 | LP V3 | LP en WETH/USDC 0.3% con la política de escenario y ticks múltiplos de 60 |
+| M08 | Cierre de posición | Cierre en un lote, fila `close` sin crédito |
+| M09 | Estado pendiente entre revisiones y reinicio | Salida retenida por el bundler, timeout, reinicio y reenvío con el mismo nonce |
+| M10 | Harvest con inclusión inmediata o retrasada | Slot ocupado y crédito solo en `confirmed` |
+| M11 | Rechazos previos, gas y estado estable | Manipulación de precio sin envío, ETH solo para gas, ciclo estable |
+| M12 | Tres buckets | Tres buckets con uno ejecutable y shadow sin efecto |
+| M13 | Plan en dry-run | Dry-run en dos fases con cadena intacta |
+| M14 | Reajuste de rango | Cierre por rango, reentrada con `tokenId` nuevo y variante con premisa vieja |
 
-## 5. Reescritura de Titan26: M01 a M14
+## 5. Escenarios de ciclo: M01 a M14
 
 Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se indique. Todos comprueban los invariantes de la sección 2.
 
 ### M01 · Observación sin capital
 
-- Titan26: s01-observe
 - Requisitos: FR-RPC-001, FR-DEC-001, FR-DEC-007, FR-DEC-013, FR-LAB-006
 - Fork: `catalog-v1` · 51811000 · 31337
 - Política: `conservador-lab-v1`
@@ -133,7 +131,6 @@ Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se in
 
 ### M02 · Depósito y primera asignación
 
-- Titan26: s02-deposit
 - Requisitos: FR-DEC-007, FR-ENG-015, FR-UNI-001, FR-UNI-002, FR-UNI-003, FR-UNI-006, FR-ACC-003
 - Fork: `catalog-v1` · 51811000 · 31337
 - Política: `conservador-lab-v1`
@@ -160,7 +157,6 @@ Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se in
 
 ### M03 · Swap por la sesión
 
-- Titan26: s03-swap
 - Requisitos: FR-UNI-001, FR-UNI-002, FR-UNI-006, FR-ACC-010, FR-AA-001, FR-AA-002, FR-AA-004
 - Fork: `catalog-v1` · 51811000 · 31337
 - Política: `conservador-lab-v1`
@@ -178,7 +174,6 @@ Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se in
 
 ### M04 · Harvest a USDC
 
-- Titan26: s04-harvest
 - Requisitos: FR-DEC-009, FR-UNI-005, FR-UNI-006, FR-PRJ-003, FR-PRJ-004, FR-ENG-008
 - Fork: `catalog-v1` · 51811000 · 31337
 - Política: `conservador-lab-v1`
@@ -207,7 +202,6 @@ Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se in
 
 ### M05 · Autoprueba del runner
 
-- Titan26: s05-scenario-fixture
 - Requisitos: FR-LAB-002, FR-LAB-004, FR-LAB-005, FR-LAB-006, FR-LAB-012
 - Fork: `catalog-v1` · 51811000 · 31337
 - Política: `conservador-lab-v1`
@@ -226,7 +220,6 @@ Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se in
 
 ### M06 · Guarda de chain y activos fuera de la política
 
-- Titan26: s06-mainnet
 - Requisitos: FR-RPC-004, FR-ENG-017, FR-DEC-014, FR-LAB-003
 - Fork: `catalog-v1` · 51811000 · 31337, más un segundo anvil en el mismo bloque con chain id 31338
 - Política: `conservador-lab-v1`
@@ -242,7 +235,6 @@ Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se in
 
 ### M07 · LP en WETH/USDC 0.3% con la política de escenario
 
-- Titan26: s07-uniswap-v3-lp
 - Requisitos: FR-UNI-003, FR-UNI-004, FR-DEC-002, FR-ENG-013
 - Fork: `catalog-v1` · 51811000 · 31337
 - Política: `lab-weth-usdc-v1`, solo de escenario. Sus grants son los de §12.2 del plan con WETH en lugar de cbBTC y fee 3000.
@@ -264,7 +256,6 @@ Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se in
 
 ### M08 · Cierre de posición
 
-- Titan26: s08a-close-position
 - Requisitos: FR-UNI-004, FR-PRJ-003, FR-PRJ-004, FR-ENG-013
 - Fork: `catalog-v1` · 51811000 · 31337
 - Política: `conservador-lab-v1`
@@ -288,7 +279,6 @@ Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se in
 
 ### M09 · Salida retenida, reinicio y mismo nonce
 
-- Titan26: s09-erc7540-redeem
 - Requisitos: FR-ENG-006, FR-ENG-010, FR-ENG-013, FR-AA-003
 - Fork: `catalog-v1` · 51811000 · 31337
 - Política: `conservador-lab-v1`
@@ -317,7 +307,6 @@ Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se in
 
 ### M10 · Slot ocupado y crédito solo en `confirmed`
 
-- Titan26: s10-erc7540-harvest
 - Requisitos: FR-ENG-003, FR-ENG-015, FR-PRJ-004, FR-PRJ-005
 - Fork: `catalog-v1` · 51811000 · 31337
 - Política: `conservador-lab-v1`
@@ -343,7 +332,6 @@ Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se in
 
 ### M11 · Precio manipulado sin envío y ETH solo para gas
 
-- Titan26: s11-conservador-eth-loop
 - Requisitos: FR-UNI-009, FR-ACC-002, FR-DEC-014, FR-ENG-015
 - Fork: `catalog-v1` · 51811000 · 31337
 - Política: `conservador-lab-v1`
@@ -368,7 +356,6 @@ Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se in
 
 ### M12 · Tres buckets
 
-- Titan26: s12-conservador-three-buckets
 - Requisitos: FR-DEC-006, FR-DEC-007, FR-DSH-002
 - Fork: `catalog-v1` · 51811000 · 31337
 - Política: `conservador-lab-v1`
@@ -385,7 +372,6 @@ Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se in
 
 ### M13 · Dry-run en dos fases
 
-- Titan26: s13-dry-run-plan
 - Requisitos: FR-ENG-014, FR-DSH-004
 - Fork: `catalog-v1` · 51811000 · 31337
 - Política: `conservador-lab-v1`
@@ -405,7 +391,6 @@ Todos usan el fork `catalog-v1` (Base 51811000, chain id 31337), salvo que se in
 
 ### M14 · Reajuste de rango
 
-- Titan26: s14-range-adjust
 - Requisitos: FR-DEC-010, FR-UNI-003, FR-UNI-004, FR-ENG-015
 - Fork: `catalog-v1` · 51811000 · 31337
 - Política: `conservador-lab-v1`, con `range.adjust = on_out_of_range`

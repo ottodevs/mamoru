@@ -1,5 +1,4 @@
 id: M05
-titan26: s05-scenario-fixture
 requirements: [FR-LAB-002, FR-LAB-004, FR-LAB-005, FR-LAB-006, FR-LAB-012]
 fork:
   source: base
