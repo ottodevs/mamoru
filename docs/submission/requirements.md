@@ -26,7 +26,7 @@ The form has seven tabs: Project details, Images, Tech stack, Select prizes, Vid
 |---|---|---|---|
 | Project name | required | "Mamoru" | OK |
 | Category | required | DeFi | OK |
-| Emoji | required | 🌾 | OK (form field; our docs stay emoji-free) |
+| Emoji | required | set (a wheat sheaf) | OK |
 | Demo link | required | https://mamoru.lol | FIX: point to https://app.mamoru.lol (live since main `b27f1af`). The landing hero reads "APY. DELIVERED." and "The yield gets set aside.", both outside the claims policy (dashboard.md §12.3); it also has no link to the app. The landing repo is outside this lane |
 | Short description | required, max 100 characters | "Non-custodial savings on Base. The principal keeps working. The yield gets set aside." (84) | FIX: talks about yield; v1 is simulation mode. New text in `submission.md` |
 | Description | required, min 280 characters | Says "continuously harvests yield", "private allowlist until 09:00 JST", "Checks run on an Anvil fork" | FIX: overclaims harvesting on Base, stale allowlist line. Replace with `submission.md` §3 |
