@@ -80,6 +80,16 @@ export const fixtureClient: ApiClient = {
   session: () => delay(liveState.owner ? fixtureSession : null),
   dashboard: () => delay(emptyAccount),
   pools: () => delay(poolsResponse),
+  apy: () =>
+    delay({
+      pool: '0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef',
+      currentPct: 11.4,
+      currentWindow: '1h' as const,
+      currentSource: 'Pool fees, last hour · GeckoTerminal',
+      monthlyPct: 22.6,
+      monthlySource: '30-day mean · DefiLlama',
+      asOf: new Date().toISOString(),
+    }),
   createOwner: () => {
     liveState.owner = true
     return delay(fixtureOwner)

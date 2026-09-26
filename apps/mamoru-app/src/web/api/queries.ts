@@ -6,6 +6,7 @@ export const queryKeys = {
   session: ['session'] as const,
   dashboard: (accountKey: string) => ['dashboard', accountKey] as const,
   pools: ['pools'] as const,
+  apy: ['apy'] as const,
   funding: (accountKey: string) => ['funding', accountKey] as const,
   ops: (accountKey: string) => ['ops', accountKey] as const,
 }
@@ -35,6 +36,13 @@ export function useDashboard(accountKey: string | undefined) {
 export function usePools() {
   const api = useApi()
   return useQuery({ queryKey: queryKeys.pools, queryFn: () => api.pools(), refetchInterval: 60_000 })
+}
+
+/** Pool fee APR of the plan's live pool. Refreshes every 30 s (APY_REFRESH_MS). */
+export const APY_REFRESH_MS = 30_000
+export function useApy() {
+  const api = useApi()
+  return useQuery({ queryKey: queryKeys.apy, queryFn: () => api.apy(), refetchInterval: APY_REFRESH_MS, refetchIntervalInBackground: false })
 }
 
 /** What the Safe holds now. Polls every 6 s by default, 4 s while waiting for a deposit. */

@@ -2,7 +2,7 @@ import type { FundingView, Hex0x, OpView } from '@mamoru/domain'
 import { useMutation } from '@tanstack/react-query'
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { useApi } from '../api/client.ts'
-import { useFunding, useOps, usePools } from '../api/queries.ts'
+import { APY_REFRESH_MS, useApy, useFunding, useOps, usePools } from '../api/queries.ts'
 import { TokenMark } from '../components/token-mark.tsx'
 import { BasescanLink, Brand, Modal, Waiting } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
@@ -18,6 +18,7 @@ export const homeCopy = {
   total: 'Total balance',
   apy: 'Current APY',
   month: 'Monthly average',
+  week: '7-day average',
   add: 'Add capital',
   withdraw: 'Withdraw',
   stop: 'Stop allocation',
@@ -40,6 +41,33 @@ function plural(n: number, one: string, many: string) {
   return `${n} ${n === 1 ? one : many}`
 }
 
+const pct = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${v.toFixed(1)}%`)
+/** Short caption from the source line: "Pool fees, last hour · GeckoTerminal" -> "GeckoTerminal · 1h". */
+const caption = (source: string, window: string) => `${source.split(' · ').at(-1) ?? source} · ${window}`
+
+/** Pool-level fee APR of the plan's live pool (Uniswap v3 USDC/cbBTC 0.05% on Base), sourced upstream. */
+function ApyTiles() {
+  const { data, dataUpdatedAt } = useApy()
+  const weekly = data?.monthlySource.startsWith('7-day') ?? false
+  return (
+    <>
+      <li className="apr apr-live flex-1" title={data?.currentSource}>
+        <span className="apr-label whitespace-nowrap">{homeCopy.apy}</span>
+        <strong key={dataUpdatedAt} className="apr-fade" data-testid="apy-current">
+          {pct(data?.currentPct)}
+        </strong>
+        {data && <span className="apr-src">{caption(data.currentSource, data.currentWindow)}</span>}
+        {data && <span key={dataUpdatedAt} className="apr-tick" style={{ animationDuration: `${APY_REFRESH_MS}ms` }} aria-hidden="true" />}
+      </li>
+      <li className="apr flex-1" title={data?.monthlySource}>
+        <span className="apr-label whitespace-nowrap">{weekly ? homeCopy.week : homeCopy.month}</span>
+        <strong data-testid="apy-month">{pct(data?.monthlyPct)}</strong>
+        {data && <span className="apr-src">{caption(data.monthlySource, weekly ? '7d' : '30d')}</span>}
+      </li>
+    </>
+  )
+}
+
 export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () => void; onWithdraw: () => void }) {
   return (
     <section className="mb-8" aria-labelledby="total-title">
@@ -54,14 +82,7 @@ export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () =
           </p>
         </div>
         <ul className="m-0 flex w-full list-none gap-[0.7rem] p-0 self-center min-[761px]:w-auto">
-          <li className="apr flex-1">
-            <span className="apr-label whitespace-nowrap">{homeCopy.apy}</span>
-            <strong>—</strong>
-          </li>
-          <li className="apr flex-1">
-            <span className="apr-label whitespace-nowrap">{homeCopy.month}</span>
-            <strong>—</strong>
-          </li>
+          <ApyTiles />
         </ul>
       </div>
       <div className="mt-[1.15rem] flex flex-wrap gap-[0.7rem]">

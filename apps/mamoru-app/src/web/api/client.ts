@@ -1,6 +1,7 @@
 import { createContext, useContext } from 'react'
 import type {
   ApiError,
+  ApyView,
   AppConfig,
   DashboardPayload,
   FundingView,
@@ -22,6 +23,7 @@ export type ApiClient = {
   session(): Promise<SessionView | null>
   dashboard(accountKey: string): Promise<DashboardPayload>
   pools(): Promise<PoolsResponse>
+  apy(): Promise<ApyView>
   createOwner(body: OwnerRequest): Promise<OwnerResponse>
   recoveryKit(accountKey: string): Promise<unknown>
   ackRecovery(accountKey: string): Promise<{ ok: true }>
@@ -76,6 +78,7 @@ export const httpClient: ApiClient = {
   },
   dashboard: (accountKey) => request<DashboardPayload>(`/api/accounts/${encodeURIComponent(accountKey)}/dashboard`),
   pools: () => request<PoolsResponse>('/api/pools'),
+  apy: () => request<ApyView>('/api/apy'),
   createOwner: (body) => request<OwnerResponse>('/api/onboarding/owner', { method: 'POST', body: JSON.stringify(body) }),
   recoveryKit: (accountKey) => request<unknown>(`/api/onboarding/kit?accountKey=${encodeURIComponent(accountKey)}`),
   ackRecovery: (accountKey) =>
