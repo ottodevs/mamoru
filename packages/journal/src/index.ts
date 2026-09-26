@@ -15,7 +15,7 @@ export const OP_STATES = [
 ] as const
 export type OpState = (typeof OP_STATES)[number]
 
-export const OP_KINDS = ['enter_swap', 'enter_mint', 'harvest', 'close_position', 'convert'] as const
+export const OP_KINDS = ['enter_swap', 'enter_mint', 'harvest', 'close_position', 'convert', 'rerange', 'reduce'] as const
 export type OpKind = (typeof OP_KINDS)[number]
 
 const TERMINAL: ReadonlySet<OpState> = new Set(['discarded', 'confirmed', 'failed'])

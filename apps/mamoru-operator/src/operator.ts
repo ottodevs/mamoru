@@ -5,7 +5,7 @@ import type { AccountContext, Address, FundingView, OpView, OwnerSignature, Owne
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import { simulateCalls, type SimCallResult } from '@mamoru/rpc'
-import { computeCaps, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
+import { MANAGE_ANY_GRANTS, computeCaps, hasManageAny, instantiateGrant, type GrantName, type PolicyVersion } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -94,7 +94,7 @@ const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
 }
 
 function engineKind(k: OpRecord['kind']): OpView['kind'] {
-  return k === 'close_position' ? 'exit' : k === 'harvest' || k === 'convert' ? 'reduce' : 'enter'
+  return k === 'close_position' ? 'exit' : k === 'harvest' || k === 'convert' || k === 'rerange' || k === 'reduce' ? 'reduce' : 'enter'
 }
 
 const now = () => new Date().toISOString()
@@ -224,7 +224,9 @@ export class Operator {
     const caps = computeCaps(policy, LIVE_CAP_USDC, { cbBTC: { num: r.sqrtPriceX96 * r.sqrtPriceX96, den: 1n << 192n } })
     const block = await this.client.getBlock({ blockNumber: r.block })
     const t = Number(block.timestamp)
-    const grants = (['enter-swap', 'enter-mint'] as const).map((name) =>
+    // Live manage grants (owner decision 2026-09-26): re-range, reduce and harvest any position of the pair, in the same passkey.
+    const names: GrantName[] = ['enter-swap', 'enter-mint', ...(hasManageAny(policy) ? MANAGE_ANY_GRANTS : [])]
+    const grants = names.map((name) =>
       instantiateGrant(policy, name, {
         account: live.safe,
         sessionKey,
@@ -244,6 +246,9 @@ export class Operator {
         ? `Let Mamoru's engine allocate your ${fmtUsdc(r.usdc)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
         : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) into Uniswap v3 USDC/cbBTC 0.05% as soon as it arrives`,
       `Engine key ${sessionKey} may only swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap) and mint that pool, for ${Math.round(policy.session.validitySeconds / 86_400)} days`,
+      ...(hasManageAny(policy)
+        ? [`It may also re-range, reduce and harvest your positions in that pool (withdraw liquidity, collect fees, convert cbBTC->USDC); every token and position it touches is paid back to your Safe`]
+        : []),
       `Funds never leave your Safe without your passkey; cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`,
     ]
     return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })

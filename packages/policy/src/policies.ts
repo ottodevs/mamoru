@@ -1,4 +1,4 @@
-import { pairGrants } from './grants.ts'
+import { manageAnyGrants, pairGrants } from './grants.ts'
 import type { CapFormula, PolicyVersion } from './types.ts'
 
 const usdcCbbtcCaps: CapFormula[] = [
@@ -71,6 +71,26 @@ export const conservadorLiveV1: PolicyVersion = {
   ...conservadorV1,
   policyId: 'conservador-live-v1',
   gasReserveWei: 300_000_000_000_000n,
+  // 15 minutes between re-ranges so the demo can show one; out of range or within 10% of an edge.
+  range: { ...conservadorV1.range, cooldownSeconds: 900 },
+  session: {
+    ...conservadorV1.session,
+    grants: [...conservadorV1.session.grants, ...manageAnyGrants(usdcCbbtcPair, { manage: 256, convert: 64 })],
+  },
+}
+
+/** A policy that enables the live manage grants (manage-any, convert-any) at activation. */
+export function hasManageAny(policy: PolicyVersion): boolean {
+  return policy.session.grants.some((g) => g.name === 'manage-any')
+}
+
+/**
+ * Test-only: the fork E2E shortens the re-range cooldown. Honoured only with
+ * MAMORU_TEST_OVERRIDES=1; the live operator never sets it.
+ */
+export function withTestOverrides(policy: PolicyVersion, env: Record<string, string | undefined>): PolicyVersion {
+  if (env.MAMORU_TEST_OVERRIDES !== '1' || env.MAMORU_TEST_RERANGE_COOLDOWN_S === undefined) return policy
+  return { ...policy, range: { ...policy.range, cooldownSeconds: Number(env.MAMORU_TEST_RERANGE_COOLDOWN_S) } }
 }
 
 /** Scenario policy for M07: LP on WETH/USDC 0.3%, only in the lab. */

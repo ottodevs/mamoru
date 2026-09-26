@@ -41,7 +41,10 @@ export type ActionRuleTemplate = {
   params: ParamRuleTemplate[]
 }
 
-export type GrantName = 'enter-swap' | 'enter-mint' | 'manage'
+export type GrantName = 'enter-swap' | 'enter-mint' | 'manage' | 'manage-any' | 'convert-any'
+
+/** Grants that cover any position of the pair the account holds, enabled at activation. */
+export const MANAGE_ANY_GRANTS = ['manage-any', 'convert-any'] as const satisfies readonly GrantName[]
 
 export type GrantTemplate = {
   name: GrantName
