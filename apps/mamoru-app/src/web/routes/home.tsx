@@ -263,7 +263,7 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
     e.preventDefault()
     const raw = parseUsdc(amount)
     if (raw === null) return setInvalid('Enter an amount above zero.')
-    if (BigInt(raw) > s.total) return setInvalid(`You can withdraw up to ${usd(s.maxWithdraw)} USDC right now.`)
+    if (BigInt(raw) > s.total) return setInvalid(`You can withdraw up to $${usd(s.maxWithdraw)} right now.`)
     if (dest.state !== 'ok') return setInvalid(dest.state === 'invalid' ? dest.message : `Enter where the ${asset} should go.`)
     if (!options.find((o) => o.asset === asset)?.available) return setInvalid(`${asset} is not available right now.`)
     setInvalid(null)
@@ -291,7 +291,7 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
           onApprove={() => void flow.approve()}
         >
           <p className="m-0 text-[2rem] leading-none text-emerald tabular-nums">
-            {usd(BigInt(parseUsdc(amount) ?? '0'))} <span className="text-[0.9rem] tracking-[0.12em] text-stone">USDC</span>
+            ${usd(BigInt(parseUsdc(amount) ?? '0'))}
           </p>
           {flow.prepared.receive && flow.prepared.receive.asset !== 'USDC' ? (
             <div className="grid gap-1" data-testid="receive">
@@ -313,24 +313,25 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
       ) : (
         <form className="grid gap-[0.55rem]" onSubmit={submit}>
           <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-stretch gap-2">
-            <span className="flex items-center gap-2 border border-ink bg-paper px-3 font-mono tracking-[0.1em]">
-              <TokenMark symbol="USDC" size={20} />
-              USDC
-            </span>
-            <label className="block min-w-0">
-              <span className="sr-only">Amount</span>
-              <input className="field" value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" placeholder="0.00" autoComplete="off" />
+            <AssetPicker value={asset} options={options} onChange={setAsset} />
+            <label className="relative block min-w-0">
+              <span className="sr-only">Amount in USD</span>
+              <span aria-hidden="true" className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-stone">
+                $
+              </span>
+              <input className="field pl-7" value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" placeholder="0.00" autoComplete="off" />
             </label>
             <button type="button" className="chipbtn" onClick={() => setAmount(usdInput(s.maxWithdraw))}>
               Max
             </button>
           </div>
-          <p className="m-0 text-[0.85rem] text-stone">{usd(s.maxWithdraw)} USDC available</p>
-          <div className="mt-2 grid gap-[0.35rem] text-[0.88rem]">
-            <span>Receive as</span>
-            <AssetPicker value={asset} options={options} onChange={setAsset} />
-            {asset !== 'USDC' ? <p className="m-0 text-[0.8rem] text-stone">Mamoru swaps the USDC to {asset} on Uniswap. You see the quote before your passkey.</p> : null}
-          </div>
+          <p className="m-0 text-[0.85rem] text-stone">${usd(s.maxWithdraw)} available</p>
+          {asset !== 'USDC' ? (
+            <p className="m-0 flex items-center gap-2 text-[0.88rem]" data-testid="receive-estimate">
+              <TokenMark symbol={asset} size={16} />
+              You receive {asset}. Mamoru swaps on Uniswap and shows the quote before your passkey.
+            </p>
+          ) : null}
           <label className="mt-2 grid gap-[0.35rem] text-[0.88rem]">
             <span>To</span>
             <input className="field mono" value={to} onChange={(e) => setTo(e.target.value)} placeholder="0x… or name.eth" autoComplete="off" spellCheck={false} autoCapitalize="off" />

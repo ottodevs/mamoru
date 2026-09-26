@@ -28,7 +28,7 @@ export function AssetPicker({ value, options, onChange }: { value: WithdrawAsset
 
   return (
     <div className="tok-dd" ref={root}>
-      <button type="button" className="tok-now" aria-haspopup="listbox" aria-expanded={open} aria-label={`Receive ${value}`} onClick={() => setOpen((o) => !o)}>
+      <button type="button" className="tok-now" aria-haspopup="listbox" aria-expanded={open} aria-label={`Receive as ${value}`} onClick={() => setOpen((o) => !o)}>
         <TokenMark symbol={value} size={20} />
         <span className="tok-sym">{value}</span>
       </button>

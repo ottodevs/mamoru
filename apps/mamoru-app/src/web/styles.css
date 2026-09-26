@@ -319,6 +319,7 @@
   }
   .tok-dd {
     position: relative;
+    display: flex;
   }
   .tok-now {
     display: flex;
