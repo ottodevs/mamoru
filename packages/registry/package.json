@@ -1,0 +1,14 @@
+{
+  "name": "@mamoru/registry",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./base.json": "./base.json"
+  },
+  "dependencies": {
+    "@mamoru/domain": "workspace:*",
+    "viem": "2.56.9"
+  }
+}

@@ -1,0 +1,208 @@
+{
+  "chain": "base",
+  "chainId": 8453,
+  "block": 51811000,
+  "blockHash": "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff",
+  "entries": [
+    {
+      "name": "USDC",
+      "kind": "token",
+      "role": "token de la política y activo de ahorro",
+      "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "decimals": 6,
+      "codeHash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab"
+    },
+    {
+      "name": "cbBTC",
+      "kind": "token",
+      "role": "token de la política",
+      "address": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+      "decimals": 8,
+      "codeHash": "0x91149353e08445ba77a52bf7e4cef919054027f4ad42812b4314bbaf2abd8b71"
+    },
+    {
+      "name": "WETH",
+      "kind": "token",
+      "role": "token del registro, fuera de Conservador",
+      "address": "0x4200000000000000000000000000000000000006",
+      "decimals": 18,
+      "codeHash": "0x8a3a1f6a9f9dce633117adee5b458245835a8645a8c8726a26382a4622508b1c"
+    },
+    {
+      "name": "UniswapV3Factory",
+      "kind": "uniswap",
+      "role": "factory V3",
+      "address": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
+      "codeHash": "0x95707a4ac71f20181a63ef7d180e3c625be5d20fc8f6f980befa966bad568132"
+    },
+    {
+      "name": "NonfungiblePositionManager",
+      "kind": "uniswap",
+      "role": "LP y cobro",
+      "address": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
+      "codeHash": "0x9177a11768996e8f951e0f0013d7165134178b15b21fb9916108f995e6c564bf"
+    },
+    {
+      "name": "SwapRouter02",
+      "kind": "uniswap",
+      "role": "swap",
+      "address": "0x2626664c2603336E57B271c5C0b26F421741e481",
+      "codeHash": "0x38bd640f47df62b2fd5a6755a63f4976ad847dc9b946ae0d145d21d16bb124e4"
+    },
+    {
+      "name": "QuoterV2",
+      "kind": "uniswap",
+      "role": "cotización",
+      "address": "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
+      "codeHash": "0xceb5b8bc35e09fc64b1c48c6b920e0d2e37d5710e4f3ef214e1a81f75acee51e"
+    },
+    {
+      "name": "pool:USDC/cbBTC/500",
+      "kind": "pool",
+      "role": "pool curado de btc-usdc",
+      "address": "0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef",
+      "token0": "USDC",
+      "token1": "cbBTC",
+      "fee": 500,
+      "tickSpacing": 10,
+      "codeHash": "0xee6005c7a98b2bd04deb07f8283a90f61e225b3f005d3014e07f30ba5d14cd78"
+    },
+    {
+      "name": "pool:WETH/USDC/3000",
+      "kind": "pool",
+      "role": "pool de lab-weth-usdc-v1",
+      "address": "0x6c561B446416E1A00E8E93E221854d6eA4171372",
+      "token0": "WETH",
+      "token1": "USDC",
+      "fee": 3000,
+      "tickSpacing": 60,
+      "codeHash": "0x71ff5f428af7891e7cbce51d4dadacef1e8eb0c1e454342413066bbd8a0d344c"
+    },
+    {
+      "name": "EntryPointV07",
+      "kind": "erc4337",
+      "role": "EntryPoint",
+      "address": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+      "codeHash": "0x8db5ff695839d655407cc8490bb7a5d82337a86a6b39c3f0258aa6c3b582fc58"
+    },
+    {
+      "name": "SafeL2_141",
+      "kind": "safe",
+      "role": "singleton del Safe",
+      "address": "0x29fcB43b46531BcA003ddC8FCB67FFE91900C762",
+      "codeHash": "0xb1f926978a0f44a2c0ec8fe822418ae969bd8c3f18d61e5103100339894f81ff"
+    },
+    {
+      "name": "SafeProxyFactory_141",
+      "kind": "safe",
+      "role": "factory del Safe",
+      "address": "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67",
+      "codeHash": "0x50c3cdc4074750a7a974204a716c999edd37482f907608d960b2b025ee0b3317"
+    },
+    {
+      "name": "Safe7579",
+      "kind": "erc7579",
+      "role": "adaptador ERC-7579",
+      "address": "0x7579EE8307284F293B1927136486880611F20002",
+      "codeHash": "0xe03f1efc4aa74c91a87731397278a9c32d81f593263931fc94ff867aa09b83ac"
+    },
+    {
+      "name": "Safe7579Launchpad",
+      "kind": "erc7579",
+      "role": "setup contrafactual",
+      "address": "0x7579011aB74c46090561ea277Ba79D510c6C00ff",
+      "codeHash": "0xe15c7413325ecf9e9fe60a315a0c9b49ad3003f3e6c254b9fa841dff8a8a32a5"
+    },
+    {
+      "name": "ModuleRegistry",
+      "kind": "erc7484",
+      "role": "registro ERC-7484 que Safe7579 consulta al instalar módulos",
+      "address": "0x000000000069E2a187AEFFb852bF3cCdC95151B2",
+      "codeHash": "0xcdd1062006d34ec7e57d22b8b1bc6690bb0de49d3a348809c88c66e0bf0c0356"
+    },
+    {
+      "name": "RhinestoneAttester",
+      "kind": "erc7484",
+      "role": "único attester de confianza de la cuenta, umbral 1",
+      "address": "0x000000333034E9f539ce08819E12c1b8Cb29084d",
+      "codeHash": "0xd7d408ebcd99b2b70be43e20253d6d92a8ea8fab29bd3be7f55b10032331fb4c"
+    },
+    {
+      "name": "SmartSession",
+      "kind": "smart-sessions",
+      "role": "validador de sesiones",
+      "address": "0x00000000002B0eCfbD0496EE71e01257dA0E37DE",
+      "codeHash": "0xf2817b8943b9fc813ad3602de2f0b973dc6b7e190f1b77dc9eb02b8d3022ab0c"
+    },
+    {
+      "name": "OwnableValidator",
+      "kind": "smart-sessions",
+      "role": "validador de la session key",
+      "address": "0x2483DA3A338895199E5e538530213157e931Bf06",
+      "codeHash": "0xd9ad90a204447aec1a1528d764e1d80212c8011dc0125b3995875e58ec9a43bf"
+    },
+    {
+      "name": "TimeFramePolicy",
+      "kind": "smart-sessions-policy",
+      "role": "marco temporal de la sesión (userOp policy)",
+      "address": "0x8177451511dE0577b911C254E9551D981C26dc72",
+      "codeHash": "0xfe83529b2df328020b49b8e728f62e571e21a38b3b7e59e75d6c6629a38cd87c"
+    },
+    {
+      "name": "UsageLimitPolicy",
+      "kind": "smart-sessions-policy",
+      "role": "límite de uso de la sesión (userOp policy)",
+      "address": "0x1F34eF8311345A3A4a4566aF321b313052F51493",
+      "codeHash": "0x1996dc03fa5ad5714c3a9a693239dfae75733efe7c27c1398e0c5df6f320aae9"
+    },
+    {
+      "name": "UniActionPolicy",
+      "kind": "smart-sessions-policy",
+      "role": "reglas de parámetros y valor por uso (action policy)",
+      "address": "0x0000006DDA6c463511C4e9B05CFc34C1247fCF1F",
+      "codeHash": "0xc58f13d259c69d0db90f611347535e2d5642f3352740b7d58fbf6e6b939670dd"
+    },
+    {
+      "name": "ValueLimitPolicy",
+      "kind": "smart-sessions-policy",
+      "role": "límite de valor nativo (action policy)",
+      "address": "0x730DA93267E7E513e932301B47F2ac7D062abC83",
+      "codeHash": "0xc5efddfaf9a5fad8cb996f1fd03056926af11ebd4496a7a7758e2e4315a7865e"
+    },
+    {
+      "name": "SafeWebAuthnSharedSigner",
+      "kind": "safe",
+      "role": "owner passkey",
+      "address": "0x94a4F6affBd8975951142c3999aEAB7ecee555c2",
+      "codeHash": "0xeaa32d0280053e2feea48a7c3fa15a535cd07c23ff60c9469cfa1999533e9332"
+    },
+    {
+      "name": "SafeWebAuthnSignerFactory",
+      "kind": "safe",
+      "role": "respaldo con segunda passkey",
+      "address": "0xF7488fFbe67327ac9f37D5F722d83Fc900852Fbf",
+      "codeHash": "0xbe9db61b4ee533cb4b1136ef244141db4ca3b7867b44d154db9faeb22f39d7bb"
+    },
+    {
+      "name": "P256Verifier",
+      "kind": "safe",
+      "role": "verificador P-256 de respaldo",
+      "address": "0xc2b78104907F722DABAc4C69f826a522B2754De4",
+      "codeHash": "0x3cd725b6ba67b40b7979190c41a015e82cf21e098eb61832ba623f8538bab7fc"
+    },
+    {
+      "name": "MultiSendCallOnly_141",
+      "kind": "safe",
+      "role": "lote del walkaway y de las operaciones del owner",
+      "address": "0x9641d764fc13c8B624c04430C7356C1C7C8102e2",
+      "codeHash": "0xecd5bd14a08c5d2122379900b2f272bdf107a7e92423c10dd5fe3254386c9939"
+    },
+    {
+      "name": "Multicall3",
+      "kind": "read",
+      "role": "solo lecturas",
+      "address": "0xcA11bde05977b3631167028862bE2a173976CA11",
+      "codeHash": "0xd5c15df687b16f2ff992fc8d767b4216323184a2bbc6ee2f9c398c318e770891"
+    }
+  ]
+}
