@@ -8,7 +8,7 @@ The closed architecture is `inputs/mamoru-spec-v1.md`. Do not reopen it. Accepte
 
 Ot approved this on 2026-09-26. It overrides "One unit" and the deploy ban in `tasks.md` rule 5 until the deadline. Everything else in the spec still holds: no signing or sending on Base, funds gate closed, `CORE_DRY_RUN=true`, no keys in the repo, no `wrangler.toml`.
 
-Five lanes run in parallel. Each lane has one worktree and one branch `lane/<name>`, and writes only inside its paths. Only the integrator (L0) pushes `main` and deploys.
+Six lanes run in parallel. Each lane has one worktree and one branch `lane/<name>`, and writes only inside its paths. Only the integrator (L0) pushes `main` and deploys.
 
 | Lane | Owns |
 |---|---|
@@ -17,6 +17,7 @@ Five lanes run in parallel. Each lane has one worktree and one branch `lane/<nam
 | L2 SPA | `apps/mamoru-app/{index.html,vite.config.ts,package.json,tsconfig.json,src/web/**,test/e2e/**}` |
 | L3 API and onboarding | `apps/mamoru-app/{wrangler.jsonc,src/api/**,src/worker.ts,test/api/**}`, `migrations/d1/0002_*` and later, `packages/account/proofs/` |
 | L4 Base read model | `apps/mamoru-engine/**`, `packages/multibaas/**`, `scripts/multibaas/**` |
+| L6 submission | `README.md`, `FEEDBACK.md`, `docs/submission/**`, `docs/multibaas.md`, `evidence/**` |
 
 - The SPA and the API meet only through `@mamoru/domain` (`DashboardPayload`, `app-api.ts`). A lane that needs a new field asks L0.
 - D1 `mamoru` id `682b2a66-d9d4-49e5-ac78-596d002d02ca`, binding `DB`, shared by both Workers. A schema change goes to L0.
