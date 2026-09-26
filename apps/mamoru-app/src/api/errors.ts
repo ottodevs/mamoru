@@ -2,7 +2,10 @@ import type { Context } from 'hono'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import type { ApiError, ReasonCode } from '@mamoru/domain'
 
-export function apiError(c: Context, status: ContentfulStatusCode, error: string, code?: ReasonCode) {
+/** App-local codes not (yet) in the domain catalog. */
+export type LocalCode = 'OPERATOR_UNAVAILABLE' | 'BODY_TOO_LARGE'
+
+export function apiError(c: Context, status: ContentfulStatusCode, error: string, code?: ReasonCode | LocalCode) {
   const body: ApiError = code ? { error, code } : { error }
   return c.json(body, status)
 }

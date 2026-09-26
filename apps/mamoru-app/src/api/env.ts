@@ -19,6 +19,10 @@ export type Env = {
   CHAIN_ID?: string
   CORE_DRY_RUN?: string
   SESSION_SECRET?: string
+  // Live funds (sprint amendment 2026-09-26 21:40): LIVE_FUNDS is a var; OPERATOR_URL and OPERATOR_SECRET are secrets.
+  LIVE_FUNDS?: string
+  OPERATOR_URL?: string
+  OPERATOR_SECRET?: string
 }
 
 export type AppSettings = { mode: 'production'; chainId: typeof BASE_CHAIN_ID; sessionSecret: string }
@@ -40,4 +44,9 @@ export function readSettings(env: Env): AppSettings {
     throw new ConfigError('CONFIG_MODE_INVALID', `SESSION_SECRET must be set, at least ${MIN_SECRET_LENGTH} characters`)
   }
   return { mode: 'production', chainId: BASE_CHAIN_ID, sessionSecret: env.SESSION_SECRET }
+}
+
+/** Live funds are on only when the var says so and an operator is configured. */
+export function liveFunds(env: Env): boolean {
+  return env.LIVE_FUNDS === '1' && !!env.OPERATOR_URL
 }

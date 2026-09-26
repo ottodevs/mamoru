@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { PRODUCTION_BANNER, type AppConfig, type SessionView } from '@mamoru/domain'
 import type { AppEnv } from './context.ts'
-import { ConfigError, readSettings } from './env.ts'
+import { ConfigError, liveFunds, readSettings } from './env.ts'
 import { apiError } from './errors.ts'
 import { DeviceSessionAuth } from './auth/device-session.ts'
 import { sameOrigin } from './middleware/origin.ts'
@@ -9,8 +9,12 @@ import { onboarding } from './onboarding/routes.ts'
 import { accountOfUser } from './accounts/store.ts'
 import { accounts } from './accounts/routes.ts'
 import { pools } from './pools/routes.ts'
+import { operatorRoutes, type OperatorFetch } from './accounts/operator.ts'
 
-export type AppOptions = { now?: () => Date }
+export type AppOptions = { now?: () => Date; operatorFetch?: OperatorFetch }
+
+/** Hard cap per account in live mode, USDC base units (25 USDC). */
+export const LIVE_CAP_USDC = '25000000'
 
 export function createApp(options: AppOptions = {}) {
   const now = options.now ?? (() => new Date())
@@ -33,13 +37,15 @@ export function createApp(options: AppOptions = {}) {
   app.use('/api/*', sameOrigin)
 
   app.get('/api/config', (c) => {
-    const config: AppConfig = {
+    const base: AppConfig = {
       mode: c.var.settings.mode,
       chainId: c.var.settings.chainId,
       banner: { kind: 'simulation', text: PRODUCTION_BANNER },
       fundsGate: 'closed',
       dryRun: true,
     }
+    // Live funds: the operator moves funds; the engine Worker stays read-only (CORE_DRY_RUN unchanged).
+    const config: AppConfig = liveFunds(c.env) ? { ...base, fundsGate: 'live', dryRun: false, capUsdc: LIVE_CAP_USDC } : base
     return c.json(config)
   })
 
@@ -52,6 +58,7 @@ export function createApp(options: AppOptions = {}) {
   })
 
   app.route('/api/onboarding', onboarding)
+  app.route('/api/accounts', operatorRoutes(options.operatorFetch ?? ((input, init) => fetch(input, init))))
   app.route('/api/accounts', accounts)
   app.route('/api/pools', pools)
 

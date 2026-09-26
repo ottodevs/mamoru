@@ -1,5 +1,5 @@
 {
-  // mamoru-app (plan §19.1): the SPA assets plus the Hono API. SESSION_SECRET is a secret (L0 sets it; locally .dev.vars).
+  // mamoru-app (plan §19.1): the SPA assets plus the Hono API. SESSION_SECRET, OPERATOR_URL and OPERATOR_SECRET are secrets (L0 sets them; locally .dev.vars).
   "name": "mamoru-app",
   "account_id": "ac5100a2c4cec1e240cbd20252ba9213",
   "main": "src/worker.ts",
@@ -26,7 +26,8 @@
   "vars": {
     "MODE": "production",
     "CHAIN_ID": "8453",
-    "CORE_DRY_RUN": "true"
+    "CORE_DRY_RUN": "true",
+    "LIVE_FUNDS": "1"
   },
   "observability": { "enabled": true }
 }
