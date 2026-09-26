@@ -7,8 +7,9 @@ export type AppConfig = {
   mode: 'production' | 'lab'
   chainId: number
   banner: DashboardPayload['banner']
-  fundsGate: 'closed' | 'lab'
-  dryRun: true
+  fundsGate: 'closed' | 'lab' | 'live'
+  dryRun: boolean
+  capUsdc?: string        // live only: hard cap per account, base units
 }
 
 // GET /api/session -> 200 SessionView | 401
@@ -54,7 +55,9 @@ export type FundingView = {
 // POST /api/accounts/:accountKey/transfer/prepare   body: TransferRequest -> TransferPlan
 // POST /api/accounts/:accountKey/transfer           body: OwnerSignature -> OpView
 // Frees USDC by reducing positions if idle USDC is short (engine), then the owner transfer.
-// POST /api/accounts/:accountKey/stop                -> OpView (engine exits every position to USDC)
+// POST /api/accounts/:accountKey/stop/prepare        -> OwnerTxToSign
+// POST /api/accounts/:accountKey/stop                body: OwnerSignature -> OpView
+// Stop allocation: revoke every grant, close every position, swap the volatile side to USDC. USDC stays in the Safe.
 // GET  /api/accounts/:accountKey/ops?after=          -> { ops: OpView[] }
 export type TransferRequest = { to: Hex0x; amountUsdc: string }
 export type TransferPlan = { reduce: { tokenId: string; liquidityBps: number }[]; ownerTx: OwnerTxToSign }
@@ -81,4 +84,16 @@ export type OpView = {
   txHash?: Hex0x
   block?: number
   updatedAt: string
+}
+
+// Live operator (sprint amendment 2026-09-26 21:40). The Worker authenticates the device session, then
+// forwards the same route to the operator with this context in `x-mamoru-account` (base64url JSON)
+// and `x-mamoru-sig` = hex HMAC-SHA256(OPERATOR_SECRET, `${method} ${path}\n${header}\n${body}`).
+export type AccountContext = {
+  accountKey: string
+  chainId: number
+  address: Hex0x          // counterfactual Safe, recomputed by the operator and compared
+  owners: Hex0x[]
+  saltNonce: string       // decimal
+  passkey: { credentialId: string; x: Hex0x; y: Hex0x }
 }
