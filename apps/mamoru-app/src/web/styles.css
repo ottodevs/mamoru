@@ -1,0 +1,131 @@
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #f4f0e6;
+  --color-rice: #f8f5ef;
+  --color-ink: #0f0f0e;
+  --color-wash: #d9d2c3;
+  --color-emerald: #2f5d50;
+  --color-stone: #8a8578;
+  --color-alert: #9b2c2c;
+  --color-alert-ink: #6b1f1f;
+  --font-serif: "Noto Serif", "Noto Serif JP", "Iowan Old Style", "Palatino Linotype", Palatino, serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@font-face {
+  font-family: "Noto Serif";
+  src: url("/fonts/NotoSerif-400.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: optional;
+}
+
+@layer base {
+  html,
+  body {
+    margin: 0;
+    min-height: 100%;
+    overflow-x: clip;
+    background-color: var(--color-rice);
+    background-image: url("/rice-washi-tile.png");
+    background-image: image-set(url("/rice-washi-tile.webp") type("image/webp"), url("/rice-washi-tile.png") type("image/png"));
+    background-repeat: repeat;
+    background-size: 256px 256px;
+    color: var(--color-ink);
+    font-family: var(--font-serif);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    min-height: 100dvh;
+  }
+  a {
+    color: inherit;
+  }
+}
+
+@layer components {
+  .kicker {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--color-stone);
+  }
+  .mono-label {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 8.5rem;
+    width: fit-content;
+    padding: 0.7rem 1.2rem;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    text-decoration: none;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .btn:disabled,
+  .btn[aria-disabled="true"] {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .btn-primary {
+    background: var(--color-ink);
+    color: var(--color-rice);
+  }
+  .btn-ghost {
+    border-color: var(--color-wash);
+    color: var(--color-ink);
+    background: transparent;
+  }
+  .act {
+    background: var(--color-emerald);
+    color: var(--color-paper);
+    border: 0;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.65rem 1.2rem;
+    cursor: pointer;
+  }
+  .act:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .sheet {
+    border: 1px solid var(--color-wash);
+    background: color-mix(in srgb, var(--color-paper) 80%, transparent);
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.04em;
+    color: var(--color-stone);
+    border: 1px solid var(--color-wash);
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .code {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    color: var(--color-emerald);
+  }
+}

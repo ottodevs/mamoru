@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test test/e2e",
     "dev:worker": "wrangler dev",
     "deploy": "vite build && wrangler deploy"
   },
