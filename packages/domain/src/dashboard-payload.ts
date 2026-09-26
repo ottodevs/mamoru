@@ -165,6 +165,7 @@ export type DashboardPayload = {
   portfolio: {
     tokens: TokenHolding[]
     positions: { managed: number; unmanaged: number; value: Figure<string> }
+    // preference and actual are basis points (5000 = 50%)
     allocation: { bucket: string; preference: number; actual: Figure<number>; code: ReasonCode }[]
     unmanaged: { kind: 'token' | 'position'; ref: string; code: ReasonCode }[]
     total: Figure<string>
