@@ -8,9 +8,10 @@ import { formatBps, formatInteger } from '../lib/format.ts'
 export function PortfolioPanel({ data }: { data: DashboardPayload }) {
   const p = data.portfolio
   // only an observed zero on both counts means no positions
-  const noPositions = p.positions.managed.value === 0 && p.positions.unmanaged.value === 0
+  const noPositions = p.positions.managed.value === 0 && p.positions.unmanaged.value === 0 && p.positions.value.value !== null
   return (
     <Section id="portfolio" title="Portfolio" question="What is in my smart account on Base and what is it worth?">
+      {p.tokens.length === 0 ? <Empty>{copy.noBalances}</Empty> : null}
       <ul className="m-0 grid list-none gap-2 p-0">
         {p.tokens.map((t) => (
           <li key={t.token} data-testid="token-row" className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-3 border-t border-wash pt-2 sm:grid-cols-[auto_12rem_minmax(0,1fr)]">
@@ -35,6 +36,8 @@ export function PortfolioPanel({ data }: { data: DashboardPayload }) {
         <Row label="Positions">
           {noPositions ? (
             <span>{copy.noPositions}</span>
+          ) : p.positions.value.value === null ? (
+            <FigureValue figure={p.positions.value} />
           ) : (
             <span className="grid gap-1">
               <span>
@@ -80,7 +83,6 @@ export function PortfolioPanel({ data }: { data: DashboardPayload }) {
           </ul>
         </>
       ) : null}
-      {p.tokens.length === 0 ? <Empty>{copy.noPositions}</Empty> : null}
       <p className="m-0 flex gap-4 font-mono text-[0.75rem] uppercase tracking-[0.06em]">
         <a className="text-emerald" href="#treasury">
           Open Treasury

@@ -41,8 +41,8 @@ export function TreasuryPanel({ data }: { data: DashboardPayload }) {
       <dl className="m-0 grid">
         <Row label="Idle">
           <span className="grid gap-1">
-            <FigureValue figure={t.idle.usdc} />
-            <FigureValue figure={t.idle.cbBTC} />
+            <FigureValue figure={t.idle.usdc} unitWhenMissing />
+            <FigureValue figure={t.idle.cbBTC} unitWhenMissing />
             <span className="text-[0.85rem] text-stone">
               Value <FigureValue figure={t.idle.value} />
             </span>

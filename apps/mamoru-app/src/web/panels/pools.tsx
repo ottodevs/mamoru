@@ -6,7 +6,10 @@ import { TokenMark } from '../components/token-mark.tsx'
 import { errors, NOT_OBSERVED, pools as poolCopy, positions as copy } from '../copy/dashboard.ts'
 import { formatAmount, formatFraction, formatInteger, formatUtcDateTime } from '../lib/format.ts'
 
-export type PlanPools = { status: 'loading' } | { status: 'error'; retry: () => void } | { status: 'ready'; pools: PoolView[] }
+export type PlanPools =
+  | { status: 'loading' }
+  | { status: 'error'; retry: () => void }
+  | { status: 'ready'; pools: PoolView[]; syncedAt: string | null }
 
 const rangeText = (v: 'in_range' | 'out_of_range') => (v === 'in_range' ? copy.inRange : copy.outOfRange)
 
@@ -28,8 +31,21 @@ function PairMark({ token0, token1 }: { token0: string; token1: string }) {
 function Amounts({ a0, a1 }: { a0: Figure<string>; a1: Figure<string> }) {
   return (
     <span className="grid gap-1">
-      <FigureValue figure={a0} />
-      <FigureValue figure={a1} />
+      <FigureValue figure={a0} unitWhenMissing />
+      <FigureValue figure={a1} unitWhenMissing />
+    </span>
+  )
+}
+
+function rowAmount(f: Figure<string>): string {
+  return f.value === null ? `${f.unit ?? ''} ${NOT_OBSERVED}`.trim() : formatAmount(f.value, f.unit)
+}
+
+// History rows carry one chip for the whole row, so their amounts go bare.
+function RowAmounts({ a0, a1 }: { a0: Figure<string>; a1: Figure<string> }) {
+  return (
+    <span className="tabular-nums">
+      {rowAmount(a0)} · {rowAmount(a1)}
     </span>
   )
 }
@@ -122,7 +138,7 @@ function PositionCard({ position: p }: { position: PositionView }) {
                 <span className="text-stone">block {e.block}</span>
                 <span className="text-stone">{e.opId ? copy.mamoru : copy.notMamoru}</span>
               </span>
-              <Amounts a0={e.amount0} a1={e.amount1} />
+              <RowAmounts a0={e.amount0} a1={e.amount1} />
               <span className="flex flex-wrap items-center gap-2">
                 <HexValue hex={e.txHash} kind="tx" />
                 <ProvenanceChip provenance={e.provenance} />
@@ -153,7 +169,7 @@ function PoolCard({ pool: v }: { pool: PoolView }) {
           <strong>
             Uniswap V3 · {v.pool.token0}/{v.pool.token1} {feeLabel(v.pool.fee)}
           </strong>
-          <HexValue hex={v.pool.address} kind="address" />
+          <HexValue hex={v.pool.address} kind="address" linkLabel="View pool" />
         </span>
       </div>
       <dl className="m-0 grid">
@@ -272,7 +288,7 @@ function PoolCard({ pool: v }: { pool: PoolView }) {
                   ticks {l.tickLower} to {l.tickUpper}
                 </span>
               </span>
-              <Amounts a0={l.amount0} a1={l.amount1} />
+              <RowAmounts a0={l.amount0} a1={l.amount1} />
               <span className="flex flex-wrap items-center gap-2">
                 <HexValue hex={l.txHash} kind="tx" />
                 <ProvenanceChip provenance={l.provenance} />
@@ -301,10 +317,13 @@ function PoolCard({ pool: v }: { pool: PoolView }) {
 
 export function PoolsPanel({ data, plan }: { data: DashboardPayload; plan: PlanPools }) {
   const positions = data.pools.positions
+  const positionsValue = data.portfolio.positions.value
   return (
     <Section id="positions" title="Pools and positions" question="What is happening in my plan's pools and in my positions: swaps, liquidity, fees and range?">
       <SubTitle>Your positions</SubTitle>
-      {positions.length === 0 ? (
+      {positions.length === 0 && positionsValue.value === null ? (
+        <FigureValue figure={positionsValue} />
+      ) : positions.length === 0 ? (
         <Empty>{data.mode === 'lab' ? copy.emptyLab : copy.empty}</Empty>
       ) : (
         <ul className="m-0 grid list-none gap-3 p-0">
@@ -317,7 +336,11 @@ export function PoolsPanel({ data, plan }: { data: DashboardPayload; plan: PlanP
       <SubTitle>Pools in your plan</SubTitle>
       {plan.status === 'loading' ? <Skeleton /> : null}
       {plan.status === 'error' ? <ErrorNotice message={errors.pools} onRetry={plan.retry} /> : null}
-      {plan.status === 'ready' ? (
+      {plan.status === 'ready' && plan.pools.length === 0 ? <Empty>{poolCopy.notSynced}</Empty> : null}
+      {plan.status === 'ready' && plan.syncedAt !== null ? (
+        <p className="m-0 text-[0.85rem] text-stone">{poolCopy.syncedAt(formatUtcDateTime(plan.syncedAt))}</p>
+      ) : null}
+      {plan.status === 'ready' && plan.pools.length > 0 ? (
         <ul className="m-0 grid list-none gap-3 p-0">
           {plan.pools.map((v) => (
             <PoolCard key={v.pool.address} pool={v} />

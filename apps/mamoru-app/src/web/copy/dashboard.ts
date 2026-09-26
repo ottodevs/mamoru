@@ -109,6 +109,7 @@ export const portfolio = {
   idleNoPool: 'Idle, no executable pool in v1',
   registryOnly: "Only tokens in Mamoru's registry are observed: USDC, cbBTC, WETH and ETH.",
   noPositions: 'No positions. Deposits are closed.',
+  noBalances: 'Token balances not observed.',
 }
 
 export const treasury = {
@@ -148,6 +149,8 @@ export const pools = {
   noLiquidity: 'No liquidity changes in the last 24 hours.',
   added: 'Added',
   removed: 'Removed',
+  notSynced: 'Not observed yet. Mamoru has not read the pools in your plan on Base.',
+  syncedAt: (at: string) => `Pool data synced ${at}.`,
 }
 
 export const savings = {

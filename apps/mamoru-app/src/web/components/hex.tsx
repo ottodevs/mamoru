@@ -7,7 +7,9 @@ function basescanUrl(kind: 'address' | 'tx', hex: string): string {
   return `https://basescan.org/${kind}/${hex}`
 }
 
-export function HexValue({ hex, kind, full = false }: { hex: string; kind: 'address' | 'tx'; full?: boolean }) {
+type HexProps = { hex: string; kind: 'address' | 'tx'; full?: boolean; linkLabel?: string }
+
+export function HexValue({ hex, kind, full = false, linkLabel }: HexProps) {
   const { mode } = useScope()
   const [copied, setCopied] = useState(false)
   const copy = async () => {
@@ -30,7 +32,7 @@ export function HexValue({ hex, kind, full = false }: { hex: string; kind: 'addr
           target="_blank"
           rel="noreferrer"
         >
-          {kind === 'address' ? 'View on Basescan' : 'View transaction'}
+          {linkLabel ?? (kind === 'address' ? 'View on Basescan' : 'View transaction')}
         </a>
       ) : null}
     </span>

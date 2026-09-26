@@ -78,7 +78,7 @@ export function DashboardPage() {
   }
 
   const plan: PlanPools = pools.data
-    ? { status: 'ready', pools: pools.data.pools }
+    ? { status: 'ready', pools: pools.data.pools, syncedAt: pools.data.syncedAt }
     : pools.isError
       ? { status: 'error', retry: () => pools.refetch() }
       : { status: 'loading' }
@@ -86,13 +86,13 @@ export function DashboardPage() {
 
   return (
     <Shell>
-        {dashboard.isError ? <ErrorNotice message={errors.header} onRetry={() => dashboard.refetch()} /> : null}
-        <DashboardView
-          data={data}
-          plan={plan}
-          kitState={kit.isPending ? 'pending' : kit.isError ? 'error' : 'idle'}
-          onDownloadKit={() => address && kit.mutate({ key: data.account.key, address })}
-        />
+      {dashboard.isError ? <ErrorNotice message={errors.header} onRetry={() => dashboard.refetch()} /> : null}
+      <DashboardView
+        data={data}
+        plan={plan}
+        kitState={kit.isPending ? 'pending' : kit.isError ? 'error' : 'idle'}
+        onDownloadKit={() => address && kit.mutate({ key: data.account.key, address })}
+      />
     </Shell>
   )
 }

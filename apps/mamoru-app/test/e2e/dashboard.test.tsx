@@ -7,7 +7,7 @@ import type { PlanPools } from '../../src/web/panels/pools.tsx'
 import { populatedAccount } from './populated.ts'
 import { count, render } from './render.ts'
 
-const ready: PlanPools = { status: 'ready', pools: poolsResponse.pools }
+const ready: PlanPools = { status: 'ready', pools: poolsResponse.pools, syncedAt: poolsResponse.syncedAt }
 
 function view(data: DashboardPayload, plan: PlanPools = ready) {
   return render(<DashboardView data={data} plan={plan} kitState="idle" onDownloadKit={() => {}} />)
@@ -79,6 +79,52 @@ describe('empty production account (dashboard.md §7 "Vacío")', () => {
     expect(text).toContain('1,284')
     expect(text).toContain('Leave without Mamoru')
     expect(text).toContain('Download recovery kit')
+  })
+})
+
+describe('a full pool in your plan (dashboard.md §7.6.2)', () => {
+  const pool = poolsResponse.pools[0]
+  if (!pool) throw new Error('fixture has no pool')
+  const { html, text } = view(emptyAccount)
+  const card = html.slice(html.indexOf('data-testid="pool"'))
+
+  test('state at the block: price, tick, TWAP guard, liquidity and balances with chips', () => {
+    expect(text).toContain('Price of cbBTC in USDC 65,432.1 USDC Base · block 52114380')
+    expect(text).toContain('Tick -64842 Base · block 52114380')
+    expect(text).toContain('TWAP tick -64836 Base · block 52114380 Within the policy guard')
+    expect(text).toContain('Liquidity in range 1,843,200,418,822,907')
+    expect(text).toContain('4,210,385.12 USDC')
+    expect(text).toContain('51.20447381 cbBTC')
+    expect(text).toContain('Value 7,560,740 USDC Estimate · Base · block 52114380')
+    expect(text).toContain('Pool data synced 26 Sep 2026 18:20 UTC.')
+  })
+
+  test('window stats name their block range', () => {
+    expect(text).toContain(`Last 24 hours · blocks ${pool.window.fromBlock} to ${pool.window.toBlock}`)
+    expect(text).toContain('Swaps 1,284')
+    expect(text).toContain('18,420,330.1 USDC')
+    expect(text).toContain('Low -65118')
+    expect(text).toContain('37 changes')
+    expect(text).toContain('29 changes')
+  })
+
+  test('recent swaps and liquidity link each transaction on Basescan with a reconciled chip', () => {
+    expect(count(card, 'data-testid="pool-swap"')).toBe(pool.recentSwaps.length)
+    for (const row of [...pool.recentSwaps, ...pool.recentLiquidity]) {
+      expect(card).toContain(`href="https://basescan.org/tx/${row.txHash}"`)
+    }
+    expect(text).toContain('In 0.191 cbBTC, out 12,480.22 USDC tick after -64845')
+    expect(text).toContain('Added')
+    expect(text).toContain('Removed')
+    expect(count(card, 'MultiBaas · Base · checked at block 52114380')).toBe(pool.recentSwaps.length + pool.recentLiquidity.length)
+    expect(card).toContain(`href="https://basescan.org/address/${pool.pool.address}"`)
+    expect(text).toContain('View pool')
+  })
+
+  test('twap above the guard says so', () => {
+    const above = { ...pool, twapGuard: { ...pool.twapGuard, value: 'above_guard' as const } }
+    const { text: t } = view(emptyAccount, { status: 'ready', pools: [above], syncedAt: null })
+    expect(t).toContain('Above the policy guard')
   })
 })
 
@@ -179,6 +225,23 @@ describe('data states', () => {
     const d = clone()
     d.savings.ledgerTotal = { ...d.savings.ledgerTotal, provenance: { ...d.savings.ledgerTotal.provenance, status: 'stale' } }
     expect(view(d).text).toContain('Stale · updated 18:20 UTC')
+  })
+
+  test('nothing read from Base yet: balances, positions and pools say not observed, never "No positions"', () => {
+    const d = clone()
+    const missing: Provenance = { source: 'chain_rpc', chainId: 8453, observedAt: d.sources.rpc.observedAt, status: 'not_observed' }
+    d.sources.rpc = { status: 'unavailable', observedAt: d.sources.rpc.observedAt }
+    d.portfolio.tokens = []
+    d.portfolio.positions = { managed: 0, unmanaged: 0, value: { value: null, unit: 'USDC', provenance: missing } }
+    d.treasury.idle.usdc = { value: null, unit: 'USDC', provenance: missing }
+    d.treasury.idle.cbBTC = { value: null, unit: 'cbBTC', provenance: missing }
+    const { text } = view(d, { status: 'ready', pools: [], syncedAt: null })
+    expect(text).toContain('Token balances not observed.')
+    expect(text).not.toContain('No positions. Deposits are closed.')
+    expect(text).toContain('Not observed yet. Mamoru has not read the pools in your plan on Base.')
+    expect(text).not.toContain('Pool data synced')
+    expect(text).toContain('USDC Not observed Base')
+    expect(text).toContain('cbBTC Not observed Base')
   })
 
   test('pool data failure shows its error copy with Try again', () => {

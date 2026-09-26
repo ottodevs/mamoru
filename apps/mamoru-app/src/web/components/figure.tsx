@@ -25,6 +25,8 @@ type FigureProps<T> = {
   figure: Figure<T>
   format?: (value: T, unit: string | undefined) => ReactNode
   className?: string
+  /** Names the unit beside "Not observed" where several amounts share one row. */
+  unitWhenMissing?: boolean
 }
 
 function defaultFormat(value: unknown, unit: string | undefined): ReactNode {
@@ -33,10 +35,13 @@ function defaultFormat(value: unknown, unit: string | undefined): ReactNode {
 }
 
 /** One figure with its provenance chip. A null value is "Not observed", never zero. */
-export function FigureValue<T>({ figure, format, className }: FigureProps<T>) {
+export function FigureValue<T>({ figure, format, className, unitWhenMissing = false }: FigureProps<T>) {
   const shown = figure.value === null ? null : (format ?? defaultFormat)(figure.value, figure.unit)
   return (
     <span className={`inline-flex min-w-0 max-w-full flex-wrap items-baseline gap-x-2 gap-y-1 ${className ?? ''}`}>
+      {shown === null && unitWhenMissing && figure.unit ? (
+        <span className="font-mono text-[0.75rem] tracking-[0.06em]">{figure.unit}</span>
+      ) : null}
       {shown === null ? (
         <span className="text-stone" data-testid="not-observed">
           {NOT_OBSERVED}
