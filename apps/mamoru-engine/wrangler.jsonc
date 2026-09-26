@@ -1,0 +1,20 @@
+{
+  // mamoru-engine (plan §19.2): Base read model on a cron. No public routes.
+  "name": "mamoru-engine",
+  "account_id": "ac5100a2c4cec1e240cbd20252ba9213",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-26",
+  "workers_dev": false,
+  "preview_urls": false,
+  "triggers": { "crons": ["*/2 * * * *"] },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "mamoru", "database_id": "682b2a66-d9d4-49e5-ac78-596d002d02ca", "migrations_dir": "../../migrations/d1" }
+  ],
+  "vars": {
+    "CHAIN_ID": "8453",
+    "CORE_DRY_RUN": "true",
+    "BASE_RPC_PUBLIC": "https://mainnet.base.org"
+  },
+  // Optional secrets, set by L0: BASE_RPC_URL, MULTIBAAS_URL, MULTIBAAS_API_KEY.
+  "observability": { "enabled": true }
+}

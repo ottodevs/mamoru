@@ -35,6 +35,21 @@
         "wrangler": "4.139.0",
       },
     },
+    "apps/mamoru-engine": {
+      "name": "@mamoru/engine",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mamoru/domain": "workspace:*",
+        "@mamoru/multibaas": "workspace:*",
+        "@mamoru/policy": "workspace:*",
+        "@mamoru/registry": "workspace:*",
+        "viem": "2.56.9",
+      },
+      "devDependencies": {
+        "@cloudflare/workers-types": "5.20260926.1",
+        "wrangler": "4.139.0",
+      },
+    },
     "packages/account": {
       "name": "@mamoru/account",
       "version": "0.0.0",
@@ -49,6 +64,13 @@
     "packages/domain": {
       "name": "@mamoru/domain",
       "version": "0.0.0",
+    },
+    "packages/multibaas": {
+      "name": "@mamoru/multibaas",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mamoru/domain": "workspace:*",
+      },
     },
     "packages/policy": {
       "name": "@mamoru/policy",
@@ -237,6 +259,10 @@
     "@mamoru/app": ["@mamoru/app@workspace:apps/mamoru-app"],
 
     "@mamoru/domain": ["@mamoru/domain@workspace:packages/domain"],
+
+    "@mamoru/engine": ["@mamoru/engine@workspace:apps/mamoru-engine"],
+
+    "@mamoru/multibaas": ["@mamoru/multibaas@workspace:packages/multibaas"],
 
     "@mamoru/policy": ["@mamoru/policy@workspace:packages/policy"],
 

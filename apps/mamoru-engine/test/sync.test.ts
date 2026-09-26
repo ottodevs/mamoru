@@ -1,0 +1,229 @@
+import { beforeEach, describe, expect, test } from 'bun:test'
+import type { PoolView, TokenHolding } from '@mamoru/domain'
+import { address, type Registry } from '@mamoru/registry'
+import { sqliteD1 } from '../scripts/sqlite-d1.ts'
+import { syncOnce } from '../src/sync/run.ts'
+import { FakeChain } from './fake-chain.ts'
+
+const POOL = address('pool:USDC/cbBTC/500')
+const WETH_POOL = address('pool:WETH/USDC/3000')
+const USDC = address('USDC')
+const CBBTC = address('cbBTC')
+const WETH = address('WETH')
+const NOW = new Date('2026-09-26T18:00:00.000Z')
+const W = 100
+
+// 1 cbBTC = 102,400 USDC: raw cbBTC per raw USDC is 1/1024, so sqrtPriceX96 = 2^96 / 32.
+const CBBTC_SQRT = 2n ** 91n
+// 1 WETH = 3,814,697.265625 USDC: raw USDC per raw WETH is 2^-18, so sqrtPriceX96 = 2^96 / 2^9.
+const WETH_SQRT = 2n ** 87n
+
+let chain: FakeChain
+let registry: Registry
+let db: ReturnType<typeof sqliteD1>
+const logs: Record<string, unknown>[] = []
+
+function run() {
+  return syncOnce({ client: chain.client(), db, chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: (l) => logs.push(l) })
+}
+
+function poolView(): PoolView {
+  const row = db.sqlite.query('SELECT payload_json FROM proj_pool_state WHERE pool_address = ?').get(POOL) as { payload_json: string } | null
+  if (!row) throw new Error('no pool row')
+  return JSON.parse(row.payload_json) as PoolView
+}
+
+/** Every Figure in a payload carries Provenance on Base. */
+function figures(node: unknown, out: { value: unknown; provenance: { chainId: number; status: string } }[] = []) {
+  if (Array.isArray(node)) node.forEach((n) => figures(n, out))
+  else if (node && typeof node === 'object') {
+    const o = node as Record<string, unknown>
+    if ('value' in o && 'provenance' in o) out.push(o as never)
+    Object.values(o).forEach((n) => figures(n, out))
+  }
+  return out
+}
+
+beforeEach(() => {
+  chain = new FakeChain()
+  registry = chain.registry()
+  db = sqliteD1()
+  logs.length = 0
+  chain.pools.set(POOL.toLowerCase(), { sqrtPriceX96: CBBTC_SQRT, tick: -69315, liquidity: 5_000_000n, tickCumulatives: [-69_300n * 1_000_000n, -69_300n * 1_000_000n - 69_310n * 1800n] })
+  chain.pools.set(WETH_POOL.toLowerCase(), { sqrtPriceX96: WETH_SQRT, tick: -124766, liquidity: 1n })
+  chain.setBalance(USDC, POOL, 1_000_000_000n)
+  chain.setBalance(CBBTC, POOL, 50_000n)
+  const H = chain.safe
+  chain.addSwap(POOL, H - 150, 0, { amount0: 999n, amount1: -1n, sqrtPriceX96: CBBTC_SQRT, liquidity: 1n, tick: -1 }) // before the window
+  chain.addSwap(POOL, H - 90, 1, { amount0: 2_000_000n, amount1: -1_900n, sqrtPriceX96: CBBTC_SQRT, liquidity: 5_000_000n, tick: -69320 })
+  chain.addSwap(POOL, H - 50, 3, { amount0: -1_000_000n, amount1: 1_000n, sqrtPriceX96: CBBTC_SQRT, liquidity: 5_000_000n, tick: -69310 })
+  chain.addLiquidity(POOL, 'Mint', H - 60, 2, { tickLower: -70000, tickUpper: -68000, amount: 10n, amount0: 500n, amount1: 7n })
+  chain.addLiquidity(POOL, 'Burn', H - 40, 4, { tickLower: -70000, tickUpper: -68000, amount: 0n, amount0: 0n, amount1: 0n }) // fee poke
+  chain.addLiquidity(POOL, 'Burn', H - 10, 5, { tickLower: -70000, tickUpper: -68000, amount: 4n, amount0: 200n, amount1: 3n })
+})
+
+describe('pool state sync', () => {
+  test('writes the PoolView of the plan pool at the safe block', async () => {
+    const summary = await run()
+    expect(summary.rpc).toBe('ok')
+    expect(summary.safeBlock).toBe(chain.safe)
+    const v = poolView()
+    expect(v.block).toBe(chain.safe)
+    expect(v.pool).toMatchObject({ token0: 'USDC', token1: 'cbBTC', fee: 500, tickSpacing: 10 })
+    expect(v.price).toMatchObject({ value: '102400000000', unit: 'USDC' })
+    expect(v.price.provenance).toMatchObject({ source: 'chain_rpc', chainId: 8453, blockNumber: chain.safe, blockHash: chain.hashOf(chain.safe), status: 'fresh' })
+    expect(v.tick.value).toBe(-69315)
+    expect(v.twapTick.value).toBe(-69310)
+    expect(v.twapGuard.value).toBe('ok')
+    expect(v.liquidity.value).toBe('5000000')
+    expect(v.balances.amount0.value).toBe('1000000000')
+    // 1,000 USDC + 0.0005 cbBTC at 102,400 = 1,051.2 USDC
+    expect(v.balances.value).toMatchObject({ value: '1051200000', unit: 'USDC' })
+    expect(v.balances.value.provenance.source).toBe('estimate')
+    expect(v.window).toEqual({ fromBlock: chain.safe - W + 1, toBlock: chain.safe })
+    // only pools of the policy are written
+    expect((db.sqlite.query('SELECT COUNT(*) n FROM proj_pool_state').get() as { n: number }).n).toBe(1)
+  })
+
+  test('computes window stats and recent rows from RPC logs with fallback provenance', async () => {
+    await run()
+    const { stats, recentSwaps, recentLiquidity } = poolView()
+    expect(stats.swaps.value).toBe(2)
+    expect(stats.volume0.value).toBe('2000000')
+    expect(stats.volume1.value).toBe('1000')
+    expect(stats.fees0.value).toBe('1000')
+    expect(stats.fees0.provenance.source).toBe('estimate')
+    expect(stats.tickMin.value).toBe(-69320)
+    expect(stats.tickMax.value).toBe(-69310)
+    expect(stats.added.count.value).toBe(1)
+    expect(stats.removed).toMatchObject({ count: { value: 1 }, amount0: { value: '200' }, amount1: { value: '3' } })
+    expect(stats.swaps.provenance).toMatchObject({ source: 'chain_rpc', detail: 'PROJ_SOURCE_FALLBACK_RPC' })
+    expect(stats.swaps.provenance.cause).toBeUndefined()
+    expect(recentSwaps.map((r) => r.block)).toEqual([chain.safe - 50, chain.safe - 90])
+    expect(recentSwaps[0]).toMatchObject({ logIndex: 3, blockHash: chain.hashOf(chain.safe - 50), tick: -69310, at: new Date(chain.timeOf(chain.safe - 50) * 1000).toISOString() })
+    expect(recentSwaps[0]!.amount0).toMatchObject({ value: '-1000000', unit: 'USDC' })
+    expect(recentSwaps[0]!.provenance).toMatchObject({ source: 'chain_rpc', blockNumber: chain.safe - 50, detail: 'PROJ_SOURCE_FALLBACK_RPC' })
+    expect(recentLiquidity.map((r) => r.kind)).toEqual(['burn', 'mint'])
+    expect(recentLiquidity[1]).toMatchObject({ tickLower: -70000, tickUpper: -68000 })
+  })
+
+  test('every figure carries Base provenance', async () => {
+    await run()
+    const all = figures(poolView())
+    expect(all.length).toBeGreaterThan(20)
+    for (const f of all) {
+      expect(f.provenance.chainId).toBe(8453)
+      if (f.value === null) expect(f.provenance.status).toBe('not_observed')
+    }
+  })
+
+  test('writes source_state with RPC ok and MultiBaas not configured', async () => {
+    await run()
+    const s = db.sqlite.query('SELECT * FROM source_state').get() as Record<string, unknown>
+    expect(s).toMatchObject({ chain_id: 8453, rpc_status: 'ok', block: chain.latest, safe_block: chain.safe, index_provider: 'multibaas', index_status: 'not_configured', index_code: null })
+  })
+
+  test('a code hash that does not match the registry leaves the pool not observed', async () => {
+    registry = { ...registry, entries: registry.entries.map((e) => (e.name === 'pool:USDC/cbBTC/500' ? { ...e, codeHash: `0x${'00'.repeat(32)}` } : e)) }
+    const summary = await run()
+    expect(summary.pools[0]!.identity).toBe('mismatch')
+    const v = poolView()
+    for (const f of [v.price, v.tick, v.twapTick, v.liquidity, v.balances.amount0, v.stats.swaps]) {
+      expect(f.value).toBeNull()
+      expect(f.provenance).toMatchObject({ status: 'not_observed', detail: 'PURGA_IDENTITY_MISMATCH' })
+    }
+    expect(v.recentSwaps).toEqual([])
+    expect(chain.calls).not.toContain('eth_getLogs')
+  })
+
+  test('without an observation window the TWAP is not observed', async () => {
+    chain.pools.get(POOL.toLowerCase())!.tickCumulatives = undefined
+    await run()
+    const v = poolView()
+    expect(v.twapTick).toMatchObject({ value: null, provenance: { status: 'not_observed', detail: 'EHG_TWAP_UNAVAILABLE' } })
+    expect(v.twapGuard.value).toBeNull()
+    expect(v.tick.value).toBe(-69315)
+  })
+
+  test('a TWAP farther than the policy guard is above_guard', async () => {
+    chain.pools.get(POOL.toLowerCase())!.tickCumulatives = [0n, -69_100n * 1800n]
+    await run()
+    expect(poolView().twapGuard.value).toBe('above_guard')
+  })
+
+  test('RPC down: source_state unavailable, last blocks kept, pool rows untouched', async () => {
+    await run()
+    const before = poolView()
+    chain.down = true
+    const summary = await run()
+    expect(summary.rpc).toBe('unavailable')
+    const s = db.sqlite.query('SELECT rpc_status, block, safe_block FROM source_state').get()
+    expect(s).toEqual({ rpc_status: 'unavailable', block: chain.latest, safe_block: chain.safe })
+    expect(poolView()).toEqual(before)
+  })
+
+  test('a foreign chain id is refused', async () => {
+    chain.chainId = 1
+    const summary = await run()
+    expect(summary).toMatchObject({ rpc: 'unavailable', code: 'OBS_CHAIN_MISMATCH' })
+  })
+
+  test('logs carry counts, never account addresses', async () => {
+    const acct = '0x3333333333333333333333333333333333333333'
+    seedAccount('acct-1', acct)
+    await run()
+    const text = JSON.stringify(logs).toLowerCase()
+    expect(text).not.toContain(acct.slice(2))
+    expect(logs.at(-1)).toMatchObject({ msg: 'sync.done', accounts: 1, accountsTotal: 1 })
+  })
+})
+
+function seedAccount(key: string, addr: string) {
+  db.sqlite.run("INSERT OR IGNORE INTO users (user_id, created_at) VALUES ('u1', '2026-09-26T00:00:00Z')")
+  db.sqlite.run(
+    "INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at) VALUES (?, 'u1', 8453, ?, '[]', 'c', 'x', 'y', '0', 'conservador-v1', '2026-09-26T00:00:00Z')",
+    [key, addr],
+  )
+}
+
+describe('account state sync', () => {
+  const A = '0x4444444444444444444444444444444444444444' as const
+  const B = '0x5555555555555555555555555555555555555555' as const
+
+  test('balances, deployment and USDC value at the safe block', async () => {
+    seedAccount('acct-a', A)
+    seedAccount('acct-b', B)
+    chain.code.set(A.toLowerCase(), '0x60806040')
+    chain.setBalance(USDC, A, 5_000_000n)
+    chain.setBalance(CBBTC, A, 1_000n) // 0.00001 cbBTC = 1.024 USDC
+    chain.setBalance(WETH, A, 262_144n) // 2^18 wei WETH = 1 raw USDC
+    chain.setBalance('ETH', A, 524_288n) // 2 raw USDC
+    await run()
+    const rows = db.sqlite.query('SELECT * FROM proj_account_state ORDER BY account_key').all() as Record<string, unknown>[]
+    expect(rows).toHaveLength(2)
+    const a = rows[0]!
+    expect(a).toMatchObject({ account_key: 'acct-a', chain_id: 8453, block: chain.safe, block_hash: chain.hashOf(chain.safe), deployed: 1, total_value: String(5_000_000 + 1_024_000 + 1 + 2) })
+    const tokens = JSON.parse(a.tokens_json as string) as TokenHolding[]
+    expect(tokens.map((t) => [t.token, t.role, t.amount.value, t.value.value])).toEqual([
+      ['USDC', 'plan', '5000000', '5000000'],
+      ['cbBTC', 'plan', '1000', '1024000'],
+      ['WETH', 'outside_plan', '262144', '1'],
+      ['ETH', 'gas', '524288', '2'],
+    ])
+    expect(tokens[2]!.code).toBe('OBS_UNMANAGED_ASSET')
+    expect(tokens[1]!.value.provenance.source).toBe('estimate')
+    expect(tokens[0]!.amount.provenance).toMatchObject({ source: 'chain_rpc', blockNumber: chain.safe })
+    expect(rows[1]).toMatchObject({ account_key: 'acct-b', deployed: 0, total_value: '0' })
+  })
+
+  test('without the WETH price, WETH and ETH values are not observed and the total is null', async () => {
+    seedAccount('acct-a', A)
+    chain.pools.delete(WETH_POOL.toLowerCase())
+    await run()
+    const a = db.sqlite.query('SELECT tokens_json, total_value FROM proj_account_state').get() as { tokens_json: string; total_value: string | null }
+    expect(a.total_value).toBeNull()
+    const tokens = JSON.parse(a.tokens_json) as TokenHolding[]
+    expect(tokens.find((t) => t.token === 'ETH')!.value).toMatchObject({ value: null, provenance: { status: 'not_observed' } })
+    expect(tokens.find((t) => t.token === 'USDC')!.value.value).toBe('0')
+  })
+})

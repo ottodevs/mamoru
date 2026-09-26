@@ -1,0 +1,23 @@
+{
+  "name": "@mamoru/engine",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test",
+    "sync:once": "bun scripts/sync-once.ts",
+    "dev": "wrangler dev --local --test-scheduled"
+  },
+  "dependencies": {
+    "@mamoru/domain": "workspace:*",
+    "@mamoru/multibaas": "workspace:*",
+    "@mamoru/policy": "workspace:*",
+    "@mamoru/registry": "workspace:*",
+    "viem": "2.56.9"
+  },
+  "devDependencies": {
+    "wrangler": "4.139.0",
+    "@cloudflare/workers-types": "5.20260926.1"
+  }
+}
