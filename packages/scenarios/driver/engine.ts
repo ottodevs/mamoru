@@ -4,7 +4,7 @@ import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { decide, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
 import type { PolicyVersion, SessionGrant } from '@mamoru/policy'
-import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { isSafeAndCanonical, observe, principalOwedBefore, readUserOpEvent, rpcClient, simulateFromEntryPoint, type Simulation } from '@mamoru/rpc'
 import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
 import { SessionLedger, precheck } from '@mamoru/account/precheck'
@@ -23,6 +23,8 @@ const OP_GAS_UNITS = LAB_GAS_LIMITS.verificationGasLimit + LAB_GAS_LIMITS.callGa
 const ETH_PRICE_POOL = 'pool:WETH/USDC/3000'
 /** Bounded waits for the bundler receipt and for `safe`, in blocks the lab lets pass. */
 const MAX_WAIT_BLOCKS = 32
+/** Live: after a bundler rejection that left the nonce unmoved, the same premise or kind+pool is not proposed again for this long. */
+export const UNINCLUDABLE_BACKOFF_SECONDS = 600n
 
 export type EngineSession = { name: string; grant: SessionGrant; permissionId: Hex }
 
@@ -44,6 +46,8 @@ export type EngineConfig = {
   maxWaitBlocks?: number
   /** First block of the managed positions' history on a restarted engine. Default: depositsAfter. */
   historyFromBlock?: bigint
+  /** Session uses already confirmed on chain before this engine started (restart): replayed into the ledger so caps and usage limits count them. */
+  priorIncluded?: { permissionId: Hex; calls: Execution[] }[]
 }
 
 export type EngineHooks = {
@@ -58,6 +62,11 @@ export type ReviewResult =
   | { kind: 'decided'; observation: Observation; record: DecisionRecord; op: OpRecord | null }
 
 type Prepared = { calls: Execution[]; quote?: OpRecord['quote']; /** Harvest: principal owed for the tokenId at the prepare block. */ owed?: Pair }
+
+/** Kind and pool of a proposal: the unit a live backoff holds back. */
+function proposalKey(p: Proposal): string {
+  return `${p.kind}|${p.pool}`
+}
 
 function exec(c: V3Call): Execution {
   return { target: c.to, value: c.value, callData: c.data }
@@ -79,6 +88,8 @@ export class Engine {
   readonly historyFromBlock: bigint
   depositsAfter: bigint
   lastObservation?: Observation
+  /** Live: premises the bundler rejected as unincludable, held back until `until` (block timestamp, seconds). */
+  private readonly backoff: { premiseHash: string; key: string; until: bigint }[] = []
   private readonly client: PublicClient
   private readonly bundler: BundlerClient
   private readonly nonceKey: bigint
@@ -93,6 +104,17 @@ export class Engine {
     this.depositsAfter = cfg.depositsAfter
     this.historyFromBlock = cfg.historyFromBlock ?? cfg.depositsAfter
     for (const s of cfg.sessions) this.addSession(s)
+    for (const u of cfg.priorIncluded ?? []) this.ledger.recordIncluded(u.permissionId, u.calls)
+  }
+
+  /** Live: a session the owner removed on chain (SmartSession) is revoked in the ledger, so decide never proposes an op it cannot authorize. */
+  private async syncEnabled(): Promise<void> {
+    if (this.cfg.mode !== 'live') return
+    for (const s of this.sessions) {
+      if (this.ledger.get(s.permissionId)?.revoked) continue
+      const on = await this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [s.permissionId, this.cfg.account] })
+      if (!on) this.ledger.revoke(s.permissionId)
+    }
   }
 
   addSession(s: EngineSession): void {
@@ -140,6 +162,7 @@ export class Engine {
     await this.resumeIncluded()
     let obs: Observation
     try {
+      await this.syncEnabled()
       obs = await this.observe()
     } catch (e) {
       if (e instanceof ReasonError) return { kind: 'observation-failed', code: e.code, detail: e.detail }
@@ -148,11 +171,16 @@ export class Engine {
     this.lastObservation = obs
     const decision = decide(obs, this.cfg.policy)
     this.depositsAfter = obs.safeBlock.number > this.depositsAfter ? obs.safeBlock.number : this.depositsAfter
-    const deduped = !!decision.proposal && this.journal.lastDiscarded()?.premiseHash === decision.premiseHash
+    const key = decision.proposal ? proposalKey(decision.proposal) : ''
+    const backedOff = !!decision.proposal && this.backoff.some((b) => b.until > obs.block.timestamp && (b.premiseHash === decision.premiseHash || b.key === key))
+    const deduped = (!!decision.proposal && this.journal.lastDiscarded()?.premiseHash === decision.premiseHash) || backedOff
     const record = this.journal.recordDecision(decision, deduped ? 'REVIEW_DEDUPED' : undefined)
     if (!decision.proposal || deduped) return { kind: 'decided', observation: obs, record, op: null }
     const op = this.journal.propose(record, decision.proposal.grant)
     await this.run(op, obs, decision)
+    if (this.journal.op(op.opId)?.stateCode === 'RECON_UNINCLUDABLE') {
+      this.backoff.push({ premiseHash: decision.premiseHash, key, until: obs.block.timestamp + UNINCLUDABLE_BACKOFF_SECONDS })
+    }
     return { kind: 'decided', observation: obs, record, op }
   }
 
