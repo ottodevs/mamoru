@@ -29,8 +29,8 @@ describe('lab guards', () => {
 
   test('keyed or remote URLs never reach argv', () => {
     for (const url of [
-      'https://base-mainnet.g.alchemy.com/v2/abcdef',
-      'https://mainnet.base.org',
+      'https://rpc.example.com/v2/abcdef',
+      'https://rpc.example.org',
       'http://user:pass@127.0.0.1:8545',
       'http://127.0.0.1:8545/?key=abc',
       'http://127.0.0.1:8545/v2/abc',
