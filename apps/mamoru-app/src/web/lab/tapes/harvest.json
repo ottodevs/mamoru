@@ -1,0 +1,666 @@
+{
+  "id": "TAPE-HARVEST",
+  "title": "Harvest only when it pays",
+  "summary": "Fees build up while gas is expensive and the engine holds. When the base fee drops and fees clear three times the cost, it harvests once on the fork and fees return to zero.",
+  "savingsAsset": "USDC",
+  "chainId": 31337,
+  "forkOf": "Base",
+  "forkBlock": 51811000,
+  "recordedAt": "2026-09-26T22:09:09.763Z",
+  "frames": [
+    {
+      "t": 0,
+      "block": 51811015,
+      "key": true,
+      "title": "Position is live",
+      "note": "The engine entered the pool with a range around the price. Fees 0 USDC against a bar of 32.94 USDC (3x the 10.98 USDC cost of one operation). Holding.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67346,
+        "price": "84069.52",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.067848",
+        "feesValue": "0"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x066c54b9473b7b9a7255100539572135cebdedd8c5b841591e2c5c1a3412b5b6"
+      },
+      "tx": null
+    },
+    {
+      "t": 901,
+      "block": 51811021,
+      "key": false,
+      "title": "Fees accrue",
+      "note": "Traders swap through the range; base fee 0.4 gwei. Fees 1.01 USDC against a bar of 32.94 USDC (3x the 10.98 USDC cost of one operation). Harvesting now would cost more than it earns.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67346,
+        "price": "84071.6",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.116991",
+        "feesValue": "1.013148"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0xb593cc750d18e414a51f61d42e6f02977ce304f1730f718f26c7239dd15ae61c"
+      },
+      "tx": null
+    },
+    {
+      "t": 1801,
+      "block": 51811027,
+      "key": false,
+      "title": "Fees accrue",
+      "note": "Traders swap through the range; base fee 0.4 gwei. Fees 2.03 USDC against a bar of 32.94 USDC (3x the 10.98 USDC cost of one operation). Harvesting now would cost more than it earns.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67347,
+        "price": "84073.67",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.166687",
+        "feesValue": "2.026975"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x4bb7cbb71107a5c910540e8ca54b1cf3559aaab1bf7dc16853dc73b292cd0793"
+      },
+      "tx": null
+    },
+    {
+      "t": 2701,
+      "block": 51811033,
+      "key": false,
+      "title": "Fees accrue",
+      "note": "Traders swap through the range; base fee 0.4 gwei. Fees 3.04 USDC against a bar of 32.94 USDC (3x the 10.98 USDC cost of one operation). Harvesting now would cost more than it earns.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67347,
+        "price": "84075.75",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.216098",
+        "feesValue": "3.040636"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x4c37483b46d6567082c8dc24558afa96e58c734720e155442fb0720b10d69ac4"
+      },
+      "tx": null
+    },
+    {
+      "t": 3602,
+      "block": 51811039,
+      "key": false,
+      "title": "Fees accrue",
+      "note": "Traders swap through the range; base fee 0.4 gwei. Fees 4.05 USDC against a bar of 32.94 USDC (3x the 10.98 USDC cost of one operation). Harvesting now would cost more than it earns.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67347,
+        "price": "84077.82",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.265221",
+        "feesValue": "4.053294"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0xedffe5d77ff8a866850fb37e31daaf9c72db34956ef8c47fd15d47024650da90"
+      },
+      "tx": null
+    },
+    {
+      "t": 4502,
+      "block": 51811045,
+      "key": false,
+      "title": "Fees accrue",
+      "note": "Traders swap through the range; base fee 0.4 gwei. Fees 5.07 USDC against a bar of 32.94 USDC (3x the 10.98 USDC cost of one operation). Harvesting now would cost more than it earns.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67347,
+        "price": "84079.89",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.314059",
+        "feesValue": "5.065787"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x0149f2d2523271f622459e978f2fd59d7053d7908af67fcf5f8eacb439af4eb3"
+      },
+      "tx": null
+    },
+    {
+      "t": 5403,
+      "block": 51811051,
+      "key": true,
+      "title": "Fees below cost",
+      "note": "Traders swap through the range; base fee 0.4 gwei. Fees 6.08 USDC against a bar of 32.94 USDC (3x the 10.98 USDC cost of one operation). Harvesting now would cost more than it earns.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67348,
+        "price": "84081.96",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.363449",
+        "feesValue": "6.078117"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0xea88bb1ad425233484a239750cea8eaaa62a614f2b1984e603c7da88817492ec"
+      },
+      "tx": null
+    },
+    {
+      "t": 6303,
+      "block": 51811053,
+      "key": true,
+      "title": "Gas gets cheaper",
+      "note": "Base fee drops to 0.1 gwei, so the bar falls. Fees 6.08 USDC against a bar of 8.27 USDC (3x the 2.76 USDC cost of one operation). Still below. Holding.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67348,
+        "price": "84081.96",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.363449",
+        "feesValue": "6.078117"
+      },
+      "cost": {
+        "baseFeeGwei": "0.1",
+        "opCost": "2.755523",
+        "threshold": "8.266569",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0xc090e4ae72bbda3f19033ba414ac0ec92366d139f6614a7dd43ce0de4dafde3a"
+      },
+      "tx": null
+    },
+    {
+      "t": 7203,
+      "block": 51811059,
+      "key": false,
+      "title": "Fees accrue",
+      "note": "Fees 7.09 USDC against a bar of 8.27 USDC (3x the 2.76 USDC cost of one operation). Still below the bar. Holding.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67348,
+        "price": "84084.03",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.411948",
+        "feesValue": "7.09383"
+      },
+      "cost": {
+        "baseFeeGwei": "0.1",
+        "opCost": "2.755523",
+        "threshold": "8.266569",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x0eb0bb639f9e7d72f82497291b5b3cd050a0eb848d8826e6bc5b6e1b97ca923b"
+      },
+      "tx": null
+    },
+    {
+      "t": 8104,
+      "block": 51811065,
+      "key": false,
+      "title": "Fees accrue",
+      "note": "Fees 8.11 USDC against a bar of 8.27 USDC (3x the 2.76 USDC cost of one operation). Still below the bar. Holding.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67348,
+        "price": "84086.11",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.461841",
+        "feesValue": "8.108539"
+      },
+      "cost": {
+        "baseFeeGwei": "0.1",
+        "opCost": "2.755523",
+        "threshold": "8.266569",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0xa8ecdcf767477447d8e3fad5454d84ede80004a2fd4b5a2b7617aa82a3992e57"
+      },
+      "tx": null
+    },
+    {
+      "t": 9013,
+      "block": 51811071,
+      "key": true,
+      "title": "Harvest pays",
+      "note": "Fees 9.12 USDC against a bar of 8.27 USDC (3x the 2.76 USDC cost of one operation). Fees clear the bar, so the engine collects them and converts them to USDC in one operation.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67348,
+        "price": "84088.18",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.510607",
+        "feesValue": "9.123083"
+      },
+      "cost": {
+        "baseFeeGwei": "0.1",
+        "opCost": "2.755523",
+        "threshold": "8.266569",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "harvest",
+        "code": "DECIDE_HARVEST",
+        "reason": "DECIDE_HARVEST",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "GO",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xd7b5387d5fb869f0b48c825298318116ba66d0799173f13545fd466be154a4a8"
+      },
+      "tx": {
+        "hash": "0xeb52fa2122ceda67ae914681bd1e79418fd91d3cba8b4a683096d61d562e03e3",
+        "label": "harvest",
+        "ok": true
+      }
+    },
+    {
+      "t": 9018,
+      "block": 51811075,
+      "key": true,
+      "title": "Fees collected",
+      "note": "Fees are back to 0 USDC. The position keeps its liquidity; only the fees left it.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67348,
+        "price": "84088.17",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.510684",
+        "feesValue": "0"
+      },
+      "cost": {
+        "baseFeeGwei": "0.1",
+        "opCost": "2.755523",
+        "threshold": "8.266569",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0xb6272beb3bcde231c9419986e25e8bc1ddf82b239a1c660f377f9356a10dbf09"
+      },
+      "tx": null
+    },
+    {
+      "t": 9926,
+      "block": 51811081,
+      "key": false,
+      "title": "Fees build again",
+      "note": "Fees 1.01 USDC against a bar of 8.27 USDC (3x the 2.76 USDC cost of one operation). Holding until they pay again.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67349,
+        "price": "84090.24",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.559166",
+        "feesValue": "1.014271"
+      },
+      "cost": {
+        "baseFeeGwei": "0.1",
+        "opCost": "2.755523",
+        "threshold": "8.266569",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0xf6ae132bd9a3d8e890ff0b8c9ba8622e851a0bc796e2fec0739e5739abab524d"
+      },
+      "tx": null
+    },
+    {
+      "t": 10836,
+      "block": 51811087,
+      "key": false,
+      "title": "Fees build again",
+      "note": "Fees 2.03 USDC against a bar of 8.27 USDC (3x the 2.76 USDC cost of one operation). Holding until they pay again.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67349,
+        "price": "84092.31",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.608202",
+        "feesValue": "2.027537"
+      },
+      "cost": {
+        "baseFeeGwei": "0.1",
+        "opCost": "2.755523",
+        "threshold": "8.266569",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0xfac124cd52eb5d274473d7cca1989649caceacf78a43bf3e192ca90167368d7e"
+      },
+      "tx": null
+    },
+    {
+      "t": 11750,
+      "block": 51811093,
+      "key": false,
+      "title": "Fees build again",
+      "note": "Fees 3.04 USDC against a bar of 8.27 USDC (3x the 2.76 USDC cost of one operation). Holding until they pay again.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67349,
+        "price": "84094.38",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.657794",
+        "feesValue": "3.041482"
+      },
+      "cost": {
+        "baseFeeGwei": "0.1",
+        "opCost": "2.755523",
+        "threshold": "8.266569",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x07e8e136690ca18ce9dae59808f830d9477d1e1d212336d331dee600e07ce252"
+      },
+      "tx": null
+    }
+  ]
+}
