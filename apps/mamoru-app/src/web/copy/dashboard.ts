@@ -126,9 +126,13 @@ export const treasury = {
   },
 }
 
-export function convertText(state: DashboardPayload['treasury']['convert']['state'], hasCause: boolean): string {
-  const text = treasury.convert[state]
-  return state === 'held' ? `${text}${hasCause ? ': ' : '.'}` : text
+export function convertText(convert: Pick<DashboardPayload['treasury']['convert'], 'state' | 'cause' | 'code'>): string {
+  const text = treasury.convert[convert.state]
+  if (convert.state !== 'held') return text
+  if (convert.cause) return `${text}: `
+  // Held by a gate, not by the market: say the gate.
+  const gate = convert.code ? opNotes[convert.code] : undefined
+  return gate ?? `${text}.`
 }
 
 export const positions = {

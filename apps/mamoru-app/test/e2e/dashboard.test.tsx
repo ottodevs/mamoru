@@ -59,7 +59,7 @@ describe('empty production account (dashboard.md §7 "Vacío")', () => {
     expect(count(html, '>Pause</button>')).toBe(1)
     expect(count(html, '>Exit</button>')).toBe(1)
     expect(html).toMatch(/<button[^>]*disabled[^>]*>Pause<\/button>/)
-    expect(text).toContain('Nothing to manage. Deposits are closed.')
+    expect(count(text, 'Nothing to manage. Deposits are closed.')).toBe(1)
   })
 
   test('no deposit, convert, sell or collect button', () => {
@@ -216,9 +216,16 @@ describe('data states', () => {
     d.savings.ledgerTotal = { value: null, unit: 'USDC', provenance: journalMissing }
     const { text } = view(d)
     expect(text).toContain('Deposits are closed. FUNDS_GATE_CLOSED')
-    expect(text).toContain('Waiting for a healthy market. FUNDS_GATE_CLOSED')
+    expect(text).toContain('Conversion Deposits are closed. FUNDS_GATE_CLOSED')
+    expect(text).not.toContain('Waiting for a healthy market')
     expect(text).not.toContain('No savings yet. Deposits are closed.')
     expect(count(text, 'Not observed')).toBeGreaterThanOrEqual(3)
+  })
+
+  test('a conversion held by the market names the market cause', () => {
+    const d = clone()
+    d.treasury.convert = { ...d.treasury.convert, state: 'held', cause: 'EHG_PRICE_DIVERGENCE', code: 'DECIDE_CONVERT_HELD' }
+    expect(view(d).text).toContain('Waiting for a healthy market: EHG_PRICE_DIVERGENCE DECIDE_CONVERT_HELD')
   })
 
   test('stale projection shows the update time', () => {

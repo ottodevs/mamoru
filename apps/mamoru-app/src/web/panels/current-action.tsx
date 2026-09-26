@@ -1,7 +1,7 @@
 import type { DashboardPayload } from '@mamoru/domain'
 import { Code, FigureValue, ProvenanceChip, Row } from '../components/figure.tsx'
 import { HexValue } from '../components/hex.tsx'
-import { IntentButton } from '../components/intent-button.tsx'
+import { IntentButton, intentsReason } from '../components/intent-button.tsx'
 import { Empty, Section, SubTitle } from '../components/section.tsx'
 import { currentAction as copy, opNotes, opStateText, sessionText } from '../copy/dashboard.ts'
 import { formatUtcDateTime, formatUtcTime } from '../lib/format.ts'
@@ -97,9 +97,10 @@ export function CurrentActionPanel({ data }: { data: DashboardPayload }) {
         </Row>
       </dl>
 
-      <div className="flex flex-wrap gap-3">
-        {ca.paused.value === true ? null : <IntentButton label="Pause" fundsGate={fundsGate} />}
-        <IntentButton label="Exit" fundsGate={fundsGate} />
+      <div className="flex flex-wrap items-center gap-3">
+        {ca.paused.value === true ? null : <IntentButton label="Pause" fundsGate={fundsGate} reason={false} />}
+        <IntentButton label="Exit" fundsGate={fundsGate} reason={false} />
+        <span className="text-[0.85rem] text-stone">{intentsReason(fundsGate)}</span>
       </div>
 
       {ca.recentDecisions.length > 0 ? (

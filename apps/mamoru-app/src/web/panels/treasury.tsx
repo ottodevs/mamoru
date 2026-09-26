@@ -74,7 +74,7 @@ export function TreasuryPanel({ data }: { data: DashboardPayload }) {
         </Row>
         <Row label="Conversion">
           <span className="inline-flex flex-wrap items-baseline gap-2">
-            <span>{convertText(c.state, c.cause !== undefined)}</span>
+            <span>{convertText(c)}</span>
             {c.cause ? <Code code={c.cause} /> : null}
             {c.code ? <Code code={c.code} /> : null}
           </span>
