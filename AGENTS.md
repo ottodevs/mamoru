@@ -2,21 +2,21 @@
 
 Public product repo. GitHub `ottodevs/mamoru` is the only push remote. Forgejo is fetch-only.
 
-The closed architecture is `inputs/mamoru-spec-v1.md`. Do not reopen it. Work on `main`. Do not open a feature branch.
+The closed architecture is `inputs/mamoru-spec-v1.md`. Do not reopen it. Accepted work lands on `main` by fast-forward. A branch exists only for the open slice, then it is deleted.
 
 ## Now
 
-T001 is on `main` at `82774c7`. Do not start the next task until Ot says so. The next task, when it starts, is T002 only, from `specs/001-mamoru-v1/tasks.md`. Do not skip ahead. Do not deploy. Do not push Forgejo.
+T002 is the open task, from `specs/001-mamoru-v1/tasks.md`. The owner walkaway batch and recovery kit are on `main` at `1d75734`. The next slice is still T002: WALK-01 and WALK-04. Do not start T003. Do not deploy. Do not push Forgejo.
 
 ## One unit
 
 The next task stays off `main` until its review passes. One task, then stop.
 
-1. Implement only that task from `tasks.md`. Cursor, model `claude-opus-5-5-high`. Only the files the task names.
-2. One short commit on a branch that exists for that task alone. Push it to GitHub. Do not start the next task on that branch.
+1. Implement only the open slice of that task from `tasks.md`. One writer at a time, in turn: Cursor Agent `--model claude-opus-5-5-high`, or Claude Code `--model claude-opus-5-5 --effort high`. Only the files that slice needs. One concern, at most 12 files.
+2. One short commit on a branch that exists for that slice alone. Push it to GitHub. Do not start another slice on that branch.
 3. Codex `gpt-6-astra` at medium reviews that commit. Verdict is APTO or NO-GO. It does not rewrite the commit.
 4. NO-GO: one fix commit on the same branch, then review again. APTO: fast-forward `main` and delete the branch.
-5. Only then take the next task.
+5. Only then take the next slice. The next task starts when Ot says so.
 
 Do not stack a phase of unreviewed commits. Do not open a pull request. Do not squash. Forgejo stays fetch-only.
 
