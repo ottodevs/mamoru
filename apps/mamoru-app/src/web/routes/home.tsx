@@ -496,7 +496,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const f = funding.data
   const opList = ops.data?.ops ?? []
   const s = f ? split(f, cbbtcPrice(pools.data)) : null
-  const inFlight = opList.some((o) => !TERMINAL.has(o.state))
+  // An owner prepare that was never signed is not in flight; only armed or sent ops are.
+  const inFlight = opList.some((o) => !TERMINAL.has(o.state) && !(o.state === 'proposed' && o.code !== 'ARMED' && !o.txHash))
   const armed = activationLive(opList)
   // Stopped after running: the Working card offers the restart where Stop was, so no Start row too.
   const stopped = !!f && !f.active && f.positions.length === 0 && !inFlight && everStarted(opList)

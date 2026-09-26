@@ -72,7 +72,8 @@ export const TERMINAL = new Set<OpView['state']>(['confirmed', 'failed'])
 
 /** True when the latest activation is armed or running (not failed). */
 export function activationLive(ops: OpView[]): boolean {
-  const last = [...ops].filter((o) => o.kind === 'activate').sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
+  // Unsigned prepares (proposed, not armed, no tx) do not count.
+  const last = [...ops].filter((o) => o.kind === 'activate' && !(o.state === 'proposed' && o.code !== 'ARMED' && !o.txHash)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
   return last !== undefined && last.state !== 'failed'
 }
 
