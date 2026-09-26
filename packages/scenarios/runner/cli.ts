@@ -1,5 +1,7 @@
 import { pinRegistry } from './pin-registry.ts'
 import { runCatalog } from './run.ts'
+import { DEMO_SCENARIOS, formatDemo } from './demo.ts'
+import { loadManifest } from './manifest.ts'
 
 const [command = 'run', ...rest] = process.argv.slice(2)
 
@@ -17,7 +19,12 @@ if (command === 'pin-registry') {
   if (kt1.length) console.log(`KT-1: an attack passed in ${kt1.map((r) => r.id).join(', ')}. Stop.`)
   console.log(`report: ${reportPath.replace(`${process.cwd()}/`, '')}`)
   process.exit(passed.length === results.length ? 0 : 1)
+} else if (command === 'demo') {
+  const { runId, results, reportPath } = await runCatalog({ only: [...DEMO_SCENARIOS] })
+  const { fork } = await loadManifest()
+  console.log(`\n${formatDemo({ runId, forkBlock: fork.block, chainId: fork.chainId, reportPath: reportPath.replace(`${process.cwd()}/`, '') }, results)}`)
+  process.exit(results.every((r) => r.status === 'pass') ? 0 : 1)
 } else {
-  console.error('usage: bun run scenarios [run [--only ID,ID]] | pin-registry')
+  console.error('usage: bun run scenarios [run [--only ID,ID]] | demo | pin-registry')
   process.exit(2)
 }
