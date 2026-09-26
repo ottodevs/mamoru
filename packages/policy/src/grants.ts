@@ -205,9 +205,10 @@ export function manageAnyGrants(p: PairSpec, usage: { manage: number; convert: n
       perPosition: false,
       usageLimit: usage.manage,
       actions: [
-        { target: 'NonfungiblePositionManager', signature: DECREASE, params: [] },
+        // UniActionPolicy refuses an action with no rule (PolicyNotInitialized): `tokenId > 0` admits any id.
+        { target: 'NonfungiblePositionManager', signature: DECREASE, params: [{ field: 'tokenId', index: 0, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_POSITION' }] },
         { ...collectToAccount, params: [...collectToAccount.params] },
-        { target: 'NonfungiblePositionManager', signature: BURN, params: [] },
+        { target: 'NonfungiblePositionManager', signature: BURN, params: [{ field: 'tokenId', index: 0, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_POSITION' }] },
         {
           target: p.token0,
           signature: APPROVE,
