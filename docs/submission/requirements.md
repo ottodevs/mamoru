@@ -85,7 +85,7 @@ Optional multiselect: "Interested in grant programs", "Interested in accelerator
 
 | Item | Status |
 |---|---|
-| Team: Otto Garcia (Developer), Brais Romero (Product Manager) | OK on ETHGlobal. README handles still TODO-HANDLES (L0 gets them from Ot) |
+| Team: Brais and Otto | OK on ETHGlobal. README handles still TODO-HANDLES (L0 gets them from Ot) |
 | Checkbox `confirmRules` (already ticked): "built entirely during this hackathon and no work was completed before the event", "starting this project from scratch", "not submitting to another hackathon" | RISK, see §6 |
 
 ## 3. Uniswap Foundation prize ("Best Uniswap Stack Contribution")
@@ -116,13 +116,12 @@ Selecting Curvegrid makes us eligible for all three $1,000 tracks: Best RWA Toke
 | Version control, commit frequently, no large single commits | OK: 37+ small commits on main since 25 Sep 14:03 CEST, lanes pushing small commits |
 | AI attribution: document where and how AI tools were used, which parts | FIX: AI-use field exists; README gets a short "How this was built" line. Draft in `submission.md` §6 |
 | Spec-driven development: include all spec files, prompts and planning artifacts in the repo | OK for `specs/001-mamoru-v1/`, `.specify/`, `inputs/`. RISK: the lane briefs used tonight (prompts to the agents) are not in the repo. L0 may add them under `docs/` or `inputs/` |
-| Clearly distinguish what is new and what is reused | FIX: README says which dependencies are third-party (Safe, Rhinestone modules, Uniswap periphery, viem). See §6 for prior Titan26 material |
+| Clearly distinguish what is new and what is reused | FIX: README says which dependencies are third-party (Safe, Rhinestone modules, Uniswap periphery, viem) |
 
 ## 6. Track eligibility (RISK, Ot decides)
 
 - Classic "From Scratch" rule: "all work on your project must begin after the hackathon officially starts. Any prior project-specific code, designs, or assets are not allowed unless they're from public libraries or starter kits. Projects built before the event ... won't qualify for partner prizes."
 - Hacking began Fri 25 Sep 21:00 JST (14:00 CEST). GitHub: `ottodevs/mamoru` created 12:03 UTC (21:03 JST), first commit 14:03 CEST; `ottodevs/mamoru-landing` created 12:14 UTC. Both start after the official start.
-- Open point: `specs/001-mamoru-v1/scenarios.md` describes M01 to M14 as a "rewrite of Titan26 s01 to s14", an earlier project. If any Titan26 code, design or asset was carried over, the classic track rule is at risk and the Continuity Track (which would also change the Uniswap pool to $4,000) is the honest choice. If only the idea and lessons carried over, say so in "How it's made". This lane does not change the track.
 
 ## 7. Uniswap Developer Feedback Form (https://developers.uniswap.org/hackathon-feedback)
 
