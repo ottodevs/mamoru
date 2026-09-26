@@ -45,7 +45,10 @@ MultiBaas is the indexer behind the production dashboard on Base. Details and ev
 
 ## Team handles
 
-TODO-HANDLES
+- X: [@entermamoru](https://x.com/entermamoru)
+- Web: [mamoru.lol](https://mamoru.lol)
+- Code: [github.com/ottodevs/mamoru](https://github.com/ottodevs/mamoru)
+- Team: Brais and Otto ([@ottodevs](https://github.com/ottodevs) on GitHub)
 
 ## Setup and tests
 
@@ -90,3 +93,7 @@ What failed or cost time:
 - Our spec asked for a starting block seven days back (`-302400`) on the pool. The Free plan refused it with 403 "request exceeds the plan's past logs max depth limit" (100 blocks). We now read older history from Base RPC logs and label it as fallback.
 - The Free plan caps indexing at 2 events per second and 30,000 calls per month. The engine keeps the Base RPC path live for that reason.
 - [PENDING L4] Results of MB-02 to MB-04 (query formats accepted, which queries reconciled, mismatches), including failures.
+
+## License
+
+MIT, see [`LICENSE`](LICENSE).
