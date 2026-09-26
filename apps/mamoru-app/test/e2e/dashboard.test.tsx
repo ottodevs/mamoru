@@ -121,6 +121,12 @@ describe('a full pool in your plan (dashboard.md §7.6.2)', () => {
     expect(text).toContain('View pool')
   })
 
+  test("the account's positions in the pool show their range state", () => {
+    const withPosition = { ...pool, accountPositions: [{ tokenId: '1234', rangeState: { ...pool.twapGuard, value: 'out_of_range' as const } }] }
+    const { text: t } = view(emptyAccount, { status: 'ready', pools: [withPosition], syncedAt: null })
+    expect(t).toContain('Your positions in this pool #1234 Out of range Base · block 52114380')
+  })
+
   test('twap above the guard says so', () => {
     const above = { ...pool, twapGuard: { ...pool.twapGuard, value: 'above_guard' as const } }
     const { text: t } = view(emptyAccount, { status: 'ready', pools: [above], syncedAt: null })

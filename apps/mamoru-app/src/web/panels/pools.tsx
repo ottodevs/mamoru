@@ -174,7 +174,7 @@ function PoolCard({ pool: v }: { pool: PoolView }) {
       </div>
       <dl className="m-0 grid">
         <Row label={`Price of ${v.pool.token1} in ${v.pool.token0}`}>
-          <FigureValue figure={v.price} />
+          <FigureValue figure={v.price} className="text-[1.15rem] text-emerald" />
         </Row>
         <Row label="Tick">
           <FigureValue figure={v.tick} />
