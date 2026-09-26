@@ -15,6 +15,7 @@
       "dependencies": {
         "@mamoru/account": "workspace:*",
         "@mamoru/domain": "workspace:*",
+        "@mamoru/policy": "workspace:*",
         "@mamoru/registry": "workspace:*",
         "@tanstack/react-query": "5.101.2",
         "@tanstack/react-router": "1.170.39",

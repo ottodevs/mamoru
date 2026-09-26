@@ -13,6 +13,7 @@
     "@mamoru/domain": "workspace:*",
     "@mamoru/account": "workspace:*",
     "@mamoru/registry": "workspace:*",
+    "@mamoru/policy": "workspace:*",
     "hono": "4.13.9",
     "react": "19.2.7",
     "react-dom": "19.2.7",
