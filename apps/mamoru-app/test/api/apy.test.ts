@@ -78,9 +78,16 @@ describe('GET /api/apy', () => {
     const { res, view } = await getApy(fetcher)
     expect(res.status).toBe(200)
     expect(view.currentPct).toBeNull()
-    expect(view.currentSource).toBe('GeckoTerminal unavailable')
+    expect(view.currentSource).toBe('Pool fee data unavailable')
     expect(view.monthlyPct).toBeNull()
     expect(view.monthlySource).toBe('DefiLlama unavailable')
+  })
+
+  test('falls back to DefiLlama daily base APY when GeckoTerminal fails', async () => {
+    const { fetcher } = fakeFetch({ llama: { data: [{ timestamp: day(1), apy: 12, apyBase: 10.5 }] } })
+    const { view } = await getApy(fetcher)
+    expect(view.currentPct).toBe(10.5)
+    expect(view.currentSource).toBe('Pool fees, last 24h · DefiLlama')
   })
 
   test('caches successes and does not cache failures', async () => {
@@ -94,6 +101,7 @@ describe('GET /api/apy', () => {
     const cold = memoryCache()
     await getApy(down.fetcher, cold)
     await getApy(down.fetcher, cold)
-    expect(down.calls.length).toBe(4)
+    // Each request tries GeckoTerminal, DefiLlama for the current fallback, and DefiLlama for the monthly mean.
+    expect(down.calls.length).toBe(6)
   })
 })
