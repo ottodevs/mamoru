@@ -1,0 +1,33 @@
+{
+  "name": "@mamoru/app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "dev:worker": "wrangler dev",
+    "deploy": "vite build && wrangler deploy"
+  },
+  "dependencies": {
+    "@mamoru/domain": "workspace:*",
+    "@mamoru/account": "workspace:*",
+    "@mamoru/registry": "workspace:*",
+    "hono": "4.13.9",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "@tanstack/react-query": "5.101.2",
+    "@tanstack/react-router": "1.170.39",
+    "viem": "2.56.9"
+  },
+  "devDependencies": {
+    "vite": "8.1.4",
+    "@vitejs/plugin-react": "6.1.1",
+    "tailwindcss": "4.3.3",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "wrangler": "4.139.0",
+    "@cloudflare/workers-types": "5.20260926.1"
+  }
+}
