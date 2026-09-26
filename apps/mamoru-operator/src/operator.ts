@@ -28,6 +28,7 @@ import { permissionIdOf, toSmartSession } from '@mamoru/account/sessions'
 import { minOut, quoteExactInputSingle } from '@mamoru/uniswap-v3/quote'
 import { Engine, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
+import { isTerminal } from '@mamoru/journal'
 import { USDC_POOLS, amountsForLiquidity, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
 import { Lock } from './lock.ts'
@@ -100,6 +101,17 @@ function engineKind(k: OpRecord['kind']): OpView['kind'] {
 
 const now = () => new Date().toISOString()
 
+type Progress = NonNullable<FundingView['progress']>
+
+/** Engine op kind -> the progress line the SPA shows. close_position is the engine closing a position to re-range it. */
+const ENGINE_STEP: Record<OpRecord['kind'], Progress['step']> = {
+  enter_swap: 'swapping',
+  enter_mint: 'opening',
+  close_position: 'reranging',
+  harvest: 'rebalancing',
+  convert: 'rebalancing',
+}
+
 /** Accounts activated before the operator stored a policy id per account ran this policy. */
 const LEGACY_POLICY = 'conservador-live-v1'
 const LIVE_POOL_NAME = 'pool:USDC/cbBTC/500'
@@ -116,6 +128,9 @@ export class Operator {
   private readonly runners = new Map<string, Runner>()
   private armTimer: ReturnType<typeof setTimeout> | null = null
   private armStopped = false
+  /** Owner transactions being executed right now, by accountKey. */
+  private readonly busy = new Map<string, Progress>()
+  private readonly seenAt = new Map<string, string>()
 
   constructor(
     readonly cfg: OperatorConfig,
@@ -200,8 +215,40 @@ export class Operator {
         inRange: p.inRange,
         amountUsdc: (p.token0 === 'USDC' ? p.amount0 : p.amount1).toString(),
         amountCbbtc: (p.token0 === 'cbBTC' ? p.amount0 : p.token1 === 'cbBTC' ? p.amount1 : 0n).toString(),
+        amounts: [
+          { token: p.token0, amount: p.amount0.toString(), decimals: entry(p.token0).decimals ?? 18 },
+          { token: p.token1, amount: p.amount1.toString(), decimals: entry(p.token1).decimals ?? 18 },
+        ],
+        valueUsdc: positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96).toString(),
       })),
+      progress: this.progressOf(acc),
     }
+  }
+
+  /** What is in flight for this account: an owner transaction the operator is executing, else a live engine op. */
+  progressOf(acc: AccountState): Progress | null {
+    const owner = this.busy.get(acc.accountKey)
+    if (owner) return { ...owner }
+    const runner = this.runners.get(acc.accountKey)
+    if (!runner) return null
+    const o = runner.engine.journal.ops.findLast((x) => !isTerminal(x.state))
+    if (!o) return null
+    return { step: ENGINE_STEP[o.kind], pool: o.intent.pool, since: this.since(acc.accountKey, `${runner.epoch}-${runner.run}-${o.opId}`) }
+  }
+
+  /** First time this engine op was seen in flight (the journal keeps no timestamps). */
+  private since(key: string, opKey: string): string {
+    const k = `${key}|${opKey}`
+    let at = this.seenAt.get(k)
+    if (!at) {
+      if (this.seenAt.size > 1000) this.seenAt.clear()
+      this.seenAt.set(k, (at = now()))
+    }
+    return at
+  }
+
+  private setBusy(acc: AccountState, step: Progress['step']): void {
+    this.busy.set(acc.accountKey, { step, since: now() })
   }
 
   ops(ctx: AccountContext, after: string | null): { ops: OpView[] } {
@@ -637,14 +684,25 @@ export class Operator {
   }
 
   private async execute(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView): Promise<void> {
+    this.setBusy(acc, p.kind === 'activate' ? 'activating' : p.kind === 'stop' ? 'closing' : 'withdrawing')
+    try {
+      await this.executeOwner(acc, live, p, signature, op)
+    } finally {
+      this.busy.delete(acc.accountKey)
+    }
+  }
+
+  private async executeOwner(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView): Promise<void> {
     const safe = live.safe
     if (p.kind === 'activate') {
       const { deployed } = await readSafeNonce(this.client, safe)
       if (!deployed) {
+        this.setBusy(acc, 'deploying')
         const d = deployCall(live)
         const { hash, receipt } = await this.relayer.send(d)
         console.log(`[owner] deploy ${safe} tx ${hash} ${receipt.status}`)
         if (receipt.status !== 'success') return this.patchOp(acc, op.opId, { state: 'failed', code: 'DEPLOY_FAILED', txHash: hash })
+        this.setBusy(acc, 'activating')
       }
       const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
       const eth = await this.client.getBalance({ address: safe })
