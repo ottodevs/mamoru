@@ -1,14 +1,30 @@
 {
-  // mamoru-app (plan §19.1). Static assets only until the Hono API and Vite build land.
+  // mamoru-app (plan §19.1): the SPA assets plus the Hono API. SESSION_SECRET is a secret (L0 sets it; locally .dev.vars).
   "name": "mamoru-app",
   "account_id": "ac5100a2c4cec1e240cbd20252ba9213",
+  "main": "src/worker.ts",
   "compatibility_date": "2026-09-26",
   "workers_dev": false,
   "preview_urls": false,
   "routes": [{ "pattern": "app.mamoru.lol", "custom_domain": true }],
   "assets": {
-    "directory": "./public",
-    "not_found_handling": "single-page-application"
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/hooks/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mamoru",
+      "database_id": "682b2a66-d9d4-49e5-ac78-596d002d02ca",
+      "migrations_dir": "../../migrations/d1"
+    }
+  ],
+  "vars": {
+    "MODE": "production",
+    "CHAIN_ID": "8453",
+    "CORE_DRY_RUN": "true"
   },
   "observability": { "enabled": true }
 }

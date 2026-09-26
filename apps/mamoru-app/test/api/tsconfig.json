@@ -1,0 +1,5 @@
+{
+  // Typecheck of the mamoru-app Worker API and its tests (L3). Run: bunx tsc -p apps/mamoru-app/test/api
+  "extends": "../../../../tsconfig.base.json",
+  "include": ["../../src/worker.ts", "../../src/api/**/*.ts", "./**/*.ts"]
+}
