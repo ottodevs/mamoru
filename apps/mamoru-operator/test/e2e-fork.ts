@@ -29,7 +29,7 @@ if (!process.env.RPC_URL && existsSync(envFile)) {
 }
 if (!process.env.RPC_URL && process.env.BASE_RPC_URL) process.env.RPC_URL = process.env.BASE_RPC_URL
 
-const DEPOSIT = 10_000_000n
+const DEPOSIT = 12_000_000n
 const TRANSFER = 2_000_000n
 const WITHDRAW = 1_000_000n
 const SINK = '0x000000000000000000000000000000000000dEaD' as const
