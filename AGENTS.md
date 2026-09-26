@@ -10,7 +10,15 @@ T001 is on `main` at `82774c7`. Do not start the next task until Ot says so. The
 
 ## One unit
 
-Implement one task. One short commit. Review that commit. Fix it or approve it. Fast-forward `main`. Only then start the next task. Do not stack a phase of unreviewed commits.
+The next task stays off `main` until its review passes. One task, then stop.
+
+1. Implement only that task from `tasks.md`. Cursor, model `claude-opus-5-5-high`. Only the files the task names.
+2. One short commit on a branch that exists for that task alone. Push it to GitHub. Do not start the next task on that branch.
+3. Codex `gpt-6-astra` at medium reviews that commit. Verdict is APTO or NO-GO. It does not rewrite the commit.
+4. NO-GO: one fix commit on the same branch, then review again. APTO: fast-forward `main` and delete the branch.
+5. Only then take the next task.
+
+Do not stack a phase of unreviewed commits. Do not open a pull request. Do not squash. Forgejo stays fetch-only.
 
 ## Read before writing a spec
 
