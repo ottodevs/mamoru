@@ -142,6 +142,7 @@ const mineUntilSafeStep: StepHandler = async (ctx) => {
   return { step: 'mine until the deposit is below safe', ok: true, detail: `mined ${mined} blocks; block ${target} is safe` }
 }
 
+/** `eth` is the account balance plus its EntryPoint deposit, where the v0.7 prefund refund lands. */
 type AccountSnapshot = { eth: bigint; nonce: bigint; tokens: Record<string, bigint>; liquidity: Record<string, bigint> }
 
 async function snapshot(ctx: ScenarioCtx, engine: Engine): Promise<AccountSnapshot> {
@@ -155,7 +156,7 @@ async function snapshot(ctx: ScenarioCtx, engine: Engine): Promise<AccountSnapsh
     liquidity[String(id)] = p[7]
   }
   return {
-    eth: await c.getBalance({ address: w.a1.safe }),
+    eth: (await c.getBalance({ address: w.a1.safe })) + (await c.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'balanceOf', args: [w.a1.safe] })),
     nonce: await w.lab.entryPointNonce(w.a1.safe, sessionNonceKey(engine.cfg.nonceLane)),
     tokens,
     liquidity,
@@ -189,7 +190,7 @@ async function checkOp(ctx: ScenarioCtx, engine: Engine, op: OpRecord, before: A
   for (const t of badTargets) ctx.invariantErrors.push({ name: 'INV-TARGETS', detail: `${op.opId} calls ${t}` })
   const gasSpent = before.eth - after.eth
   const expectedGas = included ? op.included!.actualGasCost : 0n
-  if (gasSpent !== expectedGas) ctx.invariantErrors.push({ name: 'INV-ETH-GAS', detail: `${op.opId}: ETH fell ${gasSpent}, actualGasCost ${expectedGas}` })
+  if (gasSpent !== expectedGas) ctx.invariantErrors.push({ name: 'INV-ETH-GAS', detail: `${op.opId}: ETH plus deposit fell ${gasSpent}, actualGasCost ${expectedGas}` })
   const nonceStep = after.nonce - before.nonce
   if (nonceStep !== (included ? 1n : 0n)) ctx.invariantErrors.push({ name: 'INV-NONCE', detail: `${op.opId}: lane moved ${nonceStep}` })
   if (included && op.nonce !== before.nonce) ctx.invariantErrors.push({ name: 'INV-NONCE', detail: `${op.opId} signed nonce ${op.nonce}, lane was ${before.nonce}` })

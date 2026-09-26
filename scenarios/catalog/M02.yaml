@@ -1,0 +1,42 @@
+id: M02
+requirements: [FR-DEC-007, FR-ENG-015, FR-UNI-001, FR-UNI-002, FR-UNI-003, FR-UNI-006, FR-ACC-003]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: engine
+fixtures: [fx-owners, fx-safe, fx-gas, fx-sessions, fx-usdc]
+steps:
+  - fixtures: {}
+  # 1. mine until the deposit is below safe
+  - mine-until-safe: {}
+  # 2. review
+  - review:
+      label: step 2
+      expect:
+        codes: [OBS_DEPOSIT_DETECTED, ENY_SHADOW]
+        decision: DECIDE_ENTER
+        buckets: { stables: PLAN_BUCKET_NO_EXECUTABLE_POOL, btc-usdc: STRATEGY_PREFERENCE, risk: PLAN_BUCKET_NO_EXECUTABLE_POOL }
+        op: { kind: enter_swap, state: confirmed, code: EXEC_OK, grant: enter-swap }
+  # 3. immediate review after the terminal state
+  - review:
+      label: step 3
+      expect:
+        decision: DECIDE_ENTER
+        op: { kind: enter_mint, state: confirmed, code: EXEC_OK, grant: enter-mint }
+        managed: true
+  # 4. review
+  - review:
+      label: step 4
+      expect:
+        decision: DECIDE_HOLD
+        reason: DECIDE_IN_RANGE
+        buckets: { stables: PLAN_BUCKET_NO_EXECUTABLE_POOL, btc-usdc: STRATEGY_PREFERENCE, risk: PLAN_BUCKET_NO_EXECUTABLE_POOL }
+        op: none
+  - journal: { decisions: 3, ops: 2 }
+  - persist-first: {}
+expect:
+  codes: [OBS_DEPOSIT_DETECTED, DECIDE_ENTER, EXEC_OK, STRATEGY_PREFERENCE, PLAN_BUCKET_NO_EXECUTABLE_POOL, ENY_SHADOW, DECIDE_HOLD, DECIDE_IN_RANGE]
+invariants: [INV-RECIPIENT, INV-TARGETS, INV-SLOT, INV-NONCE, INV-PERSIST-FIRST, INV-ETH-GAS, INV-CODES, INV-FORK-CHAIN, INV-NO-ANVIL-IN-ENGINE]
