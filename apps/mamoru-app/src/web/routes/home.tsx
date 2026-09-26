@@ -54,11 +54,11 @@ function ApyTiles() {
     <>
       <li className="apr apr-live flex-1" title={data?.currentSource}>
         <span className="apr-label whitespace-nowrap">{homeCopy.apy}</span>
-        <strong key={dataUpdatedAt} className="apr-fade" data-testid="apy-current">
+        <strong key={`v-${dataUpdatedAt}`} className="apr-fade" data-testid="apy-current">
           {pct(data?.currentPct)}
         </strong>
         {data && <span className="apr-src">{caption(data.currentSource, data.currentWindow)}</span>}
-        {data && <span key={dataUpdatedAt} className="apr-tick" style={{ animationDuration: `${APY_REFRESH_MS}ms` }} aria-hidden="true" />}
+        {data && <span key={`t-${dataUpdatedAt}`} className="apr-tick" style={{ animationDuration: `${APY_REFRESH_MS}ms` }} aria-hidden="true" />}
       </li>
       <li className="apr flex-1" title={data?.monthlySource}>
         <span className="apr-label whitespace-nowrap">{weekly ? homeCopy.week : homeCopy.month}</span>
