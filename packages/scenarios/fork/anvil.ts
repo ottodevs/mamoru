@@ -11,6 +11,8 @@ export type AnvilOptions = {
   chainId: number
   slotsInAnEpoch: number
   logPath: string
+  /** LAB-08 a: an EVM hardfork without the RIP-7212 precompile. Default: anvil's latest. */
+  hardfork?: string
 }
 
 export type AnvilHandle = {
@@ -77,6 +79,7 @@ export function anvilArgv(opts: AnvilOptions, port: number): string[] {
     '--slots-in-an-epoch',
     String(opts.slotsInAnEpoch),
     '--no-request-size-limit',
+    ...(opts.hardfork ? ['--hardfork', opts.hardfork] : []),
   ]
   assertNoKeyInArgv(argv)
   return argv
@@ -181,5 +184,10 @@ export async function postStartChecks(
   if (served !== expected.anvil.version) {
     throw new ReasonError('LAB_ANVIL_VERSION_MISMATCH', `rpc reports ${clientVersion}`)
   }
+  const simulated = await (client.request({ method: 'eth_simulateV1' as never, params: [{ blockStateCalls: [{ calls: [] }] }, 'latest'] as never }) as Promise<unknown>).then(
+    (r) => Array.isArray(r) && r.length === 1,
+    () => false,
+  )
+  if (!simulated) throw new ReasonError('LAB_SIMULATE_UNAVAILABLE', 'eth_simulateV1 is not served')
   return { chainId, blockHash: block.hash, clientVersion }
 }

@@ -13,7 +13,8 @@ export type ScenarioResult = {
   id: string
   file: string
   requirements: string[]
-  status: 'pass' | 'fail'
+  /** `not-executed`: a pre-step gate stopped the scenario (LAB_P256_UNAVAILABLE). Never a pass. */
+  status: 'pass' | 'fail' | 'not-executed'
   kt1?: string[]
   gate?: string
   steps: StepResult[]

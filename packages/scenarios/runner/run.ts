@@ -13,7 +13,7 @@ import { artifactsRoot, ensureDir, sha256File, writeJson, type ScenarioResult, t
 import { dumpState } from '../perturb/index.ts'
 import { loadCatalog, type Scenario } from './catalog.ts'
 import type { RunCtx, ScenarioCtx, StepHandler } from './context.ts'
-import { LAB_STEPS } from './lab-steps.ts'
+import { LAB_STEPS, p256Gate } from './lab-steps.ts'
 import { loadManifest, REPO_ROOT } from './manifest.ts'
 import { SESSION_STEPS } from './session-steps.ts'
 import { SnapshotBook } from './snapshots.ts'
@@ -65,6 +65,7 @@ async function runScenario(run: RunCtx, s: Scenario, env: WorldEnv, first: boole
   const dir = ensureDir(`${artifactsRoot(REPO_ROOT)}/${s.id}/${run.runId}`)
   const ctx: ScenarioCtx = { run, scenario: s, world: env.world, snaps: env.snaps, enginePort: env.enginePort, results: [], codes: new Set(), kt1: [], invariantErrors: [], dir }
   const result: ScenarioResult = { id: s.id, file: s.file.replace(`${REPO_ROOT}/`, ''), requirements: s.requirements, status: 'fail', steps: [], invariants: {}, codes: [], durationMs: 0 }
+  let notExecuted = false
   try {
     if (env.snaps && env.lab) {
       if (!first) {
@@ -75,7 +76,7 @@ async function runScenario(run: RunCtx, s: Scenario, env: WorldEnv, first: boole
       for (const p of s.prepare ?? []) {
         const [k, a] = Object.entries(p)[0]!
         if (k === 'set-code') await setRegistryCode(env.lab, a.name as string)
-        else throw new Error(`unknown preparation ${k}`)
+        else if (k !== 'require-p256') throw new Error(`unknown preparation ${k}`)
       }
       try {
         await assertCodeHashes(env.lab.client)
@@ -93,6 +94,16 @@ async function runScenario(run: RunCtx, s: Scenario, env: WorldEnv, first: boole
       if (s.expect.gate) {
         ctx.results.push({ step: 'registry code hashes checked before the first step', ok: false, detail: `expected ${s.expect.gate}, all hashes matched` })
         return finish()
+      }
+      if (s.prepare?.some((p) => 'require-p256' in p)) {
+        const gate = await p256Gate(env.lab.client)
+        ctx.results.push({ step: 'P-256 vector checked before the first step', ok: !gate.code, detail: `${gate.code ?? 'verifies'}: ${gate.check.detail}`, codes: gate.code ? [gate.code] : [] })
+        if (gate.code) {
+          ctx.codes.add(gate.code)
+          result.gate = gate.code
+          notExecuted = true
+          return finish()
+        }
       }
     }
     for (const step of s.steps) {
@@ -137,7 +148,7 @@ async function runScenario(run: RunCtx, s: Scenario, env: WorldEnv, first: boole
     const missing = expectedCodes.filter((c) => !ctx.codes.has(c))
     if (missing.length) result.steps.push({ step: 'expected codes observed', ok: false, detail: `missing ${missing.join(', ')}` })
     const allOk = !result.error && result.steps.length > 0 && result.steps.every((x) => x.ok) && Object.values(inv).every((x) => x.ok) && ctx.kt1.length === 0
-    result.status = allOk ? 'pass' : 'fail'
+    result.status = notExecuted && !result.error ? 'not-executed' : allOk ? 'pass' : 'fail'
     result.durationMs = Date.now() - t
     await writeJson(`${dir}/result.json`, result)
     return result
@@ -173,7 +184,7 @@ export async function runCatalog(opts: { only?: string[] } = {}): Promise<{ runI
         process.stdout.write(`${s.id} … `)
         const r = await runScenario(run, s, env, i === 0)
         results.push(r)
-        console.log(`${r.status}${r.kt1 ? ' KT-1' : ''} (${r.durationMs} ms)${r.status === 'fail' ? ` ${r.error?.split('\n')[0] ?? r.steps.filter((x) => !x.ok).map((x) => `${x.step}: ${x.detail}`).slice(0, 2).join(' | ')}` : ''}`)
+        console.log(`${r.status}${r.status === 'not-executed' ? ` ${r.gate}` : ''}${r.kt1 ? ' KT-1' : ''} (${r.durationMs} ms)${r.status === 'fail' ? ` ${r.error?.split('\n')[0] ?? r.steps.filter((x) => !x.ok).map((x) => `${x.step}: ${x.detail}`).slice(0, 2).join(' | ')}` : ''}`)
       }
       if (env.anvil && kind !== 'basic') await env.anvil.stop()
       env.enginePort?.stop()
@@ -195,7 +206,13 @@ export async function runCatalog(opts: { only?: string[] } = {}): Promise<{ runI
     pins: manifest.pins,
     policy: 'conservador-lab-v1',
     durationMs: Date.now() - started,
-    summary: { total: results.length, pass: results.filter((r) => r.status === 'pass').length, fail: results.filter((r) => r.status === 'fail').length, kt1: results.filter((r) => r.kt1).map((r) => r.id) },
+    summary: {
+      total: results.length,
+      pass: results.filter((r) => r.status === 'pass').length,
+      fail: results.filter((r) => r.status === 'fail').length,
+      notExecuted: results.filter((r) => r.status === 'not-executed').map((r) => ({ id: r.id, code: r.gate })),
+      kt1: results.filter((r) => r.kt1).map((r) => r.id),
+    },
     scenarios: results.map((r) => ({ id: r.id, status: r.status, requirements: r.requirements, codes: r.codes, kt1: r.kt1, gate: r.gate, artifacts: `scenarios/.artifacts/${r.id}/${runId}/` })),
   }
   const reportPath = `${runDir}/report.json`

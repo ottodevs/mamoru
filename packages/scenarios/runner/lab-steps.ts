@@ -1,12 +1,13 @@
 import { readdirSync } from 'node:fs'
-import { encodeFunctionData, keccak256, stringToHex } from 'viem'
+import { encodeFunctionData, keccak256, stringToHex, type PublicClient } from 'viem'
 import { ReasonError, type Hex } from '@mamoru/domain'
 import { address, erc20Abi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { Lab } from '../fixtures/lab.ts'
 import { DEPOSIT_USDC, GAS_RESERVE_WEI, ownerExec, type World } from '../fixtures/world.ts'
 import { assertNoKeyInArgv } from '../fork/anvil.ts'
 import { startLabFork } from '../fork/lab-fork.ts'
-import { dumpState, secondFork } from '../perturb/index.ts'
+import { dumpState, secondFork, setRegistryCode } from '../perturb/index.ts'
+import { checkP256, type P256Check } from '../webauthn/index.ts'
 import { processCmdline, secretScan, writeJson, type StepResult } from '../report/index.ts'
 import { readScenario } from './catalog.ts'
 import type { ScenarioCtx, StepHandler } from './context.ts'
@@ -49,7 +50,7 @@ const startForkStep: StepHandler = async (ctx, args) => {
         : [run.proxyUrl]
   const out: StepResult[] = []
   for (const [i, forkUrl] of urls.entries()) {
-    const label = `start fork${args.chainId ? ` chain ${args.chainId}` : ''}${args.rewriteChainId ? ` answering ${args.rewriteChainId}` : ''}${args.manifest ? ` with ${args.manifest}` : ''}${args.forkBlock === null ? ' without block' : ''}${args.forkUrl ? ` (${args.forkUrl} #${i + 1})` : ''}`
+    const label = `start fork${args.chainId ? ` chain ${args.chainId}` : ''}${args.rewriteChainId ? ` answering ${args.rewriteChainId}` : ''}${args.refuseMethods ? ` without ${(args.refuseMethods as string[]).join(', ')}` : ''}${args.manifest ? ` with ${args.manifest}` : ''}${args.forkBlock === null ? ' without block' : ''}${args.forkUrl ? ` (${args.forkUrl} #${i + 1})` : ''}`
     out.push(
       await expectCode(ctx, label, args.expect as string, async () => {
         const { handle } = await startLabFork({
@@ -59,6 +60,7 @@ const startForkStep: StepHandler = async (ctx, args) => {
           chainId: args.chainId as number | undefined,
           forkBlock: args.forkBlock as number | null | undefined,
           rewriteChainId: args.rewriteChainId as number | undefined,
+          refuseMethods: args.refuseMethods as string[] | undefined,
         })
         run.anvils.push(handle)
         await handle.stop()
@@ -214,6 +216,45 @@ const reproStep: StepHandler = async (ctx) => {
   return { step: 'dump, load in another anvil of the same version, observe again', ok: same, detail: `${code}, state sha256 ${stateSha256.slice(0, 16)}…`, codes: [code] }
 }
 
+/** FR-LAB-010: a passkey scenario runs only on a fork that verifies P-256. */
+export async function p256Gate(client: PublicClient): Promise<{ code?: 'LAB_P256_UNAVAILABLE'; check: P256Check }> {
+  const check = await checkP256(client)
+  return check.available ? { check } : { code: 'LAB_P256_UNAVAILABLE', check }
+}
+
+/**
+ * LAB-08 a: the gate on its own anvil of the catalog fork, as pinned or with
+ * the precompile or the fallback taken away. The worlds are never touched.
+ */
+const p256CheckStep: StepHandler = async (ctx, args) => {
+  const run = ctx.run
+  const hardfork = args.hardfork as string | undefined
+  const clear = args.clear as string | undefined
+  const { handle } = await startLabFork({
+    manifest: run.manifest,
+    forkUrl: run.proxyUrl,
+    logPath: `${ctx.dir}/anvil-p256-${hardfork ?? 'latest'}${clear ? '-cleared' : ''}.log`,
+    hardfork,
+  })
+  run.anvils.push(handle)
+  run.rpcUrls.add(handle.url)
+  try {
+    const lab = new Lab(handle.url, run.manifest.fork.chainId)
+    if (clear) await setRegistryCode(lab, clear, '0x')
+    const gate = await p256Gate(lab.client)
+    const code = gate.code ?? 'NONE'
+    ctx.codes.add(code)
+    const verifies = [gate.check.precompile && 'precompile', gate.check.fallback && 'fallback'].filter(Boolean).join(',')
+    const expected = args.expect as string
+    const ok = (expected === 'available' ? gate.check.available : code === expected) && (args.verifies === undefined || (args.verifies as string[]).join(',') === verifies)
+    const label = `P-256 vector on ${hardfork ?? "anvil's default hardfork"}${clear ? `, ${clear} without code` : ''}`
+    const verdict = gate.code ? `${gate.code}, passkey scenarios are not executed` : 'passkey scenarios run'
+    return { step: label, ok, detail: `${verdict}. ${gate.check.detail}`, codes: [code] }
+  } finally {
+    await handle.stop()
+  }
+}
+
 const noopStep: StepHandler = async () => ({ step: 'scenario body', ok: true })
 
 export const LAB_STEPS: Record<string, StepHandler> = {
@@ -229,5 +270,6 @@ export const LAB_STEPS: Record<string, StepHandler> = {
   'check-fixture-balances': fixtureBalancesStep,
   'engine-port-call': enginePortCallStep,
   repro: reproStep,
+  'p256-check': p256CheckStep,
   noop: noopStep,
 }

@@ -1,4 +1,3 @@
-import { createECDH } from 'node:crypto'
 import { encodeFunctionData, getAddress, parseEventLogs, type Hex } from 'viem'
 import type { PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
@@ -20,6 +19,7 @@ import { SessionLedger } from '@mamoru/account/precheck'
 import { approve, exactInputSingle, mint } from '@mamoru/uniswap-v3'
 import { Lab, devAccount, type TxResult } from './lab.ts'
 import { sendSessionOp, type SessionOpOutcome } from './session-op.ts'
+import { PASSKEY_SCALARS, SoftwarePasskey, signSafeTxWithPasskey } from '../webauthn/index.ts'
 
 /** Public holder of USDC and cbBTC on Base at the catalog block, impersonated for fx-usdc and fx-whale. */
 export const WHALE: Address = getAddress('0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb')
@@ -29,26 +29,13 @@ export const SECOND_DEPOSIT_USDC = 5_000_000_000n
 export const GAS_RESERVE_WEI = 50_000_000_000_000_000n
 export const POOL = 'pool:USDC/cbBTC/500'
 
-/** Fixed test scalars for the software passkeys. Test material only. */
-const PASSKEY_SCALARS = {
-  a1: '0x1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100',
-  a2: '0x2f2e2d2c2b2a292827262524232221201f1e1d1c1b1a19181716151413121110',
-} as const
-
-export function passkeyPublicKey(scalar: Hex): { x: bigint; y: bigint } {
-  const ecdh = createECDH('prime256v1')
-  ecdh.setPrivateKey(Buffer.from(scalar.slice(2), 'hex'))
-  const pub = ecdh.getPublicKey()
-  return { x: BigInt(`0x${pub.subarray(1, 33).toString('hex')}`), y: BigInt(`0x${pub.subarray(33, 65).toString('hex')}`) }
-}
-
 export type ActiveGrant = { name: string; grant: SessionGrant; permissionId: Hex }
 
 export type AccountFixture = {
   label: string
   safe: Address
   backupOwner: PrivateKeyAccount
-  passkey: { x: bigint; y: bigint }
+  passkey: SoftwarePasskey
   sessionKey: PrivateKeyAccount
   caps: Caps
   grants: ActiveGrant[]
@@ -91,24 +78,32 @@ export type OpRecord = {
   validator?: string
 }
 
+/** Which owner signs: the backup EOA, or the passkey through SafeWebAuthnSharedSigner. */
+export type OwnerSigner = 'backup' | 'passkey'
+
+export async function ownerSignature(lab: Lab, acct: AccountFixture, tx: SafeTx, by: OwnerSigner = 'backup'): Promise<Hex> {
+  return by === 'passkey' ? signSafeTxWithPasskey(acct.passkey, acct.safe, lab.chainId, tx) : signSafeTx(acct.backupOwner, acct.safe, lab.chainId, tx)
+}
+
 export async function ownerExec(
   lab: Lab,
   relayer: PrivateKeyAccount,
   acct: AccountFixture,
   op: { to: Address; data: Hex; operation?: 0 | 1 },
+  by: OwnerSigner = 'backup',
 ): Promise<TxResult & { tx: SafeTx; signature: Hex; data: Hex }> {
   const nonce = await lab.client.readContract({ address: acct.safe, abi: safeAbi, functionName: 'nonce' })
   const tx: SafeTx = { to: op.to, value: 0n, data: op.data, operation: op.operation ?? OPERATION_CALL, nonce }
-  const signature = await signSafeTx(acct.backupOwner, acct.safe, lab.chainId, tx)
+  const signature = await ownerSignature(lab, acct, tx, by)
   const data = execTransactionData(tx, signature)
   const r = await lab.send(relayer, acct.safe, data)
   acct.signedOwnerTxs.push({ tx, signature, data })
   return { ...r, tx, signature, data }
 }
 
-export async function ownerBatch(lab: Lab, relayer: PrivateKeyAccount, acct: AccountFixture, calls: MultiSendCall[]) {
+export async function ownerBatch(lab: Lab, relayer: PrivateKeyAccount, acct: AccountFixture, calls: MultiSendCall[], by: OwnerSigner = 'backup') {
   const b = multiSendCallOnly(calls)
-  return ownerExec(lab, relayer, acct, { to: b.to, data: b.data, operation: b.operation })
+  return ownerExec(lab, relayer, acct, { to: b.to, data: b.data, operation: b.operation }, by)
 }
 
 function must(r: TxResult, what: string): void {
@@ -141,7 +136,7 @@ function nextSalt(world: World): Hex {
 // fx-owners + fx-safe
 async function deployAccount(lab: Lab, relayer: PrivateKeyAccount, label: string, backupIndex: number, sessionIndex: number, scalar: Hex, saltNonce: bigint): Promise<AccountFixture> {
   const backupOwner = devAccount(backupIndex)
-  const passkey = passkeyPublicKey(scalar)
+  const passkey = new SoftwarePasskey(scalar)
   const call = createProxyCall({
     owners: [address('SafeWebAuthnSharedSigner'), backupOwner.address],
     threshold: 1n,

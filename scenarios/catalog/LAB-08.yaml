@@ -1,0 +1,26 @@
+id: LAB-08
+requirements: [FR-LAB-010, FR-RPC-002]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: none
+fixtures: []
+notes: >
+  Each check starts its own anvil of catalog-v1; the SESS world that WALK-02
+  uses is never changed. The engine side of b (EHG_SIM_UNAVAILABLE and no
+  operation when forced) needs the engine and is accepted by a later task.
+steps:
+  # The fork as pinned: the P-256 vector from the software passkey, and the same vector altered.
+  - p256-check: { expect: available, verifies: [precompile, fallback] }
+  # No RIP-7212 precompile: the pinned P256Verifier alone still verifies.
+  - p256-check: { hardfork: prague, expect: available, verifies: [fallback] }
+  # a) No precompile and the fallback verifier without code.
+  - p256-check: { hardfork: prague, clear: P256Verifier, expect: LAB_P256_UNAVAILABLE }
+  # b) The proxy in front of anvil does not serve eth_simulateV1: startup stops.
+  - start-fork: { refuseMethods: [eth_simulateV1], expect: LAB_SIMULATE_UNAVAILABLE }
+expect:
+  codes: [LAB_P256_UNAVAILABLE, LAB_SIMULATE_UNAVAILABLE]
+invariants: [INV-CODES]

@@ -54,13 +54,15 @@ export type ResponseRewrite = (method: string, result: unknown) => unknown
 
 /**
  * The port the engine and its adapters talk to. It forwards to anvil and
- * refuses anvil_*, evm_* and hardhat_* (INV-NO-ANVIL-IN-ENGINE).
+ * refuses anvil_*, evm_* and hardhat_* (INV-NO-ANVIL-IN-ENGINE). `refuse`
+ * removes more methods, as a provider without them would (LAB-08 b).
  */
-export function startEnginePort(target: string, rewrite?: ResponseRewrite): EnginePort {
+export function startEnginePort(target: string, rewrite?: ResponseRewrite, refuse: string[] = []): EnginePort {
   const stats: EnginePortStats = { forwarded: 0, rejectedLabMethods: 0, rejected: [] }
   const handleOne = async (msg: JsonRpcRequest): Promise<unknown> => {
-    if (isLabOnlyMethod(msg.method)) {
-      stats.rejectedLabMethods++
+    const lab = isLabOnlyMethod(msg.method)
+    if (lab || refuse.includes(msg.method)) {
+      if (lab) stats.rejectedLabMethods++
       stats.rejected.push(msg.method)
       return { jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: `method ${msg.method} is not available on the engine port` } }
     }

@@ -2,10 +2,12 @@ import { readdirSync } from 'node:fs'
 import { decodeFunctionResult, encodeFunctionData, keccak256, parseEventLogs, stringToHex, toEventSelector, type Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { address, erc20Abi, nonfungiblePositionManagerAbi, safe7579Abi, safeAbi, safeProxyFactoryAbi, smartSessionAbi } from '@mamoru/registry'
-import { OPERATION_CALL, execTransactionData, signSafeTx } from '@mamoru/account/safe'
+import type { PrivateKeyAccount } from 'viem/accounts'
+import { OPERATION_CALL, execTransactionData, multiSendCallOnly, signSafeTx, type MultiSendCall, type SafeTx } from '@mamoru/account/safe'
 import { WALKAWAY_TOKENS, walkawayCalls, type WalkawayPosition } from '@mamoru/account/owner'
 import { deployCallFromKit, recoveryKit, type RecoveryKit } from '@mamoru/account/recovery'
-import { WHALE, ownerBatch, type World } from '../fixtures/world.ts'
+import { devAccount } from '../fixtures/lab.ts'
+import { WHALE, ownerBatch, ownerSignature, type AccountFixture, type OwnerSigner, type World } from '../fixtures/world.ts'
 import { processCmdline, writeJson, type StepResult } from '../report/index.ts'
 import type { ScenarioCtx, StepHandler } from './context.ts'
 
@@ -88,16 +90,35 @@ async function readPositions(w: World, account: Address, tokenIds: bigint[]) {
 }
 
 /**
- * WALK-01: the backup owner closes everything from the recovery kit and the
- * chain alone. One Safe transaction through MultiSendCallOnly, sent and paid
- * by another development account.
+ * WALK-02: the Safe really asks SafeWebAuthnSharedSigner. A valid assertion
+ * from the same passkey over another SafeTx hash does not execute this one.
  */
-const ownerWalkaway: StepHandler = async (ctx) => {
+async function passkeyIsVerified(w: World, acct: AccountFixture, calls: MultiSendCall[], sender: PrivateKeyAccount): Promise<StepResult> {
+  const b = multiSendCallOnly(calls)
+  const nonce = await w.lab.client.readContract({ address: acct.safe, abi: safeAbi, functionName: 'nonce' })
+  const tx: SafeTx = { to: b.to, value: 0n, data: b.data, operation: b.operation, nonce }
+  const other = await ownerSignature(w.lab, acct, { ...tx, nonce: nonce + 1n }, 'passkey')
+  const outcome = await w.lab.client.call({ account: sender.address, to: acct.safe, data: execTransactionData(tx, other) }).then(
+    () => 'executed',
+    (e) => String((e as Error).message),
+  )
+  const refused = outcome.includes('GS024')
+  return check('a passkey assertion over another Safe transaction is refused', refused, refused ? 'GS024: SafeWebAuthnSharedSigner rejected the signature' : outcome.slice(0, 160))
+}
+
+/**
+ * WALK-01 and WALK-02: the owner closes everything from the recovery kit and
+ * the chain alone. One Safe transaction through MultiSendCallOnly, signed by
+ * the backup owner or by the passkey, sent and paid by another development account.
+ */
+const ownerWalkaway: StepHandler = async (ctx, args) => {
   const w = world(ctx)
   const acct = w.a1
   const c = w.lab.client
   const out: StepResult[] = []
   const engineCalls = forwarded(ctx)
+  const by = (args.signer as OwnerSigner | undefined) ?? 'backup'
+  const sender = by === 'passkey' ? devAccount((args.sender as number | undefined) ?? 3) : w.gasPayer
 
   const owners = await c.readContract({ address: acct.safe, abi: safeAbi, functionName: 'getOwners' })
   const kit = await downloadKit(
@@ -122,13 +143,16 @@ const ownerWalkaway: StepHandler = async (ctx) => {
   const amounts = { USDC: before.USDC + collected.USDC!, cbBTC: before.cbBTC + collected.cbBTC! }
   const calls = walkawayCalls({ account: safe, permissionIds: kit.permissionIds, positions, recipient, amounts, deadline })
 
-  const r = await ownerBatch(w.lab, w.gasPayer, acct, calls)
+  if (by === 'passkey') out.push(await passkeyIsVerified(w, acct, calls, sender))
+  const r = await ownerBatch(w.lab, sender, acct, calls, by)
   const success = r.receipt.logs.filter((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
+  const signer = `0x${r.signature.slice(26, 66)}`.toLowerCase()
+  const signedBy = by === 'passkey' ? signer === address('SafeWebAuthnSharedSigner').toLowerCase() : true
   out.push(
     check(
-      'backup owner signs one Safe transaction, the gas payer sends it',
-      r.ok && success.length === 1 && r.receipt.from.toLowerCase() === w.gasPayer.address.toLowerCase(),
-      `${calls.length} calls through MultiSendCallOnly, ${r.receipt.gasUsed} gas paid by ${r.receipt.from}`,
+      by === 'passkey' ? 'the passkey signs one Safe transaction through SafeWebAuthnSharedSigner, a development account sends it' : 'backup owner signs one Safe transaction, the gas payer sends it',
+      r.ok && success.length === 1 && signedBy && r.receipt.from.toLowerCase() === sender.address.toLowerCase(),
+      `${calls.length} calls through MultiSendCallOnly, ${r.receipt.gasUsed} gas paid by ${r.receipt.from}${by === 'passkey' ? `, contract signature from ${signer}` : ''}`,
     ),
   )
 
