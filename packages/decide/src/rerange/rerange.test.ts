@@ -132,6 +132,11 @@ describe('reduce (manage-any)', () => {
     expect(p.liquidity).toBeLessThan(65n * 10n ** 10n)
   })
 
+  test('after a reduce: idle volatile of a bucket at target goes back to savings with convert-any', () => {
+    const d = decide(obs({ balances: { ...BALANCED, cbBTC: 50_000_000_000n }, positions: [position()] }), live)
+    expect(d.proposal).toMatchObject({ kind: 'enter_swap', grant: 'convert-any', tokenIn: 'cbBTC', tokenOut: 'USDC', amountIn: 50_000_000_000n })
+  })
+
   test('within 5pp of target: no reduce', () => {
     expect(decide(obs({ balances: BALANCED, positions: [position()] }), live).kind).toBe('hold')
   })

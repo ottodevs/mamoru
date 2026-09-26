@@ -355,7 +355,12 @@ export class Operator {
     return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })
   }
 
-  async prepareTransfer(ctx: AccountContext, req: TransferRequest): Promise<TransferPlan> {
+  /** Planned under the account lock: an in-flight engine op (reduce, re-range) lands first, so the plan sees its liquidity. */
+  prepareTransfer(ctx: AccountContext, req: TransferRequest): Promise<TransferPlan> {
+    return this.lock(ctx.accountKey).run(() => this.planTransfer(ctx, req))
+  }
+
+  private async planTransfer(ctx: AccountContext, req: TransferRequest): Promise<TransferPlan> {
     this.assertLive()
     const { acc, live } = this.account(ctx)
     if (!req || typeof req.to !== 'string' || !isAddress(req.to)) throw new HttpError(400, 'BAD_REQUEST', 'to must be an address')
@@ -476,6 +481,8 @@ export class Operator {
         return { pos, bps, lp: { tokenId: pos.tokenId, liquidity, amount0Min: (a.amount0 * keep) / 10_000n, amount1Min: (a.amount1 * keep) / 10_000n } }
       })
       const got = await this.simulateCollect(safe, reduce.map((x) => ({ lp: x.lp, pos: x.pos })), r.block)
+      // Idle volatile tokens (left by an engine reduce or re-range) swap back with what the reduce frees.
+      for (const [token, raw] of Object.entries(r.tokens)) if (token !== 'USDC' && raw > 0n) got[token] = (got[token] ?? 0n) + raw
       const swaps = await this.swapQuotes(acc, got, r.block, slip)
       const freed = (got.USDC ?? 0n) + swaps.reduce((s, x) => s + x.amountOutMinimum, 0n)
       if (r.usdc + freed >= amount) return { reduce, swaps }
@@ -515,6 +522,7 @@ export class Operator {
       const pool = routeOf(token, this.bucketPools(acc), USDC_POOLS)
       if (!pool) continue
       const q = await quoteExactInputSingle(this.client, { tokenIn: address(token), tokenOut: address('USDC'), fee: entry(pool).fee!, amountIn, blockNumber }).catch(() => 0n)
+      if (q <= 1n) continue
       const amountOutMinimum = minOut(q, slip)
       if (amountOutMinimum > 0n) out.push({ token, pool, amountIn, amountOutMinimum })
     }
@@ -556,7 +564,11 @@ export class Operator {
     return { amountIn, amountOutMinimum: minOut(out, slip) }
   }
 
-  async prepareStop(ctx: AccountContext): Promise<OwnerTxToSign> {
+  prepareStop(ctx: AccountContext): Promise<OwnerTxToSign> {
+    return this.lock(ctx.accountKey).run(() => this.planStop(ctx))
+  }
+
+  private async planStop(ctx: AccountContext): Promise<OwnerTxToSign> {
     this.assertLive()
     const { acc, live } = this.account(ctx)
     const r = await readSafe(this.client, live.safe)
@@ -955,6 +967,13 @@ export class Operator {
           const head = await this.client.getBlockNumber()
           if (head <= BigInt(acc.historyFromBlock)) {
             console.log(`[engine ${acc.accountKey}] rpc head ${head} not past activation block ${acc.historyFromBlock}, waiting`)
+            return
+          }
+          // An owner tx prepared on the current positions is waiting for its passkey: an engine reduce or
+          // re-range now would change the liquidity it withdraws (GS013). Hold until it runs or expires.
+          const now = Date.now()
+          if ([...this.prepared.values()].some((p) => p.accountKey === acc.accountKey && p.kind !== 'activate' && p.expires > now)) {
+            console.log(`[engine ${acc.accountKey}] owner tx pending, review held`)
             return
           }
           const r = await engine.review()

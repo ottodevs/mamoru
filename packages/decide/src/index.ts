@@ -4,7 +4,7 @@ import { hasManageAny, policyHash, type PolicyVersion } from '@mamoru/policy'
 import { enterBucket, safeSavings } from './enter/index.ts'
 import { ehgPreliminary, purgaIdentity } from './gates/index.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
-import { isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
+import { anyKey, idleConvertOf, isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
 import type { Decision, GateStep, Observation, Proposal, ShadowNote } from './types.ts'
 
 export type * from './types.ts'
@@ -142,7 +142,8 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
     reason = 'DECIDE_PAUSED'
   } else {
     const reduce = reranges.length || harvests.length ? null : reduceOf(obs, policy, policyPools)
-    proposal = reranges[0] ?? harvests[0] ?? reduce?.proposal ?? entries[0] ?? null
+    const idle = reranges.length || harvests.length || reduce?.proposal ? null : idleConvertOf(obs, policy, policyPools)
+    proposal = reranges[0] ?? harvests[0] ?? reduce?.proposal ?? idle ?? entries[0] ?? null
     reason = proposal ? PROPOSAL_CODE[proposal.kind] : holdReason()
   }
 
