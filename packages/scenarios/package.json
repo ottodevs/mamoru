@@ -5,9 +5,14 @@
   "type": "module",
   "dependencies": {
     "@mamoru/account": "workspace:*",
+    "@mamoru/decide": "workspace:*",
     "@mamoru/domain": "workspace:*",
+    "@mamoru/erc4337": "workspace:*",
+    "@mamoru/journal": "workspace:*",
     "@mamoru/policy": "workspace:*",
+    "@mamoru/projector": "workspace:*",
     "@mamoru/registry": "workspace:*",
+    "@mamoru/rpc": "workspace:*",
     "@mamoru/uniswap-v3": "workspace:*",
     "viem": "2.56.9"
   }

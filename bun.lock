@@ -61,9 +61,36 @@
         "viem": "2.56.9",
       },
     },
+    "packages/decide": {
+      "name": "@mamoru/decide",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mamoru/domain": "workspace:*",
+        "@mamoru/policy": "workspace:*",
+        "@mamoru/registry": "workspace:*",
+        "@mamoru/uniswap-v3": "workspace:*",
+        "viem": "2.56.9",
+      },
+    },
     "packages/domain": {
       "name": "@mamoru/domain",
       "version": "0.0.0",
+    },
+    "packages/erc4337": {
+      "name": "@mamoru/erc4337",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mamoru/domain": "workspace:*",
+        "@mamoru/registry": "workspace:*",
+        "viem": "2.56.9",
+      },
+    },
+    "packages/journal": {
+      "name": "@mamoru/journal",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mamoru/domain": "workspace:*",
+      },
     },
     "packages/multibaas": {
       "name": "@mamoru/multibaas",
@@ -81,6 +108,15 @@
         "viem": "2.56.9",
       },
     },
+    "packages/projector": {
+      "name": "@mamoru/projector",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mamoru/domain": "workspace:*",
+        "@mamoru/registry": "workspace:*",
+        "viem": "2.56.9",
+      },
+    },
     "packages/registry": {
       "name": "@mamoru/registry",
       "version": "0.0.0",
@@ -89,14 +125,29 @@
         "viem": "2.56.9",
       },
     },
+    "packages/rpc": {
+      "name": "@mamoru/rpc",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mamoru/decide": "workspace:*",
+        "@mamoru/domain": "workspace:*",
+        "@mamoru/registry": "workspace:*",
+        "viem": "2.56.9",
+      },
+    },
     "packages/scenarios": {
       "name": "@mamoru/scenarios",
       "version": "0.0.0",
       "dependencies": {
         "@mamoru/account": "workspace:*",
+        "@mamoru/decide": "workspace:*",
         "@mamoru/domain": "workspace:*",
+        "@mamoru/erc4337": "workspace:*",
+        "@mamoru/journal": "workspace:*",
         "@mamoru/policy": "workspace:*",
+        "@mamoru/projector": "workspace:*",
         "@mamoru/registry": "workspace:*",
+        "@mamoru/rpc": "workspace:*",
         "@mamoru/uniswap-v3": "workspace:*",
         "viem": "2.56.9",
       },
@@ -258,15 +309,25 @@
 
     "@mamoru/app": ["@mamoru/app@workspace:apps/mamoru-app"],
 
+    "@mamoru/decide": ["@mamoru/decide@workspace:packages/decide"],
+
     "@mamoru/domain": ["@mamoru/domain@workspace:packages/domain"],
 
     "@mamoru/engine": ["@mamoru/engine@workspace:apps/mamoru-engine"],
+
+    "@mamoru/erc4337": ["@mamoru/erc4337@workspace:packages/erc4337"],
+
+    "@mamoru/journal": ["@mamoru/journal@workspace:packages/journal"],
 
     "@mamoru/multibaas": ["@mamoru/multibaas@workspace:packages/multibaas"],
 
     "@mamoru/policy": ["@mamoru/policy@workspace:packages/policy"],
 
+    "@mamoru/projector": ["@mamoru/projector@workspace:packages/projector"],
+
     "@mamoru/registry": ["@mamoru/registry@workspace:packages/registry"],
+
+    "@mamoru/rpc": ["@mamoru/rpc@workspace:packages/rpc"],
 
     "@mamoru/scenarios": ["@mamoru/scenarios@workspace:packages/scenarios"],
 

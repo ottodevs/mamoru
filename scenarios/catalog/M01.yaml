@@ -1,0 +1,26 @@
+id: M01
+requirements: [FR-RPC-001, FR-DEC-001, FR-DEC-007, FR-DEC-013, FR-LAB-006]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: engine
+fixtures: [fx-owners, fx-safe, fx-gas]
+steps:
+  # 1. review
+  - review:
+      label: review
+      expect:
+        observation: OBS_OK
+        decision: DECIDE_HOLD
+        reason: DECIDE_NO_CAPITAL
+        buckets: { stables: PLAN_BUCKET_NO_EXECUTABLE_POOL, btc-usdc: DECIDE_NO_CAPITAL, risk: PLAN_BUCKET_NO_EXECUTABLE_POOL }
+        op: none
+  - journal: { decisions: 1, ops: 0 }
+  # 2. decide again on the same observation
+  - decide-again: {}
+expect:
+  codes: [OBS_OK, DECIDE_HOLD, DECIDE_NO_CAPITAL, PLAN_BUCKET_NO_EXECUTABLE_POOL]
+invariants: [INV-SLOT, INV-CODES, INV-FORK-CHAIN, INV-NO-ANVIL-IN-ENGINE]

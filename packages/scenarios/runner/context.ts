@@ -4,6 +4,7 @@ import type { SnapshotBook } from './snapshots.ts'
 import type { World } from '../fixtures/world.ts'
 import type { AnvilHandle } from '../fork/anvil.ts'
 import type { EnginePort } from '../proxy/index.ts'
+import type { LabBundler } from '../bundler/index.ts'
 import type { StepResult } from '../report/index.ts'
 
 export type RunCtx = {
@@ -23,6 +24,9 @@ export type ScenarioCtx = {
   world?: World
   snaps?: SnapshotBook
   enginePort?: EnginePort
+  /** Engine world: the loopback bundler and the block the engine was registered at. */
+  bundler?: LabBundler
+  engineBaseBlock?: bigint
   results: StepResult[]
   codes: Set<string>
   kt1: string[]

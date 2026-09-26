@@ -10,7 +10,7 @@ export type Scenario = {
   requirements: string[]
   fork: { source: string; block: number; blockHash: Hex; chainId: number }
   policy: string
-  world: 'sess' | 'basic' | 'none'
+  world: 'sess' | 'basic' | 'engine' | 'none'
   order?: 'last'
   fixtures: string[]
   prepare?: Step[]

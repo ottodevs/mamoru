@@ -18,9 +18,15 @@ import { loadManifest, REPO_ROOT } from './manifest.ts'
 import { SESSION_STEPS } from './session-steps.ts'
 import { SnapshotBook } from './snapshots.ts'
 import { WALK_STEPS } from './walk-steps.ts'
+import { ENGINE_STEPS } from './engine-steps.ts'
+import { buildEngineWorld } from './engine-world.ts'
+import { startLabBundler, type LabBundler } from '../bundler/index.ts'
+import { devAccount } from '../fixtures/lab.ts'
 
-const STEPS: Record<string, StepHandler> = { ...SESSION_STEPS, ...LAB_STEPS, ...WALK_STEPS }
-const WORLD_ORDER = ['none', 'sess', 'basic'] as const
+const STEPS: Record<string, StepHandler> = { ...SESSION_STEPS, ...LAB_STEPS, ...WALK_STEPS, ...ENGINE_STEPS }
+const WORLD_ORDER = ['none', 'sess', 'engine', 'basic'] as const
+/** Anvil development account that submits the lab bundler's handleOps. */
+const BUNDLER_EXECUTOR = 4
 
 function newRunId(): string {
   const t = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, 'Z')
@@ -32,9 +38,9 @@ async function chainIdOf(url: string): Promise<number> {
   return Number(BigInt((await c.request({ method: 'eth_chainId' })) as string))
 }
 
-type WorldEnv = { world?: World; checkpoint?: WorldCheckpoint; snaps?: SnapshotBook; enginePort?: EnginePort; anvil?: AnvilHandle; lab?: Lab }
+type WorldEnv = { world?: World; checkpoint?: WorldCheckpoint; snaps?: SnapshotBook; enginePort?: EnginePort; anvil?: AnvilHandle; lab?: Lab; bundler?: LabBundler; engineBaseBlock?: bigint }
 
-async function startWorld(run: RunCtx, kind: 'sess' | 'basic', policyId: string): Promise<WorldEnv> {
+async function startWorld(run: RunCtx, kind: 'sess' | 'basic' | 'engine', policyId: string): Promise<WorldEnv> {
   const { handle } = await startLabFork({ manifest: run.manifest, forkUrl: run.proxyUrl, logPath: `${run.runDir}/anvil-${kind}.log` })
   run.anvils.push(handle)
   run.rpcUrls.add(handle.url)
@@ -47,7 +53,8 @@ async function startWorld(run: RunCtx, kind: 'sess' | 'basic', policyId: string)
   const policy = POLICIES[policyId]
   if (!policy) throw new Error(`unknown policy ${policyId}`)
   const t = Date.now()
-  const world = kind === 'sess' ? await buildSessWorld(lab, policy, engineNow) : await buildBasicWorld(lab, policy, engineNow)
+  const build = kind === 'sess' ? buildSessWorld : kind === 'engine' ? buildEngineWorld : buildBasicWorld
+  const world = await build(lab, policy, engineNow)
   const snaps = new SnapshotBook(lab, run.runId)
   await snaps.take('S0')
   const stateSha256 = await dumpState(lab, `${run.runDir}/world-${kind}.state.json.gz`)
@@ -57,13 +64,17 @@ async function startWorld(run: RunCtx, kind: 'sess' | 'basic', policyId: string)
     stateSha256,
     buildMs: Date.now() - t,
   })
-  return { world, checkpoint: checkpointWorld(world), snaps, enginePort, anvil: handle, lab }
+  if (kind !== 'engine') return { world, checkpoint: checkpointWorld(world), snaps, enginePort, anvil: handle, lab }
+  const bundler = startLabBundler(lab, devAccount(BUNDLER_EXECUTOR))
+  run.rpcUrls.add(bundler.url)
+  const engineBaseBlock = (await lab.client.getBlock()).number
+  return { world, checkpoint: checkpointWorld(world), snaps, enginePort, anvil: handle, lab, bundler, engineBaseBlock }
 }
 
 async function runScenario(run: RunCtx, s: Scenario, env: WorldEnv, first: boolean): Promise<ScenarioResult> {
   const t = Date.now()
   const dir = ensureDir(`${artifactsRoot(REPO_ROOT)}/${s.id}/${run.runId}`)
-  const ctx: ScenarioCtx = { run, scenario: s, world: env.world, snaps: env.snaps, enginePort: env.enginePort, results: [], codes: new Set(), kt1: [], invariantErrors: [], dir }
+  const ctx: ScenarioCtx = { run, scenario: s, world: env.world, snaps: env.snaps, enginePort: env.enginePort, bundler: env.bundler, engineBaseBlock: env.engineBaseBlock, results: [], codes: new Set(), kt1: [], invariantErrors: [], dir }
   const result: ScenarioResult = { id: s.id, file: s.file.replace(`${REPO_ROOT}/`, ''), requirements: s.requirements, status: 'fail', steps: [], invariants: {}, codes: [], durationMs: 0 }
   let notExecuted = false
   try {
@@ -128,7 +139,7 @@ async function runScenario(run: RunCtx, s: Scenario, env: WorldEnv, first: boole
         inv[name] = { ok: bad.length === 0, detail: bad.join(', ') || `${ctx.codes.size} codes, all catalogued` }
       } else if (name === 'INV-FORK-CHAIN') {
         const wrong: string[] = []
-        for (const url of [env.anvil?.url, env.enginePort?.url].filter(Boolean) as string[]) {
+        for (const url of [env.anvil?.url, env.enginePort?.url, env.bundler?.url].filter(Boolean) as string[]) {
           const id = await chainIdOf(url).catch(() => -1)
           if (id !== run.manifest.fork.chainId) wrong.push(`${url} answered ${id}`)
         }
@@ -188,6 +199,7 @@ export async function runCatalog(opts: { only?: string[] } = {}): Promise<{ runI
       }
       if (env.anvil && kind !== 'basic') await env.anvil.stop()
       env.enginePort?.stop()
+      env.bundler?.stop()
     }
   } finally {
     for (const a of run.anvils) await a.stop().catch(() => {})
