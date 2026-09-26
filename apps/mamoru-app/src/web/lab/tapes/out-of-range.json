@@ -1,0 +1,614 @@
+{
+  "id": "TAPE-OUT-OF-RANGE",
+  "title": "Price leaves the range",
+  "summary": "A burst of cbBTC buying pushes the price above the range. The engine holds with no transaction and the principal intact; when the price comes back, the position earns again.",
+  "savingsAsset": "USDC",
+  "chainId": 31337,
+  "forkOf": "Base",
+  "forkBlock": 51811000,
+  "recordedAt": "2026-09-26T22:09:43.050Z",
+  "frames": [
+    {
+      "t": 0,
+      "block": 51811015,
+      "key": true,
+      "title": "In range and earning",
+      "note": "The price 84,069.52 USDC sits inside the range 76,026.59 USDC to 92,951.06 USDC. Holding.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67346,
+        "price": "84069.52",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.067848",
+        "feesValue": "0"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x8943f8ba561015a6127be450ecf3fdbc75c3b133d1bf207991b34b7e39d5fd59"
+      },
+      "tx": null
+    },
+    {
+      "t": 900,
+      "block": 51811021,
+      "key": false,
+      "title": "Earning fees",
+      "note": "Swaps cross the range. Fees 1.01 USDC and growing.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67346,
+        "price": "84071.6",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.116991",
+        "feesValue": "1.013148"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0xbe8a022dd4df446305c90d539c1a3d9bf0652e9fb7686298e0d406207a1ff87e"
+      },
+      "tx": null
+    },
+    {
+      "t": 1801,
+      "block": 51811027,
+      "key": false,
+      "title": "Earning fees",
+      "note": "Swaps cross the range. Fees 2.03 USDC and growing.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67347,
+        "price": "84073.67",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.166687",
+        "feesValue": "2.026975"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x9a335b0547f5a76d67871f3bae67850e71e3f83f06b84d2fe2c6bd59c6971b82"
+      },
+      "tx": null
+    },
+    {
+      "t": 2701,
+      "block": 51811033,
+      "key": false,
+      "title": "Earning fees",
+      "note": "Swaps cross the range. Fees 3.04 USDC and growing.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67347,
+        "price": "84075.75",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.216098",
+        "feesValue": "3.040636"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0xb13b03082c219bf61de816a2dbda1a2019029fddd6a868ead53a78ae3e6515d6"
+      },
+      "tx": null
+    },
+    {
+      "t": 3001,
+      "block": 51811037,
+      "key": false,
+      "title": "Price falls",
+      "note": "Heavy selling moves the price to 87,019.2 USDC, still inside the range. Holding.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67691,
+        "price": "87019.2",
+        "liquidity": "1509750941554"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "4054.808631",
+        "feesValue": "3.358512"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x6c45986574e06ce9da21996957b4173402061eca8c0be21d89934a89e96bbd28"
+      },
+      "tx": null
+    },
+    {
+      "t": 3302,
+      "block": 51811041,
+      "key": false,
+      "title": "Price falls",
+      "note": "Heavy selling moves the price to 90,183.19 USDC, still inside the range. Holding.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -68048,
+        "price": "90183.19",
+        "liquidity": "746761513185"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "4090.269704",
+        "feesValue": "3.695243"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0xf56fb3f4788fe50a35566bf396e49c82259c51ca54c507e54e0cc28662c3c239"
+      },
+      "tx": null
+    },
+    {
+      "t": 3602,
+      "block": 51811045,
+      "key": true,
+      "title": "Price leaves the range",
+      "note": "Heavy cbBTC buying pushes the price to 94,481.28 USDC, above the range. The position stops earning and the engine holds: no transaction, principal 4,099.92 USDC intact.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -68514,
+        "price": "94481.28",
+        "liquidity": "349580208623"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": false,
+        "principalValue": "4099.920221",
+        "feesValue": "4.013015"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "OBS_POSITION_OUT_OF_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x9338f831fbc560b5ca3d728a3c0465e592a57b7dd4045e519bc4a1ba5d60e46f"
+      },
+      "tx": null
+    },
+    {
+      "t": 5402,
+      "block": 51811047,
+      "key": false,
+      "title": "Out of range",
+      "note": "Still out of range. Fees stay at 4.01 USDC, principal 4,099.92 USDC. Nothing to do.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -68514,
+        "price": "94481.28",
+        "liquidity": "349580208623"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": false,
+        "principalValue": "4099.920221",
+        "feesValue": "4.013015"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "OBS_POSITION_OUT_OF_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x9b60f6fead6fa156b6ac45cea04daec595a1e8c64b6cecef0b36df191052d0fe"
+      },
+      "tx": null
+    },
+    {
+      "t": 7202,
+      "block": 51811049,
+      "key": false,
+      "title": "Out of range",
+      "note": "Still out of range. Fees stay at 4.01 USDC, principal 4,099.92 USDC. Nothing to do.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -68514,
+        "price": "94481.28",
+        "liquidity": "349580208623"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": false,
+        "principalValue": "4099.920221",
+        "feesValue": "4.013015"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "OBS_POSITION_OUT_OF_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x0d5d1c917922562548fe040100e608497801f8c0fa77d855e4884ff14da7371b"
+      },
+      "tx": null
+    },
+    {
+      "t": 9002,
+      "block": 51811051,
+      "key": true,
+      "title": "Holding out of range",
+      "note": "Still out of range. Fees stay at 4.01 USDC, principal 4,099.92 USDC. Nothing to do.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -68514,
+        "price": "94481.28",
+        "liquidity": "349580208623"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": false,
+        "principalValue": "4099.920221",
+        "feesValue": "4.013015"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "OBS_POSITION_OUT_OF_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0xa0e1ae5e0c0fa99450dc88e7b13fb29cbde124422818da29b21da061cfa9d779"
+      },
+      "tx": null
+    },
+    {
+      "t": 9002,
+      "block": 51811054,
+      "key": true,
+      "title": "Back in range",
+      "note": "Sellers return and the price comes back to 84,078.31 USDC, inside the range again.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67347,
+        "price": "84078.31",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.276734",
+        "feesValue": "4.576347"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x8d62910393544ce4682788e78768aee735c6097b761263b8a7c7f7363a164216"
+      },
+      "tx": null
+    },
+    {
+      "t": 9903,
+      "block": 51811060,
+      "key": false,
+      "title": "Earning again",
+      "note": "Swaps cross the range again. Fees 5.59 USDC.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67347,
+        "price": "84080.38",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.325503",
+        "feesValue": "5.588805"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x8b3c996cde4361cac0766136912be9837ca8b125f2dcf258346214f45b4cb073"
+      },
+      "tx": null
+    },
+    {
+      "t": 10803,
+      "block": 51811066,
+      "key": false,
+      "title": "Earning again",
+      "note": "Swaps cross the range again. Fees 6.6 USDC.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67348,
+        "price": "84082.45",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.374826",
+        "feesValue": "6.6011"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x152b7d3e2a3ce70f06deee20d6810495d0983a9a7ef6f3e0d6cd883efbbf337f"
+      },
+      "tx": null
+    },
+    {
+      "t": 11704,
+      "block": 51811072,
+      "key": true,
+      "title": "Fees resume",
+      "note": "Swaps cross the range again. Fees 7.62 USDC.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67348,
+        "price": "84084.52",
+        "liquidity": "2105781087350"
+      },
+      "position": {
+        "tokenId": "6100765",
+        "tickLower": -68350,
+        "tickUpper": -66340,
+        "lowerPrice": "76026.59",
+        "upperPrice": "92951.06",
+        "inRange": true,
+        "principalValue": "3997.424098",
+        "feesValue": "7.616778"
+      },
+      "cost": {
+        "baseFeeGwei": "0.4",
+        "opCost": "10.980966",
+        "threshold": "32.942898",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "DECIDE_IN_RANGE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0xa01ed27ffcf352040ccc65738ae7f4fc4d33211edc136b4fa6739153518b30eb"
+      },
+      "tx": null
+    }
+  ]
+}

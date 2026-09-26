@@ -1,0 +1,748 @@
+{
+  "id": "TAPE-POOL-SHOCK",
+  "title": "Pool shock, no entry",
+  "summary": "A fresh deposit is ready to enter. A sudden price move takes the pool far from its 30-minute average and the health gate refuses the entry until the price settles.",
+  "savingsAsset": "USDC",
+  "chainId": 31337,
+  "forkOf": "Base",
+  "forkBlock": 51811000,
+  "recordedAt": "2026-09-26T22:10:00.863Z",
+  "frames": [
+    {
+      "t": 0,
+      "block": 51811006,
+      "key": true,
+      "title": "Deposit arrives",
+      "note": "USDC lands in the account. The engine waits until the deposit block is final before acting.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67346,
+        "price": "84064.01",
+        "liquidity": "2104374575675"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.1",
+        "opCost": "2.755523",
+        "threshold": "8.266569",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "OBS_DEPOSIT_UNSAFE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          }
+        ],
+        "decisionId": "0x1217f11f3afe7f1ed72135d136b5c0738add4a8fa33a0d7bd2f8e3bf00849bef"
+      },
+      "tx": null
+    },
+    {
+      "t": 0,
+      "block": 51811008,
+      "key": true,
+      "title": "Ready to enter",
+      "note": "The deposit is final and the pool looks healthy at 84,064.01 USDC. The engine would enter now.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67346,
+        "price": "84064.01",
+        "liquidity": "2104374575675"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.0765",
+        "opCost": "2.11291",
+        "threshold": "6.33873",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "enter",
+        "code": "DECIDE_ENTER",
+        "reason": "DECIDE_ENTER",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "strategy",
+            "verdict": "GO",
+            "reason": "STRATEGY_PREFERENCE"
+          },
+          {
+            "gate": "eny",
+            "verdict": "SKIP",
+            "reason": "ENY_SHADOW"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "GO",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0x8a988848102f200ecf5e499c4586f4c35bcb9858c235c2f67b0c945c4e434ce0"
+      },
+      "tx": null
+    },
+    {
+      "t": 120,
+      "block": 51811009,
+      "key": false,
+      "title": "Would enter",
+      "note": "Price steady against its 30-minute average. Entry still allowed.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67346,
+        "price": "84064.01",
+        "liquidity": "2104374575675"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.0669",
+        "opCost": "1.85051",
+        "threshold": "5.55153",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "enter",
+        "code": "DECIDE_ENTER",
+        "reason": "DECIDE_ENTER",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "strategy",
+            "verdict": "GO",
+            "reason": "STRATEGY_PREFERENCE"
+          },
+          {
+            "gate": "eny",
+            "verdict": "SKIP",
+            "reason": "ENY_SHADOW"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "GO",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xb4f85808bcfb5c1b06dd795894a79eb5a69a5ba26f7e53f09faaf51ca31035a5"
+      },
+      "tx": null
+    },
+    {
+      "t": 240,
+      "block": 51811010,
+      "key": false,
+      "title": "Would enter",
+      "note": "Price steady against its 30-minute average. Entry still allowed.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67346,
+        "price": "84064.01",
+        "liquidity": "2104374575675"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.0586",
+        "opCost": "1.62091",
+        "threshold": "4.86273",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "enter",
+        "code": "DECIDE_ENTER",
+        "reason": "DECIDE_ENTER",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "strategy",
+            "verdict": "GO",
+            "reason": "STRATEGY_PREFERENCE"
+          },
+          {
+            "gate": "eny",
+            "verdict": "SKIP",
+            "reason": "ENY_SHADOW"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "GO",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0x9e04a5d1852fc1cb1459ecd65d64ec29a3e0180117f7126cc66d9c9a77359d1c"
+      },
+      "tx": null
+    },
+    {
+      "t": 360,
+      "block": 51811011,
+      "key": false,
+      "title": "Would enter",
+      "note": "Price steady against its 30-minute average. Entry still allowed.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67346,
+        "price": "84064.01",
+        "liquidity": "2104374575675"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.0512",
+        "opCost": "1.42001",
+        "threshold": "4.26003",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "enter",
+        "code": "DECIDE_ENTER",
+        "reason": "DECIDE_ENTER",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "strategy",
+            "verdict": "GO",
+            "reason": "STRATEGY_PREFERENCE"
+          },
+          {
+            "gate": "eny",
+            "verdict": "SKIP",
+            "reason": "ENY_SHADOW"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "GO",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0xbd76fdd05aee8ff53d0f4da9342755f0cacc2da3be7e4f095bf266e45c28ee1e"
+      },
+      "tx": null
+    },
+    {
+      "t": 360,
+      "block": 51811014,
+      "key": true,
+      "title": "Pool shock",
+      "note": "A sudden burst of buying moves the price 486 ticks to 88,250.63 USDC, far from its 30-minute average. The health gate refuses the entry: EHG_PRICE_DIVERGENCE.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67832,
+        "price": "88250.63",
+        "liquidity": "1428946270534"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.1",
+        "opCost": "2.755523",
+        "threshold": "8.266569",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "EHG_PRICE_DIVERGENCE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "strategy",
+            "verdict": "GO",
+            "reason": "STRATEGY_PREFERENCE"
+          },
+          {
+            "gate": "eny",
+            "verdict": "SKIP",
+            "reason": "ENY_SHADOW"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "NO_GO",
+            "reason": "EHG_PRICE_DIVERGENCE"
+          }
+        ],
+        "decisionId": "0xf3e29fb62f6b0b47df7a5d3952a386ce3a866dcff13d5f01bdc246c36b71920f"
+      },
+      "tx": null
+    },
+    {
+      "t": 540,
+      "block": 51811015,
+      "key": false,
+      "title": "Entry refused",
+      "note": "The 30-minute average has not caught up with the new price yet. No entry, the deposit stays in USDC.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67832,
+        "price": "88250.63",
+        "liquidity": "1428946270534"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.0875",
+        "opCost": "2.412796",
+        "threshold": "7.238388",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "EHG_PRICE_DIVERGENCE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "strategy",
+            "verdict": "GO",
+            "reason": "STRATEGY_PREFERENCE"
+          },
+          {
+            "gate": "eny",
+            "verdict": "SKIP",
+            "reason": "ENY_SHADOW"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "NO_GO",
+            "reason": "EHG_PRICE_DIVERGENCE"
+          }
+        ],
+        "decisionId": "0xf090003d380802914bc50b30ea4d941139977ecb92fa9336d6de7fb0ec9f20eb"
+      },
+      "tx": null
+    },
+    {
+      "t": 720,
+      "block": 51811016,
+      "key": false,
+      "title": "Entry refused",
+      "note": "The 30-minute average has not caught up with the new price yet. No entry, the deposit stays in USDC.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67832,
+        "price": "88250.63",
+        "liquidity": "1428946270534"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.0765",
+        "opCost": "2.11291",
+        "threshold": "6.33873",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "EHG_PRICE_DIVERGENCE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "strategy",
+            "verdict": "GO",
+            "reason": "STRATEGY_PREFERENCE"
+          },
+          {
+            "gate": "eny",
+            "verdict": "SKIP",
+            "reason": "ENY_SHADOW"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "NO_GO",
+            "reason": "EHG_PRICE_DIVERGENCE"
+          }
+        ],
+        "decisionId": "0x4372a87fc78be4f791950401ded4ddf66e0a49e2921a6feaf6cea8573a6250df"
+      },
+      "tx": null
+    },
+    {
+      "t": 900,
+      "block": 51811017,
+      "key": false,
+      "title": "Entry refused",
+      "note": "The 30-minute average has not caught up with the new price yet. No entry, the deposit stays in USDC.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67832,
+        "price": "88250.63",
+        "liquidity": "1428946270534"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.0669",
+        "opCost": "1.85051",
+        "threshold": "5.55153",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "EHG_PRICE_DIVERGENCE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "strategy",
+            "verdict": "GO",
+            "reason": "STRATEGY_PREFERENCE"
+          },
+          {
+            "gate": "eny",
+            "verdict": "SKIP",
+            "reason": "ENY_SHADOW"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "NO_GO",
+            "reason": "EHG_PRICE_DIVERGENCE"
+          }
+        ],
+        "decisionId": "0xa715ef5333c26044fd6b7ea12c366bce13da99f876032fe20e38fb777773c169"
+      },
+      "tx": null
+    },
+    {
+      "t": 1080,
+      "block": 51811018,
+      "key": false,
+      "title": "Entry refused",
+      "note": "The 30-minute average has not caught up with the new price yet. No entry, the deposit stays in USDC.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67832,
+        "price": "88250.63",
+        "liquidity": "1428946270534"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.0586",
+        "opCost": "1.62091",
+        "threshold": "4.86273",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "EHG_PRICE_DIVERGENCE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "strategy",
+            "verdict": "GO",
+            "reason": "STRATEGY_PREFERENCE"
+          },
+          {
+            "gate": "eny",
+            "verdict": "SKIP",
+            "reason": "ENY_SHADOW"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "NO_GO",
+            "reason": "EHG_PRICE_DIVERGENCE"
+          }
+        ],
+        "decisionId": "0x9ad34b92d49e4d43238adc3d4e2097f560bc1e94e0aa986b3bb16964811faf8e"
+      },
+      "tx": null
+    },
+    {
+      "t": 1260,
+      "block": 51811019,
+      "key": false,
+      "title": "Entry refused",
+      "note": "The 30-minute average has not caught up with the new price yet. No entry, the deposit stays in USDC.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67832,
+        "price": "88250.63",
+        "liquidity": "1428946270534"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.0512",
+        "opCost": "1.42001",
+        "threshold": "4.26003",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "EHG_PRICE_DIVERGENCE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "strategy",
+            "verdict": "GO",
+            "reason": "STRATEGY_PREFERENCE"
+          },
+          {
+            "gate": "eny",
+            "verdict": "SKIP",
+            "reason": "ENY_SHADOW"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "NO_GO",
+            "reason": "EHG_PRICE_DIVERGENCE"
+          }
+        ],
+        "decisionId": "0x175b340415a73701d54e98f1094945ea5c13c919870574d1a4c2d9c9f56df048"
+      },
+      "tx": null
+    },
+    {
+      "t": 1440,
+      "block": 51811020,
+      "key": false,
+      "title": "Entry refused",
+      "note": "The 30-minute average has not caught up with the new price yet. No entry, the deposit stays in USDC.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67832,
+        "price": "88250.63",
+        "liquidity": "1428946270534"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.0448",
+        "opCost": "1.244222",
+        "threshold": "3.732666",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "EHG_PRICE_DIVERGENCE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "strategy",
+            "verdict": "GO",
+            "reason": "STRATEGY_PREFERENCE"
+          },
+          {
+            "gate": "eny",
+            "verdict": "SKIP",
+            "reason": "ENY_SHADOW"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "NO_GO",
+            "reason": "EHG_PRICE_DIVERGENCE"
+          }
+        ],
+        "decisionId": "0xe6f82294b830f8e88241984cf656e1ef86643fb917ac261bdf10215dbf01bae6"
+      },
+      "tx": null
+    },
+    {
+      "t": 1620,
+      "block": 51811021,
+      "key": false,
+      "title": "Entry refused",
+      "note": "The 30-minute average has not caught up with the new price yet. No entry, the deposit stays in USDC.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67832,
+        "price": "88250.63",
+        "liquidity": "1428946270534"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.0392",
+        "opCost": "1.090408",
+        "threshold": "3.271224",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "hold",
+        "code": "DECIDE_HOLD",
+        "reason": "EHG_PRICE_DIVERGENCE",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "strategy",
+            "verdict": "GO",
+            "reason": "STRATEGY_PREFERENCE"
+          },
+          {
+            "gate": "eny",
+            "verdict": "SKIP",
+            "reason": "ENY_SHADOW"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "NO_GO",
+            "reason": "EHG_PRICE_DIVERGENCE"
+          }
+        ],
+        "decisionId": "0xa004fbb26a2b0524f770b181271e694eb466f0dceed07e6ac2800e4bb31b3fe2"
+      },
+      "tx": null
+    },
+    {
+      "t": 1800,
+      "block": 51811022,
+      "key": true,
+      "title": "Price settles",
+      "note": "The average has caught up with the new price 88,250.63 USDC. Entry is allowed again.",
+      "pool": {
+        "name": "USDC/cbBTC/500",
+        "tick": -67832,
+        "price": "88250.63",
+        "liquidity": "1428946270534"
+      },
+      "position": null,
+      "cost": {
+        "baseFeeGwei": "0.0343",
+        "opCost": "0.95582",
+        "threshold": "2.86746",
+        "factorBps": 30000
+      },
+      "decision": {
+        "kind": "enter",
+        "code": "DECIDE_ENTER",
+        "reason": "DECIDE_ENTER",
+        "trail": [
+          {
+            "gate": "observation",
+            "verdict": "GO",
+            "reason": "OBS_OK"
+          },
+          {
+            "gate": "purga",
+            "verdict": "GO",
+            "reason": "PURGA_OK"
+          },
+          {
+            "gate": "strategy",
+            "verdict": "GO",
+            "reason": "STRATEGY_PREFERENCE"
+          },
+          {
+            "gate": "eny",
+            "verdict": "SKIP",
+            "reason": "ENY_SHADOW"
+          },
+          {
+            "gate": "ehg",
+            "verdict": "GO",
+            "reason": "EHG_OK"
+          }
+        ],
+        "decisionId": "0x425126c9004ab023036c1f553f21d443a45331990f18890451d6162654fd923c"
+      },
+      "tx": null
+    }
+  ]
+}

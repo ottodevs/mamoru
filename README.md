@@ -99,6 +99,8 @@ bun run scenarios run --only SESS-01,WALK-02      # a subset
 bun run scenarios demo                            # M01 to M04 with a readable summary, about 80 s
 ```
 
+Lab replay. [app.mamoru.lol/lab](https://app.mamoru.lol/lab) replays three runs recorded on the same fork, with a timeline of keyframes and the engine's decision at each one: a harvest that waits until fees clear three times the operation cost, a position that leaves its range and is held without a transaction, and an entry refused while the pool price is far from its 30-minute average. Every frame comes from the real engine and `decide()` on fork state; the recorder stops without writing if the fork does not do what the script expects. Re-record with `bun run packages/scenarios/tape/record.ts [harvest|out-of-range|pool-shock]` ([`packages/scenarios/tape/`](packages/scenarios/tape/), contract [`scenario-tape.ts`](packages/domain/src/scenario-tape.ts)).
+
 The runner's bundler is a loopback bundler that speaks the standard ERC-4337 JSON-RPC methods and submits to EntryPoint v0.7 ([`packages/scenarios/bundler/`](packages/scenarios/bundler/)). Alto is pinned in the manifest but is not installed and was not used.
 
 Each run writes `scenarios/.artifacts/runs/<runId>/report.json`. The catalog is now 45 scenarios, after the live-path receipt and bundle checks (`M03-RECEIPT`, `M04-BUNDLE`, `M04-OWNER`) that check the operator's own userOp receipt and the owner's passkey-signed `execTransaction` against the fork. Latest full run: see [`evidence/scenarios/`](evidence/scenarios/).

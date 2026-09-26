@@ -16,8 +16,11 @@ function decodeContext(header: string): AccountContext {
 
 const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop)$/
 
+// Amounts are base-unit strings on the wire; a bigint that slips into a view is sent as its decimal string.
+const wire = (_k: string, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)
+
 function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+  return new Response(JSON.stringify(body, wire), { status, headers: { 'content-type': 'application/json' } })
 }
 
 export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number }): Server<undefined> {
@@ -60,7 +63,7 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
           case 'GET withdraw-assets':
             return json(200, await op.withdrawAssets())
           case 'GET ops':
-            return json(200, op.ops(ctx, url.searchParams.get('after')))
+            return json(200, op.ops(ctx, url.searchParams.get('after'), url.searchParams.get('all') === '1'))
           case 'POST activate/prepare':
             return json(200, await op.prepareActivate(ctx))
           case 'POST activate':
