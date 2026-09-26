@@ -88,9 +88,16 @@ describe('grant instantiation', () => {
     expect(grant.permitERC4337Paymaster).toBe(false)
     expect(grant.actions.every((a) => a.nativeValue === 0n)).toBe(true)
   })
-  test('manage is per position', () => {
+  test('manage is per position and only for an admitted mint', () => {
     expect(() => instantiateGrant(conservadorLabV1, 'manage', grantCtx)).toThrow()
-    const m = instantiateGrant(conservadorLabV1, 'manage', { ...grantCtx, tokenId: 42n })
+    let denied = 'NONE'
+    try {
+      instantiateGrant(conservadorLabV1, 'manage', { ...grantCtx, tokenId: 42n })
+    } catch (e) {
+      if (e instanceof ReasonError) denied = e.code
+    }
+    expect(denied).toBe('POLICY_DENIED_POSITION')
+    const m = instantiateGrant(conservadorLabV1, 'manage', { ...grantCtx, tokenId: 42n, admittedTokenIds: [42n] })
     expect(m.actions.filter((a) => a.params.some((p) => p.field === 'tokenId')).every((a) => a.params[0]!.ref === 42n)).toBe(true)
   })
 })

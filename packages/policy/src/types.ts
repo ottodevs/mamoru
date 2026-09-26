@@ -45,7 +45,7 @@ export type GrantName = 'enter-swap' | 'enter-mint' | 'manage'
 
 export type GrantTemplate = {
   name: GrantName
-  /** A per-position grant is activated by the owner for one tokenId that the session minted. */
+  /** Activated by the owner only for a tokenId already admitted from enter-mint. */
   perPosition: boolean
   usageLimit: number
   actions: ActionRuleTemplate[]

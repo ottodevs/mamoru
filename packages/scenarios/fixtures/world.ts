@@ -182,6 +182,7 @@ export async function activateGrants(world: World, acct: AccountFixture, specs: 
       validUntil: now + world.policy.session.validitySeconds,
       caps: s.caps ?? acct.caps,
       tokenId: s.tokenId,
+      admittedTokenIds: acct.managedTokenIds,
     }),
   )
   const act = activationCall(grants, acct.ledger.revokedIds())
@@ -228,8 +229,8 @@ async function lpDirect(world: World, acct: AccountFixture, swapUsdc: bigint, mi
   ])
   mustInclude(m, `${acct.label} lp-direct mint`)
   const tokenId = mintedTokenId({ hash: m.txHash!, receipt: m.receipt!, ok: true }, acct.safe)
-  await activateGrants(world, acct, [{ name: 'manage', tokenId }])
   acct.managedTokenIds.push(tokenId)
+  await activateGrants(world, acct, [{ name: 'manage', tokenId }])
   return tokenId
 }
 

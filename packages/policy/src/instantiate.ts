@@ -54,6 +54,8 @@ export type GrantContext = {
   validUntil: number
   caps: Caps
   tokenId?: bigint
+  /** Positions minted by this session's enter-mint. A manage grant cannot name any other id. */
+  admittedTokenIds?: readonly bigint[]
 }
 
 function resolveRef(ref: RefTemplate, ctx: GrantContext): bigint {
@@ -77,6 +79,9 @@ export function instantiateGrant(policy: PolicyVersion, name: GrantName, ctx: Gr
   if (!template) throw new Error(`${policy.policyId} has no grant ${name}`)
   if (template.perPosition !== (ctx.tokenId !== undefined)) {
     throw new Error(`grant ${name} ${template.perPosition ? 'needs' : 'does not take'} a tokenId`)
+  }
+  if (template.perPosition && !ctx.admittedTokenIds?.some((id) => id === ctx.tokenId)) {
+    throw new ReasonError('POLICY_DENIED_POSITION', 'tokenId was not minted by enter-mint')
   }
   const actions: ResolvedActionRule[] = template.actions.map((a) => ({
     target: a.target,

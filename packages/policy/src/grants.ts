@@ -28,7 +28,8 @@ export type PairSpec = {
 /**
  * The three grants of plan section 12.2. `manage` is per position: Smart
  * Sessions has no set membership, so each managed tokenId gets its own grant
- * with `tokenId EQUAL <id>`, activated by the owner (plan section 12.4).
+ * with `tokenId EQUAL <id>`. The owner activates it only for an id this
+ * session minted with enter-mint (plan section 12.4).
  */
 export function pairGrants(p: PairSpec, usage: { enterSwap: number; enterMint: number; manage: number }): GrantTemplate[] {
   const c = p.caps
