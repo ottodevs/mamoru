@@ -62,6 +62,17 @@ export const conservadorLabV1: PolicyVersion = {
   chain: 'fork',
 }
 
+/**
+ * Conservador v1 for the live real-funds demo on Base (sprint amendment
+ * 2026-09-26): same grants and caps, a small ETH reserve so a 5-25 USDC
+ * account does not need a large gas top-up.
+ */
+export const conservadorLiveV1: PolicyVersion = {
+  ...conservadorV1,
+  policyId: 'conservador-live-v1',
+  gasReserveWei: 300_000_000_000_000n,
+}
+
 /** Scenario policy for M07: LP on WETH/USDC 0.3%, only in the lab. */
 export const labWethUsdcV1: PolicyVersion = {
   ...conservadorV1,
@@ -107,5 +118,6 @@ export const labWethUsdcV1: PolicyVersion = {
 export const POLICIES: Record<string, PolicyVersion> = {
   [conservadorV1.policyId]: conservadorV1,
   [conservadorLabV1.policyId]: conservadorLabV1,
+  [conservadorLiveV1.policyId]: conservadorLiveV1,
   [labWethUsdcV1.policyId]: labWethUsdcV1,
 }

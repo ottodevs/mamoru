@@ -1,6 +1,6 @@
 import { toHex, type Hex } from 'viem'
 import type { UserOperation } from 'viem/account-abstraction'
-import { FORBIDDEN_LAB_CHAIN_IDS, ReasonError, type Address } from '@mamoru/domain'
+import { BASE_CHAIN_ID, FORBIDDEN_LAB_CHAIN_IDS, ReasonError, type Address } from '@mamoru/domain'
 import { address } from '@mamoru/registry'
 
 /** FR-AA-002: the only bundler methods on the critical path. */
@@ -82,7 +82,7 @@ export function assertLabBundler(url: string): void {
   if (!LOOPBACK_HOSTS.has(new URL(url).hostname)) throw new ReasonError('LAB_BUNDLER_NOT_LOCAL', 'the lab bundler must listen on loopback')
 }
 
-export type BundlerConfig = { url: string; mode: 'production' | 'lab'; chainId: number; signingChainIds: readonly number[] }
+export type BundlerConfig = { url: string; mode: 'production' | 'lab' | 'live'; chainId: number; signingChainIds: readonly number[] }
 
 /**
  * BundlerPort over JSON-RPC, standard methods only. Sending refuses
@@ -118,7 +118,11 @@ export class BundlerClient {
 
   async sendUserOperation(op: UserOperation<'0.7'>): Promise<Hex> {
     if (this.cfg.mode === 'production') throw new ReasonError('DRY_RUN_STOP', 'production never sends')
-    if (FORBIDDEN_LAB_CHAIN_IDS.includes(this.cfg.chainId) || !this.cfg.signingChainIds.includes(this.cfg.chainId)) {
+    if (this.cfg.mode === 'live') {
+      // Live sends only on Base, only with MAMORU_LIVE=1 in this process.
+      const allowed = this.cfg.chainId === BASE_CHAIN_ID && process.env.MAMORU_LIVE === '1' && this.cfg.signingChainIds.includes(this.cfg.chainId)
+      if (!allowed) throw new ReasonError('SIGN_CHAIN_NOT_ALLOWED', `live send on chain ${this.cfg.chainId}`)
+    } else if (FORBIDDEN_LAB_CHAIN_IDS.includes(this.cfg.chainId) || !this.cfg.signingChainIds.includes(this.cfg.chainId)) {
       throw new ReasonError('SIGN_CHAIN_NOT_ALLOWED', `chain ${this.cfg.chainId}`)
     }
     return this.call('eth_sendUserOperation', [toRpcUserOp(op), address('EntryPointV07')])

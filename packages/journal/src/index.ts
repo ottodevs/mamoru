@@ -1,4 +1,4 @@
-import { FORBIDDEN_LAB_CHAIN_IDS, type ReasonCode } from '@mamoru/domain'
+import { BASE_CHAIN_ID, FORBIDDEN_LAB_CHAIN_IDS, type ReasonCode } from '@mamoru/domain'
 
 /** Plan §10: the states of one operation. */
 export const OP_STATES = [
@@ -61,7 +61,7 @@ export function checkTransition(from: OpState, to: OpState, code: ReasonCode): T
 }
 
 export type SignContext = {
-  mode: 'production' | 'lab'
+  mode: 'production' | 'lab' | 'live'
   chainId: number
   signingChainIds: readonly number[]
   observationAgeSeconds: number
@@ -72,12 +72,23 @@ export type SignContext = {
 }
 
 /**
+ * Live mode (sprint amendment 2026-09-26, owner-approved real-funds path):
+ * signing is allowed only on Base and only when the process runs with
+ * MAMORU_LIVE=1. Production stays DRY_RUN_STOP; the lab is unchanged.
+ */
+export function liveSigningAllowed(chainId: number): boolean {
+  return chainId === BASE_CHAIN_ID && typeof process !== 'undefined' && process.env?.MAMORU_LIVE === '1'
+}
+
+/**
  * Plan §10, "Firma": the four conditions that stop a signature, in order.
  * Returns null when the operation may be signed.
  */
 export function signBlocker(ctx: SignContext): ReasonCode | null {
   if (ctx.mode === 'production') return 'DRY_RUN_STOP'
-  if (FORBIDDEN_LAB_CHAIN_IDS.includes(ctx.chainId) || !ctx.signingChainIds.includes(ctx.chainId)) return 'SIGN_CHAIN_NOT_ALLOWED'
+  if (ctx.mode === 'live') {
+    if (!liveSigningAllowed(ctx.chainId) || !ctx.signingChainIds.includes(ctx.chainId)) return 'SIGN_CHAIN_NOT_ALLOWED'
+  } else if (FORBIDDEN_LAB_CHAIN_IDS.includes(ctx.chainId) || !ctx.signingChainIds.includes(ctx.chainId)) return 'SIGN_CHAIN_NOT_ALLOWED'
   if (!ctx.observationCanonical) return 'EHG_OBSERVATION_REORGED'
   if (ctx.observationAgeSeconds > ctx.observationTtlSeconds) return 'EHG_OBSERVATION_STALE'
   if (ctx.preparedNonce !== ctx.chainNonce) return 'OP_NONCE_MOVED'

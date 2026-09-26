@@ -64,6 +64,22 @@ describe('signBlocker', () => {
     expect(signBlocker({ ...lab, chainId: 84532, signingChainIds: [84532] })).toBe('SIGN_CHAIN_NOT_ALLOWED')
   })
 
+  test('live signs only on Base with MAMORU_LIVE=1', () => {
+    const prev = process.env.MAMORU_LIVE
+    const live = { ...lab, mode: 'live' as const, chainId: 8453, signingChainIds: [8453] }
+    try {
+      delete process.env.MAMORU_LIVE
+      expect(signBlocker(live)).toBe('SIGN_CHAIN_NOT_ALLOWED')
+      process.env.MAMORU_LIVE = '1'
+      expect(signBlocker(live)).toBeNull()
+      expect(signBlocker({ ...live, chainId: 31337, signingChainIds: [31337] })).toBe('SIGN_CHAIN_NOT_ALLOWED')
+      expect(signBlocker({ ...live, chainId: 84532, signingChainIds: [84532] })).toBe('SIGN_CHAIN_NOT_ALLOWED')
+    } finally {
+      if (prev === undefined) delete process.env.MAMORU_LIVE
+      else process.env.MAMORU_LIVE = prev
+    }
+  })
+
   test('stale, reorged and moved nonce', () => {
     expect(signBlocker({ ...lab, observationAgeSeconds: 121 })).toBe('EHG_OBSERVATION_STALE')
     expect(signBlocker({ ...lab, observationCanonical: false })).toBe('EHG_OBSERVATION_REORGED')

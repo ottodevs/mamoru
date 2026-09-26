@@ -30,6 +30,22 @@ describe('BundlerClient', () => {
     await expect(c.sendUserOperation(op)).rejects.toThrow('SIGN_CHAIN_NOT_ALLOWED')
   })
 
+  test('live sends only on Base with MAMORU_LIVE=1', async () => {
+    const prev = process.env.MAMORU_LIVE
+    try {
+      delete process.env.MAMORU_LIVE
+      const c = new BundlerClient({ url: 'http://127.0.0.1:1/', mode: 'live', chainId: 8453, signingChainIds: [8453] })
+      await expect(c.sendUserOperation(op)).rejects.toThrow('SIGN_CHAIN_NOT_ALLOWED')
+      process.env.MAMORU_LIVE = '1'
+      const fork = new BundlerClient({ url: 'http://127.0.0.1:1/', mode: 'live', chainId: 31337, signingChainIds: [31337] })
+      await expect(fork.sendUserOperation(op)).rejects.toThrow('SIGN_CHAIN_NOT_ALLOWED')
+      await expect(c.sendUserOperation(op)).rejects.toThrow('BUNDLER_UNAVAILABLE')
+    } finally {
+      if (prev === undefined) delete process.env.MAMORU_LIVE
+      else process.env.MAMORU_LIVE = prev
+    }
+  })
+
   test('the RPC shape round-trips', () => {
     expect(fromRpcUserOp(toRpcUserOp(op))).toEqual(op)
   })

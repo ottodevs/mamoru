@@ -27,7 +27,8 @@ const MAX_WAIT_BLOCKS = 32
 export type EngineSession = { name: string; grant: SessionGrant; permissionId: Hex }
 
 export type EngineConfig = {
-  mode: 'production' | 'lab'
+  /** 'live' signs and sends on Base only with MAMORU_LIVE=1 (journal signBlocker and the bundler client both check). */
+  mode: 'production' | 'lab' | 'live'
   chainId: number
   signingChainIds: readonly number[]
   rpcUrl: string
@@ -39,6 +40,10 @@ export type EngineConfig = {
   nonceLane: number
   depositsAfter: bigint
   sessions: EngineSession[]
+  /** Blocks to wait for the UserOperationEvent and for `safe`. Default 32; live Base needs more for its safe head. */
+  maxWaitBlocks?: number
+  /** First block of the managed positions' history on a restarted engine. Default: depositsAfter. */
+  historyFromBlock?: bigint
 }
 
 export type EngineHooks = {
@@ -86,7 +91,7 @@ export class Engine {
     this.bundler = new BundlerClient({ url: cfg.bundlerUrl, mode: cfg.mode, chainId: cfg.chainId, signingChainIds: cfg.signingChainIds })
     this.nonceKey = sessionNonceKey(cfg.nonceLane)
     this.depositsAfter = cfg.depositsAfter
-    this.historyFromBlock = cfg.depositsAfter
+    this.historyFromBlock = cfg.historyFromBlock ?? cfg.depositsAfter
     for (const s of cfg.sessions) this.addSession(s)
   }
 
@@ -132,6 +137,7 @@ export class Engine {
 
   /** One review: observe at a fixed block, decide, and run at most one operation. */
   async review(): Promise<ReviewResult> {
+    await this.resumeIncluded()
     let obs: Observation
     try {
       obs = await this.observe()
@@ -240,7 +246,8 @@ export class Engine {
 
     // await: the RPC's UserOperationEvent is the proof; the bundler receipt is checked against it.
     let ev = null
-    for (let i = 0; i < MAX_WAIT_BLOCKS && !ev; i++) {
+    const maxWait = this.cfg.maxWaitBlocks ?? MAX_WAIT_BLOCKS
+    for (let i = 0; i < maxWait && !ev; i++) {
       ev = await readUserOpEvent(this.client, hash, block.number)
       if (!ev) await this.hooks.waitBlock()
     }
@@ -262,7 +269,7 @@ export class Engine {
     )
 
     // confirm: only in a block at or below `safe` whose hash is still canonical (FR-ENG-008).
-    for (let i = 0; i < MAX_WAIT_BLOCKS; i++) {
+    for (let i = 0; i < maxWait; i++) {
       const s = await isSafeAndCanonical(this.client, ev.blockNumber, ev.blockHash)
       if (!s.canonical) return void j.move(op.opId, 'pending_reconciliation', 'RECON_REORGED')
       if (s.safe) {
@@ -274,6 +281,20 @@ export class Engine {
       await this.hooks.waitBlock()
     }
     // Still above `safe`: stays `included`; the next review holds on the busy slot.
+  }
+
+  /** An op left `included` when the wait ran out (slow `safe` head): confirm it once `safe` reaches its block. */
+  private async resumeIncluded(): Promise<void> {
+    const op = this.journal.live
+    if (!op || op.state !== 'included' || !op.included || !op.userOpHash) return
+    const s = await isSafeAndCanonical(this.client, op.included.blockNumber, op.included.blockHash)
+    if (!s.canonical) return void this.journal.move(op.opId, 'pending_reconciliation', 'RECON_REORGED')
+    if (!s.safe) return
+    if (!op.included.success) return void this.journal.move(op.opId, 'failed', 'EXEC_INNER_REVERT', { confirmedSafeBlock: s.safeBlock })
+    const ev = await readUserOpEvent(this.client, op.userOpHash, op.included.blockNumber)
+    if (!ev) return
+    this.journal.move(op.opId, 'confirmed', 'EXEC_OK', { confirmedSafeBlock: s.safeBlock })
+    await this.afterConfirmed(op, op.intent, op.calls ?? [], ev.logs)
   }
 
   private async afterConfirmed(op: OpRecord, proposal: Proposal, calls: Execution[], logs: Log[]): Promise<void> {
