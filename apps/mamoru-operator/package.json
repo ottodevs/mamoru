@@ -1,0 +1,23 @@
+{
+  "name": "@mamoru/operator",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun src/main.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "e2e:fork": "bun test/e2e-fork.ts"
+  },
+  "dependencies": {
+    "@mamoru/account": "workspace:*",
+    "@mamoru/decide": "workspace:*",
+    "@mamoru/domain": "workspace:*",
+    "@mamoru/erc4337": "workspace:*",
+    "@mamoru/journal": "workspace:*",
+    "@mamoru/policy": "workspace:*",
+    "@mamoru/registry": "workspace:*",
+    "@mamoru/scenarios": "workspace:*",
+    "@mamoru/uniswap-v3": "workspace:*",
+    "viem": "2.56.9"
+  }
+}

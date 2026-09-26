@@ -8,11 +8,12 @@
     "apps/*"
   ],
   "scripts": {
-    "typecheck": "tsc -p tsconfig.base.json --noEmit && tsc -p apps/mamoru-app/tsconfig.json --noEmit && tsc -p apps/mamoru-app/test/api --noEmit && tsc -p apps/mamoru-engine/tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.base.json --noEmit && tsc -p apps/mamoru-app/tsconfig.json --noEmit && tsc -p apps/mamoru-app/test/api --noEmit && tsc -p apps/mamoru-engine/tsconfig.json --noEmit && tsc -p apps/mamoru-operator/tsconfig.json --noEmit",
     "test": "bun test packages apps",
     "scenarios": "bun packages/scenarios/runner/cli.ts",
     "sync:once": "bun run --cwd apps/mamoru-engine sync:once",
-    "mb:probe": "bun run --cwd apps/mamoru-engine mb:probe"
+    "mb:probe": "bun run --cwd apps/mamoru-engine mb:probe",
+    "operator": "bun apps/mamoru-operator/src/main.ts"
   },
   "devDependencies": {
     "@types/bun": "1.3.13",

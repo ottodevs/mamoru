@@ -51,6 +51,22 @@
         "wrangler": "4.139.0",
       },
     },
+    "apps/mamoru-operator": {
+      "name": "@mamoru/operator",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mamoru/account": "workspace:*",
+        "@mamoru/decide": "workspace:*",
+        "@mamoru/domain": "workspace:*",
+        "@mamoru/erc4337": "workspace:*",
+        "@mamoru/journal": "workspace:*",
+        "@mamoru/policy": "workspace:*",
+        "@mamoru/registry": "workspace:*",
+        "@mamoru/scenarios": "workspace:*",
+        "@mamoru/uniswap-v3": "workspace:*",
+        "viem": "2.56.9",
+      },
+    },
     "packages/account": {
       "name": "@mamoru/account",
       "version": "0.0.0",
@@ -322,6 +338,8 @@
     "@mamoru/journal": ["@mamoru/journal@workspace:packages/journal"],
 
     "@mamoru/multibaas": ["@mamoru/multibaas@workspace:packages/multibaas"],
+
+    "@mamoru/operator": ["@mamoru/operator@workspace:apps/mamoru-operator"],
 
     "@mamoru/policy": ["@mamoru/policy@workspace:packages/policy"],
 
