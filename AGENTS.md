@@ -12,13 +12,14 @@ Five lanes run in parallel. Each lane has one worktree and one branch `lane/<nam
 
 | Lane | Owns |
 |---|---|
-| L0 integrator | `packages/domain/src/dashboard-payload.ts`, `packages/domain/src/app-api.ts`, `AGENTS.md`, deploys |
+| L0 integrator | `packages/domain/src/dashboard-payload.ts`, `packages/domain/src/app-api.ts`, `migrations/d1/0001_sprint.sql`, `AGENTS.md`, deploys |
 | L1 engine lab (T003) | `packages/{journal,decide,rpc,erc4337,projector}/`, quote part of `packages/uniswap-v3/`, `packages/scenarios/{driver,bundler}/`, T003 entries in `scenarios/catalog/` |
 | L2 SPA | `apps/mamoru-app/{index.html,vite.config.ts,package.json,tsconfig.json,src/web/**,test/e2e/**}` |
-| L3 API and onboarding | `apps/mamoru-app/{wrangler.jsonc,src/api/**,src/worker.ts,test/api/**}`, `migrations/d1/**`, `packages/account/proofs/` |
+| L3 API and onboarding | `apps/mamoru-app/{wrangler.jsonc,src/api/**,src/worker.ts,test/api/**}`, `migrations/d1/0002_*` and later, `packages/account/proofs/` |
 | L4 Base read model | `apps/mamoru-engine/**`, `packages/multibaas/**`, `scripts/multibaas/**` |
 
 - The SPA and the API meet only through `@mamoru/domain` (`DashboardPayload`, `app-api.ts`). A lane that needs a new field asks L0.
+- D1 `mamoru` id `682b2a66-d9d4-49e5-ac78-596d002d02ca`, binding `DB`, shared by both Workers. A schema change goes to L0.
 - Push your lane branch after each green step. Never push `main`. Never force-push.
 - Before a push: `bun run typecheck` and `bun test` pass, and scenarios accepted before stay green.
 - L0 rejects a branch that touches files outside its lane.
