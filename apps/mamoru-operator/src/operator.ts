@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { getAddress, isAddress, keccak256, stringToHex, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { AccountContext, Address, FundingView, OpView, OwnerSignature, OwnerTxToSign, TransferPlan, TransferRequest } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { address, erc20Abi } from '@mamoru/registry'
 import { computeCaps, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
@@ -29,7 +29,7 @@ import { LIVE_POOL, amountsForLiquidity, cbbtcInUsdc, readSafe, type PoolPositio
 import { Lock } from './lock.ts'
 import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
-import type { AccountState, StateStore, StoredGrant } from './state.ts'
+import type { AccountState, ArmedActivation, StateStore, StoredGrant } from './state.ts'
 
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
 const PREPARE_TTL_MS = 5 * 60_000
@@ -37,6 +37,8 @@ const PREPARE_TTL_MS = 5 * 60_000
 const TOP_UP_MARGIN_WEI = 200_000_000_000_000n
 /** How long a POST waits for the owner transaction before answering with the op as it stands; the SPA polls /ops. */
 const POST_WAIT_MS = 15_000
+/** How often the armed-activation watcher reads the USDC balance of each armed Safe. */
+const ARM_WATCH_MS = 6_000
 
 export class HttpError extends Error {
   constructor(
@@ -98,6 +100,8 @@ export class Operator {
   private readonly prepared = new Map<string, Prepared>()
   private readonly locks = new Map<string, Lock>()
   private readonly runners = new Map<string, Runner>()
+  private armTimer: ReturnType<typeof setTimeout> | null = null
+  private armStopped = false
 
   constructor(
     readonly cfg: OperatorConfig,
@@ -109,9 +113,15 @@ export class Operator {
   /** Restarts the engine loop of every account that was active. */
   resume(): void {
     for (const acc of Object.values(this.store.state.accounts)) if (acc.active) this.startLoop(acc)
+    const armed = Object.values(this.store.state.accounts).filter((a) => a.armed).length
+    if (armed) console.log(`[armed] ${armed} armed activation(s) reloaded`)
+    this.armStopped = false
+    this.armTimer = setTimeout(() => this.watchArmed(), 0)
   }
 
   shutdown(): void {
+    this.armStopped = true
+    if (this.armTimer) clearTimeout(this.armTimer)
     for (const r of this.runners.values()) {
       r.stopped = true
       if (r.timer) clearTimeout(r.timer)
@@ -199,7 +209,6 @@ export class Operator {
     const { acc, live } = this.account(ctx)
     if (acc.active) throw new HttpError(409, 'ALREADY_ACTIVE', 'the engine is already active for this account')
     const r = await readSafe(this.client, live.safe)
-    if (r.usdc === 0n) throw new HttpError(409, 'NO_DEPOSIT', 'the Safe holds no USDC yet')
     if (r.usdc > LIVE_CAP_USDC) throw new HttpError(409, 'CAP_EXCEEDED', `the Safe holds ${r.usdc} USDC base units, cap is ${LIVE_CAP_USDC}`)
     if (!acc.sessionKey) {
       acc.sessionKey = generatePrivateKey()
@@ -207,7 +216,9 @@ export class Operator {
     }
     const sessionKey = privateKeyToAccount(acc.sessionKey).address
     const policy = this.cfg.policy
-    const caps = computeCaps(policy, r.usdc, { cbBTC: { num: r.sqrtPriceX96 * r.sqrtPriceX96, den: 1n << 192n } })
+    // Sized at the account cap, not the observed deposit: the same signature bounds any deposit up to the cap,
+    // so the owner can sign before any USDC arrives (armed activation).
+    const caps = computeCaps(policy, LIVE_CAP_USDC, { cbBTC: { num: r.sqrtPriceX96 * r.sqrtPriceX96, den: 1n << 192n } })
     const block = await this.client.getBlock({ blockNumber: r.block })
     const t = Number(block.timestamp)
     const grants = (['enter-swap', 'enter-mint'] as const).map((name) =>
@@ -226,7 +237,9 @@ export class Operator {
     const stored = grants.map((g, i) => ({ name: g.name, grant: g, permissionId: batch.permissionIds[i]! }))
     const summary = [
       `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
-      `Let Mamoru's engine allocate your ${fmtUsdc(r.usdc)} USDC into Uniswap v3 USDC/cbBTC 0.05%`,
+      r.usdc > 0n
+        ? `Let Mamoru's engine allocate your ${fmtUsdc(r.usdc)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
+        : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) into Uniswap v3 USDC/cbBTC 0.05% as soon as it arrives`,
       `Engine key ${sessionKey} may only swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap) and mint that pool, for ${Math.round(policy.session.validitySeconds / 86_400)} days`,
       `Funds never leave your Safe without your passkey; cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`,
     ]
@@ -338,6 +351,12 @@ export class Operator {
       throw new HttpError(400, 'BAD_SIGNATURE', (e as Error).message)
     }
     this.prepared.delete(p.prepareId)
+    if (kind === 'activate') {
+      const usdc = await this.usdcOf(live.safe)
+      if (usdc === 0n) return this.arm(acc, p, signature)
+      if (usdc > LIVE_CAP_USDC) throw new HttpError(409, 'CAP_EXCEEDED', `the Safe holds ${usdc} USDC base units, cap is ${LIVE_CAP_USDC}`)
+      this.disarm(acc, 'ARMED_SUPERSEDED')
+    }
     const op = this.newOp(acc, kind === 'stop' ? 'exit' : kind)
     const run = this.lock(acc.accountKey).run(() => this.execute(acc, live, p, signature, op))
     run.catch((e) => {
@@ -346,6 +365,71 @@ export class Operator {
     })
     await Promise.race([run.catch(() => undefined), Bun.sleep(POST_WAIT_MS)])
     return { ...acc.ops.find((o) => o.opId === op.opId)! }
+  }
+
+  private usdcOf(safe: Address): Promise<bigint> {
+    return this.client.readContract({ address: address('USDC'), abi: erc20Abi, functionName: 'balanceOf', args: [safe] })
+  }
+
+  /** Stores the signed activation (0600 state file); the watcher executes it when USDC lands. */
+  private arm(acc: AccountState, p: Prepared, signature: Hex): OpView {
+    this.disarm(acc, 'ARMED_SUPERSEDED')
+    const op = this.newOp(acc, 'activate')
+    op.code = 'ARMED'
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now() }
+    this.store.save()
+    console.log(`[armed] ${acc.accountKey} ${op.opId} armed for ${acc.ctx.address} at Safe nonce ${p.tx.nonce}`)
+    return { ...op }
+  }
+
+  /** Drops a pending armed activation, failing its op with `code`. */
+  private disarm(acc: AccountState, code: string): void {
+    const a = acc.armed
+    if (!a) return
+    acc.armed = undefined
+    this.patchOp(acc, a.opId, { state: 'failed', code })
+  }
+
+  /** One USDC balance read per armed account every ARM_WATCH_MS; executes the armed activation once 0 < USDC <= cap. */
+  private async watchArmed(): Promise<void> {
+    if (this.armStopped) return
+    for (const acc of Object.values(this.store.state.accounts)) {
+      if (!acc.armed || this.armStopped) continue
+      try {
+        const usdc = await this.usdcOf(acc.ctx.address as Address)
+        if (usdc === 0n) continue
+        await this.lock(acc.accountKey).run(() => this.fireArmed(acc, usdc))
+      } catch (e) {
+        console.error(`[armed] ${acc.accountKey} ${(e as Error).message.split('\n')[0]}`)
+      }
+    }
+    if (!this.armStopped) this.armTimer = setTimeout(() => this.watchArmed(), ARM_WATCH_MS)
+  }
+
+  private async fireArmed(acc: AccountState, usdc: bigint): Promise<void> {
+    const a = acc.armed
+    if (!a || acc.active) return this.disarm(acc, 'ALREADY_ACTIVE')
+    if (usdc > LIVE_CAP_USDC) {
+      console.log(`[armed] ${acc.accountKey} deposit ${usdc} over cap ${LIVE_CAP_USDC}`)
+      return this.disarm(acc, 'CAP_EXCEEDED')
+    }
+    const live = liveAccountFromContext(acc.ctx)
+    const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
+    if (deployed && nonce !== a.tx.nonce) {
+      console.log(`[armed] ${acc.accountKey} Safe nonce ${nonce} != armed ${a.tx.nonce}`)
+      return this.disarm(acc, 'ARMED_NONCE_MOVED')
+    }
+    acc.armed = undefined
+    this.patchOp(acc, a.opId, { code: undefined })
+    console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
+    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants }
+    const op = acc.ops.find((o) => o.opId === a.opId)!
+    try {
+      await this.execute(acc, live, p, a.signature, op)
+    } catch (e) {
+      console.error(`[armed] ${op.opId} ${(e as Error).message.split('\n')[0]}`)
+      this.patchOp(acc, op.opId, { state: 'failed', code: 'OWNER_TX_ERROR' })
+    }
   }
 
   private newOp(acc: AccountState, kind: OpView['kind']): OpView {
@@ -411,6 +495,7 @@ export class Operator {
       this.startLoop(acc)
     } else if (p.kind === 'stop') {
       this.stopLoop(acc.accountKey)
+      this.disarm(acc, 'STOPPED')
       acc.active = false
       acc.revoked.push(...(p.revokes ?? []))
       acc.grants = []

@@ -2,9 +2,22 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { join } from 'node:path'
 import type { AccountContext, Hex, OpView } from '@mamoru/domain'
 import type { SessionGrant } from '@mamoru/policy'
+import type { SafeTx } from '@mamoru/account/live'
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */
 export type StoredGrant = { name: string; grant: SessionGrant; permissionId: Hex }
+
+/** An activation the owner signed before any USDC arrived; the operator executes it when the deposit lands. */
+export type ArmedActivation = {
+  opId: string
+  tx: SafeTx
+  safeTxHash: Hex
+  /** Owner signature (SafeWebAuthnSharedSigner contract signature) over safeTxHash. */
+  signature: Hex
+  /** The grants this tx enables, with their permissionIds. */
+  grants: StoredGrant[]
+  armedAt: string
+}
 
 export type AccountState = {
   accountKey: string
@@ -23,6 +36,8 @@ export type AccountState = {
   epoch: number
   ops: OpView[]
   seq: number
+  /** Signed activation waiting for the first USDC deposit. */
+  armed?: ArmedActivation
 }
 
 export type OperatorState = { accounts: Record<string, AccountState> }
