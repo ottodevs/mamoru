@@ -4,6 +4,8 @@
   "account_id": "ac5100a2c4cec1e240cbd20252ba9213",
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-26",
+  // Plan §19.3: no Node compat unless a pinned dependency needs it; hono, viem and the account packages do not.
+  "compatibility_flags": ["no_nodejs_compat", "no_nodejs_compat_v2"],
   "workers_dev": false,
   "preview_urls": false,
   "routes": [{ "pattern": "app.mamoru.lol", "custom_domain": true }],
