@@ -14,10 +14,12 @@ function log(addr: `0x${string}`, topics: `0x${string}`[], data: `0x${string}`, 
 const collectLog = (tokenId: bigint, a0: bigint, a1: bigint, i: number) =>
   log(NPM, encodeEventTopics({ abi: positionEventsAbi, eventName: 'Collect', args: { tokenId } }) as `0x${string}`[], encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'uint256' }], [ACCOUNT, a0, a1]), i)
 
-const swapLog = (a0: bigint, a1: bigint, i: number) =>
+const OTHER = '0x00000000000000000000000000000000000000bb'
+
+const swapLog = (a0: bigint, a1: bigint, i: number, recipient: `0x${string}` = ACCOUNT) =>
   log(
     POOL,
-    encodeEventTopics({ abi: poolSwapAbi, eventName: 'Swap', args: { sender: ACCOUNT, recipient: ACCOUNT } }) as `0x${string}`[],
+    encodeEventTopics({ abi: poolSwapAbi, eventName: 'Swap', args: { sender: address('SwapRouter02'), recipient } }) as `0x${string}`[],
     encodeAbiParameters([{ type: 'int256' }, { type: 'int256' }, { type: 'uint160' }, { type: 'uint128' }, { type: 'int24' }], [a0, a1, 1n << 96n, 1n, 69_000]),
     i,
   )
@@ -43,11 +45,11 @@ describe('applyPrincipal', () => {
 })
 
 describe('harvestRow', () => {
-  const base = { opId: 'op-3', tokenId: 7n, chainId: 31337, block: 10n, blockHash: `0x${'aa'.repeat(32)}` as const, txHash: `0x${'bb'.repeat(32)}` as const, at: '2026-09-26T00:00:00.000Z', pool: POOL, savingsIsToken0: true }
+  const base = { opId: 'op-3', tokenId: 7n, chainId: 31337, block: 10n, blockHash: `0x${'aa'.repeat(32)}` as const, txHash: `0x${'bb'.repeat(32)}` as const, at: '2026-09-26T00:00:00.000Z', account: ACCOUNT, pool: POOL, savingsIsToken0: true } as const
 
   test('fees from Collect, conversion from Swap, credit only the savings asset', () => {
     const logs = [collectLog(7n, 5_000n, 90n, 3), swapLog(-8_000n, 90n, 6)]
-    const row = harvestRow({ ...base, logs, pendingBefore: [0n, 0n] })
+    const row = harvestRow({ ...base, logs, pendingBefore: [0n, 0n], converted: true })
     expect(row.principal).toEqual([0n, 0n])
     expect(row.fees).toEqual([5_000n, 90n])
     expect(row.conversion).toEqual({ amountIn: 90n, amountOut: 8_000n })
@@ -58,14 +60,41 @@ describe('harvestRow', () => {
   })
 
   test('principal owed from an external decrease is not credited', () => {
-    const row = harvestRow({ ...base, logs: [collectLog(7n, 5_000n, 0n, 1)], pendingBefore: [4_000n, 0n] })
+    const row = harvestRow({ ...base, logs: [collectLog(7n, 5_000n, 0n, 1)], pendingBefore: [4_000n, 0n], converted: false })
     expect(row.principal).toEqual([4_000n, 0n])
     expect(row.credited).toBe(1_000n)
     expect(row.conversion).toBeNull()
   })
 
+  test('volatile principal left by an external decrease is kept as capital: only the fee part converts', () => {
+    // 300 cbBTC owed, 390 collected: 90 are fees and convert, 300 stay in the account.
+    const row = harvestRow({ ...base, logs: [collectLog(7n, 0n, 390n, 1), swapLog(-8_000n, 90n, 4)], pendingBefore: [0n, 300n], converted: true })
+    expect(row.principal).toEqual([0n, 300n])
+    expect(row.fees).toEqual([0n, 90n])
+    expect(row.credited).toBe(8_000n)
+  })
+
+  test('a conversion larger than the volatile fees is refused: it would spend principal', () => {
+    expect(() => harvestRow({ ...base, logs: [collectLog(7n, 0n, 390n, 1), swapLog(-9_000n, 100n, 4)], pendingBefore: [0n, 300n], converted: true })).toThrow(/above the volatile fees/)
+  })
+
+  test("another account's swap on the same pool is never this harvest's conversion", () => {
+    const foreign = [collectLog(7n, 5_000n, 90n, 3), swapLog(-8_000n, 90n, 5, OTHER)]
+    expect(() => harvestRow({ ...base, logs: foreign, pendingBefore: [0n, 0n], converted: true })).toThrow(/not volatile to savings for the account/)
+  })
+
+  test('a swap in the wrong direction is refused', () => {
+    const wrong = [collectLog(7n, 5_000n, 90n, 3), swapLog(8_000n, -90n, 5)]
+    expect(() => harvestRow({ ...base, logs: wrong, pendingBefore: [0n, 0n], converted: true })).toThrow(/not volatile to savings/)
+  })
+
+  test('a missing or duplicated Collect is refused', () => {
+    expect(() => harvestRow({ ...base, logs: [], pendingBefore: [0n, 0n], converted: false })).toThrow(/0 Collect/)
+    expect(() => harvestRow({ ...base, logs: [collectLog(7n, 1n, 0n, 1), collectLog(7n, 1n, 0n, 2)], pendingBefore: [0n, 0n], converted: false })).toThrow(/2 Collect/)
+  })
+
   test('the dashboard view carries the credit and both sources', () => {
-    const v = savingsRowView(harvestRow({ ...base, logs: [collectLog(7n, 5_000n, 0n, 1)], pendingBefore: [0n, 0n] }))
+    const v = savingsRowView(harvestRow({ ...base, logs: [collectLog(7n, 5_000n, 0n, 1)], pendingBefore: [0n, 0n], converted: false }))
     expect(v.amount.value).toBe('5000')
     expect(v.provenance.source).toBe('journal')
     expect(v.amount.provenance.source).toBe('fork_rpc')

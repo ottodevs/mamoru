@@ -6,6 +6,7 @@ import { checkTransition, isTerminal, type OpKind, type OpState } from '@mamoru/
 import type { Simulation } from '@mamoru/rpc'
 import type { Execution } from '@mamoru/account/safe'
 import type { BundlerReceipt } from '@mamoru/erc4337'
+import type { ReceiptCheck } from './receipt.ts'
 
 export type Inclusion = { blockNumber: bigint; blockHash: Hex; txHash: Hex; success: boolean; actualGasCost: bigint }
 
@@ -36,6 +37,8 @@ export type OpRecord = {
   userOp?: UserOperation<'0.7'>
   userOpHash?: Hex
   bundlerReceipt?: BundlerReceipt
+  /** The bundler receipt against the journal and the RPC UserOperationEvent. */
+  receiptCheck?: ReceiptCheck
   included?: Inclusion
   confirmedSafeBlock?: bigint
   mintedTokenId?: bigint

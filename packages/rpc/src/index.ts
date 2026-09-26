@@ -7,12 +7,15 @@ import {
   parseAbi,
   parseAbiItem,
   zeroAddress,
+  isAddressEqual,
+  toEventSelector,
   type Hex,
   type Log,
   type PublicClient,
 } from 'viem'
 import { ReasonError, type Address } from '@mamoru/domain'
 import type { DepositObs, Observation, PoolObs, PositionObs, SessionObs } from '@mamoru/decide'
+import { applyPrincipal, positionEventsAbi, type Pair, type PositionEvent } from '@mamoru/projector'
 import {
   address,
   baseRegistry,
@@ -46,7 +49,12 @@ export type ObserveInput = {
   depositsAfter: bigint
   sessions: SessionObs[]
   allowedTokenIds: readonly bigint[]
-  principalOwed: ReadonlyMap<bigint, readonly [bigint, bigint]>
+  /**
+   * First block of the managed positions' history. The principal owed is
+   * folded from every canonical DecreaseLiquidity and Collect of those
+   * tokenIds from here to the observation block, whoever sent them.
+   */
+  historyFromBlock: bigint
   intents: Observation['intents']
   slot: Observation['slot']
   twapWindowSeconds: number
@@ -84,7 +92,9 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const tokenIds = await Promise.all(
     Array.from({ length: Number(nftCount) }, (_, i) => client.readContract({ address: npm, abi: enumerableAbi, functionName: 'tokenOfOwnerByIndex', args: [acct, BigInt(i)], blockNumber })),
   )
-  const positions = await Promise.all(tokenIds.map((id) => readPosition(client, acct, id, blockNumber, input)))
+  const history = await readPositionHistory(client, input.allowedTokenIds, input.historyFromBlock, blockNumber)
+  const owed = applyPrincipal(new Map(), history)
+  const positions = await Promise.all(tokenIds.map((id) => readPosition(client, acct, id, blockNumber, input, owed)))
   const pools = await Promise.all(POOLS.map((p) => readPool(client, p, blockNumber, input.twapWindowSeconds)))
   const priceSlot0 = await client.readContract({ address: address(input.ethPricePool), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber })
   const deposits = await readDeposits(client, acct, input, blockNumber, safe.number)
@@ -111,7 +121,7 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   }
 }
 
-async function readPosition(client: PublicClient, acct: Address, tokenId: bigint, blockNumber: bigint, input: ObserveInput): Promise<PositionObs> {
+async function readPosition(client: PublicClient, acct: Address, tokenId: bigint, blockNumber: bigint, input: ObserveInput, principal: ReadonlyMap<bigint, Pair>): Promise<PositionObs> {
   const npm = address('NonfungiblePositionManager')
   const p = await client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId], blockNumber })
   const poolAddr = await client.readContract({ address: address('UniswapV3Factory'), abi: uniswapV3FactoryAbi, functionName: 'getPool', args: [p[2], p[3], p[4]], blockNumber })
@@ -124,7 +134,7 @@ async function readPosition(client: PublicClient, acct: Address, tokenId: bigint
   })
   const raw = await client.call({ account: acct, to: npm, data: collectData, blockNumber })
   const [collectable0, collectable1] = decodeFunctionResult({ abi: nonfungiblePositionManagerAbi, functionName: 'collect', data: raw.data ?? '0x' })
-  const owed = input.principalOwed.get(tokenId) ?? [0n, 0n]
+  const owed = principal.get(tokenId) ?? [0n, 0n]
   return {
     tokenId,
     pool,
@@ -193,6 +203,38 @@ async function readDeposits(client: PublicClient, acct: Address, input: ObserveI
     .map((l) => ({ token: input.savingsAsset, amount: l.args.value!, block: l.blockNumber!, txHash: l.transactionHash!, logIndex: l.logIndex!, safe: l.blockNumber! <= safeNumber }))
 }
 
+export type ChainPositionEvent = PositionEvent & { blockNumber: bigint; txHash: Hex }
+
+/**
+ * FR-PRJ-003: every canonical DecreaseLiquidity and Collect of these
+ * tokenIds in [fromBlock, toBlock], engine or not, in chain order.
+ */
+export async function readPositionHistory(client: PublicClient, tokenIds: readonly bigint[], fromBlock: bigint, toBlock: bigint): Promise<ChainPositionEvent[]> {
+  if (tokenIds.length === 0 || fromBlock > toBlock) return []
+  const npm = address('NonfungiblePositionManager')
+  const [decreases, collects] = await Promise.all(
+    (['DecreaseLiquidity', 'Collect'] as const).map((eventName) =>
+      client.getLogs({ address: npm, event: positionEventsAbi.find((e) => e.name === eventName)!, args: { tokenId: [...tokenIds] }, fromBlock, toBlock }),
+    ),
+  )
+  const events = [...decreases!, ...collects!].map((l) => ({
+    kind: l.eventName === 'Collect' ? ('collect' as const) : ('decrease' as const),
+    tokenId: l.args.tokenId!,
+    amount0: l.args.amount0!,
+    amount1: l.args.amount1!,
+    logIndex: l.logIndex!,
+    blockNumber: l.blockNumber!,
+    txHash: l.transactionHash!,
+  }))
+  return events.sort((a, b) => (a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1))
+}
+
+/** Principal owed per tokenId just before (block, logIndex): the fold of the canonical history up to there. */
+export async function principalOwedBefore(client: PublicClient, tokenIds: readonly bigint[], fromBlock: bigint, at: { block: bigint; logIndex: number }): Promise<Map<bigint, Pair>> {
+  const history = await readPositionHistory(client, tokenIds, fromBlock, at.block)
+  return applyPrincipal(new Map(), history.filter((e) => e.blockNumber < at.block || e.logIndex < at.logIndex))
+}
+
 export type SimCall = { from?: Address; to: Address; data: Hex }
 export type SimCallResult = { status: 'success' | 'reverted'; returnData: Hex; gasUsed: bigint; logs: Log[]; error?: string }
 
@@ -256,22 +298,58 @@ export async function simulateFromEntryPoint(client: PublicClient, account: Addr
   }
 }
 
-export type UserOpEventRead = { blockNumber: bigint; blockHash: Hex; txHash: Hex; success: boolean; actualGasCost: bigint; nonce: bigint; logs: Log[] }
+export type UserOpEventRead = {
+  userOpHash: Hex
+  sender: Address
+  nonce: bigint
+  blockNumber: bigint
+  blockHash: Hex
+  txHash: Hex
+  logIndex: number
+  success: boolean
+  actualGasCost: bigint
+  /** Only the logs this userOp produced, not the whole bundle's. */
+  logs: Log[]
+}
 
-/** FR-AA-004 and FR-ENG-008: the UserOperationEvent of a hash, read from the RPC, with the logs of its transaction. */
+const BEFORE_EXECUTION = toEventSelector('BeforeExecution()')
+const USER_OPERATION_EVENT = toEventSelector(userOperationEvent)
+
+/**
+ * EntryPoint v0.7 runs the ops of a bundle after one BeforeExecution, each
+ * closed by its UserOperationEvent. The logs of the op whose event sits at
+ * `eventLogIndex` are the ones after the previous boundary and before it.
+ */
+export function userOpLogs<L extends Log>(txLogs: readonly L[], eventLogIndex: number): L[] {
+  const ep = address('EntryPointV07')
+  const ordered = [...txLogs].sort((a, b) => a.logIndex! - b.logIndex!)
+  const boundary = (topic: Hex) => (l: L) => isAddressEqual(l.address, ep) && l.topics[0] === topic
+  const event = ordered.find((l) => l.logIndex === eventLogIndex)
+  if (!event || !boundary(USER_OPERATION_EVENT)(event)) throw new Error(`no UserOperationEvent at log ${eventLogIndex}`)
+  const before = ordered.filter((l) => l.logIndex! < eventLogIndex)
+  const start = before.findLast((l) => boundary(USER_OPERATION_EVENT)(l) || boundary(BEFORE_EXECUTION)(l))
+  if (!before.some(boundary(BEFORE_EXECUTION))) throw new Error('the transaction has no BeforeExecution: not a handleOps bundle')
+  return before.filter((l) => l.logIndex! > start!.logIndex!)
+}
+
+/** FR-AA-004 and FR-ENG-008: the UserOperationEvent of a hash, read from the RPC, with the logs of that userOp only. */
 export async function readUserOpEvent(client: PublicClient, userOpHash: Hex, fromBlock: bigint): Promise<UserOpEventRead | null> {
   const logs = await client.getLogs({ address: address('EntryPointV07'), event: userOperationEvent, args: { userOpHash }, fromBlock, toBlock: 'latest' })
+  if (logs.length > 1) throw new Error(`${logs.length} UserOperationEvents for ${userOpHash}`)
   const ev = logs[0]
   if (!ev) return null
   const receipt = await client.getTransactionReceipt({ hash: ev.transactionHash! })
   return {
+    userOpHash: ev.args.userOpHash!,
+    sender: ev.args.sender!,
+    nonce: ev.args.nonce!,
     blockNumber: ev.blockNumber!,
     blockHash: ev.blockHash!,
     txHash: ev.transactionHash!,
+    logIndex: ev.logIndex!,
     success: ev.args.success!,
     actualGasCost: ev.args.actualGasCost!,
-    nonce: ev.args.nonce!,
-    logs: receipt.logs,
+    logs: userOpLogs(receipt.logs, ev.logIndex!),
   }
 }
 

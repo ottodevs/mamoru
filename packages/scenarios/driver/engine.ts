@@ -5,15 +5,16 @@ import { decide, type Decision, type Observation, type Proposal, type SessionObs
 import { signBlocker } from '@mamoru/journal'
 import type { PolicyVersion, SessionGrant } from '@mamoru/policy'
 import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
-import { isSafeAndCanonical, observe, readUserOpEvent, rpcClient, simulateFromEntryPoint, type Simulation } from '@mamoru/rpc'
+import { isSafeAndCanonical, observe, principalOwedBefore, readUserOpEvent, rpcClient, simulateFromEntryPoint, type Simulation } from '@mamoru/rpc'
 import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
 import { SessionLedger, precheck } from '@mamoru/account/precheck'
 import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useModeSignature, userOpHash, type GasSettings } from '@mamoru/account/sessions'
 import type { Execution } from '@mamoru/account/safe'
 import { approve, collect, exactInputSingle, mint, type V3Call } from '@mamoru/uniswap-v3'
 import { minOut, quoteExactInputSingle, quoteMint } from '@mamoru/uniswap-v3/quote'
-import { applyPrincipal, harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
+import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
 import { MemoryJournal, type DecisionRecord, type OpRecord } from './journal.ts'
+import { reconcileReceipt } from './receipt.ts'
 
 /** Gas limits of every engine userOp. Their sum is the budget `decide` prices for the harvest cost. */
 export const LAB_GAS_LIMITS = { verificationGasLimit: 3_000_000n, callGasLimit: 2_000_000n, preVerificationGas: 100_000n } as const
@@ -51,7 +52,7 @@ export type ReviewResult =
   | { kind: 'observation-failed'; code: ReasonCode; detail?: string }
   | { kind: 'decided'; observation: Observation; record: DecisionRecord; op: OpRecord | null }
 
-type Prepared = { calls: Execution[]; quote?: OpRecord['quote'] }
+type Prepared = { calls: Execution[]; quote?: OpRecord['quote']; /** Harvest: principal owed for the tokenId at the prepare block. */ owed?: Pair }
 
 function exec(c: V3Call): Execution {
   return { target: c.to, value: c.value, callData: c.data }
@@ -69,7 +70,8 @@ export class Engine {
   readonly sessions: EngineSession[] = []
   readonly allowedTokenIds: bigint[] = []
   readonly savingsLog: SavingsLogRow[] = []
-  principalOwed = new Map<bigint, Pair>()
+  /** Managed positions are minted by this engine after this block (plan §12.4), so their whole history is on chain from here. */
+  readonly historyFromBlock: bigint
   depositsAfter: bigint
   lastObservation?: Observation
   private readonly client: PublicClient
@@ -84,6 +86,7 @@ export class Engine {
     this.bundler = new BundlerClient({ url: cfg.bundlerUrl, mode: cfg.mode, chainId: cfg.chainId, signingChainIds: cfg.signingChainIds })
     this.nonceKey = sessionNonceKey(cfg.nonceLane)
     this.depositsAfter = cfg.depositsAfter
+    this.historyFromBlock = cfg.depositsAfter
     for (const s of cfg.sessions) this.addSession(s)
   }
 
@@ -116,7 +119,7 @@ export class Engine {
       depositsAfter: this.depositsAfter,
       sessions: this.sessionObs(),
       allowedTokenIds: this.allowedTokenIds,
-      principalOwed: this.principalOwed,
+      historyFromBlock: this.historyFromBlock,
       intents: { paused: false, exitRequested: false },
       slot: live ? { opId: live.opId, state: live.state } : null,
       twapWindowSeconds: this.cfg.policy.execution.twapWindowSeconds,
@@ -242,11 +245,21 @@ export class Engine {
       if (!ev) await this.hooks.waitBlock()
     }
     if (!ev) return void j.move(op.opId, 'pending_reconciliation', 'RECON_TIMEOUT')
+    // The RPC event stays the authority; the bundler receipt is reconciled against it and the journal, and any conflict is kept.
     const receipt = await this.bundler.getUserOperationReceipt(hash)
-    j.move(op.opId, 'included', 'OP_INCLUDED', {
-      included: { blockNumber: ev.blockNumber, blockHash: ev.blockHash, txHash: ev.txHash, success: ev.success, actualGasCost: ev.actualGasCost },
-      bundlerReceipt: receipt ?? undefined,
-    })
+    const receiptCheck = reconcileReceipt({ userOpHash: hash, sender: this.cfg.account, nonce }, ev, receipt)
+    if (ev.sender.toLowerCase() !== this.cfg.account.toLowerCase() || ev.nonce !== nonce) throw new Error(`${op.opId}: UserOperationEvent of ${ev.sender} nonce ${ev.nonce} for our hash`)
+    j.move(
+      op.opId,
+      'included',
+      'OP_INCLUDED',
+      {
+        included: { blockNumber: ev.blockNumber, blockHash: ev.blockHash, txHash: ev.txHash, success: ev.success, actualGasCost: ev.actualGasCost },
+        bundlerReceipt: receipt ?? undefined,
+        receiptCheck,
+      },
+      receiptCheck.status === 'match' ? undefined : `bundler receipt ${receiptCheck.status}${receiptCheck.status === 'mismatch' ? `: ${receiptCheck.fields.join(', ')}` : ''}; RPC event kept`,
+    )
 
     // confirm: only in a block at or below `safe` whose hash is still canonical (FR-ENG-008).
     for (let i = 0; i < MAX_WAIT_BLOCKS; i++) {
@@ -265,8 +278,6 @@ export class Engine {
 
   private async afterConfirmed(op: OpRecord, proposal: Proposal, calls: Execution[], logs: Log[]): Promise<void> {
     this.ledger.recordIncluded(op.permissionId!, calls)
-    const pendingBefore = this.principalOwed
-    this.principalOwed = applyPrincipal(this.principalOwed, positionEvents(logs))
     if (proposal.kind === 'enter_mint') {
       const minted = parseEventLogs({ abi: nonfungiblePositionManagerAbi, logs, eventName: 'Transfer' }).find(
         (l) => isAddressEqual(l.address, address('NonfungiblePositionManager')) && isAddressEqual(l.args.to, this.cfg.account),
@@ -278,6 +289,10 @@ export class Engine {
     if (proposal.kind === 'harvest') {
       const inc = op.included!
       const pool = entry(proposal.pool)
+      const collect = positionEvents(logs).find((e) => e.kind === 'collect' && e.tokenId === proposal.tokenId)
+      if (!collect) throw new Error(`${op.opId}: confirmed harvest without a Collect of ${proposal.tokenId}`)
+      // FR-PRJ-003: the principal owed right before this Collect, folded from the canonical history, owner actions included.
+      const owed = await principalOwedBefore(this.client, [proposal.tokenId], this.historyFromBlock, { block: inc.blockNumber, logIndex: collect.logIndex })
       this.savingsLog.push(
         harvestRow({
           opId: op.opId,
@@ -288,9 +303,11 @@ export class Engine {
           txHash: inc.txHash,
           at: new Date(Number((await this.client.getBlock({ blockNumber: inc.blockNumber })).timestamp) * 1000).toISOString(),
           logs,
+          account: this.cfg.account,
           pool: pool.address,
-          pendingBefore: pendingBefore.get(proposal.tokenId) ?? [0n, 0n],
+          pendingBefore: owed.get(proposal.tokenId) ?? [0n, 0n],
           savingsIsToken0: pool.token0 === this.cfg.policy.savingsAsset,
+          converted: proposal.convert !== null,
         }),
       )
     }
@@ -333,8 +350,10 @@ export class Engine {
         ].map(exec),
       }
     }
+    const owedAt = await principalOwedBefore(this.client, [p.tokenId], this.historyFromBlock, { block: blockNumber + 1n, logIndex: 0 })
+    const owed = owedAt.get(p.tokenId) ?? [0n, 0n]
     const calls = [collect({ account: acct, tokenId: p.tokenId })]
-    if (!p.convert) return { calls: calls.map(exec) }
+    if (!p.convert) return { calls: calls.map(exec), owed }
     const savings = this.cfg.policy.savingsAsset
     const fee = entry(p.pool).fee!
     const amountOut = await quoteExactInputSingle(this.client, { tokenIn: address(p.convert.token), tokenOut: address(savings), fee, amountIn: p.convert.amount, blockNumber })
@@ -343,7 +362,7 @@ export class Engine {
       approve(p.convert.token, 'SwapRouter02', p.convert.amount),
       exactInputSingle({ account: acct, tokenIn: p.convert.token, tokenOut: savings, fee, amountIn: p.convert.amount, amountOutMinimum }),
     )
-    return { calls: calls.map(exec), quote: { amountIn: p.convert.amount, amountOut, amountOutMinimum } }
+    return { calls: calls.map(exec), quote: { amountIn: p.convert.amount, amountOut, amountOutMinimum }, owed }
   }
 
   /** FR-RPC-002: the simulated deltas must be the ones the intent expects. Returns why not, or null. */
@@ -362,7 +381,23 @@ export class Engine {
       return null
     }
     if (sim.nftDelta !== 0n) return `positions changed by ${sim.nftDelta}`
-    if (p.convert && d(p.convert.token) !== 0n) return `${p.convert.token} moved ${d(p.convert.token)} after converting the fees`
+    // FR-UNI-005: the conversion spends fees only; principal collected from an external decrease stays in the account.
+    const pool = entry(p.pool)
+    const savings = this.cfg.policy.savingsAsset
+    const savingsIs0 = pool.token0 === savings
+    const volatile = savingsIs0 ? pool.token1! : pool.token0!
+    const collects = positionEvents(sim.logs).filter((e) => e.kind === 'collect' && e.tokenId === p.tokenId)
+    if (collects.length !== 1) return `${collects.length} Collect events for ${p.tokenId}`
+    const c = collects[0]!
+    const [collectedSavings, collectedVolatile] = savingsIs0 ? [c.amount0, c.amount1] : [c.amount1, c.amount0]
+    const owedVolatile = (savingsIs0 ? prepared.owed?.[1] : prepared.owed?.[0]) ?? 0n
+    const converting = p.convert?.amount ?? 0n
+    if (p.convert && p.convert.token !== volatile) return `converts ${p.convert.token}, the volatile token is ${volatile}`
+    const retained = collectedVolatile - converting
+    if (retained < owedVolatile) return `converting ${converting} ${volatile} would spend principal: collected ${collectedVolatile}, principal owed ${owedVolatile}`
+    if (d(volatile) !== retained) return `${volatile} moved ${d(volatile)}, expected the ${retained} left after converting the fees`
+    const minimum = collectedSavings + (prepared.quote?.amountOutMinimum ?? 0n)
+    if (d(savings) < minimum) return `${savings} rose ${d(savings)}, below the collected ${collectedSavings} plus the minimum out`
     return null
   }
 }

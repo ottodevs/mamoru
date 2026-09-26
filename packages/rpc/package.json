@@ -9,6 +9,7 @@
   "dependencies": {
     "@mamoru/decide": "workspace:*",
     "@mamoru/domain": "workspace:*",
+    "@mamoru/projector": "workspace:*",
     "@mamoru/registry": "workspace:*",
     "viem": "2.56.9"
   }

@@ -51,12 +51,14 @@ export function applyPrincipal(owed: ReadonlyMap<bigint, Pair>, events: Position
   return next
 }
 
-export type SwapFill = { pool: Address; amountIn: bigint; amountOut: bigint; tick: number; logIndex: number }
+export type SwapFill = { pool: Address; recipient: Address; zeroForOne: boolean; amountIn: bigint; amountOut: bigint; tick: number; logIndex: number }
 
-/** Swap events of `pool` in these logs, as positive in and out amounts. */
+/** Swap events of `pool` in these logs, as positive in and out amounts with their direction and recipient. */
 export function swapFills(logs: Log[], pool: Address): SwapFill[] {
   return parseEventLogs({ abi: poolSwapAbi, logs: logs.filter((l) => isAddressEqual(l.address, pool)) }).map((e) => ({
     pool,
+    recipient: e.args.recipient,
+    zeroForOne: e.args.amount0 > 0n,
     amountIn: e.args.amount0 > 0n ? e.args.amount0 : e.args.amount1,
     amountOut: e.args.amount0 < 0n ? -e.args.amount0 : -e.args.amount1,
     tick: e.args.tick,
@@ -92,11 +94,15 @@ export type HarvestProjection = {
   blockHash: Hex
   txHash: Hex
   at: string
+  /** The logs of this userOp only (between its bundle boundaries), never the whole transaction's. */
   logs: Log[]
+  account: Address
   pool: Address
-  /** Principal owed for the tokenId before this operation. */
+  /** Principal owed for the tokenId just before this operation's Collect, from the canonical history. */
   pendingBefore: Pair
   savingsIsToken0: boolean
+  /** Whether the harvest converted the volatile fees. */
+  converted: boolean
 }
 
 /**
@@ -105,10 +111,20 @@ export type HarvestProjection = {
  * from the Swap event, and only fees in the savings asset are credited.
  */
 export function harvestRow(h: HarvestProjection): SavingsLogRow {
-  const collect = positionEvents(h.logs).find((e) => e.kind === 'collect' && e.tokenId === h.tokenId)
-  if (!collect) throw new Error(`no Collect for tokenId ${h.tokenId} in ${h.txHash}`)
+  const collects = positionEvents(h.logs).filter((e) => e.kind === 'collect' && e.tokenId === h.tokenId)
+  if (collects.length !== 1) throw new Error(`${collects.length} Collect events for tokenId ${h.tokenId} in ${h.opId}`)
+  const collect = collects[0]!
   const split = splitCollect(h.pendingBefore, [collect.amount0, collect.amount1])
-  const swap = swapFills(h.logs, h.pool)[0] ?? null
+  // Only a swap of the volatile token into the savings asset, paid to the account, is this harvest's conversion.
+  // Volatile in means token1 in (zeroForOne false) when savings is token0, and token0 in otherwise.
+  const volatileToSavings = !h.savingsIsToken0
+  const swaps = swapFills(h.logs, h.pool)
+  const conversions = swaps.filter((f) => f.zeroForOne === volatileToSavings && isAddressEqual(f.recipient, h.account))
+  if (swaps.length !== conversions.length) throw new Error(`${h.opId}: a Swap of the pool is not volatile to savings for the account`)
+  if (conversions.length !== (h.converted ? 1 : 0)) throw new Error(`${h.opId}: ${conversions.length} conversions, expected ${h.converted ? 1 : 0}`)
+  const swap = conversions[0] ?? null
+  const volatileFees = h.savingsIsToken0 ? split.fees[1] : split.fees[0]
+  if (swap && swap.amountIn > volatileFees) throw new Error(`${h.opId}: converted ${swap.amountIn}, above the volatile fees ${volatileFees}`)
   const feesInSavings = h.savingsIsToken0 ? split.fees[0] : split.fees[1]
   const provenance: Provenance[] = [
     { source: 'journal', chainId: h.chainId, observedAt: h.at, status: 'fresh', detail: 'PROJ_CONFIRMED' },
