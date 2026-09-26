@@ -3,6 +3,9 @@ import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import { Lock } from './lock.ts'
 
+/** Per-tx gas cap on Base (EIP-7825). */
+const TX_GAS_CAP = 16_777_216n
+
 /** The relayer EOA: pays gas for Safe deploys, owner execTransactions, top-ups and handleOps bundles. One send at a time. */
 export class Relayer {
   readonly account: PrivateKeyAccount
@@ -45,7 +48,9 @@ export class Relayer {
   send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint }, onSent?: (hash: Hex) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     return this.lock.run(async () => {
       const wallet = createWalletClient({ account: this.account, chain: this.chain, transport: http(this.rpcUrl, { timeout: 60_000 }) })
-      const gas = tx.gas ?? ((await this.client.estimateGas({ account: this.account.address, to: tx.to, data: tx.data, value: tx.value })) * 13n) / 10n
+      // Base rejects a tx over 2^24 gas (EIP-7825): the 30% margin must not push a fitting estimate over the cap.
+      const est = tx.gas ?? ((await this.client.estimateGas({ account: this.account.address, to: tx.to, data: tx.data, value: tx.value })) * 13n) / 10n
+      const gas = est > TX_GAS_CAP ? TX_GAS_CAP : est
       const hash = await wallet.sendTransaction({ to: tx.to, data: tx.data, value: tx.value ?? 0n, gas })
       onSent?.(hash)
       return { hash, receipt: await this.receipt(hash) }

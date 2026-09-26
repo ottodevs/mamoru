@@ -127,6 +127,13 @@ const ENGINE_STEP: Record<OpRecord['kind'], Progress['step']> = {
 /** Accounts activated before the operator stored a policy id per account ran this policy. */
 const LEGACY_POLICY = 'conservador-live-v1'
 const LIVE_POOL_NAME = 'pool:USDC/cbBTC/500'
+/** Base's per-tx gas cap is 2^24 (EIP-7825). Budget the activation well under it: the relayer adds a margin on top of its estimate. */
+export const BASE_TX_GAS_CAP = 16_777_216n
+const ACTIVATION_GAS_BUDGET = 15_000_000n
+/** execTransaction, WebAuthn P-256 verify and MultiSend around the calls. */
+const ACTIVATION_OVERHEAD_GAS = 600_000n
+/** Measured on Base: enableSessions costs 1.4-2.1M gas per session of the live policies; 2.1M is the conservative bound. */
+const STATIC_GAS_PER_SESSION = 2_100_000n
 
 /** "USDC/cbBTC 0.05%" for pool:USDC/cbBTC/500. */
 function poolLabel(pool: string): string {
@@ -294,6 +301,52 @@ export class Operator {
     return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary, expiresAt: new Date(expires).toISOString(), prepareId }
   }
 
+  /**
+   * Base caps a transaction at 2^24 gas (EIP-7825); a fork does not. SmartSession.enableSessions costs ~1-3M gas per
+   * session, so the full multi-pool v2 set (12 sessions, ~18.2M) reverts GS013 on real Base. Keep every entry grant
+   * and drop the manage-any/convert-any pairs of the lowest-preference buckets until the simulated tx fits. The engine
+   * discards a proposal whose session is missing (SESSION_MISSING), so a dropped pair only disables re-range/reduce
+   * for that pool.
+   */
+  private async fitActivation(
+    live: LiveAccount,
+    policy: PolicyVersion,
+    allKeys: string[],
+    build: (keys: string[]) => ReturnType<typeof instantiateGrant>[],
+    acc: AccountState,
+    block: bigint,
+  ): Promise<{ keys: string[]; grants: ReturnType<typeof instantiateGrant>[]; batch: ReturnType<typeof activationBatch> }> {
+    const droppable = [...policy.buckets]
+      .sort((a, b) => a.preference - b.preference)
+      .flatMap((b) => b.pools)
+      .map((pool) => allKeys.filter((k) => (k.startsWith('manage-any') || k.startsWith('convert-any')) && (k.endsWith(`:${pool}`) || !k.includes(':'))))
+      .filter((ks) => ks.length > 0)
+    let keys = allKeys
+    for (let i = 0; ; i++) {
+      const grants = build(keys)
+      const batch = activationBatch(live, grants, acc.revoked, { trust: !acc.trusted })
+      const gas = await this.activationGas(live, batch.calls, grants.length, block)
+      if (gas <= ACTIVATION_GAS_BUDGET || i >= droppable.length) {
+        if (keys.length < allKeys.length) console.log(`[activate] ${live.safe} ~${gas} gas: dropped ${allKeys.filter((k) => !keys.includes(k)).join(', ')} to fit Base's per-tx gas cap`)
+        return { keys, grants, batch }
+      }
+      keys = keys.filter((k) => !droppable[i]!.includes(k))
+    }
+  }
+
+  /** Simulated gas of the activation calls from the Safe plus calldata and Safe/WebAuthn overhead; a static estimate when the simulation is unavailable (e.g. undeployed Safe). */
+  private async activationGas(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], sessions: number, block: bigint): Promise<bigint> {
+    const bytes = calls.reduce((n, c) => n + BigInt((c.data.length - 2) / 2), 0n)
+    const overhead = 16n * bytes + ACTIVATION_OVERHEAD_GAS
+    try {
+      const res = await simulateCalls(this.client, calls.map((c) => ({ from: live.safe, to: c.to, data: c.data })), block)
+      if (res.every((x) => x.status === 'success')) return res.reduce((n, x) => n + x.gasUsed, 0n) + overhead
+    } catch {
+      // fall through to the static estimate
+    }
+    return 400_000n + BigInt(sessions) * STATIC_GAS_PER_SESSION + overhead
+  }
+
   async prepareActivate(ctx: AccountContext): Promise<OwnerTxToSign> {
     this.assertLive()
     const { acc, live } = this.account(ctx)
@@ -317,8 +370,8 @@ export class Operator {
     const caps = computeCaps(policy, LIVE_CAP_USDC, prices)
     const block = await this.client.getBlock({ blockNumber: r.block })
     const t = Number(block.timestamp)
-    const keys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
-    const grants = keys.map((key) =>
+    const allKeys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
+    const build = (keys: string[]) => keys.map((key) =>
       instantiateGrant(policy, key, {
         account: live.safe,
         sessionKey,
@@ -330,7 +383,7 @@ export class Operator {
         admittedTokenIds: [],
       }),
     )
-    const batch = activationBatch(live, grants, acc.revoked, { trust: !acc.trusted })
+    const { keys, grants, batch } = await this.fitActivation(live, policy, allKeys, build, acc, r.block)
     const stored = grants.map((g, i) => ({ name: keys[i]!, grant: g, permissionId: batch.permissionIds[i]! }))
     const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!)} ${b.preference / 100}%`)
     if (pools.length > 1) {
