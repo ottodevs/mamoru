@@ -2,8 +2,9 @@ import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
-// The SPA talks only to /api on its own origin; in dev that is `wrangler dev` on 8787.
-const WORKER = 'http://localhost:8787'
+// The SPA talks only to /api on its own origin. In dev that is `wrangler dev` on 8787,
+// or the origin in MAMORU_API_ORIGIN (e.g. https://app.mamoru.lol) to try the SPA against a deployed API.
+const API_ORIGIN = process.env.MAMORU_API_ORIGIN ?? 'http://localhost:8787'
 
 export default defineConfig(({ command, mode }) => {
   const env = loadEnv(mode, process.cwd(), 'VITE_')
@@ -14,8 +15,9 @@ export default defineConfig(({ command, mode }) => {
     plugins: [react(), tailwindcss()],
     build: { outDir: 'dist', emptyOutDir: true, sourcemap: false },
     server: {
-      // The API refuses POSTs from a foreign Origin, so the proxy presents the Worker's own origin.
-      proxy: env.VITE_FIXTURES === '1' ? undefined : { '/api': { target: WORKER, changeOrigin: true, headers: { origin: WORKER } } },
+      // The API refuses POSTs from a foreign Origin, so the proxy presents the API's own origin.
+      proxy:
+        env.VITE_FIXTURES === '1' ? undefined : { '/api': { target: API_ORIGIN, changeOrigin: true, headers: { origin: API_ORIGIN } } },
     },
   }
 })
