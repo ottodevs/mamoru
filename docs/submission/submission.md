@@ -1,8 +1,6 @@
 # ETHGlobal Tokyo 2026: submission text for Mamoru
 
-Draft for every field of the project form (see `requirements.md` for the rules). L0 pastes these at freeze after resolving each [PENDING Lx]. Voice rules: plain, factual, no em dash, no emoji in prose, no invented numbers, no yield or APY claims, no users, deposits or TVL. MultiBaas and fork claims follow `specs/001-mamoru-v1/dashboard.md` §12.2 and §12.3.
-
-Permanent links use `main`. The old branch `spec/mamoru-v1` no longer exists; every field that mentions it must be replaced.
+Text for every field of the project form (rules in `requirements.md`). Voice rules: plain, factual, no em dash, no emoji in prose, no invented numbers, no yield or APY claims, no users, deposits or TVL, no earlier projects. MultiBaas and fork claims follow `specs/001-mamoru-v1/dashboard.md` §12.2 and §12.3. Every link points to `main`.
 
 ## 1. Project details
 
@@ -11,7 +9,7 @@ Permanent links use `main`. The old branch `spec/mamoru-v1` no longer exists; ev
 | Project name | Mamoru |
 | Category | DeFi |
 | Emoji | keep the current one |
-| Demo link | https://app.mamoru.lol (live since main b27f1af). Do not use https://mamoru.lol: its hero says "APY. DELIVERED.", which the claims policy forbids |
+| Demo link | https://app.mamoru.lol. Not https://mamoru.lol while its hero says "APY. DELIVERED.", which the claims policy forbids |
 
 ## 2. Short description (max 100 characters)
 
@@ -25,33 +23,33 @@ Option B (89 characters):
 
 ## 3. Description (min 280 characters)
 
-Mamoru is a non-custodial savings account on Base. You own a Safe smart account through a passkey on your device, add a backup owner, and download a recovery kit before anything else happens. The server never holds an owner key.
+Mamoru is a non-custodial savings account on Base. You own a Safe smart account through a passkey on your device and download a recovery kit before anything else happens. The server never holds an owner key.
 
-A session key can act for the account only inside a written policy: it may call Uniswap v3 on Base, on registry addresses, with the account as recipient and a positive minimum on every swap and mint. You can revoke it at any time, and you can leave without Mamoru: the owner walkaway revokes the sessions, closes the position and withdraws with the engine, the app and the indexer all off.
+A session key can act for the account only inside a written policy: it may call Uniswap v3 on Base, on registry addresses, with the account as recipient and a positive minimum on every swap and mint. You can revoke it at any time, and you can leave without Mamoru: with the kit and your passkey, you revoke the sessions, close the position and withdraw, with our engine, app and indexer all off.
 
 In v1 production, Mamoru runs in simulation mode. It plans and simulates, and it does not sign or send transactions. Deposits are closed.
 
-The dashboard shows Base only. Every figure carries its chain id and its source, as a chip such as "Base · block N" or "MultiBaas · Base · checked at block N". It shows what the account holds, what needs your decision, what Mamoru would do next and why, and the state of the Uniswap pool in the plan. [PENDING L2/L3/L4: confirm each view is live on app.mamoru.lol with real Base pool data]
+The dashboard shows Base only. Every figure carries its chain id and its source, as a chip such as "Base · block N" or "MultiBaas · Base · checked at block N". It shows what the account holds, what needs your decision, what Mamoru would do next and why, and the live state of the Uniswap pool in the plan, read from Base every 2 minutes.
 
-The full cycle is verified on a Base fork pinned at block 51811000 with chain id 31337. Fork results are not capital and do not use MultiBaas. The last full run passed 36 of 36 scenarios: 24 session attacks with a leaked key, 3 walkaway scenarios and 9 checks of the verification plane itself. [PENDING L1: add the T003 harvest scenarios if they pass before freeze]
+The full cycle is verified on a Base fork pinned at block 51811000 with chain id 31337. Fork results are not capital and do not use MultiBaas. The last full run passed 42 of 42 scenarios: 24 session attacks with a leaked key, 3 walkaway scenarios, 6 engine scenarios from deposit to harvest, and 9 checks of the verification plane itself.
 
-Live app: https://app.mamoru.lol. Landing: https://mamoru.lol. Repo: https://github.com/ottodevs/mamoru.
+Live app: https://app.mamoru.lol. Repo: https://github.com/ottodevs/mamoru.
 
 ## 4. How it's made (min 280 characters)
 
-Mamoru is a Bun and TypeScript monorepo, https://github.com/ottodevs/mamoru. Everything runs on Cloudflare: the app Worker serves a Vite and React single-page app and a small API, and an engine Worker syncs Base state into a D1 database on a cron. [PENDING L2/L3/L4 merge]
+Mamoru is a Bun workspaces monorepo in TypeScript, https://github.com/ottodevs/mamoru. It runs on Cloudflare Workers: the app Worker serves a Vite 8, React 19, TanStack Router and Query and Tailwind 4 single-page app plus a Hono API; a second, cron-triggered engine Worker reads Base every 2 minutes into a shared D1 database. The API serves the dashboard only from D1.
 
-Account. The account is a Safe 1.4.1 with the Safe7579 adapter, so it can use ERC-7579 modules and ERC-4337 EntryPoint v0.7. The owner is a WebAuthn passkey through Safe's WebAuthn shared signer, plus a backup owner. The address is counterfactual: we compute it from the setup before it exists, and the recovery kit holds every parameter needed to deploy it without us. There is no account SDK; we encode everything with viem against ABIs and addresses pinned in packages/registry/base.json, each checked by code hash at Base block 51811000.
+Account. The account is a Safe 1.4.1 with the Safe7579 adapter, so it uses ERC-7579 modules and ERC-4337 EntryPoint v0.7. The owner is a WebAuthn passkey through Safe's WebAuthn shared signer, bound inside Safe.setup through a MultiSend 1.4.1 delegatecall, so the counterfactual address commits to the passkey. The recovery kit holds every public parameter needed to deploy that exact Safe without us. There is no account SDK: everything is encoded with viem 2.56.9 against addresses pinned in packages/registry/base.json, each checked by code hash at Base block 51811000.
 
 Sessions. packages/account/sessions/index.ts (toSmartSession, line 103) encodes a Rhinestone Smart Session. The grants in packages/policy name the allowed contracts and selectors and add argument rules through UniActionPolicy, plus time and usage limits. A session cannot install modules, change owners, approve an attacker or pay anyone but the account.
 
-Uniswap. packages/uniswap-v3/src/index.ts builds SwapRouter02.exactInputSingle (line 24) with the account as recipient and a positive amountOutMinimum, and NonfungiblePositionManager mint (line 54) with ticks on the pool spacing and positive minimums, plus decreaseLiquidity, collect and burn. v1 uses one pool, USDC/cbBTC 0.05% on Base. [PENDING L1: QuoterV2 quotes and the harvest path on the fork] [PENDING L4: the engine reads slot0 and Swap, Mint and Burn logs of that pool on Base]
+Uniswap. packages/uniswap-v3/src/index.ts builds SwapRouter02.exactInputSingle (line 24) with the account as recipient and a positive amountOutMinimum, and NonfungiblePositionManager mint (line 54) with ticks on the pool spacing and positive minimums, plus decreaseLiquidity, collect and burn. quote.ts quotes through QuoterV2 at a fixed block and derives the minimum. v1 uses one pool, USDC/cbBTC 0.05% on Base. In production the engine reads its slot0, liquidity, a TWAP and one hour of Swap, Mint and Burn at the safe block.
 
-MultiBaas. The engine Worker reads Base through a Curvegrid MultiBaas deployment with the pool, the NonfungiblePositionManager and EntryPoint v0.7 linked, using a read-only key. The browser never calls it. [PENDING L4: name only the queries that reconciled against Base RPC.] The Free plan refused a seven-day start block (100-block limit), so older history comes from Base RPC logs and is labeled as fallback.
+MultiBaas. The engine Worker reads the pool's Swap, Mint and Burn events from a Curvegrid MultiBaas deployment on Base, with a read-only key, and checks every row against Base RPC logs before it stores it; a probe matched 10 of 10 rows with nothing missing on either side. Rows older than the index start block come from Base RPC logs and are labeled. The browser never calls MultiBaas.
 
-Verification. The fork runner in packages/scenarios starts Anvil on a Base fork pinned at block 51811000 with chain id 31337 and refuses Base chain ids, unpinned blocks and keys in argv. The session attacks send real batches to EntryPoint.handleOps and must be rejected by the chain. The Base RPC URL stays in the environment; it never reaches argv or logs.
+Verification. The fork runner in packages/scenarios starts Anvil on a Base fork pinned at block 51811000 with chain id 31337 and refuses Base chain ids, unpinned blocks and keys in argv. Session attacks send real batches to EntryPoint.handleOps and must be rejected by the chain. The engine scenarios run the same decision code against the fork through a loopback bundler that speaks the standard ERC-4337 methods (Alto is pinned but not installed): a deposit is entered with a swap and a mint, the swap minimum recomputed from QuoterV2 equals the signed one, the bundler receipt matches the UserOperationEvent, and a harvest converts fees to USDC and credits the Savings Log.
 
-How we worked. We wrote the spec first with GitHub Spec Kit: the constitution, spec, plan, dashboard spec, scenarios, threats and tasks are in inputs/ and specs/001-mamoru-v1. Otto and Brais set the product, the spec and the screens; Cursor Agent, Claude Code, Codex and Grok wrote most of the code in parallel lanes against that pack, and an integrator merged the lanes into main.
+How we worked. We wrote the spec first with GitHub Spec Kit: constitution, spec, plan, dashboard spec, scenarios, threats and tasks are in inputs/ and specs/001-mamoru-v1. Brais and Otto decided the product, the design and every merge. AI agents implemented in parallel lanes on separate branches, and a second model reviewed each lane (docs/process/ai-attribution.md).
 
 ## 5. Tech stack answers
 
@@ -60,26 +58,26 @@ How we worked. We wrote the spec first with GitHub Spec Kit: the constitution, s
 | Ethereum developer tools | Foundry (anvil), viem |
 | Blockchain networks | Base |
 | Programming languages | TypeScript, SQL |
-| Web frameworks | React, Vite [PENDING L2] |
-| Databases | Cloudflare D1 [PENDING L3/L4] |
-| Design tools | Ot decides |
-| Other technologies | Bun, Cloudflare Workers, Astro (landing), Safe, Safe7579, Rhinestone Smart Sessions, ERC-4337 EntryPoint v0.7, WebAuthn passkeys, Uniswap v3, Curvegrid MultiBaas, GitHub Spec Kit |
+| Web frameworks | React, Vite, Hono, Tailwind CSS, TanStack Router, TanStack Query |
+| Databases | Cloudflare D1 |
+| Design tools | Brais and Otto decide |
+| Other technologies | Bun, Cloudflare Workers (cron triggers), Safe 1.4.1, Safe7579, Rhinestone Smart Sessions, SafeWebAuthnSharedSigner, ERC-4337 EntryPoint v0.7, WebAuthn passkeys, Uniswap v3 (QuoterV2, SwapRouter02, NonfungiblePositionManager), Curvegrid MultiBaas, GitHub Spec Kit |
 
 ## 6. How AI tools were used
 
-Otto and Brais set the product, the copy, the screens and the closed spec (inputs/mamoru-spec-v1.md). The spec pack in specs/001-mamoru-v1 (spec, plan, dashboard, scenarios, threats, tasks) was drafted with AI and is in the public repo; it is how the agents were directed. Cursor Agent, Claude Code, Codex and Grok implemented the packages (registry, policy, account, uniswap-v3, scenarios), the app and the engine, one lane per area of the repo with a written brief. Codex also reviewed commits during the first tasks. The Uniswap call builders, the session encoding and the fork scenarios were written with the spec files open, and every scenario result comes from a real run on the fork, not from a model.
+Spec-driven. Brais and Otto set the product spec (inputs/mamoru-spec-v1.md); the spec pack in specs/001-mamoru-v1 (spec, plan, dashboard, scenarios, threats, tasks) was drafted with AI and reviewed by the team, and it is how the agents were directed. Cursor Agent and Claude Code, both with Claude Opus 5.5, implemented most of the code in packages/, apps/ and scenarios/ in parallel lanes, each on its own branch and allowed to write only its own paths. Codex with GPT-6 Astra reviewed lane commits independently. Brais and Otto decided the product, the design and every merge. Every scenario result comes from a real run on the fork, not from a model. Full record: docs/process/ai-attribution.md.
 
 ## 7. Prize: Uniswap Foundation
 
 How are you using this protocol:
 
-> Mamoru's capital side is Uniswap v3 on Base. packages/uniswap-v3/src/index.ts on main builds SwapRouter02.exactInputSingle with the account as recipient and a positive amountOutMinimum, and NonfungiblePositionManager mint with ticks on the pool spacing and positive minimums for both tokens, plus decreaseLiquidity, collect and burn. The addresses are pinned in packages/registry/base.json and checked by code hash at Base block 51811000.
+> Mamoru's capital side is Uniswap v3 on Base. packages/uniswap-v3/src/index.ts builds SwapRouter02.exactInputSingle with the account as recipient and a positive amountOutMinimum, and NonfungiblePositionManager mint with ticks on the pool spacing and positive minimums, plus decreaseLiquidity, collect and burn. packages/uniswap-v3/src/quote.ts quotes through QuoterV2 at a fixed block. Addresses are pinned in packages/registry/base.json and checked by code hash at Base block 51811000.
 >
-> A session key may only call those selectors on those addresses, with argument rules (packages/account/sessions/index.ts, packages/policy). On a Base fork pinned at block 51811000 (chain id 31337), 24 scenarios use a leaked session key to swap or mint to an attacker, approve max, collect a foreign position or exceed caps; the chain rejects every one (evidence/scenarios/). [PENDING L1: the harvest path, collect then swap to USDC through QuoterV2 and SwapRouter02, on the fork.] [PENDING L4: the dashboard reads the USDC/cbBTC 0.05% pool on Base.] In v1 production Mamoru runs in simulation mode and does not sign or send.
+> A session key may only call those selectors on those addresses, with argument rules. On a Base fork pinned at block 51811000 (chain id 31337), 24 scenarios use a leaked session key to swap or mint to an attacker, approve max, collect a foreign position or exceed caps, and the chain rejects every one. The engine scenarios enter the USDC/cbBTC 0.05% pool with a swap and a mint, check that the minimum recomputed from QuoterV2 equals the signed one, and harvest: collect the fees and swap the cbBTC part to USDC through SwapRouter02, leaving no allowance. In production the engine reads that pool on Base every 2 minutes for the dashboard. v1 production runs in simulation mode and does not sign or send.
 
 Proof link: https://github.com/ottodevs/mamoru/blob/main/packages/uniswap-v3/src/index.ts#L24
 
-Ease rating (1-10): 8 (unchanged; Ot decides)
+Ease rating (1-10): 8 (Brais and Otto decide)
 
 Notes:
 
@@ -89,30 +87,27 @@ Notes:
 
 How are you using this protocol:
 
-> Mamoru's production dashboard on Base answers four questions for one smart account: what it holds, what needs the owner's decision, what Mamoru would do next and why, and what is happening in the Uniswap pool in its plan. Every figure carries its chain id and its source, shown as a chip. The dashboard shows Base only. [PENDING L2/L3/L4: confirm views live at https://app.mamoru.lol]
+> Mamoru's production dashboard on Base answers four questions for one smart account: what it holds, what needs the owner's decision, what Mamoru would do next and why, and what is happening in the Uniswap pool in its plan. The dashboard shows Base only. Every figure carries its chain id and its source, shown as a chip. Live at https://app.mamoru.lol.
 >
-> The engine Worker reads Base through our MultiBaas deployment on Base (chain id 8453) with the USDC/cbBTC 0.05% pool, the NonfungiblePositionManager and EntryPoint v0.7 linked, using a read-only key in the DApp User group. The browser never calls MultiBaas. [PENDING L4: "Pool swaps, liquidity changes, position history and account operations come from MultiBaas event queries that Mamoru's server checks against Base RPC before showing them", naming only reconciled queries.] If MultiBaas is behind or unavailable, the dashboard reads Base RPC logs and labels every row [PENDING L4: DASH-17 and BASE-02]. In v1 production, Mamoru runs in simulation mode. It plans and simulates, and it does not sign or send transactions. Not covered: DAO votes, vesting schedules and RWA ownership analytics.
+> Mamoru links the Uniswap V3 pool it uses, the NonfungiblePositionManager and EntryPoint v0.7 on Base in MultiBaas. The engine Worker reads the pool's Swap, Mint and Burn events through MultiBaas event queries that Mamoru's server checks against Base RPC before showing them (probe: 10 of 10 rows reconciled). Rows older than the index start block come from Base RPC logs and are labeled. The key is read-only in the DApp User group; the browser never calls MultiBaas. In v1 production, Mamoru runs in simulation mode. It plans and simulates, and it does not sign or send transactions. Not covered: DAO votes, vesting schedules and RWA ownership analytics.
 
 Proof link: https://github.com/ottodevs/mamoru#how-multibaas-was-used
 
-Ease rating (1-10): 7 (unchanged; Ot decides)
+Ease rating (1-10): 7 (Brais and Otto decide)
 
 Notes:
 
-> Creating the Base deployment, linking three contracts with canonical ABIs and scoping a read-only key to the DApp User group was direct. The Free plan refused our seven-day start block with a 403 (100-block past-logs limit), so history older than the link comes from Base RPC logs and is labeled as fallback. [PENDING L4: MB-02 to MB-04 results.] Details: https://github.com/ottodevs/mamoru/blob/main/docs/multibaas.md
+> Creating the Base deployment, linking three contracts with canonical ABIs and scoping a read-only key was direct, and event queries matched Base RPC one to one. What cost time: the Free plan refused our seven-day start block (100-block limit), limit is 50 rows per page, log_index cannot be selected, the contract status endpoint returns 403 for the DApp User key, and Swap aggregates compared ticks as strings, so we use rows only. Details: https://github.com/ottodevs/mamoru/blob/main/docs/multibaas.md
 
 ## 9. Future
 
-Ot decides (grants, accelerators).
+Brais and Otto decide (grants, accelerators).
 
-## 10. Claims checklist for L0 at freeze
+## 10. Evidence behind the numbers
 
-| Claim | Depends on | Keep if |
-|---|---|---|
-| Live app URL and views | L2, L3 | app.mamoru.lol serves onboarding and the dashboard after the last deploy |
-| React, Vite, D1 in tech stack | L2, L3, L4 | merged on main |
-| Engine reads the pool on Base | L4 | merged and deployed; D1 has pool rows |
-| Reconciled MultiBaas queries | L4 | MB-02 to MB-04 report `PROJ_RECONCILED` for the named queries |
-| RPC fallback labeled | L4 | DASH-17 and BASE-02 pass |
-| Harvest on the fork | L1 | M01 to M04 and DEP-01 pass in a recorded run |
-| "36 of 36" and "24 session attacks" | done | evidence/scenarios/fork-run-20260926T181151Z-0ce9e2.md; update both if a newer full run is recorded |
+| Claim | Evidence |
+|---|---|
+| 42 of 42, 24 session attacks, 3 walkaway, 6 engine, 9 lab | `evidence/scenarios/fork-run-20260926T185126Z-84632e.md` |
+| QuoterV2 minimum equals the signed one; receipt matches `UserOperationEvent`; harvest credited to the Savings Log | same file, T003 section |
+| MultiBaas 10 of 10 reconciled; formats; plan limits | `evidence/multibaas/mb-02-04-results.md`, `evidence/multibaas/mb-01-deployment.md` |
+| Pool read every 2 minutes | `apps/mamoru-engine/wrangler.jsonc` (cron `*/2 * * * *`) |

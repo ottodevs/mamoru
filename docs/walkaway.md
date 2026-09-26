@@ -58,7 +58,7 @@ Developers can build this batch with `walkawayCalls` in [`packages/account/owner
 
 ## What we tested
 
-On a local fork of Base pinned at block 51811000 (chain id 31337), with Mamoru's engine, app and the MultiBaas indexer all switched off. The fork is our test bench, not real funds. Last recorded run: [`evidence/scenarios/fork-run-20260926T181151Z-0ce9e2.md`](../evidence/scenarios/fork-run-20260926T181151Z-0ce9e2.md).
+On a local fork of Base pinned at block 51811000 (chain id 31337), with Mamoru's engine, app and the MultiBaas indexer all switched off. The fork is our test bench, not real funds. Last recorded run: [`evidence/scenarios/fork-run-20260926T185126Z-84632e.md`](../evidence/scenarios/fork-run-20260926T185126Z-84632e.md).
 
 | Scenario | What it shows |
 |---|---|
