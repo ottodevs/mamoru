@@ -1,29 +1,35 @@
 import type { FundingView } from '@mamoru/domain'
 import { useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
-import { useConfig, useFunding, useSession } from '../api/queries.ts'
+import { useFunding, useSession } from '../api/queries.ts'
+import { ConnectWallet } from '../components/connect-wallet.tsx'
 import { AddressBlock, Brand, Copy, Qr, Waiting } from '../components/ui.tsx'
 import { usd } from '../lib/money.ts'
 import { localTime } from '../lib/time.ts'
+import { useInjectedWallets } from '../lib/wallets.ts'
 
 export const addCopy = {
   title: 'Add capital',
-  send: (cap: string) => `Send USDC on Base. Up to ${cap} USDC.`,
+  send: 'Send USDC on Base.',
   waiting: 'Waiting for your USDC',
   arrived: (amount: string) => `${amount} USDC arrived`,
 }
 
-/** Address, QR and the cap. Shared by the Add money screen and the Home modal. */
-export function DepositDetails({ address, capUsdc }: { address: string; capUsdc: string }) {
+/** Address, QR and Connect wallet. Shared by the Add money screen and the Home modal. */
+export function DepositDetails({ address }: { address: string }) {
+  const wallets = useInjectedWallets()
   return (
-    <div className="grid gap-5 sm:grid-cols-[auto_1fr] sm:items-center sm:gap-7">
-      <Qr text={address} />
-      <div className="grid min-w-0 gap-3">
-        <p className="kicker">Your address on Base</p>
-        <AddressBlock address={address} />
-        <div className="flex flex-wrap items-center gap-3">
-          <Copy text={address} label="Copy address" />
-          <span className="text-[0.88rem] text-stone">{addCopy.send(usd(capUsdc).replace(/\.00$/, ''))}</span>
+    <div className="grid gap-6">
+      <ConnectWallet to={address} wallets={wallets} />
+      <div className="grid gap-5 sm:grid-cols-[auto_1fr] sm:items-center sm:gap-7">
+        <Qr text={address} />
+        <div className="grid min-w-0 gap-3">
+          <p className="kicker">Your address on Base</p>
+          <AddressBlock address={address} />
+          <div className="flex flex-wrap items-center gap-3">
+            <Copy text={address} label="Copy address" />
+            <span className="text-[0.88rem] text-stone">{addCopy.send}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -36,7 +42,6 @@ export function hasMoney(f: FundingView | undefined): boolean {
 
 export function AddMoneyPage() {
   const session = useSession()
-  const config = useConfig()
   const accountKey = session.data?.accountKey
   const funding = useFunding(accountKey, true, 4_000)
   const navigate = useNavigate()
@@ -69,11 +74,7 @@ export function AddMoneyPage() {
         <div>
           <h1 className="m-0 text-[clamp(2rem,7vw,3rem)] font-normal leading-[1.05]">{addCopy.title}</h1>
         </div>
-        {f ? (
-          <DepositDetails address={f.address} capUsdc={f.capUsdc ?? config.data?.capUsdc ?? '25000000'} />
-        ) : (
-          <div className="h-44 animate-pulse bg-wash/40" aria-hidden="true" />
-        )}
+        {f ? <DepositDetails address={f.address} /> : <div className="h-44 animate-pulse bg-wash/40" aria-hidden="true" />}
         <div className="card flex flex-wrap items-center justify-between gap-3">
           {arrived && f ? (
             <p className="m-0 text-[1.05rem] text-emerald" role="status">
