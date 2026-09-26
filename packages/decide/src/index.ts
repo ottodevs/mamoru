@@ -1,6 +1,7 @@
 import { keccak256, stringToHex, type Hex } from 'viem'
 import type { ReasonCode } from '@mamoru/domain'
 import { policyHash, type PolicyVersion } from '@mamoru/policy'
+import { allocate } from './allocate/index.ts'
 import { enterBucket } from './enter/index.ts'
 import { ehgPreliminary, purgaIdentity } from './gates/index.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
@@ -9,7 +10,8 @@ import type { Decision, GateStep, Observation, Proposal, ShadowNote } from './ty
 export type * from './types.ts'
 export { estimateFees } from './harvest/index.ts'
 export { safeSavings } from './enter/index.ts'
-export { inSavings, volatileOf } from './value.ts'
+export { amountsForLiquidity, inSavings, volatileOf } from './value.ts'
+export { allocate, widthOf, type Allocation, type BucketValue } from './allocate/index.ts'
 
 /** Deterministic JSON: sorted keys, bigints as decimal strings. */
 export function canonicalJson(value: unknown): string {
@@ -72,7 +74,17 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
   // Plan §9, step 7: entry, bucket by bucket.
   const entries: Proposal[] = []
   let enterEvaluated = false
-  for (const b of policy.buckets) {
+  if (policy.allocation === 'target-weights') {
+    const a = allocate(obs, policy, unsafeDeposit)
+    for (const b of a.buckets) buckets.push({ bucket: b.bucket, code: b.code })
+    trail.push(...a.trail)
+    if (a.proposal) {
+      enterEvaluated = true
+      const pool = obs.pools.find((x) => x.name === a.proposal!.pool)!
+      trail.push(purgaIdentity(pool), { gate: 'strategy', verdict: 'GO', reason: 'STRATEGY_PREFERENCE_DEVIATION' }, { gate: 'eny', verdict: 'SKIP', reason: 'ENY_SHADOW' })
+      entries.push(a.proposal)
+    }
+  } else for (const b of policy.buckets) {
     const poolName = b.pools[0]
     const pool = poolName ? obs.pools.find((x) => x.name === poolName) : undefined
     if (!pool) {

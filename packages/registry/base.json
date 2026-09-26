@@ -37,6 +37,14 @@
       "codeHash": "0xdc7d03167b2b33566fa1cf50046e5bf4828f6d401678ed832d2cd7973ea17380"
     },
     {
+      "name": "USDT",
+      "kind": "token",
+      "role": "stable del bucket stables (conservador-live-v2)",
+      "address": "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",
+      "decimals": 6,
+      "codeHash": "0x478746a8e4b17181c4efbeb2069d86f22ec395788099ed65c9442ca44df265bc"
+    },
+    {
       "name": "UniswapV3Factory",
       "kind": "uniswap",
       "role": "factory V3",
@@ -107,6 +115,17 @@
       "fee": 500,
       "tickSpacing": 10,
       "codeHash": "0xcd06f61c6db6a1d8317548aaaa0aa83254624aec741534c51815810e977587ae"
+    },
+    {
+      "name": "pool:USDC/USDT/100",
+      "kind": "pool",
+      "role": "bucket stables (conservador-live-v2): el pool stable/stable v3 más profundo con USDC en Base",
+      "address": "0xD56da2B74bA826f19015E6B7Dd9Dae1903E85DA1",
+      "token0": "USDC",
+      "token1": "USDT",
+      "fee": 100,
+      "tickSpacing": 1,
+      "codeHash": "0x7c1e281e8700a5038559b9380296ee9c4591b706789a1aa5a7a270ca837ef80d"
     },
     {
       "name": "EntryPointV07",

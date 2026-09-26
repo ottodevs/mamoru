@@ -64,7 +64,8 @@ export type ShadowNote = { code: ReasonCode; note: string }
 
 export type EnterSwapProposal = {
   kind: 'enter_swap'
-  grant: 'enter-swap'
+  /** `enter-swap`, or `enter-swap:<pool>` on a multi-pool policy. */
+  grant: 'enter-swap' | `enter-swap:${string}`
   pool: RegistryName
   tokenIn: RegistryName
   tokenOut: RegistryName
@@ -74,7 +75,7 @@ export type EnterSwapProposal = {
 
 export type EnterMintProposal = {
   kind: 'enter_mint'
-  grant: 'enter-mint'
+  grant: 'enter-mint' | `enter-mint:${string}`
   pool: RegistryName
   tickLower: number
   tickUpper: number

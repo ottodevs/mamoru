@@ -45,6 +45,8 @@ export type GrantName = 'enter-swap' | 'enter-mint' | 'manage'
 
 export type GrantTemplate = {
   name: GrantName
+  /** Multi-pool policies: the pool this grant is for. The session key is `${name}:${pool}` (see `grantKey`). */
+  pool?: RegistryName
   /** Activated by the owner only for a tokenId already admitted from enter-mint. */
   perPosition: boolean
   usageLimit: number
@@ -67,7 +69,24 @@ export type PolicyVersion = {
   savingsAsset: RegistryName
   gasReserveWei: bigint
   harvest: { costFactorBps: number }
-  range: { widthTicks: number; adjust: 'off' | 'on_out_of_range'; cooldownSeconds: number }
+  range: {
+    widthTicks: number
+    adjust: 'off' | 'on_out_of_range'
+    cooldownSeconds: number
+    /** Width per pool, overriding `widthTicks` (a stable/stable pool wants a narrow range around 1.0). */
+    widthTicksByPool?: Record<RegistryName, number>
+  }
+  /**
+   * How `decide` enters. `first-entry` (default, v1): one entry per bucket without a managed position.
+   * `target-weights`: every review values each bucket (positions + idle volatile, in the savings asset at the
+   * TWAP) against its share of the whole account and proposes the next entry for the most under-weight bucket,
+   * so idle savings is always re-invested toward the target mix.
+   */
+  allocation?: 'first-entry' | 'target-weights'
+  /** target-weights: smallest entry, in raw savings units. */
+  minEntry?: bigint
+  /** target-weights: a bucket is topped up only when it is short of its target by more than this share of it (bps). */
+  rebalanceBandBps?: number
   execution: { slippageBps: number; maxTwapDeviationTicks: number; twapWindowSeconds: number; observationTtlSeconds: number }
   session: {
     validitySeconds: number
@@ -101,6 +120,7 @@ export type SessionGrant = {
   policyId: string
   policyHash: Hex
   name: GrantName
+  pool?: RegistryName
   salt: Hex
   chainId: number
   account: Address

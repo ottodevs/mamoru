@@ -1,6 +1,7 @@
 import { keccak256, stringToHex, toFunctionSelector } from 'viem'
 import { FORBIDDEN_LAB_CHAIN_IDS, BASE_CHAIN_ID, ReasonError, type Address, type Hex } from '@mamoru/domain'
 import { address } from '@mamoru/registry'
+import { grantKey } from './grants.ts'
 import type { GrantName, PolicyVersion, RefTemplate, ResolvedActionRule, SessionGrant } from './types.ts'
 
 function canonical(value: unknown): unknown {
@@ -73,10 +74,12 @@ function resolveRef(ref: RefTemplate, ctx: GrantContext): bigint {
   return BigInt(address(ref))
 }
 
-export function instantiateGrant(policy: PolicyVersion, name: GrantName, ctx: GrantContext): SessionGrant {
+/** `key` is a grant name or, on a multi-pool policy, `name:pool` (see `grantKey`). A bare name takes the first grant of that name. */
+export function instantiateGrant(policy: PolicyVersion, key: GrantName | string, ctx: GrantContext): SessionGrant {
   assertPolicyChain(policy, ctx.chainId)
-  const template = policy.session.grants.find((g) => g.name === name)
-  if (!template) throw new Error(`${policy.policyId} has no grant ${name}`)
+  const template = policy.session.grants.find((g) => grantKey(g) === key) ?? policy.session.grants.find((g) => g.name === key)
+  if (!template) throw new Error(`${policy.policyId} has no grant ${key}`)
+  const name = template.name
   if (template.perPosition !== (ctx.tokenId !== undefined)) {
     throw new Error(`grant ${name} ${template.perPosition ? 'needs' : 'does not take'} a tokenId`)
   }
@@ -108,6 +111,7 @@ export function instantiateGrant(policy: PolicyVersion, name: GrantName, ctx: Gr
     policyId: policy.policyId,
     policyHash: policyHash(policy),
     name,
+    ...(template.pool ? { pool: template.pool } : {}),
     salt: ctx.salt,
     chainId: ctx.chainId,
     account: ctx.account,

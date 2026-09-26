@@ -1,4 +1,4 @@
-import type { GrantTemplate } from './types.ts'
+import type { GrantName, GrantTemplate } from './types.ts'
 
 const APPROVE = 'approve(address,uint256)'
 const EXACT_INPUT_SINGLE = 'exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))'
@@ -15,6 +15,8 @@ export type PairSpec = {
   token0: string
   token1: string
   fee: number
+  /** Registry name of the pool; set on multi-pool policies so each pair's grants get their own session key. */
+  pool?: string
   caps: {
     stableSwapPerCall: string
     stableSwapTotal: string
@@ -33,7 +35,7 @@ export type PairSpec = {
  */
 export function pairGrants(p: PairSpec, usage: { enterSwap: number; enterMint: number; manage: number }): GrantTemplate[] {
   const c = p.caps
-  return [
+  const templates: GrantTemplate[] = [
     {
       name: 'enter-swap',
       perPosition: false,
@@ -174,4 +176,17 @@ export function pairGrants(p: PairSpec, usage: { enterSwap: number; enterMint: n
       ],
     },
   ]
+  return p.pool ? templates.map((t) => ({ ...t, pool: p.pool })) : templates
+}
+
+/** Session key of a grant: its name, or `name:pool` for the per-pair grants of a multi-pool policy. */
+export function grantKey(t: { name: GrantName; pool?: string }): string {
+  return t.pool ? `${t.name}:${t.pool}` : t.name
+}
+
+/** The key of the grant `name` that covers `pool` in this policy (plain `name` for single-pair policies). */
+export function grantKeyFor(policy: { session: { grants: GrantTemplate[] } }, name: GrantName, pool: string): string {
+  const t = policy.session.grants.find((g) => g.name === name && g.pool === pool) ?? policy.session.grants.find((g) => g.name === name && !g.pool)
+  if (!t) throw new Error(`no ${name} grant for ${pool}`)
+  return grantKey(t)
 }
