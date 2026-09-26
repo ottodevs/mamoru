@@ -449,7 +449,7 @@ type SessionGrant = {
   permitERC4337Paymaster: false
   erc7739: 'none'
   fallbackAction: 'none'
-  allowedTokenIds: bigint[]
+  tokenId?: bigint                // solo en manage: un grant por posición (12.4)
   actions: ActionRule[]
 }
 
@@ -464,12 +464,21 @@ type ParamRule = {
   field: string                   // nombre del campo en la ABI
   index: number                   // posición en la tupla estática; offset = index * 32 tras el selector
   condition: 'EQUAL' | 'GREATER_THAN' | 'GREATER_THAN_OR_EQUAL' | 'LESS_THAN_OR_EQUAL'
-  ref: 'ACCOUNT' | RegistryName | bigint | 'allowedTokenIds' | 'cap:<name>'
+  ref: 'ACCOUNT' | RegistryName | bigint | 'tokenId' | 'cap:<name>'
   cumulative?: 'cap:<name>'       // tope acumulado en la vida del grant
+  denial: ReasonCode              // código del pre-chequeo si la regla falla
 }
 ```
 
 Solo se admiten funciones cuyos argumentos son una tupla estática o valores estáticos. Una regla por offset sobre calldata dinámica se puede engañar con offsets no canónicos. Por eso `exactInput`, `multicall` y cualquier función con `bytes` o arrays quedan fuera.
+
+Codificación en cadena, comprobada por T001 en el fork del bloque 51811000:
+
+- **Marco temporal.** `TimeFramePolicy` (`0x8177451511dE0577b911C254E9551D981C26dc72`), userOp policy, con `initData = encodePacked(uint128 validUntil, uint128 validAfter)`. El empaquetado en `uint48` revierte.
+- **Límite de uso.** `UsageLimitPolicy` (`0x1F34eF8311345A3A4a4566aF321b313052F51493`), userOp policy, con `initData = encodePacked(uint128 limit)`.
+- **Reglas de parámetros y valor nativo.** `UniActionPolicy` (`0x0000006DDA6c463511C4e9B05CFc34C1247fCF1F`), única action policy de cada acción: `valueLimitPerUse = 0` y hasta 16 reglas con `offset = index * 32`. Las reglas con `cumulative` llevan `isLimited` y el tope acumulado como `usage.limit`.
+- **Sin `ValueLimitPolicy`.** Trata un límite 0 como no inicializado y revierte (`PolicyNotInitialized`). El valor nativo 0 lo impone `UniActionPolicy`.
+- **Firma de la session key.** `OwnableValidator` con umbral 1; firma EIP-191 del `userOpHash`. La firma de la userOp es `0x00 ‖ permissionId ‖ firma` (modo USE). La clave del nonce es `SmartSession << 32 | carril`.
 
 ### 12.2 Los tres grants de Conservador v1
 
@@ -490,13 +499,13 @@ Pool `pool:USDC/cbBTC/500`. Activo de ahorro USDC. `ACCOUNT` es la dirección de
 | `cbBTC` | `approve(address,uint256)` | `spender` EQUAL `NonfungiblePositionManager`; `amount` LESS_THAN_OR_EQUAL `cap:cbbtcMint` |
 | `NonfungiblePositionManager` | `mint((address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256))` | `token0`[0] EQUAL `USDC`; `token1`[1] EQUAL `cbBTC`; `fee`[2] EQUAL 500; `amount0Desired`[5] LESS_THAN_OR_EQUAL `cap:usdcMint`, acumulado igual; `amount1Desired`[6] LESS_THAN_OR_EQUAL `cap:cbbtcMint`, acumulado igual; `amount0Min`[7] GREATER_THAN 0; `amount1Min`[8] GREATER_THAN 0; `recipient`[9] EQUAL `ACCOUNT` |
 
-**`manage`: cosechar, cerrar y convertir.**
+**`manage:<tokenId>`: cosechar, cerrar y convertir, un grant por posición.**
 
 | Target | Selector | Reglas |
 |---|---|---|
-| `NonfungiblePositionManager` | `decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))` | `tokenId`[0] IN_SET `allowedTokenIds` |
-| `NonfungiblePositionManager` | `collect((uint256,address,uint128,uint128))` | `tokenId`[0] IN_SET `allowedTokenIds`; `recipient`[1] EQUAL `ACCOUNT` |
-| `NonfungiblePositionManager` | `burn(uint256)` | `tokenId`[0] IN_SET `allowedTokenIds` |
+| `NonfungiblePositionManager` | `decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))` | `tokenId`[0] EQUAL `tokenId` del grant |
+| `NonfungiblePositionManager` | `collect((uint256,address,uint128,uint128))` | `tokenId`[0] EQUAL `tokenId` del grant; `recipient`[1] EQUAL `ACCOUNT` |
+| `NonfungiblePositionManager` | `burn(uint256)` | `tokenId`[0] EQUAL `tokenId` del grant |
 | `cbBTC` | `approve(address,uint256)` | `spender` EQUAL `SwapRouter02`; `amount` LESS_THAN_OR_EQUAL `cap:cbbtcConvertPerCall` |
 | `SwapRouter02` | `exactInputSingle(...)` | `tokenIn` EQUAL `cbBTC`; `tokenOut` EQUAL `USDC`; `fee` EQUAL 500; `recipient` EQUAL `ACCOUNT`; `amountIn` LESS_THAN_OR_EQUAL `cap:cbbtcConvertPerCall`, acumulado `cap:cbbtcConvertTotal`; `amountOutMinimum` GREATER_THAN 0; `sqrtPriceLimitX96` EQUAL 0 |
 
@@ -516,21 +525,25 @@ Smart Sessions guarda un conjunto de políticas por par (target, selector) dentr
 - `approve` de cbBTC necesita el NonfungiblePositionManager para acuñar y el router para convertir.
 - `exactInputSingle` va en dos direcciones.
 
-Cada conflicto se resuelve con un grant más, no con una regla más ancha. Una userOp usa un solo `permissionId`, así que un lote nunca mezcla grants. Si T001 encuentra otra regla que no se expresa, la parte en un grant nuevo y actualiza esta tabla.
+Cada conflicto se resuelve con un grant más, no con una regla más ancha. Una userOp usa un solo `permissionId`, así que un lote nunca mezcla grants.
 
-### 12.4 `allowedTokenIds`
+T001 encontró una regla más que no se expresa: la pertenencia a un conjunto. `UniActionPolicy` no tiene IN_SET y no existe una política publicada que escriba una lista en el mismo lote que el `mint` (`mintAndNote`). Sin Solidity propio, `manage` se parte en un grant por posición (12.4).
 
-La sesión no usa un suelo `tokenIdMin`. Un suelo dejaría dentro las posiciones que el owner acuñe después.
+### 12.4 Un grant `manage` por posición
 
-- La única escritura de la lista es `mintAndNote`, en el mismo lote que el `mint` de esa posición. La función comprueba que la cuenta acaba de recibir ese NFT en la transacción y que es su dueña.
-- La session key no tiene una función que añada un `tokenId` ya existente.
-- `decreaseLiquidity`, `collect` y `burn` exigen que el `tokenId` esté en la lista.
-- Una posición que el owner abra por su cuenta no entra. La validación la rechaza. La vista puede marcarla como no gestionada. Eso no es un permiso.
+La sesión no usa un suelo `tokenIdMin` ni una lista. Un suelo dejaría dentro las posiciones que el owner acuñe después.
 
-Renovar la sesión no amplía la lista por antigüedad. Solo conserva los ids que sigan en la cuenta y que entraron por `mintAndNote`.
+- `enter-mint` acuña la posición con destinatario la cuenta. No da ningún permiso sobre ella.
+- Después, una operación del owner activa `manage:<tokenId>` para ese id, con salt nuevo. El motor solo la pide para un `tokenId` que su diario registró como acuñado por `enter-mint` y que la cuenta tiene.
+- `decreaseLiquidity`, `collect` y `burn` exigen `tokenId` EQUAL al del grant. Otro id se rechaza en validación con `POLICY_DENIED_POSITION`.
+- La session key no puede activar ni ampliar grants: SmartSession, la cuenta y los módulos están fuera de todo grant.
+- Una posición que el owner abra por su cuenta no recibe grant. La validación la rechaza. La vista puede marcarla como no gestionada. Eso no es un permiso.
+
+Renovar la sesión renueva un `manage:<tokenId>` solo para los ids que sigan en la cuenta y que entraron por `enter-mint`. Cerrar una posición revoca su grant en el lote de cierre del owner o en la renovación siguiente.
 
 ### 12.5 Activación, renovación y revocación
 
+- **Registro ERC-7484.** `Safe7579Launchpad.addSafe7579` exige al menos un attester. La cuenta confía en `RhinestoneAttester` (`0x000000333034E9f539ce08819E12c1b8Cb29084d`) con umbral 1, en el `ModuleRegistry` (`0x000000000069E2a187AEFFb852bF3cCdC95151B2`). SmartSession consulta el registro por cada política que activa, y Rhinestone no ha atestado `TimeFramePolicy` ni `UsageLimitPolicy`. Por eso el lote del owner que sigue al despliegue llama a `trustAttesters(1, [RhinestoneAttester, cuenta])` y la cuenta atesta esas dos políticas en el schema `0x93d46fcca4ef7d66a413c7bde08bb1ff14bacbd04c4069bb24cd7c21729d7bf1`. Solo el owner firma ese lote. Ninguna session key puede atestar: el registro está fuera de todo grant.
 - **Activar y renovar.** Es una operación del owner. En el laboratorio, una `execTransaction` del Safe o una userOp del owner por el carril del owner. Llama a `SmartSession` para activar los grants con salt nuevo. Nunca es una firma de activación embebida en una userOp de sesión. Renovar activa grants nuevos y revoca los viejos en el mismo lote.
 - **Revocar.** Es una operación del owner que llama a `removeSession(permissionId)` de cada grant. El motor guarda el `permissionId` en `revoked_permission_ids` y se niega a construir una activación con él (`SESSION_PERMISSION_ID_REUSED`).
 - **Walkaway.** El owner, sin ningún servicio de Mamoru, envía `execTransaction` con un lote que:
@@ -543,6 +556,19 @@ Renovar la sesión no amplía la lista por antigüedad. Solo conserva los ids qu
 ### 12.6 Pre-chequeo en el motor
 
 `packages/account/precheck` decodifica cada llamada del lote con la ABI del registro y aplica las mismas reglas del grant. Si algo falla, devuelve `POLICY_DENIED_*` y la operación termina `discarded` antes de firmar. SESS-25 comprueba que el pre-chequeo rechaza lo mismo que rechaza la cadena.
+
+Orden de las comprobaciones y código de cada una:
+
+1. Firma en otro modo que USE: `POLICY_DENIED_TARGET`.
+2. `permissionId` desconocido: `SESSION_MISSING`.
+3. `permissionId` revocado: `SESSION_REVOKED`.
+4. Grant de otro chain id: `SIGN_CHAIN_NOT_ALLOWED`.
+5. Grant de otra cuenta: `SESSION_MISSING`.
+6. Fuera del marco temporal: `SESSION_EXPIRED`.
+7. Límite de uso agotado: `SESSION_MISSING`.
+8. Paymaster presente: `POLICY_DENIED_TARGET`.
+9. `executeFromExecutor`, `executeUserOp`, exec type distinto del default, `delegatecall` o modo con selector o payload: `POLICY_DENIED_CALLTYPE`. Cualquier otro selector que no sea `execute`: `POLICY_DENIED_TARGET`.
+10. Por llamada: valor nativo mayor que 0, `POLICY_DENIED_VALUE`; la propia cuenta o un par (target, selector) sin conceder, `POLICY_DENIED_TARGET`; una regla que falla, el `denial` de la regla; el acumulado por encima del tope, `POLICY_DENIED_CUMULATIVE`.
 
 ## 13. Secuencias
 
