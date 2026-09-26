@@ -108,7 +108,7 @@ export function toSmartSession(grant: SessionGrant): SmartSessionStruct {
     userOpPolicies: [
       {
         policy: address('TimeFramePolicy'),
-        initData: encodePacked(['uint48', 'uint48'], [grant.userOp.validUntil, grant.userOp.validAfter]),
+        initData: encodePacked(['uint128', 'uint128'], [BigInt(grant.userOp.validUntil), BigInt(grant.userOp.validAfter)]),
       },
       { policy: address('UsageLimitPolicy'), initData: encodePacked(['uint128'], [BigInt(grant.userOp.usageLimit)]) },
     ],
@@ -116,10 +116,7 @@ export function toSmartSession(grant: SessionGrant): SmartSessionStruct {
     actions: grant.actions.map((a) => ({
       actionTargetSelector: a.selector,
       actionTarget: a.targetAddress,
-      actionPolicies: [
-        { policy: address('UniActionPolicy'), initData: uniActionInitData(a) },
-        { policy: address('ValueLimitPolicy'), initData: encodeAbiParameters([{ type: 'uint256' }], [0n]) },
-      ],
+      actionPolicies: [{ policy: address('UniActionPolicy'), initData: uniActionInitData(a) }],
     })),
     permitERC4337Paymaster: grant.permitERC4337Paymaster,
   }
@@ -160,7 +157,7 @@ export function activationCall(
 export const ATTESTATION_SCHEMA_UID: Hex = '0x93d46fcca4ef7d66a413c7bde08bb1ff14bacbd04c4069bb24cd7c21729d7bf1'
 
 /** Published policies that the Rhinestone attester has not attested; the account attests them itself. */
-export const SELF_ATTESTED_POLICIES = ['TimeFramePolicy', 'UsageLimitPolicy', 'ValueLimitPolicy'] as const
+export const SELF_ATTESTED_POLICIES = ['TimeFramePolicy', 'UsageLimitPolicy'] as const
 
 /**
  * SmartSession checks every policy against the account's trusted attesters.
