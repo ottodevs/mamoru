@@ -13,7 +13,8 @@ export function IndexPage() {
   useEffect(() => {
     if (session.isSuccess && !accountKey) setBoarding(true)
   }, [session.isSuccess, accountKey])
-  if (accountKey && !boarding) return <HomeView accountKey={accountKey} />
+  const cards = boarding || (session.isSuccess && !accountKey)
+  if (accountKey && !cards) return <HomeView accountKey={accountKey} />
   return (
     <main className="page">
       <title>Mamoru</title>
@@ -28,7 +29,7 @@ export function IndexPage() {
           </button>
         </p>
       ) : null}
-      {boarding ? <Onboarding /> : null}
+      {cards ? <Onboarding /> : null}
     </main>
   )
 }
