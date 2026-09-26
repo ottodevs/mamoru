@@ -39,6 +39,7 @@ if (!process.env.RPC_URL && process.env.BASE_RPC_URL) process.env.RPC_URL = proc
 const DEPOSIT = 10_000_000n
 const ATTACKER = '0x000000000000000000000000000000000000bEEF' as const
 const MOVER = '0x0000000000000000000000000000000000C0FFEE' as const
+const BTC = 'pool:USDC/cbBTC/500'
 const t0 = Date.now()
 const log = (m: string) => console.log(`[e2e +${((Date.now() - t0) / 1000).toFixed(0)}s] ${m}`)
 function check(ok: boolean, what: string): void {
@@ -99,7 +100,7 @@ try {
   process.env.MAMORU_LIVE = '1'
   process.env.MAMORU_HEAD_LAG = '0'
   const secret = randomBytes(32).toString('hex')
-  const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100 })
+  const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: process.env.E2E_POLICY })
   stopOperator = op.stop
   check(op.operator.cfg.live && op.operator.cfg.policy.session.grants.some((g) => g.name === 'manage-any'), `operator live with ${op.operator.cfg.policy.policyId} (manage-any)`)
   await lab.setBalance(op.operator.relayer.address, 10n ** 18n)
@@ -159,7 +160,7 @@ try {
   })
   const state = (op.operator as unknown as { store: { state: { accounts: Record<string, { sessionKey: Hex; grants: { name: string; permissionId: Hex }[] }> } } }).store.state.accounts[ctx.accountKey]!
   check(
-    ['enter-swap', 'enter-mint', 'manage-any', 'convert-any'].every((n) => state.grants.some((g) => g.name === n)),
+    ['enter-swap', 'enter-mint', 'manage-any', 'convert-any'].every((n) => state.grants.some((g) => g.name.split(':')[0] === n)),
     `one owner tx (${activated.txHash}) enabled ${state.grants.map((g) => g.name).join(', ')}`,
   )
   const fromBlock = BigInt(activated.block!)
@@ -168,18 +169,18 @@ try {
   // --- engine enters ----------------------------------------------------------
   const pos1 = await waitFor('engine entry', 240_000, async () => {
     const f = await funding()
-    return f.positions.find((p) => BigInt(p.liquidity) > 0n) ?? null
+    return f.positions.find((p) => p.pool === BTC && BigInt(p.liquidity) > 0n) ?? null
   })
   const id1 = BigInt(pos1.tokenId)
   const npm = address('NonfungiblePositionManager')
   const p1 = await lab.client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [id1] })
-  const pool = entry('pool:USDC/cbBTC/500')
+  const pool = entry(BTC)
   const tick0 = (await lab.client.readContract({ address: pool.address, abi: uniswapV3PoolAbi, functionName: 'slot0' }))[1]
   check(p1[5] <= tick0 && tick0 < p1[6], `engine entered: position #${id1} [${p1[5]}, ${p1[6]}) around tick ${tick0}`)
 
   // --- malicious session userOp: collect to another recipient ---------------------
   const sessionKey = privateKeyToAccount(state.sessionKey)
-  const manageAny = state.grants.find((g) => g.name === 'manage-any')!
+  const manageAny = state.grants.find((g) => g.name === 'manage-any' || g.name === `manage-any:${BTC}`)!
   const key = sessionNonceKey(7)
   async function validate(recipient: Address): Promise<string> {
     const nonce = await lab.entryPointNonce(safe, key)
@@ -238,7 +239,7 @@ try {
   check(owner === null, `re-range ${rerange.opId} (${rerange.txHash}) burned position #${id1}`)
   const pos2 = await waitFor('new mint in range', 300_000, async () => {
     const f = await funding()
-    return f.positions.find((p) => BigInt(p.tokenId) !== id1 && BigInt(p.liquidity) > 0n && p.inRange) ?? null
+    return f.positions.find((p) => p.pool === BTC && BigInt(p.tokenId) !== id1 && BigInt(p.liquidity) > 0n && p.inRange) ?? null
   })
   const p2 = await lab.client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [BigInt(pos2.tokenId)] })
   const tick2 = (await lab.client.readContract({ address: pool.address, abi: uniswapV3PoolAbi, functionName: 'slot0' }))[1]
@@ -247,9 +248,12 @@ try {
   // --- funds never left the Safe ---------------------------------------------------------
   const toBlock = await lab.client.getBlockNumber()
   const transferEvt = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)'])
-  const erc20Out = await lab.client.getLogs({ address: [usdc, address('cbBTC')], event: transferEvt[0], args: { from: safe }, fromBlock, toBlock })
-  const strays = erc20Out.filter((l) => l.args.to!.toLowerCase() !== pool.address.toLowerCase())
-  check(erc20Out.length > 0 && strays.length === 0, `${erc20Out.length} ERC-20 transfers out of the Safe since activation, all to the pool (mint and swap payments); 0 elsewhere`)
+  const policyPools = op.operator.cfg.policy.buckets.flatMap((b) => b.pools).map((n) => entry(n))
+  const tokens = [...new Set(policyPools.flatMap((p) => [p.token0!, p.token1!]))].map((t) => address(t))
+  const poolAddrs = new Set(policyPools.map((p) => p.address.toLowerCase()))
+  const erc20Out = await lab.client.getLogs({ address: tokens, event: transferEvt[0], args: { from: safe }, fromBlock, toBlock })
+  const strays = erc20Out.filter((l) => !poolAddrs.has(l.args.to!.toLowerCase()))
+  check(erc20Out.length > 0 && strays.length === 0, `${erc20Out.length} ERC-20 transfers out of the Safe since activation, all to policy pools (mint and swap payments); 0 elsewhere`)
   const nftOut = parseEventLogs({ abi: nonfungiblePositionManagerAbi, eventName: 'Transfer', logs: await lab.client.getLogs({ address: npm, fromBlock, toBlock }) }).filter((l) => l.args.from.toLowerCase() === safe.toLowerCase())
   check(nftOut.every((l) => l.args.to === '0x0000000000000000000000000000000000000000'), `${nftOut.length} position NFTs left the Safe, all burned`)
   check((await lab.balanceOf('USDC', ATTACKER)) === attackerBefore[0] && (await lab.balanceOf('cbBTC', ATTACKER)) === attackerBefore[1], 'the attacker address received nothing')
