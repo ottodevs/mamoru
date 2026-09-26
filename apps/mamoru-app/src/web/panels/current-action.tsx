@@ -29,7 +29,8 @@ export function CurrentActionPanel({ data }: { data: DashboardPayload }) {
       ) : null}
       {ca.notes.map((code) => (
         <p key={code} className="m-0 text-[0.95rem]">
-          {opNotes[code] ?? code} <Code code={code} />
+          {opNotes[code] ? `${opNotes[code]} ` : null}
+          <Code code={code} />
         </p>
       ))}
 

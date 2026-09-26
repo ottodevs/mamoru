@@ -160,6 +160,21 @@ describe('data states', () => {
     expect(text).toContain("Session revoked Understand SESSION_REVOKED You revoked Mamoru's session.")
   })
 
+  test('journal not projected yet: nulls, the gate note and a held conversion without cause', () => {
+    const d = clone()
+    const journalMissing: Provenance = { source: 'journal', chainId: 8453, observedAt: d.sources.rpc.observedAt, status: 'not_observed' }
+    d.currentAction.session = { value: null, provenance: journalMissing }
+    d.currentAction.paused = { value: null, provenance: journalMissing }
+    d.currentAction.notes = ['FUNDS_GATE_CLOSED']
+    d.treasury.convert = { ...d.treasury.convert, state: 'held', code: 'FUNDS_GATE_CLOSED' }
+    d.savings.ledgerTotal = { value: null, unit: 'USDC', provenance: journalMissing }
+    const { text } = view(d)
+    expect(text).toContain('Deposits are closed. FUNDS_GATE_CLOSED')
+    expect(text).toContain('Waiting for a healthy market. FUNDS_GATE_CLOSED')
+    expect(text).not.toContain('No savings yet. Deposits are closed.')
+    expect(count(text, 'Not observed')).toBeGreaterThanOrEqual(3)
+  })
+
   test('stale projection shows the update time', () => {
     const d = clone()
     d.savings.ledgerTotal = { ...d.savings.ledgerTotal, provenance: { ...d.savings.ledgerTotal.provenance, status: 'stale' } }

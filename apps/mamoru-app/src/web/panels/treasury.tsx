@@ -2,7 +2,7 @@ import type { AccountSwapView, DashboardPayload } from '@mamoru/domain'
 import { Code, FigureValue, ProvenanceChip, Row } from '../components/figure.tsx'
 import { HexValue } from '../components/hex.tsx'
 import { Empty, Section, SubTitle } from '../components/section.tsx'
-import { treasury as copy } from '../copy/dashboard.ts'
+import { convertText, treasury as copy } from '../copy/dashboard.ts'
 import { formatUtcDateTime } from '../lib/format.ts'
 
 function SwapRow({ swap }: { swap: AccountSwapView }) {
@@ -74,7 +74,7 @@ export function TreasuryPanel({ data }: { data: DashboardPayload }) {
         </Row>
         <Row label="Conversion">
           <span className="inline-flex flex-wrap items-baseline gap-2">
-            <span>{copy.convert[c.state]}</span>
+            <span>{convertText(c.state, c.cause !== undefined)}</span>
             {c.cause ? <Code code={c.cause} /> : null}
             {c.code ? <Code code={c.code} /> : null}
           </span>

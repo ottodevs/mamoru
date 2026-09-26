@@ -71,6 +71,7 @@ export function opStateText(state: string, code: ReasonCode): string {
 export const opNotes: Partial<Record<ReasonCode, string>> = {
   BUNDLER_UNAVAILABLE: 'Waiting to send.',
   RECON_TIMEOUT: 'Waiting for the network.',
+  FUNDS_GATE_CLOSED: 'Deposits are closed.',
 }
 
 export const currentAction = {
@@ -120,8 +121,13 @@ export const treasury = {
     nothing_to_convert: 'Nothing to convert.',
     held_for_entry: 'Held for the next entry.',
     converting: 'Converting to USDC.',
-    held: 'Waiting for a healthy market: ',
+    held: 'Waiting for a healthy market',
   },
+}
+
+export function convertText(state: DashboardPayload['treasury']['convert']['state'], hasCause: boolean): string {
+  const text = treasury.convert[state]
+  return state === 'held' ? `${text}${hasCause ? ': ' : '.'}` : text
 }
 
 export const positions = {
