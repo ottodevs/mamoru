@@ -27,7 +27,7 @@ The form has seven tabs: Project details, Images, Tech stack, Select prizes, Vid
 | Project name | required | "Mamoru" | OK |
 | Category | required | DeFi | OK |
 | Emoji | required | 🌾 | OK (form field; our docs stay emoji-free) |
-| Demo link | required | https://mamoru.lol | FIX: point to https://app.mamoru.lol once L2/L3 are live, or keep the landing if the app is not public at freeze |
+| Demo link | required | https://mamoru.lol | FIX: point to https://app.mamoru.lol (live since main `b27f1af`). The landing hero reads "APY. DELIVERED." and "The yield gets set aside.", both outside the claims policy (dashboard.md §12.3); it also has no link to the app. The landing repo is outside this lane |
 | Short description | required, max 100 characters | "Non-custodial savings on Base. The principal keeps working. The yield gets set aside." (84) | FIX: talks about yield; v1 is simulation mode. New text in `submission.md` |
 | Description | required, min 280 characters | Says "continuously harvests yield", "private allowlist until 09:00 JST", "Checks run on an Anvil fork" | FIX: overclaims harvesting on Base, stale allowlist line. Replace with `submission.md` §3 |
 | How it's made | required, min 280 characters | Points at branch `spec/mamoru-v1` | FIX: that branch no longer exists on GitHub (only `main` and `lane/*`). Replace with `submission.md` §4 |
@@ -138,3 +138,4 @@ Fields: first name*, last name, email*, Telegram handle*, which hackathon*, comp
 6. Description and short description claim yield harvesting; v1 is simulation mode.
 7. README "Team handles": TODO-HANDLES until Ot gives them.
 8. Track eligibility question in §6.
+9. Landing https://mamoru.lol (linked from the form as a second repo and the current demo link) claims APY in its hero. Partners read it.
