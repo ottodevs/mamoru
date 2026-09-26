@@ -148,8 +148,12 @@ export function stopBatch(i: {
 
 export const P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n
 
-function fromB64url(s: string): Uint8Array {
-  return new Uint8Array(Buffer.from(s, 'base64url'))
+/** base64url -> bytes without Buffer, so the module runs in a Worker without nodejs_compat. */
+export function fromB64url(s: string): Uint8Array {
+  if (!/^[A-Za-z0-9_-]*={0,2}$/.test(s)) throw new Error('not base64url')
+  const b64 = s.replace(/=+$/, '').replace(/-/g, '+').replace(/_/g, '/')
+  const bin = atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4))
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0))
 }
 
 /** ASN.1 DER ECDSA-Sig-Value -> r, low s. */
@@ -217,7 +221,7 @@ export function safeContractSignature(signer: Address, data: Hex): Hex {
  */
 export function browserOwnerSignature(sig: OwnerSignature, safeTxHash?: Hex): Hex {
   const authenticatorData = toHex(fromB64url(sig.authenticatorData))
-  const clientDataJSON = Buffer.from(sig.clientDataJSON, 'base64url').toString('utf8')
+  const clientDataJSON = new TextDecoder('utf-8', { fatal: true }).decode(fromB64url(sig.clientDataJSON))
   const { challenge, fields } = clientDataFieldsOf(clientDataJSON)
   if (safeTxHash && toHex(fromB64url(challenge)).toLowerCase() !== safeTxHash.toLowerCase()) throw new Error('assertion challenge is not the safeTxHash')
   const { r, s } = parseDerSignature(fromB64url(sig.signature))
