@@ -17,7 +17,7 @@ Open the kit and check:
 
 - `chainId` is `8453` (Base).
 - `address` is the account address you saw in the app.
-- `owners` lists your owners. With a passkey, the Safe owner is the Safe WebAuthn shared signer `0x94a4F6affBd8975951142c3999aEAB7ecee555c2`, and your passkey's public key is part of the setup [PENDING L3: kit field names for the passkey public key x and y, and for the setup call that configures it].
+- `owners` lists your owners. With a passkey, the Safe owner is the Safe WebAuthn shared signer `0x94a4F6affBd8975951142c3999aEAB7ecee555c2`, and the kit's `webauthn` block holds your passkey's public key (`x`, `y`), the verifier setting (`verifiers`) and the signer address (`signer`). No private key is in the kit.
 - `setup.factory` is SafeProxyFactory 1.4.1 `0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67` and `setup.singleton` is SafeL2 1.4.1 `0x29fcB43b46531BcA003ddC8FCB67FFE91900C762`.
 
 ## Step 2. Deploy the Safe, if it is not deployed yet
@@ -27,7 +27,7 @@ Your account address exists before the Safe does (it is counterfactual). Anythin
 - Call `createProxyWithNonce(singleton, initializer, saltNonce)` on `setup.factory`, with `setup.singleton`, `setup.initializer` and `setup.saltNonce` from the kit.
 - Check that the new Safe's address equals `address` in the kit. If it does not, stop: the parameters are wrong.
 
-The initializer sets the owners, threshold 1, the Safe7579 adapter and the Smart Sessions module with no sessions. [PENDING L3: with the passkey fix, the same initializer also configures the passkey through a MultiSend call, so the address commits to your passkey.]
+The initializer sets the owners, threshold 1, the Safe7579 adapter and the Smart Sessions module with no sessions. With a passkey owner, the same setup also configures your passkey on the shared signer through a MultiSend 1.4.1 delegatecall (kit fields `setup.to` and `setup.data`), so the account address commits to your passkey: a different passkey gives a different address.
 
 If the Safe is already deployed (it is once Mamoru has operated for you), skip this step.
 

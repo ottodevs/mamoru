@@ -12,8 +12,8 @@ Mamoru v1 is a non-custodial savings account on Base. In production it runs in s
 | Call builders | [`packages/uniswap-v3/src/index.ts`](packages/uniswap-v3/src/index.ts) | `approve` (L18), `exactInputSingle` on SwapRouter02 (L24), `mint` on the NonfungiblePositionManager (L54), `decreaseLiquidity` (L98), `collect` (L107), `burn` (L118) |
 | Session limits around those calls | [`packages/account/sessions/index.ts`](packages/account/sessions/index.ts) (`toSmartSession`, L103) and [`packages/policy/src/grants.ts`](packages/policy/src/grants.ts) | A Rhinestone Smart Session on a Safe (ERC-7579) that may only call the selectors above on the registry addresses, with argument rules: recipient is the account, minimums are positive, a position can be managed only after the account minted it in the same batch that records its token id |
 | Fork checks | [`scenarios/catalog/`](scenarios/catalog/), runner in [`packages/scenarios/runner/`](packages/scenarios/runner/) | SESS-01 to SESS-23 and SESS-25 treat the session key as leaked and try to swap to an attacker, mint to an attacker, approve max, collect someone else's position and so on. Each attack must be rejected by the chain |
-| Quotes and harvest | `packages/uniswap-v3` quote part and `packages/decide/harvest` | [PENDING L1] QuoterV2 quotes and the T003 harvest on the fork |
-| Pool reads for the dashboard | `apps/mamoru-engine/src/sync/pool-state.ts` | [PENDING L4] `slot0`, liquidity and Swap/Mint/Burn logs of the USDC/cbBTC 0.05% pool read from Base |
+| Quotes and harvest | [`packages/uniswap-v3/src/quote.ts`](packages/uniswap-v3/src/quote.ts) (`quoteExactInputSingle` L13, `minOut` L31, `quoteMint` L96), [`packages/decide/src/harvest/`](packages/decide/src/harvest/) | QuoterV2 quote at the prepare block, then the swap minimum from it; mint amounts and minimums from the pool price. On the fork (M03) the minimum recomputed from QuoterV2 equals the signed one, and the cbBTC received from the `Swap` event is above it. The harvest (M04) collects the fees and swaps the cbBTC part to USDC through SwapRouter02, leaving no allowance behind ([evidence](evidence/scenarios/fork-run-20260926T185126Z-84632e.md)) |
+| Pool reads for the dashboard | [`apps/mamoru-engine/src/sync/pool-state.ts`](apps/mamoru-engine/src/sync/pool-state.ts) | In production, every 2 minutes at the Base `safe` block: `slot0`, liquidity, `observe` for a TWAP, both token balances, and one hour of `Swap`, `Mint` and `Burn` of the USDC/cbBTC 0.05% pool |
 
 ## What was clear
 
@@ -36,4 +36,5 @@ Mamoru v1 is a non-custodial savings account on Base. In production it runs in s
 ## What did not work or is not done
 
 - We did not use v4 or the Uniswap API. v1 is v3 only, by design: one pool that we could verify on Base at a fixed block.
-- The harvest path (collect, swap to USDC, re-add) on the fork is [PENDING L1] at the time of writing.
+- The fork uses a loopback bundler that speaks the standard ERC-4337 methods, not a production bundler. Alto is pinned but was not installed.
+- In production v1 runs in simulation mode, so none of these calls is sent on Base.
