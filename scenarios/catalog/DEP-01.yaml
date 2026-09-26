@@ -1,0 +1,31 @@
+id: DEP-01
+requirements: [FR-RPC-001, FR-DEC-013]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: engine
+fixtures: [fx-owners, fx-safe, fx-gas, fx-sessions, fx-usdc]
+steps:
+  # fx-usdc without mining until safe
+  - fixtures: {}
+  - review:
+      label: unsafe deposit
+      expect:
+        decision: DECIDE_HOLD
+        reason: OBS_DEPOSIT_UNSAFE
+        codes: [OBS_DEPOSIT_UNSAFE]
+        op: none
+  - mine-until-safe: {}
+  - review:
+      label: safe deposit
+      expect:
+        codes: [OBS_DEPOSIT_DETECTED]
+        decision: DECIDE_ENTER
+        op: { kind: enter_swap, state: confirmed, code: EXEC_OK, grant: enter-swap }
+  - persist-first: {}
+expect:
+  codes: [OBS_DEPOSIT_UNSAFE, OBS_DEPOSIT_DETECTED, DECIDE_ENTER]
+invariants: [INV-RECIPIENT, INV-TARGETS, INV-SLOT, INV-NONCE, INV-PERSIST-FIRST, INV-ETH-GAS, INV-CODES, INV-FORK-CHAIN, INV-NO-ANVIL-IN-ENGINE]

@@ -385,7 +385,7 @@ const decideAgainStep: StepHandler = async (ctx) => {
   return { step: 'decide again on the same observation', ok: first === again, detail: first === again ? `same decision ${run.last.record.decision.decisionId}, ${first.length} bytes identical` : 'the decisions differ' }
 }
 
-/** M07: the same observation decided with another policy marks the position unmanaged. */
+/** M07: the same state decided with another policy marks the position unmanaged and proposes nothing on it. */
 const decideWithPolicyStep: StepHandler = async (ctx, args) => {
   const run = runOf(ctx)
   const obs = await run.engine.observe()
@@ -394,8 +394,10 @@ const decideWithPolicyStep: StepHandler = async (ctx, args) => {
   const d = decide(obs, policy)
   const want = String(args.positionCode)
   for (const c of decisionCodes(d)) ctx.codes.add(c)
-  const ok = d.positions.length > 0 && d.positions.every((p) => p.codes.includes(want as ReasonCode)) && d.proposal === null
-  return { step: `decide with ${policy.policyId} on the same state`, ok, detail: `positions ${d.positions.map((p) => `${p.tokenId}:${p.codes.join('+')}`).join(' ')}; ${d.code}/${d.reason}` }
+  const touched = d.proposal?.kind === 'harvest' && d.positions.some((p) => p.tokenId === (d.proposal as { tokenId: bigint }).tokenId)
+  const ok = d.positions.length > 0 && d.positions.every((p) => p.codes.includes(want as ReasonCode)) && !touched
+  const proposal = d.proposal ? `${d.proposal.kind} in ${d.proposal.pool}` : 'none'
+  return { step: `decide with ${policy.policyId} on the same state`, ok, detail: `positions ${d.positions.map((p) => `${p.tokenId}:${p.codes.join('+')}`).join(' ')}; ${d.code}/${d.reason}; proposal ${proposal}, none on the unmanaged position` }
 }
 
 /**
@@ -533,6 +535,27 @@ const swapChecksStep: StepHandler = async (ctx) => {
   return out
 }
 
+/** M07: the entry swap bought the pool's volatile token at its fee, and the minted position sits on the pool's pair and spacing. */
+const lpPairStep: StepHandler = async (ctx, args) => {
+  const engine = engineOf(ctx)
+  const c = worldOf(ctx).lab.client
+  const pool = entry(String(args.pool))
+  const errs: string[] = []
+  const swap = engine.journal.ops.find((o) => o.kind === 'enter_swap' && o.state === 'confirmed')
+  if (swap?.intent.kind !== 'enter_swap') errs.push('no confirmed enter_swap')
+  else if (swap.intent.tokenIn !== 'USDC' || swap.intent.tokenOut !== String(args.token0) || swap.intent.fee !== pool.fee) errs.push(`swap ${swap.intent.tokenIn}->${swap.intent.tokenOut} fee ${swap.intent.fee}`)
+  const id = engine.allowedTokenIds[0]
+  if (id === undefined) return { step: 'LP pair and spacing', ok: false, detail: [...errs, 'no managed position'].join('; ') }
+  const p = await c.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [id] })
+  if (!isAddressEqual(p[2], address(String(args.token0))) || !isAddressEqual(p[3], address(String(args.token1))) || p[4] !== pool.fee) errs.push(`position pair ${p[2]}/${p[3]} fee ${p[4]}`)
+  if (p[5] % pool.tickSpacing! !== 0 || p[6] % pool.tickSpacing! !== 0) errs.push(`ticks ${p[5]}, ${p[6]}`)
+  return {
+    step: 'LP pair and spacing',
+    ok: errs.length === 0,
+    detail: errs.join('; ') || `swap USDC->${args.token0} fee ${pool.fee}; position ${id} ${args.token0}/${args.token1} fee ${p[4]}, ticks ${p[5]}..${p[6]} multiples of ${pool.tickSpacing}`,
+  }
+}
+
 /** INV-PERSIST-FIRST: every userOp the bundler got was `signed` in the journal first. */
 const persistFirstStep: StepHandler = async (ctx) => {
   const run = runOf(ctx)
@@ -554,6 +577,7 @@ export const ENGINE_STEPS: Record<string, StepHandler> = {
   'harvest-state': harvestStateStep,
   'savings-log': savingsLogStep,
   'swap-checks': swapChecksStep,
+  'lp-pair': lpPairStep,
   'persist-first': persistFirstStep,
 }
 

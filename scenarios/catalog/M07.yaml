@@ -1,0 +1,38 @@
+id: M07
+requirements: [FR-UNI-003, FR-DEC-002]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: lab-weth-usdc-v1
+world: engine
+fixtures: [fx-owners, fx-safe, fx-gas, fx-sessions, fx-usdc]
+# Step 1 only. Steps 2 and 3 (exit intent, close_position, convert) come with the exit task.
+steps:
+  - fixtures: {}
+  - mine-until-safe: {}
+  # 1. reviews until the stable state
+  - review:
+      label: entry swap
+      expect:
+        decision: DECIDE_ENTER
+        op: { kind: enter_swap, state: confirmed, code: EXEC_OK, grant: enter-swap }
+  - review:
+      label: entry mint
+      expect:
+        decision: DECIDE_ENTER
+        op: { kind: enter_mint, state: confirmed, code: EXEC_OK, grant: enter-mint }
+        managed: true
+  - review:
+      label: stable
+      expect:
+        decision: DECIDE_HOLD
+        reason: DECIDE_IN_RANGE
+        op: none
+  - lp-pair: { pool: pool:WETH/USDC/3000, token0: WETH, token1: USDC }
+  - decide-with-policy: { policy: conservador-lab-v1, positionCode: OBS_UNMANAGED_ASSET }
+  - persist-first: {}
+expect:
+  codes: [DECIDE_ENTER, EXEC_OK, DECIDE_HOLD, DECIDE_IN_RANGE, OBS_UNMANAGED_ASSET]
+invariants: [INV-RECIPIENT, INV-TARGETS, INV-SLOT, INV-NONCE, INV-PERSIST-FIRST, INV-ETH-GAS, INV-CODES, INV-FORK-CHAIN, INV-NO-ANVIL-IN-ENGINE]
