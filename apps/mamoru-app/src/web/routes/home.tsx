@@ -1,6 +1,6 @@
 import type { FundingView, Hex0x, OpView } from '@mamoru/domain'
 import { useMutation } from '@tanstack/react-query'
-import { useState, type FormEvent } from 'react'
+import { useState, type FormEvent, type ReactNode } from 'react'
 import { useApi } from '../api/client.ts'
 import { useFunding, useOps, usePools } from '../api/queries.ts'
 import { TokenMark } from '../components/token-mark.tsx'
@@ -55,11 +55,11 @@ export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () =
         </div>
         <ul className="m-0 flex w-full list-none gap-[0.7rem] p-0 self-center min-[761px]:w-auto">
           <li className="apr flex-1">
-            <span className="apr-label">{homeCopy.apy}</span>
+            <span className="apr-label whitespace-nowrap">{homeCopy.apy}</span>
             <strong>—</strong>
           </li>
           <li className="apr flex-1">
-            <span className="apr-label">{homeCopy.month}</span>
+            <span className="apr-label whitespace-nowrap">{homeCopy.month}</span>
             <strong>—</strong>
           </li>
         </ul>
@@ -202,14 +202,17 @@ export function History({ ops }: { ops: OpView[] }) {
   )
 }
 
-function Review({ lines, busy, error, onApprove }: { lines: string[]; busy: string | null; error: string | null; onApprove: () => void }) {
+function Review({ lines, busy, error, onApprove, children }: { lines: string[]; busy: string | null; error: string | null; onApprove: () => void; children?: ReactNode }) {
   return (
-    <div className="grid gap-3" data-testid="review">
-      <ul className="m-0 grid gap-1 pl-5 text-[0.95rem]">
-        {lines.map((l) => (
-          <li key={l}>{l}</li>
-        ))}
-      </ul>
+    <div className="grid min-w-0 gap-3 [overflow-wrap:anywhere]" data-testid="review">
+      {children}
+      {lines.length ? (
+        <ul className="m-0 grid gap-1 pl-5 text-[0.95rem]">
+          {lines.map((l) => (
+            <li key={l}>{l}</li>
+          ))}
+        </ul>
+      ) : null}
       {error ? <p className="err">{error}</p> : null}
       <div className="flex justify-end">
         <button type="button" className="cta" onClick={onApprove} disabled={busy !== null}>
@@ -240,7 +243,6 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
     setInvalid(null)
     await flow.prepare({ to: dest.address as Hex0x, amountUsdc: raw })
   }
-  const destLabel = dest.state === 'ok' ? (dest.name ? `${dest.name} (${shortHex(dest.address)})` : shortHex(dest.address)) : ''
   const error = flow.error ? humanMessage(flow.error, s.maxWithdraw) : null
   const done = flow.result !== null
 
@@ -257,15 +259,22 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
         </div>
       ) : flow.prepared ? (
         <Review
-          lines={[
-            `${amount} USDC to ${destLabel}`,
-            ...(dest.state === 'ok' && dest.name ? [dest.address] : []),
-            ...(flow.prepared.reduce?.length ? ['Mamoru first takes the missing USDC out of the pool.'] : []),
-          ]}
+          lines={flow.prepared.reduce?.length ? ['Mamoru first takes the missing USDC out of the pool.'] : []}
           busy={flow.busy}
           error={error}
           onApprove={() => void flow.approve()}
-        />
+        >
+          <p className="m-0 text-[2rem] leading-none text-emerald tabular-nums">
+            {usd(BigInt(parseUsdc(amount) ?? '0'))} <span className="text-[0.9rem] tracking-[0.12em] text-stone">USDC</span>
+          </p>
+          {dest.state === 'ok' ? (
+            <div className="grid gap-1">
+              <p className="kicker">To</p>
+              {dest.name ? <p className="m-0 text-[1.05rem]">{dest.name}</p> : null}
+              <p className="m-0 font-mono text-[0.82rem] break-all text-stone">{dest.address}</p>
+            </div>
+          ) : null}
+        </Review>
       ) : (
         <form className="grid gap-[0.55rem]" onSubmit={submit}>
           <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-stretch gap-2">
