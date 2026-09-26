@@ -4,7 +4,7 @@ import { canonicalJson, decide, type Decision } from '@mamoru/decide'
 import { POLICIES, computeCaps, type PolicyVersion, type Price } from '@mamoru/policy'
 import { address, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { approve, exactInputSingle } from '@mamoru/uniswap-v3'
-import { minOut, quoteExactInputSingle } from '@mamoru/uniswap-v3/quote'
+import { minOut, quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { toPackedUserOperation } from 'viem/account-abstraction'
 import { isTerminal } from '@mamoru/journal'
 import { sessionNonceKey } from '@mamoru/account/sessions'
@@ -16,10 +16,11 @@ import type { StepResult } from '../report/index.ts'
 import type { ScenarioCtx, StepHandler } from './context.ts'
 import { checkRecipient } from './state.ts'
 
-type EngineRun = { engine: Engine; last?: Extract<ReviewResult, { kind: 'decided' }>; preHarvest?: AccountSnapshot }
+/** `bundlerSeen` is how many userOps the group's bundler had received before this scenario's engine. */
+type EngineRun = { engine: Engine; bundlerSeen: number; last?: Extract<ReviewResult, { kind: 'decided' }>; preHarvest?: AccountSnapshot }
 
 const RUNS = new WeakMap<ScenarioCtx, EngineRun>()
-const WHALE_SWAP_USDC = 5_000_000_000_000n
+const Q96 = 1n << 96n
 
 function worldOf(ctx: ScenarioCtx) {
   if (!ctx.world) throw new Error('engine steps need a world')
@@ -62,7 +63,7 @@ function engineOf(ctx: ScenarioCtx): Engine {
       },
     },
   )
-  RUNS.set(ctx, { engine })
+  RUNS.set(ctx, { engine, bundlerSeen: ctx.bundler.received().length })
   return engine
 }
 
@@ -115,6 +116,12 @@ const fixturesStep: StepHandler = async (ctx) => {
 
 /** fx-lp: the engine itself runs the two entries of M02 until a managed position is in range. */
 async function lpThroughEngine(ctx: ScenarioCtx): Promise<StepResult[]> {
+  const out: StepResult[] = []
+  if (!ctx.scenario.fixtures.includes('fx-usdc')) {
+    const w = worldOf(ctx)
+    const r = await w.lab.whaleTransfer('USDC', WHALE, w.a1.safe, DEPOSIT_USDC)
+    out.push({ step: 'fx-lp deposit', ok: r.ok, detail: `${DEPOSIT_USDC} USDC units transferred to the account in block ${r.receipt.blockNumber}` })
+  }
   await mineUntilSafe(ctx)
   const engine = engineOf(ctx)
   const ops: string[] = []
@@ -123,7 +130,8 @@ async function lpThroughEngine(ctx: ScenarioCtx): Promise<StepResult[]> {
     if (r.kind === 'decided' && r.op) ops.push(`${r.op.kind}:${r.op.state}`)
   }
   const ok = engine.allowedTokenIds.length === 1 && ops.every((o) => o.endsWith(':confirmed'))
-  return [{ step: 'fx-lp', ok, detail: `engine ran ${ops.join(', ') || 'nothing'}; managed ${engine.allowedTokenIds.join(', ') || 'none'}` }]
+  out.push({ step: 'fx-lp', ok, detail: `engine ran ${ops.join(', ') || 'nothing'}; managed ${engine.allowedTokenIds.join(', ') || 'none'}` })
+  return out
 }
 
 async function mineUntilSafe(ctx: ScenarioCtx): Promise<{ target: bigint; mined: number }> {
@@ -390,31 +398,54 @@ const decideWithPolicyStep: StepHandler = async (ctx, args) => {
   return { step: `decide with ${policy.policyId} on the same state`, ok, detail: `positions ${d.positions.map((p) => `${p.tokenId}:${p.codes.join('+')}`).join(' ')}; ${d.code}/${d.reason}` }
 }
 
+/**
+ * USDC that moves the pool at most half-way from its tick to the edge of the managed range,
+ * at the pool's in-range liquidity, so a round never leaves the range.
+ */
+async function inRangeSwapUsdc(ctx: ScenarioCtx, poolName: string, tokenId: bigint): Promise<bigint> {
+  const c = worldOf(ctx).lab.client
+  const e = entry(poolName)
+  const [sqrt, tick] = await c.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'slot0' })
+  const liquidity = await c.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'liquidity' })
+  const pos = await c.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] })
+  const [lower, upper] = [pos[5], pos[6]]
+  if (e.token0 === 'USDC') {
+    const target = sqrtRatioAtTick(tick - Math.floor((tick - lower) / 2))
+    return (liquidity * Q96 * (sqrt - target)) / (sqrt * target)
+  }
+  const target = sqrtRatioAtTick(tick + Math.floor((upper - tick) / 2))
+  return (liquidity * (target - sqrt)) / Q96
+}
+
 /** swaps-in-range: the whale swaps both ways on the pool without leaving the range. */
-async function swapsInRange(ctx: ScenarioCtx, poolName: string): Promise<void> {
+async function swapsInRange(ctx: ScenarioCtx, poolName: string, tokenId: bigint): Promise<bigint> {
   const w = worldOf(ctx)
   const e = entry(poolName)
   const volatile = e.token0 === 'USDC' ? e.token1! : e.token0!
+  const amount = await inRangeSwapUsdc(ctx, poolName, tokenId)
   await w.lab.setBalance(WHALE, 10n ** 18n)
-  const approveData = approve('USDC', 'SwapRouter02', WHALE_SWAP_USDC)
+  const approveData = approve('USDC', 'SwapRouter02', amount)
   if (!(await w.lab.sendAs(WHALE, approveData.to, approveData.data)).ok) throw new Error('whale approve failed')
   const before = await w.lab.balanceOf(volatile, WHALE)
-  const buy = exactInputSingle({ account: WHALE, tokenIn: 'USDC', tokenOut: volatile, fee: e.fee!, amountIn: WHALE_SWAP_USDC, amountOutMinimum: 1n })
+  const buy = exactInputSingle({ account: WHALE, tokenIn: 'USDC', tokenOut: volatile, fee: e.fee!, amountIn: amount, amountOutMinimum: 1n })
   if (!(await w.lab.sendAs(WHALE, buy.to, buy.data)).ok) throw new Error('whale buy failed')
   const got = (await w.lab.balanceOf(volatile, WHALE)) - before
   const approveBack = approve(volatile, 'SwapRouter02', got)
   if (!(await w.lab.sendAs(WHALE, approveBack.to, approveBack.data)).ok) throw new Error('whale approve back failed')
   const sell = exactInputSingle({ account: WHALE, tokenIn: volatile, tokenOut: 'USDC', fee: e.fee!, amountIn: got, amountOutMinimum: 1n })
   if (!(await w.lab.sendAs(WHALE, sell.to, sell.data)).ok) throw new Error('whale sell failed')
+  return amount
 }
 
 const harvestRoundsStep: StepHandler = async (ctx, args) => {
   const max = Number(args.maxRounds ?? 12)
   const pool = String(args.pool ?? 'pool:USDC/cbBTC/500')
   const engine = engineOf(ctx)
+  const tokenId = engine.allowedTokenIds[0]
+  if (tokenId === undefined) throw new Error('harvest-rounds needs a managed position')
   const held: string[] = []
   for (let round = 1; round <= max; round++) {
-    await swapsInRange(ctx, pool)
+    await swapsInRange(ctx, pool, tokenId)
     const before = await snapshot(ctx, engine)
     const r = await engine.review()
     if (r.kind === 'decided' && r.record.decision.code !== 'DECIDE_HARVEST') {
@@ -460,7 +491,7 @@ const savingsLogStep: StepHandler = async (ctx) => {
   if (row.principal[0] !== 0n || row.principal[1] !== 0n) errs.push(`principal ${row.principal}`)
   if (!collect) errs.push('no Collect event at the row log index')
   if (op.simulation && swap && row.conversion && (row.conversion.amountIn !== swap.amountIn || row.conversion.amountOut !== swap.amountOut)) errs.push('conversion differs from Swap')
-  if ((op.intent.kind === 'harvest' && op.intent.convert) !== !!row.conversion) errs.push('conversion presence')
+  if ((op.intent.kind === 'harvest' && op.intent.convert !== null) !== (row.conversion !== null)) errs.push('conversion presence')
   if (row.status !== 'confirmed' || row.code !== 'PROJ_CONFIRMED') errs.push(`${row.status} ${row.code}`)
   const sources = row.provenance.map((p) => p.source).join('+')
   if (sources !== 'journal+fork_rpc') errs.push(`provenance ${sources}`)
@@ -504,8 +535,9 @@ const swapChecksStep: StepHandler = async (ctx) => {
 
 /** INV-PERSIST-FIRST: every userOp the bundler got was `signed` in the journal first. */
 const persistFirstStep: StepHandler = async (ctx) => {
-  const j = engineOf(ctx).journal
-  const received = ctx.bundler!.received()
+  const run = runOf(ctx)
+  const j = run.engine.journal
+  const received = ctx.bundler!.received().slice(run.bundlerSeen)
   const missing = received.filter((h) => !j.signedHashes.some((s) => s.toLowerCase() === h.toLowerCase()))
   for (const m of missing) ctx.invariantErrors.push({ name: 'INV-PERSIST-FIRST', detail: `${m} reached the bundler without a signed row` })
   return { step: 'every userOp at the bundler has a signed journal row', ok: missing.length === 0, detail: `${received.length} userOps, ${missing.length} without a row` }

@@ -1,0 +1,24 @@
+id: M03
+requirements: [FR-UNI-001, FR-UNI-002, FR-UNI-006, FR-ACC-010, FR-AA-001, FR-AA-002, FR-AA-004, FR-RPC-002]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: engine
+fixtures: [fx-owners, fx-safe, fx-gas, fx-sessions, fx-usdc]
+steps:
+  - fixtures: {}
+  - mine-until-safe: {}
+  # 1. review until enter_swap is terminal
+  - review:
+      label: step 1
+      expect:
+        decision: DECIDE_ENTER
+        op: { kind: enter_swap, state: confirmed, code: EXEC_OK, grant: enter-swap }
+  - swap-checks: {}
+  - persist-first: {}
+expect:
+  codes: [DECIDE_ENTER, EXEC_OK, SESSION_ACTIVE]
+invariants: [INV-RECIPIENT, INV-TARGETS, INV-SLOT, INV-NONCE, INV-PERSIST-FIRST, INV-ETH-GAS, INV-CODES, INV-FORK-CHAIN, INV-NO-ANVIL-IN-ENGINE]
