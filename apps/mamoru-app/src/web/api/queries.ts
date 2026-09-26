@@ -37,14 +37,14 @@ export function usePools() {
   return useQuery({ queryKey: queryKeys.pools, queryFn: () => api.pools(), refetchInterval: 60_000 })
 }
 
-/** What the Safe holds now. Polls every 6 s while the live panel is shown. */
-export function useFunding(accountKey: string | undefined, enabled: boolean) {
+/** What the Safe holds now. Polls every 6 s by default, 4 s while waiting for a deposit. */
+export function useFunding(accountKey: string | undefined, enabled: boolean, intervalMs = 6_000) {
   const api = useApi()
   return useQuery({
     queryKey: queryKeys.funding(accountKey ?? ''),
     queryFn: () => api.funding(accountKey as string),
     enabled: enabled && accountKey !== undefined,
-    refetchInterval: 6_000,
+    refetchInterval: intervalMs,
   })
 }
 

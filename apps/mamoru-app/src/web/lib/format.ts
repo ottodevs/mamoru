@@ -56,22 +56,6 @@ export function formatInteger(n: number): string {
   return groupThousands(String(Math.trunc(n)))
 }
 
-function pad2(n: number): string {
-  return String(n).padStart(2, '0')
-}
-
-export function formatUtcTime(iso: string): string {
-  const d = new Date(iso)
-  return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())} UTC`
-}
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
-export function formatUtcDateTime(iso: string): string {
-  const d = new Date(iso)
-  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()} ${formatUtcTime(iso)}`
-}
-
 export function shortHex(hex: string): string {
   return hex.length <= 12 ? hex : `${hex.slice(0, 6)}…${hex.slice(-4)}`
 }

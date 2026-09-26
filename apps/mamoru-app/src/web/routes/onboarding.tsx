@@ -1,154 +1,126 @@
 import type { OwnerResponse } from '@mamoru/domain'
+import { conservadorV1 } from '@mamoru/policy'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link, useNavigate } from '@tanstack/react-router'
-import { useState, type ReactNode } from 'react'
+import { useNavigate } from '@tanstack/react-router'
+import { useEffect, useState } from 'react'
 import { useApi } from '../api/client.ts'
-import { queryKeys, useConfig, useSession } from '../api/queries.ts'
-import { HexValue } from '../components/hex.tsx'
-import { ScopeContext } from '../components/scope.tsx'
-import { ErrorNotice, Skeleton } from '../components/section.tsx'
-import { errors, GUIDE_URL } from '../copy/dashboard.ts'
+import { queryKeys } from '../api/queries.ts'
 import { downloadJson, kitFilename } from '../lib/download.ts'
-import { createOwnerPasskey, PasskeyError } from '../lib/passkey.ts'
+import { errorText, useOwnerAction } from '../lib/owner-flow.ts'
+import { createOwnerPasskey } from '../lib/passkey.ts'
 import { rememberCredential } from '../lib/passkey-sign.ts'
-import { chainName } from '../lib/provenance.ts'
 
-type Pending = { pending: boolean; error: string | null }
+// The Conservador mix as the policy defines it (basis points), drawn like the mockup's mix bar.
+const BUCKET: Record<string, { name: string; note: string; tone: string }> = {
+  risk: { name: 'Higher yield', note: 'Off for now', tone: 'mercenary' },
+  'btc-usdc': { name: 'BTC + stablecoins', note: 'USDC/cbBTC on Uniswap', tone: 'paired' },
+  stables: { name: 'Stablecoins', note: 'Kept in USDC', tone: 'stables' },
+}
+export const MIX = [...conservadorV1.buckets]
+  .reverse()
+  .map((b) => ({ id: b.id, pct: b.preference / 100, ...(BUCKET[b.id] ?? { name: b.id, note: '', tone: 'stables' }) }))
 
-export type OnboardingViewProps = {
-  mode: 'production' | 'lab'
-  owner: OwnerResponse | null
-  kitDownloaded: boolean
-  acked: boolean
-  createOwner: Pending & { run: () => void }
-  downloadKit: Pending & { run: () => void }
-  ack: Pending & { run: () => void }
-  onFinish: () => void
+export const onboardingCopy = {
+  screens: [
+    { title: 'Fund Mamoru', body: ['Send the USDC you want to invest.'] },
+    { title: "What's next?", body: ['Yield is reinvested. You can transfer part or all of it whenever you want.'] },
+  ],
+  create: { title: 'You keep control', body: ['No forced lockups or third-party dependencies.', 'Free to exit anytime.'] },
+  approve: { title: 'Approve once', body: 'Approve once. Mamoru starts when your money lands.' },
 }
 
-function Step({ n, title, done, children }: { n: number; title: string; done: boolean; children: ReactNode }) {
+function Mix() {
   return (
-    <li className="sheet grid gap-[0.55rem] px-[1.1rem] py-4" data-testid={`step-${n}`}>
-      <div className="flex items-center justify-between gap-3">
-        <strong className="mono-label text-[0.8rem] font-normal">
-          {n}. {title}
-        </strong>
-        <span className="shrink-0 whitespace-nowrap rounded-full border border-wash px-2 py-[0.15rem] font-mono text-[0.7rem] uppercase tracking-[0.06em] text-stone">
-          {done ? 'Done' : `Step ${n}`}
-        </span>
-      </div>
-      {children}
-    </li>
-  )
-}
-
-const PERMISSIONS = [
-  'Mamoru holds no session on your account. It cannot move, swap or withdraw anything.',
-  'Only your owners can change your account. Mamoru cannot add owners or install modules.',
-  'Mamoru plans and simulates. It does not sign or send transactions.',
-]
-
-export function OnboardingView(p: OnboardingViewProps) {
-  const owner = p.owner
-  return (
-    <ScopeContext.Provider value={{ mode: p.mode, chains: [] }}>
-      <ol className="m-0 flex list-none flex-col gap-4 p-0">
-        <Step n={1} title="Create your owner passkey" done={owner !== null}>
-          <p className="m-0 leading-[1.45]">
-            Your smart account is owned by a passkey created for it on this device. It is not your login. Mamoru never sees its private key.
-          </p>
-          {owner === null ? (
-            <button type="button" className="btn btn-primary" onClick={p.createOwner.run} disabled={p.createOwner.pending}>
-              {p.createOwner.pending ? 'Creating passkey' : 'Create passkey'}
-            </button>
-          ) : null}
-          {p.createOwner.error ? <ErrorNotice message={p.createOwner.error} /> : null}
-        </Step>
-
-        <Step n={2} title="Your account on Base" done={owner !== null}>
-          {owner === null ? (
-            <p className="m-0 text-stone">Your account address appears after you create the passkey.</p>
-          ) : (
-            <>
-              <p className="m-0 leading-[1.45]">
-                This is your Safe smart account on {chainName(owner.chainId, [])} · {owner.chainId}. It is counterfactual: the address is fixed,
-                and nothing is deployed until you deploy it.
-              </p>
-              <HexValue hex={owner.address} kind="address" full />
-            </>
-          )}
-        </Step>
-
-        <Step n={3} title="Save your recovery kit" done={p.acked}>
-          <p className="m-0 leading-[1.45]">
-            The kit has your account address, its setup, modules and owners. It has no secrets. With it and the guide you can leave without
-            Mamoru.
-          </p>
-          <div className="flex flex-wrap gap-3">
-            <button type="button" className="btn btn-ghost" onClick={p.downloadKit.run} disabled={owner === null || p.downloadKit.pending}>
-              Download recovery kit
-            </button>
-            <a className="btn btn-ghost" href={GUIDE_URL} target="_blank" rel="noreferrer">
-              Open the guide
-            </a>
+    <figure className="mix" aria-label="Conservador mix">
+      <div className="mix-bar" aria-hidden="true">
+        {MIX.map((s) => (
+          <div key={s.id} className={`mix-seg ${s.tone}`} style={{ flex: s.pct }}>
+            {s.pct}%
           </div>
-          {p.downloadKit.error ? <ErrorNotice message={p.downloadKit.error} /> : null}
-          {p.acked ? (
-            <p className="m-0 font-mono text-[0.78rem] text-emerald">Backup confirmed.</p>
-          ) : (
-            <button type="button" className="btn btn-primary" onClick={p.ack.run} disabled={!p.kitDownloaded || p.ack.pending}>
-              Confirm I saved the kit
-            </button>
-          )}
-          {p.ack.error ? <ErrorNotice message={p.ack.error} /> : null}
-        </Step>
-
-        <Step n={4} title="Conservador and permissions" done={false}>
-          <p className="m-0 leading-[1.45]">
-            Conservador is the only preset in v1. Its plan is one Uniswap V3 pool on Base: USDC/cbBTC 0.05%. Stables and risk buckets stay idle:
-            no executable pool in v1.
-          </p>
-          <ul className="m-0 grid gap-1 pl-5 text-[0.95rem]">
-            {PERMISSIONS.map((line) => (
-              <li key={line}>{line}</li>
-            ))}
-          </ul>
-          <p className="m-0 font-mono text-[0.78rem] uppercase tracking-[0.04em] text-emerald">Deposits are closed</p>
-          <button type="button" className="btn btn-primary" onClick={p.onFinish} disabled={!p.acked}>
-            Open dashboard
-          </button>
-        </Step>
-      </ol>
-    </ScopeContext.Provider>
+        ))}
+      </div>
+      <ul className="m-0 grid list-none gap-[0.95rem] p-0">
+        {MIX.map((s) => (
+          <li key={s.id} className="grid grid-cols-[0.7rem_1fr] items-start gap-[0.65rem]">
+            <span className={`mix-dot ${s.tone}`} />
+            <span>
+              <span className="block text-base leading-tight">
+                {s.name} {s.pct}%
+              </span>
+              <span className="mt-[0.2rem] block text-[0.85rem] leading-snug text-stone">{s.note}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </figure>
   )
 }
 
-function message(e: unknown, fallback: string): string {
-  return e instanceof PasskeyError ? e.message : e instanceof DOMException && e.name === 'NotAllowedError' ? 'The passkey prompt was closed. Try again.' : fallback
-}
+function Identity({ owner, onCreate, creating, createError }: { owner: OwnerResponse | null; onCreate: () => void; creating: boolean; createError: string | null }) {
+  const api = useApi()
+  const navigate = useNavigate()
+  const act = useOwnerAction(owner?.accountKey, 'activate')
+  const [kitSaved, setKitSaved] = useState(false)
+  const kit = useMutation({
+    mutationFn: async (o: OwnerResponse) => {
+      downloadJson(kitFilename(o.address), await api.recoveryKit(o.accountKey))
+      await api.ackRecovery(o.accountKey).catch(() => undefined)
+    },
+    onSuccess: () => setKitSaved(true),
+  })
+  const { prepare, prepared, busy } = act
 
-function ExistingAccount() {
+  // Prepare the activation as soon as the account exists, so the approve tap goes straight to the passkey.
+  useEffect(() => {
+    if (owner && !prepared && busy === null && !act.error && !act.result) void prepare()
+  }, [owner, prepared, busy, act.error, act.result, prepare])
+
+  if (!owner) {
+    return (
+      <>
+        <h1 className="ob-title">{onboardingCopy.create.title}</h1>
+        {onboardingCopy.create.body.map((p) => (
+          <p key={p} className="ob-body">
+            {p}
+          </p>
+        ))}
+        {createError ? <p className="err mt-3">{createError}</p> : null}
+        <div className="mt-[1.6rem] flex justify-end">
+          <button type="button" className="ob-btn solid" onClick={onCreate} disabled={creating}>
+            {creating ? 'Creating account' : 'Create account'}
+          </button>
+        </div>
+      </>
+    )
+  }
+
+  const approve = async () => {
+    const op = prepared ? await act.approve() : null
+    if (!prepared) await prepare()
+    if (op) void navigate({ to: '/add' })
+  }
+
   return (
-    <div className="sheet grid gap-3 px-[1.1rem] py-4" data-testid="existing-account">
-      <p className="m-0 leading-[1.45]">
-        This browser already has a Mamoru account. Its owner passkey is set, so there is nothing to create here. Your recovery kit is on the
-        dashboard, under Leave without Mamoru.
-      </p>
-      <Link to="/dashboard" className="btn btn-primary">
-        Open dashboard
-      </Link>
+    <div className="enter">
+      <h1 className="ob-title">{onboardingCopy.approve.title}</h1>
+      <p className="ob-body">{onboardingCopy.approve.body}</p>
+      {act.error ? <p className="err mt-3">{act.error}</p> : null}
+      <div className="mt-[1.6rem] flex flex-wrap items-center justify-between gap-3">
+        <button type="button" className="text-[0.88rem] text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => kit.mutate(owner)} disabled={kit.isPending}>
+          {kitSaved ? 'Recovery kit saved' : 'Save recovery kit'}
+        </button>
+        <button type="button" className="ob-btn solid" onClick={approve} disabled={busy !== null}>
+          {busy === 'signing' ? 'Waiting for passkey' : busy === 'preparing' ? 'Preparing' : 'Approve with passkey'}
+        </button>
+      </div>
     </div>
   )
 }
 
-export function OnboardingPage() {
+export function Onboarding() {
   const api = useApi()
-  const config = useConfig()
-  const session = useSession()
-  const queryClient = useQueryClient()
-  const navigate = useNavigate()
-  const [kitDownloaded, setKitDownloaded] = useState(false)
-
+  const qc = useQueryClient()
+  const [step, setStep] = useState(0)
   const owner = useMutation({
     mutationFn: async () => {
       const passkey = await createOwnerPasskey()
@@ -156,54 +128,46 @@ export function OnboardingPage() {
       rememberCredential(created.accountKey, passkey.credentialId)
       return created
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.session }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.session }),
   })
-  const kit = useMutation({
-    mutationFn: async (o: OwnerResponse) => downloadJson(kitFilename(o.address), await api.recoveryKit(o.accountKey)),
-    onSuccess: () => setKitDownloaded(true),
-  })
-  const ack = useMutation({ mutationFn: (o: OwnerResponse) => api.ackRecovery(o.accountKey) })
-  const o = owner.data ?? null
-  const returning = o === null && session.data?.accountKey !== undefined
+  const last = onboardingCopy.screens.length
+  const screen = onboardingCopy.screens[step]
 
   return (
-    <main className="flex flex-1 justify-center px-[clamp(1rem,5vw,4rem)] pt-[clamp(1.5rem,5vh,3.5rem)] pb-12">
-      <title>Mamoru · Onboarding</title>
-      <div className="flex w-full max-w-[34rem] flex-col gap-4">
-        <p className="m-0 w-fit rounded-full border border-wash px-3 py-1 font-mono text-[0.7rem] uppercase tracking-[0.06em] text-emerald">
-          {config.data?.mode === 'lab' ? 'Verification plane · Base fork' : 'Base · simulation mode'}
-        </p>
-        <p className="kicker text-[0.75rem] tracking-[0.06em]">
-          <Link to="/" className="no-underline">
-            Home
-          </Link>{' '}
-          / Onboarding
-        </p>
-        <h1 className="m-0 text-[clamp(2rem,5vw,3rem)] font-normal">Four steps.</h1>
-        <p className="m-0 leading-[1.45] text-stone">
-          Create the passkey that owns your account, see its address on Base, save your recovery kit, then review what Mamoru may do.
-        </p>
-        {session.isPending ? (
-          <Skeleton lines={4} />
-        ) : returning ? (
-          <ExistingAccount />
-        ) : (
-          <OnboardingView
-            mode={config.data?.mode ?? 'production'}
-            owner={o}
-            kitDownloaded={kitDownloaded}
-            acked={ack.isSuccess}
-            createOwner={{
-              run: () => owner.mutate(),
-              pending: owner.isPending,
-              error: owner.error ? message(owner.error, "Mamoru's API did not create your account. Try again.") : null,
-            }}
-            downloadKit={{ run: () => o && kit.mutate(o), pending: kit.isPending, error: kit.error ? errors.kit : null }}
-            ack={{ run: () => o && ack.mutate(o), pending: ack.isPending, error: ack.error ? "Mamoru's API did not record your backup. Try again." : null }}
-            onFinish={() => navigate({ to: '/dashboard' })}
-          />
-        )}
+    <div className="fixed inset-0 z-30 grid place-items-center overflow-y-auto bg-[color-mix(in_srgb,var(--color-ink)_42%,transparent)] p-4" role="dialog" aria-modal="true" aria-label="Welcome to Mamoru">
+      <div className="w-[min(48rem,100%)] min-[761px]:w-[min(60vw,48rem)]">
+        <section className="ob-card rise" aria-live="polite" data-testid={`onboarding-${step + 1}`}>
+          <div key={step} className="enter">
+            <p className="ob-step">{String(step + 1).padStart(2, '0')} / 03</p>
+            {screen ? (
+              <>
+                <h1 className="ob-title">{screen.title}</h1>
+                {screen.body.map((p) => (
+                  <p key={p} className="ob-body">
+                    {p}
+                  </p>
+                ))}
+                {step === 1 ? <Mix /> : null}
+                <div className="mt-[1.6rem] flex flex-wrap justify-end gap-[0.65rem]">
+                  <button type="button" className="ob-btn ghost" onClick={() => setStep(last)}>
+                    Skip
+                  </button>
+                  <button type="button" className="ob-btn solid" onClick={() => setStep(step + 1)}>
+                    Next
+                  </button>
+                </div>
+              </>
+            ) : (
+              <Identity
+                owner={owner.data ?? null}
+                onCreate={() => owner.mutate()}
+                creating={owner.isPending}
+                createError={owner.error ? errorText(owner.error) : null}
+              />
+            )}
+          </div>
+        </section>
       </div>
-    </main>
+    </div>
   )
 }

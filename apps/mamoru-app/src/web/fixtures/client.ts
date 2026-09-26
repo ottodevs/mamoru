@@ -40,7 +40,14 @@ export const fixtureFunding: FundingView = {
   positions: [],
 }
 
-const liveState = { funding: structuredClone(fixtureFunding), ops: [] as OpView[], n: 0 }
+// ?fresh (dev only): no account yet, 0 USDC. The approval arms; a deposit lands a few seconds later.
+const fresh = liveGate && typeof location !== 'undefined' && new URLSearchParams(location.search).has('fresh')
+const liveState = {
+  funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}) },
+  ops: [] as OpView[],
+  n: 0,
+  owner: !fresh,
+}
 
 function fixtureTx(summary: string[]): OwnerTxToSign {
   liveState.n += 1
@@ -70,17 +77,37 @@ function fixtureOp(kind: OpView['kind'], after: () => void): OpView {
 
 export const fixtureClient: ApiClient = {
   config: () => delay(liveGate ? { ...fixtureConfig, fundsGate: 'live', dryRun: false, capUsdc: '25000000' } : fixtureConfig),
-  session: () => delay(fixtureSession),
+  session: () => delay(liveState.owner ? fixtureSession : null),
   dashboard: () => delay(emptyAccount),
   pools: () => delay(poolsResponse),
-  createOwner: () => delay(fixtureOwner),
+  createOwner: () => {
+    liveState.owner = true
+    return delay(fixtureOwner)
+  },
   recoveryKit: () => delay({ chainId: 8453, address: FIXTURE_ADDRESS, fixture: true }),
   ackRecovery: () => delay({ ok: true as const }),
   funding: () => delay(liveState.funding),
   ops: () => delay({ ops: liveState.ops }),
   activatePrepare: () => delay(fixtureTx(['Deploy your Safe on Base', 'Enable the engine session for up to 20 USDC', 'Top up gas reserve to 0.0003 ETH'])),
-  activate: () =>
-    delay(
+  activate: () => {
+    if (fresh && BigInt(liveState.funding.usdc) === 0n) {
+      liveState.n += 1
+      const op: OpView = { opId: `op_fixture_${liveState.n}`, kind: 'activate', state: 'proposed', code: 'ARMED', updatedAt: new Date().toISOString() }
+      liveState.ops.push(op)
+      setTimeout(() => {
+        liveState.funding.usdc = '20000000'
+        setTimeout(() => {
+          op.state = 'confirmed'
+          op.txHash = `0x${'c'.repeat(64)}`
+          op.updatedAt = new Date().toISOString()
+          Object.assign(liveState.funding, { deployed: true, active: true, usdc: '10000000' })
+          liveState.funding.positions = [{ tokenId: '4242', pool: '0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef', liquidity: '1000', inRange: true, amountUsdc: '5000000', amountCbbtc: '7641' }]
+          liveState.ops.push({ opId: 'op_enter', kind: 'enter', state: 'confirmed', txHash: `0x${'d'.repeat(64)}`, updatedAt: new Date().toISOString() })
+        }, 6000)
+      }, 8000)
+      return delay(op)
+    }
+    return delay(
       fixtureOp('activate', () => {
         const f = liveState.funding
         f.deployed = true
@@ -88,7 +115,8 @@ export const fixtureClient: ApiClient = {
         f.usdc = '10000000'
         f.positions = [{ tokenId: '4242', pool: '0x0000000000000000000000000000000000000abc', liquidity: '1000', inRange: true, amountUsdc: '5000000', amountCbbtc: '5000' }]
       }),
-    ),
+    )
+  },
   transferPrepare: (_k, body) =>
     delay({
       reduce: BigInt(body.amountUsdc) > BigInt(liveState.funding.usdc) ? [{ tokenId: '4242', liquidityBps: 5000 }] : [],

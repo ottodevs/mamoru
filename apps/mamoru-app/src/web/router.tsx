@@ -1,16 +1,19 @@
-import { createRootRoute, createRoute, createRouter, type RouterHistory } from '@tanstack/react-router'
-import { DashboardPage } from './routes/dashboard.tsx'
-import { HomePage } from './routes/home.tsx'
-import { OnboardingPage } from './routes/onboarding.tsx'
+import { createRootRoute, createRoute, createRouter, redirect, type RouterHistory } from '@tanstack/react-router'
+import { AddMoneyPage } from './routes/add-money.tsx'
+import { IndexPage } from './routes/index.tsx'
 import { NotFound, RootLayout } from './routes/root.tsx'
 
-// Client-only routes (FR-DSH-001): no SSR, no route beyond these three.
+// Client-only routes. "/" is onboarding or Home; "/add" waits for the first deposit.
 export function buildRouter(history?: RouterHistory) {
   const rootRoute = createRootRoute({ component: RootLayout, notFoundComponent: NotFound })
+  const home = () => {
+    throw redirect({ to: '/', replace: true })
+  }
   const routeTree = rootRoute.addChildren([
-    createRoute({ getParentRoute: () => rootRoute, path: '/', component: HomePage }),
-    createRoute({ getParentRoute: () => rootRoute, path: '/onboarding', component: OnboardingPage }),
-    createRoute({ getParentRoute: () => rootRoute, path: '/dashboard', component: DashboardPage }),
+    createRoute({ getParentRoute: () => rootRoute, path: '/', component: IndexPage }),
+    createRoute({ getParentRoute: () => rootRoute, path: '/add', component: AddMoneyPage }),
+    createRoute({ getParentRoute: () => rootRoute, path: '/onboarding', beforeLoad: home }),
+    createRoute({ getParentRoute: () => rootRoute, path: '/dashboard', beforeLoad: home }),
   ])
   return createRouter({ routeTree, defaultPreload: false, scrollRestoration: true, ...(history ? { history } : {}) })
 }
