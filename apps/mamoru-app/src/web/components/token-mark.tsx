@@ -37,6 +37,11 @@ export function TokenMark({ symbol, size = 28 }: { symbol: Symbol | string; size
           <path fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" d="M10.8 8.6 16 16l5.2-7.4M16 16v8" />
           <path fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" d="M11.6 17.4h8.8M11.6 20.6h8.8" />
         </svg>
+      ) : symbol === 'USDT' ? (
+        <svg viewBox="0 0 32 32" aria-hidden="true" className="block h-full w-full">
+          <circle cx="16" cy="16" r="16" fill="#26A17B" />
+          <path fill="#fff" d="M17.9 17.1v0c-.1 0-.7.1-1.9.1-1 0-1.7 0-1.9-.1v0c-3.7-.2-6.5-.8-6.5-1.6s2.8-1.4 6.5-1.6v2.5c.2 0 .9.1 1.9.1 1.2 0 1.8-.1 1.9-.1v-2.5c3.7.2 6.4.8 6.4 1.6s-2.7 1.4-6.4 1.6zm0-3.4v-2.3h5.2V8H8.9v3.5h5.2v2.3c-4.2.2-7.4 1-7.4 2s3.2 1.8 7.4 2v7.2h3.8v-7.2c4.2-.2 7.4-1 7.4-2s-3.2-1.8-7.4-2z" />
+        </svg>
       ) : symbol === 'cbBTC' ? (
         <svg viewBox="0 0 32 32" aria-hidden="true" className="block h-full w-full">
           <circle cx="16" cy="16" r="16" fill="#0052FF" />
