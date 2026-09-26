@@ -129,6 +129,16 @@ export function quoteMint(p: {
   return { liquidity, amount0, amount1, amount0Min, amount1Min }
 }
 
+/** Token amounts `liquidity` holds between the ticks at `sqrtPriceX96` (LiquidityAmounts.getAmountsForLiquidity). */
+export function amountsForLiquidity(sqrtPriceX96: bigint, tickLower: number, tickUpper: number, liquidity: bigint): { amount0: bigint; amount1: bigint } {
+  const a = sqrtRatioAtTick(tickLower)
+  const b = sqrtRatioAtTick(tickUpper)
+  const s = sqrtPriceX96
+  if (s <= a) return { amount0: amount0Of(a, b, liquidity), amount1: 0n }
+  if (s < b) return { amount0: amount0Of(s, b, liquidity), amount1: amount1Of(a, s, liquidity) }
+  return { amount0: 0n, amount1: amount1Of(a, b, liquidity) }
+}
+
 /** Raw units of token0 worth `amount1` raw units of token1 at `sqrtPriceX96`. */
 export function token1InToken0(amount1: bigint, sqrtPriceX96: bigint): bigint {
   return (amount1 * Q192) / (sqrtPriceX96 * sqrtPriceX96)

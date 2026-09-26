@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { minOut, quoteMint, rangeAround, sqrtRatioAtTick, token0InToken1, token1InToken0 } from './quote.ts'
+import { amountsForLiquidity, minOut, quoteMint, rangeAround, sqrtRatioAtTick, token0InToken1, token1InToken0 } from './quote.ts'
 
 describe('sqrtRatioAtTick', () => {
   test('matches TickMath at the reference ticks', () => {
@@ -38,6 +38,19 @@ describe('quoteMint', () => {
     expect(() =>
       quoteMint({ sqrtPriceX96: sqrtRatioAtTick(-200), tickLower: -100, tickUpper: 100, amount0Desired: 10n ** 12n, amount1Desired: 10n ** 12n, slippageBps: 50 }),
     ).toThrow('EHG_QUOTE_UNAVAILABLE')
+  })
+})
+
+describe('amountsForLiquidity', () => {
+  const q = quoteMint({ sqrtPriceX96: sqrtRatioAtTick(0), tickLower: -100, tickUpper: 100, amount0Desired: 10n ** 12n, amount1Desired: 10n ** 12n, slippageBps: 50 })
+
+  test('in range, gives back what the mint took', () => {
+    expect(amountsForLiquidity(sqrtRatioAtTick(0), -100, 100, q.liquidity)).toEqual({ amount0: q.amount0, amount1: q.amount1 })
+  })
+
+  test('below the range is all token0, above is all token1', () => {
+    expect(amountsForLiquidity(sqrtRatioAtTick(-200), -100, 100, q.liquidity).amount1).toBe(0n)
+    expect(amountsForLiquidity(sqrtRatioAtTick(200), -100, 100, q.liquidity).amount0).toBe(0n)
   })
 })
 
