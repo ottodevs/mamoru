@@ -50,7 +50,13 @@ export type FundingView = {
   cbbtc: string           // base units
   gasReserveWei: string   // the relayer tops the Safe up to this at activation
   active: boolean         // engine grants enabled and the engine loop running
-  positions: { tokenId: string; pool: string; liquidity: string; inRange: boolean; amountUsdc: string; amountCbbtc: string }[]
+  positions: {
+    tokenId: string; pool: string; liquidity: string; inRange: boolean; amountUsdc: string; amountCbbtc: string
+    amounts?: { token: string; amount: string; decimals: number }[]   // both sides of any pool, base units
+    valueUsdc?: string                                                  // position value in USDC base units
+  }[]
+  // What the engine is doing right now, for a subtle progress line in Working capital.
+  progress?: { step: 'deploying' | 'activating' | 'swapping' | 'opening' | 'rebalancing' | 'reranging' | 'closing' | 'withdrawing'; pool?: string; since: string } | null
 }
 
 // POST /api/accounts/:accountKey/activate/prepare -> OwnerTxToSign
