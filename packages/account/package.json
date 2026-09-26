@@ -1,0 +1,17 @@
+{
+  "name": "@mamoru/account",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./safe": "./safe/index.ts",
+    "./sessions": "./sessions/index.ts",
+    "./precheck": "./precheck/index.ts"
+  },
+  "dependencies": {
+    "@mamoru/domain": "workspace:*",
+    "@mamoru/policy": "workspace:*",
+    "@mamoru/registry": "workspace:*",
+    "viem": "2.56.9"
+  }
+}
