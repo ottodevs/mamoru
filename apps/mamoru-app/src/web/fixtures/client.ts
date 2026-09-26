@@ -95,12 +95,12 @@ export const fixtureClient: ApiClient = {
   pools: () => delay(poolsResponse),
   apy: () =>
     delay({
-      pool: '0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef',
-      currentPct: 11.4,
-      currentWindow: '1h' as const,
-      currentSource: 'Pool fees, last hour · GeckoTerminal',
-      monthlyPct: 22.6,
-      monthlySource: '30-day mean · DefiLlama',
+      pool: 'conservador-live-v2',
+      currentPct: 6.4,
+      currentWindow: '24h' as const,
+      currentSource: 'Plan pools, fee APR · GeckoTerminal/DefiLlama',
+      monthlyPct: 5.9,
+      monthlySource: 'Plan pools, 30-day mean · DefiLlama',
       asOf: new Date().toISOString(),
     }),
   createOwner: () => {

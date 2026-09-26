@@ -116,7 +116,8 @@ export type AccountContext = {
   passkey: { credentialId: string; x: Hex0x; y: Hex0x }
 }
 
-// Pool-level fee APR of the plan's live pool (public, no session).
+// One current and one monthly APY for the account (public, no session). Until positions earn
+// fees: the plan's pools' APYs weighted by the policy bucket weights. `pool` = the plan's policyId.
 // GET  /api/apy                                      -> ApyView
 export type ApyView = {
   pool: string
