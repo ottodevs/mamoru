@@ -21,6 +21,7 @@ export function HomePage() {
   const lab = config.data?.mode === 'lab'
   return (
     <main className="flex flex-1 justify-center px-[clamp(1rem,5vw,4rem)] pt-[clamp(1.25rem,4vh,3rem)] pb-12">
+      <title>Mamoru · Savings, explained</title>
       <div className="flex w-full max-w-[40rem] flex-col items-center gap-[0.85rem] text-center">
         <p className="m-0 rounded-full border border-wash px-3 py-1 font-mono text-[0.7rem] uppercase tracking-[0.06em] text-emerald">
           {lab ? 'Verification plane · Base fork' : 'Base · simulation mode'}

@@ -68,6 +68,7 @@ test('a new owner onboards with a passkey and lands on the simulation dashboard'
   const payload = page.waitForResponse((r) => /\/api\/accounts\/[^/]+\/dashboard$/.test(new URL(r.url()).pathname) && r.ok())
   await presetStep.getByRole('button', { name: 'Open dashboard' }).click()
   await expect(page).toHaveURL(/\/dashboard$/)
+  await expect(page).toHaveTitle('Mamoru · Dashboard')
   const data = (await (await payload).json()) as DashboardPayload
   await test.info().attach('dashboard-payload.json', { body: JSON.stringify(data, null, 2), contentType: 'application/json' })
   expect(data.mode).toBe('production')

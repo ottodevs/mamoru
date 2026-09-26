@@ -12,6 +12,7 @@ import { Brand } from './root.tsx'
 function Shell({ children }: { children: React.ReactNode }) {
   return (
     <main className="mx-auto flex w-[min(68rem,calc(100%-3rem))] flex-1 flex-col pt-[1.15rem] pb-7">
+      <title>Mamoru · Dashboard</title>
       <header className="mb-7 flex flex-wrap items-center justify-between gap-3">
         <Brand />
       </header>

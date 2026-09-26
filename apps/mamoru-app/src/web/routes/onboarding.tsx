@@ -162,6 +162,7 @@ export function OnboardingPage() {
 
   return (
     <main className="flex flex-1 justify-center px-[clamp(1rem,5vw,4rem)] pt-[clamp(1.5rem,5vh,3.5rem)] pb-12">
+      <title>Mamoru · Onboarding</title>
       <div className="flex w-full max-w-[34rem] flex-col gap-4">
         <p className="m-0 w-fit rounded-full border border-wash px-3 py-1 font-mono text-[0.7rem] uppercase tracking-[0.06em] text-emerald">
           {config.data?.mode === 'lab' ? 'Verification plane · Base fork' : 'Base · simulation mode'}
