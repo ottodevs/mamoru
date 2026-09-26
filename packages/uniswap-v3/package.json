@@ -1,0 +1,14 @@
+{
+  "name": "@mamoru/uniswap-v3",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@mamoru/domain": "workspace:*",
+    "@mamoru/registry": "workspace:*",
+    "viem": "2.56.9"
+  }
+}
