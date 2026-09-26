@@ -11,7 +11,7 @@ Permanent links use `main`. The old branch `spec/mamoru-v1` no longer exists; ev
 | Project name | Mamoru |
 | Category | DeFi |
 | Emoji | keep the current one |
-| Demo link | https://app.mamoru.lol [PENDING L2/L3: keep https://mamoru.lol if the app is not public at freeze] |
+| Demo link | https://app.mamoru.lol (live since main b27f1af). Do not use https://mamoru.lol: its hero says "APY. DELIVERED.", which the claims policy forbids |
 
 ## 2. Short description (max 100 characters)
 

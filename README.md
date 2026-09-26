@@ -4,7 +4,7 @@ Mamoru v1 is a non-custodial savings account on Base. You own a Safe smart accou
 
 In v1 production, Mamoru runs in simulation mode. It plans and simulates, and it does not sign or send transactions. Deposits are closed. ([spec](specs/001-mamoru-v1/spec.md), [dashboard spec](specs/001-mamoru-v1/dashboard.md))
 
-- App: https://app.mamoru.lol [PENDING L2/L3 deploy]
+- App: https://app.mamoru.lol (simulation mode: passkey onboarding, counterfactual Safe on Base, recovery kit, dashboard). Pool data on the dashboard [PENDING L4]
 - Landing: https://mamoru.lol ([ottodevs/mamoru-landing](https://github.com/ottodevs/mamoru-landing))
 - Built at ETHGlobal Tokyo 2026 (25 to 27 September). First commit 25 September 14:03 CEST.
 
