@@ -30,7 +30,6 @@ export const homeCopy = {
   history: 'Savings history',
   notRunning: 'Mamoru is not running on this money yet.',
   armFirst: 'Approve once. Mamoru starts when your money lands.',
-  starting: 'Approved. Mamoru starts on this deposit shortly.',
   stopBody: 'Mamoru closes every position and swaps back to USDC. Your USDC stays in your account.',
   confirm: 'Confirm with passkey',
 }
@@ -442,11 +441,6 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       ) : (
         <>
           {!f.active && !inFlight && !armed ? <StartRow accountKey={accountKey} funded={hasMoney(f)} /> : null}
-          {hasMoney(f) && !f.active && armed ? (
-            <section className="card">
-              <Waiting>{homeCopy.starting}</Waiting>
-            </section>
-          ) : null}
           <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} />
           <Idle s={s as Split} />
           <History ops={opList} />
