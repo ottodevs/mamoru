@@ -19,6 +19,8 @@ export type Observation = {
   deposits: DepositObs[]
   intents: { paused: boolean; exitRequested: boolean }
   slot: { opId: string; state: string } | null
+  /** Block timestamp of the last confirmed re-range, for the policy cooldown. Absent or null: none yet. */
+  lastRerangeAt?: bigint | null
 }
 
 export type SessionObs = { grant: string; permissionId: Hex; tokenId?: bigint; validUntil: number; active: boolean }
@@ -64,8 +66,8 @@ export type ShadowNote = { code: ReasonCode; note: string }
 
 export type EnterSwapProposal = {
   kind: 'enter_swap'
-  /** `enter-swap`, or `enter-swap:<pool>` on a multi-pool policy. */
-  grant: 'enter-swap' | `enter-swap:${string}`
+  /** convert-any: the volatile side back to savings before a re-mint (live manage grants). */
+  grant: 'enter-swap' | 'convert-any'
   pool: RegistryName
   tokenIn: RegistryName
   tokenOut: RegistryName
@@ -75,7 +77,8 @@ export type EnterSwapProposal = {
 
 export type EnterMintProposal = {
   kind: 'enter_mint'
-  grant: 'enter-mint' | `enter-mint:${string}`
+  /** manage-any: re-mints after a re-range are not bounded by enter-mint's one-time cumulative cap. */
+  grant: 'enter-mint' | 'manage-any'
   pool: RegistryName
   tickLower: number
   tickUpper: number
@@ -85,7 +88,7 @@ export type EnterMintProposal = {
 
 export type HarvestProposal = {
   kind: 'harvest'
-  grant: `manage:${string}`
+  grant: `manage:${string}` | 'convert-any'
   pool: RegistryName
   tokenId: bigint
   /** Fees only: collectable minus principal owed. */
@@ -95,7 +98,25 @@ export type HarvestProposal = {
   convert: { token: RegistryName; amount: bigint } | null
 }
 
-export type Proposal = EnterSwapProposal | EnterMintProposal | HarvestProposal
+/** Whole position back to the Safe: decreaseLiquidity(all) + collect(to the Safe) + burn. */
+export type RerangeProposal = {
+  kind: 'rerange'
+  grant: 'manage-any'
+  pool: RegistryName
+  tokenId: bigint
+  liquidity: bigint
+}
+
+/** Part of an over-weight bucket's position back to the Safe: decreaseLiquidity(part) + collect(to the Safe). */
+export type ReduceProposal = {
+  kind: 'reduce'
+  grant: 'manage-any'
+  pool: RegistryName
+  tokenId: bigint
+  liquidity: bigint
+}
+
+export type Proposal = EnterSwapProposal | EnterMintProposal | HarvestProposal | RerangeProposal | ReduceProposal
 
 export type DecisionKind = 'hold' | Proposal['kind']
 
@@ -108,7 +129,7 @@ export type Decision = {
   policyRef: { policyId: string; version: string; hash: Hex }
   observationCodes: ReasonCode[]
   kind: DecisionKind
-  code: 'DECIDE_HOLD' | 'DECIDE_ENTER' | 'DECIDE_HARVEST'
+  code: 'DECIDE_HOLD' | 'DECIDE_ENTER' | 'DECIDE_HARVEST' | 'DECIDE_RANGE_ADJUST' | 'STRATEGY_PREFERENCE_DEVIATION'
   reason: ReasonCode
   trail: GateStep[]
   proposal: Proposal | null

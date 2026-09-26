@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { createPublicClient, http } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID } from '@mamoru/domain'
-import { POLICIES } from '@mamoru/policy'
+import { POLICIES, withTestOverrides } from '@mamoru/policy'
 import { startLiveBundler } from './bundler.ts'
 import { Operator } from './operator.ts'
 import { Relayer } from './relayer.ts'
@@ -30,8 +30,10 @@ export async function bootOperator(o: BootOptions) {
   const client = createPublicClient({ transport: http(o.rpcUrl, { batch: true, timeout: 60_000 }) })
   const chainId = await client.getChainId()
   const live = chainId === BASE_CHAIN_ID && process.env.MAMORU_LIVE === '1'
-  const policy = POLICIES[o.policyId ?? 'conservador-live-v2']
-  if (!policy) throw new Error(`unknown policy ${o.policyId}`)
+  const named = POLICIES[o.policyId ?? 'conservador-live-v1']
+  if (!named) throw new Error(`unknown policy ${o.policyId}`)
+  // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
+  const policy = withTestOverrides(named, process.env)
   const store = new StateStore(o.stateDir)
   const relayer = new Relayer(loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey), client, o.rpcUrl, chainId)
   const bundler = startLiveBundler(client, relayer, chainId)

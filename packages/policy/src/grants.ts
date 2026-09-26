@@ -190,3 +190,97 @@ export function grantKeyFor(policy: { session: { grants: GrantTemplate[] } }, na
   if (!t) throw new Error(`no ${name} grant for ${pool}`)
   return grantKey(t)
 }
+
+/**
+ * Live manage grants (owner decision 2026-09-26), enabled in the one
+ * activation batch next to the enter grants, for any position of the pair
+ * the Safe holds. Nothing in them can move a token or a position out of the
+ * Safe: `collect` and `mint` pin `recipient` to the account, the swap pins
+ * its recipient and both tokens, approvals name only the position manager or
+ * the router with a per-call cap. `decreaseLiquidity` and `burn` take any
+ * tokenId: the manager reverts for an id the Safe does not own, and neither
+ * call pays anything out (burn needs an empty position).
+ *
+ * Two grants because Smart Sessions keys an action by target and selector:
+ * the volatile token's `approve` goes to the manager for a mint and to the
+ * router for a conversion, which one session cannot hold twice.
+ * - `manage-any`: re-range, reduce and re-mint (decrease, collect, burn, mint).
+ * - `convert-any`: harvest (collect, then volatile -> savings asset).
+ */
+export function manageAnyGrants(p: PairSpec, usage: { manage: number; convert: number }): GrantTemplate[] {
+  const c = p.caps
+  const collectToAccount = {
+    target: 'NonfungiblePositionManager',
+    signature: COLLECT,
+    params: [{ field: 'recipient', index: 1, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' }],
+  } as const
+  return [
+    {
+      name: 'manage-any',
+      perPosition: false,
+      usageLimit: usage.manage,
+      actions: [
+        { target: 'NonfungiblePositionManager', signature: DECREASE, params: [] },
+        { ...collectToAccount, params: [...collectToAccount.params] },
+        { target: 'NonfungiblePositionManager', signature: BURN, params: [] },
+        {
+          target: p.token0,
+          signature: APPROVE,
+          params: [
+            { field: 'spender', index: 0, condition: 'EQUAL', ref: 'NonfungiblePositionManager', denial: 'POLICY_DENIED_APPROVAL' },
+            { field: 'amount', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.mint0}`, denial: 'POLICY_DENIED_APPROVAL' },
+          ],
+        },
+        {
+          target: p.token1,
+          signature: APPROVE,
+          params: [
+            { field: 'spender', index: 0, condition: 'EQUAL', ref: 'NonfungiblePositionManager', denial: 'POLICY_DENIED_APPROVAL' },
+            { field: 'amount', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.mint1}`, denial: 'POLICY_DENIED_APPROVAL' },
+          ],
+        },
+        {
+          target: 'NonfungiblePositionManager',
+          signature: MINT,
+          params: [
+            { field: 'token0', index: 0, condition: 'EQUAL', ref: p.token0, denial: 'POLICY_DENIED_TARGET' },
+            { field: 'token1', index: 1, condition: 'EQUAL', ref: p.token1, denial: 'POLICY_DENIED_TARGET' },
+            { field: 'fee', index: 2, condition: 'EQUAL', ref: BigInt(p.fee), denial: 'POLICY_DENIED_TARGET' },
+            { field: 'amount0Desired', index: 5, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.mint0}`, denial: 'POLICY_DENIED_AMOUNT' },
+            { field: 'amount1Desired', index: 6, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.mint1}`, denial: 'POLICY_DENIED_AMOUNT' },
+            { field: 'recipient', index: 9, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },
+          ],
+        },
+      ],
+    },
+    {
+      name: 'convert-any',
+      perPosition: false,
+      usageLimit: usage.convert,
+      actions: [
+        { ...collectToAccount, params: [...collectToAccount.params] },
+        {
+          target: p.volatile,
+          signature: APPROVE,
+          params: [
+            { field: 'spender', index: 0, condition: 'EQUAL', ref: 'SwapRouter02', denial: 'POLICY_DENIED_APPROVAL' },
+            { field: 'amount', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.volatileConvertPerCall}`, denial: 'POLICY_DENIED_APPROVAL' },
+          ],
+        },
+        {
+          target: 'SwapRouter02',
+          signature: EXACT_INPUT_SINGLE,
+          params: [
+            { field: 'tokenIn', index: 0, condition: 'EQUAL', ref: p.volatile, denial: 'POLICY_DENIED_TARGET' },
+            { field: 'tokenOut', index: 1, condition: 'EQUAL', ref: p.stable, denial: 'POLICY_DENIED_TARGET' },
+            { field: 'fee', index: 2, condition: 'EQUAL', ref: BigInt(p.fee), denial: 'POLICY_DENIED_TARGET' },
+            { field: 'recipient', index: 3, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },
+            { field: 'amountIn', index: 4, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.volatileConvertPerCall}`, denial: 'POLICY_DENIED_AMOUNT' },
+            { field: 'amountOutMinimum', index: 5, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+            { field: 'sqrtPriceLimitX96', index: 6, condition: 'EQUAL', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+          ],
+        },
+      ],
+    },
+  ]
+}

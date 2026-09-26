@@ -1,17 +1,25 @@
 import { keccak256, stringToHex, type Hex } from 'viem'
 import type { ReasonCode } from '@mamoru/domain'
-import { policyHash, type PolicyVersion } from '@mamoru/policy'
-import { allocate } from './allocate/index.ts'
-import { enterBucket } from './enter/index.ts'
+import { hasManageAny, policyHash, type PolicyVersion } from '@mamoru/policy'
+import { enterBucket, safeSavings } from './enter/index.ts'
 import { ehgPreliminary, purgaIdentity } from './gates/index.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
+import { isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
 import type { Decision, GateStep, Observation, Proposal, ShadowNote } from './types.ts'
 
 export type * from './types.ts'
 export { estimateFees } from './harvest/index.ts'
 export { safeSavings } from './enter/index.ts'
-export { amountsForLiquidity, inSavings, volatileOf } from './value.ts'
-export { allocate, widthOf, type Allocation, type BucketValue } from './allocate/index.ts'
+export { inSavings, volatileOf } from './value.ts'
+export { amountsOf, bucketValues, positionValue, rerangeOf, reduceOf, EDGE_BPS, DRIFT_BPS } from './rerange/index.ts'
+
+const PROPOSAL_CODE = {
+  enter_swap: 'DECIDE_ENTER',
+  enter_mint: 'DECIDE_ENTER',
+  harvest: 'DECIDE_HARVEST',
+  rerange: 'DECIDE_RANGE_ADJUST',
+  reduce: 'STRATEGY_PREFERENCE_DEVIATION',
+} as const
 
 /** Deterministic JSON: sorted keys, bigints as decimal strings. */
 export function canonicalJson(value: unknown): string {
@@ -48,12 +56,14 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
 
   // Plan §9, step 10 and FR-DEC-009: annotations for every position, harvest only for managed ones.
   const harvests: Proposal[] = []
+  const reranges: Proposal[] = []
+  const manageAny = hasManageAny(policy)
   let managedInRange = 0
   let managedOutOfRange = 0
   for (const p of obs.positions) {
     const codes: ReasonCode[] = []
     const pool = p.pool ? obs.pools.find((x) => x.name === p.pool) : undefined
-    const managed = p.managed && !!pool && policyPools.has(pool.name)
+    const managed = !!pool && isManaged(p, policy, policyPools)
     if (!managed) codes.push('OBS_UNMANAGED_ASSET')
     if (pool) {
       const within = inRange(pool.tick, p.tickLower, p.tickUpper)
@@ -63,9 +73,12 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
       if (managed) {
         if (within) managedInRange++
         else managedOutOfRange++
+        const r = rerangeOf(obs, policy, p, pool)
+        if (r.code) codes.push(r.code)
+        if (r.proposal) reranges.push(r.proposal)
         const h = harvestOf(p, pool, policy, est)
         codes.push(h.code)
-        if (h.proposal) harvests.push(h.proposal)
+        if (h.proposal) harvests.push(manageAny ? { ...h.proposal, grant: 'convert-any' } : h.proposal)
       }
     }
     positions.push({ tokenId: p.tokenId, codes })
@@ -91,7 +104,7 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
       buckets.push({ bucket: b.id, code: 'PLAN_BUCKET_NO_EXECUTABLE_POOL' })
       continue
     }
-    const entered = obs.positions.some((p) => p.managed && p.pool === pool.name)
+    const entered = obs.positions.some((p) => p.pool === pool.name && isManaged(p, policy, policyPools))
     if (entered) {
       buckets.push({ bucket: b.id, code: 'STRATEGY_PREFERENCE' })
       continue
@@ -106,7 +119,9 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
       buckets.push({ bucket: b.id, code: 'OBS_DEPOSIT_UNSAFE' })
       continue
     }
-    const e = enterBucket(obs, policy, b.preference, pool)
+    const convert = ratioConvertOf(obs, policy, b.preference, pool, safeSavings(obs, policy))
+    const e = convert ? { code: 'DECIDE_CONVERT' as const, proposal: convert } : enterBucket(obs, policy, b.preference, pool)
+    if (manageAny && e.proposal?.kind === 'enter_mint') e.proposal = { ...e.proposal, grant: 'manage-any' }
     buckets.push({ bucket: b.id, code: e.code })
     if (e.proposal) {
       enterEvaluated = true
@@ -126,8 +141,9 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
   } else if (obs.intents.paused) {
     reason = 'DECIDE_PAUSED'
   } else {
-    proposal = harvests[0] ?? entries[0] ?? null
-    reason = proposal ? (proposal.kind === 'harvest' ? 'DECIDE_HARVEST' : 'DECIDE_ENTER') : holdReason()
+    const reduce = reranges.length || harvests.length ? null : reduceOf(obs, policy, policyPools)
+    proposal = reranges[0] ?? harvests[0] ?? reduce?.proposal ?? entries[0] ?? null
+    reason = proposal ? PROPOSAL_CODE[proposal.kind] : holdReason()
   }
 
   // Plan §9, step 9: a preliminary NO GO drops the proposal with its code.
@@ -150,7 +166,7 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
   }
 
   const kind = proposal?.kind ?? 'hold'
-  const code = kind === 'hold' ? 'DECIDE_HOLD' : kind === 'harvest' ? 'DECIDE_HARVEST' : 'DECIDE_ENTER'
+  const code = kind === 'hold' ? 'DECIDE_HOLD' : PROPOSAL_CODE[kind]
   const policyRef = { policyId: policy.policyId, version: policy.version, hash: policyHash(policy) }
   const body = { policyRef, observationCodes, kind, code, reason, trail, proposal, shadow, buckets, positions } as const
   const observationRef = { block: obs.block.number, hash: obs.block.hash }

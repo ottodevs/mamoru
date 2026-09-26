@@ -1,16 +1,16 @@
 import { isAddressEqual, parseEventLogs, type Hex, type Log, type PublicClient } from 'viem'
 import type { LocalAccount } from 'viem/accounts'
 import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
-import { decide, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
+import { amountsOf, decide, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
-import type { PolicyVersion, SessionGrant } from '@mamoru/policy'
-import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { hasManageAny, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { isSafeAndCanonical, observe, principalOwedBefore, readUserOpEvent, rpcClient, simulateFromEntryPoint, type Simulation } from '@mamoru/rpc'
 import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
 import { SessionLedger, precheck } from '@mamoru/account/precheck'
 import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useModeSignature, userOpHash, type GasSettings } from '@mamoru/account/sessions'
 import type { Execution } from '@mamoru/account/safe'
-import { approve, collect, exactInputSingle, mint, type V3Call } from '@mamoru/uniswap-v3'
+import { approve, burn, collect, decreaseLiquidity, exactInputSingle, mint, type V3Call } from '@mamoru/uniswap-v3'
 import { minOut, quoteExactInputSingle, quoteMint } from '@mamoru/uniswap-v3/quote'
 import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
 import { MemoryJournal, type DecisionRecord, type OpRecord } from './journal.ts'
@@ -53,8 +53,11 @@ export type EngineConfig = {
 export type EngineHooks = {
   /** Lets one block pass on the fork. The engine itself never calls anvil methods. */
   waitBlock: () => Promise<void>
-  /** The owner activates `manage:<tokenId>` for a position that enter-mint minted (plan §12.4). */
-  requestManageGrant: (tokenId: bigint, pool: string) => Promise<EngineSession>
+  /**
+   * The owner activates `manage:<tokenId>` for a position that enter-mint minted (plan §12.4).
+   * Not called under a policy with the live `manage-any` grant, enabled at activation.
+   */
+  requestManageGrant?: (tokenId: bigint) => Promise<EngineSession>
 }
 
 export type ReviewResult =
@@ -88,8 +91,8 @@ export class Engine {
   readonly historyFromBlock: bigint
   depositsAfter: bigint
   lastObservation?: Observation
-  /** Live: premises the bundler rejected as unincludable, held back until `until` (block timestamp, seconds). */
-  private readonly backoff: { premiseHash: string; key: string; until: bigint }[] = []
+  /** Block timestamp of the last confirmed re-range, for the policy cooldown. */
+  lastRerangeAt: bigint | null = null
   private readonly client: PublicClient
   private readonly bundler: BundlerClient
   private readonly nonceKey: bigint
@@ -168,6 +171,7 @@ export class Engine {
       if (e instanceof ReasonError) return { kind: 'observation-failed', code: e.code, detail: e.detail }
       throw e
     }
+    obs = { ...obs, lastRerangeAt: this.lastRerangeAt }
     this.lastObservation = obs
     const decision = decide(obs, this.cfg.policy)
     this.depositsAfter = obs.safeBlock.number > this.depositsAfter ? obs.safeBlock.number : this.depositsAfter
@@ -340,7 +344,17 @@ export class Engine {
       )
       if (!minted) throw new Error(`${op.opId}: confirmed mint without a position transfer to the account`)
       op.mintedTokenId = minted.args.tokenId
-      this.addSession(await this.hooks.requestManageGrant(minted.args.tokenId, proposal.pool))
+      if (!this.allowedTokenIds.includes(minted.args.tokenId)) this.allowedTokenIds.push(minted.args.tokenId)
+      if (!hasManageAny(this.cfg.policy)) {
+        if (!this.hooks.requestManageGrant) throw new Error(`${op.opId}: policy ${this.cfg.policy.policyId} needs a manage grant per position`)
+        this.addSession(await this.hooks.requestManageGrant(minted.args.tokenId))
+      }
+    }
+    if (proposal.kind === 'rerange') {
+      const inc = op.included!
+      this.lastRerangeAt = (await this.client.getBlock({ blockNumber: inc.blockNumber })).timestamp
+      const i = this.allowedTokenIds.indexOf(proposal.tokenId)
+      if (i >= 0) this.allowedTokenIds.splice(i, 1)
     }
     if (proposal.kind === 'harvest') {
       const inc = op.included!
@@ -406,6 +420,23 @@ export class Engine {
         ].map(exec),
       }
     }
+    if (p.kind === 'rerange' || p.kind === 'reduce') {
+      // decreaseLiquidity(all or part) + collect(to the Safe) [+ burn]: nothing leaves the account.
+      const [pos, [sqrtPriceX96]] = await Promise.all([
+        this.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [p.tokenId], blockNumber }),
+        this.client.readContract({ address: entry(p.pool).address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
+      ])
+      const liquidity = p.kind === 'rerange' ? pos[7] : p.liquidity < pos[7] ? p.liquidity : pos[7]
+      const deadline = timestamp + BigInt(this.cfg.policy.execution.observationTtlSeconds)
+      const calls: V3Call[] = []
+      if (liquidity > 0n) {
+        const a = amountsOf(sqrtPriceX96, pos[5], pos[6], liquidity)
+        calls.push(decreaseLiquidity({ tokenId: p.tokenId, liquidity, amount0Min: a.amount0 > 0n ? minOut(a.amount0, slippage) : 0n, amount1Min: a.amount1 > 0n ? minOut(a.amount1, slippage) : 0n, deadline }))
+      }
+      calls.push(collect({ account: acct, tokenId: p.tokenId }))
+      if (p.kind === 'rerange') calls.push(burn(p.tokenId))
+      return { calls: calls.map(exec) }
+    }
     const owedAt = await principalOwedBefore(this.client, [p.tokenId], this.historyFromBlock, { block: blockNumber + 1n, logIndex: 0 })
     const owed = owedAt.get(p.tokenId) ?? [0n, 0n]
     const calls = [collect({ account: acct, tokenId: p.tokenId })]
@@ -434,6 +465,13 @@ export class Engine {
       if (sim.nftDelta !== 1n) return `positions changed by ${sim.nftDelta}`
       if (d(pool.token0!) > 0n || -d(pool.token0!) > p.amount0Desired) return `${pool.token0} moved ${d(pool.token0!)}`
       if (d(pool.token1!) > 0n || -d(pool.token1!) > p.amount1Desired) return `${pool.token1} moved ${d(pool.token1!)}`
+      return null
+    }
+    if (p.kind === 'rerange' || p.kind === 'reduce') {
+      const want = p.kind === 'rerange' ? -1n : 0n
+      if (sim.nftDelta !== want) return `positions changed by ${sim.nftDelta}, intent ${want}`
+      const pool = entry(p.pool)
+      if (d(pool.token0!) < 0n || d(pool.token1!) < 0n) return `${pool.token0} moved ${d(pool.token0!)}, ${pool.token1} moved ${d(pool.token1!)}: a ${p.kind} only returns tokens to the account`
       return null
     }
     if (sim.nftDelta !== 0n) return `positions changed by ${sim.nftDelta}`
