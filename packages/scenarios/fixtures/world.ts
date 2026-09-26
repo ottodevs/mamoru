@@ -85,6 +85,10 @@ export type OpRecord = {
   precheck: string
   verdict: string
   failedOp?: string
+  /** Revert data of the account's validation, from FailedOpWithRevert. */
+  inner?: Hex
+  /** SmartSession.validateUserOp called directly from the account. */
+  validator?: string
 }
 
 export async function ownerExec(

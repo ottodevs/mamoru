@@ -1,9 +1,9 @@
-import { concat, encodeAbiParameters, encodeFunctionData, keccak256, parseAbi, stringToHex, type Hex } from 'viem'
+import { concat, decodeErrorResult, encodeAbiParameters, encodeFunctionData, keccak256, parseAbi, slice, stringToHex, type Hex } from 'viem'
 import { ReasonError, isReasonCode } from '@mamoru/domain'
-import { address, erc20Abi, safe7579Abi, smartSessionAbi } from '@mamoru/registry'
+import { address, erc20Abi, safe7579Abi, smartSessionAbi, smartSessionErrorsAbi } from '@mamoru/registry'
 import { activationCall, revocationCalls } from '@mamoru/account/sessions'
 import { sendSessionOp, type SessionOpOutcome } from '../fixtures/session-op.ts'
-import { WHALE, activateGrants, grantOf, ownerMint, revokeGrants, type ActiveGrant, type World } from '../fixtures/world.ts'
+import { WHALE, activateGrants, grantOf, ownerMint, revokeGrants, type ActiveGrant, type OpRecord, type World } from '../fixtures/world.ts'
 import { Lab } from '../fixtures/lab.ts'
 import { dumpState, secondFork, timeWarp } from '../perturb/index.ts'
 import type { StepResult } from '../report/index.ts'
@@ -101,7 +101,7 @@ async function runOne(ctx: ScenarioCtx, grant: ActiveGrant, batch: string, args:
   return {
     step: label,
     ok: problems.length === 0,
-    detail: problems.length ? problems.join('; ') : `${got} / ${o.verdict}${o.failedOp?.reason ? ` (${o.failedOp.reason})` : ''}`,
+    detail: problems.length ? problems.join('; ') : `${got} / ${o.verdict}${o.failedOp?.reason ? ` (${o.failedOp.reason}${o.validator ? `; SmartSession: ${o.validator}` : ''})` : ''}`,
     codes: [got, o.verdict],
   }
 }
@@ -291,6 +291,19 @@ const secondForkStep: StepHandler = async (ctx) => {
   return out
 }
 
+function chainError(r: OpRecord): string {
+  const outer = !r.inner || r.inner === '0x' ? (r.failedOp ?? 'unknown') : `${r.failedOp} ${innerName(r.inner)}`
+  return r.validator ? `${outer} ← SmartSession: ${r.validator}` : outer
+}
+
+function innerName(inner: Hex): string {
+  try {
+    return decodeErrorResult({ abi: [...smartSessionErrorsAbi, ...parseAbi(['error ExecutionFailed()'])], data: inner }).errorName
+  } catch {
+    return slice(inner, 0, 4)
+  }
+}
+
 /** SESS-25: the pre-check rejects exactly what the chain rejects, with the table's codes. */
 const precheckParity: StepHandler = async (ctx, args) => {
   const w = world(ctx)
@@ -302,9 +315,13 @@ const precheckParity: StepHandler = async (ctx, args) => {
   const mismatches = records.filter((r) => (r.verdict === 'INCLUDED') !== (r.precheck === 'ACCEPT'))
   const bad = records.filter((r) => r.precheck !== 'ACCEPT' && !isReasonCode(r.precheck))
   for (const r of records) if (r.precheck !== 'ACCEPT') ctx.codes.add(r.precheck)
-  await Bun.write(`${ctx.dir}/parity.json`, JSON.stringify({ records, excludedControls: controls }, null, 2))
+  const rejections = records.filter((r) => r.verdict === 'CHAIN_REJECTED_VALIDATION').map((r) => ({ ...r, chainError: chainError(r) }))
+  const byError: Record<string, number> = {}
+  for (const r of rejections) byError[r.chainError] = (byError[r.chainError] ?? 0) + 1
+  await Bun.write(`${ctx.dir}/parity.json`, JSON.stringify({ records, rejections, byError, excludedControls: controls }, null, 2))
   const rejected = records.filter((r) => r.verdict !== 'INCLUDED').length
   return [
+    { step: 'chain errors behind the rejections', ok: true, detail: Object.entries(byError).map(([k, v]) => `${k} ×${v}`).join('; ') },
     { step: 'every SESS-01..SESS-23 scenario ran in this run', ok: missing.length === 0, detail: missing.length ? `missing: ${missing.join(', ')}` : `${covered.size - 1} scenarios` },
     {
       step: 'pre-check and chain agree on every batch',

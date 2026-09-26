@@ -1,7 +1,7 @@
-import { concat, encodeFunctionData, parseEventLogs, type Hex, type TransactionReceipt } from 'viem'
-import type { UserOperation } from 'viem/account-abstraction'
+import { concat, decodeErrorResult, encodeFunctionData, parseEventLogs, slice, type Hex, type TransactionReceipt } from 'viem'
+import { toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import type { Address } from '@mamoru/domain'
-import { address, entryPointV07Abi, safe7579Abi } from '@mamoru/registry'
+import { address, entryPointV07Abi, nameOf, safe7579Abi, smartSessionErrorsAbi, smartSessionValidateAbi } from '@mamoru/registry'
 import {
   CALLTYPE_BATCH,
   CALLTYPE_DELEGATECALL,
@@ -42,6 +42,8 @@ export type SessionOpOutcome = {
   verdict: Verdict
   precheck: PrecheckResult
   failedOp?: { name: string; reason?: string; inner?: Hex } | null
+  /** SmartSession's own answer when the chain rejects; Safe7579 reports only ExecutionFailed(). */
+  validator?: string
   userOp: UserOperation<'0.7'>
   userOpHash: Hex
   txHash?: Hex
@@ -102,6 +104,8 @@ export async function sendSessionOp(
     precheck: outcome.precheck.ok ? 'ACCEPT' : outcome.precheck.code,
     verdict: outcome.verdict,
     failedOp: outcome.failedOp?.reason,
+    inner: outcome.failedOp?.inner,
+    validator: outcome.validator,
   })
   return outcome
 }
@@ -145,18 +149,42 @@ async function buildAndSend(
   const decoded = decodeExecute(callData)
   const execs = 'calls' in decoded ? decoded.calls : []
   let failedOp: SessionOpOutcome['failedOp'] = null
+  let validator: string | undefined
   try {
     await lab.client.call({ account: world.relayer.address, to: address('EntryPointV07'), data, gas: 15_000_000n })
   } catch (e) {
     failedOp = decodeEntryPointError(revertData(e)) ?? { name: 'unknown' }
+    validator = await smartSessionVerdict(lab, op)
   }
   const sent = await lab.send(world.relayer, address('EntryPointV07'), data)
-  const base = { precheck: pre, userOp: op, userOpHash: hash, txHash: sent.hash, receipt: sent.receipt, calls: execs, handleOpsData: data }
+  const base = { precheck: pre, validator, userOp: op, userOpHash: hash, txHash: sent.hash, receipt: sent.receipt, calls: execs, handleOpsData: data }
   if (!sent.ok) return { ...base, verdict: 'CHAIN_REJECTED_VALIDATION', failedOp }
   const ev = parseEventLogs({ abi: entryPointV07Abi, logs: sent.receipt.logs, eventName: 'UserOperationEvent' })[0]
   if (!ev) return { ...base, verdict: 'CHAIN_REJECTED_VALIDATION', failedOp }
   if (lab === world.lab) acct.ledger.recordIncluded(pid, execs)
   return { ...base, verdict: ev.args.success ? 'INCLUDED' : 'CHAIN_REVERTED_EXECUTION', failedOp, actualGasCost: ev.args.actualGasCost }
+}
+
+/** Calls SmartSession.validateUserOp from the account, as Safe7579 does, with the hash of the chain the op was sent to. */
+async function smartSessionVerdict(lab: Lab, op: UserOperation<'0.7'>): Promise<string> {
+  const data = encodeFunctionData({ abi: smartSessionValidateAbi, functionName: 'validateUserOp', args: [toPackedUserOperation(op), userOpHash(op, lab.chainId)] })
+  try {
+    const r = await lab.client.call({ account: op.sender, to: address('SmartSession'), data, gas: 10_000_000n })
+    const v = BigInt(r.data ?? '0x0')
+    if (v === 0n) return 'valid'
+    if ((v & ((1n << 160n) - 1n)) === 1n) return 'SIG_VALIDATION_FAILED'
+    return `time range (validUntil ${(v >> 160n) & ((1n << 48n) - 1n)}, validAfter ${v >> 208n})`
+  } catch (e) {
+    const d = revertData(e)
+    if (!d || d === '0x') return 'revert without data'
+    try {
+      const x = decodeErrorResult({ abi: smartSessionErrorsAbi, data: d })
+      if (x.errorName === 'PolicyViolation') return `PolicyViolation(${nameOf(x.args[1]) ?? x.args[1]})`
+      return x.errorName
+    } catch {
+      return `revert ${slice(d, 0, 4)}`
+    }
+  }
 }
 
 function revertData(e: unknown): Hex | undefined {

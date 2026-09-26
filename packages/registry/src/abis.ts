@@ -151,6 +151,45 @@ export const moduleRegistryAbi = parseAbi([
   'error InvalidTrustedAttesterInput()',
 ])
 
+export const smartSessionValidateAbi = parseAbi([
+  'struct PackedUserOperation { address sender; uint256 nonce; bytes initCode; bytes callData; bytes32 accountGasLimits; uint256 preVerificationGas; bytes32 gasFees; bytes paymasterAndData; bytes signature; }',
+  'function validateUserOp(PackedUserOperation userOp, bytes32 userOpHash) returns (uint256)',
+])
+
+/** Errors SmartSession, PolicyLib and UniActionPolicy can raise in validateUserOp (erc7579/smartsessions ISmartSession). */
+export const smartSessionErrorsAbi = parseAbi([
+  'error AssociatedArray_OutOfBounds(uint256 index)',
+  'error ChainIdMismatch(uint64 providedChainId)',
+  'error HashIndexOutOfBounds(uint256 index)',
+  'error HashMismatch(bytes32 providedHash, bytes32 computedHash)',
+  'error InvalidData()',
+  'error InvalidActionId()',
+  'error NoExecutionsInBatch()',
+  'error InvalidTarget()',
+  'error InvalidEnableSignature(address account, bytes32 hash)',
+  'error InvalidISessionValidator(address sessionValidator)',
+  'error InvalidSelfCall()',
+  'error InvalidSession(bytes32 permissionId)',
+  'error InvalidSessionKeySignature(bytes32 permissionId, address sessionValidator, address account, bytes32 userOpHash)',
+  'error InvalidPermissionId(bytes32 permissionId)',
+  'error InvalidCallTarget()',
+  'error InvalidMode()',
+  'error InvalidUserOpSender(address sender)',
+  'error NoPoliciesSet(bytes32 permissionId)',
+  'error PartlyEnabledActions()',
+  'error PartlyEnabledPolicies()',
+  'error PolicyViolation(bytes32 permissionId, address policy)',
+  'error SignerNotFound(bytes32 permissionId, address account)',
+  'error UnsupportedExecutionType()',
+  'error UnsupportedPolicy(address policy)',
+  'error UnsupportedSmartSessionMode(uint8 mode)',
+  'error ForbiddenValidationData()',
+  'error PaymasterValidationNotEnabled(bytes32 permissionId)',
+  'error PolicyCheckReverted(bytes32 permissionId)',
+  'error PolicyNotInitialized(bytes32 id, address msgSender, address userOpSender)',
+  'error ValueLimitExceeded(bytes32 id, uint256 providedValue, uint256 limit)',
+])
+
 export const safeWebAuthnSharedSignerAbi = parseAbi([
   'struct Signer { uint256 x; uint256 y; uint176 verifiers; }',
   'function configure(Signer signer)',
