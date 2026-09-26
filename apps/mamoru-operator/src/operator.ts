@@ -478,6 +478,12 @@ export class Operator {
       await this.lock(acc.accountKey).run(async () => {
         if (runner.stopped) return
         try {
+          // The provider may still serve a block before the activation that enabled the grants: wait for it.
+          const head = await this.client.getBlockNumber()
+          if (head <= BigInt(acc.historyFromBlock)) {
+            console.log(`[engine ${acc.accountKey}] rpc head ${head} not past activation block ${acc.historyFromBlock}, waiting`)
+            return
+          }
           const r = await engine.review()
           this.revokeManage(engine)
           if (r.kind === 'observation-failed') console.log(`[engine ${acc.accountKey}] observation failed ${r.code} ${r.detail ?? ''}`)

@@ -38,10 +38,17 @@ export function startLiveBundler(client: PublicClient, relayer: Relayer, chainId
     const op = fromRpcUserOp(rpcOp)
     const hash = userOpHash(op, chainId)
     const data = handleOpsData([op], relayer.address)
-    try {
-      await client.call({ account: relayer.address, to: entryPoint, data, gas: HANDLE_OPS_GAS })
-    } catch (e) {
-      throw new RpcFailure(-32500, entryPointReason(revertData(e)) ?? 'validation reverted')
+    // A load-balanced provider can answer from a node a block or two behind (e.g. before the activation that enabled the session): retry validation briefly.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await client.call({ account: relayer.address, to: entryPoint, data, gas: HANDLE_OPS_GAS })
+        break
+      } catch (e) {
+        const reason = entryPointReason(revertData(e)) ?? 'validation reverted'
+        if (attempt >= 3) throw new RpcFailure(-32500, reason)
+        console.log(`[bundler] ${hash.slice(0, 10)} validation ${reason}, retry ${attempt + 1}`)
+        await Bun.sleep(2_500)
+      }
     }
     const { receipt } = await relayer.send({ to: entryPoint, data, gas: HANDLE_OPS_GAS })
     const events = parseEventLogs({ abi: entryPointV07Abi, logs: receipt.logs, eventName: 'UserOperationEvent' })

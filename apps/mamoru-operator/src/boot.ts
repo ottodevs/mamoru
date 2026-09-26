@@ -6,6 +6,7 @@ import { POLICIES } from '@mamoru/policy'
 import { startLiveBundler } from './bundler.ts'
 import { Operator } from './operator.ts'
 import { Relayer } from './relayer.ts'
+import { startRpcProxy } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
 import { StateStore, loadOrCreateKey } from './state.ts'
 
@@ -23,6 +24,9 @@ export type BootOptions = {
 
 /** Starts the operator: relayer key, state, loopback bundler, HTTP server, and the engine loops that were active. */
 export async function bootOperator(o: BootOptions) {
+  // Every RPC call of the operator, engine and bundler goes through the loopback proxy (getLogs splitting, no keyed URL in errors).
+  const proxy = startRpcProxy(o.rpcUrl)
+  o = { ...o, rpcUrl: proxy.url }
   const client = createPublicClient({ transport: http(o.rpcUrl, { batch: true, timeout: 60_000 }) })
   const chainId = await client.getChainId()
   const live = chainId === BASE_CHAIN_ID && process.env.MAMORU_LIVE === '1'
@@ -57,6 +61,7 @@ export async function bootOperator(o: BootOptions) {
       operator.shutdown()
       server.stop(true)
       bundler.stop()
+      proxy.stop()
     },
   }
 }

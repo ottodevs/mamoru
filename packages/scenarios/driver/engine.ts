@@ -238,7 +238,14 @@ export class Engine {
       const accepted = await this.bundler.sendUserOperation(signed)
       if (accepted.toLowerCase() !== hash.toLowerCase()) throw new Error(`bundler answered hash ${accepted}, journal has ${hash}`)
     } catch (e) {
-      if (e instanceof BundlerRpcError) return void j.move(op.opId, 'pending_reconciliation', 'BUNDLER_REJECTED', {}, e.message)
+      if (e instanceof BundlerRpcError) {
+        j.move(op.opId, 'pending_reconciliation', 'BUNDLER_REJECTED', {}, e.message)
+        // Live: a userOp the bundler never accepted, with the nonce unmoved, cannot land; free the slot so the next review retries.
+        if (this.cfg.mode === 'live' && (await this.entryPointNonce(await this.client.getBlockNumber())) === nonce) {
+          j.move(op.opId, 'failed', 'RECON_UNINCLUDABLE', {}, `bundler rejected (${e.message}); nonce ${nonce} unmoved`)
+        }
+        return
+      }
       if (e instanceof ReasonError && e.code === 'BUNDLER_UNAVAILABLE') return void j.move(op.opId, 'pending_reconciliation', 'BUNDLER_UNAVAILABLE', {}, e.detail)
       throw e
     }
