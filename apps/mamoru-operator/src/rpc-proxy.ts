@@ -40,11 +40,12 @@ export function startRpcProxy(upstream: string, maxLogRange = Number(process.env
     } catch {}
     return { status: res.status, json }
   }
-  /** Primary with 3 backoff retries on rate/capacity errors, then each fallback once. Always returns a result/error object. */
+  /** On a rate/capacity refusal, move to the next provider at once; two passes over the list. Always returns a result/error object. */
   async function raw(body: any): Promise<any> {
     let last: any = null
-    for (const [pi, url] of providers.entries()) {
-      const tries = pi === 0 ? 4 : 1
+    for (const [pi, url] of [...providers, ...providers].entries()) {
+      const tries = 1
+      if (pi === providers.length) await Bun.sleep(250)
       for (let attempt = 0; attempt < tries; attempt++) {
         try {
           const r = await post(url, body)
@@ -55,7 +56,7 @@ export function startRpcProxy(upstream: string, maxLogRange = Number(process.env
         }
         if (attempt + 1 < tries) await Bun.sleep(400 * 2 ** attempt)
       }
-      if (pi === 0 && providers.length > 1) console.log(`[rpc] ${body?.method} falling back after: ${String(last?.message).slice(0, 120)}`)
+      if (pi === 0 && providers.length > 1 && process.env.MAMORU_RPC_LOG) console.log(`[rpc] ${body?.method} falling back after: ${String(last?.message).slice(0, 120)}`)
     }
     return { jsonrpc: '2.0', id: body?.id ?? null, error: { code: typeof last?.code === 'number' ? last.code : -32603, message: String(last?.message ?? 'upstream unavailable') } }
   }
