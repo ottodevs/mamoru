@@ -1,5 +1,6 @@
 import type { PoolView } from '@mamoru/domain'
 import type { D1Like, D1Statement } from './env.ts'
+import type { PreviousIndexState } from './sync/multibaas-index.ts'
 import type { AccountRow, AccountState } from './sync/accounts.ts'
 import type { Anchor } from './sync/provenance.ts'
 
@@ -31,6 +32,17 @@ export function upsertSourceState(db: D1Like, s: SourceStateRow): D1Statement {
     .bind(s.chainId, s.rpcStatus, s.block, s.safeBlock, s.observedAt, s.indexProvider, s.indexStatus, s.indexBlock, s.indexCode, s.indexCheckedAt)
 }
 
+/** RPC down: only the reader fields change; the index health stays as it was (dashboard.md §6.6). */
+export function markRpcUnavailable(db: D1Like, chainId: number, observedAt: string, indexConfigured: boolean): D1Statement {
+  return db
+    .prepare(
+      `INSERT INTO source_state (chain_id, rpc_status, observed_at, index_provider, index_status, index_code, index_checked_at)
+       VALUES (?, 'unavailable', ?, 'multibaas', ?, ?, ?)
+       ON CONFLICT(chain_id) DO UPDATE SET rpc_status = excluded.rpc_status, observed_at = excluded.observed_at`,
+    )
+    .bind(chainId, observedAt, indexConfigured ? 'failing' : 'not_configured', indexConfigured ? 'OBS_RPC_UNAVAILABLE' : null, observedAt)
+}
+
 export function upsertPoolState(db: D1Like, anchor: Anchor, source: 'chain_rpc' | 'multibaas', view: PoolView): D1Statement {
   return db
     .prepare(
@@ -56,4 +68,18 @@ export function upsertAccountState(db: D1Like, anchor: Anchor, accountKey: strin
 export async function listAccounts(db: D1Like, chainId: number): Promise<AccountRow[]> {
   const { results } = await db.prepare('SELECT account_key, address FROM accounts WHERE chain_id = ? ORDER BY account_key').bind(chainId).all<AccountRow>()
   return results
+}
+
+export async function previousPoolView(db: D1Like, chainId: number, pool: string): Promise<PoolView | null> {
+  const { results } = await db.prepare('SELECT payload_json FROM proj_pool_state WHERE chain_id = ? AND pool_address = ?').bind(chainId, pool).all<{ payload_json: string }>()
+  const row = results[0]
+  return row ? (JSON.parse(row.payload_json) as PoolView) : null
+}
+
+export async function previousIndexState(db: D1Like, chainId: number): Promise<PreviousIndexState | null> {
+  const { results } = await db
+    .prepare('SELECT index_status AS status, index_checked_at AS checkedAt, index_block AS block, index_code AS code FROM source_state WHERE chain_id = ?')
+    .bind(chainId)
+    .all<PreviousIndexState>()
+  return results[0] ?? null
 }

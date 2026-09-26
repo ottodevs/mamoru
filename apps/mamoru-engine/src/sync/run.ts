@@ -1,17 +1,19 @@
 import { ReasonError, type IndexHealth, type PoolRef, type PoolView, type ReasonCode } from '@mamoru/domain'
 import { conservadorV1, type PolicyVersion } from '@mamoru/policy'
+import type { MultiBaasClient } from '@mamoru/multibaas'
 import { baseRegistry, entry, readCodeHash, type Registry, type RegistryEntry } from '@mamoru/registry'
 import { getAddress, type Address, type PublicClient } from 'viem'
-import { listAccounts, upsertAccountState, upsertPoolState, upsertSourceState, type SourceStateRow } from '../d1.ts'
+import { listAccounts, markRpcUnavailable, previousIndexState, previousPoolView, upsertAccountState, upsertPoolState, upsertSourceState, type SourceStateRow } from '../d1.ts'
 import type { D1Like, D1Statement } from '../env.ts'
 import { poolReadAbi } from './abis.ts'
 import { readAccountState } from './accounts.ts'
 import { readHead } from './head.ts'
 import { rpcFallback } from './history.ts'
-import { readPoolEvents, type PoolEvent } from './logs.ts'
+import { readPoolEvents } from './logs.ts'
 import { rateFromSqrtPrice, UNIT_RATE, type Rate } from './math.ts'
 import { readPoolState, type PoolState } from './pool-state.ts'
-import { buildPoolView, displayedBlocks, type PoolHistory, type SourcedEvent } from './pool-view.ts'
+import { MultiBaasPoolIndex } from './multibaas-index.ts'
+import { buildPoolView, displayedBlocks, type PoolHistory } from './pool-view.ts'
 import type { Anchor } from './provenance.ts'
 
 /** Stats window: 1,800 blocks, about one hour at two seconds per block on Base. */
@@ -20,20 +22,20 @@ export const WINDOW_BLOCKS = 1800
 /** Pool used only to value WETH and ETH in USDC. It is not a pool of the plan. */
 export const VALUATION_POOLS = ['pool:WETH/USDC/3000'] as const
 
-/** Contrast of RPC rows with an event index (dashboard.md §6.5). Absent when MultiBaas is not configured. */
-export interface PoolIndex {
-  health(anchor: Anchor): Promise<Omit<IndexHealth, 'provider'>>
-  resolve(pool: RegistryEntry, from: number, to: number, rpc: PoolEvent[], anchor: Anchor, health: Omit<IndexHealth, 'provider'>): Promise<{ events: SourcedEvent[]; window: PoolHistory['window']; source: 'chain_rpc' | 'multibaas' }>
-}
 
 export type SyncDeps = {
   client: PublicClient
+  /** Client for eth_getLogs. The keyed free-tier RPC caps log ranges at 10 blocks, so logs go to the public RPC. */
+  logsClient?: PublicClient
   db: D1Like
   chainId: number
   now: () => Date
   registry?: Registry
   policy?: PolicyVersion
-  index?: PoolIndex
+  /** MultiBaas client when its URL and key are configured. */
+  multibaas?: MultiBaasClient
+  /** Start block of the index per registry pool name, when known. */
+  startBlocks?: ReadonlyMap<string, number>
   windowBlocks?: number
   log?: (line: Record<string, unknown>) => void
   /** Local runs only: adds raw error text to logs. The Worker never sets it. */
@@ -45,7 +47,7 @@ export type SyncSummary = {
   code?: ReasonCode
   block?: number
   safeBlock?: number
-  index: IndexHealth['status']
+  index?: IndexHealth['status']
   pools: { name: string; swaps: number | null; liquidity: number | null; identity: 'ok' | 'mismatch' }[]
   accounts: number
   logRequests: number
@@ -100,14 +102,17 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
     head = await readHead(client, chainId)
   } catch (err) {
     const code: ReasonCode = err instanceof ReasonError ? err.code : 'OBS_RPC_UNAVAILABLE'
-    await upsertSourceState(db, { ...sourceRow(notConfigured), rpcStatus: 'unavailable', block: null, safeBlock: null }).run()
+    await markRpcUnavailable(db, chainId, observedAt, Boolean(deps.multibaas)).run()
     log({ msg: 'sync.rpc_unavailable', code })
-    return { rpc: 'unavailable', code, index: 'not_configured', pools: [], accounts: 0, logRequests: 0 }
+    return { rpc: 'unavailable', code, pools: [], accounts: 0, logRequests: 0 }
   }
 
   const anchor: Anchor = { chainId, blockNumber: head.safe.number, blockHash: head.safe.hash, observedAt }
   const H = BigInt(anchor.blockNumber)
-  const health = deps.index ? await deps.index.health(anchor) : notConfigured
+  const index = deps.multibaas
+    ? new MultiBaasPoolIndex(deps.multibaas, { chainId, now: deps.now(), previous: await previousIndexState(db, chainId), startBlocks: deps.startBlocks })
+    : null
+  if (index) await index.begin(anchor)
 
   const planPools = [...new Set(policy.buckets.flatMap((b) => b.pools))].map((n) => planOf(n, registry))
   const valuationPools = VALUATION_POOLS.map((n) => planOf(n, registry))
@@ -140,9 +145,11 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
     let source: 'chain_rpc' | 'multibaas' = 'chain_rpc'
     if (ok) {
       try {
-        const { events, requests } = await readPoolEvents(client, p.entry.address, from, anchor.blockNumber)
+        const { events, requests } = await readPoolEvents(deps.logsClient ?? client, p.entry.address, from, anchor.blockNumber)
         logRequests += requests
-        const resolved = deps.index ? await deps.index.resolve(p.entry, from, anchor.blockNumber, events, anchor, health) : { ...rpcFallback(events, anchor), source: 'chain_rpc' as const }
+        const resolved = index
+          ? await index.resolve({ pool: p.entry, from, to: anchor.blockNumber, rpc: events, anchor, previous: await previousPoolView(db, chainId, p.entry.address) })
+          : { ...rpcFallback(events, anchor), source: 'chain_rpc' as const }
         source = resolved.source
         history = { events: resolved.events, window: resolved.window, blockTimes: await blockTimes(client, displayedBlocks(resolved.events)) }
       } catch (err) {
@@ -193,12 +200,13 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
     }
   }
 
+  const health = index ? index.health() : notConfigured
   statements.push(upsertSourceState(db, { ...sourceRow(health), rpcStatus: 'ok', block: head.latest.number, safeBlock: head.safe.number }))
   await db.batch(statements)
 
   const summary: SyncSummary = {
     rpc: 'ok', block: head.latest.number, safeBlock: head.safe.number, index: health.status, pools: summaryPools, accounts: accountsRead, logRequests,
   }
-  log({ msg: 'sync.done', block: summary.block, safeBlock: summary.safeBlock, index: summary.index, pools: summaryPools, accounts: accountsRead, accountsTotal: accounts.length, logRequests })
+  log({ msg: 'sync.done', block: summary.block, safeBlock: summary.safeBlock, index: summary.index, pools: summaryPools, accounts: accountsRead, accountsTotal: accounts.length, logRequests, mbCalls: index?.calls ?? 0, mbOnlyRows: index?.mbOnly ?? 0 })
   return summary
 }

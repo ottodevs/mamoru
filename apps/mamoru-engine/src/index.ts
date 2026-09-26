@@ -1,5 +1,5 @@
-import type { Env } from './env.ts'
-import { makeClient, rpcTransport } from './sync/client.ts'
+import { multibaasFrom, type Env } from './env.ts'
+import { makeClient, publicTransport, rpcTransport } from './sync/client.ts'
 import { syncOnce } from './sync/run.ts'
 
 type ScheduledEvent = { cron: string; scheduledTime: number }
@@ -17,7 +17,8 @@ export default {
       return
     }
     const { transport, keyed } = rpcTransport(env)
-    console.log(JSON.stringify({ msg: 'sync.start', rpc: keyed ? 'keyed' : 'public' }))
-    ctx.waitUntil(syncOnce({ client: makeClient(transport), db: env.DB, chainId: Number(env.CHAIN_ID), now: () => new Date() }))
+    const mb = multibaasFrom(env)
+    console.log(JSON.stringify({ msg: 'sync.start', rpc: keyed ? 'keyed' : 'public', multibaas: mb ? 'configured' : 'not_configured' }))
+    ctx.waitUntil(syncOnce({ client: makeClient(transport), logsClient: makeClient(publicTransport(env)), db: env.DB, chainId: Number(env.CHAIN_ID), now: () => new Date(), ...(mb ?? {}) }))
   },
 }

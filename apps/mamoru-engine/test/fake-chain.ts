@@ -125,6 +125,6 @@ export class FakeChain {
   }
 
   client(): PublicClient {
-    return makeClient(custom({ request: (a) => this.request(a) }))
+    return makeClient(custom({ request: (a) => this.request(a) }, { retryCount: 0 }))
   }
 }
