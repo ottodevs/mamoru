@@ -194,7 +194,10 @@ try {
   // --- the engine invests until it holds: a position in each pool, idle USDC below 1% ---
   const until = Date.now() + 480_000
   let m = await mix()
+  const steps = new Set<string>()
   for (;;) {
+    const pr = (await funding()).progress
+    if (pr) steps.add(`${pr.step}${pr.pool ? ` ${pr.pool}` : ''}`)
     const all = await ops()
     const enters = all.filter((o) => o.kind === 'enter')
     const failed = enters.filter((o) => o.state === 'failed')
@@ -214,6 +217,13 @@ try {
   check(Math.abs(w[0]! - 50) < 3 && Math.abs(w[1]! - 40) < 3 && Math.abs(w[2]! - 10) < 3, `weights ${w.join('/')} within 3 points of 50/40/10`)
   const f2 = await funding()
   check(new Set(f2.positions.map((p) => p.pool)).size === 3, `GET funding lists positions in ${[...new Set(f2.positions.map((p) => p.pool))].join(', ')}`)
+  const valued = f2.positions.reduce((a, p) => a + BigInt(p.valueUsdc ?? '0'), 0n)
+  const invested = m.total - m.idle
+  check(
+    f2.positions.every((p) => p.amounts?.length === 2 && p.valueUsdc !== undefined) && valued * 100n >= invested * 90n && valued * 100n <= invested * 101n,
+    `GET funding values every position with both legs: ${f2.positions.map((p) => `${p.amounts!.map((a) => `${a.amount} ${a.token}`).join(' + ')} = ${p.valueUsdc}`).join('; ')} (sum ${valued}, invested ${invested})`,
+  )
+  check(f2.progress === null, `GET funding progress is null when idle; seen while allocating: ${[...steps].join(', ') || 'none'}`)
 
   // --- withdraw more than the idle USDC: only the stables bucket is reduced ---
   const sinkBefore = await lab.balanceOf('USDC', SINK)
