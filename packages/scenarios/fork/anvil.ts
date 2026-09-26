@@ -10,7 +10,6 @@ export type AnvilOptions = {
   forkBlock: number | undefined
   chainId: number
   slotsInAnEpoch: number
-  loadStatePath?: string
   logPath: string
 }
 
@@ -79,7 +78,6 @@ export function anvilArgv(opts: AnvilOptions, port: number): string[] {
     String(opts.slotsInAnEpoch),
     '--no-request-size-limit',
   ]
-  if (opts.loadStatePath) argv.push('--load-state', opts.loadStatePath)
   assertNoKeyInArgv(argv)
   return argv
 }

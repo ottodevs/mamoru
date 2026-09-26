@@ -10,7 +10,6 @@ export type LabForkOptions = {
   logPath: string
   chainId?: number
   forkBlock?: number | undefined | null
-  loadStatePath?: string
   /** LAB-01: answer eth_chainId with this value through a port in front of anvil. */
   rewriteChainId?: number
 }
@@ -29,7 +28,6 @@ export async function startLabFork(opts: LabForkOptions): Promise<{ handle: Anvi
     forkBlock: opts.forkBlock === null ? undefined : (opts.forkBlock ?? m.fork.block),
     chainId,
     slotsInAnEpoch: m.anvil.slotsInAnEpoch,
-    loadStatePath: opts.loadStatePath,
     logPath: opts.logPath,
   })
   const rewrite = opts.rewriteChainId !== undefined ? chainIdRewrite(handle.url, opts.rewriteChainId) : undefined
