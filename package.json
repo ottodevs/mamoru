@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "typecheck": "tsc -p tsconfig.base.json --noEmit",
-    "test": "bun test packages",
+    "test": "bun test packages apps",
     "scenarios": "bun packages/scenarios/runner/cli.ts"
   },
   "devDependencies": {
