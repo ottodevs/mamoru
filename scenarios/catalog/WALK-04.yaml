@@ -1,0 +1,18 @@
+id: WALK-04
+requirements: [FR-ONB-005, FR-ONB-006, FR-ACC-009]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: basic
+fixtures: [fx-owners, fx-safe:counterfactual, fx-usdc]
+steps:
+  # No Mamoru service runs. The owner has the recovery kit and a development account.
+  - services-off: {}
+  - counterfactual-walkaway: { usdc: 1000000000, saltNonce: 4 }
+  - services-off: {}
+expect:
+  codes: [ONB_ADDRESS_MATCH]
+invariants: [INV-CODES, INV-FORK-CHAIN]

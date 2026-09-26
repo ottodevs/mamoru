@@ -17,8 +17,9 @@ import { LAB_STEPS } from './lab-steps.ts'
 import { loadManifest, REPO_ROOT } from './manifest.ts'
 import { SESSION_STEPS } from './session-steps.ts'
 import { SnapshotBook } from './snapshots.ts'
+import { WALK_STEPS } from './walk-steps.ts'
 
-const STEPS: Record<string, StepHandler> = { ...SESSION_STEPS, ...LAB_STEPS }
+const STEPS: Record<string, StepHandler> = { ...SESSION_STEPS, ...LAB_STEPS, ...WALK_STEPS }
 const WORLD_ORDER = ['none', 'sess', 'basic'] as const
 
 function newRunId(): string {
