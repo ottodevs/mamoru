@@ -1,0 +1,70 @@
+{
+  "catalog": "catalog-v1",
+  "source": {
+    "chain": "base",
+    "chainId": 8453
+  },
+  "fork": {
+    "block": 51811000,
+    "blockHash": "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff",
+    "timestamp": 1790411347,
+    "chainId": 31337,
+    "secondChainId": 31338
+  },
+  "anvil": {
+    "version": "1.7.1",
+    "commit": "4072e48705af9d93e3c0f6e29e93b5e9a40caed8",
+    "slotsInAnEpoch": 2
+  },
+  "alto": {
+    "package": "@pimlico/alto",
+    "version": "0.0.21",
+    "installed": false,
+    "note": "Pinned published release. T001 does not start Alto; the SESS attack batches go to EntryPoint.handleOps from an anvil development account."
+  },
+  "workers": {
+    "compatibilityDate": "2026-09-26",
+    "note": "From this date nodejs_compat and nodejs_compat_v2 are on by default. Plan section 19.3 only allows nodejs_compat when a pinned dependency needs it, so the Worker configs of T004 and T015 add no_nodejs_compat and no_nodejs_compat_v2 unless one does."
+  },
+  "pins": {
+    "bun": "1.3.13",
+    "typescript": "7.0.2",
+    "@types/bun": "1.3.13",
+    "viem": "2.56.9",
+    "vite": "8.1.4",
+    "react": "19.2.7",
+    "@tanstack/react-query": "5.101.2"
+  },
+  "registry": {
+    "path": "packages/registry/base.json",
+    "codeHashes": {
+      "USDC": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+      "cbBTC": "0x91149353e08445ba77a52bf7e4cef919054027f4ad42812b4314bbaf2abd8b71",
+      "WETH": "0x8a3a1f6a9f9dce633117adee5b458245835a8645a8c8726a26382a4622508b1c",
+      "UniswapV3Factory": "0x95707a4ac71f20181a63ef7d180e3c625be5d20fc8f6f980befa966bad568132",
+      "NonfungiblePositionManager": "0x9177a11768996e8f951e0f0013d7165134178b15b21fb9916108f995e6c564bf",
+      "SwapRouter02": "0x38bd640f47df62b2fd5a6755a63f4976ad847dc9b946ae0d145d21d16bb124e4",
+      "QuoterV2": "0xceb5b8bc35e09fc64b1c48c6b920e0d2e37d5710e4f3ef214e1a81f75acee51e",
+      "pool:USDC/cbBTC/500": "0xee6005c7a98b2bd04deb07f8283a90f61e225b3f005d3014e07f30ba5d14cd78",
+      "pool:WETH/USDC/3000": "0x71ff5f428af7891e7cbce51d4dadacef1e8eb0c1e454342413066bbd8a0d344c",
+      "EntryPointV07": "0x8db5ff695839d655407cc8490bb7a5d82337a86a6b39c3f0258aa6c3b582fc58",
+      "SafeL2_141": "0xb1f926978a0f44a2c0ec8fe822418ae969bd8c3f18d61e5103100339894f81ff",
+      "SafeProxyFactory_141": "0x50c3cdc4074750a7a974204a716c999edd37482f907608d960b2b025ee0b3317",
+      "Safe7579": "0xe03f1efc4aa74c91a87731397278a9c32d81f593263931fc94ff867aa09b83ac",
+      "Safe7579Launchpad": "0xe15c7413325ecf9e9fe60a315a0c9b49ad3003f3e6c254b9fa841dff8a8a32a5",
+      "ModuleRegistry": "0xcdd1062006d34ec7e57d22b8b1bc6690bb0de49d3a348809c88c66e0bf0c0356",
+      "RhinestoneAttester": "0xd7d408ebcd99b2b70be43e20253d6d92a8ea8fab29bd3be7f55b10032331fb4c",
+      "SmartSession": "0xf2817b8943b9fc813ad3602de2f0b973dc6b7e190f1b77dc9eb02b8d3022ab0c",
+      "OwnableValidator": "0xd9ad90a204447aec1a1528d764e1d80212c8011dc0125b3995875e58ec9a43bf",
+      "TimeFramePolicy": "0xfe83529b2df328020b49b8e728f62e571e21a38b3b7e59e75d6c6629a38cd87c",
+      "UsageLimitPolicy": "0x1996dc03fa5ad5714c3a9a693239dfae75733efe7c27c1398e0c5df6f320aae9",
+      "UniActionPolicy": "0xc58f13d259c69d0db90f611347535e2d5642f3352740b7d58fbf6e6b939670dd",
+      "ValueLimitPolicy": "0xc5efddfaf9a5fad8cb996f1fd03056926af11ebd4496a7a7758e2e4315a7865e",
+      "SafeWebAuthnSharedSigner": "0xeaa32d0280053e2feea48a7c3fa15a535cd07c23ff60c9469cfa1999533e9332",
+      "SafeWebAuthnSignerFactory": "0xbe9db61b4ee533cb4b1136ef244141db4ca3b7867b44d154db9faeb22f39d7bb",
+      "P256Verifier": "0x3cd725b6ba67b40b7979190c41a015e82cf21e098eb61832ba623f8538bab7fc",
+      "MultiSendCallOnly_141": "0xecd5bd14a08c5d2122379900b2f272bdf107a7e92423c10dd5fe3254386c9939",
+      "Multicall3": "0xd5c15df687b16f2ff992fc8d767b4216323184a2bbc6ee2f9c398c318e770891"
+    }
+  }
+}
