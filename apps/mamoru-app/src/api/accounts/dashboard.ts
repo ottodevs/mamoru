@@ -16,6 +16,7 @@ import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import type { Db } from '../env.ts'
 import { aged, everythingObserved, notObserved } from '../provenance.ts'
 import { ownersOf, type AccountRow } from './store.ts'
+import { passkeySigner } from '../onboarding/account.ts'
 
 export type AccountStateRow = {
   account_key: string
@@ -76,7 +77,7 @@ export function buildDashboard(input: DashboardInput, now: Date): DashboardPaylo
   const chainId = account.chain_id
   const miss = <T>(src: Provenance['source'], unit?: string) => notObserved<T>(src, chainId, now, unit)
 
-  const rebuilt = counterfactualAddress(accountSetup(ownersOf(account), BigInt(account.salt_nonce)))
+  const rebuilt = counterfactualAddress(accountSetup(ownersOf(account), BigInt(account.salt_nonce), passkeySigner(account.passkey_x, account.passkey_y)))
   const addressMatches = rebuilt.toLowerCase() === account.address.toLowerCase()
   const address: Figure<Hex0x> = {
     value: account.address,

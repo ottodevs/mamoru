@@ -5,7 +5,7 @@ import { recoveryKit } from '@mamoru/account/recovery'
 import type { AppEnv } from '../context.ts'
 import { accountNotFound, apiError } from '../errors.ts'
 import { acknowledgeRecovery, accountOfUser, insertAccount, ownedAccount, ownersOf, type AccountRow } from '../accounts/store.ts'
-import { ACCOUNT_KEY, counterfactualAccount } from './account.ts'
+import { ACCOUNT_KEY, counterfactualAccount, passkeySigner } from './account.ts'
 import { parsePasskey } from './passkey.ts'
 
 async function jsonBody(c: Context): Promise<Record<string, unknown> | null> {
@@ -38,7 +38,7 @@ onboarding.post('/owner', async (c) => {
   }
 
   const accountKey = crypto.randomUUID()
-  const account = counterfactualAccount(accountKey)
+  const account = counterfactualAccount(accountKey, passkey)
   const row: AccountRow = {
     account_key: accountKey,
     user_id: session.userId,
@@ -70,7 +70,7 @@ onboarding.post('/recovery-ack', async (c) => {
   return c.json({ ok: true as const })
 })
 
-// FR-ONB-006: public data only, rebuilt from the stored owners and saltNonce and checked against the stored address.
+// FR-ONB-006: public data only, rebuilt from the stored owners, saltNonce and passkey, and checked against the stored address.
 onboarding.get('/kit', async (c) => {
   const session = await c.var.auth.current(c)
   if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
@@ -78,7 +78,7 @@ onboarding.get('/kit', async (c) => {
   if (!accountKey || !ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
   const row = await ownedAccount(c.env.DB, session.userId, accountKey)
   if (!row) return accountNotFound(c)
-  const kit = recoveryKit({ chainId: row.chain_id, owners: ownersOf(row), saltNonce: BigInt(row.salt_nonce), permissionIds: [], tokenIds: [] })
+  const kit = recoveryKit({ chainId: row.chain_id, owners: ownersOf(row), saltNonce: BigInt(row.salt_nonce), webauthn: passkeySigner(row.passkey_x, row.passkey_y), permissionIds: [], tokenIds: [] })
   if (kit.address.toLowerCase() !== row.address.toLowerCase()) return apiError(c, 500, 'The recovery kit does not match the stored account address.')
   c.header('content-disposition', `attachment; filename="mamoru-recovery-kit-${row.address}.json"`)
   c.header('cache-control', 'no-store')

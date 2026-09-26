@@ -4,7 +4,7 @@ import type { AppConfig, OwnerResponse, SessionView } from '@mamoru/domain'
 import { PRODUCTION_BANNER } from '@mamoru/domain'
 import { address } from '@mamoru/registry'
 import { accountSetup, counterfactualAddress, type RecoveryKit } from '@mamoru/account/recovery'
-import { saltNonceOf } from '../../src/api/onboarding/account.ts'
+import { counterfactualAccount, passkeySigner, saltNonceOf } from '../../src/api/onboarding/account.ts'
 import { isP256Point } from '../../src/api/onboarding/passkey.ts'
 import { harness, PASSKEY_A, PASSKEY_B, sessionCookie } from './helpers.ts'
 
@@ -81,13 +81,13 @@ describe('session', () => {
 })
 
 describe('owner', () => {
-  test('the passkey owns a counterfactual Safe on Base through the shared signer; nothing deployed', async () => {
+  test('the passkey owns a counterfactual Safe on Base through the shared signer, bound in setup; nothing deployed', async () => {
     const h = harness()
     const { owner } = await onboard(h)
     expect(owner.chainId).toBe(8453)
     expect(owner.deployed).toBe(false)
     expect(owner.owners).toEqual([address('SafeWebAuthnSharedSigner')])
-    const expected = counterfactualAddress(accountSetup(owner.owners, saltNonceOf(owner.accountKey)))
+    const expected = counterfactualAddress(accountSetup(owner.owners, saltNonceOf(owner.accountKey), passkeySigner(PASSKEY_A.x, PASSKEY_A.y)))
     expect(owner.address).toBe(expected)
     expect(getAddress(owner.address)).toBe(owner.address)
 
@@ -100,6 +100,11 @@ describe('owner', () => {
     const k = crypto.randomUUID()
     expect(saltNonceOf(k)).toBe(saltNonceOf(k))
     expect(saltNonceOf(k)).not.toBe(saltNonceOf(crypto.randomUUID()))
+  })
+
+  test('the address commits to the passkey: same key, other passkey, other address', () => {
+    const k = crypto.randomUUID()
+    expect(counterfactualAccount(k, PASSKEY_A).address).not.toBe(counterfactualAccount(k, PASSKEY_B).address)
   })
 
   test('repeating the call with the same passkey returns the same account', async () => {
@@ -164,6 +169,8 @@ describe('recovery kit', () => {
     expect(kit.address).toBe(owner.address)
     expect(kit.chainId).toBe(8453)
     expect(kit.owners).toEqual(owner.owners)
+    expect(kit.webauthn).toMatchObject({ x: BigInt(PASSKEY_A.x).toString(), y: BigInt(PASSKEY_A.y).toString() })
+    expect(kit.setup.to).toBe(address('MultiSend_141'))
     expect(JSON.stringify(kit)).not.toContain(PASSKEY_A.credentialId)
 
     expect((await h.post('/api/onboarding/recovery-ack', { accountKey: owner.accountKey }, { cookie })).status).toBe(200)
