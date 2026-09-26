@@ -16,8 +16,8 @@ export function HexValue({ hex, kind, full = false }: { hex: string; kind: 'addr
     setTimeout(() => setCopied(false), 1500)
   }
   return (
-    <span className="inline-flex flex-wrap items-baseline gap-x-3 gap-y-1">
-      <code className="font-mono text-[0.85rem] break-all" title={hex}>
+    <span className="inline-flex min-w-0 max-w-full flex-wrap items-baseline gap-x-3 gap-y-1">
+      <code className="min-w-0 max-w-full font-mono text-[0.85rem] break-all" title={hex}>
         {full ? hex : shortHex(hex)}
       </code>
       <button type="button" className="font-mono text-[0.7rem] uppercase tracking-wider text-stone hover:text-ink" onClick={copy}>

@@ -77,7 +77,7 @@ export function CurrentActionPanel({ data }: { data: DashboardPayload }) {
           <FigureValue figure={ca.session} format={(v) => sessionText(v, validUntil)} />
         </Row>
         <Row label="Pause">
-          <FigureValue figure={ca.paused} format={(v) => (v ? copy.paused : 'Running')} />
+          <FigureValue figure={ca.paused} format={(v) => (v ? copy.paused : copy.notPaused)} />
         </Row>
         {ca.exit ? (
           <Row label="Exit">
@@ -101,21 +101,21 @@ export function CurrentActionPanel({ data }: { data: DashboardPayload }) {
         <IntentButton label="Exit" fundsGate={fundsGate} />
       </div>
 
-      <SubTitle>{copy.recentDecisions}</SubTitle>
-      {ca.recentDecisions.length === 0 ? (
-        <Empty>{copy.noDecision}</Empty>
-      ) : (
-        <ul className="m-0 grid list-none gap-1 p-0">
-          {ca.recentDecisions.map((d) => (
-            <li key={d.decisionId} className="grid gap-2 border-t border-wash pt-1 text-[0.9rem] sm:grid-cols-[12rem_8rem_minmax(0,1fr)_auto]">
-              <time className="text-stone">{formatUtcDateTime(d.at)}</time>
-              <span>{d.kind}</span>
-              <Code code={d.code} />
-              <span className="text-stone">block {d.block}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      {ca.recentDecisions.length > 0 ? (
+        <>
+          <SubTitle>{copy.recentDecisions}</SubTitle>
+          <ul className="m-0 grid list-none gap-1 p-0">
+            {ca.recentDecisions.map((d) => (
+              <li key={d.decisionId} className="grid gap-2 border-t border-wash pt-1 text-[0.9rem] sm:grid-cols-[12rem_8rem_minmax(0,1fr)_auto]">
+                <time className="text-stone">{formatUtcDateTime(d.at)}</time>
+                <span>{d.kind}</span>
+                <Code code={d.code} />
+                <span className="text-stone">block {d.block}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
 
       <SubTitle>{copy.chainOps}</SubTitle>
       {ca.chainOps.length === 0 ? (

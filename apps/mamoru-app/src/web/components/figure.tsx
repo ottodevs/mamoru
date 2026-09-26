@@ -8,7 +8,7 @@ import { useScope } from './scope.tsx'
 export function ProvenanceChip({ provenance }: { provenance: Provenance }) {
   const chip = chipFor(provenance, useScope())
   return (
-    <span className="inline-flex flex-wrap items-center gap-1">
+    <span className="inline-flex min-w-0 max-w-full flex-wrap items-center gap-1">
       <span className="chip" data-testid="chip">
         {chip.label}
       </span>
@@ -36,7 +36,7 @@ function defaultFormat(value: unknown, unit: string | undefined): ReactNode {
 export function FigureValue<T>({ figure, format, className }: FigureProps<T>) {
   const shown = figure.value === null ? null : (format ?? defaultFormat)(figure.value, figure.unit)
   return (
-    <span className={`inline-flex flex-wrap items-baseline gap-x-2 gap-y-1 ${className ?? ''}`}>
+    <span className={`inline-flex min-w-0 max-w-full flex-wrap items-baseline gap-x-2 gap-y-1 ${className ?? ''}`}>
       {shown === null ? (
         <span className="text-stone" data-testid="not-observed">
           {NOT_OBSERVED}

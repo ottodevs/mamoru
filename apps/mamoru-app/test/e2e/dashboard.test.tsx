@@ -4,6 +4,7 @@ import { emptyAccount } from '../../src/web/fixtures/empty-account.ts'
 import { poolsResponse } from '../../src/web/fixtures/pools.ts'
 import { DashboardView } from '../../src/web/panels/dashboard-view.tsx'
 import type { PlanPools } from '../../src/web/panels/pools.tsx'
+import { populatedAccount } from './populated.ts'
 import { count, render } from './render.ts'
 
 const ready: PlanPools = { status: 'ready', pools: poolsResponse.pools }
@@ -30,7 +31,6 @@ describe('empty production account (dashboard.md §7 "Vacío")', () => {
   test('each view shows its empty state copy', () => {
     for (const copy of [
       'Nothing needs your decision.',
-      'Mamoru has not reviewed your account yet. The first review runs within five minutes.',
       'No operations on Base yet. In simulation mode Mamoru sends nothing.',
       'No session. Deposits are closed.',
       'Nothing in your treasury yet. Deposits are closed.',
@@ -41,6 +41,10 @@ describe('empty production account (dashboard.md §7 "Vacío")', () => {
     ]) {
       expect(text).toContain(copy)
     }
+  })
+
+  test('no decision yet is said once', () => {
+    expect(count(text, 'Mamoru has not reviewed your account yet. The first review runs within five minutes.')).toBe(1)
   })
 
   test('zeros read at a block carry their chip; a null figure says Not observed', () => {
@@ -75,6 +79,43 @@ describe('empty production account (dashboard.md §7 "Vacío")', () => {
     expect(text).toContain('1,284')
     expect(text).toContain('Leave without Mamoru')
     expect(text).toContain('Download recovery kit')
+  })
+})
+
+describe('account with a position, a decision and history', () => {
+  const { html, text } = view(populatedAccount())
+
+  test('current action shows the dry-run stop, the gate trail and the notes', () => {
+    expect(text).toContain('Simulated, not sent DRY_RUN_STOP')
+    expect(text).toContain('Execution Health Gate GO EHG_OK')
+    expect(text).toContain('Shadow, not used to decide')
+    expect(text).toContain('Waiting to send. BUNDLER_UNAVAILABLE')
+    expect(text).toContain('Recent decisions')
+    expect(count(text, 'Mamoru has not reviewed your account yet')).toBe(0)
+  })
+
+  test('rows carry reconciled, fallback and mismatch chips', () => {
+    expect(text).toContain('Base RPC logs · block 52114380 · MultiBaas query failed')
+    expect(text).toContain('Base · block 52114380 · MultiBaas disagreed')
+    expect(text).toContain('MultiBaas · Base · checked at block 52114380')
+    expect(text).toContain('Not from Mamoru')
+  })
+
+  test('position analytics paint the payload', () => {
+    expect(text).toContain('#1234 · USDC/cbBTC 0.05% Managed by Mamoru OBS_POSITION_OUT_OF_RANGE')
+    expect(text).toContain('Out of range for more than 7 days')
+    expect(text).toContain('62.5%')
+    expect(text).toContain('History incomplete PROJ_INDEXER_MISMATCH')
+    expect(text).toContain('500 USDC')
+    expect(text).toContain('0.00764 cbBTC')
+  })
+
+  test('savings log row shows kind, amount and code; no empty copy', () => {
+    expect(count(html, 'data-testid="savings-row"')).toBe(1)
+    expect(text).toContain('Harvest 2.38 USDC')
+    expect(text).toContain('PROJ_RECONCILED')
+    expect(text).not.toContain('No harvests yet. In simulation mode Mamoru collects nothing.')
+    expect(text).not.toContain('No savings yet. Deposits are closed.')
   })
 })
 

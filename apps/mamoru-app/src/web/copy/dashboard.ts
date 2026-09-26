@@ -80,6 +80,7 @@ export const currentAction = {
   recentDecisions: 'Recent decisions',
   chainOps: 'Operations on Base',
   paused: 'Paused',
+  notPaused: 'Not paused',
   exitInProgress: 'Exit in progress',
   exitPending: 'Exit pending: ',
   exitCompleted: 'Exit completed',
