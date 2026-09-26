@@ -1,8 +1,10 @@
 import { randomBytes } from 'node:crypto'
-import { getAddress, isAddress, keccak256, stringToHex, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { decodeErrorResult, decodeFunctionResult, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { AccountContext, Address, FundingView, OpView, OwnerSignature, OwnerTxToSign, TransferPlan, TransferRequest } from '@mamoru/domain'
-import { address, erc20Abi } from '@mamoru/registry'
+import { address, erc20Abi, nonfungiblePositionManagerAbi } from '@mamoru/registry'
+import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
+import { simulateCalls, type SimCallResult } from '@mamoru/rpc'
 import { computeCaps, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
@@ -265,12 +267,13 @@ export class Operator {
     let reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[] = []
     let swap: LiveSwap | undefined
     if (r.usdc < amount) {
-      const plan = await this.reducePlan(r, amount, slip)
+      const plan = await this.reducePlan(live.safe, r, amount, slip)
       reduce = plan.reduce
       swap = plan.swap
     }
     const deadline = (await this.client.getBlock()).timestamp + 1800n
     const calls = transferBatch({ account: live.safe, to, amountUsdc: amount, reduce: reduce.map((x) => x.lp), swapCbbtc: swap, deadline })
+    await this.simulateFromSafe(live.safe, calls, r.block)
     const summary = [
       ...reduce.map((x) => `Withdraw ${(x.bps / 100).toFixed(2)}% of position #${x.pos.tokenId} (USDC/cbBTC 0.05%)`),
       ...(swap ? [`Swap ${swap.amountIn} cbBTC units to at least ${fmtUsdc(swap.amountOutMinimum)} USDC`] : []),
@@ -280,8 +283,8 @@ export class Operator {
     return { reduce: reduce.map((x) => ({ tokenId: x.pos.tokenId.toString(), liquidityBps: x.bps })), ownerTx }
   }
 
-  /** Proportional decrease of the pool positions plus a cbBTC->USDC swap, enough to cover `amount` with the policy slippage. */
-  private async reducePlan(r: SafeRead, amount: bigint, slip: number): Promise<{ reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[]; swap?: LiveSwap }> {
+  /** Proportional decrease of the pool positions plus a cbBTC->USDC swap, sized from a simulated decrease+collect at the prepare block. */
+  private async reducePlan(safe: Address, r: SafeRead, amount: bigint, slip: number): Promise<{ reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[]; swap?: LiveSwap }> {
     const open = r.positions.filter((p) => p.liquidity > 0n)
     const value = open.reduce((s, p) => s + p.amount0 + cbbtcInUsdc(p.amount1, r.sqrtPriceX96), 0n)
     const need = amount - r.usdc
@@ -295,13 +298,52 @@ export class Operator {
         const a = amountsForLiquidity(r.sqrtPriceX96, pos.tickLower, pos.tickUpper, liquidity)
         return { pos, bps, lp: { tokenId: pos.tokenId, liquidity, amount0Min: (a.amount0 * keep) / 10_000n, amount1Min: (a.amount1 * keep) / 10_000n } }
       })
-      const usdcMin = reduce.reduce((s, x) => s + x.lp.amount0Min, 0n)
-      const cbbtcIn = r.cbbtc + reduce.reduce((s, x) => s + x.lp.amount1Min, 0n)
-      const swap = await this.swapQuote(cbbtcIn, r.block, slip)
-      if (r.usdc + usdcMin + (swap?.amountOutMinimum ?? 0n) >= amount) return { reduce, swap }
-      if (bps >= 10_000) throw new HttpError(409, 'INSUFFICIENT_FUNDS', `the Safe cannot free ${amount} USDC base units`)
+      const got = await this.simulateCollect(safe, reduce.map((x) => x.lp), r.block)
+      const swap = await this.swapQuote(r.cbbtc + got.amount1 - 1n, r.block, slip)
+      if (r.usdc + got.amount0 + (swap?.amountOutMinimum ?? 0n) >= amount) return { reduce, swap }
+      if (bps >= 10_000) throw new HttpError(409, 'INSUFFICIENT_FUNDS', `the Safe can free about ${fmtUsdc(r.usdc + got.amount0 + (swap?.amountOutMinimum ?? 0n))} USDC, less than ${fmtUsdc(amount)}`)
       bps = Math.ceil(bps * 1.2)
     }
+  }
+
+  /** What decreaseLiquidity + collect of these positions returns to the Safe, simulated from the Safe at `block`. */
+  private async simulateCollect(safe: Address, lps: LivePosition[], block: bigint): Promise<{ amount0: bigint; amount1: bigint }> {
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600)
+    const calls = lps.flatMap((p) => [
+      ...(p.liquidity > 0n ? [decreaseLiquidity({ tokenId: p.tokenId, liquidity: p.liquidity, amount0Min: p.amount0Min, amount1Min: p.amount1Min, deadline })] : []),
+      collect({ account: safe, tokenId: p.tokenId }),
+    ])
+    const res = await this.simulateFromSafe(safe, calls, block)
+    let amount0 = 0n
+    let amount1 = 0n
+    res.forEach((x, i) => {
+      if (calls[i]!.data.startsWith(COLLECT_SELECTOR)) {
+        const [a0, a1] = decodeFunctionResult({ abi: nonfungiblePositionManagerAbi, functionName: 'collect', data: x.returnData })
+        amount0 += a0
+        amount1 += a1
+      }
+    })
+    return { amount0, amount1 }
+  }
+
+  /**
+   * Every call of the owner batch, in order, from the Safe (what MultiSendCallOnly does under delegatecall), with
+   * eth_simulateV1 at `block`. Refuses before the owner is asked to sign if any call reverts.
+   */
+  private async simulateFromSafe(safe: Address, calls: { to: Address; data: Hex }[], block: bigint): Promise<SimCallResult[]> {
+    let res: SimCallResult[]
+    try {
+      res = await simulateCalls(this.client, calls.map((c) => ({ from: safe, to: c.to, data: c.data })), block)
+    } catch (e) {
+      throw new HttpError(503, 'SIMULATION_UNAVAILABLE', (e as Error).message.split('\n')[0] ?? 'simulation unavailable')
+    }
+    const bad = res.findIndex((x) => x.status !== 'success')
+    if (bad >= 0) {
+      const reason = res[bad]!.error ?? res[bad]!.returnData
+      console.log(`[owner] simulation: call ${bad} to ${calls[bad]!.to} (${calls[bad]!.data.slice(0, 10)}) reverts: ${reason}`)
+      throw new HttpError(409, 'SIMULATION_FAILED', `call ${bad + 1} of ${calls.length} (${calls[bad]!.data.slice(0, 10)} on ${calls[bad]!.to}) would revert: ${reason}`)
+    }
+    return res
   }
 
   private async swapQuote(amountIn: bigint, blockNumber: bigint, slip: number): Promise<LiveSwap | undefined> {
@@ -318,12 +360,13 @@ export class Operator {
     const slip = this.cfg.policy.execution.slippageBps
     const keep = BigInt(10_000 - slip)
     const positions: LivePosition[] = r.positions.map((p) => ({ tokenId: p.tokenId, liquidity: p.liquidity, amount0Min: (p.amount0 * keep) / 10_000n, amount1Min: (p.amount1 * keep) / 10_000n }))
-    const cbbtcIn = r.cbbtc + positions.reduce((s, p) => s + p.amount1Min, 0n)
-    const swap = await this.swapQuote(cbbtcIn, r.block, slip)
+    const got = positions.length ? await this.simulateCollect(live.safe, positions, r.block) : { amount0: 0n, amount1: 0n }
+    const swap = await this.swapQuote(r.cbbtc + got.amount1 - (got.amount1 > 0n ? 1n : 0n), r.block, slip)
     const revokes = acc.grants.map((g) => g.permissionId)
     if (!revokes.length && !positions.length && !swap) throw new HttpError(409, 'NOTHING_TO_STOP', 'no grant, no position and no cbBTC')
     const deadline = (await this.client.getBlock()).timestamp + 1800n
     const calls = stopBatch({ account: live.safe, permissionIds: revokes, positions, swapCbbtc: swap, deadline })
+    await this.simulateFromSafe(live.safe, calls, r.block)
     const summary = [
       ...(revokes.length ? [`Revoke the engine's ${revokes.length} session grant(s)`] : []),
       ...positions.map((p) => `Close and burn position #${p.tokenId} (USDC/cbBTC 0.05%)`),
@@ -466,11 +509,20 @@ export class Operator {
     const { nonce } = await readSafeNonce(this.client, safe)
     if (nonce !== p.tx.nonce) return this.patchOp(acc, op.opId, { state: 'failed', code: 'SAFE_NONCE_MOVED' })
     const data = execData(p.tx, signature)
-    try {
-      await this.client.call({ account: this.relayer.address, to: safe, data })
-    } catch (e) {
-      console.error(`[owner] ${op.opId} simulation reverts: ${revertData(e) ?? (e as Error).message.split('\n')[0]}`)
-      return this.patchOp(acc, op.opId, { state: 'failed', code: 'OWNER_TX_REVERTS' })
+    // A load-balanced provider can answer from a lagging node: retry the static check before failing the op.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.client.call({ account: this.relayer.address, to: safe, data })
+        break
+      } catch (e) {
+        const why = revertReason(e)
+        if (attempt >= 2) {
+          console.error(`[owner] ${op.opId} simulation reverts: ${why}`)
+          return this.patchOp(acc, op.opId, { state: 'failed', code: 'OWNER_TX_REVERTS' })
+        }
+        console.log(`[owner] ${op.opId} simulation reverts (${why}), retry ${attempt + 1}`)
+        await Bun.sleep(3_000)
+      }
     }
     const sent = this.relayer.send({ to: safe, data })
     const { hash, receipt } = await sent
@@ -624,6 +676,18 @@ export class Operator {
     }
     if (changed) this.store.save()
   }
+}
+
+const COLLECT_SELECTOR = toFunctionSelector('collect((uint256,address,uint128,uint128))')
+
+function revertReason(e: unknown): string {
+  const data = revertData(e)
+  if (data && data.startsWith('0x08c379a0')) {
+    try {
+      return String(decodeErrorResult({ abi: [{ type: 'error', name: 'Error', inputs: [{ type: 'string' }] }], data }).args[0])
+    } catch {}
+  }
+  return data ?? (e as Error).message.split('\n')[0] ?? 'reverted'
 }
 
 function fmtUsdc(v: bigint): string {

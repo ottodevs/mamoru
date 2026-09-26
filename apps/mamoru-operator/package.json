@@ -17,6 +17,7 @@
     "@mamoru/journal": "workspace:*",
     "@mamoru/policy": "workspace:*",
     "@mamoru/registry": "workspace:*",
+    "@mamoru/rpc": "workspace:*",
     "@mamoru/scenarios": "workspace:*",
     "@mamoru/uniswap-v3": "workspace:*",
     "viem": "2.56.9"

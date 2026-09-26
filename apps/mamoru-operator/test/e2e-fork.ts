@@ -89,6 +89,8 @@ try {
 
   // --- operator, live on "8453" ------------------------------------------------
   process.env.MAMORU_LIVE = '1'
+  // anvil is one node: no head lag to absorb (live default 3 blocks, see rpc-proxy.ts)
+  process.env.MAMORU_HEAD_LAG = '0'
   const secret = randomBytes(32).toString('hex')
   const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100 })
   stopOperator = op.stop
@@ -192,6 +194,9 @@ try {
   const reduceTx = await ownerAction('transfer', { to: SINK, amountUsdc: big.toString() })
   const f25 = await funding()
   check((await lab.balanceOf('USDC', SINK)) - sinkBefore === TRANSFER + big && f25.positions.length === 1, `${big} USDC units (idle ${idle} + 1 USDC) sent after reducing position #${f25.positions[0]?.tokenId} to liquidity ${f25.positions[0]?.liquidity}`)
+
+  const tooMuch = await call<{ code: string; error: string }>('POST', `${base}/transfer/prepare`, { to: SINK, amountUsdc: '100000000' })
+  check(tooMuch.status === 409, `a transfer the Safe cannot cover is refused before signing: ${tooMuch.json.code} ${tooMuch.json.error}`)
 
   // --- stop -------------------------------------------------------------------
   const stop = await ownerAction('stop')

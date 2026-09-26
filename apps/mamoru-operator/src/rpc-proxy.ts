@@ -31,7 +31,7 @@ export function startRpcProxy(upstream: string, maxLogRange = Number(process.env
   }
   const toNum = async (tag: unknown): Promise<bigint> => {
     if (typeof tag === 'string' && tag.startsWith('0x')) return BigInt(tag)
-    if (tag === undefined || tag === 'latest' || tag === 'pending') return BigInt(await one('eth_blockNumber', []))
+    if (tag === undefined || tag === 'latest' || tag === 'pending') return head()
     const b = await one('eth_getBlockByNumber', [tag, false])
     return BigInt(b.number)
   }
@@ -53,8 +53,19 @@ export function startRpcProxy(upstream: string, maxLogRange = Number(process.env
     }
     return out
   }
+  // A load-balanced provider answers from nodes a block or two apart: a head read from one node and a call pinned
+  // to it on another gives "0x", null fields or "block not found". Serve `latest` a few blocks behind the tip.
+  const lag = BigInt(process.env.MAMORU_HEAD_LAG ?? 3)
+  async function head(): Promise<bigint> {
+    const n = BigInt(await one('eth_blockNumber', [])) - lag
+    return n
+  }
   async function handle(msg: Req): Promise<unknown> {
     try {
+      if (msg.method === 'eth_blockNumber') return { jsonrpc: '2.0', id: msg.id, result: `0x${(await head()).toString(16)}` }
+      if (msg.method === 'eth_getBlockByNumber' && (msg.params?.[0] === 'latest' || msg.params?.[0] === 'pending')) {
+        return { jsonrpc: '2.0', id: msg.id, result: await one('eth_getBlockByNumber', [`0x${(await head()).toString(16)}`, msg.params?.[1] ?? false]) }
+      }
       if (msg.method === 'eth_getLogs') return { jsonrpc: '2.0', id: msg.id, result: await getLogs(msg) }
       const r = await raw({ ...msg })
       return { ...r, id: msg.id }
