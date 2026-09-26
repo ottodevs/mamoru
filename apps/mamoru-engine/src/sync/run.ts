@@ -9,7 +9,8 @@ import { poolReadAbi } from './abis.ts'
 import { readAccountState } from './accounts.ts'
 import { readHead } from './head.ts'
 import { rpcFallback } from './history.ts'
-import { readPoolEvents } from './logs.ts'
+import type { LogSource } from './client.ts'
+import { errorInfo, readPoolEventsFrom } from './logs.ts'
 import { rateFromSqrtPrice, UNIT_RATE, type Rate } from './math.ts'
 import { readPoolState, type PoolState } from './pool-state.ts'
 import { MultiBaasPoolIndex } from './multibaas-index.ts'
@@ -25,8 +26,8 @@ export const VALUATION_POOLS = ['pool:WETH/USDC/3000'] as const
 
 export type SyncDeps = {
   client: PublicClient
-  /** Client for eth_getLogs. The keyed free-tier RPC caps log ranges at 10 blocks, so logs go to the public RPC. */
-  logsClient?: PublicClient
+  /** eth_getLogs sources in order. Defaults to the state client with 500-block chunks. */
+  logSources?: LogSource[]
   db: D1Like
   chainId: number
   now: () => Date
@@ -136,25 +137,33 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
   const statements: D1Statement[] = []
   const summaryPools: SyncSummary['pools'] = []
   let logRequests = 0
+  const sources = deps.logSources ?? [{ name: 'state', client, maxRange: 500 }]
   const from = anchor.blockNumber - W + 1
-  const window = { fromBlock: from, toBlock: anchor.blockNumber }
 
   for (const { p, ok, state } of planReads) {
     let history: PoolHistory | null = null
     let historyCode: ReasonCode | undefined
     let source: 'chain_rpc' | 'multibaas' = 'chain_rpc'
+    // The window starts where the log source could read from; a short-range fallback shortens it.
+    let window = { fromBlock: from, toBlock: anchor.blockNumber }
     if (ok) {
+      let stage = 'logs'
       try {
-        const { events, requests } = await readPoolEvents(deps.logsClient ?? client, p.entry.address, from, anchor.blockNumber)
-        logRequests += requests
+        const read = await readPoolEventsFrom(sources, p.entry.address, from, anchor.blockNumber)
+        logRequests += read.requests
+        window = { fromBlock: read.fromBlock, toBlock: anchor.blockNumber }
+        log({ msg: 'sync.logs', pool: p.name, source: read.source, fromBlock: read.fromBlock, events: read.events.length, requests: read.requests, failures: read.failures })
+        stage = 'index'
         const resolved = index
-          ? await index.resolve({ pool: p.entry, from, to: anchor.blockNumber, rpc: events, anchor, previous: await previousPoolView(db, chainId, p.entry.address) })
-          : { ...rpcFallback(events, anchor), source: 'chain_rpc' as const }
+          ? await index.resolve({ pool: p.entry, from: read.fromBlock, to: anchor.blockNumber, rpc: read.events, anchor, previous: await previousPoolView(db, chainId, p.entry.address) })
+          : { ...rpcFallback(read.events, anchor), source: 'chain_rpc' as const }
         source = resolved.source
+        stage = 'block_times'
         history = { events: resolved.events, window: resolved.window, blockTimes: await blockTimes(client, displayedBlocks(resolved.events)) }
       } catch (err) {
-        // Error names only: messages can carry the RPC URL.
-        log({ msg: 'sync.history_failed', pool: p.name, error: err instanceof Error ? err.name : 'unknown', ...(deps.debug ? { debug: String(err) } : {}) })
+        // Error class, HTTP status and RPC code only: messages can carry the RPC URL.
+        const failures = (err as { failures?: unknown }).failures
+        log({ msg: 'sync.history_failed', pool: p.name, stage, ...errorInfo(err), ...(failures ? { failures } : {}), ...(deps.debug ? { debug: String(err) } : {}) })
         historyCode = 'OBS_RPC_UNAVAILABLE'
       }
     }

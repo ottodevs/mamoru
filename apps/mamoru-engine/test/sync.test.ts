@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 import type { PoolView, TokenHolding } from '@mamoru/domain'
 import { address, type Registry } from '@mamoru/registry'
 import { sqliteD1 } from '../scripts/sqlite-d1.ts'
+import { custom, HttpRequestError } from 'viem'
+import { makeClient } from '../src/sync/client.ts'
 import { syncOnce } from '../src/sync/run.ts'
 import { FakeChain } from './fake-chain.ts'
 
@@ -225,5 +227,36 @@ describe('account state sync', () => {
     const tokens = JSON.parse(a.tokens_json) as TokenHolding[]
     expect(tokens.find((t) => t.token === 'ETH')!.value).toMatchObject({ value: null, provenance: { status: 'not_observed' } })
     expect(tokens.find((t) => t.token === 'USDC')!.value.value).toBe('0')
+  })
+})
+
+describe('log sources', () => {
+  const failing = () =>
+    makeClient(
+      custom({ request: async () => { throw new HttpRequestError({ url: 'https://secret.example/key123', status: 503 }) } }, { retryCount: 0 }),
+    )
+
+  test('falls through to the next source and logs the failure without URLs', async () => {
+    const sources = [{ name: 'first', client: failing(), maxRange: 1000 }, { name: 'second', client: chain.client(), maxRange: 30 }]
+    await syncOnce({ client: chain.client(), logSources: sources, db, chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: (l) => logs.push(l) })
+    expect(poolView().stats.swaps.value).toBe(2)
+    const line = logs.find((l) => l.msg === 'sync.logs')!
+    expect(line).toMatchObject({ source: 'second', requests: 1 + 4, failures: [{ source: 'first', error: 'HttpRequestError', status: 503 }] })
+    expect(JSON.stringify(logs)).not.toContain('secret.example')
+  })
+
+  test('a short-range last resort reads a shorter window and says so', async () => {
+    const sources = [{ name: 'first', client: failing(), maxRange: 1000 }, { name: 'keyed', client: chain.client(), maxRange: 10, maxWindow: 55 }]
+    await syncOnce({ client: chain.client(), logSources: sources, db, chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: (l) => logs.push(l) })
+    const v = poolView()
+    expect(v.window).toEqual({ fromBlock: chain.safe - 54, toBlock: chain.safe })
+    expect(v.stats.swaps.value).toBe(1)
+  })
+
+  test('when every source fails the history is not observed and the log names each failure', async () => {
+    const sources = [{ name: 'a', client: failing(), maxRange: 1000 }, { name: 'b', client: failing(), maxRange: 500 }]
+    await syncOnce({ client: chain.client(), logSources: sources, db, chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: (l) => logs.push(l) })
+    expect(poolView().stats.swaps).toMatchObject({ value: null, provenance: { status: 'not_observed', detail: 'OBS_RPC_UNAVAILABLE' } })
+    expect(logs.find((l) => l.msg === 'sync.history_failed')).toMatchObject({ stage: 'logs', error: 'LogSourcesFailed', failures: [{ source: 'a', status: 503 }, { source: 'b', status: 503 }] })
   })
 })

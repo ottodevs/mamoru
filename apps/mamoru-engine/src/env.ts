@@ -20,6 +20,8 @@ export type Env = {
   CORE_DRY_RUN: string
   BASE_RPC_PUBLIC: string
   BASE_RPC_URL?: string
+  /** Optional eth_getLogs endpoint tried before the public providers. */
+  BASE_LOGS_RPC_URL?: string
   MULTIBAAS_URL?: string
   MULTIBAAS_API_KEY?: string
   /** First block MultiBaas indexes for the curated pool; inferred from the first indexed row when absent. */

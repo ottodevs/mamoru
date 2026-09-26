@@ -1,9 +1,7 @@
 import type { Hex0x } from '@mamoru/domain'
 import type { Address, PublicClient } from 'viem'
+import type { LogSource } from './client.ts'
 import { poolEventsAbi } from './abis.ts'
-
-/** Largest eth_getLogs range per request; the public Base RPC rejects wide ranges. */
-export const RPC_LOGS_MAX_RANGE = 500
 
 type RowBase = { block: number; blockHash: Hex0x; txHash: Hex0x; logIndex: number }
 
@@ -37,8 +35,8 @@ export function chunks(from: number, to: number, size: number): [number, number]
 }
 
 /** Swap, Mint and Burn of one pool in [from, to], ascending by block and log index. */
-export async function readPoolEvents(client: PublicClient, pool: Address, from: number, to: number): Promise<{ events: PoolEvent[]; requests: number }> {
-  const ranges = chunks(from, to, RPC_LOGS_MAX_RANGE)
+export async function readPoolEvents(client: PublicClient, pool: Address, from: number, to: number, maxRange = 500): Promise<{ events: PoolEvent[]; requests: number }> {
+  const ranges = chunks(from, to, maxRange)
   const pages = await Promise.all(
     ranges.map(([a, b]) =>
       client.getLogs({ address: pool, events: poolEventsAbi, fromBlock: BigInt(a), toBlock: BigInt(b), strict: true }),
@@ -59,4 +57,34 @@ export async function readPoolEvents(client: PublicClient, pool: Address, from: 
   }
   events.sort((x, y) => x.block - y.block || x.logIndex - y.logIndex)
   return { events, requests: ranges.length }
+}
+
+/** Error class, HTTP status and JSON-RPC code of a failed read. Never the message: it can carry the URL. */
+export function errorInfo(err: unknown): { error: string; status?: number; code?: number } {
+  const out: { error: string; status?: number; code?: number } = { error: err instanceof Error ? err.name : 'unknown' }
+  for (let e: unknown = err, depth = 0; e && typeof e === 'object' && depth < 6; e = (e as { cause?: unknown }).cause, depth++) {
+    const o = e as { status?: unknown; code?: unknown }
+    if (out.status === undefined && typeof o.status === 'number') out.status = o.status
+    if (out.code === undefined && typeof o.code === 'number') out.code = o.code
+  }
+  return out
+}
+
+export type LogsRead = { events: PoolEvent[]; requests: number; source: string; fromBlock: number; failures: ({ source: string } & ReturnType<typeof errorInfo>)[] }
+
+/** Pool events from the first source that answers the whole range. Throws when every source fails. */
+export async function readPoolEventsFrom(sources: LogSource[], pool: Address, from: number, to: number): Promise<LogsRead> {
+  const failures: LogsRead['failures'] = []
+  let requests = 0
+  for (const s of sources) {
+    const start = s.maxWindow ? Math.max(from, to - s.maxWindow + 1) : from
+    try {
+      const r = await readPoolEvents(s.client, pool, start, to, s.maxRange)
+      return { events: r.events, requests: requests + r.requests, source: s.name, fromBlock: start, failures }
+    } catch (err) {
+      requests += chunks(start, to, s.maxRange).length
+      failures.push({ source: s.name, ...errorInfo(err) })
+    }
+  }
+  throw Object.assign(new Error('every log source failed'), { name: 'LogSourcesFailed', failures })
 }

@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { PoolView } from '@mamoru/domain'
 import { multibaasFrom } from '../src/env.ts'
-import { makeClient, publicTransport, rpcTransport } from '../src/sync/client.ts'
+import { logSources, makeClient, rpcTransport } from '../src/sync/client.ts'
 import { syncOnce } from '../src/sync/run.ts'
 import { sqliteD1 } from './sqlite-d1.ts'
 
@@ -17,7 +17,7 @@ const mb = multibaasFrom({ MULTIBAAS_URL, MULTIBAAS_API_KEY, MULTIBAAS_POOL_STAR
 console.log(`rpc: ${keyed ? 'keyed' : 'public'}, multibaas: ${mb ? 'configured' : 'not configured'}`)
 
 const started = performance.now()
-const summary = await syncOnce({ client: makeClient(transport), logsClient: makeClient(publicTransport({ BASE_RPC_PUBLIC: 'https://mainnet.base.org' })), db, chainId: 8453, now: () => new Date(), debug: Boolean(process.env.ENGINE_DEBUG), ...(mb ?? {}) })
+const summary = await syncOnce({ client: makeClient(transport), logSources: logSources({ BASE_LOGS_RPC_URL: process.env.BASE_LOGS_RPC_URL, BASE_RPC_URL: process.env.BASE_RPC_URL }), db, chainId: 8453, now: () => new Date(), debug: Boolean(process.env.ENGINE_DEBUG), ...(mb ?? {}) })
 console.log(`took ${Math.round(performance.now() - started)} ms`)
 
 const rows = db.sqlite.query('SELECT pool_address, block, source, payload_json FROM proj_pool_state').all() as { pool_address: string; block: number; source: string; payload_json: string }[]
