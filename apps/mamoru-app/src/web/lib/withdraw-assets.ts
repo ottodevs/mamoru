@@ -4,14 +4,20 @@ export type WithdrawAssetOption = { asset: WithdrawAsset; available: boolean; re
 
 export const WITHDRAW_ASSETS: readonly WithdrawAsset[] = ['USDC', 'EURC', 'ETH', 'JPYC']
 
-export const JPYC_NOT_ON_BASE = 'Not available on Base yet'
+/** The JPYC slot pays out Dephaser JPYT on Base (official JPYC is not on Base); the caption says so under "JPY". */
+export const JPYT_CAPTION = 'Dephaser JPYT, backed by USDC. Not a regulated issuer.'
 
-/** Used when GET withdraw-assets fails: USDC always, EURC and ETH optimistically, JPYC off. */
+/** What the picker and receive line call an asset: the JPYC slot reads as plain JPY. */
+export function assetLabel(asset: WithdrawAsset): string {
+  return asset === 'JPYC' ? 'JPY' : asset
+}
+
+/** Used when GET withdraw-assets fails: USDC always, the rest optimistically (the operator still refuses at prepare). */
 export const FALLBACK_WITHDRAW_ASSETS: WithdrawAssetOption[] = [
   { asset: 'USDC', available: true },
   { asset: 'EURC', available: true },
   { asset: 'ETH', available: true },
-  { asset: 'JPYC', available: false, reason: JPYC_NOT_ON_BASE },
+  { asset: 'JPYC', available: true, reason: JPYT_CAPTION },
 ]
 
 /** Keeps the picker order fixed and USDC always selectable, whatever the API returns. */
@@ -23,8 +29,8 @@ export function withdrawOptions(api: WithdrawAssetOption[] | undefined): Withdra
   })
 }
 
-// ETH to 6 decimals, the fiat stables to 2.
-const FRACTION: Record<WithdrawAsset, number> = { USDC: 2, EURC: 2, JPYC: 2, ETH: 6 }
+// ETH to 6 decimals, USD and EUR stables to 2, yen whole.
+const FRACTION: Record<WithdrawAsset, number> = { USDC: 2, EURC: 2, JPYC: 0, ETH: 6 }
 
 /** Base units to a display amount with the asset's precision. Truncates, never rounds up. */
 export function formatReceive(raw: string, decimals: number, asset: WithdrawAsset): string {
@@ -35,7 +41,7 @@ export function formatReceive(raw: string, decimals: number, asset: WithdrawAsse
   return fraction ? `${whole}.${fraction}` : whole
 }
 
-/** "You receive ≈ 18.4 EURC (at least 18.3)". */
+/** "You receive ≈ 18.4 EURC (at least 18.3)", "You receive ≈ 1,616 JPY (at least 1,608)". */
 export function receiveLine(r: NonNullable<TransferPlan['receive']>): string {
-  return `You receive ≈ ${formatReceive(r.quoted, r.decimals, r.asset)} ${r.asset} (at least ${formatReceive(r.minimum, r.decimals, r.asset)})`
+  return `You receive ≈ ${formatReceive(r.quoted, r.decimals, r.asset)} ${assetLabel(r.asset)} (at least ${formatReceive(r.minimum, r.decimals, r.asset)})`
 }

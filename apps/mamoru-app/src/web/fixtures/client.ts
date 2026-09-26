@@ -79,7 +79,7 @@ function fixtureOp(kind: OpView['kind'], after: () => void): OpView {
 const FIXTURE_QUOTE: Record<Exclude<WithdrawAsset, 'USDC'>, { perUsdc: bigint; decimals: number; route: string }> = {
   EURC: { perUsdc: 921_000n, decimals: 6, route: 'Uniswap v3 · USDC → EURC 0.05% · Base' },
   ETH: { perUsdc: 384_615_384_615_384n, decimals: 18, route: 'Uniswap v3 · USDC → WETH 0.05% · unwrapped to ETH · Base' },
-  JPYC: { perUsdc: 147_300_000_000_000_000_000n, decimals: 18, route: 'Uniswap v4 · USDC → JPYC · Base' },
+  JPYC: { perUsdc: 161_600_000n, decimals: 6, route: 'Uniswap v3 · USDC → JPYT 0.30% · Base' },
 }
 
 export function fixtureReceive(asset: Exclude<WithdrawAsset, 'USDC'>, amountUsdc: bigint): NonNullable<TransferPlan['receive']> {
@@ -146,7 +146,7 @@ export const fixtureClient: ApiClient = {
         { asset: 'USDC' as const, available: true },
         { asset: 'EURC' as const, available: true },
         { asset: 'ETH' as const, available: true },
-        { asset: 'JPYC' as const, available: false, reason: 'Not available on Base yet' },
+        { asset: 'JPYC' as const, available: true, reason: 'Dephaser JPYT, backed by USDC. Not a regulated issuer.' },
       ],
     }),
   transferPrepare: (_k, body) =>

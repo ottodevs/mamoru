@@ -204,16 +204,16 @@ try {
   const tooMuch = await call<{ code: string; error: string }>('POST', `${base}/transfer/prepare`, { to: SINK, amountUsdc: '100000000' })
   check(tooMuch.status === 409, `a transfer the Safe cannot cover is refused before signing: ${tooMuch.json.code} ${tooMuch.json.error}`)
 
-  // --- withdraw in EURC and in native ETH to fresh addresses --------------------
+  // --- withdraw in EURC, native ETH and JPY (JPYT) to fresh addresses --------------------
   const assets = (await call<{ assets: { asset: WithdrawAsset; available: boolean; reason?: string }[] }>('GET', `${base}/withdraw-assets`)).json.assets
   const av = (a: WithdrawAsset) => assets.find((x) => x.asset === a)
-  check(!!av('USDC')?.available && !!av('EURC')?.available && !!av('ETH')?.available && av('JPYC')?.available === false && !!av('JPYC')?.reason, `withdraw-assets: ${assets.map((a) => `${a.asset}=${a.available}${a.reason ? ` (${a.reason})` : ''}`).join(', ')}`)
-  const jpy = await call<{ code: string }>('POST', `${base}/transfer/prepare`, { to: SINK, amountUsdc: WITHDRAW.toString(), asset: 'JPYC' })
-  check(jpy.status === 409 && jpy.json.code === 'ASSET_UNAVAILABLE', 'a JPYC withdraw is refused before signing')
+  check(!!av('USDC')?.available && !!av('EURC')?.available && !!av('ETH')?.available && !!av('JPYC')?.available && !!av('JPYC')?.reason, `withdraw-assets: ${assets.map((a) => `${a.asset}=${a.available}${a.reason ? ` (${a.reason})` : ''}`).join(', ')}`)
+  const jpy = await call<{ code: string; error: string }>('POST', `${base}/transfer/prepare`, { to: SINK, amountUsdc: '25000001', asset: 'JPYC' })
+  check(jpy.status === 409 && jpy.json.code === 'CAP_EXCEEDED', `a JPYT withdraw over 25 USD is refused before signing: ${jpy.json.error}`)
   const received: string[] = []
-  for (const asset of ['EURC', 'ETH'] as const) {
+  for (const asset of ['EURC', 'ETH', 'JPYC'] as const) {
     const dest = privateKeyToAccount(generatePrivateKey()).address
-    const bal = () => (asset === 'ETH' ? lab.client.getBalance({ address: dest }) : lab.balanceOf('EURC', dest))
+    const bal = () => (asset === 'ETH' ? lab.client.getBalance({ address: dest }) : lab.balanceOf(asset === 'JPYC' ? 'JPYT' : asset, dest))
     const before = await bal()
     await ownerAction('transfer', { to: dest, amountUsdc: WITHDRAW.toString(), asset })
     const got = (await bal()) - before
@@ -229,7 +229,7 @@ try {
   const cbbtcValueCap = 10_000n // dust: < ~$10 at any sane BTC price is not the claim; we assert < 0.0001 BTC
   check(!f3.active && f3.positions.length === 0 && BigInt(f3.cbbtc) < cbbtcValueCap, `after stop: inactive, no positions, cbBTC ${f3.cbbtc} units (dust), USDC ${f3.usdc}, ETH ${f3.eth}`)
   const usdcAfter = BigInt(f3.usdc)
-  check(usdcAfter > DEPOSIT - TRANSFER - big - 2n * WITHDRAW - 100_000n, `Safe holds ${usdcAfter} USDC units after round trip (deposit ${DEPOSIT} - transfers ${TRANSFER + big + 2n * WITHDRAW}, costs within 0.1 USDC)`)
+  check(usdcAfter > DEPOSIT - TRANSFER - big - 3n * WITHDRAW - 100_000n, `Safe holds ${usdcAfter} USDC units after round trip (deposit ${DEPOSIT} - transfers ${TRANSFER + big + 3n * WITHDRAW}, costs within 0.1 USDC)`)
 
   const all = await ops()
   const txs = new Set(all.filter((o) => o.txHash).map((o) => o.txHash))

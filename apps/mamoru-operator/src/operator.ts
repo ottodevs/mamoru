@@ -307,6 +307,8 @@ export class Operator {
     const avail = WITHDRAW_ASSETS.find((a) => a.asset === asset)
     if (!avail) throw new HttpError(400, 'BAD_REQUEST', 'asset must be USDC, EURC, ETH or JPYC')
     if (!avail.available) throw new HttpError(409, 'ASSET_UNAVAILABLE', avail.reason ?? `${asset} is not available`)
+    const payoutCap = PAYOUT_CAP_USDC[asset]
+    if (payoutCap !== undefined && amount > payoutCap) throw new HttpError(409, 'CAP_EXCEEDED', `${ASSET_LABEL[asset] ?? asset} payouts are capped at ${fmtUsdc(payoutCap)} USD each`)
     const to = getAddress(req.to)
     if (to.toLowerCase() === live.safe.toLowerCase()) throw new HttpError(400, 'BAD_REQUEST', 'recipient is the Safe itself')
     const r = await readSafe(this.client, live.safe)
@@ -339,7 +341,7 @@ export class Operator {
       ...(out
         ? [
             `Swap ${fmtUsdc(amount)} USDC from your Safe on ${out.route}`,
-            `Receive at least ${fmtUnits(out.receive.amountOutMinimum, out.decimals)} ${asset} at ${short} (${to})`,
+            `Receive at least ${fmtUnits(out.receive.amountOutMinimum, out.decimals)} ${ASSET_LABEL[asset] ?? asset} at ${short} (${to})`,
           ]
         : [`Send ${fmtUsdc(amount)} USDC from your Safe to ${to}`]),
     ]
@@ -360,7 +362,7 @@ export class Operator {
       WITHDRAW_ASSETS.map(async (a) => {
         if (!a.available || a.asset === 'USDC') return a
         try {
-          await this.receiveQuote(a.asset as 'EURC' | 'ETH', 1_000_000n, block, this.cfg.policy.execution.slippageBps)
+          await this.receiveQuote(a.asset, 1_000_000n, block, this.cfg.policy.execution.slippageBps)
           return a
         } catch (e) {
           return { asset: a.asset, available: false, reason: `No Uniswap quote for ${a.asset} right now (${(e as Error).message.split('\n')[0]})` }
@@ -372,7 +374,7 @@ export class Operator {
 
   /** QuoterV2 at the prepare block over every registered pool for the asset; the best output wins. */
   private async receiveQuote(asset: WithdrawAsset, amountIn: bigint, blockNumber: bigint, slip: number): Promise<{ receive: LiveReceive; quoted: bigint; decimals: number; route: string }> {
-    const routes = RECEIVE_ROUTES[asset as 'EURC' | 'ETH']
+    const routes = RECEIVE_ROUTES[asset as ReceiveAsset]
     if (!routes) throw new HttpError(409, 'ASSET_UNAVAILABLE', `${asset} is not available`)
     let best: { pool: string; fee: number; out: bigint } | undefined
     for (const pool of routes.pools) {
@@ -385,9 +387,9 @@ export class Operator {
       }
     }
     if (!best) throw new HttpError(503, 'QUOTE_UNAVAILABLE', `no Uniswap v3 quote for USDC -> ${asset}`)
-    const pair = asset === 'ETH' ? 'USDC/WETH' : `USDC/${asset}`
+    const pair = `USDC/${routes.tokenOut}`
     const route = `Uniswap v3 ${pair} ${(best.fee / 10_000).toFixed(2)}%${asset === 'ETH' ? ' + unwrap' : ''}`
-    return { receive: { asset: asset as 'EURC' | 'ETH', fee: best.fee, amountOutMinimum: minOut(best.out, slip) }, quoted: best.out, decimals: entry(routes.tokenOut).decimals!, route }
+    return { receive: { asset: routes.receive, fee: best.fee, amountOutMinimum: minOut(best.out, slip) }, quoted: best.out, decimals: entry(routes.tokenOut).decimals!, route }
   }
 
   /**
@@ -885,21 +887,35 @@ function balanceProbe(asset: WithdrawAsset, holder: Address): Probe {
   if (asset === 'ETH') {
     return { to: address('Multicall3'), data: encodeFunctionData({ abi: multicall3Abi, functionName: 'getEthBalance', args: [holder] }), decode: (d) => decodeFunctionResult({ abi: multicall3Abi, functionName: 'getEthBalance', data: d }) }
   }
-  return { to: address(asset), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [holder] }), decode: (d) => decodeFunctionResult({ abi: erc20Abi, functionName: 'balanceOf', data: d }) }
+  return { to: address(RECEIVE_ROUTES[asset as ReceiveAsset]?.tokenOut ?? asset), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [holder] }), decode: (d) => decodeFunctionResult({ abi: erc20Abi, functionName: 'balanceOf', data: d }) }
 }
 
 /** Registered pools a withdraw may route through, best quote wins. */
-const RECEIVE_ROUTES: Record<'EURC' | 'ETH', { tokenOut: string; pools: string[] }> = {
-  EURC: { tokenOut: 'EURC', pools: ['pool:EURC/USDC/500'] },
-  ETH: { tokenOut: 'WETH', pools: ['pool:WETH/USDC/500', 'pool:WETH/USDC/3000'] },
+type ReceiveAsset = Exclude<WithdrawAsset, 'USDC'>
+/**
+ * Registered pools a withdraw may route through, best quote wins. `tokenOut` is the registry token read for
+ * decimals and the recipient balance probe, `receive` the swap output handed to the batch (ETH unwraps WETH).
+ * JPYC slot: official JPYC is not on Base (the "JPYC" at 0xaf94…2fb3 on Base is unofficial and never used),
+ * so the yen payout is Dephaser JPYT, USDC-collateralized at an oracle USD/JPY rate.
+ */
+const RECEIVE_ROUTES: Record<ReceiveAsset, { tokenOut: string; receive: LiveReceive['asset']; pools: string[] }> = {
+  EURC: { tokenOut: 'EURC', receive: 'EURC', pools: ['pool:EURC/USDC/500'] },
+  ETH: { tokenOut: 'WETH', receive: 'ETH', pools: ['pool:WETH/USDC/500', 'pool:WETH/USDC/3000'] },
+  JPYC: { tokenOut: 'JPYT', receive: 'JPYT', pools: ['pool:USDC/JPYT/3000'] },
 }
 
-/** JPYC: no yen stablecoin on Base has a Uniswap pool worth routing through (checked 2026-09-26: "JPYC" on Base is an unofficial token priced far off 1 JPY). */
+/** Display label where it differs from the enum value. */
+const ASSET_LABEL: Partial<Record<WithdrawAsset, string>> = { JPYC: 'JPY (JPYT)' }
+
+/** Hard per-payout ceiling in USDC base units: JPYT is unregulated and its pool is thin (~$6.5k). */
+export const PAYOUT_CAP_USDC: Partial<Record<WithdrawAsset, bigint>> = { JPYC: 25_000_000n }
+
+/** `reason` on an available asset is a caption the app shows under it. */
 export const WITHDRAW_ASSETS: { asset: WithdrawAsset; available: boolean; reason?: string }[] = [
   { asset: 'USDC', available: true },
   { asset: 'EURC', available: true },
   { asset: 'ETH', available: true },
-  { asset: 'JPYC', available: false, reason: 'No yen stablecoin with enough liquidity on Base yet' },
+  { asset: 'JPYC', available: true, reason: 'Dephaser JPYT, backed by USDC. Not a regulated issuer.' },
 ]
 
 /** Raw units rounded down for a minimum: 2 decimals for 6-decimal stablecoins, 6 for ETH. */
