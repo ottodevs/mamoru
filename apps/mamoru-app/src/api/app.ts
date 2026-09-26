@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { PRODUCTION_BANNER, type AppConfig, type SessionView } from '@mamoru/domain'
+import { PRODUCTION_BANNER, LIVE_BANNER, type AppConfig, type SessionView } from '@mamoru/domain'
 import type { AppEnv } from './context.ts'
 import { ConfigError, liveFunds, readSettings } from './env.ts'
 import { apiError } from './errors.ts'
@@ -45,7 +45,7 @@ export function createApp(options: AppOptions = {}) {
       dryRun: true,
     }
     // Live funds: the operator moves funds; the engine Worker stays read-only (CORE_DRY_RUN unchanged).
-    const config: AppConfig = liveFunds(c.env) ? { ...base, fundsGate: 'live', dryRun: false, capUsdc: LIVE_CAP_USDC } : base
+    const config: AppConfig = liveFunds(c.env) ? { ...base, banner: { kind: 'live', text: LIVE_BANNER }, fundsGate: 'live', dryRun: false, capUsdc: LIVE_CAP_USDC } : base
     return c.json(config)
   })
 

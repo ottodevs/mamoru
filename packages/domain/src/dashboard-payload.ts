@@ -134,7 +134,7 @@ export type DashboardPayload = {
     rpc: { status: 'ok' | 'unavailable'; block?: number; safeBlock?: number; observedAt: string }
     index: IndexHealth
   }
-  banner: { kind: 'simulation' | 'lab'; text: string; block?: number }
+  banner: { kind: 'simulation' | 'lab' | 'live'; text: string; block?: number }
   account: {
     key: string
     address: Figure<Hex0x>
@@ -201,3 +201,6 @@ export type DashboardPayload = {
 
 export const PRODUCTION_BANNER =
   'Simulation mode. Mamoru plans and simulates. It does not sign or send transactions. Deposits are closed.'
+
+export const LIVE_BANNER =
+  'Live on Base with a 25 USDC cap per account. Your passkey signs every owner action. The engine acts only inside its session grants.'

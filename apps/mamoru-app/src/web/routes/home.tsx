@@ -44,10 +44,9 @@ export function HomePage() {
           ))}
         </section>
         <section className="mt-[0.35rem] max-w-[32rem]">
-          <h2 className="m-0 mb-[0.4rem] text-[clamp(1.25rem,3vw,1.6rem)] font-normal">Simulation mode today</h2>
+          <h2 className="m-0 mb-[0.4rem] text-[clamp(1.25rem,3vw,1.6rem)] font-normal">Live on Base, capped</h2>
           <p className="m-0 leading-[1.45] text-stone">
-            In v1, Mamoru plans and simulates. It does not sign or send transactions, and deposits are closed. Your account stays counterfactual
-            until you deploy it yourself.
+            Each account holds at most 25 USDC. Your passkey signs every owner action: start, transfer out and stop. The engine enters positions with a session key that can only do what its grants allow. Harvest is shown on a Base fork.
           </p>
         </section>
         <nav className="mt-[0.6rem] flex flex-wrap justify-center gap-3" aria-label="App entry">
