@@ -7,7 +7,8 @@
     "start": "bun src/main.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "e2e:fork": "bun test/e2e-fork.ts",
-    "e2e:armed": "bun test/e2e-armed.ts"
+    "e2e:armed": "bun test/e2e-armed.ts",
+    "e2e:multipool": "bun test/e2e-multipool.ts"
   },
   "dependencies": {
     "@mamoru/account": "workspace:*",

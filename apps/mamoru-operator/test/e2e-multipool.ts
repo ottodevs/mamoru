@@ -1,14 +1,16 @@
-// E2E of armed activation: the owner signs with 0 USDC, the deposit lands later, the operator executes alone.
-// Same harness as e2e-fork.ts: E2E of the live operator on an anvil fork of Base that keeps chain id 8453.
+// E2E of conservador-live-v2 on an anvil fork of Base (chain id 8453): 20 USDC -> the engine invests across
+// USDC/USDT 0.01%, USDC/cbBTC 0.05% and WETH/USDC 0.3% near 50/40/10; a withdraw reduces stables first; stop
+// closes every position and swaps everything back to USDC.
 // The upstream RPC comes from the environment only (RPC_URL or BASE_RPC_URL, or ~/.config/mamoru-operator/env)
 // and reaches anvil through a loopback proxy; the operator talks to anvil through the engine port, which
 // refuses anvil_* methods. Blocks advance by themselves (--block-time 1), so the operator runs unchanged.
 import { createHmac, randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { toHex, type Hex } from 'viem'
-import type { AccountContext, FundingView, OpView, OwnerSignature, OwnerTxToSign, TransferPlan } from '@mamoru/domain'
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
+import type { AccountContext, FundingView, OpView, OwnerSignature, OwnerTxToSign, TransferPlan, WithdrawAsset } from '@mamoru/domain'
 import { address } from '@mamoru/registry'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
@@ -19,6 +21,7 @@ import { Lab } from '../../../packages/scenarios/fixtures/lab.ts'
 import { WHALE } from '../../../packages/scenarios/fixtures/world.ts'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { bootOperator } from '../src/boot.ts'
+import { positionUsdc, readSafe, inUsdc } from '../src/chain.ts'
 
 const envFile = join(homedir(), '.config/mamoru-operator/env')
 if (!process.env.RPC_URL && existsSync(envFile)) {
@@ -29,7 +32,9 @@ if (!process.env.RPC_URL && existsSync(envFile)) {
 }
 if (!process.env.RPC_URL && process.env.BASE_RPC_URL) process.env.RPC_URL = process.env.BASE_RPC_URL
 
-const DEPOSIT = 10_000_000n
+const DEPOSIT = 20_000_000n
+const WITHDRAW = 3_000_000n
+const SINK = '0x000000000000000000000000000000000000dEaD' as const
 const t0 = Date.now()
 const log = (m: string) => console.log(`[e2e +${((Date.now() - t0) / 1000).toFixed(0)}s] ${m}`)
 function check(ok: boolean, what: string): void {
@@ -43,7 +48,7 @@ const anvilBin = Bun.which('anvil') ?? join(homedir(), '.foundry/bin/anvil')
 const portProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
 const port = portProbe.port as number
 portProbe.stop(true)
-const argv = ['--fork-url', proxy.url, '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
+const argv = ['--fork-url', proxy.url, '--compute-units-per-second', process.env.FORK_CUPS ?? '330', '--fork-retry-backoff', '2000', '--retries', '10', '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
 assertNoKeyInArgv(argv, ['RPC_URL', 'BASE_RPC_URL'])
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-operator-e2e-'))
 const anvil = Bun.spawn([anvilBin, ...argv], { stdout: Bun.file(join(dir, 'anvil.log')), stderr: Bun.file(join(dir, 'anvil.log')), env: sanitizedEnv() })
@@ -83,14 +88,16 @@ try {
     saltNonce: saltNonce.toString(),
     passkey: { credentialId: 'e2e', x: toHex(passkey.x, { size: 32 }), y: toHex(passkey.y, { size: 32 }) },
   }
-  log(`counterfactual Safe ${ctx.address}, empty`)
+  await lab.whaleTransfer('USDC', WHALE, ctx.address, DEPOSIT)
+  log(`counterfactual Safe ${ctx.address} funded with ${DEPOSIT} USDC units`)
 
   // --- operator, live on "8453" ------------------------------------------------
   process.env.MAMORU_LIVE = '1'
-  process.env.MAMORU_HEAD_LAG = '0' // anvil is one node
+  // anvil is one node: no head lag to absorb (live default 3 blocks, see rpc-proxy.ts)
+  process.env.MAMORU_HEAD_LAG = '0'
   const secret = randomBytes(32).toString('hex')
-  let op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'conservador-live-v1' })
-  stopOperator = () => op.stop()
+  const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'conservador-live-v2' })
+  stopOperator = op.stop
   check(op.operator.cfg.live, 'operator is live on chain 8453 with MAMORU_LIVE=1')
   await lab.setBalance(op.operator.relayer.address, 10n ** 18n)
 
@@ -142,65 +149,92 @@ try {
       await Bun.sleep(1_000)
     }
   }
+  let lastPlan: TransferPlan | undefined
   async function ownerAction(kind: 'activate' | 'transfer' | 'stop', prepareBody?: unknown): Promise<OpView> {
     const prep = await call<OwnerTxToSign | TransferPlan>('POST', `${base}/${kind}/prepare`, prepareBody)
     if (prep.status !== 200) throw new Error(`E2E FAILED: ${kind}/prepare ${prep.status} ${JSON.stringify(prep.json)}`)
     const tx = 'ownerTx' in prep.json ? prep.json.ownerTx : prep.json
-    if ('reduce' in prep.json) log(`transfer plan reduce ${JSON.stringify(prep.json.reduce)}`)
+    if ('reduce' in prep.json) {
+      lastPlan = prep.json
+      log(`transfer plan reduce ${JSON.stringify(prep.json.reduce)} receive ${JSON.stringify(prep.json.receive)}`)
+    }
     log(`${kind} to sign: ${tx.summary.join(' | ')}`)
     const res = await call<OpView>('POST', `${base}/${kind}`, browserSign(tx))
     if (res.status !== 200) throw new Error(`E2E FAILED: ${kind} ${res.status} ${JSON.stringify(res.json)}`)
     return waitOp(res.json.opId, `owner ${kind}`)
   }
 
-  const f0 = await funding()
-  check(!f0.deployed && f0.usdc === '0' && !f0.active, 'funding before arming: not deployed, 0 USDC, inactive')
-
-  // --- arm: the owner signs before any money arrives ------------------------------
-  const prep = await call<OwnerTxToSign>('POST', `${base}/activate/prepare`)
-  check(prep.status === 200, `activate/prepare with 0 USDC: ${prep.json.summary?.join(' | ')}`)
-  const armed = await call<OpView>('POST', `${base}/activate`, browserSign(prep.json))
-  check(armed.status === 200 && armed.json.kind === 'activate' && armed.json.state === 'proposed' && armed.json.code === 'ARMED', `activate with 0 USDC -> ${JSON.stringify(armed.json)}`)
-  const stateFile = join(dir, 'state', 'accounts.json')
-  check((statSync(stateFile).mode & 0o777) === 0o600 && !!JSON.parse(readFileSync(stateFile, 'utf8')).accounts[ctx.accountKey].armed, 'armed activation persisted in the 0600 state file')
-  check(!(await funding()).active, 'funding stays inactive while armed')
-
-  // --- the operator restarts: the armed activation survives ---------------------------
-  op.stop()
-  op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'conservador-live-v1' })
-  check((await ops()).find((o) => o.opId === armed.json.opId)?.code === 'ARMED', 'operator restarted, armed op reloaded')
-
-  // --- the deposit lands; no further owner action --------------------------------------
-  await lab.whaleTransfer('USDC', WHALE, ctx.address, DEPOSIT)
-  log(`Safe funded with ${DEPOSIT} USDC units`)
-  const activate = await waitOp(armed.json.opId, 'armed activation executed by the watcher', 180_000)
-  const f1 = await funding()
-  check(f1.deployed && f1.active && BigInt(f1.eth) >= BigInt(f1.gasReserveWei), `Safe deployed, engine active, ETH ${f1.eth} >= reserve ${f1.gasReserveWei}`)
-
-  // --- engine enters: swap then mint ------------------------------------------
-  const until = Date.now() + 240_000
-  let enters: OpView[] = []
-  for (;;) {
-    enters = (await ops()).filter((o) => o.kind === 'enter')
-    if (enters.filter((o) => o.state === 'confirmed').length >= 2) break
-    if (enters.some((o) => o.state === 'failed')) throw new Error(`E2E FAILED: engine op failed ${JSON.stringify(enters)}`)
-    if (Date.now() > until) throw new Error(`E2E FAILED: engine did not enter: ${JSON.stringify(enters)}`)
-    await Bun.sleep(2_000)
+  const BUCKETS: [string, string][] = [
+    ['stables', 'pool:USDC/USDT/100'],
+    ['btc', 'pool:USDC/cbBTC/500'],
+    ['risk', 'pool:WETH/USDC/3000'],
+  ]
+  const VOLATILE: Record<string, string> = { 'pool:USDC/USDT/100': 'USDT', 'pool:USDC/cbBTC/500': 'cbBTC', 'pool:WETH/USDC/3000': 'WETH' }
+  /** Value per bucket in USDC units (positions + idle volatile, at slot0), idle USDC and the total. */
+  async function mix() {
+    const r = await readSafe(lab.client, ctx.address)
+    const per = BUCKETS.map(([b, pool]) => {
+      const px = r.prices[pool]!.sqrtPriceX96
+      const pos = r.positions.filter((p) => p.pool === pool).reduce((s, p) => s + positionUsdc(p, px), 0n)
+      return { b, pool, value: pos + inUsdc(pool, VOLATILE[pool]!, r.tokens[VOLATILE[pool]!] ?? 0n, px), positions: r.positions.filter((p) => p.pool === pool).length }
+    })
+    const total = r.usdc + per.reduce((s, x) => s + x.value, 0n)
+    const pct = (v: bigint) => Number((v * 10_000n) / (total || 1n)) / 100
+    return { r, per, total, idle: r.usdc, text: `${per.map((x) => `${x.b} ${pct(x.value)}% (${x.positions} pos)`).join(', ')}, idle USDC ${pct(r.usdc)}%, total ${total}` }
   }
-  check(enters[0]!.opId.includes('enter_swap') && enters[1]!.opId.includes('enter_mint'), `engine entered: ${enters.map((o) => `${o.opId} ${o.txHash}`).join(', ')}`)
-  const f2 = await funding()
-  check(f2.positions.length === 1 && BigInt(f2.positions[0]!.liquidity) > 0n, `position #${f2.positions[0]?.tokenId} inRange=${f2.positions[0]?.inRange}; idle USDC ${f2.usdc}`)
 
-  // --- stop -------------------------------------------------------------------
+  const f0 = await funding()
+  check(!f0.deployed && f0.usdc === DEPOSIT.toString() && !f0.active, `funding before activation: not deployed, ${f0.usdc} USDC, inactive`)
+
+  // --- activate: one passkey signature enables the enter grants of the three pairs ---
+  const activate = await ownerAction('activate')
+  const f1 = await funding()
+  check(f1.deployed && f1.active, `Safe deployed, engine active (${activate.txHash})`)
+
+  // --- the engine invests until it holds: a position in each pool, idle USDC below 1% ---
+  const until = Date.now() + 480_000
+  let m = await mix()
+  for (;;) {
+    const all = await ops()
+    const enters = all.filter((o) => o.kind === 'enter')
+    const failed = enters.filter((o) => o.state === 'failed')
+    if (failed.length) log(`engine failures so far: ${failed.map((o) => `${o.opId} ${o.code}`).join(', ')}`)
+    m = await mix()
+    const settled = enters.every((o) => o.state === 'confirmed' || o.state === 'failed')
+    if (m.per.every((x) => x.positions > 0) && m.idle * 100n < m.total && settled) break
+    if (Date.now() > until) throw new Error(`E2E FAILED: engine did not allocate: ${m.text}; ops ${JSON.stringify(enters.map((o) => `${o.opId}:${o.state}:${o.code}`))}`)
+    await Bun.sleep(3_000)
+  }
+  // a few more reviews: nothing left to do
+  await Bun.sleep(8_000)
+  m = await mix()
+  const confirmed = (await ops()).filter((o) => o.kind === 'enter' && o.state === 'confirmed')
+  check(true, `ALLOCATION ${m.text}; ${confirmed.length} engine ops confirmed`)
+  const w = m.per.map((x) => Number((x.value * 10_000n) / m.total) / 100)
+  check(Math.abs(w[0]! - 50) < 3 && Math.abs(w[1]! - 40) < 3 && Math.abs(w[2]! - 10) < 3, `weights ${w.join('/')} within 3 points of 50/40/10`)
+  const f2 = await funding()
+  check(new Set(f2.positions.map((p) => p.pool)).size === 3, `GET funding lists positions in ${[...new Set(f2.positions.map((p) => p.pool))].join(', ')}`)
+
+  // --- withdraw more than the idle USDC: only the stables bucket is reduced ---
+  const sinkBefore = await lab.balanceOf('USDC', SINK)
+  const before = await mix()
+  const wd = await ownerAction('transfer', { to: SINK, amountUsdc: WITHDRAW.toString() })
+  const reduced = lastPlan!.reduce.map((x) => x.tokenId)
+  const stableIds = before.r.positions.filter((p) => p.pool === 'pool:USDC/USDT/100').map((p) => p.tokenId.toString())
+  check((await lab.balanceOf('USDC', SINK)) - sinkBefore === WITHDRAW && reduced.length > 0 && reduced.every((id) => stableIds.includes(id)), `withdraw ${WITHDRAW} reduced only stables positions ${reduced.join(', ')} (${wd.txHash})`)
+  log(`after withdraw: ${(await mix()).text}`)
+
+  // --- stop: close all three, swap back to USDC ---
   const stop = await ownerAction('stop')
   const f3 = await funding()
-  check(!f3.active && f3.positions.length === 0 && BigInt(f3.cbbtc) < 10_000n, `after stop: inactive, no positions, cbBTC ${f3.cbbtc}, USDC ${f3.usdc}`)
-  check(BigInt(f3.usdc) > DEPOSIT - 100_000n, `Safe holds ${f3.usdc} USDC units after round trip (costs within 0.1 USDC)`)
-
+  const end = await mix()
+  const volatileDust = end.per.every((x) => x.value < 20_000n)
+  check(!f3.active && f3.positions.length === 0 && volatileDust, `after stop: inactive, no positions, volatile left ${end.per.map((x) => `${x.b} ${x.value}`).join(', ')} USDC units; USDC ${f3.usdc} (${stop.txHash})`)
+  const usdcAfter = BigInt(f3.usdc)
+  check(usdcAfter > DEPOSIT - WITHDRAW - 200_000n, `Safe holds ${usdcAfter} USDC units after the round trip (deposit ${DEPOSIT} - withdraw ${WITHDRAW}, costs within 0.2 USDC)`)
   const stats = enginePort.stats()
   check(stats.rejectedLabMethods === 0, `operator made ${stats.forwarded} RPC calls, 0 anvil_/evm_ methods`)
-  const all = await ops()
-  log(`RESULT PASS: ops ${all.map((o) => `${o.kind}:${o.state}`).join(', ')} (armed activate ${activate.txHash}, stop ${stop.txHash})`)
+  log(`RESULT PASS: ${m.text}`)
 } catch (e) {
   console.error((e as Error).message)
   process.exitCode = 1
