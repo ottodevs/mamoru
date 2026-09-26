@@ -63,8 +63,16 @@ export type FundingView = {
 // POST /api/accounts/:accountKey/stop                body: OwnerSignature -> OpView
 // Stop allocation: revoke every grant, close every position, swap the volatile side to USDC. USDC stays in the Safe.
 // GET  /api/accounts/:accountKey/ops?after=          -> { ops: OpView[] }
-export type TransferRequest = { to: Hex0x; amountUsdc: string }
-export type TransferPlan = { reduce: { tokenId: string; liquidityBps: number }[]; ownerTx: OwnerTxToSign }
+// asset: what the recipient receives. amountUsdc is always the USDC the Safe spends; for EURC/ETH/JPYC
+// the operator swaps it on Uniswap with the recipient as the swap output (ETH is unwrapped from WETH).
+export type WithdrawAsset = 'USDC' | 'EURC' | 'ETH' | 'JPYC'
+export type TransferRequest = { to: Hex0x; amountUsdc: string; asset?: WithdrawAsset }
+export type TransferPlan = {
+  reduce: { tokenId: string; liquidityBps: number }[]
+  receive?: { asset: WithdrawAsset; quoted: string; minimum: string; decimals: number; route: string }
+  ownerTx: OwnerTxToSign
+}
+// GET /api/accounts/:accountKey/withdraw-assets -> { assets: { asset: WithdrawAsset; available: boolean; reason?: string }[] }
 export type OwnerTxToSign = {
   safe: Hex0x
   chainId: number
