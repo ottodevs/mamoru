@@ -2,7 +2,7 @@ import type { OwnerResponse } from '@mamoru/domain'
 import { conservadorV1 } from '@mamoru/policy'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { type CSSProperties, useEffect, useState } from 'react'
 import { useApi } from '../api/client.ts'
 import { queryKeys } from '../api/queries.ts'
 import { downloadJson, kitFilename } from '../lib/download.ts'
@@ -29,20 +29,41 @@ export const onboardingCopy = {
   approve: { title: 'Approve once', body: 'Approve once. Mamoru starts when your money lands.' },
 }
 
+// The bar fills bottom-up like a single pour: each band starts when the one below it is full, at one speed.
+const POUR_MS = 1000
+const POUR_START_MS = 220
+const EASE = { first: 'cubic-bezier(0.5, 0, 0.75, 0.75)', mid: 'linear', last: 'cubic-bezier(0.25, 0.25, 0.3, 1)' }
+function pour() {
+  const up = [...MIX].reverse()
+  let at = POUR_START_MS
+  return new Map(
+    up.map((s, i) => {
+      const ms = Math.max(180, (POUR_MS * s.pct) / 100)
+      const ease = i === 0 ? EASE.first : i === up.length - 1 ? EASE.last : EASE.mid
+      const t = { delay: at, ms, ease }
+      at += ms
+      return [s.id, t]
+    }),
+  )
+}
+const fill = (t: { delay: number; ms: number; ease: string }) =>
+  ({ animationDelay: `${t.delay}ms`, animationDuration: `${t.ms}ms`, animationTimingFunction: t.ease }) as const
+
 function Mix() {
+  const t = pour()
   return (
     <figure className="mix" aria-label="Conservador mix">
       <div className="mix-bar" aria-hidden="true">
         {MIX.map((s) => (
-          <div key={s.id} className={`mix-seg ${s.tone}`} style={{ flex: s.pct }}>
-            {s.pct}%
+          <div key={s.id} className={`mix-seg ${s.tone}`} style={{ flex: s.pct, ...fill(t.get(s.id)!) }}>
+            <span className="mix-pct" style={{ ...fill(t.get(s.id)!), '--to': s.pct } as CSSProperties} />
           </div>
         ))}
       </div>
-      <ul className="m-0 grid list-none gap-[0.95rem] p-0">
+      <ul className="m-0 grid list-none justify-items-start gap-[0.95rem] p-0">
         {MIX.map((s) => (
-          <li key={s.id} className="grid grid-cols-[0.7rem_1fr] items-start gap-[0.65rem]">
-            <span className={`mix-dot ${s.tone}`} />
+          <li key={s.id} className={`mix-row ${s.tone} grid grid-cols-[0.7rem_1fr] items-start gap-[0.65rem]`} style={{ animationDelay: `${t.get(s.id)!.delay}ms` }}>
+            <span className={`mix-dot ${s.tone}`} style={fill(t.get(s.id)!)} />
             <span>
               <span className="block text-base leading-tight">
                 {s.name} {s.pct}%
