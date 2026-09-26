@@ -28,13 +28,15 @@ export type TxEvent = {
 
 export type QueryRow = Record<string, unknown>
 
+export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>
+
 export type MultiBaasConfig = {
   url: string
   apiKey: string
   pageLimit?: number
   /** Stop paging after this many pages; the caller treats a cut result as a failed query. */
   maxPages?: number
-  fetch?: typeof fetch
+  fetch?: Fetcher
 }
 
 // Largest `limit` the deployment accepts (MB-02, 2026-09-26: 51 is rejected).
@@ -44,14 +46,15 @@ type Envelope<T> = { status: number; message: string; result: T }
 
 export class MultiBaasClient {
   private readonly base: string
-  private readonly fetcher: typeof fetch
+  private readonly fetcher: Fetcher
   readonly pageLimit: number
   readonly maxPages: number
   requests = 0
 
   constructor(private readonly config: MultiBaasConfig) {
     this.base = `${config.url.replace(/\/+$/, '')}/api/v0`
-    this.fetcher = config.fetch ?? fetch
+    // Workers reject a fetch detached from globalThis (Illegal invocation), so the default is wrapped.
+    this.fetcher = config.fetch ?? ((input, init) => fetch(input, init))
     this.pageLimit = config.pageLimit ?? MB_PAGE_LIMIT
     this.maxPages = config.maxPages ?? 10
   }
