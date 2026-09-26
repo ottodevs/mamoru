@@ -6,7 +6,7 @@ In v1 production, Mamoru runs in simulation mode. It plans and simulates, and it
 
 - App: https://app.mamoru.lol (simulation mode: passkey onboarding, counterfactual Safe on Base, recovery kit, dashboard with the Base pool read every 2 minutes)
 - Landing: https://mamoru.lol ([ottodevs/mamoru-landing](https://github.com/ottodevs/mamoru-landing))
-- Built at ETHGlobal Tokyo 2026 (25 to 27 September).
+- Built at ETHGlobal Tokyo 2026 (25 to 27 September). First commit 25 September 14:03 CEST.
 
 ### Where to look
 

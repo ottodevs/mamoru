@@ -1,8 +1,8 @@
 # ETHGlobal Tokyo 2026: submission requirements and where Mamoru stands
 
-Read on 2026-09-26 between 20:10 and 20:20 CEST from Ot's logged-in ETHGlobal session (event page, hacker dashboard, project form tabs, rules page, prize pages) and from https://developers.uniswap.org/hackathon-feedback. Nothing was submitted or saved. The form was only read.
+Read on 2026-09-26 between 20:10 and 20:20 CEST from the team's logged-in ETHGlobal session (event page, hacker dashboard, project form tabs, rules page, prize pages) and from https://developers.uniswap.org/hackathon-feedback. Nothing was submitted or saved. The form was only read.
 
-Status legend: OK (meets it now), FIX (exists but wrong or stale, L0 must edit before the deadline), MISSING (not there yet), RISK (a rule we may not meet; Ot decides).
+Status legend: OK (meets it now), FIX (exists but wrong or stale, L0 must edit before the deadline), MISSING (not there yet), RISK (a rule we may not meet; Brais and Otto decide).
 
 ## 1. Deadline and judging
 
@@ -39,7 +39,21 @@ The form has seven tabs: Project details, Images, Tech stack, Select prizes, Vid
 |---|---|---|---|
 | Logo | required, square, e.g. 512x512 | uploaded (id 274458) | OK |
 | Cover image | required, 16:9, e.g. 640x360 | uploaded (id 274459) | OK |
-| Screenshots | required, **minimum 3**, up to 6 | **none uploaded** (all six slots empty) | MISSING: take 3 to 6 from app.mamoru.lol after the 23:05 deploy: onboarding passkey, recovery kit, dashboard with provenance chips and simulation banner, pools panel. Shot list in `video-script.md` §4 |
+| Screenshots | required, **minimum 3**, up to 6 | **none uploaded** (all six slots empty) | MISSING: upload the five in §2.2.1 |
+
+#### 2.2.1 Screenshots to upload
+
+From the L2 shots folder (scratchpad `shots/`). Upload these, in this order. Use only `live-*` and `flow/*` files: they are the deployed app on Base. Never upload `fixture-*` files. They show test fixture data, and presenting them as the product would break the rule against placeholders shown as real data.
+
+| Order | File | What it shows |
+|---|---|---|
+| 1 | `flow/desktop-1-home.png` | Home: simulation banner, OWN, WATCH, LEAVE |
+| 2 | `flow/desktop-3-onboarding-account.png` | Passkey done, counterfactual Safe address on Base 8453, recovery kit step |
+| 3 | `live-desktop-positions.png` | Uniswap V3 USDC/cbBTC 0.05% pool on Base: price, tick, TWAP within the guard, liquidity, balances, each with a "Base · block N" chip |
+| 4 | `live-desktop-dashboard-top.png` | Dashboard header: chain Base 8453, Conservador preset, index "MultiBaas · Base", Current Action "Deposits are closed" |
+| 5 | `flow/desktop-4-onboarding-done.png` | Onboarding complete (optional) |
+
+Note: in `live-desktop-positions.png`, taken at 18:36 UTC, the 24-hour swap and liquidity rows read "Not observed". The engine now reads a swap window, so a retake after the next sync would show swaps with MultiBaas chips. Retake it only if time allows; the current shot is honest as it stands.
 
 ### 2.3 Tech stack
 
@@ -48,9 +62,9 @@ The form has seven tabs: Project details, Images, Tech stack, Select prizes, Vid
 | Ethereum developer tools | yes | Foundry | FIX: add viem if listed; Foundry (anvil) is correct |
 | Blockchain networks | yes | Base | OK. Do not add others (dashboard.md §12.3) |
 | Programming languages | yes | TypeScript | OK (add SQL if D1 migrations count) |
-| Web frameworks | yes | None | FIX: React, Vite [PENDING L2] |
-| Databases | yes | None | FIX: Cloudflare D1 (SQLite) [PENDING L3/L4] |
-| Design tools | yes | None | Ot decides (Figma or Penpot if used for the dashboard) |
+| Web frameworks | yes | None | FIX: React, Vite, Hono, Tailwind CSS, TanStack (`submission.md` §5) |
+| Databases | yes | None | FIX: Cloudflare D1 |
+| Design tools | yes | None | Brais and Otto decide |
 | Other technologies | optional | Cloudflare Workers, Astro, Anvil, viem | FIX: add Safe, ERC-4337 EntryPoint v0.7, Rhinestone Smart Sessions (ERC-7579), WebAuthn passkeys, Uniswap v3, Curvegrid MultiBaas, Bun |
 | How AI tools were used | optional but see §5 | Present: names Cursor, Codex, Grok and the spec pack | FIX: add Claude Code (implementer pool per AGENTS.md) and keep the spec pack pointer. Draft in `submission.md` §6 |
 
@@ -62,7 +76,7 @@ The form has seven tabs: Project details, Images, Tech stack, Select prizes, Vid
 | Partners | max 3 partners; one partner covers all its tracks | Uniswap Foundation, Curvegrid | OK |
 | Per prize: "How are you using this Protocol / API?" | required | Uniswap and Curvegrid texts present | FIX: both cite branch `spec/mamoru-v1` or an old landing mockup. Replace with `submission.md` §7 and §8 |
 | Per prize: proof link | present in the form | Uniswap: `.../blob/spec/mamoru-v1/packages/uniswap-v3/src/index.ts#L24` returns **404**. Curvegrid: `mamoru-landing/.../dashboard.astro#L112` (200, but it is the landing mockup, not the product) | FIX: Uniswap -> `https://github.com/ottodevs/mamoru/blob/main/packages/uniswap-v3/src/index.ts#L24`; Curvegrid -> README "How MultiBaas was used" anchor on main |
-| Per prize: ease rating 1-10 | form | Uniswap 8, Curvegrid 7 | Ot decides |
+| Per prize: ease rating 1-10 | form | Uniswap 8, Curvegrid 7 | Brais and Otto decide |
 | Per prize: notes | form | Uniswap notes point to FEEDBACK.md on `spec/mamoru-v1` | FIX: point to `main` |
 | Other partner tech used | optional | empty | Leave empty |
 
@@ -73,19 +87,19 @@ The form has seven tabs: Project details, Images, Tech stack, Select prizes, Vid
 | Optional but "highly recommended"; partners use it for judging | - | MISSING |
 | Length | **between 2 and 4 minutes**; upload fails outside that range | Script in `video-script.md` targets 3:40 |
 | Format | .mp4 or .mov, minimum 720p | - |
-| Audio | must have audio, **no music**, **no text-to-speech or AI voiceover**, no phone recording | A human (Ot or Brais) must record the voiceover |
+| Audio | must have audio, **no music**, **no text-to-speech or AI voiceover**, no phone recording | A team member must record the voiceover |
 | Speed | must not be sped up (manually verified, disqualifies); waiting may be cut | Cut waits, never speed up |
 | Intro | under 20 seconds of backstory; slides max 4 bullets | Script follows this |
 
 ### 2.6 Future
 
-Optional multiselect: "Interested in grant programs", "Interested in accelerator / incubator programs". Ot decides.
+Optional multiselect: "Interested in grant programs", "Interested in accelerator / incubator programs". Brais and Otto decide.
 
 ### 2.7 Final
 
 | Item | Status |
 |---|---|
-| Team: Brais and Otto | OK on ETHGlobal. README handles still TODO-HANDLES (L0 gets them from Ot) |
+| Team: Brais and Otto | OK. README "Team handles" lists X @entermamoru, mamoru.lol and GitHub ottodevs |
 | Checkbox `confirmRules` (already ticked): "built entirely during this hackathon and no work was completed before the event", "starting this project from scratch", "not submitting to another hackathon" | RISK, see §6 |
 
 ## 3. Uniswap Foundation prize ("Best Uniswap Stack Contribution")
@@ -93,7 +107,7 @@ Optional multiselect: "Interested in grant programs", "Interested in accelerator
 | Requirement | Status |
 |---|---|
 | Classic track pool: $6,000 (3,000 / 2,000 / 1,000). A separate $4,000 pool exists only for Continuity Track | We are in the classic pool |
-| Public GitHub repository with open-source code | FIX/RISK: repo is public; **no LICENSE file on main**. Without a license the code is visible but not open source. L0 should add one (MIT or Apache-2.0, Ot decides) |
+| Public GitHub repository with open-source code | OK: public, MIT license |
 | `FEEDBACK.md` in the repo | OK after this lane lands: rewritten for `main` |
 | Completed Uniswap Developer Feedback Form that **includes the link to FEEDBACK.md** | MISSING: L0 submits. The form has no dedicated link field; put the link in "What did you build?" and in "Any additional feedback?". Answers in `uniswap-feedback-form.md` |
 | README clearly points to the relevant contracts and lines of code | OK after this lane lands: README "Uniswap v3 integration" table with line links on `main` |
@@ -105,23 +119,22 @@ Selecting Curvegrid makes us eligible for all three $1,000 tracks: Best RWA Toke
 | Requirement | Status |
 |---|---|
 | GitHub repo with project artifacts (contracts, tests, documentation) | OK: tests, fork scenarios, spec pack |
-| README with 1) one-sentence summary 2) how MultiBaas was used (optional) 3) team intro and social handles 4) setup and testing instructions 5) experience with MultiBaas | Structure OK after this lane (dashboard.md §12.1 order). "Team handles": **TODO-HANDLES** for L0. MultiBaas query reconciliation [PENDING L4] |
-| Dashboard "helps users understand their digital assets, identify actions, make better operational decisions" | [PENDING L2/L3/L4] live dashboard with real Base pool data |
+| README with 1) one-sentence summary 2) how MultiBaas was used (optional) 3) team intro and social handles 4) setup and testing instructions 5) experience with MultiBaas | OK: five sections in the dashboard.md §12.1 order, each claim linked to evidence |
+| Dashboard "helps users understand their digital assets, identify actions, make better operational decisions" | OK: live at https://app.mamoru.lol, with the Base pool read every 2 minutes and every figure chipped with its chain and source |
 
 ## 5. Rules that apply to every project
 
 | Rule | Status |
 |---|---|
-| Open source, repo public and stays public | Public: OK. License: MISSING (see §3) |
-| Version control, commit frequently, no large single commits | OK: 37+ small commits on main since 25 Sep 14:03 CEST, lanes pushing small commits |
-| AI attribution: document where and how AI tools were used, which parts | FIX: AI-use field exists; README gets a short "How this was built" line. Draft in `submission.md` §6 |
-| Spec-driven development: include all spec files, prompts and planning artifacts in the repo | OK for `specs/001-mamoru-v1/`, `.specify/`, `inputs/`. RISK: the lane briefs used tonight (prompts to the agents) are not in the repo. L0 may add them under `docs/` or `inputs/` |
-| Clearly distinguish what is new and what is reused | FIX: README says which dependencies are third-party (Safe, Rhinestone modules, Uniswap periphery, viem) |
+| Open source, repo public and stays public | OK: public, MIT `LICENSE` on main |
+| Version control, commit frequently, no large single commits | OK: root commit `c12207d` on 25 Sep 14:03 CEST, then small conventional commits on main and on the lane branches |
+| AI attribution: document where and how AI tools were used, which parts | OK: `docs/process/ai-attribution.md`, the README line, and `submission.md` §6 for the form field |
+| Spec-driven development: include all spec files, prompts and planning artifacts in the repo | OK for `specs/001-mamoru-v1/`, `.specify/`, `inputs/`. RISK: the lane briefs used tonight (the prompts to the agents) are not in the repo. `docs/process/ai-attribution.md` describes them, but the texts themselves are missing |
+| Clearly distinguish what is new and what is reused | OK: README lists the third-party code used as published |
 
-## 6. Track eligibility (RISK, Ot decides)
+## 6. Track
 
-- Classic "From Scratch" rule: "all work on your project must begin after the hackathon officially starts. Any prior project-specific code, designs, or assets are not allowed unless they're from public libraries or starter kits. Projects built before the event ... won't qualify for partner prizes."
-- Hacking began Fri 25 Sep 21:00 JST (14:00 CEST). GitHub: `ottodevs/mamoru` created 12:03 UTC (21:03 JST), first commit 14:03 CEST; `ottodevs/mamoru-landing` created 12:14 UTC. Both start after the official start.
+Decision: Building from Scratch. Hacking began Fri 25 Sep 21:00 JST (14:00 CEST). Both repos, `ottodevs/mamoru` and `ottodevs/mamoru-landing`, were created after that.
 
 ## 7. Uniswap Developer Feedback Form (https://developers.uniswap.org/hackathon-feedback)
 
@@ -129,12 +142,9 @@ Fields: first name*, last name, email*, Telegram handle*, which hackathon*, comp
 
 ## 8. At-risk list for L0 (in order of cost if missed)
 
-1. Screenshots: form requires at least 3, none uploaded.
-2. Uniswap proof link and texts point to deleted branch `spec/mamoru-v1` (404).
-3. Uniswap feedback form not submitted; must contain the FEEDBACK.md link.
-4. No LICENSE on main (open-source requirement for Uniswap and ETHGlobal).
-5. Video: none yet; must be 2 to 4 min, 720p+, human voice, no music, not sped up.
-6. Description and short description claim yield harvesting; v1 is simulation mode.
-7. README "Team handles": TODO-HANDLES until Ot gives them.
-8. Track eligibility question in §6.
-9. Landing https://mamoru.lol (linked from the form as a second repo and the current demo link) claims APY in its hero. Partners read it.
+1. Screenshots: the form needs at least 3 and none are uploaded. Use §2.2.1.
+2. Form texts still point to the deleted branch `spec/mamoru-v1` (the Uniswap proof link returns 404) and still claim yield. Paste `submission.md` §1 to §8.
+3. Uniswap feedback form: not submitted. It must contain the FEEDBACK.md link (`uniswap-feedback-form.md`).
+4. Video: none yet. It must be 2 to 4 minutes, at least 720p, a human voice, no music, not sped up (`video-script.md`).
+5. The landing https://mamoru.lol claims APY in its hero and is linked from the form as the second repo. Partners read it.
+6. "How it's made" draft is about 3,300 characters. The form states only a minimum; if it refuses the text, cut the Verification paragraph first.

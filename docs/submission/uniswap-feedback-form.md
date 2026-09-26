@@ -6,30 +6,30 @@ FEEDBACK.md link: https://github.com/ottodevs/mamoru/blob/main/FEEDBACK.md
 
 | Field | Required | Answer |
 |---|---|---|
-| First name | yes | [L0: Ot's first name as on ETHGlobal] |
+| First name | yes | [L0: the submitter's first name] |
 | Last name | no | [L0] |
 | Email | yes | [L0: the email on the ETHGlobal account] |
-| Telegram handle | yes | [L0: ask Ot] |
+| Telegram handle | yes | [L0: the submitter's handle] |
 | Which hackathon did you participate in? | yes | ETHGlobal Tokyo 2026 |
 | Did you complete a project during the hackathon? | yes | Yes |
 | What did you build? | yes | see below |
 | Are you building an AI-powered or agentic project? | yes | "Yes: a bot / agent that executes onchain actions" (Mamoru is an autonomous savings agent that plans Uniswap v3 actions for a Safe through a scoped session key; in v1 it runs in simulation mode and does not send) |
-| Were you able to successfully integrate Uniswap into your project? | yes | Partially [PENDING L1: "Yes" if the T003 harvest on the fork passes before submission] |
-| How long did it take to get your first successful integration working? | yes | [Ot decides: the commits `336cf88` (registry) and `6503732` (call builders) share one timestamp, so the history does not show it] |
+| Were you able to successfully integrate Uniswap into your project? | yes | Yes (call builders and QuoterV2 quotes; swaps, mints and a harvest executed on a Base fork, M02 to M04) |
+| How long did it take to get your first successful integration working? | yes | [team decides: the commits `336cf88` (registry) and `6503732` (call builders) share one timestamp, so the history does not show it] |
 | What was the biggest blocker you faced? | no | see below |
 | If applicable: what was the hardest part of building an agentic app on Uniswap? | no | see below |
-| How helpful was the Uniswap documentation for your use case? (1-5) | yes | 4 [Ot decides] |
-| How would you rate the support Uniswap provided overall? (1-5) | yes | 4 [Ot decides; we did not use office hours] |
+| How helpful was the Uniswap documentation for your use case? (1-5) | yes | 4 [team decides] |
+| How would you rate the support Uniswap provided overall? (1-5) | yes | 4 [team decides; we did not use office hours] |
 | Do you plan to continue building the project? | yes | Yes |
 | What type of support did you use? | yes | Technical docs |
 | What support was missing, or could have been better? | no | see below |
 | Any additional feedback? | no | see below |
-| Can we follow up with you about your feedback? | no | Yes [Ot decides] |
-| I agree to Uniswap Labs Terms of Service and Privacy Policy | yes | L0 ticks it only with Ot's consent |
+| Can we follow up with you about your feedback? | no | Yes [team decides] |
+| I agree to Uniswap Labs Terms of Service and Privacy Policy | yes | L0 ticks it only with the submitter's consent |
 
 ## What did you build?
 
-> Mamoru, a non-custodial savings account on Base. The user owns a Safe smart account with a passkey. A scoped Rhinestone Smart Session may call only Uniswap v3 on Base: SwapRouter02.exactInputSingle with the account as recipient and a positive minimum, and NonfungiblePositionManager mint, decreaseLiquidity, collect and burn with ticks on the pool spacing and positive minimums. On a Base fork pinned at block 51811000 we attack that session with a leaked key (24 scenarios) and every attack is rejected by the chain. In v1 production Mamoru runs in simulation mode: it plans and simulates, and does not sign or send. Repo: https://github.com/ottodevs/mamoru. Feedback: https://github.com/ottodevs/mamoru/blob/main/FEEDBACK.md
+> Mamoru, a non-custodial savings account on Base. The user owns a Safe smart account with a passkey. A scoped Rhinestone Smart Session may call only Uniswap v3 on Base: SwapRouter02.exactInputSingle with the account as recipient and a positive minimum, and NonfungiblePositionManager mint, decreaseLiquidity, collect and burn with ticks on the pool spacing and positive minimums. On a Base fork pinned at block 51811000 we attack that session with a leaked key (24 scenarios) and every attack is rejected by the chain. On the same fork the engine enters the USDC/cbBTC 0.05% pool with a swap and a mint (minimum from QuoterV2) and harvests the fees to USDC. In production it reads that pool on Base every 2 minutes. In v1 production Mamoru runs in simulation mode: it plans and simulates, and does not sign or send. Repo: https://github.com/ottodevs/mamoru. Feedback: https://github.com/ottodevs/mamoru/blob/main/FEEDBACK.md
 
 ## What was the biggest blocker you faced?
 
