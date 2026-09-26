@@ -67,7 +67,7 @@ export function TapeChart({ frames, at }: { frames: readonly TapeFrame[]; at: nu
         ) : null,
       )}
       {line ? <polyline points={line} fill="none" stroke="var(--color-alert)" strokeWidth={1} strokeDasharray="3 3" /> : null}
-      <text x={L} y={FEE_TOP - 6} fontFamily="var(--font-mono)" fontSize={9} letterSpacing="0.08em" fill="var(--color-stone)">
+      <text x={L} y={FEE_TOP - 6} fontFamily="var(--font-mono)" fontSize={11} letterSpacing="0.08em" fill="var(--color-stone)">
         FEES · HARVEST LINE
       </text>
       <line x1={x(at)} x2={x(at)} y1={TOP} y2={FEE_BOT} stroke="var(--color-ink)" strokeOpacity={0.35} strokeWidth={1} data-testid="lab-cursor" />
