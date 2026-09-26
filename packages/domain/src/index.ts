@@ -9,3 +9,4 @@ export const FORBIDDEN_LAB_CHAIN_IDS: readonly number[] = [BASE_CHAIN_ID, BASE_S
 export type * from './dashboard-payload.ts'
 export { PRODUCTION_BANNER, LIVE_BANNER } from './dashboard-payload.ts'
 export type * from './app-api.ts'
+export type * from './scenario-tape.ts'
