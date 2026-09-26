@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { concat, decodeFunctionData, getAddress, keccak256, numberToHex, pad, slice, type Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, safe7579LaunchpadAbi, safeAbi, safeProxyFactoryAbi } from '@mamoru/registry'
-import { createProxyCall, safeInitializer } from '../safe/index.ts'
+import { address, multiSendCallOnlyAbi, safe7579LaunchpadAbi, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi } from '@mamoru/registry'
+import { OPERATION_DELEGATECALL, createProxyCall, packVerifiers, safeInitializer, webAuthnSigner, type WebAuthnSigner } from '../safe/index.ts'
 import {
   SAFE_PROXY_141_CREATION_CODE,
   WALKAWAY_DOC,
@@ -16,6 +16,27 @@ import {
 const BACKUP: Address = getAddress('0x00000000000000000000000000000000000000b1')
 const OWNERS: Address[] = [address('SafeWebAuthnSharedSigner'), BACKUP]
 const SALT_NONCE = 7n
+// Public key of the software passkey a1 (packages/scenarios/webauthn); test material only.
+const PASSKEY: WebAuthnSigner = webAuthnSigner(
+  0x984225585d2285c138033d6140e3cef8b91859704e53c313f8b636ba4f967649n,
+  0x9734144f46fd19a767a545287c4396b97b69dd38faaea8981adc1a4fed9b401en,
+)
+
+/** Unpacks MultiSend transactions: uint8 op, address to, uint256 value, uint256 len, bytes data. */
+function unpackMultiSend(packed: Hex): { operation: number; to: Address; value: bigint; data: Hex }[] {
+  const out: { operation: number; to: Address; value: bigint; data: Hex }[] = []
+  const hex = packed.slice(2)
+  for (let o = 0; o < hex.length; ) {
+    const operation = parseInt(hex.slice(o, o + 2), 16)
+    const to = getAddress(`0x${hex.slice(o + 2, o + 42)}`)
+    const value = BigInt(`0x${hex.slice(o + 42, o + 106)}`)
+    const len = Number(BigInt(`0x${hex.slice(o + 106, o + 170)}`))
+    const data = `0x${hex.slice(o + 170, o + 170 + len * 2)}` as Hex
+    out.push({ operation, to, value, data })
+    o += 170 + len * 2
+  }
+  return out
+}
 const PIDS: Hex[] = [`0x${'11'.repeat(32)}`, `0x${'22'.repeat(32)}`]
 
 /** CREATE2 as SafeProxyFactory 1.4.1 computes it, written out byte by byte. */
@@ -27,17 +48,24 @@ function factoryCreate2(initializer: Hex, saltNonce: bigint): Address {
 }
 
 describe('counterfactual address', () => {
-  const setup = accountSetup(OWNERS, SALT_NONCE)
+  const setup = accountSetup(OWNERS, SALT_NONCE, PASSKEY)
 
-  test('setup: the owners, threshold 1, Safe7579, Smart Sessions with no sessions', () => {
+  test('setup: the owners, threshold 1, Safe7579, Smart Sessions with no sessions, passkey configured in the same setup', () => {
     const decoded = decodeFunctionData({ abi: safeAbi, data: safeInitializer(setup) })
     if (decoded.functionName !== 'setup') throw new Error('not Safe.setup')
     const [owners, threshold, to, data, fallbackHandler] = decoded.args
     expect(owners).toEqual(OWNERS)
     expect(threshold).toBe(1n)
-    expect(to).toBe(address('Safe7579Launchpad'))
+    expect(to).toBe(address('MultiSend_141'))
     expect(fallbackHandler).toBe(address('Safe7579'))
-    const launch = decodeFunctionData({ abi: safe7579LaunchpadAbi, data })
+    const batch = decodeFunctionData({ abi: multiSendCallOnlyAbi, data })
+    const [launchCall, configureCall] = unpackMultiSend(batch.args[0])
+    expect(unpackMultiSend(batch.args[0])).toHaveLength(2)
+    expect([launchCall!.operation, launchCall!.to, launchCall!.value]).toEqual([OPERATION_DELEGATECALL, address('Safe7579Launchpad'), 0n])
+    expect([configureCall!.operation, configureCall!.to, configureCall!.value]).toEqual([OPERATION_DELEGATECALL, address('SafeWebAuthnSharedSigner'), 0n])
+    const cfg = decodeFunctionData({ abi: safeWebAuthnSharedSignerAbi, data: configureCall!.data })
+    expect(cfg.args[0]).toEqual({ x: PASSKEY.x, y: PASSKEY.y, verifiers: packVerifiers(0x100, address('P256Verifier')) })
+    const launch = decodeFunctionData({ abi: safe7579LaunchpadAbi, data: launchCall!.data })
     const [adapter, validators, executors, fallbacks, hooks, attesters, attesterThreshold] = launch.args
     expect(adapter).toBe(address('Safe7579'))
     expect(validators).toEqual([{ module: address('SmartSession'), initData: '0x' }])
@@ -58,21 +86,40 @@ describe('counterfactual address', () => {
 
   test('saltNonce and owner order change the address', () => {
     const a = counterfactualAddress(setup)
-    expect(counterfactualAddress(accountSetup(OWNERS, SALT_NONCE + 1n))).not.toBe(a)
-    expect(counterfactualAddress(accountSetup([...OWNERS].reverse(), SALT_NONCE))).not.toBe(a)
+    expect(counterfactualAddress(accountSetup(OWNERS, SALT_NONCE + 1n, PASSKEY))).not.toBe(a)
+    expect(counterfactualAddress(accountSetup([...OWNERS].reverse(), SALT_NONCE, PASSKEY))).not.toBe(a)
   })
 
-  test('refuses an account with no owner', () => expect(() => accountSetup([], 0n)).toThrow())
+  test('the address commits to the passkey: another key or verifier gives another address', () => {
+    const a = counterfactualAddress(setup)
+    expect(counterfactualAddress(accountSetup(OWNERS, SALT_NONCE, { ...PASSKEY, x: PASSKEY.x + 1n }))).not.toBe(a)
+    expect(counterfactualAddress(accountSetup(OWNERS, SALT_NONCE, { ...PASSKEY, verifiers: packVerifiers(0x100, BACKUP) }))).not.toBe(a)
+  })
+
+  test('refuses a shared-signer owner without its passkey, and a passkey without the shared-signer owner', () => {
+    expect(() => accountSetup(OWNERS, SALT_NONCE, null)).toThrow()
+    expect(() => accountSetup([BACKUP], SALT_NONCE, PASSKEY)).toThrow()
+  })
+
+  test('without a passkey owner the setup delegatecalls the launchpad directly', () => {
+    const decoded = decodeFunctionData({ abi: safeAbi, data: safeInitializer(accountSetup([BACKUP], SALT_NONCE, null)) })
+    expect(decoded.args[2]).toBe(address('Safe7579Launchpad'))
+  })
+
+  test('refuses an account with no owner', () => expect(() => accountSetup([], 0n, null)).toThrow())
 })
 
 describe('recovery kit', () => {
-  const input: RecoveryKitInput = { chainId: 31337, owners: OWNERS, saltNonce: SALT_NONCE, permissionIds: PIDS, tokenIds: [42n, 43n] }
+  const input: RecoveryKitInput = { chainId: 31337, owners: OWNERS, saltNonce: SALT_NONCE, webauthn: PASSKEY, permissionIds: PIDS, tokenIds: [42n, 43n] }
   const kit = recoveryKit(input)
 
   test('carries the FR-ONB-006 fields and nothing else', () => {
-    expect(Object.keys(kit).sort()).toEqual(['address', 'chainId', 'modules', 'owners', 'permissionIds', 'setup', 'tokenIds', 'walkaway'])
+    expect(Object.keys(kit).sort()).toEqual(['address', 'chainId', 'modules', 'owners', 'permissionIds', 'setup', 'tokenIds', 'walkaway', 'webauthn'])
     expect(kit.chainId).toBe(31337)
-    expect(kit.address).toBe(counterfactualAddress(accountSetup(OWNERS, SALT_NONCE)))
+    expect(kit.address).toBe(counterfactualAddress(accountSetup(OWNERS, SALT_NONCE, PASSKEY)))
+    expect(kit.webauthn).toEqual({ signer: address('SafeWebAuthnSharedSigner'), x: PASSKEY.x.toString(), y: PASSKEY.y.toString(), verifiers: PASSKEY.verifiers.toString() })
+    const [, , to, data] = decodeFunctionData({ abi: safeAbi, data: kit.setup.initializer }).args as unknown as [unknown, unknown, Address, Hex]
+    expect([kit.setup.to, kit.setup.data]).toEqual([to, data])
     expect(kit.owners).toEqual(OWNERS)
     expect(kit.permissionIds).toEqual(PIDS)
     expect(kit.tokenIds).toEqual(['42', '43'])
@@ -88,7 +135,7 @@ describe('recovery kit', () => {
 
   test('the kit alone rebuilds the deploy call and the address', () => {
     const fromJson = JSON.parse(JSON.stringify(kit))
-    expect(deployCallFromKit(fromJson)).toEqual(createProxyCall(accountSetup(OWNERS, SALT_NONCE)))
+    expect(deployCallFromKit(fromJson)).toEqual(createProxyCall(accountSetup(OWNERS, SALT_NONCE, PASSKEY)))
     expect(factoryCreate2(fromJson.setup.initializer, BigInt(fromJson.setup.saltNonce))).toBe(kit.address)
   })
 

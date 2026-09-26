@@ -24,30 +24,54 @@ export const OPERATION_DELEGATECALL = 1
 
 export type ModuleInit = { module: Address; initData: Hex }
 
+/** Passkey coordinates and packed verifiers stored in SafeWebAuthnSharedSigner for the account. */
+export type WebAuthnSigner = { x: bigint; y: bigint; verifiers: bigint }
+
 export type SafeSetup = {
   owners: Address[]
   threshold: bigint
   validators: ModuleInit[]
   saltNonce: bigint
+  /** Required when SafeWebAuthnSharedSigner is an owner: configured inside Safe.setup, so the address commits to it. */
+  webauthn?: WebAuthnSigner
 }
 
 /**
- * Safe.setup with Safe7579 as fallback handler. The launchpad's addSafe7579 is
- * delegatecalled during setup: it enables Safe7579 as module and installs the
- * given validators. The deployed Safe7579 requires at least one ERC-7484
- * attester; the account trusts only the Rhinestone attester, threshold 1.
+ * The delegatecall Safe.setup makes. The launchpad's addSafe7579 enables
+ * Safe7579 as module and installs the given validators. The deployed Safe7579
+ * requires at least one ERC-7484 attester; the account trusts only the
+ * Rhinestone attester, threshold 1. With a passkey owner, MultiSend 1.4.1
+ * also delegatecalls SafeWebAuthnSharedSigner.configure in the same setup.
  */
-export function safeInitializer(setup: SafeSetup): Hex {
+export function setupDelegate(setup: SafeSetup): { to: Address; data: Hex } {
+  const sharedSigner = address('SafeWebAuthnSharedSigner').toLowerCase()
+  const ownsWithPasskey = setup.owners.some((o) => o.toLowerCase() === sharedSigner)
+  if (ownsWithPasskey !== !!setup.webauthn) throw new Error('SafeWebAuthnSharedSigner is an owner exactly when the setup carries its passkey')
   const safe7579 = address('Safe7579')
-  const addSafe7579 = encodeFunctionData({
-    abi: safe7579LaunchpadAbi,
-    functionName: 'addSafe7579',
-    args: [safe7579, setup.validators, [], [], [], [address('RhinestoneAttester')], 1],
-  })
+  const launch = {
+    to: address('Safe7579Launchpad'),
+    data: encodeFunctionData({
+      abi: safe7579LaunchpadAbi,
+      functionName: 'addSafe7579',
+      args: [safe7579, setup.validators, [], [], [], [address('RhinestoneAttester')], 1],
+    }),
+  }
+  if (!setup.webauthn) return launch
+  const cfg = configureSharedSigner(setup.webauthn.x, setup.webauthn.y, setup.webauthn.verifiers)
+  const packed = concat(
+    [launch, cfg].map((c) => encodePacked(['uint8', 'address', 'uint256', 'uint256', 'bytes'], [OPERATION_DELEGATECALL, c.to, 0n, BigInt(size(c.data)), c.data])),
+  )
+  // MultiSend 1.4.1 has the same multiSend(bytes) signature as MultiSendCallOnly, but allows delegatecall entries.
+  return { to: address('MultiSend_141'), data: encodeFunctionData({ abi: multiSendCallOnlyAbi, functionName: 'multiSend', args: [packed] }) }
+}
+
+/** Safe.setup with Safe7579 as fallback handler and setupDelegate as the setup delegatecall. */
+export function safeInitializer(setup: SafeSetup): Hex {
+  const delegate = setupDelegate(setup)
   return encodeFunctionData({
     abi: safeAbi,
     functionName: 'setup',
-    args: [setup.owners, setup.threshold, address('Safe7579Launchpad'), addSafe7579, safe7579, zeroAddress, 0n, zeroAddress],
+    args: [setup.owners, setup.threshold, delegate.to, delegate.data, address('Safe7579'), zeroAddress, 0n, zeroAddress],
   })
 }
 
@@ -148,6 +172,14 @@ export function configureSharedSigner(x: bigint, y: bigint, verifiers: bigint): 
  */
 export function packVerifiers(precompile: number, fallback: Address): bigint {
   return (BigInt(precompile) << 160n) | BigInt(fallback)
+}
+
+/** RIP-7212 P-256 precompile address. */
+export const P256_PRECOMPILE_ADDRESS = 0x100
+
+/** A passkey owner verified by the RIP-7212 precompile, with the pinned P256Verifier as fallback. */
+export function webAuthnSigner(x: bigint, y: bigint): WebAuthnSigner {
+  return { x, y, verifiers: packVerifiers(P256_PRECOMPILE_ADDRESS, address('P256Verifier')) }
 }
 
 // ERC-7579 execution modes (Safe7579.execute)
