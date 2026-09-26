@@ -7,6 +7,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "bun test",
     "sync:once": "bun scripts/sync-once.ts",
+    "mb:probe": "bun scripts/multibaas-probe.ts",
     "dev": "wrangler dev --local --test-scheduled"
   },
   "dependencies": {
