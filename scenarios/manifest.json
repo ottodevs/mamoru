@@ -59,7 +59,6 @@
       "TimeFramePolicy": "0xfe83529b2df328020b49b8e728f62e571e21a38b3b7e59e75d6c6629a38cd87c",
       "UsageLimitPolicy": "0x1996dc03fa5ad5714c3a9a693239dfae75733efe7c27c1398e0c5df6f320aae9",
       "UniActionPolicy": "0xc58f13d259c69d0db90f611347535e2d5642f3352740b7d58fbf6e6b939670dd",
-      "ValueLimitPolicy": "0xc5efddfaf9a5fad8cb996f1fd03056926af11ebd4496a7a7758e2e4315a7865e",
       "SafeWebAuthnSharedSigner": "0xeaa32d0280053e2feea48a7c3fa15a535cd07c23ff60c9469cfa1999533e9332",
       "SafeWebAuthnSignerFactory": "0xbe9db61b4ee533cb4b1136ef244141db4ca3b7867b44d154db9faeb22f39d7bb",
       "P256Verifier": "0x3cd725b6ba67b40b7979190c41a015e82cf21e098eb61832ba623f8538bab7fc",
