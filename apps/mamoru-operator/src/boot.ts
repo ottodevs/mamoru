@@ -30,7 +30,7 @@ export async function bootOperator(o: BootOptions) {
   const client = createPublicClient({ transport: http(o.rpcUrl, { batch: true, timeout: 60_000 }) })
   const chainId = await client.getChainId()
   const live = chainId === BASE_CHAIN_ID && process.env.MAMORU_LIVE === '1'
-  const policy = POLICIES[o.policyId ?? 'conservador-live-v1']
+  const policy = POLICIES[o.policyId ?? 'conservador-live-v2']
   if (!policy) throw new Error(`unknown policy ${o.policyId}`)
   const store = new StateStore(o.stateDir)
   const relayer = new Relayer(loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey), client, o.rpcUrl, chainId)

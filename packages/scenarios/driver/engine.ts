@@ -54,7 +54,7 @@ export type EngineHooks = {
   /** Lets one block pass on the fork. The engine itself never calls anvil methods. */
   waitBlock: () => Promise<void>
   /** The owner activates `manage:<tokenId>` for a position that enter-mint minted (plan §12.4). */
-  requestManageGrant: (tokenId: bigint) => Promise<EngineSession>
+  requestManageGrant: (tokenId: bigint, pool: string) => Promise<EngineSession>
 }
 
 export type ReviewResult =
@@ -340,7 +340,7 @@ export class Engine {
       )
       if (!minted) throw new Error(`${op.opId}: confirmed mint without a position transfer to the account`)
       op.mintedTokenId = minted.args.tokenId
-      this.addSession(await this.hooks.requestManageGrant(minted.args.tokenId))
+      this.addSession(await this.hooks.requestManageGrant(minted.args.tokenId, proposal.pool))
     }
     if (proposal.kind === 'harvest') {
       const inc = op.included!

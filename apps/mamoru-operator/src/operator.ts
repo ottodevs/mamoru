@@ -5,7 +5,7 @@ import type { AccountContext, Address, FundingView, OpView, OwnerSignature, Owne
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import { simulateCalls, type SimCallResult } from '@mamoru/rpc'
-import { computeCaps, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
+import { POLICIES, computeCaps, grantKey, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -28,7 +28,8 @@ import { permissionIdOf, toSmartSession } from '@mamoru/account/sessions'
 import { minOut, quoteExactInputSingle } from '@mamoru/uniswap-v3/quote'
 import { Engine, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
-import { LIVE_POOL, amountsForLiquidity, cbbtcInUsdc, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
+import { USDC_POOLS, amountsForLiquidity, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
+import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
 import { Lock } from './lock.ts'
 import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
@@ -99,6 +100,16 @@ function engineKind(k: OpRecord['kind']): OpView['kind'] {
 
 const now = () => new Date().toISOString()
 
+/** Accounts activated before the operator stored a policy id per account ran this policy. */
+const LEGACY_POLICY = 'conservador-live-v1'
+const LIVE_POOL_NAME = 'pool:USDC/cbBTC/500'
+
+/** "USDC/cbBTC 0.05%" for pool:USDC/cbBTC/500. */
+function poolLabel(pool: string): string {
+  const e = entry(pool)
+  return `${e.token0}/${e.token1} ${(e.fee! / 10_000).toFixed(2)}%`
+}
+
 export class Operator {
   private readonly prepared = new Map<string, Prepared>()
   private readonly locks = new Map<string, Lock>()
@@ -157,6 +168,18 @@ export class Operator {
     return { acc, live }
   }
 
+  /** The policy the account was activated with; accounts activated before policy ids were stored run conservador-live-v1. */
+  policyOf(acc: AccountState): PolicyVersion {
+    if (!acc.policyId) return acc.active || acc.grants.length ? (POLICIES[LEGACY_POLICY] ?? this.cfg.policy) : this.cfg.policy
+    const p = POLICIES[acc.policyId]
+    if (!p) throw new Error(`${acc.accountKey}: unknown policy ${acc.policyId}`)
+    return p
+  }
+
+  private bucketPools(acc: AccountState): string[] {
+    return this.policyOf(acc).buckets.flatMap((b) => b.pools)
+  }
+
   async funding(ctx: AccountContext): Promise<FundingView> {
     const { acc, live } = this.account(ctx)
     const r = await readSafe(this.client, live.safe)
@@ -168,15 +191,15 @@ export class Operator {
       eth: r.eth.toString(),
       capUsdc: LIVE_CAP_USDC.toString(),
       cbbtc: r.cbbtc.toString(),
-      gasReserveWei: this.cfg.policy.gasReserveWei.toString(),
+      gasReserveWei: this.policyOf(acc).gasReserveWei.toString(),
       active: acc.active,
       positions: r.positions.map((p) => ({
         tokenId: p.tokenId.toString(),
-        pool: LIVE_POOL,
+        pool: p.pool,
         liquidity: p.liquidity.toString(),
         inRange: p.inRange,
-        amountUsdc: p.amount0.toString(),
-        amountCbbtc: p.amount1.toString(),
+        amountUsdc: (p.token0 === 'USDC' ? p.amount0 : p.amount1).toString(),
+        amountCbbtc: (p.token0 === 'cbBTC' ? p.amount0 : p.token1 === 'cbBTC' ? p.amount1 : 0n).toString(),
       })),
     }
   }
@@ -222,11 +245,18 @@ export class Operator {
     const policy = this.cfg.policy
     // Sized at the account cap, not the observed deposit: the same signature bounds any deposit up to the cap,
     // so the owner can sign before any USDC arrives (armed activation).
-    const caps = computeCaps(policy, LIVE_CAP_USDC, { cbBTC: { num: r.sqrtPriceX96 * r.sqrtPriceX96, den: 1n << 192n } })
+    const prices = Object.fromEntries(
+      [...new Set([LIVE_POOL_NAME, ...policy.buckets.flatMap((b) => b.pools)])].map((pool) => {
+        const pr = priceOf(pool, r.prices[pool]!.sqrtPriceX96)
+        return [pr.asset, { num: pr.num, den: pr.den }]
+      }),
+    )
+    const caps = computeCaps(policy, LIVE_CAP_USDC, prices)
     const block = await this.client.getBlock({ blockNumber: r.block })
     const t = Number(block.timestamp)
-    const grants = (['enter-swap', 'enter-mint'] as const).map((name) =>
-      instantiateGrant(policy, name, {
+    const keys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
+    const grants = keys.map((key) =>
+      instantiateGrant(policy, key, {
         account: live.safe,
         sessionKey,
         chainId: this.cfg.chainId,
@@ -238,7 +268,19 @@ export class Operator {
       }),
     )
     const batch = activationBatch(live, grants, acc.revoked, { trust: !acc.trusted })
-    const stored = grants.map((g, i) => ({ name: g.name, grant: g, permissionId: batch.permissionIds[i]! }))
+    const stored = grants.map((g, i) => ({ name: keys[i]!, grant: g, permissionId: batch.permissionIds[i]! }))
+    const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!)} ${b.preference / 100}%`)
+    if (pools.length > 1) {
+      const summary = [
+        `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
+        r.usdc > 0n
+          ? `Let Mamoru's engine keep your ${fmtUsdc(r.usdc)} USDC invested across Uniswap v3 ${pools.join(', ')}`
+          : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
+        `Engine key ${sessionKey} may only swap USDC into those pools' tokens and mint those pools, for ${Math.round(policy.session.validitySeconds / 86_400)} days`,
+        `Funds never leave your Safe without your passkey; cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`,
+      ]
+      return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })
+    }
     const summary = [
       `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
       r.usdc > 0n
@@ -269,17 +311,21 @@ export class Operator {
     if (to.toLowerCase() === live.safe.toLowerCase()) throw new HttpError(400, 'BAD_REQUEST', 'recipient is the Safe itself')
     const r = await readSafe(this.client, live.safe)
     if (!r.deployed) throw new HttpError(409, 'NOT_DEPLOYED', 'the Safe is not deployed yet')
-    const slip = this.cfg.policy.execution.slippageBps
+    const slip = this.policyOf(acc).execution.slippageBps
     let reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[] = []
-    let swap: LiveSwap | undefined
+    let swaps: SwapBack[] = []
     if (r.usdc < amount) {
-      const plan = await this.reducePlan(live.safe, r, amount, slip)
+      const plan = await this.reducePlan(acc, live.safe, r, amount, slip)
       reduce = plan.reduce
-      swap = plan.swap
+      swaps = plan.swaps
     }
     const out = asset === 'USDC' ? undefined : await this.receiveQuote(asset, amount, r.block, slip)
     const deadline = (await this.client.getBlock()).timestamp + 1800n
-    const calls = transferBatch({ account: live.safe, to, amountUsdc: amount, reduce: reduce.map((x) => x.lp), swapCbbtc: swap, deadline, receive: out?.receive })
+    const calls = [
+      ...closeCalls(live.safe, reduce.map((x) => x.lp), deadline, false),
+      ...swapBackCalls(live.safe, swaps),
+      ...transferBatch({ account: live.safe, to, amountUsdc: amount, reduce: [], deadline, receive: out?.receive }),
+    ]
     const probe = out ? balanceProbe(asset, to) : undefined
     const sim = await this.simulateFromSafe(live.safe, calls, r.block, probe)
     if (out && probe) {
@@ -288,8 +334,8 @@ export class Operator {
     }
     const short = `${to.slice(0, 6)}…${to.slice(-4)}`
     const summary = [
-      ...reduce.map((x) => `Withdraw ${(x.bps / 100).toFixed(2)}% of position #${x.pos.tokenId} (USDC/cbBTC 0.05%)`),
-      ...(swap ? [`Swap ${swap.amountIn} cbBTC units to at least ${fmtUsdc(swap.amountOutMinimum)} USDC`] : []),
+      ...reduce.map((x) => `Withdraw ${(x.bps / 100).toFixed(2)}% of position #${x.pos.tokenId} (${poolLabel(x.pos.pool)})`),
+      ...swaps.map((sw) => `Swap ${sw.amountIn} ${sw.token} units to at least ${fmtUsdc(sw.amountOutMinimum)} USDC`),
       ...(out
         ? [
             `Swap ${fmtUsdc(amount)} USDC from your Safe on ${out.route}`,
@@ -344,47 +390,70 @@ export class Operator {
     return { receive: { asset: asset as 'EURC' | 'ETH', fee: best.fee, amountOutMinimum: minOut(best.out, slip) }, quoted: best.out, decimals: entry(routes.tokenOut).decimals!, route }
   }
 
-  /** Proportional decrease of the pool positions plus a cbBTC->USDC swap, sized from a simulated decrease+collect at the prepare block. */
-  private async reducePlan(safe: Address, r: SafeRead, amount: bigint, slip: number): Promise<{ reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[]; swap?: LiveSwap }> {
+  /**
+   * Withdraw: reduce the stables bucket first, then BTC, then risk (policy bucket order), only as far as needed,
+   * plus swaps of what the reduce frees back to USDC; sized from a simulated decrease+collect at the prepare block.
+   */
+  private async reducePlan(acc: AccountState, safe: Address, r: SafeRead, amount: bigint, slip: number): Promise<{ reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[]; swaps: SwapBack[] }> {
     const open = r.positions.filter((p) => p.liquidity > 0n)
-    const value = open.reduce((s, p) => s + p.amount0 + cbbtcInUsdc(p.amount1, r.sqrtPriceX96), 0n)
+    const value = open.reduce((s, p) => s + positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96), 0n)
     const need = amount - r.usdc
     if (value === 0n) throw new HttpError(409, 'INSUFFICIENT_FUNDS', `idle ${r.usdc} USDC and no position to reduce`)
     const keep = BigInt(10_000 - slip)
-    let bps = Number((need * 10_000n * 103n) / (value * 100n)) + 1
+    const order = this.bucketPools(acc)
+    let margin = 103n
     for (;;) {
-      bps = Math.min(bps, 10_000)
-      const reduce = open.map((pos) => {
+      const target = (need * margin) / 100n
+      const plan = planReduce(open, r.prices, target > value ? value : target, order)
+      const reduce = plan.map(({ pos, bps }) => {
         const liquidity = (pos.liquidity * BigInt(bps)) / 10_000n
-        const a = amountsForLiquidity(r.sqrtPriceX96, pos.tickLower, pos.tickUpper, liquidity)
+        const a = amountsForLiquidity(r.prices[pos.pool]!.sqrtPriceX96, pos.tickLower, pos.tickUpper, liquidity)
         return { pos, bps, lp: { tokenId: pos.tokenId, liquidity, amount0Min: (a.amount0 * keep) / 10_000n, amount1Min: (a.amount1 * keep) / 10_000n } }
       })
-      const got = await this.simulateCollect(safe, reduce.map((x) => x.lp), r.block)
-      const swap = await this.swapQuote(r.cbbtc + got.amount1 - 1n, r.block, slip)
-      if (r.usdc + got.amount0 + (swap?.amountOutMinimum ?? 0n) >= amount) return { reduce, swap }
-      if (bps >= 10_000) throw new HttpError(409, 'INSUFFICIENT_FUNDS', `the Safe can free about ${fmtUsdc(r.usdc + got.amount0 + (swap?.amountOutMinimum ?? 0n))} USDC, less than ${fmtUsdc(amount)}`)
-      bps = Math.ceil(bps * 1.2)
+      const got = await this.simulateCollect(safe, reduce.map((x) => ({ lp: x.lp, pos: x.pos })), r.block)
+      const swaps = await this.swapQuotes(acc, got, r.block, slip)
+      const freed = (got.USDC ?? 0n) + swaps.reduce((s, x) => s + x.amountOutMinimum, 0n)
+      if (r.usdc + freed >= amount) return { reduce, swaps }
+      if (target >= value) throw new HttpError(409, 'INSUFFICIENT_FUNDS', `the Safe can free about ${fmtUsdc(r.usdc + freed)} USDC, less than ${fmtUsdc(amount)}`)
+      margin = (margin * 120n) / 100n
     }
   }
 
-  /** What decreaseLiquidity + collect of these positions returns to the Safe, simulated from the Safe at `block`. */
-  private async simulateCollect(safe: Address, lps: LivePosition[], block: bigint): Promise<{ amount0: bigint; amount1: bigint }> {
+  /** What decreaseLiquidity + collect of these positions returns to the Safe, per token, simulated from the Safe at `block`. */
+  private async simulateCollect(safe: Address, lps: { lp: LivePosition; pos: PoolPosition }[], block: bigint): Promise<Record<string, bigint>> {
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600)
-    const calls = lps.flatMap((p) => [
+    const calls: { to: Address; data: Hex; pos?: PoolPosition }[] = lps.flatMap(({ lp: p, pos }) => [
       ...(p.liquidity > 0n ? [decreaseLiquidity({ tokenId: p.tokenId, liquidity: p.liquidity, amount0Min: p.amount0Min, amount1Min: p.amount1Min, deadline })] : []),
-      collect({ account: safe, tokenId: p.tokenId }),
+      { ...collect({ account: safe, tokenId: p.tokenId }), pos },
     ])
     const res = await this.simulateFromSafe(safe, calls, block)
-    let amount0 = 0n
-    let amount1 = 0n
+    const out: Record<string, bigint> = {}
     res.forEach((x, i) => {
-      if (calls[i]!.data.startsWith(COLLECT_SELECTOR)) {
+      const pos = calls[i]!.pos
+      if (pos && calls[i]!.data.startsWith(COLLECT_SELECTOR)) {
         const [a0, a1] = decodeFunctionResult({ abi: nonfungiblePositionManagerAbi, functionName: 'collect', data: x.returnData })
-        amount0 += a0
-        amount1 += a1
+        out[pos.token0] = (out[pos.token0] ?? 0n) + a0
+        out[pos.token1] = (out[pos.token1] ?? 0n) + a1
       }
     })
-    return { amount0, amount1 }
+    return out
+  }
+
+  /** Quotes every non-USDC amount back to USDC on its route; amounts too small to quote a positive minimum stay in the Safe. */
+  private async swapQuotes(acc: AccountState, amounts: Record<string, bigint>, blockNumber: bigint, slip: number): Promise<SwapBack[]> {
+    const out: SwapBack[] = []
+    for (const [token, raw] of Object.entries(amounts)) {
+      if (token === 'USDC') continue
+      // one unit less: collect rounding can leave the Safe a unit short of the simulated amount
+      const amountIn = raw > 1n ? raw - 1n : 0n
+      if (amountIn <= 0n) continue
+      const pool = routeOf(token, this.bucketPools(acc), USDC_POOLS)
+      if (!pool) continue
+      const q = await quoteExactInputSingle(this.client, { tokenIn: address(token), tokenOut: address('USDC'), fee: entry(pool).fee!, amountIn, blockNumber }).catch(() => 0n)
+      const amountOutMinimum = minOut(q, slip)
+      if (amountOutMinimum > 0n) out.push({ token, pool, amountIn, amountOutMinimum })
+    }
+    return out
   }
 
   /**
@@ -427,20 +496,26 @@ export class Operator {
     const { acc, live } = this.account(ctx)
     const r = await readSafe(this.client, live.safe)
     if (!r.deployed) throw new HttpError(409, 'NOT_DEPLOYED', 'the Safe is not deployed yet')
-    const slip = this.cfg.policy.execution.slippageBps
+    const slip = this.policyOf(acc).execution.slippageBps
     const keep = BigInt(10_000 - slip)
     const positions: LivePosition[] = r.positions.map((p) => ({ tokenId: p.tokenId, liquidity: p.liquidity, amount0Min: (p.amount0 * keep) / 10_000n, amount1Min: (p.amount1 * keep) / 10_000n }))
-    const got = positions.length ? await this.simulateCollect(live.safe, positions, r.block) : { amount0: 0n, amount1: 0n }
-    const swap = await this.swapQuote(r.cbbtc + got.amount1 - (got.amount1 > 0n ? 1n : 0n), r.block, slip)
+    const got = positions.length ? await this.simulateCollect(live.safe, positions.map((lp, i) => ({ lp, pos: r.positions[i]! })), r.block) : {}
+    const held: Record<string, bigint> = {}
+    for (const [t, v] of Object.entries(r.tokens)) if (t !== 'USDC' && v > 0n) held[t] = v + 1n
+    for (const [t, v] of Object.entries(got)) if (t !== 'USDC') held[t] = (held[t] ?? 1n) + v
+    const swaps = await this.swapQuotes(acc, held, r.block, slip)
     const revokes = acc.grants.map((g) => g.permissionId)
-    if (!revokes.length && !positions.length && !swap) throw new HttpError(409, 'NOTHING_TO_STOP', 'no grant, no position and no cbBTC')
+    if (!revokes.length && !positions.length && !swaps.length) throw new HttpError(409, 'NOTHING_TO_STOP', 'no grant, no position and nothing to swap back')
     const deadline = (await this.client.getBlock()).timestamp + 1800n
-    const calls = stopBatch({ account: live.safe, permissionIds: revokes, positions, swapCbbtc: swap, deadline })
+    const calls = [
+      ...(revokes.length || positions.length ? stopBatch({ account: live.safe, permissionIds: revokes, positions, deadline }) : []),
+      ...swapBackCalls(live.safe, swaps),
+    ]
     await this.simulateFromSafe(live.safe, calls, r.block)
     const summary = [
       ...(revokes.length ? [`Revoke the engine's ${revokes.length} session grant(s)`] : []),
-      ...positions.map((p) => `Close and burn position #${p.tokenId} (USDC/cbBTC 0.05%)`),
-      ...(swap ? [`Swap ${swap.amountIn} cbBTC units to at least ${fmtUsdc(swap.amountOutMinimum)} USDC`] : []),
+      ...r.positions.map((p) => `Close and burn position #${p.tokenId} (${poolLabel(p.pool)})`),
+      ...swaps.map((sw) => `Swap ${sw.amountIn} ${sw.token} units to at least ${fmtUsdc(sw.amountOutMinimum)} USDC`),
       'Everything stays in your Safe as USDC',
     ]
     return this.hold(acc, live, 'stop', calls, summary, { revokes })
@@ -609,6 +684,7 @@ export class Operator {
       acc.trusted = true
       acc.active = true
       acc.grants = p.grants ?? []
+      acc.policyId = p.grants?.[0]?.grant.policyId ?? this.cfg.policy.policyId
       acc.managedTokenIds = []
       acc.depositsAfter = receipt.blockNumber.toString()
       acc.historyFromBlock = receipt.blockNumber.toString()
@@ -628,15 +704,17 @@ export class Operator {
 
   // ---- engine side ---------------------------------------------------------
 
-  private manageSession(acc: AccountState, tokenId: bigint): EngineSession {
-    const grant = instantiateGrant(this.cfg.policy, 'manage', {
+  private manageSession(acc: AccountState, tokenId: bigint, pool?: string): EngineSession {
+    const policy = this.policyOf(acc)
+    const key = pool && policy.session.grants.some((g) => g.name === 'manage' && g.pool === pool) ? `manage:${pool}` : 'manage'
+    const grant = instantiateGrant(policy, key, {
       account: acc.ctx.address as Address,
       sessionKey: privateKeyToAccount(acc.sessionKey!).address,
       chainId: this.cfg.chainId,
       salt: toHex(randomBytes(32)),
       validAfter: 0,
       validUntil: 0,
-      caps: Object.fromEntries(this.cfg.policy.session.caps.map((c) => [c.name, 0n])),
+      caps: Object.fromEntries(policy.session.caps.map((c) => [c.name, 0n])),
       tokenId,
       admittedTokenIds: [tokenId],
     })
@@ -663,7 +741,7 @@ export class Operator {
         signingChainIds: [this.cfg.chainId],
         rpcUrl: this.cfg.rpcUrl,
         bundlerUrl: this.cfg.bundlerUrl,
-        policy: this.cfg.policy,
+        policy: this.policyOf(acc),
         account: acc.ctx.address as Address,
         sessionKey: privateKeyToAccount(acc.sessionKey),
         nonceLane: 0,
@@ -675,10 +753,10 @@ export class Operator {
       },
       {
         waitBlock: () => Bun.sleep(this.cfg.waitBlockMs),
-        requestManageGrant: async (tokenId) => {
+        requestManageGrant: async (tokenId, pool) => {
           acc.managedTokenIds.push(tokenId.toString())
           this.store.save()
-          return this.manageSession(acc, tokenId)
+          return this.manageSession(acc, tokenId, pool)
         },
       },
     )
