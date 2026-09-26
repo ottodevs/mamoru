@@ -191,6 +191,13 @@
       "codeHash": "0xecd5bd14a08c5d2122379900b2f272bdf107a7e92423c10dd5fe3254386c9939"
     },
     {
+      "name": "MultiSend_141",
+      "kind": "safe",
+      "role": "setup del Safe: delegatecall del launchpad y de la passkey",
+      "address": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
+      "codeHash": "0x0e4f7fc66550a322d1e7688e181b75e217e662a4f3f4d6a29b22bc61217c4b77"
+    },
+    {
       "name": "Multicall3",
       "kind": "read",
       "role": "solo lecturas",
