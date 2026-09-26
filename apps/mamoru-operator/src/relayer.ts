@@ -42,11 +42,12 @@ export class Relayer {
   }
 
   /** Sends and waits for the receipt. Gas is estimated with a 30% margin unless given. */
-  send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint }): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
+  send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint }, onSent?: (hash: Hex) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     return this.lock.run(async () => {
       const wallet = createWalletClient({ account: this.account, chain: this.chain, transport: http(this.rpcUrl, { timeout: 60_000 }) })
       const gas = tx.gas ?? ((await this.client.estimateGas({ account: this.account.address, to: tx.to, data: tx.data, value: tx.value })) * 13n) / 10n
       const hash = await wallet.sendTransaction({ to: tx.to, data: tx.data, value: tx.value ?? 0n, gas })
+      onSent?.(hash)
       return { hash, receipt: await this.receipt(hash) }
     })
   }

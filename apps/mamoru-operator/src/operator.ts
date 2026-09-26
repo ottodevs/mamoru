@@ -37,6 +37,12 @@ import { revertData } from './bundler.ts'
 import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
 
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
+/** An owner op whose receipt poll failed after the tx was sent: the tx may still have landed. */
+const RECEIPT_UNKNOWN = 'OWNER_TX_ERROR'
+/** Minimum gap between two receipt reconciliation passes of one account. */
+const RECONCILE_EVERY_MS = 20_000
+/** Base produces a block every 2 s; used to place a failure time on the chain when no tx hash was kept. */
+const BLOCK_SECONDS = 2n
 const PREPARE_TTL_MS = 5 * 60_000
 /** On top of the policy reserve: the first userOp prefund leaves the Safe's balance into its EntryPoint deposit. */
 const TOP_UP_MARGIN_WEI = 200_000_000_000_000n
@@ -78,6 +84,8 @@ type Prepared = {
   /** activate: the grants this tx enables. stop: the permissionIds it revokes. */
   grants?: StoredGrant[]
   revokes?: Hex[]
+  /** transfer: what the history line shows. */
+  meta?: { amountUsdc: string; asset?: string; to: Hex }
 }
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
@@ -126,6 +134,7 @@ export class Operator {
   private readonly prepared = new Map<string, Prepared>()
   private readonly locks = new Map<string, Lock>()
   private readonly runners = new Map<string, Runner>()
+  private readonly reconciled = new Map<string, number>()
   private armTimer: ReturnType<typeof setTimeout> | null = null
   private armStopped = false
   /** Owner transactions being executed right now, by accountKey. */
@@ -142,6 +151,7 @@ export class Operator {
   /** Restarts the engine loop of every account that was active. */
   resume(): void {
     for (const acc of Object.values(this.store.state.accounts)) if (acc.active) this.startLoop(acc)
+    for (const acc of Object.values(this.store.state.accounts)) this.reconcileSoon(acc)
     const armed = Object.values(this.store.state.accounts).filter((a) => a.armed).length
     if (armed) console.log(`[armed] ${armed} armed activation(s) reloaded`)
     this.armStopped = false
@@ -251,9 +261,11 @@ export class Operator {
     this.busy.set(acc.accountKey, { step, since: now() })
   }
 
-  ops(ctx: AccountContext, after: string | null): { ops: OpView[] } {
+  /** GET /ops. Failed engine ops are internal attempts: left out unless `all` (debugging). */
+  ops(ctx: AccountContext, after: string | null, includeFailedEngine = false): { ops: OpView[] } {
     const { acc } = this.account(ctx)
-    const all = collapseFailed(acc.ops)
+    this.reconcileSoon(acc)
+    const all = collapseFailed(includeFailedEngine ? acc.ops : acc.ops.filter((o) => !(o.opId.startsWith('eng-') && o.state === 'failed')))
     if (!after) return { ops: all }
     const i = all.findIndex((o) => o.opId === after)
     if (i >= 0) return { ops: all.slice(i + 1) }
@@ -392,7 +404,7 @@ export class Operator {
           ]
         : [`Send ${fmtUsdc(amount)} USDC from your Safe to ${to}`]),
     ]
-    const ownerTx = await this.hold(acc, live, 'transfer', calls, summary)
+    const ownerTx = await this.hold(acc, live, 'transfer', calls, summary, { meta: { amountUsdc: amount.toString(), ...(asset === 'USDC' ? {} : { asset }), to } })
     return {
       reduce: reduce.map((x) => ({ tokenId: x.pos.tokenId.toString(), liquidityBps: x.bps })),
       ...(out
@@ -595,6 +607,7 @@ export class Operator {
       this.disarm(acc, 'ARMED_SUPERSEDED')
     }
     const op = this.newOp(acc, kind === 'stop' ? 'exit' : kind)
+    this.stash(acc, op, p)
     const run = this.lock(acc.accountKey).run(() => this.execute(acc, live, p, signature, op))
     run.catch((e) => {
       console.error(`[owner] ${op.opId} ${(e as Error).message}`)
@@ -613,6 +626,7 @@ export class Operator {
     this.disarm(acc, 'ARMED_SUPERSEDED')
     const op = this.newOp(acc, 'activate')
     op.code = 'ARMED'
+    this.stash(acc, op, p)
     acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now() }
     this.store.save()
     console.log(`[armed] ${acc.accountKey} ${op.opId} armed for ${acc.ctx.address} at Safe nonce ${p.tx.nonce}`)
@@ -676,6 +690,15 @@ export class Operator {
     return op
   }
 
+  /** Keeps on the op what a late receipt needs to apply the owner tx (grants, revokes) and what history shows (transfer). */
+  private stash(acc: AccountState, op: OpView, p: Prepared): void {
+    const o = op as StoredOp
+    if (p.kind === 'activate' && p.grants) o.ownerGrants = p.grants
+    if (p.kind === 'stop' && p.revokes) o.revokes = p.revokes
+    if (p.meta) Object.assign(o, p.meta)
+    this.store.save()
+  }
+
   private patchOp(acc: AccountState, opId: string, patch: Partial<OpView>): void {
     const op = acc.ops.find((o) => o.opId === opId)
     if (!op) return
@@ -729,8 +752,8 @@ export class Operator {
         await Bun.sleep(3_000)
       }
     }
-    const sent = this.relayer.send({ to: safe, data })
-    const { hash, receipt } = await sent
+    // Keep the hash as soon as the tx is out: if the receipt poll fails, reconciliation reads it later.
+    const { hash, receipt } = await this.relayer.send({ to: safe, data }, (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }))
     this.patchOp(acc, op.opId, { state: 'submitted', txHash: hash })
     const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
     console.log(`[owner] ${op.opId} tx ${hash} block ${receipt.blockNumber} ${ok ? 'ok' : 'FAILED'}`)
@@ -760,6 +783,102 @@ export class Operator {
       acc.managedTokenIds = []
       this.store.save()
     }
+  }
+
+  // ---- owner side: late receipts -------------------------------------------
+
+  /** Background pass (throttled, under the account lock): owner ops failed only because the receipt poll failed. */
+  private reconcileSoon(acc: AccountState): void {
+    if (!acc.ops.some((o) => o.opId.startsWith('own-') && o.state === 'failed' && o.code === RECEIPT_UNKNOWN)) return
+    const last = this.reconciled.get(acc.accountKey) ?? 0
+    if (Date.now() - last < RECONCILE_EVERY_MS) return
+    this.reconciled.set(acc.accountKey, Date.now())
+    this.lock(acc.accountKey)
+      .run(() => this.reconcileOwner(acc))
+      .catch((e) => console.error(`[reconcile] ${acc.accountKey} ${(e as Error).message.split('\n')[0]}`))
+  }
+
+  /** Reads every owner op marked failed with an unknown receipt; a tx that executed becomes confirmed with its side effects. */
+  async reconcileOwner(acc: AccountState): Promise<void> {
+    const safe = (acc.ctx.address as string).toLowerCase()
+    for (const op of acc.ops.filter((o) => o.opId.startsWith('own-') && o.state === 'failed' && o.code === RECEIPT_UNKNOWN)) {
+      let found: { hash: Hex; block: number; ok: boolean } | null = null
+      const receipt = op.txHash ? await this.receiptOf(op.txHash as Hex) : null
+      if (receipt) {
+        const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe && l.topics[0] === EXECUTION_SUCCESS)
+        found = { hash: receipt.transactionHash, block: Number(receipt.blockNumber), ok }
+      } else found = await this.findOwnerTx(acc, op)
+      if (!found) continue
+      const { hash, block } = found
+      if (!found.ok) {
+        console.log(`[reconcile] ${op.opId} tx ${hash} did not execute`)
+        this.patchOp(acc, op.opId, { code: 'OWNER_TX_FAILED', txHash: hash, block })
+        continue
+      }
+      const i = acc.ops.indexOf(op)
+      const later = (kind: OpView['kind']) => acc.ops.slice(i + 1).some((o) => o.opId.startsWith('own-') && o.kind === kind && o.state === 'confirmed')
+      if (op.kind === 'exit' && !later('activate')) {
+        this.stopLoop(acc.accountKey)
+        this.disarm(acc, 'STOPPED')
+        acc.active = false
+        const revokes = op.revokes ?? acc.grants.map((g) => g.permissionId)
+        acc.revoked.push(...revokes.filter((r) => !acc.revoked.includes(r)))
+        acc.grants = []
+        acc.managedTokenIds = []
+        this.store.save()
+      } else if (op.kind === 'activate') {
+        if (!op.ownerGrants) {
+          console.log(`[reconcile] ${op.opId} landed but its grants were not kept; left as is`)
+          continue
+        }
+        if (!later('exit') && !acc.active) {
+          const r = receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt)
+          this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'activate', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants }, r)
+        }
+      }
+      console.log(`[reconcile] ${op.opId} tx ${hash} landed at block ${block}, confirmed`)
+      this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', txHash: hash, block })
+    }
+  }
+
+  /** The receipt, or null when the provider does not serve it after a few tries (lagging node, or publicnode's archive gate). */
+  private async receiptOf(hash: Hex): Promise<TransactionReceipt | null> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await this.client.getTransactionReceipt({ hash })
+      } catch (e) {
+        console.log(`[reconcile] receipt ${hash.slice(0, 10)} (${(e as Error).message.split('\n')[0]}), retry ${attempt + 1}`)
+        await Bun.sleep(1_500)
+      }
+    }
+    return null
+  }
+
+  /**
+   * Without a receipt: the Safe's ExecutionSuccess log in the blocks just before the failure time. Only an owner
+   * execTransaction emits it (engine userOps run through the module), so the log proves the tx executed. With a kept
+   * hash the log must carry it; without one, exactly one log not claimed by another op, or nothing.
+   */
+  private async findOwnerTx(acc: AccountState, op: StoredOp): Promise<{ hash: Hex; block: number; ok: boolean } | null> {
+    const head = await this.client.getBlock()
+    const t = BigInt(Math.floor(Date.parse(op.updatedAt) / 1000))
+    const lag = head.timestamp > t ? (head.timestamp - t) / BLOCK_SECONDS : 0n
+    const at = head.number - lag
+    const fromBlock = at > 150n ? at - 150n : 0n
+    const toBlock = at + 10n < head.number ? at + 10n : head.number
+    const logs = (await this.client.getLogs({ address: acc.ctx.address as Address, fromBlock, toBlock })).filter((l) => l.topics[0] === EXECUTION_SUCCESS && l.transactionHash)
+    const hit = (h: string) => logs.find((l) => l.transactionHash!.toLowerCase() === h.toLowerCase())
+    if (op.txHash) {
+      const l = hit(op.txHash)
+      return l ? { hash: l.transactionHash!, block: Number(l.blockNumber), ok: true } : null
+    }
+    const claimed = new Set(acc.ops.map((o) => o.txHash?.toLowerCase()).filter(Boolean))
+    const free = [...new Map(logs.filter((l) => !claimed.has(l.transactionHash!.toLowerCase())).map((l) => [l.transactionHash!, l])).values()]
+    if (free.length !== 1) {
+      if (free.length > 1) console.log(`[reconcile] ${op.opId} ${free.length} candidate txs, left as is`)
+      return null
+    }
+    return { hash: free[0]!.transactionHash!, block: Number(free[0]!.blockNumber), ok: true }
   }
 
   // ---- engine side ---------------------------------------------------------
@@ -915,7 +1034,7 @@ export function collapseFailed(ops: StoredOp[]): OpView[] {
   const out: OpView[] = []
   ops.forEach((o, i) => {
     const k = keyOf(o)
-    const { permissionId: _p, calls: _c, ...view } = o
+    const { permissionId: _p, calls: _c, ownerGrants: _g, revokes: _r, ...view } = o
     if (!k) return void out.push(view)
     if (newest.get(k) !== i) return
     const n = counts.get(k)!

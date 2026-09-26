@@ -6,7 +6,15 @@ import type { SafeTx } from '@mamoru/account/live'
 import type { Execution } from '@mamoru/account/safe'
 
 /** An op as GET /ops serves it, plus what the operator keeps: repeat count of an identical failure, and for a confirmed engine op the session and calls it used (ledger replay on restart). */
-export type StoredOp = OpView & { count?: number; permissionId?: Hex; calls?: Execution[] }
+export type StoredOp = OpView & {
+  count?: number
+  permissionId?: Hex
+  calls?: Execution[]
+  /** Owner activate: the grants its tx enables, so a late receipt can still start the engine. */
+  ownerGrants?: StoredGrant[]
+  /** Owner stop: the permissionIds its tx revokes. */
+  revokes?: Hex[]
+}
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */
 export type StoredGrant = { name: string; grant: SessionGrant; permissionId: Hex }

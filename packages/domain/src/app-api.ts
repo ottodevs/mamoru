@@ -102,6 +102,10 @@ export type OpView = {
   txHash?: Hex0x
   block?: number
   updatedAt: string
+  /** transfer: amount in USDC base units, the asset received, and the recipient. */
+  amountUsdc?: string
+  asset?: string
+  to?: Hex0x
 }
 
 // Live operator (sprint amendment 2026-09-26 21:40). The Worker authenticates the device session, then

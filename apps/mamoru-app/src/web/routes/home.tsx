@@ -10,7 +10,7 @@ import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
 import { cbbtcPrice, humanMessage, split, usd, usdInput, type Split } from '../lib/money.ts'
-import { activationLive, opLine, opTone, TERMINAL } from '../lib/ops.ts'
+import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, positionAmounts, positionTokens, progressLine } from '../lib/positions.ts'
 import { localTime } from '../lib/time.ts'
@@ -24,6 +24,9 @@ export const homeCopy = {
   add: 'Add capital',
   withdraw: 'Withdraw',
   stop: 'Stop allocation',
+  startAllocation: 'Start allocation',
+  startBody: 'Mamoru puts your idle USDC back to work in Uniswap v3 USDC/cbBTC. You approve with your passkey.',
+  retry: 'Approve again',
   start: 'Start',
   working: 'Working capital',
   idle: 'Idle assets',
@@ -97,7 +100,7 @@ export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () =
   )
 }
 
-export function Working({ f, s, onStop }: { f: FundingView; s: Split; onStop: (() => void) | null }) {
+export function Working({ f, s, onStop, onStart = null }: { f: FundingView; s: Split; onStop: (() => void) | null; onStart?: (() => void) | null }) {
   const n = f.positions.length
   const assets = [...new Set([...positionTokens(f), ...(s.idleCbbtc > 0n ? ['cbBTC'] : [])])]
   const line = progressLine(f.progress)
@@ -127,6 +130,17 @@ export function Working({ f, s, onStop }: { f: FundingView; s: Split; onStop: ((
             }}
           >
             {homeCopy.stop}
+          </button>
+        ) : onStart ? (
+          <button
+            type="button"
+            className="act ml-auto shrink-0"
+            onClick={(e) => {
+              e.preventDefault()
+              onStart()
+            }}
+          >
+            {homeCopy.startAllocation}
           </button>
         ) : (
           <span className="ml-auto" />
@@ -210,8 +224,8 @@ export function Idle({ s }: { s: Split }) {
   )
 }
 
-export function History({ ops }: { ops: OpView[] }) {
-  const sorted = [...ops].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+export function History({ ops, onRetry }: { ops: OpView[]; onRetry?: (kind: OpView['kind']) => void }) {
+  const sorted = historyOps(ops)
   return (
     <details className="card fold" open={sorted.length > 0 && sorted.length <= 4}>
       <summary>
@@ -231,8 +245,12 @@ export function History({ ops }: { ops: OpView[] }) {
             >
               <time dateTime={op.updatedAt}>{localTime(op.updatedAt)}</time>
               <span className="font-mono text-[0.78rem] uppercase tracking-[0.04em] text-emerald">{KIND[op.kind]}</span>
-              <span className={tone === 'failed' ? 'text-alert-ink' : tone === 'pending' ? 'text-stone' : undefined}>{opLine(op)}</span>
-              {op.txHash ? (
+              <span className={tone === 'done' ? undefined : 'text-stone'}>{opLine(op)}</span>
+              {needsRetry(op) && onRetry ? (
+                <button type="button" className="chipbtn min-[761px]:justify-self-end" onClick={() => onRetry(op.kind)}>
+                  {homeCopy.retry}
+                </button>
+              ) : op.txHash ? (
                 <span className="flex items-center gap-1 font-mono text-[0.8rem] text-emerald min-[761px]:justify-self-end">
                   {shortHex(op.txHash)}
                   <BasescanLink tx={op.txHash} />
@@ -415,6 +433,43 @@ function StopDialog({ accountKey, s, open, onClose }: { accountKey: string; s: S
   )
 }
 
+function StartDialog({ accountKey, s, open, onClose }: { accountKey: string; s: Split; open: boolean; onClose: () => void }) {
+  const flow = useOwnerAction(accountKey, 'activate')
+  const close = () => {
+    flow.reset()
+    onClose()
+  }
+  return (
+    <Modal open={open} onClose={close} title={homeCopy.startAllocation}>
+      <p className="m-0 text-[0.88rem] text-stone">{usd(s.idle)} USDC idle</p>
+      <p className="mt-2 mb-0 text-[0.95rem]">{homeCopy.startBody}</p>
+      <div className="mt-4">
+        {flow.result ? (
+          <div className="grid gap-4">
+            <p className="m-0">Starting. It shows in your history as it settles.</p>
+            <div className="flex justify-end">
+              <button type="button" className="cta" onClick={close}>
+                Done
+              </button>
+            </div>
+          </div>
+        ) : flow.prepared ? (
+          <Review lines={flow.prepared.tx.summary} busy={flow.busy} error={flow.error} onApprove={() => void flow.approve()} />
+        ) : (
+          <>
+            {flow.error ? <p className="err mb-3">{flow.error}</p> : null}
+            <div className="flex justify-end">
+              <button type="button" className="cta" onClick={() => void flow.prepare()} disabled={flow.busy !== null}>
+                {flow.busy === 'preparing' ? 'Preparing' : homeCopy.startAllocation}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </Modal>
+  )
+}
+
 function StartRow({ accountKey, funded }: { accountKey: string; funded: boolean }) {
   const flow = useOwnerAction(accountKey, 'activate')
   const tap = () => void (flow.prepared ? flow.approve() : flow.prepare())
@@ -437,12 +492,16 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const funding = useFunding(accountKey, true)
   const ops = useOps(accountKey, true)
   const pools = usePools()
-  const [dialog, setDialog] = useState<null | 'add' | 'withdraw' | 'stop'>(null)
+  const [dialog, setDialog] = useState<null | 'add' | 'withdraw' | 'stop' | 'start'>(null)
   const f = funding.data
   const opList = ops.data?.ops ?? []
   const s = f ? split(f, cbbtcPrice(pools.data)) : null
   const inFlight = opList.some((o) => !TERMINAL.has(o.state))
   const armed = activationLive(opList)
+  // Stopped after running: the Working card offers the restart where Stop was, so no Start row too.
+  const stopped = !!f && !f.active && f.positions.length === 0 && !inFlight && everStarted(opList)
+  const canRestart = stopped && !!s && s.idleUsdc > 0n
+  const retry = (kind: OpView['kind']) => setDialog(kind === 'exit' ? 'stop' : kind === 'transfer' ? 'withdraw' : 'start')
   const kit = useMutation({
     mutationFn: async () => {
       if (!f) return
@@ -466,10 +525,10 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         )
       ) : (
         <>
-          {!f.active && !inFlight && !armed ? <StartRow accountKey={accountKey} funded={hasMoney(f)} /> : null}
-          <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} />
+          {!f.active && !inFlight && !armed && !stopped ? <StartRow accountKey={accountKey} funded={hasMoney(f)} /> : null}
+          <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? () => setDialog('start') : null} />
           <Idle s={s as Split} />
-          <History ops={opList} />
+          <History ops={opList} onRetry={retry} />
         </>
       )}
       <footer className="mt-auto flex flex-wrap gap-x-5 gap-y-2 border-t border-wash pt-5 text-[0.85rem] text-stone">
@@ -488,6 +547,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           </Modal>
           <WithdrawDialog accountKey={accountKey} s={s} open={dialog === 'withdraw'} onClose={() => setDialog(null)} />
           <StopDialog accountKey={accountKey} s={s} open={dialog === 'stop'} onClose={() => setDialog(null)} />
+          <StartDialog accountKey={accountKey} s={s} open={dialog === 'start'} onClose={() => setDialog(null)} />
         </>
       ) : null}
     </main>

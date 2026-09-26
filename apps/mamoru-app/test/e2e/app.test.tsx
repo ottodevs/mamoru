@@ -10,7 +10,7 @@ import { poolsResponse } from '../../src/web/fixtures/pools.ts'
 import { base64url } from '../../src/web/lib/passkey.ts'
 import { base64urlDecode, hexToBytes } from '../../src/web/lib/passkey-sign.ts'
 import { cbbtcPrice, humanMessage, split, usd } from '../../src/web/lib/money.ts'
-import { activationLive, opLine } from '../../src/web/lib/ops.ts'
+import { activationLive, historyOps, opLine } from '../../src/web/lib/ops.ts'
 import { isAddress, parseUsdc } from '../../src/web/lib/owner-flow.ts'
 import { encodeQr } from '../../src/web/lib/qr.ts'
 import { localTime } from '../../src/web/lib/time.ts'
@@ -103,8 +103,26 @@ describe('helpers', () => {
     expect(opLine(op({}))).toBe('Opened USDC/cbBTC position')
     expect(opLine(op({ kind: 'activate', state: 'proposed', code: 'ARMED' }))).toBe('Start approved')
     expect(activationLive([op({ kind: 'activate', state: 'failed' })])).toBe(false)
+    expect(opLine(op({ opId: 'own-4-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR' }))).toBe('Stop needs another approval')
+    expect(opLine(op({ opId: 'own-4-exit', kind: 'exit' }))).toBe('Allocation stopped')
+    expect(opLine(op({ opId: 'eng-1-1-op-1-enter_swap' }))).toBe('Swapped USDC to cbBTC')
     const { html } = render(<History ops={[op({ txHash: `0x${'b'.repeat(64)}` })]} />)
     expect(html).toContain(`https://basescan.org/tx/0x${'b'.repeat(64)}`)
+    expect(opLine(op({ opId: 'own-3-transfer', kind: 'transfer', amountUsdc: '1500000', to: `0x${'c'.repeat(40)}` }))).toBe('Withdrew 1.50 USDC to 0xcccc…cccc')
+  })
+  test('history hides internal attempts and superseded failures', () => {
+    const at = (i: number) => `2026-09-26T21:0${i}:00.000Z`
+    const op = (opId: string, kind: OpView['kind'], state: OpView['state'], i: number, code?: string): OpView => ({ opId, kind, state, updatedAt: at(i), ...(code ? { code } : {}) })
+    const shown = historyOps([
+      op('own-1-activate', 'activate', 'failed', 0, 'OWNER_TX_REVERTS'),
+      op('own-2-activate', 'activate', 'confirmed', 1),
+      op('eng-1-1-op-1-enter_swap', 'enter', 'failed', 2, 'RECON_UNINCLUDABLE'),
+      op('eng-1-1-op-2-enter_mint', 'enter', 'confirmed', 3),
+      op('eng-1-1-op-3-enter_swap', 'enter', 'proposed', 4),
+      op('own-3-transfer', 'transfer', 'failed', 5, 'OWNER_TX_REVERTS'),
+      op('own-4-exit', 'exit', 'failed', 6, 'OWNER_TX_ERROR'),
+    ]).map((o) => o.opId)
+    expect(shown).toEqual(['own-4-exit', 'own-3-transfer', 'eng-1-1-op-2-enter_mint', 'own-2-activate'])
   })
   test('local time, never UTC', () => {
     const now = new Date('2026-09-26T20:30:00')
