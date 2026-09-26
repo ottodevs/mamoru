@@ -6,12 +6,15 @@
   "exports": {
     "./safe": "./safe/index.ts",
     "./sessions": "./sessions/index.ts",
-    "./precheck": "./precheck/index.ts"
+    "./precheck": "./precheck/index.ts",
+    "./owner": "./owner/index.ts",
+    "./recovery": "./recovery/index.ts"
   },
   "dependencies": {
     "@mamoru/domain": "workspace:*",
     "@mamoru/policy": "workspace:*",
     "@mamoru/registry": "workspace:*",
+    "@mamoru/uniswap-v3": "workspace:*",
     "viem": "2.56.9"
   }
 }

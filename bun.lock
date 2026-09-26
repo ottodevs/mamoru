@@ -16,6 +16,7 @@
         "@mamoru/domain": "workspace:*",
         "@mamoru/policy": "workspace:*",
         "@mamoru/registry": "workspace:*",
+        "@mamoru/uniswap-v3": "workspace:*",
         "viem": "2.56.9",
       },
     },
