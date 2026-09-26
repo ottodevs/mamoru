@@ -90,8 +90,28 @@ export async function sendSessionOp(
   world: World,
   acct: AccountFixture,
   grant: ActiveGrant,
+  batch: string,
   calls: CallLike[],
   opts: SessionOpOptions = {},
+): Promise<SessionOpOutcome> {
+  const outcome = await buildAndSend(world, acct, grant, calls, opts)
+  world.opLog.push({
+    context: world.context,
+    grant: grant.name,
+    batch,
+    precheck: outcome.precheck.ok ? 'ACCEPT' : outcome.precheck.code,
+    verdict: outcome.verdict,
+    failedOp: outcome.failedOp?.reason,
+  })
+  return outcome
+}
+
+async function buildAndSend(
+  world: World,
+  acct: AccountFixture,
+  grant: ActiveGrant,
+  calls: CallLike[],
+  opts: SessionOpOptions,
 ): Promise<SessionOpOutcome> {
   const lab = opts.submitTo ?? world.lab
   const callData = opts.rawCallData ?? accountCallData(calls, opts.mode)
@@ -118,7 +138,7 @@ export async function sendSessionOp(
 
   const pre = precheck(
     { sender: op.sender, callData: op.callData, signature: op.signature, paymaster: op.paymaster },
-    { chainId: lab.chainId, now: Number(block.timestamp), ledger: acct.ledger },
+    { chainId: lab.chainId, now: lab === world.lab ? await world.engineNow() : Number(block.timestamp), ledger: acct.ledger },
   )
 
   const data = handleOpsData([op], world.relayer.address)

@@ -70,6 +70,21 @@ export type World = {
   fixtures: string[]
   t0: number
   saltCounter: number
+  /** Every session userOp built in this world, with the pre-check and chain verdicts (SESS-25). */
+  opLog: OpRecord[]
+  /** Label of the scenario step that is running, for the log. */
+  context: string
+  /** Engine-side reads go through the engine port, which refuses anvil methods. */
+  engineNow: () => Promise<number>
+}
+
+export type OpRecord = {
+  context: string
+  grant: string
+  batch: string
+  precheck: string
+  verdict: string
+  failedOp?: string
 }
 
 export async function ownerExec(
@@ -191,7 +206,7 @@ export function grantOf(acct: AccountFixture, name: string): ActiveGrant {
 async function lpDirect(world: World, acct: AccountFixture, swapUsdc: bigint, mintUsdc: bigint): Promise<bigint> {
   const { lab } = world
   const swapGrant = grantOf(acct, 'enter-swap')
-  const s = await sendSessionOp(world, acct, swapGrant, [
+  const s = await sendSessionOp(world, acct, swapGrant, 'lp-direct-swap', [
     approve('USDC', 'SwapRouter02', swapUsdc),
     exactInputSingle({ account: acct.safe, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: 500, amountIn: swapUsdc, amountOutMinimum: 1n }),
   ])
@@ -200,10 +215,12 @@ async function lpDirect(world: World, acct: AccountFixture, swapUsdc: bigint, mi
   const { tick } = await poolTick(lab)
   const range = rangeAround(tick, world.policy.range.widthTicks, 10)
   const deadline = BigInt(Number(await lab.timestamp()) + 3600)
-  const m = await sendSessionOp(world, acct, grantOf(acct, 'enter-mint'), [
+  const m = await sendSessionOp(world, acct, grantOf(acct, 'enter-mint'), 'lp-direct-mint', [
     approve('USDC', 'NonfungiblePositionManager', mintUsdc),
     approve('cbBTC', 'NonfungiblePositionManager', cbbtc),
     mint({ account: acct.safe, pool: POOL, ...range, amount0Desired: mintUsdc, amount1Desired: cbbtc, amount0Min: 1n, amount1Min: 1n, deadline }),
+    approve('USDC', 'NonfungiblePositionManager', 0n),
+    approve('cbBTC', 'NonfungiblePositionManager', 0n),
   ])
   mustInclude(m, `${acct.label} lp-direct mint`)
   const tokenId = mintedTokenId({ hash: m.txHash!, receipt: m.receipt!, ok: true }, acct.safe)
@@ -242,7 +259,7 @@ async function capsFor(lab: Lab, policy: PolicyVersion, deposit: bigint): Promis
 }
 
 /** Builds the SESS world on a fresh fork. The caller snapshots it. */
-export async function buildSessWorld(lab: Lab, policy: PolicyVersion): Promise<World> {
+export async function buildSessWorld(lab: Lab, policy: PolicyVersion, engineNow: () => Promise<number>): Promise<World> {
   const relayer = devAccount(0)
   const world: World = {
     lab,
@@ -255,6 +272,9 @@ export async function buildSessWorld(lab: Lab, policy: PolicyVersion): Promise<W
     fixtures: [],
     t0: Number(await lab.timestamp()),
     saltCounter: 0,
+    opLog: [],
+    context: 'fixtures',
+    engineNow,
   }
   // fx-owners, fx-safe
   world.a1 = await deployAccount(lab, relayer, 'A1', 1, 5, PASSKEY_SCALARS.a1, 1n)
@@ -288,7 +308,7 @@ export async function buildSessWorld(lab: Lab, policy: PolicyVersion): Promise<W
 }
 
 /** M05 world: fx-owners, fx-safe, fx-gas and fx-usdc only. */
-export async function buildBasicWorld(lab: Lab, policy: PolicyVersion): Promise<World> {
+export async function buildBasicWorld(lab: Lab, policy: PolicyVersion, engineNow: () => Promise<number>): Promise<World> {
   const relayer = devAccount(0)
   const world: World = {
     lab,
@@ -301,6 +321,9 @@ export async function buildBasicWorld(lab: Lab, policy: PolicyVersion): Promise<
     fixtures: [],
     t0: Number(await lab.timestamp()),
     saltCounter: 0,
+    opLog: [],
+    context: 'fixtures',
+    engineNow,
   }
   world.a1 = await deployAccount(lab, relayer, 'A1', 1, 5, PASSKEY_SCALARS.a1, 1n)
   must(await lab.send(world.gasPayer, world.a1.safe, '0x', GAS_RESERVE_WEI), 'fx-gas')
