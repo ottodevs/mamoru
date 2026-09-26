@@ -1,23 +1,39 @@
-import { decodeFunctionData, isAddressEqual, maxUint128, type Hex } from 'viem'
+import { decodeFunctionData, encodeFunctionData, isAddressEqual, maxUint128, parseEventLogs, type Hex } from 'viem'
 import type { Address, ReasonCode } from '@mamoru/domain'
 import { canonicalJson, decide, type Decision } from '@mamoru/decide'
 import { POLICIES, computeCaps, type PolicyVersion, type Price } from '@mamoru/policy'
-import { address, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
-import { approve, exactInputSingle } from '@mamoru/uniswap-v3'
+import { address, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, safeProxyFactoryAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { approve, decreaseLiquidity, exactInputSingle } from '@mamoru/uniswap-v3'
 import { minOut, quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { toPackedUserOperation } from 'viem/account-abstraction'
 import { isTerminal } from '@mamoru/journal'
-import { sessionNonceKey } from '@mamoru/account/sessions'
-import { swapFills } from '@mamoru/projector'
-import { Engine, type ReviewResult } from '../driver/engine.ts'
+import { draftUserOp, executeCallData, registryTrustCalls, sessionNonceKey, signSessionUserOp } from '@mamoru/account/sessions'
+import { createProxyCall, webAuthnSigner } from '@mamoru/account/safe'
+import { SessionLedger } from '@mamoru/account/precheck'
+import { BundlerClient } from '@mamoru/erc4337'
+import { userOpLogs } from '@mamoru/rpc'
+import { decodeExecute } from '@mamoru/account/precheck'
+import { positionEvents, swapFills, type Pair } from '@mamoru/projector'
+import { Engine, LAB_GAS_LIMITS, MAX_PRIORITY_FEE_PER_GAS, type ReviewResult } from '../driver/engine.ts'
 import type { OpRecord } from '../driver/journal.ts'
-import { DEPOSIT_USDC, WHALE, activateGrants } from '../fixtures/world.ts'
+import { DEPOSIT_USDC, GAS_RESERVE_WEI, SECOND_DEPOSIT_USDC, WHALE, activateGrants, ownerBatch, ownerExec, type AccountFixture } from '../fixtures/world.ts'
+import { devAccount } from '../fixtures/lab.ts'
+import { PASSKEY_SCALARS, SoftwarePasskey } from '../webauthn/index.ts'
 import type { StepResult } from '../report/index.ts'
 import type { ScenarioCtx, StepHandler } from './context.ts'
 import { checkRecipient } from './state.ts'
 
 /** `bundlerSeen` is how many userOps the group's bundler had received before this scenario's engine. */
-type EngineRun = { engine: Engine; bundlerSeen: number; last?: Extract<ReviewResult, { kind: 'decided' }>; preHarvest?: AccountSnapshot }
+type EngineRun = {
+  engine: Engine
+  bundlerSeen: number
+  last?: Extract<ReviewResult, { kind: 'decided' }>
+  preHarvest?: AccountSnapshot
+  /** Principal the owner left owed after withdrawing outside Mamoru, token0 and token1 (owner-withdraws). */
+  ownerPrincipal?: Pair
+  /** userOps of another account that the bundler put in the engine's bundle; they are not the engine's. */
+  foreign: { hash: Hex; account: Address }[]
+}
 
 const RUNS = new WeakMap<ScenarioCtx, EngineRun>()
 const Q96 = 1n << 96n
@@ -63,7 +79,7 @@ function engineOf(ctx: ScenarioCtx): Engine {
       },
     },
   )
-  RUNS.set(ctx, { engine, bundlerSeen: ctx.bundler.received().length })
+  RUNS.set(ctx, { engine, bundlerSeen: ctx.bundler.received().length, foreign: [] })
   return engine
 }
 
@@ -203,8 +219,10 @@ async function checkOp(ctx: ScenarioCtx, engine: Engine, op: OpRecord, before: A
   if (nonceStep !== (included ? 1n : 0n)) ctx.invariantErrors.push({ name: 'INV-NONCE', detail: `${op.opId}: lane moved ${nonceStep}` })
   if (included && op.nonce !== before.nonce) ctx.invariantErrors.push({ name: 'INV-NONCE', detail: `${op.opId} signed nonce ${op.nonce}, lane was ${before.nonce}` })
   if (included) {
+    // Only this userOp's logs: a shared bundle may carry other accounts' transfers.
     const receipt = await w.lab.client.getTransactionReceipt({ hash: op.included!.txHash })
-    for (const e of checkRecipient(w.a1.safe, op.calls ?? [], receipt)) ctx.invariantErrors.push({ name: 'INV-RECIPIENT', detail: `${op.opId}: ${e}` })
+    const own = { ...receipt, logs: await opLogs(ctx, op) }
+    for (const e of checkRecipient(w.a1.safe, op.calls ?? [], own)) ctx.invariantErrors.push({ name: 'INV-RECIPIENT', detail: `${op.opId}: ${e}` })
   }
   const allowances: string[] = []
   for (const t of ['USDC', 'cbBTC', 'WETH']) {
@@ -215,6 +233,14 @@ async function checkOp(ctx: ScenarioCtx, engine: Engine, op: OpRecord, before: A
   }
   out.push({ step: `${op.opId} leaves no allowance`, ok: allowances.length === 0, detail: allowances.join(', ') || 'USDC, cbBTC and WETH allowances to SwapRouter02 and NonfungiblePositionManager are 0' })
   return out
+}
+
+/** The logs of one included userOp, isolated from the rest of its bundle by the EntryPoint boundaries. */
+async function opLogs(ctx: ScenarioCtx, op: OpRecord) {
+  const receipt = await worldOf(ctx).lab.client.getTransactionReceipt({ hash: op.included!.txHash })
+  const ev = parseEventLogs({ abi: entryPointV07Abi, logs: receipt.logs, eventName: 'UserOperationEvent' }).find((l) => l.args.userOpHash === op.userOpHash)
+  if (!ev) throw new Error(`${op.opId}: no UserOperationEvent in ${op.included!.txHash}`)
+  return userOpLogs(receipt.logs, ev.logIndex)
 }
 
 type CallView = { target: string; fn: string; args: readonly unknown[] }
@@ -461,51 +487,253 @@ const harvestRoundsStep: StepHandler = async (ctx, args) => {
   return { step: 'swaps-in-range until the decision changes', ok: false, detail: `still below cost after ${max} rounds` }
 }
 
-/** M04, step 2: liquidity unchanged, tokenId still managed, USDC up, the volatile token back to its pre-harvest balance. */
+/**
+ * M04, step 2: liquidity unchanged, tokenId still managed, USDC up by exactly
+ * the credit plus any USDC principal, the volatile token up by exactly the
+ * volatile principal that was collected (0 when nothing was owed).
+ */
 const harvestStateStep: StepHandler = async (ctx) => {
   const run = runOf(ctx)
   const pre = run.preHarvest
-  if (!pre) throw new Error('harvest-state needs a harvest first')
+  const row = run.engine.savingsLog.at(-1)
+  if (!pre || !row) throw new Error('harvest-state needs a confirmed harvest first')
   const post = await snapshot(ctx, run.engine)
   const id = String(run.engine.allowedTokenIds[0])
+  const pool = entry((run.engine.journal.op(row.opId).intent as { pool: string }).pool)
+  const savingsIs0 = pool.token0 === 'USDC'
+  const [principalUsdc, principalVolatile] = savingsIs0 ? row.principal : [row.principal[1], row.principal[0]]
+  const volatile = savingsIs0 ? pool.token1! : pool.token0!
   const errs: string[] = []
   if (post.liquidity[id] !== pre.liquidity[id]) errs.push(`liquidity ${pre.liquidity[id]} -> ${post.liquidity[id]}`)
   if (!run.engine.allowedTokenIds.includes(BigInt(id))) errs.push('tokenId no longer managed')
-  if (!(post.tokens.USDC! > pre.tokens.USDC!)) errs.push(`USDC ${pre.tokens.USDC} -> ${post.tokens.USDC}`)
-  if (post.tokens.cbBTC !== pre.tokens.cbBTC) errs.push(`cbBTC ${pre.tokens.cbBTC} -> ${post.tokens.cbBTC}`)
+  const usdcUp = post.tokens.USDC! - pre.tokens.USDC!
+  if (usdcUp !== row.credited + principalUsdc || usdcUp <= 0n) errs.push(`USDC up ${usdcUp}, credited ${row.credited} plus principal ${principalUsdc}`)
+  const volatileUp = post.tokens[volatile]! - pre.tokens[volatile]!
+  if (volatileUp !== principalVolatile) errs.push(`${volatile} up ${volatileUp}, principal kept ${principalVolatile}`)
   return {
     step: 'account after the harvest',
     ok: errs.length === 0,
-    detail: errs.join('; ') || `liquidity of ${id} unchanged (${post.liquidity[id]}); USDC ${pre.tokens.USDC} -> ${post.tokens.USDC}; cbBTC back to ${post.tokens.cbBTC}`,
+    detail:
+      errs.join('; ') ||
+      `liquidity of ${id} unchanged (${post.liquidity[id]}); USDC ${pre.tokens.USDC} -> ${post.tokens.USDC} (credit ${row.credited} + principal ${principalUsdc}); ${volatile} kept ${volatileUp} of principal, converted only fees`,
   }
 }
 
-/** M04 Savings Log: principal 0, fees equal to Collect, conversion equal to Swap, confirmed, both sources, total up by the credit. */
-const savingsLogStep: StepHandler = async (ctx) => {
-  const engine = engineOf(ctx)
+/**
+ * M04 Savings Log, rebuilt from the harvest userOp's own logs: principal as
+ * expected (0, or what the owner left owed), fees equal to the Collect above
+ * it, conversion equal to this account's Swap, credit without principal.
+ */
+const savingsLogStep: StepHandler = async (ctx, args) => {
+  const run = runOf(ctx)
+  const engine = run.engine
   const row = engine.savingsLog.at(-1)
   if (!row) return { step: 'Savings Log harvest row', ok: false, detail: 'no row' }
   const op = engine.journal.op(row.opId)
-  const logs = (await worldOf(ctx).lab.client.getTransactionReceipt({ hash: row.txHash })).logs
-  const collect = logs.find((l) => isAddressEqual(l.address, address('NonfungiblePositionManager')) && l.logIndex === row.logIndex)
-  const swap = swapFills(logs, entry((op.intent as { pool: string }).pool).address)[0]
+  const logs = await opLogs(ctx, op)
+  const pool = entry((op.intent as { pool: string }).pool)
+  const savingsIs0 = pool.token0 === 'USDC'
+  const expected: Pair = args.principal === 'owner' ? (run.ownerPrincipal ?? [-1n, -1n]) : [0n, 0n]
+  const collect = positionEvents(logs).find((e) => e.kind === 'collect' && e.tokenId === row.tokenId)
+  const swaps = swapFills(logs, pool.address)
+  const own = swaps.filter((f) => isAddressEqual(f.recipient, engine.cfg.account))
   const errs: string[] = []
-  if (row.principal[0] !== 0n || row.principal[1] !== 0n) errs.push(`principal ${row.principal}`)
-  if (!collect) errs.push('no Collect event at the row log index')
-  if (op.simulation && swap && row.conversion && (row.conversion.amountIn !== swap.amountIn || row.conversion.amountOut !== swap.amountOut)) errs.push('conversion differs from Swap')
-  if ((op.intent.kind === 'harvest' && op.intent.convert !== null) !== (row.conversion !== null)) errs.push('conversion presence')
+  if (row.principal[0] !== expected[0] || row.principal[1] !== expected[1]) errs.push(`principal ${row.principal}, expected ${expected}`)
+  if (!collect || collect.logIndex !== row.logIndex) errs.push('no Collect of the tokenId at the row log index')
+  const fees: Pair = collect ? [collect.amount0 - expected[0], collect.amount1 - expected[1]] : [0n, 0n]
+  if (row.fees[0] !== fees[0] || row.fees[1] !== fees[1]) errs.push(`fees ${row.fees}, Collect minus principal ${fees}`)
+  if (swaps.length !== own.length) errs.push(`${swaps.length - own.length} Swap(s) of another recipient inside this userOp`)
+  const swap = own[0]
+  if ((op.intent.kind === 'harvest' && op.intent.convert !== null) !== !!row.conversion) errs.push('conversion presence')
+  if (row.conversion && (!swap || row.conversion.amountIn !== swap.amountIn || row.conversion.amountOut !== swap.amountOut)) errs.push("conversion differs from the account's Swap")
+  const feesVolatile = savingsIs0 ? fees[1] : fees[0]
+  if (row.conversion && row.conversion.amountIn > feesVolatile) errs.push(`converted ${row.conversion.amountIn}, volatile fees ${feesVolatile}`)
+  const credit = (savingsIs0 ? fees[0] : fees[1]) + (swap?.amountOut ?? 0n)
+  if (row.credited !== credit || row.credited <= 0n) errs.push(`credited ${row.credited}, fees in USDC plus conversion ${credit}`)
   if (row.status !== 'confirmed' || row.code !== 'PROJ_CONFIRMED') errs.push(`${row.status} ${row.code}`)
   const sources = row.provenance.map((p) => p.source).join('+')
   if (sources !== 'journal+fork_rpc') errs.push(`provenance ${sources}`)
   const total = engine.savingsTotal()
-  if (total !== engine.savingsLog.reduce((s, r) => s + r.credited, 0n) || row.credited <= 0n) errs.push(`total ${total}, credited ${row.credited}`)
+  if (total !== engine.savingsLog.reduce((s, r) => s + r.credited, 0n)) errs.push(`total ${total}`)
   ctx.codes.add(row.code)
   return {
     step: 'Savings Log harvest row',
     ok: errs.length === 0,
-    detail: `${row.opId}: principal 0, fees ${row.fees[0]} USDC + ${row.fees[1]} volatile, conversion ${row.conversion ? `${row.conversion.amountIn} -> ${row.conversion.amountOut} USDC` : 'none'}, credited ${row.credited}; ${row.status} ${row.code}; ${sources}; ledger total ${total}${errs.length ? ` | ${errs.join('; ')}` : ''}`,
+    detail: `${row.opId}: principal ${row.principal[0]} + ${row.principal[1]} kept as capital, fees ${row.fees[0]} USDC + ${row.fees[1]} volatile, conversion ${row.conversion ? `${row.conversion.amountIn} -> ${row.conversion.amountOut} USDC` : 'none'}, credited ${row.credited}; ${row.status} ${row.code}; ${sources}; ledger total ${total}${errs.length ? ` | ${errs.join('; ')}` : ''}`,
     codes: [row.code],
   }
+}
+
+/**
+ * The owner, outside Mamoru, removes part of the managed position's liquidity
+ * and collects part of it to their own address. That is principal: the
+ * engine must read it from the chain and never credit it as fees.
+ */
+const ownerWithdrawsStep: StepHandler = async (ctx, args) => {
+  const w = worldOf(ctx)
+  const run = runOf(ctx)
+  const tokenId = run.engine.allowedTokenIds[0]
+  if (tokenId === undefined) throw new Error('owner-withdraws needs a managed position')
+  const npm = address('NonfungiblePositionManager')
+  const pos = await w.lab.client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] })
+  const liquidity = (pos[7] * BigInt(Number(args.decreasePercent ?? 10))) / 100n
+  const dec = decreaseLiquidity({ tokenId, liquidity, amount0Min: 0n, amount1Min: 0n, deadline: (await w.lab.timestamp()) + 600n })
+  const r1 = await ownerExec(w.lab, w.relayer, w.a1, { to: dec.to, data: dec.data })
+  const d = positionEvents(r1.receipt.logs).find((e) => e.kind === 'decrease' && e.tokenId === tokenId)
+  if (!r1.ok || !d) return { step: 'owner decreases liquidity outside Mamoru', ok: false, detail: `tx ${r1.hash}` }
+  const pct = BigInt(Number(args.collectPercent ?? 50))
+  const collectData = encodeFunctionData({
+    abi: nonfungiblePositionManagerAbi,
+    functionName: 'collect',
+    args: [{ tokenId, recipient: w.a1.backupOwner.address, amount0Max: (d.amount0 * pct) / 100n, amount1Max: (d.amount1 * pct) / 100n }],
+  })
+  const r2 = await ownerExec(w.lab, w.relayer, w.a1, { to: npm, data: collectData })
+  const c = positionEvents(r2.receipt.logs).find((e) => e.kind === 'collect' && e.tokenId === tokenId)
+  if (!r2.ok || !c) return { step: 'owner collects part of it to their own address', ok: false, detail: `tx ${r2.hash}` }
+  // FR-PRJ-003: the partial collect pays principal first, so what stays owed is the decrease minus the collect.
+  run.ownerPrincipal = [d.amount0 - c.amount0, d.amount1 - c.amount1]
+  return [
+    { step: 'owner decreases liquidity outside Mamoru', ok: true, detail: `tokenId ${tokenId}: ${liquidity} liquidity, ${d.amount0} + ${d.amount1} principal owed, tx ${r1.hash}` },
+    { step: 'owner collects part of it to their own address', ok: true, detail: `${c.amount0} + ${c.amount1} to ${w.a1.backupOwner.address}; ${run.ownerPrincipal[0]} + ${run.ownerPrincipal[1]} principal still owed` },
+  ]
+}
+
+/**
+ * A second account, with its own enter-swap session, signs a USDC to cbBTC
+ * swap on the same pool. The bundler holds it and puts it first in the same
+ * handleOps as the engine's next userOp.
+ */
+const foreignSwapInBundleStep: StepHandler = async (ctx) => {
+  const w = worldOf(ctx)
+  const run = runOf(ctx)
+  const lab = w.lab
+  const policy = policyOf(ctx)
+  const backupOwner = devAccount(6)
+  const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a2)
+  const call = createProxyCall({
+    owners: [address('SafeWebAuthnSharedSigner'), backupOwner.address],
+    threshold: 1n,
+    validators: [{ module: address('SmartSession'), initData: '0x' }],
+    saltNonce: 2n,
+    webauthn: webAuthnSigner(passkey.x, passkey.y),
+  })
+  const deployed = await lab.send(w.relayer, call.to, call.data)
+  const safe = parseEventLogs({ abi: safeProxyFactoryAbi, logs: deployed.receipt.logs, eventName: 'ProxyCreation' })[0]?.args.proxy
+  if (!deployed.ok || !safe) throw new Error('second account deployment failed')
+  const a2: AccountFixture = {
+    label: 'A2',
+    safe,
+    backupOwner,
+    passkey,
+    sessionKey: devAccount(7),
+    caps: computeCaps(policy, SECOND_DEPOSIT_USDC, await activationPrices(ctx, policy)),
+    grants: [],
+    managedTokenIds: [],
+    ownerTokenIds: [],
+    ledger: new SessionLedger(),
+    signedOwnerTxs: [],
+  }
+  if (!(await ownerBatch(lab, w.relayer, a2, registryTrustCalls(safe))).ok) throw new Error('second account registry trust failed')
+  if (!(await lab.send(w.gasPayer, safe, '0x', GAS_RESERVE_WEI)).ok) throw new Error('second account gas failed')
+  if (!(await lab.whaleTransfer('USDC', WHALE, safe, SECOND_DEPOSIT_USDC)).ok) throw new Error('second account deposit failed')
+  const [grant] = await activateGrants(w, a2, [{ name: 'enter-swap' }])
+  const pool = entry('pool:USDC/cbBTC/500')
+  const amountIn = 100_000_000n
+  const block = await lab.client.getBlock({ blockTag: 'latest' })
+  const quote = await quoteExactInputSingle(lab.client, { tokenIn: address('USDC'), tokenOut: address('cbBTC'), fee: pool.fee!, amountIn, blockNumber: block.number })
+  const calls = [approve('USDC', 'SwapRouter02', amountIn), exactInputSingle({ account: safe, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: pool.fee!, amountIn, amountOutMinimum: minOut(quote, policy.execution.slippageBps) })]
+  const nonce = await lab.entryPointNonce(safe, sessionNonceKey(0))
+  const gas = { ...LAB_GAS_LIMITS, maxFeePerGas: (block.baseFeePerGas ?? 0n) * 4n + MAX_PRIORITY_FEE_PER_GAS, maxPriorityFeePerGas: MAX_PRIORITY_FEE_PER_GAS }
+  const userOp = draftUserOp(safe, nonce, executeCallData(calls.map((c) => ({ target: c.to, value: c.value, callData: c.data }))), gas)
+  const signed = await signSessionUserOp(userOp, lab.chainId, grant!.permissionId, a2.sessionKey)
+  ctx.bundler!.holdNext()
+  const bundler = new BundlerClient({ url: ctx.bundler!.url, mode: 'lab', chainId: lab.chainId, signingChainIds: [lab.chainId] })
+  const hash = await bundler.sendUserOperation(signed)
+  run.foreign.push({ hash, account: safe })
+  return { step: 'a second account signs a swap on the same pool; the bundler holds it for the next bundle', ok: true, detail: `${safe} USDC -> cbBTC ${amountIn}, userOp ${hash}` }
+}
+
+/** The harvest shared its handleOps with the other account's swap, which ran first; the credit is still only this account's. */
+const sharedBundleStep: StepHandler = async (ctx) => {
+  const run = runOf(ctx)
+  const w = worldOf(ctx)
+  const row = run.engine.savingsLog.at(-1)
+  const foreign = run.foreign.at(-1)
+  if (!row || !foreign) return { step: 'shared bundle', ok: false, detail: 'needs a foreign userOp and a harvest' }
+  const receipt = await w.lab.client.getTransactionReceipt({ hash: row.txHash })
+  const events = parseEventLogs({ abi: entryPointV07Abi, logs: receipt.logs, eventName: 'UserOperationEvent' })
+  const theirs = events.find((e) => e.args.userOpHash === foreign.hash)
+  const ours = events.find((e) => e.args.userOpHash === run.engine.journal.op(row.opId).userOpHash)
+  const pool = entry('pool:USDC/cbBTC/500').address
+  const all = swapFills(receipt.logs, pool)
+  const errs: string[] = []
+  if (events.length !== 2 || !theirs || !ours) errs.push(`${events.length} userOps in the bundle`)
+  if (theirs && ours && theirs.logIndex > ours.logIndex) errs.push('the other account did not run first')
+  if (all.length !== 2 || !isAddressEqual(all[0]!.recipient, foreign.account)) errs.push(`${all.length} swaps, first to ${all[0]?.recipient}`)
+  if (row.conversion && all[0] && row.conversion.amountOut === all[0].amountOut) errs.push("the credit used the other account's swap")
+  return {
+    step: "the harvest shared a handleOps with another account's swap and credited only its own",
+    ok: errs.length === 0,
+    detail: errs.join('; ') || `tx ${row.txHash}: ${foreign.account} swapped first (out ${all[0]!.amountOut} cbBTC), the account's conversion ${row.conversion?.amountIn} -> ${row.conversion?.amountOut} USDC`,
+  }
+}
+
+/**
+ * A bundler that lies about its receipt: the driver keeps the RPC's
+ * UserOperationEvent as the truth and records every conflicting field.
+ */
+const lyingBundlerReviewStep: StepHandler = async (ctx, args) => {
+  const bundler = ctx.bundler!
+  bundler.tamperReceipts((r) => ({ ...r, actualGasCost: `0x${(BigInt(r.actualGasCost) + 1n).toString(16)}`, receipt: { ...r.receipt, transactionHash: `0x${'de'.repeat(32)}` } }))
+  let out: StepResult[]
+  try {
+    out = await reviewAndCheck(ctx, String(args.label ?? 'review with a lying bundler'), (args.expect ?? {}) as ReviewExpect)
+  } finally {
+    bundler.tamperReceipts(null)
+  }
+  const op = runOf(ctx).engine.journal.ops.at(-1)
+  const check = op?.receiptCheck
+  const fields = check?.status === 'mismatch' ? check.fields : []
+  const onChain = op?.included ? await worldOf(ctx).lab.client.getTransactionReceipt({ hash: op.included.txHash }).then(() => true, () => false) : false
+  const transition = op ? runOf(ctx).engine.journal.transitions.find((t) => t.opId === op.opId && t.to === 'included') : undefined
+  const ok = fields.join() === 'txHash,actualGasCost' && onChain && op?.state === 'confirmed' && !!transition?.detail?.includes('txHash')
+  out.push({
+    step: 'the driver records the conflicting receipt and keeps the RPC event',
+    ok,
+    detail: `receipt ${check?.status ?? 'unchecked'} on ${fields.join(', ') || 'nothing'}; included tx ${op?.included?.txHash} is the RPC one; journal: ${transition?.detail ?? 'no detail'}`,
+  })
+  return out
+}
+
+/** The amountOutMinimum encoded in a signed userOp's callData: account execute batch, then SwapRouter02.exactInputSingle. */
+export function signedAmountOutMinimum(callData: Hex): bigint | null {
+  const decoded = decodeExecute(callData)
+  if ('code' in decoded) return null
+  const swaps = decoded.calls
+    .filter((c) => isAddressEqual(c.target, address('SwapRouter02')))
+    .map((c) => decodeFunctionData({ abi: swapRouter02Abi, data: c.callData }))
+    .filter((d) => d.functionName === 'exactInputSingle')
+  if (swaps.length !== 1) return null
+  return (swaps[0]!.args![0] as { amountOutMinimum: bigint }).amountOutMinimum
+}
+
+/** The same callData with the swap minimum replaced: what a tampered signature would carry. */
+function withAmountOutMinimum(callData: Hex, amountOutMinimum: bigint): Hex {
+  const decoded = decodeExecute(callData)
+  if ('code' in decoded) throw new Error(decoded.detail)
+  return executeCallData(
+    decoded.calls.map((c) => {
+      if (!isAddressEqual(c.target, address('SwapRouter02'))) return c
+      const d = decodeFunctionData({ abi: swapRouter02Abi, data: c.callData })
+      if (d.functionName !== 'exactInputSingle') return c
+      const params = d.args[0] as Parameters<typeof exactInputSingleArgs>[0]
+      return { ...c, callData: exactInputSingleArgs({ ...params, amountOutMinimum }) }
+    }),
+  )
+}
+
+function exactInputSingleArgs(params: { tokenIn: Address; tokenOut: Address; fee: number; recipient: Address; amountIn: bigint; amountOutMinimum: bigint; sqrtPriceLimitX96: bigint }): Hex {
+  return encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [params] })
 }
 
 /** M03: the minimum, the deltas, the allowance, the userOp hash and the receipt, checked against independent reads. */
@@ -518,7 +746,11 @@ const swapChecksStep: StepHandler = async (ctx) => {
   const out: StepResult[] = []
   const quote = await quoteExactInputSingle(w.lab.client, { tokenIn: address(p.tokenIn), tokenOut: address(p.tokenOut), fee: p.fee, amountIn: p.amountIn, blockNumber: op.prepareBlock! })
   const recomputed = minOut(quote, run.engine.cfg.policy.execution.slippageBps)
-  out.push({ step: 'amountOutMinimum from QuoterV2 at the prepare block', ok: recomputed === op.quote.amountOutMinimum, detail: `recomputed ${recomputed}, signed ${op.quote.amountOutMinimum} (quote ${quote}, block ${op.prepareBlock})` })
+  // The minimum that was signed is the one encoded in the userOp's callData, not the journal's quote field.
+  const signed = signedAmountOutMinimum(op.userOp.callData)
+  out.push({ step: 'signed amountOutMinimum equals QuoterV2 at the prepare block', ok: signed !== null && signed === recomputed, detail: `recomputed ${recomputed}, decoded from the signed callData ${signed} (quote ${quote}, block ${op.prepareBlock})` })
+  const tampered = signedAmountOutMinimum(withAmountOutMinimum(op.userOp.callData, recomputed - 1n))
+  out.push({ step: 'a callData with another minimum is caught', ok: tampered === recomputed - 1n && tampered !== recomputed, detail: `tampered callData decodes to ${tampered}, recomputed ${recomputed}: mismatch detected` })
   const simOut = op.simulation!.deltas[p.tokenOut] ?? 0n
   const receipt = await w.lab.client.getTransactionReceipt({ hash: op.included.txHash })
   const fill = swapFills(receipt.logs, entry(p.pool).address)[0]
@@ -528,8 +760,9 @@ const swapChecksStep: StepHandler = async (ctx) => {
   const epHash = (await w.lab.client.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'getUserOpHash', args: [toPackedUserOperation(op.userOp)] })) as Hex
   out.push({ step: 'journal userOpHash equals EntryPoint.getUserOpHash', ok: epHash === op.userOpHash, detail: `${op.userOpHash}` })
   const b = op.bundlerReceipt
-  const same = !!b && b.txHash === op.included.txHash && b.success === op.included.success && b.actualGasCost === op.included.actualGasCost && b.blockHash === op.included.blockHash
-  out.push({ step: 'bundler receipt matches the UserOperationEvent read by RPC', ok: same, detail: same ? `tx ${b!.txHash}, success ${b!.success}, actualGasCost ${b!.actualGasCost}` : 'mismatch or missing' })
+  const check = op.receiptCheck
+  const same = check?.status === 'match' && !!b
+  out.push({ step: 'driver reconciled the bundler receipt with the journal and the RPC event', ok: same, detail: same ? `tx ${b!.txHash}, nonce ${b!.nonce}, success ${b!.success}, actualGasCost ${b!.actualGasCost}` : JSON.stringify(check ?? 'no check') })
   out.push({ step: 'pre-check accepts the batch', ok: op.precheck === 'SESSION_ACTIVE', detail: String(op.precheck), codes: op.precheck ? [op.precheck] : [] })
   if (op.precheck) ctx.codes.add(op.precheck)
   return out
@@ -560,7 +793,8 @@ const lpPairStep: StepHandler = async (ctx, args) => {
 const persistFirstStep: StepHandler = async (ctx) => {
   const run = runOf(ctx)
   const j = run.engine.journal
-  const received = ctx.bundler!.received().slice(run.bundlerSeen)
+  const foreign = new Set(run.foreign.map((f) => f.hash.toLowerCase()))
+  const received = ctx.bundler!.received().slice(run.bundlerSeen).filter((h) => !foreign.has(h.toLowerCase()))
   const missing = received.filter((h) => !j.signedHashes.some((s) => s.toLowerCase() === h.toLowerCase()))
   for (const m of missing) ctx.invariantErrors.push({ name: 'INV-PERSIST-FIRST', detail: `${m} reached the bundler without a signed row` })
   return { step: 'every userOp at the bundler has a signed journal row', ok: missing.length === 0, detail: `${received.length} userOps, ${missing.length} without a row` }
@@ -579,5 +813,9 @@ export const ENGINE_STEPS: Record<string, StepHandler> = {
   'swap-checks': swapChecksStep,
   'lp-pair': lpPairStep,
   'persist-first': persistFirstStep,
+  'owner-withdraws': ownerWithdrawsStep,
+  'foreign-swap-in-bundle': foreignSwapInBundleStep,
+  'shared-bundle': sharedBundleStep,
+  'lying-bundler-review': lyingBundlerReviewStep,
 }
 

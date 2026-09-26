@@ -1,0 +1,23 @@
+id: M03-RECEIPT
+requirements: [FR-AA-004, FR-ENG-008]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: engine
+fixtures: [fx-owners, fx-safe, fx-gas, fx-sessions, fx-usdc]
+steps:
+  - fixtures: {}
+  - mine-until-safe: {}
+  # The bundler answers with a receipt whose transaction and gas cost are wrong. The RPC event is the proof.
+  - lying-bundler-review:
+      label: step 1
+      expect:
+        decision: DECIDE_ENTER
+        op: { kind: enter_swap, state: confirmed, code: EXEC_OK, grant: enter-swap }
+  - persist-first: {}
+expect:
+  codes: [DECIDE_ENTER, OP_INCLUDED, EXEC_OK]
+invariants: [INV-RECIPIENT, INV-TARGETS, INV-SLOT, INV-NONCE, INV-PERSIST-FIRST, INV-ETH-GAS, INV-CODES, INV-FORK-CHAIN, INV-NO-ANVIL-IN-ENGINE]

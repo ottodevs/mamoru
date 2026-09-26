@@ -1,0 +1,33 @@
+id: M04-OWNER
+requirements: [FR-DEC-009, FR-UNI-005, FR-PRJ-003, FR-PRJ-004]
+fork:
+  source: base
+  block: 51811000
+  blockHash: "0xb7820875b174f7a8afb72d33464864e6cdfbe0c2173446cc8c4a5649923423ff"
+  chainId: 31337
+policy: conservador-lab-v1
+world: engine
+fixtures: [fx-owners, fx-safe, fx-gas, fx-sessions, fx-lp, fx-whale]
+steps:
+  - fixtures: {}
+  # The owner removes 10% of the liquidity outside Mamoru and collects half of it to their own address.
+  - owner-withdraws: { decreasePercent: 10, collectPercent: 50 }
+  # 1. The principal left owed is not fees: nothing to harvest yet.
+  - review:
+      label: step 1
+      expect:
+        decision: DECIDE_HOLD
+        codes: [DECIDE_HARVEST_BELOW_COST]
+        op: none
+  # 2. Fees grow; the harvest collects fees and the owed principal, converts only the fees.
+  - harvest-rounds:
+      pool: pool:USDC/cbBTC/500
+      expect:
+        decision: DECIDE_HARVEST
+        op: { kind: harvest, state: confirmed, code: EXEC_OK }
+  - harvest-state: {}
+  - savings-log: { principal: owner }
+  - persist-first: {}
+expect:
+  codes: [DECIDE_HOLD, DECIDE_HARVEST_BELOW_COST, DECIDE_HARVEST, EXEC_OK, PROJ_CONFIRMED]
+invariants: [INV-RECIPIENT, INV-TARGETS, INV-SLOT, INV-NONCE, INV-PERSIST-FIRST, INV-ETH-GAS, INV-CODES, INV-FORK-CHAIN, INV-NO-ANVIL-IN-ENGINE]
