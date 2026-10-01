@@ -94,9 +94,10 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const tokenIds = await Promise.all(
     Array.from({ length: Number(nftCount) }, (_, i) => client.readContract({ address: npm, abi: enumerableAbi, functionName: 'tokenOfOwnerByIndex', args: [acct, BigInt(i)], blockNumber })),
   )
-  const history = input.historyCursor
+  const cursorRead = input.historyCursor
     ? await readPositionHistoryFrom(client, input.historyCursor, input.allowedTokenIds, input.historyFromBlock, blockNumber, safe.number)
-    : await readPositionHistory(client, input.allowedTokenIds, input.historyFromBlock, blockNumber)
+    : null
+  const history = cursorRead ? cursorRead.events : await readPositionHistory(client, input.allowedTokenIds, input.historyFromBlock, blockNumber)
   const owed = applyPrincipal(new Map(), history)
   const positions = await Promise.all(tokenIds.map((id) => readPosition(client, acct, id, blockNumber, input, owed)))
   const pools = await Promise.all(POOLS.map((p) => readPool(client, p, blockNumber, input.twapWindowSeconds)))
@@ -105,6 +106,8 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
 
   const again = await client.getBlock({ blockNumber })
   if (again.hash !== block.hash) throw new ReasonError('OBS_BLOCK_INCONSISTENT', `block ${blockNumber} changed hash during the observation`)
+  // Only a consistent observation moves the history cursor.
+  if (cursorRead && input.historyCursor) Object.assign(input.historyCursor, cursorRead.next)
 
   const baseFee = block.baseFeePerGas ?? 0n
   return {
@@ -249,7 +252,8 @@ function resetCursor(cursor: HistoryCursor, fromBlock: bigint): void {
 /**
  * readPositionHistory over [fromBlock, toBlock] without re-reading what `cursor` holds.
  * Only blocks at or below `safeBlock` are kept; everything after the cursor is read again on every call.
- * A new origin, or a cursor block whose hash changed (reorg), starts the cursor over.
+ * A new origin, or a cursor block whose hash changed (reorg), starts over. `cursor` is not touched:
+ * the caller commits `next` only once its whole observation is consistent.
  */
 export async function readPositionHistoryFrom(
   client: PublicClient,
@@ -258,28 +262,34 @@ export async function readPositionHistoryFrom(
   fromBlock: bigint,
   toBlock: bigint,
   safeBlock: bigint,
-): Promise<ChainPositionEvent[]> {
-  if (tokenIds.length === 0 || fromBlock > toBlock) return []
-  if (cursor.fromBlock !== fromBlock) resetCursor(cursor, fromBlock)
-  if (cursor.hash && (await client.getBlock({ blockNumber: cursor.through })).hash !== cursor.hash) resetCursor(cursor, fromBlock)
+): Promise<{ events: ChainPositionEvent[]; next: HistoryCursor }> {
+  const next: HistoryCursor = { ...cursor, ids: new Set(cursor.ids), events: [...cursor.events] }
+  if (tokenIds.length === 0 || fromBlock > toBlock) return { events: [], next }
+  if (next.fromBlock !== fromBlock) resetCursor(next, fromBlock)
+  if (next.hash && (await client.getBlock({ blockNumber: next.through })).hash !== next.hash) resetCursor(next, fromBlock)
   // A tokenId the cursor has not seen: backfill its history up to the cursor once.
-  const fresh = tokenIds.filter((id) => !cursor.ids.has(String(id)))
+  const fresh = tokenIds.filter((id) => !next.ids.has(String(id)))
   if (fresh.length > 0) {
-    if (cursor.through >= fromBlock) cursor.events.push(...(await readPositionHistory(client, fresh, fromBlock, cursor.through)))
-    for (const id of fresh) cursor.ids.add(String(id))
+    if (next.through >= fromBlock) next.events.push(...(await readPositionHistory(client, fresh, fromBlock, next.through)))
+    for (const id of fresh) next.ids.add(String(id))
   }
   const stable = safeBlock < toBlock ? safeBlock : toBlock
-  if (stable > cursor.through) {
-    const [events, block] = await Promise.all([readPositionHistory(client, [...cursor.ids].map(BigInt), cursor.through + 1n, stable), client.getBlock({ blockNumber: stable })])
-    cursor.events.push(...events)
-    cursor.through = stable
-    cursor.hash = block.hash
+  if (stable > next.through) {
+    // The stable block's hash before and after the read: a reorg in between leaves the cursor where it was.
+    const before = (await client.getBlock({ blockNumber: stable })).hash
+    const events = await readPositionHistory(client, [...next.ids].map(BigInt), next.through + 1n, stable)
+    const after = (await client.getBlock({ blockNumber: stable })).hash
+    if (before === after) {
+      next.events.push(...events)
+      next.through = stable
+      next.hash = after
+    }
   }
   // The tail starts after the cursor, never below it: a safe head that moved back cannot read a block twice.
-  const tailFrom = cursor.through + 1n
+  const tailFrom = next.through + 1n
   const tail = tailFrom <= toBlock ? await readPositionHistory(client, tokenIds, tailFrom, toBlock) : []
   const wanted = new Set(tokenIds.map(String))
-  return [...cursor.events.filter((e) => wanted.has(String(e.tokenId)) && e.blockNumber <= toBlock), ...tail].sort(byChainOrder)
+  return { events: [...next.events.filter((e) => wanted.has(String(e.tokenId)) && e.blockNumber <= toBlock), ...tail].sort(byChainOrder), next }
 }
 
 /** Principal owed per tokenId just before (block, logIndex): the fold of the canonical history up to there. */

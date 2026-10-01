@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import type { PublicClient } from 'viem'
-import { historyCursor, readPositionHistory, readPositionHistoryFrom } from '../src/index.ts'
+import { historyCursor, readPositionHistory, readPositionHistoryFrom as readFrom, type HistoryCursor } from '../src/index.ts'
+
+// Read and commit, as a consistent observe() does.
+async function readPositionHistoryFrom(client: PublicClient, cursor: HistoryCursor, ...rest: [readonly bigint[], bigint, bigint, bigint]) {
+  const { events, next } = await readFrom(client, cursor, ...rest)
+  Object.assign(cursor, next)
+  return events
+}
 
 type Raw = { eventName: 'DecreaseLiquidity' | 'Collect'; tokenId: bigint; block: bigint; logIndex: number }
 
@@ -100,5 +107,27 @@ describe('readPositionHistoryFrom', () => {
     forks.add(150n)
     const r = await readPositionHistoryFrom(client, cursor, [1n], 100n, 150n, 150n)
     expect(r.map(key)).toEqual([])
+  })
+
+  test('an uncommitted read leaves the cursor as it was', async () => {
+    const { client } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    const { next } = await readFrom(client, cursor, [1n], 100n, 150n, 150n)
+    expect(next.through).toBe(150n)
+    expect(cursor.through).toBe(-1n)
+    expect(cursor.events).toEqual([])
+  })
+
+  test('a reorg during the read does not move the cursor', async () => {
+    const { client, forks } = fakeClient(LOGS)
+    const getLogs = (client as any).getLogs
+    ;(client as any).getLogs = async (q: any) => {
+      forks.add(150n)
+      return getLogs(q)
+    }
+    const { events, next } = await readFrom(client, historyCursor(), [1n], 100n, 150n, 150n)
+    expect(next.through).toBe(99n)
+    expect(next.events).toEqual([])
+    expect(events.map(key)).toEqual(['decrease:1@105.0', 'collect:1@105.1'])
   })
 })
