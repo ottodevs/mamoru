@@ -33,6 +33,11 @@ export type SimConfig = {
   /** `decide` runs every this many samples. Default 1. */
   reviewEvery?: number
   gas?: Partial<GasModel>
+  /**
+   * `enforce` (default): an operation whose grant has no uses left in its session window is refused, as the chain
+   * would refuse it. `report`: every operation runs and the overuse is only reported.
+   */
+  sessions?: 'enforce' | 'report'
   /** Later deposits of the savings asset: `at` is a sample index, the amount lands before that sample's review. */
   topUps?: { at: number; amount: bigint }[]
   /** First and last sample to replay, inclusive. Default: the whole dataset. */
@@ -77,6 +82,8 @@ export type Metrics = {
   gas: bigint
   operations: Record<OpKind, number>
   discarded: number
+  /** Operations refused because their grant had no uses left in the session window. */
+  refused: number
   /** Share of position value in range, averaged over the samples with a position. Basis points. */
   timeInRangeBps: number
   maxDrawdownBps: number

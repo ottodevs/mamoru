@@ -111,12 +111,16 @@ function drawdowns(time: number[], value: bigint[]): { maxDrawdownBps: number; w
   return { maxDrawdownBps: maxDd, worstWeekBps: worst }
 }
 
+/** Usage limit of the session a proposal runs under, or null when the policy has no such grant. */
+function limitOf(policy: PolicyVersion, grant: string): number | null {
+  const perPosition = /^manage:\d+$/.test(grant)
+  return policy.session.grants.find((g) => (perPosition ? g.name === 'manage' : grantKey(g) === grant))?.usageLimit ?? null
+}
+
 function sessionUses(policy: PolicyVersion, uses: Map<string, number[]>, t0: number): SessionUse[] {
   const out: SessionUse[] = []
   for (const [grant, times] of [...uses.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-    const perPosition = /^manage:\d+$/.test(grant)
-    const t = policy.session.grants.find((g) => (perPosition ? g.name === 'manage' : grantKey(g) === grant))
-    const limit = t?.usageLimit ?? null
+    const limit = limitOf(policy, grant)
     const windows = new Map<number, number>()
     for (const at of times) {
       const w = Math.floor((at - t0) / policy.session.validitySeconds)
@@ -151,6 +155,8 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   let deposited = config.deposit
   let fees = 0n
   let discarded = 0
+  let refused = 0
+  const enforce = (config.sessions ?? 'enforce') === 'enforce'
   let rangeSum = 0
   let rangeSamples = 0
 
@@ -194,7 +200,14 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
       const d = decide(observe(ds, i, w, policy, gas.priorityFeeWei), policy)
       reasons[d.reason] = (reasons[d.reason] ?? 0) + 1
       const p: Proposal | null = d.proposal
-      if (p) {
+      // Sessions are renewed every `validitySeconds`; inside one window a grant has `usageLimit` uses.
+      const window = Math.floor((s.time - first.time) / policy.session.validitySeconds)
+      const limit = p ? limitOf(policy, p.grant) : null
+      const used = p ? (uses.get(p.grant) ?? []).filter((at) => Math.floor((at - first.time) / policy.session.validitySeconds) === window).length : 0
+      if (p && enforce && limit !== null && used >= limit) {
+        refused++
+        reasons.SESSION_USAGE_SPENT = (reasons.SESSION_USAGE_SPENT ?? 0) + 1
+      } else if (p) {
         const ps = s.pools[ds.pools.indexOf(p.pool)] as PoolSample
         const done = apply(w, p, ps, s.time, policy.execution.slippageBps)
         const e = entry(p.pool)
@@ -237,13 +250,14 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
     gas: gasSpent,
     operations: count,
     discarded,
+    refused,
     timeInRangeBps: rangeSamples === 0 ? 0 : Math.round(rangeSum / rangeSamples),
     ...drawdowns(series.time, series.value),
     returnBps: bps(end - deposited, deposited),
   }
   const sessions = sessionUses(policy, uses, first.time)
   const pHash = policyHash(policy)
-  const facts = { simVersion: SIM_VERSION, datasetId: ds.id, policyHash: pHash, from, to, every, gaps, deposit: config.deposit, topUps: config.topUps ?? [], gas, end, hodlEnd, fees, gasSpent, ops: ops.map(({ trail: _t, ...o }) => o), reasons, sessions }
+  const facts = { simVersion: SIM_VERSION, datasetId: ds.id, policyHash: pHash, from, to, every, gaps, enforce, refused, deposit: config.deposit, topUps: config.topUps ?? [], gas, end, hodlEnd, fees, gasSpent, ops: ops.map(({ trail: _t, ...o }) => o), reasons, sessions }
   return {
     simVersion: SIM_VERSION,
     datasetId: ds.id,

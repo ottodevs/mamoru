@@ -1,6 +1,7 @@
 // Replays a dataset file through `decide` and prints the result.
 //   bun packages/backtest/cli/run.ts --dataset .local/base-30d.json --policy conservador-live-v2 --deposit 1000
 // --json writes the whole result (series and operation log) to a file. --every N reviews one sample in N.
+// --no-limits runs operations past their session usage limit and only reports the overuse.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { POLICIES } from '@mamoru/policy'
 import { entry } from '@mamoru/registry'
@@ -22,7 +23,7 @@ const unit = 10n ** BigInt(decimals)
 const deposit = BigInt(Math.round(Number(arg('deposit', '1000')) * 100)) * (unit / 100n)
 
 const started = performance.now()
-const r = runBacktest(ds, policy, { deposit, reviewEvery: Number(arg('every', '1')) })
+const r = runBacktest(ds, policy, { deposit, reviewEvery: Number(arg('every', '1')), sessions: process.argv.includes('--no-limits') ? 'report' : 'enforce' })
 const ms = Math.round(performance.now() - started)
 
 const money = (v: bigint) => `${(Number(v) / Number(unit)).toFixed(4)} ${policy.savingsAsset}`
@@ -36,7 +37,7 @@ console.log(`end, net gas   ${money(m.end)}   net ${money(m.net)} (${pct(m.retur
 console.log(`hold the mix   ${money(m.hodl)}   LP vs hold ${money(m.vsHodl)}`)
 console.log(`fees earned    ${money(m.fees)}   gas ${money(m.gas)}`)
 console.log(`in range       ${pct(m.timeInRangeBps)}   max drawdown ${pct(m.maxDrawdownBps)}   worst week ${pct(m.worstWeekBps)}`)
-console.log(`operations     ${Object.entries(m.operations).map(([k, n]) => `${k} ${n}`).join(', ')}, discarded ${m.discarded}`)
+console.log(`operations     ${Object.entries(m.operations).map(([k, n]) => `${k} ${n}`).join(', ')}, discarded ${m.discarded}, refused ${m.refused}`)
 console.log(`reviews        ${Object.entries(r.reasons).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(', ')}`)
 for (const s of r.sessions) console.log(`  ${s.exhausted ? 'OVER ' : '     '}${s.grant}: ${s.peakPerWindow} of ${s.limit ?? 'n/a'} uses in its busiest session window`)
 console.log(`result ${r.resultHash}`)

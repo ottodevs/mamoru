@@ -117,11 +117,17 @@ describe('run', () => {
 
   test('a strategy that harvests more often than its grant allows is flagged', () => {
     // Fees that clear the bar at every review: more harvests in one session window than the convert-any limit of 64.
-    const r = runBacktest(syntheticDataset({ samples: 300, growth: [1n << 110n, 1n << 126n, 1n << 100n] }), conservadorLiveV2, { deposit: DEPOSIT })
+    const ds = syntheticDataset({ samples: 300, growth: [1n << 110n, 1n << 126n, 1n << 100n] })
+    const r = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT, sessions: 'report' })
     const s = r.sessions.find((x) => x.grant === 'convert-any:pool:USDC/USDT/100')!
     expect(s.limit).toBe(64)
     expect(s.peakPerWindow).toBeGreaterThan(64)
     expect(s.exhausted).toBe(true)
+    // Enforced, as on chain: the grant stops at its limit and the rest are refused.
+    const e = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT })
+    expect(e.sessions.find((x) => x.grant === 'convert-any:pool:USDC/USDT/100')).toMatchObject({ peakPerWindow: 64, exhausted: false })
+    expect(e.metrics.refused).toBeGreaterThan(0)
+    expect(e.reasons.SESSION_USAGE_SPENT).toBe(e.metrics.refused)
   })
 
   test('a price that walks out of the range is re-ranged after the cooldown, and that costs against holding', () => {
