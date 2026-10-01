@@ -5,7 +5,7 @@ import { amountsOf, decide, type Decision, type Observation, type Proposal, type
 import { signBlocker } from '@mamoru/journal'
 import { hasManageAny, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi } from '@mamoru/registry'
-import { isSafeAndCanonical, observe, principalOwedBefore, readUserOpEvent, rpcClient, simulateFromEntryPoint, type Simulation } from '@mamoru/rpc'
+import { historyCursor, isSafeAndCanonical, observe, principalOwedBefore, readUserOpEvent, rpcClient, simulateFromEntryPoint, type Simulation } from '@mamoru/rpc'
 import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
 import { SessionLedger, precheck } from '@mamoru/account/precheck'
 import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useModeSignature, userOpHash, type GasSettings } from '@mamoru/account/sessions'
@@ -89,6 +89,8 @@ export class Engine {
   readonly savingsLog: SavingsLogRow[] = []
   /** Managed positions are minted by this engine after this block (plan §12.4), so their whole history is on chain from here. */
   readonly historyFromBlock: bigint
+  /** Position history read so far: each review scans only the blocks after it. */
+  private readonly historyCursor = historyCursor()
   depositsAfter: bigint
   lastObservation?: Observation
   /** Live: premises the bundler rejected as unincludable, held back until `until` (block timestamp, seconds). */
@@ -152,6 +154,7 @@ export class Engine {
       sessions: this.sessionObs(),
       allowedTokenIds: this.allowedTokenIds,
       historyFromBlock: this.historyFromBlock,
+      historyCursor: this.historyCursor,
       intents: { paused: false, exitRequested: false },
       slot: live ? { opId: live.opId, state: live.state } : null,
       twapWindowSeconds: this.cfg.policy.execution.twapWindowSeconds,

@@ -55,6 +55,8 @@ export type ObserveInput = {
    * tokenIds from here to the observation block, whoever sent them.
    */
   historyFromBlock: bigint
+  /** When set, history already read is kept here and only new blocks are scanned. */
+  historyCursor?: HistoryCursor
   intents: Observation['intents']
   slot: Observation['slot']
   twapWindowSeconds: number
@@ -92,7 +94,9 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const tokenIds = await Promise.all(
     Array.from({ length: Number(nftCount) }, (_, i) => client.readContract({ address: npm, abi: enumerableAbi, functionName: 'tokenOfOwnerByIndex', args: [acct, BigInt(i)], blockNumber })),
   )
-  const history = await readPositionHistory(client, input.allowedTokenIds, input.historyFromBlock, blockNumber)
+  const history = input.historyCursor
+    ? await readPositionHistoryFrom(client, input.historyCursor, input.allowedTokenIds, input.historyFromBlock, blockNumber, safe.number)
+    : await readPositionHistory(client, input.allowedTokenIds, input.historyFromBlock, blockNumber)
   const owed = applyPrincipal(new Map(), history)
   const positions = await Promise.all(tokenIds.map((id) => readPosition(client, acct, id, blockNumber, input, owed)))
   const pools = await Promise.all(POOLS.map((p) => readPool(client, p, blockNumber, input.twapWindowSeconds)))
@@ -227,6 +231,45 @@ export async function readPositionHistory(client: PublicClient, tokenIds: readon
     txHash: l.transactionHash!,
   }))
   return events.sort((a, b) => (a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1))
+}
+
+/** Position history already read, up to `through` (a safe block), and for which tokenIds. Owned by one engine. */
+export type HistoryCursor = { through: bigint; ids: Set<string>; events: ChainPositionEvent[] }
+
+export function historyCursor(): HistoryCursor {
+  return { through: -1n, ids: new Set(), events: [] }
+}
+
+const byChainOrder = (a: ChainPositionEvent, b: ChainPositionEvent) => (a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1)
+
+/**
+ * readPositionHistory over [fromBlock, toBlock] without re-reading what `cursor` holds.
+ * Only blocks at or below `safeBlock` are kept; the unsafe tail is read again on every call.
+ */
+export async function readPositionHistoryFrom(
+  client: PublicClient,
+  cursor: HistoryCursor,
+  tokenIds: readonly bigint[],
+  fromBlock: bigint,
+  toBlock: bigint,
+  safeBlock: bigint,
+): Promise<ChainPositionEvent[]> {
+  if (tokenIds.length === 0 || fromBlock > toBlock) return []
+  if (cursor.through < fromBlock - 1n) Object.assign(cursor, { through: fromBlock - 1n, ids: new Set(tokenIds.map(String)), events: [] })
+  // A tokenId the cursor has not seen: backfill its history up to the cursor once.
+  const fresh = tokenIds.filter((id) => !cursor.ids.has(String(id)))
+  if (fresh.length > 0) {
+    if (cursor.through >= fromBlock) cursor.events.push(...(await readPositionHistory(client, fresh, fromBlock, cursor.through)))
+    for (const id of fresh) cursor.ids.add(String(id))
+  }
+  const stable = safeBlock < toBlock ? safeBlock : toBlock
+  if (stable > cursor.through) {
+    cursor.events.push(...(await readPositionHistory(client, [...cursor.ids].map(BigInt), cursor.through + 1n, stable)))
+    cursor.through = stable
+  }
+  const tail = stable < toBlock ? await readPositionHistory(client, tokenIds, stable + 1n, toBlock) : []
+  const wanted = new Set(tokenIds.map(String))
+  return [...cursor.events.filter((e) => wanted.has(String(e.tokenId)) && e.blockNumber >= fromBlock && e.blockNumber <= toBlock), ...tail].sort(byChainOrder)
 }
 
 /** Principal owed per tokenId just before (block, logIndex): the fold of the canonical history up to there. */
