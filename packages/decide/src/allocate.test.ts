@@ -135,6 +135,34 @@ describe('allocate (conservador-live-v2, target weights)', () => {
     expect(d.proposal).toMatchObject({ kind: 'enter_swap', pool: 'pool:USDC/cbBTC/500', grant: 'enter-swap:pool:USDC/cbBTC/500' })
   })
 
+  test('a top-up of an invested account is swapped once per bucket and minted, never sold back', () => {
+    let o = obs({ balances: { USDC: 20n * USDC } })
+    let id = 1n
+    for (; id < 20n; id++) {
+      const next = apply(o, id)
+      if (next === o) break
+      o = next
+    }
+    expect(o.positions).toHaveLength(3)
+    // 10 USDC more: every bucket is short by its share, the risk bucket by 1 USDC (3% of the account).
+    o = { ...o, balances: { ...o.balances, USDC: o.balances.USDC! + 10n * USDC } }
+    const kinds: string[] = []
+    for (let steps = 0; steps < 20; steps++, id++) {
+      const p = decide(o, V2).proposal
+      if (!p) break
+      // The loop this guards against: buy the volatile token, then sell it back with convert-any at the next review.
+      expect(p.kind === 'enter_swap' && p.tokenOut === 'USDC').toBe(false)
+      kinds.push(`${p.kind}:${p.pool}`)
+      o = apply(o, id)
+    }
+    expect(decide(o, V2).proposal).toBeNull()
+    expect(kinds.filter((k) => k.startsWith('enter_mint'))).toHaveLength(3)
+    expect(kinds.filter((k) => k.startsWith('enter_swap')).length).toBeLessThanOrEqual(3)
+    const a = allocate(o, V2, false)
+    expect(a.free < 3n * V2.minEntry!).toBe(true)
+    expect(o.positions).toHaveLength(6)
+  })
+
   test('dust below the minimum entry holds', () => {
     const d = decide(obs({ balances: { USDC: 90_000n } }), V2)
     expect(d.proposal).toBeNull()

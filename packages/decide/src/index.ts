@@ -91,8 +91,11 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
   // Plan §9, step 7: entry, bucket by bucket.
   const entries: Proposal[] = []
   let enterEvaluated = false
+  // Target weights: pools of the buckets that are not above their target once their idle volatile is counted.
+  let underTarget: ReadonlySet<string> | undefined
   if (policy.allocation === 'target-weights') {
     const a = allocate(obs, policy, unsafeDeposit)
+    underTarget = new Set(a.buckets.flatMap((b) => (b.pool && b.value <= b.target ? [b.pool] : [])))
     for (const b of a.buckets) buckets.push({ bucket: b.bucket, code: b.code })
     trail.push(...a.trail)
     if (a.proposal) {
@@ -146,7 +149,7 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
     reason = 'DECIDE_PAUSED'
   } else {
     const reduce = reranges.length || harvests.length ? null : reduceOf(obs, policy, policyPools)
-    const idle = reranges.length || harvests.length || reduce?.proposal ? null : idleConvertOf(obs, policy, policyPools)
+    const idle = reranges.length || harvests.length || reduce?.proposal ? null : idleConvertOf(obs, policy, policyPools, underTarget)
     proposal = reranges[0] ?? harvests[0] ?? reduce?.proposal ?? idle ?? entries[0] ?? null
     reason = proposal ? PROPOSAL_CODE[proposal.kind] : holdReason()
   }
