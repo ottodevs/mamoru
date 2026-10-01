@@ -79,6 +79,18 @@
         "viem": "2.56.9",
       },
     },
+    "packages/backtest": {
+      "name": "@mamoru/backtest",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mamoru/decide": "workspace:*",
+        "@mamoru/domain": "workspace:*",
+        "@mamoru/policy": "workspace:*",
+        "@mamoru/registry": "workspace:*",
+        "@mamoru/uniswap-v3": "workspace:*",
+        "viem": "2.56.9",
+      },
+    },
     "packages/decide": {
       "name": "@mamoru/decide",
       "version": "0.0.0",
@@ -327,6 +339,8 @@
     "@mamoru/account": ["@mamoru/account@workspace:packages/account"],
 
     "@mamoru/app": ["@mamoru/app@workspace:apps/mamoru-app"],
+
+    "@mamoru/backtest": ["@mamoru/backtest@workspace:packages/backtest"],
 
     "@mamoru/decide": ["@mamoru/decide@workspace:packages/decide"],
 

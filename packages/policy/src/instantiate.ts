@@ -17,8 +17,16 @@ function canonical(value: unknown): unknown {
   return value
 }
 
+const hashes = new WeakMap<PolicyVersion, Hex>()
+
+/** Hash of the canonical policy. A policy version is never changed in place, so the hash is kept per object. */
 export function policyHash(policy: PolicyVersion): Hex {
-  return keccak256(stringToHex(JSON.stringify(canonical(policy))))
+  let h = hashes.get(policy)
+  if (!h) {
+    h = keccak256(stringToHex(JSON.stringify(canonical(policy))))
+    hashes.set(policy, h)
+  }
+  return h
 }
 
 /** Raw units of `asset` per raw unit of USDC, as a fraction. */
