@@ -70,6 +70,11 @@ export function insertPoolSnapshot(db: D1Like, anchor: Anchor, blockTime: number
     )
 }
 
+/** Drops the rows of one pool below `block`. A range on the primary key, so it reads only what it deletes. */
+export function prunePoolSnapshots(db: D1Like, chainId: number, pool: string, block: number): D1Statement {
+  return db.prepare('DELETE FROM pool_snapshots WHERE chain_id = ? AND pool_address = ? AND block < ?').bind(chainId, pool, block)
+}
+
 export function upsertAccountState(db: D1Like, anchor: Anchor, accountKey: string, s: AccountState): D1Statement {
   return db
     .prepare(

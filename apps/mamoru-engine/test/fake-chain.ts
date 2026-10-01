@@ -30,6 +30,8 @@ export class FakeChain {
   baseFee: bigint | null = 0n
   /** Multicall3 reverts as a whole. */
   multicallDown = false
+  /** Block parameter of every Multicall3 request, in order. */
+  multicalls: number[] = []
 
   hashOf(n: number): Hex {
     return keccak256(toHex(`block-${n}`))
@@ -136,6 +138,7 @@ export class FakeChain {
         return numberToHex(this.balances.get(`eth:${(ps[0] as string).toLowerCase()}`) ?? 0n)
       case 'eth_call': {
         const { to, data } = ps[0] as { to: Address; data: Hex }
+        if (to.toLowerCase() === MULTICALL3) this.multicalls.push(this.blockParam(ps[1]))
         return this.call(to, data)
       }
       case 'eth_getLogs': {

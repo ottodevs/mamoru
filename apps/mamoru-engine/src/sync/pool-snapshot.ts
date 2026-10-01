@@ -23,8 +23,11 @@ export function snapshotPools(registry: Registry): Address[] {
   return registry.entries.filter((e) => e.kind === 'pool').map((e) => e.address)
 }
 
+/** Calldata bytes viem packs into one aggregate3. Five reads of a pool take 116, so one request holds about 70 pools. */
+const MULTICALL_BATCH_BYTES = 8_192
+
 /**
- * All pools at `H` in one Multicall3 `eth_call`, so the history costs one request per sync whatever the pool count.
+ * All pools at `H` through Multicall3: one `eth_call` for the registry as it is today, instead of five per pool.
  * A pool with a failed read is left out; the others are kept.
  */
 export async function readPoolSnapshots(client: PublicClient, pools: readonly Address[], anchor: Anchor): Promise<PoolSnapshot[]> {
@@ -33,7 +36,7 @@ export async function readPoolSnapshots(client: PublicClient, pools: readonly Ad
     ...READS.map((functionName) => ({ address, abi: poolSnapshotAbi, functionName }) as const),
     { address, abi: poolSnapshotAbi, functionName: 'observe', args: [[0]] } as const,
   ])
-  const results = await client.multicall({ contracts, blockNumber: BigInt(anchor.blockNumber), allowFailure: true })
+  const results = await client.multicall({ contracts, blockNumber: BigInt(anchor.blockNumber), allowFailure: true, batchSize: MULTICALL_BATCH_BYTES })
   const per = READS.length + 1
   const out: PoolSnapshot[] = []
   pools.forEach((pool, i) => {

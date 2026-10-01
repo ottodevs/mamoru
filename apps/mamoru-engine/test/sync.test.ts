@@ -277,8 +277,10 @@ describe('pool history', () => {
   })
 
   test('appends one row per readable registry pool at the safe block, in one eth_call', async () => {
-    const before = chain.calls.filter((m) => m === 'eth_call').length
+    chain.latest = chain.safe + 500
     const summary = await run()
+    // One Multicall3 request for every registry pool, pinned to the safe block and not to the head.
+    expect(chain.multicalls).toEqual([chain.safe])
     expect(summary.snapshots).toBe(2)
     const [a] = rows().filter((r) => r.pool_address === POOL)
     expect(a).toMatchObject({
@@ -290,9 +292,23 @@ describe('pool history', () => {
     expect(rows().find((r) => r.pool_address === WETH_POOL)).toMatchObject({ tick_cumulative: null, fee_protocol: 102 })
     // Registry pools the chain does not serve are left out, not written as zeros.
     expect(rows()).toHaveLength(2)
-    const multicalls = logs.filter((l) => l.msg === 'sync.snapshots_failed')
-    expect(multicalls).toHaveLength(0)
-    expect(chain.calls.filter((m) => m === 'eth_call').length).toBeGreaterThan(before)
+    expect(logs.filter((l) => l.msg === 'sync.snapshots_failed')).toHaveLength(0)
+  })
+
+  test('keeps the retention window and drops the rows below it', async () => {
+    const keep = 100
+    const sync = () => syncOnce({ client: chain.client(), db, chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: (l) => logs.push(l), snapshotRetentionBlocks: keep })
+    await sync()
+    const first = chain.safe
+    chain.safe += keep
+    chain.latest += keep
+    await sync()
+    expect(rows().filter((r) => r.pool_address === POOL).map((r) => r.block)).toEqual([first, chain.safe])
+    chain.safe += 1
+    chain.latest += 1
+    await sync()
+    expect(rows().filter((r) => r.pool_address === POOL).map((r) => r.block)).toEqual([chain.safe - 1, chain.safe])
+    expect(rows().filter((r) => r.pool_address === WETH_POOL).map((r) => r.block)).toEqual([chain.safe - 1, chain.safe])
   })
 
   test('a second sync on the same safe block keeps the first row; a new safe block adds one', async () => {

@@ -3,7 +3,7 @@ import { conservadorV1, type PolicyVersion } from '@mamoru/policy'
 import type { MultiBaasClient } from '@mamoru/multibaas'
 import { baseRegistry, entry, readCodeHash, type Registry, type RegistryEntry } from '@mamoru/registry'
 import { getAddress, type Address, type PublicClient } from 'viem'
-import { insertPoolSnapshot, listAccounts, markRpcUnavailable, previousIndexState, previousPoolView, upsertAccountState, upsertPoolState, upsertSourceState, type SourceStateRow } from '../d1.ts'
+import { insertPoolSnapshot, listAccounts, prunePoolSnapshots, markRpcUnavailable, previousIndexState, previousPoolView, upsertAccountState, upsertPoolState, upsertSourceState, type SourceStateRow } from '../d1.ts'
 import type { D1Like, D1Statement } from '../env.ts'
 import { poolReadAbi } from './abis.ts'
 import { readAccountState } from './accounts.ts'
@@ -20,6 +20,12 @@ import type { Anchor } from './provenance.ts'
 
 /** Stats window: 1,800 blocks, about one hour at two seconds per block on Base. */
 export const WINDOW_BLOCKS = 1800
+
+/**
+ * The pool history keeps about 90 days (43,200 blocks a day on Base): near 390,000 rows, well inside one D1 database.
+ * Older history is not lost with the rows: it is the chain's, and any block can be read again from an archive node.
+ */
+export const SNAPSHOT_RETENTION_BLOCKS = 90 * 43_200
 
 /** Pool used only to value WETH and ETH in USDC. It is not a pool of the plan. */
 export const VALUATION_POOLS = ['pool:WETH/USDC/3000'] as const
@@ -39,6 +45,8 @@ export type SyncDeps = {
   /** Start block of the index per registry pool name, when known. */
   startBlocks?: ReadonlyMap<string, number>
   windowBlocks?: number
+  /** Blocks of pool history kept. Defaults to SNAPSHOT_RETENTION_BLOCKS. */
+  snapshotRetentionBlocks?: number
   log?: (line: Record<string, unknown>) => void
   /** Local runs only: adds raw error text to logs. The Worker never sets it. */
   debug?: boolean
@@ -223,7 +231,13 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
     const rows = await readPoolSnapshots(client, pools, anchor)
     // viem reports a reverted aggregate as every call failed, not as a throw.
     if (rows.length < pools.length) log({ msg: 'sync.snapshots_partial', read: rows.length, pools: pools.length })
-    if (rows.length > 0) await db.batch(rows.map((r) => insertPoolSnapshot(db, anchor, head.safe.timestamp, head.safe.baseFeePerGas, r)))
+    const floor = anchor.blockNumber - (deps.snapshotRetentionBlocks ?? SNAPSHOT_RETENTION_BLOCKS)
+    if (rows.length > 0) {
+      await db.batch([
+        ...rows.map((r) => insertPoolSnapshot(db, anchor, head.safe.timestamp, head.safe.baseFeePerGas, r)),
+        ...rows.map((r) => prunePoolSnapshots(db, chainId, r.pool, floor)),
+      ])
+    }
     snapshots = rows.length
   } catch (err) {
     log({ msg: 'sync.snapshots_failed', ...errorInfo(err), ...(deps.debug ? { debug: String(err) } : {}) })
