@@ -1,3 +1,4 @@
+import { upsertActivity } from '../../src/api/accounts/activity.ts'
 import { describe, expect, test } from 'bun:test'
 import type { OwnerResponse, SessionView } from '@mamoru/domain'
 import type { Db, DbStatement, DbValue } from '../../src/api/env.ts'
@@ -85,13 +86,35 @@ describe('account activity tracking', () => {
     expect(days).toEqual(['2026-09-26', '2026-09-27'])
   })
 
-  test('an activity write failure does not break the response', async () => {
-    const h = harness()
+  test('an activity write failure does not break the response, and the next request retries', async () => {
+    let now = new Date('2026-09-26T18:00:00Z')
+    const h = harness(() => now)
     const { cookie, owner } = await onboard(h)
-    h.env.DB = failingActivityDb(h.db)
+    const good = h.env.DB
+    let attempts = 0
+    const failing = failingActivityDb(h.db)
+    h.env.DB = { prepare: (sql: string) => (sql.includes('account_activity') ? (attempts++, failing.prepare(sql)) : failing.prepare(sql)) }
 
+    // Past the throttle window, so the write is attempted and fails.
+    now = new Date('2026-09-26T18:05:00Z')
     const res = await h.request('/api/session', { cookie })
     expect(res.status).toBe(200)
     expect(((await res.json()) as SessionView).accountKey).toBe(owner.accountKey)
+    expect(attempts).toBe(1)
+    await Bun.sleep(0)
+    expect(activityRow(h, owner.accountKey)?.hits).toBe(1)
+
+    // The DB is back 30s later: the failed write did not hold the throttle.
+    h.env.DB = good
+    now = new Date('2026-09-26T18:05:30Z')
+    await h.request('/api/session', { cookie })
+    expect(activityRow(h, owner.accountKey)?.hits).toBe(2)
+  })
+
+  test('writes that land out of order keep the earliest first_at and the latest last_at', async () => {
+    const h = harness()
+    await upsertActivity(h.env.DB, 'acct-order', new Date('2026-09-26T18:10:00Z'))
+    await upsertActivity(h.env.DB, 'acct-order', new Date('2026-09-26T18:02:00Z'))
+    expect(activityRow(h, 'acct-order')).toMatchObject({ hits: 2, first_at: '2026-09-26T18:02:00.000Z', last_at: '2026-09-26T18:10:00.000Z' })
   })
 })

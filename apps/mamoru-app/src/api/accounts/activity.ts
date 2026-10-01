@@ -11,7 +11,7 @@ function utcDay(now: Date): string {
   return now.toISOString().slice(0, 10)
 }
 
-async function upsertActivity(db: Db, accountKey: string, now: Date): Promise<void> {
+export async function upsertActivity(db: Db, accountKey: string, now: Date): Promise<void> {
   const day = utcDay(now)
   const iso = now.toISOString()
   await db
@@ -36,6 +36,8 @@ export function recordActivity(c: Context<AppEnv>, accountKey: string): void {
   if (lastSeen.size > 5_000) lastSeen.clear()
   lastSeen.set(key, now.getTime())
   const task = upsertActivity(c.env.DB, accountKey, now).catch((e) => {
+    // A failed write must not hold the throttle: the next request tries again.
+    lastSeen.delete(key)
     console.error('account_activity upsert failed', e instanceof Error ? e.message : String(e))
   })
   try {
