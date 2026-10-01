@@ -29,5 +29,36 @@
     "CORE_DRY_RUN": "true",
     "LIVE_FUNDS": "1"
   },
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+  // Canary: built from branch `beta`, same D1 and same operator as prod. Opt-in testers, real funds, real data.
+  // Secrets (SESSION_SECRET, OPERATOR_URL, OPERATOR_SECRET) are set separately with `wrangler secret put X --env beta`.
+  "env": {
+    "beta": {
+      "name": "mamoru-app-beta",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [{ "pattern": "beta.mamoru.lol", "custom_domain": true }],
+      "assets": {
+        "directory": "./dist",
+        "binding": "ASSETS",
+        "not_found_handling": "single-page-application",
+        "run_worker_first": ["/api/*", "/hooks/*"]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "mamoru",
+          "database_id": "682b2a66-d9d4-49e5-ac78-596d002d02ca",
+          "migrations_dir": "../../migrations/d1"
+        }
+      ],
+      "vars": {
+        "MODE": "production",
+        "CHAIN_ID": "8453",
+        "CORE_DRY_RUN": "true",
+        "LIVE_FUNDS": "1"
+      },
+      "observability": { "enabled": true }
+    }
+  }
 }

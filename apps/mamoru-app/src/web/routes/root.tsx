@@ -7,6 +7,11 @@ export function RootLayout() {
       {import.meta.env.VITE_FIXTURES === '1' ? (
         <p className="m-0 bg-ink px-4 py-1 text-center font-mono text-[0.68rem] tracking-[0.05em] text-rice">Fixture data. Not from Mamoru's API.</p>
       ) : null}
+      {import.meta.env.VITE_BETA === '1' ? (
+        <p className="m-0 bg-alert px-4 py-1 text-center font-mono text-[0.68rem] tracking-[0.05em] text-rice">
+          BETA · opt-in testers, real funds, same account as production
+        </p>
+      ) : null}
       <Outlet />
     </div>
   )
