@@ -13,16 +13,20 @@ systemd state. Ot decides if and when to wire it up.
 `mamoru-beta-deploy.timer` fires `mamoru-beta-deploy.service` every 60s. The service runs
 `beta-watch.sh`, which:
 
-1. Checks `origin/beta`'s HEAD sha via `git ls-remote` (no local fetch if nothing changed).
+1. Checks `origin/beta`'s HEAD sha via `git ls-remote` (no local fetch if nothing changed), and
+   skips a sha that already failed until `origin/beta` moves again (or `MAMORU_BETA_FORCE_RETRY=1`).
 2. If it's new, clones/updates a dedicated worktree at `~/.local/state/mamoru-beta-deploy/worktree`
-   and checks out that sha.
-3. Runs `bun install --frozen-lockfile && bun run deploy:beta`, which itself does
-   typecheck + test + build + `wrangler deploy --env beta` + a smoke test, printing a
-   rollback command if the smoke test fails.
-4. Records the deployed sha and a one-line log entry.
+   and checks it out, purely so there is somewhere to run the script and something to inspect.
+3. Runs `bun install --frozen-lockfile && bun run deploy:beta`. `deploy:beta` itself re-resolves
+   `origin/beta`'s tip and builds an immutable detached-worktree snapshot of that exact sha (never
+   the live working tree), then does typecheck + test + build + `wrangler deploy --env beta` + a
+   smoke test, printing a rollback command if the smoke test fails.
+4. Records the deployed (or failed) sha and a one-line log entry.
 
 `main` is never touched by this watcher. Prod deploys stay manual via `bun run promote`
-(fast-forward main to beta, then `deploy:prod`) or a direct `bun run deploy:prod`.
+(fast-forward main to beta, then `deploy:prod`) or a direct `bun run deploy:prod`. Beta is a
+separate account from prod for every tester (separate session cookie, separate passkey, same D1
+and operator) — see `AGENTS.md`.
 
 ## Install (run manually, this agent does not do this)
 
