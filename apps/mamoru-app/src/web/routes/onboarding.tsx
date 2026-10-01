@@ -2,7 +2,7 @@ import type { OwnerResponse } from '@mamoru/domain'
 import { conservadorV1 } from '@mamoru/policy'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { type CSSProperties, useEffect, useState } from 'react'
+import { type CSSProperties, type ReactNode, useEffect, useState } from 'react'
 import { useApi } from '../api/client.ts'
 import { queryKeys, useConfig } from '../api/queries.ts'
 import { downloadJson, kitFilename } from '../lib/download.ts'
@@ -10,6 +10,7 @@ import { capNote } from '../lib/money.ts'
 import { errorText, useOwnerAction } from '../lib/owner-flow.ts'
 import { createOwnerPasskey } from '../lib/passkey.ts'
 import { rememberCredential } from '../lib/passkey-sign.ts'
+import { signInCopy } from '../lib/signin.ts'
 
 // The Conservador mix as the policy defines it (basis points), drawn like the mockup's mix bar.
 const BUCKET: Record<string, { name: string; note: string; tone: string }> = {
@@ -78,7 +79,23 @@ function Mix() {
   )
 }
 
-function Identity({ owner, onCreate, creating, createError }: { owner: OwnerResponse | null; onCreate: () => void; creating: boolean; createError: string | null }) {
+// A text link on the card: the card is darker than the page, so stone on wash would not read.
+export const CARD_LINK = 'text-[0.88rem] text-[color-mix(in_srgb,var(--color-ink)_68%,transparent)] underline decoration-[color-mix(in_srgb,var(--color-ink)_35%,transparent)] underline-offset-4 hover:text-ink'
+
+/** The dimmed backdrop and the card every first-screen step sits in. */
+export function CardFrame({ label, testId, children }: { label: string; testId: string; children: ReactNode }) {
+  return (
+    <div className="fixed inset-0 z-30 grid place-items-center overflow-y-auto bg-[color-mix(in_srgb,var(--color-ink)_42%,transparent)] p-4" role="dialog" aria-modal="true" aria-label={label}>
+      <div className="w-[min(48rem,100%)] min-[761px]:w-[min(60vw,48rem)]">
+        <section className="ob-card rise" aria-live="polite" data-testid={testId}>
+          {children}
+        </section>
+      </div>
+    </div>
+  )
+}
+
+function Identity({ owner, onCreate, creating, createError, onSignIn }: { owner: OwnerResponse | null; onCreate: () => void; creating: boolean; createError: string | null; onSignIn: () => void }) {
   const api = useApi()
   const navigate = useNavigate()
   const act = useOwnerAction(owner?.accountKey, 'activate')
@@ -107,8 +124,11 @@ function Identity({ owner, onCreate, creating, createError }: { owner: OwnerResp
           </p>
         ))}
         {createError ? <p className="err mt-3">{createError}</p> : null}
-        <div className="mt-[1.6rem] flex justify-end">
-          <button type="button" className="ob-btn solid" onClick={onCreate} disabled={creating}>
+        <div className="mt-[1.6rem] flex flex-wrap items-center justify-between gap-3">
+          <button type="button" className={CARD_LINK} onClick={onSignIn} disabled={creating}>
+            {signInCopy.link}
+          </button>
+          <button type="button" className="ob-btn solid ml-auto" onClick={onCreate} disabled={creating}>
             {creating ? 'Creating account' : 'Create account'}
           </button>
         </div>
@@ -139,7 +159,7 @@ function Identity({ owner, onCreate, creating, createError }: { owner: OwnerResp
   )
 }
 
-export function Onboarding() {
+export function Onboarding({ onSignIn }: { onSignIn: () => void }) {
   const api = useApi()
   const qc = useQueryClient()
   const [step, setStep] = useState(0)
@@ -159,9 +179,7 @@ export function Onboarding() {
   const body = screen ? [...screen.body, ...(step === 0 && capUsdc ? [capNote(capUsdc)] : [])] : []
 
   return (
-    <div className="fixed inset-0 z-30 grid place-items-center overflow-y-auto bg-[color-mix(in_srgb,var(--color-ink)_42%,transparent)] p-4" role="dialog" aria-modal="true" aria-label="Welcome to Mamoru">
-      <div className="w-[min(48rem,100%)] min-[761px]:w-[min(60vw,48rem)]">
-        <section className="ob-card rise" aria-live="polite" data-testid={`onboarding-${step + 1}`}>
+    <CardFrame label="Welcome to Mamoru" testId={`onboarding-${step + 1}`}>
           <div key={step} className="enter">
             <p className="ob-step">{String(step + 1).padStart(2, '0')} / 03</p>
             {screen ? (
@@ -173,13 +191,18 @@ export function Onboarding() {
                   </p>
                 ))}
                 {step === 1 ? <Mix /> : null}
-                <div className="mt-[1.6rem] flex flex-wrap justify-end gap-[0.65rem]">
-                  <button type="button" className="ob-btn ghost" onClick={() => setStep(last)}>
-                    Skip
+                <div className="mt-[1.6rem] flex flex-wrap items-center justify-between gap-3">
+                  <button type="button" className={CARD_LINK} onClick={onSignIn}>
+                    {signInCopy.link}
                   </button>
-                  <button type="button" className="ob-btn solid" onClick={() => setStep(step + 1)}>
-                    Next
-                  </button>
+                  <span className="ml-auto flex flex-wrap gap-[0.65rem]">
+                    <button type="button" className="ob-btn ghost" onClick={() => setStep(last)}>
+                      Skip
+                    </button>
+                    <button type="button" className="ob-btn solid" onClick={() => setStep(step + 1)}>
+                      Next
+                    </button>
+                  </span>
                 </div>
               </>
             ) : (
@@ -188,11 +211,10 @@ export function Onboarding() {
                 onCreate={() => owner.mutate()}
                 creating={owner.isPending}
                 createError={owner.error ? errorText(owner.error) : null}
+                onSignIn={onSignIn}
               />
             )}
           </div>
-        </section>
-      </div>
-    </div>
+    </CardFrame>
   )
 }

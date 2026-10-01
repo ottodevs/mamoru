@@ -21,6 +21,12 @@ export function accountOfUser(db: Db, userId: string): Promise<AccountRow | null
   return db.prepare('SELECT * FROM accounts WHERE user_id = ? ORDER BY created_at LIMIT 1').bind(userId).first<AccountRow>()
 }
 
+/** Accounts registered with this credential id, oldest first. Several rows are possible (the id is not proven at onboarding); the key decides. */
+export async function accountsByCredential(db: Db, chainId: number, credentialId: string): Promise<AccountRow[]> {
+  const rows = await db.prepare('SELECT * FROM accounts WHERE passkey_credential_id = ? AND chain_id = ? ORDER BY created_at LIMIT 8').bind(credentialId, chainId).all<AccountRow>()
+  return rows.results
+}
+
 /** The account only if it belongs to this user; a foreign key reads as absent. */
 export function ownedAccount(db: Db, userId: string, accountKey: string): Promise<AccountRow | null> {
   return db.prepare('SELECT * FROM accounts WHERE account_key = ? AND user_id = ?').bind(accountKey, userId).first<AccountRow>()

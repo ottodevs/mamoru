@@ -15,6 +15,13 @@ export type AppConfig = {
 // GET /api/session -> 200 SessionView | 401
 export type SessionView = { userId: string; email?: string; accountKey?: string }
 
+// Returning owner: sign in with the passkey that owns the account. Grants what the device session grants, nothing more.
+// POST /api/auth/challenge -> SignInChallenge (single use, 5 minutes, bound to this host)
+export type SignInChallenge = { challenge: string; token: string; rpId: string; expiresAt: string }
+// POST /api/auth/signin  body: SignInRequest -> 200 SessionView + session cookie | 401 AUTH_SIGNIN_FAILED | 429 AUTH_RATE_LIMITED
+// Every field is base64url, as navigator.credentials.get returns them; token is SignInChallenge.token.
+export type SignInRequest = { token: string; credentialId: string; authenticatorData: string; clientDataJSON: string; signature: string }
+
 // Passkey owner as produced by navigator.credentials.create (P-256).
 export type PasskeyOwner = { credentialId: string; x: Hex0x; y: Hex0x }
 

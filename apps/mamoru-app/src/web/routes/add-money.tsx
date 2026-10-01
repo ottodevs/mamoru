@@ -57,7 +57,8 @@ export function AddMoneyPage() {
   const [leaving, setLeaving] = useState(false)
 
   useEffect(() => {
-    if (session.isSuccess && !accountKey) void navigate({ to: '/', replace: true })
+    // No session on a deep link: most likely a returning owner, so open on the sign-in card.
+    if (session.isSuccess && !accountKey) void navigate({ to: '/', search: { signin: true }, replace: true })
   }, [session.isSuccess, accountKey, navigate])
 
   useEffect(() => {

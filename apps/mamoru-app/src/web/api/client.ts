@@ -12,6 +12,8 @@ import type {
   OwnerResponse,
   PoolsResponse,
   SessionView,
+  SignInChallenge,
+  SignInRequest,
   TransferPlan,
   TransferRequest,
   WithdrawAsset,
@@ -26,6 +28,9 @@ export type ApiClient = {
   pools(): Promise<PoolsResponse>
   apy(): Promise<ApyView>
   createOwner(body: OwnerRequest): Promise<OwnerResponse>
+  /** Returning owner: a one-time challenge, then the passkey assertion over it. signIn sets the session cookie. */
+  signInChallenge(): Promise<SignInChallenge>
+  signIn(body: SignInRequest): Promise<SessionView>
   recoveryKit(accountKey: string): Promise<unknown>
   ackRecovery(accountKey: string): Promise<{ ok: true }>
   // Live happy path (fundsGate 'live'). Owner actions are prepared by the API and signed by the passkey here.
@@ -82,6 +87,8 @@ export const httpClient: ApiClient = {
   pools: () => request<PoolsResponse>('/api/pools'),
   apy: () => request<ApyView>('/api/apy'),
   createOwner: (body) => request<OwnerResponse>('/api/onboarding/owner', { method: 'POST', body: JSON.stringify(body) }),
+  signInChallenge: () => post<SignInChallenge>('/api/auth/challenge'),
+  signIn: (body) => post<SessionView>('/api/auth/signin', body),
   recoveryKit: (accountKey) => request<unknown>(`/api/onboarding/kit?accountKey=${encodeURIComponent(accountKey)}`),
   ackRecovery: (accountKey) =>
     request<{ ok: true }>('/api/onboarding/recovery-ack', { method: 'POST', body: JSON.stringify({ accountKey }) }),

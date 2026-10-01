@@ -20,6 +20,21 @@ export function storedCredential(accountKey: string): string | undefined {
   }
 }
 
+/** Credential ids this browser used for an account here: a returning owner whose session is gone. */
+export function knownCredentials(): string[] {
+  try {
+    const out: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      const v = k?.startsWith(STORE_PREFIX) ? localStorage.getItem(k) : null
+      if (v && !out.includes(v)) out.push(v)
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
 export function hexToBytes(hex: Hex0x | string): Uint8Array {
   const clean = hex.startsWith('0x') ? hex.slice(2) : hex
   if (clean.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(clean)) throw new Error(`not hex: ${hex}`)

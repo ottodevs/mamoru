@@ -3,7 +3,7 @@ import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import type { ApiError, ReasonCode } from '@mamoru/domain'
 
 /** App-local codes not (yet) in the domain catalog. */
-export type LocalCode = 'OPERATOR_UNAVAILABLE' | 'BODY_TOO_LARGE'
+export type LocalCode = 'OPERATOR_UNAVAILABLE' | 'BODY_TOO_LARGE' | 'AUTH_SIGNIN_FAILED' | 'AUTH_RATE_LIMITED'
 
 export function apiError(c: Context, status: ContentfulStatusCode, error: string, code?: ReasonCode | LocalCode) {
   const body: ApiError = code ? { error, code } : { error }
