@@ -33,6 +33,7 @@ onboarding.post('/owner', async (c) => {
   const db = c.env.DB
   const existing = await accountOfUser(db, session.userId)
   if (existing) {
+    c.set('accountKey', existing.account_key)
     if (existing.passkey_credential_id === passkey.credentialId) return c.json(ownerResponse(existing))
     return apiError(c, 409, 'This session already has an account with another passkey.', 'INTENT_REJECTED_STATE')
   }
@@ -66,6 +67,7 @@ onboarding.post('/recovery-ack', async (c) => {
   if (typeof accountKey !== 'string' || !ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
   const row = await ownedAccount(c.env.DB, session.userId, accountKey)
   if (!row) return accountNotFound(c)
+  c.set('accountKey', row.account_key)
   await acknowledgeRecovery(c.env.DB, accountKey, c.var.now().toISOString())
   return c.json({ ok: true as const })
 })
@@ -78,6 +80,7 @@ onboarding.get('/kit', async (c) => {
   if (!accountKey || !ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
   const row = await ownedAccount(c.env.DB, session.userId, accountKey)
   if (!row) return accountNotFound(c)
+  c.set('accountKey', row.account_key)
   const kit = recoveryKit({ chainId: row.chain_id, owners: ownersOf(row), saltNonce: BigInt(row.salt_nonce), webauthn: passkeySigner(row.passkey_x, row.passkey_y), permissionIds: [], tokenIds: [] })
   if (kit.address.toLowerCase() !== row.address.toLowerCase()) return apiError(c, 500, 'The recovery kit does not match the stored account address.')
   c.header('content-disposition', `attachment; filename="mamoru-recovery-kit-${row.address}.json"`)

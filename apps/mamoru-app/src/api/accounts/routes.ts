@@ -17,6 +17,7 @@ accounts.get('/:accountKey/dashboard', async (c) => {
   if (!ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
   const account = await ownedAccount(c.env.DB, session.userId, accountKey)
   if (!account) return accountNotFound(c)
+  c.set('accountKey', account.account_key)
   const payload = buildDashboard(await loadDashboardInput(c.env.DB, account), c.var.now())
   if (liveFunds(c.env)) payload.banner = { ...payload.banner, kind: 'live', text: LIVE_BANNER }
   return c.json(payload)

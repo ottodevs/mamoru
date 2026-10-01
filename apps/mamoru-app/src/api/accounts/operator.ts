@@ -53,6 +53,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch) {
     if (!ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
     const row = await ownedAccount(c.env.DB, session.userId, accountKey)
     if (!row) return accountNotFound(c)
+    c.set('accountKey', row.account_key)
 
     const method = c.req.method
     let body = ''

@@ -3,5 +3,6 @@ import type { ProductAuthPort } from './auth/port.ts'
 
 export type AppEnv = {
   Bindings: Env
-  Variables: { settings: AppSettings; auth: ProductAuthPort; now: () => Date }
+  // accountKey: set by a route once it resolves the session to an account; read by the activity-tracking middleware.
+  Variables: { settings: AppSettings; auth: ProductAuthPort; now: () => Date; accountKey?: string }
 }

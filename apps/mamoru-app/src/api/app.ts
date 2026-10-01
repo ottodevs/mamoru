@@ -7,6 +7,7 @@ import { DeviceSessionAuth } from './auth/device-session.ts'
 import { sameOrigin } from './middleware/origin.ts'
 import { onboarding } from './onboarding/routes.ts'
 import { accountOfUser } from './accounts/store.ts'
+import { recordActivity } from './accounts/activity.ts'
 import { accounts } from './accounts/routes.ts'
 import { pools } from './pools/routes.ts'
 import { operatorRoutes, type OperatorFetch } from './accounts/operator.ts'
@@ -35,7 +36,12 @@ export function createApp(options: AppOptions = {}) {
     c.set('now', now)
     c.set('auth', new DeviceSessionAuth(c.env.DB, settings.sessionSecret, now))
     c.header('cache-control', 'no-store')
-    await next()
+    // Single choke point: any route that resolves an account sets c.var.accountKey; this records it.
+    try {
+      await next()
+    } finally {
+      if (c.var.accountKey) recordActivity(c, c.var.accountKey)
+    }
   })
   app.use('/api/*', sameOrigin)
 
@@ -56,6 +62,7 @@ export function createApp(options: AppOptions = {}) {
     const session = await c.var.auth.current(c)
     if (!session) return apiError(c, 401, 'No session yet. It starts with onboarding.', 'AUTH_REQUIRED')
     const account = await accountOfUser(c.env.DB, session.userId)
+    if (account) c.set('accountKey', account.account_key)
     const view: SessionView = { ...session, ...(account ? { accountKey: account.account_key } : {}) }
     return c.json(view)
   })
