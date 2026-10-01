@@ -1,66 +1,68 @@
 #!/usr/bin/env bun
-// `bun run deploy:prod` — check, require HEAD == origin/main on a clean tree, deploy the mamoru-app
-// Worker (default env, app.mamoru.lol), record the release, print the rollback command. Manual only:
-// this script never runs on a push, only `promote` or a human calls it.
-import { $ } from 'bun'
+// `bun run deploy:prod` — deploys the exact commit at origin/main's current tip to the mamoru-app
+// Worker (default env, app.mamoru.lol), from an immutable detached-worktree snapshot, never the
+// live working tree. Logs the release and prints the rollback command even if something fails
+// after the deploy itself (smoke test throws, etc). Manual only: this never runs on a push, only
+// `promote` or a human calls it.
+import { fetchRefs, revParse } from './lib/git.ts'
 import { runCheck } from './lib/check.ts'
-import { currentBranch, currentSha, fetchRefs, isClean, revParse } from './lib/git.ts'
+import { withSnapshot } from './lib/snapshot.ts'
 import { currentVersionId, deploy, rollbackCommand } from './lib/wrangler.ts'
 import { smokeTest, printSmoke } from './lib/smoke.ts'
 import { appendReleaseLog } from './lib/release-log.ts'
 
 const root = new URL('../../', import.meta.url).pathname
-const appDir = `${root}apps/mamoru-app`
+const stableAppDir = `${root}apps/mamoru-app`
 
 console.log('== deploy:prod ==')
 
-const branch = await currentBranch(root)
-if (branch !== 'main') {
-  console.error(`refusing: HEAD is on '${branch}', deploy:prod requires 'main'. Run 'bun run promote' or checkout main.`)
-  process.exit(1)
-}
-
 await fetchRefs(root, 'main')
-const local = await currentSha(root)
-const remote = await revParse(root, 'origin/main')
-if (local !== remote) {
-  console.error(`refusing: HEAD (${local.slice(0, 7)}) != origin/main (${remote.slice(0, 7)}). Push or pull first.`)
+const sha = await revParse(root, 'origin/main')
+console.log(`deploying origin/main at ${sha.slice(0, 7)} from a clean snapshot`)
+
+let output: string
+let versionId: string | null
+let before: string | null
+try {
+  ;({ output, versionId, before } = await withSnapshot(root, sha, async (dir) => {
+    const appDir = `${dir}/apps/mamoru-app`
+    await runCheck(dir)
+    // Read inside the snapshot: fails closed (throws, aborts before deploying) on any read error.
+    const before = await currentVersionId(appDir, '')
+    const result = await deploy(appDir, '')
+    return { ...result, before }
+  }))
+} catch (err) {
+  console.error('deploy:prod failed before or during the deploy; prod was not touched:', err instanceof Error ? err.message : err)
   process.exit(1)
 }
 
-if (!(await isClean(root))) {
-  console.error('refusing: working tree is not clean.')
-  process.exit(1)
-}
-
-await runCheck(root)
-
-const before = await currentVersionId(appDir)
-console.log(`current live version before deploy: ${before ?? 'unknown (first deploy?)'}`)
-
-console.log('-> wrangler deploy (prod, default env)')
-const { output, versionId } = await deploy(appDir)
 console.log(output)
 const after = versionId ?? 'unknown'
+console.log(`deployed version: ${after}`)
 
-console.log('-> smoke test https://app.mamoru.lol')
-const smoke = await smokeTest('https://app.mamoru.lol')
-printSmoke(smoke)
+// The deploy already happened: everything from here must still log + print the rollback command
+// on any failure, including an exception (a thrown smoke-test fetch, a log-write error, etc).
+let smokeOk = false
+try {
+  console.log('-> smoke test https://app.mamoru.lol')
+  const smoke = await smokeTest('https://app.mamoru.lol')
+  printSmoke(smoke)
+  smokeOk = smoke.ok
+} catch (err) {
+  console.error('smoke test threw:', err instanceof Error ? err.message : err)
+}
 
-const sha = await currentSha(root)
-const logPath = await appendReleaseLog(root, {
-  env: 'prod',
-  sha,
-  versionId: after,
-  previousVersionId: before ?? 'none',
-  smokeOk: smoke.ok,
-  at: new Date().toISOString(),
-})
-console.log(`release logged: ${logPath}`)
+try {
+  const logPath = await appendReleaseLog({ env: 'prod', sha, versionId: after, previousVersionId: before ?? 'none', smokeOk, at: new Date().toISOString() })
+  console.log(`release logged: ${logPath}`)
+} catch (err) {
+  console.error('failed to write the release log (deploy result above still stands):', err instanceof Error ? err.message : err)
+}
 
-const rollback = before ? rollbackCommand(appDir, undefined, before) : null
+const rollback = before ? rollbackCommand(stableAppDir, '', before) : null
 
-if (!smoke.ok) {
+if (!smokeOk) {
   console.error('prod smoke test FAILED after deploy.')
   if (rollback) console.error(`rollback to the previous version: ${rollback}`)
   process.exit(1)
