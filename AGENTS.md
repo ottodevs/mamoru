@@ -11,11 +11,11 @@ Sprint mode (parallel lanes, deploy-during-build) ended 2026-09-27 with the ETHG
 1. Branch per fix off `main`, one concern, at most ~12 files.
 2. `bun run typecheck` and `bun test packages apps` pass locally (`bun run release:check` runs both plus the SPA build).
 3. Push the branch. Codex `gpt-6-astra` reviews the commit; verdict is APTO or NO-GO. NO-GO: one fix commit on the same branch, review again. Do not stack unreviewed commits, do not open a pull request, do not squash.
-4. Risky UI or API changes go to the `beta` branch first: `bun run deploy:beta` ships them to https://beta.mamoru.lol (same D1, same live operator as prod, opt-in testers, real funds) to soak before touching `main`.
-5. APTO (and, for beta changes, soaked): fast-forward `main` and delete the branch. `bun run promote` does this fast-forward from `beta` and runs `deploy:prod`; `bun run deploy:prod` alone requires HEAD to already be `origin/main` on a clean tree. Never force-push, never force the fast-forward.
-6. Every `deploy:prod` run appends a row to `docs/releases.md` (git sha, version id, previous version, smoke test result) and prints the `wrangler rollback <version>` command.
+4. Risky UI or API changes go to the `beta` branch first: `bun run deploy:beta` ships the exact commit at `origin/beta`'s tip to https://beta.mamoru.lol (same D1, same live operator as prod, opt-in testers, real funds) to soak before touching `main`. Beta is **not** the same account as prod: `__Host-` session cookies and the passkey RP ID are both scoped to the hostname, so beta always starts a fresh session with a fresh passkey (a new counterfactual Safe) on the shared backend. Do not change the passkey RP ID to "fix" this.
+5. APTO (and, for beta changes, soaked): fast-forward `main` and delete the branch. `bun run promote [sha]` verifies `origin/beta`'s tip is a fast-forward of `origin/main` and pushes exactly that sha (never the local branch state), then runs `deploy:prod`; `bun run deploy:prod` alone always deploys `origin/main`'s current tip. Never force-push, never force the fast-forward.
+6. Both deploy scripts build and deploy from an immutable detached-worktree snapshot of the exact sha (never the live working tree), so a dirty or unreviewed local branch can never reach a Worker. Every `deploy:prod` run appends a line to `~/.local/state/mamoru-app/releases.jsonl` (git sha, version id, previous version, smoke test result; path overridable via `MAMORU_RELEASE_LOG`) and prints the `wrangler rollback <version>` command, even if a post-deploy step throws.
 
-Release scripts live in `scripts/release/` (`release:check`, `deploy:beta`, `deploy:prod`, `promote`, wired in `package.json`). Forgejo stays fetch-only.
+Release scripts live in `scripts/release/` (`release:check`, `deploy:beta`, `deploy:prod`, `promote`, wired in `package.json`; `scripts/release/lib/*.test.ts` covers the SHA/fast-forward/env-scrubbing/log-path guards). Forgejo stays fetch-only.
 
 ## Read before writing a spec
 

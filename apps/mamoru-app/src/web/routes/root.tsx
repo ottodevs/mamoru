@@ -9,7 +9,7 @@ export function RootLayout() {
       ) : null}
       {import.meta.env.VITE_BETA === '1' ? (
         <p className="m-0 bg-alert px-4 py-1 text-center font-mono text-[0.68rem] tracking-[0.05em] text-rice">
-          BETA · opt-in testers, real funds, same account as production
+          BETA · real funds · separate sign-in from app.mamoru.lol
         </p>
       ) : null}
       <Outlet />

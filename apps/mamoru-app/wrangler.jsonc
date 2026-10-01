@@ -32,6 +32,10 @@
   "observability": { "enabled": true },
   // Canary: built from branch `beta`, same D1 and same operator as prod. Opt-in testers, real funds, real data.
   // Secrets (SESSION_SECRET, OPERATOR_URL, OPERATOR_SECRET) are set separately with `wrangler secret put X --env beta`.
+  // NOT the same account as prod: __Host- session cookies and the passkey RP ID are both scoped to
+  // the browser's hostname, so beta.mamoru.lol always creates a fresh session and a fresh passkey
+  // (a new counterfactual Safe), on the same D1 and operator. Do not change the passkey RP ID
+  // (location.hostname in src/web/lib/passkey-sign.ts) to "fix" this.
   "env": {
     "beta": {
       "name": "mamoru-app-beta",
