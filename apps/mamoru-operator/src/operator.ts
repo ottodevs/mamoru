@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeFunctionData, parseAbi, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import type { AccountContext, Address, FundingView, OpView, OwnerSignature, OwnerTxToSign, TransferPlan, TransferRequest, WithdrawAsset } from '@mamoru/domain'
+import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import { simulateCalls, type SimCallResult } from '@mamoru/rpc'
@@ -228,6 +228,8 @@ export class Operator {
       usdc: r.usdc.toString(),
       eth: r.eth.toString(),
       capUsdc: LIVE_CAP_USDC.toString(),
+      // Only while the engine is off: that is when the cap refuses Start.
+      overCap: acc.active ? null : overCap(r.usdc, LIVE_CAP_USDC),
       cbbtc: r.cbbtc.toString(),
       gasReserveWei: this.policyOf(acc).gasReserveWei.toString(),
       active: acc.active,
@@ -354,7 +356,7 @@ export class Operator {
     const { acc, live } = this.account(ctx)
     if (acc.active) throw new HttpError(409, 'ALREADY_ACTIVE', 'the engine is already active for this account')
     const r = await readSafe(this.client, live.safe)
-    if (r.usdc > LIVE_CAP_USDC) throw new HttpError(409, 'CAP_EXCEEDED', `the Safe holds ${r.usdc} USDC base units, cap is ${LIVE_CAP_USDC}`)
+    if (r.usdc > LIVE_CAP_USDC) throw depositOverCap(r.usdc)
     if (!acc.sessionKey) {
       acc.sessionKey = generatePrivateKey()
       this.store.save()
@@ -437,8 +439,8 @@ export class Operator {
     if (payoutCap !== undefined && amount > payoutCap) throw new HttpError(409, 'CAP_EXCEEDED', `${ASSET_LABEL[asset] ?? asset} payouts are capped at ${fmtUsdc(payoutCap)} USD each`)
     const to = getAddress(req.to)
     if (to.toLowerCase() === live.safe.toLowerCase()) throw new HttpError(400, 'BAD_REQUEST', 'recipient is the Safe itself')
+    // An undeployed Safe can still pay out: the relayer deploys it right before the owner transfer (executeOwner).
     const r = await readSafe(this.client, live.safe)
-    if (!r.deployed) throw new HttpError(409, 'NOT_DEPLOYED', 'the Safe is not deployed yet')
     const slip = this.policyOf(acc).execution.slippageBps
     let reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[] = []
     let swaps: SwapBack[] = []
@@ -462,6 +464,7 @@ export class Operator {
     }
     const short = `${to.slice(0, 6)}…${to.slice(-4)}`
     const summary = [
+      ...(r.deployed ? [] : [`Create your Safe ${live.safe} on Base`]),
       ...reduce.map((x) => `Withdraw ${(x.bps / 100).toFixed(2)}% of position #${x.pos.tokenId} (${poolLabel(x.pos.pool)})`),
       ...swaps.map((sw) => `Swap ${sw.amountIn} ${sw.token} units to at least ${fmtUsdc(sw.amountOutMinimum)} USDC`),
       ...(out
@@ -677,7 +680,7 @@ export class Operator {
     if (kind === 'activate') {
       const usdc = await this.usdcOf(live.safe)
       if (usdc === 0n) return this.arm(acc, p, signature)
-      if (usdc > LIVE_CAP_USDC) throw new HttpError(409, 'CAP_EXCEEDED', `the Safe holds ${usdc} USDC base units, cap is ${LIVE_CAP_USDC}`)
+      if (usdc > LIVE_CAP_USDC) throw depositOverCap(usdc)
       this.disarm(acc, 'ARMED_SUPERSEDED')
     }
     const op = this.newOp(acc, kind === 'stop' ? 'exit' : kind)
@@ -707,12 +710,12 @@ export class Operator {
     return { ...op }
   }
 
-  /** Drops a pending armed activation, failing its op with `code`. */
-  private disarm(acc: AccountState, code: string): void {
+  /** Drops a pending armed activation, failing its op with `code` (and what `detail` adds to the op). */
+  private disarm(acc: AccountState, code: string, detail: Partial<OpView> = {}): void {
     const a = acc.armed
     if (!a) return
     acc.armed = undefined
-    this.patchOp(acc, a.opId, { state: 'failed', code })
+    this.patchOp(acc, a.opId, { state: 'failed', code, ...detail })
   }
 
   /** One USDC balance read per armed account every ARM_WATCH_MS; executes the armed activation once 0 < USDC <= cap. */
@@ -736,7 +739,8 @@ export class Operator {
     if (!a || acc.active) return this.disarm(acc, 'ALREADY_ACTIVE')
     if (usdc > LIVE_CAP_USDC) {
       console.log(`[armed] ${acc.accountKey} deposit ${usdc} over cap ${LIVE_CAP_USDC}`)
-      return this.disarm(acc, 'CAP_EXCEEDED')
+      // On the op the SPA reads, with the amounts: the owner withdraws the excess, then approves Start again.
+      return this.disarm(acc, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() })
     }
     const live = liveAccountFromContext(acc.ctx)
     const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
@@ -796,7 +800,8 @@ export class Operator {
 
   private async executeOwner(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView): Promise<void> {
     const safe = live.safe
-    if (p.kind === 'activate') {
+    // A transfer may be the first owner tx of a Safe that never started (deposit over the cap): deploy it first too.
+    if (p.kind === 'activate' || p.kind === 'transfer') {
       const { deployed } = await readSafeNonce(this.client, safe)
       if (!deployed) {
         this.setBusy(acc, 'deploying')
@@ -804,8 +809,10 @@ export class Operator {
         const { hash, receipt } = await this.relayer.send(d)
         console.log(`[owner] deploy ${safe} tx ${hash} ${receipt.status}`)
         if (receipt.status !== 'success') return this.patchOp(acc, op.opId, { state: 'failed', code: 'DEPLOY_FAILED', txHash: hash })
-        this.setBusy(acc, 'activating')
+        this.setBusy(acc, p.kind === 'activate' ? 'activating' : 'withdrawing')
       }
+    }
+    if (p.kind === 'activate') {
       const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
       const eth = await this.client.getBalance({ address: safe })
       if (eth < target) {
@@ -1134,6 +1141,11 @@ export function collapseFailed(ops: StoredOp[]): OpView[] {
   return out
 }
 
+/** Start refused: the Safe holds more USDC than the per-account cap. The message carries the amounts for the SPA. */
+function depositOverCap(usdc: bigint): HttpError {
+  return new HttpError(409, 'DEPOSIT_OVER_CAP', `this account holds ${fmtUsdc(usdc)} USDC, over the ${fmtUsdc(LIVE_CAP_USDC)} USDC cap; withdraw at least ${fmtUsdcUp(usdc - LIVE_CAP_USDC)} USDC to start`)
+}
+
 const COLLECT_SELECTOR = toFunctionSelector('collect((uint256,address,uint128,uint128))')
 
 function revertReason(e: unknown): string {
@@ -1196,4 +1208,9 @@ function fmtUnits(v: bigint, decimals: number): string {
 function fmtUsdc(v: bigint): string {
   const s = v.toString().padStart(7, '0')
   return `${s.slice(0, -6)}.${s.slice(-6, -4)}`
+}
+
+/** Cents rounded up: an amount the owner must reach is never understated. */
+function fmtUsdcUp(v: bigint): string {
+  return fmtUsdc(((v + 9_999n) / 10_000n) * 10_000n)
 }

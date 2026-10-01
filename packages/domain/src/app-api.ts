@@ -47,6 +47,8 @@ export type FundingView = {
   usdc: string            // base units
   eth: string             // wei
   capUsdc: string         // hard cap per account, base units
+  // Set while the engine is not running and the Safe holds more USDC than the cap: Start is refused until the excess leaves.
+  overCap?: OverCap | null
   cbbtc: string           // base units
   gasReserveWei: string   // the relayer tops the Safe up to this at activation
   active: boolean         // engine grants enabled and the engine loop running
@@ -59,12 +61,16 @@ export type FundingView = {
   progress?: { step: 'deploying' | 'activating' | 'swapping' | 'opening' | 'rebalancing' | 'reranging' | 'closing' | 'withdrawing'; pool?: string; since: string } | null
 }
 
+// What the operator found when a deposit is above the per-account cap. Amounts in USDC base units.
+export type OverCap = { code: 'DEPOSIT_OVER_CAP'; usdc: string; capUsdc: string; excessUsdc: string }
+
 // POST /api/accounts/:accountKey/activate/prepare -> OwnerTxToSign
 // POST /api/accounts/:accountKey/activate            body: OwnerSignature -> OpView
 // Deploys the Safe if needed and enables the session grants sized to the observed deposit.
 // POST /api/accounts/:accountKey/transfer/prepare   body: TransferRequest -> TransferPlan
 // POST /api/accounts/:accountKey/transfer           body: OwnerSignature -> OpView
 // Frees USDC by reducing positions if idle USDC is short (engine), then the owner transfer.
+// Works on a Safe that is not deployed yet (a deposit that never started): the relayer deploys it, then the transfer runs.
 // POST /api/accounts/:accountKey/stop/prepare        -> OwnerTxToSign
 // POST /api/accounts/:accountKey/stop                body: OwnerSignature -> OpView
 // Stop allocation: revoke every grant, close every position, swap the volatile side to USDC. USDC stays in the Safe.
@@ -106,6 +112,8 @@ export type OpView = {
   amountUsdc?: string
   asset?: string
   to?: Hex0x
+  /** activate failed with DEPOSIT_OVER_CAP: amountUsdc is the deposit found, capUsdc the cap it exceeded. */
+  capUsdc?: string
 }
 
 // Live operator (sprint amendment 2026-09-26 21:40). The Worker authenticates the device session, then

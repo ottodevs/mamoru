@@ -40,6 +40,8 @@ The account owner is a WebAuthn passkey held by Safe's `SafeWebAuthnSharedSigner
 - **Transfer out.** Reduces open positions first if the idle USDC on hand is short, then sends USDC to the address the owner chose.
 - **Stop.** Revokes every session grant, closes and burns every position, and swaps the cbBTC side to USDC. USDC stays in the Safe.
 
+A deposit above the cap does not start: the operator fails the pending start with `DEPOSIT_OVER_CAP` and the amounts, reports it on the account's funding view, and the app says so. The owner withdraws the excess with Transfer out (the relayer deploys the Safe first if it was never deployed), then starts.
+
 The owner never pays gas or sends a transaction directly. A relayer sends the owner's signed `execTransaction` and pays for it, and tops up the Safe's ETH balance when needed. The same relayer also bundles the engine's own operations: once a session grant is active, the engine (the same Engine package proven on the Base fork, [`packages/scenarios/driver/engine.ts`](packages/scenarios/driver/engine.ts)) enters and manages a Uniswap v3 USDC/cbBTC 0.05% position with the session key, through ERC-4337 userOps that the operator bundles itself, calling `handleOps` on EntryPoint v0.7 with its own relayer rather than a third-party bundler.
 
 The engine Worker ([`apps/mamoru-engine`](apps/mamoru-engine)) stays read-only: it still only reads Base every 2 minutes for the dashboard. The live operator is a separate Bun service, [`apps/mamoru-operator`](apps/mamoru-operator), gated by `MAMORU_LIVE=1` and `CHAIN_ID=8453`; the app Worker forwards owner routes to it over an HMAC-signed internal call ([`packages/domain/src/app-api.ts`](packages/domain/src/app-api.ts), `AccountContext`).

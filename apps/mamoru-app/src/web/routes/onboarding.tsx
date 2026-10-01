@@ -4,8 +4,9 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { type CSSProperties, useEffect, useState } from 'react'
 import { useApi } from '../api/client.ts'
-import { queryKeys } from '../api/queries.ts'
+import { queryKeys, useConfig } from '../api/queries.ts'
 import { downloadJson, kitFilename } from '../lib/download.ts'
+import { capNote } from '../lib/money.ts'
 import { errorText, useOwnerAction } from '../lib/owner-flow.ts'
 import { createOwnerPasskey } from '../lib/passkey.ts'
 import { rememberCredential } from '../lib/passkey-sign.ts'
@@ -153,6 +154,9 @@ export function Onboarding() {
   })
   const last = onboardingCopy.screens.length
   const screen = onboardingCopy.screens[step]
+  // The cap is said before any money moves: on the funding card, when the API runs live.
+  const capUsdc = useConfig().data?.capUsdc
+  const body = screen ? [...screen.body, ...(step === 0 && capUsdc ? [capNote(capUsdc)] : [])] : []
 
   return (
     <div className="fixed inset-0 z-30 grid place-items-center overflow-y-auto bg-[color-mix(in_srgb,var(--color-ink)_42%,transparent)] p-4" role="dialog" aria-modal="true" aria-label="Welcome to Mamoru">
@@ -163,7 +167,7 @@ export function Onboarding() {
             {screen ? (
               <>
                 <h1 className="ob-title">{screen.title}</h1>
-                {screen.body.map((p) => (
+                {body.map((p) => (
                   <p key={p} className="ob-body">
                     {p}
                   </p>

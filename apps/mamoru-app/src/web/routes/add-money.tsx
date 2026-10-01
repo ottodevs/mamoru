@@ -1,10 +1,10 @@
-import type { FundingView } from '@mamoru/domain'
+import type { FundingView, OverCap } from '@mamoru/domain'
 import { useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { useFunding, useSession } from '../api/queries.ts'
 import { ConnectWallet } from '../components/connect-wallet.tsx'
 import { AddressBlock, Brand, Copy, Qr, Waiting } from '../components/ui.tsx'
-import { usd } from '../lib/money.ts'
+import { capNote, ceilCents, overCapOf, usd, usdPlain } from '../lib/money.ts'
 import { localTime } from '../lib/time.ts'
 import { useInjectedWallets } from '../lib/wallets.ts'
 
@@ -13,10 +13,13 @@ export const addCopy = {
   send: 'Send USDC on Base.',
   waiting: 'Waiting for your USDC',
   arrived: (amount: string) => `${amount} USDC arrived`,
+  overCap: (o: OverCap) =>
+    `${usd(o.usdc)} USDC arrived. That is ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC over the ${usdPlain(o.capUsdc)} USDC cap, so Mamoru has not started. Your money is in your account and nothing was moved.`,
+  overCapNext: 'See what you can do',
 }
 
 /** Address, QR and Connect wallet. Shared by the Add money screen and the Home modal. */
-export function DepositDetails({ address }: { address: string }) {
+export function DepositDetails({ address, capUsdc }: { address: string; capUsdc?: string }) {
   const wallets = useInjectedWallets()
   return (
     <div className="grid gap-6">
@@ -28,7 +31,10 @@ export function DepositDetails({ address }: { address: string }) {
           <AddressBlock address={address} />
           <div className="flex flex-wrap items-center gap-3">
             <Copy text={address} label="Copy address" />
-            <span className="text-[0.88rem] text-stone">{addCopy.send}</span>
+            <span className="text-[0.88rem] text-stone">
+              {addCopy.send}
+              {capUsdc ? ` ${capNote(capUsdc)}` : ''}
+            </span>
           </div>
         </div>
       </div>
@@ -47,6 +53,7 @@ export function AddMoneyPage() {
   const navigate = useNavigate()
   const f = funding.data
   const arrived = hasMoney(f)
+  const over = overCapOf(f)
   const [leaving, setLeaving] = useState(false)
 
   useEffect(() => {
@@ -54,7 +61,8 @@ export function AddMoneyPage() {
   }, [session.isSuccess, accountKey, navigate])
 
   useEffect(() => {
-    if (!arrived) return
+    // Over the cap nothing starts: stay here until the owner has read why.
+    if (!arrived || over) return
     const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
     const t1 = setTimeout(() => setLeaving(true), reduce ? 600 : 1400)
     const t2 = setTimeout(() => void navigate({ to: '/', replace: true }), reduce ? 700 : 1650)
@@ -62,7 +70,7 @@ export function AddMoneyPage() {
       clearTimeout(t1)
       clearTimeout(t2)
     }
-  }, [arrived, navigate])
+  }, [arrived, over, navigate])
 
   return (
     <main className={`page ${leaving ? 'leave' : ''}`}>
@@ -74,9 +82,13 @@ export function AddMoneyPage() {
         <div>
           <h1 className="m-0 text-[clamp(2rem,7vw,3rem)] font-normal leading-[1.05]">{addCopy.title}</h1>
         </div>
-        {f ? <DepositDetails address={f.address} /> : <div className="h-44 animate-pulse bg-wash/40" aria-hidden="true" />}
+        {f ? <DepositDetails address={f.address} capUsdc={f.capUsdc} /> : <div className="h-44 animate-pulse bg-wash/40" aria-hidden="true" />}
         <div className="card flex flex-wrap items-center justify-between gap-3">
-          {arrived && f ? (
+          {over ? (
+            <p className="m-0 max-w-[34rem] text-[0.95rem] leading-[1.45] text-alert-ink" role="status" data-testid="over-cap">
+              {addCopy.overCap(over)}
+            </p>
+          ) : arrived && f ? (
             <p className="m-0 text-[1.05rem] text-emerald" role="status">
               {addCopy.arrived(usd(f.usdc))}
             </p>
@@ -88,7 +100,7 @@ export function AddMoneyPage() {
         {funding.isError ? <p className="err">Could not check your balance. Retrying.</p> : null}
         <p className="m-0">
           <button type="button" className="text-[0.88rem] text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => void navigate({ to: '/' })}>
-            Later
+            {over ? addCopy.overCapNext : 'Later'}
           </button>
         </p>
       </section>
