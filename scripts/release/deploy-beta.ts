@@ -22,9 +22,20 @@ try {
   console.error('refusing: origin/beta does not exist yet. Nothing to deploy. This script never creates it.')
   process.exit(1)
 }
+// A caller that polled a sha (the watcher) passes it: if origin/beta moved since, refuse, so what
+// it records as deployed or failed is the commit that was actually tried.
+const expected = process.argv.slice(2).find((a) => /^[0-9a-f]{40}$/.test(a))
+if (expected && expected !== sha) {
+  console.error(`refusing: origin/beta is at ${sha}, caller expected ${expected}`)
+  process.exit(1)
+}
 console.log(`deploying origin/beta at ${sha.slice(0, 7)} from a clean snapshot`)
 
-const { output, versionId, before } = await withSnapshot(root, sha, async (dir) => {
+let output: string
+let versionId: string | null
+let before: string | null
+try {
+  ;({ output, versionId, before } = await withSnapshot(root, sha, async (dir) => {
   const appDir = `${dir}/apps/mamoru-app`
   await runTypecheckAndTest(dir)
   await buildApp(appDir, { VITE_BETA: '1' })
@@ -32,7 +43,11 @@ const { output, versionId, before } = await withSnapshot(root, sha, async (dir) 
   const before = await currentVersionId(appDir, 'beta')
   const result = await deploy(appDir, 'beta')
   return { ...result, before }
-})
+  }))
+} catch (err) {
+  console.error('deploy:beta failed before or during `wrangler deploy`. Check `bunx wrangler deployments list --env beta` to see whether a new version went live:', err instanceof Error ? err.message : err)
+  process.exit(1)
+}
 console.log(output)
 const after = versionId ?? 'unknown'
 console.log(`deployed version: ${after}`)

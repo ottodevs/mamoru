@@ -22,9 +22,12 @@ describe('childEnv', () => {
 
 describe('rollbackCommand', () => {
   it('quotes the empty top-level environment so a pasted shell does not shift v1 into --env', () => {
-    expect(rollbackCommand('/repo/apps/mamoru-app', '', 'v1')).toBe('(cd /repo/apps/mamoru-app && bunx wrangler rollback --env "" v1)')
+    expect(rollbackCommand('/repo/apps/mamoru-app', '', 'v1')).toBe("(cd '/repo/apps/mamoru-app' && bunx wrangler rollback --env '' 'v1')")
   })
   it('names the environment for beta', () => {
-    expect(rollbackCommand('/repo/apps/mamoru-app', 'beta', 'v1')).toBe('(cd /repo/apps/mamoru-app && bunx wrangler rollback --env beta v1)')
+    expect(rollbackCommand('/repo/apps/mamoru-app', 'beta', 'v1')).toBe("(cd '/repo/apps/mamoru-app' && bunx wrangler rollback --env 'beta' 'v1')")
+  })
+  it('quotes shell metacharacters in the path and the version id', () => {
+    expect(rollbackCommand("/re po/$(x)/it's", '', 'v1; rm -rf ~')).toBe("(cd '/re po/$(x)/it'\\''s' && bunx wrangler rollback --env '' 'v1; rm -rf ~')")
   })
 })

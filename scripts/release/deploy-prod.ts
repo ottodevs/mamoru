@@ -33,7 +33,7 @@ try {
     return { ...result, before }
   }))
 } catch (err) {
-  console.error('deploy:prod failed before or during the deploy; prod was not touched:', err instanceof Error ? err.message : err)
+  console.error('deploy:prod failed before or during `wrangler deploy`. Check `bunx wrangler deployments list --env ""` to see whether a new version went live:', err instanceof Error ? err.message : err)
   process.exit(1)
 }
 

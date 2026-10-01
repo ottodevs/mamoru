@@ -34,13 +34,18 @@ export async function currentVersionId(appDir: string, env: WranglerEnv): Promis
 /** Runs `wrangler deploy` for the given (explicit) environment and returns stdout plus the new version id. */
 export async function deploy(appDir: string, env: WranglerEnv): Promise<{ output: string; versionId: string | null }> {
   const output = await $`bunx wrangler deploy ${envArgs(env)}`.cwd(appDir).env(childEnv()).text()
-  const versionId = output.match(/Current Version ID:\s*(\S+)/)?.[1] ?? (await currentVersionId(appDir, env))
+  // The deploy is done here: a failed version lookup must not turn it into a "deploy failed".
+  const versionId = output.match(/Current Version ID:\s*(\S+)/)?.[1] ?? (await currentVersionId(appDir, env).catch(() => null))
   return { output, versionId }
 }
 
-/** A copy-pasteable shell command. `''` must print as `--env ""`: an unquoted empty string
- *  collapses in a real shell and silently shifts versionId into the --env flag's value. */
+/** POSIX single-quoting: safe to paste whatever the string holds. */
+export function shellQuote(arg: string): string {
+  return `'${arg.replace(/'/g, `'\\''`)}'`
+}
+
+/** A copy-pasteable shell command with every argument quoted. `''` prints as `--env ''`: an
+ *  unquoted empty string collapses in a real shell and shifts versionId into the --env value. */
 export function rollbackCommand(appDir: string, env: WranglerEnv, versionId: string): string {
-  const envFlag = env === '' ? '--env ""' : `--env ${env}`
-  return `(cd ${appDir} && bunx wrangler rollback ${envFlag} ${versionId})`
+  return `(cd ${shellQuote(appDir)} && bunx wrangler rollback --env ${shellQuote(env)} ${shellQuote(versionId)})`
 }

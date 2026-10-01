@@ -43,19 +43,21 @@ if [ "$sha" = "$last_failed" ] && [ "${MAMORU_BETA_FORCE_RETRY:-}" != "1" ]; the
   exit 0
 fi
 
-if [ ! -d "$WT/.git" ]; then
-  git clone --branch beta "$REPO_URL" "$WT"
-fi
-git -C "$WT" fetch origin beta
-git -C "$WT" checkout --detach "$sha"
+# Everything from the checkout on counts as an attempt at this sha: a broken lockfile or a failed
+# fetch is recorded like a failed deploy, not retried every tick. deploy:beta gets the polled sha
+# and refuses if origin/beta moved meanwhile, so the recorded sha is the one that was tried.
+attempt() {
+  if [ ! -d "$WT/.git" ]; then
+    git clone --branch beta "$REPO_URL" "$WT" || return 1
+  fi
+  git -C "$WT" fetch origin beta || return 1
+  git -C "$WT" checkout --detach "$sha" || return 1
+  cd "$WT" || return 1
+  bun install --frozen-lockfile || return 1
+  bun run deploy:beta -- "$sha"
+}
 
-cd "$WT"
-bun install --frozen-lockfile
-
-# deploy:beta resolves and deploys origin/beta's tip itself from its own immutable snapshot; this
-# checkout only needs to exist to run the script and to leave a human-inspectable copy of what was
-# attempted.
-if bun run deploy:beta; then
+if attempt; then
   printf '%s\n' "$sha" >"$STATE/deployed-sha"
   rm -f "$STATE/failed-sha"
   echo "$(date -Is) beta deploy ok sha=$sha" >>"$STATE/deploys.log"
