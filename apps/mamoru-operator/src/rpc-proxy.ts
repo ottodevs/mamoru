@@ -97,6 +97,13 @@ export function startRpcProxy(upstream: string, maxLogRange = Number(process.env
     return n
   }
   async function handle(msg: Req): Promise<unknown> {
+    const r = await handleInner(msg)
+    // Name the call behind an invalid-params refusal: the engine only sees the message.
+    const e = (r as any)?.error
+    if (e && (e.code === -32602 || /invalid param/i.test(String(e.message)))) console.log(`[rpc] ${msg.method} refused (${e.code}): ${JSON.stringify(msg.params ?? []).slice(0, 300)}`)
+    return r
+  }
+  async function handleInner(msg: Req): Promise<unknown> {
     try {
       if (msg.method === 'eth_blockNumber') return { jsonrpc: '2.0', id: msg.id, result: `0x${(await head()).toString(16)}` }
       if (msg.method === 'eth_getBlockByNumber' && (msg.params?.[0] === 'latest' || msg.params?.[0] === 'pending')) {
