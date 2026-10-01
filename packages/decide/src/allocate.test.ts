@@ -135,7 +135,8 @@ describe('allocate (conservador-live-v2, target weights)', () => {
     expect(d.proposal).toMatchObject({ kind: 'enter_swap', pool: 'pool:USDC/cbBTC/500', grant: 'enter-swap:pool:USDC/cbBTC/500' })
   })
 
-  test('a top-up of an invested account is swapped once per bucket and minted, never sold back', () => {
+  /** A 20 USDC account taken to its resting state: three positions, nothing left to do. */
+  function invested(): { o: Observation; id: bigint } {
     let o = obs({ balances: { USDC: 20n * USDC } })
     let id = 1n
     for (; id < 20n; id++) {
@@ -143,24 +144,71 @@ describe('allocate (conservador-live-v2, target weights)', () => {
       if (next === o) break
       o = next
     }
-    expect(o.positions).toHaveLength(3)
-    // 10 USDC more: every bucket is short by its share, the risk bucket by 1 USDC (3% of the account).
-    o = { ...o, balances: { ...o.balances, USDC: o.balances.USDC! + 10n * USDC } }
-    const kinds: string[] = []
-    for (let steps = 0; steps < 20; steps++, id++) {
+    return { o, id }
+  }
+
+  /** Reviews until `decide` holds. Returns every proposal on the way, as `kind:pool:tokenOut`. */
+  function settle(start: Observation, id: bigint, max = 24): { o: Observation; steps: string[] } {
+    let o = start
+    const steps: string[] = []
+    for (let n = 0; n < max; n++, id++) {
       const p = decide(o, V2).proposal
-      if (!p) break
-      // The loop this guards against: buy the volatile token, then sell it back with convert-any at the next review.
-      expect(p.kind === 'enter_swap' && p.tokenOut === 'USDC').toBe(false)
-      kinds.push(`${p.kind}:${p.pool}`)
+      if (!p) return { o, steps }
+      steps.push(`${p.kind}:${p.pool}${p.kind === 'enter_swap' ? `:${p.tokenOut}` : ''}`)
       o = apply(o, id)
     }
-    expect(decide(o, V2).proposal).toBeNull()
-    expect(kinds.filter((k) => k.startsWith('enter_mint'))).toHaveLength(3)
-    expect(kinds.filter((k) => k.startsWith('enter_swap')).length).toBeLessThanOrEqual(3)
-    const a = allocate(o, V2, false)
-    expect(a.free < 3n * V2.minEntry!).toBe(true)
+    throw new Error(`still proposing after ${max} reviews: ${steps.join(' | ')}`)
+  }
+
+  const idleValue = (o: Observation) => (['USDT', 'cbBTC', 'WETH'] as const).reduce((n, t, k) => n + (POOLS[k]!.token0 === t ? token0InToken1(o.balances[t] ?? 0n, POOLS[k]!.sqrtPriceX96) : token1InToken0(o.balances[t] ?? 0n, POOLS[k]!.sqrtPriceX96)), 0n)
+
+  test('a top-up of an invested account is swapped once per bucket and minted, never sold back', () => {
+    const { o: base, id } = invested()
+    expect(base.positions).toHaveLength(3)
+    // 10 USDC more: every bucket is short by its share, the risk bucket by 1 USDC (3% of the account).
+    const { o, steps } = settle({ ...base, balances: { ...base.balances, USDC: base.balances.USDC! + 10n * USDC } }, id)
+    // The loop this guards against: buy the volatile token, then sell it back with convert-any at the next review.
+    expect(steps.filter((k) => k.endsWith(':USDC'))).toEqual([])
+    expect(steps.filter((k) => k.startsWith('enter_mint'))).toHaveLength(3)
+    expect(steps.filter((k) => k.startsWith('enter_swap')).length).toBeLessThanOrEqual(3)
+    expect(allocate(o, V2, false).free < 3n * V2.minEntry!).toBe(true)
     expect(o.positions).toHaveLength(6)
+  })
+
+  test('top-ups of any size settle: every swap toward a bucket is followed by its mint, nothing is left bought and unminted', () => {
+    for (const cents of [30n, 65n, 100n, 300n, 1_000n, 5_000n, 20_000n]) {
+      const { o: base, id } = invested()
+      const { o, steps } = settle({ ...base, balances: { ...base.balances, USDC: base.balances.USDC! + cents * 10_000n } }, id)
+      const bought = steps.filter((k) => k.startsWith('enter_swap') && !k.endsWith(':USDC')).map((k) => k.split(':').slice(1, 3).join(':'))
+      const minted = steps.filter((k) => k.startsWith('enter_mint')).map((k) => k.split(':').slice(1, 3).join(':'))
+      // One purchase per bucket at most, and each one ends in a position.
+      expect(new Set(bought).size).toBe(bought.length)
+      for (const pool of bought) expect(minted).toContain(pool)
+      expect(steps.filter((k) => k.endsWith(':USDC'))).toEqual([])
+      // What stays idle in volatile tokens is mint dust, far under the smallest entry.
+      expect(idleValue(o) < V2.minEntry!).toBe(true)
+    }
+  })
+
+  test('the same top-up settles when the pool price sits away from its average', () => {
+    const { o: base, id } = invested()
+    // The two volatile pools trade 30 ticks (0.3%) above their 30-minute average; the stable pool stays on it.
+    const moved = { ...base, pools: base.pools.map((p, k) => (k === 0 ? p : { ...p, twapTick: p.tick - 30 })), balances: { ...base.balances, USDC: base.balances.USDC! + 10n * USDC } }
+    const { steps } = settle(moved, id)
+    expect(steps.filter((k) => k.startsWith('enter_mint')).length).toBeGreaterThanOrEqual(3)
+    const sells = steps.filter((k) => k.endsWith(':USDC'))
+    expect(sells.length).toBeLessThanOrEqual(1)
+  })
+
+  test('idle volatile the allocation cannot pair is still sold back, once', () => {
+    // No free savings: the leftover cbBTC of a bucket inside its band has no mint to wait for.
+    const { o: base, id } = invested()
+    const cbbtc = token0InToken1(800_000n, POOLS[1]!.sqrtPriceX96)
+    const stuck = { ...base, balances: { ...base.balances, USDC: 0n, cbBTC: (base.balances.cbBTC ?? 0n) + cbbtc } }
+    expect(allocate(stuck, V2, false).pendingMint).toEqual([])
+    const { steps } = settle(stuck, id)
+    expect(steps[0]).toBe('enter_swap:pool:USDC/cbBTC/500:USDC')
+    expect(steps.filter((k) => k.endsWith(':USDC'))).toHaveLength(1)
   })
 
   test('dust below the minimum entry holds', () => {

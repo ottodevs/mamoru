@@ -152,8 +152,8 @@ export function ratioConvertOf(obs: Observation, policy: PolicyVersion, preferen
  * idle volatile goes back to the savings asset (grant convert-any), so the
  * freed value flows to the under-weight buckets through the normal entries.
  * Below the op cost times the harvest factor it stays. `keep` names the pools
- * whose bucket, idle volatile included, is still at or under its target: there
- * the volatile stays for the next mint.
+ * whose idle volatile the allocation can mint now: there it waits for that
+ * mint. Idle volatile the allocation cannot pair is still converted.
  */
 export function idleConvertOf(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>, keep?: ReadonlySet<string>): EnterSwapProposal | null {
   if (!hasManageAny(policy)) return null
@@ -162,7 +162,7 @@ export function idleConvertOf(obs: Observation, policy: PolicyVersion, policyPoo
   const floor = opCostInSavings(obs, savings) * BigInt(policy.harvest.costFactorBps)
   for (const b of buckets) {
     if (!b.pool || b.value * 10_000n + total * BigInt(DRIFT_BPS) < b.target * 10_000n) continue
-    // Volatile the allocation just bought for a top-up is waiting for its mint: selling it back would undo the entry.
+    // Bought for a top-up and about to be minted: selling it back would undo the entry.
     if (keep?.has(b.pool)) continue
     if (!obs.positions.some((p) => p.pool === b.pool && p.liquidity > 0n && isManaged(p, policy, policyPools))) continue
     const pool = obs.pools.find((x) => x.name === b.pool)

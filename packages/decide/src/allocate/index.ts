@@ -22,7 +22,15 @@ export type BucketValue = {
   code: ReasonCode
 }
 
-export type Allocation = { total: bigint; free: bigint; buckets: BucketValue[]; proposal: Proposal | null; trail: GateStep[] }
+export type Allocation = {
+  total: bigint
+  free: bigint
+  buckets: BucketValue[]
+  proposal: Proposal | null
+  trail: GateStep[]
+  /** Pools whose idle volatile token this allocation can mint now. It waits there for its turn; it is not idle capital. */
+  pendingMint: string[]
+}
 
 /** The pool priced at its TWAP tick (slot0 when the TWAP is unavailable; the EHG then refuses to act on it). */
 function atTwap(pool: PoolObs): PoolObs {
@@ -49,9 +57,11 @@ function volatileShareBps(pool: PoolObs, policy: PolicyVersion): bigint {
  * Target weights (policy `allocation: 'target-weights'`). Every bucket is valued in the savings asset at the TWAP:
  * its positions (amounts at the TWAP plus what `collect` returns) and the idle volatile token of its pool. The
  * account total adds the free savings, so idle capital counts toward the targets and is always re-invested.
- * Targets are the preferences of the buckets that have an executable pool, over that total. The most under-weight
- * bucket (by deficit relative to its target, policy order on ties) whose deficit is at least `minEntry` and outside
- * the `rebalanceBandBps` band gets the
+ * Targets are the preferences of the buckets that have an executable pool, over that total. A bucket is short when
+ * its positions, without the idle token, are under the target by at least `minEntry` and by more than the
+ * `rebalanceBandBps` band. The gap is measured on the positions because a swap toward a mint moves value from the free
+ * savings into the bucket's idle token: measured with it, the swap itself would close the gap and the mint would
+ * never follow. The most under-weight short bucket (by deficit relative to its target, policy order on ties) gets the
  * next entry: a swap when its idle volatile is short of the mint, else a mint of a new range around the tick.
  */
 export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit: boolean): Allocation {
@@ -61,7 +71,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   const trail: GateStep[] = []
   const rows = policy.buckets.map((b) => {
     const pool = b.pools[0] ? obs.pools.find((x) => x.name === b.pools[0]) : undefined
-    if (!pool) return { b, pool: undefined, value: 0n, idleVolatile: 0n, blocked: 'PLAN_BUCKET_NO_EXECUTABLE_POOL' as ReasonCode }
+    if (!pool) return { b, pool: undefined, value: 0n, deployed: 0n, idleVolatile: 0n, blocked: 'PLAN_BUCKET_NO_EXECUTABLE_POOL' as ReasonCode }
     const p = atTwap(pool)
     const volatile = volatileOf(pool, savings)
     let value = 0n
@@ -71,10 +81,11 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       value += inSavings(p, p.token0, a.amount0 + pos.collectable0, savings) + inSavings(p, p.token1, a.amount1 + pos.collectable1, savings)
     }
     const idleVolatile = obs.balances[volatile] ?? 0n
+    const deployed = value
     value += inSavings(p, volatile, idleVolatile, savings)
     const purga = purgaIdentity(pool)
     if (purga.verdict !== 'GO') trail.push(purga)
-    return { b, pool, value, idleVolatile, blocked: purga.verdict !== 'GO' ? purga.reason : null }
+    return { b, pool, value, deployed, idleVolatile, blocked: purga.verdict !== 'GO' ? purga.reason : null }
   })
   const executable = rows.filter((r) => r.pool)
   const total = free + executable.reduce((s, r) => s + r.value, 0n)
@@ -85,10 +96,10 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     return { bucket: r.b.id, pool: r.pool?.name ?? null, value: r.value, target, weightBps: total > 0n ? Number((r.value * 10_000n) / total) : 0, code: r.blocked ?? 'STRATEGY_PREFERENCE' }
   })
 
-  // Under-weight buckets, most under-weight first (relative deficit), policy order on ties.
+  // Short buckets, most under-weight first (relative deficit), policy order on ties.
   const order = rows
-    .map((r, i) => ({ r, i, deficit: buckets[i]!.target - r.value, target: buckets[i]!.target }))
-    .filter((x) => x.r.pool && !x.r.blocked && x.deficit >= minEntry && x.deficit * 10_000n > x.target * BigInt(policy.rebalanceBandBps ?? 0))
+    .map((r, i) => ({ r, i, deficit: buckets[i]!.target - r.value, gap: buckets[i]!.target - r.deployed, target: buckets[i]!.target }))
+    .filter((x) => x.r.pool && !x.r.blocked && x.gap >= minEntry && x.gap * 10_000n > x.target * BigInt(policy.rebalanceBandBps ?? 0))
     .sort((x, y) => {
       const dx = (x.deficit * 1_000_000n) / x.target
       const dy = (y.deficit * 1_000_000n) / y.target
@@ -96,35 +107,42 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     })
 
   let proposal: Proposal | null = null
+  const pendingMint: string[] = []
   for (const { r, i, deficit } of order) {
-    const row = buckets[i]!
+    // After the first proposal the loop only finds which other buckets hold a mint that can go; their codes stay.
+    const row = proposal ? null : buckets[i]!
     if (unsafeDeposit) {
-      row.code = 'OBS_DEPOSIT_UNSAFE'
+      if (row) row.code = 'OBS_DEPOSIT_UNSAFE'
       continue
     }
     const pool = r.pool!
     const volatile = volatileOf(pool, savings)
     const volatileValue = inSavings(atTwap(pool), volatile, r.idleVolatile, savings)
     // What the next mint of this bucket holds: the idle volatile plus the savings still missing from the target.
-    const size = deficit < free ? deficit + volatileValue : free + volatileValue
+    const short = deficit > 0n ? deficit : 0n
+    const size = short < free ? short + volatileValue : free + volatileValue
     const wantVolatile = (size * volatileShareBps(pool, policy)) / 10_000n
     if (volatileValue * 10_000n < wantVolatile * SWAP_BELOW_BPS) {
       const need = wantVolatile - volatileValue
       const amountIn = need < free ? need : free
       if (amountIn < minEntry) {
-        row.code = 'DECIDE_NO_CAPITAL'
+        if (row) row.code = 'DECIDE_NO_CAPITAL'
         continue
       }
-      row.code = 'STRATEGY_PREFERENCE_DEVIATION'
-      proposal = { kind: 'enter_swap', grant: grantKeyFor(policy, 'enter-swap', pool.name) as `enter-swap:${string}`, pool: pool.name, tokenIn: savings, tokenOut: volatile, fee: pool.fee, amountIn }
-      break
+      if (row) {
+        row.code = 'STRATEGY_PREFERENCE_DEVIATION'
+        proposal = { kind: 'enter_swap', grant: grantKeyFor(policy, 'enter-swap', pool.name) as `enter-swap:${string}`, pool: pool.name, tokenIn: savings, tokenOut: volatile, fee: pool.fee, amountIn }
+      }
+      continue
     }
     const wantSavings = size - wantVolatile
     const savingsIn = wantSavings < free ? wantSavings : free
     if (savingsIn <= 0n || r.idleVolatile === 0n) {
-      row.code = 'DECIDE_NO_CAPITAL'
+      if (row) row.code = 'DECIDE_NO_CAPITAL'
       continue
     }
+    pendingMint.push(pool.name)
+    if (!row) continue
     row.code = 'STRATEGY_PREFERENCE_DEVIATION'
     const range = rangeAround(pool.tick, widthOf(policy, pool.name), pool.tickSpacing)
     const savingsIs0 = pool.token0 === savings
@@ -136,8 +154,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       amount0Desired: savingsIs0 ? savingsIn : r.idleVolatile,
       amount1Desired: savingsIs0 ? r.idleVolatile : savingsIn,
     }
-    break
   }
   if (total === 0n) for (const row of buckets) if (row.code === 'STRATEGY_PREFERENCE') row.code = 'DECIDE_NO_CAPITAL'
-  return { total, free, buckets, proposal, trail }
+  return { total, free, buckets, proposal, trail, pendingMint }
 }
