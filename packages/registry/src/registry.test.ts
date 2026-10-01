@@ -21,7 +21,7 @@ const ACCOUNT_STACK = [
   'Multicall3',
 ]
 
-/** Not deployed on Monad (ticket #62): a lookup must fail loudly, never fall back to Base. */
+/** Not deployed on Monad: a lookup must fail loudly, never fall back to Base. */
 const MISSING_ON_MONAD = ['TimeFramePolicy', 'UsageLimitPolicy', 'SafeWebAuthnSignerFactory']
 
 function code(fn: () => unknown): string | undefined {
