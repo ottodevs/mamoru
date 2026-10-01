@@ -211,6 +211,15 @@ describe('allocate (conservador-live-v2, target weights)', () => {
     expect(steps.filter((k) => k.endsWith(':USDC'))).toHaveLength(1)
   })
 
+  test('token dust next to a short bucket is not minted: the proposal could never be built', () => {
+    // Free savings spent, a few raw units of USDT left by the last mint, and the stables bucket short of its target.
+    const { o: base } = invested()
+    const positions = base.positions.map((p) => (p.pool === 'pool:USDC/USDT/100' ? { ...p, liquidity: (p.liquidity * 8n) / 10n } : p))
+    const d = decide({ ...base, positions, balances: { ...base.balances, USDC: 40n, USDT: 3n } }, V2)
+    expect(d.proposal).toBeNull()
+    expect(allocate({ ...base, positions, balances: { ...base.balances, USDC: 40n, USDT: 3n } }, V2, false).pendingMint).toEqual([])
+  })
+
   test('dust below the minimum entry holds', () => {
     const d = decide(obs({ balances: { USDC: 90_000n } }), V2)
     expect(d.proposal).toBeNull()

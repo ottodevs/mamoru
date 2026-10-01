@@ -137,7 +137,8 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     }
     const wantSavings = size - wantVolatile
     const savingsIn = wantSavings < free ? wantSavings : free
-    if (savingsIn <= 0n || r.idleVolatile === 0n) {
+    // A mint smaller than the minimum entry is dust left by an earlier mint: its minimums round to zero and it cannot be built.
+    if (savingsIn <= 0n || r.idleVolatile === 0n || savingsIn + volatileValue < minEntry) {
       if (row) row.code = 'DECIDE_NO_CAPITAL'
       continue
     }
