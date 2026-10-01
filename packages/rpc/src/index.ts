@@ -233,18 +233,23 @@ export async function readPositionHistory(client: PublicClient, tokenIds: readon
   return events.sort((a, b) => (a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1))
 }
 
-/** Position history already read, up to `through` (a safe block), and for which tokenIds. Owned by one engine. */
-export type HistoryCursor = { through: bigint; ids: Set<string>; events: ChainPositionEvent[] }
+/** Position history already read for `fromBlock`, up to `through` (a safe block whose hash is `hash`), and for which tokenIds. Owned by one engine. */
+export type HistoryCursor = { fromBlock: bigint; through: bigint; hash: Hex | null; ids: Set<string>; events: ChainPositionEvent[] }
 
 export function historyCursor(): HistoryCursor {
-  return { through: -1n, ids: new Set(), events: [] }
+  return { fromBlock: -1n, through: -1n, hash: null, ids: new Set(), events: [] }
 }
 
 const byChainOrder = (a: ChainPositionEvent, b: ChainPositionEvent) => (a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1)
 
+function resetCursor(cursor: HistoryCursor, fromBlock: bigint): void {
+  Object.assign(cursor, { fromBlock, through: fromBlock - 1n, hash: null, ids: new Set<string>(), events: [] })
+}
+
 /**
  * readPositionHistory over [fromBlock, toBlock] without re-reading what `cursor` holds.
- * Only blocks at or below `safeBlock` are kept; the unsafe tail is read again on every call.
+ * Only blocks at or below `safeBlock` are kept; everything after the cursor is read again on every call.
+ * A new origin, or a cursor block whose hash changed (reorg), starts the cursor over.
  */
 export async function readPositionHistoryFrom(
   client: PublicClient,
@@ -255,7 +260,8 @@ export async function readPositionHistoryFrom(
   safeBlock: bigint,
 ): Promise<ChainPositionEvent[]> {
   if (tokenIds.length === 0 || fromBlock > toBlock) return []
-  if (cursor.through < fromBlock - 1n) Object.assign(cursor, { through: fromBlock - 1n, ids: new Set(tokenIds.map(String)), events: [] })
+  if (cursor.fromBlock !== fromBlock) resetCursor(cursor, fromBlock)
+  if (cursor.hash && (await client.getBlock({ blockNumber: cursor.through })).hash !== cursor.hash) resetCursor(cursor, fromBlock)
   // A tokenId the cursor has not seen: backfill its history up to the cursor once.
   const fresh = tokenIds.filter((id) => !cursor.ids.has(String(id)))
   if (fresh.length > 0) {
@@ -264,12 +270,16 @@ export async function readPositionHistoryFrom(
   }
   const stable = safeBlock < toBlock ? safeBlock : toBlock
   if (stable > cursor.through) {
-    cursor.events.push(...(await readPositionHistory(client, [...cursor.ids].map(BigInt), cursor.through + 1n, stable)))
+    const [events, block] = await Promise.all([readPositionHistory(client, [...cursor.ids].map(BigInt), cursor.through + 1n, stable), client.getBlock({ blockNumber: stable })])
+    cursor.events.push(...events)
     cursor.through = stable
+    cursor.hash = block.hash
   }
-  const tail = stable < toBlock ? await readPositionHistory(client, tokenIds, stable + 1n, toBlock) : []
+  // The tail starts after the cursor, never below it: a safe head that moved back cannot read a block twice.
+  const tailFrom = cursor.through + 1n
+  const tail = tailFrom <= toBlock ? await readPositionHistory(client, tokenIds, tailFrom, toBlock) : []
   const wanted = new Set(tokenIds.map(String))
-  return [...cursor.events.filter((e) => wanted.has(String(e.tokenId)) && e.blockNumber >= fromBlock && e.blockNumber <= toBlock), ...tail].sort(byChainOrder)
+  return [...cursor.events.filter((e) => wanted.has(String(e.tokenId)) && e.blockNumber <= toBlock), ...tail].sort(byChainOrder)
 }
 
 /** Principal owed per tokenId just before (block, logIndex): the fold of the canonical history up to there. */

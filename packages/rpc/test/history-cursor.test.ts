@@ -7,7 +7,11 @@ type Raw = { eventName: 'DecreaseLiquidity' | 'Collect'; tokenId: bigint; block:
 // Fake client: serves logs by event name, tokenId and block range, and records every range asked.
 function fakeClient(logs: Raw[]) {
   const ranges: [bigint, bigint][] = []
+  const forks = new Set<bigint>()
   const client = {
+    async getBlock({ blockNumber }: any) {
+      return { number: blockNumber, hash: `0x${forks.has(blockNumber) ? 'f' : 'a'}${blockNumber.toString(16)}` }
+    },
     async getLogs({ event, args, fromBlock, toBlock }: any) {
       ranges.push([fromBlock, toBlock])
       const ids = new Set((args.tokenId as bigint[]).map(String))
@@ -16,7 +20,7 @@ function fakeClient(logs: Raw[]) {
         .map((l) => ({ eventName: l.eventName, args: { tokenId: l.tokenId, amount0: 1n, amount1: 2n }, logIndex: l.logIndex, blockNumber: l.block, transactionHash: '0x01' }))
     },
   } as unknown as PublicClient
-  return { client, ranges }
+  return { client, ranges, forks }
 }
 
 const LOGS: Raw[] = [
@@ -62,5 +66,39 @@ describe('readPositionHistoryFrom', () => {
     const { client, ranges } = fakeClient(LOGS)
     expect(await readPositionHistoryFrom(client, historyCursor(), [], 100n, 200n, 150n)).toEqual([])
     expect(ranges.length).toBe(0)
+  })
+
+  test('a safe head below the origin reads nothing before the origin', async () => {
+    const { client } = fakeClient([...LOGS, { eventName: 'Collect', tokenId: 1n, block: 90n, logIndex: 0 }])
+    const r = await readPositionHistoryFrom(client, historyCursor(), [1n], 100n, 150n, 80n)
+    expect(r.map(key)).toEqual((await readPositionHistory(client, [1n], 100n, 150n)).map(key))
+  })
+
+  test('a safe head that moves back does not count a block twice', async () => {
+    const { client } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    await readPositionHistoryFrom(client, cursor, [2n], 100n, 150n, 145n)
+    const r = await readPositionHistoryFrom(client, cursor, [2n], 100n, 150n, 130n)
+    expect(r.map(key)).toEqual((await readPositionHistory(client, [2n], 100n, 150n)).map(key))
+  })
+
+  test('a new origin starts the cursor over', async () => {
+    const { client } = fakeClient([...LOGS, { eventName: 'Collect', tokenId: 1n, block: 90n, logIndex: 0 }])
+    const cursor = historyCursor()
+    await readPositionHistoryFrom(client, cursor, [1n], 100n, 150n, 150n)
+    const r = await readPositionHistoryFrom(client, cursor, [1n], 80n, 150n, 150n)
+    expect(r.map(key)).toEqual((await readPositionHistory(client, [1n], 80n, 150n)).map(key))
+  })
+
+  test('a reorged cursor block rereads the history', async () => {
+    const logs = [...LOGS]
+    const { client, forks } = fakeClient(logs)
+    const cursor = historyCursor()
+    await readPositionHistoryFrom(client, cursor, [1n], 100n, 150n, 150n)
+    // The event at 105 is gone on the new chain, and block 150 has a new hash.
+    logs.splice(0, 2)
+    forks.add(150n)
+    const r = await readPositionHistoryFrom(client, cursor, [1n], 100n, 150n, 150n)
+    expect(r.map(key)).toEqual([])
   })
 })
