@@ -4,6 +4,7 @@ import type { AppEnv } from './context.ts'
 import { ConfigError, liveFunds, readSettings } from './env.ts'
 import { apiError } from './errors.ts'
 import { DeviceSessionAuth } from './auth/device-session.ts'
+import { signIn } from './auth/routes.ts'
 import { sameOrigin } from './middleware/origin.ts'
 import { onboarding } from './onboarding/routes.ts'
 import { accountOfUser } from './accounts/store.ts'
@@ -67,6 +68,7 @@ export function createApp(options: AppOptions = {}) {
     return c.json(view)
   })
 
+  app.route('/api/auth', signIn)
   app.route('/api/onboarding', onboarding)
   app.route('/api/accounts', operatorRoutes(options.operatorFetch ?? ((input, init) => fetch(input, init))))
   app.route('/api/accounts', accounts)

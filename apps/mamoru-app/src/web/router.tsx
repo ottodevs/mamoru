@@ -10,7 +10,8 @@ export function buildRouter(history?: RouterHistory) {
     throw redirect({ to: '/', replace: true })
   }
   const routeTree = rootRoute.addChildren([
-    createRoute({ getParentRoute: () => rootRoute, path: '/', component: IndexPage }),
+    // ?signin=true opens on the returning-owner card: a deep link that found no session lands here.
+    createRoute({ getParentRoute: () => rootRoute, path: '/', component: IndexPage, validateSearch: (s: Record<string, unknown>): { signin?: true } => (s.signin ? { signin: true } : {}) }),
     createRoute({ getParentRoute: () => rootRoute, path: '/add', component: AddMoneyPage }),
     createRoute({ getParentRoute: () => rootRoute, path: '/lab', component: lazyRouteComponent(() => import('./lab/page.tsx'), 'LabPage') }),
     createRoute({ getParentRoute: () => rootRoute, path: '/onboarding', beforeLoad: home }),

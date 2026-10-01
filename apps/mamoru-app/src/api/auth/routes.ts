@@ -1,0 +1,92 @@
+import { Hono, type Context } from 'hono'
+import type { SessionView, SignInChallenge } from '@mamoru/domain'
+import type { AppEnv } from '../context.ts'
+import { apiError } from '../errors.ts'
+import { accountsByCredential } from '../accounts/store.ts'
+import { issueChallenge, openChallenge, spendChallenge } from './challenge.ts'
+import { SIGNIN_LIMITS, allow, rateKey } from './rate-limit.ts'
+import { DECOY_KEY, checkClaims, decodeB64url, verifyP256 } from './webauthn.ts'
+
+// Returning owner (otto/mamoru#6): a device without a session proves it holds the passkey that owns an account, and
+// gets the same device session onboarding gives. No new authority: owner transactions still need a passkey signature each.
+
+const MAX_BODY_BYTES = 8 * 1024
+const CREDENTIAL_ID = /^[A-Za-z0-9_-]{16,1023}$/
+
+/** One answer for every refusal: the caller never learns which check failed, or whether the credential exists. */
+const refused = (c: Context, why: string) => {
+  console.log(`signin refused: ${why}`)
+  return apiError(c, 401, 'Sign-in failed.', 'AUTH_SIGNIN_FAILED')
+}
+const slowDown = (c: Context) => apiError(c, 429, 'Too many sign-in attempts. Wait a few minutes and try again.', 'AUTH_RATE_LIMITED')
+
+/** The site this request was served on. app.mamoru.lol and beta.mamoru.lol are different RP IDs and stay separate identities. */
+function site(c: Context): { origin: string; rpId: string } {
+  const url = new URL(c.req.url)
+  return { origin: url.origin, rpId: url.hostname }
+}
+
+export const signIn = new Hono<AppEnv>()
+
+signIn.post('/challenge', async (c) => {
+  const { rpId } = site(c)
+  const issued = await issueChallenge(c.var.settings.sessionSecret, rpId, c.var.now())
+  const body: SignInChallenge = { ...issued, rpId }
+  return c.json(body)
+})
+
+signIn.post('/signin', async (c) => {
+  const now = c.var.now()
+  const db = c.env.DB
+  const secret = c.var.settings.sessionSecret
+  const { origin, rpId } = site(c)
+
+  // Cloudflare sets cf-connecting-ip; without it (tests, local dev) every caller shares one bucket.
+  const ip = c.req.header('cf-connecting-ip') ?? 'unknown'
+  if (!(await allow(db, await rateKey('ip', ip, secret), SIGNIN_LIMITS.perIp, now))) return slowDown(c)
+
+  if (Number(c.req.header('content-length') ?? '0') > MAX_BODY_BYTES) return refused(c, 'body')
+  const text = await c.req.text()
+  if (text.length > MAX_BODY_BYTES) return refused(c, 'body')
+  let body: Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return refused(c, 'body')
+    body = parsed as Record<string, unknown>
+  } catch {
+    return refused(c, 'body')
+  }
+  const credentialId = body.credentialId
+  const authenticatorData = decodeB64url(body.authenticatorData, 2048)
+  const clientDataJSON = decodeB64url(body.clientDataJSON, 4096)
+  const signature = decodeB64url(body.signature, 256)
+  if (typeof credentialId !== 'string' || !CREDENTIAL_ID.test(credentialId) || !authenticatorData || !clientDataJSON || !signature) return refused(c, 'body')
+
+  const opened = await openChallenge(secret, rpId, body.token, now)
+  if (!opened) return refused(c, 'challenge token')
+  if (!(await allow(db, await rateKey('cred', credentialId), SIGNIN_LIMITS.perCredential, now))) return slowDown(c)
+  // Spent before anything is verified: one challenge is one attempt, and a captured assertion cannot be sent again.
+  if (!(await spendChallenge(db, opened.challenge, opened.exp, now))) return refused(c, 'challenge replayed')
+
+  const claims = await checkClaims({ authenticatorData, clientDataJSON, signature }, { challenge: opened.challenge, origin, rpId })
+  if (!claims.ok) return refused(c, claims.reason)
+
+  const candidates = await accountsByCredential(db, c.var.settings.chainId, credentialId)
+  let account = null
+  for (const row of candidates) {
+    if (await verifyP256({ x: row.passkey_x, y: row.passkey_y }, claims.signed, signature)) {
+      account = row
+      break
+    }
+  }
+  if (!account) {
+    // Unknown credential and wrong key look and cost the same.
+    if (candidates.length === 0) await verifyP256(DECOY_KEY, claims.signed, signature)
+    return refused(c, candidates.length ? 'signature' : 'credential')
+  }
+
+  const session = await c.var.auth.bind(c, account.user_id)
+  c.set('accountKey', account.account_key)
+  const view: SessionView = { ...session, accountKey: account.account_key }
+  return c.json(view)
+})

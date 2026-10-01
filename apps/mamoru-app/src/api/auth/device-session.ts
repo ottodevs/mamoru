@@ -4,7 +4,7 @@ import type { Db } from '../env.ts'
 import type { ProductAuthPort, ProductSession } from './port.ts'
 
 // Sprint candidate for ProductAuthPort: an anonymous device session, HMAC-SHA256 signed cookie.
-// Open line 1 (Better Auth) stays open: this candidate has no recovery method (FR-ONB-002).
+// Open line 1 (Better Auth) stays open. A lost cookie is recovered by signing in with the owner passkey (auth/routes.ts).
 
 export const SESSION_COOKIE = 'mamoru_session'
 export const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -36,7 +36,17 @@ export class DeviceSessionAuth implements ProductAuthPort {
     const now = this.now()
     const userId = crypto.randomUUID()
     await this.db.prepare('INSERT INTO users (user_id, email, created_at) VALUES (?, NULL, ?)').bind(userId, now.toISOString()).run()
-    await setSignedCookie(c, SESSION_COOKIE, `${userId}:${Math.floor(now.getTime() / 1000)}`, this.secret, {
+    await this.setCookie(c, userId)
+    return { userId }
+  }
+
+  async bind(c: Context, userId: string): Promise<ProductSession> {
+    await this.setCookie(c, userId)
+    return { userId }
+  }
+
+  private async setCookie(c: Context, userId: string): Promise<void> {
+    await setSignedCookie(c, SESSION_COOKIE, `${userId}:${Math.floor(this.now().getTime() / 1000)}`, this.secret, {
       prefix: COOKIE_PREFIX,
       path: '/',
       httpOnly: true,
@@ -44,6 +54,5 @@ export class DeviceSessionAuth implements ProductAuthPort {
       sameSite: 'Lax',
       maxAge: SESSION_TTL_SECONDS,
     })
-    return { userId }
   }
 }

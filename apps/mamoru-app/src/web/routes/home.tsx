@@ -1,8 +1,8 @@
 import type { FundingView, Hex0x, OpView, OverCap, WithdrawAsset } from '@mamoru/domain'
-import { useMutation } from '@tanstack/react-query'
-import { useState, type FormEvent, type ReactNode } from 'react'
-import { useApi } from '../api/client.ts'
-import { APY_REFRESH_MS, useApy, useFunding, useOps, usePools, useWithdrawAssets } from '../api/queries.ts'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { ApiRequestError, useApi } from '../api/client.ts'
+import { APY_REFRESH_MS, queryKeys, useApy, useFunding, useOps, usePools, useWithdrawAssets } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { TokenMark } from '../components/token-mark.tsx'
 import { BasescanLink, Brand, Modal, Waiting } from '../components/ui.tsx'
@@ -515,6 +515,12 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // Amount the withdraw form opens with; a new value remounts the dialog.
   const [withdrawSeed, setWithdrawSeed] = useState('')
   const f = funding.data
+  // The session ended while Home was open: ask again, and the first screen offers the sign-in.
+  const qc = useQueryClient()
+  const signedOut = funding.error instanceof ApiRequestError && funding.error.status === 401
+  useEffect(() => {
+    if (signedOut) void qc.invalidateQueries({ queryKey: queryKeys.session })
+  }, [signedOut, qc])
   const opList = ops.data?.ops ?? []
   const s = f ? split(f, cbbtcPrice(pools.data)) : null
   // An owner prepare that was never signed is not in flight; only armed or sent ops are.

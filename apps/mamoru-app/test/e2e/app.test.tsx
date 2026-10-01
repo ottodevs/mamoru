@@ -1,13 +1,15 @@
 import { describe, expect, test } from 'bun:test'
-import type { AppConfig, FundingView, OpView, SessionView } from '@mamoru/domain'
+import type { AppConfig, FundingView, OpView, SessionView, SignInChallenge, SignInRequest } from '@mamoru/domain'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router'
-import { ApiContext } from '../../src/web/api/client.ts'
+import { ApiContext, ApiRequestError, type ApiClient } from '../../src/web/api/client.ts'
 import { queryKeys } from '../../src/web/api/queries.ts'
 import { fixtureClient, fixtureConfig, fixtureFunding, fixtureSession } from '../../src/web/fixtures/client.ts'
 import { FIXTURE_ACCOUNT_KEY } from '../../src/web/fixtures/empty-account.ts'
 import { poolsResponse } from '../../src/web/fixtures/pools.ts'
-import { base64url } from '../../src/web/lib/passkey.ts'
+import { base64url, PasskeyError } from '../../src/web/lib/passkey.ts'
+import { challengeUsable, signInCopy, signInProblem, signInWithPasskey, WALKAWAY_URL } from '../../src/web/lib/signin.ts'
+import { SignInCard } from '../../src/web/routes/signin.tsx'
 import { base64urlDecode, hexToBytes } from '../../src/web/lib/passkey-sign.ts'
 import { capNote, cbbtcPrice, ceilCents, humanMessage, overCapOf, split, usd, usdPlain } from '../../src/web/lib/money.ts'
 import { activationLive, historyOps, needsRetry, opLine } from '../../src/web/lib/ops.ts'
@@ -133,6 +135,101 @@ describe('deposit cap', () => {
     expect(usdPlain('25000000')).toBe('25')
     expect(usdPlain('1920000')).toBe('1.92')
     expect(capNote('25000000')).toBe('Up to 25 USDC per account for now.')
+  })
+})
+
+// otto/mamoru#6: a returning owner whose session is gone signs in with the passkey that owns the account.
+describe('sign in', () => {
+  const noop = () => {}
+  const card = (p: Partial<Parameters<typeof SignInCard>[0]>) => render(<SignInCard busy={false} problem={null} remembered={false} onSignIn={noop} onRemembered={noop} onCreate={noop} {...p} />)
+
+  test('the first screen offers the way back in, on every card', async () => {
+    const { text } = await renderRoute('/', null)
+    expect(text).toContain('01 / 03')
+    expect(text).toContain('I already have an account')
+  })
+  test('?signin=true opens on the sign-in card: what it does, the passkey button, and help for a device without the passkey', async () => {
+    const { text, html } = await renderRoute('/?signin=true', null)
+    expect(html).toContain('data-testid="signin"')
+    expect(text).not.toContain('01 / 03')
+    expect(text).toContain('Open your account')
+    expect(text).toContain('This only signs you in. No money moves.')
+    expect(text).toContain('Sign in with passkey')
+    expect(text).toContain('Create a new account')
+    expect(text).toContain('Passkeys sync through your Apple, Google or password manager account.')
+    expect(text).toContain('The recovery kit cannot sign you in: it holds no key.')
+    expect(html).toContain(`href="${WALKAWAY_URL}"`)
+  })
+  test('a session with an account goes straight to Home, whatever the link says', async () => {
+    const { text } = await renderRoute('/?signin=true', fixtureSession, funded)
+    expect(text).toContain('Total balance')
+    expect(text).not.toContain('Open your account')
+  })
+  test('the card says what went wrong in plain words', () => {
+    expect(card({ busy: true }).text).toContain('Waiting for passkey')
+    const cancelled = card({ problem: signInProblem(new DOMException('x', 'NotAllowedError')) })
+    expect(cancelled.text).toContain('No passkey was used, so you are not signed in.')
+    expect(cancelled.text).not.toContain(signInCopy.remembered)
+    expect(card({ problem: signInProblem(new DOMException('x', 'NotAllowedError')), remembered: true }).text).toContain('Try the passkey this browser used before')
+    const refused = card({ problem: signInProblem(new ApiRequestError(401, { error: 'Sign-in failed.', code: 'AUTH_SIGNIN_FAILED' })), remembered: true })
+    expect(refused.html).toContain('data-testid="signin-refused"')
+    expect(refused.text).toContain('That passkey does not open a Mamoru account on this site.')
+    expect(refused.text).not.toContain(signInCopy.remembered)
+    expect(refused.text).not.toContain('Sign-in failed.')
+  })
+  test('errors map to a kind: cancelled, refused, rate limited, unsupported, anything else', () => {
+    expect(signInProblem(new DOMException('x', 'AbortError')).kind).toBe('cancelled')
+    expect(signInProblem(new ApiRequestError(401, null)).kind).toBe('refused')
+    expect(signInProblem(new ApiRequestError(429, { error: 'slow' }))).toEqual({ kind: 'limited', message: 'Too many attempts. Wait a few minutes and try again.' })
+    expect(signInProblem(new PasskeyError('no passkeys here'))).toEqual({ kind: 'unsupported', message: 'no passkeys here' })
+    expect(signInProblem(new ApiRequestError(500, null)).kind).toBe('failed')
+    expect(signInProblem(new TypeError('fetch failed')).message).toBe('Mamoru did not answer. Try again.')
+    for (const line of Object.values(signInCopy)) expect(line).not.toContain('!')
+  })
+  test('a challenge close to its expiry is not used', () => {
+    const at = Date.parse('2026-10-01T10:00:00Z')
+    const c = (ms: number): SignInChallenge => ({ challenge: 'c', token: 't', rpId: 'app.mamoru.lol', expiresAt: new Date(at + ms).toISOString() })
+    expect(challengeUsable(c(300_000), at)).toBe(true)
+    expect(challengeUsable(c(20_000), at)).toBe(false)
+    expect(challengeUsable(undefined, at)).toBe(false)
+  })
+  test('the ceremony asks for any passkey of this site over the server challenge and posts the assertion as base64url', async () => {
+    const g = globalThis as Record<string, unknown>
+    const before = { pkc: g.PublicKeyCredential, location: g.location, credentials: Object.getOwnPropertyDescriptor(navigator, 'credentials') }
+    const asked: CredentialRequestOptions[] = []
+    const sent: SignInRequest[] = []
+    const bytes = (...b: number[]) => new Uint8Array(b).buffer
+    g.PublicKeyCredential = class {}
+    g.location = { hostname: 'app.mamoru.lol' }
+    Object.defineProperty(navigator, 'credentials', {
+      configurable: true,
+      value: {
+        get: async (o: CredentialRequestOptions) => {
+          asked.push(o)
+          return { rawId: bytes(251, 255, 0), response: { authenticatorData: bytes(1, 2), clientDataJSON: bytes(3), signature: bytes(4, 5) } }
+        },
+      },
+    })
+    try {
+      const api = { signIn: async (b: SignInRequest) => (sent.push(b), fixtureSession) } as unknown as ApiClient
+      const challenge: SignInChallenge = { challenge: base64url(new Uint8Array(32).fill(7)), token: 'tok', rpId: 'app.mamoru.lol', expiresAt: '2026-10-01T10:05:00Z' }
+      expect(await signInWithPasskey(api, challenge)).toEqual(fixtureSession)
+      const pk = asked[0]!.publicKey!
+      expect(Array.from(pk.challenge as Uint8Array)).toEqual(Array(32).fill(7))
+      expect(pk.allowCredentials).toEqual([])
+      expect(pk.userVerification).toBe('required')
+      expect(pk.rpId).toBe('app.mamoru.lol')
+      expect(sent[0]).toEqual({ token: 'tok', credentialId: '-_8A', authenticatorData: 'AQI', clientDataJSON: 'Aw', signature: 'BAU' })
+      // Limited to the credentials this browser used before, when asked.
+      await signInWithPasskey(api, challenge, ['-_8A'])
+      expect(asked[1]!.publicKey!.allowCredentials).toHaveLength(1)
+      expect(Array.from(asked[1]!.publicKey!.allowCredentials![0]!.id as Uint8Array)).toEqual([251, 255, 0])
+    } finally {
+      g.PublicKeyCredential = before.pkc
+      g.location = before.location
+      if (before.credentials) Object.defineProperty(navigator, 'credentials', before.credentials)
+      else delete (navigator as unknown as Record<string, unknown>).credentials
+    }
   })
 })
 

@@ -4,6 +4,7 @@ import { useApi } from './client.ts'
 export const queryKeys = {
   config: ['config'] as const,
   session: ['session'] as const,
+  signInChallenge: ['signin-challenge'] as const,
   dashboard: (accountKey: string) => ['dashboard', accountKey] as const,
   pools: ['pools'] as const,
   apy: ['apy'] as const,
@@ -22,6 +23,12 @@ export function useConfig() {
 export function useSession(enabled = true) {
   const api = useApi()
   return useQuery({ queryKey: queryKeys.session, queryFn: () => api.session(), enabled })
+}
+
+/** A sign-in challenge kept ready, so the passkey prompt opens straight from the tap. Renewed before its 5 minutes run out. */
+export function useSignInChallenge(enabled: boolean) {
+  const api = useApi()
+  return useQuery({ queryKey: queryKeys.signInChallenge, queryFn: () => api.signInChallenge(), enabled, staleTime: 0, gcTime: 0, refetchInterval: 4 * 60_000 })
 }
 
 export function useDashboard(accountKey: string | undefined) {

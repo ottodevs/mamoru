@@ -11,4 +11,6 @@ export interface ProductAuthPort {
   current(c: Context): Promise<ProductSession | null>
   /** The current session, or a new one bound to the response. */
   ensure(c: Context): Promise<ProductSession>
+  /** Binds this device to an existing user: a fresh session cookie on the response. The caller has proven who it is. */
+  bind(c: Context, userId: string): Promise<ProductSession>
 }

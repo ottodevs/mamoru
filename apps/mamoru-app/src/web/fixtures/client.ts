@@ -115,6 +115,11 @@ export const fixtureClient: ApiClient = {
     liveState.owner = true
     return delay(fixtureOwner)
   },
+  signInChallenge: () => delay({ challenge: 'Zml4dHVyZS1jaGFsbGVuZ2UtMzItYnl0ZXMtbG9uZy0wMDE', token: 'fixture', rpId: 'localhost', expiresAt: new Date(Date.now() + 300_000).toISOString() }),
+  signIn: () => {
+    liveState.owner = true
+    return delay(fixtureSession)
+  },
   recoveryKit: () => delay({ chainId: 8453, address: FIXTURE_ADDRESS, fixture: true }),
   ackRecovery: () => delay({ ok: true as const }),
   funding: () => delay(liveState.funding),
