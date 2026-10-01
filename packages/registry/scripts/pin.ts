@@ -1,5 +1,5 @@
 import { parseArgs } from 'node:util'
-import { createPublicClient, http, parseAbi, type Address, type Hex, type PublicClient } from 'viem'
+import { createPublicClient, http, isHash, parseAbi, type Address, type PublicClient } from 'viem'
 import { address, readCodeHash, type Registry, type RegistryEntry } from '../src/index.ts'
 
 /**
@@ -73,12 +73,14 @@ export async function pinOrVerify(input: { path: string; rpc: string; pin: boole
   let block = BigInt(json.block)
   if (input.pin) block = input.block ?? (await client.getBlockNumber()) - 64n
   const header = await client.getBlock({ blockNumber: block })
+  if (header.number !== block) throw new Error(`asked for block ${block}, rpc answered block ${header.number}, ${json.chain}.json not written`)
+  if (!header.hash || !isHash(header.hash)) throw new Error(`block ${block} has no valid hash (${header.hash}), ${json.chain}.json not written`)
   if (!input.pin && header.hash !== json.blockHash) {
     throw new Error(`block ${block} hash is ${header.hash}, ${json.chain}.json pins ${json.blockHash}`)
   }
 
   const problems: Problem[] = []
-  const registry: Registry = { ...json, block: Number(block), blockHash: header.hash as Hex }
+  const registry: Registry = { ...json, block: Number(block), blockHash: header.hash }
   for (const e of registry.entries) {
     const hash = await readCodeHash(client, e.address, block)
     if (!hash) {
