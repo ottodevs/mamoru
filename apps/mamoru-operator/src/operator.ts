@@ -48,6 +48,8 @@ const BLOCK_SECONDS = 2n
 const PREPARE_TTL_MS = 5 * 60_000
 /** On top of the policy reserve: the first userOp prefund leaves the Safe's balance into its EntryPoint deposit. */
 const TOP_UP_MARGIN_WEI = 200_000_000_000_000n
+/** Blocks of deposit progress (~10 min on Base) before it is written to the state file. */
+const DEPOSITS_SAVE_BLOCKS = 300n
 /** How long a POST waits for the owner transaction before answering with the op as it stands; the SPA polls /ops. */
 const POST_WAIT_MS = 15_000
 /** How often the armed-activation watcher reads the USDC balance of each armed Safe. */
@@ -1048,6 +1050,11 @@ export class Operator {
           }
         } catch (e) {
           console.error(`[engine ${acc.accountKey}] review error: ${(e as Error).message.split('\n')[0]}`)
+        }
+        // Persist how far deposits were read, so a restart or a failed review does not rescan from activation.
+        if (runner.engine.depositsAfter - BigInt(acc.depositsAfter) >= DEPOSITS_SAVE_BLOCKS) {
+          acc.depositsAfter = runner.engine.depositsAfter.toString()
+          this.store.save()
         }
         this.syncEngineOps(acc, runner)
       })
