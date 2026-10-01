@@ -1,6 +1,7 @@
 import { getAddress, keccak256, type PublicClient } from 'viem'
 import { ReasonError, type Address, type Hex } from '@mamoru/domain'
 import base from '../base.json' with { type: 'json' }
+import monad from '../monad.json' with { type: 'json' }
 
 export * from './abis.ts'
 
@@ -37,9 +38,28 @@ export type Registry = {
   entries: RegistryEntry[]
 }
 
-export const baseRegistry: Registry = {
-  ...(base as Omit<Registry, 'entries'>),
-  entries: (base.entries as RegistryEntry[]).map((e) => ({ ...e, address: getAddress(e.address) })),
+type RegistryFile = { chain: string; chainId: number; block: number; blockHash: string; entries: unknown[] }
+
+function load(file: RegistryFile): Registry {
+  return {
+    chain: file.chain,
+    chainId: file.chainId,
+    block: file.block,
+    blockHash: file.blockHash as Hex,
+    entries: (file.entries as RegistryEntry[]).map((e) => ({ ...e, address: getAddress(e.address) })),
+  }
+}
+
+export const baseRegistry: Registry = load(base)
+export const monadRegistry: Registry = load(monad)
+
+/** One registry per chain. Selection is by chain id only; there is no cross-chain fallback. */
+export const registries: readonly Registry[] = [baseRegistry, monadRegistry]
+
+export function registryFor(chainId: number): Registry {
+  const found = registries.find((r) => r.chainId === chainId)
+  if (!found) throw new ReasonError('OBS_CHAIN_MISMATCH', `no registry for chain id ${chainId}`)
+  return found
 }
 
 export type RegistryName = string

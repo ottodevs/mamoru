@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./base.json": "./base.json"
+    "./base.json": "./base.json",
+    "./monad.json": "./monad.json"
   },
   "dependencies": {
     "@mamoru/domain": "workspace:*",
