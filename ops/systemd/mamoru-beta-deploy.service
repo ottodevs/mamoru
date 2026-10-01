@@ -1,0 +1,9 @@
+# Deploy ottodevs/mamoru branch `beta` to the mamoru-app-beta Worker (beta.mamoru.lol).
+# Proposed, not installed. See ops/systemd/README.md.
+[Unit]
+Description=Deploy ottodevs/mamoru branch beta to the mamoru-app-beta Worker
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/share/bun/bin:/etc/profiles/per-user/%u/bin:/run/current-system/sw/bin
+ExecStart=%h/box/src/mamoru.workspace/mamoru/ops/systemd/beta-watch.sh
