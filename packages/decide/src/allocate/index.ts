@@ -1,5 +1,5 @@
 import type { ReasonCode } from '@mamoru/domain'
-import { grantKeyFor, type PolicyVersion } from '@mamoru/policy'
+import { grantKeyFor, hasManageAny, type PolicyVersion } from '@mamoru/policy'
 import { rangeAround, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { safeSavings } from '../enter/index.ts'
 import { purgaIdentity } from '../gates/index.ts'
@@ -10,6 +10,8 @@ import { amountsForLiquidity, inSavings, volatileOf } from '../value.ts'
 export const DEFAULT_MIN_ENTRY = 100_000n
 /** Swap only when the idle volatile covers less than this share (bps) of what the mint needs. */
 const SWAP_BELOW_BPS = 9_000n
+/** Sell idle volatile only when it exceeds what the mint needs by more than this share (bps) and savings are short to pair it. */
+const SELL_ABOVE_BPS = 11_000n
 
 export type BucketValue = {
   bucket: string
@@ -28,7 +30,7 @@ export type Allocation = {
   buckets: BucketValue[]
   proposal: Proposal | null
   trail: GateStep[]
-  /** Pools whose idle volatile token this allocation can mint now. It waits there for its turn; it is not idle capital. */
+  /** Pools whose idle volatile token this allocation has a use for: a mint that can go, or the sale that makes it possible. */
   pendingMint: string[]
 }
 
@@ -41,10 +43,14 @@ export function widthOf(policy: PolicyVersion, pool: string): number {
   return policy.range.widthTicksByPool?.[pool] ?? policy.range.widthTicks
 }
 
-/** Value share (bps) of the volatile side in a fresh range around the current tick, at the TWAP. */
+/**
+ * Value share (bps) of the volatile side in a fresh range around the current tick, at the pool price. The mint takes
+ * its tokens at that price: split at the TWAP instead, a narrow range a few ticks off its average ends with one token
+ * left over.
+ */
 function volatileShareBps(pool: PoolObs, policy: PolicyVersion): bigint {
   const r = rangeAround(pool.tick, widthOf(policy, pool.name), pool.tickSpacing)
-  const p = atTwap(pool)
+  const p = pool
   const a = amountsForLiquidity(p.sqrtPriceX96, r.tickLower, r.tickUpper, 10n ** 24n)
   const savings = policy.savingsAsset
   const v0 = inSavings(p, p.token0, a.amount0, savings)
@@ -62,7 +68,9 @@ function volatileShareBps(pool: PoolObs, policy: PolicyVersion): bigint {
  * `rebalanceBandBps` band. The gap is measured on the positions because a swap toward a mint moves value from the free
  * savings into the bucket's idle token: measured with it, the swap itself would close the gap and the mint would
  * never follow. The most under-weight short bucket (by deficit relative to its target, policy order on ties) gets the
- * next entry: a swap when its idle volatile is short of the mint, else a mint of a new range around the tick.
+ * next entry. Its next mint holds the gap, or all the bucket can gather (free savings plus idle volatile) when that
+ * is less, split as a new range around the tick needs it. Idle volatile short of that split: buy it. Too much of it
+ * and not the savings to pair it (the one-sided tokens a re-range frees): sell the excess back. Otherwise mint.
  */
 export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit: boolean): Allocation {
   const savings = policy.savingsAsset
@@ -108,8 +116,8 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
 
   let proposal: Proposal | null = null
   const pendingMint: string[] = []
-  for (const { r, i, deficit } of order) {
-    // After the first proposal the loop only finds which other buckets hold a mint that can go; their codes stay.
+  for (const { r, i, gap } of order) {
+    // After the first proposal the loop only finds which other buckets have a use for their idle volatile; their codes stay.
     const row = proposal ? null : buckets[i]!
     if (unsafeDeposit) {
       if (row) row.code = 'OBS_DEPOSIT_UNSAFE'
@@ -118,10 +126,10 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     const pool = r.pool!
     const volatile = volatileOf(pool, savings)
     const volatileValue = inSavings(atTwap(pool), volatile, r.idleVolatile, savings)
-    // What the next mint of this bucket holds: the idle volatile plus the savings still missing from the target.
-    const short = deficit > 0n ? deficit : 0n
-    const size = short < free ? short + volatileValue : free + volatileValue
+    // What the next mint of this bucket holds: the gap, or everything the bucket can gather when that is less.
+    const size = gap < free + volatileValue ? gap : free + volatileValue
     const wantVolatile = (size * volatileShareBps(pool, policy)) / 10_000n
+    const wantSavings = size - wantVolatile
     if (volatileValue * 10_000n < wantVolatile * SWAP_BELOW_BPS) {
       const need = wantVolatile - volatileValue
       const amountIn = need < free ? need : free
@@ -135,10 +143,26 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       }
       continue
     }
-    const wantSavings = size - wantVolatile
+    if (free < wantSavings && volatileValue * 10_000n > wantVolatile * SELL_ABOVE_BPS) {
+      const excess = volatileValue - wantVolatile
+      if (excess < minEntry || !hasManageAny(policy)) {
+        if (row) row.code = 'DECIDE_NO_CAPITAL'
+        continue
+      }
+      // The rest of the idle token is the volatile side of the mint that follows.
+      pendingMint.push(pool.name)
+      if (row) {
+        row.code = 'STRATEGY_PREFERENCE_DEVIATION'
+        proposal = { kind: 'enter_swap', grant: grantKeyFor(policy, 'convert-any', pool.name) as `convert-any:${string}`, pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn: (r.idleVolatile * excess) / volatileValue }
+      }
+      continue
+    }
     const savingsIn = wantSavings < free ? wantSavings : free
+    // No more of the idle token than the mint needs; what is over stays idle and is converted once the bucket is full.
+    const volatileIn = volatileValue * 10_000n > wantVolatile * SELL_ABOVE_BPS ? (r.idleVolatile * wantVolatile * SELL_ABOVE_BPS) / (volatileValue * 10_000n) : r.idleVolatile
+    const volatileInValue = volatileValue < wantVolatile ? volatileValue : wantVolatile
     // A mint smaller than the minimum entry is dust left by an earlier mint: its minimums round to zero and it cannot be built.
-    if (savingsIn <= 0n || r.idleVolatile === 0n || savingsIn + volatileValue < minEntry) {
+    if (savingsIn <= 0n || volatileIn === 0n || savingsIn + volatileInValue < minEntry) {
       if (row) row.code = 'DECIDE_NO_CAPITAL'
       continue
     }
@@ -152,8 +176,8 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       grant: grantKeyFor(policy, 'enter-mint', pool.name) as `enter-mint:${string}`,
       pool: pool.name,
       ...range,
-      amount0Desired: savingsIs0 ? savingsIn : r.idleVolatile,
-      amount1Desired: savingsIs0 ? r.idleVolatile : savingsIn,
+      amount0Desired: savingsIs0 ? savingsIn : volatileIn,
+      amount1Desired: savingsIs0 ? volatileIn : savingsIn,
     }
   }
   if (total === 0n) for (const row of buckets) if (row.code === 'STRATEGY_PREFERENCE') row.code = 'DECIDE_NO_CAPITAL'

@@ -200,15 +200,29 @@ describe('allocate (conservador-live-v2, target weights)', () => {
     expect(sells.length).toBeLessThanOrEqual(1)
   })
 
-  test('idle volatile the allocation cannot pair is still sold back, once', () => {
-    // No free savings: the leftover cbBTC of a bucket inside its band has no mint to wait for.
+  test('one-sided volatile and no savings to pair it: the excess is sold once, the rest is minted', () => {
+    // What a re-range leaves when the price sat at the top of the range: all cbBTC, no USDC.
     const { o: base, id } = invested()
     const cbbtc = token0InToken1(800_000n, POOLS[1]!.sqrtPriceX96)
-    const stuck = { ...base, balances: { ...base.balances, USDC: 0n, cbBTC: (base.balances.cbBTC ?? 0n) + cbbtc } }
-    expect(allocate(stuck, V2, false).pendingMint).toEqual([])
-    const { steps } = settle(stuck, id)
-    expect(steps[0]).toBe('enter_swap:pool:USDC/cbBTC/500:USDC')
-    expect(steps.filter((k) => k.endsWith(':USDC'))).toHaveLength(1)
+    const oneSided = { ...base, balances: { ...base.balances, USDC: 0n, cbBTC: (base.balances.cbBTC ?? 0n) + cbbtc } }
+    const first = decide(oneSided, V2).proposal
+    expect(first).toMatchObject({ kind: 'enter_swap', grant: 'convert-any:pool:USDC/cbBTC/500', tokenIn: 'cbBTC', tokenOut: 'USDC' })
+    // Part of it, not all: the rest is the volatile side of the mint.
+    expect((first as { amountIn: bigint }).amountIn < cbbtc).toBe(true)
+    const { o, steps } = settle(oneSided, id)
+    expect(steps.filter((k) => k === 'enter_swap:pool:USDC/cbBTC/500:USDC')).toHaveLength(1)
+    expect(steps).toContain('enter_mint:pool:USDC/cbBTC/500')
+    expect(steps.filter((k) => k.startsWith('enter_swap:pool:USDC/cbBTC/500:cbBTC'))).toEqual([])
+    expect(idleValue(o) < V2.minEntry!).toBe(true)
+  })
+
+  test('idle volatile of a bucket that is not short has no mint to wait for and is sold back, once', () => {
+    const { o: base, id } = invested()
+    const cbbtc = token0InToken1(200_000n, POOLS[1]!.sqrtPriceX96)
+    const idle = { ...base, balances: { ...base.balances, USDC: 0n, cbBTC: (base.balances.cbBTC ?? 0n) + cbbtc } }
+    expect(allocate(idle, V2, false).pendingMint).toEqual([])
+    const { steps } = settle(idle, id)
+    expect(steps).toEqual(['enter_swap:pool:USDC/cbBTC/500:USDC'])
   })
 
   test('token dust next to a short bucket is not minted: the proposal could never be built', () => {
