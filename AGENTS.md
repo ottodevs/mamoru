@@ -4,42 +4,18 @@ Public product repo. GitHub `ottodevs/mamoru` is the only push remote. Forgejo i
 
 The closed architecture is `inputs/mamoru-spec-v1.md`. Do not reopen it. Accepted work lands on `main` by fast-forward. A branch exists only for the open slice, then it is deleted.
 
-## Sprint mode (until 2026-09-27 02:00 CEST, ETHGlobal Tokyo submission)
+## Operating flow (post-hackathon)
 
-Ot approved this on 2026-09-26. It overrides "One unit" and the deploy ban in `tasks.md` rule 5 until the deadline. Everything else in the spec still holds: no signing or sending on Base, funds gate closed, `CORE_DRY_RUN=true`, no keys in the repo, no `wrangler.toml`.
+Sprint mode (parallel lanes, deploy-during-build) ended 2026-09-27 with the ETHGlobal Tokyo submission. Fixes now go to production once tested, one unit at a time:
 
-Six lanes run in parallel. Each lane has one worktree and one branch `lane/<name>`, and writes only inside its paths. Only the integrator (L0) pushes `main` and deploys.
+1. Branch per fix off `main`, one concern, at most ~12 files.
+2. `bun run typecheck` and `bun test packages apps` pass locally (`bun run release:check` runs both plus the SPA build).
+3. Push the branch. Codex `gpt-6-astra` reviews the commit; verdict is APTO or NO-GO. NO-GO: one fix commit on the same branch, review again. Do not stack unreviewed commits, do not open a pull request, do not squash.
+4. Risky UI or API changes go to the `beta` branch first: `bun run deploy:beta` ships them to https://beta.mamoru.lol (same D1, same live operator as prod, opt-in testers, real funds) to soak before touching `main`.
+5. APTO (and, for beta changes, soaked): fast-forward `main` and delete the branch. `bun run promote` does this fast-forward from `beta` and runs `deploy:prod`; `bun run deploy:prod` alone requires HEAD to already be `origin/main` on a clean tree. Never force-push, never force the fast-forward.
+6. Every `deploy:prod` run appends a row to `docs/releases.md` (git sha, version id, previous version, smoke test result) and prints the `wrangler rollback <version>` command.
 
-| Lane | Owns |
-|---|---|
-| L0 integrator | `packages/domain/src/dashboard-payload.ts`, `packages/domain/src/app-api.ts`, `migrations/d1/0001_sprint.sql`, `AGENTS.md`, deploys |
-| L1 engine lab (T003) | `packages/{journal,decide,rpc,erc4337,projector}/`, quote part of `packages/uniswap-v3/`, `packages/scenarios/{driver,bundler}/`, T003 entries in `scenarios/catalog/` |
-| L2 SPA | `apps/mamoru-app/{index.html,vite.config.ts,package.json,tsconfig.json,src/web/**,test/e2e/**}` |
-| L3 API and onboarding | `apps/mamoru-app/{wrangler.jsonc,src/api/**,src/worker.ts,test/api/**}`, `migrations/d1/0002_*` and later, `packages/account/proofs/` |
-| L4 Base read model | `apps/mamoru-engine/**`, `packages/multibaas/**`, `scripts/multibaas/**` |
-| L6 submission | `README.md`, `FEEDBACK.md`, `docs/submission/**`, `docs/multibaas.md`, `evidence/**` |
-
-- The SPA and the API meet only through `@mamoru/domain` (`DashboardPayload`, `app-api.ts`). A lane that needs a new field asks L0.
-- D1 `mamoru` id `682b2a66-d9d4-49e5-ac78-596d002d02ca`, binding `DB`, shared by both Workers. A schema change goes to L0.
-- Push your lane branch after each green step. Never push `main`. Never force-push.
-- Before a push: `bun run typecheck` and `bun test` pass, and scenarios accepted before stay green.
-- L0 rejects a branch that touches files outside its lane.
-
-## Now
-
-T002 is the open task, from `specs/001-mamoru-v1/tasks.md`. The owner walkaway batch and recovery kit are on `main` at `1d75734`. The next slice is still T002: WALK-01 and WALK-04. Do not start T003. Do not deploy. Do not push Forgejo.
-
-## One unit
-
-The next task stays off `main` until its review passes. One task, then stop.
-
-1. Implement only the open slice of that task from `tasks.md`. One writer at a time, in turn: Cursor Agent `--model claude-opus-5-5-high`, or Claude Code `--model claude-opus-5-5 --effort high`. Only the files that slice needs. One concern, at most 12 files.
-2. One short commit on a branch that exists for that slice alone. Push it to GitHub. Do not start another slice on that branch.
-3. Codex `gpt-6-astra` at medium reviews that commit. Verdict is APTO or NO-GO. It does not rewrite the commit.
-4. NO-GO: one fix commit on the same branch, then review again. APTO: fast-forward `main` and delete the branch.
-5. Only then take the next slice. The next task starts when Ot says so.
-
-Do not stack a phase of unreviewed commits. Do not open a pull request. Do not squash. Forgejo stays fetch-only.
+Release scripts live in `scripts/release/` (`release:check`, `deploy:beta`, `deploy:prod`, `promote`, wired in `package.json`). Forgejo stays fetch-only.
 
 ## Read before writing a spec
 
