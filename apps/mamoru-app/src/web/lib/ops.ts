@@ -1,6 +1,6 @@
 import type { OpView } from '@mamoru/domain'
 import { shortHex } from './format.ts'
-import { usd } from './money.ts'
+import { usd, usdPlain } from './money.ts'
 
 const owner = (op: OpView) => op.opId.startsWith('own-')
 /** Engine op kind from its id (eng-…-enter_swap), or null for an owner op. */
@@ -9,9 +9,14 @@ const engineKind = (op: OpView) => (owner(op) ? null : (/(enter_swap|enter_mint|
 /** Failures that only mean another op took over (a newer approval, a stop): nothing for the user to do. */
 const INTERNAL_FAILURES = new Set(['ARMED_SUPERSEDED', 'STOPPED', 'ALREADY_ACTIVE'])
 
-/** An owner action that failed after the passkey signed it: the user approves it again. */
+/** Start refused because the deposit was over the cap. CAP_EXCEEDED is what operators before DEPOSIT_OVER_CAP stored. */
+export function overCapRefusal(op: OpView): boolean {
+  return op.kind === 'activate' && op.state === 'failed' && (op.code === 'DEPOSIT_OVER_CAP' || op.code === 'CAP_EXCEEDED')
+}
+
+/** An owner action that failed after the passkey signed it: the user approves it again. An over-cap refusal is not one: approving again cannot help. */
 export function needsRetry(op: OpView): boolean {
-  return owner(op) && op.state === 'failed'
+  return owner(op) && op.state === 'failed' && !overCapRefusal(op)
 }
 
 function withdrewLine(op: OpView, done: boolean): string {
@@ -27,6 +32,9 @@ export function opLine(op: OpView): string {
   const failed = op.state === 'failed'
   switch (op.kind) {
     case 'activate':
+      if (overCapRefusal(op)) {
+        return op.amountUsdc && op.capUsdc ? `Start refused: ${usd(op.amountUsdc)} USDC is over the ${usdPlain(op.capUsdc)} USDC cap` : 'Start refused: the deposit was over the cap'
+      }
       if (failed) return 'Start needs another approval'
       if (done) return 'Mamoru started'
       return op.code === 'ARMED' || op.state === 'proposed' ? 'Start approved' : 'Starting Mamoru'

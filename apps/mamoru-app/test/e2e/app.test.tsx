@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { FundingView, OpView, SessionView } from '@mamoru/domain'
+import type { AppConfig, FundingView, OpView, SessionView } from '@mamoru/domain'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router'
 import { ApiContext } from '../../src/web/api/client.ts'
@@ -9,8 +9,8 @@ import { FIXTURE_ACCOUNT_KEY } from '../../src/web/fixtures/empty-account.ts'
 import { poolsResponse } from '../../src/web/fixtures/pools.ts'
 import { base64url } from '../../src/web/lib/passkey.ts'
 import { base64urlDecode, hexToBytes } from '../../src/web/lib/passkey-sign.ts'
-import { cbbtcPrice, humanMessage, split, usd } from '../../src/web/lib/money.ts'
-import { activationLive, historyOps, opLine } from '../../src/web/lib/ops.ts'
+import { capNote, cbbtcPrice, ceilCents, humanMessage, overCapOf, split, usd, usdPlain } from '../../src/web/lib/money.ts'
+import { activationLive, historyOps, needsRetry, opLine } from '../../src/web/lib/ops.ts'
 import { isAddress, parseUsdc } from '../../src/web/lib/owner-flow.ts'
 import { encodeQr } from '../../src/web/lib/qr.ts'
 import { localTime } from '../../src/web/lib/time.ts'
@@ -27,13 +27,13 @@ const funded: FundingView = {
   positions: [{ tokenId: '1', pool: `0x${'a'.repeat(40)}`, liquidity: '1', inRange: true, amountUsdc: '5000000', amountCbbtc: '10000' }],
 }
 
-async function renderRoute(path: string, session: SessionView | null, funding?: FundingView) {
+async function renderRoute(path: string, session: SessionView | null, funding?: FundingView, more: { ops?: OpView[]; config?: AppConfig } = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
-  qc.setQueryData(queryKeys.config, fixtureConfig)
+  qc.setQueryData(queryKeys.config, more.config ?? fixtureConfig)
   qc.setQueryData(queryKeys.session, session)
   qc.setQueryData(queryKeys.pools, poolsResponse)
   if (funding) qc.setQueryData(queryKeys.funding(FIXTURE_ACCOUNT_KEY), funding)
-  qc.setQueryData(queryKeys.ops(FIXTURE_ACCOUNT_KEY), { ops: [] })
+  qc.setQueryData(queryKeys.ops(FIXTURE_ACCOUNT_KEY), { ops: more.ops ?? [] })
   const router = buildRouter(createMemoryHistory({ initialEntries: [path] }))
   await router.load()
   return render(
@@ -70,6 +70,69 @@ describe('routes', () => {
   })
   test('old paths redirect home; unknown paths are not found', async () => {
     expect((await renderRoute('/deposit', null)).text).toContain('Page not found')
+  })
+})
+
+// otto/mamoru#4: 26.92 USDC arrived on a 25 USDC cap. The operator refuses Start and reports it; the SPA says so.
+describe('deposit cap', () => {
+  const over = { code: 'DEPOSIT_OVER_CAP' as const, usdc: '26920000', capUsdc: '25000000', excessUsdc: '1920000' }
+  const overFunding: FundingView = { ...fixtureFunding, usdc: '26920000', active: false, overCap: over }
+  const refused: OpView = { opId: 'own-1-activate', kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: '26920000', capUsdc: '25000000', updatedAt: '2026-10-01T10:00:00Z' }
+  const live: AppConfig = { ...fixtureConfig, fundsGate: 'live', dryRun: false, capUsdc: '25000000' }
+
+  test('the cap is said before funding: on the first card when the API runs live, and next to the deposit address', async () => {
+    expect((await renderRoute('/', null, undefined, { config: live })).text).toContain('Send the USDC you want to invest. Up to 25 USDC per account for now.')
+    expect((await renderRoute('/', null)).text).not.toContain('per account for now')
+    expect((await renderRoute('/add', fixtureSession, { ...fixtureFunding, usdc: '0' })).text).toContain('Send USDC on Base. Up to 25 USDC per account for now.')
+  })
+  test('Home over the cap: what happened, what to do, and the withdraw that fixes it instead of a Start that would fail', async () => {
+    const { text, html } = await renderRoute('/', fixtureSession, overFunding, { ops: [refused] })
+    expect(text).toContain('This account is over the 25 USDC cap, so Mamoru has not started.')
+    expect(text).toContain('It holds 26.92 USDC. Nothing was moved. Withdraw at least 1.92 USDC to an address you control, then start Mamoru.')
+    expect(text).toContain('Withdraw 1.92 USDC')
+    expect(html).toContain('data-testid="over-cap"')
+    expect(html).not.toContain('data-testid="start"')
+    expect(text).toContain('Start refused: 26.92 USDC is over the 25 USDC cap')
+    expect(text).not.toContain('Approve again')
+    expect(text.split('Save recovery kit')[0]).not.toContain('!')
+  })
+  test('an operator that does not report overCap yet: the SPA derives it from the balance and the cap', async () => {
+    const { overCap: _, ...old } = overFunding
+    expect(overCapOf(old)).toEqual(over)
+    expect((await renderRoute('/', fixtureSession, old)).text).toContain('Withdraw 1.92 USDC')
+    expect(overCapOf({ ...old, active: true })).toBeNull()
+  })
+  test('at the cap or under it nothing changes: one Start button', async () => {
+    const { html } = await renderRoute('/', fixtureSession, { ...fixtureFunding, usdc: '25000000', active: false, overCap: null })
+    expect(html).toContain('data-testid="start"')
+    expect(html).not.toContain('data-testid="over-cap"')
+  })
+  test('while the withdraw is in flight the notice steps aside', async () => {
+    const sending: OpView = { opId: 'own-2-transfer', kind: 'transfer', state: 'submitted', updatedAt: '2026-10-01T10:05:00Z' }
+    expect((await renderRoute('/', fixtureSession, overFunding, { ops: [refused, sending] })).html).not.toContain('data-testid="over-cap"')
+  })
+  test('Add capital over the cap: the arrival line says why nothing started and stays', async () => {
+    const { text } = await renderRoute('/add', fixtureSession, overFunding)
+    expect(text).toContain('26.92 USDC arrived. That is 1.92 USDC over the 25 USDC cap, so Mamoru has not started. Your money is in your account and nothing was moved.')
+    expect(text).toContain('See what you can do')
+    expect(text).not.toContain('Waiting for your USDC')
+  })
+  test('the refusal reads as one line and offers no pointless retry; older operators stored CAP_EXCEEDED', () => {
+    expect(opLine(refused)).toBe('Start refused: 26.92 USDC is over the 25 USDC cap')
+    expect(needsRetry(refused)).toBe(false)
+    const legacy: OpView = { opId: 'own-1-activate', kind: 'activate', state: 'failed', code: 'CAP_EXCEEDED', updatedAt: '2026-10-01T10:00:00Z' }
+    expect(opLine(legacy)).toBe('Start refused: the deposit was over the cap')
+    expect(needsRetry(legacy)).toBe(false)
+    expect(needsRetry({ ...refused, code: 'OWNER_TX_REVERTS' })).toBe(true)
+    expect(historyOps([refused]).map((o) => o.opId)).toEqual(['own-1-activate'])
+  })
+  test('the excess is rounded up to the cent, never understated', () => {
+    expect(ceilCents(1_920_000n)).toBe(1_920_000n)
+    expect(ceilCents(1_920_001n)).toBe(1_930_000n)
+    expect(ceilCents(1n)).toBe(10_000n)
+    expect(usdPlain('25000000')).toBe('25')
+    expect(usdPlain('1920000')).toBe('1.92')
+    expect(capNote('25000000')).toBe('Up to 25 USDC per account for now.')
   })
 })
 

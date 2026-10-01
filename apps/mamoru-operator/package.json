@@ -9,7 +9,8 @@
     "e2e:fork": "bun test/e2e-fork.ts",
     "e2e:armed": "bun test/e2e-armed.ts",
     "e2e:rerange": "bun test/e2e-rerange.ts",
-    "e2e:multipool": "bun test/e2e-multipool.ts"
+    "e2e:multipool": "bun test/e2e-multipool.ts",
+    "e2e:overcap": "bun test/e2e-overcap.ts"
   },
   "dependencies": {
     "@mamoru/account": "workspace:*",

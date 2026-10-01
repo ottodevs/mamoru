@@ -1,4 +1,4 @@
-import { PRODUCTION_BANNER, type AppConfig, type FundingView, type OpView, type OwnerResponse, type OwnerTxToSign, type SessionView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
+import { overCap, PRODUCTION_BANNER, type AppConfig, type FundingView, type OpView, type OwnerResponse, type OwnerTxToSign, type SessionView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
 import type { ApiClient } from '../api/client.ts'
 import { emptyAccount, FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from './empty-account.ts'
 import { poolsResponse } from './pools.ts'
@@ -41,12 +41,20 @@ export const fixtureFunding: FundingView = {
 }
 
 // ?fresh (dev only): no account yet, 0 USDC. The approval arms; a deposit lands a few seconds later.
-const fresh = liveGate && typeof location !== 'undefined' && new URLSearchParams(location.search).has('fresh')
+const param = (name: string) => liveGate && typeof location !== 'undefined' && new URLSearchParams(location.search).has(name)
+const fresh = param('fresh')
+// ?overcap (dev only): the armed approval met a 26.92 USDC deposit, over the 25 USDC cap. Nothing started.
+const overcap = param('overcap')
+const OVER_CAP_USDC = '26920000'
+const capState = (usdc: string) => ({ usdc, overCap: overCap(BigInt(usdc), BigInt(fixtureFunding.capUsdc)) })
 const liveState = {
-  funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}) },
-  ops: [] as OpView[],
+  funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}) } as FundingView,
+  ops: (overcap
+    ? [{ opId: 'own-1-activate', kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: OVER_CAP_USDC, capUsdc: fixtureFunding.capUsdc, updatedAt: new Date().toISOString() }]
+    : []) as OpView[],
   n: 0,
   owner: !fresh,
+  transferUsdc: 0n,
 }
 
 function fixtureTx(summary: string[]): OwnerTxToSign {
@@ -149,16 +157,23 @@ export const fixtureClient: ApiClient = {
         { asset: 'JPYC' as const, available: true, reason: 'Dephaser JPYT, backed by USDC. Not a regulated issuer.' },
       ],
     }),
-  transferPrepare: (_k, body) =>
-    delay({
+  transferPrepare: (_k, body) => {
+    liveState.transferUsdc = BigInt(body.amountUsdc)
+    return delay({
       reduce: BigInt(body.amountUsdc) > BigInt(liveState.funding.usdc) ? [{ tokenId: '4242', liquidityBps: 5000 }] : [],
       ...(body.asset && body.asset !== 'USDC' ? { receive: fixtureReceive(body.asset, BigInt(body.amountUsdc)) } : {}),
-      ownerTx: fixtureTx([`Transfer ${Number(body.amountUsdc) / 1e6} USDC to ${body.to}${body.asset && body.asset !== 'USDC' ? ` as ${body.asset}` : ''}`]),
-    }),
+      ownerTx: fixtureTx([
+        ...(liveState.funding.deployed ? [] : ['Create your Safe on Base']),
+        `Transfer ${Number(body.amountUsdc) / 1e6} USDC to ${body.to}${body.asset && body.asset !== 'USDC' ? ` as ${body.asset}` : ''}`,
+      ]),
+    })
+  },
   transfer: () =>
     delay(
       fixtureOp('transfer', () => {
-        liveState.funding.usdc = '0'
+        const f = liveState.funding
+        const left = BigInt(f.usdc) - liveState.transferUsdc
+        Object.assign(f, { deployed: true }, f.active ? { usdc: String(left > 0n ? left : 0n) } : capState(String(left > 0n ? left : 0n)))
       }),
     ),
   stopPrepare: () => delay(fixtureTx(['Revoke every engine grant', 'Close every position', 'Swap cbBTC to USDC. USDC stays in the Safe'])),

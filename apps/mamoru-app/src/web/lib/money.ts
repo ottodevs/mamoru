@@ -1,4 +1,4 @@
-import type { FundingView, PoolsResponse } from '@mamoru/domain'
+import { overCap, type FundingView, type OverCap, type PoolsResponse } from '@mamoru/domain'
 import { formatUnits } from './format.ts'
 
 const SATS = 100_000_000n
@@ -54,6 +54,27 @@ export function usd(raw: bigint | string): string {
   const s = formatUnits(String(raw), 'USDC')
   const [w, f = ''] = s.split('.')
   return `${w}.${f.padEnd(2, '0')}`
+}
+
+/** Base units to "25" or "1.92": cents, without a trailing ".00". */
+export function usdPlain(raw: bigint | string): string {
+  return usd(raw).replace(/\.00$/, '')
+}
+
+/** Base units rounded up to the next cent, so an amount the owner must reach is never understated. */
+export function ceilCents(raw: bigint): bigint {
+  return ((raw + 9_999n) / 10_000n) * 10_000n
+}
+
+export function capNote(capUsdc: string): string {
+  return `Up to ${usdPlain(capUsdc)} USDC per account for now.`
+}
+
+/** The operator's over-cap report; derived from the balance when an older operator does not send one. */
+export function overCapOf(f: FundingView | undefined): OverCap | null {
+  if (!f) return null
+  if (f.overCap !== undefined) return f.overCap
+  return f.active ? null : overCap(BigInt(f.usdc), BigInt(f.capUsdc))
 }
 
 /** Base units to the amount a person types: "1.93". */

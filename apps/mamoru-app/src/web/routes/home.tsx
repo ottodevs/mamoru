@@ -1,4 +1,4 @@
-import type { FundingView, Hex0x, OpView, WithdrawAsset } from '@mamoru/domain'
+import type { FundingView, Hex0x, OpView, OverCap, WithdrawAsset } from '@mamoru/domain'
 import { useMutation } from '@tanstack/react-query'
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { useApi } from '../api/client.ts'
@@ -9,7 +9,7 @@ import { BasescanLink, Brand, Modal, Waiting } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
-import { cbbtcPrice, humanMessage, split, usd, usdInput, type Split } from '../lib/money.ts'
+import { cbbtcPrice, ceilCents, humanMessage, overCapOf, split, usd, usdInput, usdPlain, type Split } from '../lib/money.ts'
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, positionAmounts, positionTokens, progressLine } from '../lib/positions.ts'
@@ -35,6 +35,10 @@ export const homeCopy = {
   armFirst: 'Approve once. Mamoru starts when your money lands.',
   stopBody: 'Mamoru closes every position and swaps back to USDC. Your USDC stays in your account.',
   confirm: 'Confirm with passkey',
+  createFirst: 'Your account is created on Base first, then the USDC is sent.',
+  overCapTitle: (o: OverCap) => `This account is over the ${usdPlain(o.capUsdc)} USDC cap, so Mamoru has not started.`,
+  overCapBody: (o: OverCap) => `It holds ${usd(o.usdc)} USDC. Nothing was moved. Withdraw at least ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC to an address you control, then start Mamoru.`,
+  overCapAct: (o: OverCap) => `Withdraw ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC`,
 }
 
 const GITHUB = 'https://github.com/ottodevs/mamoru#readme'
@@ -287,9 +291,9 @@ function Review({ lines, busy, error, onApprove, children }: { lines: string[]; 
   )
 }
 
-function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; s: Split; open: boolean; onClose: () => void }) {
+function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', deployed = true }: { accountKey: string; s: Split; open: boolean; onClose: () => void; initialAmount?: string; deployed?: boolean }) {
   const flow = useOwnerAction(accountKey, 'transfer')
-  const [amount, setAmount] = useState('')
+  const [amount, setAmount] = useState(initialAmount)
   const [to, setTo] = useState('')
   const [asset, setAsset] = useState<WithdrawAsset>('USDC')
   const [invalid, setInvalid] = useState<string | null>(null)
@@ -327,7 +331,7 @@ function WithdrawDialog({ accountKey, s, open, onClose }: { accountKey: string; 
         </div>
       ) : flow.prepared ? (
         <Review
-          lines={flow.prepared.reduce?.length ? ['Mamoru first takes the missing USDC out of the pool.'] : []}
+          lines={[...(deployed ? [] : [homeCopy.createFirst]), ...(flow.prepared.reduce?.length ? ['Mamoru first takes the missing USDC out of the pool.'] : [])]}
           busy={flow.busy}
           error={error}
           onApprove={() => void flow.approve()}
@@ -470,6 +474,21 @@ function StartDialog({ accountKey, s, open, onClose }: { accountKey: string; s: 
   )
 }
 
+/** The deposit is above the cap: say what happened and offer the one thing that fixes it. */
+export function OverCapRow({ over, onWithdraw }: { over: OverCap; onWithdraw: () => void }) {
+  return (
+    <section className="card flex flex-wrap items-center justify-between gap-3" data-testid="over-cap" role="status">
+      <span className="max-w-[40rem]">
+        <span className="title">{homeCopy.overCapTitle(over)}</span>
+        <span className="sub">{homeCopy.overCapBody(over)}</span>
+      </span>
+      <button type="button" className="act" onClick={onWithdraw}>
+        {homeCopy.overCapAct(over)}
+      </button>
+    </section>
+  )
+}
+
 function StartRow({ accountKey, funded }: { accountKey: string; funded: boolean }) {
   const flow = useOwnerAction(accountKey, 'activate')
   const tap = () => void (flow.prepared ? flow.approve() : flow.prepare())
@@ -493,6 +512,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const ops = useOps(accountKey, true)
   const pools = usePools()
   const [dialog, setDialog] = useState<null | 'add' | 'withdraw' | 'stop' | 'start'>(null)
+  // Amount the withdraw form opens with; a new value remounts the dialog.
+  const [withdrawSeed, setWithdrawSeed] = useState('')
   const f = funding.data
   const opList = ops.data?.ops ?? []
   const s = f ? split(f, cbbtcPrice(pools.data)) : null
@@ -501,8 +522,14 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const armed = activationLive(opList)
   // Stopped after running: the Working card offers the restart where Stop was, so no Start row too.
   const stopped = !!f && !f.active && f.positions.length === 0 && !inFlight && everStarted(opList)
-  const canRestart = stopped && !!s && s.idleUsdc > 0n
-  const retry = (kind: OpView['kind']) => setDialog(kind === 'exit' ? 'stop' : kind === 'transfer' ? 'withdraw' : 'start')
+  // Over the cap the operator refuses Start, so the only action offered is the withdraw that fixes it.
+  const over = inFlight ? null : overCapOf(f)
+  const canRestart = stopped && !!s && s.idleUsdc > 0n && !over
+  const withdraw = (seed = '') => {
+    setWithdrawSeed(seed)
+    setDialog('withdraw')
+  }
+  const retry = (kind: OpView['kind']) => (kind === 'transfer' ? withdraw() : setDialog(kind === 'exit' ? 'stop' : 'start'))
   const kit = useMutation({
     mutationFn: async () => {
       if (!f) return
@@ -517,7 +544,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       <header className="mb-7">
         <Brand />
       </header>
-      <Balance s={s} onAdd={() => setDialog('add')} onWithdraw={() => setDialog('withdraw')} />
+      <Balance s={s} onAdd={() => setDialog('add')} onWithdraw={() => withdraw()} />
       {!f ? (
         funding.isError ? (
           <p className="err card">Could not load your balance. Retrying.</p>
@@ -526,7 +553,11 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         )
       ) : (
         <>
-          {!f.active && !inFlight && !armed && !stopped ? <StartRow accountKey={accountKey} funded={hasMoney(f)} /> : null}
+          {over ? (
+            <OverCapRow over={over} onWithdraw={() => withdraw(usdInput(ceilCents(BigInt(over.excessUsdc))))} />
+          ) : !f.active && !inFlight && !armed && !stopped ? (
+            <StartRow accountKey={accountKey} funded={hasMoney(f)} />
+          ) : null}
           <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? () => setDialog('start') : null} />
           <Idle s={s as Split} />
           <History ops={opList} onRetry={retry} />
@@ -544,9 +575,9 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       {f && s ? (
         <>
           <Modal open={dialog === 'add'} onClose={() => setDialog(null)} title={homeCopy.add}>
-            <DepositDetails address={f.address} />
+            <DepositDetails address={f.address} capUsdc={f.capUsdc} />
           </Modal>
-          <WithdrawDialog accountKey={accountKey} s={s} open={dialog === 'withdraw'} onClose={() => setDialog(null)} />
+          <WithdrawDialog key={withdrawSeed} accountKey={accountKey} s={s} open={dialog === 'withdraw'} onClose={() => setDialog(null)} initialAmount={withdrawSeed} deployed={f.deployed} />
           <StopDialog accountKey={accountKey} s={s} open={dialog === 'stop'} onClose={() => setDialog(null)} />
           <StartDialog accountKey={accountKey} s={s} open={dialog === 'start'} onClose={() => setDialog(null)} />
         </>
