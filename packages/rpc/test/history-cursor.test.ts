@@ -130,4 +130,17 @@ describe('readPositionHistoryFrom', () => {
     expect(next.events).toEqual([])
     expect(events.map(key)).toEqual(['decrease:1@105.0', 'collect:1@105.1'])
   })
+
+  test('a head behind the cursor reads in full and keeps the cursor', async () => {
+    const { client } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    await readPositionHistoryFrom(client, cursor, [1n, 2n], 100n, 150n, 150n)
+    ;(client as any).getBlock = async ({ blockNumber }: any) => {
+      if (blockNumber > 140n) throw new Error('BlockNotFoundError')
+      return { number: blockNumber, hash: `0xa${blockNumber.toString(16)}` }
+    }
+    const { events, next } = await readFrom(client, cursor, [1n, 2n], 100n, 140n, 130n)
+    expect(events.map(key)).toEqual((await readPositionHistory(client, [1n, 2n], 100n, 140n)).map(key))
+    expect(next.through).toBe(150n)
+  })
 })

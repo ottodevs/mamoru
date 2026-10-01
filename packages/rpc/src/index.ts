@@ -266,6 +266,8 @@ export async function readPositionHistoryFrom(
   const next: HistoryCursor = { ...cursor, ids: new Set(cursor.ids), events: [...cursor.events] }
   if (tokenIds.length === 0 || fromBlock > toBlock) return { events: [], next }
   if (next.fromBlock !== fromBlock) resetCursor(next, fromBlock)
+  // A head behind the cursor (lagging node or rollback): its blocks cannot be checked here, so read in full and keep the cursor.
+  if (next.through > toBlock) return { events: await readPositionHistory(client, tokenIds, fromBlock, toBlock), next: cursor }
   if (next.hash && (await client.getBlock({ blockNumber: next.through })).hash !== next.hash) resetCursor(next, fromBlock)
   // A tokenId the cursor has not seen: backfill its history up to the cursor once.
   const fresh = tokenIds.filter((id) => !next.ids.has(String(id)))
