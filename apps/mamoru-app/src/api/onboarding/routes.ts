@@ -56,6 +56,7 @@ onboarding.post('/owner', async (c) => {
     created_at: c.var.now().toISOString(),
   }
   await insertAccount(db, row)
+  c.set('accountKey', row.account_key)
   return c.json(ownerResponse(row), 201)
 })
 

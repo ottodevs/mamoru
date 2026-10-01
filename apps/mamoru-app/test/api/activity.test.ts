@@ -69,6 +69,22 @@ describe('account activity tracking', () => {
     expect(row?.last_at).toBe(now.toISOString())
   })
 
+  test('creating the account counts as activity that day', async () => {
+    const h = harness()
+    const { owner } = await onboard(h)
+    expect(activityRow(h, owner.accountKey)).toMatchObject({ day: '2026-09-26', hits: 1 })
+  })
+
+  test('the first call after UTC midnight writes the new day inside the throttle window', async () => {
+    let now = new Date('2026-09-26T23:59:40Z')
+    const h = harness(() => now)
+    const { cookie, owner } = await onboard(h)
+    now = new Date('2026-09-27T00:00:10Z')
+    await h.request('/api/session', { cookie })
+    const days = (h.db.raw.query('SELECT day FROM account_activity WHERE account_key = ? ORDER BY day').all(owner.accountKey) as { day: string }[]).map((r) => r.day)
+    expect(days).toEqual(['2026-09-26', '2026-09-27'])
+  })
+
   test('an activity write failure does not break the response', async () => {
     const h = harness()
     const { cookie, owner } = await onboard(h)

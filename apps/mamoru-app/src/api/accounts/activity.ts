@@ -2,8 +2,8 @@ import type { Context } from 'hono'
 import type { AppEnv } from '../context.ts'
 import type { Db } from '../env.ts'
 
-// Throttle per account so a chatty session does not write every request; worst case on a cold
-// isolate is one extra write, never a correctness problem since the upsert is idempotent.
+// Throttle per account and day so a chatty session does not write every request. The map lives in one
+// isolate: `hits` is an approximate count (several isolates each write once a minute); DAU only needs the row.
 const THROTTLE_MS = 60_000
 const lastSeen = new Map<string, number>()
 
@@ -17,7 +17,7 @@ async function upsertActivity(db: Db, accountKey: string, now: Date): Promise<vo
   await db
     .prepare(
       `INSERT INTO account_activity (account_key, day, hits, first_at, last_at) VALUES (?, ?, 1, ?, ?)
-       ON CONFLICT(account_key, day) DO UPDATE SET hits = hits + 1, last_at = excluded.last_at`,
+       ON CONFLICT(account_key, day) DO UPDATE SET hits = hits + 1, last_at = MAX(last_at, excluded.last_at), first_at = MIN(first_at, excluded.first_at)`,
     )
     .bind(accountKey, day, iso, iso)
     .run()
@@ -29,9 +29,12 @@ async function upsertActivity(db: Db, accountKey: string, now: Date): Promise<vo
  */
 export function recordActivity(c: Context<AppEnv>, accountKey: string): void {
   const now = c.var.now()
-  const last = lastSeen.get(accountKey)
+  // Keyed by day: the first request after UTC midnight always writes the new day's row.
+  const key = `${accountKey}:${utcDay(now)}`
+  const last = lastSeen.get(key)
   if (last !== undefined && now.getTime() - last < THROTTLE_MS) return
-  lastSeen.set(accountKey, now.getTime())
+  if (lastSeen.size > 5_000) lastSeen.clear()
+  lastSeen.set(key, now.getTime())
   const task = upsertActivity(c.env.DB, accountKey, now).catch((e) => {
     console.error('account_activity upsert failed', e instanceof Error ? e.message : String(e))
   })
