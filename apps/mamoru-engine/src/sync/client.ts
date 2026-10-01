@@ -1,12 +1,21 @@
-import { createPublicClient, http, type PublicClient, type Transport } from 'viem'
+import { createPublicClient, fallback, http, type PublicClient, type Transport } from 'viem'
 import { base } from 'viem/chains'
 import type { Env } from '../env.ts'
 
-/** Keyed RPC when the secret exists, public otherwise. JSON-RPC batching keeps subrequests low. */
-export function rpcTransport(env: Pick<Env, 'BASE_RPC_URL' | 'BASE_RPC_PUBLIC'>): { transport: Transport; keyed: boolean } {
+type FetchFn = typeof fetch
+
+const stateHttp = (url: string, fetchFn?: FetchFn) => http(url, { batch: { batchSize: 10, wait: 0 }, retryCount: 1, timeout: 15_000, ...(fetchFn ? { fetchFn } : {}) })
+
+/**
+ * Keyed RPC first when the secret exists, then the public one. A keyed provider that is out of quota or down
+ * answers every request with an error; without the public endpoint behind it the read model stops until someone
+ * changes the secret. Every read of a sync is pinned to one block, so answering from two providers stays consistent.
+ * JSON-RPC batching keeps subrequests low.
+ */
+export function rpcTransport(env: Pick<Env, 'BASE_RPC_URL' | 'BASE_RPC_PUBLIC'>, fetchFn?: FetchFn): { transport: Transport; keyed: boolean } {
   const keyed = Boolean(env.BASE_RPC_URL)
-  const url = env.BASE_RPC_URL || env.BASE_RPC_PUBLIC
-  return { transport: http(url, { batch: { batchSize: 10, wait: 0 }, retryCount: 1, timeout: 15_000 }), keyed }
+  const publicRpc = stateHttp(env.BASE_RPC_PUBLIC, fetchFn)
+  return { transport: env.BASE_RPC_URL ? fallback([stateHttp(env.BASE_RPC_URL, fetchFn), publicRpc], { rank: false }) : publicRpc, keyed }
 }
 
 /** Always the public RPC. */
