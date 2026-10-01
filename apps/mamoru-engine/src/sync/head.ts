@@ -1,7 +1,8 @@
 import { ReasonError, type Hex0x } from '@mamoru/domain'
 import type { PublicClient } from 'viem'
 
-export type BlockRef = { number: number; hash: Hex0x; timestamp: number }
+/** `baseFeePerGas` is null when the node omits it. */
+export type BlockRef = { number: number; hash: Hex0x; timestamp: number; baseFeePerGas: bigint | null }
 export type Head = { latest: BlockRef; safe: BlockRef }
 
 /** Latest and safe blocks with hashes. The safe block is `H`, the anchor of every read (plan §23.3). */
@@ -22,7 +23,7 @@ export async function readHead(client: PublicClient, chainId: number): Promise<H
     throw new ReasonError('OBS_BLOCK_INCONSISTENT', 'pending block')
   }
   return {
-    latest: { number: Number(latest.number), hash: latest.hash, timestamp: Number(latest.timestamp) },
-    safe: { number: Number(safe.number), hash: safe.hash, timestamp: Number(safe.timestamp) },
+    latest: { number: Number(latest.number), hash: latest.hash, timestamp: Number(latest.timestamp), baseFeePerGas: latest.baseFeePerGas ?? null },
+    safe: { number: Number(safe.number), hash: safe.hash, timestamp: Number(safe.timestamp), baseFeePerGas: safe.baseFeePerGas ?? null },
   }
 }

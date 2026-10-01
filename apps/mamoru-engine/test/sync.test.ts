@@ -260,3 +260,75 @@ describe('log sources', () => {
     expect(logs.find((l) => l.msg === 'sync.history_failed')).toMatchObject({ stage: 'logs', error: 'LogSourcesFailed', failures: [{ source: 'a', status: 503 }, { source: 'b', status: 503 }] })
   })
 })
+
+describe('pool history', () => {
+  type Row = {
+    pool_address: string; block: number; block_hash: string; block_time: number; sqrt_price_x96: string; tick: number; liquidity: string
+    fee_growth_global0_x128: string; fee_growth_global1_x128: string; tick_cumulative: string | null; fee_protocol: number; base_fee_wei: string | null
+  }
+  const rows = () => db.sqlite.query('SELECT * FROM pool_snapshots ORDER BY block, pool_address').all() as Row[]
+  const FG: [bigint, bigint] = [2n ** 200n + 7n, 2n ** 130n + 3n]
+
+  beforeEach(() => {
+    const p = chain.pools.get(POOL.toLowerCase())!
+    chain.pools.set(POOL.toLowerCase(), { ...p, feeGrowth: FG, feeProtocol: 68 })
+    chain.pools.set(WETH_POOL.toLowerCase(), { ...chain.pools.get(WETH_POOL.toLowerCase())!, feeGrowth: [1n, 2n], feeProtocol: 102 })
+    chain.baseFee = 5_000_000n
+  })
+
+  test('appends one row per readable registry pool at the safe block, in one eth_call', async () => {
+    const before = chain.calls.filter((m) => m === 'eth_call').length
+    const summary = await run()
+    expect(summary.snapshots).toBe(2)
+    const [a] = rows().filter((r) => r.pool_address === POOL)
+    expect(a).toMatchObject({
+      block: chain.safe, block_hash: chain.hashOf(chain.safe), block_time: chain.timeOf(chain.safe), sqrt_price_x96: CBBTC_SQRT.toString(), tick: -69315,
+      liquidity: '5000000', fee_growth_global0_x128: FG[0].toString(), fee_growth_global1_x128: FG[1].toString(), fee_protocol: 68, base_fee_wei: '5000000',
+    })
+    expect(a!.tick_cumulative).toBe((-69_300n * 1_000_000n - 69_310n * 1800n).toString())
+    // The WETH pool has no oracle answer in this fixture: the row is kept, the cumulative is null.
+    expect(rows().find((r) => r.pool_address === WETH_POOL)).toMatchObject({ tick_cumulative: null, fee_protocol: 102 })
+    // Registry pools the chain does not serve are left out, not written as zeros.
+    expect(rows()).toHaveLength(2)
+    const multicalls = logs.filter((l) => l.msg === 'sync.snapshots_failed')
+    expect(multicalls).toHaveLength(0)
+    expect(chain.calls.filter((m) => m === 'eth_call').length).toBeGreaterThan(before)
+  })
+
+  test('a second sync on the same safe block keeps the first row; a new safe block adds one', async () => {
+    await run()
+    chain.pools.set(POOL.toLowerCase(), { ...chain.pools.get(POOL.toLowerCase())!, tick: -69000 })
+    await run()
+    expect(rows().filter((r) => r.pool_address === POOL).map((r) => r.tick)).toEqual([-69315])
+    chain.safe += 60
+    chain.latest += 60
+    await run()
+    expect(rows().filter((r) => r.pool_address === POOL).map((r) => [r.block, r.tick])).toEqual([[chain.safe - 60, -69315], [chain.safe, -69000]])
+  })
+
+  test('a failed history read or a missing table never costs the read model', async () => {
+    chain.multicallDown = true
+    const s1 = await run()
+    expect(s1.rpc).toBe('ok')
+    expect(s1.snapshots).toBe(0)
+    expect(poolView().block).toBe(chain.safe)
+    expect(logs.find((l) => l.msg === 'sync.snapshots_partial')).toMatchObject({ read: 0 })
+
+    chain.multicallDown = false
+    logs.length = 0
+    db.sqlite.exec('DROP TABLE pool_snapshots')
+    chain.safe += 10
+    chain.latest += 10
+    const s2 = await run()
+    expect(s2.rpc).toBe('ok')
+    expect(s2.snapshots).toBe(0)
+    expect(poolView().block).toBe(chain.safe)
+    expect(logs.some((l) => l.msg === 'sync.snapshots_failed')).toBe(true)
+  })
+
+  test('a node that omits the base fee still gets its row', async () => {
+    chain.baseFee = null
+    await run()
+    expect(rows().find((r) => r.pool_address === POOL)).toMatchObject({ base_fee_wei: null })
+  })
+})

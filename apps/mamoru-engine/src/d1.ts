@@ -2,6 +2,7 @@ import type { PoolView } from '@mamoru/domain'
 import type { D1Like, D1Statement } from './env.ts'
 import type { PreviousIndexState } from './sync/multibaas-index.ts'
 import type { AccountRow, AccountState } from './sync/accounts.ts'
+import type { PoolSnapshot } from './sync/pool-snapshot.ts'
 import type { Anchor } from './sync/provenance.ts'
 
 export type SourceStateRow = {
@@ -52,6 +53,21 @@ export function upsertPoolState(db: D1Like, anchor: Anchor, source: 'chain_rpc' 
          observed_at = excluded.observed_at, source = excluded.source, payload_json = excluded.payload_json`,
     )
     .bind(anchor.chainId, view.pool.address, anchor.blockNumber, anchor.blockHash, anchor.observedAt, source, JSON.stringify(view))
+}
+
+/** Append-only: a second sync on the same safe block keeps the first row. */
+export function insertPoolSnapshot(db: D1Like, anchor: Anchor, blockTime: number, baseFeeWei: bigint | null, s: PoolSnapshot): D1Statement {
+  return db
+    .prepare(
+      `INSERT OR IGNORE INTO pool_snapshots (chain_id, pool_address, block, block_hash, block_time, sqrt_price_x96, tick, liquidity,
+         fee_growth_global0_x128, fee_growth_global1_x128, tick_cumulative, fee_protocol, base_fee_wei)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      anchor.chainId, s.pool, anchor.blockNumber, anchor.blockHash, blockTime, s.sqrtPriceX96.toString(), s.tick, s.liquidity.toString(),
+      s.feeGrowthGlobal0X128.toString(), s.feeGrowthGlobal1X128.toString(), s.tickCumulative === null ? null : s.tickCumulative.toString(), s.feeProtocol,
+      baseFeeWei === null ? null : baseFeeWei.toString(),
+    )
 }
 
 export function upsertAccountState(db: D1Like, anchor: Anchor, accountKey: string, s: AccountState): D1Statement {

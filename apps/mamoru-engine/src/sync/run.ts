@@ -3,7 +3,7 @@ import { conservadorV1, type PolicyVersion } from '@mamoru/policy'
 import type { MultiBaasClient } from '@mamoru/multibaas'
 import { baseRegistry, entry, readCodeHash, type Registry, type RegistryEntry } from '@mamoru/registry'
 import { getAddress, type Address, type PublicClient } from 'viem'
-import { listAccounts, markRpcUnavailable, previousIndexState, previousPoolView, upsertAccountState, upsertPoolState, upsertSourceState, type SourceStateRow } from '../d1.ts'
+import { insertPoolSnapshot, listAccounts, markRpcUnavailable, previousIndexState, previousPoolView, upsertAccountState, upsertPoolState, upsertSourceState, type SourceStateRow } from '../d1.ts'
 import type { D1Like, D1Statement } from '../env.ts'
 import { poolReadAbi } from './abis.ts'
 import { readAccountState } from './accounts.ts'
@@ -12,6 +12,7 @@ import { rpcFallback } from './history.ts'
 import type { LogSource } from './client.ts'
 import { errorInfo, readPoolEventsFrom } from './logs.ts'
 import { rateFromSqrtPrice, UNIT_RATE, type Rate } from './math.ts'
+import { readPoolSnapshots, snapshotPools } from './pool-snapshot.ts'
 import { readPoolState, type PoolState } from './pool-state.ts'
 import { MultiBaasPoolIndex } from './multibaas-index.ts'
 import { buildPoolView, displayedBlocks, type PoolHistory } from './pool-view.ts'
@@ -52,6 +53,8 @@ export type SyncSummary = {
   pools: { name: string; swaps: number | null; liquidity: number | null; identity: 'ok' | 'mismatch' }[]
   accounts: number
   logRequests: number
+  /** Rows offered to the pool history this sync; 0 when the read or the write failed. */
+  snapshots: number
 }
 
 type PoolPlan = { name: string; entry: RegistryEntry; t0: RegistryEntry; t1: RegistryEntry }
@@ -105,7 +108,7 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
     const code: ReasonCode = err instanceof ReasonError ? err.code : 'OBS_RPC_UNAVAILABLE'
     await markRpcUnavailable(db, chainId, observedAt, Boolean(deps.multibaas)).run()
     log({ msg: 'sync.rpc_unavailable', code })
-    return { rpc: 'unavailable', code, pools: [], accounts: 0, logRequests: 0 }
+    return { rpc: 'unavailable', code, pools: [], accounts: 0, logRequests: 0, snapshots: 0 }
   }
 
   const anchor: Anchor = { chainId, blockNumber: head.safe.number, blockHash: head.safe.hash, observedAt }
@@ -213,9 +216,22 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
   statements.push(upsertSourceState(db, { ...sourceRow(health), rpcStatus: 'ok', block: head.latest.number, safeBlock: head.safe.number }))
   await db.batch(statements)
 
-  const summary: SyncSummary = {
-    rpc: 'ok', block: head.latest.number, safeBlock: head.safe.number, index: health.status, pools: summaryPools, accounts: accountsRead, logRequests,
+  // Pool history for the Lab. Its own batch, after the read model: a failure here never costs the projection.
+  let snapshots = 0
+  try {
+    const pools = snapshotPools(registry)
+    const rows = await readPoolSnapshots(client, pools, anchor)
+    // viem reports a reverted aggregate as every call failed, not as a throw.
+    if (rows.length < pools.length) log({ msg: 'sync.snapshots_partial', read: rows.length, pools: pools.length })
+    if (rows.length > 0) await db.batch(rows.map((r) => insertPoolSnapshot(db, anchor, head.safe.timestamp, head.safe.baseFeePerGas, r)))
+    snapshots = rows.length
+  } catch (err) {
+    log({ msg: 'sync.snapshots_failed', ...errorInfo(err), ...(deps.debug ? { debug: String(err) } : {}) })
   }
-  log({ msg: 'sync.done', block: summary.block, safeBlock: summary.safeBlock, index: summary.index, pools: summaryPools, accounts: accountsRead, accountsTotal: accounts.length, logRequests, mbCalls: index?.calls ?? 0, mbOnlyRows: index?.mbOnly ?? 0 })
+
+  const summary: SyncSummary = {
+    rpc: 'ok', block: head.latest.number, safeBlock: head.safe.number, index: health.status, pools: summaryPools, accounts: accountsRead, logRequests, snapshots,
+  }
+  log({ msg: 'sync.done', block: summary.block, safeBlock: summary.safeBlock, index: summary.index, pools: summaryPools, accounts: accountsRead, accountsTotal: accounts.length, logRequests, snapshots, mbCalls: index?.calls ?? 0, mbOnlyRows: index?.mbOnly ?? 0 })
   return summary
 }
