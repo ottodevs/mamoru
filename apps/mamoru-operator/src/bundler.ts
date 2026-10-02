@@ -4,6 +4,7 @@ import type { UserOperation } from 'viem/account-abstraction'
 import { address, entryPointV07Abi } from '@mamoru/registry'
 import { handleOpsData, userOpHash } from '@mamoru/account/sessions'
 import { fromRpcUserOp, toRpcUserOp, type RpcUserOperation } from '@mamoru/erc4337'
+import { logErr } from './metrics.ts'
 import type { Relayer } from './relayer.ts'
 
 type Included = { op: UserOperation<'0.7'>; hash: Hex; receipt: TransactionReceipt; success: boolean; actualGasCost: bigint; actualGasUsed: bigint }
@@ -46,7 +47,7 @@ export function startLiveBundler(client: PublicClient, relayer: Relayer, chainId
       } catch (e) {
         const reason = entryPointReason(revertData(e)) ?? 'validation reverted'
         if (attempt >= 3) throw new RpcFailure(-32500, reason)
-        console.log(`[bundler] ${hash.slice(0, 10)} validation ${reason}, retry ${attempt + 1}`)
+        logErr(`[bundler] ${hash.slice(0, 10)} validation, retry ${attempt + 1}:`, reason)
         await Bun.sleep(2_500)
       }
     }
@@ -104,7 +105,7 @@ export function startLiveBundler(client: PublicClient, relayer: Relayer, chainId
       return { jsonrpc: '2.0', id: msg.id, result }
     } catch (e) {
       const f = e instanceof RpcFailure ? e : new RpcFailure(-32603, (e as Error).message.split('\n')[0] ?? 'error')
-      console.log(`[bundler] ${msg.method} refused: ${f.message}`)
+      logErr(`[bundler] ${msg.method} refused:`, f.message)
       return { jsonrpc: '2.0', id: msg.id, error: { code: f.code, message: f.message } }
     }
   }

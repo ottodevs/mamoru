@@ -2,6 +2,7 @@ import { createWalletClient, defineChain, http, type Chain, type Hex, type Publi
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import { Lock } from './lock.ts'
+import { logErr } from './metrics.ts'
 
 /** Per-tx gas cap on Base (EIP-7825). */
 const TX_GAS_CAP = 16_777_216n
@@ -38,7 +39,7 @@ export class Relayer {
         return await this.client.waitForTransactionReceipt({ hash, pollingInterval: 1_000, timeout: Math.max(1_000, deadline - Date.now()) })
       } catch (e) {
         if (Date.now() >= deadline) throw e
-        console.log(`[relayer] receipt ${hash.slice(0, 10)} poll failed (${(e as Error).message.split('\n')[0]}), retrying`)
+        logErr(`[relayer] receipt ${hash.slice(0, 10)} poll failed, retrying:`, e)
         await Bun.sleep(2_000)
       }
     }

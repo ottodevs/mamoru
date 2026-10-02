@@ -1,0 +1,210 @@
+import { afterEach, describe, expect, test } from 'bun:test'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { RpcMetrics } from '../src/metrics.ts'
+import { labelProviders, startRpcProxy } from '../src/rpc-proxy.ts'
+
+/** 40 lowercase-hex chars, the shape of a QuickNode endpoint token (and most other provider API keys). */
+const QUICKNODE_TOKEN = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2'
+
+const dirs: string[] = []
+function tmpDir(): string {
+  const d = mkdtempSync(join(tmpdir(), 'mamoru-rpc-proxy-'))
+  dirs.push(d)
+  return d
+}
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
+})
+
+describe('labelProviders', () => {
+  test('registrable domain only (not the full host) when every provider has a distinct one', () => {
+    const labels = labelProviders(['https://base-mainnet.g.alchemy.com/v2/key-a', 'https://base-rpc.publicnode.com'])
+    expect(labels.get('https://base-mainnet.g.alchemy.com/v2/key-a')).toBe('alchemy.com')
+    expect(labels.get('https://base-rpc.publicnode.com')).toBe('publicnode.com')
+  })
+
+  test('#1/#2 suffix when two providers share a registrable domain, never the path or key', () => {
+    const labels = labelProviders(['https://base-mainnet.g.alchemy.com/v2/key-a', 'https://eth-mainnet.g.alchemy.com/v2/key-b'])
+    expect(labels.get('https://base-mainnet.g.alchemy.com/v2/key-a')).toBe('alchemy.com#1')
+    expect(labels.get('https://eth-mainnet.g.alchemy.com/v2/key-b')).toBe('alchemy.com#2')
+  })
+
+  test('a multi-part public suffix (co.uk) keeps three labels, not two', () => {
+    const labels = labelProviders(['https://rpc.example.co.uk/v1/key'])
+    expect(labels.get('https://rpc.example.co.uk/v1/key')).toBe('example.co.uk')
+  })
+
+  test('an IPv4 upstream (the loopback proxy in tests) is never split into octets', () => {
+    const labels = labelProviders(['http://127.0.0.1:8080/'])
+    expect(labels.get('http://127.0.0.1:8080/')).toBe('127.0.0.1')
+  })
+
+  test('a QuickNode-style URL with a 40-char token as the first subdomain label never surfaces the token', () => {
+    const url = `https://${QUICKNODE_TOKEN}.base-mainnet.quiknode.pro/`
+    const labels = labelProviders([url])
+    const label = labels.get(url)!
+    expect(label).toBe('quiknode.pro')
+    expect(label).not.toContain(QUICKNODE_TOKEN)
+  })
+
+  test('a QuickNode-style provider never leaks its token into the /metrics payload or the persisted ring file', () => {
+    const url = `https://${QUICKNODE_TOKEN}.base-mainnet.quiknode.pro/`
+    const label = labelProviders([url]).get(url)!
+    const dir = tmpDir()
+    const metrics = new RpcMetrics(dir)
+    metrics.recordRequest(label, 'eth_call', false)
+    metrics.recordError(label, 'eth_call', 'rateCapacity')
+    metrics.persist()
+
+    const payloadText = JSON.stringify(metrics.snapshot())
+    expect(payloadText).not.toContain(QUICKNODE_TOKEN)
+    expect(payloadText).toContain('quiknode.pro')
+
+    const persisted = readFileSync(join(dir, 'rpc-usage.json'), 'utf8')
+    expect(persisted).not.toContain(QUICKNODE_TOKEN)
+    expect(persisted).toContain('quiknode.pro')
+  })
+})
+
+/** A fake single-provider upstream the proxy's loopback detection won't try to fall back from (providers.length === 1). */
+function fakeUpstream(handler: (body: any) => { status?: number; json: any }) {
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(req) {
+      const body = await req.json()
+      const { status, json } = handler(body)
+      return Response.json(json, { status: status ?? 200 })
+    },
+  })
+  return { url: `http://127.0.0.1:${server.port}/`, stop: () => server.stop(true) }
+}
+
+describe('startRpcProxy metrics wiring', () => {
+  test('a successful call counts one request against the provider+method, no error', async () => {
+    const upstream = fakeUpstream((body) => ({ json: { jsonrpc: '2.0', id: body.id, result: '0x1' } }))
+    const metrics = new RpcMetrics(tmpDir())
+    const proxy = startRpcProxy(upstream.url, { metrics })
+    try {
+      const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }) })
+      expect(((await res.json()) as { result: string }).result).toBe('0x1')
+    } finally {
+      proxy.stop()
+      upstream.stop()
+    }
+    const snap = metrics.snapshot()
+    const c = snap.cumulative['127.0.0.1']!.eth_chainId!
+    expect(c.requests).toBe(1)
+    expect(c.errors.invalidParams + c.errors.rateCapacity + c.errors.timeout + c.errors.other).toBe(0)
+  })
+
+  test('an invalid-params error is classified and counted, and returned to the caller unchanged', async () => {
+    const upstream = fakeUpstream((body) => ({ json: { jsonrpc: '2.0', id: body.id, error: { code: -32602, message: 'invalid params for eth_call' } } }))
+    const metrics = new RpcMetrics(tmpDir())
+    const proxy = startRpcProxy(upstream.url, { metrics })
+    try {
+      const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [] }) })
+      expect(((await res.json()) as { error: { code: number } }).error.code).toBe(-32602)
+    } finally {
+      proxy.stop()
+      upstream.stop()
+    }
+    const c = metrics.snapshot().cumulative['127.0.0.1']!.eth_call!
+    expect(c.errors.invalidParams).toBe(1)
+    expect(c.errors.rateCapacity).toBe(0)
+  })
+
+  test('eth_getLogs chunking increments getLogsChunks once per chunk, not once per logical call', async () => {
+    const calls: unknown[] = []
+    const upstream = fakeUpstream((body) => {
+      calls.push(body)
+      if (body.method === 'eth_blockNumber') return { json: { jsonrpc: '2.0', id: body.id, result: '0x14' } } // block 20, lag 3 -> head 17
+      if (body.method === 'eth_getLogs') return { json: { jsonrpc: '2.0', id: body.id, result: [] } }
+      return { json: { jsonrpc: '2.0', id: body.id, result: null } }
+    })
+    const metrics = new RpcMetrics(tmpDir())
+    const prevRange = process.env.MAMORU_LOG_RANGE
+    process.env.MAMORU_LOG_RANGE = '2' // force chunking regardless of host
+    const proxy = startRpcProxy(upstream.url, { metrics, maxLogRange: 2 })
+    try {
+      const res = await fetch(proxy.url, {
+        method: 'POST',
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ fromBlock: '0x0', toBlock: '0xa' }] }), // 11 blocks / 2 per chunk = 6 chunks
+      })
+      expect(((await res.json()) as { result: unknown[] }).result).toEqual([])
+    } finally {
+      proxy.stop()
+      upstream.stop()
+      if (prevRange === undefined) delete process.env.MAMORU_LOG_RANGE
+      else process.env.MAMORU_LOG_RANGE = prevRange
+    }
+    const c = metrics.snapshot().cumulative['127.0.0.1']!.eth_getLogs!
+    expect(c.getLogsChunks).toBe(6)
+    expect(c.requests).toBe(6)
+  })
+
+  test('a throwing metrics object never changes the proxy response (success path)', async () => {
+    const upstream = fakeUpstream((body) => ({ json: { jsonrpc: '2.0', id: body.id, result: '0x2a' } }))
+    const throwingMetrics = {
+      recordRequest: () => {
+        throw new Error('metrics backend is on fire')
+      },
+      recordError: () => {
+        throw new Error('metrics backend is on fire')
+      },
+      recordFallback: () => {
+        throw new Error('metrics backend is on fire')
+      },
+    } as unknown as RpcMetrics
+    const proxy = startRpcProxy(upstream.url, { metrics: throwingMetrics })
+    try {
+      const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }) })
+      expect(res.status).toBe(200)
+      expect(((await res.json()) as { result: string }).result).toBe('0x2a')
+    } finally {
+      proxy.stop()
+      upstream.stop()
+    }
+  })
+
+  test('a throwing metrics object never changes the proxy response (error path)', async () => {
+    const upstream = fakeUpstream((body) => ({ json: { jsonrpc: '2.0', id: body.id, error: { code: -32602, message: 'invalid params for eth_call' } } }))
+    const throwingMetrics = {
+      recordRequest: () => {
+        throw new Error('metrics backend is on fire')
+      },
+      recordError: () => {
+        throw new Error('metrics backend is on fire')
+      },
+      recordFallback: () => {
+        throw new Error('metrics backend is on fire')
+      },
+    } as unknown as RpcMetrics
+    const proxy = startRpcProxy(upstream.url, { metrics: throwingMetrics })
+    try {
+      const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [] }) })
+      expect(res.status).toBe(200)
+      expect(((await res.json()) as { error: { code: number } }).error.code).toBe(-32602)
+    } finally {
+      proxy.stop()
+      upstream.stop()
+    }
+  })
+
+  test('an odd method name (shaped like an Object.prototype member) never throws end to end', async () => {
+    const upstream = fakeUpstream((body) => ({ json: { jsonrpc: '2.0', id: body.id, result: 'ok' } }))
+    const metrics = new RpcMetrics(tmpDir())
+    const proxy = startRpcProxy(upstream.url, { metrics })
+    try {
+      const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'toString', params: [] }) })
+      expect(res.status).toBe(200)
+      expect(((await res.json()) as { result: string }).result).toBe('ok')
+    } finally {
+      proxy.stop()
+      upstream.stop()
+    }
+    expect(metrics.snapshot().cumulative['127.0.0.1']!.other!.requests).toBe(1)
+  })
+})

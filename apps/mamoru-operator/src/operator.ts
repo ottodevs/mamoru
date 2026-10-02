@@ -36,9 +36,14 @@ import { isTerminal } from '@mamoru/journal'
 import { USDC_POOLS, amountsForLiquidity, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
 import { Lock } from './lock.ts'
+import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type EngineHealthSnapshot } from './metrics.ts'
 import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
 import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
+
+/** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
+export type AccountsSummary = { known: number; active: number; armed: number }
+const RELAYER_BALANCE_CACHE_MS = 60_000
 
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
 /** An owner op whose receipt poll failed after the tx was sent: the tx may still have landed. */
@@ -74,6 +79,33 @@ const BUDGET_CODES = new Set(['OWNER_TX_FAILED', 'OWNER_TX_ERROR', 'DEPLOY_FAILE
 /** How often an unavailable simulation or eth_call is tried again before the fallback. */
 const SIM_TRIES = 3
 
+/**
+ * Every `HttpError` message is either a static string or built only from values this operator
+ * computed itself (an amount, an address, an asset name from a closed set, a call index) — never
+ * from a caught exception's own `.message`, which could carry upstream/provider-originated text (an
+ * RPC error, a URL). Audited: of every `new HttpError(...)` call site in this file, the ones that
+ * used to embed `(e as Error).message` or another RPC/simulation-derived value directly
+ * (account-context validation, a simulation RPC failure, owner-signature parsing, and the two
+ * owner-signature-check-unavailable sites) are built with `safeHttpError` below instead, which can
+ * only ever carry the fixed text for `code` — a call site cannot accidentally pass through a raw
+ * exception message for one of these codes, because there is nowhere to pass one. A code already
+ * covered by `safeHttpError` is never also thrown with `new HttpError` elsewhere with a different
+ * literal, so this fixed text is the one and only message that code ever carries. Every other code
+ * keeps its own distinct, equally safe, operator-authored text passed directly to `new HttpError`
+ * (e.g. `BAD_SIGNATURE` on a proven chain revert, or `DEPOSIT_OVER_CAP`, which is always built only
+ * from the live deposit amount and the constant cap, never from an exception, and must keep
+ * carrying those amounts for the SPA). The real exception, redacted, still goes to the journal via
+ * `logErr` at every one of the `safeHttpError` call sites.
+ */
+const SAFE_ERROR_MESSAGE = {
+  ACCOUNT_MISMATCH: 'accountKey is bound to another Safe',
+  SIMULATION_UNAVAILABLE: 'the operator could not simulate this transaction right now; try again shortly',
+  BAD_SIGNATURE: 'the signature could not be verified',
+  OPERATOR_ERROR: 'the operator hit an unexpected error handling this request',
+  OWNER_CHECK_UNAVAILABLE: 'the signature could not be checked right now; try again in a moment',
+  OWNER_FAILURE_BUDGET: `${MAX_OWNER_FAILURES_PER_DAY} activations of this account failed in 24 hours; withdrawals still work, starting again waits`,
+} as const
+
 export class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -82,6 +114,11 @@ export class HttpError extends Error {
   ) {
     super(message)
   }
+}
+
+/** An `HttpError` whose message can only ever be the fixed, closed-table text for `code` — see `SAFE_ERROR_MESSAGE` above. */
+export function safeHttpError(status: number, code: keyof typeof SAFE_ERROR_MESSAGE): HttpError {
+  return new HttpError(status, code, SAFE_ERROR_MESSAGE[code])
 }
 
 export type OperatorConfig = {
@@ -176,6 +213,8 @@ export class Operator {
   private retryMs = 3_000
   /** Times the off-chain signature check said no and the chain said yes, since this process started. Logged with each one. */
   mirrorMismatches = 0
+  private readonly engineHealth = new EngineHealthTracker()
+  private relayerBalanceCache: { at: number; value: bigint } | null = null
 
   constructor(
     readonly cfg: OperatorConfig,
@@ -183,6 +222,27 @@ export class Operator {
     readonly relayer: Relayer,
     private readonly store: StateStore,
   ) {}
+
+  /** GET /metrics: accounts known / active / armed. */
+  accountsSummary(): AccountsSummary {
+    const all = Object.values(this.store.state.accounts)
+    return { known: all.length, active: all.filter((a) => a.active).length, armed: all.filter((a) => !!a.armed).length }
+  }
+
+  /** GET /metrics: engine health of every account with a running loop, newest-first. */
+  engineHealthSnapshot(): EngineHealthSnapshot[] {
+    return [...this.runners.keys()].map((key) => this.engineHealth.snapshot(key))
+  }
+
+  /** GET /metrics: relayer ETH balance, cached 60s so a metrics poll never adds RPC load. */
+  async relayerBalance(): Promise<{ wei: string; cachedAgeMs: number }> {
+    const now = Date.now()
+    if (!this.relayerBalanceCache || now - this.relayerBalanceCache.at >= RELAYER_BALANCE_CACHE_MS) {
+      const value = await this.client.getBalance({ address: this.relayer.address })
+      this.relayerBalanceCache = { at: now, value }
+    }
+    return { wei: this.relayerBalanceCache.value.toString(), cachedAgeMs: now - this.relayerBalanceCache.at }
+  }
 
   /** Restarts the engine loop of every account that was active. */
   resume(): void {
@@ -216,7 +276,8 @@ export class Operator {
     try {
       live = liveAccountFromContext(ctx)
     } catch (e) {
-      throw new HttpError(400, 'ACCOUNT_MISMATCH', (e as Error).message)
+      logErr('[http] account context rejected:', e)
+      throw safeHttpError(400, 'ACCOUNT_MISMATCH')
     }
     let acc = this.store.state.accounts[ctx.accountKey]
     if (!acc) {
@@ -634,13 +695,17 @@ export class Operator {
         res = Object.assign(all.slice(1, -1), { before: before.returnData, after: after.returnData })
       } else res = all
     } catch (e) {
-      throw new HttpError(503, 'SIMULATION_UNAVAILABLE', (e as Error).message.split('\n')[0] ?? 'simulation unavailable')
+      logErr('[owner] simulation unavailable:', e)
+      throw safeHttpError(503, 'SIMULATION_UNAVAILABLE')
     }
     const bad = res.findIndex((x) => x.status !== 'success')
     if (bad >= 0) {
       const reason = res[bad]!.error ?? res[bad]!.returnData
-      console.log(`[owner] simulation: call ${bad} to ${calls[bad]!.to} (${calls[bad]!.data.slice(0, 10)}) reverts: ${reason}`)
-      throw new HttpError(409, 'SIMULATION_FAILED', `call ${bad + 1} of ${calls.length} (${calls[bad]!.data.slice(0, 10)} on ${calls[bad]!.to}) would revert: ${reason}`)
+      logErr(`[owner] simulation: call ${bad} to ${calls[bad]!.to} (${calls[bad]!.data.slice(0, 10)}) reverts:`, reason)
+      // The revert reason itself is chain-decoded data, not an operator-authored string (and could in
+      // principle carry something opaque from an unexpected contract): it goes to the journal above
+      // (redacted by logErr), never into the client-facing message.
+      throw new HttpError(409, 'SIMULATION_FAILED', `call ${bad + 1} of ${calls.length} (${calls[bad]!.data.slice(0, 10)} on ${calls[bad]!.to}) would revert`)
     }
     return res
   }
@@ -654,7 +719,7 @@ export class Operator {
       return await this.simulateFromSafe(safe, calls, block, probe)
     } catch (e) {
       if (probe || !(e instanceof HttpError) || e.code !== 'SIMULATION_UNAVAILABLE') throw e
-      console.error(`[owner] ${safe} prepare: simulation unavailable (${e.message}); prepared without it`)
+      logErr(`[owner] ${safe} prepare: simulation unavailable, prepared without it:`, e)
       return []
     }
   }
@@ -715,8 +780,8 @@ export class Operator {
       signature = browserOwnerSignature(body, p.safeTxHash)
     } catch (e) {
       // No Safe signature can be built from this body, so there is nothing to ask the chain about. The shape is kept for diagnosis.
-      console.error(`[owner] OWNER_SIG_UNPARSEABLE ${acc.accountKey} ${kind}: ${(e as Error).message} ${JSON.stringify(bodyShape(body))}`)
-      throw new HttpError(400, 'BAD_SIGNATURE', (e as Error).message)
+      logErr(`[owner] OWNER_SIG_UNPARSEABLE ${acc.accountKey} ${kind} ${JSON.stringify(bodyShape(body))}:`, e)
+      throw safeHttpError(400, 'BAD_SIGNATURE')
     }
     // The off-chain check mirrors the on-chain verifier and the chain is the ground truth: a "no" from the mirror is
     // never the reason to refuse an owner. When it says no, the exact sequence the relayer would send is simulated
@@ -725,8 +790,8 @@ export class Operator {
     if (!(await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn))) {
       const truth = await this.groundTruth(live, execData(p.tx, signature))
       if (truth.outcome === 'unavailable') {
-        console.error(`[owner] ${acc.accountKey} ${kind}: signature not verified off chain and no simulation available (${truth.why}); retryable`)
-        throw new HttpError(503, 'OWNER_CHECK_UNAVAILABLE', 'the signature could not be checked right now; try again in a moment')
+        logErr(`[owner] ${acc.accountKey} ${kind} signature not verified off chain and no simulation available, retryable:`, truth.why)
+        throw safeHttpError(503, 'OWNER_CHECK_UNAVAILABLE')
       }
       if (truth.outcome === 'revert') {
         this.prepared.delete(p.prepareId)
@@ -747,7 +812,7 @@ export class Operator {
     this.stash(acc, op, p)
     const run = this.lock(acc.accountKey).run(() => this.execute(acc, live, p, signature, op))
     run.catch((e) => {
-      console.error(`[owner] ${op.opId} ${(e as Error).message}`)
+      logErr(`[owner] ${op.opId}:`, e)
       // A refusal before anything was sent keeps its own code; anything else may have reached the chain.
       this.failOwner(acc, op, e instanceof HttpError ? e.code : 'OWNER_TX_ERROR')
     })
@@ -769,18 +834,16 @@ export class Operator {
     acc.ownerFailures = [...this.recentFailures(acc), now()]
     this.store.save()
     const all = Object.values(this.store.state.accounts).reduce((n, a) => n + this.recentFailures(a).length, 0)
-    if (all >= OWNER_FAILURES_ALERT_PER_DAY) console.error(`[alert] ${all} failed owner executions paid by the relayer in 24 hours, across all accounts`)
+    if (all >= OWNER_FAILURES_ALERT_PER_DAY) logErr('[alert]', `${all} failed owner executions paid by the relayer in 24 hours, across all accounts`)
   }
 
-  /** The reason this account may not start another activation today, or null. Exit paths never ask. */
-  private overBudget(acc: AccountState): string | null {
-    if (this.recentFailures(acc).length >= MAX_OWNER_FAILURES_PER_DAY) return `${MAX_OWNER_FAILURES_PER_DAY} activations of this account failed in 24 hours; withdrawals still work, starting again waits`
-    return null
+  /** Whether this account may not start another activation today. Exit paths never ask. */
+  private overBudget(acc: AccountState): boolean {
+    return this.recentFailures(acc).length >= MAX_OWNER_FAILURES_PER_DAY
   }
 
   private assertBudget(acc: AccountState): void {
-    const why = this.overBudget(acc)
-    if (why) throw new HttpError(429, 'OWNER_FAILURE_BUDGET', why)
+    if (this.overBudget(acc)) throw safeHttpError(429, 'OWNER_FAILURE_BUDGET')
   }
 
   private failOwner(acc: AccountState, op: OpView, code: string, detail: Partial<OpView> = {}): void {
@@ -814,12 +877,15 @@ export class Operator {
       if (!deployed && usdc < MIN_DEPLOY_USDC) return { code: 'BELOW_DEPLOY_MINIMUM' }
       let sim = await this.simulateOwner(live, deployed, data)
       if (sim.outcome === 'unavailable') {
-        console.error(`[owner] ${acc.accountKey} ${p.kind}: simulation unavailable (${sim.why})`)
+        logErr(`[owner] ${acc.accountKey} ${p.kind} simulation unavailable:`, sim.why)
         if (deployed) sim = await this.callOwner(live, data)
         if (sim.outcome === 'unavailable') {
           // Neither proof is in hand: not refused for good, not sent, not counted. The caller may try again.
-          if (!proven) throw new HttpError(503, 'OWNER_CHECK_UNAVAILABLE', `signature not verified off chain and no simulation available (${sim.why})`)
-          console.error(`[owner] ${acc.accountKey} ${p.kind}: proceeding on the verified signature${deployed ? '' : ' and the minimum balance (Safe not deployed)'}`)
+          if (!proven) {
+            logErr(`[owner] ${acc.accountKey} ${p.kind} signature not verified off chain and no simulation available:`, sim.why)
+            throw safeHttpError(503, 'OWNER_CHECK_UNAVAILABLE')
+          }
+          logErr(`[owner] ${acc.accountKey} ${p.kind}:`, `proceeding on the verified signature${deployed ? '' : ' and the minimum balance (Safe not deployed)'}`)
           return null
         }
       }
@@ -828,10 +894,10 @@ export class Operator {
         return null
       }
       if (attempt >= 2) {
-        console.error(`[owner] ${acc.accountKey} ${p.kind} would revert, nothing sent: ${sim.why}`)
+        logErr(`[owner] ${acc.accountKey} ${p.kind} would revert, nothing sent:`, sim.why)
         return { code: proven ? 'OWNER_TX_REVERTS' : 'BAD_SIGNATURE' }
       }
-      console.log(`[owner] ${acc.accountKey} ${p.kind} simulation reverts (${sim.why}), retry ${attempt + 1}`)
+      logErr(`[owner] ${acc.accountKey} ${p.kind} simulation reverts, retry ${attempt + 1}:`, sim.why)
       await Bun.sleep(this.retryMs)
     }
   }
@@ -847,10 +913,18 @@ export class Operator {
     }
   }
 
-  /** The mirror refused a signature the chain accepts. Loud on purpose: the mirror has a bug for this authenticator. */
+  /**
+   * The mirror refused a signature the chain accepts. Loud on purpose: the mirror has a bug for this authenticator.
+   * `shape` is already a closed, pre-vetted diagnostic shape (lengths, flags, a fixed set of key names — never a
+   * key, a signature or a challenge/origin value), so it is embedded verbatim rather than passed through
+   * `logErr`'s generic redaction: that path truncates at 160 chars and would otherwise cut the JSON off mid-object.
+   */
   private mirrorMismatch(acc: AccountState, kind: OwnerKind, shape: unknown): void {
     this.mirrorMismatches++
-    console.error(`[owner] OWNER_SIG_MIRROR_MISMATCH #${this.mirrorMismatches} ${acc.accountKey} ${kind}: off-chain check refused a signature the chain accepts; proceeding. shape ${JSON.stringify(shape)}`)
+    logErr(
+      `[owner] OWNER_SIG_MIRROR_MISMATCH #${this.mirrorMismatches} ${acc.accountKey} ${kind}: off-chain check refused a signature the chain accepts; proceeding. shape ${JSON.stringify(shape)}`,
+      undefined,
+    )
   }
 
   /** The relayer's own sequence in one eth_simulateV1 block: the factory call when the Safe has no code, then execTransaction. */
@@ -928,7 +1002,7 @@ export class Operator {
         if (usdc === 0n) continue
         await this.lock(acc.accountKey).run(() => this.fireArmed(acc, usdc))
       } catch (e) {
-        console.error(`[armed] ${acc.accountKey} ${(e as Error).message.split('\n')[0]}`)
+        logErr(`[armed] ${acc.accountKey}`, e)
       }
     }
     if (!this.armStopped) this.armTimer = setTimeout(() => this.watchArmed(), ARM_WATCH_MS)
@@ -939,7 +1013,7 @@ export class Operator {
     if (!a || acc.active) return this.disarm(acc, 'ALREADY_ACTIVE')
     if (this.overBudget(acc)) return this.disarm(acc, 'OWNER_FAILURE_BUDGET')
     if (usdc > LIVE_CAP_USDC) {
-      console.log(`[armed] ${acc.accountKey} deposit ${usdc} over cap ${LIVE_CAP_USDC}`)
+      logErr(`[armed] ${acc.accountKey} deposit over cap:`, { usdc: usdc.toString(), cap: LIVE_CAP_USDC.toString() })
       // On the op the SPA reads, with the amounts: the owner withdraws the excess, then approves Start again.
       return this.disarm(acc, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() })
     }
@@ -961,7 +1035,7 @@ export class Operator {
     } catch (e) {
       // Transient RPC/relay failures keep the signed activation armed; the watcher retries it on the next pass.
       const tries = (a.tries ?? 0) + 1
-      console.error(`[armed] ${op.opId} attempt ${tries}: ${(e as Error).message.split('\n')[0]}`)
+      logErr(`[armed] ${op.opId} attempt ${tries}:`, e)
       if (tries < ARM_MAX_TRIES && !acc.active) {
         acc.armed = { ...a, tries }
         this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
@@ -1039,13 +1113,13 @@ export class Operator {
         if (attempt >= 2) {
           if (!isRevert(e)) {
             // The provider could not answer; that is not a revert. The signature is proven, so the transaction goes out.
-            console.error(`[owner] ${op.opId} eth_call unavailable (${why}); sending on the verified signature`)
+            logErr(`[owner] ${op.opId} eth_call unavailable, sending on the verified signature:`, why)
             break
           }
-          console.error(`[owner] ${op.opId} simulation reverts: ${why}`)
+          logErr(`[owner] ${op.opId} simulation reverts:`, why)
           return this.failOwner(acc, op, 'OWNER_TX_REVERTS')
         }
-        console.log(`[owner] ${op.opId} simulation reverts (${why}), retry ${attempt + 1}`)
+        logErr(`[owner] ${op.opId} simulation reverts, retry ${attempt + 1}:`, why)
         await Bun.sleep(this.retryMs)
       }
     }
@@ -1056,7 +1130,7 @@ export class Operator {
       // outside this check altogether (otto/mamoru#71).
       const usdc = await this.usdcOf(safe)
       if (usdc > LIVE_CAP_USDC) {
-        console.log(`[owner] ${op.opId} deposit ${usdc} over cap ${LIVE_CAP_USDC} at send time, not activating`)
+        logErr(`[owner] ${op.opId} deposit over cap at send time, not activating:`, { usdc: usdc.toString(), cap: LIVE_CAP_USDC.toString() })
         return this.failOwner(acc, op, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() })
       }
     }
@@ -1106,7 +1180,7 @@ export class Operator {
     this.reconciled.set(acc.accountKey, Date.now())
     this.lock(acc.accountKey)
       .run(() => this.reconcileOwner(acc))
-      .catch((e) => console.error(`[reconcile] ${acc.accountKey} ${(e as Error).message.split('\n')[0]}`))
+      .catch((e) => logErr(`[reconcile] ${acc.accountKey}`, e))
   }
 
   /** Reads every owner op marked failed with an unknown receipt; a tx that executed becomes confirmed with its side effects. */
@@ -1158,7 +1232,7 @@ export class Operator {
       try {
         return await this.client.getTransactionReceipt({ hash })
       } catch (e) {
-        console.log(`[reconcile] receipt ${hash.slice(0, 10)} (${(e as Error).message.split('\n')[0]}), retry ${attempt + 1}`)
+        logErr(`[reconcile] receipt ${hash.slice(0, 10)}, retry ${attempt + 1}:`, e)
         await Bun.sleep(1_500)
       }
     }
@@ -1273,15 +1347,23 @@ export class Operator {
           }
           const r = await engine.review()
           this.revokeManage(engine)
-          if (r.kind === 'observation-failed') console.log(`[engine ${acc.accountKey}] observation failed ${r.code} ${r.detail ?? ''}`)
-          else {
+          if (r.kind === 'observation-failed') {
+            logErr(`[engine ${acc.accountKey}] observation failed ${r.code}:`, r.detail)
+            safeMetrics(() => this.engineHealth.record(acc.accountKey, false, r.code, classifyEngineError(r.code, r.detail)))
+          } else {
             const d = r.record.decision
             const o = r.op ? engine.journal.op(r.op.opId) : null
             const last = o ? engine.journal.transitions.filter((t) => t.opId === o.opId).at(-1) : null
-            console.log(`[engine ${acc.accountKey}] block ${d.observationRef.block} ${d.kind} ${d.reason}${o ? ` -> ${o.opId} ${o.state} ${o.stateCode}${last?.detail ? ` (${last.detail})` : ''}` : ''}`)
+            // `last.detail` is free text (unlike d.reason/o.state/o.stateCode, all closed enums): redact it.
+            const prefix = `[engine ${acc.accountKey}] block ${d.observationRef.block} ${d.kind} ${d.reason}${o ? ` -> ${o.opId} ${o.state} ${o.stateCode}` : ''}`
+            if (last?.detail) logErr(prefix, last.detail)
+            else console.log(prefix)
+            safeMetrics(() => this.engineHealth.record(acc.accountKey, true, d.code, undefined))
           }
         } catch (e) {
-          console.error(`[engine ${acc.accountKey}] review error: ${(e as Error).message.split('\n')[0]}`)
+          logErr(`[engine ${acc.accountKey}] review error:`, e)
+          const detail = e instanceof Error ? e.message.split('\n')[0] : String(e)
+          safeMetrics(() => this.engineHealth.record(acc.accountKey, false, 'REVIEW_ERROR', classifyEngineError('REVIEW_ERROR', detail)))
         }
         // Persist how far deposits were read, so a restart or a failed review does not rescan from activation.
         if (runner.engine.depositsAfter - BigInt(acc.depositsAfter) >= DEPOSITS_SAVE_BLOCKS) {
