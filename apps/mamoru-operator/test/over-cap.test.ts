@@ -596,3 +596,52 @@ describe('withdrawing with an armed activation', () => {
   })
 })
 
+
+// otto/mamoru#85: the watcher cost one eth_call per armed account per tick; it is one request for all of them.
+describe('the armed watcher reads every armed Safe in one request', () => {
+  type Reads = { call(a: { to: string; data: Hex }): Promise<unknown>; readContract(a: { address: string; functionName: string }): Promise<unknown> }
+  const pass = (op: Operator) => (op as unknown as { checkArmed(): Promise<void> }).checkArmed()
+  /** Counts the Multicall3 requests and the single balance reads the operator makes from here on. */
+  const count = (op: Operator) => {
+    const client = (op as unknown as { client: Reads }).client
+    const seen = { multicall: 0, balanceOf: 0 }
+    const { call, readContract } = client
+    client.call = (a) => (a.to.toLowerCase() === address('Multicall3').toLowerCase() && seen.multicall++, call(a))
+    client.readContract = (a) => (a.functionName === 'balanceOf' && seen.balanceOf++, readContract(a))
+    return seen
+  }
+
+  test('three armed accounts with nothing deposited: one Multicall3 request, no single read, nothing sent', async () => {
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    expect((await w.op.submit(ctx, 'activate', sign(tx))).code).toBe('ARMED')
+    const acc = w.state.accounts.k!
+    for (const [key, safe] of [['k2', TO], ['k3', RELAYER]] as const) w.state.accounts[key] = { ...acc, accountKey: key, ctx: { ...acc.ctx, accountKey: key, address: safe } }
+    const seen = count(w.op)
+    await pass(w.op)
+    expect(seen).toEqual({ multicall: 1, balanceOf: 0 })
+    expect(w.sent).toHaveLength(0)
+    expect(Object.values(w.state.accounts).every((a) => a.armed)).toBe(true)
+  })
+
+  test('no armed account: no request at all', async () => {
+    const w = world(0n)
+    const seen = count(w.op)
+    await pass(w.op)
+    expect(seen).toEqual({ multicall: 0, balanceOf: 0 })
+  })
+
+  test('a deposit is seen by the batch, read again on its own and executed', async () => {
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    const armed = await w.op.submit(ctx, 'activate', sign(tx))
+    w.chain.usdc = 10_000_000n
+    const seen = count(w.op)
+    await pass(w.op)
+    expect(seen.balanceOf).toBeGreaterThanOrEqual(1)
+    expect(w.state.accounts.k!.armed).toBeUndefined()
+    expect(w.sent.length).toBeGreaterThan(0)
+    // Sent by the relayer: the op left the armed state.
+    expect(w.op.ops(ctx, null).ops.find((o) => o.opId === armed.opId)?.code).toBeUndefined()
+  })
+})

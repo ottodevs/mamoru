@@ -4,7 +4,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
-import { poolStateCache, simulateCalls, type SimCallResult } from '@mamoru/rpc'
+import { Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, type SimCallResult } from '@mamoru/rpc'
 import { POLICIES, computeCaps, grantKey, hasManageAny, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
@@ -61,8 +61,8 @@ const TOP_UP_MARGIN_WEI = 200_000_000_000_000n
 const DEPOSITS_SAVE_BLOCKS = 300n
 /** How long a POST waits for the owner transaction before answering with the op as it stands; the SPA polls /ops. */
 const POST_WAIT_MS = 15_000
-/** How often the armed-activation watcher reads the USDC balance of each armed Safe. */
-const ARM_WATCH_MS = 6_000
+/** How often the armed-activation watcher reads the USDC balances of the armed Safes (one request for all of them). */
+const ARM_WATCH_MS = 15_000
 /** The relayer does not pay to deploy a Safe that holds less than this (1 USDC). */
 export const MIN_DEPLOY_USDC = 1_000_000n
 /**
@@ -994,12 +994,32 @@ export class Operator {
     this.patchOp(acc, a.opId, { state: 'failed', code, ...detail })
   }
 
-  /** One USDC balance read per armed account every ARM_WATCH_MS; executes the armed activation once 0 < USDC <= cap. */
+  /** Every ARM_WATCH_MS: one pass over the armed accounts. */
   private async watchArmed(): Promise<void> {
     if (this.armStopped) return
-    for (const acc of Object.values(this.store.state.accounts)) {
+    await this.checkArmed()
+    if (!this.armStopped) this.armTimer = setTimeout(() => this.watchArmed(), ARM_WATCH_MS)
+  }
+
+  /**
+   * The USDC balance of every armed Safe in one Multicall3 request, whatever their number; executes the armed
+   * activation once 0 < USDC <= cap. The batch only says who received something: the amount acted on is read
+   * again, on its own, right before executing.
+   */
+  private async checkArmed(): Promise<void> {
+    const armed = Object.values(this.store.state.accounts).filter((a) => a.armed)
+    if (armed.length === 0) return
+    const batch = new Batch(this.client, MULTICALL3)
+    const balances = armed.map((acc) => batch.add(contractRead(this.client, { address: address('USDC'), abi: erc20Abi, functionName: 'balanceOf', args: [acc.ctx.address as Address] })))
+    try {
+      await batch.run()
+    } catch (e) {
+      return logErr('[armed] balances', e)
+    }
+    for (const [i, acc] of armed.entries()) {
       if (!acc.armed || this.armStopped) continue
       try {
+        if ((await balances[i]!.need()) === 0n) continue
         const usdc = await this.usdcOf(acc.ctx.address as Address)
         if (usdc === 0n) continue
         await this.lock(acc.accountKey).run(() => this.fireArmed(acc, usdc))
@@ -1007,7 +1027,6 @@ export class Operator {
         logErr(`[armed] ${acc.accountKey}`, e)
       }
     }
-    if (!this.armStopped) this.armTimer = setTimeout(() => this.watchArmed(), ARM_WATCH_MS)
   }
 
   private async fireArmed(acc: AccountState, usdc: bigint): Promise<void> {
