@@ -328,7 +328,9 @@ describe('pool history', () => {
     expect(s1.rpc).toBe('ok')
     expect(s1.snapshots).toBe(0)
     expect(poolView().block).toBe(chain.safe)
-    expect(logs.find((l) => l.msg === 'sync.snapshots_partial')).toMatchObject({ read: 0 })
+    // The aggregate failed twice: the second try names the cause instead of reporting six silent failures.
+    expect(logs.find((l) => l.msg === 'sync.snapshots_failed')).toMatchObject({ stage: 'read' })
+    expect(chain.multicalls).toHaveLength(2)
 
     chain.multicallDown = false
     logs.length = 0
@@ -339,12 +341,37 @@ describe('pool history', () => {
     expect(s2.rpc).toBe('ok')
     expect(s2.snapshots).toBe(0)
     expect(poolView().block).toBe(chain.safe)
-    expect(logs.some((l) => l.msg === 'sync.snapshots_failed')).toBe(true)
+    expect(logs.find((l) => l.msg === 'sync.snapshots_failed')).toMatchObject({ stage: 'write' })
+  })
+
+  test('the history is the first read after the head, before the log reads', async () => {
+    chain.calls.length = 0
+    await run()
+    const firstCall = chain.calls.indexOf('eth_call')
+    const firstLogs = chain.calls.indexOf('eth_getLogs')
+    expect(chain.multicalls).toEqual([chain.safe])
+    expect(firstCall).toBeGreaterThan(-1)
+    expect(firstCall).toBeLessThan(firstLogs)
   })
 
   test('a node that omits the base fee still gets its row', async () => {
     chain.baseFee = null
     await run()
     expect(rows().find((r) => r.pool_address === POOL)).toMatchObject({ base_fee_wei: null })
+  })
+})
+
+describe('anchor consistency', () => {
+  test('a different hash for the anchor block at the end of the sync writes nothing', async () => {
+    await run()
+    const before = poolView().block
+    chain.safe += 20
+    chain.latest += 20
+    chain.forkAt = chain.safe
+    const s = await run()
+    expect(s).toMatchObject({ rpc: 'unavailable', code: 'OBS_BLOCK_INCONSISTENT' })
+    expect(poolView().block).toBe(before)
+    expect(db.sqlite.query('SELECT rpc_status FROM source_state').get()).toEqual({ rpc_status: 'unavailable' })
+    expect(logs.some((l) => l.msg === 'sync.block_inconsistent')).toBe(true)
   })
 })

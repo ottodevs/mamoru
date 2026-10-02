@@ -126,6 +126,13 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
     : null
   if (index) await index.begin(anchor)
 
+  // Pool history for the Lab, read first: one request, before the log reads use up a throttled endpoint's allowance.
+  const historyPools = snapshotPools(registry)
+  const history = await readPoolSnapshots(client, historyPools, anchor).catch((err) => {
+    log({ msg: 'sync.snapshots_failed', stage: 'read', ...errorInfo(err), ...(deps.debug ? { debug: String(err) } : {}) })
+    return []
+  })
+
   const planPools = [...new Set(policy.buckets.flatMap((b) => b.pools))].map((n) => planOf(n, registry))
   const valuationPools = VALUATION_POOLS.map((n) => planOf(n, registry))
 
@@ -220,27 +227,32 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
     }
   }
 
+  // The anchor is the same block for whoever answered last: a provider switch or a reorg in the middle writes nothing.
+  const again = await client.getBlock({ blockNumber: H }).catch(() => null)
+  if (!again || again.hash !== anchor.blockHash) {
+    await markRpcUnavailable(db, chainId, observedAt, Boolean(deps.multibaas)).run()
+    log({ msg: 'sync.block_inconsistent', block: anchor.blockNumber, code: 'OBS_BLOCK_INCONSISTENT' })
+    return { rpc: 'unavailable', code: 'OBS_BLOCK_INCONSISTENT', pools: [], accounts: 0, logRequests, snapshots: 0 }
+  }
+
   const health = index ? index.health() : notConfigured
   statements.push(upsertSourceState(db, { ...sourceRow(health), rpcStatus: 'ok', block: head.latest.number, safeBlock: head.safe.number }))
   await db.batch(statements)
 
-  // Pool history for the Lab. Its own batch, after the read model: a failure here never costs the projection.
+  // Its own batch, after the read model: a failure here never costs the projection.
   let snapshots = 0
   try {
-    const pools = snapshotPools(registry)
-    const rows = await readPoolSnapshots(client, pools, anchor)
-    // viem reports a reverted aggregate as every call failed, not as a throw.
-    if (rows.length < pools.length) log({ msg: 'sync.snapshots_partial', read: rows.length, pools: pools.length })
+    if (history.length < historyPools.length) log({ msg: 'sync.snapshots_partial', read: history.length, pools: historyPools.length })
     const floor = anchor.blockNumber - (deps.snapshotRetentionBlocks ?? SNAPSHOT_RETENTION_BLOCKS)
-    if (rows.length > 0) {
+    if (history.length > 0) {
       await db.batch([
-        ...rows.map((r) => insertPoolSnapshot(db, anchor, head.safe.timestamp, head.safe.baseFeePerGas, r)),
-        ...rows.map((r) => prunePoolSnapshots(db, chainId, r.pool, floor)),
+        ...history.map((r) => insertPoolSnapshot(db, anchor, head.safe.timestamp, head.safe.baseFeePerGas, r)),
+        ...history.map((r) => prunePoolSnapshots(db, chainId, r.pool, floor)),
       ])
     }
-    snapshots = rows.length
+    snapshots = history.length
   } catch (err) {
-    log({ msg: 'sync.snapshots_failed', ...errorInfo(err), ...(deps.debug ? { debug: String(err) } : {}) })
+    log({ msg: 'sync.snapshots_failed', stage: 'write', ...errorInfo(err), ...(deps.debug ? { debug: String(err) } : {}) })
   }
 
   const summary: SyncSummary = {

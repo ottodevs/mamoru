@@ -30,6 +30,8 @@ export class FakeChain {
   baseFee: bigint | null = 0n
   /** Multicall3 reverts as a whole. */
   multicallDown = false
+  /** Block number whose hash differs when it is read by number. */
+  forkAt: number | null = null
   /** Block parameter of every Multicall3 request, in order. */
   multicalls: number[] = []
 
@@ -130,8 +132,11 @@ export class FakeChain {
         return numberToHex(this.chainId)
       case 'eth_blockNumber':
         return numberToHex(this.latest)
-      case 'eth_getBlockByNumber':
-        return this.block(this.blockParam(ps[0]))
+      case 'eth_getBlockByNumber': {
+        const b = this.block(this.blockParam(ps[0]))
+        // A numbered read after the head read can be made to answer another hash: a reorg, or a second provider on a fork.
+        return this.forkAt !== null && typeof ps[0] === 'string' && ps[0].startsWith('0x') && Number(ps[0]) === this.forkAt ? { ...b, hash: keccak256(toHex(`fork-${this.forkAt}`)) } : b
+      }
       case 'eth_getCode':
         return this.code.get((ps[0] as string).toLowerCase()) ?? '0x'
       case 'eth_getBalance':

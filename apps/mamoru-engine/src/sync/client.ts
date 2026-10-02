@@ -1,21 +1,55 @@
-import { createPublicClient, fallback, http, type PublicClient, type Transport } from 'viem'
+import { createPublicClient, createTransport, http, type PublicClient, type Transport } from 'viem'
 import { base } from 'viem/chains'
 import type { Env } from '../env.ts'
 
 type FetchFn = typeof fetch
 
-const stateHttp = (url: string, fetchFn?: FetchFn) => http(url, { batch: { batchSize: 10, wait: 0 }, retryCount: 1, timeout: 15_000, ...(fetchFn ? { fetchFn } : {}) })
+const stateHttp = (url: string, retryCount: number, fetchFn?: FetchFn) => http(url, { batch: { batchSize: 10, wait: 0 }, retryCount, timeout: 15_000, ...(fetchFn ? { fetchFn } : {}) })
+
+/** A node answer about the call itself (a revert, a rejected transaction): asking another provider would say the same. */
+function isCallError(err: unknown): boolean {
+  for (let e = err as { code?: unknown; message?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++) {
+    if (typeof e.message === 'string' && /execution reverted/i.test(e.message)) return true
+    if (e.code === 3 || e.code === -32003 || e.code === 4001 || e.code === 5000) return true
+  }
+  return false
+}
 
 /**
- * Keyed RPC first when the secret exists, then the public one. A keyed provider that is out of quota or down
- * answers every request with an error; without the public endpoint behind it the read model stops until someone
- * changes the secret. Every read of a sync is pinned to one block, so answering from two providers stays consistent.
- * JSON-RPC batching keeps subrequests low.
+ * `first` until it fails once, then `second` for the rest of this transport's life. The engine builds one transport
+ * per sync, so a provider that is out of quota costs one failed request per sync, not one per read, and every read
+ * after the failure comes from the same provider.
+ */
+export function stickyFallback(first: Transport, second: Transport): Transport {
+  return (opts) => {
+    const a = first({ ...opts, retryCount: 0 })
+    const b = second(opts)
+    let failed = false
+    const request = (async (args: Parameters<typeof a.request>[0]) => {
+      if (!failed) {
+        try {
+          return await a.request(args)
+        } catch (err) {
+          if (isCallError(err)) throw err
+          failed = true
+        }
+      }
+      return b.request(args)
+    }) as typeof a.request
+    return createTransport({ key: 'stickyFallback', name: 'Sticky fallback', type: 'fallback', retryCount: 0, request })
+  }
+}
+
+/**
+ * Keyed RPC first when the secret exists, with the public endpoint behind it. A keyed provider that is out of quota
+ * or down answers every request with an error; without the public endpoint the read model stops until someone
+ * changes the secret. The sync checks the hash of its anchor block again before it writes, so a sync that changed
+ * provider halfway never records one provider's reads under the other's block. JSON-RPC batching keeps subrequests low.
  */
 export function rpcTransport(env: Pick<Env, 'BASE_RPC_URL' | 'BASE_RPC_PUBLIC'>, fetchFn?: FetchFn): { transport: Transport; keyed: boolean } {
   const keyed = Boolean(env.BASE_RPC_URL)
-  const publicRpc = stateHttp(env.BASE_RPC_PUBLIC, fetchFn)
-  return { transport: env.BASE_RPC_URL ? fallback([stateHttp(env.BASE_RPC_URL, fetchFn), publicRpc], { rank: false }) : publicRpc, keyed }
+  const publicRpc = stateHttp(env.BASE_RPC_PUBLIC, 1, fetchFn)
+  return { transport: env.BASE_RPC_URL ? stickyFallback(stateHttp(env.BASE_RPC_URL, 0, fetchFn), publicRpc) : publicRpc, keyed }
 }
 
 /** Always the public RPC. */

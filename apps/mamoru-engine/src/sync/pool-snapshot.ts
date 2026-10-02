@@ -36,7 +36,11 @@ export async function readPoolSnapshots(client: PublicClient, pools: readonly Ad
     ...READS.map((functionName) => ({ address, abi: poolSnapshotAbi, functionName }) as const),
     { address, abi: poolSnapshotAbi, functionName: 'observe', args: [[0]] } as const,
   ])
-  const results = await client.multicall({ contracts, blockNumber: BigInt(anchor.blockNumber), allowFailure: true, batchSize: MULTICALL_BATCH_BYTES })
+  type Read = { status: 'success'; result: unknown } | { status: 'failure' }
+  const at = { contracts, blockNumber: BigInt(anchor.blockNumber), batchSize: MULTICALL_BATCH_BYTES } as const
+  let results = (await client.multicall({ ...at, allowFailure: true })) as Read[]
+  // viem reports a failed request as every call failed. One more try, this time letting the cause out so the sync can log it.
+  if (results.every((r) => r.status === 'failure')) results = ((await client.multicall({ ...at, allowFailure: false })) as unknown[]).map((result) => ({ status: 'success', result }))
   const per = READS.length + 1
   const out: PoolSnapshot[] = []
   pools.forEach((pool, i) => {
