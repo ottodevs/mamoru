@@ -30,8 +30,11 @@ export type Allocation = {
   buckets: BucketValue[]
   proposal: Proposal | null
   trail: GateStep[]
-  /** Pools whose idle volatile token this allocation has a use for: a mint that can go, or the swap that makes it possible. */
-  pendingMint: string[]
+  /**
+   * Pools whose idle volatile token this allocation has a use for, with the grant its next step needs: the mint that
+   * can go, or the swap that makes it possible. The token is held back for it only while that grant has a live session.
+   */
+  pendingMint: { pool: string; grant: string }[]
 }
 
 /** The pool priced at its TWAP tick (slot0 when the TWAP is unavailable; the EHG then refuses to act on it). */
@@ -115,7 +118,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     })
 
   let proposal: Proposal | null = null
-  const pendingMint: string[] = []
+  const pendingMint: Allocation['pendingMint'] = []
   for (const { r, i, gap } of order) {
     // After the first proposal the loop only finds which other buckets have a use for their idle volatile; their codes stay.
     const row = proposal ? null : buckets[i]!
@@ -138,10 +141,11 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
         continue
       }
       // What it already holds of the volatile token is part of that mint: it is not idle capital to sell meanwhile.
-      if (r.idleVolatile > 0n) pendingMint.push(pool.name)
+      const buyGrant = grantKeyFor(policy, 'enter-swap', pool.name) as `enter-swap:${string}`
+      if (r.idleVolatile > 0n) pendingMint.push({ pool: pool.name, grant: buyGrant })
       if (row) {
         row.code = 'STRATEGY_PREFERENCE_DEVIATION'
-        proposal = { kind: 'enter_swap', grant: grantKeyFor(policy, 'enter-swap', pool.name) as `enter-swap:${string}`, pool: pool.name, tokenIn: savings, tokenOut: volatile, fee: pool.fee, amountIn }
+        proposal = { kind: 'enter_swap', grant: buyGrant, pool: pool.name, tokenIn: savings, tokenOut: volatile, fee: pool.fee, amountIn }
       }
       continue
     }
@@ -152,31 +156,35 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
         continue
       }
       // The rest of the idle token is the volatile side of the mint that follows.
-      pendingMint.push(pool.name)
+      const sellGrant = grantKeyFor(policy, 'convert-any', pool.name) as `convert-any:${string}`
+      pendingMint.push({ pool: pool.name, grant: sellGrant })
       if (row) {
         row.code = 'STRATEGY_PREFERENCE_DEVIATION'
-        proposal = { kind: 'enter_swap', grant: grantKeyFor(policy, 'convert-any', pool.name) as `convert-any:${string}`, pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn: (r.idleVolatile * excess) / volatileValue }
+        proposal = { kind: 'enter_swap', grant: sellGrant, pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn: (r.idleVolatile * excess) / volatileValue }
       }
       continue
     }
     const savingsIn = wantSavings < free ? wantSavings : free
     // No more of the idle token than the mint needs: the session cap counts what is asked for, not what the pool takes.
     // What is over stays idle and is converted once the bucket is full.
-    const volatileIn = volatileValue > wantVolatile ? (r.idleVolatile * wantVolatile) / volatileValue : r.idleVolatile
-    const volatileInValue = volatileValue < wantVolatile ? volatileValue : wantVolatile
+    // With savings short of the split, the volatile side shrinks with them.
+    const pairValue = wantSavings > 0n ? (wantVolatile * savingsIn) / wantSavings : wantVolatile
+    const volatileIn = volatileValue > pairValue ? (r.idleVolatile * pairValue) / volatileValue : r.idleVolatile
+    const volatileInValue = volatileValue < pairValue ? volatileValue : pairValue
     // A mint smaller than the minimum entry is dust left by an earlier mint: its minimums round to zero and it cannot be built.
     if (savingsIn <= 0n || volatileIn === 0n || savingsIn + volatileInValue < minEntry) {
       if (row) row.code = 'DECIDE_NO_CAPITAL'
       continue
     }
-    pendingMint.push(pool.name)
+    const mintGrant = grantKeyFor(policy, 'enter-mint', pool.name) as `enter-mint:${string}`
+    pendingMint.push({ pool: pool.name, grant: mintGrant })
     if (!row) continue
     row.code = 'STRATEGY_PREFERENCE_DEVIATION'
     const range = rangeAround(pool.tick, widthOf(policy, pool.name), pool.tickSpacing)
     const savingsIs0 = pool.token0 === savings
     proposal = {
       kind: 'enter_mint',
-      grant: grantKeyFor(policy, 'enter-mint', pool.name) as `enter-mint:${string}`,
+      grant: mintGrant,
       pool: pool.name,
       ...range,
       amount0Desired: savingsIs0 ? savingsIn : volatileIn,

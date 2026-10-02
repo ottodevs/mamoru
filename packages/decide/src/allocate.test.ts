@@ -230,9 +230,20 @@ describe('allocate (conservador-live-v2, target weights)', () => {
     const { o: base } = invested()
     const positions = base.positions.filter((p) => p.pool !== 'pool:USDC/USDT/100')
     const o = { ...base, positions, balances: { ...base.balances, USDC: 10n * USDC, USDT: 2n * USDC } }
-    expect(allocate(o, V2, false).pendingMint).toContain('pool:USDC/USDT/100')
+    expect(allocate(o, V2, false).pendingMint).toContainEqual({ pool: 'pool:USDC/USDT/100', grant: 'enter-swap:pool:USDC/USDT/100' })
     const p = decide(o, V2).proposal
     expect(p).toMatchObject({ kind: 'enter_swap', pool: 'pool:USDC/USDT/100', tokenIn: 'USDC', tokenOut: 'USDT' })
+  })
+
+  test('held volatile is not kept for a purchase that has no live session', () => {
+    // The same partly filled bucket, with the enter-swap session of that pool gone: the buy can never run.
+    const o = btcShort(600_000n, 60_000n)
+    const a = allocate(o, V2, false)
+    expect(a.proposal).toMatchObject({ kind: 'enter_swap', pool: 'pool:USDC/cbBTC/500', tokenOut: 'cbBTC' })
+    expect(a.pendingMint).toContainEqual({ pool: 'pool:USDC/cbBTC/500', grant: 'enter-swap:pool:USDC/cbBTC/500' })
+    const noBuy = { ...o, sessions: o.sessions.filter((s) => s.grant !== 'enter-swap:pool:USDC/cbBTC/500'), balances: { ...o.balances, cbBTC: token0InToken1(300_000n, POOLS[1]!.sqrtPriceX96) } }
+    const p = decide(noBuy, V2).proposal
+    expect(p === null || !(p.kind === 'enter_swap' && p.pool === 'pool:USDC/cbBTC/500' && p.tokenOut === 'cbBTC')).toBe(true)
   })
 
   /** The btc bucket a little short (inside the 5-point drift, outside the 3% band), the other two a little over: only btc has an entry. */
@@ -246,7 +257,7 @@ describe('allocate (conservador-live-v2, target weights)', () => {
 
   test('with no live session for the mint, the idle token is not held back for it', () => {
     const o = btcShort(400_000n, 400_000n)
-    expect(allocate(o, V2, false).pendingMint).toEqual(['pool:USDC/cbBTC/500'])
+    expect(allocate(o, V2, false).pendingMint).toEqual([{ pool: 'pool:USDC/cbBTC/500', grant: 'enter-mint:pool:USDC/cbBTC/500' }])
     expect(decide(o, V2).proposal).toMatchObject({ kind: 'enter_mint', pool: 'pool:USDC/cbBTC/500' })
     // The same account without the enter-mint session of that pool: the mint cannot go, so the token is free to convert.
     const noMint = { ...o, sessions: o.sessions.filter((s) => s.grant !== 'enter-mint:pool:USDC/cbBTC/500') }
@@ -264,8 +275,9 @@ describe('allocate (conservador-live-v2, target weights)', () => {
       mints++
       const asked = token1InToken0(p.amount1Desired, POOLS[1]!.sqrtPriceX96)
       expect(p.amount1Desired <= o.balances.cbBTC!).toBe(true)
-      expect(asked <= (p.amount0Desired * 12n) / 10n).toBe(true)
-      expect(asked >= (p.amount0Desired * 8n) / 10n).toBe(true)
+      // Within 5% of the savings side: a pair the pool takes whole.
+      expect(asked <= (p.amount0Desired * 105n) / 100n).toBe(true)
+      expect(asked >= (p.amount0Desired * 95n) / 100n).toBe(true)
     }
     expect(mints).toBeGreaterThan(2)
   }, 60_000)

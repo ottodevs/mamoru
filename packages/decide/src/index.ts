@@ -95,9 +95,11 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
   let pendingMint: ReadonlySet<string> | undefined
   if (policy.allocation === 'target-weights') {
     const a = allocate(obs, policy, unsafeDeposit)
-    // Only where the mint has a live session: without one the mint never goes and the token would wait for ever.
+    // Only where the next step has a live session: without one it never goes and the token would wait for ever.
+    // A mint after a re-range runs under manage-any, as below.
     const live = (grant: string) => obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp)
-    pendingMint = new Set(a.pendingMint.filter((pool) => live(remint ? anyKey(policy, 'manage-any', pool) : grantKeyFor(policy, 'enter-mint', pool))))
+    const needs = (p: { pool: string; grant: string }) => (remint && p.grant.startsWith('enter-mint') ? anyKey(policy, 'manage-any', p.pool) : p.grant)
+    pendingMint = new Set(a.pendingMint.filter((p) => live(needs(p))).map((p) => p.pool))
     for (const b of a.buckets) buckets.push({ bucket: b.bucket, code: b.code })
     trail.push(...a.trail)
     if (a.proposal) {
