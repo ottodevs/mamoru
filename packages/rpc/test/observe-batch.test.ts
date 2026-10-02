@@ -293,6 +293,17 @@ describe('pool state shared per block', () => {
     expect(poolCache.size).toBe(3)
   })
 
+  test('an observation whose block changed hash leaves no pool state behind', async () => {
+    const c = chain()
+    const poolCache = poolStateCache()
+    c.onRequest = (r) => {
+      if (r.method === 'eth_getLogs') c.forked.add(c.head)
+    }
+    const err = await observe(c.client, input({ poolCache })).catch((e) => e)
+    expect((err as ReasonError).code).toBe('OBS_BLOCK_INCONSISTENT')
+    expect(poolCache.size).toBe(0)
+  })
+
   test('a failed shared read is not kept, and the account waiting on it reads the pools itself', async () => {
     const c = chain()
     const poolCache = poolStateCache()
