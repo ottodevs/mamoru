@@ -580,3 +580,17 @@ describe('logErr', () => {
     expect(lines[0]).toContain('execution reverted')
   })
 })
+
+describe('classifyEngineError with the thrown value itself', () => {
+  test('an Error keeps its RPC class', () => {
+    expect(classifyEngineError('REVIEW_ERROR', new Error('Invalid parameters were provided to the RPC method.'))).toBe(classifyEngineError('REVIEW_ERROR', 'Invalid parameters were provided to the RPC method.'))
+  })
+  test('values that throw when read or coerced classify without throwing', () => {
+    const revoked = Proxy.revocable({}, {})
+    revoked.revoke()
+    const hostile = { get message(): string { throw new Error('boom') }, toString() { throw new Error('boom') } }
+    for (const v of [revoked.proxy, hostile, Object.create(null), Symbol('x'), 10n, () => {}]) {
+      expect(() => classifyEngineError('REVIEW_ERROR', v)).not.toThrow()
+    }
+  })
+})
