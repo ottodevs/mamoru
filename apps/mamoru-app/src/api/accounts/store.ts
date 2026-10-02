@@ -15,7 +15,7 @@ export type AccountRow = {
   policy_version: string
   recovery_ack_at: string | null
   created_at: string
-  /** Last WebAuthn signature counter seen at sign-in (migration 0003; 0 until then). */
+  /** Last WebAuthn signature counter seen at sign-in (migration 0005; 0 until then). */
   passkey_sign_count?: number
 }
 
@@ -23,7 +23,7 @@ export function accountOfUser(db: Db, userId: string): Promise<AccountRow | null
   return db.prepare('SELECT * FROM accounts WHERE user_id = ? ORDER BY created_at LIMIT 1').bind(userId).first<AccountRow>()
 }
 
-/** The account this credential id owns on this chain. At most one: the pair is unique (migration 0003). */
+/** The account this credential id owns on this chain. At most one: the pair is unique (migration 0005). */
 export function accountByCredential(db: Db, chainId: number, credentialId: string): Promise<AccountRow | null> {
   return db.prepare('SELECT * FROM accounts WHERE passkey_credential_id = ? AND chain_id = ?').bind(credentialId, chainId).first<AccountRow>()
 }
@@ -42,7 +42,7 @@ export function ownedAccount(db: Db, userId: string, accountKey: string): Promis
   return db.prepare('SELECT * FROM accounts WHERE account_key = ? AND user_id = ?').bind(accountKey, userId).first<AccountRow>()
 }
 
-/** False when the credential id already owns an account on this chain (unique index, migration 0003). */
+/** False when the credential id already owns an account on this chain (unique index, migration 0005). */
 export async function insertAccount(db: Db, row: AccountRow): Promise<boolean> {
   try {
     await db

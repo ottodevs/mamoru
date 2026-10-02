@@ -184,7 +184,7 @@ function seedAccount(key: string, addr: string) {
   db.sqlite.run("INSERT OR IGNORE INTO users (user_id, created_at) VALUES ('u1', '2026-09-26T00:00:00Z')")
   db.sqlite.run(
     "INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at) VALUES (?, 'u1', 8453, ?, '[]', ?, 'x', 'y', '0', 'conservador-v1', '2026-09-26T00:00:00Z')",
-    // One credential id per account: (chain_id, passkey_credential_id) is unique since migration 0003.
+    // One credential id per account: (chain_id, passkey_credential_id) is unique since migration 0005.
     [key, addr, `c-${key}`],
   )
 }

@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 // otto/mamoru#6 in a real browser with a CDP virtual WebAuthn authenticator: an owner creates the account, loses the
-// session, and gets back to the same account with the passkey. Run against a Worker that has migration 0003 applied.
+// session, and gets back to the same account with the passkey. Run against a Worker that has migration 0005 applied.
 test('a returning owner signs back in with the passkey, with or without what the browser remembered', async ({ page, context }) => {
   const cdp = await context.newCDPSession(page)
   await cdp.send('WebAuthn.enable', { enableUI: false })
