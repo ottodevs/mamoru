@@ -206,6 +206,15 @@ describe('run', () => {
     expect(-r.metrics.net).toBeLessThan(r.metrics.start / 300n)
   }, SLOW)
 
+  test('a deposit due at a sample the run steps over lands at the next one', () => {
+    const ds = syntheticDataset({ samples: 60 })
+    const holed = { ...ds, samples: ds.samples.map((x, i) => (i === 40 ? { ...x, pools: x.pools.map((p, k) => (k === 2 ? null : p)) } : x)) }
+    const r = runBacktest(holed, conservadorLiveV2, { deposit: DEPOSIT, topUps: [{ at: 40, amount: DEPOSIT }] })
+    expect(r.window.gaps).toBe(1)
+    expect(r.metrics.start).toBe(2n * DEPOSIT)
+    expect(r.series.value.at(-1)! > DEPOSIT + DEPOSIT / 2n).toBe(true)
+  }, SLOW)
+
   test('drawdown and worst week follow the value of the account', () => {
     // cbBTC falls 6% (600 ticks) over a day, flat before and after; 40% of the account sits in that bucket.
     const ds = syntheticDataset({ samples: 3 * 288, tick: (k, i) => (k === 1 ? 2 * Math.max(0, Math.min(300, i - 288)) : 0) })

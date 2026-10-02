@@ -173,6 +173,8 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   if (!first) throw new Error(`no sample of the window has every pool of ${policy.policyId} and ${ETH_PRICE_POOL}`)
   const hodl = hodlBasket(ds, first, policy, config.deposit)
   let prevIndex = -1
+  const topUps = [...(config.topUps ?? [])].sort((a, b) => a.at - b.at)
+  let nextTopUp = 0
   let gaps = 0
 
   for (let i = from; i <= to; i++) {
@@ -193,8 +195,9 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
         fees += price(s, e.token0!, f.fees0) + price(s, e.token1!, f.fees1)
       }
     }
-    for (const t of config.topUps ?? []) {
-      if (t.at !== i) continue
+    // A deposit due at a sample the run stepped over lands at the next one it replays.
+    for (; nextTopUp < topUps.length && topUps[nextTopUp]!.at <= i; nextTopUp++) {
+      const t = topUps[nextTopUp]!
       w.balances[savings] = (w.balances[savings] ?? 0n) + t.amount
       deposited += t.amount
       // The benchmark receives the same money at the same time, in the same mix.
@@ -264,7 +267,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   }
   const sessions = sessionUses(policy, uses, first.time)
   const pHash = policyHash(policy)
-  const facts = { simVersion: SIM_VERSION, datasetId: ds.id, policyHash: pHash, from, to, every, gaps, enforce, renewal, refused, deposit: config.deposit, topUps: config.topUps ?? [], gas, end, hodlEnd, fees, gasSpent, ops: ops.map(({ trail: _t, ...o }) => o), reasons, sessions }
+  const facts = { simVersion: SIM_VERSION, datasetId: ds.id, policyHash: pHash, from, to, every, gaps, enforce, renewal, refused, deposit: config.deposit, topUps, gas, end, hodlEnd, fees, gasSpent, ops: ops.map(({ trail: _t, ...o }) => o), reasons, sessions }
   return {
     simVersion: SIM_VERSION,
     datasetId: ds.id,

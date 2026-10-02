@@ -1,7 +1,8 @@
 // Checks the fee model against the chain: for real positions, what the simulator says they earned over the dataset
 // window against what a static `collect` returns at the end of it.
 //   bun packages/backtest/cli/calibrate.ts --dataset .local/base-30d.json --owner 0x... [--owner 0x...]
-// Reads only. A position whose liquidity changed inside the window is skipped: its collect also carries principal.
+// Reads only. Each position is measured from its last touch (collect or liquidity change) to the end of the dataset,
+// so the difference of two static collects is fees and nothing else.
 import { readFileSync } from 'node:fs'
 import { createPublicClient, encodeFunctionData, decodeFunctionResult, http, maxUint128, parseAbi, type Address, type PublicClient } from 'viem'
 import { base } from 'viem/chains'
@@ -60,21 +61,24 @@ for (const owner of args('owner') as Address[]) {
     const name = nameOf(poolAddr)
     const k = name ? ds.pools.indexOf(name) : -1
     if (!name || k < 0 || pos[7] === 0n) continue
-    // The first sample at which the position already exists with today's liquidity: a binary search, about 14 archive
-    // reads for a 30-day dataset, instead of a scan.
-    const sameAt = async (j: number) => {
+    // The position manager rewrites `feeGrowthInside*Last` whenever the position is touched (a collect, an increase
+    // or a decrease). From the last touch on, liquidity and those two values stay what they are at the end: the first
+    // sample where all three already match is found by binary search, about 14 archive reads for a 30-day dataset,
+    // and the window after it has no collect and no liquidity change in it.
+    const untouchedSince = async (j: number) => {
       const p = await client.readContract({ address: npm, abi: npmAbi, functionName: 'positions', args: [tokenId], blockNumber: BigInt(ds.samples[j]!.block) }).catch(() => null)
-      return !!p && p[7] === pos[7]
+      return !!p && p[7] === pos[7] && p[8] === pos[8] && p[9] === pos[9]
     }
     let lo = 0
     let hi = ds.samples.length - 1
-    if (!(await sameAt(hi))) continue
+    if (!(await untouchedSince(hi))) continue
     while (lo < hi) {
       const mid = (lo + hi) >> 1
-      if (await sameAt(mid)) hi = mid
+      if (await untouchedSince(mid)) hi = mid
       else lo = mid + 1
     }
     const start = lo
+    if (start >= ds.samples.length - 1) continue
     const before = await collectable(owner, tokenId, BigInt(ds.samples[start]!.block))
     const after = await collectable(owner, tokenId, BigInt(last.block))
     if (!before || !after) continue
