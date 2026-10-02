@@ -1019,7 +1019,7 @@ export class Operator {
    */
   private async checkArmed(): Promise<void> {
     const at = Date.now()
-    const armed = Object.values(this.store.state.accounts).filter((a) => a.armed && at - (this.armRead.get(a.accountKey) ?? 0) >= this.armEvery(a, at))
+    const armed = Object.values(this.store.state.accounts).filter((a) => a.armed && this.armDue(a, at))
     if (armed.length === 0) return
     const batch = new Batch(this.client, MULTICALL3)
     const balances = armed.map((acc) => batch.add(contractRead(this.client, { address: address('USDC'), abi: erc20Abi, functionName: 'balanceOf', args: [acc.ctx.address as Address] })))
@@ -1031,8 +1031,10 @@ export class Operator {
     for (const [i, acc] of armed.entries()) {
       if (!acc.armed || this.armStopped) continue
       try {
+        // Counted as read only once the balance is known: a failed read is tried again on the next pass.
+        const seen = await balances[i]!.need()
         this.armRead.set(acc.accountKey, at)
-        if ((await balances[i]!.need()) === 0n) continue
+        if (seen === 0n) continue
         // Something landed: until it is executed or dropped, this account is read every pass (retries included).
         this.armSeen.set(acc.accountKey, at)
         const usdc = await this.usdcOf(acc.ctx.address as Address)
@@ -1044,11 +1046,17 @@ export class Operator {
     }
   }
 
-  /** How long an armed Safe may go unread: every pass while its owner is around, then slower the longer nothing happens. */
-  private armEvery(acc: AccountState, at: number): number {
+  /**
+   * Whether an armed Safe is read in this pass: every pass while its owner is around, then slower the longer
+   * nothing happens. A clock set back (a last read or a last sighting in the future) reads it at once.
+   */
+  private armDue(acc: AccountState, at: number): boolean {
+    const read = this.armRead.get(acc.accountKey)
+    if (read === undefined || read > at) return true
     const armedAt = Date.parse(acc.ops.find((o) => o.opId === acc.armed?.opId)?.updatedAt ?? '') || 0
     const idle = at - Math.max(armedAt, this.armSeen.get(acc.accountKey) ?? 0)
-    return idle < ARM_FRESH_MS ? 0 : idle < ARM_DAY_MS ? ARM_IDLE_MS : ARM_STALE_MS
+    const every = idle < ARM_FRESH_MS ? 0 : idle < ARM_DAY_MS ? ARM_IDLE_MS : ARM_STALE_MS
+    return at - read >= every
   }
 
   private async fireArmed(acc: AccountState, usdc: bigint): Promise<void> {

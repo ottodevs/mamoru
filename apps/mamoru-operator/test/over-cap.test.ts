@@ -599,29 +599,84 @@ describe('withdrawing with an armed activation', () => {
 
 // otto/mamoru#85: the watcher cost one eth_call per armed account per tick; it is one request for all of them.
 describe('the armed watcher reads every armed Safe in one request', () => {
-  type Reads = { call(a: { to: string; data: Hex }): Promise<unknown>; readContract(a: { address: string; functionName: string }): Promise<unknown> }
-  const pass = (op: Operator) => (op as unknown as { checkArmed(): Promise<void> }).checkArmed()
+  type Reads = { call(a: { to: string; data: Hex }): Promise<unknown>; readContract(a: { address: string; functionName: string; args?: readonly unknown[] }): Promise<unknown> }
+  type Watcher = { checkArmed(): Promise<void>; fireArmed(a: AccountState, usdc: bigint): Promise<void>; armRead: Map<string, number>; armSeen: Map<string, number> }
+  const priv = (op: Operator) => op as unknown as Watcher
+  const pass = (op: Operator) => priv(op).checkArmed()
+  const clientOf = (op: Operator) => (op as unknown as { client: Reads }).client
+  const isMulticall = (to: string) => to.toLowerCase() === address('Multicall3').toLowerCase()
+  const word = (v: bigint) => toHex(v, { size: 32 })
+  /** The holder a balanceOf(address) calldata asks about. */
+  const holderOf = (callData: Hex) => getAddress(`0x${callData.slice(34)}`)
   /** Counts the Multicall3 requests and the single balance reads the operator makes from here on. */
   const count = (op: Operator) => {
-    const client = (op as unknown as { client: Reads }).client
+    const client = clientOf(op)
     const seen = { multicall: 0, balanceOf: 0 }
     const { call, readContract } = client
-    client.call = (a) => (a.to.toLowerCase() === address('Multicall3').toLowerCase() && seen.multicall++, call(a))
+    client.call = (a) => (isMulticall(a.to) && seen.multicall++, call(a))
     client.readContract = (a) => (a.functionName === 'balanceOf' && seen.balanceOf++, readContract(a))
     return seen
   }
-
-  test('three armed accounts with nothing deposited: one Multicall3 request, no single read, nothing sent', async () => {
+  /** The USDC balance of each Safe, in the batch and in single reads; `fail` makes that way of reading throw. */
+  const balances = (op: Operator, usdc: Record<string, bigint>, fail: { batch?: boolean; slot?: boolean; single?: boolean } = {}) => {
+    const client = clientOf(op)
+    const { readContract } = client
+    client.call = async (a) => {
+      if (!isMulticall(a.to)) throw new Error('unexpected call')
+      if (fail.batch) throw new Error('HTTP request failed. Status: 429')
+      return { data: answerAggregate3(a.data, (_target, callData) => { if (fail.slot) throw new Error('execution reverted'); return word(usdc[holderOf(callData)] ?? 0n) }) }
+    }
+    client.readContract = async (a) => {
+      if (a.functionName !== 'balanceOf') return readContract(a)
+      if (fail.single) throw new Error('HTTP request failed. Status: 429')
+      return usdc[getAddress(a.args![0] as string)] ?? 0n
+    }
+    return fail
+  }
+  /** Every fireArmed the watcher started, without executing it. */
+  const fired = (op: Operator) => {
+    const out: { key: string; usdc: bigint }[] = []
+    priv(op).fireArmed = async (a, usdc) => void out.push({ key: a.accountKey, usdc })
+    return out
+  }
+  /** One armed account `k` plus two copies of it on other Safes. */
+  const three = async () => {
     const w = world(0n)
     const tx = await w.op.prepareActivate(ctx)
     expect((await w.op.submit(ctx, 'activate', sign(tx))).code).toBe('ARMED')
     const acc = w.state.accounts.k!
-    for (const [key, safe] of [['k2', TO], ['k3', RELAYER]] as const) w.state.accounts[key] = { ...acc, accountKey: key, ctx: { ...acc.ctx, accountKey: key, address: safe } }
+    for (const [key, safe] of [['k2', TO], ['k3', getAddress(RELAYER)]] as const) w.state.accounts[key] = { ...acc, accountKey: key, ctx: { ...acc.ctx, accountKey: key, address: safe } }
+    return w
+  }
+
+  test('three armed accounts with nothing deposited: one Multicall3 request, no single read, nothing sent', async () => {
+    const w = await three()
     const seen = count(w.op)
     await pass(w.op)
     expect(seen).toEqual({ multicall: 1, balanceOf: 0 })
     expect(w.sent).toHaveLength(0)
     expect(Object.values(w.state.accounts).every((a) => a.armed)).toBe(true)
+  })
+
+  test('only the Safe that received the deposit is executed, with its own balance', async () => {
+    const w = await three()
+    balances(w.op, { [TO]: 7_000_000n })
+    const out = fired(w.op)
+    await pass(w.op)
+    expect(out).toEqual([{ key: 'k2', usdc: 7_000_000n }])
+  })
+
+  test('the amount executed is the one read on its own after the batch, not the one the batch saw', async () => {
+    const w = await three()
+    const usdc: Record<string, bigint> = { [TO]: 7_000_000n }
+    balances(w.op, usdc)
+    const client = clientOf(w.op)
+    const { call } = client
+    // More USDC lands between the batch and the single read.
+    client.call = async (a) => { const r = await call(a); usdc[TO] = 9_000_000n; return r }
+    const out = fired(w.op)
+    await pass(w.op)
+    expect(out).toEqual([{ key: 'k2', usdc: 9_000_000n }])
   })
 
   test('an activation armed days ago with no owner around is read every five minutes, and at once when the app opens', async () => {
@@ -633,14 +688,68 @@ describe('the armed watcher reads every armed Safe in one request', () => {
     const seen = count(w.op)
     await pass(w.op)
     await pass(w.op)
+    expect(seen.multicall).toBe(1)
+    // Four minutes after the last read: not yet. Five: read again.
+    priv(w.op).armRead.set('k', Date.now() - 240_000)
     await pass(w.op)
     expect(seen.multicall).toBe(1)
-    // The owner opens the app: funding marks the account, the next pass reads it again.
+    priv(w.op).armRead.set('k', Date.now() - 301_000)
+    await pass(w.op)
+    expect(seen.multicall).toBe(2)
+    // The owner opens the app: funding marks the account, every pass reads it again.
     await w.op.funding(ctx)
+    // funding reads the Safe through Multicall3 too: count the watcher's passes from here.
     const before = seen.multicall
     await pass(w.op)
     await pass(w.op)
     expect(seen.multicall - before).toBe(2)
+  })
+
+  test('armed between a day and an hour ago: read once a minute', async () => {
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    const armed = await w.op.submit(ctx, 'activate', sign(tx))
+    w.state.accounts.k!.ops.find((o) => o.opId === armed.opId)!.updatedAt = new Date(Date.now() - 2 * 3_600_000).toISOString()
+    const seen = count(w.op)
+    await pass(w.op)
+    priv(w.op).armRead.set('k', Date.now() - 30_000)
+    await pass(w.op)
+    expect(seen.multicall).toBe(1)
+    priv(w.op).armRead.set('k', Date.now() - 61_000)
+    await pass(w.op)
+    expect(seen.multicall).toBe(2)
+  })
+
+  test('a clock set back does not hide an armed account: a last read in the future is read at once', async () => {
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    const armed = await w.op.submit(ctx, 'activate', sign(tx))
+    w.state.accounts.k!.ops.find((o) => o.opId === armed.opId)!.updatedAt = new Date(Date.now() - 3 * 86_400_000).toISOString()
+    priv(w.op).armRead.set('k', Date.now() + 3_600_000)
+    const seen = count(w.op)
+    await pass(w.op)
+    expect(seen.multicall).toBe(1)
+  })
+
+  test('a failed read does not count as a read: the idle account is tried again on the next pass', async () => {
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    const armed = await w.op.submit(ctx, 'activate', sign(tx))
+    w.state.accounts.k!.ops.find((o) => o.opId === armed.opId)!.updatedAt = new Date(Date.now() - 3 * 86_400_000).toISOString()
+    const out = fired(w.op)
+    // The whole batch fails, then its slot and the single read fail: neither marks the account as read.
+    const fail = balances(w.op, { [SAFE]: 5_000_000n }, { batch: true })
+    await pass(w.op)
+    expect(priv(w.op).armRead.has('k')).toBe(false)
+    fail.batch = false
+    fail.slot = fail.single = true
+    await pass(w.op)
+    expect(priv(w.op).armRead.has('k')).toBe(false)
+    expect(out).toEqual([])
+    // The provider is back: the very next pass sees the deposit.
+    fail.slot = fail.single = false
+    await pass(w.op)
+    expect(out).toEqual([{ key: 'k', usdc: 5_000_000n }])
   })
 
   test('no armed account: no request at all', async () => {
@@ -650,17 +759,14 @@ describe('the armed watcher reads every armed Safe in one request', () => {
     expect(seen).toEqual({ multicall: 0, balanceOf: 0 })
   })
 
-  test('a deposit is seen by the batch, read again on its own and executed', async () => {
+  test('a deposit is executed by the relayer and the op leaves the armed state', async () => {
     const w = world(0n)
     const tx = await w.op.prepareActivate(ctx)
     const armed = await w.op.submit(ctx, 'activate', sign(tx))
     w.chain.usdc = 10_000_000n
-    const seen = count(w.op)
     await pass(w.op)
-    expect(seen.balanceOf).toBeGreaterThanOrEqual(1)
     expect(w.state.accounts.k!.armed).toBeUndefined()
     expect(w.sent.length).toBeGreaterThan(0)
-    // Sent by the relayer: the op left the armed state.
     expect(w.op.ops(ctx, null).ops.find((o) => o.opId === armed.opId)?.code).toBeUndefined()
   })
 })
