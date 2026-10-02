@@ -9,11 +9,14 @@ import { POLICIES, computeCaps, grantKey, hasManageAny, instantiateGrant, type P
 import {
   LIVE_CAP_USDC,
   activationBatch,
+  assertionShape,
   browserOwnerSignature,
   deployCall,
   execData,
+  fromB64url,
   liveAccountFromContext,
   ownerSafeTx,
+  ownerSignatureShape,
   readSafeNonce,
   safeTxHashOf,
   stopBatch,
@@ -171,6 +174,8 @@ export class Operator {
   private readonly seenAt = new Map<string, string>()
   /** Pause between retries of a pre-send simulation that reverts (a load-balanced provider can answer from a lagging node). */
   private retryMs = 3_000
+  /** Times the off-chain signature check said no and the chain said yes, since this process started. Logged with each one. */
+  mirrorMismatches = 0
 
   constructor(
     readonly cfg: OperatorConfig,
@@ -709,13 +714,27 @@ export class Operator {
     try {
       signature = browserOwnerSignature(body, p.safeTxHash)
     } catch (e) {
+      // No Safe signature can be built from this body, so there is nothing to ask the chain about. The shape is kept for diagnosis.
+      console.error(`[owner] OWNER_SIG_UNPARSEABLE ${acc.accountKey} ${kind}: ${(e as Error).message} ${JSON.stringify(bodyShape(body))}`)
       throw new HttpError(400, 'BAD_SIGNATURE', (e as Error).message)
     }
-    this.prepared.delete(p.prepareId)
-    // A signature the passkey did not make stops here: no op, no armed activation, no relayer transaction.
+    // The off-chain check mirrors the on-chain verifier and the chain is the ground truth: a "no" from the mirror is
+    // never the reason to refuse an owner. When it says no, the exact sequence the relayer would send is simulated
+    // with this signature. If that succeeds the signature is valid on chain and the request goes on; if it reverts
+    // the signature is forged or wrong; if nothing can answer, the request is refused for now and can be sent again.
     if (!(await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn))) {
-      throw new HttpError(400, 'BAD_SIGNATURE', 'the passkey signature does not match this account and transaction')
+      const truth = await this.groundTruth(live, execData(p.tx, signature))
+      if (truth.outcome === 'unavailable') {
+        console.error(`[owner] ${acc.accountKey} ${kind}: signature not verified off chain and no simulation available (${truth.why}); retryable`)
+        throw new HttpError(503, 'OWNER_CHECK_UNAVAILABLE', 'the signature could not be checked right now; try again in a moment')
+      }
+      if (truth.outcome === 'revert') {
+        this.prepared.delete(p.prepareId)
+        throw new HttpError(400, 'BAD_SIGNATURE', 'the passkey signature does not match this account and transaction')
+      }
+      this.mirrorMismatch(acc, kind, bodyShape(body))
     }
+    this.prepared.delete(p.prepareId)
     if (kind === 'activate') {
       // Only a new activation is subject to the failure budget; a proven owner's transfer or stop never is.
       this.assertBudget(acc)
@@ -772,8 +791,9 @@ export class Operator {
   /**
    * Everything that can be known before the relayer spends gas on an owner signature. Every owner path runs through
    * here (activate, armed activate, transfer, stop). Returns the refusal, or null to go ahead.
-   * - The passkey signed exactly this SafeTx (Safe, chain, nonce): always checked, off chain. This is what stops a
-   *   forged request from costing the relayer anything.
+   * - The passkey signed exactly this SafeTx (Safe, chain, nonce): checked off chain, with the chain as ground truth
+   *   when that check says no (a successful simulation overrules it, and is logged as OWNER_SIG_MIRROR_MISMATCH). A
+   *   forged request needs one of the two to pass, so it never costs the relayer anything.
    * - The whole sequence (deploy if needed, then execTransaction) is simulated. A revert refuses: nothing is sent and
    *   nothing counts against a budget. When the simulation cannot run (provider does not serve eth_simulateV1, rate
    *   limit, timeout) it is tried again, then an eth_call of execTransaction stands in when the Safe is deployed; for
@@ -782,7 +802,9 @@ export class Operator {
    */
   private async preflight(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex): Promise<{ code: string; detail?: Partial<OpView> } | null> {
     if (safeTxHashOf(live, p.tx).toLowerCase() !== p.safeTxHash.toLowerCase()) return { code: 'BAD_SIGNATURE' }
-    if (!(await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn))) return { code: 'BAD_SIGNATURE' }
+    // The mirror of the on-chain verifier. When it says yes the signature is proven. When it says no, only the chain
+    // (the simulation below) decides: it must succeed for anything to be sent, and a revert is the refusal.
+    const proven = await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn)
     const data = execData(p.tx, signature)
     for (let attempt = 0; ; attempt++) {
       const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
@@ -793,24 +815,42 @@ export class Operator {
       let sim = await this.simulateOwner(live, deployed, data)
       if (sim.outcome === 'unavailable') {
         console.error(`[owner] ${acc.accountKey} ${p.kind}: simulation unavailable (${sim.why})`)
-        if (!deployed) {
-          console.error(`[owner] ${acc.accountKey} ${p.kind}: proceeding on the verified signature and the minimum balance (Safe not deployed)`)
-          return null
-        }
-        sim = await this.callOwner(live, data)
+        if (deployed) sim = await this.callOwner(live, data)
         if (sim.outcome === 'unavailable') {
-          console.error(`[owner] ${acc.accountKey} ${p.kind}: eth_call unavailable too (${sim.why}); proceeding on the verified signature`)
+          // Neither proof is in hand: not refused for good, not sent, not counted. The caller may try again.
+          if (!proven) throw new HttpError(503, 'OWNER_CHECK_UNAVAILABLE', `signature not verified off chain and no simulation available (${sim.why})`)
+          console.error(`[owner] ${acc.accountKey} ${p.kind}: proceeding on the verified signature${deployed ? '' : ' and the minimum balance (Safe not deployed)'}`)
           return null
         }
       }
-      if (sim.outcome === 'ok') return null
+      if (sim.outcome === 'ok') {
+        if (!proven) this.mirrorMismatch(acc, p.kind, ownerSignatureShape(signature))
+        return null
+      }
       if (attempt >= 2) {
         console.error(`[owner] ${acc.accountKey} ${p.kind} would revert, nothing sent: ${sim.why}`)
-        return { code: 'OWNER_TX_REVERTS' }
+        return { code: proven ? 'OWNER_TX_REVERTS' : 'BAD_SIGNATURE' }
       }
       console.log(`[owner] ${acc.accountKey} ${p.kind} simulation reverts (${sim.why}), retry ${attempt + 1}`)
       await Bun.sleep(this.retryMs)
     }
+  }
+
+  /** What the chain says about this execTransaction: the relayer's sequence simulated, or an eth_call when the Safe is deployed and the simulation cannot run. A revert is asked again twice (lagging node). */
+  private async groundTruth(live: LiveAccount, data: Hex): Promise<Outcome> {
+    for (let attempt = 0; ; attempt++) {
+      const { deployed } = await readSafeNonce(this.client, live.safe)
+      let sim = await this.simulateOwner(live, deployed, data)
+      if (sim.outcome === 'unavailable' && deployed) sim = await this.callOwner(live, data)
+      if (sim.outcome !== 'revert' || attempt >= 2) return sim
+      await Bun.sleep(this.retryMs)
+    }
+  }
+
+  /** The mirror refused a signature the chain accepts. Loud on purpose: the mirror has a bug for this authenticator. */
+  private mirrorMismatch(acc: AccountState, kind: OwnerKind, shape: unknown): void {
+    this.mirrorMismatches++
+    console.error(`[owner] OWNER_SIG_MIRROR_MISMATCH #${this.mirrorMismatches} ${acc.accountKey} ${kind}: off-chain check refused a signature the chain accepts; proceeding. shape ${JSON.stringify(shape)}`)
   }
 
   /** The relayer's own sequence in one eth_simulateV1 block: the factory call when the Safe has no code, then execTransaction. */
@@ -1345,6 +1385,18 @@ function revertReason(e: unknown): string {
     } catch {}
   }
   return data ?? (e as Error).message.split('\n')[0] ?? 'reverted'
+}
+
+/** The non-secret shape of a submitted assertion, for the log. Fields that do not decode count as empty. */
+function bodyShape(body: OwnerSignature): unknown {
+  const bytes = (v: unknown) => {
+    try {
+      return typeof v === 'string' ? fromB64url(v) : new Uint8Array()
+    } catch {
+      return new Uint8Array()
+    }
+  }
+  return assertionShape({ authenticatorData: bytes(body?.authenticatorData), clientDataJSON: bytes(body?.clientDataJSON), signature: bytes(body?.signature) })
 }
 
 type Outcome = { outcome: 'ok' } | { outcome: 'revert' | 'unavailable'; why: string }

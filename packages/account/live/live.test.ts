@@ -11,6 +11,7 @@ import { counterfactualAddress, accountSetup } from '../recovery/index.ts'
 import { webAuthnSigner } from '../safe/index.ts'
 import {
   activationBatch,
+  assertionShape,
   browserOwnerSignature,
   clientDataFieldsOf,
   decodeOwnerSignature,
@@ -19,6 +20,7 @@ import {
   execData,
   liveAccountFromContext,
   ownerSafeTx,
+  ownerSignatureShape,
   parseDerSignature,
   P256_N,
   readSafeNonce,
@@ -157,6 +159,23 @@ describe('live owner path: pure', () => {
     expect(await verifyOwnerSignature('0x', hash, passkey)).toBe(false)
     expect(await verifyOwnerSignature(safeContractSignature(`0x${'22'.repeat(20)}`, `0x${sig.slice(2 + 97 * 2)}`), hash, passkey)).toBe(false)
     expect(await verifyOwnerSignature(`${sig}00`, hash, passkey)).toBe(false)
+  })
+
+  test('the assertion shape for the log holds sizes, flags and key order, nothing secret', () => {
+    const p = new SoftwarePasskey(PASSKEY_SCALARS.a1)
+    const hash = `0x${'cd'.repeat(32)}` as const
+    const sig = browserAssert(p, hash, true)
+    const bytes = (v: string) => Uint8Array.from(Buffer.from(v, 'base64url'))
+    const shape = assertionShape({ authenticatorData: bytes(sig.authenticatorData), clientDataJSON: bytes(sig.clientDataJSON), signature: bytes(sig.signature) })
+    expect(shape).toMatchObject({ authenticatorDataLength: 37, flags: '0x05', signCountZero: false, clientDataKeys: ['type', 'challenge', 'origin', 'crossOrigin'], clientDataPrefixOk: true, signatureDer: 'ok', highS: true })
+    expect(JSON.stringify(shape)).not.toContain('app.mamoru.lol')
+    // An authenticator that writes other keys, extension data and a broken signature still gets a shape, not a throw.
+    const odd = assertionShape({ authenticatorData: new Uint8Array(80).fill(0x81), clientDataJSON: new TextEncoder().encode('{"challenge":"x","type":"webauthn.get","other":1}'), signature: new Uint8Array([0x30, 0x00]) })
+    expect(odd).toMatchObject({ authenticatorDataLength: 80, flags: '0x81', clientDataKeys: ['challenge', 'type', 'other'], clientDataPrefixOk: false, highS: null })
+    expect(odd.signatureDer).not.toBe('ok')
+    expect(assertionShape({ authenticatorData: new Uint8Array(), clientDataJSON: new Uint8Array([0xff]), signature: new Uint8Array() })).toMatchObject({ flags: null, clientDataKeys: null })
+    expect(ownerSignatureShape(browserOwnerSignature(sig, hash))).toEqual({ decodes: true, authenticatorDataLength: 37, flags: '0x05', clientDataKeys: ['type', 'challenge', 'origin', 'crossOrigin'] })
+    expect(ownerSignatureShape('0x1234')).toEqual({ decodes: false })
   })
 
   test('context is refused when the address does not match', () => {
