@@ -1,0 +1,53 @@
+# User unit (systemctl --user). Install at ~/.config/systemd/user/mamoru-operatord.service.
+#
+# Named mamoru-operatord.service — deliberately NOT mamoru-operator.service, the name of the
+# currently-running *transient* unit (`systemd-run --user --unit=mamoru-operator ...`), which
+# disappears on `systemctl --user stop` and does not survive a reboot. Two units cannot be loaded
+# under the same name at once, and a transient unit's ExecStart text does not reliably say what it
+# runs either (it is "bun run operator", not the entrypoint path) — so telling the transient and
+# durable units apart by NAME is the simple, robust answer `scripts/operator/deploy.ts` relies on;
+# `systemctl --user show -p Transient -p FragmentPath` is the authoritative *runtime* signal it
+# additionally checks (see lib/systemctl.ts, lib/enumerate.ts). See ops/systemd/README.md for the
+# one-time migration from the transient unit (via `deploy.ts --migrate-from-transient <unit>`), how
+# to apply this file, and how to verify.
+#
+# WorkingDirectory is `current`, a symlink scripts/operator/deploy.ts atomically repoints at an
+# immutable per-sha release directory (~/.local/share/mamoru-operator/releases/<sha>, a fresh
+# `git worktree`, never a Cursor worktree and never mutated in place after it is created). This
+# file's paths never change across a deploy: only the symlink's target does, so "rollback" is
+# deploy.ts repointing it back and restarting, not editing this unit. accounts.json (session keys)
+# and relayer.key live outside any release, in the state dir below; this unit never writes a release.
+[Unit]
+Description=Mamoru Uniswap v3 LP operator, durable (live, real funds)
+After=network-online.target
+Wants=network-online.target
+# 5 restarts inside 5 minutes and systemd stops trying instead of crash-looping forever; `systemctl
+# --user reset-failed mamoru-operatord` clears the counter once the underlying problem is fixed.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/mamoru-operator/current
+ExecStart=/etc/profiles/per-user/otto/bin/bun run %h/.local/share/mamoru-operator/current/apps/mamoru-operator/src/main.ts
+Environment=MAMORU_LIVE=1
+Restart=on-failure
+RestartSec=5
+# Session keys and the relayer key are only ever as private as the files they land in; a
+# deploy-created release's own files inherit umask at worktree/install time (not this directive),
+# but everything THIS process creates (env file secret generation, state files) must never be
+# group/other-readable even if a caller's umask is loose.
+UMask=0077
+
+# Hardening that does not break it: no privilege escalation, a private /tmp, and the rest of the
+# home directory read-only except the two paths the process actually writes (env file with
+# OPERATOR_SECRET, and state dir with accounts.json/relayer.key/rpc-usage.json). The release tree
+# under .../mamoru-operator/ (repo/releases/current) is deliberately NOT in ReadWritePaths: this
+# unit must never write its own code, only deploy.ts (run manually, outside this unit) does.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ReadWritePaths=%h/.config/mamoru-operator %h/.local/state/mamoru-operator
+
+[Install]
+WantedBy=default.target
