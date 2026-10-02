@@ -62,7 +62,7 @@ function aggregates(c: FakeChain): { target: Address; callData: Hex }[][] {
 }
 
 describe('observe through Multicall3', () => {
-  test('one review of an account with 3 positions: 11 requests, 2 of them eth_call', async () => {
+  test('one review of an account with 3 positions: 12 requests, 2 of them eth_call', async () => {
     const c = chain()
     const cursor = historyCursor()
     // First review: the cursor reads the history from the activation block.
@@ -72,8 +72,9 @@ describe('observe through Multicall3', () => {
     c.requests.length = 0
     const obs = await observe(c.client, input({ historyCursor: cursor, depositsAfter: 900n }))
     expect(obs.positions.map((p) => p.tokenId)).toEqual([11n, 12n, 13n])
-    expect(c.byMethod()).toEqual({ eth_chainId: 1, eth_getBlockByNumber: 5, eth_getCode: 1, eth_call: 2, eth_getLogs: 2 })
-    expect(c.count()).toBe(11)
+    // Logs: the history up to the new safe block, the history above it, the deposits.
+    expect(c.byMethod()).toEqual({ eth_chainId: 1, eth_getBlockByNumber: 5, eth_getCode: 1, eth_call: 2, eth_getLogs: 3 })
+    expect(c.count()).toBe(12)
     // Unbatched, the same review: every contract read is a request of its own.
     c.requests.length = 0
     const plain = historyCursor()
@@ -119,6 +120,30 @@ describe('observe through Multicall3', () => {
     for (const r of c.requests.filter((x) => x.method === 'eth_call' || x.method === 'eth_getCode')) expect(r.params[1]).toBe(head)
     for (const r of c.requests.filter((x) => x.method === 'eth_getLogs')) expect(BigInt(r.params[0].toBlock) <= obs.block.number).toBe(true)
     expect(c.count('eth_getBalance')).toBe(0)
+  })
+
+  test('a log read that fails is a failed observation, and the history cursor does not move', async () => {
+    const c = chain()
+    const cursor = historyCursor()
+    await observe(c.client, input({ historyCursor: cursor }))
+    const held = { through: cursor.through, hash: cursor.hash, events: cursor.events.length }
+    c.head = 1150n
+    c.safe = 1050n
+    // Deposits are the last log read: the history was read, and its cursor must still not be committed.
+    c.onRequest = (r) => {
+      if (r.method === 'eth_getLogs' && r.params[0].address.toLowerCase() === address('USDC').toLowerCase()) throw Object.assign(new Error('no provider has the chain view of block 1150'), { code: -32603 })
+    }
+    const err = await observe(c.client, input({ historyCursor: cursor, depositsAfter: 900n })).catch((e) => e)
+    expect(err).toBeInstanceOf(ReasonError)
+    expect((err as ReasonError).code).toBe('OBS_RPC_UNAVAILABLE')
+    expect({ through: cursor.through, hash: cursor.hash, events: cursor.events.length }).toEqual(held)
+    // The history read fails: same outcome.
+    c.onRequest = (r) => {
+      if (r.method === 'eth_getLogs') throw Object.assign(new Error('no provider has the chain view of block 1050'), { code: -32603 })
+    }
+    const again = await observe(c.client, input({ historyCursor: cursor, depositsAfter: 900n })).catch((e) => e)
+    expect((again as ReasonError).code).toBe('OBS_RPC_UNAVAILABLE')
+    expect({ through: cursor.through, hash: cursor.hash, events: cursor.events.length }).toEqual(held)
   })
 
   test('a block that changes hash during the observation is OBS_BLOCK_INCONSISTENT', async () => {

@@ -155,15 +155,21 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
 
   const tokenIds = await idsOf(Number(await nftCount.need()))
 
+  // Log reads. Each range ends at the safe block (checked inside the cursor) or at the observation block, whose
+  // hash is read again below, after them. A log read that fails is a failed observation.
+  const logs = <T>(read: Promise<T>) =>
+    read.catch((e: Error) => {
+      throw e instanceof ReasonError ? e : new ReasonError('OBS_RPC_UNAVAILABLE', `logs: ${e.message.split('\n')[0]}`)
+    })
   const cursorRead = input.historyCursor
-    ? await readPositionHistoryFrom(client, input.historyCursor, input.allowedTokenIds, input.historyFromBlock, blockNumber, safe.number, safe.hash)
+    ? await logs(readPositionHistoryFrom(client, input.historyCursor, input.allowedTokenIds, input.historyFromBlock, blockNumber, safe.number, safe.hash))
     : null
-  const history = cursorRead ? cursorRead.events : await readPositionHistory(client, input.allowedTokenIds, input.historyFromBlock, blockNumber)
+  const history = cursorRead ? cursorRead.events : await logs(readPositionHistory(client, input.allowedTokenIds, input.historyFromBlock, blockNumber))
   const owed = applyPrincipal(new Map(), history)
   const positions = await readPositions(client, multicall3, acct, tokenIds, blockNumber, input, owed, pools)
   const ethPricePool = pools.find((p) => p.name === input.ethPricePool)
   const ethSqrtPriceX96 = priceSlot0 ? (await priceSlot0.need())[0] : ethPricePool!.sqrtPriceX96
-  const deposits = await readDeposits(client, acct, input, blockNumber, safe.number)
+  const deposits = await logs(readDeposits(client, acct, input, blockNumber, safe.number))
 
   const again = await client.getBlock({ blockNumber })
   if (again.hash !== block.hash) {
@@ -430,36 +436,49 @@ export async function readPositionHistoryFrom(
   // A tokenId the cursor has not seen: backfill its history up to the cursor once.
   const fresh = tokenIds.filter((id) => !next.ids.has(String(id)))
   if (fresh.length > 0) {
-    if (next.through >= fromBlock) next.events.push(...(await readPositionHistory(client, fresh, fromBlock, next.through)))
-    for (const id of fresh) next.ids.add(String(id))
-  }
-  const wanted = new Set(tokenIds.map(String))
-  const stable = safeBlock < toBlock ? safeBlock : toBlock
-  // The tail starts after the cursor, never below it: a safe head that moved back cannot read a block twice.
-  const from = next.through + 1n
-  let tail: ChainPositionEvent[] = []
-  if (stable > next.through) {
-    // One read for the stable part and the unsafe tail. The stable block's hash before and after it: a reorg in between leaves the cursor where it was.
-    const before = await hashAt(stable)
-    const read = await readPositionHistory(client, [...next.ids].map(BigInt), from, toBlock)
-    const after = (await client.getBlock({ blockNumber: stable })).hash
-    if (before === after) {
-      next.events.push(...read.filter((e) => e.blockNumber <= stable))
-      next.through = stable
-      next.hash = after
-      tail = read.filter((e) => e.blockNumber > stable && wanted.has(String(e.tokenId)))
-    } else {
-      tail = await readPositionHistory(client, tokenIds, from, toBlock)
+    if (next.through >= fromBlock && next.hash) {
+      const backfill = await historyEndingAt(client, fresh, fromBlock, next.through, next.hash)
+      if (backfill) next.events.push(...backfill)
+      // The cursor block changed while its history was being read: start over, for every tokenId.
+      else resetCursor(next, fromBlock)
     }
-  } else if (from <= toBlock) {
-    tail = await readPositionHistory(client, tokenIds, from, toBlock)
+    for (const id of next.ids.size === 0 ? tokenIds : fresh) next.ids.add(String(id))
   }
+  const stable = safeBlock < toBlock ? safeBlock : toBlock
+  if (stable > next.through) {
+    // The cursor only moves to a block whose hash is the same before the read and after it.
+    const before = await hashAt(stable)
+    const events = await historyEndingAt(client, [...next.ids].map(BigInt), next.through + 1n, stable, before)
+    if (events) {
+      next.events.push(...events)
+      next.through = stable
+      next.hash = before
+    }
+  }
+  // The tail starts after the cursor, never below it: a safe head that moved back cannot read a block twice.
+  // It ends at `toBlock`, whose hash the caller checks after this read (observe: the final block check).
+  const tailFrom = next.through + 1n
+  const tail = tailFrom <= toBlock ? await readPositionHistory(client, tokenIds, tailFrom, toBlock) : []
+  const wanted = new Set(tokenIds.map(String))
   return { events: [...next.events.filter((e) => wanted.has(String(e.tokenId)) && e.blockNumber <= toBlock), ...tail].sort(byChainOrder), next }
+}
+
+/**
+ * Position history of [fromBlock, toBlock] that is kept: it counts only if, asked after the log read, the
+ * provider has block `toBlock` with the hash the caller holds for it. Null when it has another hash. A log
+ * provider that is behind or on another fork cannot put events, or their absence, into the cursor this way;
+ * the operator's proxy applies the same rule to each provider it reads logs from.
+ */
+async function historyEndingAt(client: PublicClient, tokenIds: readonly bigint[], fromBlock: bigint, toBlock: bigint, expected: Hex): Promise<ChainPositionEvent[] | null> {
+  const events = await readPositionHistory(client, tokenIds, fromBlock, toBlock)
+  const after = (await client.getBlock({ blockNumber: toBlock })).hash
+  return after === expected ? events : null
 }
 
 /** Principal owed per tokenId just before (block, logIndex): the fold of the canonical history up to there. */
 export async function principalOwedBefore(client: PublicClient, tokenIds: readonly bigint[], fromBlock: bigint, at: { block: bigint; logIndex: number }): Promise<Map<bigint, Pair>> {
-  const history = await readPositionHistory(client, tokenIds, fromBlock, at.block)
+  // Nothing at or after (block, 0) is used: do not ask for a block that may not exist yet.
+  const history = await readPositionHistory(client, tokenIds, fromBlock, at.logIndex === 0 ? at.block - 1n : at.block)
   return applyPrincipal(new Map(), history.filter((e) => e.blockNumber < at.block || e.logIndex < at.logIndex))
 }
 
