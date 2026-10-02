@@ -72,6 +72,8 @@ const ARM_DAY_MS = 86_400_000
 const ARM_STALE_MS = 300_000
 /** Over the RPC budget an account with nothing in flight is still reviewed at least this often. */
 const BUDGET_REVIEW_MS = 900_000
+/** Over the RPC budget an operation left `included` is picked up at the normal pace for this long, then at the braked pace. */
+const BUDGET_RESUME_MS = 1_800_000
 /** The relayer does not pay to deploy a Safe that holds less than this (1 USDC). */
 export const MIN_DEPLOY_USDC = 1_000_000n
 /**
@@ -159,7 +161,7 @@ type Prepared = {
   meta?: { amountUsdc: string; asset?: string; to: Hex }
 }
 
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** When the last review started (ms); absent before the first. */ reviewedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -1455,11 +1457,16 @@ export class Operator {
    * started less than BUDGET_REVIEW_MS ago and the next review has nothing to finish. The only operation a
    * review picks up again is one left `included` (Engine.resumeIncluded, until `safe` reaches its block); every
    * other state is driven to its end inside the review that started it, or by the reconcile path, which the
-   * budget does not touch. Reads are never moved to another provider; the operator does less.
+   * budget does not touch. An operation can stay `included` without end (a `safe` head that does not move, an
+   * event that cannot be read again), so it holds the brake off for BUDGET_RESUME_MS and no longer: after
+   * that it is picked up at the braked pace. Reads are never moved to another provider; the operator does less.
    */
-  private reviewBraked(runner: Pick<Runner, 'engine' | 'reviewedAt'>, now: number = Date.now()): boolean {
+  private reviewBraked(runner: Pick<Runner, 'engine' | 'reviewedAt' | 'includedAt'>, now: number = Date.now()): boolean {
+    // Kept whatever the budget says: how long the journal has had an operation left `included`.
+    if (!runner.engine.journal.ops.some((o) => o.state === 'included')) runner.includedAt = undefined
+    else if (runner.includedAt === undefined || now < runner.includedAt) runner.includedAt = now
     if (!this.rpcOverBudget(now)) return false
-    if (runner.engine.journal.ops.some((o) => o.state === 'included')) return false
+    if (runner.includedAt !== undefined && now - runner.includedAt < BUDGET_RESUME_MS) return false
     return runner.reviewedAt !== undefined && now >= runner.reviewedAt && now - runner.reviewedAt < BUDGET_REVIEW_MS
   }
 

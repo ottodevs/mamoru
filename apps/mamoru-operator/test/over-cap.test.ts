@@ -816,7 +816,7 @@ describe('the armed watcher reads every armed Safe in one request', () => {
 
 // The keyed RPC provider has an hourly budget: over it the loops that can wait do less, and nothing is read elsewhere.
 describe('over the RPC budget the background loops slow down', () => {
-  type Run = { engine: { journal: { ops: { state: string }[] } }; reviewedAt?: number }
+  type Run = { engine: { journal: { ops: { state: string }[] } }; reviewedAt?: number; includedAt?: number }
   type Braked = { reviewBraked(r: Run, now?: number): boolean; checkArmed(): Promise<void>; armRead: Map<string, number>; cfg: { rpcBudget?: { over(): boolean; cuPerHour: number } } }
   const priv = (op: Operator) => op as unknown as Braked
   const budget = (op: Operator, over: boolean) => {
@@ -848,10 +848,46 @@ describe('over the RPC budget the background loops slow down', () => {
     expect(priv(w.op).reviewBraked({ engine: { journal: { ops: [] } } }, NOW)).toBe(false)
   })
 
-  test('over the budget an operation left included, which the next review finishes, is never skipped', () => {
+  test('over the budget an operation left included is picked up at the normal pace for 30 minutes, then at the braked pace', () => {
     const w = world(0n)
     budget(w.op, true)
-    expect(priv(w.op).reviewBraked({ engine: { journal: { ops: [{ state: 'confirmed' }, { state: 'included' }] } }, reviewedAt: NOW - 1_000 }, NOW)).toBe(false)
+    const run: Run = { engine: { journal: { ops: [{ state: 'confirmed' }, { state: 'included' }] } }, reviewedAt: NOW - 1_000 }
+    expect(priv(w.op).reviewBraked(run, NOW)).toBe(false)
+    expect(run.includedAt).toBe(NOW)
+    run.reviewedAt = NOW + 29 * 60_000 - 1_000
+    expect(priv(w.op).reviewBraked(run, NOW + 29 * 60_000)).toBe(false)
+    // Still included after 30 minutes (a safe head that does not move): the brake applies again, it is not off for good.
+    run.reviewedAt = NOW + 31 * 60_000 - 1_000
+    expect(priv(w.op).reviewBraked(run, NOW + 31 * 60_000)).toBe(true)
+    // And it is still reviewed, at the braked pace.
+    expect(priv(w.op).reviewBraked(run, NOW + 31 * 60_000 - 1_000 + 15 * 60_000)).toBe(false)
+  })
+
+  test('the 30 minutes are per operation: once it ends, the next one left included starts its own', () => {
+    const w = world(0n)
+    const b = budget(w.op, true)
+    const ops = [{ state: 'included' }]
+    const run: Run = { engine: { journal: { ops } }, reviewedAt: NOW - 1_000 }
+    expect(priv(w.op).reviewBraked(run, NOW)).toBe(false)
+    // It confirms while the budget is not over: the mark is cleared even though the brake was not asked.
+    ops[0]!.state = 'confirmed'
+    b.over = () => false
+    expect(priv(w.op).reviewBraked(run, NOW + 60_000)).toBe(false)
+    expect(run.includedAt).toBeUndefined()
+    // Two hours later another operation is left included, over the budget: it gets its own 30 minutes.
+    b.over = () => true
+    ops.push({ state: 'included' })
+    run.reviewedAt = NOW + 2 * 3_600_000 - 1_000
+    expect(priv(w.op).reviewBraked(run, NOW + 2 * 3_600_000)).toBe(false)
+    expect(run.includedAt).toBe(NOW + 2 * 3_600_000)
+  })
+
+  test('a clock set back does not stretch the 30 minutes of an included operation', () => {
+    const w = world(0n)
+    budget(w.op, true)
+    const run: Run = { engine: { journal: { ops: [{ state: 'included' }] } }, reviewedAt: NOW - 1_000, includedAt: NOW + 6 * 3_600_000 }
+    expect(priv(w.op).reviewBraked(run, NOW)).toBe(false)
+    expect(run.includedAt).toBe(NOW)
   })
 
   test('an operation no review picks up again does not switch the brake off: it would stay off for good', () => {
