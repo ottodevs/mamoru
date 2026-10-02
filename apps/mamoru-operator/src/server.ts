@@ -1,6 +1,9 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { Server } from 'bun'
 import type { AccountContext } from '@mamoru/domain'
+import { verifyMetricsSignature } from '@mamoru/operator-auth'
+import { logErr } from './metrics.ts'
+import type { RpcMetrics } from './metrics.ts'
 import { HttpError, type Operator } from './operator.ts'
 
 /** hex HMAC-SHA256(secret, `${method} ${path}\n${header}\n${body}`), path with its query string. */
@@ -23,7 +26,36 @@ function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body, wire), { status, headers: { 'content-type': 'application/json' } })
 }
 
-export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number }): Server<undefined> {
+/**
+ * GET /metrics payload: RPC traffic (per provider host, never the URL or a key), engine health per
+ * account (key shortened to 8 chars) and operator-level facts. No secrets, no session keys, no full
+ * account keys, no RPC URLs. See docs/operator-metrics.md.
+ */
+async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha: string, bootedAt: number): Promise<unknown> {
+  const rpc = rpcMetrics.snapshot()
+  const relayerBalance = await op.relayerBalance()
+  return {
+    generatedAt: new Date().toISOString(),
+    operator: {
+      uptimeSeconds: Math.round((Date.now() - bootedAt) / 1000),
+      gitSha,
+      chainId: op.cfg.chainId,
+      live: op.cfg.live,
+      policyId: op.cfg.policy.policyId,
+      relayer: { address: op.relayer.address, balanceWei: relayerBalance.wei, balanceCachedAgeMs: relayerBalance.cachedAgeMs },
+      accounts: op.accountsSummary(),
+    },
+    rpc: {
+      cumulative: rpc.cumulative,
+      cuEstimateTotal: rpc.cuEstimateTotal,
+      last48h: rpc.last48h,
+      note: 'cuEstimate is a static per-method estimate (see metrics.ts CU_TABLE), not Alchemy\'s billed figure',
+    },
+    engines: op.engineHealthSnapshot(),
+  }
+}
+
+export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number; rpcMetrics: RpcMetrics; gitSha: string; bootedAt: number }): Server<undefined> {
   return Bun.serve({
     hostname: opts.hostname,
     port: opts.port,
@@ -33,6 +65,12 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
       const path = url.pathname + url.search
       if (url.pathname === '/health') {
         return json(200, { ok: true, chainId: op.cfg.chainId, live: op.cfg.live, policy: op.cfg.policy.policyId, relayer: op.relayer.address })
+      }
+      if (url.pathname === '/metrics') {
+        if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
+        const sig = req.headers.get('x-mamoru-sig')
+        if (!(await verifyMetricsSignature(opts.secret, 'GET', '/metrics', sig))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+        return json(200, await buildMetricsPayload(op, opts.rpcMetrics, opts.gitSha, opts.bootedAt))
       }
       const m = ROUTE.exec(url.pathname)
       if (!m) return json(404, { error: 'not found' })
@@ -80,9 +118,13 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
             return json(405, { error: 'method not allowed' })
         }
       } catch (e) {
+        // HttpError's own message is always one of the fixed, operator-authored strings in
+        // operator.ts's SAFE_ERROR_MESSAGE table (or static/safe-dynamic text audited there) —
+        // never a raw caught exception's message — so it is safe to return as-is here. Anything
+        // that is NOT an HttpError is an unexpected failure: redact it to the journal, never to the client.
         if (e instanceof HttpError) return json(e.status, { error: e.message, code: e.code })
-        console.error(`[http] ${route} ${(e as Error).message.split('\n')[0]}`)
-        return json(500, { error: (e as Error).message.split('\n')[0], code: 'OPERATOR_ERROR' })
+        logErr(`[http] ${route}:`, e)
+        return json(500, { error: 'the operator hit an unexpected error handling this request', code: 'OPERATOR_ERROR' })
       }
     },
   })
