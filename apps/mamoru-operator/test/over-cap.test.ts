@@ -752,6 +752,49 @@ describe('the armed watcher reads every armed Safe in one request', () => {
     expect(out).toEqual([{ key: 'k', usdc: 5_000_000n }])
   })
 
+  test('more armed accounts than one request carries: a failed request loses only its own accounts', async () => {
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    await w.op.submit(ctx, 'activate', sign(tx))
+    const acc = w.state.accounts.k!
+    delete w.state.accounts.k
+    const safeOf = (i: number) => getAddress(toHex(0x1000 + i, { size: 20 }))
+    for (let i = 0; i < 150; i++) w.state.accounts[`a${i}`] = { ...acc, accountKey: `a${i}`, ctx: { ...acc.ctx, accountKey: `a${i}`, address: safeOf(i) } }
+    // A deposit in the first request's accounts and one in the second's.
+    balances(w.op, { [safeOf(3)]: 4_000_000n, [safeOf(120)]: 6_000_000n })
+    const client = clientOf(w.op)
+    const { call } = client
+    let requests = 0
+    client.call = async (a) => {
+      if (++requests === 2) throw new Error('HTTP request failed. Status: 429')
+      return call(a)
+    }
+    const out = fired(w.op)
+    await pass(w.op)
+    expect(requests).toBe(2)
+    expect(out).toEqual([{ key: 'a3', usdc: 4_000_000n }])
+    expect(priv(w.op).armRead.size).toBe(100)
+    // Next pass: the 50 accounts of the failed request are due at once, and their deposit is seen.
+    await pass(w.op)
+    expect(out).toContainEqual({ key: 'a120', usdc: 6_000_000n })
+    expect(priv(w.op).armRead.size).toBe(150)
+  })
+
+  test('the batch sees a deposit but the single read fails: nothing is executed and the next pass tries again', async () => {
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    const armed = await w.op.submit(ctx, 'activate', sign(tx))
+    w.state.accounts.k!.ops.find((o) => o.opId === armed.opId)!.updatedAt = new Date(Date.now() - 3 * 86_400_000).toISOString()
+    const fail = balances(w.op, { [SAFE]: 5_000_000n }, { single: true })
+    const out = fired(w.op)
+    await pass(w.op)
+    expect(out).toEqual([])
+    expect(w.state.accounts.k!.armed).toBeDefined()
+    fail.single = false
+    await pass(w.op)
+    expect(out).toEqual([{ key: 'k', usdc: 5_000_000n }])
+  })
+
   test('no armed account: no request at all', async () => {
     const w = world(0n)
     const seen = count(w.op)

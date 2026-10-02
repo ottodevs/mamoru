@@ -4,7 +4,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
-import { Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, type SimCallResult } from '@mamoru/rpc'
+import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, type SimCallResult } from '@mamoru/rpc'
 import { POLICIES, computeCaps, grantKey, hasManageAny, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
@@ -1019,8 +1019,12 @@ export class Operator {
    */
   private async checkArmed(): Promise<void> {
     const at = Date.now()
-    const armed = Object.values(this.store.state.accounts).filter((a) => a.armed && this.armDue(a, at))
-    if (armed.length === 0) return
+    const due = Object.values(this.store.state.accounts).filter((a) => a.armed && this.armDue(a, at))
+    // One request per BATCH_MAX_CALLS accounts, each on its own: a request that fails loses only its accounts, until the next pass.
+    for (let i = 0; i < due.length && !this.armStopped; i += BATCH_MAX_CALLS) await this.checkArmedGroup(due.slice(i, i + BATCH_MAX_CALLS), at)
+  }
+
+  private async checkArmedGroup(armed: AccountState[], at: number): Promise<void> {
     const batch = new Batch(this.client, MULTICALL3)
     const balances = armed.map((acc) => batch.add(contractRead(this.client, { address: address('USDC'), abi: erc20Abi, functionName: 'balanceOf', args: [acc.ctx.address as Address] })))
     try {
