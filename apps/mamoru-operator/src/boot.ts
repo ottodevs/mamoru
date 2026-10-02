@@ -1,14 +1,25 @@
 import { join } from 'node:path'
+import { $ } from 'bun'
 import { createPublicClient, http } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID } from '@mamoru/domain'
 import { POLICIES, withTestOverrides } from '@mamoru/policy'
 import { startLiveBundler } from './bundler.ts'
+import { RpcMetrics } from './metrics.ts'
 import { Operator } from './operator.ts'
 import { Relayer } from './relayer.ts'
 import { startRpcProxy } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
 import { StateStore, loadOrCreateKey } from './state.ts'
+
+/** `git rev-parse --short HEAD` at the operator's cwd, read once at boot. 'unknown' outside a git checkout. */
+async function gitShaOnce(cwd: string): Promise<string> {
+  try {
+    return (await $`git rev-parse --short HEAD`.cwd(cwd).quiet().text()).trim() || 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
 
 export type BootOptions = {
   rpcUrl: string
@@ -24,8 +35,11 @@ export type BootOptions = {
 
 /** Starts the operator: relayer key, state, loopback bundler, HTTP server, and the engine loops that were active. */
 export async function bootOperator(o: BootOptions) {
+  const bootedAt = Date.now()
+  const gitSha = await gitShaOnce(process.cwd())
+  const rpcMetrics = new RpcMetrics(o.stateDir)
   // Every RPC call of the operator, engine and bundler goes through the loopback proxy (getLogs splitting, no keyed URL in errors).
-  const proxy = startRpcProxy(o.rpcUrl)
+  const proxy = startRpcProxy(o.rpcUrl, { metrics: rpcMetrics })
   o = { ...o, rpcUrl: proxy.url }
   const client = createPublicClient({ transport: http(o.rpcUrl, { batch: true, timeout: 60_000 }) })
   const chainId = await client.getChainId()
@@ -52,9 +66,9 @@ export async function bootOperator(o: BootOptions) {
     relayer,
     store,
   )
-  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787 })
+  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt })
   const eth = await client.getBalance({ address: relayer.address })
-  console.log(`[operator] chain ${chainId} live=${live} policy ${policy.policyId} relayer ${relayer.address} (${eth} wei) on http://${server.hostname}:${server.port}`)
+  console.log(`[operator] chain ${chainId} live=${live} policy ${policy.policyId} relayer ${relayer.address} (${eth} wei) sha ${gitSha} on http://${server.hostname}:${server.port}`)
   operator.resume()
   return {
     operator,
@@ -64,6 +78,7 @@ export async function bootOperator(o: BootOptions) {
       server.stop(true)
       bundler.stop()
       proxy.stop()
+      rpcMetrics.persist()
     },
   }
 }

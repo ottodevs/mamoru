@@ -1,4 +1,5 @@
 import type { Server } from 'bun'
+import { classifyRpcError, redactSecrets, safeMetrics, type RpcMetrics } from './metrics.ts'
 
 type Req = { jsonrpc: '2.0'; id: unknown; method: string; params?: any[] }
 
@@ -26,12 +27,59 @@ function wellFormed(body: any): boolean {
   return !!body && typeof body === 'object' && ('result' in body || (body.error && typeof body.error === 'object'))
 }
 
-export function startRpcProxy(upstream: string, maxLogRange = Number(process.env.MAMORU_LOG_RANGE ?? 10)): { url: string; stop: () => void } {
+/** Second-level "public suffixes" where the registrable domain needs the last three labels, not two
+ * (co.uk, com.au, ...). Not a full public-suffix list — this only needs to be right for the handful
+ * of plausible RPC-provider/CDN domains, not to resolve eTLD+1 for arbitrary hostnames; an unlisted
+ * multi-part suffix just collapses one label further than ideal, never leaks one further than safe. */
+const MULTI_PART_SUFFIXES = new Set(['co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'co.jp', 'co.in', 'co.nz', 'co.kr', 'com.au', 'com.br', 'com.cn'])
+
+const IPV4_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/
+
+/**
+ * The registrable domain (eTLD+1) of a hostname: the last two labels, or the last three when the
+ * last two form a known multi-part suffix. Some providers put their API key in a subdomain
+ * (QuickNode: `<key>.base-mainnet.quiknode.pro`); the full hostname must never become a label, a
+ * `/metrics` field, or a line in the persisted ring file — only the registrable domain underneath it.
+ * An IPv4 address (the loopback proxy's own upstream in tests) or a bracketed IPv6 address has no
+ * "registrable domain" at all and is returned as-is, never split into its dotted octets/groups.
+ */
+function registrableDomain(hostname: string): string {
+  if (IPV4_RE.test(hostname) || hostname.includes(':')) return hostname
+  const labels = hostname.split('.').filter(Boolean)
+  if (labels.length <= 2) return hostname
+  const lastTwo = labels.slice(-2).join('.')
+  return labels.slice(-(MULTI_PART_SUFFIXES.has(lastTwo) ? 3 : 2)).join('.')
+}
+
+/** Provider URL -> display label: registrable domain only, `#1`/`#2` suffix when several providers
+ * share one (never a subdomain, the path, or a key — see `registrableDomain`). */
+export function labelProviders(providers: string[]): Map<string, string> {
+  const hosts = providers.map((p) => registrableDomain(new URL(p).hostname))
+  const totalPerHost = new Map<string, number>()
+  for (const h of hosts) totalPerHost.set(h, (totalPerHost.get(h) ?? 0) + 1)
+  const seen = new Map<string, number>()
+  const labels = new Map<string, string>()
+  providers.forEach((p, i) => {
+    const h = hosts[i]!
+    if ((totalPerHost.get(h) ?? 0) > 1) {
+      const idx = (seen.get(h) ?? 0) + 1
+      seen.set(h, idx)
+      labels.set(p, `${h}#${idx}`)
+    } else labels.set(p, h)
+  })
+  return labels
+}
+
+export function startRpcProxy(upstream: string, opts: { maxLogRange?: number; metrics?: RpcMetrics } = {}): { url: string; stop: () => void } {
+  const maxLogRange = opts.maxLogRange ?? Number(process.env.MAMORU_LOG_RANGE ?? 10)
+  const metrics = opts.metrics
   let id = 0
   const local = isLoopback(upstream)
   // Chunk getLogs for Alchemy (free tier: 10 blocks) or when MAMORU_LOG_RANGE is set; otherwise the range goes as is.
   const chunkLogs = /alchemy/i.test(new URL(upstream).hostname) || !!process.env.MAMORU_LOG_RANGE
   const providers = local ? [upstream] : [upstream, ...FALLBACKS.filter((f) => f !== upstream)]
+  const labels = labelProviders(providers)
+  const labelOf = (url: string) => labels.get(url) ?? registrableDomain(new URL(url).hostname)
   async function post(url: string, body: unknown): Promise<{ status: number; json: any }> {
     const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) })
     let json: any = null
@@ -41,27 +89,36 @@ export function startRpcProxy(upstream: string, maxLogRange = Number(process.env
     return { status: res.status, json }
   }
   /** On a rate/capacity refusal, move to the next provider at once; two passes over the list. Always returns a result/error object. */
-  async function raw(body: any): Promise<any> {
+  async function raw(body: any, isChunk = false): Promise<any> {
     let last: any = null
-    for (const [pi, url] of [...providers, ...providers].entries()) {
+    const all = [...providers, ...providers]
+    for (const [pi, url] of all.entries()) {
+      const label = labelOf(url)
       const tries = 1
       if (pi === providers.length) await Bun.sleep(250)
       for (let attempt = 0; attempt < tries; attempt++) {
         try {
           const r = await post(url, body)
+          if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk))
+          const errObj = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
+          if (errObj && metrics) safeMetrics(() => metrics.recordError(label, body.method, classifyRpcError(r.status, errObj)))
           if (wellFormed(r.json) && !retriable(r.status, r.json)) return r.json
-          last = r.json?.error ?? { code: -32603, message: `upstream HTTP ${r.status}` }
+          last = errObj
         } catch (e) {
+          if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk))
           last = { code: -32603, message: (e as Error).message.split('\n')[0] }
+          if (metrics) safeMetrics(() => metrics.recordError(label, body.method, classifyRpcError(undefined, last)))
         }
         if (attempt + 1 < tries) await Bun.sleep(400 * 2 ** attempt)
       }
-      if (pi === 0 && providers.length > 1 && process.env.MAMORU_RPC_LOG) console.log(`[rpc] ${body?.method} falling back after: ${String(last?.message).slice(0, 120)}`)
+      const next = all[pi + 1]
+      if (next !== undefined && next !== url && metrics) safeMetrics(() => metrics.recordFallback(label, body.method))
+      if (pi === 0 && providers.length > 1 && process.env.MAMORU_RPC_LOG) console.log(`[rpc] ${body?.method} falling back after: ${redactSecrets(last?.message).slice(0, 120)}`)
     }
     return { jsonrpc: '2.0', id: body?.id ?? null, error: { code: typeof last?.code === 'number' ? last.code : -32603, message: String(last?.message ?? 'upstream unavailable') } }
   }
-  async function one(method: string, params: unknown[]): Promise<any> {
-    const r = await raw({ jsonrpc: '2.0', id: ++id, method, params })
+  async function one(method: string, params: unknown[], isChunk = false): Promise<any> {
+    const r = await raw({ jsonrpc: '2.0', id: ++id, method, params }, isChunk)
     if (r.error) throw Object.assign(new Error(r.error.message), { rpc: r.error })
     return r.result
   }
@@ -84,7 +141,7 @@ export function startRpcProxy(upstream: string, maxLogRange = Number(process.env
     }
     const out: unknown[] = []
     for (let i = 0; i < ranges.length; i += 4) {
-      const chunk = await Promise.all(ranges.slice(i, i + 4).map(([a, b]) => one('eth_getLogs', [{ ...filter, fromBlock: `0x${a.toString(16)}`, toBlock: `0x${b.toString(16)}` }])))
+      const chunk = await Promise.all(ranges.slice(i, i + 4).map(([a, b]) => one('eth_getLogs', [{ ...filter, fromBlock: `0x${a.toString(16)}`, toBlock: `0x${b.toString(16)}` }], true)))
       for (const c of chunk) out.push(...(c as unknown[]))
     }
     return out
@@ -100,7 +157,7 @@ export function startRpcProxy(upstream: string, maxLogRange = Number(process.env
     const r = await handleInner(msg)
     // Name the call behind an invalid-params refusal: the engine only sees the message.
     const e = (r as any)?.error
-    if (e && (e.code === -32602 || /invalid param/i.test(String(e.message)))) console.log(`[rpc] ${msg.method} refused (${e.code}): ${JSON.stringify(msg.params ?? []).slice(0, 300)}`)
+    if (e && (e.code === -32602 || /invalid param/i.test(String(e.message)))) console.log(`[rpc] ${msg.method} refused (${e.code}): ${redactSecrets(JSON.stringify(msg.params ?? [])).slice(0, 300)}`)
     return r
   }
   async function handleInner(msg: Req): Promise<unknown> {

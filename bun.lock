@@ -60,6 +60,7 @@
         "@mamoru/domain": "workspace:*",
         "@mamoru/erc4337": "workspace:*",
         "@mamoru/journal": "workspace:*",
+        "@mamoru/operator-auth": "workspace:*",
         "@mamoru/policy": "workspace:*",
         "@mamoru/registry": "workspace:*",
         "@mamoru/rpc": "workspace:*",
@@ -128,6 +129,10 @@
       "dependencies": {
         "@mamoru/domain": "workspace:*",
       },
+    },
+    "packages/operator-auth": {
+      "name": "@mamoru/operator-auth",
+      "version": "0.0.0",
     },
     "packages/policy": {
       "name": "@mamoru/policy",
@@ -355,6 +360,8 @@
     "@mamoru/multibaas": ["@mamoru/multibaas@workspace:packages/multibaas"],
 
     "@mamoru/operator": ["@mamoru/operator@workspace:apps/mamoru-operator"],
+
+    "@mamoru/operator-auth": ["@mamoru/operator-auth@workspace:packages/operator-auth"],
 
     "@mamoru/policy": ["@mamoru/policy@workspace:packages/policy"],
 

@@ -18,6 +18,7 @@
     "@mamoru/domain": "workspace:*",
     "@mamoru/erc4337": "workspace:*",
     "@mamoru/journal": "workspace:*",
+    "@mamoru/operator-auth": "workspace:*",
     "@mamoru/policy": "workspace:*",
     "@mamoru/registry": "workspace:*",
     "@mamoru/rpc": "workspace:*",
