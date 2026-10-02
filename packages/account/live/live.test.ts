@@ -328,3 +328,15 @@ describe.skipIf(!RUN_FORK)('live owner path on a Base fork', () => {
     ).rejects.toThrow()
   }, 180_000)
 })
+
+describe('assertion shape logging', () => {
+  test('only WebAuthn-defined clientDataJSON key names are kept; others are counted', async () => {
+    const { assertionShape, safeClientDataKeys } = await import('./index.ts')
+    expect(safeClientDataKeys(['type', 'challenge', 'origin', 'crossOrigin'])).toEqual(['type', 'challenge', 'origin', 'crossOrigin'])
+    expect(safeClientDataKeys(['type', 'cred-AAAAsecretBBBB', 'challenge', '0xdeadbeef'])).toEqual(['type', 'challenge', '+2'])
+    const clientDataJSON = new TextEncoder().encode(JSON.stringify({ type: 'webauthn.get', 'leak-my-credential-id': 1, challenge: 'x' }))
+    const shape = assertionShape({ authenticatorData: new Uint8Array(37), clientDataJSON, signature: new Uint8Array(8) })
+    expect(JSON.stringify(shape)).not.toContain('leak-my-credential-id')
+    expect(shape.clientDataKeys).toEqual(['type', 'challenge', '+1'])
+  })
+})
