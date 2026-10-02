@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import type { PublicClient } from 'viem'
+import { encodeAbiParameters, encodeEventTopics, numberToHex, zeroAddress, type Hex, type PublicClient } from 'viem'
+import { positionEventsAbi } from '@mamoru/projector'
+import { address } from '@mamoru/registry'
 import { historyCursor, readPositionHistory, readPositionHistoryFrom as readFrom, type HistoryCursor } from '../src/index.ts'
 
 // Read and commit, as a consistent observe() does.
@@ -9,9 +11,11 @@ async function readPositionHistoryFrom(client: PublicClient, cursor: HistoryCurs
   return events
 }
 
+const NPM = address('NonfungiblePositionManager')
+
 type Raw = { eventName: 'DecreaseLiquidity' | 'Collect'; tokenId: bigint; block: bigint; logIndex: number }
 
-// Fake client: serves logs by event name, tokenId and block range, and records every range asked.
+// Fake client: serves logs by tokenId and block range, and records every range asked.
 function fakeClient(logs: Raw[]) {
   const ranges: [bigint, bigint][] = []
   const forks = new Set<bigint>()
@@ -19,12 +23,24 @@ function fakeClient(logs: Raw[]) {
     async getBlock({ blockNumber }: any) {
       return { number: blockNumber, hash: `0x${forks.has(blockNumber) ? 'f' : 'a'}${blockNumber.toString(16)}` }
     },
-    async getLogs({ event, args, fromBlock, toBlock }: any) {
+    // One eth_getLogs for both events: topic 0 is either signature, topic 1 any of the tokenIds.
+    async request({ params: [filter] }: any) {
+      const [fromBlock, toBlock] = [BigInt(filter.fromBlock), BigInt(filter.toBlock)]
       ranges.push([fromBlock, toBlock])
-      const ids = new Set((args.tokenId as bigint[]).map(String))
+      const ids = new Set((filter.topics[1] as Hex[]).map((t) => String(BigInt(t))))
       return logs
-        .filter((l) => l.eventName === event.name && ids.has(String(l.tokenId)) && l.block >= fromBlock && l.block <= toBlock)
-        .map((l) => ({ eventName: l.eventName, args: { tokenId: l.tokenId, amount0: 1n, amount1: 2n }, logIndex: l.logIndex, blockNumber: l.block, transactionHash: '0x01' }))
+        .filter((l) => ids.has(String(l.tokenId)) && l.block >= fromBlock && l.block <= toBlock)
+        .map((l) => ({
+          address: NPM,
+          topics: encodeEventTopics({ abi: positionEventsAbi, eventName: l.eventName, args: { tokenId: l.tokenId } }),
+          data: encodeAbiParameters([{ type: l.eventName === 'Collect' ? 'address' : 'uint128' }, { type: 'uint256' }, { type: 'uint256' }], [l.eventName === 'Collect' ? zeroAddress : 0n, 1n, 2n]),
+          logIndex: numberToHex(l.logIndex),
+          blockNumber: numberToHex(l.block),
+          blockHash: `0x${'00'.repeat(32)}`,
+          transactionHash: `0x${'01'.repeat(32)}`,
+          transactionIndex: '0x0',
+          removed: false,
+        }))
     },
   } as unknown as PublicClient
   return { client, ranges, forks }
@@ -48,9 +64,11 @@ describe('readPositionHistoryFrom', () => {
     expect(cursor.through).toBe(145n)
     ranges.length = 0
     const second = await readPositionHistoryFrom(client, cursor, [1n, 2n], 100n, 200n, 195n)
+    // Second call: one read from 146 for the stable part and the unsafe tail; nothing below the cursor again.
+    expect(ranges).toEqual([[146n, 200n]])
+    expect(cursor.through).toBe(195n)
+    expect(cursor.events.every((e) => e.blockNumber <= 195n)).toBe(true)
     expect(second.map(key)).toEqual((await readPositionHistory(client, [1n, 2n], 100n, 200n)).map(key))
-    // Second call: stable part from 146, unsafe tail from 196; nothing below the cursor again.
-    expect(ranges.slice(0, 4).every(([from]) => from >= 146n)).toBe(true)
   })
 
   test('backfills a tokenId added after the cursor moved', async () => {
@@ -67,6 +85,35 @@ describe('readPositionHistoryFrom', () => {
     const r = await readPositionHistoryFrom(client, cursor, [1n], 100n, 200n, 150n)
     expect(r.map(key)).toContain('decrease:1@190.3')
     expect(cursor.events.some((e) => e.blockNumber > 150n)).toBe(false)
+  })
+
+  test('the caller\'s safe block hash stands in for the reads of that block', async () => {
+    const { client } = fakeClient(LOGS)
+    const asked: bigint[] = []
+    const getBlock = (client as any).getBlock
+    ;(client as any).getBlock = async (q: any) => (asked.push(q.blockNumber), getBlock(q))
+    const cursor = historyCursor()
+    await readFrom(client, cursor, [1n], 100n, 150n, 145n, '0xa91').then(({ next }) => Object.assign(cursor, next))
+    // Only the read after the logs: the hash before them is the caller's.
+    expect(asked).toEqual([145n])
+    expect(cursor.hash).toBe('0xa91')
+    // Same safe block on the next call: the cursor is checked against the caller's hash, with no request.
+    asked.length = 0
+    await readFrom(client, cursor, [1n], 100n, 160n, 145n, '0xa91')
+    expect(asked).toEqual([])
+    // A caller's hash that differs from the cursor's is a reorg: start over.
+    const { next } = await readFrom(client, cursor, [1n], 100n, 160n, 145n, '0xf91')
+    expect(next.through).toBe(99n)
+  })
+
+  test('a tokenId the caller no longer wants is left out of the tail', async () => {
+    const { client } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    await readPositionHistoryFrom(client, cursor, [1n, 2n], 100n, 120n, 120n)
+    const r = await readPositionHistoryFrom(client, cursor, [2n], 100n, 200n, 150n)
+    expect(r.map(key)).toEqual(['collect:2@140.0'])
+    // The cursor still follows both ids below the safe block.
+    expect(cursor.events.map(key)).toContain('decrease:1@105.0')
   })
 
   test('no tokenIds reads nothing', async () => {
@@ -120,10 +167,10 @@ describe('readPositionHistoryFrom', () => {
 
   test('a reorg during the read does not move the cursor', async () => {
     const { client, forks } = fakeClient(LOGS)
-    const getLogs = (client as any).getLogs
-    ;(client as any).getLogs = async (q: any) => {
+    const request = (client as any).request
+    ;(client as any).request = async (q: any) => {
       forks.add(150n)
-      return getLogs(q)
+      return request(q)
     }
     const { events, next } = await readFrom(client, historyCursor(), [1n], 100n, 150n, 150n)
     expect(next.through).toBe(99n)
