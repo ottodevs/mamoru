@@ -223,6 +223,13 @@ class Buckets {
     }
   }
 
+  /** CU estimate over every provider and method of this bucket. */
+  cuTotal(): number {
+    let total = 0
+    for (const byMethod of this.providers.values()) for (const c of byMethod.values()) total += c.cuEstimate
+    return total
+  }
+
   toJSON(): RpcSnapshot {
     const out: RpcSnapshot = Object.create(null) as RpcSnapshot
     for (const [provider, byMethod] of this.providers) {
@@ -339,6 +346,11 @@ export class RpcMetrics {
     } catch (e) {
       console.error(`[metrics] failed to persist ${this.file}: ${redactedLine(e)}`)
     }
+  }
+
+  /** CU estimate billed in the clock hour of `now`, over every provider (labels and folding into "other" do not matter). */
+  cuThisHour(now: number = Date.now()): number {
+    return this.ring.get(Math.floor(now / HOUR_MS) * HOUR_MS)?.cuTotal() ?? 0
   }
 
   cuEstimateTotal(): number {

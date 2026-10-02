@@ -33,6 +33,7 @@ import { minOut, quoteExactInputSingle } from '@mamoru/uniswap-v3/quote'
 import { Engine, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import { isTerminal } from '@mamoru/journal'
+import type { RpcBudget } from './budget.ts'
 import { USDC_POOLS, amountsForLiquidity, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
 import { Lock } from './lock.ts'
@@ -69,6 +70,8 @@ const ARM_FRESH_MS = 3_600_000
 const ARM_IDLE_MS = 60_000
 const ARM_DAY_MS = 86_400_000
 const ARM_STALE_MS = 300_000
+/** Over the RPC budget an account with nothing in flight is still reviewed at least this often. */
+const BUDGET_REVIEW_MS = 900_000
 /** The relayer does not pay to deploy a Safe that holds less than this (1 USDC). */
 export const MIN_DEPLOY_USDC = 1_000_000n
 /**
@@ -136,6 +139,8 @@ export type OperatorConfig = {
   reviewMs: number
   waitBlockMs: number
   maxWaitBlocks: number
+  /** Hourly budget of the keyed RPC provider; absent: no limit. */
+  rpcBudget?: RpcBudget
 }
 
 type OwnerKind = 'activate' | 'transfer' | 'stop'
@@ -154,7 +159,7 @@ type Prepared = {
   meta?: { amountUsdc: string; asset?: string; to: Hex }
 }
 
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** When the last review started (ms); absent before the first. */ reviewedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -214,6 +219,8 @@ export class Operator {
   /** Armed watcher, in memory: when each armed Safe was last read, and when its owner was last seen (funding poll, deposit). */
   private readonly armRead = new Map<string, number>()
   private readonly armSeen = new Map<string, number>()
+  /** When the watcher last made a pass (ms). */
+  private armPassAt = 0
   private armStopped = false
   /** Owner transactions being executed right now, by accountKey. */
   private readonly busy = new Map<string, Progress>()
@@ -1019,6 +1026,9 @@ export class Operator {
    */
   private async checkArmed(): Promise<void> {
     const at = Date.now()
+    // Over the RPC budget the watcher passes once a minute instead of every ARM_WATCH_MS.
+    if (this.rpcOverBudget(at) && at >= this.armPassAt && at - this.armPassAt < ARM_IDLE_MS) return
+    this.armPassAt = at
     const due = Object.values(this.store.state.accounts).filter((a) => a.armed && this.armDue(a, at))
     // One request per BATCH_MAX_CALLS accounts, each on its own: a request that fails loses only its accounts, until the next pass.
     for (let i = 0; i < due.length && !this.armStopped; i += BATCH_MAX_CALLS) await this.checkArmedGroup(due.slice(i, i + BATCH_MAX_CALLS), at)
@@ -1387,7 +1397,8 @@ export class Operator {
       if (runner.stopped) return
       try {
       await this.lock(acc.accountKey).run(async () => {
-        if (runner.stopped) return
+        if (runner.stopped || this.reviewBraked(runner)) return
+        runner.reviewedAt = Date.now()
         try {
           // The provider may still serve a block before the activation that enabled the grants: wait for it.
           const head = await this.client.getBlockNumber()
@@ -1438,6 +1449,29 @@ export class Operator {
     }
     runner.timer = setTimeout(tick, 0)
     console.log(`[engine ${acc.accountKey}] loop started for ${acc.ctx.address} every ${this.cfg.reviewMs}ms`)
+  }
+
+  /**
+   * Over the hourly RPC budget, a review that can wait is skipped: the account has nothing in flight and was
+   * reviewed less than BUDGET_REVIEW_MS ago. Reads are never moved to another provider; the operator does less.
+   */
+  private reviewBraked(runner: Pick<Runner, 'engine' | 'reviewedAt'>, now: number = Date.now()): boolean {
+    if (!this.rpcOverBudget(now)) return false
+    if (runner.engine.journal.ops.some((o) => !isTerminal(o.state))) return false
+    return runner.reviewedAt !== undefined && now >= runner.reviewedAt && now - runner.reviewedAt < BUDGET_REVIEW_MS
+  }
+
+  private budgetLoggedHour = -1
+  /** Whether the keyed provider spent its hour; says so once per hour. */
+  private rpcOverBudget(now: number): boolean {
+    const budget = this.cfg.rpcBudget
+    if (!budget?.over(now)) return false
+    const hour = Math.floor(now / 3_600_000)
+    if (hour !== this.budgetLoggedHour) {
+      this.budgetLoggedHour = hour
+      console.log(`[budget] keyed RPC provider over ${budget.cuPerHour} CU this hour: reviews at most every ${BUDGET_REVIEW_MS / 60_000} min and the armed watcher once a minute until the hour ends; owner operations are not affected`)
+    }
+    return true
   }
 
   private stopLoop(key: string): void {

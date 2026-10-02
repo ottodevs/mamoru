@@ -4,6 +4,7 @@ import { createPublicClient, http } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID } from '@mamoru/domain'
 import { POLICIES, withTestOverrides } from '@mamoru/policy'
+import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
 import { Operator } from './operator.ts'
@@ -61,6 +62,7 @@ export async function bootOperator(o: BootOptions) {
       reviewMs: o.reviewMs ?? 20_000,
       waitBlockMs: o.waitBlockMs ?? 2_100,
       maxWaitBlocks: o.maxWaitBlocks ?? 150,
+      rpcBudget: rpcBudget(rpcMetrics),
     },
     client,
     relayer,
