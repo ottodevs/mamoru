@@ -56,6 +56,8 @@ export type AccountState = {
   seq: number
   /** Signed activation waiting for the first USDC deposit. */
   armed?: ArmedActivation
+  /** When owner executions of this account failed (ISO), last 24 h: the relayer's failure budget. */
+  ownerFailures?: string[]
 }
 
 export type OperatorState = { accounts: Record<string, AccountState> }

@@ -1,4 +1,4 @@
-import { concat, encodeAbiParameters, encodeFunctionData, hashTypedData, hexToBigInt, numberToHex, pad, size, toHex, type PublicClient } from 'viem'
+import { concat, decodeAbiParameters, encodeAbiParameters, encodeFunctionData, hashTypedData, hexToBigInt, hexToBytes, numberToHex, pad, size, toHex, type PublicClient } from 'viem'
 import type { AccountContext, Address, Hex, OwnerSignature } from '@mamoru/domain'
 import { address, erc20Abi, safeAbi } from '@mamoru/registry'
 import type { SessionGrant } from '@mamoru/policy'
@@ -168,36 +168,33 @@ export function fromB64url(s: string): Uint8Array {
   return Uint8Array.from(bin, (c) => c.charCodeAt(0))
 }
 
-/** ASN.1 DER ECDSA-Sig-Value -> r, low s. */
+/**
+ * Strict ASN.1 DER ECDSA-Sig-Value -> r, low s. One SEQUENCE of exactly two INTEGERs and nothing after it; each
+ * INTEGER positive and minimal (a leading 0x00 only when the next byte has its high bit set, which is how every
+ * authenticator encodes a value >= 2^255); r and s in [1, n-1].
+ * High s is accepted and normalised to low s: authenticators emit it about half the time, and the on-chain verifier
+ * (SafeWebAuthnSharedSigner over RIP-7212 / P256Verifier) accepts both forms, so rejecting it would fail real owners.
+ * The normalised (r, s) is what goes on chain and what the off-chain checks verify.
+ */
 export function parseDerSignature(der: Uint8Array): { r: bigint; s: bigint } {
-  let i = 0
-  const byte = () => {
-    const b = der[i++]
-    if (b === undefined) throw new Error('DER signature truncated')
-    return b
-  }
-  const len = () => {
-    let l = byte()
-    if (l & 0x80) {
-      const n = l & 0x7f
-      l = 0
-      for (let k = 0; k < n; k++) l = (l << 8) | byte()
-    }
-    return l
-  }
-  if (byte() !== 0x30) throw new Error('DER signature: expected SEQUENCE')
-  const seqLen = len()
-  if (i + seqLen !== der.length) throw new Error('DER signature: bad length')
+  // 2 + 2 * (2 + 33): a P-256 signature never needs the long length form, so a 0x8x length is not DER here.
+  if (der.length < 2 || der.length > 72) throw new Error('DER signature: bad length')
+  if (der[0] !== 0x30) throw new Error('DER signature: expected SEQUENCE')
+  if (der[1]! & 0x80 || der[1]! !== der.length - 2) throw new Error('DER signature: bad length')
+  let i = 2
   const int = () => {
-    if (byte() !== 0x02) throw new Error('DER signature: expected INTEGER')
-    const l = len()
-    if (l === 0 || i + l > der.length) throw new Error('DER signature: bad INTEGER')
-    const v = BigInt(toHex(der.subarray(i, i + l)))
-    i += l
-    return v
+    if (der[i] !== 0x02) throw new Error('DER signature: expected INTEGER')
+    const l = der[i + 1]
+    if (l === undefined || l === 0 || l > 33 || i + 2 + l > der.length) throw new Error('DER signature: bad INTEGER')
+    const body = der.subarray(i + 2, i + 2 + l)
+    if (body[0]! & 0x80) throw new Error('DER signature: negative INTEGER')
+    if (l > 1 && body[0] === 0 && !(body[1]! & 0x80)) throw new Error('DER signature: non-minimal INTEGER')
+    i += 2 + l
+    return BigInt(toHex(body))
   }
   const r = int()
   let s = int()
+  if (i !== der.length) throw new Error('DER signature: trailing data')
   if (r === 0n || r >= P256_N || s === 0n || s >= P256_N) throw new Error('DER signature out of range')
   if (s > P256_N / 2n) s = P256_N - s
   return { r, s }
@@ -238,6 +235,55 @@ export function browserOwnerSignature(sig: OwnerSignature, safeTxHash?: Hex): He
   if (safeTxHash && toHex(fromB64url(challenge)).toLowerCase() !== safeTxHash.toLowerCase()) throw new Error('assertion challenge is not the safeTxHash')
   const { r, s } = parseDerSignature(fromB64url(sig.signature))
   return safeContractSignature(address('SafeWebAuthnSharedSigner'), encodeWebAuthnSignature({ authenticatorData, clientDataFields: fields, r, s }))
+}
+
+/** authenticatorData flag SafeWebAuthnSharedSigner requires (WebAuthn.USER_VERIFICATION). */
+const FLAG_UV = 0x04
+
+function toB64url(bytes: Uint8Array): string {
+  let bin = ''
+  for (const b of bytes) bin += String.fromCharCode(b)
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+/** The parts of a Safe contract signature built by safeContractSignature(SafeWebAuthnSharedSigner, encodeWebAuthnSignature(...)). */
+export function decodeOwnerSignature(signature: Hex): { authenticatorData: Hex; clientDataFields: string; r: bigint; s: bigint } {
+  const bytes = hexToBytes(signature)
+  if (bytes.length < 97) throw new Error('owner signature too short')
+  const signer = toHex(bytes.subarray(12, 32))
+  const padding = hexToBigInt(toHex(bytes.subarray(0, 12)))
+  if (padding !== 0n || signer.toLowerCase() !== address('SafeWebAuthnSharedSigner').toLowerCase()) throw new Error('owner signature is not from SafeWebAuthnSharedSigner')
+  if (hexToBigInt(toHex(bytes.subarray(32, 64))) !== 65n || bytes[64] !== 0) throw new Error('owner signature is not one contract signature')
+  if (hexToBigInt(toHex(bytes.subarray(65, 97))) !== BigInt(bytes.length - 97)) throw new Error('owner signature length mismatch')
+  const [authenticatorData, clientDataFields, r, s] = decodeAbiParameters([{ type: 'bytes' }, { type: 'string' }, { type: 'uint256' }, { type: 'uint256' }], toHex(bytes.subarray(97)))
+  return { authenticatorData, clientDataFields, r, s }
+}
+
+/**
+ * Off-chain copy of what SafeWebAuthnSharedSigner checks for this account: the passkey (x, y) signed, with user
+ * verification, a WebAuthn assertion whose challenge is `safeTxHash`. safeTxHash is the EIP-712 hash over the Safe
+ * address, the chain id and the SafeTx with its nonce, so a true result means "this owner signed exactly this
+ * transaction". Run it before the relayer spends anything: a forged signature must cost the relayer nothing.
+ */
+export async function verifyOwnerSignature(signature: Hex, safeTxHash: Hex, key: { x: bigint; y: bigint }): Promise<boolean> {
+  try {
+    const { authenticatorData, clientDataFields, r, s } = decodeOwnerSignature(signature)
+    const auth = hexToBytes(authenticatorData)
+    if (auth.length < 37 || !(auth[32]! & FLAG_UV)) return false
+    if (r === 0n || r >= P256_N || s === 0n || s >= P256_N) return false
+    // The contract rebuilds clientDataJSON around the hash it is asked about; so does this.
+    const clientDataJSON = `${CLIENT_DATA_PREFIX}${toB64url(hexToBytes(safeTxHash))}",${clientDataFields}}`
+    const clientHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(clientDataJSON)))
+    const message = new Uint8Array(auth.length + 32)
+    message.set(auth)
+    message.set(clientHash, auth.length)
+    const point = hexToBytes(concat(['0x04', numberToHex(key.x, { size: 32 }), numberToHex(key.y, { size: 32 })]))
+    const pub = await crypto.subtle.importKey('raw', point as Uint8Array<ArrayBuffer>, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify'])
+    const raw = hexToBytes(concat([numberToHex(r, { size: 32 }), numberToHex(s, { size: 32 })]))
+    return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, raw as Uint8Array<ArrayBuffer>, message)
+  } catch {
+    return false
+  }
 }
 
 export function execData(tx: SafeTx, signature: Hex): Hex {

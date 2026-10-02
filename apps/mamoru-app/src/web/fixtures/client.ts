@@ -34,6 +34,7 @@ export const fixtureFunding: FundingView = {
   usdc: '20000000',
   eth: '0',
   capUsdc: '25000000',
+  deployMinUsdc: '1000000',
   cbbtc: '0',
   gasReserveWei: '300000000000000',
   active: false,

@@ -56,6 +56,8 @@ export type FundingView = {
   capUsdc: string         // hard cap per account, base units
   // Set while the engine is not running and the Safe holds more USDC than the cap: Start is refused until the excess leaves.
   overCap?: OverCap | null
+  // The relayer deploys the Safe only once it holds this much USDC (base units); below it nothing starts and nothing can be sent.
+  deployMinUsdc?: string
   cbbtc: string           // base units
   gasReserveWei: string   // the relayer tops the Safe up to this at activation
   active: boolean         // engine grants enabled and the engine loop running

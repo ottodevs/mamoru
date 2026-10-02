@@ -9,7 +9,7 @@ import { BasescanLink, Brand, Modal, Waiting } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
-import { cbbtcPrice, ceilCents, humanMessage, overCapOf, split, usd, usdInput, usdPlain, type Split } from '../lib/money.ts'
+import { belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, overCapOf, split, usd, usdInput, usdPlain, type Split } from '../lib/money.ts'
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, positionAmounts, positionTokens, progressLine } from '../lib/positions.ts'
@@ -38,6 +38,8 @@ export const homeCopy = {
   createFirst: 'Your account is created on Base first, then the USDC is sent.',
   overCapTitle: (o: OverCap) => `This account is over the ${usdPlain(o.capUsdc)} USDC cap, so Mamoru has not started.`,
   overCapBody: (o: OverCap) => `It holds ${usd(o.usdc)} USDC. Nothing was moved. Withdraw at least ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC to an address you control, then start Mamoru.`,
+  belowTitle: (min: bigint) => `Mamoru starts from ${usdPlain(min)} USDC.`,
+  belowBody: (usdc: bigint, missing: bigint) => `This account holds ${usd(usdc)} USDC, so it has not started. Add at least ${usd(ceilCents(missing))} USDC more.`,
   overCapAct: (o: OverCap) => `Withdraw ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC`,
 }
 
@@ -528,8 +530,11 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const armed = activationLive(opList)
   // Stopped after running: the Working card offers the restart where Stop was, so no Start row too.
   const stopped = !!f && !f.active && f.positions.length === 0 && !inFlight && everStarted(opList)
-  // Over the cap the operator refuses Start, so the only action offered is the withdraw that fixes it.
-  const over = inFlight ? null : overCapOf(f)
+  // Over the cap the operator refuses Start, so the only action offered is the withdraw that fixes it. This state
+  // wins over an armed activation (which the cap will refuse anyway); only a withdraw already on its way hides it.
+  const withdrawing = opList.some((o) => o.kind === 'transfer' && !TERMINAL.has(o.state))
+  const over = withdrawing ? null : overCapOf(f)
+  const below = belowMinimumOf(f)
   const canRestart = stopped && !!s && s.idleUsdc > 0n && !over
   const withdraw = (seed = '') => {
     setWithdrawSeed(seed)
@@ -561,6 +566,16 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         <>
           {over ? (
             <OverCapRow over={over} onWithdraw={() => withdraw(usdInput(ceilCents(BigInt(over.excessUsdc))))} />
+          ) : below ? (
+            <section className="card flex flex-wrap items-center justify-between gap-3" data-testid="below-minimum" role="status">
+              <span className="max-w-[40rem]">
+                <span className="title">{homeCopy.belowTitle(below.minUsdc)}</span>
+                <span className="sub">{homeCopy.belowBody(below.usdc, below.missingUsdc)}</span>
+              </span>
+              <button type="button" className="act" onClick={() => setDialog('add')}>
+                {homeCopy.add}
+              </button>
+            </section>
           ) : !f.active && !inFlight && !armed && !stopped ? (
             <StartRow accountKey={accountKey} funded={hasMoney(f)} />
           ) : null}

@@ -13,16 +13,20 @@ import {
   activationBatch,
   browserOwnerSignature,
   clientDataFieldsOf,
+  decodeOwnerSignature,
   deployCall,
+  encodeWebAuthnSignature,
   execData,
   liveAccountFromContext,
   ownerSafeTx,
   parseDerSignature,
   P256_N,
   readSafeNonce,
+  safeContractSignature,
   safeTxHashOf,
   stopBatch,
   transferBatch,
+  verifyOwnerSignature,
   type LiveAccount,
 } from './index.ts'
 // Lab helpers (fork, whale, software passkey) live in the scenarios package.
@@ -85,6 +89,74 @@ describe('live owner path: pure', () => {
     const a = p.assert(('0x' + '11'.repeat(32)) as Hex)
     expect(parseDerSignature(der(a.r, P256_N - a.s))).toEqual({ r: a.r, s: a.s })
     expect(parseDerSignature(der(a.r, a.s))).toEqual({ r: a.r, s: a.s })
+  })
+
+  test('DER is strict: each malformed shape is refused, and what authenticators emit passes', () => {
+    const hex = (h: string) => Uint8Array.from(Buffer.from(h.replace(/\s+/g, ''), 'hex'))
+    const one = '0201' + '01'
+    const top = '0221' + '00' + 'ff'.padEnd(64, '0') // 33 bytes: 0x00 then a value with the high bit set
+    const order = P256_N.toString(16)
+    const cases: [string, string, string][] = [
+      ['trailing byte after the sequence', '3006' + one + one + '00', 'bad length'],
+      ['sequence length shorter than the content', '3005' + one + one, 'bad length'],
+      ['sequence length longer than the content', '3007' + one + one, 'bad length'],
+      ['long-form sequence length', '308106' + one + one, 'bad length'],
+      ['not a sequence', '3106' + one + one, 'expected SEQUENCE'],
+      ['not an integer', '3006' + '030101' + one, 'expected INTEGER'],
+      ['empty integer', '3005' + '0200' + one, 'bad INTEGER'],
+      ['negative integer (high bit set, no leading zero)', '3006' + '020181' + one, 'negative INTEGER'],
+      ['non-minimal integer (needless leading zero)', '3007' + '02020001' + one, 'non-minimal INTEGER'],
+      ['integer longer than 33 bytes', '3027' + '0222' + '0000' + 'ff'.repeat(32) + one, 'bad INTEGER'],
+      ['integer running past the sequence', '3006' + '0205' + '01020101', 'bad INTEGER'],
+      ['a third element inside the sequence', '3009' + one + one + one, 'trailing data'],
+      ['r = 0', '3006' + '020100' + one, 'out of range'],
+      ['s = 0', '3006' + one + '020100', 'out of range'],
+      ['r = n', '3026' + '022100' + order + one, 'out of range'],
+      ['s = n', '3026' + one + '022100' + order, 'out of range'],
+      ['empty input', '', 'bad length'],
+    ]
+    for (const [what, input, why] of cases) expect(() => parseDerSignature(hex(input)), what).toThrow(why)
+    // Minimal encodings real authenticators produce: a leading 0x00 when the high bit is set, short values without padding.
+    expect(parseDerSignature(hex('3026' + top + one))).toEqual({ r: BigInt('0x' + 'ff'.padEnd(64, '0')), s: 1n })
+    expect(parseDerSignature(hex('3006' + one + one))).toEqual({ r: 1n, s: 1n })
+    expect(parseDerSignature(hex('3026' + one + '022100' + (P256_N - 1n).toString(16)))).toEqual({ r: 1n, s: 1n })
+    for (const scalar of [PASSKEY_SCALARS.a1, PASSKEY_SCALARS.a2]) {
+      const k = new SoftwarePasskey(scalar)
+      for (let i = 0; i < 16; i++) {
+        const a = k.assert(toHex(i, { size: 32 }))
+        expect(parseDerSignature(der(a.r, a.s))).toEqual({ r: a.r, s: a.s })
+        expect(parseDerSignature(der(a.r, P256_N - a.s))).toEqual({ r: a.r, s: a.s })
+      }
+    }
+  })
+
+  test('the owner signature verifies off chain only for this key and this safeTxHash', async () => {
+    const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
+    const other = new SoftwarePasskey(PASSKEY_SCALARS.a2)
+    const hash = `0x${'ab'.repeat(32)}` as const
+    for (const highS of [false, true]) {
+      const sig = browserOwnerSignature(browserAssert(passkey, hash, highS), hash)
+      expect(await verifyOwnerSignature(sig, hash, passkey)).toBe(true)
+      // Another key, another transaction (Safe, chain or nonce change the hash), a forged or altered signature.
+      expect(await verifyOwnerSignature(sig, hash, other)).toBe(false)
+      expect(await verifyOwnerSignature(sig, `0x${'ac'.repeat(32)}`, passkey)).toBe(false)
+      expect(await verifyOwnerSignature(browserOwnerSignature(browserAssert(other, hash, highS), hash), hash, passkey)).toBe(false)
+      const d = decodeOwnerSignature(sig)
+      const forge = (p: Partial<typeof d>) => safeContractSignature(address('SafeWebAuthnSharedSigner'), encodeWebAuthnSignature({ ...d, ...p }))
+      expect(await verifyOwnerSignature(forge({}), hash, passkey)).toBe(true)
+      expect(await verifyOwnerSignature(forge({ r: d.r + 1n }), hash, passkey)).toBe(false)
+      expect(await verifyOwnerSignature(forge({ s: 0n }), hash, passkey)).toBe(false)
+      expect(await verifyOwnerSignature(forge({ clientDataFields: `${d.clientDataFields},"x":1` }), hash, passkey)).toBe(false)
+      // User verification is required on chain; without the flag the signature is refused here too (and no longer matches).
+      const noUv = (d.authenticatorData.slice(0, 66) + '01' + d.authenticatorData.slice(68)) as Hex
+      expect(await verifyOwnerSignature(forge({ authenticatorData: noUv }), hash, passkey)).toBe(false)
+    }
+    // Not a SafeWebAuthnSharedSigner contract signature at all.
+    const sig = browserOwnerSignature(browserAssert(passkey, hash), hash)
+    expect(await verifyOwnerSignature(`0x${'11'.repeat(97)}`, hash, passkey)).toBe(false)
+    expect(await verifyOwnerSignature('0x', hash, passkey)).toBe(false)
+    expect(await verifyOwnerSignature(safeContractSignature(`0x${'22'.repeat(20)}`, `0x${sig.slice(2 + 97 * 2)}`), hash, passkey)).toBe(false)
+    expect(await verifyOwnerSignature(`${sig}00`, hash, passkey)).toBe(false)
   })
 
   test('context is refused when the address does not match', () => {
