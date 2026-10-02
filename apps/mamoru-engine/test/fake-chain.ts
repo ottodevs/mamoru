@@ -32,6 +32,8 @@ export class FakeChain {
   multicallDown = false
   /** Block number whose hash differs when it is read by number. */
   forkAt: number | null = null
+  /** Reads of a block by number fail; the head tags still answer. */
+  numberedBlocksDown = false
   /** Block parameter of every Multicall3 request, in order. */
   multicalls: number[] = []
 
@@ -133,6 +135,7 @@ export class FakeChain {
       case 'eth_blockNumber':
         return numberToHex(this.latest)
       case 'eth_getBlockByNumber': {
+        if (this.numberedBlocksDown && typeof ps[0] === 'string' && ps[0].startsWith('0x')) throw new Error('connection refused')
         const b = this.block(this.blockParam(ps[0]))
         // A numbered read after the head read can be made to answer another hash: a reorg, or a second provider on a fork.
         return this.forkAt !== null && typeof ps[0] === 'string' && ps[0].startsWith('0x') && Number(ps[0]) === this.forkAt ? { ...b, hash: keccak256(toHex(`fork-${this.forkAt}`)) } : b

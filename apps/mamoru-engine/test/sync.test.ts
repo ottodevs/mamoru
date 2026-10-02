@@ -374,4 +374,16 @@ describe('anchor consistency', () => {
     expect(db.sqlite.query('SELECT rpc_status FROM source_state').get()).toEqual({ rpc_status: 'unavailable' })
     expect(logs.some((l) => l.msg === 'sync.block_inconsistent')).toBe(true)
   })
+
+  test('no answer for the anchor block is an outage, not an inconsistency', async () => {
+    await run()
+    const before = poolView().block
+    chain.safe += 20
+    chain.latest += 20
+    chain.numberedBlocksDown = true
+    const s = await run()
+    expect(s).toMatchObject({ rpc: 'unavailable', code: 'OBS_RPC_UNAVAILABLE' })
+    expect(poolView().block).toBe(before)
+    expect(logs.some((l) => l.msg === 'sync.block_inconsistent')).toBe(false)
+  })
 })

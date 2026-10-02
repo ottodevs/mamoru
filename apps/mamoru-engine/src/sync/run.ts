@@ -230,9 +230,11 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
   // The anchor is the same block for whoever answered last: a provider switch or a reorg in the middle writes nothing.
   const again = await client.getBlock({ blockNumber: H }).catch(() => null)
   if (!again || again.hash !== anchor.blockHash) {
+    // No answer is an outage; only a different hash says the block changed.
+    const code: ReasonCode = again ? 'OBS_BLOCK_INCONSISTENT' : 'OBS_RPC_UNAVAILABLE'
     await markRpcUnavailable(db, chainId, observedAt, Boolean(deps.multibaas)).run()
-    log({ msg: 'sync.block_inconsistent', block: anchor.blockNumber, code: 'OBS_BLOCK_INCONSISTENT' })
-    return { rpc: 'unavailable', code: 'OBS_BLOCK_INCONSISTENT', pools: [], accounts: 0, logRequests, snapshots: 0 }
+    log({ msg: again ? 'sync.block_inconsistent' : 'sync.rpc_unavailable', block: anchor.blockNumber, code })
+    return { rpc: 'unavailable', code, pools: [], accounts: 0, logRequests, snapshots: 0 }
   }
 
   const health = index ? index.health() : notConfigured

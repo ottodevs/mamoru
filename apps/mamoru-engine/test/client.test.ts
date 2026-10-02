@@ -58,9 +58,10 @@ describe('engine state transport', () => {
     const client = makeClient(rpcTransport({ BASE_RPC_URL: KEYED, BASE_RPC_PUBLIC: PUBLIC }, fakeFetch('quota', calls)).transport)
     const head = await readHead(client, 0x2105)
     expect(head.safe).toMatchObject({ number: 16, hash: HASH })
-    // readHead sends chain id, latest and safe together: the keyed batch fails, the public endpoint answers all three.
-    expect(calls.filter((c) => c.url === PUBLIC).flatMap((c) => c.methods).sort()).toEqual(['eth_chainId', 'eth_getBlockByNumber', 'eth_getBlockByNumber'])
-    expect(calls.filter((c) => c.url === KEYED).length).toBeLessThanOrEqual(3)
+    // readHead sends chain id, latest and safe together: one keyed batch fails, the public endpoint answers all three.
+    const head3 = ['eth_chainId', 'eth_getBlockByNumber', 'eth_getBlockByNumber']
+    expect(calls.filter((c) => c.url === KEYED).map((c) => [...c.methods].sort())).toEqual([head3])
+    expect(calls.filter((c) => c.url === PUBLIC).flatMap((c) => c.methods).sort()).toEqual(head3)
     const after = calls.length
     await client.getChainId()
     expect(urls(calls.slice(after))).toEqual([PUBLIC])
@@ -73,6 +74,24 @@ describe('engine state transport', () => {
     await expect(client.call({ to: POOL, data })).rejects.toThrow(/execution reverted/)
     await expect(client.call({ to: POOL, data })).rejects.toThrow(/execution reverted/)
     expect(urls(calls)).toEqual([KEYED, KEYED])
+  })
+
+  test('a method or parameters the keyed provider refuses is not an outage either', async () => {
+    for (const code of [-32601, -32602]) {
+      const calls: Call[] = []
+      const refusing = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input).replace(/\/$/, '')
+        const body = JSON.parse(String(init?.body))
+        const reqs: Req[] = Array.isArray(body) ? body : [body]
+        calls.push({ url, methods: reqs.map((r) => r.method) })
+        const payload = reqs.map((r) => (url === KEYED && r.method === 'eth_call' ? { jsonrpc: '2.0', id: r.id, error: { code, message: 'refused' } } : { jsonrpc: '2.0', id: r.id, result: '0x1' }))
+        return new Response(JSON.stringify(Array.isArray(body) ? payload : payload[0]), { status: 200, headers: { 'content-type': 'application/json' } })
+      }) as typeof fetch
+      const client = makeClient(rpcTransport({ BASE_RPC_URL: KEYED, BASE_RPC_PUBLIC: PUBLIC }, refusing).transport)
+      await expect(client.call({ to: POOL, data: '0x' })).rejects.toThrow()
+      expect(await client.getChainId()).toBe(1)
+      expect(urls(calls)).toEqual([KEYED, KEYED])
+    }
   })
 
   test('without the secret only the public endpoint is used', async () => {

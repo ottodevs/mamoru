@@ -6,11 +6,14 @@ type FetchFn = typeof fetch
 
 const stateHttp = (url: string, retryCount: number, fetchFn?: FetchFn) => http(url, { batch: { batchSize: 10, wait: 0 }, retryCount, timeout: 15_000, ...(fetchFn ? { fetchFn } : {}) })
 
-/** A node answer about the call itself (a revert, a rejected transaction): asking another provider would say the same. */
+/** JSON-RPC codes that describe the request, not the provider: parse, invalid request, unknown method, invalid params, rejected transaction. */
+const CALL_ERROR_CODES: readonly unknown[] = [3, -32700, -32600, -32601, -32602, -32003, 4001, 5000]
+
+/** A node answer about the call itself (a revert, a method or parameters it does not accept): another provider would say the same. */
 function isCallError(err: unknown): boolean {
   for (let e = err as { code?: unknown; message?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++) {
     if (typeof e.message === 'string' && /execution reverted/i.test(e.message)) return true
-    if (e.code === 3 || e.code === -32003 || e.code === 4001 || e.code === 5000) return true
+    if (CALL_ERROR_CODES.includes(e.code)) return true
   }
   return false
 }
