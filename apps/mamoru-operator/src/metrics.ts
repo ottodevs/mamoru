@@ -341,6 +341,14 @@ export class RpcMetrics {
     }
   }
 
+  /** CU estimate charged to `provider` in the clock hour of `now`. */
+  cuThisHour(provider: string, now: number = Date.now()): number {
+    const byMethod = this.ring.get(Math.floor(now / HOUR_MS) * HOUR_MS)?.toJSON()[provider]
+    let total = 0
+    for (const c of Object.values(byMethod ?? {})) total += c.cuEstimate
+    return total
+  }
+
   cuEstimateTotal(): number {
     let total = 0
     const snap = this.cumulative.toJSON()

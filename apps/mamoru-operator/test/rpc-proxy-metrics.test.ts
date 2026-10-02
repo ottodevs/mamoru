@@ -210,3 +210,70 @@ describe('startRpcProxy metrics wiring', () => {
     expect(metrics.snapshot().cumulative['127.0.0.1']!.other!.requests).toBe(1)
   })
 })
+
+// A caller gone wrong must not be able to spend the keyed provider's month in a day.
+describe('keyed upstream hourly budget', () => {
+  const KEYED = 'https://base-mainnet.g.alchemy.com/v2/key-a'
+  const PUBLIC = 'https://base-rpc.publicnode.com'
+  /** Records which provider answered each request; every provider answers. */
+  function world(keyedCuPerHour: number) {
+    const hits: { host: string; method: string }[] = []
+    const metrics = new RpcMetrics(tmpDir())
+    const proxy = startRpcProxy(KEYED, {
+      metrics,
+      fallbacks: [PUBLIC],
+      keyedCuPerHour,
+      fetch: async (url, init) => {
+        const body = JSON.parse(String(init.body))
+        hits.push({ host: new URL(url).hostname, method: body.method })
+        return Response.json({ jsonrpc: '2.0', id: body.id, result: '0x1' })
+      },
+    })
+    const ask = async (method: string) => ((await (await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: [] }) })).json()) as { result?: string }).result
+    return { hits, metrics, proxy, ask }
+  }
+
+  test('under the budget every call goes to the keyed upstream', async () => {
+    const w = world(1_000)
+    try {
+      for (let i = 0; i < 3; i++) expect(await w.ask('eth_call')).toBe('0x1')
+    } finally {
+      w.proxy.stop()
+    }
+    expect(w.hits.map((h) => h.host)).toEqual(Array(3).fill('base-mainnet.g.alchemy.com'))
+  })
+
+  test('once the hour is spent, reads go to the other providers and the keyed upstream is charged nothing more', async () => {
+    // eth_call is 26 CU: the fourth call finds 78 CU used, over a budget of 60.
+    const w = world(60)
+    try {
+      for (let i = 0; i < 6; i++) expect(await w.ask('eth_call')).toBe('0x1')
+    } finally {
+      w.proxy.stop()
+    }
+    expect(w.hits.map((h) => h.host)).toEqual([...Array(3).fill('base-mainnet.g.alchemy.com'), ...Array(3).fill('base-rpc.publicnode.com')])
+    expect(w.metrics.cuThisHour('alchemy.com')).toBe(78)
+  })
+
+  test('over the budget, a call that is not a plain read still goes to the keyed upstream', async () => {
+    const w = world(60)
+    try {
+      for (let i = 0; i < 4; i++) await w.ask('eth_call')
+      expect(await w.ask('eth_sendRawTransaction')).toBe('0x1')
+      expect(await w.ask('eth_simulateV1')).toBe('0x1')
+    } finally {
+      w.proxy.stop()
+    }
+    expect(w.hits.slice(-2).map((h) => h.host)).toEqual(['base-mainnet.g.alchemy.com', 'base-mainnet.g.alchemy.com'])
+  })
+
+  test('a budget of 0 turns the limit off', async () => {
+    const w = world(0)
+    try {
+      for (let i = 0; i < 5; i++) await w.ask('eth_call')
+    } finally {
+      w.proxy.stop()
+    }
+    expect(w.hits.every((h) => h.host === 'base-mainnet.g.alchemy.com')).toBe(true)
+  })
+})

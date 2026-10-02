@@ -20,6 +20,20 @@ export function fallbacksFromEnv(env: Env = process.env): string[] {
   return (env.MAMORU_RPC_FALLBACKS ?? DEFAULT_FALLBACKS).split(',').map((u) => u.trim()).filter(Boolean)
 }
 
+/**
+ * CU the keyed upstream may take per clock hour before reads go to the other providers first. The default
+ * spends a 30M CU month evenly (30M / 720 h), so no bug in a caller can use the month up in a day. 0 turns it off.
+ */
+const DEFAULT_KEYED_CU_PER_HOUR = 40_000
+
+export function keyedBudgetFromEnv(env: Env = process.env): number {
+  const n = Number(env.MAMORU_KEYED_CU_PER_HOUR ?? DEFAULT_KEYED_CU_PER_HOUR)
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_KEYED_CU_PER_HOUR
+}
+
+/** Reads any public node answers the same way: the only calls that leave the keyed upstream when it is over its budget. */
+const BUDGETED_READS = new Set(['eth_call', 'eth_getBalance', 'eth_blockNumber', 'eth_getBlockByNumber', 'eth_getCode', 'eth_chainId', 'eth_gasPrice', 'eth_getTransactionReceipt'])
+
 function isLoopback(url: string): boolean {
   const h = new URL(url).hostname
   return h === '127.0.0.1' || h === 'localhost' || h === '[::1]'
@@ -124,6 +138,8 @@ export type RpcProxyOptions = {
   fallbacks?: string[]
   /** eth_getLogs range per host; default MAMORU_LOG_RANGES, read now. */
   logRanges?: Record<string, number>
+  /** CU per clock hour on the keyed upstream before reads prefer the other providers; default MAMORU_KEYED_CU_PER_HOUR, read now. */
+  keyedCuPerHour?: number
   /** Tests: the upstream transport. */
   fetch?: (url: string, init: RequestInit) => Promise<Response>
 }
@@ -151,10 +167,25 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     } catch {}
     return { status: res.status, json }
   }
+  const keyedCuPerHour = opts.keyedCuPerHour ?? keyedBudgetFromEnv()
+  let budgetLoggedAt = -1
+  /** The keyed upstream spent its hour: reads go to the other providers first, and it stays the last resort. */
+  function overBudget(method: string): boolean {
+    if (local || !metrics || keyedCuPerHour <= 0 || providers.length < 2 || !BUDGETED_READS.has(method)) return false
+    const used = metrics.cuThisHour(labelOf(upstream))
+    if (used < keyedCuPerHour) return false
+    const hour = Math.floor(Date.now() / 3_600_000)
+    if (hour !== budgetLoggedAt) {
+      budgetLoggedAt = hour
+      console.log(`[rpc] ${labelOf(upstream)} over its budget (${used} of ${keyedCuPerHour} CU this hour): reads go to the other providers first until the hour ends`)
+    }
+    return true
+  }
   /** On a rate/capacity refusal, move to the next provider at once; two passes over the list. Always returns a result/error object. */
   async function raw(body: any, isChunk = false): Promise<any> {
     let last: any = null
-    const all = [...providers, ...providers]
+    const order = overBudget(body?.method) ? [...providers.slice(1), upstream] : providers
+    const all = [...order, ...order]
     for (const [pi, url] of all.entries()) {
       const label = labelOf(url)
       const tries = 1
