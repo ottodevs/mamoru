@@ -19,45 +19,59 @@ function isCallError(err: unknown): boolean {
 }
 
 /**
- * `first` until it fails once, then `second` for the rest of this transport's life. The engine builds one transport
- * per sync, so a provider that is out of quota costs one failed request per sync, not one per read, and every read
- * after the failure comes from the same provider.
+ * The transports in order: each one until it fails once, then the next for the rest of this transport's life. The
+ * engine builds one transport per sync, so a provider that is out of quota or refuses the Worker costs one failed
+ * request per sync, not one per read, and every read after a failure comes from the same provider. `onSwitch` hears
+ * the position of the provider that takes over.
  */
-export function stickyFallback(first: Transport, second: Transport): Transport {
+export function stickyFallback(transports: readonly Transport[], onSwitch?: (index: number) => void): Transport {
+  if (transports.length === 0) throw new Error('stickyFallback needs at least one transport')
   return (opts) => {
-    const a = first({ ...opts, retryCount: 0 })
-    const b = second(opts)
-    let failed = false
-    const request = (async (args: Parameters<typeof a.request>[0]) => {
-      if (!failed) {
+    // Only the last one keeps its own retries: before it, the next provider is the retry.
+    const built = transports.map((t, i) => t(i < transports.length - 1 ? { ...opts, retryCount: 0 } : opts))
+    let at = 0
+    const request = (async (args: Parameters<(typeof built)[0]['request']>[0]) => {
+      for (;;) {
+        const used = at
         try {
-          return await a.request(args)
+          return await built[used]!.request(args)
         } catch (err) {
-          if (isCallError(err)) throw err
-          failed = true
+          if (isCallError(err) || used === built.length - 1) throw err
+          // The requests of one batch fail together: only the first of them moves on, the others follow it.
+          if (at === used) {
+            at = used + 1
+            onSwitch?.(at)
+          }
         }
       }
-      return b.request(args)
-    }) as typeof a.request
+    }) as (typeof built)[0]['request']
     return createTransport({ key: 'stickyFallback', name: 'Sticky fallback', type: 'fallback', retryCount: 0, request })
   }
 }
 
+/** The public endpoints of `BASE_RPC_PUBLIC`: one URL or several separated by commas, tried in that order. */
+export function publicUrls(env: Pick<Env, 'BASE_RPC_PUBLIC'>): string[] {
+  return env.BASE_RPC_PUBLIC.split(',').map((u) => u.trim()).filter(Boolean)
+}
+
 /**
- * Keyed RPC first when the secret exists, with the public endpoint behind it. A keyed provider that is out of quota
- * or down answers every request with an error; without the public endpoint the read model stops until someone
- * changes the secret. The sync checks the hash of its anchor block again before it writes, so a sync that changed
- * provider halfway never records one provider's reads under the other's block. JSON-RPC batching keeps subrequests low.
+ * Keyed RPC first when the secret exists, with the public endpoints behind it. A keyed provider that is out of quota
+ * or down answers every request with an error, and a public endpoint may refuse the Worker's addresses; with the
+ * list behind it the read model keeps going on the first one that answers. The sync checks the hash of its anchor
+ * block again before it writes, so a sync that changed provider halfway never records one provider's reads under
+ * another's block. JSON-RPC batching keeps subrequests low. `served` is the position of the provider in use.
  */
-export function rpcTransport(env: Pick<Env, 'BASE_RPC_URL' | 'BASE_RPC_PUBLIC'>, fetchFn?: FetchFn): { transport: Transport; keyed: boolean } {
+export function rpcTransport(env: Pick<Env, 'BASE_RPC_URL' | 'BASE_RPC_PUBLIC'>, fetchFn?: FetchFn): { transport: Transport; keyed: boolean; served: () => number; providers: number } {
   const keyed = Boolean(env.BASE_RPC_URL)
-  const publicRpc = stateHttp(env.BASE_RPC_PUBLIC, 1, fetchFn)
-  return { transport: env.BASE_RPC_URL ? stickyFallback(stateHttp(env.BASE_RPC_URL, 0, fetchFn), publicRpc) : publicRpc, keyed }
+  const urls = [...(env.BASE_RPC_URL ? [env.BASE_RPC_URL] : []), ...publicUrls(env)]
+  let at = 0
+  const transport = stickyFallback(urls.map((url, i) => stateHttp(url, i < urls.length - 1 ? 0 : 1, fetchFn)), (i) => (at = i))
+  return { transport, keyed, served: () => at, providers: urls.length }
 }
 
 /** Always the public RPC. */
 export function publicTransport(env: Pick<Env, 'BASE_RPC_PUBLIC'>): Transport {
-  return http(env.BASE_RPC_PUBLIC, { batch: { batchSize: 10, wait: 0 }, retryCount: 1, timeout: 15_000 })
+  return stickyFallback(publicUrls(env).map((url, i, all) => stateHttp(url, i < all.length - 1 ? 0 : 1)))
 }
 
 /**

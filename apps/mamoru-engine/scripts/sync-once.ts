@@ -11,7 +11,7 @@ import { sqliteD1 } from './sqlite-d1.ts'
 const dir = join(import.meta.dir, '../.local')
 mkdirSync(dir, { recursive: true })
 const db = sqliteD1(process.env.ENGINE_SQLITE ?? join(dir, 'engine.sqlite'))
-const { transport, keyed } = rpcTransport({ BASE_RPC_URL: process.env.BASE_RPC_URL, BASE_RPC_PUBLIC: 'https://mainnet.base.org' })
+const { transport, keyed } = rpcTransport({ BASE_RPC_URL: process.env.BASE_RPC_URL, BASE_RPC_PUBLIC: process.env.BASE_RPC_PUBLIC ?? 'https://mainnet.base.org' })
 const { MULTIBAAS_URL, MULTIBAAS_API_KEY, MULTIBAAS_POOL_START_BLOCK } = process.env
 const mb = multibaasFrom({ MULTIBAAS_URL, MULTIBAAS_API_KEY, MULTIBAAS_POOL_START_BLOCK })
 console.log(`rpc: ${keyed ? 'keyed' : 'public'}, multibaas: ${mb ? 'configured' : 'not configured'}`)

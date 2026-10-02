@@ -13,7 +13,9 @@
   "vars": {
     "CHAIN_ID": "8453",
     "CORE_DRY_RUN": "true",
-    "BASE_RPC_PUBLIC": "https://mainnet.base.org"
+    // Public endpoints behind the keyed one, in order. Each accepts JSON-RPC batches (checked 2026-10-02); reads are
+    // at the safe block, so none needs archive state.
+    "BASE_RPC_PUBLIC": "https://base-rpc.publicnode.com,https://base-mainnet.public.blastapi.io,https://mainnet.base.org"
   },
   // Optional secrets, set by L0: BASE_RPC_URL, MULTIBAAS_URL, MULTIBAAS_API_KEY.
   "observability": { "enabled": true }

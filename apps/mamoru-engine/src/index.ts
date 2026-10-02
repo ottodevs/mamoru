@@ -15,9 +15,11 @@ export default {
       console.log(JSON.stringify({ msg: 'sync.refused', code: 'CONFIG_DRY_RUN_REQUIRED' }))
       return
     }
-    const { transport, keyed } = rpcTransport(env)
+    const { transport, keyed, served, providers } = rpcTransport(env)
     const mb = multibaasFrom(env)
     console.log(JSON.stringify({ msg: 'sync.start', rpc: keyed ? 'keyed' : 'public', multibaas: mb ? 'configured' : 'not_configured' }))
     await syncOnce({ client: makeClient(transport), logSources: logSources(env), db: env.DB, chainId: Number(env.CHAIN_ID), now: () => new Date(), ...(mb ?? {}) })
+    // Position only, never a URL: 0 is the first provider of the list, the keyed one when the secret exists.
+    console.log(JSON.stringify({ msg: 'sync.provider', served: served(), providers }))
   },
 }

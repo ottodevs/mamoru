@@ -94,6 +94,43 @@ describe('engine state transport', () => {
     }
   })
 
+  test('several public endpoints: the first that answers serves the rest of the sync, and its position is reported', async () => {
+    const A = 'https://a.example'
+    const B = 'https://b.example'
+    const calls: Call[] = []
+    const fetchFn = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input).replace(/\/$/, '')
+      const body = JSON.parse(String(init?.body))
+      const reqs: Req[] = Array.isArray(body) ? body : [body]
+      calls.push({ url, methods: reqs.map((r) => r.method) })
+      // The keyed provider is out of quota, A refuses the caller, B answers.
+      if (url === KEYED) return new Response(JSON.stringify({ jsonrpc: '2.0', id: reqs[0]!.id, error: { code: 429, message: 'quota' } }), { status: 429 })
+      if (url === A) return new Response('forbidden', { status: 403 })
+      const payload = reqs.map((r) => ({ jsonrpc: '2.0', id: r.id, result: '0x2105' }))
+      return new Response(JSON.stringify(Array.isArray(body) ? payload : payload[0]), { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+    const { transport, served, providers } = rpcTransport({ BASE_RPC_URL: KEYED, BASE_RPC_PUBLIC: `${A}, ${B}` }, fetchFn)
+    const client = makeClient(transport)
+    expect(providers).toBe(3)
+    expect(served()).toBe(0)
+    expect(await client.getChainId()).toBe(0x2105)
+    expect(await client.getChainId()).toBe(0x2105)
+    expect(urls(calls)).toEqual([KEYED, A, B, B])
+    expect(served()).toBe(2)
+  })
+
+  test('every provider down: the error of the last one surfaces', async () => {
+    const calls: Call[] = []
+    const down = (async (input: Parameters<typeof fetch>[0]) => {
+      calls.push({ url: String(input instanceof Request ? input.url : input).replace(/\/$/, ''), methods: [] })
+      throw new TypeError('fetch failed')
+    }) as unknown as typeof fetch
+    const client = makeClient(rpcTransport({ BASE_RPC_URL: KEYED, BASE_RPC_PUBLIC: 'https://a.example,https://b.example' }, down).transport)
+    await expect(client.getChainId()).rejects.toThrow()
+    // Keyed and the first public endpoint once each; the last one keeps its single retry.
+    expect(urls(calls)).toEqual([KEYED, 'https://a.example', 'https://b.example', 'https://b.example'])
+  })
+
   test('without the secret only the public endpoint is used', async () => {
     const calls: Call[] = []
     const { transport, keyed } = rpcTransport({ BASE_RPC_PUBLIC: PUBLIC }, fakeFetch('ok', calls))
