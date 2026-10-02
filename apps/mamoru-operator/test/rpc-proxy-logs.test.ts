@@ -396,6 +396,10 @@ describe('a witness must be another operator, not another URL', () => {
     expect(sameOperator('https://base-mainnet.g.alchemy.com/v2/keyA', 'https://BASE-MAINNET.G.ALCHEMY.COM/v2/keyA')).toBe(true)
     expect(sameOperator('https://base-mainnet.g.alchemy.com/v2/keyA', 'https://base-rpc.publicnode.com')).toBe(false)
     expect(sameOperator('http://127.0.0.1:8545', 'http://127.0.0.1:9545/')).toBe(true)
+    expect(sameOperator('https://cloudflare-eth.com', 'https://cloudflare-eth.com.')).toBe(true)
+    expect(sameOperator('https://base-rpc.publicnode.com.', 'https://Base-RPC.PublicNode.com')).toBe(true)
+    expect(sameOperator('https://a.example.co.uk', 'https://b.example.co.uk.')).toBe(true)
+    expect(sameOperator('https://a.example.co.uk', 'https://a.other.co.uk')).toBe(false)
   })
 
   test('a second key of the upstream provider is not a witness: eth_getLogs is refused and nothing is read', async () => {
