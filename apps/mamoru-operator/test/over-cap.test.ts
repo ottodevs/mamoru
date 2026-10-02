@@ -624,6 +624,25 @@ describe('the armed watcher reads every armed Safe in one request', () => {
     expect(Object.values(w.state.accounts).every((a) => a.armed)).toBe(true)
   })
 
+  test('an activation armed days ago with no owner around is read every five minutes, and at once when the app opens', async () => {
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    const armed = await w.op.submit(ctx, 'activate', sign(tx))
+    const stored = w.state.accounts.k!.ops.find((o) => o.opId === armed.opId)!
+    stored.updatedAt = new Date(Date.now() - 3 * 86_400_000).toISOString()
+    const seen = count(w.op)
+    await pass(w.op)
+    await pass(w.op)
+    await pass(w.op)
+    expect(seen.multicall).toBe(1)
+    // The owner opens the app: funding marks the account, the next pass reads it again.
+    await w.op.funding(ctx)
+    const before = seen.multicall
+    await pass(w.op)
+    await pass(w.op)
+    expect(seen.multicall - before).toBe(2)
+  })
+
   test('no armed account: no request at all', async () => {
     const w = world(0n)
     const seen = count(w.op)

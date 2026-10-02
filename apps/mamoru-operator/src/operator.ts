@@ -61,8 +61,14 @@ const TOP_UP_MARGIN_WEI = 200_000_000_000_000n
 const DEPOSITS_SAVE_BLOCKS = 300n
 /** How long a POST waits for the owner transaction before answering with the op as it stands; the SPA polls /ops. */
 const POST_WAIT_MS = 15_000
-/** How often the armed-activation watcher reads the USDC balances of the armed Safes (one request for all of them). */
+/** How often the armed-activation watcher runs a pass; one request for every Safe due in that pass. */
 const ARM_WATCH_MS = 15_000
+/** While the owner is around (armed, seen in the app or paid in within the last hour) the Safe is read every pass. */
+const ARM_FRESH_MS = 3_600_000
+/** After that: once a minute for a day, then every five minutes. A deposit nobody is waiting for can take that long to start. */
+const ARM_IDLE_MS = 60_000
+const ARM_DAY_MS = 86_400_000
+const ARM_STALE_MS = 300_000
 /** The relayer does not pay to deploy a Safe that holds less than this (1 USDC). */
 export const MIN_DEPLOY_USDC = 1_000_000n
 /**
@@ -205,6 +211,9 @@ export class Operator {
   private readonly runners = new Map<string, Runner>()
   private readonly reconciled = new Map<string, number>()
   private armTimer: ReturnType<typeof setTimeout> | null = null
+  /** Armed watcher, in memory: when each armed Safe was last read, and when its owner was last seen (funding poll, deposit). */
+  private readonly armRead = new Map<string, number>()
+  private readonly armSeen = new Map<string, number>()
   private armStopped = false
   /** Owner transactions being executed right now, by accountKey. */
   private readonly busy = new Map<string, Progress>()
@@ -306,6 +315,8 @@ export class Operator {
 
   async funding(ctx: AccountContext): Promise<FundingView> {
     const { acc, live } = this.account(ctx)
+    // The app is open on this account: an armed activation is watched at full pace again.
+    if (acc.armed) this.armSeen.set(acc.accountKey, Date.now())
     const r = await readSafe(this.client, live.safe)
     return {
       address: live.safe,
@@ -1007,7 +1018,8 @@ export class Operator {
    * again, on its own, right before executing.
    */
   private async checkArmed(): Promise<void> {
-    const armed = Object.values(this.store.state.accounts).filter((a) => a.armed)
+    const at = Date.now()
+    const armed = Object.values(this.store.state.accounts).filter((a) => a.armed && at - (this.armRead.get(a.accountKey) ?? 0) >= this.armEvery(a, at))
     if (armed.length === 0) return
     const batch = new Batch(this.client, MULTICALL3)
     const balances = armed.map((acc) => batch.add(contractRead(this.client, { address: address('USDC'), abi: erc20Abi, functionName: 'balanceOf', args: [acc.ctx.address as Address] })))
@@ -1019,7 +1031,10 @@ export class Operator {
     for (const [i, acc] of armed.entries()) {
       if (!acc.armed || this.armStopped) continue
       try {
+        this.armRead.set(acc.accountKey, at)
         if ((await balances[i]!.need()) === 0n) continue
+        // Something landed: until it is executed or dropped, this account is read every pass (retries included).
+        this.armSeen.set(acc.accountKey, at)
         const usdc = await this.usdcOf(acc.ctx.address as Address)
         if (usdc === 0n) continue
         await this.lock(acc.accountKey).run(() => this.fireArmed(acc, usdc))
@@ -1027,6 +1042,13 @@ export class Operator {
         logErr(`[armed] ${acc.accountKey}`, e)
       }
     }
+  }
+
+  /** How long an armed Safe may go unread: every pass while its owner is around, then slower the longer nothing happens. */
+  private armEvery(acc: AccountState, at: number): number {
+    const armedAt = Date.parse(acc.ops.find((o) => o.opId === acc.armed?.opId)?.updatedAt ?? '') || 0
+    const idle = at - Math.max(armedAt, this.armSeen.get(acc.accountKey) ?? 0)
+    return idle < ARM_FRESH_MS ? 0 : idle < ARM_DAY_MS ? ARM_IDLE_MS : ARM_STALE_MS
   }
 
   private async fireArmed(acc: AccountState, usdc: bigint): Promise<void> {
