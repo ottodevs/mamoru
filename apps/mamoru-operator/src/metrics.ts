@@ -156,6 +156,10 @@ const RING_HOURS = 48
 const MAX_PROVIDERS = 16
 const OTHER_PROVIDER = 'other'
 
+/** How a logical eth_getLogs range ended on the provider that read it: accepted with a witness, or why it was rejected. */
+export type LogRangeOutcome = 'accepted' | 'no_witness' | 'hash_mismatch' | 'provider_error'
+export type LogRangeCounters = Record<LogRangeOutcome, number>
+
 function emptyCounters(): RpcCounters {
   return { requests: 0, errors: { rateCapacity: 0, invalidParams: 0, timeout: 0, other: 0 }, fallbacks: 0, getLogsChunks: 0, cuEstimate: 0 }
 }
@@ -241,6 +245,8 @@ export class RpcMetrics {
   private ring = new Map<number, Buckets>()
   private lastPersistAt = 0
   private readonly file: string
+  /** Log ranges per provider since this process started (in memory only, like the engine health). */
+  private logRanges = new Map<string, LogRangeCounters>()
 
   constructor(private readonly stateDir: string) {
     this.file = join(stateDir, 'rpc-usage.json')
@@ -308,6 +314,14 @@ export class RpcMetrics {
     this.maybePersist(now)
   }
 
+  /** One logical eth_getLogs range read from `provider`: accepted, or rejected and why. */
+  recordLogRange(provider: string, outcome: LogRangeOutcome): void {
+    const key = this.logRanges.has(provider) || this.logRanges.size < MAX_PROVIDERS ? provider : OTHER_PROVIDER
+    let c = this.logRanges.get(key)
+    if (!c) this.logRanges.set(key, (c = { accepted: 0, no_witness: 0, hash_mismatch: 0, provider_error: 0 }))
+    c[outcome]++
+  }
+
   private maybePersist(now: number): void {
     if (now - this.lastPersistAt >= 60_000) this.persist(now)
   }
@@ -335,12 +349,13 @@ export class RpcMetrics {
   }
 
   /** `last48h` oldest first, ISO hour-start timestamps; only hours with recorded activity are present (sparse, not zero-filled). */
-  snapshot(now: number = Date.now()): { cumulative: RpcSnapshot; cuEstimateTotal: number; last48h: { hourStart: string; data: RpcSnapshot }[] } {
+  snapshot(now: number = Date.now()): { cumulative: RpcSnapshot; cuEstimateTotal: number; last48h: { hourStart: string; data: RpcSnapshot }[]; logRanges: Record<string, LogRangeCounters> } {
     this.pruneRing(now)
     return {
       cumulative: this.cumulative.toJSON(),
       cuEstimateTotal: this.cuEstimateTotal(),
       last48h: [...this.ring.entries()].sort(([a], [b]) => a - b).map(([hourStart, b]) => ({ hourStart: new Date(hourStart).toISOString(), data: b.toJSON() })),
+      logRanges: Object.fromEntries([...this.logRanges].map(([provider, c]) => [provider, { ...c }])),
     }
   }
 }

@@ -93,7 +93,13 @@ account keys are shortened to 8 chars. Example (values illustrative):
   mainnet.base.org 2000, drpc 10000; `MAMORU_LOG_RANGES="host=blocks,..."` overrides), so its requests
   and chunks are counted against that provider, and a provider tried and abandoned gets a fallback.
   After each range the provider that served it is asked for the range's last block (`eth_getBlockByNumber`),
-  and so is the state provider: a provider that does not have that block with the same hash is abandoned.
+  and so is an independent witness (the upstream for a fallback's range, a fallback for the upstream's).
+- **Log ranges** (`rpc.logRanges`, per provider, since boot, in memory only): `accepted` (the witness has
+  the range's last block with the same hash), `hash_mismatch` (it has another hash), `no_witness` (no other
+  provider had the block, or none is configured), `provider_error` (the provider failed a chunk or does
+  not have the block). A rejected range is read whole by the next provider; when none is accepted the
+  review fails with `OBS_RPC_UNAVAILABLE`. A rising `no_witness` means reviews are failing for lack of a
+  second provider that answers.
 - **Persistence**: the cumulative counters and the 48h ring are both persisted to
   `stateDir/rpc-usage.json`, written atomically (tmp file + rename, 0600) at most once a minute and once
   more on a clean shutdown, so a restart does not lose history. The 48h ring is sparse (only hours with
