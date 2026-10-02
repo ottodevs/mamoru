@@ -236,21 +236,22 @@ describe('allocate (conservador-live-v2, target weights)', () => {
   })
 
   test('held volatile is not kept for a purchase that has no live session', () => {
-    // The same partly filled bucket, with the enter-swap session of that pool gone: the buy can never run.
-    const o = btcShort(600_000n, 60_000n)
-    const a = allocate(o, V2, false)
-    expect(a.proposal).toMatchObject({ kind: 'enter_swap', pool: 'pool:USDC/cbBTC/500', tokenOut: 'cbBTC' })
-    expect(a.pendingMint).toContainEqual({ pool: 'pool:USDC/cbBTC/500', grant: 'enter-swap:pool:USDC/cbBTC/500' })
-    const noBuy = { ...o, sessions: o.sessions.filter((s) => s.grant !== 'enter-swap:pool:USDC/cbBTC/500'), balances: { ...o.balances, cbBTC: token0InToken1(300_000n, POOLS[1]!.sqrtPriceX96) } }
-    const p = decide(noBuy, V2).proposal
-    expect(p === null || !(p.kind === 'enter_swap' && p.pool === 'pool:USDC/cbBTC/500' && p.tokenOut === 'cbBTC')).toBe(true)
+    // The btc bucket holds some cbBTC and must buy more to mint.
+    const o = btcShort(700_000n, 200_000n, 104n, 95n)
+    expect(allocate(o, V2, false).pendingMint).toContainEqual({ pool: 'pool:USDC/cbBTC/500', grant: 'enter-swap:pool:USDC/cbBTC/500' })
+    // Held for that buy while its session is live: nothing sells it.
+    const kept = decide(o, V2).proposal
+    expect(kept?.kind === 'enter_swap' && kept.tokenIn === 'cbBTC').toBe(false)
+    // With the enter-swap session of that pool gone the buy can never run, and the token goes back to savings.
+    const noBuy = { ...o, sessions: o.sessions.filter((s) => s.grant !== 'enter-swap:pool:USDC/cbBTC/500') }
+    expect(decide(noBuy, V2).proposal).toMatchObject({ kind: 'enter_swap', grant: 'convert-any:pool:USDC/cbBTC/500', tokenIn: 'cbBTC', tokenOut: 'USDC' })
   })
 
   /** The btc bucket a little short (inside the 5-point drift, outside the 3% band), the other two a little over: only btc has an entry. */
   let settled: Observation | undefined
-  function btcShort(usdc: bigint, cbbtcValue: bigint, others = 104n): Observation {
+  function btcShort(usdc: bigint, cbbtcValue: bigint, others = 104n, btc = 90n): Observation {
     const base = (settled ??= invested().o)
-    const scale = (pool: string) => (pool === 'pool:USDC/cbBTC/500' ? 90n : others)
+    const scale = (pool: string) => (pool === 'pool:USDC/cbBTC/500' ? btc : others)
     const positions = base.positions.map((p) => ({ ...p, liquidity: (p.liquidity * scale(p.pool!)) / 100n }))
     return { ...base, positions, balances: { ...base.balances, USDC: usdc, cbBTC: token0InToken1(cbbtcValue, POOLS[1]!.sqrtPriceX96) } }
   }
