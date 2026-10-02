@@ -8,7 +8,14 @@ type Req = { jsonrpc: '2.0'; id: unknown; method: string; params?: any[] }
  * keyed URL inside this process (viem errors echo the URL they called) and
  * splits eth_getLogs into ranges the provider accepts (Alchemy free tier: 10 blocks).
  */
-const FALLBACKS = (process.env.MAMORU_RPC_FALLBACKS ?? 'https://base-rpc.publicnode.com,https://base.drpc.org,https://mainnet.base.org').split(',').filter(Boolean)
+const DEFAULT_FALLBACKS = 'https://base-rpc.publicnode.com,https://base.drpc.org,https://mainnet.base.org'
+
+type Env = Record<string, string | undefined>
+
+/** Read when the proxy starts, never at module load: main.ts fills process.env from the env file after its imports ran. */
+export function fallbacksFromEnv(env: Env = process.env): string[] {
+  return (env.MAMORU_RPC_FALLBACKS ?? DEFAULT_FALLBACKS).split(',').map((u) => u.trim()).filter(Boolean)
+}
 
 function isLoopback(url: string): boolean {
   const h = new URL(url).hostname
@@ -70,18 +77,29 @@ export function labelProviders(providers: string[]): Map<string, string> {
   return labels
 }
 
-export function startRpcProxy(upstream: string, opts: { maxLogRange?: number; metrics?: RpcMetrics } = {}): { url: string; stop: () => void } {
+export type RpcProxyOptions = {
+  maxLogRange?: number
+  metrics?: RpcMetrics
+  /** Fallback providers; default MAMORU_RPC_FALLBACKS, read now. */
+  fallbacks?: string[]
+  /** Tests: the upstream transport. */
+  fetch?: (url: string, init: RequestInit) => Promise<Response>
+}
+
+export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { url: string; stop: () => void } {
+  const send = opts.fetch ?? fetch
+  const fallbacks = opts.fallbacks ?? fallbacksFromEnv()
   const maxLogRange = opts.maxLogRange ?? Number(process.env.MAMORU_LOG_RANGE ?? 10)
   const metrics = opts.metrics
   let id = 0
   const local = isLoopback(upstream)
   // Chunk getLogs for Alchemy (free tier: 10 blocks) or when MAMORU_LOG_RANGE is set; otherwise the range goes as is.
   const chunkLogs = /alchemy/i.test(new URL(upstream).hostname) || !!process.env.MAMORU_LOG_RANGE
-  const providers = local ? [upstream] : [upstream, ...FALLBACKS.filter((f) => f !== upstream)]
+  const providers = local ? [upstream] : [upstream, ...fallbacks.filter((f) => f !== upstream)]
   const labels = labelProviders(providers)
   const labelOf = (url: string) => labels.get(url) ?? registrableDomain(new URL(url).hostname)
   async function post(url: string, body: unknown): Promise<{ status: number; json: any }> {
-    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) })
+    const res = await send(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) })
     let json: any = null
     try {
       json = await res.json()
