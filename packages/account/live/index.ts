@@ -177,6 +177,12 @@ export function fromB64url(s: string): Uint8Array {
  * The normalised (r, s) is what goes on chain and what the off-chain checks verify.
  */
 export function parseDerSignature(der: Uint8Array): { r: bigint; s: bigint } {
+  const { r, s } = parseDerStrict(der)
+  return { r, s: s > P256_N / 2n ? P256_N - s : s }
+}
+
+/** The strict parse, with s as the authenticator sent it. */
+function parseDerStrict(der: Uint8Array): { r: bigint; s: bigint } {
   // 2 + 2 * (2 + 33): a P-256 signature never needs the long length form, so a 0x8x length is not DER here.
   if (der.length < 2 || der.length > 72) throw new Error('DER signature: bad length')
   if (der[0] !== 0x30) throw new Error('DER signature: expected SEQUENCE')
@@ -193,11 +199,75 @@ export function parseDerSignature(der: Uint8Array): { r: bigint; s: bigint } {
     return BigInt(toHex(body))
   }
   const r = int()
-  let s = int()
+  const s = int()
   if (i !== der.length) throw new Error('DER signature: trailing data')
   if (r === 0n || r >= P256_N || s === 0n || s >= P256_N) throw new Error('DER signature out of range')
-  if (s > P256_N / 2n) s = P256_N - s
   return { r, s }
+}
+
+/**
+ * What an assertion looks like, without anything secret or identifying: sizes, the flags byte, the clientDataJSON
+ * keys in the order the browser wrote them, and how the signature is encoded. Logged when a check that mirrors the
+ * chain disagrees with the chain, or when sign-in refuses a real device, so the mirror can be fixed from the log.
+ */
+export type AssertionShape = {
+  authenticatorDataLength: number
+  flags: string | null
+  signCountZero: boolean | null
+  clientDataLength: number
+  clientDataKeys: string[] | null
+  clientDataPrefixOk: boolean
+  signatureLength: number
+  signatureDer: 'ok' | string
+  highS: boolean | null
+}
+
+export function assertionShape(a: { authenticatorData: Uint8Array; clientDataJSON: Uint8Array; signature: Uint8Array }): AssertionShape {
+  const auth = a.authenticatorData
+  let keys: string[] | null = null
+  let text = ''
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(a.clientDataJSON)
+    const parsed: unknown = JSON.parse(text)
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) keys = Object.keys(parsed)
+  } catch {
+    // not JSON: keys stay null
+  }
+  let der: AssertionShape['signatureDer'] = 'ok'
+  let highS: boolean | null = null
+  try {
+    highS = parseDerStrict(a.signature).s > P256_N / 2n
+  } catch (e) {
+    der = (e as Error).message
+  }
+  return {
+    authenticatorDataLength: auth.length,
+    flags: auth.length > 32 ? `0x${auth[32]!.toString(16).padStart(2, '0')}` : null,
+    signCountZero: auth.length >= 37 ? auth[33] === 0 && auth[34] === 0 && auth[35] === 0 && auth[36] === 0 : null,
+    clientDataLength: a.clientDataJSON.length,
+    clientDataKeys: keys,
+    clientDataPrefixOk: text.startsWith(CLIENT_DATA_PREFIX),
+    signatureLength: a.signature.length,
+    signatureDer: der,
+    highS,
+  }
+}
+
+/** The same for a stored Safe contract signature (the armed executor has nothing else): s is already normalised there. */
+export function ownerSignatureShape(signature: Hex): Partial<AssertionShape> & { decodes: boolean } {
+  try {
+    const d = decodeOwnerSignature(signature)
+    const auth = hexToBytes(d.authenticatorData)
+    let keys: string[] | null = null
+    try {
+      keys = ['type', 'challenge', ...Object.keys(JSON.parse(`{${d.clientDataFields}}`) as object)]
+    } catch {
+      // fields are not JSON members
+    }
+    return { decodes: true, authenticatorDataLength: auth.length, flags: auth.length > 32 ? `0x${auth[32]!.toString(16).padStart(2, '0')}` : null, clientDataKeys: keys }
+  } catch {
+    return { decodes: false }
+  }
 }
 
 const CLIENT_DATA_PREFIX = '{"type":"webauthn.get","challenge":"'
