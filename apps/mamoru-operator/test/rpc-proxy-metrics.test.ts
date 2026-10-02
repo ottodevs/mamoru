@@ -122,6 +122,8 @@ describe('startRpcProxy metrics wiring', () => {
       calls.push(body)
       if (body.method === 'eth_blockNumber') return { json: { jsonrpc: '2.0', id: body.id, result: '0x14' } } // block 20, lag 3 -> head 17
       if (body.method === 'eth_getLogs') return { json: { jsonrpc: '2.0', id: body.id, result: [] } }
+      // The proxy asks the provider that served the logs for the last block of the range.
+      if (body.method === 'eth_getBlockByNumber') return { json: { jsonrpc: '2.0', id: body.id, result: { number: body.params[0], hash: `0x${'ab'.repeat(32)}` } } }
       return { json: { jsonrpc: '2.0', id: body.id, result: null } }
     })
     const metrics = new RpcMetrics(tmpDir())
