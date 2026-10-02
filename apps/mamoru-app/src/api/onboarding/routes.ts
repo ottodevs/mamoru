@@ -1,12 +1,18 @@
 import { Hono, type Context } from 'hono'
-import type { OwnerResponse } from '@mamoru/domain'
+import type { OwnerResponse, SignInChallenge } from '@mamoru/domain'
 import { conservadorV1 } from '@mamoru/policy'
 import { recoveryKit } from '@mamoru/account/recovery'
 import type { AppEnv } from '../context.ts'
 import { accountNotFound, apiError } from '../errors.ts'
-import { acknowledgeRecovery, accountOfUser, insertAccount, ownedAccount, ownersOf, type AccountRow } from '../accounts/store.ts'
+import { deleteCookie } from 'hono/cookie'
+import { SESSION_COOKIE } from '../auth/device-session.ts'
+import { acknowledgeRecovery, accountByCredential, accountOfUser, insertAccount, ownedAccount, ownersOf, type AccountRow } from '../accounts/store.ts'
 import { ACCOUNT_KEY, counterfactualAccount, passkeySigner } from './account.ts'
 import { parsePasskey } from './passkey.ts'
+import { issueChallenge, openChallenge, spendChallenge } from '../auth/challenge.ts'
+import { ONBOARDING_PER_IP, allow, ipKey } from '../auth/rate-limit.ts'
+import { checkRegistration } from '../auth/registration.ts'
+import { decodeB64url } from '../auth/webauthn.ts'
 
 async function jsonBody(c: Context): Promise<Record<string, unknown> | null> {
   if (!c.req.header('content-type')?.toLowerCase().startsWith('application/json')) return null
@@ -20,7 +26,22 @@ function ownerResponse(row: AccountRow): OwnerResponse {
 
 export const onboarding = new Hono<AppEnv>()
 
+/** One answer when the passkey cannot be registered, whatever the reason: bad proof, spent challenge, or a credential id that already owns an account. */
+const notRegistered = (c: Context, why: string) => {
+  console.log(`onboarding refused: ${why}`)
+  return apiError(c, 400, 'This passkey could not be registered. If you already have an account, sign in with it.', 'ONB_PASSKEY_REFUSED')
+}
+
+// The challenge navigator.credentials.create() must carry: single use, 5 minutes, bound to this host. Stores nothing.
+onboarding.post('/challenge', async (c) => {
+  const rpId = new URL(c.req.url).hostname
+  const body: SignInChallenge = { ...(await issueChallenge(c.var.settings.sessionSecret, rpId, c.var.now(), 'register')), rpId }
+  return c.json(body)
+})
+
 // FR-ONB-003/005: the passkey becomes the owner of a counterfactual Safe on Base. Nothing is signed or sent.
+// The request carries the registration data the browser produced for a challenge from this server (see auth/registration.ts);
+// a credential id owns at most one account per chain, so sign-in finds exactly one row.
 onboarding.post('/owner', async (c) => {
   const body = await jsonBody(c)
   if (!body) return apiError(c, 400, 'Send a JSON body with the passkey.')
@@ -29,15 +50,37 @@ onboarding.post('/owner', async (c) => {
   // FR-ONB-004: a backup owner needs a signature over an API challenge, which this contract does not carry yet.
   if (body.backupOwner !== undefined) return apiError(c, 400, 'A backup owner needs a signed challenge first.', 'ONB_BACKUP_UNPROVEN')
 
-  const session = await c.var.auth.ensure(c)
   const db = c.env.DB
-  const existing = await accountOfUser(db, session.userId)
+  const now = c.var.now()
+  // A session that already has an account: the same passkey is answered again, another one is refused. No proof needed to see your own account.
+  const current = await c.var.auth.current(c)
+  const existing = current ? await accountOfUser(db, current.userId) : null
   if (existing) {
     c.set('accountKey', existing.account_key)
     if (existing.passkey_credential_id === passkey.credentialId) return c.json(ownerResponse(existing))
     return apiError(c, 409, 'This session already has an account with another passkey.', 'INTENT_REJECTED_STATE')
   }
 
+  // Anonymous from here: bounded per client IP, and nothing is written before the registration data checks out.
+  const secret = c.var.settings.sessionSecret
+  const ip = c.req.header('cf-connecting-ip') ?? 'unknown'
+  if (!(await allow(db, await ipKey(secret, ip, 'onb'), ONBOARDING_PER_IP, now))) {
+    return apiError(c, 429, 'Too many accounts from this network. Wait a few minutes and try again.', 'AUTH_RATE_LIMITED')
+  }
+  const url = new URL(c.req.url)
+  const proof = typeof body.proof === 'object' && body.proof !== null ? (body.proof as Record<string, unknown>) : null
+  const clientDataJSON = decodeB64url(proof?.clientDataJSON, 4096)
+  const authenticatorData = decodeB64url(proof?.authenticatorData, 4096)
+  if (!proof || !clientDataJSON || !authenticatorData) return notRegistered(c, 'no proof')
+  const opened = await openChallenge(secret, url.hostname, proof.token, now, 'register')
+  if (!opened) return notRegistered(c, 'challenge token')
+  if (!(await spendChallenge(db, opened.challenge, opened.exp, now))) return notRegistered(c, 'challenge replayed')
+  const refusal = await checkRegistration({ clientDataJSON, authenticatorData }, { challenge: opened.challenge, origin: url.origin, rpId: url.hostname }, passkey)
+  if (refusal) return notRegistered(c, refusal)
+  // One credential id, one account. Checked before a user row or a cookie exists; the unique index settles a race.
+  if (await accountByCredential(db, c.var.settings.chainId, passkey.credentialId)) return notRegistered(c, 'credential id already registered')
+
+  const session = await c.var.auth.ensure(c)
   const accountKey = crypto.randomUUID()
   const account = counterfactualAccount(accountKey, passkey)
   const row: AccountRow = {
@@ -53,9 +96,16 @@ onboarding.post('/owner', async (c) => {
     preset: conservadorV1.preset,
     policy_version: conservadorV1.version,
     recovery_ack_at: null,
-    created_at: c.var.now().toISOString(),
+    created_at: now.toISOString(),
   }
-  await insertAccount(db, row)
+  if (!(await insertAccount(db, row))) {
+    // Lost a race for the same credential id: take back the user row and the cookie this request just made.
+    if (!current) {
+      await db.prepare('DELETE FROM users WHERE user_id = ?').bind(session.userId).run()
+      deleteCookie(c, SESSION_COOKIE, { prefix: 'host', path: '/', secure: true })
+    }
+    return notRegistered(c, 'credential id already registered (race)')
+  }
   c.set('accountKey', row.account_key)
   return c.json(ownerResponse(row), 201)
 })

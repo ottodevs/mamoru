@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { createHmac } from 'node:crypto'
 import type { AccountContext, AppConfig, OwnerResponse } from '@mamoru/domain'
-import { harness, ORIGIN, PASSKEY_A, PASSKEY_B, sessionCookie } from './helpers.ts'
+import { harness, register, ORIGIN, PASSKEY_A, PASSKEY_B, sessionCookie } from './helpers.ts'
 
 const OPERATOR_URL = 'https://operator.test'
 const OPERATOR_SECRET = 'operator-secret-for-tests-only-0123456789'
@@ -20,7 +20,7 @@ function fakeOperator(reply: (s: Seen) => Response = () => Response.json({ ok: t
 }
 
 async function onboard(h: ReturnType<typeof harness>, passkey = PASSKEY_A) {
-  const res = await h.post('/api/onboarding/owner', { passkey })
+  const res = await register(h, passkey)
   return { cookie: sessionCookie(res), owner: (await res.json()) as OwnerResponse }
 }
 

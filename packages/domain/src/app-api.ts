@@ -25,8 +25,12 @@ export type SignInRequest = { token: string; credentialId: string; authenticator
 // Passkey owner as produced by navigator.credentials.create (P-256).
 export type PasskeyOwner = { credentialId: string; x: Hex0x; y: Hex0x }
 
-// POST /api/onboarding/owner  body: OwnerRequest -> OwnerResponse
-export type OwnerRequest = { passkey: PasskeyOwner; backupOwner?: Hex0x }
+// POST /api/onboarding/challenge -> SignInChallenge: the challenge navigator.credentials.create() must carry.
+// POST /api/onboarding/owner  body: OwnerRequest -> OwnerResponse | 400 ONB_PASSKEY_REFUSED | 429 AUTH_RATE_LIMITED
+// proof: what create() returned for that challenge (base64url). The API checks the challenge, the origin, the RP ID,
+// and that the credential id and public key inside authenticatorData are the ones in `passkey`.
+export type RegistrationProof = { token: string; clientDataJSON: string; authenticatorData: string }
+export type OwnerRequest = { passkey: PasskeyOwner; proof: RegistrationProof; backupOwner?: Hex0x }
 export type OwnerResponse = {
   accountKey: string
   chainId: number

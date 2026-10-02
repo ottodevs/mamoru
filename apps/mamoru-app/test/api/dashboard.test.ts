@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import type { DashboardPayload, OwnerResponse, PoolsResponse, Provenance } from '@mamoru/domain'
 import { PRODUCTION_BANNER } from '@mamoru/domain'
-import { harness, PASSKEY_A, PASSKEY_B, sessionCookie } from './helpers.ts'
+import { harness, register, PASSKEY_A, PASSKEY_B, sessionCookie } from './helpers.ts'
 import { BLOCK, BLOCK_HASH, poolView, tokens } from './fixtures.ts'
 
 const T0 = new Date('2026-09-26T18:00:00Z')
 
 async function onboard(h: ReturnType<typeof harness>, passkey = PASSKEY_A) {
-  const res = await h.post('/api/onboarding/owner', { passkey })
+  const res = await register(h, passkey)
   return { cookie: sessionCookie(res), owner: (await res.json()) as OwnerResponse }
 }
 

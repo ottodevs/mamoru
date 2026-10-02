@@ -1,4 +1,5 @@
-import type { PasskeyOwner } from '@mamoru/domain'
+import { createHash } from 'node:crypto'
+import type { PasskeyOwner, RegistrationProof, SignInChallenge } from '@mamoru/domain'
 import { createApp, type AppOptions } from '../../src/api/app.ts'
 import type { Env } from '../../src/api/env.ts'
 import { memoryD1 } from './d1.ts'
@@ -45,4 +46,37 @@ export function sessionCookie(res: Response): string {
   const set = res.headers.get('set-cookie')
   if (!set) throw new Error('no session cookie')
   return set.split(';')[0]!
+}
+
+export type RegistrationShape = { rpId?: string; origin?: string; type?: string; flags?: number; challenge?: string; credentialId?: string; x?: string; y?: string; alg?: number; crossOrigin?: boolean }
+
+/**
+ * What navigator.credentials.create() returns for `challenge`, as the SPA posts it: clientDataJSON and the
+ * authenticatorData with the attested credential (aaguid, credential id, COSE EC2 key). `shape` bends one part of it.
+ */
+export function registrationProof(passkey: PasskeyOwner, challenge: SignInChallenge, shape: RegistrationShape = {}): RegistrationProof {
+  const id = Buffer.from(shape.credentialId ?? passkey.credentialId, 'base64url')
+  const coord = (h: string) => Buffer.from(h.slice(2), 'hex')
+  // a5: map(5) { 1: 2 (EC2), 3: alg, -1: 1 (P-256), -2: x, -3: y }
+  const alg = shape.alg ?? -7
+  const cose = Buffer.concat([Buffer.from([0xa5, 0x01, 0x02, 0x03, 0x20 | (-1 - alg), 0x20, 0x01, 0x21, 0x58, 0x20]), coord(shape.x ?? passkey.x), Buffer.from([0x22, 0x58, 0x20]), coord(shape.y ?? passkey.y)])
+  const authenticatorData = Buffer.concat([
+    createHash('sha256').update(shape.rpId ?? 'app.mamoru.lol').digest(),
+    Buffer.from([shape.flags ?? 0x45, 0, 0, 0, 0]),
+    Buffer.alloc(16),
+    Buffer.from([id.length >> 8, id.length & 0xff]),
+    id,
+    cose,
+  ])
+  const clientDataJSON = JSON.stringify({ type: shape.type ?? 'webauthn.create', challenge: shape.challenge ?? challenge.challenge, origin: shape.origin ?? ORIGIN, crossOrigin: shape.crossOrigin ?? false })
+  return { token: challenge.token, clientDataJSON: Buffer.from(clientDataJSON).toString('base64url'), authenticatorData: authenticatorData.toString('base64url') }
+}
+
+type Harness = ReturnType<typeof harness>
+
+/** Onboarding as the SPA does it: a registration challenge, then the passkey with the proof for it. */
+export async function register(h: Harness, passkey: PasskeyOwner, opts: { cookie?: string; shape?: RegistrationShape; ip?: string } = {}): Promise<Response> {
+  const challenge = (await (await h.post('/api/onboarding/challenge', {})).json()) as SignInChallenge
+  const headers: Record<string, string> = { 'content-type': 'application/json', origin: ORIGIN, ...(opts.ip ? { 'cf-connecting-ip': opts.ip } : {}) }
+  return h.request('/api/onboarding/owner', { method: 'POST', body: JSON.stringify({ passkey, proof: registrationProof(passkey, challenge, opts.shape) }), headers, cookie: opts.cookie })
 }

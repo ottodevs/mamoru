@@ -12,7 +12,7 @@ const FLAG_BS = 0x10
 const AUTH_DATA_MIN = 37
 
 export type Assertion = { authenticatorData: Uint8Array; clientDataJSON: Uint8Array; signature: Uint8Array }
-export type Expected = { challenge: string; origin: string; rpId: string }
+export type Expected = { challenge: string; origin: string; rpId: string; type?: 'webauthn.get' | 'webauthn.create' }
 export type AssertionRefusal = 'client_data' | 'type' | 'challenge' | 'origin' | 'cross_origin' | 'auth_data' | 'rp_id' | 'user_present' | 'user_verified' | 'backup_flags'
 
 const enc = new TextEncoder()
@@ -51,7 +51,7 @@ export function signCountOf(authenticatorData: Uint8Array): number {
 
 function refusalOf(client: Record<string, unknown> | null, auth: Uint8Array, rpIdHash: Uint8Array, expected: Expected): AssertionRefusal | null {
   if (!client) return 'client_data'
-  if (client.type !== 'webauthn.get') return 'type'
+  if (client.type !== (expected.type ?? 'webauthn.get')) return 'type'
   if (typeof client.challenge !== 'string' || !constantTimeEqual(client.challenge, expected.challenge)) return 'challenge'
   if (typeof client.origin !== 'string' || !constantTimeEqual(client.origin, expected.origin)) return 'origin'
   // An assertion made inside a cross-origin iframe is not the owner at this site.

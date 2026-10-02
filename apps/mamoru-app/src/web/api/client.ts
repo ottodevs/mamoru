@@ -27,6 +27,8 @@ export type ApiClient = {
   dashboard(accountKey: string): Promise<DashboardPayload>
   pools(): Promise<PoolsResponse>
   apy(): Promise<ApyView>
+  /** The challenge the new passkey is created over; createOwner sends back what the browser returned for it. */
+  registrationChallenge(): Promise<SignInChallenge>
   createOwner(body: OwnerRequest): Promise<OwnerResponse>
   /** Returning owner: a one-time challenge, then the passkey assertion over it. signIn sets the session cookie. */
   signInChallenge(): Promise<SignInChallenge>
@@ -86,6 +88,7 @@ export const httpClient: ApiClient = {
   dashboard: (accountKey) => request<DashboardPayload>(`/api/accounts/${encodeURIComponent(accountKey)}/dashboard`),
   pools: () => request<PoolsResponse>('/api/pools'),
   apy: () => request<ApyView>('/api/apy'),
+  registrationChallenge: () => post<SignInChallenge>('/api/onboarding/challenge'),
   createOwner: (body) => request<OwnerResponse>('/api/onboarding/owner', { method: 'POST', body: JSON.stringify(body) }),
   signInChallenge: () => post<SignInChallenge>('/api/auth/challenge'),
   signIn: (body) => post<SessionView>('/api/auth/signin', body),

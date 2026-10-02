@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono'
 import type { SessionView, SignInChallenge } from '@mamoru/domain'
 import type { AppEnv } from '../context.ts'
 import { apiError } from '../errors.ts'
-import { MAX_CREDENTIAL_ROWS, accountsByCredential, advanceSignCount, type AccountRow } from '../accounts/store.ts'
+import { accountByCredential, advanceSignCount, type AccountRow } from '../accounts/store.ts'
 import { issueChallenge, openChallenge, spendChallenge } from './challenge.ts'
 import { SIGNIN_LIMITS, allow, count, countNothing, credentialKey, ipKey } from './rate-limit.ts'
 import { DECOY_KEY, checkClaims, decodeB64url, signCountOf, verifyP256 } from './webauthn.ts'
@@ -68,22 +68,15 @@ signIn.post('/signin', async (c) => {
   if (!(await spendChallenge(db, opened.challenge, opened.exp, now))) return refused(c, 'challenge replayed')
 
   // From here on every request does the same work whatever is wrong with it: the claims are evaluated, the account
-  // rows are read, one or more P-256 verifications run, and the outcome is decided at the end. A caller cannot tell
-  // an unknown credential from a wrong key or a refused flag by the status, the body, or what the request cost.
+  // row is read, one P-256 verification runs (against the decoy key when no account has this credential), and the
+  // outcome is decided at the end. A caller cannot tell an unknown credential from a wrong key or a refused flag by
+  // the status, the body, or what the request cost.
   const claims = await checkClaims({ authenticatorData, clientDataJSON, signature }, { challenge: opened.challenge, origin, rpId })
-  const rows = await accountsByCredential(db, c.var.settings.chainId, credentialId)
-  if (rows === null) console.error(`signin: more than ${MAX_CREDENTIAL_ROWS} accounts share one credential id; refusing`)
-  const candidates = rows ?? []
-  let account: AccountRow | null = null
-  for (const row of candidates) {
-    if (await verifyP256({ x: row.passkey_x, y: row.passkey_y }, claims.signed, signature)) {
-      account = row
-      break
-    }
-  }
-  if (candidates.length === 0) await verifyP256(DECOY_KEY, claims.signed, signature)
+  const row = await accountByCredential(db, c.var.settings.chainId, credentialId)
+  const verified = await verifyP256(row ? { x: row.passkey_x, y: row.passkey_y } : DECOY_KEY, claims.signed, signature)
+  const account: AccountRow | null = row && verified ? row : null
 
-  let why: string | null = claims.reason ?? (account ? null : candidates.length ? 'signature' : rows === null ? 'too many accounts' : 'credential')
+  let why: string | null = claims.reason ?? (account ? null : row ? 'signature' : 'credential')
   if (!why && account) {
     // Signature counter (WebAuthn 7.2 step 22). Synced passkeys always report 0 and are accepted. Once a counter was
     // seen, it must increase: one that does not is a second copy of the authenticator, and that assertion is refused.
@@ -98,7 +91,7 @@ signIn.post('/signin', async (c) => {
     // Failures are counted per credential only here (complete assertion, valid challenge) and only for credentials that
     // exist; the count is for the log and never refuses anyone. An unknown credential runs the same statements on no row.
     const key = await credentialKey(credentialId)
-    if (candidates.length) {
+    if (row) {
       const failures = await count(db, key, now)
       if (failures === SIGNIN_LIMITS.credentialFailuresLogged) console.warn(`signin: ${failures} failed attempts on one credential in ${SIGNIN_LIMITS.windowSeconds / 60} minutes`)
     } else await countNothing(db, key, now)

@@ -1,4 +1,4 @@
-import type { Hex0x, PasskeyOwner } from '@mamoru/domain'
+import type { Hex0x, OwnerRequest, PasskeyOwner, SignInChallenge } from '@mamoru/domain'
 
 const ES256 = -7
 
@@ -24,11 +24,17 @@ export async function p256FromSpki(spki: ArrayBuffer | Uint8Array): Promise<{ x:
 
 export class PasskeyError extends Error {}
 
+function fromBase64url(s: string): Uint8Array {
+  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4))
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0))
+}
+
 /**
  * Creates the account owner passkey (FR-ONB-003): ES256 only, resident key preferred, user verification required.
- * Registration only. Nothing is signed here.
+ * Registration only. Nothing is signed here. The challenge comes from the API, and what the browser returns for it
+ * (clientDataJSON and authenticatorData) goes back as the proof that this credential id and key were made here, now.
  */
-export async function createOwnerPasskey(): Promise<PasskeyOwner> {
+export async function createOwnerPasskey(challenge: SignInChallenge): Promise<Pick<OwnerRequest, 'passkey' | 'proof'>> {
   if (typeof PublicKeyCredential === 'undefined' || !navigator.credentials) {
     throw new PasskeyError('This browser does not support passkeys. Open Mamoru in a browser with passkey support and try again.')
   }
@@ -36,7 +42,7 @@ export async function createOwnerPasskey(): Promise<PasskeyOwner> {
     publicKey: {
       rp: { name: 'Mamoru' },
       user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'Mamoru account owner', displayName: 'Mamoru account owner' },
-      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      challenge: fromBase64url(challenge.challenge) as BufferSource,
       pubKeyCredParams: [{ type: 'public-key', alg: ES256 }],
       authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
       attestation: 'none',
@@ -50,6 +56,10 @@ export async function createOwnerPasskey(): Promise<PasskeyOwner> {
   }
   const spki = response.getPublicKey()
   if (!spki) throw new PasskeyError('Your browser did not return the passkey public key. Try another browser.')
+  if (typeof response.getAuthenticatorData !== 'function') throw new PasskeyError('Your browser is too old to register a passkey here. Update it and try again.')
   const { x, y } = await p256FromSpki(spki)
-  return { credentialId: base64url(credential.rawId), x, y }
+  return {
+    passkey: { credentialId: base64url(credential.rawId), x, y } satisfies PasskeyOwner,
+    proof: { token: challenge.token, clientDataJSON: base64url(response.clientDataJSON), authenticatorData: base64url(response.getAuthenticatorData()) },
+  }
 }

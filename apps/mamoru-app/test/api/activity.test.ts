@@ -2,10 +2,10 @@ import { upsertActivity } from '../../src/api/accounts/activity.ts'
 import { describe, expect, test } from 'bun:test'
 import type { OwnerResponse, SessionView } from '@mamoru/domain'
 import type { Db, DbStatement, DbValue } from '../../src/api/env.ts'
-import { harness, PASSKEY_A, sessionCookie } from './helpers.ts'
+import { harness, register, PASSKEY_A, sessionCookie } from './helpers.ts'
 
 async function onboard(h: ReturnType<typeof harness>) {
-  const res = await h.post('/api/onboarding/owner', { passkey: PASSKEY_A })
+  const res = await register(h, PASSKEY_A)
   expect(res.status).toBe(201)
   return { cookie: sessionCookie(res), owner: (await res.json()) as OwnerResponse }
 }

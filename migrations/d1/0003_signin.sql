@@ -7,7 +7,7 @@ CREATE TABLE auth_challenge_used (
 );
 CREATE INDEX auth_challenge_used_expiry ON auth_challenge_used(expires_at);
 
--- Fixed-window counters. key is 'ip:<bucket 0..4095>' (attempts) or 'cred:<sha256>' (failures, only for credential ids
+-- Fixed-window counters. key is 'ip:<bucket 0..4095>' (sign-in attempts), 'onb:<bucket>' (onboarding attempts) or 'cred:<sha256>' (failures, only for credential ids
 -- that belong to an account): no raw IP or credential id is stored, and the table cannot outgrow buckets + accounts per window.
 CREATE TABLE auth_rate (
   key TEXT NOT NULL,
@@ -20,5 +20,6 @@ CREATE INDEX auth_rate_window ON auth_rate(window);
 -- Last signature counter seen at sign-in. 0 for synced passkeys, which never count; a counter that stops increasing is a cloned authenticator.
 ALTER TABLE accounts ADD COLUMN passkey_sign_count INTEGER NOT NULL DEFAULT 0;
 
--- Sign-in finds the account by the credential id the authenticator returns.
-CREATE INDEX accounts_passkey_credential ON accounts(passkey_credential_id);
+-- A credential id owns at most one account per chain: sign-in finds exactly one row, and nobody can pile rows onto
+-- someone else's credential id. Production had 40 accounts and no duplicate when this was written (2026-10-02).
+CREATE UNIQUE INDEX accounts_chain_credential ON accounts(chain_id, passkey_credential_id);
