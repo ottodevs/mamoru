@@ -80,7 +80,9 @@ const IPV4_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/
  * An IPv4 address (the loopback proxy's own upstream in tests) or a bracketed IPv6 address has no
  * "registrable domain" at all and is returned as-is, never split into its dotted octets/groups.
  */
-function registrableDomain(hostname: string): string {
+function registrableDomain(raw: string): string {
+  // One spelling per host: lower case, no trailing root dot (`host.com.` is `host.com`).
+  const hostname = raw.toLowerCase().replace(/\.+$/, '')
   if (IPV4_RE.test(hostname) || hostname.includes(':')) return hostname
   const labels = hostname.split('.').filter(Boolean)
   if (labels.length <= 2) return hostname
