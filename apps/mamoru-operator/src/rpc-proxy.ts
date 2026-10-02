@@ -88,6 +88,14 @@ function registrableDomain(hostname: string): string {
   return labels.slice(-(MULTI_PART_SUFFIXES.has(lastTwo) ? 3 : 2)).join('.')
 }
 
+/**
+ * Whether two provider URLs are the same operator: same registrable domain, whatever the scheme, port,
+ * path, key or subdomain. Two keys of one provider, or one URL spelled two ways, are not independent.
+ */
+export function sameOperator(a: string, b: string): boolean {
+  return registrableDomain(new URL(a).hostname).toLowerCase() === registrableDomain(new URL(b).hostname).toLowerCase()
+}
+
 /** Provider URL -> display label: registrable domain only, `#1`/`#2` suffix when several providers
  * share one (never a subdomain, the path, or a key — see `registrableDomain`). */
 export function labelProviders(providers: string[]): Map<string, string> {
@@ -240,9 +248,10 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    */
   async function witnessHash(p: LogProvider, n: bigint, seen: Witnessed): Promise<string | null> {
     const known = seen.get(String(n))
-    if (known && known.url !== p.url) return known.hash
+    if (known && !sameOperator(known.url, p.url)) return known.hash
     for (const w of logProviders) {
-      if (w.url === p.url) continue
+      // Independence is by operator, not by URL: another key or another spelling of the same provider is no witness.
+      if (sameOperator(w.url, p.url)) continue
       const hash = await blockHash(w.url, n).catch(() => null)
       if (!hash) continue
       seen.set(String(n), { url: w.url, hash })
@@ -272,9 +281,9 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const filter = { ...(msg.params?.[0] ?? {}) }
     if (filter.blockHash) return one('eth_getLogs', [filter])
     // A remote upstream alone could only witness itself: no logs are read at all.
-    if (!local && logProviders.length < 2) {
+    if (!local && !logProviders.some((w) => !sameOperator(w.url, upstream))) {
       if (metrics) safeMetrics(() => metrics.recordLogRange(labelOf(upstream), 'no_witness'))
-      throw fail('eth_getLogs needs a second provider to witness the range: set MAMORU_RPC_FALLBACKS', 'no_witness')
+      throw fail('eth_getLogs needs a provider from another operator to witness the range: set MAMORU_RPC_FALLBACKS', 'no_witness')
     }
     const from = await toNum(filter.fromBlock ?? 'latest')
     const to = await toNum(filter.toBlock ?? 'latest')
