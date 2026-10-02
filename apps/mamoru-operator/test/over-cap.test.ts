@@ -7,7 +7,7 @@ import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
 import { LIVE_CAP_USDC, browserOwnerSignature, deployCall, liveAccountFromContext } from '@mamoru/account/live'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
-import { HttpError, MAX_OWNER_FAILURES_GLOBAL_PER_DAY, MAX_OWNER_FAILURES_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
+import { HttpError, MAX_OWNER_FAILURES_PER_DAY, OWNER_FAILURES_ALERT_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
 import type { Relayer } from '../src/relayer.ts'
 import type { AccountState, ArmedActivation, StateStore } from '../src/state.ts'
 
@@ -36,7 +36,9 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', onSend: (_tx: { to: string }) => {} }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {} }
+  /** eth_calls of execTransaction the operator made. */
+  const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
   const factory = deployCall(liveAccountFromContext(ctx))
   const client = {
@@ -61,7 +63,12 @@ function world(usdc: bigint) {
       const last = calls.length - 1
       return [{ calls: calls.map((_, i) => (knobs.sim === 'revert' && i === last ? { status: '0x0', returnData: '0x', gasUsed: '0x5208', logs: [], error: { message: 'GS026' } } : { status: '0x1', returnData: TRUE, gasUsed: '0x5208', logs: [] })) }]
     },
-    call: async () => ({ data: '0x' }),
+    call: async ({ data }: { data: Hex }) => {
+      called.push(data)
+      if (knobs.call === 'revert') throw Object.assign(new Error('execution reverted: GS026'), { code: 3, data: '0x08c379a0' })
+      if (knobs.call === 'down') throw new Error('HTTP request failed. Status: 429')
+      return { data: '0x' }
+    },
   } as unknown as PublicClient
   const relayer = {
     address: RELAYER,
@@ -73,7 +80,7 @@ function world(usdc: bigint) {
       const isDeploy = tx.to.toLowerCase() === factory.to.toLowerCase()
       if (isDeploy) chain.deployed = true
       else if (tx.data) chain.nonce++
-      const logs = isDeploy ? [] : [{ address: SAFE, topics: [EXECUTION_SUCCESS] }]
+      const logs = isDeploy || !knobs.execOk ? [] : [{ address: SAFE, topics: [EXECUTION_SUCCESS] }]
       return { hash, receipt: { transactionHash: hash, status: 'success', blockNumber: 101n, logs } as unknown as TransactionReceipt }
     },
   } as unknown as Relayer
@@ -82,7 +89,7 @@ function world(usdc: bigint) {
   const cfg = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 } satisfies OperatorConfig
   const op = new Operator(cfg, client, relayer, store)
   ;(op as unknown as { retryMs: number }).retryMs = 0
-  return { op, chain, sent, simulated, knobs, factory, state }
+  return { op, chain, sent, simulated, called, knobs, factory, state }
 }
 
 function der(r: bigint, s: bigint): Uint8Array {
@@ -206,7 +213,8 @@ describe('the relayer spends nothing before the owner signature is proven', () =
     expect(w.sent).toHaveLength(0)
     expect(w.chain.deployed).toBe(false)
     expect(w.op.ops(ctx, null).ops).toEqual([])
-    expect(w.state.accounts.k!.ownerFailures).toHaveLength(1)
+    // It cost the relayer nothing, so it counts against nothing.
+    expect(w.state.accounts.k!.ownerFailures ?? []).toHaveLength(0)
     // The prepared transaction is spent: the same body cannot be tried again.
     expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx)).catch((e: unknown) => e)).toMatchObject({ code: 'PREPARE_UNKNOWN' })
   })
@@ -253,24 +261,60 @@ describe('the relayer spends nothing before the owner signature is proven', () =
     expect(w.simulated.length - before).toBe(3)
     expect(w.sent).toHaveLength(0)
     expect(w.chain.deployed).toBe(false)
+    // No gas was spent: the refusal is not held against the account.
+    expect(w.state.accounts.k!.ownerFailures ?? []).toHaveLength(0)
   })
 
-  test('when the simulation cannot run nothing is sent; an armed activation stays armed and is retried', async () => {
+  test('simulation unavailable never stops a proven owner: an undeployed Safe goes ahead on the signature and the minimum balance', async () => {
     const w = world(OVER)
-    const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
     w.knobs.sim = 'down'
-    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ state: 'failed', code: 'SIMULATION_UNAVAILABLE' })
-    expect(w.sent).toHaveLength(0)
-    expect(w.state.accounts.k!.ownerFailures ?? []).toHaveLength(0)
-
-    const v = world(0n)
-    await arm(v)
+    // Preparing a plain USDC transfer does not need the simulation either.
+    const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
+    const before = w.simulated.length
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ state: 'confirmed' })
+    expect(w.simulated.length - before).toBe(3)
+    expect(w.sent.map((t) => t.to)).toEqual([w.factory.to, SAFE])
+    // A forged signature still costs nothing, simulation or not.
+    const v = world(OVER)
     v.knobs.sim = 'down'
-    v.chain.usdc = 10_000_000n
-    await priv(v.op).fireArmed(v.state.accounts.k!, 10_000_000n)
+    const forged = await v.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
+    expect(await v.op.submit(ctx, 'transfer', sign(forged.ownerTx, thief)).catch((e: unknown) => e)).toMatchObject({ code: 'BAD_SIGNATURE' })
     expect(v.sent).toHaveLength(0)
-    expect(v.state.accounts.k!.armed?.tries).toBe(1)
-    expect(v.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'proposed', code: 'ARMED' })
+  })
+
+  test('simulation unavailable on a deployed Safe: eth_call stands in; ok sends, revert does not, and no answer at all still sends', async () => {
+    const deployedWorld = () => {
+      const w = world(5_000_000n)
+      w.chain.deployed = true
+      w.knobs.sim = 'down'
+      return w
+    }
+    const ok = deployedWorld()
+    const p1 = await ok.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1000000' })
+    expect(await ok.op.submit(ctx, 'transfer', sign(p1.ownerTx))).toMatchObject({ state: 'confirmed' })
+    expect(ok.called.length).toBeGreaterThan(0)
+    expect(ok.sent).toHaveLength(1)
+
+    const reverting = deployedWorld()
+    const p2 = await reverting.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1000000' })
+    reverting.knobs.call = 'revert'
+    expect(await reverting.op.submit(ctx, 'transfer', sign(p2.ownerTx))).toMatchObject({ state: 'failed', code: 'OWNER_TX_REVERTS' })
+    expect(reverting.sent).toHaveLength(0)
+    expect(reverting.state.accounts.k!.ownerFailures ?? []).toHaveLength(0)
+
+    const blind = deployedWorld()
+    const p3 = await blind.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1000000' })
+    blind.knobs.call = 'down'
+    expect(await blind.op.submit(ctx, 'transfer', sign(p3.ownerTx))).toMatchObject({ state: 'confirmed' })
+    expect(blind.sent).toHaveLength(1)
+
+    // Stop, the other exit path, behaves the same.
+    const stop = deployedWorld()
+    stop.op.account(ctx).acc.grants = [{ name: 'enter-swap', permissionId: `0x${'aa'.repeat(32)}`, grant: {} as never }]
+    stop.knobs.call = 'down'
+    const tx = await stop.op.prepareStop(ctx)
+    expect(await stop.op.submit(ctx, 'stop', sign(tx))).toMatchObject({ kind: 'exit', state: 'confirmed' })
+    expect(stop.sent).toHaveLength(1)
   })
 
   test('stop goes through the same checks', async () => {
@@ -304,20 +348,51 @@ describe('the relayer spends nothing before the owner signature is proven', () =
     expect(v.sent).toHaveLength(0)
   })
 
-  test('failure budget: after 5 failed owner executions in a day the account is refused, and an armed activation is dropped', async () => {
+  test('the budget counts only failures the relayer paid for', async () => {
     const w = world(OVER)
-    for (let i = 0; i < MAX_OWNER_FAILURES_PER_DAY; i++) {
-      const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
-      await w.op.submit(ctx, 'transfer', sign(plan.ownerTx, thief)).catch(() => undefined)
-    }
     const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
-    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx)).catch((e: unknown) => e)).toMatchObject({ status: 429, code: 'OWNER_FAILURE_BUDGET' })
-    expect(w.sent).toHaveLength(0)
-    // Failures older than 24 hours no longer count.
-    const acc = w.state.accounts.k!
-    acc.ownerFailures = acc.ownerFailures!.map(() => new Date(Date.now() - 25 * 3_600_000).toISOString())
-    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ state: 'confirmed' })
+    w.knobs.execOk = false
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ state: 'failed', code: 'OWNER_TX_FAILED' })
+    expect(w.sent).toHaveLength(2)
+    expect(w.state.accounts.k!.ownerFailures).toHaveLength(1)
+  })
 
+  test('a proven owner always withdraws and stops, whatever the failure counters say; only a new activation waits', async () => {
+    const w = world(OVER)
+    const { acc } = w.op.account(ctx)
+    const recent = new Date().toISOString()
+    acc.ownerFailures = Array.from({ length: MAX_OWNER_FAILURES_PER_DAY + 3 }, () => recent)
+    // Other accounts failing a lot is an alert, not a gate.
+    for (let i = 0; i < OWNER_FAILURES_ALERT_PER_DAY; i++) w.state.accounts[`other-${i}`] = { ownerFailures: [recent, recent] } as unknown as AccountState
+
+    const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ kind: 'transfer', state: 'confirmed' })
+    acc.grants = [{ name: 'enter-swap', permissionId: `0x${'aa'.repeat(32)}`, grant: {} as never }]
+    const stop = await w.op.prepareStop(ctx)
+    expect(await w.op.submit(ctx, 'stop', sign(stop))).toMatchObject({ kind: 'exit', state: 'confirmed' })
+
+    // A new activation of this account is what the budget holds back, with a message that says withdrawals work.
+    w.chain.usdc = 20_000_000n
+    const start = await w.op.prepareActivate(ctx)
+    const refused = await w.op.submit(ctx, 'activate', sign(start)).catch((e: unknown) => e as HttpError)
+    expect(refused).toMatchObject({ status: 429, code: 'OWNER_FAILURE_BUDGET' })
+    expect((refused as HttpError).message).toContain('withdrawals still work')
+    // Failures older than 24 hours no longer count.
+    acc.ownerFailures = acc.ownerFailures!.map(() => new Date(Date.now() - 25 * 3_600_000).toISOString())
+    w.chain.usdc = 0n
+    const again = await w.op.prepareActivate(ctx)
+    expect(await w.op.submit(ctx, 'activate', sign(again))).toMatchObject({ code: 'ARMED' })
+  })
+
+  test('failures of other accounts never gate this one, not even its activation', async () => {
+    const w = world(0n)
+    w.op.account(ctx)
+    const recent = new Date().toISOString()
+    for (let i = 0; i < OWNER_FAILURES_ALERT_PER_DAY; i++) w.state.accounts[`other-${i}`] = { ownerFailures: [recent, recent] } as unknown as AccountState
+    expect((await arm(w)).op).toMatchObject({ state: 'proposed', code: 'ARMED' })
+  })
+
+  test('an armed activation of an account over its budget is dropped without a send', async () => {
     const v = world(0n)
     await arm(v)
     const armedAcc = v.state.accounts.k!
@@ -327,16 +402,6 @@ describe('the relayer spends nothing before the owner signature is proven', () =
     expect(armedAcc.armed).toBeUndefined()
     expect(v.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'failed', code: 'OWNER_FAILURE_BUDGET' })
     expect(v.sent).toHaveLength(0)
-  })
-
-  test('global failure budget: failures across accounts pause every owner execution', async () => {
-    const w = world(OVER)
-    w.op.account(ctx)
-    const recent = new Date().toISOString()
-    for (let i = 0; i < MAX_OWNER_FAILURES_GLOBAL_PER_DAY / 2; i++) w.state.accounts[`other-${i}`] = { ownerFailures: [recent, recent] } as unknown as AccountState
-    const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
-    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx)).catch((e: unknown) => e)).toMatchObject({ status: 429, code: 'OWNER_FAILURE_BUDGET' })
-    expect(w.sent).toHaveLength(0)
   })
 })
 

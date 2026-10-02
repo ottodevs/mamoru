@@ -57,12 +57,19 @@ const POST_WAIT_MS = 15_000
 const ARM_WATCH_MS = 6_000
 /** The relayer does not pay to deploy a Safe that holds less than this (1 USDC). */
 export const MIN_DEPLOY_USDC = 1_000_000n
-/** Failed owner executions the relayer accepts per account, and over all accounts, in 24 hours. */
+/**
+ * Activations the relayer paid for and that failed, per account, in 24 hours. Only a new activation is refused once
+ * the budget is spent. A withdrawal or a stop whose signature verified is always attempted: the guards protect the
+ * relayer's gas, never at the price of an owner reaching their own funds.
+ */
 export const MAX_OWNER_FAILURES_PER_DAY = 5
-export const MAX_OWNER_FAILURES_GLOBAL_PER_DAY = 50
+/** Across all accounts this is a figure for the log and an alert, never a gate. */
+export const OWNER_FAILURES_ALERT_PER_DAY = 50
 const DAY_MS = 24 * 3_600_000
-/** Failures that count against the budget: a signature or a transaction that was wrong, or relayer gas spent for nothing. */
-const BUDGET_CODES = new Set(['BAD_SIGNATURE', 'OWNER_TX_REVERTS', 'OWNER_TX_FAILED', 'OWNER_TX_ERROR', 'DEPLOY_FAILED'])
+/** What counts: the relayer sent a transaction and it failed, or its outcome is unknown. Refusals before any send cost no gas and do not count. */
+const BUDGET_CODES = new Set(['OWNER_TX_FAILED', 'OWNER_TX_ERROR', 'DEPLOY_FAILED'])
+/** How often an unavailable simulation or eth_call is tried again before the fallback. */
+const SIM_TRIES = 3
 
 export class HttpError extends Error {
   constructor(
@@ -471,7 +478,7 @@ export class Operator {
       ...transferBatch({ account: live.safe, to, amountUsdc: amount, reduce: [], deadline, receive: out?.receive }),
     ]
     const probe = out ? balanceProbe(asset, to) : undefined
-    const sim = await this.simulateFromSafe(live.safe, calls, r.block, probe)
+    const sim = await this.checkFromSafe(live.safe, calls, r.block, probe)
     if (out && probe) {
       const delta = probe.decode(sim.after!) - probe.decode(sim.before!)
       if (delta < out.receive.amountOutMinimum) throw new HttpError(409, 'SIMULATION_FAILED', `the recipient would receive ${delta} ${asset} units, less than the minimum ${out.receive.amountOutMinimum}`)
@@ -633,6 +640,20 @@ export class Operator {
     return res
   }
 
+  /**
+   * The pre-signing check of an owner batch. When nothing is read from the result (no payout probe), an unavailable
+   * simulation does not stop the owner from preparing a withdrawal or a stop: the preflight decides before sending.
+   */
+  private async checkFromSafe(safe: Address, calls: { to: Address; data: Hex }[], block: bigint, probe: Probe | undefined): Promise<SimCallResult[] & { before?: Hex; after?: Hex }> {
+    try {
+      return await this.simulateFromSafe(safe, calls, block, probe)
+    } catch (e) {
+      if (probe || !(e instanceof HttpError) || e.code !== 'SIMULATION_UNAVAILABLE') throw e
+      console.error(`[owner] ${safe} prepare: simulation unavailable (${e.message}); prepared without it`)
+      return []
+    }
+  }
+
   private async swapQuote(amountIn: bigint, blockNumber: bigint, slip: number): Promise<LiveSwap | undefined> {
     if (amountIn <= 0n) return undefined
     const out = await quoteExactInputSingle(this.client, { tokenIn: address('cbBTC'), tokenOut: address('USDC'), fee: 500, amountIn, blockNumber })
@@ -663,7 +684,7 @@ export class Operator {
       ...(revokes.length || positions.length ? stopBatch({ account: live.safe, permissionIds: revokes, positions, deadline }) : []),
       ...swapBackCalls(live.safe, swaps),
     ]
-    await this.simulateFromSafe(live.safe, calls, r.block)
+    await this.checkFromSafe(live.safe, calls, r.block, undefined)
     const summary = [
       ...(revokes.length ? [`Revoke the engine's ${revokes.length} session grant(s)`] : []),
       ...r.positions.map((p) => `Close and burn position #${p.tokenId} (${poolLabel(p.pool)})`),
@@ -678,7 +699,6 @@ export class Operator {
   async submit(ctx: AccountContext, kind: OwnerKind, body: OwnerSignature): Promise<OpView> {
     this.assertLive()
     const { acc, live } = this.account(ctx)
-    this.assertBudget(acc)
     const p = body && typeof body.prepareId === 'string' ? this.prepared.get(body.prepareId) : undefined
     if (!p || p.accountKey !== acc.accountKey || p.kind !== kind) throw new HttpError(404, 'PREPARE_UNKNOWN', 'no such prepared transaction for this account')
     if (p.expires < Date.now()) {
@@ -694,10 +714,11 @@ export class Operator {
     this.prepared.delete(p.prepareId)
     // A signature the passkey did not make stops here: no op, no armed activation, no relayer transaction.
     if (!(await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn))) {
-      this.noteFailure(acc)
       throw new HttpError(400, 'BAD_SIGNATURE', 'the passkey signature does not match this account and transaction')
     }
     if (kind === 'activate') {
+      // Only a new activation is subject to the failure budget; a proven owner's transfer or stop never is.
+      this.assertBudget(acc)
       const usdc = await this.usdcOf(live.safe)
       if (usdc === 0n) return this.arm(acc, p, signature)
       if (usdc > LIVE_CAP_USDC) throw depositOverCap(usdc)
@@ -728,13 +749,13 @@ export class Operator {
   private noteFailure(acc: AccountState): void {
     acc.ownerFailures = [...this.recentFailures(acc), now()]
     this.store.save()
+    const all = Object.values(this.store.state.accounts).reduce((n, a) => n + this.recentFailures(a).length, 0)
+    if (all >= OWNER_FAILURES_ALERT_PER_DAY) console.error(`[alert] ${all} failed owner executions paid by the relayer in 24 hours, across all accounts`)
   }
 
-  /** The reason this account may not ask the relayer for another owner execution today, or null. */
+  /** The reason this account may not start another activation today, or null. Exit paths never ask. */
   private overBudget(acc: AccountState): string | null {
-    if (this.recentFailures(acc).length >= MAX_OWNER_FAILURES_PER_DAY) return `this account had ${MAX_OWNER_FAILURES_PER_DAY} failed owner transactions in 24 hours; try again later`
-    const all = Object.values(this.store.state.accounts).reduce((n, a) => n + this.recentFailures(a).length, 0)
-    if (all >= MAX_OWNER_FAILURES_GLOBAL_PER_DAY) return 'the relayer paused owner transactions after too many failures; try again later'
+    if (this.recentFailures(acc).length >= MAX_OWNER_FAILURES_PER_DAY) return `${MAX_OWNER_FAILURES_PER_DAY} activations of this account failed in 24 hours; withdrawals still work, starting again waits`
     return null
   }
 
@@ -750,9 +771,14 @@ export class Operator {
 
   /**
    * Everything that can be known before the relayer spends gas on an owner signature. Every owner path runs through
-   * here (activate, armed activate, transfer, stop): the passkey signed exactly this SafeTx (Safe, chain, nonce), the
-   * guards hold, and the whole sequence (deploy if needed, then execTransaction) succeeds in a simulation.
-   * Returns the refusal, or null. Throws when the simulation cannot run: nothing is sent, the caller may retry.
+   * here (activate, armed activate, transfer, stop). Returns the refusal, or null to go ahead.
+   * - The passkey signed exactly this SafeTx (Safe, chain, nonce): always checked, off chain. This is what stops a
+   *   forged request from costing the relayer anything.
+   * - The whole sequence (deploy if needed, then execTransaction) is simulated. A revert refuses: nothing is sent and
+   *   nothing counts against a budget. When the simulation cannot run (provider does not serve eth_simulateV1, rate
+   *   limit, timeout) it is tried again, then an eth_call of execTransaction stands in when the Safe is deployed; for
+   *   an undeployed Safe, or when eth_call cannot run either, the verified signature and the minimum balance are
+   *   enough and the transaction is sent. An unavailable simulation never stops a proven owner.
    */
   private async preflight(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex): Promise<{ code: string; detail?: Partial<OpView> } | null> {
     if (safeTxHashOf(live, p.tx).toLowerCase() !== p.safeTxHash.toLowerCase()) return { code: 'BAD_SIGNATURE' }
@@ -764,35 +790,68 @@ export class Operator {
       const usdc = await this.usdcOf(live.safe)
       if (p.kind === 'activate' && usdc > LIVE_CAP_USDC) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() } }
       if (!deployed && usdc < MIN_DEPLOY_USDC) return { code: 'BELOW_DEPLOY_MINIMUM' }
-      const why = await this.simulateOwner(live, deployed, data)
-      if (!why) return null
+      let sim = await this.simulateOwner(live, deployed, data)
+      if (sim.outcome === 'unavailable') {
+        console.error(`[owner] ${acc.accountKey} ${p.kind}: simulation unavailable (${sim.why})`)
+        if (!deployed) {
+          console.error(`[owner] ${acc.accountKey} ${p.kind}: proceeding on the verified signature and the minimum balance (Safe not deployed)`)
+          return null
+        }
+        sim = await this.callOwner(live, data)
+        if (sim.outcome === 'unavailable') {
+          console.error(`[owner] ${acc.accountKey} ${p.kind}: eth_call unavailable too (${sim.why}); proceeding on the verified signature`)
+          return null
+        }
+      }
+      if (sim.outcome === 'ok') return null
       if (attempt >= 2) {
-        console.error(`[owner] ${acc.accountKey} ${p.kind} would revert, nothing sent: ${why}`)
+        console.error(`[owner] ${acc.accountKey} ${p.kind} would revert, nothing sent: ${sim.why}`)
         return { code: 'OWNER_TX_REVERTS' }
       }
-      console.log(`[owner] ${acc.accountKey} ${p.kind} simulation reverts (${why}), retry ${attempt + 1}`)
+      console.log(`[owner] ${acc.accountKey} ${p.kind} simulation reverts (${sim.why}), retry ${attempt + 1}`)
       await Bun.sleep(this.retryMs)
     }
   }
 
-  /** The relayer's own sequence in one eth_simulateV1 block: the factory call when the Safe has no code, then execTransaction. Null when it all succeeds. */
-  private async simulateOwner(live: LiveAccount, deployed: boolean, data: Hex): Promise<string | null> {
+  /** The relayer's own sequence in one eth_simulateV1 block: the factory call when the Safe has no code, then execTransaction. */
+  private async simulateOwner(live: LiveAccount, deployed: boolean, data: Hex): Promise<Outcome> {
     const from = this.relayer.address
     const calls = [...(deployed ? [] : [{ from, ...deployCall(live) }]), { from, to: live.safe, data }]
-    let res: SimCallResult[]
-    try {
-      res = await simulateCalls(this.client, calls, await this.client.getBlockNumber({ cacheTime: 0 }))
-    } catch (e) {
-      throw new HttpError(503, 'SIMULATION_UNAVAILABLE', (e as Error).message.split('\n')[0] ?? 'simulation unavailable')
+    let res: SimCallResult[] | undefined
+    let why = 'simulation unavailable'
+    for (let i = 0; i < SIM_TRIES && !res; i++) {
+      try {
+        res = await simulateCalls(this.client, calls, await this.client.getBlockNumber({ cacheTime: 0 }))
+      } catch (e) {
+        why = (e as Error).message.split('\n')[0] ?? why
+        if (i < SIM_TRIES - 1) await Bun.sleep(this.retryMs)
+      }
     }
+    if (!res) return { outcome: 'unavailable', why }
     const bad = res.findIndex((x) => x.status !== 'success')
-    if (bad >= 0) return `${bad === res.length - 1 ? 'execTransaction' : 'deploy'}: ${res[bad]!.error ?? res[bad]!.returnData}`
+    if (bad >= 0) return { outcome: 'revert', why: `${bad === res.length - 1 ? 'execTransaction' : 'deploy'}: ${res[bad]!.error ?? res[bad]!.returnData}` }
     try {
-      if (decodeFunctionResult({ abi: safeAbi, functionName: 'execTransaction', data: res.at(-1)!.returnData }) !== true) return 'execTransaction returned false'
+      if (decodeFunctionResult({ abi: safeAbi, functionName: 'execTransaction', data: res.at(-1)!.returnData }) !== true) return { outcome: 'revert', why: 'execTransaction returned false' }
     } catch {
-      return 'execTransaction returned no result'
+      return { outcome: 'revert', why: 'execTransaction returned no result' }
     }
-    return null
+    return { outcome: 'ok' }
+  }
+
+  /** A plain eth_call of execTransaction from the relayer on a deployed Safe: a revert is a revert, anything else is the provider. */
+  private async callOwner(live: LiveAccount, data: Hex): Promise<Outcome> {
+    let why = 'eth_call unavailable'
+    for (let i = 0; i < SIM_TRIES; i++) {
+      try {
+        await this.client.call({ account: this.relayer.address, to: live.safe, data })
+        return { outcome: 'ok' }
+      } catch (e) {
+        if (isRevert(e)) return { outcome: 'revert', why: revertReason(e) }
+        why = (e as Error).message.split('\n')[0] ?? why
+        if (i < SIM_TRIES - 1) await Bun.sleep(this.retryMs)
+      }
+    }
+    return { outcome: 'unavailable', why }
   }
 
   private usdcOf(safe: Address): Promise<bigint> {
@@ -938,6 +997,11 @@ export class Operator {
       } catch (e) {
         const why = revertReason(e)
         if (attempt >= 2) {
+          if (!isRevert(e)) {
+            // The provider could not answer; that is not a revert. The signature is proven, so the transaction goes out.
+            console.error(`[owner] ${op.opId} eth_call unavailable (${why}); sending on the verified signature`)
+            break
+          }
           console.error(`[owner] ${op.opId} simulation reverts: ${why}`)
           return this.failOwner(acc, op, 'OWNER_TX_REVERTS')
         }
@@ -1281,6 +1345,19 @@ function revertReason(e: unknown): string {
     } catch {}
   }
   return data ?? (e as Error).message.split('\n')[0] ?? 'reverted'
+}
+
+type Outcome = { outcome: 'ok' } | { outcome: 'revert' | 'unavailable'; why: string }
+
+/** True when the node executed the call and it reverted; false for transport, rate-limit and unsupported-method errors. */
+function isRevert(e: unknown): boolean {
+  if (revertData(e) !== undefined) return true
+  let cur = e as { message?: string; details?: string; code?: number; cause?: unknown } | undefined
+  for (let i = 0; i < 8 && cur; i++) {
+    if (cur.code === 3 || /execution reverted|\bGS\d{3}\b/i.test(`${cur.message ?? ''} ${cur.details ?? ''}`)) return true
+    cur = cur.cause as typeof cur
+  }
+  return false
 }
 
 type Probe = { to: Address; data: Hex; decode: (ret: Hex) => bigint }
