@@ -5,7 +5,7 @@ import { amountsOf, decide, type Decision, type Observation, type Proposal, type
 import { signBlocker } from '@mamoru/journal'
 import { hasManageAny, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi } from '@mamoru/registry'
-import { historyCursor, isSafeAndCanonical, observe, principalOwedBefore, readUserOpEvent, rpcClient, simulateFromEntryPoint, type Simulation } from '@mamoru/rpc'
+import { Batch, MULTICALL3, contractRead, historyCursor, isSafeAndCanonical, observe, principalOwedBefore, readUserOpEvent, rpcClient, simulateFromEntryPoint, type PoolStateCache, type Simulation } from '@mamoru/rpc'
 import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
 import { SessionLedger, precheck } from '@mamoru/account/precheck'
 import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useModeSignature, userOpHash, type GasSettings } from '@mamoru/account/sessions'
@@ -48,6 +48,8 @@ export type EngineConfig = {
   historyFromBlock?: bigint
   /** Session uses already confirmed on chain before this engine started (restart): replayed into the ledger so caps and usage limits count them. */
   priorIncluded?: { permissionId: Hex; calls: Execution[] }[]
+  /** Pool state per block, shared with the other engines of the process. */
+  poolCache?: PoolStateCache
 }
 
 export type EngineHooks = {
@@ -117,11 +119,13 @@ export class Engine {
   /** Live: a session the owner removed on chain (SmartSession) is revoked in the ledger, so decide never proposes an op it cannot authorize. */
   private async syncEnabled(): Promise<void> {
     if (this.cfg.mode !== 'live') return
-    for (const s of this.sessions) {
-      if (this.ledger.get(s.permissionId)?.revoked) continue
-      const on = await this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [s.permissionId, this.cfg.account] })
-      if (!on) this.ledger.revoke(s.permissionId)
-    }
+    const sessions = this.sessions.filter((s) => !this.ledger.get(s.permissionId)?.revoked)
+    if (sessions.length === 0) return
+    // Every session in one request.
+    const batch = new Batch(this.client, MULTICALL3)
+    const enabled = sessions.map((s) => batch.add(contractRead(this.client, { address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [s.permissionId, this.cfg.account] })))
+    await batch.run()
+    for (const [i, s] of sessions.entries()) if (!(await enabled[i]!.need())) this.ledger.revoke(s.permissionId)
   }
 
   addSession(s: EngineSession): void {
@@ -155,6 +159,7 @@ export class Engine {
       allowedTokenIds: this.allowedTokenIds,
       historyFromBlock: this.historyFromBlock,
       historyCursor: this.historyCursor,
+      poolCache: this.cfg.poolCache,
       intents: { paused: false, exitRequested: false },
       slot: live ? { opId: live.opId, state: live.state } : null,
       twapWindowSeconds: this.cfg.policy.execution.twapWindowSeconds,

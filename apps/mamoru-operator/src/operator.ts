@@ -4,7 +4,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
-import { simulateCalls, type SimCallResult } from '@mamoru/rpc'
+import { poolStateCache, simulateCalls, type SimCallResult } from '@mamoru/rpc'
 import { POLICIES, computeCaps, grantKey, hasManageAny, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
@@ -215,6 +215,8 @@ export class Operator {
   mirrorMismatches = 0
   private readonly engineHealth = new EngineHealthTracker()
   private relayerBalanceCache: { at: number; value: bigint } | null = null
+  /** Pool state of the last few blocks: accounts reviewed at the same block read it once. */
+  private readonly poolCache = poolStateCache()
 
   constructor(
     readonly cfg: OperatorConfig,
@@ -1314,6 +1316,7 @@ export class Operator {
         sessions,
         priorIncluded,
         maxWaitBlocks: this.cfg.maxWaitBlocks,
+        poolCache: this.poolCache,
       },
       {
         waitBlock: () => Bun.sleep(this.cfg.waitBlockMs),
