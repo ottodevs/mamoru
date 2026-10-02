@@ -26,6 +26,14 @@ export function SignInCard({ busy, problem, remembered, onSignIn, onRemembered, 
             {problem.message}
           </p>
         ) : null}
+        {problem?.kind === 'refused' ? (
+          <p className="mt-2 mb-0 text-[0.88rem] leading-[1.45]" data-testid="signin-funds">
+            {signInCopy.refusedFunds}{' '}
+            <a className={CARD_LINK} href={WALKAWAY_URL} target="_blank" rel="noreferrer">
+              {signInCopy.refusedLink}
+            </a>
+          </p>
+        ) : null}
         {problem?.kind === 'cancelled' && remembered ? (
           <p className="mt-2 mb-0">
             <button type="button" className={CARD_LINK} onClick={onRemembered} disabled={busy}>

@@ -48,3 +48,29 @@ test('a returning owner signs back in with the passkey, with or without what the
   await expect(page.getByText('No passkey was used, so you are not signed in.')).toBeVisible()
   expect(await session()).toBeNull()
 })
+
+// Browsers without AuthenticatorAttestationResponse.getAuthenticatorData(): the SPA reads authData out of the
+// attestationObject the browser really produced, and the API accepts it.
+test('an owner registers and signs in on a browser without getAuthenticatorData()', async ({ page, context }) => {
+  await page.addInitScript(() => {
+    delete (AuthenticatorAttestationResponse.prototype as { getAuthenticatorData?: unknown }).getAuthenticatorData
+  })
+  const cdp = await context.newCDPSession(page)
+  await cdp.send('WebAuthn.enable', { enableUI: false })
+  await cdp.send('WebAuthn.addVirtualAuthenticator', {
+    options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
+  })
+  await page.goto('/')
+  expect(await page.evaluate(() => 'getAuthenticatorData' in AuthenticatorAttestationResponse.prototype)).toBe(false)
+  await page.getByRole('button', { name: 'Skip' }).click()
+  await page.getByRole('button', { name: 'Create account' }).click()
+  await expect(page.getByRole('heading', { name: 'Approve once' })).toBeVisible()
+  const created = (await (await page.request.get('/api/session')).json()) as { accountKey?: string }
+  expect(created.accountKey).toBeTruthy()
+
+  await context.clearCookies()
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Sign in with passkey' }).click()
+  await expect(page.getByText('Total balance')).toBeVisible()
+  expect(((await (await page.request.get('/api/session')).json()) as { accountKey?: string }).accountKey).toBe(created.accountKey)
+})
