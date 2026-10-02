@@ -7,7 +7,9 @@ type Req = { jsonrpc: '2.0'; id: unknown; method: string; params?: any[] }
  * Loopback JSON-RPC proxy in front of the upstream provider. It keeps the
  * keyed URL inside this process (viem errors echo the URL they called),
  * splits eth_getLogs into ranges the provider accepts and sends it to the
- * provider that serves the range in the fewest requests.
+ * provider that serves the range in the fewest requests, accepting the logs
+ * only from a provider that proves it has the state provider's view of the
+ * range's last block.
  */
 const DEFAULT_FALLBACKS = 'https://base-rpc.publicnode.com,https://base.drpc.org,https://mainnet.base.org'
 
@@ -130,7 +132,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const labelOf = (url: string) => labels.get(url) ?? registrableDomain(new URL(url).hostname)
   const logRanges = opts.logRanges ?? logRangesFromEnv()
   // The upstream keeps its setting (Alchemy or MAMORU_LOG_RANGE: chunks of maxLogRange); every other provider has its own range.
-  const logProviders = providers.map((url, i) => ({ url, logRange: i === 0 && chunkLogs ? maxLogRange : logRangeOf(url, logRanges), head: -1n }))
+  const logProviders = providers.map((url, i) => ({ url, logRange: i === 0 && chunkLogs ? maxLogRange : logRangeOf(url, logRanges) }))
   async function post(url: string, body: unknown): Promise<{ status: number; json: any }> {
     const res = await send(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) })
     let json: any = null
@@ -212,53 +214,61 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const [x, y] = [BigInt(a.blockNumber), BigInt(b.blockNumber)]
     return x === y ? Number(BigInt(a.logIndex) - BigInt(b.logIndex)) : x < y ? -1 : 1
   }
-  /** A fallback may trail the upstream that named `to`: it serves the range only once its own head reached it. */
-  async function reaches(p: LogProvider, to: bigint): Promise<boolean> {
-    if (p.head < to) p.head = BigInt(await ask(p.url, 'eth_blockNumber', []))
-    return p.head >= to
-  }
-  /** The whole range from one provider, in chunks it accepts. Any failed chunk fails the provider. */
+  const fail = (message: string) => Object.assign(new Error(message), { rpc: { code: -32603, message } })
+  /** The whole range from one provider, in chunks it accepts. Any failed chunk fails the provider: providers are never mixed inside one range. */
   async function logsFrom(p: LogProvider, filter: any, from: bigint, to: bigint): Promise<unknown[]> {
     const chunks = ranges(from, to, p.logRange)
     const out: unknown[] = []
     for (let i = 0; i < chunks.length; i += 4) {
       const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => ask(p.url, 'eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], chunks.length > 1)))
       for (const logs of part) {
-        if (!Array.isArray(logs)) throw Object.assign(new Error('eth_getLogs answered no list'), { rpc: { code: -32603, message: 'eth_getLogs answered no list' } })
+        if (!Array.isArray(logs)) throw fail('eth_getLogs answered no list')
         out.push(...logs)
       }
     }
     return out.sort(byBlockAndIndex)
+  }
+  /** Hash of block `n` as the state reads see it (the upstream, with their fallback). A node that does not have it yet is asked again. */
+  async function stateHash(n: bigint): Promise<string> {
+    for (let i = 0; ; i++) {
+      const b = await one('eth_getBlockByNumber', [hex(n), false])
+      if (b?.hash) return b.hash
+      if (i >= 2) throw fail(`no state provider has block ${n}`)
+      await Bun.sleep(300)
+    }
+  }
+  /**
+   * Logs and state must come from the same chain view. A range read from a provider counts only if that
+   * provider, asked after the read, has the range's last block with the hash the state reads have for it:
+   * a provider that is behind does not know the block, one on another fork has another hash. Nothing about
+   * a provider's head is remembered between ranges. The upstream is held to the same check.
+   */
+  async function verifiedLogs(p: LogProvider, isState: boolean, filter: any, from: bigint, to: bigint): Promise<unknown[]> {
+    const logs = await logsFrom(p, filter, from, to)
+    const own = await ask(p.url, 'eth_getBlockByNumber', [hex(to), false])
+    if (!own?.hash) throw fail(`provider does not have block ${to}: its logs for the range may be incomplete`)
+    const expected = isState ? own.hash : await stateHash(to)
+    if (String(own.hash).toLowerCase() !== String(expected).toLowerCase()) throw fail(`provider has another block ${to} than the state provider: its logs are from another chain view`)
+    return logs
   }
   async function getLogs(msg: Req): Promise<unknown> {
     const filter = { ...(msg.params?.[0] ?? {}) }
     if (filter.blockHash) return one('eth_getLogs', [filter])
     const from = await toNum(filter.fromBlock ?? 'latest')
     const to = await toNum(filter.toBlock ?? 'latest')
-    if (logProviders.length === 1) {
-      // One provider (a fork, or no fallbacks): its chunks go through the retrying path.
-      const chunks = ranges(from, to, logProviders[0]!.logRange)
-      if (chunks.length <= 1) return one('eth_getLogs', [{ ...filter, fromBlock: hex(from), toBlock: hex(to) }])
-      const out: unknown[] = []
-      for (let i = 0; i < chunks.length; i += 4) {
-        const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => one('eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], true)))
-        for (const logs of part) out.push(...(logs as unknown[]))
-      }
-      return out
-    }
+    if (from > to) return []
     // Fewest requests first; the configured order breaks ties and is the fallback order. Two passes, as for every other call.
     const span = to - from + 1n
-    const requests = (p: LogProvider) => (Number.isFinite(p.logRange) && span > 0n ? (span + BigInt(p.logRange) - 1n) / BigInt(p.logRange) : 1n)
+    const requests = (p: LogProvider) => (Number.isFinite(p.logRange) ? (span + BigInt(p.logRange) - 1n) / BigInt(p.logRange) : 1n)
     const order = logProviders.map((p, i) => ({ p, i, n: requests(p) })).sort((a, b) => (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
     let last: any = null
     for (const [k, { p, i }] of [...order, ...order].entries()) {
       if (k === order.length) await Bun.sleep(250)
       try {
-        if (i > 0 && !(await reaches(p, to))) throw Object.assign(new Error('provider head is behind the range'), { rpc: { code: -32603, message: `provider head ${p.head} is behind block ${to}` } })
-        return await logsFrom(p, filter, from, to)
+        return await verifiedLogs(p, i === 0, filter, from, to)
       } catch (e) {
         last = (e as any).rpc ?? { code: -32603, message: (e as Error).message.split('\n')[0] }
-        if (metrics) safeMetrics(() => metrics.recordFallback(labelOf(p.url), 'eth_getLogs'))
+        if (metrics && logProviders.length > 1) safeMetrics(() => metrics.recordFallback(labelOf(p.url), 'eth_getLogs'))
         if (process.env.MAMORU_RPC_LOG) console.log(`[rpc] eth_getLogs ${labelOf(p.url)} failed: ${redactSecrets(String(last?.message)).slice(0, 120)}`)
       }
     }

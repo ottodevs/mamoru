@@ -14,7 +14,7 @@ import { startForkProxy } from '../../../packages/scenarios/proxy/index.ts'
 
 if (!process.env.RPC_URL) process.env.RPC_URL = process.env.BASE_RPC_URL ?? 'https://mainnet.base.org'
 /** Requests of one batched review, steady state (packages/rpc/test/observe-batch.test.ts). */
-const MAX_BATCHED = 11
+const MAX_BATCHED = 12
 const HISTORY_BLOCKS = 1_500n
 const log = (m: string) => console.log(`[rpc-count] ${m}`)
 
