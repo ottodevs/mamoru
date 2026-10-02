@@ -1329,6 +1329,7 @@ export class Operator {
     this.runners.set(acc.accountKey, runner)
     const tick = async () => {
       if (runner.stopped) return
+      try {
       await this.lock(acc.accountKey).run(async () => {
         if (runner.stopped) return
         try {
@@ -1361,9 +1362,9 @@ export class Operator {
             safeMetrics(() => this.engineHealth.record(acc.accountKey, true, d.code, undefined))
           }
         } catch (e) {
+          // `e` goes to the classifier as it is: reading or coercing an odd thrown value here could itself throw.
           logErr(`[engine ${acc.accountKey}] review error:`, e)
-          const detail = e instanceof Error ? e.message.split('\n')[0] : String(e)
-          safeMetrics(() => this.engineHealth.record(acc.accountKey, false, 'REVIEW_ERROR', classifyEngineError('REVIEW_ERROR', detail)))
+          safeMetrics(() => this.engineHealth.record(acc.accountKey, false, 'REVIEW_ERROR', classifyEngineError('REVIEW_ERROR', e)))
         }
         // Persist how far deposits were read, so a restart or a failed review does not rescan from activation.
         if (runner.engine.depositsAfter - BigInt(acc.depositsAfter) >= DEPOSITS_SAVE_BLOCKS) {
@@ -1372,7 +1373,12 @@ export class Operator {
         }
         this.syncEngineOps(acc, runner)
       })
-      if (!runner.stopped) runner.timer = setTimeout(tick, this.cfg.reviewMs)
+      } catch (e) {
+        // Nothing thrown by a tick may end the loop: the account would silently stop being reviewed.
+        logErr(`[engine ${acc.accountKey}] tick error:`, e)
+      } finally {
+        if (!runner.stopped) runner.timer = setTimeout(tick, this.cfg.reviewMs)
+      }
     }
     runner.timer = setTimeout(tick, 0)
     console.log(`[engine ${acc.accountKey}] loop started for ${acc.ctx.address} every ${this.cfg.reviewMs}ms`)
