@@ -14,7 +14,7 @@ import {
 } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { positionEventsAbi } from '@mamoru/projector'
-import { address, baseRegistry, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, uniswapV3FactoryAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { address, baseRegistry, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3FactoryAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { multicall3Abi } from '../src/multicall.ts'
 
 const enumerableAbi = parseAbi(['function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)'])
@@ -52,6 +52,8 @@ export class FakeChain {
   readonly nonces = new Map<string, bigint>()
   readonly positions: FakePosition[] = []
   readonly logs: FakeLog[] = []
+  /** SmartSession permissions removed on chain. */
+  readonly disabled = new Set<string>()
   /** `${contract}:${selector}` reads that revert, lowercase. */
   readonly reverting = new Set<string>()
   readonly requests: Recorded[] = []
@@ -132,6 +134,26 @@ export class FakeChain {
     }
   }
 
+  /** A loopback JSON-RPC endpoint over this chain, for code that builds its own client from a URL. */
+  serve(): { url: string; stop: () => void } {
+    const answer = async (m: { id: unknown; method: string; params: any }) => {
+      try {
+        return { jsonrpc: '2.0', id: m.id, result: await this.request({ method: m.method, params: m.params }) }
+      } catch (e) {
+        return { jsonrpc: '2.0', id: m.id, error: { code: (e as { code?: number }).code ?? -32603, message: (e as Error).message, data: (e as { data?: Hex }).data } }
+      }
+    }
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: async (req) => {
+        const body = (await req.json()) as any
+        return Response.json(Array.isArray(body) ? await Promise.all(body.map(answer)) : await answer(body))
+      },
+    })
+    return { url: `http://127.0.0.1:${server.port}/`, stop: () => server.stop(true) }
+  }
+
   private async request(r: Recorded): Promise<unknown> {
     this.requests.push(r)
     this.onRequest(r)
@@ -190,6 +212,11 @@ export class FakeChain {
       const call = decodeFunctionData({ abi: entryPointV07Abi, data })
       if (call.functionName !== 'getNonce') throw new Revert('unknown EntryPoint call')
       return encodeFunctionResult({ abi: entryPointV07Abi, functionName: 'getNonce', result: this.nonces.get(call.args[0].toLowerCase()) ?? 0n })
+    }
+    if (at === address('SmartSession').toLowerCase()) {
+      const call = decodeFunctionData({ abi: smartSessionAbi, data })
+      if (call.functionName !== 'isPermissionEnabled') throw new Revert('unknown SmartSession call')
+      return encodeFunctionResult({ abi: smartSessionAbi, functionName: 'isPermissionEnabled', result: !this.disabled.has((call.args[0] as Hex).toLowerCase()) })
     }
     if (at === address('NonfungiblePositionManager').toLowerCase()) return this.npm(from, to, data)
     if (at === address('UniswapV3Factory').toLowerCase()) {
