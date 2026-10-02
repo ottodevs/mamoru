@@ -5,9 +5,9 @@ import { address, erc20Abi, safeAbi } from '@mamoru/registry'
 import { POLICIES } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
-import { LIVE_CAP_USDC, deployCall, liveAccountFromContext } from '@mamoru/account/live'
+import { LIVE_CAP_USDC, browserOwnerSignature, deployCall, liveAccountFromContext } from '@mamoru/account/live'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
-import { HttpError, Operator, type OperatorConfig } from '../src/operator.ts'
+import { HttpError, MAX_OWNER_FAILURES_GLOBAL_PER_DAY, MAX_OWNER_FAILURES_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
 import type { Relayer } from '../src/relayer.ts'
 import type { AccountState, ArmedActivation, StateStore } from '../src/state.ts'
 
@@ -32,11 +32,20 @@ const SAFE = ctx.address
 /** A chain with one counterfactual Safe holding `usdc`: no code until the relayer sends the factory call. */
 function world(usdc: bigint) {
   const sent: { to: string; data?: Hex; value?: bigint }[] = []
+  /** Every eth_simulateV1 the operator ran, as its list of calls. */
+  const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n }
+  /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', onSend: (_tx: { to: string }) => {} }
+  const TRUE = `0x${'0'.repeat(63)}1` as const
   const factory = deployCall(liveAccountFromContext(ctx))
   const client = {
     getBlockNumber: async () => 100n,
     getBlock: async () => ({ number: 100n, timestamp: 1_790_000_000n }),
+    getTransactionReceipt: async () => {
+      throw new Error('no receipt')
+    },
+    getLogs: async () => [],
     getCode: async () => (chain.deployed ? '0x01' : undefined),
     getBalance: async () => 0n,
     readContract: async ({ address: at, functionName }: { address: string; functionName: string }) => {
@@ -45,13 +54,20 @@ function world(usdc: bigint) {
       if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : 0n
       throw new Error(`unexpected read ${functionName}`)
     },
-    request: async ({ params }: { params: [{ blockStateCalls: [{ calls: unknown[] }] }] }) => [{ calls: params[0].blockStateCalls[0].calls.map(() => ({ status: '0x1', returnData: '0x', gasUsed: '0x5208', logs: [] })) }],
+    request: async ({ params }: { params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {
+      const calls = params[0].blockStateCalls[0].calls
+      simulated.push(calls)
+      if (knobs.sim === 'down') throw new Error('the method eth_simulateV1 does not exist')
+      const last = calls.length - 1
+      return [{ calls: calls.map((_, i) => (knobs.sim === 'revert' && i === last ? { status: '0x0', returnData: '0x', gasUsed: '0x5208', logs: [], error: { message: 'GS026' } } : { status: '0x1', returnData: TRUE, gasUsed: '0x5208', logs: [] })) }]
+    },
     call: async () => ({ data: '0x' }),
   } as unknown as PublicClient
   const relayer = {
     address: RELAYER,
     send: async (tx: { to: string; data?: Hex; value?: bigint }, onSent?: (h: Hex) => void) => {
       sent.push(tx)
+      knobs.onSend(tx)
       const hash = toHex(sent.length, { size: 32 })
       onSent?.(hash)
       const isDeploy = tx.to.toLowerCase() === factory.to.toLowerCase()
@@ -65,7 +81,8 @@ function world(usdc: bigint) {
   const store = { state, save: () => {} } as unknown as StateStore
   const cfg = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 } satisfies OperatorConfig
   const op = new Operator(cfg, client, relayer, store)
-  return { op, chain, sent, factory, state }
+  ;(op as unknown as { retryMs: number }).retryMs = 0
+  return { op, chain, sent, simulated, knobs, factory, state }
 }
 
 function der(r: bigint, s: bigint): Uint8Array {
@@ -79,8 +96,8 @@ function der(r: bigint, s: bigint): Uint8Array {
   return Buffer.concat([Buffer.from([0x30, body.length]), body])
 }
 
-function sign(t: OwnerTxToSign): OwnerSignature {
-  const a = passkey.assert(t.safeTxHash)
+function sign(t: OwnerTxToSign, key = passkey): OwnerSignature {
+  const a = key.assert(t.safeTxHash)
   return {
     prepareId: t.prepareId,
     authenticatorData: Buffer.from(a.authenticatorData.slice(2), 'hex').toString('base64url'),
@@ -142,6 +159,11 @@ describe('deposit over the cap', () => {
     expect(w.sent[0]).toEqual(w.factory)
     expect(w.sent[1]!.to).toBe(SAFE)
     expect(w.sent.every((t) => t.value === undefined)).toBe(true)
+    // Before either send, the same two calls ran from the relayer in one simulation.
+    const sim = w.simulated.at(-1)!
+    expect(sim.map((c) => c.to.toLowerCase())).toEqual([w.factory.to.toLowerCase(), SAFE.toLowerCase()])
+    expect(sim.map((c) => c.from)).toEqual([RELAYER, RELAYER])
+    expect(sim[1]!.data).toBe(w.sent[1]!.data!)
     const exec = decodeFunctionData({ abi: safeAbi, data: w.sent[1]!.data! })
     expect(exec.functionName).toBe('execTransaction')
     expect((exec.args[0] as string).toLowerCase()).toBe(address('USDC').toLowerCase())
@@ -165,3 +187,207 @@ describe('deposit over the cap', () => {
     expect(await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '2000000' }).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'INSUFFICIENT_FUNDS' })
   })
 })
+
+// Review P1: a forged or useless owner signature must cost the relayer nothing, on every path it pays for.
+describe('the relayer spends nothing before the owner signature is proven', () => {
+  const thief = new SoftwarePasskey(PASSKEY_SCALARS.a2)
+  type Privates = { fireArmed(a: AccountState, usdc: bigint): Promise<void>; watchArmed(): Promise<void>; armStopped: boolean }
+  const priv = (op: Operator) => op as unknown as Privates
+  const arm = async (w: ReturnType<typeof world>, key = passkey) => {
+    w.chain.usdc = 0n
+    const tx = await w.op.prepareActivate(ctx)
+    return { tx, op: await w.op.submit(ctx, 'activate', sign(tx, key)).catch((e: unknown) => e as HttpError) }
+  }
+
+  test('transfer: a signature from another key is refused before the Safe is deployed', async () => {
+    const w = world(OVER)
+    const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx, thief)).catch((e: unknown) => e)).toMatchObject({ status: 400, code: 'BAD_SIGNATURE' })
+    expect(w.sent).toHaveLength(0)
+    expect(w.chain.deployed).toBe(false)
+    expect(w.op.ops(ctx, null).ops).toEqual([])
+    expect(w.state.accounts.k!.ownerFailures).toHaveLength(1)
+    // The prepared transaction is spent: the same body cannot be tried again.
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx)).catch((e: unknown) => e)).toMatchObject({ code: 'PREPARE_UNKNOWN' })
+  })
+
+  test('activate and armed activate: a forged signature is neither executed nor armed', async () => {
+    const w = world(10_000_000n)
+    const tx = await w.op.prepareActivate(ctx)
+    expect(await w.op.submit(ctx, 'activate', sign(tx, thief)).catch((e: unknown) => e)).toMatchObject({ code: 'BAD_SIGNATURE' })
+    const armed = await arm(w, thief)
+    expect(armed.op).toMatchObject({ code: 'BAD_SIGNATURE' })
+    expect(w.state.accounts.k!.armed).toBeUndefined()
+    expect(w.sent).toHaveLength(0)
+  })
+
+  test('armed executor: a stored signature that does not verify fails the op without a deploy', async () => {
+    const w = world(0n)
+    const armed = await arm(w)
+    expect(armed.op).toMatchObject({ state: 'proposed', code: 'ARMED' })
+    const acc = w.state.accounts.k!
+    // As if the state file held a signature the passkey never made (older operator, tampering).
+    acc.armed = { ...acc.armed!, signature: browserOwnerSignature(sign(armed.tx, thief), armed.tx.safeTxHash) }
+    w.chain.usdc = 10_000_000n
+    await priv(w.op).fireArmed(acc, 10_000_000n)
+    expect(w.sent).toHaveLength(0)
+    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'failed', code: 'BAD_SIGNATURE' })
+    expect(acc.armed).toBeUndefined()
+  })
+
+  test('a signature over another transaction (other nonce, same Safe) is refused', async () => {
+    const w = world(OVER)
+    const first = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
+    const second = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '2920000' })
+    const swapped = { ...sign(first.ownerTx), prepareId: second.ownerTx.prepareId }
+    expect(await w.op.submit(ctx, 'transfer', swapped).catch((e: unknown) => e)).toMatchObject({ status: 400, code: 'BAD_SIGNATURE' })
+    expect(w.sent).toHaveLength(0)
+  })
+
+  test('a valid signature whose sequence would revert is not sent: no deploy, no exec', async () => {
+    const w = world(OVER)
+    const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
+    w.knobs.sim = 'revert'
+    const before = w.simulated.length
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ state: 'failed', code: 'OWNER_TX_REVERTS' })
+    expect(w.simulated.length - before).toBe(3)
+    expect(w.sent).toHaveLength(0)
+    expect(w.chain.deployed).toBe(false)
+  })
+
+  test('when the simulation cannot run nothing is sent; an armed activation stays armed and is retried', async () => {
+    const w = world(OVER)
+    const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
+    w.knobs.sim = 'down'
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ state: 'failed', code: 'SIMULATION_UNAVAILABLE' })
+    expect(w.sent).toHaveLength(0)
+    expect(w.state.accounts.k!.ownerFailures ?? []).toHaveLength(0)
+
+    const v = world(0n)
+    await arm(v)
+    v.knobs.sim = 'down'
+    v.chain.usdc = 10_000_000n
+    await priv(v.op).fireArmed(v.state.accounts.k!, 10_000_000n)
+    expect(v.sent).toHaveLength(0)
+    expect(v.state.accounts.k!.armed?.tries).toBe(1)
+    expect(v.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'proposed', code: 'ARMED' })
+  })
+
+  test('stop goes through the same checks', async () => {
+    const w = world(5_000_000n)
+    w.chain.deployed = true
+    const { acc } = w.op.account(ctx)
+    acc.grants = [{ name: 'enter-swap', permissionId: `0x${'aa'.repeat(32)}`, grant: {} as never }]
+    const tx = await w.op.prepareStop(ctx)
+    expect(await w.op.submit(ctx, 'stop', sign(tx, thief)).catch((e: unknown) => e)).toMatchObject({ code: 'BAD_SIGNATURE' })
+    const again = await w.op.prepareStop(ctx)
+    w.knobs.sim = 'revert'
+    expect(await w.op.submit(ctx, 'stop', sign(again))).toMatchObject({ state: 'failed', code: 'OWNER_TX_REVERTS' })
+    expect(w.sent).toHaveLength(0)
+  })
+
+  test('no deploy for an account under 1 USDC: transfer and Start are refused, an armed activation waits', async () => {
+    const w = world(500_000n)
+    expect(await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '500000' }).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'BELOW_DEPLOY_MINIMUM' })
+    expect(await w.op.prepareActivate(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'BELOW_DEPLOY_MINIMUM' })
+    expect((await w.op.funding(ctx)).deployMinUsdc).toBe('1000000')
+    await arm(w)
+    const acc = w.state.accounts.k!
+    await priv(w.op).fireArmed(acc, 500_000n)
+    expect(acc.armed).toBeDefined()
+    expect(w.sent).toHaveLength(0)
+    // Signed while the balance was enough, executed after it dropped: refused by the preflight, still nothing sent.
+    const v = world(2_000_000n)
+    const plan = await v.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1000000' })
+    v.chain.usdc = 900_000n
+    expect(await v.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ state: 'failed', code: 'BELOW_DEPLOY_MINIMUM' })
+    expect(v.sent).toHaveLength(0)
+  })
+
+  test('failure budget: after 5 failed owner executions in a day the account is refused, and an armed activation is dropped', async () => {
+    const w = world(OVER)
+    for (let i = 0; i < MAX_OWNER_FAILURES_PER_DAY; i++) {
+      const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
+      await w.op.submit(ctx, 'transfer', sign(plan.ownerTx, thief)).catch(() => undefined)
+    }
+    const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx)).catch((e: unknown) => e)).toMatchObject({ status: 429, code: 'OWNER_FAILURE_BUDGET' })
+    expect(w.sent).toHaveLength(0)
+    // Failures older than 24 hours no longer count.
+    const acc = w.state.accounts.k!
+    acc.ownerFailures = acc.ownerFailures!.map(() => new Date(Date.now() - 25 * 3_600_000).toISOString())
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ state: 'confirmed' })
+
+    const v = world(0n)
+    await arm(v)
+    const armedAcc = v.state.accounts.k!
+    armedAcc.ownerFailures = Array.from({ length: MAX_OWNER_FAILURES_PER_DAY }, () => new Date().toISOString())
+    v.chain.usdc = 10_000_000n
+    await priv(v.op).fireArmed(armedAcc, 10_000_000n)
+    expect(armedAcc.armed).toBeUndefined()
+    expect(v.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'failed', code: 'OWNER_FAILURE_BUDGET' })
+    expect(v.sent).toHaveLength(0)
+  })
+
+  test('global failure budget: failures across accounts pause every owner execution', async () => {
+    const w = world(OVER)
+    w.op.account(ctx)
+    const recent = new Date().toISOString()
+    for (let i = 0; i < MAX_OWNER_FAILURES_GLOBAL_PER_DAY / 2; i++) w.state.accounts[`other-${i}`] = { ownerFailures: [recent, recent] } as unknown as AccountState
+    const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx)).catch((e: unknown) => e)).toMatchObject({ status: 429, code: 'OWNER_FAILURE_BUDGET' })
+    expect(w.sent).toHaveLength(0)
+  })
+})
+
+// Review P1: the cap is read again right before the activation is sent.
+describe('cap re-check at send time', () => {
+  test('a deposit that lands while the Safe is being deployed stops the activation with DEPOSIT_OVER_CAP', async () => {
+    const w = world(20_000_000n)
+    const tx = await w.op.prepareActivate(ctx)
+    // The deposit lands with the first relayer transaction: after the preflight, before the activation.
+    w.knobs.onSend = () => {
+      w.chain.usdc = OVER
+    }
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    expect(op).toMatchObject({ kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: '26920000', capUsdc: '25000000' })
+    expect(w.sent.some((t) => t.to === SAFE && t.data !== undefined)).toBe(false)
+    expect(w.state.accounts.k).toMatchObject({ active: false, grants: [] })
+    expect((await w.op.funding(ctx)).overCap?.excessUsdc).toBe('1920000')
+  })
+
+  test('a deposit that lands before the preflight is refused before any relayer transaction', async () => {
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    await w.op.submit(ctx, 'activate', sign(tx))
+    const acc = w.state.accounts.k!
+    // The watcher saw 20 USDC; by the time it executes, the account holds 26.92.
+    w.chain.usdc = OVER
+    await (w.op as unknown as { fireArmed(a: AccountState, usdc: bigint): Promise<void> }).fireArmed(acc, 20_000_000n)
+    expect(w.sent).toHaveLength(0)
+    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: '26920000' })
+  })
+})
+
+// Review P2: the owner can withdraw while an activation is still armed, and that activation is invalidated cleanly.
+describe('withdrawing with an armed activation', () => {
+  test('the transfer runs at nonce 0 and the armed activation is superseded, so the app asks for a fresh Start', async () => {
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    const armed = await w.op.submit(ctx, 'activate', sign(tx))
+    expect(armed.code).toBe('ARMED')
+    // 26.92 USDC lands; the owner withdraws the excess before the watcher has looked.
+    w.chain.usdc = OVER
+    const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ state: 'confirmed' })
+    const acc = w.state.accounts.k!
+    expect(acc.armed).toBeUndefined()
+    expect(w.op.ops(ctx, null).ops.find((o) => o.opId === armed.opId)).toMatchObject({ state: 'failed', code: 'ARMED_SUPERSEDED' })
+    // The stale activation can never run: the Safe is at nonce 1. A new Start prepares at that nonce.
+    w.chain.usdc = OVER - 1_920_000n
+    const fresh = await w.op.prepareActivate(ctx)
+    expect(fresh.safeTxHash).not.toBe(tx.safeTxHash)
+    expect(fresh.summary[0]).toBe(`Use your Safe ${SAFE} on Base`)
+  })
+})
+

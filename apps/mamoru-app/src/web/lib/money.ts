@@ -77,6 +77,13 @@ export function overCapOf(f: FundingView | undefined): OverCap | null {
   return f.active ? null : overCap(BigInt(f.usdc), BigInt(f.capUsdc))
 }
 
+/** An undeployed account holding less than the relayer deploys for: nothing starts until it reaches the minimum. */
+export function belowMinimumOf(f: FundingView | undefined): { usdc: bigint; minUsdc: bigint; missingUsdc: bigint } | null {
+  if (!f || f.deployed || f.deployMinUsdc === undefined) return null
+  const [usdc, minUsdc] = [BigInt(f.usdc), BigInt(f.deployMinUsdc)]
+  return usdc > 0n && usdc < minUsdc ? { usdc, minUsdc, missingUsdc: minUsdc - usdc } : null
+}
+
 /** Base units to the amount a person types: "1.93". */
 export function usdInput(raw: bigint): string {
   return usd(raw).replace(/,/g, '')

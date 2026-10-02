@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeFunctionData, parseAbi, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
-import { address, entry, erc20Abi, nonfungiblePositionManagerAbi } from '@mamoru/registry'
+import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import { simulateCalls, type SimCallResult } from '@mamoru/rpc'
 import { POLICIES, computeCaps, grantKey, hasManageAny, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
@@ -18,6 +18,7 @@ import {
   safeTxHashOf,
   stopBatch,
   transferBatch,
+  verifyOwnerSignature,
   type LiveAccount,
   type LivePosition,
   type LiveReceive,
@@ -54,6 +55,14 @@ const DEPOSITS_SAVE_BLOCKS = 300n
 const POST_WAIT_MS = 15_000
 /** How often the armed-activation watcher reads the USDC balance of each armed Safe. */
 const ARM_WATCH_MS = 6_000
+/** The relayer does not pay to deploy a Safe that holds less than this (1 USDC). */
+export const MIN_DEPLOY_USDC = 1_000_000n
+/** Failed owner executions the relayer accepts per account, and over all accounts, in 24 hours. */
+export const MAX_OWNER_FAILURES_PER_DAY = 5
+export const MAX_OWNER_FAILURES_GLOBAL_PER_DAY = 50
+const DAY_MS = 24 * 3_600_000
+/** Failures that count against the budget: a signature or a transaction that was wrong, or relayer gas spent for nothing. */
+const BUDGET_CODES = new Set(['BAD_SIGNATURE', 'OWNER_TX_REVERTS', 'OWNER_TX_FAILED', 'OWNER_TX_ERROR', 'DEPLOY_FAILED'])
 
 export class HttpError extends Error {
   constructor(
@@ -153,6 +162,8 @@ export class Operator {
   /** Owner transactions being executed right now, by accountKey. */
   private readonly busy = new Map<string, Progress>()
   private readonly seenAt = new Map<string, string>()
+  /** Pause between retries of a pre-send simulation that reverts (a load-balanced provider can answer from a lagging node). */
+  private retryMs = 3_000
 
   constructor(
     readonly cfg: OperatorConfig,
@@ -230,6 +241,7 @@ export class Operator {
       capUsdc: LIVE_CAP_USDC.toString(),
       // Only while the engine is off: that is when the cap refuses Start.
       overCap: acc.active ? null : overCap(r.usdc, LIVE_CAP_USDC),
+      deployMinUsdc: MIN_DEPLOY_USDC.toString(),
       cbbtc: r.cbbtc.toString(),
       gasReserveWei: this.policyOf(acc).gasReserveWei.toString(),
       active: acc.active,
@@ -357,6 +369,7 @@ export class Operator {
     if (acc.active) throw new HttpError(409, 'ALREADY_ACTIVE', 'the engine is already active for this account')
     const r = await readSafe(this.client, live.safe)
     if (r.usdc > LIVE_CAP_USDC) throw depositOverCap(r.usdc)
+    if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
     if (!acc.sessionKey) {
       acc.sessionKey = generatePrivateKey()
       this.store.save()
@@ -441,6 +454,7 @@ export class Operator {
     if (to.toLowerCase() === live.safe.toLowerCase()) throw new HttpError(400, 'BAD_REQUEST', 'recipient is the Safe itself')
     // An undeployed Safe can still pay out: the relayer deploys it right before the owner transfer (executeOwner).
     const r = await readSafe(this.client, live.safe)
+    if (!r.deployed && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
     const slip = this.policyOf(acc).execution.slippageBps
     let reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[] = []
     let swaps: SwapBack[] = []
@@ -664,6 +678,7 @@ export class Operator {
   async submit(ctx: AccountContext, kind: OwnerKind, body: OwnerSignature): Promise<OpView> {
     this.assertLive()
     const { acc, live } = this.account(ctx)
+    this.assertBudget(acc)
     const p = body && typeof body.prepareId === 'string' ? this.prepared.get(body.prepareId) : undefined
     if (!p || p.accountKey !== acc.accountKey || p.kind !== kind) throw new HttpError(404, 'PREPARE_UNKNOWN', 'no such prepared transaction for this account')
     if (p.expires < Date.now()) {
@@ -677,6 +692,11 @@ export class Operator {
       throw new HttpError(400, 'BAD_SIGNATURE', (e as Error).message)
     }
     this.prepared.delete(p.prepareId)
+    // A signature the passkey did not make stops here: no op, no armed activation, no relayer transaction.
+    if (!(await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn))) {
+      this.noteFailure(acc)
+      throw new HttpError(400, 'BAD_SIGNATURE', 'the passkey signature does not match this account and transaction')
+    }
     if (kind === 'activate') {
       const usdc = await this.usdcOf(live.safe)
       if (usdc === 0n) return this.arm(acc, p, signature)
@@ -688,10 +708,91 @@ export class Operator {
     const run = this.lock(acc.accountKey).run(() => this.execute(acc, live, p, signature, op))
     run.catch((e) => {
       console.error(`[owner] ${op.opId} ${(e as Error).message}`)
-      this.patchOp(acc, op.opId, { state: 'failed', code: 'OWNER_TX_ERROR' })
+      // A refusal before anything was sent keeps its own code; anything else may have reached the chain.
+      this.failOwner(acc, op, e instanceof HttpError ? e.code : 'OWNER_TX_ERROR')
     })
     await Promise.race([run.catch(() => undefined), Bun.sleep(POST_WAIT_MS)])
     return { ...acc.ops.find((o) => o.opId === op.opId)! }
+  }
+
+  // ---- owner side: what the relayer will not pay for ------------------------
+
+  /** Failure times of the last 24 h, pruned in place. */
+  private recentFailures(acc: AccountState): string[] {
+    const since = Date.now() - DAY_MS
+    const kept = (acc.ownerFailures ?? []).filter((t) => Date.parse(t) > since)
+    if (acc.ownerFailures && kept.length !== acc.ownerFailures.length) acc.ownerFailures = kept
+    return kept
+  }
+
+  private noteFailure(acc: AccountState): void {
+    acc.ownerFailures = [...this.recentFailures(acc), now()]
+    this.store.save()
+  }
+
+  /** The reason this account may not ask the relayer for another owner execution today, or null. */
+  private overBudget(acc: AccountState): string | null {
+    if (this.recentFailures(acc).length >= MAX_OWNER_FAILURES_PER_DAY) return `this account had ${MAX_OWNER_FAILURES_PER_DAY} failed owner transactions in 24 hours; try again later`
+    const all = Object.values(this.store.state.accounts).reduce((n, a) => n + this.recentFailures(a).length, 0)
+    if (all >= MAX_OWNER_FAILURES_GLOBAL_PER_DAY) return 'the relayer paused owner transactions after too many failures; try again later'
+    return null
+  }
+
+  private assertBudget(acc: AccountState): void {
+    const why = this.overBudget(acc)
+    if (why) throw new HttpError(429, 'OWNER_FAILURE_BUDGET', why)
+  }
+
+  private failOwner(acc: AccountState, op: OpView, code: string, detail: Partial<OpView> = {}): void {
+    if (BUDGET_CODES.has(code)) this.noteFailure(acc)
+    this.patchOp(acc, op.opId, { state: 'failed', code, ...detail })
+  }
+
+  /**
+   * Everything that can be known before the relayer spends gas on an owner signature. Every owner path runs through
+   * here (activate, armed activate, transfer, stop): the passkey signed exactly this SafeTx (Safe, chain, nonce), the
+   * guards hold, and the whole sequence (deploy if needed, then execTransaction) succeeds in a simulation.
+   * Returns the refusal, or null. Throws when the simulation cannot run: nothing is sent, the caller may retry.
+   */
+  private async preflight(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex): Promise<{ code: string; detail?: Partial<OpView> } | null> {
+    if (safeTxHashOf(live, p.tx).toLowerCase() !== p.safeTxHash.toLowerCase()) return { code: 'BAD_SIGNATURE' }
+    if (!(await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn))) return { code: 'BAD_SIGNATURE' }
+    const data = execData(p.tx, signature)
+    for (let attempt = 0; ; attempt++) {
+      const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
+      if (nonce !== p.tx.nonce) return { code: 'SAFE_NONCE_MOVED' }
+      const usdc = await this.usdcOf(live.safe)
+      if (p.kind === 'activate' && usdc > LIVE_CAP_USDC) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() } }
+      if (!deployed && usdc < MIN_DEPLOY_USDC) return { code: 'BELOW_DEPLOY_MINIMUM' }
+      const why = await this.simulateOwner(live, deployed, data)
+      if (!why) return null
+      if (attempt >= 2) {
+        console.error(`[owner] ${acc.accountKey} ${p.kind} would revert, nothing sent: ${why}`)
+        return { code: 'OWNER_TX_REVERTS' }
+      }
+      console.log(`[owner] ${acc.accountKey} ${p.kind} simulation reverts (${why}), retry ${attempt + 1}`)
+      await Bun.sleep(this.retryMs)
+    }
+  }
+
+  /** The relayer's own sequence in one eth_simulateV1 block: the factory call when the Safe has no code, then execTransaction. Null when it all succeeds. */
+  private async simulateOwner(live: LiveAccount, deployed: boolean, data: Hex): Promise<string | null> {
+    const from = this.relayer.address
+    const calls = [...(deployed ? [] : [{ from, ...deployCall(live) }]), { from, to: live.safe, data }]
+    let res: SimCallResult[]
+    try {
+      res = await simulateCalls(this.client, calls, await this.client.getBlockNumber({ cacheTime: 0 }))
+    } catch (e) {
+      throw new HttpError(503, 'SIMULATION_UNAVAILABLE', (e as Error).message.split('\n')[0] ?? 'simulation unavailable')
+    }
+    const bad = res.findIndex((x) => x.status !== 'success')
+    if (bad >= 0) return `${bad === res.length - 1 ? 'execTransaction' : 'deploy'}: ${res[bad]!.error ?? res[bad]!.returnData}`
+    try {
+      if (decodeFunctionResult({ abi: safeAbi, functionName: 'execTransaction', data: res.at(-1)!.returnData }) !== true) return 'execTransaction returned false'
+    } catch {
+      return 'execTransaction returned no result'
+    }
+    return null
   }
 
   private usdcOf(safe: Address): Promise<bigint> {
@@ -737,6 +838,7 @@ export class Operator {
   private async fireArmed(acc: AccountState, usdc: bigint): Promise<void> {
     const a = acc.armed
     if (!a || acc.active) return this.disarm(acc, 'ALREADY_ACTIVE')
+    if (this.overBudget(acc)) return this.disarm(acc, 'OWNER_FAILURE_BUDGET')
     if (usdc > LIVE_CAP_USDC) {
       console.log(`[armed] ${acc.accountKey} deposit ${usdc} over cap ${LIVE_CAP_USDC}`)
       // On the op the SPA reads, with the amounts: the owner withdraws the excess, then approves Start again.
@@ -748,6 +850,8 @@ export class Operator {
       console.log(`[armed] ${acc.accountKey} Safe nonce ${nonce} != armed ${a.tx.nonce}`)
       return this.disarm(acc, 'ARMED_NONCE_MOVED')
     }
+    // Too little to deploy a Safe for: stay armed and wait for more (funding reports deployMinUsdc).
+    if (!deployed && usdc < MIN_DEPLOY_USDC) return
     acc.armed = undefined
     this.patchOp(acc, a.opId, { code: undefined })
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
@@ -762,7 +866,7 @@ export class Operator {
       if (tries < ARM_MAX_TRIES && !acc.active) {
         acc.armed = { ...a, tries }
         this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
-      } else if (!acc.active) this.patchOp(acc, op.opId, { state: 'failed', code: 'OWNER_TX_ERROR' })
+      } else if (!acc.active) this.failOwner(acc, op, 'OWNER_TX_ERROR')
     }
   }
 
@@ -800,6 +904,9 @@ export class Operator {
 
   private async executeOwner(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView): Promise<void> {
     const safe = live.safe
+    // Before any relayer transaction: signature, guards and a simulation of everything about to be sent.
+    const refusal = await this.preflight(acc, live, p, signature)
+    if (refusal) return this.failOwner(acc, op, refusal.code, refusal.detail)
     // A transfer may be the first owner tx of a Safe that never started (deposit over the cap): deploy it first too.
     if (p.kind === 'activate' || p.kind === 'transfer') {
       const { deployed } = await readSafeNonce(this.client, safe)
@@ -808,7 +915,7 @@ export class Operator {
         const d = deployCall(live)
         const { hash, receipt } = await this.relayer.send(d)
         console.log(`[owner] deploy ${safe} tx ${hash} ${receipt.status}`)
-        if (receipt.status !== 'success') return this.patchOp(acc, op.opId, { state: 'failed', code: 'DEPLOY_FAILED', txHash: hash })
+        if (receipt.status !== 'success') return this.failOwner(acc, op, 'DEPLOY_FAILED', { txHash: hash })
         this.setBusy(acc, p.kind === 'activate' ? 'activating' : 'withdrawing')
       }
     }
@@ -832,10 +939,21 @@ export class Operator {
         const why = revertReason(e)
         if (attempt >= 2) {
           console.error(`[owner] ${op.opId} simulation reverts: ${why}`)
-          return this.patchOp(acc, op.opId, { state: 'failed', code: 'OWNER_TX_REVERTS' })
+          return this.failOwner(acc, op, 'OWNER_TX_REVERTS')
         }
         console.log(`[owner] ${op.opId} simulation reverts (${why}), retry ${attempt + 1}`)
-        await Bun.sleep(3_000)
+        await Bun.sleep(this.retryMs)
+      }
+    }
+    if (p.kind === 'activate') {
+      // The balance is read again right before the send, so a deposit that landed since the prepare or the preflight is
+      // counted. This narrows the window; it is not atomic: a deposit mined between this read and the activation still
+      // gets through, and the chain itself enforces no account cap. Deposits to an account that is already running are
+      // outside this check altogether (otto/mamoru#71).
+      const usdc = await this.usdcOf(safe)
+      if (usdc > LIVE_CAP_USDC) {
+        console.log(`[owner] ${op.opId} deposit ${usdc} over cap ${LIVE_CAP_USDC} at send time, not activating`)
+        return this.failOwner(acc, op, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() })
       }
     }
     // Keep the hash as soon as the tx is out: if the receipt poll fails, reconciliation reads it later.
@@ -843,7 +961,7 @@ export class Operator {
     this.patchOp(acc, op.opId, { state: 'submitted', txHash: hash })
     const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
     console.log(`[owner] ${op.opId} tx ${hash} block ${receipt.blockNumber} ${ok ? 'ok' : 'FAILED'}`)
-    if (!ok) return this.patchOp(acc, op.opId, { state: 'failed', code: 'OWNER_TX_FAILED', block: Number(receipt.blockNumber) })
+    if (!ok) return this.failOwner(acc, op, 'OWNER_TX_FAILED', { block: Number(receipt.blockNumber) })
     this.afterOwner(acc, p, receipt)
     this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(receipt.blockNumber) })
   }
@@ -868,6 +986,9 @@ export class Operator {
       acc.grants = []
       acc.managedTokenIds = []
       this.store.save()
+    } else {
+      // The Safe nonce moved, so an activation signed earlier can never run: drop it and let the app ask for a fresh Start.
+      this.disarm(acc, 'ARMED_SUPERSEDED')
     }
   }
 
@@ -1144,6 +1265,10 @@ export function collapseFailed(ops: StoredOp[]): OpView[] {
 /** Start refused: the Safe holds more USDC than the per-account cap. The message carries the amounts for the SPA. */
 function depositOverCap(usdc: bigint): HttpError {
   return new HttpError(409, 'DEPOSIT_OVER_CAP', `this account holds ${fmtUsdc(usdc)} USDC, over the ${fmtUsdc(LIVE_CAP_USDC)} USDC cap; withdraw at least ${fmtUsdcUp(usdc - LIVE_CAP_USDC)} USDC to start`)
+}
+
+function belowDeployMinimum(usdc: bigint): HttpError {
+  return new HttpError(409, 'BELOW_DEPLOY_MINIMUM', `this account holds ${fmtUsdc(usdc)} USDC; Mamoru creates the account on Base from ${fmtUsdc(MIN_DEPLOY_USDC)} USDC`)
 }
 
 const COLLECT_SELECTOR = toFunctionSelector('collect((uint256,address,uint128,uint128))')

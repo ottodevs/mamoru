@@ -113,6 +113,30 @@ describe('deposit cap', () => {
     const sending: OpView = { opId: 'own-2-transfer', kind: 'transfer', state: 'submitted', updatedAt: '2026-10-01T10:05:00Z' }
     expect((await renderRoute('/', fixtureSession, overFunding, { ops: [refused, sending] })).html).not.toContain('data-testid="over-cap"')
   })
+  test('over the cap wins over an armed activation: the notice and the withdraw show while the start is still armed', async () => {
+    const armedOp: OpView = { opId: 'own-1-activate', kind: 'activate', state: 'proposed', code: 'ARMED', updatedAt: '2026-10-01T10:00:00Z' }
+    const { text, html } = await renderRoute('/', fixtureSession, overFunding, { ops: [armedOp] })
+    expect(html).toContain('data-testid="over-cap"')
+    expect(text).toContain('Withdraw 1.92 USDC')
+    expect(html).not.toContain('data-testid="start"')
+    // After the withdraw the operator fails the armed start as superseded: no notice, no stale line, a fresh Start.
+    const superseded: OpView = { ...armedOp, state: 'failed', code: 'ARMED_SUPERSEDED' }
+    const sent: OpView = { opId: 'own-2-transfer', kind: 'transfer', state: 'confirmed', amountUsdc: '1920000', updatedAt: '2026-10-01T10:05:00Z' }
+    const after = await renderRoute('/', fixtureSession, { ...overFunding, usdc: '25000000', deployed: true, overCap: null }, { ops: [superseded, sent] })
+    expect(after.html).toContain('data-testid="start"')
+    expect(after.html).not.toContain('data-testid="over-cap"')
+    expect(after.text).toContain('Mamoru is not running on this money yet.')
+    expect(after.text).not.toContain('Start needs another approval')
+  })
+  test('under the 1 USDC the relayer deploys for: the account says why nothing started', async () => {
+    const small: FundingView = { ...fixtureFunding, usdc: '500000', active: false, deployed: false, overCap: null, deployMinUsdc: '1000000' }
+    const { text, html } = await renderRoute('/', fixtureSession, small)
+    expect(html).toContain('data-testid="below-minimum"')
+    expect(text).toContain('Mamoru starts from 1 USDC. This account holds 0.50 USDC, so it has not started. Add at least 0.50 USDC more.')
+    expect(html).not.toContain('data-testid="start"')
+    expect((await renderRoute('/', fixtureSession, { ...small, usdc: '1000000' })).html).toContain('data-testid="start"')
+    expect((await renderRoute('/', fixtureSession, { ...small, deployed: true })).html).toContain('data-testid="start"')
+  })
   test('Add capital over the cap: the arrival line says why nothing started and stays', async () => {
     const { text } = await renderRoute('/add', fixtureSession, overFunding)
     expect(text).toContain('26.92 USDC arrived. That is 1.92 USDC over the 25 USDC cap, so Mamoru has not started. Your money is in your account and nothing was moved.')

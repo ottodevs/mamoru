@@ -182,6 +182,21 @@ try {
   const again = await call<{ code: string; error: string }>('POST', `${base}/activate/prepare`)
   check(again.status === 409 && again.json.code === 'DEPOSIT_OVER_CAP', `Start is refused before signing: ${again.json.error}`)
 
+  // --- a forged owner signature costs the relayer nothing ------------------------------
+  const relayerNonce = () => lab.client.getTransactionCount({ address: op.operator.relayer.address })
+  const sentBefore = await relayerNonce()
+  const forgedPlan = await call<TransferPlan>('POST', `${base}/transfer/prepare`, { to: RECIPIENT, amountUsdc: EXCESS.toString() })
+  const thief = new SoftwarePasskey(PASSKEY_SCALARS.a2)
+  const stolen = thief.assert(forgedPlan.json.ownerTx.safeTxHash)
+  const forged = await call<{ code: string }>('POST', `${base}/transfer`, {
+    prepareId: forgedPlan.json.ownerTx.prepareId,
+    authenticatorData: Buffer.from(stolen.authenticatorData.slice(2), 'hex').toString('base64url'),
+    clientDataJSON: Buffer.from(stolen.clientDataJSON).toString('base64url'),
+    signature: Buffer.from(der(stolen.r, stolen.s)).toString('base64url'),
+  })
+  check(forged.status === 400 && forged.json.code === 'BAD_SIGNATURE', 'a transfer signed by another passkey is refused')
+  check((await relayerNonce()) === sentBefore && !(await funding()).deployed, 'the relayer sent nothing for it and the Safe is still undeployed')
+
   // --- the owner withdraws the excess from the undeployed Safe ----------------------
   const before = await usdcOf(RECIPIENT)
   const transfer = await ownerAction('transfer', { to: RECIPIENT, amountUsdc: EXCESS.toString() })
