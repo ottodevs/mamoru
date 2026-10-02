@@ -14,6 +14,8 @@ export const signInCopy = {
   create: 'Create a new account',
   cancelled: 'No passkey was used, so you are not signed in.',
   refused: 'That passkey does not open a Mamoru account on this site. Choose the passkey you created your account with.',
+  refusedFunds: 'Your funds are not affected. They are in your account on Base, and your passkey with your recovery kit can withdraw them without Mamoru.',
+  refusedLink: 'How to withdraw with the recovery kit',
   limited: 'Too many attempts. Wait a few minutes and try again.',
   unsupported: 'This browser does not support passkeys. Open Mamoru in the browser that holds your passkey.',
   failed: 'Mamoru did not answer. Try again.',

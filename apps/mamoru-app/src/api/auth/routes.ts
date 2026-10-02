@@ -5,6 +5,7 @@ import { apiError } from '../errors.ts'
 import { accountByCredential, advanceSignCount, type AccountRow } from '../accounts/store.ts'
 import { issueChallenge, openChallenge, spendChallenge } from './challenge.ts'
 import { SIGNIN_LIMITS, allow, count, countNothing, credentialKey, ipKey } from './rate-limit.ts'
+import { assertionShape } from '@mamoru/account/live'
 import { DECOY_KEY, checkClaims, decodeB64url, signCountOf, verifyP256 } from './webauthn.ts'
 
 // Returning owner (otto/mamoru#6): a device without a session proves it holds the passkey that owns an account, and
@@ -95,7 +96,9 @@ signIn.post('/signin', async (c) => {
       const failures = await count(db, key, now)
       if (failures === SIGNIN_LIMITS.credentialFailuresLogged) console.warn(`signin: ${failures} failed attempts on one credential in ${SIGNIN_LIMITS.windowSeconds / 60} minutes`)
     } else await countNothing(db, key, now)
-    return refused(c, why ?? 'credential')
+    // This check has no chain to overrule it, so it stays strict; a false refusal blocks sign-in, never funds. The
+    // non-secret shape of the assertion is logged so a real device that is refused can be diagnosed.
+    return refused(c, `${why ?? 'credential'} ${JSON.stringify(assertionShape({ authenticatorData, clientDataJSON, signature }))}`)
   }
 
   const session = await c.var.auth.bind(c, account.user_id)

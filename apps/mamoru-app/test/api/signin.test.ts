@@ -417,6 +417,29 @@ describe('signature counter', () => {
   })
 })
 
+describe('refusal log', () => {
+  test('a refused assertion is logged with its non-secret shape, so a real device can be diagnosed', async () => {
+    const h = harness()
+    const a = await authenticator()
+    await onboard(h, a)
+    const lines: string[] = []
+    const log = console.log
+    console.log = (...args: unknown[]) => void lines.push(String(args[0]))
+    let body: SignInRequest
+    try {
+      body = await assertion(await authenticator(a.owner.credentialId), await challenge(h), { highS: true })
+      await expectRefused(await signIn(h, body))
+    } finally {
+      console.log = log
+    }
+    const line = lines.find((l) => l.startsWith('signin refused: signature'))!
+    const shape = JSON.parse(line.slice(line.indexOf('{'))) as Record<string, unknown>
+    expect(shape).toMatchObject({ authenticatorDataLength: 37, flags: '0x05', signCountZero: true, clientDataKeys: ['type', 'challenge', 'origin', 'crossOrigin'], signatureDer: 'ok', highS: true })
+    // No credential id, no key, no challenge, no signature bytes.
+    for (const secret of [a.owner.credentialId, body.signature, body.clientDataJSON, a.owner.x.slice(2)]) expect(line).not.toContain(secret)
+  })
+})
+
 describe('sign-in rate limit', () => {
   test('knowing a credential id does not lock its owner out: failures on it never block a correct assertion', async () => {
     const h = harness(() => new Date('2026-10-01T10:00:00Z'))

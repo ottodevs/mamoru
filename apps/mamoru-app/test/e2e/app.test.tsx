@@ -198,6 +198,10 @@ describe('sign in', () => {
     const refused = card({ problem: signInProblem(new ApiRequestError(401, { error: 'Sign-in failed.', code: 'AUTH_SIGNIN_FAILED' })), remembered: true })
     expect(refused.html).toContain('data-testid="signin-refused"')
     expect(refused.text).toContain('That passkey does not open a Mamoru account on this site.')
+    // A refusal says the money is safe and how to reach it without Mamoru.
+    expect(refused.text).toContain('Your funds are not affected. They are in your account on Base, and your passkey with your recovery kit can withdraw them without Mamoru. How to withdraw with the recovery kit')
+    expect(refused.html).toContain('data-testid="signin-funds"')
+    expect(cancelled.html).not.toContain('data-testid="signin-funds"')
     expect(refused.text).not.toContain(signInCopy.remembered)
     expect(refused.text).not.toContain('Sign-in failed.')
   })
