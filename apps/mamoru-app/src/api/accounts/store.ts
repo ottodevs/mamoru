@@ -15,16 +15,36 @@ export type AccountRow = {
   policy_version: string
   recovery_ack_at: string | null
   created_at: string
+  /** Last WebAuthn signature counter seen at sign-in (migration 0003; 0 until then). */
+  passkey_sign_count?: number
 }
 
 export function accountOfUser(db: Db, userId: string): Promise<AccountRow | null> {
   return db.prepare('SELECT * FROM accounts WHERE user_id = ? ORDER BY created_at LIMIT 1').bind(userId).first<AccountRow>()
 }
 
-/** Accounts registered with this credential id, oldest first. Several rows are possible (the id is not proven at onboarding); the key decides. */
-export async function accountsByCredential(db: Db, chainId: number, credentialId: string): Promise<AccountRow[]> {
-  const rows = await db.prepare('SELECT * FROM accounts WHERE passkey_credential_id = ? AND chain_id = ? ORDER BY created_at LIMIT 8').bind(credentialId, chainId).all<AccountRow>()
-  return rows.results
+/** More rows than this for one credential id is not a real owner: sign-in refuses instead of scanning further. */
+export const MAX_CREDENTIAL_ROWS = 64
+
+/**
+ * Accounts registered with this credential id, oldest first. Several rows are possible (the id is not proven at
+ * onboarding); the caller tries each key. Null when there are more than MAX_CREDENTIAL_ROWS: fail closed, never a silent cut.
+ */
+export async function accountsByCredential(db: Db, chainId: number, credentialId: string): Promise<AccountRow[] | null> {
+  const rows = await db
+    .prepare('SELECT * FROM accounts WHERE passkey_credential_id = ? AND chain_id = ? ORDER BY created_at, account_key LIMIT ?')
+    .bind(credentialId, chainId, MAX_CREDENTIAL_ROWS + 1)
+    .all<AccountRow>()
+  return rows.results.length > MAX_CREDENTIAL_ROWS ? null : rows.results
+}
+
+/** Stores a signature counter only if it is higher than the one stored. False when it is not: a replayed or cloned authenticator. */
+export async function advanceSignCount(db: Db, accountKey: string, count: number): Promise<boolean> {
+  const row = await db
+    .prepare('UPDATE accounts SET passkey_sign_count = ? WHERE account_key = ? AND passkey_sign_count < ? RETURNING account_key')
+    .bind(count, accountKey, count)
+    .first<{ account_key: string }>()
+  return row !== null
 }
 
 /** The account only if it belongs to this user; a foreign key reads as absent. */

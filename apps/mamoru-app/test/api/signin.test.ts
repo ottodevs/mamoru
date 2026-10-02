@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import type { OwnerResponse, PasskeyOwner, SessionView, SignInChallenge, SignInRequest } from '@mamoru/domain'
 import { CHALLENGE_TTL_SECONDS, issueChallenge, openChallenge, spendChallenge } from '../../src/api/auth/challenge.ts'
-import { SIGNIN_LIMITS, allow, rateKey } from '../../src/api/auth/rate-limit.ts'
-import { checkClaims, constantTimeEqual, verifyP256 } from '../../src/api/auth/webauthn.ts'
+import { SIGNIN_LIMITS, allow, count, countNothing, credentialKey, ipKey } from '../../src/api/auth/rate-limit.ts'
+import { checkClaims, constantTimeEqual, signCountOf, verifyP256 } from '../../src/api/auth/webauthn.ts'
+import { MAX_CREDENTIAL_ROWS } from '../../src/api/accounts/store.ts'
 import { harness, ORIGIN, SECRET, sessionCookie } from './helpers.ts'
 
 // Real P-256 keys made here with WebCrypto: a software authenticator that answers like navigator.credentials.get.
@@ -36,14 +37,14 @@ async function authenticator(credentialId = b64url(crypto.getRandomValues(new Ui
   return { owner: { credentialId, x: coord(jwk.x!), y: coord(jwk.y!) }, key: pair.privateKey }
 }
 
-type Shape = { rpId?: string; origin?: string; type?: string; flags?: number; challenge?: string; extra?: Record<string, unknown>; highS?: boolean; credentialId?: string }
+type Shape = { rpId?: string; origin?: string; type?: string; flags?: number; challenge?: string; extra?: Record<string, unknown>; highS?: boolean; credentialId?: string; signCount?: number }
 
-/** The assertion a platform authenticator returns for `challenge`: UP and UV set unless `flags` says otherwise. */
+/** The assertion a platform authenticator returns for `challenge`: UP and UV set unless `flags` says otherwise; counter 0 like a synced passkey. */
 async function assertion(a: Authenticator, c: SignInChallenge, shape: Shape = {}): Promise<SignInRequest> {
   const authenticatorData = new Uint8Array(37)
   authenticatorData.set(await sha256(shape.rpId ?? RP_ID))
   authenticatorData[32] = shape.flags ?? 0x05
-  authenticatorData[36] = 1
+  new DataView(authenticatorData.buffer).setUint32(33, shape.signCount ?? 0)
   const clientDataJSON = enc.encode(JSON.stringify({ type: shape.type ?? 'webauthn.get', challenge: shape.challenge ?? c.challenge, origin: shape.origin ?? ORIGIN, crossOrigin: false, ...shape.extra }))
   const signed = Buffer.concat([authenticatorData, await sha256(clientDataJSON)])
   const raw = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, a.key, signed))
@@ -142,7 +143,7 @@ describe('assertion verification', () => {
       const req = await assertion(a, c, { highS })
       const parts = { authenticatorData: Buffer.from(req.authenticatorData, 'base64url'), clientDataJSON: Buffer.from(req.clientDataJSON, 'base64url'), signature: Buffer.from(req.signature, 'base64url') }
       const claims = await checkClaims(parts, { challenge: c.challenge, origin: ORIGIN, rpId: RP_ID })
-      if (!claims.ok) throw new Error(claims.reason)
+      expect(claims.reason).toBeNull()
       expect(await verifyP256(a.owner, claims.signed, parts.signature)).toBe(true)
       expect(await verifyP256(b.owner, claims.signed, parts.signature)).toBe(false)
       const other = Uint8Array.from(claims.signed)
@@ -152,13 +153,13 @@ describe('assertion verification', () => {
     }
   })
 
-  test('each claim is checked: type, challenge, origin, cross-origin, rpIdHash, user present, user verified', async () => {
+  test('each claim is checked: type, challenge, origin, cross-origin, rpIdHash, user present, user verified, backup flags', async () => {
     const a = await authenticator()
     const c: SignInChallenge = { challenge: 'y'.repeat(43), token: '', rpId: RP_ID, expiresAt: '' }
     const reason = async (shape: Shape, expected = { challenge: c.challenge, origin: ORIGIN, rpId: RP_ID }) => {
       const req = await assertion(a, c, shape)
       const r = await checkClaims({ authenticatorData: Buffer.from(req.authenticatorData, 'base64url'), clientDataJSON: Buffer.from(req.clientDataJSON, 'base64url'), signature: Buffer.from(req.signature, 'base64url') }, expected)
-      return r.ok ? 'ok' : r.reason
+      return r.reason ?? 'ok'
     }
     expect(await reason({})).toBe('ok')
     expect(await reason({ type: 'webauthn.create' })).toBe('type')
@@ -172,11 +173,19 @@ describe('assertion verification', () => {
     expect(await reason({ rpId: 'mamoru.lol' })).toBe('rp_id')
     expect(await reason({ flags: 0x04 })).toBe('user_present')
     expect(await reason({ flags: 0x01 })).toBe('user_verified')
+    // Backup state without backup eligibility is not a state an authenticator can be in (WebAuthn L3).
+    expect(await reason({ flags: 0x15 })).toBe('backup_flags')
+    expect(await reason({ flags: 0x0d })).toBe('ok')
+    expect(await reason({ flags: 0x1d })).toBe('ok')
     const junk = { authenticatorData: new Uint8Array(37), signature: new Uint8Array(8) }
-    expect(await checkClaims({ ...junk, clientDataJSON: enc.encode('not json') }, { challenge: '', origin: ORIGIN, rpId: RP_ID })).toEqual({ ok: false, reason: 'client_data' })
-    expect(await checkClaims({ ...junk, clientDataJSON: enc.encode('[]') }, { challenge: '', origin: ORIGIN, rpId: RP_ID })).toEqual({ ok: false, reason: 'client_data' })
+    expect((await checkClaims({ ...junk, clientDataJSON: enc.encode('not json') }, { challenge: '', origin: ORIGIN, rpId: RP_ID })).reason).toBe('client_data')
+    const list = await checkClaims({ ...junk, clientDataJSON: enc.encode('[]') }, { challenge: '', origin: ORIGIN, rpId: RP_ID })
+    expect(list.reason).toBe('client_data')
+    // A refused claim still yields the bytes to verify, so the caller does the same work either way.
+    expect(list.signed).toHaveLength(37 + 32)
     const short = await assertion(a, c)
-    expect(await checkClaims({ authenticatorData: new Uint8Array(36), clientDataJSON: Buffer.from(short.clientDataJSON, 'base64url'), signature: new Uint8Array(8) }, { challenge: c.challenge, origin: ORIGIN, rpId: RP_ID })).toEqual({ ok: false, reason: 'auth_data' })
+    expect((await checkClaims({ authenticatorData: new Uint8Array(36), clientDataJSON: Buffer.from(short.clientDataJSON, 'base64url'), signature: new Uint8Array(8) }, { challenge: c.challenge, origin: ORIGIN, rpId: RP_ID })).reason).toBe('auth_data')
+    expect(signCountOf(Buffer.from((await assertion(a, c, { signCount: 0x01020304 })).authenticatorData, 'base64url'))).toBe(0x01020304)
   })
 })
 
@@ -272,6 +281,7 @@ describe('POST /api/auth/signin', () => {
       { type: 'webauthn.create' },
       { flags: 0x04 },
       { flags: 0x01 },
+      { flags: 0x15 },
       { extra: { crossOrigin: true } },
     ]
     for (const shape of shapes) await expectRefused(await attempt(h, a, shape))
@@ -355,23 +365,87 @@ describe('POST /api/auth/signin', () => {
   })
 })
 
-describe('sign-in rate limit', () => {
-  test('per credential: after 10 attempts in the window even a good assertion waits', async () => {
-    let now = new Date('2026-10-01T10:00:00Z')
-    const h = harness(() => now)
+describe('signature counter', () => {
+  test('a synced passkey always reports 0 and keeps signing in', async () => {
+    const h = harness()
     const a = await authenticator()
     await onboard(h, a)
-    for (let i = 0; i < SIGNIN_LIMITS.perCredential; i++) await expectRefused(await attempt(h, a, { flags: 0x01 }, `198.51.100.${i}`))
-    const limited = await attempt(h, a, {}, '198.51.100.200')
-    expect(limited.status).toBe(429)
-    expect(((await limited.json()) as { code: string }).code).toBe('AUTH_RATE_LIMITED')
-    expect(limited.headers.get('set-cookie')).toBeNull()
-    // Another credential is not affected; the next window opens the first one again.
-    const b = await authenticator()
-    await onboard(h, b)
-    expect((await attempt(h, b, {}, '198.51.100.201')).status).toBe(200)
-    now = new Date(now.getTime() + SIGNIN_LIMITS.windowSeconds * 1000)
-    expect((await attempt(h, a, {}, '198.51.100.200')).status).toBe(200)
+    for (let i = 0; i < 3; i++) expect((await attempt(h, a, { signCount: 0 })).status).toBe(200)
+    expect(h.db.raw.query('SELECT passkey_sign_count AS n FROM accounts').get()).toEqual({ n: 0 })
+  })
+
+  test('a counter that increases is stored; one that repeats, goes back or resets to 0 is refused', async () => {
+    const h = harness()
+    const a = await authenticator()
+    await onboard(h, a)
+    const stored = () => (h.db.raw.query('SELECT passkey_sign_count AS n FROM accounts').get() as { n: number }).n
+    expect((await attempt(h, a, { signCount: 5 })).status).toBe(200)
+    expect(stored()).toBe(5)
+    expect((await attempt(h, a, { signCount: 9 })).status).toBe(200)
+    expect(stored()).toBe(9)
+    for (const signCount of [9, 3, 0]) await expectRefused(await attempt(h, a, { signCount }))
+    expect(stored()).toBe(9)
+    expect((await attempt(h, a, { signCount: 10 })).status).toBe(200)
+  })
+
+  test('a refused assertion never moves the counter', async () => {
+    const h = harness()
+    const a = await authenticator()
+    await onboard(h, a)
+    await expectRefused(await attempt(h, a, { signCount: 50, flags: 0x01 }))
+    await expectRefused(await attempt(h, await authenticator(a.owner.credentialId), { signCount: 50 }))
+    expect(h.db.raw.query('SELECT passkey_sign_count AS n FROM accounts').get()).toEqual({ n: 0 })
+    expect((await attempt(h, a, { signCount: 1 })).status).toBe(200)
+  })
+})
+
+describe('duplicate credential ids', () => {
+  test('the account whose key signed is found past any number of earlier rows with the same id', async () => {
+    const h = harness()
+    const first = await authenticator()
+    await onboard(h, first)
+    let last = first
+    for (let i = 0; i < 12; i++) {
+      last = await authenticator(first.owner.credentialId)
+      await onboard(h, last)
+    }
+    const res = await attempt(h, last)
+    expect(res.status).toBe(200)
+    const mine = h.db.raw.query('SELECT account_key FROM accounts WHERE passkey_x = ?').get(last.owner.x) as { account_key: string }
+    expect(((await res.json()) as SessionView).accountKey).toBe(mine.account_key)
+    expect((await attempt(h, first)).status).toBe(200)
+  })
+
+  test('more rows than the bound fails closed, for every key, and says so in the log', async () => {
+    const h = harness()
+    const a = await authenticator()
+    await onboard(h, a)
+    for (let i = 0; i < MAX_CREDENTIAL_ROWS; i++) await onboard(h, await authenticator(a.owner.credentialId))
+    const logged: unknown[] = []
+    const error = console.error
+    console.error = (...args: unknown[]) => void logged.push(args[0])
+    try {
+      await expectRefused(await attempt(h, a))
+    } finally {
+      console.error = error
+    }
+    expect(String(logged[0])).toContain(`more than ${MAX_CREDENTIAL_ROWS} accounts share one credential id`)
+  })
+})
+
+describe('sign-in rate limit', () => {
+  test('knowing a credential id does not lock its owner out: failures on it never block a correct assertion', async () => {
+    const h = harness(() => new Date('2026-10-01T10:00:00Z'))
+    const a = await authenticator()
+    await onboard(h, a)
+    const attacker = await authenticator(a.owner.credentialId)
+    for (let i = 0; i < 3 * SIGNIN_LIMITS.credentialFailuresLogged; i++) {
+      // Always the generic 401, never a 429 that would also tell the id exists.
+      await expectRefused(await signIn(h, await assertion(attacker, await challenge(h)), `198.51.100.${i}`))
+    }
+    const owner = await attempt(h, a, {}, '192.0.2.1')
+    expect(owner.status).toBe(200)
+    expect(owner.headers.get('set-cookie')).toStartWith('__Host-mamoru_session=')
   })
 
   test('per IP: after 20 attempts one address is refused whatever it sends, another address is not', async () => {
@@ -379,22 +453,100 @@ describe('sign-in rate limit', () => {
     const a = await authenticator()
     await onboard(h, a)
     for (let i = 0; i < SIGNIN_LIMITS.perIp; i++) await expectRefused(await attempt(h, await authenticator(), {}, '203.0.113.50'))
-    expect((await attempt(h, a, {}, '203.0.113.50')).status).toBe(429)
+    const limited = await attempt(h, a, {}, '203.0.113.50')
+    expect(limited.status).toBe(429)
+    expect(((await limited.json()) as { code: string }).code).toBe('AUTH_RATE_LIMITED')
+    expect(limited.headers.get('set-cookie')).toBeNull()
     expect((await signIn(h, {}, '203.0.113.50')).status).toBe(429)
     expect((await attempt(h, a, {}, '203.0.113.51')).status).toBe(200)
   })
 
-  test('counters hold no raw IP or credential id, and old windows are dropped', async () => {
+  test('failures are counted per credential only for credentials that exist, and only after a valid challenge', async () => {
+    const h = harness(() => new Date('2026-10-01T10:00:00Z'))
+    const a = await authenticator()
+    await onboard(h, a)
+    const credRows = () => h.db.raw.query("SELECT key, count FROM auth_rate WHERE key LIKE 'cred:%'").all() as { key: string; count: number }[]
+    // Unknown credential ids, malformed bodies, bad or replayed challenge tokens: no per-credential row.
+    for (let i = 0; i < 5; i++) await expectRefused(await attempt(h, await authenticator(), {}, `198.51.100.${i}`))
+    await expectRefused(await signIn(h, { ...(await assertion(a, await challenge(h))), signature: '***' }))
+    await expectRefused(await signIn(h, { ...(await assertion(a, await challenge(h))), token: 'x.1.y' }))
+    const once = await assertion(await authenticator(a.owner.credentialId), await challenge(h))
+    await expectRefused(await signIn(h, once))
+    expect(credRows()).toEqual([{ key: await credentialKey(a.owner.credentialId), count: 1 }])
+    await expectRefused(await signIn(h, once))
+    expect(credRows()[0]!.count).toBe(1)
+    // A success is not a failure.
+    expect((await attempt(h, a)).status).toBe(200)
+    expect(credRows()[0]!.count).toBe(1)
+  })
+
+  test('the table is bounded: IPs fall into a fixed set of buckets and past windows are dropped on write', async () => {
     const t0 = new Date('2026-10-01T10:00:00Z')
     const h = harness(() => t0)
-    const key = await rateKey('ip', '203.0.113.50', SECRET)
-    expect(key).toMatch(/^ip:[0-9a-f]{32}$/)
-    expect(await rateKey('ip', '203.0.113.50', `${SECRET}x`)).not.toBe(key)
-    expect(await rateKey('cred', 'abc')).toMatch(/^cred:[0-9a-f]{32}$/)
+    const keys = new Set<string>()
+    // More addresses than buckets: the rows an attacker can create per window stop at the bucket count.
+    for (let i = 0; i < 6_000; i++) keys.add(await ipKey(SECRET, `10.${(i >> 8) & 255}.${i & 255}.${i % 7}`))
+    expect(keys.size).toBeLessThanOrEqual(SIGNIN_LIMITS.ipBuckets)
+    expect(keys.size).toBeGreaterThan(2_800)
+    for (const k of keys) expect(Number(k.slice(3))).toBeLessThan(SIGNIN_LIMITS.ipBuckets)
+    expect(await ipKey(`${SECRET}x`, '203.0.113.50')).not.toBe(await ipKey(SECRET, '203.0.113.50'))
+    expect(await credentialKey('abc')).toMatch(/^cred:[0-9a-f]{32}$/)
+
+    const key = await ipKey(SECRET, '203.0.113.50')
     expect(await allow(h.db, key, 2, t0)).toBe(true)
     expect(await allow(h.db, key, 2, t0)).toBe(true)
     expect(await allow(h.db, key, 2, t0)).toBe(false)
+    expect(await count(h.db, 'cred:x', t0)).toBe(1)
+    await countNothing(h.db, 'cred:never', t0)
+    expect(h.db.raw.query('SELECT COUNT(*) AS n FROM auth_rate').get()).toEqual({ n: 2 })
+    // The next window: one write removes every row of the old one.
     expect(await allow(h.db, key, 2, new Date(t0.getTime() + SIGNIN_LIMITS.windowSeconds * 1000))).toBe(true)
     expect(h.db.raw.query('SELECT key, count FROM auth_rate').all()).toEqual([{ key, count: 1 }])
+  }, 30_000)
+})
+
+// Nothing in the answer, or in the work done to produce it, says whether a credential id belongs to an account.
+describe('sign-in does not reveal whether a credential exists', () => {
+  test('unknown credential, wrong key, refused flags and a stale counter: same status, same body, same work', async () => {
+    const h = harness(() => new Date('2026-10-01T10:00:00Z'))
+    const a = await authenticator()
+    await onboard(h, a)
+    expect((await attempt(h, a, { signCount: 7 })).status).toBe(200)
+    const subtle = crypto.subtle
+    const verify = subtle.verify.bind(subtle)
+    const prepare = h.db.prepare.bind(h.db)
+    let verifies = 0
+    let statements: string[] = []
+    subtle.verify = ((...args: Parameters<typeof verify>) => (verifies++, verify(...args))) as typeof subtle.verify
+    // The failure count is an upsert for a known credential and an update of no row for an unknown one: one write either way.
+    h.db.prepare = (sql: string) => (statements.push(sql.split(' ')[0]!.replace(/^(INSERT|UPDATE)$/, 'WRITE')), prepare(sql))
+    const cases: [string, () => Promise<SignInRequest>][] = [
+      ['unknown credential', async () => assertion(await authenticator(), await challenge(h))],
+      ['wrong key', async () => assertion(await authenticator(a.owner.credentialId), await challenge(h))],
+      ['refused flags, right key', async () => assertion(a, await challenge(h), { flags: 0x01, signCount: 8 })],
+      ['wrong origin, unknown credential', async () => assertion(await authenticator(), await challenge(h), { origin: BETA })],
+    ]
+    const seen: { what: string; status: number; body: string; headers: string; verifies: number; statements: string }[] = []
+    try {
+      for (const [what, make] of cases) {
+        const body = await make()
+        verifies = 0
+        statements = []
+        const res = await signIn(h, body, `198.51.100.${seen.length}`)
+        seen.push({ what, status: res.status, body: await res.text(), headers: [...res.headers.keys()].sort().join(','), verifies, statements: statements.join(' | ') })
+      }
+    } finally {
+      subtle.verify = verify
+      h.db.prepare = prepare
+    }
+    const { what: _, ...first } = seen[0]!
+    expect(first).toMatchObject({ status: 401, body: JSON.stringify(FAILED), verifies: 1 })
+    for (const s of seen) {
+      const { what, ...rest } = s
+      expect(rest, what).toEqual(first)
+    }
+    // The stale counter is refused after the key verified: same answer; it costs one statement more (the counter update), which only the holder of the key can reach.
+    const stale = await signIn(h, await assertion(a, await challenge(h), { signCount: 7 }), '198.51.100.99')
+    expect({ status: stale.status, body: await stale.text() }).toEqual({ status: 401, body: JSON.stringify(FAILED) })
   })
 })

@@ -2,10 +2,10 @@ import { Hono, type Context } from 'hono'
 import type { SessionView, SignInChallenge } from '@mamoru/domain'
 import type { AppEnv } from '../context.ts'
 import { apiError } from '../errors.ts'
-import { accountsByCredential } from '../accounts/store.ts'
+import { MAX_CREDENTIAL_ROWS, accountsByCredential, advanceSignCount, type AccountRow } from '../accounts/store.ts'
 import { issueChallenge, openChallenge, spendChallenge } from './challenge.ts'
-import { SIGNIN_LIMITS, allow, rateKey } from './rate-limit.ts'
-import { DECOY_KEY, checkClaims, decodeB64url, verifyP256 } from './webauthn.ts'
+import { SIGNIN_LIMITS, allow, count, countNothing, credentialKey, ipKey } from './rate-limit.ts'
+import { DECOY_KEY, checkClaims, decodeB64url, signCountOf, verifyP256 } from './webauthn.ts'
 
 // Returning owner (otto/mamoru#6): a device without a session proves it holds the passkey that owns an account, and
 // gets the same device session onboarding gives. No new authority: owner transactions still need a passkey signature each.
@@ -43,7 +43,7 @@ signIn.post('/signin', async (c) => {
 
   // Cloudflare sets cf-connecting-ip; without it (tests, local dev) every caller shares one bucket.
   const ip = c.req.header('cf-connecting-ip') ?? 'unknown'
-  if (!(await allow(db, await rateKey('ip', ip, secret), SIGNIN_LIMITS.perIp, now))) return slowDown(c)
+  if (!(await allow(db, await ipKey(secret, ip), SIGNIN_LIMITS.perIp, now))) return slowDown(c)
 
   if (Number(c.req.header('content-length') ?? '0') > MAX_BODY_BYTES) return refused(c, 'body')
   const text = await c.req.text()
@@ -64,25 +64,45 @@ signIn.post('/signin', async (c) => {
 
   const opened = await openChallenge(secret, rpId, body.token, now)
   if (!opened) return refused(c, 'challenge token')
-  if (!(await allow(db, await rateKey('cred', credentialId), SIGNIN_LIMITS.perCredential, now))) return slowDown(c)
   // Spent before anything is verified: one challenge is one attempt, and a captured assertion cannot be sent again.
   if (!(await spendChallenge(db, opened.challenge, opened.exp, now))) return refused(c, 'challenge replayed')
 
+  // From here on every request does the same work whatever is wrong with it: the claims are evaluated, the account
+  // rows are read, one or more P-256 verifications run, and the outcome is decided at the end. A caller cannot tell
+  // an unknown credential from a wrong key or a refused flag by the status, the body, or what the request cost.
   const claims = await checkClaims({ authenticatorData, clientDataJSON, signature }, { challenge: opened.challenge, origin, rpId })
-  if (!claims.ok) return refused(c, claims.reason)
-
-  const candidates = await accountsByCredential(db, c.var.settings.chainId, credentialId)
-  let account = null
+  const rows = await accountsByCredential(db, c.var.settings.chainId, credentialId)
+  if (rows === null) console.error(`signin: more than ${MAX_CREDENTIAL_ROWS} accounts share one credential id; refusing`)
+  const candidates = rows ?? []
+  let account: AccountRow | null = null
   for (const row of candidates) {
     if (await verifyP256({ x: row.passkey_x, y: row.passkey_y }, claims.signed, signature)) {
       account = row
       break
     }
   }
-  if (!account) {
-    // Unknown credential and wrong key look and cost the same.
-    if (candidates.length === 0) await verifyP256(DECOY_KEY, claims.signed, signature)
-    return refused(c, candidates.length ? 'signature' : 'credential')
+  if (candidates.length === 0) await verifyP256(DECOY_KEY, claims.signed, signature)
+
+  let why: string | null = claims.reason ?? (account ? null : candidates.length ? 'signature' : rows === null ? 'too many accounts' : 'credential')
+  if (!why && account) {
+    // Signature counter (WebAuthn 7.2 step 22). Synced passkeys always report 0 and are accepted. Once a counter was
+    // seen, it must increase: one that does not is a second copy of the authenticator, and that assertion is refused.
+    const seen = signCountOf(authenticatorData)
+    const stored = account.passkey_sign_count ?? 0
+    if ((seen !== 0 || stored !== 0) && !(seen > stored && (await advanceSignCount(db, account.account_key, seen)))) {
+      console.warn(`signin: signature counter did not increase for account ${account.account_key} (stored ${stored}, got ${seen})`)
+      why = 'sign count'
+    }
+  }
+  if (why || !account) {
+    // Failures are counted per credential only here (complete assertion, valid challenge) and only for credentials that
+    // exist; the count is for the log and never refuses anyone. An unknown credential runs the same statements on no row.
+    const key = await credentialKey(credentialId)
+    if (candidates.length) {
+      const failures = await count(db, key, now)
+      if (failures === SIGNIN_LIMITS.credentialFailuresLogged) console.warn(`signin: ${failures} failed attempts on one credential in ${SIGNIN_LIMITS.windowSeconds / 60} minutes`)
+    } else await countNothing(db, key, now)
+    return refused(c, why ?? 'credential')
   }
 
   const session = await c.var.auth.bind(c, account.user_id)

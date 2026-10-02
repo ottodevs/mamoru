@@ -7,7 +7,8 @@ CREATE TABLE auth_challenge_used (
 );
 CREATE INDEX auth_challenge_used_expiry ON auth_challenge_used(expires_at);
 
--- Fixed-window attempt counters. key is 'ip:<hmac>' or 'cred:<sha256>': no raw IP or credential id is stored.
+-- Fixed-window counters. key is 'ip:<bucket 0..4095>' (attempts) or 'cred:<sha256>' (failures, only for credential ids
+-- that belong to an account): no raw IP or credential id is stored, and the table cannot outgrow buckets + accounts per window.
 CREATE TABLE auth_rate (
   key TEXT NOT NULL,
   window INTEGER NOT NULL,      -- unix seconds of the window start
@@ -15,6 +16,9 @@ CREATE TABLE auth_rate (
   PRIMARY KEY (key, window)
 );
 CREATE INDEX auth_rate_window ON auth_rate(window);
+
+-- Last signature counter seen at sign-in. 0 for synced passkeys, which never count; a counter that stops increasing is a cloned authenticator.
+ALTER TABLE accounts ADD COLUMN passkey_sign_count INTEGER NOT NULL DEFAULT 0;
 
 -- Sign-in finds the account by the credential id the authenticator returns.
 CREATE INDEX accounts_passkey_credential ON accounts(passkey_credential_id);
