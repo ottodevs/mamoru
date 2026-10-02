@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { decodeFunctionData, getAddress, keccak256, stringToHex, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { decodeFunctionData, encodeFunctionResult, getAddress, keccak256, stringToHex, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import type { AccountContext, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
-import { address, erc20Abi, safeAbi } from '@mamoru/registry'
+import { address, erc20Abi, safeAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { POLICIES } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
@@ -9,6 +9,7 @@ import { LIVE_CAP_USDC, browserOwnerSignature, deployCall, liveAccountFromContex
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { HttpError, MAX_OWNER_FAILURES_PER_DAY, OWNER_FAILURES_ALERT_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
 import type { Relayer } from '../src/relayer.ts'
+import { answerAggregate3 } from './fake-multicall.ts'
 import type { AccountState, ArmedActivation, StateStore } from '../src/state.ts'
 
 const RELAYER = `0x${'7'.repeat(40)}` as const
@@ -63,7 +64,19 @@ function world(usdc: bigint) {
       const last = calls.length - 1
       return [{ calls: calls.map((_, i) => (knobs.sim === 'revert' && i === last ? { status: '0x0', returnData: '0x', gasUsed: '0x5208', logs: [], error: { message: 'GS026' } } : { status: '0x1', returnData: TRUE, gasUsed: '0x5208', logs: [] })) }]
     },
-    call: async ({ data }: { data: Hex }) => {
+    call: async ({ to, data }: { to: string; data: Hex }) => {
+      // readSafe batches its reads through Multicall3: same answers as readContract above.
+      if (to.toLowerCase() === address('Multicall3').toLowerCase()) {
+        const word = (v: bigint) => toHex(v, { size: 32 })
+        return {
+          data: answerAggregate3(data, (target, callData) => {
+            if (callData.startsWith('0x3850c7bd')) return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [1n << 96n, 0, 0, 0, 0, 0, true] })
+            if (callData.startsWith('0x70a08231')) return word(target.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : 0n)
+            if (callData.startsWith('0x4d2301cc')) return word(0n)
+            throw new Error('execution reverted')
+          }),
+        }
+      }
       called.push(data)
       if (knobs.call === 'revert') throw Object.assign(new Error('execution reverted: GS026'), { code: 3, data: '0x08c379a0' })
       if (knobs.call === 'down') throw new Error('HTTP request failed. Status: 429')

@@ -1,12 +1,12 @@
-import { parseAbi, type PublicClient } from 'viem'
+import type { PublicClient } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { address, baseRegistry, entry, erc20Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { Batch, MULTICALL3, balanceRead, contractRead, tokenIdReads } from '@mamoru/rpc'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 
 export const LIVE_POOL = 'pool:USDC/cbBTC/500'
 const Q96 = 1n << 96n
 const Q192 = 1n << 192n
-const enumerableAbi = parseAbi(['function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)'])
 
 /** Registry pools that pair USDC: the pools a position of the account can be read, valued and unwound in. */
 export const USDC_POOLS = baseRegistry.entries.filter((e) => e.kind === 'pool' && (e.token0 === 'USDC' || e.token1 === 'USDC')).map((e) => e.name)
@@ -75,25 +75,29 @@ export function positionUsdc(p: PoolPosition, sqrtPriceX96: bigint): bigint {
   return inUsdc(p.pool, p.token0, p.amount0, sqrtPriceX96) + inUsdc(p.pool, p.token1, p.amount1, sqrtPriceX96)
 }
 
-/** Everything the Safe holds at one block: balances and its positions in every registry pool that pairs USDC. */
+/** Everything the Safe holds at one block: balances and its positions in every registry pool that pairs USDC. Two eth_call through Multicall3. */
 export async function readSafe(client: PublicClient, safe: Address): Promise<SafeRead> {
   const blockNumber = await client.getBlockNumber({ cacheTime: 0 })
   const at = { blockNumber } as const
   const npm = address('NonfungiblePositionManager')
   const tokenNames = [...new Set(USDC_POOLS.flatMap((p) => [entry(p).token0!, entry(p).token1!]))]
-  const [code, eth, nfts, balances, slots] = await Promise.all([
-    client.getCode({ address: safe, ...at }),
-    client.getBalance({ address: safe, ...at }),
-    client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe], ...at }),
-    Promise.all(tokenNames.map((t) => client.readContract({ address: address(t), abi: erc20Abi, functionName: 'balanceOf', args: [safe], ...at }))),
-    Promise.all(USDC_POOLS.map((p) => client.readContract({ address: address(p), abi: uniswapV3PoolAbi, functionName: 'slot0', ...at }))),
-  ])
+  const first = new Batch(client, MULTICALL3, blockNumber)
+  const ethRead = first.add(balanceRead(client, MULTICALL3, safe, blockNumber))
+  const nftRead = first.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe], ...at }))
+  const balanceReads = tokenNames.map((t) => first.add(contractRead(client, { address: address(t), abi: erc20Abi, functionName: 'balanceOf', args: [safe], ...at })))
+  const slotReads = USDC_POOLS.map((p) => first.add(contractRead(client, { address: address(p), abi: uniswapV3PoolAbi, functionName: 'slot0', ...at })))
+  const idsOf = tokenIdReads(client, MULTICALL3, first, safe, blockNumber)
+  const [code] = await Promise.all([client.getCode({ address: safe, ...at }), first.run()])
+  const [eth, nfts, balances, slots] = await Promise.all([ethRead.need(), nftRead.need(), Promise.all(balanceReads.map((r) => r.need())), Promise.all(slotReads.map((r) => r.need()))])
   const tokens = Object.fromEntries(tokenNames.map((t, i) => [t, balances[i]!]))
   const prices: Record<string, PoolPrice> = Object.fromEntries(USDC_POOLS.map((p, i) => [p, { sqrtPriceX96: slots[i]![0], tick: slots[i]![1] }]))
-  const ids = await Promise.all(Array.from({ length: Number(nfts) }, (_, i) => client.readContract({ address: npm, abi: enumerableAbi, functionName: 'tokenOfOwnerByIndex', args: [safe, BigInt(i)], ...at })))
+  const ids = await idsOf(Number(nfts))
+  const second = new Batch(client, MULTICALL3, blockNumber)
+  const positionReads = ids.map((tokenId) => second.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId], ...at })))
+  if (second.size > 0) await second.run()
   const positions: PoolPosition[] = []
-  for (const tokenId of ids) {
-    const p = await client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId], ...at })
+  for (const [i, tokenId] of ids.entries()) {
+    const p = await positionReads[i]!.need()
     const pool = USDC_POOLS.find((n) => {
       const e = entry(n)
       return p[2].toLowerCase() === address(e.token0!).toLowerCase() && p[3].toLowerCase() === address(e.token1!).toLowerCase() && p[4] === e.fee
