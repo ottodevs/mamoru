@@ -387,3 +387,34 @@ describe('log range per provider', () => {
     expect(w.logsCalls(PUBLICNODE).length).toBe(0)
   })
 })
+
+describe('a witness must be another operator, not another URL', () => {
+  test('sameOperator ignores scheme, port, path, key and subdomain', async () => {
+    const { sameOperator } = await import('../src/rpc-proxy.ts')
+    expect(sameOperator('https://base-mainnet.g.alchemy.com/v2/keyA', 'https://base-mainnet.g.alchemy.com/v2/keyB')).toBe(true)
+    expect(sameOperator('https://base-mainnet.g.alchemy.com/v2/keyA', 'http://eth-mainnet.g.alchemy.com:8443/v2/keyA/')).toBe(true)
+    expect(sameOperator('https://base-mainnet.g.alchemy.com/v2/keyA', 'https://BASE-MAINNET.G.ALCHEMY.COM/v2/keyA')).toBe(true)
+    expect(sameOperator('https://base-mainnet.g.alchemy.com/v2/keyA', 'https://base-rpc.publicnode.com')).toBe(false)
+    expect(sameOperator('http://127.0.0.1:8545', 'http://127.0.0.1:9545/')).toBe(true)
+  })
+
+  test('a second key of the upstream provider is not a witness: eth_getLogs is refused and nothing is read', async () => {
+    const w = world(LOGS)
+    const dir = mkdtempSync(join(tmpdir(), 'mamoru-rpc-logs-'))
+    dirs.push(dir)
+    const metrics = new RpcMetrics(dir)
+    const otherKey = `${new URL(ALCHEMY).origin}/v2/another-key`
+    const respelled = `${ALCHEMY.replace(/\/$/, '')}/`
+    const proxy = startRpcProxy(ALCHEMY, { fetch: w.fetch, fallbacks: [otherKey, respelled], logRanges: {}, metrics })
+    try {
+      const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ fromBlock: hex(1000), toBlock: hex(1009) }] }) })
+      const r = (await res.json()) as Answer
+      expect(r.result).toBeUndefined()
+      expect(r.error!.message).toContain('another operator')
+    } finally {
+      proxy.stop()
+    }
+    expect(w.logsCalls(ALCHEMY).length).toBe(0)
+    expect(metrics.snapshot().logRanges['alchemy.com#1']).toEqual({ accepted: 0, no_witness: 1, hash_mismatch: 0, provider_error: 0 })
+  })
+})
