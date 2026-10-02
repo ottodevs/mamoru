@@ -4,13 +4,13 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { type CSSProperties, type ReactNode, useEffect, useState } from 'react'
 import { useApi } from '../api/client.ts'
-import { queryKeys, useConfig } from '../api/queries.ts'
+import { queryKeys, useConfig, useRegistrationChallenge } from '../api/queries.ts'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { capNote } from '../lib/money.ts'
 import { errorText, useOwnerAction } from '../lib/owner-flow.ts'
 import { createOwnerPasskey } from '../lib/passkey.ts'
 import { rememberCredential } from '../lib/passkey-sign.ts'
-import { signInCopy } from '../lib/signin.ts'
+import { challengeUsable, signInCopy } from '../lib/signin.ts'
 
 // The Conservador mix as the policy defines it (basis points), drawn like the mockup's mix bar.
 const BUCKET: Record<string, { name: string; note: string; tone: string }> = {
@@ -165,15 +165,23 @@ export function Onboarding({ onSignIn }: { onSignIn: () => void }) {
   const [step, setStep] = useState(0)
   const owner = useMutation({
     mutationFn: async () => {
-      const passkey = await createOwnerPasskey()
-      const created = await api.createOwner({ passkey })
-      rememberCredential(created.accountKey, passkey.credentialId)
-      return created
+      // Fetched ahead while the create step is on screen; a stale one is replaced first. One challenge is one attempt.
+      const challenge = challengeUsable(ready.data) ? ready.data : await api.registrationChallenge()
+      try {
+        const made = await createOwnerPasskey(challenge)
+        const created = await api.createOwner(made)
+        rememberCredential(created.accountKey, made.passkey.credentialId)
+        return created
+      } catch (e) {
+        void ready.refetch()
+        throw e
+      }
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.session }),
   })
   const last = onboardingCopy.screens.length
   const screen = onboardingCopy.screens[step]
+  const ready = useRegistrationChallenge(step === last && !owner.data)
   // The cap is said before any money moves: on the funding card, when the API runs live.
   const capUsdc = useConfig().data?.capUsdc
   const body = screen ? [...screen.body, ...(step === 0 && capUsdc ? [capNote(capUsdc)] : [])] : []

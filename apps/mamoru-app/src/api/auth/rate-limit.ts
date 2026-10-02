@@ -9,13 +9,15 @@ import { sha256 } from './webauthn.ts'
 // The table is bounded: IPs hash into IP_BUCKETS buckets, credential rows exist only for real accounts, and rows of
 // past windows are deleted on every write.
 export const SIGNIN_LIMITS = { windowSeconds: 10 * 60, perIp: 20, ipBuckets: 4096, credentialFailuresLogged: 10 } as const
+/** Anonymous onboarding: accounts one IP bucket may try to create per window. Same bounded buckets, its own counters. */
+export const ONBOARDING_PER_IP = 10
 
 const hex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
 
 /** The bucket an IP falls in, keyed by the server secret so buckets cannot be targeted. Two IPs may share one. */
-export async function ipKey(secret: string, ip: string): Promise<string> {
+export async function ipKey(secret: string, ip: string, scope: 'ip' | 'onb' = 'ip'): Promise<string> {
   const h = await sha256(`mamoru:signin:rate:v1\n${secret}\n${ip}`)
-  return `ip:${(((h[0]! << 24) | (h[1]! << 16) | (h[2]! << 8) | h[3]!) >>> 0) % SIGNIN_LIMITS.ipBuckets}`
+  return `${scope}:${(((h[0]! << 24) | (h[1]! << 16) | (h[2]! << 8) | h[3]!) >>> 0) % SIGNIN_LIMITS.ipBuckets}`
 }
 
 export async function credentialKey(credentialId: string): Promise<string> {

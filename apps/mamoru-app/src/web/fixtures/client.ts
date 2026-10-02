@@ -112,6 +112,7 @@ export const fixtureClient: ApiClient = {
       monthlySource: 'Plan pools, 30-day mean · DefiLlama',
       asOf: new Date().toISOString(),
     }),
+  registrationChallenge: () => delay({ challenge: 'Zml4dHVyZS1jaGFsbGVuZ2UtMzItYnl0ZXMtbG9uZy0wMDI', token: 'fixture', rpId: 'localhost', expiresAt: new Date(Date.now() + 300_000).toISOString() }),
   createOwner: () => {
     liveState.owner = true
     return delay(fixtureOwner)

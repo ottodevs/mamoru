@@ -23,19 +23,9 @@ export function accountOfUser(db: Db, userId: string): Promise<AccountRow | null
   return db.prepare('SELECT * FROM accounts WHERE user_id = ? ORDER BY created_at LIMIT 1').bind(userId).first<AccountRow>()
 }
 
-/** More rows than this for one credential id is not a real owner: sign-in refuses instead of scanning further. */
-export const MAX_CREDENTIAL_ROWS = 64
-
-/**
- * Accounts registered with this credential id, oldest first. Several rows are possible (the id is not proven at
- * onboarding); the caller tries each key. Null when there are more than MAX_CREDENTIAL_ROWS: fail closed, never a silent cut.
- */
-export async function accountsByCredential(db: Db, chainId: number, credentialId: string): Promise<AccountRow[] | null> {
-  const rows = await db
-    .prepare('SELECT * FROM accounts WHERE passkey_credential_id = ? AND chain_id = ? ORDER BY created_at, account_key LIMIT ?')
-    .bind(credentialId, chainId, MAX_CREDENTIAL_ROWS + 1)
-    .all<AccountRow>()
-  return rows.results.length > MAX_CREDENTIAL_ROWS ? null : rows.results
+/** The account this credential id owns on this chain. At most one: the pair is unique (migration 0003). */
+export function accountByCredential(db: Db, chainId: number, credentialId: string): Promise<AccountRow | null> {
+  return db.prepare('SELECT * FROM accounts WHERE passkey_credential_id = ? AND chain_id = ?').bind(credentialId, chainId).first<AccountRow>()
 }
 
 /** Stores a signature counter only if it is higher than the one stored. False when it is not: a replayed or cloned authenticator. */
@@ -52,8 +42,10 @@ export function ownedAccount(db: Db, userId: string, accountKey: string): Promis
   return db.prepare('SELECT * FROM accounts WHERE account_key = ? AND user_id = ?').bind(accountKey, userId).first<AccountRow>()
 }
 
-export async function insertAccount(db: Db, row: AccountRow): Promise<void> {
-  await db
+/** False when the credential id already owns an account on this chain (unique index, migration 0003). */
+export async function insertAccount(db: Db, row: AccountRow): Promise<boolean> {
+  try {
+    await db
     .prepare(
       `INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y,
         salt_nonce, preset, policy_version, recovery_ack_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -63,6 +55,11 @@ export async function insertAccount(db: Db, row: AccountRow): Promise<void> {
       row.salt_nonce, row.preset, row.policy_version, row.recovery_ack_at, row.created_at,
     )
     .run()
+    return true
+  } catch (e) {
+    if (/UNIQUE constraint failed/i.test(e instanceof Error ? e.message : String(e))) return false
+    throw e
+  }
 }
 
 export async function acknowledgeRecovery(db: Db, accountKey: string, at: string): Promise<void> {

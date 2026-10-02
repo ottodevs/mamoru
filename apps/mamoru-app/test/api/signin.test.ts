@@ -3,8 +3,7 @@ import type { OwnerResponse, PasskeyOwner, SessionView, SignInChallenge, SignInR
 import { CHALLENGE_TTL_SECONDS, issueChallenge, openChallenge, spendChallenge } from '../../src/api/auth/challenge.ts'
 import { SIGNIN_LIMITS, allow, count, countNothing, credentialKey, ipKey } from '../../src/api/auth/rate-limit.ts'
 import { checkClaims, constantTimeEqual, signCountOf, verifyP256 } from '../../src/api/auth/webauthn.ts'
-import { MAX_CREDENTIAL_ROWS } from '../../src/api/accounts/store.ts'
-import { harness, ORIGIN, SECRET, sessionCookie } from './helpers.ts'
+import { harness, register, registrationProof, ORIGIN, SECRET, sessionCookie } from './helpers.ts'
 
 // Real P-256 keys made here with WebCrypto: a software authenticator that answers like navigator.credentials.get.
 
@@ -59,7 +58,7 @@ type H = ReturnType<typeof harness>
 const FAILED = { error: 'Sign-in failed.', code: 'AUTH_SIGNIN_FAILED' }
 
 async function onboard(h: H, a: Authenticator) {
-  const res = await h.post('/api/onboarding/owner', { passkey: a.owner })
+  const res = await register(h, a.owner)
   expect(res.status).toBe(201)
   return { cookie: sessionCookie(res), owner: (await res.json()) as OwnerResponse }
 }
@@ -322,22 +321,41 @@ describe('POST /api/auth/signin', () => {
     await expectRefused(await beta('/api/auth/signin', await assertion(a, await challenge(h), { rpId: 'beta.mamoru.lol', origin: BETA })))
     // A beta-scoped passkey with its own account does sign in on beta.
     const b = await authenticator()
-    const made = await beta('/api/onboarding/owner', { passkey: b.owner })
+    const regChallenge = (await (await beta('/api/onboarding/challenge', {})).json()) as SignInChallenge
+    const made = await beta('/api/onboarding/owner', { passkey: b.owner, proof: registrationProof(b.owner, regChallenge, { rpId: 'beta.mamoru.lol', origin: BETA }) })
+    expect(made.status).toBe(201)
     const fresh = (await (await beta('/api/auth/challenge', {})).json()) as SignInChallenge
     const ok = await beta('/api/auth/signin', await assertion(b, fresh, { rpId: 'beta.mamoru.lol', origin: BETA }))
     expect(ok.status).toBe(200)
     expect(((await ok.json()) as SessionView).accountKey).toBe(((await made.json()) as OwnerResponse).accountKey)
   })
 
-  test('a credential id registered again with another key never opens the first account', async () => {
+  test('a credential id cannot be registered twice, so nobody else can sit on it; its owner keeps signing in', async () => {
     const h = harness()
     const victim = await authenticator()
     const v = await onboard(h, victim)
     const squatter = await authenticator(victim.owner.credentialId)
-    const s = await onboard(h, squatter)
-    expect(s.owner.accountKey).not.toBe(v.owner.accountKey)
+    const refused = await register(h, squatter.owner)
+    expect(refused.status).toBe(400)
+    expect(((await refused.json()) as { code: string }).code).toBe('ONB_PASSKEY_REFUSED')
+    expect(h.db.raw.query('SELECT COUNT(*) AS n FROM accounts').get()).toEqual({ n: 1 })
     expect(((await (await attempt(h, victim)).json()) as SessionView).accountKey).toBe(v.owner.accountKey)
-    expect(((await (await attempt(h, squatter)).json()) as SessionView).accountKey).toBe(s.owner.accountKey)
+    await expectRefused(await attempt(h, squatter))
+  })
+
+  test('an account created before this change (no proof, no counter) signs in like any other', async () => {
+    const h = harness()
+    const a = await authenticator()
+    h.db.raw.exec("INSERT INTO users (user_id, email, created_at) VALUES ('5b0c7a52-7f0e-4d1a-9c3e-2f6a1b9d8e70', NULL, '2026-09-27T10:00:00.000Z')")
+    h.db.raw
+      .query(
+        `INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, preset, policy_version, recovery_ack_at, created_at)
+         VALUES ('1081e868-0000-4000-8000-000000000001', '5b0c7a52-7f0e-4d1a-9c3e-2f6a1b9d8e70', 8453, '0x00000000000000000000000000000000000000aa', '[]', ?, ?, ?, '1', 'conservador', '1.0.0', NULL, '2026-09-27T10:00:00.000Z')`,
+      )
+      .run(a.owner.credentialId, a.owner.x, a.owner.y)
+    const res = await attempt(h, a)
+    expect(res.status).toBe(200)
+    expect((await res.json()) as SessionView).toEqual({ userId: '5b0c7a52-7f0e-4d1a-9c3e-2f6a1b9d8e70', accountKey: '1081e868-0000-4000-8000-000000000001' })
   })
 
   test('signing in from a device that holds another session switches it to the proven account', async () => {
@@ -396,40 +414,6 @@ describe('signature counter', () => {
     await expectRefused(await attempt(h, await authenticator(a.owner.credentialId), { signCount: 50 }))
     expect(h.db.raw.query('SELECT passkey_sign_count AS n FROM accounts').get()).toEqual({ n: 0 })
     expect((await attempt(h, a, { signCount: 1 })).status).toBe(200)
-  })
-})
-
-describe('duplicate credential ids', () => {
-  test('the account whose key signed is found past any number of earlier rows with the same id', async () => {
-    const h = harness()
-    const first = await authenticator()
-    await onboard(h, first)
-    let last = first
-    for (let i = 0; i < 12; i++) {
-      last = await authenticator(first.owner.credentialId)
-      await onboard(h, last)
-    }
-    const res = await attempt(h, last)
-    expect(res.status).toBe(200)
-    const mine = h.db.raw.query('SELECT account_key FROM accounts WHERE passkey_x = ?').get(last.owner.x) as { account_key: string }
-    expect(((await res.json()) as SessionView).accountKey).toBe(mine.account_key)
-    expect((await attempt(h, first)).status).toBe(200)
-  })
-
-  test('more rows than the bound fails closed, for every key, and says so in the log', async () => {
-    const h = harness()
-    const a = await authenticator()
-    await onboard(h, a)
-    for (let i = 0; i < MAX_CREDENTIAL_ROWS; i++) await onboard(h, await authenticator(a.owner.credentialId))
-    const logged: unknown[] = []
-    const error = console.error
-    console.error = (...args: unknown[]) => void logged.push(args[0])
-    try {
-      await expectRefused(await attempt(h, a))
-    } finally {
-      console.error = error
-    }
-    expect(String(logged[0])).toContain(`more than ${MAX_CREDENTIAL_ROWS} accounts share one credential id`)
   })
 })
 

@@ -5,6 +5,7 @@ export const queryKeys = {
   config: ['config'] as const,
   session: ['session'] as const,
   signInChallenge: ['signin-challenge'] as const,
+  registrationChallenge: ['registration-challenge'] as const,
   dashboard: (accountKey: string) => ['dashboard', accountKey] as const,
   pools: ['pools'] as const,
   apy: ['apy'] as const,
@@ -29,6 +30,12 @@ export function useSession(enabled = true) {
 export function useSignInChallenge(enabled: boolean) {
   const api = useApi()
   return useQuery({ queryKey: queryKeys.signInChallenge, queryFn: () => api.signInChallenge(), enabled, staleTime: 0, gcTime: 0, refetchInterval: 4 * 60_000 })
+}
+
+/** The registration challenge kept ready while the create step is on screen, so the passkey prompt opens straight from the tap. */
+export function useRegistrationChallenge(enabled: boolean) {
+  const api = useApi()
+  return useQuery({ queryKey: queryKeys.registrationChallenge, queryFn: () => api.registrationChallenge(), enabled, staleTime: 0, gcTime: 0, refetchInterval: 4 * 60_000 })
 }
 
 export function useDashboard(accountKey: string | undefined) {
