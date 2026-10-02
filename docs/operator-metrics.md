@@ -88,7 +88,10 @@ account keys are shortened to 8 chars. Example (values illustrative):
   retried against itself across the two-pass retry loop does not count as a fallback).
 - **getLogs chunks**: counted separately from `requests` (which already includes every chunk sub-call);
   it is how many of a provider+method's requests were chunk requests from a split `eth_getLogs` range
-  (Alchemy's free tier caps a range at 10 blocks; see `MAMORU_LOG_RANGE`).
+  (Alchemy's free tier caps a range at 10 blocks; see `MAMORU_LOG_RANGE`). An `eth_getLogs` goes to the
+  provider that serves its range in the fewest requests (range per host: Alchemy 10, publicnode and
+  mainnet.base.org 2000, drpc 10000; `MAMORU_LOG_RANGES="host=blocks,..."` overrides), so its requests
+  and chunks are counted against that provider, and a provider tried and abandoned gets a fallback.
 - **Persistence**: the cumulative counters and the 48h ring are both persisted to
   `stateDir/rpc-usage.json`, written atomically (tmp file + rename, 0600) at most once a minute and once
   more on a clean shutdown, so a restart does not lose history. The 48h ring is sparse (only hours with
