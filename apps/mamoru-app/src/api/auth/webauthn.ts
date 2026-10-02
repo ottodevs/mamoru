@@ -5,12 +5,15 @@ import { fromB64url, parseDerSignature } from '@mamoru/account/live'
 
 const FLAG_UP = 0x01
 const FLAG_UV = 0x04
+/** Backup eligible, backup state. */
+const FLAG_BE = 0x08
+const FLAG_BS = 0x10
 /** rpIdHash (32) + flags (1) + signCount (4). */
 const AUTH_DATA_MIN = 37
 
 export type Assertion = { authenticatorData: Uint8Array; clientDataJSON: Uint8Array; signature: Uint8Array }
 export type Expected = { challenge: string; origin: string; rpId: string }
-export type AssertionRefusal = 'client_data' | 'type' | 'challenge' | 'origin' | 'cross_origin' | 'auth_data' | 'rp_id' | 'user_present' | 'user_verified' | 'signature'
+export type AssertionRefusal = 'client_data' | 'type' | 'challenge' | 'origin' | 'cross_origin' | 'auth_data' | 'rp_id' | 'user_present' | 'user_verified' | 'backup_flags'
 
 const enc = new TextEncoder()
 /** WebCrypto wants a view over a plain ArrayBuffer; every array here is one. */
@@ -40,38 +43,49 @@ export function decodeB64url(s: unknown, maxLength: number): Uint8Array | null {
   }
 }
 
+/** The authenticator's signature counter (big-endian uint32 after the flags); 0 when the data is too short. */
+export function signCountOf(authenticatorData: Uint8Array): number {
+  if (authenticatorData.length < AUTH_DATA_MIN) return 0
+  return new DataView(authenticatorData.buffer, authenticatorData.byteOffset + 33, 4).getUint32(0)
+}
+
+function refusalOf(client: Record<string, unknown> | null, auth: Uint8Array, rpIdHash: Uint8Array, expected: Expected): AssertionRefusal | null {
+  if (!client) return 'client_data'
+  if (client.type !== 'webauthn.get') return 'type'
+  if (typeof client.challenge !== 'string' || !constantTimeEqual(client.challenge, expected.challenge)) return 'challenge'
+  if (typeof client.origin !== 'string' || !constantTimeEqual(client.origin, expected.origin)) return 'origin'
+  // An assertion made inside a cross-origin iframe is not the owner at this site.
+  if (client.crossOrigin === true || client.topOrigin !== undefined) return 'cross_origin'
+  if (auth.length < AUTH_DATA_MIN) return 'auth_data'
+  if (!constantTimeEqual(auth.subarray(0, 32), rpIdHash)) return 'rp_id'
+  const flags = auth[32]!
+  if (!(flags & FLAG_UP)) return 'user_present'
+  if (!(flags & FLAG_UV)) return 'user_verified'
+  // WebAuthn L3 6.1: a credential that is not backup eligible cannot be backed up.
+  if (flags & FLAG_BS && !(flags & FLAG_BE)) return 'backup_flags'
+  return null
+}
+
 /**
- * WebAuthn §7.2 steps that do not need the key: type, challenge, origin, rpIdHash, user present and verified.
- * Returns the bytes the authenticator signed (authenticatorData || SHA-256(clientDataJSON)).
+ * WebAuthn 7.2 steps that do not need the key: type, challenge, origin, rpIdHash, user present and verified, backup flags.
+ * `signed` is always the bytes an authenticator would have signed (authenticatorData || SHA-256(clientDataJSON)), also
+ * when a claim is refused: the caller verifies the signature either way, so a refused claim costs what a good one costs.
  */
-export async function checkClaims(a: Assertion, expected: Expected): Promise<{ ok: true; signed: Uint8Array } | { ok: false; reason: AssertionRefusal }> {
-  const no = (reason: AssertionRefusal) => ({ ok: false as const, reason })
-  let client: Record<string, unknown>
+export async function checkClaims(a: Assertion, expected: Expected): Promise<{ reason: AssertionRefusal | null; signed: Uint8Array }> {
+  let client: Record<string, unknown> | null = null
   try {
     const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(a.clientDataJSON))
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return no('client_data')
-    client = parsed as Record<string, unknown>
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) client = parsed as Record<string, unknown>
   } catch {
-    return no('client_data')
+    // not JSON: refused below
   }
-  if (client.type !== 'webauthn.get') return no('type')
-  if (typeof client.challenge !== 'string' || !constantTimeEqual(client.challenge, expected.challenge)) return no('challenge')
-  if (typeof client.origin !== 'string' || !constantTimeEqual(client.origin, expected.origin)) return no('origin')
-  // An assertion made inside a cross-origin iframe is not the owner at this site.
-  if (client.crossOrigin === true || client.topOrigin !== undefined) return no('cross_origin')
-
   const auth = a.authenticatorData
-  if (auth.length < AUTH_DATA_MIN) return no('auth_data')
-  if (!constantTimeEqual(auth.subarray(0, 32), await sha256(expected.rpId))) return no('rp_id')
-  const flags = auth[32]!
-  if (!(flags & FLAG_UP)) return no('user_present')
-  if (!(flags & FLAG_UV)) return no('user_verified')
-
+  const reason = refusalOf(client, auth, await sha256(expected.rpId), expected)
   const hash = await sha256(a.clientDataJSON)
   const signed = new Uint8Array(auth.length + hash.length)
   signed.set(auth)
   signed.set(hash, auth.length)
-  return { ok: true, signed }
+  return { reason, signed }
 }
 
 function bytes32(v: bigint): Uint8Array {
