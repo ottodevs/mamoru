@@ -7,7 +7,7 @@ import { createPublicClient, encodeFunctionData, decodeFunctionResult, http, max
 import { base } from 'viem/chains'
 import { address, entry, nameOf } from '@mamoru/registry'
 import { decodeDataset, type DatasetJson } from '../src/dataset.ts'
-import { accrued, valueIn } from '../src/world.ts'
+import { accrue, valueIn, type SimPosition } from '../src/world.ts'
 
 const npmAbi = parseAbi([
   'function balanceOf(address owner) view returns (uint256)',
@@ -64,14 +64,14 @@ for (const owner of args('owner') as Address[]) {
     const before = await collectable(owner, tokenId, BigInt(ds.samples[start]!.block))
     const after = await collectable(owner, tokenId, BigInt(last.block))
     if (!before || !after) continue
-    const sim = { tokenId, pool: name, tickLower: pos[5], tickUpper: pos[6], liquidity: pos[7], owed0: 0n, owed1: 0n }
+    const sim: SimPosition = { tokenId, pool: name, tickLower: pos[5], tickUpper: pos[6], liquidity: pos[7], owed0: 0n, owed1: 0n }
     let f0 = 0n
     let f1 = 0n
     let prev = ds.samples[start]!.pools[k]
     for (let j = start + 1; j < ds.samples.length; j++) {
       const cur = ds.samples[j]!.pools[k]
       if (!prev || !cur) continue
-      const f = accrued(sim, prev, cur)
+      const f = accrue(sim, prev, cur)
       f0 += f.fees0
       f1 += f.fees1
       prev = cur

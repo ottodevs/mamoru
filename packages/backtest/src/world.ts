@@ -18,6 +18,9 @@ export type SimPosition = {
   /** Fees accrued and not collected yet. */
   owed0: bigint
   owed1: bigint
+  /** Fractions of a raw unit still to be credited, scaled by 2^128, so small positions do not lose them at every sample. */
+  rem0?: bigint
+  rem1?: bigint
 }
 
 export type World = {
@@ -60,16 +63,35 @@ export function valueIn(e: RegistryEntry, s: PoolSample, token: RegistryName, am
  * `feeGrowthGlobal` is the fee per unit of active liquidity, already net of the protocol fee. The position was not in
  * the pool, so its share is its liquidity over the active liquidity plus itself. In range at both ends: the whole
  * interval. At one end only: half. At neither: nothing. A price that crosses the whole range between two samples is
- * not seen; denser samples shrink that error.
+ * not seen; denser samples shrink that error. The result is scaled by 2^128, as the counters are.
  */
-export function accrued(p: SimPosition, a: PoolSample, b: PoolSample): { fees0: bigint; fees1: bigint } {
+export function accruedX128(p: SimPosition, a: PoolSample, b: PoolSample): { fees0X128: bigint; fees1X128: bigint } {
   const halves = BigInt((inRange(a.tick, p) ? 1 : 0) + (inRange(b.tick, p) ? 1 : 0))
-  if (halves === 0n || p.liquidity === 0n) return { fees0: 0n, fees1: 0n }
   const active = (a.liquidity + b.liquidity) / 2n
+  if (halves === 0n || p.liquidity === 0n || active === 0n) return { fees0X128: 0n, fees1X128: 0n }
   const growth = (now: bigint, before: bigint) => (((now - before) % U256) + U256) % U256
-  const share = (g: bigint) => (p.liquidity * g * active * halves) / ((active + p.liquidity) * 2n * Q128)
-  if (active === 0n) return { fees0: 0n, fees1: 0n }
-  return { fees0: share(growth(b.feeGrowthGlobal0X128, a.feeGrowthGlobal0X128)), fees1: share(growth(b.feeGrowthGlobal1X128, a.feeGrowthGlobal1X128)) }
+  const share = (g: bigint) => (p.liquidity * g * active * halves) / ((active + p.liquidity) * 2n)
+  return { fees0X128: share(growth(b.feeGrowthGlobal0X128, a.feeGrowthGlobal0X128)), fees1X128: share(growth(b.feeGrowthGlobal1X128, a.feeGrowthGlobal1X128)) }
+}
+
+/** The same in whole raw units, for one interval on its own. */
+export function accrued(p: SimPosition, a: PoolSample, b: PoolSample): { fees0: bigint; fees1: bigint } {
+  const f = accruedX128(p, a, b)
+  return { fees0: f.fees0X128 / Q128, fees1: f.fees1X128 / Q128 }
+}
+
+/** Credits one interval to the position, carrying the fraction of a unit to the next one. Returns the whole units credited. */
+export function accrue(p: SimPosition, a: PoolSample, b: PoolSample): { fees0: bigint; fees1: bigint } {
+  const f = accruedX128(p, a, b)
+  const t0 = (p.rem0 ?? 0n) + f.fees0X128
+  const t1 = (p.rem1 ?? 0n) + f.fees1X128
+  const fees0 = t0 / Q128
+  const fees1 = t1 / Q128
+  p.rem0 = t0 % Q128
+  p.rem1 = t1 % Q128
+  p.owed0 += fees0
+  p.owed1 += fees1
+  return { fees0, fees1 }
 }
 
 /**

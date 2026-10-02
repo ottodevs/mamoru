@@ -7,7 +7,7 @@ import { POOLS, syntheticDataset } from './fixtures.ts'
 import { twapTick } from './observe.ts'
 import { runBacktest } from './run.ts'
 import type { PoolSample } from './types.ts'
-import { accrued, swapOut, type SimPosition } from './world.ts'
+import { accrue, accrued, swapOut, type SimPosition } from './world.ts'
 
 const USDC = 1_000_000n
 const Q128 = 1n << 128n
@@ -37,6 +37,23 @@ describe('fee accrual', () => {
   test('in range at one end earns half, at neither end nothing', () => {
     expect(accrued(position(), a, { ...b, tick: 100 })).toEqual({ fees0: 1_000_000n, fees1: 2_500_000n })
     expect(accrued(position(), { ...a, tick: -101 }, { ...b, tick: 100 })).toEqual({ fees0: 0n, fees1: 0n })
+  })
+
+  test('fractions of a unit carry over, so a small position earns what the sum of its intervals is worth', () => {
+    // A third of a raw unit per interval: nothing in any single one, one unit every three.
+    const p = position({ liquidity: 1n })
+    const big = sample({ liquidity: 10n ** 30n })
+    const step = Q128 / 3n
+    let last = big
+    let earned = 0n
+    for (let i = 1; i <= 9; i++) {
+      const next = { ...big, feeGrowthGlobal0X128: step * BigInt(i) }
+      expect(accrued(p, last, next).fees0).toBe(0n)
+      earned += accrue(p, last, next).fees0
+      last = next
+    }
+    expect(earned).toBe(2n)
+    expect(p.owed0).toBe(2n)
   })
 
   test('the counters wrap like the chain uint256', () => {

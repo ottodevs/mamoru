@@ -6,7 +6,7 @@ import { entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
 import { token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
 import { ETH_PRICE_POOL, observe } from './observe.ts'
 import type { Dataset, GasModel, Metrics, OpEntry, OpKind, PoolSample, RunResult, Sample, SessionUse, SimConfig } from './types.ts'
-import { accrued, apply, inRange, newWorld, valueIn, type World } from './world.ts'
+import { accrue, apply, inRange, newWorld, valueIn, type World } from './world.ts'
 
 export const SIM_VERSION = 'backtest-1'
 
@@ -182,9 +182,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
         const a = prev.pools[k]
         const b = s.pools[k]
         if (!a || !b) continue
-        const f = accrued(p, a, b)
-        p.owed0 += f.fees0
-        p.owed1 += f.fees1
+        const f = accrue(p, a, b)
         const e = entry(p.pool)
         fees += price(s, e.token0!, f.fees0) + price(s, e.token1!, f.fees1)
       }
