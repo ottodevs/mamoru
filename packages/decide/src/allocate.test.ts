@@ -225,6 +225,50 @@ describe('allocate (conservador-live-v2, target weights)', () => {
     expect(steps).toEqual(['enter_swap:pool:USDC/cbBTC/500:USDC'])
   })
 
+  test('a bucket that holds part of its volatile and must buy the rest keeps what it holds', () => {
+    // Stables bucket emptied, 2 USDT already in the account, 10 USDC free: the next step is a purchase of more USDT.
+    const { o: base } = invested()
+    const positions = base.positions.filter((p) => p.pool !== 'pool:USDC/USDT/100')
+    const o = { ...base, positions, balances: { ...base.balances, USDC: 10n * USDC, USDT: 2n * USDC } }
+    expect(allocate(o, V2, false).pendingMint).toContain('pool:USDC/USDT/100')
+    const p = decide(o, V2).proposal
+    expect(p).toMatchObject({ kind: 'enter_swap', pool: 'pool:USDC/USDT/100', tokenIn: 'USDC', tokenOut: 'USDT' })
+  })
+
+  /** The btc bucket a little short (inside the 5-point drift, outside the 3% band), the other two a little over: only btc has an entry. */
+  function btcShort(usdc: bigint, cbbtcValue: bigint, others = 104n): Observation {
+    const { o: base } = invested()
+    const scale = (pool: string) => (pool === 'pool:USDC/cbBTC/500' ? 90n : others)
+    const positions = base.positions.map((p) => ({ ...p, liquidity: (p.liquidity * scale(p.pool!)) / 100n }))
+    return { ...base, positions, balances: { ...base.balances, USDC: usdc, cbBTC: token0InToken1(cbbtcValue, POOLS[1]!.sqrtPriceX96) } }
+  }
+
+  test('with no live session for the mint, the idle token is not held back for it', () => {
+    const o = btcShort(400_000n, 400_000n)
+    expect(allocate(o, V2, false).pendingMint).toEqual(['pool:USDC/cbBTC/500'])
+    expect(decide(o, V2).proposal).toMatchObject({ kind: 'enter_mint', pool: 'pool:USDC/cbBTC/500' })
+    // The same account without the enter-mint session of that pool: the mint cannot go, so the token is free to convert.
+    const noMint = { ...o, sessions: o.sessions.filter((s) => s.grant !== 'enter-mint:pool:USDC/cbBTC/500') }
+    expect(decide(noMint, V2).proposal).toMatchObject({ kind: 'enter_swap', grant: 'convert-any:pool:USDC/cbBTC/500', tokenIn: 'cbBTC', tokenOut: 'USDC' })
+  })
+
+  test('a mint asks for no more of the idle token than its split needs', () => {
+    // More cbBTC than the mint needs, over a range of free savings: wherever the entry is a mint of that pool,
+    // it asks for a balanced pair and not for the whole idle balance (the session cap counts what is asked for).
+    let mints = 0
+    for (let cents = 40n; cents <= 400n; cents += 20n) {
+      const o = btcShort(cents * 10_000n, 2_400_000n, 124n)
+      const p = allocate(o, V2, false).proposal
+      if (p?.kind !== 'enter_mint' || p.pool !== 'pool:USDC/cbBTC/500') continue
+      mints++
+      const asked = token1InToken0(p.amount1Desired, POOLS[1]!.sqrtPriceX96)
+      expect(p.amount1Desired <= o.balances.cbBTC!).toBe(true)
+      expect(asked <= (p.amount0Desired * 12n) / 10n).toBe(true)
+      expect(asked >= (p.amount0Desired * 8n) / 10n).toBe(true)
+    }
+    expect(mints).toBeGreaterThan(3)
+  })
+
   test('token dust next to a short bucket is not minted: the proposal could never be built', () => {
     // Free savings spent, a few raw units of USDT left by the last mint, and the stables bucket short of its target.
     const { o: base } = invested()

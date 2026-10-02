@@ -30,7 +30,7 @@ export type Allocation = {
   buckets: BucketValue[]
   proposal: Proposal | null
   trail: GateStep[]
-  /** Pools whose idle volatile token this allocation has a use for: a mint that can go, or the sale that makes it possible. */
+  /** Pools whose idle volatile token this allocation has a use for: a mint that can go, or the swap that makes it possible. */
   pendingMint: string[]
 }
 
@@ -137,6 +137,8 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
         if (row) row.code = 'DECIDE_NO_CAPITAL'
         continue
       }
+      // What it already holds of the volatile token is part of that mint: it is not idle capital to sell meanwhile.
+      if (r.idleVolatile > 0n) pendingMint.push(pool.name)
       if (row) {
         row.code = 'STRATEGY_PREFERENCE_DEVIATION'
         proposal = { kind: 'enter_swap', grant: grantKeyFor(policy, 'enter-swap', pool.name) as `enter-swap:${string}`, pool: pool.name, tokenIn: savings, tokenOut: volatile, fee: pool.fee, amountIn }
@@ -158,8 +160,9 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       continue
     }
     const savingsIn = wantSavings < free ? wantSavings : free
-    // No more of the idle token than the mint needs; what is over stays idle and is converted once the bucket is full.
-    const volatileIn = volatileValue * 10_000n > wantVolatile * SELL_ABOVE_BPS ? (r.idleVolatile * wantVolatile * SELL_ABOVE_BPS) / (volatileValue * 10_000n) : r.idleVolatile
+    // No more of the idle token than the mint needs: the session cap counts what is asked for, not what the pool takes.
+    // What is over stays idle and is converted once the bucket is full.
+    const volatileIn = volatileValue > wantVolatile ? (r.idleVolatile * wantVolatile) / volatileValue : r.idleVolatile
     const volatileInValue = volatileValue < wantVolatile ? volatileValue : wantVolatile
     // A mint smaller than the minimum entry is dust left by an earlier mint: its minimums round to zero and it cannot be built.
     if (savingsIn <= 0n || volatileIn === 0n || savingsIn + volatileInValue < minEntry) {
