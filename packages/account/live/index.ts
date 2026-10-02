@@ -222,6 +222,16 @@ export type AssertionShape = {
   highS: boolean | null
 }
 
+/** clientDataJSON members WebAuthn defines. Any other name is caller-controlled text and is only counted, never logged. */
+const KNOWN_CLIENT_DATA_KEYS = new Set(['type', 'challenge', 'origin', 'crossOrigin', 'topOrigin', 'tokenBinding'])
+
+/** Key names safe to log: the known ones in order, then `+N` for however many others there were. */
+export function safeClientDataKeys(keys: readonly string[]): string[] {
+  const known = keys.filter((k) => KNOWN_CLIENT_DATA_KEYS.has(k))
+  const others = keys.length - known.length
+  return others > 0 ? [...known, `+${others}`] : known
+}
+
 export function assertionShape(a: { authenticatorData: Uint8Array; clientDataJSON: Uint8Array; signature: Uint8Array }): AssertionShape {
   const auth = a.authenticatorData
   let keys: string[] | null = null
@@ -229,7 +239,7 @@ export function assertionShape(a: { authenticatorData: Uint8Array; clientDataJSO
   try {
     text = new TextDecoder('utf-8', { fatal: true }).decode(a.clientDataJSON)
     const parsed: unknown = JSON.parse(text)
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) keys = Object.keys(parsed)
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) keys = safeClientDataKeys(Object.keys(parsed))
   } catch {
     // not JSON: keys stay null
   }
@@ -260,7 +270,7 @@ export function ownerSignatureShape(signature: Hex): Partial<AssertionShape> & {
     const auth = hexToBytes(d.authenticatorData)
     let keys: string[] | null = null
     try {
-      keys = ['type', 'challenge', ...Object.keys(JSON.parse(`{${d.clientDataFields}}`) as object)]
+      keys = safeClientDataKeys(['type', 'challenge', ...Object.keys(JSON.parse(`{${d.clientDataFields}}`) as object)])
     } catch {
       // fields are not JSON members
     }
