@@ -123,7 +123,8 @@ function limitOf(policy: PolicyVersion, grant: string): number | null {
 
 function sessionUses(policy: PolicyVersion, uses: Map<string, number[]>, t0: number): SessionUse[] {
   const out: SessionUse[] = []
-  for (const [grant, times] of [...uses.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+  // Code-unit order, the same on every machine: the list goes into the result hash.
+  for (const [grant, times] of [...uses.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
     const limit = limitOf(policy, grant)
     const windows = new Map<number, number>()
     for (const at of times) {
@@ -161,6 +162,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   let discarded = 0
   let refused = 0
   const enforce = (config.sessions ?? 'enforce') === 'enforce'
+  const renewal = config.sessionRenewal ?? 'renewed'
   let rangeSum = 0
   let rangeSamples = 0
 
@@ -206,7 +208,10 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
       const window = Math.floor((s.time - first.time) / policy.session.validitySeconds)
       const limit = p ? limitOf(policy, p.grant) : null
       const used = p ? (uses.get(p.grant) ?? []).filter((at) => Math.floor((at - first.time) / policy.session.validitySeconds) === window).length : 0
-      if (p && enforce && limit !== null && used >= limit) {
+      if (p && renewal === 'once' && window > 0) {
+        refused++
+        reasons.SESSION_EXPIRED = (reasons.SESSION_EXPIRED ?? 0) + 1
+      } else if (p && enforce && limit !== null && used >= limit) {
         refused++
         reasons.SESSION_USAGE_SPENT = (reasons.SESSION_USAGE_SPENT ?? 0) + 1
       } else if (p) {
@@ -259,7 +264,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   }
   const sessions = sessionUses(policy, uses, first.time)
   const pHash = policyHash(policy)
-  const facts = { simVersion: SIM_VERSION, datasetId: ds.id, policyHash: pHash, from, to, every, gaps, enforce, refused, deposit: config.deposit, topUps: config.topUps ?? [], gas, end, hodlEnd, fees, gasSpent, ops: ops.map(({ trail: _t, ...o }) => o), reasons, sessions }
+  const facts = { simVersion: SIM_VERSION, datasetId: ds.id, policyHash: pHash, from, to, every, gaps, enforce, renewal, refused, deposit: config.deposit, topUps: config.topUps ?? [], gas, end, hodlEnd, fees, gasSpent, ops: ops.map(({ trail: _t, ...o }) => o), reasons, sessions }
   return {
     simVersion: SIM_VERSION,
     datasetId: ds.id,

@@ -96,7 +96,8 @@ export function accrue(p: SimPosition, a: PoolSample, b: PoolSample): { fees0: b
 
 /**
  * Output of an exact-input swap against the active liquidity of the sample, with the pool fee and the price impact
- * of a single tick range. The historical price path is not moved by it.
+ * of a single tick range, rounded the way the pool rounds. A swap large enough to cross a tick is priced as if the
+ * liquidity stayed the same. The historical price path is not moved by it.
  */
 export function swapOut(e: RegistryEntry, s: PoolSample, tokenIn: RegistryName, amountIn: bigint): bigint {
   const net = (amountIn * BigInt(1_000_000 - (e.fee ?? 0))) / 1_000_000n
@@ -105,7 +106,9 @@ export function swapOut(e: RegistryEntry, s: PoolSample, tokenIn: RegistryName, 
   if (net === 0n) return 0n
   if (tokenIn === e.token0) {
     if (L === 0n) return token0InToken1(net, sp)
-    const next = ((L << 96n) * sp) / ((L << 96n) + net * sp)
+    // As the pool does for an exact input of token0: the next price rounds up, the output rounds down.
+    const den = (L << 96n) + net * sp
+    const next = ((L << 96n) * sp + den - 1n) / den
     return (L * (sp - next)) / Q96
   }
   if (L === 0n) return token1InToken0(net, sp)

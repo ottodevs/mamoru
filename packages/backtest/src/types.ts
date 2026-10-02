@@ -38,6 +38,12 @@ export type SimConfig = {
    * would refuse it. `report`: every operation runs and the overuse is only reported.
    */
   sessions?: 'enforce' | 'report'
+  /**
+   * `renewed` (default): the owner renews every session when it lapses, so each `validitySeconds` window starts with
+   * all its uses. `once`: nobody renews; after the first window every operation is refused, as on an account whose
+   * owner never comes back. Either way the run assumes every grant of the policy was enabled at activation.
+   */
+  sessionRenewal?: 'renewed' | 'once'
   /** Later deposits of the savings asset: `at` is a sample index, the amount lands before that sample's review. */
   topUps?: { at: number; amount: bigint }[]
   /** First and last sample to replay, inclusive. Default: the whole dataset. */

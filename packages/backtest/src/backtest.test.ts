@@ -11,6 +11,8 @@ import { accrue, accrued, swapOut, type SimPosition } from './world.ts'
 
 const USDC = 1_000_000n
 const Q128 = 1n << 128n
+/** A replay is CPU bound: on a busy machine a run can take several times its usual second. */
+const SLOW = 60_000
 const DEPOSIT = 1_000n * USDC
 /** Fee growth per sample sized so the three positions of a 1,000 USDC account earn about a cent each per hour. */
 const GROWTH = [1n << 103n, 1n << 104n, 1n << 96n] as const
@@ -74,6 +76,23 @@ describe('swap model', () => {
     expect((spot - out) * 10_000n / spot).toBeLessThanOrEqual(5n)
   })
 
+  test('the output matches the pool arithmetic for one range, to the unit', () => {
+    // SwapMath for an exact input inside one range, written out with its own rounding: fee off the input, next
+    // price rounded up for token0 in and down for token1 in, output rounded down.
+    const Q96 = 1n << 96n
+    const L = s.liquidity
+    const sp = s.sqrtPriceX96
+    const net0 = (250n * USDC * 999_500n) / 1_000_000n
+    const den = (L << 96n) + net0 * sp
+    const next0 = ((L << 96n) * sp + den - 1n) / den
+    expect(swapOut(e, s, 'USDC', 250n * USDC)).toBe((L * (sp - next0)) / Q96)
+    const btc = 250_000n
+    const net1 = (btc * 999_500n) / 1_000_000n
+    const next1 = sp + (net1 * Q96) / L
+    expect(swapOut(e, s, 'cbBTC', btc)).toBe(((L << 96n) * (next1 - sp)) / next1 / sp)
+    expect(swapOut(e, s, 'USDC', 0n)).toBe(0n)
+  })
+
   test('a large swap moves the price against itself, in both directions', () => {
     const big = swapOut(e, s, 'USDC', 1_000_000n * USDC)
     const small = swapOut(e, s, 'USDC', 1_000n * USDC)
@@ -100,6 +119,14 @@ describe('dataset', () => {
     expect(twapTick(ds, 1, 12, 1800)).toBe(-67_420 + 50)
     expect(twapTick(ds, 1, 19, 1800)).toBe(-67_420 + 100)
   })
+
+  test('a mean tick that is not whole rounds toward negative infinity, as the pool oracle does', () => {
+    // Stable pool at tick 9, then one sample at 8 inside a 1800 s window: mean 8.83, and -0.17 when shifted below zero.
+    const up = syntheticDataset({ samples: 20, tick: (_k, i) => (i === 12 ? -1 : 0) })
+    expect(twapTick(up, 0, 14, 1800)).toBe(8)
+    const down = syntheticDataset({ samples: 20, tick: (_k, i) => (i === 12 ? -10 : -9) })
+    expect(twapTick(down, 0, 14, 1800)).toBe(-1)
+  })
 })
 
 describe('run', () => {
@@ -117,7 +144,7 @@ describe('run', () => {
     expect(-r.metrics.net).toBeLessThan(DEPOSIT / 500n)
     expect(r.reasons.DECIDE_IN_RANGE).toBeGreaterThan(40)
     expect(r.series.value).toHaveLength(60)
-  })
+  }, SLOW)
 
   test('fee growth is earned, harvested once it beats the cost, and counted', () => {
     const growth = GROWTH
@@ -130,7 +157,7 @@ describe('run', () => {
     expect(harvested).toBeGreaterThan(0n)
     expect(harvested).toBeLessThanOrEqual(paid.metrics.fees)
     for (const s of paid.sessions) expect(s.exhausted).toBe(false)
-  })
+  }, SLOW)
 
   test('a strategy that harvests more often than its grant allows is flagged', () => {
     // Fees that clear the bar at every review: more harvests in one session window than the convert-any limit of 64.
@@ -145,7 +172,7 @@ describe('run', () => {
     expect(e.sessions.find((x) => x.grant === 'convert-any:pool:USDC/USDT/100')).toMatchObject({ peakPerWindow: 64, exhausted: false })
     expect(e.metrics.refused).toBeGreaterThan(0)
     expect(e.reasons.SESSION_USAGE_SPENT).toBe(e.metrics.refused)
-  })
+  }, SLOW)
 
   test('a price that walks out of the range is re-ranged after the cooldown, and that costs against holding', () => {
     // cbBTC pool drifts 4 ticks per sample: out of a 2000-tick range in about 250 samples.
@@ -156,7 +183,7 @@ describe('run', () => {
     expect(r.metrics.timeInRangeBps).toBeGreaterThan(9_000)
     // A one-way drift is the textbook loss against holding the entry mix.
     expect(r.metrics.vsHodl).toBeLessThan(0n)
-  })
+  }, SLOW)
 
   test('same dataset, policy and config give the same hash; a change in any of them does not', () => {
     const ds = syntheticDataset({ samples: 80, growth: GROWTH })
@@ -165,7 +192,41 @@ describe('run', () => {
     expect(runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT + 1n }).resultHash).not.toBe(a.resultHash)
     const wider = { ...conservadorLiveV2, range: { ...conservadorLiveV2.range, widthTicks: 4000 } }
     expect(runBacktest(ds, wider, { deposit: DEPOSIT }).resultHash).not.toBe(a.resultHash)
-  })
+  }, SLOW)
+
+  test('a later deposit is counted as money in, for the run and for the benchmark alike', () => {
+    const ds = syntheticDataset({ samples: 120 })
+    const r = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT, topUps: [{ at: 40, amount: DEPOSIT / 2n }] })
+    expect(r.metrics.start).toBe(DEPOSIT + DEPOSIT / 2n)
+    expect(r.series.value[39]! < DEPOSIT).toBe(true)
+    expect(r.series.value[40]! > DEPOSIT + DEPOSIT / 3n).toBe(true)
+    // Flat market: the benchmark holds exactly what went in.
+    const drift = r.series.hodl.at(-1)! - r.metrics.start
+    expect((drift < 0n ? -drift : drift) < r.metrics.start / 10_000n).toBe(true)
+    expect(-r.metrics.net).toBeLessThan(r.metrics.start / 300n)
+  }, SLOW)
+
+  test('drawdown and worst week follow the value of the account', () => {
+    // cbBTC falls 6% (600 ticks) over a day, flat before and after; 40% of the account sits in that bucket.
+    const ds = syntheticDataset({ samples: 3 * 288, tick: (k, i) => (k === 1 ? 2 * Math.max(0, Math.min(300, i - 288)) : 0) })
+    const r = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT })
+    expect(r.metrics.maxDrawdownBps).toBeGreaterThan(50)
+    expect(r.metrics.maxDrawdownBps).toBeLessThan(400)
+    // The whole run is shorter than a week: the worst week is the same fall.
+    expect(r.metrics.worstWeekBps).toBeGreaterThan(50)
+    expect(r.metrics.worstWeekBps).toBeLessThanOrEqual(r.metrics.maxDrawdownBps)
+  }, SLOW)
+
+  test('sessions nobody renews refuse everything after their first window', () => {
+    // 31 days of samples one hour apart; the price walks out of the cbBTC range in the second month.
+    const ds = syntheticDataset({ samples: 31 * 24 + 48, step: 3600, tick: (k, i) => (k === 1 && i > 30 * 24 ? 60 * (i - 30 * 24) : 0) })
+    const renewed = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT })
+    const once = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT, sessionRenewal: 'once' })
+    expect(renewed.metrics.operations.rerange).toBeGreaterThan(0)
+    expect(once.metrics.operations.rerange).toBe(0)
+    expect(once.reasons.SESSION_EXPIRED).toBeGreaterThan(0)
+    expect(once.resultHash).not.toBe(renewed.resultHash)
+  }, SLOW)
 
   test('a policy pool the dataset lacks is refused before the run', () => {
     const ds = syntheticDataset({ samples: 3 })

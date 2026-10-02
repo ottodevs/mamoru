@@ -22,6 +22,17 @@ function args(name: string): string[] {
   return process.argv.flatMap((a, i) => (a === `--${name}` && process.argv[i + 1] ? [process.argv[i + 1]!] : []))
 }
 
+/** First line of an error with every URL removed: an endpoint URL can carry a key. */
+function redact(err: unknown): string {
+  return String((err as Error)?.message ?? err).split('\n')[0]!.replace(/https?:\/\/\S+/g, '<url>')
+}
+for (const event of ['uncaughtException', 'unhandledRejection'] as const) {
+  process.on(event, (err) => {
+    console.error(redact(err))
+    process.exit(1)
+  })
+}
+
 const ds = decodeDataset(JSON.parse(readFileSync(args('dataset')[0]!, 'utf8')) as DatasetJson)
 const client = createPublicClient({ chain: base, transport: http(process.env.BACKFILL_RPC_URL ?? 'https://mainnet.base.org', { retryCount: 4, retryDelay: 800, timeout: 30_000 }) }) as PublicClient
 const npm = address('NonfungiblePositionManager')
@@ -49,18 +60,21 @@ for (const owner of args('owner') as Address[]) {
     const name = nameOf(poolAddr)
     const k = name ? ds.pools.indexOf(name) : -1
     if (!name || k < 0 || pos[7] === 0n) continue
-    // The first sample at which the position already exists with today's liquidity.
-    let start = -1
-    for (let j = 0; j < ds.samples.length; j++) {
+    // The first sample at which the position already exists with today's liquidity: a binary search, about 14 archive
+    // reads for a 30-day dataset, instead of a scan.
+    const sameAt = async (j: number) => {
       const p = await client.readContract({ address: npm, abi: npmAbi, functionName: 'positions', args: [tokenId], blockNumber: BigInt(ds.samples[j]!.block) }).catch(() => null)
-      if (p && p[7] === pos[7]) {
-        start = j
-        break
-      }
-      // Jump ahead: positions are a few days old at most in a 30-day window.
-      j += Math.max(0, Math.floor(ds.samples.length / 200) - 1)
+      return !!p && p[7] === pos[7]
     }
-    if (start < 0) continue
+    let lo = 0
+    let hi = ds.samples.length - 1
+    if (!(await sameAt(hi))) continue
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (await sameAt(mid)) hi = mid
+      else lo = mid + 1
+    }
+    const start = lo
     const before = await collectable(owner, tokenId, BigInt(ds.samples[start]!.block))
     const after = await collectable(owner, tokenId, BigInt(last.block))
     if (!before || !after) continue

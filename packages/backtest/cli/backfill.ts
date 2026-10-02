@@ -46,6 +46,19 @@ async function readSample(client: PublicClient, block: bigint): Promise<Sample> 
   return { block: Number(b.number), hash: b.hash as Hex, time: Number(b.timestamp), baseFeeWei: b.baseFeePerGas ?? 0n, pools }
 }
 
+/** First line of an error with every URL removed: an endpoint URL can carry a key. */
+function redact(err: unknown): string {
+  return String((err as Error)?.message ?? err).split('\n')[0]!.replace(/https?:\/\/\S+/g, '<url>')
+}
+process.on('uncaughtException', (err) => {
+  console.error(redact(err))
+  process.exit(1)
+})
+process.on('unhandledRejection', (err) => {
+  console.error(redact(err))
+  process.exit(1)
+})
+
 const big = (_k: string, v: unknown) => (typeof v === 'bigint' ? `${v}n` : v)
 const unbig = (_k: string, v: unknown) => (typeof v === 'string' && /^-?\d+n$/.test(v) ? BigInt(v.slice(0, -1)) : v)
 
@@ -56,7 +69,8 @@ const step = BigInt(arg('step', '150'))
 // the operator's host would starve it, so they are not defaults.
 const DEFAULT_URLS = 'https://base-mainnet.public.blastapi.io,https://base.gateway.tenderly.co,https://gateway.tenderly.co/public/base'
 const urls = (process.env.BACKFILL_RPC_URL ?? DEFAULT_URLS).split(',').map((u) => u.trim()).filter(Boolean)
-const concurrency = Number(arg('concurrency', '4'))
+// Public endpoints throttle by source address: more than a few requests at once only gets the address rested.
+const concurrency = Math.max(1, Math.min(8, Number(arg('concurrency', '4')) || 4))
 const endpoints = urls.map((url) => ({ host: new URL(url).host, restUntil: 0, client: createPublicClient({ chain: base, transport: http(url, { retryCount: 0, timeout: 20_000 }) }) as PublicClient }))
 let turn = 0
 
@@ -113,7 +127,7 @@ async function worker(): Promise<void> {
       appendFileSync(cache, `${JSON.stringify(s, big)}\n`)
     } catch (err) {
       failed++
-      console.error(`block ${b}: ${String((err as Error)?.message ?? err).split('\n')[0]}`)
+      console.error(`block ${b}: ${redact(err)}`)
     }
     if (++done % 250 === 0) console.log(`${done} fetched, ${failed} failed, ${Math.round((Date.now() - started) / 1000)} s`)
   }
