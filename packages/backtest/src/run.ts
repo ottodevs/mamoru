@@ -10,11 +10,15 @@ import { accrue, apply, inRange, newWorld, valueIn, type World } from './world.t
 
 export const SIM_VERSION = 'backtest-1'
 
-/** Placeholder units per operation until they are measured from the operator's receipts. */
+/**
+ * Gas of one operation. Swap and mint are the medians of 14 live receipts on Base (2026-09-26 to 2026-10-01): 470,200
+ * and 835,285 gas, an L1 data fee near 3.1e9 wei. Harvest, re-range and reduce have no live receipt yet;
+ * theirs are estimates between the two.
+ */
 export const DEFAULT_GAS: GasModel = {
-  unitsByKind: { enter_swap: 450_000n, enter_mint: 750_000n, harvest: 650_000n, rerange: 700_000n, reduce: 600_000n },
+  unitsByKind: { enter_swap: 470_000n, enter_mint: 835_000n, harvest: 650_000n, rerange: 700_000n, reduce: 600_000n },
   priorityFeeWei: 1_000_000n,
-  l1FeeWei: 0n,
+  l1FeeWei: 3_100_000_000n,
 }
 
 const WEEK = 7 * 86_400

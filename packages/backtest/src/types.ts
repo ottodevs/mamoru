@@ -23,7 +23,7 @@ export type OpKind = Proposal['kind']
 
 /**
  * What an executed operation costs. `decide` prices a harvest with the userOp gas budget, as the live engine does;
- * the account is charged these units instead. The defaults are placeholders until they are measured from receipts.
+ * the account is charged these units instead.
  */
 export type GasModel = { unitsByKind: Record<OpKind, bigint>; priorityFeeWei: bigint; l1FeeWei: bigint }
 
