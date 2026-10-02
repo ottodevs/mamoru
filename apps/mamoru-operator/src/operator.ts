@@ -72,8 +72,6 @@ const ARM_DAY_MS = 86_400_000
 const ARM_STALE_MS = 300_000
 /** Over the RPC budget an account with nothing in flight is still reviewed at least this often. */
 const BUDGET_REVIEW_MS = 900_000
-/** A stored engine operation left proposed or submitted counts as in flight for this long after its last change; older, it is a leftover of a past run. */
-const BUDGET_IN_FLIGHT_MS = 1_800_000
 /** The relayer does not pay to deploy a Safe that holds less than this (1 USDC). */
 export const MIN_DEPLOY_USDC = 1_000_000n
 /**
@@ -1395,7 +1393,7 @@ export class Operator {
       if (runner.stopped) return
       try {
       await this.lock(acc.accountKey).run(async () => {
-        if (runner.stopped || this.reviewBraked(acc, runner)) return
+        if (runner.stopped || this.reviewBraked(runner)) return
         try {
           // The provider may still serve a block before the activation that enabled the grants: wait for it.
           const head = await this.client.getBlockNumber()
@@ -1453,18 +1451,15 @@ export class Operator {
   }
 
   /**
-   * Over the hourly RPC budget, a review that can wait is skipped: the account has nothing in flight and its
-   * last review that reached a decision started less than BUDGET_REVIEW_MS ago. In flight is an engine operation
-   * that is not terminal in this run's journal, or one stored as proposed or submitted that changed in the last
-   * BUDGET_IN_FLIGHT_MS (a restart starts a new journal). Reads are never moved to
-   * another provider; the operator does less.
+   * Over the hourly RPC budget, a review that can wait is skipped: its last review that reached a decision
+   * started less than BUDGET_REVIEW_MS ago and the next review has nothing to finish. The only operation a
+   * review picks up again is one left `included` (Engine.resumeIncluded, until `safe` reaches its block); every
+   * other state is driven to its end inside the review that started it, or by the reconcile path, which the
+   * budget does not touch. Reads are never moved to another provider; the operator does less.
    */
-  private reviewBraked(acc: Pick<AccountState, 'ops'>, runner: Pick<Runner, 'engine' | 'reviewedAt'>, now: number = Date.now()): boolean {
+  private reviewBraked(runner: Pick<Runner, 'engine' | 'reviewedAt'>, now: number = Date.now()): boolean {
     if (!this.rpcOverBudget(now)) return false
-    if (runner.engine.journal.ops.some((o) => !isTerminal(o.state))) return false
-    // A row no run will ever finish (its journal is gone) must not hold the brake off for good: only a recent one counts.
-    const recent = (o: { updatedAt: string }) => now - (Date.parse(o.updatedAt) || 0) < BUDGET_IN_FLIGHT_MS
-    if (acc.ops.some((o) => o.opId.startsWith('eng-') && (o.state === 'proposed' || o.state === 'submitted') && recent(o))) return false
+    if (runner.engine.journal.ops.some((o) => o.state === 'included')) return false
     return runner.reviewedAt !== undefined && now >= runner.reviewedAt && now - runner.reviewedAt < BUDGET_REVIEW_MS
   }
 
