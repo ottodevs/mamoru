@@ -39,6 +39,8 @@ function world(logs: Log[]) {
   }
   const fetch = async (url: string, init: RequestInit) => {
     const p = providers[url]!
+    // One node answers one request: its fork point is read once.
+    const forkFrom = p.forkFrom
     const body = JSON.parse(String(init.body))
     const answer = (result: unknown) => Response.json({ jsonrpc: '2.0', id: body.id, result })
     const refuse = (code: number, message: string, status = 200) => Response.json({ jsonrpc: '2.0', id: body.id, error: { code, message } }, { status })
@@ -50,14 +52,14 @@ function world(logs: Log[]) {
       const n = Number(body.params[0])
       p.calls.push({ method: body.method, block: n })
       if (p.down) return refuse(-32603, 'service unavailable', 503)
-      return answer(n > p.head ? null : { number: hex(n), hash: hashOf(n, p.forkFrom !== undefined && n >= p.forkFrom) })
+      return answer(n > p.head ? null : { number: hex(n), hash: hashOf(n, forkFrom !== undefined && n >= forkFrom) })
     }
     const [from, to] = [Number(body.params[0].fromBlock), Number(body.params[0].toBlock)]
     p.calls.push({ method: body.method, from, to })
     if (p.down) return refuse(-32603, 'service unavailable', 503)
     if (to - from + 1 > p.limit) return refuse(-32602, `query exceeds max block range ${p.limit}`)
     if (p.failAt?.(from, to)) return refuse(-32000, 'Archive requests require a personal token')
-    const visible = p.forkFrom === undefined ? logs : [...logs.filter((l) => Number(l.blockNumber) < p.forkFrom!), ...(p.forkLogs ?? [])]
+    const visible = forkFrom === undefined ? logs : [...logs.filter((l) => Number(l.blockNumber) < forkFrom), ...(p.forkLogs ?? [])]
     const last = Math.min(to, p.head)
     return answer(visible.filter((l) => Number(l.blockNumber) >= from && Number(l.blockNumber) <= last))
   }
@@ -100,7 +102,8 @@ describe('eth_getLogs routing by provider range', () => {
     const r = await getLogs(w, 1000, 1009)
     expect(r.result).toEqual(inOrder(1000, 1009))
     expect(w.logsCalls(ALCHEMY)).toEqual([{ method: 'eth_getLogs', from: 1000, to: 1009 }])
-    expect(w.providers[PUBLICNODE]!.calls.length).toBe(0)
+    // The first fallback only witnesses the hash of the range's last block.
+    expect(w.providers[PUBLICNODE]!.calls).toEqual([{ method: 'eth_getBlockByNumber', block: 1009 }])
   })
 
   test('a 5000-block range goes to the provider that needs one request, before the ones that need three', async () => {
@@ -135,9 +138,9 @@ describe('eth_getLogs routing by provider range', () => {
     expect(w.blockCalls(PUBLICNODE)).toEqual([])
   })
 
-  test('with every fallback down the upstream serves the range in 10-block chunks, merged in block and log order', async () => {
+  test('with every fallback refusing the range the upstream serves it in 10-block chunks, merged in block and log order', async () => {
     const w = world(LOGS)
-    for (const url of FALLBACKS) w.providers[url]!.down = true
+    for (const url of FALLBACKS) w.providers[url]!.failAt = () => true
     const dir = mkdtempSync(join(tmpdir(), 'mamoru-rpc-logs-'))
     dirs.push(dir)
     const metrics = new RpcMetrics(dir)
@@ -147,13 +150,20 @@ describe('eth_getLogs routing by provider range', () => {
     const calls = w.logsCalls(ALCHEMY)
     expect(calls.length).toBe(15)
     expect(calls.every((c) => c.to! - c.from! + 1 <= 10)).toBe(true)
-    const counted = metrics.snapshot().cumulative['alchemy.com']!.eth_getLogs!
+    const snap = metrics.snapshot()
+    const counted = snap.cumulative['alchemy.com']!.eth_getLogs!
     expect(counted.requests).toBe(15)
     expect(counted.getLogsChunks).toBe(15)
-    // Each fallback was asked for the logs, failed, and was left behind.
-    const publicnode = metrics.snapshot().cumulative['publicnode.com']!
+    // Each fallback was asked for the logs, failed, and was left behind; the first one then witnessed the upstream's range.
+    const publicnode = snap.cumulative['publicnode.com']!
     expect(publicnode.eth_getLogs!.requests).toBe(1)
     expect(publicnode.eth_getLogs!.fallbacks).toBe(1)
+    expect(snap.logRanges).toEqual({
+      'publicnode.com': { accepted: 0, no_witness: 0, hash_mismatch: 0, provider_error: 1 },
+      'drpc.org': { accepted: 0, no_witness: 0, hash_mismatch: 0, provider_error: 1 },
+      'base.org': { accepted: 0, no_witness: 0, hash_mismatch: 0, provider_error: 1 },
+      'alchemy.com': { accepted: 1, no_witness: 0, hash_mismatch: 0, provider_error: 0 },
+    })
   })
 
   test('when no provider answers, the caller gets a JSON-RPC error, not an empty list', async () => {
@@ -165,14 +175,14 @@ describe('eth_getLogs routing by provider range', () => {
   })
 })
 
-describe('logs and state come from the same chain view', () => {
-  test('the provider that served the logs is asked for the last block of the range after the read, and the state provider for its hash', async () => {
+describe('a log range needs an independent witness', () => {
+  test('logs from a fallback: the fallback and the upstream are asked directly for the last block, after the read, and agree', async () => {
     const w = world(LOGS)
-    await getLogs(w, 1000, 1149)
-    const calls = w.providers[PUBLICNODE]!.calls
-    expect(calls.map((c) => c.method)).toEqual(['eth_getLogs', 'eth_getBlockByNumber'])
-    expect(calls[1]!.block).toBe(1149)
-    expect(w.blockCalls(ALCHEMY)).toEqual([1149])
+    const r = await getLogs(w, 1000, 1149)
+    expect(r.result).toEqual(inOrder(1000, 1149))
+    expect(w.providers[PUBLICNODE]!.calls).toEqual([{ method: 'eth_getLogs', from: 1000, to: 1149 }, { method: 'eth_getBlockByNumber', block: 1149 }])
+    expect(w.providers[ALCHEMY]!.calls).toEqual([{ method: 'eth_getBlockByNumber', block: 1149 }])
+    expect(w.providers[DRPC]!.calls.length + w.providers[BASE_ORG]!.calls.length).toBe(0)
   })
 
   test('a provider 3 blocks behind answers with an incomplete range: rejected, the next provider serves it', async () => {
@@ -186,7 +196,7 @@ describe('logs and state come from the same chain view', () => {
     expect(w.logsCalls(DRPC).length).toBe(1)
   })
 
-  test('nothing about a provider head is remembered: it is checked again on every range', async () => {
+  test('nothing about a provider is remembered between requests: it is checked again on every range', async () => {
     const w = world(LOGS)
     const proxy = startRpcProxy(ALCHEMY, { fetch: w.fetch, fallbacks: FALLBACKS, logRanges: {} })
     const ask = async (to: number) =>
@@ -201,36 +211,105 @@ describe('logs and state come from the same chain view', () => {
       proxy.stop()
     }
     expect(w.blockCalls(PUBLICNODE)).toEqual([1149, 1149, 1100])
+    // The witness is asked again for the same block on the next request.
+    expect(w.blockCalls(ALCHEMY)).toEqual([1149, 1149, 1100])
     expect(w.logsCalls(DRPC).length).toBe(2)
     expect(w.providers[PUBLICNODE]!.calls.some((c) => c.method === 'eth_blockNumber')).toBe(false)
+  })
+
+  test('ranges of one request that end at the same block share one witness answer; the next request asks again', async () => {
+    const w = world(LOGS)
+    const proxy = startRpcProxy(ALCHEMY, { fetch: w.fetch, fallbacks: FALLBACKS, logRanges: {} })
+    const range = (id: number, from: number) => ({ jsonrpc: '2.0', id, method: 'eth_getLogs', params: [{ fromBlock: hex(from), toBlock: hex(1149) }] })
+    try {
+      // A first range fills the memo of this request; the other two end at the same block.
+      const batch = [range(1, 1000), range(2, 1020), range(3, 1100)]
+      const first = (await (await fetch(proxy.url, { method: 'POST', body: JSON.stringify(batch) })).json()) as Answer[]
+      expect(first.map((r) => r.result!.length)).toEqual([5, 2, 2])
+      expect(w.blockCalls(PUBLICNODE)).toEqual([1149, 1149, 1149])
+      expect(w.blockCalls(ALCHEMY).length).toBeLessThanOrEqual(3)
+      const before = w.blockCalls(ALCHEMY).length
+      await fetch(proxy.url, { method: 'POST', body: JSON.stringify(range(4, 1000)) })
+      expect(w.blockCalls(ALCHEMY).length).toBe(before + 1)
+    } finally {
+      proxy.stop()
+    }
   })
 
   test('a provider on another fork has another hash at the end of the range: rejected, its logs never reach the caller', async () => {
     const w = world(LOGS)
     w.providers[PUBLICNODE]!.forkFrom = 1140
     w.providers[PUBLICNODE]!.forkLogs = [log(1145, 9)]
-    const r = await getLogs(w, 1000, 1149)
+    const dir = mkdtempSync(join(tmpdir(), 'mamoru-rpc-logs-'))
+    dirs.push(dir)
+    const metrics = new RpcMetrics(dir)
+    const r = await getLogs(w, 1000, 1149, metrics)
     expect(w.logsCalls(PUBLICNODE).length).toBe(1)
     expect(r.result).toEqual(inOrder(1000, 1149))
     expect(r.result!.some((l) => Number(l.blockNumber) === 1145)).toBe(false)
+    expect(metrics.snapshot().logRanges['publicnode.com']).toEqual({ accepted: 0, no_witness: 0, hash_mismatch: 1, provider_error: 0 })
+    expect(metrics.snapshot().logRanges['drpc.org']!.accepted).toBe(1)
   })
 
-  test('the upstream is held to the same check: behind its own earlier answer, it is rejected', async () => {
+  test('logs from an upstream node that is behind on a stale block: the witness disagrees, rejected; a fallback serves and the upstream witnesses', async () => {
     const w = world(LOGS)
-    const proxy = startRpcProxy(ALCHEMY, { fetch: w.fetch, fallbacks: [PUBLICNODE], logRanges: {} })
-    // The range fits the upstream in one request. A lagging node of the upstream serves the logs and the block read
-    // that follows; the node that named block 1149 answers again afterwards.
-    let lagging = 2
+    // The range fits the upstream in one request. A stale node of the upstream serves the logs and the block read
+    // that follows; its healthy node answers afterwards.
+    let stale = 2
     const upstream = w.providers[ALCHEMY]!
-    Object.defineProperty(upstream, 'head', { get: () => (lagging-- > 0 ? 1146 : 10_000) })
+    Object.defineProperty(upstream, 'forkFrom', { get: () => (stale-- > 0 ? 1148 : undefined) })
+    upstream.forkLogs = []
+    const proxy = startRpcProxy(ALCHEMY, { fetch: w.fetch, fallbacks: [PUBLICNODE, BASE_ORG], logRanges: {} })
     try {
       const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ fromBlock: hex(1145), toBlock: hex(1149) }] }) })
+      // The stale node had no log at 1149; the answer has it.
       expect(((await res.json()) as Answer).result).toEqual(inOrder(1145, 1149))
     } finally {
       proxy.stop()
     }
-    expect(w.logsCalls(ALCHEMY).length).toBe(1)
+    expect(w.providers[ALCHEMY]!.calls).toEqual([
+      { method: 'eth_getLogs', from: 1145, to: 1149 },
+      { method: 'eth_getBlockByNumber', block: 1149 },
+      // As the witness of publicnode's range.
+      { method: 'eth_getBlockByNumber', block: 1149 },
+    ])
     expect(w.logsCalls(PUBLICNODE)).toEqual([{ method: 'eth_getLogs', from: 1145, to: 1149 }])
+  })
+
+  test('the upstream is never its own witness: with no other provider answering, its range is rejected', async () => {
+    const w = world(LOGS)
+    for (const url of FALLBACKS) w.providers[url]!.down = true
+    const dir = mkdtempSync(join(tmpdir(), 'mamoru-rpc-logs-'))
+    dirs.push(dir)
+    const metrics = new RpcMetrics(dir)
+    // The upstream has the block and would agree with itself.
+    const r = await getLogs(w, 1000, 1009, metrics)
+    expect(r.result).toBeUndefined()
+    expect(r.error!.message).toContain('witness')
+    expect(w.logsCalls(ALCHEMY).length).toBe(2)
+    expect(metrics.snapshot().logRanges['alchemy.com']).toEqual({ accepted: 0, no_witness: 2, hash_mismatch: 0, provider_error: 0 })
+    expect(metrics.snapshot().logRanges['publicnode.com']!.provider_error).toBe(2)
+  })
+
+  test('a witness that does not have the block yet is skipped: the next one decides', async () => {
+    const w = world(LOGS)
+    w.providers[PUBLICNODE]!.head = 1005
+    const r = await getLogs(w, 1000, 1009)
+    expect(r.result).toEqual(inOrder(1000, 1009))
+    expect(w.logsCalls(ALCHEMY).length).toBe(1)
+    expect(w.blockCalls(PUBLICNODE)).toEqual([1009])
+    expect(w.blockCalls(DRPC)).toEqual([1009])
+    expect(w.blockCalls(BASE_ORG)).toEqual([])
+  })
+
+  test('the first witness that has the block decides: a disagreement is not put to a vote', async () => {
+    const w = world(LOGS)
+    w.providers[PUBLICNODE]!.forkFrom = 1005
+    const r = await getLogs(w, 1000, 1009)
+    // The upstream is rejected against publicnode; publicnode against the upstream; drpc agrees with the upstream.
+    expect(r.result).toEqual(inOrder(1000, 1009))
+    expect(w.logsCalls(DRPC).length).toBe(1)
+    expect(w.blockCalls(BASE_ORG)).toEqual([])
   })
 
   test('every provider fails the check: an error, never a short list', async () => {
@@ -242,7 +321,7 @@ describe('logs and state come from the same chain view', () => {
     expect(r.error!.message).toContain('1149')
   })
 
-  test('a single provider (a fork) is checked too: a range past its head is an error', async () => {
+  test('a loopback upstream (a fork) is one node and has no witness by construction: its own block is the check', async () => {
     const w = world(LOGS)
     w.providers['http://127.0.0.1:9/'] = { limit: 1_000_000, head: 1100, calls: [] }
     const proxy = startRpcProxy('http://127.0.0.1:9/', { fetch: w.fetch })
@@ -253,6 +332,27 @@ describe('logs and state come from the same chain view', () => {
     } finally {
       proxy.stop()
     }
+  })
+
+  test('a remote upstream with no fallback cannot be witnessed: eth_getLogs is refused without reading anything', async () => {
+    const w = world(LOGS)
+    const dir = mkdtempSync(join(tmpdir(), 'mamoru-rpc-logs-'))
+    dirs.push(dir)
+    const metrics = new RpcMetrics(dir)
+    const proxy = startRpcProxy(ALCHEMY, { fetch: w.fetch, fallbacks: [], logRanges: {}, metrics })
+    try {
+      const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ fromBlock: hex(1000), toBlock: hex(1009) }] }) })
+      const r = (await res.json()) as Answer
+      expect(r.result).toBeUndefined()
+      expect(r.error!.message).toContain('MAMORU_RPC_FALLBACKS')
+      // Every other call still works.
+      const head = (await (await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'eth_getBlockByNumber', params: [hex(1009), false] }) })).json()) as { result: { number: string } }
+      expect(head.result.number).toBe(hex(1009))
+    } finally {
+      proxy.stop()
+    }
+    expect(w.logsCalls(ALCHEMY).length).toBe(0)
+    expect(metrics.snapshot().logRanges['alchemy.com']).toEqual({ accepted: 0, no_witness: 1, hash_mismatch: 0, provider_error: 0 })
   })
 })
 

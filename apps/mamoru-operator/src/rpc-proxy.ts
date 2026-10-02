@@ -1,5 +1,5 @@
 import type { Server } from 'bun'
-import { classifyRpcError, redactSecrets, safeMetrics, type RpcMetrics } from './metrics.ts'
+import { classifyRpcError, redactSecrets, safeMetrics, type LogRangeOutcome, type RpcMetrics } from './metrics.ts'
 
 type Req = { jsonrpc: '2.0'; id: unknown; method: string; params?: any[] }
 
@@ -8,8 +8,8 @@ type Req = { jsonrpc: '2.0'; id: unknown; method: string; params?: any[] }
  * keyed URL inside this process (viem errors echo the URL they called),
  * splits eth_getLogs into ranges the provider accepts and sends it to the
  * provider that serves the range in the fewest requests, accepting the logs
- * only from a provider that proves it has the state provider's view of the
- * range's last block.
+ * only when an independent provider witnesses the hash of the range's last
+ * block.
  */
 const DEFAULT_FALLBACKS = 'https://base-rpc.publicnode.com,https://base.drpc.org,https://mainnet.base.org'
 
@@ -214,7 +214,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const [x, y] = [BigInt(a.blockNumber), BigInt(b.blockNumber)]
     return x === y ? Number(BigInt(a.logIndex) - BigInt(b.logIndex)) : x < y ? -1 : 1
   }
-  const fail = (message: string) => Object.assign(new Error(message), { rpc: { code: -32603, message } })
+  type Rejection = Exclude<LogRangeOutcome, 'accepted'>
+  const fail = (message: string, reason: Rejection = 'provider_error') => Object.assign(new Error(message), { rpc: { code: -32603, message }, reason })
   /** The whole range from one provider, in chunks it accepts. Any failed chunk fails the provider: providers are never mixed inside one range. */
   async function logsFrom(p: LogProvider, filter: any, from: bigint, to: bigint): Promise<unknown[]> {
     const chunks = ranges(from, to, p.logRange)
@@ -228,32 +229,53 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     }
     return out.sort(byBlockAndIndex)
   }
-  /** Hash of block `n` as the state reads see it (the upstream, with their fallback). A node that does not have it yet is asked again. */
-  async function stateHash(n: bigint): Promise<string> {
-    for (let i = 0; ; i++) {
-      const b = await one('eth_getBlockByNumber', [hex(n), false])
-      if (b?.hash) return b.hash
-      if (i >= 2) throw fail(`no state provider has block ${n}`)
-      await Bun.sleep(300)
+  /** Witness answers of one incoming request, by block number: ranges of that request ending at the same block share them. Never kept longer. */
+  type Witnessed = Map<string, { url: string; hash: string }>
+  const blockHash = async (url: string, n: bigint): Promise<string | null> => (await ask(url, 'eth_getBlockByNumber', [hex(n), false]))?.hash ?? null
+  /**
+   * The hash of block `n` from a provider other than `p`, asked directly: no fallback chain that could land
+   * on `p` itself. Logs from the upstream are witnessed by the fallbacks in order; logs from a fallback by the
+   * upstream first, then the other fallbacks. A witness that fails or does not have the block yet is skipped;
+   * the first one that has it decides. Null when none has it.
+   */
+  async function witnessHash(p: LogProvider, n: bigint, seen: Witnessed): Promise<string | null> {
+    const known = seen.get(String(n))
+    if (known && known.url !== p.url) return known.hash
+    for (const w of logProviders) {
+      if (w.url === p.url) continue
+      const hash = await blockHash(w.url, n).catch(() => null)
+      if (!hash) continue
+      seen.set(String(n), { url: w.url, hash })
+      return hash
     }
+    return null
   }
   /**
-   * Logs and state must come from the same chain view. A range read from a provider counts only if that
-   * provider, asked after the read, has the range's last block with the hash the state reads have for it:
-   * a provider that is behind does not know the block, one on another fork has another hash. Nothing about
-   * a provider's head is remembered between ranges. The upstream is held to the same check.
+   * Logs and state must come from the same chain view, proven and not assumed. A range read from a provider
+   * counts only if, asked after the read, that provider has the range's last block and an independent witness
+   * has it with the same hash: a provider that is behind does not know the block, one on another fork has
+   * another hash. Nothing about a provider is remembered between requests, and the upstream is held to the same
+   * rule. One direct block read on the provider and one on the witness per range.
    */
-  async function verifiedLogs(p: LogProvider, isState: boolean, filter: any, from: bigint, to: bigint): Promise<unknown[]> {
+  async function verifiedLogs(p: LogProvider, filter: any, from: bigint, to: bigint, seen: Witnessed): Promise<unknown[]> {
     const logs = await logsFrom(p, filter, from, to)
-    const own = await ask(p.url, 'eth_getBlockByNumber', [hex(to), false])
-    if (!own?.hash) throw fail(`provider does not have block ${to}: its logs for the range may be incomplete`)
-    const expected = isState ? own.hash : await stateHash(to)
-    if (String(own.hash).toLowerCase() !== String(expected).toLowerCase()) throw fail(`provider has another block ${to} than the state provider: its logs are from another chain view`)
+    const own = await blockHash(p.url, to)
+    if (!own) throw fail(`provider does not have block ${to}: its logs for the range may be incomplete`)
+    // A local fork is one node and the only provider: there is no witness by construction, and its own block is the check.
+    if (local) return logs
+    const witness = await witnessHash(p, to, seen)
+    if (!witness) throw fail(`no other provider has block ${to} to witness the logs`, 'no_witness')
+    if (own.toLowerCase() !== witness.toLowerCase()) throw fail(`provider and witness have another block ${to}: the logs may be from another chain view`, 'hash_mismatch')
     return logs
   }
-  async function getLogs(msg: Req): Promise<unknown> {
+  async function getLogs(msg: Req, seen: Witnessed): Promise<unknown> {
     const filter = { ...(msg.params?.[0] ?? {}) }
     if (filter.blockHash) return one('eth_getLogs', [filter])
+    // A remote upstream alone could only witness itself: no logs are read at all.
+    if (!local && logProviders.length < 2) {
+      if (metrics) safeMetrics(() => metrics.recordLogRange(labelOf(upstream), 'no_witness'))
+      throw fail('eth_getLogs needs a second provider to witness the range: set MAMORU_RPC_FALLBACKS', 'no_witness')
+    }
     const from = await toNum(filter.fromBlock ?? 'latest')
     const to = await toNum(filter.toBlock ?? 'latest')
     if (from > to) return []
@@ -262,16 +284,24 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const requests = (p: LogProvider) => (Number.isFinite(p.logRange) ? (span + BigInt(p.logRange) - 1n) / BigInt(p.logRange) : 1n)
     const order = logProviders.map((p, i) => ({ p, i, n: requests(p) })).sort((a, b) => (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
     let last: any = null
-    for (const [k, { p, i }] of [...order, ...order].entries()) {
+    // What the caller is told when nothing is accepted: a range that was read but not witnessed says more than a provider being down.
+    let unwitnessed: any = null
+    for (const [k, { p }] of [...order, ...order].entries()) {
       if (k === order.length) await Bun.sleep(250)
+      const label = labelOf(p.url)
       try {
-        return await verifiedLogs(p, i === 0, filter, from, to)
+        const logs = await verifiedLogs(p, filter, from, to, seen)
+        if (metrics) safeMetrics(() => metrics.recordLogRange(label, 'accepted'))
+        return logs
       } catch (e) {
         last = (e as any).rpc ?? { code: -32603, message: (e as Error).message.split('\n')[0] }
-        if (metrics && logProviders.length > 1) safeMetrics(() => metrics.recordFallback(labelOf(p.url), 'eth_getLogs'))
-        if (process.env.MAMORU_RPC_LOG) console.log(`[rpc] eth_getLogs ${labelOf(p.url)} failed: ${redactSecrets(String(last?.message)).slice(0, 120)}`)
+        const reason: Rejection = (e as any).reason ?? 'provider_error'
+        if (reason !== 'provider_error') unwitnessed = last
+        if (metrics) safeMetrics(() => (metrics.recordLogRange(label, reason), logProviders.length > 1 && metrics.recordFallback(label, 'eth_getLogs')))
+        if (process.env.MAMORU_RPC_LOG) console.log(`[rpc] eth_getLogs ${label} rejected (${reason}): ${redactSecrets(String(last?.message)).slice(0, 120)}`)
       }
     }
+    last = unwitnessed ?? last
     throw Object.assign(new Error(String(last?.message ?? 'upstream unavailable')), { rpc: { code: typeof last?.code === 'number' ? last.code : -32603, message: String(last?.message ?? 'upstream unavailable') } })
   }
   // A load-balanced provider answers from nodes a block or two apart: a head read from one node and a call pinned
@@ -281,20 +311,20 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const n = BigInt(await one('eth_blockNumber', [])) - lag
     return n
   }
-  async function handle(msg: Req): Promise<unknown> {
-    const r = await handleInner(msg)
+  async function handle(msg: Req, seen: Witnessed): Promise<unknown> {
+    const r = await handleInner(msg, seen)
     // Name the call behind an invalid-params refusal: the engine only sees the message.
     const e = (r as any)?.error
     if (e && (e.code === -32602 || /invalid param/i.test(String(e.message)))) console.log(`[rpc] ${msg.method} refused (${e.code}): ${redactSecrets(JSON.stringify(msg.params ?? [])).slice(0, 300)}`)
     return r
   }
-  async function handleInner(msg: Req): Promise<unknown> {
+  async function handleInner(msg: Req, seen: Witnessed): Promise<unknown> {
     try {
       if (msg.method === 'eth_blockNumber') return { jsonrpc: '2.0', id: msg.id, result: `0x${(await head()).toString(16)}` }
       if (msg.method === 'eth_getBlockByNumber' && (msg.params?.[0] === 'latest' || msg.params?.[0] === 'pending')) {
         return { jsonrpc: '2.0', id: msg.id, result: await one('eth_getBlockByNumber', [`0x${(await head()).toString(16)}`, msg.params?.[1] ?? false]) }
       }
-      if (msg.method === 'eth_getLogs') return { jsonrpc: '2.0', id: msg.id, result: await getLogs(msg) }
+      if (msg.method === 'eth_getLogs') return { jsonrpc: '2.0', id: msg.id, result: await getLogs(msg, seen) }
       let r = await raw({ ...msg })
       // A block by number that this node does not have yet comes back null: ask again (a fallback may have it).
       for (let i = 0; i < 3 && msg.method.startsWith('eth_getBlockBy') && r && 'result' in r && r.result === null; i++) {
@@ -313,7 +343,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     async fetch(req) {
       if (req.method !== 'POST') return new Response('method not allowed', { status: 405 })
       const payload = (await req.json()) as Req | Req[]
-      return Response.json(Array.isArray(payload) ? await Promise.all(payload.map(handle)) : await handle(payload))
+      const seen: Witnessed = new Map()
+      return Response.json(Array.isArray(payload) ? await Promise.all(payload.map((m) => handle(m, seen))) : await handle(payload, seen))
     },
   })
   return { url: `http://127.0.0.1:${server.port}/`, stop: () => server.stop(true) }

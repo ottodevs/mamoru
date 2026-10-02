@@ -159,7 +159,8 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   // hash is read again below, after them. A log read that fails is a failed observation.
   const logs = <T>(read: Promise<T>) =>
     read.catch((e: Error) => {
-      throw e instanceof ReasonError ? e : new ReasonError('OBS_RPC_UNAVAILABLE', `logs: ${e.message.split('\n')[0]}`)
+      // `details` is the JSON-RPC error message (why the proxy rejected the range); viem's first line is generic.
+      throw e instanceof ReasonError ? e : new ReasonError('OBS_RPC_UNAVAILABLE', `logs: ${(e as { details?: string }).details ?? e.message.split('\n')[0]}`)
     })
   const cursorRead = input.historyCursor
     ? await logs(readPositionHistoryFrom(client, input.historyCursor, input.allowedTokenIds, input.historyFromBlock, blockNumber, safe.number, safe.hash))
@@ -465,9 +466,10 @@ export async function readPositionHistoryFrom(
 
 /**
  * Position history of [fromBlock, toBlock] that is kept: it counts only if, asked after the log read, the
- * provider has block `toBlock` with the hash the caller holds for it. Null when it has another hash. A log
- * provider that is behind or on another fork cannot put events, or their absence, into the cursor this way;
- * the operator's proxy applies the same rule to each provider it reads logs from.
+ * provider has block `toBlock` with the hash the caller holds for it. Null when it has another hash. This is
+ * the engine's half and holds with any client. The other half is the operator proxy's guarantee: a range it
+ * reads from one provider is accepted only when an independent provider witnesses the hash of its last block,
+ * so the logs and this block read cannot both come from one provider that is behind or on another fork.
  */
 async function historyEndingAt(client: PublicClient, tokenIds: readonly bigint[], fromBlock: bigint, toBlock: bigint, expected: Hex): Promise<ChainPositionEvent[] | null> {
   const events = await readPositionHistory(client, tokenIds, fromBlock, toBlock)
