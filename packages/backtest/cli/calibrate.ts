@@ -61,13 +61,14 @@ for (const owner of args('owner') as Address[]) {
     const name = nameOf(poolAddr)
     const k = name ? ds.pools.indexOf(name) : -1
     if (!name || k < 0 || pos[7] === 0n) continue
-    // The position manager rewrites `feeGrowthInside*Last` whenever the position is touched (a collect, an increase
-    // or a decrease). From the last touch on, liquidity and those two values stay what they are at the end: the first
-    // sample where all three already match is found by binary search, about 14 archive reads for a 30-day dataset,
-    // and the window after it has no collect and no liquidity change in it.
+    // Every touch of a position (a collect, an increase, a decrease) changes at least one of five stored values:
+    // its liquidity, the two `feeGrowthInside*Last` checkpoints, or the two `tokensOwed` balances. From the last touch
+    // on all five stay what they are at the end. The first sample where they already match is found by binary
+    // search, about 14 archive reads for a 30-day dataset; a touch that left all five exactly as before would be
+    // missed, and would also have moved no tokens.
     const untouchedSince = async (j: number) => {
       const p = await client.readContract({ address: npm, abi: npmAbi, functionName: 'positions', args: [tokenId], blockNumber: BigInt(ds.samples[j]!.block) }).catch(() => null)
-      return !!p && p[7] === pos[7] && p[8] === pos[8] && p[9] === pos[9]
+      return !!p && p[7] === pos[7] && p[8] === pos[8] && p[9] === pos[9] && p[10] === pos[10] && p[11] === pos[11]
     }
     let lo = 0
     let hi = ds.samples.length - 1
