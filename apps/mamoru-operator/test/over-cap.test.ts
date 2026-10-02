@@ -816,7 +816,8 @@ describe('the armed watcher reads every armed Safe in one request', () => {
 
 // The keyed RPC provider has an hourly budget: over it the loops that can wait do less, and nothing is read elsewhere.
 describe('over the RPC budget the background loops slow down', () => {
-  type Braked = { reviewBraked(r: { engine: { journal: { ops: { state: string }[] } }; reviewedAt?: number }, now?: number): boolean; checkArmed(): Promise<void>; armPassAt: number; cfg: { rpcBudget?: { over(): boolean; cuPerHour: number } } }
+  type Run = { engine: { journal: { ops: { state: string }[] } }; reviewedAt?: number }
+  type Braked = { reviewBraked(acc: { ops: { opId: string; state: string }[] }, r: Run, now?: number): boolean; checkArmed(): Promise<void>; armRead: Map<string, number>; cfg: { rpcBudget?: { over(): boolean; cuPerHour: number } } }
   const priv = (op: Operator) => op as unknown as Braked
   const budget = (op: Operator, over: boolean) => {
     const b = { cuPerHour: 40_000, over: () => over }
@@ -824,38 +825,54 @@ describe('over the RPC budget the background loops slow down', () => {
     return b
   }
   const idle = { journal: { ops: [{ state: 'confirmed' }, { state: 'failed' }] } }
+  const none = { ops: [] }
   const NOW = Date.now()
 
   test('under the budget no review is skipped', () => {
     const w = world(0n)
     budget(w.op, false)
-    expect(priv(w.op).reviewBraked({ engine: idle, reviewedAt: NOW - 1_000 }, NOW)).toBe(false)
+    expect(priv(w.op).reviewBraked(none, { engine: idle, reviewedAt: NOW - 1_000 }, NOW)).toBe(false)
   })
 
-  test('over the budget an idle account reviewed less than 15 minutes ago is skipped, and reviewed again after that', () => {
+  test('over the budget an idle account whose last decision is under 15 minutes old is skipped, and reviewed again after that', () => {
     const w = world(0n)
     budget(w.op, true)
-    expect(priv(w.op).reviewBraked({ engine: idle, reviewedAt: NOW - 5 * 60_000 }, NOW)).toBe(true)
-    expect(priv(w.op).reviewBraked({ engine: idle, reviewedAt: NOW - 14 * 60_000 }, NOW)).toBe(true)
-    expect(priv(w.op).reviewBraked({ engine: idle, reviewedAt: NOW - 15 * 60_000 }, NOW)).toBe(false)
+    expect(priv(w.op).reviewBraked(none, { engine: idle, reviewedAt: NOW - 5 * 60_000 }, NOW)).toBe(true)
+    expect(priv(w.op).reviewBraked(none, { engine: idle, reviewedAt: NOW - 14 * 60_000 }, NOW)).toBe(true)
+    expect(priv(w.op).reviewBraked(none, { engine: idle, reviewedAt: NOW - 15 * 60_000 }, NOW)).toBe(false)
   })
 
-  test('over the budget an account never reviewed, or with an operation in flight, is not skipped', () => {
+  test('over the budget an account with no decision yet in this run is not skipped', () => {
     const w = world(0n)
     budget(w.op, true)
-    expect(priv(w.op).reviewBraked({ engine: idle }, NOW)).toBe(false)
-    for (const state of ['proposed', 'signed', 'submitted', 'included', 'pending_reconciliation']) {
-      expect(priv(w.op).reviewBraked({ engine: { journal: { ops: [{ state: 'confirmed' }, { state }] } }, reviewedAt: NOW - 1_000 }, NOW)).toBe(false)
+    expect(priv(w.op).reviewBraked(none, { engine: idle }, NOW)).toBe(false)
+  })
+
+  test('over the budget an operation in flight in the journal is never skipped, whatever its state', () => {
+    const w = world(0n)
+    budget(w.op, true)
+    for (const state of ['proposed', 'prepared', 'simulated', 'signed', 'submitted', 'included', 'pending_reconciliation']) {
+      expect(priv(w.op).reviewBraked(none, { engine: { journal: { ops: [{ state: 'confirmed' }, { state }] } }, reviewedAt: NOW - 1_000 }, NOW)).toBe(false)
     }
+  })
+
+  test('after a restart the journal is new: an engine operation stored as proposed or submitted still counts as in flight', () => {
+    const w = world(0n)
+    budget(w.op, true)
+    const run = { engine: { journal: { ops: [] } }, reviewedAt: NOW - 1_000 }
+    expect(priv(w.op).reviewBraked({ ops: [{ opId: 'eng-1-2-op-7-swap', state: 'submitted' }] }, run, NOW)).toBe(false)
+    expect(priv(w.op).reviewBraked({ ops: [{ opId: 'eng-1-2-op-7-swap', state: 'proposed' }] }, run, NOW)).toBe(false)
+    // Finished engine operations and owner operations do not hold the brake off.
+    expect(priv(w.op).reviewBraked({ ops: [{ opId: 'eng-1-2-op-7-swap', state: 'confirmed' }, { opId: 'own-1-activate', state: 'proposed' }] }, run, NOW)).toBe(true)
   })
 
   test('a clock set back does not keep an account unreviewed', () => {
     const w = world(0n)
     budget(w.op, true)
-    expect(priv(w.op).reviewBraked({ engine: idle, reviewedAt: NOW + 3_600_000 }, NOW)).toBe(false)
+    expect(priv(w.op).reviewBraked(none, { engine: idle, reviewedAt: NOW + 3_600_000 }, NOW)).toBe(false)
   })
 
-  test('the armed watcher passes once a minute over the budget, every pass under it, and owner operations are never held', async () => {
+  test('armed Safes are read at most once a minute over the budget, every pass under it, and a funding read is never held', async () => {
     const w = world(0n)
     const tx = await w.op.prepareActivate(ctx)
     await w.op.submit(ctx, 'activate', sign(tx))
@@ -863,22 +880,24 @@ describe('over the RPC budget the background loops slow down', () => {
     const { call } = client
     let multicalls = 0
     client.call = (a) => (a.to.toLowerCase() === address('Multicall3').toLowerCase() && multicalls++, call(a))
-    const b = budget(w.op, true)
+    // Under the budget a freshly armed Safe is read on every pass.
+    const b = budget(w.op, false)
     await priv(w.op).checkArmed()
-    await priv(w.op).checkArmed()
-    await priv(w.op).checkArmed()
-    expect(multicalls).toBe(1)
-    priv(w.op).armPassAt = Date.now() - 61_000
     await priv(w.op).checkArmed()
     expect(multicalls).toBe(2)
-    // Over the budget the owner still reads the account and withdraws: those calls do not ask the budget.
+    // The budget trips: the Safe just read waits a minute from its own last read, not from the last pass.
+    b.over = () => true
+    await priv(w.op).checkArmed()
+    expect(multicalls).toBe(2)
+    priv(w.op).armRead.set('k', Date.now() - 59_000)
+    await priv(w.op).checkArmed()
+    expect(multicalls).toBe(2)
+    priv(w.op).armRead.set('k', Date.now() - 61_000)
+    await priv(w.op).checkArmed()
+    expect(multicalls).toBe(3)
+    // Over the budget the owner still reads the account: funding does not ask the budget.
     const before = multicalls
     expect((await w.op.funding(ctx)).usdc).toBe('0')
     expect(multicalls).toBeGreaterThan(before)
-    b.over = () => false
-    const under = multicalls
-    await priv(w.op).checkArmed()
-    await priv(w.op).checkArmed()
-    expect(multicalls - under).toBe(2)
   })
 })

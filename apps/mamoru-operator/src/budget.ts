@@ -12,7 +12,8 @@ export function keyedBudgetFromEnv(env: Env = process.env): number {
   const raw = env.MAMORU_KEYED_CU_PER_HOUR?.trim()
   if (!raw) return DEFAULT_KEYED_CU_PER_HOUR
   const n = Number(raw)
-  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_KEYED_CU_PER_HOUR
+  // -0 ("-0", or a negative that underflows) is not a way to turn the limit off.
+  return Number.isFinite(n) && n >= 0 && !Object.is(n, -0) ? n : DEFAULT_KEYED_CU_PER_HOUR
 }
 
 /** Whether this clock hour's budget is spent. Asked by the loops that can wait; owner operations never ask. */

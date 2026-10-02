@@ -25,6 +25,8 @@ describe('keyedBudgetFromEnv', () => {
     expect(keyedBudgetFromEnv({ MAMORU_KEYED_CU_PER_HOUR: '   ' })).toBe(DEFAULT_KEYED_CU_PER_HOUR)
     expect(keyedBudgetFromEnv({ MAMORU_KEYED_CU_PER_HOUR: '-5' })).toBe(DEFAULT_KEYED_CU_PER_HOUR)
     expect(keyedBudgetFromEnv({ MAMORU_KEYED_CU_PER_HOUR: 'lots' })).toBe(DEFAULT_KEYED_CU_PER_HOUR)
+    expect(keyedBudgetFromEnv({ MAMORU_KEYED_CU_PER_HOUR: '-0' })).toBe(DEFAULT_KEYED_CU_PER_HOUR)
+    expect(keyedBudgetFromEnv({ MAMORU_KEYED_CU_PER_HOUR: '-1e-400' })).toBe(DEFAULT_KEYED_CU_PER_HOUR)
     expect(keyedBudgetFromEnv({ MAMORU_KEYED_CU_PER_HOUR: '0' })).toBe(0)
     expect(keyedBudgetFromEnv({ MAMORU_KEYED_CU_PER_HOUR: ' 12000 ' })).toBe(12_000)
   })

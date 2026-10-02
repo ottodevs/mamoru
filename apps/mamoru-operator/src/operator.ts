@@ -219,8 +219,6 @@ export class Operator {
   /** Armed watcher, in memory: when each armed Safe was last read, and when its owner was last seen (funding poll, deposit). */
   private readonly armRead = new Map<string, number>()
   private readonly armSeen = new Map<string, number>()
-  /** When the watcher last made a pass (ms). */
-  private armPassAt = 0
   private armStopped = false
   /** Owner transactions being executed right now, by accountKey. */
   private readonly busy = new Map<string, Progress>()
@@ -1026,9 +1024,6 @@ export class Operator {
    */
   private async checkArmed(): Promise<void> {
     const at = Date.now()
-    // Over the RPC budget the watcher passes once a minute instead of every ARM_WATCH_MS.
-    if (this.rpcOverBudget(at) && at >= this.armPassAt && at - this.armPassAt < ARM_IDLE_MS) return
-    this.armPassAt = at
     const due = Object.values(this.store.state.accounts).filter((a) => a.armed && this.armDue(a, at))
     // One request per BATCH_MAX_CALLS accounts, each on its own: a request that fails loses only its accounts, until the next pass.
     for (let i = 0; i < due.length && !this.armStopped; i += BATCH_MAX_CALLS) await this.checkArmedGroup(due.slice(i, i + BATCH_MAX_CALLS), at)
@@ -1070,7 +1065,8 @@ export class Operator {
     const armedAt = Date.parse(acc.ops.find((o) => o.opId === acc.armed?.opId)?.updatedAt ?? '') || 0
     const idle = at - Math.max(armedAt, this.armSeen.get(acc.accountKey) ?? 0)
     const every = idle < ARM_FRESH_MS ? 0 : idle < ARM_DAY_MS ? ARM_IDLE_MS : ARM_STALE_MS
-    return at - read >= every
+    // Over the RPC budget no armed Safe is read more than once a minute.
+    return at - read >= (this.rpcOverBudget(at) ? Math.max(every, ARM_IDLE_MS) : every)
   }
 
   private async fireArmed(acc: AccountState, usdc: bigint): Promise<void> {
@@ -1397,8 +1393,7 @@ export class Operator {
       if (runner.stopped) return
       try {
       await this.lock(acc.accountKey).run(async () => {
-        if (runner.stopped || this.reviewBraked(runner)) return
-        runner.reviewedAt = Date.now()
+        if (runner.stopped || this.reviewBraked(acc, runner)) return
         try {
           // The provider may still serve a block before the activation that enabled the grants: wait for it.
           const head = await this.client.getBlockNumber()
@@ -1427,6 +1422,8 @@ export class Operator {
             if (last?.detail) logErr(prefix, last.detail)
             else console.log(prefix)
             safeMetrics(() => this.engineHealth.record(acc.accountKey, true, d.code, undefined))
+            // Only a review that reached a decision counts: one that was held, failed to observe or threw is tried again on the next tick.
+            runner.reviewedAt = Date.now()
           }
         } catch (e) {
           // `e` goes to the classifier as it is: reading or coercing an odd thrown value here could itself throw.
@@ -1452,12 +1449,15 @@ export class Operator {
   }
 
   /**
-   * Over the hourly RPC budget, a review that can wait is skipped: the account has nothing in flight and was
-   * reviewed less than BUDGET_REVIEW_MS ago. Reads are never moved to another provider; the operator does less.
+   * Over the hourly RPC budget, a review that can wait is skipped: the account has nothing in flight and its
+   * last review that reached a decision is less than BUDGET_REVIEW_MS old. In flight is an engine operation
+   * that is not terminal, in this run's journal or stored from before a restart. Reads are never moved to
+   * another provider; the operator does less.
    */
-  private reviewBraked(runner: Pick<Runner, 'engine' | 'reviewedAt'>, now: number = Date.now()): boolean {
+  private reviewBraked(acc: Pick<AccountState, 'ops'>, runner: Pick<Runner, 'engine' | 'reviewedAt'>, now: number = Date.now()): boolean {
     if (!this.rpcOverBudget(now)) return false
     if (runner.engine.journal.ops.some((o) => !isTerminal(o.state))) return false
+    if (acc.ops.some((o) => o.opId.startsWith('eng-') && (o.state === 'proposed' || o.state === 'submitted'))) return false
     return runner.reviewedAt !== undefined && now >= runner.reviewedAt && now - runner.reviewedAt < BUDGET_REVIEW_MS
   }
 
@@ -1469,7 +1469,7 @@ export class Operator {
     const hour = Math.floor(now / 3_600_000)
     if (hour !== this.budgetLoggedHour) {
       this.budgetLoggedHour = hour
-      console.log(`[budget] keyed RPC provider over ${budget.cuPerHour} CU this hour: reviews at most every ${BUDGET_REVIEW_MS / 60_000} min and the armed watcher once a minute until the hour ends; owner operations are not affected`)
+      console.log(`[budget] keyed RPC provider over ${budget.cuPerHour} CU this hour: reviews at most every ${BUDGET_REVIEW_MS / 60_000} min and armed Safes read at most once a minute until the hour ends; owner operations are not affected`)
     }
     return true
   }
