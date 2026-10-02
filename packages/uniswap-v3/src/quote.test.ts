@@ -1,5 +1,60 @@
 import { describe, expect, test } from 'bun:test'
-import { minOut, quoteMint, rangeAround, sqrtRatioAtTick, token0InToken1, token1InToken0 } from './quote.ts'
+import { decodeFunctionData, encodeFunctionResult, isAddressEqual, type Hex, type PublicClient } from 'viem'
+import type { Address } from '@mamoru/domain'
+import { address, baseRegistry, monadRegistry, nameOf, type Registry } from '@mamoru/registry'
+import { minOut, quoteExactInputSingle, quoteMint, quoterV2, quoterV2Abi, rangeAround, sqrtRatioAtTick, token0InToken1, token1InToken0 } from './quote.ts'
+
+/** A client that records the eth_call and answers a fixed quote. */
+function fakeClient(amountOut: bigint) {
+  const calls: { to?: Address; data?: Hex; blockNumber?: bigint }[] = []
+  const client = {
+    call: async (args: { to?: Address; data?: Hex; blockNumber?: bigint }) => {
+      calls.push(args)
+      return { data: encodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', result: [amountOut, 0n, 0, 0n] }) }
+    },
+  } as unknown as PublicClient
+  return { client, calls }
+}
+
+describe('quoterV2(registry)', () => {
+  const req = (r: Registry) => ({ tokenIn: address('USDC', r), tokenOut: address(r === monadRegistry ? 'WMON' : 'WETH', r), fee: 3000, amountIn: 10n ** 6n, blockNumber: 123n })
+
+  test('with monadRegistry the eth_call goes to the Monad QuoterV2 with Monad tokens', async () => {
+    const { client, calls } = fakeClient(777n)
+    const out = await quoterV2(monadRegistry).quoteExactInputSingle(client, req(monadRegistry))
+    expect(out).toBe(777n)
+    expect(calls).toHaveLength(1)
+    const [c] = calls
+    expect(nameOf(c!.to!, monadRegistry)).toBe('QuoterV2')
+    expect(nameOf(c!.to!, baseRegistry)).toBeUndefined()
+    expect(c!.blockNumber).toBe(123n)
+    const d = decodeFunctionData({ abi: quoterV2Abi, data: c!.data! })
+    expect(d.functionName).toBe('quoteExactInputSingle')
+    const [p] = d.args as readonly [{ tokenIn: Address; tokenOut: Address; fee: number; sqrtPriceLimitX96: bigint }]
+    expect(nameOf(p.tokenIn, monadRegistry)).toBe('USDC')
+    expect(nameOf(p.tokenOut, monadRegistry)).toBe('WMON')
+    expect(nameOf(p.tokenIn, baseRegistry)).toBeUndefined()
+    expect(nameOf(p.tokenOut, baseRegistry)).toBeUndefined()
+    expect(p.fee).toBe(3000)
+    expect(p.sqrtPriceLimitX96).toBe(0n)
+  })
+
+  test('the free form is the Base-bound form', async () => {
+    const free = fakeClient(1n)
+    const bound = fakeClient(1n)
+    await quoteExactInputSingle(free.client, req(baseRegistry))
+    await quoterV2(baseRegistry).quoteExactInputSingle(bound.client, req(baseRegistry))
+    expect(free.calls).toEqual(bound.calls)
+    expect(isAddressEqual(free.calls[0]!.to!, address('QuoterV2', baseRegistry))).toBe(true)
+  })
+
+  test('a failed or empty eth_call is EHG_QUOTE_UNAVAILABLE', async () => {
+    const failing = { call: async () => { throw new Error('execution reverted\nmore') } } as unknown as PublicClient
+    await expect(quoterV2(monadRegistry).quoteExactInputSingle(failing, req(monadRegistry))).rejects.toThrow('EHG_QUOTE_UNAVAILABLE')
+    const empty = { call: async () => ({}) } as unknown as PublicClient
+    await expect(quoterV2(monadRegistry).quoteExactInputSingle(empty, req(monadRegistry))).rejects.toThrow('EHG_QUOTE_UNAVAILABLE')
+  })
+})
 
 describe('sqrtRatioAtTick', () => {
   test('matches TickMath at the reference ticks', () => {

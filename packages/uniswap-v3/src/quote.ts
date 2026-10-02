@@ -1,6 +1,6 @@
 import { decodeFunctionResult, encodeFunctionData, parseAbi, type PublicClient } from 'viem'
 import { ReasonError, type Address } from '@mamoru/domain'
-import { baseRegistry, address } from '@mamoru/registry'
+import { address, baseRegistry, type Registry } from '@mamoru/registry'
 
 export const quoterV2Abi = parseAbi([
   'struct QuoteExactInputSingleParams { address tokenIn; address tokenOut; uint256 amountIn; uint24 fee; uint160 sqrtPriceLimitX96; }',
@@ -9,22 +9,36 @@ export const quoterV2Abi = parseAbi([
 
 export type QuoteRequest = { tokenIn: Address; tokenOut: Address; fee: number; amountIn: bigint; blockNumber: bigint }
 
-/** FR-UNI-001: QuoterV2.quoteExactInputSingle at the block of the operation, as an eth_call. */
-export async function quoteExactInputSingle(client: PublicClient, q: QuoteRequest): Promise<bigint> {
-  const data = encodeFunctionData({
-    abi: quoterV2Abi,
-    functionName: 'quoteExactInputSingle',
-    args: [{ tokenIn: q.tokenIn, tokenOut: q.tokenOut, amountIn: q.amountIn, fee: q.fee, sqrtPriceLimitX96: 0n }],
-  })
-  let raw
-  try {
-    raw = await client.call({ to: address('QuoterV2', baseRegistry), data, blockNumber: q.blockNumber })
-  } catch (e) {
-    throw new ReasonError('EHG_QUOTE_UNAVAILABLE', (e as Error).message.split('\n')[0])
+export type QuoterV2 = {
+  readonly registry: Registry
+  /** FR-UNI-001: QuoterV2.quoteExactInputSingle at the block of the operation, as an eth_call to this registry's QuoterV2. */
+  quoteExactInputSingle(client: PublicClient, q: QuoteRequest): Promise<bigint>
+}
+
+/** The quoter of one registry. The QuoterV2 address comes from it and from nothing else. */
+export function quoterV2(registry: Registry): QuoterV2 {
+  async function quoteExactInputSingle(client: PublicClient, q: QuoteRequest): Promise<bigint> {
+    const data = encodeFunctionData({
+      abi: quoterV2Abi,
+      functionName: 'quoteExactInputSingle',
+      args: [{ tokenIn: q.tokenIn, tokenOut: q.tokenOut, amountIn: q.amountIn, fee: q.fee, sqrtPriceLimitX96: 0n }],
+    })
+    let raw
+    try {
+      raw = await client.call({ to: address('QuoterV2', registry), data, blockNumber: q.blockNumber })
+    } catch (e) {
+      throw new ReasonError('EHG_QUOTE_UNAVAILABLE', (e as Error).message.split('\n')[0])
+    }
+    if (!raw.data) throw new ReasonError('EHG_QUOTE_UNAVAILABLE', 'empty QuoterV2 answer')
+    const [amountOut] = decodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', data: raw.data })
+    return amountOut
   }
-  if (!raw.data) throw new ReasonError('EHG_QUOTE_UNAVAILABLE', 'empty QuoterV2 answer')
-  const [amountOut] = decodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', data: raw.data })
-  return amountOut
+  return { registry, quoteExactInputSingle }
+}
+
+/** @deprecated Bound to `baseRegistry`. Use `quoterV2(registry).quoteExactInputSingle` or `uniswapV3(registry).quoteExactInputSingle`. */
+export async function quoteExactInputSingle(client: PublicClient, q: QuoteRequest): Promise<bigint> {
+  return quoterV2(baseRegistry).quoteExactInputSingle(client, q)
 }
 
 /** FR-UNI-002: the minimum out from a fresh quote and the policy tolerance. Never zero. */
