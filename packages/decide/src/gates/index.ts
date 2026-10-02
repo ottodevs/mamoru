@@ -1,19 +1,34 @@
 import { isAddressEqual, zeroAddress } from 'viem'
 import type { PolicyVersion } from '@mamoru/policy'
-import { baseRegistry, address, entry } from '@mamoru/registry'
+import { address, baseRegistry, entry, type Registry } from '@mamoru/registry'
 import type { GateStep, Observation, PoolObs } from '../types.ts'
 
-/** Purga, identity part: the pool the chain returns is the registry's, with the registry's tokens, fee and spacing. */
-export function purgaIdentity(pool: PoolObs): GateStep {
-  const e = entry(pool.name, baseRegistry)
+/**
+ * The registry an observation was read against. An observation without one is a Base observation until the
+ * registry default is retired; after that the field is required and this is `obs.registry`.
+ */
+export function registryOf(obs: Pick<Observation, 'registry'>): Registry {
+  return obs.registry ?? baseRegistry
+}
+
+/**
+ * Purga, identity part: the pool the chain returns is the registry's, with the registry's tokens, fee and spacing.
+ * The registry is the observation's: a pool name it lacks is POLICY_TARGET_NOT_IN_REGISTRY, never a Base lookup.
+ */
+export function purgaIdentity(pool: PoolObs, registry: Registry): GateStep
+/** @deprecated Bound to `baseRegistry`. Pass the registry of the observation: `purgaIdentity(pool, registryOf(obs))`. */
+export function purgaIdentity(pool: PoolObs): GateStep
+export function purgaIdentity(pool: PoolObs, registry?: Registry): GateStep {
+  const r = registry ?? baseRegistry
+  const e = entry(pool.name, r)
   const id = pool.identity
   if (!e.token0 || !e.token1 || !e.fee || !e.tickSpacing || isAddressEqual(id.factoryPool, zeroAddress)) {
     return { gate: 'purga', verdict: 'NO_GO', reason: 'PURGA_IDENTITY_INCOMPLETE' }
   }
   const same =
     isAddressEqual(id.factoryPool, e.address) &&
-    isAddressEqual(id.token0, address(e.token0, baseRegistry)) &&
-    isAddressEqual(id.token1, address(e.token1, baseRegistry)) &&
+    isAddressEqual(id.token0, address(e.token0, r)) &&
+    isAddressEqual(id.token1, address(e.token1, r)) &&
     id.fee === e.fee &&
     id.tickSpacing === e.tickSpacing
   return same ? { gate: 'purga', verdict: 'GO', reason: 'PURGA_OK' } : { gate: 'purga', verdict: 'NO_GO', reason: 'PURGA_IDENTITY_MISMATCH' }

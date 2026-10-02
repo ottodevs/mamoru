@@ -1,9 +1,15 @@
 import type { Address, Hex, ReasonCode } from '@mamoru/domain'
-import type { RegistryName } from '@mamoru/registry'
+import type { Registry, RegistryName } from '@mamoru/registry'
 
 /** Plan §8.1. Every chain read is pinned to `block`. */
 export type Observation = {
   chainId: number
+  /**
+   * The registry the observation was read against. The gates compare every pool identity with it and `decide`
+   * never resolves it from a chain id or a constant. Optional only while the registry default exists: an observation
+   * without one is a Base observation (`baseRegistry`). It becomes required when the default is retired.
+   */
+  registry?: Registry
   block: { number: bigint; hash: Hex; timestamp: bigint }
   safeBlock: { number: bigint; hash: Hex }
   account: { address: Address; deployed: boolean; nonceKey: bigint; nonce: bigint }

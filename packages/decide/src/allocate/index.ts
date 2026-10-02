@@ -4,7 +4,7 @@ import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { safeSavings } from '../enter/index.ts'
 import { depthOf } from '../depth/index.ts'
 import { rangeFor, widthFor, widthOf } from '../geometry/index.ts'
-import { purgaIdentity } from '../gates/index.ts'
+import { purgaIdentity, registryOf } from '../gates/index.ts'
 import type { GateStep, Observation, PoolObs, Proposal } from '../types.ts'
 import { amountsForLiquidity, inSavings, volatileOf } from '../value.ts'
 
@@ -103,7 +103,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     const idleVolatile = obs.balances[volatile] ?? 0n
     const deployed = value
     value += inSavings(p, volatile, idleVolatile, savings)
-    const purga = purgaIdentity(pool)
+    const purga = purgaIdentity(pool, registryOf(obs))
     if (purga.verdict !== 'GO') trail.push(purga)
     // Spec 004 FREEZE (#101): a bucket whose pool is in a fast fall gets no entry; its share waits where it is.
     const blocked = purga.verdict !== 'GO' ? purga.reason : frozen?.has(b.id) ? ('DECIDE_ENTRY_PAUSED_FALL' as ReasonCode) : null

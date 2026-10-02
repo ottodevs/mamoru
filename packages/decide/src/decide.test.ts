@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { conservadorLabV1, conservadorV1 } from '@mamoru/policy'
-import { baseRegistry, address, entry } from '@mamoru/registry'
+import { conservadorLabV1, conservadorV1, type PolicyVersion } from '@mamoru/policy'
+import { address, baseRegistry, entry, monadRegistry, type Registry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { canonicalJson, decide, type Observation, type PoolObs, type PositionObs } from './index.ts'
+import { purgaIdentity, registryOf } from './gates/index.ts'
+import { allocate, canonicalJson, decide, type Observation, type PoolObs, type PositionObs } from './index.ts'
 
 const POOL = 'pool:USDC/cbBTC/500'
 const ACCOUNT = '0x00000000000000000000000000000000000000aa'
@@ -162,5 +163,87 @@ describe('decide', () => {
     const d = decide(obs({ slot: { opId: 'op-1', state: 'submitted' }, balances: { USDC: 10_000_000_000n } }), conservadorLabV1)
     expect(d.reason).toBe('DECIDE_SLOT_BUSY')
     expect(d.proposal).toBeNull()
+  })
+
+  test('a Base observation that names its registry decides byte for byte like one that does not', () => {
+    const o = obs({ balances: { USDC: 10_000_000_000n, cbBTC: 0n }, deposits: [deposit(true)] })
+    expect(canonicalJson(decide({ ...o, registry: baseRegistry }, conservadorLabV1))).toBe(canonicalJson(decide(o, conservadorLabV1)))
+  })
+})
+
+// The registry travels with the observation. Monad pools are compared with monad.json and never with base.json.
+const MONAD_POOL = 'pool:WMON/USDC/3000'
+const MONAD_TICK = -260_000
+
+function monadPool(registry: Registry = monadRegistry, over: Partial<PoolObs> = {}): PoolObs {
+  const e = entry(MONAD_POOL, monadRegistry)
+  return {
+    name: MONAD_POOL,
+    address: e.address,
+    token0: e.token0!,
+    token1: e.token1!,
+    fee: e.fee!,
+    tickSpacing: e.tickSpacing!,
+    sqrtPriceX96: sqrtRatioAtTick(MONAD_TICK),
+    tick: MONAD_TICK,
+    liquidity: 10n ** 18n,
+    twapTick: MONAD_TICK,
+    identity: { factoryPool: e.address, token0: address(e.token0!, registry), token1: address(e.token1!, registry), fee: e.fee!, tickSpacing: e.tickSpacing! },
+    ...over,
+  }
+}
+
+/** A scenario policy over the Monad candidate pool. The real one arrives with the Monad session policies. */
+const monadPolicy: PolicyVersion = {
+  ...conservadorLabV1,
+  allocation: 'target-weights',
+  minEntry: 100_000n,
+  buckets: conservadorLabV1.buckets.map((b) => (b.pools.length ? { ...b, pools: [MONAD_POOL] } : b)),
+}
+
+function monadObs(over: Partial<Observation> = {}): Observation {
+  return obs({
+    registry: monadRegistry,
+    balances: { USDC: 10_000_000_000n, WMON: 0n },
+    pools: [monadPool()],
+    ethPrice: { pool: MONAD_POOL, sqrtPriceX96: sqrtRatioAtTick(MONAD_TICK), token0: 'WMON' },
+    ...over,
+  })
+}
+
+describe('the registry of the observation', () => {
+  test('registryOf is the observation registry, and Base while the default exists', () => {
+    expect(registryOf(monadObs())).toBe(monadRegistry)
+    expect(registryOf(obs())).toBe(baseRegistry)
+  })
+
+  test('Purga accepts a Monad pool against monad.json', () => {
+    expect(purgaIdentity(monadPool(), monadRegistry)).toEqual({ gate: 'purga', verdict: 'GO', reason: 'PURGA_OK' })
+  })
+
+  test('Purga refuses a Monad pool whose chain tokens are the Base ones', () => {
+    const baseTokens = monadPool(monadRegistry, { identity: { ...monadPool().identity, token1: address('USDC', baseRegistry) } })
+    expect(purgaIdentity(baseTokens, monadRegistry)).toEqual({ gate: 'purga', verdict: 'NO_GO', reason: 'PURGA_IDENTITY_MISMATCH' })
+  })
+
+  test('a Monad pool against the Base registry fails loudly, never with a Base lookup', () => {
+    expect(() => purgaIdentity(monadPool(), baseRegistry)).toThrow('POLICY_TARGET_NOT_IN_REGISTRY')
+    expect(() => purgaIdentity(monadPool())).toThrow('POLICY_TARGET_NOT_IN_REGISTRY')
+    expect(() => allocate(monadObs({ registry: undefined }), monadPolicy, false)).toThrow('POLICY_TARGET_NOT_IN_REGISTRY')
+  })
+
+  test('allocate on a Monad observation gates the pool with monad.json and proposes the Monad entry', () => {
+    const a = allocate(monadObs(), monadPolicy, false)
+    expect(a.trail).toEqual([])
+    expect(a.proposal).toMatchObject({ kind: 'enter_swap', pool: MONAD_POOL, tokenIn: 'USDC', tokenOut: 'WMON', fee: 3000 })
+    expect(a.buckets.find((b) => b.pool === MONAD_POOL)?.code).toBe('STRATEGY_PREFERENCE_DEVIATION')
+  })
+
+  test('allocate on a Monad observation refuses a pool whose identity is not the registry one', () => {
+    const bad = monadPool(monadRegistry, { identity: { ...monadPool().identity, fee: 500 } })
+    const a = allocate(monadObs({ pools: [bad] }), monadPolicy, false)
+    expect(a.proposal).toBeNull()
+    expect(a.trail).toEqual([{ gate: 'purga', verdict: 'NO_GO', reason: 'PURGA_IDENTITY_MISMATCH' }])
+    expect(a.buckets.find((b) => b.pool === MONAD_POOL)?.code).toBe('PURGA_IDENTITY_MISMATCH')
   })
 })
