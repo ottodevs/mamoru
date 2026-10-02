@@ -166,7 +166,11 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const deposits = await readDeposits(client, acct, input, blockNumber, safe.number)
 
   const again = await client.getBlock({ blockNumber })
-  if (again.hash !== block.hash) throw new ReasonError('OBS_BLOCK_INCONSISTENT', `block ${blockNumber} changed hash during the observation`)
+  if (again.hash !== block.hash) {
+    // The pool state this observation published was read around a reorg: no other account may use it.
+    if (ownPools) input.poolCache?.delete(poolKey)
+    throw new ReasonError('OBS_BLOCK_INCONSISTENT', `block ${blockNumber} changed hash during the observation`)
+  }
   // Only a consistent observation moves the history cursor.
   if (cursorRead && input.historyCursor) Object.assign(input.historyCursor, cursorRead.next)
 
