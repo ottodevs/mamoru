@@ -41,7 +41,7 @@ function engine(all: EngineSession[]): Engine {
 }
 
 describe('one live review', () => {
-  test('12 sessions and 3 positions: one request for the sessions, eleven for the observation', async () => {
+  test('12 sessions and 3 positions: one request for the sessions, twelve for the observation', async () => {
     const all = sessions()
     expect(new Set(all.map((s) => s.permissionId)).size).toBe(12)
     const e = engine(all)
@@ -55,7 +55,7 @@ describe('one live review', () => {
     if (r.kind !== 'decided') throw new Error('unreachable')
     expect(r.op).toBeNull()
     expect(r.observation.positions.map((p) => p.pool)).toEqual(['pool:USDC/cbBTC/500', 'pool:WETH/USDC/3000', 'pool:USDC/USDT/100'])
-    expect(chain.byMethod()).toEqual({ eth_chainId: 1, eth_getBlockByNumber: 5, eth_getCode: 1, eth_call: 3, eth_getLogs: 2 })
+    expect(chain.byMethod()).toEqual({ eth_chainId: 1, eth_getBlockByNumber: 5, eth_getCode: 1, eth_call: 3, eth_getLogs: 3 })
     // The session checks are the first request: every permission in one aggregate3.
     const first = chain.requests.find((x) => x.method === 'eth_call')!
     const inner = decodeFunctionData({ abi: multicall3Abi, data: first.params[0].data }).args[0] as readonly { target: Address; callData: Hex }[]

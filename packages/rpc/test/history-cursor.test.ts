@@ -64,8 +64,8 @@ describe('readPositionHistoryFrom', () => {
     expect(cursor.through).toBe(145n)
     ranges.length = 0
     const second = await readPositionHistoryFrom(client, cursor, [1n, 2n], 100n, 200n, 195n)
-    // Second call: one read from 146 for the stable part and the unsafe tail; nothing below the cursor again.
-    expect(ranges).toEqual([[146n, 200n]])
+    // Second call: the stable part from 146, the unsafe tail from 196; nothing below the cursor again.
+    expect(ranges).toEqual([[146n, 195n], [196n, 200n]])
     expect(cursor.through).toBe(195n)
     expect(cursor.events.every((e) => e.blockNumber <= 195n)).toBe(true)
     expect(second.map(key)).toEqual((await readPositionHistory(client, [1n, 2n], 100n, 200n)).map(key))
@@ -104,6 +104,42 @@ describe('readPositionHistoryFrom', () => {
     // A caller's hash that differs from the cursor's is a reorg: start over.
     const { next } = await readFrom(client, cursor, [1n], 100n, 160n, 145n, '0xf91')
     expect(next.through).toBe(99n)
+  })
+
+  test('the cursor moves only when the block that ends the range still has its hash after the log read', async () => {
+    const { client, forks } = fakeClient(LOGS)
+    const order: string[] = []
+    const [getBlock, request] = [(client as any).getBlock, (client as any).request]
+    ;(client as any).getBlock = async (q: any) => (order.push(`block ${q.blockNumber}`), getBlock(q))
+    ;(client as any).request = async (q: any) => (order.push('logs'), request(q))
+    const cursor = historyCursor()
+    await readFrom(client, cursor, [1n], 100n, 150n, 145n, '0xa91').then(({ next }) => Object.assign(cursor, next))
+    // Stable range, then its last block, then the tail.
+    expect(order).toEqual(['logs', 'block 145', 'logs'])
+    // A log provider on another view of block 190 (the hash the caller holds is not the one read after the logs).
+    forks.add(190n)
+    const { next } = await readFrom(client, cursor, [1n], 100n, 200n, 190n, '0xabe')
+    expect(next.through).toBe(145n)
+    expect(next.hash).toBe('0xa91')
+    expect(next.events.some((e) => e.blockNumber > 145n)).toBe(false)
+  })
+
+  test('a backfill whose cursor block changed during the read is thrown away', async () => {
+    const { client, forks } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    await readPositionHistoryFrom(client, cursor, [2n], 100n, 150n, 150n)
+    const request = (client as any).request
+    let first = true
+    ;(client as any).request = async (q: any) => {
+      // The backfill of tokenId 1 is the first log read; block 150 changes under it.
+      if (first) forks.add(150n)
+      first = false
+      return request(q)
+    }
+    const { events, next } = await readFrom(client, cursor, [1n, 2n], 100n, 150n, 150n)
+    // Read again from the origin on the new view, with a cursor that holds the new hash.
+    expect(next.hash).toBe('0xf96')
+    expect(events.map(key)).toEqual((await readPositionHistory(client, [1n, 2n], 100n, 150n)).map(key))
   })
 
   test('a tokenId the caller no longer wants is left out of the tail', async () => {
