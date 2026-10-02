@@ -72,6 +72,8 @@ const ARM_DAY_MS = 86_400_000
 const ARM_STALE_MS = 300_000
 /** Over the RPC budget an account with nothing in flight is still reviewed at least this often. */
 const BUDGET_REVIEW_MS = 900_000
+/** A stored engine operation left proposed or submitted counts as in flight for this long after its last change; older, it is a leftover of a past run. */
+const BUDGET_IN_FLIGHT_MS = 1_800_000
 /** The relayer does not pay to deploy a Safe that holds less than this (1 USDC). */
 export const MIN_DEPLOY_USDC = 1_000_000n
 /**
@@ -1408,6 +1410,7 @@ export class Operator {
             console.log(`[engine ${acc.accountKey}] owner tx pending, review held`)
             return
           }
+          const startedAt = Date.now()
           const r = await engine.review()
           this.revokeManage(engine)
           if (r.kind === 'observation-failed') {
@@ -1422,8 +1425,9 @@ export class Operator {
             if (last?.detail) logErr(prefix, last.detail)
             else console.log(prefix)
             safeMetrics(() => this.engineHealth.record(acc.accountKey, true, d.code, undefined))
-            // Only a review that reached a decision counts: one that was held, failed to observe or threw is tried again on the next tick.
-            runner.reviewedAt = Date.now()
+            // Only a review that reached a decision counts, from when it started (it may then wait minutes on its
+            // operation): one that was held, failed to observe or threw is tried again on the next tick.
+            runner.reviewedAt = startedAt
           }
         } catch (e) {
           // `e` goes to the classifier as it is: reading or coercing an odd thrown value here could itself throw.
@@ -1450,14 +1454,17 @@ export class Operator {
 
   /**
    * Over the hourly RPC budget, a review that can wait is skipped: the account has nothing in flight and its
-   * last review that reached a decision is less than BUDGET_REVIEW_MS old. In flight is an engine operation
-   * that is not terminal, in this run's journal or stored from before a restart. Reads are never moved to
+   * last review that reached a decision started less than BUDGET_REVIEW_MS ago. In flight is an engine operation
+   * that is not terminal in this run's journal, or one stored as proposed or submitted that changed in the last
+   * BUDGET_IN_FLIGHT_MS (a restart starts a new journal). Reads are never moved to
    * another provider; the operator does less.
    */
   private reviewBraked(acc: Pick<AccountState, 'ops'>, runner: Pick<Runner, 'engine' | 'reviewedAt'>, now: number = Date.now()): boolean {
     if (!this.rpcOverBudget(now)) return false
     if (runner.engine.journal.ops.some((o) => !isTerminal(o.state))) return false
-    if (acc.ops.some((o) => o.opId.startsWith('eng-') && (o.state === 'proposed' || o.state === 'submitted'))) return false
+    // A row no run will ever finish (its journal is gone) must not hold the brake off for good: only a recent one counts.
+    const recent = (o: { updatedAt: string }) => now - (Date.parse(o.updatedAt) || 0) < BUDGET_IN_FLIGHT_MS
+    if (acc.ops.some((o) => o.opId.startsWith('eng-') && (o.state === 'proposed' || o.state === 'submitted') && recent(o))) return false
     return runner.reviewedAt !== undefined && now >= runner.reviewedAt && now - runner.reviewedAt < BUDGET_REVIEW_MS
   }
 

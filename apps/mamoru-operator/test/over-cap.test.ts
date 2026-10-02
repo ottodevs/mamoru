@@ -817,7 +817,7 @@ describe('the armed watcher reads every armed Safe in one request', () => {
 // The keyed RPC provider has an hourly budget: over it the loops that can wait do less, and nothing is read elsewhere.
 describe('over the RPC budget the background loops slow down', () => {
   type Run = { engine: { journal: { ops: { state: string }[] } }; reviewedAt?: number }
-  type Braked = { reviewBraked(acc: { ops: { opId: string; state: string }[] }, r: Run, now?: number): boolean; checkArmed(): Promise<void>; armRead: Map<string, number>; cfg: { rpcBudget?: { over(): boolean; cuPerHour: number } } }
+  type Braked = { reviewBraked(acc: { ops: { opId: string; state: string; updatedAt: string }[] }, r: Run, now?: number): boolean; checkArmed(): Promise<void>; armRead: Map<string, number>; cfg: { rpcBudget?: { over(): boolean; cuPerHour: number } } }
   const priv = (op: Operator) => op as unknown as Braked
   const budget = (op: Operator, over: boolean) => {
     const b = { cuPerHour: 40_000, over: () => over }
@@ -856,14 +856,24 @@ describe('over the RPC budget the background loops slow down', () => {
     }
   })
 
-  test('after a restart the journal is new: an engine operation stored as proposed or submitted still counts as in flight', () => {
+  test('after a restart the journal is new: a recent engine operation stored as proposed or submitted still counts as in flight', () => {
     const w = world(0n)
     budget(w.op, true)
     const run = { engine: { journal: { ops: [] } }, reviewedAt: NOW - 1_000 }
-    expect(priv(w.op).reviewBraked({ ops: [{ opId: 'eng-1-2-op-7-swap', state: 'submitted' }] }, run, NOW)).toBe(false)
-    expect(priv(w.op).reviewBraked({ ops: [{ opId: 'eng-1-2-op-7-swap', state: 'proposed' }] }, run, NOW)).toBe(false)
+    const at = (ms: number) => new Date(NOW - ms).toISOString()
+    expect(priv(w.op).reviewBraked({ ops: [{ opId: 'eng-1-2-op-7-swap', state: 'submitted', updatedAt: at(60_000) }] }, run, NOW)).toBe(false)
+    expect(priv(w.op).reviewBraked({ ops: [{ opId: 'eng-1-2-op-7-swap', state: 'proposed', updatedAt: at(29 * 60_000) }] }, run, NOW)).toBe(false)
     // Finished engine operations and owner operations do not hold the brake off.
-    expect(priv(w.op).reviewBraked({ ops: [{ opId: 'eng-1-2-op-7-swap', state: 'confirmed' }, { opId: 'own-1-activate', state: 'proposed' }] }, run, NOW)).toBe(true)
+    expect(priv(w.op).reviewBraked({ ops: [{ opId: 'eng-1-2-op-7-swap', state: 'confirmed', updatedAt: at(60_000) }, { opId: 'own-1-activate', state: 'proposed', updatedAt: at(60_000) }] }, run, NOW)).toBe(true)
+  })
+
+  test('a stored engine operation no run will finish does not hold the brake off for good: after 30 minutes it is a leftover', () => {
+    const w = world(0n)
+    budget(w.op, true)
+    const run = { engine: { journal: { ops: [] } }, reviewedAt: NOW - 1_000 }
+    const old = new Date(NOW - 31 * 60_000).toISOString()
+    expect(priv(w.op).reviewBraked({ ops: [{ opId: 'eng-1-1-op-3-swap', state: 'submitted', updatedAt: old }] }, run, NOW)).toBe(true)
+    expect(priv(w.op).reviewBraked({ ops: [{ opId: 'eng-1-1-op-3-swap', state: 'proposed', updatedAt: 'not a date' }] }, run, NOW)).toBe(true)
   })
 
   test('a clock set back does not keep an account unreviewed', () => {
