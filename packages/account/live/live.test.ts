@@ -171,7 +171,7 @@ describe('live owner path: pure', () => {
     expect(JSON.stringify(shape)).not.toContain('app.mamoru.lol')
     // An authenticator that writes other keys, extension data and a broken signature still gets a shape, not a throw.
     const odd = assertionShape({ authenticatorData: new Uint8Array(80).fill(0x81), clientDataJSON: new TextEncoder().encode('{"challenge":"x","type":"webauthn.get","other":1}'), signature: new Uint8Array([0x30, 0x00]) })
-    expect(odd).toMatchObject({ authenticatorDataLength: 80, flags: '0x81', clientDataKeys: ['challenge', 'type', 'other'], clientDataPrefixOk: false, highS: null })
+    expect(odd).toMatchObject({ authenticatorDataLength: 80, flags: '0x81', clientDataKeys: ['challenge', 'type', '+1'], clientDataPrefixOk: false, highS: null })
     expect(odd.signatureDer).not.toBe('ok')
     expect(assertionShape({ authenticatorData: new Uint8Array(), clientDataJSON: new Uint8Array([0xff]), signature: new Uint8Array() })).toMatchObject({ flags: null, clientDataKeys: null })
     expect(ownerSignatureShape(browserOwnerSignature(sig, hash))).toEqual({ decodes: true, authenticatorDataLength: 37, flags: '0x05', clientDataKeys: ['type', 'challenge', 'origin', 'crossOrigin'] })
