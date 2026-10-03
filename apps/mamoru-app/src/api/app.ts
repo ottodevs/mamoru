@@ -18,8 +18,8 @@ import type { ApyCache, Fetcher } from './apy/source.ts'
 
 export type AppOptions = { now?: () => Date; operatorFetch?: OperatorFetch; apyFetch?: Fetcher; apyCache?: () => ApyCache | null }
 
-/** Hard cap per account in live mode, USDC base units (25 USDC). */
-export const LIVE_CAP_USDC = '25000000'
+/** Hard cap per account in live mode, USDC base units (100 USDC). */
+export const LIVE_CAP_USDC = '100000000'
 
 export function createApp(options: AppOptions = {}) {
   const now = options.now ?? (() => new Date())

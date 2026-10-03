@@ -1,4 +1,4 @@
-// E2E of a deposit over the cap (otto/mamoru#4): the owner arms with 0 USDC, 26.92 USDC lands, the operator reports
+// E2E of a deposit over the cap (otto/mamoru#4): the owner arms with 0 USDC, 101.92 USDC lands, the operator reports
 // DEPOSIT_OVER_CAP instead of starting, the owner withdraws the excess from the still undeployed Safe, then starts.
 // Same harness as e2e-armed.ts: the live operator on an anvil fork of Base that keeps chain id 8453.
 // The upstream RPC comes from the environment only (RPC_URL or BASE_RPC_URL, or ~/.config/mamoru-operator/env)
@@ -30,7 +30,7 @@ if (!process.env.RPC_URL && existsSync(envFile)) {
 }
 if (!process.env.RPC_URL && process.env.BASE_RPC_URL) process.env.RPC_URL = process.env.BASE_RPC_URL
 
-const DEPOSIT = 26_920_000n
+const DEPOSIT = 101_920_000n
 const EXCESS = DEPOSIT - LIVE_CAP_USDC
 const RECIPIENT = getAddress(`0x${'c0ffee'.padStart(40, '0')}`)
 const POLICY = process.env.MAMORU_POLICY ?? 'conservador-live-v2'
