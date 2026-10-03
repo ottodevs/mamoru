@@ -58,6 +58,10 @@ const BLOCK_SECONDS = 2n
 const PREPARE_TTL_MS = 5 * 60_000
 /** On top of the policy reserve: the first userOp prefund leaves the Safe's balance into its EntryPoint deposit. */
 const TOP_UP_MARGIN_WEI = 200_000_000_000_000n
+/** Relayer gas for one activation beyond the Safe top-up: the Safe deploy and the ~14M gas execTransaction on Base. */
+const ACTIVATION_GAS_WEI = 200_000_000_000_000n
+/** While an activation waits for the relayer to be funded, it is logged at most this often per account. */
+const RELAYER_LOW_LOG_MS = 3_600_000
 /** Blocks of deposit progress (~10 min on Base) before it is written to the state file. */
 const DEPOSITS_SAVE_BLOCKS = 300n
 /** How long a POST waits for the owner transaction before answering with the op as it stands; the SPA polls /ops. */
@@ -231,6 +235,8 @@ export class Operator {
   mirrorMismatches = 0
   private readonly engineHealth = new EngineHealthTracker()
   private relayerBalanceCache: { at: number; value: bigint } | null = null
+  /** Last time each account's activation was logged as waiting for relayer ETH. */
+  private readonly relayerLowLogged = new Map<string, number>()
   /** Pool state of the last few blocks: accounts reviewed at the same block read it once. */
   private readonly poolCache = poolStateCache()
 
@@ -260,6 +266,22 @@ export class Operator {
       this.relayerBalanceCache = { at: now, value }
     }
     return { wei: this.relayerBalanceCache.value.toString(), cachedAgeMs: now - this.relayerBalanceCache.at }
+  }
+
+  /**
+   * Whether the relayer can pay one activation now: the Safe top-up plus the deploy and execTransaction gas. When it
+   * cannot, the owner's signed activation waits armed instead of failing; a relayer short of ETH is ours to fix.
+   */
+  private async relayerCanActivate(acc: AccountState): Promise<boolean> {
+    const need = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI + ACTIVATION_GAS_WEI
+    const have = BigInt((await this.relayerBalance()).wei)
+    if (have >= need) return true
+    const at = Date.now()
+    if (at - (this.relayerLowLogged.get(acc.accountKey) ?? 0) >= RELAYER_LOW_LOG_MS) {
+      this.relayerLowLogged.set(acc.accountKey, at)
+      logErr(`[armed] ${acc.accountKey} relayer short of ETH, activation waits armed:`, { have: have.toString(), need: need.toString() })
+    }
+    return false
   }
 
   /** Restarts the engine loop of every account that was active. */
@@ -826,6 +848,8 @@ export class Operator {
       const usdc = await this.usdcOf(live.safe)
       if (usdc === 0n) return this.arm(acc, p, signature)
       if (usdc > LIVE_CAP_USDC) throw depositOverCap(usdc)
+      // The relayer cannot pay for it now: the signature waits armed and the watcher runs it once the relayer is funded.
+      if (!(await this.relayerCanActivate(acc))) return this.arm(acc, p, signature)
       this.disarm(acc, 'ARMED_SUPERSEDED')
     }
     const op = this.newOp(acc, kind === 'stop' ? 'exit' : kind)
@@ -833,6 +857,9 @@ export class Operator {
     const run = this.lock(acc.accountKey).run(() => this.execute(acc, live, p, signature, op))
     run.catch((e) => {
       logErr(`[owner] ${op.opId}:`, e)
+      this.relayerBalanceCache = null
+      // The relayer ran out of ETH before the owner's transaction went out: same op, back to waiting armed.
+      if (kind === 'activate' && !(e instanceof HttpError) && relayerShort(e) && !acc.active) return this.rearm(acc, op, p, signature)
       // A refusal before anything was sent keeps its own code; anything else may have reached the chain.
       this.failOwner(acc, op, e instanceof HttpError ? e.code : 'OWNER_TX_ERROR')
     })
@@ -1004,6 +1031,13 @@ export class Operator {
     return { ...op }
   }
 
+  /** Puts an activation that could not be sent back to waiting armed, on the same op; it costs the owner nothing. */
+  private rearm(acc: AccountState, op: OpView, p: Prepared, signature: Hex): void {
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now() }
+    this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
+    console.log(`[armed] ${acc.accountKey} ${op.opId} back to armed: the relayer could not pay for it`)
+  }
+
   /** Drops a pending armed activation, failing its op with `code` (and what `detail` adds to the op). */
   private disarm(acc: AccountState, code: string, detail: Partial<OpView> = {}): void {
     const a = acc.armed
@@ -1088,6 +1122,8 @@ export class Operator {
     }
     // Too little to deploy a Safe for: stay armed and wait for more (funding reports deployMinUsdc).
     if (!deployed && usdc < MIN_DEPLOY_USDC) return
+    // The relayer cannot pay for it yet: stay armed, without using up a try.
+    if (!(await this.relayerCanActivate(acc))) return
     acc.armed = undefined
     this.patchOp(acc, a.opId, { code: undefined })
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
@@ -1097,7 +1133,9 @@ export class Operator {
       await this.execute(acc, live, p, a.signature, op)
     } catch (e) {
       // Transient RPC/relay failures keep the signed activation armed; the watcher retries it on the next pass.
-      const tries = (a.tries ?? 0) + 1
+      // A relayer short of ETH is ours to fix, not the owner's: it does not use up a try.
+      this.relayerBalanceCache = null
+      const tries = (a.tries ?? 0) + (relayerShort(e) ? 0 : 1)
       logErr(`[armed] ${op.opId} attempt ${tries}:`, e)
       if (tries < ARM_MAX_TRIES && !acc.active) {
         acc.armed = { ...a, tries }
@@ -1594,6 +1632,16 @@ function isRevert(e: unknown): boolean {
   let cur = e as { message?: string; details?: string; code?: number; cause?: unknown } | undefined
   for (let i = 0; i < 8 && cur; i++) {
     if (cur.code === 3 || /execution reverted|\bGS\d{3}\b/i.test(`${cur.message ?? ''} ${cur.details ?? ''}`)) return true
+    cur = cur.cause as typeof cur
+  }
+  return false
+}
+
+/** True when the relayer could not pay for a transaction (the node refused it before it was broadcast). */
+function relayerShort(e: unknown): boolean {
+  let cur = e as { message?: string; details?: string; cause?: unknown } | undefined
+  for (let i = 0; i < 8 && cur; i++) {
+    if (/insufficient funds/i.test(`${cur.message ?? ''} ${cur.details ?? ''}`)) return true
     cur = cur.cause as typeof cur
   }
   return false
