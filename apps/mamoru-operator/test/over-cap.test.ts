@@ -1006,6 +1006,27 @@ describe('an activation waits for the relayer instead of failing', () => {
     expect(acc.armed?.opId).toBe(armed.opId)
   })
 
+  test('an armed activation whose execTransaction went out is never sent again, whatever the error after it', async () => {
+    type Send = (tx: { to: string; data?: Hex; value?: bigint }, onSent?: (h: Hex) => void) => Promise<unknown>
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    const armed = await w.op.submit(ctx, 'activate', sign(tx))
+    const relayer = (w.op as unknown as { relayer: { send: Send } }).relayer
+    const send = relayer.send.bind(relayer)
+    relayer.send = async (t, onSent) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && t.data) {
+        onSent?.(`0x${'ab'.repeat(32)}`)
+        throw new Error('insufficient funds for gas * price + value (receipt poll)')
+      }
+      return send(t, onSent)
+    }
+    w.chain.usdc = 20_000_000n
+    const acc = w.state.accounts.k!
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.armed).toBeUndefined()
+    expect(acc.ops.find((o) => o.opId === armed.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR', txHash: `0x${'ab'.repeat(32)}` })
+  })
+
   test('any other send failure still fails the op and counts against the owner budget', async () => {
     const w = world(20_000_000n)
     w.knobs.onSend = (t) => {

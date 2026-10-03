@@ -1158,6 +1158,11 @@ export class Operator {
       const unsent = !acc.ops.find((o) => o.opId === op.opId)?.txHash
       const tries = (a.tries ?? 0) + (relayerShort(e) && unsent ? 0 : 1)
       logErr(`[armed] ${op.opId} attempt ${tries}:`, e)
+      // Once the execTransaction went out it is never sent again: the receipt settles it (reconcileOwner reads it).
+      if (!unsent) {
+        if (!acc.active) this.failOwner(acc, op, 'OWNER_TX_ERROR')
+        return
+      }
       if (tries < ARM_MAX_TRIES && !acc.active) {
         acc.armed = { ...a, tries }
         this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
