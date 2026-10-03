@@ -2,9 +2,9 @@
 
 Mamoru v1 is a non-custodial savings account on Base. You own a Safe smart account through a passkey and keep a recovery kit that lets you leave without Mamoru. A scoped session key may only call Uniswap v3 on Base within a written policy. The dashboard shows what the account holds, what needs your decision, and what Mamoru would do next, with the source and chain of every figure.
 
-As of 26 September 2026, app.mamoru.lol runs a live path on Base, with a hard cap of 25 USDC per account. Within that cap, your passkey signs starting the allocation, transferring funds out and stopping it, and a relayer sends those transactions; once started, the engine enters and manages a Uniswap v3 position for you with a session key. Above the cap, and for the harvest and every session-key attack, everything is still only demonstrated on a Base fork. ([spec](specs/001-mamoru-v1/spec.md), [dashboard spec](specs/001-mamoru-v1/dashboard.md))
+As of 26 September 2026, app.mamoru.lol runs a live path on Base, with a hard cap of 100 USDC per account. Within that cap, your passkey signs starting the allocation, transferring funds out and stopping it, and a relayer sends those transactions; once started, the engine enters and manages a Uniswap v3 position for you with a session key. Above the cap, and for the harvest and every session-key attack, everything is still only demonstrated on a Base fork. ([spec](specs/001-mamoru-v1/spec.md), [dashboard spec](specs/001-mamoru-v1/dashboard.md))
 
-- App: https://app.mamoru.lol (passkey onboarding, counterfactual Safe on Base, recovery kit, live start, transfer and stop up to 25 USDC per account, dashboard with the Base pool read every 2 minutes)
+- App: https://app.mamoru.lol (passkey onboarding, counterfactual Safe on Base, recovery kit, live start, transfer and stop up to 100 USDC per account, dashboard with the Base pool read every 2 minutes)
 - Landing: https://mamoru.lol ([ottodevs/mamoru-landing](https://github.com/ottodevs/mamoru-landing))
 - Built at ETHGlobal Tokyo 2026 (25 to 27 September). First commit 25 September 14:03 CEST.
 
@@ -28,11 +28,11 @@ How this was built: Brais and Otto decided the product, the design and every mer
 
 ## One sentence
 
-Mamoru v1 is a non-custodial autonomous savings account on Base whose dashboard shows every figure with its chain and source. Within a 25 USDC per account cap it runs live, with the owner's passkey signing every start, transfer and stop; above the cap, and for the harvest and the session-key attacks, it is demonstrated on a Base fork.
+Mamoru v1 is a non-custodial autonomous savings account on Base whose dashboard shows every figure with its chain and source. Within a 100 USDC per account cap it runs live, with the owner's passkey signing every start, transfer and stop; above the cap, and for the harvest and the session-key attacks, it is demonstrated on a Base fork.
 
 ## Live path on Base
 
-app.mamoru.lol runs a live path on Base (chain id 8453), capped at 25 USDC per account (`LIVE_CAP_USDC` in [`packages/account/live/index.ts`](packages/account/live/index.ts)).
+app.mamoru.lol runs a live path on Base (chain id 8453), capped at 100 USDC per account (`LIVE_CAP_USDC` in [`packages/account/live/index.ts`](packages/account/live/index.ts)).
 
 The account owner is a WebAuthn passkey held by Safe's `SafeWebAuthnSharedSigner`, the sole owner of a Safe 1.4.1 with the Safe7579 adapter and Rhinestone Smart Sessions installed. The owner signs three actions, each as one Safe transaction:
 
@@ -71,7 +71,7 @@ MultiBaas is one of two sources for the pool history on the production dashboard
 - Mamoru links the Uniswap V3 pool it uses, the NonfungiblePositionManager and EntryPoint v0.7 on Base in MultiBaas.
 - Only the engine Worker calls MultiBaas, with a read-only key in the least-privileged "DApp User" group. The browser never calls it.
 - The engine Worker runs every 2 minutes on Base at the `safe` block. Pool state (`slot0`, liquidity, TWAP, balances) and account state come from Base RPC. Pool swaps and liquidity changes (MBQ-01 and MBQ-02, `Swap`, `Mint` and `Burn` of the USDC/cbBTC 0.05% pool) come from MultiBaas event queries that Mamoru's server checks against Base RPC before showing them. Each reconciled row is shown as "MultiBaas · Base · checked at block N". Probe: 10 of 10 rows reconciled, none missing on either side ([evidence](evidence/multibaas/mb-02-04-results.md), [code](apps/mamoru-engine/src/sync/multibaas-index.ts)).
-- MBQ-03 to MBQ-05 and MBQ-08 (position history, position transfers, account operations, account swaps) are built and tested but not used yet: live accounts are capped at 25 USDC and hold at most one small position on Base, so there is not yet enough position history, transfers or account-level operations to show. MBQ-06 and MBQ-07 are not used (see "Experience with MultiBaas").
+- MBQ-03 to MBQ-05 and MBQ-08 (position history, position transfers, account operations, account swaps) are built and tested but not used yet: live accounts are capped at 100 USDC and hold at most one small position on Base, so there is not yet enough position history, transfers or account-level operations to show. MBQ-06 and MBQ-07 are not used (see "Experience with MultiBaas").
 - MultiBaas is queried at most every 10 minutes to fit the Free plan.
 - History older than the index start block comes from Base RPC logs, labeled `PROJ_SOURCE_FALLBACK_RPC` with cause `MB_BEFORE_START_BLOCK` ("before MultiBaas start"), because the Free plan cannot index further back ([evidence](evidence/multibaas/mb-02-04-results.md)).
 - No webhooks, Cloud Wallets or signers were created. MultiBaas does not sign, send or decide anything for Mamoru, and it does not index the Base fork.
@@ -125,7 +125,7 @@ Workers (names only, values are never committed; local values go in `.dev.vars` 
 | `apps/mamoru-operator` (live owner and engine path, a Bun service, not a Cloudflare Worker) | `MAMORU_LIVE`, `CHAIN_ID`, `BASE_RPC_URL`, `OPERATOR_SECRET`, relayer private key, `MAMORU_POLICY` (optional) |
 | fork scenarios | `RPC_URL` (environment only, never argv) |
 
-`CORE_DRY_RUN` is always `true` in v1 for both Cloudflare Workers: they read Base and Uniswap state but never sign or send. Signing and sending live, within the 25 USDC per account cap, happens only in `apps/mamoru-operator`, gated separately by `MAMORU_LIVE=1`. Both Workers share the D1 database `mamoru`, binding `DB`, schema in [`migrations/d1/`](migrations/d1/).
+`CORE_DRY_RUN` is always `true` in v1 for both Cloudflare Workers: they read Base and Uniswap state but never sign or send. Signing and sending live, within the 100 USDC per account cap, happens only in `apps/mamoru-operator`, gated separately by `MAMORU_LIVE=1`. Both Workers share the D1 database `mamoru`, binding `DB`, schema in [`migrations/d1/`](migrations/d1/).
 
 ```sh
 cd apps/mamoru-app && bun run dev              # SPA on Vite

@@ -14,7 +14,7 @@ import type { AccountState, ArmedActivation, StateStore } from '../src/state.ts'
 
 const RELAYER = `0x${'7'.repeat(40)}` as const
 const TO = getAddress(`0x${'c'.repeat(40)}`)
-const OVER = 26_920_000n
+const OVER = 101_920_000n
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
 
 const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
@@ -129,8 +129,8 @@ function sign(t: OwnerTxToSign, key = passkey): OwnerSignature {
 describe('deposit over the cap', () => {
   test('funding reports DEPOSIT_OVER_CAP with the amounts, and nothing at or under the cap', async () => {
     const over = await world(OVER).op.funding(ctx)
-    expect(over.capUsdc).toBe('25000000')
-    expect(over.overCap).toEqual({ code: 'DEPOSIT_OVER_CAP', usdc: '26920000', capUsdc: '25000000', excessUsdc: '1920000' })
+    expect(over.capUsdc).toBe('100000000')
+    expect(over.overCap).toEqual({ code: 'DEPOSIT_OVER_CAP', usdc: '101920000', capUsdc: '100000000', excessUsdc: '1920000' })
     expect((await world(LIVE_CAP_USDC).op.funding(ctx)).overCap).toBeNull()
     expect((await world(0n).op.funding(ctx)).overCap).toBeNull()
   })
@@ -150,7 +150,7 @@ describe('deposit over the cap', () => {
     expect(acc.armed).toBeUndefined()
     expect(acc.active).toBe(false)
     expect(w.sent).toHaveLength(0)
-    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ opId: 'own-1-activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: '26920000', capUsdc: '25000000' })
+    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ opId: 'own-1-activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: '101920000', capUsdc: '100000000' })
   })
 
   test('Start is refused before and after the passkey with DEPOSIT_OVER_CAP and readable amounts', async () => {
@@ -158,7 +158,7 @@ describe('deposit over the cap', () => {
     const err = await w.op.prepareActivate(ctx).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(HttpError)
     expect(err as HttpError).toMatchObject({ status: 409, code: 'DEPOSIT_OVER_CAP' })
-    expect((err as HttpError).message).toBe('this account holds 26.92 USDC, over the 25.00 USDC cap; withdraw at least 1.92 USDC to start')
+    expect((err as HttpError).message).toBe('this account holds 101.92 USDC, over the 100.00 USDC cap; withdraw at least 1.92 USDC to start')
     // Signed while empty, submitted after an over-cap deposit landed.
     w.chain.usdc = 0n
     const tx = await w.op.prepareActivate(ctx)
@@ -555,7 +555,7 @@ describe('cap re-check at send time', () => {
       w.chain.usdc = OVER
     }
     const op = await w.op.submit(ctx, 'activate', sign(tx))
-    expect(op).toMatchObject({ kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: '26920000', capUsdc: '25000000' })
+    expect(op).toMatchObject({ kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: '101920000', capUsdc: '100000000' })
     expect(w.sent.some((t) => t.to === SAFE && t.data !== undefined)).toBe(false)
     expect(w.state.accounts.k).toMatchObject({ active: false, grants: [] })
     expect((await w.op.funding(ctx)).overCap?.excessUsdc).toBe('1920000')
@@ -566,11 +566,11 @@ describe('cap re-check at send time', () => {
     const tx = await w.op.prepareActivate(ctx)
     await w.op.submit(ctx, 'activate', sign(tx))
     const acc = w.state.accounts.k!
-    // The watcher saw 20 USDC; by the time it executes, the account holds 26.92.
+    // The watcher saw 20 USDC; by the time it executes, the account holds 101.92.
     w.chain.usdc = OVER
     await (w.op as unknown as { fireArmed(a: AccountState, usdc: bigint): Promise<void> }).fireArmed(acc, 20_000_000n)
     expect(w.sent).toHaveLength(0)
-    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: '26920000' })
+    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: '101920000' })
   })
 })
 
@@ -581,7 +581,7 @@ describe('withdrawing with an armed activation', () => {
     const tx = await w.op.prepareActivate(ctx)
     const armed = await w.op.submit(ctx, 'activate', sign(tx))
     expect(armed.code).toBe('ARMED')
-    // 26.92 USDC lands; the owner withdraws the excess before the watcher has looked.
+    // 101.92 USDC lands; the owner withdraws the excess before the watcher has looked.
     w.chain.usdc = OVER
     const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
     expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ state: 'confirmed' })

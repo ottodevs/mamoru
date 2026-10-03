@@ -28,10 +28,10 @@ const hmac = (method: string, path: string, header: string, body: string) =>
   createHmac('sha256', OPERATOR_SECRET).update(`${method} ${path}\n${header}\n${body}`).digest('hex')
 
 describe('live config', () => {
-  test('LIVE_FUNDS=1 with an operator opens the gate with the 25 USDC cap', async () => {
+  test('LIVE_FUNDS=1 with an operator opens the gate with the 100 USDC cap', async () => {
     const h = harness(undefined, { env: LIVE })
     const c = (await (await h.request('/api/config')).json()) as AppConfig
-    expect(c).toMatchObject({ fundsGate: 'live', dryRun: false, capUsdc: '25000000' })
+    expect(c).toMatchObject({ fundsGate: 'live', dryRun: false, capUsdc: '100000000' })
   })
   test('without an operator URL the config stays closed', async () => {
     const h = harness(undefined, { env: { LIVE_FUNDS: '1' } })

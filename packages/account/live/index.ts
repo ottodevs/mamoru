@@ -17,8 +17,8 @@ import {
 import { accountSetup, counterfactualAddress } from '../recovery/index.ts'
 import { activationCall, registryTrustCalls, revocationCalls } from '../sessions/index.ts'
 
-/** Owner-authorized cap for the live happy path on Base: 25 USDC per account (6 decimals). */
-export const LIVE_CAP_USDC = 25_000_000n
+/** Owner-authorized cap for the live happy path on Base: 100 USDC per account (6 decimals). */
+export const LIVE_CAP_USDC = 100_000_000n
 
 /** pool:USDC/cbBTC/500. token0 USDC, token1 cbBTC. */
 export const LIVE_POOL_FEE = 500
