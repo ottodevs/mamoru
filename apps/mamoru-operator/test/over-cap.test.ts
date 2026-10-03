@@ -37,7 +37,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {} }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -50,7 +50,7 @@ function world(usdc: bigint) {
     },
     getLogs: async () => [],
     getCode: async () => (chain.deployed ? '0x01' : undefined),
-    getBalance: async () => 0n,
+    getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? knobs.relayerWei : 0n),
     readContract: async ({ address: at, functionName }: { address: string; functionName: string }) => {
       if (functionName === 'slot0') return [1n << 96n, 0, 0, 0, 0, 0, true]
       if (functionName === 'nonce') return chain.nonce
@@ -931,5 +931,72 @@ describe('over the RPC budget the background loops slow down', () => {
     const before = multicalls
     expect((await w.op.funding(ctx)).usdc).toBe('0')
     expect(multicalls).toBeGreaterThan(before)
+  })
+})
+
+// A relayer short of ETH is ours to fix: the owner's signed Start waits armed and runs once the relayer is funded.
+describe('an activation waits for the relayer instead of failing', () => {
+  type Privates = { fireArmed(a: AccountState, usdc: bigint): Promise<void>; relayerBalanceCache: unknown }
+  const priv = (op: Operator) => op as unknown as Privates
+  /** Funds the relayer and drops the 60 s balance cache, as the minute passing would. */
+  const fund = (w: ReturnType<typeof world>, wei: bigint) => {
+    w.knobs.relayerWei = wei
+    priv(w.op).relayerBalanceCache = null
+  }
+  const SHORT = 100_000_000_000_000n
+
+  test('Start with the deposit already there and the relayer short: armed, nothing sent, nothing counted', async () => {
+    const w = world(20_000_000n)
+    w.knobs.relayerWei = SHORT
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    expect(op).toMatchObject({ kind: 'activate', state: 'proposed', code: 'ARMED' })
+    expect(w.sent).toHaveLength(0)
+    const acc = w.state.accounts.k!
+    expect(acc.armed?.opId).toBe(op.opId)
+    expect(acc.ownerFailures ?? []).toHaveLength(0)
+    // Still short: the watcher leaves it armed and does not use up a try.
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.armed?.tries ?? 0).toBe(0)
+    expect(w.sent).toHaveLength(0)
+    // Funded: the same signature runs without the owner.
+    fund(w, 10n ** 18n)
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.armed).toBeUndefined()
+    expect(acc.active).toBe(true)
+    expect(w.sent.map((t) => t.to)).toEqual([w.factory.to, SAFE, SAFE])
+  })
+
+  test('the relayer runs out mid-way (insufficient funds): the same op goes back to armed, at no cost to the owner', async () => {
+    const w = world(20_000_000n)
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase()) throw new Error('insufficient funds for gas * price + value: have 1 want 2')
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(0)
+    const acc = w.state.accounts.k!
+    expect(acc.armed?.opId).toBe(op.opId)
+    expect(w.op.ops(ctx, null).ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'proposed', code: 'ARMED' })
+    expect(acc.ownerFailures ?? []).toHaveLength(0)
+    // The armed retry that hits the same refusal does not use up a try either.
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.armed?.tries ?? 0).toBe(0)
+    w.knobs.onSend = () => {}
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.active).toBe(true)
+  })
+
+  test('any other send failure still fails the op and counts against the owner budget', async () => {
+    const w = world(20_000_000n)
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw new Error('nonce too low')
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(0)
+    expect(w.op.ops(ctx, null).ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(w.state.accounts.k!.armed).toBeUndefined()
+    expect(w.state.accounts.k!.ownerFailures).toHaveLength(1)
   })
 })
