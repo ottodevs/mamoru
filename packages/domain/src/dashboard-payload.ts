@@ -203,4 +203,4 @@ export const PRODUCTION_BANNER =
   'Simulation mode. Mamoru plans and simulates. It does not sign or send transactions. Deposits are closed.'
 
 export const LIVE_BANNER =
-  'Live on Base with a 25 USDC cap per account. Your passkey signs every owner action. The engine acts only inside its session grants.'
+  'Live on Base with a 100 USDC cap per account. Your passkey signs every owner action. The engine acts only inside its session grants.'
