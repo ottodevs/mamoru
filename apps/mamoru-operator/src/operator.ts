@@ -58,7 +58,11 @@ const BLOCK_SECONDS = 2n
 const PREPARE_TTL_MS = 5 * 60_000
 /** On top of the policy reserve: the first userOp prefund leaves the Safe's balance into its EntryPoint deposit. */
 const TOP_UP_MARGIN_WEI = 200_000_000_000_000n
-/** Relayer gas for one activation beyond the Safe top-up: the Safe deploy and the ~14M gas execTransaction on Base. */
+/**
+ * Relayer gas for one activation beyond the Safe top-up: the Safe deploy and the ~14M gas execTransaction on Base.
+ * Fixed and on the high side on purpose: with the full top-up it asks for the worst case, so a wait can only be
+ * longer than needed, never a send that runs out half way.
+ */
 const ACTIVATION_GAS_WEI = 200_000_000_000_000n
 /** While an activation waits for the relayer to be funded, it is logged at most this often per account. */
 const RELAYER_LOW_LOG_MS = 3_600_000
@@ -859,7 +863,12 @@ export class Operator {
       logErr(`[owner] ${op.opId}:`, e)
       this.relayerBalanceCache = null
       // The relayer ran out of ETH before the owner's transaction went out: same op, back to waiting armed.
-      if (kind === 'activate' && !(e instanceof HttpError) && relayerShort(e) && !acc.active) return this.rearm(acc, op, p, signature)
+      if (kind === 'activate' && !(e instanceof HttpError) && relayerShort(e)) {
+        this.lock(acc.accountKey)
+          .run(async () => this.rearm(acc, op, p, signature))
+          .catch((err) => logErr(`[armed] ${op.opId} rearm:`, err))
+        return
+      }
       // A refusal before anything was sent keeps its own code; anything else may have reached the chain.
       this.failOwner(acc, op, e instanceof HttpError ? e.code : 'OWNER_TX_ERROR')
     })
@@ -1031,8 +1040,15 @@ export class Operator {
     return { ...op }
   }
 
-  /** Puts an activation that could not be sent back to waiting armed, on the same op; it costs the owner nothing. */
+  /**
+   * Puts an activation the relayer could not pay for back to waiting armed, on the same op; it costs the owner nothing.
+   * Only while its execTransaction never went out (no hash on the op): once broadcast, it is the receipt's to settle.
+   * A newer armed activation or an account that started meanwhile wins: this op is dropped as superseded.
+   */
   private rearm(acc: AccountState, op: OpView, p: Prepared, signature: Hex): void {
+    const current = acc.ops.find((o) => o.opId === op.opId)
+    if (current?.txHash) return this.failOwner(acc, op, 'OWNER_TX_ERROR')
+    if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
     acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now() }
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
     console.log(`[armed] ${acc.accountKey} ${op.opId} back to armed: the relayer could not pay for it`)
@@ -1114,6 +1130,12 @@ export class Operator {
       // On the op the SPA reads, with the amounts: the owner withdraws the excess, then approves Start again.
       return this.disarm(acc, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() })
     }
+    // The relayer cannot pay for it yet: stay armed, without using up a try. Waiting is not activity, so the watcher
+    // slows down on this account as it does on an idle one, instead of reading it every pass.
+    if (!(await this.relayerCanActivate(acc))) {
+      this.armSeen.delete(acc.accountKey)
+      return
+    }
     const live = liveAccountFromContext(acc.ctx)
     const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
     if (deployed && nonce !== a.tx.nonce) {
@@ -1122,8 +1144,6 @@ export class Operator {
     }
     // Too little to deploy a Safe for: stay armed and wait for more (funding reports deployMinUsdc).
     if (!deployed && usdc < MIN_DEPLOY_USDC) return
-    // The relayer cannot pay for it yet: stay armed, without using up a try.
-    if (!(await this.relayerCanActivate(acc))) return
     acc.armed = undefined
     this.patchOp(acc, a.opId, { code: undefined })
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
@@ -1133,9 +1153,10 @@ export class Operator {
       await this.execute(acc, live, p, a.signature, op)
     } catch (e) {
       // Transient RPC/relay failures keep the signed activation armed; the watcher retries it on the next pass.
-      // A relayer short of ETH is ours to fix, not the owner's: it does not use up a try.
+      // A relayer short of ETH before the execTransaction went out is ours to fix, not the owner's: it does not use up a try.
       this.relayerBalanceCache = null
-      const tries = (a.tries ?? 0) + (relayerShort(e) ? 0 : 1)
+      const unsent = !acc.ops.find((o) => o.opId === op.opId)?.txHash
+      const tries = (a.tries ?? 0) + (relayerShort(e) && unsent ? 0 : 1)
       logErr(`[armed] ${op.opId} attempt ${tries}:`, e)
       if (tries < ARM_MAX_TRIES && !acc.active) {
         acc.armed = { ...a, tries }
@@ -1637,11 +1658,11 @@ function isRevert(e: unknown): boolean {
   return false
 }
 
-/** True when the relayer could not pay for a transaction (the node refused it before it was broadcast). */
+/** True when the node refused a relayer transaction for lack of ETH (geth: `insufficient funds for gas * price + value`). */
 function relayerShort(e: unknown): boolean {
   let cur = e as { message?: string; details?: string; cause?: unknown } | undefined
   for (let i = 0; i < 8 && cur; i++) {
-    if (/insufficient funds/i.test(`${cur.message ?? ''} ${cur.details ?? ''}`)) return true
+    if (/insufficient funds for gas/i.test(`${cur.message ?? ''} ${cur.details ?? ''}`)) return true
     cur = cur.cause as typeof cur
   }
   return false

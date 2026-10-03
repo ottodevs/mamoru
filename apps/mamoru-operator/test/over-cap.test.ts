@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { decodeFunctionData, encodeFunctionResult, getAddress, keccak256, stringToHex, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
-import type { AccountContext, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
+import type { AccountContext, OpView, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
 import { address, erc20Abi, safeAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { POLICIES } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
@@ -972,9 +972,10 @@ describe('an activation waits for the relayer instead of failing', () => {
     w.knobs.onSend = (t) => {
       if (t.to.toLowerCase() === SAFE.toLowerCase()) throw new Error('insufficient funds for gas * price + value: have 1 want 2')
     }
+    // The relayer reads as funded (a stale minute of cache): the node is what refuses.
     const tx = await w.op.prepareActivate(ctx)
     const op = await w.op.submit(ctx, 'activate', sign(tx))
-    await Bun.sleep(0)
+    await Bun.sleep(5)
     const acc = w.state.accounts.k!
     expect(acc.armed?.opId).toBe(op.opId)
     expect(w.op.ops(ctx, null).ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'proposed', code: 'ARMED' })
@@ -985,6 +986,24 @@ describe('an activation waits for the relayer instead of failing', () => {
     w.knobs.onSend = () => {}
     await priv(w.op).fireArmed(acc, 20_000_000n)
     expect(acc.active).toBe(true)
+  })
+
+  test('rearm never brings back an op whose execTransaction went out, nor overrides a newer armed activation', async () => {
+    type Rearm = { rearm(a: AccountState, op: OpView, p: unknown, sig: Hex): void }
+    const w = world(20_000_000n)
+    w.knobs.relayerWei = SHORT
+    const tx = await w.op.prepareActivate(ctx)
+    const armed = await w.op.submit(ctx, 'activate', sign(tx))
+    const acc = w.state.accounts.k!
+    const p = { tx: acc.armed!.tx, safeTxHash: acc.armed!.safeTxHash, grants: [] }
+    const sent: OpView = { opId: 'own-9-activate', kind: 'activate', state: 'submitted', txHash: '0x01', updatedAt: '2026-10-04T00:00:00Z' }
+    const later: OpView = { opId: 'own-10-activate', kind: 'activate', state: 'submitted', updatedAt: '2026-10-04T00:00:00Z' }
+    acc.ops.push(sent as never, later as never)
+    ;(w.op as unknown as Rearm).rearm(acc, sent, p, '0x')
+    ;(w.op as unknown as Rearm).rearm(acc, later, p, '0x')
+    expect(acc.ops.find((o) => o.opId === 'own-9-activate')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(acc.ops.find((o) => o.opId === 'own-10-activate')).toMatchObject({ state: 'failed', code: 'ARMED_SUPERSEDED' })
+    expect(acc.armed?.opId).toBe(armed.opId)
   })
 
   test('any other send failure still fails the op and counts against the owner budget', async () => {
