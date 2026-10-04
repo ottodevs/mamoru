@@ -1090,6 +1090,25 @@ describe('an activation waits for the relayer instead of failing', () => {
     expect(acc.armed).toBeUndefined()
   })
 
+  test('a retry whose preflight finds the transaction reverting (its nonce spent) is left to reconciliation', async () => {
+    const w = world(20_000_000n)
+    let refuse = true
+    w.knobs.onSend = (t) => {
+      if (refuse && t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Internal error'), { code: -32603 })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    const acc = w.state.accounts.k!
+    refuse = false
+    const sentBefore = w.sent.length
+    w.knobs.sim = 'revert'
+    acc.armed!.retryAt = Date.now() - 1
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(w.sent.length).toBe(sentBefore)
+  })
+
   test('already known on the deploy or the top-up is not about the owner transaction: the op waits armed', async () => {
     const w = world(20_000_000n)
     w.knobs.onSend = (t) => {

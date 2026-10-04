@@ -102,6 +102,8 @@ export const OWNER_FAILURES_ALERT_PER_DAY = 50
 const DAY_MS = 24 * 3_600_000
 /** What counts: the relayer sent a transaction and it failed, or its outcome is unknown. Refusals before any send cost no gas and do not count. */
 const BUDGET_CODES = new Set(['OWNER_TX_FAILED', 'OWNER_TX_ERROR', 'DEPLOY_FAILED'])
+/** What a retried activation meets when the Safe nonce it was signed for is already spent. */
+const SPENT_NONCE_CODES = new Set(['SAFE_NONCE_MOVED', 'OWNER_TX_REVERTS', 'OWNER_TX_FAILED', 'BAD_SIGNATURE'])
 /** How often an unavailable simulation or eth_call is tried again before the fallback. */
 const SIM_TRIES = 3
 
@@ -1233,11 +1235,24 @@ export class Operator {
     }
   }
 
+  /**
+   * A retried activation that finds its Safe nonce spent, or its execTransaction reverting, may be looking at its own
+   * earlier copy, executed behind an answer that said no. It fails as an unknown receipt with no hash, and
+   * reconcileOwner reads the Safe's logs: the account is activated if that copy landed. Returns false for any other op.
+   */
+  private settleRetried(acc: AccountState, op: OpView, code: string): boolean {
+    if (!this.retried.has(op.opId) || !SPENT_NONCE_CODES.has(code)) return false
+    console.log(`[armed] ${op.opId} retry met ${code}: left to reconciliation`)
+    this.failOwner(acc, op, RECEIPT_UNKNOWN, { txHash: undefined })
+    this.reconcileSoon(acc)
+    return true
+  }
+
   private async executeOwner(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView): Promise<void> {
     const safe = live.safe
     // Before any relayer transaction: signature, guards and a simulation of everything about to be sent.
     const refusal = await this.preflight(acc, live, p, signature)
-    if (refusal) return this.failOwner(acc, op, refusal.code, refusal.detail)
+    if (refusal) return this.settleRetried(acc, op, refusal.code) ? undefined : this.failOwner(acc, op, refusal.code, refusal.detail)
     // A transfer may be the first owner tx of a Safe that never started (deposit over the cap): deploy it first too.
     if (p.kind === 'activate' || p.kind === 'transfer') {
       const { deployed } = await readSafeNonce(this.client, safe)
@@ -1259,7 +1274,7 @@ export class Operator {
       }
     }
     const { nonce } = await readSafeNonce(this.client, safe)
-    if (nonce !== p.tx.nonce) return this.patchOp(acc, op.opId, { state: 'failed', code: 'SAFE_NONCE_MOVED' })
+    if (nonce !== p.tx.nonce) return this.settleRetried(acc, op, 'SAFE_NONCE_MOVED') ? undefined : this.patchOp(acc, op.opId, { state: 'failed', code: 'SAFE_NONCE_MOVED' })
     const data = execData(p.tx, signature)
     // A load-balanced provider can answer from a lagging node: retry the static check before failing the op.
     for (let attempt = 0; ; attempt++) {
@@ -1275,7 +1290,7 @@ export class Operator {
             break
           }
           logErr(`[owner] ${op.opId} simulation reverts:`, why)
-          return this.failOwner(acc, op, 'OWNER_TX_REVERTS')
+          return this.settleRetried(acc, op, 'OWNER_TX_REVERTS') ? undefined : this.failOwner(acc, op, 'OWNER_TX_REVERTS')
         }
         logErr(`[owner] ${op.opId} simulation reverts, retry ${attempt + 1}:`, why)
         await Bun.sleep(this.retryMs)
@@ -1298,12 +1313,8 @@ export class Operator {
     this.patchOp(acc, op.opId, { state: 'submitted', txHash: hash })
     const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
     console.log(`[owner] ${op.opId} tx ${hash} block ${receipt.blockNumber} ${ok ? 'ok' : 'FAILED'}`)
-    if (!ok && this.retried.has(op.opId)) {
-      // A second copy fails when the first one executed after all (the Safe nonce it was signed for is spent). The op
-      // fails as an unknown receipt, without this hash, so reconcileOwner looks the execution up in the Safe's logs.
-      this.failOwner(acc, op, RECEIPT_UNKNOWN, { txHash: undefined })
-      return this.reconcileSoon(acc)
-    }
+    // A second copy fails when the first one executed after all (the Safe nonce it was signed for is spent).
+    if (!ok && this.settleRetried(acc, op, 'OWNER_TX_FAILED')) return
     if (!ok) return this.failOwner(acc, op, 'OWNER_TX_FAILED', { block: Number(receipt.blockNumber) })
     this.afterOwner(acc, p, receipt)
     this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(receipt.blockNumber) })
