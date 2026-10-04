@@ -37,7 +37,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -56,7 +56,10 @@ function world(usdc: bigint) {
       if (functionName === 'slot0') return [1n << 96n, 0, 0, 0, 0, 0, true]
       if (functionName === 'nonce') return chain.nonce
       if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : 0n
-      if (functionName === 'isPermissionEnabled') return knobs.grantsEnabled && (blockNumber === undefined || blockNumber >= knobs.enabledFromBlock)
+      if (functionName === 'isPermissionEnabled') {
+        if (blockNumber !== undefined && knobs.noHistory) throw new Error('missing trie node: historical state not available')
+        return knobs.grantsEnabled && (blockNumber === undefined || blockNumber >= knobs.enabledFromBlock)
+      }
       throw new Error(`unexpected read ${functionName}`)
     },
     request: async ({ params }: { params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {
@@ -1133,10 +1136,34 @@ describe('an activation waits for the relayer instead of failing', () => {
     await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
     expect(acc.active).toBe(false)
     expect(acc.armed?.opId).toBe(op.opId)
-    // It never catches up (no provider serves those blocks): on the third pass the account starts from the floor of
-    // the search, a block before the execution, rather than staying inactive for good.
-    await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
+    // A head that answers "not yet" is waited for, however many passes: an engine started on it would see no grant.
+    for (let i = 0; i < 5; i++) await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
     expect(acc.active).toBe(false)
+    expect(acc.armed?.opId).toBe(op.opId)
+    // The head catches up: the account starts from the block it executed in.
+    w.knobs.enabledFromBlock = 97n
+    await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
+    expect(acc.active).toBe(true)
+    expect(acc.depositsAfter).toBe('97')
+  })
+
+  test('no provider serves the state of past blocks: after three passes the account starts from the floor of the search', async () => {
+    const w = world(20_000_000n)
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    const acc = w.state.accounts.k!
+    w.chain.nonce = 1n
+    w.knobs.grantsEnabled = true
+    w.knobs.noHistory = true
+    for (let i = 0; i < 2; i++) {
+      acc.armed!.retryAt = Date.now() - 1
+      await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
+      expect(acc.active).toBe(false)
+    }
     await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
     expect(acc.active).toBe(true)
     expect(BigInt(acc.depositsAfter)).toBeLessThan(100n)
