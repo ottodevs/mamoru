@@ -151,6 +151,8 @@ export type OperatorConfig = {
   maxWaitBlocks: number
   /** Hourly budget of the keyed RPC provider; absent: no limit. */
   rpcBudget?: RpcBudget
+  /** Client of the armed watcher's batched balance reads, so the counters tell them apart; absent: the operator's client. */
+  watchClient?: PublicClient
 }
 
 type OwnerKind = 'activate' | 'transfer' | 'stop'
@@ -1082,8 +1084,9 @@ export class Operator {
   }
 
   private async checkArmedGroup(armed: AccountState[], at: number): Promise<void> {
-    const batch = new Batch(this.client, MULTICALL3)
-    const balances = armed.map((acc) => batch.add(contractRead(this.client, { address: address('USDC'), abi: erc20Abi, functionName: 'balanceOf', args: [acc.ctx.address as Address] })))
+    const client = this.cfg.watchClient ?? this.client
+    const batch = new Batch(client, MULTICALL3)
+    const balances = armed.map((acc) => batch.add(contractRead(client, { address: address('USDC'), abi: erc20Abi, functionName: 'balanceOf', args: [acc.ctx.address as Address] })))
     try {
       await batch.run()
     } catch (e) {

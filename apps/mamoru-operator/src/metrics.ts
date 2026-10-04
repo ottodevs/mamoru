@@ -247,9 +247,21 @@ class Buckets {
  * plus a rolling per-hour ring for the last 48h. Persisted to `stateDir/rpc-usage.json`, written
  * at most once a minute and always atomically (tmp file + rename, like state.ts).
  */
+/** Who made a request: the loops of the operator, as the loopback proxy is told by the path it was called on. A closed set. */
+export const COMPONENTS = ['engine', 'watcher', 'operator', 'relayer'] as const
+export type Component = (typeof COMPONENTS)[number] | 'unlabelled'
+
+export function componentOf(pathname: string): Component {
+  const m = /^\/c\/([a-z]+)\/?$/.exec(pathname)
+  return m && (COMPONENTS as readonly string[]).includes(m[1]!) ? (m[1] as Component) : 'unlabelled'
+}
+
 export class RpcMetrics {
   private cumulative = new Buckets()
   private ring = new Map<number, Buckets>()
+  /** The same traffic by component and method (the provider key of these buckets is the component). */
+  private byComponent = new Buckets()
+  private byComponentRing = new Map<number, Buckets>()
   private lastPersistAt = 0
   private readonly file: string
   /** Log ranges per provider since this process started (in memory only, like the engine health). */
@@ -265,6 +277,18 @@ export class RpcMetrics {
     try {
       const raw = JSON.parse(readFileSync(this.file, 'utf8')) as { cumulative?: unknown; ring?: unknown }
       if (raw.cumulative && typeof raw.cumulative === 'object' && !Array.isArray(raw.cumulative)) this.cumulative.load(raw.cumulative as RpcSnapshot)
+      const comp = (raw as { components?: { cumulative?: unknown; ring?: unknown } }).components
+      if (comp?.cumulative && typeof comp.cumulative === 'object' && !Array.isArray(comp.cumulative)) this.byComponent.load(comp.cumulative as RpcSnapshot)
+      if (Array.isArray(comp?.ring)) {
+        for (const e of comp.ring) {
+          const hourStart = (e as { hourStart?: unknown } | null)?.hourStart
+          const data = (e as { data?: unknown } | null)?.data
+          if (typeof hourStart !== 'number' || !Number.isFinite(hourStart) || !data || typeof data !== 'object' || Array.isArray(data)) continue
+          const b = new Buckets()
+          b.load(data as RpcSnapshot)
+          this.byComponentRing.set(hourStart, b)
+        }
+      }
       if (Array.isArray(raw.ring)) {
         for (const e of raw.ring) {
           if (!e || typeof e !== 'object') continue
@@ -285,6 +309,7 @@ export class RpcMetrics {
   private pruneRing(now: number): void {
     const cutoff = now - RING_HOURS * HOUR_MS
     for (const h of this.ring.keys()) if (h < cutoff) this.ring.delete(h)
+    for (const h of this.byComponentRing.keys()) if (h < cutoff) this.byComponentRing.delete(h)
   }
 
   private hourBuckets(now: number): Buckets {
@@ -299,13 +324,22 @@ export class RpcMetrics {
   }
 
   /** One attempt sent to `provider` for `method` (whatever the outcome). `isChunk` marks a sub-request of a split eth_getLogs range. */
-  recordRequest(provider: string, method: string, isChunk: boolean, now: number = Date.now()): void {
+  recordRequest(provider: string, method: string, isChunk: boolean, now: number = Date.now(), component: Component = 'unlabelled'): void {
+    // CU estimate only makes sense against Alchemy's billed usage; other providers are free-tier/public and are not billed per-request.
+    const cu = /alchemy/i.test(provider) ? cuFor(method) : 0
     for (const b of [this.cumulative, this.hourBuckets(now)]) {
       const c = b.get(provider, method)
       c.requests++
       if (isChunk) c.getLogsChunks++
-      // CU estimate only makes sense against Alchemy's billed usage; other providers are free-tier/public and are not billed per-request.
-      if (/alchemy/i.test(provider)) c.cuEstimate += cuFor(method)
+      c.cuEstimate += cu
+    }
+    const hourStart = Math.floor(now / HOUR_MS) * HOUR_MS
+    let hour = this.byComponentRing.get(hourStart)
+    if (!hour) this.byComponentRing.set(hourStart, (hour = new Buckets()))
+    for (const b of [this.byComponent, hour]) {
+      const c = b.get(component, method)
+      c.requests++
+      c.cuEstimate += cu
     }
     this.maybePersist(now)
   }
@@ -341,7 +375,11 @@ export class RpcMetrics {
     try {
       mkdirSync(this.stateDir, { recursive: true, mode: 0o700 })
       const tmp = `${this.file}.tmp`
-      writeFileSync(tmp, JSON.stringify({ cumulative: this.cumulative.toJSON(), ring }, null, 1), { mode: 0o600 })
+      const components = {
+        cumulative: this.byComponent.toJSON(),
+        ring: [...this.byComponentRing.entries()].sort(([a], [b]) => a - b).map(([hourStart, b]) => ({ hourStart, data: b.toJSON() })),
+      }
+      writeFileSync(tmp, JSON.stringify({ cumulative: this.cumulative.toJSON(), ring, components }, null, 1), { mode: 0o600 })
       renameSync(tmp, this.file)
     } catch (e) {
       console.error(`[metrics] failed to persist ${this.file}: ${redactedLine(e)}`)
@@ -361,13 +399,17 @@ export class RpcMetrics {
   }
 
   /** `last48h` oldest first, ISO hour-start timestamps; only hours with recorded activity are present (sparse, not zero-filled). */
-  snapshot(now: number = Date.now()): { cumulative: RpcSnapshot; cuEstimateTotal: number; last48h: { hourStart: string; data: RpcSnapshot }[]; logRanges: Record<string, LogRangeCounters> } {
+  snapshot(now: number = Date.now()): { cumulative: RpcSnapshot; cuEstimateTotal: number; last48h: { hourStart: string; data: RpcSnapshot }[]; logRanges: Record<string, LogRangeCounters>; byComponent: { cumulative: RpcSnapshot; last48h: { hourStart: string; data: RpcSnapshot }[] } } {
     this.pruneRing(now)
     return {
       cumulative: this.cumulative.toJSON(),
       cuEstimateTotal: this.cuEstimateTotal(),
       last48h: [...this.ring.entries()].sort(([a], [b]) => a - b).map(([hourStart, b]) => ({ hourStart: new Date(hourStart).toISOString(), data: b.toJSON() })),
       logRanges: Object.fromEntries([...this.logRanges].map(([provider, c]) => [provider, { ...c }])),
+      byComponent: {
+        cumulative: this.byComponent.toJSON(),
+        last48h: [...this.byComponentRing.entries()].sort(([a], [b]) => a - b).map(([hourStart, b]) => ({ hourStart: new Date(hourStart).toISOString(), data: b.toJSON() })),
+      },
     }
   }
 }

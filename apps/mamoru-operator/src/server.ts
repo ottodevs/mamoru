@@ -51,6 +51,8 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
       last48h: rpc.last48h,
       // eth_getLogs ranges per provider since boot: accepted with a witness, or rejected (no_witness, hash_mismatch, provider_error).
       logRanges: rpc.logRanges,
+      // The same requests by component (engine reviews, armed watcher, operator, relayer) and method.
+      byComponent: rpc.byComponent,
       note: 'cuEstimate is a static per-method estimate (see metrics.ts CU_TABLE), not Alchemy\'s billed figure',
     },
     engines: op.engineHealthSnapshot(),
