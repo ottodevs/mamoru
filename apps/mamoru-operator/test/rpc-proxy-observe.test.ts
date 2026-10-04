@@ -92,7 +92,7 @@ describe('observe through the proxy: logs and state from one chain view', () => 
     expect(third.count()).toBe(0)
   })
 
-  test('upstream requests of one steady review: 8 to the state provider, 6 to the log provider', async () => {
+  test('upstream requests of one steady review: 9 to the state provider, 6 to the log provider', async () => {
     const [state, logs, third] = [view(), view(), view()]
     const client = through(state, logs, third)
     const cursor = historyCursor()
@@ -104,8 +104,8 @@ describe('observe through the proxy: logs and state from one chain view', () => 
     }
     await observe(client, input(cursor))
     // No block read beyond what the engine asks for: the blocks it just read from the upstream witness the end of each log range.
-    // The chain id and the code of the deployed account were read in the first review and are not asked again.
-    expect(state.byMethod()).toEqual({ eth_blockNumber: 1, eth_getBlockByNumber: 5, eth_call: 2 })
+    // The code of the deployed account was read in the first review and is not asked again.
+    expect(state.byMethod()).toEqual({ eth_chainId: 1, eth_blockNumber: 1, eth_getBlockByNumber: 5, eth_call: 2 })
     expect(logs.byMethod()).toEqual({ eth_getLogs: 3, eth_getBlockByNumber: 3 })
     expect(third.count()).toBe(0)
   })

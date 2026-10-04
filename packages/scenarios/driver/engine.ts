@@ -119,11 +119,15 @@ export class Engine {
   /** Live: a session the owner removed on chain (SmartSession) is revoked in the ledger, so decide never proposes an op it cannot authorize. */
   /**
    * The sessions' on-chain state, read with the observation: one isPermissionEnabled per session in its first
-   * batch, at its block. A session the chain no longer has enabled is revoked in the ledger before the
-   * observation lists the sessions.
+   * batch, at its block (the provider's head minus its lag, a few seconds behind `latest`: a permission removed
+   * in between is still listed for one review, and its userOp is refused on chain by the SmartSession validator).
+   * A session the chain no longer has enabled is revoked in the ledger before the observation lists the sessions.
    */
   private readEnabled(batch: Batch, blockNumber: bigint): (() => Promise<void>) | void {
     if (this.cfg.mode !== 'live') return
+    // A provider that is behind the activation does not have the grants yet: every permission would read as
+    // not enabled and be revoked here for good. That view is no observation of this account.
+    if (blockNumber <= this.historyFromBlock) throw new ReasonError('OBS_BLOCK_INCONSISTENT', `rpc block ${blockNumber} is not past the activation block ${this.historyFromBlock}`)
     const sessions = this.sessions.filter((s) => !this.ledger.get(s.permissionId)?.revoked)
     if (sessions.length === 0) return
     const enabled = sessions.map((s) => batch.add(contractRead(this.client, { address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [s.permissionId, this.cfg.account], blockNumber })))

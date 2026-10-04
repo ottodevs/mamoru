@@ -82,31 +82,23 @@ export type ObserveInput = {
   firstBatch?: (batch: Batch, blockNumber: bigint) => (() => Promise<void>) | void
 }
 
-/** How long the chain id a client answered is taken as still true: it is checked again after this, not on every observation. */
-const CHAIN_ID_TTL_MS = 600_000
-const chainIds = new WeakMap<PublicClient, { chainId: number; at: number }>()
+/**
+ * Accounts each client has seen with code, and the block it saw them at. A deployed Safe stays deployed, so its
+ * code is not read again at that block or a later one; an earlier block is read (a provider that is behind, a
+ * fork before the deployment). "Not deployed" is never kept.
+ */
+const deployed = new WeakMap<PublicClient, Map<string, bigint>>()
 
-async function chainIdOf(client: PublicClient): Promise<number> {
-  const known = chainIds.get(client)
-  const now = Date.now()
-  if (known && now >= known.at && now - known.at < CHAIN_ID_TTL_MS) return known.chainId
-  const chainId = await client.getChainId()
-  chainIds.set(client, { chainId, at: now })
-  return chainId
-}
-
-/** Accounts each client has seen with code. A deployed Safe stays deployed, so its code is not read again; "not deployed" is never kept. */
-const deployed = new WeakMap<PublicClient, Set<string>>()
-
-/** Whether `account` has code at `blockNumber` (latest when absent); one eth_getCode until it is seen deployed, none after. */
-export async function isDeployed(client: PublicClient, account: Address, blockNumber?: bigint): Promise<boolean> {
+/** Whether `account` has code at `blockNumber`: one eth_getCode until it is seen deployed, none from that block on. */
+export async function isDeployed(client: PublicClient, account: Address, blockNumber: bigint): Promise<boolean> {
   let seen = deployed.get(client)
-  if (!seen) deployed.set(client, (seen = new Set()))
+  if (!seen) deployed.set(client, (seen = new Map()))
   const key = account.toLowerCase()
-  if (seen.has(key)) return true
-  const code = await client.getCode(blockNumber === undefined ? { address: account } : { address: account, blockNumber })
+  const since = seen.get(key)
+  if (since !== undefined && blockNumber >= since) return true
+  const code = await client.getCode({ address: account, blockNumber })
   const has = !!code && code !== '0x'
-  if (has) seen.add(key)
+  if (has && (since === undefined || blockNumber < since)) seen.set(key, blockNumber)
   return has
 }
 
@@ -147,7 +139,7 @@ export function poolStateCache(max = 8): PoolStateCache & { readonly size: numbe
  * go through Multicall3 in a fixed number of requests.
  */
 export async function observe(client: PublicClient, input: ObserveInput): Promise<Observation> {
-  const chainId = await chainIdOf(client).catch((e: Error) => {
+  const chainId = await client.getChainId().catch((e: Error) => {
     throw new ReasonError('OBS_RPC_UNAVAILABLE', e.message.split('\n')[0])
   })
   if (chainId !== input.chainId) throw new ReasonError('OBS_CHAIN_MISMATCH', `rpc answered ${chainId}, engine is ${input.chainId}`)

@@ -55,7 +55,7 @@ describe('one live review', () => {
     if (r.kind !== 'decided') throw new Error('unreachable')
     expect(r.op).toBeNull()
     expect(r.observation.positions.map((p) => p.pool)).toEqual(['pool:USDC/cbBTC/500', 'pool:WETH/USDC/3000', 'pool:USDC/USDT/100'])
-    expect(chain.byMethod()).toEqual({ eth_getBlockByNumber: 5, eth_call: 2, eth_getLogs: 3 })
+    expect(chain.byMethod()).toEqual({ eth_chainId: 1, eth_getBlockByNumber: 5, eth_call: 2, eth_getLogs: 3 })
     // The session checks ride in the observation's first aggregate3, pinned to its block: every permission, once.
     const first = chain.requests.find((x) => x.method === 'eth_call')!
     expect(first.params[1]).toBe('0x47e')
@@ -79,6 +79,26 @@ describe('one live review', () => {
     const first = chain.requests.find((x) => x.method === 'eth_call')!
     const asked = (decodeFunctionData({ abi: multicall3Abi, data: first.params[0].data }).args[0] as readonly { target: Address }[]).filter((c) => c.target.toLowerCase() === address('SmartSession').toLowerCase())
     expect(asked.length).toBe(11)
+  })
+
+  test('a provider behind the activation block revokes nothing: the review fails and every session stays', async () => {
+    const all = sessions()
+    const e = engine(all)
+    const [head, safe] = [chain.head, chain.safe]
+    // Before the activation the chain has none of the grants: every permission reads as not enabled.
+    for (const s of all) chain.disabled.add(s.permissionId.toLowerCase())
+    chain.head = e.historyFromBlock
+    chain.safe = e.historyFromBlock - 10n
+    let r: Awaited<ReturnType<Engine['review']>>
+    try {
+      r = await e.review()
+    } finally {
+      chain.disabled.clear()
+      chain.head = head
+      chain.safe = safe
+    }
+    expect(r).toMatchObject({ kind: 'observation-failed', code: 'OBS_BLOCK_INCONSISTENT' })
+    expect(all.filter((s) => e.ledger.get(s.permissionId)?.revoked).length).toBe(0)
   })
 
   test('a session read that fails does not revoke anything: the review throws as before', async () => {
