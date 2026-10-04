@@ -20,6 +20,18 @@ export function fallbacksFromEnv(env: Env = process.env): string[] {
   return (env.MAMORU_RPC_FALLBACKS ?? DEFAULT_FALLBACKS).split(',').map((u) => u.trim()).filter(Boolean)
 }
 
+/**
+ * Keyed providers the operator trusts as much as the upstream (MAMORU_RPC_TRUSTED, comma separated). Every call
+ * except eth_getLogs and sends falls back only among the upstream and these: state, heads, blocks and simulations
+ * that decide what the operator signs never come from a public node. Read when the proxy starts.
+ */
+export function trustedFromEnv(env: Env = process.env): string[] {
+  return (env.MAMORU_RPC_TRUSTED ?? '').split(',').map((u) => u.trim()).filter(Boolean)
+}
+
+/** Calls whose answer decides nothing: a signed transaction is the same bytes whoever relays it. Any provider may take them. */
+const ANY_PROVIDER = new Set(['eth_sendRawTransaction'])
+
 function isLoopback(url: string): boolean {
   const h = new URL(url).hostname
   return h === '127.0.0.1' || h === 'localhost' || h === '[::1]'
@@ -124,6 +136,8 @@ export type RpcProxyOptions = {
   fallbacks?: string[]
   /** eth_getLogs range per host; default MAMORU_LOG_RANGES, read now. */
   logRanges?: Record<string, number>
+  /** Keyed fallbacks trusted like the upstream; default MAMORU_RPC_TRUSTED, read now. */
+  trusted?: string[]
   /** Tests: the upstream transport. */
   fetch?: (url: string, init: RequestInit) => Promise<Response>
 }
@@ -137,7 +151,11 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const local = isLoopback(upstream)
   // Chunk getLogs for Alchemy (free tier: 10 blocks) or when MAMORU_LOG_RANGE is set; otherwise the range goes as is.
   const chunkLogs = /alchemy/i.test(new URL(upstream).hostname) || !!process.env.MAMORU_LOG_RANGE
-  const providers = local ? [upstream] : [upstream, ...fallbacks.filter((f) => f !== upstream)]
+  const trustedFallbacks = (opts.trusted ?? trustedFromEnv()).filter((t) => t !== upstream)
+  /** The upstream and the trusted keyed providers: the only ones a decision read may come from. */
+  const trusted = local ? [upstream] : [upstream, ...trustedFallbacks]
+  /** Every provider, trusted first: eth_getLogs (witnessed) and sends may use any of them. */
+  const providers = local ? [upstream] : [...trusted, ...fallbacks.filter((f) => !trusted.includes(f))]
   const labels = labelProviders(providers)
   const labelOf = (url: string) => labels.get(url) ?? registrableDomain(new URL(url).hostname)
   const logRanges = opts.logRanges ?? logRangesFromEnv()
@@ -151,14 +169,18 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     } catch {}
     return { status: res.status, json }
   }
-  /** On a rate/capacity refusal, move to the next provider at once; two passes over the list. Always returns a result/error object. */
+  /**
+   * On a rate/capacity refusal, move to the next provider at once; two passes over the list. The list is the
+   * trusted providers, or every provider for a send. Always returns a result/error object.
+   */
   async function raw(body: any, isChunk = false): Promise<any> {
     let last: any = null
-    const all = [...providers, ...providers]
+    const list = ANY_PROVIDER.has(body?.method) ? providers : trusted
+    const all = [...list, ...list]
     for (const [pi, url] of all.entries()) {
       const label = labelOf(url)
       const tries = 1
-      if (pi === providers.length) await Bun.sleep(250)
+      if (pi === list.length) await Bun.sleep(250)
       for (let attempt = 0; attempt < tries; attempt++) {
         try {
           const r = await post(url, body)
@@ -176,7 +198,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       }
       const next = all[pi + 1]
       if (next !== undefined && next !== url && metrics) safeMetrics(() => metrics.recordFallback(label, body.method))
-      if (pi === 0 && providers.length > 1 && process.env.MAMORU_RPC_LOG) console.log(`[rpc] ${body?.method} falling back after: ${redactSecrets(last?.message).slice(0, 120)}`)
+      if (pi === 0 && list.length > 1 && process.env.MAMORU_RPC_LOG) console.log(`[rpc] ${body?.method} falling back after: ${redactSecrets(last?.message).slice(0, 120)}`)
     }
     return { jsonrpc: '2.0', id: body?.id ?? null, error: { code: typeof last?.code === 'number' ? last.code : -32603, message: String(last?.message ?? 'upstream unavailable') } }
   }

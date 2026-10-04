@@ -210,3 +210,59 @@ describe('startRpcProxy metrics wiring', () => {
     expect(metrics.snapshot().cumulative['127.0.0.1']!.other!.requests).toBe(1)
   })
 })
+
+// A decision read (state, head, block, simulation) comes only from the upstream or a trusted keyed provider.
+describe('decision reads fall back only to trusted providers', () => {
+  const KEYED = 'https://base-mainnet.g.alchemy.com/v2/key-a'
+  const TRUSTED = 'https://abc.base-mainnet.quiknode.pro/token/'
+  const PUBLIC = 'https://base-rpc.publicnode.com'
+  function world(down: Set<string>) {
+    const hits: { host: string; method: string }[] = []
+    const proxy = startRpcProxy(KEYED, {
+      fallbacks: [PUBLIC],
+      trusted: [TRUSTED],
+      fetch: async (url, init) => {
+        const body = JSON.parse(String(init.body))
+        const host = new URL(url).hostname
+        hits.push({ host, method: body.method })
+        if (down.has(host)) return Response.json({ jsonrpc: '2.0', id: body.id, error: { code: 429, message: 'rate limit' } }, { status: 429 })
+        return Response.json({ jsonrpc: '2.0', id: body.id, result: host.includes('publicnode') ? '0xbad' : '0x1' })
+      },
+    })
+    const ask = async (method: string, params: unknown[] = []) => (await (await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })).json()) as { result?: string; error?: { code: number } }
+    return { hits, proxy, ask }
+  }
+
+  test('the upstream refuses: eth_call is answered by the trusted provider, never the public one', async () => {
+    const w = world(new Set(['base-mainnet.g.alchemy.com']))
+    try {
+      for (const method of ['eth_call', 'eth_getBalance', 'eth_getCode', 'eth_chainId', 'eth_simulateV1']) expect((await w.ask(method)).result).toBe('0x1')
+    } finally {
+      w.proxy.stop()
+    }
+    expect(w.hits.some((h) => h.host === 'base-rpc.publicnode.com')).toBe(false)
+  })
+
+  test('both keyed providers refuse: the read fails instead of trusting a public node', async () => {
+    const w = world(new Set(['base-mainnet.g.alchemy.com', 'abc.base-mainnet.quiknode.pro']))
+    let r: { result?: string; error?: { code: number } }
+    try {
+      r = await w.ask('eth_call')
+    } finally {
+      w.proxy.stop()
+    }
+    expect(r.result).toBeUndefined()
+    expect(r.error?.code).toBe(429)
+    expect(w.hits.some((h) => h.host === 'base-rpc.publicnode.com')).toBe(false)
+  })
+
+  test('a signed transaction may be relayed by any provider when the keyed ones refuse', async () => {
+    const w = world(new Set(['base-mainnet.g.alchemy.com', 'abc.base-mainnet.quiknode.pro']))
+    try {
+      expect((await w.ask('eth_sendRawTransaction', ['0x02'])).result).toBe('0xbad')
+    } finally {
+      w.proxy.stop()
+    }
+    expect(w.hits.at(-1)?.host).toBe('base-rpc.publicnode.com')
+  })
+})
