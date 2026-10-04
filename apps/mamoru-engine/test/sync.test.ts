@@ -294,7 +294,7 @@ describe('account state sync', () => {
     await syncOnce({ client: chain.client(), db: sqliteD1(), chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: () => {} })
     const bare = { code: count('eth_getCode'), blocks: count('eth_getBlockByNumber'), call: count('eth_call') }
     for (const step of [0, 5]) {
-      // The same safe block again, then a later one: the hash of the earlier block rides in the accounts' own request.
+      // The same safe block again, then a later one: the hash of the earlier block rides in the pools' request.
       chain.safe += step
       chain.latest += step
       chain.calls.length = 0
@@ -302,6 +302,26 @@ describe('account state sync', () => {
       expect(count('eth_getCode') - bare.code).toBe(0)
       expect(count('eth_getBlockByNumber') - bare.blocks).toBe(0)
       expect(count('eth_call') - bare.call).toBe(1)
+    }
+  })
+
+  test('a stored hash of zeroes is never proof, in reach of BLOCKHASH or out of it', async () => {
+    seedAccount('acct-a', A)
+    chain.code.set(A.toLowerCase(), '0x60806040')
+    await run()
+    chain.calls.length = 0
+    await syncOnce({ client: chain.client(), db: sqliteD1(), chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: () => {} })
+    const bare = count('eth_getCode')
+    for (const step of [5, 300]) {
+      db.sqlite.run(`UPDATE proj_account_state SET block_hash = '0x${'00'.repeat(32)}'`)
+      chain.code.delete(A.toLowerCase())
+      chain.safe += step
+      chain.latest += step
+      chain.calls.length = 0
+      await run()
+      expect(count('eth_getCode') - bare).toBe(1)
+      expect(db.sqlite.query('SELECT deployed FROM proj_account_state').all()).toEqual([{ deployed: 0 }])
+      db.sqlite.run('UPDATE proj_account_state SET deployed = 1')
     }
   })
 
@@ -325,22 +345,27 @@ describe('account state sync', () => {
     expect(db.sqlite.query('SELECT deployed FROM proj_account_state').all()).toEqual([{ deployed: 1 }])
   })
 
-  test('with earlier projections the first request carries 24 accounts and the hash; 60 accounts still cost three requests', async () => {
-    for (let i = 0; i < 60; i++) {
-      seedAccount(`acct-${String(i).padStart(2, '0')}`, addr(i))
-      chain.code.set(addr(i).toLowerCase(), '0x60806040')
+  test('with earlier projections a run costs the same requests as without: 25, 50 and 60 accounts', async () => {
+    for (const [n, requests] of [[25, 1], [50, 2], [60, 3]] as const) {
+      db.sqlite.run('DELETE FROM proj_account_state')
+      db.sqlite.run('DELETE FROM accounts')
+      for (let i = 0; i < n; i++) {
+        seedAccount(`acct-${String(i).padStart(2, '0')}`, addr(i))
+        chain.code.set(addr(i).toLowerCase(), '0x60806040')
+      }
+      await run()
+      chain.calls.length = 0
+      await syncOnce({ client: chain.client(), db: sqliteD1(), chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: () => {} })
+      const bare = { code: count('eth_getCode'), call: count('eth_call'), blocks: count('eth_getBlockByNumber') }
+      chain.safe += 5
+      chain.latest += 5
+      chain.calls.length = 0
+      await run()
+      expect(count('eth_call') - bare.call).toBe(requests)
+      expect(count('eth_getCode') - bare.code).toBe(0)
+      expect(count('eth_getBlockByNumber') - bare.blocks).toBeLessThanOrEqual(0)
+      expect(db.sqlite.query('SELECT COUNT(*) AS n FROM proj_account_state WHERE deployed = 1 AND block = ?').get(chain.safe)).toEqual({ n })
     }
-    await run()
-    chain.calls.length = 0
-    await syncOnce({ client: chain.client(), db: sqliteD1(), chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: () => {} })
-    const bare = { code: count('eth_getCode'), call: count('eth_call') }
-    chain.safe += 5
-    chain.latest += 5
-    chain.calls.length = 0
-    await run()
-    expect(count('eth_call') - bare.call).toBe(3)
-    expect(count('eth_getCode') - bare.code).toBe(0)
-    expect(db.sqlite.query('SELECT COUNT(*) AS n FROM proj_account_state WHERE deployed = 1 AND block = ?').get(chain.safe)).toEqual({ n: 60 })
   })
 
   test('a projection from a later block than this run does not vouch for the code: it is read', async () => {
