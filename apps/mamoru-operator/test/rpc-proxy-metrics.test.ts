@@ -572,6 +572,15 @@ describe('providerWords', () => {
     expect(providerWords('nonce\u061c too low')).toBe('nonce too low')
   })
 
+  test('a word cut by the reading limit is dropped: half an address is not a plain word', () => {
+    for (let pad = 1960; pad <= 2000; pad++) {
+      const out = providerWords(`no ${' '.repeat(pad)}short-key.rpc.example/v2/abc`)
+      expect(out).not.toMatch(/short|key|rpc|example|abc/)
+    }
+    expect(providerWords(`${'x '.repeat(999)}ab`)).toBe(providerWords('x '.repeat(999) + 'ab'))
+    expect(providerWords('nonce too low')).toBe('nonce too low')
+  })
+
   test('it never throws and never writes more than one short line', () => {
     for (const m of [undefined, null, 7, {}, [], Symbol('x'), 'a.'.repeat(50_000), '\n'.repeat(5_000)]) {
       const out = providerWords(m)
