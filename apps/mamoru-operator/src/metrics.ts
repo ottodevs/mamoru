@@ -270,6 +270,8 @@ function fileUnlabelled(total: Buckets, byComponent: Buckets): void {
   for (const [method, t] of totalsByMethod(total)) {
     const requests = Math.max(0, t.requests - (counted.get(method)?.requests ?? 0))
     const cuEstimate = Math.max(0, t.cuEstimate - (counted.get(method)?.cuEstimate ?? 0))
+    // Sums of a damaged file can overflow: a figure that is not a finite number is not filed, and would not load back.
+    if (!Number.isFinite(requests) || !Number.isFinite(cuEstimate)) continue
     if (requests === 0 && cuEstimate === 0) continue
     const c = byComponent.get('unlabelled', method)
     c.requests += requests

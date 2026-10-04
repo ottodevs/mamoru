@@ -458,6 +458,27 @@ describe('requests by component', () => {
     expect(by).toEqual({ engine: { eth_call: { requests: 1, cuEstimate: 26 } }, unlabelled: { eth_call: { requests: 1, cuEstimate: 26 } } })
   })
 
+  test('a file whose figures overflow when added files nothing for that method, and loads the same the next time', () => {
+    const dir = tmpDir()
+    const old = new RpcMetrics(dir)
+    old.recordRequest('alchemy.com', 'eth_call', false)
+    old.recordRequest('quiknode.pro', 'eth_call', false)
+    old.recordRequest('alchemy.com', 'eth_chainId', false)
+    old.persist()
+    const file = join(dir, 'rpc-usage.json')
+    const raw = JSON.parse(readFileSync(file, 'utf8'))
+    delete raw.components
+    raw.cumulative['alchemy.com'].eth_call.cuEstimate = 1e308
+    raw.cumulative['quiknode.pro'].eth_call.cuEstimate = 1e308
+    writeFileSync(file, JSON.stringify(raw))
+    const metrics = new RpcMetrics(dir)
+    const by = metrics.snapshot().byComponent.cumulative
+    expect(by.unlabelled!.eth_call).toBeUndefined()
+    expect(by.unlabelled!.eth_chainId).toEqual({ requests: 1, cuEstimate: 0 })
+    metrics.persist()
+    expect(new RpcMetrics(dir).snapshot().byComponent.cumulative).toEqual(by)
+  })
+
   test('a component reports requests and CU only: no counter that is not kept for it', () => {
     const metrics = new RpcMetrics(tmpDir())
     metrics.recordRequest('alchemy.com', 'eth_getLogs', true, Date.now(), 'engine')
