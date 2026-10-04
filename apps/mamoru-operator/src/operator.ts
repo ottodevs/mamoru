@@ -70,6 +70,8 @@ const ARM_BUDGET_HOLD_MS = 600_000
 const RECONCILE_EVERY_MS = 20_000
 /** Base produces a block every 2 s; used to place a failure time on the chain when no tx hash was kept. */
 const BLOCK_SECONDS = 2n
+/** Blocks added before the handover time when looking for the block an activation executed in (clock and block-time slack). */
+const ACTIVATION_SEARCH_MARGIN = 60n
 const PREPARE_TTL_MS = 5 * 60_000
 /** On top of the policy reserve: the first userOp prefund leaves the Safe's balance into its EntryPoint deposit. */
 const TOP_UP_MARGIN_WEI = 200_000_000_000_000n
@@ -1209,11 +1211,27 @@ export class Operator {
     if (!a.execSent && !op?.txHash) return this.disarm(acc, 'ARMED_NONCE_MOVED')
     const permissionId = a.grants[0]?.permissionId
     if (op && permissionId) {
-      const enabled = await this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [permissionId, acc.ctx.address as Address] })
+      const enabledAt = (blockNumber?: bigint) =>
+        this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [permissionId, acc.ctx.address as Address], ...(blockNumber === undefined ? {} : { blockNumber }) })
+      const enabled = await enabledAt()
       if (acc.armed?.opId !== a.opId) return
       if (enabled) {
-        const block = await this.client.getBlockNumber()
-        console.log(`[armed] ${acc.accountKey} ${a.opId} executed on chain (its grants are enabled): account started`)
+        // The block it executed in, not the one it is noticed in: deposits and history are read from there. It is the
+        // first block with the grant enabled, searched from just before the transaction was first handed over.
+        const head = await this.client.getBlockNumber()
+        const since = a.sentAt ?? (Date.parse(op.updatedAt) || Date.now())
+        const back = BigInt(Math.ceil(Math.max(0, Date.now() - since) / 1000)) / BLOCK_SECONDS + ACTIVATION_SEARCH_MARGIN
+        let lo = head > back ? head - back : 0n
+        let hi = head
+        if (await enabledAt(lo)) hi = lo
+        while (lo + 1n < hi) {
+          const mid = (lo + hi) / 2n
+          if (await enabledAt(mid)) hi = mid
+          else lo = mid
+        }
+        const block = hi
+        if (acc.armed?.opId !== a.opId) return
+        console.log(`[armed] ${acc.accountKey} ${a.opId} executed on chain at block ${block} (its grants are enabled): account started`)
         this.afterOwner(acc, { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: 0, grants: a.grants }, { blockNumber: block } as TransactionReceipt)
         return this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(block) })
       }
@@ -1424,6 +1442,7 @@ export class Operator {
         // Written before the provider gets it: a restart from here on must know a copy may be out.
         if (acc.armed?.opId === op.opId && !acc.armed.execSent) {
           acc.armed.execSent = true
+          acc.armed.sentAt = Date.now()
           this.store.save()
         }
       },

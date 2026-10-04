@@ -35,6 +35,8 @@ export type ArmedActivation = {
   retryAt?: number
   /** A failed attempt got as far as sending the execTransaction: it may have landed although the reply said no. */
   execSent?: boolean
+  /** When (ms) the execTransaction was first handed to a provider: nothing of it can be on chain before. */
+  sentAt?: number
 }
 
 export type AccountState = {
