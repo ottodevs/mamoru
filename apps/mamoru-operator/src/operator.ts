@@ -250,6 +250,8 @@ export class Operator {
   private relayerBalanceCache: { at: number; value: bigint } | null = null
   /** Ops whose execTransaction send was started in this attempt: only then can a refusal be about a copy already out. */
   private readonly execTried = new Set<string>()
+  /** Armed ops being sent again after a failed attempt: an earlier copy may have landed although its reply said no. */
+  private readonly retried = new Set<string>()
   /** Last time each account's activation was logged as waiting for relayer ETH. */
   private readonly relayerLowLogged = new Map<string, number>()
   /** Pool state of the last few blocks: accounts reviewed at the same block read it once. */
@@ -1175,6 +1177,7 @@ export class Operator {
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
     const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants }
     const op = acc.ops.find((o) => o.opId === a.opId)!
+    if ((a.tries ?? 0) > 0) this.retried.add(op.opId)
     try {
       await this.execute(acc, live, p, a.signature, op)
     } catch (e) {
@@ -1295,6 +1298,12 @@ export class Operator {
     this.patchOp(acc, op.opId, { state: 'submitted', txHash: hash })
     const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
     console.log(`[owner] ${op.opId} tx ${hash} block ${receipt.blockNumber} ${ok ? 'ok' : 'FAILED'}`)
+    if (!ok && this.retried.has(op.opId)) {
+      // A second copy fails when the first one executed after all (the Safe nonce it was signed for is spent). The op
+      // fails as an unknown receipt, without this hash, so reconcileOwner looks the execution up in the Safe's logs.
+      this.failOwner(acc, op, RECEIPT_UNKNOWN, { txHash: undefined })
+      return this.reconcileSoon(acc)
+    }
     if (!ok) return this.failOwner(acc, op, 'OWNER_TX_FAILED', { block: Number(receipt.blockNumber) })
     this.afterOwner(acc, p, receipt)
     this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(receipt.blockNumber) })

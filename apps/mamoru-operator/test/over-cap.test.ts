@@ -1070,6 +1070,26 @@ describe('an activation waits for the relayer instead of failing', () => {
     expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
   })
 
+  test('a retry whose execTransaction fails on chain is left to reconciliation: the first copy may have executed', async () => {
+    const w = world(20_000_000n)
+    let refuse = true
+    w.knobs.onSend = (t) => {
+      if (refuse && t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Internal error'), { code: -32603 })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    const acc = w.state.accounts.k!
+    refuse = false
+    w.knobs.execOk = false
+    acc.armed!.retryAt = Date.now() - 1
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    const after = acc.ops.find((o) => o.opId === op.opId)!
+    expect(after).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(after.txHash).toBeUndefined()
+    expect(acc.armed).toBeUndefined()
+  })
+
   test('already known on the deploy or the top-up is not about the owner transaction: the op waits armed', async () => {
     const w = world(20_000_000n)
     w.knobs.onSend = (t) => {
