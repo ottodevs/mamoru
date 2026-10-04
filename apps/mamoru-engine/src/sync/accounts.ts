@@ -1,5 +1,5 @@
 import type { Figure, ReasonCode, TokenHolding } from '@mamoru/domain'
-import type { Address, PublicClient } from 'viem'
+import { multicall3Abi, type Address, type PublicClient } from 'viem'
 import { balanceOfAbi } from './abis.ts'
 import { valueAt, type Rate } from './math.ts'
 import { estimateAt, fig, notObserved, rpcAt, type Anchor } from './provenance.ts'
@@ -12,23 +12,10 @@ export type AccountState = { deployed: boolean; tokens: TokenHolding[]; totalVal
 
 const ROLES: Record<TokenHolding['token'], TokenHolding['role']> = { USDC: 'plan', cbBTC: 'plan', WETH: 'outside_plan', ETH: 'gas' }
 
-/** Code, native balance and plan token balances of one account at `H`, valued in USDC as estimates. */
-export async function readAccountState(
-  client: PublicClient,
-  account: Address,
-  tokens: AccountTokens,
-  anchor: Anchor,
-  rates: ReadonlyMap<string, Rate>,
-): Promise<AccountState> {
-  const blockNumber = BigInt(anchor.blockNumber)
-  const bal = (token: Address) => client.readContract({ address: token, abi: balanceOfAbi, functionName: 'balanceOf', args: [account], blockNumber })
-  const [code, usdc, cbbtc, weth, eth] = await Promise.all([
-    client.getCode({ address: account, blockNumber }),
-    bal(tokens.USDC),
-    bal(tokens.cbBTC),
-    bal(tokens.WETH),
-    client.getBalance({ address: account, blockNumber }),
-  ])
+type Amounts = { usdc: bigint; cbbtc: bigint; weth: bigint; eth: bigint }
+
+/** The projection of one account from its balances at `H`, valued in USDC as estimates. */
+function stateOf(deployed: boolean, { usdc, cbbtc, weth, eth }: Amounts, anchor: Anchor, rates: ReadonlyMap<string, Rate>): AccountState {
   const amounts: [TokenHolding['token'], bigint][] = [['USDC', usdc], ['cbBTC', cbbtc], ['WETH', weth], ['ETH', eth]]
   let total: bigint | null = 0n
   const holdings = amounts.map(([token, amount]): TokenHolding => {
@@ -48,5 +35,95 @@ export async function readAccountState(
     if (code) holding.code = code
     return holding
   })
-  return { deployed: code !== undefined && code !== '0x', tokens: holdings, totalValue: total === null ? null : total.toString() }
+  return { deployed, tokens: holdings, totalValue: total === null ? null : total.toString() }
+}
+
+/** Code, native balance and plan token balances of one account at `H`, valued in USDC as estimates. */
+export async function readAccountState(
+  client: PublicClient,
+  account: Address,
+  tokens: AccountTokens,
+  anchor: Anchor,
+  rates: ReadonlyMap<string, Rate>,
+): Promise<AccountState> {
+  const blockNumber = BigInt(anchor.blockNumber)
+  const bal = (token: Address) => client.readContract({ address: token, abi: balanceOfAbi, functionName: 'balanceOf', args: [account], blockNumber })
+  const [code, usdc, cbbtc, weth, eth] = await Promise.all([
+    client.getCode({ address: account, blockNumber }),
+    bal(tokens.USDC),
+    bal(tokens.cbBTC),
+    bal(tokens.WETH),
+    client.getBalance({ address: account, blockNumber }),
+  ])
+  return stateOf(code !== undefined && code !== '0x', { usdc, cbbtc, weth, eth }, anchor, rates)
+}
+
+/** Accounts per Multicall3 request: four reads each, within the 100 calls a provider takes in one aggregate3. */
+export const ACCOUNTS_PER_CALL = 25
+/** Calldata of one request: 100 short reads fit several times over, so a group is never split. */
+const GROUP_BATCH_BYTES = 16_384
+
+export type AccountRef = { key: string; address: Address }
+
+/**
+ * The state of every account at `H` in one Multicall3 request per ACCOUNTS_PER_CALL accounts, instead of five
+ * requests per account. The code of an account is read only until it is known to be deployed (`knownDeployed`,
+ * from the last projection): a deployed Safe stays deployed. An account with a read that failed, or in a group
+ * whose request failed, is left out and keeps its last projection.
+ */
+export async function readAccountStates(
+  client: PublicClient,
+  accounts: readonly AccountRef[],
+  tokens: AccountTokens,
+  anchor: Anchor,
+  rates: ReadonlyMap<string, Rate>,
+  knownDeployed: ReadonlySet<string>,
+): Promise<Map<string, AccountState>> {
+  const out = new Map<string, AccountState>()
+  const multicall3 = client.chain?.contracts?.multicall3?.address
+  const blockNumber = BigInt(anchor.blockNumber)
+  if (!multicall3) {
+    // No Multicall3 on this chain: one account at a time, as before.
+    for (const a of accounts) {
+      try {
+        out.set(a.key, await readAccountState(client, a.address, tokens, anchor, rates))
+      } catch {}
+    }
+    return out
+  }
+  for (let i = 0; i < accounts.length; i += ACCOUNTS_PER_CALL) {
+    const group = accounts.slice(i, i + ACCOUNTS_PER_CALL)
+    const contracts = group.flatMap((a) => [
+      { address: multicall3, abi: multicall3Abi, functionName: 'getEthBalance', args: [a.address] } as const,
+      ...[tokens.USDC, tokens.cbBTC, tokens.WETH].map((token) => ({ address: token, abi: balanceOfAbi, functionName: 'balanceOf', args: [a.address] }) as const),
+    ])
+    type Read = { status: 'success'; result: unknown } | { status: 'failure' }
+    let results: Read[]
+    let codes: (boolean | null)[]
+    try {
+      ;[results, codes] = await Promise.all([
+        client.multicall({ contracts, blockNumber, batchSize: GROUP_BATCH_BYTES, allowFailure: true }) as Promise<Read[]>,
+        Promise.all(
+          group.map((a) =>
+            knownDeployed.has(a.key)
+              ? true
+              : client.getCode({ address: a.address, blockNumber }).then(
+                  (code) => code !== undefined && code !== '0x',
+                  () => null,
+                ),
+          ),
+        ),
+      ])
+    } catch {
+      continue
+    }
+    group.forEach((a, j) => {
+      const [eth, usdc, cbbtc, weth] = results.slice(j * 4, j * 4 + 4)
+      const deployed = codes[j]
+      if (deployed === null || deployed === undefined) return
+      if (eth?.status !== 'success' || usdc?.status !== 'success' || cbbtc?.status !== 'success' || weth?.status !== 'success') return
+      out.set(a.key, stateOf(deployed, { usdc: usdc.result as bigint, cbbtc: cbbtc.result as bigint, weth: weth.result as bigint, eth: eth.result as bigint }, anchor, rates))
+    })
+  }
+  return out
 }

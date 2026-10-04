@@ -3,10 +3,10 @@ import { conservadorV1, type PolicyVersion } from '@mamoru/policy'
 import type { MultiBaasClient } from '@mamoru/multibaas'
 import { baseRegistry, entry, readCodeHash, type Registry, type RegistryEntry } from '@mamoru/registry'
 import { getAddress, type Address, type PublicClient } from 'viem'
-import { insertPoolSnapshot, listAccounts, prunePoolSnapshots, markRpcUnavailable, previousIndexState, previousPoolView, upsertAccountState, upsertPoolState, upsertSourceState, type SourceStateRow } from '../d1.ts'
+import { deployedAccountKeys, insertPoolSnapshot, listAccounts, prunePoolSnapshots, markRpcUnavailable, previousIndexState, previousPoolView, upsertAccountState, upsertPoolState, upsertSourceState, type SourceStateRow } from '../d1.ts'
 import type { D1Like, D1Statement } from '../env.ts'
 import { poolReadAbi } from './abis.ts'
-import { readAccountState } from './accounts.ts'
+import { readAccountStates, type AccountRef } from './accounts.ts'
 import { readHead } from './head.ts'
 import { rpcFallback } from './history.ts'
 import type { LogSource } from './client.ts'
@@ -210,22 +210,18 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
   // Accounts: read only, never written here except their chain projection.
   const accounts = await listAccounts(db, chainId)
   const tokens = { USDC: entry('USDC', registry).address, cbBTC: entry('cbBTC', registry).address, WETH: entry('WETH', registry).address }
-  let accountsRead = 0
+  const refs: AccountRef[] = []
   for (const a of accounts) {
-    let address: Address
     try {
-      address = getAddress(a.address)
+      refs.push({ key: a.account_key, address: getAddress(a.address) })
     } catch {
-      continue
-    }
-    try {
-      const s = await readAccountState(client, address, tokens, anchor, rates)
-      statements.push(upsertAccountState(db, anchor, a.account_key, s))
-      accountsRead++
-    } catch {
-      // Keeps the last projection; the API shows it stale by age.
+      // Not an address: nothing to read.
     }
   }
+  // An account missing from the answer keeps its last projection; the API shows it stale by age.
+  const states = await readAccountStates(client, refs, tokens, anchor, rates, await deployedAccountKeys(db, chainId))
+  for (const [key, s] of states) statements.push(upsertAccountState(db, anchor, key, s))
+  const accountsRead = states.size
 
   // The anchor is the same block for whoever answered last: a provider switch or a reorg in the middle writes nothing.
   const again = await client.getBlock({ blockNumber: H }).catch(() => null)

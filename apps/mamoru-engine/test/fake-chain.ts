@@ -24,6 +24,8 @@ export class FakeChain {
   code = new Map<string, Hex>()
   pools = new Map<string, PoolFake>()
   balances = new Map<string, bigint>() // `${token}:${owner}`, token 'ETH' for native
+  /** Owners whose balanceOf reverts, lower case. */
+  balanceReverts = new Set<string>()
   logs: FakeLog[] = []
   calls: string[] = []
   /** Base fee of every block; null leaves the field out, as some nodes do. */
@@ -93,7 +95,10 @@ export class FakeChain {
   private call(to: Address, data: Hex): Hex {
     if (to.toLowerCase() === MULTICALL3) {
       if (this.multicallDown) throw new Error('execution reverted')
-      const { args } = decodeFunctionData({ abi: multicall3Abi, data })
+      const { args, functionName } = decodeFunctionData({ abi: multicall3Abi, data })
+      if (functionName === 'getEthBalance') {
+        return encodeFunctionResult({ abi: multicall3Abi, functionName: 'getEthBalance', result: this.balances.get(`eth:${(args[0] as string).toLowerCase()}`) ?? 0n })
+      }
       const inner = args[0] as readonly { target: Address; callData: Hex }[]
       const result = inner.map((c) => {
         try {
@@ -108,6 +113,7 @@ export class FakeChain {
     const pool = this.pools.get(to.toLowerCase())
     if (call.functionName === 'balanceOf') {
       const owner = (call.args[0] as string).toLowerCase()
+      if (this.balanceReverts.has(owner)) throw new Error('execution reverted')
       return encodeFunctionResult({ abi: readAbi, functionName: 'balanceOf', result: this.balances.get(`${to.toLowerCase()}:${owner}`) ?? 0n })
     }
     if (!pool) throw new Error('execution reverted')

@@ -91,6 +91,12 @@ export async function listAccounts(db: D1Like, chainId: number): Promise<Account
   return results
 }
 
+/** Accounts whose last projection saw them deployed: their code is not read again (a deployed Safe stays deployed). */
+export async function deployedAccountKeys(db: D1Like, chainId: number): Promise<Set<string>> {
+  const { results } = await db.prepare('SELECT account_key FROM proj_account_state WHERE chain_id = ? AND deployed = 1').bind(chainId).all<{ account_key: string }>()
+  return new Set(results.map((r) => r.account_key))
+}
+
 export async function previousPoolView(db: D1Like, chainId: number, pool: string): Promise<PoolView | null> {
   const { results } = await db.prepare('SELECT payload_json FROM proj_pool_state WHERE chain_id = ? AND pool_address = ?').bind(chainId, pool).all<{ payload_json: string }>()
   const row = results[0]

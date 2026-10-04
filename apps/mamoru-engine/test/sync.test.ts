@@ -219,6 +219,72 @@ describe('account state sync', () => {
     expect(rows[1]).toMatchObject({ account_key: 'acct-b', deployed: 0, total_value: '0' })
   })
 
+  const addr = (i: number) => `0x${(0x1000 + i).toString(16).padStart(40, '0')}` as const
+  const count = (method: string) => chain.calls.filter((m) => m === method).length
+
+  test('60 accounts cost three Multicall3 requests, not five requests each', async () => {
+    for (let i = 0; i < 60; i++) seedAccount(`acct-${String(i).padStart(2, '0')}`, addr(i))
+    chain.setBalance(USDC, addr(7), 3_000_000n)
+    chain.setBalance('ETH', addr(41), 524_288n)
+    // What a run costs with no account at all: the pools and the head.
+    const empty = sqliteD1()
+    await syncOnce({ client: chain.client(), db: empty, chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: () => {} })
+    const before = { call: count('eth_call'), code: count('eth_getCode') }
+    chain.calls.length = 0
+    await run()
+    expect(count('eth_call') - before.call).toBe(3)
+    expect(count('eth_getBalance')).toBe(0)
+    // None is known to be deployed yet: the code of each is read, once.
+    expect(count('eth_getCode') - before.code).toBe(60)
+    const rows = db.sqlite.query('SELECT account_key, total_value, tokens_json FROM proj_account_state ORDER BY account_key').all() as { account_key: string; total_value: string; tokens_json: string }[]
+    expect(rows).toHaveLength(60)
+    expect(rows[7]).toMatchObject({ account_key: 'acct-07', total_value: '3000000' })
+    expect((JSON.parse(rows[41]!.tokens_json) as TokenHolding[]).find((t) => t.token === 'ETH')!.amount.value).toBe('524288')
+    expect(logs.at(-1)).toMatchObject({ msg: 'sync.done', accounts: 60, accountsTotal: 60 })
+  })
+
+  test('the code of an account already projected as deployed is not read again; an undeployed one is', async () => {
+    seedAccount('acct-a', A)
+    seedAccount('acct-b', B)
+    chain.code.set(A.toLowerCase(), '0x60806040')
+    await run()
+    const codeReads = () => count('eth_getCode')
+    chain.calls.length = 0
+    const baseline = sqliteD1()
+    await syncOnce({ client: chain.client(), db: baseline, chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: () => {} })
+    const withoutAccounts = codeReads()
+    chain.calls.length = 0
+    await run()
+    // One read: acct-b, still undeployed. acct-a is known.
+    expect(codeReads() - withoutAccounts).toBe(1)
+    chain.code.set(B.toLowerCase(), '0x60806040')
+    await run()
+    chain.calls.length = 0
+    await run()
+    expect(codeReads() - withoutAccounts).toBe(0)
+    const rows = db.sqlite.query('SELECT account_key, deployed FROM proj_account_state ORDER BY account_key').all()
+    expect(rows).toEqual([{ account_key: 'acct-a', deployed: 1 }, { account_key: 'acct-b', deployed: 1 }])
+  })
+
+  test('an account with a read that fails keeps its last projection; the others in the request are written', async () => {
+    seedAccount('acct-a', A)
+    seedAccount('acct-b', B)
+    chain.setBalance(USDC, A, 1_000_000n)
+    chain.setBalance(USDC, B, 2_000_000n)
+    await run()
+    chain.setBalance(USDC, A, 9_000_000n)
+    chain.setBalance(USDC, B, 8_000_000n)
+    chain.balanceReverts.add(A.toLowerCase())
+    chain.safe += 5
+    chain.latest += 5
+    await run()
+    const rows = db.sqlite.query('SELECT account_key, block, total_value FROM proj_account_state ORDER BY account_key').all() as { account_key: string; block: number; total_value: string }[]
+    expect(rows[0]).toMatchObject({ account_key: 'acct-a', total_value: '1000000' })
+    expect(rows[0]!.block).toBeLessThan(rows[1]!.block)
+    expect(rows[1]).toMatchObject({ account_key: 'acct-b', total_value: '8000000', block: chain.safe })
+    expect(logs.at(-1)).toMatchObject({ msg: 'sync.done', accounts: 1, accountsTotal: 2 })
+  })
+
   test('without the WETH price, WETH and ETH values are not observed and the total is null', async () => {
     seedAccount('acct-a', A)
     chain.pools.delete(WETH_POOL.toLowerCase())
