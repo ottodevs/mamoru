@@ -335,9 +335,11 @@ export class Operator {
         this.failOwner(acc, op, RECEIPT_UNKNOWN)
       } else {
         if (op.state !== 'proposed' || op.code !== 'ARMED') this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
-        // Handed to a provider with no hash kept: it may be pending. Give it time to land before anything is sent
-        // again; the nonce read on each pass then finds it.
-        if (acc.armed!.execSent) acc.armed = { ...acc.armed!, retryAt: Math.max(acc.armed!.retryAt ?? 0, Date.now() + ARM_RETRY_MS) }
+        // Handed to a provider with no hash kept: it may be pending. Three minutes (90 Base blocks) to land before
+        // anything is sent again; the nonce read on each pass then finds it. What is left is a copy pending longer
+        // than that which no node reports: the second copy then fails at the Safe for its gas, and settleRetried
+        // still records the account from the first.
+        if (acc.armed!.execSent) acc.armed = { ...acc.armed!, retryAt: Math.max(acc.armed!.retryAt ?? 0, Date.now() + ARM_RETRY_MAX_MS) }
       }
     }
     for (const acc of Object.values(this.store.state.accounts)) this.reconcileSoon(acc)
