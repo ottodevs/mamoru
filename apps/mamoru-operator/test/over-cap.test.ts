@@ -1062,8 +1062,11 @@ describe('an activation waits for the relayer instead of failing', () => {
     await Bun.sleep(5)
     const acc = w.state.accounts.k!
     expect(acc.armed?.tries).toBe(1)
-    // The refused attempt landed after all: the Safe executed it.
+    // The refused attempt landed after all: the Safe executed it. The relayer is left short of ETH by it, and the
+    // moved nonce is still seen.
     w.chain.nonce = 1n
+    w.chain.deployed = true
+    fund(w, SHORT)
     acc.armed!.retryAt = Date.now() - 1
     await priv(w.op).fireArmed(acc, 20_000_000n)
     expect(acc.armed).toBeUndefined()
