@@ -151,19 +151,26 @@ export type RpcProxyOptions = {
   fetch?: (url: string, init: RequestInit) => Promise<Response>
 }
 
-const ANY_URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g
+/** Control characters, line and paragraph separators, and the invisible format characters (zero width, bidi). */
+const UNPRINTABLE_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]+/g
+/** A word that could be part of an address: a path or scheme (`/`, `\`), userinfo (`@`), or a dotted name. */
+const ADDRESS_PART_RE = /[\/\\@]|[a-z0-9]\.[a-z0-9]/i
+/** A plain decimal such as `1.5`, with the punctuation a sentence may put around it. */
+const DECIMAL_RE = /^[([]?\d+\.\d+[)\],.;:]?$/
 /** How much of a provider's message is read at all: the rest is dropped before any pattern runs over it. */
 const PROVIDER_WORDS_READ = 2000
 
 /**
- * A provider's own words, fit for one journal line. The text is theirs, not ours, so: a URL goes whole (a key can
- * sit in the hostname, which `redactSecrets` keeps), and control characters and line separators become a space
- * (one message is one line, and cannot write a second one or move the terminal).
+ * A provider's own words, fit for one journal line. The text is theirs, not ours, so it is read word by word:
+ * unprintable characters and line separators become a space (one message is one line, and cannot write a second
+ * one or move the terminal), and any word that could be part of an endpoint address is dropped whole, however the
+ * address was split: a key can sit in a hostname, a path or the userinfo, which `redactSecrets` alone would keep.
+ * A message that is not text says nothing: an object is not serialised.
  */
 export function providerWords(message: unknown): string {
-  const read = typeof message === 'string' ? message.slice(0, PROVIDER_WORDS_READ).replace(ANY_URL_RE, '[url]') : message
-  return redactSecrets(read).replace(ANY_URL_RE, '[url]').replace(CONTROL_RE, ' ')
+  if (typeof message !== 'string') return '(no text)'
+  const words = message.slice(0, PROVIDER_WORDS_READ).replace(UNPRINTABLE_RE, ' ').split(/\s+/).filter(Boolean)
+  return redactSecrets(words.map((w) => (ADDRESS_PART_RE.test(w) && !DECIMAL_RE.test(w) ? '[redacted]' : w)).join(' '))
 }
 
 export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { url: string; stop: () => void } {
