@@ -865,9 +865,11 @@ export class Operator {
       logErr(`[owner] ${op.opId}:`, e)
       this.relayerBalanceCache = null
       // The relayer ran out of ETH before the owner's transaction went out: same op, back to waiting armed.
-      if (kind === 'activate' && !(e instanceof HttpError) && relayerShort(e)) {
+      // The relayer ran out of ETH, or the provider refused the transaction outright: the owner's execTransaction never
+      // went out and the signature is still good, so the same op goes back to waiting armed and the watcher tries again.
+      if (kind === 'activate' && !(e instanceof HttpError) && (relayerShort(e) || providerRefused(e))) {
         this.lock(acc.accountKey)
-          .run(async () => this.rearm(acc, op, p, signature))
+          .run(async () => this.rearm(acc, op, p, signature, relayerShort(e) ? 0 : 1))
           .catch((err) => logErr(`[armed] ${op.opId} rearm:`, err))
         return
       }
@@ -1043,17 +1045,18 @@ export class Operator {
   }
 
   /**
-   * Puts an activation the relayer could not pay for back to waiting armed, on the same op; it costs the owner nothing.
+   * Puts an activation that could not be sent back to waiting armed, on the same op; it costs the owner nothing.
+   * `tries` is what this attempt counts towards ARM_MAX_TRIES: none for a relayer short of ETH, one for a refusal.
    * Only while its execTransaction never went out (no hash on the op): once broadcast, it is the receipt's to settle.
    * A newer armed activation or an account that started meanwhile wins: this op is dropped as superseded.
    */
-  private rearm(acc: AccountState, op: OpView, p: Prepared, signature: Hex): void {
+  private rearm(acc: AccountState, op: OpView, p: Prepared, signature: Hex, tries = 0): void {
     const current = acc.ops.find((o) => o.opId === op.opId)
     if (current?.txHash) return this.failOwner(acc, op, 'OWNER_TX_ERROR')
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now() }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(tries ? { tries } : {}) }
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
-    console.log(`[armed] ${acc.accountKey} ${op.opId} back to armed: the relayer could not pay for it`)
+    console.log(`[armed] ${acc.accountKey} ${op.opId} back to armed: ${tries ? 'the provider refused the transaction' : 'the relayer could not pay for it'}`)
   }
 
   /** Drops a pending armed activation, failing its op with `code` (and what `detail` adds to the op). */
@@ -1675,6 +1678,19 @@ function relayerShort(e: unknown): boolean {
   let cur = e as { message?: string; details?: string; cause?: unknown } | undefined
   for (let i = 0; i < 8 && cur; i++) {
     if (/insufficient funds for gas/i.test(`${cur.message ?? ''} ${cur.details ?? ''}`)) return true
+    cur = cur.cause as typeof cur
+  }
+  return false
+}
+
+/**
+ * True when a provider answered a send with a JSON-RPC error: the node looked at the transaction and did not take it,
+ * so nothing was broadcast. A timeout or a transport failure carries no such code and says nothing either way.
+ */
+function providerRefused(e: unknown): boolean {
+  let cur = e as { code?: unknown; name?: string; cause?: unknown } | undefined
+  for (let i = 0; i < 8 && cur; i++) {
+    if (typeof cur.code === 'number' && cur.code < 0 && cur.name !== 'TimeoutError' && cur.name !== 'HttpRequestError') return true
     cur = cur.cause as typeof cur
   }
   return false

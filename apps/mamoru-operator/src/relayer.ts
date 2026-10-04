@@ -12,6 +12,8 @@ export class Relayer {
   readonly account: PrivateKeyAccount
   private readonly lock = new Lock()
   private readonly chain: Chain
+  /** Nonce of the last transaction of this process that got a receipt. */
+  private lastMined: number | null = null
 
   constructor(
     key: Hex,
@@ -52,9 +54,15 @@ export class Relayer {
       // Base rejects a tx over 2^24 gas (EIP-7825): the 30% margin must not push a fitting estimate over the cap.
       const est = tx.gas ?? ((await this.client.estimateGas({ account: this.account.address, to: tx.to, data: tx.data, value: tx.value })) * 13n) / 10n
       const gas = est > TX_GAS_CAP ? TX_GAS_CAP : est
-      const hash = await wallet.sendTransaction({ to: tx.to, data: tx.data, value: tx.value ?? 0n, gas })
+      // A load-balanced provider can answer the count from a node that has not seen the previous transaction yet, and
+      // the node that has would refuse the reused nonce: never go below the one after the last mined here.
+      const counted = await this.client.getTransactionCount({ address: this.account.address, blockTag: 'pending' })
+      const nonce = this.lastMined !== null && counted <= this.lastMined ? this.lastMined + 1 : counted
+      const hash = await wallet.sendTransaction({ to: tx.to, data: tx.data, value: tx.value ?? 0n, gas, nonce })
       onSent?.(hash)
-      return { hash, receipt: await this.receipt(hash) }
+      const receipt = await this.receipt(hash)
+      this.lastMined = nonce
+      return { hash, receipt }
     })
   }
 }
