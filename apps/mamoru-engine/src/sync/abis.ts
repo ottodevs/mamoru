@@ -23,3 +23,6 @@ export const poolEventsAbi = parseAbi([
 ])
 
 export const balanceOfAbi = parseAbi(['function balanceOf(address owner) view returns (uint256)'])
+
+/** Multicall3.getBlockHash: BLOCKHASH as the request's own block sees it, zero beyond the 256 blocks before it. Not in viem's multicall3Abi. */
+export const blockHashAbi = parseAbi(['function getBlockHash(uint256 blockNumber) view returns (bytes32 blockHash)'])

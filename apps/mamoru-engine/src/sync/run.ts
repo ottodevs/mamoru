@@ -3,7 +3,7 @@ import { conservadorV1, type PolicyVersion } from '@mamoru/policy'
 import type { MultiBaasClient } from '@mamoru/multibaas'
 import { baseRegistry, entry, readCodeHash, type Registry, type RegistryEntry } from '@mamoru/registry'
 import { getAddress, type Address, type PublicClient } from 'viem'
-import { deployedAccountKeys, insertPoolSnapshot, listAccounts, prunePoolSnapshots, markRpcUnavailable, previousIndexState, previousPoolView, upsertAccountState, upsertPoolState, upsertSourceState, type SourceStateRow } from '../d1.ts'
+import { deployedProjections, insertPoolSnapshot, listAccounts, prunePoolSnapshots, markRpcUnavailable, previousIndexState, previousPoolView, upsertAccountState, upsertPoolState, upsertSourceState, type SourceStateRow } from '../d1.ts'
 import type { D1Like, D1Statement } from '../env.ts'
 import { poolReadAbi } from './abis.ts'
 import { readAccountStates, type AccountRef } from './accounts.ts'
@@ -219,7 +219,7 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
     }
   }
   // An account missing from the answer keeps its last projection; the API shows it stale by age.
-  const states = await readAccountStates(client, refs, tokens, anchor, rates, await deployedAccountKeys(db, chainId, anchor.blockNumber))
+  const states = await readAccountStates(client, refs, tokens, anchor, rates, await deployedProjections(db, chainId, anchor.blockNumber))
   for (const [key, s] of states) statements.push(upsertAccountState(db, anchor, key, s))
   const accountsRead = states.size
 
