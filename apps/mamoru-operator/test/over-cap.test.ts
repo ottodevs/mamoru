@@ -37,7 +37,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0 }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -56,6 +56,7 @@ function world(usdc: bigint) {
       if (functionName === 'slot0') return [1n << 96n, 0, 0, 0, 0, 0, true]
       if (functionName === 'nonce') return chain.nonce
       if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : 0n
+      if (functionName === 'isPermissionEnabled') return knobs.grantsEnabled
       throw new Error(`unexpected read ${functionName}`)
     },
     request: async ({ params }: { params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {
@@ -1085,6 +1086,28 @@ describe('an activation waits for the relayer instead of failing', () => {
     await priv(w.op).fireArmed(acc, 20_000_000n)
     expect(acc.armed).toBeUndefined()
     expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+  })
+
+  test('the nonce moved and the signed grants are enabled on the Safe: the attempt landed, the account is started, whenever it was', async () => {
+    const w = world(20_000_000n)
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    const acc = w.state.accounts.k!
+    const signed = acc.armed!.grants.map((g) => g.permissionId)
+    // Hours later (the operator was down): the copy had landed, and the engine's grants are on the Safe.
+    w.chain.nonce = 1n
+    w.knobs.grantsEnabled = true
+    acc.ops.find((o) => o.opId === op.opId)!.updatedAt = '2026-10-01T00:00:00.000Z'
+    acc.armed!.retryAt = Date.now() - 1
+    await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
+    expect(acc.active).toBe(true)
+    expect(acc.armed).toBeUndefined()
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(signed)
+    expect(acc.ownerFailures ?? []).toHaveLength(0)
   })
 
   test('a retry whose execTransaction fails on chain is left to reconciliation: the first copy may have executed', async () => {
