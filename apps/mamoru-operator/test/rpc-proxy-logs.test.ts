@@ -422,3 +422,87 @@ describe('a witness must be another operator, not another URL', () => {
     expect(metrics.snapshot().logRanges['alchemy.com#1']).toEqual({ accepted: 0, no_witness: 1, hash_mismatch: 0, provider_error: 0 })
   })
 })
+
+// A block the upstream answered moments ago witnesses a log range served by another operator: no second read of it.
+describe('recent trusted block hashes as witnesses', () => {
+  /** One proxy kept for several requests, as the engine uses it within a review. */
+  function session(w: ReturnType<typeof world>, witnessTtlMs?: number) {
+    const proxy = startRpcProxy(ALCHEMY, { fetch: w.fetch, fallbacks: FALLBACKS, logRanges: {}, witnessTtlMs })
+    const post = async (method: string, params: unknown[]) => (await (await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })).json()) as Answer
+    return { block: (n: number) => post('eth_getBlockByNumber', [hex(n), false]), logs: (from: number, to: number) => post('eth_getLogs', [{ address: '0x01', fromBlock: hex(from), toBlock: hex(to) }]), stop: () => proxy.stop() }
+  }
+
+  test('the upstream just answered the last block of the range: it is the witness, and is not asked again', async () => {
+    const w = world(LOGS)
+    const s = session(w)
+    try {
+      await s.block(1149)
+      expect((await s.logs(1000, 1149)).result).toEqual(inOrder(1000, 1149))
+    } finally {
+      s.stop()
+    }
+    expect(w.logsCalls(PUBLICNODE)).toEqual([{ method: 'eth_getLogs', from: 1000, to: 1149 }])
+    expect(w.blockCalls(ALCHEMY)).toEqual([1149])
+  })
+
+  test('a hash older than the time limit is not used: the witness is asked', async () => {
+    const w = world(LOGS)
+    const s = session(w, 1)
+    try {
+      await s.block(1149)
+      await Bun.sleep(5)
+      expect((await s.logs(1000, 1149)).result).toEqual(inOrder(1000, 1149))
+    } finally {
+      s.stop()
+    }
+    expect(w.blockCalls(ALCHEMY)).toEqual([1149, 1149])
+  })
+
+  test('a hash answered by the same operator that serves the logs is no witness of them', async () => {
+    const w = world(LOGS)
+    const s = session(w)
+    try {
+      await s.block(1009)
+      // Ten blocks: the upstream serves the range itself, so another operator must witness it.
+      expect((await s.logs(1000, 1009)).result).toEqual(inOrder(1000, 1009))
+    } finally {
+      s.stop()
+    }
+    expect(w.logsCalls(ALCHEMY)).toEqual([{ method: 'eth_getLogs', from: 1000, to: 1009 }])
+    expect(w.blockCalls(PUBLICNODE)).toEqual([1009])
+  })
+
+  test('the log provider is on another fork than the block the upstream answered: its range is rejected', async () => {
+    const w = world(LOGS)
+    w.providers[PUBLICNODE]!.forkFrom = 1100
+    w.providers[PUBLICNODE]!.forkLogs = [log(1120, 0)]
+    const s = session(w)
+    let r: Answer
+    try {
+      await s.block(1149)
+      r = await s.logs(1000, 1149)
+    } finally {
+      s.stop()
+    }
+    // The forked rows never reach the caller: another provider on the canonical chain serves the range.
+    expect(r.result).toEqual(inOrder(1000, 1149))
+    expect(w.logsCalls(PUBLICNODE).length).toBeGreaterThan(0)
+    expect(w.logsCalls(DRPC).length + w.logsCalls(BASE_ORG).length).toBeGreaterThan(0)
+  })
+
+  test('the upstream reorged after its block was remembered and the log provider is still on the old fork: the proxy accepts within the time limit', async () => {
+    // What the cache gives up, stated as a test: this view is rejected by the observation's own final hash check, not here.
+    const w = world(LOGS)
+    const s = session(w)
+    let r: Answer
+    try {
+      await s.block(1149)
+      w.providers[ALCHEMY]!.forkFrom = 1100
+      r = await s.logs(1000, 1149)
+    } finally {
+      s.stop()
+    }
+    expect(r.result).toEqual(inOrder(1000, 1149))
+    expect(w.blockCalls(ALCHEMY)).toEqual([1149])
+  })
+})

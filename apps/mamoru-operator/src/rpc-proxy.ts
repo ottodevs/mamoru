@@ -29,6 +29,9 @@ export function trustedFromEnv(env: Env = process.env): string[] {
   return (env.MAMORU_RPC_TRUSTED ?? '').split(',').map((u) => u.trim()).filter(Boolean)
 }
 
+/** How long a block hash answered by a trusted provider may witness a log range: one review's worth of requests. */
+const WITNESS_TTL_MS = 15_000
+
 /** A trusted provider serves a log range ahead of every public one when it takes it in at most this many requests. */
 const TRUSTED_LOG_MAX_REQUESTS = 4n
 
@@ -141,6 +144,8 @@ export type RpcProxyOptions = {
   logRanges?: Record<string, number>
   /** Keyed fallbacks trusted like the upstream; default MAMORU_RPC_TRUSTED, read now. */
   trusted?: string[]
+  /** How long a trusted block hash may witness a log range; default WITNESS_TTL_MS. Tests shorten it. */
+  witnessTtlMs?: number
   /** Tests: the upstream transport. */
   fetch?: (url: string, init: RequestInit) => Promise<Response>
 }
@@ -176,6 +181,23 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     return { status: res.status, json }
   }
   /**
+   * Block hashes a trusted provider answered in the last WITNESS_TTL_MS, by block number: the engine reads the
+   * blocks of its observation through raw() right before it asks for logs, and that answer can witness a log
+   * range served by another operator without asking the same provider for the same block again. Only trusted
+   * providers reach raw() for blocks; an entry older than the TTL is not used. A reorg inside the TTL can at
+   * worst make a stale hash accept logs of the old fork from a provider still on it: the observation's own
+   * final hash check on its pinned block, made after the logs, is what rejects that view.
+   */
+  const witnessTtl = opts.witnessTtlMs ?? WITNESS_TTL_MS
+  const recent = new Map<string, { url: string; hash: string; at: number }>()
+  function remember(url: string, block: unknown): void {
+    const b = block as { number?: unknown; hash?: unknown } | null
+    if (!b || typeof b.number !== 'string' || typeof b.hash !== 'string') return
+    const at = Date.now()
+    for (const [k, v] of recent) if (at - v.at >= witnessTtl) recent.delete(k)
+    recent.set(String(BigInt(b.number)), { url, hash: b.hash, at })
+  }
+  /**
    * On a rate/capacity refusal, move to the next provider at once; two passes over the list. The list is the
    * trusted providers, or every provider for a send. Always returns a result/error object.
    */
@@ -195,7 +217,10 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
           if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk))
           const errObj = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
           if (errObj && metrics) safeMetrics(() => metrics.recordError(label, body.method, classifyRpcError(r.status, errObj)))
-          if (wellFormed(r.json) && !retriable(r.status, r.json)) return r.json
+          if (wellFormed(r.json) && !retriable(r.status, r.json)) {
+            if (body.method === 'eth_getBlockByNumber') remember(url, r.json.result)
+            return r.json
+          }
           last = errObj
         } catch (e) {
           if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk))
@@ -281,6 +306,12 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   async function witnessHash(p: LogProvider, n: bigint, seen: Witnessed): Promise<string | null> {
     const known = seen.get(String(n))
     if (known && !sameOperator(known.url, p.url)) return known.hash
+    // A block a trusted provider of another operator answered moments ago (see `recent`).
+    const cached = recent.get(String(n))
+    if (cached && Date.now() - cached.at < witnessTtl && Date.now() >= cached.at && !sameOperator(cached.url, p.url)) {
+      seen.set(String(n), { url: cached.url, hash: cached.hash })
+      return cached.hash
+    }
     for (const w of logProviders) {
       // Independence is by operator, not by URL: another key or another spelling of the same provider is no witness.
       if (sameOperator(w.url, p.url)) continue
@@ -295,8 +326,9 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    * Logs and state must come from the same chain view, proven and not assumed. A range read from a provider
    * counts only if, asked after the read, that provider has the range's last block and an independent witness
    * has it with the same hash: a provider that is behind does not know the block, one on another fork has
-   * another hash. Nothing about a provider is remembered between requests, and the upstream is held to the same
-   * rule. One direct block read on the provider and one on the witness per range.
+   * another hash. Nothing is remembered about a provider beyond the block hashes of the last WITNESS_TTL_MS (see
+   * `recent`), and the upstream is held to the same rule. One direct block read on the provider and, unless a
+   * trusted provider of another operator just answered that block, one on the witness per range.
    */
   async function verifiedLogs(p: LogProvider, filter: any, from: bigint, to: bigint, seen: Witnessed): Promise<unknown[]> {
     const logs = await logsFrom(p, filter, from, to)
