@@ -1,7 +1,6 @@
 import type { Figure, ReasonCode, TokenHolding } from '@mamoru/domain'
 import { multicall3Abi, type Address, type PublicClient } from 'viem'
-import type { DeployedProjection } from '../d1.ts'
-import { balanceOfAbi, blockHashAbi } from './abis.ts'
+import { balanceOfAbi } from './abis.ts'
 import { valueAt, type Rate } from './math.ts'
 import { estimateAt, fig, notObserved, rpcAt, type Anchor } from './provenance.ts'
 
@@ -66,18 +65,11 @@ const GROUP_BATCH_BYTES = 16_384
 
 export type AccountRef = { key: string; address: Address }
 
-/** Blocks of earlier projections whose hash is asked for in a run, fewer than the reads of one account. Every account read in a run shares its block, so this is one in practice. */
-const VOUCHED_BLOCKS_PER_RUN = 3
-
 /**
  * The state of every account at `H` in one Multicall3 request per ACCOUNTS_PER_CALL accounts, instead of five
- * requests per account. The code of an account is read only until it is known to be deployed: a deployed Safe
- * stays deployed, but only on the chain where it was seen. `projected` are the accounts last projected as
- * deployed, with the block and hash of that projection; a row vouches for the code only if that block still has
- * that hash as seen from `H`. The hashes ride in the first request (Multicall3.getBlockHash, in place of one
- * account's reads), so a steady run asks nothing more. A projection whose block was replaced (a safe block
- * follows L1, and L1 can reorg), or is more than 256 blocks back, vouches for nothing and that code is read again.
- * An account with a read that failed, or in a group whose request failed, is left out and keeps its last projection.
+ * requests per account. The code of an account is read only until it is known to be deployed (`knownDeployed`:
+ * projected as deployed at a block that still has its hash, see vouchedDeployed in run.ts): a deployed Safe stays deployed. An account with a read that failed, or in a group
+ * whose request failed, is left out and keeps its last projection.
  */
 export async function readAccountStates(
   client: PublicClient,
@@ -85,7 +77,7 @@ export async function readAccountStates(
   tokens: AccountTokens,
   anchor: Anchor,
   rates: ReadonlyMap<string, Rate>,
-  projected: readonly DeployedProjection[],
+  knownDeployed: ReadonlySet<string>,
 ): Promise<Map<string, AccountState>> {
   const out = new Map<string, AccountState>()
   const multicall3 = client.chain?.contracts?.multicall3?.address
@@ -99,48 +91,29 @@ export async function readAccountStates(
     }
     return out
   }
-  const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
-  const byBlock = new Map<number, DeployedProjection[]>()
-  for (const r of projected) byBlock.set(r.block, [...(byBlock.get(r.block) ?? []), r])
-  // A projection at this very block needs no question (BLOCKHASH does not answer for the block it runs in): the anchor's hash is in hand.
-  const vouched = new Set<string>((byBlock.get(anchor.blockNumber) ?? []).filter((r) => same(r.blockHash, anchor.blockHash)).map((r) => r.accountKey))
-  byBlock.delete(anchor.blockNumber)
-  // Earlier blocks, the most shared first. Asked until one request answers; then never again.
-  let asked: number[] | null = [...byBlock.keys()].sort((a, b) => byBlock.get(b)!.length - byBlock.get(a)!.length || b - a).slice(0, VOUCHED_BLOCKS_PER_RUN)
-  if (asked.length === 0) asked = null
-  for (let i = 0; i < accounts.length; ) {
-    const hashes = asked ?? []
-    const group = accounts.slice(i, i + ACCOUNTS_PER_CALL - (hashes.length > 0 ? 1 : 0))
-    i += group.length
-    const contracts = [
-      ...hashes.map((n) => ({ address: multicall3, abi: blockHashAbi, functionName: 'getBlockHash', args: [BigInt(n)] }) as const),
-      ...group.flatMap((a) => [
-        { address: multicall3, abi: multicall3Abi, functionName: 'getEthBalance', args: [a.address] } as const,
-        ...[tokens.USDC, tokens.cbBTC, tokens.WETH].map((token) => ({ address: token, abi: balanceOfAbi, functionName: 'balanceOf', args: [a.address] }) as const),
-      ]),
-    ]
+  for (let i = 0; i < accounts.length; i += ACCOUNTS_PER_CALL) {
+    const group = accounts.slice(i, i + ACCOUNTS_PER_CALL)
+    const contracts = group.flatMap((a) => [
+      { address: multicall3, abi: multicall3Abi, functionName: 'getEthBalance', args: [a.address] } as const,
+      ...[tokens.USDC, tokens.cbBTC, tokens.WETH].map((token) => ({ address: token, abi: balanceOfAbi, functionName: 'balanceOf', args: [a.address] }) as const),
+    ])
     type Read = { status: 'success'; result: unknown } | { status: 'failure' }
     let results: Read[]
     let codes: (boolean | null)[]
     try {
-      const all = (await client.multicall({ contracts, blockNumber, batchSize: GROUP_BATCH_BYTES, allowFailure: true })) as Read[]
-      hashes.forEach((n, h) => {
-        const r = all[h]
-        if (r?.status !== 'success' || typeof r.result !== 'string') return
-        for (const p of byBlock.get(n)!) if (same(p.blockHash, r.result)) vouched.add(p.accountKey)
-      })
-      asked = null
-      results = all.slice(hashes.length)
-      codes = await Promise.all(
-        group.map((a) =>
-          vouched.has(a.key)
-            ? true
-            : client.getCode({ address: a.address, blockNumber }).then(
-                (code) => code !== undefined && code !== '0x',
-                () => null,
-              ),
+      ;[results, codes] = await Promise.all([
+        client.multicall({ contracts, blockNumber, batchSize: GROUP_BATCH_BYTES, allowFailure: true }) as Promise<Read[]>,
+        Promise.all(
+          group.map((a) =>
+            knownDeployed.has(a.key)
+              ? true
+              : client.getCode({ address: a.address, blockNumber }).then(
+                  (code) => code !== undefined && code !== '0x',
+                  () => null,
+                ),
+          ),
         ),
-      )
+      ])
     } catch {
       continue
     }
