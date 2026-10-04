@@ -1041,9 +1041,29 @@ describe('an activation waits for the relayer instead of failing', () => {
     expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'proposed', code: 'ARMED' })
     expect(acc.ownerFailures ?? []).toHaveLength(0)
     refuse = false
+    // Not at once: the first retry waits 30 s.
+    expect(acc.armed!.retryAt! - Date.now()).toBeGreaterThan(25_000)
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.armed).toBeDefined()
+    expect(w.sent.filter((t) => t.data && t.to.toLowerCase() === SAFE.toLowerCase())).toHaveLength(1)
+    acc.armed!.retryAt = Date.now() - 1
     await priv(w.op).fireArmed(acc, 20_000_000n)
     expect(acc.armed).toBeUndefined()
     expect(acc.active).toBe(true)
+  })
+
+  test('a refusal that may be about a copy already in a node (already known, nonce too low) is never sent again', async () => {
+    for (const message of ['already known', 'nonce too low: next nonce 43, tx nonce 42', 'replacement transaction underpriced']) {
+      const w = world(20_000_000n)
+      w.knobs.onSend = (t) => {
+        if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error(message), { code: -32000 })
+      }
+      const tx = await w.op.prepareActivate(ctx)
+      const op = await w.op.submit(ctx, 'activate', sign(tx))
+      await Bun.sleep(5)
+      expect(w.state.accounts.k!.armed).toBeUndefined()
+      expect(w.state.accounts.k!.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    }
   })
 
   test('a send that times out says nothing about the chain: the op fails as before and reconciliation settles it', async () => {

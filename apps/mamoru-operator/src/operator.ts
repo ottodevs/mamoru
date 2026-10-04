@@ -51,6 +51,9 @@ const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint25
 const RECEIPT_UNKNOWN = 'OWNER_TX_ERROR'
 /** Armed activations retry this many times across watcher passes before failing visibly. */
 const ARM_MAX_TRIES = 20
+/** Wait after the first failed attempt of an armed activation; doubles each try up to ARM_RETRY_MAX_MS. */
+const ARM_RETRY_MS = 30_000
+const ARM_RETRY_MAX_MS = 900_000
 /** Minimum gap between two receipt reconciliation passes of one account. */
 const RECONCILE_EVERY_MS = 20_000
 /** Base produces a block every 2 s; used to place a failure time on the chain when no tx hash was kept. */
@@ -867,7 +870,7 @@ export class Operator {
       // The relayer ran out of ETH before the owner's transaction went out: same op, back to waiting armed.
       // The relayer ran out of ETH, or the provider refused the transaction outright: the owner's execTransaction never
       // went out and the signature is still good, so the same op goes back to waiting armed and the watcher tries again.
-      if (kind === 'activate' && !(e instanceof HttpError) && (relayerShort(e) || providerRefused(e))) {
+      if (kind === 'activate' && !(e instanceof HttpError) && !maybeBroadcast(e) && (relayerShort(e) || providerRefused(e))) {
         this.lock(acc.accountKey)
           .run(async () => this.rearm(acc, op, p, signature, relayerShort(e) ? 0 : 1))
           .catch((err) => logErr(`[armed] ${op.opId} rearm:`, err))
@@ -1054,7 +1057,7 @@ export class Operator {
     const current = acc.ops.find((o) => o.opId === op.opId)
     if (current?.txHash) return this.failOwner(acc, op, 'OWNER_TX_ERROR')
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(tries ? { tries } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(tries ? { tries, retryAt: retryAt(tries) } : {}) }
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
     console.log(`[armed] ${acc.accountKey} ${op.opId} back to armed: ${tries ? 'the provider refused the transaction' : 'the relayer could not pay for it'}`)
   }
@@ -1131,6 +1134,8 @@ export class Operator {
     const a = acc.armed
     if (!a || acc.active) return this.disarm(acc, 'ALREADY_ACTIVE')
     if (this.overBudget(acc)) return this.disarm(acc, 'OWNER_FAILURE_BUDGET')
+    // A failed attempt is not tried again at once: the wait grows with the tries.
+    if (a.retryAt !== undefined && Date.now() < a.retryAt) return
     if (usdc > LIVE_CAP_USDC) {
       logErr(`[armed] ${acc.accountKey} deposit over cap:`, { usdc: usdc.toString(), cap: LIVE_CAP_USDC.toString() })
       // On the op the SPA reads, with the amounts: the owner withdraws the excess, then approves Start again.
@@ -1165,12 +1170,13 @@ export class Operator {
       const tries = (a.tries ?? 0) + (relayerShort(e) && unsent ? 0 : 1)
       logErr(`[armed] ${op.opId} attempt ${tries}:`, e)
       // Once the execTransaction went out it is never sent again: the receipt settles it (reconcileOwner reads it).
-      if (!unsent) {
+      // Nor when the answer may mean an earlier copy of it is already in a node (a transport retry after a lost reply).
+      if (!unsent || maybeBroadcast(e)) {
         if (!acc.active) this.failOwner(acc, op, 'OWNER_TX_ERROR')
         return
       }
       if (tries < ARM_MAX_TRIES && !acc.active) {
-        acc.armed = { ...a, tries }
+        acc.armed = { ...a, tries, retryAt: tries > (a.tries ?? 0) ? retryAt(tries) : undefined }
         this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
       } else if (!acc.active) this.failOwner(acc, op, 'OWNER_TX_ERROR')
     }
@@ -1678,6 +1684,25 @@ function relayerShort(e: unknown): boolean {
   let cur = e as { message?: string; details?: string; cause?: unknown } | undefined
   for (let i = 0; i < 8 && cur; i++) {
     if (/insufficient funds for gas/i.test(`${cur.message ?? ''} ${cur.details ?? ''}`)) return true
+    cur = cur.cause as typeof cur
+  }
+  return false
+}
+
+/** When an armed activation that failed `tries` times may be tried again. */
+function retryAt(tries: number): number {
+  return Date.now() + Math.min(ARM_RETRY_MAX_MS, ARM_RETRY_MS * 2 ** Math.max(0, tries - 1))
+}
+
+/**
+ * True when a refusal may be about a copy of the transaction a node already holds or mined: the transport retries a
+ * send whose reply was lost, and the second answer is then "already known" or a nonce error. Such an op is not sent
+ * again; it fails as an unknown receipt and reconcileOwner settles it from the chain.
+ */
+function maybeBroadcast(e: unknown): boolean {
+  let cur = e as { message?: string; details?: string; cause?: unknown } | undefined
+  for (let i = 0; i < 8 && cur; i++) {
+    if (/already known|known transaction|already imported|nonce too low|nonce provided|replacement transaction|already exists/i.test(`${cur.message ?? ''} ${cur.details ?? ''}`)) return true
     cur = cur.cause as typeof cur
   }
   return false

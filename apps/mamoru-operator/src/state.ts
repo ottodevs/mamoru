@@ -31,6 +31,8 @@ export type ArmedActivation = {
   armedAt: string
   /** Failed execution attempts so far; the watcher retries until ARM_MAX_TRIES. */
   tries?: number
+  /** Not before this time (ms): the wait after a failed attempt grows with the tries. */
+  retryAt?: number
 }
 
 export type AccountState = {
