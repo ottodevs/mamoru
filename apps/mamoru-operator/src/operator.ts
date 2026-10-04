@@ -1227,12 +1227,20 @@ export class Operator {
         const back = BigInt(Math.ceil(Math.max(0, Date.now() - since) / 1000)) / BLOCK_SECONDS + ACTIVATION_SEARCH_MARGIN
         const floor = head > back ? head - back : 0n
         let block: bigint
+        // The head may come from a node behind the one that answered "enabled": the upper bound has to hold itself, or
+        // the search (and an engine started on that head) would be looking at blocks before the execution. Stay armed
+        // until the head has it, however many passes that takes; only a head that cannot be read at all counts below.
+        let headHasIt: boolean | null = null
+        try {
+          headHasIt = await enabledAt(head)
+        } catch {
+          // no historical state: decided by the tries below
+        }
+        if (headHasIt === false) throw new Error(`grant enabled at latest but not at head ${head}: provider behind`)
         try {
           let lo = floor
           let hi = head
-          // The head may come from a node behind the one that answered "enabled": the upper bound has to hold itself,
-          // or the search would settle on a block before the execution. Not yet: stay armed, the next pass asks again.
-          if (!(await enabledAt(hi))) throw new Error(`grant enabled at latest but not at head ${hi}: provider behind`)
+          if (headHasIt === null) throw new Error(`no state served for block ${head}`)
           if (await enabledAt(lo)) hi = lo
           while (lo + 1n < hi) {
             const mid = (lo + hi) / 2n
