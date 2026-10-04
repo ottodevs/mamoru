@@ -880,7 +880,7 @@ export class Operator {
       // The relayer ran out of ETH before the owner's transaction went out: same op, back to waiting armed.
       // The relayer ran out of ETH, or the provider refused the transaction outright: the owner's execTransaction never
       // went out and the signature is still good, so the same op goes back to waiting armed and the watcher tries again.
-      if (kind === 'activate' && !(e instanceof HttpError) && !(this.execTried.has(op.opId) && maybeBroadcast(e)) && (relayerShort(e) || providerRefused(e))) {
+      if (kind === 'activate' && !(e instanceof HttpError) && !(this.execTried.has(opKey(acc, op)) && maybeBroadcast(e)) && (relayerShort(e) || providerRefused(e))) {
         this.lock(acc.accountKey)
           .run(async () => this.rearm(acc, op, p, signature, relayerShort(e) ? 0 : 1))
           .catch((err) => logErr(`[armed] ${op.opId} rearm:`, err))
@@ -1069,7 +1069,7 @@ export class Operator {
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
     acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(tries ? { tries, retryAt: retryAt(tries) } : {}) }
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
-    this.execTried.delete(op.opId)
+    this.execTried.delete(opKey(acc, op))
     console.log(`[armed] ${acc.accountKey} ${op.opId} back to armed: ${tries ? 'the provider refused the transaction' : 'the relayer could not pay for it'}`)
   }
 
@@ -1141,12 +1141,34 @@ export class Operator {
     return at - read >= (this.rpcOverBudget(at) ? Math.max(every, ARM_IDLE_MS) : every)
   }
 
+  /**
+   * The Safe nonce an armed activation was signed for is spent. Never tried: another owner transaction took it, the
+   * activation is dropped. Tried before: that attempt may have landed after all (its reply was lost), so the op fails
+   * as an unknown receipt and reconcileOwner reads the chain, activating the account if it did.
+   */
+  private nonceMoved(acc: AccountState, a: ArmedActivation, nonce: bigint): void {
+    console.log(`[armed] ${acc.accountKey} Safe nonce ${nonce} != armed ${a.tx.nonce}`)
+    if ((a.tries ?? 0) === 0) return this.disarm(acc, 'ARMED_NONCE_MOVED')
+    const op = acc.ops.find((o) => o.opId === a.opId)
+    acc.armed = undefined
+    if (op) this.failOwner(acc, op, RECEIPT_UNKNOWN)
+    this.reconcileSoon(acc)
+  }
+
   private async fireArmed(acc: AccountState, usdc: bigint): Promise<void> {
     const a = acc.armed
     if (!a || acc.active) return this.disarm(acc, 'ALREADY_ACTIVE')
-    if (this.overBudget(acc)) return this.disarm(acc, 'OWNER_FAILURE_BUDGET')
     // A failed attempt is not tried again at once: the wait grows with the tries.
     if (a.retryAt !== undefined && Date.now() < a.retryAt) return
+    // An op already tried once reads its Safe nonce before anything can drop it (budget, cap) or hold it (relayer
+    // short): an attempt that landed after all must reach reconciliation.
+    const tried = (a.tries ?? 0) > 0
+    const live = liveAccountFromContext(acc.ctx)
+    if (tried) {
+      const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
+      if (deployed && nonce !== a.tx.nonce) return this.nonceMoved(acc, a, nonce)
+    }
+    if (this.overBudget(acc)) return this.disarm(acc, 'OWNER_FAILURE_BUDGET')
     if (usdc > LIVE_CAP_USDC) {
       logErr(`[armed] ${acc.accountKey} deposit over cap:`, { usdc: usdc.toString(), cap: LIVE_CAP_USDC.toString() })
       // On the op the SPA reads, with the amounts: the owner withdraws the excess, then approves Start again.
@@ -1154,27 +1176,12 @@ export class Operator {
     }
     // The relayer cannot pay for it yet: stay armed, without using up a try. Waiting is not activity, so the watcher
     // slows down on this account as it does on an idle one, instead of reading it every pass.
-    // An op already tried once reads its Safe nonce first: an attempt that landed after all must reach reconciliation
-    // even while the relayer is short.
-    const tried = (a.tries ?? 0) > 0
     if (!tried && !(await this.relayerCanActivate(acc))) {
       this.armSeen.delete(acc.accountKey)
       return
     }
-    const live = liveAccountFromContext(acc.ctx)
     const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
-    if (deployed && nonce !== a.tx.nonce) {
-      console.log(`[armed] ${acc.accountKey} Safe nonce ${nonce} != armed ${a.tx.nonce}`)
-      // After an attempt of ours the nonce may have moved because that attempt landed after all (its reply was lost):
-      // the op fails as an unknown receipt and reconcileOwner reads the chain, activating the account if it did.
-      if (tried) {
-        const triedOp = acc.ops.find((o) => o.opId === a.opId)
-        acc.armed = undefined
-        if (triedOp) this.failOwner(acc, triedOp, RECEIPT_UNKNOWN)
-        return this.reconcileSoon(acc)
-      }
-      return this.disarm(acc, 'ARMED_NONCE_MOVED')
-    }
+    if (deployed && nonce !== a.tx.nonce) return this.nonceMoved(acc, a, nonce)
     // Too little to deploy a Safe for: stay armed and wait for more (funding reports deployMinUsdc).
     if (!deployed && usdc < MIN_DEPLOY_USDC) return
     if (tried && !(await this.relayerCanActivate(acc))) {
@@ -1186,7 +1193,7 @@ export class Operator {
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
     const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants }
     const op = acc.ops.find((o) => o.opId === a.opId)!
-    if ((a.tries ?? 0) > 0) this.retried.add(op.opId)
+    if ((a.tries ?? 0) > 0) this.retried.add(opKey(acc, op))
     try {
       await this.execute(acc, live, p, a.signature, op)
     } catch (e) {
@@ -1198,13 +1205,13 @@ export class Operator {
       logErr(`[armed] ${op.opId} attempt ${tries}:`, e)
       // Once the execTransaction went out it is never sent again: the receipt settles it (reconcileOwner reads it).
       // Nor when the answer may mean an earlier copy of it is already in a node (a transport retry after a lost reply).
-      if (!unsent || (this.execTried.has(op.opId) && maybeBroadcast(e))) {
+      if (!unsent || (this.execTried.has(opKey(acc, op)) && maybeBroadcast(e))) {
         if (!acc.active) this.failOwner(acc, op, 'OWNER_TX_ERROR')
         return
       }
       if (tries < ARM_MAX_TRIES && !acc.active) {
         acc.armed = { ...a, tries, retryAt: tries > (a.tries ?? 0) ? retryAt(tries) : undefined }
-        this.execTried.delete(op.opId)
+        this.execTried.delete(opKey(acc, op))
         this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
       } else if (!acc.active) this.failOwner(acc, op, 'OWNER_TX_ERROR')
     }
@@ -1230,6 +1237,10 @@ export class Operator {
     const op = acc.ops.find((o) => o.opId === opId)
     if (!op) return
     Object.assign(op, patch, { updatedAt: now() })
+    if (patch.state === 'failed' || patch.state === 'confirmed') {
+      this.execTried.delete(opKey(acc, op))
+      this.retried.delete(opKey(acc, op))
+    }
     this.store.save()
   }
 
@@ -1248,7 +1259,7 @@ export class Operator {
    * reconcileOwner reads the Safe's logs: the account is activated if that copy landed. Returns false for any other op.
    */
   private settleRetried(acc: AccountState, op: OpView, code: string): boolean {
-    if (!this.retried.has(op.opId) || !SPENT_NONCE_CODES.has(code)) return false
+    if (!this.retried.has(opKey(acc, op)) || !SPENT_NONCE_CODES.has(code)) return false
     console.log(`[armed] ${op.opId} retry met ${code}: left to reconciliation`)
     this.failOwner(acc, op, RECEIPT_UNKNOWN, { txHash: undefined })
     this.reconcileSoon(acc)
@@ -1315,7 +1326,7 @@ export class Operator {
       }
     }
     // Keep the hash as soon as the tx is out: if the receipt poll fails, reconciliation reads it later.
-    this.execTried.add(op.opId)
+    this.execTried.add(opKey(acc, op))
     const { hash, receipt } = await this.relayer.send({ to: safe, data }, (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }))
     this.patchOp(acc, op.opId, { state: 'submitted', txHash: hash })
     const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
@@ -1731,6 +1742,11 @@ function relayerShort(e: unknown): boolean {
     cur = cur.cause as typeof cur
   }
   return false
+}
+
+/** Op ids restart at own-1 in every account: what is remembered about an op in memory is keyed by both. */
+function opKey(acc: AccountState, op: { opId: string }): string {
+  return `${acc.accountKey}:${op.opId}`
 }
 
 /** When an armed activation that failed `tries` times may be tried again. */
