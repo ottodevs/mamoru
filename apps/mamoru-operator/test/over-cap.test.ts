@@ -1194,6 +1194,45 @@ describe('an activation waits for the relayer instead of failing', () => {
     expect(acc.armed).toBeUndefined()
   })
 
+  test('a restart after the execTransaction was handed over, before its hash was kept, waits before sending again', async () => {
+    type Boot = { resume(): void; armStopped: boolean; armTimer?: ReturnType<typeof setTimeout> }
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    const acc = w.state.accounts.k!
+    acc.armed!.execSent = true
+    acc.ops.find((o) => o.opId === op.opId)!.code = undefined
+    const boot = w.op as unknown as Boot
+    boot.resume()
+    boot.armStopped = true
+    clearTimeout(boot.armTimer)
+    expect(acc.armed!.retryAt! - Date.now()).toBeGreaterThan(25_000)
+    w.chain.usdc = 20_000_000n
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(w.sent).toHaveLength(0)
+  })
+
+  test('the owner approves again while an attempt is out: the old attempt does not touch the new approval', async () => {
+    const w = world(0n)
+    const first = await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+    const acc = w.state.accounts.k!
+    let second: { opId: string } | undefined
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) {
+        // While the first attempt is at the provider, a newer approval takes its place.
+        acc.armed = { ...acc.armed!, opId: 'own-9-activate' }
+        second = { opId: 'own-9-activate' }
+        throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
+      }
+    }
+    w.chain.usdc = 20_000_000n
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(second).toBeDefined()
+    expect(acc.armed?.opId).toBe('own-9-activate')
+    expect(acc.armed?.tries ?? 0).toBe(0)
+    expect(first.opId).not.toBe('own-9-activate')
+  })
+
   test('a restart that finds the execTransaction already out leaves it to its receipt, and does not send it again', async () => {
     type Boot = { resume(): void; armStopped: boolean; armTimer?: ReturnType<typeof setTimeout> }
     const w = world(0n)
