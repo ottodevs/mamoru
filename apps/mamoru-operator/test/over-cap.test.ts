@@ -37,7 +37,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0 }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -51,6 +51,7 @@ function world(usdc: bigint) {
     getLogs: async () => [],
     getCode: async () => (chain.deployed ? '0x01' : undefined),
     getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? knobs.relayerWei : 0n),
+    getTransactionCount: async ({ blockTag }: { blockTag?: string }) => (blockTag === 'pending' ? 5 + knobs.relayerPending : 5),
     readContract: async ({ address: at, functionName }: { address: string; functionName: string }) => {
       if (functionName === 'slot0') return [1n << 96n, 0, 0, 0, 0, 0, true]
       if (functionName === 'nonce') return chain.nonce
@@ -1210,6 +1211,28 @@ describe('an activation waits for the relayer instead of failing', () => {
     w.chain.usdc = 20_000_000n
     await priv(w.op).fireArmed(acc, 20_000_000n)
     expect(w.sent).toHaveLength(0)
+  })
+
+  test('an approval sent once is not sent again while the relayer still has a transaction pending', async () => {
+    const w = world(20_000_000n)
+    let refuse = true
+    w.knobs.onSend = (t) => {
+      if (refuse && t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    const acc = w.state.accounts.k!
+    refuse = false
+    const before = w.sent.length
+    w.knobs.relayerPending = 1
+    acc.armed!.retryAt = Date.now() - 1
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(w.sent.length).toBe(before)
+    expect(acc.armed).toBeDefined()
+    w.knobs.relayerPending = 0
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.active).toBe(true)
   })
 
   test('the owner approves again while an attempt is out: the old attempt does not touch the new approval', async () => {
