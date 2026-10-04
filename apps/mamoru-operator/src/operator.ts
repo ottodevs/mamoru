@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeFunctionData, parseAbi, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
-import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi } from '@mamoru/registry'
+import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, type SimCallResult } from '@mamoru/rpc'
 import { POLICIES, computeCaps, grantKey, hasManageAny, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
@@ -1195,16 +1195,29 @@ export class Operator {
   }
 
   /**
-   * The Safe nonce an armed activation was signed for is spent. Its execTransaction never sent: another owner
-   * transaction took it, the activation is dropped. Sent before: that attempt may have landed after all, so the op fails
-   * as an unknown receipt and reconcileOwner reads the chain, activating the account if it did.
+   * The Safe nonce an armed activation was signed for is spent. Its execTransaction never handed to a provider:
+   * another owner transaction took the nonce, the activation is dropped. Handed over before: that copy may have
+   * landed after all. The chain says which: the permission ids of a signed activation are its own (random salt), so
+   * one of them enabled on the Safe means this activation executed, however long ago, and the account is started.
+   * Otherwise the op fails as an unknown receipt and reconcileOwner has the last word.
    */
-  private nonceMoved(acc: AccountState, a: ArmedActivation, nonce: bigint): void {
+  private async nonceMoved(acc: AccountState, a: ArmedActivation, nonce: bigint): Promise<void> {
     // The owner approved again while the nonce was being read: that approval was signed for the nonce there is now.
     if (acc.armed?.opId !== a.opId) return
     console.log(`[armed] ${acc.accountKey} Safe nonce ${nonce} != armed ${a.tx.nonce}`)
     const op = acc.ops.find((o) => o.opId === a.opId)
     if (!a.execSent && !op?.txHash) return this.disarm(acc, 'ARMED_NONCE_MOVED')
+    const permissionId = a.grants[0]?.permissionId
+    if (op && permissionId) {
+      const enabled = await this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [permissionId, acc.ctx.address as Address] })
+      if (acc.armed?.opId !== a.opId) return
+      if (enabled) {
+        const block = await this.client.getBlockNumber()
+        console.log(`[armed] ${acc.accountKey} ${a.opId} executed on chain (its grants are enabled): account started`)
+        this.afterOwner(acc, { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: 0, grants: a.grants }, { blockNumber: block } as TransactionReceipt)
+        return this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(block) })
+      }
+    }
     acc.armed = undefined
     if (op) this.failOwner(acc, op, RECEIPT_UNKNOWN)
     this.reconcileSoon(acc)
