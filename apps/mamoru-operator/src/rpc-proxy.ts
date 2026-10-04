@@ -1,5 +1,6 @@
 import type { Server } from 'bun'
-import { classifyRpcError, redactSecrets, safeMetrics, type LogRangeOutcome, type RpcMetrics } from './metrics.ts'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { classifyRpcError, componentOf, redactSecrets, safeMetrics, type Component, type LogRangeOutcome, type RpcMetrics } from './metrics.ts'
 
 type Req = { jsonrpc: '2.0'; id: unknown; method: string; params?: any[] }
 
@@ -155,6 +156,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const fallbacks = opts.fallbacks ?? fallbacksFromEnv()
   const maxLogRange = opts.maxLogRange ?? Number(process.env.MAMORU_LOG_RANGE ?? 10)
   const metrics = opts.metrics
+  /** The component that made the request being served: the path the proxy was called on (`/c/<component>`), for the counters only. */
+  const caller = new AsyncLocalStorage<Component>()
   let id = 0
   const local = isLoopback(upstream)
   // Chunk getLogs for Alchemy (free tier: 10 blocks) or when MAMORU_LOG_RANGE is set; otherwise the range goes as is.
@@ -214,7 +217,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       for (let attempt = 0; attempt < tries; attempt++) {
         try {
           const r = await post(url, body)
-          if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk))
+          if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk, Date.now(), caller.getStore()))
           const errObj = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
           if (errObj && metrics) safeMetrics(() => metrics.recordError(label, body.method, classifyRpcError(r.status, errObj)))
           if (wellFormed(r.json) && !retriable(r.status, r.json)) {
@@ -223,7 +226,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
           }
           last = errObj
         } catch (e) {
-          if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk))
+          if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk, Date.now(), caller.getStore()))
           last = { code: -32603, message: (e as Error).message.split('\n')[0] }
           if (metrics) safeMetrics(() => metrics.recordError(label, body.method, classifyRpcError(undefined, last)))
         }
@@ -256,10 +259,10 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       r = await post(url, { jsonrpc: '2.0', id: ++id, method, params })
     } catch (e) {
       const rpc = { code: -32603, message: (e as Error).message.split('\n')[0] }
-      if (metrics) safeMetrics(() => (metrics.recordRequest(label, method, isChunk), metrics.recordError(label, method, classifyRpcError(undefined, rpc))))
+      if (metrics) safeMetrics(() => (metrics.recordRequest(label, method, isChunk, Date.now(), caller.getStore()), metrics.recordError(label, method, classifyRpcError(undefined, rpc))))
       throw Object.assign(new Error(String(rpc.message)), { rpc })
     }
-    if (metrics) safeMetrics(() => metrics.recordRequest(label, method, isChunk))
+    if (metrics) safeMetrics(() => metrics.recordRequest(label, method, isChunk, Date.now(), caller.getStore()))
     const rpc = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
     if (!rpc) return r.json.result
     if (metrics) safeMetrics(() => metrics.recordError(label, method, classifyRpcError(r.status, rpc)))
@@ -424,7 +427,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       if (req.method !== 'POST') return new Response('method not allowed', { status: 405 })
       const payload = (await req.json()) as Req | Req[]
       const seen: Witnessed = new Map()
-      return Response.json(Array.isArray(payload) ? await Promise.all(payload.map((m) => handle(m, seen))) : await handle(payload, seen))
+      const answer = () => (Array.isArray(payload) ? Promise.all(payload.map((m) => handle(m, seen))) : handle(payload, seen))
+      return Response.json(await caller.run(componentOf(new URL(req.url).pathname), answer))
     },
   })
   return { url: `http://127.0.0.1:${server.port}/`, stop: () => server.stop(true) }

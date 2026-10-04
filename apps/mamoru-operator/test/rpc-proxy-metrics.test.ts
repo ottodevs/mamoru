@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { RpcMetrics } from '../src/metrics.ts'
+import { componentOf, RpcMetrics } from '../src/metrics.ts'
 import { labelProviders, startRpcProxy } from '../src/rpc-proxy.ts'
 
 /** 40 lowercase-hex chars, the shape of a QuickNode endpoint token (and most other provider API keys). */
@@ -358,5 +358,77 @@ describe('decision reads fall back only to trusted providers', () => {
       w.proxy.stop()
     }
     expect(w.hits.at(-1)?.host).toBe('base-rpc.publicnode.com')
+  })
+})
+
+// Which loop of the operator made a request: told by the path the proxy is called on, counted apart from the provider.
+describe('requests by component', () => {
+  test('componentOf: the closed set, anything else is unlabelled', () => {
+    expect(['/c/engine', '/c/watcher', '/c/operator', '/c/relayer', '/c/engine/'].map(componentOf)).toEqual(['engine', 'watcher', 'operator', 'relayer', 'engine'])
+    expect(['/', '', '/c/', '/c/attacker', '/c/engine/extra', '/c/ENGINE', '/x/engine'].map(componentOf)).toEqual(Array(7).fill('unlabelled'))
+  })
+
+  test('the path decides the component; the provider counters are the same as before', async () => {
+    const upstream = fakeUpstream((body) => ({ json: { jsonrpc: '2.0', id: body.id, result: '0x1' } }))
+    const dir = tmpDir()
+    const metrics = new RpcMetrics(dir)
+    const proxy = startRpcProxy(upstream.url, { metrics })
+    const ask = (path: string, method: string) => fetch(`${proxy.url}${path}`, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: [] }) }).then((r) => r.json())
+    try {
+      await ask('c/engine', 'eth_call')
+      await ask('c/engine', 'eth_call')
+      await ask('c/watcher', 'eth_call')
+      await ask('c/nobody', 'eth_getCode')
+      await ask('', 'eth_chainId')
+      // A batch is one caller.
+      await fetch(`${proxy.url}c/relayer`, { method: 'POST', body: JSON.stringify([{ jsonrpc: '2.0', id: 1, method: 'eth_gasPrice', params: [] }, { jsonrpc: '2.0', id: 2, method: 'eth_gasPrice', params: [] }]) })
+    } finally {
+      proxy.stop()
+      upstream.stop()
+    }
+    const snap = metrics.snapshot()
+    const by = snap.byComponent.cumulative
+    expect(by.engine!.eth_call!.requests).toBe(2)
+    expect(by.watcher!.eth_call!.requests).toBe(1)
+    expect(by.relayer!.eth_gasPrice!.requests).toBe(2)
+    expect(by.unlabelled!.eth_getCode!.requests).toBe(1)
+    expect(by.unlabelled!.eth_chainId!.requests).toBe(1)
+    expect(Object.keys(by).sort()).toEqual(['engine', 'relayer', 'unlabelled', 'watcher'])
+    // By provider: every request, whoever made it.
+    const total = Object.values(snap.cumulative['127.0.0.1']!).reduce((n, c) => n + c.requests, 0)
+    expect(total).toBe(7)
+    expect(snap.byComponent.last48h).toHaveLength(1)
+    // It survives a restart.
+    metrics.persist()
+    const again = new RpcMetrics(dir).snapshot()
+    expect(again.byComponent.cumulative.engine!.eth_call!.requests).toBe(2)
+    expect(again.byComponent.last48h).toHaveLength(1)
+    expect(JSON.parse(readFileSync(join(dir, 'rpc-usage.json'), 'utf8')).components.cumulative.watcher.eth_call.requests).toBe(1)
+  })
+
+  test('the CU of a billed provider is charged to the component that asked', () => {
+    const metrics = new RpcMetrics(tmpDir())
+    metrics.recordRequest('alchemy.com', 'eth_call', false, Date.now(), 'engine')
+    metrics.recordRequest('alchemy.com', 'eth_call', false, Date.now(), 'watcher')
+    metrics.recordRequest('publicnode.com', 'eth_getLogs', false, Date.now(), 'engine')
+    const by = metrics.snapshot().byComponent.cumulative
+    expect(by.engine!.eth_call!.cuEstimate).toBe(26)
+    expect(by.watcher!.eth_call!.cuEstimate).toBe(26)
+    expect(by.engine!.eth_getLogs!.cuEstimate).toBe(0)
+    expect(metrics.cuEstimateTotal()).toBe(52)
+  })
+
+  test('a usage file written before components existed loads as before', () => {
+    const dir = tmpDir()
+    const old = new RpcMetrics(dir)
+    old.recordRequest('alchemy.com', 'eth_call', false)
+    old.persist()
+    const file = join(dir, 'rpc-usage.json')
+    const raw = JSON.parse(readFileSync(file, 'utf8'))
+    delete raw.components
+    writeFileSync(file, JSON.stringify(raw))
+    const snap = new RpcMetrics(dir).snapshot()
+    expect(snap.cumulative['alchemy.com']!.eth_call!.requests).toBe(1)
+    expect(snap.byComponent.cumulative).toEqual({})
   })
 })

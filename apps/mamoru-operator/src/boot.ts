@@ -41,8 +41,11 @@ export async function bootOperator(o: BootOptions) {
   const rpcMetrics = new RpcMetrics(o.stateDir)
   // Every RPC call of the operator, engine and bundler goes through the loopback proxy (getLogs splitting, no keyed URL in errors).
   const proxy = startRpcProxy(o.rpcUrl, { metrics: rpcMetrics })
-  o = { ...o, rpcUrl: proxy.url }
-  const client = createPublicClient({ transport: http(o.rpcUrl, { batch: true, timeout: 60_000 }) })
+  // One path per component, for the counters only: the proxy serves them all the same way.
+  const via = (component: string) => `${proxy.url}c/${component}`
+  o = { ...o, rpcUrl: via('engine') }
+  const client = createPublicClient({ transport: http(via('operator'), { batch: true, timeout: 60_000 }) })
+  const watchClient = createPublicClient({ transport: http(via('watcher'), { batch: true, timeout: 60_000 }) })
   const chainId = await client.getChainId()
   const live = chainId === BASE_CHAIN_ID && process.env.MAMORU_LIVE === '1'
   const named = POLICIES[o.policyId ?? 'conservador-live-v2']
@@ -50,7 +53,7 @@ export async function bootOperator(o: BootOptions) {
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
   const policy = withTestOverrides(named, process.env)
   const store = new StateStore(o.stateDir)
-  const relayer = new Relayer(loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey), client, o.rpcUrl, chainId)
+  const relayer = new Relayer(loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey), client, via('relayer'), chainId)
   const bundler = startLiveBundler(client, relayer, chainId)
   const operator = new Operator(
     {
@@ -63,6 +66,7 @@ export async function bootOperator(o: BootOptions) {
       waitBlockMs: o.waitBlockMs ?? 2_100,
       maxWaitBlocks: o.maxWaitBlocks ?? 150,
       rpcBudget: rpcBudget(rpcMetrics),
+      watchClient,
     },
     client,
     relayer,
