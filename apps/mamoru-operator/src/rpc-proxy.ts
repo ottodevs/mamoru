@@ -151,6 +151,21 @@ export type RpcProxyOptions = {
   fetch?: (url: string, init: RequestInit) => Promise<Response>
 }
 
+const ANY_URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g
+/** How much of a provider's message is read at all: the rest is dropped before any pattern runs over it. */
+const PROVIDER_WORDS_READ = 2000
+
+/**
+ * A provider's own words, fit for one journal line. The text is theirs, not ours, so: a URL goes whole (a key can
+ * sit in the hostname, which `redactSecrets` keeps), and control characters and line separators become a space
+ * (one message is one line, and cannot write a second one or move the terminal).
+ */
+export function providerWords(message: unknown): string {
+  const read = typeof message === 'string' ? message.slice(0, PROVIDER_WORDS_READ).replace(ANY_URL_RE, '[url]') : message
+  return redactSecrets(read).replace(ANY_URL_RE, '[url]').replace(CONTROL_RE, ' ')
+}
+
 export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { url: string; stop: () => void } {
   const send = opts.fetch ?? fetch
   const fallbacks = opts.fallbacks ?? fallbacksFromEnv()
@@ -401,7 +416,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       // Why a provider refused a transaction: the sender only sees a generic message (viem folds -32000 into
       // "Missing or invalid parameters"). The provider's words, never the transaction; a log line never costs the answer.
       try {
-        console.log(`[rpc] eth_sendRawTransaction refused (${typeof e.code === 'number' ? e.code : '?'}): ${redactSecrets(e.message).slice(0, 200)}`)
+        console.log(`[rpc] eth_sendRawTransaction refused (${typeof e.code === 'number' ? e.code : '?'}): ${providerWords(e.message)}`)
       } catch {}
     } else if (e && (e.code === -32602 || /invalid param/i.test(String(e.message)))) console.log(`[rpc] ${msg.method} refused (${e.code}): ${redactSecrets(JSON.stringify(msg.params ?? [])).slice(0, 300)}`)
     return r

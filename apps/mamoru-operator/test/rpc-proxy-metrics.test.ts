@@ -459,7 +459,7 @@ describe('a refused transaction says why', () => {
     const { answers, said } = await send(() => ({ error: { code: -32000, message } }), [{ method: 'eth_sendRawTransaction', params: [RAW] }, { method: 'eth_call', params: [] }])
     expect(answers[0]!.error).toEqual({ code: -32000, message })
     expect(said).toHaveLength(1)
-    expect(said[0]).toBe('[rpc] eth_sendRawTransaction refused (-32000): transaction gas limit too high (cap: 16777216, tx: 16777217) see https://secret-key.example')
+    expect(said[0]).toBe('[rpc] eth_sendRawTransaction refused (-32000): transaction gas limit too high (cap: 16777216, tx: 16777217) see [url]')
     // The params (the signed transaction) are not part of the line.
     expect(said[0]).not.toContain('c0ffee')
   })
@@ -482,5 +482,46 @@ describe('a refused transaction says why', () => {
     expect(answers[0]!.error).toBeDefined()
     expect(said).toHaveLength(1)
     expect(said[0]).toContain('refused (?)')
+  })
+
+  test('a key in the hostname of a URL the provider echoes is not logged, whatever the scheme', async () => {
+    const message = 'upstream https://short-key.rpc.example/v2/abc and wss://k3y.rpc.example said no'
+    const { answers, said } = await send(() => ({ error: { code: -32000, message } }), [{ method: 'eth_sendRawTransaction', params: [RAW] }])
+    expect(answers[0]!.error).toEqual({ code: -32000, message })
+    expect(said[0]).toBe('[rpc] eth_sendRawTransaction refused (-32000): upstream [url] and [url] said no')
+  })
+
+  test('provider text cannot write a second line or a terminal escape', async () => {
+    const message = 'rejected\n[operator] forged entry\r\u001b[31mred\u2028next\u0085end'
+    const { answers, said } = await send(() => ({ error: { code: -32000, message } }), [{ method: 'eth_sendRawTransaction', params: [RAW] }])
+    expect(answers[0]!.error).toEqual({ code: -32000, message })
+    expect(said).toHaveLength(1)
+    expect(said[0]).toBe('[rpc] eth_sendRawTransaction refused (-32000): rejected [operator] forged entry [31mred next end')
+    expect(said[0]).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/)
+  })
+
+  test('a log that throws costs no answer, alone or in a batch', async () => {
+    const error = { code: -32000, message: 'nonce too low' }
+    const upstream = fakeUpstream((body) => ({ json: { jsonrpc: '2.0', id: body.id, error } }))
+    const proxy = startRpcProxy(upstream.url, {})
+    const log = console.log
+    let thrown = 0
+    console.log = () => {
+      thrown++
+      throw new Error('sink down')
+    }
+    try {
+      const call = (id: number) => ({ jsonrpc: '2.0', id, method: 'eth_sendRawTransaction', params: [RAW] })
+      const one = (await (await fetch(proxy.url, { method: 'POST', body: JSON.stringify(call(1)) })).json()) as { error: unknown }
+      const many = (await (await fetch(proxy.url, { method: 'POST', body: JSON.stringify([call(2), call(3)]) })).json()) as { id: number; error: unknown }[]
+      expect(one.error).toEqual(error)
+      expect(many.map((m) => m.id).sort()).toEqual([2, 3])
+      for (const m of many) expect(m.error).toEqual(error)
+      expect(thrown).toBe(3)
+    } finally {
+      console.log = log
+      proxy.stop()
+      upstream.stop()
+    }
   })
 })
