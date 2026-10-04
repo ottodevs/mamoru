@@ -1223,6 +1223,9 @@ export class Operator {
         const back = BigInt(Math.ceil(Math.max(0, Date.now() - since) / 1000)) / BLOCK_SECONDS + ACTIVATION_SEARCH_MARGIN
         let lo = head > back ? head - back : 0n
         let hi = head
+        // The head may come from a node behind the one that answered "enabled": the upper bound has to hold itself, or
+        // the search would settle on a block before the execution. Not yet: stay armed, the next pass asks again.
+        if (!(await enabledAt(hi))) throw new Error(`grant enabled at latest but not at head ${hi}: provider behind, retrying`)
         if (await enabledAt(lo)) hi = lo
         while (lo + 1n < hi) {
           const mid = (lo + hi) / 2n

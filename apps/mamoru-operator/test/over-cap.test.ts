@@ -1116,6 +1116,25 @@ describe('an activation waits for the relayer instead of failing', () => {
     expect(acc.historyFromBlock).toBe('63')
   })
 
+  test('a head behind the node that saw the grant enabled settles nothing: the approval stays armed for the next pass', async () => {
+    const w = world(20_000_000n)
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    const acc = w.state.accounts.k!
+    w.chain.nonce = 1n
+    w.knobs.grantsEnabled = true
+    // Enabled from block 105, and the head this provider reports is still 100.
+    w.knobs.enabledFromBlock = 105n
+    acc.armed!.retryAt = Date.now() - 1
+    await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
+    expect(acc.active).toBe(false)
+    expect(acc.armed?.opId).toBe(op.opId)
+  })
+
   test('a retry whose execTransaction fails on chain is left to reconciliation: the first copy may have executed', async () => {
     const w = world(20_000_000n)
     let refuse = true
