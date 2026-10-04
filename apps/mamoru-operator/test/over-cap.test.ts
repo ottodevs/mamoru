@@ -1052,6 +1052,35 @@ describe('an activation waits for the relayer instead of failing', () => {
     expect(acc.active).toBe(true)
   })
 
+  test('the Safe nonce moved after an attempt of ours: the op goes to reconciliation, not to ARMED_NONCE_MOVED', async () => {
+    const w = world(20_000_000n)
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    const acc = w.state.accounts.k!
+    expect(acc.armed?.tries).toBe(1)
+    // The refused attempt landed after all: the Safe executed it.
+    w.chain.nonce = 1n
+    acc.armed!.retryAt = Date.now() - 1
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.armed).toBeUndefined()
+    expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+  })
+
+  test('already known on the deploy or the top-up is not about the owner transaction: the op waits armed', async () => {
+    const w = world(20_000_000n)
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && !('data' in t && t.data)) throw Object.assign(new Error('already known'), { code: -32000 })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    expect(w.state.accounts.k!.armed).toMatchObject({ opId: op.opId, tries: 1 })
+  })
+
   test('a refusal that may be about a copy already in a node (already known, nonce too low) is never sent again', async () => {
     for (const message of ['already known', 'nonce too low: next nonce 43, tx nonce 42', 'replacement transaction underpriced']) {
       const w = world(20_000_000n)

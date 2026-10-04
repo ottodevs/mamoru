@@ -65,7 +65,12 @@ export class Relayer {
       const hash = await wallet.sendTransaction({ to: tx.to, data: tx.data, value: tx.value ?? 0n, gas, nonce })
       this.lastSent = { nonce, at: Date.now() }
       onSent?.(hash)
-      return { hash, receipt: await this.receipt(hash) }
+      try {
+        return { hash, receipt: await this.receipt(hash) }
+      } finally {
+        // The window runs from the end of the send, receipt wait included: the next send starts right after it.
+        this.lastSent = { nonce, at: Date.now() }
+      }
     })
   }
 }
