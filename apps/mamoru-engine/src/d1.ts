@@ -96,7 +96,7 @@ export type DeployedProjection = { accountKey: string; block: number; blockHash:
 /**
  * Accounts whose last projection saw them deployed, at a block not after `block`, with the block and hash that
  * projection was written at. A row from a later block (a provider that is behind today) is left out. The caller
- * checks the hash before it trusts the row (readAccountStates): a safe block can still be replaced.
+ * checks the hash before it trusts the row (vouchedDeployed in sync/run.ts): a safe block can still be replaced.
  */
 export async function deployedProjections(db: D1Like, chainId: number, block: number): Promise<DeployedProjection[]> {
   const { results } = await db
