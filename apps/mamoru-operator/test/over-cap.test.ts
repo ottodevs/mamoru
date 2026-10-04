@@ -37,7 +37,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -52,11 +52,11 @@ function world(usdc: bigint) {
     getCode: async () => (chain.deployed ? '0x01' : undefined),
     getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? knobs.relayerWei : 0n),
     getTransactionCount: async ({ blockTag }: { blockTag?: string }) => (blockTag === 'pending' ? 5 + knobs.relayerPending : 5),
-    readContract: async ({ address: at, functionName }: { address: string; functionName: string }) => {
+    readContract: async ({ address: at, functionName, blockNumber }: { address: string; functionName: string; blockNumber?: bigint }) => {
       if (functionName === 'slot0') return [1n << 96n, 0, 0, 0, 0, 0, true]
       if (functionName === 'nonce') return chain.nonce
       if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : 0n
-      if (functionName === 'isPermissionEnabled') return knobs.grantsEnabled
+      if (functionName === 'isPermissionEnabled') return knobs.grantsEnabled && (blockNumber === undefined || blockNumber >= knobs.enabledFromBlock)
       throw new Error(`unexpected read ${functionName}`)
     },
     request: async ({ params }: { params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {
@@ -1101,6 +1101,9 @@ describe('an activation waits for the relayer instead of failing', () => {
     // Hours later (the operator was down): the copy had landed, and the engine's grants are on the Safe.
     w.chain.nonce = 1n
     w.knobs.grantsEnabled = true
+    // The fake chain's head is block 100; the activation executed in block 63.
+    w.knobs.enabledFromBlock = 63n
+    acc.armed!.sentAt = Date.now() - 60_000
     acc.ops.find((o) => o.opId === op.opId)!.updatedAt = '2026-10-01T00:00:00.000Z'
     acc.armed!.retryAt = Date.now() - 1
     await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
@@ -1108,6 +1111,9 @@ describe('an activation waits for the relayer instead of failing', () => {
     expect(acc.armed).toBeUndefined()
     expect(acc.grants.map((g) => g.permissionId)).toEqual(signed)
     expect(acc.ownerFailures ?? []).toHaveLength(0)
+    // Deposits and history are read from the block it executed in, not from the one it was noticed in.
+    expect(acc.depositsAfter).toBe('63')
+    expect(acc.historyFromBlock).toBe('63')
   })
 
   test('a retry whose execTransaction fails on chain is left to reconciliation: the first copy may have executed', async () => {
