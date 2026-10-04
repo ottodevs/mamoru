@@ -1154,7 +1154,10 @@ export class Operator {
     }
     // The relayer cannot pay for it yet: stay armed, without using up a try. Waiting is not activity, so the watcher
     // slows down on this account as it does on an idle one, instead of reading it every pass.
-    if (!(await this.relayerCanActivate(acc))) {
+    // An op already tried once reads its Safe nonce first: an attempt that landed after all must reach reconciliation
+    // even while the relayer is short.
+    const tried = (a.tries ?? 0) > 0
+    if (!tried && !(await this.relayerCanActivate(acc))) {
       this.armSeen.delete(acc.accountKey)
       return
     }
@@ -1164,16 +1167,20 @@ export class Operator {
       console.log(`[armed] ${acc.accountKey} Safe nonce ${nonce} != armed ${a.tx.nonce}`)
       // After an attempt of ours the nonce may have moved because that attempt landed after all (its reply was lost):
       // the op fails as an unknown receipt and reconcileOwner reads the chain, activating the account if it did.
-      if ((a.tries ?? 0) > 0) {
-        const tried = acc.ops.find((o) => o.opId === a.opId)
+      if (tried) {
+        const triedOp = acc.ops.find((o) => o.opId === a.opId)
         acc.armed = undefined
-        if (tried) this.failOwner(acc, tried, RECEIPT_UNKNOWN)
+        if (triedOp) this.failOwner(acc, triedOp, RECEIPT_UNKNOWN)
         return this.reconcileSoon(acc)
       }
       return this.disarm(acc, 'ARMED_NONCE_MOVED')
     }
     // Too little to deploy a Safe for: stay armed and wait for more (funding reports deployMinUsdc).
     if (!deployed && usdc < MIN_DEPLOY_USDC) return
+    if (tried && !(await this.relayerCanActivate(acc))) {
+      this.armSeen.delete(acc.accountKey)
+      return
+    }
     acc.armed = undefined
     this.patchOp(acc, a.opId, { code: undefined })
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
