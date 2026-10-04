@@ -544,6 +544,10 @@ describe('providerWords', () => {
       '10.0.0.7:8545/v2/abc',
       'wss://short-key.rpc.example',
       'https\u200b://short-key\u2060.rpc.example\\v2\\abc',
+      'https://\nshort-key.\nrpc.example/v2/abc',
+      'https://rpc.example\n.short-key',
+      'short-key. rpc .example',
+      'https://short-key\u00ad.rpc\u034f.example\u061c/v2/abc',
     ]) {
       const out = providerWords(`refused by ${split} today`)
       expect(out).not.toMatch(/short-key|short-pass|rpc\.example|abc|10\.0/)
@@ -560,6 +564,12 @@ describe('providerWords', () => {
       'transaction gas limit too high (cap: 16777216, tx: 16777217)',
       'max fee per gas less than block base fee: maxFeePerGas: 100, baseFee: 1.5',
     ]) expect(providerWords(said)).toBe(said)
+  })
+
+  test('nothing invisible reaches the line: controls, bidi marks, zero width, soft hyphen, separators', () => {
+    const invisible = ['\u0000', '\u001b', '\u007f', '\u0085', '\u00ad', '\u034f', '\u061c', '\u180e', '\u200b', '\u200f', '\u2028', '\u2029', '\u202e', '\u2060', '\u206a', '\ufeff', '\u00a0', '\u3000', '\ud800']
+    for (const c of invisible) expect(providerWords(`nonce${c}too${c}${c}low`)).toBe('nonce too low')
+    expect(providerWords('nonce\u061c too low')).toBe('nonce too low')
   })
 
   test('it never throws and never writes more than one short line', () => {
