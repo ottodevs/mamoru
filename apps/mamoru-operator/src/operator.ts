@@ -63,6 +63,9 @@ const ARM_RETRY_MAX_MS = 180_000
  * signed approval ends only by running, or by the owner (a moved Safe nonce, a newer approval, a stop).
  */
 const ARM_PARKED_MS = 1_800_000
+/** How long an approval over the cap, or over the failure budget, waits between looks. */
+const ARM_CAP_HOLD_MS = 300_000
+const ARM_BUDGET_HOLD_MS = 600_000
 /** Minimum gap between two receipt reconciliation passes of one account. */
 const RECONCILE_EVERY_MS = 20_000
 /** Base produces a block every 2 s; used to place a failure time on the chain when no tx hash was kept. */
@@ -259,6 +262,8 @@ export class Operator {
   private readonly execTried = new Set<string>()
   /** Armed ops being sent again after a failed attempt: an earlier copy may have landed although its reply said no. */
   private readonly retried = new Set<string>()
+  /** Until when (ms) the watcher leaves a parked armed account unread. */
+  private readonly armHold = new Map<string, number>()
   /** Last time each account's activation was logged as waiting for relayer ETH. */
   private readonly relayerLowLogged = new Map<string, number>()
   /** Pool state of the last few blocks: accounts reviewed at the same block read it once. */
@@ -311,6 +316,16 @@ export class Operator {
   /** Restarts the engine loop of every account that was active. */
   resume(): void {
     for (const acc of Object.values(this.store.state.accounts)) if (acc.active) this.startLoop(acc)
+    // An approval a restart caught mid-attempt: once its execTransaction was out, the receipt settles it; before
+    // that it is simply armed again.
+    for (const acc of Object.values(this.store.state.accounts)) {
+      const op = acc.armed && acc.ops.find((o) => o.opId === acc.armed!.opId)
+      if (!op || acc.active) continue
+      if (op.txHash) {
+        acc.armed = undefined
+        this.failOwner(acc, op, RECEIPT_UNKNOWN)
+      } else if (op.state !== 'proposed' || op.code !== 'ARMED') this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
+    }
     for (const acc of Object.values(this.store.state.accounts)) this.reconcileSoon(acc)
     const armed = Object.values(this.store.state.accounts).filter((a) => a.armed).length
     if (armed) console.log(`[armed] ${armed} armed activation(s) reloaded`)
@@ -1053,6 +1068,7 @@ export class Operator {
   /** Stores the signed activation (0600 state file); the watcher executes it when USDC lands. */
   private arm(acc: AccountState, p: Prepared, signature: Hex): OpView {
     this.disarm(acc, 'ARMED_SUPERSEDED')
+    this.armHold.delete(acc.accountKey)
     const op = this.newOp(acc, 'activate')
     op.code = 'ARMED'
     this.stash(acc, op, p)
@@ -1073,6 +1089,7 @@ export class Operator {
     if (current?.txHash) return this.failOwner(acc, op, 'OWNER_TX_ERROR')
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
     acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(tries ? { tries, retryAt: retryAt(tries) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
+    this.armHold.delete(acc.accountKey)
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
     this.execTried.delete(opKey(acc, op))
     console.log(`[armed] ${acc.accountKey} ${op.opId} back to armed: ${tries ? 'the provider refused the transaction' : 'the relayer could not pay for it'}`)
@@ -1120,7 +1137,11 @@ export class Operator {
         // Counted as read only once the balance is known: a failed read is tried again on the next pass.
         const seen = await balances[i]!.need()
         this.armRead.set(acc.accountKey, at)
-        if (seen === 0n) continue
+        if (seen === 0n) {
+          // The money left, but an approval sent once may have landed first: it still reads its Safe nonce.
+          if (acc.armed.execSent) await this.lock(acc.accountKey).run(() => this.fireArmed(acc, 0n))
+          continue
+        }
         // Something landed: until it is executed or dropped, this account is read every pass (retries included).
         this.armSeen.set(acc.accountKey, at)
         const usdc = await this.usdcOf(acc.ctx.address as Address)
@@ -1139,6 +1160,9 @@ export class Operator {
   private armDue(acc: AccountState, at: number): boolean {
     const read = this.armRead.get(acc.accountKey)
     if (read === undefined || read > at) return true
+    // Parked: nothing to read until the hold ends. A hold further away than the longest one is a clock set back.
+    const hold = this.armHold.get(acc.accountKey)
+    if (hold !== undefined && at < hold && hold - at <= ARM_PARKED_MS) return false
     const armedAt = Date.parse(acc.ops.find((o) => o.opId === acc.armed?.opId)?.updatedAt ?? '') || 0
     const idle = at - Math.max(armedAt, this.armSeen.get(acc.accountKey) ?? 0)
     const every = idle < ARM_FRESH_MS ? 0 : idle < ARM_DAY_MS ? ARM_IDLE_MS : ARM_STALE_MS
@@ -1146,9 +1170,14 @@ export class Operator {
     return at - read >= (this.rpcOverBudget(at) ? Math.max(every, ARM_IDLE_MS) : every)
   }
 
-  /** Leaves an armed approval waiting for something only time or the owner changes; the watcher reads it as an idle one. */
-  private park(acc: AccountState): void {
+  /**
+   * Leaves an armed approval waiting for something only time or the owner changes: the watcher does not read its
+   * Safe again for `ms`. An approval whose execTransaction went to a provider is still read once a minute, so a copy
+   * that landed reaches reconciliation while findOwnerTx can find it.
+   */
+  private park(acc: AccountState, ms: number): void {
     this.armSeen.delete(acc.accountKey)
+    this.armHold.set(acc.accountKey, Date.now() + (acc.armed?.execSent ? Math.min(ms, ARM_IDLE_MS) : ms))
   }
 
   /**
@@ -1158,8 +1187,8 @@ export class Operator {
    */
   private nonceMoved(acc: AccountState, a: ArmedActivation, nonce: bigint): void {
     console.log(`[armed] ${acc.accountKey} Safe nonce ${nonce} != armed ${a.tx.nonce}`)
-    if (!a.execSent) return this.disarm(acc, 'ARMED_NONCE_MOVED')
     const op = acc.ops.find((o) => o.opId === a.opId)
+    if (!a.execSent && !op?.txHash) return this.disarm(acc, 'ARMED_NONCE_MOVED')
     acc.armed = undefined
     if (op) this.failOwner(acc, op, RECEIPT_UNKNOWN)
     this.reconcileSoon(acc)
@@ -1177,32 +1206,30 @@ export class Operator {
       const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
       if (deployed && nonce !== a.tx.nonce) return this.nonceMoved(acc, a, nonce)
     }
+    // Nothing in the Safe: the look was only for the nonce of an approval already sent once.
+    if (usdc === 0n) return
     // A failed attempt is not tried again at once: the wait grows with the tries.
-    if (a.retryAt !== undefined && Date.now() < a.retryAt) return
+    if (a.retryAt !== undefined && Date.now() < a.retryAt) return this.park(acc, a.retryAt - Date.now())
     // Over its failure budget the account waits, armed: the budget is a pause on what the relayer pays, and the day
     // that frees it must not cost the owner a new signature.
-    if (this.overBudget(acc)) return this.park(acc)
+    if (this.overBudget(acc)) return this.park(acc, ARM_BUDGET_HOLD_MS)
     // Over the cap the approval waits too: it runs if the excess leaves through a path that keeps the Safe nonce, or
     // the cap is raised. The app reads the excess from funding and offers the withdrawal.
     if (usdc > LIVE_CAP_USDC) {
-      this.patchOp(acc, a.opId, { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() })
-      return this.park(acc)
+      const shown = acc.ops.find((o) => o.opId === a.opId)
+      if (shown?.amountUsdc !== usdc.toString() || shown.capUsdc !== LIVE_CAP_USDC.toString()) this.patchOp(acc, a.opId, { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() })
+      return this.park(acc, ARM_CAP_HOLD_MS)
     }
     // The relayer cannot pay for it yet: stay armed, without using up a try. Waiting is not activity, so the watcher
     // slows down on this account as it does on an idle one, instead of reading it every pass.
-    if (!tried && !(await this.relayerCanActivate(acc))) {
-      this.armSeen.delete(acc.accountKey)
-      return
-    }
+    if (!tried && !(await this.relayerCanActivate(acc))) return this.park(acc, ARM_IDLE_MS)
     const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
     if (deployed && nonce !== a.tx.nonce) return this.nonceMoved(acc, a, nonce)
     // Too little to deploy a Safe for: stay armed and wait for more (funding reports deployMinUsdc).
     if (!deployed && usdc < MIN_DEPLOY_USDC) return
-    if (tried && !(await this.relayerCanActivate(acc))) {
-      this.armSeen.delete(acc.accountKey)
-      return
-    }
-    acc.armed = undefined
+    if (tried && !(await this.relayerCanActivate(acc))) return this.park(acc, ARM_IDLE_MS)
+    // The approval stays in the state file through the attempt: a restart in the middle must not lose it. It is
+    // cleared when the account starts, or when the attempt ends in a failure that is final.
     this.patchOp(acc, a.opId, { code: undefined })
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
     const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants }
@@ -1219,11 +1246,11 @@ export class Operator {
       logErr(`[armed] ${op.opId} attempt ${tries}:`, e)
       // Once the execTransaction went out it is never sent again: the receipt settles it (reconcileOwner reads it).
       // Nor when the answer may mean an earlier copy of it is already in a node (a transport retry after a lost reply).
-      if (!unsent || (this.execTried.has(opKey(acc, op)) && maybeBroadcast(e))) {
-        if (!acc.active) this.failOwner(acc, op, 'OWNER_TX_ERROR')
-        return
-      }
       if (acc.active) return
+      if (!unsent || (this.execTried.has(opKey(acc, op)) && maybeBroadcast(e))) {
+        acc.armed = undefined
+        return this.failOwner(acc, op, 'OWNER_TX_ERROR')
+      }
       // Never dropped for failing: past ARM_MAX_TRIES it is parked and tried again every ARM_PARKED_MS, and says so.
       if (tries >= ARM_MAX_TRIES && tries > (a.tries ?? 0)) logErr('[alert]', `${acc.accountKey} ${op.opId} failed ${tries} times, parked: next try in ${ARM_PARKED_MS / 60_000} min`)
       acc.armed = { ...a, tries, retryAt: tries > (a.tries ?? 0) ? retryAt(tries) : undefined, execSent: a.execSent || this.execTried.has(opKey(acc, op)) || undefined }
@@ -1231,12 +1258,18 @@ export class Operator {
       this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
       return
     }
-    // The cap was met inside the attempt (a deposit landed meanwhile): same wait as above, the approval is kept.
+    if (acc.active) return
     const ended = acc.ops.find((o) => o.opId === op.opId)
-    if (!acc.active && !acc.armed && ended?.state === 'failed' && ended.code === 'DEPOSIT_OVER_CAP' && !ended.txHash) {
-      acc.armed = { ...a }
+    if (ended?.state !== 'failed') return
+    // The cap was met inside the attempt (a deposit landed meanwhile): same wait as above, the approval is kept.
+    if (ended.code === 'DEPOSIT_OVER_CAP' && !ended.txHash) {
       this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
-      this.park(acc)
+      return this.park(acc, ARM_CAP_HOLD_MS)
+    }
+    // Any other failure the attempt recorded is final for this signature.
+    if (acc.armed?.opId === op.opId) {
+      acc.armed = undefined
+      this.store.save()
     }
   }
 
@@ -1368,6 +1401,8 @@ export class Operator {
     if (p.kind === 'activate') {
       acc.trusted = true
       acc.active = true
+      // The approval ran: it is spent.
+      acc.armed = undefined
       acc.grants = p.grants ?? []
       acc.policyId = p.grants?.[0]?.grant.policyId ?? this.cfg.policy.policyId
       acc.managedTokenIds = []

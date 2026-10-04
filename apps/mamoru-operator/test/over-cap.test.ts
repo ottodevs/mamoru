@@ -1169,6 +1169,84 @@ describe('an activation waits for the relayer instead of failing', () => {
     expect(acc.active).toBe(true)
   })
 
+  test('the approval stays in the state through an attempt, and a restart arms it again', async () => {
+    type Boot = { resume(): void; stop?: () => void; armStopped: boolean; armTimer?: ReturnType<typeof setTimeout> }
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    const acc = w.state.accounts.k!
+    let during: unknown
+    w.knobs.onSend = () => {
+      during ??= acc.armed?.opId
+    }
+    w.chain.usdc = 20_000_000n
+    // A restart caught it before anything was sent: the op had left the armed code, the signature is still stored.
+    acc.ops.find((o) => o.opId === op.opId)!.code = undefined
+    const boot = w.op as unknown as Boot
+    boot.resume()
+    boot.armStopped = true
+    clearTimeout(boot.armTimer)
+    expect(acc.armed?.opId).toBe(op.opId)
+    expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'proposed', code: 'ARMED' })
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(during).toBe(op.opId)
+    expect(acc.active).toBe(true)
+    expect(acc.armed).toBeUndefined()
+  })
+
+  test('a restart that finds the execTransaction already out leaves it to its receipt, and does not send it again', async () => {
+    type Boot = { resume(): void; armStopped: boolean; armTimer?: ReturnType<typeof setTimeout> }
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    const acc = w.state.accounts.k!
+    Object.assign(acc.ops.find((o) => o.opId === op.opId)!, { state: 'submitted', code: undefined, txHash: `0x${'cd'.repeat(32)}` })
+    const boot = w.op as unknown as Boot
+    boot.resume()
+    boot.armStopped = true
+    clearTimeout(boot.armTimer)
+    expect(acc.armed).toBeUndefined()
+    expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR', txHash: `0x${'cd'.repeat(32)}` })
+    expect(w.sent).toHaveLength(0)
+  })
+
+  test('a parked approval is not read again until its hold ends; one already sent once is read within a minute', async () => {
+    type Watch = { armDue(a: AccountState, at: number): boolean; armRead: Map<string, number>; park(a: AccountState, ms: number): void }
+    const w = world(0n)
+    const tx = await w.op.prepareActivate(ctx)
+    await w.op.submit(ctx, 'activate', sign(tx))
+    const acc = w.state.accounts.k!
+    const watch = w.op as unknown as Watch
+    const t = Date.now()
+    watch.armRead.set(acc.accountKey, t)
+    watch.park(acc, 10 * 60_000)
+    expect(watch.armDue(acc, t + 9 * 60_000)).toBe(false)
+    expect(watch.armDue(acc, t + 10 * 60_000 + 1)).toBe(true)
+    acc.armed!.execSent = true
+    watch.park(acc, 10 * 60_000)
+    expect(watch.armDue(acc, t + 59_000)).toBe(false)
+    expect(watch.armDue(acc, t + 61_000)).toBe(true)
+  })
+
+  test('money gone, but an approval sent once still looks at its Safe nonce and reaches reconciliation', async () => {
+    type Watch = { checkArmed(): Promise<void> }
+    const w = world(20_000_000n)
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    const acc = w.state.accounts.k!
+    expect(acc.armed?.execSent).toBe(true)
+    // The copy landed after all, and the engine has since placed every USDC.
+    w.chain.nonce = 1n
+    w.chain.usdc = 0n
+    await (w.op as unknown as Watch).checkArmed()
+    expect(acc.armed).toBeUndefined()
+    expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+  })
+
   test('already known on the deploy or the top-up is not about the owner transaction: the op waits armed', async () => {
     const w = world(20_000_000n)
     w.knobs.onSend = (t) => {
