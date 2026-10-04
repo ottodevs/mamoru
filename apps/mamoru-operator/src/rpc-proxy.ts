@@ -179,9 +179,11 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    * On a rate/capacity refusal, move to the next provider at once; two passes over the list. The list is the
    * trusted providers, or every provider for a send. Always returns a result/error object.
    */
-  async function raw(body: any, isChunk = false): Promise<any> {
+  async function raw(body: any, isChunk = false, start = 0): Promise<any> {
     let last: any = null
-    const list = ANY_PROVIDER.has(body?.method) ? providers : trusted
+    const base = ANY_PROVIDER.has(body?.method) ? providers : trusted
+    // `start` rotates the list: a retry asks the next provider first.
+    const list = [...base.slice(start % base.length), ...base.slice(0, start % base.length)]
     const all = [...list, ...list]
     for (const [pi, url] of all.entries()) {
       const label = labelOf(url)
@@ -371,10 +373,11 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       }
       if (msg.method === 'eth_getLogs') return { jsonrpc: '2.0', id: msg.id, result: await getLogs(msg, seen) }
       let r = await raw({ ...msg })
-      // A block by number that this node does not have yet comes back null: ask again (a fallback may have it).
+      // A block by number that this node does not have yet comes back null: ask again.
+      // Each retry starts at the next trusted provider: another node of the upstream, or a trusted fallback, may have it.
       for (let i = 0; i < 3 && msg.method.startsWith('eth_getBlockBy') && r && 'result' in r && r.result === null; i++) {
         await Bun.sleep(700)
-        r = await raw({ ...msg })
+        r = await raw({ ...msg }, false, i + 1)
       }
       return { ...r, id: msg.id }
     } catch (e) {

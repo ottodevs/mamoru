@@ -270,17 +270,17 @@ describe('decision reads fall back only to trusted providers', () => {
     expect(w.hits.some((h) => h.host === 'base-rpc.publicnode.com')).toBe(false)
   })
 
-  test('a block the upstream does not have yet is asked again of trusted providers only', async () => {
-    let nulls = 0
+  test('a block the upstream does not have yet is asked again of the next trusted provider, never a public one', async () => {
     const hits: string[] = []
     const proxy = startRpcProxy(KEYED, {
       fallbacks: [PUBLIC],
       trusted: [TRUSTED],
       fetch: async (url, init) => {
         const body = JSON.parse(String(init.body))
-        hits.push(new URL(url).hostname)
-        // The block is not there on the first three answers, then it is.
-        const result = ++nulls <= 3 ? null : { number: '0x10', hash: `0x${'cd'.repeat(32)}` }
+        const host = new URL(url).hostname
+        hits.push(host)
+        // The upstream does not have the block; the trusted provider does.
+        const result = host === 'abc.base-mainnet.quiknode.pro' ? { number: '0x10', hash: `0x${'cd'.repeat(32)}` } : null
         return Response.json({ jsonrpc: '2.0', id: body.id, result })
       },
     })
@@ -291,6 +291,26 @@ describe('decision reads fall back only to trusted providers', () => {
       proxy.stop()
     }
     expect(r.result?.number).toBe('0x10')
+    expect(hits).toEqual(['base-mainnet.g.alchemy.com', 'abc.base-mainnet.quiknode.pro'])
+  })
+
+  test('a block no trusted provider has stays null after the retries, without asking a public node', async () => {
+    const hits: string[] = []
+    const proxy = startRpcProxy(KEYED, {
+      fallbacks: [PUBLIC],
+      trusted: [TRUSTED],
+      fetch: async (url, init) => {
+        hits.push(new URL(url).hostname)
+        return Response.json({ jsonrpc: '2.0', id: JSON.parse(String(init.body)).id, result: null })
+      },
+    })
+    let r: { result?: unknown }
+    try {
+      r = (await (await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getBlockByNumber', params: ['0x10', false] }) })).json()) as typeof r
+    } finally {
+      proxy.stop()
+    }
+    expect(r.result).toBeNull()
     expect(hits.length).toBe(4)
     expect(hits.includes('base-rpc.publicnode.com')).toBe(false)
   })
