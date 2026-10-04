@@ -324,7 +324,12 @@ export class Operator {
       if (op.txHash) {
         acc.armed = undefined
         this.failOwner(acc, op, RECEIPT_UNKNOWN)
-      } else if (op.state !== 'proposed' || op.code !== 'ARMED') this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
+      } else {
+        if (op.state !== 'proposed' || op.code !== 'ARMED') this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
+        // Handed to a provider with no hash kept: it may be pending. Give it time to land before anything is sent
+        // again; the nonce read on each pass then finds it.
+        if (acc.armed!.execSent) acc.armed = { ...acc.armed!, retryAt: Math.max(acc.armed!.retryAt ?? 0, Date.now() + ARM_RETRY_MS) }
+      }
     }
     for (const acc of Object.values(this.store.state.accounts)) this.reconcileSoon(acc)
     const armed = Object.values(this.store.state.accounts).filter((a) => a.armed).length
@@ -1247,10 +1252,13 @@ export class Operator {
       // Once the execTransaction went out it is never sent again: the receipt settles it (reconcileOwner reads it).
       // Nor when the answer may mean an earlier copy of it is already in a node (a transport retry after a lost reply).
       if (acc.active) return
+      // The owner approved again while this attempt was out: that approval is the one that counts now.
+      const current = acc.armed?.opId === op.opId
       if (!unsent || (this.execTried.has(opKey(acc, op)) && maybeBroadcast(e))) {
-        acc.armed = undefined
+        if (current) acc.armed = undefined
         return this.failOwner(acc, op, 'OWNER_TX_ERROR')
       }
+      if (!current) return
       // Never dropped for failing: past ARM_MAX_TRIES it is parked and tried again every ARM_PARKED_MS, and says so.
       if (tries >= ARM_MAX_TRIES && tries > (a.tries ?? 0)) logErr('[alert]', `${acc.accountKey} ${op.opId} failed ${tries} times, parked: next try in ${ARM_PARKED_MS / 60_000} min`)
       acc.armed = { ...a, tries, retryAt: tries > (a.tries ?? 0) ? retryAt(tries) : undefined, execSent: a.execSent || this.execTried.has(opKey(acc, op)) || undefined }
@@ -1258,7 +1266,7 @@ export class Operator {
       this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
       return
     }
-    if (acc.active) return
+    if (acc.active || acc.armed?.opId !== op.opId) return
     const ended = acc.ops.find((o) => o.opId === op.opId)
     if (ended?.state !== 'failed') return
     // The cap was met inside the attempt (a deposit landed meanwhile): same wait as above, the approval is kept.
@@ -1267,10 +1275,8 @@ export class Operator {
       return this.park(acc, ARM_CAP_HOLD_MS)
     }
     // Any other failure the attempt recorded is final for this signature.
-    if (acc.armed?.opId === op.opId) {
-      acc.armed = undefined
-      this.store.save()
-    }
+    acc.armed = undefined
+    this.store.save()
   }
 
   private newOp(acc: AccountState, kind: OpView['kind']): OpView {
@@ -1385,7 +1391,14 @@ export class Operator {
     const { hash, receipt } = await this.relayer.send(
       { to: safe, data },
       (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }),
-      () => this.execTried.add(opKey(acc, op)),
+      () => {
+        this.execTried.add(opKey(acc, op))
+        // Written before the provider gets it: a restart from here on must know a copy may be out.
+        if (acc.armed?.opId === op.opId && !acc.armed.execSent) {
+          acc.armed.execSent = true
+          this.store.save()
+        }
+      },
     )
     this.patchOp(acc, op.opId, { state: 'submitted', txHash: hash })
     const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
