@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { componentOf, RpcMetrics } from '../src/metrics.ts'
+import { componentOf, cuFor, RpcMetrics } from '../src/metrics.ts'
 import { labelProviders, providerWords, startRpcProxy } from '../src/rpc-proxy.ts'
 
 /** 40 lowercase-hex chars, the shape of a QuickNode endpoint token (and most other provider API keys). */
@@ -418,18 +418,55 @@ describe('requests by component', () => {
     expect(metrics.cuEstimateTotal()).toBe(52)
   })
 
-  test('a usage file written before components existed loads as before', () => {
+  test('a usage file written before components existed loads as before, its traffic filed as unlabelled', () => {
     const dir = tmpDir()
     const old = new RpcMetrics(dir)
     old.recordRequest('alchemy.com', 'eth_call', false)
+    old.recordRequest('publicnode.com', 'eth_call', false)
+    old.recordRequest('alchemy.com', 'eth_getLogs', true)
     old.persist()
     const file = join(dir, 'rpc-usage.json')
     const raw = JSON.parse(readFileSync(file, 'utf8'))
     delete raw.components
     writeFileSync(file, JSON.stringify(raw))
-    const snap = new RpcMetrics(dir).snapshot()
+    const metrics = new RpcMetrics(dir)
+    const snap = metrics.snapshot()
     expect(snap.cumulative['alchemy.com']!.eth_call!.requests).toBe(1)
-    expect(snap.byComponent.cumulative).toEqual({})
+    expect(snap.byComponent.cumulative).toEqual({ unlabelled: { eth_call: { requests: 2, cuEstimate: 26 }, eth_getLogs: { requests: 1, cuEstimate: cuFor('eth_getLogs') } } })
+    expect(snap.byComponent.last48h).toHaveLength(1)
+    expect(snap.byComponent.last48h[0]!.data).toEqual(snap.byComponent.cumulative)
+    // New traffic goes to its component; the components still add up to the providers.
+    metrics.recordRequest('alchemy.com', 'eth_call', false, Date.now(), 'engine')
+    const sum = (o: Record<string, Record<string, { cuEstimate: number }>>) => Object.values(o).flatMap((m) => Object.values(m)).reduce((n, c) => n + c.cuEstimate, 0)
+    expect(sum(metrics.snapshot().byComponent.cumulative)).toBe(metrics.cuEstimateTotal())
+    // A second load changes nothing: the file adds up already.
+    metrics.persist()
+    expect(new RpcMetrics(dir).snapshot().byComponent).toEqual(metrics.snapshot().byComponent)
+  })
+
+  test('a file whose components fall short of its providers is topped up once, by the difference only', () => {
+    const dir = tmpDir()
+    const old = new RpcMetrics(dir)
+    old.recordRequest('alchemy.com', 'eth_call', false, Date.now(), 'engine')
+    old.recordRequest('alchemy.com', 'eth_call', false, Date.now(), 'watcher')
+    old.persist()
+    const file = join(dir, 'rpc-usage.json')
+    const raw = JSON.parse(readFileSync(file, 'utf8'))
+    delete raw.components.cumulative.watcher
+    writeFileSync(file, JSON.stringify(raw))
+    const by = new RpcMetrics(dir).snapshot().byComponent.cumulative
+    expect(by).toEqual({ engine: { eth_call: { requests: 1, cuEstimate: 26 } }, unlabelled: { eth_call: { requests: 1, cuEstimate: 26 } } })
+  })
+
+  test('a component reports requests and CU only: no counter that is not kept for it', () => {
+    const metrics = new RpcMetrics(tmpDir())
+    metrics.recordRequest('alchemy.com', 'eth_getLogs', true, Date.now(), 'engine')
+    metrics.recordError('alchemy.com', 'eth_getLogs', 'rateCapacity')
+    metrics.recordFallback('alchemy.com', 'eth_getLogs')
+    const snap = metrics.snapshot()
+    expect(snap.cumulative['alchemy.com']!.eth_getLogs).toMatchObject({ getLogsChunks: 1, fallbacks: 1 })
+    expect(Object.keys(snap.byComponent.cumulative.engine!.eth_getLogs!).sort()).toEqual(['cuEstimate', 'requests'])
+    expect(Object.keys(snap.byComponent.last48h[0]!.data.engine!.eth_getLogs!).sort()).toEqual(['cuEstimate', 'requests'])
   })
 })
 
