@@ -5,7 +5,7 @@ import {
   type Address, type Hex, type PublicClient,
 } from 'viem'
 import { base } from 'viem/chains'
-import { balanceOfAbi, poolEventsAbi, poolSnapshotAbi, poolReadAbi } from '../src/sync/abis.ts'
+import { balanceOfAbi, blockHashAbi, poolEventsAbi, poolSnapshotAbi, poolReadAbi } from '../src/sync/abis.ts'
 import { makeClient } from '../src/sync/client.ts'
 
 const readAbi = [...poolReadAbi, ...balanceOfAbi]
@@ -38,6 +38,13 @@ export class FakeChain {
   numberedBlocksDown = false
   /** Block parameter of every Multicall3 request, in order. */
   multicalls: number[] = []
+  /** Block the eth_call in hand runs at: BLOCKHASH answers for the 256 blocks before it. */
+  private callBlock = 0
+
+  /** Hash of block `n` as a numbered read or BLOCKHASH sees it: another one at `forkAt`. */
+  private canonicalHash(n: number): Hex {
+    return this.forkAt === n ? keccak256(toHex(`fork-${n}`)) : this.hashOf(n)
+  }
 
   hashOf(n: number): Hex {
     return keccak256(toHex(`block-${n}`))
@@ -95,9 +102,14 @@ export class FakeChain {
   private call(to: Address, data: Hex): Hex {
     if (to.toLowerCase() === MULTICALL3) {
       if (this.multicallDown) throw new Error('execution reverted')
-      const { args, functionName } = decodeFunctionData({ abi: multicall3Abi, data })
+      const { args, functionName } = decodeFunctionData({ abi: [...multicall3Abi, ...blockHashAbi], data })
       if (functionName === 'getEthBalance') {
         return encodeFunctionResult({ abi: multicall3Abi, functionName: 'getEthBalance', result: this.balances.get(`eth:${(args[0] as string).toLowerCase()}`) ?? 0n })
+      }
+      if (functionName === 'getBlockHash') {
+        const n = Number(args[0] as bigint)
+        const inWindow = n < this.callBlock && this.callBlock - n <= 256
+        return encodeFunctionResult({ abi: blockHashAbi, functionName: 'getBlockHash', result: inWindow ? this.canonicalHash(n) : `0x${'00'.repeat(32)}` })
       }
       const inner = args[0] as readonly { target: Address; callData: Hex }[]
       const result = inner.map((c) => {
@@ -144,7 +156,7 @@ export class FakeChain {
         if (this.numberedBlocksDown && typeof ps[0] === 'string' && ps[0].startsWith('0x')) throw new Error('connection refused')
         const b = this.block(this.blockParam(ps[0]))
         // A numbered read after the head read can be made to answer another hash: a reorg, or a second provider on a fork.
-        return this.forkAt !== null && typeof ps[0] === 'string' && ps[0].startsWith('0x') && Number(ps[0]) === this.forkAt ? { ...b, hash: keccak256(toHex(`fork-${this.forkAt}`)) } : b
+        return typeof ps[0] === 'string' && ps[0].startsWith('0x') ? { ...b, hash: this.canonicalHash(Number(ps[0])) } : b
       }
       case 'eth_getCode':
         return this.code.get((ps[0] as string).toLowerCase()) ?? '0x'
@@ -153,6 +165,7 @@ export class FakeChain {
       case 'eth_call': {
         const { to, data } = ps[0] as { to: Address; data: Hex }
         if (to.toLowerCase() === MULTICALL3) this.multicalls.push(this.blockParam(ps[1]))
+        this.callBlock = this.blockParam(ps[1])
         return this.call(to, data)
       }
       case 'eth_getLogs': {

@@ -91,15 +91,19 @@ export async function listAccounts(db: D1Like, chainId: number): Promise<Account
   return results
 }
 
+export type DeployedProjection = { accountKey: string; block: number; blockHash: string }
+
 /**
- * Accounts whose last projection saw them deployed, at a block not after `block`. Every projection is written at
- * a `safe` block whose hash was checked again after the reads (syncOnce), so that code is not on a fork that can
- * still be replaced, and a deployed Safe stays deployed: its code is not read again. A row from a later block
- * (a provider that is behind today) does not count.
+ * Accounts whose last projection saw them deployed, at a block not after `block`, with the block and hash that
+ * projection was written at. A row from a later block (a provider that is behind today) is left out. The caller
+ * checks the hash before it trusts the row (readAccountStates): a safe block can still be replaced.
  */
-export async function deployedAccountKeys(db: D1Like, chainId: number, block: number): Promise<Set<string>> {
-  const { results } = await db.prepare('SELECT account_key FROM proj_account_state WHERE chain_id = ? AND deployed = 1 AND block <= ?').bind(chainId, block).all<{ account_key: string }>()
-  return new Set(results.map((r) => r.account_key))
+export async function deployedProjections(db: D1Like, chainId: number, block: number): Promise<DeployedProjection[]> {
+  const { results } = await db
+    .prepare('SELECT account_key, block, block_hash FROM proj_account_state WHERE chain_id = ? AND deployed = 1 AND block <= ?')
+    .bind(chainId, block)
+    .all<{ account_key: string; block: number; block_hash: string }>()
+  return results.map((r) => ({ accountKey: r.account_key, block: r.block, blockHash: r.block_hash }))
 }
 
 export async function previousPoolView(db: D1Like, chainId: number, pool: string): Promise<PoolView | null> {
