@@ -142,16 +142,18 @@ describe('deposit over the cap', () => {
     expect((await w.op.funding(ctx)).overCap).toBeNull()
   })
 
-  test('an armed activation that meets an over-cap deposit fails on the op with the code and the amounts', async () => {
+  test('an armed approval that meets an over-cap deposit is kept, waiting, with the amounts on its op', async () => {
     const w = world(OVER)
     const { acc } = w.op.account(ctx)
     acc.ops.push({ opId: 'own-1-activate', kind: 'activate', state: 'proposed', code: 'ARMED', updatedAt: '2026-10-01T10:00:00.000Z' })
     acc.armed = { opId: 'own-1-activate', tx: { nonce: 0n } as ArmedActivation['tx'], safeTxHash: '0x', signature: '0x', grants: [], armedAt: '2026-10-01T10:00:00.000Z' }
     await (w.op as unknown as { fireArmed(a: AccountState, usdc: bigint): Promise<void> }).fireArmed(acc, OVER)
-    expect(acc.armed).toBeUndefined()
+    // The owner's signature is not ours to drop: the cap may be raised, and the app shows the excess from funding.
+    expect(acc.armed?.opId).toBe('own-1-activate')
     expect(acc.active).toBe(false)
     expect(w.sent).toHaveLength(0)
-    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ opId: 'own-1-activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: '101920000', capUsdc: '100000000' })
+    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ opId: 'own-1-activate', state: 'proposed', code: 'ARMED', amountUsdc: '101920000', capUsdc: '100000000' })
+    expect((await w.op.funding(ctx)).overCap).toMatchObject({ code: 'DEPOSIT_OVER_CAP', usdc: '101920000' })
   })
 
   test('Start is refused before and after the passkey with DEPOSIT_OVER_CAP and readable amounts', async () => {
@@ -406,16 +408,21 @@ describe('the relayer spends nothing before the owner signature is proven', () =
     expect((await arm(w)).op).toMatchObject({ state: 'proposed', code: 'ARMED' })
   })
 
-  test('an armed activation of an account over its budget is dropped without a send', async () => {
+  test('an armed approval of an account over its budget waits without a send, and runs once the budget frees', async () => {
     const v = world(0n)
     await arm(v)
     const armedAcc = v.state.accounts.k!
     armedAcc.ownerFailures = Array.from({ length: MAX_OWNER_FAILURES_PER_DAY }, () => new Date().toISOString())
     v.chain.usdc = 10_000_000n
     await priv(v.op).fireArmed(armedAcc, 10_000_000n)
-    expect(armedAcc.armed).toBeUndefined()
-    expect(v.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'failed', code: 'OWNER_FAILURE_BUDGET' })
+    expect(armedAcc.armed).toBeDefined()
+    expect(v.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'proposed', code: 'ARMED' })
     expect(v.sent).toHaveLength(0)
+    // A day later the failures are out of the window: the same signature runs.
+    armedAcc.ownerFailures = []
+    await priv(v.op).fireArmed(armedAcc, 10_000_000n)
+    expect(armedAcc.armed).toBeUndefined()
+    expect(armedAcc.active).toBe(true)
   })
 })
 
@@ -571,7 +578,12 @@ describe('cap re-check at send time', () => {
     w.chain.usdc = OVER
     await (w.op as unknown as { fireArmed(a: AccountState, usdc: bigint): Promise<void> }).fireArmed(acc, 20_000_000n)
     expect(w.sent).toHaveLength(0)
-    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: '101920000' })
+    // Refused for now, and the approval is kept for when the account is back within the cap.
+    expect(acc.armed).toBeDefined()
+    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'proposed', code: 'ARMED', amountUsdc: '101920000' })
+    w.chain.usdc = 20_000_000n
+    await (w.op as unknown as { fireArmed(a: AccountState, usdc: bigint): Promise<void> }).fireArmed(acc, 20_000_000n)
+    expect(acc.active).toBe(true)
   })
 })
 
@@ -1130,6 +1142,31 @@ describe('an activation waits for the relayer instead of failing', () => {
     await priv(w.op).fireArmed(acc, 20_000_000n)
     expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'ARMED_NONCE_MOVED' })
     expect(acc.ownerFailures ?? []).toHaveLength(0)
+  })
+
+  test('past the maximum of tries the approval is parked, not dropped, and still runs when the send goes through', async () => {
+    const w = world(20_000_000n)
+    let refuse = true
+    w.knobs.failBeforeSending = true
+    w.knobs.onSend = (t) => {
+      if (refuse && t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    const acc = w.state.accounts.k!
+    for (let i = 0; i < 25; i++) {
+      acc.armed!.retryAt = Date.now() - 1
+      await priv(w.op).fireArmed(acc, 20_000_000n)
+    }
+    expect(acc.armed).toMatchObject({ opId: op.opId, tries: 26 })
+    // Parked: the next try is half an hour away, not minutes.
+    expect(acc.armed!.retryAt! - Date.now()).toBeGreaterThan(25 * 60_000)
+    expect(acc.ownerFailures ?? []).toHaveLength(0)
+    refuse = false
+    acc.armed!.retryAt = Date.now() - 1
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.active).toBe(true)
   })
 
   test('already known on the deploy or the top-up is not about the owner transaction: the op waits armed', async () => {

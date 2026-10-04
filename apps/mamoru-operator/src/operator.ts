@@ -58,6 +58,11 @@ const ARM_MAX_TRIES = 20
  */
 const ARM_RETRY_MS = 30_000
 const ARM_RETRY_MAX_MS = 180_000
+/**
+ * After ARM_MAX_TRIES failed attempts the approval is not dropped: it is parked and tried again this often. An owner's
+ * signed approval ends only by running, or by the owner (a moved Safe nonce, a newer approval, a stop).
+ */
+const ARM_PARKED_MS = 1_800_000
 /** Minimum gap between two receipt reconciliation passes of one account. */
 const RECONCILE_EVERY_MS = 20_000
 /** Base produces a block every 2 s; used to place a failure time on the chain when no tx hash was kept. */
@@ -1141,6 +1146,11 @@ export class Operator {
     return at - read >= (this.rpcOverBudget(at) ? Math.max(every, ARM_IDLE_MS) : every)
   }
 
+  /** Leaves an armed approval waiting for something only time or the owner changes; the watcher reads it as an idle one. */
+  private park(acc: AccountState): void {
+    this.armSeen.delete(acc.accountKey)
+  }
+
   /**
    * The Safe nonce an armed activation was signed for is spent. Its execTransaction never sent: another owner
    * transaction took it, the activation is dropped. Sent before: that attempt may have landed after all, so the op fails
@@ -1158,21 +1168,25 @@ export class Operator {
   private async fireArmed(acc: AccountState, usdc: bigint): Promise<void> {
     const a = acc.armed
     if (!a || acc.active) return this.disarm(acc, 'ALREADY_ACTIVE')
-    // A failed attempt is not tried again at once: the wait grows with the tries.
-    if (a.retryAt !== undefined && Date.now() < a.retryAt) return
-    // An op whose execTransaction send was started once reads its Safe nonce before anything can drop it (budget,
-    // cap) or hold it (relayer short): an attempt that landed after all must reach reconciliation.
+    // An op whose execTransaction went to a provider once reads its Safe nonce first, on every pass, before anything
+    // can hold it (the wait between tries, budget, cap, relayer short): an attempt that landed after all must reach
+    // reconciliation while its transaction is still recent.
     const tried = a.execSent === true
     const live = liveAccountFromContext(acc.ctx)
     if (tried) {
       const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
       if (deployed && nonce !== a.tx.nonce) return this.nonceMoved(acc, a, nonce)
     }
-    if (this.overBudget(acc)) return this.disarm(acc, 'OWNER_FAILURE_BUDGET')
+    // A failed attempt is not tried again at once: the wait grows with the tries.
+    if (a.retryAt !== undefined && Date.now() < a.retryAt) return
+    // Over its failure budget the account waits, armed: the budget is a pause on what the relayer pays, and the day
+    // that frees it must not cost the owner a new signature.
+    if (this.overBudget(acc)) return this.park(acc)
+    // Over the cap the approval waits too: it runs if the excess leaves through a path that keeps the Safe nonce, or
+    // the cap is raised. The app reads the excess from funding and offers the withdrawal.
     if (usdc > LIVE_CAP_USDC) {
-      logErr(`[armed] ${acc.accountKey} deposit over cap:`, { usdc: usdc.toString(), cap: LIVE_CAP_USDC.toString() })
-      // On the op the SPA reads, with the amounts: the owner withdraws the excess, then approves Start again.
-      return this.disarm(acc, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() })
+      this.patchOp(acc, a.opId, { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() })
+      return this.park(acc)
     }
     // The relayer cannot pay for it yet: stay armed, without using up a try. Waiting is not activity, so the watcher
     // slows down on this account as it does on an idle one, instead of reading it every pass.
@@ -1209,11 +1223,20 @@ export class Operator {
         if (!acc.active) this.failOwner(acc, op, 'OWNER_TX_ERROR')
         return
       }
-      if (tries < ARM_MAX_TRIES && !acc.active) {
-        acc.armed = { ...a, tries, retryAt: tries > (a.tries ?? 0) ? retryAt(tries) : undefined, execSent: a.execSent || this.execTried.has(opKey(acc, op)) || undefined }
-        this.execTried.delete(opKey(acc, op))
-        this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
-      } else if (!acc.active) this.failOwner(acc, op, 'OWNER_TX_ERROR')
+      if (acc.active) return
+      // Never dropped for failing: past ARM_MAX_TRIES it is parked and tried again every ARM_PARKED_MS, and says so.
+      if (tries >= ARM_MAX_TRIES && tries > (a.tries ?? 0)) logErr('[alert]', `${acc.accountKey} ${op.opId} failed ${tries} times, parked: next try in ${ARM_PARKED_MS / 60_000} min`)
+      acc.armed = { ...a, tries, retryAt: tries > (a.tries ?? 0) ? retryAt(tries) : undefined, execSent: a.execSent || this.execTried.has(opKey(acc, op)) || undefined }
+      this.execTried.delete(opKey(acc, op))
+      this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
+      return
+    }
+    // The cap was met inside the attempt (a deposit landed meanwhile): same wait as above, the approval is kept.
+    const ended = acc.ops.find((o) => o.opId === op.opId)
+    if (!acc.active && !acc.armed && ended?.state === 'failed' && ended.code === 'DEPOSIT_OVER_CAP' && !ended.txHash) {
+      acc.armed = { ...a }
+      this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
+      this.park(acc)
     }
   }
 
@@ -1754,6 +1777,7 @@ function opKey(acc: AccountState, op: { opId: string }): string {
 
 /** When an armed activation that failed `tries` times may be tried again. */
 function retryAt(tries: number): number {
+  if (tries >= ARM_MAX_TRIES) return Date.now() + ARM_PARKED_MS
   return Date.now() + Math.min(ARM_RETRY_MAX_MS, ARM_RETRY_MS * 2 ** Math.max(0, tries - 1))
 }
 
