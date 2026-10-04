@@ -92,7 +92,7 @@ describe('observe through the proxy: logs and state from one chain view', () => 
     expect(third.count()).toBe(0)
   })
 
-  test('upstream requests of one steady review: 9 to the state provider, 6 to the log provider', async () => {
+  test('upstream requests of one review: 10 to the state provider, 6 to the log provider, and no account code once it is settled', async () => {
     const [state, logs, third] = [view(), view(), view()]
     const client = through(state, logs, third)
     const cursor = historyCursor()
@@ -104,10 +104,14 @@ describe('observe through the proxy: logs and state from one chain view', () => 
     }
     await observe(client, input(cursor))
     // No block read beyond what the engine asks for: the blocks it just read from the upstream witness the end of each log range.
-    // The code of the deployed account was read in the first review and is not asked again.
-    expect(state.byMethod()).toEqual({ eth_chainId: 1, eth_blockNumber: 1, eth_getBlockByNumber: 5, eth_call: 2 })
+    // The account code is read here at the safe block, which settles that it is deployed.
+    expect(state.byMethod()).toEqual({ eth_chainId: 1, eth_blockNumber: 1, eth_getBlockByNumber: 5, eth_getCode: 1, eth_call: 2 })
     expect(logs.byMethod()).toEqual({ eth_getLogs: 3, eth_getBlockByNumber: 3 })
     expect(third.count()).toBe(0)
+    // From the next review on the code is not asked again.
+    state.requests.length = 0
+    await observe(client, input(cursor))
+    expect(state.byMethod().eth_getCode).toBeUndefined()
   })
 
   test('a log provider 3 blocks behind, missing the last deposit and the last decrease: its ranges ending at the head are rejected', async () => {

@@ -84,25 +84,40 @@ export type ObserveInput = {
 }
 
 /**
- * Accounts each client has seen with code, and the block it saw them at. A deployed Safe stays deployed, so its
- * code is not read again, under two conditions: the block it was seen at is at or below the `safe` block (a
- * deployment that could still be reorged out is read again), and the block asked for is not earlier than that
- * one (a provider that is behind is read). "Not deployed" is never kept.
+ * Accounts each client knows to be deployed. A deployed Safe stays deployed, so its code is not read again once
+ * that is certain, and it is certain only when the code was read at the `safe` block: a sighting above it could
+ * still be reorged out and is only a reason to ask at `safe` once `safe` has reached it. "Not deployed" is
+ * never kept.
  */
-const deployed = new WeakMap<PublicClient, Map<string, bigint>>()
+type Sighting = { since: bigint; confirmed: boolean }
+const deployed = new WeakMap<PublicClient, Map<string, Sighting>>()
 
-/** Whether `account` has code at `blockNumber`: eth_getCode until it was seen deployed at a block now at or below `safeNumber`, none after. */
+/**
+ * Whether `account` has code at `blockNumber`. One eth_getCode per call until the account was read with code at
+ * a `safe` block; none after, for that block or a later one.
+ */
 export async function isDeployed(client: PublicClient, account: Address, blockNumber: bigint, safeNumber: bigint): Promise<boolean> {
   let seen = deployed.get(client)
   if (!seen) deployed.set(client, (seen = new Map()))
   const key = account.toLowerCase()
-  const since = seen.get(key)
-  if (since !== undefined && since <= safeNumber && blockNumber >= since) return true
-  const code = await client.getCode({ address: account, blockNumber })
-  const has = !!code && code !== '0x'
-  if (has && (since === undefined || blockNumber < since)) seen.set(key, blockNumber)
-  // Read at a block and without code there: whatever was remembered from that block on did not hold.
-  if (!has && since !== undefined && blockNumber >= since) seen.delete(key)
+  const codeAt = async (n: bigint) => {
+    const code = await client.getCode({ address: account, blockNumber: n })
+    return !!code && code !== '0x'
+  }
+  const known = seen.get(key)
+  if (known?.confirmed) return blockNumber >= known.since ? true : codeAt(blockNumber)
+  // Seen with code at a block `safe` has now reached: ask at `safe`. Code there is code at every later block.
+  if (known && known.since <= safeNumber && blockNumber >= safeNumber) {
+    if (await codeAt(safeNumber)) {
+      seen.set(key, { since: safeNumber, confirmed: true })
+      return true
+    }
+    // That sighting was on a fork that is gone.
+    seen.delete(key)
+  }
+  const has = await codeAt(blockNumber)
+  if (!has) seen.delete(key)
+  else if (!seen.has(key) || blockNumber < seen.get(key)!.since) seen.set(key, { since: blockNumber, confirmed: false })
   return has
 }
 

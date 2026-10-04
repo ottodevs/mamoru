@@ -55,7 +55,8 @@ describe('one live review', () => {
     if (r.kind !== 'decided') throw new Error('unreachable')
     expect(r.op).toBeNull()
     expect(r.observation.positions.map((p) => p.pool)).toEqual(['pool:USDC/cbBTC/500', 'pool:WETH/USDC/3000', 'pool:USDC/USDT/100'])
-    expect(chain.byMethod()).toEqual({ eth_chainId: 1, eth_getBlockByNumber: 5, eth_call: 2, eth_getLogs: 3 })
+    // The account code is read at the safe block in this review, which settles that it is deployed.
+    expect(chain.byMethod()).toEqual({ eth_chainId: 1, eth_getBlockByNumber: 5, eth_getCode: 1, eth_call: 2, eth_getLogs: 3 })
     // The session checks ride in the observation's first aggregate3, pinned to its block: every permission, once.
     const first = chain.requests.find((x) => x.method === 'eth_call')!
     expect(first.params[1]).toBe('0x47e')

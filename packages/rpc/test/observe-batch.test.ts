@@ -62,7 +62,7 @@ function aggregates(c: FakeChain): { target: Address; callData: Hex }[][] {
 }
 
 describe('observe through Multicall3', () => {
-  test('one steady review of an account with 3 positions: 11 requests, 2 of them eth_call', async () => {
+  test('one review of an account with 3 positions: 12 requests, 2 of them eth_call, and no account code once it is settled', async () => {
     const c = chain()
     const cursor = historyCursor()
     // First review: the cursor reads the history from the activation block.
@@ -73,9 +73,12 @@ describe('observe through Multicall3', () => {
     const obs = await observe(c.client, input({ historyCursor: cursor, depositsAfter: 900n }))
     expect(obs.positions.map((p) => p.tokenId)).toEqual([11n, 12n, 13n])
     // Logs: the history up to the new safe block, the history above it, the deposits.
-    // The code of the deployed account was read in the first review and is not asked again.
-    expect(c.byMethod()).toEqual({ eth_chainId: 1, eth_getBlockByNumber: 5, eth_call: 2, eth_getLogs: 3 })
-    expect(c.count()).toBe(11)
+    // The account code is read here at the safe block, which settles that it is deployed: the next review does not ask.
+    expect(c.byMethod()).toEqual({ eth_chainId: 1, eth_getBlockByNumber: 5, eth_getCode: 1, eth_call: 2, eth_getLogs: 3 })
+    expect(c.count()).toBe(12)
+    c.requests.length = 0
+    await observe(c.client, input({ historyCursor: cursor, depositsAfter: 900n }))
+    expect(c.count('eth_getCode')).toBe(0)
     // Unbatched, the same review: every contract read is a request of its own.
     c.requests.length = 0
     const plain = historyCursor()
@@ -110,46 +113,58 @@ describe('observe through Multicall3', () => {
     // Seen deployed, but above the safe block: it is read again.
     expect((await observe(c.client, input({ account: OTHER_UNDEPLOYED, allowedTokenIds: [] }))).account.deployed).toBe(true)
     expect(c.count('eth_getCode')).toBe(4)
-    // The safe head passes the block it was seen at: from here on it is not read.
+    // The safe head reaches the block it was seen at: one read at safe settles it, and it is not read again.
     c.safe = c.head
     expect((await observe(c.client, input({ account: OTHER_UNDEPLOYED, allowedTokenIds: [] }))).account.deployed).toBe(true)
+    expect(c.count('eth_getCode')).toBe(5)
     expect((await observe(c.client, input({ account: OTHER_UNDEPLOYED, allowedTokenIds: [] }))).account.deployed).toBe(true)
-    expect(c.count('eth_getCode')).toBe(4)
+    expect(c.count('eth_getCode')).toBe(5)
     // The chain id is still checked on every observation.
     expect(c.count('eth_chainId')).toBe(6)
   })
 
-  test('isDeployed: once seen at a block the safe head has passed, later blocks are not read; earlier blocks and unsettled sightings are', async () => {
+  test('isDeployed: read every time until the code is read at a safe block, then not again', async () => {
     const asked: bigint[] = []
-    let deployedFrom = 95n
-    const client = { getCode: async ({ blockNumber }: { blockNumber: bigint }) => (asked.push(blockNumber), blockNumber >= deployedFrom ? '0x6001' : '0x') } as unknown as Parameters<typeof isDeployed>[0]
-    // Seen at 100 while safe is 90: it could still be reorged out, so it is read again.
+    const client = { getCode: async ({ blockNumber }: { blockNumber: bigint }) => (asked.push(blockNumber), blockNumber >= 95n ? '0x6001' : '0x') } as unknown as Parameters<typeof isDeployed>[0]
+    // Seen at 100 and 101 while safe is 90: nothing is certain yet.
     expect(await isDeployed(client, ACCOUNT, 100n, 90n)).toBe(true)
     expect(await isDeployed(client, ACCOUNT, 101n, 90n)).toBe(true)
     expect(asked).toEqual([100n, 101n])
-    // Safe has passed block 100: not read again from there on.
+    // Safe has reached the sighting: the code is read at safe (120), and that settles it.
     expect(await isDeployed(client, ACCOUNT, 150n, 120n)).toBe(true)
+    expect(asked).toEqual([100n, 101n, 120n])
     expect(await isDeployed(client, ACCOUNT, 250n, 200n)).toBe(true)
-    expect(asked).toEqual([100n, 101n])
-    // A provider that is behind, or a block before the deployment: read, and not deployed there.
+    expect(await isDeployed(client, ACCOUNT, 120n, 200n)).toBe(true)
+    expect(asked).toEqual([100n, 101n, 120n])
+    // A block before the one it was confirmed at (a provider that is behind): read, and not deployed there.
     expect(await isDeployed(client, ACCOUNT, 90n, 200n)).toBe(false)
-    expect(asked).toEqual([100n, 101n, 90n])
+    expect(asked).toEqual([100n, 101n, 120n, 90n])
     // Another client knows nothing of it.
     const other = { getCode: async () => '0x' } as unknown as Parameters<typeof isDeployed>[0]
     expect(await isDeployed(other, ACCOUNT, 300n, 300n)).toBe(false)
   })
 
-  test('isDeployed: a deployment reorged out before safe passed it is not remembered', async () => {
+  test('isDeployed: a deployment reorged out is never taken as deployed, whenever the next review comes', async () => {
     let deployedFrom = 100n
     const asked: bigint[] = []
     const client = { getCode: async ({ blockNumber }: { blockNumber: bigint }) => (asked.push(blockNumber), blockNumber >= deployedFrom ? '0x6001' : '0x') } as unknown as Parameters<typeof isDeployed>[0]
     expect(await isDeployed(client, ACCOUNT, 100n, 90n)).toBe(true)
-    // The deployment is reorged out: the replacement chain has no code at 102.
+    // The fork with the deployment is replaced. The next review comes after safe has passed block 100.
+    deployedFrom = 10_000n
+    expect(await isDeployed(client, ACCOUNT, 130n, 110n)).toBe(false)
+    // Asked at safe (no code), then at the block of the observation (no code): nothing remembered.
+    expect(asked).toEqual([100n, 110n, 130n])
+    expect(await isDeployed(client, ACCOUNT, 300n, 250n)).toBe(false)
+    expect(asked).toEqual([100n, 110n, 130n, 300n])
+  })
+
+  test('isDeployed: a sighting reorged out while still above safe is forgotten on the next read', async () => {
+    let deployedFrom = 100n
+    const client = { getCode: async ({ blockNumber }: { blockNumber: bigint }) => (blockNumber >= deployedFrom ? '0x6001' : '0x') } as unknown as Parameters<typeof isDeployed>[0]
+    expect(await isDeployed(client, ACCOUNT, 100n, 90n)).toBe(true)
     deployedFrom = 10_000n
     expect(await isDeployed(client, ACCOUNT, 102n, 91n)).toBe(false)
-    // Safe moves past 100 later: the forgotten sighting must not come back.
     expect(await isDeployed(client, ACCOUNT, 300n, 250n)).toBe(false)
-    expect(asked).toEqual([100n, 102n, 300n])
   })
 
   test('a client that answers another chain id is refused, on every observation', async () => {
