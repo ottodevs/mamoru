@@ -256,6 +256,32 @@ describe('decision reads fall back only to trusted providers', () => {
     expect(w.hits.some((h) => h.host === 'base-rpc.publicnode.com')).toBe(false)
   })
 
+  test('heads, blocks, receipts and nonces fall back to the trusted provider only, also inside a batch', async () => {
+    const w = world(new Set(['base-mainnet.g.alchemy.com']))
+    try {
+      for (const [method, params] of [['eth_blockNumber', []], ['eth_getBlockByNumber', ['0x10', false]], ['eth_getBlockByNumber', ['latest', false]], ['eth_getTransactionReceipt', ['0x01']], ['eth_getTransactionCount', ['0x0000000000000000000000000000000000000001', 'latest']]] as const) {
+        expect((await w.ask(method, [...params])).error).toBeUndefined()
+      }
+      const batch = (await (await fetch(w.proxy.url, { method: 'POST', body: JSON.stringify([{ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [] }, { jsonrpc: '2.0', id: 2, method: 'eth_getBalance', params: [] }]) })).json()) as { result?: string }[]
+      expect(batch.map((r) => r.result)).toEqual(['0x1', '0x1'])
+    } finally {
+      w.proxy.stop()
+    }
+    expect(w.hits.some((h) => h.host === 'base-rpc.publicnode.com')).toBe(false)
+  })
+
+  test('logs of one block by hash come from a trusted provider only', async () => {
+    const w = world(new Set(['base-mainnet.g.alchemy.com']))
+    let r: { result?: string; error?: { code: number } }
+    try {
+      r = await w.ask('eth_getLogs', [{ blockHash: `0x${'ab'.repeat(32)}` }])
+    } finally {
+      w.proxy.stop()
+    }
+    expect(r.result).toBe('0x1')
+    expect(w.hits.filter((h) => h.method === 'eth_getLogs').map((h) => h.host)).toEqual(['base-mainnet.g.alchemy.com', 'abc.base-mainnet.quiknode.pro'])
+  })
+
   test('a signed transaction may be relayed by any provider when the keyed ones refuse', async () => {
     const w = world(new Set(['base-mainnet.g.alchemy.com', 'abc.base-mainnet.quiknode.pro']))
     try {

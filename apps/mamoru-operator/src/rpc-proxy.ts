@@ -154,7 +154,10 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const trustedFallbacks = (opts.trusted ?? trustedFromEnv()).filter((t) => t !== upstream)
   /** The upstream and the trusted keyed providers: the only ones a decision read may come from. */
   const trusted = local ? [upstream] : [upstream, ...trustedFallbacks]
-  /** Every provider, trusted first: eth_getLogs (witnessed) and sends may use any of them. */
+  /**
+   * Every provider, trusted first: eth_getLogs over a range (witnessed) and sends may use any of them. Trusted first
+   * also means a trusted provider wins a tie between log providers and is asked first as a witness.
+   */
   const providers = local ? [upstream] : [...trusted, ...fallbacks.filter((f) => !trusted.includes(f))]
   const labels = labelProviders(providers)
   const labelOf = (url: string) => labels.get(url) ?? registrableDomain(new URL(url).hostname)
@@ -303,6 +306,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   }
   async function getLogs(msg: Req, seen: Witnessed): Promise<unknown> {
     const filter = { ...(msg.params?.[0] ?? {}) }
+    // Logs of one block by hash: from a trusted provider only, which needs no witness (a public node could leave rows out).
     if (filter.blockHash) return one('eth_getLogs', [filter])
     // A remote upstream alone could only witness itself: no logs are read at all.
     if (!local && !logProviders.some((w) => !sameOperator(w.url, upstream))) {
