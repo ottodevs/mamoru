@@ -51,9 +51,13 @@ const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint25
 const RECEIPT_UNKNOWN = 'OWNER_TX_ERROR'
 /** Armed activations retry this many times across watcher passes before failing visibly. */
 const ARM_MAX_TRIES = 20
-/** Wait after the first failed attempt of an armed activation; doubles each try up to ARM_RETRY_MAX_MS. */
+/**
+ * Wait after the first failed attempt of an armed activation; doubles each try up to ARM_RETRY_MAX_MS. The maximum
+ * stays inside the window findOwnerTx looks back (150 blocks, about 5 min), so an attempt that landed after all is
+ * still found when the next one sees the Safe nonce moved.
+ */
 const ARM_RETRY_MS = 30_000
-const ARM_RETRY_MAX_MS = 900_000
+const ARM_RETRY_MAX_MS = 180_000
 /** Minimum gap between two receipt reconciliation passes of one account. */
 const RECONCILE_EVERY_MS = 20_000
 /** Base produces a block every 2 s; used to place a failure time on the chain when no tx hash was kept. */
@@ -244,6 +248,8 @@ export class Operator {
   mirrorMismatches = 0
   private readonly engineHealth = new EngineHealthTracker()
   private relayerBalanceCache: { at: number; value: bigint } | null = null
+  /** Ops whose execTransaction send was started in this attempt: only then can a refusal be about a copy already out. */
+  private readonly execTried = new Set<string>()
   /** Last time each account's activation was logged as waiting for relayer ETH. */
   private readonly relayerLowLogged = new Map<string, number>()
   /** Pool state of the last few blocks: accounts reviewed at the same block read it once. */
@@ -870,7 +876,7 @@ export class Operator {
       // The relayer ran out of ETH before the owner's transaction went out: same op, back to waiting armed.
       // The relayer ran out of ETH, or the provider refused the transaction outright: the owner's execTransaction never
       // went out and the signature is still good, so the same op goes back to waiting armed and the watcher tries again.
-      if (kind === 'activate' && !(e instanceof HttpError) && !maybeBroadcast(e) && (relayerShort(e) || providerRefused(e))) {
+      if (kind === 'activate' && !(e instanceof HttpError) && !(this.execTried.has(op.opId) && maybeBroadcast(e)) && (relayerShort(e) || providerRefused(e))) {
         this.lock(acc.accountKey)
           .run(async () => this.rearm(acc, op, p, signature, relayerShort(e) ? 0 : 1))
           .catch((err) => logErr(`[armed] ${op.opId} rearm:`, err))
@@ -1059,6 +1065,7 @@ export class Operator {
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
     acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(tries ? { tries, retryAt: retryAt(tries) } : {}) }
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
+    this.execTried.delete(op.opId)
     console.log(`[armed] ${acc.accountKey} ${op.opId} back to armed: ${tries ? 'the provider refused the transaction' : 'the relayer could not pay for it'}`)
   }
 
@@ -1151,6 +1158,14 @@ export class Operator {
     const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
     if (deployed && nonce !== a.tx.nonce) {
       console.log(`[armed] ${acc.accountKey} Safe nonce ${nonce} != armed ${a.tx.nonce}`)
+      // After an attempt of ours the nonce may have moved because that attempt landed after all (its reply was lost):
+      // the op fails as an unknown receipt and reconcileOwner reads the chain, activating the account if it did.
+      if ((a.tries ?? 0) > 0) {
+        const tried = acc.ops.find((o) => o.opId === a.opId)
+        acc.armed = undefined
+        if (tried) this.failOwner(acc, tried, RECEIPT_UNKNOWN)
+        return this.reconcileSoon(acc)
+      }
       return this.disarm(acc, 'ARMED_NONCE_MOVED')
     }
     // Too little to deploy a Safe for: stay armed and wait for more (funding reports deployMinUsdc).
@@ -1171,12 +1186,13 @@ export class Operator {
       logErr(`[armed] ${op.opId} attempt ${tries}:`, e)
       // Once the execTransaction went out it is never sent again: the receipt settles it (reconcileOwner reads it).
       // Nor when the answer may mean an earlier copy of it is already in a node (a transport retry after a lost reply).
-      if (!unsent || maybeBroadcast(e)) {
+      if (!unsent || (this.execTried.has(op.opId) && maybeBroadcast(e))) {
         if (!acc.active) this.failOwner(acc, op, 'OWNER_TX_ERROR')
         return
       }
       if (tries < ARM_MAX_TRIES && !acc.active) {
         acc.armed = { ...a, tries, retryAt: tries > (a.tries ?? 0) ? retryAt(tries) : undefined }
+        this.execTried.delete(op.opId)
         this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
       } else if (!acc.active) this.failOwner(acc, op, 'OWNER_TX_ERROR')
     }
@@ -1274,6 +1290,7 @@ export class Operator {
       }
     }
     // Keep the hash as soon as the tx is out: if the receipt poll fails, reconciliation reads it later.
+    this.execTried.add(op.opId)
     const { hash, receipt } = await this.relayer.send({ to: safe, data }, (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }))
     this.patchOp(acc, op.opId, { state: 'submitted', txHash: hash })
     const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
