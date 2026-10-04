@@ -1147,7 +1147,7 @@ describe('an activation waits for the relayer instead of failing', () => {
     expect(acc.depositsAfter).toBe('97')
   })
 
-  test('no provider serves the state of past blocks: after three passes the account starts from the floor of the search', async () => {
+  test('no provider serves the state of past blocks: after three passes the account starts, engine from the head, deposits from the floor', async () => {
     const w = world(20_000_000n)
     w.knobs.onSend = (t) => {
       if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
@@ -1166,6 +1166,8 @@ describe('an activation waits for the relayer instead of failing', () => {
     }
     await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
     expect(acc.active).toBe(true)
+    // The engine starts at the head, where the grant already is; deposits are read from before the execution.
+    expect(acc.historyFromBlock).toBe('100')
     expect(BigInt(acc.depositsAfter)).toBeLessThan(100n)
   })
 
