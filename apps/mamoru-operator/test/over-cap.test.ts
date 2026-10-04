@@ -1166,8 +1166,9 @@ describe('an activation waits for the relayer instead of failing', () => {
     }
     await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
     expect(acc.active).toBe(true)
-    // The engine starts at the head, where the grant already is; deposits are read from before the execution.
-    expect(acc.historyFromBlock).toBe('100')
+    // The engine starts 150 blocks past the unproven head, so no node still before the execution is ever reviewed;
+    // deposits are read from before the execution.
+    expect(acc.historyFromBlock).toBe('250')
     expect(BigInt(acc.depositsAfter)).toBeLessThan(100n)
   })
 
