@@ -1207,7 +1207,7 @@ describe('an activation waits for the relayer instead of failing', () => {
     boot.resume()
     boot.armStopped = true
     clearTimeout(boot.armTimer)
-    expect(acc.armed!.retryAt! - Date.now()).toBeGreaterThan(25_000)
+    expect(acc.armed!.retryAt! - Date.now()).toBeGreaterThan(170_000)
     w.chain.usdc = 20_000_000n
     await priv(w.op).fireArmed(acc, 20_000_000n)
     expect(w.sent).toHaveLength(0)
