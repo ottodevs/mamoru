@@ -1227,6 +1227,7 @@ export class Operator {
         const back = BigInt(Math.ceil(Math.max(0, Date.now() - since) / 1000)) / BLOCK_SECONDS + ACTIVATION_SEARCH_MARGIN
         const floor = head > back ? head - back : 0n
         let block: bigint
+        let depositsFrom: bigint | undefined
         // The head may come from a node behind the one that answered "enabled": the upper bound has to hold itself, or
         // the search (and an engine started on that head) would be looking at blocks before the execution. Stay armed
         // until the head has it, however many passes that takes; only a head that cannot be read at all counts below.
@@ -1251,18 +1252,21 @@ export class Operator {
           this.recoverFails.delete(acc.accountKey)
         } catch (e) {
           // No provider serves the state of those blocks (a long outage, no archive): after a few passes the account
-          // is started from the floor instead of never. The floor is before the execution, so no deposit is missed;
-          // what landed between the floor and the execution is read as a deposit, which is what it is to the engine.
+          // is started instead of never. The engine starts from the head, where `latest` already shows the grant, so
+          // it never observes a block before the execution (it waits for a head past its starting block). Deposits
+          // are read from the floor, before the execution, so none is missed: what landed in between is read as a
+          // deposit, which is what it is to the engine.
           const fails = (this.recoverFails.get(acc.accountKey) ?? 0) + 1
           this.recoverFails.set(acc.accountKey, fails)
           if (fails < RECOVER_TRIES) throw e
-          logErr('[alert]', `${acc.accountKey} ${a.opId} executed on chain; its block could not be read in ${fails} passes, starting from block ${floor}`)
+          logErr('[alert]', `${acc.accountKey} ${a.opId} executed on chain; its block could not be read in ${fails} passes, engine from head ${head}, deposits from block ${floor}`)
           this.recoverFails.delete(acc.accountKey)
-          block = floor
+          block = head
+          depositsFrom = floor
         }
         if (acc.armed?.opId !== a.opId) return
         console.log(`[armed] ${acc.accountKey} ${a.opId} executed on chain at block ${block} (its grants are enabled): account started`)
-        this.afterOwner(acc, { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: 0, grants: a.grants }, { blockNumber: block } as TransactionReceipt)
+        this.afterOwner(acc, { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: 0, grants: a.grants }, { blockNumber: block } as TransactionReceipt, depositsFrom)
         return this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(block) })
       }
     }
@@ -1487,7 +1491,8 @@ export class Operator {
     this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(receipt.blockNumber) })
   }
 
-  private afterOwner(acc: AccountState, p: Prepared, receipt: TransactionReceipt): void {
+  /** `depositsFrom`: where deposits are read from when it is not the block of the receipt (a recovered activation). */
+  private afterOwner(acc: AccountState, p: Prepared, receipt: TransactionReceipt, depositsFrom?: bigint): void {
     if (p.kind === 'activate') {
       acc.trusted = true
       acc.active = true
@@ -1497,7 +1502,7 @@ export class Operator {
       acc.grants = p.grants ?? []
       acc.policyId = p.grants?.[0]?.grant.policyId ?? this.cfg.policy.policyId
       acc.managedTokenIds = []
-      acc.depositsAfter = receipt.blockNumber.toString()
+      acc.depositsAfter = (depositsFrom ?? receipt.blockNumber).toString()
       acc.historyFromBlock = receipt.blockNumber.toString()
       acc.epoch++
       this.store.save()
