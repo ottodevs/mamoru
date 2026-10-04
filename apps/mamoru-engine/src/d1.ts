@@ -91,9 +91,14 @@ export async function listAccounts(db: D1Like, chainId: number): Promise<Account
   return results
 }
 
-/** Accounts whose last projection saw them deployed: their code is not read again (a deployed Safe stays deployed). */
-export async function deployedAccountKeys(db: D1Like, chainId: number): Promise<Set<string>> {
-  const { results } = await db.prepare('SELECT account_key FROM proj_account_state WHERE chain_id = ? AND deployed = 1').bind(chainId).all<{ account_key: string }>()
+/**
+ * Accounts whose last projection saw them deployed, at a block not after `block`. Every projection is written at
+ * a `safe` block whose hash was checked again after the reads (syncOnce), so that code is not on a fork that can
+ * still be replaced, and a deployed Safe stays deployed: its code is not read again. A row from a later block
+ * (a provider that is behind today) does not count.
+ */
+export async function deployedAccountKeys(db: D1Like, chainId: number, block: number): Promise<Set<string>> {
+  const { results } = await db.prepare('SELECT account_key FROM proj_account_state WHERE chain_id = ? AND deployed = 1 AND block <= ?').bind(chainId, block).all<{ account_key: string }>()
   return new Set(results.map((r) => r.account_key))
 }
 

@@ -266,6 +266,36 @@ describe('account state sync', () => {
     expect(rows).toEqual([{ account_key: 'acct-a', deployed: 1 }, { account_key: 'acct-b', deployed: 1 }])
   })
 
+  test('a projection from a later block than this run does not vouch for the code: it is read', async () => {
+    seedAccount('acct-a', A)
+    chain.code.set(A.toLowerCase(), '0x60806040')
+    await run()
+    // As if the row had been written by a run that saw a later block than the provider has today.
+    db.sqlite.run('UPDATE proj_account_state SET block = block + 1000')
+    const baseline = sqliteD1()
+    chain.calls.length = 0
+    await syncOnce({ client: chain.client(), db: baseline, chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: () => {} })
+    const withoutAccounts = count('eth_getCode')
+    chain.calls.length = 0
+    await run()
+    expect(count('eth_getCode') - withoutAccounts).toBe(1)
+  })
+
+  test('the request of a whole group fails: its accounts keep their last projection and the sync still finishes', async () => {
+    seedAccount('acct-a', A)
+    chain.setBalance(USDC, A, 1_000_000n)
+    await run()
+    chain.setBalance(USDC, A, 7_000_000n)
+    chain.safe += 5
+    chain.latest += 5
+    chain.multicallDown = true
+    await run()
+    const row = db.sqlite.query('SELECT block, total_value FROM proj_account_state').get() as { block: number; total_value: string }
+    expect(row.total_value).toBe('1000000')
+    expect(row.block).toBeLessThan(chain.safe)
+    expect(logs.at(-1)).toMatchObject({ msg: 'sync.done', accounts: 0, accountsTotal: 1 })
+  })
+
   test('an account with a read that fails keeps its last projection; the others in the request are written', async () => {
     seedAccount('acct-a', A)
     seedAccount('acct-b', B)

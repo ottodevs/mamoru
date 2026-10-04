@@ -60,15 +60,15 @@ export async function readAccountState(
 
 /** Accounts per Multicall3 request: four reads each, within the 100 calls a provider takes in one aggregate3. */
 export const ACCOUNTS_PER_CALL = 25
-/** Calldata of one request: 100 short reads fit several times over, so a group is never split. */
+/** viem splits a multicall by the bytes of the inner calls' calldata: a group has about 3,600 (100 reads of 36 bytes), so it is one eth_call. The aggregate3 request itself is larger, about 20 kB. */
 const GROUP_BATCH_BYTES = 16_384
 
 export type AccountRef = { key: string; address: Address }
 
 /**
  * The state of every account at `H` in one Multicall3 request per ACCOUNTS_PER_CALL accounts, instead of five
- * requests per account. The code of an account is read only until it is known to be deployed (`knownDeployed`,
- * from the last projection): a deployed Safe stays deployed. An account with a read that failed, or in a group
+ * requests per account. The code of an account is read only until it is known to be deployed (`knownDeployed`:
+ * projected as deployed at a safe block, see deployedAccountKeys): a deployed Safe stays deployed. An account with a read that failed, or in a group
  * whose request failed, is left out and keeps its last projection.
  */
 export async function readAccountStates(

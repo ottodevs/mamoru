@@ -219,7 +219,7 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
     }
   }
   // An account missing from the answer keeps its last projection; the API shows it stale by age.
-  const states = await readAccountStates(client, refs, tokens, anchor, rates, await deployedAccountKeys(db, chainId))
+  const states = await readAccountStates(client, refs, tokens, anchor, rates, await deployedAccountKeys(db, chainId, anchor.blockNumber))
   for (const [key, s] of states) statements.push(upsertAccountState(db, anchor, key, s))
   const accountsRead = states.size
 
