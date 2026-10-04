@@ -101,6 +101,31 @@ describe('one live review', () => {
     expect(all.filter((s) => e.ledger.get(s.permissionId)?.revoked).length).toBe(0)
   })
 
+  test('the observation block changes hash: the sessions it read as removed are not revoked', async () => {
+    const all = sessions()
+    const e = engine(all)
+    chain.disabled.add(all[2]!.permissionId.toLowerCase())
+    // The final read of the observation block answers another hash: the observation is not consistent.
+    let blockReads = 0
+    const before = chain.onRequest
+    chain.onRequest = (r) => {
+      if (r.method === 'eth_getBlockByNumber' && typeof r.params[0] === 'string' && r.params[0] !== 'safe' && r.params[0] !== 'latest') blockReads++
+    }
+    const hashOf = chain.hashOf.bind(chain)
+    const head = chain.head
+    chain.hashOf = (n: bigint) => (n === head && blockReads >= 1 ? (`0x${'ee'.repeat(32)}` as Hex) : hashOf(n))
+    let r: Awaited<ReturnType<Engine['review']>>
+    try {
+      r = await e.review()
+    } finally {
+      chain.hashOf = hashOf
+      chain.onRequest = before
+      chain.disabled.clear()
+    }
+    expect(r).toMatchObject({ kind: 'observation-failed', code: 'OBS_BLOCK_INCONSISTENT' })
+    expect(all.filter((s) => e.ledger.get(s.permissionId)?.revoked).length).toBe(0)
+  })
+
   test('a session read that fails does not revoke anything: the review throws as before', async () => {
     const all = sessions()
     const e = engine(all)

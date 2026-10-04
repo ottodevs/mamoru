@@ -132,7 +132,9 @@ export class Engine {
     if (sessions.length === 0) return
     const enabled = sessions.map((s) => batch.add(contractRead(this.client, { address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [s.permissionId, this.cfg.account], blockNumber })))
     return async () => {
-      for (const [i, s] of sessions.entries()) if (!(await enabled[i]!.need())) this.ledger.revoke(s.permissionId)
+      // Every answer first: a read that fails revokes nothing.
+      const answers = await Promise.all(enabled.map((h) => h.need()))
+      for (const [i, s] of sessions.entries()) if (!answers[i]) this.ledger.revoke(s.permissionId)
     }
   }
 

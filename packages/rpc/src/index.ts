@@ -77,28 +77,32 @@ export type ObserveInput = {
   poolCache?: PoolStateCache
   /**
    * Reads of the caller that belong to this observation: added to the first batch, pinned to its block, at no
-   * extra request. The function it returns runs once the batch has answered, inside the block-hash bracket.
+   * extra request. The function it returns runs after the final block-hash check and before `sessions` is
+   * asked: an observation that fails applies nothing.
    */
   firstBatch?: (batch: Batch, blockNumber: bigint) => (() => Promise<void>) | void
 }
 
 /**
  * Accounts each client has seen with code, and the block it saw them at. A deployed Safe stays deployed, so its
- * code is not read again at that block or a later one; an earlier block is read (a provider that is behind, a
- * fork before the deployment). "Not deployed" is never kept.
+ * code is not read again, under two conditions: the block it was seen at is at or below the `safe` block (a
+ * deployment that could still be reorged out is read again), and the block asked for is not earlier than that
+ * one (a provider that is behind is read). "Not deployed" is never kept.
  */
 const deployed = new WeakMap<PublicClient, Map<string, bigint>>()
 
-/** Whether `account` has code at `blockNumber`: one eth_getCode until it is seen deployed, none from that block on. */
-export async function isDeployed(client: PublicClient, account: Address, blockNumber: bigint): Promise<boolean> {
+/** Whether `account` has code at `blockNumber`: eth_getCode until it was seen deployed at a block now at or below `safeNumber`, none after. */
+export async function isDeployed(client: PublicClient, account: Address, blockNumber: bigint, safeNumber: bigint): Promise<boolean> {
   let seen = deployed.get(client)
   if (!seen) deployed.set(client, (seen = new Map()))
   const key = account.toLowerCase()
   const since = seen.get(key)
-  if (since !== undefined && blockNumber >= since) return true
+  if (since !== undefined && since <= safeNumber && blockNumber >= since) return true
   const code = await client.getCode({ address: account, blockNumber })
   const has = !!code && code !== '0x'
   if (has && (since === undefined || blockNumber < since)) seen.set(key, blockNumber)
+  // Read at a block and without code there: whatever was remembered from that block on did not hold.
+  if (!has && since !== undefined && blockNumber >= since) seen.delete(key)
   return has
 }
 
@@ -161,7 +165,7 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const own = shared ? null : POOLS.map((p) => poolReads(first, client, p, blockNumber, input.twapWindowSeconds))
   const priceSlot0 = POOLS.includes(input.ethPricePool) ? null : first.add(contractRead(client, { address: address(input.ethPricePool), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }))
   const afterFirst = input.firstBatch?.(first, blockNumber)
-  const round = Promise.all([isDeployed(client, acct, blockNumber), first.run()])
+  const round = Promise.all([isDeployed(client, acct, blockNumber, safe.number), first.run()])
   const ownPools = own ? round.then(() => Promise.all(own.map((finish) => finish()))) : null
   if (ownPools) {
     // Published before it resolves, so accounts observing this block at the same time wait for it instead of reading again.
@@ -169,7 +173,6 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
     ownPools.catch(() => input.poolCache?.delete(poolKey))
   }
   const [accountDeployed] = await round
-  if (afterFirst) await afterFirst()
   // Settled here, inside the block-hash bracket: a read that failed in the batch is asked again on its own.
   const [nativeBalance, accountNonce, tokenBalances] = await Promise.all([native.need(), nonce.need(), Promise.all(balances.map((b) => b.need()))])
   const readAlone = async () => {
@@ -206,6 +209,8 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
     if (ownPools) input.poolCache?.delete(poolKey)
     throw new ReasonError('OBS_BLOCK_INCONSISTENT', `block ${blockNumber} changed hash during the observation`)
   }
+  // What the caller read in the first batch is applied only now: the block is the one it was read at.
+  if (afterFirst) await afterFirst()
   // Only a consistent observation moves the history cursor.
   if (cursorRead && input.historyCursor) Object.assign(input.historyCursor, cursorRead.next)
 

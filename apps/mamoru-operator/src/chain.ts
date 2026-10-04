@@ -1,7 +1,7 @@
 import type { PublicClient } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { address, baseRegistry, entry, erc20Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
-import { Batch, MULTICALL3, balanceRead, contractRead, tokenIdReads, isDeployed } from '@mamoru/rpc'
+import { Batch, MULTICALL3, balanceRead, contractRead, tokenIdReads } from '@mamoru/rpc'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 
 export const LIVE_POOL = 'pool:USDC/cbBTC/500'
@@ -87,7 +87,7 @@ export async function readSafe(client: PublicClient, safe: Address): Promise<Saf
   const balanceReads = tokenNames.map((t) => first.add(contractRead(client, { address: address(t), abi: erc20Abi, functionName: 'balanceOf', args: [safe], ...at })))
   const slotReads = USDC_POOLS.map((p) => first.add(contractRead(client, { address: address(p), abi: uniswapV3PoolAbi, functionName: 'slot0', ...at })))
   const idsOf = tokenIdReads(client, MULTICALL3, first, safe, blockNumber)
-  const [deployed] = await Promise.all([isDeployed(client, safe, blockNumber), first.run()])
+  const [code] = await Promise.all([client.getCode({ address: safe, ...at }), first.run()])
   const [eth, nfts, balances, slots] = await Promise.all([ethRead.need(), nftRead.need(), Promise.all(balanceReads.map((r) => r.need())), Promise.all(slotReads.map((r) => r.need()))])
   const tokens = Object.fromEntries(tokenNames.map((t, i) => [t, balances[i]!]))
   const prices: Record<string, PoolPrice> = Object.fromEntries(USDC_POOLS.map((p, i) => [p, { sqrtPriceX96: slots[i]![0], tick: slots[i]![1] }]))
@@ -110,5 +110,5 @@ export async function readSafe(client: PublicClient, safe: Address): Promise<Saf
     positions.push({ tokenId, pool, token0: e.token0!, token1: e.token1!, fee: e.fee!, liquidity, tickLower, tickUpper, inRange: price.tick >= tickLower && price.tick < tickUpper, amount0, amount1 })
   }
   const live = prices[LIVE_POOL]!
-  return { block: blockNumber, deployed, eth, usdc: tokens.USDC ?? 0n, cbbtc: tokens.cbBTC ?? 0n, sqrtPriceX96: live.sqrtPriceX96, tick: live.tick, tokens, prices, positions }
+  return { block: blockNumber, deployed: !!code && code !== '0x', eth, usdc: tokens.USDC ?? 0n, cbbtc: tokens.cbBTC ?? 0n, sqrtPriceX96: live.sqrtPriceX96, tick: live.tick, tokens, prices, positions }
 }
