@@ -74,6 +74,8 @@ const BLOCK_SECONDS = 2n
 const ACTIVATION_SEARCH_MARGIN = 60n
 /** Passes the search for that block is tried before the account is started from the search floor. */
 const RECOVER_TRIES = 3
+/** Blocks past an unproven head (5 min on Base) the engine of an activation recovered without historical state starts at. */
+const RECOVER_HEAD_MARGIN = 150n
 const PREPARE_TTL_MS = 5 * 60_000
 /** On top of the policy reserve: the first userOp prefund leaves the Safe's balance into its EntryPoint deposit. */
 const TOP_UP_MARGIN_WEI = 200_000_000_000_000n
@@ -1252,16 +1254,17 @@ export class Operator {
           this.recoverFails.delete(acc.accountKey)
         } catch (e) {
           // No provider serves the state of those blocks (a long outage, no archive): after a few passes the account
-          // is started instead of never. The engine starts from the head, where `latest` already shows the grant, so
-          // it never observes a block before the execution (it waits for a head past its starting block). Deposits
-          // are read from the floor, before the execution, so none is missed: what landed in between is read as a
-          // deposit, which is what it is to the engine.
+          // is started instead of never. `latest` showed the grant, but this head was not proven to have it (it may
+          // come from a node behind). So the engine starts RECOVER_HEAD_MARGIN blocks past it: it waits for an RPC
+          // head beyond its starting block before its first review, and by then no node is still before the
+          // execution. Deposits are read from the floor, before the execution, so none is missed: what landed in
+          // between is read as a deposit, which is what it is to the engine.
           const fails = (this.recoverFails.get(acc.accountKey) ?? 0) + 1
           this.recoverFails.set(acc.accountKey, fails)
           if (fails < RECOVER_TRIES) throw e
-          logErr('[alert]', `${acc.accountKey} ${a.opId} executed on chain; its block could not be read in ${fails} passes, engine from head ${head}, deposits from block ${floor}`)
+          logErr('[alert]', `${acc.accountKey} ${a.opId} executed on chain; its block could not be read in ${fails} passes, engine from block ${head + RECOVER_HEAD_MARGIN}, deposits from block ${floor}`)
           this.recoverFails.delete(acc.accountKey)
-          block = head
+          block = head + RECOVER_HEAD_MARGIN
           depositsFrom = floor
         }
         if (acc.armed?.opId !== a.opId) return
