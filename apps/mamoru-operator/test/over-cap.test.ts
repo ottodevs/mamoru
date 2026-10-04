@@ -1027,6 +1027,37 @@ describe('an activation waits for the relayer instead of failing', () => {
     expect(acc.ops.find((o) => o.opId === armed.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR', txHash: `0x${'ab'.repeat(32)}` })
   })
 
+  test('the provider refuses the execTransaction (JSON-RPC error, nothing broadcast): the op waits armed and the next pass sends it', async () => {
+    const w = world(20_000_000n)
+    let refuse = true
+    w.knobs.onSend = (t) => {
+      if (refuse && t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { name: 'InvalidInputRpcError', code: -32000 })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    const acc = w.state.accounts.k!
+    expect(acc.armed).toMatchObject({ opId: op.opId, tries: 1 })
+    expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'proposed', code: 'ARMED' })
+    expect(acc.ownerFailures ?? []).toHaveLength(0)
+    refuse = false
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.armed).toBeUndefined()
+    expect(acc.active).toBe(true)
+  })
+
+  test('a send that times out says nothing about the chain: the op fails as before and reconciliation settles it', async () => {
+    const w = world(20_000_000n)
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('The request took too long to respond.'), { name: 'TimeoutError' })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    expect(w.state.accounts.k!.armed).toBeUndefined()
+    expect(w.state.accounts.k!.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+  })
+
   test('any other send failure still fails the op and counts against the owner budget', async () => {
     const w = world(20_000_000n)
     w.knobs.onSend = (t) => {
