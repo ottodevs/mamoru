@@ -39,8 +39,8 @@ function relayer(count: () => number) {
 }
 const TO = `0x${'22'.repeat(20)}` as const
 
-describe('the relayer never reuses the nonce of a transaction it saw mined', () => {
-  test('a lagging node repeats the count after a mined send: the next send goes one above it', async () => {
+describe('the relayer does not reuse the nonce of a transaction a provider just accepted', () => {
+  test('a lagging node repeats the count right after a send: the next send goes one above it', async () => {
     nonces.length = 0
     const r = relayer(() => 41)
     await r.send({ to: TO, value: 1n })
@@ -56,5 +56,14 @@ describe('the relayer never reuses the nonce of a transaction it saw mined', () 
     n = 12
     await r.send({ to: TO, value: 1n })
     expect(nonces).toEqual([7, 12])
+  })
+
+  test('after two minutes the count alone decides, so a dropped transaction leaves no gap for good', async () => {
+    nonces.length = 0
+    const r = relayer(() => 41)
+    await r.send({ to: TO, value: 1n })
+    ;(r as unknown as { lastSent: { nonce: number; at: number } }).lastSent.at -= 121_000
+    await r.send({ to: TO, value: 1n })
+    expect(nonces).toEqual([41, 41])
   })
 })

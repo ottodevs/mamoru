@@ -6,14 +6,16 @@ import { logErr } from './metrics.ts'
 
 /** Per-tx gas cap on Base (EIP-7825). */
 const TX_GAS_CAP = 16_777_216n
+/** How long the nonce of the last accepted send overrules a provider count that has not caught up with it. */
+const LAST_SENT_MS = 120_000
 
 /** The relayer EOA: pays gas for Safe deploys, owner execTransactions, top-ups and handleOps bundles. One send at a time. */
 export class Relayer {
   readonly account: PrivateKeyAccount
   private readonly lock = new Lock()
   private readonly chain: Chain
-  /** Nonce of the last transaction of this process that got a receipt. */
-  private lastMined: number | null = null
+  /** Nonce and time of the last transaction a provider accepted from this process. */
+  private lastSent: { nonce: number; at: number } | null = null
 
   constructor(
     key: Hex,
@@ -55,14 +57,15 @@ export class Relayer {
       const est = tx.gas ?? ((await this.client.estimateGas({ account: this.account.address, to: tx.to, data: tx.data, value: tx.value })) * 13n) / 10n
       const gas = est > TX_GAS_CAP ? TX_GAS_CAP : est
       // A load-balanced provider can answer the count from a node that has not seen the previous transaction yet, and
-      // the node that has would refuse the reused nonce: never go below the one after the last mined here.
+      // the node that has would refuse the reused nonce. For LAST_SENT_MS after a send the count is never taken below
+      // the one after it; later the count alone decides, so a transaction that was dropped cannot leave a gap for good.
       const counted = await this.client.getTransactionCount({ address: this.account.address, blockTag: 'pending' })
-      const nonce = this.lastMined !== null && counted <= this.lastMined ? this.lastMined + 1 : counted
+      const last = this.lastSent
+      const nonce = last && Date.now() - last.at < LAST_SENT_MS && counted <= last.nonce ? last.nonce + 1 : counted
       const hash = await wallet.sendTransaction({ to: tx.to, data: tx.data, value: tx.value ?? 0n, gas, nonce })
+      this.lastSent = { nonce, at: Date.now() }
       onSent?.(hash)
-      const receipt = await this.receipt(hash)
-      this.lastMined = nonce
-      return { hash, receipt }
+      return { hash, receipt: await this.receipt(hash) }
     })
   }
 }
