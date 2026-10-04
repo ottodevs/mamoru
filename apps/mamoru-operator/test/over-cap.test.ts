@@ -37,7 +37,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -85,8 +85,9 @@ function world(usdc: bigint) {
   } as unknown as PublicClient
   const relayer = {
     address: RELAYER,
-    send: async (tx: { to: string; data?: Hex; value?: bigint }, onSent?: (h: Hex) => void) => {
+    send: async (tx: { to: string; data?: Hex; value?: bigint }, onSent?: (h: Hex) => void, onSending?: () => void) => {
       sent.push(tx)
+      if (!knobs.failBeforeSending) onSending?.()
       knobs.onSend(tx)
       const hash = toHex(sent.length, { size: 32 })
       onSent?.(hash)
@@ -1110,6 +1111,25 @@ describe('an activation waits for the relayer instead of failing', () => {
     await priv(w.op).fireArmed(acc, 20_000_000n)
     expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
     expect(w.sent.length).toBe(sentBefore)
+  })
+
+  test('a refusal while the relayer still reads (gas, nonce) is not a send: a later moved nonce drops the op, no budget charged', async () => {
+    const w = world(20_000_000n)
+    w.knobs.failBeforeSending = true
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Internal error'), { code: -32603 })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    const acc = w.state.accounts.k!
+    expect(acc.armed).toMatchObject({ opId: op.opId, tries: 1 })
+    expect(acc.armed!.execSent).toBeUndefined()
+    w.chain.nonce = 1n
+    acc.armed!.retryAt = Date.now() - 1
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'ARMED_NONCE_MOVED' })
+    expect(acc.ownerFailures ?? []).toHaveLength(0)
   })
 
   test('already known on the deploy or the top-up is not about the owner transaction: the op waits armed', async () => {

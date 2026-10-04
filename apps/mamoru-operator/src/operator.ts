@@ -250,7 +250,7 @@ export class Operator {
   mirrorMismatches = 0
   private readonly engineHealth = new EngineHealthTracker()
   private relayerBalanceCache: { at: number; value: bigint } | null = null
-  /** Ops whose execTransaction send was started in this attempt: only then can a refusal be about a copy already out. */
+  /** Ops whose execTransaction went to the provider in this attempt: only then can a refusal be about a copy already out. */
   private readonly execTried = new Set<string>()
   /** Armed ops being sent again after a failed attempt: an earlier copy may have landed although its reply said no. */
   private readonly retried = new Set<string>()
@@ -1326,8 +1326,11 @@ export class Operator {
       }
     }
     // Keep the hash as soon as the tx is out: if the receipt poll fails, reconciliation reads it later.
-    this.execTried.add(opKey(acc, op))
-    const { hash, receipt } = await this.relayer.send({ to: safe, data }, (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }))
+    const { hash, receipt } = await this.relayer.send(
+      { to: safe, data },
+      (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }),
+      () => this.execTried.add(opKey(acc, op)),
+    )
     this.patchOp(acc, op.opId, { state: 'submitted', txHash: hash })
     const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
     console.log(`[owner] ${op.opId} tx ${hash} block ${receipt.blockNumber} ${ok ? 'ok' : 'FAILED'}`)

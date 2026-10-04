@@ -48,6 +48,14 @@ describe('the relayer does not reuse the nonce of a transaction a provider just 
     expect(nonces).toEqual([41, 42])
   })
 
+  test('onSending runs after the reads and before the provider gets the transaction', async () => {
+    nonces.length = 0
+    const order: string[] = []
+    const r = relayer(() => (order.push('count'), 3))
+    await r.send({ to: TO, value: 1n }, () => order.push('sent'), () => order.push(`sending:${nonces.length}`))
+    expect(order).toEqual(['count', 'sending:0', 'sent'])
+  })
+
   test('a count ahead of what this process mined is taken as is', async () => {
     nonces.length = 0
     let n = 7
