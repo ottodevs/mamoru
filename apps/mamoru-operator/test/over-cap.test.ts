@@ -1078,7 +1078,7 @@ describe('an activation waits for the relayer instead of failing', () => {
     const w = world(20_000_000n)
     let refuse = true
     w.knobs.onSend = (t) => {
-      if (refuse && t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Internal error'), { code: -32603 })
+      if (refuse && t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
     }
     const tx = await w.op.prepareActivate(ctx)
     const op = await w.op.submit(ctx, 'activate', sign(tx))
@@ -1098,7 +1098,7 @@ describe('an activation waits for the relayer instead of failing', () => {
     const w = world(20_000_000n)
     let refuse = true
     w.knobs.onSend = (t) => {
-      if (refuse && t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Internal error'), { code: -32603 })
+      if (refuse && t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
     }
     const tx = await w.op.prepareActivate(ctx)
     const op = await w.op.submit(ctx, 'activate', sign(tx))
@@ -1117,7 +1117,7 @@ describe('an activation waits for the relayer instead of failing', () => {
     const w = world(20_000_000n)
     w.knobs.failBeforeSending = true
     w.knobs.onSend = (t) => {
-      if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Internal error'), { code: -32603 })
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
     }
     const tx = await w.op.prepareActivate(ctx)
     const op = await w.op.submit(ctx, 'activate', sign(tx))
@@ -1155,6 +1155,18 @@ describe('an activation waits for the relayer instead of failing', () => {
       expect(w.state.accounts.k!.armed).toBeUndefined()
       expect(w.state.accounts.k!.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
     }
+  })
+
+  test('an internal error (-32603) is what the proxy answers for a lost reply: the op fails as before, it is not sent again', async () => {
+    const w = world(20_000_000n)
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Internal error'), { code: -32603 })
+    }
+    const tx = await w.op.prepareActivate(ctx)
+    const op = await w.op.submit(ctx, 'activate', sign(tx))
+    await Bun.sleep(5)
+    expect(w.state.accounts.k!.armed).toBeUndefined()
+    expect(w.state.accounts.k!.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
   })
 
   test('a send that times out says nothing about the chain: the op fails as before and reconciliation settles it', async () => {

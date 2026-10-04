@@ -1773,11 +1773,14 @@ function maybeBroadcast(e: unknown): boolean {
 
 /**
  * True when a provider answered a send with a JSON-RPC error: the node looked at the transaction and did not take it,
- * so nothing was broadcast. A timeout or a transport failure carries no such code and says nothing either way.
+ * so nothing was broadcast. A timeout or a transport failure carries no such code and says nothing either way, and
+ * neither does -32603 (internal error): the operator's own proxy answers it when a provider took a request and the
+ * reply was lost.
  */
 function providerRefused(e: unknown): boolean {
   let cur = e as { code?: unknown; name?: string; cause?: unknown } | undefined
   for (let i = 0; i < 8 && cur; i++) {
+    if (cur.code === -32603) return false
     if (typeof cur.code === 'number' && cur.code < 0 && cur.name !== 'TimeoutError' && cur.name !== 'HttpRequestError') return true
     cur = cur.cause as typeof cur
   }
