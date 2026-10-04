@@ -432,3 +432,28 @@ describe('requests by component', () => {
     expect(snap.byComponent.cumulative).toEqual({})
   })
 })
+
+describe('a refused transaction says why', () => {
+  test('the provider message of a refused eth_sendRawTransaction is logged, redacted, and the error returned unchanged', async () => {
+    const upstream = fakeUpstream((body) => ({ json: { jsonrpc: '2.0', id: body.id, error: { code: -32000, message: 'transaction gas limit too high (cap: 16777216, tx: 16777217) see https://secret-key.example/v2/abcdefabcdefabcdefabcdef' } } }))
+    const proxy = startRpcProxy(upstream.url, {})
+    const lines: string[] = []
+    const log = console.log
+    console.log = (...a: unknown[]) => void lines.push(a.join(' '))
+    let r: { error?: { code: number; message: string } }
+    try {
+      r = (await (await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_sendRawTransaction', params: ['0x02f8'] }) })).json()) as typeof r
+      await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'eth_call', params: [] }) })
+    } finally {
+      console.log = log
+      proxy.stop()
+      upstream.stop()
+    }
+    expect(r.error?.code).toBe(-32000)
+    const said = lines.filter((l) => l.startsWith('[rpc] eth_sendRawTransaction refused'))
+    expect(said).toHaveLength(1)
+    expect(said[0]).toContain('(-32000): transaction gas limit too high')
+    expect(said[0]).not.toContain('abcdefabcdef')
+    expect(said[0]).not.toContain('0x02f8')
+  })
+})
