@@ -577,7 +577,11 @@ describe('providerWords', () => {
       const out = providerWords(`no ${' '.repeat(pad)}short-key.rpc.example/v2/abc`)
       expect(out).not.toMatch(/short|key|rpc|example|abc/)
     }
-    expect(providerWords(`${'x '.repeat(999)}ab`)).toBe(providerWords('x '.repeat(999) + 'ab'))
+    // Exactly at the limit nothing was cut: the last word stays. One character over, it goes.
+    expect(providerWords(`${' '.repeat(1995)}nonce`)).toBe('nonce')
+    expect(providerWords(`low ${' '.repeat(1991)}nonce.`)).toBe('low')
+    // A cut through a surrogate pair leaves no half character behind (the word before it goes too: it is the last one).
+    expect(providerWords(`too low ${' '.repeat(1991)}\u{1F600}`)).toBe('too')
     expect(providerWords('nonce too low')).toBe('nonce too low')
   })
 
