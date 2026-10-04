@@ -397,9 +397,13 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const r = await handleInner(msg, seen)
     // Name the call behind an invalid-params refusal: the engine only sees the message.
     const e = (r as any)?.error
-    if (e && (e.code === -32602 || /invalid param/i.test(String(e.message)))) console.log(`[rpc] ${msg.method} refused (${e.code}): ${redactSecrets(JSON.stringify(msg.params ?? [])).slice(0, 300)}`)
-    // Why a provider refused a transaction: the sender only sees a generic message (viem folds -32000 into "Missing or invalid parameters").
-    if (e && msg.method === 'eth_sendRawTransaction') console.log(`[rpc] eth_sendRawTransaction refused (${e.code}): ${redactSecrets(String(e.message)).slice(0, 200)}`)
+    if (e && msg.method === 'eth_sendRawTransaction') {
+      // Why a provider refused a transaction: the sender only sees a generic message (viem folds -32000 into
+      // "Missing or invalid parameters"). The provider's words, never the transaction; a log line never costs the answer.
+      try {
+        console.log(`[rpc] eth_sendRawTransaction refused (${typeof e.code === 'number' ? e.code : '?'}): ${redactSecrets(e.message).slice(0, 200)}`)
+      } catch {}
+    } else if (e && (e.code === -32602 || /invalid param/i.test(String(e.message)))) console.log(`[rpc] ${msg.method} refused (${e.code}): ${redactSecrets(JSON.stringify(msg.params ?? [])).slice(0, 300)}`)
     return r
   }
   async function handleInner(msg: Req, seen: Witnessed): Promise<unknown> {

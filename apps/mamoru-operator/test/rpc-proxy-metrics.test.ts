@@ -434,26 +434,53 @@ describe('requests by component', () => {
 })
 
 describe('a refused transaction says why', () => {
-  test('the provider message of a refused eth_sendRawTransaction is logged, redacted, and the error returned unchanged', async () => {
-    const upstream = fakeUpstream((body) => ({ json: { jsonrpc: '2.0', id: body.id, error: { code: -32000, message: 'transaction gas limit too high (cap: 16777216, tx: 16777217) see https://secret-key.example/v2/abcdefabcdefabcdefabcdef' } } }))
+  const RAW = '0x02f8aabbccddeeff00112233445566778899'
+  /** Sends through a proxy whose upstream answers `answer`; returns the proxy's answers and what it logged. */
+  async function send(answer: (body: any) => any, calls: { method: string; params: unknown[] }[]) {
+    const upstream = fakeUpstream((body) => ({ json: { jsonrpc: '2.0', id: body.id, ...answer(body) } }))
     const proxy = startRpcProxy(upstream.url, {})
     const lines: string[] = []
     const log = console.log
     console.log = (...a: unknown[]) => void lines.push(a.join(' '))
-    let r: { error?: { code: number; message: string } }
+    const answers: { result?: unknown; error?: { code: unknown; message: unknown } }[] = []
     try {
-      r = (await (await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_sendRawTransaction', params: ['0x02f8'] }) })).json()) as typeof r
-      await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'eth_call', params: [] }) })
+      for (const c of calls) answers.push((await (await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, ...c }) })).json()) as (typeof answers)[number])
     } finally {
       console.log = log
       proxy.stop()
       upstream.stop()
     }
-    expect(r.error?.code).toBe(-32000)
-    const said = lines.filter((l) => l.startsWith('[rpc] eth_sendRawTransaction refused'))
+    return { answers, said: lines.filter((l) => l.includes('refused')) }
+  }
+
+  test('the provider message is logged once, its URL redacted, the transaction never; the error comes back as it was', async () => {
+    const message = 'transaction gas limit too high (cap: 16777216, tx: 16777217) see https://secret-key.example/v2/abcdefabcdefabcdefabcdef'
+    const { answers, said } = await send(() => ({ error: { code: -32000, message } }), [{ method: 'eth_sendRawTransaction', params: [RAW] }, { method: 'eth_call', params: [] }])
+    expect(answers[0]!.error).toEqual({ code: -32000, message })
     expect(said).toHaveLength(1)
-    expect(said[0]).toContain('(-32000): transaction gas limit too high')
+    expect(said[0]).toStartWith('[rpc] eth_sendRawTransaction refused (-32000): transaction gas limit too high')
     expect(said[0]).not.toContain('abcdefabcdef')
-    expect(said[0]).not.toContain('0x02f8')
+    // The params (the signed transaction) are not part of the line.
+    expect(said[0]).not.toContain(RAW.slice(2, 20))
+  })
+
+  test('an invalid-params refusal of a send is one line, without the transaction', async () => {
+    const { said } = await send(() => ({ error: { code: -32602, message: 'invalid params: rlp' } }), [{ method: 'eth_sendRawTransaction', params: [RAW] }])
+    expect(said).toHaveLength(1)
+    expect(said[0]).toContain('(-32602): invalid params: rlp')
+    expect(said[0]).not.toContain(RAW.slice(2, 20))
+  })
+
+  test('an accepted transaction logs nothing', async () => {
+    const { answers, said } = await send(() => ({ result: '0xhash' }), [{ method: 'eth_sendRawTransaction', params: [RAW] }])
+    expect(answers[0]!.result).toBe('0xhash')
+    expect(said).toHaveLength(0)
+  })
+
+  test('an error with no usable message or code still comes back', async () => {
+    const { answers, said } = await send(() => ({ error: { code: 'x', message: { nested: true } } }), [{ method: 'eth_sendRawTransaction', params: [RAW] }])
+    expect(answers[0]!.error).toBeDefined()
+    expect(said).toHaveLength(1)
+    expect(said[0]).toContain('refused (?)')
   })
 })
