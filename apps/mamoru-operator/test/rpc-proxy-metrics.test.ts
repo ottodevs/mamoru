@@ -270,6 +270,54 @@ describe('decision reads fall back only to trusted providers', () => {
     expect(w.hits.some((h) => h.host === 'base-rpc.publicnode.com')).toBe(false)
   })
 
+  test('a block the upstream does not have yet is asked again of trusted providers only', async () => {
+    let nulls = 0
+    const hits: string[] = []
+    const proxy = startRpcProxy(KEYED, {
+      fallbacks: [PUBLIC],
+      trusted: [TRUSTED],
+      fetch: async (url, init) => {
+        const body = JSON.parse(String(init.body))
+        hits.push(new URL(url).hostname)
+        // The block is not there on the first three answers, then it is.
+        const result = ++nulls <= 3 ? null : { number: '0x10', hash: `0x${'cd'.repeat(32)}` }
+        return Response.json({ jsonrpc: '2.0', id: body.id, result })
+      },
+    })
+    let r: { result?: { number: string } | null }
+    try {
+      r = (await (await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getBlockByNumber', params: ['0x10', false] }) })).json()) as typeof r
+    } finally {
+      proxy.stop()
+    }
+    expect(r.result?.number).toBe('0x10')
+    expect(hits.length).toBe(4)
+    expect(hits.includes('base-rpc.publicnode.com')).toBe(false)
+  })
+
+  test('a log range the trusted provider takes in a few requests is served by it, not by a public node', async () => {
+    const calls: { host: string; method: string }[] = []
+    const proxy = startRpcProxy(KEYED, {
+      fallbacks: [PUBLIC],
+      trusted: [TRUSTED],
+      logRanges: { 'quiknode.pro': 10_000, 'publicnode.com': 2_000 },
+      fetch: async (url, init) => {
+        const body = JSON.parse(String(init.body))
+        calls.push({ host: new URL(url).hostname, method: body.method })
+        if (body.method === 'eth_blockNumber') return Response.json({ jsonrpc: '2.0', id: body.id, result: '0x2000' })
+        if (body.method === 'eth_getBlockByNumber') return Response.json({ jsonrpc: '2.0', id: body.id, result: { number: body.params[0], hash: `0x${'ab'.repeat(32)}` } })
+        return Response.json({ jsonrpc: '2.0', id: body.id, result: [] })
+      },
+    })
+    try {
+      const r = (await (await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ address: '0x01', fromBlock: '0x1000', toBlock: '0x1095' }] }) })).json()) as { result?: unknown[] }
+      expect(r.result).toEqual([])
+    } finally {
+      proxy.stop()
+    }
+    expect(calls.filter((c) => c.method === 'eth_getLogs').map((c) => c.host)).toEqual(['abc.base-mainnet.quiknode.pro'])
+  })
+
   test('logs of one block by hash come from a trusted provider only', async () => {
     const w = world(new Set(['base-mainnet.g.alchemy.com']))
     let r: { result?: string; error?: { code: number } }

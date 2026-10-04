@@ -29,6 +29,9 @@ export function trustedFromEnv(env: Env = process.env): string[] {
   return (env.MAMORU_RPC_TRUSTED ?? '').split(',').map((u) => u.trim()).filter(Boolean)
 }
 
+/** A trusted provider serves a log range ahead of every public one when it takes it in at most this many requests. */
+const TRUSTED_LOG_MAX_REQUESTS = 4n
+
 /** Calls whose answer decides nothing: a signed transaction is the same bytes whoever relays it. Any provider may take them. */
 const ANY_PROVIDER = new Set(['eth_sendRawTransaction'])
 
@@ -316,10 +319,15 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const from = await toNum(filter.fromBlock ?? 'latest')
     const to = await toNum(filter.toBlock ?? 'latest')
     if (from > to) return []
-    // Fewest requests first; the configured order breaks ties and is the fallback order. Two passes, as for every other call.
+    // A trusted provider that serves the range in a few requests goes first. Then the fewest requests, the
+    // configured order breaking ties: a public provider (witnessed) serves logs only after those, or when the
+    // trusted ones would need many small requests (Alchemy free: 10 blocks each). Two passes, as for every other call.
     const span = to - from + 1n
     const requests = (p: LogProvider) => (Number.isFinite(p.logRange) ? (span + BigInt(p.logRange) - 1n) / BigInt(p.logRange) : 1n)
-    const order = logProviders.map((p, i) => ({ p, i, n: requests(p) })).sort((a, b) => (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
+    const tier = (p: LogProvider, n: bigint) => (trusted.includes(p.url) && n <= TRUSTED_LOG_MAX_REQUESTS ? 0 : 1)
+    const order = logProviders
+      .map((p, i) => { const n = requests(p); return { p, i, n, t: tier(p, n) } })
+      .sort((a, b) => a.t - b.t || (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
     let last: any = null
     // What the caller is told when nothing is accepted: a range that was read but not witnessed says more than a provider being down.
     let unwitnessed: any = null
