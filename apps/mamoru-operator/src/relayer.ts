@@ -49,8 +49,12 @@ export class Relayer {
     }
   }
 
-  /** Sends and waits for the receipt. Gas is estimated with a 30% margin unless given. */
-  send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint }, onSent?: (hash: Hex) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
+  /**
+   * Sends and waits for the receipt. Gas is estimated with a 30% margin unless given. `onSending` runs once the reads
+   * are done, right before the signed transaction goes to the provider: from there on a failure may have broadcast it.
+   * `onSent` runs with the hash once the provider accepts it.
+   */
+  send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: () => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     return this.lock.run(async () => {
       const wallet = createWalletClient({ account: this.account, chain: this.chain, transport: http(this.rpcUrl, { timeout: 60_000 }) })
       // Base rejects a tx over 2^24 gas (EIP-7825): the 30% margin must not push a fitting estimate over the cap.
@@ -62,6 +66,7 @@ export class Relayer {
       const counted = await this.client.getTransactionCount({ address: this.account.address, blockTag: 'pending' })
       const last = this.lastSent
       const nonce = last && Date.now() - last.at < LAST_SENT_MS && counted <= last.nonce ? last.nonce + 1 : counted
+      onSending?.()
       const hash = await wallet.sendTransaction({ to: tx.to, data: tx.data, value: tx.value ?? 0n, gas, nonce })
       this.lastSent = { nonce, at: Date.now() }
       onSent?.(hash)
