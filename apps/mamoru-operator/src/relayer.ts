@@ -66,8 +66,21 @@ export class Relayer {
       const counted = await this.client.getTransactionCount({ address: this.account.address, blockTag: 'pending' })
       const last = this.lastSent
       const nonce = last && Date.now() - last.at < LAST_SENT_MS && counted <= last.nonce ? last.nonce + 1 : counted
+      // Fees are read and the transaction signed here, so that after onSending the only request left is the send itself.
+      const fees = await this.client.estimateFeesPerGas()
+      const serializedTransaction = await this.account.signTransaction({
+        chainId: this.chain.id,
+        type: 'eip1559',
+        to: tx.to,
+        data: tx.data,
+        value: tx.value ?? 0n,
+        gas,
+        nonce,
+        maxFeePerGas: fees.maxFeePerGas,
+        maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+      })
       onSending?.()
-      const hash = await wallet.sendTransaction({ to: tx.to, data: tx.data, value: tx.value ?? 0n, gas, nonce })
+      const hash = await wallet.sendRawTransaction({ serializedTransaction })
       this.lastSent = { nonce, at: Date.now() }
       onSent?.(hash)
       try {
