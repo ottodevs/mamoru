@@ -33,6 +33,8 @@ export type ArmedActivation = {
   tries?: number
   /** Not before this time (ms): the wait after a failed attempt grows with the tries. */
   retryAt?: number
+  /** A failed attempt got as far as sending the execTransaction: it may have landed although the reply said no. */
+  execSent?: boolean
 }
 
 export type AccountState = {

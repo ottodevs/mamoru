@@ -1067,7 +1067,7 @@ export class Operator {
     const current = acc.ops.find((o) => o.opId === op.opId)
     if (current?.txHash) return this.failOwner(acc, op, 'OWNER_TX_ERROR')
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(tries ? { tries, retryAt: retryAt(tries) } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(tries ? { tries, retryAt: retryAt(tries) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
     this.execTried.delete(opKey(acc, op))
     console.log(`[armed] ${acc.accountKey} ${op.opId} back to armed: ${tries ? 'the provider refused the transaction' : 'the relayer could not pay for it'}`)
@@ -1142,13 +1142,13 @@ export class Operator {
   }
 
   /**
-   * The Safe nonce an armed activation was signed for is spent. Never tried: another owner transaction took it, the
-   * activation is dropped. Tried before: that attempt may have landed after all (its reply was lost), so the op fails
+   * The Safe nonce an armed activation was signed for is spent. Its execTransaction never sent: another owner
+   * transaction took it, the activation is dropped. Sent before: that attempt may have landed after all, so the op fails
    * as an unknown receipt and reconcileOwner reads the chain, activating the account if it did.
    */
   private nonceMoved(acc: AccountState, a: ArmedActivation, nonce: bigint): void {
     console.log(`[armed] ${acc.accountKey} Safe nonce ${nonce} != armed ${a.tx.nonce}`)
-    if ((a.tries ?? 0) === 0) return this.disarm(acc, 'ARMED_NONCE_MOVED')
+    if (!a.execSent) return this.disarm(acc, 'ARMED_NONCE_MOVED')
     const op = acc.ops.find((o) => o.opId === a.opId)
     acc.armed = undefined
     if (op) this.failOwner(acc, op, RECEIPT_UNKNOWN)
@@ -1160,9 +1160,9 @@ export class Operator {
     if (!a || acc.active) return this.disarm(acc, 'ALREADY_ACTIVE')
     // A failed attempt is not tried again at once: the wait grows with the tries.
     if (a.retryAt !== undefined && Date.now() < a.retryAt) return
-    // An op already tried once reads its Safe nonce before anything can drop it (budget, cap) or hold it (relayer
-    // short): an attempt that landed after all must reach reconciliation.
-    const tried = (a.tries ?? 0) > 0
+    // An op whose execTransaction send was started once reads its Safe nonce before anything can drop it (budget,
+    // cap) or hold it (relayer short): an attempt that landed after all must reach reconciliation.
+    const tried = a.execSent === true
     const live = liveAccountFromContext(acc.ctx)
     if (tried) {
       const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
@@ -1193,7 +1193,7 @@ export class Operator {
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
     const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants }
     const op = acc.ops.find((o) => o.opId === a.opId)!
-    if ((a.tries ?? 0) > 0) this.retried.add(opKey(acc, op))
+    if (a.execSent) this.retried.add(opKey(acc, op))
     try {
       await this.execute(acc, live, p, a.signature, op)
     } catch (e) {
@@ -1210,7 +1210,7 @@ export class Operator {
         return
       }
       if (tries < ARM_MAX_TRIES && !acc.active) {
-        acc.armed = { ...a, tries, retryAt: tries > (a.tries ?? 0) ? retryAt(tries) : undefined }
+        acc.armed = { ...a, tries, retryAt: tries > (a.tries ?? 0) ? retryAt(tries) : undefined, execSent: a.execSent || this.execTried.has(opKey(acc, op)) || undefined }
         this.execTried.delete(opKey(acc, op))
         this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
       } else if (!acc.active) this.failOwner(acc, op, 'OWNER_TX_ERROR')
