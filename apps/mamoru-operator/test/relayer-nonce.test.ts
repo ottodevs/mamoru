@@ -4,12 +4,15 @@ import { Relayer } from '../src/relayer.ts'
 
 // A JSON-RPC stub that takes any raw transaction and remembers the nonce it carried.
 const nonces: number[] = []
+/** Every method the stub was asked, in order. */
+const calls: string[] = []
 const server = Bun.serve({
   port: 0,
   hostname: '127.0.0.1',
   fetch: async (req) => {
     type Call = { id: number; method: string; params: unknown[] }
     const one = (m: Call) => {
+      calls.push(m.method)
       const result =
         m.method === 'eth_chainId'
           ? '0x2105'
@@ -29,9 +32,10 @@ const server = Bun.serve({
 afterAll(() => server.stop(true))
 
 /** A provider whose pending count is whatever `count` says: a lagging node repeats an old one. */
-function relayer(count: () => number) {
+function relayer(count: () => number, order?: string[]) {
   const client = {
     estimateGas: async () => 21_000n,
+    estimateFeesPerGas: async () => (order?.push('fees'), { maxFeePerGas: 6_000_000n, maxPriorityFeePerGas: 1_000_000n }),
     getTransactionCount: async () => count(),
     waitForTransactionReceipt: async ({ hash }: { hash: Hex }) => ({ transactionHash: hash, status: 'success', blockNumber: 1n, logs: [] }),
   } as unknown as PublicClient
@@ -51,9 +55,11 @@ describe('the relayer does not reuse the nonce of a transaction a provider just 
   test('onSending runs after the reads and before the provider gets the transaction', async () => {
     nonces.length = 0
     const order: string[] = []
-    const r = relayer(() => (order.push('count'), 3))
-    await r.send({ to: TO, value: 1n }, () => order.push('sent'), () => order.push(`sending:${nonces.length}`))
-    expect(order).toEqual(['count', 'sending:0', 'sent'])
+    const r = relayer(() => (order.push('count'), 3), order)
+    await r.send({ to: TO, value: 1n }, () => order.push('sent'), () => (calls.push('mark'), order.push(`sending:${nonces.length}`)))
+    expect(order).toEqual(['count', 'fees', 'sending:0', 'sent'])
+    // After onSending the provider was asked for one thing only: to take the signed transaction.
+    expect(calls.slice(calls.lastIndexOf('mark') + 1)).toEqual(['eth_sendRawTransaction'])
   })
 
   test('a count ahead of what this process mined is taken as is', async () => {
