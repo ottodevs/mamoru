@@ -297,6 +297,15 @@ export class Operator {
     return { wei: this.relayerBalanceCache.value.toString(), cachedAgeMs: now - this.relayerBalanceCache.at }
   }
 
+  /** Whether a transaction of the relayer is in a node's pool and not yet mined. */
+  private async relayerHasPending(): Promise<boolean> {
+    const [pending, latest] = await Promise.all([
+      this.client.getTransactionCount({ address: this.relayer.address, blockTag: 'pending' }),
+      this.client.getTransactionCount({ address: this.relayer.address, blockTag: 'latest' }),
+    ])
+    return pending > latest
+  }
+
   /**
    * Whether the relayer can pay one activation now: the Safe top-up plus the deploy and execTransaction gas. When it
    * cannot, the owner's signed activation waits armed instead of failing; a relayer short of ETH is ours to fix.
@@ -1191,6 +1200,8 @@ export class Operator {
    * as an unknown receipt and reconcileOwner reads the chain, activating the account if it did.
    */
   private nonceMoved(acc: AccountState, a: ArmedActivation, nonce: bigint): void {
+    // The owner approved again while the nonce was being read: that approval was signed for the nonce there is now.
+    if (acc.armed?.opId !== a.opId) return
     console.log(`[armed] ${acc.accountKey} Safe nonce ${nonce} != armed ${a.tx.nonce}`)
     const op = acc.ops.find((o) => o.opId === a.opId)
     if (!a.execSent && !op?.txHash) return this.disarm(acc, 'ARMED_NONCE_MOVED')
@@ -1233,6 +1244,9 @@ export class Operator {
     // Too little to deploy a Safe for: stay armed and wait for more (funding reports deployMinUsdc).
     if (!deployed && usdc < MIN_DEPLOY_USDC) return
     if (tried && !(await this.relayerCanActivate(acc))) return this.park(acc, ARM_IDLE_MS)
+    // A copy handed to a provider earlier may still be pending: while the relayer has a transaction not yet mined,
+    // nothing is sent again. Mined, it shows in the Safe nonce above; dropped, the pending count falls back.
+    if (tried && (await this.relayerHasPending())) return this.park(acc, ARM_RETRY_MS)
     // The approval stays in the state file through the attempt: a restart in the middle must not lose it. It is
     // cleared when the account starts, or when the attempt ends in a failure that is final.
     this.patchOp(acc, a.opId, { code: undefined })
@@ -1414,8 +1428,9 @@ export class Operator {
     if (p.kind === 'activate') {
       acc.trusted = true
       acc.active = true
-      // The approval ran: it is spent.
-      acc.armed = undefined
+      // The approval ran: it is spent. One armed meanwhile for the same Safe nonce can no longer run.
+      if (acc.armed?.opId === p.prepareId.replace(/^armed-/, '')) acc.armed = undefined
+      else this.disarm(acc, 'ALREADY_ACTIVE')
       acc.grants = p.grants ?? []
       acc.policyId = p.grants?.[0]?.grant.policyId ?? this.cfg.policy.policyId
       acc.managedTokenIds = []
