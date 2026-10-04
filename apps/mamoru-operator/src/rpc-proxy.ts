@@ -175,6 +175,8 @@ const PROVIDER_WORDS_READ = 2000
 export function providerWords(message: unknown): string {
   if (typeof message !== 'string') return '(no text)'
   const words = message.slice(0, PROVIDER_WORDS_READ).replace(UNPRINTABLE_RE, ' ').split(' ').filter(Boolean)
+  // A message cut short may end in half a word, with the part that gave it away as an address left behind.
+  if (message.length > PROVIDER_WORDS_READ) words.pop()
   return redactSecrets(words.map((w) => (ADDRESS_PART_RE.test(w) && !DECIMAL_RE.test(w) ? '[redacted]' : w)).join(' '))
 }
 
