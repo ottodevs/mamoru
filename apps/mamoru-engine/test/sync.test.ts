@@ -266,6 +266,83 @@ describe('account state sync', () => {
     expect(rows).toEqual([{ account_key: 'acct-a', deployed: 1 }, { account_key: 'acct-b', deployed: 1 }])
   })
 
+  test('a projection whose block was replaced since does not vouch for the code: it is read, and the account is no longer deployed', async () => {
+    seedAccount('acct-a', A)
+    chain.code.set(A.toLowerCase(), '0x60806040')
+    await run()
+    const seenAt = chain.safe
+    expect(db.sqlite.query('SELECT deployed, block FROM proj_account_state').all()).toEqual([{ deployed: 1, block: seenAt }])
+    // A reorg between runs: the block of that projection now has another hash, and on this chain the Safe was never deployed.
+    chain.forkAt = seenAt
+    chain.code.delete(A.toLowerCase())
+    chain.safe += 5
+    chain.latest += 5
+    chain.calls.length = 0
+    const out = await run()
+    expect(out.rpc).toBe('ok')
+    expect(db.sqlite.query('SELECT deployed, block, block_hash FROM proj_account_state').all()).toEqual([{ deployed: 0, block: chain.safe, block_hash: chain.hashOf(chain.safe) }])
+  })
+
+  test('a projection whose block is still on the chain vouches for the code, and asking costs no request', async () => {
+    seedAccount('acct-a', A)
+    seedAccount('acct-b', B)
+    chain.code.set(A.toLowerCase(), '0x60806040')
+    chain.code.set(B.toLowerCase(), '0x60806040')
+    await run()
+    // What a run with no accounts asks (the registry's own code checks, the head, the anchor check).
+    chain.calls.length = 0
+    await syncOnce({ client: chain.client(), db: sqliteD1(), chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: () => {} })
+    const bare = { code: count('eth_getCode'), blocks: count('eth_getBlockByNumber'), call: count('eth_call') }
+    for (const step of [0, 5]) {
+      // The same safe block again, then a later one: the hash of the earlier block rides in the accounts' own request.
+      chain.safe += step
+      chain.latest += step
+      chain.calls.length = 0
+      await run()
+      expect(count('eth_getCode') - bare.code).toBe(0)
+      expect(count('eth_getBlockByNumber') - bare.blocks).toBe(0)
+      expect(count('eth_call') - bare.call).toBe(1)
+    }
+  })
+
+  test('a projection more than 256 blocks back vouches for nothing: the code is read once, and the next run is steady again', async () => {
+    seedAccount('acct-a', A)
+    chain.code.set(A.toLowerCase(), '0x60806040')
+    await run()
+    chain.calls.length = 0
+    await syncOnce({ client: chain.client(), db: sqliteD1(), chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: () => {} })
+    const bare = count('eth_getCode')
+    chain.safe += 300
+    chain.latest += 300
+    chain.calls.length = 0
+    await run()
+    expect(count('eth_getCode') - bare).toBe(1)
+    chain.safe += 5
+    chain.latest += 5
+    chain.calls.length = 0
+    await run()
+    expect(count('eth_getCode') - bare).toBe(0)
+    expect(db.sqlite.query('SELECT deployed FROM proj_account_state').all()).toEqual([{ deployed: 1 }])
+  })
+
+  test('with earlier projections the first request carries 24 accounts and the hash; 60 accounts still cost three requests', async () => {
+    for (let i = 0; i < 60; i++) {
+      seedAccount(`acct-${String(i).padStart(2, '0')}`, addr(i))
+      chain.code.set(addr(i).toLowerCase(), '0x60806040')
+    }
+    await run()
+    chain.calls.length = 0
+    await syncOnce({ client: chain.client(), db: sqliteD1(), chainId: 8453, now: () => NOW, registry, windowBlocks: W, log: () => {} })
+    const bare = { code: count('eth_getCode'), call: count('eth_call') }
+    chain.safe += 5
+    chain.latest += 5
+    chain.calls.length = 0
+    await run()
+    expect(count('eth_call') - bare.call).toBe(3)
+    expect(count('eth_getCode') - bare.code).toBe(0)
+    expect(db.sqlite.query('SELECT COUNT(*) AS n FROM proj_account_state WHERE deployed = 1 AND block = ?').get(chain.safe)).toEqual({ n: 60 })
+  })
+
   test('a projection from a later block than this run does not vouch for the code: it is read', async () => {
     seedAccount('acct-a', A)
     chain.code.set(A.toLowerCase(), '0x60806040')
