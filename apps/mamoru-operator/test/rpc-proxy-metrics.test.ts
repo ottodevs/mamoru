@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { componentOf, RpcMetrics } from '../src/metrics.ts'
-import { labelProviders, startRpcProxy } from '../src/rpc-proxy.ts'
+import { labelProviders, providerWords, startRpcProxy } from '../src/rpc-proxy.ts'
 
 /** 40 lowercase-hex chars, the shape of a QuickNode endpoint token (and most other provider API keys). */
 const QUICKNODE_TOKEN = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2'
@@ -459,7 +459,7 @@ describe('a refused transaction says why', () => {
     const { answers, said } = await send(() => ({ error: { code: -32000, message } }), [{ method: 'eth_sendRawTransaction', params: [RAW] }, { method: 'eth_call', params: [] }])
     expect(answers[0]!.error).toEqual({ code: -32000, message })
     expect(said).toHaveLength(1)
-    expect(said[0]).toBe('[rpc] eth_sendRawTransaction refused (-32000): transaction gas limit too high (cap: 16777216, tx: 16777217) see [url]')
+    expect(said[0]).toBe('[rpc] eth_sendRawTransaction refused (-32000): transaction gas limit too high (cap: 16777216, tx: 16777217) see [redacted]')
     // The params (the signed transaction) are not part of the line.
     expect(said[0]).not.toContain('c0ffee')
   })
@@ -481,14 +481,21 @@ describe('a refused transaction says why', () => {
     const { answers, said } = await send(() => ({ error: { code: 'x', message: { nested: true } } }), [{ method: 'eth_sendRawTransaction', params: [RAW] }])
     expect(answers[0]!.error).toBeDefined()
     expect(said).toHaveLength(1)
-    expect(said[0]).toContain('refused (?)')
+    expect(said[0]).toBe('[rpc] eth_sendRawTransaction refused (?): (no text)')
+  })
+
+  test('a message that is not text is not serialised: nothing inside it is logged', async () => {
+    const message = { token: 'short-key', password: 'short-pass', url: 'aaaaaaaaaaaaaaaaaaaaaaaa://short-key.rpc.example', pad: 'x'.repeat(100_000) }
+    const { answers, said } = await send(() => ({ error: { code: -32000, message } }), [{ method: 'eth_sendRawTransaction', params: [RAW] }])
+    expect(answers[0]!.error).toEqual({ code: -32000, message })
+    expect(said).toEqual(['[rpc] eth_sendRawTransaction refused (-32000): (no text)'])
   })
 
   test('a key in the hostname of a URL the provider echoes is not logged, whatever the scheme', async () => {
     const message = 'upstream https://short-key.rpc.example/v2/abc and wss://k3y.rpc.example said no'
     const { answers, said } = await send(() => ({ error: { code: -32000, message } }), [{ method: 'eth_sendRawTransaction', params: [RAW] }])
     expect(answers[0]!.error).toEqual({ code: -32000, message })
-    expect(said[0]).toBe('[rpc] eth_sendRawTransaction refused (-32000): upstream [url] and [url] said no')
+    expect(said[0]).toBe('[rpc] eth_sendRawTransaction refused (-32000): upstream [redacted] and [redacted] said no')
   })
 
   test('provider text cannot write a second line or a terminal escape', async () => {
@@ -522,6 +529,44 @@ describe('a refused transaction says why', () => {
       console.log = log
       proxy.stop()
       upstream.stop()
+    }
+  })
+})
+
+describe('providerWords', () => {
+  test('an endpoint address is dropped however it is split', () => {
+    for (const split of [
+      '//alice:short-pass@short-key.rpc.example',
+      'https://\nshort-key.rpc.example/v2/abc',
+      'https://alice:\nshort-pass@short-key.rpc.example',
+      'https:// short-key.rpc.example /v2/abc',
+      'short-key.rpc.example:8545',
+      '10.0.0.7:8545/v2/abc',
+      'wss://short-key.rpc.example',
+      'https\u200b://short-key\u2060.rpc.example\\v2\\abc',
+    ]) {
+      const out = providerWords(`refused by ${split} today`)
+      expect(out).not.toMatch(/short-key|short-pass|rpc\.example|abc|10\.0/)
+      expect(out.startsWith('refused by ')).toBe(true)
+      expect(out.endsWith(' today')).toBe(true)
+    }
+  })
+
+  test('what a node says when it refuses a transaction comes through as it was', () => {
+    for (const said of [
+      'insufficient funds for gas * price + value: have 0 want 7000000000000',
+      'nonce too low',
+      'replacement transaction underpriced',
+      'transaction gas limit too high (cap: 16777216, tx: 16777217)',
+      'max fee per gas less than block base fee: maxFeePerGas: 100, baseFee: 1.5',
+    ]) expect(providerWords(said)).toBe(said)
+  })
+
+  test('it never throws and never writes more than one short line', () => {
+    for (const m of [undefined, null, 7, {}, [], Symbol('x'), 'a.'.repeat(50_000), '\n'.repeat(5_000)]) {
+      const out = providerWords(m)
+      expect(out.length).toBeLessThanOrEqual(161)
+      expect(out).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/)
     }
   })
 })
