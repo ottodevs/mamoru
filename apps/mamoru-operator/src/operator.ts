@@ -335,10 +335,8 @@ export class Operator {
         this.failOwner(acc, op, RECEIPT_UNKNOWN)
       } else {
         if (op.state !== 'proposed' || op.code !== 'ARMED') this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
-        // Handed to a provider with no hash kept: it may be pending. Three minutes (90 Base blocks) to land before
-        // anything is sent again; the nonce read on each pass then finds it. What is left is a copy pending longer
-        // than that which no node reports: the second copy then fails at the Safe for its gas, and settleRetried
-        // still records the account from the first.
+        // Handed to a provider with no hash kept: it may be pending. The same full wait as after any handover (see
+        // retryAt) before anything is sent again; the nonce read on each pass then finds it.
         if (acc.armed!.execSent) acc.armed = { ...acc.armed!, retryAt: Math.max(acc.armed!.retryAt ?? 0, Date.now() + ARM_RETRY_MAX_MS) }
       }
     }
@@ -1104,7 +1102,7 @@ export class Operator {
     const current = acc.ops.find((o) => o.opId === op.opId)
     if (current?.txHash) return this.failOwner(acc, op, 'OWNER_TX_ERROR')
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(tries ? { tries, retryAt: retryAt(tries) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
     this.armHold.delete(acc.accountKey)
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
     this.execTried.delete(opKey(acc, op))
@@ -1277,7 +1275,8 @@ export class Operator {
       if (!current) return
       // Never dropped for failing: past ARM_MAX_TRIES it is parked and tried again every ARM_PARKED_MS, and says so.
       if (tries >= ARM_MAX_TRIES && tries > (a.tries ?? 0)) logErr('[alert]', `${acc.accountKey} ${op.opId} failed ${tries} times, parked: next try in ${ARM_PARKED_MS / 60_000} min`)
-      acc.armed = { ...a, tries, retryAt: tries > (a.tries ?? 0) ? retryAt(tries) : undefined, execSent: a.execSent || this.execTried.has(opKey(acc, op)) || undefined }
+      const handed = this.execTried.has(opKey(acc, op))
+      acc.armed = { ...a, tries, retryAt: tries > (a.tries ?? 0) || handed ? retryAt(tries, handed) : undefined, execSent: a.execSent || handed || undefined }
       this.execTried.delete(opKey(acc, op))
       this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
       return
@@ -1841,8 +1840,12 @@ function opKey(acc: AccountState, op: { opId: string }): string {
 }
 
 /** When an armed activation that failed `tries` times may be tried again. */
-function retryAt(tries: number): number {
+function retryAt(tries: number, execSent = false): number {
   if (tries >= ARM_MAX_TRIES) return Date.now() + ARM_PARKED_MS
+  // A copy handed to a provider may be pending whatever the answer was: it gets the full wait to land before another
+  // is sent (90 Base blocks). Left over: a copy pending longer than that which no node reports; the second then
+  // fails at the Safe for its gas, and settleRetried still records the account from the first.
+  if (execSent) return Date.now() + ARM_RETRY_MAX_MS
   return Date.now() + Math.min(ARM_RETRY_MAX_MS, ARM_RETRY_MS * 2 ** Math.max(0, tries - 1))
 }
 

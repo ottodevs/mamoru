@@ -1055,8 +1055,8 @@ describe('an activation waits for the relayer instead of failing', () => {
     expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'proposed', code: 'ARMED' })
     expect(acc.ownerFailures ?? []).toHaveLength(0)
     refuse = false
-    // Not at once: the first retry waits 30 s.
-    expect(acc.armed!.retryAt! - Date.now()).toBeGreaterThan(25_000)
+    // Not at once: the transaction was handed to the provider, so the retry waits the full three minutes.
+    expect(acc.armed!.retryAt! - Date.now()).toBeGreaterThan(170_000)
     await priv(w.op).fireArmed(acc, 20_000_000n)
     expect(acc.armed).toBeDefined()
     expect(w.sent.filter((t) => t.data && t.to.toLowerCase() === SAFE.toLowerCase())).toHaveLength(1)
