@@ -1133,6 +1133,13 @@ describe('an activation waits for the relayer instead of failing', () => {
     await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
     expect(acc.active).toBe(false)
     expect(acc.armed?.opId).toBe(op.opId)
+    // It never catches up (no provider serves those blocks): on the third pass the account starts from the floor of
+    // the search, a block before the execution, rather than staying inactive for good.
+    await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
+    expect(acc.active).toBe(false)
+    await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
+    expect(acc.active).toBe(true)
+    expect(BigInt(acc.depositsAfter)).toBeLessThan(100n)
   })
 
   test('a retry whose execTransaction fails on chain is left to reconciliation: the first copy may have executed', async () => {

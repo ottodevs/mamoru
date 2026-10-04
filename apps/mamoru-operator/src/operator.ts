@@ -72,6 +72,8 @@ const RECONCILE_EVERY_MS = 20_000
 const BLOCK_SECONDS = 2n
 /** Blocks added before the handover time when looking for the block an activation executed in (clock and block-time slack). */
 const ACTIVATION_SEARCH_MARGIN = 60n
+/** Passes the search for that block is tried before the account is started from the search floor. */
+const RECOVER_TRIES = 3
 const PREPARE_TTL_MS = 5 * 60_000
 /** On top of the policy reserve: the first userOp prefund leaves the Safe's balance into its EntryPoint deposit. */
 const TOP_UP_MARGIN_WEI = 200_000_000_000_000n
@@ -264,6 +266,8 @@ export class Operator {
   private readonly execTried = new Set<string>()
   /** Armed ops being sent again after a failed attempt: an earlier copy may have landed although its reply said no. */
   private readonly retried = new Set<string>()
+  /** Passes in a row in which the block of an activation found on chain could not be read, by account. */
+  private readonly recoverFails = new Map<string, number>()
   /** Until when (ms) the watcher leaves a parked armed account unread. */
   private readonly armHold = new Map<string, number>()
   /** Last time each account's activation was logged as waiting for relayer ETH. */
@@ -1221,18 +1225,33 @@ export class Operator {
         const head = await this.client.getBlockNumber()
         const since = a.sentAt ?? (Date.parse(op.updatedAt) || Date.now())
         const back = BigInt(Math.ceil(Math.max(0, Date.now() - since) / 1000)) / BLOCK_SECONDS + ACTIVATION_SEARCH_MARGIN
-        let lo = head > back ? head - back : 0n
-        let hi = head
-        // The head may come from a node behind the one that answered "enabled": the upper bound has to hold itself, or
-        // the search would settle on a block before the execution. Not yet: stay armed, the next pass asks again.
-        if (!(await enabledAt(hi))) throw new Error(`grant enabled at latest but not at head ${hi}: provider behind, retrying`)
-        if (await enabledAt(lo)) hi = lo
-        while (lo + 1n < hi) {
-          const mid = (lo + hi) / 2n
-          if (await enabledAt(mid)) hi = mid
-          else lo = mid
+        const floor = head > back ? head - back : 0n
+        let block: bigint
+        try {
+          let lo = floor
+          let hi = head
+          // The head may come from a node behind the one that answered "enabled": the upper bound has to hold itself,
+          // or the search would settle on a block before the execution. Not yet: stay armed, the next pass asks again.
+          if (!(await enabledAt(hi))) throw new Error(`grant enabled at latest but not at head ${hi}: provider behind`)
+          if (await enabledAt(lo)) hi = lo
+          while (lo + 1n < hi) {
+            const mid = (lo + hi) / 2n
+            if (await enabledAt(mid)) hi = mid
+            else lo = mid
+          }
+          block = hi
+          this.recoverFails.delete(acc.accountKey)
+        } catch (e) {
+          // No provider serves the state of those blocks (a long outage, no archive): after a few passes the account
+          // is started from the floor instead of never. The floor is before the execution, so no deposit is missed;
+          // what landed between the floor and the execution is read as a deposit, which is what it is to the engine.
+          const fails = (this.recoverFails.get(acc.accountKey) ?? 0) + 1
+          this.recoverFails.set(acc.accountKey, fails)
+          if (fails < RECOVER_TRIES) throw e
+          logErr('[alert]', `${acc.accountKey} ${a.opId} executed on chain; its block could not be read in ${fails} passes, starting from block ${floor}`)
+          this.recoverFails.delete(acc.accountKey)
+          block = floor
         }
-        const block = hi
         if (acc.armed?.opId !== a.opId) return
         console.log(`[armed] ${acc.accountKey} ${a.opId} executed on chain at block ${block} (its grants are enabled): account started`)
         this.afterOwner(acc, { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: 0, grants: a.grants }, { blockNumber: block } as TransactionReceipt)
