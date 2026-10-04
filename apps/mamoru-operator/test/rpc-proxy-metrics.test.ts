@@ -434,7 +434,8 @@ describe('requests by component', () => {
 })
 
 describe('a refused transaction says why', () => {
-  const RAW = '0x02f8aabbccddeeff00112233445566778899'
+  // Short on purpose: redactSecrets blanks long runs, which would hide the bytes even if they were logged.
+  const RAW = '0x02f8c0ffee'
   /** Sends through a proxy whose upstream answers `answer`; returns the proxy's answers and what it logged. */
   async function send(answer: (body: any) => any, calls: { method: string; params: unknown[] }[]) {
     const upstream = fakeUpstream((body) => ({ json: { jsonrpc: '2.0', id: body.id, ...answer(body) } }))
@@ -458,17 +459,16 @@ describe('a refused transaction says why', () => {
     const { answers, said } = await send(() => ({ error: { code: -32000, message } }), [{ method: 'eth_sendRawTransaction', params: [RAW] }, { method: 'eth_call', params: [] }])
     expect(answers[0]!.error).toEqual({ code: -32000, message })
     expect(said).toHaveLength(1)
-    expect(said[0]).toStartWith('[rpc] eth_sendRawTransaction refused (-32000): transaction gas limit too high')
-    expect(said[0]).not.toContain('abcdefabcdef')
+    expect(said[0]).toBe('[rpc] eth_sendRawTransaction refused (-32000): transaction gas limit too high (cap: 16777216, tx: 16777217) see https://secret-key.example')
     // The params (the signed transaction) are not part of the line.
-    expect(said[0]).not.toContain(RAW.slice(2, 20))
+    expect(said[0]).not.toContain('c0ffee')
   })
 
   test('an invalid-params refusal of a send is one line, without the transaction', async () => {
     const { said } = await send(() => ({ error: { code: -32602, message: 'invalid params: rlp' } }), [{ method: 'eth_sendRawTransaction', params: [RAW] }])
     expect(said).toHaveLength(1)
     expect(said[0]).toContain('(-32602): invalid params: rlp')
-    expect(said[0]).not.toContain(RAW.slice(2, 20))
+    expect(said[0]).not.toContain('c0ffee')
   })
 
   test('an accepted transaction logs nothing', async () => {
