@@ -53,7 +53,8 @@ export type ObserveInput = {
   nonceKey: bigint
   /** Deposits are the savings-asset transfers to the account after this block. */
   depositsAfter: bigint
-  sessions: SessionObs[]
+  /** The sessions as they are when the observation ends: a function is asked after `firstBatch` has applied what it read. */
+  sessions: SessionObs[] | (() => SessionObs[])
   allowedTokenIds: readonly bigint[]
   /**
    * First block of the managed positions' history. The principal owed is
@@ -74,6 +75,39 @@ export type ObserveInput = {
   multicall3?: Address | null
   /** Shared by the accounts of one operator: the pool state of a block is read once. */
   poolCache?: PoolStateCache
+  /**
+   * Reads of the caller that belong to this observation: added to the first batch, pinned to its block, at no
+   * extra request. The function it returns runs once the batch has answered, inside the block-hash bracket.
+   */
+  firstBatch?: (batch: Batch, blockNumber: bigint) => (() => Promise<void>) | void
+}
+
+/** How long the chain id a client answered is taken as still true: it is checked again after this, not on every observation. */
+const CHAIN_ID_TTL_MS = 600_000
+const chainIds = new WeakMap<PublicClient, { chainId: number; at: number }>()
+
+async function chainIdOf(client: PublicClient): Promise<number> {
+  const known = chainIds.get(client)
+  const now = Date.now()
+  if (known && now >= known.at && now - known.at < CHAIN_ID_TTL_MS) return known.chainId
+  const chainId = await client.getChainId()
+  chainIds.set(client, { chainId, at: now })
+  return chainId
+}
+
+/** Accounts each client has seen with code. A deployed Safe stays deployed, so its code is not read again; "not deployed" is never kept. */
+const deployed = new WeakMap<PublicClient, Set<string>>()
+
+/** Whether `account` has code at `blockNumber` (latest when absent); one eth_getCode until it is seen deployed, none after. */
+export async function isDeployed(client: PublicClient, account: Address, blockNumber?: bigint): Promise<boolean> {
+  let seen = deployed.get(client)
+  if (!seen) deployed.set(client, (seen = new Set()))
+  const key = account.toLowerCase()
+  if (seen.has(key)) return true
+  const code = await client.getCode(blockNumber === undefined ? { address: account } : { address: account, blockNumber })
+  const has = !!code && code !== '0x'
+  if (has) seen.add(key)
+  return has
 }
 
 const TOKENS = baseRegistry.entries.filter((e) => e.kind === 'token').map((e) => e.name)
@@ -113,7 +147,7 @@ export function poolStateCache(max = 8): PoolStateCache & { readonly size: numbe
  * go through Multicall3 in a fixed number of requests.
  */
 export async function observe(client: PublicClient, input: ObserveInput): Promise<Observation> {
-  const chainId = await client.getChainId().catch((e: Error) => {
+  const chainId = await chainIdOf(client).catch((e: Error) => {
     throw new ReasonError('OBS_RPC_UNAVAILABLE', e.message.split('\n')[0])
   })
   if (chainId !== input.chainId) throw new ReasonError('OBS_CHAIN_MISMATCH', `rpc answered ${chainId}, engine is ${input.chainId}`)
@@ -134,14 +168,16 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const shared = input.poolCache?.get(poolKey)
   const own = shared ? null : POOLS.map((p) => poolReads(first, client, p, blockNumber, input.twapWindowSeconds))
   const priceSlot0 = POOLS.includes(input.ethPricePool) ? null : first.add(contractRead(client, { address: address(input.ethPricePool), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }))
-  const round = Promise.all([client.getCode({ address: acct, blockNumber }), first.run()])
+  const afterFirst = input.firstBatch?.(first, blockNumber)
+  const round = Promise.all([isDeployed(client, acct, blockNumber), first.run()])
   const ownPools = own ? round.then(() => Promise.all(own.map((finish) => finish()))) : null
   if (ownPools) {
     // Published before it resolves, so accounts observing this block at the same time wait for it instead of reading again.
     input.poolCache?.set(poolKey, ownPools)
     ownPools.catch(() => input.poolCache?.delete(poolKey))
   }
-  const [code] = await round
+  const [accountDeployed] = await round
+  if (afterFirst) await afterFirst()
   // Settled here, inside the block-hash bracket: a read that failed in the batch is asked again on its own.
   const [nativeBalance, accountNonce, tokenBalances] = await Promise.all([native.need(), nonce.need(), Promise.all(balances.map((b) => b.need()))])
   const readAlone = async () => {
@@ -186,8 +222,8 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
     chainId,
     block: { number: blockNumber, hash: block.hash, timestamp: block.timestamp },
     safeBlock: { number: safe.number, hash: safe.hash },
-    account: { address: acct, deployed: !!code && code !== '0x', nonceKey: input.nonceKey, nonce: accountNonce },
-    sessions: input.sessions,
+    account: { address: acct, deployed: accountDeployed, nonceKey: input.nonceKey, nonce: accountNonce },
+    sessions: typeof input.sessions === 'function' ? input.sessions() : input.sessions,
     native: nativeBalance,
     balances: Object.fromEntries(TOKENS.map((t, i) => [t, tokenBalances[i]!])),
     positions,

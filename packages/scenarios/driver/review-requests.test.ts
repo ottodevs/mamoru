@@ -41,7 +41,7 @@ function engine(all: EngineSession[]): Engine {
 }
 
 describe('one live review', () => {
-  test('12 sessions and 3 positions: one request for the sessions, twelve for the observation', async () => {
+  test('12 sessions and 3 positions: no request for the sessions, they are read in the first batch of the observation', async () => {
     const all = sessions()
     expect(new Set(all.map((s) => s.permissionId)).size).toBe(12)
     const e = engine(all)
@@ -55,12 +55,12 @@ describe('one live review', () => {
     if (r.kind !== 'decided') throw new Error('unreachable')
     expect(r.op).toBeNull()
     expect(r.observation.positions.map((p) => p.pool)).toEqual(['pool:USDC/cbBTC/500', 'pool:WETH/USDC/3000', 'pool:USDC/USDT/100'])
-    expect(chain.byMethod()).toEqual({ eth_chainId: 1, eth_getBlockByNumber: 5, eth_getCode: 1, eth_call: 3, eth_getLogs: 3 })
-    // The session checks are the first request: every permission in one aggregate3.
+    expect(chain.byMethod()).toEqual({ eth_getBlockByNumber: 5, eth_call: 2, eth_getLogs: 3 })
+    // The session checks ride in the observation's first aggregate3, pinned to its block: every permission, once.
     const first = chain.requests.find((x) => x.method === 'eth_call')!
-    const inner = decodeFunctionData({ abi: multicall3Abi, data: first.params[0].data }).args[0] as readonly { target: Address; callData: Hex }[]
+    expect(first.params[1]).toBe('0x47e')
+    const inner = (decodeFunctionData({ abi: multicall3Abi, data: first.params[0].data }).args[0] as readonly { target: Address; callData: Hex }[]).filter((c) => c.target.toLowerCase() === address('SmartSession').toLowerCase())
     expect(inner.length).toBe(12)
-    expect(inner.every((c) => c.target.toLowerCase() === address('SmartSession').toLowerCase())).toBe(true)
     expect(inner.map((c) => decodeFunctionData({ abi: smartSessionAbi, data: c.callData }).args![0])).toEqual(all.map((s) => s.permissionId))
   })
 
@@ -77,7 +77,8 @@ describe('one live review', () => {
     chain.requests.length = 0
     await e.review()
     const first = chain.requests.find((x) => x.method === 'eth_call')!
-    expect((decodeFunctionData({ abi: multicall3Abi, data: first.params[0].data }).args[0] as unknown[]).length).toBe(11)
+    const asked = (decodeFunctionData({ abi: multicall3Abi, data: first.params[0].data }).args[0] as readonly { target: Address }[]).filter((c) => c.target.toLowerCase() === address('SmartSession').toLowerCase())
+    expect(asked.length).toBe(11)
   })
 
   test('a session read that fails does not revoke anything: the review throws as before', async () => {

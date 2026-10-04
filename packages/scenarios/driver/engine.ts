@@ -117,15 +117,19 @@ export class Engine {
   }
 
   /** Live: a session the owner removed on chain (SmartSession) is revoked in the ledger, so decide never proposes an op it cannot authorize. */
-  private async syncEnabled(): Promise<void> {
+  /**
+   * The sessions' on-chain state, read with the observation: one isPermissionEnabled per session in its first
+   * batch, at its block. A session the chain no longer has enabled is revoked in the ledger before the
+   * observation lists the sessions.
+   */
+  private readEnabled(batch: Batch, blockNumber: bigint): (() => Promise<void>) | void {
     if (this.cfg.mode !== 'live') return
     const sessions = this.sessions.filter((s) => !this.ledger.get(s.permissionId)?.revoked)
     if (sessions.length === 0) return
-    // Every session in one request.
-    const batch = new Batch(this.client, MULTICALL3)
-    const enabled = sessions.map((s) => batch.add(contractRead(this.client, { address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [s.permissionId, this.cfg.account] })))
-    await batch.run()
-    for (const [i, s] of sessions.entries()) if (!(await enabled[i]!.need())) this.ledger.revoke(s.permissionId)
+    const enabled = sessions.map((s) => batch.add(contractRead(this.client, { address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [s.permissionId, this.cfg.account], blockNumber })))
+    return async () => {
+      for (const [i, s] of sessions.entries()) if (!(await enabled[i]!.need())) this.ledger.revoke(s.permissionId)
+    }
   }
 
   addSession(s: EngineSession): void {
@@ -155,7 +159,8 @@ export class Engine {
       account: this.cfg.account,
       nonceKey: this.nonceKey,
       depositsAfter: this.depositsAfter,
-      sessions: this.sessionObs(),
+      sessions: () => this.sessionObs(),
+      firstBatch: (batch, blockNumber) => this.readEnabled(batch, blockNumber),
       allowedTokenIds: this.allowedTokenIds,
       historyFromBlock: this.historyFromBlock,
       historyCursor: this.historyCursor,
@@ -175,7 +180,6 @@ export class Engine {
     await this.resumeIncluded()
     let obs: Observation
     try {
-      await this.syncEnabled()
       obs = await this.observe()
     } catch (e) {
       if (e instanceof ReasonError) return { kind: 'observation-failed', code: e.code, detail: e.detail }

@@ -169,7 +169,7 @@ type Prepared = {
   meta?: { amountUsdc: string; asset?: string; to: Hex }
 }
 
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -1462,10 +1462,14 @@ export class Operator {
         if (runner.stopped || this.reviewBraked(runner)) return
         try {
           // The provider may still serve a block before the activation that enabled the grants: wait for it.
-          const head = await this.client.getBlockNumber()
-          if (head <= BigInt(acc.historyFromBlock)) {
-            console.log(`[engine ${acc.accountKey}] rpc head ${head} not past activation block ${acc.historyFromBlock}, waiting`)
-            return
+          if (!runner.pastActivation) {
+            const head = await this.client.getBlockNumber()
+            if (head <= BigInt(acc.historyFromBlock)) {
+              console.log(`[engine ${acc.accountKey}] rpc head ${head} not past activation block ${acc.historyFromBlock}, waiting`)
+              return
+            }
+            // The head only moves forward past it: not asked again in this run.
+            runner.pastActivation = true
           }
           // An owner tx prepared on the current positions is waiting for its passkey: an engine reduce or
           // re-range now would change the liquidity it withdraws (GS013). Hold until it runs or expires.

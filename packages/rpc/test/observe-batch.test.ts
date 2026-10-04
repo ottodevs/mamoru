@@ -62,7 +62,7 @@ function aggregates(c: FakeChain): { target: Address; callData: Hex }[][] {
 }
 
 describe('observe through Multicall3', () => {
-  test('one review of an account with 3 positions: 12 requests, 2 of them eth_call', async () => {
+  test('one steady review of an account with 3 positions: 10 requests, 2 of them eth_call', async () => {
     const c = chain()
     const cursor = historyCursor()
     // First review: the cursor reads the history from the activation block.
@@ -73,8 +73,9 @@ describe('observe through Multicall3', () => {
     const obs = await observe(c.client, input({ historyCursor: cursor, depositsAfter: 900n }))
     expect(obs.positions.map((p) => p.tokenId)).toEqual([11n, 12n, 13n])
     // Logs: the history up to the new safe block, the history above it, the deposits.
-    expect(c.byMethod()).toEqual({ eth_chainId: 1, eth_getBlockByNumber: 5, eth_getCode: 1, eth_call: 2, eth_getLogs: 3 })
-    expect(c.count()).toBe(12)
+    // The chain id and the code of the deployed account were read in the first review and are not asked again.
+    expect(c.byMethod()).toEqual({ eth_getBlockByNumber: 5, eth_call: 2, eth_getLogs: 3 })
+    expect(c.count()).toBe(10)
     // Unbatched, the same review: every contract read is a request of its own.
     c.requests.length = 0
     const plain = historyCursor()
@@ -84,14 +85,42 @@ describe('observe through Multicall3', () => {
     expect(c.count('eth_getBalance')).toBe(1)
   })
 
-  test('with a safe head that did not move, a review is 9 requests', async () => {
+  test('with a safe head that did not move, a steady review is 7 requests', async () => {
     const c = chain()
     const cursor = historyCursor()
     await observe(c.client, input({ historyCursor: cursor }))
     c.head = 1010n
     c.requests.length = 0
     await observe(c.client, input({ historyCursor: cursor, depositsAfter: 900n }))
-    expect(c.byMethod()).toEqual({ eth_chainId: 1, eth_getBlockByNumber: 3, eth_getCode: 1, eth_call: 2, eth_getLogs: 2 })
+    expect(c.byMethod()).toEqual({ eth_getBlockByNumber: 3, eth_call: 2, eth_getLogs: 2 })
+  })
+
+  test('the first review of a client reads the chain id and the account code; an account without code is read again every time', async () => {
+    const c = chain()
+    await observe(c.client, input({ historyCursor: historyCursor() }))
+    expect(c.count('eth_chainId')).toBe(1)
+    expect(c.count('eth_getCode')).toBe(1)
+    // Another account, not deployed: asked on each observation until it has code, and never taken as deployed before.
+    const OTHER_UNDEPLOYED = '0x00000000000000000000000000000000000000bb' as Address
+    c.requests.length = 0
+    const first = await observe(c.client, input({ account: OTHER_UNDEPLOYED, allowedTokenIds: [] }))
+    const second = await observe(c.client, input({ account: OTHER_UNDEPLOYED, allowedTokenIds: [] }))
+    expect([first.account.deployed, second.account.deployed]).toEqual([false, false])
+    expect(c.count('eth_getCode')).toBe(2)
+    c.code.set(OTHER_UNDEPLOYED.toLowerCase(), '0x01')
+    expect((await observe(c.client, input({ account: OTHER_UNDEPLOYED, allowedTokenIds: [] }))).account.deployed).toBe(true)
+    expect((await observe(c.client, input({ account: OTHER_UNDEPLOYED, allowedTokenIds: [] }))).account.deployed).toBe(true)
+    expect(c.count('eth_getCode')).toBe(3)
+    expect(c.count('eth_chainId')).toBe(0)
+  })
+
+  test('a client that answers another chain id is refused on its first observation; another client is checked on its own', async () => {
+    const wrong = chain()
+    wrong.chainId = 1
+    expect(await observe(wrong.client, input({})).catch((e: { code?: string }) => e.code)).toBe('OBS_CHAIN_MISMATCH')
+    const right = chain()
+    await observe(right.client, input({ historyCursor: historyCursor() }))
+    expect(right.count('eth_chainId')).toBe(1)
   })
 
   test('batched and unbatched reads give the same observation', async () => {
