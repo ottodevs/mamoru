@@ -16,6 +16,7 @@ import { pairLabel, poolAddress, positionAmounts, positionTokens, progressLine }
 import { localTime } from '../lib/time.ts'
 import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
 import { DepositDetails, hasMoney } from './add-money.tsx'
+import { WrongNetwork } from '../components/other-chain-notice.tsx'
 
 export const homeCopy = {
   total: 'Total balance',
@@ -556,6 +557,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         <Brand />
       </header>
       <Balance s={s} onAdd={() => setDialog('add')} onWithdraw={() => withdraw()} />
+      <WrongNetwork accountKey={accountKey} />
       {!f ? (
         funding.isError ? (
           <p className="err card">Could not load your balance. Retrying.</p>

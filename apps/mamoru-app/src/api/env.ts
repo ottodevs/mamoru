@@ -23,6 +23,8 @@ export type Env = {
   LIVE_FUNDS?: string
   OPERATOR_URL?: string
   OPERATOR_SECRET?: string
+  // Read-only Ethereum Mainnet RPC for the wrong-network notice (accounts/other-chains.ts). Unset: nothing is read.
+  ETHEREUM_RPC_URL?: string
 }
 
 export type AppSettings = { mode: 'production'; chainId: typeof BASE_CHAIN_ID; sessionSecret: string }

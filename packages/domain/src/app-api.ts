@@ -74,6 +74,15 @@ export type FundingView = {
   progress?: { step: 'deploying' | 'activating' | 'swapping' | 'opening' | 'rebalancing' | 'reranging' | 'closing' | 'withdrawing'; pool?: string; since: string } | null
 }
 
+// GET /api/accounts/:accountKey/other-chains -> OtherChainsView
+// What sits at the account's address on a chain Mamoru does not run on (a transfer sent on the wrong network).
+// Read-only and separate from FundingView on purpose: these amounts are never part of the Mamoru balance,
+// never count towards the cap and never start anything. Each row carries the chain id it was read on.
+export type OtherChainFunds =
+  | { chainId: number; name: string; status: 'observed'; block: number; usdc: string; eth: string; observedAt: string }   // usdc base units, eth wei
+  | { chainId: number; name: string; status: 'not_observed'; observedAt: string }
+export type OtherChainsView = { address: Hex0x; accountChainId: number; chains: OtherChainFunds[] }
+
 // What the operator found when a deposit is above the per-account cap. Amounts in USDC base units.
 export type OverCap = { code: 'DEPOSIT_OVER_CAP'; usdc: string; capUsdc: string; excessUsdc: string }
 
