@@ -135,6 +135,36 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
     expect((await read(h, cookie, owner.accountKey)).chains[0]!.status).toBe('not_observed')
   })
 
+  test('the RPC URL never reaches the log, whatever the failure quotes', async () => {
+    const logged: string[] = []
+    const original = console.error
+    console.error = (...args: unknown[]) => void logged.push(args.map(String).join(' '))
+    try {
+      const failures: ChainFetch[] = [
+        async () => {
+          throw new Error(`connect failed ${RPC}`)
+        },
+        async () => new Response(`not json, from ${RPC}`, { status: 200 }),
+        async () => new Response(RPC, { status: 502 }),
+        async () => Response.json([{ id: 0, error: { message: RPC } }, { id: 1, result: RPC }]),
+        async () => Response.json([{ id: 0, result: RPC }, { id: 1, result: '0x10' }]),
+      ]
+      for (const chainFetch of failures) {
+        const h = harness(() => T0, { env: { ETHEREUM_RPC_URL: RPC }, chainFetch })
+        const { cookie, owner } = await onboard(h)
+        const res = await h.request(`/api/accounts/${owner.accountKey}/other-chains`, { cookie })
+        const text = await res.text()
+        expect(text).not.toContain('l1.example')
+        expect((JSON.parse(text) as OtherChainsView).chains[0]!.status).toBe('not_observed')
+      }
+    } finally {
+      console.error = original
+    }
+    expect(logged.length).toBe(5)
+    expect(logged.join('\n')).not.toContain('l1.example')
+    expect(logged.join('\n')).not.toContain('rpc-key')
+  })
+
   test('only the owner reads it; another session and no session get what the dashboard gives them', async () => {
     const n = node({ usdc: 150_000_000n })
     const h = harness(() => T0, { env: { ETHEREUM_RPC_URL: RPC }, chainFetch: n.fetch })
