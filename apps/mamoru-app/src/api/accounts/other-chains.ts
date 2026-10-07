@@ -28,26 +28,35 @@ const BALANCE_OF = '0x70a08231'
 
 type RpcCall = { method: string; params: unknown[] }
 
+/** A reason this module wrote itself: fixed text, safe to log. Anything else thrown may quote the RPC URL. */
+class ReadError extends Error {}
+
 /** A JSON-RPC batch, answers in the order asked. Throws on any transport, HTTP or RPC error and on a missing answer. */
 async function rpcBatch(fetcher: ChainFetch, url: string, calls: RpcCall[]): Promise<unknown[]> {
-  const res = await fetcher(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(calls.map((c, id) => ({ jsonrpc: '2.0', id, method: c.method, params: c.params }))),
-    signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
-  })
-  if (!res.ok) throw new Error(`rpc http ${res.status}`)
-  const body = (await res.json()) as unknown
-  if (!Array.isArray(body)) throw new Error('rpc answer is not a batch')
+  let res: Response
+  let body: unknown
+  try {
+    res = await fetcher(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(calls.map((c, id) => ({ jsonrpc: '2.0', id, method: c.method, params: c.params }))),
+      signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
+    })
+    body = res.ok ? ((await res.json()) as unknown) : null
+  } catch {
+    throw new ReadError('rpc unreachable')
+  }
+  if (!res.ok) throw new ReadError(`rpc http ${res.status}`)
+  if (!Array.isArray(body)) throw new ReadError('rpc answer is not a batch')
   return calls.map((_, id) => {
     const item = (body as { id?: unknown; result?: unknown; error?: unknown }[]).find((r) => r?.id === id)
-    if (!item || item.error !== undefined || item.result === undefined) throw new Error(`rpc call ${id} failed`)
+    if (!item || item.error !== undefined || item.result === undefined) throw new ReadError(`rpc call ${id} failed`)
     return item.result
   })
 }
 
 function quantity(v: unknown, what: string): bigint {
-  if (typeof v !== 'string' || !QUANTITY.test(v)) throw new Error(`${what} is not a quantity`)
+  if (typeof v !== 'string' || !QUANTITY.test(v)) throw new ReadError(`${what} is not a quantity`)
   return BigInt(v)
 }
 
@@ -64,7 +73,7 @@ export async function readOtherChain(fetcher: ChainFetch, url: string | undefine
       { method: 'eth_chainId', params: [] },
       { method: 'eth_blockNumber', params: [] },
     ])
-    if (quantity(id, 'chain id') !== BigInt(chain.chainId)) throw new Error('rpc is on another chain')
+    if (quantity(id, 'chain id') !== BigInt(chain.chainId)) throw new ReadError('rpc is on another chain')
     const block = quantity(head, 'block number')
     const tag = `0x${block.toString(16)}`
     const [again, usdc, eth] = await rpcBatch(fetcher, url, [
@@ -72,12 +81,12 @@ export async function readOtherChain(fetcher: ChainFetch, url: string | undefine
       { method: 'eth_call', params: [{ to: chain.usdc, data: `${BALANCE_OF}${address.slice(2).toLowerCase().padStart(64, '0')}` }, tag] },
       { method: 'eth_getBalance', params: [address, tag] },
     ])
-    if (quantity(again, 'chain id') !== BigInt(chain.chainId)) throw new Error('rpc is on another chain')
-    if (typeof usdc !== 'string' || !WORD.test(usdc)) throw new Error('balanceOf is not one word')
+    if (quantity(again, 'chain id') !== BigInt(chain.chainId)) throw new ReadError('rpc is on another chain')
+    if (typeof usdc !== 'string' || !WORD.test(usdc)) throw new ReadError('balanceOf is not one word')
     return { chainId: chain.chainId, name: chain.name, status: 'observed', block: Number(block), usdc: BigInt(usdc).toString(), eth: quantity(eth, 'balance').toString(), observedAt }
   } catch (e) {
-    // The URL may carry a key: log the reason only.
-    console.error('other chain not observed', chain.chainId, e instanceof Error ? e.message : String(e))
+    // The URL may carry a key and a foreign error may quote it: only this module's own reasons are logged.
+    console.error('other chain not observed', chain.chainId, e instanceof ReadError ? e.message : 'unexpected error')
     return missing
   }
 }
