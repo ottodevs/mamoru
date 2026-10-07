@@ -6,6 +6,7 @@ import type {
   DashboardPayload,
   FundingView,
   OpView,
+  OtherChainsView,
   OwnerRequest,
   OwnerSignature,
   OwnerTxToSign,
@@ -37,6 +38,8 @@ export type ApiClient = {
   ackRecovery(accountKey: string): Promise<{ ok: true }>
   // Live happy path (fundsGate 'live'). Owner actions are prepared by the API and signed by the passkey here.
   funding(accountKey: string): Promise<FundingView>
+  /** What the account address holds on chains Mamoru does not run on. Never part of the balance. */
+  otherChains(accountKey: string): Promise<OtherChainsView>
   ops(accountKey: string): Promise<{ ops: OpView[] }>
   activatePrepare(accountKey: string): Promise<OwnerTxToSign>
   activate(accountKey: string, sig: OwnerSignature): Promise<OpView>
@@ -96,6 +99,7 @@ export const httpClient: ApiClient = {
   ackRecovery: (accountKey) =>
     request<{ ok: true }>('/api/onboarding/recovery-ack', { method: 'POST', body: JSON.stringify({ accountKey }) }),
   funding: (k) => request<FundingView>(acct(k, 'funding')),
+  otherChains: (k) => request<OtherChainsView>(acct(k, 'other-chains')),
   ops: (k) => request<{ ops: OpView[] }>(acct(k, 'ops')),
   activatePrepare: (k) => post<OwnerTxToSign>(acct(k, 'activate/prepare')),
   activate: (k, sig) => post<OpView>(acct(k, 'activate'), sig),

@@ -3,6 +3,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { useFunding, useSession } from '../api/queries.ts'
 import { ConnectWallet } from '../components/connect-wallet.tsx'
+import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { AddressBlock, Brand, Copy, Qr, Waiting } from '../components/ui.tsx'
 import { capNote, ceilCents, overCapOf, usd, usdPlain } from '../lib/money.ts'
 import { localTime } from '../lib/time.ts'
@@ -11,6 +12,7 @@ import { useInjectedWallets } from '../lib/wallets.ts'
 export const addCopy = {
   title: 'Add capital',
   send: 'Send USDC on Base.',
+  baseOnly: 'Only USDC sent on the Base network arrives. The same address on Ethereum or any other network is not your Mamoru balance.',
   waiting: 'Waiting for your USDC',
   arrived: (amount: string) => `${amount} USDC arrived`,
   overCap: (o: OverCap) =>
@@ -38,6 +40,9 @@ export function DepositDetails({ address, capUsdc }: { address: string; capUsdc?
           </div>
         </div>
       </div>
+      <p className="m-0 text-[0.88rem] leading-[1.45] text-stone" data-testid="base-only">
+        {addCopy.baseOnly}
+      </p>
     </div>
   )
 }
@@ -98,6 +103,7 @@ export function AddMoneyPage() {
           )}
           {funding.dataUpdatedAt ? <span className="font-mono text-[0.72rem] text-stone">Checked {localTime(new Date(funding.dataUpdatedAt).toISOString())}</span> : null}
         </div>
+        <WrongNetwork accountKey={accountKey} />
         {funding.isError ? <p className="err">Could not check your balance. Retrying.</p> : null}
         <p className="m-0">
           <button type="button" className="text-[0.88rem] text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => void navigate({ to: '/' })}>

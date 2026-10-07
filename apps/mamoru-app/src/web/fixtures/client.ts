@@ -125,6 +125,15 @@ export const fixtureClient: ApiClient = {
   recoveryKit: () => delay({ chainId: 8453, address: FIXTURE_ADDRESS, fixture: true }),
   ackRecovery: () => delay({ ok: true as const }),
   funding: () => delay(liveState.funding),
+  // ?wrongchain (dev only): 150 USDC was sent on Ethereum to the Base address.
+  otherChains: () =>
+    delay({
+      address: FIXTURE_ADDRESS,
+      accountChainId: 8453,
+      chains: param('wrongchain')
+        ? [{ chainId: 1, name: 'Ethereum', status: 'observed' as const, block: 21_000_000, usdc: '150000000', eth: '0', observedAt: new Date().toISOString() }]
+        : [{ chainId: 1, name: 'Ethereum', status: 'not_observed' as const, observedAt: new Date().toISOString() }],
+    }),
   ops: () => delay({ ops: liveState.ops }),
   activatePrepare: () => delay(fixtureTx(['Deploy your Safe on Base', 'Enable the engine session for up to 20 USDC', 'Top up gas reserve to 0.0003 ETH'])),
   activate: () => {

@@ -10,6 +10,7 @@ export const queryKeys = {
   pools: ['pools'] as const,
   apy: ['apy'] as const,
   funding: (accountKey: string) => ['funding', accountKey] as const,
+  otherChains: (accountKey: string) => ['other-chains', accountKey] as const,
   ops: (accountKey: string) => ['ops', accountKey] as const,
   withdrawAssets: (accountKey: string) => ['withdraw-assets', accountKey] as const,
 }
@@ -68,6 +69,18 @@ export function useFunding(accountKey: string | undefined, enabled: boolean, int
     queryFn: () => api.funding(accountKey as string),
     enabled: enabled && accountKey !== undefined,
     refetchInterval: (q) => (q.state.data?.progress ? Math.min(4_000, intervalMs) : intervalMs),
+  })
+}
+
+/** The account address on chains Mamoru does not run on (a transfer sent on the wrong network). Slow poll, no retry: a failure shows nothing. */
+export function useOtherChains(accountKey: string | undefined) {
+  const api = useApi()
+  return useQuery({
+    queryKey: queryKeys.otherChains(accountKey ?? ''),
+    queryFn: () => api.otherChains(accountKey as string),
+    enabled: accountKey !== undefined,
+    retry: false,
+    refetchInterval: 60_000,
   })
 }
 
