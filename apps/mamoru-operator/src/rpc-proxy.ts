@@ -151,6 +151,35 @@ export type RpcProxyOptions = {
   fetch?: (url: string, init: RequestInit) => Promise<Response>
 }
 
+/**
+ * Everything that is not a visible character: controls, format and invisible characters (zero width, bidi marks,
+ * soft hyphen and the rest of Unicode's default-ignorable set), unassigned and private-use code points, lone
+ * surrogates, and every kind of space and line separator.
+ */
+const UNPRINTABLE_RE = /[\p{C}\p{Z}\p{Default_Ignorable_Code_Point}]+/gu
+/** A word that could be part of an address: a path or scheme (`/`, `\`), userinfo (`@`), or a dot anywhere in it. */
+const ADDRESS_PART_RE = /[\/\\@.]/
+/** A plain decimal such as `1.5`, with the punctuation a sentence may put around it. */
+const DECIMAL_RE = /^[([]?\d+\.\d+[)\],;:]?$/
+/** How much of a provider's message is read at all: the rest is dropped before any pattern runs over it. */
+const PROVIDER_WORDS_READ = 2000
+
+/**
+ * A provider's own words, fit for one journal line. The text is theirs, not ours, so it is read word by word:
+ * whatever is not a visible character becomes a space (one message is one line, and cannot write a second one,
+ * move the terminal or hide text), and any word that could be part of an endpoint address is dropped whole,
+ * however the address was split: a key can sit in a hostname, a path or the userinfo, which `redactSecrets` alone
+ * would keep. A dot is enough, at either end of a word too, so a word that closes a sentence with a period is
+ * dropped with it: node refusals do not use them. A message that is not text says nothing: an object is not serialised.
+ */
+export function providerWords(message: unknown): string {
+  if (typeof message !== 'string') return '(no text)'
+  const words = message.slice(0, PROVIDER_WORDS_READ).replace(UNPRINTABLE_RE, ' ').split(' ').filter(Boolean)
+  // A message cut short may end in half a word, with the part that gave it away as an address left behind.
+  if (message.length > PROVIDER_WORDS_READ) words.pop()
+  return redactSecrets(words.map((w) => (ADDRESS_PART_RE.test(w) && !DECIMAL_RE.test(w) ? '[redacted]' : w)).join(' '))
+}
+
 export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { url: string; stop: () => void } {
   const send = opts.fetch ?? fetch
   const fallbacks = opts.fallbacks ?? fallbacksFromEnv()
@@ -234,7 +263,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       }
       const next = all[pi + 1]
       if (next !== undefined && next !== url && metrics) safeMetrics(() => metrics.recordFallback(label, body.method))
-      if (pi === 0 && list.length > 1 && process.env.MAMORU_RPC_LOG) console.log(`[rpc] ${body?.method} falling back after: ${redactSecrets(last?.message).slice(0, 120)}`)
+      if (pi === 0 && list.length > 1 && process.env.MAMORU_RPC_LOG) console.log(`[rpc] ${body?.method} falling back after: ${providerWords(last?.message).slice(0, 120)}`)
     }
     return { jsonrpc: '2.0', id: body?.id ?? null, error: { code: typeof last?.code === 'number' ? last.code : -32603, message: String(last?.message ?? 'upstream unavailable') } }
   }
@@ -380,7 +409,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
         const reason: Rejection = (e as any).reason ?? 'provider_error'
         if (reason !== 'provider_error') unwitnessed = last
         if (metrics) safeMetrics(() => (metrics.recordLogRange(label, reason), logProviders.length > 1 && metrics.recordFallback(label, 'eth_getLogs')))
-        if (process.env.MAMORU_RPC_LOG) console.log(`[rpc] eth_getLogs ${label} rejected (${reason}): ${redactSecrets(String(last?.message)).slice(0, 120)}`)
+        if (process.env.MAMORU_RPC_LOG) console.log(`[rpc] eth_getLogs ${label} rejected (${reason}): ${providerWords(last?.message).slice(0, 120)}`)
       }
     }
     last = unwitnessed ?? last
@@ -401,7 +430,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       // Why a provider refused a transaction: the sender only sees a generic message (viem folds -32000 into
       // "Missing or invalid parameters"). The provider's words, never the transaction; a log line never costs the answer.
       try {
-        console.log(`[rpc] eth_sendRawTransaction refused (${typeof e.code === 'number' ? e.code : '?'}): ${redactSecrets(e.message).slice(0, 200)}`)
+        console.log(`[rpc] eth_sendRawTransaction refused (${typeof e.code === 'number' ? e.code : '?'}): ${providerWords(e.message)}`)
       } catch {}
     } else if (e && (e.code === -32602 || /invalid param/i.test(String(e.message)))) console.log(`[rpc] ${msg.method} refused (${e.code}): ${redactSecrets(JSON.stringify(msg.params ?? [])).slice(0, 300)}`)
     return r
