@@ -68,7 +68,7 @@ export type AccountRef = { key: string; address: Address }
 /**
  * The state of every account at `H` in one Multicall3 request per ACCOUNTS_PER_CALL accounts, instead of five
  * requests per account. The code of an account is read only until it is known to be deployed (`knownDeployed`:
- * projected as deployed at a safe block, see deployedAccountKeys): a deployed Safe stays deployed. An account with a read that failed, or in a group
+ * projected as deployed at a block that still has its hash, see vouchedDeployed in run.ts): a deployed Safe stays deployed. An account with a read that failed, or in a group
  * whose request failed, is left out and keeps its last projection.
  */
 export async function readAccountStates(

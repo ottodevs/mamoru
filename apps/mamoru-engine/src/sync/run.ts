@@ -3,7 +3,7 @@ import { conservadorV1, type PolicyVersion } from '@mamoru/policy'
 import type { MultiBaasClient } from '@mamoru/multibaas'
 import { baseRegistry, entry, readCodeHash, type Registry, type RegistryEntry } from '@mamoru/registry'
 import { getAddress, type Address, type PublicClient } from 'viem'
-import { deployedAccountKeys, insertPoolSnapshot, listAccounts, prunePoolSnapshots, markRpcUnavailable, previousIndexState, previousPoolView, upsertAccountState, upsertPoolState, upsertSourceState, type SourceStateRow } from '../d1.ts'
+import { deployedProjections, insertPoolSnapshot, listAccounts, prunePoolSnapshots, markRpcUnavailable, previousIndexState, previousPoolView, upsertAccountState, upsertPoolState, upsertSourceState, type DeployedProjection, type SourceStateRow } from '../d1.ts'
 import type { D1Like, D1Statement } from '../env.ts'
 import { poolReadAbi } from './abis.ts'
 import { readAccountStates, type AccountRef } from './accounts.ts'
@@ -12,7 +12,7 @@ import { rpcFallback } from './history.ts'
 import type { LogSource } from './client.ts'
 import { errorInfo, readPoolEventsFrom } from './logs.ts'
 import { rateFromSqrtPrice, UNIT_RATE, type Rate } from './math.ts'
-import { readPoolSnapshots, snapshotPools } from './pool-snapshot.ts'
+import { readPoolSnapshots, snapshotPools, type BlockHashes } from './pool-snapshot.ts'
 import { readPoolState, type PoolState } from './pool-state.ts'
 import { MultiBaasPoolIndex } from './multibaas-index.ts'
 import { buildPoolView, displayedBlocks, type PoolHistory } from './pool-view.ts'
@@ -96,6 +96,34 @@ async function blockTimes(client: PublicClient, blocks: number[]): Promise<Map<n
 }
 
 /** One sync of the Base read model: head, plan pools, accounts, source health (plan §23, sprint cadence). */
+/** Earlier blocks whose hash is asked for in a run. Every account read in a run shares its block, so this is one in practice. */
+const VOUCHED_BLOCKS_PER_RUN = 3
+/** BLOCKHASH answers for this many blocks before the one it runs in. */
+const BLOCKHASH_WINDOW = 256
+
+/** The blocks of earlier projections worth asking about: within BLOCKHASH's reach of the anchor, the most shared first. */
+function blocksToVouch(projected: readonly DeployedProjection[], anchor: Anchor): number[] {
+  const rows = new Map<number, number>()
+  for (const r of projected) if (r.block < anchor.blockNumber && r.block >= anchor.blockNumber - BLOCKHASH_WINDOW) rows.set(r.block, (rows.get(r.block) ?? 0) + 1)
+  return [...rows.keys()].sort((a, b) => rows.get(b)! - rows.get(a)! || b - a).slice(0, VOUCHED_BLOCKS_PER_RUN)
+}
+
+/**
+ * The accounts whose code need not be read again: projected as deployed at a block that still has the hash it was
+ * written with, as this run's anchor sees it. A deployed Safe stays deployed, but only on the chain where it was
+ * seen: a safe block follows L1, and L1 can reorg. A projection at the anchor's own block is compared with the
+ * anchor's hash; an earlier one with the answer that came in the pools' request (`hashes`). No answer (the block
+ * is out of BLOCKHASH's reach, was not asked about, or that request failed) vouches for nothing: the code is read.
+ */
+function vouchedDeployed(projected: readonly DeployedProjection[], anchor: Anchor, hashes: ReadonlyMap<number, string>): Set<string> {
+  const out = new Set<string>()
+  for (const r of projected) {
+    const hash = r.block === anchor.blockNumber ? anchor.blockHash : hashes.get(r.block)
+    if (hash && hash.toLowerCase() === r.blockHash.toLowerCase()) out.add(r.accountKey)
+  }
+  return out
+}
+
 export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
   const { client, db, chainId } = deps
   const registry = deps.registry ?? baseRegistry
@@ -128,7 +156,10 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
 
   // Pool history for the Lab, read first: one request, before the log reads use up a throttled endpoint's allowance.
   const historyPools = snapshotPools(registry)
-  const history = await readPoolSnapshots(client, historyPools, anchor).catch((err) => {
+  // The same request asks whether the blocks of the last account projections are still on this chain (vouchedDeployed).
+  const projected = await deployedProjections(db, chainId, anchor.blockNumber)
+  const blockHashes: BlockHashes = { ask: blocksToVouch(projected, anchor), answers: new Map() }
+  const history = await readPoolSnapshots(client, historyPools, anchor, blockHashes).catch((err) => {
     log({ msg: 'sync.snapshots_failed', stage: 'read', ...errorInfo(err), ...(deps.debug ? { debug: String(err) } : {}) })
     return []
   })
@@ -219,7 +250,7 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
     }
   }
   // An account missing from the answer keeps its last projection; the API shows it stale by age.
-  const states = await readAccountStates(client, refs, tokens, anchor, rates, await deployedAccountKeys(db, chainId, anchor.blockNumber))
+  const states = await readAccountStates(client, refs, tokens, anchor, rates, vouchedDeployed(projected, anchor, blockHashes.answers))
   for (const [key, s] of states) statements.push(upsertAccountState(db, anchor, key, s))
   const accountsRead = states.size
 
