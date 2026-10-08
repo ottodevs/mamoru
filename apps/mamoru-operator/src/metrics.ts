@@ -247,6 +247,52 @@ class Buckets {
  * plus a rolling per-hour ring for the last 48h. Persisted to `stateDir/rpc-usage.json`, written
  * at most once a minute and always atomically (tmp file + rename, like state.ts).
  */
+/** Requests and CU of each method, over every key of the bucket (providers, or components). */
+function totalsByMethod(b: Buckets): Map<string, { requests: number; cuEstimate: number }> {
+  const out = new Map<string, { requests: number; cuEstimate: number }>()
+  for (const byMethod of Object.values(b.toJSON())) {
+    for (const [method, c] of Object.entries(byMethod)) {
+      const t = out.get(method) ?? { requests: 0, cuEstimate: 0 }
+      t.requests += c.requests
+      t.cuEstimate += c.cuEstimate
+      out.set(method, t)
+    }
+  }
+  return out
+}
+
+/**
+ * Makes the components of a bucket add up to its providers: whatever `total` counted and no component did goes
+ * to `unlabelled`, method by method. Run once, on load; a file that already adds up is left as it is.
+ */
+function fileUnlabelled(total: Buckets, byComponent: Buckets): void {
+  const counted = totalsByMethod(byComponent)
+  for (const [method, t] of totalsByMethod(total)) {
+    const requests = Math.max(0, t.requests - (counted.get(method)?.requests ?? 0))
+    const cuEstimate = Math.max(0, t.cuEstimate - (counted.get(method)?.cuEstimate ?? 0))
+    // Sums of a damaged file can overflow: a figure that is not a finite number is not filed, and would not load back.
+    if (!Number.isFinite(requests) || !Number.isFinite(cuEstimate)) continue
+    if (requests === 0 && cuEstimate === 0) continue
+    const c = byComponent.get('unlabelled', method)
+    c.requests += requests
+    c.cuEstimate += cuEstimate
+  }
+}
+
+/** What is counted per component: requests and CU. Errors, fallbacks and log chunks are counted per provider only. */
+export type ComponentCounters = { requests: number; cuEstimate: number }
+export type ComponentSnapshot = Record<string, Record<string, ComponentCounters>>
+
+function componentView(b: Buckets): ComponentSnapshot {
+  const out: ComponentSnapshot = Object.create(null) as ComponentSnapshot
+  for (const [component, byMethod] of Object.entries(b.toJSON())) {
+    const m: Record<string, ComponentCounters> = Object.create(null) as Record<string, ComponentCounters>
+    for (const [method, c] of Object.entries(byMethod)) m[method] = { requests: c.requests, cuEstimate: c.cuEstimate }
+    out[component] = m
+  }
+  return out
+}
+
 /** Who made a request: the loops of the operator, as the loopback proxy is told by the path it was called on. A closed set. */
 export const COMPONENTS = ['engine', 'watcher', 'operator', 'relayer'] as const
 export type Component = (typeof COMPONENTS)[number] | 'unlabelled'
@@ -299,6 +345,13 @@ export class RpcMetrics {
           b.load(data as RpcSnapshot)
           this.ring.set(hourStart, b)
         }
+      }
+      // Traffic counted before the components existed, or by a version that did not count them, has no component.
+      fileUnlabelled(this.cumulative, this.byComponent)
+      for (const [hourStart, total] of this.ring) {
+        let hour = this.byComponentRing.get(hourStart)
+        if (!hour) this.byComponentRing.set(hourStart, (hour = new Buckets()))
+        fileUnlabelled(total, hour)
       }
       this.pruneRing(Date.now())
     } catch (e) {
@@ -399,7 +452,7 @@ export class RpcMetrics {
   }
 
   /** `last48h` oldest first, ISO hour-start timestamps; only hours with recorded activity are present (sparse, not zero-filled). */
-  snapshot(now: number = Date.now()): { cumulative: RpcSnapshot; cuEstimateTotal: number; last48h: { hourStart: string; data: RpcSnapshot }[]; logRanges: Record<string, LogRangeCounters>; byComponent: { cumulative: RpcSnapshot; last48h: { hourStart: string; data: RpcSnapshot }[] } } {
+  snapshot(now: number = Date.now()): { cumulative: RpcSnapshot; cuEstimateTotal: number; last48h: { hourStart: string; data: RpcSnapshot }[]; logRanges: Record<string, LogRangeCounters>; byComponent: { cumulative: ComponentSnapshot; last48h: { hourStart: string; data: ComponentSnapshot }[] } } {
     this.pruneRing(now)
     return {
       cumulative: this.cumulative.toJSON(),
@@ -407,8 +460,8 @@ export class RpcMetrics {
       last48h: [...this.ring.entries()].sort(([a], [b]) => a - b).map(([hourStart, b]) => ({ hourStart: new Date(hourStart).toISOString(), data: b.toJSON() })),
       logRanges: Object.fromEntries([...this.logRanges].map(([provider, c]) => [provider, { ...c }])),
       byComponent: {
-        cumulative: this.byComponent.toJSON(),
-        last48h: [...this.byComponentRing.entries()].sort(([a], [b]) => a - b).map(([hourStart, b]) => ({ hourStart: new Date(hourStart).toISOString(), data: b.toJSON() })),
+        cumulative: componentView(this.byComponent),
+        last48h: [...this.byComponentRing.entries()].sort(([a], [b]) => a - b).map(([hourStart, b]) => ({ hourStart: new Date(hourStart).toISOString(), data: componentView(b) })),
       },
     }
   }

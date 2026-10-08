@@ -53,7 +53,9 @@ export async function bootOperator(o: BootOptions) {
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
   const policy = withTestOverrides(named, process.env)
   const store = new StateStore(o.stateDir)
-  const relayer = new Relayer(loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey), client, via('relayer'), chainId)
+  // The relayer's own reads (gas estimate, nonce, the wait for a receipt) are counted as the relayer's, like its sends.
+  const relayerClient = createPublicClient({ transport: http(via('relayer'), { batch: true, timeout: 60_000 }) })
+  const relayer = new Relayer(loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey), relayerClient, via('relayer'), chainId)
   const bundler = startLiveBundler(client, relayer, chainId)
   const operator = new Operator(
     {
