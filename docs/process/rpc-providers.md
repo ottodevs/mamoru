@@ -28,7 +28,9 @@ Cost, and what bounds it:
   location and approximately, so it is a brake, not an exact quota: an account reaching several locations
   can pass 6 a minute in total. When an isolate's table of 500 accounts is full, an admitted read is not
   cached, so the limiter is then the only bound for that account.
-- Worst case for one account in one location: 6 reads a minute, 18 `eth_call`s if two providers are down.
+- Configured rate for one account in one location: 6 reads a minute, 18 `eth_call`s if two providers are
+  down. This is the nominal rate, not a ceiling: the limiter's counters are eventually consistent and can
+  let a few more through.
 - The provider's own quota alert is the last line: keep it on for the key this Worker uses.
 
 ### Setting it (coordinator only)
