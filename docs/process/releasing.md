@@ -57,6 +57,8 @@ schedule, and not for a change that only touches the operator.
    when its smoke test fails.
 4. `git push origin <sha>:beta`. Git refuses this unless it is a fast-forward of `beta`. It does not check
    that the sha is on `main`: `git merge-base --is-ancestor <sha> origin/main` first.
+   Once `beta` is protected, GitHub also refuses the push until CI has finished green on that sha: after a
+   merge, wait for the CI run on `main` (`gh run list -R ottodevs/mamoru --branch main --limit 1`).
 5. `bun run deploy:beta`. It fetches `beta` again, builds from a clean snapshot of its tip, runs typecheck
    and tests, deploys and runs the smoke test. Check that the sha it prints is the one you pushed.
 6. Announce it in `#mamoru` as `@mamorusan`: the sha, the version id before and after, what changes for a
@@ -111,6 +113,9 @@ cd apps/mamoru-app
 bunx wrangler deployments list --env beta        # or without --env for production
 bunx wrangler rollback --env beta <version id>   # production: no --env
 ```
+
+When a deploy script printed a rollback command, use that one as printed: it is the same call with the
+path and the environment filled in.
 
 Where the version id comes from:
 
