@@ -51,6 +51,11 @@ export type AccountState = {
   sessionKey?: Hex
   grants: StoredGrant[]
   revoked: Hex[]
+  /**
+   * Permission ids still enabled on the Safe that the engine no longer uses: the grants a renewal replaced when it
+   * could not revoke them in its own transaction. A stop revokes them with the rest.
+   */
+  superseded?: Hex[]
   managedTokenIds: string[]
   depositsAfter: string
   historyFromBlock: string

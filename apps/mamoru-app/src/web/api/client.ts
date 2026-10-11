@@ -50,6 +50,8 @@ export type ApiClient = {
   transfer(accountKey: string, sig: OwnerSignature): Promise<OpView>
   stopPrepare(accountKey: string): Promise<OwnerTxToSign>
   stop(accountKey: string, sig: OwnerSignature): Promise<OpView>
+  renewPrepare(accountKey: string): Promise<OwnerTxToSign>
+  renew(accountKey: string, sig: OwnerSignature): Promise<OpView>
   /** Works with or without a session. */
   feedback(body: FeedbackRequest): Promise<FeedbackResponse>
 }
@@ -112,6 +114,8 @@ export const httpClient: ApiClient = {
   transfer: (k, sig) => post<OpView>(acct(k, 'transfer'), sig),
   stopPrepare: (k) => post<OwnerTxToSign>(acct(k, 'stop/prepare')),
   stop: (k, sig) => post<OpView>(acct(k, 'stop'), sig),
+  renewPrepare: (k) => post<OwnerTxToSign>(acct(k, 'renew/prepare')),
+  renew: (k, sig) => post<OpView>(acct(k, 'renew'), sig),
   feedback: (body) => post<FeedbackResponse>('/api/feedback', body),
 }
 

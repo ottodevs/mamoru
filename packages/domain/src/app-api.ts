@@ -72,6 +72,9 @@ export type FundingView = {
   // What the engine of a running account is up to between operations: `placing` while it is working through an
   // entry (the next step comes in seconds), and when its next review of the account is due. Null when not running.
   engine?: { placing: boolean; nextReviewAt: string | null } | null
+  // The owner's approval of a running account: until when (unix seconds) the engine's grants are valid, whether the
+  // renewal is due (inside the renewal window) and whether they already lapsed. Null or absent when not running.
+  approval?: { validUntil: number; renewDue: boolean; expired: boolean } | null
   positions: {
     tokenId: string; pool: string; liquidity: string; inRange: boolean; amountUsdc: string; amountCbbtc: string
     amounts?: { token: string; amount: string; decimals: number; valueUsdc?: string }[]   // both sides of any pool, base units, each with its value in USDC
@@ -101,6 +104,8 @@ export type OverCap = { code: 'DEPOSIT_OVER_CAP'; usdc: string; capUsdc: string;
 // Frees USDC by reducing positions if idle USDC is short (engine), then the owner transfer.
 // Works on a Safe that is not deployed yet (a deposit that never started): the relayer deploys it, then the transfer runs.
 // POST /api/accounts/:accountKey/stop/prepare        -> OwnerTxToSign
+// POST /api/accounts/:accountKey/renew/prepare       -> OwnerTxToSign   (running account: same grants, fresh validity)
+// POST /api/accounts/:accountKey/renew  OwnerSignature -> OpView
 // POST /api/accounts/:accountKey/stop                body: OwnerSignature -> OpView
 // Stop allocation: revoke every grant, close every position, swap the volatile side to USDC. USDC stays in the Safe.
 // GET  /api/accounts/:accountKey/ops?after=          -> { ops: OpView[] }
@@ -131,7 +136,7 @@ export type OwnerSignature = {
 }
 export type OpView = {
   opId: string
-  kind: 'activate' | 'enter' | 'reduce' | 'transfer' | 'exit'
+  kind: 'activate' | 'enter' | 'reduce' | 'transfer' | 'exit' | 'renew'
   state: 'proposed' | 'submitted' | 'confirmed' | 'failed'
   code?: string
   txHash?: Hex0x

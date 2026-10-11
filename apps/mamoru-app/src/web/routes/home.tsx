@@ -41,6 +41,10 @@ export const homeCopy = {
   armFirst: 'Approve once. Mamoru starts when your money lands.',
   stopBody: 'Mamoru closes every position and swaps back to USDC. Your USDC stays in your account.',
   confirm: 'Confirm with passkey',
+  renewSoon: (day: string) => `Mamoru's approval ends on ${day}. Renew it so your money keeps working.`,
+  renewEnded: 'Mamoru\'s approval has ended. Your money is where it was, but Mamoru cannot manage it until you renew.',
+  renewNote: 'One tap with your passkey. Nothing is moved.',
+  renew: 'Renew approval',
   createFirst: 'Your account is created on Base first, then the USDC is sent.',
   overCapTitle: (o: OverCap) => `This account is over the ${usdPlain(o.capUsdc)} USDC cap, so Mamoru has not started.`,
   overCapBody: (o: OverCap) => `It holds ${usd(o.usdc)} USDC. Nothing was moved. Withdraw at least ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC to an address you control, then start Mamoru.`,
@@ -51,7 +55,7 @@ export const homeCopy = {
 
 const GITHUB = 'https://github.com/ottodevs/mamoru#readme'
 
-const KIND: Record<OpView['kind'], string> = { activate: 'Start', enter: 'Position', reduce: 'Position', transfer: 'Withdraw', exit: 'Stop' }
+const KIND: Record<OpView['kind'], string> = { activate: 'Start', enter: 'Position', reduce: 'Position', transfer: 'Withdraw', exit: 'Stop', renew: 'Approval' }
 
 function plural(n: number, one: string, many: string) {
   return `${n} ${n === 1 ? one : many}`
@@ -559,6 +563,31 @@ export function OverCapRow({ over, onWithdraw }: { over: OverCap; onWithdraw: ()
   )
 }
 
+/** The day an approval ends, as the owner's device writes dates. */
+export function approvalDay(validUntil: number): string {
+  return new Date(validUntil * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' })
+}
+
+/** A running account whose approval is in its last weeks, or over: one tap renews it, nothing is moved. */
+function RenewRow({ accountKey, approval }: { accountKey: string; approval: NonNullable<FundingView['approval']> }) {
+  const flow = useOwnerAction(accountKey, 'renew')
+  const tap = () => void (flow.prepared ? flow.approve() : flow.prepare())
+  // A renewal that failed leaves the row in place: this is where it is tried again.
+  if (flow.result && flow.result.state !== 'failed') return null
+  return (
+    <section className="card flex flex-wrap items-center justify-between gap-3" data-testid="renew" role="status">
+      <span className="max-w-[40rem]">
+        <span className="title">{approval.expired ? homeCopy.renewEnded : homeCopy.renewSoon(approvalDay(approval.validUntil))}</span>
+        <span className="sub">{homeCopy.renewNote}</span>
+        {flow.error ? <span className="err mt-1 block">{flow.error}</span> : null}
+      </span>
+      <button type="button" className="act" onClick={tap} disabled={flow.busy !== null}>
+        {flow.busy === 'signing' ? 'Waiting for passkey' : flow.busy === 'preparing' ? 'Preparing' : flow.prepared ? homeCopy.confirm : homeCopy.renew}
+      </button>
+    </section>
+  )
+}
+
 function StartRow({ accountKey, funded }: { accountKey: string; funded: boolean }) {
   const flow = useOwnerAction(accountKey, 'activate')
   const tap = () => void (flow.prepared ? flow.approve() : flow.prepare())
@@ -597,6 +626,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // An owner prepare that was never signed is not in flight; only armed or sent ops are.
   const inFlight = opList.some((o) => !TERMINAL.has(o.state) && !(o.state === 'proposed' && o.code !== 'ARMED' && !o.txHash))
   const armed = activationLive(opList)
+  // A renewal the owner signed is on its way: the row that asks for it steps aside until it settles.
+  const renewing = opList.some((o) => o.kind === 'renew' && !TERMINAL.has(o.state))
   // Stopped after running: the Working card offers the restart where Stop was, so no Start row too.
   const stopped = !!f && !f.active && f.positions.length === 0 && !inFlight && everStarted(opList)
   // Over the cap the operator refuses Start, so the only action offered is the withdraw that fixes it. This state
@@ -609,7 +640,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
     setWithdrawSeed(seed)
     setDialog('withdraw')
   }
-  const retry = (kind: OpView['kind']) => (kind === 'transfer' ? withdraw() : setDialog(kind === 'exit' ? 'stop' : 'start'))
+  // A renewal is retried from its own row at the top, which is back as soon as the failed one settles.
+  const retry = (kind: OpView['kind']) => (kind === 'renew' ? window.scrollTo({ top: 0, behavior: 'smooth' }) : kind === 'transfer' ? withdraw() : setDialog(kind === 'exit' ? 'stop' : 'start'))
   const kit = useMutation({
     mutationFn: async () => {
       if (!f) return
@@ -648,6 +680,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
             </section>
           ) : !f.active && !inFlight && !armed && !stopped ? (
             <StartRow accountKey={accountKey} funded={hasMoney(f)} />
+          ) : f.active && f.approval?.renewDue && !renewing ? (
+            <RenewRow accountKey={accountKey} approval={f.approval} />
           ) : null}
           <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? () => setDialog('start') : null} />
           <Idle s={s as Split} placing={f.active && (f.engine?.placing === true || !!f.progress)} />
