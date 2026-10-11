@@ -255,7 +255,7 @@ export function Idle({ s, placing = false }: { s: Split; placing?: boolean }) {
       ) : (
         <p className="sub">
           {plural(tokens, placing ? 'token' : 'token idle', placing ? 'tokens' : 'tokens idle')}
-          {s.idleCbbtc > 0n ? ` · ${formatUnits(String(s.idleCbbtc), 'cbBTC')} cbBTC` : ''}
+          {s.idle >= DUST_USDC && s.idleCbbtc > 0n ? ` · ${formatUnits(String(s.idleCbbtc), 'cbBTC')} cbBTC` : ''}
         </p>
       )}
     </section>

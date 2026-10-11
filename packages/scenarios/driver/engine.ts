@@ -62,6 +62,11 @@ export type EngineHooks = {
   requestManageGrant?: (tokenId: bigint, pool: string) => Promise<EngineSession>
 }
 
+/** The block of the latest operation that reached the chain: no review may observe before it. */
+export function observationFloor(ops: readonly Pick<OpRecord, 'included'>[]): bigint {
+  return ops.reduce((floor, o) => (o.included && o.included.blockNumber > floor ? o.included.blockNumber : floor), 0n)
+}
+
 export type ReviewResult =
   | { kind: 'observation-failed'; code: ReasonCode; detail?: string }
   | { kind: 'decided'; observation: Observation; record: DecisionRecord; op: OpRecord | null }
@@ -190,6 +195,13 @@ export class Engine {
     } catch (e) {
       if (e instanceof ReasonError) return { kind: 'observation-failed', code: e.code, detail: e.detail }
       throw e
+    }
+    // Never decide on a view older than the engine's own last operation: a provider serving a head behind it shows
+    // the account as it was before that operation, and the same step would be proposed again. The reviews used to be
+    // minutes apart, which hid this; they can now follow each other in seconds.
+    const floor = observationFloor(this.journal.ops)
+    if (obs.block.number < floor) {
+      return { kind: 'observation-failed', code: 'EHG_OBSERVATION_STALE', detail: `observed at block ${obs.block.number}, the last operation is in block ${floor}` }
     }
     obs = { ...obs, lastRerangeAt: this.lastRerangeAt }
     this.lastObservation = obs
