@@ -34,7 +34,7 @@ import { Engine, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
-import { USDC_POOLS, amountsForLiquidity, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
+import { USDC_POOLS, amountsForLiquidity, inUsdc, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
 import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type EngineHealthSnapshot } from './metrics.ts'
@@ -217,7 +217,7 @@ type Prepared = {
   meta?: { amountUsdc: string; asset?: string; to: Hex }
 }
 
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -444,6 +444,8 @@ export class Operator {
       cbbtc: r.cbbtc.toString(),
       gasReserveWei: this.policyOf(acc).gasReserveWei.toString(),
       active: acc.active,
+      idle: idleTokens(r),
+      engine: this.engineView(acc),
       positions: r.positions.map((p) => ({
         tokenId: p.tokenId.toString(),
         pool: p.pool,
@@ -452,13 +454,20 @@ export class Operator {
         amountUsdc: (p.token0 === 'USDC' ? p.amount0 : p.amount1).toString(),
         amountCbbtc: (p.token0 === 'cbBTC' ? p.amount0 : p.token1 === 'cbBTC' ? p.amount1 : 0n).toString(),
         amounts: [
-          { token: p.token0, amount: p.amount0.toString(), decimals: entry(p.token0).decimals ?? 18 },
-          { token: p.token1, amount: p.amount1.toString(), decimals: entry(p.token1).decimals ?? 18 },
+          { token: p.token0, amount: p.amount0.toString(), decimals: entry(p.token0).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token0, p.amount0, r.prices[p.pool]!.sqrtPriceX96).toString() },
+          { token: p.token1, amount: p.amount1.toString(), decimals: entry(p.token1).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token1, p.amount1, r.prices[p.pool]!.sqrtPriceX96).toString() },
         ],
         valueUsdc: positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96).toString(),
       })),
       progress: this.progressOf(acc),
     }
+  }
+
+  /** Between operations: whether the engine is working through an entry, and when it looks at the account next. */
+  private engineView(acc: AccountState): FundingView['engine'] {
+    const runner = acc.active ? this.runners.get(acc.accountKey) : undefined
+    if (!runner || runner.stopped) return null
+    return { placing: (runner.followUps ?? 0) > 0, nextReviewAt: runner.nextAt === undefined ? null : new Date(runner.nextAt).toISOString() }
   }
 
   /** What is in flight for this account: an owner transaction the operator is executing, else a live engine op. */
@@ -1773,6 +1782,7 @@ export class Operator {
           runner.grace = g.grace
           const next = nextReview(g.more, runner.followUps ?? 0, this.rpcOverBudget(Date.now()), this.cfg.reviewMs)
           runner.followUps = next.followUps
+          runner.nextAt = Date.now() + next.ms
           runner.timer = setTimeout(tick, next.ms)
         }
       }
@@ -1926,6 +1936,23 @@ function isRevert(e: unknown): boolean {
     cur = cur.cause as typeof cur
   }
   return false
+}
+
+/**
+ * Every token of the USDC pools the Safe holds outside a position, with its value in USDC at the pool's price. A
+ * swap leaves its output there until the mint that follows; leaving it out would show the account short of it.
+ */
+export function idleTokens(r: Awaited<ReturnType<typeof readSafe>>): NonNullable<FundingView['idle']> {
+  const out: NonNullable<FundingView['idle']> = []
+  for (const [token, amount] of Object.entries(r.tokens)) {
+    if (amount === 0n) continue
+    const pool = token === 'USDC' ? undefined : USDC_POOLS.find((p) => r.prices[p] && (entry(p).token0 === token || entry(p).token1 === token))
+    if (token !== 'USDC' && !pool) continue
+    const valueUsdc = pool ? inUsdc(pool, token, amount, r.prices[pool]!.sqrtPriceX96) : amount
+    out.push({ token, amount: amount.toString(), decimals: entry(token).decimals ?? 18, valueUsdc: valueUsdc.toString() })
+  }
+  // USDC first, then by value.
+  return out.sort((a, b) => (a.token === 'USDC' ? -1 : b.token === 'USDC' ? 1 : Number(BigInt(b.valueUsdc) - BigInt(a.valueUsdc))))
 }
 
 /** True when the node refused a relayer transaction for lack of ETH (geth: `insufficient funds for gas * price + value`). */

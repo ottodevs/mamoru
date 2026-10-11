@@ -48,8 +48,36 @@ const fresh = param('fresh')
 const overcap = param('overcap')
 const OVER_CAP_USDC = '26920000'
 const capState = (usdc: string) => ({ usdc, overCap: overCap(BigInt(usdc), BigInt(fixtureFunding.capUsdc)) })
+// ?placing (dev only): a running account in the middle of an entry. One position is open, a swap to USDT waits for
+// its mint, the engine is on its way to the next step.
+const placing = param('placing')
+const midEntry = (): Partial<FundingView> => ({
+  active: true,
+  usdc: '1248000',
+  cbbtc: '0',
+  idle: [
+    { token: 'USDC', amount: '1248000', decimals: 6, valueUsdc: '1248000' },
+    { token: 'USDT', amount: '1253694', decimals: 6, valueUsdc: '1253694' },
+  ],
+  engine: { placing: true, nextReviewAt: new Date(Date.now() + 5_000).toISOString() },
+  positions: [
+    {
+      tokenId: '4821',
+      pool: 'pool:USDC/cbBTC/500',
+      liquidity: '1',
+      inRange: true,
+      amountUsdc: '1010000',
+      amountCbbtc: '881',
+      valueUsdc: '2000000',
+      amounts: [
+        { token: 'USDC', amount: '1010000', decimals: 6, valueUsdc: '1010000' },
+        { token: 'cbBTC', amount: '881', decimals: 8, valueUsdc: '990000' },
+      ],
+    },
+  ],
+})
 const liveState = {
-  funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}) } as FundingView,
+  funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}) } as FundingView,
   ops: (overcap
     ? [{ opId: 'own-1-activate', kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: OVER_CAP_USDC, capUsdc: fixtureFunding.capUsdc, updatedAt: new Date().toISOString() }]
     : []) as OpView[],
