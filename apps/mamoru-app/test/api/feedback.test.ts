@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { FeedbackResponse, OwnerResponse } from '@mamoru/domain'
-import { CLAIM_SECONDS, DRAIN_PER_CRON, drainFeedback, FEEDBACK_LIMITS } from '../../src/api/feedback.ts'
+import { CLAIM_SECONDS, DRAIN_PER_CRON, drainFeedback, FEEDBACK_LIMITS, POST_ATTEMPTS_MAX } from '../../src/api/feedback.ts'
 import { harness, register, sessionCookie, PASSKEY_A } from './helpers.ts'
 
 const T0 = new Date('2026-10-11T12:00:00Z')
@@ -16,6 +16,7 @@ type Row = {
   account_key: string | null
   status: string
   mm_post_id: string | null
+  post_attempts: number
   ticket_url: string | null
 }
 
@@ -95,7 +96,7 @@ describe('feedback: one button, two paths (#72)', () => {
     expect(JSON.stringify(found)).not.toContain('203.0.113.9')
 
     const cols = (h.db.raw.query('PRAGMA table_info(feedback)').all() as { name: string }[]).map((c) => c.name).sort()
-    expect(cols).toEqual(['account_key', 'app_version', 'body', 'contact', 'created_at', 'id', 'kind', 'mm_post_id', 'route', 'status', 'ticket_url'].sort())
+    expect(cols).toEqual(['account_key', 'app_version', 'body', 'contact', 'created_at', 'id', 'kind', 'mm_post_id', 'post_attempts', 'route', 'status', 'ticket_url'].sort())
   })
 
   test('contact is stored when sent', async () => {
@@ -317,6 +318,109 @@ describe('feedback: one button, two paths (#72)', () => {
     expect(rows(h).find((r) => r.id === a!.id)!.mm_post_id).toBe('mm-post-2')
     expect(rows(h).find((r) => r.id === c!.id)!.mm_post_id).toBeNull()
     expect(mm.posts.length).toBe(2)
+  })
+
+  test('a note Mattermost refuses does not hold the queue: the ones behind it are posted, and after five tries it is left for a person', async () => {
+    const original = console.error
+    console.error = () => {}
+    try {
+      const mm = mattermost()
+      // Mattermost takes everything except the note whose text says "poison": that one is always a 400.
+      const fetch = async (input: string, init: RequestInit) => (String(init.body).includes('poison') ? new Response('bad post', { status: 400 }) : mm.fetch(input, init))
+      const h = harness(() => T0)
+      const env = { ...h.env, ...MM }
+      for (const [i, body] of ['poison', 'second', 'third'].entries()) {
+        h.db.raw.query("INSERT INTO feedback (id, created_at, kind, body, route, status) VALUES (?, ?, 'support', ?, '/', 'new')").run(`id-${i}`, new Date(T0.getTime() + i * 1000).toISOString(), body)
+      }
+      expect(await drainFeedback(h.db, fetch, env, T0, DRAIN_PER_CRON)).toBe(2)
+      expect(mm.posts.map((p) => parts(p.message).blocks[0])).toEqual(['second', 'third'])
+      const poison = () => rows(h).find((r) => r.id === 'id-0')!
+      expect(poison()).toMatchObject({ mm_post_id: null, post_attempts: 1 })
+      // It is tried again on later runs, up to the limit, and then no more.
+      for (let i = 2; i <= POST_ATTEMPTS_MAX + 3; i++) await drainFeedback(h.db, fetch, env, new Date(T0.getTime() + i * 600_000), DRAIN_PER_CRON)
+      expect(poison()).toMatchObject({ mm_post_id: null, post_attempts: POST_ATTEMPTS_MAX, status: 'new' })
+      expect(mm.posts.length).toBe(2)
+    } finally {
+      console.error = original
+    }
+  })
+
+  test('an outage, a bot that is not authorised and a spent budget count against no note, however long they last', async () => {
+    const original = console.error
+    console.error = () => {}
+    try {
+      const mm = mattermost()
+      let status = 503
+      const fetch = async (input: string, init: RequestInit) => (status === 200 ? mm.fetch(input, init) : new Response('no', { status }))
+      const h = harness(() => T0)
+      const env = { ...h.env, ...MM }
+      h.db.raw.query("INSERT INTO feedback (id, created_at, kind, body, route, status) VALUES ('s', ?, 'support', 'help', '/', 'new'), ('f', ?, 'bug', 'bug', '/', 'new')").run(T0.toISOString(), T0.toISOString())
+      for (const code of [503, 500, 401, 429]) {
+        status = code
+        for (let i = 0; i < 4; i++) expect(await drainFeedback(h.db, fetch, env, new Date(T0.getTime() + i * 600_000), DRAIN_PER_CRON)).toBe(0)
+      }
+      expect(rows(h).map((r) => [r.mm_post_id, r.post_attempts])).toEqual([[null, 0], [null, 0]])
+      status = 200
+      expect(await drainFeedback(h.db, fetch, env, new Date(T0.getTime() + 3_600_000), DRAIN_PER_CRON)).toBe(2)
+    } finally {
+      console.error = original
+    }
+  })
+
+  test('one channel failing or out of budget does not stop the other', async () => {
+    const original = console.error
+    console.error = () => {}
+    try {
+      const mm = mattermost()
+      // The support channel is down; the feedback channel works.
+      const fetch = async (input: string, init: RequestInit) => (String(init.body).includes('support-chan') ? new Response('down', { status: 503 }) : mm.fetch(input, init))
+      const h = harness(() => T0)
+      const env = { ...h.env, ...MM }
+      h.db.raw.query("INSERT INTO feedback (id, created_at, kind, body, route, status) VALUES ('s', ?, 'support', 'help', '/', 'new'), ('f', ?, 'idea', 'idea', '/', 'new')").run(T0.toISOString(), T0.toISOString())
+      expect(await drainFeedback(h.db, fetch, env, T0, DRAIN_PER_CRON)).toBe(1)
+      expect(mm.posts[0]!.channel_id).toBe('feedback-chan')
+
+      // The support budget of the window is spent and many support notes wait: feedback is still posted.
+      const h2 = harness(() => T0)
+      const window = Math.floor(T0.getTime() / 1000) - (Math.floor(T0.getTime() / 1000) % 600)
+      h2.db.raw.query('INSERT INTO auth_rate (key, window, count) VALUES (?, ?, ?)').run('fb:posts:support', window, FEEDBACK_LIMITS.posts.support)
+      for (let i = 0; i < 100; i++) h2.db.raw.query("INSERT INTO feedback (id, created_at, kind, body, route, status) VALUES (?, ?, 'support', 'help', '/', 'new')").run(`s-${i}`, T0.toISOString())
+      h2.db.raw.query("INSERT INTO feedback (id, created_at, kind, body, route, status) VALUES ('f', ?, 'bug', 'bug', '/', 'new')").run(T0.toISOString())
+      const mm2 = mattermost()
+      expect(await drainFeedback(h2.db, mm2.fetch, { ...h2.env, ...MM }, T0, DRAIN_PER_CRON)).toBe(1)
+      expect(mm2.posts[0]!.channel_id).toBe('feedback-chan')
+      // The support notes wait untouched: no claim, no attempt.
+      expect(h2.db.raw.query("SELECT COUNT(*) AS n FROM feedback WHERE kind = 'support' AND mm_post_id IS NULL AND post_attempts = 0").get()).toEqual({ n: 100 })
+    } finally {
+      console.error = original
+    }
+  })
+
+  test('runs at the same moment cannot pass the budget of the window between them', async () => {
+    const h = harness(() => T0)
+    const env = { ...h.env, ...MM }
+    const window = Math.floor(T0.getTime() / 1000) - (Math.floor(T0.getTime() / 1000) % 600)
+    h.db.raw.query('INSERT INTO auth_rate (key, window, count) VALUES (?, ?, ?)').run('fb:posts:support', window, FEEDBACK_LIMITS.posts.support - 2)
+    for (let i = 0; i < 12; i++) h.db.raw.query("INSERT INTO feedback (id, created_at, kind, body, route, status) VALUES (?, ?, 'support', 'help', '/', 'new')").run(`s-${i}`, new Date(T0.getTime() + i).toISOString())
+    const mm = mattermost()
+    // A slow Mattermost, so the four runs overlap.
+    const fetch = async (input: string, init: RequestInit) => (await new Promise((r) => setTimeout(r, 5)), mm.fetch(input, init))
+    const posted = await Promise.all(Array.from({ length: 4 }, () => drainFeedback(h.db, fetch, env, T0, DRAIN_PER_CRON)))
+    expect(posted.reduce((a, b) => a + b, 0)).toBe(2)
+    expect(mm.posts.length).toBe(2)
+    // The ten that did not fit wait with no claim and no attempt.
+    expect(h.db.raw.query('SELECT COUNT(*) AS n FROM feedback WHERE mm_post_id IS NULL AND post_attempts = 0').get()).toEqual({ n: 10 })
+  })
+
+  test('an answer without a post id is kept as posted, not posted again', async () => {
+    const h = harness(() => T0)
+    h.db.raw.query("INSERT INTO feedback (id, created_at, kind, body, route, status) VALUES ('s', ?, 'support', 'help', '/', 'new')").run(T0.toISOString())
+    let calls = 0
+    const fetch = async () => (calls++, Response.json({}))
+    expect(await drainFeedback(h.db, fetch, { ...h.env, ...MM }, T0, DRAIN_PER_CRON)).toBe(1)
+    expect(await drainFeedback(h.db, fetch, { ...h.env, ...MM }, new Date(T0.getTime() + 600_000), DRAIN_PER_CRON)).toBe(0)
+    expect(calls).toBe(1)
+    expect(rows(h)[0]!.mm_post_id).toBe('posted:no-id')
   })
 
   test('without Mattermost configured the drain does nothing and claims nothing', async () => {

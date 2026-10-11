@@ -71,12 +71,16 @@ export const MATTERMOST_TIMEOUT_MS = 5_000
 export const DRAIN_PER_REQUEST = 3
 export const DRAIN_PER_CRON = 20
 
-/** Posts the note to the channel its kind belongs to. Null when unconfigured, refused or unreachable: nothing here ever throws. */
-async function postToMattermost(fetcher: MattermostFetch, env: Env, note: Note): Promise<string | null> {
+/**
+ * Posts the note to the channel its kind belongs to. `refused` says Mattermost answered and would not take this
+ * post (4xx): the note's own problem, not a server that is down. Nothing here ever throws.
+ */
+async function postToMattermost(fetcher: MattermostFetch, env: Env, note: Note): Promise<{ postId: string | null; refused: boolean }> {
   const { MATTERMOST_URL, MATTERMOST_BOT_TOKEN, MATTERMOST_SUPPORT_CHANNEL_ID, MATTERMOST_FEEDBACK_CHANNEL_ID } = env
-  if (!MATTERMOST_URL || !MATTERMOST_BOT_TOKEN || !MATTERMOST_SUPPORT_CHANNEL_ID || !MATTERMOST_FEEDBACK_CHANNEL_ID) return null
+  if (!MATTERMOST_URL || !MATTERMOST_BOT_TOKEN || !MATTERMOST_SUPPORT_CHANNEL_ID || !MATTERMOST_FEEDBACK_CHANNEL_ID) return { postId: null, refused: false }
   const channelId = note.kind === 'support' ? MATTERMOST_SUPPORT_CHANNEL_ID : MATTERMOST_FEEDBACK_CHANNEL_ID
   const message = note.kind === 'support' ? supportMessage(note) : feedbackMessage(note)
+  let refused = false
   try {
     const res = await fetcher(`${MATTERMOST_URL.replace(/\/+$/, '')}/api/v4/posts`, {
       method: 'POST',
@@ -84,13 +88,18 @@ async function postToMattermost(fetcher: MattermostFetch, env: Env, note: Note):
       body: JSON.stringify({ channel_id: channelId, message }),
       signal: AbortSignal.timeout(MATTERMOST_TIMEOUT_MS),
     })
-    if (!res.ok) throw new MattermostPostError(`mattermost http ${res.status}`)
+    if (!res.ok) {
+      // 401 and 429 are about the bot and the server, not about this note.
+      refused = res.status >= 400 && res.status < 500 && res.status !== 401 && res.status !== 429
+      throw new MattermostPostError(`mattermost http ${res.status}`)
+    }
     const data = (await res.json().catch(() => null)) as { id?: unknown } | null
-    return typeof data?.id === 'string' ? data.id : null
+    // An answer without an id is kept as posted under a marker: posting it again would be a duplicate.
+    return { postId: typeof data?.id === 'string' && data.id !== '' ? data.id : 'posted:no-id', refused: false }
   } catch (e) {
     // The token and the response body never reach the log: only this module's own reason, or a generic one for anything foreign.
     console.error('feedback: mattermost post failed', e instanceof MattermostPostError ? e.message : 'unexpected error')
-    return null
+    return { postId: null, refused }
   }
 }
 
@@ -137,15 +146,25 @@ type FeedbackRow = { id: string; created_at: string; kind: FeedbackRequest['kind
 
 /** A claim on a note while it is being posted. One left behind by a Worker that died is taken over after this long. */
 export const CLAIM_SECONDS = 120
+/** A note Mattermost keeps refusing is tried this many times, then left in the table for a person: it must not hold the queue for ever. */
+export const POST_ATTEMPTS_MAX = 5
 const claimOf = (now: Date) => `posting:${Math.floor(now.getTime() / 1000)}`
 const staleClaim = (now: Date) => `posting:${Math.floor(now.getTime() / 1000) - CLAIM_SECONDS}`
 
 /**
- * Posts notes that are stored and not yet in Mattermost: support first, then oldest first, at most `max`.
- * It runs after every accepted note (which is then simply the first one waiting) and from the Worker's cron,
- * so a note that could not be posted (Mattermost down, budget of the window spent) is posted later instead of
- * waiting unseen. A note is claimed in one statement before it is posted, so two runs never post it twice.
- * Stops at the first post that fails: Mattermost is not answering. Returns how many were posted. Never throws.
+ * Posts notes that are stored and not yet in Mattermost, at most `max`. It runs after every accepted note
+ * (which is then simply one of those waiting) and from the Worker's cron, so a note that could not be posted
+ * (Mattermost down, budget of the window spent) is posted later instead of waiting unseen.
+ * - Support and feedback are two queues, each oldest first, support served first. Neither can hold the other
+ *   back: a spent budget or a failing channel on one side leaves the other side running.
+ * - A note is claimed in one statement before it is posted, so two runs never post it twice.
+ * - When Mattermost refuses a note itself (4xx), that is an attempt against the note and the queue goes on to
+ *   the next one. After POST_ATTEMPTS_MAX the note is no longer tried, so it cannot block the notes behind it.
+ *   An outage or a spent budget is not counted against any note.
+ * - The budget of the window is counted and checked in one statement, so runs at the same moment cannot
+ *   pass it between them.
+ * - A queue stops at the first post that fails for a reason that is not the note's own (network, 5xx).
+ * Returns how many were posted. Never throws.
  */
 export async function drainFeedback(db: Db, fetcher: MattermostFetch, env: Env, now: Date, max: number): Promise<number> {
   const { MATTERMOST_URL, MATTERMOST_BOT_TOKEN, MATTERMOST_SUPPORT_CHANNEL_ID, MATTERMOST_FEEDBACK_CHANNEL_ID } = env
@@ -153,31 +172,42 @@ export async function drainFeedback(db: Db, fetcher: MattermostFetch, env: Env, 
   let posted = 0
   try {
     const window = windowOf(now)
-    const waiting = await db
-      .prepare(
-        `SELECT id, created_at, kind, body, contact, route, account_key, mm_post_id FROM feedback
-         WHERE status = 'new' AND (mm_post_id IS NULL OR (mm_post_id LIKE 'posting:%' AND mm_post_id < ?))
-         ORDER BY (kind = 'support') DESC, created_at ASC LIMIT ?`,
-      )
-      .bind(staleClaim(now), max * 4)
-      .all<FeedbackRow>()
-    const spent = { support: await counted(db, 'fb:posts:support', window), feedback: await counted(db, 'fb:posts:feedback', window) }
-    for (const row of waiting.results) {
-      if (posted >= max) break
-      const budget = row.kind === 'support' ? 'support' : 'feedback'
-      if (spent[budget] >= FEEDBACK_LIMITS.posts[budget]) continue
-      const claim = claimOf(now)
-      const mine = await db
-        .prepare('UPDATE feedback SET mm_post_id = ? WHERE id = ? AND (mm_post_id IS NULL OR mm_post_id = ?) RETURNING id')
-        .bind(claim, row.id, row.mm_post_id)
-        .first<{ id: string }>()
-      if (!mine) continue
-      spent[budget] = await bump(db, `fb:posts:${budget}`, window)
-      const postId = await postToMattermost(fetcher, env, { id: row.id, kind: row.kind, body: row.body, contact: row.contact, route: row.route, accountKey: row.account_key })
-      // The claim is given back when the post failed, so the next run tries again.
-      await db.prepare('UPDATE feedback SET mm_post_id = ? WHERE id = ? AND mm_post_id = ?').bind(postId, row.id, claim).run()
-      if (!postId) break
-      posted++
+    for (const queue of ['support', 'feedback'] as const) {
+      const waiting = await db
+        .prepare(
+          `SELECT id, created_at, kind, body, contact, route, account_key, mm_post_id FROM feedback
+           WHERE status = 'new' AND post_attempts < ? AND (kind = 'support') = ?
+             AND (mm_post_id IS NULL OR (mm_post_id LIKE 'posting:%' AND mm_post_id < ?))
+           ORDER BY post_attempts ASC, created_at ASC LIMIT ?`,
+        )
+        .bind(POST_ATTEMPTS_MAX, queue === 'support' ? 1 : 0, staleClaim(now), max)
+        .all<FeedbackRow>()
+      for (const row of waiting.results) {
+        if (posted >= max) return posted
+        const claim = claimOf(now)
+        const mine = await db
+          .prepare('UPDATE feedback SET mm_post_id = ?, post_attempts = post_attempts + 1 WHERE id = ? AND (mm_post_id IS NULL OR mm_post_id = ?) RETURNING id')
+          .bind(claim, row.id, row.mm_post_id)
+          .first<{ id: string }>()
+        if (!mine) continue
+        // Gives the claim back. An attempt counts against the note only when Mattermost refused the note itself.
+        const giveBack = (keepAttempt: boolean) =>
+          db.prepare(`UPDATE feedback SET mm_post_id = NULL, post_attempts = post_attempts - ? WHERE id = ? AND mm_post_id = ?`).bind(keepAttempt ? 0 : 1, row.id, claim).run()
+        // Counted, then checked: the count this run got back is its own place in the window.
+        if ((await bump(db, `fb:posts:${queue}`, window)) > FEEDBACK_LIMITS.posts[queue]) {
+          await giveBack(false)
+          break
+        }
+        const result = await postToMattermost(fetcher, env, { id: row.id, kind: row.kind, body: row.body, contact: row.contact, route: row.route, accountKey: row.account_key })
+        if (result.postId) {
+          await db.prepare('UPDATE feedback SET mm_post_id = ? WHERE id = ? AND mm_post_id = ?').bind(result.postId, row.id, claim).run()
+          posted++
+        } else {
+          await giveBack(result.refused)
+          // Not this note's fault: Mattermost is not answering, so this queue waits for the next run.
+          if (!result.refused) break
+        }
+      }
     }
   } catch {
     console.error('feedback: drain stopped on an unexpected error')
