@@ -83,6 +83,8 @@ const floorHours = (h: number) => (Math.floor(h * 100) / 100).toFixed(2)
 export function soakVerdict(records: readonly ReleaseRecord[], sha: string, now: Date, options: SoakOptions): Verdict & { hours?: number } {
   const beta = records.filter((r) => r.env === 'beta')
   if (beta.some((r) => !Number.isFinite(Date.parse(r.at)))) return { ok: false, reason: 'the release log has a beta record with a date that cannot be read. Fix the log before releasing.' }
+  // A record from the future means the clock or the log is wrong, and every sum made with it would be too.
+  if (beta.some((r) => Date.parse(r.at) > now.getTime())) return { ok: false, reason: 'the release log has a beta deploy dated in the future. Check the clock and the release log.' }
   const newestFirst = [...beta].sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
   const latest = newestFirst[0]
   if (!newestFirst.some((r) => r.sha === sha && r.smokeOk)) return { ok: false, reason: `the release log has no beta deploy of ${short(sha)} with a passing smoke test. Deploy it to beta with \`bun run deploy:beta\` first.` }
@@ -94,7 +96,6 @@ export function soakVerdict(records: readonly ReleaseRecord[], sha: string, now:
     start = Date.parse(r.at)
   }
   const hours = (now.getTime() - start) / 3_600_000
-  if (hours < 0) return { ok: false, reason: `the beta deploy of ${short(sha)} is dated in the future. Check the clock and the release log.` }
   if (hours < options.minHours) {
     const minutesLeft = Math.ceil((options.minHours - hours) * 60)
     return { ok: false, hours, reason: `${short(sha)} has been on beta for ${floorHours(hours)} h; this release asks for ${options.minHours} h (${minutesLeft} min to go).` }

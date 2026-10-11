@@ -150,6 +150,9 @@ describe('soakVerdict', () => {
   })
   it('a record dated in the future or with a date that cannot be read is refused', () => {
     expect(soakVerdict([beta(A, -5)], A, T0, opts).ok).toBe(false)
+    // An older good record does not hide a later one from the future, of this sha or of another.
+    expect(soakVerdict([beta(A, 25), beta(A, -1)], A, T0, opts).ok).toBe(false)
+    expect(soakVerdict([beta(B, -1), beta(A, 30)], A, T0, opts).ok).toBe(false)
     expect(soakVerdict([{ ...beta(A, 30), at: 'yesterday' }], A, T0, opts).ok).toBe(false)
     expect(soakVerdict([beta(A, 30), { ...beta(B, 30), at: 'yesterday' }], A, T0, opts).ok).toBe(false)
   })
