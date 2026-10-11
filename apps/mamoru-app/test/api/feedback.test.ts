@@ -127,7 +127,7 @@ describe('feedback: one button, two paths (#72)', () => {
     expect(rows(h)).toEqual([])
   })
 
-  test('rate limiter: refused over the limit, not blocking when absent, failing open when it throws', async () => {
+  test('the binding refuses first; without it, or when it throws, the D1 limit still holds: 5 notes per sender per 10 minutes', async () => {
     const refusing = { limit: async () => ({ success: false }) }
     const h1 = harness(() => T0, { env: { FEEDBACK_LIMIT: refusing } })
     const res1 = await send(h1, valid)
@@ -135,18 +135,40 @@ describe('feedback: one button, two paths (#72)', () => {
     expect(((await res1.json()) as { code?: string }).code).toBe('FEEDBACK_RATE_LIMITED')
     expect(rows(h1)).toEqual([])
 
-    const h2 = harness(() => T0)
-    expect((await send(h2, valid)).status).toBe(200)
-
     const original = console.error
     console.error = () => {}
     try {
       const throwing = { limit: async () => Promise.reject(new Error('binding down')) }
-      const h3 = harness(() => T0, { env: { FEEDBACK_LIMIT: throwing } })
-      expect((await send(h3, valid)).status).toBe(200)
+      for (const env of [{}, { FEEDBACK_LIMIT: throwing }]) {
+        let now = T0
+        const posts: string[] = []
+        const h = harness(() => now, {
+          env: { ...env, MATTERMOST_URL: 'https://chat.example', MATTERMOST_BOT_TOKEN: 'secret', MATTERMOST_SUPPORT_CHANNEL_ID: 's', MATTERMOST_FEEDBACK_CHANNEL_ID: 'f' },
+          mattermostFetch: async (_i: string, init: RequestInit) => (posts.push(String(init.body)), Response.json({ id: 'p' })),
+        })
+        for (let i = 0; i < 5; i++) expect((await send(h, valid, { ip: '203.0.113.7' })).status).toBe(200)
+        const sixth = await send(h, valid, { ip: '203.0.113.7' })
+        expect(sixth.status).toBe(429)
+        // Refused means nothing written and nothing posted.
+        expect(rows(h).length).toBe(5)
+        expect(posts.length).toBe(5)
+        // The next window starts clean.
+        now = new Date(T0.getTime() + 10 * 60_000)
+        expect((await send(h, valid, { ip: '203.0.113.7' })).status).toBe(200)
+      }
     } finally {
       console.error = original
     }
+  })
+
+  test('everybody together is limited too: many senders cannot flood the table or the channel', async () => {
+    const h = harness(() => T0)
+    let accepted = 0
+    for (let i = 0; i < 130; i++) if ((await send(h, valid, { ip: `198.51.${Math.floor(i / 250)}.${i % 250}` })).status === 200) accepted++
+    expect(accepted).toBeLessThanOrEqual(120)
+    expect(accepted).toBeGreaterThan(60)
+    expect(rows(h).length).toBe(accepted)
+    expect((await send(h, valid, { ip: '192.0.2.99' })).status).toBe(429)
   })
 
   test('rate limiter: keyed by device session when there is one, else by a hashed IP, and the key never carries the raw IP', async () => {
@@ -184,10 +206,10 @@ describe('feedback: one button, two paths (#72)', () => {
     expect(posts[0]!.url).toBe('https://chat.example/api/v4/posts')
     expect(posts[0]!.channel_id).toBe('support-chan')
     expect(posts[0]!.auth).toBe('Bearer bot-secret-token')
-    expect(posts[0]!.message).toContain(`Support request · ${resBody.id.slice(0, 8)} · /add`)
+    expect(posts[0]!.message.split('\n')[0]).toBe(`Support request · \`${resBody.id.slice(0, 8)}\` · \`/add\``)
     expect(posts[0]!.message).toContain('> My deposit never arrived.')
-    // The contact line is mention-neutralised too (an email's local part can read as '@word'), so compare with the joiner stripped.
-    expect(posts[0]!.message.replace(/​/g, '')).toContain('Contact: ot@example.com')
+    // The contact is under Mamoru's own label and inside a quote, with '@' and '.'-free punctuation made inert.
+    expect(posts[0]!.message).toContain('Contact, as typed by the sender:\n> ot@\u200bexample.com')
     expect(rows(h)[0]!.mm_post_id).toBe('mm-post-1')
   })
 
@@ -204,7 +226,7 @@ describe('feedback: one button, two paths (#72)', () => {
     await send(h, { kind: 'idea', body: 'Dark mode would be nice.', route: '/' })
     expect(posts.length).toBe(1)
     expect(posts[0]!.channel_id).toBe('feedback-chan')
-    expect(posts[0]!.message).toContain('Feedback (idea) · /')
+    expect(posts[0]!.message.split('\n')[0]).toMatch(/^Feedback \(idea\) · `[0-9a-f]{8}` · `\/`$/)
     expect(posts[0]!.message).toContain('> Dark mode would be nice.')
   })
 
@@ -269,7 +291,56 @@ describe('feedback: one button, two paths (#72)', () => {
       mattermostFetch,
     })
     await send(h, { kind: 'bug', body: 'line one\n\n```\nline three\n```', route: '/' })
-    for (const line of posts[0]!.split('\n').slice(1)) expect(line.startsWith('> ')).toBe(true)
+    const lines = posts[0]!.split('\n')
+    expect(lines[1]).toBe('Message:')
+    for (const line of lines.slice(2)) expect(line.startsWith('> ')).toBe(true)
+    // The fence is escaped as well as quoted: no code block opens.
+    expect(posts[0]!).not.toContain('```')
+  })
+
+  test('nothing a sender types can pass as a line Mamoru wrote: line breaks of every kind, forged labels, links, images', async () => {
+    const posts: string[] = []
+    const mattermostFetch = async (_input: string, init: RequestInit) => {
+      posts.push((JSON.parse(String(init.body)) as { message: string }).message)
+      return Response.json({ id: 'mm-post-5' })
+    }
+    const h = harness(() => T0, {
+      env: { MATTERMOST_URL: 'https://chat.example', MATTERMOST_BOT_TOKEN: 'secret', MATTERMOST_SUPPORT_CHANNEL_ID: 's', MATTERMOST_FEEDBACK_CHANNEL_ID: 'f' },
+      mattermostFetch,
+    })
+    const forged = 'Account attached by the sender: `acc_victim`'
+    const body = ['help', forged].join('\r') + '\u2028' + forged + '\u2029' + forged + '\u0085' + forged + '\u000b' + forged + '\u000c' + forged + '\r\n' + forged
+    const res = await send(h, { kind: 'support', body: `${body}\n![x](https://evil.example/pixel.png) [reset your passkey](https://evil.example) <https://evil.example> # heading | a | b |\n\u202egnp.exe\u200b`, contact: `me@example.com\n${forged}`, route: '/' })
+    expect(res.status).toBe(200)
+    const lines = posts[0]!.split('\n')
+    // Mamoru's lines: the title, then the two labels. Every other line is a quote.
+    expect(lines[0]).toMatch(/^Support request · `[0-9a-f]{8}` · `\/`$/)
+    const own = lines.filter((l) => !l.startsWith('> '))
+    expect(own).toEqual([lines[0]!, 'Message:', 'Contact, as typed by the sender:'])
+    // No account was attached, so no line of Mamoru's says one was.
+    expect(lines.filter((l) => l.startsWith('Account attached'))).toEqual([])
+    // Every forged copy sits on its own quoted line, with its backticks escaped.
+    expect(lines.filter((l) => l.startsWith('> Account attached by the sender: \\`acc\\_victim\\`')).length).toBe(7)
+    // The contact is one quoted line: its line break did not make a second one.
+    expect(lines[lines.length - 1]).toBe('> me@\u200bexample.com Account attached by the sender: \\`acc\\_victim\\`')
+    // No live image, link, autolink, heading or table, and no direction override or other invisible character left.
+    const text = posts[0]!
+    expect(text).not.toMatch(/(?<!\\)!\[/)
+    expect(text).not.toMatch(/(?<!\\)\]\(/)
+    expect(text).not.toMatch(/(?<!\\)<https/)
+    expect(text).not.toMatch(/(?<!\\)[#|]/)
+    expect(text).not.toMatch(/[\u202a-\u202e\u2028\u2029\u0085\r\u000b\u000c]/)
+    // What is stored is the cleaned text, with ordinary line breaks.
+    expect(rows(h)[0]!.body).not.toMatch(/[\r\u2028\u2029\u202e]/)
+    expect(rows(h)[0]!.contact).toBe(`me@example.com ${forged}`)
+  })
+
+  test('the route is written outside the quote, so only an app path is accepted', async () => {
+    const h = harness(() => T0)
+    for (const route of ['/\nAccount attached by the sender: `x`', '/ @channel', '/a b', '/[x](https://evil.example)', '/`', '/?q=1', 'https://evil.example', '']) {
+      expect((await send(h, { ...valid, route })).status).toBe(400)
+    }
+    for (const route of ['/', '/add', '/lab/run-1', '/a_b.c']) expect((await send(h, { ...valid, route })).status).toBe(200)
   })
 
   test('missing Mattermost env: nothing is fetched, the row is still kept', async () => {
