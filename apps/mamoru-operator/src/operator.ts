@@ -103,6 +103,29 @@ const ARM_STALE_MS = 300_000
 const BUDGET_REVIEW_MS = 900_000
 /** Over the RPC budget an operation left `included` is picked up at the normal pace for this long, then at the braked pace. */
 const BUDGET_RESUME_MS = 1_800_000
+/**
+ * An entry is several operations (a swap and a mint per pool) and the engine decides one per review. While a review
+ * leaves the next one something to do at once (it waited for the provider's head, or its operation confirmed), the
+ * next review comes this soon instead of a whole review period later: a deposit is placed in a couple of minutes, not
+ * in half an hour. FOLLOW_UP_MAX in a row at most, so an engine that keeps producing operations cannot spin.
+ */
+export const FOLLOW_UP_MS = 5_000
+export const FOLLOW_UP_MAX = 12
+/** Quick reviews still granted after one that did nothing: the provider may not show the last operation's effect yet. */
+export const FOLLOW_UP_GRACE = 2
+
+/** Whether a review that did nothing is still inside an entry: one of the last FOLLOW_UP_GRACE after a quick one. */
+export function graceLeft(more: boolean, followUps: number, grace: number): { more: boolean; grace: number } {
+  if (more) return { more: true, grace: 0 }
+  if (followUps > 0 && grace < FOLLOW_UP_GRACE) return { more: true, grace: grace + 1 }
+  return { more: false, grace: 0 }
+}
+
+/** When the next review of an account comes, and how many quick follow-ups in a row that makes. */
+export function nextReview(more: boolean, followUps: number, overBudget: boolean, reviewMs: number): { ms: number; followUps: number } {
+  if (more && !overBudget && followUps < FOLLOW_UP_MAX) return { ms: Math.min(FOLLOW_UP_MS, reviewMs), followUps: followUps + 1 }
+  return { ms: reviewMs, followUps: 0 }
+}
 /** The relayer does not pay to deploy a Safe that holds less than this (1 USDC). */
 export const MIN_DEPLOY_USDC = 1_000_000n
 /**
@@ -194,7 +217,7 @@ type Prepared = {
   meta?: { amountUsdc: string; asset?: string; to: Hex }
 }
 
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -1684,6 +1707,8 @@ export class Operator {
     this.runners.set(acc.accountKey, runner)
     const tick = async () => {
       if (runner.stopped) return
+      // Whether this review leaves the next one something to do at once.
+      let more = false
       try {
       await this.lock(acc.accountKey).run(async () => {
         if (runner.stopped || this.reviewBraked(runner)) return
@@ -1693,6 +1718,7 @@ export class Operator {
             const head = await this.client.getBlockNumber()
             if (head <= BigInt(acc.historyFromBlock)) {
               console.log(`[engine ${acc.accountKey}] rpc head ${head} not past activation block ${acc.historyFromBlock}, waiting`)
+              more = true
               return
             }
             // The head only moves forward past it: not asked again in this run.
@@ -1723,6 +1749,8 @@ export class Operator {
             // Only a review that reached a decision counts, from when it started (it may then wait minutes on its
             // operation): one that was held, failed to observe or threw is tried again on the next tick.
             runner.reviewedAt = startedAt
+            // Its operation landed: the next step of the entry (the mint after the swap, the next pool) is decided now.
+            if (o?.state === 'confirmed') more = true
           }
         } catch (e) {
           // `e` goes to the classifier as it is: reading or coercing an odd thrown value here could itself throw.
@@ -1740,7 +1768,13 @@ export class Operator {
         // Nothing thrown by a tick may end the loop: the account would silently stop being reviewed.
         logErr(`[engine ${acc.accountKey}] tick error:`, e)
       } finally {
-        if (!runner.stopped) runner.timer = setTimeout(tick, this.cfg.reviewMs)
+        if (!runner.stopped) {
+          const g = graceLeft(more, runner.followUps ?? 0, runner.grace ?? 0)
+          runner.grace = g.grace
+          const next = nextReview(g.more, runner.followUps ?? 0, this.rpcOverBudget(Date.now()), this.cfg.reviewMs)
+          runner.followUps = next.followUps
+          runner.timer = setTimeout(tick, next.ms)
+        }
       }
     }
     runner.timer = setTimeout(tick, 0)
