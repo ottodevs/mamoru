@@ -24,11 +24,13 @@ export const WATCHED_CHAINS: readonly WatchedChain[] = [
 ]
 
 export const RPC_TIMEOUT_MS = 8_000
-/** One read per account in this window: the SPA polls, the RPC is not ours. Requests that arrive while a read is in flight share it. */
+/** One read per account in this window: the SPA polls, the RPC is not ours. */
 export const CACHE_MS = 30_000
 /** A read that failed is not repeated before this: an owner cannot spend the RPC quota by asking again. */
 export const FAIL_MS = 10_000
-const CACHE_MAX = 500
+/** While a read is under way no second one starts for that account. Longer than the RPC timeout, so a read that was abandoned frees itself. */
+export const PENDING_MS = RPC_TIMEOUT_MS + 2_000
+export const GATE_MAX = 500
 
 const abi = parseAbi([
   'struct Call3 { address target; bool allowFailure; bytes callData; }',
@@ -114,11 +116,51 @@ export async function readOtherChain(fetcher: ChainFetch, url: string | undefine
   }
 }
 
-type Cached = { at: number; failed: boolean; view: Promise<OtherChainsView> }
+type Slot = { at: number; state: 'pending' | 'ok' | 'failed'; view?: OtherChainsView }
+const LIFETIME = { pending: PENDING_MS, ok: CACHE_MS, failed: FAIL_MS } as const
 
-export function otherChainRoutes(fetcher: ChainFetch) {
+export type Admission =
+  | { kind: 'cached'; view: OtherChainsView }
+  /** A read for this account is under way, or there is no room to track another one: do not read now. */
+  | { kind: 'wait' }
+  | { kind: 'read'; done: (view: OtherChainsView) => void }
+
+/**
+ * Decides whether a request may read the RPC. It keeps values, never promises: on Workers a promise belongs to
+ * the request that created it and may never settle if that request goes away, so nothing here waits on another
+ * request. A slot leaves only when its own time is up; when every slot is live a new account is told to wait,
+ * so filling the table cannot erase a read under way or a failure's backoff.
+ */
+export class ReadGate {
+  private readonly slots = new Map<string, Slot>()
+  constructor(private readonly max = GATE_MAX) {}
+
+  private live(slot: Slot, now: number): boolean {
+    const age = now - slot.at
+    return age >= 0 && age < LIFETIME[slot.state]
+  }
+
+  admit(key: string, now: number): Admission {
+    const hit = this.slots.get(key)
+    if (hit && this.live(hit, now)) return hit.view ? { kind: 'cached', view: hit.view } : { kind: 'wait' }
+    if (!hit && this.slots.size >= this.max) {
+      for (const [k, slot] of this.slots) if (!this.live(slot, now)) this.slots.delete(k)
+      if (this.slots.size >= this.max) return { kind: 'wait' }
+    }
+    const slot: Slot = { at: now, state: 'pending' }
+    this.slots.set(key, slot)
+    return {
+      kind: 'read',
+      done: (view) => {
+        slot.view = view
+        slot.state = view.chains.every((ch) => ch.status === 'observed') ? 'ok' : 'failed'
+      },
+    }
+  }
+}
+
+export function otherChainRoutes(fetcher: ChainFetch, gate = new ReadGate()) {
   const routes = new Hono<AppEnv>()
-  const cache = new Map<string, Cached>()
 
   // TEN: same ownership rule as the dashboard. The address read is the account's own, taken from its row.
   routes.get('/:accountKey/other-chains', async (c) => {
@@ -131,23 +173,18 @@ export function otherChainRoutes(fetcher: ChainFetch) {
     c.set('accountKey', account.account_key)
 
     const now = c.var.now()
-    const hit = cache.get(account.account_key)
-    const age = hit ? now.getTime() - hit.at : -1
-    // The entry is stored before the read ends, so requests that arrive meanwhile wait for the same read.
-    if (hit && age >= 0 && age < (hit.failed ? FAIL_MS : CACHE_MS)) return c.json(await hit.view)
-
     // Only for an account that lives on Base, and never the chain the account is on: that one is the operator's to read.
     const watched = account.chain_id === BASE_CHAIN_ID ? WATCHED_CHAINS.filter((w) => w.chainId !== account.chain_id) : []
-    const entry: Cached = {
-      at: now.getTime(),
-      failed: false,
-      view: Promise.all(watched.map((w) => readOtherChain(fetcher, c.env.ETHEREUM_RPC_URL, w, account.address, now))).then((chains) => ({ address: account.address, accountChainId: account.chain_id, chains })),
-    }
-    if (cache.size >= CACHE_MAX) cache.clear()
-    cache.set(account.account_key, entry)
-    const view = await entry.view
-    entry.failed = view.chains.some((ch) => ch.status !== 'observed')
-    return c.json(view)
+    const view = (chains: OtherChainFunds[]): OtherChainsView => ({ address: account.address, accountChainId: account.chain_id, chains })
+
+    const admission = gate.admit(account.account_key, now.getTime())
+    if (admission.kind === 'cached') return c.json(admission.view)
+    // Not read this time: said as not observed, which the SPA shows as nothing. The next poll asks again.
+    if (admission.kind === 'wait') return c.json(view(watched.map((w) => ({ chainId: w.chainId, name: w.name, status: 'not_observed' as const, observedAt: now.toISOString() }))))
+
+    const read = view(await Promise.all(watched.map((w) => readOtherChain(fetcher, c.env.ETHEREUM_RPC_URL, w, account.address, now))))
+    admission.done(read)
+    return c.json(read)
   })
   return routes
 }
