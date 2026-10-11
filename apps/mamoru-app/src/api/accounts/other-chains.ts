@@ -155,7 +155,8 @@ export type Admission =
   | { kind: 'busy' }
   /** Every slot is live and none is this account's: this read cannot be tracked. */
   | { kind: 'full' }
-  | { kind: 'read'; done: (view: OtherChainsView) => void; cancel: () => void }
+  /** `done` takes the time the read ended: the cache window and a failure's backoff run from there, not from when it started. */
+  | { kind: 'read'; done: (view: OtherChainsView, endedAt: number) => void; cancel: () => void }
 
 /**
  * Decides whether a request may read the RPC. It keeps values, never promises: on Workers a promise belongs to
@@ -183,7 +184,8 @@ export class ReadGate {
     this.slots.set(key, slot)
     return {
       kind: 'read',
-      done: (view) => {
+      done: (view, endedAt) => {
+        slot.at = endedAt
         slot.view = view
         slot.state = view.chains.every((ch) => ch.status === 'observed') ? 'ok' : 'failed'
       },
@@ -244,7 +246,7 @@ export function otherChainRoutes(fetcher: ChainFetch, gate = new ReadGate()) {
       return notRead()
     }
     const result = await read()
-    admission.done(result)
+    admission.done(result, c.var.now().getTime())
     return c.json(result)
   })
   return routes

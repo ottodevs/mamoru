@@ -280,14 +280,19 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
     const ok = (usdc: string): OtherChainsView => ({ address: `0x${'1'.repeat(40)}`, accountChainId: 8453, chains: [{ chainId: 1, name: 'Ethereum', status: 'observed', block: 1, usdc, eth: '0', observedAt: T0.toISOString() }] })
     const failed: OtherChainsView = { address: `0x${'1'.repeat(40)}`, accountChainId: 8453, chains: NOT_OBSERVED as OtherChainsView['chains'] }
     const gate = new ReadGate(3)
+    const reading2 = (g: ReadGate, key: string, at: number) => {
+      const a = g.admit(key, at)
+      if (a.kind !== 'read') throw new Error(`${key} was not admitted: ${a.kind}`)
+      return a.done
+    }
     const reading = (key: string, at: number) => {
       const a = gate.admit(key, at)
       if (a.kind !== 'read') throw new Error(`${key} was not admitted: ${a.kind}`)
       return a.done
     }
     reading('pending', t)
-    reading('failed', t)(failed)
-    reading('ok', t)(ok('5'))
+    reading('failed', t)(failed, t)
+    reading('ok', t)(ok('5'), t)
 
     // Full, and every slot is live: the newcomer is not tracked and nothing is thrown away.
     expect(gate.admit('new', t + 1).kind).toBe('full')
@@ -305,6 +310,16 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
     expect(gate.admit('other', t + PENDING_MS).kind).toBe('read')
     expect(gate.admit('third', t + PENDING_MS).kind).toBe('full')
 
+    // A read that took long: the backoff and the cache window run from when it ended, so three providers timing
+    // out one after the other (12 s) do not use up a 10 s backoff before it starts.
+    const slow = new ReadGate(2)
+    reading2(slow, 'f', t)(failed, t + 12_000)
+    expect(slow.admit('f', t + 12_000 + FAIL_MS - 1)).toEqual({ kind: 'cached', view: failed })
+    expect(slow.admit('f', t + 12_000 + FAIL_MS).kind).toBe('read')
+    reading2(slow, 'g', t)(ok('7'), t + 3_000)
+    expect(slow.admit('g', t + 3_000 + CACHE_MS - 1)).toEqual({ kind: 'cached', view: ok('7') })
+    expect(slow.admit('g', t + 3_000 + CACHE_MS).kind).toBe('read')
+
     // A read that was cancelled gives its slot back; cancelling late does not remove a newer slot.
     const c = new ReadGate(1)
     const c1 = c.admit('a', t)
@@ -320,8 +335,8 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
     const a1 = g.admit('k', t)
     const a2 = g.admit('k', t + PENDING_MS)
     if (a1.kind !== 'read' || a2.kind !== 'read') throw new Error('not admitted')
-    a2.done(ok('9'))
-    a1.done(ok('1'))
+    a2.done(ok('9'), t + PENDING_MS)
+    a1.done(ok('1'), t + PENDING_MS)
     expect(g.admit('k', t + PENDING_MS + 1)).toEqual({ kind: 'cached', view: ok('9') })
     // A clock that went backwards is not a hit.
     expect(g.admit('k', t - 1).kind).toBe('read')
@@ -343,6 +358,28 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
     expect((await read(h, cookie, owner.accountKey)).chains[0]).toMatchObject({ status: 'observed', usdc: '2000000' })
     expect(n.requests.length).toBe(2)
     expect(FAIL_MS).toBeLessThan(CACHE_MS)
+  })
+
+  test('a failure that took 12 s to happen is still not repeated for 10 s after it', async () => {
+    let now = T0
+    const n = node({ http: 503 })
+    // Each provider call takes 4 s of the clock, as a timeout would.
+    const chainFetch: ChainFetch = async (input, init) => {
+      now = new Date(now.getTime() + RPC_TIMEOUT_MS)
+      return n.fetch(input, init)
+    }
+    const h = harness(() => now, { env: { ETHEREUM_RPC_URLS: 'https://a.example/k,https://b.example/k,https://c.example/k' }, chainFetch })
+    const { cookie, owner } = await onboard(h)
+    expect((await read(h, cookie, owner.accountKey)).chains[0]!.status).toBe('not_observed')
+    expect(n.requests.length).toBe(3)
+    expect(now.getTime() - T0.getTime()).toBe(12_000)
+    expect((await read(h, cookie, owner.accountKey)).chains[0]!.status).toBe('not_observed')
+    now = new Date(now.getTime() + FAIL_MS - 1)
+    expect((await read(h, cookie, owner.accountKey)).chains[0]!.status).toBe('not_observed')
+    expect(n.requests.length).toBe(3)
+    now = new Date(now.getTime() + 1)
+    await read(h, cookie, owner.accountKey)
+    expect(n.requests.length).toBe(6)
   })
 
   test('rate limiter: an account over its limit is not read, a cached answer costs nothing, and the key is the account', async () => {
