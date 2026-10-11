@@ -426,6 +426,54 @@ describe('feedback: one button, two paths (#72)', () => {
     expect(rows(h)[0]!.mm_post_id).toBe('posted:no-id')
   })
 
+  test('a note that fails every time with a server error while others are posted does not sit first in line for ever', async () => {
+    const original = console.error
+    console.error = () => {}
+    try {
+      const mm = mattermost()
+      // Mattermost answers 500 to one particular note and takes the rest.
+      const fetch = async (input: string, init: RequestInit) => (String(init.body).includes('cursed') ? new Response('boom', { status: 500 }) : mm.fetch(input, init))
+      const h = harness(() => T0)
+      const env = { ...h.env, ...MM }
+      const add = (id: string, body: string, at: number) => h.db.raw.query("INSERT INTO feedback (id, created_at, kind, body, route, status) VALUES (?, ?, 'support', ?, '/', 'new')").run(id, new Date(T0.getTime() + at).toISOString(), body)
+      add('cursed', 'cursed', 0)
+      add('a', 'first', 1)
+      add('b', 'second', 2)
+      // It fails, the next one is tried and posted: the queue did not stop, and the failure is charged to the note.
+      expect(await drainFeedback(h.db, fetch, env, T0, DRAIN_PER_CRON)).toBe(2)
+      expect(rows(h).find((r) => r.id === 'cursed')).toMatchObject({ mm_post_id: null, post_attempts: 1 })
+      // New notes keep being posted on every run, and after five charged attempts the cursed one is no longer tried.
+      let calls = 0
+      const counting = async (input: string, init: RequestInit) => (calls++, fetch(input, init))
+      for (let i = 1; i <= 6; i++) {
+        add(`n-${i}`, `later ${i}`, 1000 * i)
+        expect(await drainFeedback(h.db, counting, env, new Date(T0.getTime() + i * 600_000), DRAIN_PER_CRON)).toBe(1)
+      }
+      expect(rows(h).find((r) => r.id === 'cursed')).toMatchObject({ mm_post_id: null, post_attempts: POST_ATTEMPTS_MAX, status: 'new' })
+      // Runs 1 to 4 tried it (two calls each); runs 5 and 6 did not (one call each).
+      expect(calls).toBe(4 * 2 + 2)
+      expect(mm.posts.length).toBe(8)
+    } finally {
+      console.error = original
+    }
+  })
+
+  test('two failures in a row stop the queue and charge nobody: that is an outage', async () => {
+    const original = console.error
+    console.error = () => {}
+    try {
+      let calls = 0
+      const down = async () => (calls++, new Response('down', { status: 502 }))
+      const h = harness(() => T0)
+      for (let i = 0; i < 6; i++) h.db.raw.query("INSERT INTO feedback (id, created_at, kind, body, route, status) VALUES (?, ?, 'support', 'help', '/', 'new')").run(`s-${i}`, new Date(T0.getTime() + i).toISOString())
+      expect(await drainFeedback(h.db, down, { ...h.env, ...MM }, T0, DRAIN_PER_CRON)).toBe(0)
+      expect(calls).toBe(2)
+      expect(h.db.raw.query('SELECT COUNT(*) AS n FROM feedback WHERE mm_post_id IS NULL AND post_attempts = 0').get()).toEqual({ n: 6 })
+    } finally {
+      console.error = original
+    }
+  })
+
   test('without Mattermost configured the drain does nothing and claims nothing', async () => {
     const mm = mattermost()
     const h = harness(() => T0, { mattermostFetch: mm.fetch })
