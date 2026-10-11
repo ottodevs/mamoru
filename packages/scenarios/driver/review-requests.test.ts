@@ -7,7 +7,7 @@ import { address, smartSessionAbi } from '@mamoru/registry'
 import { multicall3Abi } from '@mamoru/rpc'
 import { permissionIdOf, toSmartSession } from '@mamoru/account/sessions'
 import { FakeChain } from '../../rpc/test/fake-chain.ts'
-import { Engine, type EngineSession } from './engine.ts'
+import { Engine, observationFloor, type EngineSession } from './engine.ts'
 
 const ACCOUNT = '0x00000000000000000000000000000000000000aa' as Address
 const policy = POLICIES['conservador-live-v2']!
@@ -136,5 +136,28 @@ describe('one live review', () => {
     expect(err).toBeInstanceOf(Error)
     expect(err.name).toBe('ContractFunctionExecutionError')
     expect(all.some((s) => e.ledger.get(s.permissionId)?.revoked)).toBe(false)
+  })
+})
+
+// A provider behind the engine's last operation shows the account as it was before it: the same step would be decided again.
+describe('a review never observes before the last operation', () => {
+  const inc = (blockNumber: bigint) => ({ included: { blockNumber, blockHash: '0x01' as Hex, txHash: '0x02' as Hex, success: true, actualGasCost: 0n } })
+
+  test('the floor is the block of the latest operation that reached the chain', () => {
+    expect(observationFloor([])).toBe(0n)
+    expect(observationFloor([{}, inc(1200n), inc(1100n), {}])).toBe(1200n)
+  })
+
+  test('behind the floor the review fails as stale and decides nothing; at the floor it decides', async () => {
+    const e = engine(sessions())
+    for (const id of [11n, 12n, 13n]) e.allowedTokenIds.push(id)
+    chain.head = 1150n
+    chain.safe = 1050n
+    const ops = (e.journal as unknown as { ops: unknown[] }).ops
+    ops.push(inc(1151n))
+    const behind = await e.review()
+    expect(behind).toMatchObject({ kind: 'observation-failed', code: 'EHG_OBSERVATION_STALE' })
+    chain.head = 1151n
+    expect((await e.review()).kind).toBe('decided')
   })
 })

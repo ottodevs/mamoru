@@ -1745,6 +1745,8 @@ export class Operator {
           this.revokeManage(engine)
           if (r.kind === 'observation-failed') {
             logErr(`[engine ${acc.accountKey}] observation failed ${r.code}:`, r.detail)
+            // The provider is behind the engine's last operation: asked again in seconds, not a whole period later.
+            if (r.code === 'EHG_OBSERVATION_STALE') more = true
             safeMetrics(() => this.engineHealth.record(acc.accountKey, false, r.code, classifyEngineError(r.code, r.detail)))
           } else {
             const d = r.record.decision
