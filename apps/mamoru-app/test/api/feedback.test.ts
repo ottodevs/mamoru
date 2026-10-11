@@ -329,13 +329,15 @@ describe('feedback: one button, two paths (#72)', () => {
       const fetch = async (input: string, init: RequestInit) => (String(init.body).includes('poison') ? new Response('bad post', { status: String(init.body).includes('poison-large') ? 413 : 400 }) : mm.fetch(input, init))
       const h = harness(() => T0)
       const env = { ...h.env, ...MM }
-      for (const [i, body] of ['poison', 'second', 'third'].entries()) {
+      for (const [i, body] of ['poison', 'second', 'poison-large', 'third'].entries()) {
         h.db.raw.query("INSERT INTO feedback (id, created_at, kind, body, route, status) VALUES (?, ?, 'support', ?, '/', 'new')").run(`id-${i}`, new Date(T0.getTime() + i * 1000).toISOString(), body)
       }
       expect(await drainFeedback(h.db, fetch, env, T0, DRAIN_PER_CRON)).toBe(2)
       expect(mm.posts.map((p) => parts(p.message).blocks[0])).toEqual(['second', 'third'])
       const poison = () => rows(h).find((r) => r.id === 'id-0')!
       expect(poison()).toMatchObject({ mm_post_id: null, post_attempts: 1 })
+      // A post that is too large (413) is the note's own problem as well.
+      expect(rows(h).find((r) => r.id === 'id-2')).toMatchObject({ mm_post_id: null, post_attempts: 1 })
       // It is tried again on later runs, up to the limit, and then no more.
       for (let i = 2; i <= POST_ATTEMPTS_MAX + 3; i++) await drainFeedback(h.db, fetch, env, new Date(T0.getTime() + i * 600_000), DRAIN_PER_CRON)
       expect(poison()).toMatchObject({ mm_post_id: null, post_attempts: POST_ATTEMPTS_MAX, status: 'new' })
