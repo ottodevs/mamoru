@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { decodeFunctionData, encodeFunctionResult, parseAbi, toFunctionSelector } from 'viem'
 import type { FundingView, OtherChainsView, OwnerResponse } from '@mamoru/domain'
-import { CACHE_MS, FAIL_MS, WATCHED_CHAINS, type ChainFetch } from '../../src/api/accounts/other-chains.ts'
+import { CACHE_MS, FAIL_MS, PENDING_MS, ReadGate, RPC_TIMEOUT_MS, WATCHED_CHAINS, type ChainFetch } from '../../src/api/accounts/other-chains.ts'
 import { harness, register, PASSKEY_A, PASSKEY_B, sessionCookie } from './helpers.ts'
 
 const RPC = 'https://l1.example/rpc-key'
@@ -231,24 +231,89 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
     const h = harness(() => now, { env: { ETHEREUM_RPC_URL: RPC }, chainFetch: n.fetch })
     const { cookie, owner } = await onboard(h)
 
-    // Ten requests while the first read is still in flight: one RPC request, ten equal answers.
-    const all = Array.from({ length: 10 }, () => read(h, cookie, owner.accountKey))
+    // Ten requests at once: one RPC request. The nine that did not read answer at once, without waiting for the first.
+    const first = read(h, cookie, owner.accountKey)
     await new Promise((r) => setTimeout(r, 20))
+    const others = await Promise.all(Array.from({ length: 9 }, () => read(h, cookie, owner.accountKey)))
     expect(n.requests.length).toBe(1)
+    for (const v of others) expect(v.chains).toEqual(NOT_OBSERVED as OtherChainsView['chains'])
     release()
-    const views = await Promise.all(all)
-    expect(new Set(views.map((v) => JSON.stringify(v))).size).toBe(1)
-    expect(views[0]!.chains[0]).toMatchObject({ status: 'observed', usdc: '1000000' })
-    expect(n.requests.length).toBe(1)
+    expect((await first).chains[0]).toMatchObject({ status: 'observed', usdc: '1000000' })
 
     n.wait = undefined
     n.usdc = 2_000_000n
+    expect((await read(h, cookie, owner.accountKey)).chains[0]).toMatchObject({ usdc: '1000000' })
     now = new Date(T0.getTime() + CACHE_MS - 1)
     expect((await read(h, cookie, owner.accountKey)).chains[0]).toMatchObject({ usdc: '1000000' })
     expect(n.requests.length).toBe(1)
     now = new Date(T0.getTime() + CACHE_MS)
     expect((await read(h, cookie, owner.accountKey)).chains[0]).toMatchObject({ usdc: '2000000' })
     expect(n.requests.length).toBe(2)
+  })
+
+  test('a read whose request went away never settles: nobody waits on it and the next read starts once its time is up', async () => {
+    let now = T0
+    // The first read hangs for ever, as when Workers cancels the request that started it.
+    const n = node({ usdc: 3_000_000n, wait: new Promise<void>(() => {}) })
+    const h = harness(() => now, { env: { ETHEREUM_RPC_URL: RPC }, chainFetch: n.fetch })
+    const { cookie, owner } = await onboard(h)
+    void read(h, cookie, owner.accountKey).catch(() => undefined)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(n.requests.length).toBe(1)
+
+    n.wait = undefined
+    const answered = await Promise.race([read(h, cookie, owner.accountKey), new Promise<'hung'>((r) => setTimeout(() => r('hung'), 500))])
+    expect(answered).not.toBe('hung')
+    expect((answered as OtherChainsView).chains).toEqual(NOT_OBSERVED as OtherChainsView['chains'])
+    now = new Date(T0.getTime() + PENDING_MS - 1)
+    expect((await read(h, cookie, owner.accountKey)).chains[0]!.status).toBe('not_observed')
+    expect(n.requests.length).toBe(1)
+
+    now = new Date(T0.getTime() + PENDING_MS)
+    expect((await read(h, cookie, owner.accountKey)).chains[0]).toMatchObject({ status: 'observed', usdc: '3000000' })
+    expect(n.requests.length).toBe(2)
+    expect(PENDING_MS).toBeGreaterThan(RPC_TIMEOUT_MS)
+  })
+
+  test('a full table does not erase a read under way or a backoff: a new account waits instead', () => {
+    const t = T0.getTime()
+    const ok = (usdc: string): OtherChainsView => ({ address: `0x${'1'.repeat(40)}`, accountChainId: 8453, chains: [{ chainId: 1, name: 'Ethereum', status: 'observed', block: 1, usdc, eth: '0', observedAt: T0.toISOString() }] })
+    const failed: OtherChainsView = { address: `0x${'1'.repeat(40)}`, accountChainId: 8453, chains: NOT_OBSERVED as OtherChainsView['chains'] }
+    const gate = new ReadGate(3)
+    const reading = (key: string, at: number) => {
+      const a = gate.admit(key, at)
+      if (a.kind !== 'read') throw new Error(`${key} was not admitted: ${a.kind}`)
+      return a.done
+    }
+    reading('pending', t)
+    reading('failed', t)(failed)
+    reading('ok', t)(ok('5'))
+
+    // Full, and every slot is live: the newcomer does not read and nothing is thrown away.
+    expect(gate.admit('new', t + 1).kind).toBe('wait')
+    expect(gate.admit('pending', t + 1).kind).toBe('wait')
+    expect(gate.admit('failed', t + 1)).toEqual({ kind: 'cached', view: failed })
+    expect(gate.admit('ok', t + 1)).toEqual({ kind: 'cached', view: ok('5') })
+
+    // Only slots whose own time is up make room: the failure and the abandoned read after 10 s, while the good read stays its 30 s.
+    expect(FAIL_MS).toBe(PENDING_MS)
+    expect(gate.admit('new', t + FAIL_MS - 1).kind).toBe('wait')
+    expect(gate.admit('new', t + FAIL_MS).kind).toBe('read')
+    expect(gate.admit('ok', t + FAIL_MS)).toEqual({ kind: 'cached', view: ok('5') })
+    expect(gate.admit('other', t + FAIL_MS).kind).toBe('read')
+    expect(gate.admit('third', t + FAIL_MS).kind).toBe('wait')
+    expect(gate.admit('ok', t + CACHE_MS).kind).toBe('read')
+
+    // A result that arrives after its slot was replaced does not overwrite the newer one.
+    const g = new ReadGate(3)
+    const a1 = g.admit('k', t)
+    const a2 = g.admit('k', t + PENDING_MS)
+    if (a1.kind !== 'read' || a2.kind !== 'read') throw new Error('not admitted')
+    a2.done(ok('9'))
+    a1.done(ok('1'))
+    expect(g.admit('k', t + PENDING_MS + 1)).toEqual({ kind: 'cached', view: ok('9') })
+    // A clock that went backwards is not a hit.
+    expect(g.admit('k', t - 1).kind).toBe('read')
   })
 
   test('a failed read is not repeated for 10 s and is never kept as long as a good one', async () => {
