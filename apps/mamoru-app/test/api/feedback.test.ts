@@ -326,7 +326,7 @@ describe('feedback: one button, two paths (#72)', () => {
     try {
       const mm = mattermost()
       // Mattermost takes everything except the note whose text says "poison": that one is always a 400.
-      const fetch = async (input: string, init: RequestInit) => (String(init.body).includes('poison') ? new Response('bad post', { status: 400 }) : mm.fetch(input, init))
+      const fetch = async (input: string, init: RequestInit) => (String(init.body).includes('poison') ? new Response('bad post', { status: String(init.body).includes('poison-large') ? 413 : 400 }) : mm.fetch(input, init))
       const h = harness(() => T0)
       const env = { ...h.env, ...MM }
       for (const [i, body] of ['poison', 'second', 'third'].entries()) {
@@ -345,7 +345,7 @@ describe('feedback: one button, two paths (#72)', () => {
     }
   })
 
-  test('an outage, a bot that is not authorised and a spent budget count against no note, however long they last', async () => {
+  test('an outage, a bad token, a bot that is not in the channel, a wrong channel id and a throttled server count against no note, however long they last', async () => {
     const original = console.error
     console.error = () => {}
     try {
@@ -355,11 +355,12 @@ describe('feedback: one button, two paths (#72)', () => {
       const h = harness(() => T0)
       const env = { ...h.env, ...MM }
       h.db.raw.query("INSERT INTO feedback (id, created_at, kind, body, route, status) VALUES ('s', ?, 'support', 'help', '/', 'new'), ('f', ?, 'bug', 'bug', '/', 'new')").run(T0.toISOString(), T0.toISOString())
-      for (const code of [503, 500, 401, 429]) {
+      for (const code of [503, 500, 502, 401, 403, 404, 429]) {
         status = code
         for (let i = 0; i < 4; i++) expect(await drainFeedback(h.db, fetch, env, new Date(T0.getTime() + i * 600_000), DRAIN_PER_CRON)).toBe(0)
       }
       expect(rows(h).map((r) => [r.mm_post_id, r.post_attempts])).toEqual([[null, 0], [null, 0]])
+      // 28 runs of failures later, with the channel fixed, both are posted: nothing was given up on.
       status = 200
       expect(await drainFeedback(h.db, fetch, env, new Date(T0.getTime() + 3_600_000), DRAIN_PER_CRON)).toBe(2)
     } finally {
