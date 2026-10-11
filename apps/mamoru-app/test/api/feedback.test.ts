@@ -31,6 +31,42 @@ async function send(h: ReturnType<typeof harness>, body: unknown, opts: { cookie
   })
 }
 
+const MM = { MATTERMOST_URL: 'https://chat.example', MATTERMOST_BOT_TOKEN: 'bot-secret-token', MATTERMOST_SUPPORT_CHANNEL_ID: 'support-chan', MATTERMOST_FEEDBACK_CHANNEL_ID: 'feedback-chan' }
+
+/** A Mattermost that records what it is sent. */
+function mattermost() {
+  const posts: { url: string; channel_id: string; message: string; auth: string | null }[] = []
+  const fetch = async (input: string, init: RequestInit) => {
+    const payload = JSON.parse(String(init.body)) as { channel_id: string; message: string }
+    posts.push({ url: input, channel_id: payload.channel_id, message: payload.message, auth: (init.headers as Record<string, string>).authorization ?? null })
+    return Response.json({ id: `mm-post-${posts.length}` })
+  }
+  return { posts, fetch }
+}
+
+/**
+ * A message as a CommonMark reader takes it: the lines outside any fenced code block (Mamoru's) and the text of
+ * each block (the sender's). A fence is closed only by a line of the same character, at least as long, with
+ * nothing after it.
+ */
+function parts(message: string): { own: string[]; blocks: string[] } {
+  const own: string[] = []
+  const blocks: string[] = []
+  let open: { char: string; length: number; lines: string[] } | null = null
+  for (const line of message.split('\n')) {
+    const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
+    if (!open) {
+      if (fence) open = { char: fence[1]![0]!, length: fence[1]!.length, lines: [] }
+      else own.push(line)
+    } else if (fence && fence[1]![0] === open.char && fence[1]!.length >= open.length && fence[2]!.trim() === '') {
+      blocks.push(open.lines.join('\n'))
+      open = null
+    } else open.lines.push(line)
+  }
+  if (open) throw new Error('a code block was left open')
+  return { own, blocks }
+}
+
 const valid = { kind: 'bug' as const, body: 'The deposit screen is blank on Safari.', route: '/' }
 
 describe('feedback: one button, two paths (#72)', () => {
@@ -85,9 +121,9 @@ describe('feedback: one button, two paths (#72)', () => {
     expect(rows(h)[2]!.account_key).toBeNull()
   })
 
-  test('honeypot: a filled website field answers success and stores nothing, whatever else is wrong with the request', async () => {
+  test('honeypot: a filled trap field answers success and stores nothing, whatever else is wrong with the request', async () => {
     const h = harness(() => T0)
-    const res = await send(h, { kind: 'not-a-kind', body: '', route: 'not-a-route', website: 'http://spam.example' })
+    const res = await send(h, { kind: 'not-a-kind', body: '', route: 'not-a-route', leaveEmpty: 'http://spam.example' })
     expect(res.status).toBe(200)
     const body = (await res.json()) as FeedbackResponse
     expect(body.received).toBe(true)
@@ -141,17 +177,13 @@ describe('feedback: one button, two paths (#72)', () => {
       const throwing = { limit: async () => Promise.reject(new Error('binding down')) }
       for (const env of [{}, { FEEDBACK_LIMIT: throwing }]) {
         let now = T0
-        const posts: string[] = []
-        const h = harness(() => now, {
-          env: { ...env, MATTERMOST_URL: 'https://chat.example', MATTERMOST_BOT_TOKEN: 'secret', MATTERMOST_SUPPORT_CHANNEL_ID: 's', MATTERMOST_FEEDBACK_CHANNEL_ID: 'f' },
-          mattermostFetch: async (_i: string, init: RequestInit) => (posts.push(String(init.body)), Response.json({ id: 'p' })),
-        })
+        const mm = mattermost()
+        const h = harness(() => now, { env: { ...env, ...MM }, mattermostFetch: mm.fetch })
         for (let i = 0; i < 5; i++) expect((await send(h, valid, { ip: '203.0.113.7' })).status).toBe(200)
-        const sixth = await send(h, valid, { ip: '203.0.113.7' })
-        expect(sixth.status).toBe(429)
+        expect((await send(h, valid, { ip: '203.0.113.7' })).status).toBe(429)
         // Refused means nothing written and nothing posted.
         expect(rows(h).length).toBe(5)
-        expect(posts.length).toBe(5)
+        expect(mm.posts.length).toBe(5)
         // The next window starts clean.
         now = new Date(T0.getTime() + 10 * 60_000)
         expect((await send(h, valid, { ip: '203.0.113.7' })).status).toBe(200)
@@ -161,14 +193,52 @@ describe('feedback: one button, two paths (#72)', () => {
     }
   })
 
-  test('everybody together is limited too: many senders cannot flood the table or the channel', async () => {
+  test("a refusal is not counted: hammering after the limit runs no counter up, the sender's or the shared ones", async () => {
     const h = harness(() => T0)
-    let accepted = 0
-    for (let i = 0; i < 130; i++) if ((await send(h, valid, { ip: `198.51.${Math.floor(i / 250)}.${i % 250}` })).status === 200) accepted++
-    expect(accepted).toBeLessThanOrEqual(120)
-    expect(accepted).toBeGreaterThan(60)
-    expect(rows(h).length).toBe(accepted)
-    expect((await send(h, valid, { ip: '192.0.2.99' })).status).toBe(429)
+    const counters = () => Object.fromEntries((h.db.raw.query("SELECT key, count FROM auth_rate WHERE key LIKE 'fb:%'").all() as { key: string; count: number }[]).map((r) => [r.key.replace(/^fb:ip:\d+$/, 'fb:sender'), r.count]))
+    for (let i = 0; i < 5; i++) await send(h, valid, { ip: '203.0.113.7' })
+    const after5 = counters()
+    expect(after5).toEqual({ 'fb:sender': 5, 'fb:stored': 5, 'fb:posts': 5 })
+    for (let i = 0; i < 40; i++) expect((await send(h, valid, { ip: '203.0.113.7' })).status).toBe(429)
+    expect(counters()).toEqual(after5)
+    // Requests that fail validation are not counted either.
+    for (let i = 0; i < 10; i++) expect((await send(h, { ...valid, body: '' }, { ip: '203.0.113.8' })).status).toBe(400)
+    expect(counters()).toEqual(after5)
+  })
+
+  test('many senders cannot make anyone else be refused: over the post budget a note is still stored and answered, it just is not posted', async () => {
+    const original = console.error
+    console.error = () => {}
+    try {
+      const mm = mattermost()
+      const h = harness(() => T0, { env: MM, mattermostFetch: mm.fetch })
+      // 70 different senders, one note each: more than the 60 posts of a window.
+      for (let i = 0; i < 70; i++) expect((await send(h, valid, { ip: `198.51.100.${i}` })).status).toBe(200)
+      // An ordinary sender arriving now is accepted like any other.
+      const res = await send(h, { kind: 'support', body: 'My deposit never arrived.', route: '/add' }, { ip: '192.0.2.99' })
+      expect(res.status).toBe(200)
+      const id = ((await res.json()) as FeedbackResponse).id
+      expect(mm.posts.length).toBe(60)
+      const all = rows(h)
+      expect(all.length).toBe(71)
+      expect(all.filter((r) => r.mm_post_id !== null).length).toBe(60)
+      // Their note is in the table, waiting, without a post.
+      expect(all.find((r) => r.id === id)).toMatchObject({ kind: 'support', status: 'new', mm_post_id: null })
+    } finally {
+      console.error = original
+    }
+  })
+
+  test('the stored limit is far above real use and refuses only once it is reached', async () => {
+    const { FEEDBACK_LIMITS } = await import('../../src/api/feedback.ts')
+    expect(FEEDBACK_LIMITS.stored).toBeGreaterThanOrEqual(1000)
+    const h = harness(() => T0)
+    const window = Math.floor(T0.getTime() / 1000) - (Math.floor(T0.getTime() / 1000) % 600)
+    h.db.raw.query('INSERT INTO auth_rate (key, window, count) VALUES (?, ?, ?)').run('fb:stored', window, FEEDBACK_LIMITS.stored - 1)
+    expect((await send(h, valid, { ip: '203.0.113.1' })).status).toBe(200)
+    expect((await send(h, valid, { ip: '203.0.113.2' })).status).toBe(429)
+    // The sender who was refused did not spend any of their own allowance.
+    expect(h.db.raw.query("SELECT COUNT(*) AS n FROM auth_rate WHERE key LIKE 'fb:ip:%'").get()).toEqual({ n: 1 })
   })
 
   test('rate limiter: keyed by device session when there is one, else by a hashed IP, and the key never carries the raw IP', async () => {
@@ -189,45 +259,110 @@ describe('feedback: one button, two paths (#72)', () => {
     expect(keys.join(' ')).not.toContain('198.51.100.7')
   })
 
-  test('Mattermost: a support request posts a new root post in the support channel and keeps the returned id', async () => {
-    const posts: { url: string; channel_id: string; message: string; auth: string | null }[] = []
-    const mattermostFetch = async (input: string, init: RequestInit) => {
-      const payload = JSON.parse(String(init.body)) as { channel_id: string; message: string }
-      posts.push({ url: input, channel_id: payload.channel_id, message: payload.message, auth: (init.headers as Record<string, string>).authorization ?? null })
-      return Response.json({ id: 'mm-post-1' })
-    }
-    const h = harness(() => T0, {
-      env: { MATTERMOST_URL: 'https://chat.example', MATTERMOST_BOT_TOKEN: 'bot-secret-token', MATTERMOST_SUPPORT_CHANNEL_ID: 'support-chan', MATTERMOST_FEEDBACK_CHANNEL_ID: 'feedback-chan' },
-      mattermostFetch,
+  test("Mattermost: a support request is a new root post in the support channel, Mamoru's lines first, the sender's text in code blocks", async () => {
+    const mm = mattermost()
+    const h = harness(() => T0, { env: MM, mattermostFetch: mm.fetch })
+    const res = await send(h, { kind: 'support', body: 'My deposit never arrived.\nSent 20 USDC.', contact: 'ot@example.com', route: '/add' })
+    const id = ((await res.json()) as FeedbackResponse).id
+    expect(mm.posts.length).toBe(1)
+    expect(mm.posts[0]).toMatchObject({ url: 'https://chat.example/api/v4/posts', channel_id: 'support-chan', auth: 'Bearer bot-secret-token' })
+    expect(parts(mm.posts[0]!.message)).toEqual({
+      own: [`Support request · \`${id.slice(0, 8)}\` · \`/add\``, 'Message:', 'Contact, as typed by the sender:'],
+      blocks: ['My deposit never arrived.\nSent 20 USDC.', 'ot@example.com'],
     })
-    const res = await send(h, { kind: 'support', body: 'My deposit never arrived.', contact: 'ot@example.com', route: '/add' })
-    const resBody = (await res.json()) as FeedbackResponse
-    expect(posts.length).toBe(1)
-    expect(posts[0]!.url).toBe('https://chat.example/api/v4/posts')
-    expect(posts[0]!.channel_id).toBe('support-chan')
-    expect(posts[0]!.auth).toBe('Bearer bot-secret-token')
-    expect(posts[0]!.message.split('\n')[0]).toBe(`Support request · \`${resBody.id.slice(0, 8)}\` · \`/add\``)
-    expect(posts[0]!.message).toContain('> My deposit never arrived.')
-    // The contact is under Mamoru's own label and inside a quote, with '@' and '.'-free punctuation made inert.
-    expect(posts[0]!.message).toContain('Contact, as typed by the sender:\n> ot@\u200bexample.com')
     expect(rows(h)[0]!.mm_post_id).toBe('mm-post-1')
   })
 
-  test('Mattermost: a bug or idea posts one compact post in the feedback channel', async () => {
-    const posts: { channel_id: string; message: string }[] = []
-    const mattermostFetch = async (_input: string, init: RequestInit) => {
-      posts.push(JSON.parse(String(init.body)) as { channel_id: string; message: string })
-      return Response.json({ id: 'mm-post-2' })
-    }
-    const h = harness(() => T0, {
-      env: { MATTERMOST_URL: 'https://chat.example', MATTERMOST_BOT_TOKEN: 'bot-secret-token', MATTERMOST_SUPPORT_CHANNEL_ID: 'support-chan', MATTERMOST_FEEDBACK_CHANNEL_ID: 'feedback-chan' },
-      mattermostFetch,
-    })
+  test("Mattermost: an attached account is a line of Mamoru's own, before anything the sender typed", async () => {
+    const mm = mattermost()
+    const h = harness(() => T0, { env: MM, mattermostFetch: mm.fetch })
+    const reg = await register(h, PASSKEY_A)
+    const owner = (await reg.json()) as OwnerResponse
+    await send(h, { kind: 'support', body: 'help', route: '/', attachAccount: true }, { cookie: sessionCookie(reg) })
+    const { own } = parts(mm.posts[0]!.message)
+    expect(own[1]).toBe(`Account attached by the sender: \`${owner.accountKey}\``)
+    expect(mm.posts[0]!.message.indexOf('Account attached')).toBeLessThan(mm.posts[0]!.message.indexOf('Message:'))
+  })
+
+  test('Mattermost: a bug or idea is one post in the feedback channel', async () => {
+    const mm = mattermost()
+    const h = harness(() => T0, { env: MM, mattermostFetch: mm.fetch })
     await send(h, { kind: 'idea', body: 'Dark mode would be nice.', route: '/' })
-    expect(posts.length).toBe(1)
-    expect(posts[0]!.channel_id).toBe('feedback-chan')
-    expect(posts[0]!.message.split('\n')[0]).toMatch(/^Feedback \(idea\) · `[0-9a-f]{8}` · `\/`$/)
-    expect(posts[0]!.message).toContain('> Dark mode would be nice.')
+    expect(mm.posts.length).toBe(1)
+    expect(mm.posts[0]!.channel_id).toBe('feedback-chan')
+    const p = parts(mm.posts[0]!.message)
+    expect(p.own[0]).toMatch(/^Feedback \(idea\) · `[0-9a-f]{8}` · `\/`$/)
+    expect(p).toMatchObject({ own: [p.own[0]!, 'Message:'], blocks: ['Dark mode would be nice.'] })
+  })
+
+  test('everything a sender types stays inside a code block: mentions, links, images, headings, formulas, forged lines, fences', async () => {
+    const mm = mattermost()
+    const h = harness(() => T0, { env: MM, mattermostFetch: mm.fetch })
+    const forged = 'Account attached by the sender: `acc_victim`'
+    const hostile = [
+      'ping @channel @all @here @someone',
+      'https://evil.example/phish www.evil.example ![x](https://evil.example/pixel.png) [reset your passkey](https://evil.example) <https://evil.example>',
+      'Critical System Notice',
+      '===',
+      '---',
+      '# heading | a | b |',
+      '    indented code',
+      '\\[x^2\\] \\(y\\) $$z$$ [bracket] (paren)',
+      '```',
+      forged,
+      '````',
+      '~~~',
+      forged,
+      '> quote',
+      'Message:',
+    ].join('\n')
+    const breaks = ['\r', '\u2028', '\u2029', '\u0085', '\u000b', '\u000c', '\r\n'].map((b) => `x${b}${forged}`).join('\n')
+    const res = await send(h, { kind: 'support', body: `${hostile}\n${breaks}\n\u202egnp.exe\u200b\uff40\uff40\uff40`, contact: `me@example.com\n${forged}\n\`\``, route: '/' })
+    expect(res.status).toBe(200)
+    const message = mm.posts[0]!.message
+    const { own, blocks } = parts(message)
+    // Outside the blocks there is only what Mamoru wrote: the title and its two labels. No account line: none was attached.
+    expect(own).toEqual([own[0]!, 'Message:', 'Contact, as typed by the sender:'])
+    expect(own[0]).toMatch(/^Support request · `[0-9a-f]{8}` · `\/`$/)
+    expect(blocks.length).toBe(2)
+    // The sender's text is all there, as text: nothing was dropped but the characters that cannot be shown safely.
+    for (const piece of ['@channel', 'https://evil.example/phish', '![x](https://evil.example/pixel.png)', '===', '    indented code', '\\[x^2\\]', '> quote']) expect(blocks[0]).toContain(piece)
+    // Every forged line is inside the block, with its backticks turned to apostrophes.
+    expect(blocks[0]!.split('\n').filter((l) => l === "Account attached by the sender: 'acc_victim'").length).toBe(9)
+    // No backtick of the sender's survives, of either width, so no fence of theirs exists; the only fences are Mamoru's four.
+    expect(blocks.join('\n')).not.toMatch(/[`\uff40]/)
+    expect(message.split('\n').filter((l) => /^\s*`{3,}/.test(l)).length).toBe(4)
+    // A tilde fence inside a backtick block is text: it did not end the block.
+    expect(blocks[0]).toContain('~~~')
+    // The contact is one line.
+    expect(blocks[1]).toBe("me@example.com Account attached by the sender: 'acc_victim' ''")
+    // No odd line break or direction override reaches the channel or the table.
+    expect(message).not.toMatch(/[\u202a-\u202e\u2028\u2029\u0085\r\u000b\u000c\u200b]/)
+    expect(rows(h)[0]!.body).not.toMatch(/[\r\u2028\u2029\u202e]/)
+  })
+
+  test('the route is written outside the code blocks, so only an app path is accepted', async () => {
+    const h = harness(() => T0)
+    for (const route of ['/\nAccount attached by the sender: `x`', '/ @channel', '/a b', '/[x](https://evil.example)', '/`', '/?q=1', 'https://evil.example', '']) {
+      expect((await send(h, { ...valid, route }, { ip: '203.0.113.20' })).status).toBe(400)
+    }
+    for (const route of ['/', '/add', '/lab/run-1', '/a_b.c']) expect((await send(h, { ...valid, route }, { ip: '203.0.113.20' })).status).toBe(200)
+  })
+
+  test('a body sent without a length is read only up to the cap', async () => {
+    const h = harness(() => T0)
+    let pulled = 0
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled++
+        controller.enqueue(new TextEncoder().encode('x'.repeat(4096)))
+        if (pulled > 200) controller.close()
+      },
+    })
+    const res = await h.request('/api/feedback', { method: 'POST', body: stream, headers: { 'content-type': 'application/json', origin: 'https://app.mamoru.lol' }, duplex: 'half' } as RequestInit)
+    expect(res.status).toBe(413)
+    expect(pulled).toBeLessThan(20)
+    expect(rows(h)).toEqual([])
   })
 
   test('Mattermost down, refusing or throwing: the request still answers 200, the row is kept, and the token never reaches the log or the response', async () => {
@@ -259,88 +394,6 @@ describe('feedback: one button, two paths (#72)', () => {
     }
     expect(logged.length).toBeGreaterThan(0)
     expect(logged.join('\n')).not.toContain('bot-secret-token')
-  })
-
-  test('mentions are neutralised: @channel, @all, @here and an arbitrary @name never reach Mattermost as a live mention', async () => {
-    const posts: string[] = []
-    const mattermostFetch = async (_input: string, init: RequestInit) => {
-      posts.push((JSON.parse(String(init.body)) as { message: string }).message)
-      return Response.json({ id: 'mm-post-3' })
-    }
-    const h = harness(() => T0, {
-      env: { MATTERMOST_URL: 'https://chat.example', MATTERMOST_BOT_TOKEN: 'secret', MATTERMOST_SUPPORT_CHANNEL_ID: 's', MATTERMOST_FEEDBACK_CHANNEL_ID: 'f' },
-      mattermostFetch,
-    })
-    await send(h, { kind: 'bug', body: 'ping @channel and @all and @here, also @someone look at this', contact: 'reach me @handle', route: '/' })
-    const message = posts[0]!
-    // The zero-width joiner breaks up the literal mention text, so the contiguous sequence is gone...
-    for (const mention of ['@channel', '@all', '@here', '@someone', '@handle']) expect(message).not.toContain(mention)
-    // ...while the words themselves are still readable.
-    expect(message).toContain('channel')
-    expect(message).toContain('handle')
-  })
-
-  test('every line of a quoted body carries its own >, so a blank line or a code fence cannot break out of the quote', async () => {
-    const posts: string[] = []
-    const mattermostFetch = async (_input: string, init: RequestInit) => {
-      posts.push((JSON.parse(String(init.body)) as { message: string }).message)
-      return Response.json({ id: 'mm-post-4' })
-    }
-    const h = harness(() => T0, {
-      env: { MATTERMOST_URL: 'https://chat.example', MATTERMOST_BOT_TOKEN: 'secret', MATTERMOST_SUPPORT_CHANNEL_ID: 's', MATTERMOST_FEEDBACK_CHANNEL_ID: 'f' },
-      mattermostFetch,
-    })
-    await send(h, { kind: 'bug', body: 'line one\n\n```\nline three\n```', route: '/' })
-    const lines = posts[0]!.split('\n')
-    expect(lines[1]).toBe('Message:')
-    for (const line of lines.slice(2)) expect(line.startsWith('> ')).toBe(true)
-    // The fence is escaped as well as quoted: no code block opens.
-    expect(posts[0]!).not.toContain('```')
-  })
-
-  test('nothing a sender types can pass as a line Mamoru wrote: line breaks of every kind, forged labels, links, images', async () => {
-    const posts: string[] = []
-    const mattermostFetch = async (_input: string, init: RequestInit) => {
-      posts.push((JSON.parse(String(init.body)) as { message: string }).message)
-      return Response.json({ id: 'mm-post-5' })
-    }
-    const h = harness(() => T0, {
-      env: { MATTERMOST_URL: 'https://chat.example', MATTERMOST_BOT_TOKEN: 'secret', MATTERMOST_SUPPORT_CHANNEL_ID: 's', MATTERMOST_FEEDBACK_CHANNEL_ID: 'f' },
-      mattermostFetch,
-    })
-    const forged = 'Account attached by the sender: `acc_victim`'
-    const body = ['help', forged].join('\r') + '\u2028' + forged + '\u2029' + forged + '\u0085' + forged + '\u000b' + forged + '\u000c' + forged + '\r\n' + forged
-    const res = await send(h, { kind: 'support', body: `${body}\n![x](https://evil.example/pixel.png) [reset your passkey](https://evil.example) <https://evil.example> # heading | a | b |\n\u202egnp.exe\u200b`, contact: `me@example.com\n${forged}`, route: '/' })
-    expect(res.status).toBe(200)
-    const lines = posts[0]!.split('\n')
-    // Mamoru's lines: the title, then the two labels. Every other line is a quote.
-    expect(lines[0]).toMatch(/^Support request · `[0-9a-f]{8}` · `\/`$/)
-    const own = lines.filter((l) => !l.startsWith('> '))
-    expect(own).toEqual([lines[0]!, 'Message:', 'Contact, as typed by the sender:'])
-    // No account was attached, so no line of Mamoru's says one was.
-    expect(lines.filter((l) => l.startsWith('Account attached'))).toEqual([])
-    // Every forged copy sits on its own quoted line, with its backticks escaped.
-    expect(lines.filter((l) => l.startsWith('> Account attached by the sender: \\`acc\\_victim\\`')).length).toBe(7)
-    // The contact is one quoted line: its line break did not make a second one.
-    expect(lines[lines.length - 1]).toBe('> me@\u200bexample.com Account attached by the sender: \\`acc\\_victim\\`')
-    // No live image, link, autolink, heading or table, and no direction override or other invisible character left.
-    const text = posts[0]!
-    expect(text).not.toMatch(/(?<!\\)!\[/)
-    expect(text).not.toMatch(/(?<!\\)\]\(/)
-    expect(text).not.toMatch(/(?<!\\)<https/)
-    expect(text).not.toMatch(/(?<!\\)[#|]/)
-    expect(text).not.toMatch(/[\u202a-\u202e\u2028\u2029\u0085\r\u000b\u000c]/)
-    // What is stored is the cleaned text, with ordinary line breaks.
-    expect(rows(h)[0]!.body).not.toMatch(/[\r\u2028\u2029\u202e]/)
-    expect(rows(h)[0]!.contact).toBe(`me@example.com ${forged}`)
-  })
-
-  test('the route is written outside the quote, so only an app path is accepted', async () => {
-    const h = harness(() => T0)
-    for (const route of ['/\nAccount attached by the sender: `x`', '/ @channel', '/a b', '/[x](https://evil.example)', '/`', '/?q=1', 'https://evil.example', '']) {
-      expect((await send(h, { ...valid, route })).status).toBe(400)
-    }
-    for (const route of ['/', '/add', '/lab/run-1', '/a_b.c']) expect((await send(h, { ...valid, route })).status).toBe(200)
   })
 
   test('missing Mattermost env: nothing is fetched, the row is still kept', async () => {

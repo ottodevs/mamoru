@@ -34,9 +34,9 @@ export const feedbackCopy = {
 const BODY_MAX = 4000
 const CONTACT_MAX = 200
 
-function currentRoute(): string {
-  if (typeof window === 'undefined' || !window.location.pathname.startsWith('/')) return '/'
-  return window.location.pathname
+/** The path the form was opened from, or '/' when it is not a plain app path: the API accepts nothing else. */
+export function currentRoute(pathname: string | undefined = typeof window === 'undefined' ? undefined : window.location.pathname): string {
+  return pathname !== undefined && pathname.length <= 200 && /^\/[A-Za-z0-9/_.-]*$/.test(pathname) ? pathname : '/'
 }
 
 /** The form for one path, once chosen. A pure function of its props: no step state of its own, so it is easy to render for a test. */
@@ -53,26 +53,26 @@ export function FeedbackForm({
   busy: boolean
   error: string | null
   onBack: () => void
-  onSend: (fields: { body: string; contact: string; attachAccount: boolean; website: string }) => void
+  onSend: (fields: { body: string; contact: string; attachAccount: boolean; leaveEmpty: string }) => void
 }) {
   const [body, setBody] = useState('')
   const [contact, setContact] = useState('')
   const [attach, setAttach] = useState(false)
-  const [website, setWebsite] = useState('')
+  const [leaveEmpty, setLeaveEmpty] = useState('')
   const trimmed = body.trim()
   const submit = (e: FormEvent) => {
     e.preventDefault()
     if (trimmed.length === 0) return
-    onSend({ body: trimmed, contact: contact.trim(), attachAccount: attach, website })
+    onSend({ body: trimmed, contact: contact.trim(), attachAccount: attach, leaveEmpty })
   }
   return (
     <form className="grid gap-[0.6rem]" data-testid="feedback-form" onSubmit={submit}>
-      {/* Honeypot: no person sees this field. A bot that fills every field fills this one too. */}
+      {/* Honeypot: no person sees this field, and its name is one no browser or password manager autofills. A bot that fills every field fills this one too. */}
       <input
         type="text"
-        value={website}
-        onChange={(e) => setWebsite(e.target.value)}
-        name="website"
+        value={leaveEmpty}
+        onChange={(e) => setLeaveEmpty(e.target.value)}
+        name="mamoru-leave-empty"
         autoComplete="off"
         tabIndex={-1}
         aria-hidden="true"
@@ -159,7 +159,7 @@ export function FeedbackDialog({ accountKey, open, onClose }: { accountKey: stri
               route: currentRoute(),
               attachAccount: fields.attachAccount,
               ...(fields.contact ? { contact: fields.contact } : {}),
-              ...(fields.website ? { website: fields.website } : {}),
+              ...(fields.leaveEmpty ? { leaveEmpty: fields.leaveEmpty } : {}),
             })
           }
         />
