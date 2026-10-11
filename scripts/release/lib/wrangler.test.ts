@@ -1,7 +1,7 @@
 // CLOUDFLARE_ENV must never leak into a wrangler child process: wrangler falls back to it when
 // `--env` is not explicit, which could silently redirect a prod deploy at a named environment.
 import { describe, expect, it } from 'bun:test'
-import { childEnv, rollbackCommand } from './wrangler.ts'
+import { childEnv, rollbackCommand, describeFailure } from './wrangler.ts'
 
 describe('childEnv', () => {
   it('drops CLOUDFLARE_ENV', () => {
@@ -29,5 +29,18 @@ describe('rollbackCommand', () => {
   })
   it('quotes shell metacharacters in the path and the version id', () => {
     expect(rollbackCommand("/re po/$(x)/it's", '', 'v1; rm -rf ~')).toBe("(cd '/re po/$(x)/it'\\''s' && bunx wrangler rollback --env '' 'v1; rm -rf ~')")
+  })
+})
+
+describe('describeFailure', () => {
+  it('prints what the failed command said, not only its exit code (otto/mamoru#47)', () => {
+    const text = describeFailure({ exitCode: 1, stdout: Buffer.from('Uploading...\n'), stderr: Buffer.from('✘ [ERROR] A request to the Cloudflare API failed.\n') })
+    expect(text).toContain('exit code 1')
+    expect(text).toContain('Uploading...')
+    expect(text).toContain('A request to the Cloudflare API failed.')
+  })
+  it('falls back to the message of an ordinary error', () => {
+    expect(describeFailure(new Error('snapshot failed'))).toBe('snapshot failed')
+    expect(describeFailure('boom')).toBe('boom')
   })
 })

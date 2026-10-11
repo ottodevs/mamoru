@@ -17,7 +17,7 @@ ticket ─► branch + worktree ─► pull request ─► CI + independent revi
 | Review | CI green and an `APTO` verdict from a model that did not write the code | Reviewer | Verdict as a pull request comment |
 | `main` | Reviewed and merged. **Not yet released** | Coordinator | "Rebase and merge" |
 | `beta` | The sha of `main` now running on https://beta.mamoru.lol | Coordinator | `git push origin <sha>:beta`, then `bun run deploy:beta` |
-| Production | The sha that soaked on beta, on https://app.mamoru.lol | Coordinator, with Otto's GO | "Releasing to production", every step |
+| Production | The sha that soaked on beta, on https://app.mamoru.lol | Coordinator, with Otto's GO | `bun run deploy:prod <sha>` |
 
 ## Branches
 
@@ -51,16 +51,13 @@ schedule, and not for a change that only touches the operator.
 1. `git fetch origin` and choose the sha of `main` to release. Read the deploy notes of every pull request
    between `origin/beta` and that sha (`git log --oneline origin/beta..<sha>`).
 2. Do what those notes ask first, in their order: D1 migration, secret, operator.
-3. Write down what beta runs now, so there is something to go back to: in `apps/mamoru-app`,
-   `bunx wrangler deployments list --env beta` and note the newest version id in the tracking thread.
-   `deploy:beta` does not record it: it writes nothing to the release log and prints a rollback command only
-   when its smoke test fails.
-4. `git push origin <sha>:beta`. Git refuses this unless it is a fast-forward of `beta`. It does not check
-   that the sha is on `main`: `git merge-base --is-ancestor <sha> origin/main` first.
-   Once `beta` is protected, GitHub also refuses the push until CI has finished green on that sha: after a
-   merge, wait for the CI run on `main` (`gh run list -R ottodevs/mamoru --branch main --limit 1`).
-5. `bun run deploy:beta`. It fetches `beta` again, builds from a clean snapshot of its tip, runs typecheck
-   and tests, deploys and runs the smoke test. Check that the sha it prints is the one you pushed.
+3. `git push origin <sha>:beta`. Git refuses this unless it is a fast-forward of `beta`. Once `beta` is
+   protected, GitHub also refuses it until CI has finished green on that sha: after a merge, wait for the CI
+   run on `main` (`gh run list -R ottodevs/mamoru --branch main --limit 1`).
+4. `bun run deploy:beta`. It fetches `beta` and `main`, refuses a tip that is not a commit of `main`, builds
+   from a clean snapshot of the tip, runs typecheck and tests, deploys and runs the smoke test. It writes
+   the deploy to the release log and prints the rollback command. The soak is counted from that record.
+5. Check that the sha it printed is the one you pushed.
 6. Announce it in `#mamoru` as `@mamorusan`: the sha, the version id before and after, what changes for a
    user, what to try, what is known to be broken.
 
@@ -76,32 +73,25 @@ A sha is ready for production when all of this is true and written in the tracki
 
 ## Releasing to production
 
-Needs Otto's GO, given for one sha: the one that soaked. Call it `S` and write it in the tracking thread.
+Needs Otto's GO, given for one sha: the one that soaked. Write it in the tracking thread.
 
-Today the scripts do not hold this for you. `deploy:prod` takes no sha: it fetches `main` and deploys
-whatever its tip is at that moment. So until `otto/mamoru#118` unit B makes it deploy `S` and refuse
-anything else, the coordinator holds it by hand:
+1. `bun run deploy:prod <sha>`. The script holds the rules, and refuses if any is not met:
+   - a sha must be named; nothing is taken from the tip of a branch;
+   - it must be the tip of `origin/beta`, so it is what is running on beta;
+   - it must be a commit of `origin/main`;
+   - the release log must show its beta deploy, with a passing smoke test, at least 24 hours ago.
+   `main` may be ahead: commits merged after the beta was cut are not in the release, and the script says so.
+2. Shorter soak, when "Soak" above allows it: `--min-soak-hours=2`. Under two hours is a hotfix and needs
+   the reason, which goes into the release log: `--min-soak-hours=0.5 --hotfix="withdrawals answer 500"`.
+3. The script ends by printing the two commands that tag and publish the release (`app-YYYY.MM.DD.N`, the
+   next free `N` of the day). Run them, writing the one line that says what changes for a user. Check the
+   tag push succeeded before `gh release create`: `--verify-tag` refuses to invent a missing tag.
+4. Announce in `#mamoru` with the link to the release.
+5. Move the tickets to `done`. A ticket is done when its change is live, not when it merged.
 
-1. **Freeze.** Say in the tracking thread that a release is under way. Nothing is merged and no branch is
-   moved until step 5 is done. The coordinator is the only one who merges, so this is a rule for one seat.
-2. **Look at the server, not at local refs:** `git fetch origin main beta`, then
-   `git rev-parse origin/main origin/beta`. Both must print `S`. If `main` is ahead, there are commits
-   nobody watched: cut a new beta and soak it. Do not deploy.
-3. `bun run deploy:prod`.
-4. **Read the sha it printed** (`deploying origin/main at …`). If it is not `S`, roll back at once with the
-   command in "Rolling back", then find out who moved `main`.
-5. Tag `S` and push the tag: `git tag -a app-YYYY.MM.DD.N S -m "<one line>"` and
-   `git push origin app-YYYY.MM.DD.N`. `N` starts at 1 each day. Check the push succeeded before the next
-   step.
-6. Publish the notes: `gh release create app-YYYY.MM.DD.N --verify-tag --generate-notes`, then edit the top
-   to say in plain words what changes for a user. `--verify-tag` matters: without it a tag that is missing
-   on the server is created at the tip of `main`. Announce in `#mamoru` with the link.
-7. Move the tickets to `done`. A ticket is done when its change is live, not when it merged.
-
-**Do not use `bun run promote`** while this section stands. It was written for the earlier model (work
-reaches `beta` first and `main` is fast-forwarded to it). It checks a sha against `beta` and then calls
-`deploy:prod` without passing it, so the sha you give it is not what pins the deploy; and it knows nothing
-about soak or GO.
+The soak is read from the release log of the machine that ran `deploy:beta`
+(`~/.local/state/mamoru-app/releases.jsonl`). Releases are cut from one machine; a beta deployed from
+another one does not count here, and the script will say there is no record.
 
 ## Rolling back
 
@@ -117,15 +107,11 @@ bunx wrangler rollback --env beta <version id>   # production: no --env
 When a deploy script printed a rollback command, use that one as printed: it is the same call with the
 path and the environment filled in.
 
-Where the version id comes from:
-
-- **Production:** each `deploy:prod` that reaches the deploy step appends a line to
-  `~/.local/state/mamoru-app/releases.jsonl` on the machine that ran it, with `sha`, `versionId`,
-  `previousVersionId` and `smokeOk`. `previousVersionId` is what to roll back to. The script also prints the
-  full command. A run that fails before or during `wrangler deploy` writes nothing: check
-  `wrangler deployments list` to see whether a new version went live.
-- **Beta:** the id you noted in step 3 of "Cutting a beta". If it was not noted, the second newest entry of
-  `wrangler deployments list --env beta`.
+Where the version id comes from: each `deploy:beta` and `deploy:prod` that reaches the deploy step appends a
+line to `~/.local/state/mamoru-app/releases.jsonl` on the machine that ran it, with `env`, `sha`,
+`versionId`, `previousVersionId` and `smokeOk`. `previousVersionId` is what to roll back to, and the script
+prints the full command. A run that fails before or during `wrangler deploy` writes nothing and prints what
+wrangler said: check `wrangler deployments list` to see whether a new version went live.
 
 Rules:
 
