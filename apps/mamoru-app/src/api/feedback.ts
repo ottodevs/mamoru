@@ -4,7 +4,7 @@ import type { AppEnv } from './context.ts'
 import type { Env, RateLimiter } from './env.ts'
 import { apiError } from './errors.ts'
 import { accountOfUser } from './accounts/store.ts'
-import { allow, ipKey as ipBucket } from './auth/rate-limit.ts'
+import { count, ipKey as ipBucket, SIGNIN_LIMITS } from './auth/rate-limit.ts'
 
 // In-app feedback (otto/mamoru#72): one button, two paths. 'support' is answered in Mattermost as a new root
 // post, one thread per request; 'bug' and 'idea' land as a short line in the feedback channel and wait in the
@@ -24,41 +24,37 @@ const ROUTE = /^\/[A-Za-z0-9/_.-]*$/
 /** A reason this module wrote itself: fixed text, safe to log. The Mattermost response body never is. */
 class MattermostPostError extends Error {}
 
-// What a sender types ends up in a channel that staff trust. Three things keep it from passing as anything but
-// a quote: every kind of line break becomes one '\n' and invisible or direction-changing characters are
-// dropped (plain); Markdown punctuation is escaped, so there is no link, image, heading, table or code fence
-// (inert); and each line is quoted. The lines Mamoru writes itself (id, route, account) come first and are
-// never built from free text: the route is checked against a strict pattern before it gets here.
+// What a sender types ends up in a channel that staff trust, so it is never handed to Markdown at all: it
+// goes inside a fenced code block, where Mattermost renders nothing (no mention, link, image, heading,
+// table or formula) and unfurls nothing. Escaping punctuation instead does not hold: a backslash before a
+// bracket is itself formula syntax, and bare URLs and underlined headings need no punctuation.
+// A fence is closed only by a line of backticks, so the text carries none (BACKTICK), and every kind of
+// line break is one '\n' with invisible and direction-changing characters dropped (plain). The lines Mamoru
+// writes itself (id, route, account) come first and are never built from free text: the route is checked
+// against a strict pattern before it gets here.
 
 const LINE_BREAKS = /\r\n|[\r\u000b\u000c\u0085\u2028\u2029]/g
 const INVISIBLE = /[\u0000-\u0008\u000e-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g
+const BACKTICK = /[`\uff40]/g
 
 /** One kind of line break, no control, zero-width or bidi characters, and no run of more than one blank line. */
 export function plain(text: string): string {
   return text.replace(LINE_BREAKS, '\n').replace(INVISIBLE, '').replace(/\t/g, ' ').replace(/\n{3,}/g, '\n\n')
 }
 
-/** Markdown and mentions made inert: a backslash before every character Mattermost gives a meaning to, and a zero-width space after '@'. */
-export function inert(text: string): string {
-  return text.replace(/[\\`*_~\[\]()<>#|!]/g, '\\$&').replace(/@/g, '@\u200b')
-}
-
-/** The sender's text as a quote: every line carries its own '>', so nothing in it can end the quote. */
-function quote(text: string): string {
-  return inert(plain(text))
-    .split('\n')
-    .map((line) => `> ${line}`)
-    .join('\n')
+/** The sender's text as a code block that nothing inside it can close: a backtick becomes an apostrophe. */
+function block(text: string): string {
+  return ['```', plain(text).replace(BACKTICK, "'"), '```'].join('\n')
 }
 
 type Note = { id: string; kind: FeedbackRequest['kind']; body: string; contact: string | null; route: string; accountKey: string | null }
 
-/** Mamoru's own lines first, then what the sender typed, each part under a label Mamoru wrote and inside a quote. */
+/** Mamoru's own lines first, then what the sender typed, each part under a label Mamoru wrote and inside a code block. */
 function message(title: string, n: Note): string {
   const lines = [title]
   if (n.accountKey) lines.push(`Account attached by the sender: \`${n.accountKey}\``)
-  lines.push('Message:', quote(n.body))
-  if (n.contact) lines.push('Contact, as typed by the sender:', quote(n.contact.replace(/\s+/g, ' ')))
+  lines.push('Message:', block(n.body))
+  if (n.contact) lines.push('Contact, as typed by the sender:', block(n.contact.replace(/\s+/g, ' ')))
   return lines.join('\n')
 }
 
@@ -90,12 +86,52 @@ async function postToMattermost(fetcher: MattermostFetch, env: Env, note: Note):
   }
 }
 
-// Anyone can reach this route without signing in, and each accepted note writes a row and posts to a channel.
-// So the limit that decides is the D1 counter (auth/rate-limit.ts): it is shared by every isolate and it is
-// always there. Per sender, and one for everybody together, so many senders cannot flood the table or the
-// channel either. The Workers binding is only a cheaper first refusal; without it, or if it does not answer,
-// the D1 limit still holds.
-export const FEEDBACK_LIMITS = { perSender: 5, total: 120 } as const // per 10-minute window (SIGNIN_LIMITS.windowSeconds)
+// Anyone can reach this route without signing in, and each accepted note writes a row and may post to a
+// channel. The counters are the D1 ones of auth/rate-limit.ts (shared by every isolate, always there), used
+// so that a sender can spend only their own allowance:
+// - a request is counted only when it is accepted. A refusal reads and writes nothing more, so being refused
+//   costs the sender nothing and cannot be used to run a counter up;
+// - perSender: notes one sender may store per window. The only limit a normal sender can meet;
+// - posts: notes posted to Mattermost per window, all senders together. Over it a note is still stored and
+//   answered as received, it just waits in the table without a post, so a flood cannot bury the channel and
+//   cannot make anyone else's note be refused;
+// - stored: notes stored per window, all senders together, far above real use. Only a flood from thousands
+//   of addresses reaches it, and then the form answers "try later" until the window ends.
+// The Workers binding is a cheaper refusal in front; without it, or if it does not answer, these still hold.
+export const FEEDBACK_LIMITS = { perSender: 5, posts: 60, stored: 2000 } as const // per 10-minute window (SIGNIN_LIMITS.windowSeconds)
+
+/** How many times `key` was counted in the current window, without counting this look. */
+async function counted(db: Env['DB'], key: string, now: Date): Promise<number> {
+  const t = Math.floor(now.getTime() / 1000)
+  const window = t - (t % SIGNIN_LIMITS.windowSeconds)
+  const row = await db.prepare('SELECT count FROM auth_rate WHERE key = ? AND window = ?').bind(key, window).first<{ count: number }>()
+  return row?.count ?? 0
+}
+
+/** The request body as text, or null once it passes `max` bytes: the rest is not read. */
+async function readCapped(req: Request, max: number): Promise<string | null> {
+  const reader = req.body?.getReader()
+  if (!reader) return ''
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > max) {
+      await reader.cancel().catch(() => undefined)
+      return null
+    }
+    chunks.push(value)
+  }
+  const all = new Uint8Array(size)
+  let at = 0
+  for (const c of chunks) {
+    all.set(c, at)
+    at += c.byteLength
+  }
+  return new TextDecoder().decode(all)
+}
 
 /** False only when the binding answered and said no. */
 async function bindingAllows(limiter: RateLimiter | undefined, key: string): Promise<boolean> {
@@ -116,10 +152,11 @@ export function feedbackRoutes(mattermostFetch: MattermostFetch) {
   const routes = new Hono<AppEnv>()
 
   routes.post('/feedback', async (c: Context<AppEnv>) => {
-    const declared = Number(c.req.header('content-length') ?? '0')
-    if (declared > MAX_BODY_BYTES) return apiError(c, 413, 'Request body too large.', 'BODY_TOO_LARGE')
-    const text = await c.req.text()
-    if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) return apiError(c, 413, 'Request body too large.', 'BODY_TOO_LARGE')
+    const tooLarge = () => apiError(c, 413, 'Request body too large.', 'BODY_TOO_LARGE')
+    if (Number(c.req.header('content-length') ?? '0') > MAX_BODY_BYTES) return tooLarge()
+    // A body without a declared length is read only up to the cap.
+    const text = await readCapped(c.req.raw, MAX_BODY_BYTES)
+    if (text === null) return tooLarge()
     let raw: unknown
     try {
       raw = JSON.parse(text)
@@ -130,8 +167,8 @@ export function feedbackRoutes(mattermostFetch: MattermostFetch) {
     const body = raw as Record<string, unknown>
 
     // Honeypot: a field no person sees or fills. Answer as if it worked; nothing else about the request is checked or stored.
-    const website = typeof body.website === 'string' ? body.website.trim() : ''
-    if (website !== '') {
+    const trap = typeof body.leaveEmpty === 'string' ? body.leaveEmpty.trim() : ''
+    if (trap !== '') {
       const faked: FeedbackResponse = { id: fakeId(), received: true }
       return c.json(faked)
     }
@@ -165,8 +202,11 @@ export function feedbackRoutes(mattermostFetch: MattermostFetch) {
     const slowDown = () => apiError(c, 429, 'Too many requests. Wait a few minutes and try again.', 'FEEDBACK_RATE_LIMITED')
     if (!(await bindingAllows(c.env.FEEDBACK_LIMIT, sender))) return slowDown()
     const now = c.var.now()
-    if (!(await allow(c.env.DB, `fb:${sender}`, FEEDBACK_LIMITS.perSender, now))) return slowDown()
-    if (!(await allow(c.env.DB, 'fb:all', FEEDBACK_LIMITS.total, now))) return slowDown()
+    // Looked at first, counted only on acceptance (see FEEDBACK_LIMITS).
+    if ((await counted(c.env.DB, `fb:${sender}`, now)) >= FEEDBACK_LIMITS.perSender) return slowDown()
+    if ((await counted(c.env.DB, 'fb:stored', now)) >= FEEDBACK_LIMITS.stored) return slowDown()
+    await count(c.env.DB, `fb:${sender}`, now)
+    await count(c.env.DB, 'fb:stored', now)
 
     const id = crypto.randomUUID()
     const createdAt = now.toISOString()
@@ -178,7 +218,10 @@ export function feedbackRoutes(mattermostFetch: MattermostFetch) {
       .run()
 
     const note: Note = { id, kind: kind as FeedbackRequest['kind'], body: bodyText, contact: contact || null, route, accountKey }
-    const postId = await postToMattermost(mattermostFetch, c.env, note)
+    // The post budget is counted here, after the row is safe. Over it the note waits in the table without a post.
+    const withinPostBudget = (await count(c.env.DB, 'fb:posts', now)) <= FEEDBACK_LIMITS.posts
+    if (!withinPostBudget) console.error('feedback: post budget of the window is spent; the note is stored without a post')
+    const postId = withinPostBudget ? await postToMattermost(mattermostFetch, c.env, note) : null
     if (postId) await c.env.DB.prepare('UPDATE feedback SET mm_post_id = ? WHERE id = ?').bind(postId, id).run()
 
     const sent: FeedbackResponse = { id, received: true }

@@ -173,7 +173,7 @@ export type FeedbackRequest = {
   route: string          // the SPA path the form was opened from, e.g. '/'
   // Attaches the account key only when a session owning an account exists; otherwise this is a no-op. Off by default.
   attachAccount?: boolean
-  // Honeypot: a field no person sees. Any value in it answers success and stores nothing.
-  website?: string
+  // Honeypot: a field no person sees and no browser autofills. Any value in it answers success and stores nothing.
+  leaveEmpty?: string
 }
 export type FeedbackResponse = { id: string; received: true }

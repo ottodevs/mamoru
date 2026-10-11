@@ -47,7 +47,8 @@ describe('feedback dialog copy (#72)', () => {
       expect(text).toContain(feedbackCopy.contactLabel)
       expect(text).toContain(feedbackCopy.attachLabel)
       expect(text).toContain(feedbackCopy.send)
-      expect(html).toContain('name="website"')
+      expect(html).toContain('name="mamoru-leave-empty"')
+      expect(html).not.toContain('name="website"')
       expect(html).toContain('aria-hidden="true"')
     }
   })
@@ -94,5 +95,14 @@ describe('fixture client (#72)', () => {
     expect(a.received).toBe(true)
     expect(b.received).toBe(true)
     expect(a.id).not.toBe(b.id)
+  })
+})
+
+describe('currentRoute', () => {
+  test("an app path is sent as it is; anything the API would refuse becomes '/'", async () => {
+    const { currentRoute } = await import('../../src/web/components/feedback-dialog.tsx')
+    expect(currentRoute('/add')).toBe('/add')
+    expect(currentRoute('/lab/run-1')).toBe('/lab/run-1')
+    for (const odd of ['/pools/ETH%20USDC', '/a?b=1', '/a:b', 'relative', '', `/${'x'.repeat(300)}`]) expect(currentRoute(odd)).toBe('/')
   })
 })
