@@ -1,4 +1,4 @@
-// Guards that gate promote/deploy: fast-forward detection, clean-tree detection, sha resolution.
+// Guards that gate the deploys: fast-forward detection, clean-tree detection, sha resolution.
 // Built against a disposable scratch repo so no real history is needed.
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'

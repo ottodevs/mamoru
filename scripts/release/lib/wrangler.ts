@@ -31,9 +31,19 @@ export async function currentVersionId(appDir: string, env: WranglerEnv): Promis
   return latest.versions?.[0]?.version_id ?? null
 }
 
+/** What a failed command said, for the person reading the terminal: Bun's ShellError keeps it in buffers and prints only the exit code. */
+export function describeFailure(err: unknown): string {
+  const e = err as { exitCode?: number; stdout?: { toString(): string }; stderr?: { toString(): string }; message?: string }
+  const out = e?.stdout?.toString().trim() ?? ''
+  const errOut = e?.stderr?.toString().trim() ?? ''
+  const head = typeof e?.exitCode === 'number' ? `exit code ${e.exitCode}` : (e?.message ?? String(err))
+  return [head, ...(out ? [`--- stdout ---\n${out}`] : []), ...(errOut ? [`--- stderr ---\n${errOut}`] : [])].join('\n')
+}
+
 /** Runs `wrangler deploy` for the given (explicit) environment and returns stdout plus the new version id. */
 export async function deploy(appDir: string, env: WranglerEnv): Promise<{ output: string; versionId: string | null }> {
-  const output = await $`bunx wrangler deploy ${envArgs(env)}`.cwd(appDir).env(childEnv()).text()
+  // quiet(): the output is returned and printed by the caller, and on failure it is in the error (describeFailure).
+  const output = await $`bunx wrangler deploy ${envArgs(env)}`.cwd(appDir).env(childEnv()).quiet().text()
   // The deploy is done here: a failed version lookup must not turn it into a "deploy failed".
   const versionId = output.match(/Current Version ID:\s*(\S+)/)?.[1] ?? (await currentVersionId(appDir, env).catch(() => null))
   return { output, versionId }

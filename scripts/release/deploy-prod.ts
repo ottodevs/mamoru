@@ -1,24 +1,61 @@
 #!/usr/bin/env bun
-// `bun run deploy:prod` — deploys the exact commit at origin/main's current tip to the mamoru-app
-// Worker (default env, app.mamoru.lol), from an immutable detached-worktree snapshot, never the
-// live working tree. Logs the release and prints the rollback command even if something fails
-// after the deploy itself (smoke test throws, etc). Manual only: this never runs on a push, only
-// `promote` or a human calls it.
-import { fetchRefs, revParse } from './lib/git.ts'
+// `bun run deploy:prod <sha> [--min-soak-hours=N] [--hotfix="<reason>"]` — deploys ONE named commit to the
+// mamoru-app Worker (default env, app.mamoru.lol). The sha must be the tip of origin/beta (what is running
+// on beta), must be on origin/main (reviewed and merged) and must have soaked: the release log has to show
+// its beta deploy, with a passing smoke test, at least 24 hours ago (or the hours asked for). It is never
+// "whatever main is now": commits merged after the beta was cut cannot ride along.
+// Builds from an immutable detached-worktree snapshot of that sha, never the live working tree. Logs the
+// release and prints the rollback command even if something fails after the deploy itself. Manual only.
+import { $ } from 'bun'
+import { fetchRefs, isAncestor, revParse } from './lib/git.ts'
 import { runCheck } from './lib/check.ts'
+import { nextTag, parseSoakOptions, prodTarget, soakVerdict } from './lib/gate.ts'
 import { withSnapshot } from './lib/snapshot.ts'
-import { currentVersionId, deploy, rollbackCommand } from './lib/wrangler.ts'
+import { currentVersionId, deploy, describeFailure, rollbackCommand } from './lib/wrangler.ts'
 import { smokeTest, printSmoke } from './lib/smoke.ts'
-import { appendReleaseLog } from './lib/release-log.ts'
+import { appendReleaseLog, readReleaseLog } from './lib/release-log.ts'
 
 const root = new URL('../../', import.meta.url).pathname
 const stableAppDir = `${root}apps/mamoru-app`
 
 console.log('== deploy:prod ==')
 
-await fetchRefs(root, 'main')
-const sha = await revParse(root, 'origin/main')
-console.log(`deploying origin/main at ${sha.slice(0, 7)} from a clean snapshot`)
+const refuse = (reason: string): never => {
+  console.error(`refusing: ${reason}`)
+  process.exit(1)
+}
+
+const args = process.argv.slice(2)
+const requestedArg = args.find((a) => !a.startsWith('--'))
+const parsed = parseSoakOptions(args.filter((a) => a.startsWith('--')))
+if (!parsed.ok) refuse(parsed.reason)
+const soakOptions = parsed.ok ? parsed.options : refuse('unreachable')
+
+let beta: string
+let main: string
+try {
+  await fetchRefs(root, 'main', 'beta')
+  beta = await revParse(root, 'origin/beta')
+  main = await revParse(root, 'origin/main')
+} catch {
+  refuse('could not read origin/main and origin/beta.')
+}
+// An abbreviated sha is resolved by git to the full one before it is compared.
+let requested: string | undefined
+try {
+  requested = requestedArg ? await revParse(root, `${requestedArg}^{commit}`) : undefined
+} catch {
+  refuse(`'${requestedArg}' does not resolve to a commit.`)
+}
+
+const target = prodTarget({ requested, beta: beta!, betaIsOnMain: beta! === main! || (await isAncestor(root, beta!, main!)) })
+if (!target.ok) refuse(target.reason)
+const sha = requested as string
+
+const soak = soakVerdict(await readReleaseLog(), sha, new Date(), soakOptions)
+if (!soak.ok) refuse(soak.reason)
+console.log(`deploying ${sha.slice(0, 7)}: on beta for ${soak.hours!.toFixed(1)} h (asked: ${soakOptions.minHours} h)${soakOptions.hotfix ? `, hotfix: ${soakOptions.hotfix}` : ''}`)
+if (main! !== sha) console.log(`note: origin/main is ahead at ${main!.slice(0, 7)}. Those commits are NOT in this release.`)
 
 let output: string
 let versionId: string | null
@@ -33,7 +70,8 @@ try {
     return { ...result, before }
   }))
 } catch (err) {
-  console.error('deploy:prod failed before or during `wrangler deploy`. Check `bunx wrangler deployments list --env ""` to see whether a new version went live:', err instanceof Error ? err.message : err)
+  console.error('deploy:prod failed before or during `wrangler deploy`. Check `bunx wrangler deployments list --env ""` to see whether a new version went live.')
+  console.error(describeFailure(err))
   process.exit(1)
 }
 
@@ -54,7 +92,16 @@ try {
 }
 
 try {
-  const logPath = await appendReleaseLog({ env: 'prod', sha, versionId: after, previousVersionId: before ?? 'none', smokeOk, at: new Date().toISOString() })
+  const logPath = await appendReleaseLog({
+    env: 'prod',
+    sha,
+    versionId: after,
+    previousVersionId: before ?? 'none',
+    smokeOk,
+    at: new Date().toISOString(),
+    soakHours: Number(soak.hours!.toFixed(2)),
+    ...(soakOptions.hotfix ? { hotfix: soakOptions.hotfix } : {}),
+  })
   console.log(`release logged: ${logPath}`)
 } catch (err) {
   console.error('failed to write the release log (deploy result above still stands):', err instanceof Error ? err.message : err)
@@ -70,3 +117,15 @@ if (!smokeOk) {
 
 console.log(`prod deploy OK. version ${after}, sha ${sha.slice(0, 7)}.`)
 if (rollback) console.log(`rollback if needed later: ${rollback}`)
+
+// The tag names the release. It is printed, not pushed: the coordinator writes the one line that says what changed.
+try {
+  await $`git fetch origin --tags`.cwd(root).quiet()
+  const tags = (await $`git tag --list ${'app-*'}`.cwd(root).text()).split('\n').filter(Boolean)
+  const tag = nextTag(tags, new Date())
+  console.log('tag and publish this release:')
+  console.log(`  git tag -a ${tag} ${sha} -m "<one line: what changes for a user>" && git push origin ${tag}`)
+  console.log(`  gh release create ${tag} -R ottodevs/mamoru --verify-tag --generate-notes`)
+} catch {
+  console.error('could not read the existing tags; tag the release by hand (docs/process/releasing.md).')
+}

@@ -33,11 +33,11 @@ systemd state. Ot decides if and when to wire it up.
 3. Runs `bun install --frozen-lockfile && bun run deploy:beta`. `deploy:beta` itself re-resolves
    `origin/beta`'s tip and builds an immutable detached-worktree snapshot of that exact sha (never
    the live working tree), then does typecheck + test + build + `wrangler deploy --env beta` + a
-   smoke test, printing a rollback command if the smoke test fails.
+   smoke test, writing the deploy to the release log and printing the rollback command.
 4. Records the deployed (or failed) sha and a one-line log entry.
 
 `main` is never touched by this watcher. Prod deploys stay manual and follow
-`docs/process/releasing.md` ("Releasing to production"); `bun run promote` is not used. Beta is a
+`docs/process/releasing.md` ("Releasing to production": `bun run deploy:prod <sha>`). Beta is a
 separate account from prod for every tester (separate session cookie, separate passkey, same D1
 and operator) — see `AGENTS.md`.
 

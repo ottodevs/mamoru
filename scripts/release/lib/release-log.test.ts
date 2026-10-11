@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { appendReleaseLog, releaseLogPath } from './release-log.ts'
+import { writeFile } from 'node:fs/promises'
+import { appendReleaseLog, readReleaseLog, releaseLogPath } from './release-log.ts'
 
 const ORIGINAL = process.env.MAMORU_RELEASE_LOG
 
@@ -41,6 +42,29 @@ describe('appendReleaseLog', () => {
       expect(lines).toHaveLength(2)
       expect(JSON.parse(lines[0] ?? '')).toEqual(record)
       expect(JSON.parse(lines[1] ?? '').smokeOk).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('readReleaseLog', () => {
+  it('a missing file is an empty log', async () => {
+    process.env.MAMORU_RELEASE_LOG = join(tmpdir(), 'mamoru-no-such-dir', 'releases.jsonl')
+    expect(await readReleaseLog()).toEqual([])
+  })
+
+  it('reads beta and prod records back in order and skips lines that are not records', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mamoru-release-log-test-'))
+    const path = join(dir, 'releases.jsonl')
+    process.env.MAMORU_RELEASE_LOG = path
+    try {
+      const beta = { env: 'beta' as const, sha: 'a'.repeat(40), versionId: 'v1', previousVersionId: 'v0', smokeOk: true, at: '2026-10-10T00:00:00.000Z' }
+      const prod = { env: 'prod' as const, sha: 'a'.repeat(40), versionId: 'v2', previousVersionId: 'v1', smokeOk: true, at: '2026-10-11T00:00:00.000Z', soakHours: 24, hotfix: 'none needed' }
+      await appendReleaseLog(beta)
+      await writeFile(path, 'not json\n{"env":"staging","sha":"x","at":"2026","smokeOk":true}\n{"env":"beta"}\n\n', { flag: 'a' })
+      await appendReleaseLog(prod)
+      expect(await readReleaseLog()).toEqual([beta, prod])
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
