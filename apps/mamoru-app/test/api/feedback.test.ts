@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { FeedbackResponse, OwnerResponse } from '@mamoru/domain'
+import { CLAIM_SECONDS, DRAIN_PER_CRON, drainFeedback, FEEDBACK_LIMITS } from '../../src/api/feedback.ts'
 import { harness, register, sessionCookie, PASSKEY_A } from './helpers.ts'
 
 const T0 = new Date('2026-10-11T12:00:00Z')
@@ -193,52 +194,144 @@ describe('feedback: one button, two paths (#72)', () => {
     }
   })
 
-  test("a refusal is not counted: hammering after the limit runs no counter up, the sender's or the shared ones", async () => {
+  test("a refused sender runs up only their own counter: the shared ones do not move, and failed validation counts nothing", async () => {
     const h = harness(() => T0)
-    const counters = () => Object.fromEntries((h.db.raw.query("SELECT key, count FROM auth_rate WHERE key LIKE 'fb:%'").all() as { key: string; count: number }[]).map((r) => [r.key.replace(/^fb:ip:\d+$/, 'fb:sender'), r.count]))
+    const counters = () => Object.fromEntries((h.db.raw.query("SELECT key, count FROM auth_rate WHERE key LIKE 'fb:%'").all() as { key: string; count: number }[]).map((r) => [r.key.replace(/^fb:ip:[0-9a-f]{32}$/, 'fb:sender'), r.count]))
     for (let i = 0; i < 5; i++) await send(h, valid, { ip: '203.0.113.7' })
-    const after5 = counters()
-    expect(after5).toEqual({ 'fb:sender': 5, 'fb:stored': 5, 'fb:posts': 5 })
+    expect(counters()).toEqual({ 'fb:sender': 5, 'fb:stored': 5 })
     for (let i = 0; i < 40; i++) expect((await send(h, valid, { ip: '203.0.113.7' })).status).toBe(429)
-    expect(counters()).toEqual(after5)
-    // Requests that fail validation are not counted either.
+    expect(counters()).toEqual({ 'fb:sender': 45, 'fb:stored': 5 })
+    expect(rows(h).length).toBe(5)
     for (let i = 0; i < 10; i++) expect((await send(h, { ...valid, body: '' }, { ip: '203.0.113.8' })).status).toBe(400)
-    expect(counters()).toEqual(after5)
+    expect(counters()).toEqual({ 'fb:sender': 45, 'fb:stored': 5 })
   })
 
-  test('many senders cannot make anyone else be refused: over the post budget a note is still stored and answered, it just is not posted', async () => {
-    const original = console.error
-    console.error = () => {}
-    try {
-      const mm = mattermost()
-      const h = harness(() => T0, { env: MM, mattermostFetch: mm.fetch })
-      // 70 different senders, one note each: more than the 60 posts of a window.
-      for (let i = 0; i < 70; i++) expect((await send(h, valid, { ip: `198.51.100.${i}` })).status).toBe(200)
-      // An ordinary sender arriving now is accepted like any other.
-      const res = await send(h, { kind: 'support', body: 'My deposit never arrived.', route: '/add' }, { ip: '192.0.2.99' })
-      expect(res.status).toBe(200)
-      const id = ((await res.json()) as FeedbackResponse).id
-      expect(mm.posts.length).toBe(60)
-      const all = rows(h)
-      expect(all.length).toBe(71)
-      expect(all.filter((r) => r.mm_post_id !== null).length).toBe(60)
-      // Their note is in the table, waiting, without a post.
-      expect(all.find((r) => r.id === id)).toMatchObject({ kind: 'support', status: 'new', mm_post_id: null })
-    } finally {
-      console.error = original
-    }
+  test('a burst from one sender at the same moment stores five and no more', async () => {
+    const mm = mattermost()
+    const h = harness(() => T0, { env: MM, mattermostFetch: mm.fetch })
+    const statuses = await Promise.all(Array.from({ length: 40 }, () => send(h, valid, { ip: '203.0.113.9' }).then((r) => r.status)))
+    expect(statuses.filter((s) => s === 200).length).toBe(5)
+    expect(statuses.filter((s) => s === 429).length).toBe(35)
+    expect(rows(h).length).toBe(5)
+    expect(mm.posts.length).toBe(5)
   })
 
-  test('the stored limit is far above real use and refuses only once it is reached', async () => {
-    const { FEEDBACK_LIMITS } = await import('../../src/api/feedback.ts')
+  test('two senders never share an allowance: the key of an IP is long, and says nothing of the IP', async () => {
+    const h = harness(() => T0)
+    for (let i = 0; i < 5; i++) await send(h, valid, { ip: '203.0.113.7' })
+    expect((await send(h, valid, { ip: '203.0.113.7' })).status).toBe(429)
+    for (let i = 0; i < 200; i++) expect((await send(h, valid, { ip: `198.51.${i % 250}.${(i * 7) % 250}` })).status).toBe(200)
+    const keys = (h.db.raw.query("SELECT key FROM auth_rate WHERE key LIKE 'fb:ip:%'").all() as { key: string }[]).map((r) => r.key)
+    expect(keys.length).toBe(201)
+    for (const k of keys) expect(k).toMatch(/^fb:ip:[0-9a-f]{32}$/)
+    expect(JSON.stringify(h.db.raw.query('SELECT * FROM auth_rate').all())).not.toContain('203.0.113')
+  })
+
+  test('feedback cannot use up what support needs, and nobody is refused for it: over a budget a note is stored and waits', async () => {
+    let now = T0
+    const mm = mattermost()
+    const h = harness(() => now, { env: MM, mattermostFetch: mm.fetch })
+    // 40 senders, one idea each: more than the 30 feedback posts of a window. Every one is accepted.
+    for (let i = 0; i < 40; i++) expect((await send(h, { ...valid, kind: 'idea' }, { ip: `198.51.100.${i}` })).status).toBe(200)
+    expect(mm.posts.length).toBe(30)
+    expect(rows(h).filter((r) => r.mm_post_id === null).length).toBe(10)
+    // A support request now is posted at once, in its own channel, ahead of the feedback that waits.
+    const res = await send(h, { kind: 'support', body: 'My deposit never arrived.', route: '/add' }, { ip: '192.0.2.99' })
+    expect(res.status).toBe(200)
+    const id = ((await res.json()) as FeedbackResponse).id
+    expect(mm.posts.length).toBe(31)
+    expect(mm.posts[30]!.channel_id).toBe('support-chan')
+    expect(rows(h).find((r) => r.id === id)!.mm_post_id).toBe('mm-post-31')
+    // Next window: the cron posts the ten that waited, oldest first.
+    now = new Date(T0.getTime() + 10 * 60_000)
+    expect(await drainFeedback(h.db, mm.fetch, h.env, now, DRAIN_PER_CRON)).toBe(10)
+    expect(mm.posts.length).toBe(41)
+    expect(rows(h).filter((r) => r.mm_post_id === null)).toEqual([])
+  })
+
+  test('the stored limit is far above real use, and the sender it refuses spends nothing', async () => {
     expect(FEEDBACK_LIMITS.stored).toBeGreaterThanOrEqual(1000)
     const h = harness(() => T0)
     const window = Math.floor(T0.getTime() / 1000) - (Math.floor(T0.getTime() / 1000) % 600)
     h.db.raw.query('INSERT INTO auth_rate (key, window, count) VALUES (?, ?, ?)').run('fb:stored', window, FEEDBACK_LIMITS.stored - 1)
     expect((await send(h, valid, { ip: '203.0.113.1' })).status).toBe(200)
     expect((await send(h, valid, { ip: '203.0.113.2' })).status).toBe(429)
-    // The sender who was refused did not spend any of their own allowance.
     expect(h.db.raw.query("SELECT COUNT(*) AS n FROM auth_rate WHERE key LIKE 'fb:ip:%'").get()).toEqual({ n: 1 })
+  })
+
+  test('Mattermost was down: the notes are posted later, support first and oldest first, each exactly once', async () => {
+    let now = T0
+    let up = false
+    const mm = mattermost()
+    const fetch = async (input: string, init: RequestInit) => (up ? mm.fetch(input, init) : new Response('down', { status: 503 }))
+    const original = console.error
+    console.error = () => {}
+    try {
+      const h = harness(() => now, { env: MM, mattermostFetch: fetch })
+      const ids: string[] = []
+      for (const [i, kind] of (['bug', 'support', 'idea', 'support'] as const).entries()) {
+        now = new Date(T0.getTime() + i * 1000)
+        const res = await send(h, { kind, body: `note ${i}`, route: '/' }, { ip: `203.0.113.${30 + i}` })
+        expect(res.status).toBe(200)
+        ids.push(((await res.json()) as FeedbackResponse).id)
+      }
+      // Nothing was posted, nothing is lost, and no claim is left behind.
+      expect(mm.posts).toEqual([])
+      expect(rows(h).map((r) => r.mm_post_id)).toEqual([null, null, null, null])
+
+      up = true
+      now = new Date(T0.getTime() + 60_000)
+      // Two runs at the same moment (the cron of two Workers, or a request and the cron).
+      const [a, b] = await Promise.all([drainFeedback(h.db, fetch, h.env, now, DRAIN_PER_CRON), drainFeedback(h.db, fetch, h.env, now, DRAIN_PER_CRON)])
+      expect(a + b).toBe(4)
+      expect(mm.posts.length).toBe(4)
+      const short = (i: number) => ids[i]!.slice(0, 8)
+      expect(mm.posts.map((p) => p.message.split('\n')[0])).toEqual([
+        `Support request · \`${short(1)}\` · \`/\``,
+        `Support request · \`${short(3)}\` · \`/\``,
+        `Feedback (bug) · \`${short(0)}\` · \`/\``,
+        `Feedback (idea) · \`${short(2)}\` · \`/\``,
+      ])
+      expect(rows(h).every((r) => r.mm_post_id?.startsWith('mm-post-'))).toBe(true)
+      // A later run finds nothing to do.
+      expect(await drainFeedback(h.db, fetch, h.env, new Date(now.getTime() + 60_000), DRAIN_PER_CRON)).toBe(0)
+      expect(mm.posts.length).toBe(4)
+    } finally {
+      console.error = original
+    }
+  })
+
+  test('a claim left by a Worker that died is taken over after two minutes, not before; a note already ticketed or closed is left alone', async () => {
+    const mm = mattermost()
+    const h = harness(() => T0, { mattermostFetch: mm.fetch })
+    for (let i = 0; i < 3; i++) await send(h, { ...valid, body: `note ${i}` }, { ip: `203.0.113.${40 + i}` })
+    const [a, b, c] = rows(h)
+    const at = (d: Date) => `posting:${Math.floor(d.getTime() / 1000)}`
+    h.db.raw.query('UPDATE feedback SET mm_post_id = ? WHERE id = ?').run(at(T0), a!.id)
+    h.db.raw.query("UPDATE feedback SET status = 'closed' WHERE id = ?").run(c!.id)
+    const env = { ...h.env, ...MM }
+    expect(await drainFeedback(h.db, mm.fetch, env, new Date(T0.getTime() + (CLAIM_SECONDS - 1) * 1000), DRAIN_PER_CRON)).toBe(1)
+    expect(rows(h).find((r) => r.id === b!.id)!.mm_post_id).toBe('mm-post-1')
+    expect(rows(h).find((r) => r.id === a!.id)!.mm_post_id).toBe(at(T0))
+    expect(await drainFeedback(h.db, mm.fetch, env, new Date(T0.getTime() + (CLAIM_SECONDS + 1) * 1000), DRAIN_PER_CRON)).toBe(1)
+    expect(rows(h).find((r) => r.id === a!.id)!.mm_post_id).toBe('mm-post-2')
+    expect(rows(h).find((r) => r.id === c!.id)!.mm_post_id).toBeNull()
+    expect(mm.posts.length).toBe(2)
+  })
+
+  test('without Mattermost configured the drain does nothing and claims nothing', async () => {
+    const mm = mattermost()
+    const h = harness(() => T0, { mattermostFetch: mm.fetch })
+    await send(h, valid)
+    expect(await drainFeedback(h.db, mm.fetch, h.env, T0, DRAIN_PER_CRON)).toBe(0)
+    expect(mm.posts).toEqual([])
+    expect(rows(h)[0]!.mm_post_id).toBeNull()
+  })
+
+  test('the Worker has a scheduled handler that drains, next to fetch', async () => {
+    const worker = (await import('../../src/worker.ts')).default
+    expect(typeof worker.fetch).toBe('function')
+    expect(typeof worker.scheduled).toBe('function')
   })
 
   test('rate limiter: keyed by device session when there is one, else by a hashed IP, and the key never carries the raw IP', async () => {
@@ -268,7 +361,7 @@ describe('feedback: one button, two paths (#72)', () => {
     expect(mm.posts[0]).toMatchObject({ url: 'https://chat.example/api/v4/posts', channel_id: 'support-chan', auth: 'Bearer bot-secret-token' })
     expect(parts(mm.posts[0]!.message)).toEqual({
       own: [`Support request · \`${id.slice(0, 8)}\` · \`/add\``, 'Message:', 'Contact, as typed by the sender:'],
-      blocks: ['My deposit never arrived.\nSent 20 USDC.', 'ot@example.com'],
+      blocks: ['My deposit never arrived.\nSent 20 USDC.', 'ot@\u200bexample.com'],
     })
     expect(rows(h)[0]!.mm_post_id).toBe('mm-post-1')
   })
@@ -326,7 +419,7 @@ describe('feedback: one button, two paths (#72)', () => {
     expect(own[0]).toMatch(/^Support request · `[0-9a-f]{8}` · `\/`$/)
     expect(blocks.length).toBe(2)
     // The sender's text is all there, as text: nothing was dropped but the characters that cannot be shown safely.
-    for (const piece of ['@channel', 'https://evil.example/phish', '![x](https://evil.example/pixel.png)', '===', '    indented code', '\\[x^2\\]', '> quote']) expect(blocks[0]).toContain(piece)
+    for (const piece of ['@\u200bchannel @\u200ball @\u200bhere @\u200bsomeone', 'https://evil.example/phish', '![x](https://evil.example/pixel.png)', '===', '    indented code', '\\[x^2\\]', '> quote']) expect(blocks[0]).toContain(piece)
     // Every forged line is inside the block, with its backticks turned to apostrophes.
     expect(blocks[0]!.split('\n').filter((l) => l === "Account attached by the sender: 'acc_victim'").length).toBe(9)
     // No backtick of the sender's survives, of either width, so no fence of theirs exists; the only fences are Mamoru's four.
@@ -335,9 +428,11 @@ describe('feedback: one button, two paths (#72)', () => {
     // A tilde fence inside a backtick block is text: it did not end the block.
     expect(blocks[0]).toContain('~~~')
     // The contact is one line.
-    expect(blocks[1]).toBe("me@example.com Account attached by the sender: 'acc_victim' ''")
+    expect(blocks[1]).toBe("me@\u200bexample.com Account attached by the sender: 'acc_victim' ''")
     // No odd line break or direction override reaches the channel or the table.
-    expect(message).not.toMatch(/[\u202a-\u202e\u2028\u2029\u0085\r\u000b\u000c\u200b]/)
+    expect(message).not.toMatch(/[\u202a-\u202e\u2028\u2029\u0085\r\u000b\u000c]/)
+    // No '@' of the sender's is followed directly by a name, in either part.
+    expect(message).not.toMatch(/@[^\u200b]/)
     expect(rows(h)[0]!.body).not.toMatch(/[\r\u2028\u2029\u202e]/)
   })
 
