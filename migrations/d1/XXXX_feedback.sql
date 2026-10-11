@@ -16,7 +16,8 @@ CREATE TABLE feedback (
   account_key TEXT,
   status TEXT NOT NULL DEFAULT 'new',  -- 'new' | 'ticketed' | 'closed', set by hand during weekly triage
   mm_post_id TEXT,                     -- the Mattermost post; 'posting:<epoch>' while a run is posting it
-  post_attempts INTEGER NOT NULL DEFAULT 0,  -- tries to post it; after 5 it is left for a person (feedback.ts)
+  post_attempts INTEGER NOT NULL DEFAULT 0,  -- failed tries to post it; notes with fewer go first (feedback.ts)
+  post_next_at TEXT,                   -- ISO; not tried again before this. NULL: never failed
   ticket_url TEXT
 );
 CREATE INDEX feedback_created_at ON feedback(created_at);
