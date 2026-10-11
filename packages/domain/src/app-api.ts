@@ -162,3 +162,18 @@ export type ApyView = {
   monthlySource: string
   asOf: string
 }
+
+// In-app feedback (otto/mamoru#72): one button, two paths. 'support' is answered in Mattermost, one thread per
+// request; 'bug' and 'idea' land as a short line and wait for weekly triage. Works with or without a session.
+// POST /api/feedback -> 200 FeedbackResponse | 400 | 429 FEEDBACK_RATE_LIMITED
+export type FeedbackRequest = {
+  kind: 'support' | 'bug' | 'idea'
+  body: string
+  contact?: string
+  route: string          // the SPA path the form was opened from, e.g. '/'
+  // Attaches the account key only when a session owning an account exists; otherwise this is a no-op. Off by default.
+  attachAccount?: boolean
+  // Honeypot: a field no person sees. Any value in it answers success and stores nothing.
+  website?: string
+}
+export type FeedbackResponse = { id: string; received: true }

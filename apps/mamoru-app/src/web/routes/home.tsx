@@ -17,6 +17,7 @@ import { localTime } from '../lib/time.ts'
 import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
 import { DepositDetails, hasMoney } from './add-money.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
+import { FeedbackDialog, feedbackCopy } from '../components/feedback-dialog.tsx'
 
 export const homeCopy = {
   total: 'Total balance',
@@ -515,6 +516,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const ops = useOps(accountKey, true)
   const pools = usePools()
   const [dialog, setDialog] = useState<null | 'add' | 'withdraw' | 'stop' | 'start'>(null)
+  const [feedbackOpen, setFeedbackOpen] = useState(false)
   // Amount the withdraw form opens with; a new value remounts the dialog.
   const [withdrawSeed, setWithdrawSeed] = useState('')
   const f = funding.data
@@ -590,10 +592,14 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         <button type="button" className="text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => kit.mutate()} disabled={!f || kit.isPending}>
           {kit.isSuccess ? 'Recovery kit saved' : 'Save recovery kit'}
         </button>
+        <button type="button" className="text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => setFeedbackOpen(true)}>
+          {feedbackCopy.trigger}
+        </button>
         <a className="underline decoration-wash underline-offset-4 hover:text-ink" href={GITHUB} target="_blank" rel="noreferrer">
           How Mamoru works
         </a>
       </footer>
+      <FeedbackDialog accountKey={accountKey} open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
 
       {f && s ? (
         <>

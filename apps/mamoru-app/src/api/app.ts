@@ -15,9 +15,18 @@ import { operatorRoutes, type OperatorFetch } from './accounts/operator.ts'
 import { otherChainRoutes, type ChainFetch, type ReadGate } from './accounts/other-chains.ts'
 import { apyRoutes } from './apy/routes.ts'
 import { ens } from './ens/routes.ts'
+import { feedbackRoutes, type MattermostFetch } from './feedback.ts'
 import type { ApyCache, Fetcher } from './apy/source.ts'
 
-export type AppOptions = { now?: () => Date; operatorFetch?: OperatorFetch; apyFetch?: Fetcher; apyCache?: () => ApyCache | null; chainFetch?: ChainFetch; chainGate?: ReadGate }
+export type AppOptions = {
+  now?: () => Date
+  operatorFetch?: OperatorFetch
+  apyFetch?: Fetcher
+  apyCache?: () => ApyCache | null
+  chainFetch?: ChainFetch
+  chainGate?: ReadGate
+  mattermostFetch?: MattermostFetch
+}
 
 /** Hard cap per account in live mode, USDC base units (100 USDC). */
 export const LIVE_CAP_USDC = '100000000'
@@ -77,6 +86,7 @@ export function createApp(options: AppOptions = {}) {
   app.route('/api/pools', pools)
   app.route('/api/ens', ens)
   app.route('/api/apy', apyRoutes(options.apyFetch ?? ((input, init) => fetch(input, init)), options.apyCache))
+  app.route('/api', feedbackRoutes(options.mattermostFetch ?? ((input, init) => fetch(input, init))))
 
   app.all('/api/*', (c) => apiError(c, 404, 'No such API route.'))
   app.onError((err, c) => {

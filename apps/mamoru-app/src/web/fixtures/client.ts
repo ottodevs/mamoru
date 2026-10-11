@@ -202,4 +202,5 @@ export const fixtureClient: ApiClient = {
         f.usdc = '19900000'
       }),
     ),
+  feedback: () => delay({ id: `fixture_fb_${liveState.n++}`, received: true as const }),
 }
