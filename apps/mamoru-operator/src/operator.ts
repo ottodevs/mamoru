@@ -109,6 +109,8 @@ const BUDGET_RESUME_MS = 1_800_000
  * next review comes this soon instead of a whole review period later: a deposit is placed in a couple of minutes, not
  * in half an hour. FOLLOW_UP_MAX in a row at most, so an engine that keeps producing operations cannot spin.
  */
+/** Blocks past the head (a minute on Base) no review looks before, when an engine operation was out at the last stop. */
+const RESTART_FLOOR_MARGIN = 30n
 export const FOLLOW_UP_MS = 5_000
 export const FOLLOW_UP_MAX = 12
 /** Quick reviews still granted after one that did nothing: the provider may not show the last operation's effect yet. */
@@ -222,7 +224,7 @@ type Prepared = {
   meta?: { amountUsdc: string; asset?: string; to: Hex }
 }
 
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -1719,9 +1721,16 @@ export class Operator {
     // The journal of a restarted engine is empty: the block of the last operation stored for the account stands in
     // for it, so the first review does not decide on a view from before that operation.
     engine.minObservationBlock = lastEngineBlock(acc.ops)
+    // An engine operation that was out when the process stopped has no block stored: it may have landed since. The
+    // first tick then puts the floor a margin past the head it reads, so a provider still before it is not believed.
+    const unsettled = acc.ops.some((o) => o.opId.startsWith('eng-') && o.state === 'submitted' && o.block === undefined)
     this.revokeManage(engine)
     const runner: Runner = { engine, timer: null, stopped: false, epoch: acc.epoch, run: acc.runs, seen: new Map(), alias: new Map() }
     this.runners.set(acc.accountKey, runner)
+    runner.floorPending = unsettled
+    // Every move of an engine operation is stored as it happens: a restart in the middle of a review still knows
+    // which block the operation landed in.
+    engine.journal.onMove = () => this.syncEngineOps(acc, runner)
     const tick = async () => {
       if (runner.stopped) return
       // Whether this review leaves the next one something to do at once.
@@ -1730,6 +1739,13 @@ export class Operator {
       await this.lock(acc.accountKey).run(async () => {
         if (runner.stopped || this.reviewBraked(runner)) return
         try {
+          if (runner.floorPending) {
+            const head = await this.client.getBlockNumber()
+            const floor = head + RESTART_FLOOR_MARGIN
+            if (floor > engine.minObservationBlock) engine.minObservationBlock = floor
+            runner.floorPending = false
+            console.log(`[engine ${acc.accountKey}] an operation was out at the last stop: no review before block ${floor}`)
+          }
           // The provider may still serve a block before the activation that enabled the grants: wait for it.
           if (!runner.pastActivation) {
             const head = await this.client.getBlockNumber()
