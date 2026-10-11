@@ -165,7 +165,10 @@ const staleClaim = (now: Date) => `posting:${Math.floor(now.getTime() / 1000) - 
  *   An outage, a bot that may not post, a wrong channel or a spent budget is not counted against any note.
  * - The budget of the window is counted and checked in one statement, so runs at the same moment cannot
  *   pass it between them.
- * - A queue stops at the first post that fails for a reason that is not the note's own.
+ * - A failure that is not plainly the note's own (5xx, timeout, 403, ...) does not stop a queue at once: the
+ *   next note is tried. If another note of the queue is posted in the same run, the server was fine, so the
+ *   note that failed is charged the attempt and cannot be tried for ever. Two such failures in a row with
+ *   nothing posted stop the queue until the next run.
  * Returns how many were posted. Never throws.
  */
 export async function drainFeedback(db: Db, fetcher: MattermostFetch, env: Env, now: Date, max: number): Promise<number> {
@@ -184,6 +187,11 @@ export async function drainFeedback(db: Db, fetcher: MattermostFetch, env: Env, 
         )
         .bind(POST_ATTEMPTS_MAX, queue === 'support' ? 1 : 0, staleClaim(now), max)
         .all<FeedbackRow>()
+      // Notes that failed in this run for a reason that looked like the server's. If another note of the same
+      // queue is posted in this run, before or after, the server was fine and the failure was theirs: they are
+      // charged the attempt.
+      const unexplained: string[] = []
+      let postedHere = 0
       for (const row of waiting.results) {
         if (posted >= max) return posted
         const claim = claimOf(now)
@@ -192,7 +200,7 @@ export async function drainFeedback(db: Db, fetcher: MattermostFetch, env: Env, 
           .bind(claim, row.id, row.mm_post_id)
           .first<{ id: string }>()
         if (!mine) continue
-        // Gives the claim back. An attempt counts against the note only when Mattermost refused the note itself.
+        // Gives the claim back. An attempt counts against the note only when the failure was the note's own.
         const giveBack = (keepAttempt: boolean) =>
           db.prepare(`UPDATE feedback SET mm_post_id = NULL, post_attempts = post_attempts - ? WHERE id = ? AND mm_post_id = ?`).bind(keepAttempt ? 0 : 1, row.id, claim).run()
         // Counted, then checked: the count this run got back is its own place in the window.
@@ -204,10 +212,18 @@ export async function drainFeedback(db: Db, fetcher: MattermostFetch, env: Env, 
         if (result.postId) {
           await db.prepare('UPDATE feedback SET mm_post_id = ? WHERE id = ? AND mm_post_id = ?').bind(result.postId, row.id, claim).run()
           posted++
+          postedHere++
+          for (const id of unexplained.splice(0)) await db.prepare('UPDATE feedback SET post_attempts = post_attempts + 1 WHERE id = ? AND mm_post_id IS NULL').bind(id).run()
+        } else if (result.refused) {
+          await giveBack(true)
+        } else if (postedHere > 0) {
+          // The server took another note a moment ago: this failure is the note's.
+          await giveBack(true)
         } else {
-          await giveBack(result.refused)
-          // Not this note's fault: Mattermost is not answering, so this queue waits for the next run.
-          if (!result.refused) break
+          await giveBack(false)
+          unexplained.push(row.id)
+          // One failure may be this note; two in a row is Mattermost not answering, and the queue waits for the next run.
+          if (unexplained.length >= 2) break
         }
       }
     }
