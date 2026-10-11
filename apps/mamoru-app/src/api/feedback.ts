@@ -144,31 +144,41 @@ async function ipSender(secret: string, ip: string): Promise<string> {
   return `ip:${Array.from(h.slice(0, 16), (b) => b.toString(16).padStart(2, '0')).join('')}`
 }
 
-type FeedbackRow = { id: string; created_at: string; kind: FeedbackRequest['kind']; body: string; contact: string | null; route: string; account_key: string | null; mm_post_id: string | null }
+type FeedbackRow = { id: string; created_at: string; kind: FeedbackRequest['kind']; body: string; contact: string | null; route: string; account_key: string | null; mm_post_id: string | null; post_attempts: number }
 
 /** A claim on a note while it is being posted. One left behind by a Worker that died is taken over after this long. */
 export const CLAIM_SECONDS = 120
-/** A note Mattermost keeps refusing is tried this many times, then left in the table for a person: it must not hold the queue for ever. */
-export const POST_ATTEMPTS_MAX = 5
+/** After this many failed posts in a row with none posted, a queue waits for the next run: Mattermost is not answering. */
+export const FAILURES_BEFORE_WAITING = 2
 const claimOf = (now: Date) => `posting:${Math.floor(now.getTime() / 1000)}`
 const staleClaim = (now: Date) => `posting:${Math.floor(now.getTime() / 1000) - CLAIM_SECONDS}`
+
+const MINUTE = 60_000
+/**
+ * How long a note waits before it is tried again, after `failures` failed posts. 10, 20, 40 minutes, then
+ * every hour; a whole day when Mattermost said the post itself is not valid, since trying again will not help.
+ */
+export function retryDelayMs(failures: number, refused: boolean): number {
+  if (refused) return 24 * 60 * MINUTE
+  return Math.min(10 * MINUTE * 2 ** Math.max(0, Math.min(failures, 10) - 1), 60 * MINUTE)
+}
 
 /**
  * Posts notes that are stored and not yet in Mattermost, at most `max`. It runs after every accepted note
  * (which is then simply one of those waiting) and from the Worker's cron, so a note that could not be posted
  * (Mattermost down, budget of the window spent) is posted later instead of waiting unseen.
- * - Support and feedback are two queues, each oldest first, support served first. Neither can hold the other
- *   back: a spent budget or a failing channel on one side leaves the other side running.
+ *
+ * There is no guessing whether a failure is the note's or the server's, and no note is ever given up on:
+ * - Support and feedback are two queues, support served first. A spent budget or a failing channel on one
+ *   side leaves the other running.
  * - A note is claimed in one statement before it is posted, so two runs never post it twice.
- * - When Mattermost refuses a note itself (400, 413), that is an attempt against the note and the queue goes on to
- *   the next one. After POST_ATTEMPTS_MAX the note is no longer tried, so it cannot block the notes behind it.
- *   An outage, a bot that may not post, a wrong channel or a spent budget is not counted against any note.
- * - The budget of the window is counted and checked in one statement, so runs at the same moment cannot
- *   pass it between them.
- * - A failure that is not plainly the note's own (5xx, timeout, 403, ...) does not stop a queue at once: the
- *   next note is tried. If another note of the queue is posted in the same run, the server was fine, so the
- *   note that failed is charged the attempt and cannot be tried for ever. Two such failures in a row with
- *   nothing posted stop the queue until the next run.
+ * - A post that fails, whatever the reason, counts a failure on the note and sets when it may be tried again
+ *   (retryDelayMs). Notes with fewer failures go first, so a note that keeps failing sinks behind the others
+ *   and cannot hold the queue, and one that was only caught by an outage is tried again within the hour.
+ * - FAILURES_BEFORE_WAITING failures in a row stop a queue until the next run, which bounds what an outage
+ *   costs a run to that many timeouts.
+ * - The budget of the window is counted and checked in one statement, so runs at the same moment cannot pass
+ *   it between them. A note that finds no budget is not charged anything.
  * Returns how many were posted. Never throws.
  */
 export async function drainFeedback(db: Db, fetcher: MattermostFetch, env: Env, now: Date, max: number): Promise<number> {
@@ -180,51 +190,40 @@ export async function drainFeedback(db: Db, fetcher: MattermostFetch, env: Env, 
     for (const queue of ['support', 'feedback'] as const) {
       const waiting = await db
         .prepare(
-          `SELECT id, created_at, kind, body, contact, route, account_key, mm_post_id FROM feedback
-           WHERE status = 'new' AND post_attempts < ? AND (kind = 'support') = ?
+          `SELECT id, created_at, kind, body, contact, route, account_key, mm_post_id, post_attempts FROM feedback
+           WHERE status = 'new' AND (kind = 'support') = ?
              AND (mm_post_id IS NULL OR (mm_post_id LIKE 'posting:%' AND mm_post_id < ?))
+             AND (post_next_at IS NULL OR post_next_at <= ?)
            ORDER BY post_attempts ASC, created_at ASC LIMIT ?`,
         )
-        .bind(POST_ATTEMPTS_MAX, queue === 'support' ? 1 : 0, staleClaim(now), max)
+        .bind(queue === 'support' ? 1 : 0, staleClaim(now), now.toISOString(), max)
         .all<FeedbackRow>()
-      // Notes that failed in this run for a reason that looked like the server's. If another note of the same
-      // queue is posted in this run, before or after, the server was fine and the failure was theirs: they are
-      // charged the attempt.
-      const unexplained: string[] = []
-      let postedHere = 0
+      let failuresInARow = 0
       for (const row of waiting.results) {
         if (posted >= max) return posted
         const claim = claimOf(now)
         const mine = await db
-          .prepare('UPDATE feedback SET mm_post_id = ?, post_attempts = post_attempts + 1 WHERE id = ? AND (mm_post_id IS NULL OR mm_post_id = ?) RETURNING id')
+          .prepare('UPDATE feedback SET mm_post_id = ? WHERE id = ? AND (mm_post_id IS NULL OR mm_post_id = ?) RETURNING id')
           .bind(claim, row.id, row.mm_post_id)
           .first<{ id: string }>()
         if (!mine) continue
-        // Gives the claim back. An attempt counts against the note only when the failure was the note's own.
-        const giveBack = (keepAttempt: boolean) =>
-          db.prepare(`UPDATE feedback SET mm_post_id = NULL, post_attempts = post_attempts - ? WHERE id = ? AND mm_post_id = ?`).bind(keepAttempt ? 0 : 1, row.id, claim).run()
         // Counted, then checked: the count this run got back is its own place in the window.
         if ((await bump(db, `fb:posts:${queue}`, window)) > FEEDBACK_LIMITS.posts[queue]) {
-          await giveBack(false)
+          await db.prepare('UPDATE feedback SET mm_post_id = NULL WHERE id = ? AND mm_post_id = ?').bind(row.id, claim).run()
           break
         }
         const result = await postToMattermost(fetcher, env, { id: row.id, kind: row.kind, body: row.body, contact: row.contact, route: row.route, accountKey: row.account_key })
         if (result.postId) {
-          await db.prepare('UPDATE feedback SET mm_post_id = ? WHERE id = ? AND mm_post_id = ?').bind(result.postId, row.id, claim).run()
+          await db.prepare('UPDATE feedback SET mm_post_id = ?, post_next_at = NULL WHERE id = ? AND mm_post_id = ?').bind(result.postId, row.id, claim).run()
           posted++
-          postedHere++
-          for (const id of unexplained.splice(0)) await db.prepare('UPDATE feedback SET post_attempts = post_attempts + 1 WHERE id = ? AND mm_post_id IS NULL').bind(id).run()
-        } else if (result.refused) {
-          await giveBack(true)
-        } else if (postedHere > 0) {
-          // The server took another note a moment ago: this failure is the note's.
-          await giveBack(true)
-        } else {
-          await giveBack(false)
-          unexplained.push(row.id)
-          // One failure may be this note; two in a row is Mattermost not answering, and the queue waits for the next run.
-          if (unexplained.length >= 2) break
+          failuresInARow = 0
+          continue
         }
+        // The claim is given back with one more failure and the time of the next try.
+        const next = new Date(now.getTime() + retryDelayMs(row.post_attempts + 1, result.refused)).toISOString()
+        await db.prepare('UPDATE feedback SET mm_post_id = NULL, post_attempts = post_attempts + 1, post_next_at = ? WHERE id = ? AND mm_post_id = ?').bind(next, row.id, claim).run()
+        // A post Mattermost calls invalid says nothing about the server, so it does not count towards waiting.
+        if (!result.refused && ++failuresInARow >= FAILURES_BEFORE_WAITING) break
       }
     }
   } catch {
