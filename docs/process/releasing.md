@@ -76,10 +76,13 @@ A sha is ready for production when all of this is true and written in the tracki
 Needs Otto's GO, given for one sha: the one that soaked. Write it in the tracking thread.
 
 1. `bun run deploy:prod <sha>`. The script holds the rules, and refuses if any is not met:
-   - a sha must be named; nothing is taken from the tip of a branch;
+   - the sha is written in full, all 40 characters; a branch, a tag, `HEAD` or a short sha is refused,
+     and so is any second word on the command line;
    - it must be the tip of `origin/beta`, so it is what is running on beta;
    - it must be a commit of `origin/main`;
-   - the release log must show its beta deploy, with a passing smoke test, at least 24 hours ago.
+   - by the release log, beta must have been running it without interruption for at least 24 hours: the
+     latest beta deploy is this sha with a passing smoke test, and no other commit and no failed smoke
+     test since the run began. Putting another commit on beta and coming back starts the soak again.
    `main` may be ahead: commits merged after the beta was cut are not in the release, and the script says so.
 2. Shorter soak, when "Soak" above allows it: `--min-soak-hours=2`. Under two hours is a hotfix and needs
    the reason, which goes into the release log: `--min-soak-hours=0.5 --hotfix="withdrawals answer 500"`.
@@ -92,6 +95,8 @@ Needs Otto's GO, given for one sha: the one that soaked. Write it in the trackin
 The soak is read from the release log of the machine that ran `deploy:beta`
 (`~/.local/state/mamoru-app/releases.jsonl`). Releases are cut from one machine; a beta deployed from
 another one does not count here, and the script will say there is no record.
+A rollback of beta done by hand with `wrangler rollback` is not in the log. After one, deploy the sha
+again with `bun run deploy:beta` so the log says what beta runs; the soak starts from there.
 
 ## Rolling back
 

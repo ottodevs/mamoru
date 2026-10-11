@@ -7,7 +7,7 @@
 // deploy:prod reads to know how long a sha has soaked) and prints the rollback command.
 // Never creates origin/beta; refuses if it does not exist.
 import { runTypecheckAndTest, buildApp } from './lib/check.ts'
-import { betaTarget } from './lib/gate.ts'
+import { betaTarget, parseBetaArgs } from './lib/gate.ts'
 import { withSnapshot } from './lib/snapshot.ts'
 import { fetchRefs, isAncestor, revParse } from './lib/git.ts'
 import { appendReleaseLog } from './lib/release-log.ts'
@@ -37,7 +37,12 @@ try {
 }
 // A caller that polled a sha (the watcher) passes it: if origin/beta moved since, refuse, so what
 // it records as deployed or failed is the commit that was actually tried.
-const expected = process.argv.slice(2).find((a) => /^[0-9a-f]{40}$/.test(a))
+const parsedArgs = parseBetaArgs(process.argv.slice(2))
+if (!parsedArgs.ok) {
+  console.error(`refusing: ${parsedArgs.reason}`)
+  process.exit(1)
+}
+const expected = parsedArgs.expected
 const target = betaTarget({ beta: sha, betaIsOnMain: sha === main || (await isAncestor(root, sha, main)), ...(expected ? { expected } : {}) })
 if (!target.ok) {
   console.error(`refusing: ${target.reason}`)
