@@ -121,6 +121,11 @@ export function graceLeft(more: boolean, followUps: number, grace: number): { mo
   return { more: false, grace: 0 }
 }
 
+/** The block of the latest engine operation stored for an account that reached the chain; 0 when none did. */
+export function lastEngineBlock(ops: readonly Pick<OpView, 'opId' | 'block'>[]): bigint {
+  return ops.reduce((m, o) => (o.opId.startsWith('eng-') && o.block !== undefined && BigInt(o.block) > m ? BigInt(o.block) : m), 0n)
+}
+
 /** When the next review of an account comes, and how many quick follow-ups in a row that makes. */
 export function nextReview(more: boolean, followUps: number, overBudget: boolean, reviewMs: number): { ms: number; followUps: number } {
   if (more && !overBudget && followUps < FOLLOW_UP_MAX) return { ms: Math.min(FOLLOW_UP_MS, reviewMs), followUps: followUps + 1 }
@@ -1711,6 +1716,9 @@ export class Operator {
         },
       },
     )
+    // The journal of a restarted engine is empty: the block of the last operation stored for the account stands in
+    // for it, so the first review does not decide on a view from before that operation.
+    engine.minObservationBlock = lastEngineBlock(acc.ops)
     this.revokeManage(engine)
     const runner: Runner = { engine, timer: null, stopped: false, epoch: acc.epoch, run: acc.runs, seen: new Map(), alias: new Map() }
     this.runners.set(acc.accountKey, runner)

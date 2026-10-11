@@ -160,4 +160,15 @@ describe('a review never observes before the last operation', () => {
     chain.head = 1151n
     expect((await e.review()).kind).toBe('decided')
   })
+
+  test('a restored engine (empty journal) takes its floor from whoever restores it', async () => {
+    const e = engine(sessions())
+    for (const id of [11n, 12n, 13n]) e.allowedTokenIds.push(id)
+    chain.head = 1151n
+    chain.safe = 1050n
+    e.minObservationBlock = 1160n
+    expect(await e.review()).toMatchObject({ kind: 'observation-failed', code: 'EHG_OBSERVATION_STALE' })
+    chain.head = 1160n
+    expect((await e.review()).kind).toBe('decided')
+  })
 })
