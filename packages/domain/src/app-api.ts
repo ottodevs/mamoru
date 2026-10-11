@@ -65,9 +65,16 @@ export type FundingView = {
   cbbtc: string           // base units
   gasReserveWei: string   // the relayer tops the Safe up to this at activation
   active: boolean         // engine grants enabled and the engine loop running
+  // Every token the account holds outside a position (USDC, and what a swap leaves until its mint: USDT, cbBTC, WETH),
+  // base units, each with its value in USDC base units. `usdc` and `cbbtc` above are the same balances, kept for
+  // older app versions.
+  idle?: { token: string; amount: string; decimals: number; valueUsdc: string }[]
+  // What the engine of a running account is up to between operations: `placing` while it is working through an
+  // entry (the next step comes in seconds), and when its next review of the account is due. Null when not running.
+  engine?: { placing: boolean; nextReviewAt: string | null } | null
   positions: {
     tokenId: string; pool: string; liquidity: string; inRange: boolean; amountUsdc: string; amountCbbtc: string
-    amounts?: { token: string; amount: string; decimals: number }[]   // both sides of any pool, base units
+    amounts?: { token: string; amount: string; decimals: number; valueUsdc?: string }[]   // both sides of any pool, base units, each with its value in USDC
     valueUsdc?: string                                                  // position value in USDC base units
   }[]
   // What the engine is doing right now, for a subtle progress line in Working capital.

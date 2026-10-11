@@ -24,7 +24,12 @@ export type Split = {
   idleCbbtc: bigint
   priced: boolean // false when cbBTC is held but no price was observed
   maxWithdraw: bigint // total less a 1% margin, rounded down to cents
+  /** Every token held outside a position, as the operator reports it; empty for an older operator. */
+  idleTokens: Holding[]
 }
+
+/** An amount of one token (base units) and what it is worth in USDC base units. */
+export type Holding = { token: string; amount: bigint; decimals: number; valueUsdc: bigint }
 
 export function split(f: FundingView, price: bigint | null): Split {
   const workingUsdc = f.positions.reduce((a, p) => a + BigInt(p.amountUsdc), 0n)
@@ -33,7 +38,9 @@ export function split(f: FundingView, price: bigint | null): Split {
   const idleCbbtc = BigInt(f.cbbtc)
   // valueUsdc covers every pool (USDT, WETH too); older views fall back to the USDC + cbBTC legs.
   const working = f.positions.reduce((a, p) => a + (p.valueUsdc !== undefined ? BigInt(p.valueUsdc) : BigInt(p.amountUsdc) + cbbtcToUsdc(BigInt(p.amountCbbtc), price)), 0n)
-  const idle = idleUsdc + cbbtcToUsdc(idleCbbtc, price)
+  const idleTokens: Holding[] = (f.idle ?? []).map((t) => ({ token: t.token, amount: BigInt(t.amount), decimals: t.decimals, valueUsdc: BigInt(t.valueUsdc) }))
+  // The operator's list covers every token (USDT and WETH between a swap and its mint too); without it, USDC + cbBTC.
+  const idle = f.idle ? idleTokens.reduce((a, t) => a + t.valueUsdc, 0n) : idleUsdc + cbbtcToUsdc(idleCbbtc, price)
   const total = working + idle
   const margin = (total * 99n) / 100n
   return {
@@ -46,7 +53,27 @@ export function split(f: FundingView, price: bigint | null): Split {
     idleCbbtc,
     priced: price !== null || (f.positions.every((p) => p.valueUsdc !== undefined || p.amountCbbtc === '0') && idleCbbtc === 0n),
     maxWithdraw: (margin / 10_000n) * 10_000n,
+    idleTokens,
   }
+}
+
+/**
+ * The whole account by token: what sits idle plus both sides of every position, largest value first. Null when the
+ * operator does not report values per token yet.
+ */
+export function holdings(f: FundingView): (Holding & { idle: bigint; working: bigint })[] | null {
+  if (!f.idle || f.positions.some((p) => !p.amounts || p.amounts.some((a) => a.valueUsdc === undefined))) return null
+  const by = new Map<string, Holding & { idle: bigint; working: bigint }>()
+  const add = (token: string, amount: bigint, decimals: number, valueUsdc: bigint, where: 'idle' | 'working') => {
+    const h = by.get(token) ?? { token, amount: 0n, decimals, valueUsdc: 0n, idle: 0n, working: 0n }
+    h.amount += amount
+    h.valueUsdc += valueUsdc
+    h[where] += amount
+    by.set(token, h)
+  }
+  for (const t of f.idle) add(t.token, BigInt(t.amount), t.decimals, BigInt(t.valueUsdc), 'idle')
+  for (const p of f.positions) for (const a of p.amounts!) add(a.token, BigInt(a.amount), a.decimals, BigInt(a.valueUsdc!), 'working')
+  return [...by.values()].filter((h) => h.amount > 0n).sort((a, b) => (b.valueUsdc > a.valueUsdc ? 1 : b.valueUsdc < a.valueUsdc ? -1 : 0))
 }
 
 /** Base units to "12.34". Always two decimals, grouped. */

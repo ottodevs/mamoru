@@ -11,12 +11,12 @@ import { base64url, PasskeyError } from '../../src/web/lib/passkey.ts'
 import { challengeUsable, signInCopy, signInProblem, signInWithPasskey, WALKAWAY_URL } from '../../src/web/lib/signin.ts'
 import { SignInCard } from '../../src/web/routes/signin.tsx'
 import { base64urlDecode, hexToBytes } from '../../src/web/lib/passkey-sign.ts'
-import { capNote, cbbtcPrice, ceilCents, humanMessage, overCapOf, split, usd, usdPlain } from '../../src/web/lib/money.ts'
+import { capNote, cbbtcPrice, ceilCents, holdings, humanMessage, overCapOf, split, usd, usdPlain } from '../../src/web/lib/money.ts'
 import { activationLive, historyOps, needsRetry, opLine } from '../../src/web/lib/ops.ts'
 import { isAddress, parseUsdc } from '../../src/web/lib/owner-flow.ts'
 import { encodeQr } from '../../src/web/lib/qr.ts'
 import { localTime } from '../../src/web/lib/time.ts'
-import { History } from '../../src/web/routes/home.tsx'
+import { engineLine, History } from '../../src/web/routes/home.tsx'
 import { MIX } from '../../src/web/routes/onboarding.tsx'
 import { buildRouter } from '../../src/web/router.tsx'
 import { render } from './render.ts'
@@ -326,5 +326,77 @@ describe('helpers', () => {
   })
   test('the mix is the Conservador policy', () => {
     expect(MIX.reduce((a, s) => a + s.pct, 0)).toBe(100)
+  })
+})
+
+// otto/mamoru#122 and #121: every token counts and shows, and the account says what Mamoru is doing between steps.
+describe('funds by token and what Mamoru is doing', () => {
+  // Ot's beta account after the first step: 5 USDC in, 1.25 swapped to USDT and waiting for its mint.
+  const midEntry: FundingView = {
+    ...funded,
+    active: true,
+    usdc: '3748000',
+    cbbtc: '0',
+    positions: [],
+    idle: [
+      { token: 'USDC', amount: '3748000', decimals: 6, valueUsdc: '3748000' },
+      { token: 'USDT', amount: '1253694', decimals: 6, valueUsdc: '1253694' },
+    ],
+    engine: { placing: true, nextReviewAt: new Date(Date.now() + 5_000).toISOString() },
+  }
+
+  test('the total counts the USDT too: 5 in, 5 shown', () => {
+    expect(usd(split(midEntry, null).total)).toBe('5.00')
+    // An operator that does not list tokens yet: the old sum, as before.
+    expect(usd(split({ ...midEntry, idle: undefined }, null).total)).toBe('3.74')
+  })
+
+  test('Home says the money is being placed, lists each token outside a position and shows the split by token', async () => {
+    const { text, html } = await renderRoute('/', fixtureSession, midEntry)
+    expect(text).toContain('Total balance 5.00 USDC')
+    expect(text).toContain('Being placed 5.00 USDC')
+    expect(text).not.toContain('Idle assets')
+    expect(html).toContain('data-testid="idle-tokens"')
+    expect(text).toContain('3.74 USDC')
+    expect(text).toContain('1.25 USDT')
+    expect(html).toContain('data-testid="by-token"')
+    expect(text).toContain('By token')
+    expect(text).toContain('Placing your money. The next step starts in a few seconds.')
+  })
+
+  test('holdings add what is outside and what is in positions, per token, largest first', () => {
+    const f: FundingView = {
+      ...midEntry,
+      positions: [
+        {
+          tokenId: '1', pool: 'pool:USDC/USDT/100', liquidity: '1', inRange: true, amountUsdc: '1000000', amountCbbtc: '0', valueUsdc: '2500000',
+          amounts: [
+            { token: 'USDC', amount: '1000000', decimals: 6, valueUsdc: '1000000' },
+            { token: 'USDT', amount: '1500000', decimals: 6, valueUsdc: '1500000' },
+          ],
+        },
+      ],
+    }
+    const rows = holdings(f)!
+    expect(rows.map((h) => [h.token, String(h.amount), String(h.valueUsdc), String(h.idle), String(h.working)])).toEqual([
+      ['USDC', '4748000', '4748000', '3748000', '1000000'],
+      ['USDT', '2753694', '2753694', '1253694', '1500000'],
+    ])
+    // Without values per token (an older operator) there is no split to show, rather than a wrong one.
+    expect(holdings({ ...f, idle: undefined })).toBeNull()
+  })
+
+  test('between operations a running account says when Mamoru looks again; a stopped one says nothing', () => {
+    const at = new Date('2026-10-11T21:30:00Z').toISOString()
+    const line = engineLine({ ...midEntry, engine: { placing: false, nextReviewAt: at } })!
+    expect(line.startsWith('Nothing to do right now. Mamoru looks again at ')).toBe(true)
+    expect(engineLine({ ...midEntry, engine: { placing: true, nextReviewAt: at } })).toBe('Placing your money. The next step starts in a few seconds.')
+    expect(engineLine({ ...midEntry, active: false })).toBeNull()
+    expect(engineLine({ ...midEntry, engine: null })).toBeNull()
+  })
+
+  test('an account with nothing in progress keeps the plain label', async () => {
+    const { text } = await renderRoute('/', fixtureSession, { ...midEntry, engine: { placing: false, nextReviewAt: null } })
+    expect(text).toContain('Idle assets 5.00 USDC')
   })
 })

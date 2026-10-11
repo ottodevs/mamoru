@@ -9,7 +9,7 @@ import { BasescanLink, Brand, Modal, Waiting } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
-import { belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, overCapOf, split, usd, usdInput, usdPlain, type Split } from '../lib/money.ts'
+import { belowMinimumOf, cbbtcPrice, ceilCents, holdings, humanMessage, overCapOf, split, usd, usdInput, usdPlain, type Split } from '../lib/money.ts'
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, positionAmounts, positionTokens, progressLine } from '../lib/positions.ts'
@@ -32,6 +32,10 @@ export const homeCopy = {
   start: 'Start',
   working: 'Working capital',
   idle: 'Idle assets',
+  idlePlacing: 'Being placed',
+  byToken: 'By token',
+  placing: 'Placing your money. The next step starts in a few seconds.',
+  upToDate: (time: string) => `Nothing to do right now. Mamoru looks again at ${time}.`,
   history: 'Savings history',
   notRunning: 'Mamoru is not running on this money yet.',
   armFirst: 'Approve once. Mamoru starts when your money lands.',
@@ -110,8 +114,9 @@ export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () =
 
 export function Working({ f, s, onStop, onStart = null }: { f: FundingView; s: Split; onStop: (() => void) | null; onStart?: (() => void) | null }) {
   const n = f.positions.length
-  const assets = [...new Set([...positionTokens(f), ...(s.idleCbbtc > 0n ? ['cbBTC'] : [])])]
-  const line = progressLine(f.progress)
+  const assets = [...new Set([...positionTokens(f), ...(s.idleCbbtc > 0n ? ['cbBTC'] : []), ...s.idleTokens.map((t) => t.token)])]
+  // An operation in flight says what it is; between operations the engine says whether more is coming and when it looks next.
+  const line = progressLine(f.progress) ?? engineLine(f)
   return (
     <details className="card fold">
       <summary>
@@ -214,20 +219,80 @@ function tokenAmount(raw: string, token: string, decimals: number): string {
   return `${s.slice(0, -decimals) || '0'}${frac ? `.${frac}` : ''}`
 }
 
-export function Idle({ s }: { s: Split }) {
-  const tokens = (s.idleUsdc > 0n ? 1 : 0) + (s.idleCbbtc > 0n ? 1 : 0)
+/** What the engine of a running account says between operations; null when it is not running or says nothing. */
+export function engineLine(f: FundingView): string | null {
+  if (!f.active || !f.engine) return null
+  if (f.engine.placing) return homeCopy.placing
+  if (!f.engine.nextReviewAt) return null
+  return homeCopy.upToDate(new Date(f.engine.nextReviewAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
+}
+
+/** `placing`: the engine is working through an entry, so what is outside a position is on its way in, not idle. */
+export function Idle({ s, placing = false }: { s: Split; placing?: boolean }) {
+  const listed = s.idleTokens.length > 0
+  const tokens = listed ? s.idleTokens.length : (s.idleUsdc > 0n ? 1 : 0) + (s.idleCbbtc > 0n ? 1 : 0)
   return (
     <section className="card" aria-labelledby="idle-title">
       <p className="m-0 flex flex-wrap items-baseline gap-x-[0.7rem]">
         <span className="title" id="idle-title">
-          {homeCopy.idle}
+          {placing ? homeCopy.idlePlacing : homeCopy.idle}
         </span>
         <span className="title">{usd(s.idle)} USDC</span>
       </p>
-      <p className="sub">
-        {plural(tokens, 'token idle', 'tokens idle')}
-        {s.idleCbbtc > 0n ? ` · ${formatUnits(String(s.idleCbbtc), 'cbBTC')} cbBTC` : ''}
+      {listed ? (
+        <ul className="m-0 mt-[0.35rem] grid list-none gap-[0.3rem] p-0" data-testid="idle-tokens">
+          {s.idleTokens.map((t) => (
+            <li key={t.token} className="flex items-center gap-[0.5rem] font-mono text-[0.82rem]">
+              <TokenMark symbol={t.token} size={20} />
+              <span>
+                {tokenAmount(String(t.amount), t.token, t.decimals)} {t.token}
+              </span>
+              {t.token === 'USDC' ? null : <span className="text-stone">${usd(t.valueUsdc)}</span>}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="sub">
+          {plural(tokens, placing ? 'token' : 'token idle', placing ? 'tokens' : 'tokens idle')}
+          {s.idleCbbtc > 0n ? ` · ${formatUnits(String(s.idleCbbtc), 'cbBTC')} cbBTC` : ''}
+        </p>
+      )}
+    </section>
+  )
+}
+
+/** The whole account by token: idle plus both sides of every position, with what each is worth and its share. */
+export function ByToken({ f, s }: { f: FundingView; s: Split }) {
+  const rows = holdings(f)
+  if (!rows || rows.length === 0 || s.total === 0n) return null
+  return (
+    <section className="card" aria-labelledby="by-token-title" data-testid="by-token">
+      <p className="title m-0" id="by-token-title">
+        {homeCopy.byToken}
       </p>
+      <ul className="m-0 mt-[0.45rem] grid list-none gap-[0.4rem] p-0">
+        {rows.map((h) => (
+          <li key={h.token} className="grid grid-cols-[auto_1fr_auto] items-center gap-[0.6rem] border-t border-wash pt-[0.4rem] font-mono text-[0.85rem]">
+            <TokenMark symbol={h.token} size={22} />
+            <span className="flex min-w-0 flex-col">
+              <span>
+                {tokenAmount(String(h.amount), h.token, h.decimals)} {h.token}
+              </span>
+              {h.idle > 0n && h.working > 0n ? (
+                <span className="text-[0.76rem] text-stone">
+                  {tokenAmount(String(h.working), h.token, h.decimals)} in positions · {tokenAmount(String(h.idle), h.token, h.decimals)} outside
+                </span>
+              ) : (
+                <span className="text-[0.76rem] text-stone">{h.working > 0n ? 'In positions' : 'Outside a position'}</span>
+              )}
+            </span>
+            <span className="flex flex-col items-end">
+              <span className="font-medium">${usd(h.valueUsdc)}</span>
+              <span className="text-[0.76rem] text-stone">{Number((h.valueUsdc * 1000n) / s.total) / 10}%</span>
+            </span>
+          </li>
+        ))}
+      </ul>
     </section>
   )
 }
@@ -584,7 +649,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
             <StartRow accountKey={accountKey} funded={hasMoney(f)} />
           ) : null}
           <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? () => setDialog('start') : null} />
-          <Idle s={s as Split} />
+          <Idle s={s as Split} placing={f.active && (f.engine?.placing === true || !!f.progress)} />
+          <ByToken f={f} s={s as Split} />
           <History ops={opList} onRetry={retry} />
         </>
       )}

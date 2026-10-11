@@ -37,7 +37,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -76,7 +76,7 @@ function world(usdc: bigint) {
         return {
           data: answerAggregate3(data, (target, callData) => {
             if (callData.startsWith('0x3850c7bd')) return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [1n << 96n, 0, 0, 0, 0, 0, true] })
-            if (callData.startsWith('0x70a08231')) return word(target.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : 0n)
+            if (callData.startsWith('0x70a08231')) return word(target.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : target.toLowerCase() === address('USDT').toLowerCase() ? knobs.usdt : 0n)
             if (callData.startsWith('0x4d2301cc')) return word(0n)
             throw new Error('execution reverted')
           }),
@@ -1491,5 +1491,28 @@ describe('reviews follow each other quickly while an entry is in progress', () =
 
   test('a review period shorter than the follow-up (tests, the lab) is never stretched', () => {
     expect(nextReview(true, 0, false, 1)).toEqual({ ms: 1, followUps: 1 })
+  })
+})
+
+// otto/mamoru#122: 5 USDC in, a swap to USDT waiting for its mint, and the app showed 3.74.
+describe('funding reports every token the account holds, not only USDC', () => {
+  test('USDT left by a swap is listed with its value, and the deposit adds up', async () => {
+    const w = world(3_748_000n)
+    w.knobs.usdt = 1_253_694n
+    const f = await w.op.funding(ctx)
+    expect(f.idle).toEqual([
+      { token: 'USDC', amount: '3748000', decimals: 6, valueUsdc: '3748000' },
+      // The fake pool trades one for one.
+      { token: 'USDT', amount: '1253694', decimals: 6, valueUsdc: '1253694' },
+    ])
+    expect(f.idle!.reduce((a, t) => a + BigInt(t.valueUsdc), 0n)).toBe(5_001_694n)
+    // The old fields stay for app versions that read them.
+    expect(f.usdc).toBe('3748000')
+  })
+
+  test('an empty account lists nothing, and an account that is not running has no engine status', async () => {
+    const f = await world(0n).op.funding(ctx)
+    expect(f.idle).toEqual([])
+    expect(f.engine).toBeNull()
   })
 })
