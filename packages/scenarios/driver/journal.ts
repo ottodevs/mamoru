@@ -61,6 +61,8 @@ export class MemoryJournal {
   readonly signedHashes: Hex[] = []
   private liveOpId: string | null = null
   private seq = 0
+  /** Called after every transition of an operation. */
+  onMove?: (op: OpRecord) => void
 
   get live(): OpRecord | null {
     return this.liveOpId ? this.op(this.liveOpId) : null
@@ -120,6 +122,13 @@ export class MemoryJournal {
     this.transitions.push({ opId, seq, from, to, code, actor: 'workflow', detail })
     if (to === 'signed' && op.userOpHash) this.signedHashes.push(op.userOpHash)
     if (isTerminal(to)) this.liveOpId = null
+    // Whoever persists the journal hears of every move as it happens, not only when the review ends: a process that
+    // stops in the middle must still know what reached the chain. A listener that throws does not undo the move.
+    try {
+      this.onMove?.(op)
+    } catch {
+      // the move stands
+    }
     return op
   }
 
