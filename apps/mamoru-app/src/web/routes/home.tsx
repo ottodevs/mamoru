@@ -9,7 +9,7 @@ import { BasescanLink, Brand, Modal, Waiting } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
-import { belowMinimumOf, cbbtcPrice, ceilCents, holdings, humanMessage, overCapOf, split, usd, usdInput, usdPlain, type Split } from '../lib/money.ts'
+import { belowMinimumOf, cbbtcPrice, ceilCents, DUST_USDC, holdings, humanMessage, overCapOf, split, usd, usdInput, usdPlain, type Split } from '../lib/money.ts'
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, positionAmounts, positionTokens, progressLine } from '../lib/positions.ts'
@@ -230,7 +230,8 @@ export function engineLine(f: FundingView): string | null {
 /** `placing`: the engine is working through an entry, so what is outside a position is on its way in, not idle. */
 export function Idle({ s, placing = false }: { s: Split; placing?: boolean }) {
   const listed = s.idleTokens.length > 0
-  const tokens = listed ? s.idleTokens.length : (s.idleUsdc > 0n ? 1 : 0) + (s.idleCbbtc > 0n ? 1 : 0)
+  // Nothing from a cent up outside a position: say so rather than count the rounding left in each token.
+  const tokens = listed ? s.idleTokens.length : s.idle < DUST_USDC ? 0 : (s.idleUsdc > 0n ? 1 : 0) + (s.idleCbbtc > 0n ? 1 : 0)
   return (
     <section className="card" aria-labelledby="idle-title">
       <p className="m-0 flex flex-wrap items-baseline gap-x-[0.7rem]">

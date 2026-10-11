@@ -395,6 +395,38 @@ describe('funds by token and what Mamoru is doing', () => {
     expect(engineLine({ ...midEntry, engine: null })).toBeNull()
   })
 
+  test('what a swap or a mint rounds off (under a cent per token) counts in the total and is not listed', async () => {
+    // Ot's beta account once placed: three positions and a few millionths left in four tokens.
+    const placed: FundingView = {
+      ...midEntry,
+      usdc: '313',
+      idle: [
+        { token: 'USDC', amount: '313', decimals: 6, valueUsdc: '313' },
+        { token: 'cbBTC', amount: '4', decimals: 8, valueUsdc: '3300' },
+        { token: 'USDT', amount: '1646', decimals: 6, valueUsdc: '1646' },
+        { token: 'WETH', amount: '754', decimals: 18, valueUsdc: '0' },
+      ],
+      engine: { placing: false, nextReviewAt: null },
+      positions: [
+        {
+          tokenId: '1', pool: 'pool:USDC/USDT/100', liquidity: '1', inRange: true, amountUsdc: '1242700', amountCbbtc: '0', valueUsdc: '2497200',
+          amounts: [
+            { token: 'USDC', amount: '1242700', decimals: 6, valueUsdc: '1242700' },
+            { token: 'USDT', amount: '1254500', decimals: 6, valueUsdc: '1254500' },
+          ],
+        },
+      ],
+    }
+    const s = split(placed, null)
+    expect(s.idleTokens).toEqual([])
+    expect(s.idle).toBe(5259n)
+    expect(s.total).toBe(2_502_459n)
+    expect(holdings(placed)!.map((h) => h.token)).toEqual(['USDT', 'USDC'])
+    const { text, html } = await renderRoute('/', fixtureSession, placed)
+    expect(html).not.toContain('data-testid="idle-tokens"')
+    expect(text).toContain('Idle assets 0.00 USDC 0 tokens idle')
+  })
+
   test('an account with nothing in progress keeps the plain label', async () => {
     const { text } = await renderRoute('/', fixtureSession, { ...midEntry, engine: { placing: false, nextReviewAt: null } })
     expect(text).toContain('Idle assets 5.00 USDC')
