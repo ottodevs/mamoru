@@ -19,8 +19,17 @@ token is ever written in this repository, in a ticket or in a log.
 - The Worker has its own provider key. It does not share the operator's: the operator's hourly budget and
   ledger count only its own traffic, and a Worker secret is a different trust boundary.
 
-Cost: one `eth_call` per account every 30 seconds at most while that owner has the app open, bounded per
-account by the `OTHER_CHAINS_LIMIT` rate limiter in `wrangler.jsonc` (6 reads a minute).
+Cost, and what bounds it:
+
+- Normally one `eth_call` per account every 30 seconds at most, while that owner has the app open: each
+  Worker isolate caches a good answer for 30 seconds and a failure for 10.
+- One read is up to three `eth_call`s, one per provider, when the first ones fail.
+- `OTHER_CHAINS_LIMIT` in `wrangler.jsonc` admits 6 reads a minute per account. Cloudflare counts this per
+  location and approximately, so it is a brake, not an exact quota: an account reaching several locations
+  can pass 6 a minute in total. When an isolate's table of 500 accounts is full, an admitted read is not
+  cached, so the limiter is then the only bound for that account.
+- Worst case for one account in one location: 6 reads a minute, 18 `eth_call`s if two providers are down.
+- The provider's own quota alert is the last line: keep it on for the key this Worker uses.
 
 ### Setting it (coordinator only)
 
