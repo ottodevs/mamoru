@@ -163,6 +163,12 @@ export class Engine {
     }))
   }
 
+  /**
+   * Set by whoever restores this engine after a restart: the block of the last operation it ran before. The journal
+   * starts empty then, and the first review must not look at the chain from before that operation either.
+   */
+  minObservationBlock = 0n
+
   async observe(): Promise<Observation> {
     const live = this.journal.live
     return observe(this.client, {
@@ -199,7 +205,8 @@ export class Engine {
     // Never decide on a view older than the engine's own last operation: a provider serving a head behind it shows
     // the account as it was before that operation, and the same step would be proposed again. The reviews used to be
     // minutes apart, which hid this; they can now follow each other in seconds.
-    const floor = observationFloor(this.journal.ops)
+    const inJournal = observationFloor(this.journal.ops)
+    const floor = inJournal > this.minObservationBlock ? inJournal : this.minObservationBlock
     if (obs.block.number < floor) {
       return { kind: 'observation-failed', code: 'EHG_OBSERVATION_STALE', detail: `observed at block ${obs.block.number}, the last operation is in block ${floor}` }
     }

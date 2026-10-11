@@ -7,7 +7,7 @@ import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
 import { LIVE_CAP_USDC, browserOwnerSignature, deployCall, liveAccountFromContext } from '@mamoru/account/live'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
-import { FOLLOW_UP_GRACE, FOLLOW_UP_MAX, FOLLOW_UP_MS, graceLeft, HttpError, nextReview, MAX_OWNER_FAILURES_PER_DAY, OWNER_FAILURES_ALERT_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
+import { FOLLOW_UP_GRACE, FOLLOW_UP_MAX, FOLLOW_UP_MS, graceLeft, HttpError, lastEngineBlock, nextReview, MAX_OWNER_FAILURES_PER_DAY, OWNER_FAILURES_ALERT_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
 import type { Relayer } from '../src/relayer.ts'
 import { answerAggregate3 } from './fake-multicall.ts'
 import type { AccountState, ArmedActivation, StateStore } from '../src/state.ts'
@@ -1514,5 +1514,12 @@ describe('funding reports every token the account holds, not only USDC', () => {
     const f = await world(0n).op.funding(ctx)
     expect(f.idle).toEqual([])
     expect(f.engine).toBeNull()
+  })
+})
+
+describe('a restarted engine does not look at the chain from before its last operation', () => {
+  test('the floor it is given is the block of the latest stored engine operation that reached the chain', () => {
+    expect(lastEngineBlock([])).toBe(0n)
+    expect(lastEngineBlock([{ opId: 'own-1-activate', block: 900 }, { opId: 'eng-1-1-op-1-enter_swap', block: 120 }, { opId: 'eng-1-1-op-2-enter_mint', block: 131 }, { opId: 'eng-1-1-op-3-enter_swap' }])).toBe(131n)
   })
 })
