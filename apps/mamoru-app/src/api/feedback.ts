@@ -1,10 +1,11 @@
 import { Hono, type Context } from 'hono'
 import type { FeedbackRequest, FeedbackResponse } from '@mamoru/domain'
 import type { AppEnv } from './context.ts'
-import type { Env, RateLimiter } from './env.ts'
+import type { Db, Env, RateLimiter } from './env.ts'
 import { apiError } from './errors.ts'
 import { accountOfUser } from './accounts/store.ts'
-import { count, ipKey as ipBucket, SIGNIN_LIMITS } from './auth/rate-limit.ts'
+import { SIGNIN_LIMITS } from './auth/rate-limit.ts'
+import { sha256 } from './auth/webauthn.ts'
 
 // In-app feedback (otto/mamoru#72): one button, two paths. 'support' is answered in Mattermost as a new root
 // post, one thread per request; 'bug' and 'idea' land as a short line in the feedback channel and wait in the
@@ -42,9 +43,13 @@ export function plain(text: string): string {
   return text.replace(LINE_BREAKS, '\n').replace(INVISIBLE, '').replace(/\t/g, ' ').replace(/\n{3,}/g, '\n\n')
 }
 
-/** The sender's text as a code block that nothing inside it can close: a backtick becomes an apostrophe. */
+/**
+ * The sender's text as a code block that nothing inside it can close: a backtick becomes an apostrophe.
+ * Mattermost does not notify for a mention inside a code block; a zero-width space after every '@' makes sure
+ * of it even if the server and the reader ever disagree on where a block ends.
+ */
 function block(text: string): string {
-  return ['```', plain(text).replace(BACKTICK, "'"), '```'].join('\n')
+  return ['```', plain(text).replace(BACKTICK, "'").replace(/@/g, '@\u200b'), '```'].join('\n')
 }
 
 type Note = { id: string; kind: FeedbackRequest['kind']; body: string; contact: string | null; route: string; accountKey: string | null }
@@ -62,6 +67,9 @@ const supportMessage = (n: Note) => message(`Support request · \`${n.id.slice(0
 const feedbackMessage = (n: Note) => message(`Feedback (${n.kind}) · \`${n.id.slice(0, 8)}\` · \`${n.route}\``, n)
 
 export const MATTERMOST_TIMEOUT_MS = 5_000
+/** Notes posted after each accepted one, and by each run of the cron. */
+export const DRAIN_PER_REQUEST = 3
+export const DRAIN_PER_CRON = 20
 
 /** Posts the note to the channel its kind belongs to. Null when unconfigured, refused or unreachable: nothing here ever throws. */
 async function postToMattermost(fetcher: MattermostFetch, env: Env, note: Note): Promise<string | null> {
@@ -86,26 +94,95 @@ async function postToMattermost(fetcher: MattermostFetch, env: Env, note: Note):
   }
 }
 
-// Anyone can reach this route without signing in, and each accepted note writes a row and may post to a
-// channel. The counters are the D1 ones of auth/rate-limit.ts (shared by every isolate, always there), used
-// so that a sender can spend only their own allowance:
-// - a request is counted only when it is accepted. A refusal reads and writes nothing more, so being refused
-//   costs the sender nothing and cannot be used to run a counter up;
-// - perSender: notes one sender may store per window. The only limit a normal sender can meet;
-// - posts: notes posted to Mattermost per window, all senders together. Over it a note is still stored and
-//   answered as received, it just waits in the table without a post, so a flood cannot bury the channel and
-//   cannot make anyone else's note be refused;
-// - stored: notes stored per window, all senders together, far above real use. Only a flood from thousands
-//   of addresses reaches it, and then the form answers "try later" until the window ends.
+// Anyone can reach this route without signing in, and each accepted note writes a row and is posted to a
+// channel. The counters are rows of auth_rate (D1: shared by every isolate, always there), in the same
+// ten-minute windows as sign-in. They are arranged so that a sender can only ever spend their own allowance:
+// - perSender: notes one sender may store per window. Counted and checked in one statement, so a burst of
+//   requests at once cannot pass it. It is the only counter a refusal touches, and it is the sender's own;
+// - stored: notes stored per window, all senders together, far above real use. Looked at before the sender is
+//   counted, so someone refused by it spends nothing. Only a flood from hundreds of addresses reaches it;
+// - posts.support and posts.feedback: posts to Mattermost per window, all senders together, one budget for
+//   each channel so feedback cannot use up what support needs. A note over the budget is not refused: it is
+//   stored, answered as received, and posted by `drainFeedback` once there is budget again.
 // The Workers binding is a cheaper refusal in front; without it, or if it does not answer, these still hold.
-export const FEEDBACK_LIMITS = { perSender: 5, posts: 60, stored: 2000 } as const // per 10-minute window (SIGNIN_LIMITS.windowSeconds)
+export const FEEDBACK_LIMITS = { perSender: 5, stored: 2000, posts: { support: 60, feedback: 30 } } as const
 
-/** How many times `key` was counted in the current window, without counting this look. */
-async function counted(db: Env['DB'], key: string, now: Date): Promise<number> {
+function windowOf(now: Date): number {
   const t = Math.floor(now.getTime() / 1000)
-  const window = t - (t % SIGNIN_LIMITS.windowSeconds)
+  return t - (t % SIGNIN_LIMITS.windowSeconds)
+}
+
+/** How many times `key` was counted in this window, without counting this look. */
+async function counted(db: Db, key: string, window: number): Promise<number> {
   const row = await db.prepare('SELECT count FROM auth_rate WHERE key = ? AND window = ?').bind(key, window).first<{ count: number }>()
   return row?.count ?? 0
+}
+
+/** Adds one to `key` in this window and returns the new count, in one statement. */
+async function bump(db: Db, key: string, window: number): Promise<number> {
+  const row = await db
+    .prepare('INSERT INTO auth_rate (key, window, count) VALUES (?, ?, 1) ON CONFLICT(key, window) DO UPDATE SET count = count + 1 RETURNING count')
+    .bind(key, window)
+    .first<{ count: number }>()
+  return row?.count ?? Number.MAX_SAFE_INTEGER
+}
+
+/** The sender behind an IP, keyed by the server secret so it cannot be computed outside. Long enough that two senders do not share one. No raw IP is kept. */
+async function ipSender(secret: string, ip: string): Promise<string> {
+  const h = await sha256(`mamoru:feedback:rate:v1\n${secret}\n${ip}`)
+  return `ip:${Array.from(h.slice(0, 16), (b) => b.toString(16).padStart(2, '0')).join('')}`
+}
+
+type FeedbackRow = { id: string; created_at: string; kind: FeedbackRequest['kind']; body: string; contact: string | null; route: string; account_key: string | null; mm_post_id: string | null }
+
+/** A claim on a note while it is being posted. One left behind by a Worker that died is taken over after this long. */
+export const CLAIM_SECONDS = 120
+const claimOf = (now: Date) => `posting:${Math.floor(now.getTime() / 1000)}`
+const staleClaim = (now: Date) => `posting:${Math.floor(now.getTime() / 1000) - CLAIM_SECONDS}`
+
+/**
+ * Posts notes that are stored and not yet in Mattermost: support first, then oldest first, at most `max`.
+ * It runs after every accepted note (which is then simply the first one waiting) and from the Worker's cron,
+ * so a note that could not be posted (Mattermost down, budget of the window spent) is posted later instead of
+ * waiting unseen. A note is claimed in one statement before it is posted, so two runs never post it twice.
+ * Stops at the first post that fails: Mattermost is not answering. Returns how many were posted. Never throws.
+ */
+export async function drainFeedback(db: Db, fetcher: MattermostFetch, env: Env, now: Date, max: number): Promise<number> {
+  const { MATTERMOST_URL, MATTERMOST_BOT_TOKEN, MATTERMOST_SUPPORT_CHANNEL_ID, MATTERMOST_FEEDBACK_CHANNEL_ID } = env
+  if (!MATTERMOST_URL || !MATTERMOST_BOT_TOKEN || !MATTERMOST_SUPPORT_CHANNEL_ID || !MATTERMOST_FEEDBACK_CHANNEL_ID) return 0
+  let posted = 0
+  try {
+    const window = windowOf(now)
+    const waiting = await db
+      .prepare(
+        `SELECT id, created_at, kind, body, contact, route, account_key, mm_post_id FROM feedback
+         WHERE status = 'new' AND (mm_post_id IS NULL OR (mm_post_id LIKE 'posting:%' AND mm_post_id < ?))
+         ORDER BY (kind = 'support') DESC, created_at ASC LIMIT ?`,
+      )
+      .bind(staleClaim(now), max * 4)
+      .all<FeedbackRow>()
+    const spent = { support: await counted(db, 'fb:posts:support', window), feedback: await counted(db, 'fb:posts:feedback', window) }
+    for (const row of waiting.results) {
+      if (posted >= max) break
+      const budget = row.kind === 'support' ? 'support' : 'feedback'
+      if (spent[budget] >= FEEDBACK_LIMITS.posts[budget]) continue
+      const claim = claimOf(now)
+      const mine = await db
+        .prepare('UPDATE feedback SET mm_post_id = ? WHERE id = ? AND (mm_post_id IS NULL OR mm_post_id = ?) RETURNING id')
+        .bind(claim, row.id, row.mm_post_id)
+        .first<{ id: string }>()
+      if (!mine) continue
+      spent[budget] = await bump(db, `fb:posts:${budget}`, window)
+      const postId = await postToMattermost(fetcher, env, { id: row.id, kind: row.kind, body: row.body, contact: row.contact, route: row.route, accountKey: row.account_key })
+      // The claim is given back when the post failed, so the next run tries again.
+      await db.prepare('UPDATE feedback SET mm_post_id = ? WHERE id = ? AND mm_post_id = ?').bind(postId, row.id, claim).run()
+      if (!postId) break
+      posted++
+    }
+  } catch {
+    console.error('feedback: drain stopped on an unexpected error')
+  }
+  return posted
 }
 
 /** The request body as text, or null once it passes `max` bytes: the rest is not read. */
@@ -195,34 +272,31 @@ export function feedbackRoutes(mattermostFetch: MattermostFetch) {
       }
     }
 
-    // Keyed by the device session when there is one; the bucket of the connecting IP otherwise. No raw IP is kept.
+    // Keyed by the device session when there is one, by the connecting IP otherwise.
     const secret = c.var.settings.sessionSecret
-    const ip = c.req.header('cf-connecting-ip') ?? 'unknown'
-    const sender = session ? `u:${session.userId}` : await ipBucket(secret, ip)
+    const sender = session ? `u:${session.userId}` : await ipSender(secret, c.req.header('cf-connecting-ip') ?? 'unknown')
     const slowDown = () => apiError(c, 429, 'Too many requests. Wait a few minutes and try again.', 'FEEDBACK_RATE_LIMITED')
     if (!(await bindingAllows(c.env.FEEDBACK_LIMIT, sender))) return slowDown()
     const now = c.var.now()
-    // Looked at first, counted only on acceptance (see FEEDBACK_LIMITS).
-    if ((await counted(c.env.DB, `fb:${sender}`, now)) >= FEEDBACK_LIMITS.perSender) return slowDown()
-    if ((await counted(c.env.DB, 'fb:stored', now)) >= FEEDBACK_LIMITS.stored) return slowDown()
-    await count(c.env.DB, `fb:${sender}`, now)
-    await count(c.env.DB, 'fb:stored', now)
+    const window = windowOf(now)
+    const db = c.env.DB
+    // The shared limit is only looked at, and first: someone it refuses has not spent anything of their own.
+    if ((await counted(db, 'fb:stored', window)) >= FEEDBACK_LIMITS.stored) return slowDown()
+    await db.prepare('DELETE FROM auth_rate WHERE window < ?').bind(window).run()
+    if ((await bump(db, `fb:${sender}`, window)) > FEEDBACK_LIMITS.perSender) return slowDown()
+    await bump(db, 'fb:stored', window)
 
     const id = crypto.randomUUID()
-    const createdAt = now.toISOString()
-    await c.env.DB.prepare(
-      `INSERT INTO feedback (id, created_at, kind, body, contact, route, app_version, account_key, status)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'new')`,
-    )
-      .bind(id, createdAt, kind, bodyText, contact || null, route, accountKey)
+    await db
+      .prepare(
+        `INSERT INTO feedback (id, created_at, kind, body, contact, route, app_version, account_key, status)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'new')`,
+      )
+      .bind(id, now.toISOString(), kind, bodyText, contact || null, route, accountKey)
       .run()
 
-    const note: Note = { id, kind: kind as FeedbackRequest['kind'], body: bodyText, contact: contact || null, route, accountKey }
-    // The post budget is counted here, after the row is safe. Over it the note waits in the table without a post.
-    const withinPostBudget = (await count(c.env.DB, 'fb:posts', now)) <= FEEDBACK_LIMITS.posts
-    if (!withinPostBudget) console.error('feedback: post budget of the window is spent; the note is stored without a post')
-    const postId = withinPostBudget ? await postToMattermost(mattermostFetch, c.env, note) : null
-    if (postId) await c.env.DB.prepare('UPDATE feedback SET mm_post_id = ? WHERE id = ?').bind(postId, id).run()
+    // The row is safe. Post what is waiting: this note, unless older ones or support requests are ahead of it.
+    await drainFeedback(db, mattermostFetch, c.env, now, DRAIN_PER_REQUEST)
 
     const sent: FeedbackResponse = { id, received: true }
     return c.json(sent)
