@@ -12,12 +12,12 @@ import { recordActivity } from './accounts/activity.ts'
 import { accounts } from './accounts/routes.ts'
 import { pools } from './pools/routes.ts'
 import { operatorRoutes, type OperatorFetch } from './accounts/operator.ts'
-import { otherChainRoutes, type ChainFetch } from './accounts/other-chains.ts'
+import { otherChainRoutes, type ChainFetch, type ReadGate } from './accounts/other-chains.ts'
 import { apyRoutes } from './apy/routes.ts'
 import { ens } from './ens/routes.ts'
 import type { ApyCache, Fetcher } from './apy/source.ts'
 
-export type AppOptions = { now?: () => Date; operatorFetch?: OperatorFetch; apyFetch?: Fetcher; apyCache?: () => ApyCache | null; chainFetch?: ChainFetch }
+export type AppOptions = { now?: () => Date; operatorFetch?: OperatorFetch; apyFetch?: Fetcher; apyCache?: () => ApyCache | null; chainFetch?: ChainFetch; chainGate?: ReadGate }
 
 /** Hard cap per account in live mode, USDC base units (100 USDC). */
 export const LIVE_CAP_USDC = '100000000'
@@ -73,7 +73,7 @@ export function createApp(options: AppOptions = {}) {
   app.route('/api/onboarding', onboarding)
   app.route('/api/accounts', operatorRoutes(options.operatorFetch ?? ((input, init) => fetch(input, init))))
   app.route('/api/accounts', accounts)
-  app.route('/api/accounts', otherChainRoutes(options.chainFetch ?? ((input, init) => fetch(input, init))))
+  app.route('/api/accounts', otherChainRoutes(options.chainFetch ?? ((input, init) => fetch(input, init)), options.chainGate))
   app.route('/api/pools', pools)
   app.route('/api/ens', ens)
   app.route('/api/apy', apyRoutes(options.apyFetch ?? ((input, init) => fetch(input, init)), options.apyCache))

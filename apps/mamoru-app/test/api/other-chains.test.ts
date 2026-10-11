@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { decodeFunctionData, encodeFunctionResult, parseAbi, toFunctionSelector } from 'viem'
 import type { FundingView, OtherChainsView, OwnerResponse } from '@mamoru/domain'
-import { CACHE_MS, FAIL_MS, PENDING_MS, ReadGate, RPC_TIMEOUT_MS, WATCHED_CHAINS, type ChainFetch } from '../../src/api/accounts/other-chains.ts'
+import { CACHE_MS, FAIL_MS, MAX_PROVIDERS, PENDING_MS, providerUrls, ReadGate, RPC_TIMEOUT_MS, WATCHED_CHAINS, type ChainFetch } from '../../src/api/accounts/other-chains.ts'
 import { harness, register, PASSKEY_A, PASSKEY_B, sessionCookie } from './helpers.ts'
 
 const RPC = 'https://l1.example/rpc-key'
@@ -79,7 +79,7 @@ async function read(h: ReturnType<typeof harness>, cookie: string, key: string) 
 describe('other chains: USDC sent on Ethereum to the Base address (#117)', () => {
   test('reports the amount on chain id 1 for the account address only, from one call to Multicall3', async () => {
     const n = node({ usdc: 150_000_000n, eth: 7n })
-    const h = harness(() => T0, { env: { ETHEREUM_RPC_URL: RPC }, chainFetch: n.fetch })
+    const h = harness(() => T0, { env: { ETHEREUM_RPC_URLS: RPC }, chainFetch: n.fetch })
     const { cookie, owner } = await onboard(h)
     const v = await read(h, cookie, owner.accountKey)
 
@@ -107,7 +107,7 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
       operatorCalls.push(new URL(input).pathname)
       return Response.json(baseFunding)
     }
-    const h = harness(() => T0, { env: { ETHEREUM_RPC_URL: RPC, LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.example', OPERATOR_SECRET: 'operator-secret' }, chainFetch: n.fetch, operatorFetch })
+    const h = harness(() => T0, { env: { ETHEREUM_RPC_URLS: RPC, LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.example', OPERATOR_SECRET: 'operator-secret' }, chainFetch: n.fetch, operatorFetch })
     const { cookie, owner } = await onboard(h)
     const tables = () => h.db.raw.query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]
     const snapshot = () => JSON.stringify(tables().filter((t) => !/session|activity|rate|challenge/i.test(t.name)).map((t) => [t.name, h.db.raw.query(`SELECT * FROM ${t.name}`).all()]))
@@ -129,7 +129,7 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
     for (const chainId of [8453, 10, 143]) {
       // The same address holds ETH and (hypothetically) a token at the USDC address on that chain.
       const n = node({ chainId, usdc: 99_000_000n, eth: 1_000_000_000_000_000_000n })
-      const h = harness(() => T0, { env: { ETHEREUM_RPC_URL: RPC }, chainFetch: n.fetch })
+      const h = harness(() => T0, { env: { ETHEREUM_RPC_URLS: RPC }, chainFetch: n.fetch })
       const { cookie, owner } = await onboard(h)
       const text = await (await h.request(`/api/accounts/${owner.accountKey}/other-chains`, { cookie })).text()
       expect((JSON.parse(text) as OtherChainsView).chains).toEqual(NOT_OBSERVED as OtherChainsView['chains'])
@@ -140,7 +140,7 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
 
   test('Base as it really is (no code at the Ethereum USDC address, ETH at the Safe) is not observed', async () => {
     const n = node({ chainId: 8453, eth: 1_000_000_000_000_000_000n, inner: (call, honest) => (call.target === USDC_L1 ? { success: true, returnData: '0x' } : honest) })
-    const h = harness(() => T0, { env: { ETHEREUM_RPC_URL: RPC }, chainFetch: n.fetch })
+    const h = harness(() => T0, { env: { ETHEREUM_RPC_URLS: RPC }, chainFetch: n.fetch })
     const { cookie, owner } = await onboard(h)
     expect((await read(h, cookie, owner.accountKey)).chains).toEqual(NOT_OBSERVED as OtherChainsView['chains'])
   })
@@ -171,7 +171,7 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
       { inner: (call, honest) => (call.callData === SEL.block ? { success: true, returnData: word(2n ** 60n) } : honest) },
     ]
     for (const b of broken) {
-      const h = harness(() => T0, { env: { ETHEREUM_RPC_URL: RPC }, chainFetch: node({ usdc: 5n, eth: 5n, ...b }).fetch })
+      const h = harness(() => T0, { env: { ETHEREUM_RPC_URLS: RPC }, chainFetch: node({ usdc: 5n, eth: 5n, ...b }).fetch })
       const { cookie, owner } = await onboard(h)
       expect((await read(h, cookie, owner.accountKey)).chains).toEqual(NOT_OBSERVED as OtherChainsView['chains'])
     }
@@ -192,7 +192,7 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
         async () => Response.json({ id: 1, result: RPC }),
       ]
       for (const chainFetch of failures) {
-        const h = harness(() => T0, { env: { ETHEREUM_RPC_URL: RPC }, chainFetch })
+        const h = harness(() => T0, { env: { ETHEREUM_RPC_URLS: RPC }, chainFetch })
         const { cookie, owner } = await onboard(h)
         const text = await (await h.request(`/api/accounts/${owner.accountKey}/other-chains`, { cookie })).text()
         expect(text).not.toContain('l1.example')
@@ -208,7 +208,7 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
 
   test('only the owner reads it; another session and no session get what the dashboard gives them', async () => {
     const n = node({ usdc: 150_000_000n })
-    const h = harness(() => T0, { env: { ETHEREUM_RPC_URL: RPC }, chainFetch: n.fetch })
+    const h = harness(() => T0, { env: { ETHEREUM_RPC_URLS: RPC }, chainFetch: n.fetch })
     const a = await onboard(h, PASSKEY_A)
     const b = await onboard(h, PASSKEY_B)
     expect((await h.request(`/api/accounts/${a.owner.accountKey}/other-chains`)).status).toBe(401)
@@ -228,7 +228,7 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
     let now = T0
     let release = () => {}
     const n = node({ usdc: 1_000_000n, wait: new Promise<void>((r) => (release = r)) })
-    const h = harness(() => now, { env: { ETHEREUM_RPC_URL: RPC }, chainFetch: n.fetch })
+    const h = harness(() => now, { env: { ETHEREUM_RPC_URLS: RPC }, chainFetch: n.fetch })
     const { cookie, owner } = await onboard(h)
 
     // Ten requests at once: one RPC request. The nine that did not read answer at once, without waiting for the first.
@@ -255,7 +255,7 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
     let now = T0
     // The first read hangs for ever, as when Workers cancels the request that started it.
     const n = node({ usdc: 3_000_000n, wait: new Promise<void>(() => {}) })
-    const h = harness(() => now, { env: { ETHEREUM_RPC_URL: RPC }, chainFetch: n.fetch })
+    const h = harness(() => now, { env: { ETHEREUM_RPC_URLS: RPC }, chainFetch: n.fetch })
     const { cookie, owner } = await onboard(h)
     void read(h, cookie, owner.accountKey).catch(() => undefined)
     await new Promise((r) => setTimeout(r, 20))
@@ -272,7 +272,7 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
     now = new Date(T0.getTime() + PENDING_MS)
     expect((await read(h, cookie, owner.accountKey)).chains[0]).toMatchObject({ status: 'observed', usdc: '3000000' })
     expect(n.requests.length).toBe(2)
-    expect(PENDING_MS).toBeGreaterThan(RPC_TIMEOUT_MS)
+    expect(PENDING_MS).toBeGreaterThan(RPC_TIMEOUT_MS * MAX_PROVIDERS)
   })
 
   test('a full table does not erase a read under way or a backoff: a new account waits instead', () => {
@@ -289,20 +289,31 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
     reading('failed', t)(failed)
     reading('ok', t)(ok('5'))
 
-    // Full, and every slot is live: the newcomer does not read and nothing is thrown away.
-    expect(gate.admit('new', t + 1).kind).toBe('wait')
-    expect(gate.admit('pending', t + 1).kind).toBe('wait')
+    // Full, and every slot is live: the newcomer is not tracked and nothing is thrown away.
+    expect(gate.admit('new', t + 1).kind).toBe('full')
+    expect(gate.admit('pending', t + 1).kind).toBe('busy')
     expect(gate.admit('failed', t + 1)).toEqual({ kind: 'cached', view: failed })
     expect(gate.admit('ok', t + 1)).toEqual({ kind: 'cached', view: ok('5') })
 
-    // Only slots whose own time is up make room: the failure and the abandoned read after 10 s, while the good read stays its 30 s.
-    expect(FAIL_MS).toBe(PENDING_MS)
-    expect(gate.admit('new', t + FAIL_MS - 1).kind).toBe('wait')
+    // Only slots whose own time is up make room: the failure after 10 s, while the good read stays its 30 s.
+    expect(FAIL_MS).toBeLessThan(PENDING_MS)
+    expect(gate.admit('new', t + FAIL_MS - 1).kind).toBe('full')
     expect(gate.admit('new', t + FAIL_MS).kind).toBe('read')
     expect(gate.admit('ok', t + FAIL_MS)).toEqual({ kind: 'cached', view: ok('5') })
-    expect(gate.admit('other', t + FAIL_MS).kind).toBe('read')
-    expect(gate.admit('third', t + FAIL_MS).kind).toBe('wait')
-    expect(gate.admit('ok', t + CACHE_MS).kind).toBe('read')
+    // The read under way keeps its slot until its own, longer, time is up.
+    expect(gate.admit('other', t + PENDING_MS - 1).kind).toBe('full')
+    expect(gate.admit('other', t + PENDING_MS).kind).toBe('read')
+    expect(gate.admit('third', t + PENDING_MS).kind).toBe('full')
+
+    // A read that was cancelled gives its slot back; cancelling late does not remove a newer slot.
+    const c = new ReadGate(1)
+    const c1 = c.admit('a', t)
+    if (c1.kind !== 'read') throw new Error('not admitted')
+    c1.cancel()
+    const c2 = c.admit('b', t)
+    expect(c2.kind).toBe('read')
+    c1.cancel()
+    expect(c.admit('b', t + 1).kind).toBe('busy')
 
     // A result that arrives after its slot was replaced does not overwrite the newer one.
     const g = new ReadGate(3)
@@ -319,7 +330,7 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
   test('a failed read is not repeated for 10 s and is never kept as long as a good one', async () => {
     let now = T0
     const n = node({ usdc: 2_000_000n, http: 502 })
-    const h = harness(() => now, { env: { ETHEREUM_RPC_URL: RPC }, chainFetch: n.fetch })
+    const h = harness(() => now, { env: { ETHEREUM_RPC_URLS: RPC }, chainFetch: n.fetch })
     const { cookie, owner } = await onboard(h)
     for (let i = 0; i < 5; i++) expect((await read(h, cookie, owner.accountKey)).chains[0]!.status).toBe('not_observed')
     expect(n.requests.length).toBe(1)
@@ -332,6 +343,126 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
     expect((await read(h, cookie, owner.accountKey)).chains[0]).toMatchObject({ status: 'observed', usdc: '2000000' })
     expect(n.requests.length).toBe(2)
     expect(FAIL_MS).toBeLessThan(CACHE_MS)
+  })
+
+  test('rate limiter: an account over its limit is not read, a cached answer costs nothing, and the key is the account', async () => {
+    let now = T0
+    const keys: string[] = []
+    let left = 1
+    const limiter = { limit: async ({ key }: { key: string }) => (keys.push(key), { success: left-- > 0 }) }
+    const n = node({ usdc: 4_000_000n })
+    const h = harness(() => now, { env: { ETHEREUM_RPC_URLS: RPC, OTHER_CHAINS_LIMIT: limiter }, chainFetch: n.fetch })
+    const { cookie, owner } = await onboard(h)
+
+    expect((await read(h, cookie, owner.accountKey)).chains[0]).toMatchObject({ status: 'observed', usdc: '4000000' })
+    // Served from the gate: the limiter is not asked.
+    expect((await read(h, cookie, owner.accountKey)).chains[0]).toMatchObject({ status: 'observed' })
+    expect(keys).toEqual([owner.accountKey])
+
+    // The window is over and the limiter says no: nothing is read, and the refusal leaves no slot behind.
+    now = new Date(T0.getTime() + CACHE_MS)
+    expect((await read(h, cookie, owner.accountKey)).chains).toEqual([{ chainId: 1, name: 'Ethereum', status: 'not_observed', observedAt: now.toISOString() }])
+    expect(n.requests.length).toBe(1)
+    left = 1
+    expect((await read(h, cookie, owner.accountKey)).chains[0]).toMatchObject({ status: 'observed' })
+    expect(n.requests.length).toBe(2)
+    expect(keys).toEqual([owner.accountKey, owner.accountKey, owner.accountKey])
+  })
+
+  test('a full table: with the limiter the newcomer is still read, without it (or with it broken) it is not', async () => {
+    const fill = (gate: ReadGate) => {
+      if (gate.admit('someone-else', T0.getTime()).kind !== 'read') throw new Error('not admitted')
+    }
+    const run = async (limiter: { limit: (o: { key: string }) => Promise<{ success: boolean }> } | undefined) => {
+      const gate = new ReadGate(1)
+      fill(gate)
+      const n = node({ usdc: 9_000_000n })
+      const h = harness(() => T0, { env: { ETHEREUM_RPC_URLS: RPC, ...(limiter ? { OTHER_CHAINS_LIMIT: limiter } : {}) }, chainFetch: n.fetch, chainGate: gate })
+      const { cookie, owner } = await onboard(h)
+      const first = (await read(h, cookie, owner.accountKey)).chains[0]!
+      await read(h, cookie, owner.accountKey)
+      // The other account's slot is still there, whatever happened to the newcomer.
+      expect(gate.admit('someone-else', T0.getTime() + 1).kind).toBe('busy')
+      return { status: first.status, rpc: n.requests.length }
+    }
+    const original = console.error
+    console.error = () => {}
+    try {
+      // Not tracked, so each request reads: the limiter is what bounds it.
+      expect(await run({ limit: async () => ({ success: true }) })).toEqual({ status: 'observed', rpc: 2 })
+      expect(await run({ limit: async () => ({ success: false }) })).toEqual({ status: 'not_observed', rpc: 0 })
+      expect(await run(undefined)).toEqual({ status: 'not_observed', rpc: 0 })
+      expect(
+        await run({
+          limit: async () => {
+            throw new Error('binding down')
+          },
+        }),
+      ).toEqual({ status: 'not_observed', rpc: 0 })
+    } finally {
+      console.error = original
+    }
+  })
+
+  test('a limiter that does not answer does not stop a tracked read', async () => {
+    const original = console.error
+    console.error = () => {}
+    try {
+      const n = node({ usdc: 1n })
+      const h = harness(() => T0, { env: { ETHEREUM_RPC_URLS: RPC, OTHER_CHAINS_LIMIT: { limit: async () => Promise.reject(new Error('down')) } }, chainFetch: n.fetch })
+      const { cookie, owner } = await onboard(h)
+      expect((await read(h, cookie, owner.accountKey)).chains[0]).toMatchObject({ status: 'observed', usdc: '1' })
+    } finally {
+      console.error = original
+    }
+  })
+
+  test('provider pool: the next provider answers when one fails, in the order written, and answers are never mixed', async () => {
+    const A = 'https://a.example/key-a'
+    const B = 'https://b.example/key-b'
+    const C = 'https://c.example/key-c'
+    const nodes: Record<string, ReturnType<typeof node>> = { [A]: node({ http: 429 }), [B]: node({ chainId: 8453, usdc: 77n, eth: 77n }), [C]: node({ usdc: 150_000_000n, eth: 3n, block: 21_000_009 }) }
+    const order: string[] = []
+    const chainFetch: ChainFetch = (input, init) => {
+      order.push(input)
+      return nodes[input]!.fetch(input, init)
+    }
+    const logged: string[] = []
+    const original = console.error
+    console.error = (...args: unknown[]) => void logged.push(args.map(String).join(' '))
+    try {
+      const h = harness(() => T0, { env: { ETHEREUM_RPC_URLS: `${A}, ${B}\n${C}` }, chainFetch })
+      const { cookie, owner } = await onboard(h)
+      // The first is out of quota, the second is on Base: the third answers, and every figure is its own.
+      expect((await read(h, cookie, owner.accountKey)).chains).toEqual([{ chainId: 1, name: 'Ethereum', status: 'observed', block: 21_000_009, usdc: '150000000', eth: '3', observedAt: T0.toISOString() }])
+      expect(order).toEqual([A, B, C])
+    } finally {
+      console.error = original
+    }
+    expect(logged).toEqual(['other chain not observed 1 provider 1 of 3 rpc http 429', 'other chain not observed 1 provider 2 of 3 rpc is on another chain'])
+
+    // A healthy first provider is the only one asked.
+    const first = node({ usdc: 1n })
+    const second = node({ usdc: 2n })
+    const h2 = harness(() => T0, { env: { ETHEREUM_RPC_URLS: `${A},${B}` }, chainFetch: (input, init) => (input === A ? first : second).fetch(input, init) })
+    const o2 = await onboard(h2)
+    expect((await read(h2, o2.cookie, o2.owner.accountKey)).chains[0]).toMatchObject({ usdc: '1' })
+    expect(second.requests).toEqual([])
+
+    // Every provider down: not observed, after asking each once.
+    const down = node({ http: 503 })
+    const h3 = harness(() => T0, { env: { ETHEREUM_RPC_URLS: `${A},${B},${C}` }, chainFetch: down.fetch })
+    const o3 = await onboard(h3)
+    expect((await read(h3, o3.cookie, o3.owner.accountKey)).chains).toEqual(NOT_OBSERVED as OtherChainsView['chains'])
+    expect(down.requests.map((r) => r.url)).toEqual([A, B, C])
+  })
+
+  test('provider pool: only https URLs, no repeats, at most three', () => {
+    expect(providerUrls(undefined)).toEqual([])
+    expect(providerUrls('  ')).toEqual([])
+    expect(providerUrls('https://a.example/k')).toEqual(['https://a.example/k'])
+    expect(providerUrls('https://a.example/k, http://plain.example/k ,wss://ws.example/k, not a url,https://a.example/k\thttps://b.example/k')).toEqual(['https://a.example/k', 'https://b.example/k'])
+    expect(providerUrls('https://1.example https://2.example https://3.example https://4.example')).toHaveLength(MAX_PROVIDERS)
   })
 
   test('the watch list is Ethereum only and never the chain Mamoru runs on', () => {
