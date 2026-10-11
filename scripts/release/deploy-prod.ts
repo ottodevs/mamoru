@@ -2,14 +2,15 @@
 // `bun run deploy:prod <sha> [--min-soak-hours=N] [--hotfix="<reason>"]` — deploys ONE named commit to the
 // mamoru-app Worker (default env, app.mamoru.lol). The sha must be the tip of origin/beta (what is running
 // on beta), must be on origin/main (reviewed and merged) and must have soaked: the release log has to show
-// its beta deploy, with a passing smoke test, at least 24 hours ago (or the hours asked for). It is never
+// beta running it without interruption, smoke test passing, for at least 24 hours (or the hours asked
+// for). The sha is a full 40-character commit id: a branch, a tag or a short sha is refused. It is never
 // "whatever main is now": commits merged after the beta was cut cannot ride along.
 // Builds from an immutable detached-worktree snapshot of that sha, never the live working tree. Logs the
 // release and prints the rollback command even if something fails after the deploy itself. Manual only.
 import { $ } from 'bun'
 import { fetchRefs, isAncestor, revParse } from './lib/git.ts'
 import { runCheck } from './lib/check.ts'
-import { nextTag, parseSoakOptions, prodTarget, soakVerdict } from './lib/gate.ts'
+import { nextTag, parseProdArgs, prodTarget, soakVerdict } from './lib/gate.ts'
 import { withSnapshot } from './lib/snapshot.ts'
 import { currentVersionId, deploy, describeFailure, rollbackCommand } from './lib/wrangler.ts'
 import { smokeTest, printSmoke } from './lib/smoke.ts'
@@ -25,11 +26,10 @@ const refuse = (reason: string): never => {
   process.exit(1)
 }
 
-const args = process.argv.slice(2)
-const requestedArg = args.find((a) => !a.startsWith('--'))
-const parsed = parseSoakOptions(args.filter((a) => a.startsWith('--')))
+// The sha is taken as written: a full 40-character commit id, never resolved from a name by git.
+const parsed = parseProdArgs(process.argv.slice(2))
 if (!parsed.ok) refuse(parsed.reason)
-const soakOptions = parsed.ok ? parsed.options : refuse('unreachable')
+const { sha, options: soakOptions } = parsed.ok ? parsed : refuse('unreachable')
 
 let beta: string
 let main: string
@@ -40,21 +40,13 @@ try {
 } catch {
   refuse('could not read origin/main and origin/beta.')
 }
-// An abbreviated sha is resolved by git to the full one before it is compared.
-let requested: string | undefined
-try {
-  requested = requestedArg ? await revParse(root, `${requestedArg}^{commit}`) : undefined
-} catch {
-  refuse(`'${requestedArg}' does not resolve to a commit.`)
-}
 
-const target = prodTarget({ requested, beta: beta!, betaIsOnMain: beta! === main! || (await isAncestor(root, beta!, main!)) })
+const target = prodTarget({ requested: sha, beta: beta!, betaIsOnMain: beta! === main! || (await isAncestor(root, beta!, main!)) })
 if (!target.ok) refuse(target.reason)
-const sha = requested as string
 
 const soak = soakVerdict(await readReleaseLog(), sha, new Date(), soakOptions)
 if (!soak.ok) refuse(soak.reason)
-console.log(`deploying ${sha.slice(0, 7)}: on beta for ${soak.hours!.toFixed(1)} h (asked: ${soakOptions.minHours} h)${soakOptions.hotfix ? `, hotfix: ${soakOptions.hotfix}` : ''}`)
+console.log(`deploying ${sha.slice(0, 7)}: on beta without interruption for ${(Math.floor(soak.hours! * 100) / 100).toFixed(2)} h (asked: ${soakOptions.minHours} h)${soakOptions.hotfix ? `, hotfix: ${soakOptions.hotfix}` : ''}`)
 if (main! !== sha) console.log(`note: origin/main is ahead at ${main!.slice(0, 7)}. Those commits are NOT in this release.`)
 
 let output: string
