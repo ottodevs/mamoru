@@ -30,7 +30,13 @@
     "LIVE_FUNDS": "1"
   },
   // Ethereum RPC reads for the wrong-network notice, per account (accounts/other-chains.ts). ETHEREUM_RPC_URLS is a secret.
-  "ratelimits": [{ "name": "OTHER_CHAINS_LIMIT", "namespace_id": "117001", "simple": { "limit": 6, "period": 60 } }],
+  // FEEDBACK_LIMIT (feedback.ts, otto/mamoru#72): 3 posts per 60 s, keyed by device session or a hashed IP. The
+  // Mattermost vars (MATTERMOST_URL, MATTERMOST_BOT_TOKEN, MATTERMOST_SUPPORT_CHANNEL_ID, MATTERMOST_FEEDBACK_CHANNEL_ID)
+  // are secrets, set separately; unset, a row is still stored and nothing is posted.
+  "ratelimits": [
+    { "name": "OTHER_CHAINS_LIMIT", "namespace_id": "117001", "simple": { "limit": 6, "period": 60 } },
+    { "name": "FEEDBACK_LIMIT", "namespace_id": "72001", "simple": { "limit": 3, "period": 60 } }
+  ],
   "observability": { "enabled": true },
   // Canary: built from branch `beta`, same D1 and same operator as prod. Opt-in testers, real funds, real data.
   // Secrets (SESSION_SECRET, OPERATOR_URL, OPERATOR_SECRET) are set separately with `wrangler secret put X --env beta`.
@@ -64,7 +70,10 @@
         "CORE_DRY_RUN": "true",
         "LIVE_FUNDS": "1"
       },
-      "ratelimits": [{ "name": "OTHER_CHAINS_LIMIT", "namespace_id": "117002", "simple": { "limit": 6, "period": 60 } }],
+      "ratelimits": [
+        { "name": "OTHER_CHAINS_LIMIT", "namespace_id": "117002", "simple": { "limit": 6, "period": 60 } },
+        { "name": "FEEDBACK_LIMIT", "namespace_id": "72002", "simple": { "limit": 3, "period": 60 } }
+      ],
       "observability": { "enabled": true }
     }
   }

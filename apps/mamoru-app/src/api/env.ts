@@ -29,6 +29,15 @@ export type Env = {
   // Workers Rate Limiting binding (wrangler.jsonc `ratelimits`): reads of the Ethereum RPC per account, counted per
   // Cloudflare location and not per isolate. Absent in tests and local runs.
   OTHER_CHAINS_LIMIT?: RateLimiter
+  // In-app feedback (feedback.ts, otto/mamoru#72). Workers Rate Limiting binding, keyed by device session when
+  // there is one, else a hash of the connecting IP. Absent in tests and local runs.
+  FEEDBACK_LIMIT?: RateLimiter
+  // Mattermost fan-out for feedback (feedback.ts). All secrets, all optional: unset, a row is still stored and
+  // nothing is posted. MATTERMOST_BOT_TOKEN is never logged.
+  MATTERMOST_URL?: string
+  MATTERMOST_BOT_TOKEN?: string
+  MATTERMOST_SUPPORT_CHANNEL_ID?: string
+  MATTERMOST_FEEDBACK_CHANNEL_ID?: string
 }
 
 /** The part of the Workers Rate Limiting binding the app uses. */

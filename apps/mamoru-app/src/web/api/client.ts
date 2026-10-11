@@ -4,6 +4,8 @@ import type {
   ApyView,
   AppConfig,
   DashboardPayload,
+  FeedbackRequest,
+  FeedbackResponse,
   FundingView,
   OpView,
   OtherChainsView,
@@ -48,6 +50,8 @@ export type ApiClient = {
   transfer(accountKey: string, sig: OwnerSignature): Promise<OpView>
   stopPrepare(accountKey: string): Promise<OwnerTxToSign>
   stop(accountKey: string, sig: OwnerSignature): Promise<OpView>
+  /** Works with or without a session. */
+  feedback(body: FeedbackRequest): Promise<FeedbackResponse>
 }
 
 export class ApiRequestError extends Error {
@@ -108,6 +112,7 @@ export const httpClient: ApiClient = {
   transfer: (k, sig) => post<OpView>(acct(k, 'transfer'), sig),
   stopPrepare: (k) => post<OwnerTxToSign>(acct(k, 'stop/prepare')),
   stop: (k, sig) => post<OpView>(acct(k, 'stop'), sig),
+  feedback: (body) => post<FeedbackResponse>('/api/feedback', body),
 }
 
 export const ApiContext = createContext<ApiClient>(httpClient)
