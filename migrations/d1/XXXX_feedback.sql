@@ -15,7 +15,8 @@ CREATE TABLE feedback (
   app_version TEXT,                    -- unset today; reserved for when the SPA starts sending one
   account_key TEXT,
   status TEXT NOT NULL DEFAULT 'new',  -- 'new' | 'ticketed' | 'closed', set by hand during weekly triage
-  mm_post_id TEXT,
+  mm_post_id TEXT,                     -- the Mattermost post; 'posting:<epoch>' while a run is posting it
+  post_attempts INTEGER NOT NULL DEFAULT 0,  -- tries to post it; after 5 it is left for a person (feedback.ts)
   ticket_url TEXT
 );
 CREATE INDEX feedback_created_at ON feedback(created_at);
