@@ -72,8 +72,8 @@ export const DRAIN_PER_REQUEST = 3
 export const DRAIN_PER_CRON = 20
 
 /**
- * Posts the note to the channel its kind belongs to. `refused` says Mattermost answered and would not take this
- * post (4xx): the note's own problem, not a server that is down. Nothing here ever throws.
+ * Posts the note to the channel its kind belongs to. `refused` says Mattermost answered that this post itself is
+ * not acceptable (400, 413): the note's own problem, not the bot's, the channel's or the server's. Never throws.
  */
 async function postToMattermost(fetcher: MattermostFetch, env: Env, note: Note): Promise<{ postId: string | null; refused: boolean }> {
   const { MATTERMOST_URL, MATTERMOST_BOT_TOKEN, MATTERMOST_SUPPORT_CHANNEL_ID, MATTERMOST_FEEDBACK_CHANNEL_ID } = env
@@ -89,8 +89,10 @@ async function postToMattermost(fetcher: MattermostFetch, env: Env, note: Note):
       signal: AbortSignal.timeout(MATTERMOST_TIMEOUT_MS),
     })
     if (!res.ok) {
-      // 401 and 429 are about the bot and the server, not about this note.
-      refused = res.status >= 400 && res.status < 500 && res.status !== 401 && res.status !== 429
+      // Only "this post is not valid" (400) and "this post is too large" (413) are about the note. Everything else is
+      // about the bot, the channel or the server (401, 403 bot not in the channel, 404 wrong channel id, 429, 5xx):
+      // every note would fail the same way, so none of them is blamed and the queue waits.
+      refused = res.status === 400 || res.status === 413
       throw new MattermostPostError(`mattermost http ${res.status}`)
     }
     const data = (await res.json().catch(() => null)) as { id?: unknown } | null
@@ -158,12 +160,12 @@ const staleClaim = (now: Date) => `posting:${Math.floor(now.getTime() / 1000) - 
  * - Support and feedback are two queues, each oldest first, support served first. Neither can hold the other
  *   back: a spent budget or a failing channel on one side leaves the other side running.
  * - A note is claimed in one statement before it is posted, so two runs never post it twice.
- * - When Mattermost refuses a note itself (4xx), that is an attempt against the note and the queue goes on to
+ * - When Mattermost refuses a note itself (400, 413), that is an attempt against the note and the queue goes on to
  *   the next one. After POST_ATTEMPTS_MAX the note is no longer tried, so it cannot block the notes behind it.
- *   An outage or a spent budget is not counted against any note.
+ *   An outage, a bot that may not post, a wrong channel or a spent budget is not counted against any note.
  * - The budget of the window is counted and checked in one statement, so runs at the same moment cannot
  *   pass it between them.
- * - A queue stops at the first post that fails for a reason that is not the note's own (network, 5xx).
+ * - A queue stops at the first post that fails for a reason that is not the note's own.
  * Returns how many were posted. Never throws.
  */
 export async function drainFeedback(db: Db, fetcher: MattermostFetch, env: Env, now: Date, max: number): Promise<number> {
