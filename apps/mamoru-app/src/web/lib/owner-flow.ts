@@ -32,13 +32,14 @@ export function errorText(e: unknown): string {
   return e instanceof Error && e.message ? e.message : flowCopy.apiFailed
 }
 
-export type OwnerKind = 'activate' | 'transfer' | 'stop'
+export type OwnerKind = 'activate' | 'transfer' | 'stop' | 'renew'
 type Prepared = { tx: OwnerTxToSign; reduce?: TransferPlan['reduce']; receive?: TransferPlan['receive'] }
 
 const SUBMIT: Record<OwnerKind, (api: ApiClient) => ApiClient['activate']> = {
   activate: (api) => api.activate,
   transfer: (api) => api.transfer,
   stop: (api) => api.stop,
+  renew: (api) => api.renew,
 }
 
 /**
@@ -65,7 +66,7 @@ export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind) 
           const plan = await api.transferPrepare(accountKey, body)
           p = { tx: plan.ownerTx, reduce: plan.reduce, receive: plan.receive }
         } else {
-          p = { tx: kind === 'activate' ? await api.activatePrepare(accountKey) : await api.stopPrepare(accountKey) }
+          p = { tx: kind === 'activate' ? await api.activatePrepare(accountKey) : kind === 'renew' ? await api.renewPrepare(accountKey) : await api.stopPrepare(accountKey) }
         }
         setPrepared(p)
         return p

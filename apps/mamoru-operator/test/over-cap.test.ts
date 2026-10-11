@@ -1457,6 +1457,275 @@ describe('an activation waits for the relayer instead of failing', () => {
   })
 })
 
+// One approval lasts a year and is renewed with one tap: the same grants with a fresh validity, nothing moved.
+describe('renewing the approval of a running account', () => {
+  type Loop = { startLoop(a: AccountState): void }
+  /** A running account: activated through the real path, with the engine loop stubbed (the fake chain has no engine RPC). */
+  const running = async () => {
+    const w = world(20_000_000n)
+    ;(w.op as unknown as Loop).startLoop = () => {}
+    const op = await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+    const acc = w.state.accounts.k!
+    expect(acc.active).toBe(true)
+    return { w, acc, started: op }
+  }
+
+  test('an account that is not running cannot renew: it starts instead', async () => {
+    const w = world(20_000_000n)
+    expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'NOT_ACTIVE' })
+  })
+
+  test('funding tells until when the approval is valid and when its renewal is due', async () => {
+    const { w, acc } = await running()
+    const now = Math.floor(Date.now() / 1000)
+    const fresh = (await w.op.funding(ctx)).approval!
+    // Signed for a year from the block time of the fake chain; only the shape of the answer matters here.
+    expect(fresh.validUntil).toBe(acc.grants[0]!.grant.userOp.validUntil)
+    const until = (validUntil: number) => {
+      acc.grants = acc.grants.map((g) => ({ ...g, grant: { ...g.grant, userOp: { ...g.grant.userOp, validUntil } } }))
+    }
+    until(now + 200 * 86_400)
+    expect((await w.op.funding(ctx)).approval).toEqual({ validUntil: now + 200 * 86_400, renewDue: false, expired: false })
+    until(now + 15 * 86_400)
+    expect((await w.op.funding(ctx)).approval).toMatchObject({ renewDue: true, expired: false })
+    until(now - 60)
+    expect((await w.op.funding(ctx)).approval).toMatchObject({ renewDue: true, expired: true })
+    acc.active = false
+    expect((await w.op.funding(ctx)).approval).toBeNull()
+  })
+
+  test('one signature replaces the grants with fresh ones; positions, deposits and history are left as they are', async () => {
+    const { w, acc } = await running()
+    const before = acc.grants.map((g) => g.permissionId)
+    acc.managedTokenIds = ['7']
+    acc.depositsAfter = '90'
+    acc.historyFromBlock = '80'
+    const epoch = acc.epoch
+    const sentBefore = w.sent.length
+    const tx = await w.op.prepareRenew(ctx)
+    expect(tx.summary.join(' ')).toContain('Nothing is moved')
+    const op = await w.op.submit(ctx, 'renew', sign(tx))
+    expect(op).toMatchObject({ kind: 'renew', state: 'confirmed', code: 'EXEC_OK' })
+    // One transaction, to the Safe: no deploy, no top-up.
+    expect(w.sent.slice(sentBefore).map((t) => t.to)).toEqual([SAFE])
+    const after = acc.grants.map((g) => g.permissionId)
+    expect(after).toHaveLength(before.length)
+    expect(after.some((id) => before.includes(id))).toBe(false)
+    // The grants it replaced were revoked in the same transaction: nothing is left enabled beside the new ones.
+    expect(tx.summary.join(' ')).toContain('revoked in the same transaction')
+    expect(before.every((id) => acc.revoked.includes(id))).toBe(true)
+    expect(acc.superseded ?? []).toEqual([])
+    expect(acc.grants.map((g) => g.name)).toEqual((await running()).acc.grants.map((g) => g.name))
+    expect(acc.active).toBe(true)
+    expect(acc.epoch).toBe(epoch + 1)
+    expect(acc.managedTokenIds).toEqual(['7'])
+    expect(acc.depositsAfter).toBe('90')
+    expect(acc.historyFromBlock).toBe('80')
+  })
+
+  test('a renewal that does not fit one transaction with its revocations is refused: never done without them', async () => {
+    type Gas = { activationGas(...a: unknown[]): Promise<bigint> }
+    const { w, acc } = await running()
+    const before = acc.grants.map((g) => g.permissionId)
+    ;(w.op as unknown as Gas).activationGas = async () => 99_000_000n
+    expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'RENEWAL_TOO_LARGE' })
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(before)
+    expect(acc.active).toBe(true)
+  })
+
+  test('the renewed grants are the ones the account had, by name: none lost, none added', async () => {
+    const { w, acc } = await running()
+    // An account that holds fewer grants than the policy offers keeps exactly those.
+    acc.grants = acc.grants.slice(0, 3)
+    const names = acc.grants.map((g) => g.name)
+    await w.op.submit(ctx, 'renew', sign(await w.op.prepareRenew(ctx)))
+    expect(acc.grants.map((g) => g.name)).toEqual(names)
+  })
+
+  test('a stop revokes the grants of a renewal whose outcome is unknown, without asking the chain first', async () => {
+    for (const state of [{ state: 'failed', code: 'OWNER_TX_ERROR' }, { state: 'submitted' }]) {
+      const { w, acc } = await running()
+      const fresh = [{ name: 'enter-swap:x', grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }]
+      acc.ops.push({ opId: 'own-7-renew', kind: 'renew', updatedAt: new Date().toISOString(), ownerGrants: fresh, ...state } as never)
+      // Whatever the chain would say: the removal of a session that is not there is taken.
+      w.knobs.grantsEnabled = false
+      await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))
+      expect(acc.revoked).toContain(`0x${'ee'.repeat(32)}`)
+    }
+  })
+
+  test('no renewal while a stop is on its way, or while the engine has an operation that is not settled', async () => {
+    const { w, acc } = await running()
+    // The engine's grants are enabled on the Safe throughout: no stop has run.
+    w.knobs.grantsEnabled = true
+    acc.ops.push({ opId: 'own-7-exit', kind: 'exit', state: 'submitted', updatedAt: new Date().toISOString() } as never)
+    expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'STOP_IN_FLIGHT' })
+    // A stop whose receipt was not read is still on its way as far as anyone knows.
+    Object.assign(acc.ops.at(-1)!, { state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ code: 'STOP_IN_FLIGHT' })
+    // It stops counting once it cannot land any more: a later owner transaction confirmed, or an hour gone.
+    acc.ops.push({ opId: 'own-8-transfer', kind: 'transfer', state: 'confirmed', updatedAt: new Date().toISOString() } as never)
+    await w.op.prepareRenew(ctx)
+    acc.ops.pop()
+    Object.assign(acc.ops.at(-1)!, { updatedAt: new Date(Date.now() - 3_700_000).toISOString() })
+    await w.op.prepareRenew(ctx)
+    Object.assign(acc.ops.at(-1)!, { state: 'failed', code: 'OWNER_TX_FAILED' })
+    const tx = await w.op.prepareRenew(ctx)
+    // Prepared while idle; by the time it is signed the engine has an operation out.
+    type Runners = { runners: Map<string, { engine: { journal: { ops: { state: string }[] } } }> }
+    ;(w.op as unknown as Runners).runners.set(acc.accountKey, { engine: { journal: { ops: [{ state: 'included' }] } } })
+    const sentBefore = w.sent.length
+    expect(await w.op.submit(ctx, 'renew', sign(tx)).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'ENGINE_BUSY' })
+    expect(w.sent.length).toBe(sentBefore)
+  })
+
+  test('a renewal whose receipt was never read is applied from the chain before another one is built', async () => {
+    const { w, acc } = await running()
+    const old = acc.grants.map((g) => g.permissionId)
+    const fresh = [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }]
+    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: old } as never)
+    // The chain says it ran: its grants are the engine's now, and the next renewal revokes those, not the old ones.
+    w.knobs.grantsEnabled = true
+    const tx = await w.op.prepareRenew(ctx)
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'confirmed', code: 'EXEC_OK' })
+    expect(acc.grants.map((g) => g.permissionId)).toEqual([`0x${'ee'.repeat(32)}`])
+    expect(old.every((id) => acc.revoked.includes(id))).toBe(true)
+    await w.op.submit(ctx, 'renew', sign(tx))
+    expect(acc.revoked).toContain(`0x${'ee'.repeat(32)}`)
+    expect(acc.superseded ?? []).toEqual([])
+  })
+
+  test('one renewal at a time, and one prepared on grants that changed since is prepared again', async () => {
+    const { w, acc } = await running()
+    const tx = await w.op.prepareRenew(ctx)
+    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'submitted', updatedAt: new Date().toISOString() } as never)
+    expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'RENEWAL_IN_FLIGHT' })
+    expect(await w.op.submit(ctx, 'renew', sign(tx)).catch((e: unknown) => e)).toMatchObject({ code: 'RENEWAL_IN_FLIGHT' })
+    acc.ops.pop()
+    // The account's grants are no longer the ones this renewal was built to revoke.
+    const again = await w.op.prepareRenew(ctx)
+    acc.grants = acc.grants.map((g, i) => (i === 0 ? { ...g, permissionId: `0x${'dd'.repeat(32)}` as Hex } : g))
+    expect(await w.op.submit(ctx, 'renew', sign(again)).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'RENEWAL_STALE' })
+  })
+
+  test('a stop whose receipt was never read and that did run is applied from the chain: nothing is renewed after it', async () => {
+    const { w, acc } = await running()
+    const had = acc.grants.map((g) => g.permissionId)
+    acc.ops.push({ opId: 'own-7-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date(Date.now() - 2 * 3_600_000).toISOString() } as never)
+    // The engine's grants are no longer enabled on the Safe: the stop executed.
+    w.knobs.grantsEnabled = false
+    expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'NOT_ACTIVE' })
+    expect(acc.active).toBe(false)
+    expect(acc.ops.find((o) => o.opId === 'own-7-exit')).toMatchObject({ state: 'confirmed' })
+    expect(had.every((id) => acc.revoked.includes(id))).toBe(true)
+  })
+
+  test('a renewal that ran unread is settled before a stop is judged: its revoked old grants are not taken for a stop that ran', async () => {
+    const { w, acc } = await running()
+    const old = acc.grants.map((g) => g.permissionId)
+    const fresh = [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }]
+    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: old } as never)
+    acc.ops.push({ opId: 'own-8-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString() } as never)
+    // The renewed grant is enabled; the old ones are not (the renewal revoked them). The stop has not run.
+    type Read = { readContract(a: { functionName: string; args?: readonly unknown[] }): Promise<unknown> }
+    const client = (w.op as unknown as { client: Read }).client
+    const read = client.readContract.bind(client)
+    client.readContract = async (a) => (a.functionName === 'isPermissionEnabled' ? a.args![0] === `0x${'ee'.repeat(32)}` : read(a))
+    expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ code: 'STOP_IN_FLIGHT' })
+    expect(acc.active).toBe(true)
+    expect(acc.grants.map((g) => g.permissionId)).toEqual([`0x${'ee'.repeat(32)}`])
+    expect(acc.ops.find((o) => o.opId === 'own-8-exit')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+  })
+
+  test('a new renewal revokes the grants of one whose outcome is unknown, and that one is never applied after it', async () => {
+    const { w, acc } = await running()
+    const ghost = [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }]
+    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: ghost, revokes: [] } as never)
+    // The read says it did not run (a node behind): the next renewal revokes its grants all the same.
+    w.knobs.grantsEnabled = false
+    await w.op.submit(ctx, 'renew', sign(await w.op.prepareRenew(ctx)))
+    expect(acc.revoked).toContain(`0x${'ee'.repeat(32)}`)
+    const mine = acc.grants.map((g) => g.permissionId)
+    // Later the chain shows the first one's grants enabled (they are not: the second revoked them; a stale read).
+    w.knobs.grantsEnabled = true
+    await w.op.prepareRenew(ctx).catch(() => undefined)
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'RENEWAL_SUPERSEDED' })
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(mine)
+  })
+
+  test('an engine operation sent before a restart (stored, not in the new journal) holds the renewal for ten minutes, not for ever', async () => {
+    const { w, acc } = await running()
+    w.knobs.grantsEnabled = true
+    acc.ops.push({ opId: 'eng-1-1-op-9-enter_mint', kind: 'enter', state: 'submitted', updatedAt: new Date().toISOString() } as never)
+    expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'ENGINE_BUSY' })
+    Object.assign(acc.ops.at(-1)!, { updatedAt: new Date(Date.now() - 11 * 60_000).toISOString() })
+    expect((await w.op.prepareRenew(ctx)).summary.join(' ')).toContain('Renew')
+  })
+
+  test('a renewal that was out when the operator stopped is settled after the restart, and does not hold later ones for ever', async () => {
+    type Boot = { resume(): void; armStopped: boolean; armTimer?: ReturnType<typeof setTimeout> }
+    const { w, acc } = await running()
+    const old = acc.grants.map((g) => g.permissionId)
+    const fresh = [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }]
+    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'submitted', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: old } as never)
+    // One that was only queued when the process stopped is recovered the same way.
+    acc.ops.push({ opId: 'own-8-transfer', kind: 'transfer', state: 'proposed', updatedAt: new Date().toISOString() } as never)
+    const boot = w.op as unknown as Boot
+    boot.resume()
+    boot.armStopped = true
+    clearTimeout(boot.armTimer)
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(acc.ops.find((o) => o.opId === 'own-8-transfer')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(acc.ownerFailures ?? []).toHaveLength(0)
+    // It had run: the chain shows its grants, and the next renewal is built on them.
+    w.knobs.grantsEnabled = true
+    await w.op.prepareRenew(ctx)
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'confirmed' })
+    expect(acc.grants.map((g) => g.permissionId)).toEqual([`0x${'ee'.repeat(32)}`])
+  })
+
+  test('a renewal counts against the same failure budget as an activation', async () => {
+    const { w, acc } = await running()
+    const tx = await w.op.prepareRenew(ctx)
+    acc.ownerFailures = Array.from({ length: MAX_OWNER_FAILURES_PER_DAY }, () => new Date().toISOString())
+    expect(await w.op.submit(ctx, 'renew', sign(tx)).catch((e: unknown) => e)).toMatchObject({ status: 429, code: 'OWNER_FAILURE_BUDGET' })
+  })
+
+  test('a renewal that lands on an account stopped meanwhile leaves its grants remembered, for the next stop to revoke', async () => {
+    type After = { afterOwner(a: AccountState, p: unknown, r: unknown): void }
+    const { w, acc } = await running()
+    const old = acc.grants.map((g) => g.permissionId)
+    const tx = await w.op.prepareRenew(ctx)
+    void tx
+    acc.active = false
+    const fresh = [{ name: 'enter-swap:x', grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }]
+    ;(w.op as unknown as After).afterOwner(acc, { prepareId: 'own-9-renew', accountKey: acc.accountKey, kind: 'renew', grants: fresh, revokes: old }, { blockNumber: 5n })
+    expect(acc.superseded).toEqual([`0x${'ee'.repeat(32)}`])
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(old)
+  })
+
+  test('a renewal that fails on chain changes nothing: the engine keeps the grants it had', async () => {
+    const { w, acc } = await running()
+    const before = acc.grants.map((g) => g.permissionId)
+    const tx = await w.op.prepareRenew(ctx)
+    w.knobs.execOk = false
+    expect(await w.op.submit(ctx, 'renew', sign(tx))).toMatchObject({ kind: 'renew', state: 'failed', code: 'OWNER_TX_FAILED' })
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(before)
+    expect(acc.active).toBe(true)
+  })
+
+  test('a renewal signed by another key is refused before the relayer sends anything', async () => {
+    const { w, acc } = await running()
+    const before = acc.grants.map((g) => g.permissionId)
+    const sentBefore = w.sent.length
+    const tx = await w.op.prepareRenew(ctx)
+    w.knobs.sim = 'revert'
+    expect(await w.op.submit(ctx, 'renew', sign(tx, new SoftwarePasskey(PASSKEY_SCALARS.a2))).catch((e: unknown) => e)).toMatchObject({ code: 'BAD_SIGNATURE' })
+    expect(w.sent.length).toBe(sentBefore)
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(before)
+  })
+})
+
 // otto/mamoru#120: a 5 USDC deposit took half an hour to be placed, one step per 5-minute review.
 describe('reviews follow each other quickly while an entry is in progress', () => {
   const REVIEW = 300_000

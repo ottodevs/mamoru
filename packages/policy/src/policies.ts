@@ -47,8 +47,9 @@ export const conservadorV1: PolicyVersion = {
   range: { widthTicks: 2000, adjust: 'on_out_of_range', cooldownSeconds: 86_400 },
   execution: { slippageBps: 50, maxTwapDeviationTicks: 100, twapWindowSeconds: 1800, observationTtlSeconds: 120 },
   session: {
-    validitySeconds: 30 * 86_400,
-    renewalWindowSeconds: 5 * 86_400,
+    // One approval lasts a year (owner decision, 2026-10-11); the app offers the renewal in the last 30 days.
+    validitySeconds: 365 * 86_400,
+    renewalWindowSeconds: 30 * 86_400,
     caps: usdcCbbtcCaps,
     grants: pairGrants(usdcCbbtcPair, { enterSwap: 8, enterMint: 8, manage: 64 }),
   },

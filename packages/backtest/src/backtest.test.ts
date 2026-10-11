@@ -229,8 +229,10 @@ describe('run', () => {
   test('sessions nobody renews refuse everything after their first window', () => {
     // 31 days of samples one hour apart; the price walks out of the cbBTC range in the second month.
     const ds = syntheticDataset({ samples: 31 * 24 + 48, step: 3600, tick: (k, i) => (k === 1 && i > 30 * 24 ? 60 * (i - 30 * 24) : 0) })
-    const renewed = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT })
-    const once = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT, sessionRenewal: 'once' })
+    // A 30-day approval, so the window ends inside the dataset (the live policy's lasts a year).
+    const monthly = { ...conservadorLiveV2, session: { ...conservadorLiveV2.session, validitySeconds: 30 * 86_400 } }
+    const renewed = runBacktest(ds, monthly, { deposit: DEPOSIT })
+    const once = runBacktest(ds, monthly, { deposit: DEPOSIT, sessionRenewal: 'once' })
     expect(renewed.metrics.operations.rerange).toBeGreaterThan(0)
     expect(once.metrics.operations.rerange).toBe(0)
     expect(once.reasons.SESSION_EXPIRED).toBeGreaterThan(0)

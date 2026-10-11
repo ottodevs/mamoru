@@ -16,7 +16,7 @@ import { activationLive, historyOps, needsRetry, opLine } from '../../src/web/li
 import { isAddress, parseUsdc } from '../../src/web/lib/owner-flow.ts'
 import { encodeQr } from '../../src/web/lib/qr.ts'
 import { localTime } from '../../src/web/lib/time.ts'
-import { engineLine, History } from '../../src/web/routes/home.tsx'
+import { approvalDay, engineLine, History } from '../../src/web/routes/home.tsx'
 import { MIX } from '../../src/web/routes/onboarding.tsx'
 import { buildRouter } from '../../src/web/router.tsx'
 import { render } from './render.ts'
@@ -326,6 +326,46 @@ describe('helpers', () => {
   })
   test('the mix is the Conservador policy', () => {
     expect(MIX.reduce((a, s) => a + s.pct, 0)).toBe(100)
+  })
+})
+
+// otto/mamoru#112: one approval lasts a year; in its last weeks a running account is offered the renewal.
+describe('renewing the approval', () => {
+  const now = Math.floor(Date.now() / 1000)
+  const running = (approval: FundingView['approval']): FundingView => ({ ...funded, active: true, approval })
+
+  test('nothing is asked while the approval has months left', async () => {
+    const { text, html } = await renderRoute('/', fixtureSession, running({ validUntil: now + 200 * 86_400, renewDue: false, expired: false }))
+    expect(html).not.toContain('data-testid="renew"')
+    expect(text).not.toContain('Renew approval')
+  })
+
+  test('in the renewal window the account says the day it ends and offers one tap', async () => {
+    const validUntil = now + 12 * 86_400
+    const { text, html } = await renderRoute('/', fixtureSession, running({ validUntil, renewDue: true, expired: false }))
+    expect(html).toContain('data-testid="renew"')
+    expect(text).toContain(`Mamoru's approval ends on ${approvalDay(validUntil)}. Renew it so your money keeps working.`)
+    expect(text).toContain('One tap with your passkey. Nothing is moved.')
+    expect(text).toContain('Renew approval')
+  })
+
+  test('once it has ended the account says what that means for the money', async () => {
+    const { text } = await renderRoute('/', fixtureSession, running({ validUntil: now - 3600, renewDue: true, expired: true }))
+    expect(text).toContain("Mamoru's approval has ended. Your money is where it was, but Mamoru cannot manage it until you renew.")
+  })
+
+  test('a renewal on its way hides the row; history reads it in plain words', async () => {
+    const sent: OpView = { opId: 'own-4-renew', kind: 'renew', state: 'submitted', updatedAt: '2026-10-11T10:00:00Z' }
+    const { html } = await renderRoute('/', fixtureSession, running({ validUntil: now + 12 * 86_400, renewDue: true, expired: false }), { ops: [sent] })
+    expect(html).not.toContain('data-testid="renew"')
+    expect(opLine(sent)).toBe('Renewing approval')
+    expect(opLine({ ...sent, state: 'confirmed' })).toBe('Approval renewed')
+    expect(opLine({ ...sent, state: 'failed', code: 'OWNER_TX_FAILED' })).toBe('Renewal needs another approval')
+  })
+
+  test('an account that is not running is never asked to renew', async () => {
+    const { html } = await renderRoute('/', fixtureSession, { ...funded, active: false, approval: null })
+    expect(html).not.toContain('data-testid="renew"')
   })
 })
 

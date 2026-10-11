@@ -17,7 +17,7 @@ function decodeContext(header: string): AccountContext {
   return ctx
 }
 
-const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop)$/
+const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop|renew\/prepare|renew)$/
 
 // Amounts are base-unit strings on the wire; a bigint that slips into a view is sent as its decimal string.
 const wire = (_k: string, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)
@@ -118,6 +118,10 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
             return json(200, await op.prepareStop(ctx))
           case 'POST stop':
             return json(200, await op.submit(ctx, 'stop', parse()))
+          case 'POST renew/prepare':
+            return json(200, await op.prepareRenew(ctx))
+          case 'POST renew':
+            return json(200, await op.submit(ctx, 'renew', parse()))
           default:
             return json(405, { error: 'method not allowed' })
         }

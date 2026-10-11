@@ -230,5 +230,12 @@ export const fixtureClient: ApiClient = {
         f.usdc = '19900000'
       }),
     ),
+  renewPrepare: () => delay(fixtureTx(["Renew Mamoru's approval on your Safe", 'Nothing is moved: your positions stay as they are'])),
+  renew: () =>
+    delay(
+      fixtureOp('renew', () => {
+        liveState.funding.approval = { validUntil: Math.floor(Date.now() / 1000) + 365 * 86_400, renewDue: false, expired: false }
+      }),
+    ),
   feedback: () => delay({ id: `fixture_fb_${liveState.n++}`, received: true as const }),
 }
