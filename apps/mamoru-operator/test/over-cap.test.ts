@@ -7,7 +7,7 @@ import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
 import { LIVE_CAP_USDC, browserOwnerSignature, deployCall, liveAccountFromContext } from '@mamoru/account/live'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
-import { HttpError, MAX_OWNER_FAILURES_PER_DAY, OWNER_FAILURES_ALERT_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
+import { FOLLOW_UP_GRACE, FOLLOW_UP_MAX, FOLLOW_UP_MS, graceLeft, HttpError, nextReview, MAX_OWNER_FAILURES_PER_DAY, OWNER_FAILURES_ALERT_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
 import type { Relayer } from '../src/relayer.ts'
 import { answerAggregate3 } from './fake-multicall.ts'
 import type { AccountState, ArmedActivation, StateStore } from '../src/state.ts'
@@ -1454,5 +1454,42 @@ describe('an activation waits for the relayer instead of failing', () => {
     expect(w.op.ops(ctx, null).ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
     expect(w.state.accounts.k!.armed).toBeUndefined()
     expect(w.state.accounts.k!.ownerFailures).toHaveLength(1)
+  })
+})
+
+// otto/mamoru#120: a 5 USDC deposit took half an hour to be placed, one step per 5-minute review.
+describe('reviews follow each other quickly while an entry is in progress', () => {
+  const REVIEW = 300_000
+
+  test('a review with nothing to do is followed by the next one a whole period later', () => {
+    expect(nextReview(false, 0, false, REVIEW)).toEqual({ ms: REVIEW, followUps: 0 })
+    expect(nextReview(false, 7, false, REVIEW)).toEqual({ ms: REVIEW, followUps: 0 })
+  })
+
+  test('a review that waited for the head, or whose operation confirmed, is followed in seconds', () => {
+    expect(nextReview(true, 0, false, REVIEW)).toEqual({ ms: FOLLOW_UP_MS, followUps: 1 })
+    expect(nextReview(true, 5, false, REVIEW)).toEqual({ ms: FOLLOW_UP_MS, followUps: 6 })
+  })
+
+  test('twelve in a row at most, then a whole period: an engine that keeps producing operations cannot spin', () => {
+    expect(nextReview(true, FOLLOW_UP_MAX - 1, false, REVIEW)).toEqual({ ms: FOLLOW_UP_MS, followUps: FOLLOW_UP_MAX })
+    expect(nextReview(true, FOLLOW_UP_MAX, false, REVIEW)).toEqual({ ms: REVIEW, followUps: 0 })
+  })
+
+  test('over the RPC budget nothing is hurried', () => {
+    expect(nextReview(true, 0, true, REVIEW)).toEqual({ ms: REVIEW, followUps: 0 })
+  })
+
+  test('after a quick review, two that do nothing are still quick: the provider may not show the last step yet', () => {
+    expect(graceLeft(true, 3, 1)).toEqual({ more: true, grace: 0 })
+    expect(graceLeft(false, 3, 0)).toEqual({ more: true, grace: 1 })
+    expect(graceLeft(false, 4, FOLLOW_UP_GRACE - 1)).toEqual({ more: true, grace: FOLLOW_UP_GRACE })
+    expect(graceLeft(false, 5, FOLLOW_UP_GRACE)).toEqual({ more: false, grace: 0 })
+    // An account that was not in an entry gets none.
+    expect(graceLeft(false, 0, 0)).toEqual({ more: false, grace: 0 })
+  })
+
+  test('a review period shorter than the follow-up (tests, the lab) is never stretched', () => {
+    expect(nextReview(true, 0, false, 1)).toEqual({ ms: 1, followUps: 1 })
   })
 })
