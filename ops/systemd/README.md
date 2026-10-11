@@ -36,8 +36,8 @@ systemd state. Ot decides if and when to wire it up.
    smoke test, printing a rollback command if the smoke test fails.
 4. Records the deployed (or failed) sha and a one-line log entry.
 
-`main` is never touched by this watcher. Prod deploys stay manual via `bun run promote`
-(fast-forward main to beta, then `deploy:prod`) or a direct `bun run deploy:prod`. Beta is a
+`main` is never touched by this watcher. Prod deploys stay manual and follow
+`docs/process/releasing.md` ("Releasing to production"); `bun run promote` is not used. Beta is a
 separate account from prod for every tester (separate session cookie, separate passkey, same D1
 and operator) — see `AGENTS.md`.
 

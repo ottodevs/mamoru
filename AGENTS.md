@@ -29,7 +29,7 @@ The path from `main` to beta to production, the soak and the rollback are in [`d
 
 Only the coordinator runs these, one release at a time, and each is announced in Mattermost `#mamoru` by `@mamorusan` and logged:
 
-- App: `bun run deploy:beta` (exact tip of `origin/beta`, https://beta.mamoru.lol) and `bun run deploy:prod` (exact tip of `origin/main`, run only when that is the sha that soaked on beta). Both build from an immutable snapshot of the sha, smoke-test, write `~/.local/state/mamoru-app/releases.jsonl` and print the rollback command.
+- App: `bun run deploy:beta` (exact tip of `origin/beta`, https://beta.mamoru.lol) and `bun run deploy:prod` (exact tip of `origin/main`, run only when that is the sha that soaked on beta, following every step of the release document). Both build from an immutable snapshot of the sha and smoke-test. `deploy:prod` writes `~/.local/state/mamoru-app/releases.jsonl` and prints the rollback command; `deploy:beta` does neither on success, so the coordinator notes the previous version id first. `bun run promote` is not used: it does not pin the sha it deploys.
 - Risky UI or API changes soak on beta first. Beta shares D1 and the live operator with production (real funds) but is **not** the same account: session cookies and the passkey RP ID are scoped to the hostname. Do not change the RP ID.
 - D1 migrations: additive only, applied by the coordinator before the Worker that needs them.
 - Operator: one process, one owner. It holds session keys and the relayer nonce; two operators at once corrupt both. Only the coordinator stops, starts or redeploys it, and says so in the tracking thread first.

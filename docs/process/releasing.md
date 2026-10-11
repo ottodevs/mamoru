@@ -17,7 +17,7 @@ ticket ─► branch + worktree ─► pull request ─► CI + independent revi
 | Review | CI green and an `APTO` verdict from a model that did not write the code | Reviewer | Verdict as a pull request comment |
 | `main` | Reviewed and merged. **Not yet released** | Coordinator | "Rebase and merge" |
 | `beta` | The sha of `main` now running on https://beta.mamoru.lol | Coordinator | `git push origin <sha>:beta`, then `bun run deploy:beta` |
-| Production | The sha that soaked on beta, on https://app.mamoru.lol | Coordinator, with Otto's GO | `bun run deploy:prod` |
+| Production | The sha that soaked on beta, on https://app.mamoru.lol | Coordinator, with Otto's GO | "Releasing to production", every step |
 
 ## Branches
 
@@ -51,11 +51,16 @@ schedule, and not for a change that only touches the operator.
 1. `git fetch origin` and choose the sha of `main` to release. Read the deploy notes of every pull request
    between `origin/beta` and that sha (`git log --oneline origin/beta..<sha>`).
 2. Do what those notes ask first, in their order: D1 migration, secret, operator.
-3. `git push origin <sha>:beta` (fast-forward only; git refuses anything else).
-4. `bun run deploy:beta`. It builds from a clean snapshot of that sha, runs the checks, deploys, runs the
-   smoke test and prints the rollback command.
-5. Announce it in `#mamoru` as `@mamorusan`: the sha, what changes for a user, what to try, what is known
-   to be broken.
+3. Write down what beta runs now, so there is something to go back to: in `apps/mamoru-app`,
+   `bunx wrangler deployments list --env beta` and note the newest version id in the tracking thread.
+   `deploy:beta` does not record it: it writes nothing to the release log and prints a rollback command only
+   when its smoke test fails.
+4. `git push origin <sha>:beta`. Git refuses this unless it is a fast-forward of `beta`. It does not check
+   that the sha is on `main`: `git merge-base --is-ancestor <sha> origin/main` first.
+5. `bun run deploy:beta`. It fetches `beta` again, builds from a clean snapshot of its tip, runs typecheck
+   and tests, deploys and runs the smoke test. Check that the sha it prints is the one you pushed.
+6. Announce it in `#mamoru` as `@mamorusan`: the sha, the version id before and after, what changes for a
+   user, what to try, what is known to be broken.
 
 ## Soak
 
@@ -69,26 +74,60 @@ A sha is ready for production when all of this is true and written in the tracki
 
 ## Releasing to production
 
-Needs Otto's GO, given for that sha.
+Needs Otto's GO, given for one sha: the one that soaked. Call it `S` and write it in the tracking thread.
 
-1. The sha is the tip of `origin/beta`. **Production is deployed only when `origin/main` is at that same
-   sha**: `deploy:prod` deploys the tip of `main`, and a tip ahead of beta holds commits nobody watched.
-   If `main` has moved on, cut a new beta and soak it. (`otto/mamoru#118` unit B makes the script deploy
-   the soaked sha and refuse anything else; until then this check is done by hand, and said out loud.)
-2. `bun run deploy:prod`.
-3. Tag the release and push the tag: `git tag -a app-YYYY.MM.DD.N <sha> -m "<one line>"` and
-   `git push origin app-YYYY.MM.DD.N`. `N` starts at 1 each day.
-4. Publish the notes: `gh release create app-YYYY.MM.DD.N --generate-notes`, then edit the top to say in
-   plain words what changes for a user. Announce in `#mamoru` with the link.
-5. Move the tickets to `done`. A ticket is done when its change is live, not when it merged.
+Today the scripts do not hold this for you. `deploy:prod` takes no sha: it fetches `main` and deploys
+whatever its tip is at that moment. So until `otto/mamoru#118` unit B makes it deploy `S` and refuse
+anything else, the coordinator holds it by hand:
+
+1. **Freeze.** Say in the tracking thread that a release is under way. Nothing is merged and no branch is
+   moved until step 5 is done. The coordinator is the only one who merges, so this is a rule for one seat.
+2. **Look at the server, not at local refs:** `git fetch origin main beta`, then
+   `git rev-parse origin/main origin/beta`. Both must print `S`. If `main` is ahead, there are commits
+   nobody watched: cut a new beta and soak it. Do not deploy.
+3. `bun run deploy:prod`.
+4. **Read the sha it printed** (`deploying origin/main at …`). If it is not `S`, roll back at once with the
+   command in "Rolling back", then find out who moved `main`.
+5. Tag `S` and push the tag: `git tag -a app-YYYY.MM.DD.N S -m "<one line>"` and
+   `git push origin app-YYYY.MM.DD.N`. `N` starts at 1 each day. Check the push succeeded before the next
+   step.
+6. Publish the notes: `gh release create app-YYYY.MM.DD.N --verify-tag --generate-notes`, then edit the top
+   to say in plain words what changes for a user. `--verify-tag` matters: without it a tag that is missing
+   on the server is created at the tip of `main`. Announce in `#mamoru` with the link.
+7. Move the tickets to `done`. A ticket is done when its change is live, not when it merged.
+
+**Do not use `bun run promote`** while this section stands. It was written for the earlier model (work
+reaches `beta` first and `main` is fast-forwarded to it). It checks a sha against `beta` and then calls
+`deploy:prod` without passing it, so the sha you give it is not what pins the deploy; and it knows nothing
+about soak or GO.
 
 ## Rolling back
 
-Every deploy prints its rollback command and writes it to `~/.local/state/mamoru-app/releases.jsonl`. A
-Worker rollback takes seconds and does not touch D1 or the operator.
+A Worker rollback takes seconds. It puts back the previous Worker code and nothing else: D1, secrets and
+the operator stay as they are.
+
+```sh
+cd apps/mamoru-app
+bunx wrangler deployments list --env beta        # or without --env for production
+bunx wrangler rollback --env beta <version id>   # production: no --env
+```
+
+Where the version id comes from:
+
+- **Production:** each `deploy:prod` that reaches the deploy step appends a line to
+  `~/.local/state/mamoru-app/releases.jsonl` on the machine that ran it, with `sha`, `versionId`,
+  `previousVersionId` and `smokeOk`. `previousVersionId` is what to roll back to. The script also prints the
+  full command. A run that fails before or during `wrangler deploy` writes nothing: check
+  `wrangler deployments list` to see whether a new version went live.
+- **Beta:** the id you noted in step 3 of "Cutting a beta". If it was not noted, the second newest entry of
+  `wrangler deployments list --env beta`.
+
+Rules:
 
 - Roll back first, find the cause after. Say so in the tracking thread.
-- A D1 migration is additive only, so the previous Worker still runs against the new schema.
+- A D1 migration is additive only, which is what lets the previous Worker run against the new schema. It is
+  a reason to expect that, not a proof: the deploy notes of a pull request with a migration say that the
+  previous Worker was run against the new schema.
 - After a rollback `beta` or the last tag no longer says what is deployed. Fix forward with a new pull
   request; do not move a branch backwards.
 
@@ -100,12 +139,14 @@ branch that skips `main` and no deploy from a working tree.
 
 ## What CI checks, and what it does not
 
-`.github/workflows/ci.yml` runs `bun run release:check` (typecheck, every test, the production build of the
-app) on each pull request and on each push to `main` and `beta`.
+`.github/workflows/ci.yml` runs `bun run release:check` on each pull request and on each push to `main`
+and `beta`: typecheck, the tests under `packages`, `apps` and `scripts/release` that need nothing but the
+checkout, and the production build of the app.
 
-It does not run the fork scenarios (`bun run scenarios`), the operator end-to-end scripts or Playwright:
-they need a Base fork or a browser. A pull request that touches the operator, the account packages or the
-policy says in its body which of those were run by hand.
+It does not run what needs a chain or a browser: the fork scenarios (`bun run scenarios`), the operator
+end-to-end scripts, Playwright, and the suites that skip themselves without `RPC_URL` and Anvil (the live
+owner path in `packages/account/live`). A pull request that touches the operator, the account packages or
+the policy says in its body which of those were run by hand.
 
 ## Repository settings
 
@@ -127,5 +168,10 @@ JSON
 done
 ```
 
-`enforce_admins` is off so the coordinator can still fast-forward `beta` and act in an incident; the
-tracking thread is where that is accounted for.
+What these settings do and do not do:
+
+- `enforce_admins` is off, so an administrator can still act in an incident; the tracking thread is where
+  that is accounted for. A coordinator who is not an administrator can push a sha to `beta` only once CI
+  has passed on it, which every sha of `main` has.
+- They do not enforce who the coordinator is or that an independent review happened. Those stay rules of
+  `AGENTS.md`, checked by people.
