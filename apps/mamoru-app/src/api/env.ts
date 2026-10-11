@@ -23,8 +23,17 @@ export type Env = {
   LIVE_FUNDS?: string
   OPERATOR_URL?: string
   OPERATOR_SECRET?: string
-  // Read-only Ethereum Mainnet RPC for the wrong-network notice (accounts/other-chains.ts). Unset: nothing is read.
-  ETHEREUM_RPC_URL?: string
+  // Secret. Read-only Ethereum Mainnet RPC pool for the wrong-network notice (accounts/other-chains.ts): https URLs
+  // separated by commas, tried in order (docs/process/rpc-providers.md). Unset: nothing is read.
+  ETHEREUM_RPC_URLS?: string
+  // Workers Rate Limiting binding (wrangler.jsonc `ratelimits`): reads of the Ethereum RPC per account, counted per
+  // Cloudflare location and not per isolate. Absent in tests and local runs.
+  OTHER_CHAINS_LIMIT?: RateLimiter
+}
+
+/** The part of the Workers Rate Limiting binding the app uses. */
+export interface RateLimiter {
+  limit(options: { key: string }): Promise<{ success: boolean }>
 }
 
 export type AppSettings = { mode: 'production'; chainId: typeof BASE_CHAIN_ID; sessionSecret: string }
