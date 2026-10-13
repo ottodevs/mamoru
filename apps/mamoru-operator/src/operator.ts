@@ -1787,6 +1787,8 @@ export class Operator {
         // What the transaction did not revoke of the old ones stays enabled until it lapses: remembered for a stop.
         acc.superseded = kept([...(acc.superseded ?? []), ...acc.grants.map((g) => g.permissionId)])
         acc.grants = p.grants
+        // The engine restarts on these grants and must not look at the chain from before they were enabled.
+        acc.grantsFromBlock = receipt.blockNumber.toString()
         acc.epoch++
         this.store.save()
         this.startLoop(acc)
@@ -1975,6 +1977,8 @@ export class Operator {
     // The journal of a restarted engine is empty: the block of the last operation stored for the account stands in
     // for it, so the first review does not decide on a view from before that operation.
     engine.minObservationBlock = lastEngineBlock(acc.ops)
+    // A renewal enabled the grants this engine starts on: a view from before it would show them as not enabled.
+    if (acc.grantsFromBlock && BigInt(acc.grantsFromBlock) > engine.minObservationBlock) engine.minObservationBlock = BigInt(acc.grantsFromBlock)
     // An engine operation that was out when the process stopped has no block stored: it may have landed since. The
     // first tick then puts the floor a margin past the head it reads, so a provider still before it is not believed.
     const unsettled = acc.ops.some((o) => o.opId.startsWith('eng-') && o.state === 'submitted' && o.block === undefined)
