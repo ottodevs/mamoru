@@ -161,6 +161,26 @@ describe('a review never observes before the last operation', () => {
     expect((await e.review()).kind).toBe('decided')
   })
 
+  test('a view from before the floor revokes nothing: the grants a renewal just enabled are still there once the chain shows them', async () => {
+    // Seen live on 13 Oct: the engine restarted on renewed grants, observed three blocks before the renewal, read
+    // every one of them as not enabled and revoked them in its ledger for good.
+    const all = sessions()
+    const e = engine(all)
+    for (const id of [11n, 12n, 13n]) e.allowedTokenIds.push(id)
+    chain.head = 1200n
+    chain.safe = 1100n
+    e.minObservationBlock = 1203n
+    for (const s of all) chain.disabled.add(s.permissionId.toLowerCase())
+    expect(await e.review()).toMatchObject({ kind: 'observation-failed', code: 'EHG_OBSERVATION_STALE' })
+    // The chain reaches the renewal: the grants are enabled, and the engine still has all of them.
+    chain.disabled.clear()
+    chain.head = 1203n
+    const r = await e.review()
+    expect(r.kind).toBe('decided')
+    if (r.kind !== 'decided') throw new Error('unreachable')
+    expect(r.observation.sessions.filter((x) => x.active)).toHaveLength(all.length)
+  })
+
   test('a restored engine (empty journal) takes its floor from whoever restores it', async () => {
     const e = engine(sessions())
     for (const id of [11n, 12n, 13n]) e.allowedTokenIds.push(id)

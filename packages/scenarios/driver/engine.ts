@@ -133,6 +133,11 @@ export class Engine {
     // A provider that is behind the activation does not have the grants yet: every permission would read as
     // not enabled and be revoked here for good. That view is no observation of this account.
     if (blockNumber <= this.historyFromBlock) throw new ReasonError('OBS_BLOCK_INCONSISTENT', `rpc block ${blockNumber} is not past the activation block ${this.historyFromBlock}`)
+    // The same for any later point the engine must not look before: the block a renewal enabled the current grants
+    // in, or its own last operation. Checked here, before a session is read: a view from before a renewal shows
+    // the renewed grants as not enabled, and they would be revoked in the ledger for good.
+    const floor = this.observationFloorNow()
+    if (blockNumber < floor) throw new ReasonError('EHG_OBSERVATION_STALE', `observed at block ${blockNumber}, not before block ${floor}`)
     const sessions = this.sessions.filter((s) => !this.ledger.get(s.permissionId)?.revoked)
     if (sessions.length === 0) return
     const enabled = sessions.map((s) => batch.add(contractRead(this.client, { address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [s.permissionId, this.cfg.account], blockNumber })))
@@ -168,6 +173,12 @@ export class Engine {
    * starts empty then, and the first review must not look at the chain from before that operation either.
    */
   minObservationBlock = 0n
+
+  /** The block no observation may be before: the latest of the engine's own operations and what its restorer set. */
+  private observationFloorNow(): bigint {
+    const inJournal = observationFloor(this.journal.ops)
+    return inJournal > this.minObservationBlock ? inJournal : this.minObservationBlock
+  }
 
   async observe(): Promise<Observation> {
     const live = this.journal.live
@@ -205,8 +216,7 @@ export class Engine {
     // Never decide on a view older than the engine's own last operation: a provider serving a head behind it shows
     // the account as it was before that operation, and the same step would be proposed again. The reviews used to be
     // minutes apart, which hid this; they can now follow each other in seconds.
-    const inJournal = observationFloor(this.journal.ops)
-    const floor = inJournal > this.minObservationBlock ? inJournal : this.minObservationBlock
+    const floor = this.observationFloorNow()
     if (obs.block.number < floor) {
       return { kind: 'observation-failed', code: 'EHG_OBSERVATION_STALE', detail: `observed at block ${obs.block.number}, the last operation is in block ${floor}` }
     }

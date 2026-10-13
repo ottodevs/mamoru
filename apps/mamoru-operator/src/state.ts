@@ -59,6 +59,8 @@ export type AccountState = {
   managedTokenIds: string[]
   depositsAfter: string
   historyFromBlock: string
+  /** Block the engine's current grants were enabled in by a renewal: the engine must not observe before it. */
+  grantsFromBlock?: string
   /** Bumped at each activation so engine op ids stay unique across runs. */
   epoch: number
   /** Engine loops started in this epoch; part of engine op ids so a restart never reuses one. */
