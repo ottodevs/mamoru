@@ -2,7 +2,7 @@
 // It forks Ethereum with anvil and runs the same fixtures the Base scenarios start from: a Safe deployed with a
 // passkey owner, session grants enabled, then a swap and a mint sent through the session. The fixtures sign owner
 // steps with a backup owner, so it then does what the product does: an account whose only owner is the passkey,
-// deployed, trusted, granted and used with WebAuthn signatures alone. Nothing is sent to a real chain and no product code path changes.
+// deployed by the relayer, then trusted and granted with WebAuthn signatures alone, and used by its session key. Nothing is sent to a real chain and no product code path changes.
 //
 // The fixtures look contracts up by name in the Base registry. Here, in this process only, those names are
 // pointed at Ethereum addresses (OVERLAY) before the fixtures are loaded. That is a lab trick to learn what
@@ -19,7 +19,7 @@ import type { Address } from '@mamoru/domain'
 import { address, baseRegistry, erc20Abi, moduleRegistryAbi } from '@mamoru/registry'
 import { ATTESTATION_SCHEMA_UID } from '@mamoru/account/sessions'
 import { anvilBinary, assertNoKeyInArgv, sanitizedEnv } from '../fork/anvil.ts'
-import { startEnginePort, startForkProxy } from '../proxy/index.ts'
+import { startEnginePort, startForkProxy, withoutUpstream } from '../proxy/index.ts'
 import { Lab, devAccount } from '../fixtures/lab.ts'
 import { checkP256 } from '../webauthn/index.ts'
 
@@ -48,19 +48,18 @@ const L1_CBBTC_HOLDER: Address = '0xe8f7c89C5eFa061e340f2d2F206EC78FD8f7e124' //
 type Line = { step: string; ok: boolean | null; detail: string }
 const report: Line[] = []
 const t0 = Date.now()
-/** The upstream URL and every piece of it that could be a key, taken out of anything that is printed. */
-function redact(text: string): string {
-  const secret = process.env.L1_RPC_URL
-  if (!secret) return text
-  let out = text.split(secret).join('<rpc>')
-  try {
-    const u = new URL(secret)
-    for (const piece of [u.host, ...u.pathname.split('/'), u.username, u.password, ...u.search.replace(/^\?/, '').split(/[&=]/)]) if (piece.length >= 8) out = out.split(piece).join('<rpc>')
-  } catch {
-    // not a URL: the whole value was already removed
-  }
-  return out
-}
+/** Everything this script prints passes through here: the upstream URL and its parts never reach the terminal. */
+const redact = (text: string) => (process.env.L1_RPC_URL ? withoutUpstream(text, process.env.L1_RPC_URL) : text)
+
+// A failure anywhere, including before the fork exists, is printed through the same filter and nothing else is.
+process.on('uncaughtException', (e) => {
+  console.error(redact(`probe failed: ${e instanceof Error ? e.message : String(e)}`))
+  process.exit(1)
+})
+process.on('unhandledRejection', (e) => {
+  console.error(redact(`probe failed: ${e instanceof Error ? e.message : String(e)}`))
+  process.exit(1)
+})
 
 function note(step: string, ok: boolean | null, rawDetail: string): void {
   const detail = redact(rawDetail)
@@ -271,8 +270,8 @@ try {
       if (!passes) exitCode = 1
     }
 
-    // The product's account, not the fixtures': the passkey is the only owner, so every owner step below carries a
-    // WebAuthn signature and nothing else. Deploy, trust, grants; then the session key swaps.
+    // The product's account, not the fixtures': the passkey is the only owner. The relayer deploys it (a factory call
+    // needs no owner signature); trust and grants carry a WebAuthn signature and nothing else; then the session key swaps.
     try {
       const { accountSetup, counterfactualAddress } = await import('@mamoru/account/recovery')
       const { createProxyCall, webAuthnSigner } = await import('@mamoru/account/safe')

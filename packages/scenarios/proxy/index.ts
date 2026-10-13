@@ -4,6 +4,19 @@ type JsonRpcRequest = { jsonrpc: '2.0'; id: unknown; method: string; params?: un
 
 const LOOPBACK = '127.0.0.1'
 
+/** `text` with the upstream URL, and every part of it long enough to be a key, replaced. */
+export function withoutUpstream(text: string, upstream: string): string {
+  let out = text.split(upstream).join('<upstream>')
+  try {
+    const u = new URL(upstream)
+    const parts = [u.host, ...u.pathname.split('/'), u.username, u.password, ...u.search.replace(/^\?/, '').split(/[&=]/)]
+    for (const part of parts) if (part.length >= 8) out = out.split(part).join('<upstream>')
+  } catch {
+    // not a URL: the whole value was already replaced
+  }
+  return out
+}
+
 export type ForkProxy = { url: string; requests: () => number; stop: () => void }
 
 /**
@@ -29,7 +42,8 @@ export function startForkProxy(envVar = 'RPC_URL'): ForkProxy {
             await Bun.sleep(250 * (attempt + 1))
             continue
           }
-          return new Response(await res.text(), { status: res.status, headers: { 'content-type': 'application/json' } })
+          // A provider's error may quote the URL it was called with: it never leaves this process, whoever reads the answer.
+          return new Response(withoutUpstream(await res.text(), upstream), { status: res.status, headers: { 'content-type': 'application/json' } })
         } catch {
           if (attempt >= 5) return new Response('upstream unavailable', { status: 502 })
           await Bun.sleep(250 * (attempt + 1))
