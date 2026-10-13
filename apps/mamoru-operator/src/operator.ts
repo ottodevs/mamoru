@@ -730,6 +730,10 @@ export class Operator {
       const enabled = await this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [first, acc.ctx.address as Address] })
       if (!enabled) continue
       const block = await this.client.getBlockNumber()
+      // This block becomes the engine's observation floor, so it must itself show the grant: a head from a provider
+      // behind the one that answered would put the floor before the renewal. Not yet: left for the next time.
+      const atBlock = await this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [first, acc.ctx.address as Address], blockNumber: block })
+      if (!atBlock) continue
       // Asked again after the reads: the caller holds the account lock, and this keeps it true if one ever does not.
       if (superseded(op) || op.state !== 'failed' || op.code !== RECEIPT_UNKNOWN) continue
       console.log(`[renew] ${acc.accountKey} ${op.opId} executed on chain (its grants are enabled): applied`)
