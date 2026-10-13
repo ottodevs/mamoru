@@ -1,7 +1,8 @@
 // Feasibility probe (otto/mamoru#125): does the account path Mamoru runs on Base work on Ethereum Mainnet?
 // It forks Ethereum with anvil and runs the same fixtures the Base scenarios start from: a Safe deployed with a
-// passkey owner, session grants enabled, then a swap and a mint sent through the session; and then an owner
-// transaction signed by the passkey alone, which is how every owner action is signed in the product. Nothing is sent to a real chain and no product code path changes.
+// passkey owner, session grants enabled, then a swap and a mint sent through the session. The fixtures sign owner
+// steps with a backup owner, so it then does what the product does: an account whose only owner is the passkey,
+// deployed, trusted, granted and used with WebAuthn signatures alone. Nothing is sent to a real chain and no product code path changes.
 //
 // The fixtures look contracts up by name in the Base registry. Here, in this process only, those names are
 // pointed at Ethereum addresses (OVERLAY) before the fixtures are loaded. That is a lab trick to learn what
@@ -47,7 +48,22 @@ const L1_CBBTC_HOLDER: Address = '0xe8f7c89C5eFa061e340f2d2F206EC78FD8f7e124' //
 type Line = { step: string; ok: boolean | null; detail: string }
 const report: Line[] = []
 const t0 = Date.now()
-function note(step: string, ok: boolean | null, detail: string): void {
+/** The upstream URL and every piece of it that could be a key, taken out of anything that is printed. */
+function redact(text: string): string {
+  const secret = process.env.L1_RPC_URL
+  if (!secret) return text
+  let out = text.split(secret).join('<rpc>')
+  try {
+    const u = new URL(secret)
+    for (const piece of [u.host, ...u.pathname.split('/'), u.username, u.password, ...u.search.replace(/^\?/, '').split(/[&=]/)]) if (piece.length >= 8) out = out.split(piece).join('<rpc>')
+  } catch {
+    // not a URL: the whole value was already removed
+  }
+  return out
+}
+
+function note(step: string, ok: boolean | null, rawDetail: string): void {
+  const detail = redact(rawDetail)
   report.push({ step, ok, detail })
   console.log(`[+${((Date.now() - t0) / 1000).toFixed(0)}s] ${ok === null ? 'info' : ok ? 'ok  ' : 'FAIL'} ${step}: ${detail}`)
 }
@@ -139,7 +155,6 @@ try {
   const registryAbi = parseAbi([
     'function findModule(address moduleAddress) view returns ((bytes32 resolverUID, address sender, bytes metadata))',
     'function findSchema(bytes32 uid) view returns ((uint48 registeredAt, address validator, string schema))',
-    'function findAttestation(address module, address attester) view returns ((uint48 time, uint48 expirationTime, uint48 revocationTime, bytes32 moduleTypes, bytes32 schemaUID, address moduleAddress, address attester, address dataPointer))',
   ])
   const registry = address('ModuleRegistry')
   const attester = address('RhinestoneAttester')
@@ -150,7 +165,12 @@ try {
     for (const name of ['SmartSession', 'OwnableValidator', 'UniActionPolicy', 'TimeFramePolicy', 'UsageLimitPolicy', 'Safe7579']) {
       const module = address(name)
       const registered = await client.readContract({ address: registry, abi: registryAbi, functionName: 'findModule', args: [module] }).then((r) => (/^0x0+$/.test(r.resolverUID) ? 'not registered' : `registered by ${r.sender}`), reason)
-      const attested = await client.readContract({ address: registry, abi: registryAbi, functionName: 'findAttestation', args: [module, attester] }).then((r) => (r.time > 0 ? (r.revocationTime > 0 ? 'attestation REVOKED' : 'attested by Rhinestone') : 'not attested by Rhinestone'), reason)
+      const now = (await client.getBlock()).timestamp
+      // The record as the registry's own ABI describes it. A record that was revoked or has expired does not count.
+      const attested = await client.readContract({ address: registry, abi: moduleRegistryAbi, functionName: 'findAttestation', args: [module, attester] }).then(
+        (r) => (r.time === 0 ? 'not attested by Rhinestone' : r.revocationTime > 0 ? 'Rhinestone attestation REVOKED' : r.expirationTime > 0 && BigInt(r.expirationTime) <= now ? 'Rhinestone attestation EXPIRED' : 'attested by Rhinestone, in force'),
+        reason,
+      )
       note(`registry on ${chain}: ${name}`, null, `${registered}; ${attested}`)
     }
   }
@@ -189,7 +209,7 @@ try {
   }
 
   // The fixtures take test funds from one holder (WHALE). Fill it on the fork from holders on Ethereum.
-  const { WHALE, DEPOSIT_USDC, SECOND_DEPOSIT_USDC, buildSessWorld, ownerExec } = await import('../fixtures/world.ts')
+  const { WHALE, DEPOSIT_USDC, SECOND_DEPOSIT_USDC, GAS_RESERVE_WEI, buildSessWorld, ownerBatch, ownerExec, poolTick } = await import('../fixtures/world.ts')
   const { conservadorLabV1 } = await import('@mamoru/policy')
   const fund = async (token: Address, from: Address, amount: bigint) => {
     await lab.setBalance(from, 10n ** 18n)
@@ -204,8 +224,7 @@ try {
   const engineClient = createPublicClient({ transport: http(enginePort.url) })
   const engineNow = async () => Number((await engineClient.getBlock()).timestamp)
   const relayer = devAccount(0)
-  const spenders = [relayer, devAccount(2)]
-  const before = await Promise.all(spenders.map((a) => lab.client.getBalance({ address: a.address })))
+  const startBlock = await lab.client.getBlockNumber()
 
   // The same fixture chain the Base scenarios start from. Each name it pushes is a step that worked.
   const expected = ['fx-owners', 'fx-safe', 'fx-gas', 'fx-usdc', 'fx-whale', 'fx-owner-position', 'fx-sessions', 'fx-lp-direct', 'fx-second-account']
@@ -214,7 +233,7 @@ try {
     'fx-owner-position': 'an owner transaction mints a Uniswap v3 position',
     'fx-sessions': 'session grants enter-swap and enter-mint enabled by the owner',
     'fx-lp-direct': 'the session key swaps USDC to cbBTC and mints a position through EntryPoint, inside its grants; a manage grant is scoped to the new position',
-    'fx-second-account': 'a second account does all of it again',
+    'fx-second-account': 'a second account is deployed, gets its grants, and its session key swaps and mints',
   }
   let world: Awaited<ReturnType<typeof buildSessWorld>> | undefined
   let failure: string | null = null
@@ -244,15 +263,82 @@ try {
     const moved = (await lab.balanceOf('USDC', sink)) - usdcBefore
     note('owner transaction signed by the passkey alone', byPasskey.ok && moved === 1_000_000n, byPasskey.ok ? `1 USDC left the account; ${'receipt' in byPasskey ? byPasskey.receipt.gasUsed : '?'} gas` : `refused: ${'error' in byPasskey ? byPasskey.error : 'reverted'}`)
     if (!(byPasskey.ok && moved === 1_000_000n)) exitCode = 1
+    // What the account's own check says today, module by module: this is the call SmartSession makes before it lets a
+    // module act for the account.
+    for (const name of ['SmartSession', 'OwnableValidator', 'UniActionPolicy', 'TimeFramePolicy', 'UsageLimitPolicy']) {
+      const passes = await lab.client.readContract({ address: registry, abi: moduleRegistryAbi, functionName: 'checkForAccount', args: [a1.safe, address(name)] }).then(() => true, () => false)
+      note(`registry check for the account: ${name}`, passes, passes ? 'trusted for this account' : 'NOT trusted for this account')
+      if (!passes) exitCode = 1
+    }
+
+    // The product's account, not the fixtures': the passkey is the only owner, so every owner step below carries a
+    // WebAuthn signature and nothing else. Deploy, trust, grants; then the session key swaps.
+    try {
+      const { accountSetup, counterfactualAddress } = await import('@mamoru/account/recovery')
+      const { createProxyCall, webAuthnSigner } = await import('@mamoru/account/safe')
+      const { activationCall, registryTrustCalls } = await import('@mamoru/account/sessions')
+      const { SessionLedger } = await import('@mamoru/account/precheck')
+      const { computeCaps, instantiateGrant } = await import('@mamoru/policy')
+      const { approve, exactInputSingle } = await import('@mamoru/uniswap-v3')
+      const { sendSessionOp } = await import('../fixtures/session-op.ts')
+      const { SoftwarePasskey, PASSKEY_SCALARS } = await import('../webauthn/index.ts')
+      const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
+      const setup = accountSetup([address('SafeWebAuthnSharedSigner')], 3n, webAuthnSigner(passkey.x, passkey.y))
+      const safe = counterfactualAddress(setup)
+      const deploy = createProxyCall(setup)
+      const deployed = await lab.send(relayer, deploy.to, deploy.data)
+      const hasCode = ((await lab.client.getCode({ address: safe })) ?? '0x') !== '0x'
+      note('product account: deployed', deployed.ok && hasCode, `${safe}, owner: the passkey only; ${deployed.receipt.gasUsed} gas`)
+      const deposit = 100_000_000n
+      await lab.send(world.gasPayer, safe, '0x', GAS_RESERVE_WEI)
+      await lab.whaleTransfer('USDC', WHALE, safe, deposit)
+      // The backup owner of this fixture object owns nothing: every signature below is asked from the passkey.
+      const acct = { label: 'P1', safe, backupOwner: devAccount(9), passkey, sessionKey: devAccount(4), caps: {}, grants: [], managedTokenIds: [], ownerTokenIds: [], ledger: new SessionLedger(), signedOwnerTxs: [] } as (typeof world)['a1']
+      const trustTx = await ownerBatch(lab, relayer, acct, registryTrustCalls(safe), 'passkey')
+      note('product account: registry trust, signed by the passkey', trustTx.ok, `${trustTx.receipt.gasUsed} gas`)
+      const { sqrtPriceX96 } = await poolTick(lab)
+      acct.caps = computeCaps(world.policy, deposit, { cbBTC: { num: sqrtPriceX96 * sqrtPriceX96, den: 1n << 192n } })
+      const now = Number(await lab.timestamp())
+      const grants = (['enter-swap', 'enter-mint'] as const).map((name, i) =>
+        instantiateGrant(world.policy, name, { account: safe, sessionKey: acct.sessionKey.address, chainId: lab.chainId, salt: `0x${(0xa300 + i).toString(16).padStart(64, '0')}`, validAfter: now - 60, validUntil: now + world.policy.session.validitySeconds, caps: acct.caps, tokenId: undefined, admittedTokenIds: [] }),
+      )
+      const act = activationCall(grants, [])
+      const activation = await ownerExec(lab, relayer, acct, { to: act.to, data: act.data }, 'passkey')
+      note('product account: session grants enabled, signed by the passkey', activation.ok, `${activation.receipt.gasUsed} gas`)
+      grants.forEach((g, i) => {
+        acct.ledger.activate(act.permissionIds[i]!, g)
+        acct.grants.push({ name: g.name, grant: g, permissionId: act.permissionIds[i]! })
+      })
+      const amount = 10_000_000n
+      const cbbtcBefore = await lab.balanceOf('cbBTC', safe)
+      const swap = await sendSessionOp(world, acct, acct.grants[0]!, 'product-swap', [
+        approve('USDC', 'SwapRouter02', amount),
+        exactInputSingle({ account: safe, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: 500, amountIn: amount, amountOutMinimum: 1n }),
+      ])
+      const got = (await lab.balanceOf('cbBTC', safe)) - cbbtcBefore
+      note('product account: the session key swaps 10 USDC to cbBTC through EntryPoint', swap.verdict === 'INCLUDED' && got > 0n, `${swap.verdict}${swap.failedOp?.reason ? ` ${swap.failedOp.reason}` : ''}; ${got} sats of cbBTC arrived`)
+      if (!(deployed.ok && hasCode && trustTx.ok && activation.ok && swap.verdict === 'INCLUDED' && got > 0n)) exitCode = 1
+    } catch (e) {
+      note('product account', false, e instanceof Error ? e.message.slice(0, 400) : String(e))
+      exitCode = 1
+    }
+
     const ops = world.opLog.map((o) => `${o.batch}:${o.verdict}`)
     note('session operations', ops.every((o) => o.endsWith('INCLUDED')), ops.join(' '))
-    const after = await Promise.all(spenders.map((a) => lab.client.getBalance({ address: a.address })))
-    const sent = 2n * 50_000_000_000_000_000n // the gas reserve the fixtures send to each of the two accounts
-    const spent = before.reduce((a, b) => a + b, 0n) - after.reduce((a, b) => a + b, 0n) - sent
+    // Gas is what the receipts say, block by block since the fixtures started: every transaction of the path,
+    // whoever paid for it.
+    const head = await lab.client.getBlockNumber()
+    let gasUsed = 0n
+    let txs = 0
+    for (let n = startBlock + 1n; n <= head; n++) {
+      const block = await lab.client.getBlock({ blockNumber: n })
+      for (const hash of block.transactions) {
+        gasUsed += (await lab.client.getTransactionReceipt({ hash })).gasUsed
+        txs++
+      }
+    }
     const realGas = await real.getGasPrice()
-    const forkGas = await lab.client.getGasPrice()
-    const gasUnits = forkGas > 0n ? spent / forkGas : 0n
-    note('gas', null, `about ${gasUnits} gas for both accounts end to end (deploy, trust, owner mint, grants, swap, mint, manage grant); at today's ${(Number(realGas) / 1e9).toFixed(3)} gwei that is ${(Number(gasUnits * realGas) / 1e18).toFixed(6)} ETH`)
+    note('gas', null, `${gasUsed} gas in ${txs} transactions for three accounts (two fixture accounts end to end, one product account up to its first swap); at the ${(Number(realGas) / 1e9).toFixed(3)} gwei Ethereum asks right now that is ${(Number(gasUsed * realGas) / 1e18).toFixed(6)} ETH`)
   }
   enginePort.stop()
 } catch (e) {
