@@ -19,7 +19,7 @@ import type { Address } from '@mamoru/domain'
 import { address, baseRegistry, erc20Abi, moduleRegistryAbi } from '@mamoru/registry'
 import { ATTESTATION_SCHEMA_UID } from '@mamoru/account/sessions'
 import { anvilBinary, assertNoKeyInArgv, sanitizedEnv } from '../fork/anvil.ts'
-import { startEnginePort, startForkProxy, withoutUpstream } from '../proxy/index.ts'
+import { startEnginePort, startForkProxy } from '../proxy/index.ts'
 import { Lab, devAccount } from '../fixtures/lab.ts'
 import { checkP256 } from '../webauthn/index.ts'
 
@@ -48,8 +48,25 @@ const L1_CBBTC_HOLDER: Address = '0xe8f7c89C5eFa061e340f2d2F206EC78FD8f7e124' //
 type Line = { step: string; ok: boolean | null; detail: string }
 const report: Line[] = []
 const t0 = Date.now()
-/** Everything this script prints passes through here: the upstream URL and its parts never reach the terminal. */
-const redact = (text: string) => (process.env.L1_RPC_URL ? withoutUpstream(text, process.env.L1_RPC_URL) : text)
+/**
+ * Everything this script prints passes through here: the upstream URL and its parts are taken out of the text.
+ * It covers what the probe itself prints. What a provider answers still reaches anvil's log file as it came,
+ * as in every lab that forks through the loopback proxy (otto/mamoru#126).
+ */
+function redact(text: string): string {
+  const upstream = process.env.L1_RPC_URL
+  if (!upstream) return text
+  const parts = new Set<string>([upstream])
+  try {
+    const u = new URL(upstream)
+    for (const p of [u.host, u.hostname, u.username, u.password, ...u.pathname.split('/'), ...u.search.replace(/^\?/, '').split(/[&=]/)]) if (p.length >= 3) parts.add(p)
+  } catch {
+    // not a URL: the whole value is the only part
+  }
+  let out = text
+  for (const part of [...parts].sort((a, b) => b.length - a.length)) out = out.split(part).join('<rpc>')
+  return out
+}
 
 // A failure anywhere, including before the fork exists, is printed through the same filter and nothing else is.
 process.on('uncaughtException', (e) => {
