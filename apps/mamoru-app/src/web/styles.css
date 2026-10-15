@@ -223,13 +223,6 @@
     position: relative;
     overflow: hidden;
   }
-  .apr-src {
-    font-family: var(--font-mono);
-    font-size: 0.58rem;
-    letter-spacing: 0.06em;
-    color: var(--color-stone);
-    white-space: nowrap;
-  }
   /* Refresh hairline: fills over one polling period, restarts on each refresh (keyed on dataUpdatedAt). */
   .apr-tick {
     position: absolute;
@@ -242,6 +235,82 @@
     transform-origin: left;
     transform: scaleX(0);
     animation: apr-fill linear forwards;
+  }
+  .info {
+    position: relative;
+    display: inline-flex;
+  }
+  .info-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.3rem;
+    height: 1.3rem;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--color-stone);
+    cursor: pointer;
+  }
+  .info-btn:hover,
+  .info-btn:focus-visible,
+  .info-btn[aria-expanded="true"] {
+    color: var(--color-emerald);
+  }
+  .info-panel {
+    position: absolute;
+    top: calc(100% + 0.5rem);
+    right: 0;
+    z-index: 20;
+    width: min(21rem, 86vw);
+    border: 1px solid var(--color-wash);
+    background: var(--color-rice);
+    box-shadow: 0 0.4rem 1.2rem rgb(15 15 14 / 12%);
+    padding: 0.85rem 0.95rem;
+  }
+  .info-body {
+    display: grid;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    color: var(--color-ink);
+  }
+  .info-row {
+    margin: 0;
+  }
+  .info-row b {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-stone);
+    font-weight: 400;
+  }
+  .info-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+  }
+  .info-table th,
+  .info-table td {
+    padding: 0.3rem 0.35rem;
+    text-align: right;
+    border-top: 1px solid var(--color-wash);
+    font-variant-numeric: tabular-nums;
+  }
+  .info-table th:first-child,
+  .info-table td:first-child {
+    text-align: left;
+  }
+  .info-table th {
+    color: var(--color-stone);
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    font-size: 0.62rem;
+    border-top: 0;
   }
   .act.stop {
     background: transparent;

@@ -77,9 +77,31 @@ describe('GET /api/apy', () => {
       // 0.5*mean(2,4) + 0.4*10 + 0.1*30 = 8.5; the 40-day-old point is out of the window.
       monthlyPct: 8.5,
       monthlySource: 'Plan pools, 30-day mean · DefiLlama',
+      byPool: [
+        { pool: 'pool:USDC/USDT/100', weight: 5000, currentPct: 2, monthlyPct: 3 },
+        { pool: 'pool:USDC/cbBTC/500', weight: 4000, currentPct: 5, monthlyPct: 10 },
+        { pool: 'pool:WETH/USDC/3000', weight: 1000, currentPct: 20, monthlyPct: 30 },
+      ],
       asOf: NOW.toISOString(),
     })
     expect(calls.filter((u) => u.includes('geckoterminal')).length).toBe(3)
+  })
+
+  test('exposes the figure behind each pool, not only the blend', async () => {
+    const { fetcher } = fakeFetch({
+      [STABLE]: gecko(2, 100),
+      // BTC has no GeckoTerminal data; falls back to DefiLlama's latest apyBase.
+      [ID[STABLE]]: llama({ d: 1, apy: 2 }),
+      [ID[BTC]]: llama({ d: 1, apy: 9, apyBase: 7 }),
+      [ID[RISK]]: llama({ d: 1, apy: 50 }),
+    })
+    const { view } = await getApy(fetcher)
+    expect(view.byPool).toEqual([
+      { pool: 'pool:USDC/USDT/100', weight: 5000, currentPct: 2, monthlyPct: 2 },
+      { pool: 'pool:USDC/cbBTC/500', weight: 4000, currentPct: 7, monthlyPct: 9 },
+      // RISK has no GeckoTerminal data either; its current falls back to DefiLlama's latest apyBase (50).
+      { pool: 'pool:WETH/USDC/3000', weight: 1000, currentPct: 50, monthlyPct: 50 },
+    ])
   })
 
   test('falls back per pool to DefiLlama latest apyBase when GeckoTerminal fails', async () => {

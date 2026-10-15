@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { encodeQr, qrPath } from '../lib/qr.ts'
 
 export function Brand() {
@@ -108,6 +108,63 @@ export function Modal({ open, onClose, title, children }: { open: boolean; onClo
         </div>
       ) : null}
     </dialog>
+  )
+}
+
+/**
+ * A circled-i button that opens a small panel anchored under it, with the extra detail that used to sit as
+ * plain text on the card. Opens and closes on click or Enter/Space (it is a real button); closes on Escape,
+ * returning focus to the button, and on a click or focus outside it. The panel is `role="dialog"` so a
+ * screen reader announces it as a distinct region when it opens.
+ */
+export function InfoPopover({ label, children }: { label: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false)
+  const id = useId()
+  const wrapRef = useRef<HTMLSpanElement>(null)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    panelRef.current?.focus()
+    const close = () => setOpen(false)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        close()
+        btnRef.current?.focus()
+      }
+    }
+    const onPointer = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) close()
+    }
+    const onFocus = (e: FocusEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) close()
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onPointer)
+    document.addEventListener('focusin', onFocus)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onPointer)
+      document.removeEventListener('focusin', onFocus)
+    }
+  }, [open])
+
+  return (
+    <span className="info" ref={wrapRef}>
+      <button type="button" ref={btnRef} className="info-btn" aria-expanded={open} aria-haspopup="dialog" aria-controls={open ? id : undefined} aria-label={label} onClick={() => setOpen((o) => !o)}>
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
+          <circle cx="8" cy="8" r="6.3" />
+          <path d="M8 7.3v4" strokeLinecap="round" />
+          <circle cx="8" cy="4.6" r="0.75" fill="currentColor" stroke="none" />
+        </svg>
+      </button>
+      {open && (
+        <div id={id} ref={panelRef} role="dialog" aria-label={label} tabIndex={-1} className="info-panel">
+          {children}
+        </div>
+      )}
+    </span>
   )
 }
 
