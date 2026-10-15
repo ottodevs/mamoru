@@ -45,7 +45,7 @@ export const homeCopy = {
   renewEnded: 'Mamoru\'s approval has ended. Your money is where it was, but Mamoru cannot manage it until you renew.',
   renewNote: 'One tap with your passkey. Nothing is moved.',
   renew: 'Renew approval',
-  extendTitle: 'Mamoru needs one more approval to re-range and collect fees in every pool.',
+  extendTitle: 'Mamoru is missing part of its approval: in some pools it cannot re-range or collect fees until you add it.',
   extend: 'Approve',
   createFirst: 'Your account is created on Base first, then the USDC is sent.',
   overCapTitle: (o: OverCap) => `This account is over the ${usdPlain(o.capUsdc)} USDC cap, so Mamoru has not started.`,
@@ -584,18 +584,31 @@ export function approvalRowKey(approval: NonNullable<FundingView['approval']>): 
  */
 function RenewRow({ accountKey, approval }: { accountKey: string; approval: NonNullable<FundingView['approval']> }) {
   const flow = useOwnerAction(accountKey, 'renew')
-  const tap = () => void (flow.prepared ? flow.approve() : flow.prepare())
   // A renewal that failed leaves the row in place: this is where it is tried again.
   if (flow.result && flow.result.state !== 'failed') return null
+  return <ApprovalCard approval={approval} summary={flow.prepared?.tx.summary ?? null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void flow.approve()} />
+}
+
+/** The approval row itself: what is asked, and once prepared, every line the passkey is about to sign. */
+export function ApprovalCard({ approval, summary, busy, error, onPrepare, onApprove }: { approval: NonNullable<FundingView['approval']>; summary: string[] | null; busy: string | null; error: string | null; onPrepare: () => void; onApprove: () => void }) {
+  const title = approval.expired ? homeCopy.renewEnded : approval.renewDue ? homeCopy.renewSoon(approvalDay(approval.validUntil)) : homeCopy.extendTitle
+  if (summary) {
+    return (
+      <section className="card grid gap-3" data-testid="renew" role="status">
+        <span className="title">{title}</span>
+        <Review lines={summary} busy={busy} error={error} onApprove={onApprove} />
+      </section>
+    )
+  }
   return (
     <section className="card flex flex-wrap items-center justify-between gap-3" data-testid="renew" role="status">
       <span className="max-w-[40rem]">
-        <span className="title">{approval.expired ? homeCopy.renewEnded : approval.renewDue ? homeCopy.renewSoon(approvalDay(approval.validUntil)) : homeCopy.extendTitle}</span>
+        <span className="title">{title}</span>
         <span className="sub">{homeCopy.renewNote}</span>
-        {flow.error ? <span className="err mt-1 block">{flow.error}</span> : null}
+        {error ? <span className="err mt-1 block">{error}</span> : null}
       </span>
-      <button type="button" className="act" onClick={tap} disabled={flow.busy !== null}>
-        {flow.busy === 'signing' ? 'Waiting for passkey' : flow.busy === 'preparing' ? 'Preparing' : flow.prepared ? homeCopy.confirm : approval.renewDue ? homeCopy.renew : homeCopy.extend}
+      <button type="button" className="act" onClick={onPrepare} disabled={busy !== null}>
+        {busy === 'preparing' ? 'Preparing' : approval.renewDue ? homeCopy.renew : homeCopy.extend}
       </button>
     </section>
   )
