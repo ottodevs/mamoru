@@ -11,6 +11,8 @@ import { Operator } from './operator.ts'
 import { Relayer } from './relayer.ts'
 import { startRpcProxy } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
+import { readSnapshot, SnapshotLoop } from './snapshot.ts'
+import { MULTICALL3 } from '@mamoru/rpc'
 import { StateStore, loadOrCreateKey } from './state.ts'
 
 /** `git rev-parse --short HEAD` at the operator's cwd, read once at boot. 'unknown' outside a git checkout. */
@@ -74,7 +76,17 @@ export async function bootOperator(o: BootOptions) {
     relayer,
     store,
   )
-  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt })
+  // otto/mamoru#136 phase 1: one read of every served Safe and its pools, served on GET /snapshot. Off unless MAMORU_SNAPSHOT=1;
+  // nothing decides from it yet.
+  let snapshot: SnapshotLoop | null = null
+  if (process.env.MAMORU_SNAPSHOT === '1' && MULTICALL3) {
+    const snapshotClient = createPublicClient({ transport: http(via('snapshot'), { batch: true, timeout: 60_000 }) })
+    const multicall3 = MULTICALL3
+    const budget = rpcBudget(rpcMetrics)
+    snapshot = new SnapshotLoop(() => readSnapshot(snapshotClient, multicall3, chainId, operator.snapshotTargets()), Number(process.env.MAMORU_SNAPSHOT_MS) || 30_000, () => budget.over())
+    snapshot.start()
+  }
+  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot })
   const eth = await client.getBalance({ address: relayer.address })
   console.log(`[operator] chain ${chainId} live=${live} policy ${policy.policyId} relayer ${relayer.address} (${eth} wei) sha ${gitSha} on http://${server.hostname}:${server.port}`)
   operator.resume()
@@ -83,6 +95,7 @@ export async function bootOperator(o: BootOptions) {
     url: `http://${server.hostname}:${server.port}`,
     stop: () => {
       operator.shutdown()
+      snapshot?.stop()
       server.stop(true)
       bundler.stop()
       proxy.stop()

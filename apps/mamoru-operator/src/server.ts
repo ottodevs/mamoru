@@ -3,6 +3,7 @@ import type { Server } from 'bun'
 import type { AccountContext } from '@mamoru/domain'
 import { verifyMetricsSignature } from '@mamoru/operator-auth'
 import { logErr } from './metrics.ts'
+import type { SnapshotLoop } from './snapshot.ts'
 import type { RpcMetrics } from './metrics.ts'
 import { HttpError, type Operator } from './operator.ts'
 
@@ -59,7 +60,7 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
   }
 }
 
-export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number; rpcMetrics: RpcMetrics; gitSha: string; bootedAt: number }): Server<undefined> {
+export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number; rpcMetrics: RpcMetrics; gitSha: string; bootedAt: number; snapshot?: SnapshotLoop | null }): Server<undefined> {
   return Bun.serve({
     hostname: opts.hostname,
     port: opts.port,
@@ -75,6 +76,16 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
         const sig = req.headers.get('x-mamoru-sig')
         if (!(await verifyMetricsSignature(opts.secret, 'GET', '/metrics', sig))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
         return json(200, await buildMetricsPayload(op, opts.rpcMetrics, opts.gitSha, opts.bootedAt))
+      }
+      if (url.pathname === '/snapshot') {
+        // otto/mamoru#136: the latest snapshot, signed like /metrics. 404 while the loop is off (MAMORU_SNAPSHOT unset).
+        if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
+        const sig = req.headers.get('x-mamoru-sig')
+        if (!(await verifyMetricsSignature(opts.secret, 'GET', '/snapshot', sig))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+        if (!opts.snapshot) return json(404, { error: 'snapshot off' })
+        const snap = opts.snapshot.current
+        if (!snap) return json(503, { error: 'no snapshot yet', lastError: opts.snapshot.lastError })
+        return json(200, { ...snap, safes: snap.safes.map((x) => ({ ...x, accountKey: x.accountKey.slice(0, 8) })), lastError: opts.snapshot.lastError })
       }
       const m = ROUTE.exec(url.pathname)
       if (!m) return json(404, { error: 'not found' })

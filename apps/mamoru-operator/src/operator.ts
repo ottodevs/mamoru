@@ -4,6 +4,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
+import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, type SimCallResult } from '@mamoru/rpc'
 import { POLICIES, computeCaps, grantKey, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
 import {
@@ -349,6 +350,13 @@ export class Operator {
   accountsSummary(): AccountsSummary {
     const all = Object.values(this.store.state.accounts)
     return { known: all.length, active: all.filter((a) => a.active).length, armed: all.filter((a) => !!a.armed).length }
+  }
+
+  /** The Safes the snapshot loop reads (otto/mamoru#136): every active or armed account. */
+  snapshotTargets(): SnapshotTarget[] {
+    return Object.values(this.store.state.accounts)
+      .filter((a) => a.active || !!a.armed)
+      .map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, active: !!a.active, armed: !!a.armed }))
   }
 
   /** GET /metrics: engine health of every account with a running loop, newest-first. */

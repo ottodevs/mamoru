@@ -64,6 +64,9 @@ export const uniswapV3PoolAbi = parseAbi([
   'function fee() view returns (uint24)',
   'function tickSpacing() view returns (int24)',
   'function liquidity() view returns (uint128)',
+  'function feeGrowthGlobal0X128() view returns (uint256)',
+  'function feeGrowthGlobal1X128() view returns (uint256)',
+  'function ticks(int24 tick) view returns (uint128 liquidityGross, int128 liquidityNet, uint256 feeGrowthOutside0X128, uint256 feeGrowthOutside1X128, int56 tickCumulativeOutside, uint160 secondsPerLiquidityOutsideX128, uint32 secondsOutside, bool initialized)',
 ])
 
 export const uniswapV3FactoryAbi = parseAbi([
