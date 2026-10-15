@@ -256,11 +256,14 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
   return { chainId, block, readAt: new Date().toISOString(), pools, safes, calls }
 }
 
-/** MAMORU_SNAPSHOT_MS: default 30 s; never under 10 s; anything not a finite number is the default. */
+/** setTimeout's largest delay; above it timers fire after 1 ms. */
+const MAX_TIMER_MS = 2_147_483_647
+
+/** MAMORU_SNAPSHOT_MS: default 30 s; never under 10 s nor over the timer limit; anything not a finite number is the default. */
 export function snapshotIntervalMs(raw: string | undefined): number {
   const n = Number(raw?.trim())
   if (!raw?.trim() || !Number.isFinite(n)) return 30_000
-  return Math.max(10_000, n)
+  return Math.min(MAX_TIMER_MS, Math.max(10_000, n))
 }
 
 /** Reads a snapshot every `intervalMs` and keeps the latest. Off unless started; a failed read keeps the previous one. */

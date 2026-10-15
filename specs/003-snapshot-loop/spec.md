@@ -74,7 +74,7 @@ every 30 s is too much for the free keyed tier, so phase 3 changes what is re-re
 
 Default interval 30 s (`MAMORU_SNAPSHOT_MS`).
 
-## Storage (D1, `migrations/d1/0007_account_snapshots.sql`, not applied in phase 1)
+## Storage (D1, `migrations/d1/XXXX_account_snapshots.sql (the coordinator numbers it at merge)`, not applied in phase 1)
 
 - `account_snapshot_latest (chain_id, address)`: the last snapshot of each Safe.
 - `account_daily (day, chain_id, address)`: first and last snapshot of each UTC day; #129 adds `collected_usdc` and
@@ -89,7 +89,7 @@ same signed path and upserts both tables.
 ## Phases
 
 1. **Reader, fee math, verification script, migration file, `GET /snapshot` behind `MAMORU_SNAPSHOT=1` (off).** This PR.
-2. Turn it on in the operator; Worker pulls into D1 (apply 0007); `/ops` shows yield per account; the app shows
+2. Turn it on in the operator; Worker pulls into D1 (apply the migration); `/ops` shows yield per account; the app shows
    "earned so far" growing between harvests (#129, #128).
 3. Consumers move to the snapshot: funding reads it (replacing #135's 15 s cache), the armed watcher reads it; the
    reuse and webhook changes above.

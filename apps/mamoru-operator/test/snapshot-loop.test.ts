@@ -62,5 +62,6 @@ describe('SnapshotLoop (otto/mamoru#136)', () => {
     expect(snapshotIntervalMs('-5')).toBe(10_000)
     expect(snapshotIntervalMs('0')).toBe(10_000)
     expect(snapshotIntervalMs('60000')).toBe(60_000)
+    expect(snapshotIntervalMs('1e12')).toBe(2_147_483_647)
   })
 })
