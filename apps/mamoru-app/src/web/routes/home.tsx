@@ -155,7 +155,7 @@ export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () =
             <span className="unit">USDC</span>
           </p>
         </div>
-        <ul className="m-0 flex w-full list-none gap-[0.7rem] p-0 self-center min-[761px]:w-auto">
+        <ul className="m-0 flex w-full flex-wrap gap-[0.7rem] list-none p-0 self-center min-[761px]:w-auto min-[761px]:flex-nowrap">
           <ApyTiles />
         </ul>
       </div>
