@@ -14,5 +14,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/web/**/*.ts", "src/web/**/*.tsx", "test/e2e/**/*.ts", "test/e2e/**/*.tsx", "vite.config.ts"]
+  "include": ["src/web/**/*.ts", "src/web/**/*.tsx", "test/e2e/**/*.ts", "test/e2e/**/*.tsx", "test/web/**/*.ts", "vite.config.ts"]
 }

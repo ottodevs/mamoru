@@ -32,6 +32,7 @@ import { permissionIdOf, revocationCalls, toSmartSession } from '@mamoru/account
 import { minOut, quoteExactInputSingle } from '@mamoru/uniswap-v3/quote'
 import { Engine, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
+import type { Proposal } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { USDC_POOLS, amountsForLiquidity, inUsdc, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
@@ -252,6 +253,17 @@ const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
 
 function engineKind(k: OpRecord['kind']): OpView['kind'] {
   return k === 'close_position' ? 'exit' : k === 'harvest' || k === 'convert' || k === 'rerange' || k === 'reduce' ? 'reduce' : 'enter'
+}
+
+/**
+ * The pool and, for a swap or a converting harvest, the tokens and amount: every `Proposal` kind carries a
+ * `pool`, so this always has something to show the SPA, going from "the USDC/cbBTC pool" (hardcoded) to the
+ * pool each history row actually acted on. otto/mamoru#131.
+ */
+export function opIntentView(intent: Proposal): Pick<OpView, 'pool' | 'tokenIn' | 'tokenOut' | 'amountIn' | 'convert'> {
+  if (intent.kind === 'enter_swap') return { pool: intent.pool, tokenIn: intent.tokenIn, tokenOut: intent.tokenOut, amountIn: intent.amountIn.toString() }
+  if (intent.kind === 'harvest' && intent.convert) return { pool: intent.pool, convert: intent.convert.token }
+  return { pool: intent.pool }
 }
 
 const now = () => new Date().toISOString()
@@ -2225,6 +2237,7 @@ export class Operator {
         txHash: o.included?.txHash,
         block: o.included ? Number(o.included.blockNumber) : undefined,
         updatedAt: now(),
+        ...opIntentView(o.intent),
         ...(o.state === 'confirmed' && o.permissionId && o.calls ? { permissionId: o.permissionId, calls: o.calls } : {}),
       }
       const sig = `${view.state}|${view.code}|${view.txHash ?? ''}`
