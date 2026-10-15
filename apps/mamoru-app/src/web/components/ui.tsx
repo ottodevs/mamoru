@@ -119,6 +119,10 @@ export function Modal({ open, onClose, title, children }: { open: boolean; onClo
  */
 export function InfoPopover({ label, children }: { label: string; children: ReactNode }) {
   const [open, setOpen] = useState(false)
+  // Which edge of the trigger the panel hangs from: anchored to whichever side has more room, measured when it
+  // opens. A button that wrapped onto its own line near the left edge (a narrow screen) would otherwise have a
+  // `right`-anchored panel open further left and off the viewport, where `overflow-x: clip` hides it.
+  const [anchor, setAnchor] = useState<'left' | 'right'>('right')
   const id = useId()
   const wrapRef = useRef<HTMLSpanElement>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
@@ -126,6 +130,8 @@ export function InfoPopover({ label, children }: { label: string; children: Reac
 
   useEffect(() => {
     if (!open) return
+    const box = wrapRef.current?.getBoundingClientRect()
+    if (box) setAnchor(box.left < window.innerWidth / 2 ? 'left' : 'right')
     panelRef.current?.focus()
     const close = () => setOpen(false)
     const onKey = (e: KeyboardEvent) => {
@@ -160,7 +166,7 @@ export function InfoPopover({ label, children }: { label: string; children: Reac
         </svg>
       </button>
       {open && (
-        <div id={id} ref={panelRef} role="dialog" aria-label={label} tabIndex={-1} className="info-panel">
+        <div id={id} ref={panelRef} role="dialog" aria-label={label} tabIndex={-1} className={`info-panel info-panel-${anchor}`}>
           {children}
         </div>
       )}

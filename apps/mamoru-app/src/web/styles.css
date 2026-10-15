@@ -260,13 +260,18 @@
   .info-panel {
     position: absolute;
     top: calc(100% + 0.5rem);
-    right: 0;
     z-index: 20;
     width: min(21rem, 86vw);
     border: 1px solid var(--color-wash);
     background: var(--color-rice);
     box-shadow: 0 0.4rem 1.2rem rgb(15 15 14 / 12%);
     padding: 0.85rem 0.95rem;
+  }
+  .info-panel-right {
+    right: 0;
+  }
+  .info-panel-left {
+    left: 0;
   }
   .info-body {
     display: grid;
