@@ -16,7 +16,7 @@ import { activationLive, historyOps, needsRetry, opLine } from '../../src/web/li
 import { isAddress, parseUsdc } from '../../src/web/lib/owner-flow.ts'
 import { encodeQr } from '../../src/web/lib/qr.ts'
 import { localTime } from '../../src/web/lib/time.ts'
-import { approvalDay, engineLine, History } from '../../src/web/routes/home.tsx'
+import { approvalDay, approvalRowKey, engineLine, History } from '../../src/web/routes/home.tsx'
 import { MIX } from '../../src/web/routes/onboarding.tsx'
 import { buildRouter } from '../../src/web/router.tsx'
 import { render } from './render.ts'
@@ -380,9 +380,16 @@ describe('renewing the approval', () => {
     expect(both.text).toContain('Renew approval')
   })
 
-  test('history reads an extension in its own words', () => {
+  test('the row comes back for the next approval once one lands: a renewal changes the end date, an extension what is missing', () => {
+    const due = { validUntil: now + 12 * 86_400, renewDue: true, expired: false, missing: 4 }
+    const renewed = { validUntil: now + 365 * 86_400, renewDue: false, expired: false, missing: 4 }
+    const extended = { ...renewed, missing: 2 }
+    expect(new Set([approvalRowKey(due), approvalRowKey(renewed), approvalRowKey(extended)]).size).toBe(3)
+  })
+
+    test('history reads an extension in its own words', () => {
     const op: OpView = { opId: 'own-5-renew', kind: 'renew', state: 'confirmed', updatedAt: '2026-10-15T10:00:00Z', extend: true }
-    expect(opLine(op)).toBe('Approval extended to every pool')
+    expect(opLine(op)).toBe('Approval extended')
     expect(opLine({ ...op, state: 'submitted' })).toBe('Extending approval')
   })
 })

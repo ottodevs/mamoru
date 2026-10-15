@@ -41,7 +41,7 @@ export function opLine(op: OpView): string {
     case 'renew':
       if (op.extend) {
         if (failed) return 'Approval needs another try'
-        return done ? 'Approval extended to every pool' : 'Extending approval'
+        return done ? 'Approval extended' : 'Extending approval'
       }
       if (failed) return 'Renewal needs another approval'
       return done ? 'Approval renewed' : 'Renewing approval'

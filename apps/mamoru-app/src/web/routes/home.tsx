@@ -571,6 +571,14 @@ export function approvalDay(validUntil: number): string {
 }
 
 /**
+ * Identity of the approval row: a renewal or an extension that lands changes the approval (a new end date, fewer
+ * grants missing), so the row mounts afresh and offers the next approval instead of staying hidden on the last result.
+ */
+export function approvalRowKey(approval: NonNullable<FundingView['approval']>): string {
+  return `${approval.validUntil}-${approval.missing ?? 0}`
+}
+
+/**
  * A running account whose approval is in its last weeks, or over: one tap renews it, nothing is moved. Or one that
  * lacks grants of its plan (left out to fit Base's gas cap): one tap adds them. The renewal, when due, goes first.
  */
@@ -686,7 +694,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           ) : !f.active && !inFlight && !armed && !stopped ? (
             <StartRow accountKey={accountKey} funded={hasMoney(f)} />
           ) : f.active && f.approval && (f.approval.renewDue || (f.approval.missing ?? 0) > 0) && !renewing ? (
-            <RenewRow accountKey={accountKey} approval={f.approval} />
+            <RenewRow key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} />
           ) : null}
           <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? () => setDialog('start') : null} />
           <Idle s={s as Split} placing={f.active && (f.engine?.placing === true || !!f.progress)} />

@@ -742,7 +742,7 @@ export class Operator {
     const added = stored.map((g) => g.name)
     const summary = [
       `Let Mamoru's engine re-range and collect fees in ${this.poolsOf(added)} on your Safe ${live.safe}`,
-      `Engine key ${sessionKey} may only re-range, reduce and collect in those pools and swap what it collects back to USDC, for ${Math.round(policy.session.validitySeconds / 86_400)} days`,
+      `Engine key ${sessionKey} may withdraw liquidity from and collect fees of any position your Safe owns, re-mint in those pools and swap what it collects back to USDC, for ${Math.round(policy.session.validitySeconds / 86_400)} days; every token and position it touches is paid back to your Safe`,
       ...(dropped.length ? [`${this.poolsOf(dropped)} needs one more approval after this one`] : []),
       'Nothing is moved: your positions stay as they are',
       'Funds never leave your Safe without your passkey',
