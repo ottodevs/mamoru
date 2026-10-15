@@ -1979,6 +1979,28 @@ describe('the relayer pays the gas reserve within limits', () => {
     expect(await w.op.prepareActivate(ctx).catch((x: unknown) => x)).toMatchObject({ status: 409, code: 'SUBSIDY_ACCOUNT_LIMIT' })
   })
 
+  test('the reserve is on the record before its send, and comes off it only when nothing can have been paid', async () => {
+    const w = quiet(20_000_000n)
+    let atSend: unknown
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && !('data' in t && (t as { data?: Hex }).data)) atSend = structuredClone(w.state.accounts.k!.subsidies)
+    }
+    await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+    expect(atSend).toEqual([{ at: expect.any(String), wei: TARGET.toString() }])
+
+    // Refused before it reached a provider: off the record. Lost after it was handed over: kept, it may have landed.
+    for (const [handed, kept] of [[false, 0], [true, 1]] as const) {
+      const v = quiet(20_000_000n)
+      v.knobs.failBeforeSending = !handed
+      v.knobs.onSend = (t) => {
+        if (t.to.toLowerCase() === SAFE.toLowerCase() && !(t as { data?: Hex }).data) throw handed ? new Error('Timed out while waiting for transaction') : new Error('insufficient funds for gas * price + value')
+      }
+      await v.op.submit(ctx, 'activate', sign(await v.op.prepareActivate(ctx)))
+      await Bun.sleep(5)
+      expect(v.state.accounts.k!.subsidies ?? []).toHaveLength(kept)
+    }
+  })
+
   test('the daily budget: prepare is refused, an approval signed before waits armed with nothing sent and runs once the budget frees', async () => {
     const w = quiet(20_000_000n)
     const logged: string[] = []

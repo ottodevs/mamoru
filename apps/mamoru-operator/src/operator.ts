@@ -1348,10 +1348,18 @@ export class Operator {
     logErr('[alert]', `relayer subsidy: ${spent} of ${budget} wei of gas reserves paid in 24 hours${code === 'SUBSIDY_DAILY_BUDGET' ? ', budget spent: new starts wait or bring their own gas' : ''}`)
   }
 
-  private noteSubsidy(acc: AccountState, wei: bigint): void {
-    acc.subsidies = [...(acc.subsidies ?? []), { at: now(), wei: wei.toString() }]
+  private noteSubsidy(acc: AccountState, wei: bigint): { at: string; wei: string } {
+    const paid = { at: now(), wei: wei.toString() }
+    acc.subsidies = [...(acc.subsidies ?? []), paid]
     this.store.save()
     this.subsidyAlert(null)
+    return paid
+  }
+
+  /** A top-up that was never paid (not handed to a provider, refused by it, or reverted) is taken off the record. */
+  private dropSubsidy(acc: AccountState, paid: { at: string; wei: string }): void {
+    acc.subsidies = (acc.subsidies ?? []).filter((x) => x !== paid)
+    this.store.save()
   }
 
   /** GET /metrics: gas reserves the relayer paid in the last 24 hours, and the day's budget, in wei. */
@@ -1825,8 +1833,10 @@ export class Operator {
     const refusal = await this.preflight(acc, live, p, signature)
     if (refusal) return this.settleRetried(acc, op, refusal.code) ? undefined : this.failOwner(acc, op, refusal.code, refusal.detail)
     // The subsidy is decided again under the lock and before the deploy: nothing is spent on a start that is refused.
+    let usdc = 0n
     if (p.kind === 'activate') {
-      const s = this.subsidy(acc, await this.usdcOf(safe), await this.client.getBalance({ address: safe }))
+      usdc = await this.usdcOf(safe)
+      const s = this.subsidy(acc, usdc, await this.client.getBalance({ address: safe }))
       if (s.code) {
         this.subsidyAlert(s.code)
         return this.failOwner(acc, op, s.code)
@@ -1848,9 +1858,24 @@ export class Operator {
       const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
       const eth = await this.client.getBalance({ address: safe })
       if (eth < target) {
-        const { hash, receipt } = await this.relayer.send({ to: safe, value: target - eth, gas: 50_000n })
-        console.log(`[owner] top-up ${safe} +${target - eth} wei tx ${hash} ${receipt.status}`)
-        if (receipt.status === 'success') this.noteSubsidy(acc, target - eth)
+        // Decided once more and recorded with no await in between, so activations of other accounts running at the same
+        // time cannot all take the last of the day's budget; recorded before the send, so a top-up whose receipt is
+        // lost (timeout, restart) still counts. Taken back only when nothing can have been paid.
+        const s = this.subsidy(acc, usdc, eth)
+        if (s.code) {
+          this.subsidyAlert(s.code)
+          return this.failOwner(acc, op, s.code)
+        }
+        const paid = this.noteSubsidy(acc, target - eth)
+        let handed = false
+        try {
+          const { hash, receipt } = await this.relayer.send({ to: safe, value: target - eth, gas: 50_000n }, undefined, () => (handed = true))
+          console.log(`[owner] top-up ${safe} +${target - eth} wei tx ${hash} ${receipt.status}`)
+          if (receipt.status !== 'success') this.dropSubsidy(acc, paid)
+        } catch (e) {
+          if (!handed || (!maybeBroadcast(e) && (relayerShort(e) || providerRefused(e)))) this.dropSubsidy(acc, paid)
+          throw e
+        }
       }
     }
     const { nonce } = await readSafeNonce(this.client, safe)
@@ -2033,6 +2058,11 @@ export class Operator {
         this.store.save()
       } else if (op.kind === 'renew' && op.ownerGrants) {
         this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, extend: op.extend }, receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt))
+      }
+      // A withdrawal or stop found late counts for the subsidy as when it was sent (subsidy.ts).
+      if ((op.kind === 'exit' || op.kind === 'transfer') && noteExit(acc, Date.parse(op.updatedAt) || Date.now())) {
+        console.log(`[subsidy] ${acc.accountKey} ${op.opId} left within the early-exit window: no further paid reserve`)
+        this.store.save()
       }
       console.log(`[reconcile] ${op.opId} tx ${hash} landed at block ${block}, confirmed`)
       this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', txHash: hash, block })
