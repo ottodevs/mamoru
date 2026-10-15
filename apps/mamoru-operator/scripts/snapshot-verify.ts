@@ -30,7 +30,7 @@ const client = createPublicClient({ chain: base, transport: http(rpc, { timeout:
 if (!MULTICALL3) throw new Error('no Multicall3 in the registry')
 const t0 = Date.now()
 const snap = await readSnapshot(client, MULTICALL3, base.id, targets)
-console.log(`snapshot block ${snap.block}: ${snap.safes.length} Safes, ${snap.safes.reduce((n, s) => n + s.positions.length, 0)} positions, ${snap.calls} eth_call, ${Date.now() - t0} ms`)
+console.log(`snapshot block ${snap.block}: ${snap.safes.length} Safes, ${snap.safes.reduce((n, s) => n + s.positions.length, 0)} positions, ${snap.calls} requests, ${Date.now() - t0} ms`)
 
 const MAX = (1n << 128n) - 1n
 const rows: { account: string; tokenId: string; pool: string; collectable0: string; collectable1: string; accrued0: string; accrued1: string; sim0: string; sim1: string; match: boolean }[] = []

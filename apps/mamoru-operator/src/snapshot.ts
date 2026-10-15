@@ -91,7 +91,7 @@ export type Snapshot = {
   readAt: string
   pools: Record<string, PoolState>
   safes: SafeSnapshot[]
-  /** eth_call requests this snapshot cost (one per Multicall3 chunk). */
+  /** RPC requests this snapshot cost: one eth_blockNumber plus one eth_call per Multicall3 chunk. */
   calls: number
 }
 
