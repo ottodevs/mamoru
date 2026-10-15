@@ -742,11 +742,10 @@ export class Operator {
     const added = stored.map((g) => g.name)
     const summary = [
       `Let Mamoru's engine re-range and collect fees in ${this.poolsOf(added)} on your Safe ${live.safe}`,
-      `Engine key ${sessionKey} may, for ${Math.round(policy.session.validitySeconds / 86_400)} days: withdraw liquidity from any position your Safe owns, collect its fees into your Safe and burn it once it is empty; open positions again in those pools; and swap those pools' tokens to USDC, within your plan's limits`,
-      'Everything it withdraws or collects is paid to your Safe, never to anyone else',
+      `Engine key ${sessionKey} may, for ${Math.round(policy.session.validitySeconds / 86_400)} days and within your plan's limits: take liquidity out of any position your Safe owns and collect it, with its fees, into your Safe; burn a position once it is empty; open positions again in those pools; and swap ${this.volatileOf(added)} to USDC`,
+      'It does this without asking you again, only within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
       ...(dropped.length ? [`${this.poolsOf(dropped)} needs one more approval after this one`] : []),
-      'Nothing is moved: your positions stay as they are',
-      'Funds never leave your Safe without your passkey',
+      'Nothing is moved now: your positions stay as they are',
     ]
     return this.hold(acc, live, 'renew', calls, summary, { grants: stored, revokes: old, extend: true, base: acc.grants.map((g) => g.permissionId) })
   }
@@ -774,6 +773,13 @@ export class Operator {
       }
       ks = ks.filter((k) => !droppable[i]!.includes(k))
     }
+  }
+
+  /** "cbBTC and WETH": the tokens other than USDC of the pools named in a set of grant keys (what a harvest converts). */
+  private volatileOf(keys: string[]): string {
+    const pools = [...new Set(keys.map((k) => k.split(':').slice(1).join(':')).filter((p) => p.startsWith('pool:')))]
+    const tokens = [...new Set(pools.flatMap((p) => [entry(p).token0, entry(p).token1]).filter((t): t is string => !!t && t !== 'USDC'))]
+    return tokens.length ? tokens.join(' and ') : 'what it collects'
   }
 
   /** "USDC/cbBTC 0.05% and WETH/USDC 0.30%" for the pools named in a set of grant keys. */

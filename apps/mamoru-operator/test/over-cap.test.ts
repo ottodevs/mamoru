@@ -1633,7 +1633,9 @@ describe('renewing the approval of a running account', () => {
       acc.managedTokenIds = ['7']
       const tx = await w.op.prepareRenew(ctx)
       expect(tx.summary.join(' ')).toContain('re-range and collect fees in')
-      expect(tx.summary.join(' ')).toContain('Nothing is moved')
+      expect(tx.summary.join(' ')).toContain('swap cbBTC and WETH to USDC')
+      expect(tx.summary.join(' ')).toContain('without asking you again, only within these limits')
+      expect(tx.summary.join(' ')).toContain('Nothing is moved now')
       const sentBefore = w.sent.length
       const op = await w.op.submit(ctx, 'renew', sign(tx))
       expect(op).toMatchObject({ kind: 'renew', state: 'confirmed', code: 'EXEC_OK', extend: true })
