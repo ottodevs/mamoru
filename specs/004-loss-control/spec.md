@@ -42,7 +42,7 @@ Data that exists:
 |---|---|---|---|
 | `base-30d-5m` | 2026-09-01 23:15 .. 2026-10-01 23:15 UTC | 8,641 at 5 min | archive backfill, 6 registry pools |
 | `base-2025-10-crash-10m` | 2025-10-06 23:55 .. 2025-10-13 23:55 UTC | 1,009 at 10 min | backfilled 15 Oct for this spec (public archive RPC) |
-| `base-2025-02-crash-10m` | 2025-01-30 .. 2025-02-06 UTC | 1,009 at 10 min | backfill in progress on 15 Oct (slow public endpoints); results go in the Lab note |
+| `base-2025-02-crash-10m` | 2025-01-29 23:55 .. 2025-02-05 23:55 UTC | 1,009 at 10 min | backfilled 15 Oct for this spec (public archive RPC) |
 | D1 `pool_snapshots` | from 2026-10-02 00:43 UTC | live collector | not exported to a dataset yet (task LC-T2) |
 
 Not available on Base at all: the USDC depeg of March 2023 (Base mainnet opened in August 2023; cbBTC in September
@@ -54,6 +54,7 @@ Market in each window (prices from the pools' ticks):
 |---|---|---|---|---|
 | Sep 2026 | 8.2%, -2.4%, -5.1% | 10.0%, -2.8%, -8.6% | 45% / 46% | 22 bps |
 | Oct 2025 | 17.4%, **-11.8%**, -15.3% | 23.9%, **-10.1%**, -17.6% | 205% / 179% | 5 bps |
+| Feb 2025 | 13.3%, -4.7%, -9.0% | 31.1%, **-16.7%**, -25.1% | 87% / 352% | 39 bps |
 
 `conservador-live-v2` as it runs today:
 
@@ -63,6 +64,7 @@ Market in each window (prices from the pools' ticks):
 | Sep 2026 (30 d) | 100 | 101.73 (+1.73%) | 102.51 | 2.09% | 1.64% | n/a | 0.57 | 12 | 3 |
 | Oct 2025 (7 d) | 1,000 | 966.71 (-3.33%) | 979.82 | 7.62% | 7.57% | -3.12% | 3.95 | 12 | 12 |
 | Oct 2025 (7 d) | 100 | 94.59 (-5.41%) | 97.98 | 8.96% | 8.94% | -4.56% | 2.48 | 8 | 12 |
+| Feb 2025 (7 d) | 1,000 | 964.16 (-3.58%) | 980.76 | 5.63% | 4.98% | -1.86% | 2.57 | 15 | 11 |
 
 Reading:
 
@@ -73,11 +75,13 @@ Reading:
   that hour. A 24 h trend rule at -7% (BTC) / -9% (ETH) fires once, at 21:15-21:25 on 10 Oct, which was the trough;
   prices ended the window 11.5% (BTC) and 13.7% (ETH) above the exit price. Tighter thresholds fire earlier in October
   (-5% ETH: 8 Oct, then a further -18.9%) but also fire in calm September (-4% / -5%: 15 Sep, followed by +11-12%).
-  **On this data a pure 24 h trend exit is a coin flip: it does not separate the onset of a crash from an ordinary
+  In February 2025 the same rule fired at the BTC trough (window end +5% above the exit) but early for ETH (2 Feb
+  18:45, then a further -19.5%, window end -5%). **On this data a pure 24 h trend exit is a coin flip: it does not separate the onset of a crash from an ordinary
   dip.** What clearly helps in both windows is not chasing: stop re-ranging into a fall (`RISK_REGIME_VOL` freeze,
   `RISK_EXIT_NOT_RERANGE`), which the September window never triggers (vol p90 45%) and October triggers for the whole
-  crash (vol p90 179-205%).
-- The 100-tick TWAP gate blocked 12 reviews in the October week (max deviation 723 ticks on cbBTC, 465 on WETH).
+  crash (vol p90 179-205% in October, 87-352% in February).
+- The 100-tick TWAP gate blocked 12 reviews in the October week (max deviation 723 ticks on cbBTC, 465 on WETH) and
+  11 in February (1,468 ticks on WETH).
 
 These are single windows replayed once. They rank nothing on their own (lab note 2026-10-02); they set the
 thresholds' starting points and show which rules the Lab sweep must kill or keep.
