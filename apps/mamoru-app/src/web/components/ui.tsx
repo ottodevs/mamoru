@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { encodeQr, qrPath } from '../lib/qr.ts'
 
 export function Brand() {
@@ -119,19 +119,36 @@ export function Modal({ open, onClose, title, children }: { open: boolean; onClo
  */
 export function InfoPopover({ label, children }: { label: string; children: ReactNode }) {
   const [open, setOpen] = useState(false)
-  // Which edge of the trigger the panel hangs from: anchored to whichever side has more room, measured when it
-  // opens. A button that wrapped onto its own line near the left edge (a narrow screen) would otherwise have a
-  // `right`-anchored panel open further left and off the viewport, where `overflow-x: clip` hides it.
-  const [anchor, setAnchor] = useState<'left' | 'right'>('right')
+  // The panel's pixel offset from the trigger's own left edge, clamped so it never extends past the viewport
+  // on either side regardless of where the trigger sits or how wide the panel renders. Recomputed whenever it
+  // could change: on open (a fresh layout) and on resize while it stays open (an orientation change, a resized
+  // window) — not just once, and not a left/right guess, since neither alone fits a trigger at any position.
+  const [left, setLeft] = useState<number | null>(null)
   const id = useId()
   const wrapRef = useRef<HTMLSpanElement>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
 
+  useLayoutEffect(() => {
+    if (!open) return
+    const place = () => {
+      const wrap = wrapRef.current
+      const panel = panelRef.current
+      if (!wrap || !panel) return
+      const margin = 8
+      const wrapBox = wrap.getBoundingClientRect()
+      // Prefer ending flush with the trigger's right edge (today's common case); clamp into the viewport.
+      const preferred = wrapBox.right - panel.offsetWidth
+      const clamped = Math.max(margin, Math.min(preferred, window.innerWidth - margin - panel.offsetWidth))
+      setLeft(clamped - wrapBox.left)
+    }
+    place()
+    window.addEventListener('resize', place)
+    return () => window.removeEventListener('resize', place)
+  }, [open])
+
   useEffect(() => {
     if (!open) return
-    const box = wrapRef.current?.getBoundingClientRect()
-    if (box) setAnchor(box.left < window.innerWidth / 2 ? 'left' : 'right')
     panelRef.current?.focus()
     const close = () => setOpen(false)
     const onKey = (e: KeyboardEvent) => {
@@ -166,7 +183,7 @@ export function InfoPopover({ label, children }: { label: string; children: Reac
         </svg>
       </button>
       {open && (
-        <div id={id} ref={panelRef} role="dialog" aria-label={label} tabIndex={-1} className={`info-panel info-panel-${anchor}`}>
+        <div id={id} ref={panelRef} role="dialog" aria-label={label} tabIndex={-1} className="info-panel" style={left === null ? undefined : { left: `${left}px`, right: 'auto' }}>
           {children}
         </div>
       )}
