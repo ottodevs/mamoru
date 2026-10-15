@@ -16,7 +16,7 @@ import { activationLive, historyOps, needsRetry, opLine } from '../../src/web/li
 import { isAddress, parseUsdc } from '../../src/web/lib/owner-flow.ts'
 import { encodeQr } from '../../src/web/lib/qr.ts'
 import { localTime } from '../../src/web/lib/time.ts'
-import { approvalDay, approvalRowKey, engineLine, History } from '../../src/web/routes/home.tsx'
+import { ApprovalCard, approvalDay, approvalRowKey, engineLine, History } from '../../src/web/routes/home.tsx'
 import { MIX } from '../../src/web/routes/onboarding.tsx'
 import { buildRouter } from '../../src/web/router.tsx'
 import { render } from './render.ts'
@@ -372,7 +372,7 @@ describe('renewing the approval', () => {
   test('an account missing grants is asked for one more approval, months before any renewal', async () => {
     const { text, html } = await renderRoute('/', fixtureSession, running({ validUntil: now + 200 * 86_400, renewDue: false, expired: false, missing: 4 }))
     expect(html).toContain('data-testid="renew"')
-    expect(text).toContain('Mamoru needs one more approval to re-range and collect fees in every pool.')
+    expect(text).toContain('Mamoru is missing part of its approval: in some pools it cannot re-range or collect fees until you add it.')
     expect(text).toContain('One tap with your passkey. Nothing is moved.')
     expect(text).not.toContain('Renew approval')
     // When the renewal is due as well, the renewal is what is asked first.
@@ -385,6 +385,14 @@ describe('renewing the approval', () => {
     const renewed = { validUntil: now + 365 * 86_400, renewDue: false, expired: false, missing: 4 }
     const extended = { ...renewed, missing: 2 }
     expect(new Set([approvalRowKey(due), approvalRowKey(renewed), approvalRowKey(extended)]).size).toBe(3)
+  })
+
+    test('once prepared, the row shows every line the passkey is about to sign', () => {
+    const summary = ['Let Mamoru\'s engine re-range and collect fees in USDC/cbBTC 0.05%', 'Nothing is moved: your positions stay as they are']
+    const { text, html } = render(<ApprovalCard approval={{ validUntil: now + 200 * 86_400, renewDue: false, expired: false, missing: 4 }} summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} />)
+    expect(html).toContain('data-testid="review"')
+    for (const line of summary) expect(text).toContain(line)
+    expect(text).toContain('Confirm')
   })
 
     test('history reads an extension in its own words', () => {
