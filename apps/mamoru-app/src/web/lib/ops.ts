@@ -17,6 +17,18 @@ export function overCapRefusal(op: OpView): boolean {
   return op.kind === 'activate' && op.state === 'failed' && (op.code === 'DEPOSIT_OVER_CAP' || op.code === 'CAP_EXCEEDED')
 }
 
+/**
+ * Start refused because Mamoru does not pay this account's gas reserve (otto/mamoru#82). The owner can always start
+ * with their own: the refusal at prepare names the exact ETH; this is the line history keeps.
+ */
+const SUBSIDY_REFUSED: Record<string, string> = {
+  SUBSIDY_BELOW_MINIMUM: 'Start needs gas: add USDC, or send ETH on Base to your account',
+  SUBSIDY_EARLY_EXIT: 'Start needs gas: funds left soon after a start Mamoru paid for. Send ETH on Base to your account',
+  SUBSIDY_ACCOUNT_LIMIT: 'Start needs gas: Mamoru already paid this account\'s reserve. Send ETH on Base to your account',
+  SUBSIDY_PASSKEY_LIMIT: 'Start needs gas: Mamoru already paid this passkey\'s reserves. Send ETH on Base to your account',
+  SUBSIDY_DAILY_BUDGET: 'Start needs gas: Mamoru-paid starts are used up for now. Try later, or send ETH on Base to your account',
+}
+
 /** An owner action that failed after the passkey signed it: the user approves it again. An over-cap refusal is not one: approving again cannot help. */
 export function needsRetry(op: OpView): boolean {
   return owner(op) && op.state === 'failed' && !overCapRefusal(op)
@@ -38,6 +50,7 @@ export function opLine(op: OpView): string {
       if (overCapRefusal(op)) {
         return op.amountUsdc && op.capUsdc ? `Start refused: ${usd(op.amountUsdc)} USDC is over the ${usdPlain(op.capUsdc)} USDC cap` : 'Start refused: the deposit was over the cap'
       }
+      if (failed && op.code && SUBSIDY_REFUSED[op.code]) return SUBSIDY_REFUSED[op.code]!
       if (failed) return 'Start needs another approval'
       if (done) return 'Mamoru started'
       return op.code === 'ARMED' || op.state === 'proposed' ? 'Start approved' : 'Starting Mamoru'

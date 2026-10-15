@@ -45,7 +45,7 @@ account keys are shortened to 8 chars. Example (values illustrative):
     "chainId": 8453,
     "live": true,
     "policyId": "conservador-live-v2",
-    "relayer": { "address": "0xRELAYER…", "balanceWei": "812345678901234567", "balanceCachedAgeMs": 12 },
+    "relayer": { "address": "0xRELAYER…", "balanceWei": "812345678901234567", "balanceCachedAgeMs": 12, "subsidy": { "paid24hWei": "500000000000000", "budgetWei": "5000000000000000" } },
     "accounts": { "known": 14, "active": 9, "armed": 1 }
   },
   "rpc": {

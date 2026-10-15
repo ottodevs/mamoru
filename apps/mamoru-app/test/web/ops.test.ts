@@ -6,6 +6,12 @@ const AT = '2026-10-10T12:00:00.000Z'
 const base = (patch: Partial<OpView>): OpView => ({ opId: 'own-1-activate', kind: 'activate', state: 'confirmed', updatedAt: AT, ...patch })
 
 describe('opLine', () => {
+  test('a start refused for gas says so and how to start with your own', () => {
+    expect(opLine(base({ state: 'failed', code: 'SUBSIDY_BELOW_MINIMUM' }))).toBe('Start needs gas: add USDC, or send ETH on Base to your account')
+    expect(opLine(base({ state: 'failed', code: 'SUBSIDY_DAILY_BUDGET' }))).toContain('send ETH on Base')
+    expect(opLine(base({ state: 'failed', code: 'OWNER_TX_FAILED' }))).toBe('Start needs another approval')
+  })
+
   test('enter_swap names the tokens and the amount when known', () => {
     const op = base({ opId: 'eng-1-1-op-1-enter_swap', kind: 'enter', state: 'confirmed', pool: 'pool:USDC/cbBTC/500', tokenIn: 'USDC', tokenOut: 'cbBTC', amountIn: '10000000' })
     expect(opLine(op)).toBe('Swapped 10 USDC to cbBTC')
