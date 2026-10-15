@@ -367,6 +367,24 @@ describe('renewing the approval', () => {
     const { html } = await renderRoute('/', fixtureSession, { ...funded, active: false, approval: null })
     expect(html).not.toContain('data-testid="renew"')
   })
+
+  // otto/mamoru#5: grants left out at activation to fit Base's gas cap are added with one more tap.
+  test('an account missing grants is asked for one more approval, months before any renewal', async () => {
+    const { text, html } = await renderRoute('/', fixtureSession, running({ validUntil: now + 200 * 86_400, renewDue: false, expired: false, missing: 4 }))
+    expect(html).toContain('data-testid="renew"')
+    expect(text).toContain('Mamoru needs one more approval to re-range and collect fees in every pool.')
+    expect(text).toContain('One tap with your passkey. Nothing is moved.')
+    expect(text).not.toContain('Renew approval')
+    // When the renewal is due as well, the renewal is what is asked first.
+    const both = await renderRoute('/', fixtureSession, running({ validUntil: now + 12 * 86_400, renewDue: true, expired: false, missing: 4 }))
+    expect(both.text).toContain('Renew approval')
+  })
+
+  test('history reads an extension in its own words', () => {
+    const op: OpView = { opId: 'own-5-renew', kind: 'renew', state: 'confirmed', updatedAt: '2026-10-15T10:00:00Z', extend: true }
+    expect(opLine(op)).toBe('Approval extended to every pool')
+    expect(opLine({ ...op, state: 'submitted' })).toBe('Extending approval')
+  })
 })
 
 // otto/mamoru#122 and #121: every token counts and shows, and the account says what Mamoru is doing between steps.

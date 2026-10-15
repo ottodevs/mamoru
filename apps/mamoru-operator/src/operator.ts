@@ -228,6 +228,9 @@ type Prepared = {
   /** activate: the grants this tx enables. stop: the permissionIds it revokes. */
   grants?: StoredGrant[]
   revokes?: Hex[]
+  /** renew: it only adds the grants the account lacks (see planExtend); `base` is the account's grants it was built on. */
+  extend?: boolean
+  base?: Hex[]
   /** transfer: what the history line shows. */
   meta?: { amountUsdc: string; asset?: string; to: Hex }
 }
@@ -473,7 +476,27 @@ export class Operator {
     if (!untils.length) return null
     const validUntil = Math.min(...untils)
     const left = validUntil - Math.floor(Date.now() / 1000)
-    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0 }
+    const missing = this.missingGrants(acc).length
+    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, ...(missing ? { missing } : {}) }
+  }
+
+  /**
+   * Grants of the account's policy that it does not hold: the manage-any/convert-any pairs an activation (or a
+   * renewal) left out to fit Base's per-tx gas cap. Without them the engine cannot re-range, reduce or harvest in that
+   * pool (SESSION_MISSING); one more owner approval adds them (planExtend).
+   */
+  private missingGrants(acc: AccountState): string[] {
+    const have = new Set(acc.grants.map((g) => g.name))
+    return this.policyOf(acc).session.grants.filter((g) => !g.perPosition).map(grantKey).filter((k) => !have.has(k))
+  }
+
+  /** The manage-any/convert-any keys of one pool per entry, lowest-preference bucket first: what is left out first when a grant set does not fit one transaction. */
+  private droppablePairs(policy: PolicyVersion, keys: string[]): string[][] {
+    return [...policy.buckets]
+      .sort((a, b) => a.preference - b.preference)
+      .flatMap((b) => b.pools)
+      .map((pool) => keys.filter((k) => (k.startsWith('manage-any') || k.startsWith('convert-any')) && (k.endsWith(`:${pool}`) || !k.includes(':'))))
+      .filter((ks) => ks.length > 0)
   }
 
   async funding(ctx: AccountContext): Promise<FundingView> {
@@ -581,7 +604,7 @@ export class Operator {
    * session, so the full multi-pool v2 set (12 sessions, ~18.2M) reverts GS013 on real Base. Keep every entry grant
    * and drop the manage-any/convert-any pairs of the lowest-preference buckets until the simulated tx fits. The engine
    * discards a proposal whose session is missing (SESSION_MISSING), so a dropped pair only disables re-range/reduce
-   * for that pool.
+   * for that pool, until the owner adds it with one more approval (planExtend).
    */
   private async fitActivation(
     live: LiveAccount,
@@ -591,11 +614,7 @@ export class Operator {
     acc: AccountState,
     block: bigint,
   ): Promise<{ keys: string[]; grants: ReturnType<typeof instantiateGrant>[]; batch: ReturnType<typeof activationBatch> }> {
-    const droppable = [...policy.buckets]
-      .sort((a, b) => a.preference - b.preference)
-      .flatMap((b) => b.pools)
-      .map((pool) => allKeys.filter((k) => (k.startsWith('manage-any') || k.startsWith('convert-any')) && (k.endsWith(`:${pool}`) || !k.includes(':'))))
-      .filter((ks) => ks.length > 0)
+    const droppable = this.droppablePairs(policy, allKeys)
     let keys = allKeys
     for (let i = 0; ; i++) {
       const grants = build(keys)
@@ -685,27 +704,81 @@ export class Operator {
     this.assertRenewable(acc)
     const r = await readSafe(this.client, live.safe)
     const policy = this.policyOf(acc)
-    const { sessionKey, stored, batch } = await this.approval(acc, live, policy, r, acc.grants.map((g) => g.name))
+    // Grants the account lacks are added by an approval of their own, unless the renewal is due: then the renewal goes
+    // first (it revokes every grant the account has, and the added ones would be revoked with them) and the missing
+    // grants are offered once it has landed. Nor while a renewal's outcome is unknown: if it ran unseen, the grants the
+    // engine has are revoked on chain and only a full renewal (which revokes everything and enables a fresh set) is
+    // safe to build on them.
+    const missing = this.missingGrants(acc)
+    if (missing.length && !this.approvalView(acc)?.renewDue && !this.unsettledRenewalGrants(acc).length) return this.planExtend(acc, live, policy, r, missing)
     // The grants it replaces are revoked in the same Safe transaction, always: two sets are never enabled at once
     // and each limit exists once. Measured on Base: revoking eight grants is about 1.45M gas on top of the 12.7M that
-    // enabling eight takes. If the whole does not fit the cap the renewal is refused, never done without the revokes.
+    // enabling eight takes. When the whole does not fit the cap, manage-any/convert-any pairs are left out of the new
+    // set (lowest-preference bucket first), never the revokes; an approval of their own adds them back afterwards.
     // The grants of a renewal whose outcome is still unknown go with them: if it ran unseen (a read behind the
     // chain), its grants are revoked here all the same; the removal of a session that is not there is taken.
     const old = [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc)])]
-    const calls = [...revocationCalls(old), ...batch.calls]
-    const gas = await this.activationGas(live, calls, stored.length, r.block)
-    if (gas > RENEW_GAS_BUDGET) {
-      logErr(`[renew] ${acc.accountKey} ~${gas} gas over ${RENEW_GAS_BUDGET}:`, { grants: stored.length, revokes: old.length })
-      throw new HttpError(409, 'RENEWAL_TOO_LARGE', 'this renewal does not fit one transaction on Base: nothing was changed, Mamoru keeps running')
-    }
+    const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, acc.grants.map((g) => g.name), old)
     const summary = [
       `Renew Mamoru's approval on your Safe ${live.safe}`,
       `Engine key ${sessionKey} keeps the same limits, for ${Math.round(policy.session.validitySeconds / 86_400)} more days`,
       'The approval it replaces is revoked in the same transaction',
+      ...(dropped.length ? [`Re-ranging and collecting fees in ${this.poolsOf(dropped)} needs one more approval after this one`] : []),
       'Nothing is moved: your positions stay as they are',
       'Funds never leave your Safe without your passkey',
     ]
     return this.hold(acc, live, 'renew', calls, summary, { grants: stored, revokes: old })
+  }
+
+  /**
+   * One more approval for a running account that lacks grants of its policy: it enables only those, valid from now
+   * for the policy's validity, and keeps every grant the account has. It revokes only what a renewal would revoke
+   * besides the engine's grants (left-over and unsettled ones), so nothing the engine uses stops working. It travels
+   * as a renewal (kind `renew`, same route, same one-at-a-time rules) and is applied by adding its grants.
+   */
+  private async planExtend(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, missing: string[]): Promise<OwnerTxToSign> {
+    const old = [...new Set([...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc)])]
+    const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, missing, old)
+    const added = stored.map((g) => g.name)
+    const summary = [
+      `Let Mamoru's engine re-range and collect fees in ${this.poolsOf(added)} on your Safe ${live.safe}`,
+      `Engine key ${sessionKey} may only re-range, reduce and collect in those pools and swap what it collects back to USDC, for ${Math.round(policy.session.validitySeconds / 86_400)} days`,
+      ...(dropped.length ? [`${this.poolsOf(dropped)} needs one more approval after this one`] : []),
+      'Nothing is moved: your positions stay as they are',
+      'Funds never leave your Safe without your passkey',
+    ]
+    return this.hold(acc, live, 'renew', calls, summary, { grants: stored, revokes: old, extend: true, base: acc.grants.map((g) => g.permissionId) })
+  }
+
+  /**
+   * The grants for `keys` and the Safe calls that revoke `revokes` and enable them, fitted to one Base transaction:
+   * manage-any/convert-any pairs are left out, lowest-preference bucket first, until the simulated gas fits. Refused
+   * when nothing is left to enable or it still does not fit; the revokes are never left out.
+   */
+  private async fitGrants(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, keys: string[], revokes: Hex[]) {
+    const droppable = this.droppablePairs(policy, keys)
+    let ks = keys
+    for (let i = 0; ; i++) {
+      const { sessionKey, stored, batch } = await this.approval(acc, live, policy, r, ks)
+      const calls = [...revocationCalls(revokes), ...batch.calls]
+      const gas = stored.length ? await this.activationGas(live, calls, stored.length, r.block) : 0n
+      if (stored.length && gas <= RENEW_GAS_BUDGET) {
+        const dropped = keys.filter((k) => !ks.includes(k))
+        if (dropped.length) console.log(`[renew] ${live.safe} ~${gas} gas: left out ${dropped.join(', ')} to fit Base's per-tx gas cap`)
+        return { sessionKey, stored, calls, dropped }
+      }
+      if (!stored.length || i >= droppable.length) {
+        logErr(`[renew] ${acc.accountKey} ~${gas} gas over ${RENEW_GAS_BUDGET}:`, { grants: stored.length, revokes: revokes.length })
+        throw new HttpError(409, 'RENEWAL_TOO_LARGE', 'this approval does not fit one transaction on Base: nothing was changed, Mamoru keeps running')
+      }
+      ks = ks.filter((k) => !droppable[i]!.includes(k))
+    }
+  }
+
+  /** "USDC/cbBTC 0.05% and WETH/USDC 0.30%" for the pools named in a set of grant keys. */
+  private poolsOf(keys: string[]): string {
+    const pools = [...new Set(keys.map((k) => k.split(':').slice(1).join(':')).filter((p) => p.startsWith('pool:')))]
+    return pools.length ? pools.map(poolLabel).join(' and ') : 'its pools'
   }
 
   /**
@@ -737,7 +810,7 @@ export class Operator {
       // Asked again after the reads: the caller holds the account lock, and this keeps it true if one ever does not.
       if (superseded(op) || op.state !== 'failed' || op.code !== RECEIPT_UNKNOWN) continue
       console.log(`[renew] ${acc.accountKey} ${op.opId} executed on chain (its grants are enabled): applied`)
-      this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes }, { blockNumber: block } as TransactionReceipt)
+      this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, extend: op.extend }, { blockNumber: block } as TransactionReceipt)
       this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(block) })
     }
     // Stops after renewals: a renewal that ran replaced the engine's grants, and the stop is judged by the grants
@@ -1156,7 +1229,12 @@ export class Operator {
       // Built on the grants the account had when it was prepared: if a renewal was applied since, prepare again.
       const now = new Set(acc.grants.map((g) => g.permissionId.toLowerCase()))
       const known = new Set([...now, ...(acc.superseded ?? []).map((s) => s.toLowerCase()), ...this.unsettledRenewalGrants(acc).map((s) => s.toLowerCase()), ...acc.revoked.map((s) => s.toLowerCase())])
-      if (![...now].every((id) => (p.revokes ?? []).some((r) => r.toLowerCase() === id)) || (p.revokes ?? []).some((id) => !known.has(id.toLowerCase()))) {
+      // A renewal must revoke every grant the account has now; an extension must find exactly the grants it was built on.
+      const base = new Set((p.base ?? []).map((id) => id.toLowerCase()))
+      const changed = p.extend
+        ? base.size !== now.size || [...now].some((id) => !base.has(id)) || this.unsettledRenewalGrants(acc).length > 0
+        : ![...now].every((id) => (p.revokes ?? []).some((r) => r.toLowerCase() === id))
+      if (changed || (p.revokes ?? []).some((id) => !known.has(id.toLowerCase()))) {
         throw new HttpError(409, 'RENEWAL_STALE', 'the approval changed since this renewal was prepared: prepare it again')
       }
     }
@@ -1631,6 +1709,7 @@ export class Operator {
     const o = op as StoredOp
     if ((p.kind === 'activate' || p.kind === 'renew') && p.grants) o.ownerGrants = p.grants
     if ((p.kind === 'stop' || p.kind === 'renew') && p.revokes) o.revokes = p.revokes
+    if (p.kind === 'renew' && p.extend) o.extend = true
     if (p.meta) Object.assign(o, p.meta)
     this.store.save()
   }
@@ -1789,8 +1868,12 @@ export class Operator {
       if (acc.active && p.grants?.length) {
         // The engine works with the renewed grants from here on: positions, deposits and history stay as they are.
         // What the transaction did not revoke of the old ones stays enabled until it lapses: remembered for a stop.
-        acc.superseded = kept([...(acc.superseded ?? []), ...acc.grants.map((g) => g.permissionId)])
-        acc.grants = p.grants
+        // An extension adds its grants to the ones the engine has; one of the same name (never expected: it is built
+        // on the missing ones) replaces the old, which stays enabled and is remembered the same way.
+        const names = new Set(p.grants.map((g) => g.name))
+        const replaced = p.extend ? acc.grants.filter((g) => names.has(g.name)) : acc.grants
+        acc.superseded = kept([...(acc.superseded ?? []), ...replaced.map((g) => g.permissionId)])
+        acc.grants = p.extend ? [...acc.grants.filter((g) => !names.has(g.name)), ...p.grants] : p.grants
         // The engine restarts on these grants and must not look at the chain from before they were enabled.
         acc.grantsFromBlock = receipt.blockNumber.toString()
         acc.epoch++
@@ -1872,7 +1955,7 @@ export class Operator {
         acc.superseded = [...new Set([...(acc.superseded ?? []), ...op.ownerGrants.map((g) => g.permissionId).filter((id) => !revokedNow.has(id.toLowerCase()))])]
         this.store.save()
       } else if (op.kind === 'renew' && op.ownerGrants) {
-        this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes }, receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt))
+        this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, extend: op.extend }, receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt))
       }
       console.log(`[reconcile] ${op.opId} tx ${hash} landed at block ${block}, confirmed`)
       this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', txHash: hash, block })
