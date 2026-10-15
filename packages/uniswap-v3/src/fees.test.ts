@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { feeGrowthInside, uncollectedFees } from './fees.ts'
+import { feeGrowthInside, positionFees } from './fees.ts'
 import fixture from './fees.fixture.json'
 
 const Q128 = 1n << 128n
@@ -28,15 +28,40 @@ describe('feeGrowthInside', () => {
   })
 })
 
-describe('uncollectedFees', () => {
-  test('owed plus growth since the checkpoint times liquidity, floored', () => {
-    const r = uncollectedFees({ liquidity: 3n, feeGrowthInside0LastX128: 0n, feeGrowthInside1LastX128: 0n, tokensOwed0: 7n, tokensOwed1: 0n }, { inside0: Q128, inside1: Q128 / 2n })
-    expect(r).toEqual({ fees0: 10n, fees1: 1n })
+describe('positionFees', () => {
+  const pos = (o: Partial<{ liquidity: bigint; in0: bigint; in1: bigint; owed0: bigint; owed1: bigint }>) => ({
+    liquidity: o.liquidity ?? 1n,
+    feeGrowthInside0LastX128: o.in0 ?? 0n,
+    feeGrowthInside1LastX128: o.in1 ?? 0n,
+    tokensOwed0: o.owed0 ?? 0n,
+    tokensOwed1: o.owed1 ?? 0n,
+  })
+
+  test('accrued is growth since the checkpoint times liquidity, floored; collectable adds what is owed', () => {
+    const r = positionFees(pos({ liquidity: 3n, owed0: 7n }), { inside0: Q128, inside1: Q128 / 2n })
+    expect(r).toEqual({ accrued0: 3n, accrued1: 1n, collectable0: 10n, collectable1: 1n })
+  })
+
+  test('owed principal is collectable but never counted as accrued fees', () => {
+    const r = positionFees(pos({ liquidity: 0n, owed0: 5_000_000n, owed1: 0n }), { inside0: 0n, inside1: 0n })
+    expect(r.accrued0).toBe(0n)
+    expect(r.collectable0).toBe(5_000_000n)
   })
 
   test('a checkpoint above the current growth (wrapped) still gives the right difference', () => {
-    const r = uncollectedFees({ liquidity: 1n, feeGrowthInside0LastX128: MOD - Q128, feeGrowthInside1LastX128: 0n, tokensOwed0: 0n, tokensOwed1: 0n }, { inside0: Q128, inside1: 0n })
-    expect(r.fees0).toBe(2n)
+    const r = positionFees(pos({ in0: MOD - Q128 }), { inside0: Q128, inside1: 0n })
+    expect(r.accrued0).toBe(2n)
+  })
+
+  test('the uint128 cast of the accrued amount wraps like the contract, it does not clamp', () => {
+    // liquidity * diff / 2^128 = 2^128 + 5 -> uint128 keeps 5.
+    const r = positionFees(pos({ liquidity: Q128 + 5n }), { inside0: Q128, inside1: 0n })
+    expect(r.accrued0).toBe(5n)
+  })
+
+  test('tokensOwed + accrued wraps at 2^128 like the unchecked addition', () => {
+    const r = positionFees(pos({ liquidity: 3n, owed0: Q128 - 1n }), { inside0: Q128, inside1: 0n })
+    expect(r.collectable0).toBe(2n)
   })
 })
 
@@ -44,8 +69,10 @@ describe('live Base positions match a simulated collect at the same block', () =
   for (const c of fixture.cases) {
     test(`#${c.tokenId} ${c.pool} at block ${fixture.block}`, () => {
       const inside = feeGrowthInside(c.tick, c.tickLower, c.tickUpper, BigInt(c.g0), BigInt(c.g1), t(BigInt(c.lo0), BigInt(c.lo1)), t(BigInt(c.up0), BigInt(c.up1)))
-      const fees = uncollectedFees({ liquidity: BigInt(c.liquidity), feeGrowthInside0LastX128: BigInt(c.in0), feeGrowthInside1LastX128: BigInt(c.in1), tokensOwed0: BigInt(c.owed0), tokensOwed1: BigInt(c.owed1) }, inside)
-      expect(fees).toEqual({ fees0: BigInt(c.collect0), fees1: BigInt(c.collect1) })
+      const fees = positionFees({ liquidity: BigInt(c.liquidity), feeGrowthInside0LastX128: BigInt(c.in0), feeGrowthInside1LastX128: BigInt(c.in1), tokensOwed0: BigInt(c.owed0), tokensOwed1: BigInt(c.owed1) }, inside)
+      expect({ c0: fees.collectable0, c1: fees.collectable1 }).toEqual({ c0: BigInt(c.collect0), c1: BigInt(c.collect1) })
+      // Nothing owed on these positions: everything collectable is accrued fees.
+      expect({ a0: fees.accrued0, a1: fees.accrued1 }).toEqual({ a0: BigInt(c.collect0), a1: BigInt(c.collect1) })
     })
   }
 })

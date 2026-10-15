@@ -2,14 +2,35 @@
 // Phase 1: read-only and off by default (MAMORU_SNAPSHOT=1). Nothing decides from it yet: funding, the armed
 // watcher and the engine keep their own reads, with their own provider and staleness rules.
 
-import { parseAbi, type PublicClient } from 'viem'
+import { decodeFunctionResult, encodeFunctionData, parseAbi, type PublicClient } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, uniswapV3PoolAbi } from '@mamoru/registry'
-import { BATCH_MAX_CALLS, Batch, balanceRead, contractRead, type Handle } from '@mamoru/rpc'
-import { feeGrowthInside, uncollectedFees } from '@mamoru/uniswap-v3/fees'
+import { BATCH_MAX_CALLS, Batch, balanceRead, contractRead, type Handle, type Read } from '@mamoru/rpc'
+import { feeGrowthInside, positionFees } from '@mamoru/uniswap-v3/fees'
 import { amountsForLiquidity, inUsdc, USDC_POOLS } from './chain.ts'
 
 const enumerableAbi = parseAbi(['function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)'])
+
+/**
+ * Whether the Safe has code, inside the batch: Multicall3 calls a codeless address successfully and gets empty
+ * return data (no Safe yet), while a deployed Safe answers getThreshold. If the call itself fails in the batch,
+ * the retry on its own is a plain eth_getCode at the same block, so a failed read is never taken for "undeployed".
+ */
+function deployedRead(client: PublicClient, safe: Address, blockNumber: bigint): Read<boolean> {
+  return {
+    to: safe,
+    data: encodeFunctionData({ abi: safeAbi, functionName: 'getThreshold' }),
+    decode: (returnData) => {
+      if (returnData === '0x') return false
+      decodeFunctionResult({ abi: safeAbi, functionName: 'getThreshold', data: returnData })
+      return true
+    },
+    direct: async () => {
+      const code = await client.getCode({ address: safe, blockNumber })
+      return !!code && code !== '0x'
+    },
+  }
+}
 
 export type SnapshotTarget = { accountKey: string; safe: Address; active: boolean; armed: boolean }
 
@@ -26,12 +47,21 @@ export type PositionSnapshot = {
   inRange: boolean
   amount0: bigint
   amount1: bigint
-  fees0: bigint
-  fees1: bigint
+  /** Fee income since the position's last checkpoint (yield only). */
+  accrued0: bigint
+  accrued1: bigint
+  /** tokensOwed at the checkpoint: earlier fees, and principal a decrease left uncollected. Not counted as yield. */
+  owed0: bigint
+  owed1: bigint
+  /** What collect would pay now: owed + accrued (an estimate; the pool may round a few units down). */
+  collectable0: bigint
+  collectable1: bigint
   /** Principal of the position in raw USDC at the pool price. */
   valueUsdc: bigint
-  /** Uncollected fees in raw USDC at the pool price. */
+  /** Accrued fees in raw USDC at the pool price. */
   feesUsdc: bigint
+  /** Owed amounts in raw USDC at the pool price. */
+  owedUsdc: bigint
 }
 
 export type SafeSnapshot = {
@@ -47,8 +77,11 @@ export type SafeSnapshot = {
   /** Tokens held outside positions, in raw USDC. ETH (gas) is left out. */
   idleUsdc: bigint
   lpUsdc: bigint
+  /** Accrued fees of all positions: yield not yet collected. */
   feesUsdc: bigint
-  /** idle + lp + uncollected fees. */
+  /** Owed amounts of all positions (may include principal). */
+  owedUsdc: bigint
+  /** idle + lp + accrued + owed: everything the Safe would hold if it collected now. */
   totalUsdc: bigint
 }
 
@@ -70,7 +103,7 @@ function pricingPool(token: string): string | null {
 function tokenUsdc(token: string, amount: bigint, pools: Record<string, PoolState>): bigint {
   if (token === 'USDC' || amount === 0n) return amount
   const pool = pricingPool(token)
-  if (!pool || !pools[pool]) return 0n
+  if (!pool || !pools[pool]) throw new Error(`snapshot: no USDC pool prices ${token}`)
   return inUsdc(pool, token, amount, pools[pool]!.sqrtPriceX96)
 }
 
@@ -99,59 +132,55 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
   const first = new Batch(client, multicall3, block)
   const poolReads = USDC_POOLS.map((p) => ({
     pool: p,
-    slot0: first.add(contractRead(client, { address: address(p), abi: uniswapV3PoolAbi, functionName: 'slot0' })),
-    fg0: first.add(contractRead(client, { address: address(p), abi: uniswapV3PoolAbi, functionName: 'feeGrowthGlobal0X128' })),
-    fg1: first.add(contractRead(client, { address: address(p), abi: uniswapV3PoolAbi, functionName: 'feeGrowthGlobal1X128' })),
+    slot0: first.add(contractRead(client, { address: address(p), abi: uniswapV3PoolAbi, functionName: 'slot0', ...at })),
+    fg0: first.add(contractRead(client, { address: address(p), abi: uniswapV3PoolAbi, functionName: 'feeGrowthGlobal0X128', ...at })),
+    fg1: first.add(contractRead(client, { address: address(p), abi: uniswapV3PoolAbi, functionName: 'feeGrowthGlobal1X128', ...at })),
   }))
   const safeReads = targets.map((t) => ({
     t,
-    eth: first.add(balanceRead(client, multicall3, t.safe)),
-    nfts: first.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [t.safe] })),
-    // Fails on an undeployed Safe (no code): that failure is the deployed check, at no extra request.
-    threshold: first.add(contractRead(client, { address: t.safe, abi: safeAbi, functionName: 'getThreshold' })),
-    tokens: tokenNames.map((name) => ({ name, read: first.add(contractRead(client, { address: address(name), abi: erc20Abi, functionName: 'balanceOf', args: [t.safe] })) })),
+    eth: first.add(balanceRead(client, multicall3, t.safe, block)),
+    nfts: first.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [t.safe], ...at })),
+    deployed: first.add(deployedRead(client, t.safe, block)),
+    tokens: tokenNames.map((name) => ({ name, read: first.add(contractRead(client, { address: address(name), abi: erc20Abi, functionName: 'balanceOf', args: [t.safe], ...at })) })),
   }))
   await run(first)
 
+  // A read that failed inside the batch is retried on its own at the same block (need()); if that fails too, the
+  // whole snapshot fails and the loop keeps the previous one. No failed read is ever reported as a zero.
   const pools: Record<string, PoolState> = {}
   for (const r of poolReads) {
-    const s = r.slot0.maybe()
-    const fg0 = r.fg0.maybe()
-    const fg1 = r.fg1.maybe()
-    if (!s || fg0 === null || fg1 === null) continue
+    const [s, fg0, fg1] = await Promise.all([r.slot0.need(), r.fg0.need(), r.fg1.need()])
     pools[r.pool] = { sqrtPriceX96: s[0], tick: s[1], feeGrowthGlobal0X128: fg0, feeGrowthGlobal1X128: fg1 }
   }
+  const nftCounts = await Promise.all(safeReads.map((s) => s.nfts.need()))
 
   // Batch 2: token ids of Safes that hold positions.
   const second = new Batch(client, multicall3, block)
-  const idReads = safeReads.map((s) => {
-    const n = Number(s.nfts.maybe() ?? 0n)
-    return Array.from({ length: n }, (_, i) => second.add(contractRead(client, { address: npm, abi: enumerableAbi, functionName: 'tokenOfOwnerByIndex', args: [s.t.safe, BigInt(i)], ...at })))
-  })
+  const idReads = safeReads.map((s, i) => Array.from({ length: Number(nftCounts[i]!) }, (_, k) => second.add(contractRead(client, { address: npm, abi: enumerableAbi, functionName: 'tokenOfOwnerByIndex', args: [s.t.safe, BigInt(k)], ...at }))))
   await run(second)
+  const ids = await Promise.all(idReads.map((reads) => Promise.all(reads.map((r) => r.need()))))
 
   // Batch 3: positions.
   const third = new Batch(client, multicall3, block)
-  const posReads = idReads.map((reads) =>
-    reads.map((r) => r.maybe()).filter((id): id is bigint => id !== null).map((tokenId) => ({ tokenId, read: third.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId], ...at })) })),
-  )
+  const posReads = ids.map((list) => list.map((tokenId) => ({ tokenId, read: third.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId], ...at })) })))
   await run(third)
 
   type Raw = { tokenId: bigint; pool: string; tickLower: number; tickUpper: number; liquidity: bigint; in0: bigint; in1: bigint; owed0: bigint; owed1: bigint }
-  const raws: Raw[][] = posReads.map((list) => {
+  const raws: Raw[][] = []
+  for (const list of posReads) {
     const out: Raw[] = []
     for (const { tokenId, read } of list) {
-      const p = read.maybe()
-      if (!p) continue
+      const p = await read.need()
+      // A position outside the USDC pools of the registry is not one Mamoru opened: left out, as readSafe does.
       const pool = USDC_POOLS.find((n) => {
         const e = entry(n)
         return p[2].toLowerCase() === address(e.token0!).toLowerCase() && p[3].toLowerCase() === address(e.token1!).toLowerCase() && p[4] === e.fee
       })
-      if (!pool || !pools[pool]) continue
+      if (!pool) continue
       out.push({ tokenId, pool, tickLower: p[5], tickUpper: p[6], liquidity: p[7], in0: p[8], in1: p[9], owed0: p[10], owed1: p[11] })
     }
-    return out
-  })
+    raws.push(out)
+  }
 
   // Batch 4: the two ticks of every position, once per (pool, tick).
   const fourth = new Batch(client, multicall3, block)
@@ -163,45 +192,75 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
     }
   }
   await run(fourth)
+  const ticks = new Map<string, readonly [bigint, bigint, bigint, bigint, bigint, bigint, number, boolean]>()
+  for (const [key, h] of tickReads) ticks.set(key, await h.need())
 
-  const safes: SafeSnapshot[] = safeReads.map((s, i) => {
-    const tokens = Object.fromEntries(s.tokens.map((x) => [x.name, x.read.maybe() ?? 0n])) as Record<string, bigint>
+  const safes: SafeSnapshot[] = []
+  for (const [i, s] of safeReads.entries()) {
+    const balances = await Promise.all(s.tokens.map((x) => x.read.need()))
+    const tokens = Object.fromEntries(s.tokens.map((x, k) => [x.name, balances[k]!])) as Record<string, bigint>
+    const eth = await s.eth.need()
     const positions: PositionSnapshot[] = []
     for (const r of raws[i]!) {
       const e = entry(r.pool)
       const ps = pools[r.pool]!
-      const lower = tickReads.get(`${r.pool}:${r.tickLower}`)!.maybe()
-      const upper = tickReads.get(`${r.pool}:${r.tickUpper}`)!.maybe()
+      const lower = ticks.get(`${r.pool}:${r.tickLower}`)!
+      const upper = ticks.get(`${r.pool}:${r.tickUpper}`)!
       const { amount0, amount1 } = amountsForLiquidity(ps.sqrtPriceX96, r.tickLower, r.tickUpper, r.liquidity)
-      let fees0 = r.owed0
-      let fees1 = r.owed1
-      if (lower && upper) {
-        const inside = feeGrowthInside(ps.tick, r.tickLower, r.tickUpper, ps.feeGrowthGlobal0X128, ps.feeGrowthGlobal1X128, { feeGrowthOutside0X128: lower[2], feeGrowthOutside1X128: lower[3] }, { feeGrowthOutside0X128: upper[2], feeGrowthOutside1X128: upper[3] })
-        ;({ fees0, fees1 } = uncollectedFees({ liquidity: r.liquidity, feeGrowthInside0LastX128: r.in0, feeGrowthInside1LastX128: r.in1, tokensOwed0: r.owed0, tokensOwed1: r.owed1 }, inside))
-      }
-      const valueUsdc = inUsdc(r.pool, e.token0!, amount0, ps.sqrtPriceX96) + inUsdc(r.pool, e.token1!, amount1, ps.sqrtPriceX96)
-      const feesUsdc = inUsdc(r.pool, e.token0!, fees0, ps.sqrtPriceX96) + inUsdc(r.pool, e.token1!, fees1, ps.sqrtPriceX96)
-      positions.push({ tokenId: r.tokenId, pool: r.pool, token0: e.token0!, token1: e.token1!, liquidity: r.liquidity, tickLower: r.tickLower, tickUpper: r.tickUpper, inRange: ps.tick >= r.tickLower && ps.tick < r.tickUpper, amount0, amount1, fees0, fees1, valueUsdc, feesUsdc })
+      const inside = feeGrowthInside(ps.tick, r.tickLower, r.tickUpper, ps.feeGrowthGlobal0X128, ps.feeGrowthGlobal1X128, { feeGrowthOutside0X128: lower[2], feeGrowthOutside1X128: lower[3] }, { feeGrowthOutside0X128: upper[2], feeGrowthOutside1X128: upper[3] })
+      const f = positionFees({ liquidity: r.liquidity, feeGrowthInside0LastX128: r.in0, feeGrowthInside1LastX128: r.in1, tokensOwed0: r.owed0, tokensOwed1: r.owed1 }, inside)
+      const usdc = (a0: bigint, a1: bigint) => inUsdc(r.pool, e.token0!, a0, ps.sqrtPriceX96) + inUsdc(r.pool, e.token1!, a1, ps.sqrtPriceX96)
+      positions.push({
+        tokenId: r.tokenId,
+        pool: r.pool,
+        token0: e.token0!,
+        token1: e.token1!,
+        liquidity: r.liquidity,
+        tickLower: r.tickLower,
+        tickUpper: r.tickUpper,
+        inRange: ps.tick >= r.tickLower && ps.tick < r.tickUpper,
+        amount0,
+        amount1,
+        accrued0: f.accrued0,
+        accrued1: f.accrued1,
+        owed0: r.owed0,
+        owed1: r.owed1,
+        collectable0: f.collectable0,
+        collectable1: f.collectable1,
+        valueUsdc: usdc(amount0, amount1),
+        feesUsdc: usdc(f.accrued0, f.accrued1),
+        owedUsdc: usdc(r.owed0, r.owed1),
+      })
     }
     const idleUsdc = Object.entries(tokens).reduce((n, [name, amt]) => n + tokenUsdc(name, amt, pools), 0n)
     const lpUsdc = positions.reduce((n, p) => n + p.valueUsdc, 0n)
     const feesUsdc = positions.reduce((n, p) => n + p.feesUsdc, 0n)
-    return {
+    const owedUsdc = positions.reduce((n, p) => n + p.owedUsdc, 0n)
+    safes.push({
       accountKey: s.t.accountKey,
       safe: s.t.safe,
       active: s.t.active,
       armed: s.t.armed,
-      deployed: s.threshold.maybe() !== null,
-      eth: s.eth.maybe() ?? 0n,
+      // Balances of an undeployed Safe are real too: tokens can be sent to its counterfactual address.
+      deployed: await s.deployed.need(),
+      eth,
       tokens,
       positions,
       idleUsdc,
       lpUsdc,
       feesUsdc,
-      totalUsdc: idleUsdc + lpUsdc + feesUsdc,
-    }
-  })
+      owedUsdc,
+      totalUsdc: idleUsdc + lpUsdc + feesUsdc + owedUsdc,
+    })
+  }
   return { chainId, block, readAt: new Date().toISOString(), pools, safes, calls }
+}
+
+/** MAMORU_SNAPSHOT_MS: default 30 s; never under 10 s; anything not a finite number is the default. */
+export function snapshotIntervalMs(raw: string | undefined): number {
+  const n = Number(raw?.trim())
+  if (!raw?.trim() || !Number.isFinite(n)) return 30_000
+  return Math.max(10_000, n)
 }
 
 /** Reads a snapshot every `intervalMs` and keeps the latest. Off unless started; a failed read keeps the previous one. */

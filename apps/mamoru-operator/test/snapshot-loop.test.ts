@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { SnapshotLoop, type Snapshot } from '../src/snapshot.ts'
+import { SnapshotLoop, snapshotIntervalMs, type Snapshot } from '../src/snapshot.ts'
 
 const snap = (block: bigint): Snapshot => ({ chainId: 8453, block, readAt: new Date(0).toISOString(), pools: {}, safes: [], calls: 1 })
 const settle = () => new Promise((r) => setTimeout(r, 5))
@@ -53,5 +53,14 @@ describe('SnapshotLoop (otto/mamoru#136)', () => {
     const after = n
     await settle()
     expect(n).toBe(after)
+  })
+
+  test('MAMORU_SNAPSHOT_MS: 30 s by default, never under 10 s, garbage is the default', () => {
+    expect(snapshotIntervalMs(undefined)).toBe(30_000)
+    expect(snapshotIntervalMs('')).toBe(30_000)
+    expect(snapshotIntervalMs('abc')).toBe(30_000)
+    expect(snapshotIntervalMs('-5')).toBe(10_000)
+    expect(snapshotIntervalMs('0')).toBe(10_000)
+    expect(snapshotIntervalMs('60000')).toBe(60_000)
   })
 })

@@ -33,7 +33,7 @@ const snap = await readSnapshot(client, MULTICALL3, base.id, targets)
 console.log(`snapshot block ${snap.block}: ${snap.safes.length} Safes, ${snap.safes.reduce((n, s) => n + s.positions.length, 0)} positions, ${snap.calls} eth_call, ${Date.now() - t0} ms`)
 
 const MAX = (1n << 128n) - 1n
-const rows: { account: string; tokenId: string; pool: string; fees0: string; fees1: string; sim0: string; sim1: string; match: boolean }[] = []
+const rows: { account: string; tokenId: string; pool: string; collectable0: string; collectable1: string; accrued0: string; accrued1: string; sim0: string; sim1: string; match: boolean }[] = []
 for (const s of snap.safes) {
   for (const p of s.positions) {
     const { result } = await client.simulateContract({
@@ -45,11 +45,11 @@ for (const s of snap.safes) {
       blockNumber: snap.block,
     })
     const [sim0, sim1] = result as readonly [bigint, bigint]
-    const match = sim0 === p.fees0 && sim1 === p.fees1
-    rows.push({ account: s.accountKey.slice(0, 8), tokenId: p.tokenId.toString(), pool: p.pool, fees0: p.fees0.toString(), fees1: p.fees1.toString(), sim0: sim0.toString(), sim1: sim1.toString(), match })
-    console.log(`${match ? 'OK  ' : 'DIFF'} ${s.accountKey.slice(0, 8)} #${p.tokenId} ${p.pool} ours ${p.fees0}/${p.fees1} collect ${sim0}/${sim1}`)
+    const match = sim0 === p.collectable0 && sim1 === p.collectable1
+    rows.push({ account: s.accountKey.slice(0, 8), tokenId: p.tokenId.toString(), pool: p.pool, collectable0: p.collectable0.toString(), collectable1: p.collectable1.toString(), accrued0: p.accrued0.toString(), accrued1: p.accrued1.toString(), sim0: sim0.toString(), sim1: sim1.toString(), match })
+    console.log(`${match ? 'OK  ' : 'DIFF'} ${s.accountKey.slice(0, 8)} #${p.tokenId} ${p.pool} ours ${p.collectable0}/${p.collectable1} (accrued ${p.accrued0}/${p.accrued1}) collect ${sim0}/${sim1}`)
   }
-  console.log(`     ${s.accountKey.slice(0, 8)} deployed=${s.deployed} idle ${s.idleUsdc} lp ${s.lpUsdc} fees ${s.feesUsdc} total ${s.totalUsdc} (raw USDC, 6 decimals)`)
+  console.log(`     ${s.accountKey.slice(0, 8)} deployed=${s.deployed} idle ${s.idleUsdc} lp ${s.lpUsdc} fees ${s.feesUsdc} owed ${s.owedUsdc} total ${s.totalUsdc} (raw USDC, 6 decimals)`)
 }
 const bad = rows.filter((r) => !r.match).length
 console.log(`${rows.length - bad}/${rows.length} positions match collect exactly`)

@@ -19,7 +19,7 @@ const SNAP: Snapshot = {
   block: 52644273n,
   readAt: '2026-10-15T10:00:00.000Z',
   pools: {},
-  safes: [{ accountKey: 'c23e94e1-2b74-47e5-a46e-56f3e4d366a1', safe: '0x1C046083d60655f3CDe66130d774ac64C5A5D60a', active: true, armed: false, deployed: true, eth: 1n, tokens: { USDC: 189962n }, positions: [], idleUsdc: 189962n, lpUsdc: 0n, feesUsdc: 0n, totalUsdc: 189962n }],
+  safes: [{ accountKey: 'c23e94e1-2b74-47e5-a46e-56f3e4d366a1', safe: '0x1C046083d60655f3CDe66130d774ac64C5A5D60a', active: true, armed: false, deployed: true, eth: 1n, tokens: { USDC: 189962n }, positions: [], idleUsdc: 189962n, lpUsdc: 0n, feesUsdc: 0n, owedUsdc: 0n, totalUsdc: 189962n }],
   calls: 3,
 }
 

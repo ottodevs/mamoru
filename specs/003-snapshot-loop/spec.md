@@ -24,13 +24,20 @@ hold:
 | 3 | `positions(tokenId)` |
 | 4 | `ticks(lower)`, `ticks(upper)` per position, deduplicated per pool |
 
-Uncollected fees per position are computed with the pool's own arithmetic (`getFeeGrowthInside`, then
-`tokensOwed + liquidity * (inside - insideLast) / 2^128`, all differences modulo 2^256): `packages/uniswap-v3/src/fees.ts`.
-Checked on 15 Oct at block 52644273: 11 of 11 live positions equal a simulated `collect` exactly
-(`apps/mamoru-operator/scripts/snapshot-verify.ts`).
+Fees per position use the pool's and the NonfungiblePositionManager's own arithmetic (`packages/uniswap-v3/src/fees.ts`):
+`getFeeGrowthInside` with differences modulo 2^256, then `accrued = uint128(liquidity * (inside - insideLast) / 2^128)`
+and `collectable = uint128(tokensOwed + accrued)`, both wrapping like the 0.7 contracts.
+
+- **accrued** is fee income since the position's checkpoint: this is the yield.
+- **owed** (`tokensOwed`) holds earlier fees and also principal that a `decreaseLiquidity` left uncollected. It is the
+  user's money but not all of it is yield, so it is reported apart and never counted as fees.
+- **collectable** = owed + accrued, what `collect` pays (an estimate: the pool may round a few units down).
+
+Checked on 15 Oct at blocks 52644273 and 52644485: 11 of 11 live positions' collectable equals a simulated `collect`
+exactly (`apps/mamoru-operator/scripts/snapshot-verify.ts`; nothing owed on any of them today).
 
 Per Safe the snapshot carries idle (tokens outside positions, valued in USDC at the pricing pool), LP principal,
-uncollected fees and total, plus every position with its amounts and fees.
+accrued fees, owed, and total, plus every position with its amounts.
 
 ## Safety
 
@@ -39,8 +46,12 @@ uncollected fees and total, plus every position with its amounts and fees.
   checks, never around them.
 - `GET /snapshot` is signed like `/metrics` (HMAC over method, path and minute; a `/metrics` signature does not open
   it). It answers 404 while the loop is off and 503 before the first read. Account keys are cut to 8 characters.
-- A failed read keeps the previous snapshot and its one-line error; over the keyed CU budget the loop slows to one
-  read a minute, like the other loops that can wait.
+- No failed read is reported as a zero. A read that fails in the batch is retried on its own at the same block; if that
+  fails, the whole snapshot fails and the loop keeps the previous one with a one-line error. "Undeployed" is read
+  explicitly (empty return from the Safe address in the batch, `eth_getCode` on retry), never inferred from a failure.
+- Over the keyed CU budget the loop slows to one read a minute, like the other loops that can wait.
+- Base only: the reader takes pools and tokens from the Base registry. Other chains wait for `registryFor(chainId)`.
+- `MAMORU_SNAPSHOT_MS`: default 30 s, never under 10 s.
 
 ## Cost (Alchemy CU: `eth_blockNumber` 10, `eth_call` 26)
 
@@ -65,12 +76,15 @@ Default interval 30 s (`MAMORU_SNAPSHOT_MS`).
 
 ## Storage (D1, `migrations/d1/0007_account_snapshots.sql`, not applied in phase 1)
 
-- `account_snapshot_latest (chain_id, address)`: the last snapshot of each Safe, with `env`.
-- `account_daily (day, chain_id, address)`: first and last snapshot of each UTC day, with `env`; #129 adds
-  `collected_usdc` and `gas_paid_wei`. Yield of a day = fees_close - fees_open + collected.
+- `account_snapshot_latest (chain_id, address)`: the last snapshot of each Safe.
+- `account_daily (day, chain_id, address)`: first and last snapshot of each UTC day; #129 adds `collected_usdc` and
+  `gas_paid_wei`. Yield of a day = fees_close - fees_open + fees collected that day. A checkpoint (any liquidity
+  change) moves accrued fees into owed; #129 takes those moves from the position events, so they are not lost.
+- `env` has no default: beta shares this D1, so the writer must say 'prod', 'beta', 'test' or 'unknown'. Until #130
+  gives accounts an environment it writes 'unknown', and #130 backfills.
 
 The operator has no D1 binding. A Worker cron (the app's `*/10` or the engine's) pulls `GET /snapshot` through the
-same signed path and upserts both tables; `env` comes from the accounts table once #130 adds it there ('prod' until then).
+same signed path and upserts both tables.
 
 ## Phases
 

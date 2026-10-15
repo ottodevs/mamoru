@@ -37,15 +37,25 @@ export type PositionFeeState = {
   tokensOwed1: bigint
 }
 
+const MAX128 = Q128 - 1n
+
 /**
- * What `collect` would pay out of fees right now: tokens already owed plus growth since the position's last
- * checkpoint times its liquidity. Matches a simulated collect of a position with no principal owed
- * (principal from a decrease sits in tokensOwed too and is included, as collect would).
+ * Fees the position has earned since its last checkpoint, and what `collect` would pay right now, with the
+ * NonfungiblePositionManager's arithmetic: `uint128(mulDiv(inside - insideLast, liquidity, 2^128))`, then
+ * `tokensOwed += that`, both wrapping like the 0.7 contract does (no checked math).
+ *
+ * `accrued` is fee income only. `collectable` adds `tokensOwed`, which also holds principal left by a
+ * decreaseLiquidity that was not collected in the same transaction: it is the user's money, but not all of it is
+ * yield. The pool rounds each position's owed amount on its own, so `collect` can pay a few units less than
+ * `collectable`: treat it as an estimate.
  */
-export function uncollectedFees(position: PositionFeeState, inside: { inside0: bigint; inside1: bigint }): { fees0: bigint; fees1: bigint } {
-  const fees0 = position.tokensOwed0 + (position.liquidity * sub256(inside.inside0, position.feeGrowthInside0LastX128)) / Q128
-  const fees1 = position.tokensOwed1 + (position.liquidity * sub256(inside.inside1, position.feeGrowthInside1LastX128)) / Q128
-  // collect pays at most uint128 per token.
-  const MAX128 = Q128 - 1n
-  return { fees0: fees0 > MAX128 ? MAX128 : fees0, fees1: fees1 > MAX128 ? MAX128 : fees1 }
+export function positionFees(position: PositionFeeState, inside: { inside0: bigint; inside1: bigint }): { accrued0: bigint; accrued1: bigint; collectable0: bigint; collectable1: bigint } {
+  const accrued0 = ((position.liquidity * sub256(inside.inside0, position.feeGrowthInside0LastX128)) / Q128) & MAX128
+  const accrued1 = ((position.liquidity * sub256(inside.inside1, position.feeGrowthInside1LastX128)) / Q128) & MAX128
+  return {
+    accrued0,
+    accrued1,
+    collectable0: (position.tokensOwed0 + accrued0) & MAX128,
+    collectable1: (position.tokensOwed1 + accrued1) & MAX128,
+  }
 }
