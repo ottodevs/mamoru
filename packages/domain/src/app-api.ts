@@ -74,7 +74,9 @@ export type FundingView = {
   engine?: { placing: boolean; nextReviewAt: string | null } | null
   // The owner's approval of a running account: until when (unix seconds) the engine's grants are valid, whether the
   // renewal is due (inside the renewal window) and whether they already lapsed. Null or absent when not running.
-  approval?: { validUntil: number; renewDue: boolean; expired: boolean } | null
+  // `missing`: how many grants of its policy the account lacks (left out to fit Base's per-tx gas cap); the renew
+  // route then adds them with one more approval. Absent when none is missing.
+  approval?: { validUntil: number; renewDue: boolean; expired: boolean; missing?: number } | null
   positions: {
     tokenId: string; pool: string; liquidity: string; inRange: boolean; amountUsdc: string; amountCbbtc: string
     amounts?: { token: string; amount: string; decimals: number; valueUsdc?: string }[]   // both sides of any pool, base units, each with its value in USDC
@@ -104,7 +106,7 @@ export type OverCap = { code: 'DEPOSIT_OVER_CAP'; usdc: string; capUsdc: string;
 // Frees USDC by reducing positions if idle USDC is short (engine), then the owner transfer.
 // Works on a Safe that is not deployed yet (a deposit that never started): the relayer deploys it, then the transfer runs.
 // POST /api/accounts/:accountKey/stop/prepare        -> OwnerTxToSign
-// POST /api/accounts/:accountKey/renew/prepare       -> OwnerTxToSign   (running account: same grants, fresh validity)
+// POST /api/accounts/:accountKey/renew/prepare       -> OwnerTxToSign   (running account: same grants, fresh validity; or, with grants missing and no renewal due, only the missing ones)
 // POST /api/accounts/:accountKey/renew  OwnerSignature -> OpView
 // POST /api/accounts/:accountKey/stop                body: OwnerSignature -> OpView
 // Stop allocation: revoke every grant, close every position, swap the volatile side to USDC. USDC stays in the Safe.
@@ -148,6 +150,8 @@ export type OpView = {
   to?: Hex0x
   /** activate failed with DEPOSIT_OVER_CAP: amountUsdc is the deposit found, capUsdc the cap it exceeded. */
   capUsdc?: string
+  /** renew: it only added the grants the account lacked (re-range and harvest in more pools), nothing was renewed. */
+  extend?: boolean
 }
 
 // Live operator (sprint amendment 2026-09-26 21:40). The Worker authenticates the device session, then

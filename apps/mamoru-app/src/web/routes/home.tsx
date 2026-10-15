@@ -45,6 +45,8 @@ export const homeCopy = {
   renewEnded: 'Mamoru\'s approval has ended. Your money is where it was, but Mamoru cannot manage it until you renew.',
   renewNote: 'One tap with your passkey. Nothing is moved.',
   renew: 'Renew approval',
+  extendTitle: 'Mamoru needs one more approval to re-range and collect fees in every pool.',
+  extend: 'Approve',
   createFirst: 'Your account is created on Base first, then the USDC is sent.',
   overCapTitle: (o: OverCap) => `This account is over the ${usdPlain(o.capUsdc)} USDC cap, so Mamoru has not started.`,
   overCapBody: (o: OverCap) => `It holds ${usd(o.usdc)} USDC. Nothing was moved. Withdraw at least ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC to an address you control, then start Mamoru.`,
@@ -568,7 +570,10 @@ export function approvalDay(validUntil: number): string {
   return new Date(validUntil * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' })
 }
 
-/** A running account whose approval is in its last weeks, or over: one tap renews it, nothing is moved. */
+/**
+ * A running account whose approval is in its last weeks, or over: one tap renews it, nothing is moved. Or one that
+ * lacks grants of its plan (left out to fit Base's gas cap): one tap adds them. The renewal, when due, goes first.
+ */
 function RenewRow({ accountKey, approval }: { accountKey: string; approval: NonNullable<FundingView['approval']> }) {
   const flow = useOwnerAction(accountKey, 'renew')
   const tap = () => void (flow.prepared ? flow.approve() : flow.prepare())
@@ -577,12 +582,12 @@ function RenewRow({ accountKey, approval }: { accountKey: string; approval: NonN
   return (
     <section className="card flex flex-wrap items-center justify-between gap-3" data-testid="renew" role="status">
       <span className="max-w-[40rem]">
-        <span className="title">{approval.expired ? homeCopy.renewEnded : homeCopy.renewSoon(approvalDay(approval.validUntil))}</span>
+        <span className="title">{approval.expired ? homeCopy.renewEnded : approval.renewDue ? homeCopy.renewSoon(approvalDay(approval.validUntil)) : homeCopy.extendTitle}</span>
         <span className="sub">{homeCopy.renewNote}</span>
         {flow.error ? <span className="err mt-1 block">{flow.error}</span> : null}
       </span>
       <button type="button" className="act" onClick={tap} disabled={flow.busy !== null}>
-        {flow.busy === 'signing' ? 'Waiting for passkey' : flow.busy === 'preparing' ? 'Preparing' : flow.prepared ? homeCopy.confirm : homeCopy.renew}
+        {flow.busy === 'signing' ? 'Waiting for passkey' : flow.busy === 'preparing' ? 'Preparing' : flow.prepared ? homeCopy.confirm : approval.renewDue ? homeCopy.renew : homeCopy.extend}
       </button>
     </section>
   )
@@ -680,7 +685,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
             </section>
           ) : !f.active && !inFlight && !armed && !stopped ? (
             <StartRow accountKey={accountKey} funded={hasMoney(f)} />
-          ) : f.active && f.approval?.renewDue && !renewing ? (
+          ) : f.active && f.approval && (f.approval.renewDue || (f.approval.missing ?? 0) > 0) && !renewing ? (
             <RenewRow accountKey={accountKey} approval={f.approval} />
           ) : null}
           <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? () => setDialog('start') : null} />

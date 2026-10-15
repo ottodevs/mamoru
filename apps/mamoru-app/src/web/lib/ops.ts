@@ -39,6 +39,10 @@ export function opLine(op: OpView): string {
       if (done) return 'Mamoru started'
       return op.code === 'ARMED' || op.state === 'proposed' ? 'Start approved' : 'Starting Mamoru'
     case 'renew':
+      if (op.extend) {
+        if (failed) return 'Approval needs another try'
+        return done ? 'Approval extended to every pool' : 'Extending approval'
+      }
       if (failed) return 'Renewal needs another approval'
       return done ? 'Approval renewed' : 'Renewing approval'
     case 'transfer':

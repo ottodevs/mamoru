@@ -1469,6 +1469,9 @@ describe('renewing the approval of a running account', () => {
     expect(acc.active).toBe(true)
     return { w, acc, started: op }
   }
+  /** Grants whose end is inside the renewal window: what the renewal (not an extension) is built for. */
+  const due = <G extends { grant: { userOp: { validUntil: number } } }>(gs: G[]): G[] =>
+    gs.map((g) => ({ ...g, grant: { ...g.grant, userOp: { ...g.grant.userOp, validUntil: Math.floor(Date.now() / 1000) + 15 * 86_400 } } }))
 
   test('an account that is not running cannot renew: it starts instead', async () => {
     const w = world(20_000_000n)
@@ -1535,8 +1538,8 @@ describe('renewing the approval of a running account', () => {
 
   test('the renewed grants are the ones the account had, by name: none lost, none added', async () => {
     const { w, acc } = await running()
-    // An account that holds fewer grants than the policy offers keeps exactly those.
-    acc.grants = acc.grants.slice(0, 3)
+    // An account that holds fewer grants than the policy offers keeps exactly those when its renewal is due.
+    acc.grants = due(acc.grants.slice(0, 3))
     const names = acc.grants.map((g) => g.name)
     await w.op.submit(ctx, 'renew', sign(await w.op.prepareRenew(ctx)))
     expect(acc.grants.map((g) => g.name)).toEqual(names)
@@ -1582,7 +1585,7 @@ describe('renewing the approval of a running account', () => {
   test('a renewal whose receipt was never read is applied from the chain before another one is built', async () => {
     const { w, acc } = await running()
     const old = acc.grants.map((g) => g.permissionId)
-    const fresh = [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }]
+    const fresh = due([{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }])
     acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: old } as never)
     // The chain says it ran: its grants are the engine's now, and the next renewal revokes those, not the old ones.
     w.knobs.grantsEnabled = true
@@ -1593,6 +1596,124 @@ describe('renewing the approval of a running account', () => {
     await w.op.submit(ctx, 'renew', sign(tx))
     expect(acc.revoked).toContain(`0x${'ee'.repeat(32)}`)
     expect(acc.superseded ?? []).toEqual([])
+  })
+
+  // Base caps a transaction at 2^24 gas: an activation of the full v2 set does not fit, so it leaves out the
+  // manage-any/convert-any pairs of the lowest-preference pools (otto/mamoru#5). One more approval adds them.
+  describe('grants left out to fit the gas cap', () => {
+    type Gas = { activationGas(live: unknown, calls: unknown[], sessions: number): Promise<bigint> }
+    /** About what Base charges per session enabled: more than eight do not fit the activation budget. */
+    const perSession = (w: ReturnType<typeof world>) => {
+      ;(w.op as unknown as Gas).activationGas = async (_l, _c, sessions) => BigInt(sessions) * 1_700_000n
+    }
+    const pairs = (names: string[]) => names.filter((n) => n.startsWith('manage-any') || n.startsWith('convert-any'))
+    /** A running account activated under the real gas cap: its WETH and cbBTC pairs were left out. */
+    const capped = async () => {
+      const w = world(20_000_000n)
+      ;(w.op as unknown as Loop).startLoop = () => {}
+      perSession(w)
+      await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+      const acc = w.state.accounts.k!
+      expect(acc.active).toBe(true)
+      return { w, acc }
+    }
+    const full = POLICIES['conservador-live-v2']!.session.grants.filter((g) => !g.perPosition).length
+
+    test('the activation leaves out the lowest-preference pairs, and funding says how many grants are missing', async () => {
+      const { w, acc } = await capped()
+      expect(acc.grants.length).toBeLessThan(full)
+      expect(pairs(acc.grants.map((g) => g.name)).every((n) => n.endsWith('pool:USDC/USDT/100'))).toBe(true)
+      expect((await w.op.funding(ctx)).approval).toMatchObject({ renewDue: false, missing: full - acc.grants.length })
+    })
+
+    test('one more approval adds only the missing grants: the engine keeps the ones it has, nothing is moved', async () => {
+      const { w, acc } = await capped()
+      const before = acc.grants.map((g) => g.permissionId)
+      const epoch = acc.epoch
+      acc.managedTokenIds = ['7']
+      const tx = await w.op.prepareRenew(ctx)
+      expect(tx.summary.join(' ')).toContain('re-range and collect fees in')
+      expect(tx.summary.join(' ')).toContain('Nothing is moved')
+      const sentBefore = w.sent.length
+      const op = await w.op.submit(ctx, 'renew', sign(tx))
+      expect(op).toMatchObject({ kind: 'renew', state: 'confirmed', code: 'EXEC_OK', extend: true })
+      expect(w.sent.slice(sentBefore).map((t) => t.to)).toEqual([SAFE])
+      // Every grant of the policy, the old ones untouched and none revoked.
+      expect(acc.grants).toHaveLength(full)
+      expect(new Set(acc.grants.map((g) => g.name)).size).toBe(full)
+      expect(before.every((id) => acc.grants.some((g) => g.permissionId === id))).toBe(true)
+      expect(before.some((id) => acc.revoked.includes(id))).toBe(false)
+      expect(acc.superseded ?? []).toEqual([])
+      expect(acc.grantsFromBlock).toBe('101')
+      expect(acc.epoch).toBe(epoch + 1)
+      expect(acc.managedTokenIds).toEqual(['7'])
+      expect((await w.op.funding(ctx)).approval?.missing).toBeUndefined()
+      // Nothing left to add: the next one is a renewal again.
+      expect((await w.op.prepareRenew(ctx)).summary.join(' ')).toContain('revoked in the same transaction')
+    })
+
+    test('a renewal that is due goes first, with what fits; the missing grants are added after it', async () => {
+      const { w, acc } = await capped()
+      acc.grants = due(acc.grants)
+      const had = acc.grants.map((g) => g.name)
+      const tx = await w.op.prepareRenew(ctx)
+      expect(tx.summary.join(' ')).toContain('revoked in the same transaction')
+      await w.op.submit(ctx, 'renew', sign(tx))
+      expect(acc.grants.map((g) => g.name)).toEqual(had)
+      const op = await w.op.submit(ctx, 'renew', sign(await w.op.prepareRenew(ctx)))
+      expect(op).toMatchObject({ state: 'confirmed', extend: true })
+      expect(acc.grants).toHaveLength(full)
+    })
+
+    test('a renewal of the full set that does not fit leaves out pairs instead of failing; their revokes stay', async () => {
+      const { w, acc } = await capped()
+      await w.op.submit(ctx, 'renew', sign(await w.op.prepareRenew(ctx)))
+      expect(acc.grants).toHaveLength(full)
+      acc.grants = due(acc.grants)
+      const old = acc.grants.map((g) => g.permissionId)
+      const tx = await w.op.prepareRenew(ctx)
+      expect(tx.summary.join(' ')).toContain('needs one more approval after this one')
+      await w.op.submit(ctx, 'renew', sign(tx))
+      expect(old.every((id) => acc.revoked.includes(id))).toBe(true)
+      expect(acc.grants.length).toBeLessThan(full)
+      expect((await w.op.funding(ctx)).approval?.missing).toBe(full - acc.grants.length)
+    })
+
+    test('an extension prepared on grants that changed since, or with a renewal of unknown outcome, is prepared again', async () => {
+      const { w, acc } = await capped()
+      const tx = await w.op.prepareRenew(ctx)
+      acc.grants = acc.grants.map((g, i) => (i === 0 ? { ...g, permissionId: `0x${'dd'.repeat(32)}` as Hex } : g))
+      expect(await w.op.submit(ctx, 'renew', sign(tx)).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'RENEWAL_STALE' })
+      const again = await w.op.prepareRenew(ctx)
+      acc.ops.push({ opId: 'own-9-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: [{ ...acc.grants[0]!, permissionId: `0x${'ee'.repeat(32)}` as Hex }], revokes: [] } as never)
+      w.knobs.grantsEnabled = false
+      expect(await w.op.submit(ctx, 'renew', sign(again)).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'RENEWAL_STALE' })
+    })
+
+    test('while a renewal\'s outcome is unknown no extension is built: the full renewal revokes it all', async () => {
+      const { w, acc } = await capped()
+      const old = acc.grants.map((g) => g.permissionId)
+      acc.ops.push({ opId: 'own-9-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: [{ ...acc.grants[0]!, permissionId: `0x${'ee'.repeat(32)}` as Hex }], revokes: old } as never)
+      // The chain says it did not run.
+      w.knobs.grantsEnabled = false
+      const tx = await w.op.prepareRenew(ctx)
+      expect(tx.summary.join(' ')).toContain('revoked in the same transaction')
+      const op = await w.op.submit(ctx, 'renew', sign(tx))
+      expect(op.extend).toBeUndefined()
+      expect([...old, `0x${'ee'.repeat(32)}`].every((id) => acc.revoked.includes(id as Hex))).toBe(true)
+    })
+
+    test('an extension whose receipt was never read is applied from the chain by adding its grants', async () => {
+      const { w, acc } = await capped()
+      const had = acc.grants.map((g) => g.permissionId)
+      const extra = { name: 'manage-any:pool:USDC/cbBTC/500', grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }
+      acc.ops.push({ opId: 'own-9-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: [extra], revokes: [], extend: true } as never)
+      w.knobs.grantsEnabled = true
+      await w.op.prepareRenew(ctx)
+      expect(acc.ops.find((o) => o.opId === 'own-9-renew')).toMatchObject({ state: 'confirmed' })
+      expect(acc.grants.map((g) => g.permissionId)).toEqual([...had, `0x${'ee'.repeat(32)}`])
+      expect(had.some((id) => acc.revoked.includes(id))).toBe(false)
+    })
   })
 
   test('one renewal at a time, and one prepared on grants that changed since is prepared again', async () => {
