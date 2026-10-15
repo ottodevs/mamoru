@@ -2001,6 +2001,23 @@ describe('the relayer pays the gas reserve within limits', () => {
     }
   })
 
+  test('an armed approval that loses the last of the budget inside its attempt stays armed', async () => {
+    const w = quiet(20_000_000n)
+    const tx = await w.op.prepareActivate(ctx)
+    w.chain.usdc = 0n
+    expect(await w.op.submit(ctx, 'activate', sign(tx))).toMatchObject({ code: 'ARMED' })
+    w.chain.usdc = 20_000_000n
+    const acc = w.state.accounts.k!
+    // The watcher's look passes; the budget is gone by the time the attempt decides (another account's start).
+    const real = (w.op as unknown as { subsidy: (...a: unknown[]) => unknown }).subsidy.bind(w.op)
+    let calls = 0
+    ;(w.op as unknown as { subsidy: (...a: unknown[]) => unknown }).subsidy = (...a: unknown[]) => (calls++ === 0 ? real(...a) : { need: TARGET, code: 'SUBSIDY_DAILY_BUDGET' })
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.armed).toBeDefined()
+    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'proposed', code: 'ARMED' })
+    expect(w.sent).toHaveLength(0)
+  })
+
   test('the daily budget: prepare is refused, an approval signed before waits armed with nothing sent and runs once the budget frees', async () => {
     const w = quiet(20_000_000n)
     const logged: string[] = []

@@ -1766,6 +1766,11 @@ export class Operator {
       this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
       return this.park(acc, ARM_CAP_HOLD_MS)
     }
+    // Another account took the last of the day's subsidy budget inside the attempt: nothing was sent, the approval waits.
+    if (ended.code === 'SUBSIDY_DAILY_BUDGET' && !ended.txHash) {
+      this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
+      return this.park(acc, ARM_BUDGET_HOLD_MS)
+    }
     // Any other failure the attempt recorded is final for this signature.
     acc.armed = undefined
     this.store.save()
