@@ -74,7 +74,7 @@ every 30 s is too much for the free keyed tier, so phase 3 changes what is re-re
 
 Default interval 30 s (`MAMORU_SNAPSHOT_MS`).
 
-## Storage (D1, `migrations/d1/XXXX_account_snapshots.sql (the coordinator numbers it at merge)`, not applied in phase 1)
+## Storage (D1, `migrations/d1/XXXX_account_snapshots.sql`, numbered by the coordinator at merge, not applied in phase 1)
 
 - `account_snapshot_latest (chain_id, address)`: the last snapshot of each Safe.
 - `account_daily (day, chain_id, address)`: first and last snapshot of each UTC day; #129 adds `collected_usdc` and
