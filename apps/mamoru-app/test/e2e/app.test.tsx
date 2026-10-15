@@ -288,12 +288,15 @@ describe('helpers', () => {
   })
   test('ops read as one plain line', () => {
     const op = (o: Partial<OpView>): OpView => ({ opId: 'x', kind: 'enter', state: 'confirmed', updatedAt: '2026-09-26T20:00:00Z', ...o })
-    expect(opLine(op({}))).toBe('Opened USDC/cbBTC position')
+    // No pool on the op (a row from before otto/mamoru#131, or an owner op that is not pool-specific): a neutral line, not a guessed pool.
+    expect(opLine(op({}))).toBe('Opened a position')
+    expect(opLine(op({ pool: 'pool:USDC/cbBTC/500' }))).toBe('Opened USDC/cbBTC position')
     expect(opLine(op({ kind: 'activate', state: 'proposed', code: 'ARMED' }))).toBe('Start approved')
     expect(activationLive([op({ kind: 'activate', state: 'failed' })])).toBe(false)
     expect(opLine(op({ opId: 'own-4-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR' }))).toBe('Stop needs another approval')
     expect(opLine(op({ opId: 'own-4-exit', kind: 'exit' }))).toBe('Allocation stopped')
-    expect(opLine(op({ opId: 'eng-1-1-op-1-enter_swap' }))).toBe('Swapped USDC to cbBTC')
+    expect(opLine(op({ opId: 'eng-1-1-op-1-enter_swap' }))).toBe('Swapped')
+    expect(opLine(op({ opId: 'eng-1-1-op-1-enter_swap', tokenIn: 'USDC', tokenOut: 'cbBTC', amountIn: '10000000' }))).toBe('Swapped 10 USDC to cbBTC')
     const { html } = render(<History ops={[op({ txHash: `0x${'b'.repeat(64)}` })]} />)
     expect(html).toContain(`https://basescan.org/tx/0x${'b'.repeat(64)}`)
     expect(opLine(op({ opId: 'own-3-transfer', kind: 'transfer', amountUsdc: '1500000', to: `0x${'c'.repeat(40)}` }))).toBe('Withdrew 1.50 USDC to 0xcccc…cccc')

@@ -152,6 +152,18 @@ export type OpView = {
   capUsdc?: string
   /** renew: it only added the grants the account lacked (re-range and harvest in more pools), nothing was renewed. */
   extend?: boolean
+  /**
+   * Engine ops only (enter/reduce rows born from the engine's journal): the registry pool name the operation
+   * acted on, e.g. 'pool:USDC/cbBTC/500'. Absent on owner ops (activate/renew/transfer/exit) and on rows an
+   * operator stored before this field existed; the SPA falls back to a neutral, pool-less line for those.
+   */
+  pool?: string
+  /** enter_swap only: the token swapped from and to, and the swapped amount of tokenIn (base units). */
+  tokenIn?: string
+  tokenOut?: string
+  amountIn?: string
+  /** harvest only: the fee token a convert step swapped back to the savings asset, when the harvest did that. */
+  convert?: string
 }
 
 // Live operator (sprint amendment 2026-09-26 21:40). The Worker authenticates the device session, then

@@ -1,8 +1,11 @@
 import type { OpView } from '@mamoru/domain'
-import { shortHex } from './format.ts'
+import { formatAmount, shortHex } from './format.ts'
 import { usd, usdPlain } from './money.ts'
+import { pairLabel } from './positions.ts'
 
 const owner = (op: OpView) => op.opId.startsWith('own-')
+/** "USDC/cbBTC": the pool's pair, no spaces, matching the style history lines used before pools were tagged. */
+const pair = (pool: string) => pairLabel(pool).replace(/ /g, '')
 /** Engine op kind from its id (eng-…-enter_swap), or null for an owner op. */
 const engineKind = (op: OpView) => (owner(op) ? null : (/(enter_swap|enter_mint|harvest|close_position|convert)$/.exec(op.opId)?.[1] ?? null))
 
@@ -53,13 +56,25 @@ export function opLine(op: OpView): string {
         if (failed) return 'Stop needs another approval'
         return done ? 'Allocation stopped' : 'Stopping allocation'
       }
-      return done ? 'Closed USDC/cbBTC position' : 'Closing USDC/cbBTC position'
+      if (!op.pool) return done ? 'Closed a position' : 'Closing a position'
+      return done ? `Closed ${pair(op.pool)} position` : `Closing ${pair(op.pool)} position`
     case 'enter':
-      if (engineKind(op) === 'enter_swap') return done ? 'Swapped USDC to cbBTC' : 'Swapping USDC to cbBTC'
-      return done ? 'Opened USDC/cbBTC position' : 'Opening USDC/cbBTC position'
-    case 'reduce':
-      if (engineKind(op) === 'harvest') return done ? 'Collected fees' : 'Collecting fees'
-      return done ? 'Rebalanced' : 'Rebalancing'
+      if (engineKind(op) === 'enter_swap') {
+        if (!op.tokenIn || !op.tokenOut) return done ? 'Swapped' : 'Swapping'
+        const from = op.amountIn ? formatAmount(op.amountIn, op.tokenIn) : op.tokenIn
+        return done ? `Swapped ${from} to ${op.tokenOut}` : `Swapping ${from} to ${op.tokenOut}`
+      }
+      if (!op.pool) return done ? 'Opened a position' : 'Opening a position'
+      return done ? `Opened ${pair(op.pool)} position` : `Opening ${pair(op.pool)} position`
+    case 'reduce': {
+      if (engineKind(op) === 'harvest') {
+        const where = op.pool ? ` from ${pair(op.pool)}` : ''
+        if (op.convert) return done ? `Collected fees${where}, converted ${op.convert} to USDC` : `Collecting fees${where}, converting ${op.convert} to USDC`
+        return done ? `Collected fees${where}` : `Collecting fees${where}`
+      }
+      if (!op.pool) return done ? 'Rebalanced' : 'Rebalancing'
+      return done ? `Rebalanced ${pair(op.pool)}` : `Rebalancing ${pair(op.pool)}`
+    }
   }
 }
 
@@ -70,6 +85,14 @@ export function opTone(op: OpView): 'done' | 'pending' | 'retry' {
 /**
  * What the history shows: confirmed actions, owner actions in flight, engine actions on chain, and an owner
  * failure only while it is the latest of its kind. Engine attempts that failed and superseded failures stay hidden.
+ *
+ * otto/mamoru#131 asked whether this ever shows genuine duplicates (retries, a top-up into a bucket that
+ * already has a position). It does not, by design: a retried failure is already collapsed server-side
+ * (`collapseFailed` in the operator, by kind+code, before it ever reaches here), and a top-up mints a second,
+ * real position (its own tokenId) rather than reusing the first one, so two rows for two deposits is correct,
+ * not a duplicate. The one known way a stale row can linger — an engine op left `submitted` across an operator
+ * restart that the next run does not reconcile — is tracked separately (otto/mamoru#124, engine op restart
+ * reconciliation) and is not something this function can tell apart from a real pending op with the fields it has.
  */
 export function historyOps(ops: OpView[]): OpView[] {
   const sorted = [...ops].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
