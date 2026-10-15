@@ -59,3 +59,17 @@ describe('owner receipt reconciliation', () => {
     })
   }
 })
+
+describe('a reconciled exit counts for the subsidy as when it was sent (otto/mamoru#82)', () => {
+  test('a stop found late, within 72 hours of a paid reserve, ends the subsidy; one outside the window does not', async () => {
+    const near = setup(true)
+    near.acc.subsidies = [{ at: '2026-09-26T20:32:00.000Z', wei: '500000000000000' }]
+    await near.op.reconcileOwner(near.acc)
+    expect(near.acc.ops[1]!.state).toBe('confirmed')
+    expect(near.acc.subsidyForfeitAt).toBe('2026-09-26T21:11:54.000Z')
+    const far = setup(true)
+    far.acc.subsidies = [{ at: '2026-09-22T20:32:00.000Z', wei: '500000000000000' }]
+    await far.op.reconcileOwner(far.acc)
+    expect(far.acc.subsidyForfeitAt).toBeUndefined()
+  })
+})

@@ -42,7 +42,7 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
       chainId: op.cfg.chainId,
       live: op.cfg.live,
       policyId: op.cfg.policy.policyId,
-      relayer: { address: op.relayer.address, balanceWei: relayerBalance.wei, balanceCachedAgeMs: relayerBalance.cachedAgeMs },
+      relayer: { address: op.relayer.address, balanceWei: relayerBalance.wei, balanceCachedAgeMs: relayerBalance.cachedAgeMs, subsidy: op.subsidySummary() },
       accounts: op.accountsSummary(),
     },
     rpc: {

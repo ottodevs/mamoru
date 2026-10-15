@@ -71,6 +71,10 @@ export type AccountState = {
   armed?: ArmedActivation
   /** When owner executions of this account failed (ISO), last 24 h: the relayer's failure budget. */
   ownerFailures?: string[]
+  /** Gas reserves the relayer sent into this Safe at activations (ISO time, wei), kept for good: see subsidy.ts. */
+  subsidies?: { at: string; wei: string }[]
+  /** Funds left soon after a paid reserve (ISO): no further reserve for this Safe or its passkey. */
+  subsidyForfeitAt?: string
 }
 
 export type OperatorState = { accounts: Record<string, AccountState> }

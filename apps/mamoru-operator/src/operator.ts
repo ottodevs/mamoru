@@ -37,6 +37,7 @@ import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { USDC_POOLS, amountsForLiquidity, inUsdc, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
+import { SUBSIDY_ALERT_SHARE, noteExit, paidToday, subsidyDecision, subsidyMessage, subsidyPerDayFromEnv, type SubsidyDecision } from './subsidy.ts'
 import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type EngineHealthSnapshot } from './metrics.ts'
 import type { Relayer } from './relayer.ts'
@@ -331,6 +332,9 @@ export class Operator {
   private readonly relayerLowLogged = new Map<string, number>()
   /** Pool state of the last few blocks: accounts reviewed at the same block read it once. */
   private readonly poolCache = poolStateCache()
+  /** Gas reserves the relayer pays in any 24 hours (subsidy.ts), and when #mamoru-ops last heard the budget was near or out. */
+  subsidyPerDay = subsidyPerDayFromEnv()
+  private subsidyAlertAt = 0
 
   constructor(
     readonly cfg: OperatorConfig,
@@ -911,6 +915,8 @@ export class Operator {
     const r = await readSafe(this.client, live.safe)
     if (r.usdc > LIVE_CAP_USDC) throw depositOverCap(r.usdc)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
+    // With nothing deposited yet the approval is armed and the subsidy is decided when the deposit lands.
+    if (r.usdc > 0n) this.assertSubsidy(this.subsidy(acc, r.usdc, r.eth), live.safe)
     const policy = this.cfg.policy
     const { sessionKey, caps, stored, batch } = await this.approval(acc, live, policy, r)
     const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!)} ${b.preference / 100}%`)
@@ -1263,6 +1269,11 @@ export class Operator {
       const usdc = await this.usdcOf(live.safe)
       if (usdc === 0n) return this.arm(acc, p, signature)
       if (usdc > LIVE_CAP_USDC) throw depositOverCap(usdc)
+      // Over the day's subsidy budget the approval waits armed (the watcher runs it once the budget frees up or the
+      // Safe holds its own reserve); any other refusal is the owner's to act on and is answered now.
+      const s = this.subsidy(acc, usdc, await this.client.getBalance({ address: live.safe }))
+      if (s.code === 'SUBSIDY_DAILY_BUDGET') return this.arm(acc, p, signature)
+      this.assertSubsidy(s, live.safe)
       // The relayer cannot pay for it now: the signature waits armed and the watcher runs it once the relayer is funded.
       if (!(await this.relayerCanActivate(acc))) return this.arm(acc, p, signature)
       this.disarm(acc, 'ARMED_SUPERSEDED')
@@ -1313,6 +1324,48 @@ export class Operator {
 
   private assertBudget(acc: AccountState): void {
     if (this.overBudget(acc)) throw safeHttpError(429, 'OWNER_FAILURE_BUDGET')
+  }
+
+  /** Whether the relayer pays the gas reserve this activation lacks (subsidy.ts). */
+  private subsidy(acc: AccountState, usdc: bigint, eth: bigint): SubsidyDecision {
+    const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
+    return subsidyDecision({ acc, all: Object.values(this.store.state.accounts), usdc, eth, target, perDay: this.subsidyPerDay })
+  }
+
+  private assertSubsidy(s: SubsidyDecision, safe: string): void {
+    if (!s.code) return
+    this.subsidyAlert(s.code)
+    throw new HttpError(409, s.code, subsidyMessage(s.code, s.need, safe))
+  }
+
+  /** The day's budget spent, or nearly: an [alert] line for #mamoru-ops, at most once an hour. */
+  private subsidyAlert(code: string | null): void {
+    const budget = BigInt(this.subsidyPerDay) * (this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI)
+    const spent = paidToday(Object.values(this.store.state.accounts))
+    const near = budget > 0n && Number(spent) >= SUBSIDY_ALERT_SHARE * Number(budget)
+    if ((code !== 'SUBSIDY_DAILY_BUDGET' && !near) || Date.now() - this.subsidyAlertAt < 3_600_000) return
+    this.subsidyAlertAt = Date.now()
+    logErr('[alert]', `relayer subsidy: ${spent} of ${budget} wei of gas reserves paid in 24 hours${code === 'SUBSIDY_DAILY_BUDGET' ? ', budget spent: new starts wait or bring their own gas' : ''}`)
+  }
+
+  private noteSubsidy(acc: AccountState, wei: bigint): { at: string; wei: string } {
+    const paid = { at: now(), wei: wei.toString() }
+    acc.subsidies = [...(acc.subsidies ?? []), paid]
+    this.store.save()
+    this.subsidyAlert(null)
+    return paid
+  }
+
+  /** A top-up that was never paid (not handed to a provider, refused by it, or reverted) is taken off the record. */
+  private dropSubsidy(acc: AccountState, paid: { at: string; wei: string }): void {
+    acc.subsidies = (acc.subsidies ?? []).filter((x) => x !== paid)
+    this.store.save()
+  }
+
+  /** GET /metrics: gas reserves the relayer paid in the last 24 hours, and the day's budget, in wei. */
+  subsidySummary(): { paid24hWei: string; budgetWei: string } {
+    const budget = BigInt(this.subsidyPerDay) * (this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI)
+    return { paid24hWei: paidToday(Object.values(this.store.state.accounts)).toString(), budgetWei: budget.toString() }
   }
 
   private failOwner(acc: AccountState, op: OpView, code: string, detail: Partial<OpView> = {}): void {
@@ -1665,6 +1718,8 @@ export class Operator {
     if (deployed && nonce !== a.tx.nonce) return this.nonceMoved(acc, a, nonce)
     // Too little to deploy a Safe for: stay armed and wait for more (funding reports deployMinUsdc).
     if (!deployed && usdc < MIN_DEPLOY_USDC) return
+    // The day's subsidy budget is spent: wait armed, like the failure budget. Other refusals end the attempt below.
+    if (this.subsidy(acc, usdc, await this.client.getBalance({ address: live.safe })).code === 'SUBSIDY_DAILY_BUDGET') return this.park(acc, ARM_BUDGET_HOLD_MS)
     if (tried && !(await this.relayerCanActivate(acc))) return this.park(acc, ARM_IDLE_MS)
     // A copy handed to a provider earlier may still be pending: while the relayer has a transaction not yet mined,
     // nothing is sent again. Mined, it shows in the Safe nonce above; dropped, the pending count falls back.
@@ -1710,6 +1765,11 @@ export class Operator {
     if (ended.code === 'DEPOSIT_OVER_CAP' && !ended.txHash) {
       this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
       return this.park(acc, ARM_CAP_HOLD_MS)
+    }
+    // Another account took the last of the day's subsidy budget inside the attempt: nothing was sent, the approval waits.
+    if (ended.code === 'SUBSIDY_DAILY_BUDGET' && !ended.txHash) {
+      this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
+      return this.park(acc, ARM_BUDGET_HOLD_MS)
     }
     // Any other failure the attempt recorded is final for this signature.
     acc.armed = undefined
@@ -1777,6 +1837,16 @@ export class Operator {
     // Before any relayer transaction: signature, guards and a simulation of everything about to be sent.
     const refusal = await this.preflight(acc, live, p, signature)
     if (refusal) return this.settleRetried(acc, op, refusal.code) ? undefined : this.failOwner(acc, op, refusal.code, refusal.detail)
+    // The subsidy is decided again under the lock and before the deploy: nothing is spent on a start that is refused.
+    let usdc = 0n
+    if (p.kind === 'activate') {
+      usdc = await this.usdcOf(safe)
+      const s = this.subsidy(acc, usdc, await this.client.getBalance({ address: safe }))
+      if (s.code) {
+        this.subsidyAlert(s.code)
+        return this.failOwner(acc, op, s.code)
+      }
+    }
     // A transfer may be the first owner tx of a Safe that never started (deposit over the cap): deploy it first too.
     if (p.kind === 'activate' || p.kind === 'transfer') {
       const { deployed } = await readSafeNonce(this.client, safe)
@@ -1793,8 +1863,24 @@ export class Operator {
       const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
       const eth = await this.client.getBalance({ address: safe })
       if (eth < target) {
-        const { hash, receipt } = await this.relayer.send({ to: safe, value: target - eth, gas: 50_000n })
-        console.log(`[owner] top-up ${safe} +${target - eth} wei tx ${hash} ${receipt.status}`)
+        // Decided once more and recorded with no await in between, so activations of other accounts running at the same
+        // time cannot all take the last of the day's budget; recorded before the send, so a top-up whose receipt is
+        // lost (timeout, restart) still counts. Taken back only when nothing can have been paid.
+        const s = this.subsidy(acc, usdc, eth)
+        if (s.code) {
+          this.subsidyAlert(s.code)
+          return this.failOwner(acc, op, s.code)
+        }
+        const paid = this.noteSubsidy(acc, target - eth)
+        let handed = false
+        try {
+          const { hash, receipt } = await this.relayer.send({ to: safe, value: target - eth, gas: 50_000n }, undefined, () => (handed = true))
+          console.log(`[owner] top-up ${safe} +${target - eth} wei tx ${hash} ${receipt.status}`)
+          if (receipt.status !== 'success') this.dropSubsidy(acc, paid)
+        } catch (e) {
+          if (!handed || (!maybeBroadcast(e) && (relayerShort(e) || providerRefused(e)))) this.dropSubsidy(acc, paid)
+          throw e
+        }
       }
     }
     const { nonce } = await readSafeNonce(this.client, safe)
@@ -1872,6 +1958,7 @@ export class Operator {
       this.store.save()
       this.startLoop(acc)
     } else if (p.kind === 'stop') {
+      if (noteExit(acc)) console.log(`[subsidy] ${acc.accountKey} stopped within the early-exit window: no further paid reserve`)
       this.stopLoop(acc.accountKey)
       this.disarm(acc, 'STOPPED')
       acc.active = false
@@ -1906,6 +1993,7 @@ export class Operator {
         this.store.save()
       }
     } else {
+      if (p.kind === 'transfer' && noteExit(acc)) console.log(`[subsidy] ${acc.accountKey} withdrew within the early-exit window: no further paid reserve`)
       // The Safe nonce moved, so an activation signed earlier can never run: drop it and let the app ask for a fresh Start.
       this.disarm(acc, 'ARMED_SUPERSEDED')
     }
@@ -1975,6 +2063,11 @@ export class Operator {
         this.store.save()
       } else if (op.kind === 'renew' && op.ownerGrants) {
         this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, extend: op.extend }, receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt))
+      }
+      // A withdrawal or stop found late counts for the subsidy as when it was sent (subsidy.ts).
+      if ((op.kind === 'exit' || op.kind === 'transfer') && noteExit(acc, Date.parse(op.updatedAt) || Date.now())) {
+        console.log(`[subsidy] ${acc.accountKey} ${op.opId} left within the early-exit window: no further paid reserve`)
+        this.store.save()
       }
       console.log(`[reconcile] ${op.opId} tx ${hash} landed at block ${block}, confirmed`)
       this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', txHash: hash, block })

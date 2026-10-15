@@ -35,7 +35,7 @@ function world(usdc: bigint) {
   const sent: { to: string; data?: Hex; value?: bigint }[] = []
   /** Every eth_simulateV1 the operator ran, as its list of calls. */
   const simulated: { from?: string; to: string; data: Hex }[][] = []
-  const chain = { deployed: false, usdc, nonce: 0n }
+  const chain = { deployed: false, usdc, nonce: 0n, eth: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
   const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n }
   /** eth_calls of execTransaction the operator made. */
@@ -50,7 +50,7 @@ function world(usdc: bigint) {
     },
     getLogs: async () => [],
     getCode: async () => (chain.deployed ? '0x01' : undefined),
-    getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? knobs.relayerWei : 0n),
+    getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? knobs.relayerWei : at.toLowerCase() === SAFE.toLowerCase() ? chain.eth : 0n),
     getTransactionCount: async ({ blockTag }: { blockTag?: string }) => (blockTag === 'pending' ? 5 + knobs.relayerPending : 5),
     readContract: async ({ address: at, functionName, blockNumber }: { address: string; functionName: string; blockNumber?: bigint }) => {
       if (functionName === 'slot0') return [1n << 96n, 0, 0, 0, 0, 0, true]
@@ -77,7 +77,7 @@ function world(usdc: bigint) {
           data: answerAggregate3(data, (target, callData) => {
             if (callData.startsWith('0x3850c7bd')) return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [1n << 96n, 0, 0, 0, 0, 0, true] })
             if (callData.startsWith('0x70a08231')) return word(target.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : target.toLowerCase() === address('USDT').toLowerCase() ? knobs.usdt : 0n)
-            if (callData.startsWith('0x4d2301cc')) return word(0n)
+            if (callData.startsWith('0x4d2301cc')) return word(chain.eth)
             throw new Error('execution reverted')
           }),
         }
@@ -99,6 +99,7 @@ function world(usdc: bigint) {
       const isDeploy = tx.to.toLowerCase() === factory.to.toLowerCase()
       if (isDeploy) chain.deployed = true
       else if (tx.data) chain.nonce++
+      else if (tx.to.toLowerCase() === SAFE.toLowerCase()) chain.eth += tx.value ?? 0n
       const logs = isDeploy || !knobs.execOk ? [] : [{ address: SAFE, topics: [EXECUTION_SUCCESS] }]
       return { hash, receipt: { transactionHash: hash, status: 'success', blockNumber: 101n, logs } as unknown as TransactionReceipt }
     },
@@ -1913,5 +1914,131 @@ describe('a restarted engine does not look at the chain from before its last ope
   test('the floor it is given is the block of the latest stored engine operation that reached the chain', () => {
     expect(lastEngineBlock([])).toBe(0n)
     expect(lastEngineBlock([{ opId: 'own-1-activate', block: 900 }, { opId: 'eng-1-1-op-1-enter_swap', block: 120 }, { opId: 'eng-1-1-op-2-enter_mint', block: 131 }, { opId: 'eng-1-1-op-3-enter_swap' }])).toBe(131n)
+  })
+})
+
+// otto/mamoru#82: the gas reserve the relayer sends into a Safe at activation is the only part of a start the owner
+// can take away, so it is what the subsidy limits guard. A Safe that holds its own reserve always starts.
+describe('the relayer pays the gas reserve within limits', () => {
+  type Armed = { fireArmed(acc: AccountState, usdc: bigint): Promise<void> }
+  const priv = (op: Operator) => op as unknown as Armed
+  /** The engine loop is not under test here: an activation only has to land. */
+  const quiet = (u: bigint) => {
+    const w = world(u)
+    ;(w.op as unknown as { startLoop(a: AccountState): void }).startLoop = () => {}
+    return w
+  }
+  const TARGET = POLICIES['conservador-live-v2']!.gasReserveWei + 200_000_000_000_000n
+  const topUps = (w: ReturnType<typeof world>) => w.sent.filter((t) => t.to.toLowerCase() === SAFE.toLowerCase() && !t.data)
+  const refusal = (e: unknown) => e as HttpError
+  const spentToday = (w: ReturnType<typeof world>, n: number) => {
+    for (let i = 0; i < n; i++) w.state.accounts[`paid-${i}`] = { accountKey: `paid-${i}`, subsidies: [{ at: new Date().toISOString(), wei: TARGET.toString() }] } as unknown as AccountState
+  }
+
+  test('a first start from 10 USDC gets its reserve, and the reserve is recorded', async () => {
+    const w = quiet(10_000_000n)
+    expect(await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))).toMatchObject({ state: 'confirmed' })
+    expect(topUps(w)).toMatchObject([{ to: SAFE, value: TARGET }])
+    expect(w.state.accounts.k!.subsidies).toEqual([{ at: expect.any(String), wei: TARGET.toString() }])
+  })
+
+  test('under 10 USDC the start is refused with a typed code and the ETH to send; with that ETH in the Safe it starts and the relayer sends no reserve', async () => {
+    const w = quiet(5_000_000n)
+    const e = refusal(await w.op.prepareActivate(ctx).catch((x: unknown) => x))
+    expect(e).toMatchObject({ status: 409, code: 'SUBSIDY_BELOW_MINIMUM' })
+    expect(e.message).toContain('send 0.0005 ETH on Base to your account')
+    expect(w.sent).toHaveLength(0)
+    w.chain.eth = TARGET
+    expect(await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))).toMatchObject({ state: 'confirmed' })
+    expect(topUps(w)).toHaveLength(0)
+    expect(w.state.accounts.k!.subsidies).toBeUndefined()
+  })
+
+  test('a stop soon after a paid reserve is never gated, and ends the subsidy of the account', async () => {
+    const w = quiet(20_000_000n)
+    await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+    const acc = w.state.accounts.k!
+    acc.grants = [{ name: 'enter-swap', permissionId: `0x${'aa'.repeat(32)}`, grant: {} as never }]
+    expect(await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))).toMatchObject({ kind: 'exit', state: 'confirmed' })
+    expect(acc.subsidyForfeitAt).toBeString()
+    // The owner moved the reserve out: starting again needs their own.
+    w.chain.eth = 0n
+    expect(await w.op.prepareActivate(ctx).catch((x: unknown) => x)).toMatchObject({ status: 409, code: 'SUBSIDY_EARLY_EXIT' })
+    w.chain.eth = TARGET
+    expect(await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))).toMatchObject({ state: 'confirmed' })
+  })
+
+  test('a withdrawal after the window keeps the subsidy; an account past its reserves is refused', async () => {
+    const w = quiet(20_000_000n)
+    const { acc } = w.op.account(ctx)
+    acc.subsidies = [{ at: new Date(Date.now() - 73 * 3_600_000).toISOString(), wei: TARGET.toString() }]
+    const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1000000' })
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ state: 'confirmed' })
+    expect(acc.subsidyForfeitAt).toBeUndefined()
+    acc.subsidies.push({ at: acc.subsidies[0]!.at, wei: TARGET.toString() })
+    expect(await w.op.prepareActivate(ctx).catch((x: unknown) => x)).toMatchObject({ status: 409, code: 'SUBSIDY_ACCOUNT_LIMIT' })
+  })
+
+  test('the reserve is on the record before its send, and comes off it only when nothing can have been paid', async () => {
+    const w = quiet(20_000_000n)
+    let atSend: unknown
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && !('data' in t && (t as { data?: Hex }).data)) atSend = structuredClone(w.state.accounts.k!.subsidies)
+    }
+    await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+    expect(atSend).toEqual([{ at: expect.any(String), wei: TARGET.toString() }])
+
+    // Refused before it reached a provider: off the record. Lost after it was handed over: kept, it may have landed.
+    for (const [handed, kept] of [[false, 0], [true, 1]] as const) {
+      const v = quiet(20_000_000n)
+      v.knobs.failBeforeSending = !handed
+      v.knobs.onSend = (t) => {
+        if (t.to.toLowerCase() === SAFE.toLowerCase() && !(t as { data?: Hex }).data) throw handed ? new Error('Timed out while waiting for transaction') : new Error('insufficient funds for gas * price + value')
+      }
+      await v.op.submit(ctx, 'activate', sign(await v.op.prepareActivate(ctx)))
+      await Bun.sleep(5)
+      expect(v.state.accounts.k!.subsidies ?? []).toHaveLength(kept)
+    }
+  })
+
+  test('an armed approval that loses the last of the budget inside its attempt stays armed', async () => {
+    const w = quiet(20_000_000n)
+    const tx = await w.op.prepareActivate(ctx)
+    w.chain.usdc = 0n
+    expect(await w.op.submit(ctx, 'activate', sign(tx))).toMatchObject({ code: 'ARMED' })
+    w.chain.usdc = 20_000_000n
+    const acc = w.state.accounts.k!
+    // The watcher's look passes; the budget is gone by the time the attempt decides (another account's start).
+    const real = (w.op as unknown as { subsidy: (...a: unknown[]) => unknown }).subsidy.bind(w.op)
+    let calls = 0
+    ;(w.op as unknown as { subsidy: (...a: unknown[]) => unknown }).subsidy = (...a: unknown[]) => (calls++ === 0 ? real(...a) : { need: TARGET, code: 'SUBSIDY_DAILY_BUDGET' })
+    await priv(w.op).fireArmed(acc, 20_000_000n)
+    expect(acc.armed).toBeDefined()
+    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'proposed', code: 'ARMED' })
+    expect(w.sent).toHaveLength(0)
+  })
+
+  test('the daily budget: prepare is refused, an approval signed before waits armed with nothing sent and runs once the budget frees', async () => {
+    const w = quiet(20_000_000n)
+    const logged: string[] = []
+    const error = console.error
+    console.error = (...args: unknown[]) => void logged.push(args.map(String).join(' '))
+    try {
+      const tx = await w.op.prepareActivate(ctx)
+      spentToday(w, 10)
+      expect(await w.op.prepareActivate(ctx).catch((x: unknown) => x)).toMatchObject({ status: 409, code: 'SUBSIDY_DAILY_BUDGET' })
+      expect(await w.op.submit(ctx, 'activate', sign(tx))).toMatchObject({ state: 'proposed', code: 'ARMED' })
+      const acc = w.state.accounts.k!
+      await priv(w.op).fireArmed(acc, 20_000_000n)
+      expect(acc.armed).toBeDefined()
+      expect(w.sent).toHaveLength(0)
+      expect(logged.filter((l) => l.includes('[alert]') && l.includes('relayer subsidy'))).toHaveLength(1)
+      for (let i = 0; i < 10; i++) w.state.accounts[`paid-${i}`]!.subsidies![0]!.at = new Date(Date.now() - 25 * 3_600_000).toISOString()
+      await priv(w.op).fireArmed(acc, 20_000_000n)
+      expect(acc.active).toBe(true)
+      expect(w.op.subsidySummary()).toEqual({ paid24hWei: TARGET.toString(), budgetWei: (10n * TARGET).toString() })
+    } finally {
+      console.error = error
+    }
   })
 })
