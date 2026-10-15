@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { AppConfig, FundingView, OpView, SessionView, SignInChallenge, SignInRequest } from '@mamoru/domain'
+import type { AppConfig, ApyView, FundingView, OpView, SessionView, SignInChallenge, SignInRequest } from '@mamoru/domain'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router'
 import { ApiContext, ApiRequestError, type ApiClient } from '../../src/web/api/client.ts'
@@ -29,13 +29,14 @@ const funded: FundingView = {
   positions: [{ tokenId: '1', pool: `0x${'a'.repeat(40)}`, liquidity: '1', inRange: true, amountUsdc: '5000000', amountCbbtc: '10000' }],
 }
 
-async function renderRoute(path: string, session: SessionView | null, funding?: FundingView, more: { ops?: OpView[]; config?: AppConfig } = {}) {
+async function renderRoute(path: string, session: SessionView | null, funding?: FundingView, more: { ops?: OpView[]; config?: AppConfig; apy?: ApyView } = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   qc.setQueryData(queryKeys.config, more.config ?? fixtureConfig)
   qc.setQueryData(queryKeys.session, session)
   qc.setQueryData(queryKeys.pools, poolsResponse)
   if (funding) qc.setQueryData(queryKeys.funding(FIXTURE_ACCOUNT_KEY), funding)
   qc.setQueryData(queryKeys.ops(FIXTURE_ACCOUNT_KEY), { ops: more.ops ?? [] })
+  if (more.apy) qc.setQueryData(queryKeys.apy, more.apy)
   const router = buildRouter(createMemoryHistory({ initialEntries: [path] }))
   await router.load()
   return render(
@@ -64,6 +65,31 @@ describe('routes', () => {
     expect(text).toContain('Stop allocation')
     expect(text).toContain('Current APY —')
     expect(text).not.toContain('UTC')
+  })
+  // otto/mamoru#132: the APY card shows the blended figures plainly; the sources/method text and the
+  // per-pool breakdown live behind an info button instead of sitting under the numbers by default.
+  test('APY: the numbers show, the sources/method and per-pool breakdown wait behind the info button', async () => {
+    const apy: ApyView = {
+      pool: 'conservador-live-v2',
+      currentPct: 6.4,
+      currentWindow: '24h',
+      currentSource: 'Plan pools, fee APR · GeckoTerminal/DefiLlama',
+      monthlyPct: 5.9,
+      monthlySource: 'Plan pools, 30-day mean · DefiLlama',
+      byPool: [{ pool: 'pool:USDC/cbBTC/500', weight: 10000, currentPct: 6.4, monthlyPct: 5.9 }],
+      asOf: '2026-10-10T00:00:00.000Z',
+    }
+    const { text, html } = await renderRoute('/', fixtureSession, funded, { apy })
+    expect(text).toContain('Current APY 6.4%')
+    expect(text).toContain('Monthly average 5.9%')
+    // Closed by default: the method text and the per-pool table are not in the painted output.
+    expect(text).not.toContain('GeckoTerminal')
+    expect(text).not.toContain('DefiLlama')
+    expect(text).not.toContain('USDC/cbBTC')
+    // The trigger is a real, labelled, collapsed toggle.
+    expect(html).toContain('aria-label="Sources and method"')
+    expect(html).toContain('aria-haspopup="dialog"')
+    expect(html).toContain('aria-expanded="false"')
   })
   test('funds present but not running: one Start button', async () => {
     const { text } = await renderRoute('/', fixtureSession, { ...fixtureFunding, active: false })

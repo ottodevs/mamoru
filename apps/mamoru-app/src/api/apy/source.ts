@@ -179,6 +179,9 @@ export async function apyView(fetcher: Fetcher, cache: ApyCache | null, now: Dat
     currentSource: source(CURRENT_SOURCE, c.covered, pools.length),
     monthlyPct: m.pct,
     monthlySource: source(MONTHLY_SOURCE, m.covered, pools.length),
+    byPool: pools.map((p, i) => ({ pool: p.name, weight: p.weight, currentPct: round(current[i]), monthlyPct: round(monthly[i]) })),
     asOf: now.toISOString(),
   }
 }
+
+const round = (v: number | null | undefined): number | null => (v === null || v === undefined ? null : round2(v))

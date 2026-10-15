@@ -177,6 +177,12 @@ export type ApyView = {
   monthlyPct: number | null
   monthlySource: string
   asOf: string
+  /**
+   * The plan's pools behind the blended figures above, each with its bucket weight (basis points, sums to
+   * 10000) and its own current/monthly APY (null when that one pool has no data). Absent only for a response
+   * from an app version before this field existed. otto/mamoru#132.
+   */
+  byPool?: { pool: string; weight: number; currentPct: number | null; monthlyPct: number | null }[]
 }
 
 // In-app feedback (otto/mamoru#72): one button, two paths. 'support' is answered in Mattermost, one thread per

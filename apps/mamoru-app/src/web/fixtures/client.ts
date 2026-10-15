@@ -138,6 +138,11 @@ export const fixtureClient: ApiClient = {
       currentSource: 'Plan pools, fee APR · GeckoTerminal/DefiLlama',
       monthlyPct: 5.9,
       monthlySource: 'Plan pools, 30-day mean · DefiLlama',
+      byPool: [
+        { pool: 'pool:USDC/USDT/100', weight: 5000, currentPct: 3.1, monthlyPct: 2.8 },
+        { pool: 'pool:USDC/cbBTC/500', weight: 4000, currentPct: 9.2, monthlyPct: 8.1 },
+        { pool: 'pool:WETH/USDC/3000', weight: 1000, currentPct: 14.6, monthlyPct: 12.9 },
+      ],
       asOf: new Date().toISOString(),
     }),
   registrationChallenge: () => delay({ challenge: 'Zml4dHVyZS1jaGFsbGVuZ2UtMzItYnl0ZXMtbG9uZy0wMDI', token: 'fixture', rpId: 'localhost', expiresAt: new Date(Date.now() + 300_000).toISOString() }),

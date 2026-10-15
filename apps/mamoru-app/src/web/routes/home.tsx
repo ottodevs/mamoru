@@ -1,11 +1,11 @@
-import type { FundingView, Hex0x, OpView, OverCap, WithdrawAsset } from '@mamoru/domain'
+import type { ApyView, FundingView, Hex0x, OpView, OverCap, WithdrawAsset } from '@mamoru/domain'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
 import { APY_REFRESH_MS, queryKeys, useApy, useFunding, useOps, usePools, useWithdrawAssets } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { TokenMark } from '../components/token-mark.tsx'
-import { BasescanLink, Brand, Modal, Waiting } from '../components/ui.tsx'
+import { BasescanLink, Brand, InfoPopover, Modal, Waiting } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
@@ -23,6 +23,8 @@ export const homeCopy = {
   total: 'Total balance',
   apy: 'Current APY',
   month: 'Monthly average',
+  apyInfo: 'Sources and method',
+  apyByPool: 'By pool',
   add: 'Add capital',
   withdraw: 'Withdraw',
   stop: 'Stop allocation',
@@ -64,27 +66,78 @@ function plural(n: number, one: string, many: string) {
 }
 
 const pct = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${v.toFixed(1)}%`)
-/** Short caption from the source line: "Pool fees, last hour · GeckoTerminal" -> "GeckoTerminal · 1h". */
-const caption = (source: string, window: string) => `${source.split(' · ').at(-1) ?? source} · ${window}`
 
-/** One current and one monthly APY: the plan's pools weighted by bucket weights until positions earn fees. */
+/** The sources and method behind the two figures, and the figure behind each pool in the blend, for the info popover. */
+function ApyDetail({ data }: { data: ApyView }) {
+  return (
+    <div className="info-body">
+      <p className="info-row">
+        <b>{homeCopy.apy}</b>
+        {data.currentSource}
+      </p>
+      <p className="info-row">
+        <b>{homeCopy.month}</b>
+        {data.monthlySource}
+      </p>
+      {data.byPool && data.byPool.length > 0 && (
+        <div>
+          <p className="info-row mb-1">
+            <b>{homeCopy.apyByPool}</b>
+          </p>
+          <table className="info-table">
+            <thead>
+              <tr>
+                <th scope="col">Pool</th>
+                <th scope="col">Weight</th>
+                <th scope="col">{homeCopy.apy}</th>
+                <th scope="col">{homeCopy.month}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.byPool.map((p) => (
+                <tr key={p.pool}>
+                  <td>{pairLabel(p.pool).replace(/ /g, '')}</td>
+                  <td>{(p.weight / 100).toFixed(0)}%</td>
+                  <td>{pct(p.currentPct)}</td>
+                  <td>{pct(p.monthlyPct)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * One current and one monthly APY: the plan's pools weighted by bucket weights until positions earn fees.
+ * The info trigger renders outside both tiles (as its own flex item in the caller's list): `.apr-live`
+ * clips overflow for its refresh hairline, which would also clip an absolutely positioned popover nested
+ * inside it.
+ */
 function ApyTiles() {
   const { data, dataUpdatedAt } = useApy()
   return (
     <>
-      <li className="apr apr-live flex-1" title={data?.currentSource}>
+      <li className="apr apr-live flex-1">
         <span className="apr-label whitespace-nowrap">{homeCopy.apy}</span>
         <strong key={`v-${dataUpdatedAt}`} className="apr-fade" data-testid="apy-current">
           {pct(data?.currentPct)}
         </strong>
-        {data && <span className="apr-src">{caption(data.currentSource, data.currentWindow)}</span>}
         {data && <span key={`t-${dataUpdatedAt}`} className="apr-tick" style={{ animationDuration: `${APY_REFRESH_MS}ms` }} aria-hidden="true" />}
       </li>
-      <li className="apr flex-1" title={data?.monthlySource}>
+      <li className="apr flex-1">
         <span className="apr-label whitespace-nowrap">{homeCopy.month}</span>
         <strong data-testid="apy-month">{pct(data?.monthlyPct)}</strong>
-        {data && <span className="apr-src">{caption(data.monthlySource, '30d')}</span>}
       </li>
+      {data && (
+        <li className="flex items-end pb-[0.3rem]">
+          <InfoPopover label={homeCopy.apyInfo}>
+            <ApyDetail data={data} />
+          </InfoPopover>
+        </li>
+      )}
     </>
   )
 }
