@@ -1,6 +1,6 @@
 import type { ApyView, FundingView, Hex0x, OpView, OverCap, WithdrawAsset } from '@mamoru/domain'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
 import { APY_REFRESH_MS, queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
@@ -54,6 +54,7 @@ export const homeCopy = {
   renewEnded: 'Mamoru\'s approval has ended. Your money is where it was, but Mamoru cannot manage it until you renew.',
   renewNote: 'One tap with your passkey. Nothing is moved.',
   renew: 'Renew approval',
+  renewAskTitle: "Renew Mamoru's approval",
   extendTitle: 'Mamoru is missing part of its approval: in some pools it cannot re-range or collect fees until you add it.',
   extend: 'Approve',
   createFirst: 'Your account is created on Base first, then the USDC is sent.',
@@ -704,6 +705,40 @@ export function ApprovalCard({ approval, summary, busy, error, onPrepare, onAppr
   )
 }
 
+/**
+ * otto/mamoru#148: owners cannot be messaged, so an approval in its last weeks (or over) is asked for in a dialog
+ * the moment Home opens, once per visit and per approval. The row at the top stays for whoever closes it.
+ */
+export function renewAskFor(f: FundingView | undefined, renewing: boolean): string | null {
+  if (!f || !f.active || !f.approval || !f.approval.renewDue || renewing) return null
+  return `mamoru:renew-asked:${f.address}:${f.approval.validUntil}`
+}
+
+function askedBefore(key: string): boolean {
+  try {
+    if (sessionStorage.getItem(key)) return true
+    sessionStorage.setItem(key, '1')
+  } catch {
+    // No storage (private mode, blocked): ask once per page load instead.
+  }
+  return false
+}
+
+function RenewDialog({ accountKey, approval, open, onClose }: { accountKey: string; approval: NonNullable<FundingView['approval']>; open: boolean; onClose: () => void }) {
+  const flow = useOwnerAction(accountKey, 'renew')
+  const done = !!flow.result && flow.result.state !== 'failed'
+  useEffect(() => {
+    if (done) onClose()
+  }, [done, onClose])
+  return (
+    <Modal open={open && !done} onClose={onClose} title={homeCopy.renewAskTitle}>
+      <div data-testid="renew-dialog">
+        <ApprovalCard approval={approval} summary={flow.prepared?.tx.summary ?? null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void flow.approve()} />
+      </div>
+    </Modal>
+  )
+}
+
 function StartRow({ accountKey, funded }: { accountKey: string; funded: boolean }) {
   const flow = useOwnerAction(accountKey, 'activate')
   const tap = () => void (flow.prepared ? flow.approve() : flow.prepare())
@@ -736,6 +771,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const pools = usePools()
   const [dialog, setDialog] = useState<null | 'add' | 'withdraw' | 'stop' | 'start'>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
+  const [renewAsked, setRenewAsked] = useState(false)
   // Amount the withdraw form opens with; a new value remounts the dialog.
   const [withdrawSeed, setWithdrawSeed] = useState('')
   const f = funding.data
@@ -749,6 +785,11 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const armed = activationLive(opList)
   // A renewal the owner signed is on its way: the row that asks for it steps aside until it settles.
   const renewing = opList.some((o) => o.kind === 'renew' && !TERMINAL.has(o.state))
+  const renewAsk = renewAskFor(f, renewing)
+  useEffect(() => {
+    if (renewAsk && !askedBefore(renewAsk)) setRenewAsked(true)
+  }, [renewAsk])
+  const closeRenewAsk = useCallback(() => setRenewAsked(false), [])
   // Stopped after running: the Working card offers the restart where Stop was, so no Start row too.
   const stopped = !!f && !f.active && f.positions.length === 0 && !inFlight && everStarted(opList)
   // Over the cap the operator refuses Start, so the only action offered is the withdraw that fixes it. This state
@@ -850,6 +891,9 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           <WithdrawDialog key={withdrawSeed} accountKey={accountKey} s={s} open={dialog === 'withdraw'} onClose={() => setDialog(null)} initialAmount={withdrawSeed} deployed={f.deployed} />
           <StopDialog accountKey={accountKey} s={s} open={dialog === 'stop'} onClose={() => setDialog(null)} />
           <StartDialog accountKey={accountKey} s={s} open={dialog === 'start'} onClose={() => setDialog(null)} />
+          {f.approval && renewAsk ? (
+            <RenewDialog key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null} onClose={closeRenewAsk} />
+          ) : null}
         </>
       ) : null}
     </main>

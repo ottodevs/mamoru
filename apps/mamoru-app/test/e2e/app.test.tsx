@@ -16,7 +16,7 @@ import { activationLive, historyOps, needsRetry, opLine } from '../../src/web/li
 import { isAddress, parseUsdc } from '../../src/web/lib/owner-flow.ts'
 import { encodeQr } from '../../src/web/lib/qr.ts'
 import { localTime } from '../../src/web/lib/time.ts'
-import { ApprovalCard, approvalDay, approvalRowKey, engineLine, History } from '../../src/web/routes/home.tsx'
+import { ApprovalCard, approvalDay, approvalRowKey, engineLine, History, renewAskFor } from '../../src/web/routes/home.tsx'
 import { MIX } from '../../src/web/routes/onboarding.tsx'
 import { buildRouter } from '../../src/web/router.tsx'
 import { render } from './render.ts'
@@ -411,6 +411,27 @@ describe('renewing the approval', () => {
     expect(opLine(sent)).toBe('Renewing approval')
     expect(opLine({ ...sent, state: 'confirmed' })).toBe('Approval renewed')
     expect(opLine({ ...sent, state: 'failed', code: 'OWNER_TX_FAILED' })).toBe('Renewal needs another approval')
+  })
+
+  // otto/mamoru#148: owners cannot be messaged, so Home asks in a dialog on arrival, once per visit and approval.
+  test('the arrival dialog is asked for only while a running approval is due and no renewal is on its way', () => {
+    const due = running({ validUntil: now + 12 * 86_400, renewDue: true, expired: false })
+    const key = renewAskFor(due, false)
+    expect(key).toBe(`mamoru:renew-asked:${due.address}:${now + 12 * 86_400}`)
+    expect(renewAskFor(running({ validUntil: now - 3600, renewDue: true, expired: true }), false)).not.toBeNull()
+    expect(renewAskFor(running({ validUntil: now + 200 * 86_400, renewDue: false, expired: false }), false)).toBeNull()
+    expect(renewAskFor(running({ validUntil: now + 200 * 86_400, renewDue: false, expired: false, missing: 4 }), false)).toBeNull()
+    expect(renewAskFor(due, true)).toBeNull()
+    expect(renewAskFor({ ...due, active: false }, false)).toBeNull()
+    expect(renewAskFor(undefined, false)).toBeNull()
+    // Next year's approval is a new one: its last weeks ask again.
+    expect(renewAskFor(running({ validUntil: now + 377 * 86_400, renewDue: true, expired: false }), false)).not.toBe(key)
+  })
+
+  test('the dialog is closed until Home has opened in the browser', async () => {
+    const { html } = await renderRoute('/', fixtureSession, running({ validUntil: now + 12 * 86_400, renewDue: true, expired: false }))
+    expect(html).toContain('data-testid="renew"')
+    expect(html).not.toContain('data-testid="renew-dialog"')
   })
 
   test('an account that is not running is never asked to renew', async () => {
