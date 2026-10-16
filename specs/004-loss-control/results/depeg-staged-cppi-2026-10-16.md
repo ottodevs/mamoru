@@ -78,7 +78,7 @@ aug2024, `nobtc` policy (`raw/round3-depeg-aug2024.md`), against `nobtc` without
 | Variant | 1k Δ return / Δ max DD | 100k Δ return / Δ max DD |
 |---|---|---|
 | dg30-t10-freeze | -0.06 / -0.23 | -0.06 / -0.28 |
-| other freeze variants | 0 / 0 (trip, but the baseline makes no move there to block) | 0 / 0 |
+| other freeze variants | 0 / 0 (identical to `nobtc`: nothing in the stables pool to block while tripped) | 0 / 0 |
 | every exit variant | -2.0 .. -2.8 / +1.9 .. +2.8 | -1.9 .. -2.4 / +2.9 .. +3.4 |
 
 **Exit loses 2-3 pp** wherever the peg comes back: it sells USDT at the bottom of the deviation and pays the
