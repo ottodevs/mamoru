@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { keccak256, stringToHex } from 'viem'
 import { canonicalJson } from '@mamoru/decide'
 import { policyHash } from '@mamoru/policy'
-import { decodeDataset, type DatasetJson } from '../src/dataset.ts'
+import { decodeDataset, makeDataset, type DatasetJson } from '../src/dataset.ts'
 import { runBacktest, SIM_VERSION } from '../src/run.ts'
 import { aggregate, cellMetrics, decimalsOf, markdown, overridesFromAssignments, policyOf, sortCells, type Cell, type Variant } from '../src/sweep.ts'
 import { datasetsDir, LAB_WINDOWS, labWindow, windowBlocks } from '../src/windows.ts'
@@ -37,11 +37,13 @@ function runJob(job: Job): Cell[] {
   const from = ds.samples.findIndex((s) => s.block >= fromBlock)
   const to = ds.samples.findLastIndex((s) => s.block <= toBlock)
   if (from < 0 || to < from) throw new Error(`${w.file} has no sample in blocks ${fromBlock}..${toBlock}`)
+  // Cut, not just bounded: TWAP and guard history must not read a sample of the window next door.
+  const own = from === 0 && to === ds.samples.length - 1 ? ds : makeDataset(ds.chainId, ds.pools, ds.samples.slice(from, to + 1))
   const cells: Cell[] = []
   for (const v of job.variants) {
     const policy = policyOf(v)
     const head = { window: w.id, split: w.split, regime: w.regime, variant: v.name, policyId: policy.policyId }
-    const missing = [...new Set(policy.buckets.flatMap((b) => b.pools))].filter((p) => !ds.samples.slice(from, to + 1).some((s) => s.pools[ds.pools.indexOf(p)]))
+    const missing = [...new Set(policy.buckets.flatMap((b) => b.pools))].filter((p) => !own.samples.some((s) => s.pools[own.pools.indexOf(p)]))
     for (const deposit of job.deposits) {
       if (missing.length > 0) {
         cells.push({ ...head, deposit, status: 'skipped', reason: `no data for ${missing.join(', ')}` })
@@ -49,7 +51,7 @@ function runJob(job: Job): Cell[] {
       }
       const unit = 10n ** BigInt(decimalsOf(policy))
       // Cents of the savings asset, as cli/run.ts takes a deposit.
-      const r = runBacktest(ds, policy, { deposit: (BigInt(Math.round(deposit * 100)) * unit) / 100n, from, to, reviewEvery: 1, sessions: 'enforce', sessionRenewal: 'renewed' })
+      const r = runBacktest(own, policy, { deposit: (BigInt(Math.round(deposit * 100)) * unit) / 100n, reviewEvery: 1, sessions: 'enforce', sessionRenewal: 'renewed' })
       cells.push({ ...head, deposit, status: 'ok', metrics: cellMetrics(r, decimalsOf(policy)) })
     }
   }

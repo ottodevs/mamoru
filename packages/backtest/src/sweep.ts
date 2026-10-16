@@ -20,14 +20,16 @@ export function applyOverrides<T>(base: T, overrides: Record<string, unknown>, p
   const out: Record<string, unknown> = { ...(base as Record<string, unknown>) }
   for (const [k, v] of Object.entries(overrides)) {
     const at = path ? `${path}.${k}` : k
-    const sub = isShapeNode(shape) ? (shape[k] ?? shape['*']) : undefined
+    const sub = isShapeNode(shape) ? (shape[k] ?? (MAP_KEYS[path] === undefined || MAP_KEYS[path]!.includes(k) ? shape['*'] : undefined)) : undefined
     if (!(k in out) && sub === undefined) throw new Error(`override ${at}: the policy has no such parameter`)
+    if (Array.isArray(out[k]) && !ARRAYS.has(at)) throw new Error(`override ${at}: lists are not overridden here; write a policy in POLICIES`)
     const cur = out[k]
     const wantsObject = isPlainObject(cur) || isShapeNode(sub)
     if (wantsObject !== isPlainObject(v)) throw new Error(`override ${at}: want ${wantsObject ? 'an object' : 'a value'}, got ${JSON.stringify(v)}`)
     if (isPlainObject(v)) {
-      if (cur === undefined && isShapeNode(sub) && Object.values(sub).every((x) => !isShapeNode(x))) {
-        const left = Object.keys(sub).filter((x) => x !== '*' && !(x in v))
+      // A parameter the base lacks is given whole: every key of its shape, unless it is keyed by pool or bucket.
+      if (cur === undefined && isShapeNode(sub) && !('*' in sub)) {
+        const left = Object.keys(sub).filter((x) => !(x in v))
         if (left.length > 0) throw new Error(`override ${at}: the policy has no ${k} to merge into; give ${left.join(', ')} too`)
       }
       out[k] = applyOverrides(cur ?? {}, v, at, sub)
@@ -36,7 +38,7 @@ export function applyOverrides<T>(base: T, overrides: Record<string, unknown>, p
     const value = typeof v === 'string' && /^-?\d+n$/.test(v) ? BigInt(v.slice(0, -1)) : v
     // The value must be of the parameter's type: the base value's, or the shape's for a parameter the base lacks.
     const want = ENUMS[at.replace(/^guards\.byBucket\.[^.]+\./, 'guards.byBucket.*.')] ?? (cur !== undefined ? (Array.isArray(cur) ? 'array' : typeof cur) : sub)
-    const ok = Array.isArray(want) ? want.includes(value as string) : want === 'array' ? Array.isArray(value) : typeof value === want
+    const ok = Array.isArray(want) ? want.includes(value as string) : want === 'array' ? Array.isArray(value) && validBuckets(value) : typeof value === want
     if (!ok) throw new Error(`override ${at}: want ${Array.isArray(want) ? want.join(' | ') : want}, got ${JSON.stringify(v)}`)
     out[k] = value
   }
@@ -49,6 +51,14 @@ function isShapeNode(s: Shape | undefined): s is { [key: string]: Shape } {
   return typeof s === 'object' && !Array.isArray(s)
 }
 const ENUMS: Record<string, readonly string[]> = { allocation: ['first-entry', 'target-weights'], 'range.adjust': ['off', 'on_out_of_range'] }
+const BUCKET_IDS = ['stables', 'btc-usdc', 'risk'] as const
+/** Maps keyed by name: which keys they take (undefined: any, e.g. a pool name). */
+const MAP_KEYS: Record<string, readonly string[]> = { 'guards.byBucket': BUCKET_IDS }
+/** The only list an override may replace: the buckets, to try other weights or pools. */
+const ARRAYS = new Set(['buckets'])
+function validBuckets(v: unknown[]): boolean {
+  return v.every((b) => isPlainObject(b) && BUCKET_IDS.includes(b.id as never) && typeof b.preference === 'number' && Array.isArray(b.pools) && b.pools.every((p) => typeof p === 'string'))
+}
 const BUCKET_RULES: Shape = { fallFreeze: { fallBps: 'number', volBps: 'number' } }
 /** Optional parameters of `PolicyVersion` an override may add although the base policy does not set them. `*`: any pool. */
 const OPTIONAL: Shape = {
@@ -56,7 +66,7 @@ const OPTIONAL: Shape = {
   minEntry: 'bigint',
   rebalanceBandBps: 'number',
   range: { widthTicksByPool: { '*': 'number' } },
-  guards: { byBucket: { stables: BUCKET_RULES, 'btc-usdc': BUCKET_RULES, risk: BUCKET_RULES } },
+  guards: { byBucket: { '*': BUCKET_RULES } },
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {

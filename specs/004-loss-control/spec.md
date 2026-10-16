@@ -367,8 +367,8 @@ once on TEST. `bun packages/backtest/cli/windows.ts manifest` writes the market 
 |---|---|---|---|---|---|---|---|
 | TRAIN | 1,000 | 7 | -0.33% | -0.36% | -3.58% | 7.62% | 6.78% |
 | TRAIN | 100,000 | 7 | -0.23% | -0.26% | -5.58% | 7.49% | 6.72% |
-| TEST | 1,000 | 5 | -0.47% | +0.06% | -3.50% | 8.87% | 6.79% |
-| TEST | 100,000 | 5 | -0.69% | -0.16% | -4.64% | 10.34% | 8.69% |
+| TEST | 1,000 | 5 | -0.58% | -0.05% | -3.50% | 9.24% | 7.19% |
+| TEST | 100,000 | 5 | -0.71% | -0.19% | -4.64% | 10.51% | 8.74% |
 
 Moving a 30-day window's start by one 10-minute sample moved its return by up to 0.5 pp at 100,000 (calm-2026-04: 2.89% to
 2.37%). A difference smaller than that between two variants on one window is noise; LC-L1's start offsets apply to every window.

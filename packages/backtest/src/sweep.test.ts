@@ -104,6 +104,10 @@ describe('overrides', () => {
     expect(() => applyOverrides(conservadorLiveV2, { range: { cooldownSeconds: '3600' } })).toThrow('want number')
     expect(() => applyOverrides(conservadorLiveV2, { minEntry: 5 })).toThrow('want bigint')
     expect(() => applyOverrides(conservadorLiveV2, { range: 5 })).toThrow('want an object')
+    expect(() => applyOverrides(conservadorLiveV2, { guards: {} })).toThrow('give byBucket')
+    expect(() => applyOverrides(conservadorLiveV2, { session: { grants: [null] } })).toThrow('lists are not overridden')
+    expect(() => applyOverrides(conservadorLiveV2, { buckets: [{ id: 'x', preference: 1, pools: [] }] })).toThrow('want array')
+    expect(applyOverrides(conservadorLiveV2, { buckets: [{ id: 'risk', preference: 10_000, pools: ['pool:WETH/USDC/3000'] }] }).buckets).toHaveLength(1)
   })
   test('"123n" from JSON becomes a bigint', () => {
     expect(applyOverrides(conservadorLiveV2, { minEntry: '5000000n' }).minEntry).toBe(5_000_000n)
