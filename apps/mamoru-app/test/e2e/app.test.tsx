@@ -521,9 +521,11 @@ describe('funds by token and what Mamoru is doing', () => {
   test('money held back on purpose says why and when it was checked (otto/mamoru#128)', () => {
     const at = new Date('2026-10-16T10:00:00Z').toISOString()
     const depth = engineLine({ ...midEntry, engine: { placing: false, nextReviewAt: at, reviewedAt: at, waiting: [{ bucket: 'stables', pool: 'pool:USDC/USDT/100', code: 'DECIDE_WAIT_DEPTH', amountUsdc: '40000000' }] } })!
-    expect(depth.startsWith('40.00 USDC is waiting: the USDC/USDT pool cannot take more right now without moving its price. Checked at ')).toBe(true)
+    expect(depth.startsWith('40.00 USDC is waiting: the USDC/USDT pool is not deep enough for more right now. Checked at ')).toBe(true)
     const fall = engineLine({ ...midEntry, engine: { placing: false, nextReviewAt: at, reviewedAt: at, waiting: [{ bucket: 'btc-usdc', pool: 'pool:USDC/cbBTC/500', code: 'DECIDE_ENTRY_PAUSED_FALL', amountUsdc: '12500000' }] } })!
     expect(fall.startsWith('12.50 USDC is waiting: USDC/cbBTC is falling fast')).toBe(true)
+    const many = engineLine({ ...midEntry, engine: { placing: false, nextReviewAt: at, reviewedAt: at, waiting: [{ bucket: 'stables', pool: 'pool:USDC/USDT/100', code: 'DECIDE_WAIT_DEPTH', amountUsdc: '40000000' }, { bucket: 'btc-usdc', pool: 'pool:USDC/cbBTC/500', code: 'DECIDE_ENTRY_PAUSED_FALL', amountUsdc: '10000000' }] } })!
+    expect(many.startsWith('50.00 USDC is waiting in 2 pools, until they can take more. Checked at ')).toBe(true)
     // Placing wins: the engine is already moving that money.
     expect(engineLine({ ...midEntry, engine: { placing: true, nextReviewAt: at, waiting: [{ bucket: 'stables', pool: null, code: 'DECIDE_WAIT_DEPTH', amountUsdc: '1' }] } })).toBe('Placing your money. The next step starts in a few seconds.')
   })

@@ -483,12 +483,35 @@ export class Engine {
     })
   }
 
+  /**
+   * otto/mamoru#127: with depth sizing on, an entry swap is refused before anything is sent when the quote (which
+   * crosses ticks) prices it worse than `maxImpactBps` from the pool's spot, the pool fee aside. `decide` sizes the swap
+   * from the active liquidity only; this is the check that holds when the liquidity next to the price is thinner.
+   */
+  private async assertImpact(p: Extract<Proposal, { kind: 'enter_swap' }>, amountOut: bigint, blockNumber: bigint): Promise<void> {
+    const depth = this.cfg.policy.depth
+    if (!depth) return
+    const pool = entry(p.pool)
+    const [sqrtPriceX96] = await this.client.readContract({ address: pool.address as Address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber })
+    const Q192 = 1n << 192n
+    const sq = sqrtPriceX96 * sqrtPriceX96
+    const afterFee = (p.amountIn * BigInt(1_000_000 - p.fee)) / 1_000_000n
+    // What the input buys at spot, in raw units of the output token.
+    const ideal = pool.token0 === p.tokenIn ? (afterFee * sq) / Q192 : (afterFee * Q192) / sq
+    if (ideal === 0n) return
+    const limit = BigInt(depth.maxImpactBpsByPool?.[p.pool] ?? depth.maxImpactBps)
+    if (amountOut * 10_000n < ideal * (10_000n - limit)) {
+      throw new ReasonError('EHG_SWAP_IMPACT_OVER_LIMIT', `${p.pool}: quote ${amountOut} for ${p.amountIn}, spot ${ideal}, over ${limit} bps`)
+    }
+  }
+
   /** FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. */
   private async prepareCalls(p: Proposal, blockNumber: bigint, timestamp: bigint): Promise<Prepared> {
     const acct = this.cfg.account
     const slippage = this.cfg.policy.execution.slippageBps
     if (p.kind === 'enter_swap') {
       const amountOut = await quoteExactInputSingle(this.client, { tokenIn: address(p.tokenIn), tokenOut: address(p.tokenOut), fee: p.fee, amountIn: p.amountIn, blockNumber })
+      await this.assertImpact(p, amountOut, blockNumber)
       const amountOutMinimum = minOut(amountOut, slippage)
       return {
         quote: { amountIn: p.amountIn, amountOut, amountOutMinimum },

@@ -12,6 +12,8 @@ export type Depth = {
   shareRoom: bigint
   /** Most savings one entry swap may sell into the pool at `maxImpactBps`, in raw savings units. */
   swapRoom: bigint
+  /** Most of the volatile token one swap may sell back into the pool at `maxImpactBps`, in raw units of that token. */
+  sellRoom: bigint
 }
 
 /** Value in the savings asset of `REF_L` liquidity in a fresh range of the policy width around the tick, at the pool price. */
@@ -27,9 +29,11 @@ function refValue(pool: PoolObs, width: number, savings: string): bigint {
  * do not see liquidity beyond it:
  * - share: the account's liquidity in the pool stays at or under `maxShareBps` of the pool's active liquidity, so
  *   Mamoru never becomes most of the market it trades in (and can always exit into it);
- * - impact: an entry swap of savings moves the price by at most twice `maxImpactBps`, which is an average execution
- *   impact of `maxImpactBps` against constant liquidity. Selling Δ of token1 moves √P by Δ/L; of token0, √P to
- *   L·√P/(L + Δ·√P). Both linearised: Δ1 = b·L·√P, Δ0 = b·L/√P with b the allowed impact as a fraction.
+ * - impact: a swap moves the price by at most twice `maxImpactBps`, which is an average execution impact of
+ *   `maxImpactBps` against constant liquidity, the pool fee aside. Selling Δ of token1 moves √P by Δ/L; of token0, √P
+ *   to L·√P/(L + Δ·√P). Both linearised: Δ1 = b·L·√P, Δ0 = b·L/√P with b the allowed impact as a fraction. It does
+ *   not see thinner liquidity past the current tick range; the engine checks the real quote before sending
+ *   (EHG_SWAP_IMPACT_OVER_LIMIT).
  */
 export function depthOf(obs: Observation, policy: PolicyVersion, pool: PoolObs, width: number): Depth | null {
   const d = policy.depth
@@ -40,6 +44,10 @@ export function depthOf(obs: Observation, policy: PolicyVersion, pool: PoolObs, 
   const roomL = maxL > ours ? maxL - ours : 0n
   const shareRoom = (roomL * refValue(pool, width, savings)) / REF_L
   const impact = BigInt(d.maxImpactBpsByPool?.[pool.name] ?? d.maxImpactBps)
-  const swapRoom = pool.token1 === savings ? (impact * pool.liquidity * pool.sqrtPriceX96) / (10_000n * Q96) : (impact * pool.liquidity * Q96) / (10_000n * pool.sqrtPriceX96)
-  return { shareRoom, swapRoom }
+  // Selling token1 moves √P by Δ/L; selling token0 the other way, by about Δ·√P/L: the same bound, per side.
+  const room1 = (impact * pool.liquidity * pool.sqrtPriceX96) / (10_000n * Q96)
+  const room0 = pool.sqrtPriceX96 === 0n ? 0n : (impact * pool.liquidity * Q96) / (10_000n * pool.sqrtPriceX96)
+  const swapRoom = pool.token1 === savings ? room1 : room0
+  const sellRoom = pool.token1 === savings ? room0 : room1
+  return { shareRoom, swapRoom, sellRoom }
 }

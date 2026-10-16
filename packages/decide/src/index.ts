@@ -1,7 +1,7 @@
 import { keccak256, stringToHex, type Hex } from 'viem'
 import type { ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, hasManageAny, policyHash, type PolicyVersion } from '@mamoru/policy'
-import { allocate } from './allocate/index.ts'
+import { allocate, type Waiting } from './allocate/index.ts'
 import { enterBucket, safeSavings } from './enter/index.ts'
 import { ehgPreliminary, purgaIdentity } from './gates/index.ts'
 import { fallFreezeOf } from './guard/index.ts'
@@ -14,7 +14,7 @@ export { estimateFees } from './harvest/index.ts'
 export { safeSavings } from './enter/index.ts'
 export { amountsForLiquidity, inSavings, volatileOf } from './value.ts'
 export { fallBpsOf, fallFreezeOf, marketOf, type CumulativePoint } from './guard/index.ts'
-export { allocate, widthOf, type Allocation, type BucketValue } from './allocate/index.ts'
+export { allocate, widthOf, type Allocation, type BucketValue, type Waiting } from './allocate/index.ts'
 export { amountsOf, bucketValues, positionValue, rerangeOf, reduceOf, EDGE_BPS, DRIFT_BPS } from './rerange/index.ts'
 
 const PROPOSAL_CODE = {
@@ -99,6 +99,7 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
   let enterEvaluated = false
   // Target weights: pools whose idle volatile the allocation is about to mint.
   let pendingMint: ReadonlySet<string> | undefined
+  let waiting: Waiting[] = []
   if (policy.allocation === 'target-weights') {
     const a = allocate(obs, policy, unsafeDeposit, frozen)
     // Only where the next step has a live session: without one it never goes and the token would wait for ever.
@@ -106,7 +107,8 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
     const live = (grant: string) => obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp)
     const needs = (p: { pool: string; grant: string }) => (remint && p.grant.startsWith('enter-mint') ? anyKey(policy, 'manage-any', p.pool) : p.grant)
     pendingMint = new Set(a.pendingMint.filter((p) => live(needs(p))).map((p) => p.pool))
-    for (const b of a.buckets) buckets.push(b.waiting === undefined ? { bucket: b.bucket, code: b.code } : { bucket: b.bucket, code: b.code, waiting: b.waiting })
+    for (const b of a.buckets) buckets.push({ bucket: b.bucket, code: b.code })
+    waiting = a.waiting
     trail.push(...a.trail)
     if (a.proposal) {
       enterEvaluated = true
@@ -199,5 +201,6 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
   const body = { policyRef, observationCodes, kind, code, reason, trail, proposal, shadow, buckets, positions, ...(policy.guards ? { guards } : {}) } as const
   const observationRef = { block: obs.block.number, hash: obs.block.hash }
   const premiseHash = hashOf(body)
-  return { decisionId: hashOf({ observationRef, premiseHash }), premiseHash, observationRef, ...body } as Decision
+  // `waiting` moves with every price, so it is reported beside the decision and never part of its premise or id.
+  return { decisionId: hashOf({ observationRef, premiseHash }), premiseHash, observationRef, ...body, ...(waiting.length ? { waiting } : {}) } as Decision
 }

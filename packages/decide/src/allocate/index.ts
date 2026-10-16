@@ -23,9 +23,10 @@ export type BucketValue = {
   /** Share of the whole account in bps (0 when the account is empty). */
   weightBps: number
   code: ReasonCode
-  /** otto/mamoru#127: savings this bucket is short of its target and cannot place now because its pool lacks depth. */
-  waiting?: bigint
 }
+
+/** otto/mamoru#127, #128: savings a bucket is short of its target and holds back on purpose, and why. */
+export type Waiting = { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_ENTRY_PAUSED_FALL'; amount: bigint }
 
 export type Allocation = {
   total: bigint
@@ -38,6 +39,8 @@ export type Allocation = {
    * can go, or the swap that makes it possible. The token is held back for it only while that grant has a live session.
    */
   pendingMint: { pool: string; grant: string }[]
+  /** Not part of the decision's premise (it moves with every price): reported beside it. */
+  waiting: Waiting[]
 }
 
 /** The pool priced at its TWAP tick (slot0 when the TWAP is unavailable; the EHG then refuses to act on it). */
@@ -110,12 +113,13 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
 
   const buckets: BucketValue[] = rows.map((r) => {
     const target = r.pool && prefTotal > 0n ? (total * BigInt(r.b.preference)) / prefTotal : 0n
-    const row: BucketValue = { bucket: r.b.id, pool: r.pool?.name ?? null, value: r.value, target, weightBps: total > 0n ? Number((r.value * 10_000n) / total) : 0, code: r.blocked ?? 'STRATEGY_PREFERENCE' }
-    // A frozen bucket is one more reason savings wait (otto/mamoru#127, #128): its shortfall is shown as waiting, the
-    // same way as a bucket whose pool lacks depth.
-    const gap = target - r.deployed
-    if (r.blocked === 'DECIDE_ENTRY_PAUSED_FALL' && gap >= minEntry) row.waiting = gap < free ? gap : free
-    return row
+    return { bucket: r.b.id, pool: r.pool?.name ?? null, value: r.value, target, weightBps: total > 0n ? Number((r.value * 10_000n) / total) : 0, code: r.blocked ?? 'STRATEGY_PREFERENCE' }
+  })
+  // A frozen bucket is one more reason savings wait (otto/mamoru#127, #128), shown the same way as a pool short of depth.
+  const waiting: Waiting[] = []
+  rows.forEach((r, i) => {
+    const gap = buckets[i]!.target - r.deployed
+    if (r.blocked === 'DECIDE_ENTRY_PAUSED_FALL' && gap >= minEntry && free > 0n) waiting.push({ bucket: r.b.id, code: 'DECIDE_ENTRY_PAUSED_FALL', amount: gap < free ? gap : free })
   })
 
   // Short buckets, most under-weight first (relative deficit), policy order on ties.
@@ -141,7 +145,8 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     const volatile = volatileOf(pool, savings)
     const volatileValue = inSavings(atTwap(pool), volatile, r.idleVolatile, savings)
     // What the next mint of this bucket holds: the gap, or everything the bucket can gather when that is less.
-    let size = gap < free + volatileValue ? gap : free + volatileValue
+    const wanted = gap < free + volatileValue ? gap : free + volatileValue
+    let size = wanted
     const volShare = volatileShareBps(pool, policy)
     // otto/mamoru#127: no more than the pool can take at its depth; the rest waits as savings, with its reason. The
     // swap toward the mint sells at most the volatile share of that size, so it stays within the allowed impact too.
@@ -150,12 +155,12 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       const bySwap = volShare > 0n ? (depth.swapRoom * 10_000n) / volShare : size
       const room = depth.shareRoom < bySwap ? depth.shareRoom : bySwap
       if (room < size) {
-        size = room
-        if (size < minEntry) {
-          if (row) {
-            row.code = 'DECIDE_WAIT_DEPTH'
-            row.waiting = gap < free ? gap : free
-          }
+        size = room < minEntry ? 0n : room
+        // What does not fit waits as savings, whether this review places part of the bucket or none of it.
+        const held = (gap < free ? gap : free) - size
+        if (held >= minEntry) waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_DEPTH', amount: held })
+        if (size === 0n) {
+          if (row) row.code = 'DECIDE_WAIT_DEPTH'
           continue
         }
       }
@@ -178,8 +183,18 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       }
       continue
     }
-    if (free < wantSavings && volatileValue * 10_000n > wantVolatile * SELL_ABOVE_BPS) {
-      const excess = volatileValue - wantVolatile
+    // Depth shrinks the mint, never the volatile the bucket keeps for it: the sale is judged against the unsized entry,
+    // and one sale stays within the impact the pool allows.
+    const keepVolatile = (wanted * volShare) / 10_000n
+    const keepSavings = wanted - keepVolatile
+    if (free < keepSavings && volatileValue * 10_000n > keepVolatile * SELL_ABOVE_BPS) {
+      const excessValue = volatileValue - keepVolatile
+      let sell = (r.idleVolatile * excessValue) / volatileValue
+      let excess = excessValue
+      if (depth && sell > depth.sellRoom) {
+        sell = depth.sellRoom
+        excess = (sell * volatileValue) / r.idleVolatile
+      }
       if (excess < minEntry || !hasManageAny(policy)) {
         if (row) row.code = 'DECIDE_NO_CAPITAL'
         continue
@@ -189,7 +204,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       pendingMint.push({ pool: pool.name, grant: sellGrant })
       if (row) {
         row.code = 'STRATEGY_PREFERENCE_DEVIATION'
-        proposal = { kind: 'enter_swap', grant: sellGrant, pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn: (r.idleVolatile * excess) / volatileValue }
+        proposal = { kind: 'enter_swap', grant: sellGrant, pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn: sell }
       }
       continue
     }
@@ -221,5 +236,5 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     }
   }
   if (total === 0n) for (const row of buckets) if (row.code === 'STRATEGY_PREFERENCE') row.code = 'DECIDE_NO_CAPITAL'
-  return { total, free, buckets, proposal, trail, pendingMint }
+  return { total, free, buckets, proposal, trail, pendingMint, waiting }
 }

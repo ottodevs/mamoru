@@ -150,9 +150,13 @@ export type Decision = {
   trail: GateStep[]
   proposal: Proposal | null
   shadow: ShadowNote[]
-  /** `waiting`: savings the bucket cannot place now for lack of pool depth (DECIDE_WAIT_DEPTH, otto/mamoru#127). */
-  buckets: { bucket: string; code: ReasonCode; waiting?: bigint }[]
+  buckets: { bucket: string; code: ReasonCode }[]
   positions: { tokenId: bigint; codes: ReasonCode[] }[]
   /** Present only when the policy sets `guards` (FR-LC-001: absent, the decision is byte-identical). */
   guards?: GuardNote[]
+  /**
+   * otto/mamoru#127, #128: savings held back on purpose, per bucket, with why. Outside the premise hash and the id
+   * (the amounts move with every price). Absent when nothing waits.
+   */
+  waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_ENTRY_PAUSED_FALL'; amount: bigint }[]
 }

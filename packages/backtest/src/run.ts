@@ -210,7 +210,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
       const d = decide(observe(ds, i, w, policy, gas.priorityFeeWei), policy)
       reasons[d.reason] = (reasons[d.reason] ?? 0) + 1
       // otto/mamoru#127: how often a bucket waited for depth, and how much savings sat idle at each review.
-      if (d.buckets.some((b) => b.code === 'DECIDE_WAIT_DEPTH')) depthWaits++
+      if (d.waiting?.some((w) => w.code === 'DECIDE_WAIT_DEPTH')) depthWaits++
       const idleNow = w.balances[savings] ?? 0n
       const totalNow = accountValue(ds, s, w, price).total
       if (totalNow > 0n) {

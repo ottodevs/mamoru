@@ -3,6 +3,7 @@ import { $ } from 'bun'
 import { createPublicClient, http } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID } from '@mamoru/domain'
+import { LIVE_CAP_USDC } from '@mamoru/account/live'
 import { POLICIES, withTestOverrides } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
@@ -65,6 +66,18 @@ export function parseDepth(v: string | undefined): OperatorConfig['depth'] {
   return { maxImpactBps: impact, maxShareBps: share, ...(stables === undefined ? {} : { maxImpactBpsByPool: { 'pool:USDC/USDT/100': stables } }) }
 }
 
+/**
+ * A cap above LIVE_CAP_USDC only with depth sizing on: without it, a large account would be entered as the 100 USDC
+ * accounts are, whatever the pool can take. Accounts activated before keep the session limits they signed; only new
+ * activations (and, in phase 2, an extend approval) get limits sized from the new cap.
+ */
+export function capAndDepth(o: Pick<BootOptions, 'capUsdc' | 'depth'>): Pick<OperatorConfig, 'capUsdc' | 'depth'> {
+  const capUsdc = parseCapUsdc(o.capUsdc)
+  const depth = parseDepth(o.depth)
+  if (capUsdc !== undefined && capUsdc > LIVE_CAP_USDC && !depth) throw new Error('MAMORU_CAP_USDC above the default cap needs MAMORU_DEPTH')
+  return { ...(capUsdc === undefined ? {} : { capUsdc }), ...(depth ? { depth } : {}) }
+}
+
 /** Starts the operator: relayer key, state, loopback bundler, HTTP server, and the engine loops that were active. */
 export async function bootOperator(o: BootOptions) {
   const bootedAt = Date.now()
@@ -100,8 +113,7 @@ export async function bootOperator(o: BootOptions) {
       maxWaitBlocks: o.maxWaitBlocks ?? 150,
       rpcBudget: rpcBudget(rpcMetrics),
       watchClient,
-      capUsdc: parseCapUsdc(o.capUsdc),
-      depth: parseDepth(o.depth),
+      ...capAndDepth(o),
     },
     client,
     relayer,

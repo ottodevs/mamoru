@@ -2333,7 +2333,7 @@ export class Operator {
           } else {
             const d = r.record.decision
             const pools = new Map<string, string | null>(this.enginePolicyOf(acc).buckets.map((b) => [b.id, b.pools[0] ?? null]))
-            runner.waiting = d.buckets.filter((b) => b.waiting !== undefined && b.waiting > 0n).map((b) => ({ bucket: b.bucket, pool: pools.get(b.bucket) ?? null, code: b.code, amountUsdc: b.waiting!.toString() }))
+            runner.waiting = (d.waiting ?? []).map((w) => ({ bucket: w.bucket, pool: pools.get(w.bucket) ?? null, code: w.code, amountUsdc: w.amount.toString() }))
             const o = r.op ? engine.journal.op(r.op.opId) : null
             const last = o ? engine.journal.transitions.filter((t) => t.opId === o.opId).at(-1) : null
             // `last.detail` is free text (unlike d.reason/o.state/o.stateCode, all closed enums): redact it.

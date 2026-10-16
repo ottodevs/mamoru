@@ -56,15 +56,20 @@ At every entry, at the decision block, for the bucket's pool:
 
 - `shareRoom`: value of the liquidity the account may still add so its in-range liquidity stays at or under
   `maxShareBps` of the pool's active liquidity.
-- `swapRoom`: the largest savings sale whose average execution impact is at most `maxImpactBps` against the active
-  liquidity (constant-liquidity, linearised: Δ1 = b·L·√P, Δ0 = b·L/√P, b the impact as a fraction). It does not see
-  liquidity beyond the current tick range: conservative in a pool whose depth falls off slowly, optimistic in one with a
-  cliff next to the price. Phase 2 checks the proposed swap with QuoterV2 before sending it.
+- `swapRoom` / `sellRoom`: the largest sale of savings (for an entry) or of the volatile token (for selling back an
+  excess) whose average execution impact is at most `maxImpactBps` against the active liquidity, the pool fee aside
+  (constant-liquidity, linearised: Δ1 = b·L·√P, Δ0 = b·L/√P, b the impact as a fraction). It does not see liquidity
+  beyond the current tick range, so the engine also checks the real QuoterV2 quote (which crosses ticks) before
+  sending an entry swap, and refuses it with `EHG_SWAP_IMPACT_OVER_LIMIT` when it is worse than the limit.
+- Depth shrinks the mint, never the volatile the bucket keeps for it: a sale of idle volatile is judged against the
+  unsized entry and capped at `sellRoom`, so depth sizing can never sell more than before.
 - The next entry of the bucket is `min(gap, available, shareRoom, swapRoom / volatileShare)`. If that is under
   `minEntry`, nothing is proposed for the bucket. Its shortfall stays as USDC with reason `DECIDE_WAIT_DEPTH` and the
   amount, and the next bucket in the order gets the entry.
 - What is placed is placed in several steps (a partial fill per review), each one re-checked against the pool at
-  its own block.
+  its own block. The part that does not fit is reported as waiting at once, not only when the bucket is blocked.
+- What waits is reported beside the decision (`Decision.waiting`), outside its premise hash and id: the amounts move
+  with every price, and inside the hash they would defeat the dedupe of repeated holds.
 
 Initial thresholds (phase 1): `maxImpactBps` 30 for the volatile pools, 5 for USDC/USDT 0.01% (its fee is 1 bp; 5 bps
 of impact is five times what the pool charges); `maxShareBps` 500 (5%).
@@ -91,34 +96,34 @@ started: the Start row). Retry cadence is the normal review (5 min; 15 min when 
 `packages/backtest`, real history: September 2026 (30 days, 5 min), October 2025 and February 2025 crash weeks
 (10 min). Live policy without the cap vs the same policy with depth sizing (30 / 500 / stables 5). The simulator
 charges swap impact against the active liquidity and shares fees by liquidity, so a big position dilutes its own
-fees. Idle: average share of the account held as USDC over the reviews. Waits: reviews where a bucket waited.
+fees. Idle: average share of the account held as USDC over the reviews. Waits: reviews where a bucket waited for depth (including the remainder of a partial entry).
 
 | Window | Deposit | Today: return / max DD / idle | Depth sizing: return / max DD / idle | Waits |
 |---|---|---|---|---|
-| Sep 2026 | 1k | +2.56% / 1.43% / 0.8% | +2.60% / 1.43% / 0.6% | 0 |
-| Sep 2026 | 10k | +2.46% / 1.42% / 0.9% | +2.66% / 1.42% / 0.7% | 3 |
-| Sep 2026 | 100k | +1.04% / 1.83% / 0.8% | +2.35% / 1.74% / 2.4% | 1,395 |
-| Sep 2026 | 1M | +2.12% / 1.59% / 0.6% | +2.07% / 1.33% / 50.2% | 8,279 |
+| Sep 2026 | 1k | +2.56% / 1.43% / 0.8% | +2.60% / 1.43% / 0.6% | 1 |
+| Sep 2026 | 10k | +2.46% / 1.42% / 0.9% | +2.66% / 1.42% / 0.7% | 5 |
+| Sep 2026 | 100k | +1.04% / 1.83% / 0.8% | +2.34% / 1.74% / 2.4% | 1,489 |
+| Sep 2026 | 1M | +2.12% / 1.59% / 0.6% | +2.07% / 1.33% / 50.2% | 8,641 |
 | Oct 2025 | 1k | −3.33% / 7.62% / 0.5% | −3.33% / 7.62% / 0.5% | 0 |
 | Oct 2025 | 10k | −2.84% / 7.45% | −2.84% / 7.45% | 0 |
 | Oct 2025 | 100k | −2.70% / 7.19% | −2.70% / 7.19% | 0 |
-| Oct 2025 | 1M | −3.11% / 7.43% / 1.1% | −2.76% / 7.71% / 34.2% | 965 |
+| Oct 2025 | 1M | −3.11% / 7.43% / 1.1% | −2.76% / 7.71% / 34.2% | 1,009 |
 | Feb 2025 | 1k | −3.58% / 5.63% / 0.9% | −3.58% / 5.63% / 0.9% | 0 |
 | Feb 2025 | 10k | −3.43% / 5.61% | −3.43% / 5.61% | 0 |
-| Feb 2025 | 100k | −2.98% / 5.92% / 1.9% | −4.13% / 5.93% / 3.0% | 10 |
-| Feb 2025 | 1M | −3.14% / 6.05% / 6.2% | −1.93% / 5.68% / 11.4% | 583 |
+| Feb 2025 | 100k | −2.98% / 5.92% / 1.9% | −4.01% / 5.93% / 2.8% | 44 |
+| Feb 2025 | 1M | −3.14% / 6.05% / 6.2% | −1.93% / 5.68% / 15.8% | 1,009 |
 
 Reading:
 
 - **Gate at 1k passes**: equal or better in all three windows. Nothing changes for today's account sizes.
-- At 10k and 100k in September, depth sizing is clearly better (100k: +2.35% vs +1.04%). Today's sizing pushes the
+- At 10k and 100k in September, depth sizing is clearly better (100k: +2.34% vs +1.04%). Today's sizing pushes the
   stables share into a 199k pool and pays for it in impact.
 - At 1M the stables bucket cannot take its 50%: about half the account waits as USDC. Return is about the same in
   September (+2.07% vs +2.12%) with a lower drawdown, and better in both crash weeks. The waiting money is the cost
   of not having a deeper stables venue (phase 3).
-- **One regression to understand before any cap goes up**: February 2025 at 100k, −4.13% vs −2.98%, with only 10
-  waits and the same drawdown. The entry is split over more steps (43 swaps, 30 mints vs 39 / 22) in a falling
-  week, and the order of entries across buckets changes. Not explained yet. It must be explained (and fixed or
+- **One regression to understand before any cap goes up**: February 2025 at 100k, −4.01% vs −2.98%, with 44
+  waits and the same drawdown. The entry is split over more steps in a falling week, and the order of entries
+  across buckets changes. Not explained yet. It must be explained (and fixed or
   accepted with a reason) before `MAMORU_CAP_USDC` goes over 10k.
 
 ## Phases
@@ -127,8 +132,10 @@ Reading:
 `DECIDE_WAIT_DEPTH` with the waiting amount per bucket, the freeze of spec 004 shown the same way, `FundingView`
 `engine.waiting`, the app line. Operator env: `MAMORU_DEPTH=30,500,5` turns depth sizing on for the engine only (the
 grants are built from the unchanged policy, so nothing about what a session allows changes); `MAMORU_CAP_USDC`
-(whole USDC) replaces the constant at Start and in the session limits of new activations. Both absent: behaviour as
-today, byte for byte (tested).
+(whole USDC) replaces the constant at Start and in the session limits of new activations. A cap above 100 USDC is
+refused at boot unless `MAMORU_DEPTH` is set. Accounts already active keep the session limits they signed: a
+deposit above them is refused by the engine's pre-check before anything is sent, until the owner approves larger
+limits (phase 2). Both absent: behaviour as today, byte for byte (tested).
 
 **Phase 2, raising the cap.**
 1. Turn on `MAMORU_DEPTH` with the cap unchanged; watch the waiting lines and the review codes for a week.

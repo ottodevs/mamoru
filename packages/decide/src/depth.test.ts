@@ -25,7 +25,7 @@ function pool(name: string, tick: number, liquidity: bigint): PoolObs {
   }
 }
 
-function obs(stablesL: bigint, usdc: bigint): Observation {
+function obs(stablesL: bigint, usdc: bigint, otherL: bigint = 10n ** 18n): Observation {
   return {
     chainId: 8453,
     block: { number: 100n, hash: `0x${'11'.repeat(32)}`, timestamp: 1_000n },
@@ -35,7 +35,7 @@ function obs(stablesL: bigint, usdc: bigint): Observation {
     native: 10n ** 17n,
     balances: { USDC: usdc, USDT: 0n, cbBTC: 0n, WETH: 0n },
     positions: [],
-    pools: [pool('pool:USDC/USDT/100', 1, stablesL), pool('pool:USDC/cbBTC/500', -69_080, 10n ** 18n), pool('pool:WETH/USDC/3000', -193_380, 10n ** 18n)],
+    pools: [pool('pool:USDC/USDT/100', 1, stablesL), pool('pool:USDC/cbBTC/500', -69_080, otherL), pool('pool:WETH/USDC/3000', -193_380, otherL)],
     ethPrice: { pool: 'pool:WETH/USDC/3000', sqrtPriceX96: sqrtRatioAtTick(-193_380), token0: 'WETH' },
     gas: { maxFeePerGas: 2_000_000n, opGasUnits: 5_100_000n },
     deposits: [],
@@ -50,7 +50,8 @@ describe('depth sizing (otto/mamoru#127)', () => {
     const a = decide(o, conservadorLiveV2)
     const b = decide(o, { ...conservadorLiveV2 })
     expect(b.premiseHash).toBe(a.premiseHash)
-    expect(a.buckets.every((x) => x.waiting === undefined)).toBe(true)
+    expect(a.waiting).toBeUndefined()
+    expect('waiting' in a).toBe(false)
   })
 
   test('the impact room of a USDC sale follows the linearised constant-liquidity move', () => {
@@ -88,7 +89,8 @@ describe('depth sizing (otto/mamoru#127)', () => {
     const d = decide(o, DEPTH)
     const stables = d.buckets.find((x) => x.bucket === 'stables')!
     expect(stables.code).toBe('DECIDE_WAIT_DEPTH')
-    expect(stables.waiting).toBeGreaterThan(4_000n * USDC)
+    expect(d.waiting?.find((w) => w.bucket === 'stables')).toMatchObject({ code: 'DECIDE_WAIT_DEPTH' })
+    expect(d.waiting!.find((w) => w.bucket === 'stables')!.amount).toBeGreaterThan(4_000n * USDC)
     expect(d.proposal?.pool).toBe('pool:USDC/cbBTC/500')
   })
 
@@ -99,5 +101,32 @@ describe('depth sizing (otto/mamoru#127)', () => {
     const held = depthOf({ ...o, positions: [{ tokenId: 1n, pool: p.name, tickLower: -20, tickUpper: 20, liquidity: (p.liquidity * 500n) / 10_000n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }] }, DEPTH, p, 40)!
     expect(empty.shareRoom > 0n).toBe(true)
     expect(held.shareRoom).toBe(0n)
+  })
+
+  test('what waits is reported beside the decision: amounts move, the premise does not', () => {
+    const a = decide(obs(1_000n, 10_000n * USDC, 1_000n), DEPTH)
+    const b = decide(obs(1_000n, 12_000n * USDC, 1_000n), DEPTH)
+    expect(a.proposal).toBeNull()
+    expect(b.premiseHash).toBe(a.premiseHash)
+    expect(b.waiting!.reduce((s, w) => s + w.amount, 0n)).toBeGreaterThan(a.waiting!.reduce((s, w) => s + w.amount, 0n))
+  })
+
+  test('a partial entry reports the part that does not fit', () => {
+    const o = obs(6n * 10n ** 11n, 10_000n * USDC)
+    const d = decide(o, DEPTH)
+    expect(d.proposal?.pool).toBe('pool:USDC/USDT/100')
+    const w = d.waiting?.find((x) => x.bucket === 'stables')
+    expect(w?.code).toBe('DECIDE_WAIT_DEPTH')
+    expect(w!.amount).toBeGreaterThan(4_000n * USDC)
+  })
+
+  test('depth never makes a sale of idle volatile larger, and caps it at the pool room', () => {
+    // 100 USDC of idle USDT, no free USDC, a thin pool: the bucket keeps what an unsized entry needs, sells the rest.
+    const o = { ...obs(6n * 10n ** 11n, 0n), balances: { USDC: 0n, USDT: 100n * USDC, cbBTC: 0n, WETH: 0n } }
+    const plain = decide(o, conservadorLiveV2)
+    const sized = decide(o, DEPTH)
+    const amt = (d: typeof plain) => (d.proposal?.kind === 'enter_swap' && d.proposal.tokenIn === 'USDT' ? d.proposal.amountIn : 0n)
+    expect(amt(sized) <= amt(plain)).toBe(true)
+    expect(amt(sized) <= depthOf(o, DEPTH, o.pools[0]!, 40)!.sellRoom).toBe(true)
   })
 })
