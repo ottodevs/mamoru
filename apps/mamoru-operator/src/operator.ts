@@ -740,13 +740,20 @@ export class Operator {
     // chain), its grants are revoked here all the same; the removal of a session that is not there is taken.
     const old = [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc)])]
     const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, acc.grants.map((g) => g.name), old)
+    // Named so the renewal says, every time, exactly what the engine keeps doing without asking again: not every
+    // renewed account holds manage-any/convert-any (a gas-capped activation can leave them out, see "fitGrants"),
+    // and the renewal must not claim more authority than what it is actually renewing.
+    const liveManage = stored.filter((g) => g.name.startsWith('manage-any') || g.name.startsWith('convert-any')).map((g) => g.name)
     const summary = [
       `Renew Mamoru's approval on your Safe ${live.safe}`,
       `Engine key ${sessionKey} keeps the same limits, for ${Math.round(policy.session.validitySeconds / 86_400)} more days`,
       'The approval it replaces is revoked in the same transaction',
       ...(dropped.length ? [`Re-ranging and collecting fees in ${this.poolsOf(dropped)} needs one more approval after this one`] : []),
+      ...(liveManage.length
+        ? [`It also keeps re-ranging, reducing and harvesting your positions in ${this.poolsOf(liveManage)} without asking again: withdraw liquidity, collect fees, and convert ${this.volatileOf(liveManage)} back to USDC`]
+        : []),
       'Nothing is moved: your positions stay as they are',
-      'What the engine may already do without asking again does not change; everything it touches still goes back to your Safe, never anywhere else',
+      'Everything it touches still goes back to your Safe, never anywhere else',
     ]
     return this.hold(acc, live, 'renew', calls, summary, { grants: stored, revokes: old })
   }

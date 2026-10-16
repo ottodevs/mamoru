@@ -1542,10 +1542,14 @@ describe('renewing the approval of a running account', () => {
     const sentBefore = w.sent.length
     const tx = await w.op.prepareRenew(ctx)
     expect(tx.summary.join(' ')).toContain('Nothing is moved')
-    // otto/mamoru#137: no blanket "funds never leave" claim; the renewal keeps whatever authority the engine
-    // already has, and every recipient stays the Safe.
-    expect(tx.summary).toContain('What the engine may already do without asking again does not change; everything it touches still goes back to your Safe, never anywhere else')
+    // otto/mamoru#137: no blanket "funds never leave" claim; the renewal says exactly what the engine keeps
+    // doing without asking again (this account's grants include manage-any/convert-any), and every recipient
+    // stays the Safe.
+    expect(tx.summary.join(' ')).toContain('It also keeps re-ranging, reducing and harvesting your positions in')
+    expect(tx.summary.join(' ')).toContain('without asking again: withdraw liquidity, collect fees, and convert')
+    expect(tx.summary).toContain('Everything it touches still goes back to your Safe, never anywhere else')
     expect(tx.summary.join(' ')).not.toContain('Funds never leave')
+    expect(tx.summary.join(' ')).not.toContain('without your passkey')
     const op = await w.op.submit(ctx, 'renew', sign(tx))
     expect(op).toMatchObject({ kind: 'renew', state: 'confirmed', code: 'EXEC_OK' })
     // One transaction, to the Safe: no deploy, no top-up.
@@ -1563,6 +1567,17 @@ describe('renewing the approval of a running account', () => {
     expect(acc.managedTokenIds).toEqual(['7'])
     expect(acc.depositsAfter).toBe('90')
     expect(acc.historyFromBlock).toBe('80')
+  })
+
+  test('otto/mamoru#137: a renewal without manage-any/convert-any makes no re-ranging claim', async () => {
+    const w = world(20_000_000n, 'conservador-v1')
+    ;(w.op as unknown as Loop).startLoop = () => {}
+    await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+    const tx = await w.op.prepareRenew(ctx)
+    const text = tx.summary.join(' ')
+    expect(text).not.toContain('re-ranging')
+    expect(tx.summary).toContain('Everything it touches still goes back to your Safe, never anywhere else')
+    expect(text).not.toContain('Funds never leave')
   })
 
   test('a renewal that does not fit one transaction with its revocations is refused: never done without them', async () => {
