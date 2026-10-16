@@ -44,6 +44,14 @@ export type SimConfig = {
    * owner never comes back. Either way the run assumes every grant of the policy was enabled at activation.
    */
   sessionRenewal?: 'renewed' | 'once'
+  /**
+   * otto/mamoru#149: the owner renews as soon as the app offers it for usage: once any grant has used `atBps` of its
+   * limit, `delaySeconds` later (the tap), every grant starts a fresh window with all its uses and totals. Absent: only
+   * the validity lapse renews (`sessionRenewal`).
+   */
+  usageRefresh?: { atBps: number; delaySeconds: number }
+  /** Account cap the grants are sized at, raw savings units: usage tiers and cumulative caps. Default: `deposit`. */
+  capUsdc?: bigint
   /** Later deposits of the savings asset: `at` is a sample index, the amount lands before that sample's review. */
   topUps?: { at: number; amount: bigint }[]
   /** First and last sample to replay, inclusive. Default: the whole dataset. */
@@ -71,7 +79,11 @@ export type OpEntry = {
   feesValue: bigint
 }
 
-export type SessionUse = { grant: string; limit: number | null; uses: number; peakPerWindow: number; exhausted: boolean }
+/**
+ * `peakSpentBps`: the largest share of a cumulative cap (enter totals) one window used, basis points; null for a grant
+ * with none. A grant is `exhausted` when report mode ran it past its usage limit or past a cumulative cap.
+ */
+export type SessionUse = { grant: string; limit: number | null; uses: number; peakPerWindow: number; peakSpentBps: number | null; exhausted: boolean }
 
 export type Metrics = {
   days: number
@@ -111,6 +123,8 @@ export type RunResult = {
   /** How many reviews ended in each reason code. */
   reasons: Record<string, number>
   sessions: SessionUse[]
+  /** #149: renewals the owner made for usage (`usageRefresh`), on top of the validity lapses. */
+  usageRefreshes: number
   metrics: Metrics
   /**
    * otto/mamoru#127, outside the result hash: reviews where a bucket waited for pool depth, and the average share of

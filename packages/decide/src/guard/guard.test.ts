@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV2, FALL_FREEZE_DEFAULTS, grantKey, type PolicyVersion } from '@mamoru/policy'
 import { address, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { decide, fallBpsOf, marketOf, type Observation, type PoolObs } from '../index.ts'
+import { keccak256, stringToHex } from 'viem'
+import { canonicalJson, decide, fallBpsOf, marketOf, type Observation, type PoolObs } from '../index.ts'
 
 const V2 = conservadorLiveV2
 const USDC = 1_000_000n
@@ -103,10 +104,14 @@ describe('decide with the fall freeze (spec 004, #101)', () => {
   })
 
   test('FR-LC-001: conservador-live-v2 hashes as on main before this change', () => {
-    // Pinned from origin/main 0bf828a: a fresh 20 USDC account on the three live pools.
+    // Pinned from origin/main 0bf828a: a fresh 20 USDC account on the three live pools. #149 moved the policy to 2.1.0
+    // (usage limits and swap totals): with the 2.0.0 reference put back, the body hashes exactly as it did.
     const d = decide(obs({ pools: [pool('pool:USDC/USDT/100', 1), pool(BTC_POOL, BTC_TICK), pool(ETH_POOL, ETH_TICK)] }), V2)
-    expect(d.premiseHash).toBe('0xba0154c8654402a8894a96446348fde417120234a0cbd39c7d3350aad927705b')
-    expect(d.decisionId).toBe('0xdfbdfb7a9da7dd24de458c414e0a2bae0fac9500e57ae74dcc6f34eaae1aa1cf')
+    const { decisionId: _id, premiseHash: _p, observationRef, waiting: _w, ...body } = d
+    const v200 = { policyId: 'conservador-live-v2', version: '2.0.0', hash: '0x8ebbf57ba5bf3abc863df041f5d19c62bc8123a799558b5ad499d441cd11158f' }
+    const premiseHash = keccak256(stringToHex(canonicalJson({ ...body, policyRef: v200 })))
+    expect(premiseHash).toBe('0xba0154c8654402a8894a96446348fde417120234a0cbd39c7d3350aad927705b')
+    expect(keccak256(stringToHex(canonicalJson({ observationRef, premiseHash })))).toBe('0xdfbdfb7a9da7dd24de458c414e0a2bae0fac9500e57ae74dcc6f34eaae1aa1cf')
   })
 
   test('a frozen bucket keeps its idle volatile token: no sell-back caused by the guard', () => {

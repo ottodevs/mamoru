@@ -30,5 +30,7 @@ export function ehgPreliminary(obs: Observation, policy: PolicyVersion, pool: Po
   const session = obs.sessions.find((s) => s.grant === grant && s.active)
   if (!session) return { gate: 'ehg', verdict: 'NO_GO', reason: 'SESSION_MISSING' }
   if (BigInt(session.validUntil) <= obs.block.timestamp) return { gate: 'ehg', verdict: 'NO_GO', reason: 'SESSION_EXPIRED' }
+  // #149: the chain would refuse it; the typed reason is what the operator turns into the renewal row.
+  if (session.usesLeft !== undefined && session.usesLeft <= 0) return { gate: 'ehg', verdict: 'NO_GO', reason: 'SESSION_USAGE_SPENT' }
   return { gate: 'ehg', verdict: 'GO', reason: 'EHG_OK' }
 }

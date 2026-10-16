@@ -1,7 +1,7 @@
 import { keccak256, stringToHex } from 'viem'
 import type { Hex } from '@mamoru/domain'
 import { amountsOf, canonicalJson, decide, pegDeviationBps, pegStep, PEG_CLEAR, stageStep, type Proposal } from '@mamoru/decide'
-import { grantKey, policyHash, type PolicyVersion } from '@mamoru/policy'
+import { computeCaps, grantKey, policyHash, usageLimitFor, type Caps, type GrantTemplate, type PolicyVersion, type Price } from '@mamoru/policy'
 import { entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
 import { token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
 import { emaTickOf, ETH_PRICE_POOL, observe, twapTick } from './observe.ts'
@@ -115,26 +115,61 @@ function drawdowns(time: number[], value: bigint[]): { maxDrawdownBps: number; w
   return { maxDrawdownBps: maxDd, worstWeekBps: worst }
 }
 
-/** Usage limit of the session a proposal runs under, or null when the policy has no such grant. */
-function limitOf(policy: PolicyVersion, grant: string): number | null {
+/** The grant template a proposal runs under (`manage:<tokenId>` is the per-position `manage`), or undefined. */
+function templateOf(policy: PolicyVersion, grant: string): GrantTemplate | undefined {
   const perPosition = /^manage:\d+$/.test(grant)
-  return policy.session.grants.find((g) => (perPosition ? g.name === 'manage' : grantKey(g) === grant))?.usageLimit ?? null
+  return policy.session.grants.find((g) => (perPosition ? g.name === 'manage' : grantKey(g) === grant))
 }
 
-function sessionUses(policy: PolicyVersion, uses: Map<string, number[]>, t0: number): SessionUse[] {
-  const out: SessionUse[] = []
-  // Code-unit order, the same on every machine: the list goes into the result hash.
-  for (const [grant, times] of [...uses.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-    const limit = limitOf(policy, grant)
-    const windows = new Map<number, number>()
-    for (const at of times) {
-      const w = Math.floor((at - t0) / policy.session.validitySeconds)
-      windows.set(w, (windows.get(w) ?? 0) + 1)
+/** Usage limit of the session a proposal runs under, at the account cap the grants are sized at; null without such a grant. */
+function limitOf(policy: PolicyVersion, grant: string, capUsdc: bigint): number | null {
+  const t = templateOf(policy, grant)
+  return t ? usageLimitFor(t, capUsdc) : null
+}
+
+/**
+ * What a proposal adds to each cumulative rule of its grant, as the chain counts it (the calldata word): the swap's
+ * `amountIn`, the mint's desired amounts. One entry per rule: [rule key, cap name, amount].
+ */
+function cumulativeSpend(t: GrantTemplate, p: Proposal): [string, string, bigint][] {
+  const out: [string, string, bigint][] = []
+  for (const [ai, a] of t.actions.entries()) {
+    for (const [ri, r] of a.params.entries()) {
+      if (typeof r.cumulative !== 'string' || !r.cumulative.startsWith('cap:')) continue
+      const v =
+        r.field === 'amountIn' ? (p.kind === 'enter_swap' ? p.amountIn : p.kind === 'harvest' ? (p.convert?.amount ?? 0n) : 0n)
+        : r.field === 'amount0Desired' && p.kind === 'enter_mint' ? p.amount0Desired
+        : r.field === 'amount1Desired' && p.kind === 'enter_mint' ? p.amount1Desired
+        : 0n
+      if (v > 0n) out.push([`${ai}:${ri}`, r.cumulative.slice(4), v])
     }
-    const peak = Math.max(0, ...windows.values())
-    out.push({ grant, limit, uses: times.length, peakPerWindow: peak, exhausted: limit !== null && peak > limit })
   }
   return out
+}
+
+/** The caps an approval signed at sample `s` carries: bps of the account cap, at that sample's prices (#149). */
+function capsAt(policy: PolicyVersion, s: Sample, price: Pricer, capUsdc: bigint): Caps {
+  const ONE = 10n ** 24n
+  const prices: Record<string, Price> = {}
+  for (const f of policy.session.caps) {
+    if (f.asset === policy.savingsAsset || prices[f.asset]) continue
+    const v = price(s, f.asset, ONE)
+    if (v === 0n) throw new Error(`no price for ${f.asset} at block ${s.block}`)
+    prices[f.asset] = { num: ONE, den: v }
+  }
+  return computeCaps(policy, capUsdc, prices)
+}
+
+type GrantTally = { uses: number; peak: number; peakSpentBps: number | null }
+
+function sessionUses(policy: PolicyVersion, tally: Map<string, GrantTally>, capUsdc: bigint): SessionUse[] {
+  // Code-unit order, the same on every machine: the list goes into the result hash.
+  return [...tally.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([grant, t]) => {
+      const limit = limitOf(policy, grant, capUsdc)
+      return { grant, limit, uses: t.uses, peakPerWindow: t.peak, peakSpentBps: t.peakSpentBps, exhausted: (limit !== null && t.peak > limit) || (t.peakSpentBps ?? 0) > 10_000 }
+    })
 }
 
 /**
@@ -157,7 +192,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   let depthWaits = 0
   let idleSum = 0
   let idleSamples = 0
-  const uses = new Map<string, number[]>()
+  const tally = new Map<string, GrantTally>()
   const count = Object.fromEntries(KINDS.map((k) => [k, 0])) as Record<OpKind, number>
   let gasSpent = 0n
   let deposited = config.deposit
@@ -166,6 +201,8 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   let refused = 0
   const enforce = (config.sessions ?? 'enforce') === 'enforce'
   const renewal = config.sessionRenewal ?? 'renewed'
+  const capUsdc = config.capUsdc ?? config.deposit
+  const refresh = renewal === 'renewed' ? config.usageRefresh : undefined
   let rangeSum = 0
   let rangeSamples = 0
   const stablesPool = policy.buckets.find((b) => b.id === 'stables')?.pools[0]
@@ -183,6 +220,20 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   if (!first) throw new Error(`no sample of the window has every pool of ${policy.policyId} and ${ETH_PRICE_POOL}`)
   const hodl = hodlBasket(ds, first, policy, config.deposit)
   let prevIndex = -1
+  // One session window: what the grants have used since the approval that opened it (#149).
+  let winStart = first.time
+  let caps = capsAt(policy, first, price, capUsdc)
+  let usedIn = new Map<string, number>()
+  let spentIn = new Map<string, bigint>()
+  let refreshAt: number | null = null
+  let usageRefreshes = 0
+  const openWindow = (s: Sample, at: number) => {
+    winStart = at
+    caps = capsAt(policy, s, price, capUsdc)
+    usedIn = new Map()
+    spentIn = new Map()
+    refreshAt = null
+  }
   const topUps = [...(config.topUps ?? [])].sort((a, b) => a.at - b.at)
   let nextTopUp = 0
   let gaps = 0
@@ -254,16 +305,30 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
         idleSamples++
       }
       const p: Proposal | null = d.proposal
-      // Sessions are renewed every `validitySeconds`; inside one window a grant has `usageLimit` uses.
-      const window = Math.floor((s.time - first.time) / policy.session.validitySeconds)
-      const limit = p ? limitOf(policy, p.grant) : null
-      const used = p ? (uses.get(p.grant) ?? []).filter((at) => Math.floor((at - first.time) / policy.session.validitySeconds) === window).length : 0
-      if (p && renewal === 'once' && window > 0) {
+      // Sessions are renewed every `validitySeconds`, and with `usageRefresh` also once the app offers it for usage;
+      // inside one window a grant has `usageLimit` uses and each cumulative rule its cap.
+      if (refreshAt !== null && s.time >= refreshAt) {
+        openWindow(s, s.time)
+        usageRefreshes++
+      } else if (renewal === 'renewed' && s.time - winStart >= policy.session.validitySeconds) {
+        let at = winStart
+        while (s.time - at >= policy.session.validitySeconds) at += policy.session.validitySeconds
+        openWindow(s, at)
+      }
+      const t = p ? templateOf(policy, p.grant) : undefined
+      const limit = t ? usageLimitFor(t, capUsdc) : null
+      const used = p ? (usedIn.get(p.grant) ?? 0) : 0
+      const spend = p && t ? cumulativeSpend(t, p) : []
+      const overCap = spend.some(([k, cap, v]) => (spentIn.get(`${p!.grant}|${k}`) ?? 0n) + v > (caps[cap] ?? 0n))
+      if (p && renewal === 'once' && s.time - first.time >= policy.session.validitySeconds) {
         refused++
         reasons.SESSION_EXPIRED = (reasons.SESSION_EXPIRED ?? 0) + 1
       } else if (p && enforce && limit !== null && used >= limit) {
         refused++
         reasons.SESSION_USAGE_SPENT = (reasons.SESSION_USAGE_SPENT ?? 0) + 1
+      } else if (p && enforce && overCap) {
+        refused++
+        reasons.POLICY_DENIED_CUMULATIVE = (reasons.POLICY_DENIED_CUMULATIVE ?? 0) + 1
       } else if (p) {
         const ps = s.pools[ds.pools.indexOf(p.pool)] as PoolSample
         const done = apply(w, p, ps, s.time, policy.execution.slippageBps)
@@ -278,7 +343,21 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
         if (done.ok) {
           gasSpent += cost
           count[p.kind]++
-          uses.set(p.grant, [...(uses.get(p.grant) ?? []), s.time])
+          const n = used + 1
+          usedIn.set(p.grant, n)
+          const g = tally.get(p.grant) ?? { uses: 0, peak: 0, peakSpentBps: null }
+          g.uses++
+          g.peak = Math.max(g.peak, n)
+          for (const [k, cap, v] of spend) {
+            const key = `${p.grant}|${k}`
+            const total = (spentIn.get(key) ?? 0n) + v
+            spentIn.set(key, total)
+            const c = caps[cap] ?? 0n
+            g.peakSpentBps = Math.max(g.peakSpentBps ?? 0, c === 0n ? Number.MAX_SAFE_INTEGER : Number((total * 10_000n) / c))
+          }
+          tally.set(p.grant, g)
+          // The app offers the renewal once a grant has used `atBps` of its limit; the owner taps `delaySeconds` later.
+          if (refresh && refreshAt === null && limit !== null && n * 10_000 >= limit * refresh.atBps) refreshAt = s.time + refresh.delaySeconds
         } else discarded++
       }
     }
@@ -312,9 +391,9 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
     ...drawdowns(series.time, series.value),
     returnBps: bps(end - deposited, deposited),
   }
-  const sessions = sessionUses(policy, uses, first.time)
+  const sessions = sessionUses(policy, tally, capUsdc)
   const pHash = policyHash(policy)
-  const facts = { simVersion: SIM_VERSION, datasetId: ds.id, policyHash: pHash, from, to, every, gaps, enforce, renewal, refused, deposit: config.deposit, topUps, gas, end, hodlEnd, fees, gasSpent, ops: ops.map(({ trail: _t, ...o }) => o), reasons, sessions }
+  const facts = { simVersion: SIM_VERSION, datasetId: ds.id, policyHash: pHash, from, to, every, gaps, enforce, renewal, refused, deposit: config.deposit, topUps, gas, end, hodlEnd, fees, gasSpent, ops: ops.map(({ trail: _t, ...o }) => o), reasons, sessions, ...(config.capUsdc === undefined ? {} : { capUsdc }), ...(refresh ? { refresh, usageRefreshes } : {}) }
   return {
     simVersion: SIM_VERSION,
     datasetId: ds.id,
@@ -325,6 +404,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
     ops,
     reasons,
     sessions,
+    usageRefreshes,
     metrics,
     capacity: { depthWaits, idleBps: idleSamples === 0 ? 0 : Math.round(idleSum / idleSamples) },
     resultHash: keccak256(stringToHex(canonicalJson(facts))) as Hex,

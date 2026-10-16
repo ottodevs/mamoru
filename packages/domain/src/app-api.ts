@@ -79,7 +79,14 @@ export type FundingView = {
   // renewal is due (inside the renewal window) and whether they already lapsed. Null or absent when not running.
   // `missing`: how many grants of its policy the account lacks (left out to fit Base's per-tx gas cap); the renew
   // route then adds them with one more approval. Absent when none is missing.
-  approval?: { validUntil: number; renewDue: boolean; expired: boolean; missing?: number } | null
+  // `usage` (otto/mamoru#149): the grant closest to the end of what the approval allows, once it has used 80% of it
+  // (its userOp count, or an entry grant's cumulative cap): what it does (`collect` fees, `rerange` or reduce, `enter`),
+  // in which pool, how much is used (bps) and whether it is `spent` (the engine has stopped doing it,
+  // SESSION_USAGE_SPENT). The renew route then renews every grant with fresh counts. Absent under 80%.
+  approval?: {
+    validUntil: number; renewDue: boolean; expired: boolean; missing?: number
+    usage?: { action: 'collect' | 'rerange' | 'enter'; pool: string | null; usedBps: number; spent: boolean }
+  } | null
   positions: {
     tokenId: string; pool: string; liquidity: string; inRange: boolean; amountUsdc: string; amountCbbtc: string
     amounts?: { token: string; amount: string; decimals: number; valueUsdc?: string }[]   // both sides of any pool, base units, each with its value in USDC

@@ -200,6 +200,7 @@ export class Engine {
       tokenId: s.grant.tokenId,
       validUntil: s.grant.userOp.validUntil,
       active: !this.ledger.get(s.permissionId)?.revoked,
+      usesLeft: Math.max(0, s.grant.userOp.usageLimit - this.ledger.usesOf(s.permissionId)),
     }))
   }
 

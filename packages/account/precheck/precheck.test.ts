@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { concat, encodeFunctionData, erc20Abi, maxUint256, type Hex } from 'viem'
+import { concat, encodeFunctionData, erc20Abi, maxUint256, parseAbi, type Hex } from 'viem'
 import { ReasonError, type Address } from '@mamoru/domain'
 import { address } from '@mamoru/registry'
 import { conservadorLabV1, instantiateGrant } from '@mamoru/policy'
@@ -58,7 +58,16 @@ describe('session pre-check', () => {
     expect(run([approve(router, 1n)], { now: NOW + 7200 })).toBe('SESSION_EXPIRED')
     const used = ledger()
     for (let i = 0; i < grant.userOp.usageLimit; i++) used.recordIncluded(PID, [])
-    expect(run([approve(router, 1n)], { ledger: used })).toBe('SESSION_MISSING')
+    expect(run([approve(router, 1n)], { ledger: used })).toBe('SESSION_USAGE_SPENT')
+  })
+  test('#149: the ledger says how much of its approval a grant has used: uses and the fullest cumulative cap', () => {
+    const l = ledger()
+    expect(l.usageOf(PID)).toEqual({ used: 0, limit: grant.userOp.usageLimit, spentBps: 0 })
+    const amountIn = caps.usdcSwapTotal / 4n
+    const swap = { target: address('SwapRouter02'), value: 0n, callData: encodeFunctionData({ abi: parseAbi(['function exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))']), functionName: 'exactInputSingle', args: [[address('USDC'), address('cbBTC'), 500, ACCOUNT, amountIn, 1n, 0n]] }) }
+    l.recordIncluded(PID, [swap])
+    expect(l.usageOf(PID)).toEqual({ used: 1, limit: grant.userOp.usageLimit, spentBps: 2_500 })
+    expect(l.usageOf(`0x${'99'.repeat(32)}`)).toBeUndefined()
   })
   test('enable-mode signature and paymaster', () => {
     expect(run([approve(router, 1n)], { signature: concat(['0x01', PID]) })).toBe('POLICY_DENIED_TARGET')

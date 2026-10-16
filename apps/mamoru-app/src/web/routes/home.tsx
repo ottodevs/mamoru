@@ -57,6 +57,9 @@ export const homeCopy = {
   renewAskTitle: "Renew Mamoru's approval",
   extendTitle: 'Mamoru is missing part of its approval: in some pools it cannot re-range or collect fees until you add it.',
   extend: 'Approve',
+  // otto/mamoru#149: a grant that has used 80% or all of what the approval allows.
+  usageSoon: (what: string, pair: string) => `Mamoru has used most of what this approval allows for ${what} in ${pair}. Renew it now so that does not stop.`,
+  usageSpent: (what: string, pair: string) => `Mamoru has used all that this approval allows for ${what} in ${pair}, so it has stopped doing that. Renew it to start again.`,
   createFirst: 'Your account is created on Base first, then the USDC is sent.',
   overCapTitle: (o: OverCap) => `This account is over the ${usdPlain(o.capUsdc)} USDC cap, so Mamoru has not started.`,
   overCapBody: (o: OverCap) => `It holds ${usd(o.usdc)} USDC. Nothing was moved. Withdraw at least ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC to an address you control, then start Mamoru.`,
@@ -666,12 +669,25 @@ export function approvalDay(validUntil: number): string {
  * grants missing), so the row mounts afresh and offers the next approval instead of staying hidden on the last result.
  */
 export function approvalRowKey(approval: NonNullable<FundingView['approval']>): string {
-  return `${approval.validUntil}-${approval.missing ?? 0}`
+  return `${approval.validUntil}-${approval.missing ?? 0}${approval.usage ? `-${approval.usage.spent ? 'spent' : 'used'}` : ''}`
+}
+
+const USAGE_WHAT: Record<NonNullable<NonNullable<FundingView['approval']>['usage']>['action'], string> = { collect: 'collecting fees', rerange: 're-ranging', enter: 'adding money' }
+
+/** The row's title: an ended approval first, then a spent grant, a due renewal, a grant near its end, a missing grant. */
+export function approvalTitle(approval: NonNullable<FundingView['approval']>): string {
+  const u = approval.usage
+  const usage = u ? (u.spent ? homeCopy.usageSpent : homeCopy.usageSoon)(USAGE_WHAT[u.action], u.pool ? pairLabel(u.pool) : 'its pools') : null
+  if (approval.expired) return homeCopy.renewEnded
+  if (u?.spent) return usage!
+  if (approval.renewDue) return homeCopy.renewSoon(approvalDay(approval.validUntil))
+  return usage ?? homeCopy.extendTitle
 }
 
 /**
- * A running account whose approval is in its last weeks, or over: one tap renews it, nothing is moved. Or one that
- * lacks grants of its plan (left out to fit Base's gas cap): one tap adds them. The renewal, when due, goes first.
+ * A running account whose approval is in its last weeks, or over, or has a grant that used 80% of what it allows
+ * (#149): one tap renews it, nothing is moved. Or one that lacks grants of its plan (left out to fit Base's gas cap):
+ * one tap adds them. The renewal, when due, goes first.
  */
 function RenewRow({ accountKey, approval }: { accountKey: string; approval: NonNullable<FundingView['approval']> }) {
   const flow = useOwnerAction(accountKey, 'renew')
@@ -682,7 +698,7 @@ function RenewRow({ accountKey, approval }: { accountKey: string; approval: NonN
 
 /** The approval row itself: what is asked, and once prepared, every line the passkey is about to sign. */
 export function ApprovalCard({ approval, summary, busy, error, onPrepare, onApprove }: { approval: NonNullable<FundingView['approval']>; summary: string[] | null; busy: string | null; error: string | null; onPrepare: () => void; onApprove: () => void }) {
-  const title = approval.expired ? homeCopy.renewEnded : approval.renewDue ? homeCopy.renewSoon(approvalDay(approval.validUntil)) : homeCopy.extendTitle
+  const title = approvalTitle(approval)
   if (summary) {
     return (
       <section className="card grid gap-3" data-testid="renew" role="status">
@@ -699,7 +715,7 @@ export function ApprovalCard({ approval, summary, busy, error, onPrepare, onAppr
         {error ? <span className="err mt-1 block">{error}</span> : null}
       </span>
       <button type="button" className="act" onClick={onPrepare} disabled={busy !== null}>
-        {busy === 'preparing' ? 'Preparing' : approval.renewDue ? homeCopy.renew : homeCopy.extend}
+        {busy === 'preparing' ? 'Preparing' : approval.renewDue || approval.usage ? homeCopy.renew : homeCopy.extend}
       </button>
     </section>
   )
@@ -894,7 +910,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
             </>
           ) : canStart ? (
             <StartRow accountKey={accountKey} funded={hasMoney(f)} />
-          ) : f.active && f.approval && (f.approval.renewDue || (f.approval.missing ?? 0) > 0) && !renewing ? (
+          ) : f.active && f.approval && (f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage) && !renewing ? (
             <RenewRow key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} />
           ) : null}
           <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />

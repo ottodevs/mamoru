@@ -70,7 +70,15 @@ export type GuardNote = {
   threshold: { fallBps: number; volBps: number }
 }
 
-export type SessionObs = { grant: string; permissionId: Hex; tokenId?: bigint; validUntil: number; active: boolean }
+export type SessionObs = {
+  grant: string
+  permissionId: Hex
+  tokenId?: bigint
+  validUntil: number
+  active: boolean
+  /** otto/mamoru#149: userOps the grant has left before its usage limit. Absent: not known (no gate on it). */
+  usesLeft?: number
+}
 
 export type PositionObs = {
   tokenId: bigint

@@ -16,7 +16,7 @@ import { activationLive, historyOps, needsRetry, opLine } from '../../src/web/li
 import { isAddress, parseUsdc } from '../../src/web/lib/owner-flow.ts'
 import { encodeQr } from '../../src/web/lib/qr.ts'
 import { localTime } from '../../src/web/lib/time.ts'
-import { ApprovalCard, approvalDay, approvalRowKey, askedBefore, engineLine, History, renewAskFor } from '../../src/web/routes/home.tsx'
+import { ApprovalCard, approvalDay, approvalRowKey, approvalTitle, askedBefore, engineLine, History, renewAskFor } from '../../src/web/routes/home.tsx'
 import { MIX } from '../../src/web/routes/onboarding.tsx'
 import { buildRouter } from '../../src/web/router.tsx'
 import { render } from './render.ts'
@@ -490,6 +490,21 @@ describe('renewing the approval', () => {
     const renewed = { validUntil: now + 365 * 86_400, renewDue: false, expired: false, missing: 4 }
     const extended = { ...renewed, missing: 2 }
     expect(new Set([approvalRowKey(due), approvalRowKey(renewed), approvalRowKey(extended)]).size).toBe(3)
+  })
+
+  test('#149: a grant near the end of its usage shows the renewal row before it stops, and says when it has stopped', async () => {
+    const year = { validUntil: now + 300 * 86_400, renewDue: false, expired: false }
+    const soon = await renderRoute('/', fixtureSession, running({ ...year, usage: { action: 'collect', pool: 'pool:USDC/cbBTC/500', usedBps: 8_000, spent: false } }))
+    expect(soon.text).toContain('Mamoru has used most of what this approval allows for collecting fees in USDC / cbBTC. Renew it now so that does not stop.')
+    expect(soon.text).toContain('Renew approval')
+    expect(soon.text).toContain('One tap with your passkey. Nothing is moved.')
+    const spent = await renderRoute('/', fixtureSession, running({ ...year, missing: 4, usage: { action: 'rerange', pool: 'pool:WETH/USDC/3000', usedBps: 10_000, spent: true } }))
+    expect(spent.text).toContain('Mamoru has used all that this approval allows for re-ranging in USDC / WETH, so it has stopped doing that. Renew it to start again.')
+    expect(spent.text).toContain('Renew approval')
+    // Spent outranks a renewal that is merely due; an approval that ended outranks both.
+    expect(approvalTitle({ ...year, renewDue: true, usage: { action: 'enter', pool: null, usedBps: 10_000, spent: true } })).toBe('Mamoru has used all that this approval allows for adding money in its pools, so it has stopped doing that. Renew it to start again.')
+    expect(approvalTitle({ ...year, expired: true, usage: { action: 'enter', pool: null, usedBps: 10_000, spent: true } })).toContain('approval has ended')
+    expect(new Set([approvalRowKey(year), approvalRowKey({ ...year, usage: { action: 'collect', pool: null, usedBps: 8_000, spent: false } }), approvalRowKey({ ...year, usage: { action: 'collect', pool: null, usedBps: 10_000, spent: true } })]).size).toBe(3)
   })
 
     test('once prepared, the row shows every line the passkey is about to sign', () => {

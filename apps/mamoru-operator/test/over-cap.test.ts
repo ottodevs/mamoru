@@ -1730,6 +1730,29 @@ describe('renewing the approval of a running account', () => {
       expect((await w.op.prepareRenew(ctx)).summary.join(' ')).toContain('revoked in the same transaction')
     })
 
+    test('#149: a grant at 80% of its usage gets the renewal row, and the renewal (not an extension) starts its counts again', async () => {
+      const { w, acc } = await capped()
+      const convert = acc.grants.find((g) => g.name === 'convert-any:pool:USDC/USDT/100')!
+      // Sized at the account cap (the 100 USDC live cap): the first tier.
+      expect(convert.grant.userOp.usageLimit).toBe(1_000)
+      expect(acc.grants.find((g) => g.name.startsWith('manage-any'))!.grant.userOp.usageLimit).toBe(2_500)
+      const harvests = (n: number) => Array.from({ length: n }, (_, i) => ({ opId: `eng-${acc.epoch}-9-op-${i}-harvest`, kind: 'enter', state: 'confirmed', updatedAt: new Date().toISOString(), permissionId: convert.permissionId }) as never)
+      acc.ops.push(...harvests(799))
+      expect((await w.op.funding(ctx)).approval?.usage).toBeUndefined()
+      acc.ops.push(...harvests(1))
+      expect((await w.op.funding(ctx)).approval?.usage).toEqual({ action: 'collect', pool: 'pool:USDC/USDT/100', usedBps: 8_000, spent: false })
+      acc.ops.push(...harvests(200))
+      expect((await w.op.funding(ctx)).approval?.usage).toMatchObject({ usedBps: 10_000, spent: true })
+      // Grants are missing too, but fresh counts need a renewal: it goes first, and says what the counts become.
+      const old = acc.grants.map((g) => g.permissionId)
+      const tx = await w.op.prepareRenew(ctx)
+      expect(tx.summary.join(' ')).toContain('revoked in the same transaction')
+      expect(tx.summary).toContain('Its counts start again: up to 1,000 fee collections, 2,500 re-range or reduce steps, 3,000 entry swaps, 1,000 entry mints per pool')
+      await w.op.submit(ctx, 'renew', sign(tx))
+      expect(old.every((id) => acc.revoked.includes(id))).toBe(true)
+      expect((await w.op.funding(ctx)).approval?.usage).toBeUndefined()
+    })
+
     test('a renewal that is due goes first, with what fits; the missing grants are added after it', async () => {
       const { w, acc } = await capped()
       acc.grants = due(acc.grants)

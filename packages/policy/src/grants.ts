@@ -1,4 +1,14 @@
-import type { GrantName, GrantTemplate } from './types.ts'
+import type { GrantName, GrantTemplate, UsageTier } from './types.ts'
+
+/** A grant's usage limit: one number for every account, or tiers by account cap (#149). */
+export type Usage = number | readonly UsageTier[]
+
+function usageOf(u: Usage): Pick<GrantTemplate, 'usageLimit' | 'usageByCap'> {
+  if (typeof u === 'number') return { usageLimit: u }
+  if (!u.length) throw new Error('usage tiers: none given')
+  for (let i = 1; i < u.length; i++) if (u[i]!.upToUsdc <= u[i - 1]!.upToUsdc) throw new Error('usage tiers: upToUsdc must ascend')
+  return { usageLimit: u[0]!.usageLimit, usageByCap: u }
+}
 
 const APPROVE = 'approve(address,uint256)'
 const EXACT_INPUT_SINGLE = 'exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))'
@@ -33,13 +43,13 @@ export type PairSpec = {
  * with `tokenId EQUAL <id>`. The owner activates it only for an id this
  * session minted with enter-mint (plan section 12.4).
  */
-export function pairGrants(p: PairSpec, usage: { enterSwap: number; enterMint: number; manage: number }): GrantTemplate[] {
+export function pairGrants(p: PairSpec, usage: { enterSwap: Usage; enterMint: Usage; manage: Usage }): GrantTemplate[] {
   const c = p.caps
   const templates: GrantTemplate[] = [
     {
       name: 'enter-swap',
       perPosition: false,
-      usageLimit: usage.enterSwap,
+      ...usageOf(usage.enterSwap),
       actions: [
         {
           target: p.stable,
@@ -74,7 +84,7 @@ export function pairGrants(p: PairSpec, usage: { enterSwap: number; enterMint: n
     {
       name: 'enter-mint',
       perPosition: false,
-      usageLimit: usage.enterMint,
+      ...usageOf(usage.enterMint),
       actions: [
         {
           target: p.token0,
@@ -125,7 +135,7 @@ export function pairGrants(p: PairSpec, usage: { enterSwap: number; enterMint: n
     {
       name: 'manage',
       perPosition: true,
-      usageLimit: usage.manage,
+      ...usageOf(usage.manage),
       actions: [
         {
           target: 'NonfungiblePositionManager',
@@ -207,7 +217,7 @@ export function grantKeyFor(policy: { session: { grants: GrantTemplate[] } }, na
  * - `manage-any`: re-range, reduce and re-mint (decrease, collect, burn, mint).
  * - `convert-any`: harvest (collect, then volatile -> savings asset).
  */
-export function manageAnyGrants(p: PairSpec, usage: { manage: number; convert: number }): GrantTemplate[] {
+export function manageAnyGrants(p: PairSpec, usage: { manage: Usage; convert: Usage }): GrantTemplate[] {
   const c = p.caps
   const collectToAccount = {
     target: 'NonfungiblePositionManager',
@@ -218,7 +228,7 @@ export function manageAnyGrants(p: PairSpec, usage: { manage: number; convert: n
     {
       name: 'manage-any',
       perPosition: false,
-      usageLimit: usage.manage,
+      ...usageOf(usage.manage),
       actions: [
         // UniActionPolicy refuses an action with no rule (PolicyNotInitialized): `tokenId > 0` admits any id.
         { target: 'NonfungiblePositionManager', signature: DECREASE, params: [{ field: 'tokenId', index: 0, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_POSITION' }] },
@@ -257,7 +267,7 @@ export function manageAnyGrants(p: PairSpec, usage: { manage: number; convert: n
     {
       name: 'convert-any',
       perPosition: false,
-      usageLimit: usage.convert,
+      ...usageOf(usage.convert),
       actions: [
         { ...collectToAccount, params: [...collectToAccount.params] },
         {

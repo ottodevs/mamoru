@@ -145,6 +145,19 @@ describe('decide', () => {
     expect(d.reason).toBe('SESSION_MISSING')
   })
 
+  test('#149: a grant with no uses left is refused with its own reason, before anything is built', () => {
+    const spent = [
+      { grant: 'enter-swap', permissionId: `0x${'01'.repeat(32)}` as const, validUntil: 10_000, active: true, usesLeft: 0 },
+      { grant: 'enter-mint', permissionId: `0x${'02'.repeat(32)}` as const, validUntil: 10_000, active: true, usesLeft: 5 },
+    ]
+    const d = decide(obs({ sessions: spent, balances: { USDC: 10_000_000_000n } }), conservadorLabV1)
+    expect(d.proposal).toBeNull()
+    expect(d.reason).toBe('SESSION_USAGE_SPENT')
+    // One use left is enough.
+    const one = decide(obs({ sessions: spent.map((x) => ({ ...x, usesLeft: 1 })), balances: { USDC: 10_000_000_000n } }), conservadorLabV1)
+    expect(one.proposal?.kind).toBe('enter_swap')
+  })
+
   test('a busy slot holds', () => {
     const d = decide(obs({ slot: { opId: 'op-1', state: 'submitted' }, balances: { USDC: 10_000_000_000n } }), conservadorLabV1)
     expect(d.reason).toBe('DECIDE_SLOT_BUSY')

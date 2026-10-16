@@ -5,6 +5,7 @@ export {
   assertPolicyChain,
   computeCaps,
   instantiateGrant,
+  usageLimitFor,
   policyHash,
   type Caps,
   type GrantContext,

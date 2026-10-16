@@ -159,19 +159,60 @@ describe('run', () => {
     for (const s of paid.sessions) expect(s.exhausted).toBe(false)
   }, SLOW)
 
+  /** conservador-live-v2 with the 2.0.0 convert-any limit of 64 in every pool, whatever the cap. */
+  const tight = { ...conservadorLiveV2, session: { ...conservadorLiveV2.session, grants: conservadorLiveV2.session.grants.map((g) => (g.name === 'convert-any' ? { ...g, usageLimit: 64, usageByCap: undefined } : g)) } }
+  // Fees that clear the bar at every review: more harvests in one session window than a convert-any limit of 64.
+  const busy = () => syntheticDataset({ samples: 300, growth: [1n << 110n, 1n << 126n, 1n << 100n] })
+
   test('a strategy that harvests more often than its grant allows is flagged', () => {
-    // Fees that clear the bar at every review: more harvests in one session window than the convert-any limit of 64.
-    const ds = syntheticDataset({ samples: 300, growth: [1n << 110n, 1n << 126n, 1n << 100n] })
-    const r = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT, sessions: 'report' })
+    const ds = busy()
+    const r = runBacktest(ds, tight, { deposit: DEPOSIT, sessions: 'report' })
     const s = r.sessions.find((x) => x.grant === 'convert-any:pool:USDC/USDT/100')!
     expect(s.limit).toBe(64)
     expect(s.peakPerWindow).toBeGreaterThan(64)
     expect(s.exhausted).toBe(true)
     // Enforced, as on chain: the grant stops at its limit and the rest are refused.
-    const e = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT })
+    const e = runBacktest(ds, tight, { deposit: DEPOSIT })
     expect(e.sessions.find((x) => x.grant === 'convert-any:pool:USDC/USDT/100')).toMatchObject({ peakPerWindow: 64, exhausted: false })
     expect(e.metrics.refused).toBeGreaterThan(0)
     expect(e.reasons.SESSION_USAGE_SPENT).toBe(e.metrics.refused)
+  }, SLOW)
+
+  test('#149: the live limits are sized at the account cap, and the same harvests fit them', () => {
+    const r = runBacktest(busy(), conservadorLiveV2, { deposit: DEPOSIT })
+    expect(r.sessions.find((x) => x.grant === 'convert-any:pool:USDC/USDT/100')?.limit).toBe(1_000)
+    expect(runBacktest(busy(), conservadorLiveV2, { deposit: DEPOSIT, capUsdc: 100_000n * USDC, sessions: 'report' }).sessions.find((x) => x.grant === 'convert-any:pool:USDC/USDT/100')?.limit).toBe(32_000)
+    expect(r.reasons.SESSION_USAGE_SPENT).toBeUndefined()
+  }, SLOW)
+
+  test('#149: an owner who renews when the app offers it at 80% is never refused for usage', () => {
+    const ds = busy()
+    const r = runBacktest(ds, tight, { deposit: DEPOSIT, usageRefresh: { atBps: 8_000, delaySeconds: 600 } })
+    expect(r.usageRefreshes).toBeGreaterThan(0)
+    expect(r.reasons.SESSION_USAGE_SPENT).toBeUndefined()
+    // Each window starts with all its uses: the peak of one window stays under the limit.
+    for (const s of r.sessions) expect(s.exhausted).toBe(false)
+    expect(r.sessions.find((x) => x.grant === 'convert-any:pool:USDC/USDT/100')!.uses).toBeGreaterThan(64)
+    // A tap that comes too late (a day, over 300 samples of 5 minutes) leaves the grant spent in between.
+    const late = runBacktest(ds, tight, { deposit: DEPOSIT, usageRefresh: { atBps: 8_000, delaySeconds: 86_400 } })
+    expect(late.reasons.SESSION_USAGE_SPENT).toBeGreaterThan(0)
+  }, SLOW)
+
+  test('#149: an entry total the swaps outgrow is refused as the chain refuses it', () => {
+    // A swap total of 1 bp of the cap: the first entry swap of every bucket is over it.
+    const small = { ...conservadorLiveV2, session: { ...conservadorLiveV2.session, caps: conservadorLiveV2.session.caps.map((c) => (c.name.endsWith('SwapTotal') ? { ...c, bpsOfDeposit: 1 } : c)) } }
+    const ds = syntheticDataset({ samples: 40 })
+    const e = runBacktest(ds, small, { deposit: DEPOSIT })
+    expect(e.reasons.POLICY_DENIED_CUMULATIVE).toBeGreaterThan(0)
+    expect(e.metrics.operations.enter_swap).toBe(0)
+    const r = runBacktest(ds, small, { deposit: DEPOSIT, sessions: 'report' })
+    const s = r.sessions.find((x) => x.grant.startsWith('enter-swap'))!
+    expect(s.peakSpentBps).toBeGreaterThan(10_000)
+    expect(s.exhausted).toBe(true)
+    // The live totals cover the same entries.
+    const live = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT })
+    expect(live.reasons.POLICY_DENIED_CUMULATIVE).toBeUndefined()
+    expect(live.metrics.operations.enter_swap).toBeGreaterThan(0)
   }, SLOW)
 
   test('a price that walks out of the range is re-ranged after the cooldown, and that costs against holding', () => {

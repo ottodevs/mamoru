@@ -52,9 +52,29 @@ export type GrantTemplate = {
   pool?: RegistryName
   /** Activated by the owner only for a tokenId already admitted from enter-mint. */
   perPosition: boolean
+  /** userOps one approval allows under this grant. With `usageByCap`, the limit of an account cap under its first tier. */
   usageLimit: number
+  /**
+   * otto/mamoru#149: the usage limit by the account cap the grant is sized at (raw savings units), so one approval lasts
+   * its whole validity at that size. Ascending by `upToUsdc`; the first tier at or above the cap applies, the last one
+   * above every tier. Never above MAX_USAGE_LIMIT. Absent: `usageLimit` for every cap.
+   */
+  usageByCap?: readonly UsageTier[]
   actions: ActionRuleTemplate[]
 }
+
+export type UsageTier = { upToUsdc: bigint; usageLimit: number }
+
+/**
+ * Hard ceiling of any grant's usage limit (#149). A usage limit is not what bounds a leaked session key's reach: every
+ * collect, mint and swap pays the account (pinned recipient), so a key can only lose value through bad prices, at most a
+ * per-call cap per userOp, and 64 convert-any uses (2.0.0) already reached past a whole pair. It bounds how many userOps
+ * the account's gas pays for, so it is never unbounded.
+ */
+export const MAX_USAGE_LIMIT = 100_000
+
+/** Share of a grant's usage limit after which the app offers the renewal (#149): before it is spent, never after. */
+export const USAGE_RENEW_BPS = 8_000
 
 export type CapFormula = {
   name: string

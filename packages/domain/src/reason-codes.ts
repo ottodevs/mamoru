@@ -22,6 +22,8 @@ export const REASON_CODES = [
   'SESSION_ACTIVE',
   'SESSION_MISSING',
   'SESSION_EXPIRED',
+  // otto/mamoru#149: the grant has used every userOp its approval allows; a renewal restores them.
+  'SESSION_USAGE_SPENT',
   'SESSION_REVOKED',
   'SESSION_RENEWAL_DUE',
   'SESSION_POSITION_OUT_OF_SCOPE',

@@ -6,7 +6,7 @@ import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, smart
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, type SimCallResult } from '@mamoru/rpc'
-import { POLICIES, computeCaps, grantKey, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
+import { POLICIES, USAGE_RENEW_BPS, computeCaps, grantKey, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -585,7 +585,33 @@ export class Operator {
     const validUntil = Math.min(...untils)
     const left = validUntil - Math.floor(Date.now() / 1000)
     const missing = this.missingGrants(acc).length
-    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, ...(missing ? { missing } : {}) }
+    const usage = this.usageView(acc)
+    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}) }
+  }
+
+  /**
+   * otto/mamoru#149: the engine grant closest to the end of what its approval allows, once it has used USAGE_RENEW_BPS
+   * of it: its usage limit (userOps the chain included under it) or, for an entry grant, its fullest cumulative cap.
+   * The renewal row offers a renewal from then on, so the engine is never blocked silently; `spent` says it already is
+   * (SESSION_USAGE_SPENT). Counted by the running engine's ledger, else by the confirmed operations stored for the
+   * account. Null when every grant is under the threshold.
+   */
+  usageView(acc: AccountState): NonNullable<NonNullable<FundingView['approval']>['usage']> | null {
+    const ledger = this.runners.get(acc.accountKey)?.engine.ledger
+    let worst: { grant: string; usedBps: number } | null = null
+    for (const g of acc.grants) {
+      const u = ledger?.usageOf(g.permissionId)
+      const limit = g.grant.userOp.usageLimit
+      const id = g.permissionId.toLowerCase()
+      const used = u?.used ?? acc.ops.filter((o) => o.state === 'confirmed' && o.permissionId?.toLowerCase() === id).length
+      const usedBps = Math.max(limit > 0 ? Math.floor((used * 10_000) / limit) : 10_000, u?.spentBps ?? 0)
+      if (!worst || usedBps > worst.usedBps) worst = { grant: g.name, usedBps }
+    }
+    if (!worst || worst.usedBps < USAGE_RENEW_BPS) return null
+    const pool = worst.grant.split(':').slice(1).join(':')
+    const name = worst.grant.split(':')[0]!
+    const action = name === 'convert-any' ? 'collect' : name === 'manage-any' ? 'rerange' : 'enter'
+    return { action, pool: pool.startsWith('pool:') ? pool : null, usedBps: Math.min(worst.usedBps, 10_000), spent: worst.usedBps >= 10_000 }
   }
 
   /**
@@ -807,6 +833,8 @@ export class Operator {
         validUntil: t + policy.session.validitySeconds,
         caps,
         admittedTokenIds: [],
+        // #149: usage limits sized for the approval's validity at this account cap.
+        capUsdc: this.cap,
       }),
     )
     // A first approval takes as many grants as fit the gas cap. A renewal takes exactly the ones the account has
@@ -844,7 +872,10 @@ export class Operator {
     // engine has are revoked on chain and only a full renewal (which revokes everything and enables a fresh set) is
     // safe to build on them.
     const missing = this.missingGrants(acc)
-    if (missing.length && !this.approvalView(acc)?.renewDue && !this.unsettledRenewalGrants(acc).length) return this.planExtend(acc, live, policy, r, missing)
+    // #149: a grant near the end of its usage needs fresh counts, which only a full renewal gives (an extension keeps the
+    // grants the account has): it goes first, like a due renewal.
+    const view = this.approvalView(acc)
+    if (missing.length && !view?.renewDue && !view?.usage && !this.unsettledRenewalGrants(acc).length) return this.planExtend(acc, live, policy, r, missing)
     // The grants it replaces are revoked in the same Safe transaction, always: two sets are never enabled at once
     // and each limit exists once. Measured on Base: revoking eight grants is about 1.45M gas on top of the 12.7M that
     // enabling eight takes. When the whole does not fit the cap, manage-any/convert-any pairs are left out of the new
@@ -862,7 +893,8 @@ export class Operator {
     const liveManage = stored.filter((g) => g.name.startsWith('manage-any') || g.name.startsWith('convert-any')).map((g) => g.name)
     const summary = [
       `Renew Mamoru's approval on your Safe ${live.safe}`,
-      `Engine key ${sessionKey} keeps the same limits, for ${Math.round(policy.session.validitySeconds / 86_400)} more days`,
+      `Engine key ${sessionKey} keeps the same permissions, for ${Math.round(policy.session.validitySeconds / 86_400)} more days`,
+      this.usageLine(stored),
       'The approval it replaces is revoked in the same transaction',
       ...(dropped.length ? [`Re-ranging and collecting fees in ${this.poolsOf(dropped)} needs one more approval after this one`] : []),
       ...(liveManage.length
@@ -917,6 +949,19 @@ export class Operator {
       }
       ks = ks.filter((k) => !droppable[i]!.includes(k))
     }
+  }
+
+  /** #149: what the renewed grants allow, counted again from zero: the limit of each kind among `stored` (the same in every pool). */
+  private usageLine(stored: StoredGrant[]): string {
+    const most = (prefix: string) => Math.max(0, ...stored.filter((g) => g.name.startsWith(prefix)).map((g) => g.grant.userOp.usageLimit))
+    const n = (v: number) => v.toLocaleString('en-US')
+    const parts = [
+      most('convert-any') ? `${n(most('convert-any'))} fee collections` : null,
+      most('manage-any') ? `${n(most('manage-any'))} re-range or reduce steps` : null,
+      most('enter-swap') ? `${n(most('enter-swap'))} entry swaps` : null,
+      most('enter-mint') ? `${n(most('enter-mint'))} entry mints` : null,
+    ].filter((x): x is string => x !== null)
+    return `Its counts start again: up to ${parts.join(', ')} per pool`
   }
 
   /** "cbBTC and WETH": the tokens other than USDC of the pools named in a set of grant keys (what a harvest converts). */

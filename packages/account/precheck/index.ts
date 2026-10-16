@@ -59,6 +59,25 @@ export class SessionLedger {
     }
   }
 
+  /**
+   * otto/mamoru#149: how much of its approval a grant has used, from the userOps the chain included: uses against the
+   * usage limit, and the fullest cumulative rule (basis points of its cap; null when the grant has none).
+   */
+  usageOf(permissionId: Hex): { used: number; limit: number; spentBps: number | null } | undefined {
+    const known = this.grants.get(permissionId.toLowerCase())
+    if (!known) return undefined
+    let spentBps: number | null = null
+    for (const [ai, a] of known.grant.actions.entries()) {
+      for (const [ri, rule] of a.params.entries()) {
+        if (rule.cumulativeLimit === undefined) continue
+        const used = this.usedOf(cumulativeKey(permissionId, ai, ri))
+        const bps = rule.cumulativeLimit === 0n ? (used > 0n ? 10_000 : 0) : Number((used * 10_000n) / rule.cumulativeLimit)
+        spentBps = Math.max(spentBps ?? 0, bps)
+      }
+    }
+    return { used: this.usesOf(permissionId), limit: known.grant.userOp.usageLimit, spentBps }
+  }
+
   clone(): SessionLedger {
     const l = new SessionLedger()
     for (const [k, v] of this.grants) l.grants.set(k, { ...v })
@@ -176,7 +195,7 @@ export function precheck(op: SessionUserOp, ctx: { chainId: number; now: number;
   if (ctx.chainId !== g.chainId) return deny('SIGN_CHAIN_NOT_ALLOWED', `chain ${ctx.chainId}, grant ${g.chainId}`, permissionId)
   if (!isAddressEqual(op.sender, g.account)) return deny('SESSION_MISSING', 'grant is for another account', permissionId)
   if (ctx.now < g.userOp.validAfter || ctx.now > g.userOp.validUntil) return deny('SESSION_EXPIRED', 'outside time frame', permissionId)
-  if (ctx.ledger.usesOf(permissionId) >= g.userOp.usageLimit) return deny('SESSION_MISSING', 'usage limit reached', permissionId)
+  if (ctx.ledger.usesOf(permissionId) >= g.userOp.usageLimit) return deny('SESSION_USAGE_SPENT', 'usage limit reached', permissionId)
   if (op.paymaster || (op.paymasterAndData && op.paymasterAndData !== '0x')) {
     return deny('POLICY_DENIED_TARGET', 'paymaster not permitted', permissionId)
   }

@@ -135,7 +135,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     const a = allocate(obs, policy, unsafeDeposit, frozen)
     // Only where the next step has a live session: without one it never goes and the token would wait for ever.
     // A mint after a re-range runs under manage-any, as below.
-    const live = (grant: string) => obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp)
+    const live = (grant: string) => obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
     const needs = (p: { pool: string; grant: string }) => (remint && p.grant.startsWith('enter-mint') ? anyKey(policy, 'manage-any', p.pool) : p.grant)
     pendingMint = new Set(a.pendingMint.filter((p) => live(needs(p))).map((p) => p.pool))
     // Lab (#101 round 3): a bucket frozen by the depeg guard says so, not that it waits for a fall.

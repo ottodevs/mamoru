@@ -2,7 +2,7 @@ import { keccak256, stringToHex, toFunctionSelector } from 'viem'
 import { FORBIDDEN_LAB_CHAIN_IDS, BASE_CHAIN_ID, ReasonError, type Address, type Hex } from '@mamoru/domain'
 import { address } from '@mamoru/registry'
 import { grantKey } from './grants.ts'
-import type { GrantName, PolicyVersion, RefTemplate, ResolvedActionRule, SessionGrant } from './types.ts'
+import { MAX_USAGE_LIMIT, type GrantName, type GrantTemplate, type PolicyVersion, type RefTemplate, type ResolvedActionRule, type SessionGrant } from './types.ts'
 
 function canonical(value: unknown): unknown {
   if (typeof value === 'bigint') return value.toString()
@@ -65,6 +65,19 @@ export type GrantContext = {
   tokenId?: bigint
   /** Positions minted by this session's enter-mint. A manage grant cannot name any other id. */
   admittedTokenIds?: readonly bigint[]
+  /** Account cap the grant is sized at (raw savings units): picks the usage tier (#149). Absent: the template's `usageLimit`. */
+  capUsdc?: bigint
+}
+
+/**
+ * The usage limit of `template` for an account sized at `capUsdc` (#149): the first tier at or above the cap, the last
+ * one above every tier, `usageLimit` without tiers or without a cap. Refuses a limit over MAX_USAGE_LIMIT.
+ */
+export function usageLimitFor(template: Pick<GrantTemplate, 'name' | 'usageLimit' | 'usageByCap'>, capUsdc?: bigint): number {
+  const tiers = template.usageByCap
+  const limit = !tiers?.length || capUsdc === undefined ? template.usageLimit : (tiers.find((t) => capUsdc <= t.upToUsdc) ?? tiers.at(-1)!).usageLimit
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_USAGE_LIMIT) throw new Error(`grant ${template.name}: usage limit ${limit} outside 1..${MAX_USAGE_LIMIT}`)
+  return limit
 }
 
 function resolveRef(ref: RefTemplate, ctx: GrantContext): bigint {
@@ -125,7 +138,7 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
     account: ctx.account,
     sessionValidator: 'OwnableValidator',
     sessionKey: ctx.sessionKey,
-    userOp: { validAfter: ctx.validAfter, validUntil: ctx.validUntil, usageLimit: template.usageLimit },
+    userOp: { validAfter: ctx.validAfter, validUntil: ctx.validUntil, usageLimit: usageLimitFor(template, ctx.capUsdc) },
     permitERC4337Paymaster: false,
     erc7739: 'none',
     fallbackAction: 'none',

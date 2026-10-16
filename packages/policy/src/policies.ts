@@ -1,5 +1,5 @@
 import { manageAnyGrants, pairGrants } from './grants.ts'
-import type { CapFormula, PolicyVersion } from './types.ts'
+import type { CapFormula, PolicyVersion, UsageTier } from './types.ts'
 
 const usdcCbbtcCaps: CapFormula[] = [
   { name: 'usdcSwapPerCall', asset: 'USDC', bpsOfDeposit: 2500 },
@@ -94,12 +94,38 @@ export function withTestOverrides(policy: PolicyVersion, env: Record<string, str
   return { ...policy, range: { ...policy.range, cooldownSeconds: Number(env.MAMORU_TEST_RERANGE_COOLDOWN_S) } }
 }
 
+const USDC = 1_000_000n
+
+/**
+ * otto/mamoru#149: usage limits of the live v2 grants, for one approval to last its 365 days. Measured in the Lab
+ * (conservador-live-v2, with and without depth sizing, Sep 2026, Sep 2025, Apr 2026, Jun 2025, Dec 2024, Oct 2025):
+ * the worst 30 days of any pool, crash weeks counted as if a whole month were a crash, times 12 and then 1.25.
+ * Harvests (convert-any) grow with the account; re-ranges, reduces and entries do not.
+ * Worst 30 days per pool at 1k / 10k / 100k / 1M USDC: convert-any 60 / 390 / 2,037 / 4,816; manage-any 99 / 124 / 159 /
+ * 64; enter-swap 43 / 133 / 176 / 48; enter-mint 9 / 9 / 9 / 43.
+ */
+const CONVERT_ANY_BY_CAP: readonly UsageTier[] = [
+  { upToUsdc: 1_000n * USDC, usageLimit: 1_000 },
+  { upToUsdc: 10_000n * USDC, usageLimit: 6_000 },
+  { upToUsdc: 100_000n * USDC, usageLimit: 32_000 },
+  { upToUsdc: 1_000_000n * USDC, usageLimit: 75_000 },
+]
+const LIVE_USAGE = { enterSwap: 3_000, enterMint: 1_000, manageAny: 2_500 }
+
+/**
+ * #149: entry swaps add up to the cumulative cap of enter-swap, and target-weights re-balances with them: Sep 2026 used
+ * 60-67% of the stables total in one month on top of the first entry. The swap totals are this many times the per-pair
+ * share of the cap, so a year of that fits (12 months x 0.67 + the entry, 8.3x, with 1.45x margin). Mint totals stay one
+ * entry: re-mints after a re-range run under manage-any, and in the Lab enter-mint only ever paid the first entry.
+ */
+const SWAP_TOTAL_YEARS = 12
+
 /** One pair of a multi-pool policy: caps named `<prefix>…`, sized in bps of the account cap. */
 function pairOf(prefix: string, pool: string, stable: string, volatile: string, token0: string, token1: string, fee: number, bps: { swapPerCall: number; swapTotal: number; mint: number }) {
   const n = (s: string) => `${prefix}${s}`
   const caps: CapFormula[] = [
     { name: n('SwapPerCall'), asset: stable, bpsOfDeposit: bps.swapPerCall },
-    { name: n('SwapTotal'), asset: stable, bpsOfDeposit: bps.swapTotal },
+    { name: n('SwapTotal'), asset: stable, bpsOfDeposit: bps.swapTotal * SWAP_TOTAL_YEARS },
     { name: n('Mint0'), asset: token0, bpsOfDeposit: bps.mint },
     { name: n('Mint1'), asset: token1, bpsOfDeposit: bps.mint },
     { name: n('ConvertPerCall'), asset: volatile, bpsOfDeposit: bps.mint },
@@ -122,13 +148,13 @@ function pairOf(prefix: string, pool: string, stable: string, volatile: string, 
         volatileConvertTotal: n('ConvertTotal'),
       },
     },
-    { enterSwap: 16, enterMint: 16, manage: 64 },
+    { enterSwap: LIVE_USAGE.enterSwap, enterMint: LIVE_USAGE.enterMint, manage: 64 },
   )
   // Live manage grants (owner decision 2026-09-26): re-range, reduce and harvest any position of this pair.
   grants.push(
     ...manageAnyGrants(
       { stable, volatile, token0, token1, fee, pool, caps: { stableSwapPerCall: n('SwapPerCall'), stableSwapTotal: n('SwapTotal'), mint0: n('Mint0'), mint1: n('Mint1'), volatileConvertPerCall: n('ConvertPerCall'), volatileConvertTotal: n('ConvertTotal') } },
-      { manage: 256, convert: 64 },
+      { manage: LIVE_USAGE.manageAny, convert: CONVERT_ANY_BY_CAP },
     ),
   )
   return { caps, grants }
@@ -145,12 +171,15 @@ const riskPair = pairOf('risk', 'pool:WETH/USDC/3000', 'USDC', 'WETH', 'WETH', '
  * - btc-usdc 40%: USDC/cbBTC 0.05%;
  * - risk 10%: WETH/USDC 0.3% (deeper than 0.05% in active liquidity).
  * One enter-swap and one enter-mint grant per pair, all enabled by the one owner activation. Caps are bps of the
- * account cap (LIVE_CAP_USDC) with room for one entry per pool plus top-ups; usage limits leave 16 ops per grant.
+ * account cap (LIVE_CAP_USDC) with room for one entry per pool plus top-ups.
+ * 2.1.0 (#149): usage limits and the entry swap totals sized for the approval's 365 days at the account cap (see
+ * CONVERT_ANY_BY_CAP and SWAP_TOTAL_YEARS). Accounts approved under 2.0.0 keep the limits they signed (16 entries,
+ * 256 manage-any, 64 convert-any per pool) until a renewal, which the app offers when a grant has used 80% of them.
  */
 export const conservadorLiveV2: PolicyVersion = {
   ...conservadorLiveV1,
   policyId: 'conservador-live-v2',
-  version: '2.0.0',
+  version: '2.1.0',
   buckets: [
     { id: 'stables', preference: 5000, pools: ['pool:USDC/USDT/100'] },
     { id: 'btc-usdc', preference: 4000, pools: ['pool:USDC/cbBTC/500'] },
