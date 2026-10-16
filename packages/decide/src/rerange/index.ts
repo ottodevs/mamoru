@@ -54,7 +54,8 @@ export function positionValue(p: PositionObs, pool: PoolObs, savings: RegistryNa
 export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionObs, pool: PoolObs): { code: ReasonCode | null; proposal: RerangeProposal | null } {
   // A position with no liquidity has no range to keep: its tokens are only owed, not at risk of the price.
   if (!hasManageAny(policy) || policy.range.adjust !== 'on_out_of_range' || p.liquidity === 0n) return { code: null, proposal: null }
-  const proposal: RerangeProposal = { kind: 'rerange', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity: p.liquidity }
+  // Built only when proposed: a pool without its own manage-any grant must not throw before the trigger says so.
+  const proposal = (): RerangeProposal => ({ kind: 'rerange', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity: p.liquidity })
   const lazy = policy.range.lazy
   if (lazy) {
     // Lab (#101 experiment 4): past the edge by the buffer, out long enough, and worth its cost; no near-edge trigger.
@@ -66,7 +67,7 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
     if (lazy.minDwellSeconds > 0 && (since === null || obs.block.timestamp - since < BigInt(lazy.minDwellSeconds))) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
     const w = rerangeWorth(obs, policy, p, pool, lazy)
     if (w && !w.worth) return { code: 'DECIDE_RANGE_BELOW_COST', proposal: null }
-    return { code: 'DECIDE_RANGE_ADJUST', proposal }
+    return { code: 'DECIDE_RANGE_ADJUST', proposal: proposal() }
   }
   const width = p.tickUpper - p.tickLower
   const outside = pool.tick < p.tickLower || pool.tick >= p.tickUpper
@@ -78,7 +79,7 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
   if (!outside && !near && !widen) return { code: null, proposal: null }
   const last = obs.lastRerangeAt ?? null
   if (last !== null && obs.block.timestamp - last < BigInt(policy.range.cooldownSeconds)) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
-  return { code: 'DECIDE_RANGE_ADJUST', proposal }
+  return { code: 'DECIDE_RANGE_ADJUST', proposal: proposal() }
 }
 
 export type BucketValue = { bucket: string; target: bigint; value: bigint; pool: RegistryName | null }

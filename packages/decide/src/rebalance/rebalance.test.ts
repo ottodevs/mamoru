@@ -89,6 +89,12 @@ describe('lazy re-range (#101 experiment 4)', () => {
     expect(rich.kind).toBe('rerange')
   })
 
+  test('a position in range in a pool without its own manage-any grant does not throw', () => {
+    const p: PolicyVersion = { ...V2, range: { ...V2.range, lazy: { edgeBufferTicks: 0, minDwellSeconds: 0, horizonSeconds: 86_400, lvrWeightBps: 10_000 } }, session: { ...V2.session, grants: V2.session.grants.filter((g) => !(g.name === 'manage-any' && g.pool === BTC_POOL)) } }
+    const o = obs(p, { balances: BALANCED, positions: [position()], pools: [pool(BTC_POOL, TICK)] })
+    expect(() => decide(o, p)).not.toThrow()
+  })
+
   test('rerangeWorth: costs are positive, LVR scales with the horizon and its weight, fees with the horizon', () => {
     const p = lazy()
     const o = obs(p, { positions: [position()], pools: [pool(BTC_POOL, TICK + 1500)], guard: market(1n << 100n, 6000) })
