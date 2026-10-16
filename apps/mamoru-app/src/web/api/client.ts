@@ -20,6 +20,7 @@ import type {
   TransferPlan,
   TransferRequest,
   WithdrawAsset,
+  YieldLedgerView,
 } from '@mamoru/domain'
 
 // Every call goes to same-origin /api (FR-DSH-019). The SPA never reaches RPC, bundler or MultiBaas.
@@ -42,6 +43,8 @@ export type ApiClient = {
   funding(accountKey: string): Promise<FundingView>
   /** What the account address holds on chains Mamoru does not run on. Never part of the balance. */
   otherChains(accountKey: string): Promise<OtherChainsView>
+  /** otto/mamoru#129: uncollected fees, collected, gas Mamoru paid and value vs hold, from the yield ledger. */
+  yieldLedger(accountKey: string): Promise<YieldLedgerView>
   ops(accountKey: string): Promise<{ ops: OpView[] }>
   activatePrepare(accountKey: string): Promise<OwnerTxToSign>
   activate(accountKey: string, sig: OwnerSignature): Promise<OpView>
@@ -106,6 +109,7 @@ export const httpClient: ApiClient = {
     request<{ ok: true }>('/api/onboarding/recovery-ack', { method: 'POST', body: JSON.stringify({ accountKey }) }),
   funding: (k) => request<FundingView>(acct(k, 'funding')),
   otherChains: (k) => request<OtherChainsView>(acct(k, 'other-chains')),
+  yieldLedger: (k) => request<YieldLedgerView>(acct(k, 'yield')),
   ops: (k) => request<{ ops: OpView[] }>(acct(k, 'ops')),
   activatePrepare: (k) => post<OwnerTxToSign>(acct(k, 'activate/prepare')),
   activate: (k, sig) => post<OpView>(acct(k, 'activate'), sig),

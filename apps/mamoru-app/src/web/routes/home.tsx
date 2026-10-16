@@ -2,7 +2,7 @@ import type { ApyView, FundingView, Hex0x, OpView, OverCap, WithdrawAsset } from
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
-import { APY_REFRESH_MS, queryKeys, useApy, useFunding, useOps, usePools, useWithdrawAssets } from '../api/queries.ts'
+import { APY_REFRESH_MS, queryKeys, useApy, useFunding, useOps, usePools, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { TokenMark } from '../components/token-mark.tsx'
 import { BasescanLink, Brand, InfoPopover, Modal, Waiting } from '../components/ui.tsx'
@@ -39,6 +39,7 @@ export const homeCopy = {
   placing: 'Placing your money. The next step starts in a few seconds.',
   upToDate: (time: string) => `Nothing to do right now. Mamoru looks again at ${time}.`,
   history: 'Savings history',
+  earnedSoFar: 'Earned so far',
   notRunning: 'Mamoru is not running on this money yet.',
   armFirst: 'Approve once. Mamoru starts when your money lands.',
   stopBody: 'Mamoru closes every position and swaps back to USDC. Your USDC stays in your account.',
@@ -168,6 +169,20 @@ export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () =
         </button>
       </div>
     </section>
+  )
+}
+
+/**
+ * otto/mamoru#129: uncollected fees plus anything collected, plain English, no extra claim. Only renders once
+ * the yield ledger has a figure (the Worker's cron has pulled at least one operator snapshot for this account);
+ * before then this is simply absent, never a placeholder zero.
+ */
+export function EarnedSoFar({ earnedSoFarUsd }: { earnedSoFarUsd: string | null | undefined }) {
+  if (earnedSoFarUsd == null) return null
+  return (
+    <p className="mb-5 text-[0.9rem] text-stone" data-testid="earned-so-far">
+      {homeCopy.earnedSoFar}: <span className="font-medium text-ink">{usd(earnedSoFarUsd)} USDC</span>
+    </p>
   )
 }
 
@@ -688,6 +703,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const api = useApi()
   const funding = useFunding(accountKey, true)
   const ops = useOps(accountKey, true)
+  const yieldLedger = useYieldLedger(accountKey)
   const pools = usePools()
   const [dialog, setDialog] = useState<null | 'add' | 'withdraw' | 'stop' | 'start'>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
@@ -736,6 +752,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         <Brand />
       </header>
       <Balance s={s} onAdd={() => setDialog('add')} onWithdraw={() => withdraw()} />
+      <EarnedSoFar earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd} />
       <WrongNetwork accountKey={accountKey} />
       {!f ? (
         funding.isError ? (

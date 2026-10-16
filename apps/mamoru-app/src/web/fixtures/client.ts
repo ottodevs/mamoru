@@ -167,6 +167,17 @@ export const fixtureClient: ApiClient = {
         ? [{ chainId: 1, name: 'Ethereum', status: 'observed' as const, block: 21_000_000, usdc: '150000000', eth: '0', observedAt: new Date().toISOString() }]
         : [{ chainId: 1, name: 'Ethereum', status: 'not_observed' as const, observedAt: new Date().toISOString() }],
     }),
+  // otto/mamoru#129: a few cents of uncollected fees, nothing collected yet (true of every live account on 15 Oct).
+  yieldLedger: () =>
+    delay({
+      asOf: new Date().toISOString(),
+      accruedUsd: '42000',
+      collectedUsd: null,
+      earnedSoFarUsd: '42000',
+      gasPaidWei: null,
+      valueVsHoldUsd: '15000',
+      feeAccruedUsd: null,
+    }),
   ops: () => delay({ ops: liveState.ops }),
   activatePrepare: () => delay(fixtureTx(['Deploy your Safe on Base', 'Enable the engine session for up to 20 USDC', 'Top up gas reserve to 0.0003 ETH'])),
   activate: () => {
