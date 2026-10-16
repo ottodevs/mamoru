@@ -16,11 +16,13 @@ export type CumulativePoint = { time: number; tickCumulative: bigint }
  * - `realizedVol24hBps`: annualized realized volatility of the consecutive `windowSeconds` mean ticks over the last
  *   24 h, in basis points (8000 = 80%).
  * `cumulativeAt(t)` answers the pool's tick cumulative at time `t`, or null when it cannot. Any missing point makes
- * both null: the rule abstains (`RISK_DATA_INSUFFICIENT`), it never acts on part of the history.
+ * both null: the rule abstains (`RISK_DATA_INSUFFICIENT`), it never acts on part of the history. So does a window that
+ * does not divide 24 h: the windows would cover less than a day.
  */
 export function marketOf(now: number, windowSeconds: number, cumulativeAt: (t: number) => CumulativePoint | null): { twap24hAgoTick: number | null; realizedVol24hBps: number | null } {
   const none = { twap24hAgoTick: null, realizedVol24hBps: null }
-  const segments = Math.floor(DAY / windowSeconds)
+  if (windowSeconds <= 0 || DAY % windowSeconds !== 0) return none
+  const segments = DAY / windowSeconds
   if (segments < 2) return none
   const points: CumulativePoint[] = []
   for (let m = segments + 1; m >= 0; m--) {

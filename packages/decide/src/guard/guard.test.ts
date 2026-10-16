@@ -69,6 +69,9 @@ describe('marketOf: 24 h history from TWAP cumulatives', () => {
     const expected = Math.round(10 * Math.log(1.0001) * Math.sqrt((365 * 86_400) / W) * 10_000)
     expect(Math.abs(m.realizedVol24hBps! - expected)).toBeLessThanOrEqual(1)
   })
+  test('a window that does not divide 24 h abstains', () => {
+    expect(marketOf(now, 700, (t) => ({ time: t, tickCumulative: 0n }))).toEqual({ twap24hAgoTick: null, realizedVol24hBps: null })
+  })
   test('any missing point: both null, never a partial history', () => {
     expect(marketOf(now, W, (t) => (t < now - 3_600 ? null : { time: t, tickCumulative: 0n }))).toEqual({ twap24hAgoTick: null, realizedVol24hBps: null })
   })
@@ -88,6 +91,25 @@ describe('decide with the fall freeze (spec 004, #101)', () => {
     const withHistory = decide(obs({ guard: { pools: { [BTC_POOL]: btcFall(800, 9_000) } } }), unguarded)
     expect(withHistory).toEqual(plain)
     expect('guards' in plain).toBe(false)
+  })
+
+  test('FR-LC-001: conservador-live-v2 hashes as on main before this change', () => {
+    // Pinned from origin/main 0bf828a: a fresh 20 USDC account on the three live pools.
+    const d = decide(obs({ pools: [pool('pool:USDC/USDT/100', 1), pool(BTC_POOL, BTC_TICK), pool(ETH_POOL, ETH_TICK)] }), V2)
+    expect(d.premiseHash).toBe('0xba0154c8654402a8894a96446348fde417120234a0cbd39c7d3350aad927705b')
+    expect(d.decisionId).toBe('0xdfbdfb7a9da7dd24de458c414e0a2bae0fac9500e57ae74dcc6f34eaae1aa1cf')
+  })
+
+  test('a frozen bucket keeps its idle volatile token: no sell-back caused by the guard', () => {
+    // btc-usdc alone, at target with an in-range position plus idle cbBTC: without the guard the idle token is converted.
+    const btcOnly: PolicyVersion = { ...guarded, buckets: guarded.buckets.filter((b) => b.id === 'btc-usdc') }
+    const p = { tokenId: 9n, pool: BTC_POOL, tickLower: BTC_TICK - 500, tickUpper: BTC_TICK + 500, liquidity: 10n ** 10n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }
+    const o = (over: Partial<Observation>) => obs({ positions: [p], balances: { USDC: 0n, USDT: 0n, cbBTC: 1_000n, WETH: 0n }, ...over })
+    const sold = decide(o({ guard: { pools: { [BTC_POOL]: calm } } }), btcOnly)
+    expect(sold.proposal).toMatchObject({ kind: 'enter_swap', pool: BTC_POOL, tokenIn: 'cbBTC', tokenOut: 'USDC' })
+    const held = decide(o({ guard: { pools: { [BTC_POOL]: btcFall(800, 9_000) } } }), btcOnly)
+    expect(held.proposal).toBeNull()
+    expect(held.reason).toBe('DECIDE_ENTRY_PAUSED_FALL')
   })
 
   test('btc-usdc in a fast fall: no entry there, the next bucket gets it, the note carries metric and threshold', () => {
