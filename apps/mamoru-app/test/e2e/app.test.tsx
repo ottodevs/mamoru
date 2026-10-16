@@ -16,7 +16,7 @@ import { activationLive, historyOps, needsRetry, opLine } from '../../src/web/li
 import { isAddress, parseUsdc } from '../../src/web/lib/owner-flow.ts'
 import { encodeQr } from '../../src/web/lib/qr.ts'
 import { localTime } from '../../src/web/lib/time.ts'
-import { ApprovalCard, approvalDay, approvalRowKey, engineLine, History, renewAskFor } from '../../src/web/routes/home.tsx'
+import { ApprovalCard, approvalDay, approvalRowKey, askedBefore, engineLine, History, renewAskFor } from '../../src/web/routes/home.tsx'
 import { MIX } from '../../src/web/routes/onboarding.tsx'
 import { buildRouter } from '../../src/web/router.tsx'
 import { render } from './render.ts'
@@ -426,6 +426,20 @@ describe('renewing the approval', () => {
     expect(renewAskFor(undefined, false)).toBeNull()
     // Next year's approval is a new one: its last weeks ask again.
     expect(renewAskFor(running({ validUntil: now + 377 * 86_400, renewDue: true, expired: false }), false)).not.toBe(key)
+  })
+
+  test('each approval is asked once per visit, even with storage blocked', () => {
+    const store = new Map<string, string>()
+    const storage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) }
+    expect(askedBefore('t:a', storage)).toBe(false)
+    expect(askedBefore('t:a', storage)).toBe(true)
+    expect(store.get('t:a')).toBe('1')
+    const blocked = { getItem: () => { throw new Error('blocked') }, setItem: () => { throw new Error('blocked') } }
+    expect(askedBefore('t:b', blocked)).toBe(false)
+    expect(askedBefore('t:b', blocked)).toBe(true)
+    // A key a previous page load of this tab already asked: storage remembers it.
+    store.set('t:c', '1')
+    expect(askedBefore('t:c', storage)).toBe(true)
   })
 
   test('the dialog is closed until Home has opened in the browser', async () => {

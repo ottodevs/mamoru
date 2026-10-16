@@ -714,12 +714,17 @@ export function renewAskFor(f: FundingView | undefined, renewing: boolean): stri
   return `mamoru:renew-asked:${f.address}:${f.approval.validUntil}`
 }
 
-function askedBefore(key: string): boolean {
+/** Keys already asked in this page load: the guarantee holds even when storage is blocked. */
+const askedThisLoad = new Set<string>()
+
+export function askedBefore(key: string, storage: Pick<Storage, 'getItem' | 'setItem'> | null = typeof sessionStorage === 'undefined' ? null : sessionStorage): boolean {
+  if (askedThisLoad.has(key)) return true
+  askedThisLoad.add(key)
   try {
-    if (sessionStorage.getItem(key)) return true
-    sessionStorage.setItem(key, '1')
+    if (storage?.getItem(key)) return true
+    storage?.setItem(key, '1')
   } catch {
-    // No storage (private mode, blocked): ask once per page load instead.
+    // No storage (private mode, blocked): the in-memory set alone keeps it to once per page load.
   }
   return false
 }
@@ -892,7 +897,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           <StopDialog accountKey={accountKey} s={s} open={dialog === 'stop'} onClose={() => setDialog(null)} />
           <StartDialog accountKey={accountKey} s={s} open={dialog === 'start'} onClose={() => setDialog(null)} />
           {f.approval && renewAsk ? (
-            <RenewDialog key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null} onClose={closeRenewAsk} />
+            <RenewDialog key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null && !feedbackOpen} onClose={closeRenewAsk} />
           ) : null}
         </>
       ) : null}
