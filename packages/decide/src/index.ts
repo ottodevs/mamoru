@@ -106,7 +106,7 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
     const live = (grant: string) => obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp)
     const needs = (p: { pool: string; grant: string }) => (remint && p.grant.startsWith('enter-mint') ? anyKey(policy, 'manage-any', p.pool) : p.grant)
     pendingMint = new Set(a.pendingMint.filter((p) => live(needs(p))).map((p) => p.pool))
-    for (const b of a.buckets) buckets.push({ bucket: b.bucket, code: b.code })
+    for (const b of a.buckets) buckets.push(b.waiting === undefined ? { bucket: b.bucket, code: b.code } : { bucket: b.bucket, code: b.code, waiting: b.waiting })
     trail.push(...a.trail)
     if (a.proposal) {
       enterEvaluated = true

@@ -154,6 +154,9 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   const series = { time: [] as number[], value: [] as bigint[], hodl: [] as bigint[] }
   const ops: OpEntry[] = []
   const reasons: Record<string, number> = {}
+  let depthWaits = 0
+  let idleSum = 0
+  let idleSamples = 0
   const uses = new Map<string, number[]>()
   const count = Object.fromEntries(KINDS.map((k) => [k, 0])) as Record<OpKind, number>
   let gasSpent = 0n
@@ -206,6 +209,14 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
     if (series.time.length % every === 0) {
       const d = decide(observe(ds, i, w, policy, gas.priorityFeeWei), policy)
       reasons[d.reason] = (reasons[d.reason] ?? 0) + 1
+      // otto/mamoru#127: how often a bucket waited for depth, and how much savings sat idle at each review.
+      if (d.buckets.some((b) => b.code === 'DECIDE_WAIT_DEPTH')) depthWaits++
+      const idleNow = w.balances[savings] ?? 0n
+      const totalNow = accountValue(ds, s, w, price).total
+      if (totalNow > 0n) {
+        idleSum += Number((idleNow * 10_000n) / totalNow)
+        idleSamples++
+      }
       const p: Proposal | null = d.proposal
       // Sessions are renewed every `validitySeconds`; inside one window a grant has `usageLimit` uses.
       const window = Math.floor((s.time - first.time) / policy.session.validitySeconds)
@@ -279,6 +290,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
     reasons,
     sessions,
     metrics,
+    capacity: { depthWaits, idleBps: idleSamples === 0 ? 0 : Math.round(idleSum / idleSamples) },
     resultHash: keccak256(stringToHex(canonicalJson(facts))) as Hex,
   }
 }

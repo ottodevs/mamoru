@@ -112,6 +112,11 @@ export type RunResult = {
   reasons: Record<string, number>
   sessions: SessionUse[]
   metrics: Metrics
+  /**
+   * otto/mamoru#127, outside the result hash: reviews where a bucket waited for pool depth, and the average share of
+   * the account held as idle savings over the reviews (basis points).
+   */
+  capacity: { depthWaits: number; idleBps: number }
   /** Hash of the integer facts above. Same dataset, policy and simulator version give the same hash on any machine. */
   resultHash: Hex
 }

@@ -69,6 +69,8 @@ export const REASON_CODES = [
   // Decisión y salida
   'DECIDE_HOLD',
   'DECIDE_NO_CAPITAL',
+  // otto/mamoru#127: the bucket's pool cannot take more without moving its price or making Mamoru too large a share of it; the rest waits as USDC.
+  'DECIDE_WAIT_DEPTH',
   'DECIDE_PAUSED',
   'DECIDE_SLOT_BUSY',
   'DECIDE_IN_RANGE',

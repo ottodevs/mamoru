@@ -90,6 +90,13 @@ export type PolicyVersion = {
   minEntry?: bigint
   /** target-weights: a bucket is topped up only when it is short of its target by more than this share of it (bps). */
   rebalanceBandBps?: number
+  /**
+   * target-weights, otto/mamoru#127: size every entry to the depth of its pool instead of a fixed account cap. An entry
+   * swap may move the pool price by at most `maxImpactBps` (average execution against the active liquidity), and the
+   * account's positions may hold at most `maxShareBps` of the pool's active liquidity. What does not fit waits as savings
+   * with DECIDE_WAIT_DEPTH. Absent: entries are sized as before.
+   */
+  depth?: { maxImpactBps: number; maxShareBps: number; maxImpactBpsByPool?: Record<string, number> }
   execution: { slippageBps: number; maxTwapDeviationTicks: number; twapWindowSeconds: number; observationTtlSeconds: number }
   session: {
     validitySeconds: number

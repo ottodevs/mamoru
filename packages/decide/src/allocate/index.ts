@@ -2,6 +2,7 @@ import type { ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, hasManageAny, type PolicyVersion } from '@mamoru/policy'
 import { rangeAround, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { safeSavings } from '../enter/index.ts'
+import { depthOf } from '../depth/index.ts'
 import { purgaIdentity } from '../gates/index.ts'
 import type { GateStep, Observation, PoolObs, Proposal } from '../types.ts'
 import { amountsForLiquidity, inSavings, volatileOf } from '../value.ts'
@@ -22,6 +23,8 @@ export type BucketValue = {
   /** Share of the whole account in bps (0 when the account is empty). */
   weightBps: number
   code: ReasonCode
+  /** otto/mamoru#127: savings this bucket is short of its target and cannot place now because its pool lacks depth. */
+  waiting?: bigint
 }
 
 export type Allocation = {
@@ -133,8 +136,26 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     const volatile = volatileOf(pool, savings)
     const volatileValue = inSavings(atTwap(pool), volatile, r.idleVolatile, savings)
     // What the next mint of this bucket holds: the gap, or everything the bucket can gather when that is less.
-    const size = gap < free + volatileValue ? gap : free + volatileValue
-    const wantVolatile = (size * volatileShareBps(pool, policy)) / 10_000n
+    let size = gap < free + volatileValue ? gap : free + volatileValue
+    const volShare = volatileShareBps(pool, policy)
+    // otto/mamoru#127: no more than the pool can take at its depth; the rest waits as savings, with its reason. The
+    // swap toward the mint sells at most the volatile share of that size, so it stays within the allowed impact too.
+    const depth = depthOf(obs, policy, pool, widthOf(policy, pool.name))
+    if (depth) {
+      const bySwap = volShare > 0n ? (depth.swapRoom * 10_000n) / volShare : size
+      const room = depth.shareRoom < bySwap ? depth.shareRoom : bySwap
+      if (room < size) {
+        size = room
+        if (size < minEntry) {
+          if (row) {
+            row.code = 'DECIDE_WAIT_DEPTH'
+            row.waiting = gap < free ? gap : free
+          }
+          continue
+        }
+      }
+    }
+    const wantVolatile = (size * volShare) / 10_000n
     const wantSavings = size - wantVolatile
     if (volatileValue * 10_000n < wantVolatile * SWAP_BELOW_BPS) {
       const need = wantVolatile - volatileValue
