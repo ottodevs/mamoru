@@ -21,6 +21,22 @@ export type Observation = {
   slot: { opId: string; state: string } | null
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. Absent or null: none yet. */
   lastRerangeAt?: bigint | null
+  /**
+   * Spec 004: 24 h history per pool, from TWAP samples (see `marketOf`). Read only by a policy with `guards`;
+   * absent or null fields make the guard rules abstain.
+   */
+  guard?: { pools: Partial<Record<RegistryName, PoolGuardObs>> }
+}
+
+export type PoolGuardObs = { twap24hAgoTick: number | null; realizedVol24hBps: number | null }
+
+/** What a guard rule measured and held, per bucket, for the app and /ops. `metric` is null when history is missing. */
+export type GuardNote = {
+  bucket: string
+  pool: RegistryName
+  code: ReasonCode
+  metric: { fallBps: number; volBps: number } | null
+  threshold: { fallBps: number; volBps: number }
 }
 
 export type SessionObs = { grant: string; permissionId: Hex; tokenId?: bigint; validUntil: number; active: boolean }
@@ -136,4 +152,6 @@ export type Decision = {
   shadow: ShadowNote[]
   buckets: { bucket: string; code: ReasonCode }[]
   positions: { tokenId: bigint; codes: ReasonCode[] }[]
+  /** Present only when the policy sets `guards` (FR-LC-001: absent, the decision is byte-identical). */
+  guards?: GuardNote[]
 }

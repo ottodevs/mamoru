@@ -167,6 +167,28 @@ export const conservadorLiveV2: PolicyVersion = {
   },
 }
 
+/**
+ * Spec 004 (#101) fall freeze: thresholds that passed the Lab gate (16 Oct 2026, Sep 2026, Oct 2025 and Feb 2025
+ * windows): the 24 h trend thresholds of `RISK_REGIME_TREND` (cbBTC 7%, WETH 9%) with the `RISK_REGIME_VOL` ones
+ * (80%, 100%). The half-trend thresholds (3.5%, 4.5%) failed: worse than no rule in October 2025.
+ */
+export const FALL_FREEZE_DEFAULTS = {
+  'btc-usdc': { fallBps: 700, volBps: 8000 },
+  risk: { fallBps: 900, volBps: 10_000 },
+} as const
+
+/**
+ * Lab policy: conservador-live-v2 with the fall freeze. Not live: the engine does not yet build
+ * `Observation.guard` (spec 004 LC-T6), so on chain the rule would only abstain.
+ */
+export const conservadorLabGuardsV1: PolicyVersion = {
+  ...conservadorLiveV2,
+  policyId: 'conservador-lab-guards-v1',
+  version: '1.0.0',
+  chain: 'fork',
+  guards: { byBucket: { 'btc-usdc': { fallFreeze: { ...FALL_FREEZE_DEFAULTS['btc-usdc'] } }, risk: { fallFreeze: { ...FALL_FREEZE_DEFAULTS.risk } } } },
+}
+
 /** Scenario policy for M07: LP on WETH/USDC 0.3%, only in the lab. */
 export const labWethUsdcV1: PolicyVersion = {
   ...conservadorV1,
@@ -215,4 +237,5 @@ export const POLICIES: Record<string, PolicyVersion> = {
   [conservadorLiveV1.policyId]: conservadorLiveV1,
   [conservadorLiveV2.policyId]: conservadorLiveV2,
   [labWethUsdcV1.policyId]: labWethUsdcV1,
+  [conservadorLabGuardsV1.policyId]: conservadorLabGuardsV1,
 }

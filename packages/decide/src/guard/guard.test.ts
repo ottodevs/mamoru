@@ -1,0 +1,124 @@
+import { describe, expect, test } from 'bun:test'
+import { conservadorLiveV2, FALL_FREEZE_DEFAULTS, grantKey, type PolicyVersion } from '@mamoru/policy'
+import { address, entry } from '@mamoru/registry'
+import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
+import { decide, fallBpsOf, marketOf, type Observation, type PoolObs } from '../index.ts'
+
+const V2 = conservadorLiveV2
+const USDC = 1_000_000n
+const BTC_POOL = 'pool:USDC/cbBTC/500'
+const ETH_POOL = 'pool:WETH/USDC/3000'
+const BTC_TICK = -69_080
+const ETH_TICK = -193_380
+
+function pool(name: string, tick: number): PoolObs {
+  const e = entry(name)
+  return {
+    name, address: e.address, token0: e.token0!, token1: e.token1!, fee: e.fee!, tickSpacing: e.tickSpacing!,
+    sqrtPriceX96: sqrtRatioAtTick(tick), tick, liquidity: 10n ** 18n, twapTick: tick,
+    identity: { factoryPool: e.address, token0: address(e.token0!), token1: address(e.token1!), fee: e.fee!, tickSpacing: e.tickSpacing! },
+  }
+}
+
+const POOLS = [pool('pool:USDC/USDT/100', 1), pool(BTC_POOL, BTC_TICK), pool(ETH_POOL, ETH_TICK)]
+
+function obs(over: Partial<Observation> = {}): Observation {
+  return {
+    chainId: 8453,
+    block: { number: 100n, hash: `0x${'11'.repeat(32)}`, timestamp: 1_000n },
+    safeBlock: { number: 98n, hash: `0x${'22'.repeat(32)}` },
+    account: { address: '0x00000000000000000000000000000000000000aa', deployed: true, nonceKey: 0n, nonce: 0n },
+    sessions: V2.session.grants.filter((g) => !g.perPosition).map((g, i) => ({ grant: grantKey(g), permissionId: `0x${(i + 1).toString(16).padStart(2, '0').repeat(32)}` as const, validUntil: 10_000, active: true })),
+    native: 10n ** 17n,
+    balances: { USDC: 20n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n },
+    positions: [],
+    pools: POOLS,
+    ethPrice: { pool: ETH_POOL, sqrtPriceX96: sqrtRatioAtTick(ETH_TICK), token0: 'WETH' },
+    gas: { maxFeePerGas: 2_000_000n, opGasUnits: 5_100_000n },
+    deposits: [],
+    intents: { paused: false, exitRequested: false },
+    slot: null,
+    ...over,
+  }
+}
+
+// The stables bucket has no pool here, so a fresh account's next entry goes to btc-usdc, then risk.
+const guarded: PolicyVersion = {
+  ...V2,
+  policyId: 'test-guards',
+  buckets: V2.buckets.map((b) => (b.id === 'stables' ? { ...b, pools: [] } : b)),
+  guards: { byBucket: { 'btc-usdc': { fallFreeze: { ...FALL_FREEZE_DEFAULTS['btc-usdc'] } }, risk: { fallFreeze: { ...FALL_FREEZE_DEFAULTS.risk } } } },
+}
+const unguarded: PolicyVersion = { ...guarded, guards: undefined }
+
+// cbBTC is token1 (it falls when the tick rises), WETH token0 (it falls with the tick).
+const btcFall = (ticks: number, vol: number) => ({ twap24hAgoTick: BTC_TICK - ticks, realizedVol24hBps: vol })
+const ethFall = (ticks: number, vol: number) => ({ twap24hAgoTick: ETH_TICK + ticks, realizedVol24hBps: vol })
+const calm = { twap24hAgoTick: BTC_TICK, realizedVol24hBps: 3_000 }
+
+describe('marketOf: 24 h history from TWAP cumulatives', () => {
+  const W = 1_800
+  const now = 200_000
+  test('a flat tick: no volatility, the 24 h-ago TWAP is that tick', () => {
+    expect(marketOf(now, W, (t) => ({ time: t, tickCumulative: BigInt(t) * 100n }))).toEqual({ twap24hAgoTick: 100, realizedVol24hBps: 0 })
+  })
+  test('the mean tick moves 10 ticks per window: annualized vol of that step', () => {
+    // Mean of window ending at t is 10 * t / W: cumulative = 10 * t^2 / (2W) integrates it.
+    const at = (t: number) => ({ time: t, tickCumulative: BigInt(Math.round((10 * t * t) / (2 * W))) })
+    const m = marketOf(now, W, at)
+    const expected = Math.round(10 * Math.log(1.0001) * Math.sqrt((365 * 86_400) / W) * 10_000)
+    expect(Math.abs(m.realizedVol24hBps! - expected)).toBeLessThanOrEqual(1)
+  })
+  test('any missing point: both null, never a partial history', () => {
+    expect(marketOf(now, W, (t) => (t < now - 3_600 ? null : { time: t, tickCumulative: 0n }))).toEqual({ twap24hAgoTick: null, realizedVol24hBps: null })
+  })
+})
+
+describe('fallBpsOf', () => {
+  test('the volatile token falls whichever side of the pool it is', () => {
+    expect(fallBpsOf(pool(BTC_POOL, BTC_TICK), 'USDC', BTC_TICK - 800, BTC_TICK)).toBe(769)
+    expect(fallBpsOf(pool(ETH_POOL, ETH_TICK), 'USDC', ETH_TICK + 1_000, ETH_TICK)).toBe(952)
+    expect(fallBpsOf(pool(ETH_POOL, ETH_TICK), 'USDC', ETH_TICK - 1_000, ETH_TICK)).toBeLessThan(0)
+  })
+})
+
+describe('decide with the fall freeze (spec 004, #101)', () => {
+  test('FR-LC-001: without policy.guards the decision is the one of today, guard history or not', () => {
+    const plain = decide(obs(), unguarded)
+    const withHistory = decide(obs({ guard: { pools: { [BTC_POOL]: btcFall(800, 9_000) } } }), unguarded)
+    expect(withHistory).toEqual(plain)
+    expect('guards' in plain).toBe(false)
+  })
+
+  test('btc-usdc in a fast fall: no entry there, the next bucket gets it, the note carries metric and threshold', () => {
+    expect(decide(obs(), guarded).proposal?.pool).toBe(BTC_POOL)
+    const d = decide(obs({ guard: { pools: { [BTC_POOL]: btcFall(800, 9_000), [ETH_POOL]: calm } } }), guarded)
+    expect(d.proposal?.pool).toBe(ETH_POOL)
+    expect(d.buckets.find((b) => b.bucket === 'btc-usdc')?.code).toBe('DECIDE_ENTRY_PAUSED_FALL')
+    expect(d.guards).toEqual([{ bucket: 'btc-usdc', pool: BTC_POOL, code: 'DECIDE_ENTRY_PAUSED_FALL', metric: { fallBps: 769, volBps: 9_000 }, threshold: { fallBps: 700, volBps: 8_000 } }])
+  })
+
+  test('both volatile buckets frozen: hold with DECIDE_ENTRY_PAUSED_FALL; the USDC waits', () => {
+    const d = decide(obs({ guard: { pools: { [BTC_POOL]: btcFall(800, 9_000), [ETH_POOL]: ethFall(1_000, 12_000) } } }), guarded)
+    expect(d.kind).toBe('hold')
+    expect(d.reason).toBe('DECIDE_ENTRY_PAUSED_FALL')
+  })
+
+  test('resumes by itself: a fall under the threshold, or volatility under it, lets the entry go', () => {
+    expect(decide(obs({ guard: { pools: { [BTC_POOL]: btcFall(600, 9_000) } } }), guarded).proposal?.pool).toBe(BTC_POOL)
+    expect(decide(obs({ guard: { pools: { [BTC_POOL]: btcFall(800, 7_000) } } }), guarded).proposal?.pool).toBe(BTC_POOL)
+  })
+
+  test('FR-LC-007: missing history abstains (RISK_DATA_INSUFFICIENT), the entry goes', () => {
+    const d = decide(obs(), guarded)
+    expect(d.proposal?.pool).toBe(BTC_POOL)
+    expect(d.guards?.map((g) => g.code)).toEqual(['RISK_DATA_INSUFFICIENT', 'RISK_DATA_INSUFFICIENT'])
+  })
+
+  test('re-ranges keep running in a frozen bucket', () => {
+    // A cbBTC position the price has left: the re-range is proposed as without the guard.
+    const p = { tokenId: 7n, pool: BTC_POOL, tickLower: BTC_TICK - 1_000, tickUpper: BTC_TICK - 500, liquidity: 10n ** 12n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }
+    const d = decide(obs({ positions: [p], guard: { pools: { [BTC_POOL]: btcFall(800, 9_000) } } }), guarded)
+    expect(d.proposal).toMatchObject({ kind: 'rerange', pool: BTC_POOL, tokenId: 7n })
+  })
+})
