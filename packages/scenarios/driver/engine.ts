@@ -12,6 +12,7 @@ import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useMo
 import type { Execution } from '@mamoru/account/safe'
 import { approve, burn, collect, decreaseLiquidity, exactInputSingle, mint, type V3Call } from '@mamoru/uniswap-v3'
 import { minOut, quoteExactInputSingle, quoteMint } from '@mamoru/uniswap-v3/quote'
+import { diverges, swapMinimum, twapFloor, twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
 import { MemoryJournal, type DecisionRecord, type OpRecord } from './journal.ts'
 import { reconcileReceipt } from './receipt.ts'
@@ -442,19 +443,51 @@ export class Engine {
     })
   }
 
+  /**
+   * otto/mamoru#140. `decide` checked spot against the TWAP at the observation block; the calls are priced at a later
+   * block, where a swap in that block could have moved slot0 and QuoterV2. The same check runs again here, at the
+   * prepare block, for every operation that prices a pool. Returns the TWAP tick.
+   */
+  private async priceGuard(pool: string, blockNumber: bigint): Promise<number> {
+    const e = entry(pool)
+    const { twapWindowSeconds, maxTwapDeviationTicks } = this.cfg.policy.execution
+    const [[, tick], twap] = await Promise.all([
+      this.client.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
+      twapTickAt(this.client, e.address, twapWindowSeconds, blockNumber),
+    ])
+    if (diverges(tick, twap, maxTwapDeviationTicks)) throw new ReasonError('EHG_PRICE_DIVERGENCE', `${pool}: tick ${tick} at block ${blockNumber}, TWAP ${twap}`)
+    return twap
+  }
+
+  /**
+   * otto/mamoru#140: the router minimum of an engine swap, never under what the input buys at the TWAP (moved by the
+   * policy's deviation, less slippage). The grant only asks for amountOutMinimum > 0, so this is the bound that holds
+   * against a sandwich at inclusion. A quote under that floor is refused.
+   */
+  private async swapMin(pool: string, tokenIn: string, amountIn: bigint, amountOut: bigint, blockNumber: bigint): Promise<bigint> {
+    const e = entry(pool)
+    const { slippageBps, maxTwapDeviationTicks } = this.cfg.policy.execution
+    const twapTick = await this.priceGuard(pool, blockNumber)
+    const floor = twapFloor({ amountIn, fee: e.fee!, twapTick, tokenInIsToken0: e.token0 === tokenIn, deviationTicks: maxTwapDeviationTicks, slippageBps })
+    const min = swapMinimum(amountOut, slippageBps, floor)
+    if (min === null) throw new ReasonError('EHG_PRICE_DIVERGENCE', `${pool}: quote ${amountOut} for ${amountIn} ${tokenIn}, under the TWAP floor ${floor} (tick ${twapTick})`)
+    return min
+  }
+
   /** FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. */
   private async prepareCalls(p: Proposal, blockNumber: bigint, timestamp: bigint): Promise<Prepared> {
     const acct = this.cfg.account
     const slippage = this.cfg.policy.execution.slippageBps
     if (p.kind === 'enter_swap') {
       const amountOut = await quoteExactInputSingle(this.client, { tokenIn: address(p.tokenIn), tokenOut: address(p.tokenOut), fee: p.fee, amountIn: p.amountIn, blockNumber })
-      const amountOutMinimum = minOut(amountOut, slippage)
+      const amountOutMinimum = await this.swapMin(p.pool, p.tokenIn, p.amountIn, amountOut, blockNumber)
       return {
         quote: { amountIn: p.amountIn, amountOut, amountOutMinimum },
         calls: [approve(p.tokenIn, 'SwapRouter02', p.amountIn), exactInputSingle({ account: acct, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn: p.amountIn, amountOutMinimum })].map(exec),
       }
     }
     if (p.kind === 'enter_mint') {
+      await this.priceGuard(p.pool, blockNumber)
       const pool = entry(p.pool)
       const [sqrtPriceX96] = await this.client.readContract({ address: pool.address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber })
       const q = quoteMint({ sqrtPriceX96, tickLower: p.tickLower, tickUpper: p.tickUpper, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, slippageBps: slippage })
@@ -471,6 +504,7 @@ export class Engine {
     }
     if (p.kind === 'rerange' || p.kind === 'reduce') {
       // decreaseLiquidity(all or part) + collect(to the Safe) [+ burn]: nothing leaves the account.
+      await this.priceGuard(p.pool, blockNumber)
       const [pos, [sqrtPriceX96]] = await Promise.all([
         this.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [p.tokenId], blockNumber }),
         this.client.readContract({ address: entry(p.pool).address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
@@ -493,7 +527,7 @@ export class Engine {
     const savings = this.cfg.policy.savingsAsset
     const fee = entry(p.pool).fee!
     const amountOut = await quoteExactInputSingle(this.client, { tokenIn: address(p.convert.token), tokenOut: address(savings), fee, amountIn: p.convert.amount, blockNumber })
-    const amountOutMinimum = minOut(amountOut, slippage)
+    const amountOutMinimum = await this.swapMin(p.pool, p.convert.token, p.convert.amount, amountOut, blockNumber)
     calls.push(
       approve(p.convert.token, 'SwapRouter02', p.convert.amount),
       exactInputSingle({ account: acct, tokenIn: p.convert.token, tokenOut: savings, fee, amountIn: p.convert.amount, amountOutMinimum }),
