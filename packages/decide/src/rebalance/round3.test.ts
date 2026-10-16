@@ -91,6 +91,7 @@ describe('depeg guard in decide (#101 round 3)', () => {
   test('freeze: the out-of-range stables position is not re-ranged and nothing else moves in that pool', () => {
     const d = decide(obs(V2, { positions: [stablePos()], pools: depegPools(), guard: tripped(), balances: { USDC: 0n, USDT: 0n, cbBTC: 0n, WETH: 0n } }), guarded())
     expect(d.kind).toBe('hold')
+    expect(d.reason).toBe('RISK_DEPEG_PAIRED')
     expect(d.positions[0]!.codes).toContain('RISK_DEPEG_PAIRED')
     expect(d.labGuards).toEqual([{ bucket: 'stables', code: 'RISK_DEPEG_PAIRED', value: 90 }])
   })
@@ -101,7 +102,7 @@ describe('depeg guard in decide (#101 round 3)', () => {
     const d = decide(obs(V2, { pools: depegPools(), guard: tripped() }), guarded())
     expect(d.proposal).not.toBeNull()
     expect(d.proposal!.pool).not.toBe(STABLE_POOL)
-    expect(d.buckets.find((b) => b.bucket === 'stables')!.code).toBe('DECIDE_ENTRY_PAUSED_FALL')
+    expect(d.buckets.find((b) => b.bucket === 'stables')!.code).toBe('RISK_DEPEG_PAIRED')
   })
 
   test('freeze: idle USDT is not sold back while tripped', () => {

@@ -185,4 +185,9 @@ median / max over the 5 offsets (`raw/round3-offsets.md`):
 - aug2024 is a young, thin pool and runs on a two-bucket policy.
 - Staged exits park the sold thirds in the stables bucket (the USDC/USDT range), not in bare USDC; under a tripped
   guard they wait as USDC.
+- Staged exits, by design: the high starts at the window's first price (a Lab window has no earlier history), and
+  in ladder mode a step does not fire again after a third was bought back until the price is back within step 1 of
+  the high (review finding 2 on PR #58: deeper steps of the same fall are skipped).
+- The depeg guard's reason codes changed after the sweeps (finding 3/5: the frozen stables bucket and the hold now
+  say `RISK_DEPEG_PAIRED`); proposals are unchanged, so no number above moves.
 - Same simulator limits as spec 004: 5-10 min samples, single-range swap impact, no MEV.

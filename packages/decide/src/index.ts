@@ -138,7 +138,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     const live = (grant: string) => obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp)
     const needs = (p: { pool: string; grant: string }) => (remint && p.grant.startsWith('enter-mint') ? anyKey(policy, 'manage-any', p.pool) : p.grant)
     pendingMint = new Set(a.pendingMint.filter((p) => live(needs(p))).map((p) => p.pool))
-    for (const b of a.buckets) buckets.push({ bucket: b.bucket, code: b.code })
+    // Lab (#101 round 3): a bucket frozen by the depeg guard says so, not that it waits for a fall.
+    for (const b of a.buckets) buckets.push({ bucket: b.bucket, code: depegged && b.bucket === 'stables' && b.code === 'DECIDE_ENTRY_PAUSED_FALL' ? 'RISK_DEPEG_PAIRED' : b.code })
     waiting = a.waiting
     trail.push(...a.trail)
     if (a.proposal) {
@@ -221,8 +222,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
 
   function holdReason(): ReasonCode {
     if (unsafeDeposit) return 'OBS_DEPOSIT_UNSAFE'
-    if (managedOutOfRange > 0) return 'OBS_POSITION_OUT_OF_RANGE'
     if (depegged) return 'RISK_DEPEG_PAIRED'
+    if (managedOutOfRange > 0) return 'OBS_POSITION_OUT_OF_RANGE'
     // Spec 004: the app and /ops show that money waits because of a fall, not that nothing is to do.
     if (frozen.size > 0) return 'DECIDE_ENTRY_PAUSED_FALL'
     if (managedInRange > 0) return 'DECIDE_IN_RANGE'
