@@ -926,7 +926,7 @@ export class Operator {
     const summary = [
       `Renew Mamoru's approval on your Safe ${live.safe}`,
       `Engine key ${sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero:`,
-      ...this.limitLines(stored),
+      ...this.limitLines(stored, policy),
       'The approval it replaces is revoked in the same transaction',
       ...(dropped.length ? [`Re-ranging and collecting fees in ${this.poolsOf(dropped)} needs one more approval after this one`] : []),
       ...(liveManage.length
@@ -952,7 +952,7 @@ export class Operator {
       `Let Mamoru's engine re-range and collect fees in ${this.poolsOf(added)} on your Safe ${live.safe}`,
       `Engine key ${sessionKey} may, for ${Math.round(policy.session.validitySeconds / 86_400)} days and within your plan's limits: take liquidity out of any position your Safe owns and collect it, with its fees, into your Safe; burn a position once it is empty; open positions again in those pools; and swap ${this.volatileOf(added)} to USDC`,
       'It does this without asking you again, only within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
-      ...this.limitLines(stored),
+      ...this.limitLines(stored, policy),
       ...(dropped.length ? [`${this.poolsOf(dropped)} needs one more approval after this one`] : []),
       'Nothing is moved now: your positions stay as they are',
     ]
@@ -989,11 +989,14 @@ export class Operator {
    * swap may spend per swap and in total, and how many transactions (userOps) each grant allows. A transaction can
    * hold several steps (collect and swap, take out and burn), so the counts are of transactions, and say so.
    */
-  private limitLines(stored: StoredGrant[]): string[] {
+  private limitLines(stored: StoredGrant[], policy: PolicyVersion): string[] {
     const n = (v: number) => v.toLocaleString('en-US')
-    const pools = [...new Set(stored.map((g) => g.name.split(':').slice(1).join(':')).filter((p) => p.startsWith('pool:')))]
+    // Bare names (single-pair policies, conservador-live-v1): '' stands for the policy's one pool.
+    const poolOf = (name: string) => name.split(':').slice(1).join(':')
+    const pools = [...new Set(stored.map((g) => poolOf(g.name)).filter((p) => p === '' || p.startsWith('pool:')))]
+    const bare = policy.buckets.flatMap((b) => b.pools)[0]
     return pools.map((pool) => {
-      const of = (name: string) => stored.find((g) => g.name === `${name}:${pool}`)
+      const of = (name: string) => stored.find((g) => g.name === (pool ? `${name}:${pool}` : name))
       const swap = of('enter-swap')?.grant.actions.find((a) => a.signature.startsWith('exactInputSingle'))?.params.find((p) => p.field === 'amountIn')
       const counts = [
         ['enter-swap', 'to swap USDC in'],
@@ -1004,8 +1007,11 @@ export class Operator {
         const g = of(name!)
         return g ? [`${n(g.grant.userOp.usageLimit)} ${what}`] : []
       }).map((c, i) => (i === 0 ? c.replace(' to ', ' transactions to ') : c))
-      const money = swap ? `USDC swapped in at most ${fmtUsdc(swap.ref)} per transaction and ${fmtUsdc(swap.cumulativeLimit ?? swap.ref)} in total; ` : ''
-      return `In ${poolLabel(pool)}: ${money}at most ${counts.join(', ')} (one transaction can hold several of these steps)`
+      // The per-call cap binds each swap call; a transaction may batch several, so only the total bounds one transaction.
+      const total = swap ? fmtUsdc(swap.cumulativeLimit ?? swap.ref) : ''
+      const money = swap ? `USDC swapped in at most ${fmtUsdc(swap.ref)} per swap and ${total} in total, so at most ${total} in one transaction, which can hold several swaps; ` : ''
+      const label = pool ? poolLabel(pool) : bare ? poolLabel(bare) : 'its pool'
+      return `In ${label}: ${money}at most ${counts.join(', ')} (one transaction can hold several of these steps)`
     })
   }
 
@@ -1189,7 +1195,7 @@ export class Operator {
         ...(liveManage.length
           ? [`It may also act on any Uniswap v3 position your Safe owns, in any pool: take liquidity out, collect fees, burn it once empty, and convert ${this.volatileOf(liveManage)} back to USDC`]
           : []),
-        ...this.limitLines(stored),
+        ...this.limitLines(stored, policy),
         paidToSafe,
       ]
       return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })

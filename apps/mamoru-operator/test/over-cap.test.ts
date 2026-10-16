@@ -1530,6 +1530,16 @@ describe('renewing the approval of a running account', () => {
   const due = <G extends { grant: { userOp: { validUntil: number } } }>(gs: G[]): G[] =>
     gs.map((g) => ({ ...g, grant: { ...g.grant, userOp: { ...g.grant.userOp, validUntil: Math.floor(Date.now() / 1000) + 15 * 86_400 } } }))
 
+  test('#149: a single-pair (conservador-live-v1) renewal lists the signed limits of its bare-named grants', async () => {
+    const w = world(20_000_000n, 'conservador-live-v1')
+    ;(w.op as unknown as Loop).startLoop = () => {}
+    await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+    const acc = w.state.accounts.k!
+    expect(acc.grants.map((g) => g.name)).toContain('enter-swap')
+    const tx = await w.op.prepareRenew(ctx)
+    expect(tx.summary).toContain('In USDC/cbBTC 0.05%: USDC swapped in at most 25.00 per swap and 50.00 in total, so at most 50.00 in one transaction, which can hold several swaps; at most 8 transactions to swap USDC in, 8 to open a position, 256 to take liquidity out, burn or re-open a position, 64 to collect fees and swap them to USDC (one transaction can hold several of these steps)')
+  })
+
   test('an account that is not running cannot renew: it starts instead', async () => {
     const w = world(20_000_000n)
     expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'NOT_ACTIVE' })
@@ -1748,7 +1758,7 @@ describe('renewing the approval of a running account', () => {
       const tx = await w.op.prepareRenew(ctx)
       expect(tx.summary.join(' ')).toContain('revoked in the same transaction')
       expect(tx.summary.join(' ')).toContain('within new limits counted from zero')
-      expect(tx.summary).toContain('In USDC/USDT 0.01%: USDC swapped in at most 50.00 per transaction and 300.00 in total; at most 3,000 transactions to swap USDC in, 1,000 to open a position, 2,500 to take liquidity out, burn or re-open a position, 1,000 to collect fees and swap them to USDC (one transaction can hold several of these steps)')
+      expect(tx.summary).toContain('In USDC/USDT 0.01%: USDC swapped in at most 50.00 per swap and 300.00 in total, so at most 300.00 in one transaction, which can hold several swaps; at most 3,000 transactions to swap USDC in, 1,000 to open a position, 2,500 to take liquidity out, burn or re-open a position, 1,000 to collect fees and swap them to USDC (one transaction can hold several of these steps)')
       await w.op.submit(ctx, 'renew', sign(tx))
       expect(old.every((id) => acc.revoked.includes(id))).toBe(true)
       expect((await w.op.funding(ctx)).approval?.usage).toBeUndefined()
