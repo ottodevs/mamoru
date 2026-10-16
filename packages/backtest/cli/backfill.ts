@@ -1,5 +1,6 @@
 // Builds a dataset file from an archive node: every registry pool at one block every `--step` blocks.
 //   bun packages/backtest/cli/backfill.ts --days 30 --step 150 --out .local/base-30d.json
+// The Lab windows (src/windows.ts) are built with `bun packages/backtest/cli/windows.ts backfill <id>`.
 // One Multicall3 eth_call and one eth_getBlockByNumber per sample. Samples already fetched are kept in a cache next
 // to the output, so an interrupted run resumes. Never uses the operator's RPC key: BACKFILL_RPC_URL takes one or
 // more archive endpoints separated by commas; requests rotate over them and a throttled one is skipped for a while.
@@ -64,10 +65,12 @@ const unbig = (_k: string, v: unknown) => (typeof v === 'string' && /^-?\d+n$/.t
 
 const out = arg('out')
 const step = BigInt(arg('step', '150'))
-// Public archive endpoints that answered historical eth_call on 2026-10-02. All of them throttle by source address.
-// base.drpc.org and mainnet.base.org also serve archive state but are the live operator's fallbacks: a backfill from
-// the operator's host would starve it, so they are not defaults.
-const DEFAULT_URLS = 'https://base-mainnet.public.blastapi.io,https://base.gateway.tenderly.co,https://gateway.tenderly.co/public/base'
+// Public archive endpoints that answered historical eth_call on 2026-10-02 (base-public.nodies.app on 2026-10-16). All
+// of them throttle by source address. base.drpc.org and mainnet.base.org also serve archive state but are the live
+// operator's fallbacks: a backfill from the operator's host would starve it, so they are not defaults. Tried on
+// 2026-10-16 and left out: meowrpc (throttles after a few calls), pokt.nodies and zan (fail every historical
+// multicall), publicnode, 1rpc, blockpi and bloxroute (pruned or keyed archive).
+const DEFAULT_URLS = 'https://base-mainnet.public.blastapi.io,https://base.gateway.tenderly.co,https://gateway.tenderly.co/public/base,https://base-public.nodies.app'
 const urls = (process.env.BACKFILL_RPC_URL ?? DEFAULT_URLS).split(',').map((u) => u.trim()).filter(Boolean)
 // Public endpoints throttle by source address: more than a few requests at once only gets the address rested.
 const concurrency = Math.max(1, Math.min(8, Number(arg('concurrency', '4')) || 4))
@@ -107,6 +110,15 @@ const cache = `${out}.cache.jsonl`
 const have = new Map<number, Sample>()
 if (existsSync(cache)) for (const line of readFileSync(cache, 'utf8').split('\n')) if (line) { const s = JSON.parse(line, unbig) as Sample; have.set(s.block, s) }
 const todo = blocks.filter((b) => !have.has(Number(b)))
+// A pool with no code at the last block of the window did not exist yet (cbBTC reached Base in September 2024): it
+// stays null in every sample without the retries that a throttled read gets.
+const absent = new Set<number>()
+const codes = await onAny((c) => Promise.all(POOLS.map((e) => c.getCode({ address: e.address, blockNumber: to }))))
+codes.forEach((code, k) => {
+  if (!code || code === '0x') absent.add(k)
+})
+if (absent.size > 0) console.log(`not deployed at block ${to}: ${[...absent].map((k) => POOLS[k]!.name).join(', ')}`)
+const missing = (s: Sample) => s.pools.some((p, k) => p === null && !absent.has(k))
 console.log(`blocks ${from}..${to} every ${step}: ${blocks.length} samples, ${have.size} cached, ${todo.length} to fetch from ${endpoints.map((e) => e.host).join(', ')}`)
 
 let done = 0
@@ -118,7 +130,7 @@ async function worker(): Promise<void> {
       // A throttled endpoint answers the aggregate with every inner call failed. A pool that is really missing at
       // this block stays null after the retries; anything else is a gap in the data and must not be kept.
       let s = await onAny((c) => readSample(c, b))
-      for (let attempt = 0; attempt < 5 && s.pools.some((p) => p === null); attempt++) {
+      for (let attempt = 0; attempt < 5 && missing(s); attempt++) {
         await new Promise((r) => setTimeout(r, 1_000 * (attempt + 1)))
         s = await onAny((c) => readSample(c, b))
       }
