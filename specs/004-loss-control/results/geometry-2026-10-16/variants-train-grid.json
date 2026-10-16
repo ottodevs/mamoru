@@ -1,0 +1,570 @@
+[
+ {
+  "name": "baseline",
+  "policy": "conservador-lab-geometry-v1"
+ },
+ {
+  "name": "s50-r2",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 5000,
+     "regime": "ret24h",
+     "fallBps": 200,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "s50-r4",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 5000,
+     "regime": "ret24h",
+     "fallBps": 400,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "s50-ema",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 5000,
+     "regime": "ema7d",
+     "fallBps": 0,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "s65-r2",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 6500,
+     "regime": "ret24h",
+     "fallBps": 200,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "s65-r4",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 6500,
+     "regime": "ret24h",
+     "fallBps": 400,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "s65-ema",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 6500,
+     "regime": "ema7d",
+     "fallBps": 0,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "s80-r2",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 8000,
+     "regime": "ret24h",
+     "fallBps": 200,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "s80-r4",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 8000,
+     "regime": "ret24h",
+     "fallBps": 400,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "s80-ema",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 8000,
+     "regime": "ema7d",
+     "fallBps": 0,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "s95-r2",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 9500,
+     "regime": "ret24h",
+     "fallBps": 200,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "s95-r4",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 9500,
+     "regime": "ret24h",
+     "fallBps": 400,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "s95-ema",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 9500,
+     "regime": "ema7d",
+     "fallBps": 0,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "s65-r2-m",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 6500,
+     "regime": "ret24h",
+     "fallBps": 200,
+     "mirror": true
+    }
+   }
+  }
+ },
+ {
+  "name": "s65-r4-m",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 6500,
+     "regime": "ret24h",
+     "fallBps": 400,
+     "mirror": true
+    }
+   }
+  }
+ },
+ {
+  "name": "s65-ema-m",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 6500,
+     "regime": "ema7d",
+     "fallBps": 0,
+     "mirror": true
+    }
+   }
+  }
+ },
+ {
+  "name": "s80-r2-m",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 8000,
+     "regime": "ret24h",
+     "fallBps": 200,
+     "mirror": true
+    }
+   }
+  }
+ },
+ {
+  "name": "s80-r4-m",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 8000,
+     "regime": "ret24h",
+     "fallBps": 400,
+     "mirror": true
+    }
+   }
+  }
+ },
+ {
+  "name": "s80-ema-m",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 8000,
+     "regime": "ema7d",
+     "fallBps": 0,
+     "mirror": true
+    }
+   }
+  }
+ },
+ {
+  "name": "s95-r2-m",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 9500,
+     "regime": "ret24h",
+     "fallBps": 200,
+     "mirror": true
+    }
+   }
+  }
+ },
+ {
+  "name": "s95-r4-m",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 9500,
+     "regime": "ret24h",
+     "fallBps": 400,
+     "mirror": true
+    }
+   }
+  }
+ },
+ {
+  "name": "s95-ema-m",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 9500,
+     "regime": "ema7d",
+     "fallBps": 0,
+     "mirror": true
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k1.5-h1d-r0",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 1.5,
+     "horizonSeconds": 86400,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 0
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k1.5-h1d-r1.5",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 1.5,
+     "horizonSeconds": 86400,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k1.5-h1d-r2",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 1.5,
+     "horizonSeconds": 86400,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 2
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k1.5-h3d-r0",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 1.5,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 0
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k1.5-h3d-r1.5",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 1.5,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k1.5-h3d-r2",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 1.5,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 2
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k2-h1d-r0",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 2,
+     "horizonSeconds": 86400,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 0
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k2-h1d-r1.5",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 2,
+     "horizonSeconds": 86400,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k2-h1d-r2",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 2,
+     "horizonSeconds": 86400,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 2
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k2-h3d-r0",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 2,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 0
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k2-h3d-r1.5",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 2,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k2-h3d-r2",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 2,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 2
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k3-h1d-r0",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 86400,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 0
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k3-h1d-r1.5",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 86400,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k3-h1d-r2",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 86400,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 2
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k3-h3d-r0",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 0
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k3-h3d-r1.5",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k3-h3d-r2",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 2
+    }
+   }
+  }
+ }
+]

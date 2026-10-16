@@ -1,0 +1,70 @@
+[
+ {
+  "name": "baseline",
+  "policy": "conservador-lab-geometry-v1"
+ },
+ {
+  "name": "s95-r4",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 9500,
+     "regime": "ret24h",
+     "fallBps": 400,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "s65-ema",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 6500,
+     "regime": "ema7d",
+     "fallBps": 0,
+     "mirror": false
+    }
+   }
+  }
+ },
+ {
+  "name": "v-k3-h3d-r1.5",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   }
+  }
+ },
+ {
+  "name": "combo-s95r4-vk3h3d",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "skew": {
+     "belowShareBps": 9500,
+     "regime": "ret24h",
+     "fallBps": 400,
+     "mirror": false
+    },
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   }
+  }
+ }
+]
