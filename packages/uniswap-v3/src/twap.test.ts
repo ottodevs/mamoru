@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { sqrtRatioAtTick } from './quote.ts'
 import { diverges, swapMinimum, twapFloor, twapTickOf } from './twap.ts'
 
 describe('twapTickOf', () => {
@@ -47,4 +48,18 @@ describe('twapFloor and swapMinimum (otto/mamoru#140)', () => {
     expect(swapMinimum(900_000n, 50, floor)).toBeNull()
     expect(swapMinimum(1n, 50, floor)).toBeNull()
   })
+
+  test('away from tick 0 the deviation moves the price against each side, across decimals', () => {
+    // USDC (6 dp) / cbBTC (8 dp) near tick -67090: 1 USDC buys about 1218 sats.
+    const t = -67_090
+    const at = (tick: number) => Number(sqrtRatioAtTick(tick)) ** 2 / 2 ** 192
+    const usdcIn = twapFloor({ amountIn: 100_000_000n, fee: 500, twapTick: t, tokenInIsToken0: true, deviationTicks: 100, slippageBps: 50 })
+    const btcIn = twapFloor({ amountIn: 121_800n, fee: 500, twapTick: t, tokenInIsToken0: false, deviationTicks: 100, slippageBps: 50 })
+    // Selling USDC is judged at the lower tick (fewer sats), selling sats at the higher one (fewer USDC).
+    expect(Number(usdcIn)).toBeCloseTo(99_950_000 * at(t - 100) * 0.995, -3)
+    expect(Number(btcIn)).toBeCloseTo((121_739.1 / at(t + 100)) * 0.995, -3)
+    expect(Number(usdcIn)).toBeLessThan(99_950_000 * at(t) * 0.995)
+    expect(Number(btcIn)).toBeLessThan((121_739.1 / at(t)) * 0.995)
+  })
 })
+

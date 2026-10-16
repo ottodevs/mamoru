@@ -25,11 +25,10 @@ import {
   type LiveAccount,
   type LivePosition,
   type LiveReceive,
-  type LiveSwap,
   type SafeTx,
 } from '@mamoru/account/live'
 import { permissionIdOf, revocationCalls, toSmartSession } from '@mamoru/account/sessions'
-import { minOut, quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
+import { quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { diverges, swapMinimum, twapFloor, twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { Engine, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
@@ -1078,7 +1077,10 @@ export class Operator {
       const got = await this.simulateCollect(safe, reduce.map((x) => ({ lp: x.lp, pos: x.pos })), r.block)
       // Idle volatile tokens (left by an engine reduce or re-range) swap back with what the reduce frees.
       for (const [token, raw] of Object.entries(r.tokens)) if (token !== 'USDC' && raw > 0n) got[token] = (got[token] ?? 0n) + raw
-      const swaps = await this.swapQuotes(acc, got, r.block, slip)
+      const unfair: string[] = []
+      const swaps = await this.swapQuotes(acc, got, r.block, slip, unfair)
+      // A token that cannot be swapped back at a fair price is not left behind half-unwound: the withdrawal waits.
+      if (unfair.length) throw new HttpError(409, 'PRICE_DIVERGENCE', `${unfair.join(', ')} is trading away from its 30-minute average right now; try again in a few minutes`)
       const freed = (got.USDC ?? 0n) + swaps.reduce((s, x) => s + x.amountOutMinimum, 0n)
       if (r.usdc + freed >= amount) return { reduce, swaps }
       if (target >= value) throw new HttpError(409, 'INSUFFICIENT_FUNDS', `the Safe can free about ${fmtUsdc(r.usdc + freed)} USDC, less than ${fmtUsdc(amount)}`)
@@ -1206,12 +1208,6 @@ export class Operator {
     }
   }
 
-  private async swapQuote(amountIn: bigint, blockNumber: bigint, slip: number): Promise<LiveSwap | undefined> {
-    if (amountIn <= 0n) return undefined
-    const out = await quoteExactInputSingle(this.client, { tokenIn: address('cbBTC'), tokenOut: address('USDC'), fee: 500, amountIn, blockNumber })
-    return { amountIn, amountOutMinimum: minOut(out, slip) }
-  }
-
   prepareStop(ctx: AccountContext): Promise<OwnerTxToSign> {
     return this.lock(ctx.accountKey).run(() => this.planStop(ctx))
   }
@@ -1233,6 +1229,7 @@ export class Operator {
     // Every grant enabled on the Safe: the ones the engine uses, the ones a renewal left behind, and those of a
     // renewal whose receipt is not known yet, enabled or not.
     const revokes = [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc)])]
+    if (!revokes.length && !positions.length && !swaps.length && unfair.length) throw new HttpError(409, 'PRICE_DIVERGENCE', `${unfair.join(', ')} is trading away from its 30-minute average right now; try again in a few minutes`)
     if (!revokes.length && !positions.length && !swaps.length) throw new HttpError(409, 'NOTHING_TO_STOP', 'no grant, no position and nothing to swap back')
     const deadline = (await this.client.getBlock()).timestamp + 1800n
     const calls = [
