@@ -14,6 +14,9 @@ export type StoredOp = OpView & {
   ownerGrants?: StoredGrant[]
   /** Owner stop: the permissionIds its tx revokes. */
   revokes?: Hex[]
+  /** Owner op: the Safe transaction hash it was signed for (ExecutionSuccess carries it) and its Safe nonce. */
+  safeTxHash?: Hex
+  safeNonce?: string
 }
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */

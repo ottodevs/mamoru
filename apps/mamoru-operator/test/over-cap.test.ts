@@ -1760,6 +1760,54 @@ describe('renewing the approval of a running account', () => {
     expect(acc.ops.find((o) => o.opId === 'own-8-exit')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
   })
 
+  test('a renewal that ran unread, still behind on the block read for it, is not taken for a stop that ran', async () => {
+    const { w, acc } = await running()
+    const old = acc.grants.map((g) => g.permissionId)
+    const ee = `0x${'ee'.repeat(32)}` as Hex
+    const fresh = [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: ee }]
+    // A stop that never ran (its receipt unread), then a renewal that did run, its receipt unread too.
+    acc.ops.push({ opId: 'own-7-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), revokes: old } as never)
+    acc.ops.push({ opId: 'own-8-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: old } as never)
+    // `latest` shows the renewal (its grant enabled, the old ones revoked); a block read by number comes from a node behind it.
+    type Read = { readContract(a: { functionName: string; args?: readonly unknown[]; blockNumber?: bigint }): Promise<unknown> }
+    const client = (w.op as unknown as { client: Read }).client
+    const read = client.readContract.bind(client)
+    client.readContract = async (a) => (a.functionName === 'isPermissionEnabled' ? (a.blockNumber === undefined ? a.args![0] === ee : a.args![0] !== ee) : read(a))
+    await w.op.prepareRenew(ctx).catch(() => undefined)
+    expect(acc.active).toBe(true)
+    expect(acc.ops.find((o) => o.opId === 'own-7-exit')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(old)
+  })
+
+  test('a renewal of unknown outcome whose Safe nonce another transaction spent is no longer revoked by every later one', async () => {
+    const { w, acc } = await running()
+    const ee = `0x${'ee'.repeat(32)}` as Hex
+    const ghost = [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: ee }]
+    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: ghost, revokes: [], safeNonce: '1' } as never)
+    w.knobs.grantsEnabled = false
+    // Its nonce not spent yet: it can still land, so the next renewal revokes its grants.
+    expect(w.chain.nonce).toBe(1n)
+    await w.op.prepareRenew(ctx)
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    // A withdrawal spent nonce 1: the renewal can never run, nothing of it is enabled.
+    w.chain.nonce = 2n
+    await w.op.submit(ctx, 'renew', sign(await w.op.prepareRenew(ctx)))
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'RENEWAL_SUPERSEDED' })
+    expect(acc.revoked).not.toContain(ee)
+  })
+
+  test('a stop leaves remembered whatever it did not revoke', async () => {
+    type After = { afterOwner(a: AccountState, p: unknown, r: unknown): void }
+    const { w, acc } = await running()
+    const old = acc.grants.map((g) => g.permissionId)
+    const dd = `0x${'dd'.repeat(32)}` as Hex
+    acc.superseded = [old[0]!, dd]
+    ;(w.op as unknown as After).afterOwner(acc, { prepareId: 'own-9-stop', accountKey: acc.accountKey, kind: 'stop', revokes: old }, { blockNumber: 5n })
+    expect(acc.active).toBe(false)
+    expect(acc.grants).toEqual([])
+    expect(acc.superseded).toEqual([dd])
+  })
+
   test('a new renewal revokes the grants of one whose outcome is unknown, and that one is never applied after it', async () => {
     const { w, acc } = await running()
     const ghost = [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }]

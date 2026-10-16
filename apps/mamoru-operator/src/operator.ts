@@ -294,6 +294,12 @@ const ACTIVATION_OVERHEAD_GAS = 600_000n
 /** Measured on Base: enableSessions costs 1.4-2.1M gas per session of the live policies; 2.1M is the conservative bound. */
 const STATIC_GAS_PER_SESSION = 2_100_000n
 
+/** The engine's and left-behind grants of `acc` that a stop revoking `revokes` leaves enabled: remembered for the next stop. */
+function unrevoked(acc: AccountState, revokes: Hex[]): Hex[] {
+  const gone = new Set(revokes.map((id) => id.toLowerCase()))
+  return [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? [])])].filter((id) => !gone.has(id.toLowerCase()))
+}
+
 /** "USDC/cbBTC 0.05%" for pool:USDC/cbBTC/500. */
 function poolLabel(pool: string): string {
   const e = entry(pool)
@@ -393,6 +399,9 @@ export class Operator {
     for (const acc of Object.values(this.store.state.accounts)) {
       const op = acc.armed && acc.ops.find((o) => o.opId === acc.armed!.opId)
       if (!op || acc.active) continue
+      // Armed before ops kept their Safe tx hash: reconciliation matches the execution by it.
+      ;(op as StoredOp).safeTxHash ??= acc.armed!.safeTxHash
+      ;(op as StoredOp).safeNonce ??= acc.armed!.tx.nonce.toString()
       if (op.txHash) {
         acc.armed = undefined
         this.failOwner(acc, op, RECEIPT_UNKNOWN)
@@ -422,7 +431,7 @@ export class Operator {
         }
       }
     }
-    if (recovered) this.store.save()
+    if (recovered || Object.values(this.store.state.accounts).some((a) => a.armed)) this.store.save()
     for (const acc of Object.values(this.store.state.accounts)) this.reconcileSoon(acc)
     const armed = Object.values(this.store.state.accounts).filter((a) => a.armed).length
     if (armed) console.log(`[armed] ${armed} armed activation(s) reloaded`)
@@ -820,7 +829,12 @@ export class Operator {
         continue
       }
       const enabled = await this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [first, acc.ctx.address as Address] })
-      if (!enabled) continue
+      if (!enabled) {
+        // It can never run once one block shows its Safe nonce spent and its grant not enabled (whatever spent the
+        // nonce, a transfer too): nothing of it is left to revoke, and every later renewal or stop stops carrying it.
+        if (op.safeNonce !== undefined && (await this.spentWithout(acc, BigInt(op.safeNonce), [first]))) this.patchOp(acc, op.opId, { state: 'failed', code: 'RENEWAL_SUPERSEDED' })
+        continue
+      }
       const block = await this.client.getBlockNumber()
       // This block becomes the engine's observation floor, so it must itself show the grant: a head from a provider
       // behind the one that answered would put the floor before the renewal. Not yet: left for the next time.
@@ -850,10 +864,38 @@ export class Operator {
     const enabled = await this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [first, acc.ctx.address as Address] })
     if (enabled) return
     const op = unknown.at(-1)!
+    // A renewal that ran also revokes the engine's grants, and enables its own. So the stop is applied only when one
+    // block shows every grant it could have revoked disabled: the engine's, the ones left behind, those of a renewal
+    // of unknown outcome and the stop's own. Any of them enabled, or a read that fails: not applied, asked again later.
+    const ids = [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc), ...(op.revokes ?? [])])]
     const block = await this.client.getBlockNumber()
+    if (!(await this.noneEnabledAt(acc, ids, block))) return
     console.log(`[stop] ${acc.accountKey} ${op.opId} executed on chain (the engine's grants are revoked): applied`)
-    this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'stop', tx: undefined as never, safeTxHash: '0x', expires: 0, revokes: op.revokes ?? acc.grants.map((g) => g.permissionId) }, { blockNumber: block } as TransactionReceipt)
+    this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'stop', tx: undefined as never, safeTxHash: '0x', expires: 0, revokes: ids }, { blockNumber: block } as TransactionReceipt)
     this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(block) })
+  }
+
+  /** Whether block `block` shows none of `ids` enabled on the Safe; false when any read fails. */
+  private async noneEnabledAt(acc: AccountState, ids: Hex[], block: bigint): Promise<boolean> {
+    try {
+      const on = await Promise.all(ids.map((id) => this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [id, acc.ctx.address as Address], blockNumber: block })))
+      return !on.some(Boolean)
+    } catch (e) {
+      logErr(`[settle] ${acc.accountKey} grants at block ${block} unreadable, left for later:`, e)
+      return false
+    }
+  }
+
+  /** Whether one block shows the Safe nonce past `nonce` and none of `ids` enabled: an op signed for `nonce` can never run. */
+  private async spentWithout(acc: AccountState, nonce: bigint, ids: Hex[]): Promise<boolean> {
+    try {
+      const block = await this.client.getBlockNumber()
+      const now = await this.client.readContract({ address: acc.ctx.address as Address, abi: safeAbi, functionName: 'nonce', blockNumber: block })
+      return now > nonce && (await this.noneEnabledAt(acc, ids, block))
+    } catch (e) {
+      logErr(`[settle] ${acc.accountKey} Safe nonce unreadable, left for later:`, e)
+      return false
+    }
   }
 
   /**
@@ -1729,6 +1771,8 @@ export class Operator {
     if ((p.kind === 'activate' || p.kind === 'renew') && p.grants) o.ownerGrants = p.grants
     if ((p.kind === 'stop' || p.kind === 'renew') && p.revokes) o.revokes = p.revokes
     if (p.kind === 'renew' && p.extend) o.extend = true
+    o.safeTxHash = p.safeTxHash
+    o.safeNonce = p.tx.nonce.toString()
     if (p.meta) Object.assign(o, p.meta)
     this.store.save()
   }
@@ -1876,8 +1920,8 @@ export class Operator {
       this.disarm(acc, 'STOPPED')
       acc.active = false
       acc.revoked.push(...(p.revokes ?? []))
+      acc.superseded = unrevoked(acc, p.revokes ?? [])
       acc.grants = []
-      acc.superseded = []
       acc.managedTokenIds = []
       this.store.save()
     } else if (p.kind === 'renew') {
@@ -1949,8 +1993,9 @@ export class Operator {
         acc.active = false
         const revokes = op.revokes ?? acc.grants.map((g) => g.permissionId)
         acc.revoked.push(...revokes.filter((r) => !acc.revoked.includes(r)))
+        // Grants enabled after this stop (a renewal once it no longer counted as in flight) are still on the Safe.
+        acc.superseded = unrevoked(acc, revokes)
         acc.grants = []
-        acc.superseded = []
         acc.managedTokenIds = []
         this.store.save()
       } else if (op.kind === 'activate') {
@@ -1961,6 +2006,11 @@ export class Operator {
         if (!later('exit') && !acc.active) {
           const r = receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt)
           this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'activate', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants }, r)
+        } else {
+          // It ran but is not the account's approval: its grants are enabled with no engine using them. Remembered, so a stop revokes them.
+          const known = new Set([...acc.revoked, ...acc.grants.map((g) => g.permissionId)].map((id) => id.toLowerCase()))
+          acc.superseded = [...new Set([...(acc.superseded ?? []), ...op.ownerGrants.map((g) => g.permissionId).filter((id) => !known.has(id.toLowerCase()))])]
+          this.store.save()
         }
       }
       else if (op.kind === 'renew' && op.ownerGrants && later('exit')) {
@@ -1997,7 +2047,7 @@ export class Operator {
   /**
    * Without a receipt: the Safe's ExecutionSuccess log in the blocks just before the failure time. Only an owner
    * execTransaction emits it (engine userOps run through the module), so the log proves the tx executed. With a kept
-   * hash the log must carry it; without one, exactly one log not claimed by another op, or nothing.
+   * hash the log must carry it; without one, exactly one log of the op's Safe tx hash not claimed by another op, or nothing.
    */
   private async findOwnerTx(acc: AccountState, op: StoredOp): Promise<{ hash: Hex; block: number; ok: boolean } | null> {
     const head = await this.client.getBlock()
@@ -2006,12 +2056,17 @@ export class Operator {
     const at = head.number - lag
     const fromBlock = at > 150n ? at - 150n : 0n
     const toBlock = at + 10n < head.number ? at + 10n : head.number
-    const logs = (await this.client.getLogs({ address: acc.ctx.address as Address, fromBlock, toBlock })).filter((l) => l.topics[0] === EXECUTION_SUCCESS && l.transactionHash)
+    // ExecutionSuccess(bytes32 indexed txHash, uint256 payment): the log must carry the Safe tx hash the op was signed
+    // for, or it is another transaction of the Safe (one the owner made elsewhere) that spent the nonce.
+    const own = op.safeTxHash?.toLowerCase()
+    const logs = (await this.client.getLogs({ address: acc.ctx.address as Address, fromBlock, toBlock })).filter((l) => l.topics[0] === EXECUTION_SUCCESS && l.transactionHash && (!own || l.topics[1]?.toLowerCase() === own))
     const hit = (h: string) => logs.find((l) => l.transactionHash!.toLowerCase() === h.toLowerCase())
     if (op.txHash) {
       const l = hit(op.txHash)
       return l ? { hash: l.transactionHash!, block: Number(l.blockNumber), ok: true } : null
     }
+    // No relayer hash and no Safe tx hash kept (an op stored before it was): nothing can tell its log from another's.
+    if (!own) return null
     const claimed = new Set(acc.ops.map((o) => o.txHash?.toLowerCase()).filter(Boolean))
     const free = [...new Map(logs.filter((l) => !claimed.has(l.transactionHash!.toLowerCase())).map((l) => [l.transactionHash!, l])).values()]
     if (free.length !== 1) {
@@ -2274,7 +2329,7 @@ export function collapseFailed(ops: StoredOp[]): OpView[] {
   const out: OpView[] = []
   ops.forEach((o, i) => {
     const k = keyOf(o)
-    const { permissionId: _p, calls: _c, ownerGrants: _g, revokes: _r, ...view } = o
+    const { permissionId: _p, calls: _c, ownerGrants: _g, revokes: _r, safeTxHash: _h, safeNonce: _n, ...view } = o
     if (!k) return void out.push(view)
     if (newest.get(k) !== i) return
     const n = counts.get(k)!
