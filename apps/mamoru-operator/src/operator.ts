@@ -1076,7 +1076,7 @@ export class Operator {
     // only enter-swap/enter-mint, plus manage-any/convert-any when `liveManage` is non-empty.
     const liveManage = stored.filter((g) => g.name.startsWith('manage-any') || g.name.startsWith('convert-any')).map((g) => g.name)
     const days = Math.round(policy.session.validitySeconds / 86_400)
-    const paidToSafe = `It does this without asking you again, within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else. For ${days} days; cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`
+    const paidToSafe = `It does this without asking you again, within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else. For ${days} days; cap ${fmtUsdc(this.cap)} USDC`
     const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!)} ${b.preference / 100}%`)
     if (pools.length > 1) {
       const summary = [
