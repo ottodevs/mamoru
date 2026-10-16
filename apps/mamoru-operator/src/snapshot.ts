@@ -62,6 +62,8 @@ export type PositionSnapshot = {
   feesUsdc: bigint
   /** Owed amounts in raw USDC at the pool price. */
   owedUsdc: bigint
+  /** otto/mamoru#129: entry amounts of this position revalued at the current price (yield-entries.ts). Absent unless MAMORU_YIELD_LEDGER=1. */
+  holdValueUsdc?: bigint
 }
 
 export type SafeSnapshot = {

@@ -11,9 +11,16 @@ import { Operator } from './operator.ts'
 import { Relayer } from './relayer.ts'
 import { startRpcProxy } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
-import { readSnapshot, SnapshotLoop, snapshotIntervalMs } from './snapshot.ts'
+import { readSnapshot, SnapshotLoop, snapshotIntervalMs, type Snapshot } from './snapshot.ts'
 import { MULTICALL3 } from '@mamoru/rpc'
 import { StateStore, loadOrCreateKey } from './state.ts'
+import { EntryStore, withHoldValue } from './yield-entries.ts'
+
+/** Wraps a snapshot reader with #129's hold-value baseline, stored in its own file under `stateDir`. */
+function withYieldLedger(stateDir: string, read: () => Promise<Snapshot>): () => Promise<Snapshot> {
+  const entries = new EntryStore(stateDir)
+  return async () => withHoldValue(await read(), entries)
+}
 
 /** `git rev-parse --short HEAD` at the operator's cwd, read once at boot. 'unknown' outside a git checkout. */
 async function gitShaOnce(cwd: string): Promise<string> {
@@ -84,7 +91,11 @@ export async function bootOperator(o: BootOptions) {
     const snapshotClient = createPublicClient({ transport: http(via('snapshot'), { batch: true, timeout: 60_000 }) })
     const multicall3 = MULTICALL3
     const budget = rpcBudget(rpcMetrics)
-    snapshot = new SnapshotLoop(() => readSnapshot(snapshotClient, multicall3, chainId, operator.snapshotTargets()), snapshotIntervalMs(process.env.MAMORU_SNAPSHOT_MS), () => budget.over())
+    const read = (): Promise<Snapshot> => readSnapshot(snapshotClient, multicall3, chainId, operator.snapshotTargets())
+    // otto/mamoru#129: adds each position's hold-value baseline for /ops and the app's "earned so far". Its own
+    // flag: MAMORU_SNAPSHOT alone must keep behaving exactly as #136 shipped it.
+    const withYield = process.env.MAMORU_YIELD_LEDGER === '1' ? withYieldLedger(o.stateDir, read) : read
+    snapshot = new SnapshotLoop(withYield, snapshotIntervalMs(process.env.MAMORU_SNAPSHOT_MS), () => budget.over())
     snapshot.start()
   }
   const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot })
