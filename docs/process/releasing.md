@@ -149,7 +149,10 @@ the policy says in its body which of those were run by hand.
 Applied by the coordinator; the rules above assume them.
 
 - `main` and `beta` protected: the CI check required, linear history required, no force push, no deletion.
-- Merge button: "Rebase and merge" only. Squash and merge commits are off.
+- Merges: `scripts/merge-pr.sh <pr>`, never the GitHub button. The button's "Rebase and merge" rewrites each
+  commit and cannot sign it, so main showed unverified commits. The script rebases locally (commit.gpgsign
+  re-signs), waits for CI on that sha and fast-forwards main; GitHub marks the pull request merged.
+- Signed commits required on `main` and `beta` (`required_signatures`), so an unsigned push or the button is refused.
 - Branches are deleted automatically when their pull request merges.
 
 ```sh
@@ -161,6 +164,7 @@ for b in main beta; do
   "enforce_admins": false, "required_pull_request_reviews": null, "restrictions": null,
   "required_linear_history": true, "allow_force_pushes": false, "allow_deletions": false }
 JSON
+  gh api -X POST repos/ottodevs/mamoru/branches/$b/protection/required_signatures
 done
 ```
 
