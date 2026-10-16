@@ -3,8 +3,10 @@
 // against what the chain paid, then replays strategy variants over the same price path.
 //   bun packages/backtest/cli/case-study.ts --dataset ~/.local/share/mamoru-lab/datasets/base-2026-cdp-case-1h.json
 //   bun packages/backtest/cli/case-study.ts --cache <file>.cache.jsonl   (a backfill still running)
-// Static ranges never pay gas after the mint. Every rebuild (re-range, compound) pays a remove, a swap and a mint at
-// the gas of `DEFAULT_GAS` and the base fee of its sample, priced in USDC through WETH/USDC/500.
+// Static ranges never pay gas after the mint. A re-range pays a remove, a swap and a mint; a compound a collect, a swap
+// and an increase; a harvest a collect and, with volatile fees, a swap. Gas is `DEFAULT_GAS` at the base fee of its
+// sample, priced in USDC through WETH/USDC/500, and leaves the free balances when it is spent. Gas the free balances cannot
+// cover is carried as debt; an account worth nothing stops operating.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { amountsOf } from '@mamoru/decide'
 import { baseRegistry, entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
@@ -129,10 +131,15 @@ function collect(book: Book): void {
   book.pos.owed1 = 0n
 }
 
-/** Pays gas out of the free balances, savings asset first. What they cannot cover is carried as debt. */
+/**
+ * Pays gas out of the free balances, savings asset first, together with any debt left from before. What they cannot
+ * cover is carried as debt, paid at the next operation and counted against the account value.
+ */
 function payGas(e: RegistryEntry, s: PoolSample, sample: Sample, book: Book, units: bigint): void {
-  let cost = gasUsd(sample, units)
-  book.gas += cost
+  const fresh = gasUsd(sample, units)
+  book.gas += fresh
+  let cost = fresh + book.debt
+  book.debt = 0n
   const savIs0 = e.token0 === SAV
   const sav = savIs0 ? book.b0 : book.b1
   const fromSav = sav < cost ? sav : cost
@@ -228,18 +235,16 @@ export function simulate(st: Strategy, capital = startUsd()): Result {
     const out = !book.pos || !inRange(b.tick, book.pos)
     if (st.idleLendApr && book.pos) {
       // Only the savings side can be lent at the USDC rate; a position below its range is all volatile token.
-      if (out && !lending) payGas(e, b, S[i]!, book, LEND_MOVE)
-      if (!out && lending) payGas(e, b, S[i]!, book, LEND_MOVE)
-      lending = out
-      if (out) {
-        const x = amountsOf(b.sqrtPriceX96, book.pos.tickLower, book.pos.tickUpper, book.pos.liquidity)
-        const savSide = e.token0 === SAV ? x.amount0 : x.amount1
-        lent += (Number(savSide) * st.idleLendApr * dt) / (100 * 365 * 86_400)
-      }
+      const x = amountsOf(b.sqrtPriceX96, book.pos.tickLower, book.pos.tickUpper, book.pos.liquidity)
+      const savSide = e.token0 === SAV ? x.amount0 : x.amount1
+      const lend = out && savSide > 0n
+      if (lend !== lending) payGas(e, b, S[i]!, book, LEND_MOVE)
+      lending = lend
+      if (lend) lent += (Number(savSide) * st.idleLendApr * dt) / (100 * 365 * 86_400)
     }
     // The exit happened somewhere inside the last interval: count from its middle.
     outSince = out ? (outSince ?? t - dt / 2) : null
-    if (book.debt === 0n && st.width !== 'real' && st.rerangeAfterH !== undefined && out && outSince !== null && t - outSince >= st.rerangeAfterH * H && t - lastRerange >= (st.cooldownH ?? 0) * H) {
+    if (bookValue(e, b, book) > 0n && st.width !== 'real' && st.rerangeAfterH !== undefined && out && outSince !== null && t - outSince >= st.rerangeAfterH * H && t - lastRerange >= (st.cooldownH ?? 0) * H) {
       unwind(b, book)
       payGas(e, b, S[i]!, book, REBUILD)
       const [tl, tu] = rangeFor(e, b.tick, st.width as number | 'full')
@@ -249,7 +254,7 @@ export function simulate(st: Strategy, capital = startUsd()): Result {
       lastRerange = t
       outSince = null
       lastFees = t
-    } else if (book.debt === 0n && st.fees && book.pos && t - lastFees >= st.fees.everyH * H && book.pos.owed0 + book.pos.owed1 > 0n) {
+    } else if (bookValue(e, b, book) > 0n && st.fees && book.pos && t - lastFees >= st.fees.everyH * H && book.pos.owed0 + book.pos.owed1 > 0n) {
       if (st.fees.mode === 'compound' && out) {
         // Out of range an increase is one-sided on the wrong token; fold the fees in once back in range.
       } else if (st.fees.mode === 'compound') {
@@ -281,6 +286,8 @@ export function simulate(st: Strategy, capital = startUsd()): Result {
     dd.see(toUsd(bookValue(e, b, book)) + lent / 1e6)
   }
   const last = at(st.pool, S[S.length - 1]!)!
+  // Still lent at the end: the withdraw is paid too.
+  if (lending) payGas(e, last, S[S.length - 1]!, book, LEND_MOVE)
   const end = bookValue(e, last, book) + BigInt(Math.round(lent))
   const hours = (S[S.length - 1]!.time - S[0]!.time) / H
   return { name: st.name, start: toUsd(st.width === 'real' ? capital : cap), end: toUsd(end), feesUsd: toUsd(book.feesUsd), gasUsd: toUsd(book.gas), swapFeesUsd: toUsd(book.swapFees), ops: book.ops, reranges: book.reranges, inRangePct: (100 * book.inRangeH) / hours, maxDdPct: dd.max, fees0: f0, fees1: f1 }
