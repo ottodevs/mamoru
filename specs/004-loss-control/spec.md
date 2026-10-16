@@ -350,6 +350,29 @@ e2e of the same tape on a policy version that enables it.
 Known simulator limits: one sample every 5-10 min against a 20 s live review (the Lab sees larger gaps than live
 would), single-range swap impact, no MEV, oracle synthetic unless the feed is backfilled.
 
+### Lab windows and the sweep (16 Oct)
+
+Thirteen Base windows in `packages/backtest/src/windows.ts`, with a fixed TRAIN/TEST split. TRAIN holds the three
+windows the thresholds above were read from, so it is in-sample by construction. A rule is tuned on TRAIN and judged
+once on TEST. `bun packages/backtest/cli/windows.ts manifest` writes the market in each window next to the datasets.
+
+| Split | Windows |
+|---|---|
+| TRAIN | sep2026 (calm), oct2025, feb2025, mar2025, aug2024 (crashes; aug2024 has no cbBTC pool and runs only WETH policies), dec2024 (rally), calm-2025-09, calm-2026-04 (drawn) |
+| TEST | apr2025 (tariff crash), may2025 (ETH +37% week), jun2025 (calm BTC, WETH -25% dip), calm-2026-05 (drawn), feb2026 (USDT 176 bps under USDC inside a crash) |
+
+`conservador-live-v2` on every window, review every sample, session limits enforced (mean over windows):
+
+| Split | Deposit | Windows | Mean return | Mean vs hold | Worst return | Worst max drawdown | Worst day |
+|---|---|---|---|---|---|---|---|
+| TRAIN | 1,000 | 7 | -0.35% | -0.36% | -3.73% | 7.62% | 6.78% |
+| TRAIN | 100,000 | 7 | -0.08% | -0.09% | -5.56% | 7.49% | 6.72% |
+| TEST | 1,000 | 5 | -0.55% | -0.01% | -3.51% | 9.30% | 7.34% |
+| TEST | 100,000 | 5 | -0.79% | -0.25% | -4.68% | 9.55% | 8.01% |
+
+A variant: `bun packages/backtest/cli/sweep.ts --policy conservador-lab-guards-v1 --set guards.byBucket.risk.fallFreeze.fallBps=500 --name risk5`
+(TRAIN, deposits 1,000 and 100,000, the unchanged policy as baseline beside it; `--split test` to judge it).
+
 ## Tasks (next sessions)
 
 | Id | What | Accepts |
