@@ -53,6 +53,7 @@ onboarding.post('/owner', async (c) => {
 
   const db = c.env.DB
   const now = c.var.now()
+  const url = new URL(c.req.url)
   // A session that already has an account: the same passkey is answered again, another one is refused. No proof needed to see your own account.
   const current = await c.var.auth.current(c)
   const existing = current ? await accountOfUser(db, current.userId) : null
@@ -62,13 +63,20 @@ onboarding.post('/owner', async (c) => {
     return apiError(c, 409, 'This session already has an account with another passkey.', 'INTENT_REJECTED_STATE')
   }
 
+  // Fail-closed (otto/mamoru#130): a host that is neither app.mamoru.lol nor beta.mamoru.lol is refused
+  // before anything is written. There is no default env to fall back to, and the origin middleware alone
+  // is not enough — it only proves the Origin header matches this request's own host, not that the host
+  // is one of the two this Worker is meant to onboard against (a preview or mirror domain would still
+  // pass that check against itself).
+  const env = envOfHostname(url.hostname)
+  if (!env) return notRegistered(c, 'unrecognized host')
+
   // Anonymous from here: bounded per client IP, and nothing is written before the registration data checks out.
   const secret = c.var.settings.sessionSecret
   const ip = c.req.header('cf-connecting-ip') ?? 'unknown'
   if (!(await allow(db, await ipKey(secret, ip, 'onb'), ONBOARDING_PER_IP, now))) {
     return apiError(c, 429, 'Too many accounts from this network. Wait a few minutes and try again.', 'AUTH_RATE_LIMITED')
   }
-  const url = new URL(c.req.url)
   const proof = typeof body.proof === 'object' && body.proof !== null ? (body.proof as Record<string, unknown>) : null
   const clientDataJSON = decodeB64url(proof?.clientDataJSON, 4096)
   const authenticatorData = decodeB64url(proof?.authenticatorData, 4096)
@@ -98,7 +106,7 @@ onboarding.post('/owner', async (c) => {
     policy_version: conservadorV1.version,
     recovery_ack_at: null,
     created_at: now.toISOString(),
-    env: envOfHostname(url.hostname),
+    env,
     is_test: 0,
   }
   if (!(await insertAccount(db, row))) {

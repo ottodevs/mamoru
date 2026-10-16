@@ -122,6 +122,26 @@ describe('owner', () => {
     expect(prodRow.env).toBe('prod')
   })
 
+  // otto/mamoru#130: fail-closed. A host that is neither app.mamoru.lol nor beta.mamoru.lol (a Workers.dev
+  // preview reachable directly, here) is refused before any row is written — never silently stored as prod.
+  test('onboarding from an unrecognized host is refused and writes nothing', async () => {
+    const h = harness()
+    const PREVIEW = 'https://mamoru-app-beta.example.workers.dev'
+    const challengeRes = await h.app.request(`${PREVIEW}/api/onboarding/challenge`, { method: 'POST', headers: { 'content-type': 'application/json', origin: PREVIEW }, body: '{}' }, h.env)
+    const challenge = (await challengeRes.json()) as SignInChallenge
+    const proof = registrationProof(PASSKEY_A, challenge, { rpId: challenge.rpId, origin: PREVIEW })
+    const res = await h.app.request(
+      `${PREVIEW}/api/onboarding/owner`,
+      { method: 'POST', headers: { 'content-type': 'application/json', origin: PREVIEW }, body: JSON.stringify({ passkey: PASSKEY_A, proof }) },
+      h.env,
+    )
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { code: string }).code).toBe('ONB_PASSKEY_REFUSED')
+    expect(res.headers.get('set-cookie')).toBeNull()
+    expect(h.db.raw.query('SELECT count(*) AS n FROM accounts').get()).toEqual({ n: 0 })
+    expect(h.db.raw.query('SELECT count(*) AS n FROM users').get()).toEqual({ n: 0 })
+  })
+
   test('the saltNonce is deterministic per account key and distinct across keys', () => {
     const k = crypto.randomUUID()
     expect(saltNonceOf(k)).toBe(saltNonceOf(k))

@@ -46,7 +46,13 @@ export function ownedAccount(db: Db, userId: string, accountKey: string): Promis
   return db.prepare('SELECT * FROM accounts WHERE account_key = ? AND user_id = ?').bind(accountKey, userId).first<AccountRow>()
 }
 
-/** False when the credential id already owns an account on this chain (unique index, migration 0005). */
+/**
+ * False when the credential id already owns an account on this chain (unique index, migration 0005).
+ * Falls back to the pre-otto/mamoru#130 13-column INSERT when `env`/`is_test` are not on this D1 yet —
+ * the coordinator applies the migration by hand, after this Worker deploys, so the first requests to land
+ * must not 500 (or, worse, misread the schema error as a credential race and tear down the session the
+ * caller just built).
+ */
 export async function insertAccount(db: Db, row: AccountRow): Promise<boolean> {
   try {
     await db
@@ -57,6 +63,28 @@ export async function insertAccount(db: Db, row: AccountRow): Promise<boolean> {
     .bind(
       row.account_key, row.user_id, row.chain_id, row.address, row.owners_json, row.passkey_credential_id, row.passkey_x, row.passkey_y,
       row.salt_nonce, row.preset, row.policy_version, row.recovery_ack_at, row.created_at, row.env, row.is_test,
+    )
+    .run()
+    return true
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    if (/UNIQUE constraint failed/i.test(message)) return false
+    if (/no such column/i.test(message)) return insertAccountLegacy(db, row)
+    throw e
+  }
+}
+
+/** The exact 13-column INSERT this function always ran before migration XXXX_accounts_env.sql. */
+async function insertAccountLegacy(db: Db, row: AccountRow): Promise<boolean> {
+  try {
+    await db
+    .prepare(
+      `INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y,
+        salt_nonce, preset, policy_version, recovery_ack_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      row.account_key, row.user_id, row.chain_id, row.address, row.owners_json, row.passkey_credential_id, row.passkey_x, row.passkey_y,
+      row.salt_nonce, row.preset, row.policy_version, row.recovery_ack_at, row.created_at,
     )
     .run()
     return true
