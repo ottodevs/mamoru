@@ -107,7 +107,6 @@ export function guardOf(ds: Dataset, i: number, windowSeconds: number, lab?: { f
 }
 
 const HOUR = 3_600
-const DAY = 86_400
 /** Segment of the geometry volatilities: 10 minutes, the step of most Lab windows. */
 export const GEOMETRY_SEGMENT = 600
 /** Time constant of the 7-day EMA (span 7 days: a time constant of half of it). */
