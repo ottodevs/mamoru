@@ -968,7 +968,10 @@ export class Operator {
     // What this activation actually enables, not what the policy could: a gas-capped activation (fitActivation)
     // can leave manage-any/convert-any out of `stored`, and the summary must not claim authority that is not
     // in `batch.calls`. manage-any's decrease/collect/burn take any tokenId the Safe owns (grants.ts), in any
-    // pool, not only the policy's pools; convert-any's swap stays pinned to that pair's volatile token.
+    // pool, not only the policy's pools; convert-any's swap stays pinned to that pair's volatile token. The
+    // baseline per-position 'manage' grant is excluded here (perPosition, not part of an activation batch) and
+    // is kept revoked by the live engine (revokeManage): activation alone never grants decrease/collect/burn,
+    // only enter-swap/enter-mint, plus manage-any/convert-any when `liveManage` is non-empty.
     const liveManage = stored.filter((g) => g.name.startsWith('manage-any') || g.name.startsWith('convert-any')).map((g) => g.name)
     const days = Math.round(policy.session.validitySeconds / 86_400)
     const paidToSafe = `It does this without asking you again, within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else. For ${days} days; cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`
@@ -979,9 +982,9 @@ export class Operator {
         r.usdc > 0n
           ? `Let Mamoru's engine keep your ${fmtUsdc(r.usdc)} USDC invested across Uniswap v3 ${pools.join(', ')}`
           : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
-        `Engine key ${sessionKey} may swap USDC into those pools' tokens, mint positions there, and manage them: collect fees, reduce or close what it opens`,
+        `Engine key ${sessionKey} may swap USDC into those pools' tokens and mint positions there`,
         ...(liveManage.length
-          ? [`It may also do the same for any other Uniswap v3 position your Safe owns, in any pool, and convert ${this.volatileOf(liveManage)} back to USDC`]
+          ? [`It may also act on any Uniswap v3 position your Safe owns, in any pool: take liquidity out, collect fees, burn it once empty, and convert ${this.volatileOf(liveManage)} back to USDC`]
           : []),
         paidToSafe,
       ]
@@ -992,9 +995,9 @@ export class Operator {
       r.usdc > 0n
         ? `Let Mamoru's engine allocate your ${fmtUsdc(r.usdc)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
         : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) into Uniswap v3 USDC/cbBTC 0.05% as soon as it arrives`,
-      `Engine key ${sessionKey} may swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap), mint that pool, and manage the position: collect fees, reduce or close it`,
+      `Engine key ${sessionKey} may swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap) and mint that pool`,
       ...(liveManage.length
-        ? [`It may also do the same for any other Uniswap v3 position your Safe owns, in any pool, and convert cbBTC back to USDC`]
+        ? [`It may also act on any Uniswap v3 position your Safe owns, in any pool: take liquidity out, collect fees, burn it once empty, and convert cbBTC back to USDC`]
         : []),
       paidToSafe,
     ]
