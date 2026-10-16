@@ -62,8 +62,13 @@ export type PositionSnapshot = {
   feesUsdc: bigint
   /** Owed amounts in raw USDC at the pool price. */
   owedUsdc: bigint
-  /** otto/mamoru#129: entry amounts of this position revalued at the current price (yield-entries.ts). Absent unless MAMORU_YIELD_LEDGER=1. */
+  /** otto/mamoru#129: entry amounts of this position revalued at the current price (yield-entries.ts). Absent unless MAMORU_YIELD_LEDGER=1, or the position's pool was momentarily missing from this read. */
   holdValueUsdc?: bigint
+  /** otto/mamoru#129: the baseline `holdValueUsdc` was computed from (yield-entries.ts's EntryStore). Present exactly when `holdValueUsdc` is; a reader must use these, not the position's current amount0/amount1, when it records the baseline. */
+  entryAmount0?: string
+  entryAmount1?: string
+  entryBlock?: number
+  entryDay?: string
 }
 
 export type SafeSnapshot = {

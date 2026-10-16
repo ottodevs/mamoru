@@ -19,8 +19,11 @@ accounts.get('/:accountKey/dashboard', async (c) => {
   const account = await ownedAccount(c.env.DB, session.userId, accountKey)
   if (!account) return accountNotFound(c)
   c.set('accountKey', account.account_key)
-  const payload = buildDashboard(await loadDashboardInput(c.env.DB, account), c.var.now())
-  payload.yield = await loadYieldLedger(c.env.DB, account.chain_id, account.account_key)
+  // Independent D1 reads (code-review finding, PR #43): the dashboard projection and the yield ledger share no
+  // input, so there is no reason to wait for one before starting the other.
+  const [input, yieldLedger] = await Promise.all([loadDashboardInput(c.env.DB, account), loadYieldLedger(c.env.DB, account.chain_id, account.account_key)])
+  const payload = buildDashboard(input, c.var.now())
+  payload.yield = yieldLedger
   if (liveFunds(c.env)) payload.banner = { ...payload.banner, kind: 'live', text: LIVE_BANNER }
   return c.json(payload)
 })

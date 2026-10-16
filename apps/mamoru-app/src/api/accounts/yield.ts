@@ -5,21 +5,41 @@
 import type { YieldLedgerView } from '@mamoru/domain'
 import type { Db } from '../env.ts'
 
-type LatestRow = { fees_usdc: number; read_at: string }
+type LatestRow = { fees_usdc: number; read_at: string; positions_json: string }
 type DailyRow = { collected_usdc: number | null; gas_paid_wei: string | null }
-type PositionRow = { value_usd: number; accrued_usd_close: number; hold_value_usd: number; fee_accrued_usd: number | null }
+type PositionRow = { value_usd: number; accrued_usd_close: number; hold_value_usd: number }
+type FeeRow = { fee_accrued_usd: number | null }
+
+const dayOf = (iso: string): string => iso.slice(0, 10)
+
+/**
+ * `valueVsHoldUsd` is read-time, not lifetime (packages/domain/src/app-api.ts's doc comment: "today's ... minus
+ * the hold baseline"), so it is scoped to the positions account_snapshot_latest says are open right now, on the
+ * day of that same snapshot. Without this, a position that closed still had a row written on its last open day,
+ * and summing blindly by MAX(day) would (a) keep reporting a closed position's stale figure forever once it is
+ * the account's only position, and (b) double-count a same-day close-then-open (rerange) against the new
+ * position's row for the rest of that UTC day. Both were code-review findings on PR #43.
+ */
+async function openPositionsValueVsHold(db: Db, chainId: number, accountKey: string, latest: LatestRow | null): Promise<bigint | null> {
+  if (!latest) return null
+  const tokenIds: number[] = (JSON.parse(latest.positions_json) as { tokenId: string }[]).map((p) => Number(p.tokenId))
+  if (tokenIds.length === 0) return null
+  const placeholders = tokenIds.map(() => '?').join(', ')
+  const rows = await db
+    .prepare(`SELECT value_usd, accrued_usd_close, hold_value_usd FROM yield_ledger_position_daily WHERE chain_id = ? AND account_key = ? AND day = ? AND token_id IN (${placeholders})`)
+    .bind(chainId, accountKey, dayOf(latest.read_at), ...tokenIds)
+    .all<PositionRow>()
+  if (rows.results.length === 0) return null
+  return rows.results.reduce((n, p) => n + BigInt(p.value_usd) + BigInt(p.accrued_usd_close) - BigInt(p.hold_value_usd), 0n)
+}
 
 export async function loadYieldLedger(db: Db, chainId: number, accountKey: string): Promise<YieldLedgerView> {
-  const [latest, daily, positions] = await Promise.all([
-    db.prepare('SELECT fees_usdc, read_at FROM account_snapshot_latest WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).first<LatestRow>(),
+  const [latest, daily, feeRows] = await Promise.all([
+    db.prepare('SELECT fees_usdc, read_at, positions_json FROM account_snapshot_latest WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).first<LatestRow>(),
     db.prepare('SELECT collected_usdc, gas_paid_wei FROM account_daily WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<DailyRow>(),
-    db
-      .prepare(
-        `SELECT value_usd, accrued_usd_close, hold_value_usd, fee_accrued_usd FROM yield_ledger_position_daily
-         WHERE chain_id = ? AND account_key = ? AND day = (SELECT MAX(day) FROM yield_ledger_position_daily WHERE chain_id = ? AND account_key = ?)`,
-      )
-      .bind(chainId, accountKey, chainId, accountKey)
-      .all<PositionRow>(),
+    // Lifetime, matching collectedUsd: every day's fee_accrued_usd is already that day's own 10% of that day's
+    // collected_usd (migrations/d1/XXXX_yield_ledger.sql), so summing every row is the lifetime readiness figure.
+    db.prepare('SELECT fee_accrued_usd FROM yield_ledger_position_daily WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<FeeRow>(),
   ])
 
   let collected = 0n
@@ -37,17 +57,16 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
     }
   }
 
-  let valueVsHold = 0n
   let feeAccrued = 0n
   let anyFeeAccrued = false
-  for (const p of positions.results) {
-    valueVsHold += BigInt(p.value_usd) + BigInt(p.accrued_usd_close) - BigInt(p.hold_value_usd)
-    if (p.fee_accrued_usd != null) {
-      feeAccrued += BigInt(p.fee_accrued_usd)
+  for (const row of feeRows.results) {
+    if (row.fee_accrued_usd != null) {
+      feeAccrued += BigInt(row.fee_accrued_usd)
       anyFeeAccrued = true
     }
   }
 
+  const valueVsHold = await openPositionsValueVsHold(db, chainId, accountKey, latest)
   const accrued = latest ? BigInt(latest.fees_usdc) : null
   return {
     asOf: latest?.read_at ?? null,
@@ -55,7 +74,7 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
     collectedUsd: anyCollected ? collected.toString() : null,
     earnedSoFarUsd: accrued !== null ? (accrued + collected).toString() : null,
     gasPaidWei: anyGas ? gas.toString() : null,
-    valueVsHoldUsd: positions.results.length ? valueVsHold.toString() : null,
+    valueVsHoldUsd: valueVsHold !== null ? valueVsHold.toString() : null,
     feeAccruedUsd: anyFeeAccrued ? feeAccrued.toString() : null,
   }
 }

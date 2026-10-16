@@ -54,6 +54,10 @@ function position(over: Partial<PositionWire> = {}): PositionWire {
     feesUsdc: fees.accrued0.toString(),
     owedUsdc: '0',
     holdValueUsdc: '5000000',
+    entryAmount0: '5000000',
+    entryAmount1: '0',
+    entryBlock: 1000,
+    entryDay: '2026-10-16',
     ...over,
   }
 }
@@ -166,11 +170,26 @@ describe('writeYieldLedger (otto/mamoru#129): reconciliation against the fee mat
     expect(skipped).toBe(1)
   })
 
+  test('a position missing just one entry* field is skipped too, even with holdValueUsdc present (code-review finding: these four must travel together)', async () => {
+    const { written, skipped } = await writeYieldLedger(db, snapshot({ safes: [safe({ positions: [position({ entryDay: undefined })] })] }), new Date())
+    expect(written).toBe(0)
+    expect(skipped).toBe(1)
+  })
+
   test('the entry baseline is captured once and never moved by a later read with different amounts', async () => {
     await writeYieldLedger(db, snapshot(), new Date('2026-10-16T09:00:00Z'))
     await writeYieldLedger(db, snapshot({ readAt: '2026-10-16T18:00:00Z', safes: [safe({ positions: [position({ amount0: '9999999' })] })] }), new Date('2026-10-16T18:00:00Z'))
     const entry = db.raw.query('SELECT * FROM yield_ledger_position_entry WHERE token_id = 42').get() as Record<string, unknown>
     expect(entry.entry_amount0).toBe('5000000')
+  })
+
+  test('yield_ledger_position_entry stores entryAmount0/1, not the position\'s current amount0/1, even when they differ (code-review finding, PR #43)', async () => {
+    // The operator's baseline (entryAmount0) can differ from the position's amount0 on the very tick the Worker
+    // first observes it: a reorder/rerange between the operator's capture and the Worker's pull, for example.
+    await writeYieldLedger(db, snapshot({ safes: [safe({ positions: [position({ amount0: '123456', entryAmount0: '5000000' })] })] }), new Date())
+    const entry = db.raw.query('SELECT entry_amount0 FROM yield_ledger_position_entry WHERE token_id = 42').get() as Record<string, unknown>
+    expect(entry.entry_amount0).toBe('5000000')
+    expect(entry.entry_amount0).not.toBe('123456')
   })
 
   test('value vs hold is derivable from stored columns: equal entry and current value means zero drift', async () => {

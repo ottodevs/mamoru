@@ -56,21 +56,31 @@ describe('holdValueUsdc (otto/mamoru#129)', () => {
   })
 })
 
+type WithHold = PositionSnapshot & { holdValueUsdc: bigint; entryAmount0: string; entryAmount1: string; entryBlock: number; entryDay: string }
+
 describe('withHoldValue (otto/mamoru#129)', () => {
-  test('captures a baseline the first time a token id is seen', () => {
+  test('captures a baseline the first time a token id is seen, and carries it as entryAmount0/1 alongside holdValueUsdc', () => {
     const store = new EntryStore(tmpDir())
     const out = withHoldValue(snap(), store)
     expect(store.get(8453, 1n)?.amount0).toBe('10000000')
-    expect((out.safes[0]!.positions[0] as PositionSnapshot & { holdValueUsdc: bigint }).holdValueUsdc).toBe(10_000_000n)
+    const p = out.safes[0]!.positions[0] as WithHold
+    expect(p.holdValueUsdc).toBe(10_000_000n)
+    expect(p.entryAmount0).toBe('10000000')
+    expect(p.entryAmount1).toBe('0')
+    expect(p.entryBlock).toBe(1)
+    expect(p.entryDay).toBe('2026-10-16')
   })
 
-  test('a later read with different amounts does not move the stored baseline', () => {
+  test('a later read with different amounts does not move the stored baseline or what it carries on the wire', () => {
     const store = new EntryStore(tmpDir())
     withHoldValue(snap(), store)
-    const later = withHoldValue(snap({ safes: [{ ...snap().safes[0]!, positions: [position({ amount0: 99_000_000n })] }] }), store)
+    const later = withHoldValue(snap({ readAt: '2026-10-17T09:00:00.000Z', safes: [{ ...snap().safes[0]!, positions: [position({ amount0: 99_000_000n })] }] }), store)
     expect(store.get(8453, 1n)?.amount0).toBe('10000000')
+    const p = later.safes[0]!.positions[0] as WithHold
     // Hold value still prices the original entry amount, not the position's amount at this later read.
-    expect((later.safes[0]!.positions[0] as PositionSnapshot & { holdValueUsdc: bigint }).holdValueUsdc).toBe(10_000_000n)
+    expect(p.holdValueUsdc).toBe(10_000_000n)
+    expect(p.entryAmount0).toBe('10000000')
+    expect(p.entryDay).toBe('2026-10-16')
   })
 
   test('two different token ids each get their own baseline', () => {
@@ -81,11 +91,26 @@ describe('withHoldValue (otto/mamoru#129)', () => {
     expect(store.get(8453, 2n)?.amount0).toBe('2000000')
   })
 
-  test('a position in a pool missing from the snapshot gets holdValueUsdc 0 instead of throwing', () => {
+  test('a position in a pool missing from the snapshot keeps holdValueUsdc and the entry fields entirely absent, never a fabricated 0', () => {
     const store = new EntryStore(tmpDir())
     const missingPool = snap({ pools: {}, safes: [{ ...snap().safes[0]!, positions: [position()] }] })
     const out = withHoldValue(missingPool, store)
-    expect((out.safes[0]!.positions[0] as PositionSnapshot & { holdValueUsdc: bigint }).holdValueUsdc).toBe(0n)
+    const p = out.safes[0]!.positions[0] as Partial<WithHold>
+    expect(p.holdValueUsdc).toBeUndefined()
+    expect(p.entryAmount0).toBeUndefined()
+    expect('holdValueUsdc' in p).toBe(false)
+    // The baseline is still captured even on a tick that cannot price it, so a later tick that can prices the
+    // earliest read, not a later one.
+    expect(store.get(8453, 1n)?.amount0).toBe('10000000')
+  })
+
+  test('once a pool becomes priceable again, the baseline captured on the unpriceable tick is what is used', () => {
+    const store = new EntryStore(tmpDir())
+    withHoldValue(snap({ pools: {}, safes: [{ ...snap().safes[0]!, positions: [position({ amount0: 7_000_000n })] }] }), store)
+    const out = withHoldValue(snap({ safes: [{ ...snap().safes[0]!, positions: [position({ amount0: 99_000_000n })] }] }), store)
+    const p = out.safes[0]!.positions[0] as WithHold
+    expect(p.entryAmount0).toBe('7000000')
+    expect(p.holdValueUsdc).toBe(7_000_000n)
   })
 
   test('persists across a new EntryStore pointed at the same directory', () => {

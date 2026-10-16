@@ -28,8 +28,17 @@ export type PositionWire = {
   valueUsdc: string
   feesUsdc: string
   owedUsdc: string
-  /** otto/mamoru#129: present only when the operator also runs with MAMORU_YIELD_LEDGER=1 (yield-entries.ts). */
+  /**
+   * otto/mamoru#129: present only when the operator also runs with MAMORU_YIELD_LEDGER=1 (yield-entries.ts), and
+   * only on a tick where the position's pool was priceable. `entryAmount0/1/Block/Day` are the exact baseline
+   * `holdValueUsdc` was computed from: all four travel together with it, and a writer must store these, not a
+   * position's current amount0/amount1, into yield_ledger_position_entry (code-review finding, PR #43).
+   */
   holdValueUsdc?: string
+  entryAmount0?: string
+  entryAmount1?: string
+  entryBlock?: number
+  entryDay?: string
 }
 export type SafeWire = {
   accountKey: string
@@ -89,6 +98,7 @@ async function resolveAccountKey(db: Db, chainId: number, address: string): Prom
   return row?.account_key ?? null
 }
 
+/** Cumulative totals for the whole UTC day this call's snapshot falls on, not one tx's delta: COALESCE on a later call with none keeps the running total, so a caller that passed only one harvest's amount would silently drop every earlier one on the same day once a call without a receipt follows it. */
 export type AccountReceipt = { collectedUsd?: number; gasWei?: string }
 
 /**
@@ -149,6 +159,7 @@ export function feeReadinessUsd(collectedUsd: number | null | undefined): number
   return collectedUsd == null ? null : Math.round((collectedUsd * FEE_ON_YIELD_BPS) / 10_000)
 }
 
+/** Same cumulative-day-total contract as AccountReceipt, per position. */
 export type PositionReceipt = { collectedUsd?: number; collected0?: string; collected1?: string }
 
 /**
@@ -170,7 +181,10 @@ export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date
     }
     const address = safe.safe.toLowerCase()
     for (const p of safe.positions) {
-      if (p.holdValueUsdc === undefined) {
+      // holdValueUsdc and the four entry* fields travel together (yield-entries.ts's withHoldValue); any one
+      // missing means the operator could not price this position's baseline on this tick, so none of it is
+      // trustworthy. Never fall back to the position's current amount0/amount1 here: that is not the baseline.
+      if (p.holdValueUsdc === undefined || p.entryAmount0 === undefined || p.entryAmount1 === undefined || p.entryBlock === undefined || p.entryDay === undefined) {
         skipped++
         continue
       }
@@ -180,7 +194,7 @@ export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date
            VALUES (?, ?, ?, ?, 'unknown', ?, ?, ?, ?, ?, ?)
            ON CONFLICT(chain_id, token_id) DO NOTHING`,
         )
-        .bind(snapshot.chainId, Number(p.tokenId), accountKey, address, p.pool, day, Number(snapshot.block), p.amount0, p.amount1, now.toISOString())
+        .bind(snapshot.chainId, Number(p.tokenId), accountKey, address, p.pool, p.entryDay, p.entryBlock, p.entryAmount0, p.entryAmount1, now.toISOString())
         .run()
 
       const receipt = receipts.get(p.tokenId)

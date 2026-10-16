@@ -63,25 +63,41 @@ export function holdValueUsdc(entry: EntryBaseline, token0: string, token1: stri
   return inUsdc(entry.pool, token0, BigInt(entry.amount0), sqrtPriceX96) + inUsdc(entry.pool, token1, BigInt(entry.amount1), sqrtPriceX96)
 }
 
-export type PositionWithHold = PositionSnapshot & { holdValueUsdc: bigint }
+/**
+ * `holdValueUsdc` and the entry fields travel together: a reader (the Worker's yield-ledger.ts) must store the
+ * exact baseline this figure was computed from, not re-derive its own from whatever amount happens to be on the
+ * wire at a later tick. All four are present, or none are (code-review finding, otto/mamoru#129 PR #43).
+ */
+export type PositionWithHold = PositionSnapshot & {
+  holdValueUsdc: bigint
+  entryAmount0: string
+  entryAmount1: string
+  entryBlock: number
+  entryDay: string
+}
 
 /**
- * Captures a baseline for every position not seen before, persists what changed, and returns the snapshot with
- * `holdValueUsdc` added to each position. Call once per read, right after readSnapshot; safe to call every tick,
- * the store only ever writes a token id's first row.
+ * Captures a baseline for every position not seen before (even one whose pool is momentarily missing from this
+ * read: the baseline should still start from the earliest read, not a later one), persists what changed, and
+ * returns the snapshot with `holdValueUsdc` and the entry it was computed from added to each position that has
+ * a priceable pool this tick. A position without a priceable pool keeps none of these fields at all — never a
+ * fabricated 0, which a reader could otherwise mistake for "no edge vs holding" instead of "not known yet".
+ * Call once per read, right after readSnapshot; safe to call every tick, the store only ever writes a token
+ * id's first row.
  */
 export function withHoldValue(snapshot: Snapshot, store: EntryStore): Snapshot {
   const day = dayOf(snapshot.readAt)
   let changed = false
   const safes = snapshot.safes.map((safe) => ({
     ...safe,
-    positions: safe.positions.map((p): PositionWithHold => {
-      const poolState = snapshot.pools[p.pool]
+    positions: safe.positions.map((p): PositionSnapshot | PositionWithHold => {
       if (store.captureIfNew(snapshot.chainId, p.tokenId, { pool: p.pool, entryBlock: Number(snapshot.block), entryDay: day, amount0: p.amount0.toString(), amount1: p.amount1.toString(), capturedAt: snapshot.readAt })) {
         changed = true
       }
+      const poolState = snapshot.pools[p.pool]
+      if (!poolState) return p
       const entry = store.get(snapshot.chainId, p.tokenId)!
-      return { ...p, holdValueUsdc: poolState ? holdValueUsdc(entry, p.token0, p.token1, poolState.sqrtPriceX96) : 0n }
+      return { ...p, holdValueUsdc: holdValueUsdc(entry, p.token0, p.token1, poolState.sqrtPriceX96), entryAmount0: entry.amount0, entryAmount1: entry.amount1, entryBlock: entry.entryBlock, entryDay: entry.entryDay }
     }),
   }))
   if (changed) store.save()
