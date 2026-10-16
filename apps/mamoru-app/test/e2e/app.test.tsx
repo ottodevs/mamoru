@@ -518,6 +518,16 @@ describe('funds by token and what Mamoru is doing', () => {
     expect(engineLine({ ...midEntry, engine: null })).toBeNull()
   })
 
+  test('money held back on purpose says why and when it was checked (otto/mamoru#128)', () => {
+    const at = new Date('2026-10-16T10:00:00Z').toISOString()
+    const depth = engineLine({ ...midEntry, engine: { placing: false, nextReviewAt: at, reviewedAt: at, waiting: [{ bucket: 'stables', pool: 'pool:USDC/USDT/100', code: 'DECIDE_WAIT_DEPTH', amountUsdc: '40000000' }] } })!
+    expect(depth.startsWith('40.00 USDC is waiting: the USDC/USDT pool cannot take more right now without moving its price. Checked at ')).toBe(true)
+    const fall = engineLine({ ...midEntry, engine: { placing: false, nextReviewAt: at, reviewedAt: at, waiting: [{ bucket: 'btc-usdc', pool: 'pool:USDC/cbBTC/500', code: 'DECIDE_ENTRY_PAUSED_FALL', amountUsdc: '12500000' }] } })!
+    expect(fall.startsWith('12.50 USDC is waiting: USDC/cbBTC is falling fast')).toBe(true)
+    // Placing wins: the engine is already moving that money.
+    expect(engineLine({ ...midEntry, engine: { placing: true, nextReviewAt: at, waiting: [{ bucket: 'stables', pool: null, code: 'DECIDE_WAIT_DEPTH', amountUsdc: '1' }] } })).toBe('Placing your money. The next step starts in a few seconds.')
+  })
+
   test('what a swap or a mint rounds off (under a cent per token) counts in the total and is not listed', async () => {
     // Ot's beta account once placed: three positions and a few millionths left in four tokens.
     const placed: FundingView = {

@@ -31,5 +31,7 @@ const op = await bootOperator({
   policyId: process.env.MAMORU_POLICY,
   reviewMs: num(process.env.MAMORU_REVIEW_MS),
   waitBlockMs: num(process.env.MAMORU_WAIT_BLOCK_MS),
+  capUsdc: process.env.MAMORU_CAP_USDC,
+  depth: process.env.MAMORU_DEPTH,
 })
 for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, () => (op.stop(), process.exit(0)))

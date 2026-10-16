@@ -7,7 +7,7 @@ import { POLICIES, withTestOverrides } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
-import { Operator } from './operator.ts'
+import { Operator, type OperatorConfig } from './operator.ts'
 import { Relayer } from './relayer.ts'
 import { startRpcProxy } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
@@ -41,6 +41,28 @@ export type BootOptions = {
   reviewMs?: number
   waitBlockMs?: number
   maxWaitBlocks?: number
+  /** MAMORU_CAP_USDC, whole USDC (otto/mamoru#127); absent: LIVE_CAP_USDC. */
+  capUsdc?: string
+  /** MAMORU_DEPTH = `impactBps,shareBps[,stablesImpactBps]` (otto/mamoru#127); absent: depth sizing off. */
+  depth?: string
+}
+
+/** Whole USDC from the env, as base units; refuses anything that is not a positive whole number up to 1e9. */
+export function parseCapUsdc(v: string | undefined): bigint | undefined {
+  if (v === undefined || v === '') return undefined
+  if (!/^[1-9][0-9]{0,8}$/.test(v)) throw new Error(`MAMORU_CAP_USDC must be a whole number of USDC, 1 to 999999999: ${v}`)
+  return BigInt(v) * 1_000_000n
+}
+
+/** `impactBps,shareBps[,stablesImpactBps]`, integers: impact 1 to 500 bps, share 1 to 5000 bps. */
+export function parseDepth(v: string | undefined): OperatorConfig['depth'] {
+  if (v === undefined || v === '') return undefined
+  const parts = v.split(',').map((x) => x.trim())
+  if (parts.length < 2 || parts.length > 3 || !parts.every((x) => /^[0-9]+$/.test(x))) throw new Error(`MAMORU_DEPTH must be impactBps,shareBps[,stablesImpactBps]: ${v}`)
+  const [impact, share, stables] = parts.map(Number) as [number, number, number | undefined]
+  const okImpact = (n: number) => n >= 1 && n <= 500
+  if (!okImpact(impact) || share < 1 || share > 5000 || (stables !== undefined && !okImpact(stables))) throw new Error(`MAMORU_DEPTH out of range: ${v}`)
+  return { maxImpactBps: impact, maxShareBps: share, ...(stables === undefined ? {} : { maxImpactBpsByPool: { 'pool:USDC/USDT/100': stables } }) }
 }
 
 /** Starts the operator: relayer key, state, loopback bundler, HTTP server, and the engine loops that were active. */
@@ -78,6 +100,8 @@ export async function bootOperator(o: BootOptions) {
       maxWaitBlocks: o.maxWaitBlocks ?? 150,
       rpcBudget: rpcBudget(rpcMetrics),
       watchClient,
+      capUsdc: parseCapUsdc(o.capUsdc),
+      depth: parseDepth(o.depth),
     },
     client,
     relayer,

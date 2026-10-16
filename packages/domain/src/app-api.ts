@@ -71,7 +71,10 @@ export type FundingView = {
   idle?: { token: string; amount: string; decimals: number; valueUsdc: string }[]
   // What the engine of a running account is up to between operations: `placing` while it is working through an
   // entry (the next step comes in seconds), and when its next review of the account is due. Null when not running.
-  engine?: { placing: boolean; nextReviewAt: string | null } | null
+  // `waiting` (otto/mamoru#127, #128): money the engine is holding back as USDC on purpose, per bucket, with the reason
+  // code of the last review (DECIDE_WAIT_DEPTH: the pool cannot take more now; DECIDE_ENTRY_PAUSED_FALL: its market is
+  // falling fast) and when that review ran. Absent when nothing waits.
+  engine?: { placing: boolean; nextReviewAt: string | null; waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; reviewedAt?: string | null } | null
   // The owner's approval of a running account: until when (unix seconds) the engine's grants are valid, whether the
   // renewal is due (inside the renewal window) and whether they already lapsed. Null or absent when not running.
   // `missing`: how many grants of its policy the account lacks (left out to fit Base's per-tx gas cap); the renew

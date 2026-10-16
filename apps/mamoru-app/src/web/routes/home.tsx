@@ -38,6 +38,8 @@ export const homeCopy = {
   byToken: 'By token',
   placing: 'Placing your money. The next step starts in a few seconds.',
   upToDate: (time: string) => `Nothing to do right now. Mamoru looks again at ${time}.`,
+  waitDepth: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: the ${pair} pool cannot take more right now without moving its price. Checked at ${time}.`,
+  waitFall: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: ${pair} is falling fast, so Mamoru adds nothing there until it settles. Checked at ${time}.`,
   history: 'Savings history',
   earnedSoFar: 'Earned so far',
   notRunning: 'Mamoru is not running on this money yet.',
@@ -299,6 +301,15 @@ function tokenAmount(raw: string, token: string, decimals: number): string {
 export function engineLine(f: FundingView): string | null {
   if (!f.active || !f.engine) return null
   if (f.engine.placing) return homeCopy.placing
+  // otto/mamoru#128: money held back on purpose says why, so a still account never looks stopped.
+  const w = f.engine.waiting?.[0]
+  if (w) {
+    const time = f.engine.reviewedAt ? new Date(f.engine.reviewedAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : 'the last review'
+    const amount = usd(w.amountUsdc)
+    const pair = pairLabel(w.pool ?? undefined).replace(/ /g, '')
+    if (w.code === 'DECIDE_WAIT_DEPTH') return homeCopy.waitDepth(amount, pair, time)
+    if (w.code === 'DECIDE_ENTRY_PAUSED_FALL') return homeCopy.waitFall(amount, pair, time)
+  }
   if (!f.engine.nextReviewAt) return null
   return homeCopy.upToDate(new Date(f.engine.nextReviewAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
 }

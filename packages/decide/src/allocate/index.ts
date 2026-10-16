@@ -110,7 +110,12 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
 
   const buckets: BucketValue[] = rows.map((r) => {
     const target = r.pool && prefTotal > 0n ? (total * BigInt(r.b.preference)) / prefTotal : 0n
-    return { bucket: r.b.id, pool: r.pool?.name ?? null, value: r.value, target, weightBps: total > 0n ? Number((r.value * 10_000n) / total) : 0, code: r.blocked ?? 'STRATEGY_PREFERENCE' }
+    const row: BucketValue = { bucket: r.b.id, pool: r.pool?.name ?? null, value: r.value, target, weightBps: total > 0n ? Number((r.value * 10_000n) / total) : 0, code: r.blocked ?? 'STRATEGY_PREFERENCE' }
+    // A frozen bucket is one more reason savings wait (otto/mamoru#127, #128): its shortfall is shown as waiting, the
+    // same way as a bucket whose pool lacks depth.
+    const gap = target - r.deployed
+    if (r.blocked === 'DECIDE_ENTRY_PAUSED_FALL' && gap >= minEntry) row.waiting = gap < free ? gap : free
+    return row
   })
 
   // Short buckets, most under-weight first (relative deficit), policy order on ties.

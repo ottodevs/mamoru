@@ -242,6 +242,10 @@ export type OperatorConfig = {
   rpcBudget?: RpcBudget
   /** Client of the armed watcher's batched balance reads, so the counters tell them apart; absent: the operator's client. */
   watchClient?: PublicClient
+  /** Per-account cap on the USDC at Start, base units (otto/mamoru#127); absent: LIVE_CAP_USDC. Session caps are sized from it. */
+  capUsdc?: bigint
+  /** Depth sizing of entries for the engine (otto/mamoru#127); absent: entries are sized as before. */
+  depth?: NonNullable<PolicyVersion['depth']>
 }
 
 type OwnerKind = 'activate' | 'transfer' | 'stop' | 'renew'
@@ -263,7 +267,7 @@ type Prepared = {
   meta?: { amountUsdc: string; asset?: string; to: Hex }
 }
 
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -524,6 +528,29 @@ export class Operator {
     return { acc, live }
   }
 
+  /** The per-account cap at Start (otto/mamoru#127): configurable, so it can be raised once depth sizing is live. */
+  get cap(): bigint {
+    return this.cfg.capUsdc ?? LIVE_CAP_USDC
+  }
+
+  private readonly depthPolicies = new WeakMap<PolicyVersion, PolicyVersion>()
+
+  /**
+   * The policy the engine decides with: the account's, plus depth sizing when the operator is configured for it.
+   * Grants are always built from `policyOf`: depth sizing changes how much an entry places, never what a session allows.
+   */
+  enginePolicyOf(acc: AccountState): PolicyVersion {
+    const p = this.policyOf(acc)
+    const depth = this.cfg.depth
+    if (!depth || p.allocation !== 'target-weights') return p
+    let d = this.depthPolicies.get(p)
+    if (!d) {
+      d = { ...p, depth }
+      this.depthPolicies.set(p, d)
+    }
+    return d
+  }
+
   /** The policy the account was activated with; accounts activated before policy ids were stored run conservador-live-v1. */
   policyOf(acc: AccountState): PolicyVersion {
     if (!acc.policyId) return acc.active || acc.grants.length ? (POLICIES[LEGACY_POLICY] ?? this.cfg.policy) : this.cfg.policy
@@ -581,9 +608,9 @@ export class Operator {
       block: Number(r.block),
       usdc: r.usdc.toString(),
       eth: r.eth.toString(),
-      capUsdc: LIVE_CAP_USDC.toString(),
+      capUsdc: this.cap.toString(),
       // Only while the engine is off: that is when the cap refuses Start.
-      overCap: acc.active ? null : overCap(r.usdc, LIVE_CAP_USDC),
+      overCap: acc.active ? null : overCap(r.usdc, this.cap),
       deployMinUsdc: MIN_DEPLOY_USDC.toString(),
       cbbtc: r.cbbtc.toString(),
       gasReserveWei: this.policyOf(acc).gasReserveWei.toString(),
@@ -632,7 +659,8 @@ export class Operator {
   private engineView(acc: AccountState): FundingView['engine'] {
     const runner = acc.active ? this.runners.get(acc.accountKey) : undefined
     if (!runner || runner.stopped) return null
-    return { placing: (runner.followUps ?? 0) > 0, nextReviewAt: runner.nextAt === undefined ? null : new Date(runner.nextAt).toISOString() }
+    const waiting = runner.waiting?.length ? { waiting: runner.waiting, reviewedAt: runner.reviewedAt === undefined ? null : new Date(runner.reviewedAt).toISOString() } : {}
+    return { placing: (runner.followUps ?? 0) > 0, nextReviewAt: runner.nextAt === undefined ? null : new Date(runner.nextAt).toISOString(), ...waiting }
   }
 
   /** What is in flight for this account: an owner transaction the operator is executing, else a live engine op. */
@@ -754,7 +782,7 @@ export class Operator {
         return [pr.asset, { num: pr.num, den: pr.den }]
       }),
     )
-    const caps = computeCaps(policy, LIVE_CAP_USDC, prices)
+    const caps = computeCaps(policy, this.cap, prices)
     const block = await this.client.getBlock({ blockNumber: r.block })
     const t = Number(block.timestamp)
     const allKeys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
@@ -1035,7 +1063,7 @@ export class Operator {
     const { acc, live } = this.account(ctx)
     if (acc.active) throw new HttpError(409, 'ALREADY_ACTIVE', 'the engine is already active for this account')
     const r = await readSafe(this.client, live.safe)
-    if (r.usdc > LIVE_CAP_USDC) throw depositOverCap(r.usdc)
+    if (r.usdc > this.cap) throw depositOverCap(r.usdc, this.cap)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
     const policy = this.cfg.policy
     const { sessionKey, caps, stored, batch } = await this.approval(acc, live, policy, r)
@@ -1055,7 +1083,7 @@ export class Operator {
         `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
         r.usdc > 0n
           ? `Let Mamoru's engine keep your ${fmtUsdc(r.usdc)} USDC invested across Uniswap v3 ${pools.join(', ')}`
-          : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
+          : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(this.cap)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
         `Engine key ${sessionKey} may swap USDC into those pools' tokens and mint positions there`,
         ...(liveManage.length
           ? [`It may also act on any Uniswap v3 position your Safe owns, in any pool: take liquidity out, collect fees, burn it once empty, and convert ${this.volatileOf(liveManage)} back to USDC`]
@@ -1068,7 +1096,7 @@ export class Operator {
       `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
       r.usdc > 0n
         ? `Let Mamoru's engine allocate your ${fmtUsdc(r.usdc)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
-        : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) into Uniswap v3 USDC/cbBTC 0.05% as soon as it arrives`,
+        : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(this.cap)} USDC) into Uniswap v3 USDC/cbBTC 0.05% as soon as it arrives`,
       `Engine key ${sessionKey} may swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap) and mint that pool`,
       ...(liveManage.length
         ? [`It may also act on any Uniswap v3 position your Safe owns, in any pool: take liquidity out, collect fees, burn it once empty, and convert cbBTC back to USDC`]
@@ -1407,7 +1435,7 @@ export class Operator {
       this.assertBudget(acc)
       const usdc = await this.usdcOf(live.safe)
       if (usdc === 0n) return this.arm(acc, p, signature)
-      if (usdc > LIVE_CAP_USDC) throw depositOverCap(usdc)
+      if (usdc > this.cap) throw depositOverCap(usdc, this.cap)
       // The relayer cannot pay for it now: the signature waits armed and the watcher runs it once the relayer is funded.
       if (!(await this.relayerCanActivate(acc))) return this.arm(acc, p, signature)
       this.disarm(acc, 'ARMED_SUPERSEDED')
@@ -1487,7 +1515,7 @@ export class Operator {
       const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
       if (nonce !== p.tx.nonce) return { code: 'SAFE_NONCE_MOVED' }
       const usdc = await this.usdcOf(live.safe)
-      if (p.kind === 'activate' && usdc > LIVE_CAP_USDC) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() } }
+      if (p.kind === 'activate' && usdc > this.cap) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: usdc.toString(), capUsdc: this.cap.toString() } }
       if (!deployed && usdc < MIN_DEPLOY_USDC) return { code: 'BELOW_DEPLOY_MINIMUM' }
       let sim = await this.simulateOwner(live, deployed, data)
       if (sim.outcome === 'unavailable') {
@@ -1798,9 +1826,9 @@ export class Operator {
     if (this.overBudget(acc)) return this.park(acc, ARM_BUDGET_HOLD_MS)
     // Over the cap the approval waits too: it runs if the excess leaves through a path that keeps the Safe nonce, or
     // the cap is raised. The app reads the excess from funding and offers the withdrawal.
-    if (usdc > LIVE_CAP_USDC) {
+    if (usdc > this.cap) {
       const shown = acc.ops.find((o) => o.opId === a.opId)
-      if (shown?.amountUsdc !== usdc.toString() || shown.capUsdc !== LIVE_CAP_USDC.toString()) this.patchOp(acc, a.opId, { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() })
+      if (shown?.amountUsdc !== usdc.toString() || shown.capUsdc !== this.cap.toString()) this.patchOp(acc, a.opId, { amountUsdc: usdc.toString(), capUsdc: this.cap.toString() })
       return this.park(acc, ARM_CAP_HOLD_MS)
     }
     // The relayer cannot pay for it yet: stay armed, without using up a try. Waiting is not activity, so the watcher
@@ -1975,9 +2003,9 @@ export class Operator {
       // gets through, and the chain itself enforces no account cap. Deposits to an account that is already running are
       // outside this check altogether (otto/mamoru#71).
       const usdc = await this.usdcOf(safe)
-      if (usdc > LIVE_CAP_USDC) {
-        logErr(`[owner] ${op.opId} deposit over cap at send time, not activating:`, { usdc: usdc.toString(), cap: LIVE_CAP_USDC.toString() })
-        return this.failOwner(acc, op, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() })
+      if (usdc > this.cap) {
+        logErr(`[owner] ${op.opId} deposit over cap at send time, not activating:`, { usdc: usdc.toString(), cap: this.cap.toString() })
+        return this.failOwner(acc, op, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: this.cap.toString() })
       }
     }
     // Keep the hash as soon as the tx is out: if the receipt poll fails, reconciliation reads it later.
@@ -2220,7 +2248,7 @@ export class Operator {
         signingChainIds: [this.cfg.chainId],
         rpcUrl: this.cfg.rpcUrl,
         bundlerUrl: this.cfg.bundlerUrl,
-        policy: this.policyOf(acc),
+        policy: this.enginePolicyOf(acc),
         account: acc.ctx.address as Address,
         sessionKey: privateKeyToAccount(acc.sessionKey),
         nonceLane: 0,
@@ -2304,6 +2332,8 @@ export class Operator {
             safeMetrics(() => this.engineHealth.record(acc.accountKey, false, r.code, classifyEngineError(r.code, r.detail)))
           } else {
             const d = r.record.decision
+            const pools = new Map<string, string | null>(this.enginePolicyOf(acc).buckets.map((b) => [b.id, b.pools[0] ?? null]))
+            runner.waiting = d.buckets.filter((b) => b.waiting !== undefined && b.waiting > 0n).map((b) => ({ bucket: b.bucket, pool: pools.get(b.bucket) ?? null, code: b.code, amountUsdc: b.waiting!.toString() }))
             const o = r.op ? engine.journal.op(r.op.opId) : null
             const last = o ? engine.journal.transitions.filter((t) => t.opId === o.opId).at(-1) : null
             // `last.detail` is free text (unlike d.reason/o.state/o.stateCode, all closed enums): redact it.
@@ -2465,8 +2495,8 @@ export function collapseFailed(ops: StoredOp[]): OpView[] {
 }
 
 /** Start refused: the Safe holds more USDC than the per-account cap. The message carries the amounts for the SPA. */
-function depositOverCap(usdc: bigint): HttpError {
-  return new HttpError(409, 'DEPOSIT_OVER_CAP', `this account holds ${fmtUsdc(usdc)} USDC, over the ${fmtUsdc(LIVE_CAP_USDC)} USDC cap; withdraw at least ${fmtUsdcUp(usdc - LIVE_CAP_USDC)} USDC to start`)
+function depositOverCap(usdc: bigint, cap: bigint): HttpError {
+  return new HttpError(409, 'DEPOSIT_OVER_CAP', `this account holds ${fmtUsdc(usdc)} USDC, over the ${fmtUsdc(cap)} USDC cap; withdraw at least ${fmtUsdcUp(usdc - cap)} USDC to start`)
 }
 
 function belowDeployMinimum(usdc: bigint): HttpError {
