@@ -25,12 +25,24 @@ export type Observation = {
    * Spec 004: 24 h history per pool, from TWAP samples (see `marketOf`). Read only by a policy with `guards`;
    * absent or null fields make the guard rules abstain.
    */
-  guard?: { pools: Partial<Record<RegistryName, PoolGuardObs>> }
+  guard?: {
+    pools: Partial<Record<RegistryName, PoolGuardObs>>
+    /** Lab (#101 CPPI): the highest account value seen, in raw savings units. Absent: the current value. */
+    peakValue?: bigint
+  }
   /** Lab (#101): history for `policy.geometry`. Absent: geometry rules abstain (centred range, policy width). */
   geometry?: { pools: Partial<Record<RegistryName, PoolGeometryObs>> }
 }
 
-export type PoolGuardObs = { twap24hAgoTick: number | null; realizedVol24hBps: number | null }
+export type PoolGuardObs = {
+  twap24hAgoTick: number | null
+  realizedVol24hBps: number | null
+  /**
+   * Lab (#101 lazy re-range): growth of the pool's fee growth globals over about the last 24 h (per unit of active
+   * liquidity, X128) and the seconds it covers. Absent or null: the cost test abstains.
+   */
+  feeGrowth24h?: { growth0X128: bigint; growth1X128: bigint; seconds: number } | null
+}
 
 /**
  * Lab (#101, range geometry): market history per pool, read only by a policy with `geometry`. Volatilities are
@@ -71,6 +83,8 @@ export type PositionObs = {
   principalOwed1: bigint
   /** The tokenId is in the account's allowedTokenIds. */
   managed: boolean
+  /** Lab (#101 lazy re-range): block time since which the price has been out of the range without coming back. */
+  outOfRangeSince?: bigint | null
 }
 
 export type PoolObs = {
@@ -174,6 +188,8 @@ export type Decision = {
   positions: { tokenId: bigint; codes: ReasonCode[] }[]
   /** Present only when the policy sets `guards` (FR-LC-001: absent, the decision is byte-identical). */
   guards?: GuardNote[]
+  /** Lab (#101 experiment 6): bucket preferences after the volatility target or CPPI. Present only with one of them. */
+  targets?: { bucket: string; preference: number }[]
   /**
    * otto/mamoru#127, #128: savings held back on purpose, per bucket, with why. Outside the premise hash and the id
    * (the amounts move with every price). Absent when nothing waits.

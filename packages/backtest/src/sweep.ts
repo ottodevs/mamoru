@@ -67,13 +67,15 @@ const OPTIONAL: Shape = {
   allocation: ENUMS.allocation!,
   minEntry: 'bigint',
   rebalanceBandBps: 'number',
-  range: { widthTicksByPool: { '*': 'number' } },
+  range: { widthTicksByPool: { '*': 'number' }, lazy: { edgeBufferTicks: 'number', minDwellSeconds: 'number', horizonSeconds: 'number', lvrWeightBps: 'number' } },
   guards: { byBucket: { '*': BUCKET_RULES } },
   // Lab range geometry (#101): given whole, every key of the rule.
   geometry: {
     skew: { belowShareBps: 'number', regime: ENUMS['geometry.skew.regime']!, fallBps: 'number', mirror: 'boolean' },
     volWidth: { k: 'number', horizonSeconds: 'number', minTicks: 'number', maxTicks: 'number', earlyRatio: 'number' },
   },
+  volTarget: { targetVolBps: 'number', bandBps: 'number', stepBps: 'number' },
+  cppi: { floorBps: 'number', multiplier: 'number' },
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {

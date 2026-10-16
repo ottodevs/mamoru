@@ -1,0 +1,24 @@
+[
+ {
+  "name": "baseline",
+  "policy": "conservador-live-v2"
+ },
+ {
+  "name": "combo-lazy-h24h-b100-d30+cppi90-m2",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "range": {
+    "lazy": {
+     "edgeBufferTicks": 100,
+     "minDwellSeconds": 1800,
+     "horizonSeconds": 86400,
+     "lvrWeightBps": 10000
+    }
+   },
+   "cppi": {
+    "floorBps": 9000,
+    "multiplier": 2
+   }
+  }
+ }
+]

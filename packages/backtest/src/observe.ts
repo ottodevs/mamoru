@@ -64,14 +64,46 @@ export function cumulativeAt(ds: Dataset, poolIndex: number, t: number, windowSe
   return { time: s.time, tickCumulative: ps.tickCumulative }
 }
 
+const DAY = 86_400
+const U256 = 1n << 256n
+
+/**
+ * Lab (#101 lazy re-range): fee growth globals of a pool from the first sample at or after 24 h ago to now. Null when
+ * the pool was not read at either end or the history covers less than 12 h.
+ */
+export function feeGrowthOf(ds: Dataset, poolIndex: number, i: number): PoolGuardObs['feeGrowth24h'] {
+  const now = ds.samples[i]!
+  const cur = now.pools[poolIndex]
+  if (!cur) return null
+  let lo = 0
+  let hi = i
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (ds.samples[mid]!.time >= now.time - DAY) hi = mid
+    else lo = mid + 1
+  }
+  const old = ds.samples[lo]!.pools[poolIndex]
+  const seconds = now.time - ds.samples[lo]!.time
+  if (!old || seconds < DAY / 2) return null
+  const growth = (a: bigint, b: bigint) => (((a - b) % U256) + U256) % U256
+  return { growth0X128: growth(cur.feeGrowthGlobal0X128, old.feeGrowthGlobal0X128), growth1X128: growth(cur.feeGrowthGlobal1X128, old.feeGrowthGlobal1X128), seconds }
+}
+
+/** A policy that reads `Observation.guard`: loss-control guards, or a Lab rebalance rule (#101). */
+export function readsGuard(policy: PolicyVersion): boolean {
+  return !!(policy.guards || policy.range.lazy || policy.volTarget || policy.cppi)
+}
+
 /** Spec 004 `Observation.guard` from the dataset, as the engine would build it from its snapshot history. */
-export function guardOf(ds: Dataset, i: number, windowSeconds: number): NonNullable<Observation['guard']> {
+export function guardOf(ds: Dataset, i: number, windowSeconds: number, lab?: { feeGrowth?: boolean; peakValue?: bigint }): NonNullable<Observation['guard']> {
   const now = ds.samples[i]!.time
   const pools: Partial<Record<RegistryName, PoolGuardObs>> = {}
   ds.pools.forEach((name, k) => {
-    if (ds.samples[i]!.pools[k]) pools[name] = marketOf(now, windowSeconds, (t) => cumulativeAt(ds, k, t, windowSeconds))
+    if (!ds.samples[i]!.pools[k]) return
+    const m: PoolGuardObs = marketOf(now, windowSeconds, (t) => cumulativeAt(ds, k, t, windowSeconds))
+    pools[name] = lab?.feeGrowth ? { ...m, feeGrowth24h: feeGrowthOf(ds, k, i) } : m
   })
-  return { pools }
+  return lab?.peakValue !== undefined ? { pools, peakValue: lab.peakValue } : { pools }
 }
 
 const HOUR = 3_600
@@ -183,6 +215,7 @@ export function observe(ds: Dataset, i: number, w: World, policy: PolicyVersion,
     positions: w.positions.map((p) => ({
       tokenId: p.tokenId, pool: p.pool, tickLower: p.tickLower, tickUpper: p.tickUpper, liquidity: p.liquidity,
       collectable0: p.owed0, collectable1: p.owed1, principalOwed0: 0n, principalOwed1: 0n, managed: true,
+      ...(policy.range.lazy ? { outOfRangeSince: p.outSince === undefined || p.outSince === null ? null : BigInt(p.outSince) } : {}),
     })),
     pools,
     ethPrice: { pool: ETH_PRICE_POOL, sqrtPriceX96: eth.sqrtPriceX96, token0: entry(ETH_PRICE_POOL).token0! },
@@ -191,7 +224,7 @@ export function observe(ds: Dataset, i: number, w: World, policy: PolicyVersion,
     intents: { paused: false, exitRequested: false },
     slot: null,
     lastRerangeAt: w.lastRerangeAt,
-    ...(policy.guards ? { guard: guardOf(ds, i, policy.execution.twapWindowSeconds) } : {}),
+    ...(readsGuard(policy) ? { guard: guardOf(ds, i, policy.execution.twapWindowSeconds, { feeGrowth: !!policy.range.lazy, ...(policy.cppi ? { peakValue: w.peakValue ?? 0n } : {}) }) } : {}),
     ...(policy.geometry ? { geometry: geometryOf(ds, i, policy.execution.twapWindowSeconds) } : {}),
   }
 }

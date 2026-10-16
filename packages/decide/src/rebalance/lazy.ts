@@ -1,0 +1,49 @@
+// Lab (#101, experiment 4): is a re-range worth what it costs? Pure; read only by a policy with `range.lazy`.
+import type { LazyRerange, PolicyVersion } from '@mamoru/policy'
+import { rangeAround } from '@mamoru/uniswap-v3/quote'
+import { widthOf } from '../allocate/index.ts'
+import type { Observation, PoolObs, PositionObs } from '../types.ts'
+import { amountsForLiquidity, inSavings, opCostInSavings } from '../value.ts'
+
+const YEAR = 365 * 86_400
+const Q96 = 2 ** 96
+/** A re-range is three operations: the close, the ratio convert and the mint. */
+export const RERANGE_OPS = 3n
+
+export type RerangeWorth = { fees: bigint; gas: bigint; swap: bigint; lvr: bigint; worth: boolean }
+
+/**
+ * What a new centred range of the position's value would earn over `lazy.horizonSeconds`, against what moving there
+ * costs (see `LazyRerange`). Null when the pool's fee growth or volatility history is missing: the test abstains.
+ */
+export function rerangeWorth(obs: Observation, policy: PolicyVersion, p: PositionObs, pool: PoolObs, lazy: LazyRerange): RerangeWorth | null {
+  const m = obs.guard?.pools[pool.name]
+  const g = m?.feeGrowth24h
+  const vol = m?.realizedVol24hBps ?? null
+  if (!g || g.seconds <= 0 || vol === null) return null
+  const savings = policy.savingsAsset
+  const held = amountsForLiquidity(pool.sqrtPriceX96, p.tickLower, p.tickUpper, p.liquidity)
+  const value = inSavings(pool, pool.token0, held.amount0 + p.collectable0, savings) + inSavings(pool, pool.token1, held.amount1 + p.collectable1, savings)
+  if (value === 0n) return null
+  const range = rangeAround(pool.tick, widthOf(policy, pool.name), pool.tickSpacing)
+  const UNIT = 10n ** 24n
+  const u = amountsForLiquidity(pool.sqrtPriceX96, range.tickLower, range.tickUpper, UNIT)
+  const unitValue = inSavings(pool, pool.token0, u.amount0, savings) + inSavings(pool, pool.token1, u.amount1, savings)
+  if (unitValue === 0n) return null
+  const L = (value * UNIT) / unitValue
+  // The new position's share of the fees: its liquidity over the active liquidity plus itself, as the simulator credits it.
+  const twapL = pool.twapLiquidity ?? pool.liquidity
+  const active = twapL < pool.liquidity ? twapL : pool.liquidity
+  const H = BigInt(lazy.horizonSeconds)
+  const S = BigInt(g.seconds)
+  const earn = (growth: bigint) => (active + L === 0n ? 0n : (L * growth * H * active) / ((active + L) * S) >> 128n)
+  const fees = inSavings(pool, pool.token0, earn(g.growth0X128), savings) + inSavings(pool, pool.token1, earn(g.growth1X128), savings)
+  const gas = opCostInSavings(obs, savings) * RERANGE_OPS
+  // The ratio convert swaps about half of the value back, paying the pool fee on it.
+  const swap = (value * BigInt(pool.fee)) / 2n / 1_000_000n
+  // LVR of a concentrated range in range: sigma^2 / 4 * L * sqrt(P) per year, in token1 (Milionis et al.).
+  const sigma = vol / 10_000
+  const lvr1 = ((sigma * sigma) / 4) * Number(L) * (Number(pool.sqrtPriceX96) / Q96) * (lazy.horizonSeconds / YEAR) * (lazy.lvrWeightBps / 10_000)
+  const lvr = inSavings(pool, pool.token1, BigInt(Math.floor(lvr1)), savings)
+  return { fees, gas, swap, lvr, worth: fees > gas + swap + lvr }
+}

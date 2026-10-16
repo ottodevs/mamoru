@@ -5,6 +5,7 @@ import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { edgeBpsOf, widenEarly } from '../geometry/index.ts'
 import type { EnterSwapProposal, Observation, PoolObs, PositionObs, RerangeProposal, ReduceProposal } from '../types.ts'
 import { inSavings, opCostInSavings, volatileOf } from '../value.ts'
+import { rerangeWorth } from '../rebalance/lazy.ts'
 
 const Q96 = 1n << 96n
 
@@ -53,6 +54,20 @@ export function positionValue(p: PositionObs, pool: PoolObs, savings: RegistryNa
 export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionObs, pool: PoolObs): { code: ReasonCode | null; proposal: RerangeProposal | null } {
   // A position with no liquidity has no range to keep: its tokens are only owed, not at risk of the price.
   if (!hasManageAny(policy) || policy.range.adjust !== 'on_out_of_range' || p.liquidity === 0n) return { code: null, proposal: null }
+  const proposal: RerangeProposal = { kind: 'rerange', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity: p.liquidity }
+  const lazy = policy.range.lazy
+  if (lazy) {
+    // Lab (#101 experiment 4): past the edge by the buffer, out long enough, and worth its cost; no near-edge trigger.
+    const past = pool.tick < p.tickLower - lazy.edgeBufferTicks || pool.tick >= p.tickUpper + lazy.edgeBufferTicks
+    if (!past) return { code: null, proposal: null }
+    const lastAt = obs.lastRerangeAt ?? null
+    if (lastAt !== null && obs.block.timestamp - lastAt < BigInt(policy.range.cooldownSeconds)) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
+    const since = p.outOfRangeSince ?? null
+    if (lazy.minDwellSeconds > 0 && (since === null || obs.block.timestamp - since < BigInt(lazy.minDwellSeconds))) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
+    const w = rerangeWorth(obs, policy, p, pool, lazy)
+    if (w && !w.worth) return { code: 'DECIDE_RANGE_BELOW_COST', proposal: null }
+    return { code: 'DECIDE_RANGE_ADJUST', proposal }
+  }
   const width = p.tickUpper - p.tickLower
   const outside = pool.tick < p.tickLower || pool.tick >= p.tickUpper
   // Lab geometry (#101): a skewed placement sits near one edge on purpose, so that edge's threshold is smaller.
@@ -63,7 +78,7 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
   if (!outside && !near && !widen) return { code: null, proposal: null }
   const last = obs.lastRerangeAt ?? null
   if (last !== null && obs.block.timestamp - last < BigInt(policy.range.cooldownSeconds)) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
-  return { code: 'DECIDE_RANGE_ADJUST', proposal: { kind: 'rerange', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity: p.liquidity } }
+  return { code: 'DECIDE_RANGE_ADJUST', proposal }
 }
 
 export type BucketValue = { bucket: string; target: bigint; value: bigint; pool: RegistryName | null }

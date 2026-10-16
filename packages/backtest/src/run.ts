@@ -206,6 +206,17 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
       // The benchmark receives the same money at the same time, in the same mix.
       for (const [token, amount] of Object.entries(hodlBasket(ds, s, policy, t.amount))) hodl[token] = (hodl[token] ?? 0n) + amount
     }
+    // Lab (#101): how long each position has been out of range, and the account's peak, as the engine would track them.
+    if (policy.range.lazy) for (const p of w.positions) {
+      const ps = s.pools[ds.pools.indexOf(p.pool)]
+      if (!ps) continue
+      if (inRange(ps.tick, p)) p.outSince = null
+      else p.outSince ??= s.time
+    }
+    if (policy.cppi) {
+      const v = accountValue(ds, s, w, price).total
+      if (w.peakValue === undefined || v > w.peakValue) w.peakValue = v
+    }
     if (series.time.length % every === 0) {
       const d = decide(observe(ds, i, w, policy, gas.priorityFeeWei), policy)
       reasons[d.reason] = (reasons[d.reason] ?? 0) + 1

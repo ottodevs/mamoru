@@ -1,0 +1,72 @@
+[
+ {
+  "name": "baseline",
+  "policy": "conservador-live-v2"
+ },
+ {
+  "name": "lazy-h24h-b100-d30",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "range": {
+    "lazy": {
+     "edgeBufferTicks": 100,
+     "minDwellSeconds": 1800,
+     "horizonSeconds": 86400,
+     "lvrWeightBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "lazy-h6h-b200-d120",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "range": {
+    "lazy": {
+     "edgeBufferTicks": 200,
+     "minDwellSeconds": 7200,
+     "horizonSeconds": 21600,
+     "lvrWeightBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "cppi90-m2",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "cppi": {
+    "floorBps": 9000,
+    "multiplier": 2
+   }
+  }
+ },
+ {
+  "name": "cppi85-m2",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "cppi": {
+    "floorBps": 8500,
+    "multiplier": 2
+   }
+  }
+ },
+ {
+  "name": "combo-lazy-h24h-b100-d30+cppi90-m2",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "range": {
+    "lazy": {
+     "edgeBufferTicks": 100,
+     "minDwellSeconds": 1800,
+     "horizonSeconds": 86400,
+     "lvrWeightBps": 10000
+    }
+   },
+   "cppi": {
+    "floorBps": 9000,
+    "multiplier": 2
+   }
+  }
+ }
+]

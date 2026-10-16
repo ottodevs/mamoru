@@ -90,6 +90,14 @@ describe('overrides', () => {
     expect(() => applyOverrides(conservadorLiveV2, { guards: { byBucket: { risk: { fallFreeze: { fallBps: 500 } } } } })).toThrow('volBps')
     expect(applyOverrides(conservadorLiveV2, { guards: { byBucket: { risk: { fallFreeze: { fallBps: 500, volBps: 1 } } } } }).guards).toEqual({ byBucket: { risk: { fallFreeze: { fallBps: 500, volBps: 1 } } } })
   })
+  test('the #101 rebalance options can be added, whole', () => {
+    const lazy = { edgeBufferTicks: 200, minDwellSeconds: 1800, horizonSeconds: 86_400, lvrWeightBps: 10_000 }
+    expect(applyOverrides(conservadorLiveV2, { range: { lazy } }).range.lazy).toEqual(lazy)
+    expect(() => applyOverrides(conservadorLiveV2, { range: { lazy: { edgeBufferTicks: 200 } } })).toThrow('minDwellSeconds')
+    expect(applyOverrides(conservadorLiveV2, { volTarget: { targetVolBps: 4500, bandBps: 2500, stepBps: 2500 } }).volTarget).toEqual({ targetVolBps: 4500, bandBps: 2500, stepBps: 2500 })
+    expect(applyOverrides(conservadorLiveV2, { cppi: { floorBps: 9000, multiplier: 3 } }).cppi).toEqual({ floorBps: 9000, multiplier: 3 })
+    expect(() => applyOverrides(conservadorLiveV2, { cppi: { floorBps: 9000, multiplir: 3 } })).toThrow('multiplier')
+  })
   test('pool widths can be added to a policy that has none', () => {
     const { widthTicksByPool: _w, ...range } = conservadorLiveV2.range
     expect(applyOverrides<PolicyVersion>({ ...conservadorLiveV2, range }, { range: { widthTicksByPool: { 'pool:WETH/USDC/3000': 4000 } } }).range.widthTicksByPool).toEqual({ 'pool:WETH/USDC/3000': 4000 })

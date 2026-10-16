@@ -6,6 +6,7 @@ import { enterBucket, safeSavings } from './enter/index.ts'
 import { ehgPreliminary, purgaIdentity } from './gates/index.ts'
 import { fallFreezeOf } from './guard/index.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
+import { weightTargets } from './rebalance/weights.ts'
 import { anyKey, idleConvertOf, isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
 import type { Decision, GateStep, GuardNote, Observation, Proposal, ShadowNote } from './types.ts'
 
@@ -17,6 +18,8 @@ export { fallBpsOf, fallFreezeOf, marketOf, type CumulativePoint } from './guard
 export { belowShareOf, edgeBpsOf, meanTickAt, rangeFor, realizedVolOf, regimeOf, skewedRange, spiking, volWidthTicks, widenEarly, widthFor, type Regime } from './geometry/index.ts'
 export { allocate, widthOf, type Allocation, type BucketValue, type Waiting } from './allocate/index.ts'
 export { depthOf, twapFloor, type Depth } from './depth/index.ts'
+export { rerangeWorth, RERANGE_OPS, type RerangeWorth } from './rebalance/lazy.ts'
+export { weightTargets } from './rebalance/weights.ts'
 export { amountsOf, bucketValues, positionValue, rerangeOf, reduceOf, EDGE_BPS, DRIFT_BPS } from './rerange/index.ts'
 
 const PROPOSAL_CODE = {
@@ -48,7 +51,10 @@ function inRange(tick: number, lower: number, upper: number): boolean {
  * FR-DEC-001: pure and deterministic. The same observation and policy give
  * the same decision, codes and trail, byte for byte.
  */
-export function decide(obs: Observation, policy: PolicyVersion): Decision {
+export function decide(obs: Observation, given: PolicyVersion): Decision {
+  // Lab (#101 experiment 6): every step reads the scaled preferences; the decision still names the policy as given.
+  const targets = weightTargets(obs, given)
+  const policy: PolicyVersion = targets ? { ...given, buckets: targets } : given
   const observationCodes: ReasonCode[] = ['OBS_OK']
   const unsafeDeposit = obs.deposits.some((d) => !d.safe)
   if (obs.deposits.some((d) => d.safe)) observationCodes.push('OBS_DEPOSIT_DETECTED')
@@ -198,9 +204,9 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
 
   const kind = proposal?.kind ?? 'hold'
   const code = kind === 'hold' ? 'DECIDE_HOLD' : PROPOSAL_CODE[kind]
-  const policyRef = { policyId: policy.policyId, version: policy.version, hash: policyHash(policy) }
+  const policyRef = { policyId: given.policyId, version: given.version, hash: policyHash(given) }
   // FR-LC-001: without `policy.guards` the body, and so every hash, is the one of today.
-  const body = { policyRef, observationCodes, kind, code, reason, trail, proposal, shadow, buckets, positions, ...(policy.guards ? { guards } : {}) } as const
+  const body = { policyRef, observationCodes, kind, code, reason, trail, proposal, shadow, buckets, positions, ...(policy.guards ? { guards } : {}), ...(targets ? { targets: targets.map((b) => ({ bucket: b.id, preference: b.preference })) } : {}) } as const
   const observationRef = { block: obs.block.number, hash: obs.block.hash }
   const premiseHash = hashOf(body)
   // `waiting` moves with every price, so it is reported beside the decision and never part of its premise or id.

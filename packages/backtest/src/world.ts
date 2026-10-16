@@ -21,6 +21,8 @@ export type SimPosition = {
   /** Fractions of a raw unit still to be credited, scaled by 2^128, so small positions do not lose them at every sample. */
   rem0?: bigint
   rem1?: bigint
+  /** Lab (#101): time of the first sample of the current stretch out of range; null or absent while in range. */
+  outSince?: number | null
 }
 
 export type World = {
@@ -29,6 +31,8 @@ export type World = {
   nextTokenId: bigint
   /** Timestamp of the last re-range, for the policy cooldown. */
   lastRerangeAt: bigint | null
+  /** Lab (#101 CPPI): highest account value seen at a review, raw savings units. */
+  peakValue?: bigint
 }
 
 export function newWorld(savings: RegistryName, deposit: bigint): World {

@@ -78,6 +78,8 @@ export type PolicyVersion = {
     cooldownSeconds: number
     /** Width per pool, overriding `widthTicks` (a stable/stable pool wants a narrow range around 1.0). */
     widthTicksByPool?: Record<RegistryName, number>
+    /** Lab only (#101 experiment 4): re-range only when it pays. Absent: today's trigger byte for byte. */
+    lazy?: LazyRerange
   }
   /**
    * How `decide` enters. `first-entry` (default, v1): one entry per bucket without a managed position.
@@ -113,6 +115,10 @@ export type PolicyVersion = {
    * (the stables pool) keeps that width and is never skewed.
    */
   geometry?: { skew?: SkewRule; volWidth?: VolWidthRule }
+  /** Lab only (#101 experiment 6): volatile bucket weights scaled to a volatility target. Absent: the preferences as set. */
+  volTarget?: VolTarget
+  /** Lab only (#101 experiment 6): CPPI on the volatile share against a floor under the account's peak. Absent: off. */
+  cppi?: Cppi
 }
 
 /**
@@ -131,6 +137,36 @@ export type SkewRule = { belowShareBps: number; regime: 'ret24h' | 'ema7d'; fall
  * of that width is re-ranged (cooldown applies). With history missing, the policy width.
  */
 export type VolWidthRule = { k: number; horizonSeconds: number; minTicks: number; maxTicks: number; earlyRatio: number }
+
+/**
+ * Lazy, cost-aware re-range (#101, experiment 4), in place of the out-of-range-or-within-10%-of-an-edge trigger:
+ * - the price must be outside the range by at least `edgeBufferTicks` (0: just out), and
+ * - have been out of range for at least `minDwellSeconds` without coming back, and
+ * - the fees a new centred range of the same value would earn over `horizonSeconds` (pool fee growth of the last 24 h,
+ *   diluted by the pool's active liquidity) must exceed the cost of doing it: three operations of gas at the engine's
+ *   userOp budget, the pool fee on the half that the ratio convert swaps, and the LVR of the new range over the horizon
+ *   (sigma^2/4 * L * sqrt(P), sigma from the 24 h realized volatility), weighted by `lvrWeightBps` (10000 = all of it).
+ * Missing fee or volatility history: the cost test abstains and the first two conditions decide alone.
+ */
+export type LazyRerange = { edgeBufferTicks: number; minDwellSeconds: number; horizonSeconds: number; lvrWeightBps: number }
+
+/**
+ * Volatility target (#101, experiment 6): a volatile bucket's weight is its preference times
+ * min(1, targetVolBps / realized 24 h volatility of its pool). The stables bucket takes what the volatile buckets
+ * give up. The scale moves on a grid of `stepBps` (2500: 0, 25, 50, 75 or 100% of the preference), with hysteresis
+ * that uses the holdings as its state: of the grid levels between the scale at a volatility `bandBps` higher and the
+ * one at a volatility `bandBps` lower, the bucket takes the one nearest its current weight. So an estimate that
+ * jitters around the target, or a price move of the holdings, does not move money between buckets at every review.
+ * Missing volatility: that bucket keeps its preference.
+ */
+export type VolTarget = { targetVolBps: number; bandBps: number; stepBps: number }
+
+/**
+ * CPPI (#101, experiment 6): floor = `floorBps` of the highest account value seen; the volatile buckets together may
+ * hold at most `multiplier` times the cushion (value above the floor), never more than their preferences. The stables
+ * bucket takes the rest. With `volTarget` too, each bucket takes the smaller of the two.
+ */
+export type Cppi = { floorBps: number; multiplier: number }
 
 export type BucketId = PolicyVersion['buckets'][number]['id']
 

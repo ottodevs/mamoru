@@ -1,0 +1,132 @@
+[
+ {
+  "name": "baseline",
+  "policy": "conservador-live-v2"
+ },
+ {
+  "name": "vt30-s2500",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "volTarget": {
+    "targetVolBps": 3000,
+    "bandBps": 2500,
+    "stepBps": 2500
+   }
+  }
+ },
+ {
+  "name": "vt30-s5000",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "volTarget": {
+    "targetVolBps": 3000,
+    "bandBps": 2500,
+    "stepBps": 5000
+   }
+  }
+ },
+ {
+  "name": "vt45-s2500",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "volTarget": {
+    "targetVolBps": 4500,
+    "bandBps": 2500,
+    "stepBps": 2500
+   }
+  }
+ },
+ {
+  "name": "vt45-s5000",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "volTarget": {
+    "targetVolBps": 4500,
+    "bandBps": 2500,
+    "stepBps": 5000
+   }
+  }
+ },
+ {
+  "name": "vt60-s2500",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "volTarget": {
+    "targetVolBps": 6000,
+    "bandBps": 2500,
+    "stepBps": 2500
+   }
+  }
+ },
+ {
+  "name": "vt60-s5000",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "volTarget": {
+    "targetVolBps": 6000,
+    "bandBps": 2500,
+    "stepBps": 5000
+   }
+  }
+ },
+ {
+  "name": "cppi85-m2",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "cppi": {
+    "floorBps": 8500,
+    "multiplier": 2
+   }
+  }
+ },
+ {
+  "name": "cppi85-m3",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "cppi": {
+    "floorBps": 8500,
+    "multiplier": 3
+   }
+  }
+ },
+ {
+  "name": "cppi85-m5",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "cppi": {
+    "floorBps": 8500,
+    "multiplier": 5
+   }
+  }
+ },
+ {
+  "name": "cppi90-m2",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "cppi": {
+    "floorBps": 9000,
+    "multiplier": 2
+   }
+  }
+ },
+ {
+  "name": "cppi90-m3",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "cppi": {
+    "floorBps": 9000,
+    "multiplier": 3
+   }
+  }
+ },
+ {
+  "name": "cppi90-m5",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "cppi": {
+    "floorBps": 9000,
+    "multiplier": 5
+   }
+  }
+ }
+]

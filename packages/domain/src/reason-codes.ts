@@ -81,6 +81,8 @@ export const REASON_CODES = [
   'DECIDE_ENTER',
   'DECIDE_RANGE_ADJUST',
   'DECIDE_RANGE_COOLDOWN',
+  // Lab (#101): a re-range that would cost more (gas, swap, LVR) than the fees it earns over the policy horizon waits.
+  'DECIDE_RANGE_BELOW_COST',
   'DECIDE_ENTRY_PAUSED_FALL',
   'DECIDE_EXIT',
   'DECIDE_CONVERT',
