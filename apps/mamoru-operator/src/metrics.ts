@@ -578,6 +578,14 @@ type GasReserveAccount = { nativeWei: bigint; thresholdWei: bigint; low: boolean
  * `EngineHealthTracker` above — the next engine review re-reads the Safe's own balance from its own observation
  * and recomputes it, no durable record needed). Keyed by a `Map` for the same reason as `Buckets`: an
  * accountKey equal to an `Object.prototype` member must behave like any other key.
+ *
+ * Unlike `EngineHealthTracker`, an entry here must be evicted when its account's engine loop stops
+ * (otto/mamoru#8 review, finding #2/#3): `lowCount()` sums every entry ever recorded, with no notion of which
+ * accounts are still running, so a stopped account that was low when it stopped would count forever and the
+ * eventual re-armed/restarted account would read back its stale pre-stop balance before its first new review.
+ * `Operator.stopLoop` calls `evict()`; `Operator.gasReserveLowCount()` additionally derives its count from the
+ * same running-accounts-only list `gasReserveSnapshot()` returns, rather than this class's own `lowCount()`
+ * (kept here for direct unit testing only), so the two can never disagree regardless of what this Map holds.
  */
 export class GasReserveTracker {
   private byAccount = new Map<string, GasReserveAccount>()
@@ -585,14 +593,22 @@ export class GasReserveTracker {
   /**
    * One engine review's own balance read (`Observation.native`, no extra RPC call) against this account's
    * current alert threshold. `transitioned` is true only the one cycle the account crosses the threshold in
-   * either direction, so the caller can log once instead of every cycle.
+   * either direction, so the caller can log once instead of every cycle — including the very first
+   * observation: a healthy account's first-ever reading must not read as a "back above" recovery, so with no
+   * `prev` a transition is reported only when this first reading is itself low.
    */
   record(accountKey: string, nativeWei: bigint, thresholdWei: bigint, now: number = Date.now()): { low: boolean; transitioned: boolean } {
     const prev = this.byAccount.get(accountKey)
     const low = nativeWei < thresholdWei
-    const transitioned = prev === undefined || prev.low !== low
-    this.byAccount.set(accountKey, { nativeWei, thresholdWei, low, lowSince: low ? (transitioned ? now : prev!.lowSince) : null })
+    const transitioned = prev === undefined ? low : prev.low !== low
+    this.byAccount.set(accountKey, { nativeWei, thresholdWei, low, lowSince: low ? (prev?.low ? prev.lowSince : now) : null })
     return { low, transitioned }
+  }
+
+  /** The engine loop for this account stopped (or is about to be restarted, which stops it first): nothing of
+   * its pre-stop balance may be read back once it (maybe) starts again. See the class doc. */
+  evict(accountKey: string): void {
+    this.byAccount.delete(accountKey)
   }
 
   snapshot(accountKey: string): GasReserveSnapshot {
@@ -606,7 +622,9 @@ export class GasReserveTracker {
     }
   }
 
-  /** GET /metrics: accounts currently below their alert threshold, over every account reviewed at least once this process. */
+  /** Every account this tracker still holds that is currently below its own threshold — including one no
+   * longer running, if nothing evicted it. Exposed for its own unit tests; `Operator.gasReserveLowCount()`
+   * does not call this (see the class doc), to stay consistent with `gasReserveSnapshot()` by construction. */
   lowCount(): number {
     let n = 0
     for (const h of this.byAccount.values()) if (h.low) n++
