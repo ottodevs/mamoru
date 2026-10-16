@@ -8,19 +8,33 @@ import type { RpcMetrics } from './metrics.ts'
 import { HttpError, type Operator } from './operator.ts'
 
 /**
- * hex HMAC-SHA256(secret, `${method} ${path}\n${header}\n${ts}\n${body}`), `ts` the caller's unix-seconds clock
- * (header `x-mamoru-ts`), path with its query string. otto/mamoru#140 (part1 #6): `ts` is signed, not read as a
- * separate unauthenticated field, and the verifier below rejects one more than REQUEST_SKEW_MS off its own clock
- * — a captured request (header, sig, body) cannot be replayed past that window.
+ * The old (pre-#140) 3-line payload has no `ts` segment, so it is just `${method} ${path}\n${header}\n${body}`
+ * with `body` unconstrained free text. If the new, ts-signed payload reused the same key, a captured 4-line
+ * signature (ts, body) would also verify a 3-line request whose body is literally `${ts}\n${body}` — the ts
+ * line "shifts" into the body slot. A different, derived key for the ts-signed form closes that: no string the
+ * old form's body can take ever reproduces a MAC made under a different key, independent of any byte shuffling.
+ */
+/** Raw digest (not hex): a Buffer used directly as HMAC key bytes needs no agreement on a string encoding with
+ * the Web Crypto side (apps/mamoru-app), which derives the exact same 32 raw bytes from `crypto.subtle.sign`. */
+function tsKey(secret: string): Buffer {
+  return createHmac('sha256', secret).update('x-mamoru-ts-v1').digest()
+}
+
+/**
+ * hex HMAC-SHA256(key, `${method} ${path}\n${header}\n${ts}\n${body}`), `ts` the caller's unix-seconds clock
+ * (header `x-mamoru-ts`), path with its query string, `key` = tsKey(secret). otto/mamoru#140 (part1 #6): `ts` is
+ * signed, not read as a separate unauthenticated field, and the verifier below rejects one more than
+ * REQUEST_SKEW_MS off its own clock — a captured request (header, sig, body) cannot be replayed past that window.
  *
- * `ts` omitted (`null`) signs the old 3-line payload with no skew check: the transition form, so the app Worker
- * (apps/mamoru-app) and this operator can be deployed in either order without a window where requests fail. Deploy
- * the operator first — it already verifies both forms — then the app Worker, the side that starts sending
- * `x-mamoru-ts`. Once every caller has run with it for a while, drop the no-ts fallback in a follow-up change.
+ * `ts` omitted (`null`) signs the old 3-line payload under `secret` directly, with no skew check: the transition
+ * form, so the app Worker (apps/mamoru-app) and this operator can be deployed in either order without a window
+ * where requests fail. Deploy the operator first — it already verifies both forms — then the app Worker, the side
+ * that starts sending `x-mamoru-ts`. Once every caller has run with it for a while, drop the no-ts fallback in a
+ * follow-up change.
  */
 export function operatorSignature(secret: string, method: string, path: string, header: string, body: string, ts: string | null = null): string {
-  const payload = ts !== null ? `${method} ${path}\n${header}\n${ts}\n${body}` : `${method} ${path}\n${header}\n${body}`
-  return createHmac('sha256', secret).update(payload).digest('hex')
+  if (ts !== null) return createHmac('sha256', tsKey(secret)).update(`${method} ${path}\n${header}\n${ts}\n${body}`).digest('hex')
+  return createHmac('sha256', secret).update(`${method} ${path}\n${header}\n${body}`).digest('hex')
 }
 
 /** How far a request's `x-mamoru-ts` may sit from this operator's clock before it is refused as stale. */

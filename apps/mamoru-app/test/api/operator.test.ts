@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { createHmac } from 'node:crypto'
 import type { AccountContext, AppConfig, OwnerResponse } from '@mamoru/domain'
+import { operatorSignature } from '../../src/api/accounts/operator.ts'
 import { harness, register, ORIGIN, PASSKEY_A, PASSKEY_B, sessionCookie } from './helpers.ts'
 
 const OPERATOR_URL = 'https://operator.test'
@@ -24,8 +24,9 @@ async function onboard(h: ReturnType<typeof harness>, passkey = PASSKEY_A) {
   return { cookie: sessionCookie(res), owner: (await res.json()) as OwnerResponse }
 }
 
-const hmac = (method: string, path: string, header: string, ts: string, body: string) =>
-  createHmac('sha256', OPERATOR_SECRET).update(`${method} ${path}\n${header}\n${ts}\n${body}`).digest('hex')
+// Reference signature computed the same way the forward() route does, via the real (exported) function — not a
+// second hand-rolled HMAC, so this test cannot drift from what operatorSignature actually signs.
+const hmac = (method: string, path: string, header: string, body: string, ts: string) => operatorSignature(OPERATOR_SECRET, method, path, header, body, ts)
 
 describe('live config', () => {
   test('LIVE_FUNDS=1 with an operator opens the gate with the 100 USDC cap', async () => {
@@ -90,7 +91,7 @@ describe('operator proxy', () => {
     const ts = s!.headers.get('x-mamoru-ts')!
     expect(ts).toMatch(/^\d+$/)
     expect(Math.abs(Date.now() / 1000 - Number(ts))).toBeLessThan(5)
-    expect(s!.headers.get('x-mamoru-sig')).toBe(hmac('GET', path, header, ts, ''))
+    expect(s!.headers.get('x-mamoru-sig')).toBe(await hmac('GET', path, header, '', ts))
   })
 
   test('POST forwards the raw body and signs it', async () => {
@@ -104,7 +105,7 @@ describe('operator proxy', () => {
     expect(((await res.json()) as { echoed: unknown }).echoed).toEqual(JSON.parse(raw))
     const s = op.seen[0]!
     expect(s.body).toBe(raw)
-    expect(s.headers.get('x-mamoru-sig')).toBe(hmac('POST', path, s.headers.get('x-mamoru-account')!, s.headers.get('x-mamoru-ts')!, raw))
+    expect(s.headers.get('x-mamoru-sig')).toBe(await hmac('POST', path, s.headers.get('x-mamoru-account')!, raw, s.headers.get('x-mamoru-ts')!))
   })
 
   test('every live route is forwarded', async () => {

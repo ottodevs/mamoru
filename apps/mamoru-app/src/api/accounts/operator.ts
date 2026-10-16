@@ -33,12 +33,27 @@ export function base64url(text: string): string {
 }
 
 /**
- * hex HMAC-SHA256(secret, `${method} ${path}\n${header}\n${ts}\n${body}`), as the operator verifies it (otto/mamoru#140
- * part1 #6: `ts`, unix seconds, is signed so a captured request cannot be replayed past the operator's skew window).
+ * Raw HMAC-SHA256(secret, "x-mamoru-ts-v1") bytes, used as the key below — the exact same 32 bytes the operator's
+ * `tsKey` (server.ts, node:crypto `.digest()` with no encoding) derives, so both sides key the ts-signed scheme
+ * identically without agreeing on a string encoding for the intermediate value.
  */
-export async function operatorSignature(secret: string, method: string, path: string, header: string, ts: string, body: string): Promise<string> {
+async function tsKey(secret: string): Promise<Uint8Array> {
   const enc = new TextEncoder()
-  const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const base = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  return new Uint8Array(await crypto.subtle.sign('HMAC', base, enc.encode('x-mamoru-ts-v1')))
+}
+
+/**
+ * hex HMAC-SHA256(tsKey(secret), `${method} ${path}\n${header}\n${ts}\n${body}`), as the operator verifies it
+ * (otto/mamoru#140 part1 #6: `ts`, unix seconds, is signed so a captured request cannot be replayed past the
+ * operator's skew window; a key derived from, not equal to, `secret` keeps this scheme from colliding with the
+ * pre-#140 3-line one — see server.ts's `tsKey` comment).
+ */
+export async function operatorSignature(secret: string, method: string, path: string, header: string, body: string, ts: string): Promise<string> {
+  const enc = new TextEncoder()
+  // The cast works around a TS lib nuance (Uint8Array<ArrayBufferLike> vs <ArrayBuffer>) with no DOM lib loaded
+  // here; the derived key is always a plain, non-shared Uint8Array.
+  const key = await crypto.subtle.importKey('raw', (await tsKey(secret)) as Uint8Array<ArrayBuffer>, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
   const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(`${method} ${path}\n${header}\n${ts}\n${body}`)))
   return Array.from(mac, (b) => b.toString(16).padStart(2, '0')).join('')
 }
@@ -73,7 +88,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch) {
     const path = url.pathname + url.search
     const header = base64url(JSON.stringify(accountContext(row)))
     const ts = Math.floor(Date.now() / 1000).toString()
-    const sig = await operatorSignature(env.OPERATOR_SECRET, method, path, header, ts, body)
+    const sig = await operatorSignature(env.OPERATOR_SECRET, method, path, header, body, ts)
     const headers: Record<string, string> = { 'x-mamoru-account': header, 'x-mamoru-sig': sig, 'x-mamoru-ts': ts, accept: 'application/json' }
     if (method !== 'GET') headers['content-type'] = 'application/json'
 

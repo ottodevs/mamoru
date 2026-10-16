@@ -3,6 +3,10 @@
 // the no-ts (old) form still verifies, so the app Worker and this operator can deploy in either order.
 import { describe, expect, test } from 'bun:test'
 import type { AccountContext } from '@mamoru/domain'
+// Cross-runtime check only: the app Worker's own signer (Web Crypto) must key the ts-signed scheme identically
+// to this operator's (node:crypto), or a correctly-signed real request would 401 for real. Not a package import
+// mamoru-operator otherwise depends on — test-only, verifying the wire protocol the two apps agree on.
+import { operatorSignature as appOperatorSignature } from '../../mamoru-app/src/api/accounts/operator.ts'
 import type { Operator } from '../src/operator.ts'
 import { operatorSignature, REQUEST_SKEW_MS, startServer } from '../src/server.ts'
 
@@ -88,6 +92,35 @@ describe('operator HMAC: a signed timestamp bounds how long a captured request c
     try {
       const res = await get(base, '/api/accounts/acc-1/funding', { ts: null })
       expect(res.status).toBe(200)
+    } finally {
+      server.stop(true)
+    }
+  })
+
+  test('the app Worker (Web Crypto) and this operator (node:crypto) key the ts-signed scheme identically', async () => {
+    const [op, app] = await Promise.all([
+      Promise.resolve(operatorSignature(SECRET, 'POST', '/api/accounts/acc-1/transfer', 'hdr', 'body', '1700000000')),
+      appOperatorSignature(SECRET, 'POST', '/api/accounts/acc-1/transfer', 'hdr', 'body', '1700000000'),
+    ])
+    expect(app).toBe(op)
+  })
+
+  test('a captured POST cannot be turned into a forever-valid one by shifting ts into the body under the old 3-line form', async () => {
+    const op = { prepareTransfer: async () => ({ ok: true }) } as unknown as Operator
+    const { server, base } = boot(op)
+    try {
+      const path = '/api/accounts/acc-1/transfer/prepare'
+      const h = header()
+      const ts = Math.floor(Date.now() / 1000).toString()
+      const body = '{"to":"0x0","amountUsdc":"1"}'
+      const captured = operatorSignature(SECRET, 'POST', path, h, body, ts) // the real, 4-line, ts-keyed signature
+      // The attack this closes: forge a request with no x-mamoru-ts, reusing `captured` as-is, and move `ts` into
+      // the body it signs for instead. Before the ts-signed scheme used its own derived key, this body made the
+      // old 3-line payload byte-identical to the captured 4-line one, so `captured` verified under it too — with
+      // no skew check at all, since the old form has none. Now the two forms are keyed differently; it fails.
+      const forgedBody = `${ts}\n${body}`
+      const res = await fetch(`${base}${path}`, { method: 'POST', body: forgedBody, headers: { 'x-mamoru-account': h, 'x-mamoru-sig': captured } })
+      expect(res.status).toBe(401)
     } finally {
       server.stop(true)
     }

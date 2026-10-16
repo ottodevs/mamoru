@@ -630,7 +630,10 @@ export class Operator {
   /** GET /ops. Failed engine ops are internal attempts: left out unless `all` (debugging). */
   ops(ctx: AccountContext, after: string | null, includeFailedEngine = false): { ops: OpView[] } {
     const { acc } = this.account(ctx, { readOnly: true })
-    this.reconcileSoon(acc)
+    // reconcileSoon is itself a no-op on an account with no unsettled own-* op (true of any account this readOnly
+    // call just built in memory, which always starts with ops: []) — but it is never run against one that is not
+    // the store's own record, so it can never schedule work against an object a mutating call will later replace.
+    if (this.store.state.accounts[acc.accountKey] === acc) this.reconcileSoon(acc)
     const all = collapseFailed(includeFailedEngine ? acc.ops : acc.ops.filter((o) => !(o.opId.startsWith('eng-') && o.state === 'failed')))
     if (!after) return { ops: all }
     const i = all.findIndex((o) => o.opId === after)
