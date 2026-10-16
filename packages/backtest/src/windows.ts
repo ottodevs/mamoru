@@ -66,10 +66,21 @@ export function blockAt(iso: string): number {
   return Math.floor((Date.parse(iso) / 1000 - BASE_GENESIS_TIME) / BASE_BLOCK_SECONDS)
 }
 
+/**
+ * First and last sampled block of a window: the first sample at or after `from`, the last at or before `to`. A
+ * dataset backfilled before this rule can hold one earlier sample; the sweep replays only the window's blocks.
+ */
 export function windowBlocks(w: LabWindow): { fromBlock: number; toBlock: number } {
   const a = blockAt(w.from)
   const b = blockAt(w.to)
-  return { fromBlock: a - (a % w.step), toBlock: b - (b % w.step) }
+  let from = a + ((w.step - (a % w.step)) % w.step)
+  // blockAt floors to the block at or before the time: a sample on that block is before `from` unless it is exact.
+  if (blockTime(from) < Date.parse(w.from) / 1000) from += w.step
+  return { fromBlock: from, toBlock: b - (b % w.step) }
+}
+
+export function blockTime(block: number): number {
+  return BASE_GENESIS_TIME + block * BASE_BLOCK_SECONDS
 }
 
 export function labWindow(id: string): LabWindow {

@@ -14,7 +14,7 @@ import { policyHash } from '@mamoru/policy'
 import { decodeDataset, type DatasetJson } from '../src/dataset.ts'
 import { runBacktest, SIM_VERSION } from '../src/run.ts'
 import { aggregate, cellMetrics, decimalsOf, markdown, overridesFromAssignments, policyOf, sortCells, type Cell, type Variant } from '../src/sweep.ts'
-import { datasetsDir, LAB_WINDOWS, labWindow } from '../src/windows.ts'
+import { datasetsDir, LAB_WINDOWS, labWindow, windowBlocks } from '../src/windows.ts'
 
 type Job = { window: string; variants: Variant[]; deposits: number[] }
 
@@ -32,11 +32,16 @@ const all = (name: string) => argv.flatMap((a, i) => (a === `--${name}` && argv[
 function runJob(job: Job): Cell[] {
   const w = labWindow(job.window)
   const ds = decodeDataset(JSON.parse(readFileSync(join(datasetsDir(), w.file), 'utf8')) as DatasetJson)
+  // Only the window's own blocks: a dataset can hold a sample of the window next to it.
+  const { fromBlock, toBlock } = windowBlocks(w)
+  const from = ds.samples.findIndex((s) => s.block >= fromBlock)
+  const to = ds.samples.findLastIndex((s) => s.block <= toBlock)
+  if (from < 0 || to < from) throw new Error(`${w.file} has no sample in blocks ${fromBlock}..${toBlock}`)
   const cells: Cell[] = []
   for (const v of job.variants) {
     const policy = policyOf(v)
     const head = { window: w.id, split: w.split, regime: w.regime, variant: v.name, policyId: policy.policyId }
-    const missing = [...new Set(policy.buckets.flatMap((b) => b.pools))].filter((p) => !ds.samples.some((s) => s.pools[ds.pools.indexOf(p)]))
+    const missing = [...new Set(policy.buckets.flatMap((b) => b.pools))].filter((p) => !ds.samples.slice(from, to + 1).some((s) => s.pools[ds.pools.indexOf(p)]))
     for (const deposit of job.deposits) {
       if (missing.length > 0) {
         cells.push({ ...head, deposit, status: 'skipped', reason: `no data for ${missing.join(', ')}` })
@@ -44,7 +49,7 @@ function runJob(job: Job): Cell[] {
       }
       const unit = 10n ** BigInt(decimalsOf(policy))
       // Cents of the savings asset, as cli/run.ts takes a deposit.
-      const r = runBacktest(ds, policy, { deposit: (BigInt(Math.round(deposit * 100)) * unit) / 100n, reviewEvery: 1, sessions: 'enforce', sessionRenewal: 'renewed' })
+      const r = runBacktest(ds, policy, { deposit: (BigInt(Math.round(deposit * 100)) * unit) / 100n, from, to, reviewEvery: 1, sessions: 'enforce', sessionRenewal: 'renewed' })
       cells.push({ ...head, deposit, status: 'ok', metrics: cellMetrics(r, decimalsOf(policy)) })
     }
   }
@@ -79,9 +84,11 @@ async function main(): Promise<void> {
   if (picked && split !== 'all' && picked.some((w) => w.split !== split)) throw new Error(`--windows names windows outside --split ${split}`)
   const windows = picked ?? LAB_WINDOWS.filter((w) => split === 'all' || w.split === split)
   const deposits = arg('deposits', '1000,100000').split(',').map(Number)
-  if (deposits.some((d) => !Number.isFinite(d) || d <= 0)) throw new Error('--deposits: positive amounts of the savings asset')
+  if (deposits.length === 0 || deposits.some((d) => !Number.isFinite(d) || d <= 0)) throw new Error('--deposits: positive amounts of the savings asset')
   // Half the cores at most and below normal priority: the box runs other work.
-  const jobs = Math.max(1, Math.min(windows.length, Number(arg('jobs', String(Math.max(1, Math.floor(availableParallelism() / 2)))))))
+  const jobsArg = Number(arg('jobs', String(Math.max(1, Math.floor(availableParallelism() / 2)))))
+  if (!Number.isInteger(jobsArg) || jobsArg < 1) throw new Error('--jobs: a positive whole number')
+  const jobs = Math.min(windows.length, jobsArg)
   if (windows.some((w) => w.split === 'test')) console.error('TEST windows included: judge a candidate on them, do not tune on them.')
 
   const started = performance.now()

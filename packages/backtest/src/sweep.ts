@@ -20,29 +20,42 @@ export function applyOverrides<T>(base: T, overrides: Record<string, unknown>, p
   const out: Record<string, unknown> = { ...(base as Record<string, unknown>) }
   for (const [k, v] of Object.entries(overrides)) {
     const at = path ? `${path}.${k}` : k
-    const sub = typeof shape === 'object' ? (shape[k] ?? shape['*']) : undefined
+    const sub = isShapeNode(shape) ? (shape[k] ?? shape['*']) : undefined
     if (!(k in out) && sub === undefined) throw new Error(`override ${at}: the policy has no such parameter`)
     const cur = out[k]
-    if (isPlainObject(v) && (isPlainObject(cur) || cur === undefined)) {
-      if (cur === undefined && typeof sub === 'object' && Object.values(sub).every((x) => x === LEAF)) {
+    const wantsObject = isPlainObject(cur) || isShapeNode(sub)
+    if (wantsObject !== isPlainObject(v)) throw new Error(`override ${at}: want ${wantsObject ? 'an object' : 'a value'}, got ${JSON.stringify(v)}`)
+    if (isPlainObject(v)) {
+      if (cur === undefined && isShapeNode(sub) && Object.values(sub).every((x) => !isShapeNode(x))) {
         const left = Object.keys(sub).filter((x) => x !== '*' && !(x in v))
         if (left.length > 0) throw new Error(`override ${at}: the policy has no ${k} to merge into; give ${left.join(', ')} too`)
       }
       out[k] = applyOverrides(cur ?? {}, v, at, sub)
-    } else out[k] = typeof v === 'string' && /^-?\d+n$/.test(v) ? BigInt(v.slice(0, -1)) : v
+      continue
+    }
+    const value = typeof v === 'string' && /^-?\d+n$/.test(v) ? BigInt(v.slice(0, -1)) : v
+    // The value must be of the parameter's type: the base value's, or the shape's for a parameter the base lacks.
+    const want = ENUMS[at.replace(/^guards\.byBucket\.[^.]+\./, 'guards.byBucket.*.')] ?? (cur !== undefined ? (Array.isArray(cur) ? 'array' : typeof cur) : sub)
+    const ok = Array.isArray(want) ? want.includes(value as string) : want === 'array' ? Array.isArray(value) : typeof value === want
+    if (!ok) throw new Error(`override ${at}: want ${Array.isArray(want) ? want.join(' | ') : want}, got ${JSON.stringify(v)}`)
+    out[k] = value
   }
   return out as T
 }
 
-const LEAF = 1
-type Shape = typeof LEAF | { [key: string]: Shape }
-const BUCKET_RULES: Shape = { fallFreeze: { fallBps: LEAF, volBps: LEAF } }
+type Leaf = 'number' | 'bigint' | readonly string[]
+type Shape = Leaf | { [key: string]: Shape }
+function isShapeNode(s: Shape | undefined): s is { [key: string]: Shape } {
+  return typeof s === 'object' && !Array.isArray(s)
+}
+const ENUMS: Record<string, readonly string[]> = { allocation: ['first-entry', 'target-weights'], 'range.adjust': ['off', 'on_out_of_range'] }
+const BUCKET_RULES: Shape = { fallFreeze: { fallBps: 'number', volBps: 'number' } }
 /** Optional parameters of `PolicyVersion` an override may add although the base policy does not set them. `*`: any pool. */
 const OPTIONAL: Shape = {
-  allocation: LEAF,
-  minEntry: LEAF,
-  rebalanceBandBps: LEAF,
-  range: { widthTicksByPool: { '*': LEAF } },
+  allocation: ENUMS.allocation!,
+  minEntry: 'bigint',
+  rebalanceBandBps: 'number',
+  range: { widthTicksByPool: { '*': 'number' } },
   guards: { byBucket: { stables: BUCKET_RULES, 'btc-usdc': BUCKET_RULES, risk: BUCKET_RULES } },
 }
 

@@ -37,7 +37,9 @@ if (cmd === 'list') {
       continue
     }
     const ds = decodeDataset(JSON.parse(readFileSync(path, 'utf8')) as DatasetJson)
-    rows.push({ ...w, datasetId: ds.id, samples: ds.samples.length, market: marketOfDataset(ds) })
+    const { fromBlock, toBlock } = windowBlocks(w)
+    const own = { ...ds, samples: ds.samples.filter((s) => s.block >= fromBlock && s.block <= toBlock) }
+    rows.push({ ...w, datasetId: ds.id, samples: own.samples.length, market: marketOfDataset(own) })
   }
   writeFileSync(join(dir, 'manifest.json'), `${JSON.stringify({ format: 'mamoru-lab-manifest-v1', windows: rows }, null, 1)}\n`)
   const pct = (x: number | null) => (x === null ? 'n/a' : `${(x * 100).toFixed(1)}%`)

@@ -4,7 +4,7 @@ import { syntheticDataset } from './fixtures.ts'
 import { marketOfDataset, moveOf } from './market.ts'
 import { runBacktest } from './run.ts'
 import { aggregate, applyOverrides, cellMetrics, markdown, overridesFromAssignments, policyOf, sortCells, worstDayBps, type Cell, type CellMetrics } from './sweep.ts'
-import { blockAt, LAB_WINDOWS, windowBlocks } from './windows.ts'
+import { blockAt, blockTime, LAB_WINDOWS, windowBlocks } from './windows.ts'
 
 const H = 3600
 const SLOW = 60_000
@@ -97,6 +97,14 @@ describe('overrides', () => {
   test('a new pool width is accepted', () => {
     expect(applyOverrides(conservadorLiveV2, { range: { widthTicksByPool: { 'pool:WETH/USDC/3000': 4000 } } }).range.widthTicksByPool).toEqual({ 'pool:USDC/USDT/100': 40, 'pool:WETH/USDC/3000': 4000 })
   })
+  test('a value of the wrong type or outside its enum is refused', () => {
+    expect(() => applyOverrides(conservadorLabGuardsV1, { guards: { byBucket: { risk: { fallFreeze: 500 } } } })).toThrow('want an object')
+    expect(() => applyOverrides(conservadorLiveV2, { allocation: 'target-weight' })).toThrow('first-entry | target-weights')
+    expect(() => applyOverrides(conservadorLiveV2, { range: { adjust: 'always' } })).toThrow('off | on_out_of_range')
+    expect(() => applyOverrides(conservadorLiveV2, { range: { cooldownSeconds: '3600' } })).toThrow('want number')
+    expect(() => applyOverrides(conservadorLiveV2, { minEntry: 5 })).toThrow('want bigint')
+    expect(() => applyOverrides(conservadorLiveV2, { range: 5 })).toThrow('want an object')
+  })
   test('"123n" from JSON becomes a bigint', () => {
     expect(applyOverrides(conservadorLiveV2, { minEntry: '5000000n' }).minEntry).toBe(5_000_000n)
   })
@@ -169,8 +177,16 @@ describe('windows', () => {
     const test = LAB_WINDOWS.filter((w) => w.split === 'test')
     for (const r of ['crash', 'rally', 'calm']) expect(test.some((w) => w.regime === r)).toBe(true)
   })
-  test('no two windows overlap', () => {
-    const spans = LAB_WINDOWS.map((w) => [Date.parse(w.from), Date.parse(w.to)] as const).sort((a, b) => a[0] - b[0])
-    for (let i = 1; i < spans.length; i++) expect(spans[i]![0]).toBeGreaterThanOrEqual(spans[i - 1]![1])
+  test('no two windows share a sampled block', () => {
+    const spans = LAB_WINDOWS.map(windowBlocks).sort((a, b) => a.fromBlock - b.fromBlock)
+    for (let i = 1; i < spans.length; i++) expect(spans[i]!.fromBlock).toBeGreaterThan(spans[i - 1]!.toBlock)
+  })
+  test('a window samples from its start time on, not the sample before it', () => {
+    const w = { id: 'x', file: 'x', split: 'train' as const, regime: 'calm' as const, label: '', from: '2026-05-01T00:00:00Z', to: '2026-05-02T00:00:00Z', step: 300 }
+    const { fromBlock, toBlock } = windowBlocks(w)
+    expect(blockTime(fromBlock)).toBeGreaterThanOrEqual(Date.parse(w.from) / 1000)
+    expect(blockTime(fromBlock - 300)).toBeLessThan(Date.parse(w.from) / 1000)
+    expect(blockTime(toBlock)).toBeLessThanOrEqual(Date.parse(w.to) / 1000)
+    expect(fromBlock % 300).toBe(0)
   })
 })

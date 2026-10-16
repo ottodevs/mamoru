@@ -365,10 +365,13 @@ once on TEST. `bun packages/backtest/cli/windows.ts manifest` writes the market 
 
 | Split | Deposit | Windows | Mean return | Mean vs hold | Worst return | Worst max drawdown | Worst day |
 |---|---|---|---|---|---|---|---|
-| TRAIN | 1,000 | 7 | -0.35% | -0.36% | -3.73% | 7.62% | 6.78% |
-| TRAIN | 100,000 | 7 | -0.08% | -0.09% | -5.56% | 7.49% | 6.72% |
-| TEST | 1,000 | 5 | -0.55% | -0.01% | -3.51% | 9.30% | 7.34% |
-| TEST | 100,000 | 5 | -0.79% | -0.25% | -4.68% | 9.55% | 8.01% |
+| TRAIN | 1,000 | 7 | -0.33% | -0.36% | -3.58% | 7.62% | 6.78% |
+| TRAIN | 100,000 | 7 | -0.23% | -0.26% | -5.58% | 7.49% | 6.72% |
+| TEST | 1,000 | 5 | -0.47% | +0.06% | -3.50% | 8.87% | 6.79% |
+| TEST | 100,000 | 5 | -0.69% | -0.16% | -4.64% | 10.34% | 8.69% |
+
+Moving a 30-day window's start by one 10-minute sample moved its return by up to 0.5 pp at 100,000 (calm-2026-04: 2.89% to
+2.37%). A difference smaller than that between two variants on one window is noise; LC-L1's start offsets apply to every window.
 
 A variant: `bun packages/backtest/cli/sweep.ts --policy conservador-lab-guards-v1 --set guards.byBucket.risk.fallFreeze.fallBps=500 --name risk5`
 (TRAIN, deposits 1,000 and 100,000, the unchanged policy as baseline beside it; `--split test` to judge it).
