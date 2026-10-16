@@ -119,7 +119,32 @@ export type PolicyVersion = {
   volTarget?: VolTarget
   /** Lab only (#101 experiment 6): CPPI on the volatile share against a floor under the account's peak. Absent: off. */
   cppi?: Cppi
+  /** Lab only (#101 round 3): stables depeg guard on the `stables` bucket's pool. Absent: off. */
+  depegGuard?: DepegGuard
+  /** Lab only (#101 round 3): staged exits of the volatile buckets on a fall from the 7-day high. Absent: off. */
+  stagedExit?: StagedExit
 }
+
+/**
+ * Stables depeg guard (#101 round 3, spec 004 `RISK_DEPEG_PAIRED` without the oracle the Lab does not have): the
+ * deviation is the stables pool's TWAP price against 1.0, in bps, either side. It trips when the deviation has been
+ * at or over `thresholdBps` for `holdSeconds` without a break, and releases when it has been under `releaseBps` for
+ * `releaseSeconds`. Tripped, `freeze`: no entry, top-up, re-range, reduce, convert or harvest in the stables pool;
+ * the stables share waits as savings. `exit`: the same, and the stables position is closed and its non-savings token
+ * sold to savings, each sale sized to `exitImpactBps` of price impact against the pool's active liquidity.
+ */
+export type DepegGuard = { thresholdBps: number; holdSeconds: number; action: 'freeze' | 'exit'; releaseBps: number; releaseSeconds: number; exitImpactBps: number }
+
+/**
+ * Staged exits (#101 round 3, research note experiment 3): each volatile bucket gives up a third of its preference
+ * (to the stables bucket, as CPPI does) when its pool's TWAP price falls `step1Bps`, `step2Bps` and `step3Bps` from
+ * the high (the 7-day high, or the high since the last re-entry if that is later). The bucket over its new target is
+ * reduced at a 1-point drift band and the freed volatile token is converted, through the ordinary reduce and convert.
+ * Re-entry, `ema`: every third comes back once the TWAP has been under its 7-day EMA since the first step and crosses
+ * back over it. `ladder`: each third comes back when the price falls `ladderGapBps` below the price that third was
+ * sold at (a buy order under the price); all of them when the price recovers to within `step1Bps` of the high.
+ */
+export type StagedExit = { step1Bps: number; step2Bps: number; step3Bps: number; reentry: 'ema' | 'ladder'; ladderGapBps: number }
 
 /**
  * Downside-skewed placement in a falling regime: the new range holds `belowShareBps` of its width below the price

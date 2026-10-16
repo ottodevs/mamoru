@@ -98,6 +98,15 @@ describe('overrides', () => {
     expect(applyOverrides(conservadorLiveV2, { cppi: { floorBps: 9000, multiplier: 3 } }).cppi).toEqual({ floorBps: 9000, multiplier: 3 })
     expect(() => applyOverrides(conservadorLiveV2, { cppi: { floorBps: 9000, multiplir: 3 } })).toThrow('multiplier')
   })
+  test('the #101 round 3 options can be added, whole, with their enums checked', () => {
+    const depegGuard = { thresholdBps: 50, holdSeconds: 1800, action: 'exit', releaseBps: 20, releaseSeconds: 259_200, exitImpactBps: 20 }
+    expect(applyOverrides(conservadorLiveV2, { depegGuard }).depegGuard).toEqual(depegGuard as never)
+    expect(() => applyOverrides(conservadorLiveV2, { depegGuard: { ...depegGuard, action: 'sell' } })).toThrow('freeze | exit')
+    expect(() => applyOverrides(conservadorLiveV2, { depegGuard: { thresholdBps: 50 } })).toThrow('holdSeconds')
+    const stagedExit = { step1Bps: 300, step2Bps: 600, step3Bps: 1000, reentry: 'ladder', ladderGapBps: 1000 }
+    expect(applyOverrides(conservadorLiveV2, { stagedExit }).stagedExit).toEqual(stagedExit as never)
+    expect(() => applyOverrides(conservadorLiveV2, { stagedExit: { ...stagedExit, reentry: 'never' } })).toThrow('ema | ladder')
+  })
   test('pool widths can be added to a policy that has none', () => {
     const { widthTicksByPool: _w, ...range } = conservadorLiveV2.range
     expect(applyOverrides<PolicyVersion>({ ...conservadorLiveV2, range }, { range: { widthTicksByPool: { 'pool:WETH/USDC/3000': 4000 } } }).range.widthTicksByPool).toEqual({ 'pool:WETH/USDC/3000': 4000 })

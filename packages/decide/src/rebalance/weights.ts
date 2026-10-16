@@ -15,6 +15,7 @@ const SCALE = 1_000_000
  *   current weight kept inside the band (see `VolTarget`); no volatility: 1.
  * - cppi: all volatile buckets share scale = min(1, multiplier * cushion / (account value * volatile share)), with
  *   cushion = value - floorBps of max(peak, value).
+ * - stagedExit: times (3 - thirds out) / 3, the thirds the engine reports in `guard.stages`.
  */
 /**
  * A scale on the grid of `step`: the grid level nearest the current weight among those inside [lo, hi], or the level
@@ -31,7 +32,7 @@ export function levelOf(lo: number, hi: number, cur: number, step: number): numb
 }
 
 export function weightTargets(obs: Observation, policy: PolicyVersion): PolicyVersion['buckets'] | null {
-  if (!policy.volTarget && !policy.cppi) return null
+  if (!policy.volTarget && !policy.cppi && !policy.stagedExit) return null
   if (!policy.buckets.some((b) => b.id === 'stables')) return null
   let cppiScale = SCALE
   const values = bucketValues(obs, policy, new Set(policy.buckets.flatMap((b) => b.pools)))
@@ -68,7 +69,9 @@ export function weightTargets(obs: Observation, policy: PolicyVersion): PolicyVe
       const cur = values.total === 0n ? 0 : Number((held * BigInt(prefTotal) * BigInt(SCALE)) / (values.total * BigInt(b.preference || 1)))
       scale = Math.min(scale, levelOf(lo, hi, cur, policy.volTarget.stepBps * (SCALE / 10_000)))
     }
-    const preference = Math.floor((b.preference * Math.min(scale, SCALE)) / SCALE)
+    // Staged exits (#101 round 3): a third of the preference per step in force, on top of the other rules.
+    const out3 = policy.stagedExit ? Math.max(0, Math.min(3, obs.guard?.stages?.[b.id] ?? 0)) : 0
+    const preference = Math.floor((b.preference * Math.min(scale, SCALE) * (3 - out3)) / (SCALE * 3))
     freed += b.preference - preference
     return { ...b, preference }
   })

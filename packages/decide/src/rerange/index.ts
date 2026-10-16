@@ -125,12 +125,15 @@ export function bucketValues(obs: Observation, policy: PolicyVersion, policyPool
  * Safe. The freed savings flow to the under-weight buckets through the
  * normal entries. Below the op cost times the harvest factor it holds.
  */
-export function reduceOf(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>): { code: ReasonCode | null; proposal: ReduceProposal | null } {
+export function reduceOf(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>, lab?: { skip?: ReadonlySet<string>; driftBps?: Partial<Record<string, number>> }): { code: ReasonCode | null; proposal: ReduceProposal | null } {
   if (!hasManageAny(policy)) return { code: null, proposal: null }
   const { total, buckets } = bucketValues(obs, policy, policyPools)
   if (total === 0n) return { code: null, proposal: null }
   for (const b of buckets) {
-    if (!b.pool || b.value * 10_000n <= b.target * 10_000n + total * BigInt(DRIFT_BPS)) continue
+    // Lab (#101 round 3): a depegged pool is left alone; a bucket under a staged exit is reduced at its own band.
+    if (b.pool && lab?.skip?.has(b.pool)) continue
+    const drift = BigInt(lab?.driftBps?.[b.bucket] ?? DRIFT_BPS)
+    if (!b.pool || b.value * 10_000n <= b.target * 10_000n + total * drift) continue
     const pool = obs.pools.find((x) => x.name === b.pool)
     const p = obs.positions.find((x) => x.pool === b.pool && x.liquidity > 0n && isManaged(x, policy, policyPools))
     if (!pool || !p) continue

@@ -5,6 +5,7 @@ import { allocate, type Waiting } from './allocate/index.ts'
 import { enterBucket, safeSavings } from './enter/index.ts'
 import { ehgPreliminary, purgaIdentity } from './gates/index.ts'
 import { fallFreezeOf } from './guard/index.ts'
+import { depeggedPool, depegExitOf } from './guard/depeg.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
 import { weightTargets } from './rebalance/weights.ts'
 import { anyKey, idleConvertOf, isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
@@ -20,7 +21,12 @@ export { allocate, widthOf, type Allocation, type BucketValue, type Waiting } fr
 export { depthOf, twapFloor, type Depth } from './depth/index.ts'
 export { rerangeWorth, RERANGE_OPS, type RerangeWorth } from './rebalance/lazy.ts'
 export { weightTargets } from './rebalance/weights.ts'
+export { depegExitOf, depeggedPool, pegDeviationBps, pegStep, PEG_CLEAR, type PegState } from './guard/depeg.ts'
+export { fallFromBps, stageStep, thirdsOut, type StageInput, type StageState } from './rebalance/staged.ts'
 export { amountsOf, bucketValues, positionValue, rerangeOf, reduceOf, EDGE_BPS, DRIFT_BPS } from './rerange/index.ts'
+
+/** Lab (#101 round 3): drift band of a bucket under a staged exit, so the risk bucket's third (3.3 points) is reduced. */
+const STAGED_DRIFT_BPS = 100
 
 const PROPOSAL_CODE = {
   enter_swap: 'DECIDE_ENTER',
@@ -65,6 +71,17 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   const buckets: Decision['buckets'] = []
   const positions: Decision['positions'] = []
   const policyPools = new Set(policy.buckets.flatMap((b) => b.pools))
+  // Lab (#101 round 3): the stables pool while the depeg guard is tripped, and the buckets under a staged exit.
+  const depegged = depeggedPool(obs, policy)
+  const labGuards: NonNullable<Decision['labGuards']> = []
+  if (depegged) labGuards.push({ bucket: 'stables', code: 'RISK_DEPEG_PAIRED', value: obs.guard?.peg?.deviationBps ?? 0 })
+  const stagedDrift: Partial<Record<string, number>> = {}
+  if (policy.stagedExit) for (const b of policy.buckets) {
+    const out = obs.guard?.stages?.[b.id] ?? 0
+    if (out <= 0) continue
+    labGuards.push({ bucket: b.id, code: 'RISK_STAGED_EXIT', value: out })
+    stagedDrift[b.id] = STAGED_DRIFT_BPS
+  }
 
   // Plan §9, step 10 and FR-DEC-009: annotations for every position, harvest only for managed ones.
   const harvests: Proposal[] = []
@@ -84,7 +101,12 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
       if (!within) codes.push('OBS_POSITION_OUT_OF_RANGE')
       const est = estimateFees(obs, policy, p, pool)
       if (est.aboveCost) codes.push('OBS_FEES_ABOVE_COST')
-      if (managed) {
+      if (managed && depegged && pool.name === depegged.name) {
+        // Nothing moves in a depegged pool but the guard's own exit.
+        codes.push('RISK_DEPEG_PAIRED')
+        if (within) managedInRange++
+        else managedOutOfRange++
+      } else if (managed) {
         if (within) managedInRange++
         else managedOutOfRange++
         const r = rerangeOf(obs, policy, p, pool)
@@ -101,6 +123,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   // Spec 004 (#101): buckets frozen by a fast fall get no entry this review.
   const guards: GuardNote[] = policy.guards ? fallFreezeOf(obs, policy) : []
   const frozen = new Set(guards.filter((g) => g.code === 'DECIDE_ENTRY_PAUSED_FALL').map((g) => g.bucket))
+  if (depegged) frozen.add('stables')
 
   // Plan §9, step 7: entry, bucket by bucket.
   const entries: Proposal[] = []
@@ -172,12 +195,16 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   } else if (obs.intents.paused) {
     reason = 'DECIDE_PAUSED'
   } else {
-    const reduce = reranges.length || harvests.length ? null : reduceOf(obs, policy, policyPools)
+    // Lab (#101 round 3): the depeg exit goes before anything else.
+    const exit = depegged ? depegExitOf(obs, policy, depegged) : null
+    const lab = depegged || policy.stagedExit ? { ...(depegged ? { skip: new Set([depegged.name]) } : {}), driftBps: stagedDrift } : undefined
+    const reduce = exit || reranges.length || harvests.length ? null : reduceOf(obs, policy, policyPools, lab)
     // A frozen bucket's idle token waits where it is: the guard never turns a pause into a sell-back.
     const frozenPools = guards.filter((g) => frozen.has(g.bucket)).map((g) => g.pool)
+    if (depegged) frozenPools.push(depegged.name)
     const keep = frozenPools.length ? new Set([...(pendingMint ?? []), ...frozenPools]) : pendingMint
-    const idle = reranges.length || harvests.length || reduce?.proposal ? null : idleConvertOf(obs, policy, policyPools, keep)
-    proposal = reranges[0] ?? harvests[0] ?? reduce?.proposal ?? idle ?? entries[0] ?? null
+    const idle = exit || reranges.length || harvests.length || reduce?.proposal ? null : idleConvertOf(obs, policy, policyPools, keep)
+    proposal = exit ?? reranges[0] ?? harvests[0] ?? reduce?.proposal ?? idle ?? entries[0] ?? null
     reason = proposal ? PROPOSAL_CODE[proposal.kind] : holdReason()
   }
 
@@ -195,6 +222,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   function holdReason(): ReasonCode {
     if (unsafeDeposit) return 'OBS_DEPOSIT_UNSAFE'
     if (managedOutOfRange > 0) return 'OBS_POSITION_OUT_OF_RANGE'
+    if (depegged) return 'RISK_DEPEG_PAIRED'
     // Spec 004: the app and /ops show that money waits because of a fall, not that nothing is to do.
     if (frozen.size > 0) return 'DECIDE_ENTRY_PAUSED_FALL'
     if (managedInRange > 0) return 'DECIDE_IN_RANGE'
@@ -206,7 +234,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   const code = kind === 'hold' ? 'DECIDE_HOLD' : PROPOSAL_CODE[kind]
   const policyRef = { policyId: given.policyId, version: given.version, hash: policyHash(given) }
   // FR-LC-001: without `policy.guards` the body, and so every hash, is the one of today.
-  const body = { policyRef, observationCodes, kind, code, reason, trail, proposal, shadow, buckets, positions, ...(policy.guards ? { guards } : {}), ...(targets ? { targets: targets.map((b) => ({ bucket: b.id, preference: b.preference })) } : {}) } as const
+  const body = { policyRef, observationCodes, kind, code, reason, trail, proposal, shadow, buckets, positions, ...(policy.guards ? { guards } : {}), ...(targets ? { targets: targets.map((b) => ({ bucket: b.id, preference: b.preference })) } : {}), ...(labGuards.length ? { labGuards } : {}) } as const
   const observationRef = { block: obs.block.number, hash: obs.block.hash }
   const premiseHash = hashOf(body)
   // `waiting` moves with every price, so it is reported beside the decision and never part of its premise or id.

@@ -1,5 +1,5 @@
 import { ReasonError } from '@mamoru/domain'
-import { amountsOf, type Proposal } from '@mamoru/decide'
+import { amountsOf, type PegState, type Proposal, type StageState } from '@mamoru/decide'
 import { entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
 import { quoteMint, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
 import type { PoolSample } from './types.ts'
@@ -33,6 +33,11 @@ export type World = {
   lastRerangeAt: bigint | null
   /** Lab (#101 CPPI): highest account value seen at a review, raw savings units. */
   peakValue?: bigint
+  /** Lab (#101 round 3): the depeg guard's state and the last deviation measured, as the engine would keep them. */
+  peg?: PegState
+  pegDeviationBps?: number | null
+  /** Lab (#101 round 3): staged-exit state per volatile bucket. */
+  stages?: Record<string, StageState>
 }
 
 export function newWorld(savings: RegistryName, deposit: bigint): World {

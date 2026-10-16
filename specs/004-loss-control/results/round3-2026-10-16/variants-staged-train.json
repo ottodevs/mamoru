@@ -1,0 +1,58 @@
+[
+ {
+  "name": "baseline",
+  "policy": "conservador-live-v2"
+ },
+ {
+  "name": "st3-6-10-ladder",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "stagedExit": {
+    "step1Bps": 300,
+    "step2Bps": 600,
+    "step3Bps": 1000,
+    "reentry": "ladder",
+    "ladderGapBps": 1000
+   }
+  }
+ },
+ {
+  "name": "st3-6-10-ema",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "stagedExit": {
+    "step1Bps": 300,
+    "step2Bps": 600,
+    "step3Bps": 1000,
+    "reentry": "ema",
+    "ladderGapBps": 1000
+   }
+  }
+ },
+ {
+  "name": "st5-10-15-ladder",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "stagedExit": {
+    "step1Bps": 500,
+    "step2Bps": 1000,
+    "step3Bps": 1500,
+    "reentry": "ladder",
+    "ladderGapBps": 1500
+   }
+  }
+ },
+ {
+  "name": "st5-10-15-ema",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "stagedExit": {
+    "step1Bps": 500,
+    "step2Bps": 1000,
+    "step3Bps": 1500,
+    "reentry": "ema",
+    "ladderGapBps": 1500
+   }
+  }
+ }
+]

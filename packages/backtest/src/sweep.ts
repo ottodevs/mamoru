@@ -50,7 +50,7 @@ type Shape = Leaf | { [key: string]: Shape }
 function isShapeNode(s: Shape | undefined): s is { [key: string]: Shape } {
   return typeof s === 'object' && !Array.isArray(s)
 }
-const ENUMS: Record<string, readonly string[]> = { allocation: ['first-entry', 'target-weights'], 'range.adjust': ['off', 'on_out_of_range'], 'geometry.skew.regime': ['ret24h', 'ema7d'] }
+const ENUMS: Record<string, readonly string[]> = { allocation: ['first-entry', 'target-weights'], 'range.adjust': ['off', 'on_out_of_range'], 'geometry.skew.regime': ['ret24h', 'ema7d'], 'depegGuard.action': ['freeze', 'exit'], 'stagedExit.reentry': ['ema', 'ladder'] }
 const BUCKET_IDS = ['stables', 'btc-usdc', 'risk'] as const
 /** Maps keyed by name: which keys they take (undefined: any, e.g. a pool name). */
 const MAP_KEYS: Record<string, readonly string[]> = { 'guards.byBucket': BUCKET_IDS }
@@ -76,6 +76,9 @@ const OPTIONAL: Shape = {
   },
   volTarget: { targetVolBps: 'number', bandBps: 'number', stepBps: 'number' },
   cppi: { floorBps: 'number', multiplier: 'number' },
+  // Lab round 3 (#101): given whole.
+  depegGuard: { thresholdBps: 'number', holdSeconds: 'number', action: ENUMS['depegGuard.action']!, releaseBps: 'number', releaseSeconds: 'number', exitImpactBps: 'number' },
+  stagedExit: { step1Bps: 'number', step2Bps: 'number', step3Bps: 'number', reentry: ENUMS['stagedExit.reentry']!, ladderGapBps: 'number' },
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {

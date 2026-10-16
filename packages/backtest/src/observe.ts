@@ -1,5 +1,5 @@
 import type { Hex } from '@mamoru/domain'
-import { marketOf, meanTickAt, realizedVolOf, type CumulativePoint, type Observation, type PoolGeometryObs, type PoolGuardObs, type PoolObs, type SessionObs } from '@mamoru/decide'
+import { marketOf, meanTickAt, realizedVolOf, thirdsOut, type CumulativePoint, type Observation, type PoolGeometryObs, type PoolGuardObs, type PoolObs, type SessionObs } from '@mamoru/decide'
 import { grantKey, type PolicyVersion } from '@mamoru/policy'
 import { address, entry, type RegistryName } from '@mamoru/registry'
 import type { Dataset, Sample } from './types.ts'
@@ -91,11 +91,11 @@ export function feeGrowthOf(ds: Dataset, poolIndex: number, i: number): PoolGuar
 
 /** A policy that reads `Observation.guard`: loss-control guards, or a Lab rebalance rule (#101). */
 export function readsGuard(policy: PolicyVersion): boolean {
-  return !!(policy.guards || policy.range.lazy || policy.volTarget || policy.cppi)
+  return !!(policy.guards || policy.range.lazy || policy.volTarget || policy.cppi || policy.depegGuard || policy.stagedExit)
 }
 
 /** Spec 004 `Observation.guard` from the dataset, as the engine would build it from its snapshot history. */
-export function guardOf(ds: Dataset, i: number, windowSeconds: number, lab?: { feeGrowth?: boolean; peakValue?: bigint }): NonNullable<Observation['guard']> {
+export function guardOf(ds: Dataset, i: number, windowSeconds: number, lab?: { feeGrowth?: boolean; peakValue?: bigint; peg?: NonNullable<Observation['guard']>['peg']; stages?: NonNullable<Observation['guard']>['stages'] }): NonNullable<Observation['guard']> {
   const now = ds.samples[i]!.time
   const pools: Partial<Record<RegistryName, PoolGuardObs>> = {}
   ds.pools.forEach((name, k) => {
@@ -103,7 +103,7 @@ export function guardOf(ds: Dataset, i: number, windowSeconds: number, lab?: { f
     const m: PoolGuardObs = marketOf(now, windowSeconds, (t) => cumulativeAt(ds, k, t, windowSeconds))
     pools[name] = lab?.feeGrowth ? { ...m, feeGrowth24h: feeGrowthOf(ds, k, i) } : m
   })
-  return lab?.peakValue !== undefined ? { pools, peakValue: lab.peakValue } : { pools }
+  return { pools, ...(lab?.peakValue !== undefined ? { peakValue: lab.peakValue } : {}), ...(lab?.peg ? { peg: lab.peg } : {}), ...(lab?.stages ? { stages: lab.stages } : {}) }
 }
 
 const HOUR = 3_600
@@ -135,6 +135,16 @@ function emaSeries(ds: Dataset, k: number, windowSeconds: number): (number | nul
     out.push(s.time - first! >= DAY ? ema : null)
   }
   return out
+}
+
+/** Lab (#101 round 3 staged exits): the 7-day EMA of the TWAP tick of pool `k` at sample `i`; null before a day of history. */
+export function emaTickOf(ds: Dataset, k: number, i: number, windowSeconds: number): number | null {
+  let cache = geometryCache.get(ds)
+  if (!cache) geometryCache.set(ds, (cache = { ema: new Map(), byIndex: new Map() }))
+  const key = `${k}:${windowSeconds}`
+  let ema = cache.ema.get(key)
+  if (!ema) cache.ema.set(key, (ema = emaSeries(ds, k, windowSeconds)))
+  return ema[i] ?? null
 }
 
 /**
@@ -223,7 +233,7 @@ export function observe(ds: Dataset, i: number, w: World, policy: PolicyVersion,
     intents: { paused: false, exitRequested: false },
     slot: null,
     lastRerangeAt: w.lastRerangeAt,
-    ...(readsGuard(policy) ? { guard: guardOf(ds, i, policy.execution.twapWindowSeconds, { feeGrowth: !!policy.range.lazy, ...(policy.cppi ? { peakValue: w.peakValue ?? 0n } : {}) }) } : {}),
+    ...(readsGuard(policy) ? { guard: guardOf(ds, i, policy.execution.twapWindowSeconds, { feeGrowth: !!policy.range.lazy, ...(policy.cppi ? { peakValue: w.peakValue ?? 0n } : {}), ...(policy.depegGuard && w.peg ? { peg: { tripped: w.peg.tripped, deviationBps: w.pegDeviationBps ?? null } } : {}), ...(policy.stagedExit && w.stages ? { stages: Object.fromEntries(Object.entries(w.stages).map(([b, st]) => [b, thirdsOut(st)])) } : {}) }) } : {}),
     ...(policy.geometry ? { geometry: geometryOf(ds, i, policy.execution.twapWindowSeconds) } : {}),
   }
 }

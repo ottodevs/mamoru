@@ -84,6 +84,10 @@ export const REASON_CODES = [
   // Lab (#101): a re-range that would cost more (gas, swap, LVR) than the fees it earns over the policy horizon waits.
   'DECIDE_RANGE_BELOW_COST',
   'DECIDE_ENTRY_PAUSED_FALL',
+  // Lab (#101 round 3): the stables pool is off peg past the guard; nothing moves in it, or it is being left.
+  'RISK_DEPEG_PAIRED',
+  // Lab (#101 round 3): a volatile bucket gave up thirds of its weight on a fall from its 7-day high.
+  'RISK_STAGED_EXIT',
   'DECIDE_EXIT',
   'DECIDE_CONVERT',
   'DECIDE_CONVERT_HELD',

@@ -4,7 +4,7 @@
 //   bun packages/backtest/cli/sweep.ts --set range.cooldownSeconds=3600 --name cd1h      variant + the unchanged baseline
 //   bun packages/backtest/cli/sweep.ts --variants my-variants.json       [{ "name", "policy", "overrides" }, ...]
 // Options: --policy <id> (conservador-live-v2), --windows a,b, --deposits 1000,100000, --jobs N, --out <dir>,
-// --no-baseline. Tune on TRAIN; run TEST once per candidate, to judge it. Same inputs give the same files.
+// --no-baseline, --start-offset <minutes> (every window starts that much later; its end stays). Tune on TRAIN; run TEST once per candidate, to judge it. Same inputs give the same files.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { availableParallelism } from 'node:os'
 import { join } from 'node:path'
@@ -16,7 +16,7 @@ import { runBacktest, SIM_VERSION } from '../src/run.ts'
 import { aggregate, cellMetrics, decimalsOf, markdown, overridesFromAssignments, policyOf, sortCells, type Cell, type Variant } from '../src/sweep.ts'
 import { datasetsDir, LAB_WINDOWS, labWindow, windowBlocks } from '../src/windows.ts'
 
-type Job = { window: string; variants: Variant[]; deposits: number[] }
+type Job = { window: string; variants: Variant[]; deposits: number[]; offsetMinutes: number }
 
 const argv = process.argv.slice(2)
 const has = (name: string) => argv.includes(`--${name}`)
@@ -34,7 +34,8 @@ function runJob(job: Job): Cell[] {
   const ds = decodeDataset(JSON.parse(readFileSync(join(datasetsDir(), w.file), 'utf8')) as DatasetJson)
   // Only the window's own blocks: a dataset can hold a sample of the window next to it.
   const { fromBlock, toBlock } = windowBlocks(w)
-  const from = ds.samples.findIndex((s) => s.block >= fromBlock)
+  // Start-offset robustness (#101 round 3): the window starts `offsetMinutes` later (Base: one block per 2 s).
+  const from = ds.samples.findIndex((s) => s.block >= fromBlock + job.offsetMinutes * 30)
   const to = ds.samples.findLastIndex((s) => s.block <= toBlock)
   if (from < 0 || to < from) throw new Error(`${w.file} has no sample in blocks ${fromBlock}..${toBlock}`)
   // Cut, not just bounded: TWAP and guard history must not read a sample of the window next door.
@@ -85,6 +86,8 @@ async function main(): Promise<void> {
   if (!['train', 'test', 'all'].includes(split)) throw new Error('--split train | test | all')
   if (picked && split !== 'all' && picked.some((w) => w.split !== split)) throw new Error(`--windows names windows outside --split ${split}`)
   const windows = picked ?? LAB_WINDOWS.filter((w) => split === 'all' || w.split === split)
+  const offsetMinutes = Number(arg('start-offset', '0'))
+  if (!Number.isInteger(offsetMinutes) || offsetMinutes < 0) throw new Error('--start-offset: whole minutes, 0 or more')
   const deposits = arg('deposits', '1000,100000').split(',').map(Number)
   if (deposits.length === 0 || deposits.some((d) => !Number.isFinite(d) || d <= 0)) throw new Error('--deposits: positive amounts of the savings asset')
   // Half the cores at most and below normal priority: the box runs other work.
@@ -94,7 +97,7 @@ async function main(): Promise<void> {
   if (windows.some((w) => w.split === 'test')) console.error('TEST windows included: judge a candidate on them, do not tune on them.')
 
   const started = performance.now()
-  const queue: Job[] = windows.map((w) => ({ window: w.id, variants, deposits }))
+  const queue: Job[] = windows.map((w) => ({ window: w.id, variants, deposits, offsetMinutes }))
   const cells: Cell[] = []
   async function worker(): Promise<void> {
     for (let job = queue.shift(); job; job = queue.shift()) {
@@ -113,6 +116,7 @@ async function main(): Promise<void> {
     format: 'mamoru-lab-sweep-v1',
     simVersion: SIM_VERSION,
     split,
+    ...(offsetMinutes > 0 ? { startOffsetMinutes: offsetMinutes } : {}),
     deposits,
     variants: variants.map((v) => ({ ...v, policyId: policyOf(v).policyId, policyHash: policyHash(policyOf(v)) })),
     windows: windows.map((w) => w.id),
@@ -121,7 +125,7 @@ async function main(): Promise<void> {
   }
   const json = canonicalJson(JSON.parse(JSON.stringify(report, (_k, v) => (typeof v === 'bigint' ? `${v}n` : v))))
   const id = keccak256(stringToHex(json)).slice(2, 10)
-  const out = arg('out', join(datasetsDir(), '..', 'sweeps', `${variants.map((v) => v.name).join('_').replace(/[^\w.+-]/g, '-')}-${split}-${id}`))
+  const out = arg('out', join(datasetsDir(), '..', 'sweeps', `${variants.map((v) => v.name).join('_').replace(/[^\w.+-]/g, '-')}-${split}${offsetMinutes > 0 ? `-o${offsetMinutes}m` : ''}-${id}`))
   mkdirSync(out, { recursive: true })
   const md = markdown(sorted, aggs)
   writeFileSync(join(out, 'sweep.json'), `${json}\n`)

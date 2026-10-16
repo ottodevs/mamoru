@@ -1,0 +1,449 @@
+[
+ {
+  "name": "nobtc",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 5000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "btc-usdc",
+     "preference": 4000,
+     "pools": []
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "nobtc+dg30-t10-freeze",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 5000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "btc-usdc",
+     "preference": 4000,
+     "pools": []
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ],
+   "depegGuard": {
+    "thresholdBps": 30,
+    "holdSeconds": 600,
+    "action": "freeze",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ },
+ {
+  "name": "nobtc+dg30-t10-exit",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 5000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "btc-usdc",
+     "preference": 4000,
+     "pools": []
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ],
+   "depegGuard": {
+    "thresholdBps": 30,
+    "holdSeconds": 600,
+    "action": "exit",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ },
+ {
+  "name": "nobtc+dg30-t30-freeze",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 5000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "btc-usdc",
+     "preference": 4000,
+     "pools": []
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ],
+   "depegGuard": {
+    "thresholdBps": 30,
+    "holdSeconds": 1800,
+    "action": "freeze",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ },
+ {
+  "name": "nobtc+dg30-t30-exit",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 5000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "btc-usdc",
+     "preference": 4000,
+     "pools": []
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ],
+   "depegGuard": {
+    "thresholdBps": 30,
+    "holdSeconds": 1800,
+    "action": "exit",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ },
+ {
+  "name": "nobtc+dg50-t10-freeze",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 5000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "btc-usdc",
+     "preference": 4000,
+     "pools": []
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ],
+   "depegGuard": {
+    "thresholdBps": 50,
+    "holdSeconds": 600,
+    "action": "freeze",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ },
+ {
+  "name": "nobtc+dg50-t10-exit",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 5000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "btc-usdc",
+     "preference": 4000,
+     "pools": []
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ],
+   "depegGuard": {
+    "thresholdBps": 50,
+    "holdSeconds": 600,
+    "action": "exit",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ },
+ {
+  "name": "nobtc+dg50-t30-freeze",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 5000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "btc-usdc",
+     "preference": 4000,
+     "pools": []
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ],
+   "depegGuard": {
+    "thresholdBps": 50,
+    "holdSeconds": 1800,
+    "action": "freeze",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ },
+ {
+  "name": "nobtc+dg50-t30-exit",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 5000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "btc-usdc",
+     "preference": 4000,
+     "pools": []
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ],
+   "depegGuard": {
+    "thresholdBps": 50,
+    "holdSeconds": 1800,
+    "action": "exit",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ },
+ {
+  "name": "nobtc+dg100-t10-freeze",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 5000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "btc-usdc",
+     "preference": 4000,
+     "pools": []
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ],
+   "depegGuard": {
+    "thresholdBps": 100,
+    "holdSeconds": 600,
+    "action": "freeze",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ },
+ {
+  "name": "nobtc+dg100-t10-exit",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 5000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "btc-usdc",
+     "preference": 4000,
+     "pools": []
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ],
+   "depegGuard": {
+    "thresholdBps": 100,
+    "holdSeconds": 600,
+    "action": "exit",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ },
+ {
+  "name": "nobtc+dg100-t30-freeze",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 5000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "btc-usdc",
+     "preference": 4000,
+     "pools": []
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ],
+   "depegGuard": {
+    "thresholdBps": 100,
+    "holdSeconds": 1800,
+    "action": "freeze",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ },
+ {
+  "name": "nobtc+dg100-t30-exit",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 5000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "btc-usdc",
+     "preference": 4000,
+     "pools": []
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ],
+   "depegGuard": {
+    "thresholdBps": 100,
+    "holdSeconds": 1800,
+    "action": "exit",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ }
+]

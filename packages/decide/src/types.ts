@@ -29,6 +29,10 @@ export type Observation = {
     pools: Partial<Record<RegistryName, PoolGuardObs>>
     /** Lab (#101 CPPI): the highest account value seen, in raw savings units. Absent: the current value. */
     peakValue?: bigint
+    /** Lab (#101 round 3 depeg guard): the guard's state as the engine keeps it (`pegStep`). Absent: not tripped. */
+    peg?: { tripped: boolean; deviationBps: number | null }
+    /** Lab (#101 round 3 staged exits): thirds each volatile bucket holds out (0-3), as the engine keeps them (`stageStep`). */
+    stages?: Partial<Record<string, number>>
   }
   /** Lab (#101): history for `policy.geometry`. Absent: geometry rules abstain (centred range, policy width). */
   geometry?: { pools: Partial<Record<RegistryName, PoolGeometryObs>> }
@@ -190,6 +194,11 @@ export type Decision = {
   guards?: GuardNote[]
   /** Lab (#101 experiment 6): bucket preferences after the volatility target or CPPI. Present only with one of them. */
   targets?: { bucket: string; preference: number }[]
+  /**
+   * Lab (#101 round 3): depeg guard tripped (`value`: deviation in bps) and staged exits in force (`value`: thirds
+   * out), per bucket. Present only with `depegGuard` or `stagedExit` and something to report.
+   */
+  labGuards?: { bucket: string; code: 'RISK_DEPEG_PAIRED' | 'RISK_STAGED_EXIT'; value: number }[]
   /**
    * otto/mamoru#127, #128: savings held back on purpose, per bucket, with why. Outside the premise hash and the id
    * (the amounts move with every price). Absent when nothing waits.

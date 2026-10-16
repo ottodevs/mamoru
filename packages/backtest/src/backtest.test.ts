@@ -244,3 +244,31 @@ describe('run', () => {
     expect(() => runBacktest({ ...ds, pools: ['x', ...ds.pools.slice(1)] }, conservadorLiveV2, { deposit: DEPOSIT })).toThrow(/has no pool:USDC\/USDT\/100/)
   })
 })
+
+describe('Lab round 3 options in a run (#101)', () => {
+  const STABLE = 'pool:USDC/USDT/100'
+  const ETH = 'pool:WETH/USDC/3000'
+  const run = (ds: ReturnType<typeof syntheticDataset>, policy: typeof conservadorLiveV2) => runBacktest(ds, policy, { deposit: 1000n * 1_000_000n, sessions: 'report' })
+
+  test('depeg guard, freeze: the stables range left behind by a depeg is not re-ranged while the guard holds', () => {
+    // From sample 100 the stables pool is 50 bps off and drifts one tick per 5-minute sample to 160: the live policy
+    // keeps re-ranging after it; the 30-minute hold trips the guard about 30 minutes in.
+    const ds = syntheticDataset({ samples: 400, tick: (k, i) => (k === 0 && i >= 100 ? Math.min(160, 50 + i - 100) : 0) })
+    const guarded = { ...conservadorLiveV2, policyId: 'lab-depeg', depegGuard: { thresholdBps: 50, holdSeconds: 1800, action: 'freeze' as const, releaseBps: 20, releaseSeconds: 259_200, exitImpactBps: 20 } }
+    const late = (r: ReturnType<typeof run>) => r.ops.filter((o) => o.pool === STABLE && o.i >= 140 && o.ok).length
+    expect(late(run(ds, conservadorLiveV2))).toBeGreaterThan(0)
+    expect(late(run(ds, guarded))).toBe(0)
+    // No depeg: the guarded run trades exactly as live.
+    const flat = syntheticDataset({ samples: 200 })
+    expect(run(flat, guarded).ops.map((o) => [o.i, o.kind, o.pool])).toEqual(run(flat, conservadorLiveV2).ops.map((o) => [o.i, o.kind, o.pool]))
+  })
+
+  test('staged exit: a 12% WETH fall sells the risk bucket down in thirds', () => {
+    // WETH is token0 of its pool: its price falls with the tick. -1300 ticks is about -12%, over 6 h from sample 100.
+    const ds = syntheticDataset({ samples: 400, tick: (k, i) => (k === 2 ? -Math.min(1300, Math.max(0, (i - 100) * 18)) : 0) })
+    const staged = { ...conservadorLiveV2, policyId: 'lab-staged', stagedExit: { step1Bps: 300, step2Bps: 600, step3Bps: 1000, reentry: 'ema' as const, ladderGapBps: 1000 } }
+    const reduces = (r: ReturnType<typeof run>) => r.ops.filter((o) => o.pool === ETH && o.kind === 'reduce' && o.ok).length
+    expect(reduces(run(ds, conservadorLiveV2))).toBe(0)
+    expect(reduces(run(ds, staged))).toBeGreaterThan(0)
+  })
+})

@@ -1,10 +1,10 @@
 import { keccak256, stringToHex } from 'viem'
 import type { Hex } from '@mamoru/domain'
-import { amountsOf, canonicalJson, decide, type Proposal } from '@mamoru/decide'
+import { amountsOf, canonicalJson, decide, pegDeviationBps, pegStep, PEG_CLEAR, stageStep, type Proposal } from '@mamoru/decide'
 import { grantKey, policyHash, type PolicyVersion } from '@mamoru/policy'
 import { entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
 import { token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
-import { ETH_PRICE_POOL, observe } from './observe.ts'
+import { emaTickOf, ETH_PRICE_POOL, observe, twapTick } from './observe.ts'
 import type { Dataset, GasModel, Metrics, OpEntry, OpKind, PoolSample, RunResult, Sample, SessionUse, SimConfig } from './types.ts'
 import { accrue, apply, inRange, newWorld, valueIn, type World } from './world.ts'
 
@@ -168,6 +168,13 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   const renewal = config.sessionRenewal ?? 'renewed'
   let rangeSum = 0
   let rangeSamples = 0
+  const stablesPool = policy.buckets.find((b) => b.id === 'stables')?.pools[0]
+  const stablesK = stablesPool ? ds.pools.indexOf(stablesPool) : -1
+  // Volatile buckets: their pool, and the sign that turns its tick into the volatile token's price (an up tick).
+  const staged = policy.buckets.filter((b) => b.id !== 'stables' && b.pools[0]).map((b) => {
+    const e = entry(b.pools[0]!)
+    return { bucket: b.id, k: ds.pools.indexOf(b.pools[0]!), sign: e.token0 === savings ? -1 : 1, highs: [] as { time: number; up: number }[] }
+  })
 
   // A sample that lacks a pool the policy needs, or the pool that prices gas, is a gap: the run steps over it.
   const needed = [...new Set([...policy.buckets.flatMap((b) => b.pools), ETH_PRICE_POOL])].map((name) => ds.pools.indexOf(name))
@@ -216,6 +223,24 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
     if (policy.cppi) {
       const v = accountValue(ds, s, w, price).total
       if (w.peakValue === undefined || v > w.peakValue) w.peakValue = v
+    }
+    // Lab (#101 round 3): the depeg guard and the staged exits step at every sample, from the TWAP, as the engine would.
+    const tw = policy.execution.twapWindowSeconds
+    if (policy.depegGuard && stablesK >= 0) {
+      const dev = s.pools[stablesK] ? pegDeviationBps(twapTick(ds, stablesK, i, tw)) : null
+      w.peg = pegStep(w.peg ?? PEG_CLEAR, s.time, dev, policy.depegGuard)
+      w.pegDeviationBps = dev
+    }
+    if (policy.stagedExit) for (const st of staged) {
+      if (!s.pools[st.k]) continue
+      const up = st.sign * twapTick(ds, st.k, i, tw)
+      // Rolling 7-day high of the up tick: a deque of decreasing values.
+      while (st.highs.length && s.time - st.highs[0]!.time > 7 * 86_400) st.highs.shift()
+      while (st.highs.length && st.highs.at(-1)!.up <= up) st.highs.pop()
+      st.highs.push({ time: s.time, up })
+      const ema = emaTickOf(ds, st.k, i, tw)
+      w.stages ??= {}
+      w.stages[st.bucket] = stageStep(w.stages[st.bucket], { now: s.time, price: up, high7d: st.highs[0]!.up, ema: ema === null ? null : st.sign * ema }, policy.stagedExit)
     }
     if (series.time.length % every === 0) {
       const d = decide(observe(ds, i, w, policy, gas.priorityFeeWei), policy)
