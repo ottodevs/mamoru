@@ -96,6 +96,25 @@ describe('routes', () => {
     expect(text).toContain('Mamoru is not running on this money yet.')
     expect(text).toContain('Start')
   })
+  // otto/mamoru#135 review: a deposit never invalidates the operator's funding-poll cache (only an owner op
+  // does), so a cached total of 0 can be stale. The Withdraw button must not disable off it — only "funding
+  // has not loaded at all" does, same as the rest of the page.
+  test('withdraw button: enabled once funding has loaded, even at a (possibly stale) zero total', async () => {
+    const buttonTag = (html: string) => html.match(/<button[^>]*data-testid="withdraw-button"[^>]*>/)?.[0] ?? ''
+    const zero: FundingView = { ...fixtureFunding, usdc: '0', cbbtc: '0', positions: [] }
+    const loaded = await renderRoute('/', fixtureSession, zero)
+    expect(buttonTag(loaded.html)).not.toContain('disabled')
+    const notLoaded = await renderRoute('/', fixtureSession)
+    expect(buttonTag(notLoaded.html)).toContain('disabled')
+  })
+  // otto/mamoru#135 review: a stopped account's restart is offered on the operator's state, not on the poll's
+  // idle balance, which can be behind the deposit that makes a restart possible.
+  test('stopped after running: the restart is offered even at a (possibly stale) zero idle balance', async () => {
+    const started: OpView = { opId: 'own-1-activate', kind: 'activate', state: 'confirmed', updatedAt: '2026-10-01T10:00:00Z' }
+    const stopped: FundingView = { ...fixtureFunding, active: false, usdc: '0', cbbtc: '0', positions: [], overCap: null }
+    const { html } = await renderRoute('/', fixtureSession, stopped, { ops: [started] })
+    expect(html).toContain('>Start allocation</button>')
+  })
   test('old paths redirect home; unknown paths are not found', async () => {
     expect((await renderRoute('/deposit', null)).text).toContain('Page not found')
   })
@@ -159,7 +178,9 @@ describe('deposit cap', () => {
     const { text, html } = await renderRoute('/', fixtureSession, small)
     expect(html).toContain('data-testid="below-minimum"')
     expect(text).toContain('Mamoru starts from 1 USDC. This account holds 0.50 USDC, so it has not started. Add at least 0.50 USDC more.')
-    expect(html).not.toContain('data-testid="start"')
+    // otto/mamoru#135: the top-up that clears this is a deposit the poll can be behind: Start stays offered, and
+    // its prepare reads the chain and refuses below the minimum (BELOW_DEPLOY_MINIMUM) if it still is.
+    expect(html).toContain('data-testid="start"')
     expect((await renderRoute('/', fixtureSession, { ...small, usdc: '1000000' })).html).toContain('data-testid="start"')
     expect((await renderRoute('/', fixtureSession, { ...small, deployed: true })).html).toContain('data-testid="start"')
   })

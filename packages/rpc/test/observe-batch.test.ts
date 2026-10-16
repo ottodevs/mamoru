@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { decodeFunctionData, zeroAddress, type Hex } from 'viem'
 import { ReasonError, type Address } from '@mamoru/domain'
 import { address, baseRegistry, monadRegistry } from '@mamoru/registry'
-import { BATCH_MAX_BYTES, BATCH_MAX_CALLS, chunkCalls, historyCursor, multicall3Abi, multicall3Of, observe, poolStateCache, type ObserveInput, isDeployed } from '../src/index.ts'
+import { BATCH_MAX_BYTES, BATCH_MAX_CALLS, chunkCalls, createDeployedChecker, historyCursor, multicall3Abi, multicall3Of, observe, poolStateCache, type ObserveInput, isDeployed } from '../src/index.ts'
 import { FakeChain, POOLS, Revert } from './fake-chain.ts'
 
 const ACCOUNT = '0x00000000000000000000000000000000000000aa' as Address
@@ -165,6 +165,48 @@ describe('observe through Multicall3', () => {
     deployedFrom = 10_000n
     expect(await isDeployed(client, ACCOUNT, 102n, 91n)).toBe(false)
     expect(await isDeployed(client, ACCOUNT, 300n, 250n)).toBe(false)
+  })
+
+  // otto/mamoru#135 review finding 7: a concurrent check at an older block that answers after a confirmation
+  // must not un-confirm it.
+  test('createDeployedChecker: a confirmation is never undone by a concurrent read that answers after it', async () => {
+    const asked: bigint[] = []
+    const held: (() => void)[] = []
+    const client = {
+      getCode: ({ blockNumber }: { blockNumber: bigint }) => {
+        asked.push(blockNumber)
+        // The read at 105 is slow: it answers only after the confirmation below.
+        return blockNumber === 105n ? new Promise((r) => held.push(() => r('0x6001'))) : Promise.resolve('0x6001')
+      },
+    } as unknown as Parameters<typeof isDeployed>[0]
+    const check = createDeployedChecker()
+    expect(await check(client, ACCOUNT, 110n, 90n)).toBe(true) // sighting at 110
+    const slow = check(client, ACCOUNT, 105n, 90n) // in flight, below the sighting
+    expect(await check(client, ACCOUNT, 200n, 150n)).toBe(true) // confirmed at 150
+    held[0]!()
+    expect(await slow).toBe(true)
+    asked.length = 0
+    // Still confirmed: no eth_getCode at or after 150.
+    expect(await check(client, ACCOUNT, 300n, 250n)).toBe(true)
+    expect(asked).toEqual([])
+  })
+
+  // otto/mamoru#135 review finding: a caller with its own correctness bar (observe()) must never have its
+  // confirmation state affected by a different caller's looser one (readSafe's local stand-in for `safe`).
+  test('createDeployedChecker: two checkers on the same client never share one Safe\'s sighting state', async () => {
+    const asked: bigint[] = []
+    const client = { getCode: async ({ blockNumber }: { blockNumber: bigint }) => (asked.push(blockNumber), '0x6001') } as unknown as Parameters<typeof isDeployed>[0]
+    const a = createDeployedChecker()
+    const b = createDeployedChecker()
+    // `a` confirms on its own (looser) terms; `b` has read nothing yet and still asks.
+    expect(await a(client, ACCOUNT, 100n, 90n)).toBe(true)
+    expect(await a(client, ACCOUNT, 150n, 120n)).toBe(true)
+    expect(asked).toEqual([100n, 120n])
+    expect(await b(client, ACCOUNT, 150n, 120n)).toBe(true)
+    expect(asked).toEqual([100n, 120n, 150n])
+    // The shared `isDeployed` is its own instance too, independent of both.
+    expect(await isDeployed(client, ACCOUNT, 150n, 120n)).toBe(true)
+    expect(asked).toEqual([100n, 120n, 150n, 150n])
   })
 
   test('a client that answers another chain id is refused, on every observation', async () => {

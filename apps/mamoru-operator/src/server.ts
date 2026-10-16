@@ -146,7 +146,7 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
       try {
         switch (route) {
           case 'GET funding':
-            return json(200, await op.funding(ctx))
+            return json(200, await op.funding(ctx, url.searchParams.get('fresh') === '1'))
           case 'GET withdraw-assets':
             return json(200, await op.withdrawAssets())
           case 'GET ops':

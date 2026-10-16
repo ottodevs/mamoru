@@ -198,6 +198,7 @@ export class FakeChain {
     if (at === address('Multicall3').toLowerCase()) {
       const call = decodeFunctionData({ abi: multicall3Abi, data })
       if (call.functionName === 'getEthBalance') return encodeFunctionResult({ abi: multicall3Abi, functionName: 'getEthBalance', result: this.native.get(call.args[0].toLowerCase()) ?? 0n })
+      if (call.functionName === 'getBlockNumber') return encodeFunctionResult({ abi: multicall3Abi, functionName: 'getBlockNumber', result: this.head })
       const results = call.args[0].map((c) => {
         try {
           return { success: true, returnData: this.execute(to, c.target, c.callData) }

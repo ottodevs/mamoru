@@ -40,7 +40,7 @@ const userOperationEvent = parseAbiItem(
   'event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)',
 )
 
-export { BATCH_MAX_BYTES, BATCH_MAX_CALLS, Batch, balanceRead, chunkCalls, contractRead, multicall3Abi, multicall3Of, type Handle, type Read } from './multicall.ts'
+export { BATCH_MAX_BYTES, BATCH_MAX_CALLS, Batch, balanceRead, blockNumberRead, chunkCalls, contractRead, multicall3Abi, multicall3Of, type Handle, type Read } from './multicall.ts'
 export {
   addGuardPoint,
   cumulativeAtFromObserve,
@@ -96,42 +96,61 @@ export type ObserveInput = {
 }
 
 /**
- * Accounts each client knows to be deployed. A deployed Safe stays deployed, so its code is not read again once
+ * Accounts a checker knows to be deployed. A deployed Safe stays deployed, so its code is not read again once
  * that is certain, and it is certain only when the code was read at the `safe` block: a sighting above it could
  * still be reorged out and is only a reason to ask at `safe` once `safe` has reached it. "Not deployed" is
  * never kept.
  */
 type Sighting = { since: bigint; confirmed: boolean }
-const deployed = new WeakMap<PublicClient, Map<string, Sighting>>()
+
+/**
+ * A fresh "whether deployed" checker with its own cache, keyed by client then account. Two independent
+ * checkers (an engine's observe() and some other caller reading the same Safe, say) never share one Safe's
+ * sighting state: a confirmation one of them accepts on its own terms can never let the other skip
+ * eth_getCode on its own, possibly stricter, terms.
+ */
+export function createDeployedChecker(): (client: PublicClient, account: Address, blockNumber: bigint, safeNumber: bigint) => Promise<boolean> {
+  const deployed = new WeakMap<PublicClient, Map<string, Sighting>>()
+  return async (client, account, blockNumber, safeNumber) => {
+    let seen = deployed.get(client)
+    if (!seen) deployed.set(client, (seen = new Map()))
+    const key = account.toLowerCase()
+    const codeAt = async (n: bigint) => {
+      const code = await client.getCode({ address: account, blockNumber: n })
+      return !!code && code !== '0x'
+    }
+    // Monotonic: a confirmation is never undone, and a lower confirmed block only widens it. Every write reads
+    // `seen` again after its await, since a concurrent call may have confirmed the account meanwhile.
+    const confirm = (n: bigint) => {
+      const cur = seen.get(key)
+      if (!cur?.confirmed || n < cur.since) seen.set(key, { since: n, confirmed: true })
+    }
+    const known = seen.get(key)
+    if (known?.confirmed) return blockNumber >= known.since ? true : codeAt(blockNumber)
+    // Seen with code at a block `safe` has now reached: ask at `safe`. Code there is code at every later block.
+    if (known && known.since <= safeNumber && blockNumber >= safeNumber) {
+      if (await codeAt(safeNumber)) {
+        confirm(safeNumber)
+        return true
+      }
+      // That sighting was on a fork that is gone (unless another call confirmed it meanwhile).
+      if (!seen.get(key)?.confirmed) seen.delete(key)
+    }
+    const has = await codeAt(blockNumber)
+    const cur = seen.get(key)
+    if (cur?.confirmed) return has
+    if (!has) seen.delete(key)
+    else if (!cur || blockNumber < cur.since) seen.set(key, { since: blockNumber, confirmed: false })
+    return has
+  }
+}
 
 /**
  * Whether `account` has code at `blockNumber`. One eth_getCode per call until the account was read with code at
- * a `safe` block; none after, for that block or a later one.
+ * a `safe` block; none after, for that block or a later one. The shared instance `observe()` uses; a caller
+ * that wants its own, isolated cache calls `createDeployedChecker()` instead.
  */
-export async function isDeployed(client: PublicClient, account: Address, blockNumber: bigint, safeNumber: bigint): Promise<boolean> {
-  let seen = deployed.get(client)
-  if (!seen) deployed.set(client, (seen = new Map()))
-  const key = account.toLowerCase()
-  const codeAt = async (n: bigint) => {
-    const code = await client.getCode({ address: account, blockNumber: n })
-    return !!code && code !== '0x'
-  }
-  const known = seen.get(key)
-  if (known?.confirmed) return blockNumber >= known.since ? true : codeAt(blockNumber)
-  // Seen with code at a block `safe` has now reached: ask at `safe`. Code there is code at every later block.
-  if (known && known.since <= safeNumber && blockNumber >= safeNumber) {
-    if (await codeAt(safeNumber)) {
-      seen.set(key, { since: safeNumber, confirmed: true })
-      return true
-    }
-    // That sighting was on a fork that is gone.
-    seen.delete(key)
-  }
-  const has = await codeAt(blockNumber)
-  if (!has) seen.delete(key)
-  else if (!seen.has(key) || blockNumber < seen.get(key)!.since) seen.set(key, { since: blockNumber, confirmed: false })
-  return has
-}
+export const isDeployed = createDeployedChecker()
 
 const TOKENS = baseRegistry.entries.filter((e) => e.kind === 'token').map((e) => e.name)
 const POOLS = baseRegistry.entries.filter((e) => e.kind === 'pool').map((e) => e.name)
@@ -263,13 +282,17 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
 /**
  * Position ids of `owner`. The first ids are asked for in `first`, before the count is known (the ones past
  * the count fail and are ignored); ids that round did not bring are read in one more request.
+ *
+ * Without `blockNumber` (a caller that learns the block from `first` itself), the ids asked in `first` carry
+ * none: they only ever resolve through `.maybe()`, never `.direct()`. The one-more-request round is then pinned
+ * to the block the caller passes once it knows it.
  */
-export function tokenIdReads(client: PublicClient, multicall3: Address | null, first: Batch, owner: Address, blockNumber: bigint): (count: number) => Promise<bigint[]> {
-  const at = (i: number) => contractRead(client, { address: address('NonfungiblePositionManager'), abi: enumerableAbi, functionName: 'tokenOfOwnerByIndex', args: [owner, BigInt(i)], blockNumber })
-  const ahead = multicall3 === null ? [] : Array.from({ length: SPECULATIVE_TOKEN_IDS }, (_, i) => first.add(at(i)))
-  return async (count) => {
-    const rest = new Batch(client, multicall3, blockNumber)
-    const ids = Array.from({ length: count }, (_, i) => ahead[i]?.maybe() ?? rest.add(at(i)))
+export function tokenIdReads(client: PublicClient, multicall3: Address | null, first: Batch, owner: Address, blockNumber?: bigint): (count: number, restBlock?: bigint) => Promise<bigint[]> {
+  const at = (i: number, n: bigint | undefined) => contractRead(client, { address: address('NonfungiblePositionManager'), abi: enumerableAbi, functionName: 'tokenOfOwnerByIndex', args: [owner, BigInt(i)], blockNumber: n })
+  const ahead = multicall3 === null ? [] : Array.from({ length: SPECULATIVE_TOKEN_IDS }, (_, i) => first.add(at(i, blockNumber)))
+  return async (count, restBlock = blockNumber) => {
+    const rest = new Batch(client, multicall3, restBlock)
+    const ids = Array.from({ length: count }, (_, i) => ahead[i]?.maybe() ?? rest.add(at(i, restBlock)))
     if (rest.size > 0) await rest.run()
     return Promise.all(ids.map((id) => (typeof id === 'bigint' ? id : id.need())))
   }

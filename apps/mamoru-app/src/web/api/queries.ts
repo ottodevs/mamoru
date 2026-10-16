@@ -1,5 +1,7 @@
-import { useQuery } from '@tanstack/react-query'
-import { useApi } from './client.ts'
+import type { FundingView } from '@mamoru/domain'
+import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
+import { useCallback } from 'react'
+import { useApi, type ApiClient } from './client.ts'
 
 export const queryKeys = {
   config: ['config'] as const,
@@ -62,15 +64,56 @@ export function useApy() {
   return useQuery({ queryKey: queryKeys.apy, queryFn: () => api.apy(), refetchInterval: APY_REFRESH_MS, refetchIntervalInBackground: false })
 }
 
-/** What the Safe holds now. Polls every 6 s by default, 4 s while waiting for a deposit or while the engine reports progress. */
-export function useFunding(accountKey: string | undefined, enabled: boolean, intervalMs = 6_000) {
+/**
+ * otto/mamoru#135: the next funding poll. `fastMs` while the engine is mid-entry (`progress`, or `engine.placing`
+ * between steps) or the caller says something of the account's own is in flight (an owner op just submitted, an
+ * entry starting); `intervalMs` otherwise. Pure so the cadence can be checked without a running query.
+ */
+export function fundingInterval(data: Pick<FundingView, 'progress' | 'engine'> | undefined, inFlight: boolean, intervalMs: number, fastMs = 4_000): number {
+  const fast = inFlight || !!data?.progress || data?.engine?.placing === true
+  return fast ? Math.min(fastMs, intervalMs) : intervalMs
+}
+
+/**
+ * What the Safe holds now. 30 s by default; 4 s while `inFlight` (an owner op the caller is watching, or an
+ * entry it already knows is starting) or while the engine reports progress on its own. The add-money screen
+ * passes a 4 s `intervalMs` outright and `fresh` too (otto/mamoru#135): it is open only to watch a deposit
+ * land, which moves nothing of the account, so without `fresh` those polls would answer from the operator's
+ * 15-60 s cache; with it each gets a read at most 2 s old, under the 4 s gap, so none is wasted. Paused while the tab is hidden (react-query's default
+ * `refetchIntervalInBackground: false`).
+ */
+export function useFunding(accountKey: string | undefined, enabled: boolean, intervalMs = 30_000, inFlight = false, fresh = false) {
   const api = useApi()
   return useQuery({
     queryKey: queryKeys.funding(accountKey ?? ''),
-    queryFn: () => api.funding(accountKey as string),
+    queryFn: () => api.funding(accountKey as string, fresh ? { fresh: true } : undefined),
     enabled: enabled && accountKey !== undefined,
-    refetchInterval: (q) => (q.state.data?.progress ? Math.min(4_000, intervalMs) : intervalMs),
+    refetchInterval: (q) => fundingInterval(q.state.data, inFlight, intervalMs),
   })
+}
+
+/**
+ * otto/mamoru#135: a read at most 2 s old (the operator's `fresh=1`), into the same query cache `useFunding`
+ * reads, for a dialog about to show an amount the poll's 15-60 s cache may not have caught up with (a deposit
+ * never moves anything of the account, so it never invalidates that cache). Nothing is blocked on it: every
+ * owner action's prepare reads the chain itself. One fetch per account at a time, by react-query: a poll in
+ * flight is cancelled first (its answer is then dropped, never written over this one), a poll tick while this
+ * is in flight joins it instead of starting its own, and a later call cancels this one and starts its own
+ * (the latest call wins). A failed or cancelled read resolves to `undefined` and leaves the cache as it was,
+ * so callers may fire and forget.
+ */
+export async function fetchFreshFunding(qc: QueryClient, api: Pick<ApiClient, 'funding'>, accountKey: string): Promise<FundingView | undefined> {
+  const queryKey = queryKeys.funding(accountKey)
+  // Before starting, not after: whatever is in flight (a poll, an earlier fresh call) is dropped, never applied.
+  await qc.cancelQueries({ queryKey })
+  return qc.fetchQuery({ queryKey, queryFn: () => api.funding(accountKey, { fresh: true }), staleTime: 0 }).catch(() => undefined)
+}
+
+/** Call the returned function the moment an Add, Withdraw or Start dialog opens (see fetchFreshFunding). */
+export function useFreshFunding(accountKey: string | undefined) {
+  const api = useApi()
+  const qc = useQueryClient()
+  return useCallback(async (): Promise<FundingView | undefined> => (accountKey ? fetchFreshFunding(qc, api, accountKey) : undefined), [accountKey, api, qc])
 }
 
 /** otto/mamoru#129: uncollected fees, collected, gas Mamoru paid and value vs hold. Slow poll, no retry: a failure shows nothing, same as useOtherChains. */

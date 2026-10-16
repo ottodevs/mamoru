@@ -2,7 +2,7 @@ import type { ApyView, FundingView, Hex0x, OpView, OverCap, WithdrawAsset } from
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
-import { APY_REFRESH_MS, queryKeys, useApy, useFunding, useOps, usePools, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
+import { APY_REFRESH_MS, queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { TokenMark } from '../components/token-mark.tsx'
 import { BasescanLink, Brand, InfoPopover, Modal, Waiting } from '../components/ui.tsx'
@@ -164,7 +164,9 @@ export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () =
         <button type="button" className="act" onClick={onAdd}>
           {homeCopy.add}
         </button>
-        <button type="button" className="act" onClick={onWithdraw} disabled={!s || s.total === 0n}>
+        {/* otto/mamoru#135: never disabled on the poll's balance, which can be 15-60 s behind a deposit. The
+            operator's prepare reads the chain and refuses with a reason the dialog shows. */}
+        <button type="button" className="act" data-testid="withdraw-button" onClick={onWithdraw} disabled={!s}>
           {homeCopy.withdraw}
         </button>
       </div>
@@ -453,7 +455,8 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
     e.preventDefault()
     const raw = parseUsdc(amount)
     if (raw === null) return setInvalid('Enter an amount above zero.')
-    if (BigInt(raw) > s.total) return setInvalid(`You can withdraw up to $${usd(s.maxWithdraw)} right now.`)
+    // otto/mamoru#135: no local check against `s.total`, which can be behind a deposit. prepareTransfer reads
+    // the chain, and its refusal (INSUFFICIENT_FUNDS -> humanMessage below) is what the amount field shows.
     if (dest.state !== 'ok') return setInvalid(dest.state === 'invalid' ? dest.message : `Enter where the ${asset} should go.`)
     if (!options.find((o) => o.asset === asset)?.available) return setInvalid(`${asset} is not available right now.`)
     setInvalid(null)
@@ -701,9 +704,16 @@ function StartRow({ accountKey, funded }: { accountKey: string; funded: boolean 
 
 export function HomeView({ accountKey }: { accountKey: string }) {
   const api = useApi()
-  const funding = useFunding(accountKey, true)
   const ops = useOps(accountKey, true)
   const yieldLedger = useYieldLedger(accountKey)
+  const opList = ops.data?.ops ?? []
+  // An owner prepare that was never signed is not in flight; only armed or sent ops are. Keeps funding polling
+  // fast (otto/mamoru#135) while one is on its way: an activation, renewal, transfer or stop.
+  const inFlight = opList.some((o) => !TERMINAL.has(o.state) && !(o.state === 'proposed' && o.code !== 'ARMED' && !o.txHash))
+  const funding = useFunding(accountKey, true, 30_000, inFlight)
+  // otto/mamoru#135: the poll can be 15-60 s behind a deposit. Opening a dialog that shows an amount asks for a
+  // read at most 2 s old; nothing waits on it, and nothing is decided on it (prepare reads the chain).
+  const refreshFunding = useFreshFunding(accountKey)
   const pools = usePools()
   const [dialog, setDialog] = useState<null | 'add' | 'withdraw' | 'stop' | 'start'>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
@@ -716,10 +726,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   useEffect(() => {
     if (signedOut) void qc.invalidateQueries({ queryKey: queryKeys.session })
   }, [signedOut, qc])
-  const opList = ops.data?.ops ?? []
   const s = f ? split(f, cbbtcPrice(pools.data)) : null
-  // An owner prepare that was never signed is not in flight; only armed or sent ops are.
-  const inFlight = opList.some((o) => !TERMINAL.has(o.state) && !(o.state === 'proposed' && o.code !== 'ARMED' && !o.txHash))
   const armed = activationLive(opList)
   // A renewal the owner signed is on its way: the row that asks for it steps aside until it settles.
   const renewing = opList.some((o) => o.kind === 'renew' && !TERMINAL.has(o.state))
@@ -730,13 +737,26 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const withdrawing = opList.some((o) => o.kind === 'transfer' && !TERMINAL.has(o.state))
   const over = withdrawing ? null : overCapOf(f)
   const below = belowMinimumOf(f)
-  const canRestart = stopped && !!s && s.idleUsdc > 0n && !over
+  // otto/mamoru#135: offered on the operator's own state, not on the poll's idle balance, which can be behind the
+  // deposit that makes a restart possible; the start's prepare reads the chain and says why when it cannot.
+  // Over the cap stays: only a withdraw clears it, and that moves the account, which refreshes this poll.
+  const canRestart = stopped && !over
+  const canStart = !!f && !f.active && !inFlight && !armed && !stopped
+  const addMoney = () => {
+    void refreshFunding()
+    setDialog('add')
+  }
+  const start = () => {
+    void refreshFunding()
+    setDialog('start')
+  }
   const withdraw = (seed = '') => {
+    void refreshFunding()
     setWithdrawSeed(seed)
     setDialog('withdraw')
   }
   // A renewal is retried from its own row at the top, which is back as soon as the failed one settles.
-  const retry = (kind: OpView['kind']) => (kind === 'renew' ? window.scrollTo({ top: 0, behavior: 'smooth' }) : kind === 'transfer' ? withdraw() : setDialog(kind === 'exit' ? 'stop' : 'start'))
+  const retry = (kind: OpView['kind']) => (kind === 'renew' ? window.scrollTo({ top: 0, behavior: 'smooth' }) : kind === 'transfer' ? withdraw() : kind === 'exit' ? setDialog('stop') : start())
   const kit = useMutation({
     mutationFn: async () => {
       if (!f) return
@@ -751,7 +771,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       <header className="mb-7">
         <Brand />
       </header>
-      <Balance s={s} onAdd={() => setDialog('add')} onWithdraw={() => withdraw()} />
+      <Balance s={s} onAdd={addMoney} onWithdraw={() => withdraw()} />
       <EarnedSoFar earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd} />
       <WrongNetwork accountKey={accountKey} />
       {!f ? (
@@ -765,21 +785,26 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           {over ? (
             <OverCapRow over={over} onWithdraw={() => withdraw(usdInput(ceilCents(BigInt(over.excessUsdc))))} />
           ) : below ? (
-            <section className="card flex flex-wrap items-center justify-between gap-3" data-testid="below-minimum" role="status">
-              <span className="max-w-[40rem]">
-                <span className="title">{homeCopy.belowTitle(below.minUsdc)}</span>
-                <span className="sub">{homeCopy.belowBody(below.usdc, below.missingUsdc)}</span>
-              </span>
-              <button type="button" className="act" onClick={() => setDialog('add')}>
-                {homeCopy.add}
-              </button>
-            </section>
-          ) : !f.active && !inFlight && !armed && !stopped ? (
+            <>
+              <section className="card flex flex-wrap items-center justify-between gap-3" data-testid="below-minimum" role="status">
+                <span className="max-w-[40rem]">
+                  <span className="title">{homeCopy.belowTitle(below.minUsdc)}</span>
+                  <span className="sub">{homeCopy.belowBody(below.usdc, below.missingUsdc)}</span>
+                </span>
+                <button type="button" className="act" onClick={addMoney}>
+                  {homeCopy.add}
+                </button>
+              </section>
+              {/* otto/mamoru#135: the top-up that clears this is a deposit, which the poll can be 15-60 s behind:
+                  Start stays offered, and its prepare reads the chain and refuses below the minimum. */}
+              {canStart ? <StartRow accountKey={accountKey} funded={hasMoney(f)} /> : null}
+            </>
+          ) : canStart ? (
             <StartRow accountKey={accountKey} funded={hasMoney(f)} />
           ) : f.active && f.approval && (f.approval.renewDue || (f.approval.missing ?? 0) > 0) && !renewing ? (
             <RenewRow key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} />
           ) : null}
-          <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? () => setDialog('start') : null} />
+          <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />
           <Idle s={s as Split} placing={f.active && (f.engine?.placing === true || !!f.progress)} />
           <ByToken f={f} s={s as Split} />
           <History ops={opList} onRetry={retry} />

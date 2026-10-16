@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'bun:test'
-import { decodeFunctionData, encodeFunctionResult, getAddress, keccak256, stringToHex, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { afterEach, describe, expect, setSystemTime, test } from 'bun:test'
+import { decodeFunctionData, encodeFunctionResult, getAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import type { AccountContext, OpView, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
 import { address, erc20Abi, safeAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { POLICIES } from '@mamoru/policy'
@@ -78,6 +78,8 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
             if (callData.startsWith('0x3850c7bd')) return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [1n << 96n, 0, 0, 0, 0, 0, true] })
             if (callData.startsWith('0x70a08231')) return word(target.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : target.toLowerCase() === address('USDT').toLowerCase() ? knobs.usdt : 0n)
             if (callData.startsWith('0x4d2301cc')) return word(0n)
+            // readSafe (otto/mamoru#135): the block number rides inside this same call.
+            if (callData.startsWith(toFunctionSelector('getBlockNumber()'))) return word(100n)
             throw new Error('execution reverted')
           }),
         }
@@ -2028,6 +2030,151 @@ describe('funding reports every token the account holds, not only USDC', () => {
     const f = await world(0n).op.funding(ctx)
     expect(f.idle).toEqual([])
     expect(f.engine).toBeNull()
+  })
+})
+
+// otto/mamoru#135: a home tab polling GET /funding every few seconds no longer costs its own readSafe each time.
+describe('funding caches its readSafe for a few seconds, shared across polls', () => {
+  test('a chain balance change with no owner op is not seen until an owner op changes the account', async () => {
+    const w = world(OVER)
+    const before = await w.op.funding(ctx)
+    expect(before.usdc).toBe('101920000')
+    // The chain changes with nothing owner-signed happening: the next poll still answers from the cache.
+    w.chain.usdc = 50_000_000n
+    expect((await w.op.funding(ctx)).usdc).toBe('101920000')
+    // A transfer runs end to end; the readSafe reads it makes along the way are never served from this cache.
+    const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ state: 'confirmed' })
+    w.chain.usdc = 40_000_000n
+    // The op's state just moved (patchOp): funding reads again instead of answering from before it.
+    expect((await w.op.funding(ctx)).usdc).toBe('40000000')
+  })
+})
+
+// otto/mamoru#135: fresh=1 on GET funding (the add-money screen, a dialog opening) asks for a read at most 2 s
+// old. A deposit moves nothing of the account, so only this, never an invalidation, shows it before 15 s.
+describe('fresh funding: a read at most 2 s old, never held back by an earlier one', () => {
+  const isMulticall = (to: string) => to.toLowerCase() === address('Multicall3').toLowerCase()
+  /** How many Multicall3 reads (one per readSafe) have run since this was called. */
+  const reads = (op: Operator) => {
+    const client = (op as unknown as { client: { call: (a: { to: string }) => Promise<unknown> } }).client
+    let n = 0
+    const { call } = client
+    client.call = (a) => (isMulticall(a.to) && n++, call(a))
+    return () => n
+  }
+  const at = (ms: number) => setSystemTime(new Date(1_790_000_000_000 + ms))
+  afterEach(() => setSystemTime())
+
+  test('sees a deposit the plain poll would still answer from before it', async () => {
+    at(0)
+    const w = world(OVER)
+    expect((await w.op.funding(ctx)).usdc).toBe('101920000')
+    w.chain.usdc = 50_000_000n
+    at(3_000)
+    expect((await w.op.funding(ctx)).usdc).toBe('101920000')
+    expect((await w.op.funding(ctx, true)).usdc).toBe('50000000')
+  })
+
+  // Review finding 1: the add-money screen polls fresh=1 every 4 s; every one of those polls must reach the chain.
+  test('fresh=1 every 4 s: each one is a read of its own, none served from the one before', async () => {
+    at(0)
+    const w = world(5_000_000n)
+    const count = reads(w.op)
+    for (let i = 0; i < 4; i++) {
+      at(i * 4_000)
+      await w.op.funding(ctx, true)
+    }
+    expect(count()).toBe(4)
+  })
+
+  test('fresh=1 in a tight loop costs at most one read per 2 s', async () => {
+    at(0)
+    const w = world(5_000_000n)
+    const count = reads(w.op)
+    await w.op.funding(ctx, true)
+    at(1_999)
+    await w.op.funding(ctx, true)
+    expect(count()).toBe(1)
+    at(4_000)
+    await w.op.funding(ctx, true)
+    expect(count()).toBe(2)
+  })
+
+  // Review finding 1 (second half): an Add dialog's fresh read right before a Withdraw dialog's must not hand the
+  // Withdraw a balance from before a deposit that landed in between, beyond the 2 s bound.
+  test('a fresh read of one dialog does not hold back the next dialog\'s past 2 s', async () => {
+    at(0)
+    const w = world(5_000_000n)
+    await w.op.funding(ctx, true)
+    w.chain.usdc = 9_000_000n
+    at(2_000)
+    expect((await w.op.funding(ctx, true)).usdc).toBe('9000000')
+  })
+
+  // Review finding 4: a failed fresh read leaves no window behind it.
+  test('a failed fresh read is retried at once, not held back for a gap', async () => {
+    at(0)
+    const w = world(5_000_000n)
+    const client = (w.op as unknown as { client: { call: (a: { to: string }) => Promise<unknown> } }).client
+    const { call } = client
+    let fail = true
+    client.call = (a) => (isMulticall(a.to) && fail ? Promise.reject(new Error('rpc down')) : call(a))
+    await expect(w.op.funding(ctx, true)).rejects.toThrow()
+    fail = false
+    w.chain.usdc = 7_000_000n
+    expect((await w.op.funding(ctx, true)).usdc).toBe('7000000')
+  })
+})
+
+// Review finding 3: funding pairs the engine and op state it reports with the balance; anything of the account
+// moving (owner or engine) must drop the cached balance, or post-entry engine state shows pre-entry balances.
+describe('funding reads the chain again whenever anything of the account moves', () => {
+  type Hooks = {
+    setBusy(acc: AccountState, step: string): void
+    watchJournal(acc: AccountState, runner: unknown): void
+    setFollowUps(acc: AccountState, runner: { followUps?: number }, n: number): void
+    syncEngineOps(acc: AccountState, runner: unknown): void
+  }
+  const acc = (w: ReturnType<typeof world>) => w.op.account(ctx).acc
+  const settle = async (w: ReturnType<typeof world>) => {
+    expect((await w.op.funding(ctx)).usdc).toBe('5000000')
+    w.chain.usdc = 6_000_000n
+    expect((await w.op.funding(ctx)).usdc).toBe('5000000')
+  }
+
+  test('an owner transaction starting or ending (the progress line)', async () => {
+    const w = world(5_000_000n)
+    await settle(w)
+    ;(w.op as unknown as Hooks).setBusy(acc(w), 'withdrawing')
+    expect((await w.op.funding(ctx)).usdc).toBe('6000000')
+  })
+
+  test('an engine journal move', async () => {
+    const w = world(5_000_000n)
+    await settle(w)
+    const hooks = w.op as unknown as Hooks
+    hooks.syncEngineOps = () => {}
+    const runner = { engine: { journal: { onMove: undefined as undefined | (() => void) } } }
+    hooks.watchJournal(acc(w), runner)
+    runner.engine.journal.onMove!()
+    expect((await w.op.funding(ctx)).usdc).toBe('6000000')
+  })
+
+  test('the engine starting or ending an entry (engine.placing flips), and nothing when it does not', async () => {
+    const w = world(5_000_000n)
+    await settle(w)
+    const hooks = w.op as unknown as Hooks
+    const runner: { followUps?: number } = { followUps: 0 }
+    hooks.setFollowUps(acc(w), runner, 0)
+    expect((await w.op.funding(ctx)).usdc).toBe('5000000')
+    hooks.setFollowUps(acc(w), runner, 2)
+    expect((await w.op.funding(ctx)).usdc).toBe('6000000')
+    w.chain.usdc = 7_000_000n
+    hooks.setFollowUps(acc(w), runner, 3)
+    expect((await w.op.funding(ctx)).usdc).toBe('6000000')
+    hooks.setFollowUps(acc(w), runner, 0)
+    expect((await w.op.funding(ctx)).usdc).toBe('7000000')
   })
 })
 

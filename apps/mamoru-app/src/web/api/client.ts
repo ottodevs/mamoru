@@ -40,7 +40,8 @@ export type ApiClient = {
   recoveryKit(accountKey: string): Promise<unknown>
   ackRecovery(accountKey: string): Promise<{ ok: true }>
   // Live happy path (fundsGate 'live'). Owner actions are prepared by the API and signed by the passkey here.
-  funding(accountKey: string): Promise<FundingView>
+  /** `fresh`: bypass the operator's funding-poll cache (otto/mamoru#135) — the Add/Withdraw dialogs ask for this the moment they open, so a stale total never blocks or rejects the owner action about to happen. */
+  funding(accountKey: string, opts?: { fresh?: boolean }): Promise<FundingView>
   /** What the account address holds on chains Mamoru does not run on. Never part of the balance. */
   otherChains(accountKey: string): Promise<OtherChainsView>
   /** otto/mamoru#129: uncollected fees, collected, gas Mamoru paid and value vs hold, from the yield ledger. */
@@ -107,7 +108,7 @@ export const httpClient: ApiClient = {
   recoveryKit: (accountKey) => request<unknown>(`/api/onboarding/kit?accountKey=${encodeURIComponent(accountKey)}`),
   ackRecovery: (accountKey) =>
     request<{ ok: true }>('/api/onboarding/recovery-ack', { method: 'POST', body: JSON.stringify({ accountKey }) }),
-  funding: (k) => request<FundingView>(acct(k, 'funding')),
+  funding: (k, opts) => request<FundingView>(acct(k, 'funding') + (opts?.fresh ? '?fresh=1' : '')),
   otherChains: (k) => request<OtherChainsView>(acct(k, 'other-chains')),
   yieldLedger: (k) => request<YieldLedgerView>(acct(k, 'yield')),
   ops: (k) => request<{ ops: OpView[] }>(acct(k, 'ops')),

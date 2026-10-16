@@ -54,7 +54,9 @@ export function hasMoney(f: FundingView | undefined): boolean {
 export function AddMoneyPage() {
   const session = useSession()
   const accountKey = session.data?.accountKey
-  const funding = useFunding(accountKey, true, 4_000)
+  // otto/mamoru#135: a deposit moves nothing of the account, so it never invalidates the operator's funding
+  // cache; `fresh` asks for a read at most 2 s old, under this 4 s poll, so every poll sees the chain.
+  const funding = useFunding(accountKey, true, 4_000, false, true)
   const navigate = useNavigate()
   const f = funding.data
   const arrived = hasMoney(f)

@@ -2,6 +2,7 @@ import {
   decodeFunctionResult,
   encodeFunctionData,
   parseAbi,
+  zeroAddress,
   type Abi,
   type ContractFunctionArgs,
   type ContractFunctionName,
@@ -18,6 +19,7 @@ export const multicall3Abi = parseAbi([
   'struct Result { bool success; bytes returnData; }',
   'function aggregate3(Call3[] calls) payable returns (Result[] returnData)',
   'function getEthBalance(address addr) view returns (uint256 balance)',
+  'function getBlockNumber() view returns (uint256 blockNumber)',
 ])
 
 /** Provider limits: one aggregate3 carries at most this many calls and this much inner calldata. */
@@ -57,6 +59,19 @@ export function balanceRead(client: PublicClient, multicall3: Address | null, ho
     data: encodeFunctionData({ abi: multicall3Abi, functionName: 'getEthBalance', args: [holder] }),
     decode: (returnData) => decodeFunctionResult({ abi: multicall3Abi, functionName: 'getEthBalance', data: returnData }),
     direct: () => client.getBalance(blockNumber === undefined ? { address: holder } : { address: holder, blockNumber }),
+  }
+}
+
+/**
+ * eth_blockNumber through Multicall3.getBlockNumber, at no extra request when it rides in a batch with other
+ * reads; on its own (no Multicall3, or asked directly) it is the plain eth_blockNumber.
+ */
+export function blockNumberRead(client: PublicClient, multicall3: Address | null): Read<bigint> {
+  return {
+    to: multicall3 ?? zeroAddress,
+    data: encodeFunctionData({ abi: multicall3Abi, functionName: 'getBlockNumber' }),
+    decode: (returnData) => decodeFunctionResult({ abi: multicall3Abi, functionName: 'getBlockNumber', data: returnData }),
+    direct: () => client.getBlockNumber(),
   }
 }
 

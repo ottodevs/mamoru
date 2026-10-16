@@ -37,6 +37,7 @@ import type { Proposal } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { USDC_POOLS, amountsForLiquidity, inUsdc, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
+import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
 import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type EngineHealthSnapshot } from './metrics.ts'
@@ -47,6 +48,16 @@ import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp }
 /** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
 export type AccountsSummary = { known: number; active: number; armed: number }
 const RELAYER_BALANCE_CACHE_MS = 60_000
+/**
+ * otto/mamoru#135: how old the shared readSafe behind GET funding may be. 15 s for a poll, 60 s while the keyed
+ * RPC provider is over its hourly budget, and 2 s for `fresh=1` (the add-money screen watching a deposit land, a
+ * dialog opening). 2 s is under the app's 4 s fast poll, so a fresh poll always gets a read of its own, while a
+ * client asking fresh=1 in a loop still costs at most one readSafe per account per 2 s. The cache only feeds what
+ * the app shows: every owner action's prepare and submit reads the chain itself and decides on that.
+ */
+const FUNDING_FRESH_MS = 15_000
+const FUNDING_STALE_MS = 60_000
+const FUNDING_FRESH_READ_MS = 2_000
 
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
 /** An owner op whose receipt poll failed after the tx was sent: the tx may still have landed. */
@@ -343,6 +354,8 @@ export class Operator {
   mirrorMismatches = 0
   private readonly engineHealth = new EngineHealthTracker()
   private relayerBalanceCache: { at: number; value: bigint } | null = null
+  /** otto/mamoru#135: one readSafe shared by every open tab and poll of the same account; dropped whenever the account moves (fundingMoved). */
+  private readonly fundingCache = new FundingCache<SafeRead>(Date.now, FUNDING_STALE_MS)
   /** Ops whose execTransaction went to the provider in this attempt: only then can a refusal be about a copy already out. */
   private readonly execTried = new Set<string>()
   /** Armed ops being sent again after a failed attempt: an earlier copy may have landed although its reply said no. */
@@ -556,11 +569,12 @@ export class Operator {
       .filter((ks) => ks.length > 0)
   }
 
-  async funding(ctx: AccountContext): Promise<FundingView> {
+  /** `fresh`: a read at most FUNDING_FRESH_READ_MS old (a deposit lands without anything of the account moving). */
+  async funding(ctx: AccountContext, fresh = false): Promise<FundingView> {
     const { acc, live } = this.account(ctx, { readOnly: true })
     // The app is open on this account: an armed activation is watched at full pace again.
     if (acc.armed) this.armSeen.set(acc.accountKey, Date.now())
-    const r = await readSafe(this.client, live.safe)
+    const r = await this.readSafeCached(acc.accountKey, live.safe, fresh)
     return {
       address: live.safe,
       deployed: r.deployed,
@@ -594,6 +608,26 @@ export class Operator {
     }
   }
 
+  /**
+   * readSafe shared by every open tab and poll of the same account (see FUNDING_FRESH_MS). Cleared whenever the
+   * account moves (fundingMoved), so the engine and op state funding reports next to it are never paired with a
+   * balance read before that move, even one the invalidation raced with. Every other caller of readSafe
+   * (prepare, submit, renew) reads live: only the display read funding serves is cached.
+   */
+  private async readSafeCached(accountKey: string, safe: Address, fresh: boolean): Promise<SafeRead> {
+    const maxAge = fresh ? FUNDING_FRESH_READ_MS : (this.cfg.rpcBudget?.over(Date.now()) ?? false) ? FUNDING_STALE_MS : FUNDING_FRESH_MS
+    return this.fundingCache.get(fundingCacheKey(accountKey, safe), maxAge, () => readSafe(this.client, safe))
+  }
+
+  /**
+   * otto/mamoru#135: something of this account moved (an owner op, the owner-tx progress line, an engine journal
+   * move, the engine starting or ending an entry): the next funding read goes to the chain.
+   */
+  private fundingMoved(acc: AccountState): void {
+    // Every Safe this account was read for, not only acc.ctx's: a request's context is what funding keys by.
+    this.fundingCache.invalidateWhere((k) => isAccountKey(k, acc.accountKey))
+  }
+
   /** Between operations: whether the engine is working through an entry, and when it looks at the account next. */
   private engineView(acc: AccountState): FundingView['engine'] {
     const runner = acc.active ? this.runners.get(acc.accountKey) : undefined
@@ -625,6 +659,7 @@ export class Operator {
 
   private setBusy(acc: AccountState, step: Progress['step']): void {
     this.busy.set(acc.accountKey, { step, since: now() })
+    this.fundingMoved(acc)
   }
 
   /** GET /ops. Failed engine ops are internal attempts: left out unless `all` (debugging). */
@@ -1853,6 +1888,7 @@ export class Operator {
       this.execTried.delete(opKey(acc, op))
       this.retried.delete(opKey(acc, op))
     }
+    this.fundingMoved(acc)
     this.store.save()
   }
 
@@ -1862,6 +1898,7 @@ export class Operator {
       await this.executeOwner(acc, live, p, signature, op)
     } finally {
       this.busy.delete(acc.accountKey)
+      this.fundingMoved(acc)
     }
   }
 
@@ -2217,7 +2254,7 @@ export class Operator {
     runner.floorPending = unsettled
     // Every move of an engine operation is stored as it happens: a restart in the middle of a review still knows
     // which block the operation landed in.
-    engine.journal.onMove = () => this.syncEngineOps(acc, runner)
+    this.watchJournal(acc, runner)
     const tick = async () => {
       if (runner.stopped) return
       // Whether this review leaves the next one something to do at once.
@@ -2300,7 +2337,7 @@ export class Operator {
           const g = graceLeft(more, runner.followUps ?? 0, runner.grace ?? 0)
           runner.grace = g.grace
           const next = nextReview(g.more, runner.followUps ?? 0, this.rpcOverBudget(Date.now()), this.cfg.reviewMs)
-          runner.followUps = next.followUps
+          this.setFollowUps(acc, runner, next.followUps)
           runner.nextAt = Date.now() + next.ms
           runner.timer = setTimeout(tick, next.ms)
         }
@@ -2339,6 +2376,20 @@ export class Operator {
       console.log(`[budget] keyed RPC provider over ${budget.cuPerHour} CU this hour: reviews at most every ${BUDGET_REVIEW_MS / 60_000} min and armed Safes read at most once a minute until the hour ends; owner operations are not affected`)
     }
     return true
+  }
+
+  /** Every move of an engine operation is stored as it happens, and the next funding read goes to the chain. */
+  private watchJournal(acc: AccountState, runner: Runner): void {
+    runner.engine.journal.onMove = () => {
+      this.fundingMoved(acc)
+      this.syncEngineOps(acc, runner)
+    }
+  }
+
+  /** funding reports `engine.placing` as followUps > 0: when that flips, an entry started or ended. */
+  private setFollowUps(acc: AccountState, runner: Runner, followUps: number): void {
+    if ((runner.followUps ?? 0) > 0 !== followUps > 0) this.fundingMoved(acc)
+    runner.followUps = followUps
   }
 
   private stopLoop(key: string): void {
