@@ -218,15 +218,18 @@ describe('deposit over the cap', () => {
 
 // otto/mamoru#137: the activation summary must say what the engine key may do without asking again, its limits,
 // and that every recipient is the Safe, never a blanket "funds never leave" promise (grants.ts pins every
-// collect/mint/swap recipient to ACCOUNT; manage-any/convert-any act on any Safe-owned position without a new signature).
+// collect/mint/swap recipient to ACCOUNT). manage-any/convert-any act on any Safe-owned position, in any pool,
+// not only the policy's pools (grants.ts: decreaseLiquidity/collect/burn take any tokenId > 0); the disclosure
+// is gated on what this activation's `stored` grants actually hold, not on the policy in the abstract, since a
+// gas-capped activation (fitActivation) can leave manage-any/convert-any out.
 describe('what the activation summary says the engine key may do', () => {
-  test('multi-pool: swap and mint, re-range and harvest, and every recipient is the Safe', async () => {
+  test('multi-pool: swap, mint, manage what it opens, and (when granted) any other position, and every recipient is the Safe', async () => {
     const w = world(20_000_000n)
     const tx = await w.op.prepareActivate(ctx)
     const text = tx.summary.join(' ')
-    expect(text).toContain("may, for 365 days: swap USDC into those pools' tokens and mint those pools")
-    expect(text).toContain('It may also re-range, reduce and harvest your positions in those pools: withdraw liquidity, collect fees, and convert their tokens back to USDC')
-    expect(text).toContain('It does this without asking you again, within these limits; everything it touches is paid back to your Safe, never anywhere else. Cap 100.00 USDC')
+    expect(text).toContain("may swap USDC into those pools' tokens, mint positions there, and manage them: collect fees, reduce or close what it opens")
+    expect(text).toContain('It may also do the same for any other Uniswap v3 position your Safe owns, in any pool, and convert')
+    expect(text).toContain('It does this without asking you again, within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else. For 365 days; cap 100.00 USDC')
     expect(text).not.toContain('Funds never leave')
     expect(text).not.toContain('without your passkey')
   })
@@ -235,19 +238,31 @@ describe('what the activation summary says the engine key may do', () => {
     const w = world(20_000_000n, 'conservador-live-v1')
     const tx = await w.op.prepareActivate(ctx)
     const text = tx.summary.join(' ')
-    expect(text).toContain('may, for 365 days: swap USDC->cbBTC')
-    expect(text).toContain('It may also re-range, reduce and harvest your positions in that pool: withdraw liquidity, collect fees, and convert cbBTC back to USDC')
-    expect(text).toContain('It does this without asking you again, within these limits; everything it touches is paid back to your Safe, never anywhere else. Cap 100.00 USDC')
+    expect(text).toContain('may swap USDC->cbBTC')
+    expect(text).toContain('mint that pool, and manage the position: collect fees, reduce or close it')
+    expect(text).toContain('It may also do the same for any other Uniswap v3 position your Safe owns, in any pool, and convert cbBTC back to USDC')
+    expect(text).toContain('It does this without asking you again, within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else. For 365 days; cap 100.00 USDC')
     expect(text).not.toContain('Funds never leave')
     expect(text).not.toContain('without your passkey')
   })
 
-  test('single pool without manage-any: no re-range/harvest claim, same recipient disclosure', async () => {
+  test('single pool without manage-any: no "any other position" claim, same recipient disclosure', async () => {
     const w = world(20_000_000n, 'conservador-v1')
     const tx = await w.op.prepareActivate(ctx)
     const text = tx.summary.join(' ')
-    expect(text).not.toContain('re-range')
-    expect(text).toContain('It does this without asking you again, within these limits; everything it touches is paid back to your Safe, never anywhere else. Cap 100.00 USDC')
+    expect(text).not.toContain('any other')
+    expect(text).toContain('It does this without asking you again, within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else. For 365 days; cap 100.00 USDC')
+  })
+
+  test('a gas-capped activation that leaves manage-any/convert-any out of this transaction makes no "any other position" claim', async () => {
+    const w = world(20_000_000n)
+    // conservador-live-v2 has 3 pairs' manage-any/convert-any (12 non-perPosition grants); at 2M gas per session
+    // all 3 pairs are dropped (12 -> 10 -> 8 -> 6), leaving only enter-swap/enter-mint, same as `stored` would hold.
+    ;(w.op as unknown as { activationGas(...a: unknown[]): Promise<bigint> }).activationGas = async (_l, _c, sessions) => BigInt(sessions as number) * 2_000_000n
+    const tx = await w.op.prepareActivate(ctx)
+    const text = tx.summary.join(' ')
+    expect(text).not.toContain('any other')
+    expect(text).toContain('It does this without asking you again, within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else.')
   })
 })
 
@@ -1545,9 +1560,9 @@ describe('renewing the approval of a running account', () => {
     // otto/mamoru#137: no blanket "funds never leave" claim; the renewal says exactly what the engine keeps
     // doing without asking again (this account's grants include manage-any/convert-any), and every recipient
     // stays the Safe.
-    expect(tx.summary.join(' ')).toContain('It also keeps re-ranging, reducing and harvesting your positions in')
-    expect(tx.summary.join(' ')).toContain('without asking again: withdraw liquidity, collect fees, and convert')
-    expect(tx.summary).toContain('Everything it touches still goes back to your Safe, never anywhere else')
+    expect(tx.summary.join(' ')).toContain('It also keeps acting, without asking again, on any Uniswap v3 position your Safe owns, in any pool')
+    expect(tx.summary.join(' ')).toContain('take liquidity out, collect fees, burn it once empty, and convert')
+    expect(tx.summary).toContain('Whatever it collects, mints or swaps is paid to your Safe, never to anyone else')
     expect(tx.summary.join(' ')).not.toContain('Funds never leave')
     expect(tx.summary.join(' ')).not.toContain('without your passkey')
     const op = await w.op.submit(ctx, 'renew', sign(tx))
@@ -1575,8 +1590,8 @@ describe('renewing the approval of a running account', () => {
     await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
     const tx = await w.op.prepareRenew(ctx)
     const text = tx.summary.join(' ')
-    expect(text).not.toContain('re-ranging')
-    expect(tx.summary).toContain('Everything it touches still goes back to your Safe, never anywhere else')
+    expect(text).not.toContain('any Uniswap v3 position')
+    expect(tx.summary).toContain('Whatever it collects, mints or swaps is paid to your Safe, never to anyone else')
     expect(text).not.toContain('Funds never leave')
   })
 

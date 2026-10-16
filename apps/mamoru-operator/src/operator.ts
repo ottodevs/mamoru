@@ -5,7 +5,7 @@ import { overCap, type AccountContext, type Address, type FundingView, type OpVi
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, type SimCallResult } from '@mamoru/rpc'
-import { POLICIES, computeCaps, grantKey, hasManageAny, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
+import { POLICIES, computeCaps, grantKey, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -742,7 +742,10 @@ export class Operator {
     const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, acc.grants.map((g) => g.name), old)
     // Named so the renewal says, every time, exactly what the engine keeps doing without asking again: not every
     // renewed account holds manage-any/convert-any (a gas-capped activation can leave them out, see "fitGrants"),
-    // and the renewal must not claim more authority than what it is actually renewing.
+    // and the renewal must not claim more authority than what it is actually renewing. manage-any's decrease,
+    // collect and burn take any tokenId the Safe owns, in any pool, not only this policy's pools (grants.ts);
+    // droppablePairs keeps a pool's manage-any and convert-any together, so `dropped` below and `liveManage`
+    // here never name the same pool.
     const liveManage = stored.filter((g) => g.name.startsWith('manage-any') || g.name.startsWith('convert-any')).map((g) => g.name)
     const summary = [
       `Renew Mamoru's approval on your Safe ${live.safe}`,
@@ -750,10 +753,10 @@ export class Operator {
       'The approval it replaces is revoked in the same transaction',
       ...(dropped.length ? [`Re-ranging and collecting fees in ${this.poolsOf(dropped)} needs one more approval after this one`] : []),
       ...(liveManage.length
-        ? [`It also keeps re-ranging, reducing and harvesting your positions in ${this.poolsOf(liveManage)} without asking again: withdraw liquidity, collect fees, and convert ${this.volatileOf(liveManage)} back to USDC`]
+        ? [`It also keeps acting, without asking again, on any Uniswap v3 position your Safe owns, in any pool: take liquidity out, collect fees, burn it once empty, and convert ${this.volatileOf(liveManage)} back to USDC`]
         : []),
       'Nothing is moved: your positions stay as they are',
-      'Everything it touches still goes back to your Safe, never anywhere else',
+      'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
     ]
     return this.hold(acc, live, 'renew', calls, summary, { grants: stored, revokes: old })
   }
@@ -962,6 +965,13 @@ export class Operator {
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
     const policy = this.cfg.policy
     const { sessionKey, caps, stored, batch } = await this.approval(acc, live, policy, r)
+    // What this activation actually enables, not what the policy could: a gas-capped activation (fitActivation)
+    // can leave manage-any/convert-any out of `stored`, and the summary must not claim authority that is not
+    // in `batch.calls`. manage-any's decrease/collect/burn take any tokenId the Safe owns (grants.ts), in any
+    // pool, not only the policy's pools; convert-any's swap stays pinned to that pair's volatile token.
+    const liveManage = stored.filter((g) => g.name.startsWith('manage-any') || g.name.startsWith('convert-any')).map((g) => g.name)
+    const days = Math.round(policy.session.validitySeconds / 86_400)
+    const paidToSafe = `It does this without asking you again, within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else. For ${days} days; cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`
     const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!)} ${b.preference / 100}%`)
     if (pools.length > 1) {
       const summary = [
@@ -969,11 +979,11 @@ export class Operator {
         r.usdc > 0n
           ? `Let Mamoru's engine keep your ${fmtUsdc(r.usdc)} USDC invested across Uniswap v3 ${pools.join(', ')}`
           : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
-        `Engine key ${sessionKey} may, for ${Math.round(policy.session.validitySeconds / 86_400)} days: swap USDC into those pools' tokens and mint those pools`,
-        ...(hasManageAny(policy)
-          ? [`It may also re-range, reduce and harvest your positions in those pools: withdraw liquidity, collect fees, and convert their tokens back to USDC`]
+        `Engine key ${sessionKey} may swap USDC into those pools' tokens, mint positions there, and manage them: collect fees, reduce or close what it opens`,
+        ...(liveManage.length
+          ? [`It may also do the same for any other Uniswap v3 position your Safe owns, in any pool, and convert ${this.volatileOf(liveManage)} back to USDC`]
           : []),
-        `It does this without asking you again, within these limits; everything it touches is paid back to your Safe, never anywhere else. Cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`,
+        paidToSafe,
       ]
       return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })
     }
@@ -982,11 +992,11 @@ export class Operator {
       r.usdc > 0n
         ? `Let Mamoru's engine allocate your ${fmtUsdc(r.usdc)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
         : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) into Uniswap v3 USDC/cbBTC 0.05% as soon as it arrives`,
-      `Engine key ${sessionKey} may, for ${Math.round(policy.session.validitySeconds / 86_400)} days: swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap) and mint that pool`,
-      ...(hasManageAny(policy)
-        ? [`It may also re-range, reduce and harvest your positions in that pool: withdraw liquidity, collect fees, and convert cbBTC back to USDC`]
+      `Engine key ${sessionKey} may swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap), mint that pool, and manage the position: collect fees, reduce or close it`,
+      ...(liveManage.length
+        ? [`It may also do the same for any other Uniswap v3 position your Safe owns, in any pool, and convert cbBTC back to USDC`]
         : []),
-      `It does this without asking you again, within these limits; everything it touches is paid back to your Safe, never anywhere else. Cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`,
+      paidToSafe,
     ]
     return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })
   }
