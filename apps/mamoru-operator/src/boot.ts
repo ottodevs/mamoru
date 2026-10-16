@@ -4,7 +4,7 @@ import { createPublicClient, http } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID } from '@mamoru/domain'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
-import { POLICIES, withTestOverrides } from '@mamoru/policy'
+import { POLICIES, withTestOverrides, type PolicyVersion } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
@@ -71,10 +71,12 @@ export function parseDepth(v: string | undefined): OperatorConfig['depth'] {
  * accounts are, whatever the pool can take. Accounts activated before keep the session limits they signed; only new
  * activations (and, in phase 2, an extend approval) get limits sized from the new cap.
  */
-export function capAndDepth(o: Pick<BootOptions, 'capUsdc' | 'depth'>): Pick<OperatorConfig, 'capUsdc' | 'depth'> {
+export function capAndDepth(o: Pick<BootOptions, 'capUsdc' | 'depth'>, policy: PolicyVersion): Pick<OperatorConfig, 'capUsdc' | 'depth'> {
   const capUsdc = parseCapUsdc(o.capUsdc)
   const depth = parseDepth(o.depth)
   if (capUsdc !== undefined && capUsdc > LIVE_CAP_USDC && !depth) throw new Error('MAMORU_CAP_USDC above the default cap needs MAMORU_DEPTH')
+  // Depth sizing applies to target-weights policies only: under any other, a raised cap would be entered unsized.
+  if (capUsdc !== undefined && capUsdc > LIVE_CAP_USDC && policy.allocation !== 'target-weights') throw new Error(`MAMORU_CAP_USDC above the default cap needs a target-weights policy, not ${policy.policyId}`)
   return { ...(capUsdc === undefined ? {} : { capUsdc }), ...(depth ? { depth } : {}) }
 }
 
@@ -113,7 +115,7 @@ export async function bootOperator(o: BootOptions) {
       maxWaitBlocks: o.maxWaitBlocks ?? 150,
       rpcBudget: rpcBudget(rpcMetrics),
       watchClient,
-      ...capAndDepth(o),
+      ...capAndDepth(o, policy),
     },
     client,
     relayer,

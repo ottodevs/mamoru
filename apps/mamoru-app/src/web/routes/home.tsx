@@ -40,7 +40,10 @@ export const homeCopy = {
   upToDate: (time: string) => `Nothing to do right now. Mamoru looks again at ${time}.`,
   waitDepth: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: the ${pair} pool is not deep enough for more right now. Checked at ${time}.`,
   waitFall: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: ${pair} is falling fast, so Mamoru adds nothing there until it settles. Checked at ${time}.`,
-  waitMany: (amount: string, n: number, time: string) => `${amount} USDC is waiting in ${n} pools, until they can take more. Checked at ${time}.`,
+  waitMany: (amount: string, n: number, why: string, time: string) => `${amount} USDC is waiting in ${n} pools: ${why}. Checked at ${time}.`,
+  whyDepth: 'they are not deep enough for more right now',
+  whyFall: 'their markets are falling fast',
+  whyBoth: 'some are not deep enough for more right now, some are falling fast',
   history: 'Savings history',
   earnedSoFar: 'Earned so far',
   notRunning: 'Mamoru is not running on this money yet.',
@@ -306,7 +309,11 @@ export function engineLine(f: FundingView): string | null {
   const waits = (f.engine.waiting ?? []).filter((w) => w.code === 'DECIDE_WAIT_DEPTH' || w.code === 'DECIDE_ENTRY_PAUSED_FALL')
   if (waits.length) {
     const time = f.engine.reviewedAt ? new Date(f.engine.reviewedAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : 'the last review'
-    if (waits.length > 1) return homeCopy.waitMany(usd(waits.reduce((s, w) => s + BigInt(w.amountUsdc), 0n)), waits.length, time)
+    if (waits.length > 1) {
+      const codes = new Set(waits.map((w) => w.code))
+      const why = codes.size > 1 ? homeCopy.whyBoth : codes.has('DECIDE_WAIT_DEPTH') ? homeCopy.whyDepth : homeCopy.whyFall
+      return homeCopy.waitMany(usd(waits.reduce((s, w) => s + BigInt(w.amountUsdc), 0n)), waits.length, why, time)
+    }
     const w = waits[0]!
     const pair = pairLabel(w.pool ?? undefined).replace(/ /g, '')
     return w.code === 'DECIDE_WAIT_DEPTH' ? homeCopy.waitDepth(usd(w.amountUsdc), pair, time) : homeCopy.waitFall(usd(w.amountUsdc), pair, time)

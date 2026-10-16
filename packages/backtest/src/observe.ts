@@ -32,6 +32,20 @@ export function twapTick(ds: Dataset, poolIndex: number, i: number, windowSecond
 }
 
 /**
+ * otto/mamoru#127: the smallest active liquidity of the samples inside the TWAP window. The datasets keep no
+ * secondsPerLiquidity cumulative, so the Lab stands in for the harmonic mean with the minimum, which is never larger.
+ */
+export function windowMinLiquidity(ds: Dataset, poolIndex: number, i: number, windowSeconds: number): bigint {
+  const now = ds.samples[i]!
+  let min = now.pools[poolIndex]!.liquidity
+  for (let j = i - 1; j >= 0 && now.time - ds.samples[j]!.time < windowSeconds; j--) {
+    const p = ds.samples[j]!.pools[poolIndex]
+    if (p && p.liquidity < min) min = p.liquidity
+  }
+  return min
+}
+
+/**
  * The pool's tick cumulative at time `t`: the last sample at or before `t`, if it is less than one TWAP window old
  * and the pool oracle answered there. A gap in the data is missing history, not a flat price.
  */
@@ -85,6 +99,7 @@ export function observe(ds: Dataset, i: number, w: World, policy: PolicyVersion,
       tick: ps.tick,
       liquidity: ps.liquidity,
       twapTick: twapTick(ds, k, i, policy.execution.twapWindowSeconds),
+      twapLiquidity: windowMinLiquidity(ds, k, i, policy.execution.twapWindowSeconds),
       identity: { factoryPool: e.address, token0: address(e.token0!), token1: address(e.token1!), fee: e.fee!, tickSpacing: e.tickSpacing! },
     })
   })

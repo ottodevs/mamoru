@@ -70,6 +70,11 @@ export type PoolObs = {
   liquidity: bigint
   /** Time-weighted tick over the policy window, or null when `observe` cannot answer. */
   twapTick: number | null
+  /**
+   * Harmonic-mean in-range liquidity over the same window (from `secondsPerLiquidityCumulativeX128`), or null when
+   * `observe` cannot answer. Not movable inside one block, unlike `liquidity`: depth sizing reads the smaller of the two.
+   */
+  twapLiquidity?: bigint | null
   /** What the chain says about the pool, for Purga's identity check. */
   identity: { factoryPool: Address; token0: Address; token1: Address; fee: number; tickSpacing: number }
 }

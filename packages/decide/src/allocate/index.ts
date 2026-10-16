@@ -84,6 +84,8 @@ function volatileShareBps(pool: PoolObs, policy: PolicyVersion): bigint {
 export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit: boolean, frozen?: ReadonlySet<string>): Allocation {
   // `frozen`: bucket ids that get no entry this review (spec 004).
   const savings = policy.savingsAsset
+  /** 0 when savings is token0 of the proposal's pool, else 1. */
+  const savingsSide = (p: { pool: string }) => (obs.pools.find((x) => x.name === p.pool)?.token0 === savings ? 0 : 1)
   const minEntry = policy.minEntry ?? DEFAULT_MIN_ENTRY
   const free = safeSavings(obs, policy)
   const trail: GateStep[] = []
@@ -157,7 +159,9 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       if (room < size) {
         size = room < minEntry ? 0n : room
         // What does not fit waits as savings, whether this review places part of the bucket or none of it.
-        const held = (gap < free ? gap : free) - size
+        // The bucket stays short by what this entry does not cover; what of it is savings is what waits.
+        const short = gap - size
+        const held = short < free ? short : free
         if (held >= minEntry) waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_DEPTH', amount: held })
         if (size === 0n) {
           if (row) row.code = 'DECIDE_WAIT_DEPTH'
@@ -236,5 +240,15 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     }
   }
   if (total === 0n) for (const row of buckets) if (row.code === 'STRATEGY_PREFERENCE') row.code = 'DECIDE_NO_CAPITAL'
-  return { total, free, buckets, proposal, trail, pendingMint, waiting }
+  // Each bucket's wait was measured against the same free savings: together they cannot hold more than what is free
+  // once this review's entry has taken its savings. Clipped in the order they were found.
+  const spent = !proposal ? 0n : proposal.kind === 'enter_swap' && proposal.tokenIn === savings ? proposal.amountIn : proposal.kind === 'enter_mint' ? (savingsSide(proposal) === 0 ? proposal.amount0Desired : proposal.amount1Desired) : 0n
+  let left = free > spent ? free - spent : 0n
+  const clipped: Waiting[] = []
+  for (const w of waiting) {
+    const amount = w.amount < left ? w.amount : left
+    if (amount >= minEntry) clipped.push({ ...w, amount })
+    left -= amount
+  }
+  return { total, free, buckets, proposal, trail, pendingMint, waiting: clipped }
 }

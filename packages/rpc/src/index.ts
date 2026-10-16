@@ -428,9 +428,21 @@ function poolReads(batch: Batch, client: PublicClient, name: RegistryName, block
       tick: s0[1],
       liquidity: await liquidity.need(),
       twapTick: twapTick(cumulatives.maybe()?.[0], windowSeconds),
+      twapLiquidity: twapLiquidity(cumulatives.maybe()?.[1], windowSeconds),
       identity: { factoryPool: factoryPool.maybe() ?? zeroAddress, token0: await token0.need(), token1: await token1.need(), fee: await fee.need(), tickSpacing: await tickSpacing.need() },
     }
   }
+}
+
+/**
+ * otto/mamoru#127: harmonic-mean in-range liquidity over the window, window·2^128 / Δ(secondsPerLiquidityCumulativeX128),
+ * or null when the pool could not answer or had no liquidity in range for the whole window.
+ */
+function twapLiquidity(cumulatives: readonly bigint[] | undefined, windowSeconds: number): bigint | null {
+  if (!cumulatives || cumulatives[0] === undefined || cumulatives[1] === undefined) return null
+  const delta = cumulatives[1] - cumulatives[0]
+  if (delta <= 0n) return null
+  return (BigInt(windowSeconds) << 128n) / delta
 }
 
 /** FR-UNI-009: time-weighted tick from the `observe` cumulatives, or null when the pool could not answer for the window. */

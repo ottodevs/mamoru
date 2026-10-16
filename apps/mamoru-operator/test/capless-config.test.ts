@@ -21,10 +21,14 @@ describe('MAMORU_CAP_USDC and MAMORU_DEPTH', () => {
 })
 
 test('a cap above the default needs depth sizing; at or under it, it does not', () => {
-  expect(() => capAndDepth({ capUsdc: '1000' })).toThrow('needs MAMORU_DEPTH')
-  expect(capAndDepth({ capUsdc: '1000', depth: '30,500' })).toEqual({ capUsdc: 1_000_000_000n, depth: { maxImpactBps: 30, maxShareBps: 500 } })
-  expect(capAndDepth({ capUsdc: '50' })).toEqual({ capUsdc: 50_000_000n })
-  expect(capAndDepth({})).toEqual({})
+  const v2 = POLICIES['conservador-live-v2']!
+  const v1 = POLICIES['conservador-live-v1']!
+  expect(() => capAndDepth({ capUsdc: '1000' }, v2)).toThrow('needs MAMORU_DEPTH')
+  expect(capAndDepth({ capUsdc: '1000', depth: '30,500' }, v2)).toEqual({ capUsdc: 1_000_000_000n, depth: { maxImpactBps: 30, maxShareBps: 500 } })
+  // A policy depth sizing does not apply to cannot take a raised cap, even with MAMORU_DEPTH set.
+  expect(() => capAndDepth({ capUsdc: '1000', depth: '30,500' }, v1)).toThrow('target-weights')
+  expect(capAndDepth({ capUsdc: '50' }, v1)).toEqual({ capUsdc: 50_000_000n })
+  expect(capAndDepth({}, v2)).toEqual({})
 })
 
 describe('Operator: cap and depth sizing (otto/mamoru#127)', () => {

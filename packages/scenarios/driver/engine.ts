@@ -1,7 +1,7 @@
-import { isAddressEqual, parseEventLogs, type Hex, type Log, type PublicClient } from 'viem'
+import { isAddressEqual, parseAbi, parseEventLogs, type Hex, type Log, type PublicClient } from 'viem'
 import type { LocalAccount } from 'viem/accounts'
 import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
-import { amountsOf, decide, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
+import { amountsOf, decide, twapFloor, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
 import { hasManageAny, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
@@ -29,6 +29,8 @@ import { approve, burn, collect, decreaseLiquidity, exactInputSingle, mint, type
 import { minOut, quoteExactInputSingle, quoteMint } from '@mamoru/uniswap-v3/quote'
 import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
 import { MemoryJournal, type DecisionRecord, type OpRecord } from './journal.ts'
+
+const observeAbi = parseAbi(['function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128s)'])
 import { reconcileReceipt } from './receipt.ts'
 
 /** Gas limits of every engine userOp. Their sum is the budget `decide` prices for the harvest cost. */
@@ -484,25 +486,33 @@ export class Engine {
   }
 
   /**
-   * otto/mamoru#127: with depth sizing on, an entry swap is refused before anything is sent when the quote (which
-   * crosses ticks) prices it worse than `maxImpactBps` from the pool's spot, the pool fee aside. `decide` sizes the swap
-   * from the active liquidity only; this is the check that holds when the liquidity next to the price is thinner.
+   * otto/mamoru#127, with depth sizing on. Slot0 and a quote at the block we read can both be moved by a swap in that
+   * same block, so the entry swap is judged against the pool's TWAP, never against its spot:
+   * - the quote (which crosses ticks) must be within `maxImpactBps` of what the input buys at the TWAP, the pool fee
+   *   aside; otherwise it is refused before anything is sent (EHG_SWAP_IMPACT_OVER_LIMIT);
+   * - the router minimum is the larger of the usual slippage minimum on the quote and that TWAP bound, so whatever
+   *   happens to the price before inclusion, the swap never executes worse than the limit against the TWAP.
+   * Returns the minimum out to use, or null when depth sizing is off (the usual minimum applies).
    */
-  private async assertImpact(p: Extract<Proposal, { kind: 'enter_swap' }>, amountOut: bigint, blockNumber: bigint): Promise<void> {
+  private async twapBound(p: Extract<Proposal, { kind: 'enter_swap' }>, amountOut: bigint, blockNumber: bigint): Promise<bigint | null> {
     const depth = this.cfg.policy.depth
-    if (!depth) return
+    if (!depth) return null
     const pool = entry(p.pool)
-    const [sqrtPriceX96] = await this.client.readContract({ address: pool.address as Address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber })
-    const Q192 = 1n << 192n
-    const sq = sqrtPriceX96 * sqrtPriceX96
-    const afterFee = (p.amountIn * BigInt(1_000_000 - p.fee)) / 1_000_000n
-    // What the input buys at spot, in raw units of the output token.
-    const ideal = pool.token0 === p.tokenIn ? (afterFee * sq) / Q192 : (afterFee * Q192) / sq
-    if (ideal === 0n) return
-    const limit = BigInt(depth.maxImpactBpsByPool?.[p.pool] ?? depth.maxImpactBps)
-    if (amountOut * 10_000n < ideal * (10_000n - limit)) {
-      throw new ReasonError('EHG_SWAP_IMPACT_OVER_LIMIT', `${p.pool}: quote ${amountOut} for ${p.amountIn}, spot ${ideal}, over ${limit} bps`)
+    const window = this.cfg.policy.execution.twapWindowSeconds
+    let tick: number
+    try {
+      const [cumulatives] = await this.client.readContract({ address: pool.address as Address, abi: observeAbi, functionName: 'observe', args: [[window, 0]], blockNumber })
+      const delta = cumulatives[1]! - cumulatives[0]!
+      let t = delta / BigInt(window)
+      if (delta < 0n && delta % BigInt(window) !== 0n) t -= 1n
+      tick = Number(t)
+    } catch {
+      throw new ReasonError('EHG_TWAP_UNAVAILABLE', `${p.pool}: observe(${window}) did not answer at ${blockNumber}`)
     }
+    const limit = depth.maxImpactBpsByPool?.[p.pool] ?? depth.maxImpactBps
+    const floor = twapFloor(p.amountIn, p.fee, tick, pool.token0 === p.tokenIn, limit)
+    if (amountOut < floor) throw new ReasonError('EHG_SWAP_IMPACT_OVER_LIMIT', `${p.pool}: quote ${amountOut} for ${p.amountIn}, under ${floor} (TWAP tick ${tick}, ${limit} bps)`)
+    return floor
   }
 
   /** FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. */
@@ -511,8 +521,9 @@ export class Engine {
     const slippage = this.cfg.policy.execution.slippageBps
     if (p.kind === 'enter_swap') {
       const amountOut = await quoteExactInputSingle(this.client, { tokenIn: address(p.tokenIn), tokenOut: address(p.tokenOut), fee: p.fee, amountIn: p.amountIn, blockNumber })
-      await this.assertImpact(p, amountOut, blockNumber)
-      const amountOutMinimum = minOut(amountOut, slippage)
+      const floor = await this.twapBound(p, amountOut, blockNumber)
+      const usual = minOut(amountOut, slippage)
+      const amountOutMinimum = floor !== null && floor > usual ? floor : usual
       return {
         quote: { amountIn: p.amountIn, amountOut, amountOutMinimum },
         calls: [approve(p.tokenIn, 'SwapRouter02', p.amountIn), exactInputSingle({ account: acct, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn: p.amountIn, amountOutMinimum })].map(exec),

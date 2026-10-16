@@ -3,7 +3,7 @@ import { conservadorLiveV2, grantKey, type PolicyVersion } from '@mamoru/policy'
 import { address, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { decide, type Observation, type PoolObs } from './index.ts'
-import { depthOf } from './depth/index.ts'
+import { depthOf, twapFloor } from './depth/index.ts'
 
 const USDC = 1_000_000n
 const DEPTH: PolicyVersion = { ...conservadorLiveV2, depth: { maxImpactBps: 30, maxShareBps: 500, maxImpactBpsByPool: { 'pool:USDC/USDT/100': 5 } } }
@@ -21,6 +21,7 @@ function pool(name: string, tick: number, liquidity: bigint): PoolObs {
     tick,
     liquidity,
     twapTick: tick,
+    twapLiquidity: liquidity,
     identity: { factoryPool: e.address, token0: address(e.token0!), token1: address(e.token1!), fee: e.fee!, tickSpacing: e.tickSpacing! },
   }
 }
@@ -57,8 +58,8 @@ describe('depth sizing (otto/mamoru#127)', () => {
   test('the impact room of a USDC sale follows the linearised constant-liquidity move', () => {
     const p = pool('pool:USDC/USDT/100', 1, 10n ** 12n)
     const d = depthOf(obs(10n ** 12n, 0n), DEPTH, p, 40)!
-    // USDC is token0 here: Δ0 = b·L/√P with b = 5 bps, √P ≈ 1 at tick 1 (6 and 6 decimals).
-    const expected = (5n * 10n ** 12n) / 10_000n
+    // USDC is token0 here: Δ0 = b·L/√P, half the 5 bps budget for sizing, √P ≈ 1 at tick 1 (6 and 6 decimals).
+    const expected = (5n * 10n ** 12n) / 20_000n
     expect(Math.abs(Number(d.swapRoom - expected)) / Number(expected)).toBeLessThan(0.001)
     expect(d.shareRoom > 0n).toBe(true)
   })
@@ -128,5 +129,69 @@ describe('depth sizing (otto/mamoru#127)', () => {
     const amt = (d: typeof plain) => (d.proposal?.kind === 'enter_swap' && d.proposal.tokenIn === 'USDT' ? d.proposal.amountIn : 0n)
     expect(amt(sized) <= amt(plain)).toBe(true)
     expect(amt(sized) <= depthOf(o, DEPTH, o.pools[0]!, 40)!.sellRoom).toBe(true)
+  })
+
+  test('waiting buckets together never hold more than the free savings', () => {
+    const o = obs(1_000n, 100n * USDC, 1_000n)
+    const d = decide(o, DEPTH)
+    const total = (d.waiting ?? []).reduce((s, w) => s + w.amount, 0n)
+    expect(total <= 100n * USDC).toBe(true)
+    expect(total > 0n).toBe(true)
+  })
+
+  describe('manipulation: spot moved inside the block we read', () => {
+    test('a spot far from the TWAP holds the entry (EHG), whatever depth says', () => {
+      const o = obs(10n ** 18n, 1_000n * USDC)
+      // Every pool's slot0 pushed 2,000 ticks (about 20%) away inside the block, the TWAPs unchanged.
+      const pushed = { ...o, pools: o.pools.map((p) => ({ ...p, tick: p.tick + 2_000, sqrtPriceX96: sqrtRatioAtTick(p.tick + 2_000) })) }
+      const plain = decide(o, DEPTH)
+      expect(plain.proposal).not.toBeNull()
+      const d = decide(pushed, DEPTH)
+      expect(d.proposal).toBeNull()
+      expect(d.reason).toBe('EHG_PRICE_DIVERGENCE')
+    })
+
+    test('room is read at the TWAP price: a pushed spot does not change it', () => {
+      const o = obs(10n ** 15n, 1_000n * USDC)
+      const p = o.pools[0]!
+      const pushed = { ...p, tick: p.tick + 50, sqrtPriceX96: sqrtRatioAtTick(p.tick + 50) }
+      expect(depthOf(o, DEPTH, pushed, 40)).toEqual(depthOf(o, DEPTH, p, 40))
+    })
+
+    test('liquidity added just for this block does not add room: the smaller of spot and window mean counts', () => {
+      const o = obs(10n ** 15n, 1_000n * USDC)
+      const p = o.pools[0]!
+      const flash = { ...p, liquidity: p.liquidity * 1_000n }
+      expect(depthOf(o, DEPTH, flash, 40)).toEqual(depthOf(o, DEPTH, p, 40))
+    })
+
+    test('without the window mean or the TWAP there is no room at all', () => {
+      const o = obs(10n ** 15n, 1_000n * USDC)
+      const p = o.pools[0]!
+      expect(depthOf(o, DEPTH, { ...p, twapLiquidity: null }, 40)).toEqual({ shareRoom: 0n, swapRoom: 0n, sellRoom: 0n })
+      expect(depthOf(o, DEPTH, { ...p, twapTick: null }, 40)).toEqual({ shareRoom: 0n, swapRoom: 0n, sellRoom: 0n })
+    })
+  })
+})
+
+describe('twapFloor (engine minimum out, otto/mamoru#127)', () => {
+  test('a quote from a pool pushed inside the block is under the floor and refused; the TWAP price passes', () => {
+    // USDC (token0) into USDT at tick 0 (1:1), 1 bp fee, 5 bps limit.
+    const amountIn = 10_000n * USDC
+    const floor = twapFloor(amountIn, 100, 0, true, 5)
+    const fair = (amountIn * 9_999n) / 10_000n
+    expect(fair >= floor).toBe(true)
+    // An attacker moves the price 1% against us before our read: the quote drops by ~1%, under the floor.
+    const manipulated = (fair * 9_900n) / 10_000n
+    expect(manipulated < floor).toBe(true)
+    // The floor sits exactly the limit under the fee-adjusted TWAP output.
+    expect(floor).toBe((fair * 9_995n) / 10_000n)
+  })
+
+  test('it follows the token order of the pool', () => {
+    // cbBTC (token1, 8 decimals) priced around tick -69,080 against USDC (token0, 6): selling USDC is token0 in.
+    const a = twapFloor(1_000n * USDC, 500, -69_080, true, 30)
+    const b = twapFloor(1_000n * USDC, 500, -69_080 + 100, true, 30)
+    expect(b > a).toBe(true)
   })
 })
