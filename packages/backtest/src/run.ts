@@ -356,8 +356,10 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
             g.peakSpentBps = Math.max(g.peakSpentBps ?? 0, c === 0n ? Number.MAX_SAFE_INTEGER : Number((total * 10_000n) / c))
           }
           tally.set(p.grant, g)
-          // The app offers the renewal once a grant has used `atBps` of its limit; the owner taps `delaySeconds` later.
-          if (refresh && refreshAt === null && limit !== null && n * 10_000 >= limit * refresh.atBps) refreshAt = s.time + refresh.delaySeconds
+          // The app offers the renewal once a grant has used `atBps` of its limit or of a cumulative cap, as the operator
+          // does (usageView); the owner taps `delaySeconds` later.
+          const nearCap = spend.some(([k, cap]) => (caps[cap] ?? 0n) > 0n && (spentIn.get(`${p.grant}|${k}`) ?? 0n) * 10_000n >= (caps[cap] ?? 0n) * BigInt(refresh?.atBps ?? 10_000))
+          if (refresh && refreshAt === null && ((limit !== null && n * 10_000 >= limit * refresh.atBps) || nearCap)) refreshAt = s.time + refresh.delaySeconds
         } else discarded++
       }
     }

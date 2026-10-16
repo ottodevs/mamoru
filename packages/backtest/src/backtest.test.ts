@@ -209,6 +209,12 @@ describe('run', () => {
     const s = r.sessions.find((x) => x.grant.startsWith('enter-swap'))!
     expect(s.peakSpentBps).toBeGreaterThan(10_000)
     expect(s.exhausted).toBe(true)
+    // An owner who renews from the row at 80% of a cap: a total of 30% of the cap per window, so each entry swap
+    // (half of a bucket's share) opens the next window, and nothing is refused.
+    const third = { ...conservadorLiveV2, session: { ...conservadorLiveV2.session, caps: conservadorLiveV2.session.caps.map((c) => (c.name.endsWith('SwapTotal') ? { ...c, bpsOfDeposit: 3_000 } : c)) } }
+    const renewing = runBacktest(syntheticDataset({ samples: 120 }), third, { deposit: DEPOSIT, usageRefresh: { atBps: 8_000, delaySeconds: 0 } })
+    expect(renewing.usageRefreshes).toBeGreaterThan(0)
+    expect(renewing.reasons.POLICY_DENIED_CUMULATIVE).toBeUndefined()
     // The live totals cover the same entries.
     const live = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT })
     expect(live.reasons.POLICY_DENIED_CUMULATIVE).toBeUndefined()
