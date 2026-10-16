@@ -2,11 +2,11 @@ import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeFunctionData, parseAbi, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
-import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi } from '@mamoru/registry'
+import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, type SimCallResult } from '@mamoru/rpc'
-import { POLICIES, USAGE_RENEW_BPS, computeCaps, grantKey, instantiateGrant, type PolicyVersion } from '@mamoru/policy'
+import { POLICIES, USAGE_RENEW_BPS, canonicalSettingsJson, capBaseUnits, computeCaps, grantKey, instantiateGrant, withEngineSettings, type PolicyVersion } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -31,7 +31,8 @@ import {
 } from '@mamoru/account/live'
 import { permissionIdOf, revocationCalls, toSmartSession } from '@mamoru/account/sessions'
 import { minOut, quoteExactInputSingle } from '@mamoru/uniswap-v3/quote'
-import { Engine, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
+import { Engine, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
+import type { EngineSettingsSource } from './engine-settings.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { Proposal } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
@@ -260,6 +261,8 @@ export type OperatorConfig = {
   capUsdc?: bigint
   /** Depth sizing of entries for the engine (otto/mamoru#127); absent: entries are sized as before. */
   depth?: NonNullable<PolicyVersion['depth']>
+  /** Spec 006 (otto/mamoru#147): engine settings per account, pulled from D1. Absent: capUsdc and depth above, as before. */
+  settings?: Pick<EngineSettingsSource, 'forAccount' | 'status'>
 }
 
 type OwnerKind = 'activate' | 'transfer' | 'stop' | 'renew'
@@ -279,6 +282,8 @@ type Prepared = {
   base?: Hex[]
   /** transfer: what the history line shows. */
   meta?: { amountUsdc: string; asset?: string; to: Hex }
+  /** activate (spec 006): the cap, in base units, that the owner's summary named. A later raise of the cap never lets more in under this signature. */
+  capUsdc?: string
 }
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
@@ -544,9 +549,75 @@ export class Operator {
     return { acc, live }
   }
 
-  /** The per-account cap at Start (otto/mamoru#127): configurable, so it can be raised once depth sizing is live. */
-  get cap(): bigint {
-    return this.cfg.capUsdc ?? LIVE_CAP_USDC
+  /** The per-account cap at Start (otto/mamoru#127): from the account's engine settings (spec 006), else configured, else the code default. */
+  capFor(acc: AccountState): bigint {
+    // With settings, they are the whole answer (the env override is already merged into them): no fall-through to the env cap.
+    const s = this.cfg.settings?.forAccount(acc.accountKey)
+    if (!s) return this.cfg.capUsdc ?? LIVE_CAP_USDC
+    const cap = capBaseUnits(s.settings) ?? LIVE_CAP_USDC
+    // The same rule as the boot check on MAMORU_CAP_USDC, for pulled settings: a cap above the default needs depth
+    // sizing actually applied to this account, which happens under a target-weights policy only. Otherwise the
+    // account keeps the default cap and the status names it.
+    if (cap > LIVE_CAP_USDC && (!s.settings.depth || this.policyOf(acc).allocation !== 'target-weights')) {
+      if (!this.capRefused.has(acc.accountKey)) console.log(`[alert] engine settings: cap ${fmtUsdc(cap)} refused for ${acc.accountKey.slice(0, 8)} (policy ${this.policyOf(acc).policyId} cannot size entries to depth); default cap kept`)
+      this.capRefused.add(acc.accountKey)
+      return LIVE_CAP_USDC
+    }
+    this.capRefused.delete(acc.accountKey)
+    return cap
+  }
+
+  /** Accounts whose pulled cap was refused by capFor; reported in /metrics. */
+  private readonly capRefused = new Set<string>()
+
+  /**
+   * The cap an activation runs under: the current one, never above the cap its signed summary named. An approval
+   * prepared or armed before spec 006 carries no cap: it was signed under LIVE_CAP_USDC (the default; above it the
+   * operator would not have started without MAMORU_DEPTH), so that is its ceiling, never the current cap.
+   */
+  activationCap(acc: AccountState, signed?: string): bigint {
+    const now = this.capFor(acc)
+    const ceiling = signed && /^[0-9]+$/.test(signed) ? BigInt(signed) : LIVE_CAP_USDC
+    return ceiling < now ? ceiling : now
+  }
+
+  /** The cap the account's grants were sized for (spec 006). */
+  signedCapOf(acc: AccountState): bigint {
+    return acc.signedCapUsdc && /^[0-9]+$/.test(acc.signedCapUsdc) ? BigInt(acc.signedCapUsdc) : LIVE_CAP_USDC
+  }
+
+  /** One line when the plan now allows a different cap than the one these grants carry. */
+  private capNotice(acc: AccountState, cap: bigint): string[] {
+    const now = this.capFor(acc)
+    return now === cap ? [] : [`Your plan now allows up to ${fmtUsdc(now)} USDC per account; this approval keeps the ${fmtUsdc(cap)} USDC limits you signed`]
+  }
+
+  settingsStatus(): (ReturnType<EngineSettingsSource['status']> & { capRefused: string[] }) | null {
+    const s = this.cfg.settings?.status()
+    return s ? { ...s, capRefused: [...this.capRefused].map((k) => k.slice(0, 8)) } : null
+  }
+
+  private readonly settingsPolicies = new Map<string, PolicyVersion>()
+
+  /** The fall guard (#101) reads the 24 h history of the volatile buckets' pools; nothing is read while it is off. */
+  guardHistoryOf(policy: PolicyVersion): EngineConfig['guardHistory'] {
+    if (!policy.guards) return undefined
+    const pools = policy.buckets.filter((b) => policy.guards?.byBucket[b.id]?.fallFreeze).map((b) => b.pools[0]).filter((p): p is NonNullable<typeof p> => !!p)
+    return pools.length ? { pools: pools as RegistryName[] } : undefined
+  }
+
+  /** Spec 006: new settings reach every running engine on its next review; nothing restarts. */
+  retuneEngines(): void {
+    for (const [key, runner] of this.runners) {
+      const acc = this.store.state.accounts[key]
+      if (!acc) continue
+      try {
+        const policy = this.enginePolicyOf(acc)
+        runner.engine.retune(policy, this.guardHistoryOf(policy))
+      } catch (e) {
+        logErr(`[settings] ${key} not retuned:`, e)
+      }
+    }
   }
 
   private readonly depthPolicies = new WeakMap<PolicyVersion, PolicyVersion>()
@@ -557,6 +628,18 @@ export class Operator {
    */
   enginePolicyOf(acc: AccountState): PolicyVersion {
     const p = this.policyOf(acc)
+    if (this.cfg.settings) {
+      // Spec 006: depth sizing and the guard come from the account's engine settings. Memoized per settings, so an
+      // unchanged version hands every review the same policy object.
+      const s = this.cfg.settings.forAccount(acc.accountKey).settings
+      const key = `${p.policyId}@${p.version} ${canonicalSettingsJson(s)}`
+      let d = this.settingsPolicies.get(key)
+      if (!d) {
+        d = withEngineSettings(p, s)
+        this.settingsPolicies.set(key, d)
+      }
+      return d
+    }
     const depth = this.cfg.depth
     if (!depth || p.allocation !== 'target-weights') return p
     let d = this.depthPolicies.get(p)
@@ -677,9 +760,9 @@ export class Operator {
       block: Number(r.block),
       usdc: r.usdc.toString(),
       eth: r.eth.toString(),
-      capUsdc: this.cap.toString(),
+      capUsdc: this.capFor(acc).toString(),
       // Only while the engine is off: that is when the cap refuses Start.
-      overCap: acc.active ? null : overCap(r.usdc, this.cap),
+      overCap: acc.active ? null : overCap(r.usdc, this.capFor(acc)),
       deployMinUsdc: MIN_DEPLOY_USDC.toString(),
       cbbtc: r.cbbtc.toString(),
       gasReserveWei: this.policyOf(acc).gasReserveWei.toString(),
@@ -837,7 +920,7 @@ export class Operator {
    * The engine's session grants for one owner approval, sized at the account cap and valid from now for the policy's
    * validity, with the Safe transaction that enables them. A first approval and a renewal sign the same thing.
    */
-  private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, only?: string[]) {
+  private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, only?: string[]) {
     if (!acc.sessionKey) {
       acc.sessionKey = generatePrivateKey()
       this.store.save()
@@ -851,7 +934,7 @@ export class Operator {
         return [pr.asset, { num: pr.num, den: pr.den }]
       }),
     )
-    const caps = computeCaps(policy, this.cap, prices)
+    const caps = computeCaps(policy, cap, prices)
     const block = await this.client.getBlock({ blockNumber: r.block })
     const t = Number(block.timestamp)
     const allKeys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
@@ -865,8 +948,9 @@ export class Operator {
         validUntil: t + policy.session.validitySeconds,
         caps,
         admittedTokenIds: [],
-        // #149: usage limits sized for the approval's validity at this account cap.
-        capUsdc: this.cap,
+        // #149: usage limits sized for the approval's validity at this account cap; spec 006: the one cap captured
+        // for this prepare, the same one the caps above, the summary and the stored ceiling use.
+        capUsdc: cap,
       }),
     )
     // A first approval takes as many grants as fit the gas cap. A renewal takes exactly the ones the account has
@@ -915,7 +999,10 @@ export class Operator {
     // The grants of a renewal whose outcome is still unknown go with them: if it ran unseen (a read behind the
     // chain), its grants are revoked here all the same; the removal of a session that is not there is taken.
     const old = [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc)])]
-    const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, acc.grants.map((g) => g.name), old)
+    // A renewal keeps the limits the account signed for (spec 006): a raised cap never enlarges grants under a summary
+    // that says they stay the same. The summary names that cap, and says so when the plan now allows a different one.
+    const cap = this.signedCapOf(acc)
+    const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, acc.grants.map((g) => g.name), old, cap)
     // Named so the renewal says, every time, exactly what the engine keeps doing without asking again: not every
     // renewed account holds manage-any/convert-any (a gas-capped activation can leave them out, see "fitGrants"),
     // and the renewal must not claim more authority than what it is actually renewing. manage-any's decrease,
@@ -925,8 +1012,9 @@ export class Operator {
     const liveManage = stored.filter((g) => g.name.startsWith('manage-any') || g.name.startsWith('convert-any')).map((g) => g.name)
     const summary = [
       `Renew Mamoru's approval on your Safe ${live.safe}`,
-      `Engine key ${sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero:`,
+      `Engine key ${sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero, sized for deposits up to ${fmtUsdc(cap)} USDC (the cap you signed):`,
       ...this.limitLines(stored, policy),
+      ...this.capNotice(acc, cap),
       'The approval it replaces is revoked in the same transaction',
       ...(dropped.length ? [`Re-ranging and collecting fees in ${this.poolsOf(dropped)} needs one more approval after this one`] : []),
       ...(liveManage.length
@@ -935,7 +1023,7 @@ export class Operator {
       'Nothing is moved: your positions stay as they are',
       'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
     ]
-    return this.hold(acc, live, 'renew', calls, summary, { grants: stored, revokes: old })
+    return this.hold(acc, live, 'renew', calls, summary, { grants: stored, revokes: old, capUsdc: cap.toString() })
   }
 
   /**
@@ -946,17 +1034,20 @@ export class Operator {
    */
   private async planExtend(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, missing: string[]): Promise<OwnerTxToSign> {
     const old = [...new Set([...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc)])]
-    const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, missing, old)
+    // The added grants are sized like the ones the account holds: for the cap it signed (spec 006), named below.
+    const cap = this.signedCapOf(acc)
+    const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, missing, old, cap)
     const added = stored.map((g) => g.name)
     const summary = [
       `Let Mamoru's engine re-range and collect fees in ${this.poolsOf(added)} on your Safe ${live.safe}`,
-      `Engine key ${sessionKey} may, for ${Math.round(policy.session.validitySeconds / 86_400)} days and within your plan's limits: take liquidity out of any position your Safe owns and collect it, with its fees, into your Safe; burn a position once it is empty; open positions again in those pools; and swap ${this.volatileOf(added)} to USDC`,
+      `Engine key ${sessionKey} may, for ${Math.round(policy.session.validitySeconds / 86_400)} days and within limits sized for deposits up to ${fmtUsdc(cap)} USDC: take liquidity out of any position your Safe owns and collect it, with its fees, into your Safe; burn a position once it is empty; open positions again in those pools; and swap ${this.volatileOf(added)} to USDC`,
       'It does this without asking you again, only within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
       ...this.limitLines(stored, policy),
       ...(dropped.length ? [`${this.poolsOf(dropped)} needs one more approval after this one`] : []),
+      ...this.capNotice(acc, cap),
       'Nothing is moved now: your positions stay as they are',
     ]
-    return this.hold(acc, live, 'renew', calls, summary, { grants: stored, revokes: old, extend: true, base: acc.grants.map((g) => g.permissionId) })
+    return this.hold(acc, live, 'renew', calls, summary, { grants: stored, revokes: old, extend: true, base: acc.grants.map((g) => g.permissionId), capUsdc: cap.toString() })
   }
 
   /**
@@ -964,11 +1055,11 @@ export class Operator {
    * manage-any/convert-any pairs are left out, lowest-preference bucket first, until the simulated gas fits. Refused
    * when nothing is left to enable or it still does not fit; the revokes are never left out.
    */
-  private async fitGrants(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, keys: string[], revokes: Hex[]) {
+  private async fitGrants(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, keys: string[], revokes: Hex[], cap: bigint) {
     const droppable = this.droppablePairs(policy, keys)
     let ks = keys
     for (let i = 0; ; i++) {
-      const { sessionKey, stored, batch } = await this.approval(acc, live, policy, r, ks)
+      const { sessionKey, stored, batch } = await this.approval(acc, live, policy, r, cap, ks)
       const calls = [...revocationCalls(revokes), ...batch.calls]
       const gas = stored.length ? await this.activationGas(live, calls, stored.length, r.block) : 0n
       if (stored.length && gas <= RENEW_GAS_BUDGET) {
@@ -1062,7 +1153,7 @@ export class Operator {
       // Asked again after the reads: the caller holds the account lock, and this keeps it true if one ever does not.
       if (superseded(op) || op.state !== 'failed' || op.code !== RECEIPT_UNKNOWN) continue
       console.log(`[renew] ${acc.accountKey} ${op.opId} executed on chain (its grants are enabled): applied`)
-      this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, extend: op.extend }, { blockNumber: block } as TransactionReceipt)
+      this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, extend: op.extend, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, { blockNumber: block } as TransactionReceipt)
       this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(block) })
     }
     // Stops after renewals: a renewal that ran replaced the engine's grants, and the stop is judged by the grants
@@ -1170,10 +1261,13 @@ export class Operator {
     const { acc, live } = this.account(ctx)
     if (acc.active) throw new HttpError(409, 'ALREADY_ACTIVE', 'the engine is already active for this account')
     const r = await readSafe(this.client, live.safe)
-    if (r.usdc > this.cap) throw depositOverCap(r.usdc, this.cap)
+    // One cap for the whole prepare (spec 006): the check, the grants, the summary and the stored ceiling all use this
+    // value, so a settings pull in the middle cannot make them disagree.
+    const cap = this.capFor(acc)
+    if (r.usdc > cap) throw depositOverCap(r.usdc, cap)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
     const policy = this.cfg.policy
-    const { sessionKey, caps, stored, batch } = await this.approval(acc, live, policy, r)
+    const { sessionKey, caps, stored, batch } = await this.approval(acc, live, policy, r, cap)
     // What this activation actually enables, not what the policy could: a gas-capped activation (fitActivation)
     // can leave manage-any/convert-any out of `stored`, and the summary must not claim authority that is not
     // in `batch.calls`. manage-any's decrease/collect/burn take any tokenId the Safe owns (grants.ts), in any
@@ -1183,14 +1277,14 @@ export class Operator {
     // only enter-swap/enter-mint, plus manage-any/convert-any when `liveManage` is non-empty.
     const liveManage = stored.filter((g) => g.name.startsWith('manage-any') || g.name.startsWith('convert-any')).map((g) => g.name)
     const days = Math.round(policy.session.validitySeconds / 86_400)
-    const paidToSafe = `It does this without asking you again, within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else. For ${days} days; cap ${fmtUsdc(this.cap)} USDC`
+    const paidToSafe = `It does this without asking you again, within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else. For ${days} days; cap ${fmtUsdc(cap)} USDC`
     const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!)} ${b.preference / 100}%`)
     if (pools.length > 1) {
       const summary = [
         `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
         r.usdc > 0n
           ? `Let Mamoru's engine keep your ${fmtUsdc(r.usdc)} USDC invested across Uniswap v3 ${pools.join(', ')}`
-          : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(this.cap)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
+          : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(cap)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
         `Engine key ${sessionKey} may swap USDC into those pools' tokens and mint positions there`,
         ...(liveManage.length
           ? [`It may also act on any Uniswap v3 position your Safe owns, in any pool: take liquidity out, collect fees, burn it once empty, and convert ${this.volatileOf(liveManage)} back to USDC`]
@@ -1198,20 +1292,20 @@ export class Operator {
         ...this.limitLines(stored, policy),
         paidToSafe,
       ]
-      return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })
+      return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored, capUsdc: cap.toString() })
     }
     const summary = [
       `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
       r.usdc > 0n
         ? `Let Mamoru's engine allocate your ${fmtUsdc(r.usdc)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
-        : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(this.cap)} USDC) into Uniswap v3 USDC/cbBTC 0.05% as soon as it arrives`,
+        : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(cap)} USDC) into Uniswap v3 USDC/cbBTC 0.05% as soon as it arrives`,
       `Engine key ${sessionKey} may swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap) and mint that pool`,
       ...(liveManage.length
         ? [`It may also act on any Uniswap v3 position your Safe owns, in any pool: take liquidity out, collect fees, burn it once empty, and convert cbBTC back to USDC`]
         : []),
       paidToSafe,
     ]
-    return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })
+    return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored, capUsdc: cap.toString() })
   }
 
   /** Planned under the account lock: an in-flight engine op (reduce, re-range) lands first, so the plan sees its liquidity. */
@@ -1543,7 +1637,7 @@ export class Operator {
       this.assertBudget(acc)
       const usdc = await this.usdcOf(live.safe)
       if (usdc === 0n) return this.arm(acc, p, signature)
-      if (usdc > this.cap) throw depositOverCap(usdc, this.cap)
+      if (usdc > this.activationCap(acc, p.capUsdc)) throw depositOverCap(usdc, this.activationCap(acc, p.capUsdc))
       // The relayer cannot pay for it now: the signature waits armed and the watcher runs it once the relayer is funded.
       if (!(await this.relayerCanActivate(acc))) return this.arm(acc, p, signature)
       this.disarm(acc, 'ARMED_SUPERSEDED')
@@ -1623,7 +1717,7 @@ export class Operator {
       const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
       if (nonce !== p.tx.nonce) return { code: 'SAFE_NONCE_MOVED' }
       const usdc = await this.usdcOf(live.safe)
-      if (p.kind === 'activate' && usdc > this.cap) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: usdc.toString(), capUsdc: this.cap.toString() } }
+      if (p.kind === 'activate' && usdc > this.activationCap(acc, p.capUsdc)) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: usdc.toString(), capUsdc: this.activationCap(acc, p.capUsdc).toString() } }
       if (!deployed && usdc < MIN_DEPLOY_USDC) return { code: 'BELOW_DEPLOY_MINIMUM' }
       let sim = await this.simulateOwner(live, deployed, data)
       if (sim.outcome === 'unavailable') {
@@ -1729,7 +1823,7 @@ export class Operator {
     const op = this.newOp(acc, 'activate')
     op.code = 'ARMED'
     this.stash(acc, op, p)
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now() }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}) }
     this.store.save()
     console.log(`[armed] ${acc.accountKey} ${op.opId} armed for ${acc.ctx.address} at Safe nonce ${p.tx.nonce}`)
     return { ...op }
@@ -1745,7 +1839,7 @@ export class Operator {
     const current = acc.ops.find((o) => o.opId === op.opId)
     if (current?.txHash) return this.failOwner(acc, op, 'OWNER_TX_ERROR')
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
     this.armHold.delete(acc.accountKey)
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
     this.execTried.delete(opKey(acc, op))
@@ -1904,7 +1998,7 @@ export class Operator {
         }
         if (acc.armed?.opId !== a.opId) return
         console.log(`[armed] ${acc.accountKey} ${a.opId} executed on chain at block ${block} (its grants are enabled): account started`)
-        this.afterOwner(acc, { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: 0, grants: a.grants }, { blockNumber: block } as TransactionReceipt, depositsFrom)
+        this.afterOwner(acc, { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: 0, grants: a.grants, ...(a.capUsdc ? { capUsdc: a.capUsdc } : {}) }, { blockNumber: block } as TransactionReceipt, depositsFrom)
         return this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(block) })
       }
     }
@@ -1934,9 +2028,10 @@ export class Operator {
     if (this.overBudget(acc)) return this.park(acc, ARM_BUDGET_HOLD_MS)
     // Over the cap the approval waits too: it runs if the excess leaves through a path that keeps the Safe nonce, or
     // the cap is raised. The app reads the excess from funding and offers the withdrawal.
-    if (usdc > this.cap) {
+    const cap = this.activationCap(acc, a.capUsdc)
+    if (usdc > cap) {
       const shown = acc.ops.find((o) => o.opId === a.opId)
-      if (shown?.amountUsdc !== usdc.toString() || shown.capUsdc !== this.cap.toString()) this.patchOp(acc, a.opId, { amountUsdc: usdc.toString(), capUsdc: this.cap.toString() })
+      if (shown?.amountUsdc !== usdc.toString() || shown.capUsdc !== cap.toString()) this.patchOp(acc, a.opId, { amountUsdc: usdc.toString(), capUsdc: cap.toString() })
       return this.park(acc, ARM_CAP_HOLD_MS)
     }
     // The relayer cannot pay for it yet: stay armed, without using up a try. Waiting is not activity, so the watcher
@@ -1954,7 +2049,7 @@ export class Operator {
     // cleared when the account starts, or when the attempt ends in a failure that is final.
     this.patchOp(acc, a.opId, { code: undefined })
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
-    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants }
+    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants, ...(a.capUsdc ? { capUsdc: a.capUsdc } : {}) }
     const op = acc.ops.find((o) => o.opId === a.opId)!
     if (a.execSent) this.retried.add(opKey(acc, op))
     try {
@@ -2008,6 +2103,7 @@ export class Operator {
   private stash(acc: AccountState, op: OpView, p: Prepared): void {
     const o = op as StoredOp
     if ((p.kind === 'activate' || p.kind === 'renew') && p.grants) o.ownerGrants = p.grants
+    if ((p.kind === 'activate' || p.kind === 'renew') && p.capUsdc) o.capUsdc = p.capUsdc
     if ((p.kind === 'stop' || p.kind === 'renew') && p.revokes) o.revokes = p.revokes
     if (p.kind === 'renew' && p.extend) o.extend = true
     o.safeTxHash = p.safeTxHash
@@ -2111,9 +2207,10 @@ export class Operator {
       // gets through, and the chain itself enforces no account cap. Deposits to an account that is already running are
       // outside this check altogether (otto/mamoru#71).
       const usdc = await this.usdcOf(safe)
-      if (usdc > this.cap) {
-        logErr(`[owner] ${op.opId} deposit over cap at send time, not activating:`, { usdc: usdc.toString(), cap: this.cap.toString() })
-        return this.failOwner(acc, op, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: this.cap.toString() })
+      const cap = this.activationCap(acc, p.capUsdc)
+      if (usdc > cap) {
+        logErr(`[owner] ${op.opId} deposit over cap at send time, not activating:`, { usdc: usdc.toString(), cap: cap.toString() })
+        return this.failOwner(acc, op, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: cap.toString() })
       }
     }
     // Keep the hash as soon as the tx is out: if the receipt poll fails, reconciliation reads it later.
@@ -2150,6 +2247,8 @@ export class Operator {
       else this.disarm(acc, 'ALREADY_ACTIVE')
       acc.grants = p.grants ?? []
       acc.policyId = p.grants?.[0]?.grant.policyId ?? this.cfg.policy.policyId
+      // Unknown (a late receipt of an op from before spec 006): the default, the conservative side.
+      acc.signedCapUsdc = p.capUsdc ?? LIVE_CAP_USDC.toString()
       acc.managedTokenIds = []
       acc.depositsAfter = (depositsFrom ?? receipt.blockNumber).toString()
       acc.historyFromBlock = receipt.blockNumber.toString()
@@ -2178,6 +2277,7 @@ export class Operator {
         const replaced = p.extend ? acc.grants.filter((g) => names.has(g.name)) : acc.grants
         acc.superseded = kept([...(acc.superseded ?? []), ...replaced.map((g) => g.permissionId)])
         acc.grants = p.extend ? [...acc.grants.filter((g) => !names.has(g.name)), ...p.grants] : p.grants
+        if (!p.extend) acc.signedCapUsdc = p.capUsdc ?? LIVE_CAP_USDC.toString()
         // The engine restarts on these grants and must not look at the chain from before they were enabled.
         acc.grantsFromBlock = receipt.blockNumber.toString()
         acc.epoch++
@@ -2246,7 +2346,7 @@ export class Operator {
         }
         if (!later('exit') && !acc.active) {
           const r = receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt)
-          this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'activate', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants }, r)
+          this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'activate', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, r)
         } else {
           // It ran but is not the account's approval: its grants are enabled with no engine using them. Remembered, so a stop revokes them.
           const known = new Set([...acc.revoked, ...acc.grants.map((g) => g.permissionId)].map((id) => id.toLowerCase()))
@@ -2265,7 +2365,7 @@ export class Operator {
         acc.superseded = [...new Set([...(acc.superseded ?? []), ...op.ownerGrants.map((g) => g.permissionId).filter((id) => !revokedNow.has(id.toLowerCase()))])]
         this.store.save()
       } else if (op.kind === 'renew' && op.ownerGrants) {
-        this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, extend: op.extend }, receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt))
+        this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, extend: op.extend, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt))
       }
       console.log(`[reconcile] ${op.opId} tx ${hash} landed at block ${block}, confirmed`)
       this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', txHash: hash, block })
@@ -2357,6 +2457,7 @@ export class Operator {
         rpcUrl: this.cfg.rpcUrl,
         bundlerUrl: this.cfg.bundlerUrl,
         policy: this.enginePolicyOf(acc),
+        guardHistory: this.guardHistoryOf(this.enginePolicyOf(acc)),
         account: acc.ctx.address as Address,
         sessionKey: privateKeyToAccount(acc.sessionKey),
         nonceLane: 0,

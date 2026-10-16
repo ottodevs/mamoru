@@ -31,6 +31,7 @@ function fakeOperator(): Operator {
     relayer: { address: '0x1111111111111111111111111111111111111111' },
     relayerBalance: async () => ({ wei: '812345678901234567', cachedAgeMs: 12 }),
     accountsSummary: () => ({ known: 14, active: 9, armed: 1 }),
+    settingsStatus: () => null,
     engineHealthSnapshot: () => [
       { account: '3f9a7c21', lastReviewAt: '2026-10-02T09:14:40.000Z', lastDecisionCode: 'DECIDE_HOLD', consecutiveErrors: 0, lastErrorClass: null, lastErrorAt: null, reviewsLastHour: 58, errorsLastHour: 0 },
       { account: '9b0e41aa', lastReviewAt: '2026-10-02T09:14:55.000Z', lastDecisionCode: null, consecutiveErrors: 4, lastErrorClass: 'rpc_other', lastErrorAt: '2026-10-02T09:14:55.000Z', reviewsLastHour: 12, errorsLastHour: 4 },
@@ -180,6 +181,7 @@ describe('GET /metrics never carries injected secret-shaped free text (finding #
       relayer: { address: '0x1111111111111111111111111111111111111111' },
       relayerBalance: async () => ({ wei: '1', cachedAgeMs: 1 }),
       accountsSummary: () => ({ known: 4, active: 4, armed: 0 }),
+      settingsStatus: () => null,
       engineHealthSnapshot: () => nasty.map((_, i) => tracker.snapshot(`account-${i}`)),
     } as unknown as Operator
 

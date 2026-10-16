@@ -16,6 +16,7 @@ import { otherChainRoutes, type ChainFetch, type ReadGate } from './accounts/oth
 import { apyRoutes } from './apy/routes.ts'
 import { ens } from './ens/routes.ts'
 import { feedbackRoutes, type MattermostFetch } from './feedback.ts'
+import { engineSettingsRoutes } from './engine-settings.ts'
 import type { ApyCache, Fetcher } from './apy/source.ts'
 
 export type AppOptions = {
@@ -87,6 +88,8 @@ export function createApp(options: AppOptions = {}) {
   app.route('/api/ens', ens)
   app.route('/api/apy', apyRoutes(options.apyFetch ?? ((input, init) => fetch(input, init)), options.apyCache))
   app.route('/api', feedbackRoutes(options.mattermostFetch ?? ((input, init) => fetch(input, init))))
+  // Spec 006 (otto/mamoru#147): the operator's signed pull of the active engine settings.
+  app.route('/', engineSettingsRoutes(now))
 
   app.all('/api/*', (c) => apiError(c, 404, 'No such API route.'))
   app.onError((err, c) => {

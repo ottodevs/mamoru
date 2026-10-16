@@ -2228,3 +2228,58 @@ describe('a restarted engine does not look at the chain from before its last ope
     expect(lastEngineBlock([{ opId: 'own-1-activate', block: 900 }, { opId: 'eng-1-1-op-1-enter_swap', block: 120 }, { opId: 'eng-1-1-op-2-enter_mint', block: 131 }, { opId: 'eng-1-1-op-3-enter_swap' }])).toBe(131n)
   })
 })
+
+describe('spec 006: one cap per prepare, and renewals keep the signed cap', () => {
+  const settingsWith = (caps: number[]) => {
+    let i = 0
+    const s = (capUsdc: number) => ({ depth: { impactBps: 30, shareBps: 500 }, capUsdc, guard: { enabled: false, btc: { fallBps: 700, volBps: 8000 }, eth: { fallBps: 900, volBps: 10000 } } })
+    return { forAccount: () => ({ settings: s(caps[Math.min(i++, caps.length - 1)]!), versionId: 1, source: 'd1', override: [] }), status: () => ({}) }
+  }
+  type Internals = { prepared: Map<string, { capUsdc?: string; kind: string }>; startLoop(a: AccountState): void }
+
+  test('a settings pull in the middle of an activation prepare cannot make the summary and the grants disagree', async () => {
+    const w = world(20_000_000n)
+    // The first read of the cap says 100; every later read (a pull landed mid-prepare) says 1000.
+    ;(w.op.cfg as { settings?: unknown }).settings = settingsWith([100, 1000])
+    const tx = await w.op.prepareActivate(ctx)
+    const p = [...(w.op as unknown as Internals).prepared.values()].find((x) => x.kind === 'activate')!
+    expect(p.capUsdc).toBe('100000000')
+    expect(tx.summary.join(' ')).toContain('cap 100.00 USDC')
+    expect(tx.summary.join(' ')).not.toContain('1,000')
+  })
+
+  test('a renewal after a cap raise keeps the limits the account signed, names them, and says the plan changed', async () => {
+    const w = world(20_000_000n)
+    ;(w.op as unknown as Internals).startLoop = () => {}
+    await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+    const acc = w.state.accounts.k!
+    expect(acc.signedCapUsdc).toBe('100000000')
+    acc.grants = acc.grants.map((g) => ({ ...g, grant: { ...g.grant, userOp: { ...g.grant.userOp, validUntil: Math.floor(Date.now() / 1000) + 15 * 86_400 } } }))
+    ;(w.op.cfg as { settings?: unknown }).settings = settingsWith([1000])
+    const tx = await w.op.prepareRenew(ctx)
+    const text = tx.summary.join(' ')
+    expect(text).toContain('keeps the same limits, sized for deposits up to 100.00 USDC')
+    expect(text).toContain('this approval keeps the 100.00 USDC limits you signed')
+    const p = [...(w.op as unknown as Internals).prepared.values()].find((x) => x.kind === 'renew')!
+    expect(p.capUsdc).toBe('100000000')
+  })
+})
+
+test('spec 006: an armed activation that runs later records the cap its signature named as the account signed cap', async () => {
+  const w = world(20_000_000n)
+  ;(w.op as unknown as { startLoop(a: AccountState): void }).startLoop = () => {}
+  const settings = (capUsdc: number) => ({ forAccount: () => ({ settings: { depth: { impactBps: 30, shareBps: 500 }, capUsdc, guard: { enabled: false, btc: { fallBps: 700, volBps: 8000 }, eth: { fallBps: 900, volBps: 10000 } } }, versionId: 1, source: 'd1', override: [] }), status: () => ({}) })
+  ;(w.op.cfg as { settings?: unknown }).settings = settings(500)
+  w.knobs.relayerWei = 100_000_000_000_000n
+  const op = await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+  expect(op).toMatchObject({ code: 'ARMED' })
+  const acc = w.state.accounts.k!
+  expect(acc.armed?.capUsdc).toBe('500000000')
+  // The cap is raised while it waits; the relayer is funded; the watcher runs it.
+  ;(w.op.cfg as { settings?: unknown }).settings = settings(1000)
+  w.knobs.relayerWei = 10n ** 18n
+  ;(w.op as unknown as { relayerBalanceCache: unknown }).relayerBalanceCache = null
+  await (w.op as unknown as { fireArmed(a: AccountState, usdc: bigint): Promise<void> }).fireArmed(acc, 20_000_000n)
+  expect(acc.active).toBe(true)
+  expect(acc.signedCapUsdc).toBe('500000000')
+})

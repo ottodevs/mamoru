@@ -16,6 +16,7 @@ import { readSnapshot, SnapshotLoop, snapshotIntervalMs, type Snapshot } from '.
 import { MULTICALL3 } from '@mamoru/rpc'
 import { StateStore, loadOrCreateKey } from './state.ts'
 import { EntryStore, withHoldValue } from './yield-entries.ts'
+import { EngineSettingsSource, type SettingsOverride } from './engine-settings.ts'
 
 /** Wraps a snapshot reader with #129's hold-value baseline, stored in its own file under `stateDir`. */
 function withYieldLedger(stateDir: string, read: () => Promise<Snapshot>): () => Promise<Snapshot> {
@@ -46,6 +47,24 @@ export type BootOptions = {
   capUsdc?: string
   /** MAMORU_DEPTH = `impactBps,shareBps[,stablesImpactBps]` (otto/mamoru#127); absent: depth sizing off. */
   depth?: string
+  /** MAMORU_SETTINGS_URL (spec 006, otto/mamoru#147): the app Worker that serves the engine settings. Unset: no pull, code defaults and the env knobs above. */
+  settingsUrl?: string
+}
+
+/**
+ * Spec 006: with settings pulled from D1, MAMORU_DEPTH and MAMORU_CAP_USDC become an emergency override. They win for
+ * the knobs they name, the boot log says so, and /metrics reports it, so they cannot be left on unseen.
+ */
+export function settingsOverride(c: Pick<OperatorConfig, 'capUsdc' | 'depth'>, o: Pick<BootOptions, 'capUsdc' | 'depth'>): SettingsOverride {
+  const out: SettingsOverride = {}
+  if (o.capUsdc) out.capUsdc = Number((c.capUsdc ?? 0n) / 1_000_000n)
+  // MAMORU_DEPTH=off forces depth sizing off over D1.
+  if (o.depth === 'off') out.depth = null
+  else if (o.depth && c.depth) {
+    const stables = c.depth.maxImpactBpsByPool?.['pool:USDC/USDT/100']
+    out.depth = { impactBps: c.depth.maxImpactBps, shareBps: c.depth.maxShareBps, ...(stables === undefined ? {} : { stablesImpactBps: stables }) }
+  }
+  return out
 }
 
 /** Whole USDC from the env, as base units; refuses anything that is not a positive whole number up to 1e9. */
@@ -73,7 +92,7 @@ export function parseDepth(v: string | undefined): OperatorConfig['depth'] {
  */
 export function capAndDepth(o: Pick<BootOptions, 'capUsdc' | 'depth'>, policy: PolicyVersion): Pick<OperatorConfig, 'capUsdc' | 'depth'> {
   const capUsdc = parseCapUsdc(o.capUsdc)
-  const depth = parseDepth(o.depth)
+  const depth = parseDepth(o.depth === 'off' ? undefined : o.depth)
   if (capUsdc !== undefined && capUsdc > LIVE_CAP_USDC && !depth) throw new Error('MAMORU_CAP_USDC above the default cap needs MAMORU_DEPTH')
   // Depth sizing applies to target-weights policies only: under any other, a raised cap would be entered unsized.
   if (capUsdc !== undefined && capUsdc > LIVE_CAP_USDC && policy.allocation !== 'target-weights') throw new Error(`MAMORU_CAP_USDC above the default cap needs a target-weights policy, not ${policy.policyId}`)
@@ -103,6 +122,12 @@ export async function bootOperator(o: BootOptions) {
   const relayerClient = createPublicClient({ transport: http(via('relayer'), { batch: true, timeout: 60_000 }) })
   const relayer = new Relayer(loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey), relayerClient, via('relayer'), chainId)
   const bundler = startLiveBundler(client, relayer, chainId)
+  const knobs = capAndDepth(o, policy)
+  let retune = () => {}
+  const settings = o.settingsUrl
+    ? new EngineSettingsSource({ url: o.settingsUrl, secret: o.secret, stateDir: o.stateDir, allocation: policy.allocation, override: settingsOverride(knobs, o), onChange: () => retune() })
+    : null
+  if (settings && settings.status().override.length) console.log(`[settings] EMERGENCY OVERRIDE from env: ${settings.status().override.join(', ')} win over D1 until removed from the env`)
   const operator = new Operator(
     {
       chainId,
@@ -115,7 +140,8 @@ export async function bootOperator(o: BootOptions) {
       maxWaitBlocks: o.maxWaitBlocks ?? 150,
       rpcBudget: rpcBudget(rpcMetrics),
       watchClient,
-      ...capAndDepth(o, policy),
+      ...knobs,
+      ...(settings ? { settings } : {}),
     },
     client,
     relayer,
@@ -139,13 +165,19 @@ export async function bootOperator(o: BootOptions) {
   const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot })
   const eth = await client.getBalance({ address: relayer.address })
   console.log(`[operator] chain ${chainId} live=${live} policy ${policy.policyId} relayer ${relayer.address} (${eth} wei) sha ${gitSha} on http://${server.hostname}:${server.port}`)
+  retune = () => operator.retuneEngines()
+  // The first pull before any engine resumes, so a restart never runs a review or a prepare on stale settings when the
+  // endpoint answers (bounded by the pull timeout; on failure the last-known-good or the defaults run, reported).
+  await settings?.pull()
   operator.resume()
+  settings?.start()
   return {
     operator,
     url: `http://${server.hostname}:${server.port}`,
     stop: () => {
       operator.shutdown()
       snapshot?.stop()
+      settings?.stop()
       server.stop(true)
       bundler.stop()
       proxy.stop()

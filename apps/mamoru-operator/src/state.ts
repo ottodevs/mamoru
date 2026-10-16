@@ -12,6 +12,8 @@ export type StoredOp = OpView & {
   calls?: Execution[]
   /** Owner activate: the grants its tx enables, so a late receipt can still start the engine. */
   ownerGrants?: StoredGrant[]
+  /** activate/renew (spec 006): the cap, in base units, its grants were sized for and its summary named. */
+  capUsdc?: string
   /** Owner stop: the permissionIds its tx revokes. */
   revokes?: Hex[]
   /** Owner op: the Safe transaction hash it was signed for (ExecutionSuccess carries it) and its Safe nonce. */
@@ -40,9 +42,13 @@ export type ArmedActivation = {
   execSent?: boolean
   /** When (ms) the execTransaction was first handed to a provider: nothing of it can be on chain before. */
   sentAt?: number
+  /** Spec 006: the cap (base units) the signed summary named; the activation never takes in more under this signature. */
+  capUsdc?: string
 }
 
 export type AccountState = {
+  /** Spec 006: the cap (base units) the account's current grants were sized for, from its last confirmed activation or renewal. Absent: LIVE_CAP_USDC. */
+  signedCapUsdc?: string
   accountKey: string
   ctx: AccountContext
   /** Registry trust calls already ran on this Safe (first activation). */

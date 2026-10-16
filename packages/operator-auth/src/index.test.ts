@@ -101,3 +101,23 @@ describe('timingSafeEqualHex', () => {
     })
   })
 })
+
+describe('engine settings response signature (spec 006)', () => {
+  test('verifies the body it signed, within the current or previous minute only', async () => {
+    const { settingsResponseSignature, verifySettingsResponse, metricsSignature } = await import('./index.ts')
+    const now = 1_760_000_000_000
+    const minute = Math.floor(now / 60_000)
+    const sig = await settingsResponseSignature('s3cret', '{"a":1}', minute)
+    expect(await verifySettingsResponse('s3cret', '{"a":1}', sig, now)).toBe(true)
+    expect(await verifySettingsResponse('s3cret', '{"a":1}', sig, now + 60_000)).toBe(true)
+    expect(await verifySettingsResponse('s3cret', '{"a":1}', sig, now + 120_000)).toBe(false)
+    // Signed a minute ahead of the verifier (flight time across a boundary, small skew): accepted; two ahead: not.
+    expect(await verifySettingsResponse('s3cret', '{"a":1}', await settingsResponseSignature('s3cret', '{"a":1}', minute + 1), now)).toBe(true)
+    expect(await verifySettingsResponse('s3cret', '{"a":1}', await settingsResponseSignature('s3cret', '{"a":1}', minute + 2), now)).toBe(false)
+    expect(await verifySettingsResponse('s3cret', '{"a":2}', sig, now)).toBe(false)
+    expect(await verifySettingsResponse('other', '{"a":1}', sig, now)).toBe(false)
+    expect(await verifySettingsResponse('s3cret', '{"a":1}', null, now)).toBe(false)
+    // A metrics signature never verifies as a settings response.
+    expect(await verifySettingsResponse('s3cret', '{"a":1}', await metricsSignature('s3cret', 'GET', '/x', minute), now)).toBe(false)
+  })
+})

@@ -96,3 +96,24 @@ export async function verifyMetricsSignature(secret: string, method: string, pat
   const [current, previous] = await Promise.all([metricsSignature(secret, method, path, minute), metricsSignature(secret, method, path, minute - 1)])
   return (await timingSafeEqualHex(current, sig)) || (await timingSafeEqualHex(previous, sig))
 }
+
+/**
+ * Spec 006 (otto/mamoru#147): the app Worker signs the engine-settings body it hands the operator, so the operator
+ * runs only settings the Worker (holder of OPERATOR_SECRET) produced:
+ *
+ *   x-mamoru-sig = hex HMAC-SHA256(OPERATOR_SECRET, `engine-settings-v1 ${unixMinute}\n${body}`)
+ *
+ * A distinct label from metricsSignature's `${method} ${path} ${unixMinute}`, so neither signature can stand in
+ * for the other. The verifier accepts the previous, current and next minute (flight time and small clock skew
+ * between the Worker and the operator); anything older is a replay.
+ */
+export async function settingsResponseSignature(secret: string, body: string, unixMinute: number): Promise<string> {
+  return toHex(await hmacBytes(await hmacKey(secret), new TextEncoder().encode(`engine-settings-v1 ${unixMinute}\n${body}`)))
+}
+
+export async function verifySettingsResponse(secret: string, body: string, sig: string | null | undefined, now: number = Date.now()): Promise<boolean> {
+  if (!sig) return false
+  const minute = Math.floor(now / 60_000)
+  for (const m of [minute, minute - 1, minute + 1]) if (await timingSafeEqualHex(await settingsResponseSignature(secret, body, m), sig)) return true
+  return false
+}

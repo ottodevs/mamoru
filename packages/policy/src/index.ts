@@ -11,3 +11,16 @@ export {
   type GrantContext,
   type Price,
 } from './instantiate.ts'
+export {
+  canonicalSettingsJson,
+  capBaseUnits,
+  DEFAULT_CAP_USDC,
+  DEFAULT_ENGINE_SETTINGS,
+  ENGINE_SETTINGS_BOUNDS,
+  ENGINE_SETTINGS_TEMPLATES,
+  parseEngineSettings,
+  riskyChanges,
+  validateEngineSettings,
+  withEngineSettings,
+  type EngineSettings,
+} from './engine-settings.ts'

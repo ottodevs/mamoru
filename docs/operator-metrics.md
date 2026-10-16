@@ -46,7 +46,10 @@ account keys are shortened to 8 chars. Example (values illustrative):
     "live": true,
     "policyId": "conservador-live-v2",
     "relayer": { "address": "0xRELAYER…", "balanceWei": "812345678901234567", "balanceCachedAgeMs": 12 },
-    "accounts": { "known": 14, "active": 9, "armed": 1 }
+    "accounts": { "known": 14, "active": 9, "armed": 1 },
+    // Spec 006: null without MAMORU_SETTINGS_URL. Else the engine settings versions applied, their source
+    // (d1, last-known-good, default), the last pull and error, and any env knob forced as an emergency override.
+    "settings": { "url": "https://app.mamoru.lol", "source": "d1", "lastPullAt": "…", "lastError": null, "versions": [{ "id": 3, "env": "prod", "canary": false, "template": "…", "hash": "…" }], "override": [] }
   },
   "rpc": {
     // provider host (never the path or an API key; "#1"/"#2" when two providers share a host) -> method -> counters,

@@ -248,7 +248,26 @@ export class Engine {
   }
 
   /** One review: observe at a fixed block, decide, and run at most one operation. */
+  private pendingRetune: { policy: PolicyVersion; guardHistory: EngineConfig['guardHistory'] } | null = null
+
+  /**
+   * Spec 006 (otto/mamoru#147): new engine settings for the next review. Applied at the start of a review, never in
+   * the middle of one, so a review decides and executes under one policy. Only the decision side may change (depth
+   * sizing, guards): the policy id, buckets and session templates must be the ones the engine started with, since
+   * its sessions were granted for them.
+   */
+  retune(policy: PolicyVersion, guardHistory: EngineConfig['guardHistory']): void {
+    const cur = this.cfg.policy
+    if (policy.policyId !== cur.policyId || policy.session !== cur.session || policy.buckets !== cur.buckets) throw new Error(`retune: ${policy.policyId} is not a retuning of ${cur.policyId}`)
+    this.pendingRetune = { policy, guardHistory }
+  }
+
   async review(): Promise<ReviewResult> {
+    if (this.pendingRetune) {
+      this.cfg.policy = this.pendingRetune.policy
+      this.cfg.guardHistory = this.pendingRetune.guardHistory
+      this.pendingRetune = null
+    }
     await this.resumeIncluded()
     let obs: Observation
     try {

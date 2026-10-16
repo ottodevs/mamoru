@@ -73,6 +73,8 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
       policyId: op.cfg.policy.policyId,
       relayer: { address: op.relayer.address, balanceWei: relayerBalance.wei, balanceCachedAgeMs: relayerBalance.cachedAgeMs },
       accounts: op.accountsSummary(),
+      // Spec 006 (otto/mamoru#147): the engine settings versions applied, where they came from, and any env override.
+      settings: op.settingsStatus(),
     },
     rpc: {
       cumulative: rpc.cumulative,
