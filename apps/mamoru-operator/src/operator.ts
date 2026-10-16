@@ -135,6 +135,21 @@ export function nextReview(more: boolean, followUps: number, overBudget: boolean
   if (more && !overBudget && followUps < FOLLOW_UP_MAX) return { ms: Math.min(FOLLOW_UP_MS, reviewMs), followUps: followUps + 1 }
   return { ms: reviewMs, followUps: 0 }
 }
+/** otto/mamoru#140 (part2 #9): the most a pending owner tx (prepared, not yet signed) holds engine review for. */
+export const REVIEW_HOLD_MAX_MS = 5 * 60_000
+/**
+ * Whether engine review is held this tick for a pending non-activate prepare on the account, and since when. An
+ * owner tx prepared on the current positions is waiting for its passkey: an engine reduce or re-range now would
+ * change the liquidity it withdraws (GS013), so review waits for it to run or expire. But `prepare` needs no
+ * passkey, so without a bound a compromised app Worker (or a scripted retry loop) could keep one unexpired prepare
+ * outstanding forever and starve the account's engine indefinitely. Bounded to REVIEW_HOLD_MAX_MS: past it, review
+ * runs anyway and a stale prepare simply reverts on submit (GS013) and is prepared again, same as always.
+ */
+export function reviewHold(pending: boolean, since: number | undefined, now: number, maxMs = REVIEW_HOLD_MAX_MS): { hold: boolean; since?: number } {
+  if (!pending) return { hold: false, since: undefined }
+  const at = since ?? now
+  return { hold: now - at < maxMs, since: at }
+}
 /** The relayer does not pay to deploy a Safe that holds less than this (1 USDC). */
 export const MIN_DEPLOY_USDC = 1_000_000n
 /**
@@ -312,6 +327,8 @@ export class Operator {
   private readonly locks = new Map<string, Lock>()
   private readonly runners = new Map<string, Runner>()
   private readonly reconciled = new Map<string, number>()
+  /** Since when (ms) engine review has been held for a pending non-activate prepare on this account; see reviewHold. */
+  private readonly reviewHeldSince = new Map<string, number>()
   private armTimer: ReturnType<typeof setTimeout> | null = null
   /** Armed watcher, in memory: when each armed Safe was last read, and when its owner was last seen (funding poll, deposit). */
   private readonly armRead = new Map<string, number>()
@@ -462,8 +479,15 @@ export class Operator {
     return l
   }
 
-  /** The stored account for this context; the Safe address is recomputed from the context and must match. */
-  account(ctx: AccountContext): { acc: AccountState; live: LiveAccount } {
+  /**
+   * The stored account for this context; the Safe address is recomputed from the context and must match, in both
+   * directions (otto/mamoru#140 part1 #6): an accountKey keeps the same Safe, and a Safe is never known under a
+   * second accountKey — a compromised app Worker cannot alias a fresh accountKey onto an address already tracked,
+   * to slip past that Safe's lock or its owner-failure budget. `readOnly` (GET /funding, GET /ops): an accountKey
+   * never seen before gets the same empty view any new account would, but it is not written into the state file —
+   * a compromised Worker (or a scripted GET loop) cannot grow the account store or trigger a disk write with reads.
+   */
+  account(ctx: AccountContext, opts: { readOnly?: boolean } = {}): { acc: AccountState; live: LiveAccount } {
     if (ctx.chainId !== this.cfg.chainId) throw new HttpError(400, 'CHAIN_MISMATCH', `account is on ${ctx.chainId}, operator on ${this.cfg.chainId}`)
     let live: LiveAccount
     try {
@@ -474,9 +498,13 @@ export class Operator {
     }
     let acc = this.store.state.accounts[ctx.accountKey]
     if (!acc) {
+      const other = Object.values(this.store.state.accounts).find((a) => a.ctx.address.toLowerCase() === ctx.address.toLowerCase())
+      if (other) throw new HttpError(409, 'ACCOUNT_MISMATCH', 'this Safe is already known under another accountKey')
       acc = { accountKey: ctx.accountKey, ctx, trusted: false, active: false, grants: [], revoked: [], managedTokenIds: [], depositsAfter: '0', historyFromBlock: '0', epoch: 0, ops: [], seq: 0 }
-      this.store.state.accounts[ctx.accountKey] = acc
-      this.store.save()
+      if (!opts.readOnly) {
+        this.store.state.accounts[ctx.accountKey] = acc
+        this.store.save()
+      }
     } else if (acc.ctx.address.toLowerCase() !== ctx.address.toLowerCase()) {
       throw new HttpError(409, 'ACCOUNT_MISMATCH', 'accountKey is bound to another Safe')
     }
@@ -529,7 +557,7 @@ export class Operator {
   }
 
   async funding(ctx: AccountContext): Promise<FundingView> {
-    const { acc, live } = this.account(ctx)
+    const { acc, live } = this.account(ctx, { readOnly: true })
     // The app is open on this account: an armed activation is watched at full pace again.
     if (acc.armed) this.armSeen.set(acc.accountKey, Date.now())
     const r = await readSafe(this.client, live.safe)
@@ -601,7 +629,7 @@ export class Operator {
 
   /** GET /ops. Failed engine ops are internal attempts: left out unless `all` (debugging). */
   ops(ctx: AccountContext, after: string | null, includeFailedEngine = false): { ops: OpView[] } {
-    const { acc } = this.account(ctx)
+    const { acc } = this.account(ctx, { readOnly: true })
     this.reconcileSoon(acc)
     const all = collapseFailed(includeFailedEngine ? acc.ops : acc.ops.filter((o) => !(o.opId.startsWith('eng-') && o.state === 'failed')))
     if (!after) return { ops: all }
@@ -1092,7 +1120,10 @@ export class Operator {
           await this.receiveQuote(a.asset, 1_000_000n, block, this.cfg.policy.execution.slippageBps)
           return a
         } catch (e) {
-          return { asset: a.asset, available: false, reason: `No Uniswap quote for ${a.asset} right now (${(e as Error).message.split('\n')[0]})` }
+          // otto/mamoru#140 (part1 #7): the caught exception can be a raw RPC/viem error (an HttpRequestError's
+          // message carries the full provider URL, key included); never interpolate it into a client-facing reason.
+          logErr(`[withdraw-assets] ${a.asset} quote unavailable:`, e)
+          return { asset: a.asset, available: false, reason: `No Uniswap quote for ${a.asset} right now; try again shortly` }
         }
       }),
     )
@@ -1124,10 +1155,13 @@ export class Operator {
    * plus swaps of what the reduce frees back to USDC; sized from a simulated decrease+collect at the prepare block.
    */
   private async reducePlan(acc: AccountState, safe: Address, r: SafeRead, amount: bigint, slip: number): Promise<{ reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[]; swaps: SwapBack[] }> {
-    const open = r.positions.filter((p) => p.liquidity > 0n)
+    // A position can be worth collecting at 0 current liquidity if a past decrease left tokensOwed uncollected.
+    const open = r.positions.filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n)
     const value = open.reduce((s, p) => s + positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96), 0n)
     const need = amount - r.usdc
-    if (value === 0n) throw new HttpError(409, 'INSUFFICIENT_FUNDS', `idle ${r.usdc} USDC and no position to reduce`)
+    // otto/mamoru#140 (part1 #4): no open position is not "nothing to withdraw" — idle non-USDC tokens (left by an
+    // enter_swap, a close_position, or a failed enter_mint) still swap back below. The loop's own check a few lines
+    // down (`target >= value`) is the real "nothing left to free" answer, reached only after that swap is tried.
     const keep = BigInt(10_000 - slip)
     const order = this.bucketPools(acc)
     let margin = 103n
@@ -2208,9 +2242,15 @@ export class Operator {
             runner.pastActivation = true
           }
           // An owner tx prepared on the current positions is waiting for its passkey: an engine reduce or
-          // re-range now would change the liquidity it withdraws (GS013). Hold until it runs or expires.
+          // re-range now would change the liquidity it withdraws (GS013). Hold until it runs or expires — but
+          // only up to REVIEW_HOLD_MAX_MS: an unsigned prepare needs no passkey, so otherwise a compromised app
+          // Worker (or a retry loop) could keep one outstanding forever and starve this account's engine.
           const now = Date.now()
-          if ([...this.prepared.values()].some((p) => p.accountKey === acc.accountKey && p.kind !== 'activate' && p.expires > now)) {
+          const pendingOwnerTx = [...this.prepared.values()].some((p) => p.accountKey === acc.accountKey && p.kind !== 'activate' && p.expires > now)
+          const held = reviewHold(pendingOwnerTx, this.reviewHeldSince.get(acc.accountKey), now)
+          if (held.since !== undefined) this.reviewHeldSince.set(acc.accountKey, held.since)
+          else this.reviewHeldSince.delete(acc.accountKey)
+          if (held.hold) {
             console.log(`[engine ${acc.accountKey}] owner tx pending, review held`)
             return
           }
@@ -2304,6 +2344,7 @@ export class Operator {
     r.stopped = true
     if (r.timer) clearTimeout(r.timer)
     this.runners.delete(key)
+    this.reviewHeldSince.delete(key)
     console.log(`[engine ${key}] loop stopped`)
   }
 

@@ -23,6 +23,9 @@ export type PoolPosition = {
   inRange: boolean
   amount0: bigint
   amount1: bigint
+  /** Settled fees/principal (from a past collect-less decrease) the position already owes, not reflected in amount0/amount1: see positionUsdc. */
+  tokensOwed0: bigint
+  tokensOwed1: bigint
 }
 
 export type PoolPrice = { sqrtPriceX96: bigint; tick: number }
@@ -71,8 +74,13 @@ export function priceOf(pool: string, sqrtPriceX96: bigint): { asset: string; nu
   return e.token0 === 'USDC' ? { asset: e.token1!, num: sqrtPriceX96 * sqrtPriceX96, den: Q192 } : { asset: e.token0!, num: Q192, den: sqrtPriceX96 * sqrtPriceX96 }
 }
 
+/**
+ * otto/mamoru#140 (part2 #8): readSafe's amount0/amount1 come only from current liquidity; tokensOwed0/1 (fees, or
+ * principal left by a decrease whose collect has not run yet) sit on the position too and are just as collectible
+ * — collect() always sweeps both. Valuation counts them so a position is never reported worth less than it is.
+ */
 export function positionUsdc(p: PoolPosition, sqrtPriceX96: bigint): bigint {
-  return inUsdc(p.pool, p.token0, p.amount0, sqrtPriceX96) + inUsdc(p.pool, p.token1, p.amount1, sqrtPriceX96)
+  return inUsdc(p.pool, p.token0, p.amount0 + p.tokensOwed0, sqrtPriceX96) + inUsdc(p.pool, p.token1, p.amount1 + p.tokensOwed1, sqrtPriceX96)
 }
 
 /** Everything the Safe holds at one block: balances and its positions in every registry pool that pairs USDC. Two eth_call through Multicall3. */
@@ -105,9 +113,9 @@ export async function readSafe(client: PublicClient, safe: Address): Promise<Saf
     if (!pool) continue
     const e = entry(pool)
     const price = prices[pool]!
-    const [tickLower, tickUpper, liquidity] = [p[5], p[6], p[7]]
+    const [tickLower, tickUpper, liquidity, tokensOwed0, tokensOwed1] = [p[5], p[6], p[7], p[10], p[11]]
     const { amount0, amount1 } = amountsForLiquidity(price.sqrtPriceX96, tickLower, tickUpper, liquidity)
-    positions.push({ tokenId, pool, token0: e.token0!, token1: e.token1!, fee: e.fee!, liquidity, tickLower, tickUpper, inRange: price.tick >= tickLower && price.tick < tickUpper, amount0, amount1 })
+    positions.push({ tokenId, pool, token0: e.token0!, token1: e.token1!, fee: e.fee!, liquidity, tickLower, tickUpper, inRange: price.tick >= tickLower && price.tick < tickUpper, amount0, amount1, tokensOwed0, tokensOwed1 })
   }
   const live = prices[LIVE_POOL]!
   return { block: blockNumber, deployed: !!code && code !== '0x', eth, usdc: tokens.USDC ?? 0n, cbbtc: tokens.cbBTC ?? 0n, sqrtPriceX96: live.sqrtPriceX96, tick: live.tick, tokens, prices, positions }

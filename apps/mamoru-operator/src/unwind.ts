@@ -19,7 +19,10 @@ export function reduceOrder(positions: PoolPosition[], bucketPools: string[]): P
     const i = bucketPools.indexOf(p.pool)
     return i < 0 ? bucketPools.length : i
   }
-  return positions.filter((p) => p.liquidity > 0n).sort((a, b) => rank(a) - rank(b) || (a.tokenId < b.tokenId ? -1 : 1))
+  // otto/mamoru#140 (part1 #4 / part2 #8): a position can be worth decreasing+collecting with 0 current liquidity
+  // if a past decrease left tokensOwed uncollected — collect() sweeps it regardless of how much liquidity a call
+  // in the same batch removes. Excluding it here left that value with no path out of the Safe.
+  return positions.filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n).sort((a, b) => rank(a) - rank(b) || (a.tokenId < b.tokenId ? -1 : 1))
 }
 
 /**

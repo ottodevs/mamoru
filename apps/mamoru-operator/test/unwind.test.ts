@@ -23,6 +23,8 @@ const pos = (tokenId: bigint, pool: string, usdc: bigint, usdcIs0: boolean): Poo
   inRange: false,
   amount0: usdcIs0 ? usdc : 0n,
   amount1: usdcIs0 ? 0n : usdc,
+  tokensOwed0: 0n,
+  tokensOwed1: 0n,
 })
 const risk = pos(3n, 'pool:WETH/USDC/3000', 2_000_000n, false)
 const btc = pos(2n, 'pool:USDC/cbBTC/500', 8_000_000n, true)

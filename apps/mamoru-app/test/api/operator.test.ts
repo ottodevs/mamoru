@@ -24,8 +24,8 @@ async function onboard(h: ReturnType<typeof harness>, passkey = PASSKEY_A) {
   return { cookie: sessionCookie(res), owner: (await res.json()) as OwnerResponse }
 }
 
-const hmac = (method: string, path: string, header: string, body: string) =>
-  createHmac('sha256', OPERATOR_SECRET).update(`${method} ${path}\n${header}\n${body}`).digest('hex')
+const hmac = (method: string, path: string, header: string, ts: string, body: string) =>
+  createHmac('sha256', OPERATOR_SECRET).update(`${method} ${path}\n${header}\n${ts}\n${body}`).digest('hex')
 
 describe('live config', () => {
   test('LIVE_FUNDS=1 with an operator opens the gate with the 100 USDC cap', async () => {
@@ -87,7 +87,10 @@ describe('operator proxy', () => {
     const ctx = JSON.parse(Buffer.from(header, 'base64url').toString('utf8')) as AccountContext
     expect(ctx).toMatchObject({ accountKey: owner.accountKey, chainId: 8453, address: owner.address, owners: owner.owners, passkey: PASSKEY_A })
     expect(ctx.saltNonce).toMatch(/^\d+$/)
-    expect(s!.headers.get('x-mamoru-sig')).toBe(hmac('GET', path, header, ''))
+    const ts = s!.headers.get('x-mamoru-ts')!
+    expect(ts).toMatch(/^\d+$/)
+    expect(Math.abs(Date.now() / 1000 - Number(ts))).toBeLessThan(5)
+    expect(s!.headers.get('x-mamoru-sig')).toBe(hmac('GET', path, header, ts, ''))
   })
 
   test('POST forwards the raw body and signs it', async () => {
@@ -101,7 +104,7 @@ describe('operator proxy', () => {
     expect(((await res.json()) as { echoed: unknown }).echoed).toEqual(JSON.parse(raw))
     const s = op.seen[0]!
     expect(s.body).toBe(raw)
-    expect(s.headers.get('x-mamoru-sig')).toBe(hmac('POST', path, s.headers.get('x-mamoru-account')!, raw))
+    expect(s.headers.get('x-mamoru-sig')).toBe(hmac('POST', path, s.headers.get('x-mamoru-account')!, s.headers.get('x-mamoru-ts')!, raw))
   })
 
   test('every live route is forwarded', async () => {

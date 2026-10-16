@@ -7,10 +7,24 @@ import type { SnapshotLoop } from './snapshot.ts'
 import type { RpcMetrics } from './metrics.ts'
 import { HttpError, type Operator } from './operator.ts'
 
-/** hex HMAC-SHA256(secret, `${method} ${path}\n${header}\n${body}`), path with its query string. */
-export function operatorSignature(secret: string, method: string, path: string, header: string, body: string): string {
-  return createHmac('sha256', secret).update(`${method} ${path}\n${header}\n${body}`).digest('hex')
+/**
+ * hex HMAC-SHA256(secret, `${method} ${path}\n${header}\n${ts}\n${body}`), `ts` the caller's unix-seconds clock
+ * (header `x-mamoru-ts`), path with its query string. otto/mamoru#140 (part1 #6): `ts` is signed, not read as a
+ * separate unauthenticated field, and the verifier below rejects one more than REQUEST_SKEW_MS off its own clock
+ * — a captured request (header, sig, body) cannot be replayed past that window.
+ *
+ * `ts` omitted (`null`) signs the old 3-line payload with no skew check: the transition form, so the app Worker
+ * (apps/mamoru-app) and this operator can be deployed in either order without a window where requests fail. Deploy
+ * the operator first — it already verifies both forms — then the app Worker, the side that starts sending
+ * `x-mamoru-ts`. Once every caller has run with it for a while, drop the no-ts fallback in a follow-up change.
+ */
+export function operatorSignature(secret: string, method: string, path: string, header: string, body: string, ts: string | null = null): string {
+  const payload = ts !== null ? `${method} ${path}\n${header}\n${ts}\n${body}` : `${method} ${path}\n${header}\n${body}`
+  return createHmac('sha256', secret).update(payload).digest('hex')
 }
+
+/** How far a request's `x-mamoru-ts` may sit from this operator's clock before it is refused as stale. */
+export const REQUEST_SKEW_MS = 60_000
 
 function decodeContext(header: string): AccountContext {
   const ctx = JSON.parse(Buffer.from(header, 'base64url').toString('utf8')) as AccountContext
@@ -92,7 +106,13 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
       const body = req.method === 'POST' ? await req.text() : ''
       const header = req.headers.get('x-mamoru-account') ?? ''
       const sig = req.headers.get('x-mamoru-sig') ?? ''
-      const expected = operatorSignature(opts.secret, req.method, path, header, body)
+      const ts = req.headers.get('x-mamoru-ts')
+      // otto/mamoru#140: a signed ts outside the accepted clock skew is a replay of an old captured request, not a
+      // forged one — refused before the signature is even checked, with the same unauthorized shape either way.
+      if (ts !== null && (!/^\d+$/.test(ts) || Math.abs(Date.now() - Number(ts) * 1000) > REQUEST_SKEW_MS)) {
+        return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+      }
+      const expected = operatorSignature(opts.secret, req.method, path, header, body, ts)
       if (!header || sig.length !== expected.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
       let ctx: AccountContext
       try {

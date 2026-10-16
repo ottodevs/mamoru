@@ -32,11 +32,14 @@ export function base64url(text: string): string {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
-/** hex HMAC-SHA256(secret, `${method} ${path}\n${header}\n${body}`), as the operator verifies it. */
-export async function operatorSignature(secret: string, method: string, path: string, header: string, body: string): Promise<string> {
+/**
+ * hex HMAC-SHA256(secret, `${method} ${path}\n${header}\n${ts}\n${body}`), as the operator verifies it (otto/mamoru#140
+ * part1 #6: `ts`, unix seconds, is signed so a captured request cannot be replayed past the operator's skew window).
+ */
+export async function operatorSignature(secret: string, method: string, path: string, header: string, ts: string, body: string): Promise<string> {
   const enc = new TextEncoder()
   const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
-  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(`${method} ${path}\n${header}\n${body}`)))
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(`${method} ${path}\n${header}\n${ts}\n${body}`)))
   return Array.from(mac, (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
@@ -69,8 +72,9 @@ export function operatorRoutes(operatorFetch: OperatorFetch) {
     const url = new URL(c.req.url)
     const path = url.pathname + url.search
     const header = base64url(JSON.stringify(accountContext(row)))
-    const sig = await operatorSignature(env.OPERATOR_SECRET, method, path, header, body)
-    const headers: Record<string, string> = { 'x-mamoru-account': header, 'x-mamoru-sig': sig, accept: 'application/json' }
+    const ts = Math.floor(Date.now() / 1000).toString()
+    const sig = await operatorSignature(env.OPERATOR_SECRET, method, path, header, ts, body)
+    const headers: Record<string, string> = { 'x-mamoru-account': header, 'x-mamoru-sig': sig, 'x-mamoru-ts': ts, accept: 'application/json' }
     if (method !== 'GET') headers['content-type'] = 'application/json'
 
     let res: Response
