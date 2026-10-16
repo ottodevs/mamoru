@@ -55,9 +55,9 @@ What this says:
 At every entry, at the decision block, for the bucket's pool:
 
 - `shareRoom`: value of the liquidity the account may still add so its in-range liquidity stays at or under
-  `maxShareBps` of the pool's active liquidity.
+  `maxShareBps` of the pool's liquidity (the smaller of the active and the window mean, at the TWAP; see Manipulation).
 - `swapRoom` / `sellRoom`: the largest sale of savings (for an entry) or of the volatile token (for selling back an
-  excess) whose average execution impact is at most `maxImpactBps` against the active liquidity, the pool fee aside
+  excess) whose average execution impact is at most half of `maxImpactBps` against that liquidity, the pool fee aside
   (constant-liquidity, linearised: Δ1 = b·L·√P, Δ0 = b·L/√P, b the impact as a fraction). It does not see liquidity
   beyond the current tick range, so the engine also checks the real QuoterV2 quote (which crosses ticks) before
   sending an entry swap, and refuses it with `EHG_SWAP_IMPACT_OVER_LIMIT` when it is worse than the limit.
@@ -100,31 +100,58 @@ fees. Idle: average share of the account held as USDC over the reviews. Waits: r
 
 | Window | Deposit | Today: return / max DD / idle | Depth sizing: return / max DD / idle | Waits |
 |---|---|---|---|---|
-| Sep 2026 | 1k | +2.56% / 1.43% / 0.8% | +2.60% / 1.43% / 0.6% | 1 |
-| Sep 2026 | 10k | +2.46% / 1.42% / 0.9% | +2.66% / 1.42% / 0.7% | 5 |
-| Sep 2026 | 100k | +1.04% / 1.83% / 0.8% | +2.34% / 1.74% / 2.4% | 1,489 |
-| Sep 2026 | 1M | +2.12% / 1.59% / 0.6% | +2.07% / 1.33% / 50.2% | 8,641 |
+| Sep 2026 | 1k | +2.56% / 1.43% / 0.8% | +2.66% / 1.43% / 0.5% | 11 |
+| Sep 2026 | 10k | +2.46% / 1.42% / 0.9% | +2.72% / 1.42% / 0.5% | 28 |
+| Sep 2026 | 100k | +1.04% / 1.83% / 0.8% | +2.35% / 1.74% / 2.5% | 1,500 |
+| Sep 2026 | 1M | +2.12% / 1.59% / 0.6% | +2.06% / 1.31% / 50.5% | 8,641 |
 | Oct 2025 | 1k | −3.33% / 7.62% / 0.5% | −3.33% / 7.62% / 0.5% | 0 |
-| Oct 2025 | 10k | −2.84% / 7.45% | −2.84% / 7.45% | 0 |
-| Oct 2025 | 100k | −2.70% / 7.19% | −2.70% / 7.19% | 0 |
-| Oct 2025 | 1M | −3.11% / 7.43% / 1.1% | −2.76% / 7.71% / 34.2% | 1,009 |
-| Feb 2025 | 1k | −3.58% / 5.63% / 0.9% | −3.58% / 5.63% / 0.9% | 0 |
-| Feb 2025 | 10k | −3.43% / 5.61% | −3.43% / 5.61% | 0 |
-| Feb 2025 | 100k | −2.98% / 5.92% / 1.9% | −4.01% / 5.93% / 2.8% | 44 |
-| Feb 2025 | 1M | −3.14% / 6.05% / 6.2% | −1.93% / 5.68% / 15.8% | 1,009 |
+| Oct 2025 | 10k | −2.84% / 7.45% / 0.6% | −2.84% / 7.45% / 0.6% | 0 |
+| Oct 2025 | 100k | −2.70% / 7.19% / 0.6% | −2.70% / 7.19% / 0.6% | 0 |
+| Oct 2025 | 1M | −3.11% / 7.43% / 1.1% | −2.72% / 7.70% / 34.3% | 1,009 |
+| Feb 2025 | 1k | −3.58% / 5.63% / 0.9% | −3.61% / 5.62% / 0.9% | 2 |
+| Feb 2025 | 10k | −3.43% / 5.61% / 1.0% | −3.44% / 5.61% / 0.9% | 5 |
+| Feb 2025 | 100k | −2.98% / 5.92% / 1.9% | −3.73% / 6.07% / 2.3% | 78 |
+| Feb 2025 | 1M | −3.14% / 6.05% / 6.2% | −2.40% / 5.74% / 15.3% | 1,009 |
+
+Depth sizing as built: read at the TWAP, liquidity = the smaller of the active and the window's (the Lab uses the
+window minimum, harsher than the harmonic mean the live code reads), swaps sized to half the impact budget.
 
 Reading:
 
-- **Gate at 1k passes**: equal or better in all three windows. Nothing changes for today's account sizes.
-- At 10k and 100k in September, depth sizing is clearly better (100k: +2.34% vs +1.04%). Today's sizing pushes the
+- **At 1k the strict gate misses by 0.03 pp in February 2025** (−3.61% vs −3.58%, max drawdown 5.62% vs 5.63%), and
+  is better in September (+2.66% vs +2.56%) and equal in October. The two waits are real: at the end of January 2025
+  the USDC/USDT 0.01% pool's liquidity over the 30-minute window fell to 0.9% of its spot value (a young, thin pool),
+  and the conservative liquidity rule held the entry. That is the case the rule exists for; whether 0.03 pp in a crash
+  week is an acceptable price for it is Ot's call (decision 4 below).
+- At 10k and 100k in September depth sizing is clearly better (100k: +2.35% vs +1.04%): today's sizing pushes the
   stables share into a 199k pool and pays for it in impact.
-- At 1M the stables bucket cannot take its 50%: about half the account waits as USDC. Return is about the same in
-  September (+2.07% vs +2.12%) with a lower drawdown, and better in both crash weeks. The waiting money is the cost
-  of not having a deeper stables venue (phase 3).
-- **One regression to understand before any cap goes up**: February 2025 at 100k, −4.01% vs −2.98%, with 44
-  waits and the same drawdown. The entry is split over more steps in a falling week, and the order of entries
-  across buckets changes. Not explained yet. It must be explained (and fixed or
-  accepted with a reason) before `MAMORU_CAP_USDC` goes over 10k.
+- At 1M the stables bucket cannot take its 50%: about half the account waits as USDC. Return about the same in
+  September with a lower drawdown, better in both crash weeks.
+- **February 2025 at 100k is worse** (−3.73% vs −2.98%, drawdown 6.07% vs 5.92%). The entry is split over more steps
+  in a falling week and the order of entries across buckets changes. Not explained yet. It must be explained (and
+  fixed or accepted with a reason) before `MAMORU_CAP_USDC` goes over 10k.
+
+## Manipulation
+
+Slot0, the active liquidity and a quote at the block we read can all be moved by a swap or by liquidity added in that
+same block. Nothing in this rule trusts them alone:
+
+- `depthOf` prices the range and the share at the **TWAP tick**, and reads liquidity as the smaller of the active and
+  the window's **harmonic-mean liquidity** (`secondsPerLiquidityCumulativeX128` from the same `observe` call as the
+  TWAP). Liquidity added for one block adds no room; a pushed price moves no room. No TWAP or no mean: no room.
+- The existing EHG gate refuses any proposal when the spot tick is more than `maxTwapDeviationTicks` (100) from the
+  TWAP, or the TWAP is unavailable (`EHG_PRICE_DIVERGENCE`, `EHG_TWAP_UNAVAILABLE`).
+- The engine reads the TWAP again at the block it quotes. A quote under what the input buys at the TWAP, after fee,
+  less `maxImpactBps`, is refused before anything is sent (`EHG_SWAP_IMPACT_OVER_LIMIT`), and that floor is the router
+  minimum when it is above the usual slippage minimum. Whatever the price does before inclusion, the swap does not
+  execute worse than the limit against the TWAP; if it would, it reverts.
+- Swaps are sized to half the impact budget, so the other half is headroom for the price to move until inclusion.
+- Limit: with depth sizing off (today's live path) the engine's minimum out still comes from the spot quote with
+  `slippageBps`; this change leaves that path byte-identical, and the EHG deviation gate is what protects it today.
+
+Tests: every pool's slot0 pushed 2,000 ticks inside the block, TWAP unchanged: the review holds with
+`EHG_PRICE_DIVERGENCE`. A pushed spot and 1,000x flash liquidity leave the depth room unchanged. A quote 1% under the
+TWAP price is under the floor.
 
 ## Phases
 
@@ -167,3 +194,5 @@ grants, its own review. Until then large stables shares wait as USDC, and the ap
 2. Large stables shares: wait as USDC (built), or spread the overflow over the other buckets (changes the risk mix:
    more BTC and ETH than the policy says). Recommended: wait, and add a stables venue in phase 3.
 3. Cap steps after phase 1: 1,000, then 10,000, after the February 100k regression is explained.
+4. Accept the 0.03 pp at 1k in February 2025 as the price of the conservative liquidity rule, or relax it (e.g. the
+   harmonic mean only, without the minimum with spot).
