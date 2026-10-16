@@ -69,6 +69,15 @@ describe('marketOf: 24 h history from TWAP cumulatives', () => {
     const expected = Math.round(10 * Math.log(1.0001) * Math.sqrt((365 * 86_400) / W) * 10_000)
     expect(Math.abs(m.realizedVol24hBps! - expected)).toBeLessThanOrEqual(1)
   })
+  test('irregular samples: a point half a window or more before its time abstains', () => {
+    const flat = (t: number) => ({ time: t, tickCumulative: BigInt(t) * 100n })
+    // 10-minute samples (up to 599 s old): fine.
+    expect(marketOf(now, W, (t) => flat(t - (t % 600))).realizedVol24hBps).toBe(0)
+    // One point 900 s old would make a 900 s and a 2,700 s interval: abstain.
+    expect(marketOf(now, W, (t) => flat(t === now - 10 * W ? t - 900 : t))).toEqual({ twap24hAgoTick: null, realizedVol24hBps: null })
+    // A point after the time asked is not a reading of that time.
+    expect(marketOf(now, W, (t) => flat(t === now - 10 * W ? t + 1 : t))).toEqual({ twap24hAgoTick: null, realizedVol24hBps: null })
+  })
   test('a window that does not divide 24 h abstains', () => {
     expect(marketOf(now, 700, (t) => ({ time: t, tickCumulative: 0n }))).toEqual({ twap24hAgoTick: null, realizedVol24hBps: null })
   })
