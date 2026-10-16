@@ -116,5 +116,8 @@ it pays, 6 volatility-targeted weights) go first.
 
 - Lab windows are cut at their start: the 7-day EMA and 7-day volatility use the history inside the window (at
   least 24 h), so in a 7-day window they never see a full week. Live would have it.
+- `vol24hBps` becomes available at 80% coverage of a day (about 19 h into a window), the other figures at 24 h. Left
+  as run (review finding 1 on PR #56): changing it now would mean a second TEST run.
+- The reduced edge threshold of a skew rule applies to every position of the pool, centred ones too (finding 2).
 - The skew applies to every new mint of a volatile pool in the regime, top-ups included, not only re-mints.
 - Same simulator limits as spec 004: 5-10 min samples, single-range swap impact, no MEV.
