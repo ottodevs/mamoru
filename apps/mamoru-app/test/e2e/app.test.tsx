@@ -431,15 +431,19 @@ describe('renewing the approval', () => {
   test('each approval is asked once per visit, even with storage blocked', () => {
     const store = new Map<string, string>()
     const storage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) }
-    expect(askedBefore('t:a', storage)).toBe(false)
-    expect(askedBefore('t:a', storage)).toBe(true)
+    expect(askedBefore('t:a', () => storage)).toBe(false)
+    expect(askedBefore('t:a', () => storage)).toBe(true)
     expect(store.get('t:a')).toBe('1')
     const blocked = { getItem: () => { throw new Error('blocked') }, setItem: () => { throw new Error('blocked') } }
-    expect(askedBefore('t:b', blocked)).toBe(false)
-    expect(askedBefore('t:b', blocked)).toBe(true)
+    expect(askedBefore('t:b', () => blocked)).toBe(false)
+    expect(askedBefore('t:b', () => blocked)).toBe(true)
+    // The browser denies storage itself: reading sessionStorage throws a SecurityError.
+    const denied = () => { throw new DOMException('denied', 'SecurityError') }
+    expect(askedBefore('t:d', denied)).toBe(false)
+    expect(askedBefore('t:d', denied)).toBe(true)
     // A key a previous page load of this tab already asked: storage remembers it.
     store.set('t:c', '1')
-    expect(askedBefore('t:c', storage)).toBe(true)
+    expect(askedBefore('t:c', () => storage)).toBe(true)
   })
 
   test('the dialog is closed until Home has opened in the browser', async () => {

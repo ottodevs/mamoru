@@ -717,10 +717,18 @@ export function renewAskFor(f: FundingView | undefined, renewing: boolean): stri
 /** Keys already asked in this page load: the guarantee holds even when storage is blocked. */
 const askedThisLoad = new Set<string>()
 
-export function askedBefore(key: string, storage: Pick<Storage, 'getItem' | 'setItem'> | null = typeof sessionStorage === 'undefined' ? null : sessionStorage): boolean {
+type AskStorage = Pick<Storage, 'getItem' | 'setItem'>
+
+/** Even reading `sessionStorage` can throw (a SecurityError getter when the browser denies it). */
+function tabStorage(): AskStorage | null {
+  return typeof sessionStorage === 'undefined' ? null : sessionStorage
+}
+
+export function askedBefore(key: string, storageOf: () => AskStorage | null = tabStorage): boolean {
   if (askedThisLoad.has(key)) return true
   askedThisLoad.add(key)
   try {
+    const storage = storageOf()
     if (storage?.getItem(key)) return true
     storage?.setItem(key, '1')
   } catch {
