@@ -44,8 +44,9 @@ import { MAX_INVENTORY, USDC_POOLS, amountsForLiquidity, inUsdc, positionUsdc, p
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
+import { gasReserveAlertOverrideFromEnv, gasReserveAlertWei } from './gas-reserve.ts'
 import { Lock } from './lock.ts'
-import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type EngineHealthSnapshot } from './metrics.ts'
+import { classifyEngineError, EngineHealthTracker, GasReserveTracker, logErr, safeMetrics, type EngineHealthSnapshot, type GasReserveSnapshot } from './metrics.ts'
 import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
@@ -580,6 +581,9 @@ export class Operator {
   /** Times the off-chain signature check said no and the chain said yes, since this process started. Logged with each one. */
   mirrorMismatches = 0
   private readonly engineHealth = new EngineHealthTracker()
+  /** otto/mamoru#8: per-account gas-reserve alert state, from the engine's own observation. */
+  private readonly gasReserve = new GasReserveTracker()
+  private readonly gasReserveAlertOverride = gasReserveAlertOverrideFromEnv()
   private relayerBalanceCache: { at: number; value: bigint } | null = null
   /** otto/mamoru#135: one readSafe shared by every open tab and poll of the same account; dropped whenever the account moves (fundingMoved). */
   private readonly fundingCache = new FundingCache<SafeRead>(Date.now, FUNDING_STALE_MS)
@@ -639,6 +643,16 @@ export class Operator {
   /** GET /metrics: engine health of every account with a running loop, newest-first. */
   engineHealthSnapshot(): EngineHealthSnapshot[] {
     return [...this.runners.keys()].map((key) => this.engineHealth.snapshot(key))
+  }
+
+  /** GET /metrics: gas-reserve alert state of every account with a running loop (otto/mamoru#8). */
+  gasReserveSnapshot(): GasReserveSnapshot[] {
+    return [...this.runners.keys()].map((key) => this.gasReserve.snapshot(key))
+  }
+
+  /** GET /metrics: accounts currently below their gas-reserve alert threshold. */
+  gasReserveLowCount(): number {
+    return this.gasReserve.lowCount()
   }
 
   /** GET /metrics: relayer ETH balance, cached 60s so a metrics poll never adds RPC load. */
@@ -3346,6 +3360,21 @@ export class Operator {
     this.store.save()
   }
 
+  /**
+   * otto/mamoru#8: the Safe's native balance this review already read (its own observation, no new RPC call)
+   * against this account's gas-reserve alert threshold (gas-reserve.ts). Logs a line only the one cycle the
+   * account crosses the threshold, in either direction — not every cycle, which would flood the journal for an
+   * account that stays low (nothing refills it today; see gas-reserve.ts's module doc).
+   */
+  private recordGasReserve(acc: AccountState, nativeWei: bigint): void {
+    const threshold = gasReserveAlertWei(this.policyOf(acc).gasReserveWei, TOP_UP_MARGIN_WEI, this.gasReserveAlertOverride)
+    const { low, transitioned } = this.gasReserve.record(acc.accountKey, nativeWei, threshold)
+    if (transitioned) {
+      const state = low ? 'below' : 'back above'
+      console.log(`[gas-reserve] ${acc.accountKey} ${state} its alert threshold: ${nativeWei} of ${threshold} wei`)
+    }
+  }
+
   private failOwner(acc: AccountState, op: OpView, code: string, detail: Partial<OpView> = {}): void {
     if (BUDGET_CODES.has(code)) this.noteFailure(acc)
     this.patchOp(acc, op.opId, { state: 'failed', code, ...detail })
@@ -4532,6 +4561,8 @@ export class Operator {
             if (last?.detail) logErr(prefix, last.detail)
             else console.log(prefix)
             safeMetrics(() => this.engineHealth.record(acc.accountKey, true, d.code, undefined))
+            // otto/mamoru#8: this review's own balance read (no extra RPC call), against the account's alert threshold.
+            safeMetrics(() => this.recordGasReserve(acc, r.observation.native))
             // Only a review that reached a decision counts, from when it started (it may then wait minutes on its
             // operation): one that was held, failed to observe or threw is tried again on the next tick.
             runner.reviewedAt = startedAt

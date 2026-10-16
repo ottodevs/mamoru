@@ -49,7 +49,8 @@ account keys are shortened to 8 chars. Example (values illustrative):
     "accounts": { "known": 14, "active": 9, "armed": 1 },
     // Spec 006: null without MAMORU_SETTINGS_URL. Else the engine settings versions applied, their source
     // (d1, last-known-good, default), the last pull and error, and any env knob forced as an emergency override.
-    "settings": { "url": "https://app.mamoru.lol", "source": "d1", "lastPullAt": "…", "lastError": null, "versions": [{ "id": 3, "env": "prod", "canary": false, "template": "…", "hash": "…" }], "override": [] }
+    "settings": { "url": "https://app.mamoru.lol", "source": "d1", "lastPullAt": "…", "lastError": null, "versions": [{ "id": 3, "env": "prod", "canary": false, "template": "…", "hash": "…" }], "override": [] },
+    "gasReserveLow": 1
   },
   "rpc": {
     // provider host (never the path or an API key; "#1"/"#2" when two providers share a host) -> method -> counters,
@@ -78,6 +79,10 @@ account keys are shortened to 8 chars. Example (values illustrative):
   "opsRecent": [
     { "accountKey": "3f9a7c21", "kind": "enter", "state": "confirmed", "at": "2026-10-02T09:14:41.000Z", "code": null },
     { "accountKey": "9b0e41aa", "kind": "activate", "state": "failed", "at": "2026-10-02T09:14:30.000Z", "code": "DEPOSIT_OVER_CAP" }
+  ],
+  "gasReserve": [
+    { "account": "3f9a7c21", "nativeWei": "250000000000000", "thresholdWei": "500000000000000", "low": true, "lowSince": "2026-10-02T09:00:00.000Z" },
+    { "account": "9b0e41aa", "nativeWei": "900000000000000", "thresholdWei": "500000000000000", "low": false, "lowSince": null }
   ]
 }
 ```
@@ -120,6 +125,42 @@ account keys are shortened to 8 chars. Example (values illustrative):
   across every account, newest `updatedAt` first, capped at 300. Mirrored into D1 (`operator_metrics_latest`,
   `migrations/d1/0013_operator_metrics.sql`) by `apps/mamoru-app/src/api/operator-metrics.ts`'s cron pull, for the
   `/ops` console (separate repo) to read without hitting the operator directly.
+- **Gas reserve (otto/mamoru#8), detection + alert only, no automatic top-up**: the relayer funds a
+  Safe's gas reserve exactly once, at activation (otto/mamoru#82's top-up, `apps/mamoru-operator/src/subsidy.ts`:
+  `policy.gasReserveWei + TOP_UP_MARGIN_WEI`, ~0.0005 ETH on the live policy). Every engine rebalance
+  and fee collection since then spends from that same balance and nothing refills it, so an active
+  account drifts toward the policy's own floor (`ehgPreliminary`'s `ACCT_GAS_RESERVE_LOW`,
+  `packages/decide/src/gates/index.ts`), at which point the engine stops reviewing it entirely — no
+  more rebalances, no more fee collection, with nothing louder than one decision line saying so.
+  - **Detection, not a new RPC call**: every engine review already reads the Safe's native ETH
+    balance in its own Multicall3 batch (`Observation.native`, `packages/rpc/src/index.ts`) to feed
+    that same EHG gate. `GasReserveTracker` (`src/metrics.ts`) reuses that read — nothing extra is
+    sent to a provider (RPC cost is a live concern, otto/mamoru#135).
+  - **Threshold**: `gasReserveAlertWei` (`src/gas-reserve.ts`) defaults to
+    `policy.gasReserveWei + TOP_UP_MARGIN_WEI` — the exact amount the relayer originally funded the
+    Safe to. `TOP_UP_MARGIN_WEI` is sized in `operator.ts` for one userOp's worst-case prefund ("the
+    first userOp prefund leaves the Safe's balance into its EntryPoint deposit"), so a Safe under the
+    *full* funded target has already spent through that one-operation headroom and is one more
+    engine action away from the hard `ACCT_GAS_RESERVE_LOW` floor that freezes it. Alerting at the
+    funded target rather than at the floor itself gives an operator a lead window instead of finding
+    out only once the account is stuck. Override with `MAMORU_GAS_RESERVE_ALERT_WEI` (absolute wei,
+    applied to every account regardless of its own policy's `gasReserveWei`); unset, non-numeric or
+    negative falls back to the default.
+  - **What happens when low**: nothing is sent on chain. `gasReserve[].low` flips, `operator.gasReserveLow`
+    counts how many accounts are below their threshold right now, and the journal gets one
+    `[gas-reserve] <account> below its alert threshold: <native> of <threshold> wei` line the cycle it
+    crosses (and one `back above` line if an owner tops it up manually) — never every cycle, so an
+    account that stays low does not flood the log.
+  - **Known gap**: `Observation.native` is the Safe's own address balance; it does not see ETH already
+    sitting as an EntryPoint deposit credit from a prior userOp's unused prefund (noted in otto/mamoru#82
+    too — "not known at signing"), so the true usable reserve can be slightly understated.
+  - **Follow-up, gated on otto/mamoru#82**: turning this alert into an automatic top-up means spending
+    more relayer ETH on real funds, and must go through #82's subsidy limits (per-Safe, per-passkey and
+    daily budget caps) so a drained account cannot be cycled into a repeated payout the same way the
+    original one-time activation reserve could. Until that lands, a low reserve is an operator-ops
+    signal only: top up the Safe by hand, or ask the owner to (the app already tells an owner who
+    cannot *start* for lack of gas via the `SUBSIDY_*` refusal codes in `apps/mamoru-app/src/web/lib/ops.ts`;
+    this ticket is about an account already running, which that path does not cover).
 - **Relayer balance** is cached 60s so a metrics poll never adds RPC load.
 - **Bounded cardinality**: a method outside the fixed CU table (`eth_call`, `eth_getLogs`, ...) folds
   into an `"other"` method bucket instead of creating a new permanent one, and provider labels beyond

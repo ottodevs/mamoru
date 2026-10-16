@@ -566,3 +566,50 @@ export class EngineHealthTracker {
     }
   }
 }
+
+// ---- Gas reserve per account (otto/mamoru#8) --------------------------------------------------
+
+export type GasReserveSnapshot = { account: string; nativeWei: string | null; thresholdWei: string | null; low: boolean; lowSince: string | null }
+
+type GasReserveAccount = { nativeWei: bigint; thresholdWei: bigint; low: boolean; lowSince: number | null }
+
+/**
+ * Per-account gas-reserve alert state, in-memory only (reset on an operator restart; harmless, like
+ * `EngineHealthTracker` above — the next engine review re-reads the Safe's own balance from its own observation
+ * and recomputes it, no durable record needed). Keyed by a `Map` for the same reason as `Buckets`: an
+ * accountKey equal to an `Object.prototype` member must behave like any other key.
+ */
+export class GasReserveTracker {
+  private byAccount = new Map<string, GasReserveAccount>()
+
+  /**
+   * One engine review's own balance read (`Observation.native`, no extra RPC call) against this account's
+   * current alert threshold. `transitioned` is true only the one cycle the account crosses the threshold in
+   * either direction, so the caller can log once instead of every cycle.
+   */
+  record(accountKey: string, nativeWei: bigint, thresholdWei: bigint, now: number = Date.now()): { low: boolean; transitioned: boolean } {
+    const prev = this.byAccount.get(accountKey)
+    const low = nativeWei < thresholdWei
+    const transitioned = prev === undefined || prev.low !== low
+    this.byAccount.set(accountKey, { nativeWei, thresholdWei, low, lowSince: low ? (transitioned ? now : prev!.lowSince) : null })
+    return { low, transitioned }
+  }
+
+  snapshot(accountKey: string): GasReserveSnapshot {
+    const h = this.byAccount.get(accountKey)
+    return {
+      account: accountKey.slice(0, 8),
+      nativeWei: h ? h.nativeWei.toString() : null,
+      thresholdWei: h ? h.thresholdWei.toString() : null,
+      low: h?.low ?? false,
+      lowSince: h?.lowSince ? new Date(h.lowSince).toISOString() : null,
+    }
+  }
+
+  /** GET /metrics: accounts currently below their alert threshold, over every account reviewed at least once this process. */
+  lowCount(): number {
+    let n = 0
+    for (const h of this.byAccount.values()) if (h.low) n++
+    return n
+  }
+}

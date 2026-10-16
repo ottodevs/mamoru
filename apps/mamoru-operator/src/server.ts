@@ -70,8 +70,9 @@ function json(status: number, body: unknown): Response {
 /**
  * GET /metrics payload: RPC traffic (per provider host, never the URL or a key), engine health per
  * account (key shortened to 8 chars), the newest ops across every account (otto/mamoru#129, same
- * trim) and operator-level facts. No secrets, no session keys, no full account keys, no RPC URLs,
- * no grants, no signatures, no salts, no userOps. See docs/operator-metrics.md.
+ * trim), gas-reserve alert state per account (otto/mamoru#8) and operator-level facts. No secrets,
+ * no session keys, no full account keys, no RPC URLs, no grants, no signatures, no salts, no userOps.
+ * See docs/operator-metrics.md.
  */
 async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha: string, bootedAt: number): Promise<unknown> {
   const rpc = rpcMetrics.snapshot()
@@ -88,6 +89,8 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
       accounts: op.accountsSummary(),
       // Spec 006 (otto/mamoru#147): the engine settings versions applied, where they came from, and any env override.
       settings: op.settingsStatus(),
+      // otto/mamoru#8: Safes below their gas-reserve alert threshold, detection + alert only (no automatic top-up).
+      gasReserveLow: op.gasReserveLowCount(),
     },
     rpc: {
       cumulative: rpc.cumulative,
@@ -103,6 +106,8 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
     // otto/mamoru#129: the newest 300 engine/owner ops across every account, newest first, for the /ops console
     // (mirrored into D1 by apps/mamoru-app's cron). Trimmed to accountKey/kind/state/at/code only — see Operator.recentOps.
     opsRecent: op.recentOps(300),
+    // otto/mamoru#8: per-account gas-reserve alert state (native balance vs threshold), running accounts only.
+    gasReserve: op.gasReserveSnapshot(),
   }
 }
 
