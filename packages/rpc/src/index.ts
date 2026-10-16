@@ -41,6 +41,18 @@ const userOperationEvent = parseAbiItem(
 )
 
 export { BATCH_MAX_BYTES, BATCH_MAX_CALLS, Batch, balanceRead, chunkCalls, contractRead, multicall3Abi, multicall3Of, type Handle, type Read } from './multicall.ts'
+export {
+  addGuardPoint,
+  cumulativeAtFromObserve,
+  cumulativeAtOf,
+  emptyGuardSeries,
+  guardSecondsAgos,
+  observeGuardHistory,
+  type GuardHistoryResult,
+  type GuardPoint,
+  type GuardSeries,
+  type PoolGuardTarget,
+} from './guard-history.ts'
 
 /** RpcPort client. Reads are batched into grouped JSON-RPC calls. */
 export function rpcClient(url: string): PublicClient {

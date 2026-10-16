@@ -4,8 +4,23 @@ import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { amountsOf, decide, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
 import { hasManageAny, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
-import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi } from '@mamoru/registry'
-import { Batch, MULTICALL3, contractRead, historyCursor, isSafeAndCanonical, observe, principalOwedBefore, readUserOpEvent, rpcClient, simulateFromEntryPoint, type PoolStateCache, type Simulation } from '@mamoru/rpc'
+import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
+import {
+  Batch,
+  MULTICALL3,
+  contractRead,
+  historyCursor,
+  isSafeAndCanonical,
+  observe,
+  observeGuardHistory,
+  principalOwedBefore,
+  readUserOpEvent,
+  rpcClient,
+  simulateFromEntryPoint,
+  type GuardSeries,
+  type PoolStateCache,
+  type Simulation,
+} from '@mamoru/rpc'
 import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
 import { SessionLedger, precheck } from '@mamoru/account/precheck'
 import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useModeSignature, userOpHash, type GasSettings } from '@mamoru/account/sessions'
@@ -50,6 +65,17 @@ export type EngineConfig = {
   priorIncluded?: { permissionId: Hex; calls: Execution[] }[]
   /** Pool state per block, shared with the other engines of the process. */
   poolCache?: PoolStateCache
+  /**
+   * Spec 004 (#101) LC-T6: builds `Observation.guard.pools` for these pools every review, one more Multicall3
+   * batch pinned to the same block as the rest of the observation (`@mamoru/rpc`'s `observeGuardHistory`).
+   * Absent, or `pools` empty: `Observation.guard` is never set, byte-identical to before this field existed
+   * (FR-LC-001). `series` seeds the rolling fallback for a pool whose on-chain oracle cannot answer the full
+   * 24.5 h window (restores it after a restart, when the caller persisted `Engine.guardSeries`); omitted, every
+   * such pool starts cold and abstains until its series is long enough (FR-LC-007, fail safe, never a guess).
+   * Enabling a policy's guard rules to act on this is a later decision (LC-T9); conservador-live-v2 itself does
+   * not change here.
+   */
+  guardHistory?: { pools: readonly RegistryName[]; series?: ReadonlyMap<RegistryName, GuardSeries> }
 }
 
 export type EngineHooks = {
@@ -104,6 +130,12 @@ export class Engine {
   private readonly backoff: { premiseHash: string; key: string; until: bigint }[] = []
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. */
   lastRerangeAt: bigint | null = null
+  /**
+   * Spec 004 (#101) LC-T6: the rolling fallback series `cfg.guardHistory` feeds from each review (per pool),
+   * updated after every `observe()`. Read this after a review and persist it (`state.ts`-style, atomic write)
+   * so a restart passes `cfg.guardHistory.series` back in instead of starting cold.
+   */
+  readonly guardSeries = new Map<RegistryName, GuardSeries>()
   private readonly client: PublicClient
   private readonly bundler: BundlerClient
   private readonly nonceKey: bigint
@@ -119,6 +151,7 @@ export class Engine {
     this.historyFromBlock = cfg.historyFromBlock ?? cfg.depositsAfter
     for (const s of cfg.sessions) this.addSession(s)
     for (const u of cfg.priorIncluded ?? []) this.ledger.recordIncluded(u.permissionId, u.calls)
+    for (const [name, series] of cfg.guardHistory?.series ?? []) this.guardSeries.set(name, series)
   }
 
   /** Live: a session the owner removed on chain (SmartSession) is revoked in the ledger, so decide never proposes an op it cannot authorize. */
@@ -182,7 +215,7 @@ export class Engine {
 
   async observe(): Promise<Observation> {
     const live = this.journal.live
-    return observe(this.client, {
+    const obs = await observe(this.client, {
       chainId: this.cfg.chainId,
       account: this.cfg.account,
       nonceKey: this.nonceKey,
@@ -201,6 +234,14 @@ export class Engine {
       savingsAsset: this.cfg.policy.savingsAsset,
       ethPricePool: ETH_PRICE_POOL,
     })
+    const gh = this.cfg.guardHistory
+    if (!gh || gh.pools.length === 0) return obs
+    // Pinned to the same block as the rest of the observation (FR-RPC-001): a second Multicall3 batch, never a second block.
+    const targets = gh.pools.map((name) => ({ name, address: entry(name).address }))
+    const result = await observeGuardHistory(this.client, MULTICALL3, targets, obs.block.number, Number(obs.block.timestamp), this.cfg.policy.execution.twapWindowSeconds, this.guardSeries)
+    this.guardSeries.clear()
+    for (const [name, series] of result.series) this.guardSeries.set(name, series)
+    return { ...obs, guard: { pools: result.pools } }
   }
 
   /** One review: observe at a fixed block, decide, and run at most one operation. */
