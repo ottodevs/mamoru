@@ -17,6 +17,7 @@
     "@mamoru/account": "workspace:*",
     "@mamoru/registry": "workspace:*",
     "@mamoru/policy": "workspace:*",
+    "@mamoru/operator-auth": "workspace:*",
     "hono": "4.13.9",
     "react": "19.2.7",
     "react-dom": "19.2.7",
@@ -25,6 +26,7 @@
     "viem": "2.56.9"
   },
   "devDependencies": {
+    "@mamoru/uniswap-v3": "workspace:*",
     "@cloudflare/workers-types": "5.20260926.1",
     "@playwright/test": "1.63.0",
     "@tailwindcss/vite": "4.3.3",

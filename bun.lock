@@ -15,6 +15,7 @@
       "dependencies": {
         "@mamoru/account": "workspace:*",
         "@mamoru/domain": "workspace:*",
+        "@mamoru/operator-auth": "workspace:*",
         "@mamoru/policy": "workspace:*",
         "@mamoru/registry": "workspace:*",
         "@tanstack/react-query": "5.101.2",
@@ -26,6 +27,7 @@
       },
       "devDependencies": {
         "@cloudflare/workers-types": "5.20260926.1",
+        "@mamoru/uniswap-v3": "workspace:*",
         "@playwright/test": "1.63.0",
         "@tailwindcss/vite": "4.3.3",
         "@types/react": "19.3.0",
