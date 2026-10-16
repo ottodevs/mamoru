@@ -1,5 +1,5 @@
 import type { Hex } from '@mamoru/domain'
-import { marketOf, type CumulativePoint, type Observation, type PoolGuardObs, type PoolObs, type SessionObs } from '@mamoru/decide'
+import { marketOf, meanTickAt, realizedVolOf, type CumulativePoint, type Observation, type PoolGeometryObs, type PoolGuardObs, type PoolObs, type SessionObs } from '@mamoru/decide'
 import { grantKey, type PolicyVersion } from '@mamoru/policy'
 import { address, entry, type RegistryName } from '@mamoru/registry'
 import type { Dataset, Sample } from './types.ts'
@@ -74,6 +74,71 @@ export function guardOf(ds: Dataset, i: number, windowSeconds: number): NonNulla
   return { pools }
 }
 
+const HOUR = 3_600
+const DAY = 86_400
+/** Segment of the geometry volatilities: 10 minutes, the step of most Lab windows. */
+export const GEOMETRY_SEGMENT = 600
+/** Time constant of the 7-day EMA (span 7 days: a time constant of half of it). */
+const EMA_TAU = 3.5 * DAY
+
+/** Per dataset: the EMA of the TWAP tick at each sample, per pool (null before a day of history), and the observations built. */
+const geometryCache = new WeakMap<Dataset, { ema: Map<string, (number | null)[]>; byIndex: Map<string, NonNullable<Observation['geometry']>> }>()
+
+function emaSeries(ds: Dataset, k: number, windowSeconds: number): (number | null)[] {
+  const out: (number | null)[] = []
+  let ema: number | null = null
+  let last = 0
+  let first: number | null = null
+  for (let i = 0; i < ds.samples.length; i++) {
+    const s = ds.samples[i]!
+    if (!s.pools[k]) {
+      out.push(null)
+      continue
+    }
+    const tick = twapTick(ds, k, i, windowSeconds)
+    if (ema === null) {
+      ema = tick
+      first = s.time
+    } else ema += (1 - Math.exp(-(s.time - last) / EMA_TAU)) * (tick - ema)
+    last = s.time
+    out.push(s.time - first! >= DAY ? ema : null)
+  }
+  return out
+}
+
+/**
+ * Lab (#101) `Observation.geometry` from the dataset: what history the window holds, as the engine would read it
+ * from its snapshot loop. The 7-day figures use the history there is (at least 24 h): a Lab window is cut at its
+ * start, so the first days of a 7-day window see less than 7 days.
+ */
+export function geometryOf(ds: Dataset, i: number, windowSeconds: number): NonNullable<Observation['geometry']> {
+  let cache = geometryCache.get(ds)
+  if (!cache) geometryCache.set(ds, (cache = { ema: new Map(), byIndex: new Map() }))
+  const key = `${i}:${windowSeconds}`
+  const hit = cache.byIndex.get(key)
+  if (hit) return hit
+  const now = ds.samples[i]!.time
+  const since = now - ds.samples[0]!.time
+  const pools: Partial<Record<RegistryName, PoolGeometryObs>> = {}
+  ds.pools.forEach((name, k) => {
+    if (!ds.samples[i]!.pools[k]) return
+    const at = (t: number) => cumulativeAt(ds, k, t, GEOMETRY_SEGMENT)
+    const emaKey = `${k}:${windowSeconds}`
+    let ema = cache!.ema.get(emaKey)
+    if (!ema) cache!.ema.set(emaKey, (ema = emaSeries(ds, k, windowSeconds)))
+    pools[name] = {
+      twap24hAgoTick: meanTickAt(now - DAY, windowSeconds, (t) => cumulativeAt(ds, k, t, windowSeconds)),
+      emaTick: ema[i] ?? null,
+      vol1hBps: realizedVolOf(now, HOUR, GEOMETRY_SEGMENT, at),
+      vol24hBps: realizedVolOf(now, DAY, GEOMETRY_SEGMENT, at),
+      vol7dBps: since < DAY ? null : realizedVolOf(now, Math.min(7 * DAY, since), GEOMETRY_SEGMENT, at),
+    }
+  })
+  const g = { pools }
+  cache.byIndex.set(key, g)
+  return g
+}
+
 function sessions(policy: PolicyVersion, w: World): SessionObs[] {
   const keys = policy.session.grants.filter((g) => !g.perPosition).map((g) => grantKey(g))
   for (const p of w.positions) keys.push(`manage:${p.tokenId}`)
@@ -127,5 +192,6 @@ export function observe(ds: Dataset, i: number, w: World, policy: PolicyVersion,
     slot: null,
     lastRerangeAt: w.lastRerangeAt,
     ...(policy.guards ? { guard: guardOf(ds, i, policy.execution.twapWindowSeconds) } : {}),
+    ...(policy.geometry ? { geometry: geometryOf(ds, i, policy.execution.twapWindowSeconds) } : {}),
   }
 }

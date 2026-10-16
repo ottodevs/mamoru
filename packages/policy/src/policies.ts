@@ -189,6 +189,17 @@ export const conservadorLabGuardsV1: PolicyVersion = {
   guards: { byBucket: { 'btc-usdc': { fallFreeze: { ...FALL_FREEZE_DEFAULTS['btc-usdc'] } }, risk: { fallFreeze: { ...FALL_FREEZE_DEFAULTS.risk } } } },
 }
 
+/**
+ * Lab policy for the range-geometry experiments (#101): conservador-live-v2 on a fork, with no geometry rule, so it
+ * trades exactly as live. A sweep turns `geometry.skew` / `geometry.volWidth` on by override.
+ */
+export const conservadorLabGeometryV1: PolicyVersion = {
+  ...conservadorLiveV2,
+  policyId: 'conservador-lab-geometry-v1',
+  version: '1.0.0',
+  chain: 'fork',
+}
+
 /** Scenario policy for M07: LP on WETH/USDC 0.3%, only in the lab. */
 export const labWethUsdcV1: PolicyVersion = {
   ...conservadorV1,
@@ -238,4 +249,5 @@ export const POLICIES: Record<string, PolicyVersion> = {
   [conservadorLiveV2.policyId]: conservadorLiveV2,
   [labWethUsdcV1.policyId]: labWethUsdcV1,
   [conservadorLabGuardsV1.policyId]: conservadorLabGuardsV1,
+  [conservadorLabGeometryV1.policyId]: conservadorLabGeometryV1,
 }

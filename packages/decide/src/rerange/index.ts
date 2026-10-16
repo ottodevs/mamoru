@@ -2,6 +2,7 @@ import type { ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, hasManageAny, type PolicyVersion } from '@mamoru/policy'
 import type { RegistryName } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
+import { edgeBpsOf, widenEarly } from '../geometry/index.ts'
 import type { EnterSwapProposal, Observation, PoolObs, PositionObs, RerangeProposal, ReduceProposal } from '../types.ts'
 import { inSavings, opCostInSavings, volatileOf } from '../value.ts'
 
@@ -54,9 +55,12 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
   if (!hasManageAny(policy) || policy.range.adjust !== 'on_out_of_range' || p.liquidity === 0n) return { code: null, proposal: null }
   const width = p.tickUpper - p.tickLower
   const outside = pool.tick < p.tickLower || pool.tick >= p.tickUpper
-  const edge = Math.min(pool.tick - p.tickLower, p.tickUpper - pool.tick)
-  const near = !outside && edge * 10_000 < width * EDGE_BPS
-  if (!outside && !near) return { code: null, proposal: null }
+  // Lab geometry (#101): a skewed placement sits near one edge on purpose, so that edge's threshold is smaller.
+  const edgeBps = policy.geometry ? edgeBpsOf(policy, pool, EDGE_BPS) : { lower: EDGE_BPS, upper: EDGE_BPS }
+  const near = !outside && ((pool.tick - p.tickLower) * 10_000 < width * edgeBps.lower || (p.tickUpper - pool.tick) * 10_000 < width * edgeBps.upper)
+  // Lab geometry: volatility spiking widens a narrow range before the price leaves it.
+  const widen = !outside && !near && policy.geometry !== undefined && widenEarly(obs, policy, pool, width)
+  if (!outside && !near && !widen) return { code: null, proposal: null }
   const last = obs.lastRerangeAt ?? null
   if (last !== null && obs.block.timestamp - last < BigInt(policy.range.cooldownSeconds)) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
   return { code: 'DECIDE_RANGE_ADJUST', proposal: { kind: 'rerange', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity: p.liquidity } }

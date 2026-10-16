@@ -28,7 +28,7 @@ export function applyOverrides<T>(base: T, overrides: Record<string, unknown>, p
     if (wantsObject !== isPlainObject(v)) throw new Error(`override ${at}: want ${wantsObject ? 'an object' : 'a value'}, got ${JSON.stringify(v)}`)
     if (isPlainObject(v)) {
       // A parameter the base lacks is given whole: every key of its shape, unless it is keyed by pool or bucket.
-      if (cur === undefined && isShapeNode(sub) && !('*' in sub)) {
+      if (cur === undefined && isShapeNode(sub) && !('*' in sub) && !CONTAINERS.has(at)) {
         const left = Object.keys(sub).filter((x) => !(x in v))
         if (left.length > 0) throw new Error(`override ${at}: the policy has no ${k} to merge into; give ${left.join(', ')} too`)
       }
@@ -45,15 +45,17 @@ export function applyOverrides<T>(base: T, overrides: Record<string, unknown>, p
   return out as T
 }
 
-type Leaf = 'number' | 'bigint' | readonly string[]
+type Leaf = 'number' | 'bigint' | 'boolean' | readonly string[]
 type Shape = Leaf | { [key: string]: Shape }
 function isShapeNode(s: Shape | undefined): s is { [key: string]: Shape } {
   return typeof s === 'object' && !Array.isArray(s)
 }
-const ENUMS: Record<string, readonly string[]> = { allocation: ['first-entry', 'target-weights'], 'range.adjust': ['off', 'on_out_of_range'] }
+const ENUMS: Record<string, readonly string[]> = { allocation: ['first-entry', 'target-weights'], 'range.adjust': ['off', 'on_out_of_range'], 'geometry.skew.regime': ['ret24h', 'ema7d'] }
 const BUCKET_IDS = ['stables', 'btc-usdc', 'risk'] as const
 /** Maps keyed by name: which keys they take (undefined: any, e.g. a pool name). */
 const MAP_KEYS: Record<string, readonly string[]> = { 'guards.byBucket': BUCKET_IDS }
+/** Optional groups whose rules are each optional: a rule inside is given whole, the group need not hold them all. */
+const CONTAINERS = new Set(['geometry'])
 /** The only list an override may replace: the buckets, to try other weights or pools. */
 const ARRAYS = new Set(['buckets'])
 function validBuckets(v: unknown[]): boolean {
@@ -67,6 +69,11 @@ const OPTIONAL: Shape = {
   rebalanceBandBps: 'number',
   range: { widthTicksByPool: { '*': 'number' } },
   guards: { byBucket: { '*': BUCKET_RULES } },
+  // Lab range geometry (#101): given whole, every key of the rule.
+  geometry: {
+    skew: { belowShareBps: 'number', regime: ENUMS['geometry.skew.regime']!, fallBps: 'number', mirror: 'boolean' },
+    volWidth: { k: 'number', horizonSeconds: 'number', minTicks: 'number', maxTicks: 'number', earlyRatio: 'number' },
+  },
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {

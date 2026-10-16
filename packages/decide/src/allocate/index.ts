@@ -1,8 +1,9 @@
 import type { ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, hasManageAny, type PolicyVersion } from '@mamoru/policy'
-import { rangeAround, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
+import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { safeSavings } from '../enter/index.ts'
 import { depthOf } from '../depth/index.ts'
+import { rangeFor, widthFor, widthOf } from '../geometry/index.ts'
 import { purgaIdentity } from '../gates/index.ts'
 import type { GateStep, Observation, PoolObs, Proposal } from '../types.ts'
 import { amountsForLiquidity, inSavings, volatileOf } from '../value.ts'
@@ -48,17 +49,16 @@ function atTwap(pool: PoolObs): PoolObs {
   return pool.twapTick === null ? pool : { ...pool, sqrtPriceX96: sqrtRatioAtTick(pool.twapTick) }
 }
 
-export function widthOf(policy: PolicyVersion, pool: string): number {
-  return policy.range.widthTicksByPool?.[pool] ?? policy.range.widthTicks
-}
+export { widthOf }
 
 /**
  * Value share (bps) of the volatile side in a fresh range around the current tick, at the pool price. The mint takes
  * its tokens at that price: split at the TWAP instead, a narrow range a few ticks off its average ends with one token
  * left over.
  */
-function volatileShareBps(pool: PoolObs, policy: PolicyVersion): bigint {
-  const r = rangeAround(pool.tick, widthOf(policy, pool.name), pool.tickSpacing)
+function volatileShareBps(obs: Observation, pool: PoolObs, policy: PolicyVersion): bigint {
+  // Lab geometry (#101): the range the mint below gets; without `policy.geometry`, the centred policy width.
+  const r = rangeFor(obs, policy, pool)
   const p = pool
   const a = amountsForLiquidity(p.sqrtPriceX96, r.tickLower, r.tickUpper, 10n ** 24n)
   const savings = policy.savingsAsset
@@ -149,10 +149,10 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     // What the next mint of this bucket holds: the gap, or everything the bucket can gather when that is less.
     const wanted = gap < free + volatileValue ? gap : free + volatileValue
     let size = wanted
-    const volShare = volatileShareBps(pool, policy)
+    const volShare = volatileShareBps(obs, pool, policy)
     // otto/mamoru#127: no more than the pool can take at its depth; the rest waits as savings, with its reason. The
     // swap toward the mint sells at most the volatile share of that size, so it stays within the allowed impact too.
-    const depth = depthOf(obs, policy, pool, widthOf(policy, pool.name))
+    const depth = depthOf(obs, policy, pool, widthFor(obs, policy, pool))
     if (depth) {
       const bySwap = volShare > 0n ? (depth.swapRoom * 10_000n) / volShare : size
       const room = depth.shareRoom < bySwap ? depth.shareRoom : bySwap
@@ -228,7 +228,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     pendingMint.push({ pool: pool.name, grant: mintGrant })
     if (!row) continue
     row.code = 'STRATEGY_PREFERENCE_DEVIATION'
-    const range = rangeAround(pool.tick, widthOf(policy, pool.name), pool.tickSpacing)
+    const range = rangeFor(obs, policy, pool)
     const savingsIs0 = pool.token0 === savings
     proposal = {
       kind: 'enter_mint',

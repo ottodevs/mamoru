@@ -26,9 +26,24 @@ export type Observation = {
    * absent or null fields make the guard rules abstain.
    */
   guard?: { pools: Partial<Record<RegistryName, PoolGuardObs>> }
+  /** Lab (#101): history for `policy.geometry`. Absent: geometry rules abstain (centred range, policy width). */
+  geometry?: { pools: Partial<Record<RegistryName, PoolGeometryObs>> }
 }
 
 export type PoolGuardObs = { twap24hAgoTick: number | null; realizedVol24hBps: number | null }
+
+/**
+ * Lab (#101, range geometry): market history per pool, read only by a policy with `geometry`. Volatilities are
+ * annualized, in bps, from 10-minute TWAP means over the last hour, 24 h and 7 days (or what history exists, at
+ * least 24 h). `emaTick`: exponential mean of the TWAP tick, 7-day span. Null: not enough history; the rule abstains.
+ */
+export type PoolGeometryObs = {
+  twap24hAgoTick: number | null
+  emaTick: number | null
+  vol1hBps: number | null
+  vol24hBps: number | null
+  vol7dBps: number | null
+}
 
 /** What a guard rule measured and held, per bucket, for the app and /ops. `metric` is null when history is missing. */
 export type GuardNote = {

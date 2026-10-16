@@ -107,7 +107,30 @@ export type PolicyVersion = {
   shadow: string[]
   /** Spec 004 loss control. Absent: today's behaviour byte for byte (FR-LC-001). */
   guards?: { byBucket: Partial<Record<BucketId, { fallFreeze?: FallFreezeRule }>> }
+  /**
+   * Lab only (#101, range geometry): where a new range sits around the price and how wide it is. Absent: the
+   * centred range of `range.widthTicks` / `widthTicksByPool`, byte for byte. A pool with a `widthTicksByPool` entry
+   * (the stables pool) keeps that width and is never skewed.
+   */
+  geometry?: { skew?: SkewRule; volWidth?: VolWidthRule }
 }
+
+/**
+ * Downside-skewed placement in a falling regime: the new range holds `belowShareBps` of its width below the price
+ * (in the volatile token's price), so it starts mostly in the savings asset and buys only if the fall goes on.
+ * Regime: `ret24h`, the 24 h TWAP change is a fall of at least `fallBps`; `ema7d`, the TWAP is under the 7-day EMA.
+ * `mirror`: in the opposite regime (a 24 h rise of `fallBps`, or the TWAP over the EMA) the range is skewed upward
+ * the same amount. Otherwise, or with history missing, the range is centred.
+ */
+export type SkewRule = { belowShareBps: number; regime: 'ret24h' | 'ema7d'; fallBps: number; mirror: boolean }
+
+/**
+ * Volatility-scaled width: `k * sigma * sqrt(horizonSeconds)` in ticks, clamped to [minTicks, maxTicks], with sigma
+ * the 24 h realized volatility of the pool. `earlyRatio` > 0: while the 1 h volatility is more than that many times
+ * the 7-day one, sigma is the larger of the 24 h and 1 h figures, and an in-range position narrower than two thirds
+ * of that width is re-ranged (cooldown applies). With history missing, the policy width.
+ */
+export type VolWidthRule = { k: number; horizonSeconds: number; minTicks: number; maxTicks: number; earlyRatio: number }
 
 export type BucketId = PolicyVersion['buckets'][number]['id']
 
