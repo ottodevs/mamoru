@@ -6,6 +6,7 @@ import { accountNotFound, apiError } from '../errors.ts'
 import { ACCOUNT_KEY } from '../onboarding/account.ts'
 import { buildDashboard, loadDashboardInput } from './dashboard.ts'
 import { ownedAccount } from './store.ts'
+import { loadYieldLedger } from './yield.ts'
 
 export const accounts = new Hono<AppEnv>()
 
@@ -19,6 +20,20 @@ accounts.get('/:accountKey/dashboard', async (c) => {
   if (!account) return accountNotFound(c)
   c.set('accountKey', account.account_key)
   const payload = buildDashboard(await loadDashboardInput(c.env.DB, account), c.var.now())
+  payload.yield = await loadYieldLedger(c.env.DB, account.chain_id, account.account_key)
   if (liveFunds(c.env)) payload.banner = { ...payload.banner, kind: 'live', text: LIVE_BANNER }
   return c.json(payload)
+})
+
+// GET /api/accounts/:accountKey/yield -> YieldLedgerView (otto/mamoru#129): the same figures as the dashboard's
+// `yield` field, on their own for a caller that does not need the rest of the dashboard payload.
+accounts.get('/:accountKey/yield', async (c) => {
+  const session = await c.var.auth.current(c)
+  if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
+  const accountKey = c.req.param('accountKey')
+  if (!ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
+  const account = await ownedAccount(c.env.DB, session.userId, accountKey)
+  if (!account) return accountNotFound(c)
+  c.set('accountKey', account.account_key)
+  return c.json(await loadYieldLedger(c.env.DB, account.chain_id, account.account_key))
 })

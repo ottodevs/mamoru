@@ -86,6 +86,23 @@ export type FundingView = {
   progress?: { step: 'deploying' | 'activating' | 'swapping' | 'opening' | 'rebalancing' | 'reranging' | 'closing' | 'withdrawing'; pool?: string; since: string } | null
 }
 
+// GET /api/accounts/:accountKey/yield -> YieldLedgerView (otto/mamoru#129): what the yield ledger knows so far,
+// read from D1 (account_snapshot_latest, account_daily, yield_ledger_position_daily — migrations/d1/XXXX_yield_ledger.sql).
+// A null field is not_observed, never a fabricated zero: every field stays null until the Worker's cron
+// (YIELD_LEDGER=1) has pulled at least one operator snapshot for this account. `collectedUsd` and `gasPaidWei`
+// specifically stay null until a harvest/close_position receipt is known for this account (none has fired on
+// any account yet, otto/mamoru#129 research 15 Oct); `earnedSoFarUsd` folds a null collected in as 0, which is
+// accurate for every account's real history today but will need a receipt tracker once a harvest actually lands.
+export type YieldLedgerView = {
+  asOf: string | null // ISO, the latest pulled snapshot this is built from
+  accruedUsd: string | null // uncollected fees right now, USDC base units (yield only, never owed principal)
+  collectedUsd: string | null // lifetime fees collected (harvest, close), USDC base units; null until any receipt exists
+  earnedSoFarUsd: string | null // accruedUsd + collectedUsd, USDC base units: the figure "earned so far" shows
+  gasPaidWei: string | null // lifetime gas Mamoru paid for this account's ops, wei; shown separately, never subtracted from earnedSoFarUsd
+  valueVsHoldUsd: string | null // today's (position value + accrued) minus the hold baseline, summed over positions, USDC base units; can be negative
+  feeAccruedUsd: string | null // #108 readiness: 10% of collectedUsd, stored, never charged by anything that reads this
+}
+
 // GET /api/accounts/:accountKey/other-chains -> OtherChainsView
 // What sits at the account's address on a chain Mamoru does not run on (a transfer sent on the wrong network).
 // Read-only and separate from FundingView on purpose: these amounts are never part of the Mamoru balance,

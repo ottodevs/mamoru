@@ -1,6 +1,7 @@
 // Dashboard payload contract. Source: specs/001-mamoru-v1/dashboard.md §5 and §9.
 // Shared by the API (writer) and the SPA (reader). Only the integrator changes this file.
 import type { ReasonCode } from './reason-codes.ts'
+import type { YieldLedgerView } from './app-api.ts'
 
 export type Hex0x = `0x${string}`
 
@@ -196,6 +197,14 @@ export type DashboardPayload = {
     lastHarvest?: Figure<string>
   }
   savingsLog: { rows: SavingsRowView[]; next?: string }
+  /**
+   * otto/mamoru#129: the yield ledger's figures for this account (uncollected fees, collected, gas Mamoru paid,
+   * value vs hold, fee readiness for #108), read straight from D1 (apps/mamoru-app/src/api/accounts/yield.ts).
+   * Optional and additive: absent on a response from an app version before this field existed, or wherever a
+   * caller builds a DashboardPayload without it (fixtures, the lab tape). A present `yield` with every field
+   * null means the account exists but the Worker's cron has not pulled an operator snapshot for it yet.
+   */
+  yield?: YieldLedgerView
   provenanceComplete: boolean
 }
 
