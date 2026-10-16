@@ -7,6 +7,7 @@ import { accountNotFound, apiError } from '../errors.ts'
 import { deleteCookie } from 'hono/cookie'
 import { SESSION_COOKIE } from '../auth/device-session.ts'
 import { acknowledgeRecovery, accountByCredential, accountOfUser, insertAccount, ownedAccount, ownersOf, type AccountRow } from '../accounts/store.ts'
+import { envOfHostname } from '../accounts/env-of-host.ts'
 import { ACCOUNT_KEY, counterfactualAccount, passkeySigner } from './account.ts'
 import { parsePasskey } from './passkey.ts'
 import { issueChallenge, openChallenge, spendChallenge } from '../auth/challenge.ts'
@@ -97,6 +98,8 @@ onboarding.post('/owner', async (c) => {
     policy_version: conservadorV1.version,
     recovery_ack_at: null,
     created_at: now.toISOString(),
+    env: envOfHostname(url.hostname),
+    is_test: 0,
   }
   if (!(await insertAccount(db, row))) {
     // Lost a race for the same credential id: take back the user row and the cookie this request just made.

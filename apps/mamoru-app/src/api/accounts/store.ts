@@ -17,6 +17,10 @@ export type AccountRow = {
   created_at: string
   /** Last WebAuthn signature counter seen at sign-in (migration 0005; 0 until then). */
   passkey_sign_count?: number
+  /** 'prod' | 'beta', from the hostname that served the onboarding request (migration ...accounts_env, otto/mamoru#130). */
+  env: 'prod' | 'beta'
+  /** 1 for Ot's test account and any coordinator smoke-test account; 0 for a real signup (same migration). */
+  is_test: number
 }
 
 export function accountOfUser(db: Db, userId: string): Promise<AccountRow | null> {
@@ -48,11 +52,11 @@ export async function insertAccount(db: Db, row: AccountRow): Promise<boolean> {
     await db
     .prepare(
       `INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y,
-        salt_nonce, preset, policy_version, recovery_ack_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        salt_nonce, preset, policy_version, recovery_ack_at, created_at, env, is_test) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       row.account_key, row.user_id, row.chain_id, row.address, row.owners_json, row.passkey_credential_id, row.passkey_x, row.passkey_y,
-      row.salt_nonce, row.preset, row.policy_version, row.recovery_ack_at, row.created_at,
+      row.salt_nonce, row.preset, row.policy_version, row.recovery_ack_at, row.created_at, row.env, row.is_test,
     )
     .run()
     return true

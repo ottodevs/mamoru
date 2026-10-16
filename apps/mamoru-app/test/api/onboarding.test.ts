@@ -94,8 +94,32 @@ describe('owner', () => {
     expect(getAddress(owner.address)).toBe(owner.address)
 
     const row = h.db.raw.query('SELECT * FROM accounts WHERE account_key = ?').get(owner.accountKey) as Record<string, unknown>
-    expect(row).toMatchObject({ chain_id: 8453, address: expected, passkey_x: PASSKEY_A.x, passkey_y: PASSKEY_A.y, preset: 'conservador', recovery_ack_at: null })
+    expect(row).toMatchObject({ chain_id: 8453, address: expected, passkey_x: PASSKEY_A.x, passkey_y: PASSKEY_A.y, preset: 'conservador', recovery_ack_at: null, env: 'prod', is_test: 0 })
     expect(row.salt_nonce).toBe(saltNonceOf(owner.accountKey).toString())
+  })
+
+  // otto/mamoru#130: the hostname that served onboarding is the only signal that tells app.mamoru.lol and
+  // beta.mamoru.lol apart (both run MODE=production). A real signup is never marked test.
+  test('an account made on beta.mamoru.lol is stored with env = beta; app.mamoru.lol stores prod', async () => {
+    const h = harness()
+    const BETA = 'https://beta.mamoru.lol'
+    const challengeRes = await h.app.request(`${BETA}/api/onboarding/challenge`, { method: 'POST', headers: { 'content-type': 'application/json', origin: BETA }, body: '{}' }, h.env)
+    const challenge = (await challengeRes.json()) as SignInChallenge
+    expect(challenge.rpId).toBe('beta.mamoru.lol')
+    const proof = registrationProof(PASSKEY_A, challenge, { rpId: 'beta.mamoru.lol', origin: BETA })
+    const ownerRes = await h.app.request(
+      `${BETA}/api/onboarding/owner`,
+      { method: 'POST', headers: { 'content-type': 'application/json', origin: BETA }, body: JSON.stringify({ passkey: PASSKEY_A, proof }) },
+      h.env,
+    )
+    expect(ownerRes.status).toBe(201)
+    const owner = (await ownerRes.json()) as OwnerResponse
+    const row = h.db.raw.query('SELECT env, is_test FROM accounts WHERE account_key = ?').get(owner.accountKey) as Record<string, unknown>
+    expect(row).toEqual({ env: 'beta', is_test: 0 })
+
+    const { owner: prodOwner } = await onboard(h, PASSKEY_B)
+    const prodRow = h.db.raw.query('SELECT env FROM accounts WHERE account_key = ?').get(prodOwner.accountKey) as { env: string }
+    expect(prodRow.env).toBe('prod')
   })
 
   test('the saltNonce is deterministic per account key and distinct across keys', () => {
@@ -239,7 +263,7 @@ describe('registration proof', () => {
     // No user row is left behind by a refused registration.
     expect(h.db.raw.query('SELECT count(*) AS n FROM users').get()).toEqual({ n: 1 })
     // The database itself refuses a second row, whatever the code above it does.
-    expect(() => h.db.raw.exec(`INSERT INTO accounts SELECT '${crypto.randomUUID()}', user_id, chain_id, '0x00000000000000000000000000000000000000bb', owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, preset, policy_version, recovery_ack_at, created_at, 0 FROM accounts`)).toThrow(/UNIQUE/)
+    expect(() => h.db.raw.exec(`INSERT INTO accounts SELECT '${crypto.randomUUID()}', user_id, chain_id, '0x00000000000000000000000000000000000000bb', owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, preset, policy_version, recovery_ack_at, created_at, 0, env, is_test FROM accounts`)).toThrow(/UNIQUE/)
   })
 
   test('the session that owns the account is answered again without a new proof', async () => {
