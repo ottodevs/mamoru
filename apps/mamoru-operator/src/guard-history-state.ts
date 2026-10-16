@@ -18,13 +18,23 @@ function toPersisted(series: ReadonlyMap<RegistryName, GuardSeries>): Persisted 
   return out
 }
 
-/** Drops anything malformed rather than trusting it: a hand-edited or corrupted state file must not crash the operator (same rule as `metrics.ts`'s `isValidCounters`). */
+/**
+ * Drops anything malformed rather than trusting it: a hand-edited or corrupted state file must not crash the
+ * operator (same rule as `metrics.ts`'s `isValidCounters`). Also sorted ascending by time with same-time
+ * duplicates collapsed to the last one: `cumulativeAtOf`'s binary search (`@mamoru/rpc`) assumes that order, and
+ * nothing here re-derives it through `addGuardPoint` (this file does not know `windowSeconds`), so a file that
+ * was edited or written out of order must still load as something that search can trust.
+ */
 function fromPersisted(raw: unknown): Map<RegistryName, GuardSeries> {
   const out = new Map<RegistryName, GuardSeries>()
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
   for (const [name, points] of Object.entries(raw as Record<string, unknown>)) {
     if (!Array.isArray(points)) continue
-    const valid = points.filter(isValidPoint).map((p) => ({ time: p.time, tickCumulative: BigInt(p.tickCumulative) }))
+    const sorted = points
+      .filter(isValidPoint)
+      .map((p) => ({ time: p.time, tickCumulative: BigInt(p.tickCumulative) }))
+      .sort((a, b) => a.time - b.time)
+    const valid = sorted.filter((p, i) => i === sorted.length - 1 || p.time !== sorted[i + 1]!.time)
     out.set(name, { points: valid })
   }
   return out

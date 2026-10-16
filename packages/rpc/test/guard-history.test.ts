@@ -43,16 +43,24 @@ describe('addGuardPoint', () => {
     expect(addGuardPoint(emptyGuardSeries(), p(1_000), W, 10 * W).points).toEqual([p(1_000)])
   })
 
-  test('a point less than a window after the last one replaces it, not appends', () => {
+  test('the second point is always appended too: with only one point there is no anchor yet to slide against', () => {
     const s1 = addGuardPoint(emptyGuardSeries(), p(1_000, 1n), W, 10 * W)
-    const s2 = addGuardPoint(s1, p(1_000 + W - 1, 2n), W, 10 * W)
-    expect(s2.points).toEqual([p(1_000 + W - 1, 2n)])
+    const s2 = addGuardPoint(s1, p(1_000 + 1, 2n), W, 10 * W)
+    expect(s2.points).toEqual([p(1_000, 1n), p(1_000 + 1, 2n)])
   })
 
-  test('a point a window or more after the last one is appended', () => {
-    const s1 = addGuardPoint(emptyGuardSeries(), p(1_000, 1n), W, 10 * W)
-    const s2 = addGuardPoint(s1, p(1_000 + W, 2n), W, 10 * W)
-    expect(s2.points).toEqual([p(1_000, 1n), p(1_000 + W, 2n)])
+  test('with an anchor established, a point less than half a window past it replaces the head, not appends', () => {
+    let s = addGuardPoint(emptyGuardSeries(), p(0, 1n), W, 10 * W)
+    s = addGuardPoint(s, p(1, 2n), W, 10 * W) // anchor = p(0), head = p(1)
+    const s2 = addGuardPoint(s, p(W / 2 - 1, 3n), W, 10 * W) // still < W/2 past the anchor p(0)
+    expect(s2.points).toEqual([p(0, 1n), p(W / 2 - 1, 3n)])
+  })
+
+  test('a point half a window or more past the anchor is appended: the slid head freezes as the next anchor', () => {
+    let s = addGuardPoint(emptyGuardSeries(), p(0, 1n), W, 10 * W)
+    s = addGuardPoint(s, p(1, 2n), W, 10 * W)
+    const s2 = addGuardPoint(s, p(W / 2, 3n), W, 10 * W)
+    expect(s2.points).toEqual([p(0, 1n), p(1, 2n), p(W / 2, 3n)])
   })
 
   test('a point at or before the last kept one is ignored: the series never goes backwards', () => {
@@ -67,6 +75,19 @@ describe('addGuardPoint', () => {
     // Only points within 5*W of the last time (10*W) survive: strictly less than 5*W old.
     expect(s.points.every((x) => 10 * W - x.time < 5 * W)).toBe(true)
     expect(s.points.at(-1)).toEqual(p(10 * W, BigInt(10 * W)))
+  })
+
+  test('REGRESSION (agy review, pre-fix bug): fed at a realistic review cadence far below the window (60 s, the live default is ~20 s), the series still grows past one point and every two kept points stay under half a window apart', () => {
+    let s: GuardSeries = emptyGuardSeries()
+    const STEP = 60
+    const HOURS_25 = 25 * 3_600
+    for (let t = 0; t <= HOURS_25; t += STEP) s = addGuardPoint(s, p(t, BigInt(t)), W, HOURS_25 + W)
+    expect(s.points.length).toBeGreaterThan(10)
+    for (let i = 1; i < s.points.length; i++) expect(s.points[i]!.time - s.points[i - 1]!.time).toBeLessThan(W / 2)
+    // And it actually answers marketOf at an arbitrary review timestamp, not only at a multiple of W.
+    const now = s.points.at(-1)!.time
+    const m = marketOf(now, W, cumulativeAtOf(s))
+    expect(m.twap24hAgoTick).not.toBeNull()
   })
 })
 
@@ -182,18 +203,21 @@ describe('observeGuardHistory', () => {
     expect(r.series.get('pool:USDC/cbBTC/500')?.points.length).toBe(1)
   })
 
-  test('fed every ~30 min across a 24.5 h fallback build-up, the series eventually answers, without the on-chain path ever working', async () => {
+  test('fed every 5 min (well below the window, like the live ~20 s review cadence) across a 24.5 h fallback build-up, the series eventually answers, without the on-chain path ever working', async () => {
     const client = fakeClient(3_600)
+    const STEP = 300 // 5 min; the live default review cadence is ~20 s, far finer still — this is the regression agy's review caught (packages/rpc/src/guard-history.ts's addGuardPoint).
     let series = new Map<string, GuardSeries>()
     let now = 100 * DAY_S
     let lastPools: Record<string, unknown> = {}
-    for (let i = 0; i <= 50; i++) {
+    for (let i = 0; i <= (25 * 3_600) / STEP; i++) {
       const r = await observeGuardHistory(client, MULTICALL3, targets, 1n, now, W, series)
       series = new Map(r.series)
       lastPools = r.pools
       expect(r.onChain.has('pool:USDC/cbBTC/500')).toBe(false)
-      now += W
+      now += STEP
     }
+    // A fast review cadence must still grow the series past one point, not replace it forever.
+    expect(series.get('pool:USDC/cbBTC/500')!.points.length).toBeGreaterThan(10)
     expect((lastPools['pool:USDC/cbBTC/500'] as { twap24hAgoTick: number | null }).twap24hAgoTick).not.toBeNull()
     expect((lastPools['pool:USDC/cbBTC/500'] as { realizedVol24hBps: number | null }).realizedVol24hBps).not.toBeNull()
   })

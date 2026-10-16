@@ -65,4 +65,21 @@ describe('GuardHistoryStore', () => {
     writeFileSync(join(dir, 'guard-history.json'), JSON.stringify([1, 2, 3]))
     expect(new GuardHistoryStore(dir).snapshot().size).toBe(0)
   })
+
+  test('a hand-edited file out of time order loads sorted ascending: cumulativeAtOf\'s binary search (@mamoru/rpc) assumes that order', () => {
+    const dir = tmpDir()
+    writeFileSync(
+      join(dir, 'guard-history.json'),
+      JSON.stringify({ 'pool:USDC/cbBTC/500': [{ time: 3_600, tickCumulative: '30' }, { time: 0, tickCumulative: '0' }, { time: 1_800, tickCumulative: '18' }] }),
+    )
+    const points = new GuardHistoryStore(dir).snapshot().get('pool:USDC/cbBTC/500')!.points
+    expect(points.map((p) => p.time)).toEqual([0, 1_800, 3_600])
+  })
+
+  test('duplicate times collapse to one point (the last one in the file), not a repeated entry the binary search could land on ambiguously', () => {
+    const dir = tmpDir()
+    writeFileSync(join(dir, 'guard-history.json'), JSON.stringify({ 'pool:USDC/cbBTC/500': [{ time: 100, tickCumulative: '1' }, { time: 100, tickCumulative: '2' }] }))
+    const points = new GuardHistoryStore(dir).snapshot().get('pool:USDC/cbBTC/500')!.points
+    expect(points).toEqual([{ time: 100, tickCumulative: 2n }])
+  })
 })

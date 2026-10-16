@@ -39,17 +39,22 @@ export function emptyGuardSeries(): GuardSeries {
 }
 
 /**
- * Folds one review's point into `series`: a point less than `windowSeconds` after the last one replaces it (so
- * a series reviewed every few seconds still grows by roughly one point per window, not one per review); further
- * apart it is appended. Points `maxAgeSeconds` or older than `point.time` are dropped first. A point at or before
- * the last kept one is ignored — a provider that answers an older block, or two reviews landing on the same
- * second, never make the series go backwards.
+ * Folds one review's point into `series`. The moving head (`kept.at(-1)`) is replaced, never appended, as long
+ * as doing so would still sit within half a window of the anchor before it (`kept.at(-2)`) — `marketOf` itself
+ * never accepts a point `windowSeconds / 2` or more from the time it asked for, so the series must never let two
+ * *kept* points drift further apart than that, however often `addGuardPoint` itself is called. A review every
+ * few seconds only replaces the head each time; once advancing it would open that gap, the head is frozen (it
+ * becomes the next anchor) and a fresh head is appended. The series this produces holds roughly one point per
+ * `windowSeconds / 2`, not one per review. Points `maxAgeSeconds` or older than `point.time` are dropped first. A
+ * point at or before the last kept one is ignored — a provider that answers an older block, or two reviews
+ * landing on the same second, never make the series go backwards.
  */
 export function addGuardPoint(series: GuardSeries, point: GuardPoint, windowSeconds: number, maxAgeSeconds: number): GuardSeries {
   const kept = series.points.filter((p) => point.time - p.time < maxAgeSeconds)
   const last = kept.at(-1)
   if (last && point.time <= last.time) return { points: kept }
-  if (last && point.time - last.time < windowSeconds) return { points: [...kept.slice(0, -1), point] }
+  const anchor = kept.at(-2)
+  if (anchor && point.time - anchor.time < windowSeconds / 2) return { points: [...kept.slice(0, -1), point] }
   return { points: [...kept, point] }
 }
 
