@@ -1,7 +1,7 @@
 -- Yield ledger: daily accrued/collected fees, gas Mamoru paid, and a hold-value baseline, per position
 -- (otto/mamoru#129). Additive only, numbered by the coordinator at merge, not applied in this PR.
 --
--- Builds on migrations/d1/XXXX_account_snapshots.sql (#136): account_snapshot_latest and account_daily already
+-- Builds on migrations/d1/0009_account_snapshots.sql (#136): account_snapshot_latest and account_daily already
 -- carry the account-level totals (idle, lp, fees, owed) and reserve `collected_usdc`/`gas_paid_wei` on
 -- account_daily for this ticket. This file adds the per-position detail the account-level rows do not carry:
 -- each position's own accrued fees, what it collected, and a baseline to compare its current value against

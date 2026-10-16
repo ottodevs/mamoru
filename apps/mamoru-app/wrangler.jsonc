@@ -29,7 +29,7 @@
     "CORE_DRY_RUN": "true",
     "LIVE_FUNDS": "1",
     // otto/mamoru#129: off by default ("0"). Set to "1" only once the operator runs with MAMORU_SNAPSHOT=1 (and,
-    // for per-position rows, MAMORU_YIELD_LEDGER=1 there too) and XXXX_yield_ledger.sql / XXXX_account_snapshots.sql
+    // for per-position rows, MAMORU_YIELD_LEDGER=1 there too) and 0010_yield_ledger.sql / 0009_account_snapshots.sql
     // are applied (docs/process/releasing.md: migration before the Worker that reads it).
     "YIELD_LEDGER": "0"
   },

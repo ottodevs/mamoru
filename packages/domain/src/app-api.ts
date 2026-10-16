@@ -87,7 +87,7 @@ export type FundingView = {
 }
 
 // GET /api/accounts/:accountKey/yield -> YieldLedgerView (otto/mamoru#129): what the yield ledger knows so far,
-// read from D1 (account_snapshot_latest, account_daily, yield_ledger_position_daily — migrations/d1/XXXX_yield_ledger.sql).
+// read from D1 (account_snapshot_latest, account_daily, yield_ledger_position_daily — migrations/d1/0010_yield_ledger.sql).
 // A null field is not_observed, never a fabricated zero: every field stays null until the Worker's cron
 // (YIELD_LEDGER=1) has pulled at least one operator snapshot for this account. `collectedUsd` and `gasPaidWei`
 // specifically stay null until a harvest/close_position receipt is known for this account (none has fired on

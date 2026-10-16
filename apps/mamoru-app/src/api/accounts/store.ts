@@ -74,7 +74,7 @@ export async function insertAccount(db: Db, row: AccountRow): Promise<boolean> {
   }
 }
 
-/** The exact 13-column INSERT this function always ran before migration XXXX_accounts_env.sql. */
+/** The exact 13-column INSERT this function always ran before migration 0007_accounts_env.sql. */
 async function insertAccountLegacy(db: Db, row: AccountRow): Promise<boolean> {
   try {
     await db

@@ -1,5 +1,5 @@
 -- Environment and test flag on accounts (otto/mamoru#130). Additive only. Numbered by the coordinator at
--- merge, after this file but before XXXX_metrics_daily_v2.sql (that table's writer reads accounts.env).
+-- merge, after this file but before 0008_metrics_daily_v2.sql (that table's writer reads accounts.env).
 --
 -- app.mamoru.lol (prod) and beta.mamoru.lol (beta) share this D1 and this chain_id: nothing stored today says
 -- which Worker created a given account, so `env` cannot be derived retroactively from the existing columns.

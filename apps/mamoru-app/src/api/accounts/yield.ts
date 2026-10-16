@@ -38,7 +38,7 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
     db.prepare('SELECT fees_usdc, read_at, positions_json FROM account_snapshot_latest WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).first<LatestRow>(),
     db.prepare('SELECT collected_usdc, gas_paid_wei FROM account_daily WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<DailyRow>(),
     // Lifetime, matching collectedUsd: every day's fee_accrued_usd is already that day's own 10% of that day's
-    // collected_usd (migrations/d1/XXXX_yield_ledger.sql), so summing every row is the lifetime readiness figure.
+    // collected_usd (migrations/d1/0010_yield_ledger.sql), so summing every row is the lifetime readiness figure.
     db.prepare('SELECT fee_accrued_usd FROM yield_ledger_position_daily WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<FeeRow>(),
   ])
 
