@@ -110,15 +110,30 @@ const cache = `${out}.cache.jsonl`
 const have = new Map<number, Sample>()
 if (existsSync(cache)) for (const line of readFileSync(cache, 'utf8').split('\n')) if (line) { const s = JSON.parse(line, unbig) as Sample; have.set(s.block, s) }
 const todo = blocks.filter((b) => !have.has(Number(b)))
-// A pool with no code at the last block of the window did not exist yet (cbBTC reached Base in September 2024): it
-// stays null in every sample without the retries that a throttled read gets.
-const absent = new Set<number>()
-const codes = await onAny((c) => Promise.all(POOLS.map((e) => c.getCode({ address: e.address, blockNumber: to }))))
-codes.forEach((code, k) => {
-  if (!code || code === '0x') absent.add(k)
-})
-if (absent.size > 0) console.log(`not deployed at block ${to}: ${[...absent].map((k) => POOLS[k]!.name).join(', ')}`)
-const missing = (s: Sample) => s.pools.some((p, k) => p === null && !absent.has(k))
+// A pool with no code at a block did not exist yet (cbBTC reached Base in September 2024): there it stays null without
+// the retries that a throttled read gets. A pool deployed inside the window is found by bisection on its code.
+const deployed = new Map<number, bigint>()
+const hasCode = async (k: number, block: bigint) => {
+  const code = await onAny((c) => c.getCode({ address: POOLS[k]!.address, blockNumber: block }))
+  return !!code && code !== '0x'
+}
+for (let k = 0; k < POOLS.length; k++) {
+  if (await hasCode(k, from)) continue
+  if (!(await hasCode(k, to))) {
+    deployed.set(k, to + 1n)
+    continue
+  }
+  let lo = from
+  let hi = to
+  while (hi - lo > 1n) {
+    const mid = (lo + hi) / 2n
+    if (await hasCode(k, mid)) hi = mid
+    else lo = mid
+  }
+  deployed.set(k, hi)
+}
+for (const [k, at] of deployed) console.log(`${POOLS[k]!.name}: no code before block ${at > to ? `${to} (whole window)` : at}`)
+const missing = (s: Sample) => s.pools.some((p, k) => p === null && BigInt(s.block) >= (deployed.get(k) ?? 0n))
 console.log(`blocks ${from}..${to} every ${step}: ${blocks.length} samples, ${have.size} cached, ${todo.length} to fetch from ${endpoints.map((e) => e.host).join(', ')}`)
 
 let done = 0

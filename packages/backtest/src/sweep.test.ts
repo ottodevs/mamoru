@@ -79,6 +79,20 @@ describe('overrides', () => {
     expect(p.guards!.byBucket.stables!.fallFreeze).toEqual({ fallBps: 1, volBps: 1 })
     expect(p.guards!.byBucket['btc-usdc']).toEqual(conservadorLabGuardsV1.guards!.byBucket['btc-usdc'])
   })
+  test('typos under guards are refused too', () => {
+    expect(() => applyOverrides(conservadorLabGuardsV1, { guards: { byBuckt: {} } })).toThrow('guards.byBuckt')
+    expect(() => applyOverrides(conservadorLabGuardsV1, { guards: { byBucket: { risk: { fallFreez: {} } } } })).toThrow('fallFreez')
+    expect(() => applyOverrides(conservadorLabGuardsV1, { guards: { byBucket: { risk: { fallFreeze: { fallBp: 500 } } } } })).toThrow('fallBp')
+    expect(() => applyOverrides(conservadorLabGuardsV1, { guards: { byBucket: { riks: {} } } })).toThrow('riks')
+    expect(() => applyOverrides(conservadorLiveV2, { guards: { byBucket: { risk: { fallFreeze: { fallBps: 1, volBp: 1 } } } } })).toThrow('volBp')
+  })
+  test('a rule the base policy lacks must be given whole', () => {
+    expect(() => applyOverrides(conservadorLiveV2, { guards: { byBucket: { risk: { fallFreeze: { fallBps: 500 } } } } })).toThrow('volBps')
+    expect(applyOverrides(conservadorLiveV2, { guards: { byBucket: { risk: { fallFreeze: { fallBps: 500, volBps: 1 } } } } }).guards).toEqual({ byBucket: { risk: { fallFreeze: { fallBps: 500, volBps: 1 } } } })
+  })
+  test('a new pool width is accepted', () => {
+    expect(applyOverrides(conservadorLiveV2, { range: { widthTicksByPool: { 'pool:WETH/USDC/3000': 4000 } } }).range.widthTicksByPool).toEqual({ 'pool:USDC/USDT/100': 40, 'pool:WETH/USDC/3000': 4000 })
+  })
   test('"123n" from JSON becomes a bigint', () => {
     expect(applyOverrides(conservadorLiveV2, { minEntry: '5000000n' }).minEntry).toBe(5_000_000n)
   })
@@ -118,7 +132,7 @@ describe('cell metrics', () => {
 })
 
 describe('report', () => {
-  const metrics = (returnPct: number): CellMetrics => ({ returnPct, vsHoldPct: 0, end: 0, hold: 0, maxDrawdownPct: -returnPct, worstDayPct: 1, ops: 2, opsByKind: {}, refused: 0, gas: 0.5, fees: 1, outOfRangePct: 0, resultHash: '0x' })
+  const metrics = (returnPct: number): CellMetrics => ({ returnPct, vsHoldPct: 0, end: 0, hold: 0, maxDrawdownPct: -returnPct, worstDayPct: 1, ops: 2, opsByKind: {}, refused: 0, gas: 0.5, fees: 1, outOfRangePct: 0, samples: 10, gaps: 0, resultHash: '0x' })
   const cell = (window: string, split: 'train' | 'test', variant: string, deposit: number, ret: number): Cell => ({ window, split, regime: 'calm', deposit, variant, policyId: variant, status: 'ok', metrics: metrics(ret) })
   const windows = LAB_WINDOWS
   const variants = [{ name: 'a', policy: 'p' }, { name: 'b', policy: 'p' }]

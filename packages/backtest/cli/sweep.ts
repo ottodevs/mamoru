@@ -52,63 +52,70 @@ function runJob(job: Job): Cell[] {
 
 if (has('worker')) {
   const job = JSON.parse(await Bun.stdin.text()) as Job
-  process.stdout.write(JSON.stringify(runJob(job)))
-  process.exit(0)
-}
+  // Written whole before the process ends: a pipe holds less than a large result.
+  await Bun.write(Bun.stdout, JSON.stringify(runJob(job)))
+} else await main()
 
-let variants: Variant[]
-if (has('variants')) variants = JSON.parse(readFileSync(arg('variants'), 'utf8')) as Variant[]
-else {
-  const policy = arg('policy', 'conservador-live-v2')
-  const sets = all('set')
-  variants = sets.length === 0 ? [{ name: policy, policy }] : [{ name: arg('name', 'variant'), policy, overrides: overridesFromAssignments(sets) }]
-  if (sets.length > 0 && !has('no-baseline')) variants.unshift({ name: 'baseline', policy })
-}
-const names = new Set(variants.map((v) => v.name))
-if (names.size !== variants.length) throw new Error('two variants share a name')
-for (const v of variants) policyOf(v) // refuses an unknown policy or parameter before any work starts
+async function main(): Promise<void> {
 
-const split = arg('split', 'train')
-if (!['train', 'test', 'all'].includes(split)) throw new Error('--split train | test | all')
-const windows = has('windows') ? arg('windows').split(',').map(labWindow) : LAB_WINDOWS.filter((w) => split === 'all' || w.split === split)
-const deposits = arg('deposits', '1000,100000').split(',').map(Number)
-if (deposits.some((d) => !Number.isFinite(d) || d <= 0)) throw new Error('--deposits: positive amounts of the savings asset')
-// Half the cores at most and below normal priority: the box runs other work.
-const jobs = Math.max(1, Math.min(windows.length, Number(arg('jobs', String(Math.max(1, Math.floor(availableParallelism() / 2)))))))
-if (windows.some((w) => w.split === 'test')) console.error('TEST windows included: judge a candidate on them, do not tune on them.')
-
-const started = performance.now()
-const queue: Job[] = windows.map((w) => ({ window: w.id, variants, deposits }))
-const cells: Cell[] = []
-async function worker(): Promise<void> {
-  for (let job = queue.shift(); job; job = queue.shift()) {
-    const p = Bun.spawn(['nice', '-n', '10', process.execPath, import.meta.path, '--worker'], { stdin: new Blob([JSON.stringify(job)]), stdout: 'pipe', stderr: 'inherit', env: process.env })
-    const text = await new Response(p.stdout).text()
-    if ((await p.exited) !== 0) throw new Error(`window ${job.window} failed`)
-    cells.push(...(JSON.parse(text) as Cell[]))
-    console.error(`${job.window} done`)
+  let variants: Variant[]
+  if (has('variants')) variants = JSON.parse(readFileSync(arg('variants'), 'utf8')) as Variant[]
+  else {
+    const policy = arg('policy', 'conservador-live-v2')
+    const sets = all('set')
+    variants = sets.length === 0 ? [{ name: policy, policy }] : [{ name: arg('name', 'variant'), policy, overrides: overridesFromAssignments(sets) }]
+    if (sets.length > 0 && !has('no-baseline')) variants.unshift({ name: 'baseline', policy })
   }
-}
-await Promise.all(Array.from({ length: jobs }, worker))
+  const names = new Set(variants.map((v) => v.name))
+  if (names.size !== variants.length) throw new Error('two variants share a name')
+  for (const v of variants) policyOf(v) // refuses an unknown policy or parameter before any work starts
 
-const sorted = sortCells(cells, LAB_WINDOWS, variants, deposits)
-const aggs = aggregate(sorted)
-const report = {
-  format: 'mamoru-lab-sweep-v1',
-  simVersion: SIM_VERSION,
-  split,
-  deposits,
-  variants: variants.map((v) => ({ ...v, policyId: policyOf(v).policyId, policyHash: policyHash(policyOf(v)) })),
-  windows: windows.map((w) => w.id),
-  cells: sorted,
-  aggregates: aggs,
+  // --windows picks windows by id; the report's split is then the one they belong to, never a label they do not have.
+  const picked = has('windows') ? arg('windows').split(',').map(labWindow) : null
+  const splits = new Set(picked?.map((w) => w.split))
+  const split = has('split') ? arg('split') : picked ? (splits.size === 1 ? [...splits][0]! : 'all') : 'train'
+  if (!['train', 'test', 'all'].includes(split)) throw new Error('--split train | test | all')
+  if (picked && split !== 'all' && picked.some((w) => w.split !== split)) throw new Error(`--windows names windows outside --split ${split}`)
+  const windows = picked ?? LAB_WINDOWS.filter((w) => split === 'all' || w.split === split)
+  const deposits = arg('deposits', '1000,100000').split(',').map(Number)
+  if (deposits.some((d) => !Number.isFinite(d) || d <= 0)) throw new Error('--deposits: positive amounts of the savings asset')
+  // Half the cores at most and below normal priority: the box runs other work.
+  const jobs = Math.max(1, Math.min(windows.length, Number(arg('jobs', String(Math.max(1, Math.floor(availableParallelism() / 2)))))))
+  if (windows.some((w) => w.split === 'test')) console.error('TEST windows included: judge a candidate on them, do not tune on them.')
+
+  const started = performance.now()
+  const queue: Job[] = windows.map((w) => ({ window: w.id, variants, deposits }))
+  const cells: Cell[] = []
+  async function worker(): Promise<void> {
+    for (let job = queue.shift(); job; job = queue.shift()) {
+      const p = Bun.spawn(['nice', '-n', '10', process.execPath, import.meta.path, '--worker'], { stdin: new Blob([JSON.stringify(job)]), stdout: 'pipe', stderr: 'inherit', env: process.env })
+      const text = await new Response(p.stdout).text()
+      if ((await p.exited) !== 0) throw new Error(`window ${job.window} failed`)
+      cells.push(...(JSON.parse(text) as Cell[]))
+      console.error(`${job.window} done`)
+    }
+  }
+  await Promise.all(Array.from({ length: jobs }, worker))
+
+  const sorted = sortCells(cells, LAB_WINDOWS, variants, deposits)
+  const aggs = aggregate(sorted)
+  const report = {
+    format: 'mamoru-lab-sweep-v1',
+    simVersion: SIM_VERSION,
+    split,
+    deposits,
+    variants: variants.map((v) => ({ ...v, policyId: policyOf(v).policyId, policyHash: policyHash(policyOf(v)) })),
+    windows: windows.map((w) => w.id),
+    cells: sorted,
+    aggregates: aggs,
+  }
+  const json = canonicalJson(JSON.parse(JSON.stringify(report, (_k, v) => (typeof v === 'bigint' ? `${v}n` : v))))
+  const id = keccak256(stringToHex(json)).slice(2, 10)
+  const out = arg('out', join(datasetsDir(), '..', 'sweeps', `${variants.map((v) => v.name).join('_').replace(/[^\w.+-]/g, '-')}-${split}-${id}`))
+  mkdirSync(out, { recursive: true })
+  const md = markdown(sorted, aggs)
+  writeFileSync(join(out, 'sweep.json'), `${json}\n`)
+  writeFileSync(join(out, 'sweep.md'), md)
+  console.log(md)
+  console.log(`${sorted.length} cells, ${jobs} jobs, ${Math.round((performance.now() - started) / 1000)} s; wrote ${out}/sweep.{json,md}`)
 }
-const json = canonicalJson(JSON.parse(JSON.stringify(report, (_k, v) => (typeof v === 'bigint' ? `${v}n` : v))))
-const id = keccak256(stringToHex(json)).slice(2, 10)
-const out = arg('out', join(datasetsDir(), '..', 'sweeps', `${variants.map((v) => v.name).join('_').replace(/[^\w.+-]/g, '-')}-${split}-${id}`))
-mkdirSync(out, { recursive: true })
-const md = markdown(sorted, aggs)
-writeFileSync(join(out, 'sweep.json'), `${json}\n`)
-writeFileSync(join(out, 'sweep.md'), md)
-console.log(md)
-console.log(`${sorted.length} cells, ${jobs} jobs, ${Math.round((performance.now() - started) / 1000)} s; wrote ${out}/sweep.{json,md}`)

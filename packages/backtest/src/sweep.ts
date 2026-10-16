@@ -12,25 +12,39 @@ export type Variant = { name: string; policy: string; overrides?: Record<string,
 
 /**
  * Deep merge for parameter overrides: objects merge key by key, anything else (arrays included) replaces. A string
- * `"123n"` becomes a bigint, so overrides can come from JSON. Unknown keys are refused: a typo must not run as the
- * baseline under a new name.
+ * `"123n"` becomes a bigint, so overrides can come from JSON. A key is accepted when the base policy has it or the
+ * shape of the optional parameters names it; anything else is refused, so a typo never runs as the baseline under a
+ * new name. A rule the base policy lacks must be given whole.
  */
-export function applyOverrides<T>(base: T, overrides: Record<string, unknown>, path = '', free = false): T {
+export function applyOverrides<T>(base: T, overrides: Record<string, unknown>, path = '', shape: Shape | undefined = OPTIONAL): T {
   const out: Record<string, unknown> = { ...(base as Record<string, unknown>) }
   for (const [k, v] of Object.entries(overrides)) {
     const at = path ? `${path}.${k}` : k
-    if (!free && !(k in out) && !OPTIONAL_KEYS.has(at)) throw new Error(`override ${at}: the policy has no such parameter`)
+    const sub = typeof shape === 'object' ? (shape[k] ?? shape['*']) : undefined
+    if (!(k in out) && sub === undefined) throw new Error(`override ${at}: the policy has no such parameter`)
     const cur = out[k]
-    if (isPlainObject(v) && (isPlainObject(cur) || cur === undefined)) out[k] = applyOverrides(cur ?? {}, v, at, free || cur === undefined || MAP_KEYS.has(at))
-    else out[k] = typeof v === 'string' && /^-?\d+n$/.test(v) ? BigInt(v.slice(0, -1)) : v
+    if (isPlainObject(v) && (isPlainObject(cur) || cur === undefined)) {
+      if (cur === undefined && typeof sub === 'object' && Object.values(sub).every((x) => x === LEAF)) {
+        const left = Object.keys(sub).filter((x) => !(x in v))
+        if (left.length > 0) throw new Error(`override ${at}: the policy has no ${k} to merge into; give ${left.join(', ')} too`)
+      }
+      out[k] = applyOverrides(cur ?? {}, v, at, sub)
+    } else out[k] = typeof v === 'string' && /^-?\d+n$/.test(v) ? BigInt(v.slice(0, -1)) : v
   }
   return out as T
 }
 
-/** Optional policy parameters an override may add although the base policy does not set them. */
-const OPTIONAL_KEYS = new Set(['allocation', 'minEntry', 'rebalanceBandBps', 'guards', 'range.widthTicksByPool'])
-/** Parameters keyed by pool or bucket: any key below them is accepted. */
-const MAP_KEYS = new Set(['range.widthTicksByPool', 'guards', 'guards.byBucket'])
+const LEAF = 1
+type Shape = typeof LEAF | { [key: string]: Shape }
+const BUCKET_RULES: Shape = { fallFreeze: { fallBps: LEAF, volBps: LEAF } }
+/** Optional parameters of `PolicyVersion` an override may add although the base policy does not set them. `*`: any pool. */
+const OPTIONAL: Shape = {
+  allocation: LEAF,
+  minEntry: LEAF,
+  rebalanceBandBps: LEAF,
+  range: { widthTicksByPool: { '*': LEAF } },
+  guards: { byBucket: { stables: BUCKET_RULES, 'btc-usdc': BUCKET_RULES, risk: BUCKET_RULES } },
+}
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v) && typeof v !== 'bigint'
@@ -95,6 +109,9 @@ export type CellMetrics = {
   fees: number
   /** 100 minus the value-weighted share of LP in range, averaged over the samples with a position. */
   outOfRangePct: number
+  /** Samples replayed, and samples stepped over because a pool the policy needs was not read there. */
+  samples: number
+  gaps: number
   resultHash: string
 }
 
@@ -116,6 +133,8 @@ export function cellMetrics(r: RunResult, decimals: number): CellMetrics {
     gas: n(m.gas),
     fees: n(m.fees),
     outOfRangePct: ops === 0 && m.timeInRangeBps === 0 ? 0 : (10_000 - m.timeInRangeBps) / 100,
+    samples: r.window.samples,
+    gaps: r.window.gaps,
     resultHash: r.resultHash,
   }
 }
@@ -175,7 +194,7 @@ export function markdown(cells: Cell[], aggs: Aggregate[]): string {
       if (c.status !== 'ok') out.push(`| ${c.window} | ${c.regime} | ${c.deposit} | ${c.variant} | skipped: ${c.reason} | | | | | | | |`)
       else {
         const m = c.metrics
-        out.push(`| ${c.window} | ${c.regime} | ${c.deposit} | ${c.variant} | ${f2(m.returnPct)} | ${f2(m.vsHoldPct)} | ${f2(m.maxDrawdownPct)} | ${f2(m.worstDayPct)} | ${m.ops} | ${f2(m.gas)} | ${f2(m.fees)} | ${f2(m.outOfRangePct)} |`)
+        out.push(`| ${c.window} | ${c.regime} | ${c.deposit} | ${c.variant} | ${f2(m.returnPct)} | ${f2(m.vsHoldPct)} | ${f2(m.maxDrawdownPct)} | ${f2(m.worstDayPct)} | ${m.ops} | ${f2(m.gas)} | ${f2(m.fees)} | ${f2(m.outOfRangePct)}${m.gaps > 0 ? ` (${m.gaps} gaps)` : ''} |`)
       }
     }
     out.push('')
