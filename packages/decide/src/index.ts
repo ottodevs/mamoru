@@ -4,14 +4,16 @@ import { grantKeyFor, hasManageAny, policyHash, type PolicyVersion } from '@mamo
 import { allocate } from './allocate/index.ts'
 import { enterBucket, safeSavings } from './enter/index.ts'
 import { ehgPreliminary, purgaIdentity } from './gates/index.ts'
+import { fallFreezeOf } from './guard/index.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
 import { anyKey, idleConvertOf, isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
-import type { Decision, GateStep, Observation, Proposal, ShadowNote } from './types.ts'
+import type { Decision, GateStep, GuardNote, Observation, Proposal, ShadowNote } from './types.ts'
 
 export type * from './types.ts'
 export { estimateFees } from './harvest/index.ts'
 export { safeSavings } from './enter/index.ts'
 export { amountsForLiquidity, inSavings, volatileOf } from './value.ts'
+export { fallBpsOf, fallFreezeOf, marketOf, type CumulativePoint } from './guard/index.ts'
 export { allocate, widthOf, type Allocation, type BucketValue } from './allocate/index.ts'
 export { amountsOf, bucketValues, positionValue, rerangeOf, reduceOf, EDGE_BPS, DRIFT_BPS } from './rerange/index.ts'
 
@@ -88,13 +90,17 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
     positions.push({ tokenId: p.tokenId, codes })
   }
 
+  // Spec 004 (#101): buckets frozen by a fast fall get no entry this review.
+  const guards: GuardNote[] = policy.guards ? fallFreezeOf(obs, policy) : []
+  const frozen = new Set(guards.filter((g) => g.code === 'DECIDE_ENTRY_PAUSED_FALL').map((g) => g.pool))
+
   // Plan §9, step 7: entry, bucket by bucket.
   const entries: Proposal[] = []
   let enterEvaluated = false
   // Target weights: pools whose idle volatile the allocation is about to mint.
   let pendingMint: ReadonlySet<string> | undefined
   if (policy.allocation === 'target-weights') {
-    const a = allocate(obs, policy, unsafeDeposit)
+    const a = allocate(obs, policy, unsafeDeposit, frozen)
     // Only where the next step has a live session: without one it never goes and the token would wait for ever.
     // A mint after a re-range runs under manage-any, as below.
     const live = (grant: string) => obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp)
@@ -118,6 +124,10 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
     const entered = obs.positions.some((p) => p.pool === pool.name && isManaged(p, policy, policyPools))
     if (entered) {
       buckets.push({ bucket: b.id, code: 'STRATEGY_PREFERENCE' })
+      continue
+    }
+    if (frozen.has(pool.name)) {
+      buckets.push({ bucket: b.id, code: 'DECIDE_ENTRY_PAUSED_FALL' })
       continue
     }
     const purga = purgaIdentity(pool)
@@ -172,6 +182,8 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
   function holdReason(): ReasonCode {
     if (unsafeDeposit) return 'OBS_DEPOSIT_UNSAFE'
     if (managedOutOfRange > 0) return 'OBS_POSITION_OUT_OF_RANGE'
+    // Spec 004: the app and /ops show that money waits because of a fall, not that nothing is to do.
+    if (frozen.size > 0) return 'DECIDE_ENTRY_PAUSED_FALL'
     if (managedInRange > 0) return 'DECIDE_IN_RANGE'
     const blocking = buckets.find((b) => b.code !== 'PLAN_BUCKET_NO_EXECUTABLE_POOL')
     return blocking?.code ?? 'PLAN_BUCKET_NO_EXECUTABLE_POOL'
@@ -180,7 +192,8 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
   const kind = proposal?.kind ?? 'hold'
   const code = kind === 'hold' ? 'DECIDE_HOLD' : PROPOSAL_CODE[kind]
   const policyRef = { policyId: policy.policyId, version: policy.version, hash: policyHash(policy) }
-  const body = { policyRef, observationCodes, kind, code, reason, trail, proposal, shadow, buckets, positions } as const
+  // FR-LC-001: without `policy.guards` the body, and so every hash, is the one of today.
+  const body = { policyRef, observationCodes, kind, code, reason, trail, proposal, shadow, buckets, positions, ...(policy.guards ? { guards } : {}) } as const
   const observationRef = { block: obs.block.number, hash: obs.block.hash }
   const premiseHash = hashOf(body)
   return { decisionId: hashOf({ observationRef, premiseHash }), premiseHash, observationRef, ...body } as Decision

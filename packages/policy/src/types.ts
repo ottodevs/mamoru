@@ -98,7 +98,18 @@ export type PolicyVersion = {
     grants: GrantTemplate[]
   }
   shadow: string[]
+  /** Spec 004 loss control. Absent: today's behaviour byte for byte (FR-LC-001). */
+  guards?: { byBucket: Partial<Record<BucketId, { fallFreeze?: FallFreezeRule }>> }
 }
+
+export type BucketId = PolicyVersion['buckets'][number]['id']
+
+/**
+ * No new money into a fall (spec 004 FREEZE, #101): while the 24 h TWAP change of the bucket's pool is a fall of at
+ * least `fallBps` and its 24 h realized volatility (annualized) is at least `volBps`, the bucket gets no entry or
+ * top-up. Re-ranges, harvests and the other buckets run as before. It lifts by itself when either condition clears.
+ */
+export type FallFreezeRule = { fallBps: number; volBps: number }
 
 export type ResolvedParamRule = {
   field: string

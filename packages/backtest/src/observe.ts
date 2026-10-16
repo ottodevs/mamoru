@@ -1,5 +1,5 @@
 import type { Hex } from '@mamoru/domain'
-import type { Observation, PoolObs, SessionObs } from '@mamoru/decide'
+import { marketOf, type CumulativePoint, type Observation, type PoolGuardObs, type PoolObs, type SessionObs } from '@mamoru/decide'
 import { grantKey, type PolicyVersion } from '@mamoru/policy'
 import { address, entry, type RegistryName } from '@mamoru/registry'
 import type { Dataset, Sample } from './types.ts'
@@ -29,6 +29,35 @@ export function twapTick(ds: Dataset, poolIndex: number, i: number, windowSecond
   let tick = delta / secs
   if (delta < 0n && delta % secs !== 0n) tick -= 1n
   return Number(tick)
+}
+
+/**
+ * The pool's tick cumulative at time `t`: the last sample at or before `t`, if it is less than one TWAP window old
+ * and the pool oracle answered there. A gap in the data is missing history, not a flat price.
+ */
+export function cumulativeAt(ds: Dataset, poolIndex: number, t: number, windowSeconds: number): CumulativePoint | null {
+  let lo = 0
+  let hi = ds.samples.length - 1
+  if (hi < 0 || ds.samples[0]!.time > t) return null
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (ds.samples[mid]!.time <= t) lo = mid
+    else hi = mid - 1
+  }
+  const s = ds.samples[lo]!
+  const ps = s.pools[poolIndex]
+  if (!ps || ps.tickCumulative === null || t - s.time >= windowSeconds) return null
+  return { time: s.time, tickCumulative: ps.tickCumulative }
+}
+
+/** Spec 004 `Observation.guard` from the dataset, as the engine would build it from its snapshot history. */
+export function guardOf(ds: Dataset, i: number, windowSeconds: number): NonNullable<Observation['guard']> {
+  const now = ds.samples[i]!.time
+  const pools: Partial<Record<RegistryName, PoolGuardObs>> = {}
+  ds.pools.forEach((name, k) => {
+    if (ds.samples[i]!.pools[k]) pools[name] = marketOf(now, windowSeconds, (t) => cumulativeAt(ds, k, t, windowSeconds))
+  })
+  return { pools }
 }
 
 function sessions(policy: PolicyVersion, w: World): SessionObs[] {
@@ -82,5 +111,6 @@ export function observe(ds: Dataset, i: number, w: World, policy: PolicyVersion,
     intents: { paused: false, exitRequested: false },
     slot: null,
     lastRerangeAt: w.lastRerangeAt,
+    ...(policy.guards ? { guard: guardOf(ds, i, policy.execution.twapWindowSeconds) } : {}),
   }
 }
