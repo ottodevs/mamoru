@@ -43,6 +43,7 @@ import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type EngineHealthSnapshot } from './metrics.ts'
 import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
+import { readChainUsage, type ChainUsage } from './session-usage.ts'
 import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
 
 /** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
@@ -56,6 +57,8 @@ const RELAYER_BALANCE_CACHE_MS = 60_000
  * the app shows: every owner action's prepare and submit reads the chain itself and decides on that.
  */
 const FUNDING_FRESH_MS = 15_000
+/** #149: how long the on-chain usage counters of an account are taken as current (about 30 reads per account). */
+const CHAIN_USAGE_TTL_MS = 10 * 60_000
 const FUNDING_STALE_MS = 60_000
 const FUNDING_FRESH_READ_MS = 2_000
 
@@ -371,6 +374,8 @@ export class Operator {
   private relayerBalanceCache: { at: number; value: bigint } | null = null
   /** otto/mamoru#135: one readSafe shared by every open tab and poll of the same account; dropped whenever the account moves (fundingMoved). */
   private readonly fundingCache = new FundingCache<SafeRead>(Date.now, FUNDING_STALE_MS)
+  /** #149: usage counters read from the chain per account (readChainUsage), keyed by lower-case permission id. */
+  private readonly chainUsage = new Map<string, { at: number; grants: string; byGrant: Map<string, ChainUsage> }>()
   /** Ops whose execTransaction went to the provider in this attempt: only then can a refusal be about a copy already out. */
   private readonly execTried = new Set<string>()
   /** Armed ops being sent again after a failed attempt: an earlier copy may have landed although its reply said no. */
@@ -591,20 +596,23 @@ export class Operator {
 
   /**
    * otto/mamoru#149: the engine grant closest to the end of what its approval allows, once it has used USAGE_RENEW_BPS
-   * of it: its usage limit (userOps the chain included under it) or, for an entry grant, its fullest cumulative cap.
-   * The renewal row offers a renewal from then on, so the engine is never blocked silently; `spent` says it already is
-   * (SESSION_USAGE_SPENT). Counted by the running engine's ledger, else by the confirmed operations stored for the
-   * account. Null when every grant is under the threshold.
+   * of it: its usage limit (userOps included under it) or, for an entry grant, its fullest cumulative cap. Counted by
+   * the chain (refreshChainUsage: uses made with the key by anyone), or by the operator's own count where that is
+   * higher or the chain was not read. The renewal row offers a renewal from then on, so the engine is never blocked
+   * silently; `spent` says it already is (SESSION_USAGE_SPENT). Null when every grant is under the threshold.
    */
   usageView(acc: AccountState): NonNullable<NonNullable<FundingView['approval']>['usage']> | null {
     const ledger = this.runners.get(acc.accountKey)?.engine.ledger
+    const chain = this.chainUsage.get(acc.accountKey)?.byGrant
     let worst: { grant: string; usedBps: number } | null = null
     for (const g of acc.grants) {
       const u = ledger?.usageOf(g.permissionId)
       const limit = g.grant.userOp.usageLimit
       const id = g.permissionId.toLowerCase()
-      const used = u?.used ?? acc.ops.filter((o) => o.state === 'confirmed' && o.permissionId?.toLowerCase() === id).length
-      const usedBps = Math.max(limit > 0 ? Math.floor((used * 10_000) / limit) : 10_000, u?.spentBps ?? 0)
+      const c = chain?.get(id)
+      const own = u?.used ?? acc.ops.filter((o) => o.state === 'confirmed' && o.permissionId?.toLowerCase() === id).length
+      const used = Math.max(own, c?.used ?? 0)
+      const usedBps = Math.max(limit > 0 ? Math.floor((used * 10_000) / limit) : 10_000, u?.spentBps ?? 0, c?.spentBps ?? 0)
       if (!worst || usedBps > worst.usedBps) worst = { grant: g.name, usedBps }
     }
     if (!worst || worst.usedBps < USAGE_RENEW_BPS) return null
@@ -633,9 +641,33 @@ export class Operator {
       .filter((ks) => ks.length > 0)
   }
 
+  /**
+   * #149: the usage counters of the account's grants as the chain has them, at most CHAIN_USAGE_TTL_MS old. A use the
+   * operator did not make (the key used elsewhere) is logged; either way the larger count is what the row follows.
+   */
+  private async refreshChainUsage(acc: AccountState): Promise<void> {
+    if (!acc.active || !acc.grants.length) return
+    const ids = acc.grants.map((g) => g.permissionId.toLowerCase()).join(',')
+    const had = this.chainUsage.get(acc.accountKey)
+    if (had && had.grants === ids && Date.now() - had.at < CHAIN_USAGE_TTL_MS) return
+    // Taken before the read, so a slow or failing RPC is not asked again on every poll.
+    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant: had?.grants === ids ? had.byGrant : new Map() })
+    const byGrant = await readChainUsage(this.client as never, acc.ctx.address as Address, acc.grants)
+    if (!byGrant.size) return
+    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant })
+    const ledger = this.runners.get(acc.accountKey)?.engine.ledger
+    for (const g of acc.grants) {
+      const c = byGrant.get(g.permissionId.toLowerCase())
+      const own = ledger?.usesOf(g.permissionId) ?? acc.ops.filter((o) => o.state === 'confirmed' && o.permissionId?.toLowerCase() === g.permissionId.toLowerCase()).length
+      if (c && c.used > own) console.log(`[usage] ${acc.accountKey} ${g.name}: the chain counts ${c.used} uses, the operator ${own}`)
+    }
+  }
+
   /** `fresh`: a read at most FUNDING_FRESH_READ_MS old (a deposit lands without anything of the account moving). */
   async funding(ctx: AccountContext, fresh = false): Promise<FundingView> {
     const { acc, live } = this.account(ctx, { readOnly: true })
+    // In the background: the row follows on the next poll, and a slow read never holds the balance up.
+    void this.refreshChainUsage(acc).catch((e) => logErr(`[usage] ${acc.accountKey}`, e))
     // The app is open on this account: an armed activation is watched at full pace again.
     if (acc.armed) this.armSeen.set(acc.accountKey, Date.now())
     const r = await this.readSafeCached(acc.accountKey, live.safe, fresh)
@@ -893,8 +925,8 @@ export class Operator {
     const liveManage = stored.filter((g) => g.name.startsWith('manage-any') || g.name.startsWith('convert-any')).map((g) => g.name)
     const summary = [
       `Renew Mamoru's approval on your Safe ${live.safe}`,
-      `Engine key ${sessionKey} keeps the same permissions, for ${Math.round(policy.session.validitySeconds / 86_400)} more days`,
-      this.usageLine(stored),
+      `Engine key ${sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero:`,
+      ...this.limitLines(stored),
       'The approval it replaces is revoked in the same transaction',
       ...(dropped.length ? [`Re-ranging and collecting fees in ${this.poolsOf(dropped)} needs one more approval after this one`] : []),
       ...(liveManage.length
@@ -920,6 +952,7 @@ export class Operator {
       `Let Mamoru's engine re-range and collect fees in ${this.poolsOf(added)} on your Safe ${live.safe}`,
       `Engine key ${sessionKey} may, for ${Math.round(policy.session.validitySeconds / 86_400)} days and within your plan's limits: take liquidity out of any position your Safe owns and collect it, with its fees, into your Safe; burn a position once it is empty; open positions again in those pools; and swap ${this.volatileOf(added)} to USDC`,
       'It does this without asking you again, only within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
+      ...this.limitLines(stored),
       ...(dropped.length ? [`${this.poolsOf(dropped)} needs one more approval after this one`] : []),
       'Nothing is moved now: your positions stay as they are',
     ]
@@ -951,17 +984,29 @@ export class Operator {
     }
   }
 
-  /** #149: what the renewed grants allow, counted again from zero: the limit of each kind among `stored` (the same in every pool). */
-  private usageLine(stored: StoredGrant[]): string {
-    const most = (prefix: string) => Math.max(0, ...stored.filter((g) => g.name.startsWith(prefix)).map((g) => g.grant.userOp.usageLimit))
+  /**
+   * #149: the limits the owner signs, read from the very grants being enabled, one line per pool: the USDC an entry
+   * swap may spend per swap and in total, and how many transactions (userOps) each grant allows. A transaction can
+   * hold several steps (collect and swap, take out and burn), so the counts are of transactions, and say so.
+   */
+  private limitLines(stored: StoredGrant[]): string[] {
     const n = (v: number) => v.toLocaleString('en-US')
-    const parts = [
-      most('convert-any') ? `${n(most('convert-any'))} fee collections` : null,
-      most('manage-any') ? `${n(most('manage-any'))} re-range or reduce steps` : null,
-      most('enter-swap') ? `${n(most('enter-swap'))} entry swaps` : null,
-      most('enter-mint') ? `${n(most('enter-mint'))} entry mints` : null,
-    ].filter((x): x is string => x !== null)
-    return `Its counts start again: up to ${parts.join(', ')} per pool`
+    const pools = [...new Set(stored.map((g) => g.name.split(':').slice(1).join(':')).filter((p) => p.startsWith('pool:')))]
+    return pools.map((pool) => {
+      const of = (name: string) => stored.find((g) => g.name === `${name}:${pool}`)
+      const swap = of('enter-swap')?.grant.actions.find((a) => a.signature.startsWith('exactInputSingle'))?.params.find((p) => p.field === 'amountIn')
+      const counts = [
+        ['enter-swap', 'to swap USDC in'],
+        ['enter-mint', 'to open a position'],
+        ['manage-any', 'to take liquidity out, burn or re-open a position'],
+        ['convert-any', 'to collect fees and swap them to USDC'],
+      ].flatMap(([name, what]) => {
+        const g = of(name!)
+        return g ? [`${n(g.grant.userOp.usageLimit)} ${what}`] : []
+      }).map((c, i) => (i === 0 ? c.replace(' to ', ' transactions to ') : c))
+      const money = swap ? `USDC swapped in at most ${fmtUsdc(swap.ref)} per transaction and ${fmtUsdc(swap.cumulativeLimit ?? swap.ref)} in total; ` : ''
+      return `In ${poolLabel(pool)}: ${money}at most ${counts.join(', ')} (one transaction can hold several of these steps)`
+    })
   }
 
   /** "cbBTC and WETH": the tokens other than USDC of the pools named in a set of grant keys (what a harvest converts). */
@@ -1144,6 +1189,7 @@ export class Operator {
         ...(liveManage.length
           ? [`It may also act on any Uniswap v3 position your Safe owns, in any pool: take liquidity out, collect fees, burn it once empty, and convert ${this.volatileOf(liveManage)} back to USDC`]
           : []),
+        ...this.limitLines(stored),
         paidToSafe,
       ]
       return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })

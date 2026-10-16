@@ -437,6 +437,10 @@ describe('renewing the approval', () => {
     expect(renewAskFor(running({ validUntil: now - 3600, renewDue: true, expired: true }), false)).not.toBeNull()
     expect(renewAskFor(running({ validUntil: now + 200 * 86_400, renewDue: false, expired: false }), false)).toBeNull()
     expect(renewAskFor(running({ validUntil: now + 200 * 86_400, renewDue: false, expired: false, missing: 4 }), false)).toBeNull()
+    // #149: a spent grant is asked once too; one at 80% only shows the row.
+    const spent = renewAskFor(running({ validUntil: now + 200 * 86_400, renewDue: false, expired: false, usage: { action: 'collect', pool: null, usedBps: 10_000, spent: true } }), false)
+    expect(spent).toEndWith(':spent')
+    expect(renewAskFor(running({ validUntil: now + 200 * 86_400, renewDue: false, expired: false, usage: { action: 'collect', pool: null, usedBps: 8_000, spent: false } }), false)).toBeNull()
     expect(renewAskFor(due, true)).toBeNull()
     expect(renewAskFor({ ...due, active: false }, false)).toBeNull()
     expect(renewAskFor(undefined, false)).toBeNull()

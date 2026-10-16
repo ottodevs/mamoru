@@ -114,18 +114,20 @@ const LIVE_USAGE = { enterSwap: 3_000, enterMint: 1_000, manageAny: 2_500 }
 
 /**
  * #149: entry swaps add up to the cumulative cap of enter-swap, and target-weights re-balances with them: Sep 2026 used
- * 60-67% of the stables total in one month on top of the first entry. The swap totals are this many times the per-pair
- * share of the cap, so a year of that fits (12 months x 0.67 + the entry, 8.3x, with 1.45x margin). Mint totals stay one
+ * about 60% of the 2.0.0 stables total in one month on top of the first entry (25%); calm months and crash weeks less.
+ * The swap totals are this many times the 2.0.0 share: at the Sep 2026 rate the row offers a renewal (80%) about every
+ * 3.5 months, about 3 taps a year more than the yearly renewal, and none in a calm year. Not 12x: a leaked session key
+ * could swap that total at a manipulated price (amountOutMinimum only needs to be above zero). Mint totals stay one
  * entry: re-mints after a re-range run under manage-any, and in the Lab enter-mint only ever paid the first entry.
  */
-const SWAP_TOTAL_YEARS = 12
+const SWAP_TOTALS = 3
 
 /** One pair of a multi-pool policy: caps named `<prefix>…`, sized in bps of the account cap. */
 function pairOf(prefix: string, pool: string, stable: string, volatile: string, token0: string, token1: string, fee: number, bps: { swapPerCall: number; swapTotal: number; mint: number }) {
   const n = (s: string) => `${prefix}${s}`
   const caps: CapFormula[] = [
     { name: n('SwapPerCall'), asset: stable, bpsOfDeposit: bps.swapPerCall },
-    { name: n('SwapTotal'), asset: stable, bpsOfDeposit: bps.swapTotal * SWAP_TOTAL_YEARS },
+    { name: n('SwapTotal'), asset: stable, bpsOfDeposit: bps.swapTotal * SWAP_TOTALS },
     { name: n('Mint0'), asset: token0, bpsOfDeposit: bps.mint },
     { name: n('Mint1'), asset: token1, bpsOfDeposit: bps.mint },
     { name: n('ConvertPerCall'), asset: volatile, bpsOfDeposit: bps.mint },
@@ -173,7 +175,7 @@ const riskPair = pairOf('risk', 'pool:WETH/USDC/3000', 'USDC', 'WETH', 'WETH', '
  * One enter-swap and one enter-mint grant per pair, all enabled by the one owner activation. Caps are bps of the
  * account cap (LIVE_CAP_USDC) with room for one entry per pool plus top-ups.
  * 2.1.0 (#149): usage limits and the entry swap totals sized for the approval's 365 days at the account cap (see
- * CONVERT_ANY_BY_CAP and SWAP_TOTAL_YEARS). Accounts approved under 2.0.0 keep the limits they signed (16 entries,
+ * CONVERT_ANY_BY_CAP and SWAP_TOTALS). Accounts approved under 2.0.0 keep the limits they signed (16 entries,
  * 256 manage-any, 64 convert-any per pool) until a renewal, which the app offers when a grant has used 80% of them.
  */
 export const conservadorLiveV2: PolicyVersion = {

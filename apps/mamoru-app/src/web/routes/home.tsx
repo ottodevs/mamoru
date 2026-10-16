@@ -726,7 +726,10 @@ export function ApprovalCard({ approval, summary, busy, error, onPrepare, onAppr
  * the moment Home opens, once per visit and per approval. The row at the top stays for whoever closes it.
  */
 export function renewAskFor(f: FundingView | undefined, renewing: boolean): string | null {
-  if (!f || !f.active || !f.approval || !f.approval.renewDue || renewing) return null
+  if (!f || !f.active || !f.approval || renewing) return null
+  // #149: a grant that ran out of what its approval allows has stopped the engine there: asked like a due renewal.
+  if (f.approval.usage?.spent) return `mamoru:renew-asked:${f.address}:${f.approval.validUntil}:spent`
+  if (!f.approval.renewDue) return null
   return `mamoru:renew-asked:${f.address}:${f.approval.validUntil}`
 }
 

@@ -46,9 +46,9 @@ describe('usage limits sized for a year at the account cap (#149)', () => {
     for (const t of conservadorLiveV2.session.grants) for (const cap of [1n, 10n ** 15n]) expect(usageLimitFor(t, cap)).toBeLessThanOrEqual(MAX_USAGE_LIMIT)
   })
 
-  test('entry swap totals hold a year of re-balancing: 12 times the 2.0.0 share; per-call caps unchanged', () => {
+  test('entry swap totals are 3 times the 2.0.0 share, renewed from the row; per-call caps unchanged', () => {
     const bps = (name: string) => conservadorLiveV2.session.caps.find((c) => c.name === name)!.bpsOfDeposit
-    expect([bps('stablesSwapTotal'), bps('btcSwapTotal'), bps('riskSwapTotal')]).toEqual([120_000, 96_000, 48_000])
+    expect([bps('stablesSwapTotal'), bps('btcSwapTotal'), bps('riskSwapTotal')]).toEqual([30_000, 24_000, 12_000])
     expect([bps('stablesSwapPerCall'), bps('btcSwapPerCall'), bps('riskSwapPerCall')]).toEqual([5_000, 4_000, 2_000])
     expect([bps('stablesMint0'), bps('btcMint0'), bps('riskMint0')]).toEqual([10_000, 8_000, 4_000])
   })

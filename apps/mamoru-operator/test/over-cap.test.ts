@@ -1747,10 +1747,21 @@ describe('renewing the approval of a running account', () => {
       const old = acc.grants.map((g) => g.permissionId)
       const tx = await w.op.prepareRenew(ctx)
       expect(tx.summary.join(' ')).toContain('revoked in the same transaction')
-      expect(tx.summary).toContain('Its counts start again: up to 1,000 fee collections, 2,500 re-range or reduce steps, 3,000 entry swaps, 1,000 entry mints per pool')
+      expect(tx.summary.join(' ')).toContain('within new limits counted from zero')
+      expect(tx.summary).toContain('In USDC/USDT 0.01%: USDC swapped in at most 50.00 per transaction and 300.00 in total; at most 3,000 transactions to swap USDC in, 1,000 to open a position, 2,500 to take liquidity out, burn or re-open a position, 1,000 to collect fees and swap them to USDC (one transaction can hold several of these steps)')
       await w.op.submit(ctx, 'renew', sign(tx))
       expect(old.every((id) => acc.revoked.includes(id))).toBe(true)
       expect((await w.op.funding(ctx)).approval?.usage).toBeUndefined()
+    })
+
+    test('#149: uses the chain counts and the operator did not make (the key used elsewhere) bring the row too', async () => {
+      const { w, acc } = await capped()
+      const swap = acc.grants.find((g) => g.name === 'enter-swap:pool:USDC/cbBTC/500')!
+      expect((await w.op.funding(ctx)).approval?.usage).toBeUndefined()
+      type Usage = { chainUsage: Map<string, { at: number; grants: string; byGrant: Map<string, { used: number; spentBps: number | null }> }> }
+      const ids = acc.grants.map((g) => g.permissionId.toLowerCase()).join(',')
+      ;(w.op as unknown as Usage).chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant: new Map([[swap.permissionId.toLowerCase(), { used: 3, spentBps: 8_500 }]]) })
+      expect((await w.op.funding(ctx)).approval?.usage).toEqual({ action: 'enter', pool: 'pool:USDC/cbBTC/500', usedBps: 8_500, spent: false })
     })
 
     test('a renewal that is due goes first, with what fits; the missing grants are added after it', async () => {
