@@ -76,6 +76,7 @@ function volatileShareBps(pool: PoolObs, policy: PolicyVersion): bigint {
  * and not the savings to pair it (the one-sided tokens a re-range frees): sell the excess back. Otherwise mint.
  */
 export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit: boolean, frozen?: ReadonlySet<string>): Allocation {
+  // `frozen`: bucket ids that get no entry this review (spec 004).
   const savings = policy.savingsAsset
   const minEntry = policy.minEntry ?? DEFAULT_MIN_ENTRY
   const free = safeSavings(obs, policy)
@@ -97,7 +98,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     const purga = purgaIdentity(pool)
     if (purga.verdict !== 'GO') trail.push(purga)
     // Spec 004 FREEZE (#101): a bucket whose pool is in a fast fall gets no entry; its share waits where it is.
-    const blocked = purga.verdict !== 'GO' ? purga.reason : frozen?.has(pool.name) ? ('DECIDE_ENTRY_PAUSED_FALL' as ReasonCode) : null
+    const blocked = purga.verdict !== 'GO' ? purga.reason : frozen?.has(b.id) ? ('DECIDE_ENTRY_PAUSED_FALL' as ReasonCode) : null
     return { b, pool, value, deployed, idleVolatile, blocked }
   })
   const executable = rows.filter((r) => r.pool)

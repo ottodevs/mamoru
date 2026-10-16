@@ -92,7 +92,7 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
 
   // Spec 004 (#101): buckets frozen by a fast fall get no entry this review.
   const guards: GuardNote[] = policy.guards ? fallFreezeOf(obs, policy) : []
-  const frozen = new Set(guards.filter((g) => g.code === 'DECIDE_ENTRY_PAUSED_FALL').map((g) => g.pool))
+  const frozen = new Set(guards.filter((g) => g.code === 'DECIDE_ENTRY_PAUSED_FALL').map((g) => g.bucket))
 
   // Plan §9, step 7: entry, bucket by bucket.
   const entries: Proposal[] = []
@@ -126,7 +126,7 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
       buckets.push({ bucket: b.id, code: 'STRATEGY_PREFERENCE' })
       continue
     }
-    if (frozen.has(pool.name)) {
+    if (frozen.has(b.id)) {
       buckets.push({ bucket: b.id, code: 'DECIDE_ENTRY_PAUSED_FALL' })
       continue
     }
@@ -163,7 +163,10 @@ export function decide(obs: Observation, policy: PolicyVersion): Decision {
     reason = 'DECIDE_PAUSED'
   } else {
     const reduce = reranges.length || harvests.length ? null : reduceOf(obs, policy, policyPools)
-    const idle = reranges.length || harvests.length || reduce?.proposal ? null : idleConvertOf(obs, policy, policyPools, pendingMint)
+    // A frozen bucket's idle token waits where it is: the guard never turns a pause into a sell-back.
+    const frozenPools = guards.filter((g) => frozen.has(g.bucket)).map((g) => g.pool)
+    const keep = frozenPools.length ? new Set([...(pendingMint ?? []), ...frozenPools]) : pendingMint
+    const idle = reranges.length || harvests.length || reduce?.proposal ? null : idleConvertOf(obs, policy, policyPools, keep)
     proposal = reranges[0] ?? harvests[0] ?? reduce?.proposal ?? idle ?? entries[0] ?? null
     reason = proposal ? PROPOSAL_CODE[proposal.kind] : holdReason()
   }
