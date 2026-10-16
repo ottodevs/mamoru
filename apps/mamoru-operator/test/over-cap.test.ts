@@ -2245,7 +2245,12 @@ describe('spec 006: one cap per prepare, and renewals keep the signed cap', () =
     const p = [...(w.op as unknown as Internals).prepared.values()].find((x) => x.kind === 'activate')!
     expect(p.capUsdc).toBe('100000000')
     expect(tx.summary.join(' ')).toContain('cap 100.00 USDC')
-    expect(tx.summary.join(' ')).not.toContain('1,000')
+    expect(tx.summary.join(' ')).not.toContain('1,000.00 USDC')
+    // The usage limits (#149) are sized from the same captured cap: equal to an activation prepared at a steady 100.
+    const steady = world(20_000_000n)
+    ;(steady.op.cfg as { settings?: unknown }).settings = settingsWith([100])
+    const lines = (t: { summary: string[] }) => t.summary.filter((l) => l.includes('at most')).map((l) => l.replace(/0x[0-9a-fA-F]{40}/g, ''))
+    expect(lines(tx)).toEqual(lines(await steady.op.prepareActivate(ctx)))
   })
 
   test('a renewal after a cap raise keeps the limits the account signed, names them, and says the plan changed', async () => {
@@ -2258,7 +2263,7 @@ describe('spec 006: one cap per prepare, and renewals keep the signed cap', () =
     ;(w.op.cfg as { settings?: unknown }).settings = settingsWith([1000])
     const tx = await w.op.prepareRenew(ctx)
     const text = tx.summary.join(' ')
-    expect(text).toContain('keeps the same limits, sized for deposits up to 100.00 USDC')
+    expect(text).toContain('sized for deposits up to 100.00 USDC (the cap you signed)')
     expect(text).toContain('this approval keeps the 100.00 USDC limits you signed')
     const p = [...(w.op as unknown as Internals).prepared.values()].find((x) => x.kind === 'renew')!
     expect(p.capUsdc).toBe('100000000')
