@@ -146,6 +146,17 @@ export function nextReview(more: boolean, followUps: number, overBudget: boolean
   if (more && !overBudget && followUps < FOLLOW_UP_MAX) return { ms: Math.min(FOLLOW_UP_MS, reviewMs), followUps: followUps + 1 }
   return { ms: reviewMs, followUps: 0 }
 }
+
+/**
+ * otto/mamoru#135 follow-up: whether two `Runner.waiting` lists report the same thing (order included). Used
+ * to invalidate the funding cache only when a review's decision actually changed what it reports, not on every
+ * tick a repeated wait holds through (that would undo the cache's point).
+ */
+export function sameWaiting(a: Runner['waiting'], b: Runner['waiting']): boolean {
+  const xs = a ?? []
+  const ys = b ?? []
+  return xs.length === ys.length && xs.every((w, i) => w.bucket === ys[i]!.bucket && w.pool === ys[i]!.pool && w.code === ys[i]!.code && w.amountUsdc === ys[i]!.amountUsdc)
+}
 /** otto/mamoru#140 (part2 #9): the most a pending owner tx (prepared, not yet signed) holds engine review for. */
 export const REVIEW_HOLD_MAX_MS = 5 * 60_000
 /**
@@ -2333,7 +2344,12 @@ export class Operator {
           } else {
             const d = r.record.decision
             const pools = new Map<string, string | null>(this.enginePolicyOf(acc).buckets.map((b) => [b.id, b.pools[0] ?? null]))
-            runner.waiting = (d.waiting ?? []).map((w) => ({ bucket: w.bucket, pool: pools.get(w.bucket) ?? null, code: w.code, amountUsdc: w.amount.toString() }))
+            const waiting = (d.waiting ?? []).map((w) => ({ bucket: w.bucket, pool: pools.get(w.bucket) ?? null, code: w.code, amountUsdc: w.amount.toString() }))
+            // otto/mamoru#135 follow-up: a new (or cleared) waiting reason is itself something /funding reports
+            // (engineView), decided off this review's own observation of the chain (a deposit, a position). Without
+            // this, that fresh decision could be paired with a balance /funding still answers from before it.
+            if (!sameWaiting(runner.waiting, waiting)) this.fundingMoved(acc)
+            runner.waiting = waiting
             const o = r.op ? engine.journal.op(r.op.opId) : null
             const last = o ? engine.journal.transitions.filter((t) => t.opId === o.opId).at(-1) : null
             // `last.detail` is free text (unlike d.reason/o.state/o.stateCode, all closed enums): redact it.

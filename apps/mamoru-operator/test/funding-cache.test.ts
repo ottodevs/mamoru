@@ -149,6 +149,37 @@ describe('FundingCache', () => {
     expect(freshCalls).toBe(1)
   })
 
+  // Review finding (otto/mamoru#135 Codex gpt-6-sol, post-merge): a rejection is only checked against the
+  // generation it started with after a successful await; the check at the bottom of the loop never runs on a
+  // throw, so an old fetch's own failure escaped straight to its waiter even once invalidation had already
+  // moved past it and a replacement had already succeeded.
+  test('a rejected fetch invalidated mid-flight does not fail its waiter once a replacement has already succeeded', async () => {
+    const { c } = cache()
+    let rejectOld!: (e: Error) => void
+    const waiter = c.get('k', 15_000, () => new Promise<number>((_, reject) => (rejectOld = reject)))
+    c.invalidate('k')
+    // A fresh fetch lands while the old one is still out.
+    expect(await c.get('k', 15_000, async () => 2)).toBe(2)
+    // The old, already-invalidated fetch now fails. Its own waiter must retry onto the newer value, not throw.
+    rejectOld(new Error('rpc down'))
+    expect(await waiter).toBe(2)
+  })
+
+  // Same finding, the other branch: no replacement has landed yet, so the retry starts its own fetch against
+  // the generation that holds now, instead of propagating the old generation's error — and a genuine failure
+  // of that retry (no further invalidation) still reaches the caller, so this cannot loop forever.
+  test('a rejected fetch invalidated mid-flight retries onto a fresh fetch when nothing newer has landed yet', async () => {
+    const { c } = cache()
+    const rejects: ((e: Error) => void)[] = []
+    const waiter = c.get('k', 15_000, () => new Promise<number>((_, reject) => void rejects.push(reject)))
+    c.invalidate('k')
+    rejects[0]!(new Error('rpc down'))
+    await tick()
+    expect(rejects.length).toBe(2)
+    rejects[1]!(new Error('still down'))
+    await expect(waiter).rejects.toThrow('still down')
+  })
+
   // Review finding 4: a failed read costs the next caller nothing: nothing is cached, nothing is held back.
   test('a failed fetch is not cached, and the very next caller (a fresh=1 retry, say) reads at once', async () => {
     const { c } = cache()

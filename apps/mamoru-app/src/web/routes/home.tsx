@@ -803,18 +803,32 @@ export function HomeView({ accountKey }: { accountKey: string }) {
     if (renewAsk && !askedBefore(renewAsk)) setRenewAsked(true)
   }, [renewAsk])
   const closeRenewAsk = useCallback(() => setRenewAsked(false), [])
+  // A confirmed activation exists somewhere in this account's history (Stop and restart only matter once this
+  // is true); ops history, not the funding poll, so this is never behind it.
+  const ranBefore = everStarted(opList)
   // Stopped after running: the Working card offers the restart where Stop was, so no Start row too.
-  const stopped = !!f && !f.active && f.positions.length === 0 && !inFlight && everStarted(opList)
-  // Over the cap the operator refuses Start, so the only action offered is the withdraw that fixes it. This state
-  // wins over an armed activation (which the cap will refuse anyway); only a withdraw already on its way hides it.
+  const stopped = !!f && !f.active && f.positions.length === 0 && !inFlight && ranBefore
+  // Over the cap, the withdraw that clears it is the one notice-worthy thing (a Start would refuse anyway); this
+  // state wins over an armed activation. Only a withdraw already on its way hides it. Start itself stays offered
+  // next to it (otto/mamoru#135 review): the notice is a read on the same poll as everything else here, up to
+  // 60 s behind a withdraw that already cleared the cap, and the operator's own prepare is what actually refuses
+  // one that has not.
   const withdrawing = opList.some((o) => o.kind === 'transfer' && !TERMINAL.has(o.state))
   const over = withdrawing ? null : overCapOf(f)
   const below = belowMinimumOf(f)
   // otto/mamoru#135: offered on the operator's own state, not on the poll's idle balance, which can be behind the
-  // deposit that makes a restart possible; the start's prepare reads the chain and says why when it cannot.
-  // Over the cap stays: only a withdraw clears it, and that moves the account, which refreshes this poll.
-  const canRestart = stopped && !over
+  // deposit that makes a restart possible, or the withdraw that clears a cap; the start's prepare reads the
+  // chain and says why when it cannot.
+  const canRestart = stopped
   const canStart = !!f && !f.active && !inFlight && !armed && !stopped
+  // otto/mamoru#135 review: whether this card offers Stop or a restart turns on f.positions, part of the
+  // operator's cache (up to 60 s behind) — never invalidated by an engine move this client did not just submit
+  // itself (another tab's stop, say). The moment the account looks idle, ask for a fresh (<=2 s) read instead
+  // of waiting on the regular poll, so a stale zero positions can never hide Stop behind one that is still
+  // really there; the Working card below rereads `f` once this lands.
+  useEffect(() => {
+    if (f && !f.active && !inFlight && ranBefore) void refreshFunding()
+  }, [f?.active, inFlight, ranBefore, refreshFunding])
   const addMoney = () => {
     void refreshFunding()
     setDialog('add')
@@ -856,7 +870,13 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       ) : (
         <>
           {over ? (
-            <OverCapRow over={over} onWithdraw={() => withdraw(usdInput(ceilCents(BigInt(over.excessUsdc))))} />
+            <>
+              <OverCapRow over={over} onWithdraw={() => withdraw(usdInput(ceilCents(BigInt(over.excessUsdc))))} />
+              {/* otto/mamoru#135 review: this notice reads the same (up to 60 s stale) poll as everything else on
+                  this page. Start stays reachable next to it; its prepare reads the chain and is what actually
+                  refuses one that is still over the cap, with the real reason. */}
+              {canStart ? <StartRow accountKey={accountKey} funded={hasMoney(f)} /> : null}
+            </>
           ) : below ? (
             <>
               <section className="card flex flex-wrap items-center justify-between gap-3" data-testid="below-minimum" role="status">

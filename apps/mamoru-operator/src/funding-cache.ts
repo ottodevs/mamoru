@@ -9,7 +9,9 @@
  * anything of that account moves (an owner op, an engine journal move, the engine starting or ending an entry), so
  * a poll never pairs the account's new state with a balance read before it. A fetch that started before an
  * invalidation is written back nowhere, and a caller waiting on it loops and reads the key again, however many
- * invalidations land while it waits, until one attempt's generation holds for its whole wait.
+ * invalidations land while it waits, until one attempt's generation holds for its whole wait. That applies to a
+ * rejection the same as a resolution: an old fetch failing after its generation moved on is not this waiter's
+ * error, so it retries too, onto whatever the current generation already holds or its own fresh fetch.
  *
  * Memory: one small slot per key (its generation must outlive its entry, or a waiter could not see an
  * invalidation), bounded by the accounts the operator serves; a cached value older than `retainMs` is dropped
@@ -62,9 +64,18 @@ export class FundingCache<T> {
         )
         s.pending = p
       }
-      const value = await s.pending
-      // Invalidated while this waited: `value` may be from before what moved. Read again.
-      if (s.gen === gen) return value
+      try {
+        const value = await s.pending
+        // Invalidated while this waited: `value` may be from before what moved. Read again.
+        if (s.gen === gen) return value
+      } catch (err) {
+        // A fetch that started before an invalidation can still reject after it: that rejection is not this
+        // attempt's answer either, any more than a resolution would be. Retry onto the generation that holds
+        // now (it may already have a value, or this loops into starting its own fetch); only a rejection whose
+        // generation never moved is this attempt's own failure.
+        if (s.gen !== gen) continue
+        throw err
+      }
     }
   }
 

@@ -132,13 +132,17 @@ describe('deposit cap', () => {
     expect((await renderRoute('/', null)).text).not.toContain('per account for now')
     expect((await renderRoute('/add', fixtureSession, { ...fixtureFunding, usdc: '0' })).text).toContain('Send USDC on Base. Up to 25 USDC per account for now.')
   })
-  test('Home over the cap: what happened, what to do, and the withdraw that fixes it instead of a Start that would fail', async () => {
+  // otto/mamoru#135 review (post-merge Codex gpt-6-sol, HIGH): Start used to be hidden whenever this (up to
+  // 60 s stale) poll read overCap, so an owner whose withdraw had already cleared the cap on the chain, but
+  // not yet on this poll, could not reach the chain-reading prepare that would have let them start. Start now
+  // stays offered next to the notice; its own prepare is what actually refuses one that is still over.
+  test('Home over the cap: what happened, what to do, and Start stays offered next to it', async () => {
     const { text, html } = await renderRoute('/', fixtureSession, overFunding, { ops: [refused] })
     expect(text).toContain('This account is over the 25 USDC cap, so Mamoru has not started.')
     expect(text).toContain('It holds 26.92 USDC. Nothing was moved. Withdraw at least 1.92 USDC to an address you control, then start Mamoru.')
     expect(text).toContain('Withdraw 1.92 USDC')
     expect(html).toContain('data-testid="over-cap"')
-    expect(html).not.toContain('data-testid="start"')
+    expect(html).toContain('data-testid="start"')
     expect(text).toContain('Start refused: 26.92 USDC is over the 25 USDC cap')
     expect(text).not.toContain('Approve again')
     expect(text.split('Save recovery kit')[0]).not.toContain('!')
@@ -153,6 +157,18 @@ describe('deposit cap', () => {
     const { html } = await renderRoute('/', fixtureSession, { ...fixtureFunding, usdc: '25000000', active: false, overCap: null })
     expect(html).toContain('data-testid="start"')
     expect(html).not.toContain('data-testid="over-cap"')
+  })
+  // otto/mamoru#135 review (post-merge Codex gpt-6-sol, HIGH): canRestart used to require `!over`, so a stopped
+  // account whose cap notice still read over (this poll can be behind a withdraw that already cleared it)
+  // offered neither Stop (nothing is active, nothing is open) nor a restart — the Working card's own header
+  // went blank, no action reachable there at all. The restart stays offered now; its own prepare refuses it,
+  // with the real reason, if the account is still over.
+  test('stopped while the cap notice still reads over: the restart is still offered, not swallowed by it', async () => {
+    const started: OpView = { opId: 'own-1-activate', kind: 'activate', state: 'confirmed', updatedAt: '2026-10-01T10:00:00Z' }
+    const stoppedOver: FundingView = { ...fixtureFunding, active: false, usdc: '26920000', cbbtc: '0', positions: [] }
+    const { html } = await renderRoute('/', fixtureSession, stoppedOver, { ops: [started] })
+    expect(html).toContain('data-testid="over-cap"')
+    expect(html).toContain('>Start allocation</button>')
   })
   test('while the withdraw is in flight the notice steps aside', async () => {
     const sending: OpView = { opId: 'own-2-transfer', kind: 'transfer', state: 'submitted', updatedAt: '2026-10-01T10:05:00Z' }
