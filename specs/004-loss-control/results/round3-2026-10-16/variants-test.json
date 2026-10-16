@@ -1,0 +1,89 @@
+[
+ {
+  "name": "baseline",
+  "policy": "conservador-live-v2"
+ },
+ {
+  "name": "dg30-t10-freeze",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "depegGuard": {
+    "thresholdBps": 30,
+    "holdSeconds": 600,
+    "action": "freeze",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ },
+ {
+  "name": "st3-6-10-ema",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "stagedExit": {
+    "step1Bps": 300,
+    "step2Bps": 600,
+    "step3Bps": 1000,
+    "reentry": "ema",
+    "ladderGapBps": 1000
+   }
+  }
+ },
+ {
+  "name": "cppi85-m2",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "cppi": {
+    "floorBps": 8500,
+    "multiplier": 2
+   }
+  }
+ },
+ {
+  "name": "cppi85-m2+dg30-t10-freeze",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "cppi": {
+    "floorBps": 8500,
+    "multiplier": 2
+   },
+   "depegGuard": {
+    "thresholdBps": 30,
+    "holdSeconds": 600,
+    "action": "freeze",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ },
+ {
+  "name": "cppi90-m2",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "cppi": {
+    "floorBps": 9000,
+    "multiplier": 2
+   }
+  }
+ },
+ {
+  "name": "cppi90-m2+dg30-t10-freeze",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "cppi": {
+    "floorBps": 9000,
+    "multiplier": 2
+   },
+   "depegGuard": {
+    "thresholdBps": 30,
+    "holdSeconds": 600,
+    "action": "freeze",
+    "releaseBps": 20,
+    "releaseSeconds": 259200,
+    "exitImpactBps": 20
+   }
+  }
+ }
+]

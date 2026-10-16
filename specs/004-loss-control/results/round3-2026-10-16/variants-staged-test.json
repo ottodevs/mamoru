@@ -1,0 +1,19 @@
+[
+ {
+  "name": "baseline",
+  "policy": "conservador-live-v2"
+ },
+ {
+  "name": "st3-6-10-ema",
+  "policy": "conservador-live-v2",
+  "overrides": {
+   "stagedExit": {
+    "step1Bps": 300,
+    "step2Bps": 600,
+    "step3Bps": 1000,
+    "reentry": "ema",
+    "ladderGapBps": 1000
+   }
+  }
+ }
+]
