@@ -31,7 +31,7 @@ const ctx: AccountContext = {
 const SAFE = ctx.address
 
 /** A chain with one counterfactual Safe holding `usdc`: no code until the relayer sends the factory call. */
-function world(usdc: bigint) {
+function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live-v2') {
   const sent: { to: string; data?: Hex; value?: bigint }[] = []
   /** Every eth_simulateV1 the operator ran, as its list of calls. */
   const simulated: { from?: string; to: string; data: Hex }[][] = []
@@ -105,7 +105,7 @@ function world(usdc: bigint) {
   } as unknown as Relayer
   const state = { accounts: {} as Record<string, AccountState> }
   const store = { state, save: () => {} } as unknown as StateStore
-  const cfg = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 } satisfies OperatorConfig
+  const cfg = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES[policyId]!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 } satisfies OperatorConfig
   const op = new Operator(cfg, client, relayer, store)
   ;(op as unknown as { retryMs: number }).retryMs = 0
   return { op, chain, sent, simulated, called, knobs, factory, state }
@@ -213,6 +213,41 @@ describe('deposit over the cap', () => {
   test('an undeployed Safe cannot send more than it holds', async () => {
     const w = world(1_000_000n)
     expect(await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '2000000' }).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'INSUFFICIENT_FUNDS' })
+  })
+})
+
+// otto/mamoru#137: the activation summary must say what the engine key may do without asking again, its limits,
+// and that every recipient is the Safe, never a blanket "funds never leave" promise (grants.ts pins every
+// collect/mint/swap recipient to ACCOUNT; manage-any/convert-any act on any Safe-owned position without a new signature).
+describe('what the activation summary says the engine key may do', () => {
+  test('multi-pool: swap and mint, re-range and harvest, and every recipient is the Safe', async () => {
+    const w = world(20_000_000n)
+    const tx = await w.op.prepareActivate(ctx)
+    const text = tx.summary.join(' ')
+    expect(text).toContain("may, for 365 days: swap USDC into those pools' tokens and mint those pools")
+    expect(text).toContain('It may also re-range, reduce and harvest your positions in those pools: withdraw liquidity, collect fees, and convert their tokens back to USDC')
+    expect(text).toContain('It does this without asking you again, within these limits; everything it touches is paid back to your Safe, never anywhere else. Cap 100.00 USDC')
+    expect(text).not.toContain('Funds never leave')
+    expect(text).not.toContain('without your passkey')
+  })
+
+  test('single pool: the same disclosure, gated on manage-any', async () => {
+    const w = world(20_000_000n, 'conservador-live-v1')
+    const tx = await w.op.prepareActivate(ctx)
+    const text = tx.summary.join(' ')
+    expect(text).toContain('may, for 365 days: swap USDC->cbBTC')
+    expect(text).toContain('It may also re-range, reduce and harvest your positions in that pool: withdraw liquidity, collect fees, and convert cbBTC back to USDC')
+    expect(text).toContain('It does this without asking you again, within these limits; everything it touches is paid back to your Safe, never anywhere else. Cap 100.00 USDC')
+    expect(text).not.toContain('Funds never leave')
+    expect(text).not.toContain('without your passkey')
+  })
+
+  test('single pool without manage-any: no re-range/harvest claim, same recipient disclosure', async () => {
+    const w = world(20_000_000n, 'conservador-v1')
+    const tx = await w.op.prepareActivate(ctx)
+    const text = tx.summary.join(' ')
+    expect(text).not.toContain('re-range')
+    expect(text).toContain('It does this without asking you again, within these limits; everything it touches is paid back to your Safe, never anywhere else. Cap 100.00 USDC')
   })
 })
 
@@ -1507,6 +1542,10 @@ describe('renewing the approval of a running account', () => {
     const sentBefore = w.sent.length
     const tx = await w.op.prepareRenew(ctx)
     expect(tx.summary.join(' ')).toContain('Nothing is moved')
+    // otto/mamoru#137: no blanket "funds never leave" claim; the renewal keeps whatever authority the engine
+    // already has, and every recipient stays the Safe.
+    expect(tx.summary).toContain('What the engine may already do without asking again does not change; everything it touches still goes back to your Safe, never anywhere else')
+    expect(tx.summary.join(' ')).not.toContain('Funds never leave')
     const op = await w.op.submit(ctx, 'renew', sign(tx))
     expect(op).toMatchObject({ kind: 'renew', state: 'confirmed', code: 'EXEC_OK' })
     // One transaction, to the Safe: no deploy, no top-up.

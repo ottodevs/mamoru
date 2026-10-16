@@ -746,7 +746,7 @@ export class Operator {
       'The approval it replaces is revoked in the same transaction',
       ...(dropped.length ? [`Re-ranging and collecting fees in ${this.poolsOf(dropped)} needs one more approval after this one`] : []),
       'Nothing is moved: your positions stay as they are',
-      'Funds never leave your Safe without your passkey',
+      'What the engine may already do without asking again does not change; everything it touches still goes back to your Safe, never anywhere else',
     ]
     return this.hold(acc, live, 'renew', calls, summary, { grants: stored, revokes: old })
   }
@@ -962,8 +962,11 @@ export class Operator {
         r.usdc > 0n
           ? `Let Mamoru's engine keep your ${fmtUsdc(r.usdc)} USDC invested across Uniswap v3 ${pools.join(', ')}`
           : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
-        `Engine key ${sessionKey} may only swap USDC into those pools' tokens and mint those pools, for ${Math.round(policy.session.validitySeconds / 86_400)} days`,
-        `Funds never leave your Safe without your passkey; cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`,
+        `Engine key ${sessionKey} may, for ${Math.round(policy.session.validitySeconds / 86_400)} days: swap USDC into those pools' tokens and mint those pools`,
+        ...(hasManageAny(policy)
+          ? [`It may also re-range, reduce and harvest your positions in those pools: withdraw liquidity, collect fees, and convert their tokens back to USDC`]
+          : []),
+        `It does this without asking you again, within these limits; everything it touches is paid back to your Safe, never anywhere else. Cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`,
       ]
       return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })
     }
@@ -972,11 +975,11 @@ export class Operator {
       r.usdc > 0n
         ? `Let Mamoru's engine allocate your ${fmtUsdc(r.usdc)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
         : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) into Uniswap v3 USDC/cbBTC 0.05% as soon as it arrives`,
-      `Engine key ${sessionKey} may only swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap) and mint that pool, for ${Math.round(policy.session.validitySeconds / 86_400)} days`,
+      `Engine key ${sessionKey} may, for ${Math.round(policy.session.validitySeconds / 86_400)} days: swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap) and mint that pool`,
       ...(hasManageAny(policy)
-        ? [`It may also re-range, reduce and harvest your positions in that pool (withdraw liquidity, collect fees, convert cbBTC->USDC); every token and position it touches is paid back to your Safe`]
+        ? [`It may also re-range, reduce and harvest your positions in that pool: withdraw liquidity, collect fees, and convert cbBTC back to USDC`]
         : []),
-      `Funds never leave your Safe without your passkey; cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`,
+      `It does this without asking you again, within these limits; everything it touches is paid back to your Safe, never anywhere else. Cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`,
     ]
     return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })
   }
