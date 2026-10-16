@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyEngineError, classifyRpcError, cuFor, CU_TABLE, DEFAULT_CU, EngineHealthTracker, logErr, redactSecrets, RpcMetrics, safeMetrics, type EngineErrorClass } from '../src/metrics.ts'
+import { classifyEngineError, classifyRpcError, cuFor, CU_TABLE, DEFAULT_CU, EngineHealthTracker, GasReserveTracker, logErr, redactSecrets, RpcMetrics, safeMetrics, type EngineErrorClass } from '../src/metrics.ts'
 
 const dirs: string[] = []
 function tmpDir(): string {
@@ -336,6 +336,61 @@ describe('EngineHealthTracker', () => {
     // Consecutive errors (and the last error class/time) are not hourly stats: they persist across the hour boundary.
     expect(s.consecutiveErrors).toBe(1)
     expect(s.lastErrorClass).toBe('internal')
+  })
+})
+
+describe('GasReserveTracker (otto/mamoru#8)', () => {
+  test('an account never recorded reports nulls and not low', () => {
+    const t = new GasReserveTracker()
+    const s = t.snapshot('never-seen')
+    expect(s.nativeWei).toBeNull()
+    expect(s.thresholdWei).toBeNull()
+    expect(s.low).toBe(false)
+    expect(s.lowSince).toBeNull()
+  })
+
+  test('crossing below the threshold is low and transitions once, then stays low without transitioning again', () => {
+    const t = new GasReserveTracker()
+    const now = Date.parse('2026-10-16T09:00:00.000Z')
+    expect(t.record('acc-1', 600_000n, 500_000n, now)).toEqual({ low: false, transitioned: true })
+    expect(t.record('acc-1', 400_000n, 500_000n, now + 1000)).toEqual({ low: true, transitioned: true })
+    // A further drop while still low is not a new transition, and lowSince does not move.
+    expect(t.record('acc-1', 100_000n, 500_000n, now + 2000)).toEqual({ low: true, transitioned: false })
+    const s = t.snapshot('acc-1')
+    expect(s.nativeWei).toBe('100000')
+    expect(s.thresholdWei).toBe('500000')
+    expect(s.low).toBe(true)
+    expect(s.lowSince).toBe(new Date(now + 1000).toISOString())
+  })
+
+  test('a top-up that brings the balance back above the threshold clears low and transitions', () => {
+    const t = new GasReserveTracker()
+    const now = Date.parse('2026-10-16T09:00:00.000Z')
+    t.record('acc-1', 100_000n, 500_000n, now)
+    expect(t.record('acc-1', 900_000n, 500_000n, now + 1000)).toEqual({ low: false, transitioned: true })
+    const s = t.snapshot('acc-1')
+    expect(s.low).toBe(false)
+    expect(s.lowSince).toBeNull()
+  })
+
+  test('exactly at the threshold is not low: strict less-than, matching ehgPreliminary\'s own ACCT_GAS_RESERVE_LOW check', () => {
+    const t = new GasReserveTracker()
+    expect(t.record('acc-1', 500_000n, 500_000n).low).toBe(false)
+    expect(t.record('acc-2', 499_999n, 500_000n).low).toBe(true)
+  })
+
+  test('shortens the account key to 8 chars in the snapshot', () => {
+    const t = new GasReserveTracker()
+    t.record('3f9a7c21-aaaa-4bbb-8ccc-ddddeeeeffff', 1n, 2n)
+    expect(t.snapshot('3f9a7c21-aaaa-4bbb-8ccc-ddddeeeeffff').account).toBe('3f9a7c21')
+  })
+
+  test('lowCount: only accounts currently below their own threshold', () => {
+    const t = new GasReserveTracker()
+    t.record('a', 100n, 500n)
+    t.record('b', 900n, 500n)
+    t.record('c', 10n, 50n)
+    expect(t.lowCount()).toBe(2)
   })
 })
 

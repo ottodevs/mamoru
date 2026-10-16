@@ -28,8 +28,9 @@ function json(status: number, body: unknown): Response {
 
 /**
  * GET /metrics payload: RPC traffic (per provider host, never the URL or a key), engine health per
- * account (key shortened to 8 chars) and operator-level facts. No secrets, no session keys, no full
- * account keys, no RPC URLs. See docs/operator-metrics.md.
+ * account (key shortened to 8 chars), gas-reserve alert state per account (otto/mamoru#8) and
+ * operator-level facts. No secrets, no session keys, no full account keys, no RPC URLs. See
+ * docs/operator-metrics.md.
  */
 async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha: string, bootedAt: number): Promise<unknown> {
   const rpc = rpcMetrics.snapshot()
@@ -44,6 +45,8 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
       policyId: op.cfg.policy.policyId,
       relayer: { address: op.relayer.address, balanceWei: relayerBalance.wei, balanceCachedAgeMs: relayerBalance.cachedAgeMs, subsidy: op.subsidySummary() },
       accounts: op.accountsSummary(),
+      // otto/mamoru#8: Safes below their gas-reserve alert threshold, detection + alert only (no automatic top-up).
+      gasReserveLow: op.gasReserveLowCount(),
     },
     rpc: {
       cumulative: rpc.cumulative,
@@ -56,6 +59,8 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
       note: 'cuEstimate is a static per-method estimate (see metrics.ts CU_TABLE), not Alchemy\'s billed figure',
     },
     engines: op.engineHealthSnapshot(),
+    // otto/mamoru#8: per-account gas-reserve alert state (native balance vs threshold), running accounts only.
+    gasReserve: op.gasReserveSnapshot(),
   }
 }
 

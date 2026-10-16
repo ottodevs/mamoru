@@ -9,9 +9,10 @@ import { startServer } from '../src/server.ts'
 
 type MetricsPayload = {
   generatedAt: string
-  operator: { gitSha: string; chainId: number; policyId: string; relayer: { address: string }; accounts: { known: number; active: number; armed: number } }
+  operator: { gitSha: string; chainId: number; policyId: string; relayer: { address: string }; accounts: { known: number; active: number; armed: number }; gasReserveLow: number }
   rpc: { cumulative: Record<string, Record<string, { requests: number }>>; last48h: unknown[] }
   engines: { account: string; lastDecisionCode: string | null; lastErrorClass: string | null }[]
+  gasReserve: { account: string; nativeWei: string | null; thresholdWei: string | null; low: boolean; lowSince: string | null }[]
 }
 
 const SECRET = 'test-operator-secret'
@@ -35,6 +36,11 @@ function fakeOperator(): Operator {
     engineHealthSnapshot: () => [
       { account: '3f9a7c21', lastReviewAt: '2026-10-02T09:14:40.000Z', lastDecisionCode: 'DECIDE_HOLD', consecutiveErrors: 0, lastErrorClass: null, lastErrorAt: null, reviewsLastHour: 58, errorsLastHour: 0 },
       { account: '9b0e41aa', lastReviewAt: '2026-10-02T09:14:55.000Z', lastDecisionCode: null, consecutiveErrors: 4, lastErrorClass: 'rpc_other', lastErrorAt: '2026-10-02T09:14:55.000Z', reviewsLastHour: 12, errorsLastHour: 4 },
+    ],
+    gasReserveLowCount: () => 1,
+    gasReserveSnapshot: () => [
+      { account: '3f9a7c21', nativeWei: '250000000000000', thresholdWei: '500000000000000', low: true, lowSince: '2026-10-02T09:00:00.000Z' },
+      { account: '9b0e41aa', nativeWei: '900000000000000', thresholdWei: '500000000000000', low: false, lowSince: null },
     ],
   } as unknown as Operator
 }
@@ -149,6 +155,9 @@ describe('GET /metrics payload', () => {
       expect(Array.isArray(body.rpc.last48h)).toBe(true)
       expect(body.engines.length).toBe(2)
       expect(body.engines[0]!.account).toBe('3f9a7c21')
+      expect(body.operator.gasReserveLow).toBe(1)
+      expect(body.gasReserve.length).toBe(2)
+      expect(body.gasReserve[0]).toEqual({ account: '3f9a7c21', nativeWei: '250000000000000', thresholdWei: '500000000000000', low: true, lowSince: '2026-10-02T09:00:00.000Z' })
 
       expect(findSecretLooking(body)).toEqual([])
     } finally {
@@ -183,6 +192,8 @@ describe('GET /metrics never carries injected secret-shaped free text (finding #
       subsidySummary: () => ({ paid24hWei: '0', budgetWei: '5000000000000000' }),
       accountsSummary: () => ({ known: 4, active: 4, armed: 0 }),
       engineHealthSnapshot: () => nasty.map((_, i) => tracker.snapshot(`account-${i}`)),
+      gasReserveLowCount: () => 0,
+      gasReserveSnapshot: () => [],
     } as unknown as Operator
 
     const rpcMetrics = new RpcMetrics(tmpDir())
