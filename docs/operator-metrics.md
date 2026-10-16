@@ -46,7 +46,8 @@ account keys are shortened to 8 chars. Example (values illustrative):
     "live": true,
     "policyId": "conservador-live-v2",
     "relayer": { "address": "0xRELAYER…", "balanceWei": "812345678901234567", "balanceCachedAgeMs": 12, "subsidy": { "paid24hWei": "500000000000000", "budgetWei": "5000000000000000" } },
-    "accounts": { "known": 14, "active": 9, "armed": 1 }
+    "accounts": { "known": 14, "active": 9, "armed": 1 },
+    "gasReserveLow": 1
   },
   "rpc": {
     // provider host (never the path or an API key; "#1"/"#2" when two providers share a host) -> method -> counters,
@@ -69,6 +70,10 @@ account keys are shortened to 8 chars. Example (values illustrative):
   "engines": [
     { "account": "3f9a7c21", "lastReviewAt": "2026-10-02T09:14:40.000Z", "lastDecisionCode": "DECIDE_HOLD", "consecutiveErrors": 0, "lastErrorClass": null, "lastErrorAt": null, "reviewsLastHour": 58, "errorsLastHour": 0 },
     { "account": "9b0e41aa", "lastReviewAt": "2026-10-02T09:14:55.000Z", "lastDecisionCode": null, "consecutiveErrors": 4, "lastErrorClass": "rpc_other", "lastErrorAt": "2026-10-02T09:14:55.000Z", "reviewsLastHour": 12, "errorsLastHour": 4 }
+  ],
+  "gasReserve": [
+    { "account": "3f9a7c21", "nativeWei": "250000000000000", "thresholdWei": "500000000000000", "low": true, "lowSince": "2026-10-02T09:00:00.000Z" },
+    { "account": "9b0e41aa", "nativeWei": "900000000000000", "thresholdWei": "500000000000000", "low": false, "lowSince": null }
   ]
 }
 ```
@@ -107,6 +112,60 @@ account keys are shortened to 8 chars. Example (values illustrative):
 - **Engine health** is in-memory only (reset on an operator restart) and only lists accounts with a
   running engine loop; it is a live-ops view, not the durable record (`accounts.json`'s per-account
   `ops` journal is).
+- **Gas reserve (otto/mamoru#8), detection + alert only, no automatic top-up**: the relayer funds a
+  Safe's gas reserve exactly once, at activation (otto/mamoru#82's top-up, `apps/mamoru-operator/src/subsidy.ts`:
+  `policy.gasReserveWei + TOP_UP_MARGIN_WEI`, ~0.0005 ETH on the live policy). Every engine rebalance
+  and fee collection since then spends from that same balance and nothing refills it, so an active
+  account drifts toward the policy's own floor (`ehgPreliminary`'s `ACCT_GAS_RESERVE_LOW`,
+  `packages/decide/src/gates/index.ts`), at which point the engine stops reviewing it entirely — no
+  more rebalances, no more fee collection, with nothing louder than one decision line saying so.
+  - **Detection, not a new RPC call**: every engine review already reads the Safe's native ETH
+    balance in its own Multicall3 batch (`Observation.native`, `packages/rpc/src/index.ts`) to feed
+    that same EHG gate. `GasReserveTracker` (`src/metrics.ts`) reuses that read — nothing extra is
+    sent to a provider (RPC cost is a live concern, otto/mamoru#135).
+  - **Threshold**: `gasReserveAlertWei` (`src/gas-reserve.ts`) defaults to `policy.gasReserveWei`
+    (the hard floor itself) plus `ALERT_RUNWAY_ACTIONS` (3) times `ONE_ACTION_WEI`, an estimate of
+    what one engine action (a rebalance or a fee collection) costs — the same gas-budget figure the
+    engine itself prices a harvest's worth against (`opCostInSavings`, `packages/decide/src/value.ts`),
+    evaluated at a representative (not worst-case) gas price. On the live policy that is
+    `300_000_000_000_000 + 3 × 15_300_000_000_000 = 345_900_000_000_000` wei (~0.000346 ETH): a
+    freshly activated account (funded to ~0.0005 ETH) can run roughly ten ordinary actions before
+    ever crossing it, and then exactly 3 more (by construction) before it would actually reach the
+    hard floor and freeze.
+    An earlier version of this threshold used `policy.gasReserveWei + TOP_UP_MARGIN_WEI` — the
+    *full* amount the relayer originally funded the Safe to. Independent review on this ticket
+    (NO-GO) caught that this was wrong: that margin equals the Safe's *entire* funded balance, so
+    every account that ran even one action went low immediately and stayed low forever, making the
+    alert meaningless. The mistake was conflating two different things — `TOP_UP_MARGIN_WEI` in
+    `operator.ts` is sized for the *first* userOp's worst-case prefund specifically (the one-time
+    cost of seeding the account's EntryPoint deposit at activation), not an ongoing per-action cost.
+    `ONE_ACTION_WEI` is sized instead, and is far smaller (see `gas-reserve.ts` for the exact figures
+    and reasoning).
+    Override with `MAMORU_GAS_RESERVE_ALERT_WEI` (absolute wei, applied to every account regardless
+    of its own policy's `gasReserveWei`); unset, non-numeric or negative falls back to the default.
+  - **What happens when low**: nothing is sent on chain. `gasReserve[].low` flips, `operator.gasReserveLow`
+    counts how many accounts are below their threshold right now, and the journal gets one
+    `[gas-reserve] <account> below its alert threshold: <native> of <threshold> wei` line the cycle it
+    crosses (and one `back above` line if an owner tops it up manually) — never every cycle, so an
+    account that stays low does not flood the log. A healthy account's very first observation (right
+    after activation, or an operator restart) never logs a spurious `back above`: a transition is
+    only reported when there is a prior reading to have moved from, or the first reading is itself low.
+  - **Scoped to running accounts, not leaked across a stop**: both `gasReserve[]` and
+    `operator.gasReserveLow` only ever include accounts with a running engine loop, derived from the
+    same list. Stopping an account (or restarting it, which stops it first) evicts its gas-reserve
+    state immediately, so a Safe that was low when it stopped does not keep counting towards
+    `gasReserveLow` forever, and a re-armed account's first `/metrics` read never shows its stale
+    pre-stop balance before its own first new review has run.
+  - **Known gap**: `Observation.native` is the Safe's own address balance; it does not see ETH already
+    sitting as an EntryPoint deposit credit from a prior userOp's unused prefund (noted in otto/mamoru#82
+    too — "not known at signing"), so the true usable reserve can be slightly understated.
+  - **Follow-up, gated on otto/mamoru#82**: turning this alert into an automatic top-up means spending
+    more relayer ETH on real funds, and must go through #82's subsidy limits (per-Safe, per-passkey and
+    daily budget caps) so a drained account cannot be cycled into a repeated payout the same way the
+    original one-time activation reserve could. Until that lands, a low reserve is an operator-ops
+    signal only: top up the Safe by hand, or ask the owner to (the app already tells an owner who
+    cannot *start* for lack of gas via the `SUBSIDY_*` refusal codes in `apps/mamoru-app/src/web/lib/ops.ts`;
+    this ticket is about an account already running, which that path does not cover).
 - **Relayer balance** is cached 60s so a metrics poll never adds RPC load.
 - **Bounded cardinality**: a method outside the fixed CU table (`eth_call`, `eth_getLogs`, ...) folds
   into an `"other"` method bucket instead of creating a new permanent one, and provider labels beyond
