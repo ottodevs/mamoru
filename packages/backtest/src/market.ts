@@ -77,6 +77,6 @@ export function marketOfDataset(ds: Dataset): MarketSummary {
     btc: one('pool:USDC/cbBTC/500', 'cbBTC'),
     eth: one('pool:WETH/USDC/3000', 'WETH'),
     // Both tokens have 6 decimals, so the raw price is the price. The pool shows only the ratio, not which side moved.
-    usdtMaxOffPegBps: usdt && Math.max(...usdt.lp.map((x) => Math.abs(Math.exp(x) - 1) * 10_000)),
+    usdtMaxOffPegBps: usdt && usdt.lp.reduce((max, x) => Math.max(max, Math.abs(Math.exp(x) - 1) * 10_000), 0),
   }
 }

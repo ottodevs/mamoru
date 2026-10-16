@@ -25,7 +25,7 @@ export function applyOverrides<T>(base: T, overrides: Record<string, unknown>, p
     const cur = out[k]
     if (isPlainObject(v) && (isPlainObject(cur) || cur === undefined)) {
       if (cur === undefined && typeof sub === 'object' && Object.values(sub).every((x) => x === LEAF)) {
-        const left = Object.keys(sub).filter((x) => !(x in v))
+        const left = Object.keys(sub).filter((x) => x !== '*' && !(x in v))
         if (left.length > 0) throw new Error(`override ${at}: the policy has no ${k} to merge into; give ${left.join(', ')} too`)
       }
       out[k] = applyOverrides(cur ?? {}, v, at, sub)
@@ -107,8 +107,8 @@ export type CellMetrics = {
   refused: number
   gas: number
   fees: number
-  /** 100 minus the value-weighted share of LP in range, averaged over the samples with a position. */
-  outOfRangePct: number
+  /** 100 minus the value-weighted share of LP in range, averaged over the samples with a position; null with no mint. */
+  outOfRangePct: number | null
   /** Samples replayed, and samples stepped over because a pool the policy needs was not read there. */
   samples: number
   gaps: number
@@ -132,7 +132,7 @@ export function cellMetrics(r: RunResult, decimals: number): CellMetrics {
     refused: m.refused,
     gas: n(m.gas),
     fees: n(m.fees),
-    outOfRangePct: ops === 0 && m.timeInRangeBps === 0 ? 0 : (10_000 - m.timeInRangeBps) / 100,
+    outOfRangePct: m.operations.enter_mint === 0 ? null : (10_000 - m.timeInRangeBps) / 100,
     samples: r.window.samples,
     gaps: r.window.gaps,
     resultHash: r.resultHash,
@@ -194,7 +194,7 @@ export function markdown(cells: Cell[], aggs: Aggregate[]): string {
       if (c.status !== 'ok') out.push(`| ${c.window} | ${c.regime} | ${c.deposit} | ${c.variant} | skipped: ${c.reason} | | | | | | | |`)
       else {
         const m = c.metrics
-        out.push(`| ${c.window} | ${c.regime} | ${c.deposit} | ${c.variant} | ${f2(m.returnPct)} | ${f2(m.vsHoldPct)} | ${f2(m.maxDrawdownPct)} | ${f2(m.worstDayPct)} | ${m.ops} | ${f2(m.gas)} | ${f2(m.fees)} | ${f2(m.outOfRangePct)}${m.gaps > 0 ? ` (${m.gaps} gaps)` : ''} |`)
+        out.push(`| ${c.window} | ${c.regime} | ${c.deposit} | ${c.variant} | ${f2(m.returnPct)} | ${f2(m.vsHoldPct)} | ${f2(m.maxDrawdownPct)} | ${f2(m.worstDayPct)} | ${m.ops} | ${f2(m.gas)} | ${f2(m.fees)} | ${m.outOfRangePct === null ? 'n/a' : f2(m.outOfRangePct)}${m.gaps > 0 ? ` (${m.gaps} gaps)` : ''} |`)
       }
     }
     out.push('')

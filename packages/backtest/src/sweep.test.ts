@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { conservadorLabGuardsV1, conservadorLiveV2 } from '@mamoru/policy'
+import { conservadorLabGuardsV1, conservadorLiveV2, type PolicyVersion } from '@mamoru/policy'
 import { syntheticDataset } from './fixtures.ts'
 import { marketOfDataset, moveOf } from './market.ts'
 import { runBacktest } from './run.ts'
@@ -89,6 +89,10 @@ describe('overrides', () => {
   test('a rule the base policy lacks must be given whole', () => {
     expect(() => applyOverrides(conservadorLiveV2, { guards: { byBucket: { risk: { fallFreeze: { fallBps: 500 } } } } })).toThrow('volBps')
     expect(applyOverrides(conservadorLiveV2, { guards: { byBucket: { risk: { fallFreeze: { fallBps: 500, volBps: 1 } } } } }).guards).toEqual({ byBucket: { risk: { fallFreeze: { fallBps: 500, volBps: 1 } } } })
+  })
+  test('pool widths can be added to a policy that has none', () => {
+    const { widthTicksByPool: _w, ...range } = conservadorLiveV2.range
+    expect(applyOverrides<PolicyVersion>({ ...conservadorLiveV2, range }, { range: { widthTicksByPool: { 'pool:WETH/USDC/3000': 4000 } } }).range.widthTicksByPool).toEqual({ 'pool:WETH/USDC/3000': 4000 })
   })
   test('a new pool width is accepted', () => {
     expect(applyOverrides(conservadorLiveV2, { range: { widthTicksByPool: { 'pool:WETH/USDC/3000': 4000 } } }).range.widthTicksByPool).toEqual({ 'pool:USDC/USDT/100': 40, 'pool:WETH/USDC/3000': 4000 })
