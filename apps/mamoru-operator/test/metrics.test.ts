@@ -349,10 +349,25 @@ describe('GasReserveTracker (otto/mamoru#8)', () => {
     expect(s.lowSince).toBeNull()
   })
 
-  test('crossing below the threshold is low and transitions once, then stays low without transitioning again', () => {
+  test('a healthy account\'s first-ever observation does not transition (no spurious "back above" log)', () => {
+    const t = new GasReserveTracker()
+    expect(t.record('acc-1', 600_000n, 500_000n)).toEqual({ low: false, transitioned: false })
+    const s = t.snapshot('acc-1')
+    expect(s.low).toBe(false)
+    expect(s.lowSince).toBeNull()
+  })
+
+  test('a low account\'s first-ever observation does transition (there is something to alert on)', () => {
     const t = new GasReserveTracker()
     const now = Date.parse('2026-10-16T09:00:00.000Z')
-    expect(t.record('acc-1', 600_000n, 500_000n, now)).toEqual({ low: false, transitioned: true })
+    expect(t.record('acc-1', 400_000n, 500_000n, now)).toEqual({ low: true, transitioned: true })
+    expect(t.snapshot('acc-1').lowSince).toBe(new Date(now).toISOString())
+  })
+
+  test('crossing below the threshold transitions once, then stays low without transitioning again', () => {
+    const t = new GasReserveTracker()
+    const now = Date.parse('2026-10-16T09:00:00.000Z')
+    expect(t.record('acc-1', 600_000n, 500_000n, now)).toEqual({ low: false, transitioned: false })
     expect(t.record('acc-1', 400_000n, 500_000n, now + 1000)).toEqual({ low: true, transitioned: true })
     // A further drop while still low is not a new transition, and lowSince does not move.
     expect(t.record('acc-1', 100_000n, 500_000n, now + 2000)).toEqual({ low: true, transitioned: false })
@@ -391,6 +406,23 @@ describe('GasReserveTracker (otto/mamoru#8)', () => {
     t.record('b', 900n, 500n)
     t.record('c', 10n, 50n)
     expect(t.lowCount()).toBe(2)
+  })
+
+  test('evict removes the entry, so a re-armed account reads back as never-seen, not its stale pre-stop state', () => {
+    const t = new GasReserveTracker()
+    t.record('acc-1', 100n, 500n) // low
+    expect(t.lowCount()).toBe(1)
+    t.evict('acc-1')
+    expect(t.lowCount()).toBe(0)
+    const s = t.snapshot('acc-1')
+    expect(s.nativeWei).toBeNull()
+    expect(s.low).toBe(false)
+    expect(s.lowSince).toBeNull()
+  })
+
+  test('evicting an unknown account is a harmless no-op', () => {
+    const t = new GasReserveTracker()
+    expect(() => t.evict('never-seen')).not.toThrow()
   })
 })
 

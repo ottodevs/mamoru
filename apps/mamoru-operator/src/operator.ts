@@ -650,9 +650,14 @@ export class Operator {
     return [...this.runners.keys()].map((key) => this.gasReserve.snapshot(key))
   }
 
-  /** GET /metrics: accounts currently below their gas-reserve alert threshold. */
+  /**
+   * GET /metrics: accounts currently below their gas-reserve alert threshold, among accounts with a running
+   * loop. Derived from `gasReserveSnapshot()` itself, not `GasReserveTracker.lowCount()` (which has no notion
+   * of which accounts are still running), so this count can never disagree with the per-account list next to
+   * it in the payload (otto/mamoru#8 review, finding #2).
+   */
   gasReserveLowCount(): number {
-    return this.gasReserve.lowCount()
+    return this.gasReserveSnapshot().filter((s) => s.low).length
   }
 
   /** GET /metrics: relayer ETH balance, cached 60s so a metrics poll never adds RPC load. */
@@ -3367,7 +3372,7 @@ export class Operator {
    * account that stays low (nothing refills it today; see gas-reserve.ts's module doc).
    */
   private recordGasReserve(acc: AccountState, nativeWei: bigint): void {
-    const threshold = gasReserveAlertWei(this.policyOf(acc).gasReserveWei, TOP_UP_MARGIN_WEI, this.gasReserveAlertOverride)
+    const threshold = gasReserveAlertWei(this.policyOf(acc).gasReserveWei, this.gasReserveAlertOverride)
     const { low, transitioned } = this.gasReserve.record(acc.accountKey, nativeWei, threshold)
     if (transitioned) {
       const state = low ? 'below' : 'back above'
@@ -4651,6 +4656,9 @@ export class Operator {
     if (r.timer) clearTimeout(r.timer)
     this.runners.delete(key)
     this.reviewHeldSince.delete(key)
+    // otto/mamoru#8: a stopped (or about-to-restart, startLoop calls this first) account must not keep counting
+    // towards gasReserveLowCount, nor hand its stale pre-stop balance to a restarted loop's first /metrics read.
+    this.gasReserve.evict(key)
     console.log(`[engine ${key}] loop stopped`)
   }
 
