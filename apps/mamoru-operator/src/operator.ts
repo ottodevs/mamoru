@@ -29,7 +29,8 @@ import {
   type SafeTx,
 } from '@mamoru/account/live'
 import { permissionIdOf, revocationCalls, toSmartSession } from '@mamoru/account/sessions'
-import { minOut, quoteExactInputSingle } from '@mamoru/uniswap-v3/quote'
+import { minOut, quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
+import { diverges, swapMinimum, twapFloor, twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { Engine, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { Proposal } from '@mamoru/decide'
@@ -664,12 +665,17 @@ export class Operator {
     }
     const sessionKey = privateKeyToAccount(acc.sessionKey).address
     // Sized at the account cap, not the observed deposit: the same signature bounds any deposit up to the cap,
-    // so the owner can sign before any USDC arrives (armed activation).
+    // so the owner can sign before any USDC arrives (armed activation). Priced at each pool's TWAP, not slot0, which a
+    // swap in the read block could move to shrink or inflate the volatile caps the owner signs (otto/mamoru#140).
     const prices = Object.fromEntries(
-      [...new Set([LIVE_POOL_NAME, ...policy.buckets.flatMap((b) => b.pools)])].map((pool) => {
-        const pr = priceOf(pool, r.prices[pool]!.sqrtPriceX96)
-        return [pr.asset, { num: pr.num, den: pr.den }]
-      }),
+      await Promise.all(
+        [...new Set([LIVE_POOL_NAME, ...policy.buckets.flatMap((b) => b.pools)])].map(async (pool) => {
+          const tick = await this.twapTick(pool, r.block, policy)
+          if (tick === null) throw new HttpError(503, 'PRICE_UNAVAILABLE', 'a pool price could not be checked right now; try again in a moment')
+          const pr = priceOf(pool, sqrtRatioAtTick(tick))
+          return [pr.asset, { num: pr.num, den: pr.den }]
+        }),
+      ),
     )
     const caps = computeCaps(policy, LIVE_CAP_USDC, prices)
     const block = await this.client.getBlock({ blockNumber: r.block })
@@ -1030,12 +1036,14 @@ export class Operator {
   private async receiveQuote(asset: WithdrawAsset, amountIn: bigint, blockNumber: bigint, slip: number): Promise<{ receive: LiveReceive; quoted: bigint; decimals: number; route: string }> {
     const routes = RECEIVE_ROUTES[asset as ReceiveAsset]
     if (!routes) throw new HttpError(409, 'ASSET_UNAVAILABLE', `${asset} is not available`)
-    let best: { pool: string; fee: number; out: bigint } | undefined
+    let best: { pool: string; fee: number; out: bigint; min: bigint } | undefined
     for (const pool of routes.pools) {
       const fee = entry(pool).fee!
       try {
         const out = await quoteExactInputSingle(this.client, { tokenIn: address('USDC'), tokenOut: address(routes.tokenOut), fee, amountIn, blockNumber })
-        if (!best || out > best.out) best = { pool, fee, out }
+        // otto/mamoru#140: the minimum is held to the TWAP; a pool priced worse than its TWAP allows drops out too.
+        const min = await this.ownerSwapMin(pool, 'USDC', amountIn, out, blockNumber, slip, this.cfg.policy)
+        if (min !== null && (!best || out > best.out)) best = { pool, fee, out, min }
       } catch {
         // an empty or broken pool only drops out of the route set
       }
@@ -1043,7 +1051,7 @@ export class Operator {
     if (!best) throw new HttpError(503, 'QUOTE_UNAVAILABLE', `no Uniswap v3 quote for USDC -> ${asset}`)
     const pair = `USDC/${routes.tokenOut}`
     const route = `Uniswap v3 ${pair} ${(best.fee / 10_000).toFixed(2)}%${asset === 'ETH' ? ' + unwrap' : ''}`
-    return { receive: { asset: routes.receive, fee: best.fee, amountOutMinimum: minOut(best.out, slip) }, quoted: best.out, decimals: entry(routes.tokenOut).decimals!, route }
+    return { receive: { asset: routes.receive, fee: best.fee, amountOutMinimum: best.min }, quoted: best.out, decimals: entry(routes.tokenOut).decimals!, route }
   }
 
   /**
@@ -1061,6 +1069,7 @@ export class Operator {
     for (;;) {
       const target = (need * margin) / 100n
       const plan = planReduce(open, r.prices, target > value ? value : target, order)
+      await this.assertNearTwap([...new Set(plan.map((x) => x.pos.pool))], r, this.policyOf(acc))
       const reduce = plan.map(({ pos, bps }) => {
         const liquidity = (pos.liquidity * BigInt(bps)) / 10_000n
         const a = amountsForLiquidity(r.prices[pos.pool]!.sqrtPriceX96, pos.tickLower, pos.tickUpper, liquidity)
@@ -1097,8 +1106,11 @@ export class Operator {
     return out
   }
 
-  /** Quotes every non-USDC amount back to USDC on its route; amounts too small to quote a positive minimum stay in the Safe. */
-  private async swapQuotes(acc: AccountState, amounts: Record<string, bigint>, blockNumber: bigint, slip: number): Promise<SwapBack[]> {
+  /**
+   * Quotes every non-USDC amount back to USDC on its route; amounts too small to quote a positive minimum stay in the
+   * Safe, and so does a token whose pool is priced worse than its TWAP allows (listed in `unfair`, otto/mamoru#140).
+   */
+  private async swapQuotes(acc: AccountState, amounts: Record<string, bigint>, blockNumber: bigint, slip: number, unfair: string[] = []): Promise<SwapBack[]> {
     const out: SwapBack[] = []
     for (const [token, raw] of Object.entries(amounts)) {
       if (token === 'USDC') continue
@@ -1109,10 +1121,42 @@ export class Operator {
       if (!pool) continue
       const q = await quoteExactInputSingle(this.client, { tokenIn: address(token), tokenOut: address('USDC'), fee: entry(pool).fee!, amountIn, blockNumber }).catch(() => 0n)
       if (q <= 1n) continue
-      const amountOutMinimum = minOut(q, slip)
-      if (amountOutMinimum > 0n) out.push({ token, pool, amountIn, amountOutMinimum })
+      const amountOutMinimum = await this.ownerSwapMin(pool, token, amountIn, q, blockNumber, slip, this.policyOf(acc))
+      if (amountOutMinimum === null) {
+        unfair.push(token)
+        continue
+      }
+      out.push({ token, pool, amountIn, amountOutMinimum })
     }
     return out
+  }
+
+  /** The pool's TWAP tick at `blockNumber` over the policy window, or null when the pool cannot answer for it. */
+  private async twapTick(pool: string, blockNumber: bigint, policy: PolicyVersion): Promise<number | null> {
+    return twapTickAt(this.client, address(pool), policy.execution.twapWindowSeconds, blockNumber).catch(() => null)
+  }
+
+  /**
+   * otto/mamoru#140: the minimum of an owner-batch swap, the larger of the usual one on the quote and the TWAP floor,
+   * or null when the TWAP cannot be read or the quote is already under that floor (the price was moved).
+   */
+  private async ownerSwapMin(pool: string, tokenIn: string, amountIn: bigint, quote: bigint, blockNumber: bigint, slip: number, policy: PolicyVersion): Promise<bigint | null> {
+    const tick = await this.twapTick(pool, blockNumber, policy)
+    if (tick === null) return null
+    const e = entry(pool)
+    const floor = twapFloor({ amountIn, fee: e.fee!, twapTick: tick, tokenInIsToken0: e.token0 === tokenIn, deviationTicks: policy.execution.maxTwapDeviationTicks, slippageBps: slip })
+    const min = swapMinimum(quote, slip, floor)
+    return min !== null && min > 0n ? min : null
+  }
+
+  /** A withdrawal does not take liquidity out of a pool whose spot strays from its TWAP: the minimums would follow the moved price. */
+  private async assertNearTwap(pools: string[], r: SafeRead, policy: PolicyVersion): Promise<void> {
+    for (const pool of pools) {
+      const tick = await this.twapTick(pool, r.block, policy)
+      if (tick === null || diverges(r.prices[pool]!.tick, tick, policy.execution.maxTwapDeviationTicks)) {
+        throw new HttpError(409, 'PRICE_DIVERGENCE', `${poolLabel(pool)} is trading away from its 30-minute average right now; try again in a few minutes`)
+      }
+    }
   }
 
   /**
@@ -1184,7 +1228,8 @@ export class Operator {
     const held: Record<string, bigint> = {}
     for (const [t, v] of Object.entries(r.tokens)) if (t !== 'USDC' && v > 0n) held[t] = v + 1n
     for (const [t, v] of Object.entries(got)) if (t !== 'USDC') held[t] = (held[t] ?? 1n) + v
-    const swaps = await this.swapQuotes(acc, held, r.block, slip)
+    const unfair: string[] = []
+    const swaps = await this.swapQuotes(acc, held, r.block, slip, unfair)
     // Every grant enabled on the Safe: the ones the engine uses, the ones a renewal left behind, and those of a
     // renewal whose receipt is not known yet, enabled or not.
     const revokes = [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc)])]
@@ -1199,7 +1244,7 @@ export class Operator {
       ...(revokes.length ? [`Revoke the engine's ${revokes.length} session grant(s)`] : []),
       ...r.positions.map((p) => `Close and burn position #${p.tokenId} (${poolLabel(p.pool)})`),
       ...swaps.map((sw) => `Swap ${sw.amountIn} ${sw.token} units to at least ${fmtUsdc(sw.amountOutMinimum)} USDC`),
-      'Everything stays in your Safe as USDC',
+      unfair.length ? `${unfair.join(', ')} stays in your Safe as it is: its pool price is off its average right now` : 'Everything stays in your Safe as USDC',
     ]
     return this.hold(acc, live, 'stop', calls, summary, { revokes })
   }

@@ -9,6 +9,7 @@ import { LIVE_CAP_USDC, browserOwnerSignature, deployCall, liveAccountFromContex
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { FOLLOW_UP_GRACE, FOLLOW_UP_MAX, FOLLOW_UP_MS, graceLeft, HttpError, lastEngineBlock, nextReview, MAX_OWNER_FAILURES_PER_DAY, OWNER_FAILURES_ALERT_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
 import type { Relayer } from '../src/relayer.ts'
+import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { answerAggregate3 } from './fake-multicall.ts'
 import type { AccountState, ArmedActivation, StateStore } from '../src/state.ts'
 
@@ -37,7 +38,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, spotTick: 0, twapTick: 0 as number | null }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -53,7 +54,11 @@ function world(usdc: bigint) {
     getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? knobs.relayerWei : 0n),
     getTransactionCount: async ({ blockTag }: { blockTag?: string }) => (blockTag === 'pending' ? 5 + knobs.relayerPending : 5),
     readContract: async ({ address: at, functionName, blockNumber }: { address: string; functionName: string; blockNumber?: bigint }) => {
-      if (functionName === 'slot0') return [1n << 96n, 0, 0, 0, 0, 0, true]
+      if (functionName === 'slot0') return [sqrtRatioAtTick(knobs.spotTick), knobs.spotTick, 0, 0, 0, 0, true]
+      if (functionName === 'observe') {
+        if (knobs.twapTick === null) throw new Error('execution reverted: OLD')
+        return [[0n, BigInt(knobs.twapTick) * 1800n], [0n, 0n]]
+      }
       if (functionName === 'nonce') return chain.nonce
       if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : 0n
       if (functionName === 'isPermissionEnabled') {
@@ -75,7 +80,7 @@ function world(usdc: bigint) {
         const word = (v: bigint) => toHex(v, { size: 32 })
         return {
           data: answerAggregate3(data, (target, callData) => {
-            if (callData.startsWith('0x3850c7bd')) return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [1n << 96n, 0, 0, 0, 0, 0, true] })
+            if (callData.startsWith('0x3850c7bd')) return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [sqrtRatioAtTick(knobs.spotTick), knobs.spotTick, 0, 0, 0, 0, true] })
             if (callData.startsWith('0x70a08231')) return word(target.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : target.toLowerCase() === address('USDT').toLowerCase() ? knobs.usdt : 0n)
             if (callData.startsWith('0x4d2301cc')) return word(0n)
             throw new Error('execution reverted')
@@ -1913,5 +1918,42 @@ describe('a restarted engine does not look at the chain from before its last ope
   test('the floor it is given is the block of the latest stored engine operation that reached the chain', () => {
     expect(lastEngineBlock([])).toBe(0n)
     expect(lastEngineBlock([{ opId: 'own-1-activate', block: 900 }, { opId: 'eng-1-1-op-1-enter_swap', block: 120 }, { opId: 'eng-1-1-op-2-enter_mint', block: 131 }, { opId: 'eng-1-1-op-3-enter_swap' }])).toBe(131n)
+  })
+})
+
+describe('prices the owner signs are read at the TWAP, not at slot0 (otto/mamoru#140)', () => {
+  /** The cap of every rule of the grants a prepared activation would enable, by grant and field. */
+  const capsOf = (w: ReturnType<typeof world>, prepareId: string) => {
+    const p = (w.op as unknown as { prepared: Map<string, { grants?: { name: string; grant: { actions: { signature: string; params: { field: string; ref: bigint; cumulativeLimit?: bigint }[] }[] } }[] }> }).prepared.get(prepareId)!
+    return p.grants!.flatMap((g) => g.grant.actions.flatMap((a) => a.params.filter((r) => r.field.startsWith('amount')).map((r) => `${g.name} ${a.signature.split('(')[0]} ${r.field} ${r.ref} ${r.cumulativeLimit ?? ''}`)))
+  }
+
+  test('a slot0 moved inside the read block does not change the volatile caps of the approval', async () => {
+    const calm = world(0n)
+    const moved = world(0n)
+    moved.knobs.spotTick = 5_000
+    const a = await calm.op.prepareActivate(ctx)
+    const b = await moved.op.prepareActivate(ctx)
+    expect(capsOf(moved, b.prepareId)).toEqual(capsOf(calm, a.prepareId))
+    // And the TWAP does move them: the caps follow the average price, as before they followed the spot.
+    const later = world(0n)
+    later.knobs.twapTick = 5_000
+    const c = await later.op.prepareActivate(ctx)
+    expect(capsOf(later, c.prepareId)).not.toEqual(capsOf(calm, a.prepareId))
+  })
+
+  test('no TWAP, no approval: the caps are not sized from slot0 alone', async () => {
+    const w = world(0n)
+    w.knobs.twapTick = null
+    expect(await w.op.prepareActivate(ctx).catch((e: unknown) => e)).toMatchObject({ status: 503, code: 'PRICE_UNAVAILABLE' })
+  })
+
+  test('an owner swap back to USDC is held to the TWAP floor, and left out when its quote is under it', async () => {
+    const w = world(0n)
+    const min = (quote: bigint) => (w.op as unknown as { ownerSwapMin(pool: string, tokenIn: string, amountIn: bigint, quote: bigint, block: bigint, slip: number, policy: unknown): Promise<bigint | null> }).ownerSwapMin('pool:USDC/USDT/100', 'USDT', 1_000_000n, quote, 100n, 50, POLICIES['conservador-live-v2'])
+    expect(await min(999_900n)).toBe(994_900n)
+    expect(await min(950_000n)).toBeNull()
+    w.knobs.twapTick = null
+    expect(await min(999_900n)).toBeNull()
   })
 })
