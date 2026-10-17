@@ -1758,12 +1758,14 @@ export class Operator {
     const runner = this.runners.get(acc.accountKey)
     // The journal of the running engine, and what is stored: after a restart the journal is empty while a user
     // operation sent before it may still be on its way. A stored one counts for ENGINE_OP_PENDING_MS, not for ever.
-    const carriedIds = new Set((acc.carried ?? []).map((o) => o.storedId))
+    const carriedIds = new Set((acc.carried ?? []).filter((o) => o.state === 'pending_reconciliation').map((o) => o.storedId))
     const stored = acc.ops.some((o) => o.opId.startsWith('eng-') && o.state === 'submitted' && !carriedIds.has(o.opId) && Date.now() - (Date.parse(o.updatedAt) || 0) < ENGINE_OP_PENDING_MS)
     // An op waiting in pending_reconciliation with signed bytes (a bundler rejection; a legacy grant's swap has no
     // deadline and could wait for ever) does not hold the renewal: it is carried to the next engine and watched until
     // it lands or its nonce passes (Sol review round 2 of #64), whatever the renewal does to its grant.
-    const carried = new Set(runner?.engine.carried() ?? [])
+    // Only an op waiting in pending_reconciliation is let through: one in flight (signed, submitted, included) still
+    // holds the renewal for the minute it takes, as before.
+    const carried = new Set((runner?.engine.carried() ?? []).filter((o) => o.state === 'pending_reconciliation'))
     if (stored || runner?.engine.journal.ops.some((o) => ENGINE_UNSETTLED.has(o.state) && !carried.has(o))) return { code: 'ENGINE_BUSY', message: 'Mamoru is finishing an operation on this account. Try again in a minute.' }
     return null
   }
@@ -3673,7 +3675,9 @@ export class Operator {
     if (moved?.storedId && moved.lateIncluded && moved.included && !runner.engine.journal.ops.includes(moved)) {
       const row = acc.ops.find((x) => x.opId === moved.storedId)
       if (row && !row.lateIncluded) {
-        Object.assign(row, { lateIncluded: true, txHash: moved.included.txHash, block: Number(moved.included.blockNumber), updatedAt: now(), ...(moved.permissionId && moved.calls ? { permissionId: moved.permissionId, calls: moved.calls } : {}) })
+        // An op carried while still in flight (not settled failed first) is simply settled: confirmed or reverted.
+        const inFlight = row.state === 'submitted'
+        Object.assign(row, { lateIncluded: true, txHash: moved.included.txHash, block: Number(moved.included.blockNumber), updatedAt: now(), ...(inFlight ? { state: moved.included.success ? 'confirmed' : 'failed', code: moved.included.success ? 'EXEC_OK' : 'EXEC_INNER_REVERT' } : {}), ...(moved.permissionId && moved.calls ? { permissionId: moved.permissionId, calls: moved.calls } : {}) })
         changed = true
       }
     }

@@ -2923,6 +2923,17 @@ describe('renewing the approval of a running account', () => {
     expect(acc.carried).toBeUndefined()
   })
 
+  test('a carried op that was still in flight settles its stored row when it lands (rebase review of #64)', async () => {
+    const { w, acc } = await running()
+    const storedId = `eng-${acc.epoch}-1-op-9-enter_mint`
+    acc.ops.push({ opId: storedId, kind: 'enter', state: 'submitted', updatedAt: new Date().toISOString() } as never)
+    type Sync = { syncEngineOps(a: AccountState, r: unknown, moved?: unknown): void }
+    const runner = { engine: { journal: { ops: [] }, carried: () => [] }, epoch: acc.epoch, run: 2, seen: new Map(), alias: new Map() }
+    const moved = { opId: 'op-9', storedId, lateIncluded: true, included: { txHash: `0x${'44'.repeat(32)}`, blockNumber: 160n, success: true }, permissionId: `0x${'dd'.repeat(32)}`, calls: [] }
+    ;(w.op as unknown as Sync).syncEngineOps(acc, runner, moved)
+    expect(acc.ops.find((o) => o.opId === storedId)).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', lateIncluded: true, block: 160 })
+  })
+
   test('session uses replay for every permission the new engine signs with, from any epoch (Sol review round 3 of #64)', () => {
     const kept = `0x${'aa'.repeat(32)}` as Hex
     const gone = `0x${'bb'.repeat(32)}` as Hex

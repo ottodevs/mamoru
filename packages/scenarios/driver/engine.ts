@@ -89,6 +89,9 @@ export type EngineConfig = {
   intents?: () => Observation['intents']
 }
 
+/** Live op states whose signed bytes may still land or have landed without being settled here (Engine.carried). */
+const CARRIED_STATES = new Set<OpRecord['state']>(['signed', 'submitted', 'included', 'pending_reconciliation'])
+
 export type EngineHooks = {
   /** Lets one block pass on the fork. The engine itself never calls anvil methods. */
   waitBlock: () => Promise<void>
@@ -549,13 +552,16 @@ export class Engine {
   private readonly released: OpRecord[] = []
 
   /**
-   * What the account must keep watching past this engine (a restart, a renewal): every released op, and the live op
-   * when it waits in pending_reconciliation with signed bytes (a bundler rejection, a reorg). The operator stores
-   * these and hands them to the next engine (`carried`).
+   * What the account must keep watching past this engine (a restart, a renewal, a stop): every released op, and the
+   * live op whenever it is unsettled with signed bytes: signed, submitted, included but not yet safe (Sol review of the
+   * rebase onto #60: a grant sweep can stop the engine before it confirms an included mint), or in
+   * pending_reconciliation (a bundler rejection, a reorg). The operator stores these and hands them to the next engine
+   * (`carried`), which applies a landing's effects.
    */
   carried(): OpRecord[] {
     const live = this.journal.live
-    const pending = live && live.state === 'pending_reconciliation' && live.userOpHash && live.nonce !== undefined && live.prepareBlock !== undefined ? [live] : []
+    const unsettled = live && CARRIED_STATES.has(live.state) && live.userOpHash && live.nonce !== undefined && live.prepareBlock !== undefined
+    const pending = unsettled ? [live] : []
     return [...this.released, ...pending.filter((o) => !this.released.includes(o))]
   }
 

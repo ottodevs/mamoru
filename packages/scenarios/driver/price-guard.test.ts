@@ -406,6 +406,24 @@ describe('a rejected or unseen userOp is settled from the chain only (otto/mamor
     expect(uses).toBe(1)
   })
 
+  test('an op included but not yet safe when the engine stops is carried, and the next engine applies it (rebase review of #64)', async () => {
+    const w = engineAt({ timestamp: 1_000n })
+    const op = rejectedOp(w.engine, 1_120n)
+    // Not rejected after all: found included above safe, then the engine is stopped (a grant sweep) before safe.
+    w.engine.journal.move(op.opId, 'included', 'OP_INCLUDED', { included: { blockNumber: 160n, blockHash: `0x${'33'.repeat(32)}`, txHash: `0x${'44'.repeat(32)}`, success: true, actualGasCost: 7n } })
+    expect(w.engine.carried().map((o) => o.opId)).toEqual([op.opId])
+    const next = engineAt({ timestamp: 1_000n }, policy, { carried: w.engine.carried().map((o) => ({ ...o, storedId: 'eng-1-1-x-enter_swap' })) })
+    next.chain.events = [eventOf(op, true)]
+    next.chain.eventBlock = { number: 160n, hash: `0x${'33'.repeat(32)}` }
+    next.chain.safeNumber = 160n
+    next.chain.nonce = 6n
+    const moved: OpRecord[] = []
+    next.engine.journal.onMove = (o) => void moved.push(o)
+    await next.priv.watchReleased()
+    expect(moved[0]).toMatchObject({ storedId: 'eng-1-1-x-enter_swap', lateIncluded: true, included: { success: true } })
+    expect(next.engine.carried()).toHaveLength(0)
+  })
+
   test('a nonce spent by something else settles the op without waiting for the expiry', async () => {
     const w = engineAt({ nonce: 6n })
     const op = rejectedOp(w.engine, 1_120n)
