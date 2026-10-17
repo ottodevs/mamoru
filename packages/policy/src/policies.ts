@@ -198,6 +198,33 @@ export const conservadorLiveV2: PolicyVersion = {
   },
 }
 
+const btcPairV3 = pairOf('btc', 'pool:USDC/cbBTC/500', 'USDC', 'cbBTC', 'USDC', 'cbBTC', 500, { swapPerCall: 3500, swapTotal: 7000, mint: 7000 })
+const riskPairV3 = pairOf('risk', 'pool:WETH/USDC/3000', 'USDC', 'WETH', 'WETH', 'USDC', 3000, { swapPerCall: 3000, swapTotal: 6000, mint: 6000 })
+
+/**
+ * Conservador v3 (owner decision 2026-10-16, Captains): the offer the landing shows, 50 / 35 / 15. Same pools, ranges,
+ * usage limits and re-balance rules as v2.1.0; only the btc-usdc and risk weights move (40 -> 35, 10 -> 15), and their
+ * caps with them: the btc pair keeps 1x / 2x of its weight, the risk pair 2x / 4x as in v2. Centred, about 75% of the
+ * account is USDC/USDT; when a volatile position leaves its range below, it is all cbBTC or WETH and that share falls
+ * towards 50%. Accounts approved under v2 keep v2 until they renew; the operator starts new activations on v3 only
+ * with MAMORU_POLICY=conservador-live-v3.
+ */
+export const conservadorLiveV3: PolicyVersion = {
+  ...conservadorLiveV2,
+  policyId: 'conservador-live-v3',
+  version: '3.0.0',
+  buckets: [
+    { id: 'stables', preference: 5000, pools: ['pool:USDC/USDT/100'] },
+    { id: 'btc-usdc', preference: 3500, pools: ['pool:USDC/cbBTC/500'] },
+    { id: 'risk', preference: 1500, pools: ['pool:WETH/USDC/3000'] },
+  ],
+  session: {
+    ...conservadorLiveV2.session,
+    caps: [...stablesPair.caps, ...btcPairV3.caps, ...riskPairV3.caps],
+    grants: [...stablesPair.grants, ...btcPairV3.grants, ...riskPairV3.grants],
+  },
+}
+
 /**
  * Spec 004 (#101) fall freeze: thresholds that passed the Lab gate (16 Oct 2026, Sep 2026, Oct 2025 and Feb 2025
  * windows): the 24 h trend thresholds of `RISK_REGIME_TREND` (cbBTC 7%, WETH 9%) with the `RISK_REGIME_VOL` ones
@@ -278,6 +305,7 @@ export const POLICIES: Record<string, PolicyVersion> = {
   [conservadorLabV1.policyId]: conservadorLabV1,
   [conservadorLiveV1.policyId]: conservadorLiveV1,
   [conservadorLiveV2.policyId]: conservadorLiveV2,
+  [conservadorLiveV3.policyId]: conservadorLiveV3,
   [labWethUsdcV1.policyId]: labWethUsdcV1,
   [conservadorLabGuardsV1.policyId]: conservadorLabGuardsV1,
   [conservadorLabGeometryV1.policyId]: conservadorLabGeometryV1,
