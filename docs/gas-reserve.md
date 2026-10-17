@@ -43,8 +43,12 @@ within 10 minutes of the deadline is dropped with `RESERVE_SWAP_EXPIRED` and the
 any failed start. One whose `execTransaction` was already handed to a provider is not sent again; reconciliation
 reads whether it landed. The limit also travels with the send itself (`notAfter` on the relayer job, deadline minus
 10 minutes): the relayer checks it again after its queue and its reads, right before the broadcast, against the later
-of its clock and the chain head, and drops the job (`SendExpired`, `RESERVE_SWAP_EXPIRED`) instead of sending it, on
-every attempt.
+of its clock (read after the head) and the chain head, and drops the job (`SendExpired`, `RESERVE_SWAP_EXPIRED`)
+instead of sending it, on every attempt. The relayer's wallet transport does not retry. The limit also goes to the
+local RPC proxy in the `x-mamoru-not-after` header, which only the proxy reads (upstream requests never carry it):
+past it the proxy hands the signed transaction to no further provider, first try or fallback. Stopped before any
+provider was asked, the start fails `RESERVE_SWAP_EXPIRED`; stopped after one was asked, it may be out, and it is
+left to reconciliation.
 
 ## When the relayer still pays (#82)
 

@@ -1905,12 +1905,12 @@ export class Operator {
   }
 
   /**
-   * An activation whose reserve swap can no longer be sent: the owner approves again. A copy handed to a provider by an
-   * earlier attempt may have landed before the deadline: that one is left to reconciliation, as a retry that meets its
-   * Safe nonce spent.
+   * An activation whose reserve swap can no longer be sent: the owner approves again. A copy that may be out (handed to
+   * a provider by an earlier attempt, or by this one before the proxy stopped it) may have landed before the deadline:
+   * that one is left to reconciliation, as a retry that meets its Safe nonce spent.
    */
-  private reserveExpiredOwner(acc: AccountState, op: OpView): void {
-    if (this.retried.has(opKey(acc, op)) || this.execTried.has(opKey(acc, op))) {
+  private reserveExpiredOwner(acc: AccountState, op: OpView, maybeOut: boolean): void {
+    if (maybeOut) {
       this.failOwner(acc, op, RECEIPT_UNKNOWN, { txHash: undefined })
       this.reconcileSoon(acc)
       return
@@ -1941,7 +1941,7 @@ export class Operator {
     // A copy handed to a provider earlier may have landed before the deadline: that is reconciliation's to find.
     if (p.kind === 'activate' && p.reserveDeadline && reserveExpired(BigInt(p.reserveDeadline), await this.chainNow())) {
       logErr(`[owner] ${op.opId} gas reserve swap past its deadline, not sent:`, { deadline: p.reserveDeadline })
-      return this.reserveExpiredOwner(acc, op)
+      return this.reserveExpiredOwner(acc, op, this.retried.has(opKey(acc, op)) || this.execTried.has(opKey(acc, op)))
     }
     // Before any relayer transaction: signature, guards and a simulation of everything about to be sent.
     const refusal = await this.preflight(acc, live, p, signature)
@@ -2034,6 +2034,8 @@ export class Operator {
     const notAfter = p.kind === 'activate' && p.reserveDeadline ? { at: BigInt(p.reserveDeadline) - SELF_RESERVE_DEADLINE_MARGIN_SECONDS, code: RESERVE_SWAP_EXPIRED } : undefined
     // Keep the hash as soon as the tx is out: if the receipt poll fails, reconciliation reads it later.
     let sent: { hash: Hex; receipt: TransactionReceipt }
+    // A copy from an earlier attempt that may be out, known before this attempt marks its own.
+    const earlier = this.retried.has(opKey(acc, op)) || this.execTried.has(opKey(acc, op))
     try {
       sent = await this.relayer.send(
         { to: safe, data, ...(notAfter ? { notAfter } : {}) },
@@ -2051,7 +2053,7 @@ export class Operator {
     } catch (e) {
       if (!(e instanceof SendExpired)) throw e
       logErr(`[owner] ${op.opId} dropped by the relayer before its broadcast:`, e.message)
-      return this.reserveExpiredOwner(acc, op)
+      return this.reserveExpiredOwner(acc, op, earlier || e.maybeSent)
     }
     const { hash, receipt } = sent
     this.patchOp(acc, op.opId, { state: 'submitted', txHash: hash })

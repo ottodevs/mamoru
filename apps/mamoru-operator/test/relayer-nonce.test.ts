@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, setSystemTime, test } from 'bun:test'
 import { parseTransaction, type Hex, type PublicClient } from 'viem'
 import { Relayer, SendExpired } from '../src/relayer.ts'
 
@@ -6,6 +6,9 @@ import { Relayer, SendExpired } from '../src/relayer.ts'
 const nonces: number[] = []
 /** Every method the stub was asked, in order. */
 const calls: string[] = []
+/** The time-limit header of each request, and an error the stub answers a send with instead (the proxy refusing it). */
+const headers: (string | null)[] = []
+const stub: { sendError: { code: number; message: string } | null } = { sendError: null }
 const server = Bun.serve({
   port: 0,
   hostname: '127.0.0.1',
@@ -26,6 +29,12 @@ const server = Bun.serve({
       return { jsonrpc: '2.0', id: m.id, result }
     }
     const body = (await req.json()) as Call | Call[]
+    headers.push(req.headers.get('x-mamoru-not-after'))
+    const sends = (Array.isArray(body) ? body : [body]).filter((m) => m.method === 'eth_sendRawTransaction')
+    if (sends.length && stub.sendError) {
+      calls.push('eth_sendRawTransaction')
+      return Response.json({ jsonrpc: '2.0', id: sends[0]!.id, error: stub.sendError })
+    }
     return Response.json(Array.isArray(body) ? body.map(one) : one(body))
   },
 })
@@ -148,5 +157,48 @@ describe('a job with a time limit is never broadcast past it', () => {
     head.t = null
     expect(await r.send({ ...job, notAfter: limit(wall()) }).catch((e: unknown) => e)).toBeInstanceOf(SendExpired)
     expect(nonces).toHaveLength(1)
+  })
+  test('the clock is read after a slow head read: a cutoff crossed during it refuses', async () => {
+    nonces.length = 0
+    const t0 = Date.now()
+    const start = BigInt(Math.floor(t0 / 1000))
+    const client = {
+      estimateGas: async () => 21_000n,
+      estimateFeesPerGas: async () => ({ maxFeePerGas: 6_000_000n, maxPriorityFeePerGas: 1_000_000n }),
+      getTransactionCount: async () => 9,
+      // The head answers late, with a block from before the cutoff; meanwhile the clock passed it.
+      getBlock: async () => (setSystemTime(new Date(t0 + 200_000)), { timestamp: start }),
+      waitForTransactionReceipt: async ({ hash }: { hash: Hex }) => ({ transactionHash: hash, status: 'success', blockNumber: 1n, logs: [] }),
+    } as unknown as PublicClient
+    const r = new Relayer(`0x${'11'.repeat(32)}`, client, `http://127.0.0.1:${server.port}`, 8453)
+    try {
+      expect(await r.send({ to: TO, data: '0x01', notAfter: limit(start + 100n) }).catch((e: unknown) => e)).toBeInstanceOf(SendExpired)
+    } finally {
+      setSystemTime()
+    }
+    expect(nonces).toHaveLength(0)
+  })
+
+  test('the limit goes to the proxy in its header; its refusal is SendExpired, maybe out only when it says so; no transport retry', async () => {
+    const r = timed({ t: wall() })
+    const at = wall() + 3600n
+    for (const [code, maybe] of [[-32098, false], [-32097, true]] as const) {
+      headers.length = 0
+      calls.length = 0
+      stub.sendError = { code, message: 'not forwarded: past the send time limit' }
+      try {
+        const e = await r.send({ to: TO, data: '0x01', notAfter: limit(at) }).catch((x: unknown) => x)
+        expect(e).toBeInstanceOf(SendExpired)
+        expect((e as SendExpired).maybeSent).toBe(maybe)
+      } finally {
+        stub.sendError = null
+      }
+      expect(calls.filter((c) => c === 'eth_sendRawTransaction')).toHaveLength(1)
+      expect(headers.filter((h) => h !== null)).toEqual([at.toString()])
+    }
+    // A job without a limit sends no header.
+    headers.length = 0
+    await r.send({ to: TO, value: 1n })
+    expect(headers.every((h) => h === null)).toBe(true)
   })
 })

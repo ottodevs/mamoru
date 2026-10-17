@@ -38,7 +38,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n, eth: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, weiPerUsdc: 0n, twapTick: null as number | null, blockTime: 1_790_000_000n, notAfterSeen: [] as bigint[], expireInQueue: false }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, weiPerUsdc: 0n, twapTick: null as number | null, blockTime: 1_790_000_000n, notAfterSeen: [] as bigint[], expireInQueue: false, proxyStops: null as null | 'not-sent' | 'maybe-sent' }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -106,6 +106,11 @@ function world(usdc: bigint) {
       if (tx.notAfter) {
         knobs.notAfterSeen.push(tx.notAfter.at)
         if (knobs.expireInQueue) throw new SendExpired(tx.notAfter.code, tx.notAfter.at, tx.notAfter.at)
+        // The proxy stopped it after the relayer marked it as going out: before any provider, or after one was asked.
+        if (knobs.proxyStops) {
+          onSending?.()
+          throw new SendExpired(tx.notAfter.code, tx.notAfter.at, tx.notAfter.at, knobs.proxyStops === 'maybe-sent')
+        }
       }
       sent.push(tx)
       if (!knobs.failBeforeSending) onSending?.()
@@ -2213,5 +2218,16 @@ describe('the activation buys its own gas reserve', () => {
     expect(w.knobs.notAfterSeen).toEqual([w.knobs.blockTime + 7n * 86_400n - 600n])
     expect(execs(w)).toHaveLength(0)
     expect(w.state.accounts.k!.ownerFailures ?? []).toHaveLength(0)
+  })
+  test('stopped by the proxy before any provider: expired; after a provider was asked: maybe out, left to reconciliation', async () => {
+    const before = quiet(20_000_000n)
+    before.knobs.proxyStops = 'not-sent'
+    expect(await before.op.submit(ctx, 'activate', sign(await before.op.prepareActivate(ctx)))).toMatchObject({ state: 'failed', code: 'RESERVE_SWAP_EXPIRED' })
+    const after = quiet(20_000_000n)
+    after.knobs.proxyStops = 'maybe-sent'
+    // Never "not sent": an unknown receipt with no hash, which reconciliation reads from the Safe's logs.
+    const op = await after.op.submit(ctx, 'activate', sign(await after.op.prepareActivate(ctx)))
+    expect(op).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(op.txHash).toBeUndefined()
   })
 })

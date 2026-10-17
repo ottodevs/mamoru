@@ -36,6 +36,23 @@ const WITNESS_TTL_MS = 15_000
 /** A trusted provider serves a log range ahead of every public one when it takes it in at most this many requests. */
 const TRUSTED_LOG_MAX_REQUESTS = 4n
 
+/**
+ * A send with a time limit (otto/mamoru#15): the relayer puts the unix second at which its transaction may no longer
+ * go out in this header. Only this proxy reads it; upstream requests are built afresh and never carry it. Once the
+ * clock reaches it, the signed transaction is not handed to any provider again, on any pass.
+ */
+export const NOT_AFTER_HEADER = 'x-mamoru-not-after'
+/** The proxy's answer when the limit was reached before any provider got the transaction: nothing was broadcast. */
+export const NOT_AFTER_NOT_SENT = -32098
+/** The same after a provider was already asked (and refused or did not answer): it may hold the transaction. */
+export const NOT_AFTER_MAYBE_SENT = -32097
+
+/** The header's value, or null when absent or not a unix second. */
+export function notAfterOf(header: string | null): number | null {
+  if (!header || !/^\d{1,12}$/.test(header.trim())) return null
+  return Number(header.trim())
+}
+
 /** Calls whose answer decides nothing: a signed transaction is the same bytes whoever relays it. Any provider may take them. */
 const ANY_PROVIDER = new Set(['eth_sendRawTransaction'])
 
@@ -233,8 +250,10 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    * On a rate/capacity refusal, move to the next provider at once; two passes over the list. The list is the
    * trusted providers, or every provider for a send. Always returns a result/error object.
    */
-  async function raw(body: any, isChunk = false, start = 0): Promise<any> {
+  async function raw(body: any, isChunk = false, start = 0, notAfter: number | null = null): Promise<any> {
     let last: any = null
+    /** Providers this signed transaction was handed to so far: from one on, it may be out. */
+    let asked = 0
     const base = ANY_PROVIDER.has(body?.method) ? providers : trusted
     // `start` rotates the list: a retry asks the next provider first.
     const list = [...base.slice(start % base.length), ...base.slice(0, start % base.length)]
@@ -244,7 +263,13 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       const tries = 1
       if (pi === list.length) await Bun.sleep(250)
       for (let attempt = 0; attempt < tries; attempt++) {
+        // A send with a time limit is checked before every provider, the first and each fallback alike.
+        if (notAfter !== null && body?.method === 'eth_sendRawTransaction' && Date.now() / 1000 >= notAfter) {
+          const code = asked > 0 ? NOT_AFTER_MAYBE_SENT : NOT_AFTER_NOT_SENT
+          return { jsonrpc: '2.0', id: body?.id ?? null, error: { code, message: `not forwarded: past the send's time limit ${notAfter}${asked > 0 ? `, after ${asked} provider(s) were asked: it may be out` : ''}` } }
+        }
         try {
+          if (body?.method === 'eth_sendRawTransaction') asked++
           const r = await post(url, body)
           if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk, Date.now(), caller.getStore()))
           const errObj = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
@@ -422,8 +447,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const n = BigInt(await one('eth_blockNumber', [])) - lag
     return n
   }
-  async function handle(msg: Req, seen: Witnessed): Promise<unknown> {
-    const r = await handleInner(msg, seen)
+  async function handle(msg: Req, seen: Witnessed, notAfter: number | null = null): Promise<unknown> {
+    const r = await handleInner(msg, seen, notAfter)
     // Name the call behind an invalid-params refusal: the engine only sees the message.
     const e = (r as any)?.error
     if (e && msg.method === 'eth_sendRawTransaction') {
@@ -435,14 +460,14 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     } else if (e && (e.code === -32602 || /invalid param/i.test(String(e.message)))) console.log(`[rpc] ${msg.method} refused (${e.code}): ${redactSecrets(JSON.stringify(msg.params ?? [])).slice(0, 300)}`)
     return r
   }
-  async function handleInner(msg: Req, seen: Witnessed): Promise<unknown> {
+  async function handleInner(msg: Req, seen: Witnessed, notAfter: number | null): Promise<unknown> {
     try {
       if (msg.method === 'eth_blockNumber') return { jsonrpc: '2.0', id: msg.id, result: `0x${(await head()).toString(16)}` }
       if (msg.method === 'eth_getBlockByNumber' && (msg.params?.[0] === 'latest' || msg.params?.[0] === 'pending')) {
         return { jsonrpc: '2.0', id: msg.id, result: await one('eth_getBlockByNumber', [`0x${(await head()).toString(16)}`, msg.params?.[1] ?? false]) }
       }
       if (msg.method === 'eth_getLogs') return { jsonrpc: '2.0', id: msg.id, result: await getLogs(msg, seen) }
-      let r = await raw({ ...msg })
+      let r = await raw({ ...msg }, false, 0, notAfter)
       // A block by number that this node does not have yet comes back null: ask again.
       // Each retry starts at the next trusted provider: another node of the upstream, or a trusted fallback, may have it.
       for (let i = 0; i < 3 && msg.method.startsWith('eth_getBlockBy') && r && 'result' in r && r.result === null; i++) {
@@ -462,7 +487,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       if (req.method !== 'POST') return new Response('method not allowed', { status: 405 })
       const payload = (await req.json()) as Req | Req[]
       const seen: Witnessed = new Map()
-      const answer = () => (Array.isArray(payload) ? Promise.all(payload.map((m) => handle(m, seen))) : handle(payload, seen))
+      const notAfter = notAfterOf(req.headers.get(NOT_AFTER_HEADER))
+      const answer = () => (Array.isArray(payload) ? Promise.all(payload.map((m) => handle(m, seen, notAfter))) : handle(payload, seen, notAfter))
       return Response.json(await caller.run(componentOf(new URL(req.url).pathname), answer))
     },
   })

@@ -3,6 +3,7 @@ import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import { Lock } from './lock.ts'
 import { logErr } from './metrics.ts'
+import { NOT_AFTER_HEADER, NOT_AFTER_MAYBE_SENT, NOT_AFTER_NOT_SENT } from './rpc-proxy.ts'
 
 /** Per-tx gas cap on Base (EIP-7825). */
 const TX_GAS_CAP = 16_777_216n
@@ -10,17 +11,30 @@ const TX_GAS_CAP = 16_777_216n
 const LAST_SENT_MS = 120_000
 
 /**
- * A job with a `notAfter` that could no longer be broadcast in time: dropped, never signed for the provider. `code`
- * is the job's own (e.g. RESERVE_SWAP_EXPIRED); nothing of it reached a provider.
+ * A job with a `notAfter` that could no longer be broadcast in time: dropped instead of sent. `code` is the job's own
+ * (e.g. RESERVE_SWAP_EXPIRED). `maybeSent`: the proxy stopped it only after a provider had been handed the signed
+ * transaction (and refused or did not answer), so it may be out and only the chain can say; otherwise nothing of
+ * it reached a provider.
  */
 export class SendExpired extends Error {
   constructor(
     readonly code: string,
     readonly notAfter: bigint,
     readonly now: bigint,
+    readonly maybeSent = false,
   ) {
-    super(`${code}: not sent, unix time ${now} is at or past the job's limit ${notAfter}`)
+    super(`${code}: ${maybeSent ? 'stopped after a provider was asked, may be out' : 'not sent'}, unix time ${now} is at or past the job's limit ${notAfter}`)
   }
+}
+
+/** The proxy's NOT_AFTER_* answer inside a viem error, if that is what it is. */
+function notAfterCode(e: unknown): number | null {
+  let cur = e as { code?: unknown; cause?: unknown } | undefined
+  for (let i = 0; i < 8 && cur; i++) {
+    if (cur.code === NOT_AFTER_NOT_SENT || cur.code === NOT_AFTER_MAYBE_SENT) return cur.code
+    cur = cur.cause as typeof cur
+  }
+  return null
 }
 
 /** When a job may no longer go out: unix seconds (the caller's margin already taken off), and the code it fails with. */
@@ -72,13 +86,15 @@ export class Relayer {
    * let a job through, and then by no more than its lag.
    */
   private async assertInTime(n: NotAfter): Promise<void> {
-    let now = BigInt(Math.floor(Date.now() / 1000))
+    let head = 0n
     try {
-      const { timestamp } = await this.client.getBlock()
-      if (timestamp > now) now = timestamp
+      head = (await this.client.getBlock()).timestamp
     } catch (e) {
       logErr('[relayer] chain head unavailable for a job with a time limit, wall clock only:', e)
     }
+    // The clock is read after the head: however long that read took, it is counted.
+    const wall = BigInt(Math.floor(Date.now() / 1000))
+    const now = head > wall ? head : wall
     if (now >= n.at) throw new SendExpired(n.code, n.at, now)
   }
 
@@ -92,7 +108,13 @@ export class Relayer {
    */
   send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint; notAfter?: NotAfter }, onSent?: (hash: Hex) => void, onSending?: () => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     return this.lock.run(async () => {
-      const wallet = createWalletClient({ account: this.account, chain: this.chain, transport: http(this.rpcUrl, { timeout: 60_000 }) })
+      // No transport retries: a send is repeated only through this method, whose checks run again. A time limit goes to
+      // the local proxy in a header it alone reads, so no provider is handed the transaction once it is reached.
+      const wallet = createWalletClient({
+        account: this.account,
+        chain: this.chain,
+        transport: http(this.rpcUrl, { timeout: 60_000, retryCount: 0, ...(tx.notAfter ? { fetchOptions: { headers: { [NOT_AFTER_HEADER]: tx.notAfter.at.toString() } } } : {}) }),
+      })
       // Base rejects a tx over 2^24 gas (EIP-7825): the 30% margin must not push a fitting estimate over the cap.
       const est = tx.gas ?? ((await this.client.estimateGas({ account: this.account.address, to: tx.to, data: tx.data, value: tx.value })) * 13n) / 10n
       const gas = est > TX_GAS_CAP ? TX_GAS_CAP : est
@@ -115,9 +137,17 @@ export class Relayer {
         maxFeePerGas: fees.maxFeePerGas,
         maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
       })
+      // The last step before the send: nothing but the send itself comes after it.
       if (tx.notAfter) await this.assertInTime(tx.notAfter)
       onSending?.()
-      const hash = await wallet.sendRawTransaction({ serializedTransaction })
+      let hash: Hex
+      try {
+        hash = await wallet.sendRawTransaction({ serializedTransaction })
+      } catch (e) {
+        const code = tx.notAfter ? notAfterCode(e) : null
+        if (code !== null) throw new SendExpired(tx.notAfter!.code, tx.notAfter!.at, BigInt(Math.floor(Date.now() / 1000)), code === NOT_AFTER_MAYBE_SENT)
+        throw e
+      }
       this.lastSent = { nonce, at: Date.now() }
       onSent?.(hash)
       try {
