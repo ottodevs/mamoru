@@ -93,6 +93,8 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     getTransactionCount: async () => 5,
     readContract: async ({ address: at, functionName, args }: { address: string; functionName: string; args?: readonly unknown[] }) => {
       if (functionName === 'slot0') return [1n << 96n, 0, 0, 0, 0, 0, true]
+      // #64: activations and engine swaps price at the pool TWAP; tick 0, as slot0.
+      if (functionName === 'observe') return [[0n, 0n], [0n, 0n]]
       if (functionName === 'nonce') return chain.nonce
       if (functionName === 'balanceOf' && at.toLowerCase() === npm) {
         if (knobs.npmDown) throw new Error('HTTP request failed. Status: 503')

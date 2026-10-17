@@ -108,11 +108,11 @@ describe('decide', () => {
     expect(d.positions).toEqual([{ tokenId: 7n, codes: ['DECIDE_HARVEST_BELOW_COST'] }])
   })
 
-  test('fees above cost propose a harvest that converts only the fees', () => {
+  test('fees above cost propose a harvest that only collects (otto/mamoru#140)', () => {
     const manage = { grant: 'manage:7', permissionId: `0x${'03'.repeat(32)}` as const, tokenId: 7n, validUntil: 10_000, active: true }
     const d = decide(obs({ sessions: [manage], positions: [position({ collectable0: 5_000_000n, collectable1: 9_000n, principalOwed1: 1_000n })] }), conservadorLabV1)
     expect(d.code).toBe('DECIDE_HARVEST')
-    expect(d.proposal).toMatchObject({ kind: 'harvest', grant: 'manage:7', tokenId: 7n, fees0: 5_000_000n, fees1: 8_000n, convert: { token: 'cbBTC', amount: 8_000n } })
+    expect(d.proposal).toMatchObject({ kind: 'harvest', grant: 'manage:7', tokenId: 7n, fees0: 5_000_000n, fees1: 8_000n, convert: null })
     expect(d.positions[0]!.codes).toEqual(['OBS_FEES_ABOVE_COST', 'DECIDE_HARVEST'])
   })
 

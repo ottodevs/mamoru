@@ -16,6 +16,28 @@ const MINT = 'mint((address,address,uint24,int24,int24,uint256,uint256,uint256,u
 const DECREASE = 'decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))'
 const COLLECT = 'collect((uint256,address,uint128,uint128))'
 const BURN = 'burn(uint256)'
+const MULTICALL_DEADLINE = 'multicall(uint256,bytes[])'
+
+/**
+ * otto/mamoru#140: an on-chain expiry for every engine swap. SwapRouter02.multicall(deadline, []) reverts once the
+ * block is past `deadline` and otherwise does nothing; the engine puts it in the same batch as the swap, so a signed
+ * userOp a bundler holds back cannot swap after it. The rules pin the array to empty (its offset is the third word,
+ * its length 0): the call can carry nothing to execute, so it widens no scope. Smart Sessions has no per-userOp
+ * expiry the session key could set (TimeFramePolicy is fixed at the grant), so this is the bound that holds.
+ */
+const SWAP_DEADLINE = {
+  target: 'SwapRouter02',
+  signature: MULTICALL_DEADLINE,
+  params: [
+    { field: 'deadline', index: 0, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+    { field: 'dataOffset', index: 1, condition: 'EQUAL', ref: 64n, denial: 'POLICY_DENIED_TARGET' },
+    { field: 'dataLength', index: 2, condition: 'EQUAL', ref: 0n, denial: 'POLICY_DENIED_TARGET' },
+  ],
+} as const
+
+function swapDeadline(): GrantTemplate['actions'][number] {
+  return { ...SWAP_DEADLINE, params: SWAP_DEADLINE.params.map((r) => ({ ...r })) }
+}
 
 export type PairSpec = {
   /** Savings asset, spent to enter and received on conversion. */
@@ -79,6 +101,7 @@ export function pairGrants(p: PairSpec, usage: { enterSwap: Usage; enterMint: Us
             { field: 'sqrtPriceLimitX96', index: 6, condition: 'EQUAL', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
           ],
         },
+        swapDeadline(),
       ],
     },
     {
@@ -183,6 +206,7 @@ export function pairGrants(p: PairSpec, usage: { enterSwap: Usage; enterMint: Us
             { field: 'sqrtPriceLimitX96', index: 6, condition: 'EQUAL', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
           ],
         },
+        swapDeadline(),
       ],
     },
   ]
@@ -291,6 +315,7 @@ export function manageAnyGrants(p: PairSpec, usage: { manage: Usage; convert: Us
             { field: 'sqrtPriceLimitX96', index: 6, condition: 'EQUAL', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
           ],
         },
+        swapDeadline(),
       ],
     },
   ]

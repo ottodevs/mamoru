@@ -1,7 +1,7 @@
 import type { ReasonCode } from '@mamoru/domain'
 import type { PolicyVersion } from '@mamoru/policy'
 import type { HarvestProposal, Observation, PoolObs, PositionObs } from '../types.ts'
-import { inSavings, opCostInSavings, volatileOf } from '../value.ts'
+import { inSavings, opCostInSavings } from '../value.ts'
 
 export type FeeEstimate = { fees0: bigint; fees1: bigint; feesValue: bigint; costValue: bigint; aboveCost: boolean }
 
@@ -20,11 +20,13 @@ export function estimateFees(obs: Observation, policy: PolicyVersion, position: 
   return { fees0, fees1, feesValue, costValue, aboveCost }
 }
 
-/** A managed position whose fees beat the cost gets a harvest proposal. Only fees are converted, never principal (FR-UNI-005). */
+/**
+ * A managed position whose fees beat the cost gets a harvest proposal. It only collects (otto/mamoru#140): a
+ * conversion in the same batch swapped an amount fixed before inclusion, which could be principal if the fees were
+ * collected elsewhere first (FR-UNI-005). The volatile fees stay in the account for a later sell-back or entry.
+ */
 export function harvestOf(position: PositionObs, pool: PoolObs, policy: PolicyVersion, est: FeeEstimate): { code: ReasonCode; proposal: HarvestProposal | null } {
   if (!est.aboveCost) return { code: 'DECIDE_HARVEST_BELOW_COST', proposal: null }
-  const volatile = volatileOf(pool, policy.savingsAsset)
-  const volatileFees = pool.token0 === volatile ? est.fees0 : est.fees1
   return {
     code: 'DECIDE_HARVEST',
     proposal: {
@@ -34,7 +36,7 @@ export function harvestOf(position: PositionObs, pool: PoolObs, policy: PolicyVe
       tokenId: position.tokenId,
       fees0: est.fees0,
       fees1: est.fees1,
-      convert: volatileFees > 0n ? { token: volatile, amount: volatileFees } : null,
+      convert: null,
     },
   }
 }

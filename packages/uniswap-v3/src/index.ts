@@ -153,3 +153,13 @@ export function swapToEth(p: { recipient: Address; tokenIn: RegistryName; fee: n
   const unwrap = encodeFunctionData({ abi: swapRouter02Abi, functionName: 'unwrapWETH9', args: [p.amountOutMinimum, p.recipient] })
   return call('SwapRouter02', encodeFunctionData({ abi: swapRouter02Abi, functionName: 'multicall', args: [p.deadline, [swap.data, unwrap]] }))
 }
+
+/**
+ * otto/mamoru#140: SwapRouter02.multicall(deadline, []), an on-chain expiry for the batch it rides in: it reverts
+ * ("Transaction too old") once the block is past `deadline`, and does nothing before. The session grant pins the
+ * array to empty (`swapDeadline` in @mamoru/policy).
+ */
+export function deadlineCheck(deadline: bigint): V3Call {
+  if (deadline <= 0n) throw new Error('deadline must be set')
+  return call('SwapRouter02', encodeFunctionData({ abi: swapRouter02Abi, functionName: 'multicall', args: [deadline, []] }))
+}

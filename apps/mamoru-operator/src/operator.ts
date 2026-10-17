@@ -30,7 +30,8 @@ import {
   type SafeTx,
 } from '@mamoru/account/live'
 import { permissionIdOf, revocationCalls, toSmartSession } from '@mamoru/account/sessions'
-import { minOut, quoteExactInputSingle } from '@mamoru/uniswap-v3/quote'
+import { minOut, quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
+import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { Engine, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
@@ -215,6 +216,16 @@ const UNKNOWN_STOP_MS = 3_600_000
 /** Owner op states after which nothing more happens to it. */
 const TERMINAL_STATES = new Set<OpView['state']>(['confirmed', 'failed'])
 /** Engine op states in which a user operation is signed or out and not settled yet. */
+/**
+ * Session uses already on chain, replayed into a new engine's ledger: every stored engine op that ran (confirmed, or
+ * landed late) under a permission this engine signs with, from any epoch. An extension keeps earlier grants and their
+ * on-chain counters keep counting (Sol review round 3 of #64); a permission's id is unique on chain.
+ */
+export function priorIncludedOf(ops: readonly StoredOp[], sessions: readonly { permissionId: Hex }[]): { permissionId: Hex; calls: NonNullable<StoredOp['calls']> }[] {
+  const active = new Set(sessions.map((s) => s.permissionId.toLowerCase()))
+  return ops.filter((o) => o.opId.startsWith('eng-') && (o.state === 'confirmed' || o.lateIncluded) && o.permissionId && o.calls && active.has(o.permissionId.toLowerCase())).map((o) => ({ permissionId: o.permissionId!, calls: o.calls! }))
+}
+
 const ENGINE_UNSETTLED = new Set<OpRecord['state']>(['signed', 'submitted', 'included', 'pending_reconciliation'])
 /** What a retried activation meets when the Safe nonce it was signed for is already spent. */
 const SPENT_NONCE_CODES = new Set(['SAFE_NONCE_MOVED', 'OWNER_TX_REVERTS', 'OWNER_TX_FAILED', 'BAD_SIGNATURE'])
@@ -1163,12 +1174,17 @@ export class Operator {
     const newKey = acc.sessionKey ? undefined : generatePrivateKey()
     const sessionKey = privateKeyToAccount(acc.sessionKey ?? newKey!).address
     // Sized at the account cap, not the observed deposit: the same signature bounds any deposit up to the cap,
-    // so the owner can sign before any USDC arrives (armed activation).
+    // so the owner can sign before any USDC arrives (armed activation). Priced at each pool's TWAP, not slot0, which a
+    // swap in the read block could move to shrink or inflate the volatile caps the owner signs (otto/mamoru#140).
     const prices = Object.fromEntries(
-      [...new Set([LIVE_POOL_NAME, ...policy.buckets.flatMap((b) => b.pools)])].map((pool) => {
-        const pr = priceOf(pool, r.prices[pool]!.sqrtPriceX96)
-        return [pr.asset, { num: pr.num, den: pr.den }]
-      }),
+      await Promise.all(
+        [...new Set([LIVE_POOL_NAME, ...policy.buckets.flatMap((b) => b.pools)])].map(async (pool) => {
+          const tick = await twapTickAt(this.client, address(pool), policy.execution.twapWindowSeconds, r.block).catch(() => null)
+          if (tick === null) throw new HttpError(503, 'PRICE_UNAVAILABLE', 'a pool price could not be checked right now; try again in a moment')
+          const pr = priceOf(pool, sqrtRatioAtTick(tick))
+          return [pr.asset, { num: pr.num, den: pr.den }]
+        }),
+      ),
     )
     const caps = computeCaps(policy, cap, prices)
     const block = await this.client.getBlock({ blockNumber: r.block })
@@ -1709,15 +1725,13 @@ export class Operator {
   }
 
   /**
-   * Why this account cannot renew now, or null. Not running: it starts instead. A stop on its way (sent, or failed
-   * only for an unread receipt): the renewal could land after it and enable grants on a stopped account. An engine
-   * operation not settled yet: it was signed under the grants the renewal revokes.
+   * A stop of this account is on its way (sent, or failed only for an unread receipt). A stop with an unread receipt
+   * counts only while it still can land: until a later owner transaction is confirmed (that one spent the Safe nonce
+   * the stop was signed for), and for an hour at most. The engine is paused meanwhile (US6): it opens nothing that the
+   * stop's revocation would cut in half.
    */
-  private renewRefusal(acc: AccountState, except?: string): { code: string; message: string } | null {
-    if (!acc.active) return { code: 'NOT_ACTIVE', message: 'Mamoru is not running on this account: start it instead of renewing' }
-    // A stop with an unread receipt counts as on its way only while it still can land: until a later owner
-    // transaction is confirmed (that one spent the Safe nonce the stop was signed for), and for an hour at most.
-    const stopping = acc.ops.some((o, i) => {
+  private stopInFlight(acc: AccountState): boolean {
+    return acc.ops.some((o, i) => {
       if (!o.opId.startsWith('own-') || o.kind !== 'exit') return false
       // In flight for at most a day: one left unsettled longer was never recovered by a restart in time. If it did
       // run, settleStops has already applied it from the chain.
@@ -1726,7 +1740,16 @@ export class Operator {
       const spent = acc.ops.slice(i + 1).some((l) => l.opId.startsWith('own-') && l.state === 'confirmed')
       return !spent && Date.now() - (Date.parse(o.updatedAt) || 0) < UNKNOWN_STOP_MS
     })
-    if (stopping) return { code: 'STOP_IN_FLIGHT', message: 'a stop of this account is on its way: nothing to renew' }
+  }
+
+  /**
+   * Why this account cannot renew now, or null. Not running: it starts instead. A stop on its way (sent, or failed
+   * only for an unread receipt): the renewal could land after it and enable grants on a stopped account. An engine
+   * operation not settled yet: it was signed under the grants the renewal revokes.
+   */
+  private renewRefusal(acc: AccountState, except?: string): { code: string; message: string } | null {
+    if (!acc.active) return { code: 'NOT_ACTIVE', message: 'Mamoru is not running on this account: start it instead of renewing' }
+    if (this.stopInFlight(acc)) return { code: 'STOP_IN_FLIGHT', message: 'a stop of this account is on its way: nothing to renew' }
     // One renewal at a time: a second one would be built on grants the first is about to replace.
     // (One left unsettled for more than a day was never recovered by a restart in time: it no longer counts.)
     if (acc.ops.some((o) => o.opId.startsWith('own-') && o.kind === 'renew' && !TERMINAL_STATES.has(o.state) && o.opId !== except && Date.now() - (Date.parse(o.updatedAt) || 0) < DAY_MS)) {
@@ -1735,8 +1758,13 @@ export class Operator {
     const runner = this.runners.get(acc.accountKey)
     // The journal of the running engine, and what is stored: after a restart the journal is empty while a user
     // operation sent before it may still be on its way. A stored one counts for ENGINE_OP_PENDING_MS, not for ever.
-    const stored = acc.ops.some((o) => o.opId.startsWith('eng-') && o.state === 'submitted' && Date.now() - (Date.parse(o.updatedAt) || 0) < ENGINE_OP_PENDING_MS)
-    if (stored || runner?.engine.journal.ops.some((o) => ENGINE_UNSETTLED.has(o.state))) return { code: 'ENGINE_BUSY', message: 'Mamoru is finishing an operation on this account. Try again in a minute.' }
+    const carriedIds = new Set((acc.carried ?? []).map((o) => o.storedId))
+    const stored = acc.ops.some((o) => o.opId.startsWith('eng-') && o.state === 'submitted' && !carriedIds.has(o.opId) && Date.now() - (Date.parse(o.updatedAt) || 0) < ENGINE_OP_PENDING_MS)
+    // An op waiting in pending_reconciliation with signed bytes (a bundler rejection; a legacy grant's swap has no
+    // deadline and could wait for ever) does not hold the renewal: it is carried to the next engine and watched until
+    // it lands or its nonce passes (Sol review round 2 of #64), whatever the renewal does to its grant.
+    const carried = new Set(runner?.engine.carried() ?? [])
+    if (stored || runner?.engine.journal.ops.some((o) => ENGINE_UNSETTLED.has(o.state) && !carried.has(o))) return { code: 'ENGINE_BUSY', message: 'Mamoru is finishing an operation on this account. Try again in a minute.' }
     return null
   }
 
@@ -3415,9 +3443,8 @@ export class Operator {
     if (!acc.sessionKey) throw new Error(`${acc.accountKey} has no session key`)
     acc.runs = (acc.runs ?? 0) + 1
     this.store.save()
-    const prefix = `eng-${acc.epoch}-`
-    const priorIncluded = acc.ops.filter((o) => o.opId.startsWith(prefix) && o.state === 'confirmed' && o.permissionId && o.calls).map((o) => ({ permissionId: o.permissionId!, calls: o.calls! }))
     const sessions: EngineSession[] = [...acc.grants.map((g) => ({ name: g.name, grant: g.grant, permissionId: g.permissionId })), ...acc.managedTokenIds.map((id) => this.manageSession(acc, BigInt(id)))]
+    const priorIncluded = priorIncludedOf(acc.ops, sessions)
     const engine = new Engine(
       {
         mode: 'live',
@@ -3434,13 +3461,17 @@ export class Operator {
         historyFromBlock: BigInt(acc.historyFromBlock),
         sessions,
         priorIncluded,
+        carried: acc.carried ?? [],
         maxWaitBlocks: this.cfg.maxWaitBlocks,
         poolCache: this.poolCache,
+        // The only owner intent the operator has today: a stop on its way pauses the engine (US6).
+        intents: () => ({ paused: this.stopInFlight(acc), exitRequested: false }),
       },
       {
         waitBlock: () => Bun.sleep(this.cfg.waitBlockMs),
         requestManageGrant: async (tokenId, pool) => {
-          acc.managedTokenIds.push(tokenId.toString())
+          // A retried landing asks again: the id is kept once.
+          if (!acc.managedTokenIds.includes(tokenId.toString())) acc.managedTokenIds.push(tokenId.toString())
           this.store.save()
           return this.manageSession(acc, tokenId, pool)
         },
@@ -3613,9 +3644,9 @@ export class Operator {
 
   /** Every move of an engine operation is stored as it happens, and the next funding read goes to the chain. */
   private watchJournal(acc: AccountState, runner: Runner): void {
-    runner.engine.journal.onMove = () => {
+    runner.engine.journal.onMove = (op) => {
       this.fundingMoved(acc)
-      this.syncEngineOps(acc, runner)
+      this.syncEngineOps(acc, runner, op)
     }
   }
 
@@ -3636,8 +3667,16 @@ export class Operator {
   }
 
   /** Journal ops that reached the chain path, as OpViews (discarded ones stay in the engine log only). */
-  private syncEngineOps(acc: AccountState, runner: Runner): void {
+  private syncEngineOps(acc: AccountState, runner: Runner, moved?: OpRecord): void {
     let changed = false
+    // An op carried from an earlier engine that landed late: its stored row says so, with what it used (replayed).
+    if (moved?.storedId && moved.lateIncluded && moved.included && !runner.engine.journal.ops.includes(moved)) {
+      const row = acc.ops.find((x) => x.opId === moved.storedId)
+      if (row && !row.lateIncluded) {
+        Object.assign(row, { lateIncluded: true, txHash: moved.included.txHash, block: Number(moved.included.blockNumber), updatedAt: now(), ...(moved.permissionId && moved.calls ? { permissionId: moved.permissionId, calls: moved.calls } : {}) })
+        changed = true
+      }
+    }
     for (const o of runner.engine.journal.ops) {
       const state = ENGINE_STATE[o.state]
       if (!state) continue
@@ -3652,7 +3691,8 @@ export class Operator {
         block: o.included ? Number(o.included.blockNumber) : undefined,
         updatedAt: now(),
         ...opIntentView(o.intent),
-        ...(o.state === 'confirmed' && o.permissionId && o.calls ? { permissionId: o.permissionId, calls: o.calls } : {}),
+        ...((o.state === 'confirmed' || o.lateIncluded) && o.permissionId && o.calls ? { permissionId: o.permissionId, calls: o.calls } : {}),
+        ...(o.lateIncluded ? { lateIncluded: true } : {}),
       }
       const sig = `${view.state}|${view.code}|${view.txHash ?? ''}`
       if (runner.seen.get(own) === sig) continue
@@ -3668,6 +3708,19 @@ export class Operator {
           Object.assign(last, { updatedAt: view.updatedAt, count: (last.count ?? 1) + 1 })
         } else acc.ops.push(view)
       }
+      changed = true
+    }
+    // What a later engine must keep watching, each op named by its stored row.
+    const carried = runner.engine.carried().map((o) => {
+      if (!o.storedId) {
+        const own = `eng-${runner.epoch}-${runner.run}-${o.opId}-${o.kind}`
+        o.storedId = runner.alias.get(own) ?? own
+      }
+      return o
+    })
+    const key = (ops: readonly OpRecord[] | undefined) => (ops ?? []).map((o) => `${o.storedId}|${o.state}|${o.nonce}`).join(',')
+    if (key(carried) !== key(acc.carried)) {
+      acc.carried = carried.length ? carried.map((o) => ({ ...o })) : undefined
       changed = true
     }
     if (changed) this.store.save()

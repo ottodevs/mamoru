@@ -27,6 +27,12 @@ export type OpRecord = {
   permissionId?: Hex
   prepareBlock?: bigint
   quote?: { amountIn: bigint; amountOut: bigint; amountOutMinimum: bigint }
+  /**
+   * otto/mamoru#140: the last block timestamp at which the signed batch can still execute, from the chain's own
+   * bounds (a SwapRouter02/NonfungiblePositionManager deadline, or the session's validUntil). Null: the batch prices
+   * nothing (collect, burn), so its late inclusion is harmless.
+   */
+  expiresAt?: bigint | null
   calls?: Execution[]
   callData?: Hex
   precheck?: ReasonCode
@@ -40,6 +46,14 @@ export type OpRecord = {
   /** The bundler receipt against the journal and the RPC UserOperationEvent. */
   receiptCheck?: ReceiptCheck
   included?: Inclusion
+  /** otto/mamoru#140: the op was settled `failed` (RECON_UNINCLUDABLE) and its signed bytes were included later; `included` says where. */
+  lateIncluded?: boolean
+  /** A late landing's effects were applied (watchReleased): a retry only stores it. */
+  lateApplied?: boolean
+  /** Its session use is in the ledger: counted once, whatever is retried after. */
+  useRecorded?: boolean
+  /** The operator's stored row for this op, when it is carried to a later engine (see Engine.carried). */
+  storedId?: string
   confirmedSafeBlock?: bigint
   mintedTokenId?: bigint
 }

@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./quote": "./src/quote.ts",
-    "./fees": "./src/fees.ts"
+    "./fees": "./src/fees.ts",
+    "./twap": "./src/twap.ts"
   },
   "dependencies": {
     "@mamoru/domain": "workspace:*",

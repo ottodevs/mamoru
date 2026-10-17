@@ -4,11 +4,14 @@ import type { AccountContext, Hex, OpView } from '@mamoru/domain'
 import type { SessionGrant } from '@mamoru/policy'
 import type { SafeTx } from '@mamoru/account/live'
 import type { Execution } from '@mamoru/account/safe'
+import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { SponsorEntry } from './sponsorship.ts'
 
 /** An op as GET /ops serves it, plus what the operator keeps: repeat count of an identical failure, and for a confirmed engine op the session and calls it used (ledger replay on restart). */
 export type StoredOp = OpView & {
   count?: number
+  /** An engine op settled failed whose signed bytes were included later: its session uses replay like a confirmed one. */
+  lateIncluded?: boolean
   permissionId?: Hex
   calls?: Execution[]
   /** Owner activate: the grants its tx enables, so a late receipt can still start the engine. */
@@ -91,6 +94,11 @@ export type AccountState = {
   /** Engine loops started in this epoch; part of engine op ids so a restart never reuses one. */
   runs?: number
   ops: StoredOp[]
+  /**
+   * otto/mamoru#140 (Sol review round 2 of #64): engine ops whose signed bytes may still be included (Engine.carried),
+   * handed to every later engine of the account until the nonce at `safe` passes them or they land.
+   */
+  carried?: OpRecord[]
   seq: number
   /** Signed activation waiting for the first USDC deposit. */
   armed?: ArmedActivation

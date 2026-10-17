@@ -33,9 +33,9 @@ chain.addPosition(ACCOUNT, 13n, 'pool:USDC/USDT/100')
 const rpc = chain.serve()
 afterAll(() => rpc.stop())
 
-function engine(all: EngineSession[]): Engine {
+function engine(all: EngineSession[], intents?: () => { paused: boolean; exitRequested: boolean }): Engine {
   return new Engine(
-    { mode: 'live', chainId: 8453, signingChainIds: [8453], rpcUrl: rpc.url, bundlerUrl: 'http://127.0.0.1:9/', policy, account: ACCOUNT, sessionKey, nonceLane: 0, depositsAfter: 800n, historyFromBlock: 800n, sessions: all },
+    { mode: 'live', chainId: 8453, signingChainIds: [8453], rpcUrl: rpc.url, bundlerUrl: 'http://127.0.0.1:9/', policy, account: ACCOUNT, sessionKey, nonceLane: 0, depositsAfter: 800n, historyFromBlock: 800n, sessions: all, intents },
     { waitBlock: async () => {} },
   )
 }
@@ -190,5 +190,23 @@ describe('a review never observes before the last operation', () => {
     expect(await e.review()).toMatchObject({ kind: 'observation-failed', code: 'EHG_OBSERVATION_STALE' })
     chain.head = 1160n
     expect((await e.review()).kind).toBe('decided')
+  })
+})
+
+describe('the owner pause reaches decide (US6, PAUSE-01)', () => {
+  test('the observation carries the intents the engine is given, read at every review', async () => {
+    let paused = true
+    const e = engine(sessions(), () => ({ paused, exitRequested: false }))
+    for (const id of [11n, 12n, 13n]) e.allowedTokenIds.push(id)
+    const a = await e.review()
+    if (a.kind !== 'decided') throw new Error(`observation failed: ${a.code}`)
+    expect(a.observation.intents.paused).toBe(true)
+    expect(a.record.decision.reason).toBe('DECIDE_PAUSED')
+    expect(a.op).toBeNull()
+    paused = false
+    const b = await e.review()
+    if (b.kind !== 'decided') throw new Error(`observation failed: ${b.code}`)
+    expect(b.observation.intents.paused).toBe(false)
+    expect(b.record.decision.reason).not.toBe('DECIDE_PAUSED')
   })
 })
