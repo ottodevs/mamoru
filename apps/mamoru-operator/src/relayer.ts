@@ -3,7 +3,7 @@ import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import { Lock } from './lock.ts'
 import { logErr } from './metrics.ts'
-import { NOT_AFTER_HEADER, SEND_VERDICT_HEADER } from './rpc-proxy.ts'
+import { NOT_AFTER_HEADER, SEND_VERDICT_HEADER, isLoopback } from './rpc-proxy.ts'
 
 /** Per-tx gas cap on Base (EIP-7825). */
 const TX_GAS_CAP = 16_777_216n
@@ -24,6 +24,18 @@ export class SendExpired extends Error {
     readonly maybeSent = false,
   ) {
     super(`${code}: ${maybeSent ? 'stopped after a provider was asked, may be out' : 'not sent'}, unix time ${now} is at or past the job's limit ${notAfter}`)
+  }
+}
+
+/**
+ * Whether a send verdict header from `rpcUrl` can be the local proxy's own: only on loopback. A relayer pointed at
+ * anything else (a provider directly) reads none, so no provider header can say "not sent".
+ */
+export function trustsVerdict(rpcUrl: string): boolean {
+  try {
+    return isLoopback(rpcUrl)
+  } catch {
+    return false
   }
 }
 
@@ -124,7 +136,7 @@ export class Relayer {
               timeout: 60_000,
               retryCount: 0,
               fetchOptions: { headers: { [NOT_AFTER_HEADER]: tx.notAfter.at.toString() } },
-              onFetchResponse: (res) => void (verdict = res.headers.get(SEND_VERDICT_HEADER)),
+              onFetchResponse: (res) => void (verdict = trustsVerdict(this.rpcUrl) ? res.headers.get(SEND_VERDICT_HEADER) : null),
             })
           : http(this.rpcUrl, { timeout: 60_000 }),
       })

@@ -50,33 +50,48 @@ to no further provider, first try or fallback, and says so in its own `x-mamoru-
 (`not-sent` or `maybe-sent`). No provider's header or error code can stand for it. Only `not-sent` fails the start
 as `RESERVE_SWAP_EXPIRED`. Any other failure after the hand-over may be out.
 
-What may be out is settled by hash, and only by positive evidence: the relayer gives the hash and nonce of each signed
-copy before it leaves, and they are kept on the op (`signedTxs`). Reconciliation reads their receipts. A successful
-receipt starts the account. A reverted one is `OWNER_TX_FAILED` with its hash and block (gas paid). A copy that no
-provider can find is never taken as "not landed": a provider can be behind or on another view, and closing on its
-silence could lose a start that ran. While such an op is open, reconciliation runs again on its own timer, with no app
-traffic needed: after 10 s, doubling up to 5 minutes. The timer is armed wherever the op is saved in that state, and
-again at startup.
+What may be out is settled only by chain evidence, never by a copy not found. The relayer gives the hash and nonce of
+each signed copy before it leaves; they are kept on the op (`signedTxs`) with the SafeTx's hash and Safe nonce.
+Reconciliation then decides as follows:
 
-An op still without a receipt 3 passes after its window (swap deadline + 10 minutes) is marked `needsReview` (saved,
-logged once as an `[alert]`). The timer then leaves it alone. It is listed in `GET /metrics` as
-`operator.ownerOpsNeedingReview` (count, Safe and op id), and in `GET /ops` with its `signedTxs`. The startup pass and
-every `GET /ops` pass keep reading its receipts, so it settles itself if one shows up. The app shows the owner "We're
-confirming your start…", with no prompt to approve again: a new approval while a copy may still land could act twice.
+- **A success receipt.** Every copy's receipt is read, and a success that executed the SafeTx wins: the account starts.
+- **A reverted copy.** It proves nothing alone, because another copy, or anyone relaying the calldata, may have
+  executed the SafeTx first. If the Safe nonce at the revert's block is still the SafeTx's, the start failed
+  (`OWNER_TX_FAILED`, gas paid). If the nonce moved, the Safe's `ExecutionSuccess(safeTxHash)` settles it as
+  confirmed, and its absence as `SAFE_NONCE_MOVED`.
+- **No receipt, swap deadline passed.** This is read at a block whose own timestamp is past the deadline. If the Safe
+  nonce is still the SafeTx's, the start never ran and never can (the router refuses after the deadline):
+  `RESERVE_SWAP_EXPIRED`, and the owner may start again. If the nonce moved, it is confirmed or `SAFE_NONCE_MOVED`, as
+  above.
+- **Anything that cannot be read** leaves the op open.
+
+While an op is open, reconciliation runs again on its own timer, with no app traffic needed: after 10 s, doubling up to
+5 minutes. The timer is armed wherever the op is saved in that state, and again at startup.
+
+From the first unknown receipt, the activation is shown in `GET /ops` as `confirming`. The app says "We're confirming
+your start…" and offers no new approval. The operator refuses a new activate prepare or submit for that account
+(`START_CONFIRMING`), so an old app or a direct call cannot start it twice.
+
+An op still open 3 timer passes after its window (swap deadline + 10 minutes) is marked `needsReview` (saved, logged
+once as an `[alert]`); other passes do not count. The timer then leaves it alone. It is listed in `GET /metrics` as
+`operator.ownerOpsNeedingReview` (count, Safe and op id) and in `GET /ops`. The startup pass and every `GET /ops` pass
+keep reading it, so it settles itself once the chain answers. Settled either way, it leaves the list and the
+confirming state.
 
 ### Settling a needsReview op by hand
 
-There is no admin action for this yet (follow-up ticket). Until there is one:
+This only happens when the chain could not be read for long: the receipts, the Safe nonce at a block, or the Safe's
+logs. There is no admin action for it yet (follow-up ticket).
 
-1. Take the op's `signedTxs` hashes from `GET /ops` (or `accounts.json`) and look each one up on Basescan.
-2. One of them succeeded: restart the operator, or wait for the next `GET /ops`, and the receipt settles it (the
-   engine starts). Do not mark it confirmed by hand: only the receipt path starts the engine with the op's grants. If no
-   provider serves that receipt for long, that is the case for the admin action of the follow-up ticket.
-3. One of them reverted: restart, or wait for the next `GET /ops`. It is recorded as `OWNER_TX_FAILED` on its own.
-4. None is on chain on Basescan, the deadline is past, and every relayer nonce they used is taken by another
-   transaction there: the start did not run, and cannot any more. Only then the coordinator closes it by hand: stop
-   the operator (it has one owner, see `AGENTS.md`), set the op's `code` to `RESERVE_SWAP_EXPIRED` and remove
-   `needsReview` in the operator's `accounts.json`, and start it again. The owner is then offered a new Start.
+1. Take the op's `signedTxs` hashes from `GET /ops` (or `accounts.json`) and look them up on Basescan, together with
+   the Safe's transactions after the time of the first one.
+2. Once the operator's provider answers again, restart the operator or wait for the next `GET /ops`. The rules above
+   settle it on their own. Do not mark a start confirmed by hand: only the settlement path starts the engine with the
+   op's grants.
+3. Only if Basescan shows the Safe nonce still at the SafeTx's past the deadline, and the provider still cannot be
+   read, the coordinator closes it by hand. Stop the operator (it has one owner, see `AGENTS.md`). In the operator's
+   `accounts.json`, set the op's `code` to `RESERVE_SWAP_EXPIRED` and remove `needsReview`. Start the operator again.
+   The owner is then offered a new Start.
 
 ## When the relayer still pays (#82)
 

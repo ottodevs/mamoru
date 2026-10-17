@@ -30,12 +30,14 @@ const SUBSIDY_REFUSED: Record<string, string> = {
 }
 
 /**
- * A start whose transaction may still be on chain and that the operator left for a person to confirm (otto/mamoru#15:
- * `needsReview` on the op, sent by operators from that change on). Approving again meanwhile could act twice: the
- * app waits and says so.
+ * A start whose transaction may still be on chain (otto/mamoru#15): the operator marks it `confirming` while its signed
+ * copies have no receipt, and `needsReview` once it is left for a person. Only while its receipt is unknown
+ * (OWNER_TX_ERROR): settled either way, it is an ordinary start again. Approving again meanwhile could act twice, and
+ * the operator refuses it (START_CONFIRMING): the app waits and says so.
  */
 export function confirmingStart(op: OpView): boolean {
-  return op.kind === 'activate' && op.state === 'failed' && (op as OpView & { needsReview?: boolean }).needsReview === true
+  const o = op as OpView & { confirming?: boolean; needsReview?: boolean }
+  return op.kind === 'activate' && op.state === 'failed' && op.code === 'OWNER_TX_ERROR' && (o.confirming === true || o.needsReview === true)
 }
 
 export const CONFIRMING_START = "We're confirming your start. This usually settles within minutes; if it takes longer, support will confirm it with you."

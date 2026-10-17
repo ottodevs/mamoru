@@ -62,7 +62,7 @@ export function notAfterOf(header: string | null): number | null {
 /** Calls whose answer decides nothing: a signed transaction is the same bytes whoever relays it. Any provider may take them. */
 const ANY_PROVIDER = new Set(['eth_sendRawTransaction'])
 
-function isLoopback(url: string): boolean {
+export function isLoopback(url: string): boolean {
   const h = new URL(url).hostname
   return h === '127.0.0.1' || h === 'localhost' || h === '[::1]'
 }

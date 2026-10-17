@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, setSystemTime, test } from 'bun:test'
 import { keccak256, parseTransaction, type Hex, type PublicClient } from 'viem'
-import { Relayer, SendExpired, SendUnsettled } from '../src/relayer.ts'
+import { Relayer, SendExpired, SendUnsettled, trustsVerdict } from '../src/relayer.ts'
 
 // A JSON-RPC stub that takes any raw transaction and remembers the nonce it carried.
 const nonces: number[] = []
@@ -248,4 +248,11 @@ describe('a job with a time limit is never broadcast past it', () => {
 
 
 
+
+  test('a verdict header is read only from the loopback proxy', () => {
+    expect(trustsVerdict('http://127.0.0.1:8545/c/relayer')).toBe(true)
+    expect(trustsVerdict('http://localhost:8545/')).toBe(true)
+    expect(trustsVerdict('https://base-mainnet.g.alchemy.com/v2/key')).toBe(false)
+    expect(trustsVerdict('not a url')).toBe(false)
+  })
 })

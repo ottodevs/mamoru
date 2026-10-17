@@ -40,7 +40,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n, eth: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, weiPerUsdc: 0n, twapTick: null as number | null, blockTime: 1_790_000_000n, notAfterSeen: [] as bigint[], expireInQueue: false, proxyStops: null as null | 'not-sent' | 'maybe-sent' | 'unsettled', receipts: new Map<string, TransactionReceipt>(), signedNonce: 9, lookupsDown: false, receiptFails: false, disk: false }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, weiPerUsdc: 0n, twapTick: null as number | null, blockTime: 1_790_000_000n, notAfterSeen: [] as bigint[], expireInQueue: false, proxyStops: null as null | 'not-sent' | 'maybe-sent' | 'unsettled', receipts: new Map<string, TransactionReceipt>(), signedNonce: 9, lookupsDown: false, receiptFails: false, disk: false, stateDown: false, safeLogs: [] as { topics: Hex[]; data: Hex; transactionHash: Hex; blockNumber: bigint }[] }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -55,13 +55,20 @@ function world(usdc: bigint) {
       if (r) return r
       throw Object.assign(new Error('no receipt'), { name: 'TransactionReceiptNotFoundError' })
     },
-    getLogs: async () => [],
+    getLogs: async () => {
+      if (knobs.stateDown) throw new Error('HTTP request failed. Status: 503')
+      return knobs.safeLogs
+    },
     getCode: async () => (chain.deployed ? '0x01' : undefined),
     getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? knobs.relayerWei : at.toLowerCase() === SAFE.toLowerCase() ? chain.eth : 0n),
     getTransactionCount: async ({ blockTag }: { blockTag?: string }) => (blockTag === 'pending' ? 5 + knobs.relayerPending : 5),
     readContract: async ({ address: at, functionName, blockNumber }: { address: string; functionName: string; blockNumber?: bigint }) => {
       if (functionName === 'slot0') return [1n << 96n, 0, 0, 0, 0, 0, true]
-      if (functionName === 'nonce') return chain.nonce
+      if (functionName === 'nonce') {
+        // `stateDown`: a node that cannot answer the Safe's state at a past block.
+        if (knobs.stateDown && blockNumber !== undefined) throw new Error('missing trie node')
+        return chain.nonce
+      }
       // A pool's observe([1800, 0]) at `twapTick` when set; otherwise the window is not covered.
       if (functionName === 'observe') {
         if (knobs.twapTick === null) throw new Error('execution reverted: OLD')
@@ -2259,12 +2266,12 @@ describe('the activation buys its own gas reserve', () => {
 
     test('an upstream error with no verdict from the proxy (a forged -32098) is maybe out, never expired', async () => {
       const { stored, hash } = await maybeOut('unsettled')
-      expect(stored.signedTxs).toEqual([{ hash, nonce: 9 }])
+      expect(stored.signedTxs).toEqual([{ hash, nonce: 9, at: expect.any(Number) }])
     })
 
     test('the hash is on the op before the hand-over, and a receipt 5000 blocks later starts the account', async () => {
       const { w, stored, hash } = await maybeOut()
-      expect(stored.signedTxs).toEqual([{ hash, nonce: 9 }])
+      expect(stored.signedTxs).toEqual([{ hash, nonce: 9, at: expect.any(Number) }])
       expect(stored.reserveDeadline).toBeString()
       // Nothing yet, in time, nonce not taken: it stays open.
       await w.op.reconcileOwner(w.state.accounts.k!)
@@ -2296,11 +2303,16 @@ describe('the activation buys its own gas reserve', () => {
       expect(stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
       expect(stored.passesAfterWindow).toBeUndefined()
       pastWindow(stored)
+      // Nothing the chain can be asked answers either: only then is it left for review.
+      w.knobs.stateDown = true
+      // Passes other than the timer's (GET /ops, startup) never count towards it.
+      for (let i = 0; i < 4; i++) await w.op.reconcileOwner(w.state.accounts.k!)
+      expect(stored.passesAfterWindow).toBeUndefined()
       const logged: string[] = []
       const error = console.error
       console.error = (...a: unknown[]) => void logged.push(a.map(String).join(' '))
       try {
-        for (let i = 0; i < 5; i++) await w.op.reconcileOwner(w.state.accounts.k!)
+        for (let i = 0; i < 5; i++) await w.op.reconcileOwner(w.state.accounts.k!, true)
       } finally {
         console.error = error
       }
@@ -2319,7 +2331,8 @@ describe('the activation buys its own gas reserve', () => {
       for (const via of ['ops', 'startup'] as const) {
         const { w, stored, hash } = await maybeOut()
         pastWindow(stored)
-        for (let i = 0; i < 3; i++) await w.op.reconcileOwner(w.state.accounts.k!)
+        w.knobs.stateDown = true
+        for (let i = 0; i < 3; i++) await w.op.reconcileOwner(w.state.accounts.k!, true)
         expect(stored.needsReview).toBe(true)
         w.knobs.receipts.set(hash.toLowerCase(), receipt(hash, true, 90_000n))
         ;(w.op as unknown as Follow).reconciled.clear()
@@ -2331,6 +2344,106 @@ describe('the activation buys its own gas reserve', () => {
         expect(w.op.ownerOpsNeedingReview().count).toBe(0)
         w.op.shutdown()
       }
+    })
+
+    /** The Safe's ExecutionSuccess of `safeTxHash`, in a transaction `hash` at `block`. */
+    const executionLog = (safeTxHash: Hex, hash: Hex, block: bigint) => ({ topics: [EXECUTION_SUCCESS], data: `${safeTxHash}${'0'.repeat(64)}` as Hex, transactionHash: hash, blockNumber: block })
+
+    test('a needsReview op that then reverts is an ordinary failed start: review cleared, out of /metrics, retry offered', async () => {
+      const { w, stored, hash } = await maybeOut()
+      pastWindow(stored)
+      w.knobs.stateDown = true
+      for (let i = 0; i < 3; i++) await w.op.reconcileOwner(w.state.accounts.k!, true)
+      expect(stored.needsReview).toBe(true)
+      w.knobs.stateDown = false
+      // Reverted with the Safe nonce still at the SafeTx's: it did not run.
+      w.knobs.receipts.set(hash.toLowerCase(), receipt(hash, false, 5_101n))
+      await w.op.reconcileOwner(w.state.accounts.k!)
+      expect(stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_FAILED', txHash: hash })
+      expect(stored.needsReview).toBeUndefined()
+      expect(stored.passesAfterWindow).toBeUndefined()
+      expect(w.op.ownerOpsNeedingReview().count).toBe(0)
+      expect(w.op.ops(ctx, null).ops.find((o) => o.opId === stored.opId)).not.toHaveProperty('confirming')
+    })
+
+    test('from the first unknown receipt the start is confirming: shown in /ops, and a new prepare or submit is refused', async () => {
+      const w = quiet(20_000_000n)
+      const second = await w.op.prepareActivate(ctx)
+      w.knobs.proxyStops = 'maybe-sent'
+      const first = await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+      expect(first).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      expect(w.op.ops(ctx, null).ops.find((o) => o.opId === first.opId)).toMatchObject({ confirming: true })
+      expect(await w.op.prepareActivate(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'START_CONFIRMING' })
+      // An approval prepared before (an old app, a direct call) is refused too, and nothing more is sent.
+      const sent = w.sent.length
+      expect(await w.op.submit(ctx, 'activate', sign(second)).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'START_CONFIRMING' })
+      expect(w.sent).toHaveLength(sent)
+    })
+
+    test('every copy is read and a success wins over a reverted one, whichever came first', async () => {
+      const { w, stored, hash } = await maybeOut()
+      const other = keccak256(stringToHex('copy-2'))
+      stored.signedTxs = [{ hash: other, nonce: 10 }, ...stored.signedTxs!]
+      // The second copy met the Safe nonce spent by the first and reverted.
+      w.chain.nonce = 1n
+      w.knobs.receipts.set(other.toLowerCase(), receipt(other, false, 5_102n))
+      w.knobs.receipts.set(hash.toLowerCase(), receipt(hash, true, 5_101n))
+      await w.op.reconcileOwner(w.state.accounts.k!)
+      expect(stored).toMatchObject({ state: 'confirmed', txHash: hash })
+      expect(w.state.accounts.k!.active).toBe(true)
+    })
+
+    test('a reverted copy after the Safe nonce moved: the SafeTx ran elsewhere (confirmed) or another transaction took the nonce', async () => {
+      for (const ranElsewhere of [true, false]) {
+        const { w, stored, hash } = await maybeOut()
+        w.chain.nonce = 1n
+        w.knobs.receipts.set(hash.toLowerCase(), receipt(hash, false, 5_101n))
+        const relayed = keccak256(stringToHex('third-party'))
+        if (ranElsewhere) w.knobs.safeLogs = [executionLog(stored.safeTxHash!, relayed, 5_100n)]
+        await w.op.reconcileOwner(w.state.accounts.k!)
+        if (ranElsewhere) {
+          expect(stored).toMatchObject({ state: 'confirmed', txHash: relayed, block: 5_100 })
+          expect(w.state.accounts.k!.active).toBe(true)
+        } else expect(stored).toMatchObject({ state: 'failed', code: 'SAFE_NONCE_MOVED' })
+      }
+    })
+
+    test('past the deadline with no receipt, the Safe nonce settles it: never ran (expired), ran (confirmed), or taken (moved)', async () => {
+      // Before the deadline (by the block's own time) nothing is concluded.
+      const early = await maybeOut()
+      await early.w.op.reconcileOwner(early.w.state.accounts.k!)
+      expect(early.stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+
+      const never = await maybeOut()
+      never.stored.reserveDeadline = String(never.w.knobs.blockTime - 1n)
+      await never.w.op.reconcileOwner(never.w.state.accounts.k!)
+      expect(never.stored).toMatchObject({ state: 'failed', code: 'RESERVE_SWAP_EXPIRED' })
+      expect(never.w.op.ops(ctx, null).ops.find((o) => o.opId === never.stored.opId)).not.toHaveProperty('confirming')
+      // The owner may start again.
+      expect(await never.w.op.prepareActivate(ctx)).toHaveProperty('prepareId')
+
+      const ran = await maybeOut()
+      ran.stored.reserveDeadline = String(ran.w.knobs.blockTime - 1n)
+      ran.w.chain.nonce = 1n
+      const relayed = keccak256(stringToHex('third-party'))
+      ran.w.knobs.safeLogs = [executionLog(ran.stored.safeTxHash!, relayed, 99n)]
+      await ran.w.op.reconcileOwner(ran.w.state.accounts.k!)
+      expect(ran.stored).toMatchObject({ state: 'confirmed', txHash: relayed })
+
+      const taken = await maybeOut()
+      taken.stored.reserveDeadline = String(taken.w.knobs.blockTime - 1n)
+      taken.w.chain.nonce = 1n
+      taken.w.knobs.safeLogs = [executionLog(keccak256(stringToHex('another SafeTx')), relayed, 99n)]
+      await taken.w.op.reconcileOwner(taken.w.state.accounts.k!)
+      expect(taken.stored).toMatchObject({ state: 'failed', code: 'SAFE_NONCE_MOVED' })
+
+      // Logs that cannot be read are no answer: open.
+      const blind = await maybeOut()
+      blind.stored.reserveDeadline = String(blind.w.knobs.blockTime - 1n)
+      blind.w.chain.nonce = 1n
+      blind.w.knobs.stateDown = true
+      await blind.w.op.reconcileOwner(blind.w.state.accounts.k!)
+      expect(blind.stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
     })
 
     test('a copy that lands after the first pass starts the account on the follow-up timer, with no app traffic', async () => {

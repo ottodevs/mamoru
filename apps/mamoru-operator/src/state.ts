@@ -17,7 +17,10 @@ export type StoredOp = OpView & {
   /** Owner activate that buys its gas reserve: the unix time its swap reverts after. */
   reserveDeadline?: string
   /** Every copy of a send with a time limit, kept before it left: reconciliation reads them by hash. */
-  signedTxs?: { hash: string; nonce: number }[]
+  signedTxs?: { hash: string; nonce: number; at?: number }[]
+  /** Owner activate that buys its gas reserve: its SafeTx hash and Safe nonce, asked of the chain when no receipt settles it. */
+  safeTxHash?: Hex
+  safeNonce?: string
   /** Passes past the swap deadline (+ margin) that found no receipt for any copy (settleSigned). */
   passesAfterWindow?: number
   /** No receipt long after the window: left for a person, shown in /ops and /metrics, still re-read at startup and on GET /ops. */

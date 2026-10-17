@@ -131,6 +131,8 @@ describe('the activation batch with the reserve swap', () => {
     expect(swap!.value).toBe(0n)
     const multicall = decodeFunctionData({ abi: swapRouter02Abi, data: swap!.data })
     expect(multicall.functionName).toBe('multicall')
+    // multicall(uint256 deadline, bytes[]): the router itself refuses the swap after the deadline.
+    expect(swap!.data.slice(0, 10)).toBe('0x5ae401dc')
     const [deadline, inner] = multicall.args as [bigint, `0x${string}`[]]
     expect(deadline).toBe(reserve.deadline)
     const exact = decodeFunctionData({ abi: swapRouter02Abi, data: inner[0]! })

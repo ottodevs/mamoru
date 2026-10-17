@@ -620,7 +620,10 @@ export class Operator {
   ops(ctx: AccountContext, after: string | null, includeFailedEngine = false): { ops: OpView[] } {
     const { acc } = this.account(ctx)
     this.reconcileSoon(acc)
-    const all = collapseFailed(includeFailedEngine ? acc.ops : acc.ops.filter((o) => !(o.opId.startsWith('eng-') && o.state === 'failed')))
+    // A start whose signed copies may still land is being confirmed: the app waits instead of asking for a new approval.
+    const all = collapseFailed(includeFailedEngine ? acc.ops : acc.ops.filter((o) => !(o.opId.startsWith('eng-') && o.state === 'failed'))).map((o) =>
+      unsettledActivation(o) ? { ...o, confirming: true } : o,
+    )
     if (!after) return { ops: all }
     const i = all.findIndex((o) => o.opId === after)
     if (i >= 0) return { ops: all.slice(i + 1) }
@@ -944,6 +947,7 @@ export class Operator {
     this.assertLive()
     const { acc, live } = this.account(ctx)
     if (acc.active) throw new HttpError(409, 'ALREADY_ACTIVE', 'the engine is already active for this account')
+    this.assertNoStartConfirming(acc)
     const r = await readSafe(this.client, live.safe)
     if (r.usdc > LIVE_CAP_USDC) throw depositOverCap(r.usdc)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
@@ -1352,6 +1356,7 @@ export class Operator {
       }
     }
     if (kind === 'activate') {
+      this.assertNoStartConfirming(acc)
       // Only a new activation or a renewal is subject to the failure budget; a proven owner's transfer or stop never is.
       this.assertBudget(acc)
       const usdc = await this.usdcOf(live.safe)
@@ -1410,6 +1415,17 @@ export class Operator {
   /** Whether this account may not start another activation today. Exit paths never ask. */
   private overBudget(acc: AccountState): boolean {
     return this.recentFailures(acc).length >= MAX_OWNER_FAILURES_PER_DAY
+  }
+
+  /**
+   * No second start while one may still land (a signed copy with no receipt yet): a new approval is signed for the
+   * next Safe nonce, so both could run and enable two grant sets of which only one is stored. Typed for the app.
+   */
+  private assertNoStartConfirming(acc: AccountState): void {
+    if (acc.ops.some(unsettledActivation)) {
+      this.reconcileSoon(acc)
+      throw new HttpError(409, 'START_CONFIRMING', 'a start of this account may still be landing: it is being confirmed, there is nothing to approve again')
+    }
   }
 
   private assertBudget(acc: AccountState): void {
@@ -1887,7 +1903,12 @@ export class Operator {
     if ((p.kind === 'stop' || p.kind === 'renew') && p.revokes) o.revokes = p.revokes
     if (p.kind === 'renew' && p.extend) o.extend = true
     if (p.meta) Object.assign(o, p.meta)
-    if (p.kind === 'activate' && p.reserveDeadline) o.reserveDeadline = p.reserveDeadline
+    if (p.kind === 'activate' && p.reserveDeadline) {
+      o.reserveDeadline = p.reserveDeadline
+      // What the chain is asked about this SafeTx when no receipt settles it (settleSigned).
+      o.safeTxHash = p.safeTxHash
+      o.safeNonce = p.tx.nonce.toString()
+    }
     this.store.save()
   }
 
@@ -2066,7 +2087,7 @@ export class Operator {
           // A send with a time limit keeps every signed copy before it leaves: reconciliation reads them by hash.
           if (notAfter) {
             const o = acc.ops.find((x) => x.opId === op.opId) as StoredOp | undefined
-            if (o) o.signedTxs = [...(o.signedTxs ?? []), { hash: signed.hash, nonce: signed.nonce }]
+            if (o) o.signedTxs = [...(o.signedTxs ?? []), { hash: signed.hash, nonce: signed.nonce, at: Date.now() }]
             this.store.save()
           }
           this.execTried.add(opKey(acc, op))
@@ -2166,15 +2187,24 @@ export class Operator {
   }
 
   /** Reads every owner op marked failed with an unknown receipt; a tx that executed becomes confirmed with its side effects. */
-  async reconcileOwner(acc: AccountState): Promise<void> {
+  /** `timer`: a pass of the follow-up timer, the only one that counts towards needsReview. */
+  async reconcileOwner(acc: AccountState, timer = false): Promise<void> {
     const safe = (acc.ctx.address as string).toLowerCase()
     for (const op of acc.ops.filter((o) => o.opId.startsWith('own-') && o.state === 'failed' && o.code === RECEIPT_UNKNOWN)) {
       let found: { hash: Hex; block: number; ok: boolean } | null = null
       let receipt: TransactionReceipt | null = null
       if (op.signedTxs?.length) {
-        // Every copy that left is known by hash: only a receipt for one of them settles the op (settleSigned).
-        receipt = await this.settleSigned(acc, op as StoredOp)
-        if (!receipt) continue
+        // Every copy that left is known by hash: only chain evidence settles the op (settleSigned).
+        const s = await this.settleSigned(acc, op as StoredOp, timer)
+        if (!s) continue
+        clearReview(op as StoredOp)
+        if ('close' in s) {
+          console.log(`[reconcile] ${op.opId} settled from the chain: ${s.close} (${s.why})`)
+          this.patchOp(acc, op.opId, { code: s.close })
+          continue
+        }
+        if ('receipt' in s) receipt = s.receipt
+        else found = s.found
       } else receipt = op.txHash ? await this.receiptOf(op.txHash as Hex) : null
       if (receipt) {
         const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe && l.topics[0] === EXECUTION_SUCCESS)
@@ -2258,7 +2288,7 @@ export class Operator {
       this.signedPasses++
       this.signedRunning = true
       const due = this.unsettledSigned()
-      Promise.all(due.map((acc) => this.lock(acc.accountKey).run(() => this.reconcileOwner(acc)).catch((e) => logErr(`[reconcile] ${acc.accountKey} follow-up:`, e))))
+      Promise.all(due.map((acc) => this.lock(acc.accountKey).run(() => this.reconcileOwner(acc, true)).catch((e) => logErr(`[reconcile] ${acc.accountKey} follow-up:`, e))))
         .finally(() => {
           this.signedRunning = false
           this.followSigned()
@@ -2269,27 +2299,81 @@ export class Operator {
   }
 
   /**
-   * The copies of an owner tx signed with a time limit, by hash. Only positive evidence settles it: a receipt for one of
-   * them (success or revert, gas paid either way). A copy not found is never taken as "not landed": a provider can be
-   * behind or on another view, and closing on its silence could lose a start that ran. An op still without a receipt
-   * after its window (swap deadline + margin) and SIGNED_REVIEW_PASSES more passes is marked `needsReview` (saved,
-   * logged once): the follow-up timer leaves it, /ops and /metrics show it, and the startup and GET /ops passes keep
-   * reading its receipts, so it still settles itself if one shows up (docs/gas-reserve.md has the manual steps).
+   * The copies of an owner tx signed with a time limit, settled only by chain evidence, never by a copy not found:
+   * - every copy's receipt is read, and a success that executed this SafeTx wins;
+   * - a reverted copy proves nothing alone (another copy or anyone relaying the calldata may have executed the SafeTx
+   *   first, and this one met its nonce spent): the SafeTx is looked up by its ExecutionSuccess(safeTxHash) once the
+   *   Safe nonce is past it; a revert with the Safe nonce still at the SafeTx's, at the revert's block, is a failure;
+   * - past the swap deadline, at a block whose own timestamp is past it: Safe nonce still at the SafeTx's means it never
+   *   ran and never can (the router refuses after the deadline): RESERVE_SWAP_EXPIRED; past it, ExecutionSuccess says
+   *   whether it ran (confirm) or another transaction took the nonce (SAFE_NONCE_MOVED).
+   * Anything that cannot be read leaves it open. An op still open SIGNED_REVIEW_PASSES timer passes after its window is
+   * marked needsReview (saved, logged once): the timer leaves it, /ops and /metrics show it, and the startup and
+   * GET /ops passes keep reading it (docs/gas-reserve.md has the manual steps).
    */
-  private async settleSigned(acc: AccountState, op: StoredOp): Promise<TransactionReceipt | null> {
+  private async settleSigned(
+    acc: AccountState,
+    op: StoredOp,
+    timer: boolean,
+  ): Promise<{ receipt: TransactionReceipt } | { found: { hash: Hex; block: number; ok: boolean } } | { close: string; why: string } | null> {
+    const safe = acc.ctx.address as Address
+    const executed = (r: TransactionReceipt) => r.status === 'success' && r.logs.some((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
+    const receipts: TransactionReceipt[] = []
     for (const { hash } of op.signedTxs ?? []) {
       const r = await lookupReceipt(this.client, hash as Hex)
-      if (r && r !== 'error') return r
+      if (r && r !== 'error') receipts.push(r)
     }
-    if (op.needsReview || !op.reserveDeadline) return null
+    const ok = receipts.find(executed)
+    if (ok) return { receipt: ok }
+    const safeNonce = op.safeNonce !== undefined ? BigInt(op.safeNonce) : null
+    try {
+      // A reverted copy: what did the SafeTx's nonce do by that block?
+      for (const r of receipts) {
+        if (safeNonce === null) return { receipt: r }
+        const nonce = await this.client.readContract({ address: safe, abi: safeAbi, functionName: 'nonce', blockNumber: r.blockNumber })
+        if (nonce === safeNonce) return { receipt: r }
+        const ran = await this.executionOf(op, safe, r.blockNumber)
+        if (ran) return { found: { ...ran, ok: true } }
+        return { close: 'SAFE_NONCE_MOVED', why: `copy ${r.transactionHash} reverted after another transaction took Safe nonce ${safeNonce}` }
+      }
+      // No receipt: past the deadline the chain itself says whether the SafeTx ran.
+      if (op.reserveDeadline && safeNonce !== null) {
+        const b = await this.client.getBlock()
+        if (b.number !== null && b.timestamp > BigInt(op.reserveDeadline)) {
+          const nonce = await this.client.readContract({ address: safe, abi: safeAbi, functionName: 'nonce', blockNumber: b.number })
+          if (nonce === safeNonce) return { close: RESERVE_SWAP_EXPIRED, why: `Safe nonce still ${safeNonce} at block ${b.number}, past the swap deadline` }
+          const ran = await this.executionOf(op, safe, b.number)
+          if (ran) return { found: { ...ran, ok: true } }
+          return { close: 'SAFE_NONCE_MOVED', why: `Safe nonce past ${safeNonce} at block ${b.number} with no ExecutionSuccess of this SafeTx` }
+        }
+      }
+    } catch (e) {
+      logErr(`[reconcile] ${op.opId} chain state unavailable, left open:`, e)
+    }
+    if (!timer || op.needsReview || !op.reserveDeadline) return null
     if ((await this.chainNow()) <= BigInt(op.reserveDeadline) + SELF_RESERVE_DEADLINE_MARGIN_SECONDS) return null
     op.passesAfterWindow = (op.passesAfterWindow ?? 0) + 1
     if (op.passesAfterWindow >= SIGNED_REVIEW_PASSES) {
       op.needsReview = true
-      logErr('[alert]', `${acc.accountKey} ${op.opId}: no receipt for its ${op.signedTxs?.length ?? 0} signed copies past the swap deadline; needs review (/ops, docs/gas-reserve.md)`)
+      logErr('[alert]', `${acc.accountKey} ${op.opId}: no chain evidence for its ${op.signedTxs?.length ?? 0} signed copies past the swap deadline; needs review (/ops, docs/gas-reserve.md)`)
     }
     this.store.save()
     return null
+  }
+
+  /**
+   * The ExecutionSuccess of this op's SafeTx on the Safe, up to `toBlock`, searched from before its first signed copy
+   * left (nobody had the calldata earlier). Throws when the logs cannot be read: no answer is not "it did not run".
+   */
+  private async executionOf(op: StoredOp, safe: Address, toBlock: bigint): Promise<{ hash: Hex; block: number } | null> {
+    if (!op.safeTxHash) throw new Error('no safeTxHash kept for this op')
+    const first = Math.min(...(op.signedTxs ?? []).map((t) => t.at ?? Date.parse(op.updatedAt)))
+    const at = await this.client.getBlock({ blockNumber: toBlock })
+    const back = (at.timestamp > BigInt(Math.floor(first / 1000)) ? (at.timestamp - BigInt(Math.floor(first / 1000))) / BLOCK_SECONDS : 0n) + ACTIVATION_SEARCH_MARGIN
+    const fromBlock = toBlock > back ? toBlock - back : 0n
+    const logs = await this.client.getLogs({ address: safe, fromBlock, toBlock })
+    const hit = logs.find((l) => l.topics[0] === EXECUTION_SUCCESS && l.transactionHash && (l.data ?? '0x').slice(0, 66).toLowerCase() === op.safeTxHash!.toLowerCase())
+    return hit ? { hash: hit.transactionHash!, block: Number(hit.blockNumber) } : null
   }
 
   /** GET /metrics: owner ops left for a person to settle (settleSigned), with the Safe and op id; hashes are in /ops. */
@@ -2696,6 +2780,17 @@ function retryAt(tries: number, execSent = false): number {
  * again; it fails as an unknown receipt and reconcileOwner settles it from the chain.
  */
 /** An owner op left with an unknown receipt and signed copies that may still land: reconciliation follows it. */
+/** An activation that may still land: the account is not offered (nor allowed) another start meanwhile. */
+function unsettledActivation(o: OpView): boolean {
+  return o.opId.startsWith('own-') && o.kind === 'activate' && o.state === 'failed' && o.code === RECEIPT_UNKNOWN && !!(o as StoredOp).signedTxs?.length
+}
+
+/** A settled op is no longer one to review. */
+function clearReview(op: StoredOp): void {
+  op.needsReview = undefined
+  op.passesAfterWindow = undefined
+}
+
 function unsettledSignedOp(o: OpView): boolean {
   return o.opId.startsWith('own-') && o.state === 'failed' && o.code === RECEIPT_UNKNOWN && !!(o as StoredOp).signedTxs?.length && !(o as StoredOp).needsReview
 }
