@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test'
-import { NOT_AFTER_HEADER, PIN_UPSTREAM_HEADER, SEND_VERDICT_HEADER, notAfterOf, startRpcProxy } from '../src/rpc-proxy.ts'
+import { NOT_AFTER_HEADER, SEND_VERDICT_HEADER, notAfterOf, startRpcProxy } from '../src/rpc-proxy.ts'
 
 // otto/mamoru#15: a send with a time limit is never handed to a provider once the limit is reached, on the first try or
 // on any fallback; the limit is the local proxy's alone and never reaches a provider.
@@ -98,27 +98,6 @@ describe('the proxy and a send with a time limit', () => {
       const r = await sendRaw(proxy.url, now() + 3600)
       expect(r.error?.code).toBe(-32098)
       expect(r.verdict).toBeNull()
-    } finally {
-      proxy.stop()
-    }
-  })
-
-  test('a pinned request is answered by the upstream alone: no fallback, and the pin stays in the proxy', async () => {
-    const up = upstream('busy')
-    const proxy = startRpcProxy(PRIMARY, { fetch: up.fetch, fallbacks: FALLBACKS, trusted: ['https://trusted.example/rpc'] })
-    try {
-      const res = await fetch(proxy.url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', [PIN_UPSTREAM_HEADER]: '1' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [`0x${'cd'.repeat(32)}`] }),
-      })
-      expect(((await res.json()) as { error?: { code: number } }).error?.code).toBe(429)
-      expect(new Set(up.calls.map((c) => c.url))).toEqual(new Set([PRIMARY]))
-      for (const c of up.calls) expect(Object.keys(c.headers).map((k) => k.toLowerCase())).not.toContain(PIN_UPSTREAM_HEADER)
-      // Unpinned, the same call falls back to the trusted provider.
-      up.calls.length = 0
-      await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'eth_getTransactionReceipt', params: [`0x${'cd'.repeat(32)}`] }) })
-      expect(up.calls.map((c) => c.url)).toContain('https://trusted.example/rpc')
     } finally {
       proxy.stop()
     }

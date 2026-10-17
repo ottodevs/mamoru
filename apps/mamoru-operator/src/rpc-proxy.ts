@@ -59,12 +59,6 @@ export function notAfterOf(header: string | null): number | null {
   return Number(header.trim())
 }
 
-/**
- * A request that must be answered by the upstream alone, no fallback (otto/mamoru#15: settling whether a signed
- * transaction landed reads one chain view). Only this proxy reads it; upstream requests never carry it.
- */
-export const PIN_UPSTREAM_HEADER = 'x-mamoru-pin-upstream'
-
 /** Calls whose answer decides nothing: a signed transaction is the same bytes whoever relays it. Any provider may take them. */
 const ANY_PROVIDER = new Set(['eth_sendRawTransaction'])
 
@@ -216,8 +210,6 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const metrics = opts.metrics
   /** The component that made the request being served: the path the proxy was called on (`/c/<component>`), for the counters only. */
   const caller = new AsyncLocalStorage<Component>()
-  /** Set for a request that carries PIN_UPSTREAM_HEADER: every provider call it makes goes to the upstream only. */
-  const pinned = new AsyncLocalStorage<boolean>()
   let id = 0
   const local = isLoopback(upstream)
   // Chunk getLogs for Alchemy (free tier: 10 blocks) or when MAMORU_LOG_RANGE is set; otherwise the range goes as is.
@@ -270,7 +262,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     let last: any = null
     /** Providers this signed transaction was handed to so far: from one on, it may be out. */
     let asked = 0
-    const base = pinned.getStore() ? [upstream] : ANY_PROVIDER.has(body?.method) ? providers : trusted
+    const base = ANY_PROVIDER.has(body?.method) ? providers : trusted
     // `start` rotates the list: a retry asks the next provider first.
     const list = [...base.slice(start % base.length), ...base.slice(0, start % base.length)]
     const all = [...list, ...list]
@@ -516,8 +508,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       const seen: Witnessed = new Map()
       const notAfter = notAfterOf(req.headers.get(NOT_AFTER_HEADER))
       const answer = () => (Array.isArray(payload) ? Promise.all(payload.map((m) => handle(m, seen, notAfter))) : handle(payload, seen, notAfter))
-      const pin = req.headers.get(PIN_UPSTREAM_HEADER) === '1'
-      const out = await pinned.run(pin, () => caller.run(componentOf(new URL(req.url).pathname), answer))
+      const out = await caller.run(componentOf(new URL(req.url).pathname), answer)
       // The verdict of a stopped send travels in a header set here and nowhere else; the worst of a batch counts.
       const found = (Array.isArray(out) ? out : [out]).map((r) => (r && typeof r === 'object' ? verdicts.get(r) : undefined)).filter(Boolean)
       const verdict = found.includes('maybe-sent') ? 'maybe-sent' : found[0]

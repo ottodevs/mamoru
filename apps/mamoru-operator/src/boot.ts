@@ -9,7 +9,7 @@ import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
 import { Operator } from './operator.ts'
 import { Relayer } from './relayer.ts'
-import { PIN_UPSTREAM_HEADER, startRpcProxy } from './rpc-proxy.ts'
+import { startRpcProxy } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
 import { StateStore, loadOrCreateKey } from './state.ts'
 
@@ -46,8 +46,6 @@ export async function bootOperator(o: BootOptions) {
   o = { ...o, rpcUrl: via('engine') }
   const client = createPublicClient({ transport: http(via('operator'), { batch: true, timeout: 60_000 }) })
   const watchClient = createPublicClient({ transport: http(via('watcher'), { batch: true, timeout: 60_000 }) })
-  // Settling whether a signed copy landed reads one chain view: the upstream alone, no fallback, no batching, no retry.
-  const settleClient = createPublicClient({ transport: http(via('settle'), { timeout: 60_000, retryCount: 0, fetchOptions: { headers: { [PIN_UPSTREAM_HEADER]: '1' } } }) })
   const chainId = await client.getChainId()
   const live = chainId === BASE_CHAIN_ID && process.env.MAMORU_LIVE === '1'
   const named = POLICIES[o.policyId ?? 'conservador-live-v2']
@@ -71,7 +69,6 @@ export async function bootOperator(o: BootOptions) {
       maxWaitBlocks: o.maxWaitBlocks ?? 150,
       rpcBudget: rpcBudget(rpcMetrics),
       watchClient,
-      settleClient,
     },
     client,
     relayer,

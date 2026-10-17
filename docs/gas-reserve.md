@@ -50,19 +50,33 @@ to no further provider, first try or fallback, and says so in its own `x-mamoru-
 (`not-sent` or `maybe-sent`). No provider's header or error code can stand for it. Only `not-sent` fails the start
 as `RESERVE_SWAP_EXPIRED`. Any other failure after the hand-over may be out.
 
-What may be out is settled by hash: the relayer gives the hash and nonce of each signed copy before it leaves, and
-they are kept on the op (`signedTxs`). Reconciliation reads their receipts for as long as one can land, not a range of
-blocks. A successful receipt starts the account. A reverted one is `OWNER_TX_FAILED` with its hash and block (gas
-paid). Any doubt keeps it open (`OWNER_TX_ERROR`): a lookup that errors, a node that knows the transaction (mined or
-pending) but serves no receipt yet. It is closed only when every copy is definitively not on chain (a "no such
-receipt" and a "no such transaction" answer for each), and either the relayer nonce of every copy is taken at a
-block 12 deep (`OWNER_TX_DROPPED`) or the deadline is 10 minutes past (`RESERVE_SWAP_EXPIRED`). Even then a second
-pass at least 2 minutes later has to see the same, and that first sighting is saved on every change. A pass reads one
-chain view: the upstream alone, pinned in the proxy (`x-mamoru-pin-upstream`, local only). It reads the head once and
-the relayer nonce 12 blocks below it, by block hash. The not-founds count only if, afterwards, the head's block number
-still carries the same hash there. While such an op is open, reconciliation runs again on its own timer, with no app
+What may be out is settled by hash, and only by positive evidence: the relayer gives the hash and nonce of each signed
+copy before it leaves, and they are kept on the op (`signedTxs`). Reconciliation reads their receipts. A successful
+receipt starts the account. A reverted one is `OWNER_TX_FAILED` with its hash and block (gas paid). A copy that no
+provider can find is never taken as "not landed": a provider can be behind or on another view, and closing on its
+silence could lose a start that ran. While such an op is open, reconciliation runs again on its own timer, with no app
 traffic needed: after 10 s, doubling up to 5 minutes. The timer is armed wherever the op is saved in that state, and
 again at startup.
+
+An op still without a receipt 3 passes after its window (swap deadline + 10 minutes) is marked `needsReview` (saved,
+logged once as an `[alert]`). The timer then leaves it alone. It is listed in `GET /metrics` as
+`operator.ownerOpsNeedingReview` (count, Safe and op id), and in `GET /ops` with its `signedTxs`. The startup pass and
+every `GET /ops` pass keep reading its receipts, so it settles itself if one shows up. The app shows the owner "We're
+confirming your start…", with no prompt to approve again: a new approval while a copy may still land could act twice.
+
+### Settling a needsReview op by hand
+
+There is no admin action for this yet (follow-up ticket). Until there is one:
+
+1. Take the op's `signedTxs` hashes from `GET /ops` (or `accounts.json`) and look each one up on Basescan.
+2. One of them succeeded: restart the operator, or wait for the next `GET /ops`, and the receipt settles it (the
+   engine starts). Do not mark it confirmed by hand: only the receipt path starts the engine with the op's grants. If no
+   provider serves that receipt for long, that is the case for the admin action of the follow-up ticket.
+3. One of them reverted: restart, or wait for the next `GET /ops`. It is recorded as `OWNER_TX_FAILED` on its own.
+4. None is on chain on Basescan, the deadline is past, and every relayer nonce they used is taken by another
+   transaction there: the start did not run, and cannot any more. Only then the coordinator closes it by hand: stop
+   the operator (it has one owner, see `AGENTS.md`), set the op's `code` to `RESERVE_SWAP_EXPIRED` and remove
+   `needsReview` in the operator's `accounts.json`, and start it again. The owner is then offered a new Start.
 
 ## When the relayer still pays (#82)
 

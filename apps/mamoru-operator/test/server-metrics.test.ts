@@ -31,6 +31,7 @@ function fakeOperator(): Operator {
     relayer: { address: '0x1111111111111111111111111111111111111111' },
     relayerBalance: async () => ({ wei: '812345678901234567', cachedAgeMs: 12 }),
     subsidySummary: () => ({ paid24hWei: '0', budgetWei: '5000000000000000' }),
+    ownerOpsNeedingReview: () => ({ count: 0, ops: [] }),
     accountsSummary: () => ({ known: 14, active: 9, armed: 1 }),
     engineHealthSnapshot: () => [
       { account: '3f9a7c21', lastReviewAt: '2026-10-02T09:14:40.000Z', lastDecisionCode: 'DECIDE_HOLD', consecutiveErrors: 0, lastErrorClass: null, lastErrorAt: null, reviewsLastHour: 58, errorsLastHour: 0 },
@@ -145,6 +146,7 @@ describe('GET /metrics payload', () => {
       expect(body.operator.policyId).toBe('conservador-live-v2')
       expect(body.operator.relayer.address).toBe('0x1111111111111111111111111111111111111111')
       expect(body.operator.accounts).toEqual({ known: 14, active: 9, armed: 1 })
+      expect((body.operator as unknown as { ownerOpsNeedingReview: unknown }).ownerOpsNeedingReview).toEqual({ count: 0, ops: [] })
       expect(body.rpc.cumulative['base-mainnet.g.alchemy.com#1']!.eth_call!.requests).toBe(1)
       expect(Array.isArray(body.rpc.last48h)).toBe(true)
       expect(body.engines.length).toBe(2)
@@ -181,6 +183,7 @@ describe('GET /metrics never carries injected secret-shaped free text (finding #
       relayer: { address: '0x1111111111111111111111111111111111111111' },
       relayerBalance: async () => ({ wei: '1', cachedAgeMs: 1 }),
       subsidySummary: () => ({ paid24hWei: '0', budgetWei: '5000000000000000' }),
+      ownerOpsNeedingReview: () => ({ count: 0, ops: [] }),
       accountsSummary: () => ({ known: 4, active: 4, armed: 0 }),
       engineHealthSnapshot: () => nasty.map((_, i) => tracker.snapshot(`account-${i}`)),
     } as unknown as Operator
