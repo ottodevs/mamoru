@@ -39,6 +39,8 @@ export type ArmedActivation = {
   sentAt?: number
   /** Wei of gas reserve the signed batch buys into the Safe at least (USDC -> ETH swap, otto/mamoru#15); absent: none. */
   reserveWei?: string
+  /** Unix time after which that swap reverts: the approval is dropped near it rather than sent. */
+  reserveDeadline?: string
 }
 
 export type AccountState = {

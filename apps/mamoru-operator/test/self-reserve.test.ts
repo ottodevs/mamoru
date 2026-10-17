@@ -6,43 +6,79 @@ import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { activationBatch, gasReserveCalls } from '@mamoru/account/live'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import {
+  SELF_RESERVE_DEADLINE_MARGIN_SECONDS,
   SELF_RESERVE_MAX_USDC,
   SELF_RESERVE_MIN_USDC,
-  SELF_RESERVE_PROBE_USDC,
-  selfReserveAmountIn,
+  SELF_RESERVE_TWAP_TOLERANCE_BPS,
+  meanTick,
+  reserveExpired,
   selfReserveConfirmed,
   selfReservePlan,
+  usdcForWeiAtTick,
 } from '../src/self-reserve.ts'
 
 /** Policy reserve 0.0003 ETH + operator margin 0.0002 ETH. */
 const T = 500_000_000_000_000n
-/** 2,700 USD/ETH: wei for one USDC. */
+/** Spot at 2,700 USD/ETH: wei for one USDC. */
 const RATE = 370_370_370_370_370n
+/** pool:WETH/USDC/500 (WETH is token0) at ~2,699.73 USD/ETH. */
+const TICK = -197_311
+const rateAt = (usdPerEth: number) => 10n ** 18n / BigInt(usdPerEth)
 
-describe('the USDC a self-funded reserve converts', () => {
-  test('the reserve at the quoted rate plus 10%, rounded up to a cent', () => {
-    // 0.0005 ETH at 2,700 = 1.35 USDC; +10% = 1.485; up to the cent: 1.49.
-    expect(selfReserveAmountIn(T, SELF_RESERVE_PROBE_USDC, RATE)).toBe(1_490_000n)
-    // Never under the headroom: what it buys at the probed rate covers the reserve by at least 10%.
-    const a = selfReserveAmountIn(T, SELF_RESERVE_PROBE_USDC, RATE)!
-    expect((a * RATE) / SELF_RESERVE_PROBE_USDC).toBeGreaterThanOrEqual((T * 11n) / 10n)
-    expect(selfReserveAmountIn(1n, SELF_RESERVE_PROBE_USDC, RATE)).toBe(10_000n)
+describe('the reserve priced at the pool TWAP', () => {
+  test('mean tick of observe([1800, 0]) rounds towards negative infinity', () => {
+    expect(meanTick([0n, BigInt(TICK) * 1800n], 1800)).toBe(TICK)
+    expect(meanTick([0n, BigInt(TICK) * 1800n + 1n], 1800)).toBe(TICK)
+    expect(meanTick([0n, BigInt(TICK) * 1800n - 1n], 1800)).toBe(TICK - 1)
+    expect(meanTick([1800n, 3600n], 1800)).toBe(1)
   })
 
-  test('no rate, no amount', () => {
-    expect(selfReserveAmountIn(T, SELF_RESERVE_PROBE_USDC, 0n)).toBeNull()
-    expect(selfReserveAmountIn(0n, SELF_RESERVE_PROBE_USDC, RATE)).toBeNull()
+  test('USDC worth the reserve at a tick, either token order, rounded up', () => {
+    const fair = usdcForWeiAtTick(T, TICK, true)
+    // 0.0005 ETH at 2,699.73 = 1.349866 USDC.
+    expect(fair).toBe(1_349_866n)
+    // The same pool with the tokens the other way round: the tick is negated.
+    const flipped = usdcForWeiAtTick(T, -TICK, false)
+    expect(flipped >= fair - 1n && flipped <= fair + 1n).toBe(true)
   })
 })
 
 describe('self-funded reserve or the relayer subsidy', () => {
-  const plan = (over: Partial<{ usdc: bigint; eth: bigint; probeOut: bigint | null }> = {}) =>
-    selfReservePlan({ usdc: over.usdc ?? 20_000_000n, eth: over.eth ?? 0n, target: T, probeOut: over.probeOut === undefined ? RATE : over.probeOut })
+  const FAIR = usdcForWeiAtTick(T, TICK, true)
+  const plan = (over: Partial<{ usdc: bigint; eth: bigint; probeOut: bigint | null; fairCost: bigint | null; feeBps: bigint }> = {}) =>
+    selfReservePlan({
+      usdc: over.usdc ?? 20_000_000n,
+      eth: over.eth ?? 0n,
+      target: T,
+      probeOut: over.probeOut === undefined ? RATE : over.probeOut,
+      fairCost: over.fairCost === undefined ? FAIR : over.fairCost,
+      feeBps: over.feeBps ?? 5n,
+    })
 
-  test('a Safe with enough USDC buys exactly the reserve it lacks as its minimum', () => {
-    expect(plan()).toEqual({ amountIn: 1_490_000n, minOut: T })
-    // A partial reserve: only what is missing, for less USDC.
-    expect(plan({ eth: T / 2n })).toEqual({ amountIn: 750_000n, minOut: T / 2n })
+  test('normal: the USDC spent is the TWAP cost plus 1% and the pool fee, never more; the minimum is the reserve', () => {
+    expect(SELF_RESERVE_TWAP_TOLERANCE_BPS).toBe(100n)
+    expect(plan()).toEqual({ amountIn: (FAIR * 10_105n) / 10_000n, minOut: T })
+    expect((FAIR * 10_105n) / 10_000n).toBe(1_364_039n)
+    // The 0.30% pool pays its own fee on top, and nothing else.
+    expect(plan({ feeBps: 30n })).toEqual({ amountIn: (FAIR * 10_130n) / 10_000n, minOut: T })
+    // A partial reserve: priced on what is missing.
+    const half = usdcForWeiAtTick(T / 2n, TICK, true)
+    expect(plan({ eth: T / 2n, fairCost: half })).toEqual({ amountIn: (half * 10_105n) / 10_000n, minOut: T / 2n })
+  })
+
+  test('a spot that makes the reserve dearer than the TWAP by more than 1% buys nothing; a cheaper spot is fine', () => {
+    expect(plan({ probeOut: rateAt(2725) })).toMatchObject({ minOut: T })
+    expect(plan({ probeOut: rateAt(2730) })).toEqual({ skip: 'TWAP_DIVERGENCE' })
+    // The review's case: the spot asks ~3 USDC for what the TWAP prices at ~1.35.
+    expect(plan({ probeOut: rateAt(6000) })).toEqual({ skip: 'TWAP_DIVERGENCE' })
+    expect(plan({ probeOut: rateAt(2000) })).toEqual({ amountIn: 1_364_039n, minOut: T })
+  })
+
+  test('no TWAP (observe failed) or no quote: no swap', () => {
+    expect(plan({ fairCost: null })).toEqual({ skip: 'NO_TWAP' })
+    expect(plan({ fairCost: 0n })).toEqual({ skip: 'NO_TWAP' })
+    expect(plan({ probeOut: null })).toEqual({ skip: 'NO_QUOTE' })
+    expect(plan({ probeOut: 0n })).toEqual({ skip: 'NO_QUOTE' })
   })
 
   test('the minimum USDC is the subsidy minimum: one unit under it keeps the relayer path', () => {
@@ -51,20 +87,25 @@ describe('self-funded reserve or the relayer subsidy', () => {
     expect(plan({ usdc: SELF_RESERVE_MIN_USDC - 1n })).toEqual({ skip: 'BELOW_MINIMUM' })
   })
 
-  test('nothing to buy, nothing deposited yet, no quote, or too dear: no swap in the batch', () => {
+  test('nothing to buy, nothing deposited yet, or too dear: no swap in the batch', () => {
     expect(plan({ eth: T })).toEqual({ skip: 'FUNDED' })
     expect(plan({ usdc: 0n })).toEqual({ skip: 'NO_DEPOSIT' })
-    expect(plan({ probeOut: null })).toEqual({ skip: 'NO_QUOTE' })
-    expect(plan({ probeOut: 0n })).toEqual({ skip: 'NO_QUOTE' })
-    // At 6,000 USD/ETH the reserve would cost 3.30 USDC, over the 3 USDC cap.
+    // At 6,000 USD/ETH on both clocks the reserve would cost 3.03 USDC, over the 3 USDC cap.
     expect(SELF_RESERVE_MAX_USDC).toBe(3_000_000n)
-    expect(plan({ probeOut: 166_666_666_666_666n })).toEqual({ skip: 'OVER_MAX' })
+    expect(plan({ probeOut: rateAt(6000), fairCost: 3_000_000n })).toEqual({ skip: 'OVER_MAX' })
   })
 
-  test('the exact quote must clear the minimum by half the headroom', () => {
-    expect(selfReserveConfirmed(T, (T * 105n) / 100n)).toBe(true)
-    expect(selfReserveConfirmed(T, (T * 105n) / 100n - 1n)).toBe(false)
-    expect(selfReserveConfirmed(T, T)).toBe(false)
+  test('the exact quote must give at least the minimum', () => {
+    expect(selfReserveConfirmed(T, T)).toBe(true)
+    expect(selfReserveConfirmed(T, T - 1n)).toBe(false)
+  })
+
+  test('a swap is never sent within ten minutes of its deadline, or after it', () => {
+    const d = 1_790_604_800n
+    expect(SELF_RESERVE_DEADLINE_MARGIN_SECONDS).toBe(600n)
+    expect(reserveExpired(d, d - 601n)).toBe(false)
+    expect(reserveExpired(d, d - 600n)).toBe(true)
+    expect(reserveExpired(d, d + 1n)).toBe(true)
   })
 })
 

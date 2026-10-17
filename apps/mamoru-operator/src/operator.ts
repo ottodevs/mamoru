@@ -38,7 +38,7 @@ import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { USDC_POOLS, amountsForLiquidity, inUsdc, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
-import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, selfReserveConfirmed, selfReservePlan } from './self-reserve.ts'
+import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, meanTick, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
 import { SUBSIDY_ALERT_SHARE, noteExit, paidToday, subsidyDecision, subsidyMessage, subsidyPerDayFromEnv, type SubsidyDecision } from './subsidy.ts'
 import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type EngineHealthSnapshot } from './metrics.ts'
@@ -51,6 +51,8 @@ export type AccountsSummary = { known: number; active: number; armed: number }
 const RELAYER_BALANCE_CACHE_MS = 60_000
 
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
+/** An activation whose gas reserve swap reached its deadline before it could be sent: the owner approves again. */
+const RESERVE_SWAP_EXPIRED = 'RESERVE_SWAP_EXPIRED'
 /** An owner op whose receipt poll failed after the tx was sent: the tx may still have landed. */
 const RECEIPT_UNKNOWN = 'OWNER_TX_ERROR'
 /** Armed activations retry this many times across watcher passes before failing visibly. */
@@ -239,6 +241,8 @@ type Prepared = {
   meta?: { amountUsdc: string; asset?: string; to: Hex }
   /** activate: wei of gas reserve the batch's own USDC -> ETH swap pays into the Safe at least (self-reserve.ts). */
   reserveWei?: string
+  /** activate: the unix time after which that swap reverts; nothing is simulated or sent near it (reserveExpired). */
+  reserveDeadline?: string
 }
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
@@ -933,9 +937,9 @@ export class Operator {
     const { sessionKey, caps, stored, batch } = await this.approval(acc, live, policy, r, undefined, self?.reserve)
     const invested = r.usdc - (self?.reserve.amountIn ?? 0n)
     const reserveLine = self
-      ? [`Convert ${fmtUsdc(self.reserve.amountIn)} USDC to at least ${fmtUnits(self.reserve.amountOutMinimum, 18)} ETH on ${self.route}, kept in your Safe as its gas reserve`]
+      ? [`Convert ${fmtUnitsExact(self.reserve.amountIn, 6)} USDC to at least ${fmtUnits(self.reserve.amountOutMinimum, 18)} ETH on ${self.route}, kept in your Safe as its gas reserve`]
       : []
-    const extra = { grants: stored, ...(self ? { reserveWei: self.reserve.amountOutMinimum.toString() } : {}) }
+    const extra = { grants: stored, ...(self ? { reserveWei: self.reserve.amountOutMinimum.toString(), reserveDeadline: self.reserve.deadline.toString() } : {}) }
     const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!)} ${b.preference / 100}%`)
     if (pools.length > 1) {
       const summary = [
@@ -978,12 +982,24 @@ export class Operator {
         logErr(`[activate] ${safe} no USDC -> ETH quote for the gas reserve:`, e)
       }
     }
-    const plan = selfReservePlan({ usdc: r.usdc, eth: r.eth, target, probeOut: probe?.quoted ?? null })
+    // The pool the spot quote chose, read for its TWAP: no answer (window not covered, provider down) means no swap.
+    const pool = probe ? RECEIVE_ROUTES.ETH.pools.find((x) => entry(x).fee === probe!.receive.fee) : undefined
+    let fairCost: bigint | null = null
+    if (probe && pool) {
+      try {
+        const [cumulatives] = await this.client.readContract({ address: address(pool), abi: poolObserveAbi, functionName: 'observe', args: [[SELF_RESERVE_TWAP_SECONDS, 0]], blockNumber: r.block })
+        const tick = meanTick([cumulatives[0]!, cumulatives[1]!], SELF_RESERVE_TWAP_SECONDS)
+        fairCost = usdcForWeiAtTick(target - r.eth, tick, entry(pool).token0 === 'WETH')
+      } catch (e) {
+        logErr(`[activate] ${safe} no TWAP for the gas reserve swap:`, e)
+      }
+    }
+    const fee = probe?.receive.fee ?? 0
+    const plan = selfReservePlan({ usdc: r.usdc, eth: r.eth, target, probeOut: probe?.quoted ?? null, fairCost, feeBps: BigInt(fee / 100) })
     if ('skip' in plan) {
-      if (plan.skip !== 'FUNDED') console.log(`[activate] ${safe} gas reserve not bought in the batch: ${plan.skip}`)
+      if (plan.skip !== 'FUNDED') console.log(`[activate] ${safe} gas reserve not bought in the batch: ${plan.skip}${fairCost !== null ? ` (TWAP cost ${fairCost} USDC units)` : ''}`)
       return null
     }
-    const fee = probe!.receive.fee
     try {
       const quoted = await quoteExactInputSingle(this.client, { tokenIn: address('USDC'), tokenOut: address('WETH'), fee, amountIn: plan.amountIn, blockNumber: r.block })
       if (!selfReserveConfirmed(plan.minOut, quoted)) {
@@ -1556,7 +1572,7 @@ export class Operator {
     const op = this.newOp(acc, 'activate')
     op.code = 'ARMED'
     this.stash(acc, op, p)
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.reserveWei ? { reserveWei: p.reserveWei } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.reserveWei ? { reserveWei: p.reserveWei, reserveDeadline: p.reserveDeadline } : {}) }
     this.store.save()
     console.log(`[armed] ${acc.accountKey} ${op.opId} armed for ${acc.ctx.address} at Safe nonce ${p.tx.nonce}`)
     return { ...op }
@@ -1572,7 +1588,7 @@ export class Operator {
     const current = acc.ops.find((o) => o.opId === op.opId)
     if (current?.txHash) return this.failOwner(acc, op, 'OWNER_TX_ERROR')
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.reserveWei ? { reserveWei: p.reserveWei } : {}), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.reserveWei ? { reserveWei: p.reserveWei, reserveDeadline: p.reserveDeadline } : {}), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
     this.armHold.delete(acc.accountKey)
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
     this.execTried.delete(opKey(acc, op))
@@ -1752,6 +1768,12 @@ export class Operator {
       const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
       if (deployed && nonce !== a.tx.nonce) return this.nonceMoved(acc, a, nonce)
     }
+    // Its reserve swap at or near its deadline can never run: an approval never sent is dropped, and the owner is asked
+    // for a new one (a failed start). One sent before goes on to executeOwner, which leaves it to reconciliation.
+    if (!tried && a.reserveDeadline && reserveExpired(BigInt(a.reserveDeadline), BigInt(Math.floor(Date.now() / 1000)))) {
+      console.log(`[armed] ${acc.accountKey} ${a.opId} gas reserve swap past its deadline: dropped, the owner approves again`)
+      return this.disarm(acc, RESERVE_SWAP_EXPIRED)
+    }
     // Nothing in the Safe: the look was only for the nonce of an approval already sent once.
     if (usdc === 0n) return
     // A failed attempt is not tried again at once: the wait grows with the tries.
@@ -1784,7 +1806,7 @@ export class Operator {
     // cleared when the account starts, or when the attempt ends in a failure that is final.
     this.patchOp(acc, a.opId, { code: undefined })
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
-    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants, reserveWei: a.reserveWei }
+    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants, reserveWei: a.reserveWei, reserveDeadline: a.reserveDeadline }
     const op = acc.ops.find((o) => o.opId === a.opId)!
     if (a.execSent) this.retried.add(opKey(acc, op))
     try {
@@ -1882,6 +1904,17 @@ export class Operator {
     return true
   }
 
+  /** Unix seconds: the later of this clock and the provider's head, so neither one lagging lets a stale swap through. */
+  private async chainNow(): Promise<bigint> {
+    const wall = BigInt(Math.floor(Date.now() / 1000))
+    try {
+      const { timestamp } = await this.client.getBlock()
+      return timestamp > wall ? timestamp : wall
+    } catch {
+      return wall
+    }
+  }
+
   private async executeOwner(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView): Promise<void> {
     const safe = live.safe
     // Under the account lock, right before anything is sent: what was true at submit may not be any more.
@@ -1889,6 +1922,17 @@ export class Operator {
       await this.settleRenewals(acc)
       const no = this.renewRefusal(acc, op.opId)
       if (no) return this.failOwner(acc, op, no.code)
+    }
+    // A reserve swap at or near its deadline reverts: nothing is simulated or sent for it, and the owner approves again.
+    // A copy handed to a provider earlier may have landed before the deadline: that is reconciliation's to find.
+    if (p.kind === 'activate' && p.reserveDeadline && reserveExpired(BigInt(p.reserveDeadline), await this.chainNow())) {
+      logErr(`[owner] ${op.opId} gas reserve swap past its deadline, not sent:`, { deadline: p.reserveDeadline })
+      if (this.retried.has(opKey(acc, op)) || this.execTried.has(opKey(acc, op))) {
+        this.failOwner(acc, op, RECEIPT_UNKNOWN, { txHash: undefined })
+        this.reconcileSoon(acc)
+        return
+      }
+      return this.failOwner(acc, op, RESERVE_SWAP_EXPIRED)
     }
     // Before any relayer transaction: signature, guards and a simulation of everything about to be sent.
     const refusal = await this.preflight(acc, live, p, signature)
@@ -2573,6 +2617,8 @@ type ReceiveAsset = Exclude<WithdrawAsset, 'USDC'>
  * JPYC slot: official JPYC is not on Base (the "JPYC" at 0xaf94…2fb3 on Base is unofficial and never used),
  * so the yen payout is Dephaser JPYT, USDC-collateralized at an oracle USD/JPY rate.
  */
+const poolObserveAbi = parseAbi(['function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128s)'])
+
 const RECEIVE_ROUTES: Record<ReceiveAsset, { tokenOut: string; receive: LiveReceive['asset']; pools: string[] }> = {
   EURC: { tokenOut: 'EURC', receive: 'EURC', pools: ['pool:EURC/USDC/500'] },
   ETH: { tokenOut: 'WETH', receive: 'ETH', pools: ['pool:WETH/USDC/500', 'pool:WETH/USDC/3000'] },
@@ -2603,6 +2649,13 @@ function fmtUnits(v: bigint, decimals: number): string {
 function fmtUsdc(v: bigint): string {
   const s = v.toString().padStart(7, '0')
   return `${s.slice(0, -6)}.${s.slice(-6, -4)}`
+}
+
+/** Every decimal that is there, none that is not: an amount the owner signs to spend, shown exactly. */
+function fmtUnitsExact(v: bigint, decimals: number): string {
+  const s = v.toString().padStart(decimals + 1, '0')
+  const frac = s.slice(-decimals).replace(/0+$/, '')
+  return frac ? `${s.slice(0, -decimals)}.${frac}` : s.slice(0, -decimals)
 }
 
 /** Cents rounded up: an amount the owner must reach is never understated. */

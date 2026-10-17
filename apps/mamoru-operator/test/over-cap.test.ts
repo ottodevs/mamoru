@@ -38,14 +38,14 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n, eth: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, weiPerUsdc: 0n }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, weiPerUsdc: 0n, twapTick: null as number | null, blockTime: 1_790_000_000n }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
   const factory = deployCall(liveAccountFromContext(ctx))
   const client = {
     getBlockNumber: async () => 100n,
-    getBlock: async () => ({ number: 100n, timestamp: 1_790_000_000n }),
+    getBlock: async () => ({ number: 100n, timestamp: knobs.blockTime }),
     getTransactionReceipt: async () => {
       throw new Error('no receipt')
     },
@@ -56,6 +56,11 @@ function world(usdc: bigint) {
     readContract: async ({ address: at, functionName, blockNumber }: { address: string; functionName: string; blockNumber?: bigint }) => {
       if (functionName === 'slot0') return [1n << 96n, 0, 0, 0, 0, 0, true]
       if (functionName === 'nonce') return chain.nonce
+      // A pool's observe([1800, 0]) at `twapTick` when set; otherwise the window is not covered.
+      if (functionName === 'observe') {
+        if (knobs.twapTick === null) throw new Error('execution reverted: OLD')
+        return [[0n, BigInt(knobs.twapTick) * 1800n], [0n, 0n]]
+      }
       if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : 0n
       if (functionName === 'isPermissionEnabled') {
         if (blockNumber !== undefined && knobs.noHistory) throw new Error('missing trie node: historical state not available')
@@ -2056,8 +2061,10 @@ describe('the activation buys its own gas reserve', () => {
   const quiet = (u: bigint) => {
     const w = world(u)
     ;(w.op as unknown as { startLoop(a: AccountState): void }).startLoop = () => {}
-    // 2,700 USD/ETH
+    // Spot 2,700 USD/ETH; TWAP ~2,699.73 (pool:WETH/USDC/500, WETH token0); the chain's clock is now.
     w.knobs.weiPerUsdc = 370_370_370_370_370n
+    w.knobs.twapTick = -197_311
+    w.knobs.blockTime = BigInt(Math.floor(Date.now() / 1000))
     return w
   }
   const TARGET = POLICIES['conservador-live-v2']!.gasReserveWei + 200_000_000_000_000n
@@ -2070,8 +2077,9 @@ describe('the activation buys its own gas reserve', () => {
   test('20 USDC: the summary names the USDC converted, the signed batch swaps it, the relayer sends no reserve', async () => {
     const w = quiet(20_000_000n)
     const tx = await w.op.prepareActivate(ctx)
-    expect(tx.summary).toContain('Convert 1.49 USDC to at least 0.0005 ETH on Uniswap v3 USDC/WETH 0.05% + unwrap, kept in your Safe as its gas reserve')
-    expect(tx.summary.some((l) => l.includes('your 18.51 USDC'))).toBe(true)
+    // 1.349866 USDC at the TWAP, +1% tolerance and the 0.05% fee: 1.364039, shown to the unit.
+    expect(tx.summary).toContain('Convert 1.364039 USDC to at least 0.0005 ETH on Uniswap v3 USDC/WETH 0.05% + unwrap, kept in your Safe as its gas reserve')
+    expect(tx.summary.some((l) => l.includes('your 18.63 USDC'))).toBe(true)
     expect(await w.op.submit(ctx, 'activate', sign(tx))).toMatchObject({ state: 'confirmed' })
     expect(topUps(w)).toHaveLength(0)
     expect(execs(w)).toHaveLength(1)
@@ -2138,5 +2146,58 @@ describe('the activation buys its own gas reserve', () => {
     await (early.op as unknown as Armed).fireArmed(early.state.accounts.k!, 20_000_000n)
     expect(topUps(early)).toMatchObject([{ value: TARGET }])
     expect(early.state.accounts.k!.subsidies).toHaveLength(1)
+  })
+
+  test('a spot away from the TWAP, or a pool that cannot answer observe: no swap, the relayer path', async () => {
+    for (const set of [(w: ReturnType<typeof world>) => (w.knobs.weiPerUsdc = 10n ** 18n / 2730n), (w: ReturnType<typeof world>) => (w.knobs.twapTick = null)]) {
+      const w = quiet(20_000_000n)
+      set(w)
+      const t = await w.op.prepareActivate(ctx)
+      expect(t.summary.some((l) => l.startsWith('Convert'))).toBe(false)
+      await w.op.submit(ctx, 'activate', sign(t))
+      expect(topUps(w)).toMatchObject([{ value: TARGET }])
+      expect(swaps(execs(w)[0]!.data)).toBe(false)
+    }
+  })
+
+  test('an armed self-funded approval near its swap deadline is never broadcast: dropped, the owner approves again', async () => {
+    const w = quiet(20_000_000n)
+    w.knobs.relayerWei = 0n
+    expect(await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))).toMatchObject({ code: 'ARMED' })
+    const acc = w.state.accounts.k!
+    expect(BigInt(acc.armed!.reserveDeadline!)).toBe(w.knobs.blockTime + 7n * 86_400n)
+    // Funded again a week later, five minutes before the deadline.
+    acc.armed!.reserveDeadline = String(Math.floor(Date.now() / 1000) + 300)
+    const sims = w.simulated.length
+    w.knobs.relayerWei = 10n ** 18n
+    ;(w.op as unknown as { relayerBalanceCache: null }).relayerBalanceCache = null
+    await (w.op as unknown as Armed).fireArmed(acc, 20_000_000n)
+    expect(w.sent).toHaveLength(0)
+    expect(w.simulated).toHaveLength(sims)
+    expect(acc.armed).toBeUndefined()
+    expect(acc.active).toBe(false)
+    expect(w.op.ops(ctx, null).ops.at(-1)).toMatchObject({ kind: 'activate', state: 'failed', code: 'RESERVE_SWAP_EXPIRED' })
+  })
+
+  test('one already handed to a provider is not sent again past its deadline: reconciliation reads whether it landed', async () => {
+    const w = quiet(20_000_000n)
+    w.knobs.relayerWei = 0n
+    await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+    const acc = w.state.accounts.k!
+    acc.armed = { ...acc.armed!, execSent: true, sentAt: Date.now() - 8 * 86_400_000, reserveDeadline: String(Math.floor(Date.now() / 1000) - 60) }
+    w.knobs.relayerWei = 10n ** 18n
+    ;(w.op as unknown as { relayerBalanceCache: null }).relayerBalanceCache = null
+    await (w.op as unknown as Armed).fireArmed(acc, 20_000_000n)
+    expect(w.sent).toHaveLength(0)
+    expect(w.op.ops(ctx, null).ops.at(-1)).toMatchObject({ kind: 'activate', state: 'failed', code: 'OWNER_TX_ERROR' })
+  })
+
+  test('a direct start whose deadline is already near is refused before anything is simulated or sent', async () => {
+    const w = quiet(20_000_000n)
+    const t = await w.op.prepareActivate(ctx)
+    // The provider's head runs ahead of the clock by a week: the later of the two counts.
+    w.knobs.blockTime += 7n * 86_400n
+    expect(await w.op.submit(ctx, 'activate', sign(t))).toMatchObject({ state: 'failed', code: 'RESERVE_SWAP_EXPIRED' })
+    expect(w.sent).toHaveLength(0)
   })
 })
