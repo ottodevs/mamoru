@@ -235,6 +235,19 @@ describe('allocate (conservador-live-v2, target weights)', () => {
     expect(a.buckets.map((b) => b.code)).toEqual(['STRATEGY_PREFERENCE', 'STRATEGY_PREFERENCE_DEVIATION', 'STRATEGY_PREFERENCE'])
   })
 
+  test('two buckets with excess idle volatile: the larger sale takes the op, whichever comes first in order', () => {
+    const cb = (usd: bigint) => token0InToken1(usd * USDC, POOLS[1]!.sqrtPriceX96)
+    const weth = (usd: bigint) => token1InToken0(usd * USDC, POOLS[2]!.sqrtPriceX96)
+    const cbFirst = allocate(obs({ balances: { USDC: 1n * USDC, cbBTC: cb(20n), WETH: weth(6n) } }), V2, false)
+    expect(cbFirst.proposal).toMatchObject({ kind: 'enter_swap', grant: 'convert-any:pool:USDC/cbBTC/500', tokenIn: 'cbBTC' })
+    expect(cbFirst.buckets.map((b) => b.code)).toEqual(['STRATEGY_PREFERENCE', 'STRATEGY_PREFERENCE_DEVIATION', 'STRATEGY_PREFERENCE'])
+    const wethFirst = allocate(obs({ balances: { USDC: 1n * USDC, cbBTC: cb(6n), WETH: weth(20n) } }), V2, false)
+    expect(wethFirst.proposal).toMatchObject({ kind: 'enter_swap', grant: 'convert-any:pool:WETH/USDC/3000', tokenIn: 'WETH' })
+    expect(wethFirst.buckets.map((b) => b.code)).toEqual(['STRATEGY_PREFERENCE', 'STRATEGY_PREFERENCE', 'STRATEGY_PREFERENCE_DEVIATION'])
+    // Both sales are still pending mints of their buckets: the one that waits keeps its volatile for later.
+    expect(wethFirst.pendingMint.map((m) => m.grant)).toEqual(expect.arrayContaining(['convert-any:pool:USDC/cbBTC/500', 'convert-any:pool:WETH/USDC/3000']))
+  })
+
   test('with no excess idle volatile the most under-weight bucket still acts first', () => {
     const a = allocate(obs({ balances: { USDC: 2n * USDC } }), V2, false)
     expect(a.proposal).toMatchObject({ kind: 'enter_swap', pool: 'pool:USDC/USDT/100', tokenIn: 'USDC' })
