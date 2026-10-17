@@ -1,6 +1,6 @@
-import type { Hex0x, OpView, OwnerTxToSign, TransferPlan, TransferRequest } from '@mamoru/domain'
+import type { Hex0x, OpView, OwnerSignature, OwnerTxToSign, TransferPlan, TransferRequest } from '@mamoru/domain'
 import { useQueryClient } from '@tanstack/react-query'
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { ApiRequestError, useApi, type ApiClient } from '../api/client.ts'
 import { queryKeys } from '../api/queries.ts'
 import { PasskeyError } from './passkey.ts'
@@ -33,7 +33,7 @@ export function errorText(e: unknown): string {
 }
 
 export type OwnerKind = 'activate' | 'transfer' | 'stop' | 'renew'
-type Prepared = { tx: OwnerTxToSign; reduce?: TransferPlan['reduce']; receive?: TransferPlan['receive'] }
+type Prepared = { tx: OwnerTxToSign; reduce?: TransferPlan['reduce']; receive?: TransferPlan['receive']; divergence?: TransferPlan['divergence'] }
 
 const SUBMIT: Record<OwnerKind, (api: ApiClient) => ApiClient['activate']> = {
   activate: (api) => api.activate,
@@ -41,6 +41,8 @@ const SUBMIT: Record<OwnerKind, (api: ApiClient) => ApiClient['activate']> = {
   stop: (api) => api.stop,
   renew: (api) => api.renew,
 }
+
+const toPrepared = (plan: TransferPlan): Prepared => ({ tx: plan.ownerTx, reduce: plan.reduce, receive: plan.receive, divergence: plan.divergence })
 
 /**
  * One owner action: the API prepares a Safe transaction, the passkey signs its safeTxHash, the API submits it.
@@ -53,6 +55,9 @@ export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind) 
   const [busy, setBusy] = useState<null | 'preparing' | 'signing'>(null)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<OpView | null>(null)
+  // otto/mamoru#155: kept so a PRICE_DIVERGENCE_STALE on submit can re-prepare with the same inputs and show
+  // the fresh warning, instead of just failing. Irrelevant, and never read, for any kind but 'transfer'.
+  const lastTransferBody = useRef<TransferRequest | undefined>(undefined)
 
   const prepare = useCallback(
     async (body?: TransferRequest) => {
@@ -63,8 +68,8 @@ export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind) 
         let p: Prepared
         if (kind === 'transfer') {
           if (!body) throw new Error('Enter an address and an amount.')
-          const plan = await api.transferPrepare(accountKey, body)
-          p = { tx: plan.ownerTx, reduce: plan.reduce, receive: plan.receive }
+          lastTransferBody.current = body
+          p = toPrepared(await api.transferPrepare(accountKey, body))
         } else {
           p = { tx: kind === 'activate' ? await api.activatePrepare(accountKey) : kind === 'renew' ? await api.renewPrepare(accountKey) : await api.stopPrepare(accountKey) }
         }
@@ -80,32 +85,48 @@ export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind) 
     [accountKey, api, kind],
   )
 
-  const approve = useCallback(async () => {
-    if (!accountKey || !prepared) return null
-    if (Date.parse(prepared.tx.expiresAt) < Date.now()) {
-      setPrepared(null)
-      setError('That approval expired. Tap again to refresh it.')
-      return null
-    }
-    setError(null)
-    setBusy('signing')
-    try {
-      const sig = await signOwnerTx(prepared.tx, storedCredential(accountKey))
-      const op = await SUBMIT[kind](api)(accountKey, sig)
-      setPrepared(null)
-      setResult(op)
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: queryKeys.funding(accountKey) }),
-        qc.invalidateQueries({ queryKey: queryKeys.ops(accountKey) }),
-      ])
-      return op
-    } catch (e) {
-      setError(errorText(e))
-      return null
-    } finally {
-      setBusy(null)
-    }
-  }, [accountKey, api, kind, prepared, qc])
+  /** `accept`: PriceDivergenceWarning.acceptDivergence, present only when the owner ticked the warning box. */
+  const approve = useCallback(
+    async (accept?: Pick<OwnerSignature, 'acceptDivergence'>) => {
+      if (!accountKey || !prepared) return null
+      if (Date.parse(prepared.tx.expiresAt) < Date.now()) {
+        setPrepared(null)
+        setError('That approval expired. Tap again to refresh it.')
+        return null
+      }
+      setError(null)
+      setBusy('signing')
+      try {
+        const sig = await signOwnerTx(prepared.tx, storedCredential(accountKey))
+        const op = await SUBMIT[kind](api)(accountKey, { ...sig, ...accept })
+        setPrepared(null)
+        setResult(op)
+        await Promise.all([
+          qc.invalidateQueries({ queryKey: queryKeys.funding(accountKey) }),
+          qc.invalidateQueries({ queryKey: queryKeys.ops(accountKey) }),
+        ])
+        return op
+      } catch (e) {
+        // otto/mamoru#155: the accepted quote went stale between prepare and this submit. Never refused and
+        // never executed at a worse price than what was shown — re-prepare the same request and let the UI
+        // show the fresh numbers. The owner's tick does not carry over: it was for the old quoteId.
+        if (kind === 'transfer' && e instanceof ApiRequestError && e.code === 'PRICE_DIVERGENCE_STALE' && lastTransferBody.current) {
+          try {
+            setPrepared(toPrepared(await api.transferPrepare(accountKey, lastTransferBody.current)))
+            return null
+          } catch (e2) {
+            setError(errorText(e2))
+            return null
+          }
+        }
+        setError(errorText(e))
+        return null
+      } finally {
+        setBusy(null)
+      }
+    },
+    [accountKey, api, kind, prepared, qc],
+  )
 
   const reset = useCallback(() => {
     setPrepared(null)
