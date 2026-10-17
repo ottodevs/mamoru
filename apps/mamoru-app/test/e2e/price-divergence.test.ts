@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { PriceDivergenceLeg, PriceDivergenceWarning } from '@mamoru/domain'
+import { httpClient } from '../../src/web/api/client.ts'
 import { fixtureClient, fixtureDivergence } from '../../src/web/fixtures/client.ts'
 import {
   acceptancePayload,
@@ -7,11 +8,12 @@ import {
   divergenceCheckboxLabel,
   divergenceLines,
   divergenceWhy,
+  isValidPriceDivergence,
   transferConfirmDisabled,
   waitLabel,
   withdrawAnywayLabel,
 } from '../../src/web/lib/price-divergence.ts'
-import { recoverFromStaleDivergence } from '../../src/web/lib/owner-flow.ts'
+import { recoverFromStaleDivergence, withAcceptance } from '../../src/web/lib/owner-flow.ts'
 
 const swapBack: PriceDivergenceWarning = {
   code: 'PRICE_DIVERGENCE',
@@ -46,8 +48,10 @@ describe('price divergence: worst-case numbers, phrased by what the leg is', () 
   })
   test('payout: the recipient gets less, the sentence says so directly', () => {
     const lines = divergenceLines('en', payout)
-    // shortfall 12000 = 0.012 EURC exactly: ceiled up to "0.02", never truncated down to "0.01".
-    expect(lines).toEqual(['The recipient would receive at least 0.909 EURC instead of about 0.921 EURC. That is 0.02 EURC less (1.30%).'])
+    // shortfall 12000 = 0.012 EURC exactly: ceiled up to "0.02", never truncated down to "0.01". The percentage
+    // is independently derived and ceiled too: true 12000/921000 = 130.29bps, which ceils to 131 (1.31%), not
+    // the operator's own (floored) shortfallBps: 130 (1.30%) on this fixture — see legShortfall's describe block.
+    expect(lines).toEqual(['The recipient would receive at least 0.909 EURC instead of about 0.921 EURC. That is 0.02 EURC less (1.31%).'])
     expect(lines[0]).toStartWith('The recipient')
   })
   test('both legs in one withdrawal: one sentence per leg, each in its own voice', () => {
@@ -100,8 +104,12 @@ describe('price divergence: the shortfall rounds UP, never down, never understat
     expect(divergenceLines('en', payout)[0]).toContain('0.02 EURC less')
   })
   test('an exact value at the display precision is left unchanged by ceiling (there is no remainder to round away)', () => {
-    const exact: PriceDivergenceWarning = { ...swapBack, legs: [{ ...swapBack.legs[0]!, shortfall: '20000' }] } // 0.02 USDC exactly
+    // fairAmount - minAmount = 20000 (0.02 USDC) exactly, so the derived shortfall is exact at 2dp already.
+    // Overriding only the (now-advisory) `shortfall` field would no longer do this: it is derived from
+    // fairAmount/minAmount first, see legShortfall.
+    const exact: PriceDivergenceWarning = { ...swapBack, legs: [{ ...swapBack.legs[0]!, minAmount: '980000', shortfall: '20000', shortfallBps: 200 }] }
     expect(divergenceLines('en', exact)[0]).toContain('0.02 USDC less')
+    expect(divergenceLines('en', exact)[0]).toContain('(2%)')
   })
   test('received amounts ("at least", "instead of about") still round DOWN: 0.999999999999999999 ETH never reads as 1', () => {
     const leg: PriceDivergenceWarning = {
@@ -134,9 +142,11 @@ describe('price divergence: precision never flattens a positive shortfall to zer
     expect(line).not.toContain('0.01 ETH less')
   })
   test('a shortfall exact within 4 decimals shows that exact figure, not a coarse 2-decimal ceiling', () => {
+    // fairAmount - minAmount = 1900000000000000 wei = 0.0019 ETH exactly: internally consistent (unlike relying
+    // on a bare `shortfall` field, which this suite no longer trusts — see legShortfall).
     const smallEth: PriceDivergenceWarning = {
       code: 'PRICE_DIVERGENCE',
-      legs: [{ kind: 'payout', token: 'ETH', decimals: 18, fairAmount: '1000000000000000', quotedAmount: '998100000000000', minAmount: '998100000000000', shortfall: '1900000000000000', shortfallBps: 19 }],
+      legs: [{ kind: 'payout', token: 'ETH', decimals: 18, fairAmount: '1000000000000000000', quotedAmount: '998100000000000000', minAmount: '998100000000000000', shortfall: '1900000000000000', shortfallBps: 19 }],
       shortfallUsdc: '1',
       quoteId: 'q',
     }
@@ -181,6 +191,9 @@ describe('price divergence: a "less than" figure is used only when the true loss
     expect(shortfallLine(8, '10000')).toContain('0.0001 TOK less')
   })
   test('property-style: across a spread of raw shortfalls and token decimals, the displayed loss is never below the true one, and "<" only appears when the true loss is strictly below the stated threshold', () => {
+    // The AMOUNT and the PERCENTAGE each independently have their own "less than" tier (otto/mamoru#155,
+    // legShortfall / formatShortfallPercent), so a sentence can show "< 0.01%" while the amount is an exact,
+    // non-"<" figure. This only checks the amount's own "That is <…>" clause, not the whole sentence.
     for (const decimals of [0, 2, 6, 8, 18]) {
       // A spread from 1 base unit up to a few whole units, scaled so every `decimals` gets dust-sized, cent-sized
       // and whole-unit-sized raw amounts in the same sweep.
@@ -188,8 +201,8 @@ describe('price divergence: a "less than" figure is used only when the true loss
       const step = top / 300n + 1n
       for (let raw = 1n; raw <= top; raw += step) {
         const displayed = shortfallLine(decimals, raw.toString())
-        if (displayed.includes('< ')) {
-          const match = displayed.match(/< ([\d.,]+) TOK less/)
+        if (displayed.includes('That is < ')) {
+          const match = displayed.match(/That is < ([\d.,]+) TOK less/)
           expect(match).not.toBeNull()
           const threshold = toBaseUnits(`< ${match![1]}`, decimals)
           expect(raw < threshold).toBe(true) // "less than" must be literally true
@@ -199,7 +212,187 @@ describe('price divergence: a "less than" figure is used only when the true loss
           const shown = toBaseUnits(match![1]!, decimals)
           expect(shown >= raw).toBe(true) // never understated
         }
+        // The percentage has the same rule, independently: "< 0.01%" only when the true ratio is under 1 bp.
+        // fair = raw + buffer exactly, matching shortfallLeg's own construction.
+        const fair = raw + 10n ** BigInt(decimals + 2)
+        const pctMatch = displayed.match(/\(([^)]+)\)\.$/)
+        expect(pctMatch).not.toBeNull()
+        const pct = pctMatch![1]!
+        const trueBpsBelowOne = raw * 10_000n < fair
+        expect(pct === '< 0.01%').toBe(trueBpsBelowOne)
       }
+    }
+  })
+})
+
+describe('price divergence: the operator is never the sole source of shortfall/shortfallBps (security review on 1c54819)', () => {
+  test('an operator that understates shortfall (e.g. computed from the quote, not the minimum) is corrected to the worse, true figure', () => {
+    // fairAmount - minAmount = 25000 (0.025), but the operator reports a much smaller shortfall (the obvious
+    // mistake the contract warns against: computing against quotedAmount instead of minAmount).
+    const understated: PriceDivergenceWarning = {
+      code: 'PRICE_DIVERGENCE',
+      legs: [{ kind: 'payout', token: 'TOK', decimals: 6, fairAmount: '1000000', quotedAmount: '990000', minAmount: '975000', shortfall: '10000', shortfallBps: 100 }],
+      shortfallUsdc: '1',
+      quoteId: 'q',
+    }
+    expect(divergenceLines('en', understated)[0]).toContain('0.03 TOK less (2.50%)')
+  })
+  test('an operator that reports a garbled (non-numeric) shortfall never throws; the computed value is used', () => {
+    const garbled: PriceDivergenceWarning = {
+      code: 'PRICE_DIVERGENCE',
+      legs: [{ kind: 'payout', token: 'TOK', decimals: 6, fairAmount: '1000000', quotedAmount: '990000', minAmount: '975000', shortfall: 'not-a-number', shortfallBps: -5 }],
+      shortfallUsdc: '1',
+      quoteId: 'q',
+    }
+    expect(() => divergenceLines('en', garbled)).not.toThrow()
+    expect(divergenceLines('en', garbled)[0]).toContain('0.03 TOK less (2.50%)')
+  })
+  test('a dust true loss the operator reports as shortfallBps: 0 (the same flatten-to-zero bug 1c54819 fixed for amounts) shows "< 0.01%", not "0%"', () => {
+    // true ratio: 1 / 1e8 = 0.0001 bp, far under 1bp. The test fixture pattern mirrors the one gpt-6-sol pass-2
+    // flagged for dust amounts (shortfall: '1').
+    const dustBps: PriceDivergenceWarning = {
+      code: 'PRICE_DIVERGENCE',
+      legs: [{ kind: 'payout', token: 'TOK', decimals: 8, fairAmount: '100000000', quotedAmount: '99999999', minAmount: '99999999', shortfall: '1', shortfallBps: 0 }],
+      shortfallUsdc: '1',
+      quoteId: 'q',
+    }
+    expect(divergenceLines('en', dustBps)[0]).toContain('< 0.01%')
+    expect(divergenceLines('en', dustBps)[0]).not.toContain('(0%)')
+  })
+  test('a floored operator percentage (2.4999% reported as 2.49%) is corrected by ceiling the true ratio to 2.50%', () => {
+    const floored: PriceDivergenceWarning = {
+      code: 'PRICE_DIVERGENCE',
+      legs: [{ kind: 'payout', token: 'TOK', decimals: 8, fairAmount: '100000000', quotedAmount: '97500100', minAmount: '97500100', shortfall: '2499900', shortfallBps: 249 }],
+      shortfallUsdc: '1',
+      quoteId: 'q',
+    }
+    expect(divergenceLines('en', floored)[0]).toContain('(2.50%)')
+    expect(divergenceLines('en', floored)[0]).not.toContain('(2.49%)')
+  })
+  test('an operator-reported shortfall larger than fairAmount (garbled or malicious) is clamped to the whole amount, not shown as a loss bigger than what is at stake', () => {
+    const overshot: PriceDivergenceWarning = {
+      code: 'PRICE_DIVERGENCE',
+      legs: [{ kind: 'payout', token: 'TOK', decimals: 6, fairAmount: '1000000', quotedAmount: '990000', minAmount: '975000', shortfall: '5000000', shortfallBps: 500 }],
+      shortfallUsdc: '1',
+      quoteId: 'q',
+    }
+    const line = divergenceLines('en', overshot)[0]!
+    expect(line).toContain('1 TOK less (100%)')
+    expect(line).not.toContain('5 TOK less')
+  })
+})
+
+describe('owner-flow: withAcceptance never spreads an arbitrary `accept` argument into the submit body (security review on 1c54819)', () => {
+  test('a real acceptance copies only its own field', () => {
+    const sig = { prepareId: 'p', authenticatorData: 'a', clientDataJSON: 'c', signature: 's' }
+    expect(withAcceptance(sig, { acceptDivergence: { quoteId: 'q1' } })).toEqual({ ...sig, acceptDivergence: { quoteId: 'q1' } })
+  })
+  test('no acceptance: the signature passes through untouched', () => {
+    const sig = { prepareId: 'p', authenticatorData: 'a', clientDataJSON: 'c', signature: 's' }
+    expect(withAcceptance(sig)).toEqual(sig)
+    expect(withAcceptance(sig, {})).toEqual(sig)
+  })
+  test("a React SyntheticEvent-shaped object (what Review's button would pass if onClick ever forwarded its argument) never reaches the submit body", () => {
+    const sig = { prepareId: 'p', authenticatorData: 'a', clientDataJSON: 'c', signature: 's' }
+    const fakeSyntheticEvent = {
+      type: 'click',
+      target: {},
+      currentTarget: {},
+      nativeEvent: { type: 'click' },
+      bubbles: true,
+      cancelable: true,
+      preventDefault: () => {},
+      stopPropagation: () => {},
+      isDefaultPrevented: () => false,
+      isPropagationStopped: () => false,
+      persist: () => {},
+    }
+    const body = withAcceptance(sig, fakeSyntheticEvent as never)
+    expect(body).toEqual(sig)
+    expect('target' in body).toBe(false)
+    expect('nativeEvent' in body).toBe(false)
+    expect('preventDefault' in body).toBe(false)
+    expect('acceptDivergence' in body).toBe(false)
+    // JSON-serializable: an actual SyntheticEvent has circular refs (fiber pointers) that would throw here if
+    // any part of it had leaked through.
+    expect(() => JSON.stringify(body)).not.toThrow()
+  })
+})
+
+describe('client boundary: a malformed divergence fails the whole prepare closed (security review on 1c54819)', () => {
+  const validLeg = { kind: 'payout' as const, token: 'TOK', decimals: 6, fairAmount: '1000000', quotedAmount: '990000', minAmount: '975000', shortfall: '25000', shortfallBps: 250 }
+  const validWarning: PriceDivergenceWarning = { code: 'PRICE_DIVERGENCE', legs: [validLeg], shortfallUsdc: '25000', quoteId: 'q' }
+
+  test('a well-formed warning validates', () => {
+    expect(isValidPriceDivergence(validWarning)).toBe(true)
+  })
+  test('no legs at all: invalid (never "I understand ." with nothing to understand)', () => {
+    expect(isValidPriceDivergence({ ...validWarning, legs: [] })).toBe(false)
+  })
+  test('minAmount above fairAmount: invalid', () => {
+    expect(isValidPriceDivergence({ ...validWarning, legs: [{ ...validLeg, minAmount: '2000000' }] })).toBe(false)
+  })
+  test('negative minAmount (not an unsigned integer string): invalid', () => {
+    expect(isValidPriceDivergence({ ...validWarning, legs: [{ ...validLeg, minAmount: '-5' }] })).toBe(false)
+  })
+  test('a non-integer amount string: invalid', () => {
+    expect(isValidPriceDivergence({ ...validWarning, legs: [{ ...validLeg, fairAmount: '1.5' }] })).toBe(false)
+  })
+  test('decimals out of the 0..36 range, or non-integer: invalid', () => {
+    expect(isValidPriceDivergence({ ...validWarning, legs: [{ ...validLeg, decimals: 37 }] })).toBe(false)
+    expect(isValidPriceDivergence({ ...validWarning, legs: [{ ...validLeg, decimals: -1 }] })).toBe(false)
+    expect(isValidPriceDivergence({ ...validWarning, legs: [{ ...validLeg, decimals: 1.5 }] })).toBe(false)
+  })
+  test('an unrecognized leg kind: invalid', () => {
+    expect(isValidPriceDivergence({ ...validWarning, legs: [{ ...validLeg, kind: 'swap-forward' }] })).toBe(false)
+  })
+  test('not an object, or missing the code: invalid, never throws', () => {
+    expect(isValidPriceDivergence(null)).toBe(false)
+    expect(isValidPriceDivergence('PRICE_DIVERGENCE')).toBe(false)
+    expect(isValidPriceDivergence({ legs: [validLeg] })).toBe(false)
+  })
+
+  test('the real API client rejects the whole prepare, fail closed, when the network sends a malformed divergence', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          reduce: [],
+          ownerTx: { safe: '0x0', chainId: 8453, safeTxHash: '0x0', summary: [], expiresAt: new Date(Date.now() + 60_000).toISOString(), prepareId: 'p1' },
+          divergence: { ...validWarning, legs: [] }, // malformed: no legs
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as unknown as typeof fetch
+    try {
+      await expect(httpClient.transferPrepare('k', { to: `0x${'1'.repeat(40)}`, amountUsdc: '1000000' })).rejects.toThrow()
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+  test('a well-formed divergence from the network passes through untouched', async () => {
+    const originalFetch = globalThis.fetch
+    const plan = {
+      reduce: [],
+      ownerTx: { safe: '0x0', chainId: 8453, safeTxHash: '0x0', summary: [], expiresAt: new Date(Date.now() + 60_000).toISOString(), prepareId: 'p1' },
+      divergence: validWarning,
+    }
+    globalThis.fetch = (async () => new Response(JSON.stringify(plan), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch
+    try {
+      const result = await httpClient.transferPrepare('k', { to: `0x${'1'.repeat(40)}`, amountUsdc: '1000000' })
+      expect(result.divergence).toEqual(validWarning)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+  test('no divergence at all from the network: untouched, nothing to validate', async () => {
+    const originalFetch = globalThis.fetch
+    const plan = { reduce: [], ownerTx: { safe: '0x0', chainId: 8453, safeTxHash: '0x0', summary: [], expiresAt: new Date(Date.now() + 60_000).toISOString(), prepareId: 'p1' } }
+    globalThis.fetch = (async () => new Response(JSON.stringify(plan), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch
+    try {
+      const result = await httpClient.transferPrepare('k', { to: `0x${'1'.repeat(40)}`, amountUsdc: '1000000' })
+      expect(result.divergence).toBeUndefined()
+    } finally {
+      globalThis.fetch = originalFetch
     }
   })
 })

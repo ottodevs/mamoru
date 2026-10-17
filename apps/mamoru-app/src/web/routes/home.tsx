@@ -445,8 +445,15 @@ export function History({ ops, onRetry }: { ops: OpView[]; onRetry?: (kind: OpVi
  * `onCancel`/`confirmLabel`/`confirmDisabled` are only passed by WithdrawDialog when prepare returned a
  * PriceDivergenceWarning (otto/mamoru#155): a calm "wait" next to the gated confirm, instead of the usual
  * single button. Every other caller omits them and gets exactly today's single centered confirm button.
+ *
+ * Security review on 1c54819: the buttons below call `onApprove()`/`onCancel()` with no arguments, never
+ * `onClick={onApprove}` directly — a raw `onClick={onApprove}` would hand the button's click SyntheticEvent to
+ * `onApprove` as its first argument. Every caller today passes an already-wrapped zero-arg closure, so this is
+ * currently harmless either way, but `useOwnerAction`'s `approve(accept?)` takes an optional argument now
+ * (otto/mamoru#155's acceptDivergence) — a future caller that forwards `flow.approve` unwrapped would leak the
+ * event into it. Exported so a regression test can exercise this wiring directly.
  */
-function Review({
+export function Review({
   lines,
   busy,
   error,
@@ -480,11 +487,11 @@ function Review({
       {error ? <p className="err">{error}</p> : null}
       <div className={onCancel ? 'mt-1 flex justify-between gap-2' : 'flex justify-end'}>
         {onCancel ? (
-          <button type="button" className="cta" onClick={onCancel} disabled={busy !== null}>
+          <button type="button" className="cta" onClick={() => onCancel()} disabled={busy !== null}>
             {cancelLabel}
           </button>
         ) : null}
-        <button type="button" className={onCancel ? 'chipbtn' : 'cta'} onClick={onApprove} disabled={busy !== null || confirmDisabled}>
+        <button type="button" className={onCancel ? 'chipbtn' : 'cta'} onClick={() => onApprove()} disabled={busy !== null || confirmDisabled}>
           {busy === 'signing' ? 'Waiting for passkey' : confirmLabel ?? homeCopy.confirm}
         </button>
       </div>

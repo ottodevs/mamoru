@@ -45,6 +45,20 @@ const SUBMIT: Record<OwnerKind, (api: ApiClient) => ApiClient['activate']> = {
 const toPrepared = (plan: TransferPlan): Prepared => ({ tx: plan.ownerTx, reduce: plan.reduce, receive: plan.receive, divergence: plan.divergence })
 
 /**
+ * otto/mamoru#155 (security review on 1c54819): the only thing ever allowed out of `accept` and into the submit
+ * body is its `acceptDivergence` field — never a spread of `accept` itself. `approve`'s `accept` parameter is
+ * typed narrowly, but nothing stops a caller from passing something else at runtime (Review's buttons call
+ * `onApprove()` with no arguments precisely so this never happens from a click, but this is the last line of
+ * defense regardless): accessing `.acceptDivergence` on an unrelated object such as a React SyntheticEvent is
+ * simply `undefined`, safely ignored, never spread into the request — no leaked event internals, no circular
+ * refs reaching `JSON.stringify`.
+ */
+export function withAcceptance(sig: OwnerSignature, accept?: Pick<OwnerSignature, 'acceptDivergence'>): OwnerSignature {
+  const acceptDivergence = (accept as { acceptDivergence?: OwnerSignature['acceptDivergence'] } | null | undefined)?.acceptDivergence
+  return acceptDivergence ? { ...sig, acceptDivergence } : sig
+}
+
+/**
  * otto/mamoru#155: what `approve()`'s catch does on a 409 PRICE_DIVERGENCE_STALE (the owner's accepted quote
  * moved past, between prepare and this submit). Clears the prepared plan FIRST, unconditionally, so there is
  * nothing left to submit while the re-prepare is in flight; if the re-prepare itself fails, `prepared` stays
@@ -125,7 +139,7 @@ export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind) 
       setBusy('signing')
       try {
         const sig = await signOwnerTx(prepared.tx, storedCredential(accountKey))
-        const op = await SUBMIT[kind](api)(accountKey, { ...sig, ...accept })
+        const op = await SUBMIT[kind](api)(accountKey, withAcceptance(sig, accept))
         setPrepared(null)
         setResult(op)
         await Promise.all([

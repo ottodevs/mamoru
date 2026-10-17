@@ -130,9 +130,17 @@ export type OverCap = { code: 'DEPOSIT_OVER_CAP'; usdc: string; capUsdc: string;
 // Deploys the Safe if needed and enables the session grants sized to the observed deposit.
 // POST /api/accounts/:accountKey/transfer/prepare   body: TransferRequest -> TransferPlan
 // POST /api/accounts/:accountKey/transfer           body: OwnerSignature -> OpView | 409 PRICE_DIVERGENCE_STALE
-// Frees USDC by reducing positions if idle USDC is short (engine), then the owner transfer. PRICE_DIVERGENCE_STALE:
-// the submit carried an acceptDivergence whose quote the price has since moved past; nothing was sent and nothing
-// was refused outright — the app re-prepares and shows the fresh PriceDivergenceWarning (otto/mamoru#155).
+// Frees USDC by reducing positions if idle USDC is short (engine), then the owner transfer. The reduce step runs
+// BEFORE the owner transfer and is engine-executed, not part of the signed ownerTx — see PriceDivergenceLeg.minAmount
+// below for what that means for a 'swap-back' leg's floor. PRICE_DIVERGENCE_STALE: the submit carried an
+// acceptDivergence whose quote the price has since moved past; nothing was sent and nothing was refused outright
+// (otto/mamoru#155). "Nothing was sent" has to be true of the WHOLE withdrawal, reduce included: the operator must
+// run the staleness check, and must have decided to answer STALE, before the engine executes any reduce for this
+// request — never partially execute a withdrawal that is about to be told to wait. On STALE the operator also
+// discards the prior prepareId's already-signed safeTxHash (the re-prepare should reuse the same Safe nonce) so
+// that old, still-validly-signed transaction can never later be executed on its own, even if the owner never
+// resubmits — the app re-prepares and shows the fresh PriceDivergenceWarning; the owner tapping "Wait" must be a
+// real wait, not a signed transaction left live in the background.
 // Works on a Safe that is not deployed yet (a deposit that never started): the relayer deploys it, then the transfer runs.
 // POST /api/accounts/:accountKey/stop/prepare        -> OwnerTxToSign
 // POST /api/accounts/:accountKey/renew/prepare       -> OwnerTxToSign   (running account: same grants, fresh validity; or, with grants missing and no renewal due, only the missing ones)
@@ -165,14 +173,30 @@ export type PriceDivergenceLeg = {
   // base units: the live quote at prepare time. Informational only — NOT the binding floor and not what the
   // app shows or computes shortfall from; see `minAmount`.
   quotedAmount: string
-  // base units: the router's amountOutMinimum this leg's already-signed calldata carries — the worst case the
-  // transaction allows. The app shows this as "at least", and `shortfall`/`shortfallBps` are computed against
-  // it, not against `quotedAmount` (the quote can only get worse by the time the owner signs; the minimum is
-  // what is actually guaranteed). OwnerSignature.acceptDivergence binds exactly this amount: the operator must
-  // never execute at a looser minimum for an accepted quoteId.
+  // base units: the floor the operator commits to for this leg.
+  // - 'payout' leg: the router's amountOutMinimum baked into ownerTx's already-signed calldata. The owner's
+  //   passkey signature binds this on-chain; the operator cannot loosen it without invalidating that signature.
+  // - 'swap-back' leg: the reduce step is engine-executed, not part of ownerTx (see the /transfer route comment
+  //   above). The owner's signature does NOT bind this floor. It is an operator commitment, enforced by the
+  //   engine using exactly the accepted quoteId's minAmount for the reduce it runs — the same trust the engine's
+  //   other automated actions already carry, not a new cryptographic guarantee. The app cannot verify this side
+  //   and shows "at least" the same way regardless of kind; it is honest about the number, not about who enforces it.
+  // Either way, `shortfall`/`shortfallBps` the app computes are against this minimum, not against `quotedAmount`
+  // (the quote can only get worse by the time the owner acts; the minimum is the committed worst case) — and the
+  // app re-derives both from `fairAmount`/`minAmount` itself rather than trusting `shortfall`/`shortfallBps`
+  // below as sent (otto/mamoru#155, security review on 1c54819): those two fields are kept for the operator's own
+  // bookkeeping/logs, not as the app's source of truth.
   minAmount: string
-  shortfall: string // base units: fairAmount - minAmount (the worst case, not the quote's)
-  shortfallBps: number // shortfall / fairAmount, basis points
+  // base units: SHOULD be fairAmount - minAmount, operator-computed, for its own logs — but the app treats this
+  // as advisory only (otto/mamoru#155, security review on 1c54819): it re-derives its own fairAmount-minAmount
+  // difference and shows the larger (worse) of that and this field, so an operator bug that under-reports here
+  // (computing against quotedAmount instead of minAmount, say) cannot understate what the owner sees.
+  shortfall: string
+  // basis points, SHOULD be shortfall / fairAmount, operator-computed — likewise advisory only. The app computes
+  // its own percentage from the shortfall it already settled on above, ceiled, never truncated, so this field
+  // cannot cause the shown amount and the shown percentage to disagree, and cannot flatten a real sub-1bp loss
+  // to a misleading "0%".
+  shortfallBps: number
 }
 export type PriceDivergenceWarning = {
   code: 'PRICE_DIVERGENCE'
@@ -214,9 +238,12 @@ export type OwnerSignature = {
   signature: string        // DER, base64url
   // otto/mamoru#155, transfer only: the owner explicitly accepted the PriceDivergenceWarning this prepare
   // returned. quoteId must match TransferPlan.divergence.quoteId for this prepareId; the operator executes
-  // at exactly that warning's per-leg minAmount as the router floor, never a looser one. Absent on every
-  // submit that carried no warning, and on every other kind — an operator that never emits
-  // PriceDivergenceWarning never looks at this field.
+  // at exactly that warning's per-leg minAmount, never a looser one. This is a CONSENT GATE, not itself part
+  // of the signed payload above (the passkey signs safeTxHash, not this field): for a 'payout' leg the
+  // accepted minAmount is independently enforced by what is already baked into that signed calldata, but for
+  // a 'swap-back' leg (see PriceDivergenceLeg.minAmount) there is no signature binding it — only the engine
+  // honoring the accepted quoteId. Absent on every submit that carried no warning, and on every other kind —
+  // an operator that never emits PriceDivergenceWarning never looks at this field.
   acceptDivergence?: { quoteId: string }
 }
 export type OpView = {
