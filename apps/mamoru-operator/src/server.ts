@@ -27,7 +27,7 @@ function tsKey(secret: string): Buffer {
  * REQUEST_SKEW_MS off its own clock — a captured request (header, sig, body) cannot be replayed past that window.
  *
  * `ts` omitted (`null`) signs the old 3-line payload under `secret` directly, with no skew check: the transition
- * form, so the app Worker (apps/mamoru-app) and this operator can be deployed in either order without a window
+ * form, accepted only until LEGACY_HMAC_UNTIL, so the app Worker (apps/mamoru-app) and this operator can be deployed in either order without a window
  * where requests fail. Deploy the operator first — it already verifies both forms — then the app Worker, the side
  * that starts sending `x-mamoru-ts`. Once every caller has run with it for a while, drop the no-ts fallback in a
  * follow-up change.
@@ -39,6 +39,16 @@ export function operatorSignature(secret: string, method: string, path: string, 
 
 /** How far a request's `x-mamoru-ts` may sit from this operator's clock before it is refused as stale. */
 export const REQUEST_SKEW_MS = 60_000
+
+/**
+ * otto/mamoru#140: the no-ts (pre-#140) form has no skew check, so a captured legacy request replays for as long as
+ * it is accepted. It is accepted only until this date, and every use is logged ([auth] legacy HMAC). Production's
+ * app Worker signs without `x-mamoru-ts` until the release that carries it; this date leaves time for that release
+ * to soak on beta and reach production. Removal: once the journal shows no legacy use, drop the fallback (and rotate
+ * OPERATOR_SECRET if old signed requests may have been captured). If the app release slips, move this date in
+ * a reviewed change; never remove the cutoff.
+ */
+export const LEGACY_HMAC_UNTIL = Date.parse('2026-10-23T00:00:00Z')
 
 function decodeContext(header: string): AccountContext {
   const ctx = JSON.parse(Buffer.from(header, 'base64url').toString('utf8')) as AccountContext
@@ -90,7 +100,8 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
   }
 }
 
-export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number; rpcMetrics: RpcMetrics; gitSha: string; bootedAt: number; snapshot?: SnapshotLoop | null }): Server<undefined> {
+export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number; rpcMetrics: RpcMetrics; gitSha: string; bootedAt: number; snapshot?: SnapshotLoop | null; /** Tests only: the legacy cutoff (default LEGACY_HMAC_UNTIL). */ legacyHmacUntil?: number }): Server<undefined> {
+  const legacyUntil = opts.legacyHmacUntil ?? LEGACY_HMAC_UNTIL
   return Bun.serve({
     hostname: opts.hostname,
     port: opts.port,
@@ -128,6 +139,11 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
       if (ts !== null && (!/^\d+$/.test(ts) || Math.abs(Date.now() - Number(ts) * 1000) > REQUEST_SKEW_MS)) {
         return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
       }
+      // otto/mamoru#140: the no-ts form only until the cutoff; past it, refused like any bad signature.
+      if (ts === null && Date.now() >= legacyUntil) {
+        console.log(`[auth] legacy HMAC refused (past ${new Date(legacyUntil).toISOString()}): ${req.method} ${m[2]}`)
+        return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+      }
       const expected = operatorSignature(opts.secret, req.method, path, header, body, ts)
       if (!header || sig.length !== expected.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
       let ctx: AccountContext
@@ -138,6 +154,8 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
       }
       if (decodeURIComponent(m[1]!) !== ctx.accountKey) return json(401, { error: 'account mismatch', code: 'OPERATOR_AUTH' })
       const route = `${req.method} ${m[2]}`
+      // Every accepted legacy request, so its removal can be planned on what the journal shows (account key shortened).
+      if (ts === null) console.log(`[auth] legacy HMAC (no x-mamoru-ts) ${route} account ${ctx.accountKey.slice(0, 8)}`)
       const parse = () => {
         try {
           return JSON.parse(body || '{}')

@@ -8,7 +8,7 @@ import type { AccountContext } from '@mamoru/domain'
 // mamoru-operator otherwise depends on — test-only, verifying the wire protocol the two apps agree on.
 import { operatorSignature as appOperatorSignature } from '../../mamoru-app/src/api/accounts/operator.ts'
 import type { Operator } from '../src/operator.ts'
-import { operatorSignature, REQUEST_SKEW_MS, startServer } from '../src/server.ts'
+import { LEGACY_HMAC_UNTIL, operatorSignature, REQUEST_SKEW_MS, startServer } from '../src/server.ts'
 
 const SECRET = 'test-operator-secret'
 const CTX: AccountContext = {
@@ -25,8 +25,8 @@ function fakeOperator(): Operator {
   return { funding: async () => ({ ok: true }) } as unknown as Operator
 }
 
-function boot(op: Operator) {
-  const server = startServer(op, { secret: SECRET, hostname: '127.0.0.1', port: 0, rpcMetrics: { snapshot: () => ({ cumulative: {}, cuEstimateTotal: 0, last48h: [] }) } as never, gitSha: 'abc', bootedAt: Date.now() })
+function boot(op: Operator, legacyHmacUntil?: number) {
+  const server = startServer(op, { secret: SECRET, hostname: '127.0.0.1', port: 0, rpcMetrics: { snapshot: () => ({ cumulative: {}, cuEstimateTotal: 0, last48h: [] }) } as never, gitSha: 'abc', bootedAt: Date.now(), ...(legacyHmacUntil === undefined ? {} : { legacyHmacUntil }) })
   return { server, base: `http://127.0.0.1:${server.port}` }
 }
 
@@ -87,14 +87,37 @@ describe('operator HMAC: a signed timestamp bounds how long a captured request c
     }
   })
 
-  test('no x-mamoru-ts header (old caller): the pre-#140 3-line signature still verifies, no skew check', async () => {
-    const { server, base } = boot(fakeOperator())
+  test('no x-mamoru-ts header (old caller): the pre-#140 3-line signature still verifies until the cutoff, and each use is logged', async () => {
+    const { server, base } = boot(fakeOperator(), Date.now() + 60_000)
+    const logged: string[] = []
+    const log = console.log
+    console.log = (...a: unknown[]) => void logged.push(a.join(' '))
     try {
       const res = await get(base, '/api/accounts/acc-1/funding', { ts: null })
       expect(res.status).toBe(200)
+      expect(logged.some((l) => l.includes('[auth] legacy HMAC') && l.includes('GET funding'))).toBe(true)
+    } finally {
+      console.log = log
+      server.stop(true)
+    }
+  })
+
+  test('otto/mamoru#140: past the cutoff a no-ts request is refused, so a captured legacy request is not replayable for ever', async () => {
+    const { server, base } = boot(fakeOperator(), Date.now() - 1)
+    try {
+      const res = await get(base, '/api/accounts/acc-1/funding', { ts: null })
+      expect(res.status).toBe(401)
+      expect((await res.json()) as unknown).toMatchObject({ code: 'OPERATOR_AUTH' })
+      // The ts-signed form is unaffected.
+      expect((await get(base, '/api/accounts/acc-1/funding')).status).toBe(200)
     } finally {
       server.stop(true)
     }
+  })
+
+  test('the default cutoff is a fixed date, not open-ended', () => {
+    expect(Number.isFinite(LEGACY_HMAC_UNTIL)).toBe(true)
+    expect(new Date(LEGACY_HMAC_UNTIL).toISOString()).toBe('2026-10-23T00:00:00.000Z')
   })
 
   test('the app Worker (Web Crypto) and this operator (node:crypto) key the ts-signed scheme identically', async () => {
