@@ -1,4 +1,4 @@
-import type { ApyView, FundingView, Hex0x, OpView, OverCap, WithdrawAsset } from '@mamoru/domain'
+import type { ApyView, FundingView, Hex0x, OpView, OverCap, PriceDivergenceWarning, WithdrawAsset } from '@mamoru/domain'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
@@ -498,10 +498,12 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
   const [to, setTo] = useState('')
   const [asset, setAsset] = useState<WithdrawAsset>('USDC')
   const [invalid, setInvalid] = useState<string | null>(null)
-  // otto/mamoru#155: which PriceDivergenceWarning.quoteId the owner ticked, if any. Compared against the
-  // current `divergence.quoteId` below rather than cleared explicitly, so a fresh (or stale-rewarned) prepare
-  // with a different quoteId un-ticks it on its own — the acceptance never silently carries over.
-  const [acceptedQuoteId, setAcceptedQuoteId] = useState<string | null>(null)
+  // otto/mamoru#155: which PriceDivergenceWarning object the owner ticked, if any — the exact instance from a
+  // prepare response, not its quoteId. Compared by reference against the current `divergence` below rather
+  // than cleared explicitly, so any fresh prepare (a new amount, or a stale-rewarn) un-ticks it on its own: a
+  // new prepare always returns a new object, so the acceptance never carries over even if an operator were to
+  // reuse the same quoteId by mistake.
+  const [acceptedWarning, setAcceptedWarning] = useState<PriceDivergenceWarning | null>(null)
   const dest = useDestination(to)
   const assetsQ = useWithdrawAssets(accountKey, open)
   const options = withdrawOptions(assetsQ.data?.assets)
@@ -509,7 +511,7 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
   const close = () => {
     flow.reset()
     setInvalid(null)
-    setAcceptedQuoteId(null)
+    setAcceptedWarning(null)
     onClose()
   }
   const submit = async (e: FormEvent) => {
@@ -543,11 +545,11 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
           lines={[...(deployed ? [] : [homeCopy.createFirst]), ...(flow.prepared.reduce?.length ? ['Mamoru first takes the missing USDC out of the pool.'] : [])]}
           busy={flow.busy}
           error={error}
-          onApprove={() => void flow.approve(acceptancePayload(divergence, acceptedQuoteId))}
+          onApprove={() => void flow.approve(acceptancePayload(divergence, acceptedWarning))}
           onCancel={divergence ? close : undefined}
           cancelLabel={divergence ? waitLabel(locale) : undefined}
           confirmLabel={divergence ? withdrawAnywayLabel(locale) : undefined}
-          confirmDisabled={transferConfirmDisabled(flow.busy, divergence, acceptedQuoteId)}
+          confirmDisabled={transferConfirmDisabled(flow.busy, divergence, acceptedWarning)}
         >
           <p className="m-0 text-[2rem] leading-none text-emerald tabular-nums">
             ${usd(BigInt(parseUsdc(amount) ?? '0'))}
@@ -571,8 +573,8 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
           {divergence ? (
             <PriceDivergenceNotice
               warning={divergence}
-              accepted={acceptedQuoteId === divergence.quoteId}
-              onAcceptedChange={(v) => setAcceptedQuoteId(v ? divergence.quoteId : null)}
+              accepted={acceptedWarning === divergence}
+              onAcceptedChange={(v) => setAcceptedWarning(v ? divergence : null)}
               locale={locale}
             />
           ) : null}

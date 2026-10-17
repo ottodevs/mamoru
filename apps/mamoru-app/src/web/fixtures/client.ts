@@ -130,18 +130,34 @@ export function fixtureReceive(asset: Exclude<WithdrawAsset, 'USDC'>, amountUsdc
   return { asset, quoted: String(quoted), minimum: String((quoted * 995n) / 1000n), decimals: q.decimals, route: q.route }
 }
 
-// ?divergence (dev only, otto/mamoru#155): the withdrawal's swap-back prices 2.5% below a made-up "fair"
-// amount, on the USDC leg regardless of the asset picked — enough to exercise the warning's rendering without
+// ?divergence (dev only, otto/mamoru#155): the withdrawal's swap-back (selling cbBTC into USDC) would floor
+// 2.5% below a made-up "fair" amount, regardless of the asset picked. A fresh quoteId every call, as a real
+// operator must mint (never reused across two prepares) — enough to exercise the warning's rendering without
 // modeling a real TWAP in a fixture.
+let fixtureDivergenceCalls = 0
 export function fixtureDivergence(amountUsdc: bigint): PriceDivergenceWarning {
+  fixtureDivergenceCalls += 1
   const fairAmount = amountUsdc
-  const quotedAmount = (amountUsdc * 975n) / 1000n
-  const shortfall = fairAmount - quotedAmount
+  const minAmount = (amountUsdc * 975n) / 1000n // the router floor this leg's signed calldata carries
+  const quotedAmount = (amountUsdc * 985n) / 1000n // the live quote, between minAmount and fairAmount; informational only
+  const shortfall = fairAmount - minAmount
   return {
     code: 'PRICE_DIVERGENCE',
-    legs: [{ token: 'USDC', decimals: 6, fairAmount: String(fairAmount), quotedAmount: String(quotedAmount), shortfall: String(shortfall), shortfallBps: 250 }],
+    legs: [
+      {
+        kind: 'swap-back',
+        token: 'USDC',
+        sellToken: 'cbBTC',
+        decimals: 6,
+        fairAmount: String(fairAmount),
+        quotedAmount: String(quotedAmount),
+        minAmount: String(minAmount),
+        shortfall: String(shortfall),
+        shortfallBps: 250,
+      },
+    ],
     shortfallUsdc: String(shortfall),
-    quoteId: `qd_fixture_${Date.now()}`,
+    quoteId: `qd_fixture_${Date.now()}_${fixtureDivergenceCalls}`,
   }
 }
 
