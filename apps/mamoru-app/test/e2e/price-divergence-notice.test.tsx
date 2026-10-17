@@ -21,10 +21,11 @@ describe('PriceDivergenceNotice: rendering with the worst-case numbers', () => {
   test('swap-back: "your account", the signed minimum ("at least"), no em dash', () => {
     const { text, html } = render(<PriceDivergenceNotice warning={swapBack} accepted={false} onAcceptedChange={() => {}} locale="en" />)
     expect(text).toContain('Your account would get at least 0.975 USDC instead of about 1 USDC from selling cbBTC')
-    expect(text).toContain('0.02 USDC less')
+    // shortfall 25000 = 0.025 USDC exactly: ceiled to 0.03, the reviewer's exact never-understate case.
+    expect(text).toContain('0.03 USDC less')
     expect(text).toContain('2.50%')
     expect(text).toContain('fair price over the last 30 minutes')
-    expect(text).toContain('I understand your account will get about 0.02 USDC less.')
+    expect(text).toContain('I understand your account will get about 0.03 USDC less.')
     expect(text).not.toContain('—')
     expect(html).toContain('data-testid="price-divergence"')
     expect(html).toContain('type="checkbox"')
@@ -32,7 +33,8 @@ describe('PriceDivergenceNotice: rendering with the worst-case numbers', () => {
   test('payout: "the recipient", not "your account"', () => {
     const { text } = render(<PriceDivergenceNotice warning={payout} accepted={false} onAcceptedChange={() => {}} locale="en" />)
     expect(text).toContain('The recipient would receive at least 0.909 EURC instead of about 0.921 EURC')
-    expect(text).toContain('I understand the recipient will get about 0.01 EURC less.')
+    // shortfall 12000 = 0.012 EURC exactly: ceiled to 0.02, never truncated down to 0.01.
+    expect(text).toContain('I understand the recipient will get about 0.02 EURC less.')
     expect(text).not.toContain('your account')
   })
   test('es and ja switch the whole notice, same worst-case numbers, no em dash', () => {
@@ -53,9 +55,22 @@ describe('PriceDivergenceNotice: rendering with the worst-case numbers', () => {
   test('a fresh (stale-rewarned) warning with different numbers re-renders with those numbers, not the old ones', () => {
     const fresh: PriceDivergenceWarning = { ...swapBack, quoteId: 'qd_new', legs: [{ ...swapBack.legs[0]!, minAmount: '950000', shortfall: '50000', shortfallBps: 500 }] }
     const { text } = render(<PriceDivergenceNotice warning={fresh} accepted={false} onAcceptedChange={() => {}} locale="en" />)
+    // 0.05 USDC is already exact at 2 decimals, so ceiling leaves it untouched.
     expect(text).toContain('at least 0.95 USDC')
     expect(text).toContain('0.05 USDC less')
     expect(text).toContain('5%')
     expect(text).not.toContain('0.975 USDC')
+  })
+  test('a dust shortfall never ceils into a wildly overstated headline: "less than" instead of "0.01"', () => {
+    const dust: PriceDivergenceWarning = {
+      ...swapBack,
+      legs: [{ kind: 'payout', token: 'ETH', decimals: 18, fairAmount: '1000000000000000', quotedAmount: '999999999999963', minAmount: '999999999999963', shortfall: '37', shortfallBps: 1 }],
+    }
+    const { text } = render(<PriceDivergenceNotice warning={dust} accepted={false} onAcceptedChange={() => {}} locale="en" />)
+    // render()'s text extraction leaves `<` HTML-escaped as `&lt;` (see render.ts); the "less than" number is
+    // the behavior under test, not the literal glyph, so assert against what toStaticMarkup actually emits.
+    expect(text).toContain('&lt; 0.0001 ETH less')
+    expect(text).not.toContain('0.01 ETH less')
+    expect(text).not.toContain('0 ETH less')
   })
 })

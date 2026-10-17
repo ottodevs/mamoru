@@ -37,14 +37,17 @@ const both: PriceDivergenceWarning = {
 describe('price divergence: worst-case numbers, phrased by what the leg is', () => {
   test('swap-back: the account keeps the loss, not the recipient; "at least" is the signed minimum, not the quote', () => {
     const lines = divergenceLines('en', swapBack)
-    expect(lines).toEqual(['Your account would get at least 0.975 USDC instead of about 1 USDC from selling cbBTC. That is 0.02 USDC less (2.50%).'])
+    // shortfall 25000 = 0.025 USDC exactly: ceiled up to the next cent (2.50% -> "0.03", never "0.02", see the
+    // dedicated rounding-direction describe block below for the reviewer's exact 0.025 -> 0.03 case).
+    expect(lines).toEqual(['Your account would get at least 0.975 USDC instead of about 1 USDC from selling cbBTC. That is 0.03 USDC less (2.50%).'])
     // minAmount (975000), not quotedAmount (985000), drives both the headline and the shortfall math.
     expect(lines[0]).not.toContain('0.985')
     expect(lines.join(' ') + divergenceWhy('en')).not.toMatch(/TWAP/i)
   })
   test('payout: the recipient gets less, the sentence says so directly', () => {
     const lines = divergenceLines('en', payout)
-    expect(lines).toEqual(['The recipient would receive at least 0.909 EURC instead of about 0.921 EURC. That is 0.01 EURC less (1.30%).'])
+    // shortfall 12000 = 0.012 EURC exactly: ceiled up to "0.02", never truncated down to "0.01".
+    expect(lines).toEqual(['The recipient would receive at least 0.909 EURC instead of about 0.921 EURC. That is 0.02 EURC less (1.30%).'])
     expect(lines[0]).toStartWith('The recipient')
   })
   test('both legs in one withdrawal: one sentence per leg, each in its own voice', () => {
@@ -73,14 +76,14 @@ describe('price divergence: worst-case numbers, phrased by what the leg is', () 
 })
 
 describe('price divergence: checkbox repeats the same loss, same unit, right voice, never USD', () => {
-  test('swap-back checkbox: "your account", same token and number as the sentence', () => {
-    expect(divergenceCheckboxLabel('en', swapBack)).toBe('I understand your account will get about 0.02 USDC less.')
+  test('swap-back checkbox: "your account", same (ceiled) number and token as the sentence', () => {
+    expect(divergenceCheckboxLabel('en', swapBack)).toBe('I understand your account will get about 0.03 USDC less.')
   })
   test('payout checkbox: "the recipient"', () => {
-    expect(divergenceCheckboxLabel('en', payout)).toBe('I understand the recipient will get about 0.01 EURC less.')
+    expect(divergenceCheckboxLabel('en', payout)).toBe('I understand the recipient will get about 0.02 EURC less.')
   })
   test('both legs: joined, one clause per leg, each its own unit', () => {
-    expect(divergenceCheckboxLabel('en', both)).toBe('I understand your account will get about 0.02 USDC less and the recipient will get about 0.01 EURC less.')
+    expect(divergenceCheckboxLabel('en', both)).toBe('I understand your account will get about 0.03 USDC less and the recipient will get about 0.02 EURC less.')
   })
   test('no $ / USD figure anywhere in the checkbox: the token is the unit, not shortfallUsdc', () => {
     for (const w of [swapBack, payout, both]) {
@@ -91,8 +94,31 @@ describe('price divergence: checkbox repeats the same loss, same unit, right voi
   })
 })
 
-describe('price divergence: precision never flattens a positive shortfall to zero', () => {
-  test('a shortfall finer than 6 decimals on an 18-decimal token reads as "less than", not zero or 18 raw places', () => {
+describe('price divergence: the shortfall rounds UP, never down, never understating the loss', () => {
+  test("gpt-6-sol's exact cases: 0.025 USDC -> 0.03, 0.012 EURC -> 0.02 (never truncated to 0.02 / 0.01)", () => {
+    expect(divergenceLines('en', swapBack)[0]).toContain('0.03 USDC less')
+    expect(divergenceLines('en', payout)[0]).toContain('0.02 EURC less')
+  })
+  test('an exact value at the display precision is left unchanged by ceiling (there is no remainder to round away)', () => {
+    const exact: PriceDivergenceWarning = { ...swapBack, legs: [{ ...swapBack.legs[0]!, shortfall: '20000' }] } // 0.02 USDC exactly
+    expect(divergenceLines('en', exact)[0]).toContain('0.02 USDC less')
+  })
+  test('received amounts ("at least", "instead of about") still round DOWN: 0.999999999999999999 ETH never reads as 1', () => {
+    const leg: PriceDivergenceWarning = {
+      code: 'PRICE_DIVERGENCE',
+      legs: [{ kind: 'payout', token: 'ETH', decimals: 18, fairAmount: '1000000000000000000', quotedAmount: '999999999999999999', minAmount: '999999999999999999', shortfall: '1', shortfallBps: 0 }],
+      shortfallUsdc: '1',
+      quoteId: 'q',
+    }
+    const line = divergenceLines('en', leg)[0]!
+    expect(line).toContain('at least 0.999999 ETH')
+    expect(line).not.toContain('1 ETH instead')
+    expect(line).not.toContain('at least 1 ETH')
+  })
+})
+
+describe('price divergence: precision never flattens a positive shortfall to zero, and never ceils dust into a false headline', () => {
+  test('a shortfall too fine to be exact within 4 decimals reads as "less than", not zero and not 18 raw places', () => {
     const tinyEth: PriceDivergenceWarning = {
       code: 'PRICE_DIVERGENCE',
       legs: [{ kind: 'payout', token: 'ETH', decimals: 18, fairAmount: '1000000000000000', quotedAmount: '999999999999963', minAmount: '999999999999963', shortfall: '37', shortfallBps: 1 }],
@@ -100,20 +126,23 @@ describe('price divergence: precision never flattens a positive shortfall to zer
       quoteId: 'q',
     }
     const line = divergenceLines('en', tinyEth)[0]!
-    expect(line).toContain('< 0.000001 ETH less')
+    expect(line).toContain('< 0.0001 ETH less')
     expect(line).not.toContain('0.00 ETH less')
     expect(line).not.toContain('0 ETH less')
+    // not ceiled all the way up to the coarse 2-decimal bucket either (that would overstate 37 wei by many
+    // orders of magnitude): "< 0.0001" stays honest about how small the loss actually is.
+    expect(line).not.toContain('0.01 ETH less')
   })
-  test('a shortfall visible at 6 decimals but not 2 shows at 6, not "< "', () => {
+  test('a shortfall exact within 4 decimals shows that exact figure, not a coarse 2-decimal ceiling', () => {
     const smallEth: PriceDivergenceWarning = {
       code: 'PRICE_DIVERGENCE',
-      legs: [{ kind: 'payout', token: 'ETH', decimals: 18, fairAmount: '1000000000000000', quotedAmount: '998100000000000', minAmount: '998100000000000', shortfall: '1900000000000', shortfallBps: 19 }],
+      legs: [{ kind: 'payout', token: 'ETH', decimals: 18, fairAmount: '1000000000000000', quotedAmount: '998100000000000', minAmount: '998100000000000', shortfall: '1900000000000000', shortfallBps: 19 }],
       shortfallUsdc: '1',
       quoteId: 'q',
     }
-    expect(divergenceLines('en', smallEth)[0]).toContain('0.000001 ETH less')
+    expect(divergenceLines('en', smallEth)[0]).toContain('0.0019 ETH less')
   })
-  test('a whole-unit token (0 decimals, e.g. JPY) never shows a fraction', () => {
+  test('a whole-unit token (0 decimals, e.g. JPY) never shows a fraction, and ceiling an already-whole amount is a no-op', () => {
     const jpy: PriceDivergenceWarning = {
       code: 'PRICE_DIVERGENCE',
       legs: [{ kind: 'payout', token: 'JPY', decimals: 0, fairAmount: '1616', quotedAmount: '1608', minAmount: '1608', shortfall: '8', shortfallBps: 495 }],
