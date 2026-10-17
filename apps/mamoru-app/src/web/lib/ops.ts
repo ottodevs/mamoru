@@ -29,9 +29,22 @@ const SUBSIDY_REFUSED: Record<string, string> = {
   SUBSIDY_DAILY_BUDGET: 'Start needs gas: Mamoru-paid starts are used up for now. Try later, or send ETH on Base to your account',
 }
 
-/** An owner action that failed after the passkey signed it: the user approves it again. An over-cap refusal is not one: approving again cannot help. */
+/**
+ * A start whose transaction may still be on chain (otto/mamoru#15): the operator marks it `confirming` while its signed
+ * copies have no receipt, and `needsReview` once it is left for a person. Only while its receipt is unknown
+ * (OWNER_TX_ERROR): settled either way, it is an ordinary start again. Approving again meanwhile could act twice, and
+ * the operator refuses it (START_CONFIRMING): the app waits and says so.
+ */
+export function confirmingStart(op: OpView): boolean {
+  const o = op as OpView & { confirming?: boolean; needsReview?: boolean }
+  return op.kind === 'activate' && op.state === 'failed' && op.code === 'OWNER_TX_ERROR' && (o.confirming === true || o.needsReview === true)
+}
+
+export const CONFIRMING_START = "We're confirming your start. This usually settles within minutes; if it takes longer, support will confirm it with you."
+
+/** An owner action that failed after the passkey signed it: the user approves it again. An over-cap refusal is not one: approving again cannot help, nor is a start being confirmed. */
 export function needsRetry(op: OpView): boolean {
-  return owner(op) && op.state === 'failed' && !overCapRefusal(op)
+  return owner(op) && op.state === 'failed' && !overCapRefusal(op) && !confirmingStart(op)
 }
 
 function withdrewLine(op: OpView, done: boolean): string {
@@ -50,6 +63,7 @@ export function opLine(op: OpView): string {
       if (overCapRefusal(op)) {
         return op.amountUsdc && op.capUsdc ? `Start refused: ${usd(op.amountUsdc)} USDC is over the ${usdPlain(op.capUsdc)} USDC cap` : 'Start refused: the deposit was over the cap'
       }
+      if (confirmingStart(op)) return CONFIRMING_START
       if (failed && op.code && SUBSIDY_REFUSED[op.code]) return SUBSIDY_REFUSED[op.code]!
       if (failed) return 'Start needs another approval'
       if (done) return 'Mamoru started'
@@ -92,7 +106,7 @@ export function opLine(op: OpView): string {
 }
 
 export function opTone(op: OpView): 'done' | 'pending' | 'retry' {
-  return op.state === 'failed' ? 'retry' : op.state === 'confirmed' ? 'done' : 'pending'
+  return confirmingStart(op) ? 'pending' : op.state === 'failed' ? 'retry' : op.state === 'confirmed' ? 'done' : 'pending'
 }
 
 /**
@@ -125,7 +139,8 @@ export const TERMINAL = new Set<OpView['state']>(['confirmed', 'failed'])
 export function activationLive(ops: OpView[]): boolean {
   // Unsigned prepares (proposed, not armed, no tx) do not count.
   const last = [...ops].filter((o) => o.kind === 'activate' && !(o.state === 'proposed' && o.code !== 'ARMED' && !o.txHash)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
-  return last !== undefined && last.state !== 'failed'
+  // A start being confirmed is not over: no new Start is offered while it may still land.
+  return last !== undefined && (last.state !== 'failed' || confirmingStart(last))
 }
 
 /** The account ran before and was stopped: a confirmed activation exists. */

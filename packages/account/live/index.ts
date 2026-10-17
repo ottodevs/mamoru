@@ -71,19 +71,38 @@ export function safeTxHashOf(a: LiveAccount, tx: SafeTx): Hex {
 const strip = (c: { to: Address; value: bigint; data: Hex }): MultiSendCall => ({ to: c.to, value: c.value, data: c.data })
 
 /**
+ * The Safe's own gas reserve, bought inside the owner's activation (otto/mamoru#15): `amountIn` USDC on the WETH/USDC
+ * pool of `fee`, unwrapped by SwapRouter02 and paid to the Safe itself. Below `amountOutMinimum` wei the swap reverts,
+ * and the whole activation with it.
+ */
+export type LiveGasReserve = { fee: number; amountIn: bigint; amountOutMinimum: bigint; deadline: bigint }
+
+/** Exact USDC approve to SwapRouter02, USDC -> ETH paid to the Safe, approve 0. */
+export function gasReserveCalls(safe: Address, r: LiveGasReserve): MultiSendCall[] {
+  if (r.amountIn <= 0n) throw new Error('amountIn must be positive')
+  return [
+    approve('USDC', 'SwapRouter02', r.amountIn),
+    swapToEth({ recipient: safe, tokenIn: 'USDC', fee: r.fee, amountIn: r.amountIn, amountOutMinimum: r.amountOutMinimum, deadline: r.deadline }),
+    approve('USDC', 'SwapRouter02', 0n),
+  ].map(strip)
+}
+
+/**
  * Registry trust (Rhinestone attester + self-attestation of the published
  * policies), then SmartSession.enableSessions, in the fork-proven order.
  * `trust: false` skips the registry calls when the account already ran them.
+ * `reserve`: the Safe buys its own gas reserve after the grants are enabled (gasReserveCalls).
  */
 export function activationBatch(
   a: LiveAccount,
   grants: SessionGrant[],
   revoked: Hex[],
-  opts: { trust?: boolean } = {},
+  opts: { trust?: boolean; reserve?: LiveGasReserve } = {},
 ): { calls: MultiSendCall[]; permissionIds: Hex[] } {
   const act = activationCall(grants, revoked)
   const trust = opts.trust === false ? [] : registryTrustCalls(a.safe)
-  return { calls: [...trust, { to: act.to, value: 0n, data: act.data }].map(strip), permissionIds: act.permissionIds }
+  const reserve = opts.reserve ? gasReserveCalls(a.safe, opts.reserve) : []
+  return { calls: [...[...trust, { to: act.to, value: 0n, data: act.data }].map(strip), ...reserve], permissionIds: act.permissionIds }
 }
 
 function closeCalls(account: Address, p: LivePosition, deadline: bigint, burnIt: boolean): MultiSendCall[] {

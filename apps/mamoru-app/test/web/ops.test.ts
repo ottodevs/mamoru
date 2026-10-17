@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { OpView } from '@mamoru/domain'
-import { historyOps, opLine } from '../../src/web/lib/ops.ts'
+import { CONFIRMING_START, activationLive, historyOps, needsRetry, opLine, opTone } from '../../src/web/lib/ops.ts'
 
 const AT = '2026-10-10T12:00:00.000Z'
 const base = (patch: Partial<OpView>): OpView => ({ opId: 'own-1-activate', kind: 'activate', state: 'confirmed', updatedAt: AT, ...patch })
@@ -10,6 +10,28 @@ describe('opLine', () => {
     expect(opLine(base({ state: 'failed', code: 'SUBSIDY_BELOW_MINIMUM' }))).toBe('Start needs gas: add USDC, or send ETH on Base to your account')
     expect(opLine(base({ state: 'failed', code: 'SUBSIDY_DAILY_BUDGET' }))).toContain('send ETH on Base')
     expect(opLine(base({ state: 'failed', code: 'OWNER_TX_FAILED' }))).toBe('Start needs another approval')
+  })
+
+  test('a start left for review is being confirmed: calm line, no retry, still live', () => {
+    const review = { ...base({ state: 'failed', code: 'OWNER_TX_ERROR' }), needsReview: true } as OpView
+    expect(opLine(review)).toBe(CONFIRMING_START)
+    expect(needsRetry(review)).toBe(false)
+    expect(opTone(review)).toBe('pending')
+    expect(activationLive([review])).toBe(true)
+    // From the first unknown receipt, before any review: the same.
+    const confirming = { ...base({ state: 'failed', code: 'OWNER_TX_ERROR' }), confirming: true } as OpView
+    expect(opLine(confirming)).toBe(CONFIRMING_START)
+    expect(needsRetry(confirming)).toBe(false)
+    expect(activationLive([confirming])).toBe(true)
+    // Settled as a revert: an ordinary failed start again, whatever flag an older answer carried.
+    const reverted = { ...base({ state: 'failed', code: 'OWNER_TX_FAILED' }), needsReview: true, confirming: true } as OpView
+    expect(opLine(reverted)).toBe('Start needs another approval')
+    expect(needsRetry(reverted)).toBe(true)
+    expect(activationLive([reverted])).toBe(false)
+    // Without the flag it is an ordinary failed start, approved again.
+    const failed = base({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(needsRetry(failed)).toBe(true)
+    expect(activationLive([failed])).toBe(false)
   })
 
   test('enter_swap names the tokens and the amount when known', () => {

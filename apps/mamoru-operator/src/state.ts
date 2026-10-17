@@ -14,6 +14,17 @@ export type StoredOp = OpView & {
   ownerGrants?: StoredGrant[]
   /** Owner stop: the permissionIds its tx revokes. */
   revokes?: Hex[]
+  /** Owner activate that buys its gas reserve: the unix time its swap reverts after. */
+  reserveDeadline?: string
+  /** Every copy of a send with a time limit, kept before it left: reconciliation reads them by hash. */
+  signedTxs?: { hash: string; nonce: number; at?: number }[]
+  /** Owner activate that buys its gas reserve: its SafeTx hash and Safe nonce, asked of the chain when no receipt settles it. */
+  safeTxHash?: Hex
+  safeNonce?: string
+  /** Passes past the swap deadline (+ margin) that found no receipt for any copy (settleSigned). */
+  passesAfterWindow?: number
+  /** No receipt long after the window: left for a person, shown in /ops and /metrics, still re-read at startup and on GET /ops. */
+  needsReview?: boolean
 }
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */
@@ -37,6 +48,10 @@ export type ArmedActivation = {
   execSent?: boolean
   /** When (ms) the execTransaction was first handed to a provider: nothing of it can be on chain before. */
   sentAt?: number
+  /** Wei of gas reserve the signed batch buys into the Safe at least (USDC -> ETH swap, otto/mamoru#15); absent: none. */
+  reserveWei?: string
+  /** Unix time after which that swap reverts: the approval is dropped near it rather than sent. */
+  reserveDeadline?: string
 }
 
 export type AccountState = {

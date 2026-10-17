@@ -23,6 +23,7 @@ import {
   transferBatch,
   verifyOwnerSignature,
   type LiveAccount,
+  type LiveGasReserve,
   type LivePosition,
   type LiveReceive,
   type LiveSwap,
@@ -37,10 +38,11 @@ import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { USDC_POOLS, amountsForLiquidity, inUsdc, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
+import { SELF_RESERVE_DEADLINE_MARGIN_SECONDS, SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, meanTick, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
 import { SUBSIDY_ALERT_SHARE, noteExit, paidToday, subsidyDecision, subsidyMessage, subsidyPerDayFromEnv, type SubsidyDecision } from './subsidy.ts'
 import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type EngineHealthSnapshot } from './metrics.ts'
-import type { Relayer } from './relayer.ts'
+import { SendExpired, SendUnsettled, type Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
 import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
 
@@ -49,6 +51,17 @@ export type AccountsSummary = { known: number; active: number; armed: number }
 const RELAYER_BALANCE_CACHE_MS = 60_000
 
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
+/**
+ * While an owner op has signed copies that may still land, reconciliation runs again on its own, whoever is looking:
+ * first after SIGNED_FOLLOW_MS, doubling up to SIGNED_FOLLOW_CAP_MS. It ends when every such op has a receipt or is
+ * marked needsReview (settleSigned), which bounds it to the swap's validity plus a few passes.
+ */
+const SIGNED_FOLLOW_MS = 10_000
+const SIGNED_FOLLOW_CAP_MS = 300_000
+/** Passes past the swap deadline (+ margin) without a receipt before an op is left for a person to review. */
+const SIGNED_REVIEW_PASSES = 3
+/** An activation whose gas reserve swap reached its deadline before it could be sent: the owner approves again. */
+const RESERVE_SWAP_EXPIRED = 'RESERVE_SWAP_EXPIRED'
 /** An owner op whose receipt poll failed after the tx was sent: the tx may still have landed. */
 const RECEIPT_UNKNOWN = 'OWNER_TX_ERROR'
 /** Armed activations retry this many times across watcher passes before failing visibly. */
@@ -235,6 +248,10 @@ type Prepared = {
   base?: Hex[]
   /** transfer: what the history line shows. */
   meta?: { amountUsdc: string; asset?: string; to: Hex }
+  /** activate: wei of gas reserve the batch's own USDC -> ETH swap pays into the Safe at least (self-reserve.ts). */
+  reserveWei?: string
+  /** activate: the unix time after which that swap reverts; nothing is simulated or sent near it (reserveExpired). */
+  reserveDeadline?: string
 }
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
@@ -294,6 +311,8 @@ const RENEW_GAS_BUDGET = 16_200_000n
 const ACTIVATION_OVERHEAD_GAS = 600_000n
 /** Measured on Base: enableSessions costs 1.4-2.1M gas per session of the live policies; 2.1M is the conservative bound. */
 const STATIC_GAS_PER_SESSION = 2_100_000n
+/** Static bound for the reserve swap of a self-funded activation (approve, exactInputSingle + unwrapWETH9, approve 0). */
+const STATIC_GAS_RESERVE_SWAP = 300_000n
 
 /** "USDC/cbBTC 0.05%" for pool:USDC/cbBTC/500. */
 function poolLabel(pool: string): string {
@@ -316,6 +335,12 @@ export class Operator {
   private readonly seenAt = new Map<string, string>()
   /** Pause between retries of a pre-send simulation that reverts (a load-balanced provider can answer from a lagging node). */
   private retryMs = 3_000
+  /** Follow-up of owner ops whose signed copies may still land (settleSigned): first wait, cap, and the timer. */
+  private signedFollowMs = SIGNED_FOLLOW_MS
+  private signedFollowCapMs = SIGNED_FOLLOW_CAP_MS
+  private signedTimer: ReturnType<typeof setTimeout> | null = null
+  private signedPasses = 0
+  private signedRunning = false
   /** Times the off-chain signature check said no and the chain said yes, since this process started. Logged with each one. */
   mirrorMismatches = 0
   private readonly engineHealth = new EngineHealthTracker()
@@ -374,11 +399,12 @@ export class Operator {
   }
 
   /**
-   * Whether the relayer can pay one activation now: the Safe top-up plus the deploy and execTransaction gas. When it
-   * cannot, the owner's signed activation waits armed instead of failing; a relayer short of ETH is ours to fix.
+   * Whether the relayer can pay one activation now: the Safe top-up plus the deploy and execTransaction gas, or only
+   * the gas when the batch buys the Safe's reserve itself (`selfFunded`). When it cannot, the owner's signed
+   * activation waits armed instead of failing; a relayer short of ETH is ours to fix.
    */
-  private async relayerCanActivate(acc: AccountState): Promise<boolean> {
-    const need = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI + ACTIVATION_GAS_WEI
+  private async relayerCanActivate(acc: AccountState, selfFunded = false): Promise<boolean> {
+    const need = (selfFunded ? 0n : this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI) + ACTIVATION_GAS_WEI
     const have = BigInt((await this.relayerBalance()).wei)
     if (have >= need) return true
     const at = Date.now()
@@ -431,12 +457,16 @@ export class Operator {
     const armed = Object.values(this.store.state.accounts).filter((a) => a.armed).length
     if (armed) console.log(`[armed] ${armed} armed activation(s) reloaded`)
     this.armStopped = false
+    // Signed copies still unsettled when the process stopped are followed again from here.
+    this.followSigned(true)
     this.armTimer = setTimeout(() => this.watchArmed(), 0)
   }
 
   shutdown(): void {
     this.armStopped = true
     if (this.armTimer) clearTimeout(this.armTimer)
+    if (this.signedTimer) clearTimeout(this.signedTimer)
+    this.signedTimer = null
     for (const r of this.runners.values()) {
       r.stopped = true
       if (r.timer) clearTimeout(r.timer)
@@ -590,7 +620,10 @@ export class Operator {
   ops(ctx: AccountContext, after: string | null, includeFailedEngine = false): { ops: OpView[] } {
     const { acc } = this.account(ctx)
     this.reconcileSoon(acc)
-    const all = collapseFailed(includeFailedEngine ? acc.ops : acc.ops.filter((o) => !(o.opId.startsWith('eng-') && o.state === 'failed')))
+    // A start whose signed copies may still land is being confirmed: the app waits instead of asking for a new approval.
+    const all = collapseFailed(includeFailedEngine ? acc.ops : acc.ops.filter((o) => !(o.opId.startsWith('eng-') && o.state === 'failed'))).map((o) =>
+      unsettledActivation(o) ? { ...o, confirming: true } : o,
+    )
     if (!after) return { ops: all }
     const i = all.findIndex((o) => o.opId === after)
     if (i >= 0) return { ops: all.slice(i + 1) }
@@ -629,13 +662,14 @@ export class Operator {
     build: (keys: string[]) => ReturnType<typeof instantiateGrant>[],
     acc: AccountState,
     block: bigint,
+    reserve?: LiveGasReserve,
   ): Promise<{ keys: string[]; grants: ReturnType<typeof instantiateGrant>[]; batch: ReturnType<typeof activationBatch> }> {
     const droppable = this.droppablePairs(policy, allKeys)
     let keys = allKeys
     for (let i = 0; ; i++) {
       const grants = build(keys)
-      const batch = activationBatch(live, grants, acc.revoked, { trust: !acc.trusted })
-      const gas = await this.activationGas(live, batch.calls, grants.length, block)
+      const batch = activationBatch(live, grants, acc.revoked, { trust: !acc.trusted, reserve })
+      const gas = await this.activationGas(live, batch.calls, grants.length, block, reserve ? STATIC_GAS_RESERVE_SWAP : 0n)
       if (gas <= ACTIVATION_GAS_BUDGET || i >= droppable.length) {
         if (keys.length < allKeys.length) console.log(`[activate] ${live.safe} ~${gas} gas: dropped ${allKeys.filter((k) => !keys.includes(k)).join(', ')} to fit Base's per-tx gas cap`)
         return { keys, grants, batch }
@@ -645,7 +679,7 @@ export class Operator {
   }
 
   /** Simulated gas of the activation calls from the Safe plus calldata and Safe/WebAuthn overhead; a static estimate when the simulation is unavailable (e.g. undeployed Safe). */
-  private async activationGas(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], sessions: number, block: bigint): Promise<bigint> {
+  private async activationGas(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], sessions: number, block: bigint, extra = 0n): Promise<bigint> {
     const bytes = calls.reduce((n, c) => n + BigInt((c.data.length - 2) / 2), 0n)
     const overhead = 16n * bytes + ACTIVATION_OVERHEAD_GAS
     try {
@@ -654,14 +688,15 @@ export class Operator {
     } catch {
       // fall through to the static estimate
     }
-    return 400_000n + BigInt(sessions) * STATIC_GAS_PER_SESSION + overhead
+    return 400_000n + BigInt(sessions) * STATIC_GAS_PER_SESSION + extra + overhead
   }
 
   /**
    * The engine's session grants for one owner approval, sized at the account cap and valid from now for the policy's
    * validity, with the Safe transaction that enables them. A first approval and a renewal sign the same thing.
+   * `reserve`: a first activation that buys the Safe's own gas reserve in the same transaction (self-reserve.ts).
    */
-  private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, only?: string[]) {
+  private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, only?: string[], reserve?: LiveGasReserve) {
     if (!acc.sessionKey) {
       acc.sessionKey = generatePrivateKey()
       this.store.save()
@@ -697,8 +732,8 @@ export class Operator {
     // Built once: every build draws new salts, and the batch must enable the very grants that are stored.
     const exactGrants = exact ? build(exact) : null
     const { keys, grants, batch } = exact && exactGrants
-      ? { keys: exact, grants: exactGrants, batch: activationBatch(live, exactGrants, acc.revoked, { trust: !acc.trusted }) }
-      : await this.fitActivation(live, policy, allKeys, build, acc, r.block)
+      ? { keys: exact, grants: exactGrants, batch: activationBatch(live, exactGrants, acc.revoked, { trust: !acc.trusted, reserve }) }
+      : await this.fitActivation(live, policy, allKeys, build, acc, r.block, reserve)
     const stored = grants.map((g, i) => ({ name: keys[i]!, grant: g, permissionId: batch.permissionIds[i]! }))
     return { sessionKey, caps, stored, batch }
   }
@@ -912,29 +947,40 @@ export class Operator {
     this.assertLive()
     const { acc, live } = this.account(ctx)
     if (acc.active) throw new HttpError(409, 'ALREADY_ACTIVE', 'the engine is already active for this account')
+    this.assertNoStartConfirming(acc)
     const r = await readSafe(this.client, live.safe)
     if (r.usdc > LIVE_CAP_USDC) throw depositOverCap(r.usdc)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
-    // With nothing deposited yet the approval is armed and the subsidy is decided when the deposit lands.
-    if (r.usdc > 0n) this.assertSubsidy(this.subsidy(acc, r.usdc, r.eth), live.safe)
+    // A Safe holding enough USDC buys its own gas reserve in this very transaction (self-reserve.ts) and needs no
+    // subsidy. Any other start is decided as before (#82); with nothing deposited yet the approval is armed and the
+    // subsidy is decided when the deposit lands.
+    const self = r.usdc > 0n ? await this.selfReserve(live.safe, r) : null
+    if (r.usdc > 0n && !self) this.assertSubsidy(this.subsidy(acc, r.usdc, r.eth), live.safe)
     const policy = this.cfg.policy
-    const { sessionKey, caps, stored, batch } = await this.approval(acc, live, policy, r)
+    const { sessionKey, caps, stored, batch } = await this.approval(acc, live, policy, r, undefined, self?.reserve)
+    const invested = r.usdc - (self?.reserve.amountIn ?? 0n)
+    const reserveLine = self
+      ? [`Convert ${fmtUnitsExact(self.reserve.amountIn, 6)} USDC to at least ${fmtUnits(self.reserve.amountOutMinimum, 18)} ETH on ${self.route}, kept in your Safe as its gas reserve`]
+      : []
+    const extra = { grants: stored, ...(self ? { reserveWei: self.reserve.amountOutMinimum.toString(), reserveDeadline: self.reserve.deadline.toString() } : {}) }
     const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!)} ${b.preference / 100}%`)
     if (pools.length > 1) {
       const summary = [
         `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
+        ...reserveLine,
         r.usdc > 0n
-          ? `Let Mamoru's engine keep your ${fmtUsdc(r.usdc)} USDC invested across Uniswap v3 ${pools.join(', ')}`
+          ? `Let Mamoru's engine keep your ${fmtUsdc(invested)} USDC invested across Uniswap v3 ${pools.join(', ')}`
           : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
         `Engine key ${sessionKey} may only swap USDC into those pools' tokens and mint those pools, for ${Math.round(policy.session.validitySeconds / 86_400)} days`,
         `Funds never leave your Safe without your passkey; cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`,
       ]
-      return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })
+      return this.hold(acc, live, 'activate', batch.calls, summary, extra)
     }
     const summary = [
       `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
+      ...reserveLine,
       r.usdc > 0n
-        ? `Let Mamoru's engine allocate your ${fmtUsdc(r.usdc)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
+        ? `Let Mamoru's engine allocate your ${fmtUsdc(invested)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
         : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) into Uniswap v3 USDC/cbBTC 0.05% as soon as it arrives`,
       `Engine key ${sessionKey} may only swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap) and mint that pool, for ${Math.round(policy.session.validitySeconds / 86_400)} days`,
       ...(hasManageAny(policy)
@@ -942,7 +988,53 @@ export class Operator {
         : []),
       `Funds never leave your Safe without your passkey; cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`,
     ]
-    return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })
+    return this.hold(acc, live, 'activate', batch.calls, summary, extra)
+  }
+
+  /**
+   * The Safe's own gas reserve, bought in the activation batch (self-reserve.ts), or null when this start keeps the
+   * relayer's path (#82). Quoted at the prepare block on the WETH/USDC pools a withdrawal to ETH uses, best rate wins.
+   */
+  private async selfReserve(safe: Address, r: SafeRead): Promise<{ reserve: LiveGasReserve; route: string } | null> {
+    const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
+    let probe: { receive: LiveReceive; quoted: bigint; route: string } | null = null
+    if (r.eth < target && r.usdc > 0n) {
+      try {
+        probe = await this.receiveQuote('ETH', SELF_RESERVE_PROBE_USDC, r.block, this.cfg.policy.execution.slippageBps)
+      } catch (e) {
+        logErr(`[activate] ${safe} no USDC -> ETH quote for the gas reserve:`, e)
+      }
+    }
+    // The pool the spot quote chose, read for its TWAP: no answer (window not covered, provider down) means no swap.
+    const pool = probe ? RECEIVE_ROUTES.ETH.pools.find((x) => entry(x).fee === probe!.receive.fee) : undefined
+    let fairCost: bigint | null = null
+    if (probe && pool) {
+      try {
+        const [cumulatives] = await this.client.readContract({ address: address(pool), abi: poolObserveAbi, functionName: 'observe', args: [[SELF_RESERVE_TWAP_SECONDS, 0]], blockNumber: r.block })
+        const tick = meanTick([cumulatives[0]!, cumulatives[1]!], SELF_RESERVE_TWAP_SECONDS)
+        fairCost = usdcForWeiAtTick(target - r.eth, tick, entry(pool).token0 === 'WETH')
+      } catch (e) {
+        logErr(`[activate] ${safe} no TWAP for the gas reserve swap:`, e)
+      }
+    }
+    const fee = probe?.receive.fee ?? 0
+    const plan = selfReservePlan({ usdc: r.usdc, eth: r.eth, target, probeOut: probe?.quoted ?? null, fairCost, feeBps: BigInt(fee / 100) })
+    if ('skip' in plan) {
+      if (plan.skip !== 'FUNDED') console.log(`[activate] ${safe} gas reserve not bought in the batch: ${plan.skip}${fairCost !== null ? ` (TWAP cost ${fairCost} USDC units)` : ''}`)
+      return null
+    }
+    try {
+      const quoted = await quoteExactInputSingle(this.client, { tokenIn: address('USDC'), tokenOut: address('WETH'), fee, amountIn: plan.amountIn, blockNumber: r.block })
+      if (!selfReserveConfirmed(plan.minOut, quoted)) {
+        console.log(`[activate] ${safe} gas reserve not bought in the batch: QUOTE_SHORT (${plan.amountIn} USDC -> ${quoted} wei, need ${plan.minOut})`)
+        return null
+      }
+    } catch (e) {
+      logErr(`[activate] ${safe} no quote for the gas reserve swap:`, e)
+      return null
+    }
+    const { timestamp } = await this.client.getBlock({ blockNumber: r.block })
+    return { reserve: { fee, amountIn: plan.amountIn, amountOutMinimum: plan.minOut, deadline: timestamp + SELF_RESERVE_DEADLINE_SECONDS }, route: probe!.route }
   }
 
   /** Planned under the account lock: an in-flight engine op (reduce, re-range) lands first, so the plan sees its liquidity. */
@@ -1264,18 +1356,21 @@ export class Operator {
       }
     }
     if (kind === 'activate') {
+      this.assertNoStartConfirming(acc)
       // Only a new activation or a renewal is subject to the failure budget; a proven owner's transfer or stop never is.
       this.assertBudget(acc)
       const usdc = await this.usdcOf(live.safe)
       if (usdc === 0n) return this.arm(acc, p, signature)
       if (usdc > LIVE_CAP_USDC) throw depositOverCap(usdc)
       // Over the day's subsidy budget the approval waits armed (the watcher runs it once the budget frees up or the
-      // Safe holds its own reserve); any other refusal is the owner's to act on and is answered now.
-      const s = this.subsidy(acc, usdc, await this.client.getBalance({ address: live.safe }))
+      // Safe holds its own reserve); any other refusal is the owner's to act on and is answered now. A batch that buys
+      // its own reserve counts it as held.
+      const own = BigInt(p.reserveWei ?? 0)
+      const s = this.subsidy(acc, usdc, (await this.client.getBalance({ address: live.safe })) + own)
       if (s.code === 'SUBSIDY_DAILY_BUDGET') return this.arm(acc, p, signature)
       this.assertSubsidy(s, live.safe)
       // The relayer cannot pay for it now: the signature waits armed and the watcher runs it once the relayer is funded.
-      if (!(await this.relayerCanActivate(acc))) return this.arm(acc, p, signature)
+      if (!(await this.relayerCanActivate(acc, own > 0n))) return this.arm(acc, p, signature)
       this.disarm(acc, 'ARMED_SUPERSEDED')
     }
     const op = this.newOp(acc, kind === 'stop' ? 'exit' : kind)
@@ -1320,6 +1415,17 @@ export class Operator {
   /** Whether this account may not start another activation today. Exit paths never ask. */
   private overBudget(acc: AccountState): boolean {
     return this.recentFailures(acc).length >= MAX_OWNER_FAILURES_PER_DAY
+  }
+
+  /**
+   * No second start while one may still land (a signed copy with no receipt yet): a new approval is signed for the
+   * next Safe nonce, so both could run and enable two grant sets of which only one is stored. Typed for the app.
+   */
+  private assertNoStartConfirming(acc: AccountState): void {
+    if (acc.ops.some(unsettledActivation)) {
+      this.reconcileSoon(acc)
+      throw new HttpError(409, 'START_CONFIRMING', 'a start of this account may still be landing: it is being confirmed, there is nothing to approve again')
+    }
   }
 
   private assertBudget(acc: AccountState): void {
@@ -1501,7 +1607,7 @@ export class Operator {
     const op = this.newOp(acc, 'activate')
     op.code = 'ARMED'
     this.stash(acc, op, p)
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now() }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.reserveWei ? { reserveWei: p.reserveWei, reserveDeadline: p.reserveDeadline } : {}) }
     this.store.save()
     console.log(`[armed] ${acc.accountKey} ${op.opId} armed for ${acc.ctx.address} at Safe nonce ${p.tx.nonce}`)
     return { ...op }
@@ -1517,7 +1623,7 @@ export class Operator {
     const current = acc.ops.find((o) => o.opId === op.opId)
     if (current?.txHash) return this.failOwner(acc, op, 'OWNER_TX_ERROR')
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.reserveWei ? { reserveWei: p.reserveWei, reserveDeadline: p.reserveDeadline } : {}), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
     this.armHold.delete(acc.accountKey)
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
     this.execTried.delete(opKey(acc, op))
@@ -1697,6 +1803,12 @@ export class Operator {
       const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
       if (deployed && nonce !== a.tx.nonce) return this.nonceMoved(acc, a, nonce)
     }
+    // Its reserve swap at or near its deadline can never run: an approval never sent is dropped, and the owner is asked
+    // for a new one (a failed start). One sent before goes on to executeOwner, which leaves it to reconciliation.
+    if (!tried && a.reserveDeadline && reserveExpired(BigInt(a.reserveDeadline), BigInt(Math.floor(Date.now() / 1000)))) {
+      console.log(`[armed] ${acc.accountKey} ${a.opId} gas reserve swap past its deadline: dropped, the owner approves again`)
+      return this.disarm(acc, RESERVE_SWAP_EXPIRED)
+    }
     // Nothing in the Safe: the look was only for the nonce of an approval already sent once.
     if (usdc === 0n) return
     // A failed attempt is not tried again at once: the wait grows with the tries.
@@ -1713,14 +1825,15 @@ export class Operator {
     }
     // The relayer cannot pay for it yet: stay armed, without using up a try. Waiting is not activity, so the watcher
     // slows down on this account as it does on an idle one, instead of reading it every pass.
-    if (!tried && !(await this.relayerCanActivate(acc))) return this.park(acc, ARM_IDLE_MS)
+    const own = BigInt(a.reserveWei ?? 0)
+    if (!tried && !(await this.relayerCanActivate(acc, own > 0n))) return this.park(acc, ARM_IDLE_MS)
     const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
     if (deployed && nonce !== a.tx.nonce) return this.nonceMoved(acc, a, nonce)
     // Too little to deploy a Safe for: stay armed and wait for more (funding reports deployMinUsdc).
     if (!deployed && usdc < MIN_DEPLOY_USDC) return
     // The day's subsidy budget is spent: wait armed, like the failure budget. Other refusals end the attempt below.
-    if (this.subsidy(acc, usdc, await this.client.getBalance({ address: live.safe })).code === 'SUBSIDY_DAILY_BUDGET') return this.park(acc, ARM_BUDGET_HOLD_MS)
-    if (tried && !(await this.relayerCanActivate(acc))) return this.park(acc, ARM_IDLE_MS)
+    if (this.subsidy(acc, usdc, (await this.client.getBalance({ address: live.safe })) + own).code === 'SUBSIDY_DAILY_BUDGET') return this.park(acc, ARM_BUDGET_HOLD_MS)
+    if (tried && !(await this.relayerCanActivate(acc, own > 0n))) return this.park(acc, ARM_IDLE_MS)
     // A copy handed to a provider earlier may still be pending: while the relayer has a transaction not yet mined,
     // nothing is sent again. Mined, it shows in the Safe nonce above; dropped, the pending count falls back.
     if (tried && (await this.relayerHasPending())) return this.park(acc, ARM_RETRY_MS)
@@ -1728,7 +1841,7 @@ export class Operator {
     // cleared when the account starts, or when the attempt ends in a failure that is final.
     this.patchOp(acc, a.opId, { code: undefined })
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
-    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants }
+    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants, reserveWei: a.reserveWei, reserveDeadline: a.reserveDeadline }
     const op = acc.ops.find((o) => o.opId === a.opId)!
     if (a.execSent) this.retried.add(opKey(acc, op))
     try {
@@ -1790,6 +1903,12 @@ export class Operator {
     if ((p.kind === 'stop' || p.kind === 'renew') && p.revokes) o.revokes = p.revokes
     if (p.kind === 'renew' && p.extend) o.extend = true
     if (p.meta) Object.assign(o, p.meta)
+    if (p.kind === 'activate' && p.reserveDeadline) {
+      o.reserveDeadline = p.reserveDeadline
+      // What the chain is asked about this SafeTx when no receipt settles it (settleSigned).
+      o.safeTxHash = p.safeTxHash
+      o.safeNonce = p.tx.nonce.toString()
+    }
     this.store.save()
   }
 
@@ -1802,6 +1921,8 @@ export class Operator {
       this.retried.delete(opKey(acc, op))
     }
     this.store.save()
+    // The one place an owner op is left unresolved with signed copies, whatever path got it there: it is followed.
+    if (unsettledSignedOp(op)) this.ensureFollowSigned()
   }
 
   private async execute(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView): Promise<void> {
@@ -1826,6 +1947,31 @@ export class Operator {
     return true
   }
 
+  /**
+   * An activation whose reserve swap can no longer be sent: the owner approves again. A copy that may be out (handed to
+   * a provider by an earlier attempt, or by this one before the proxy stopped it) may have landed before the deadline:
+   * that one is left to reconciliation, as a retry that meets its Safe nonce spent.
+   */
+  private reserveExpiredOwner(acc: AccountState, op: OpView, maybeOut: boolean): void {
+    if (maybeOut) {
+      this.failOwner(acc, op, RECEIPT_UNKNOWN, { txHash: undefined })
+      this.reconcileSoon(acc)
+      return
+    }
+    this.failOwner(acc, op, RESERVE_SWAP_EXPIRED)
+  }
+
+  /** Unix seconds: the later of this clock and the provider's head, so neither one lagging lets a stale swap through. */
+  private async chainNow(): Promise<bigint> {
+    const wall = BigInt(Math.floor(Date.now() / 1000))
+    try {
+      const { timestamp } = await this.client.getBlock()
+      return timestamp > wall ? timestamp : wall
+    } catch {
+      return wall
+    }
+  }
+
   private async executeOwner(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView): Promise<void> {
     const safe = live.safe
     // Under the account lock, right before anything is sent: what was true at submit may not be any more.
@@ -1834,14 +1980,22 @@ export class Operator {
       const no = this.renewRefusal(acc, op.opId)
       if (no) return this.failOwner(acc, op, no.code)
     }
+    // A reserve swap at or near its deadline reverts: nothing is simulated or sent for it, and the owner approves again.
+    // A copy handed to a provider earlier may have landed before the deadline: that is reconciliation's to find.
+    if (p.kind === 'activate' && p.reserveDeadline && reserveExpired(BigInt(p.reserveDeadline), await this.chainNow())) {
+      logErr(`[owner] ${op.opId} gas reserve swap past its deadline, not sent:`, { deadline: p.reserveDeadline })
+      return this.reserveExpiredOwner(acc, op, this.retried.has(opKey(acc, op)) || this.execTried.has(opKey(acc, op)))
+    }
     // Before any relayer transaction: signature, guards and a simulation of everything about to be sent.
     const refusal = await this.preflight(acc, live, p, signature)
     if (refusal) return this.settleRetried(acc, op, refusal.code) ? undefined : this.failOwner(acc, op, refusal.code, refusal.detail)
     // The subsidy is decided again under the lock and before the deploy: nothing is spent on a start that is refused.
+    // What the batch's own swap pays into the Safe (at least its minimum, or the whole transaction reverts) is held.
     let usdc = 0n
+    const own = p.kind === 'activate' ? BigInt(p.reserveWei ?? 0) : 0n
     if (p.kind === 'activate') {
       usdc = await this.usdcOf(safe)
-      const s = this.subsidy(acc, usdc, await this.client.getBalance({ address: safe }))
+      const s = this.subsidy(acc, usdc, (await this.client.getBalance({ address: safe })) + own)
       if (s.code) {
         this.subsidyAlert(s.code)
         return this.failOwner(acc, op, s.code)
@@ -1861,7 +2015,8 @@ export class Operator {
     }
     if (p.kind === 'activate') {
       const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
-      const eth = await this.client.getBalance({ address: safe })
+      const eth = (await this.client.getBalance({ address: safe })) + own
+      if (own > 0n) console.log(`[owner] ${op.opId} the batch buys the gas reserve: at least ${own} wei into ${safe}`)
       if (eth < target) {
         // Decided once more and recorded with no await in between, so activations of other accounts running at the same
         // time cannot all take the last of the day's budget; recorded before the send, so a top-up whose receipt is
@@ -1917,20 +2072,39 @@ export class Operator {
         return this.failOwner(acc, op, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() })
       }
     }
+    // A reserve swap's deadline travels with the send: the relayer checks it again after its queue and its reads, right
+    // before the broadcast, and drops the job instead of sending it (otto/mamoru#15).
+    const notAfter = p.kind === 'activate' && p.reserveDeadline ? { at: BigInt(p.reserveDeadline) - SELF_RESERVE_DEADLINE_MARGIN_SECONDS, code: RESERVE_SWAP_EXPIRED } : undefined
     // Keep the hash as soon as the tx is out: if the receipt poll fails, reconciliation reads it later.
-    const { hash, receipt } = await this.relayer.send(
-      { to: safe, data },
-      (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }),
-      () => {
-        this.execTried.add(opKey(acc, op))
-        // Written before the provider gets it: a restart from here on must know a copy may be out.
-        if (acc.armed?.opId === op.opId && !acc.armed.execSent) {
-          acc.armed.execSent = true
-          acc.armed.sentAt = Date.now()
-          this.store.save()
-        }
-      },
-    )
+    let sent: { hash: Hex; receipt: TransactionReceipt }
+    // A copy from an earlier attempt that may be out, known before this attempt marks its own.
+    const earlier = this.retried.has(opKey(acc, op)) || this.execTried.has(opKey(acc, op))
+    try {
+      sent = await this.relayer.send(
+        { to: safe, data, ...(notAfter ? { notAfter } : {}) },
+        (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }),
+        (signed) => {
+          // A send with a time limit keeps every signed copy before it leaves: reconciliation reads them by hash.
+          if (notAfter) {
+            const o = acc.ops.find((x) => x.opId === op.opId) as StoredOp | undefined
+            if (o) o.signedTxs = [...(o.signedTxs ?? []), { hash: signed.hash, nonce: signed.nonce, at: Date.now() }]
+            this.store.save()
+          }
+          this.execTried.add(opKey(acc, op))
+          // Written before the provider gets it: a restart from here on must know a copy may be out.
+          if (acc.armed?.opId === op.opId && !acc.armed.execSent) {
+            acc.armed.execSent = true
+            acc.armed.sentAt = Date.now()
+            this.store.save()
+          }
+        },
+      )
+    } catch (e) {
+      if (!(e instanceof SendExpired) && !(e instanceof SendUnsettled)) throw e
+      logErr(`[owner] ${op.opId} ${e instanceof SendExpired ? 'stopped at its time limit' : 'send unsettled'}:`, e.message)
+      return this.reserveExpiredOwner(acc, op, earlier || e.maybeSent)
+    }
+    const { hash, receipt } = sent
     this.patchOp(acc, op.opId, { state: 'submitted', txHash: hash })
     const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
     console.log(`[owner] ${op.opId} tx ${hash} block ${receipt.blockNumber} ${ok ? 'ok' : 'FAILED'}`)
@@ -2013,15 +2187,29 @@ export class Operator {
   }
 
   /** Reads every owner op marked failed with an unknown receipt; a tx that executed becomes confirmed with its side effects. */
-  async reconcileOwner(acc: AccountState): Promise<void> {
+  /** `timer`: a pass of the follow-up timer, the only one that counts towards needsReview. */
+  async reconcileOwner(acc: AccountState, timer = false): Promise<void> {
     const safe = (acc.ctx.address as string).toLowerCase()
     for (const op of acc.ops.filter((o) => o.opId.startsWith('own-') && o.state === 'failed' && o.code === RECEIPT_UNKNOWN)) {
       let found: { hash: Hex; block: number; ok: boolean } | null = null
-      const receipt = op.txHash ? await this.receiptOf(op.txHash as Hex) : null
+      let receipt: TransactionReceipt | null = null
+      if (op.signedTxs?.length) {
+        // Every copy that left is known by hash: only chain evidence settles the op (settleSigned).
+        const s = await this.settleSigned(acc, op as StoredOp, timer)
+        if (!s) continue
+        clearReview(op as StoredOp)
+        if ('close' in s) {
+          console.log(`[reconcile] ${op.opId} settled from the chain: ${s.close} (${s.why})`)
+          this.patchOp(acc, op.opId, { code: s.close })
+          continue
+        }
+        if ('receipt' in s) receipt = s.receipt
+        else found = s.found
+      } else receipt = op.txHash ? await this.receiptOf(op.txHash as Hex) : null
       if (receipt) {
         const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe && l.topics[0] === EXECUTION_SUCCESS)
         found = { hash: receipt.transactionHash, block: Number(receipt.blockNumber), ok }
-      } else found = await this.findOwnerTx(acc, op)
+      } else if (!op.signedTxs?.length) found = await this.findOwnerTx(acc, op)
       if (!found) continue
       const { hash, block } = found
       if (!found.ok) {
@@ -2072,6 +2260,128 @@ export class Operator {
       console.log(`[reconcile] ${op.opId} tx ${hash} landed at block ${block}, confirmed`)
       this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', txHash: hash, block })
     }
+  }
+
+  /** Owner ops waiting on signed copies that may still land. */
+  private unsettledSigned(): AccountState[] {
+    return Object.values(this.store.state.accounts).filter((a) => a.ops.some(unsettledSignedOp))
+  }
+
+  /** Arms the follow-up if it is not armed already (a pass in progress re-arms it when it ends). */
+  private ensureFollowSigned(): void {
+    if (!this.signedTimer && !this.signedRunning) this.followSigned(true)
+  }
+
+  /**
+   * Arms the follow-up of unsettled signed copies (SIGNED_FOLLOW_MS, doubling to the cap); `fresh` starts the wait
+   * from the beginning (a new copy to follow, a restart). Nothing to follow, no timer.
+   */
+  private followSigned(fresh = false): void {
+    if (this.armStopped) return
+    if (fresh) this.signedPasses = 0
+    if (this.signedTimer) clearTimeout(this.signedTimer)
+    this.signedTimer = null
+    if (!this.unsettledSigned().length) return
+    const wait = Math.min(this.signedFollowCapMs, this.signedFollowMs * 2 ** Math.min(this.signedPasses, 16))
+    this.signedTimer = setTimeout(() => {
+      this.signedTimer = null
+      this.signedPasses++
+      this.signedRunning = true
+      const due = this.unsettledSigned()
+      Promise.all(due.map((acc) => this.lock(acc.accountKey).run(() => this.reconcileOwner(acc, true)).catch((e) => logErr(`[reconcile] ${acc.accountKey} follow-up:`, e))))
+        .finally(() => {
+          this.signedRunning = false
+          this.followSigned()
+        })
+    }, wait)
+    // The follow-up never keeps the process alive on its own.
+    this.signedTimer.unref?.()
+  }
+
+  /**
+   * The copies of an owner tx signed with a time limit, settled only by chain evidence, never by a copy not found:
+   * - every copy's receipt is read, and a success that executed this SafeTx wins;
+   * - a reverted copy proves nothing alone (another copy or anyone relaying the calldata may have executed the SafeTx
+   *   first, and this one met its nonce spent): the SafeTx is looked up by its ExecutionSuccess(safeTxHash) once the
+   *   Safe nonce is past it; a revert with the Safe nonce still at the SafeTx's, at the revert's block, is a failure;
+   * - past the swap deadline, at a block whose own timestamp is past it: Safe nonce still at the SafeTx's means it never
+   *   ran and never can (the router refuses after the deadline): RESERVE_SWAP_EXPIRED; past it, ExecutionSuccess says
+   *   whether it ran (confirm) or another transaction took the nonce (SAFE_NONCE_MOVED).
+   * Anything that cannot be read leaves it open. An op still open SIGNED_REVIEW_PASSES timer passes after its window is
+   * marked needsReview (saved, logged once): the timer leaves it, /ops and /metrics show it, and the startup and
+   * GET /ops passes keep reading it (docs/gas-reserve.md has the manual steps).
+   */
+  private async settleSigned(
+    acc: AccountState,
+    op: StoredOp,
+    timer: boolean,
+  ): Promise<{ receipt: TransactionReceipt } | { found: { hash: Hex; block: number; ok: boolean } } | { close: string; why: string } | null> {
+    const safe = acc.ctx.address as Address
+    const executed = (r: TransactionReceipt) => r.status === 'success' && r.logs.some((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
+    const receipts: TransactionReceipt[] = []
+    for (const { hash } of op.signedTxs ?? []) {
+      const r = await lookupReceipt(this.client, hash as Hex)
+      if (r && r !== 'error') receipts.push(r)
+    }
+    const ok = receipts.find(executed)
+    if (ok) return { receipt: ok }
+    const safeNonce = op.safeNonce !== undefined ? BigInt(op.safeNonce) : null
+    try {
+      // A reverted copy: what did the SafeTx's nonce do by that block?
+      for (const r of receipts) {
+        if (safeNonce === null) return { receipt: r }
+        const nonce = await this.client.readContract({ address: safe, abi: safeAbi, functionName: 'nonce', blockNumber: r.blockNumber })
+        if (nonce === safeNonce) return { receipt: r }
+        const ran = await this.executionOf(op, safe, r.blockNumber)
+        if (ran) return { found: { ...ran, ok: true } }
+        return { close: 'SAFE_NONCE_MOVED', why: `copy ${r.transactionHash} reverted after another transaction took Safe nonce ${safeNonce}` }
+      }
+      // No receipt: past the deadline the chain itself says whether the SafeTx ran.
+      if (op.reserveDeadline && safeNonce !== null) {
+        const b = await this.client.getBlock()
+        if (b.number !== null && b.timestamp > BigInt(op.reserveDeadline)) {
+          const nonce = await this.client.readContract({ address: safe, abi: safeAbi, functionName: 'nonce', blockNumber: b.number })
+          if (nonce === safeNonce) return { close: RESERVE_SWAP_EXPIRED, why: `Safe nonce still ${safeNonce} at block ${b.number}, past the swap deadline` }
+          const ran = await this.executionOf(op, safe, b.number)
+          if (ran) return { found: { ...ran, ok: true } }
+          return { close: 'SAFE_NONCE_MOVED', why: `Safe nonce past ${safeNonce} at block ${b.number} with no ExecutionSuccess of this SafeTx` }
+        }
+      }
+    } catch (e) {
+      logErr(`[reconcile] ${op.opId} chain state unavailable, left open:`, e)
+    }
+    if (!timer || op.needsReview || !op.reserveDeadline) return null
+    if ((await this.chainNow()) <= BigInt(op.reserveDeadline) + SELF_RESERVE_DEADLINE_MARGIN_SECONDS) return null
+    op.passesAfterWindow = (op.passesAfterWindow ?? 0) + 1
+    if (op.passesAfterWindow >= SIGNED_REVIEW_PASSES) {
+      op.needsReview = true
+      logErr('[alert]', `${acc.accountKey} ${op.opId}: no chain evidence for its ${op.signedTxs?.length ?? 0} signed copies past the swap deadline; needs review (/ops, docs/gas-reserve.md)`)
+    }
+    this.store.save()
+    return null
+  }
+
+  /**
+   * The ExecutionSuccess of this op's SafeTx on the Safe, up to `toBlock`, searched from before its first signed copy
+   * left (nobody had the calldata earlier). Throws when the logs cannot be read: no answer is not "it did not run".
+   */
+  private async executionOf(op: StoredOp, safe: Address, toBlock: bigint): Promise<{ hash: Hex; block: number } | null> {
+    if (!op.safeTxHash) throw new Error('no safeTxHash kept for this op')
+    const first = Math.min(...(op.signedTxs ?? []).map((t) => t.at ?? Date.parse(op.updatedAt)))
+    const at = await this.client.getBlock({ blockNumber: toBlock })
+    const back = (at.timestamp > BigInt(Math.floor(first / 1000)) ? (at.timestamp - BigInt(Math.floor(first / 1000))) / BLOCK_SECONDS : 0n) + ACTIVATION_SEARCH_MARGIN
+    const fromBlock = toBlock > back ? toBlock - back : 0n
+    const logs = await this.client.getLogs({ address: safe, fromBlock, toBlock })
+    const hit = logs.find((l) => l.topics[0] === EXECUTION_SUCCESS && l.transactionHash && (l.data ?? '0x').slice(0, 66).toLowerCase() === op.safeTxHash!.toLowerCase())
+    return hit ? { hash: hit.transactionHash!, block: Number(hit.blockNumber) } : null
+  }
+
+  /** GET /metrics: owner ops left for a person to settle (settleSigned), with the Safe and op id; hashes are in /ops. */
+  ownerOpsNeedingReview(): { count: number; ops: { safe: string; opId: string }[] } {
+    const ops = Object.values(this.store.state.accounts).flatMap((a) =>
+      a.ops.filter((o) => (o as StoredOp).needsReview && o.state === 'failed' && o.code === RECEIPT_UNKNOWN).map((o) => ({ safe: a.ctx.address as string, opId: o.opId })),
+    )
+    return { count: ops.length, ops }
   }
 
   /** The receipt, or null when the provider does not serve it after a few tries (lagging node, or publicnode's archive gate). */
@@ -2469,6 +2779,31 @@ function retryAt(tries: number, execSent = false): number {
  * send whose reply was lost, and the second answer is then "already known" or a nonce error. Such an op is not sent
  * again; it fails as an unknown receipt and reconcileOwner settles it from the chain.
  */
+/** An owner op left with an unknown receipt and signed copies that may still land: reconciliation follows it. */
+/** An activation that may still land: the account is not offered (nor allowed) another start meanwhile. */
+function unsettledActivation(o: OpView): boolean {
+  return o.opId.startsWith('own-') && o.kind === 'activate' && o.state === 'failed' && o.code === RECEIPT_UNKNOWN && !!(o as StoredOp).signedTxs?.length
+}
+
+/** A settled op is no longer one to review. */
+function clearReview(op: StoredOp): void {
+  op.needsReview = undefined
+  op.passesAfterWindow = undefined
+}
+
+function unsettledSignedOp(o: OpView): boolean {
+  return o.opId.startsWith('own-') && o.state === 'failed' && o.code === RECEIPT_UNKNOWN && !!(o as StoredOp).signedTxs?.length && !(o as StoredOp).needsReview
+}
+
+/** A receipt, null when the node answered that there is none, 'error' when it could not answer. */
+async function lookupReceipt(client: PublicClient, hash: Hex): Promise<TransactionReceipt | null | 'error'> {
+  try {
+    return await client.getTransactionReceipt({ hash })
+  } catch (e) {
+    return (e as Error)?.name === 'TransactionReceiptNotFoundError' ? null : 'error'
+  }
+}
+
 function maybeBroadcast(e: unknown): boolean {
   let cur = e as { message?: string; details?: string; cause?: unknown } | undefined
   for (let i = 0; i < 8 && cur; i++) {
@@ -2514,6 +2849,8 @@ type ReceiveAsset = Exclude<WithdrawAsset, 'USDC'>
  * JPYC slot: official JPYC is not on Base (the "JPYC" at 0xaf94…2fb3 on Base is unofficial and never used),
  * so the yen payout is Dephaser JPYT, USDC-collateralized at an oracle USD/JPY rate.
  */
+const poolObserveAbi = parseAbi(['function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128s)'])
+
 const RECEIVE_ROUTES: Record<ReceiveAsset, { tokenOut: string; receive: LiveReceive['asset']; pools: string[] }> = {
   EURC: { tokenOut: 'EURC', receive: 'EURC', pools: ['pool:EURC/USDC/500'] },
   ETH: { tokenOut: 'WETH', receive: 'ETH', pools: ['pool:WETH/USDC/500', 'pool:WETH/USDC/3000'] },
@@ -2544,6 +2881,13 @@ function fmtUnits(v: bigint, decimals: number): string {
 function fmtUsdc(v: bigint): string {
   const s = v.toString().padStart(7, '0')
   return `${s.slice(0, -6)}.${s.slice(-6, -4)}`
+}
+
+/** Every decimal that is there, none that is not: an amount the owner signs to spend, shown exactly. */
+function fmtUnitsExact(v: bigint, decimals: number): string {
+  const s = v.toString().padStart(decimals + 1, '0')
+  const frac = s.slice(-decimals).replace(/0+$/, '')
+  return frac ? `${s.slice(0, -decimals)}.${frac}` : s.slice(0, -decimals)
 }
 
 /** Cents rounded up: an amount the owner must reach is never understated. */

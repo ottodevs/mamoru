@@ -36,10 +36,33 @@ const WITNESS_TTL_MS = 15_000
 /** A trusted provider serves a log range ahead of every public one when it takes it in at most this many requests. */
 const TRUSTED_LOG_MAX_REQUESTS = 4n
 
+/**
+ * A send with a time limit (otto/mamoru#15): the relayer puts the unix second at which its transaction may no longer
+ * go out in this header. Only this proxy reads it; upstream requests are built afresh and never carry it. Once the
+ * clock reaches it, the signed transaction is not handed to any provider again, on any pass.
+ */
+export const NOT_AFTER_HEADER = 'x-mamoru-not-after'
+/**
+ * The proxy's own verdict on a send it stopped at the time limit, in a response header only the proxy sets: the
+ * JSON-RPC error it answers with could be anything a provider can say too, so it is never the signal. `not-sent`: no
+ * provider was handed the transaction. `maybe-sent`: one was (and refused or did not answer): it may be out. A
+ * provider's response headers never reach the relayer (each answer is a new response built here).
+ */
+export const SEND_VERDICT_HEADER = 'x-mamoru-send-verdict'
+export type SendVerdict = 'not-sent' | 'maybe-sent'
+/** JSON-RPC error code of that answer: informative only, a provider may use it too. */
+const NOT_AFTER_CODE = -32098
+
+/** The header's value, or null when absent or not a unix second. */
+export function notAfterOf(header: string | null): number | null {
+  if (!header || !/^\d{1,12}$/.test(header.trim())) return null
+  return Number(header.trim())
+}
+
 /** Calls whose answer decides nothing: a signed transaction is the same bytes whoever relays it. Any provider may take them. */
 const ANY_PROVIDER = new Set(['eth_sendRawTransaction'])
 
-function isLoopback(url: string): boolean {
+export function isLoopback(url: string): boolean {
   const h = new URL(url).hostname
   return h === '127.0.0.1' || h === 'localhost' || h === '[::1]'
 }
@@ -233,8 +256,12 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    * On a rate/capacity refusal, move to the next provider at once; two passes over the list. The list is the
    * trusted providers, or every provider for a send. Always returns a result/error object.
    */
-  async function raw(body: any, isChunk = false, start = 0): Promise<any> {
+  /** Answers the proxy built itself for a stopped send, with their verdict: identity, not content, marks them. */
+  const verdicts = new WeakMap<object, SendVerdict>()
+  async function raw(body: any, isChunk = false, start = 0, notAfter: number | null = null): Promise<any> {
     let last: any = null
+    /** Providers this signed transaction was handed to so far: from one on, it may be out. */
+    let asked = 0
     const base = ANY_PROVIDER.has(body?.method) ? providers : trusted
     // `start` rotates the list: a retry asks the next provider first.
     const list = [...base.slice(start % base.length), ...base.slice(0, start % base.length)]
@@ -244,7 +271,14 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       const tries = 1
       if (pi === list.length) await Bun.sleep(250)
       for (let attempt = 0; attempt < tries; attempt++) {
+        // A send with a time limit is checked before every provider, the first and each fallback alike.
+        if (notAfter !== null && body?.method === 'eth_sendRawTransaction' && Date.now() / 1000 >= notAfter) {
+          const stopped = { jsonrpc: '2.0', id: body?.id ?? null, error: { code: NOT_AFTER_CODE, message: `not forwarded: past the send's time limit ${notAfter}${asked > 0 ? `, after ${asked} provider(s) were asked: it may be out` : ''}` } }
+          verdicts.set(stopped, asked > 0 ? 'maybe-sent' : 'not-sent')
+          return stopped
+        }
         try {
+          if (body?.method === 'eth_sendRawTransaction') asked++
           const r = await post(url, body)
           if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk, Date.now(), caller.getStore()))
           const errObj = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
@@ -422,8 +456,12 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const n = BigInt(await one('eth_blockNumber', [])) - lag
     return n
   }
-  async function handle(msg: Req, seen: Witnessed): Promise<unknown> {
-    const r = await handleInner(msg, seen)
+  async function handle(msg: Req, seen: Witnessed, notAfter: number | null = null): Promise<unknown> {
+    const r = await handleInner(msg, seen, notAfter)
+    if (r && typeof r === 'object' && verdicts.has(r)) {
+      console.log(`[rpc] eth_sendRawTransaction stopped at its time limit ${notAfter}: ${verdicts.get(r)}`)
+      return r
+    }
     // Name the call behind an invalid-params refusal: the engine only sees the message.
     const e = (r as any)?.error
     if (e && msg.method === 'eth_sendRawTransaction') {
@@ -435,14 +473,20 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     } else if (e && (e.code === -32602 || /invalid param/i.test(String(e.message)))) console.log(`[rpc] ${msg.method} refused (${e.code}): ${redactSecrets(JSON.stringify(msg.params ?? [])).slice(0, 300)}`)
     return r
   }
-  async function handleInner(msg: Req, seen: Witnessed): Promise<unknown> {
+  async function handleInner(msg: Req, seen: Witnessed, notAfter: number | null): Promise<unknown> {
     try {
       if (msg.method === 'eth_blockNumber') return { jsonrpc: '2.0', id: msg.id, result: `0x${(await head()).toString(16)}` }
       if (msg.method === 'eth_getBlockByNumber' && (msg.params?.[0] === 'latest' || msg.params?.[0] === 'pending')) {
         return { jsonrpc: '2.0', id: msg.id, result: await one('eth_getBlockByNumber', [`0x${(await head()).toString(16)}`, msg.params?.[1] ?? false]) }
       }
       if (msg.method === 'eth_getLogs') return { jsonrpc: '2.0', id: msg.id, result: await getLogs(msg, seen) }
-      let r = await raw({ ...msg })
+      let r = await raw({ ...msg }, false, 0, notAfter)
+      const verdict = verdicts.get(r)
+      if (verdict) {
+        const answer = { ...r, id: msg.id }
+        verdicts.set(answer, verdict)
+        return answer
+      }
       // A block by number that this node does not have yet comes back null: ask again.
       // Each retry starts at the next trusted provider: another node of the upstream, or a trusted fallback, may have it.
       for (let i = 0; i < 3 && msg.method.startsWith('eth_getBlockBy') && r && 'result' in r && r.result === null; i++) {
@@ -462,8 +506,13 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       if (req.method !== 'POST') return new Response('method not allowed', { status: 405 })
       const payload = (await req.json()) as Req | Req[]
       const seen: Witnessed = new Map()
-      const answer = () => (Array.isArray(payload) ? Promise.all(payload.map((m) => handle(m, seen))) : handle(payload, seen))
-      return Response.json(await caller.run(componentOf(new URL(req.url).pathname), answer))
+      const notAfter = notAfterOf(req.headers.get(NOT_AFTER_HEADER))
+      const answer = () => (Array.isArray(payload) ? Promise.all(payload.map((m) => handle(m, seen, notAfter))) : handle(payload, seen, notAfter))
+      const out = await caller.run(componentOf(new URL(req.url).pathname), answer)
+      // The verdict of a stopped send travels in a header set here and nowhere else; the worst of a batch counts.
+      const found = (Array.isArray(out) ? out : [out]).map((r) => (r && typeof r === 'object' ? verdicts.get(r) : undefined)).filter(Boolean)
+      const verdict = found.includes('maybe-sent') ? 'maybe-sent' : found[0]
+      return Response.json(out, verdict ? { headers: { [SEND_VERDICT_HEADER]: verdict } } : undefined)
     },
   })
   return { url: `http://127.0.0.1:${server.port}/`, stop: () => server.stop(true) }
