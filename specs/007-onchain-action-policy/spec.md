@@ -237,7 +237,9 @@ the account address. No engine, precheck or grant code uses it yet. No Lab run o
   three attacks through `handleOps`; measure enable and renewal gas.
 - T2 `packages/policy`: v4 grants (above), `Init` encoding in `toSmartSession`.
 - T3 engine: swap minimum and price limit from `swapBounds` (or the same math off chain), decrease minimums from
-  `decreaseMins`, mint through the policy.
+  `decreaseMins`, mint through the policy. The TWAP drifts between the engine's read and the userOp's validation,
+  so the engine computes its bounds at a narrower band (e.g. 0.8 x band): higher minimums, a tighter limit, still
+  inside what the policy accepts a few blocks later.
 - T4 precheck mirrors (a)-(c) so a refused call is not sent.
 - T5 Lab: bands and budgets per pool against 2024-2026 data; how often exits wait.
 - T6 third-party audit of the contract (open question).
