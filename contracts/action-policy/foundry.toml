@@ -1,0 +1,17 @@
+# Spec 007 (otto/mamoru#151): on-chain action policy, PoC. Not deployed anywhere.
+# Dependencies are not vendored: ./install.sh fetches them at pinned commits into lib/ (gitignored).
+[profile.default]
+src = "src"
+test = "test"
+libs = ["lib"]
+solc_version = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 10000
+via_ir = false
+remappings = [
+  "@uniswap/v3-core/=lib/v3-core/",
+  "@uniswap/v3-periphery/=lib/v3-periphery/",
+  "forge-std/=lib/forge-std/src/",
+]
+
