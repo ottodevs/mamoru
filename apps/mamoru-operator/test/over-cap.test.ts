@@ -2471,6 +2471,32 @@ describe('renewing the approval of a running account', () => {
     w.op.shutdown()
   })
 
+  test('otto/mamoru#140: a Start whose grant state changes between submit and execution is checked again under the lock', async () => {
+    for (const change of ['superseded', 'unreadable'] as const) {
+      const { w, acc } = await running()
+      await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))
+      const t = await w.op.prepareActivate(ctx)
+      type Sweep = { enforceGrants(a: AccountState): Promise<boolean> }
+      const o = w.op as unknown as Sweep
+      const real = o.enforceGrants.bind(w.op)
+      let calls = 0
+      // The submit check passes; by the time the locked execution runs, an earlier grant is enabled again (or the
+      // chain cannot be read).
+      o.enforceGrants = async (a) => {
+        calls++
+        if (calls === 1) return real(a)
+        if (change === 'unreadable') return false
+        acc.superseded = [`0x${'ee'.repeat(32)}` as Hex]
+        return true
+      }
+      const sent = w.sent.length
+      const op = await w.op.submit(ctx, 'activate', sign(t))
+      expect(op, change).toMatchObject({ kind: 'activate', state: 'failed', code: change === 'superseded' ? 'STOP_FIRST' : 'GRANT_CHECK_UNAVAILABLE' })
+      expect(w.sent.length, change).toBe(sent)
+      expect(acc.active, change).toBe(false)
+    }
+  })
+
   test('otto/mamoru#140: past 2000 tracked ids a full grant check alerts, and still reads every id (no retirement)', async () => {
     const { w, acc } = await running()
     const old = Array.from({ length: 2100 }, (_, i) => toHex(i + 1, { size: 32 }))

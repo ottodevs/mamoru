@@ -2483,6 +2483,13 @@ export class Operator {
       const no = this.renewRefusal(acc, op.opId)
       if (no) return this.failOwner(acc, op, no.code)
     }
+    // otto/mamoru#140: a Start's checks at submit ran outside this lock; the grant state may have changed since (a
+    // reconciliation, a settle pass). Checked again here, under the lock, right before anything is sent.
+    if (p.kind === 'activate') {
+      if (!(await this.enforceGrants(acc))) return this.failOwner(acc, op, 'GRANT_CHECK_UNAVAILABLE')
+      if (acc.superseded?.length) return this.failOwner(acc, op, 'STOP_FIRST')
+      if (acc.active) return this.failOwner(acc, op, 'ALREADY_ACTIVE')
+    }
     // Before any relayer transaction: signature, guards and a simulation of everything about to be sent.
     const refusal = await this.preflight(acc, live, p, signature)
     if (refusal) return this.settleRetried(acc, op, refusal.code) ? undefined : this.failOwner(acc, op, refusal.code, refusal.detail)
