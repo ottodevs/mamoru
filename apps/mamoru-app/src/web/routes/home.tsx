@@ -9,7 +9,7 @@ import { BasescanLink, Brand, InfoPopover, Modal, Waiting } from '../components/
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
-import { belowMinimumOf, cbbtcPrice, ceilCents, DUST_USDC, holdings, humanMessage, overCapOf, split, usd, usdInput, usdPlain, type Split } from '../lib/money.ts'
+import { belowMinimumOf, cbbtcPrice, ceilCents, DUST_USDC, holdings, humanMessage, overCapOf, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, positionAmounts, positionTokens, progressLine } from '../lib/positions.ts'
@@ -537,11 +537,11 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
               </span>
               <input className="field pl-7" value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" placeholder="0.00" autoComplete="off" />
             </label>
-            <button type="button" className="chipbtn" onClick={() => setAmount(usdInput(s.maxWithdraw))}>
+            <button type="button" className="chipbtn" onClick={() => setAmount(usdExactInput(s.maxWithdraw))}>
               Max
             </button>
           </div>
-          <p className="m-0 text-[0.85rem] text-stone">${usd(s.maxWithdraw)} available</p>
+          <p className="m-0 text-[0.85rem] text-stone">${usd((s.maxWithdraw / 10_000n) * 10_000n)} available</p>
           {asset !== 'USDC' ? (
             <p className="m-0 flex items-center gap-2 text-[0.88rem]" data-testid="receive-estimate">
               <TokenMark symbol={asset} size={16} />
