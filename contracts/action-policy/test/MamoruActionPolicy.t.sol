@@ -298,6 +298,57 @@ contract MamoruActionPolicyTest is Test {
         assertEq(_check(NPM, loose), 1);
     }
 
+    /// Review point (agy, PR #63): a range inside the band gets zero minimums. The loss still stays within the band,
+    /// because liquidity converts at prices inside its own range, never at the manipulated spot.
+    function test_narrowRangeDecreaseLossStaysInBand() public {
+        int24 s = _spot(POOL_BTC);
+        int24 lower = ((s - 40) / 10) * 10;
+        int24 upper = ((s + 40) / 10) * 10;
+        MintParams memory m = MintParams(USDC, CBBTC, 500, lower, upper, 20_000e6, 0.2e8, 0, 0, safe, block.timestamp);
+        _exec(USDC, abi.encodeCall(IERC20Min.approve, (address(policy), 20_000e6)));
+        _exec(CBBTC, abi.encodeCall(IERC20Min.approve, (address(policy), 0.2e8)));
+        (uint256 tokenId, uint128 liq, uint256 in0, uint256 in1) = abi.decode(
+            _exec(address(policy), abi.encodeCall(MamoruActionPolicy.mint, (m))), (uint256, uint128, uint256, uint256)
+        );
+        (uint256 min0, uint256 min1) = policy.decreaseMins(safe, POOL_BTC, tokenId, liq);
+        assertEq(min0 + min1, 0, "range inside the band: both minimums are zero");
+        _push(POOL_BTC, CBBTC, USDC, 500, 2_000); // spot 2,000 ticks up, far outside the band
+        bytes memory dec =
+            abi.encodeCall(INPMFull.decreaseLiquidity, (DecreaseLiquidityParams(tokenId, liq, 0, 0, block.timestamp)));
+        assertEq(_check(NPM, dec), 0);
+        (uint256 out0, uint256 out1) = abi.decode(_exec(NPM, dec), (uint256, uint256));
+        // Value in USDC at the TWAP price: what went in vs what came out.
+        int24 twap = _twapOf(POOL_BTC);
+        uint256 vin = in0 + _btcInUsdc(in1, twap);
+        uint256 vout = out0 + _btcInUsdc(out1, twap);
+        uint256 lossBps = vout >= vin ? 0 : (vin - vout) * 10_000 / vin;
+        console2.log("narrow range, spot +2000 ticks: decrease loss vs TWAP value, bps", lossBps);
+        assertLe(lossBps, BAND, "loss must stay within the band");
+    }
+
+    function _twapOf(address pool) internal view returns (int24 t) {
+        uint32[] memory ago = new uint32[](2);
+        ago[0] = TWAP;
+        (int56[] memory c,) = IUniswapV3Pool(pool).observe(ago);
+        int56 d = c[1] - c[0];
+        t = int24(d / int56(uint56(TWAP)));
+        if (d < 0 && (d % int56(uint56(TWAP)) != 0)) t--;
+    }
+
+    /// cbBTC (token1) in USDC (token0) at `tick`: amount1 / 1.0001^tick.
+    function _btcInUsdc(uint256 amount1, int24 tick) internal pure returns (uint256) {
+        uint256 sp = TickMath.getSqrtRatioAtTick(tick);
+        return (amount1 << 192) / (sp * sp);
+    }
+
+    function test_supportsSmartSessionInterfaceIds() public view {
+        // smartsessions: IActionPolicy is IPolicy, so type(IActionPolicy).interfaceId == checkAction.selector and
+        // type(IPolicy).interfaceId == initializeWithMultiplexer.selector (interfaceId excludes inherited functions).
+        assertTrue(policy.supportsInterface(0x01ffc9a7));
+        assertTrue(policy.supportsInterface(MamoruActionPolicy.checkAction.selector));
+        assertTrue(policy.supportsInterface(MamoruActionPolicy.initializeWithMultiplexer.selector));
+    }
+
     // ------------------------------------------------------------ (b) an unrelated NFT cannot be touched
 
     function test_unrelatedNftDecreaseReverts() public {

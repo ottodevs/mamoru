@@ -40,7 +40,7 @@ refusals. It enforces:
 | (a) price | `exactInputSingle`: `amountOutMinimum >= quoteAtTick(twap -/+ band) x (1 - fee)` and a non-zero `sqrtPriceLimitX96` no farther than the same band edge. `decreaseLiquidity`: `amount0Min`/`amount1Min` at least the position's amounts at the band edges (token0 at `twap + band`, token1 at `twap - band`). Mint: refused at execution when `|spot - twap| > band`. | Swap and decrease: calldata at validation; the router and the position manager enforce the minimums at execution. Mint: execution. |
 | (b) positions | Decrease, collect, burn only for a tokenId in the account's admitted set **and** still owned by the account. Mint goes through `MamoruActionPolicy.mint` (the grant names it instead of the manager's `mint`): the policy pulls the desired amounts, mints with the Safe as recipient, returns the rest, and admits the tokenId the manager returns. Pool and fee must be the grant's pool. | Validation (admission read), execution (admission write). |
 | (c) budgets | Per account and pool, token0 and token1 spent by swaps (`amountIn`) and mints (`amountDesired`) are summed per window (`budgetWindow`, e.g. 1 day) and over the whole approval (the generation). Charged at validation, call by call, so every call of a batch counts and a reverted execution is not refunded. | Validation. |
-| (d) renewal | Init data carries a `generation`. A higher generation retires every lower-generation config of the account on the next check, and a lower one cannot be enabled again. The renewal uses a new session key (new permissionId, new ConfigIds). | Validation; key freshness is checked off chain at activation (below). |
+| (d) renewal | Init data carries a `generation`, account-wide. A higher generation retires every lower-generation config of the account (all pools) on the next check, and a lower one cannot be enabled again. So every renewal re-enables all pools at the new generation; adding a pool without a renewal uses the current generation. The renewal uses a new session key (new permissionId, new ConfigIds). | Validation; key freshness is checked off chain at activation (below). |
 
 `initializeWithMultiplexer` accepts only the SmartSession address it was deployed with: unlike `UniActionPolicy`,
 this policy keeps account-level state (generation, budgets, admitted set) that an arbitrary "multiplexer" must not
@@ -71,6 +71,13 @@ same-block swap only changes the tick that counts from the next second). So a sw
 is the same one the router enforces at execution, even if the attacker orders a manipulation between validation
 and execution in its own bundle. Decrease minimums are enforced by the manager at execution. The mint's spot check
 runs at execution, right before the manager's call.
+
+Decrease has no spot check of its own, and needs none. The minimums are the position's amounts at the band
+edges; for a range that lies inside the band both are zero. That is still safe: liquidity converts at prices
+inside its own range, never at the spot, so a decrease at a pushed spot returns what the range would have at the
+nearest band edge or better. A spot pushed past an edge into a range that extends past it fails the edge minimum.
+`test_narrowRangeDecreaseLossStaysInBand` pushes spot 2,000 ticks past a +-40-tick range and measures 0 bp loss at
+TWAP value.
 
 ## How SmartSession calls it
 
@@ -211,7 +218,7 @@ session key that was ever enabled for the account; the operator deletes the old 
 chain, the generation retires every older config of this policy even if a `removeSession` were missing. The v2/v3
 grants do not consult this policy, so their `removeSession` in the same batch is required.
 
-## What the PoC shows (11 tests, all pass)
+## What the PoC shows (13 tests, all pass)
 
 - `test_normalSwapPasses`, `test_normalMintDecreaseCollectBurnPass`: the engine's ops with the minimums from the
   policy's `swapBounds` / `decreaseMins` views pass validation and execute.
@@ -223,6 +230,8 @@ grants do not consult this policy, so their `removeSession` in the same batch is
   Safe as approved operator: decrease, collect, burn refused.
 - `test_batchOverBudgetReverts`: the third 25k swap of one batch is refused (60k per window), a mint draws on the
   same budget, the window refills, the approval total does not.
+- `test_narrowRangeDecreaseLossStaysInBand`, `test_supportsSmartSessionInterfaceIds` (smartsessions' `IActionPolicy`
+  inherits `IPolicy`, so its interfaceId is `checkAction.selector` alone).
 - `test_renewalRetiresOldGrant`, `test_onlySmartSession`, `test_measureManipulationDepth`, `test_gasDirectMintBaseline`.
 
 ## What the PoC does not show
