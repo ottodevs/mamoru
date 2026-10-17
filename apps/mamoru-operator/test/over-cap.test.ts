@@ -2257,6 +2257,95 @@ describe('renewing the approval of a running account', () => {
     expect(acc.deactivated?.code).toBe('GRANTS_PARTLY_REVOKED')
   })
 
+  test('otto/mamoru#140: Start is refused (GRANT_CHECK_UNAVAILABLE) while the grant sweep cannot read the chain at the account floor', async () => {
+    const { w, acc } = await running()
+    // Stopped through the real path, so Start is otherwise allowed.
+    await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))
+    expect(acc.active).toBe(false)
+    type Read = { readContract(a: { functionName: string }): Promise<unknown> }
+    const client = (w.op as unknown as { client: Read }).client
+    const read = client.readContract.bind(client)
+    client.readContract = async (a) => {
+      if (a.functionName === 'isPermissionEnabled') throw new Error('HTTP request failed. Status: 429')
+      return read(a)
+    }
+    expect(await w.op.prepareActivate(ctx).catch((e: unknown) => e)).toMatchObject({ status: 503, code: 'GRANT_CHECK_UNAVAILABLE' })
+    client.readContract = read
+    // One prepared while reads worked is refused at submit when they fail again.
+    const t = await w.op.prepareActivate(ctx)
+    w.knobs.head = 10n
+    expect(await w.op.submit(ctx, 'activate', sign(t)).catch((e: unknown) => e)).toMatchObject({ status: 503, code: 'GRANT_CHECK_UNAVAILABLE' })
+    expect(acc.active).toBe(false)
+    w.knobs.head = 100n
+    expect(await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))).toMatchObject({ kind: 'activate', state: 'confirmed' })
+  })
+
+  test('otto/mamoru#140: the engine review is held while its grant check fails; it runs again once a check reads the chain', async () => {
+    const { w, acc } = await running()
+    type Gate = { grantGate(a: AccountState, at: number): Promise<boolean>; grantsChecked: Map<string, number> }
+    const g = w.op as unknown as Gate
+    type Read = { readContract(a: { functionName: string }): Promise<unknown> }
+    const client = (w.op as unknown as { client: Read }).client
+    const read = client.readContract.bind(client)
+    client.readContract = async (a) => {
+      if (a.functionName === 'isPermissionEnabled') throw new Error('HTTP request failed. Status: 429')
+      return read(a)
+    }
+    const t0 = Date.now()
+    expect(await g.grantGate(acc, t0)).toBe(false)
+    // Not counted as checked: the very next tick asks again, and holds again.
+    expect(g.grantsChecked.has(acc.accountKey)).toBe(false)
+    expect(await g.grantGate(acc, t0 + 1)).toBe(false)
+    // A provider behind the account holds it too.
+    client.readContract = read
+    w.knobs.head = 10n
+    expect(await g.grantGate(acc, t0 + 2)).toBe(false)
+    w.knobs.head = 100n
+    expect(await g.grantGate(acc, t0 + 3)).toBe(true)
+    expect(acc.active).toBe(true)
+    // Verified: the next reviews within GRANTS_CHECK_MS go ahead without a read.
+    expect(await g.grantGate(acc, t0 + 4)).toBe(true)
+  })
+
+  test('otto/mamoru#140: a full sweep over a long grant history sends its batches one at a time, capped, and resumes where it left off', async () => {
+    const { w, acc } = await running()
+    await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))
+    const old = Array.from({ length: 1200 }, (_, i) => toHex(i + 1, { size: 32 }))
+    acc.revoked.push(...old)
+    w.knobs.batchGrants = true
+    type C = { call(a: unknown): Promise<unknown> }
+    const client = (w.op as unknown as { client: C }).client
+    const call = client.call.bind(client)
+    let inflight = 0
+    let peak = 0
+    client.call = async (a) => {
+      inflight++
+      peak = Math.max(peak, inflight)
+      await Bun.sleep(1)
+      try {
+        return await call(a)
+      } finally {
+        inflight--
+      }
+    }
+    type Sweep = { enforceGrants(a: AccountState): Promise<boolean> }
+    const sweep = () => (w.op as unknown as Sweep).enforceGrants(acc)
+    const total = old.length + acc.revoked.length - old.length
+    const passes = Math.ceil(total / 500)
+    const results: boolean[] = []
+    for (let i = 0; i < passes; i++) {
+      w.knobs.batchedGrantReads = 0
+      results.push(await sweep())
+      expect(w.knobs.batchedGrantReads).toBeLessThanOrEqual(500)
+    }
+    expect(peak).toBe(1)
+    // Verified only at the end of the cycle that read the whole list.
+    expect(results).toEqual([...Array(passes - 1).fill(false), true])
+    // Start waits for that: refused mid-cycle, allowed once a cycle completes.
+    for (let i = 0; i < passes - 1; i++) expect(await w.op.prepareActivate(ctx).catch((e: unknown) => e)).toMatchObject({ code: 'GRANT_CHECK_UNAVAILABLE' })
+    expect((await w.op.prepareActivate(ctx)).summary.length).toBeGreaterThan(0)
+  })
+
   test('otto/mamoru#140: reconciliation does not apply an older renewal on a head below the account floor', async () => {
     const { w, acc } = await running()
     const had = acc.grants.map((g) => g.permissionId)
@@ -2305,15 +2394,16 @@ describe('renewing the approval of a running account', () => {
 
   test('otto/mamoru#140 invariants I1-I3 hold after every settle pass, over every combination of owner ops and chain events', async () => {
     type Owner = 'none' | 'some' | 'all'
-    const cases: { renewalRan: boolean; stopRan: boolean; read: boolean; owner: Owner; reenable: boolean; start: 'before' | 'after'; lag: boolean }[] = []
+    const cases: { renewalRan: boolean; stopRan: boolean; read: boolean; owner: Owner; reenable: boolean; start: 'before' | 'after'; lag: boolean; flaky: boolean }[] = []
     for (const renewalRan of [false, true])
       for (const stopRan of [false, true])
         for (const read of [false, true])
           for (const owner of ['none', 'some', 'all'] as const)
             for (const reenable of renewalRan ? [false] : [false, true])
               for (const start of ['before', 'after'] as const)
-                for (const lag of [false, true]) cases.push({ renewalRan, stopRan, read, owner, reenable, start, lag })
-    expect(cases.length).toBe(144)
+                for (const lag of [false, true])
+                  for (const flaky of [false, true]) cases.push({ renewalRan, stopRan, read, owner, reenable, start, lag, flaky })
+    expect(cases.length).toBe(288)
     for (const c of cases) {
       const label = JSON.stringify(c)
       const { w, acc } = await running()
@@ -2380,10 +2470,25 @@ describe('renewing the approval of a running account', () => {
         await w.op.prepareRenew(ctx).catch(() => undefined)
       }
       const tryStart = async (when: string) => {
+        // flaky: the grant reads fail while Start is asked (a 429 storm): it must never start blind.
+        type Read = { readContract(a: { functionName: string }): Promise<unknown> }
+        const client = (w.op as unknown as { client: Read }).client
+        const read = client.readContract.bind(client)
+        if (c.flaky)
+          client.readContract = async (a) => {
+            if (a.functionName === 'isPermissionEnabled') throw new Error('HTTP request failed. Status: 429')
+            return read(a)
+          }
         const res = await w.op.prepareActivate(ctx).then((t) => w.op.submit(ctx, 'activate', sign(t))).catch((e: unknown) => e)
-        if (res instanceof HttpError) expect(['ALREADY_ACTIVE', 'STOP_FIRST'], `${label} ${when}`).toContain(res.code)
-        else expect(res, `${label} ${when}`).toMatchObject({ kind: 'activate', state: 'confirmed' })
-        check(`after Start ${when}`)
+        client.readContract = read
+        if (res instanceof HttpError) expect(c.flaky ? ['ALREADY_ACTIVE', 'GRANT_CHECK_UNAVAILABLE'] : ['ALREADY_ACTIVE', 'STOP_FIRST'], `${label} ${when}`).toContain(res.code)
+        else {
+          expect(c.flaky, `${label} ${when}: started on unread grants`).toBe(false)
+          expect(res, `${label} ${when}`).toMatchObject({ kind: 'activate', state: 'confirmed' })
+        }
+        // Invariants are established by a pass that read the chain: with the reads failing none could, so only
+        // "nothing started" is asserted above; the settle pass after it checks them all.
+        if (!c.flaky) check(`after Start ${when}`)
       }
       if (c.lag) {
         // A provider behind the account first: nothing may be decided on that view. No engine whose grants are all
@@ -2407,7 +2512,7 @@ describe('renewing the approval of a running account', () => {
         check('after Start and settle')
       }
     }
-  }, 120_000)
+  }, 240_000)
 
   test('otto/mamoru#140: an unread renewal is forgotten only when every one of its grants reads disabled', async () => {
     const { w, acc } = await running()

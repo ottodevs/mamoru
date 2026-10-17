@@ -68,6 +68,8 @@ const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint25
 const GRANTS_CHECK_MS = 300_000
 /** Permission ids per engine-loop grant sweep (one Multicall3 chunk): the engine's always, the others in rotation. */
 const GRANTS_SWEEP_MAX = 100
+/** Other permission ids per full sweep (settle passes, Start), read in sequential batches of BATCH_MAX_CALLS. */
+const GRANTS_FULL_MAX = 500
 
 /** Engine-loop sweeps within which every non-engine id the account knows is read again (see enforceGrants). */
 export function sweepsToCover(others: number, engine: number): number {
@@ -380,6 +382,9 @@ export class Operator {
   private readonly grantsChecked = new Map<string, number>()
   /** Where the engine loop's rotating grant sweep resumes, per account (enforceGrants). */
   private readonly sweepCursor = new Map<string, number>()
+  /** Full sweeps over a list longer than GRANTS_FULL_MAX: where the next resumes, and whether this cycle read it all. */
+  private readonly fullCursor = new Map<string, number>()
+  private readonly fullCycleOk = new Map<string, boolean>()
   /** Since when (ms) engine review has been held for a pending non-activate prepare on this account; see reviewHold. */
   private readonly reviewHeldSince = new Map<string, number>()
   private armTimer: ReturnType<typeof setTimeout> | null = null
@@ -1226,6 +1231,18 @@ export class Operator {
   }
 
   /**
+   * Whether the engine may review now (invariant I1): its grants were verified within GRANTS_CHECK_MS, or the sweep
+   * run now read the chain. A sweep that fails or is deferred (provider behind the account) returns false: the review
+   * is held, and the sweep is tried again at the next tick, not GRANTS_CHECK_MS later.
+   */
+  private async grantGate(acc: AccountState, at: number): Promise<boolean> {
+    if (at - (this.grantsChecked.get(acc.accountKey) ?? 0) < GRANTS_CHECK_MS) return true
+    if (!(await this.enforceGrants(acc, { full: false }))) return false
+    this.grantsChecked.set(acc.accountKey, at)
+    return true
+  }
+
+  /**
    * otto/mamoru#140 invariants, from one block of the chain:
    * - I1: the engine runs only while every grant it uses reads enabled. One disabled (revoked by a transaction we
    *   did not send), whatever owner op is pending: the loop stops, the account is inactive with a typed reason
@@ -1262,18 +1279,31 @@ export class Operator {
     // one is read again within ceil(others / (GRANTS_SWEEP_MAX - engine)) sweeps (sweepsToCover).
     const list = [...others.values()]
     let window = list
-    if (opts.full === false && list.length > GRANTS_SWEEP_MAX - engine.length) {
-      const size = Math.max(1, GRANTS_SWEEP_MAX - engine.length)
-      const start = (this.sweepCursor.get(acc.accountKey) ?? 0) % list.length
-      window = Array.from({ length: Math.min(size, list.length) }, (_, i) => list[(start + i) % list.length]!)
-      this.sweepCursor.set(acc.accountKey, (start + size) % list.length)
+    // A full sweep reads at most GRANTS_FULL_MAX other ids per call, in sequential batches; a longer list is read
+    // over several calls, resuming where the last left off, and the call is verified only when it ends a cycle
+    // over the whole list in which every window read the chain (fullCycleOk).
+    let endsCycle = true
+    const full = opts.full !== false
+    const cap = full ? GRANTS_FULL_MAX : Math.max(1, GRANTS_SWEEP_MAX - engine.length)
+    if (list.length > cap) {
+      const cursors = full ? this.fullCursor : this.sweepCursor
+      const start = (cursors.get(acc.accountKey) ?? 0) % list.length
+      if (full && start === 0) this.fullCycleOk.set(acc.accountKey, true)
+      window = Array.from({ length: cap }, (_, i) => list[(start + i) % list.length]!)
+      const next = start + cap
+      endsCycle = next >= list.length
+      cursors.set(acc.accountKey, endsCycle ? 0 : next)
+    }
+    const fail = () => {
+      if (full && list.length > cap) this.fullCycleOk.set(acc.accountKey, false)
+      return false
     }
     const universe = [...engine, ...window]
     if (!universe.length) return true
     const block = await this.headAtLeast(acc, 0n)
-    if (block === null) return false
+    if (block === null) return fail()
     const on = await this.enabledAt(acc, universe, block)
-    if (!on) return false
+    if (!on) return fail()
     const enabled = new Set(universe.filter((_, i) => on[i]).map(low))
     let changed = false
     if (acc.active && engine.some((id) => !enabled.has(low(id)))) {
@@ -1300,7 +1330,12 @@ export class Operator {
       changed = true
     }
     if (changed) this.store.save()
-    return true
+    if (!full || list.length <= cap) return true
+    // Part of a cycle over a long list: verified only at its end, and only if every window of it read the chain.
+    if (!endsCycle) return false
+    const ok = this.fullCycleOk.get(acc.accountKey) === true
+    this.fullCycleOk.delete(acc.accountKey)
+    return ok
   }
 
   /** The account's floor and `min`: no grant is read at a block below it (see headAtLeast). */
@@ -1404,11 +1439,16 @@ export class Operator {
   /** Whether each of `ids` is enabled on the Safe at block `block`; null when any read fails. */
   private async enabledAt(acc: AccountState, ids: Hex[], block: bigint): Promise<boolean[] | null> {
     try {
-      // One Multicall3 batch pinned at `block` (chunked at BATCH_MAX_CALLS); a call that fails in it is read on its own.
-      const batch = new Batch(this.client, MULTICALL3, block)
-      const handles = ids.map((id) => batch.add(contractRead(this.client, { address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [id, acc.ctx.address as Address], blockNumber: block })))
-      await batch.run()
-      return await Promise.all(handles.map(async (h) => !!(await h.need())))
+      // Multicall3 batches pinned at `block`, BATCH_MAX_CALLS ids each, sent one after another (no burst); a call that
+      // fails in its batch is read on its own.
+      const out: boolean[] = []
+      for (let i = 0; i < ids.length; i += BATCH_MAX_CALLS) {
+        const batch = new Batch(this.client, MULTICALL3, block)
+        const handles = ids.slice(i, i + BATCH_MAX_CALLS).map((id) => batch.add(contractRead(this.client, { address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [id, acc.ctx.address as Address], blockNumber: block })))
+        await batch.run()
+        for (const h of handles) out.push(!!(await h.need()))
+      }
+      return out
     } catch (e) {
       logErr(`[settle] ${acc.accountKey} grants at block ${block} unreadable, left for later:`, e)
       return null
@@ -1480,8 +1520,10 @@ export class Operator {
     const { acc, live } = this.account(ctx)
     // otto/mamoru#140: what is enabled on the Safe now decides a Start (I1, I3): an engine on a revoked grant is
     // stopped, grants revoked since leave `superseded`, untracked ones join it.
-    await this.lock(acc.accountKey).run(() => this.enforceGrants(acc))
+    // Refused while that read cannot be made (a failed read, a provider behind the account): never decided blind.
+    const checked = await this.lock(acc.accountKey).run(() => this.enforceGrants(acc))
     if (acc.active) throw new HttpError(409, 'ALREADY_ACTIVE', 'the engine is already active for this account')
+    if (!checked) throw new HttpError(503, 'GRANT_CHECK_UNAVAILABLE', 'the approvals on your Safe could not be read just now: nothing was changed, try again in a minute')
     // An activation does not revoke grants left enabled (a partly revoked renewal's survivors, a renewal that landed
     // after a stop): they would stay beside the new approval. A stop revokes them first.
     if (acc.superseded?.length) throw new HttpError(409, 'STOP_FIRST', 'earlier Mamoru grants are still enabled on your Safe: stop first to revoke them, then start')
@@ -1858,6 +1900,7 @@ export class Operator {
       }
     }
     if (kind === 'activate') {
+      if (!(await this.lock(acc.accountKey).run(() => this.enforceGrants(acc)))) throw new HttpError(503, 'GRANT_CHECK_UNAVAILABLE', 'the approvals on your Safe could not be read just now: nothing was changed, try again in a minute')
       if (acc.superseded?.length) throw new HttpError(409, 'STOP_FIRST', 'earlier Mamoru grants are still enabled on your Safe: stop first to revoke them, then start')
       // Only a new activation or a renewal is subject to the failure budget; a proven owner's transfer or stop never is.
       this.assertBudget(acc)
@@ -2291,6 +2334,16 @@ export class Operator {
     // A copy handed to a provider earlier may still be pending: while the relayer has a transaction not yet mined,
     // nothing is sent again. Mined, it shows in the Safe nonce above; dropped, the pending count falls back.
     if (tried && (await this.relayerHasPending())) return this.park(acc, ARM_RETRY_MS)
+    // otto/mamoru#140: a full grant sweep right before it runs. Unreadable: held (GRANT_CHECK_UNAVAILABLE), tried
+    // again on a later pass; earlier grants found enabled: held until a stop (STOP_FIRST).
+    if (!(await this.enforceGrants(acc))) {
+      logErr(`[armed] ${acc.accountKey} ${a.opId} held: grant check unavailable (GRANT_CHECK_UNAVAILABLE)`, undefined)
+      return this.park(acc, ARM_RETRY_MS)
+    }
+    if (acc.superseded?.length) {
+      logErr(`[armed] ${acc.accountKey} ${a.opId} held: ${acc.superseded.length} earlier grants still enabled (STOP_FIRST)`, undefined)
+      return this.park(acc, ARM_CAP_HOLD_MS)
+    }
     // The approval stays in the state file through the attempt: a restart in the middle must not lose it. It is
     // cleared when the account starts, or when the attempt ends in a failure that is final.
     this.patchOp(acc, a.opId, { code: undefined })
@@ -2815,11 +2868,14 @@ export class Operator {
           }
           // I1 (otto/mamoru#140): every grant the engine uses must read enabled, checked at least every
           // GRANTS_CHECK_MS: one revoked elsewhere stops the loop here, before the engine acts on it.
-          if (now - (this.grantsChecked.get(acc.accountKey) ?? 0) >= GRANTS_CHECK_MS) {
-            // Counted as checked only when the sweep read the chain; a failed or deferred one is tried at the next tick.
-            if (await this.enforceGrants(acc, { full: false })) this.grantsChecked.set(acc.accountKey, now)
-            if (runner.stopped || !acc.active) return
+          if (!(await this.grantGate(acc, now))) {
+            // Never acts on a grant set it could not verify: no review this tick, the check is tried again at the next.
+            console.log(`[engine ${acc.accountKey}] grant check unavailable, review held (GRANT_CHECK_UNAVAILABLE)`)
+            safeMetrics(() => this.engineHealth.record(acc.accountKey, false, 'GRANT_CHECK_UNAVAILABLE', classifyEngineError('GRANT_CHECK_UNAVAILABLE')))
+            more = true
+            return
           }
+          if (runner.stopped || !acc.active) return
           const startedAt = Date.now()
           const r = await engine.review()
           this.revokeManage(engine)
