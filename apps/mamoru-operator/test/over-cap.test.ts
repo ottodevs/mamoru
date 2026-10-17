@@ -37,27 +37,29 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false as boolean | null, enabled: new Set<string>(), batchGrants: false, head: 100n, batchedGrantReads: 0, multicalls: 0, pending: null as { grants?: { permissionId: string }[]; revokes?: string[] } | null, logs: [] as { stx: Hex; hash: Hex; block: bigint }[], enabledFromBlock: 0n, noHistory: false, usdt: 0n }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
   const factory = deployCall(liveAccountFromContext(ctx))
   const client = {
-    getBlockNumber: async () => 100n,
+    getBlockNumber: async () => knobs.head,
     getBlock: async () => ({ number: 100n, timestamp: 1_790_000_000n }),
     getTransactionReceipt: async () => {
       throw new Error('no receipt')
     },
-    getLogs: async () => [],
+    getLogs: async () => knobs.logs.map((l) => ({ address: SAFE, topics: [EXECUTION_SUCCESS, l.stx], transactionHash: l.hash, blockNumber: l.block })),
     getCode: async () => (chain.deployed ? '0x01' : undefined),
     getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? knobs.relayerWei : 0n),
     getTransactionCount: async ({ blockTag }: { blockTag?: string }) => (blockTag === 'pending' ? 5 + knobs.relayerPending : 5),
-    readContract: async ({ address: at, functionName, blockNumber }: { address: string; functionName: string; blockNumber?: bigint }) => {
+    readContract: async ({ address: at, functionName, blockNumber, args }: { address: string; functionName: string; blockNumber?: bigint; args?: readonly unknown[] }) => {
       if (functionName === 'slot0') return [1n << 96n, 0, 0, 0, 0, 0, true]
       if (functionName === 'nonce') return chain.nonce
       if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : 0n
       if (functionName === 'isPermissionEnabled') {
         if (blockNumber !== undefined && knobs.noHistory) throw new Error('missing trie node: historical state not available')
+        // grantsEnabled null: the chain model, `enabled` (what the owner txs sent through the relayer enabled and revoked).
+        if (knobs.grantsEnabled === null) return knobs.enabled.has(String(args?.[0]).toLowerCase())
         return knobs.grantsEnabled && (blockNumber === undefined || blockNumber >= knobs.enabledFromBlock)
       }
       throw new Error(`unexpected read ${functionName}`)
@@ -72,6 +74,7 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
     call: async ({ to, data }: { to: string; data: Hex }) => {
       // readSafe batches its reads through Multicall3: same answers as readContract above.
       if (to.toLowerCase() === address('Multicall3').toLowerCase()) {
+        knobs.multicalls++
         const word = (v: bigint) => toHex(v, { size: 32 })
         return {
           data: answerAggregate3(data, (target, callData) => {
@@ -80,6 +83,11 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
             if (callData.startsWith('0x4d2301cc')) return word(0n)
             // readSafe (otto/mamoru#135): the block number rides inside this same call.
             if (callData.startsWith(toFunctionSelector('getBlockNumber()'))) return word(100n)
+            // isPermissionEnabled(bytes32,address) from the chain model, when a test asks the batch to answer it.
+            if (knobs.batchGrants && callData.startsWith(toFunctionSelector('isPermissionEnabled(bytes32,address)'))) {
+              knobs.batchedGrantReads++
+              return word(knobs.enabled.has(`0x${callData.slice(10, 74)}`.toLowerCase()) ? 1n : 0n)
+            }
             throw new Error('execution reverted')
           }),
         }
@@ -101,8 +109,14 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
       const isDeploy = tx.to.toLowerCase() === factory.to.toLowerCase()
       if (isDeploy) chain.deployed = true
       else if (tx.data) chain.nonce++
+      // The owner tx being executed lands: its revocations and grants on the chain model (see track).
+      if (!isDeploy && tx.data && knobs.execOk && knobs.pending && tx.to.toLowerCase() === SAFE.toLowerCase()) {
+        for (const id of knobs.pending.revokes ?? []) knobs.enabled.delete(id.toLowerCase())
+        for (const g of knobs.pending.grants ?? []) knobs.enabled.add(g.permissionId.toLowerCase())
+        knobs.pending = null
+      }
       const logs = isDeploy || !knobs.execOk ? [] : [{ address: SAFE, topics: [EXECUTION_SUCCESS] }]
-      return { hash, receipt: { transactionHash: hash, status: 'success', blockNumber: 101n, logs } as unknown as TransactionReceipt }
+      return { hash, receipt: { transactionHash: hash, status: 'success', blockNumber: 99n, logs } as unknown as TransactionReceipt }
     },
   } as unknown as Relayer
   const state = { accounts: {} as Record<string, AccountState> }
@@ -110,7 +124,10 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
   const cfg = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES[policyId]!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 } satisfies OperatorConfig
   const op = new Operator(cfg, client, relayer, store)
   ;(op as unknown as { retryMs: number }).retryMs = 0
-  return { op, chain, sent, simulated, called, knobs, factory, state }
+  const w = { op, chain, sent, simulated, called, knobs, factory, state }
+  // The chain model by default: grants enabled and revoked by the owner txs the relayer sent (see track).
+  track(w as never)
+  return w
 }
 
 function der(r: bigint, s: bigint): Uint8Array {
@@ -1163,6 +1180,8 @@ describe('an activation waits for the relayer instead of failing', () => {
     w.knobs.grantsEnabled = true
     // The fake chain's head is block 100; the activation executed in block 63.
     w.knobs.enabledFromBlock = 63n
+    // otto/mamoru#140 (I2): what proves it is the Safe's ExecutionSuccess of its own Safe tx hash in that block.
+    w.knobs.logs.push({ stx: acc.armed!.safeTxHash, hash: `0x${'63'.repeat(32)}`, block: 63n })
     acc.armed!.sentAt = Date.now() - 60_000
     acc.ops.find((o) => o.opId === op.opId)!.updatedAt = '2026-10-01T00:00:00.000Z'
     acc.armed!.retryAt = Date.now() - 1
@@ -1197,14 +1216,35 @@ describe('an activation waits for the relayer instead of failing', () => {
     for (let i = 0; i < 5; i++) await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
     expect(acc.active).toBe(false)
     expect(acc.armed?.opId).toBe(op.opId)
-    // The head catches up: the account starts from the block it executed in.
+    // The head catches up: the account starts from the block it executed in (its own ExecutionSuccess there).
     w.knobs.enabledFromBlock = 97n
+    w.knobs.logs.push({ stx: acc.armed!.safeTxHash, hash: `0x${'97'.repeat(32)}`, block: 97n })
     await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
     expect(acc.active).toBe(true)
     expect(acc.depositsAfter).toBe('97')
   })
 
-  test('no provider serves the state of past blocks: after three passes the account starts, engine from the head, deposits from the floor', async () => {
+  test('otto/mamoru#140: the signed grants enabled without the ExecutionSuccess of its Safe tx hash do not start the account', async () => {
+    const w = world(20_000_000n)
+    w.knobs.onSend = (t) => {
+      if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
+    }
+    const op = await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+    await Bun.sleep(5)
+    const acc = w.state.accounts.k!
+    // The owner enabled the same sessions in a transaction of their own (another Safe tx hash), spending the nonce.
+    w.chain.nonce = 1n
+    w.knobs.grantsEnabled = true
+    w.knobs.enabledFromBlock = 63n
+    w.knobs.logs.push({ stx: `0x${'77'.repeat(32)}`, hash: `0x${'63'.repeat(32)}`, block: 63n })
+    acc.armed!.retryAt = Date.now() - 1
+    await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
+    expect(acc.active).toBe(false)
+    expect(acc.armed).toBeUndefined()
+    expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+  })
+
+  test('no provider serves the state of past blocks: after three passes it is left to reconciliation, never started from grant state', async () => {
     const w = world(20_000_000n)
     w.knobs.onSend = (t) => {
       if (t.to.toLowerCase() === SAFE.toLowerCase() && 'data' in t) throw Object.assign(new Error('Missing or invalid parameters.'), { code: -32000 })
@@ -1222,11 +1262,10 @@ describe('an activation waits for the relayer instead of failing', () => {
       expect(acc.active).toBe(false)
     }
     await priv(w.op).fireArmed(acc, 20_000_000n).catch(() => undefined)
-    expect(acc.active).toBe(true)
-    // The engine starts 150 blocks past the unproven head, so no node still before the execution is ever reviewed;
-    // deposits are read from before the execution.
-    expect(acc.historyFromBlock).toBe('250')
-    expect(BigInt(acc.depositsAfter)).toBeLessThan(100n)
+    // otto/mamoru#140 (I2): without the block of its execution there is no ExecutionSuccess to check: not started.
+    expect(acc.active).toBe(false)
+    expect(acc.armed).toBeUndefined()
+    expect(acc.ops.find((o) => o.kind === 'activate')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
   })
 
   test('a retry whose execTransaction fails on chain is left to reconciliation: the first copy may have executed', async () => {
@@ -1515,12 +1554,42 @@ describe('an activation waits for the relayer instead of failing', () => {
 })
 
 // One approval lasts a year and is renewed with one tap: the same grants with a fresh validity, nothing moved.
+/**
+ * The chain model for grants: what an owner transaction executed through the relayer enables and revokes is applied
+ * to `knobs.enabled` when the relayer sends it (the op being executed, see executeOwner). Settlements from chain
+ * proofs do not change it: they only read what is there.
+ */
+function track(w: ReturnType<typeof world>): void {
+  type P = { kind: string; tx?: unknown; grants?: { permissionId: string }[]; revokes?: string[] }
+  const o = w.op as unknown as { executeOwner(a: AccountState, l: unknown, p: P, s: unknown, op: unknown): Promise<void> }
+  const exec = o.executeOwner.bind(w.op)
+  w.knobs.grantsEnabled = null
+  o.executeOwner = (a, l, p, s, op) => {
+    w.knobs.pending = p
+    return exec(a, l, p, s, op).finally(() => {
+      w.knobs.pending = null
+    })
+  }
+}
+
+/**
+ * An owner op of unknown outcome that did run: its grants enabled, its revocations applied on the chain model, and
+ * the Safe's ExecutionSuccess of its own Safe tx hash in the logs (I2: the only proof besides its receipt).
+ */
+function landed(w: ReturnType<typeof world>, op: { opId: string; safeTxHash?: Hex; ownerGrants?: { permissionId: string }[]; revokes?: string[] }): void {
+  op.safeTxHash ??= keccak256(stringToHex(op.opId))
+  for (const id of op.revokes ?? []) w.knobs.enabled.delete(id.toLowerCase())
+  for (const g of op.ownerGrants ?? []) w.knobs.enabled.add(g.permissionId.toLowerCase())
+  w.knobs.logs.push({ stx: op.safeTxHash, hash: keccak256(stringToHex(`tx-${op.opId}`)), block: 99n })
+}
+
 describe('renewing the approval of a running account', () => {
   type Loop = { startLoop(a: AccountState): void }
   /** A running account: activated through the real path, with the engine loop stubbed (the fake chain has no engine RPC). */
   const running = async () => {
     const w = world(20_000_000n)
     ;(w.op as unknown as Loop).startLoop = () => {}
+    track(w)
     const op = await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
     const acc = w.state.accounts.k!
     expect(acc.active).toBe(true)
@@ -1604,6 +1673,7 @@ describe('renewing the approval of a running account', () => {
   test('otto/mamoru#137: a renewal without manage-any/convert-any makes no re-ranging claim', async () => {
     const w = world(20_000_000n, 'conservador-v1')
     ;(w.op as unknown as Loop).startLoop = () => {}
+    track(w)
     await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
     const tx = await w.op.prepareRenew(ctx)
     const text = tx.summary.join(' ')
@@ -1637,7 +1707,7 @@ describe('renewing the approval of a running account', () => {
       const fresh = [{ name: 'enter-swap:x', grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }]
       acc.ops.push({ opId: 'own-7-renew', kind: 'renew', updatedAt: new Date().toISOString(), ownerGrants: fresh, ...state } as never)
       // Whatever the chain would say: the removal of a session that is not there is taken.
-      w.knobs.grantsEnabled = false
+      // (the chain model: the engine's grants enabled, the other op's not)
       await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))
       expect(acc.revoked).toContain(`0x${'ee'.repeat(32)}`)
     }
@@ -1646,7 +1716,7 @@ describe('renewing the approval of a running account', () => {
   test('no renewal while a stop is on its way, or while the engine has an operation that is not settled', async () => {
     const { w, acc } = await running()
     // The engine's grants are enabled on the Safe throughout: no stop has run.
-    w.knobs.grantsEnabled = true
+    // (the chain model: the engine's grants enabled, the other op's not)
     acc.ops.push({ opId: 'own-7-exit', kind: 'exit', state: 'submitted', updatedAt: new Date().toISOString() } as never)
     expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'STOP_IN_FLIGHT' })
     // A stop whose receipt was not read is still on its way as far as anyone knows.
@@ -1673,8 +1743,8 @@ describe('renewing the approval of a running account', () => {
     const old = acc.grants.map((g) => g.permissionId)
     const fresh = due([{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }])
     acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: old } as never)
-    // The chain says it ran: its grants are the engine's now, and the next renewal revokes those, not the old ones.
-    w.knobs.grantsEnabled = true
+    // The chain says it ran (its own ExecutionSuccess): its grants are the engine's now, and the next renewal revokes those, not the old ones.
+    landed(w, acc.ops.at(-1) as never)
     const tx = await w.op.prepareRenew(ctx)
     expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'confirmed', code: 'EXEC_OK' })
     expect(acc.grants.map((g) => g.permissionId)).toEqual([`0x${'ee'.repeat(32)}`])
@@ -1697,6 +1767,7 @@ describe('renewing the approval of a running account', () => {
     const capped = async () => {
       const w = world(20_000_000n)
       ;(w.op as unknown as Loop).startLoop = () => {}
+      track(w)
       perSession(w)
       await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
       const acc = w.state.accounts.k!
@@ -1732,7 +1803,7 @@ describe('renewing the approval of a running account', () => {
       expect(before.every((id) => acc.grants.some((g) => g.permissionId === id))).toBe(true)
       expect(before.some((id) => acc.revoked.includes(id))).toBe(false)
       expect(acc.superseded ?? []).toEqual([])
-      expect(acc.grantsFromBlock).toBe('101')
+      expect(acc.grantsFromBlock).toBe('99')
       expect(acc.epoch).toBe(epoch + 1)
       expect(acc.managedTokenIds).toEqual(['7'])
       expect((await w.op.funding(ctx)).approval?.missing).toBeUndefined()
@@ -1805,10 +1876,11 @@ describe('renewing the approval of a running account', () => {
       const { w, acc } = await capped()
       const tx = await w.op.prepareRenew(ctx)
       acc.grants = acc.grants.map((g, i) => (i === 0 ? { ...g, permissionId: `0x${'dd'.repeat(32)}` as Hex } : g))
+      w.knobs.enabled.add(`0x${'dd'.repeat(32)}`)
       expect(await w.op.submit(ctx, 'renew', sign(tx)).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'RENEWAL_STALE' })
       const again = await w.op.prepareRenew(ctx)
       acc.ops.push({ opId: 'own-9-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: [{ ...acc.grants[0]!, permissionId: `0x${'ee'.repeat(32)}` as Hex }], revokes: [] } as never)
-      w.knobs.grantsEnabled = false
+      // (the chain model: the engine's grants enabled, the other op's not)
       expect(await w.op.submit(ctx, 'renew', sign(again)).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'RENEWAL_STALE' })
     })
 
@@ -1817,7 +1889,7 @@ describe('renewing the approval of a running account', () => {
       const old = acc.grants.map((g) => g.permissionId)
       acc.ops.push({ opId: 'own-9-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: [{ ...acc.grants[0]!, permissionId: `0x${'ee'.repeat(32)}` as Hex }], revokes: old } as never)
       // The chain says it did not run.
-      w.knobs.grantsEnabled = false
+      // (the chain model: the engine's grants enabled, the other op's not)
       const tx = await w.op.prepareRenew(ctx)
       expect(tx.summary.join(' ')).toContain('revoked in the same transaction')
       const op = await w.op.submit(ctx, 'renew', sign(tx))
@@ -1830,7 +1902,7 @@ describe('renewing the approval of a running account', () => {
       const had = acc.grants.map((g) => g.permissionId)
       const extra = { name: 'manage-any:pool:USDC/cbBTC/500', grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }
       acc.ops.push({ opId: 'own-9-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: [extra], revokes: [], extend: true } as never)
-      w.knobs.grantsEnabled = true
+      landed(w, acc.ops.at(-1) as never)
       await w.op.prepareRenew(ctx)
       expect(acc.ops.find((o) => o.opId === 'own-9-renew')).toMatchObject({ state: 'confirmed' })
       expect(acc.grants.map((g) => g.permissionId)).toEqual([...had, `0x${'ee'.repeat(32)}`])
@@ -1848,19 +1920,461 @@ describe('renewing the approval of a running account', () => {
     // The account's grants are no longer the ones this renewal was built to revoke.
     const again = await w.op.prepareRenew(ctx)
     acc.grants = acc.grants.map((g, i) => (i === 0 ? { ...g, permissionId: `0x${'dd'.repeat(32)}` as Hex } : g))
+    w.knobs.enabled.add(`0x${'dd'.repeat(32)}`)
     expect(await w.op.submit(ctx, 'renew', sign(again)).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'RENEWAL_STALE' })
   })
 
-  test('a stop whose receipt was never read and that did run is applied from the chain: nothing is renewed after it', async () => {
+  test('a stop whose receipt was never read and that did run is applied from its own receipt: nothing is renewed after it', async () => {
     const { w, acc } = await running()
     const had = acc.grants.map((g) => g.permissionId)
-    acc.ops.push({ opId: 'own-7-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date(Date.now() - 2 * 3_600_000).toISOString() } as never)
-    // The engine's grants are no longer enabled on the Safe: the stop executed.
-    w.knobs.grantsEnabled = false
+    const stx = `0x${'5a'.repeat(32)}` as Hex
+    const hash = `0x${'ab'.repeat(32)}` as Hex
+    acc.ops.push({ opId: 'own-7-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', txHash: hash, safeTxHash: stx, updatedAt: new Date(Date.now() - 2 * 3_600_000).toISOString() } as never)
+    w.knobs.enabled.clear()
+    // Its receipt is read now: the Safe executed this stop's own Safe tx hash.
+    type Rc = { getTransactionReceipt(a: { hash: Hex }): Promise<unknown> }
+    ;(w.op as unknown as { client: Rc }).client.getTransactionReceipt = async () => ({ transactionHash: hash, status: 'success', blockNumber: 99n, logs: [{ address: SAFE, topics: [EXECUTION_SUCCESS, stx] }] })
     expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'NOT_ACTIVE' })
     expect(acc.active).toBe(false)
-    expect(acc.ops.find((o) => o.opId === 'own-7-exit')).toMatchObject({ state: 'confirmed' })
+    expect(acc.ops.find((o) => o.opId === 'own-7-exit')).toMatchObject({ state: 'confirmed', txHash: hash, block: 99 })
     expect(had.every((id) => acc.revoked.includes(id))).toBe(true)
+    expect(acc.deactivated).toBeUndefined()
+  })
+
+  test('otto/mamoru#140: grants revoked by another transaction do not confirm an unread stop: the account stops, the stop stays unconfirmed', async () => {
+    for (const proof of ['none', 'other-safe-tx'] as const) {
+      const { w, acc } = await running()
+      const had = acc.grants.map((g) => g.permissionId)
+      const stx = `0x${'5a'.repeat(32)}` as Hex
+      const hash = `0x${'ab'.repeat(32)}` as Hex
+      acc.ops.push({ opId: 'own-7-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', safeTxHash: stx, ...(proof === 'other-safe-tx' ? { txHash: hash } : {}), updatedAt: new Date(Date.now() - 2 * 3_600_000).toISOString() } as never)
+      // The owner revoked the grants elsewhere (spending the nonce): the stop's own transaction never landed, or the
+      // receipt read carries another Safe tx hash.
+      w.knobs.enabled.clear()
+      type Rc = { getTransactionReceipt(a: { hash: Hex }): Promise<unknown> }
+      if (proof === 'other-safe-tx') (w.op as unknown as { client: Rc }).client.getTransactionReceipt = async () => ({ transactionHash: hash, status: 'success', blockNumber: 99n, logs: [{ address: SAFE, topics: [EXECUTION_SUCCESS, `0x${'77'.repeat(32)}`] }] })
+      expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'NOT_ACTIVE' })
+      // The engine cannot act any more: the account is not running, its grants are recorded as revoked.
+      expect(acc.active).toBe(false)
+      expect(had.every((id) => acc.revoked.includes(id))).toBe(true)
+      // But the stop (its position close and swaps) is not reported as done: it stays an unread receipt.
+      expect(acc.ops.find((o) => o.opId === 'own-7-exit')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      expect(acc.deactivated).toMatchObject({ code: 'GRANTS_REVOKED_ELSEWHERE', opId: 'own-7-exit', block: '100' })
+    }
+  })
+
+  test('otto/mamoru#140: an unread stop with only some engine grants revoked elsewhere stops the engine, keeps the stop unconfirmed and the rest tracked', async () => {
+    for (const which of ['first', 'last'] as const) {
+    const { w, acc } = await running()
+    const had = acc.grants.map((g) => g.permissionId)
+    const off = which === 'first' ? had[0]! : had.at(-1)!
+    let stopped = 0
+    ;(w.op as unknown as { stopLoop(k: string): void }).stopLoop = () => void stopped++
+    acc.ops.push({ opId: 'own-7-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', safeTxHash: `0x${'5a'.repeat(32)}`, revokes: had, updatedAt: new Date(Date.now() - 2 * 3_600_000).toISOString() } as never)
+    // Another Safe transaction revoked the engine's first grant; the others are still enabled.
+    type Read = { readContract(a: { functionName: string; args?: readonly unknown[] }): Promise<unknown> }
+    const client = (w.op as unknown as { client: Read }).client
+    const read = client.readContract.bind(client)
+    client.readContract = async (a) => (a.functionName === 'isPermissionEnabled' ? a.args![0] !== off : read(a))
+    expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'NOT_ACTIVE' })
+    expect(stopped).toBeGreaterThan(0)
+    expect(acc.active).toBe(false)
+    expect(acc.ops.find((o) => o.opId === 'own-7-exit')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(acc.deactivated).toMatchObject({ code: 'GRANTS_PARTLY_REVOKED', opId: 'own-7-exit' })
+    expect(acc.revoked).toContain(off)
+    expect([...(acc.superseded ?? [])].sort()).toEqual(had.filter((id) => id !== off).sort())
+    // Start waits for a stop; the next stop revokes the grants still enabled.
+    expect(await w.op.prepareActivate(ctx).catch((e: unknown) => e)).toMatchObject({ code: 'STOP_FIRST' })
+    await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))
+    expect(had.every((id) => acc.revoked.includes(id))).toBe(true)
+    expect(acc.superseded ?? []).toEqual([])
+    }
+  })
+
+  test('otto/mamoru#140: mixed engine grants stop the engine even with an unread renewal pending, with or without an unread stop', async () => {
+    for (const withStop of [true, false]) {
+      const { w, acc } = await running()
+      const had = acc.grants.map((g) => g.permissionId)
+      const ee = `0x${'ee'.repeat(32)}` as Hex
+      const ff = `0x${'ff'.repeat(32)}` as Hex
+      const fresh = [ee, ff].map((permissionId) => ({ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId }))
+      // A renewal with its receipt unread that has not run (its grants disabled, its Safe nonce not spent).
+      acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: had, safeNonce: '5' } as never)
+      if (withStop) acc.ops.push({ opId: 'own-8-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', safeTxHash: `0x${'5a'.repeat(32)}`, revokes: had, updatedAt: new Date().toISOString() } as never)
+      // Another transaction revoked the engine's last grant; the others stay enabled.
+      const off = had.at(-1)!
+      type Read = { readContract(a: { functionName: string; args?: readonly unknown[] }): Promise<unknown> }
+      const client = (w.op as unknown as { client: Read }).client
+      const read = client.readContract.bind(client)
+      client.readContract = async (a) => (a.functionName === 'isPermissionEnabled' ? a.args![0] !== off && a.args![0] !== ee && a.args![0] !== ff : read(a))
+      await w.op.prepareRenew(ctx).catch(() => undefined)
+      expect(acc.active).toBe(false)
+      expect(acc.deactivated).toMatchObject({ code: 'GRANTS_PARTLY_REVOKED', opId: withStop ? 'own-8-exit' : 'own-7-renew' })
+      expect([...(acc.superseded ?? [])].sort()).toEqual(had.filter((id) => id !== off).sort())
+      // Neither pending op is settled by this: the renewal is still for its all-grants check, the stop unconfirmed.
+      expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      if (withStop) expect(acc.ops.find((o) => o.opId === 'own-8-exit')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      // The next stop revokes everything still tracked, the renewal's grants too.
+      await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))
+      expect([...had, ee, ff].every((id) => acc.revoked.includes(id))).toBe(true)
+    }
+  })
+
+  test('otto/mamoru#140: an unread stop left `submitted` by a restart is not confirmed by grant state either', async () => {
+    const { w, acc } = await running()
+    acc.ops.push({ opId: 'own-7-exit', kind: 'exit', state: 'submitted', safeTxHash: `0x${'5a'.repeat(32)}`, updatedAt: new Date(Date.now() - 2 * 3_600_000).toISOString() } as never)
+    w.knobs.enabled.clear()
+    await w.op.prepareRenew(ctx).catch(() => undefined)
+    expect(acc.active).toBe(false)
+    expect(acc.ops.find((o) => o.opId === 'own-7-exit')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(acc.deactivated?.code).toBe('GRANTS_REVOKED_ELSEWHERE')
+  })
+
+  test('otto/mamoru#140: an unread renewal with only some of its grants revoked since keeps the enabled ones tracked for the next stop', async () => {
+    for (const [disabled, extend] of [['first', false], ['last', false], ['first', true]] as const) {
+      const { w, acc } = await running()
+      const old = acc.grants.map((g) => g.permissionId)
+      const ee = `0x${'ee'.repeat(32)}` as Hex
+      const ff = `0x${'ff'.repeat(32)}` as Hex
+      const fresh = [ee, ff].map((permissionId) => ({ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId }))
+      acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: extend ? [] : old, extend, safeNonce: '1' } as never)
+      // It ran (its own ExecutionSuccess is in the logs) and spent nonce 1; the owner then removed one of its grants elsewhere.
+      landed(w, acc.ops.at(-1) as never)
+      w.chain.nonce = 3n
+      const on = disabled === 'first' ? ff : ee
+      w.knobs.enabled.delete(on === ff ? ee : ff)
+      await w.op.prepareRenew(ctx).catch(() => undefined)
+      // Not applied as the engine's approval (part of it is gone), not forgotten either.
+      expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'RENEWAL_PARTLY_REVOKED' })
+      expect(acc.superseded).toContain(on)
+      if (extend) {
+        // An extension revoked none of the engine's grants: it keeps running on them.
+        expect(acc.active).toBe(true)
+        expect(acc.grants.map((g) => g.permissionId)).toEqual(old)
+      } else {
+        // A renewal that ran revoked the engine's grants: the engine has nothing left to act with, so it is not left
+        // running on revoked grants. The account stops, recorded as such.
+        expect(acc.active).toBe(false)
+        expect(old.every((id) => acc.revoked.includes(id))).toBe(true)
+        expect(acc.deactivated).toMatchObject({ code: 'GRANTS_REVOKED_ELSEWHERE', opId: 'own-7-renew' })
+      }
+      // The next stop revokes the grant still enabled.
+      await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))
+      expect(acc.revoked).toContain(on)
+    }
+  })
+
+  test('otto/mamoru#140: reconciliation confirms a stop by its receipt only when the receipt carries its own Safe tx hash', async () => {
+    const { w, acc } = await running()
+    const stx = `0x${'5a'.repeat(32)}` as Hex
+    const hash = `0x${'ab'.repeat(32)}` as Hex
+    acc.ops.push({ opId: 'own-7-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', txHash: hash, safeTxHash: stx, updatedAt: new Date().toISOString() } as never)
+    type Rc = { getTransactionReceipt(a: { hash: Hex }): Promise<unknown> }
+    const client = (w.op as unknown as { client: Rc }).client
+    client.getTransactionReceipt = async () => ({ transactionHash: hash, status: 'success', blockNumber: 99n, logs: [{ address: SAFE, topics: [EXECUTION_SUCCESS, `0x${'77'.repeat(32)}`] }] })
+    await w.op.reconcileOwner(acc)
+    expect(acc.ops.find((o) => o.opId === 'own-7-exit')?.state).toBe('failed')
+    expect(acc.active).toBe(true)
+    client.getTransactionReceipt = async () => ({ transactionHash: hash, status: 'success', blockNumber: 99n, logs: [{ address: SAFE, topics: [EXECUTION_SUCCESS, stx] }] })
+    Object.assign(acc.ops.find((o) => o.opId === 'own-7-exit')!, { code: 'OWNER_TX_ERROR' })
+    await w.op.reconcileOwner(acc)
+    expect(acc.ops.find((o) => o.opId === 'own-7-exit')).toMatchObject({ state: 'confirmed', txHash: hash })
+    expect(acc.active).toBe(false)
+  })
+
+  test('otto/mamoru#140: a renewal proven by its receipt is applied only when every one of its grants is still enabled', async () => {
+    for (const whole of [false, true]) {
+      const { w, acc } = await running()
+      const old = acc.grants.map((g) => g.permissionId)
+      const ee = `0x${'ee'.repeat(32)}` as Hex
+      const ff = `0x${'ff'.repeat(32)}` as Hex
+      const stx = `0x${'5a'.repeat(32)}` as Hex
+      const hash = `0x${'ab'.repeat(32)}` as Hex
+      const fresh = [ee, ff].map((permissionId) => ({ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId }))
+      acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', txHash: hash, safeTxHash: stx, updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: old } as never)
+      type C = { getTransactionReceipt(a: { hash: Hex }): Promise<unknown>; readContract(a: { functionName: string; args?: readonly unknown[] }): Promise<unknown> }
+      const client = (w.op as unknown as { client: C }).client
+      client.getTransactionReceipt = async () => ({ transactionHash: hash, status: 'success', blockNumber: 90n, logs: [{ address: SAFE, topics: [EXECUTION_SUCCESS, stx] }] })
+      const read = client.readContract.bind(client)
+      // It ran (its receipt says so); since then the owner removed ff elsewhere, unless `whole`.
+      client.readContract = async (a) => (a.functionName === 'isPermissionEnabled' ? a.args![0] === ee || (whole && a.args![0] === ff) : read(a))
+      await w.op.reconcileOwner(acc)
+      if (whole) {
+        expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'confirmed', txHash: hash })
+        expect(acc.grants.map((g) => g.permissionId)).toEqual([ee, ff])
+        expect(acc.active).toBe(true)
+      } else {
+        // Not restarted on a disabled grant, not confirmed: the survivor is tracked, the engine stops.
+        expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'RENEWAL_PARTLY_REVOKED', txHash: hash })
+        expect(acc.grants.map((g) => g.permissionId)).not.toContain(ff)
+        expect(acc.active).toBe(false)
+        expect(acc.superseded).toContain(ee)
+        expect(acc.deactivated).toMatchObject({ code: 'GRANTS_REVOKED_ELSEWHERE', opId: 'own-7-renew' })
+      }
+    }
+  })
+
+  test('otto/mamoru#140: a renewal whose grants cannot be read now is not applied from its receipt: left for later', async () => {
+    const { w, acc } = await running()
+    const old = acc.grants.map((g) => g.permissionId)
+    const ee = `0x${'ee'.repeat(32)}` as Hex
+    const stx = `0x${'5a'.repeat(32)}` as Hex
+    const hash = `0x${'ab'.repeat(32)}` as Hex
+    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', txHash: hash, safeTxHash: stx, updatedAt: new Date().toISOString(), ownerGrants: [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: ee }], revokes: old } as never)
+    type C = { getTransactionReceipt(a: { hash: Hex }): Promise<unknown>; readContract(a: { functionName: string }): Promise<unknown> }
+    const client = (w.op as unknown as { client: C }).client
+    client.getTransactionReceipt = async () => ({ transactionHash: hash, status: 'success', blockNumber: 90n, logs: [{ address: SAFE, topics: [EXECUTION_SUCCESS, stx] }] })
+    const read = client.readContract.bind(client)
+    client.readContract = async (a) => {
+      if (a.functionName === 'isPermissionEnabled') throw new Error('HTTP request failed. Status: 429')
+      return read(a)
+    }
+    await w.op.reconcileOwner(acc)
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(old)
+  })
+
+  test('otto/mamoru#140: a renewal whose grants cannot be read right after its receipt is left to reconciliation, not applied', async () => {
+    const { w, acc } = await running()
+    const before = acc.grants.map((g) => g.permissionId)
+    type C = { getBlockNumber(): Promise<bigint>; readContract(a: { functionName: string }): Promise<unknown> }
+    const client = (w.op as unknown as { client: C }).client
+    const read = client.readContract.bind(client)
+    let sent = false
+    w.knobs.onSend = () => void (sent = true)
+    client.getBlockNumber = async () => (sent ? 120n : 100n)
+    client.readContract = async (a) => {
+      if (sent && a.functionName === 'isPermissionEnabled') throw new Error('HTTP request failed. Status: 429')
+      return read(a)
+    }
+    const op = await w.op.submit(ctx, 'renew', sign(await w.op.prepareRenew(ctx)))
+    expect(op).toMatchObject({ kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(acc.ops.find((o) => o.opId === op.opId)?.txHash).toBeDefined()
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(before)
+  })
+
+  test('otto/mamoru#140: a renewal found late after a Start is never applied over it; its grants stay tracked', async () => {
+    const { w, acc } = await running()
+    const mine = acc.grants.map((g) => g.permissionId)
+    const ee = `0x${'ee'.repeat(32)}` as Hex
+    const stx = `0x${'5a'.repeat(32)}` as Hex
+    const hash = `0x${'ab'.repeat(32)}` as Hex
+    // An unread renewal from before, then a Start that confirmed (the account's grants now are that Start's).
+    const i = acc.ops.findIndex((o) => o.kind === 'activate')
+    acc.ops.splice(i, 0, { opId: 'own-0-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', txHash: hash, safeTxHash: stx, updatedAt: new Date().toISOString(), ownerGrants: [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: ee }], revokes: [] } as never)
+    type C = { getTransactionReceipt(a: { hash: Hex }): Promise<unknown>; readContract(a: { functionName: string; args?: readonly unknown[] }): Promise<unknown> }
+    const client = (w.op as unknown as { client: C }).client
+    client.getTransactionReceipt = async () => ({ transactionHash: hash, status: 'success', blockNumber: 90n, logs: [{ address: SAFE, topics: [EXECUTION_SUCCESS, stx] }] })
+    w.knobs.enabled.add(ee)
+    await w.op.reconcileOwner(acc)
+    expect(acc.active).toBe(true)
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(mine)
+    expect(acc.superseded).toContain(ee)
+  })
+
+  test('otto/mamoru#140: Start is refused while earlier grants are still enabled on the Safe; a Stop revokes them, then Start works', async () => {
+    const { w, acc } = await running()
+    const old = acc.grants.map((g) => g.permissionId)
+    const ee = `0x${'ee'.repeat(32)}` as Hex
+    const ff = `0x${'ff'.repeat(32)}` as Hex
+    const fresh = [ee, ff].map((permissionId) => ({ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId }))
+    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: old, safeNonce: '1' } as never)
+    // It ran, unproven (no receipt, no log found); then the owner removed ee elsewhere.
+    for (const id of old) w.knobs.enabled.delete(id.toLowerCase())
+    w.knobs.enabled.add(ff)
+    w.chain.nonce = 3n
+    await w.op.prepareRenew(ctx).catch(() => undefined)
+    expect(acc.active).toBe(false)
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'RENEWAL_UNPROVEN' })
+    expect(acc.superseded).toContain(ff)
+    // Start before Stop: refused at prepare, and at submit for one prepared before.
+    expect(await w.op.prepareActivate(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'STOP_FIRST' })
+    const sup = acc.superseded
+    w.knobs.enabled.delete(ff)
+    const early = await w.op.prepareActivate(ctx)
+    w.knobs.enabled.add(ff)
+    acc.superseded = sup
+    expect(await w.op.submit(ctx, 'activate', sign(early)).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'STOP_FIRST' })
+    expect(acc.active).toBe(false)
+    // The Stop revokes ff; Start is then allowed again.
+    await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))
+    expect(acc.revoked).toContain(ff)
+    expect(acc.superseded ?? []).toEqual([])
+    const again = await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+    expect(again).toMatchObject({ kind: 'activate', state: 'confirmed' })
+    expect(acc.active).toBe(true)
+    expect(acc.deactivated).toBeUndefined()
+  })
+
+  test('otto/mamoru#140: a grant sweep is one Multicall3 batch, and past ids read disabled are not read again', async () => {
+    const { w, acc } = await running()
+    const old = Array.from({ length: 30 }, (_, i) => toHex(i + 1, { size: 32 }))
+    acc.revoked.push(...old)
+    w.knobs.batchGrants = true
+    type Sweep = { enforceGrants(a: AccountState): Promise<boolean> }
+    const before = w.knobs.multicalls
+    expect(await (w.op as unknown as Sweep).enforceGrants(acc)).toBe(true)
+    expect(w.knobs.multicalls - before).toBe(1)
+    expect(w.knobs.batchedGrantReads).toBe(acc.grants.length + old.length)
+    expect(acc.active).toBe(true)
+    // Those 30 read disabled: retired, the next sweep reads only the engine's grants.
+    w.knobs.batchedGrantReads = 0
+    await (w.op as unknown as Sweep).enforceGrants(acc)
+    expect(w.knobs.batchedGrantReads).toBe(acc.grants.length)
+  })
+
+  test('otto/mamoru#140: a provider whose head is behind the account defers every grant decision, never stops the engine', async () => {
+    const { w, acc } = await running()
+    const had = acc.grants.map((g) => g.permissionId)
+    const ee = `0x${'ee'.repeat(32)}` as Hex
+    // A renewal that ran, its receipt unread but its log readable at block 99; the provider answering is at 50.
+    const R = { opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: ee }], revokes: had, safeNonce: '1' }
+    acc.ops.push(R as never)
+    landed(w, R as never)
+    w.chain.nonce = 2n
+    w.knobs.head = 50n
+    await w.op.prepareRenew(ctx).catch(() => undefined)
+    await w.op.reconcileOwner(acc)
+    expect(acc.active).toBe(true)
+    expect(acc.deactivated).toBeUndefined()
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(had)
+    // The head catches up: the renewal is applied from its proof, every grant enabled.
+    w.knobs.head = 100n
+    await w.op.prepareRenew(ctx).catch(() => undefined)
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'confirmed' })
+    expect(acc.grants.map((g) => g.permissionId)).toEqual([ee])
+    expect(acc.active).toBe(true)
+  })
+
+  test('otto/mamoru#140 invariants I1-I3 hold after every settle pass, over every combination of owner ops and chain events', async () => {
+    type Owner = 'none' | 'some' | 'all'
+    const cases: { renewalRan: boolean; stopRan: boolean; read: boolean; owner: Owner; reenable: boolean; start: 'before' | 'after'; lag: boolean }[] = []
+    for (const renewalRan of [false, true])
+      for (const stopRan of [false, true])
+        for (const read of [false, true])
+          for (const owner of ['none', 'some', 'all'] as const)
+            for (const reenable of renewalRan ? [false] : [false, true])
+              for (const start of ['before', 'after'] as const)
+                for (const lag of [false, true]) cases.push({ renewalRan, stopRan, read, owner, reenable, start, lag })
+    expect(cases.length).toBe(144)
+    for (const c of cases) {
+      const label = JSON.stringify(c)
+      const { w, acc } = await running()
+      const E = acc.grants.map((g) => g.permissionId)
+      const N = [`0x${'e1'.repeat(32)}`, `0x${'e2'.repeat(32)}`] as Hex[]
+      const k = w.chain.nonce
+      const sR = `0x${'a1'.repeat(32)}` as Hex
+      const sS = `0x${'a2'.repeat(32)}` as Hex
+      const hR = `0x${'b1'.repeat(32)}` as Hex
+      const hS = `0x${'b2'.repeat(32)}` as Hex
+      const R = { opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: N.map((permissionId) => ({ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId })), revokes: E, safeTxHash: sR, safeNonce: k.toString(), ...(c.read ? { txHash: hR } : {}) }
+      const S = { opId: 'own-8-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), revokes: [...E, ...N], safeTxHash: sS, ...(c.read ? { txHash: hS } : {}) }
+      acc.ops.push(R as never, S as never)
+      // The chain: what ran, what the owner did with transactions of their own, and which receipts and logs can be read.
+      const on = w.knobs.enabled
+      const receipts = new Map<string, unknown>()
+      const ran = new Set<string>()
+      const execute = (stx: Hex, hash: Hex, block: bigint) => {
+        if (c.read) {
+          w.knobs.logs.push({ stx, hash, block })
+          receipts.set(hash, { transactionHash: hash, status: 'success', blockNumber: block, logs: [{ address: SAFE, topics: [EXECUTION_SUCCESS, stx] }] })
+        }
+      }
+      if (c.renewalRan) {
+        for (const id of E) on.delete(id.toLowerCase())
+        for (const id of N) on.add(id.toLowerCase())
+        w.chain.nonce = k + 1n
+        ran.add(R.opId)
+        execute(sR, hR, 95n)
+      }
+      if (c.reenable) {
+        for (const id of N) on.add(id.toLowerCase())
+        w.chain.nonce++
+      }
+      if (c.stopRan) {
+        for (const id of [...E, ...N]) on.delete(id.toLowerCase())
+        w.chain.nonce++
+        ran.add(S.opId)
+        execute(sS, hS, 97n)
+      }
+      const mine = [...E, ...N].map((id) => id.toLowerCase()).filter((id) => on.has(id)).sort()
+      if (c.owner !== 'none' && mine.length) {
+        for (const id of c.owner === 'some' ? mine.slice(0, 1) : mine) on.delete(id)
+        w.chain.nonce++
+      }
+      ;(w.op as unknown as { receiptOf(h: Hex): Promise<unknown> }).receiptOf = async (h) => receipts.get(h.toLowerCase()) ?? receipts.get(h) ?? null
+
+      const check = (when: string) => {
+        const at = `${label} ${when}`
+        // I1: the engine runs only on grants that are all enabled.
+        if (acc.active) expect(acc.grants.filter((g) => !on.has(g.permissionId.toLowerCase())).map((g) => g.permissionId), at).toEqual([])
+        // I2: an owner op is confirmed (or taken as run and partly revoked) only when it ran and its own receipt or log is readable.
+        for (const o of [R, S]) {
+          const st = acc.ops.find((x) => x.opId === o.opId)!
+          if (st.state === 'confirmed' || st.code === 'RENEWAL_PARTLY_REVOKED') expect({ op: o.opId, ran: ran.has(o.opId), read: c.read }, at).toEqual({ op: o.opId, ran: true, read: true })
+        }
+        // I3: every grant enabled on the chain is tracked: the engine's, or in superseded.
+        const tracked = new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? [])].map((id) => id.toLowerCase()))
+        expect([...on].filter((id) => !tracked.has(id)), at).toEqual([])
+      }
+      const settle = async () => {
+        await w.op.prepareRenew(ctx).catch(() => undefined)
+        await w.op.reconcileOwner(acc)
+        await w.op.prepareRenew(ctx).catch(() => undefined)
+      }
+      const tryStart = async (when: string) => {
+        const res = await w.op.prepareActivate(ctx).then((t) => w.op.submit(ctx, 'activate', sign(t))).catch((e: unknown) => e)
+        if (res instanceof HttpError) expect(['ALREADY_ACTIVE', 'STOP_FIRST'], `${label} ${when}`).toContain(res.code)
+        else expect(res, `${label} ${when}`).toMatchObject({ kind: 'activate', state: 'confirmed' })
+        check(`after Start ${when}`)
+      }
+      if (c.lag) {
+        // A provider behind the account first: nothing may be decided on that view. No engine whose grants are all
+        // enabled is stopped, no renewal is taken as partly revoked or unproven, and I2 holds.
+        const was = acc.active
+        const g0 = acc.grants.map((g) => g.permissionId.toLowerCase())
+        w.knobs.head = 50n
+        await settle()
+        // (A stop proven by its own receipt may still settle: that is proof, not a grant read.)
+        if (was && g0.every((id) => on.has(id))) expect(acc.active, `${label} lagging`).toBe(true)
+        expect(acc.deactivated, `${label} lagging`).toBeUndefined()
+        expect(['RENEWAL_PARTLY_REVOKED', 'RENEWAL_UNPROVEN'], `${label} lagging`).not.toContain(acc.ops.find((x) => x.opId === R.opId)!.code)
+        w.knobs.head = 100n
+      }
+      if (c.start === 'before') await tryStart('before settle')
+      await settle()
+      check('after settle')
+      if (c.start === 'after') {
+        await tryStart('after settle')
+        await settle()
+        check('after Start and settle')
+      }
+    }
+  }, 120_000)
+
+  test('otto/mamoru#140: an unread renewal is forgotten only when every one of its grants reads disabled', async () => {
+    const { w, acc } = await running()
+    const ee = `0x${'ee'.repeat(32)}` as Hex
+    const ff = `0x${'ff'.repeat(32)}` as Hex
+    const fresh = [ee, ff].map((permissionId) => ({ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId }))
+    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: [], safeNonce: '1' } as never)
+    w.chain.nonce = 3n
+    type Read = { readContract(a: { functionName: string; args?: readonly unknown[] }): Promise<unknown> }
+    const client = (w.op as unknown as { client: Read }).client
+    const read = client.readContract.bind(client)
+    // One of its grants cannot be read: nothing is decided.
+    client.readContract = async (a) => {
+      if (a.functionName !== 'isPermissionEnabled') return read(a)
+      if (a.args![0] === ff) throw new Error('HTTP request failed. Status: 429')
+      return false
+    }
+    await w.op.prepareRenew(ctx).catch(() => undefined)
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    // Both read disabled with the nonce spent: it can never run and nothing of it is left.
+    client.readContract = async (a) => (a.functionName === 'isPermissionEnabled' ? false : read(a))
+    await w.op.prepareRenew(ctx).catch(() => undefined)
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'RENEWAL_SUPERSEDED' })
   })
 
   test('a renewal that ran unread is settled before a stop is judged: its revoked old grants are not taken for a stop that ran', async () => {
@@ -1869,11 +2383,8 @@ describe('renewing the approval of a running account', () => {
     const fresh = [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }]
     acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: old } as never)
     acc.ops.push({ opId: 'own-8-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString() } as never)
-    // The renewed grant is enabled; the old ones are not (the renewal revoked them). The stop has not run.
-    type Read = { readContract(a: { functionName: string; args?: readonly unknown[] }): Promise<unknown> }
-    const client = (w.op as unknown as { client: Read }).client
-    const read = client.readContract.bind(client)
-    client.readContract = async (a) => (a.functionName === 'isPermissionEnabled' ? a.args![0] === `0x${'ee'.repeat(32)}` : read(a))
+    // The renewal ran (its own ExecutionSuccess): its grant enabled, the old ones revoked. The stop has not run.
+    landed(w, acc.ops.find((o) => o.opId === 'own-7-renew') as never)
     expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ code: 'STOP_IN_FLIGHT' })
     expect(acc.active).toBe(true)
     expect(acc.grants.map((g) => g.permissionId)).toEqual([`0x${'ee'.repeat(32)}`])
@@ -1904,7 +2415,7 @@ describe('renewing the approval of a running account', () => {
     const ee = `0x${'ee'.repeat(32)}` as Hex
     const ghost = [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: ee }]
     acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: ghost, revokes: [], safeNonce: '1' } as never)
-    w.knobs.grantsEnabled = false
+    // (the chain model: the engine's grants enabled, the other op's not)
     // Its nonce not spent yet: it can still land, so the next renewal revokes its grants.
     expect(w.chain.nonce).toBe(1n)
     await w.op.prepareRenew(ctx)
@@ -1933,12 +2444,12 @@ describe('renewing the approval of a running account', () => {
     const ghost = [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: `0x${'ee'.repeat(32)}` as Hex }]
     acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: ghost, revokes: [] } as never)
     // The read says it did not run (a node behind): the next renewal revokes its grants all the same.
-    w.knobs.grantsEnabled = false
+    // (the chain model: the engine's grants enabled, the other op's not)
     await w.op.submit(ctx, 'renew', sign(await w.op.prepareRenew(ctx)))
     expect(acc.revoked).toContain(`0x${'ee'.repeat(32)}`)
     const mine = acc.grants.map((g) => g.permissionId)
     // Later the chain shows the first one's grants enabled (they are not: the second revoked them; a stale read).
-    w.knobs.grantsEnabled = true
+    w.knobs.enabled.add(`0x${'ee'.repeat(32)}`)
     await w.op.prepareRenew(ctx).catch(() => undefined)
     expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'RENEWAL_SUPERSEDED' })
     expect(acc.grants.map((g) => g.permissionId)).toEqual(mine)
@@ -1946,7 +2457,7 @@ describe('renewing the approval of a running account', () => {
 
   test('an engine operation sent before a restart (stored, not in the new journal) holds the renewal for ten minutes, not for ever', async () => {
     const { w, acc } = await running()
-    w.knobs.grantsEnabled = true
+    // (the chain model: the engine's grants enabled, the other op's not)
     acc.ops.push({ opId: 'eng-1-1-op-9-enter_mint', kind: 'enter', state: 'submitted', updatedAt: new Date().toISOString() } as never)
     expect(await w.op.prepareRenew(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'ENGINE_BUSY' })
     Object.assign(acc.ops.at(-1)!, { updatedAt: new Date(Date.now() - 11 * 60_000).toISOString() })
@@ -1969,7 +2480,7 @@ describe('renewing the approval of a running account', () => {
     expect(acc.ops.find((o) => o.opId === 'own-8-transfer')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
     expect(acc.ownerFailures ?? []).toHaveLength(0)
     // It had run: the chain shows its grants, and the next renewal is built on them.
-    w.knobs.grantsEnabled = true
+    landed(w, acc.ops.find((o) => o.opId === 'own-7-renew') as never)
     await w.op.prepareRenew(ctx)
     expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'confirmed' })
     expect(acc.grants.map((g) => g.permissionId)).toEqual([`0x${'ee'.repeat(32)}`])

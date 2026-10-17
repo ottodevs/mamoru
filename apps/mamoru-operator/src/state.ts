@@ -65,6 +65,19 @@ export type AccountState = {
    * could not revoke them in its own transaction. A stop revokes them with the rest.
    */
   superseded?: Hex[]
+  /**
+   * otto/mamoru#140: why the account stopped running without an owner op of its own confirmed (invariant I1, see
+   * Operator.enforceGrants): one block showed engine grants disabled by a transaction not proven to be ours.
+   * GRANTS_PARTLY_REVOKED: some of them (the ones still enabled are kept in `superseded` for the next stop);
+   * GRANTS_REVOKED_ELSEWHERE: all of them. `opId`: the owner op of unknown outcome pending then, left unconfirmed.
+   * Cleared by an activation, or when that op is proven.
+   */
+  deactivated?: { code: 'GRANTS_REVOKED_ELSEWHERE' | 'GRANTS_PARTLY_REVOKED'; opId?: string; block: string; at: string }
+  /**
+   * otto/mamoru#140: past permission ids (revoked, or of owner ops that ended) read disabled at a block not below the
+   * account's floor: no longer read by every grant sweep. Ids the engine uses, superseded or of a pending op never are.
+   */
+  retired?: Hex[]
   managedTokenIds: string[]
   depositsAfter: string
   historyFromBlock: string

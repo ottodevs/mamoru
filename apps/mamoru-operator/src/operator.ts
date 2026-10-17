@@ -64,6 +64,10 @@ const FUNDING_STALE_MS = 60_000
 const FUNDING_FRESH_READ_MS = 2_000
 
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
+/** How often the engine loop reads every grant it uses before a review (otto/mamoru#140, invariant I1). */
+const GRANTS_CHECK_MS = 300_000
+/** At most this many permission ids per sweep (one Multicall3 chunk): the live ones always, past ones newest first. */
+const GRANTS_SWEEP_MAX = 100
 /** An owner op whose receipt poll failed after the tx was sent: the tx may still have landed. */
 const RECEIPT_UNKNOWN = 'OWNER_TX_ERROR'
 /** Armed activations retry this many times across watcher passes before failing visibly. */
@@ -350,6 +354,12 @@ function unrevoked(acc: AccountState, revokes: Hex[]): Hex[] {
   return [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? [])])].filter((id) => !gone.has(id.toLowerCase()))
 }
 
+/** `ids` without those in `gone`. */
+function unrevokedIds(ids: Hex[], gone: Hex[]): Hex[] {
+  const g = new Set(gone.map((id) => id.toLowerCase()))
+  return ids.filter((id) => !g.has(id.toLowerCase()))
+}
+
 /** "USDC/cbBTC 0.05%" for pool:USDC/cbBTC/500. */
 function poolLabel(pool: string): string {
   const e = entry(pool)
@@ -361,6 +371,8 @@ export class Operator {
   private readonly locks = new Map<string, Lock>()
   private readonly runners = new Map<string, Runner>()
   private readonly reconciled = new Map<string, number>()
+  /** When (ms) the engine loop last read every grant of the account (enforceGrants, invariant I1). */
+  private readonly grantsChecked = new Map<string, number>()
   /** Since when (ms) engine review has been held for a pending non-activate prepare on this account; see reviewHold. */
   private readonly reviewHeldSince = new Map<string, number>()
   private armTimer: ReturnType<typeof setTimeout> | null = null
@@ -1120,79 +1132,260 @@ export class Operator {
   }
 
   /**
-   * Renewals that failed only because their receipt was not read: the chain says whether they ran. The permission
-   * ids of a signed renewal are its own, so one of them enabled on the Safe means it executed; it is then applied
-   * (its grants become the engine's, the ones it revoked are recorded) before anything is built on the account's
-   * grants. One that did not run is left as it is: a renewal prepared now is signed for the same Safe nonce, so
-   * only one of the two can ever execute.
+   * Renewals that failed only because their receipt was not read. Invariant I2 (otto/mamoru#140): a renewal is
+   * confirmed only by its own receipt, or the Safe's ExecutionSuccess carrying its own Safe tx hash; never from its
+   * grants reading enabled (the owner may enable the same sessions in a transaction of their own) nor from the nonce.
+   * Proven, it is applied only if every one of its grants is still enabled (otherwise partlyRevoked). Not proven: it
+   * stays an unread receipt while its Safe nonce is not spent; once spent it ends RENEWAL_SUPERSEDED (none of its
+   * grants enabled) or RENEWAL_UNPROVEN, and whatever of it is enabled stays tracked (I3, enforceGrants).
    */
   private async settleRenewals(acc: AccountState): Promise<void> {
     const unknown = acc.ops.filter((o) => o.opId.startsWith('own-') && o.kind === 'renew' && o.state === 'failed' && o.code === RECEIPT_UNKNOWN) as StoredOp[]
     const superseded = (op: StoredOp) => acc.ops.slice(acc.ops.indexOf(op) + 1).some((l) => l.opId.startsWith('own-') && (l.kind === 'renew' || l.kind === 'exit') && l.state === 'confirmed')
     for (const op of unknown) {
-      const first = op.ownerGrants?.[0]?.permissionId
-      if (!first) continue
-      // A later renewal or stop that confirmed carried this one's grants in its revocations: whether it ran or not,
-      // there is nothing of it left to apply, and applying it would put the engine back on revoked grants.
+      const ids = (op.ownerGrants ?? []).map((g) => g.permissionId)
+      if (!ids.length) continue
+      // A later renewal or stop confirmed after it: nothing of it is applied (that would put the engine back on
+      // revoked grants). What of it is still enabled stays tracked by enforceGrants.
       if (superseded(op)) {
         this.patchOp(acc, op.opId, { state: 'failed', code: 'RENEWAL_SUPERSEDED' })
         continue
       }
-      const enabled = await this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [first, acc.ctx.address as Address] })
-      if (!enabled) {
-        // It can never run once one block shows its Safe nonce spent and its grant not enabled (whatever spent the
-        // nonce, a transfer too): nothing of it is left to revoke, and every later renewal or stop stops carrying it.
-        if (op.safeNonce !== undefined && (await this.spentWithout(acc, BigInt(op.safeNonce), [first]))) this.patchOp(acc, op.opId, { state: 'failed', code: 'RENEWAL_SUPERSEDED' })
+      const proof = await this.provenOwnerTx(acc, op)
+      // Read at a head not below the account's floor nor the renewal's own block: a lagging provider defers (#140).
+      const block = await this.headAtLeast(acc, proof ? BigInt(proof.block) : 0n)
+      if (block === null) continue
+      const on = await this.enabledAt(acc, ids, block)
+      if (!on) continue
+      if (superseded(op) || op.state !== 'failed' || op.code !== RECEIPT_UNKNOWN) continue
+      if (proof) {
+        if (on.every(Boolean)) {
+          console.log(`[renew] ${acc.accountKey} ${op.opId} executed on chain (tx ${proof.hash}), every grant enabled at block ${block}: applied`)
+          this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, extend: op.extend, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, { blockNumber: BigInt(proof.block) } as TransactionReceipt)
+          this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', txHash: proof.hash, block: proof.block })
+        } else {
+          this.partlyRevoked(acc, op, ids, on, block)
+          this.patchOp(acc, op.opId, { state: 'failed', code: 'RENEWAL_PARTLY_REVOKED', txHash: proof.hash, block: proof.block })
+        }
         continue
       }
-      const block = await this.client.getBlockNumber()
-      // This block becomes the engine's observation floor, so it must itself show the grant: a head from a provider
-      // behind the one that answered would put the floor before the renewal. Not yet: left for the next time.
-      const atBlock = await this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [first, acc.ctx.address as Address], blockNumber: block })
-      if (!atBlock) continue
-      // Asked again after the reads: the caller holds the account lock, and this keeps it true if one ever does not.
-      if (superseded(op) || op.state !== 'failed' || op.code !== RECEIPT_UNKNOWN) continue
-      console.log(`[renew] ${acc.accountKey} ${op.opId} executed on chain (its grants are enabled): applied`)
-      this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, extend: op.extend, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, { blockNumber: block } as TransactionReceipt)
-      this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(block) })
+      // Not proven. While its Safe nonce is not spent it may still land: left as it is (a stop or renewal revokes its
+      // grants). Spent by whatever transaction: it can no longer be applied from here.
+      if (op.safeNonce === undefined) continue
+      let nonce: bigint
+      try {
+        nonce = (await this.client.readContract({ address: acc.ctx.address as Address, abi: safeAbi, functionName: 'nonce', blockNumber: block })) as bigint
+      } catch (e) {
+        logErr(`[settle] ${acc.accountKey} Safe nonce unreadable, left for later:`, e)
+        continue
+      }
+      if (nonce <= BigInt(op.safeNonce)) continue
+      this.patchOp(acc, op.opId, { state: 'failed', code: on.some(Boolean) ? 'RENEWAL_UNPROVEN' : 'RENEWAL_SUPERSEDED' })
     }
-    // Stops after renewals: a renewal that ran replaced the engine's grants, and the stop is judged by the grants
-    // the engine really has (the old ones revoked by a renewal would look like a stop that ran).
+    // Stops after renewals: a renewal applied above replaced the engine's grants, and the stop is judged on those.
     await this.settleStops(acc)
+    await this.enforceGrants(acc)
   }
 
   /**
-   * Stops that failed only because their receipt was not read: the chain says whether they ran. A stop revokes every
-   * grant of the account, so the engine's first grant no longer enabled on the Safe means the stop executed; it is
-   * then applied (the account is not running, its grants are recorded as revoked) and nothing can be renewed.
+   * Stops that failed only because their receipt was not read. Disabled grants do not prove a stop ran (the owner
+   * may have revoked them elsewhere, and then its position close and swaps never happened): once an engine grant
+   * reads disabled, the stop is confirmed only by its own receipt or the ExecutionSuccess of its own Safe tx hash
+   * (I2). Without that proof it stays an unread receipt, never reported as done; the engine is stopped by
+   * enforceGrants (I1), with a typed reason.
    */
   private async settleStops(acc: AccountState): Promise<void> {
     // Unread receipts, and any stop still not settled that this process is not executing (left over from a stop of the operator).
     const unknown = acc.ops.filter((o) => o.opId.startsWith('own-') && o.kind === 'exit' && ((o.state === 'failed' && o.code === RECEIPT_UNKNOWN) || (!TERMINAL_STATES.has(o.state) && !this.busy.has(acc.accountKey)))) as StoredOp[]
-    const first = acc.grants[0]?.permissionId
-    if (!unknown.length || !acc.active || !first) return
-    const enabled = await this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [first, acc.ctx.address as Address] })
-    if (enabled) return
+    if (!unknown.length || !acc.active || !acc.grants.length) return
     const op = unknown.at(-1)!
-    // A renewal that ran also revokes the engine's grants, and enables its own. So the stop is applied only when one
-    // block shows every grant it could have revoked disabled: the engine's, the ones left behind, those of a renewal
-    // of unknown outcome and the stop's own. Any of them enabled, or a read that fails: not applied, asked again later.
     const ids = [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc), ...(op.revokes ?? [])])]
-    const block = await this.client.getBlockNumber()
-    if (!(await this.noneEnabledAt(acc, ids, block))) return
-    console.log(`[stop] ${acc.accountKey} ${op.opId} executed on chain (the engine's grants are revoked): applied`)
-    this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'stop', tx: undefined as never, safeTxHash: '0x', expires: 0, revokes: ids }, { blockNumber: block } as TransactionReceipt)
-    this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(block) })
+    const block = await this.headAtLeast(acc, 0n)
+    if (block === null) return
+    // Every engine grant, at one block: all enabled means the stop has not run.
+    const on = await this.enabledAt(acc, acc.grants.map((g) => g.permissionId), block)
+    if (!on || on.every(Boolean)) return
+    const proof = await this.provenOwnerTx(acc, op)
+    if (proof) {
+      console.log(`[stop] ${acc.accountKey} ${op.opId} executed on chain (tx ${proof.hash}): applied`)
+      this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'stop', tx: undefined as never, safeTxHash: '0x', expires: 0, revokes: ids }, { blockNumber: BigInt(proof.block) } as TransactionReceipt)
+      this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', txHash: proof.hash, block: proof.block })
+      return
+    }
+    // Not proven: it stays an unread receipt for reconciliation (one left over from a stop of the operator becomes
+    // one, its time kept for findOwnerTx's window); enforceGrants stops the engine.
+    for (const o of unknown) if (!TERMINAL_STATES.has(o.state)) Object.assign(o, { state: 'failed', code: RECEIPT_UNKNOWN })
+    this.store.save()
+  }
+
+  /**
+   * otto/mamoru#140 invariants, from one block of the chain:
+   * - I1: the engine runs only while every grant it uses reads enabled. One disabled (revoked by a transaction we
+   *   did not send), whatever owner op is pending: the loop stops, the account is inactive with a typed reason
+   *   (GRANTS_PARTLY_REVOKED, or GRANTS_REVOKED_ELSEWHERE when none is left), the grants still enabled are kept.
+   * - I3: a grant leaves tracking (`grants`/`superseded`) only when it reads disabled. Every permission id the account
+   *   ever knew (its grants, superseded, revoked, every owner op's grants and revocations, an armed approval's) that
+   *   reads enabled and is not the engine's is put in `superseded`, so the next stop or renewal revokes it and Start
+   *   waits for that stop (STOP_FIRST); one in `superseded` that reads disabled leaves it (recorded as revoked).
+   * A read that fails changes nothing. Called after every settle pass, from the engine loop and before a Start.
+   */
+  private async enforceGrants(acc: AccountState): Promise<boolean> {
+    const low = (id: string) => id.toLowerCase()
+    const engine = acc.grants.map((g) => g.permissionId)
+    // Ids that must be read on every sweep: the engine's, superseded, and those of owner ops still of unknown outcome
+    // (and an armed approval). The rest (revoked, of ended ops) only until read disabled once: then retired.
+    const live = new Map<string, Hex>()
+    const pendingOps = acc.ops.filter((o) => o.opId.startsWith('own-') && (!TERMINAL_STATES.has(o.state) || (o.state === 'failed' && o.code === RECEIPT_UNKNOWN)))
+    for (const id of [...engine, ...(acc.superseded ?? []), ...pendingOps.flatMap((o) => ((o as StoredOp).ownerGrants ?? []).map((g) => g.permissionId)), ...(acc.armed?.grants ?? []).map((g) => g.permissionId)]) live.set(low(id), id)
+    const retired = new Set((acc.retired ?? []).map(low))
+    const rest = new Map<string, Hex>()
+    // Newest first, so a cap keeps the ids most likely to matter.
+    for (const id of [...[...acc.ops].reverse().flatMap((o) => [...((o as StoredOp).ownerGrants ?? []).map((g) => g.permissionId), ...((o as StoredOp).revokes ?? [])]), ...[...acc.revoked].reverse()]) {
+      const k = low(id)
+      if (!live.has(k) && !retired.has(k) && !rest.has(k)) rest.set(k, id)
+    }
+    const room = Math.max(0, GRANTS_SWEEP_MAX - live.size)
+    if (rest.size > room) logErr(`[grants] ${acc.accountKey} ${rest.size - room} past grant ids not read this sweep (cap ${GRANTS_SWEEP_MAX})`, undefined)
+    const universe = [...live.values(), ...[...rest.values()].slice(0, room)]
+    if (!universe.length) return true
+    const block = await this.headAtLeast(acc, 0n)
+    if (block === null) return false
+    const on = await this.enabledAt(acc, universe, block)
+    if (!on) return false
+    const enabled = new Set(universe.filter((_, i) => on[i]).map(low))
+    let changed = false
+    if (acc.active && engine.some((id) => !enabled.has(low(id)))) {
+      const off = engine.filter((id) => !enabled.has(low(id)))
+      const by = pendingOps.at(-1)?.opId
+      const code = off.length === engine.length ? 'GRANTS_REVOKED_ELSEWHERE' : 'GRANTS_PARTLY_REVOKED'
+      logErr(`[grants] ${acc.accountKey} ${off.length}/${engine.length} engine grants disabled at block ${block}${by ? ` (${by} not proven)` : ''}: engine stopped (${code})`, undefined)
+      this.afterOwner(acc, { prepareId: by ?? 'grants', accountKey: acc.accountKey, kind: 'stop', tx: undefined as never, safeTxHash: '0x', expires: 0, revokes: off }, { blockNumber: block } as TransactionReceipt)
+      acc.deactivated = { code, ...(by ? { opId: by } : {}), block: block.toString(), at: now() }
+      changed = true
+    }
+    const mine = new Set(acc.grants.map((g) => low(g.permissionId)))
+    const before = acc.superseded ?? []
+    const kept = before.filter((id) => enabled.has(low(id)) && !mine.has(low(id)))
+    const gone = before.filter((id) => !enabled.has(low(id)))
+    const known = new Set(kept.map(low))
+    const added = universe.filter((id) => enabled.has(low(id)) && !mine.has(low(id)) && !known.has(low(id)))
+    if (gone.length || added.length || kept.length !== before.length) {
+      if (added.length) logErr(`[grants] ${acc.accountKey} ${added.length} enabled grants were untracked at block ${block}: kept for revocation`, undefined)
+      acc.revoked.push(...gone.filter((id) => !acc.revoked.some((r) => low(r) === low(id))))
+      acc.superseded = [...kept, ...added]
+      changed = true
+    }
+    // Past ids read disabled at this block (not below the account's floor) are not read again.
+    const retire = universe.filter((id) => !live.has(low(id)) && !enabled.has(low(id)))
+    if (retire.length) {
+      acc.retired = [...(acc.retired ?? []), ...retire]
+      changed = true
+    }
+    if (changed) this.store.save()
+    return true
+  }
+
+  /**
+   * The block number of the head, when it is not below `min` nor the account's floor: the block its current grants
+   * were enabled in (grantsFromBlock), its activation block, and the block of its latest owner op. A provider behind
+   * that answers null: whatever was to be read is deferred, never decided on an older view of the chain (#140).
+   */
+  private async headAtLeast(acc: AccountState, min: bigint): Promise<bigint | null> {
+    let floor = min
+    for (const b of [acc.grantsFromBlock, acc.active ? acc.historyFromBlock : undefined, ...acc.ops.filter((o) => o.opId.startsWith('own-')).map((o) => o.block)]) {
+      if (b === undefined || b === null || b === '') continue
+      const n = BigInt(b)
+      if (n > floor) floor = n
+    }
+    try {
+      const head = await this.client.getBlockNumber()
+      if (head >= floor) return head
+      console.log(`[grants] ${acc.accountKey} provider head ${head} behind block ${floor}: deferred`)
+      return null
+    } catch (e) {
+      logErr(`[grants] ${acc.accountKey} head unreadable:`, e)
+      return null
+    }
+  }
+
+  /**
+   * The owner tx of `op`, proven: its own receipt (status success, the Safe's ExecutionSuccess carrying the op's Safe
+   * tx hash when one is kept), or without a receipt the ExecutionSuccess log of that Safe tx hash (findOwnerTx). Null
+   * when nothing proves it ran; any read that fails counts as not proven.
+   */
+  private async provenOwnerTx(acc: AccountState, op: StoredOp): Promise<{ hash: Hex; block: number } | null> {
+    const safe = (acc.ctx.address as string).toLowerCase()
+    const own = op.safeTxHash?.toLowerCase()
+    try {
+      const receipt = op.txHash ? await this.receiptOf(op.txHash as Hex) : null
+      if (receipt) {
+        const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe && l.topics[0] === EXECUTION_SUCCESS && (!own || l.topics[1]?.toLowerCase() === own))
+        return ok ? { hash: receipt.transactionHash, block: Number(receipt.blockNumber) } : null
+      }
+      const found = await this.findOwnerTx(acc, op)
+      return found?.ok ? { hash: found.hash, block: found.block } : null
+    } catch (e) {
+      logErr(`[settle] ${acc.accountKey} ${op.opId} execution unreadable, not proven:`, e)
+      return null
+    }
+  }
+
+  /**
+   * A renewal that ran (proven by its receipt, its log, or its own grants enabled) and some of whose grants were
+   * removed since by another transaction: not made the engine's approval, part of it is gone. The ones still enabled
+   * are never dropped from tracking: remembered as superseded, so the next stop revokes them (and Start is refused
+   * until then, see STOP_FIRST). Having run, it also revoked what it was built to revoke. A full renewal revoked the
+   * engine's grants: the engine is not left running on revoked grants, the account stops (as a stop would leave it)
+   * and says why. An extension revoked none of them: the engine runs on. The caller marks the op.
+   */
+  private partlyRevoked(acc: AccountState, op: { opId: string; revokes?: Hex[]; extend?: boolean }, ids: Hex[], on: boolean[], block: bigint): void {
+    const still = ids.filter((_, i) => on[i])
+    acc.superseded = [...new Set([...(acc.superseded ?? []), ...still])]
+    logErr(`[renew] ${acc.accountKey} ${op.opId} ran but ${ids.length - still.length}/${ids.length} of its grants are disabled at block ${block}: not applied, ${still.length} kept for revocation`, undefined)
+    if (op.extend) {
+      acc.revoked.push(...(op.revokes ?? []).filter((id) => !acc.revoked.includes(id)))
+      acc.superseded = unrevokedIds(acc.superseded, op.revokes ?? [])
+      this.store.save()
+    } else {
+      this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'stop', tx: undefined as never, safeTxHash: '0x', expires: 0, revokes: op.revokes ?? [] }, { blockNumber: block } as TransactionReceipt)
+      acc.deactivated = { code: 'GRANTS_REVOKED_ELSEWHERE', opId: op.opId, block: block.toString(), at: now() }
+      this.store.save()
+    }
+  }
+
+  /**
+   * Every grant of a renewal that ran in block `from`, read now: the head block, not one behind `from`. 'behind' when
+   * the head is not past `from` yet (nothing can have removed a grant after it there), null when a read fails.
+   */
+  private async renewalGrantsNow(acc: AccountState, ids: Hex[], from: bigint): Promise<{ block: bigint; on: boolean[] } | 'behind' | null> {
+    try {
+      const block = await this.client.getBlockNumber()
+      if (block < from) return 'behind'
+      const on = await this.enabledAt(acc, ids, block)
+      return on ? { block, on } : null
+    } catch (e) {
+      logErr(`[renew] ${acc.accountKey} head unreadable:`, e)
+      return null
+    }
   }
 
   /** Whether block `block` shows none of `ids` enabled on the Safe; false when any read fails. */
   private async noneEnabledAt(acc: AccountState, ids: Hex[], block: bigint): Promise<boolean> {
+    const on = await this.enabledAt(acc, ids, block)
+    return !!on && !on.some(Boolean)
+  }
+
+  /** Whether each of `ids` is enabled on the Safe at block `block`; null when any read fails. */
+  private async enabledAt(acc: AccountState, ids: Hex[], block: bigint): Promise<boolean[] | null> {
     try {
-      const on = await Promise.all(ids.map((id) => this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [id, acc.ctx.address as Address], blockNumber: block })))
-      return !on.some(Boolean)
+      // One Multicall3 batch pinned at `block` (chunked at BATCH_MAX_CALLS); a call that fails in it is read on its own.
+      const batch = new Batch(this.client, MULTICALL3, block)
+      const handles = ids.map((id) => batch.add(contractRead(this.client, { address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [id, acc.ctx.address as Address], blockNumber: block })))
+      await batch.run()
+      return await Promise.all(handles.map(async (h) => !!(await h.need())))
     } catch (e) {
       logErr(`[settle] ${acc.accountKey} grants at block ${block} unreadable, left for later:`, e)
-      return false
+      return null
     }
   }
 
@@ -1259,7 +1452,13 @@ export class Operator {
   async prepareActivate(ctx: AccountContext): Promise<OwnerTxToSign> {
     this.assertLive()
     const { acc, live } = this.account(ctx)
+    // otto/mamoru#140: what is enabled on the Safe now decides a Start (I1, I3): an engine on a revoked grant is
+    // stopped, grants revoked since leave `superseded`, untracked ones join it.
+    await this.lock(acc.accountKey).run(() => this.enforceGrants(acc))
     if (acc.active) throw new HttpError(409, 'ALREADY_ACTIVE', 'the engine is already active for this account')
+    // An activation does not revoke grants left enabled (a partly revoked renewal's survivors, a renewal that landed
+    // after a stop): they would stay beside the new approval. A stop revokes them first.
+    if (acc.superseded?.length) throw new HttpError(409, 'STOP_FIRST', 'earlier Mamoru grants are still enabled on your Safe: stop first to revoke them, then start')
     const r = await readSafe(this.client, live.safe)
     // One cap for the whole prepare (spec 006): the check, the grants, the summary and the stored ceiling all use this
     // value, so a settings pull in the middle cannot make them disagree.
@@ -1633,6 +1832,7 @@ export class Operator {
       }
     }
     if (kind === 'activate') {
+      if (acc.superseded?.length) throw new HttpError(409, 'STOP_FIRST', 'earlier Mamoru grants are still enabled on your Safe: stop first to revoke them, then start')
       // Only a new activation or a renewal is subject to the failure budget; a proven owner's transfer or stop never is.
       this.assertBudget(acc)
       const usdc = await this.usdcOf(live.safe)
@@ -1982,22 +2182,37 @@ export class Operator {
           block = hi
           this.recoverFails.delete(acc.accountKey)
         } catch (e) {
-          // No provider serves the state of those blocks (a long outage, no archive): after a few passes the account
-          // is started instead of never. `latest` showed the grant, but this head was not proven to have it (it may
-          // come from a node behind). So the engine starts RECOVER_HEAD_MARGIN blocks past it: it waits for an RPC
-          // head beyond its starting block before its first review, and by then no node is still before the
-          // execution. Deposits are read from the floor, before the execution, so none is missed: what landed in
-          // between is read as a deposit, which is what it is to the engine.
+          // No provider serves the state of those blocks (a long outage, no archive): tried again for a few passes,
+          // then left to reconciliation as an unread receipt. Never started from grant state alone (I2).
           const fails = (this.recoverFails.get(acc.accountKey) ?? 0) + 1
           this.recoverFails.set(acc.accountKey, fails)
           if (fails < RECOVER_TRIES) throw e
-          logErr('[alert]', `${acc.accountKey} ${a.opId} executed on chain; its block could not be read in ${fails} passes, engine from block ${head + RECOVER_HEAD_MARGIN}, deposits from block ${floor}`)
+          logErr('[alert]', `${acc.accountKey} ${a.opId} grants enabled but the block of its execution could not be read in ${fails} passes: left to reconciliation`)
           this.recoverFails.delete(acc.accountKey)
-          block = head + RECOVER_HEAD_MARGIN
-          depositsFrom = floor
+          block = -1n
+        }
+        // otto/mamoru#140 (I2): the grants enabled are not proof (the owner may enable the same sessions elsewhere).
+        // The block where they were first enabled must hold the Safe's ExecutionSuccess of this approval's own Safe tx hash.
+        const own = a.safeTxHash.toLowerCase()
+        const proven =
+          block >= 0n &&
+          (await this.client.getLogs({ address: acc.ctx.address as Address, fromBlock: block, toBlock: block }).then(
+            (ls) => ls.some((l) => l.topics[0] === EXECUTION_SUCCESS && l.topics[1]?.toLowerCase() === own),
+            (e) => {
+              logErr(`[armed] ${acc.accountKey} logs of block ${block} unreadable:`, e)
+              return false
+            },
+          ))
+        if (!proven) {
+          if (acc.armed?.opId !== a.opId) return
+          console.log(`[armed] ${acc.accountKey} ${a.opId} grants enabled but no ExecutionSuccess of its Safe tx hash at block ${block}: left to reconciliation`)
+          acc.armed = undefined
+          this.failOwner(acc, op, RECEIPT_UNKNOWN)
+          this.reconcileSoon(acc)
+          return
         }
         if (acc.armed?.opId !== a.opId) return
-        console.log(`[armed] ${acc.accountKey} ${a.opId} executed on chain at block ${block} (its grants are enabled): account started`)
+        console.log(`[armed] ${acc.accountKey} ${a.opId} executed on chain at block ${block} (ExecutionSuccess of its Safe tx hash): account started`)
         this.afterOwner(acc, { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: 0, grants: a.grants, ...(a.capUsdc ? { capUsdc: a.capUsdc } : {}) }, { blockNumber: block } as TransactionReceipt, depositsFrom)
         return this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(block) })
       }
@@ -2021,6 +2236,11 @@ export class Operator {
     }
     // Nothing in the Safe: the look was only for the nonce of an approval already sent once.
     if (usdc === 0n) return
+    // otto/mamoru#140: earlier grants still enabled on the Safe (STOP_FIRST): not run beside them, held until a stop.
+    if (acc.superseded?.length) {
+      logErr(`[armed] ${acc.accountKey} ${a.opId} held: ${acc.superseded.length} earlier grants still enabled (STOP_FIRST)`, undefined)
+      return this.park(acc, ARM_CAP_HOLD_MS)
+    }
     // A failed attempt is not tried again at once: the wait grows with the tries.
     if (a.retryAt !== undefined && Date.now() < a.retryAt) return this.park(acc, a.retryAt - Date.now())
     // Over its failure budget the account waits, armed: the budget is a pause on what the relayer pays, and the day
@@ -2233,6 +2453,22 @@ export class Operator {
     // A second copy fails when the first one executed after all (the Safe nonce it was signed for is spent).
     if (!ok && this.settleRetried(acc, op, 'OWNER_TX_FAILED')) return
     if (!ok) return this.failOwner(acc, op, 'OWNER_TX_FAILED', { block: Number(receipt.blockNumber) })
+    if (p.kind === 'renew' && p.grants?.length) {
+      // The same check as every other path that applies a renewal (otto/mamoru#140): its grants are read at the head.
+      // A head not past the receipt yet cannot show a later removal; the receipt itself proves them enabled then. A
+      // read that fails decides nothing: the op becomes an unread receipt (hash kept) and reconciliation reads again.
+      const ids = p.grants.map((g) => g.permissionId)
+      const cur = await this.renewalGrantsNow(acc, ids, receipt.blockNumber)
+      if (cur === null) {
+        this.patchOp(acc, op.opId, { state: 'failed', code: RECEIPT_UNKNOWN, block: Number(receipt.blockNumber) })
+        this.reconcileSoon(acc)
+        return
+      }
+      if (cur !== 'behind' && !cur.on.every(Boolean)) {
+        this.partlyRevoked(acc, { opId: op.opId, revokes: p.revokes, extend: p.extend }, ids, cur.on, cur.block)
+        return this.patchOp(acc, op.opId, { state: 'failed', code: 'RENEWAL_PARTLY_REVOKED', block: Number(receipt.blockNumber) })
+      }
+    }
     this.afterOwner(acc, p, receipt)
     this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(receipt.blockNumber) })
   }
@@ -2242,10 +2478,13 @@ export class Operator {
     if (p.kind === 'activate') {
       acc.trusted = true
       acc.active = true
+      acc.deactivated = undefined
       // The approval ran: it is spent. One armed meanwhile for the same Safe nonce can no longer run.
       if (acc.armed?.opId === p.prepareId.replace(/^armed-/, '')) acc.armed = undefined
       else this.disarm(acc, 'ALREADY_ACTIVE')
       acc.grants = p.grants ?? []
+      // The engine's own grants are never also in `superseded` (a renewal or stop revokes those).
+      acc.superseded = unrevokedIds(acc.superseded ?? [], acc.grants.map((g) => g.permissionId))
       acc.policyId = p.grants?.[0]?.grant.policyId ?? this.cfg.policy.policyId
       // Unknown (a late receipt of an op from before spec 006): the default, the conservative side.
       acc.signedCapUsdc = p.capUsdc ?? LIVE_CAP_USDC.toString()
@@ -2278,6 +2517,7 @@ export class Operator {
         acc.superseded = kept([...(acc.superseded ?? []), ...replaced.map((g) => g.permissionId)])
         acc.grants = p.extend ? [...acc.grants.filter((g) => !names.has(g.name)), ...p.grants] : p.grants
         if (!p.extend) acc.signedCapUsdc = p.capUsdc ?? LIVE_CAP_USDC.toString()
+        acc.superseded = unrevokedIds(acc.superseded ?? [], acc.grants.map((g) => g.permissionId))
         // The engine restarts on these grants and must not look at the chain from before they were enabled.
         acc.grantsFromBlock = receipt.blockNumber.toString()
         acc.epoch++
@@ -2316,7 +2556,9 @@ export class Operator {
       let found: { hash: Hex; block: number; ok: boolean } | null = null
       const receipt = op.txHash ? await this.receiptOf(op.txHash as Hex) : null
       if (receipt) {
-        const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe && l.topics[0] === EXECUTION_SUCCESS)
+        // The Safe's ExecutionSuccess must carry the Safe tx hash this op was signed for, when one is kept (otto/mamoru#140).
+        const own = (op as StoredOp).safeTxHash?.toLowerCase()
+        const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe && l.topics[0] === EXECUTION_SUCCESS && (!own || l.topics[1]?.toLowerCase() === own))
         found = { hash: receipt.transactionHash, block: Number(receipt.blockNumber), ok }
       } else found = await this.findOwnerTx(acc, op)
       if (!found) continue
@@ -2338,6 +2580,8 @@ export class Operator {
         acc.superseded = unrevoked(acc, revokes)
         acc.grants = []
         acc.managedTokenIds = []
+        // Proven now: the account was stopped by this very stop, not by grants revoked elsewhere.
+        if (acc.deactivated?.opId === op.opId) acc.deactivated = undefined
         this.store.save()
       } else if (op.kind === 'activate') {
         if (!op.ownerGrants) {
@@ -2359,17 +2603,29 @@ export class Operator {
         const revokedNow = new Set(acc.revoked.map((id) => id.toLowerCase()))
         acc.superseded = [...new Set([...(acc.superseded ?? []), ...op.ownerGrants.map((g) => g.permissionId).filter((id) => !revokedNow.has(id.toLowerCase()))])]
         this.store.save()
-      } else if (op.kind === 'renew' && op.ownerGrants && later('renew')) {
-        // A later renewal was applied without knowing this one had run: what it did not revoke is still enabled.
+      } else if (op.kind === 'renew' && op.ownerGrants && (later('renew') || later('activate'))) {
+        // A later renewal or Start was applied without knowing this one had run: never applied over it (that would
+        // put the engine back on this one's grants); what it did not revoke is still enabled, remembered for a stop.
         const revokedNow = new Set(acc.revoked.map((id) => id.toLowerCase()))
         acc.superseded = [...new Set([...(acc.superseded ?? []), ...op.ownerGrants.map((g) => g.permissionId).filter((id) => !revokedNow.has(id.toLowerCase()))])]
         this.store.save()
       } else if (op.kind === 'renew' && op.ownerGrants) {
+        // Proven to have run, but applied only if every one of its grants is still enabled now (otto/mamoru#140): one
+        // removed since must not restart the engine on it. Unreadable now: left as an unread receipt, asked again.
+        const ids = op.ownerGrants.map((g) => g.permissionId)
+        const cur = await this.renewalGrantsNow(acc, ids, BigInt(block))
+        if (!cur || cur === 'behind') continue
+        if (!cur.on.every(Boolean)) {
+          this.partlyRevoked(acc, op, ids, cur.on, cur.block)
+          this.patchOp(acc, op.opId, { state: 'failed', code: 'RENEWAL_PARTLY_REVOKED', txHash: hash, block })
+          continue
+        }
         this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, extend: op.extend, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt))
       }
       console.log(`[reconcile] ${op.opId} tx ${hash} landed at block ${block}, confirmed`)
       this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', txHash: hash, block })
     }
+    await this.enforceGrants(acc)
   }
 
   /** The receipt, or null when the provider does not serve it after a few tries (lagging node, or publicnode's archive gate). */
@@ -2530,6 +2786,13 @@ export class Operator {
           if (held.hold) {
             console.log(`[engine ${acc.accountKey}] owner tx pending, review held`)
             return
+          }
+          // I1 (otto/mamoru#140): every grant the engine uses must read enabled, checked at least every
+          // GRANTS_CHECK_MS: one revoked elsewhere stops the loop here, before the engine acts on it.
+          if (now - (this.grantsChecked.get(acc.accountKey) ?? 0) >= GRANTS_CHECK_MS) {
+            // Counted as checked only when the sweep read the chain; a failed or deferred one is tried at the next tick.
+            if (await this.enforceGrants(acc)) this.grantsChecked.set(acc.accountKey, now)
+            if (runner.stopped || !acc.active) return
           }
           const startedAt = Date.now()
           const r = await engine.review()

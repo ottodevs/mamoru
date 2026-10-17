@@ -31,7 +31,7 @@ function setup(withHash: boolean, archiveOnly = false, logged: string = SAFE_TX,
       { opId: 'own-2-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', ...(withHash ? { txHash: TX } : {}), ...(kept ? { safeTxHash: kept } : {}), updatedAt: '2026-09-26T21:11:54.000Z' },
     ],
   } as unknown as AccountState
-  const receipt = { transactionHash: TX, status: 'success', blockNumber: 51833884n, from: RELAYER, logs: [{ address: SAFE, topics: [EXECUTION_SUCCESS] }] } as unknown as TransactionReceipt
+  const receipt = { transactionHash: TX, status: 'success', blockNumber: 51833884n, from: RELAYER, logs: [{ address: SAFE, topics: [EXECUTION_SUCCESS, logged] }] } as unknown as TransactionReceipt
   let calls = 0
   const client = {
     getTransactionReceipt: async () => {
