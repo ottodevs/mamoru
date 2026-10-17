@@ -8,7 +8,7 @@ import { webAuthnSigner } from '@mamoru/account/safe'
 import { LIVE_CAP_USDC, browserOwnerSignature, deployCall, liveAccountFromContext } from '@mamoru/account/live'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { FOLLOW_UP_GRACE, FOLLOW_UP_MAX, FOLLOW_UP_MS, graceLeft, HttpError, lastEngineBlock, nextReview, MAX_OWNER_FAILURES_PER_DAY, OWNER_FAILURES_ALERT_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
-import type { Relayer } from '../src/relayer.ts'
+import { SendExpired, type Relayer } from '../src/relayer.ts'
 import { answerAggregate3 } from './fake-multicall.ts'
 import { quoterV2Abi } from '@mamoru/uniswap-v3/quote'
 import type { AccountState, ArmedActivation, StateStore } from '../src/state.ts'
@@ -38,7 +38,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n, eth: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, weiPerUsdc: 0n, twapTick: null as number | null, blockTime: 1_790_000_000n }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, weiPerUsdc: 0n, twapTick: null as number | null, blockTime: 1_790_000_000n, notAfterSeen: [] as bigint[], expireInQueue: false }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -101,7 +101,12 @@ function world(usdc: bigint) {
   } as unknown as PublicClient
   const relayer = {
     address: RELAYER,
-    send: async (tx: { to: string; data?: Hex; value?: bigint }, onSent?: (h: Hex) => void, onSending?: () => void) => {
+    send: async (tx: { to: string; data?: Hex; value?: bigint; notAfter?: { at: bigint; code: string } }, onSent?: (h: Hex) => void, onSending?: () => void) => {
+      // The real relayer checks a job's time limit right before the broadcast (relayer-nonce.test.ts); here a knob says it ran out in the queue.
+      if (tx.notAfter) {
+        knobs.notAfterSeen.push(tx.notAfter.at)
+        if (knobs.expireInQueue) throw new SendExpired(tx.notAfter.code, tx.notAfter.at, tx.notAfter.at)
+      }
       sent.push(tx)
       if (!knobs.failBeforeSending) onSending?.()
       knobs.onSend(tx)
@@ -2199,5 +2204,14 @@ describe('the activation buys its own gas reserve', () => {
     w.knobs.blockTime += 7n * 86_400n
     expect(await w.op.submit(ctx, 'activate', sign(t))).toMatchObject({ state: 'failed', code: 'RESERVE_SWAP_EXPIRED' })
     expect(w.sent).toHaveLength(0)
+  })
+  test('the execTransaction carries the swap deadline into the relayer; dropped there, it fails as expired and nothing goes out', async () => {
+    const w = quiet(20_000_000n)
+    w.knobs.expireInQueue = true
+    const t = await w.op.prepareActivate(ctx)
+    expect(await w.op.submit(ctx, 'activate', sign(t))).toMatchObject({ state: 'failed', code: 'RESERVE_SWAP_EXPIRED' })
+    expect(w.knobs.notAfterSeen).toEqual([w.knobs.blockTime + 7n * 86_400n - 600n])
+    expect(execs(w)).toHaveLength(0)
+    expect(w.state.accounts.k!.ownerFailures ?? []).toHaveLength(0)
   })
 })

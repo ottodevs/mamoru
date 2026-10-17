@@ -38,11 +38,11 @@ import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { USDC_POOLS, amountsForLiquidity, inUsdc, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
-import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, meanTick, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
+import { SELF_RESERVE_DEADLINE_MARGIN_SECONDS, SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, meanTick, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
 import { SUBSIDY_ALERT_SHARE, noteExit, paidToday, subsidyDecision, subsidyMessage, subsidyPerDayFromEnv, type SubsidyDecision } from './subsidy.ts'
 import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type EngineHealthSnapshot } from './metrics.ts'
-import type { Relayer } from './relayer.ts'
+import { SendExpired, type Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
 import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
 
@@ -1904,6 +1904,20 @@ export class Operator {
     return true
   }
 
+  /**
+   * An activation whose reserve swap can no longer be sent: the owner approves again. A copy handed to a provider by an
+   * earlier attempt may have landed before the deadline: that one is left to reconciliation, as a retry that meets its
+   * Safe nonce spent.
+   */
+  private reserveExpiredOwner(acc: AccountState, op: OpView): void {
+    if (this.retried.has(opKey(acc, op)) || this.execTried.has(opKey(acc, op))) {
+      this.failOwner(acc, op, RECEIPT_UNKNOWN, { txHash: undefined })
+      this.reconcileSoon(acc)
+      return
+    }
+    this.failOwner(acc, op, RESERVE_SWAP_EXPIRED)
+  }
+
   /** Unix seconds: the later of this clock and the provider's head, so neither one lagging lets a stale swap through. */
   private async chainNow(): Promise<bigint> {
     const wall = BigInt(Math.floor(Date.now() / 1000))
@@ -1927,12 +1941,7 @@ export class Operator {
     // A copy handed to a provider earlier may have landed before the deadline: that is reconciliation's to find.
     if (p.kind === 'activate' && p.reserveDeadline && reserveExpired(BigInt(p.reserveDeadline), await this.chainNow())) {
       logErr(`[owner] ${op.opId} gas reserve swap past its deadline, not sent:`, { deadline: p.reserveDeadline })
-      if (this.retried.has(opKey(acc, op)) || this.execTried.has(opKey(acc, op))) {
-        this.failOwner(acc, op, RECEIPT_UNKNOWN, { txHash: undefined })
-        this.reconcileSoon(acc)
-        return
-      }
-      return this.failOwner(acc, op, RESERVE_SWAP_EXPIRED)
+      return this.reserveExpiredOwner(acc, op)
     }
     // Before any relayer transaction: signature, guards and a simulation of everything about to be sent.
     const refusal = await this.preflight(acc, live, p, signature)
@@ -2020,20 +2029,31 @@ export class Operator {
         return this.failOwner(acc, op, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: LIVE_CAP_USDC.toString() })
       }
     }
+    // A reserve swap's deadline travels with the send: the relayer checks it again after its queue and its reads, right
+    // before the broadcast, and drops the job instead of sending it (otto/mamoru#15).
+    const notAfter = p.kind === 'activate' && p.reserveDeadline ? { at: BigInt(p.reserveDeadline) - SELF_RESERVE_DEADLINE_MARGIN_SECONDS, code: RESERVE_SWAP_EXPIRED } : undefined
     // Keep the hash as soon as the tx is out: if the receipt poll fails, reconciliation reads it later.
-    const { hash, receipt } = await this.relayer.send(
-      { to: safe, data },
-      (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }),
-      () => {
-        this.execTried.add(opKey(acc, op))
-        // Written before the provider gets it: a restart from here on must know a copy may be out.
-        if (acc.armed?.opId === op.opId && !acc.armed.execSent) {
-          acc.armed.execSent = true
-          acc.armed.sentAt = Date.now()
-          this.store.save()
-        }
-      },
-    )
+    let sent: { hash: Hex; receipt: TransactionReceipt }
+    try {
+      sent = await this.relayer.send(
+        { to: safe, data, ...(notAfter ? { notAfter } : {}) },
+        (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }),
+        () => {
+          this.execTried.add(opKey(acc, op))
+          // Written before the provider gets it: a restart from here on must know a copy may be out.
+          if (acc.armed?.opId === op.opId && !acc.armed.execSent) {
+            acc.armed.execSent = true
+            acc.armed.sentAt = Date.now()
+            this.store.save()
+          }
+        },
+      )
+    } catch (e) {
+      if (!(e instanceof SendExpired)) throw e
+      logErr(`[owner] ${op.opId} dropped by the relayer before its broadcast:`, e.message)
+      return this.reserveExpiredOwner(acc, op)
+    }
+    const { hash, receipt } = sent
     this.patchOp(acc, op.opId, { state: 'submitted', txHash: hash })
     const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
     console.log(`[owner] ${op.opId} tx ${hash} block ${receipt.blockNumber} ${ok ? 'ok' : 'FAILED'}`)

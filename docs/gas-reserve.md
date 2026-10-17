@@ -41,7 +41,10 @@ activation summary says it, to the unit: "Convert 1.364039 USDC to at least 0.00
 An armed approval has no lifetime of its own, so the swap deadline is its bound: one still waiting (for the relayer)
 within 10 minutes of the deadline is dropped with `RESERVE_SWAP_EXPIRED` and the app asks for a new approval, as for
 any failed start. One whose `execTransaction` was already handed to a provider is not sent again; reconciliation
-reads whether it landed.
+reads whether it landed. The limit also travels with the send itself (`notAfter` on the relayer job, deadline minus
+10 minutes): the relayer checks it again after its queue and its reads, right before the broadcast, against the later
+of its clock and the chain head, and drops the job (`SendExpired`, `RESERVE_SWAP_EXPIRED`) instead of sending it, on
+every attempt.
 
 ## When the relayer still pays (#82)
 

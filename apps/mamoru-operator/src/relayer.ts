@@ -9,6 +9,23 @@ const TX_GAS_CAP = 16_777_216n
 /** How long the nonce of the last accepted send overrules a provider count that has not caught up with it. */
 const LAST_SENT_MS = 120_000
 
+/**
+ * A job with a `notAfter` that could no longer be broadcast in time: dropped, never signed for the provider. `code`
+ * is the job's own (e.g. RESERVE_SWAP_EXPIRED); nothing of it reached a provider.
+ */
+export class SendExpired extends Error {
+  constructor(
+    readonly code: string,
+    readonly notAfter: bigint,
+    readonly now: bigint,
+  ) {
+    super(`${code}: not sent, unix time ${now} is at or past the job's limit ${notAfter}`)
+  }
+}
+
+/** When a job may no longer go out: unix seconds (the caller's margin already taken off), and the code it fails with. */
+export type NotAfter = { at: bigint; code: string }
+
 /** The relayer EOA: pays gas for Safe deploys, owner execTransactions, top-ups and handleOps bundles. One send at a time. */
 export class Relayer {
   readonly account: PrivateKeyAccount
@@ -50,11 +67,30 @@ export class Relayer {
   }
 
   /**
+   * Throws SendExpired when the later of the wall clock and the chain head is at or past `n.at`. A head that cannot be
+   * read leaves the wall clock alone to decide: a head behind it changes nothing, so only a clock running late could
+   * let a job through, and then by no more than its lag.
+   */
+  private async assertInTime(n: NotAfter): Promise<void> {
+    let now = BigInt(Math.floor(Date.now() / 1000))
+    try {
+      const { timestamp } = await this.client.getBlock()
+      if (timestamp > now) now = timestamp
+    } catch (e) {
+      logErr('[relayer] chain head unavailable for a job with a time limit, wall clock only:', e)
+    }
+    if (now >= n.at) throw new SendExpired(n.code, n.at, now)
+  }
+
+  /**
    * Sends and waits for the receipt. Gas is estimated with a 30% margin unless given. `onSending` runs once the reads
    * are done, right before the signed transaction goes to the provider: from there on a failure may have broadcast it.
    * `onSent` runs with the hash once the provider accepts it.
+   * `notAfter`: the job carries a time limit (a swap deadline inside it). It is checked last, after the queue and every
+   * read, right before the provider gets the transaction, against the later of this clock and the chain head; at or
+   * past it the job throws SendExpired and nothing is broadcast. Every call is checked again, so a retry is too.
    */
-  send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: () => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
+  send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint; notAfter?: NotAfter }, onSent?: (hash: Hex) => void, onSending?: () => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     return this.lock.run(async () => {
       const wallet = createWalletClient({ account: this.account, chain: this.chain, transport: http(this.rpcUrl, { timeout: 60_000 }) })
       // Base rejects a tx over 2^24 gas (EIP-7825): the 30% margin must not push a fitting estimate over the cap.
@@ -79,6 +115,7 @@ export class Relayer {
         maxFeePerGas: fees.maxFeePerGas,
         maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
       })
+      if (tx.notAfter) await this.assertInTime(tx.notAfter)
       onSending?.()
       const hash = await wallet.sendRawTransaction({ serializedTransaction })
       this.lastSent = { nonce, at: Date.now() }
