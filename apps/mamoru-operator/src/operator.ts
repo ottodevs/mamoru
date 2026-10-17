@@ -60,6 +60,8 @@ const SIGNED_FOLLOW_MS = 10_000
 const SIGNED_FOLLOW_CAP_MS = 300_000
 /** A "not landed" seen on one pass is closed only if a later pass, at least this much later, sees it again. */
 const SIGNED_CLOSE_CONFIRM_MS = 120_000
+/** Blocks below the head the relayer nonce is read at for a "dropped" close (~24 s on Base): no reorg undoes it. */
+const SIGNED_NONCE_CONFIRMATIONS = 12n
 /** An activation whose gas reserve swap reached its deadline before it could be sent: the owner approves again. */
 const RESERVE_SWAP_EXPIRED = 'RESERVE_SWAP_EXPIRED'
 /** An owner op whose receipt poll failed after the tx was sent: the tx may still have landed. */
@@ -229,6 +231,8 @@ export type OperatorConfig = {
   rpcBudget?: RpcBudget
   /** Client of the armed watcher's batched balance reads, so the counters tell them apart; absent: the operator's client. */
   watchClient?: PublicClient
+  /** Client of the settlement of signed copies (settleSigned): one upstream, no fallback; absent: the operator's client. */
+  settleClient?: PublicClient
 }
 
 type OwnerKind = 'activate' | 'transfer' | 'stop' | 'renew'
@@ -340,6 +344,7 @@ export class Operator {
   private signedFollowCapMs = SIGNED_FOLLOW_CAP_MS
   private signedTimer: ReturnType<typeof setTimeout> | null = null
   private signedPasses = 0
+  private signedRunning = false
   /** Times the off-chain signature check said no and the chain said yes, since this process started. Logged with each one. */
   mirrorMismatches = 0
   private readonly engineHealth = new EngineHealthTracker()
@@ -1899,6 +1904,8 @@ export class Operator {
       this.retried.delete(opKey(acc, op))
     }
     this.store.save()
+    // The one place an owner op is left unresolved with signed copies, whatever path got it there: it is followed.
+    if (unsettledSignedOp(op)) this.ensureFollowSigned()
   }
 
   private async execute(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView): Promise<void> {
@@ -1932,7 +1939,6 @@ export class Operator {
     if (maybeOut) {
       this.failOwner(acc, op, RECEIPT_UNKNOWN, { txHash: undefined })
       this.reconcileSoon(acc)
-      this.followSigned(true)
       return
     }
     this.failOwner(acc, op, RESERVE_SWAP_EXPIRED)
@@ -2238,7 +2244,12 @@ export class Operator {
 
   /** Owner ops waiting on signed copies that may still land. */
   private unsettledSigned(): AccountState[] {
-    return Object.values(this.store.state.accounts).filter((a) => a.ops.some((o) => o.opId.startsWith('own-') && o.state === 'failed' && o.code === RECEIPT_UNKNOWN && (o as StoredOp).signedTxs?.length))
+    return Object.values(this.store.state.accounts).filter((a) => a.ops.some(unsettledSignedOp))
+  }
+
+  /** Arms the follow-up if it is not armed already (a pass in progress re-arms it when it ends). */
+  private ensureFollowSigned(): void {
+    if (!this.signedTimer && !this.signedRunning) this.followSigned(true)
   }
 
   /**
@@ -2255,9 +2266,13 @@ export class Operator {
     this.signedTimer = setTimeout(() => {
       this.signedTimer = null
       this.signedPasses++
+      this.signedRunning = true
       const due = this.unsettledSigned()
       Promise.all(due.map((acc) => this.lock(acc.accountKey).run(() => this.reconcileOwner(acc)).catch((e) => logErr(`[reconcile] ${acc.accountKey} follow-up:`, e))))
-        .finally(() => this.followSigned())
+        .finally(() => {
+          this.signedRunning = false
+          this.followSigned()
+        })
     }, wait)
     // The follow-up never keeps the process alive on its own.
     this.signedTimer.unref?.()
@@ -2265,44 +2280,58 @@ export class Operator {
 
   /**
    * The copies of an owner tx signed with a time limit, by hash. A receipt (success or revert, gas paid either way)
-   * settles it. Otherwise it stays `open` on any doubt, and is closed only when every copy is definitively not on
-   * chain: each receipt lookup answered "no such receipt" and each transaction lookup "no such transaction" (an
-   * error, a timeout or a copy still in a pool is doubt), and either the relayer nonce of every copy is taken, read at
-   * a pinned block, (OWNER_TX_DROPPED) or the swap deadline is past by a margin (RESERVE_SWAP_EXPIRED). Even then it
-   * closes only when a second pass, SIGNED_CLOSE_CONFIRM_MS later, sees the same: a lagging node that has not seen a
-   * block yet is not taken for the chain. The window is the whole of the swap's validity, not a range of blocks.
+   * settles it. Otherwise it stays `open` on any doubt, and is closed only from one chain view: every read of the pass
+   * goes to the upstream alone (settleClient, pinned in the proxy); the head is read once (number and hash); each
+   * copy must be answered "no such receipt" and "no such transaction" (an error, or a copy a node knows, is doubt);
+   * and afterwards the same block number must still carry the same hash on that upstream, or the not-founds may come
+   * from a node behind it, or from another fork. Then it is closed when the relayer nonce of every copy is taken at a
+   * block SIGNED_NONCE_CONFIRMATIONS deep, read by its hash (OWNER_TX_DROPPED), or when the swap deadline is past by a
+   * margin (RESERVE_SWAP_EXPIRED). And only when a second pass, SIGNED_CLOSE_CONFIRM_MS later, sees the same; every
+   * change of that first sighting is saved, so a restart neither forgets nor revives one.
    */
   private async settleSigned(op: StoredOp): Promise<TransactionReceipt | 'open' | 'OWNER_TX_DROPPED' | typeof RESERVE_SWAP_EXPIRED> {
+    const client = this.cfg.settleClient ?? this.client
     const copies = op.signedTxs ?? []
-    // Read first, so that "not on chain" below is from no earlier than this block.
-    let pinned: bigint
-    try {
-      pinned = await this.client.getBlockNumber({ cacheTime: 0 })
-    } catch {
+    const open = (): 'open' => {
+      if (op.notLandedSince !== undefined) {
+        op.notLandedSince = undefined
+        this.store.save()
+      }
       return 'open'
+    }
+    let head: { number: bigint; hash: Hex }
+    try {
+      const b = await client.getBlock()
+      if (b.number === null || !b.hash) return open()
+      head = { number: b.number, hash: b.hash }
+    } catch {
+      return open()
     }
     let doubt = false
     for (const { hash } of copies) {
-      const r = await lookupReceipt(this.client, hash as Hex)
+      const r = await lookupReceipt(client, hash as Hex)
       if (r === 'error') doubt = true
       else if (r) return r
-      const t = await lookupTransaction(this.client, hash as Hex)
       // Known to a node (mined, receipt not served yet, or still in a pool): it may land.
-      if (t !== null) doubt = true
+      if ((await lookupTransaction(client, hash as Hex)) !== null) doubt = true
     }
+    if (doubt) return open()
     let why: 'OWNER_TX_DROPPED' | typeof RESERVE_SWAP_EXPIRED | null = null
-    if (!doubt) {
-      try {
-        const mined = await this.client.getTransactionCount({ address: this.relayer.address, blockNumber: pinned })
-        if (copies.every((t) => t.nonce < mined)) why = 'OWNER_TX_DROPPED'
-      } catch (e) {
-        logErr(`[reconcile] ${op.opId} relayer nonce at block ${pinned} unavailable:`, e)
-      }
-      if (!why && op.reserveDeadline && (await this.chainNow()) > BigInt(op.reserveDeadline) + SELF_RESERVE_DEADLINE_MARGIN_SECONDS) why = RESERVE_SWAP_EXPIRED
+    try {
+      const deep = await client.getBlock({ blockNumber: head.number - SIGNED_NONCE_CONFIRMATIONS })
+      const count = await client.request({ method: 'eth_getTransactionCount', params: [this.relayer.address, { blockHash: deep.hash! }] } as never)
+      if (copies.every((t) => BigInt(t.nonce) < BigInt(count as string))) why = 'OWNER_TX_DROPPED'
+    } catch (e) {
+      logErr(`[reconcile] ${op.opId} relayer nonce ${SIGNED_NONCE_CONFIRMATIONS} blocks deep unavailable:`, e)
     }
-    if (!why) {
-      op.notLandedSince = undefined
-      return 'open'
+    if (!why && op.reserveDeadline && (await this.chainNow()) > BigInt(op.reserveDeadline) + SELF_RESERVE_DEADLINE_MARGIN_SECONDS) why = RESERVE_SWAP_EXPIRED
+    if (!why) return open()
+    // The view the not-founds came from: the block read at the start must still be there, with the same hash.
+    try {
+      const again = await client.getBlock({ blockNumber: head.number })
+      if (again.hash?.toLowerCase() !== head.hash.toLowerCase()) return open()
+    } catch {
+      return open()
     }
     const since = op.notLandedSince ? Date.parse(op.notLandedSince) : NaN
     if (Number.isNaN(since)) {
@@ -2708,6 +2737,11 @@ function retryAt(tries: number, execSent = false): number {
  * send whose reply was lost, and the second answer is then "already known" or a nonce error. Such an op is not sent
  * again; it fails as an unknown receipt and reconcileOwner settles it from the chain.
  */
+/** An owner op left with an unknown receipt and signed copies that may still land: reconciliation follows it. */
+function unsettledSignedOp(o: OpView): boolean {
+  return o.opId.startsWith('own-') && o.state === 'failed' && o.code === RECEIPT_UNKNOWN && !!(o as StoredOp).signedTxs?.length
+}
+
 /** A receipt, null when the node answered that there is none, 'error' when it could not answer. */
 async function lookupReceipt(client: PublicClient, hash: Hex): Promise<TransactionReceipt | null | 'error'> {
   try {

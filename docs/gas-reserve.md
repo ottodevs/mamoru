@@ -56,9 +56,13 @@ blocks. A successful receipt starts the account. A reverted one is `OWNER_TX_FAI
 paid). Any doubt keeps it open (`OWNER_TX_ERROR`): a lookup that errors, a node that knows the transaction (mined or
 pending) but serves no receipt yet. It is closed only when every copy is definitively not on chain (a "no such
 receipt" and a "no such transaction" answer for each), and either the relayer nonce of every copy is taken at a
-pinned block (`OWNER_TX_DROPPED`) or the deadline is 10 minutes past (`RESERVE_SWAP_EXPIRED`). Even then a second
-pass at least 2 minutes later has to see the same. While such an op is open, reconciliation runs again on its own
-timer, with no app traffic needed: after 10 s, doubling up to 5 minutes. The timer is armed again at startup.
+block 12 deep (`OWNER_TX_DROPPED`) or the deadline is 10 minutes past (`RESERVE_SWAP_EXPIRED`). Even then a second
+pass at least 2 minutes later has to see the same, and that first sighting is saved on every change. A pass reads one
+chain view: the upstream alone, pinned in the proxy (`x-mamoru-pin-upstream`, local only). It reads the head once and
+the relayer nonce 12 blocks below it, by block hash. The not-founds count only if, afterwards, the head's block number
+still carries the same hash there. While such an op is open, reconciliation runs again on its own timer, with no app
+traffic needed: after 10 s, doubling up to 5 minutes. The timer is armed wherever the op is saved in that state, and
+again at startup.
 
 ## When the relayer still pays (#82)
 
