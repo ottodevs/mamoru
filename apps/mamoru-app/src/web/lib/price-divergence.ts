@@ -78,6 +78,48 @@ function formatShortfallAmount(raw: string, decimals: number): string {
   return ceilLegAmount(raw, decimals, fineCap)
 }
 
+/** Ceiling division for non-negative bigints: the smallest integer not less than a/b (b > 0). */
+function ceilDiv(a: bigint, b: bigint): bigint {
+  return a <= 0n ? 0n : (a + b - 1n) / b
+}
+
+/**
+ * The percentage, like the amount, is never displayed below the true loss: ceiled to the next basis point. A
+ * true value under 1 bp (0.01%) is not ceiled up to a full "0.01%", which would read as more precise than it
+ * is for what is really a dust-level percentage; it reads as "< 0.01%" instead, the same "less than, never a
+ * false ceiling" rule `formatShortfallAmount` uses for amounts.
+ */
+function formatShortfallPercent(shortfall: bigint, fair: bigint): string {
+  if (shortfall <= 0n || fair <= 0n) return formatBps(0)
+  if (shortfall * 10_000n < fair) return '< 0.01%'
+  return formatBps(Number(ceilDiv(shortfall * 10_000n, fair)))
+}
+
+/**
+ * otto/mamoru#155 (security review on 1c54819): neither `leg.shortfall` nor `leg.shortfallBps` is trusted alone.
+ * The shortfall is always re-derived here from `fairAmount` and `minAmount` — the signed/binding floor — and
+ * only the larger (worse, more conservative) of that computation and whatever the operator reported is ever
+ * shown; the operator's figure can only make the displayed loss bigger, never smaller. Clamped to `fairAmount`
+ * so a garbled operator value can't inflate the headline past the whole amount at stake. The percentage is not
+ * taken from the operator at all: it is always arithmetic on the shortfall this function already settled on, so
+ * the dollar figure and the percentage can never disagree with each other.
+ */
+function legShortfall(leg: PriceDivergenceLeg): { amount: string; percent: string } {
+  const fair = BigInt(leg.fairAmount)
+  const min = BigInt(leg.minAmount)
+  const computed = fair > min ? fair - min : 0n
+  let reported = 0n
+  try {
+    const r = BigInt(leg.shortfall)
+    if (r > 0n) reported = r
+  } catch {
+    reported = 0n
+  }
+  const worst = computed > reported ? computed : reported
+  const shortfall = worst > fair ? fair : worst
+  return { amount: shortfall.toString(), percent: formatShortfallPercent(shortfall, fair) }
+}
+
 type LegCopy = {
   swapBack: (leg: PriceDivergenceLeg) => string
   payout: (leg: PriceDivergenceLeg) => string
@@ -99,14 +141,18 @@ type Copy = {
 const COPY: Record<Locale, Copy> = {
   en: {
     sentence: {
-      swapBack: (leg) =>
-        `Your account would get at least ${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token} instead of about ${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token} from selling ${leg.sellToken ?? leg.token}. That is ${formatShortfallAmount(leg.shortfall, leg.decimals)} ${leg.token} less (${formatBps(leg.shortfallBps)}).`,
-      payout: (leg) =>
-        `The recipient would receive at least ${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token} instead of about ${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token}. That is ${formatShortfallAmount(leg.shortfall, leg.decimals)} ${leg.token} less (${formatBps(leg.shortfallBps)}).`,
+      swapBack: (leg) => {
+        const { amount, percent } = legShortfall(leg)
+        return `Your account would get at least ${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token} instead of about ${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token} from selling ${leg.sellToken ?? leg.token}. That is ${formatShortfallAmount(amount, leg.decimals)} ${leg.token} less (${percent}).`
+      },
+      payout: (leg) => {
+        const { amount, percent } = legShortfall(leg)
+        return `The recipient would receive at least ${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token} instead of about ${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token}. That is ${formatShortfallAmount(amount, leg.decimals)} ${leg.token} less (${percent}).`
+      },
     },
     clause: {
-      swapBack: (leg) => `your account will get about ${formatShortfallAmount(leg.shortfall, leg.decimals)} ${leg.token} less`,
-      payout: (leg) => `the recipient will get about ${formatShortfallAmount(leg.shortfall, leg.decimals)} ${leg.token} less`,
+      swapBack: (leg) => `your account will get about ${formatShortfallAmount(legShortfall(leg).amount, leg.decimals)} ${leg.token} less`,
+      payout: (leg) => `the recipient will get about ${formatShortfallAmount(legShortfall(leg).amount, leg.decimals)} ${leg.token} less`,
     },
     and: ' and ',
     checkbox: (loss) => `I understand ${loss}.`,
@@ -116,14 +162,18 @@ const COPY: Record<Locale, Copy> = {
   },
   es: {
     sentence: {
-      swapBack: (leg) =>
-        `Tu cuenta recibiría al menos ${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token} en vez de unos ${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token} al vender ${leg.sellToken ?? leg.token}. Eso son ${formatShortfallAmount(leg.shortfall, leg.decimals)} ${leg.token} menos (${formatBps(leg.shortfallBps)}).`,
-      payout: (leg) =>
-        `El destinatario recibiría al menos ${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token} en vez de unos ${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token}. Eso son ${formatShortfallAmount(leg.shortfall, leg.decimals)} ${leg.token} menos (${formatBps(leg.shortfallBps)}).`,
+      swapBack: (leg) => {
+        const { amount, percent } = legShortfall(leg)
+        return `Tu cuenta recibiría al menos ${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token} en vez de unos ${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token} al vender ${leg.sellToken ?? leg.token}. Eso son ${formatShortfallAmount(amount, leg.decimals)} ${leg.token} menos (${percent}).`
+      },
+      payout: (leg) => {
+        const { amount, percent } = legShortfall(leg)
+        return `El destinatario recibiría al menos ${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token} en vez de unos ${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token}. Eso son ${formatShortfallAmount(amount, leg.decimals)} ${leg.token} menos (${percent}).`
+      },
     },
     clause: {
-      swapBack: (leg) => `tu cuenta recibirá unos ${formatShortfallAmount(leg.shortfall, leg.decimals)} ${leg.token} menos`,
-      payout: (leg) => `el destinatario recibirá unos ${formatShortfallAmount(leg.shortfall, leg.decimals)} ${leg.token} menos`,
+      swapBack: (leg) => `tu cuenta recibirá unos ${formatShortfallAmount(legShortfall(leg).amount, leg.decimals)} ${leg.token} menos`,
+      payout: (leg) => `el destinatario recibirá unos ${formatShortfallAmount(legShortfall(leg).amount, leg.decimals)} ${leg.token} menos`,
     },
     and: ' y ',
     checkbox: (loss) => `Entiendo que ${loss}.`,
@@ -133,14 +183,18 @@ const COPY: Record<Locale, Copy> = {
   },
   ja: {
     sentence: {
-      swapBack: (leg) =>
-        `${leg.sellToken ?? leg.token}を売却するアカウントは、約${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token}ではなく少なくとも${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token}を受け取ることになります。${formatShortfallAmount(leg.shortfall, leg.decimals)} ${leg.token}少なくなります(${formatBps(leg.shortfallBps)})。`,
-      payout: (leg) =>
-        `受取人は約${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token}ではなく少なくとも${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token}を受け取ることになります。${formatShortfallAmount(leg.shortfall, leg.decimals)} ${leg.token}少なくなります(${formatBps(leg.shortfallBps)})。`,
+      swapBack: (leg) => {
+        const { amount, percent } = legShortfall(leg)
+        return `${leg.sellToken ?? leg.token}を売却するアカウントは、約${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token}ではなく少なくとも${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token}を受け取ることになります。${formatShortfallAmount(amount, leg.decimals)} ${leg.token}少なくなります(${percent})。`
+      },
+      payout: (leg) => {
+        const { amount, percent } = legShortfall(leg)
+        return `受取人は約${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token}ではなく少なくとも${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token}を受け取ることになります。${formatShortfallAmount(amount, leg.decimals)} ${leg.token}少なくなります(${percent})。`
+      },
     },
     clause: {
-      swapBack: (leg) => `アカウントが約${formatShortfallAmount(leg.shortfall, leg.decimals)} ${leg.token}少なく受け取る`,
-      payout: (leg) => `受取人が約${formatShortfallAmount(leg.shortfall, leg.decimals)} ${leg.token}少なく受け取る`,
+      swapBack: (leg) => `アカウントが約${formatShortfallAmount(legShortfall(leg).amount, leg.decimals)} ${leg.token}少なく受け取る`,
+      payout: (leg) => `受取人が約${formatShortfallAmount(legShortfall(leg).amount, leg.decimals)} ${leg.token}少なく受け取る`,
     },
     and: '、',
     checkbox: (loss) => `${loss}ことを理解しています。`,
@@ -193,4 +247,45 @@ export function transferConfirmDisabled(busy: string | null, divergence: PriceDi
  */
 export function acceptancePayload(divergence: PriceDivergenceWarning | undefined, acceptedWarning: PriceDivergenceWarning | null): { acceptDivergence: { quoteId: string } } | Record<string, never> {
   return divergence && acceptedWarning === divergence ? { acceptDivergence: { quoteId: divergence.quoteId } } : {}
+}
+
+// otto/mamoru#155 (security review on 1c54819): the API client boundary validates a prepare response's
+// `divergence` before anything downstream (gating, formatting, rendering) ever sees it. An operator is already
+// trusted for a lot, but a malformed warning must never crash the Review mid-withdrawal or silently fail open
+// (gate nothing when a real divergence was meant to be flagged) — the client rejects the whole prepare instead,
+// which leaves nothing prepared and nothing submittable (see client.ts's use of this).
+
+const INT_STRING = /^\d+$/
+
+function isValidLeg(leg: unknown): leg is PriceDivergenceLeg {
+  if (typeof leg !== 'object' || leg === null) return false
+  const l = leg as Record<string, unknown>
+  if (l.kind !== 'swap-back' && l.kind !== 'payout') return false
+  if (typeof l.token !== 'string' || l.token.length === 0) return false
+  if (l.sellToken !== undefined && (typeof l.sellToken !== 'string' || l.sellToken.length === 0)) return false
+  if (typeof l.decimals !== 'number' || !Number.isInteger(l.decimals) || l.decimals < 0 || l.decimals > 36) return false
+  for (const field of ['fairAmount', 'quotedAmount', 'minAmount', 'shortfall'] as const) {
+    if (typeof l[field] !== 'string' || !INT_STRING.test(l[field] as string)) return false
+  }
+  if (typeof l.shortfallBps !== 'number' || !Number.isInteger(l.shortfallBps) || l.shortfallBps < 0) return false
+  try {
+    const fair = BigInt(l.fairAmount as string)
+    const min = BigInt(l.minAmount as string)
+    if (min < 0n || min > fair) return false
+  } catch {
+    return false
+  }
+  return true
+}
+
+/** Integer strings, 0 ≤ minAmount ≤ fairAmount per leg, integer 0 ≤ decimals ≤ 36 per leg, at least one leg. */
+export function isValidPriceDivergence(d: unknown): d is PriceDivergenceWarning {
+  if (typeof d !== 'object' || d === null) return false
+  const w = d as Record<string, unknown>
+  if (w.code !== 'PRICE_DIVERGENCE') return false
+  if (!Array.isArray(w.legs) || w.legs.length < 1) return false
+  if (!w.legs.every(isValidLeg)) return false
+  if (typeof w.shortfallUsdc !== 'string' || !INT_STRING.test(w.shortfallUsdc)) return false
+  if (typeof w.quoteId !== 'string' || w.quoteId.length === 0) return false
+  return true
 }
