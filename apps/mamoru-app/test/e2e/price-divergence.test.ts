@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { PriceDivergenceWarning } from '@mamoru/domain'
+import type { PriceDivergenceLeg, PriceDivergenceWarning } from '@mamoru/domain'
 import { fixtureClient, fixtureDivergence } from '../../src/web/fixtures/client.ts'
 import {
   acceptancePayload,
@@ -150,6 +150,57 @@ describe('price divergence: precision never flattens a positive shortfall to zer
       quoteId: 'q',
     }
     expect(divergenceLines('en', jpy)[0]).toContain('8 JPY less')
+  })
+})
+
+/** A leg whose only job is to carry one shortfall (and a safely positive fair/quoted/min) through the formatter. */
+function shortfallLeg(decimals: number, shortfall: string): PriceDivergenceLeg {
+  const buffer = 10n ** BigInt(decimals + 2) // comfortably larger than any shortfall this file exercises
+  const min = buffer
+  const fair = BigInt(shortfall) + buffer
+  return { kind: 'payout', token: 'TOK', decimals, fairAmount: String(fair), quotedAmount: String(min), minAmount: String(min), shortfall, shortfallBps: 1 }
+}
+const shortfallLine = (decimals: number, shortfall: string): string =>
+  divergenceLines('en', { code: 'PRICE_DIVERGENCE', legs: [shortfallLeg(decimals, shortfall)], shortfallUsdc: shortfall, quoteId: 'q' })[0]!
+
+/** Base-10 decimal string (plain or "< X") back to base units, exactly — for asserting against the true raw value. */
+function toBaseUnits(displayed: string, decimals: number): bigint {
+  const numeric = displayed.startsWith('< ') ? displayed.slice(2) : displayed
+  const [whole, frac = ''] = numeric.replace(/,/g, '').split('.')
+  return BigInt(whole || '0') * 10n ** BigInt(decimals) + BigInt((frac.padEnd(decimals, '0') || '0').slice(0, decimals) || '0')
+}
+
+describe('price divergence: a "less than" figure is used only when the true loss is strictly below it, never as a disguised ceiling', () => {
+  test("gpt-6-sol pass-3 NO-GO's exact cases, on an 8-decimal token so each is an exact base-unit amount", () => {
+    // 0.00012345: not exact at 4dp (fineCap), but NOT below the smallest 4dp unit (0.0001) either -> must ceil
+    // there, not say "< 0.0001" (which would itself understate a loss that has already passed 0.0001).
+    expect(shortfallLine(8, '12345')).toContain('0.0002 TOK less')
+    // 0.00009: genuinely below the smallest 4dp unit -> "less than" is true here.
+    expect(shortfallLine(8, '9000')).toContain('< 0.0001 TOK less')
+    // 0.0001 exactly: no rounding needed at all, shown as-is.
+    expect(shortfallLine(8, '10000')).toContain('0.0001 TOK less')
+  })
+  test('property-style: across a spread of raw shortfalls and token decimals, the displayed loss is never below the true one, and "<" only appears when the true loss is strictly below the stated threshold', () => {
+    for (const decimals of [0, 2, 6, 8, 18]) {
+      // A spread from 1 base unit up to a few whole units, scaled so every `decimals` gets dust-sized, cent-sized
+      // and whole-unit-sized raw amounts in the same sweep.
+      const top = 10n ** BigInt(decimals + 1)
+      const step = top / 300n + 1n
+      for (let raw = 1n; raw <= top; raw += step) {
+        const displayed = shortfallLine(decimals, raw.toString())
+        if (displayed.includes('< ')) {
+          const match = displayed.match(/< ([\d.,]+) TOK less/)
+          expect(match).not.toBeNull()
+          const threshold = toBaseUnits(`< ${match![1]}`, decimals)
+          expect(raw < threshold).toBe(true) // "less than" must be literally true
+        } else {
+          const match = displayed.match(/That is ([\d.,]+) TOK less/)
+          expect(match).not.toBeNull()
+          const shown = toBaseUnits(match![1]!, decimals)
+          expect(shown >= raw).toBe(true) // never understated
+        }
+      }
+    }
   })
 })
 

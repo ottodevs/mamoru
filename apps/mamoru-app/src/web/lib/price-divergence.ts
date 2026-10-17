@@ -54,9 +54,12 @@ function ceilLegAmount(raw: string, decimals: number, maxFraction: number): stri
  * remainder at the normal 2-decimal precision (or fewer, for a whole-unit token) is bumped up to the next cent.
  *
  * A shortfall too small to show even at that precision is not ceiling'd into a wildly overstated "0.01": the
- * exact value is shown instead when it needs no more than 4 decimal places (still truthful, still short), and
- * only a genuinely sub-4-decimal amount reads as "less than" the smallest unit shown there, which is honest
- * about the loss being tiny without inventing false precision for it.
+ * exact value is shown instead when it needs no more than 4 decimal places (still truthful, still short).
+ * Finer than that, two cases remain, and they are NOT the same number: a shortfall that is still at least one
+ * whole unit at that 4-decimal precision is ceiled there too (so, say, 0.00012345 reads as "0.0002", never a
+ * "less than 0.0001" that would itself understate it); only a shortfall genuinely smaller than that smallest
+ * unit (0.00009, say) reads as "less than" it — and "less than X" is used ONLY when the true value is strictly
+ * below X, never as a stand-in ceiling for a value that has already passed it.
  */
 function formatShortfallAmount(raw: string, decimals: number): string {
   if (raw === '0') return '0'
@@ -69,7 +72,10 @@ function formatShortfallAmount(raw: string, decimals: number): string {
     return formatLegAmount(raw, decimals, fineCap)
   }
   const smallestAtFineCap = 10n ** BigInt(decimals - fineCap)
-  return `< ${formatLegAmount(String(smallestAtFineCap), decimals, fineCap)}`
+  if (BigInt(raw) < smallestAtFineCap) {
+    return `< ${formatLegAmount(String(smallestAtFineCap), decimals, fineCap)}`
+  }
+  return ceilLegAmount(raw, decimals, fineCap)
 }
 
 type LegCopy = {
