@@ -7,7 +7,7 @@ import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
 import { LIVE_CAP_USDC, browserOwnerSignature, deployCall, liveAccountFromContext } from '@mamoru/account/live'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
-import { FOLLOW_UP_GRACE, FOLLOW_UP_MAX, FOLLOW_UP_MS, graceLeft, HttpError, lastEngineBlock, nextReview, MAX_OWNER_FAILURES_PER_DAY, OWNER_FAILURES_ALERT_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
+import { FOLLOW_UP_GRACE, FOLLOW_UP_MAX, FOLLOW_UP_MS, graceLeft, HttpError, sweepsToCover, lastEngineBlock, nextReview, MAX_OWNER_FAILURES_PER_DAY, OWNER_FAILURES_ALERT_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
 import type { Relayer } from '../src/relayer.ts'
 import { answerAggregate3 } from './fake-multicall.ts'
 import type { AccountState, ArmedActivation, StateStore } from '../src/state.ts'
@@ -2206,21 +2206,77 @@ describe('renewing the approval of a running account', () => {
     expect(acc.deactivated).toBeUndefined()
   })
 
-  test('otto/mamoru#140: a grant sweep is one Multicall3 batch, and past ids read disabled are not read again', async () => {
+  test('otto/mamoru#140: a grant sweep is one Multicall3 batch per 100 ids; a past id read disabled is read again and tracked once re-enabled', async () => {
     const { w, acc } = await running()
     const old = Array.from({ length: 30 }, (_, i) => toHex(i + 1, { size: 32 }))
     acc.revoked.push(...old)
     w.knobs.batchGrants = true
-    type Sweep = { enforceGrants(a: AccountState): Promise<boolean> }
+    type Sweep = { enforceGrants(a: AccountState, o?: { full?: boolean }): Promise<boolean> }
+    const sweep = (o?: { full?: boolean }) => (w.op as unknown as Sweep).enforceGrants(acc, o)
     const before = w.knobs.multicalls
-    expect(await (w.op as unknown as Sweep).enforceGrants(acc)).toBe(true)
+    expect(await sweep()).toBe(true)
     expect(w.knobs.multicalls - before).toBe(1)
     expect(w.knobs.batchedGrantReads).toBe(acc.grants.length + old.length)
     expect(acc.active).toBe(true)
-    // Those 30 read disabled: retired, the next sweep reads only the engine's grants.
+    // No retirement (I3): the owner enables one of those old ids again; the next sweep reads it and tracks it.
+    w.knobs.enabled.add(old[3]!.toLowerCase())
     w.knobs.batchedGrantReads = 0
-    await (w.op as unknown as Sweep).enforceGrants(acc)
-    expect(w.knobs.batchedGrantReads).toBe(acc.grants.length)
+    await sweep()
+    expect(w.knobs.batchedGrantReads).toBe(acc.grants.length + old.length)
+    expect(acc.superseded).toContain(old[3])
+  })
+
+  test('otto/mamoru#140: the engine loop sweep reads the engine grants every time and every other id within sweepsToCover sweeps', async () => {
+    const { w, acc } = await running()
+    const E = acc.grants.length
+    const old = Array.from({ length: 250 }, (_, i) => toHex(i + 1, { size: 32 }))
+    acc.revoked.push(...old)
+    w.knobs.batchGrants = true
+    type Sweep = { enforceGrants(a: AccountState, o?: { full?: boolean }): Promise<boolean> }
+    const n = sweepsToCover(old.length, E)
+    expect(n).toBe(Math.ceil(250 / (100 - E)))
+    // The oldest id is enabled again by the owner: some sweep within n finds it.
+    w.knobs.enabled.add(old[0]!.toLowerCase())
+    w.knobs.enabled.add(old[249]!.toLowerCase())
+    const reads: number[] = []
+    for (let i = 0; i < n; i++) {
+      w.knobs.batchedGrantReads = 0
+      const calls = w.knobs.multicalls
+      expect(await (w.op as unknown as Sweep).enforceGrants(acc, { full: false })).toBe(true)
+      expect(w.knobs.multicalls - calls).toBe(1)
+      reads.push(w.knobs.batchedGrantReads)
+      // The engine's grants are read every sweep: the account is still running on enabled grants.
+      expect(acc.active).toBe(true)
+    }
+    expect(Math.max(...reads)).toBeLessThanOrEqual(100)
+    expect(acc.superseded).toEqual(expect.arrayContaining([old[0], old[249]]))
+    // An engine grant revoked elsewhere is seen at the very next loop sweep, whatever the rotation.
+    w.knobs.enabled.delete(acc.grants[0]!.permissionId.toLowerCase())
+    await (w.op as unknown as Sweep).enforceGrants(acc, { full: false })
+    expect(acc.active).toBe(false)
+    expect(acc.deactivated?.code).toBe('GRANTS_PARTLY_REVOKED')
+  })
+
+  test('otto/mamoru#140: reconciliation does not apply an older renewal on a head below the account floor', async () => {
+    const { w, acc } = await running()
+    const had = acc.grants.map((g) => g.permissionId)
+    const ee = `0x${'ee'.repeat(32)}` as Hex
+    const stx = `0x${'5a'.repeat(32)}` as Hex
+    const hash = `0x${'ab'.repeat(32)}` as Hex
+    // A renewal whose receipt is readable at block 90; a later owner op of the account is recorded at block 200.
+    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', txHash: hash, safeTxHash: stx, updatedAt: new Date().toISOString(), ownerGrants: [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: ee }], revokes: [] } as never)
+    acc.ops.push({ opId: 'own-8-transfer', kind: 'transfer', state: 'confirmed', code: 'EXEC_OK', block: 200, updatedAt: new Date().toISOString() } as never)
+    w.knobs.enabled.add(ee)
+    ;(w.op as unknown as { receiptOf(h: Hex): Promise<unknown> }).receiptOf = async () => ({ transactionHash: hash, status: 'success', blockNumber: 90n, logs: [{ address: SAFE, topics: [EXECUTION_SUCCESS, stx] }] })
+    w.knobs.head = 150n
+    await w.op.reconcileOwner(acc)
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(had)
+    expect(acc.active).toBe(true)
+    // The head reaches the floor: it is applied from its receipt, every grant enabled.
+    w.knobs.head = 210n
+    await w.op.reconcileOwner(acc)
+    expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'confirmed' })
   })
 
   test('otto/mamoru#140: a provider whose head is behind the account defers every grant decision, never stops the engine', async () => {

@@ -73,11 +73,6 @@ export type AccountState = {
    * Cleared by an activation, or when that op is proven.
    */
   deactivated?: { code: 'GRANTS_REVOKED_ELSEWHERE' | 'GRANTS_PARTLY_REVOKED'; opId?: string; block: string; at: string }
-  /**
-   * otto/mamoru#140: past permission ids (revoked, or of owner ops that ended) read disabled at a block not below the
-   * account's floor: no longer read by every grant sweep. Ids the engine uses, superseded or of a pending op never are.
-   */
-  retired?: Hex[]
   managedTokenIds: string[]
   depositsAfter: string
   historyFromBlock: string

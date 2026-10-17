@@ -66,8 +66,13 @@ const FUNDING_FRESH_READ_MS = 2_000
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
 /** How often the engine loop reads every grant it uses before a review (otto/mamoru#140, invariant I1). */
 const GRANTS_CHECK_MS = 300_000
-/** At most this many permission ids per sweep (one Multicall3 chunk): the live ones always, past ones newest first. */
+/** Permission ids per engine-loop grant sweep (one Multicall3 chunk): the engine's always, the others in rotation. */
 const GRANTS_SWEEP_MAX = 100
+
+/** Engine-loop sweeps within which every non-engine id the account knows is read again (see enforceGrants). */
+export function sweepsToCover(others: number, engine: number): number {
+  return others <= GRANTS_SWEEP_MAX - engine ? 1 : Math.ceil(others / Math.max(1, GRANTS_SWEEP_MAX - engine))
+}
 /** An owner op whose receipt poll failed after the tx was sent: the tx may still have landed. */
 const RECEIPT_UNKNOWN = 'OWNER_TX_ERROR'
 /** Armed activations retry this many times across watcher passes before failing visibly. */
@@ -373,6 +378,8 @@ export class Operator {
   private readonly reconciled = new Map<string, number>()
   /** When (ms) the engine loop last read every grant of the account (enforceGrants, invariant I1). */
   private readonly grantsChecked = new Map<string, number>()
+  /** Where the engine loop's rotating grant sweep resumes, per account (enforceGrants). */
+  private readonly sweepCursor = new Map<string, number>()
   /** Since when (ms) engine review has been held for a pending non-activate prepare on this account; see reviewHold. */
   private readonly reviewHeldSince = new Map<string, number>()
   private armTimer: ReturnType<typeof setTimeout> | null = null
@@ -1227,26 +1234,41 @@ export class Operator {
    *   ever knew (its grants, superseded, revoked, every owner op's grants and revocations, an armed approval's) that
    *   reads enabled and is not the engine's is put in `superseded`, so the next stop or renewal revokes it and Start
    *   waits for that stop (STOP_FIRST); one in `superseded` that reads disabled leaves it (recorded as revoked).
-   * A read that fails changes nothing. Called after every settle pass, from the engine loop and before a Start.
+   * A read that fails, or a provider head below the account's floor, changes nothing. Full sweep (every id, chunked)
+   * after every settle pass and before a Start; the engine loop's sweep (every GRANTS_CHECK_MS) reads the engine's
+   * grants every time and the other ids in rotation, each again within sweepsToCover(others, engine) sweeps: with 12
+   * engine grants, 500 other ids are all re-read within 6 sweeps (30 min).
    */
-  private async enforceGrants(acc: AccountState): Promise<boolean> {
+  private async enforceGrants(acc: AccountState, opts: { full?: boolean } = { full: true }): Promise<boolean> {
     const low = (id: string) => id.toLowerCase()
     const engine = acc.grants.map((g) => g.permissionId)
-    // Ids that must be read on every sweep: the engine's, superseded, and those of owner ops still of unknown outcome
-    // (and an armed approval). The rest (revoked, of ended ops) only until read disabled once: then retired.
-    const live = new Map<string, Hex>()
     const pendingOps = acc.ops.filter((o) => o.opId.startsWith('own-') && (!TERMINAL_STATES.has(o.state) || (o.state === 'failed' && o.code === RECEIPT_UNKNOWN)))
-    for (const id of [...engine, ...(acc.superseded ?? []), ...pendingOps.flatMap((o) => ((o as StoredOp).ownerGrants ?? []).map((g) => g.permissionId)), ...(acc.armed?.grants ?? []).map((g) => g.permissionId)]) live.set(low(id), id)
-    const retired = new Set((acc.retired ?? []).map(low))
-    const rest = new Map<string, Hex>()
-    // Newest first, so a cap keeps the ids most likely to matter.
-    for (const id of [...[...acc.ops].reverse().flatMap((o) => [...((o as StoredOp).ownerGrants ?? []).map((g) => g.permissionId), ...((o as StoredOp).revokes ?? [])]), ...[...acc.revoked].reverse()]) {
+    // Every other permission id the account knows, in a stable order: superseded, pending ops' and the armed
+    // approval's, then every owner op's grants and revocations and the revoked list. None is ever dropped (I3).
+    const mine = new Set(engine.map(low))
+    const others = new Map<string, Hex>()
+    for (const id of [
+      ...(acc.superseded ?? []),
+      ...pendingOps.flatMap((o) => ((o as StoredOp).ownerGrants ?? []).map((g) => g.permissionId)),
+      ...(acc.armed?.grants ?? []).map((g) => g.permissionId),
+      ...acc.ops.flatMap((o) => [...((o as StoredOp).ownerGrants ?? []).map((g) => g.permissionId), ...((o as StoredOp).revokes ?? [])]),
+      ...acc.revoked,
+    ]) {
       const k = low(id)
-      if (!live.has(k) && !retired.has(k) && !rest.has(k)) rest.set(k, id)
+      if (!mine.has(k) && !others.has(k)) others.set(k, id)
     }
-    const room = Math.max(0, GRANTS_SWEEP_MAX - live.size)
-    if (rest.size > room) logErr(`[grants] ${acc.accountKey} ${rest.size - room} past grant ids not read this sweep (cap ${GRANTS_SWEEP_MAX})`, undefined)
-    const universe = [...live.values(), ...[...rest.values()].slice(0, room)]
+    // A full sweep (settle passes, Start) reads them all, in chunks of BATCH_MAX_CALLS. The engine loop's sweep reads
+    // the engine's grants every time and a rotating window of the others: GRANTS_SWEEP_MAX ids per sweep, so each
+    // one is read again within ceil(others / (GRANTS_SWEEP_MAX - engine)) sweeps (sweepsToCover).
+    const list = [...others.values()]
+    let window = list
+    if (opts.full === false && list.length > GRANTS_SWEEP_MAX - engine.length) {
+      const size = Math.max(1, GRANTS_SWEEP_MAX - engine.length)
+      const start = (this.sweepCursor.get(acc.accountKey) ?? 0) % list.length
+      window = Array.from({ length: Math.min(size, list.length) }, (_, i) => list[(start + i) % list.length]!)
+      this.sweepCursor.set(acc.accountKey, (start + size) % list.length)
+    }
+    const universe = [...engine, ...window]
     if (!universe.length) return true
     const block = await this.headAtLeast(acc, 0n)
     if (block === null) return false
@@ -1263,26 +1285,33 @@ export class Operator {
       acc.deactivated = { code, ...(by ? { opId: by } : {}), block: block.toString(), at: now() }
       changed = true
     }
-    const mine = new Set(acc.grants.map((g) => low(g.permissionId)))
+    const read = new Set(universe.map(low))
+    const now_ = new Set(acc.grants.map((g) => low(g.permissionId)))
     const before = acc.superseded ?? []
-    const kept = before.filter((id) => enabled.has(low(id)) && !mine.has(low(id)))
-    const gone = before.filter((id) => !enabled.has(low(id)))
+    // Only ids read in this sweep are decided on; the others stay as they are until their turn.
+    const kept = before.filter((id) => !now_.has(low(id)) && (!read.has(low(id)) || enabled.has(low(id))))
+    const gone = before.filter((id) => read.has(low(id)) && !enabled.has(low(id)))
     const known = new Set(kept.map(low))
-    const added = universe.filter((id) => enabled.has(low(id)) && !mine.has(low(id)) && !known.has(low(id)))
+    const added = universe.filter((id) => enabled.has(low(id)) && !now_.has(low(id)) && !known.has(low(id)))
     if (gone.length || added.length || kept.length !== before.length) {
       if (added.length) logErr(`[grants] ${acc.accountKey} ${added.length} enabled grants were untracked at block ${block}: kept for revocation`, undefined)
       acc.revoked.push(...gone.filter((id) => !acc.revoked.some((r) => low(r) === low(id))))
       acc.superseded = [...kept, ...added]
       changed = true
     }
-    // Past ids read disabled at this block (not below the account's floor) are not read again.
-    const retire = universe.filter((id) => !live.has(low(id)) && !enabled.has(low(id)))
-    if (retire.length) {
-      acc.retired = [...(acc.retired ?? []), ...retire]
-      changed = true
-    }
     if (changed) this.store.save()
     return true
+  }
+
+  /** The account's floor and `min`: no grant is read at a block below it (see headAtLeast). */
+  private floorOf(acc: AccountState, min: bigint): bigint {
+    let floor = min
+    for (const b of [acc.grantsFromBlock, acc.active ? acc.historyFromBlock : undefined, ...acc.ops.filter((o) => o.opId.startsWith('own-')).map((o) => o.block)]) {
+      if (b === undefined || b === null || b === '') continue
+      const n = BigInt(b)
+      if (n > floor) floor = n
+    }
+    return floor
   }
 
   /**
@@ -1291,12 +1320,7 @@ export class Operator {
    * that answers null: whatever was to be read is deferred, never decided on an older view of the chain (#140).
    */
   private async headAtLeast(acc: AccountState, min: bigint): Promise<bigint | null> {
-    let floor = min
-    for (const b of [acc.grantsFromBlock, acc.active ? acc.historyFromBlock : undefined, ...acc.ops.filter((o) => o.opId.startsWith('own-')).map((o) => o.block)]) {
-      if (b === undefined || b === null || b === '') continue
-      const n = BigInt(b)
-      if (n > floor) floor = n
-    }
+    const floor = this.floorOf(acc, min)
     try {
       const head = await this.client.getBlockNumber()
       if (head >= floor) return head
@@ -1360,7 +1384,9 @@ export class Operator {
   private async renewalGrantsNow(acc: AccountState, ids: Hex[], from: bigint): Promise<{ block: bigint; on: boolean[] } | 'behind' | null> {
     try {
       const block = await this.client.getBlockNumber()
-      if (block < from) return 'behind'
+      // Not below the receipt nor the account's floor (grantsFromBlock, activation, latest owner op): an older view
+      // could show grants a later op revoked (#140).
+      if (block < this.floorOf(acc, from)) return 'behind'
       const on = await this.enabledAt(acc, ids, block)
       return on ? { block, on } : null
     } catch (e) {
@@ -2791,7 +2817,7 @@ export class Operator {
           // GRANTS_CHECK_MS: one revoked elsewhere stops the loop here, before the engine acts on it.
           if (now - (this.grantsChecked.get(acc.accountKey) ?? 0) >= GRANTS_CHECK_MS) {
             // Counted as checked only when the sweep read the chain; a failed or deferred one is tried at the next tick.
-            if (await this.enforceGrants(acc)) this.grantsChecked.set(acc.accountKey, now)
+            if (await this.enforceGrants(acc, { full: false })) this.grantsChecked.set(acc.accountKey, now)
             if (runner.stopped || !acc.active) return
           }
           const startedAt = Date.now()
