@@ -1314,7 +1314,8 @@ export class Operator {
       this.sweepCursor.set(acc.accountKey, (start + size) % list.length)
     }
     const universe = [...engine, ...window]
-    if (!universe.length) return true
+    // Nothing tracked yet (a first Start): a full check still needs the chain readable, or it answers unavailable.
+    if (!universe.length) return opts.full === false || (await this.headAtLeast(acc, 0n)) !== null
     // otto/mamoru#140, a deliberate tradeoff with I3: no id is ever dropped, so a full check grows with the account's
     // history (expected ~48 ids a year: 12 grants, 4 renewals). Past GRANTS_TRACKED_ALERT it alerts, once an hour.
     if (opts.full !== false && list.length + engine.length > GRANTS_TRACKED_ALERT && Date.now() - (this.grantsAlerted.get(acc.accountKey) ?? 0) > 3_600_000) {
@@ -1332,8 +1333,9 @@ export class Operator {
       const by = pendingOps.at(-1)?.opId
       const code = off.length === engine.length ? 'GRANTS_REVOKED_ELSEWHERE' : 'GRANTS_PARTLY_REVOKED'
       logErr(`[grants] ${acc.accountKey} ${off.length}/${engine.length} engine grants disabled at block ${block}${by ? ` (${by} not proven)` : ''}: engine stopped (${code})`, undefined)
-      this.afterOwner(acc, { prepareId: by ?? 'grants', accountKey: acc.accountKey, kind: 'stop', tx: undefined as never, safeTxHash: '0x', expires: 0, revokes: off }, { blockNumber: block } as TransactionReceipt)
+      // The reason first: afterOwner saves, and the inactive account is never stored without it.
       acc.deactivated = { code, ...(by ? { opId: by } : {}), block: block.toString(), at: now() }
+      this.afterOwner(acc, { prepareId: by ?? 'grants', accountKey: acc.accountKey, kind: 'stop', tx: undefined as never, safeTxHash: '0x', expires: 0, revokes: off }, { blockNumber: block } as TransactionReceipt)
       changed = true
     }
     const read = new Set(universe.map(low))
@@ -1436,9 +1438,9 @@ export class Operator {
       acc.superseded = unrevokedIds(acc.superseded, op.revokes ?? [])
       this.store.save()
     } else {
-      this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'stop', tx: undefined as never, safeTxHash: '0x', expires: 0, revokes: op.revokes ?? [] }, { blockNumber: block } as TransactionReceipt)
+      // The reason first: afterOwner saves, and the inactive account is never stored without it.
       acc.deactivated = { code: 'GRANTS_REVOKED_ELSEWHERE', opId: op.opId, block: block.toString(), at: now() }
-      this.store.save()
+      this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'stop', tx: undefined as never, safeTxHash: '0x', expires: 0, revokes: op.revokes ?? [] }, { blockNumber: block } as TransactionReceipt)
     }
   }
 
@@ -1847,6 +1849,9 @@ export class Operator {
   private async planStop(ctx: AccountContext): Promise<OwnerTxToSign> {
     this.assertLive()
     const { acc, live } = this.account(ctx)
+    // A full sweep first (already under the account's lock): an id the owner enabled again after it was revoked, not
+    // yet reached by the engine loop's rotating window, moves to `superseded` here and is revoked by this stop.
+    if (!(await this.enforceGrants(acc))) throw new HttpError(503, 'GRANT_CHECK_UNAVAILABLE', 'the approvals on your Safe could not be read just now: nothing was changed, try again in a minute')
     const r = await readSafe(this.client, live.safe)
     if (!r.deployed) throw new HttpError(409, 'NOT_DEPLOYED', 'the Safe is not deployed yet')
     const slip = this.policyOf(acc).execution.slippageBps

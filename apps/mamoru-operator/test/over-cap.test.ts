@@ -2172,6 +2172,57 @@ describe('renewing the approval of a running account', () => {
     expect(acc.superseded).toContain(ee)
   })
 
+  test('otto/mamoru#140: a Stop sweeps the chain first, so a revoked grant the owner enabled again is revoked too', async () => {
+    const { w, acc } = await running()
+    const old = acc.grants.map((g) => g.permissionId)
+    await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))
+    expect(acc.active).toBe(false)
+    expect(old.every((id) => !w.knobs.enabled.has(id.toLowerCase()))).toBe(true)
+    // The owner enables one of them again; no engine loop runs on a stopped account, so only the Stop can see it.
+    w.knobs.enabled.add(old[0]!.toLowerCase())
+    const tx = await w.op.prepareStop(ctx)
+    expect(tx.summary).toContain("Revoke the engine's 1 session grant(s)")
+    await w.op.submit(ctx, 'stop', sign(tx))
+    expect(w.knobs.enabled.has(old[0]!.toLowerCase())).toBe(false)
+  })
+
+  test('otto/mamoru#140: a Stop whose grant sweep cannot read the chain is refused, nothing prepared', async () => {
+    const { w } = await running()
+    type C = { readContract(a: { functionName: string }): Promise<unknown> }
+    const client = (w.op as unknown as { client: C }).client
+    const read = client.readContract.bind(client)
+    client.readContract = async (a) => {
+      if (a.functionName === 'isPermissionEnabled') throw new Error('HTTP request failed. Status: 429')
+      return read(a)
+    }
+    expect(await w.op.prepareStop(ctx).catch((e: unknown) => e)).toMatchObject({ status: 503, code: 'GRANT_CHECK_UNAVAILABLE' })
+  })
+
+  test('otto/mamoru#140: a first Start, nothing tracked yet, still needs the chain readable', async () => {
+    const w = world(20_000_000n)
+    ;(w.op as unknown as Loop).startLoop = () => {}
+    const tx = await w.op.prepareActivate(ctx)
+    type C = { getBlockNumber(): Promise<bigint> }
+    ;(w.op as unknown as { client: C }).client.getBlockNumber = async () => {
+      throw new Error('HTTP request failed. Status: 429')
+    }
+    expect(await w.op.submit(ctx, 'activate', sign(tx)).catch((e: unknown) => e)).toMatchObject({ status: 503, code: 'GRANT_CHECK_UNAVAILABLE' })
+    expect(w.state.accounts.k?.active ?? false).toBe(false)
+  })
+
+  test('otto/mamoru#140: an account stopped by the grant check is never saved inactive without its reason', async () => {
+    const { w, acc } = await running()
+    const saves: { active: boolean; code?: string }[] = []
+    const store = (w.op as unknown as { store: { save(): void } }).store
+    store.save = () => void saves.push({ active: acc.active, code: acc.deactivated?.code })
+    // The owner revokes one engine grant elsewhere; the next full sweep stops the engine.
+    w.knobs.enabled.delete(acc.grants[0]!.permissionId.toLowerCase())
+    expect(await (w.op as unknown as { enforceGrants(a: AccountState): Promise<boolean> }).enforceGrants(acc)).toBe(true)
+    expect(acc.active).toBe(false)
+    expect(saves.length).toBeGreaterThan(0)
+    expect(saves.filter((s) => !s.active).every((s) => s.code === 'GRANTS_PARTLY_REVOKED')).toBe(true)
+  })
+
   test('otto/mamoru#140: Start is refused while earlier grants are still enabled on the Safe; a Stop revokes them, then Start works', async () => {
     const { w, acc } = await running()
     const old = acc.grants.map((g) => g.permissionId)
