@@ -172,7 +172,11 @@ export type TransferRequest = { to: Hex0x; amountUsdc: string; asset?: WithdrawA
 export type PriceDivergenceLeg = {
   kind: 'swap-back' | 'payout'
   token: string // this leg's output, in registry-token-name form: USDC for swap-back, the payout asset for payout
-  sellToken?: string // swap-back only: what is being sold, e.g. 'cbBTC'
+  // REQUIRED and non-empty for 'swap-back' (what is being sold, e.g. 'cbBTC'); absent for 'payout' (the source
+  // is always USDC). The app's client boundary rejects a 'swap-back' leg without it — the notice has nothing
+  // honest to say for "from selling ___" otherwise, and must not guess by naming `token` (the leg's own OUTPUT)
+  // instead (otto/mamoru#155, final Codex gate on 063332d).
+  sellToken?: string
   decimals: number
   fairAmount: string // base units: what this leg gives at the 30-minute fair price
   // base units: the live quote at prepare time. Informational only — NOT the binding floor and not what the

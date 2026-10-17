@@ -143,7 +143,13 @@ const COPY: Record<Locale, Copy> = {
     sentence: {
       swapBack: (leg) => {
         const { amount, percent } = legShortfall(leg)
-        return `Your account would get at least ${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token} instead of about ${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token} from selling ${leg.sellToken ?? leg.token}. That is ${formatShortfallAmount(amount, leg.decimals)} ${leg.token} less (${percent}).`
+        // otto/mamoru#155 (final Codex gate on 063332d): never name the leg's OWN output (`leg.token`, e.g.
+        // USDC) as the thing sold — that reads as "selling USDC" for a cbBTC-to-USDC reduce. The API boundary
+        // now requires a non-empty `sellToken` on every swap-back leg (isValidPriceDivergence), so this should
+        // never be missing by the time a warning reaches here; the neutral fallback below exists only so a
+        // directly-constructed, unvalidated warning (a test, say) never names the wrong asset either.
+        const sold = leg.sellToken || 'the position'
+        return `Your account would get at least ${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token} instead of about ${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token} from selling ${sold}. That is ${formatShortfallAmount(amount, leg.decimals)} ${leg.token} less (${percent}).`
       },
       payout: (leg) => {
         const { amount, percent } = legShortfall(leg)
@@ -164,7 +170,8 @@ const COPY: Record<Locale, Copy> = {
     sentence: {
       swapBack: (leg) => {
         const { amount, percent } = legShortfall(leg)
-        return `Tu cuenta recibiría al menos ${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token} en vez de unos ${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token} al vender ${leg.sellToken ?? leg.token}. Eso son ${formatShortfallAmount(amount, leg.decimals)} ${leg.token} menos (${percent}).`
+        const sold = leg.sellToken || 'la posición'
+        return `Tu cuenta recibiría al menos ${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token} en vez de unos ${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token} al vender ${sold}. Eso son ${formatShortfallAmount(amount, leg.decimals)} ${leg.token} menos (${percent}).`
       },
       payout: (leg) => {
         const { amount, percent } = legShortfall(leg)
@@ -185,7 +192,8 @@ const COPY: Record<Locale, Copy> = {
     sentence: {
       swapBack: (leg) => {
         const { amount, percent } = legShortfall(leg)
-        return `${leg.sellToken ?? leg.token}を売却するアカウントは、約${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token}ではなく少なくとも${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token}を受け取ることになります。${formatShortfallAmount(amount, leg.decimals)} ${leg.token}少なくなります(${percent})。`
+        const sold = leg.sellToken || 'ポジション'
+        return `${sold}を売却するアカウントは、約${formatLegAmount(leg.fairAmount, leg.decimals)} ${leg.token}ではなく少なくとも${formatLegAmount(leg.minAmount, leg.decimals)} ${leg.token}を受け取ることになります。${formatShortfallAmount(amount, leg.decimals)} ${leg.token}少なくなります(${percent})。`
       },
       payout: (leg) => {
         const { amount, percent } = legShortfall(leg)
@@ -262,6 +270,11 @@ function isValidLeg(leg: unknown): leg is PriceDivergenceLeg {
   const l = leg as Record<string, unknown>
   if (l.kind !== 'swap-back' && l.kind !== 'payout') return false
   if (typeof l.token !== 'string' || l.token.length === 0) return false
+  // otto/mamoru#155 (final Codex gate on 063332d): a 'swap-back' leg MUST name what is being sold. Without it,
+  // the notice has nothing honest to say for "from selling ___" and must not guess — see the copy functions
+  // below, which no longer fall back to `leg.token` (the leg's OUTPUT, e.g. USDC) for that blank. A 'payout'
+  // leg has no sellToken at all (its source is always USDC, per TransferRequest's comment) and must not carry one.
+  if (l.kind === 'swap-back' && (typeof l.sellToken !== 'string' || l.sellToken.length === 0)) return false
   if (l.sellToken !== undefined && (typeof l.sellToken !== 'string' || l.sellToken.length === 0)) return false
   if (typeof l.decimals !== 'number' || !Number.isInteger(l.decimals) || l.decimals < 0 || l.decimals > 36) return false
   for (const field of ['fairAmount', 'quotedAmount', 'minAmount', 'shortfall'] as const) {

@@ -79,6 +79,34 @@ describe('price divergence: worst-case numbers, phrased by what the leg is', () 
   })
 })
 
+describe('price divergence: the notice never names the leg\'s own output as the asset sold (final Codex gate on 063332d)', () => {
+  // The API boundary (isValidPriceDivergence) now rejects a 'swap-back' leg without a non-empty sellToken, so
+  // this situation should never reach the notice for real network data. These tests construct the warning
+  // directly, bypassing that gate, to prove the copy layer holds up on its own too — defense in depth, not
+  // reliance on the validator alone.
+  test('en: a swap-back leg missing sellToken reads "from selling the position", never "from selling USDC" (its own output token)', () => {
+    const noSellToken: PriceDivergenceWarning = { ...swapBack, legs: [{ ...swapBack.legs[0]!, sellToken: undefined }] }
+    const line = divergenceLines('en', noSellToken)[0]!
+    expect(line).toContain('from selling the position')
+    expect(line).not.toContain('from selling USDC')
+  })
+  test('es and ja: the same neutral fallback, never the output token, in each language', () => {
+    const noSellToken: PriceDivergenceWarning = { ...swapBack, legs: [{ ...swapBack.legs[0]!, sellToken: undefined }] }
+    expect(divergenceLines('es', noSellToken)[0]).toContain('al vender la posición')
+    expect(divergenceLines('es', noSellToken)[0]).not.toContain('al vender USDC')
+    expect(divergenceLines('ja', noSellToken)[0]).toContain('ポジションを売却する')
+    expect(divergenceLines('ja', noSellToken)[0]).not.toContain('USDCを売却する')
+  })
+  test('an empty-string sellToken is treated the same as missing (falsy), never shown as the sold asset itself', () => {
+    const emptySellToken: PriceDivergenceWarning = { ...swapBack, legs: [{ ...swapBack.legs[0]!, sellToken: '' }] }
+    expect(divergenceLines('en', emptySellToken)[0]).toContain('from selling the position')
+  })
+  test('a real sellToken (the normal case) is still used exactly as given, never overridden by the fallback', () => {
+    expect(divergenceLines('en', swapBack)[0]).toContain('from selling cbBTC')
+    expect(divergenceLines('en', swapBack)[0]).not.toContain('the position')
+  })
+})
+
 describe('price divergence: checkbox repeats the same loss, same unit, right voice, never USD', () => {
   test('swap-back checkbox: "your account", same (ceiled) number and token as the sentence', () => {
     expect(divergenceCheckboxLabel('en', swapBack)).toBe('I understand your account will get about 0.03 USDC less.')
@@ -345,6 +373,17 @@ describe('client boundary: a malformed divergence fails the whole prepare closed
   })
   test('an unrecognized leg kind: invalid', () => {
     expect(isValidPriceDivergence({ ...validWarning, legs: [{ ...validLeg, kind: 'swap-forward' }] })).toBe(false)
+  })
+  test('a swap-back leg without sellToken: invalid (final Codex gate on 063332d)', () => {
+    const swapBackNoSellToken = { ...validLeg, kind: 'swap-back' as const, token: 'USDC' }
+    expect('sellToken' in swapBackNoSellToken).toBe(false)
+    expect(isValidPriceDivergence({ ...validWarning, legs: [swapBackNoSellToken] })).toBe(false)
+  })
+  test('a swap-back leg with an empty-string sellToken: invalid, same as missing', () => {
+    expect(isValidPriceDivergence({ ...validWarning, legs: [{ ...validLeg, kind: 'swap-back' as const, token: 'USDC', sellToken: '' }] })).toBe(false)
+  })
+  test('a swap-back leg WITH a non-empty sellToken: valid', () => {
+    expect(isValidPriceDivergence({ ...validWarning, legs: [{ ...validLeg, kind: 'swap-back' as const, token: 'USDC', sellToken: 'cbBTC' }] })).toBe(true)
   })
   test('not an object, or missing the code: invalid, never throws', () => {
     expect(isValidPriceDivergence(null)).toBe(false)
