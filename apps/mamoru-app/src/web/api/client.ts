@@ -1,4 +1,5 @@
 import { createContext, useContext } from 'react'
+import { isValidPriceDivergence } from '../lib/price-divergence.ts'
 import type {
   ApiError,
   ApyView,
@@ -88,6 +89,21 @@ const acct = (k: string, rest: string) => `/api/accounts/${encodeURIComponent(k)
 const post = <T>(path: string, body?: unknown) =>
   request<T>(path, { method: 'POST', body: JSON.stringify(body ?? {}) })
 
+/**
+ * otto/mamoru#155 (security review on 1c54819): the client boundary, where a prepare response's `divergence` is
+ * validated before anything downstream (gating, formatting, the Review screen) ever sees it. A malformed
+ * warning fails the whole prepare closed — nothing is set, nothing is submittable, and the owner sees the same
+ * calm "try again" treatment as any other prepare failure — rather than either crashing render or silently
+ * treating a real (but malformed) divergence as if none were sent.
+ */
+async function transferPrepareValidated(path: string, body: unknown): Promise<TransferPlan> {
+  const plan = await post<TransferPlan>(path, body)
+  if (plan.divergence !== undefined && !isValidPriceDivergence(plan.divergence)) {
+    throw new ApiRequestError(502, { error: 'Mamoru sent back a price warning it could not read. Nothing was sent. Try again.', code: 'PRICE_DIVERGENCE_INVALID' })
+  }
+  return plan
+}
+
 export const httpClient: ApiClient = {
   config: () => request<AppConfig>('/api/config'),
   session: async () => {
@@ -115,7 +131,7 @@ export const httpClient: ApiClient = {
   activatePrepare: (k) => post<OwnerTxToSign>(acct(k, 'activate/prepare')),
   activate: (k, sig) => post<OpView>(acct(k, 'activate'), sig),
   withdrawAssets: (k) => request<{ assets: { asset: WithdrawAsset; available: boolean; reason?: string }[] }>(acct(k, 'withdraw-assets')),
-  transferPrepare: (k, body) => post<TransferPlan>(acct(k, 'transfer/prepare'), body),
+  transferPrepare: (k, body) => transferPrepareValidated(acct(k, 'transfer/prepare'), body),
   transfer: (k, sig) => post<OpView>(acct(k, 'transfer'), sig),
   stopPrepare: (k) => post<OwnerTxToSign>(acct(k, 'stop/prepare')),
   stop: (k, sig) => post<OpView>(acct(k, 'stop'), sig),

@@ -1,4 +1,4 @@
-import { overCap, PRODUCTION_BANNER, type AppConfig, type FundingView, type OpView, type OwnerResponse, type OwnerTxToSign, type SessionView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
+import { overCap, PRODUCTION_BANNER, type AppConfig, type FundingView, type OpView, type OwnerResponse, type OwnerTxToSign, type PriceDivergenceWarning, type SessionView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
 import type { ApiClient } from '../api/client.ts'
 import { emptyAccount, FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from './empty-account.ts'
 import { poolsResponse } from './pools.ts'
@@ -78,6 +78,8 @@ const midEntry = (): Partial<FundingView> => ({
 })
 // ?renewdue (dev only): a running account whose approval ends in 10 days. Home asks for the renewal on arrival (#148).
 const renewdue = param('renewdue')
+// ?divergence (dev only, otto/mamoru#155): every withdraw prepare returns a PriceDivergenceWarning.
+const divergenceOn = param('divergence')
 const dueApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 86_400_000) * 86_400 + 10 * 86_400, renewDue: true, expired: false } })
 const liveState = {
   funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}), ...(renewdue ? dueApproval() : {}) } as FundingView,
@@ -126,6 +128,37 @@ export function fixtureReceive(asset: Exclude<WithdrawAsset, 'USDC'>, amountUsdc
   const q = FIXTURE_QUOTE[asset]
   const quoted = (amountUsdc * q.perUsdc) / 1_000_000n
   return { asset, quoted: String(quoted), minimum: String((quoted * 995n) / 1000n), decimals: q.decimals, route: q.route }
+}
+
+// ?divergence (dev only, otto/mamoru#155): the withdrawal's swap-back (selling cbBTC into USDC) would floor
+// 2.5% below a made-up "fair" amount, regardless of the asset picked. A fresh quoteId every call, as a real
+// operator must mint (never reused across two prepares) — enough to exercise the warning's rendering without
+// modeling a real TWAP in a fixture.
+let fixtureDivergenceCalls = 0
+export function fixtureDivergence(amountUsdc: bigint): PriceDivergenceWarning {
+  fixtureDivergenceCalls += 1
+  const fairAmount = amountUsdc
+  const minAmount = (amountUsdc * 975n) / 1000n // the router floor this leg's signed calldata carries
+  const quotedAmount = (amountUsdc * 985n) / 1000n // the live quote, between minAmount and fairAmount; informational only
+  const shortfall = fairAmount - minAmount
+  return {
+    code: 'PRICE_DIVERGENCE',
+    legs: [
+      {
+        kind: 'swap-back',
+        token: 'USDC',
+        sellToken: 'cbBTC',
+        decimals: 6,
+        fairAmount: String(fairAmount),
+        quotedAmount: String(quotedAmount),
+        minAmount: String(minAmount),
+        shortfall: String(shortfall),
+        shortfallBps: 250,
+      },
+    ],
+    shortfallUsdc: String(shortfall),
+    quoteId: `qd_fixture_${Date.now()}_${fixtureDivergenceCalls}`,
+  }
 }
 
 export const fixtureClient: ApiClient = {
@@ -225,6 +258,7 @@ export const fixtureClient: ApiClient = {
     return delay({
       reduce: BigInt(body.amountUsdc) > BigInt(liveState.funding.usdc) ? [{ tokenId: '4242', liquidityBps: 5000 }] : [],
       ...(body.asset && body.asset !== 'USDC' ? { receive: fixtureReceive(body.asset, BigInt(body.amountUsdc)) } : {}),
+      ...(divergenceOn ? { divergence: fixtureDivergence(BigInt(body.amountUsdc)) } : {}),
       ownerTx: fixtureTx([
         ...(liveState.funding.deployed ? [] : ['Create your Safe on Base']),
         `Transfer ${Number(body.amountUsdc) / 1e6} USDC to ${body.to}${body.asset && body.asset !== 'USDC' ? ` as ${body.asset}` : ''}`,

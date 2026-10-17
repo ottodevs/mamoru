@@ -389,6 +389,11 @@
     padding: 0.2rem 0.55rem;
     cursor: pointer;
   }
+  /* otto/mamoru#155: the gated "Withdraw anyway" chipbtn needs the same disabled read as .cta's. */
+  .chipbtn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
   .tok-dd {
     position: relative;
     display: flex;

@@ -1,9 +1,10 @@
-import type { ApyView, FundingView, Hex0x, OpView, OverCap, WithdrawAsset } from '@mamoru/domain'
+import type { ApyView, FundingView, Hex0x, OpView, OverCap, PriceDivergenceWarning, WithdrawAsset } from '@mamoru/domain'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
 import { APY_REFRESH_MS, queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
+import { PriceDivergenceNotice } from '../components/price-divergence-notice.tsx'
 import { TokenMark } from '../components/token-mark.tsx'
 import { BasescanLink, Brand, InfoPopover, Modal, Waiting } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
@@ -13,6 +14,7 @@ import { belowMinimumOf, cbbtcPrice, ceilCents, DUST_USDC, holdings, humanMessag
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, positionAmounts, positionTokens, progressLine } from '../lib/positions.ts'
+import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel } from '../lib/price-divergence.ts'
 import { localTime } from '../lib/time.ts'
 import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
 import { DepositDetails, hasMoney } from './add-money.tsx'
@@ -439,7 +441,39 @@ export function History({ ops, onRetry }: { ops: OpView[]; onRetry?: (kind: OpVi
   )
 }
 
-function Review({ lines, busy, error, onApprove, children }: { lines: string[]; busy: string | null; error: string | null; onApprove: () => void; children?: ReactNode }) {
+/**
+ * `onCancel`/`confirmLabel`/`confirmDisabled` are only passed by WithdrawDialog when prepare returned a
+ * PriceDivergenceWarning (otto/mamoru#155): a calm "wait" next to the gated confirm, instead of the usual
+ * single button. Every other caller omits them and gets exactly today's single centered confirm button.
+ *
+ * Security review on 1c54819: the buttons below call `onApprove()`/`onCancel()` with no arguments, never
+ * `onClick={onApprove}` directly — a raw `onClick={onApprove}` would hand the button's click SyntheticEvent to
+ * `onApprove` as its first argument. Every caller today passes an already-wrapped zero-arg closure, so this is
+ * currently harmless either way, but `useOwnerAction`'s `approve(accept?)` takes an optional argument now
+ * (otto/mamoru#155's acceptDivergence) — a future caller that forwards `flow.approve` unwrapped would leak the
+ * event into it. Exported so a regression test can exercise this wiring directly.
+ */
+export function Review({
+  lines,
+  busy,
+  error,
+  onApprove,
+  onCancel,
+  cancelLabel,
+  confirmLabel,
+  confirmDisabled = false,
+  children,
+}: {
+  lines: string[]
+  busy: string | null
+  error: string | null
+  onApprove: () => void
+  onCancel?: () => void
+  cancelLabel?: string
+  confirmLabel?: string
+  confirmDisabled?: boolean
+  children?: ReactNode
+}) {
   return (
     <div className="grid min-w-0 gap-3 [overflow-wrap:anywhere]" data-testid="review">
       {children}
@@ -451,9 +485,14 @@ function Review({ lines, busy, error, onApprove, children }: { lines: string[]; 
         </ul>
       ) : null}
       {error ? <p className="err">{error}</p> : null}
-      <div className="flex justify-end">
-        <button type="button" className="cta" onClick={onApprove} disabled={busy !== null}>
-          {busy === 'signing' ? 'Waiting for passkey' : homeCopy.confirm}
+      <div className={onCancel ? 'mt-1 flex justify-between gap-2' : 'flex justify-end'}>
+        {onCancel ? (
+          <button type="button" className="cta" onClick={() => onCancel()} disabled={busy !== null}>
+            {cancelLabel}
+          </button>
+        ) : null}
+        <button type="button" className={onCancel ? 'chipbtn' : 'cta'} onClick={() => onApprove()} disabled={busy !== null || confirmDisabled}>
+          {busy === 'signing' ? 'Waiting for passkey' : confirmLabel ?? homeCopy.confirm}
         </button>
       </div>
     </div>
@@ -466,12 +505,20 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
   const [to, setTo] = useState('')
   const [asset, setAsset] = useState<WithdrawAsset>('USDC')
   const [invalid, setInvalid] = useState<string | null>(null)
+  // otto/mamoru#155: which PriceDivergenceWarning object the owner ticked, if any — the exact instance from a
+  // prepare response, not its quoteId. Compared by reference against the current `divergence` below rather
+  // than cleared explicitly, so any fresh prepare (a new amount, or a stale-rewarn) un-ticks it on its own: a
+  // new prepare always returns a new object, so the acceptance never carries over even if an operator were to
+  // reuse the same quoteId by mistake.
+  const [acceptedWarning, setAcceptedWarning] = useState<PriceDivergenceWarning | null>(null)
   const dest = useDestination(to)
   const assetsQ = useWithdrawAssets(accountKey, open)
   const options = withdrawOptions(assetsQ.data?.assets)
+  const locale = detectLocale()
   const close = () => {
     flow.reset()
     setInvalid(null)
+    setAcceptedWarning(null)
     onClose()
   }
   const submit = async (e: FormEvent) => {
@@ -487,6 +534,7 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
   }
   const error = flow.error ? humanMessage(flow.error, s.maxWithdraw) : null
   const done = flow.result !== null
+  const divergence = flow.prepared?.divergence
 
   return (
     <Modal open={open} onClose={close} title={homeCopy.withdraw}>
@@ -504,7 +552,11 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
           lines={[...(deployed ? [] : [homeCopy.createFirst]), ...(flow.prepared.reduce?.length ? ['Mamoru first takes the missing USDC out of the pool.'] : [])]}
           busy={flow.busy}
           error={error}
-          onApprove={() => void flow.approve()}
+          onApprove={() => void flow.approve(acceptancePayload(divergence, acceptedWarning))}
+          onCancel={divergence ? close : undefined}
+          cancelLabel={divergence ? waitLabel(locale) : undefined}
+          confirmLabel={divergence ? withdrawAnywayLabel(locale) : undefined}
+          confirmDisabled={transferConfirmDisabled(flow.busy, divergence, acceptedWarning)}
         >
           <p className="m-0 text-[2rem] leading-none text-emerald tabular-nums">
             ${usd(BigInt(parseUsdc(amount) ?? '0'))}
@@ -524,6 +576,14 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
               {dest.name ? <p className="m-0 text-[1.05rem]">{dest.name}</p> : null}
               <p className="m-0 font-mono text-[0.82rem] break-all text-stone">{dest.address}</p>
             </div>
+          ) : null}
+          {divergence ? (
+            <PriceDivergenceNotice
+              warning={divergence}
+              accepted={acceptedWarning === divergence}
+              onAcceptedChange={(v) => setAcceptedWarning(v ? divergence : null)}
+              locale={locale}
+            />
           ) : null}
         </Review>
       ) : (
