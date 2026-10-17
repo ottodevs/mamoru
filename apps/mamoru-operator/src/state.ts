@@ -37,6 +37,8 @@ export type ArmedActivation = {
   execSent?: boolean
   /** When (ms) the execTransaction was first handed to a provider: nothing of it can be on chain before. */
   sentAt?: number
+  /** Wei of gas reserve the signed batch buys into the Safe at least (USDC -> ETH swap, otto/mamoru#15); absent: none. */
+  reserveWei?: string
 }
 
 export type AccountState = {

@@ -23,6 +23,7 @@ import {
   transferBatch,
   verifyOwnerSignature,
   type LiveAccount,
+  type LiveGasReserve,
   type LivePosition,
   type LiveReceive,
   type LiveSwap,
@@ -37,6 +38,7 @@ import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { USDC_POOLS, amountsForLiquidity, inUsdc, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
+import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, selfReserveConfirmed, selfReservePlan } from './self-reserve.ts'
 import { SUBSIDY_ALERT_SHARE, noteExit, paidToday, subsidyDecision, subsidyMessage, subsidyPerDayFromEnv, type SubsidyDecision } from './subsidy.ts'
 import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type EngineHealthSnapshot } from './metrics.ts'
@@ -235,6 +237,8 @@ type Prepared = {
   base?: Hex[]
   /** transfer: what the history line shows. */
   meta?: { amountUsdc: string; asset?: string; to: Hex }
+  /** activate: wei of gas reserve the batch's own USDC -> ETH swap pays into the Safe at least (self-reserve.ts). */
+  reserveWei?: string
 }
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
@@ -294,6 +298,8 @@ const RENEW_GAS_BUDGET = 16_200_000n
 const ACTIVATION_OVERHEAD_GAS = 600_000n
 /** Measured on Base: enableSessions costs 1.4-2.1M gas per session of the live policies; 2.1M is the conservative bound. */
 const STATIC_GAS_PER_SESSION = 2_100_000n
+/** Static bound for the reserve swap of a self-funded activation (approve, exactInputSingle + unwrapWETH9, approve 0). */
+const STATIC_GAS_RESERVE_SWAP = 300_000n
 
 /** "USDC/cbBTC 0.05%" for pool:USDC/cbBTC/500. */
 function poolLabel(pool: string): string {
@@ -374,11 +380,12 @@ export class Operator {
   }
 
   /**
-   * Whether the relayer can pay one activation now: the Safe top-up plus the deploy and execTransaction gas. When it
-   * cannot, the owner's signed activation waits armed instead of failing; a relayer short of ETH is ours to fix.
+   * Whether the relayer can pay one activation now: the Safe top-up plus the deploy and execTransaction gas, or only
+   * the gas when the batch buys the Safe's reserve itself (`selfFunded`). When it cannot, the owner's signed
+   * activation waits armed instead of failing; a relayer short of ETH is ours to fix.
    */
-  private async relayerCanActivate(acc: AccountState): Promise<boolean> {
-    const need = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI + ACTIVATION_GAS_WEI
+  private async relayerCanActivate(acc: AccountState, selfFunded = false): Promise<boolean> {
+    const need = (selfFunded ? 0n : this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI) + ACTIVATION_GAS_WEI
     const have = BigInt((await this.relayerBalance()).wei)
     if (have >= need) return true
     const at = Date.now()
@@ -629,13 +636,14 @@ export class Operator {
     build: (keys: string[]) => ReturnType<typeof instantiateGrant>[],
     acc: AccountState,
     block: bigint,
+    reserve?: LiveGasReserve,
   ): Promise<{ keys: string[]; grants: ReturnType<typeof instantiateGrant>[]; batch: ReturnType<typeof activationBatch> }> {
     const droppable = this.droppablePairs(policy, allKeys)
     let keys = allKeys
     for (let i = 0; ; i++) {
       const grants = build(keys)
-      const batch = activationBatch(live, grants, acc.revoked, { trust: !acc.trusted })
-      const gas = await this.activationGas(live, batch.calls, grants.length, block)
+      const batch = activationBatch(live, grants, acc.revoked, { trust: !acc.trusted, reserve })
+      const gas = await this.activationGas(live, batch.calls, grants.length, block, reserve ? STATIC_GAS_RESERVE_SWAP : 0n)
       if (gas <= ACTIVATION_GAS_BUDGET || i >= droppable.length) {
         if (keys.length < allKeys.length) console.log(`[activate] ${live.safe} ~${gas} gas: dropped ${allKeys.filter((k) => !keys.includes(k)).join(', ')} to fit Base's per-tx gas cap`)
         return { keys, grants, batch }
@@ -645,7 +653,7 @@ export class Operator {
   }
 
   /** Simulated gas of the activation calls from the Safe plus calldata and Safe/WebAuthn overhead; a static estimate when the simulation is unavailable (e.g. undeployed Safe). */
-  private async activationGas(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], sessions: number, block: bigint): Promise<bigint> {
+  private async activationGas(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], sessions: number, block: bigint, extra = 0n): Promise<bigint> {
     const bytes = calls.reduce((n, c) => n + BigInt((c.data.length - 2) / 2), 0n)
     const overhead = 16n * bytes + ACTIVATION_OVERHEAD_GAS
     try {
@@ -654,14 +662,15 @@ export class Operator {
     } catch {
       // fall through to the static estimate
     }
-    return 400_000n + BigInt(sessions) * STATIC_GAS_PER_SESSION + overhead
+    return 400_000n + BigInt(sessions) * STATIC_GAS_PER_SESSION + extra + overhead
   }
 
   /**
    * The engine's session grants for one owner approval, sized at the account cap and valid from now for the policy's
    * validity, with the Safe transaction that enables them. A first approval and a renewal sign the same thing.
+   * `reserve`: a first activation that buys the Safe's own gas reserve in the same transaction (self-reserve.ts).
    */
-  private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, only?: string[]) {
+  private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, only?: string[], reserve?: LiveGasReserve) {
     if (!acc.sessionKey) {
       acc.sessionKey = generatePrivateKey()
       this.store.save()
@@ -697,8 +706,8 @@ export class Operator {
     // Built once: every build draws new salts, and the batch must enable the very grants that are stored.
     const exactGrants = exact ? build(exact) : null
     const { keys, grants, batch } = exact && exactGrants
-      ? { keys: exact, grants: exactGrants, batch: activationBatch(live, exactGrants, acc.revoked, { trust: !acc.trusted }) }
-      : await this.fitActivation(live, policy, allKeys, build, acc, r.block)
+      ? { keys: exact, grants: exactGrants, batch: activationBatch(live, exactGrants, acc.revoked, { trust: !acc.trusted, reserve }) }
+      : await this.fitActivation(live, policy, allKeys, build, acc, r.block, reserve)
     const stored = grants.map((g, i) => ({ name: keys[i]!, grant: g, permissionId: batch.permissionIds[i]! }))
     return { sessionKey, caps, stored, batch }
   }
@@ -915,26 +924,36 @@ export class Operator {
     const r = await readSafe(this.client, live.safe)
     if (r.usdc > LIVE_CAP_USDC) throw depositOverCap(r.usdc)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
-    // With nothing deposited yet the approval is armed and the subsidy is decided when the deposit lands.
-    if (r.usdc > 0n) this.assertSubsidy(this.subsidy(acc, r.usdc, r.eth), live.safe)
+    // A Safe holding enough USDC buys its own gas reserve in this very transaction (self-reserve.ts) and needs no
+    // subsidy. Any other start is decided as before (#82); with nothing deposited yet the approval is armed and the
+    // subsidy is decided when the deposit lands.
+    const self = r.usdc > 0n ? await this.selfReserve(live.safe, r) : null
+    if (r.usdc > 0n && !self) this.assertSubsidy(this.subsidy(acc, r.usdc, r.eth), live.safe)
     const policy = this.cfg.policy
-    const { sessionKey, caps, stored, batch } = await this.approval(acc, live, policy, r)
+    const { sessionKey, caps, stored, batch } = await this.approval(acc, live, policy, r, undefined, self?.reserve)
+    const invested = r.usdc - (self?.reserve.amountIn ?? 0n)
+    const reserveLine = self
+      ? [`Convert ${fmtUsdc(self.reserve.amountIn)} USDC to at least ${fmtUnits(self.reserve.amountOutMinimum, 18)} ETH on ${self.route}, kept in your Safe as its gas reserve`]
+      : []
+    const extra = { grants: stored, ...(self ? { reserveWei: self.reserve.amountOutMinimum.toString() } : {}) }
     const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!)} ${b.preference / 100}%`)
     if (pools.length > 1) {
       const summary = [
         `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
+        ...reserveLine,
         r.usdc > 0n
-          ? `Let Mamoru's engine keep your ${fmtUsdc(r.usdc)} USDC invested across Uniswap v3 ${pools.join(', ')}`
+          ? `Let Mamoru's engine keep your ${fmtUsdc(invested)} USDC invested across Uniswap v3 ${pools.join(', ')}`
           : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
         `Engine key ${sessionKey} may only swap USDC into those pools' tokens and mint those pools, for ${Math.round(policy.session.validitySeconds / 86_400)} days`,
         `Funds never leave your Safe without your passkey; cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`,
       ]
-      return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })
+      return this.hold(acc, live, 'activate', batch.calls, summary, extra)
     }
     const summary = [
       `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
+      ...reserveLine,
       r.usdc > 0n
-        ? `Let Mamoru's engine allocate your ${fmtUsdc(r.usdc)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
+        ? `Let Mamoru's engine allocate your ${fmtUsdc(invested)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
         : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(LIVE_CAP_USDC)} USDC) into Uniswap v3 USDC/cbBTC 0.05% as soon as it arrives`,
       `Engine key ${sessionKey} may only swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap) and mint that pool, for ${Math.round(policy.session.validitySeconds / 86_400)} days`,
       ...(hasManageAny(policy)
@@ -942,7 +961,41 @@ export class Operator {
         : []),
       `Funds never leave your Safe without your passkey; cap ${fmtUsdc(LIVE_CAP_USDC)} USDC`,
     ]
-    return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored })
+    return this.hold(acc, live, 'activate', batch.calls, summary, extra)
+  }
+
+  /**
+   * The Safe's own gas reserve, bought in the activation batch (self-reserve.ts), or null when this start keeps the
+   * relayer's path (#82). Quoted at the prepare block on the WETH/USDC pools a withdrawal to ETH uses, best rate wins.
+   */
+  private async selfReserve(safe: Address, r: SafeRead): Promise<{ reserve: LiveGasReserve; route: string } | null> {
+    const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
+    let probe: { receive: LiveReceive; quoted: bigint; route: string } | null = null
+    if (r.eth < target && r.usdc > 0n) {
+      try {
+        probe = await this.receiveQuote('ETH', SELF_RESERVE_PROBE_USDC, r.block, this.cfg.policy.execution.slippageBps)
+      } catch (e) {
+        logErr(`[activate] ${safe} no USDC -> ETH quote for the gas reserve:`, e)
+      }
+    }
+    const plan = selfReservePlan({ usdc: r.usdc, eth: r.eth, target, probeOut: probe?.quoted ?? null })
+    if ('skip' in plan) {
+      if (plan.skip !== 'FUNDED') console.log(`[activate] ${safe} gas reserve not bought in the batch: ${plan.skip}`)
+      return null
+    }
+    const fee = probe!.receive.fee
+    try {
+      const quoted = await quoteExactInputSingle(this.client, { tokenIn: address('USDC'), tokenOut: address('WETH'), fee, amountIn: plan.amountIn, blockNumber: r.block })
+      if (!selfReserveConfirmed(plan.minOut, quoted)) {
+        console.log(`[activate] ${safe} gas reserve not bought in the batch: QUOTE_SHORT (${plan.amountIn} USDC -> ${quoted} wei, need ${plan.minOut})`)
+        return null
+      }
+    } catch (e) {
+      logErr(`[activate] ${safe} no quote for the gas reserve swap:`, e)
+      return null
+    }
+    const { timestamp } = await this.client.getBlock({ blockNumber: r.block })
+    return { reserve: { fee, amountIn: plan.amountIn, amountOutMinimum: plan.minOut, deadline: timestamp + SELF_RESERVE_DEADLINE_SECONDS }, route: probe!.route }
   }
 
   /** Planned under the account lock: an in-flight engine op (reduce, re-range) lands first, so the plan sees its liquidity. */
@@ -1270,12 +1323,14 @@ export class Operator {
       if (usdc === 0n) return this.arm(acc, p, signature)
       if (usdc > LIVE_CAP_USDC) throw depositOverCap(usdc)
       // Over the day's subsidy budget the approval waits armed (the watcher runs it once the budget frees up or the
-      // Safe holds its own reserve); any other refusal is the owner's to act on and is answered now.
-      const s = this.subsidy(acc, usdc, await this.client.getBalance({ address: live.safe }))
+      // Safe holds its own reserve); any other refusal is the owner's to act on and is answered now. A batch that buys
+      // its own reserve counts it as held.
+      const own = BigInt(p.reserveWei ?? 0)
+      const s = this.subsidy(acc, usdc, (await this.client.getBalance({ address: live.safe })) + own)
       if (s.code === 'SUBSIDY_DAILY_BUDGET') return this.arm(acc, p, signature)
       this.assertSubsidy(s, live.safe)
       // The relayer cannot pay for it now: the signature waits armed and the watcher runs it once the relayer is funded.
-      if (!(await this.relayerCanActivate(acc))) return this.arm(acc, p, signature)
+      if (!(await this.relayerCanActivate(acc, own > 0n))) return this.arm(acc, p, signature)
       this.disarm(acc, 'ARMED_SUPERSEDED')
     }
     const op = this.newOp(acc, kind === 'stop' ? 'exit' : kind)
@@ -1501,7 +1556,7 @@ export class Operator {
     const op = this.newOp(acc, 'activate')
     op.code = 'ARMED'
     this.stash(acc, op, p)
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now() }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.reserveWei ? { reserveWei: p.reserveWei } : {}) }
     this.store.save()
     console.log(`[armed] ${acc.accountKey} ${op.opId} armed for ${acc.ctx.address} at Safe nonce ${p.tx.nonce}`)
     return { ...op }
@@ -1517,7 +1572,7 @@ export class Operator {
     const current = acc.ops.find((o) => o.opId === op.opId)
     if (current?.txHash) return this.failOwner(acc, op, 'OWNER_TX_ERROR')
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.reserveWei ? { reserveWei: p.reserveWei } : {}), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
     this.armHold.delete(acc.accountKey)
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
     this.execTried.delete(opKey(acc, op))
@@ -1713,14 +1768,15 @@ export class Operator {
     }
     // The relayer cannot pay for it yet: stay armed, without using up a try. Waiting is not activity, so the watcher
     // slows down on this account as it does on an idle one, instead of reading it every pass.
-    if (!tried && !(await this.relayerCanActivate(acc))) return this.park(acc, ARM_IDLE_MS)
+    const own = BigInt(a.reserveWei ?? 0)
+    if (!tried && !(await this.relayerCanActivate(acc, own > 0n))) return this.park(acc, ARM_IDLE_MS)
     const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
     if (deployed && nonce !== a.tx.nonce) return this.nonceMoved(acc, a, nonce)
     // Too little to deploy a Safe for: stay armed and wait for more (funding reports deployMinUsdc).
     if (!deployed && usdc < MIN_DEPLOY_USDC) return
     // The day's subsidy budget is spent: wait armed, like the failure budget. Other refusals end the attempt below.
-    if (this.subsidy(acc, usdc, await this.client.getBalance({ address: live.safe })).code === 'SUBSIDY_DAILY_BUDGET') return this.park(acc, ARM_BUDGET_HOLD_MS)
-    if (tried && !(await this.relayerCanActivate(acc))) return this.park(acc, ARM_IDLE_MS)
+    if (this.subsidy(acc, usdc, (await this.client.getBalance({ address: live.safe })) + own).code === 'SUBSIDY_DAILY_BUDGET') return this.park(acc, ARM_BUDGET_HOLD_MS)
+    if (tried && !(await this.relayerCanActivate(acc, own > 0n))) return this.park(acc, ARM_IDLE_MS)
     // A copy handed to a provider earlier may still be pending: while the relayer has a transaction not yet mined,
     // nothing is sent again. Mined, it shows in the Safe nonce above; dropped, the pending count falls back.
     if (tried && (await this.relayerHasPending())) return this.park(acc, ARM_RETRY_MS)
@@ -1728,7 +1784,7 @@ export class Operator {
     // cleared when the account starts, or when the attempt ends in a failure that is final.
     this.patchOp(acc, a.opId, { code: undefined })
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
-    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants }
+    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants, reserveWei: a.reserveWei }
     const op = acc.ops.find((o) => o.opId === a.opId)!
     if (a.execSent) this.retried.add(opKey(acc, op))
     try {
@@ -1838,10 +1894,12 @@ export class Operator {
     const refusal = await this.preflight(acc, live, p, signature)
     if (refusal) return this.settleRetried(acc, op, refusal.code) ? undefined : this.failOwner(acc, op, refusal.code, refusal.detail)
     // The subsidy is decided again under the lock and before the deploy: nothing is spent on a start that is refused.
+    // What the batch's own swap pays into the Safe (at least its minimum, or the whole transaction reverts) is held.
     let usdc = 0n
+    const own = p.kind === 'activate' ? BigInt(p.reserveWei ?? 0) : 0n
     if (p.kind === 'activate') {
       usdc = await this.usdcOf(safe)
-      const s = this.subsidy(acc, usdc, await this.client.getBalance({ address: safe }))
+      const s = this.subsidy(acc, usdc, (await this.client.getBalance({ address: safe })) + own)
       if (s.code) {
         this.subsidyAlert(s.code)
         return this.failOwner(acc, op, s.code)
@@ -1861,7 +1919,8 @@ export class Operator {
     }
     if (p.kind === 'activate') {
       const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
-      const eth = await this.client.getBalance({ address: safe })
+      const eth = (await this.client.getBalance({ address: safe })) + own
+      if (own > 0n) console.log(`[owner] ${op.opId} the batch buys the gas reserve: at least ${own} wei into ${safe}`)
       if (eth < target) {
         // Decided once more and recorded with no await in between, so activations of other accounts running at the same
         // time cannot all take the last of the day's budget; recorded before the send, so a top-up whose receipt is

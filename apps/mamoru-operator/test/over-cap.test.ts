@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { decodeFunctionData, encodeFunctionResult, getAddress, keccak256, stringToHex, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { decodeFunctionData, encodeFunctionData, encodeFunctionResult, getAddress, keccak256, stringToHex, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import type { AccountContext, OpView, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
-import { address, erc20Abi, safeAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { address, erc20Abi, safeAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { POLICIES } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
@@ -10,6 +10,7 @@ import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/we
 import { FOLLOW_UP_GRACE, FOLLOW_UP_MAX, FOLLOW_UP_MS, graceLeft, HttpError, lastEngineBlock, nextReview, MAX_OWNER_FAILURES_PER_DAY, OWNER_FAILURES_ALERT_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
 import type { Relayer } from '../src/relayer.ts'
 import { answerAggregate3 } from './fake-multicall.ts'
+import { quoterV2Abi } from '@mamoru/uniswap-v3/quote'
 import type { AccountState, ArmedActivation, StateStore } from '../src/state.ts'
 
 const RELAYER = `0x${'7'.repeat(40)}` as const
@@ -37,7 +38,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n, eth: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, weiPerUsdc: 0n }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -81,6 +82,11 @@ function world(usdc: bigint) {
             throw new Error('execution reverted')
           }),
         }
+      }
+      // QuoterV2 (USDC -> WETH) answers at `weiPerUsdc` when set; otherwise it has no answer and nothing is quoted.
+      if (to.toLowerCase() === address('QuoterV2').toLowerCase() && knobs.weiPerUsdc > 0n) {
+        const { args } = decodeFunctionData({ abi: quoterV2Abi, data })
+        return { data: encodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', result: [(args[0].amountIn * knobs.weiPerUsdc) / 1_000_000n, 0n, 0, 0n] }) }
       }
       called.push(data)
       if (knobs.call === 'revert') throw Object.assign(new Error('execution reverted: GS026'), { code: 3, data: '0x08c379a0' })
@@ -2040,5 +2046,97 @@ describe('the relayer pays the gas reserve within limits', () => {
     } finally {
       console.error = error
     }
+  })
+})
+
+// otto/mamoru#15: a Safe with enough USDC buys its own gas reserve inside the activation the owner signs; the relayer
+// pays only the deploy and execTransaction gas, and its subsidy (#82) is left for the starts that cannot.
+describe('the activation buys its own gas reserve', () => {
+  type Armed = { fireArmed(acc: AccountState, usdc: bigint): Promise<void> }
+  const quiet = (u: bigint) => {
+    const w = world(u)
+    ;(w.op as unknown as { startLoop(a: AccountState): void }).startLoop = () => {}
+    // 2,700 USD/ETH
+    w.knobs.weiPerUsdc = 370_370_370_370_370n
+    return w
+  }
+  const TARGET = POLICIES['conservador-live-v2']!.gasReserveWei + 200_000_000_000_000n
+  const topUps = (w: ReturnType<typeof world>) => w.sent.filter((t) => t.to.toLowerCase() === SAFE.toLowerCase() && !t.data)
+  const execs = (w: ReturnType<typeof world>) => w.sent.filter((t) => t.to.toLowerCase() === SAFE.toLowerCase() && t.data)
+  /** The Safe's execTransaction carries SwapRouter02.unwrapWETH9(reserve, Safe): the ETH of the swap is paid to the Safe. */
+  const unwrapToSafe = encodeFunctionData({ abi: swapRouter02Abi, functionName: 'unwrapWETH9', args: [TARGET, SAFE] }).slice(2).toLowerCase()
+  const swaps = (data?: Hex) => !!data && data.toLowerCase().includes(unwrapToSafe)
+
+  test('20 USDC: the summary names the USDC converted, the signed batch swaps it, the relayer sends no reserve', async () => {
+    const w = quiet(20_000_000n)
+    const tx = await w.op.prepareActivate(ctx)
+    expect(tx.summary).toContain('Convert 1.49 USDC to at least 0.0005 ETH on Uniswap v3 USDC/WETH 0.05% + unwrap, kept in your Safe as its gas reserve')
+    expect(tx.summary.some((l) => l.includes('your 18.51 USDC'))).toBe(true)
+    expect(await w.op.submit(ctx, 'activate', sign(tx))).toMatchObject({ state: 'confirmed' })
+    expect(topUps(w)).toHaveLength(0)
+    expect(execs(w)).toHaveLength(1)
+    expect(swaps(execs(w)[0]!.data)).toBe(true)
+    expect(w.state.accounts.k!.subsidies).toBeUndefined()
+  })
+
+  test('with the daily subsidy budget spent, a self-funded start still runs', async () => {
+    const w = quiet(20_000_000n)
+    for (let i = 0; i < 10; i++) w.state.accounts[`paid-${i}`] = { accountKey: `paid-${i}`, subsidies: [{ at: new Date().toISOString(), wei: TARGET.toString() }] } as unknown as AccountState
+    expect(await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))).toMatchObject({ state: 'confirmed' })
+    expect(topUps(w)).toHaveLength(0)
+  })
+
+  test('a relayer holding only the activation gas starts a self-funded account instead of arming it', async () => {
+    const w = quiet(20_000_000n)
+    w.knobs.relayerWei = 200_000_000_000_000n
+    expect(await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))).toMatchObject({ state: 'confirmed' })
+    // The same relayer cannot pay a reserve: a start that needs one waits armed.
+    const v = quiet(20_000_000n)
+    v.knobs.weiPerUsdc = 0n
+    v.knobs.relayerWei = 200_000_000_000_000n
+    expect(await v.op.submit(ctx, 'activate', sign(await v.op.prepareActivate(ctx)))).toMatchObject({ code: 'ARMED' })
+  })
+
+  test('a self-funded approval that waits armed keeps its reserve, and runs with no top-up', async () => {
+    const w = quiet(20_000_000n)
+    w.knobs.relayerWei = 0n
+    expect(await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))).toMatchObject({ code: 'ARMED' })
+    const acc = w.state.accounts.k!
+    expect(acc.armed?.reserveWei).toBe(TARGET.toString())
+    w.knobs.relayerWei = 10n ** 18n
+    ;(w.op as unknown as { relayerBalanceCache: null }).relayerBalanceCache = null
+    await (w.op as unknown as Armed).fireArmed(acc, 20_000_000n)
+    expect(acc.active).toBe(true)
+    expect(topUps(w)).toHaveLength(0)
+    expect(swaps(execs(w)[0]!.data)).toBe(true)
+  })
+
+  test('kept on the relayer path: under 10 USDC, no quote, a Safe that holds its reserve, an approval signed before the deposit', async () => {
+    const small = quiet(5_000_000n)
+    expect(await small.op.prepareActivate(ctx).catch((x: unknown) => x)).toMatchObject({ status: 409, code: 'SUBSIDY_BELOW_MINIMUM' })
+
+    const noQuote = quiet(20_000_000n)
+    noQuote.knobs.weiPerUsdc = 0n
+    const t1 = await noQuote.op.prepareActivate(ctx)
+    expect(t1.summary.some((l) => l.startsWith('Convert'))).toBe(false)
+    await noQuote.op.submit(ctx, 'activate', sign(t1))
+    expect(topUps(noQuote)).toMatchObject([{ value: TARGET }])
+
+    const funded = quiet(20_000_000n)
+    funded.chain.eth = TARGET
+    const t2 = await funded.op.prepareActivate(ctx)
+    expect(t2.summary.some((l) => l.startsWith('Convert'))).toBe(false)
+    await funded.op.submit(ctx, 'activate', sign(t2))
+    expect(topUps(funded)).toHaveLength(0)
+    expect(swaps(execs(funded)[0]!.data)).toBe(false)
+
+    const early = quiet(0n)
+    const t3 = await early.op.prepareActivate(ctx)
+    expect(t3.summary.some((l) => l.startsWith('Convert'))).toBe(false)
+    expect(await early.op.submit(ctx, 'activate', sign(t3))).toMatchObject({ code: 'ARMED' })
+    early.chain.usdc = 20_000_000n
+    await (early.op as unknown as Armed).fireArmed(early.state.accounts.k!, 20_000_000n)
+    expect(topUps(early)).toMatchObject([{ value: TARGET }])
+    expect(early.state.accounts.k!.subsidies).toHaveLength(1)
   })
 })
