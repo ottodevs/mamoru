@@ -1,4 +1,4 @@
-import { createWalletClient, defineChain, http, type Chain, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { createWalletClient, defineChain, http, parseAbi, type Chain, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import { Lock } from './lock.ts'
@@ -6,6 +6,11 @@ import { logErr } from './metrics.ts'
 
 /** Per-tx gas cap on Base (EIP-7825). */
 const TX_GAS_CAP = 16_777_216n
+/** OP Stack GasPriceOracle predeploy: the L1 data fee a Base transaction pays on top of its execution fee. */
+const GAS_PRICE_ORACLE = '0x420000000000000000000000000000000000000F' as const
+const gasPriceOracleAbi = parseAbi(['function getL1Fee(bytes) view returns (uint256)'])
+/** When the oracle cannot answer: 0.0001 ETH, orders of magnitude above a Base transaction's usual L1 data fee. */
+const L1_FEE_FALLBACK_WEI = 100_000_000_000_000n
 /** How long the nonce of the last accepted send overrules a provider count that has not caught up with it. */
 const LAST_SENT_MS = 120_000
 
@@ -49,12 +54,24 @@ export class Relayer {
     }
   }
 
+  /** The L1 data fee of `serialized` now, or a fixed bound above it when the oracle cannot answer. */
+  private async l1Fee(serialized: Hex): Promise<bigint> {
+    try {
+      return await this.client.readContract({ address: GAS_PRICE_ORACLE, abi: gasPriceOracleAbi, functionName: 'getL1Fee', args: [serialized] })
+    } catch (e) {
+      logErr('[relayer] L1 fee unreadable, bounded by the fallback:', e)
+      return L1_FEE_FALLBACK_WEI
+    }
+  }
+
   /**
    * Sends and waits for the receipt. Gas is estimated with a 30% margin unless given. `onSending` runs once the reads
    * are done, right before the signed transaction goes to the provider: from there on a failure may have broadcast it.
-   * `onSent` runs with the hash once the provider accepts it.
+   * `onSent` runs with the hash once the provider accepts it. `onSending` gets the most the transaction can cost in fees
+   * (its gas limit at its signed maxFeePerGas, plus twice the L1 data fee of its bytes), an upper bound on what the
+   * relayer pays for it.
    */
-  send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: () => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
+  send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: (maxFeeWei: bigint) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     return this.lock.run(async () => {
       const wallet = createWalletClient({ account: this.account, chain: this.chain, transport: http(this.rpcUrl, { timeout: 60_000 }) })
       // Base rejects a tx over 2^24 gas (EIP-7825): the 30% margin must not push a fitting estimate over the cap.
@@ -79,7 +96,9 @@ export class Relayer {
         maxFeePerGas: fees.maxFeePerGas,
         maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
       })
-      onSending?.()
+      // The most it can cost: execution at its signed maxFeePerGas plus the L1 data fee for these bytes, doubled for the L1
+      // price moving before inclusion. Only read when someone needs the bound.
+      if (onSending) onSending(gas * fees.maxFeePerGas + 2n * (await this.l1Fee(serializedTransaction)))
       const hash = await wallet.sendRawTransaction({ serializedTransaction })
       this.lastSent = { nonce, at: Date.now() }
       onSent?.(hash)

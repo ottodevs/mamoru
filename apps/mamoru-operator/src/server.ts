@@ -4,6 +4,7 @@ import type { AccountContext } from '@mamoru/domain'
 import { verifyMetricsSignature } from '@mamoru/operator-auth'
 import { logErr } from './metrics.ts'
 import type { SnapshotLoop } from './snapshot.ts'
+import { Admission, authFraming, boundedText, DEFAULT_ADMISSION, type AdmissionLimits, type Bucket } from './admission.ts'
 import type { RpcMetrics } from './metrics.ts'
 import { HttpError, type Operator } from './operator.ts'
 
@@ -100,12 +101,19 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
   }
 }
 
-export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number; rpcMetrics: RpcMetrics; gitSha: string; bootedAt: number; snapshot?: SnapshotLoop | null; /** Tests only: the legacy cutoff (default LEGACY_HMAC_UNTIL). */ legacyHmacUntil?: number }): Server<undefined> {
+/** A Stop body (a passkey assertion, or `{"revokeOnly":true}`) is read before its slot is taken: small and quick. */
+const STOP_BODY_BYTES = 4 * 1024
+const STOP_BODY_MS = 2_000
+
+export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number; rpcMetrics: RpcMetrics; gitSha: string; bootedAt: number; snapshot?: SnapshotLoop | null; admission?: Partial<AdmissionLimits>; /** Tests only: the legacy cutoff (default LEGACY_HMAC_UNTIL). */ legacyHmacUntil?: number }): Server<undefined> {
   const legacyUntil = opts.legacyHmacUntil ?? LEGACY_HMAC_UNTIL
+  const admission = new Admission({ ...DEFAULT_ADMISSION, ...opts.admission })
   return Bun.serve({
     hostname: opts.hostname,
     port: opts.port,
     idleTimeout: 120,
+    // otto/mamoru#140 (part2 #7): Bun's own ceiling, under the 128 MB default; account routes are held to a far smaller one below.
+    maxRequestBodySize: 256 * 1024,
     async fetch(req) {
       const url = new URL(req.url)
       const path = url.pathname + url.search
@@ -130,75 +138,114 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
       }
       const m = ROUTE.exec(url.pathname)
       if (!m) return json(404, { error: 'not found' })
-      const body = req.method === 'POST' ? await req.text() : ''
-      const header = req.headers.get('x-mamoru-account') ?? ''
-      const sig = req.headers.get('x-mamoru-sig') ?? ''
-      const ts = req.headers.get('x-mamoru-ts')
-      // otto/mamoru#140: a signed ts outside the accepted clock skew is a replay of an old captured request, not a
-      // forged one — refused before the signature is even checked, with the same unauthorized shape either way.
-      if (ts !== null && (!/^\d+$/.test(ts) || Math.abs(Date.now() - Number(ts) * 1000) > REQUEST_SKEW_MS)) {
-        return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
-      }
-      // otto/mamoru#140: the no-ts form only until the cutoff; past it, refused like any bad signature.
-      if (ts === null && Date.now() >= legacyUntil) {
-        console.log(`[auth] legacy HMAC refused (past ${new Date(legacyUntil).toISOString()}): ${req.method} ${m[2]}`)
-        return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
-      }
-      const expected = operatorSignature(opts.secret, req.method, path, header, body, ts)
-      if (!header || sig.length !== expected.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
-      let ctx: AccountContext
+      // otto/mamoru#140 (part2 #7): headers that cannot carry a valid signature are refused before the body is read,
+      // and no more than maxInFlight account requests are open at once.
+      if (!authFraming(admission.limits, req.headers.get('x-mamoru-account'), req.headers.get('x-mamoru-sig'), req.headers.get('x-mamoru-ts'))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+      // Stop (prepare and submit) has its own bucket in every limit: other traffic never keeps an owner from revoking.
+      // Its slots are taken only once the signature is verified (Sol review #5): unauthenticated slow bodies cannot fill
+      // them. Its body is read first, without a slot, under a tighter size and deadline.
+      const bucket: Bucket = m[2]!.startsWith('stop') ? 'stop' : 'other'
+      if (bucket === 'stop') return account(req, url, path, m, bucket)
+      if (!admission.enter(bucket)) return json(503, { error: 'the operator is busy, try again in a moment', code: 'OPERATOR_BUSY' })
       try {
-        ctx = decodeContext(header)
-      } catch {
-        return json(401, { error: 'bad account context', code: 'OPERATOR_AUTH' })
-      }
-      if (decodeURIComponent(m[1]!) !== ctx.accountKey) return json(401, { error: 'account mismatch', code: 'OPERATOR_AUTH' })
-      const route = `${req.method} ${m[2]}`
-      // Every accepted legacy request, so its removal can be planned on what the journal shows (account key shortened).
-      if (ts === null) console.log(`[auth] legacy HMAC (no x-mamoru-ts) ${route} account ${ctx.accountKey.slice(0, 8)}`)
-      const parse = () => {
-        try {
-          return JSON.parse(body || '{}')
-        } catch {
-          throw new HttpError(400, 'BAD_REQUEST', 'body is not JSON')
-        }
-      }
-      try {
-        switch (route) {
-          case 'GET funding':
-            return json(200, await op.funding(ctx, url.searchParams.get('fresh') === '1'))
-          case 'GET withdraw-assets':
-            return json(200, await op.withdrawAssets())
-          case 'GET ops':
-            return json(200, op.ops(ctx, url.searchParams.get('after'), url.searchParams.get('all') === '1'))
-          case 'POST activate/prepare':
-            return json(200, await op.prepareActivate(ctx))
-          case 'POST activate':
-            return json(200, await op.submit(ctx, 'activate', parse()))
-          case 'POST transfer/prepare':
-            return json(200, await op.prepareTransfer(ctx, parse()))
-          case 'POST transfer':
-            return json(200, await op.submit(ctx, 'transfer', parse()))
-          case 'POST stop/prepare':
-            return json(200, await op.prepareStop(ctx))
-          case 'POST stop':
-            return json(200, await op.submit(ctx, 'stop', parse()))
-          case 'POST renew/prepare':
-            return json(200, await op.prepareRenew(ctx))
-          case 'POST renew':
-            return json(200, await op.submit(ctx, 'renew', parse()))
-          default:
-            return json(405, { error: 'method not allowed' })
-        }
-      } catch (e) {
-        // HttpError's own message is always one of the fixed, operator-authored strings in
-        // operator.ts's SAFE_ERROR_MESSAGE table (or static/safe-dynamic text audited there) —
-        // never a raw caught exception's message — so it is safe to return as-is here. Anything
-        // that is NOT an HttpError is an unexpected failure: redact it to the journal, never to the client.
-        if (e instanceof HttpError) return json(e.status, { error: e.message, code: e.code })
-        logErr(`[http] ${route}:`, e)
-        return json(500, { error: 'the operator hit an unexpected error handling this request', code: 'OPERATOR_ERROR' })
+        return await account(req, url, path, m, bucket)
+      } finally {
+        admission.leave(bucket)
       }
     },
   })
+
+  async function account(req: Request, url: URL, path: string, m: RegExpExecArray, bucket: Bucket): Promise<Response> {
+    const stop = bucket === 'stop'
+    const body = req.method === 'POST' ? await boundedText(req, stop ? STOP_BODY_BYTES : admission.limits.maxBodyBytes, stop ? STOP_BODY_MS : admission.limits.bodyTimeoutMs) : ''
+    if (body === null) return json(413, { error: 'request body too large', code: 'BODY_TOO_LARGE' })
+    const header = req.headers.get('x-mamoru-account') ?? ''
+    const sig = req.headers.get('x-mamoru-sig') ?? ''
+    const ts = req.headers.get('x-mamoru-ts')
+    // otto/mamoru#140: a signed ts outside the accepted clock skew is a replay of an old captured request, not a
+    // forged one — refused before the signature is even checked, with the same unauthorized shape either way.
+    if (ts !== null && (!/^\d+$/.test(ts) || Math.abs(Date.now() - Number(ts) * 1000) > REQUEST_SKEW_MS)) {
+      return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+    }
+    // otto/mamoru#140: the no-ts form only until the cutoff; past it, refused like any bad signature.
+    if (ts === null && Date.now() >= legacyUntil) {
+      console.log(`[auth] legacy HMAC refused (past ${new Date(legacyUntil).toISOString()}): ${req.method} ${m[2]}`)
+      return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+    }
+    const expected = operatorSignature(opts.secret, req.method, path, header, body, ts)
+    if (!header || sig.length !== expected.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+    let ctx: AccountContext
+    try {
+      ctx = decodeContext(header)
+    } catch {
+      return json(401, { error: 'bad account context', code: 'OPERATOR_AUTH' })
+    }
+    if (decodeURIComponent(m[1]!) !== ctx.accountKey) return json(401, { error: 'account mismatch', code: 'OPERATOR_AUTH' })
+    const route = `${req.method} ${m[2]}`
+    // Every accepted legacy request, so its removal can be planned on what the journal shows (account key shortened).
+    if (ts === null) console.log(`[auth] legacy HMAC (no x-mamoru-ts) ${route} account ${ctx.accountKey.slice(0, 8)}`)
+    // Authenticated from here: one account holds at most maxInFlightPerAccount requests open, and prepares (chain
+    // reads and simulations) are rate-limited per account and overall. "Account" is the Safe, not the accountKey: a
+    // caller with the secret can name any accountKey, but every one for this Safe shares its limits. The bucket comes
+    // from the path, which the signature covers.
+    const who = ctx.address.toLowerCase()
+    if (route.endsWith('/prepare') && !admission.allowPrepare(who, Date.now(), bucket)) return json(429, { error: 'too many prepares for this account, wait a minute', code: 'PREPARE_RATE_LIMIT' })
+    if (stop && !admission.enter(bucket)) return json(503, { error: 'the operator is busy, try again in a moment', code: 'OPERATOR_BUSY' })
+    if (!admission.enterAccount(who, bucket)) {
+      if (stop) admission.leave(bucket)
+      return json(429, { error: 'this account already has requests in progress', code: 'ACCOUNT_BUSY' })
+    }
+    try {
+      return await dispatch(route, ctx, url, body)
+    } finally {
+      admission.leaveAccount(who, bucket)
+      if (stop) admission.leave(bucket)
+    }
+  }
+
+  async function dispatch(route: string, ctx: AccountContext, url: URL, body: string): Promise<Response> {
+    const parse = () => {
+      try {
+        return JSON.parse(body || '{}')
+      } catch {
+        throw new HttpError(400, 'BAD_REQUEST', 'body is not JSON')
+      }
+    }
+    try {
+      switch (route) {
+        case 'GET funding':
+          return json(200, await op.funding(ctx, url.searchParams.get('fresh') === '1'))
+        case 'GET withdraw-assets':
+          return json(200, await op.withdrawAssets())
+        case 'GET ops':
+          return json(200, op.ops(ctx, url.searchParams.get('after'), url.searchParams.get('all') === '1'))
+        case 'POST activate/prepare':
+          return json(200, await op.prepareActivate(ctx))
+        case 'POST activate':
+          return json(200, await op.submit(ctx, 'activate', parse()))
+        case 'POST transfer/prepare':
+          return json(200, await op.prepareTransfer(ctx, parse()))
+        case 'POST transfer':
+          return json(200, await op.submit(ctx, 'transfer', parse()))
+        case 'POST stop/prepare':
+          return json(200, await op.prepareStop(ctx, { revokeOnly: parse()?.revokeOnly === true }))
+        case 'POST stop':
+          return json(200, await op.submit(ctx, 'stop', parse()))
+        case 'POST renew/prepare':
+          return json(200, await op.prepareRenew(ctx))
+        case 'POST renew':
+          return json(200, await op.submit(ctx, 'renew', parse()))
+        default:
+          return json(405, { error: 'method not allowed' })
+      }
+    } catch (e) {
+      // HttpError's own message is always one of the fixed, operator-authored strings in
+      // operator.ts's SAFE_ERROR_MESSAGE table (or static/safe-dynamic text audited there) —
+      // never a raw caught exception's message — so it is safe to return as-is here. Anything
+      // that is NOT an HttpError is an unexpected failure: redact it to the journal, never to the client.
+      if (e instanceof HttpError) return json(e.status, { error: e.message, code: e.code })
+      logErr(`[http] ${route}:`, e)
+      return json(500, { error: 'the operator hit an unexpected error handling this request', code: 'OPERATOR_ERROR' })
+    }
+  }
 }

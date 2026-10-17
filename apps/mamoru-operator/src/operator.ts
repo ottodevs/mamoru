@@ -37,7 +37,7 @@ import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { Proposal } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
-import { USDC_POOLS, amountsForLiquidity, inUsdc, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
+import { MAX_INVENTORY, USDC_POOLS, amountsForLiquidity, inUsdc, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
 import { Lock } from './lock.ts'
@@ -45,6 +45,7 @@ import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type Eng
 import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, type ChainUsage } from './session-usage.ts'
+import { DEFAULT_SPONSOR, activationRefusal, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
 
 /** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
@@ -219,6 +220,43 @@ const ENGINE_UNSETTLED = new Set<OpRecord['state']>(['signed', 'submitted', 'inc
 const SPENT_NONCE_CODES = new Set(['SAFE_NONCE_MOVED', 'OWNER_TX_REVERTS', 'OWNER_TX_FAILED', 'BAD_SIGNATURE'])
 /** How often an unavailable simulation or eth_call is tried again before the fallback. */
 const SIM_TRIES = 3
+/** otto/mamoru#140 (part2 #4): positions one Stop closes; the rest stay in the Safe and the next Stop closes them. */
+export const MAX_STOP_POSITIONS = 8
+/** Positions worth less than this (raw USDC, 0.01) are not unwound by a Stop nor counted by a withdrawal: dust or unsolicited. */
+export const POSITION_DUST_USDC = 10_000n
+/** Positions a withdrawal plans from, and funding shows, at most (largest first). */
+export const MAX_SIZING_POSITIONS = 16
+/** Outstanding prepares per account (oldest dropped) and in all (refused past it). */
+const PREPARED_PER_ACCOUNT = 4
+const PREPARED_MAX = 2_000
+/**
+ * Gas an owner transaction is assumed to take when its sponsorship is reserved and when a Safe-paid fee is quoted: a
+ * Stop closing MAX_STOP_POSITIONS positions with swaps, a withdrawal reducing MAX_SIZING_POSITIONS, stay under it.
+ */
+const OWNER_TX_GAS = 4_000_000n
+/** Safe-paid: gas execTransaction is refunded on top of what it measures itself (intrinsic, calldata, the refund transfer). */
+const SAFE_PAID_BASE_GAS = 120_000n
+/** When the gas price cannot be read: 0.05 gwei, above Base's usual price. */
+const FALLBACK_GAS_PRICE = 50_000_000n
+/** Owner transactions under the sponsorship limits. Not activations: #82's subsidy and the failure budget hold those. */
+const SPONSORED_KINDS = new Set<OwnerKind>(['transfer', 'stop', 'renew'])
+/** Activations that land per Safe in any 24 h (Sol review #3); the reserve top-up itself is #82's subsidy model. */
+export const ACTIVATIONS_PER_DAY = 3
+/** A renewal's gas: near Base's per-tx cap, and never Safe-paid (no room for safeTxGas; a renewal is not an exit). */
+const RENEW_TX_GAS = 16_500_000n
+/**
+ * Sol review round 2 #4: one more position may be minted only while the admitted ones fit in one bounded read
+ * (MAX_INVENTORY), so every admitted position stays reachable by withdrawals and Stop. An account from before the
+ * record (no list) is not limited here.
+ */
+export function mintAllowed(admitted: readonly string[] | undefined): boolean {
+  return !admitted || admitted.length < MAX_INVENTORY
+}
+
+/** An activation's exec gas, reserved against the activation budget: Base's per-tx cap (EIP-7825), an upper bound. */
+const ACTIVATE_TX_GAS = 16_777_216n
+/** The Safe factory call, reserved with a sponsored transaction of a Safe not deployed yet. */
+const DEPLOY_GAS = 500_000n
 
 /**
  * Every `HttpError` message is either a static string or built only from values this operator
@@ -245,6 +283,7 @@ const SAFE_ERROR_MESSAGE = {
   OPERATOR_ERROR: 'the operator hit an unexpected error handling this request',
   OWNER_CHECK_UNAVAILABLE: 'the signature could not be checked right now; try again in a moment',
   OWNER_FAILURE_BUDGET: `${MAX_OWNER_FAILURES_PER_DAY} activations of this account failed in 24 hours; withdrawals still work, starting again waits`,
+  OPERATOR_BUSY: 'the operator is busy, try again in a moment',
 } as const
 
 export class HttpError extends Error {
@@ -281,6 +320,14 @@ export type OperatorConfig = {
   depth?: NonNullable<PolicyVersion['depth']>
   /** Spec 006 (otto/mamoru#147): engine settings per account, pulled from D1. Absent: capUsdc and depth above, as before. */
   settings?: Pick<EngineSettingsSource, 'forAccount' | 'status'>
+  /**
+   * otto/mamoru#140 (part2 #5): independent providers (MAMORU_RPC_TRUSTED) that must agree, at least two of them,
+   * before an owner signature the off-chain verifier refused is ever paid for. Absent or fewer than two: such a
+   * signature is never sent.
+   */
+  trustedClients?: { label: string; client: PublicClient }[]
+  /** otto/mamoru#140 (part2 #6): what the relayer pays of owner transfers and stops; tests and #147 phase 2 settings only, held to SPONSOR_BOUNDS. Absent: DEFAULT_SPONSOR. */
+  sponsor?: SponsorPolicy
 }
 
 type OwnerKind = 'activate' | 'transfer' | 'stop' | 'renew'
@@ -302,6 +349,21 @@ type Prepared = {
   meta?: { amountUsdc: string; asset?: string; to: Hex }
   /** activate (spec 006): the cap, in base units, that the owner's summary named. A later raise of the cap never lets more in under this signature. */
   capUsdc?: string
+  /** activate (otto/mamoru#140 part2 #3): the account's owner generation it was prepared at; any owner change since makes it stale. */
+  gen?: number
+  /**
+   * activate (part2 #7): a session key generated for this prepare, for an account that has none yet. It is written
+   * to the account only once the owner's signature over these grants is proven.
+   */
+  sessionKey?: Hex
+  /** transfer/stop/renew (part2 #6): what the relayer's payment is counted as; absent when the SafeTx refunds the fee from the Safe. */
+  sponsorKind?: SponsoredKind
+  /** stop: it only revokes grants (no position, swap or quote), so it may fall back to an emergency revocation. */
+  revokeOnly?: boolean
+  /** part2 #7: the Safe, lower case: open prepares are bounded per Safe, whatever accountKey asks. */
+  safe?: string
+  /** Safe-paid (`tx.refund`): the fee the summary named, in wei; the Safe must hold it when the transaction is sent. */
+  feeWei?: string
 }
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
@@ -489,9 +551,27 @@ export class Operator {
     return false
   }
 
+  /**
+   * otto/mamoru#140 (part2 #4): an account that ever ran before admitted positions were recorded gets, once, the
+   * positions its Safe holds now as admitted: before this release only Mamoru put positions there. A Safe holding more
+   * than MAX_INVENTORY gets the first MAX_INVENTORY, with an alert.
+   */
+  private async seedAdmitted(acc: AccountState): Promise<void> {
+    if (acc.admittedTokenIds) return
+    const r = await readSafe(this.client, acc.ctx.address as Address)
+    if (acc.admittedTokenIds) return
+    if ((r.positionCount ?? 0) > MAX_INVENTORY) logErr('[alert]', `${acc.accountKey} holds ${r.positionCount} position NFTs: admitted seeded from the first ${MAX_INVENTORY} only`)
+    acc.admittedTokenIds = r.positions.map((p) => p.tokenId.toString())
+    this.store.save()
+    console.log(`[admitted] ${acc.accountKey} seeded with ${acc.admittedTokenIds.length} position(s)`)
+  }
+
   /** Restarts the engine loop of every account that was active. */
   resume(): void {
     for (const acc of Object.values(this.store.state.accounts)) if (acc.active) this.startLoop(acc)
+    for (const acc of Object.values(this.store.state.accounts)) {
+      if (acc.trusted && !acc.admittedTokenIds) void this.lock(acc.accountKey).run(() => this.seedAdmitted(acc)).catch((e) => logErr(`[admitted] ${acc.accountKey} not seeded:`, e))
+    }
     // An approval a restart caught mid-attempt: once its execTransaction was out, the receipt settles it; before
     // that it is simply armed again.
     for (const acc of Object.values(this.store.state.accounts)) {
@@ -585,6 +665,23 @@ export class Operator {
       throw new HttpError(409, 'ACCOUNT_MISMATCH', 'accountKey is bound to another Safe')
     }
     return { acc, live }
+  }
+
+  /**
+   * otto/mamoru#140 (part2 #7): the account written into the state file. Prepares run on a readOnly view of an
+   * account never seen before; it is stored once an owner signature for it is proven (submit), so a caller that only
+   * prepares never grows the state file. The record already stored wins over the view.
+   */
+  private persist(acc: AccountState): AccountState {
+    const have = this.store.state.accounts[acc.accountKey]
+    if (have) return have
+    // Synchronous with the write: two first submits for one Safe under two accountKeys can both pass account()'s
+    // check across their awaits; only one is stored (Sol review #1).
+    const safe = acc.ctx.address.toLowerCase()
+    if (Object.values(this.store.state.accounts).some((a) => a.ctx.address.toLowerCase() === safe)) throw new HttpError(409, 'ACCOUNT_MISMATCH', 'this Safe is already known under another accountKey')
+    this.store.state.accounts[acc.accountKey] = acc
+    this.store.save()
+    return acc
   }
 
   /** The per-account cap at Start (otto/mamoru#127): from the account's engine settings (spec 006), else configured, else the code default. */
@@ -791,7 +888,7 @@ export class Operator {
     void this.refreshChainUsage(acc).catch((e) => logErr(`[usage] ${acc.accountKey}`, e))
     // The app is open on this account: an armed activation is watched at full pace again.
     if (acc.armed) this.armSeen.set(acc.accountKey, Date.now())
-    const r = await this.readSafeCached(acc.accountKey, live.safe, fresh)
+    const r = await this.readSafeCached(acc, live.safe, fresh)
     return {
       address: live.safe,
       deployed: r.deployed,
@@ -808,7 +905,7 @@ export class Operator {
       approval: this.approvalView(acc),
       idle: idleTokens(r),
       engine: this.engineView(acc),
-      positions: r.positions.map((p) => ({
+      positions: this.sizingPositions(acc, r).map((p) => ({
         tokenId: p.tokenId.toString(),
         pool: p.pool,
         liquidity: p.liquidity.toString(),
@@ -831,9 +928,35 @@ export class Operator {
    * balance read before that move, even one the invalidation raced with. Every other caller of readSafe
    * (prepare, submit, renew) reads live: only the display read funding serves is cached.
    */
-  private async readSafeCached(accountKey: string, safe: Address, fresh: boolean): Promise<SafeRead> {
+  private async readSafeCached(acc: AccountState, safe: Address, fresh: boolean): Promise<SafeRead> {
     const maxAge = fresh ? FUNDING_FRESH_READ_MS : (this.cfg.rpcBudget?.over(Date.now()) ?? false) ? FUNDING_STALE_MS : FUNDING_FRESH_MS
-    return this.fundingCache.get(fundingCacheKey(accountKey, safe), maxAge, () => readSafe(this.client, safe))
+    return this.fundingCache.get(fundingCacheKey(acc.accountKey, safe), maxAge, () => this.readOf(acc, safe))
+  }
+
+  /** readSafe with the positions Mamoru admitted on this account named (otto/mamoru#140 part2 #4: see MAX_INVENTORY). */
+  private async readOf(acc: AccountState, safe: Address): Promise<SafeRead> {
+    // The ids as they were when the read started: an id admitted while it was in flight (onMinted) was not looked
+    // for, and is never pruned on this read's word.
+    const asked = acc.admittedTokenIds ? [...acc.admittedTokenIds] : undefined
+    const r = await readSafe(this.client, safe, asked ? { admitted: asked.map((id) => BigInt(id)) } : {})
+    // Sol review #6: the record holds what the Safe still owns, so it stays bounded. Pruned from a read that saw every
+    // NFT (enumerated) or checked the admitted ids one by one (ownerOf), never from a capped enumeration.
+    const sawAll = r.byId ? (asked?.length ?? 0) <= MAX_INVENTORY : (r.positionCount ?? 0) <= MAX_INVENTORY
+    if (asked && acc.admittedTokenIds && sawAll && this.store.state.accounts[acc.accountKey] === acc) {
+      const owned = new Set([...(r.ownedIds ?? r.positions.map((p) => p.tokenId))].map((id) => id.toString()))
+      const wasAsked = new Set(asked)
+      // One synchronous step from the current record: only ids this read looked for and did not find go, and only
+      // when the read's block is not before the id's mint (Sol review round 2 #3: a lagging provider never prunes it).
+      const before = (id: string) => acc.admittedAt?.[id] !== undefined && r.block < BigInt(acc.admittedAt[id]!)
+      const kept = acc.admittedTokenIds.filter((id) => !wasAsked.has(id) || owned.has(id) || before(id))
+      if (kept.length !== acc.admittedTokenIds.length) {
+        const gone = new Set(acc.admittedTokenIds.filter((id) => !kept.includes(id)))
+        acc.admittedTokenIds = kept
+        if (acc.admittedAt) acc.admittedAt = Object.fromEntries(Object.entries(acc.admittedAt).filter(([id]) => !gone.has(id)))
+        this.store.save()
+      }
+    }
+    return r
   }
 
   /**
@@ -902,14 +1025,90 @@ export class Operator {
   }
 
   private async hold(acc: AccountState, live: LiveAccount, kind: OwnerKind, calls: Parameters<typeof ownerSafeTx>[0], summary: string[], extra: Partial<Prepared> = {}): Promise<OwnerTxToSign> {
-    const { nonce } = await readSafeNonce(this.client, live.safe)
-    const tx = ownerSafeTx(calls, nonce)
+    const { nonce, deployed } = await readSafeNonce(this.client, live.safe)
+    // otto/mamoru#140 (part2 #6): past the sponsorship limits the Safe pays its own fee, and the summary says so.
+    const fee = await this.feePlan(acc, live, kind, extra.revokeOnly === true, deployed)
+    const tx: SafeTx = fee.refund ? { ...ownerSafeTx(calls, nonce), refund: fee.refund } : ownerSafeTx(calls, nonce)
     const safeTxHash = safeTxHashOf(live, tx)
     const prepareId = toHex(randomBytes(16)).slice(2)
     const expires = Date.now() + PREPARE_TTL_MS
     for (const [id, p] of this.prepared) if (p.expires < Date.now()) this.prepared.delete(id)
-    this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra })
-    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary, expiresAt: new Date(expires).toISOString(), prepareId }
+    // part2 #7: a few open prepares per account and kind of exit (the oldest goes; a Stop never evicts, nor is evicted
+    // by, anything else), and a ceiling over all of them that a Stop is never refused by.
+    const stop = kind === 'stop'
+    const safe = live.safe.toLowerCase()
+    const mine = [...this.prepared.values()].filter((p) => (p.safe ?? '') === safe && (p.kind === 'stop') === stop).sort((a, b) => a.expires - b.expires)
+    for (const p of mine.slice(0, Math.max(0, mine.length - PREPARED_PER_ACCOUNT + 1))) this.prepared.delete(p.prepareId)
+    if (!stop && this.prepared.size >= PREPARED_MAX) throw safeHttpError(503, 'OPERATOR_BUSY')
+    this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
+    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId }
+  }
+
+  // ---- owner side: who pays (otto/mamoru#140 part2 #6) -----------------------
+
+  private sponsorPolicy(): SponsorPolicy {
+    return this.cfg.sponsor ? boundedSponsor(this.cfg.sponsor) : DEFAULT_SPONSOR
+  }
+
+  /** This account's sponsored owner transactions of the last 24 h, pruned in place, and every account's. */
+  private sponsoredOf(acc: AccountState, at: number): { own: SponsorEntry[]; all: SponsorEntry[] } {
+    const own = recentSponsored(acc.sponsored, at)
+    if (acc.sponsored && own.length !== acc.sponsored.length) acc.sponsored = own
+    const all = Object.values(this.store.state.accounts).flatMap((a) => (a.accountKey === acc.accountKey ? own : recentSponsored(a.sponsored, at)))
+    // A view not stored yet (an account's first prepare) has entries of its own only once stored.
+    return { own, all: this.store.state.accounts[acc.accountKey] ? all : [...all, ...own] }
+  }
+
+  private async gasPrice(): Promise<bigint> {
+    try {
+      const p = await this.client.getGasPrice()
+      return p > 0n ? p : FALLBACK_GAS_PRICE
+    } catch {
+      return FALLBACK_GAS_PRICE
+    }
+  }
+
+  private gasOf(kind: OwnerKind | SponsoredKind): bigint {
+    return kind === 'renew' ? RENEW_TX_GAS : OWNER_TX_GAS
+  }
+
+  /**
+   * Whether the relayer pays this owner transaction or the Safe does. Within the sponsorship limits the relayer pays,
+   * as before, and the payment is counted (chargeSponsor, before anything is sent). Past them:
+   * - a transfer or a Stop: the SafeTx refunds the fee from the Safe's ETH to the relayer, at no more than twice the
+   *   current gas price, so an exit is never locked behind a limit while the Safe can pay for itself;
+   * - a revoke-only Stop whose Safe cannot pay: an emergency revocation, sponsored up to EMERGENCY_REVOKES_PER_DAY per
+   *   account and counted; it does no work but revoking, so the exemption buys nothing else;
+   * - a renewal: refused until the limit frees (it is not an exit, and too large to be Safe-paid).
+   * Anything else that cannot be paid is told what to send or when sponsorship frees up.
+   */
+  private async feePlan(acc: AccountState, live: LiveAccount, kind: OwnerKind, revokeOnly: boolean, deployed: boolean): Promise<{ refund?: NonNullable<SafeTx['refund']>; feeWei?: bigint; line?: string; sponsorKind?: SponsoredKind }> {
+    if (!SPONSORED_KINDS.has(kind)) return {}
+    const price = await this.gasPrice()
+    const at = Date.now()
+    const { own, all } = this.sponsoredOf(acc, at)
+    const policy = this.sponsorPolicy()
+    const no = sponsorRefusal(policy, own, all, kind as SponsoredKind, this.gasOf(kind) * price, at)
+    if (!no) return { sponsorKind: kind as SponsoredKind }
+    const until = new Date(no.until).toISOString()
+    if (kind === 'renew') throw new HttpError(429, no.code, `Mamoru has paid for as many renewals as it can today; renew after ${until}`)
+    const gasPrice = price * 2n
+    // Sol review round 2 #2: a Safe not deployed yet is deployed by the relayer first; the refund pays that back too.
+    const baseGas = SAFE_PAID_BASE_GAS + (deployed ? 0n : DEPLOY_GAS)
+    const feeWei = (this.gasOf(kind) + baseGas) * gasPrice
+    // An undeployed Safe can pay too: ETH sent to its address is there once the relayer deploys it.
+    const eth = await this.client.getBalance({ address: live.safe })
+    if (eth >= feeWei) {
+      return {
+        refund: { safeTxGas: this.gasOf(kind), baseGas, gasPrice, refundReceiver: this.relayer.address as Address },
+        feeWei,
+        line: `Your Safe pays this transaction's network fee to Mamoru's relayer, at most about ${fmtUnits(feeWei, 18)} ETH (sponsored transactions are used up until ${until})`,
+      }
+    }
+    if (kind === 'stop' && revokeOnly && !sponsorRefusal(policy, own, all, 'revoke', 0n, at)) return { sponsorKind: 'revoke' }
+    // Rounded up to what fmtUnits shows (6 decimals), so the amount named is always enough.
+    const short = ((feeWei - eth + 999_999_999_999n) / 1_000_000_000_000n) * 1_000_000_000_000n
+    throw new HttpError(429, no.code, `Mamoru has paid for as many of this account's transactions as it can today. Send at least ${fmtUnits(short, 18)} ETH to your Safe ${live.safe} so it pays its own network fee, or try again after ${until}`)
   }
 
   /**
@@ -959,11 +1158,10 @@ export class Operator {
    * validity, with the Safe transaction that enables them. A first approval and a renewal sign the same thing.
    */
   private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, only?: string[]) {
-    if (!acc.sessionKey) {
-      acc.sessionKey = generatePrivateKey()
-      this.store.save()
-    }
-    const sessionKey = privateKeyToAccount(acc.sessionKey).address
+    // otto/mamoru#140 (part2 #7): a new key stays with the prepare (Prepared.sessionKey) until the owner's signature
+    // over these grants is proven; nothing is written for an account that only prepares.
+    const newKey = acc.sessionKey ? undefined : generatePrivateKey()
+    const sessionKey = privateKeyToAccount(acc.sessionKey ?? newKey!).address
     // Sized at the account cap, not the observed deposit: the same signature bounds any deposit up to the cap,
     // so the owner can sign before any USDC arrives (armed activation).
     const prices = Object.fromEntries(
@@ -1000,7 +1198,7 @@ export class Operator {
       ? { keys: exact, grants: exactGrants, batch: activationBatch(live, exactGrants, acc.revoked, { trust: !acc.trusted }) }
       : await this.fitActivation(live, policy, allKeys, build, acc, r.block)
     const stored = grants.map((g, i) => ({ name: keys[i]!, grant: g, permissionId: batch.permissionIds[i]! }))
-    return { sessionKey, caps, stored, batch }
+    return { sessionKey, caps, stored, batch, ...(newKey ? { newKey } : {}) }
   }
 
   /**
@@ -1015,10 +1213,10 @@ export class Operator {
 
   private async planRenew(ctx: AccountContext): Promise<OwnerTxToSign> {
     this.assertLive()
-    const { acc, live } = this.account(ctx)
+    const { acc, live } = this.account(ctx, { readOnly: true })
     await this.settleRenewals(acc)
     this.assertRenewable(acc)
-    const r = await readSafe(this.client, live.safe)
+    const r = await this.readOf(acc, live.safe)
     const policy = this.policyOf(acc)
     // Grants the account lacks are added by an approval of their own, unless the renewal is due: then the renewal goes
     // first (it revokes every grant the account has, and the added ones would be revoked with them) and the missing
@@ -1547,26 +1745,38 @@ export class Operator {
     if (no) throw new HttpError(409, no.code, no.message)
   }
 
-  async prepareActivate(ctx: AccountContext): Promise<OwnerTxToSign> {
+  /**
+   * otto/mamoru#140 (part2 #3): planned under the account lock from the first read to the stored prepare, so no
+   * activation, stop or renewal of the account lands in between; the prepare carries the account's owner
+   * generation, and submit and execute refuse it once that has moved (ACTIVATION_STALE).
+   */
+  prepareActivate(ctx: AccountContext): Promise<OwnerTxToSign> {
+    return this.lock(ctx.accountKey).run(() => this.planActivate(ctx))
+  }
+
+  private async planActivate(ctx: AccountContext): Promise<OwnerTxToSign> {
     this.assertLive()
-    const { acc, live } = this.account(ctx)
+    const { acc, live } = this.account(ctx, { readOnly: true })
     // otto/mamoru#140: what is enabled on the Safe now decides a Start (I1, I3): an engine on a revoked grant is
     // stopped, grants revoked since leave `superseded`, untracked ones join it.
     // Refused while that read cannot be made (a failed read, a provider behind the account): never decided blind.
-    const checked = await this.lock(acc.accountKey).run(() => this.enforceGrants(acc))
+    // Already under the account lock (prepareActivate): called directly, the lock is not re-entrant.
+    const checked = await this.enforceGrants(acc)
     if (acc.active) throw new HttpError(409, 'ALREADY_ACTIVE', 'the engine is already active for this account')
     if (!checked) throw new HttpError(503, 'GRANT_CHECK_UNAVAILABLE', 'the approvals on your Safe could not be read just now: nothing was changed, try again in a minute')
     // An activation does not revoke grants left enabled (a partly revoked renewal's survivors, a renewal that landed
     // after a stop): they would stay beside the new approval. A stop revokes them first.
     if (acc.superseded?.length) throw new HttpError(409, 'STOP_FIRST', 'earlier Mamoru grants are still enabled on your Safe: stop first to revoke them, then start')
-    const r = await readSafe(this.client, live.safe)
+    const gen = acc.gen ?? 0
+    const r = await this.readOf(acc, live.safe)
     // One cap for the whole prepare (spec 006): the check, the grants, the summary and the stored ceiling all use this
     // value, so a settings pull in the middle cannot make them disagree.
     const cap = this.capFor(acc)
     if (r.usdc > cap) throw depositOverCap(r.usdc, cap)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
     const policy = this.cfg.policy
-    const { sessionKey, caps, stored, batch } = await this.approval(acc, live, policy, r, cap)
+    const { sessionKey, caps, stored, batch, newKey } = await this.approval(acc, live, policy, r, cap)
+    const bind = { gen, ...(newKey ? { sessionKey: newKey } : {}) }
     // What this activation actually enables, not what the policy could: a gas-capped activation (fitActivation)
     // can leave manage-any/convert-any out of `stored`, and the summary must not claim authority that is not
     // in `batch.calls`. manage-any's decrease/collect/burn take any tokenId the Safe owns (grants.ts), in any
@@ -1591,7 +1801,7 @@ export class Operator {
         ...this.limitLines(stored, policy),
         paidToSafe,
       ]
-      return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored, capUsdc: cap.toString() })
+      return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored, capUsdc: cap.toString(), ...bind })
     }
     const summary = [
       `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
@@ -1604,7 +1814,7 @@ export class Operator {
         : []),
       paidToSafe,
     ]
-    return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored, capUsdc: cap.toString() })
+    return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored, capUsdc: cap.toString(), ...bind })
   }
 
   /** Planned under the account lock: an in-flight engine op (reduce, re-range) lands first, so the plan sees its liquidity. */
@@ -1614,7 +1824,7 @@ export class Operator {
 
   private async planTransfer(ctx: AccountContext, req: TransferRequest): Promise<TransferPlan> {
     this.assertLive()
-    const { acc, live } = this.account(ctx)
+    const { acc, live } = this.account(ctx, { readOnly: true })
     if (!req || typeof req.to !== 'string' || !isAddress(req.to)) throw new HttpError(400, 'BAD_REQUEST', 'to must be an address')
     let amount: bigint
     try {
@@ -1632,7 +1842,7 @@ export class Operator {
     const to = getAddress(req.to)
     if (to.toLowerCase() === live.safe.toLowerCase()) throw new HttpError(400, 'BAD_REQUEST', 'recipient is the Safe itself')
     // An undeployed Safe can still pay out: the relayer deploys it right before the owner transfer (executeOwner).
-    const r = await readSafe(this.client, live.safe)
+    const r = await this.readOf(acc, live.safe)
     if (!r.deployed && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
     const slip = this.policyOf(acc).execution.slippageBps
     let reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[] = []
@@ -1723,7 +1933,8 @@ export class Operator {
    */
   private async reducePlan(acc: AccountState, safe: Address, r: SafeRead, amount: bigint, slip: number): Promise<{ reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[]; swaps: SwapBack[] }> {
     // A position can be worth collecting at 0 current liquidity if a past decrease left tokensOwed uncollected.
-    const open = r.positions.filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n)
+    // otto/mamoru#140 (part2 #4): only the positions Mamoru admitted, never dust or ones sent to the Safe unasked.
+    const open = this.sizingPositions(acc, r).filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n)
     const value = open.reduce((s, p) => s + positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96), 0n)
     const need = amount - r.usdc
     // otto/mamoru#140 (part1 #4): no open position is not "nothing to withdraw" — idle non-USDC tokens (left by an
@@ -1749,6 +1960,22 @@ export class Operator {
       if (target >= value) throw new HttpError(409, 'INSUFFICIENT_FUNDS', `the Safe can free about ${fmtUsdc(r.usdc + freed)} USDC, less than ${fmtUsdc(amount)}`)
       margin = (margin * 120n) / 100n
     }
+  }
+
+  /**
+   * otto/mamoru#140 (part2 #4): the positions a withdrawal sizes from and funding shows. Anyone can mint or send a
+   * position NFT to a Safe; only the ones Mamoru's engine minted on it count (`admittedTokenIds`). An account from
+   * before that record (`admittedTokenIds` absent) counts every position worth more than dust. Largest first, at
+   * most MAX_SIZING_POSITIONS.
+   */
+  private sizingPositions(acc: AccountState, r: SafeRead): PoolPosition[] {
+    const admitted = acc.admittedTokenIds ? new Set(acc.admittedTokenIds) : null
+    return r.positions
+      .filter((p) => (admitted ? admitted.has(p.tokenId.toString()) : positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96) >= POSITION_DUST_USDC))
+      .map((p) => ({ p, v: positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96) }))
+      .sort((a, b) => (a.v === b.v ? 0 : a.v > b.v ? -1 : 1))
+      .slice(0, MAX_SIZING_POSITIONS)
+      .map((x) => x.p)
   }
 
   /** What decreaseLiquidity + collect of these positions returns to the Safe, per token, simulated from the Safe at `block`. */
@@ -1842,29 +2069,107 @@ export class Operator {
     return { amountIn, amountOutMinimum: minOut(out, slip) }
   }
 
-  prepareStop(ctx: AccountContext): Promise<OwnerTxToSign> {
-    return this.lock(ctx.accountKey).run(() => this.planStop(ctx))
+  /**
+   * A revoke-only Stop is planned outside the account lock: it never waits behind another prepare or an engine review.
+   * It only reads the grants (synchronously) and the Safe nonce; a renewal landing meanwhile leaves grants it did not
+   * name, which the stop records as superseded for the next Stop (afterOwner), as any stop does.
+   */
+  prepareStop(ctx: AccountContext, opts: { revokeOnly?: boolean } = {}): Promise<OwnerTxToSign> {
+    if (opts.revokeOnly) return this.planStop(ctx, opts)
+    return this.lock(ctx.accountKey).run(() => this.planStop(ctx, opts))
   }
 
-  private async planStop(ctx: AccountContext): Promise<OwnerTxToSign> {
+  /** Every grant enabled on the Safe: the ones the engine uses, the ones a renewal left behind, and those of a renewal whose receipt is not known yet, enabled or not. */
+  private stopRevokes(acc: AccountState): Hex[] {
+    return [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc)])]
+  }
+
+  /**
+   * otto/mamoru#140 (part2 #4): Stop. The engine's grants are revoked, and up to MAX_STOP_POSITIONS positions are
+   * closed and swapped back to USDC, largest first (the ones Mamoru admitted before any other); dust is left alone,
+   * and what is left over is closed by the next Stop. `revokeOnly` (or a full plan that cannot be built: a read, a
+   * quote or a simulation failing) revokes the grants and nothing else: it reads no position, price or quote, so an
+   * attacker who fills the Safe with position NFTs can never keep the owner from revoking the engine.
+   */
+  private async planStop(ctx: AccountContext, opts: { revokeOnly?: boolean } = {}): Promise<OwnerTxToSign> {
     this.assertLive()
-    const { acc, live } = this.account(ctx)
-    // A full sweep first (already under the account's lock): an id the owner enabled again after it was revoked, not
-    // yet reached by the engine loop's rotating window, moves to `superseded` here and is revoked by this stop.
+    const { acc, live } = this.account(ctx, { readOnly: true })
+    // otto/mamoru#140 (#60): every id the account ever knew is read on chain first, so one the owner enabled again
+    // after it was revoked is revoked by this stop too. A full Stop runs under the account lock: the full sweep, which
+    // records what it finds. A revoke-only Stop runs outside it: a read that changes nothing, its finds added to this
+    // stop's revocations. Unreadable: refused (GRANT_CHECK_UNAVAILABLE), like any read a Stop needs.
+    if (opts.revokeOnly) {
+      const again = await this.enabledElsewhere(acc)
+      if (!again) throw new HttpError(503, 'GRANT_CHECK_UNAVAILABLE', 'the approvals on your Safe could not be read just now: nothing was changed, try again in a minute')
+      return this.planRevokeOnly(acc, live, [...new Set([...this.stopRevokes(acc), ...again])])
+    }
     if (!(await this.enforceGrants(acc))) throw new HttpError(503, 'GRANT_CHECK_UNAVAILABLE', 'the approvals on your Safe could not be read just now: nothing was changed, try again in a minute')
-    const r = await readSafe(this.client, live.safe)
+    const revokes = this.stopRevokes(acc)
+    try {
+      return await this.planFullStop(acc, live, revokes)
+    } catch (e) {
+      if (!revokes.length || (e instanceof HttpError && ['NOT_DEPLOYED', 'NOTHING_TO_STOP', 'OPERATOR_BUSY'].includes(e.code))) throw e
+      logErr(`[owner] ${acc.accountKey} stop: the full plan could not be built, revoking only:`, e)
+      return this.planRevokeOnly(acc, live, revokes, true)
+    }
+  }
+
+  /**
+   * The ids this account knows besides the ones a Stop already revokes (stopRevokes) that read enabled now: revoked
+   * ones the owner enabled again, an owner op's grants. A read only, nothing recorded (it runs outside the account
+   * lock); null when it cannot be read.
+   */
+  private async enabledElsewhere(acc: AccountState): Promise<Hex[] | null> {
+    const low = (id: string) => id.toLowerCase()
+    const known = new Set(this.stopRevokes(acc).map(low))
+    const ids = new Map<string, Hex>()
+    for (const id of [
+      ...(acc.armed?.grants ?? []).map((g) => g.permissionId),
+      ...acc.ops.flatMap((o) => [...((o as StoredOp).ownerGrants ?? []).map((g) => g.permissionId), ...((o as StoredOp).revokes ?? [])]),
+      ...acc.revoked,
+    ]) {
+      if (!known.has(low(id)) && !ids.has(low(id))) ids.set(low(id), id)
+    }
+    const list = [...ids.values()]
+    if (!list.length) return []
+    const block = await this.headAtLeast(acc, 0n)
+    if (block === null) return null
+    const on = await this.enabledAt(acc, list, block)
+    return on ? list.filter((_, i) => on[i]) : null
+  }
+
+  private async planRevokeOnly(acc: AccountState, live: LiveAccount, revokes: Hex[], fallback = false): Promise<OwnerTxToSign> {
+    const { deployed } = await readSafeNonce(this.client, live.safe)
+    if (!deployed) throw new HttpError(409, 'NOT_DEPLOYED', 'the Safe is not deployed yet')
+    if (!revokes.length) throw new HttpError(409, 'NOTHING_TO_STOP', 'no grant to revoke')
+    const calls = stopBatch({ account: live.safe, permissionIds: revokes, positions: [], deadline: 0n })
+    const summary = [
+      `Revoke the engine's ${revokes.length} session grant(s)`,
+      fallback ? 'Your positions could not be read just now: they stay in your Safe as they are, and Stop again closes them' : 'Your positions and tokens stay in your Safe as they are; Stop again closes them',
+    ]
+    return this.hold(acc, live, 'stop', calls, summary, { revokes, revokeOnly: true })
+  }
+
+  private async planFullStop(acc: AccountState, live: LiveAccount, revokes: Hex[]): Promise<OwnerTxToSign> {
+    const r = await this.readOf(acc, live.safe)
     if (!r.deployed) throw new HttpError(409, 'NOT_DEPLOYED', 'the Safe is not deployed yet')
     const slip = this.policyOf(acc).execution.slippageBps
     const keep = BigInt(10_000 - slip)
-    const positions: LivePosition[] = r.positions.map((p) => ({ tokenId: p.tokenId, liquidity: p.liquidity, amount0Min: (p.amount0 * keep) / 10_000n, amount1Min: (p.amount1 * keep) / 10_000n }))
-    const got = positions.length ? await this.simulateCollect(live.safe, positions.map((lp, i) => ({ lp, pos: r.positions[i]! })), r.block) : {}
+    const admitted = new Set(acc.admittedTokenIds ?? [])
+    const worth = (p: PoolPosition) => positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96)
+    // Only what Mamoru admitted, once that is recorded: a position sent to the Safe unasked is never part of a Stop, so
+    // it cannot make the unwind revert and keep the admitted ones from being closed.
+    const ranked = r.positions
+      .filter((p) => (p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n) && worth(p) >= POSITION_DUST_USDC && (!acc.admittedTokenIds || admitted.has(p.tokenId.toString())))
+      .sort((a, b) => (worth(a) === worth(b) ? 0 : worth(a) > worth(b) ? -1 : 1))
+    const chosen = ranked.slice(0, MAX_STOP_POSITIONS)
+    const left = ranked.length - chosen.length
+    const positions: LivePosition[] = chosen.map((p) => ({ tokenId: p.tokenId, liquidity: p.liquidity, amount0Min: (p.amount0 * keep) / 10_000n, amount1Min: (p.amount1 * keep) / 10_000n }))
+    const got = positions.length ? await this.simulateCollect(live.safe, positions.map((lp, i) => ({ lp, pos: chosen[i]! })), r.block) : {}
     const held: Record<string, bigint> = {}
     for (const [t, v] of Object.entries(r.tokens)) if (t !== 'USDC' && v > 0n) held[t] = v + 1n
     for (const [t, v] of Object.entries(got)) if (t !== 'USDC') held[t] = (held[t] ?? 1n) + v
     const swaps = await this.swapQuotes(acc, held, r.block, slip)
-    // Every grant enabled on the Safe: the ones the engine uses, the ones a renewal left behind, and those of a
-    // renewal whose receipt is not known yet, enabled or not.
-    const revokes = [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc)])]
     if (!revokes.length && !positions.length && !swaps.length) throw new HttpError(409, 'NOTHING_TO_STOP', 'no grant, no position and nothing to swap back')
     const deadline = (await this.client.getBlock()).timestamp + 1800n
     const calls = [
@@ -1874,9 +2179,10 @@ export class Operator {
     await this.checkFromSafe(live.safe, calls, r.block, undefined)
     const summary = [
       ...(revokes.length ? [`Revoke the engine's ${revokes.length} session grant(s)`] : []),
-      ...r.positions.map((p) => `Close and burn position #${p.tokenId} (${poolLabel(p.pool)})`),
+      ...chosen.map((p) => `Close and burn position #${p.tokenId} (${poolLabel(p.pool)})`),
       ...swaps.map((sw) => `Swap ${sw.amountIn} ${sw.token} units to at least ${fmtUsdc(sw.amountOutMinimum)} USDC`),
       'Everything stays in your Safe as USDC',
+      ...(left > 0 ? [`${left} more position(s) stay in your Safe: Stop again to close them`] : []),
     ]
     return this.hold(acc, live, 'stop', calls, summary, { revokes })
   }
@@ -1885,7 +2191,10 @@ export class Operator {
 
   async submit(ctx: AccountContext, kind: OwnerKind, body: OwnerSignature): Promise<OpView> {
     this.assertLive()
-    const { acc, live } = this.account(ctx)
+    // otto/mamoru#140 (part2 #7): an account never seen before is stored only once its owner's signature is proven.
+    const view = this.account(ctx, { readOnly: true })
+    const live = view.live
+    let acc = view.acc
     const p = body && typeof body.prepareId === 'string' ? this.prepared.get(body.prepareId) : undefined
     if (!p || p.accountKey !== acc.accountKey || p.kind !== kind) throw new HttpError(404, 'PREPARE_UNKNOWN', 'no such prepared transaction for this account')
     if (p.expires < Date.now()) {
@@ -1900,21 +2209,46 @@ export class Operator {
       logErr(`[owner] OWNER_SIG_UNPARSEABLE ${acc.accountKey} ${kind} ${JSON.stringify(bodyShape(body))}:`, e)
       throw safeHttpError(400, 'BAD_SIGNATURE')
     }
-    // The off-chain check mirrors the on-chain verifier and the chain is the ground truth: a "no" from the mirror is
-    // never the reason to refuse an owner. When it says no, the exact sequence the relayer would send is simulated
-    // with this signature. If that succeeds the signature is valid on chain and the request goes on; if it reverts
-    // the signature is forged or wrong; if nothing can answer, the request is refused for now and can be sent again.
+    // otto/mamoru#140 (part2 #5): the off-chain check mirrors the on-chain verifier for this account's passkey. When
+    // it says no, one provider's simulation is not enough to pay for the transaction (a dishonest one would say yes
+    // to anything): at least two independent providers of MAMORU_RPC_TRUSTED must each run the exact sequence the
+    // relayer would send and see execTransaction return true, and none may see it revert. Without that pool the
+    // signature is refused; a pool that cannot answer is a retryable 503.
     if (!(await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn))) {
-      const truth = await this.groundTruth(live, execData(p.tx, signature))
+      const truth = await this.quorum(live, execData(p.tx, signature))
       if (truth.outcome === 'unavailable') {
-        logErr(`[owner] ${acc.accountKey} ${kind} signature not verified off chain and no simulation available, retryable:`, truth.why)
+        logErr(`[owner] ${acc.accountKey} ${kind} signature not verified off chain and not proven by the trusted providers, retryable:`, truth.why)
         throw safeHttpError(503, 'OWNER_CHECK_UNAVAILABLE')
       }
       if (truth.outcome === 'revert') {
         this.prepared.delete(p.prepareId)
         throw new HttpError(400, 'BAD_SIGNATURE', 'the passkey signature does not match this account and transaction')
       }
+      if (truth.outcome === 'unproven') {
+        this.prepared.delete(p.prepareId)
+        // The shape is closed and pre-vetted (see mirrorMismatch): embedded verbatim, not cut by logErr's redaction.
+        logErr(`[alert] ${acc.accountKey} ${kind} OWNER_SIG_UNVERIFIED: off-chain check refused a signature one provider accepts; not sent. shape ${JSON.stringify(bodyShape(body))}`, undefined)
+        throw new HttpError(400, 'OWNER_SIG_UNVERIFIED', 'the signature could not be verified for this account')
+      }
       this.mirrorMismatch(acc, kind, bodyShape(body))
+    }
+    acc = this.persist(acc)
+    if (kind === 'activate') {
+      // part2 #3: an activation prepared before the account's last activation, stop or renewal is not sent, nor one
+      // for an account that runs now. Checked again under the account lock right before the send (executeOwner).
+      if (this.staleActivation(acc, p)) {
+        this.prepared.delete(p.prepareId)
+        this.assertFresh(acc, p)
+      }
+      // part2 #7: the session key generated for this prepare becomes the account's once the owner signed its grants.
+      if (p.sessionKey) {
+        if (acc.sessionKey && acc.sessionKey !== p.sessionKey) {
+          this.prepared.delete(p.prepareId)
+          throw new HttpError(409, 'ACTIVATION_STALE', 'the account changed since this Start was prepared: prepare it again')
+        }
+        acc.sessionKey = p.sessionKey
+        this.store.save()
+      }
     }
     this.prepared.delete(p.prepareId)
     if (kind === 'renew') {
@@ -1940,10 +2274,12 @@ export class Operator {
       // Only a new activation or a renewal is subject to the failure budget; a proven owner's transfer or stop never is.
       this.assertBudget(acc)
       const usdc = await this.usdcOf(live.safe)
-      if (usdc === 0n) return this.arm(acc, p, signature)
+      if (usdc === 0n) return this.armFresh(acc, p, signature)
       if (usdc > this.activationCap(acc, p.capUsdc)) throw depositOverCap(usdc, this.activationCap(acc, p.capUsdc))
       // The relayer cannot pay for it now: the signature waits armed and the watcher runs it once the relayer is funded.
-      if (!(await this.relayerCanActivate(acc))) return this.arm(acc, p, signature)
+      if (!(await this.relayerCanActivate(acc))) return this.armFresh(acc, p, signature)
+      // part2 #3: checked again after the reads above, with no await before the approval it supersedes is dropped.
+      this.assertFresh(acc, p)
       this.disarm(acc, 'ARMED_SUPERSEDED')
     }
     const op = this.newOp(acc, kind === 'stop' ? 'exit' : kind)
@@ -1994,6 +2330,78 @@ export class Operator {
     if (this.overBudget(acc)) throw safeHttpError(429, 'OWNER_FAILURE_BUDGET')
   }
 
+  /**
+   * otto/mamoru#140 (part2 #3): why this activation must not run now, or null. An account that runs refuses any;
+   * one whose owner generation (bumped by every activation, stop and renewal that lands) moved since the prepare
+   * refuses it as stale. A prepare or armed approval from before generations were kept carries none: only the
+   * first rule applies to it.
+   */
+  private staleActivation(acc: AccountState, p: Pick<Prepared, 'gen'>): 'ALREADY_ACTIVE' | 'ACTIVATION_STALE' | null {
+    if (acc.active) return 'ALREADY_ACTIVE'
+    if (p.gen !== undefined && p.gen !== (acc.gen ?? 0)) return 'ACTIVATION_STALE'
+    return null
+  }
+
+  /**
+   * otto/mamoru#140 (part2 #6): reserves one sponsored owner transaction of `kind` for this account, at an estimate
+   * of its cost, or says which limit refuses it. Synchronous: two sends can never both pass the last free slot.
+   */
+  private chargeSponsor(acc: AccountState, kind: SponsoredKind, gasPrice: bigint, extraGas = 0n): SponsorEntry | { code: string } {
+    const at = Date.now()
+    const { own, all } = this.sponsoredOf(acc, at)
+    const estimate = (this.gasOf(kind) + extraGas) * gasPrice
+    const no = sponsorRefusal(this.sponsorPolicy(), own, all, kind, estimate, at)
+    if (no) {
+      logErr(`[sponsor] ${acc.accountKey} ${kind} not sponsored (${no.code}) at send time: prepare again, the Safe pays`, undefined)
+      return { code: no.code }
+    }
+    const entry: SponsorEntry = { at: new Date(at).toISOString(), wei: estimate.toString(), kind }
+    acc.sponsored = [...own, entry]
+    this.store.save()
+    return entry
+  }
+
+  /**
+   * Sol review round 2 #1: reserves the relayer's spend on one activation against the daily activation budget across
+   * all accounts, or says it is used up. Synchronous, like chargeSponsor: two activations never both pass the last slot.
+   */
+  private chargeActivation(acc: AccountState, opId: string, estimate: bigint): SponsorEntry | { code: string } {
+    const at = Date.now()
+    const { own, all } = this.sponsoredOf(acc, at)
+    // A retry of the same activation (an armed one the relayer could not send) holds one slot, not one per try.
+    const prior = own.find((e) => e.kind === 'activation' && e.opId === opId)
+    if (prior) return prior
+    const no = activationRefusal(this.sponsorPolicy(), all, estimate, at)
+    if (no) {
+      logErr(`[sponsor] ${acc.accountKey} activation not sent (${no.code}): the daily activation budget is used up until ${new Date(no.until).toISOString()}`, undefined)
+      return { code: no.code }
+    }
+    const entry: SponsorEntry = { at: new Date(at).toISOString(), wei: estimate.toString(), kind: 'activation', opId }
+    acc.sponsored = [...own, entry]
+    this.store.save()
+    return entry
+  }
+
+  /** What the relayer paid for a Safe-paid transaction that reverted, counted like a sponsored one. */
+  private recordSponsor(acc: AccountState, kind: SponsoredKind, receipt: TransactionReceipt, before = 0n): void {
+    const paid = before + (receipt.gasUsed !== undefined && receipt.effectiveGasPrice !== undefined ? receipt.gasUsed * receipt.effectiveGasPrice : 0n)
+    acc.sponsored = [...recentSponsored(acc.sponsored, Date.now()), { at: now(), wei: paid.toString(), kind }]
+    this.store.save()
+  }
+
+  private unchargeSponsor(acc: AccountState, entry: SponsorEntry): void {
+    acc.sponsored = (acc.sponsored ?? []).filter((e) => e !== entry)
+    this.store.save()
+  }
+
+  /** The reserved estimate becomes what the receipt says the relayer paid, when it says. */
+  private settleSponsor(acc: AccountState, entry: SponsorEntry, receipt: TransactionReceipt, before = 0n): void {
+    const paid = receipt.gasUsed !== undefined && receipt.effectiveGasPrice !== undefined ? receipt.gasUsed * receipt.effectiveGasPrice : null
+    if (paid === null) return
+    entry.wei = (before + paid).toString()
+    this.store.save()
+  }
+
   private failOwner(acc: AccountState, op: OpView, code: string, detail: Partial<OpView> = {}): void {
     if (BUDGET_CODES.has(code)) this.noteFailure(acc)
     this.patchOp(acc, op.opId, { state: 'failed', code, ...detail })
@@ -2013,52 +2421,77 @@ export class Operator {
    */
   private async preflight(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex): Promise<{ code: string; detail?: Partial<OpView> } | null> {
     if (safeTxHashOf(live, p.tx).toLowerCase() !== p.safeTxHash.toLowerCase()) return { code: 'BAD_SIGNATURE' }
-    // The mirror of the on-chain verifier. When it says yes the signature is proven. When it says no, only the chain
-    // (the simulation below) decides: it must succeed for anything to be sent, and a revert is the refusal.
-    const proven = await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn)
+    // The mirror of the on-chain verifier. When it says yes the signature is proven. When it says no, the trusted
+    // providers decide (quorum): their agreement is the proof, any revert is the refusal, one provider alone is neither.
     const data = execData(p.tx, signature)
+    let proven = await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn)
+    if (!proven) {
+      const truth = await this.quorum(live, data)
+      if (truth.outcome === 'revert') return { code: 'BAD_SIGNATURE' }
+      if (truth.outcome === 'unproven') return { code: 'OWNER_SIG_UNVERIFIED' }
+      if (truth.outcome === 'unavailable') {
+        logErr(`[owner] ${acc.accountKey} ${p.kind} signature not verified off chain and not proven by the trusted providers:`, truth.why)
+        throw safeHttpError(503, 'OWNER_CHECK_UNAVAILABLE')
+      }
+      this.mirrorMismatch(acc, p.kind, ownerSignatureShape(signature))
+      proven = true
+    }
     for (let attempt = 0; ; attempt++) {
       const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
       if (nonce !== p.tx.nonce) return { code: 'SAFE_NONCE_MOVED' }
       const usdc = await this.usdcOf(live.safe)
       if (p.kind === 'activate' && usdc > this.activationCap(acc, p.capUsdc)) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: usdc.toString(), capUsdc: this.activationCap(acc, p.capUsdc).toString() } }
       if (!deployed && usdc < MIN_DEPLOY_USDC) return { code: 'BELOW_DEPLOY_MINIMUM' }
-      let sim = await this.simulateOwner(live, deployed, data)
+      // otto/mamoru#140 (part2 #6): a Safe-paid transaction needs the ETH its fee was quoted at, or the relayer pays a revert (GS011).
+      if (p.tx.refund && p.feeWei && (await this.client.getBalance({ address: live.safe })) < BigInt(p.feeWei)) return { code: 'SAFE_FEE_UNFUNDED' }
+      let sim = await this.simulateOwner(this.client, live, deployed, data)
       if (sim.outcome === 'unavailable') {
         logErr(`[owner] ${acc.accountKey} ${p.kind} simulation unavailable:`, sim.why)
-        if (deployed) sim = await this.callOwner(live, data)
+        if (deployed) sim = await this.callOwner(this.client, live, data)
         if (sim.outcome === 'unavailable') {
-          // Neither proof is in hand: not refused for good, not sent, not counted. The caller may try again.
-          if (!proven) {
-            logErr(`[owner] ${acc.accountKey} ${p.kind} signature not verified off chain and no simulation available:`, sim.why)
-            throw safeHttpError(503, 'OWNER_CHECK_UNAVAILABLE')
-          }
+          // The signature is proven (off chain, or by the trusted providers): an unavailable simulation never stops it.
           logErr(`[owner] ${acc.accountKey} ${p.kind}:`, `proceeding on the verified signature${deployed ? '' : ' and the minimum balance (Safe not deployed)'}`)
           return null
         }
       }
-      if (sim.outcome === 'ok') {
-        if (!proven) this.mirrorMismatch(acc, p.kind, ownerSignatureShape(signature))
-        return null
-      }
+      if (sim.outcome === 'ok') return null
       if (attempt >= 2) {
         logErr(`[owner] ${acc.accountKey} ${p.kind} would revert, nothing sent:`, sim.why)
-        return { code: proven ? 'OWNER_TX_REVERTS' : 'BAD_SIGNATURE' }
+        return { code: 'OWNER_TX_REVERTS' }
       }
       logErr(`[owner] ${acc.accountKey} ${p.kind} simulation reverts, retry ${attempt + 1}:`, sim.why)
       await Bun.sleep(this.retryMs)
     }
   }
 
-  /** What the chain says about this execTransaction: the relayer's sequence simulated, or an eth_call when the Safe is deployed and the simulation cannot run. A revert is asked again twice (lagging node). */
-  private async groundTruth(live: LiveAccount, data: Hex): Promise<Outcome> {
+  /** What the chain says about this execTransaction, from `client`: the relayer's sequence simulated, or an eth_call when the Safe is deployed and the simulation cannot run. A revert is asked again twice (lagging node). */
+  private async groundTruth(client: PublicClient, live: LiveAccount, deployed: boolean, data: Hex): Promise<Outcome> {
     for (let attempt = 0; ; attempt++) {
-      const { deployed } = await readSafeNonce(this.client, live.safe)
-      let sim = await this.simulateOwner(live, deployed, data)
-      if (sim.outcome === 'unavailable' && deployed) sim = await this.callOwner(live, data)
+      let sim = await this.simulateOwner(client, live, deployed, data)
+      if (sim.outcome === 'unavailable' && deployed) sim = await this.callOwner(client, live, data)
       if (sim.outcome !== 'revert' || attempt >= 2) return sim
       await Bun.sleep(this.retryMs)
     }
+  }
+
+  /**
+   * otto/mamoru#140 (part2 #5): whether a signature the off-chain verifier refused is valid on chain, decided by
+   * independent providers. Any provider (the operator's own included) that sees the sequence revert refuses it. It
+   * is proven only when at least two of MAMORU_RPC_TRUSTED, each with execTransaction returning true, agree; the
+   * operator's own provider alone is `unproven`. Fewer than two answers is `unavailable` (retryable).
+   */
+  private async quorum(live: LiveAccount, data: Hex): Promise<Proof> {
+    const { deployed } = await readSafeNonce(this.client, live.safe)
+    const own = await this.groundTruth(this.client, live, deployed, data)
+    if (own.outcome === 'revert') return own
+    const trusted = this.cfg.trustedClients ?? []
+    if (trusted.length < 2) return own.outcome === 'ok' ? { outcome: 'unproven', why: 'MAMORU_RPC_TRUSTED has fewer than two providers' } : own
+    const answers = await Promise.all(trusted.map(async (t) => ({ label: t.label, a: await this.groundTruth(t.client, live, deployed, data).catch((e): Outcome => ({ outcome: 'unavailable', why: (e as Error).message.split('\n')[0] ?? 'error' })) })))
+    const revert = answers.find((x) => x.a.outcome === 'revert')
+    if (revert) return { outcome: 'revert', why: `${revert.label}: ${(revert.a as { why: string }).why}` }
+    const ok = answers.filter((x) => x.a.outcome === 'ok').length
+    if (ok >= 2) return { outcome: 'ok' }
+    return { outcome: 'unavailable', why: `${ok} of ${trusted.length} trusted providers proved it: ${answers.filter((x) => x.a.outcome !== 'ok').map((x) => `${x.label} ${(x.a as { why: string }).why}`).join('; ')}` }
   }
 
   /**
@@ -2076,14 +2509,14 @@ export class Operator {
   }
 
   /** The relayer's own sequence in one eth_simulateV1 block: the factory call when the Safe has no code, then execTransaction. */
-  private async simulateOwner(live: LiveAccount, deployed: boolean, data: Hex): Promise<Outcome> {
+  private async simulateOwner(client: PublicClient, live: LiveAccount, deployed: boolean, data: Hex): Promise<Outcome> {
     const from = this.relayer.address
     const calls = [...(deployed ? [] : [{ from, ...deployCall(live) }]), { from, to: live.safe, data }]
     let res: SimCallResult[] | undefined
     let why = 'simulation unavailable'
     for (let i = 0; i < SIM_TRIES && !res; i++) {
       try {
-        res = await simulateCalls(this.client, calls, await this.client.getBlockNumber({ cacheTime: 0 }))
+        res = await simulateCalls(client, calls, await client.getBlockNumber({ cacheTime: 0 }))
       } catch (e) {
         why = (e as Error).message.split('\n')[0] ?? why
         if (i < SIM_TRIES - 1) await Bun.sleep(this.retryMs)
@@ -2100,13 +2533,17 @@ export class Operator {
     return { outcome: 'ok' }
   }
 
-  /** A plain eth_call of execTransaction from the relayer on a deployed Safe: a revert is a revert, anything else is the provider. */
-  private async callOwner(live: LiveAccount, data: Hex): Promise<Outcome> {
+  /**
+   * A plain eth_call of execTransaction from the relayer on a deployed Safe: a revert is a revert, anything else is
+   * the provider. otto/mamoru#140 (part2 #5): an answer counts as ok only when it decodes to `true`; any other
+   * result (empty, false, garbage) is a revert, never a pass.
+   */
+  private async callOwner(client: PublicClient, live: LiveAccount, data: Hex): Promise<Outcome> {
     let why = 'eth_call unavailable'
     for (let i = 0; i < SIM_TRIES; i++) {
       try {
-        await this.client.call({ account: this.relayer.address, to: live.safe, data })
-        return { outcome: 'ok' }
+        const res = await client.call({ account: this.relayer.address, to: live.safe, data })
+        return execReturnsTrue(res.data) ? { outcome: 'ok' } : { outcome: 'revert', why: 'execTransaction did not return true' }
       } catch (e) {
         if (isRevert(e)) return { outcome: 'revert', why: revertReason(e) }
         why = (e as Error).message.split('\n')[0] ?? why
@@ -2120,6 +2557,20 @@ export class Operator {
     return this.client.readContract({ address: address('USDC'), abi: erc20Abi, functionName: 'balanceOf', args: [safe] })
   }
 
+  /** otto/mamoru#140 (part2 #3): refuses a stale activation; synchronous, so nothing lands between it and what follows. */
+  private assertFresh(acc: AccountState, p: Prepared): void {
+    const stale = this.staleActivation(acc, p)
+    if (stale) throw new HttpError(409, stale, stale === 'ALREADY_ACTIVE' ? 'the engine is already active for this account' : 'the account changed since this Start was prepared: prepare it again')
+  }
+
+  /** arm, under the account lock and after a last staleness check: a stale approval never replaces an armed one. */
+  private armFresh(acc: AccountState, p: Prepared, signature: Hex): Promise<OpView> {
+    return this.lock(acc.accountKey).run(async () => {
+      this.assertFresh(acc, p)
+      return this.arm(acc, p, signature)
+    })
+  }
+
   /** Stores the signed activation (0600 state file); the watcher executes it when USDC lands. */
   private arm(acc: AccountState, p: Prepared, signature: Hex): OpView {
     this.disarm(acc, 'ARMED_SUPERSEDED')
@@ -2127,7 +2578,7 @@ export class Operator {
     const op = this.newOp(acc, 'activate')
     op.code = 'ARMED'
     this.stash(acc, op, p)
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}), ...(p.gen !== undefined ? { gen: p.gen } : {}) }
     this.store.save()
     console.log(`[armed] ${acc.accountKey} ${op.opId} armed for ${acc.ctx.address} at Safe nonce ${p.tx.nonce}`)
     return { ...op }
@@ -2143,7 +2594,7 @@ export class Operator {
     const current = acc.ops.find((o) => o.opId === op.opId)
     if (current?.txHash) return this.failOwner(acc, op, 'OWNER_TX_ERROR')
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}), ...(p.gen !== undefined ? { gen: p.gen } : {}), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
     this.armHold.delete(acc.accountKey)
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
     this.execTried.delete(opKey(acc, op))
@@ -2329,6 +2780,8 @@ export class Operator {
   private async fireArmed(acc: AccountState, usdc: bigint): Promise<void> {
     const a = acc.armed
     if (!a || acc.active) return this.disarm(acc, 'ALREADY_ACTIVE')
+    // otto/mamoru#140 (part2 #3): armed before the account's last activation, stop or renewal: never run.
+    if (this.staleActivation(acc, a) === 'ACTIVATION_STALE') return this.disarm(acc, 'ACTIVATION_STALE')
     // An op whose execTransaction went to a provider once reads its Safe nonce first, on every pass, before anything
     // can hold it (the wait between tries, budget, cap, relayer short): an attempt that landed after all must reach
     // reconciliation while its transaction is still recent.
@@ -2383,7 +2836,7 @@ export class Operator {
     // cleared when the account starts, or when the attempt ends in a failure that is final.
     this.patchOp(acc, a.opId, { code: undefined })
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
-    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants, ...(a.capUsdc ? { capUsdc: a.capUsdc } : {}) }
+    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants, ...(a.capUsdc ? { capUsdc: a.capUsdc } : {}), ...(a.gen !== undefined ? { gen: a.gen } : {}) }
     const op = acc.ops.find((o) => o.opId === a.opId)!
     if (a.execSent) this.retried.add(opKey(acc, op))
     try {
@@ -2484,20 +2937,74 @@ export class Operator {
   }
 
   private async executeOwner(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView): Promise<void> {
-    const safe = live.safe
+    let activation: SponsorEntry | null = null
     // Under the account lock, right before anything is sent: what was true at submit may not be any more.
     if (p.kind === 'renew') {
       await this.settleRenewals(acc)
       const no = this.renewRefusal(acc, op.opId)
       if (no) return this.failOwner(acc, op, no.code)
     }
-    // otto/mamoru#140: a Start's checks at submit ran outside this lock; the grant state may have changed since (a
-    // reconciliation, a settle pass). Checked again here, under the lock, right before anything is sent.
+    // otto/mamoru#140 (part2 #3): under the account lock, the last word on an activation: not on an account that runs,
+    // nor once the account's owner generation moved past the one it was prepared (or armed) at.
     if (p.kind === 'activate') {
+      // otto/mamoru#140 (#60): a Start's checks at submit ran outside this lock; the grant state may have changed since
+      // (a reconciliation, a settle pass). Checked again here, under the lock, right before anything is sent.
       if (!(await this.enforceGrants(acc))) return this.failOwner(acc, op, 'GRANT_CHECK_UNAVAILABLE')
       if (acc.superseded?.length) return this.failOwner(acc, op, 'STOP_FIRST')
       if (acc.active) return this.failOwner(acc, op, 'ALREADY_ACTIVE')
+      const stale = this.staleActivation(acc, p)
+      if (stale) return this.failOwner(acc, op, stale)
+      // Sol review #3: successful activations are bounded per Safe too, or activate/stop cycles drain the relayer.
+      const at = Date.now()
+      const done = recentSponsored(acc.sponsored, at).filter((e) => e.kind === 'activate')
+      if (done.length >= ACTIVATIONS_PER_DAY) return this.failOwner(acc, op, 'ACTIVATION_LIMIT')
+      // Sol review round 2 #1: and across all Safes, what the relayer spends on them (deploy, top-up, exec) is reserved
+      // against the daily activation budget before anything is sent, so fresh Safes cannot drain it either.
+      const price = await this.gasPrice()
+      const { deployed } = await readSafeNonce(this.client, live.safe)
+      const eth = await this.client.getBalance({ address: live.safe })
+      const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
+      const reserved = this.chargeActivation(acc, op.opId, ((deployed ? 0n : DEPLOY_GAS) + ACTIVATE_TX_GAS) * price + (eth < target ? target - eth : 0n))
+      if ('code' in reserved) return this.failOwner(acc, op, reserved.code)
+      activation = reserved
     }
+    // A Stop revokes what it was prepared with: a grant enabled since (a renewal that landed meanwhile) would stay on
+    // the Safe with the account shown stopped. Prepare again (Sol review #2).
+    if (p.kind === 'stop') {
+      const signed = new Set((p.revokes ?? []).map((id) => id.toLowerCase()))
+      if (this.stopRevokes(acc).some((id) => !signed.has(id.toLowerCase()))) return this.failOwner(acc, op, 'STOP_STALE')
+    }
+    // part2 #6: a sponsored transaction is counted against the limits in one synchronous step (no await between the
+    // check and the record) before anything is sent, deploy included; the reservation goes if nothing is spent after all.
+    let sponsored: SponsorEntry | { code: string } | null = null
+    if (p.sponsorKind) {
+      const price = await this.gasPrice()
+      // An undeployed Safe: the deploy is paid by the relayer too, reserved with the transaction (Sol review #4).
+      const deployGas = (await readSafeNonce(this.client, live.safe)).deployed ? 0n : DEPLOY_GAS
+      sponsored = this.chargeSponsor(acc, p.sponsorKind, price, deployGas)
+      // A revoke-only Stop over the stop limit by now is still an emergency revocation, within its own limit.
+      if ('code' in sponsored && p.revokeOnly && p.sponsorKind === 'stop') sponsored = this.chargeSponsor(acc, 'revoke', price, deployGas)
+    }
+    if (sponsored && 'code' in sponsored) {
+      if (activation) this.unchargeSponsor(acc, activation)
+      return this.failOwner(acc, op, sponsored.code)
+    }
+    const spent: { any: boolean; deployWei?: bigint; deploySent?: boolean; deployMaxWei?: bigint; exec?: boolean } = { any: false }
+    try {
+      return await this.executeCharged(acc, live, p, signature, op, sponsored as SponsorEntry | null, spent)
+    } finally {
+      if (sponsored && !spent.any && !this.execTried.has(opKey(acc, op))) this.unchargeSponsor(acc, sponsored)
+      // The activation's reservation stays at its estimate once anything was sent (an upper bound: the top-up is in it).
+      if (activation && !spent.any && !this.execTried.has(opKey(acc, op))) this.unchargeSponsor(acc, activation)
+      // A Safe-paid transaction whose Safe the relayer deployed but whose exec never went out: no refund came back.
+      // Its receipt lost (Sol review round 3 #1): the deploy is counted at the most it could cost, its gas limit at the
+      // maxFeePerGas it was signed with when it was sent (round 4), not the SafeTx's earlier price.
+      if (!sponsored && p.tx.refund && spent.deploySent && !spent.exec) this.recordSponsor(acc, p.kind as SponsoredKind, {} as TransactionReceipt, spent.deployWei ?? spent.deployMaxWei ?? DEPLOY_GAS * p.tx.refund.gasPrice)
+    }
+  }
+
+  private async executeCharged(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView, sponsored: SponsorEntry | null, spent: { any: boolean; deployWei?: bigint; deploySent?: boolean; deployMaxWei?: bigint; exec?: boolean }): Promise<void> {
+    const safe = live.safe
     // Before any relayer transaction: signature, guards and a simulation of everything about to be sent.
     const refusal = await this.preflight(acc, live, p, signature)
     if (refusal) return this.settleRetried(acc, op, refusal.code) ? undefined : this.failOwner(acc, op, refusal.code, refusal.detail)
@@ -2507,7 +3014,14 @@ export class Operator {
       if (!deployed) {
         this.setBusy(acc, 'deploying')
         const d = deployCall(live)
-        const { hash, receipt } = await this.relayer.send(d)
+        // Spent from the moment the signed deploy goes to the provider (onSending), not before: a failure in the gas
+        // estimate or the fee reads sends nothing (Sol review round 3 #2). From then on a lost receipt still counts.
+        const { hash, receipt } = await this.relayer.send(d, undefined, (maxFeeWei) => {
+          spent.any = true
+          spent.deploySent = true
+          spent.deployMaxWei = maxFeeWei
+        })
+        if (receipt.gasUsed !== undefined && receipt.effectiveGasPrice !== undefined) spent.deployWei = receipt.gasUsed * receipt.effectiveGasPrice
         console.log(`[owner] deploy ${safe} tx ${hash} ${receipt.status}`)
         if (receipt.status !== 'success') return this.failOwner(acc, op, 'DEPLOY_FAILED', { txHash: hash })
         this.setBusy(acc, p.kind === 'activate' ? 'activating' : 'withdrawing')
@@ -2517,7 +3031,9 @@ export class Operator {
       const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
       const eth = await this.client.getBalance({ address: safe })
       if (eth < target) {
-        const { hash, receipt } = await this.relayer.send({ to: safe, value: target - eth, gas: 50_000n })
+        const { hash, receipt } = await this.relayer.send({ to: safe, value: target - eth, gas: 50_000n }, undefined, () => {
+          spent.any = true
+        })
         console.log(`[owner] top-up ${safe} +${target - eth} wei tx ${hash} ${receipt.status}`)
       }
     }
@@ -2527,7 +3043,9 @@ export class Operator {
     // A load-balanced provider can answer from a lagging node: retry the static check before failing the op.
     for (let attempt = 0; ; attempt++) {
       try {
-        await this.client.call({ account: this.relayer.address, to: safe, data })
+        // otto/mamoru#140 (part2 #5): only an execTransaction that returns true passes; anything else is a revert.
+        const res = await this.client.call({ account: this.relayer.address, to: safe, data })
+        if (!execReturnsTrue(res.data)) throw Object.assign(new Error('execution reverted: execTransaction did not return true'), { code: 3 })
         break
       } catch (e) {
         const why = revertReason(e)
@@ -2557,7 +3075,7 @@ export class Operator {
       }
     }
     // Keep the hash as soon as the tx is out: if the receipt poll fails, reconciliation reads it later.
-    const { hash, receipt } = await this.relayer.send(
+    const sent = this.relayer.send(
       { to: safe, data },
       (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }),
       () => {
@@ -2576,6 +3094,13 @@ export class Operator {
         }
       },
     )
+    const { hash, receipt } = await sent
+    spent.any = true
+    spent.exec = true
+    if (sponsored) this.settleSponsor(acc, sponsored, receipt, spent.deployWei ?? 0n)
+    // A Safe-paid transaction that reverted (the Safe short of its fee by then, GS011) was paid by the relayer after
+    // all: it counts against the account's limits like a sponsored one, so it cannot be repeated for free.
+    else if (p.tx.refund && receipt.status !== 'success') this.recordSponsor(acc, p.kind as SponsoredKind, receipt, spent.deployWei ?? 0n)
     this.patchOp(acc, op.opId, { state: 'submitted', txHash: hash })
     const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
     console.log(`[owner] ${op.opId} tx ${hash} block ${receipt.blockNumber} ${ok ? 'ok' : 'FAILED'}`)
@@ -2604,10 +3129,13 @@ export class Operator {
 
   /** `depositsFrom`: where deposits are read from when it is not the block of the receipt (a recovered activation). */
   private afterOwner(acc: AccountState, p: Prepared, receipt: TransactionReceipt, depositsFrom?: bigint): void {
+    // otto/mamoru#140 (part2 #3): what the account's grants are changed: every activation prepared before is stale.
+    if (p.kind !== 'transfer') acc.gen = (acc.gen ?? 0) + 1
     if (p.kind === 'activate') {
       acc.trusted = true
       acc.active = true
       acc.deactivated = undefined
+      acc.sponsored = [...recentSponsored(acc.sponsored, Date.now()), { at: now(), wei: receipt.gasUsed !== undefined && receipt.effectiveGasPrice !== undefined ? (receipt.gasUsed * receipt.effectiveGasPrice).toString() : '0', kind: 'activate' }]
       // The approval ran: it is spent. One armed meanwhile for the same Safe nonce can no longer run.
       if (acc.armed?.opId === p.prepareId.replace(/^armed-/, '')) acc.armed = undefined
       else this.disarm(acc, 'ALREADY_ACTIVE')
@@ -2618,6 +3146,9 @@ export class Operator {
       // Unknown (a late receipt of an op from before spec 006): the default, the conservative side.
       acc.signedCapUsdc = p.capUsdc ?? LIVE_CAP_USDC.toString()
       acc.managedTokenIds = []
+      // part2 #4: from this activation on, the positions this engine mints are the ones that count (sizingPositions).
+      // The ones an earlier run minted (left by a bounded Stop) stay counted.
+      acc.admittedTokenIds ??= []
       acc.depositsAfter = (depositsFrom ?? receipt.blockNumber).toString()
       acc.historyFromBlock = receipt.blockNumber.toString()
       acc.epoch++
@@ -2913,6 +3444,16 @@ export class Operator {
           this.store.save()
           return this.manageSession(acc, tokenId, pool)
         },
+        onMinted: (tokenId, block) => {
+          const id = tokenId.toString()
+          // An account from before the record counts every position until seedAdmitted has read them.
+          if (!acc.admittedTokenIds || acc.admittedTokenIds.includes(id)) return
+          acc.admittedTokenIds = [...acc.admittedTokenIds, id]
+          if (block !== undefined) acc.admittedAt = { ...acc.admittedAt, [id]: block.toString() }
+          this.store.save()
+        },
+        // Sol review round 2 #4: never more admitted positions than one bounded read sees (chain.ts MAX_INVENTORY).
+        mintAllowed: () => mintAllowed(acc.admittedTokenIds),
       },
     )
     // The journal of a restarted engine is empty: the block of the last operation stored for the account stands in
@@ -3190,6 +3731,17 @@ function bodyShape(body: OwnerSignature): unknown {
 }
 
 type Outcome = { outcome: 'ok' } | { outcome: 'revert' | 'unavailable'; why: string }
+/** `unproven`: one provider says the chain would accept it, which is not proof (otto/mamoru#140 part2 #5). */
+type Proof = Outcome | { outcome: 'unproven'; why: string }
+
+/** Whether execTransaction's return data is ABI `true`. */
+function execReturnsTrue(data: Hex | undefined): boolean {
+  try {
+    return !!data && decodeFunctionResult({ abi: safeAbi, functionName: 'execTransaction', data }) === true
+  } catch {
+    return false
+  }
+}
 
 /** True when the node executed the call and it reverted; false for transport, rate-limit and unsupported-method errors. */
 function isRevert(e: unknown): boolean {

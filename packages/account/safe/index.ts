@@ -92,6 +92,14 @@ export type SafeTx = {
   data: Hex
   operation: 0 | 1
   nonce: bigint
+  /**
+   * otto/mamoru#140 (part2 #6): the Safe pays its own network fee. execTransaction refunds
+   * `(gasUsed + baseGas) * min(gasPrice, tx.gasprice)` ETH from the Safe to `refundReceiver`. With gasPrice != 0
+   * Safe 1.4.1 forwards exactly `safeTxGas` to the inner call (not gasleft()), so it must be set, and an inner
+   * failure does not revert: the nonce is spent and the refund paid. Absent: no refund (the relayer pays), the
+   * encoding every SafeTx had before.
+   */
+  refund?: { safeTxGas: bigint; baseGas: bigint; gasPrice: bigint; refundReceiver: Address }
 }
 
 export function safeTxTypedData(safe: Address, chainId: number, tx: SafeTx) {
@@ -117,11 +125,11 @@ export function safeTxTypedData(safe: Address, chainId: number, tx: SafeTx) {
       value: tx.value,
       data: tx.data,
       operation: tx.operation,
-      safeTxGas: 0n,
-      baseGas: 0n,
-      gasPrice: 0n,
+      safeTxGas: tx.refund?.safeTxGas ?? 0n,
+      baseGas: tx.refund?.baseGas ?? 0n,
+      gasPrice: tx.refund?.gasPrice ?? 0n,
       gasToken: zeroAddress,
-      refundReceiver: zeroAddress,
+      refundReceiver: tx.refund?.refundReceiver ?? zeroAddress,
       nonce: tx.nonce,
     },
   }
@@ -137,7 +145,7 @@ export function execTransactionData(tx: SafeTx, signatures: Hex): Hex {
   return encodeFunctionData({
     abi: safeAbi,
     functionName: 'execTransaction',
-    args: [tx.to, tx.value, tx.data, tx.operation, 0n, 0n, 0n, zeroAddress, zeroAddress, signatures],
+    args: [tx.to, tx.value, tx.data, tx.operation, tx.refund?.safeTxGas ?? 0n, tx.refund?.baseGas ?? 0n, tx.refund?.gasPrice ?? 0n, zeroAddress, tx.refund?.refundReceiver ?? zeroAddress, signatures],
   })
 }
 

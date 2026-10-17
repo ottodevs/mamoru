@@ -95,7 +95,8 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
       called.push(data)
       if (knobs.call === 'revert') throw Object.assign(new Error('execution reverted: GS026'), { code: 3, data: '0x08c379a0' })
       if (knobs.call === 'down') throw new Error('HTTP request failed. Status: 429')
-      return { data: '0x' }
+      // otto/mamoru#140 (part2 #5): what a real Safe answers, execTransaction's `true`.
+      return { data: TRUE }
     },
   } as unknown as PublicClient
   const relayer = {
@@ -310,8 +311,8 @@ describe('the relayer spends nothing before the owner signature is proven', () =
     expect(w.sent).toHaveLength(0)
     expect(w.chain.deployed).toBe(false)
     expect(w.op.ops(ctx, null).ops).toEqual([])
-    // It cost the relayer nothing, so it counts against nothing.
-    expect(w.state.accounts.k!.ownerFailures ?? []).toHaveLength(0)
+    // It cost the relayer nothing, so it counts against nothing; and an unproven caller leaves no account behind (#140 part2 #7).
+    expect(w.state.accounts.k?.ownerFailures ?? []).toHaveLength(0)
     // The prepared transaction is spent: the same body cannot be tried again.
     expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx)).catch((e: unknown) => e)).toMatchObject({ code: 'PREPARE_UNKNOWN' })
   })
@@ -323,7 +324,7 @@ describe('the relayer spends nothing before the owner signature is proven', () =
     expect(await w.op.submit(ctx, 'activate', sign(tx, thief)).catch((e: unknown) => e)).toMatchObject({ code: 'BAD_SIGNATURE' })
     const armed = await arm(w, thief)
     expect(armed.op).toMatchObject({ code: 'BAD_SIGNATURE' })
-    expect(w.state.accounts.k!.armed).toBeUndefined()
+    expect(w.state.accounts.k?.armed).toBeUndefined()
     expect(w.sent).toHaveLength(0)
   })
 
@@ -505,10 +506,11 @@ describe('the relayer spends nothing before the owner signature is proven', () =
   })
 })
 
-// The off-chain signature check is a mirror of the on-chain verifier. The chain is the ground truth: when the mirror
-// says no, a simulation of the exact sequence decides. Here "thief" signatures stand for a real authenticator the
-// mirror gets wrong (mirror says no) and the mocked chain says whatever the knob says.
-describe('the chain overrules the off-chain signature check', () => {
+// The off-chain signature check is a mirror of the on-chain verifier. otto/mamoru#140 (part2 #5): when the mirror says
+// no, the operator's one provider is not proof (a dishonest one says yes to anything): its revert refuses, its yes alone
+// refuses too (OWNER_SIG_UNVERIFIED). The MAMORU_RPC_TRUSTED quorum that can prove it is tested in owner-hardening.test.ts.
+// Here "odd" signatures stand for a real authenticator the mirror gets wrong (mirror says no).
+describe('the off-chain signature check is overruled only by independent providers', () => {
   const odd = new SoftwarePasskey(PASSKEY_SCALARS.a2)
   const errors = async <T>(run: () => Promise<T>): Promise<{ out: T; logged: string[] }> => {
     const logged: string[] = []
@@ -521,21 +523,20 @@ describe('the chain overrules the off-chain signature check', () => {
     }
   }
 
-  test('mirror says no, simulation succeeds: the transfer is sent and the mismatch is logged with the assertion shape', async () => {
+  test('mirror says no, the one provider says yes: not sent, refused as unverified, alert logged with the assertion shape', async () => {
     const w = world(OVER)
     const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1920000' })
-    const { out, logged } = await errors(() => w.op.submit(ctx, 'transfer', sign(plan.ownerTx, odd)))
-    expect(out).toMatchObject({ kind: 'transfer', state: 'confirmed' })
-    expect(w.sent.map((t) => t.to)).toEqual([w.factory.to, SAFE])
-    expect(w.op.mirrorMismatches).toBeGreaterThanOrEqual(1)
-    const line = logged.find((l) => l.includes('OWNER_SIG_MIRROR_MISMATCH'))!
+    const { out, logged } = await errors(() => w.op.submit(ctx, 'transfer', sign(plan.ownerTx, odd)).catch((e: unknown) => e))
+    expect(out).toMatchObject({ status: 400, code: 'OWNER_SIG_UNVERIFIED' })
+    expect(w.sent).toHaveLength(0)
+    const line = logged.find((l) => l.includes('OWNER_SIG_UNVERIFIED'))!
     expect(line).toContain('k transfer')
     const shape = JSON.parse(line.slice(line.indexOf('shape ') + 6)) as Record<string, unknown>
     expect(shape).toMatchObject({ authenticatorDataLength: 37, flags: '0x05', clientDataKeys: ['type', 'challenge', 'origin', 'crossOrigin'], clientDataPrefixOk: true, signatureDer: 'ok', highS: false })
     // Nothing secret or identifying: no key, no signature bytes, no challenge, no origin value.
     expect(line).not.toContain(plan.ownerTx.safeTxHash.slice(2, 20))
     expect(line).not.toContain('mamoru.lol')
-    expect(w.state.accounts.k!.ownerFailures ?? []).toHaveLength(0)
+    expect(w.state.accounts.k?.ownerFailures ?? []).toHaveLength(0)
   })
 
   test('mirror says no, simulation reverts: nothing is sent', async () => {
@@ -558,13 +559,14 @@ describe('the chain overrules the off-chain signature check', () => {
     expect(out).toMatchObject({ status: 503, code: 'OWNER_CHECK_UNAVAILABLE' })
     expect(w.sent).toHaveLength(0)
     expect(w.op.ops(ctx, null).ops).toEqual([])
-    expect(w.state.accounts.k!.ownerFailures ?? []).toHaveLength(0)
-    // Not a permanent failure: the same prepared transaction and body go through once the chain can be asked.
+    expect(w.state.accounts.k?.ownerFailures ?? []).toHaveLength(0)
+    // Once the one provider answers yes it is still not proof: refused, never sent.
     w.knobs.sim = 'ok'
-    expect((await errors(() => w.op.submit(ctx, 'transfer', body))).out).toMatchObject({ state: 'confirmed' })
+    expect((await errors(() => w.op.submit(ctx, 'transfer', body).catch((e: unknown) => e))).out).toMatchObject({ code: 'OWNER_SIG_UNVERIFIED' })
+    expect(w.sent).toHaveLength(0)
   })
 
-  test('mirror says no on a deployed Safe without simulation: eth_call decides, and no answer at all is a retryable 503', async () => {
+  test('mirror says no on a deployed Safe without simulation: an eth_call revert refuses, a yes or no answer sends nothing', async () => {
     const make = async (call: 'ok' | 'revert' | 'down') => {
       const w = world(5_000_000n)
       w.chain.deployed = true
@@ -574,16 +576,15 @@ describe('the chain overrules the off-chain signature check', () => {
       return { w, ...(await errors(() => w.op.submit(ctx, 'transfer', sign(plan.ownerTx, odd)).catch((e: unknown) => e))) }
     }
     const ok = await make('ok')
-    expect(ok.out).toMatchObject({ state: 'confirmed' })
-    expect(ok.w.sent).toHaveLength(1)
-    expect(ok.logged.some((l) => l.includes('OWNER_SIG_MIRROR_MISMATCH'))).toBe(true)
+    expect(ok.out).toMatchObject({ status: 400, code: 'OWNER_SIG_UNVERIFIED' })
+    expect(ok.w.sent).toHaveLength(0)
     const reverting = await make('revert')
     expect(reverting.out).toMatchObject({ status: 400, code: 'BAD_SIGNATURE' })
     expect(reverting.w.sent).toHaveLength(0)
     const blind = await make('down')
     expect(blind.out).toMatchObject({ status: 503, code: 'OWNER_CHECK_UNAVAILABLE' })
     expect(blind.w.sent).toHaveLength(0)
-    expect(blind.w.state.accounts.k!.ownerFailures ?? []).toHaveLength(0)
+    expect(blind.w.state.accounts.k?.ownerFailures ?? []).toHaveLength(0)
   })
 
   test('stop follows the same rule', async () => {
@@ -591,9 +592,10 @@ describe('the chain overrules the off-chain signature check', () => {
     w.chain.deployed = true
     w.op.account(ctx).acc.grants = [{ name: 'enter-swap', permissionId: `0x${'aa'.repeat(32)}`, grant: {} as never }]
     const tx = await w.op.prepareStop(ctx)
-    const { out, logged } = await errors(() => w.op.submit(ctx, 'stop', sign(tx, odd)))
-    expect(out).toMatchObject({ kind: 'exit', state: 'confirmed' })
-    expect(logged.some((l) => l.includes('OWNER_SIG_MIRROR_MISMATCH') && l.includes('k stop'))).toBe(true)
+    const { out, logged } = await errors(() => w.op.submit(ctx, 'stop', sign(tx, odd)).catch((e: unknown) => e))
+    expect(out).toMatchObject({ code: 'OWNER_SIG_UNVERIFIED' })
+    expect(w.sent).toHaveLength(0)
+    expect(logged.some((l) => l.includes('OWNER_SIG_UNVERIFIED') && l.includes('k stop'))).toBe(true)
   })
 
   test('armed executor: a stored signature the mirror refuses is neither dropped nor sent while the chain cannot be asked', async () => {

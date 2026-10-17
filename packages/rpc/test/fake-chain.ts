@@ -264,6 +264,11 @@ export class FakeChain {
       const results = (call.args[0] as readonly Hex[]).map((d) => this.execute(from, to, d))
       return encodeFunctionResult({ abi: nonfungiblePositionManagerAbi, functionName: 'multicall', result: results })
     }
+    if (call.functionName === 'ownerOf') {
+      const p = this.positions.find((x) => x.tokenId === call.args[0])
+      if (!p) throw new Revert('ERC721: invalid token ID')
+      return encodeFunctionResult({ abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', result: p.owner })
+    }
     if (call.functionName === 'positions') {
       const p = this.positions.find((x) => x.tokenId === call.args[0])
       if (!p) throw new Revert('Invalid token ID')

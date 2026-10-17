@@ -34,5 +34,6 @@ const op = await bootOperator({
   capUsdc: process.env.MAMORU_CAP_USDC,
   depth: process.env.MAMORU_DEPTH,
   ...(process.env.MAMORU_SETTINGS_URL ? { settingsUrl: process.env.MAMORU_SETTINGS_URL } : {}),
+  ...(process.env.MAMORU_RPC_TRUSTED ? { trustedRpc: process.env.MAMORU_RPC_TRUSTED } : {}),
 })
 for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, () => (op.stop(), process.exit(0)))

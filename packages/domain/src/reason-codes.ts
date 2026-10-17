@@ -27,6 +27,8 @@ export const REASON_CODES = [
   'SESSION_REVOKED',
   'SESSION_RENEWAL_DUE',
   'SESSION_POSITION_OUT_OF_SCOPE',
+  // otto/mamoru#140: the account already holds MAX_INVENTORY admitted positions; no further mint.
+  'INVENTORY_FULL',
   'SESSION_FOREIGN_USE',
   'SESSION_PERMISSION_ID_REUSED',
   // Pre-chequeo de política en el motor

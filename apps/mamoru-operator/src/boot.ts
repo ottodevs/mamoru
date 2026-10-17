@@ -49,6 +49,8 @@ export type BootOptions = {
   depth?: string
   /** MAMORU_SETTINGS_URL (spec 006, otto/mamoru#147): the app Worker that serves the engine settings. Unset: no pull, code defaults and the env knobs above. */
   settingsUrl?: string
+  /** MAMORU_RPC_TRUSTED (otto/mamoru#140 part2 #5), see parseTrustedRpc. */
+  trustedRpc?: string
 }
 
 /**
@@ -64,6 +66,32 @@ export function settingsOverride(c: Pick<OperatorConfig, 'capUsdc' | 'depth'>, o
     const stables = c.depth.maxImpactBpsByPool?.['pool:USDC/USDT/100']
     out.depth = { impactBps: c.depth.maxImpactBps, shareBps: c.depth.maxShareBps, ...(stables === undefined ? {} : { stablesImpactBps: stables }) }
   }
+  return out
+}
+
+/**
+ * otto/mamoru#140 (part2 #5): MAMORU_RPC_TRUSTED, comma-separated RPC URLs of independent providers. Each must be
+ * https (http only for a loopback host) and on its own host: two URLs of one provider are one opinion. They are
+ * asked directly, not through the loopback proxy, and only to prove an owner signature the off-chain check refused;
+ * the label in logs is the host, never the URL (it may carry a key). Unset: none. Set but fewer than two distinct
+ * hosts: refused at boot.
+ */
+export function parseTrustedRpc(v: string | undefined): { label: string; url: string }[] {
+  if (v === undefined || v.trim() === '') return []
+  const out: { label: string; url: string }[] = []
+  for (const raw of v.split(',').map((x) => x.trim()).filter(Boolean)) {
+    let u: URL
+    try {
+      u = new URL(raw)
+    } catch {
+      throw new Error('MAMORU_RPC_TRUSTED: an entry is not a URL')
+    }
+    const loopback = u.hostname === '127.0.0.1' || u.hostname === 'localhost'
+    if (u.protocol !== 'https:' && !(u.protocol === 'http:' && loopback)) throw new Error(`MAMORU_RPC_TRUSTED: ${u.hostname} is not https`)
+    if (out.some((o) => o.label === u.hostname)) throw new Error(`MAMORU_RPC_TRUSTED: ${u.hostname} is listed twice`)
+    out.push({ label: u.hostname, url: raw })
+  }
+  if (out.length < 2) throw new Error('MAMORU_RPC_TRUSTED needs at least two providers on distinct hosts')
   return out
 }
 
@@ -141,6 +169,7 @@ export async function bootOperator(o: BootOptions) {
       rpcBudget: rpcBudget(rpcMetrics),
       watchClient,
       ...knobs,
+      trustedClients: parseTrustedRpc(o.trustedRpc).map((t) => ({ label: t.label, client: createPublicClient({ transport: http(t.url, { timeout: 15_000 }) }) })),
       ...(settings ? { settings } : {}),
     },
     client,

@@ -15,6 +15,11 @@ const SAFE_SIGHTING_LAG = 450n
 const isSafeDeployed = createDeployedChecker()
 
 export const LIVE_POOL = 'pool:USDC/cbBTC/500'
+/**
+ * otto/mamoru#140 (part2 #4): position NFTs readSafe inspects at most. Anyone can send a Safe position NFTs; past
+ * this many, only the ones Mamoru admitted are read (when the caller names them), else the first MAX_INVENTORY.
+ */
+export const MAX_INVENTORY = 64
 const Q96 = 1n << 96n
 const Q192 = 1n << 192n
 
@@ -54,6 +59,11 @@ export type SafeRead = {
   prices: Record<string, PoolPrice>
   /** Positions in any of USDC_POOLS. */
   positions: PoolPosition[]
+  /** Position NFTs the Safe holds in all, read or not (see MAX_INVENTORY). */
+  positionCount?: number
+  /** The admitted ids were read one by one (over MAX_INVENTORY); `ownedIds` are the ones still the Safe's. */
+  byId?: boolean
+  ownedIds?: bigint[]
 }
 
 /** Token amounts of `liquidity` between two ticks at `sqrtPriceX96`. */
@@ -99,7 +109,7 @@ export function positionUsdc(p: PoolPosition, sqrtPriceX96: bigint): bigint {
  * call instead of a separate eth_blockNumber, and eth_getCode is asked only until the Safe's deployment is
  * confirmed (see `isDeployed`).
  */
-export async function readSafe(client: PublicClient, safe: Address): Promise<SafeRead> {
+export async function readSafe(client: PublicClient, safe: Address, opts: { admitted?: readonly bigint[] } = {}): Promise<SafeRead> {
   const npm = address('NonfungiblePositionManager')
   const tokenNames = [...new Set(USDC_POOLS.flatMap((p) => [entry(p).token0!, entry(p).token1!]))]
   const first = new Batch(client, MULTICALL3, undefined)
@@ -138,13 +148,32 @@ export async function readSafe(client: PublicClient, safe: Address): Promise<Saf
   ])
   const tokens = Object.fromEntries(tokenNames.map((t, i) => [t, balances[i]!]))
   const prices: Record<string, PoolPrice> = Object.fromEntries(USDC_POOLS.map((p, i) => [p, { sqrtPriceX96: slots[i]![0], tick: slots[i]![1] }]))
-  const ids = await idsOf(Number(nfts), blockNumber)
+  const count = Number(nfts)
+  // Over MAX_INVENTORY the ids are not enumerated: the admitted ones are read by id, each checked to still be the
+  // Safe's (ownerOf), a burned or moved one skipped; without them, the first MAX_INVENTORY.
+  const byId = count > MAX_INVENTORY && opts.admitted !== undefined
+  if (count > MAX_INVENTORY) console.log(`[read] ${safe} holds ${count} position NFTs; reading ${byId ? `the ${opts.admitted!.length} admitted` : `the first ${MAX_INVENTORY}`}`)
+  // At most MAX_INVENTORY admitted ids, the newest: the record is pruned to what the Safe still owns (operator readOf).
+  const listed = byId ? [...opts.admitted!].slice(-MAX_INVENTORY) : await idsOf(Math.min(count, MAX_INVENTORY), blockNumber)
   const second = new Batch(client, MULTICALL3, blockNumber)
-  const positionReads = ids.map((tokenId) => second.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId], ...at })))
+  const positionReads = listed.map((tokenId) => second.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId], ...at })))
+  const ownerReads = byId ? listed.map((tokenId) => second.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [tokenId], ...at }))) : []
   if (second.size > 0) await second.run()
+  // A burned admitted id reverts ownerOf: skipped. A read that failed for any other reason fails the whole read, so
+  // a provider error never shows as a position that is not there.
+  const owned = async (i: number): Promise<boolean> => {
+    try {
+      return (await ownerReads[i]!.need()).toLowerCase() === safe.toLowerCase()
+    } catch (e) {
+      if (/revert|nonexistent|invalid token/i.test((e as Error).message ?? '')) return false
+      throw e
+    }
+  }
+  const keep = byId ? await Promise.all(listed.map((_, i) => owned(i))) : listed.map(() => true)
+  const ids = listed.filter((_, i) => keep[i])
   const positions: PoolPosition[] = []
-  for (const [i, tokenId] of ids.entries()) {
-    const p = await positionReads[i]!.need()
+  for (const tokenId of ids) {
+    const p = await positionReads[listed.indexOf(tokenId)]!.need()
     const pool = USDC_POOLS.find((n) => {
       const e = entry(n)
       return p[2].toLowerCase() === address(e.token0!).toLowerCase() && p[3].toLowerCase() === address(e.token1!).toLowerCase() && p[4] === e.fee
@@ -157,5 +186,5 @@ export async function readSafe(client: PublicClient, safe: Address): Promise<Saf
     positions.push({ tokenId, pool, token0: e.token0!, token1: e.token1!, fee: e.fee!, liquidity, tickLower, tickUpper, inRange: price.tick >= tickLower && price.tick < tickUpper, amount0, amount1, tokensOwed0, tokensOwed1 })
   }
   const live = prices[LIVE_POOL]!
-  return { block: blockNumber, deployed, eth, usdc: tokens.USDC ?? 0n, cbbtc: tokens.cbBTC ?? 0n, sqrtPriceX96: live.sqrtPriceX96, tick: live.tick, tokens, prices, positions }
+  return { block: blockNumber, deployed, eth, usdc: tokens.USDC ?? 0n, cbbtc: tokens.cbBTC ?? 0n, sqrtPriceX96: live.sqrtPriceX96, tick: live.tick, tokens, prices, positions, positionCount: count, ...(byId ? { byId, ownedIds: ids } : {}) }
 }

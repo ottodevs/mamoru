@@ -349,7 +349,9 @@ export async function verifyOwnerSignature(signature: Hex, safeTxHash: Hex, key:
   try {
     const { authenticatorData, clientDataFields, r, s } = decodeOwnerSignature(signature)
     const auth = hexToBytes(authenticatorData)
-    if (auth.length < 37 || !(auth[32]! & FLAG_UV)) return false
+    // WebAuthn.sol checks `authenticatorData.length > 32` and the flag bits, nothing about the sign counter: the
+    // same here (otto/mamoru#140 part2 #5), so the mirror refuses nothing the chain accepts on this account.
+    if (auth.length <= 32 || !(auth[32]! & FLAG_UV)) return false
     if (r === 0n || r >= P256_N || s === 0n || s >= P256_N) return false
     // The contract rebuilds clientDataJSON around the hash it is asked about; so does this.
     const clientDataJSON = `${CLIENT_DATA_PREFIX}${toB64url(hexToBytes(safeTxHash))}",${clientDataFields}}`

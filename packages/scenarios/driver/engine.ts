@@ -88,6 +88,13 @@ export type EngineHooks = {
    * Not called under a policy with the live `manage-any` grants, enabled at activation.
    */
   requestManageGrant?: (tokenId: bigint, pool: string) => Promise<EngineSession>
+  /**
+   * A position this engine minted for the account, once its mint is confirmed (otto/mamoru#140 part2 #4: the live
+   * operator records it as admitted), with the block it was minted in.
+   */
+  onMinted?: (tokenId: bigint, block?: bigint) => void
+  /** Whether one more position may be minted (the live operator: under MAX_INVENTORY admitted). Absent: always. */
+  mintAllowed?: () => boolean
 }
 
 /** The block of the latest operation that reached the chain: no review may observe before it. */
@@ -309,6 +316,7 @@ export class Engine {
     const proposal = decision.proposal!
     const session = this.session(proposal.grant)
     if (!session) return void j.move(op.opId, 'discarded', 'SESSION_MISSING')
+    if (proposal.kind === 'enter_mint' && this.hooks.mintAllowed && !this.hooks.mintAllowed()) return void j.move(op.opId, 'discarded', 'INVENTORY_FULL')
 
     // prepare: fresh block, quotes, calls, pre-check and the unsigned userOp.
     const block = await this.client.getBlock({ blockTag: 'latest' })
@@ -457,6 +465,7 @@ export class Engine {
       if (!minted) throw new Error(`${op.opId}: confirmed mint without a position transfer to the account`)
       op.mintedTokenId = minted.args.tokenId
       if (!this.allowedTokenIds.includes(minted.args.tokenId)) this.allowedTokenIds.push(minted.args.tokenId)
+      this.hooks.onMinted?.(minted.args.tokenId, op.included?.blockNumber)
       if (!hasManageAny(this.cfg.policy)) {
         if (!this.hooks.requestManageGrant) throw new Error(`${op.opId}: policy ${this.cfg.policy.policyId} needs a manage grant per position`)
         this.addSession(await this.hooks.requestManageGrant(minted.args.tokenId, proposal.pool))

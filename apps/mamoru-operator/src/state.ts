@@ -4,6 +4,7 @@ import type { AccountContext, Hex, OpView } from '@mamoru/domain'
 import type { SessionGrant } from '@mamoru/policy'
 import type { SafeTx } from '@mamoru/account/live'
 import type { Execution } from '@mamoru/account/safe'
+import type { SponsorEntry } from './sponsorship.ts'
 
 /** An op as GET /ops serves it, plus what the operator keeps: repeat count of an identical failure, and for a confirmed engine op the session and calls it used (ledger replay on restart). */
 export type StoredOp = OpView & {
@@ -49,6 +50,8 @@ export type ArmedActivation = {
   sentAt?: number
   /** Spec 006: the cap (base units) the signed summary named; the activation never takes in more under this signature. */
   capUsdc?: string
+  /** otto/mamoru#140 (part2 #3): the account's owner generation it was prepared at. Absent: armed before generations were kept. */
+  gen?: number
 }
 
 export type AccountState = {
@@ -93,6 +96,21 @@ export type AccountState = {
   armed?: ArmedActivation
   /** When owner executions of this account failed (ISO), last 24 h: the relayer's failure budget. */
   ownerFailures?: string[]
+  /**
+   * otto/mamoru#140 (part2 #3): owner generation, bumped by every activation, stop and renewal that lands. An
+   * activation prepared or armed at another generation is stale. Absent: 0.
+   */
+  gen?: number
+  /**
+   * otto/mamoru#140 (part2 #4): position tokenIds Mamoru's engine minted on this Safe. Only these are sized from by a
+   * withdrawal and shown by funding; anyone can send a Safe a position NFT. Absent: an account from before the record
+   * (every non-dust position counts until it is seeded at boot or the next activation).
+   */
+  admittedTokenIds?: string[]
+  /** Sol review round 2 #3: the block each admitted id was minted in; a read from before it never prunes the id. */
+  admittedAt?: Record<string, string>
+  /** otto/mamoru#140 (part2 #6): owner transactions of this account the relayer paid for, last 24 h (sponsorship limits). */
+  sponsored?: SponsorEntry[]
 }
 
 export type OperatorState = { accounts: Record<string, AccountState> }

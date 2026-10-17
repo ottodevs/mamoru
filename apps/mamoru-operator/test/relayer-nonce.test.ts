@@ -32,8 +32,9 @@ const server = Bun.serve({
 afterAll(() => server.stop(true))
 
 /** A provider whose pending count is whatever `count` says: a lagging node repeats an old one. */
-function relayer(count: () => number, order?: string[]) {
+function relayer(count: () => number, order?: string[], l1Fee: () => Promise<bigint> = async () => 0n) {
   const client = {
+    readContract: async ({ functionName }: { functionName: string }) => (functionName === 'getL1Fee' ? l1Fee() : null),
     estimateGas: async () => 21_000n,
     estimateFeesPerGas: async () => (order?.push('fees'), { maxFeePerGas: 6_000_000n, maxPriorityFeePerGas: 1_000_000n }),
     getTransactionCount: async () => count(),
@@ -79,5 +80,22 @@ describe('the relayer does not reuse the nonce of a transaction a provider just 
     ;(r as unknown as { lastSent: { nonce: number; at: number } }).lastSent.at -= 121_000
     await r.send({ to: TO, value: 1n })
     expect(nonces).toEqual([41, 41])
+  })
+})
+
+describe('onSending gets an upper bound on what the transaction costs (otto/mamoru#140, Sol review round 5 of #65)', () => {
+  test('execution at the signed maxFeePerGas plus twice the L1 data fee of its bytes', async () => {
+    // 21,000 estimated, signed with the 30% margin: 27,300.
+    let bound = 0n
+    await relayer(() => 1, undefined, async () => 5_000n).send({ to: TO, value: 1n }, undefined, (b) => void (bound = b))
+    expect(bound).toBe(27_300n * 6_000_000n + 10_000n)
+  })
+
+  test('an oracle that cannot answer is bounded by the fixed fallback', async () => {
+    let bound = 0n
+    await relayer(() => 2, undefined, async () => {
+      throw new Error('HTTP request failed. Status: 429')
+    }).send({ to: TO, value: 1n }, undefined, (b) => void (bound = b))
+    expect(bound).toBe(27_300n * 6_000_000n + 2n * 100_000_000_000_000n)
   })
 })
