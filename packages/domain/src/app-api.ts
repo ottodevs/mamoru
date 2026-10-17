@@ -134,8 +134,10 @@ export type OverCap = { code: 'DEPOSIT_OVER_CAP'; usdc: string; capUsdc: string;
 // POST /api/accounts/:accountKey/activate            body: OwnerSignature -> OpView
 // Deploys the Safe if needed and enables the session grants sized to the observed deposit.
 // POST /api/accounts/:accountKey/transfer/prepare   body: TransferRequest -> TransferPlan
-// POST /api/accounts/:accountKey/transfer           body: OwnerSignature -> OpView
-// Frees USDC by reducing positions if idle USDC is short (engine), then the owner transfer.
+// POST /api/accounts/:accountKey/transfer           body: OwnerSignature -> OpView | 409 PRICE_DIVERGENCE_STALE
+// Frees USDC by reducing positions if idle USDC is short (engine), then the owner transfer. PRICE_DIVERGENCE_STALE:
+// the submit carried an acceptDivergence whose quote the price has since moved past; nothing was sent and nothing
+// was refused outright — the app re-prepares and shows the fresh PriceDivergenceWarning (otto/mamoru#155).
 // Works on a Safe that is not deployed yet (a deposit that never started): the relayer deploys it, then the transfer runs.
 // POST /api/accounts/:accountKey/stop/prepare        -> OwnerTxToSign
 // POST /api/accounts/:accountKey/renew/prepare       -> OwnerTxToSign   (running account: same grants, fresh validity; or, with grants missing and no renewal due, only the missing ones)
@@ -147,10 +149,36 @@ export type OverCap = { code: 'DEPOSIT_OVER_CAP'; usdc: string; capUsdc: string;
 // the operator swaps it on Uniswap with the recipient as the swap output (ETH is unwrapped from WETH).
 export type WithdrawAsset = 'USDC' | 'EURC' | 'ETH' | 'JPYC'
 export type TransferRequest = { to: Hex0x; amountUsdc: string; asset?: WithdrawAsset }
+
+// otto/mamoru#155: a withdrawal (the reduce swap-back into USDC, or the payout swap for EURC/ETH/JPYC) that
+// would execute meaningfully below the fair price over the last 30 minutes. Never a refusal: prepare still
+// returns a plan the owner can sign, carrying this warning so they can choose to wait or accept the quote
+// as-is. One leg per diverging swap (usually one; a reduce-then-payout withdrawal can have two).
+export type PriceDivergenceLeg = {
+  token: string // registry token name of the diverging leg, e.g. 'USDC' (swap-back) or the payout asset
+  decimals: number
+  fairAmount: string // base units: what this leg gives at the 30-minute fair price
+  quotedAmount: string // base units: what the current quote gives (<= fairAmount)
+  shortfall: string // base units: fairAmount - quotedAmount
+  shortfallBps: number // shortfall / fairAmount, basis points
+}
+export type PriceDivergenceWarning = {
+  code: 'PRICE_DIVERGENCE'
+  legs: PriceDivergenceLeg[] // at least one
+  shortfallUsdc: string // total shortfall across every leg, converted to USDC base units
+  // Identifies the exact quote baked into ownerTx's calldata (the amounts above and the router minimum are
+  // already fixed at prepare time). Echoed back in OwnerSignature.acceptDivergence on submit; the operator
+  // treats a missing or mismatched quoteId while a warning is on file as not accepted.
+  quoteId: string
+}
 export type TransferPlan = {
   reduce: { tokenId: string; liquidityBps: number }[]
   receive?: { asset: WithdrawAsset; quoted: string; minimum: string; decimals: number; route: string }
   ownerTx: OwnerTxToSign
+  // Present only when the quote prices meaningfully below the fair price. Absent for every prepare within
+  // tolerance, and absent entirely from an operator built before this field existed — the app then behaves
+  // exactly as it does today (otto/mamoru#155).
+  divergence?: PriceDivergenceWarning
 }
 // GET /api/accounts/:accountKey/withdraw-assets -> { assets: { asset: WithdrawAsset; available: boolean; reason?: string }[] }
 export type OwnerTxToSign = {
@@ -169,6 +197,11 @@ export type OwnerSignature = {
   authenticatorData: string
   clientDataJSON: string
   signature: string        // DER, base64url
+  // otto/mamoru#155, transfer only: the owner explicitly accepted the PriceDivergenceWarning this prepare
+  // returned. quoteId must match TransferPlan.divergence.quoteId for this prepareId; the operator executes
+  // at that already-quoted minimum, never a worse one. Absent on every submit that carried no warning, and
+  // on every other kind — an operator that never emits PriceDivergenceWarning never looks at this field.
+  acceptDivergence?: { quoteId: string }
 }
 export type OpView = {
   opId: string
