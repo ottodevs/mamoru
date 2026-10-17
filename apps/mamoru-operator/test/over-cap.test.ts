@@ -2346,6 +2346,51 @@ describe('renewing the approval of a running account', () => {
     expect((await w.op.prepareActivate(ctx)).summary.length).toBeGreaterThan(0)
   })
 
+  test('otto/mamoru#140: a full-sweep cycle whose list changes mid-cycle verifies Start only once every id tracked now was read', async () => {
+    for (const size of [600, 0, 1100])
+      for (const change of ['none', 'add-enabled', 'superseded-shrinks'] as const)
+        for (const reenabled of [0, 1, 500]) {
+          const label = JSON.stringify({ size, change, reenabled })
+          const { w, acc } = await running()
+          await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))
+          w.knobs.batchGrants = true
+          // Half the ids sit in superseded and read disabled (they leave it on their first read, into revoked); the
+          // other half are old revoked ids, `reenabled` of which the owner enabled again. size 0: the review's case,
+          // exactly 1000 other ids (500 superseded, the rest revoked), two windows with no wrap-around.
+          const known = new Set(acc.revoked.map((id) => id.toLowerCase())).size
+          const half = size === 0 ? 500 : Math.floor(size / 2)
+          const total = size === 0 ? 1000 - known : size
+          const ids = Array.from({ length: total }, (_, i) => toHex(i + 1, { size: 32 }))
+          acc.superseded = ids.slice(0, half)
+          acc.revoked.push(...ids.slice(half))
+          for (const id of ids.slice(half, half + reenabled)) w.knobs.enabled.add(id.toLowerCase())
+          const extra = toHex(9_999, { size: 32 })
+          let started = false
+          for (let call = 0; call < 8 && !started; call++) {
+            if (call === 1 && change === 'add-enabled') {
+              // A new id appears between two calls of the cycle, enabled on the Safe.
+              acc.revoked.push(extra)
+              w.knobs.enabled.add(extra.toLowerCase())
+            }
+            if (call === 1 && change === 'superseded-shrinks') acc.superseded = (acc.superseded ?? []).slice(0, 10)
+            const res = await w.op.prepareActivate(ctx).catch((e: unknown) => e)
+            if (res instanceof HttpError) {
+              expect(['GRANT_CHECK_UNAVAILABLE', 'STOP_FIRST'], label).toContain(res.code)
+              if (res.code === 'STOP_FIRST') break
+            } else started = true
+            // Whenever Start would pass, every id enabled on the chain is tracked (I3): nothing is left beside it.
+            if (started) {
+              const tracked = new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? [])].map((id) => id.toLowerCase()))
+              expect([...w.knobs.enabled].filter((id) => !tracked.has(id)), label).toEqual([])
+            }
+          }
+          const anyEnabled = reenabled > 0 || change === 'add-enabled'
+          // With an old grant enabled again Start never passes (STOP_FIRST once the cycle has read it); with none, it does.
+          expect(started, label).toBe(!anyEnabled)
+          if (anyEnabled) expect((acc.superseded ?? []).length, label).toBeGreaterThan(0)
+        }
+  }, 240_000)
+
   test('otto/mamoru#140: reconciliation does not apply an older renewal on a head below the account floor', async () => {
     const { w, acc } = await running()
     const had = acc.grants.map((g) => g.permissionId)

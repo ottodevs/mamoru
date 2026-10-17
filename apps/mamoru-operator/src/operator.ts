@@ -70,6 +70,8 @@ const GRANTS_CHECK_MS = 300_000
 const GRANTS_SWEEP_MAX = 100
 /** Other permission ids per full sweep (settle passes, Start), read in sequential batches of BATCH_MAX_CALLS. */
 const GRANTS_FULL_MAX = 500
+/** A full-sweep cycle counts an id read longer ago than this as not read: it is read again before Start passes. */
+const FULL_READ_FRESH_MS = 600_000
 
 /** Engine-loop sweeps within which every non-engine id the account knows is read again (see enforceGrants). */
 export function sweepsToCover(others: number, engine: number): number {
@@ -382,9 +384,8 @@ export class Operator {
   private readonly grantsChecked = new Map<string, number>()
   /** Where the engine loop's rotating grant sweep resumes, per account (enforceGrants). */
   private readonly sweepCursor = new Map<string, number>()
-  /** Full sweeps over a list longer than GRANTS_FULL_MAX: where the next resumes, and whether this cycle read it all. */
-  private readonly fullCursor = new Map<string, number>()
-  private readonly fullCycleOk = new Map<string, boolean>()
+  /** Full sweeps: the ids read in the account's current cycle, with the block and time each was read at (enforceGrants). */
+  private readonly fullRead = new Map<string, Map<string, { block: bigint; at: number }>>()
   /** Since when (ms) engine review has been held for a pending non-activate prepare on this account; see reviewHold. */
   private readonly reviewHeldSince = new Map<string, number>()
   private armTimer: ReturnType<typeof setTimeout> | null = null
@@ -1279,25 +1280,28 @@ export class Operator {
     // one is read again within ceil(others / (GRANTS_SWEEP_MAX - engine)) sweeps (sweepsToCover).
     const list = [...others.values()]
     let window = list
-    // A full sweep reads at most GRANTS_FULL_MAX other ids per call, in sequential batches; a longer list is read
-    // over several calls, resuming where the last left off, and the call is verified only when it ends a cycle
-    // over the whole list in which every window read the chain (fullCycleOk).
-    let endsCycle = true
     const full = opts.full !== false
-    const cap = full ? GRANTS_FULL_MAX : Math.max(1, GRANTS_SWEEP_MAX - engine.length)
-    if (list.length > cap) {
-      const cursors = full ? this.fullCursor : this.sweepCursor
-      const start = (cursors.get(acc.accountKey) ?? 0) % list.length
-      if (full && start === 0) this.fullCycleOk.set(acc.accountKey, true)
-      window = Array.from({ length: cap }, (_, i) => list[(start + i) % list.length]!)
-      const next = start + cap
-      endsCycle = next >= list.length
-      cursors.set(acc.accountKey, endsCycle ? 0 : next)
+    if (full) {
+      // A full sweep reads at most GRANTS_FULL_MAX other ids per call, in sequential batches. It keeps, per account,
+      // which ids it has read in the current cycle and at which block (fullRead): each call reads ids not read yet in
+      // it (or read below the floor, or longer ago than FULL_READ_FRESH_MS), and the call is verified only when every
+      // id tracked now, ids added since the cycle began included, has been read in it.
+      const floor = this.floorOf(acc, 0n)
+      const seen = this.fullRead.get(acc.accountKey) ?? new Map<string, { block: bigint; at: number }>()
+      this.fullRead.set(acc.accountKey, seen)
+      const fresh = (id: Hex) => {
+        const r = seen.get(low(id))
+        return !!r && r.block >= floor && Date.now() - r.at < FULL_READ_FRESH_MS
+      }
+      window = list.filter((id) => !fresh(id)).slice(0, GRANTS_FULL_MAX)
+    } else if (list.length > GRANTS_SWEEP_MAX - engine.length) {
+      // The engine loop's sweep: the engine's grants every time, a rotating window of the others.
+      const size = Math.max(1, GRANTS_SWEEP_MAX - engine.length)
+      const start = (this.sweepCursor.get(acc.accountKey) ?? 0) % list.length
+      window = Array.from({ length: size }, (_, i) => list[(start + i) % list.length]!)
+      this.sweepCursor.set(acc.accountKey, (start + size) % list.length)
     }
-    const fail = () => {
-      if (full && list.length > cap) this.fullCycleOk.set(acc.accountKey, false)
-      return false
-    }
+    const fail = () => false
     const universe = [...engine, ...window]
     if (!universe.length) return true
     const block = await this.headAtLeast(acc, 0n)
@@ -1330,12 +1334,30 @@ export class Operator {
       changed = true
     }
     if (changed) this.store.save()
-    if (!full || list.length <= cap) return true
-    // Part of a cycle over a long list: verified only at its end, and only if every window of it read the chain.
-    if (!endsCycle) return false
-    const ok = this.fullCycleOk.get(acc.accountKey) === true
-    this.fullCycleOk.delete(acc.accountKey)
-    return ok
+    if (!full) return true
+    // Recorded as read in this cycle at `block`; verified when every id tracked now (recomputed: this sweep may have
+    // moved ids between superseded and revoked, or the list grown) has been read in it at a block >= the floor.
+    const seen = this.fullRead.get(acc.accountKey)!
+    // Everything read now counts: the engine's grants too (a stop by I1 above makes them `others`).
+    for (const id of universe) seen.set(low(id), { block, at: Date.now() })
+    const floor = this.floorOf(acc, 0n)
+    const all = [...(acc.superseded ?? []), ...this.knownIds(acc)].filter((id) => !acc.grants.some((g) => low(g.permissionId) === low(id)))
+    const done = all.every((id) => {
+      const r = seen.get(low(id))
+      return !!r && r.block >= floor && Date.now() - r.at < FULL_READ_FRESH_MS
+    })
+    // A verified cycle ends: the next full sweep (the next Start) reads everything again.
+    if (done) this.fullRead.delete(acc.accountKey)
+    return done
+  }
+
+  /** Every permission id the account knows besides `superseded`: pending ops', the armed approval's, every owner op's grants and revocations, the revoked list. */
+  private knownIds(acc: AccountState): Hex[] {
+    return [
+      ...acc.ops.flatMap((o) => [...((o as StoredOp).ownerGrants ?? []).map((g) => g.permissionId), ...((o as StoredOp).revokes ?? [])]),
+      ...(acc.armed?.grants ?? []).map((g) => g.permissionId),
+      ...acc.revoked,
+    ]
   }
 
   /** The account's floor and `min`: no grant is read at a block below it (see headAtLeast). */
