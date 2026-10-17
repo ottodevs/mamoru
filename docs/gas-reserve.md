@@ -53,8 +53,12 @@ as `RESERVE_SWAP_EXPIRED`. Any other failure after the hand-over may be out.
 What may be out is settled by hash: the relayer gives the hash and nonce of each signed copy before it leaves, and
 they are kept on the op (`signedTxs`). Reconciliation reads their receipts for as long as one can land, not a range of
 blocks. A successful receipt starts the account. A reverted one is `OWNER_TX_FAILED` with its hash and block (gas
-paid). With no receipt, the op is closed as `OWNER_TX_DROPPED` once the relayer nonce of every copy is taken by
-another transaction, or as `RESERVE_SWAP_EXPIRED` once the deadline is 10 minutes past.
+paid). Any doubt keeps it open (`OWNER_TX_ERROR`): a lookup that errors, a node that knows the transaction (mined or
+pending) but serves no receipt yet. It is closed only when every copy is definitively not on chain (a "no such
+receipt" and a "no such transaction" answer for each), and either the relayer nonce of every copy is taken at a
+pinned block (`OWNER_TX_DROPPED`) or the deadline is 10 minutes past (`RESERVE_SWAP_EXPIRED`). Even then a second
+pass at least 2 minutes later has to see the same. While such an op is open, reconciliation runs again on its own
+timer, with no app traffic needed: after 10 s, doubling up to 5 minutes. The timer is armed again at startup.
 
 ## When the relayer still pays (#82)
 

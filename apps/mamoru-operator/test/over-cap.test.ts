@@ -40,7 +40,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n, eth: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, weiPerUsdc: 0n, twapTick: null as number | null, blockTime: 1_790_000_000n, notAfterSeen: [] as bigint[], expireInQueue: false, proxyStops: null as null | 'not-sent' | 'maybe-sent' | 'unsettled', receipts: new Map<string, TransactionReceipt>(), signedNonce: 9 }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, weiPerUsdc: 0n, twapTick: null as number | null, blockTime: 1_790_000_000n, notAfterSeen: [] as bigint[], expireInQueue: false, proxyStops: null as null | 'not-sent' | 'maybe-sent' | 'unsettled', receipts: new Map<string, TransactionReceipt>(), signedNonce: 9, lookupsDown: false, known: new Set<string>() }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -48,10 +48,17 @@ function world(usdc: bigint) {
   const client = {
     getBlockNumber: async () => 100n,
     getBlock: async () => ({ number: 100n, timestamp: knobs.blockTime }),
+    // Like viem: a node with no such receipt or transaction answers with a typed not-found error; `lookupsDown` is a node that cannot answer.
     getTransactionReceipt: async ({ hash }: { hash?: string } = {}) => {
+      if (knobs.lookupsDown) throw new Error('HTTP request failed. Status: 503')
       const r = hash && knobs.receipts.get(hash.toLowerCase())
       if (r) return r
-      throw new Error('no receipt')
+      throw Object.assign(new Error('no receipt'), { name: 'TransactionReceiptNotFoundError' })
+    },
+    getTransaction: async ({ hash }: { hash: string }) => {
+      if (knobs.lookupsDown) throw new Error('HTTP request failed. Status: 503')
+      if (knobs.known.has(hash.toLowerCase()) || knobs.receipts.has(hash.toLowerCase())) return { hash, blockNumber: null }
+      throw Object.assign(new Error('no transaction'), { name: 'TransactionNotFoundError' })
     },
     getLogs: async () => [],
     getCode: async () => (chain.deployed ? '0x01' : undefined),
@@ -2243,6 +2250,8 @@ describe('the activation buys its own gas reserve', () => {
       w.knobs.proxyStops = stop
       const op = await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
       expect(op).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      // The background pass the failure scheduled runs first, so each test drives the passes it counts.
+      await Bun.sleep(20)
       const stored = w.state.accounts.k!.ops.find((o) => o.opId === op.opId)!
       return { w, op, stored, hash: signedHash(w.sent.length) }
     }
@@ -2275,17 +2284,78 @@ describe('the activation buys its own gas reserve', () => {
       expect(w.state.accounts.k!.active).toBe(false)
     })
 
-    test('no receipt: closed once its relayer nonce is taken by another transaction, or once the deadline is past', async () => {
+    /** A "not landed" first seen this long ago: the next pass may close it. */
+    const seenBefore = (stored: { notLandedSince?: string }) => (stored.notLandedSince = new Date(Date.now() - 121_000).toISOString())
+
+    test('no receipt anywhere: closed as dropped (nonce taken) or expired (deadline past), and only on a second pass that agrees', async () => {
       const dropped = await maybeOut()
       // The relayer has mined nonces up to 5 (latest count): a copy at nonce 3 can never land.
       dropped.stored.signedTxs = [{ hash: dropped.hash, nonce: 3 }]
+      await dropped.w.op.reconcileOwner(dropped.w.state.accounts.k!)
+      expect(dropped.stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      expect(dropped.stored.notLandedSince).toBeString()
+      seenBefore(dropped.stored)
       await dropped.w.op.reconcileOwner(dropped.w.state.accounts.k!)
       expect(dropped.stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_DROPPED' })
 
       const late = await maybeOut()
       late.stored.reserveDeadline = String(Math.floor(Date.now() / 1000) - 601)
+      seenBefore(late.stored)
       await late.w.op.reconcileOwner(late.w.state.accounts.k!)
       expect(late.stored).toMatchObject({ state: 'failed', code: 'RESERVE_SWAP_EXPIRED' })
     })
+
+    test('nonce taken by our own copy while its receipt is unavailable: never dropped, confirmed once the receipt is served', async () => {
+      const { w, stored, hash } = await maybeOut()
+      stored.signedTxs = [{ hash, nonce: 3 }]
+      seenBefore(stored)
+      w.knobs.lookupsDown = true
+      await w.op.reconcileOwner(w.state.accounts.k!)
+      expect(stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      expect(stored.notLandedSince).toBeUndefined()
+      // A node that knows the transaction but serves no receipt yet: still doubt.
+      w.knobs.lookupsDown = false
+      w.knobs.known.add(hash.toLowerCase())
+      seenBefore(stored)
+      await w.op.reconcileOwner(w.state.accounts.k!)
+      expect(stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      w.knobs.receipts.set(hash.toLowerCase(), receipt(hash, true, 5_101n))
+      await w.op.reconcileOwner(w.state.accounts.k!)
+      expect(stored).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', txHash: hash })
+      expect(w.state.accounts.k!.active).toBe(true)
+    })
+
+    test('deadline past while the receipt is unavailable: not expired until a lookup says there is none', async () => {
+      const { w, stored } = await maybeOut()
+      stored.reserveDeadline = String(Math.floor(Date.now() / 1000) - 601)
+      seenBefore(stored)
+      w.knobs.lookupsDown = true
+      await w.op.reconcileOwner(w.state.accounts.k!)
+      expect(stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      w.knobs.lookupsDown = false
+      await w.op.reconcileOwner(w.state.accounts.k!)
+      // The first definitive "none": noted, not yet closed.
+      expect(stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      seenBefore(stored)
+      await w.op.reconcileOwner(w.state.accounts.k!)
+      expect(stored).toMatchObject({ state: 'failed', code: 'RESERVE_SWAP_EXPIRED' })
+    })
+
+    test('a copy that lands after the first pass starts the account on the follow-up timer, with no app traffic', async () => {
+      const w = quiet(20_000_000n)
+      ;(w.op as unknown as { signedFollowMs: number }).signedFollowMs = 5
+      w.knobs.proxyStops = 'maybe-sent'
+      const op = await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+      const hash = signedHash(w.sent.length)
+      const acc = w.state.accounts.k!
+      await Bun.sleep(30)
+      expect(acc.active).toBe(false)
+      w.knobs.receipts.set(hash.toLowerCase(), receipt(hash, true, 9_000n))
+      for (let i = 0; i < 50 && !acc.active; i++) await Bun.sleep(10)
+      expect(acc.active).toBe(true)
+      expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'confirmed', txHash: hash })
+      w.op.shutdown()
+    })
+
   })
 })

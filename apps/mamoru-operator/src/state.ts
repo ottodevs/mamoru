@@ -18,6 +18,8 @@ export type StoredOp = OpView & {
   reserveDeadline?: string
   /** Every copy of a send with a time limit, kept before it left: reconciliation reads them by hash. */
   signedTxs?: { hash: string; nonce: number }[]
+  /** When a pass first found none of those copies on chain (settleSigned): closed only if a later pass agrees. */
+  notLandedSince?: string
 }
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */
