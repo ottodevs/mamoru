@@ -11,7 +11,7 @@ import { base64url, PasskeyError } from '../../src/web/lib/passkey.ts'
 import { challengeUsable, signInCopy, signInProblem, signInWithPasskey, WALKAWAY_URL } from '../../src/web/lib/signin.ts'
 import { SignInCard } from '../../src/web/routes/signin.tsx'
 import { base64urlDecode, hexToBytes } from '../../src/web/lib/passkey-sign.ts'
-import { capNote, cbbtcPrice, ceilCents, holdings, humanMessage, overCapOf, split, usd, usdPlain } from '../../src/web/lib/money.ts'
+import { capNote, cbbtcPrice, ceilCents, holdings, humanMessage, overCapOf, split, usd, usdExactInput, usdPlain } from '../../src/web/lib/money.ts'
 import { activationLive, historyOps, needsRetry, opLine } from '../../src/web/lib/ops.ts'
 import { isAddress, parseUsdc } from '../../src/web/lib/owner-flow.ts'
 import { encodeQr } from '../../src/web/lib/qr.ts'
@@ -344,6 +344,14 @@ describe('helpers', () => {
     expect(s.maxWithdraw % 10_000n).toBe(0n)
     expect(s.maxWithdraw < s.total).toBe(true)
     expect(usd(1_930_000n)).toBe('1.93')
+  })
+  test('Max is all of it when every dollar is idle USDC: nothing to unwind, no margin, no dust left behind', () => {
+    const s = split({ ...funded, usdc: '26983456', positions: [] }, cbbtcPrice(poolsResponse))
+    expect(s.maxWithdraw).toBe(26_983_456n)
+    expect(usdExactInput(s.maxWithdraw)).toBe('26.983456')
+    expect(parseUsdc(usdExactInput(s.maxWithdraw))).toBe('26983456')
+    expect(usdExactInput(26_900_000n)).toBe('26.90')
+    expect(usdExactInput(10_000n)).toBe('0.01')
   })
   test('operator errors become plain USDC copy', () => {
     expect(humanMessage('the Safe cannot free 2000000 USDC base units', 1_930_000n)).toBe('You can withdraw up to 1.93 USDC right now.')

@@ -23,7 +23,11 @@ export type Split = {
   idleUsdc: bigint
   idleCbbtc: bigint
   priced: boolean // false when cbBTC is held but no price was observed
-  maxWithdraw: bigint // total less a 1% margin, rounded down to cents
+  /**
+   * What Max fills in. The 1% margin covers the slippage of unwinding positions; idle USDC needs no unwind (the
+   * operator pays it straight out), so when it covers that much Max is every last unit of it.
+   */
+  maxWithdraw: bigint
   /** Every token held outside a position, as the operator reports it; empty for an older operator. */
   idleTokens: Holding[]
 }
@@ -57,7 +61,7 @@ export function split(f: FundingView, price: bigint | null): Split {
     idleUsdc,
     idleCbbtc,
     priced: price !== null || (f.positions.every((p) => p.valueUsdc !== undefined || p.amountCbbtc === '0') && idleCbbtc === 0n),
-    maxWithdraw: (margin / 10_000n) * 10_000n,
+    maxWithdraw: idleUsdc >= margin ? idleUsdc : (margin / 10_000n) * 10_000n,
     idleTokens,
   }
 }
@@ -119,6 +123,12 @@ export function belowMinimumOf(f: FundingView | undefined): { usdc: bigint; minU
 /** Base units to the amount a person types: "1.93". */
 export function usdInput(raw: bigint): string {
   return usd(raw).replace(/,/g, '')
+}
+
+/** Base units to every unit a person could type: "26.983456", "26.90". What Max fills in, so it never leaves dust. */
+export function usdExactInput(raw: bigint): string {
+  const f = (raw % 1_000_000n).toString().padStart(6, '0').replace(/0+$/, '').padEnd(2, '0')
+  return `${raw / 1_000_000n}.${f}`
 }
 
 /** Rewrites raw operator text: base-unit numbers become USDC, and a shortfall becomes what can be withdrawn. */
