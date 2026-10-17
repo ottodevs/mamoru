@@ -2442,6 +2442,53 @@ describe('renewing the approval of a running account', () => {
       }
   }, 120_000)
 
+  test('otto/mamoru#140: reconciliation retries on its own, with backoff, while an owner op is unresolved, and stops once it resolves', async () => {
+    const { w, acc } = await running()
+    const stx = `0x${'5a'.repeat(32)}` as Hex
+    const hash = `0x${'ab'.repeat(32)}` as Hex
+    acc.ops.push({ opId: 'own-7-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', txHash: hash, safeTxHash: stx, updatedAt: new Date().toISOString() } as never)
+    type R = { reconcileRetryMs: number; reconcileRetryMaxMs: number; reconcileSoon(a: AccountState): void; reconcileTimers: Map<string, { delay: number }>; receiptOf(h: Hex): Promise<unknown> }
+    const o = w.op as unknown as R
+    o.reconcileRetryMs = 5
+    o.reconcileRetryMaxMs = 20
+    // An RPC outage: the first passes cannot read anything; then the receipt is served.
+    let tries = 0
+    const delays: number[] = []
+    o.receiptOf = async () => {
+      tries++
+      const t = o.reconcileTimers.get(acc.accountKey)
+      if (t) delays.push(t.delay)
+      return tries < 5 ? null : { transactionHash: hash, status: 'success', blockNumber: 99n, logs: [{ address: SAFE, topics: [EXECUTION_SUCCESS, stx] }] }
+    }
+    o.reconcileSoon(acc)
+    for (let i = 0; i < 100 && acc.ops.find((x) => x.opId === 'own-7-exit')!.state !== 'confirmed'; i++) await Bun.sleep(5)
+    expect(acc.ops.find((x) => x.opId === 'own-7-exit')).toMatchObject({ state: 'confirmed', txHash: hash })
+    expect(tries).toBeGreaterThanOrEqual(5)
+    // The wait doubled up to its maximum, and nothing is scheduled once resolved.
+    expect(delays.slice(0, 3)).toEqual([5, 10, 20])
+    await Bun.sleep(30)
+    expect(o.reconcileTimers.has(acc.accountKey)).toBe(false)
+    w.op.shutdown()
+  })
+
+  test('otto/mamoru#140: past 2000 tracked ids a full grant check alerts, and still reads every id (no retirement)', async () => {
+    const { w, acc } = await running()
+    const old = Array.from({ length: 2100 }, (_, i) => toHex(i + 1, { size: 32 }))
+    acc.revoked.push(...old)
+    w.knobs.batchGrants = true
+    const lines: string[] = []
+    const err = console.error
+    console.error = (...a: unknown[]) => void lines.push(a.join(' '))
+    try {
+      type Sweep = { enforceGrants(a: AccountState): Promise<boolean> }
+      expect(await (w.op as unknown as Sweep).enforceGrants(acc)).toBe(true)
+    } finally {
+      console.error = err
+    }
+    expect(lines.some((l) => l.startsWith('[alert]') && l.includes('permission ids'))).toBe(true)
+    expect(w.knobs.batchedGrantReads).toBe(acc.grants.length + new Set(acc.revoked.map((id) => id.toLowerCase())).size)
+  })
+
   test('otto/mamoru#140: reconciliation does not apply an older renewal on a head below the account floor', async () => {
     const { w, acc } = await running()
     const had = acc.grants.map((g) => g.permissionId)

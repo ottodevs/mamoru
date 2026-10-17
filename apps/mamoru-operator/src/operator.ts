@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { decodeErrorResult, decodeFunctionResult, encodeFunctionData, parseAbi, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { decodeErrorResult, decodeFunctionResult, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
@@ -64,6 +64,15 @@ const FUNDING_STALE_MS = 60_000
 const FUNDING_FRESH_READ_MS = 2_000
 
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
+const EXECUTION_SUCCESS_EVENT = parseAbiItem('event ExecutionSuccess(bytes32 indexed txHash, uint256 payment)')
+/** How far past an owner op's send block its ExecutionSuccess is searched for (about a day of Base blocks), and per request. */
+const OWNER_LOG_SEARCH_BLOCKS = 43_200n
+const OWNER_LOG_PAGE_BLOCKS = 2_000n
+/** First and longest wait between reconciliation passes of an account with owner ops still unresolved (doubling). */
+const RECONCILE_RETRY_MS = 30_000
+const RECONCILE_RETRY_MAX_MS = 1_800_000
+/** Above this many tracked permission ids a full grant check alerts (expected ~48 a year: 12 grants, 4 renewals). */
+const GRANTS_TRACKED_ALERT = 2_000
 /** How often the engine loop reads every grant it uses before a review (otto/mamoru#140, invariant I1). */
 const GRANTS_CHECK_MS = 300_000
 /** Permission ids per engine-loop grant sweep (one Multicall3 chunk): the engine's always, the others in rotation. */
@@ -376,8 +385,15 @@ export class Operator {
   private readonly locks = new Map<string, Lock>()
   private readonly runners = new Map<string, Runner>()
   private readonly reconciled = new Map<string, number>()
+  /** Per account: the pending reconciliation timer and its current backoff (reconcileLater). */
+  private readonly reconcileTimers = new Map<string, { timer: ReturnType<typeof setTimeout> | null; delay: number }>()
+  private reconcileRetryMs = RECONCILE_RETRY_MS
+  private reconcileRetryMaxMs = RECONCILE_RETRY_MAX_MS
+  private shutDown = false
   /** When (ms) the engine loop last read every grant of the account (enforceGrants, invariant I1). */
   private readonly grantsChecked = new Map<string, number>()
+  /** When (ms) the tracked-ids alert last fired per account. */
+  private readonly grantsAlerted = new Map<string, number>()
   /** Where the engine loop's rotating grant sweep resumes, per account (enforceGrants). */
   private readonly sweepCursor = new Map<string, number>()
   /** Since when (ms) engine review has been held for a pending non-activate prepare on this account; see reviewHold. */
@@ -523,6 +539,9 @@ export class Operator {
 
   shutdown(): void {
     this.armStopped = true
+    this.shutDown = true
+    for (const t of this.reconcileTimers.values()) if (t.timer) clearTimeout(t.timer)
+    this.reconcileTimers.clear()
     if (this.armTimer) clearTimeout(this.armTimer)
     for (const r of this.runners.values()) {
       r.stopped = true
@@ -1293,6 +1312,12 @@ export class Operator {
     }
     const universe = [...engine, ...window]
     if (!universe.length) return true
+    // otto/mamoru#140, a deliberate tradeoff with I3: no id is ever dropped, so a full check grows with the account's
+    // history (expected ~48 ids a year: 12 grants, 4 renewals). Past GRANTS_TRACKED_ALERT it alerts, once an hour.
+    if (opts.full !== false && list.length + engine.length > GRANTS_TRACKED_ALERT && Date.now() - (this.grantsAlerted.get(acc.accountKey) ?? 0) > 3_600_000) {
+      this.grantsAlerted.set(acc.accountKey, Date.now())
+      logErr('[alert]', `${acc.accountKey} tracks ${list.length + engine.length} permission ids: every full grant check reads them all (over ${GRANTS_TRACKED_ALERT})`)
+    }
     const block = await this.headAtLeast(acc, 0n)
     if (block === null) return false
     const on = await this.enabledAt(acc, universe, block)
@@ -2395,6 +2420,8 @@ export class Operator {
 
   private newOp(acc: AccountState, kind: OpView['kind']): OpView {
     const op: OpView = { opId: `own-${++acc.seq}-${kind}`, kind, state: 'proposed', updatedAt: now() }
+    // When it was created, before anything is sent: the earliest its transaction can be on chain (findOwnerTx).
+    ;(op as StoredOp).sentAt = Date.now()
     acc.ops.push(op)
     this.store.save()
     return op
@@ -2621,13 +2648,44 @@ export class Operator {
 
   /** Background pass (throttled, under the account lock): owner ops failed only because the receipt poll failed. */
   private reconcileSoon(acc: AccountState): void {
-    if (!acc.ops.some((o) => o.opId.startsWith('own-') && o.state === 'failed' && (o.code === RECEIPT_UNKNOWN || o.code === 'RENEWAL_UNPROVEN'))) return
+    if (!this.unresolved(acc)) return
     const last = this.reconciled.get(acc.accountKey) ?? 0
-    if (Date.now() - last < RECONCILE_EVERY_MS) return
+    if (Date.now() - last < RECONCILE_EVERY_MS) return this.reconcileLater(acc)
     this.reconciled.set(acc.accountKey, Date.now())
     this.lock(acc.accountKey)
       .run(() => this.reconcileOwner(acc))
       .catch((e) => logErr(`[reconcile] ${acc.accountKey}`, e))
+      .finally(() => this.reconcileLater(acc))
+  }
+
+  /** Owner ops whose outcome is still being asked: unread receipts, and renewals not proven yet. */
+  private unresolved(acc: AccountState): boolean {
+    return acc.ops.some((o) => o.opId.startsWith('own-') && o.state === 'failed' && (o.code === RECEIPT_UNKNOWN || (o.kind === 'renew' && o.code === 'RENEWAL_UNPROVEN')))
+  }
+
+  /**
+   * otto/mamoru#140: while an account has unresolved owner ops, reconciliation runs again on its own, not only when
+   * a request comes in: after reconcileRetryMs, doubling up to reconcileRetryMaxMs (an RPC outage is waited out without
+   * hammering it). Nothing left unresolved: the timer and its backoff are dropped.
+   */
+  private reconcileLater(acc: AccountState): void {
+    const key = acc.accountKey
+    const t = this.reconcileTimers.get(key)
+    if (!this.unresolved(acc) || this.shutDown) {
+      if (t?.timer) clearTimeout(t.timer)
+      this.reconcileTimers.delete(key)
+      return
+    }
+    if (t?.timer) return
+    const delay = t ? Math.min(t.delay * 2, this.reconcileRetryMaxMs) : this.reconcileRetryMs
+    const timer = setTimeout(() => {
+      const e = this.reconcileTimers.get(key)
+      if (e) e.timer = null
+      this.reconciled.delete(key)
+      this.reconcileSoon(acc)
+    }, delay)
+    ;(timer as { unref?: () => void }).unref?.()
+    this.reconcileTimers.set(key, { timer, delay })
   }
 
   /** Reads every owner op marked failed with an unknown receipt; a tx that executed becomes confirmed with its side effects. */
@@ -2724,28 +2782,44 @@ export class Operator {
   }
 
   /**
-   * Without a receipt: the Safe's ExecutionSuccess log in the blocks just before the failure time. Only an owner
-   * execTransaction emits it (engine userOps run through the module), so the log proves the tx executed. With a kept
-   * hash the log must carry it; without one, exactly one log of the op's Safe tx hash not claimed by another op, or nothing.
+   * Without a receipt: the Safe's ExecutionSuccess log of the op's own Safe tx hash. Only an owner execTransaction
+   * emits it (engine userOps run through the module), so the log proves the tx executed. otto/mamoru#140: searched
+   * from the block the op was sent around (sentAt, else its time) up to the head, at most OWNER_LOG_SEARCH_BLOCKS
+   * (about a day) later, in pages of OWNER_LOG_PAGE_BLOCKS sent one after another and filtered by that Safe tx hash, so
+   * a transaction that landed late (sent, its hash lost in a timeout) is still found. With a relayer hash kept the
+   * log must also be in that transaction. Without a Safe tx hash (an op stored before it was kept): only the old
+   * narrow window around its time, and exactly one unclaimed log, or nothing.
    */
   private async findOwnerTx(acc: AccountState, op: StoredOp): Promise<{ hash: Hex; block: number; ok: boolean } | null> {
     const head = await this.client.getBlock()
-    const t = BigInt(Math.floor(Date.parse(op.updatedAt) / 1000))
+    const sent = op.sentAt ?? Date.parse(op.updatedAt)
+    const t = BigInt(Math.floor(sent / 1000))
     const lag = head.timestamp > t ? (head.timestamp - t) / BLOCK_SECONDS : 0n
     const at = head.number - lag
     const fromBlock = at > 150n ? at - 150n : 0n
-    const toBlock = at + 10n < head.number ? at + 10n : head.number
-    // ExecutionSuccess(bytes32 indexed txHash, uint256 payment): the log must carry the Safe tx hash the op was signed
-    // for, or it is another transaction of the Safe (one the owner made elsewhere) that spent the nonce.
-    const own = op.safeTxHash?.toLowerCase()
-    const logs = (await this.client.getLogs({ address: acc.ctx.address as Address, fromBlock, toBlock })).filter((l) => l.topics[0] === EXECUTION_SUCCESS && l.transactionHash && (!own || l.topics[1]?.toLowerCase() === own))
-    const hit = (h: string) => logs.find((l) => l.transactionHash!.toLowerCase() === h.toLowerCase())
+    const own = op.safeTxHash?.toLowerCase() as Hex | undefined
+    if (!own) {
+      const toBlock = at + 10n < head.number ? at + 10n : head.number
+      const logs = (await this.client.getLogs({ address: acc.ctx.address as Address, fromBlock, toBlock })).filter((l) => l.topics[0] === EXECUTION_SUCCESS && l.transactionHash)
+      if (op.txHash) {
+        const l = logs.find((x) => x.transactionHash!.toLowerCase() === op.txHash!.toLowerCase())
+        return l ? { hash: l.transactionHash!, block: Number(l.blockNumber), ok: true } : null
+      }
+      return null
+    }
+    const last = fromBlock + OWNER_LOG_SEARCH_BLOCKS < head.number ? fromBlock + OWNER_LOG_SEARCH_BLOCKS : head.number
+    const logs: Awaited<ReturnType<PublicClient['getLogs']>> = []
+    for (let from = fromBlock; from <= last; from += OWNER_LOG_PAGE_BLOCKS) {
+      const to = from + OWNER_LOG_PAGE_BLOCKS - 1n < last ? from + OWNER_LOG_PAGE_BLOCKS - 1n : last
+      const page = await this.client.getLogs({ address: acc.ctx.address as Address, event: EXECUTION_SUCCESS_EVENT, args: { txHash: own }, fromBlock: from, toBlock: to } as never)
+      // ExecutionSuccess(bytes32 indexed txHash, uint256 payment): checked here too, whatever the provider filtered.
+      logs.push(...(page as typeof logs).filter((l) => l.topics[0] === EXECUTION_SUCCESS && l.transactionHash && l.topics[1]?.toLowerCase() === own))
+      if (logs.length) break
+    }
     if (op.txHash) {
-      const l = hit(op.txHash)
+      const l = logs.find((x) => x.transactionHash!.toLowerCase() === op.txHash!.toLowerCase())
       return l ? { hash: l.transactionHash!, block: Number(l.blockNumber), ok: true } : null
     }
-    // No relayer hash and no Safe tx hash kept (an op stored before it was): nothing can tell its log from another's.
-    if (!own) return null
     const claimed = new Set(acc.ops.map((o) => o.txHash?.toLowerCase()).filter(Boolean))
     const free = [...new Map(logs.filter((l) => !claimed.has(l.transactionHash!.toLowerCase())).map((l) => [l.transactionHash!, l])).values()]
     if (free.length !== 1) {
@@ -3047,7 +3121,7 @@ export function collapseFailed(ops: StoredOp[]): OpView[] {
   const out: OpView[] = []
   ops.forEach((o, i) => {
     const k = keyOf(o)
-    const { permissionId: _p, calls: _c, ownerGrants: _g, revokes: _r, safeTxHash: _h, safeNonce: _n, ...view } = o
+    const { permissionId: _p, calls: _c, ownerGrants: _g, revokes: _r, safeTxHash: _h, safeNonce: _n, sentAt: _s, ...view } = o
     if (!k) return void out.push(view)
     if (newest.get(k) !== i) return
     const n = counts.get(k)!

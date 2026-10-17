@@ -19,6 +19,8 @@ export type StoredOp = OpView & {
   /** Owner op: the Safe transaction hash it was signed for (ExecutionSuccess carries it) and its Safe nonce. */
   safeTxHash?: Hex
   safeNonce?: string
+  /** When (ms) the op was created, before its transaction was sent: where its ExecutionSuccess is searched from. */
+  sentAt?: number
 }
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */

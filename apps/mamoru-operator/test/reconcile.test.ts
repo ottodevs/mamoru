@@ -96,4 +96,41 @@ describe('owner receipt reconciliation', () => {
     expect(acc.grants).toEqual([{ name: 'enter-swap', permissionId: '0xaa' }] as never)
     expect(acc.superseded).toEqual(['0xcc'])
   })
+
+  test('otto/mamoru#140: a stop that landed late (its hash lost) is found from its send block, in pages of at most 2000 blocks sent one at a time', async () => {
+    const { acc, op } = setup(false, true)
+    const head = 51_900_000n
+    const headTs = BigInt(Date.parse('2026-09-26T21:12:26.000Z') / 1000)
+    // Sent 3000 s (1500 blocks) before the head; landed 600 blocks after it was sent, far past the old +10 window.
+    const stop = acc.ops[1]! as unknown as { sentAt: number; updatedAt: string }
+    stop.sentAt = Number(headTs - 3000n) * 1000
+    stop.updatedAt = new Date(Number(headTs - 3000n) * 1000).toISOString()
+    const landed = head - 1500n + 600n
+    const pages: [bigint, bigint][] = []
+    let inflight = 0
+    let peak = 0
+    const c = (op as unknown as { client: Record<string, unknown> }).client
+    c.getBlock = async () => ({ number: head, timestamp: headTs })
+    c.getLogs = async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
+      inflight++
+      peak = Math.max(peak, inflight)
+      pages.push([fromBlock, toBlock])
+      await Bun.sleep(1)
+      inflight--
+      return fromBlock <= landed && landed <= toBlock ? [{ address: SAFE, topics: [EXECUTION_SUCCESS, SAFE_TX], transactionHash: TX, blockNumber: landed }] : []
+    }
+    await op.reconcileOwner(acc)
+    expect(acc.ops[1]).toMatchObject({ state: 'confirmed', txHash: TX, block: Number(landed) })
+    expect(peak).toBe(1)
+    expect(pages.every(([f, t]) => t - f < 2000n)).toBe(true)
+    expect(pages[0]![0]).toBe(head - 1500n - 150n)
+  })
+
+  test('otto/mamoru#140: a log of another Safe tx hash in that range is never taken for the op', async () => {
+    const { acc, op } = setup(false, true)
+    const c = (op as unknown as { client: Record<string, unknown> }).client
+    c.getLogs = async () => [{ address: SAFE, topics: [EXECUTION_SUCCESS, OTHER_TX], transactionHash: TX, blockNumber: 51833884n }]
+    await op.reconcileOwner(acc)
+    expect(acc.ops[1]).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+  })
 })
