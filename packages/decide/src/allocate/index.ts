@@ -135,6 +135,11 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     })
 
   let proposal: Proposal | null = null
+  // otto/mamoru#141: the review has one op. The first short bucket in order takes it, except that selling a bucket's
+  // excess idle volatile outranks any op that is not a larger such sale: idle volatile waiting behind small entries is
+  // unmanaged exposure (Lab, Feb 2025 100k: 34k of cbBTC waited 16 reviews behind cent-sized mints).
+  let picked: number | null = null
+  let pickedSale = 0n
   const pendingMint: Allocation['pendingMint'] = []
   for (const { r, i, gap } of order) {
     // After the first proposal the loop only finds which other buckets have a use for their idle volatile; their codes stay.
@@ -184,6 +189,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       if (row) {
         row.code = 'STRATEGY_PREFERENCE_DEVIATION'
         proposal = { kind: 'enter_swap', grant: buyGrant, pool: pool.name, tokenIn: savings, tokenOut: volatile, fee: pool.fee, amountIn }
+        picked = i
       }
       continue
     }
@@ -206,9 +212,13 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       // The rest of the idle token is the volatile side of the mint that follows.
       const sellGrant = grantKeyFor(policy, 'convert-any', pool.name) as `convert-any:${string}`
       pendingMint.push({ pool: pool.name, grant: sellGrant })
-      if (row) {
-        row.code = 'STRATEGY_PREFERENCE_DEVIATION'
+      if (row || excess > pickedSale) {
+        // The bucket it displaces keeps waiting for a later review, as any bucket after the one that acts.
+        if (picked !== null) buckets[picked]!.code = 'STRATEGY_PREFERENCE'
+        buckets[i]!.code = 'STRATEGY_PREFERENCE_DEVIATION'
         proposal = { kind: 'enter_swap', grant: sellGrant, pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn: sell }
+        picked = i
+        pickedSale = excess
       }
       continue
     }
@@ -228,6 +238,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     pendingMint.push({ pool: pool.name, grant: mintGrant })
     if (!row) continue
     row.code = 'STRATEGY_PREFERENCE_DEVIATION'
+    picked = i
     const range = rangeFor(obs, policy, pool)
     const savingsIs0 = pool.token0 === savings
     proposal = {
