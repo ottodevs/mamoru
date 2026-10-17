@@ -154,21 +154,43 @@ export type TransferRequest = { to: Hex0x; amountUsdc: string; asset?: WithdrawA
 // would execute meaningfully below the fair price over the last 30 minutes. Never a refusal: prepare still
 // returns a plan the owner can sign, carrying this warning so they can choose to wait or accept the quote
 // as-is. One leg per diverging swap (usually one; a reduce-then-payout withdrawal can have two).
+//
+// 'swap-back': reduce converts a position's volatile side back into USDC inside the Safe; the recipient still
+// gets the unaffected, fixed transfer amount — the shortfall lands on the account's remaining USDC balance, not
+// on what the recipient receives. `token` is the swap's output (USDC) and `sellToken` names what is sold (e.g.
+// 'cbBTC'). 'payout': the USDC-to-(EURC|ETH|JPYC) swap whose output IS what the recipient receives — the
+// shortfall is what they get less of. `token` is the payout asset; `sellToken` is not set (the source is always
+// USDC, per TransferRequest above).
 export type PriceDivergenceLeg = {
-  token: string // registry token name of the diverging leg, e.g. 'USDC' (swap-back) or the payout asset
+  kind: 'swap-back' | 'payout'
+  token: string // this leg's output, in registry-token-name form: USDC for swap-back, the payout asset for payout
+  sellToken?: string // swap-back only: what is being sold, e.g. 'cbBTC'
   decimals: number
   fairAmount: string // base units: what this leg gives at the 30-minute fair price
-  quotedAmount: string // base units: what the current quote gives (<= fairAmount)
-  shortfall: string // base units: fairAmount - quotedAmount
+  // base units: the live quote at prepare time. Informational only — NOT the binding floor and not what the
+  // app shows or computes shortfall from; see `minAmount`.
+  quotedAmount: string
+  // base units: the router's amountOutMinimum this leg's already-signed calldata carries — the worst case the
+  // transaction allows. The app shows this as "at least", and `shortfall`/`shortfallBps` are computed against
+  // it, not against `quotedAmount` (the quote can only get worse by the time the owner signs; the minimum is
+  // what is actually guaranteed). OwnerSignature.acceptDivergence binds exactly this amount: the operator must
+  // never execute at a looser minimum for an accepted quoteId.
+  minAmount: string
+  shortfall: string // base units: fairAmount - minAmount (the worst case, not the quote's)
   shortfallBps: number // shortfall / fairAmount, basis points
 }
 export type PriceDivergenceWarning = {
   code: 'PRICE_DIVERGENCE'
   legs: PriceDivergenceLeg[] // at least one
-  shortfallUsdc: string // total shortfall across every leg, converted to USDC base units
+  shortfallUsdc: string // total worst-case shortfall across every leg (from each leg's minAmount), converted to USDC base units
   // Identifies the exact quote baked into ownerTx's calldata (the amounts above and the router minimum are
   // already fixed at prepare time). Echoed back in OwnerSignature.acceptDivergence on submit; the operator
-  // treats a missing or mismatched quoteId while a warning is on file as not accepted.
+  // treats a missing or mismatched quoteId while a warning is on file as not accepted, and executes at exactly
+  // this quoteId's minAmount per leg, never a looser one. The operator MUST mint a fresh quoteId on every
+  // prepare — never reuse one across two different warnings, even where the numbers happen to match exactly.
+  // The app does not rely on quoteId alone to invalidate a stale on-screen acceptance (it keys that to the
+  // warning object from the specific prepare response), but a reused quoteId would still defeat the operator's
+  // own ability to tell which exact numbers were accepted, so it must stay unique per prepare regardless.
   quoteId: string
 }
 export type TransferPlan = {
@@ -199,8 +221,9 @@ export type OwnerSignature = {
   signature: string        // DER, base64url
   // otto/mamoru#155, transfer only: the owner explicitly accepted the PriceDivergenceWarning this prepare
   // returned. quoteId must match TransferPlan.divergence.quoteId for this prepareId; the operator executes
-  // at that already-quoted minimum, never a worse one. Absent on every submit that carried no warning, and
-  // on every other kind — an operator that never emits PriceDivergenceWarning never looks at this field.
+  // at exactly that warning's per-leg minAmount as the router floor, never a looser one. Absent on every
+  // submit that carried no warning, and on every other kind — an operator that never emits
+  // PriceDivergenceWarning never looks at this field.
   acceptDivergence?: { quoteId: string }
 }
 export type OpView = {

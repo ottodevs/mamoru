@@ -45,6 +45,29 @@ const SUBMIT: Record<OwnerKind, (api: ApiClient) => ApiClient['activate']> = {
 const toPrepared = (plan: TransferPlan): Prepared => ({ tx: plan.ownerTx, reduce: plan.reduce, receive: plan.receive, divergence: plan.divergence })
 
 /**
+ * otto/mamoru#155: what `approve()`'s catch does on a 409 PRICE_DIVERGENCE_STALE (the owner's accepted quote
+ * moved past, between prepare and this submit). Clears the prepared plan FIRST, unconditionally, so there is
+ * nothing left to submit while the re-prepare is in flight; if the re-prepare itself fails, `prepared` stays
+ * cleared rather than reverting to the stale one, so nothing stays submittable either way. On success the UI
+ * re-renders from the fresh plan's own `divergence` (a brand new object), which is never equal to whatever the
+ * owner had ticked before, so the acceptance never carries over.
+ */
+export async function recoverFromStaleDivergence(
+  accountKey: string,
+  body: TransferRequest,
+  transferPrepare: ApiClient['transferPrepare'],
+  setPrepared: (p: Prepared | null) => void,
+  setError: (e: string | null) => void,
+): Promise<void> {
+  setPrepared(null)
+  try {
+    setPrepared(toPrepared(await transferPrepare(accountKey, body)))
+  } catch (e) {
+    setError(errorText(e))
+  }
+}
+
+/**
  * One owner action: the API prepares a Safe transaction, the passkey signs its safeTxHash, the API submits it.
  * Preparing and signing are two taps, so the passkey prompt always runs inside a user gesture.
  */
@@ -64,6 +87,10 @@ export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind) 
       if (!accountKey) return null
       setError(null)
       setBusy('preparing')
+      // otto/mamoru#155: clear whatever was prepared (and so whatever was ticked) before requesting a fresh
+      // plan. Normally already null here (the form isn't shown while a Review is up), but this makes it true
+      // unconditionally rather than assumed.
+      setPrepared(null)
       try {
         let p: Prepared
         if (kind === 'transfer') {
@@ -108,16 +135,11 @@ export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind) 
         return op
       } catch (e) {
         // otto/mamoru#155: the accepted quote went stale between prepare and this submit. Never refused and
-        // never executed at a worse price than what was shown — re-prepare the same request and let the UI
-        // show the fresh numbers. The owner's tick does not carry over: it was for the old quoteId.
+        // never executed at a worse price than what was shown; never left submittable on the old numbers
+        // either. See recoverFromStaleDivergence for exactly what "cleared first" means here.
         if (kind === 'transfer' && e instanceof ApiRequestError && e.code === 'PRICE_DIVERGENCE_STALE' && lastTransferBody.current) {
-          try {
-            setPrepared(toPrepared(await api.transferPrepare(accountKey, lastTransferBody.current)))
-            return null
-          } catch (e2) {
-            setError(errorText(e2))
-            return null
-          }
+          await recoverFromStaleDivergence(accountKey, lastTransferBody.current, api.transferPrepare, setPrepared, setError)
+          return null
         }
         setError(errorText(e))
         return null
