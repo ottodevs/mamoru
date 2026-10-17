@@ -133,4 +133,27 @@ describe('owner receipt reconciliation', () => {
     await op.reconcileOwner(acc)
     expect(acc.ops[1]).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
   })
+
+  test('otto/mamoru#140: an armed Start sent days after it was prepared is searched for from when it was handed to a provider', async () => {
+    const { acc, op } = setup(false, true)
+    const head = 51_900_000n
+    const headTs = BigInt(Date.parse('2026-09-26T21:12:26.000Z') / 1000)
+    const stop = acc.ops[1]! as unknown as { sentAt: number; broadcastAt: number; lastBroadcastAt: number; updatedAt: string }
+    // Prepared (armed) three days before the head; first handed to a provider 1500 blocks before it, last 1000.
+    stop.sentAt = Number(headTs - 3n * 86_400n) * 1000
+    stop.updatedAt = new Date(stop.sentAt).toISOString()
+    stop.broadcastAt = Number(headTs - 3000n) * 1000
+    stop.lastBroadcastAt = Number(headTs - 2000n) * 1000
+    const landed = head - 900n
+    const c = (op as unknown as { client: Record<string, unknown> }).client
+    const pages: bigint[] = []
+    c.getBlock = async () => ({ number: head, timestamp: headTs })
+    c.getLogs = async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
+      pages.push(fromBlock)
+      return fromBlock <= landed && landed <= toBlock ? [{ address: SAFE, topics: [EXECUTION_SUCCESS, SAFE_TX], transactionHash: TX, blockNumber: landed }] : []
+    }
+    await op.reconcileOwner(acc)
+    expect(acc.ops[1]).toMatchObject({ state: 'confirmed', txHash: TX })
+    expect(pages[0]).toBe(head - 1500n - 150n)
+  })
 })

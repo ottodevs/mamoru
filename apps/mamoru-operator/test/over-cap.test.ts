@@ -2497,6 +2497,27 @@ describe('renewing the approval of a running account', () => {
     }
   })
 
+  test('otto/mamoru#140: the engine grants are read on every tick (one Multicall3 call): a revocation stops the engine within one tick', async () => {
+    const { w, acc } = await running()
+    acc.revoked.push(...Array.from({ length: 300 }, (_, i) => toHex(i + 1, { size: 32 })))
+    w.knobs.batchGrants = true
+    type Gate = { grantGate(a: AccountState, at: number): Promise<boolean> }
+    const g = w.op as unknown as Gate
+    const t0 = Date.now()
+    expect(await g.grantGate(acc, t0)).toBe(true)
+    // Within GRANTS_CHECK_MS: only the engine's grants are read, in one call.
+    w.knobs.batchedGrantReads = 0
+    const calls = w.knobs.multicalls
+    expect(await g.grantGate(acc, t0 + 1_000)).toBe(true)
+    expect(w.knobs.multicalls - calls).toBe(1)
+    expect(w.knobs.batchedGrantReads).toBe(acc.grants.length)
+    // The owner revokes one engine grant right after: the very next tick sees it and stops the engine.
+    w.knobs.enabled.delete(acc.grants[0]!.permissionId.toLowerCase())
+    await g.grantGate(acc, t0 + 2_000)
+    expect(acc.active).toBe(false)
+    expect(acc.deactivated?.code).toBe('GRANTS_PARTLY_REVOKED')
+  })
+
   test('otto/mamoru#140: past 2000 tracked ids a full grant check alerts, and still reads every id (no retirement)', async () => {
     const { w, acc } = await running()
     const old = Array.from({ length: 2100 }, (_, i) => toHex(i + 1, { size: 32 }))

@@ -1257,9 +1257,11 @@ export class Operator {
    * is held, and the sweep is tried again at the next tick, not GRANTS_CHECK_MS later.
    */
   private async grantGate(acc: AccountState, at: number): Promise<boolean> {
-    if (at - (this.grantsChecked.get(acc.accountKey) ?? 0) < GRANTS_CHECK_MS) return true
-    if (!(await this.enforceGrants(acc, { full: false }))) return false
-    this.grantsChecked.set(acc.accountKey, at)
+    // The engine's grants are read on every tick (one Multicall3 call), so I1 holds within one tick; the rotating
+    // window of the other ids rides along every GRANTS_CHECK_MS.
+    const others = at - (this.grantsChecked.get(acc.accountKey) ?? 0) >= GRANTS_CHECK_MS
+    if (!(await this.enforceGrants(acc, { full: false, others }))) return false
+    if (others) this.grantsChecked.set(acc.accountKey, at)
     return true
   }
 
@@ -1273,11 +1275,11 @@ export class Operator {
    *   reads enabled and is not the engine's is put in `superseded`, so the next stop or renewal revokes it and Start
    *   waits for that stop (STOP_FIRST); one in `superseded` that reads disabled leaves it (recorded as revoked).
    * A read that fails, or a provider head below the account's floor, changes nothing. Full sweep (every id at one
-   * pinned block, sequential batches) after every settle pass and before a Start; the engine loop's sweep (every GRANTS_CHECK_MS) reads the engine's
-   * grants every time and the other ids in rotation, each again within sweepsToCover(others, engine) sweeps: with 12
-   * engine grants, 500 other ids are all re-read within 6 sweeps (30 min).
+   * pinned block, sequential batches) after every settle pass and before a Start. The engine loop reads the engine's
+   * grants on every tick (grantGate), and every GRANTS_CHECK_MS a rotating window of the other ids with them, each
+   * again within sweepsToCover(others, engine) such sweeps: with 12 engine grants, 500 other ids within 6 (30 min).
    */
-  private async enforceGrants(acc: AccountState, opts: { full?: boolean } = { full: true }): Promise<boolean> {
+  private async enforceGrants(acc: AccountState, opts: { full?: boolean; others?: boolean } = { full: true }): Promise<boolean> {
     const low = (id: string) => id.toLowerCase()
     const engine = acc.grants.map((g) => g.permissionId)
     const pendingOps = acc.ops.filter((o) => o.opId.startsWith('own-') && (!TERMINAL_STATES.has(o.state) || (o.state === 'failed' && o.code === RECEIPT_UNKNOWN)))
@@ -1303,7 +1305,8 @@ export class Operator {
     // A full sweep (settle passes, Start) reads every id the account tracks at one pinned block, in sequential
     // batches of BATCH_MAX_CALLS at that same block: a consistent view, verified as a whole or not at all. A grant
     // the owner enables after that block is caught by the engine loop's sweep within sweepsToCover() sweeps.
-    if (opts.full === false && list.length > GRANTS_SWEEP_MAX - engine.length) {
+    if (opts.full === false && opts.others === false) window = []
+    else if (opts.full === false && list.length > GRANTS_SWEEP_MAX - engine.length) {
       // The engine loop's sweep: the engine's grants every time, a rotating window of the others.
       const size = Math.max(1, GRANTS_SWEEP_MAX - engine.length)
       const start = (this.sweepCursor.get(acc.accountKey) ?? 0) % list.length
@@ -2554,6 +2557,12 @@ export class Operator {
       (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }),
       () => {
         this.execTried.add(opKey(acc, op))
+        // otto/mamoru#140: when a copy was really handed to a provider (the first and the latest), not when the op was
+        // prepared or armed: findOwnerTx searches for its ExecutionSuccess from there.
+        const so = op as StoredOp
+        so.broadcastAt ??= Date.now()
+        so.lastBroadcastAt = Date.now()
+        this.store.save()
         // Written before the provider gets it: a restart from here on must know a copy may be out.
         if (acc.armed?.opId === op.opId && !acc.armed.execSent) {
           acc.armed.execSent = true
@@ -2791,19 +2800,24 @@ export class Operator {
   /**
    * Without a receipt: the Safe's ExecutionSuccess log of the op's own Safe tx hash. Only an owner execTransaction
    * emits it (engine userOps run through the module), so the log proves the tx executed. otto/mamoru#140: searched
-   * from the block the op was sent around (sentAt, else its time) up to the head, at most OWNER_LOG_SEARCH_BLOCKS
-   * (about a day) later, in pages of OWNER_LOG_PAGE_BLOCKS sent one after another and filtered by that Safe tx hash, so
+   * from the block it was first handed to a provider around (broadcastAt; else sentAt, else its time) up to the head,
+   * at most OWNER_LOG_SEARCH_BLOCKS (about a day) past the latest handover (lastBroadcastAt), in pages of OWNER_LOG_PAGE_BLOCKS sent one after another and filtered by that Safe tx hash, so
    * a transaction that landed late (sent, its hash lost in a timeout) is still found. With a relayer hash kept the
    * log must also be in that transaction. Without a Safe tx hash (an op stored before it was kept): only the old
    * narrow window around its time, and exactly one unclaimed log, or nothing.
    */
   private async findOwnerTx(acc: AccountState, op: StoredOp): Promise<{ hash: Hex; block: number; ok: boolean } | null> {
     const head = await this.client.getBlock()
-    const sent = op.sentAt ?? Date.parse(op.updatedAt)
-    const t = BigInt(Math.floor(sent / 1000))
-    const lag = head.timestamp > t ? (head.timestamp - t) / BLOCK_SECONDS : 0n
-    const at = head.number - lag
+    // From the first time a copy was handed to a provider (an armed Start may wait days between prepare and send),
+    // else its creation, else its time; to a day past the latest handover.
+    const blockAt = (ms: number) => {
+      const t = BigInt(Math.floor(ms / 1000))
+      const lag = head.timestamp > t ? (head.timestamp - t) / BLOCK_SECONDS : 0n
+      return head.number > lag ? head.number - lag : 0n
+    }
+    const at = blockAt(op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt))
     const fromBlock = at > 150n ? at - 150n : 0n
+    const lastAt = blockAt(op.lastBroadcastAt ?? op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt))
     const own = op.safeTxHash?.toLowerCase() as Hex | undefined
     if (!own) {
       const toBlock = at + 10n < head.number ? at + 10n : head.number
@@ -2814,7 +2828,7 @@ export class Operator {
       }
       return null
     }
-    const last = fromBlock + OWNER_LOG_SEARCH_BLOCKS < head.number ? fromBlock + OWNER_LOG_SEARCH_BLOCKS : head.number
+    const last = lastAt + OWNER_LOG_SEARCH_BLOCKS < head.number ? lastAt + OWNER_LOG_SEARCH_BLOCKS : head.number
     const logs: Awaited<ReturnType<PublicClient['getLogs']>> = []
     for (let from = fromBlock; from <= last; from += OWNER_LOG_PAGE_BLOCKS) {
       const to = from + OWNER_LOG_PAGE_BLOCKS - 1n < last ? from + OWNER_LOG_PAGE_BLOCKS - 1n : last
@@ -3128,7 +3142,7 @@ export function collapseFailed(ops: StoredOp[]): OpView[] {
   const out: OpView[] = []
   ops.forEach((o, i) => {
     const k = keyOf(o)
-    const { permissionId: _p, calls: _c, ownerGrants: _g, revokes: _r, safeTxHash: _h, safeNonce: _n, sentAt: _s, ...view } = o
+    const { permissionId: _p, calls: _c, ownerGrants: _g, revokes: _r, safeTxHash: _h, safeNonce: _n, sentAt: _s, broadcastAt: _b, lastBroadcastAt: _lb, ...view } = o
     if (!k) return void out.push(view)
     if (newest.get(k) !== i) return
     const n = counts.get(k)!

@@ -21,6 +21,9 @@ export type StoredOp = OpView & {
   safeNonce?: string
   /** When (ms) the op was created, before its transaction was sent: where its ExecutionSuccess is searched from. */
   sentAt?: number
+  /** When (ms) a copy of its transaction was first, and last, handed to a provider (an armed Start: maybe days after sentAt). */
+  broadcastAt?: number
+  lastBroadcastAt?: number
 }
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */
