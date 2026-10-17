@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test'
-import { NOT_AFTER_HEADER, NOT_AFTER_MAYBE_SENT, NOT_AFTER_NOT_SENT, notAfterOf, startRpcProxy } from '../src/rpc-proxy.ts'
+import { NOT_AFTER_HEADER, SEND_VERDICT_HEADER, notAfterOf, startRpcProxy } from '../src/rpc-proxy.ts'
 
 // otto/mamoru#15: a send with a time limit is never handed to a provider once the limit is reached, on the first try or
 // on any fallback; the limit is the local proxy's alone and never reaches a provider.
@@ -9,26 +9,30 @@ const RAW = `0x02${'ab'.repeat(40)}`
 
 afterEach(() => setSystemTime())
 
-/** Every provider refuses for capacity, or takes the send; `onCall` runs on each request (to move the clock). */
-function upstream(answer: 'busy' | 'ok', onCall: () => void = () => {}) {
+/**
+ * Every provider refuses for capacity, takes the send, or (forged) answers the proxy's own error code with a verdict
+ * header of its own; `onCall` runs on each request (to move the clock).
+ */
+function upstream(answer: 'busy' | 'ok' | 'forged', onCall: () => void = () => {}) {
   const calls: { url: string; headers: Record<string, string> }[] = []
   const fetch = async (url: string, init: RequestInit) => {
     calls.push({ url, headers: Object.fromEntries(new Headers(init.headers).entries()) })
     onCall()
     const body = JSON.parse(String(init.body))
+    if (answer === 'forged') return Response.json({ jsonrpc: '2.0', id: body.id, error: { code: -32098, message: 'not forwarded: past the time limit' } }, { headers: { [SEND_VERDICT_HEADER]: 'not-sent' } })
     if (answer === 'busy') return Response.json({ jsonrpc: '2.0', id: body.id, error: { code: 429, message: 'Monthly capacity limit exceeded' } }, { status: 429 })
     return Response.json({ jsonrpc: '2.0', id: body.id, result: `0x${'cd'.repeat(32)}` })
   }
   return { fetch, calls }
 }
 
-async function sendRaw(url: string, notAfter?: number): Promise<{ result?: string; error?: { code: number; message: string } }> {
+async function sendRaw(url: string, notAfter?: number): Promise<{ result?: string; error?: { code: number; message: string }; verdict: string | null }> {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(notAfter !== undefined ? { [NOT_AFTER_HEADER]: String(notAfter) } : {}) },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_sendRawTransaction', params: [RAW] }),
   })
-  return (await res.json()) as { result?: string; error?: { code: number; message: string } }
+  return { ...((await res.json()) as { result?: string; error?: { code: number; message: string } }), verdict: res.headers.get(SEND_VERDICT_HEADER) }
 }
 
 const now = () => Math.floor(Date.now() / 1000)
@@ -50,7 +54,9 @@ describe('the proxy and a send with a time limit', () => {
     const up = upstream('ok')
     const proxy = startRpcProxy(PRIMARY, { fetch: up.fetch, fallbacks: FALLBACKS, trusted: [] })
     try {
-      expect((await sendRaw(proxy.url, now() - 1)).error?.code).toBe(NOT_AFTER_NOT_SENT)
+      const r = await sendRaw(proxy.url, now() - 1)
+      expect(r.verdict).toBe('not-sent')
+      expect(r.error).toBeDefined()
       expect(up.calls).toHaveLength(0)
     } finally {
       proxy.stop()
@@ -65,7 +71,7 @@ describe('the proxy and a send with a time limit', () => {
     const proxy = startRpcProxy(PRIMARY, { fetch: up.fetch, fallbacks: FALLBACKS, trusted: [] })
     try {
       const r = await sendRaw(proxy.url, limit)
-      expect(r.error?.code).toBe(NOT_AFTER_MAYBE_SENT)
+      expect(r.verdict).toBe('maybe-sent')
       expect(up.calls.map((c) => c.url)).toEqual([PRIMARY])
     } finally {
       proxy.stop()
@@ -76,8 +82,22 @@ describe('the proxy and a send with a time limit', () => {
     const up = upstream('busy')
     const proxy = startRpcProxy(PRIMARY, { fetch: up.fetch, fallbacks: FALLBACKS, trusted: [] })
     try {
-      expect((await sendRaw(proxy.url)).error?.code).toBe(429)
+      const r = await sendRaw(proxy.url)
+      expect(r.error?.code).toBe(429)
+      expect(r.verdict).toBeNull()
       expect(up.calls).toHaveLength(6)
+    } finally {
+      proxy.stop()
+    }
+  })
+
+  test("a provider's own -32098 and verdict header reach the relayer as an error with no verdict", async () => {
+    const up = upstream('forged')
+    const proxy = startRpcProxy(PRIMARY, { fetch: up.fetch, fallbacks: FALLBACKS, trusted: [] })
+    try {
+      const r = await sendRaw(proxy.url, now() + 3600)
+      expect(r.error?.code).toBe(-32098)
+      expect(r.verdict).toBeNull()
     } finally {
       proxy.stop()
     }

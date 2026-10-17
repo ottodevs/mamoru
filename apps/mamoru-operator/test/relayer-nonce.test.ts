@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, setSystemTime, test } from 'bun:test'
-import { parseTransaction, type Hex, type PublicClient } from 'viem'
-import { Relayer, SendExpired } from '../src/relayer.ts'
+import { keccak256, parseTransaction, type Hex, type PublicClient } from 'viem'
+import { Relayer, SendExpired, SendUnsettled } from '../src/relayer.ts'
 
 // A JSON-RPC stub that takes any raw transaction and remembers the nonce it carried.
 const nonces: number[] = []
@@ -8,7 +8,8 @@ const nonces: number[] = []
 const calls: string[] = []
 /** The time-limit header of each request, and an error the stub answers a send with instead (the proxy refusing it). */
 const headers: (string | null)[] = []
-const stub: { sendError: { code: number; message: string } | null } = { sendError: null }
+/** `verdict`: the proxy's header on that answer. `failOnce`: the next send only is answered with sendError. */
+const stub: { sendError: { code: number; message: string } | null; verdict: string | null; failOnce: boolean; raws: Hex[] } = { sendError: null, verdict: null, failOnce: false, raws: [] }
 const server = Bun.serve({
   port: 0,
   hostname: '127.0.0.1',
@@ -31,9 +32,12 @@ const server = Bun.serve({
     const body = (await req.json()) as Call | Call[]
     headers.push(req.headers.get('x-mamoru-not-after'))
     const sends = (Array.isArray(body) ? body : [body]).filter((m) => m.method === 'eth_sendRawTransaction')
+    for (const m of sends) stub.raws.push(m.params[0] as Hex)
     if (sends.length && stub.sendError) {
       calls.push('eth_sendRawTransaction')
-      return Response.json({ jsonrpc: '2.0', id: sends[0]!.id, error: stub.sendError })
+      const error = stub.sendError
+      if (stub.failOnce) stub.sendError = null
+      return Response.json({ jsonrpc: '2.0', id: sends[0]!.id, error }, stub.verdict ? { headers: { 'x-mamoru-send-verdict': stub.verdict } } : undefined)
     }
     return Response.json(Array.isArray(body) ? body.map(one) : one(body))
   },
@@ -179,19 +183,28 @@ describe('a job with a time limit is never broadcast past it', () => {
     expect(nonces).toHaveLength(0)
   })
 
-  test('the limit goes to the proxy in its header; its refusal is SendExpired, maybe out only when it says so; no transport retry', async () => {
+  test("the limit goes to the proxy in its header; only the proxy's verdict header says not sent; no transport retry", async () => {
     const r = timed({ t: wall() })
     const at = wall() + 3600n
-    for (const [code, maybe] of [[-32098, false], [-32097, true]] as const) {
+    const cases: [string | null, number, (e: unknown) => void][] = [
+      ['not-sent', -32098, (e) => expect(e).toMatchObject({ maybeSent: false, code: 'RESERVE_SWAP_EXPIRED' })],
+      ['maybe-sent', -32098, (e) => expect(e).toMatchObject({ maybeSent: true })],
+      // A provider answering the same code with no verdict from the proxy: it may be out.
+      [null, -32098, (e) => expect(e).toBeInstanceOf(SendUnsettled)],
+      [null, -32603, (e) => expect(e).toBeInstanceOf(SendUnsettled)],
+    ]
+    for (const [verdict, code, check] of cases) {
       headers.length = 0
       calls.length = 0
       stub.sendError = { code, message: 'not forwarded: past the send time limit' }
+      stub.verdict = verdict
       try {
         const e = await r.send({ to: TO, data: '0x01', notAfter: limit(at) }).catch((x: unknown) => x)
-        expect(e).toBeInstanceOf(SendExpired)
-        expect((e as SendExpired).maybeSent).toBe(maybe)
+        if (verdict) expect(e).toBeInstanceOf(SendExpired)
+        check(e)
       } finally {
         stub.sendError = null
+        stub.verdict = null
       }
       expect(calls.filter((c) => c === 'eth_sendRawTransaction')).toHaveLength(1)
       expect(headers.filter((h) => h !== null)).toEqual([at.toString()])
@@ -201,4 +214,38 @@ describe('a job with a time limit is never broadcast past it', () => {
     await r.send({ to: TO, value: 1n })
     expect(headers.every((h) => h === null)).toBe(true)
   })
+
+  test('onSending gets the hash of the very bytes the provider is handed, before they leave', async () => {
+    stub.raws.length = 0
+    const r = timed({ t: wall() })
+    let seen: { hash: Hex; nonce: number } | null = null
+    let rawsAtSending = -1
+    const { hash } = await r.send({ to: TO, data: '0x01', notAfter: limit(wall() + 3600n) }, undefined, (s) => ((seen = s), (rawsAtSending = stub.raws.length)))
+    expect(rawsAtSending).toBe(0)
+    expect(seen!.hash).toBe(keccak256(stub.raws[0]!))
+    expect(seen!.nonce).toBe(9)
+    expect(hash).toBeString()
+  })
+
+  // viem's sendRawTransaction never retries (it asks with retryCount 0 itself), so neither kind of send repeats a
+  // request; an ordinary send keeps the default transport as before #15 and its provider error as is.
+  test('an ordinary send keeps the default transport and its error; one with a limit fails as unsettled', async () => {
+    const r = timed({ t: wall() })
+    try {
+      stub.raws.length = 0
+      stub.sendError = { code: -32603, message: 'internal error' }
+      const plain = await r.send({ to: TO, value: 1n }).catch((e: unknown) => e)
+      expect(plain).not.toBeInstanceOf(SendUnsettled)
+      expect(plain).toMatchObject({ code: -32603 })
+      expect(stub.raws).toHaveLength(1)
+      stub.raws.length = 0
+      expect(await r.send({ to: TO, data: '0x01', notAfter: limit(wall() + 3600n) }).catch((e: unknown) => e)).toBeInstanceOf(SendUnsettled)
+      expect(stub.raws).toHaveLength(1)
+    } finally {
+      stub.sendError = null
+    }
+  })
+
+
+
 })

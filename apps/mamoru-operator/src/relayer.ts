@@ -1,9 +1,9 @@
-import { createWalletClient, defineChain, http, type Chain, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { createWalletClient, defineChain, http, keccak256, type Chain, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import { Lock } from './lock.ts'
 import { logErr } from './metrics.ts'
-import { NOT_AFTER_HEADER, NOT_AFTER_MAYBE_SENT, NOT_AFTER_NOT_SENT } from './rpc-proxy.ts'
+import { NOT_AFTER_HEADER, SEND_VERDICT_HEADER } from './rpc-proxy.ts'
 
 /** Per-tx gas cap on Base (EIP-7825). */
 const TX_GAS_CAP = 16_777_216n
@@ -27,14 +27,15 @@ export class SendExpired extends Error {
   }
 }
 
-/** The proxy's NOT_AFTER_* answer inside a viem error, if that is what it is. */
-function notAfterCode(e: unknown): number | null {
-  let cur = e as { code?: unknown; cause?: unknown } | undefined
-  for (let i = 0; i < 8 && cur; i++) {
-    if (cur.code === NOT_AFTER_NOT_SENT || cur.code === NOT_AFTER_MAYBE_SENT) return cur.code
-    cur = cur.cause as typeof cur
+/**
+ * A send with a time limit that failed with no verdict from the proxy: whatever a provider answered, the transaction
+ * may be out (a provider can say anything, the proxy's error code included). Only the chain can settle it.
+ */
+export class SendUnsettled extends Error {
+  readonly maybeSent = true
+  constructor(readonly code: string, cause: unknown) {
+    super(`${code}: the send failed with no verdict from the proxy, it may be out: ${(cause as Error)?.message?.split('\n')[0] ?? cause}`, { cause })
   }
-  return null
 }
 
 /** When a job may no longer go out: unix seconds (the caller's margin already taken off), and the code it fails with. */
@@ -101,19 +102,31 @@ export class Relayer {
   /**
    * Sends and waits for the receipt. Gas is estimated with a 30% margin unless given. `onSending` runs once the reads
    * are done, right before the signed transaction goes to the provider: from there on a failure may have broadcast it.
-   * `onSent` runs with the hash once the provider accepts it.
+   * `onSent` runs with the hash once the provider accepts it. `onSending` gets the hash and nonce of the signed
+   * transaction, so a caller can keep them before anything leaves this process.
    * `notAfter`: the job carries a time limit (a swap deadline inside it). It is checked last, after the queue and every
    * read, right before the provider gets the transaction, against the later of this clock and the chain head; at or
    * past it the job throws SendExpired and nothing is broadcast. Every call is checked again, so a retry is too.
+   * After the hand-over, only the proxy's verdict header says it stopped the send (SendExpired, `maybeSent` as it
+   * says); any other failure of a job with a time limit is SendUnsettled.
    */
-  send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint; notAfter?: NotAfter }, onSent?: (hash: Hex) => void, onSending?: () => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
+  send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint; notAfter?: NotAfter }, onSent?: (hash: Hex) => void, onSending?: (signed: { hash: Hex; nonce: number }) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     return this.lock.run(async () => {
-      // No transport retries: a send is repeated only through this method, whose checks run again. A time limit goes to
-      // the local proxy in a header it alone reads, so no provider is handed the transaction once it is reached.
+      // A job with a time limit: no transport retries (it is repeated only through this method, whose checks run
+      // again), the limit in a header only the local proxy reads, and the proxy's verdict read from its answer.
+      // Any other job keeps the transport's own retries.
+      let verdict: string | null = null
       const wallet = createWalletClient({
         account: this.account,
         chain: this.chain,
-        transport: http(this.rpcUrl, { timeout: 60_000, retryCount: 0, ...(tx.notAfter ? { fetchOptions: { headers: { [NOT_AFTER_HEADER]: tx.notAfter.at.toString() } } } : {}) }),
+        transport: tx.notAfter
+          ? http(this.rpcUrl, {
+              timeout: 60_000,
+              retryCount: 0,
+              fetchOptions: { headers: { [NOT_AFTER_HEADER]: tx.notAfter.at.toString() } },
+              onFetchResponse: (res) => void (verdict = res.headers.get(SEND_VERDICT_HEADER)),
+            })
+          : http(this.rpcUrl, { timeout: 60_000 }),
       })
       // Base rejects a tx over 2^24 gas (EIP-7825): the 30% margin must not push a fitting estimate over the cap.
       const est = tx.gas ?? ((await this.client.estimateGas({ account: this.account.address, to: tx.to, data: tx.data, value: tx.value })) * 13n) / 10n
@@ -139,14 +152,16 @@ export class Relayer {
       })
       // The last step before the send: nothing but the send itself comes after it.
       if (tx.notAfter) await this.assertInTime(tx.notAfter)
-      onSending?.()
+      onSending?.({ hash: keccak256(serializedTransaction), nonce })
       let hash: Hex
       try {
         hash = await wallet.sendRawTransaction({ serializedTransaction })
       } catch (e) {
-        const code = tx.notAfter ? notAfterCode(e) : null
-        if (code !== null) throw new SendExpired(tx.notAfter!.code, tx.notAfter!.at, BigInt(Math.floor(Date.now() / 1000)), code === NOT_AFTER_MAYBE_SENT)
-        throw e
+        if (!tx.notAfter) throw e
+        const now = BigInt(Math.floor(Date.now() / 1000))
+        if (verdict === 'not-sent') throw new SendExpired(tx.notAfter.code, tx.notAfter.at, now, false)
+        if (verdict === 'maybe-sent') throw new SendExpired(tx.notAfter.code, tx.notAfter.at, now, true)
+        throw new SendUnsettled(tx.notAfter.code, e)
       }
       this.lastSent = { nonce, at: Date.now() }
       onSent?.(hash)

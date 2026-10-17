@@ -42,7 +42,7 @@ import { SELF_RESERVE_DEADLINE_MARGIN_SECONDS, SELF_RESERVE_DEADLINE_SECONDS, SE
 import { SUBSIDY_ALERT_SHARE, noteExit, paidToday, subsidyDecision, subsidyMessage, subsidyPerDayFromEnv, type SubsidyDecision } from './subsidy.ts'
 import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type EngineHealthSnapshot } from './metrics.ts'
-import { SendExpired, type Relayer } from './relayer.ts'
+import { SendExpired, SendUnsettled, type Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
 import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
 
@@ -1868,6 +1868,7 @@ export class Operator {
     if ((p.kind === 'stop' || p.kind === 'renew') && p.revokes) o.revokes = p.revokes
     if (p.kind === 'renew' && p.extend) o.extend = true
     if (p.meta) Object.assign(o, p.meta)
+    if (p.kind === 'activate' && p.reserveDeadline) o.reserveDeadline = p.reserveDeadline
     this.store.save()
   }
 
@@ -2040,7 +2041,13 @@ export class Operator {
       sent = await this.relayer.send(
         { to: safe, data, ...(notAfter ? { notAfter } : {}) },
         (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }),
-        () => {
+        (signed) => {
+          // A send with a time limit keeps every signed copy before it leaves: reconciliation reads them by hash.
+          if (notAfter) {
+            const o = acc.ops.find((x) => x.opId === op.opId) as StoredOp | undefined
+            if (o) o.signedTxs = [...(o.signedTxs ?? []), { hash: signed.hash, nonce: signed.nonce }]
+            this.store.save()
+          }
           this.execTried.add(opKey(acc, op))
           // Written before the provider gets it: a restart from here on must know a copy may be out.
           if (acc.armed?.opId === op.opId && !acc.armed.execSent) {
@@ -2051,8 +2058,8 @@ export class Operator {
         },
       )
     } catch (e) {
-      if (!(e instanceof SendExpired)) throw e
-      logErr(`[owner] ${op.opId} dropped by the relayer before its broadcast:`, e.message)
+      if (!(e instanceof SendExpired) && !(e instanceof SendUnsettled)) throw e
+      logErr(`[owner] ${op.opId} ${e instanceof SendExpired ? 'stopped at its time limit' : 'send unsettled'}:`, e.message)
       return this.reserveExpiredOwner(acc, op, earlier || e.maybeSent)
     }
     const { hash, receipt } = sent
@@ -2142,11 +2149,22 @@ export class Operator {
     const safe = (acc.ctx.address as string).toLowerCase()
     for (const op of acc.ops.filter((o) => o.opId.startsWith('own-') && o.state === 'failed' && o.code === RECEIPT_UNKNOWN)) {
       let found: { hash: Hex; block: number; ok: boolean } | null = null
-      const receipt = op.txHash ? await this.receiptOf(op.txHash as Hex) : null
+      let receipt: TransactionReceipt | null = null
+      if (op.signedTxs?.length) {
+        // Every copy that left is known by hash: read them, for as long as one can still land (settleSigned).
+        const s = await this.settleSigned(op)
+        if (s === 'open') continue
+        if (typeof s === 'string') {
+          console.log(`[reconcile] ${op.opId} none of its ${op.signedTxs.length} signed copies landed (${s}): closed`)
+          this.patchOp(acc, op.opId, { code: s })
+          continue
+        }
+        receipt = s
+      } else receipt = op.txHash ? await this.receiptOf(op.txHash as Hex) : null
       if (receipt) {
         const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe && l.topics[0] === EXECUTION_SUCCESS)
         found = { hash: receipt.transactionHash, block: Number(receipt.blockNumber), ok }
-      } else found = await this.findOwnerTx(acc, op)
+      } else if (!op.signedTxs?.length) found = await this.findOwnerTx(acc, op)
       if (!found) continue
       const { hash, block } = found
       if (!found.ok) {
@@ -2197,6 +2215,35 @@ export class Operator {
       console.log(`[reconcile] ${op.opId} tx ${hash} landed at block ${block}, confirmed`)
       this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', txHash: hash, block })
     }
+  }
+
+  /**
+   * The copies of an owner tx signed with a time limit, by hash. A receipt (success or revert, gas paid either way)
+   * settles it. With none: still `open` while one can land; closed when none can any more, because the relayer nonce
+   * of every copy is taken by another transaction (OWNER_TX_DROPPED), or the swap deadline is past by a margin
+   * (RESERVE_SWAP_EXPIRED; a copy mined after it would revert, so it cannot execute). The window is the whole of the
+   * swap's validity, not a range of blocks around the failure.
+   */
+  private async settleSigned(op: StoredOp): Promise<TransactionReceipt | 'open' | 'OWNER_TX_DROPPED' | typeof RESERVE_SWAP_EXPIRED> {
+    for (const { hash } of op.signedTxs ?? []) {
+      try {
+        return await this.client.getTransactionReceipt({ hash: hash as Hex })
+      } catch {
+        // not mined, or the provider does not have it yet
+      }
+    }
+    try {
+      const mined = await this.client.getTransactionCount({ address: this.relayer.address, blockTag: 'latest' })
+      if ((op.signedTxs ?? []).every((t) => t.nonce < mined)) {
+        // Taken by another transaction: unless a lagging provider missed the receipt, which the next pass reads again.
+        for (const { hash } of op.signedTxs ?? []) if (await this.receiptOf(hash as Hex)) return 'open'
+        return 'OWNER_TX_DROPPED'
+      }
+    } catch (e) {
+      logErr(`[reconcile] ${op.opId} relayer nonce unavailable:`, e)
+    }
+    if (op.reserveDeadline && (await this.chainNow()) > BigInt(op.reserveDeadline) + SELF_RESERVE_DEADLINE_MARGIN_SECONDS) return RESERVE_SWAP_EXPIRED
+    return 'open'
   }
 
   /** The receipt, or null when the provider does not serve it after a few tries (lagging node, or publicnode's archive gate). */

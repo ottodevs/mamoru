@@ -14,6 +14,10 @@ export type StoredOp = OpView & {
   ownerGrants?: StoredGrant[]
   /** Owner stop: the permissionIds its tx revokes. */
   revokes?: Hex[]
+  /** Owner activate that buys its gas reserve: the unix time its swap reverts after. */
+  reserveDeadline?: string
+  /** Every copy of a send with a time limit, kept before it left: reconciliation reads them by hash. */
+  signedTxs?: { hash: string; nonce: number }[]
 }
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */

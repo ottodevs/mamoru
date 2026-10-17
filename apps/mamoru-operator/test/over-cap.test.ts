@@ -8,7 +8,7 @@ import { webAuthnSigner } from '@mamoru/account/safe'
 import { LIVE_CAP_USDC, browserOwnerSignature, deployCall, liveAccountFromContext } from '@mamoru/account/live'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { FOLLOW_UP_GRACE, FOLLOW_UP_MAX, FOLLOW_UP_MS, graceLeft, HttpError, lastEngineBlock, nextReview, MAX_OWNER_FAILURES_PER_DAY, OWNER_FAILURES_ALERT_PER_DAY, Operator, type OperatorConfig } from '../src/operator.ts'
-import { SendExpired, type Relayer } from '../src/relayer.ts'
+import { SendExpired, SendUnsettled, type Relayer } from '../src/relayer.ts'
 import { answerAggregate3 } from './fake-multicall.ts'
 import { quoterV2Abi } from '@mamoru/uniswap-v3/quote'
 import type { AccountState, ArmedActivation, StateStore } from '../src/state.ts'
@@ -17,6 +17,8 @@ const RELAYER = `0x${'7'.repeat(40)}` as const
 const TO = getAddress(`0x${'c'.repeat(40)}`)
 const OVER = 101_920_000n
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
+/** The hash the fake relayer reports for the signed copy of its n-th send. */
+const signedHash = (n: number) => keccak256(stringToHex(`signed-${n}`))
 
 const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
 const owners = [address('SafeWebAuthnSharedSigner')]
@@ -38,7 +40,7 @@ function world(usdc: bigint) {
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n, eth: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, weiPerUsdc: 0n, twapTick: null as number | null, blockTime: 1_790_000_000n, notAfterSeen: [] as bigint[], expireInQueue: false, proxyStops: null as null | 'not-sent' | 'maybe-sent' }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false, enabledFromBlock: 0n, noHistory: false, usdt: 0n, weiPerUsdc: 0n, twapTick: null as number | null, blockTime: 1_790_000_000n, notAfterSeen: [] as bigint[], expireInQueue: false, proxyStops: null as null | 'not-sent' | 'maybe-sent' | 'unsettled', receipts: new Map<string, TransactionReceipt>(), signedNonce: 9 }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -46,7 +48,9 @@ function world(usdc: bigint) {
   const client = {
     getBlockNumber: async () => 100n,
     getBlock: async () => ({ number: 100n, timestamp: knobs.blockTime }),
-    getTransactionReceipt: async () => {
+    getTransactionReceipt: async ({ hash }: { hash?: string } = {}) => {
+      const r = hash && knobs.receipts.get(hash.toLowerCase())
+      if (r) return r
       throw new Error('no receipt')
     },
     getLogs: async () => [],
@@ -101,19 +105,20 @@ function world(usdc: bigint) {
   } as unknown as PublicClient
   const relayer = {
     address: RELAYER,
-    send: async (tx: { to: string; data?: Hex; value?: bigint; notAfter?: { at: bigint; code: string } }, onSent?: (h: Hex) => void, onSending?: () => void) => {
+    send: async (tx: { to: string; data?: Hex; value?: bigint; notAfter?: { at: bigint; code: string } }, onSent?: (h: Hex) => void, onSending?: (signed: { hash: Hex; nonce: number }) => void) => {
       // The real relayer checks a job's time limit right before the broadcast (relayer-nonce.test.ts); here a knob says it ran out in the queue.
       if (tx.notAfter) {
         knobs.notAfterSeen.push(tx.notAfter.at)
         if (knobs.expireInQueue) throw new SendExpired(tx.notAfter.code, tx.notAfter.at, tx.notAfter.at)
         // The proxy stopped it after the relayer marked it as going out: before any provider, or after one was asked.
         if (knobs.proxyStops) {
-          onSending?.()
+          onSending?.({ hash: signedHash(sent.length), nonce: knobs.signedNonce })
+          if (knobs.proxyStops === 'unsettled') throw new SendUnsettled(tx.notAfter.code, Object.assign(new Error('forged'), { code: -32098 }))
           throw new SendExpired(tx.notAfter.code, tx.notAfter.at, tx.notAfter.at, knobs.proxyStops === 'maybe-sent')
         }
       }
       sent.push(tx)
-      if (!knobs.failBeforeSending) onSending?.()
+      if (!knobs.failBeforeSending) onSending?.({ hash: signedHash(sent.length), nonce: knobs.signedNonce })
       knobs.onSend(tx)
       const hash = toHex(sent.length, { size: 32 })
       onSent?.(hash)
@@ -2229,5 +2234,58 @@ describe('the activation buys its own gas reserve', () => {
     const op = await after.op.submit(ctx, 'activate', sign(await after.op.prepareActivate(ctx)))
     expect(op).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
     expect(op.txHash).toBeUndefined()
+  })
+  // Pass 4: a maybe-sent copy is known by the hash it was signed with, kept before it left, and read for as long as it
+  // can land: far more than the ~10 blocks findOwnerTx looks at.
+  describe('a copy that may be out is settled by its signed hash', () => {
+    const maybeOut = async (stop: 'maybe-sent' | 'unsettled' = 'maybe-sent') => {
+      const w = quiet(20_000_000n)
+      w.knobs.proxyStops = stop
+      const op = await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+      expect(op).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      const stored = w.state.accounts.k!.ops.find((o) => o.opId === op.opId)!
+      return { w, op, stored, hash: signedHash(w.sent.length) }
+    }
+    const receipt = (hash: Hex, ok: boolean, block: bigint) =>
+      ({ transactionHash: hash, status: ok ? 'success' : 'reverted', blockNumber: block, logs: ok ? [{ address: SAFE, topics: [EXECUTION_SUCCESS] }] : [] }) as unknown as TransactionReceipt
+
+    test('an upstream error with no verdict from the proxy (a forged -32098) is maybe out, never expired', async () => {
+      const { stored, hash } = await maybeOut('unsettled')
+      expect(stored.signedTxs).toEqual([{ hash, nonce: 9 }])
+    })
+
+    test('the hash is on the op before the hand-over, and a receipt 5000 blocks later starts the account', async () => {
+      const { w, stored, hash } = await maybeOut()
+      expect(stored.signedTxs).toEqual([{ hash, nonce: 9 }])
+      expect(stored.reserveDeadline).toBeString()
+      // Nothing yet, in time, nonce not taken: it stays open.
+      await w.op.reconcileOwner(w.state.accounts.k!)
+      expect(stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      w.knobs.receipts.set(hash.toLowerCase(), receipt(hash, true, 5_101n))
+      await w.op.reconcileOwner(w.state.accounts.k!)
+      expect(stored).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', txHash: hash, block: 5_101 })
+      expect(w.state.accounts.k!.active).toBe(true)
+    })
+
+    test('a reverted receipt is a failure that paid gas, with its hash and block, not "not sent"', async () => {
+      const { w, stored, hash } = await maybeOut()
+      w.knobs.receipts.set(hash.toLowerCase(), receipt(hash, false, 5_101n))
+      await w.op.reconcileOwner(w.state.accounts.k!)
+      expect(stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_FAILED', txHash: hash, block: 5_101 })
+      expect(w.state.accounts.k!.active).toBe(false)
+    })
+
+    test('no receipt: closed once its relayer nonce is taken by another transaction, or once the deadline is past', async () => {
+      const dropped = await maybeOut()
+      // The relayer has mined nonces up to 5 (latest count): a copy at nonce 3 can never land.
+      dropped.stored.signedTxs = [{ hash: dropped.hash, nonce: 3 }]
+      await dropped.w.op.reconcileOwner(dropped.w.state.accounts.k!)
+      expect(dropped.stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_DROPPED' })
+
+      const late = await maybeOut()
+      late.stored.reserveDeadline = String(Math.floor(Date.now() / 1000) - 601)
+      await late.w.op.reconcileOwner(late.w.state.accounts.k!)
+      expect(late.stored).toMatchObject({ state: 'failed', code: 'RESERVE_SWAP_EXPIRED' })
+    })
   })
 })

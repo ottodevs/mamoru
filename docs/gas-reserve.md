@@ -44,11 +44,17 @@ any failed start. One whose `execTransaction` was already handed to a provider i
 reads whether it landed. The limit also travels with the send itself (`notAfter` on the relayer job, deadline minus
 10 minutes): the relayer checks it again after its queue and its reads, right before the broadcast, against the later
 of its clock (read after the head) and the chain head, and drops the job (`SendExpired`, `RESERVE_SWAP_EXPIRED`)
-instead of sending it, on every attempt. The relayer's wallet transport does not retry. The limit also goes to the
-local RPC proxy in the `x-mamoru-not-after` header, which only the proxy reads (upstream requests never carry it):
-past it the proxy hands the signed transaction to no further provider, first try or fallback. Stopped before any
-provider was asked, the start fails `RESERVE_SWAP_EXPIRED`; stopped after one was asked, it may be out, and it is
-left to reconciliation.
+instead of sending it, on every attempt. The limit also goes to the local RPC proxy in the `x-mamoru-not-after`
+header, which only the proxy reads (upstream requests never carry it): past it the proxy hands the signed transaction
+to no further provider, first try or fallback, and says so in its own `x-mamoru-send-verdict` response header
+(`not-sent` or `maybe-sent`). No provider's header or error code can stand for it. Only `not-sent` fails the start
+as `RESERVE_SWAP_EXPIRED`. Any other failure after the hand-over may be out.
+
+What may be out is settled by hash: the relayer gives the hash and nonce of each signed copy before it leaves, and
+they are kept on the op (`signedTxs`). Reconciliation reads their receipts for as long as one can land, not a range of
+blocks. A successful receipt starts the account. A reverted one is `OWNER_TX_FAILED` with its hash and block (gas
+paid). With no receipt, the op is closed as `OWNER_TX_DROPPED` once the relayer nonce of every copy is taken by
+another transaction, or as `RESERVE_SWAP_EXPIRED` once the deadline is 10 minutes past.
 
 ## When the relayer still pays (#82)
 
