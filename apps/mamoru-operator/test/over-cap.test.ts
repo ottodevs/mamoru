@@ -1999,7 +1999,7 @@ describe('renewing the approval of a running account', () => {
       const ff = `0x${'ff'.repeat(32)}` as Hex
       const fresh = [ee, ff].map((permissionId) => ({ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId }))
       // A renewal with its receipt unread that has not run (its grants disabled, its Safe nonce not spent).
-      acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: had, safeNonce: '5' } as never)
+      acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: had, safeTxHash: keccak256(stringToHex('stx-' + Math.random())), safeNonce: '5' } as never)
       if (withStop) acc.ops.push({ opId: 'own-8-exit', kind: 'exit', state: 'failed', code: 'OWNER_TX_ERROR', safeTxHash: `0x${'5a'.repeat(32)}`, revokes: had, updatedAt: new Date().toISOString() } as never)
       // Another transaction revoked the engine's last grant; the others stay enabled.
       const off = had.at(-1)!
@@ -2037,7 +2037,7 @@ describe('renewing the approval of a running account', () => {
       const ee = `0x${'ee'.repeat(32)}` as Hex
       const ff = `0x${'ff'.repeat(32)}` as Hex
       const fresh = [ee, ff].map((permissionId) => ({ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId }))
-      acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: extend ? [] : old, extend, safeNonce: '1' } as never)
+      acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: extend ? [] : old, extend, safeTxHash: keccak256(stringToHex('stx-' + Math.random())), safeNonce: '1' } as never)
       // It ran (its own ExecutionSuccess is in the logs) and spent nonce 1; the owner then removed one of its grants elsewhere.
       landed(w, acc.ops.at(-1) as never)
       w.chain.nonce = 3n
@@ -2178,7 +2178,7 @@ describe('renewing the approval of a running account', () => {
     const ee = `0x${'ee'.repeat(32)}` as Hex
     const ff = `0x${'ff'.repeat(32)}` as Hex
     const fresh = [ee, ff].map((permissionId) => ({ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId }))
-    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: old, safeNonce: '1' } as never)
+    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: old, safeTxHash: keccak256(stringToHex('stx-' + Math.random())), safeNonce: '1' } as never)
     // It ran, unproven (no receipt, no log found); then the owner removed ee elsewhere.
     for (const id of old) w.knobs.enabled.delete(id.toLowerCase())
     w.knobs.enabled.add(ff)
@@ -2307,20 +2307,22 @@ describe('renewing the approval of a running account', () => {
     expect(await g.grantGate(acc, t0 + 4)).toBe(true)
   })
 
-  test('otto/mamoru#140: a full sweep over a long grant history sends its batches one at a time, capped, and resumes where it left off', async () => {
+  test('otto/mamoru#140: a full sweep reads every tracked id at one pinned block, in batches sent one at a time', async () => {
     const { w, acc } = await running()
     await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))
     const old = Array.from({ length: 1200 }, (_, i) => toHex(i + 1, { size: 32 }))
     acc.revoked.push(...old)
     w.knobs.batchGrants = true
-    type C = { call(a: unknown): Promise<unknown> }
+    type C = { call(a: { blockNumber?: bigint }): Promise<unknown> }
     const client = (w.op as unknown as { client: C }).client
     const call = client.call.bind(client)
     let inflight = 0
     let peak = 0
+    const blocks = new Set<string>()
     client.call = async (a) => {
       inflight++
       peak = Math.max(peak, inflight)
+      blocks.add(String(a.blockNumber))
       await Bun.sleep(1)
       try {
         return await call(a)
@@ -2328,68 +2330,117 @@ describe('renewing the approval of a running account', () => {
         inflight--
       }
     }
-    type Sweep = { enforceGrants(a: AccountState): Promise<boolean> }
-    const sweep = () => (w.op as unknown as Sweep).enforceGrants(acc)
-    const total = old.length + acc.revoked.length - old.length
-    const passes = Math.ceil(total / 500)
-    const results: boolean[] = []
-    for (let i = 0; i < passes; i++) {
-      w.knobs.batchedGrantReads = 0
-      results.push(await sweep())
-      expect(w.knobs.batchedGrantReads).toBeLessThanOrEqual(500)
-    }
-    expect(peak).toBe(1)
-    // Verified only at the end of the cycle that read the whole list.
-    expect(results).toEqual([...Array(passes - 1).fill(false), true])
-    // Start waits for that: refused mid-cycle, allowed once a cycle completes.
-    for (let i = 0; i < passes - 1; i++) expect(await w.op.prepareActivate(ctx).catch((e: unknown) => e)).toMatchObject({ code: 'GRANT_CHECK_UNAVAILABLE' })
+    const before = w.knobs.multicalls
     expect((await w.op.prepareActivate(ctx)).summary.length).toBeGreaterThan(0)
+    const known = new Set(acc.revoked.map((id) => id.toLowerCase())).size
+    expect(w.knobs.batchedGrantReads).toBe(known)
+    // Batches of 100 at most, one at a time, all at the same block.
+    expect(w.knobs.multicalls - before).toBeGreaterThanOrEqual(Math.ceil(known / 100))
+    expect(peak).toBe(1)
+    expect([...blocks].filter((b) => b !== 'undefined')).toEqual(['100'])
   })
 
-  test('otto/mamoru#140: a full-sweep cycle whose list changes mid-cycle verifies Start only once every id tracked now was read', async () => {
-    for (const size of [600, 0, 1100])
-      for (const change of ['none', 'add-enabled', 'superseded-shrinks'] as const)
-        for (const reenabled of [0, 1, 500]) {
-          const label = JSON.stringify({ size, change, reenabled })
+  test('otto/mamoru#140 property: Start passes only on a snapshot of one block in which every tracked id was read; later re-enables are caught by the loop sweep', async () => {
+    for (const size of [50, 600, 1000])
+      for (const reenabled of [0, 1, 300])
+        for (const change of ['none', 'add-enabled', 'superseded-shrinks', 're-enable-read-id'] as const) {
+          const label = JSON.stringify({ size, reenabled, change })
           const { w, acc } = await running()
           await w.op.submit(ctx, 'stop', sign(await w.op.prepareStop(ctx)))
           w.knobs.batchGrants = true
-          // Half the ids sit in superseded and read disabled (they leave it on their first read, into revoked); the
-          // other half are old revoked ids, `reenabled` of which the owner enabled again. size 0: the review's case,
-          // exactly 1000 other ids (500 superseded, the rest revoked), two windows with no wrap-around.
-          const known = new Set(acc.revoked.map((id) => id.toLowerCase())).size
-          const half = size === 0 ? 500 : Math.floor(size / 2)
-          const total = size === 0 ? 1000 - known : size
-          const ids = Array.from({ length: total }, (_, i) => toHex(i + 1, { size: 32 }))
+          const half = Math.floor(size / 2)
+          const ids = Array.from({ length: size }, (_, i) => toHex(i + 1, { size: 32 }))
           acc.superseded = ids.slice(0, half)
           acc.revoked.push(...ids.slice(half))
           for (const id of ids.slice(half, half + reenabled)) w.knobs.enabled.add(id.toLowerCase())
-          const extra = toHex(9_999, { size: 32 })
-          let started = false
-          for (let call = 0; call < 8 && !started; call++) {
-            if (call === 1 && change === 'add-enabled') {
-              // A new id appears between two calls of the cycle, enabled on the Safe.
-              acc.revoked.push(extra)
-              w.knobs.enabled.add(extra.toLowerCase())
-            }
-            if (call === 1 && change === 'superseded-shrinks') acc.superseded = (acc.superseded ?? []).slice(0, 10)
-            const res = await w.op.prepareActivate(ctx).catch((e: unknown) => e)
-            if (res instanceof HttpError) {
-              expect(['GRANT_CHECK_UNAVAILABLE', 'STOP_FIRST'], label).toContain(res.code)
-              if (res.code === 'STOP_FIRST') break
-            } else started = true
-            // Whenever Start would pass, every id enabled on the chain is tracked (I3): nothing is left beside it.
-            if (started) {
-              const tracked = new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? [])].map((id) => id.toLowerCase()))
-              expect([...w.knobs.enabled].filter((id) => !tracked.has(id)), label).toEqual([])
-            }
+          const A = ids[0]!
+          const extra = toHex(99_999, { size: 32 })
+          // A first Start: one snapshot. Then the chain or the list changes, and Start is asked again.
+          const first = await w.op.prepareActivate(ctx).catch((e: unknown) => e)
+          if (change === 'add-enabled') {
+            acc.revoked.push(extra)
+            w.knobs.enabled.add(extra.toLowerCase())
           }
-          const anyEnabled = reenabled > 0 || change === 'add-enabled'
-          // With an old grant enabled again Start never passes (STOP_FIRST once the cycle has read it); with none, it does.
-          expect(started, label).toBe(!anyEnabled)
-          if (anyEnabled) expect((acc.superseded ?? []).length, label).toBeGreaterThan(0)
+          if (change === 'superseded-shrinks') acc.superseded = (acc.superseded ?? []).slice(0, 3)
+          // The review's case: an id read disabled in the first snapshot, enabled again by the owner before the second.
+          if (change === 're-enable-read-id') w.knobs.enabled.add(A.toLowerCase())
+          const second = await w.op.prepareActivate(ctx).catch((e: unknown) => e)
+          const enabledNow = [...w.knobs.enabled]
+          const tracked = new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? [])].map((id) => id.toLowerCase()))
+          // I3 at Start: after each snapshot every enabled id is tracked, and Start passes only when none is left.
+          expect(enabledNow.filter((id) => !tracked.has(id)), label).toEqual([])
+          const expectFirst = reenabled === 0
+          expect(first instanceof HttpError ? first.code : 'ok', label).toBe(expectFirst ? 'ok' : 'STOP_FIRST')
+          const expectSecond = reenabled === 0 && change !== 'add-enabled' && change !== 're-enable-read-id'
+          expect(second instanceof HttpError ? second.code : 'ok', label).toBe(expectSecond ? 'ok' : 'STOP_FIRST')
         }
   }, 240_000)
+
+  test('otto/mamoru#140: a grant re-enabled after a Start snapshot is tracked by the engine loop sweep within sweepsToCover sweeps', async () => {
+    const { w, acc } = await running()
+    const old = Array.from({ length: 400 }, (_, i) => toHex(i + 1, { size: 32 }))
+    acc.revoked.push(...old)
+    w.knobs.batchGrants = true
+    type Sweep = { enforceGrants(a: AccountState, o?: { full?: boolean }): Promise<boolean> }
+    expect(await (w.op as unknown as Sweep).enforceGrants(acc)).toBe(true)
+    expect(acc.superseded ?? []).toEqual([])
+    // After the snapshot, the owner enables an old id.
+    w.knobs.enabled.add(old[123]!.toLowerCase())
+    const others = new Set(acc.revoked.map((id) => id.toLowerCase())).size + (acc.superseded?.length ?? 0)
+    const n = sweepsToCover(others, acc.grants.length)
+    for (let i = 0; i < n; i++) await (w.op as unknown as Sweep).enforceGrants(acc, { full: false })
+    expect(acc.superseded).toContain(old[123])
+  })
+
+  test('otto/mamoru#140 property: a read error never finalises an owner op; an unproven renewal is retried until its receipt or log answers', async () => {
+    for (const failure of ['receipt-error', 'logs-error', 'none'] as const)
+      for (const ran of [false, true]) {
+        const label = JSON.stringify({ failure, ran })
+        const { w, acc } = await running()
+        const had = acc.grants.map((g) => g.permissionId)
+        const ee = `0x${'ee'.repeat(32)}` as Hex
+        const stx = keccak256(stringToHex(`stx-${failure}-${ran}`))
+        const hash = keccak256(stringToHex(`tx-${failure}-${ran}`))
+        const R = { opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: ee }], revokes: had, safeTxHash: stx, safeNonce: '1', ...(failure === 'receipt-error' ? { txHash: hash } : {}) }
+        acc.ops.push(R as never)
+        if (ran) {
+          for (const id of had) w.knobs.enabled.delete(id.toLowerCase())
+          w.knobs.enabled.add(ee)
+        }
+        w.chain.nonce = 3n
+        type C = { getTransactionReceipt(a: unknown): Promise<unknown>; getLogs(a: unknown): Promise<unknown> }
+        const client = (w.op as unknown as { client: C }).client
+        const getReceipt = client.getTransactionReceipt.bind(client)
+        const getLogs = client.getLogs.bind(client)
+        ;(w.op as unknown as { receiptOf(h: Hex): Promise<unknown> }).receiptOf = async () => null
+        if (failure === 'receipt-error') client.getTransactionReceipt = async () => {
+          throw new Error('HTTP request failed. Status: 503')
+        }
+        if (failure === 'logs-error') client.getLogs = async () => {
+          throw new Error('HTTP request failed. Status: 429')
+        }
+        await w.op.prepareRenew(ctx).catch(() => undefined)
+        const st = () => acc.ops.find((o) => o.opId === R.opId)!
+        // A read error: undecided, still an unread receipt. Reads that answer and find nothing: unproven (retryable).
+        if (failure === 'none') expect(st().code, label).toBe(ran ? 'RENEWAL_UNPROVEN' : 'RENEWAL_SUPERSEDED')
+        else expect(st(), label).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+        expect(st().state, label).toBe('failed')
+        // The provider recovers and its log (or receipt) is found: a renewal that ran is applied, every grant enabled.
+        client.getTransactionReceipt = getReceipt
+        client.getLogs = getLogs
+        if (ran) {
+          w.knobs.logs.push({ stx, hash, block: 99n })
+          ;(w.op as unknown as { receiptOf(h: Hex): Promise<unknown> }).receiptOf = async () => ({ transactionHash: hash, status: 'success', blockNumber: 99n, logs: [{ address: SAFE, topics: [EXECUTION_SUCCESS, stx] }] })
+          await w.op.prepareRenew(ctx).catch(() => undefined)
+          await w.op.reconcileOwner(acc)
+          expect(st(), label).toMatchObject({ state: 'confirmed' })
+          // While it was unproven the engine was stopped (I1: its old grants read revoked); proven now, its grant is
+          // tracked (superseded, for the next stop, since the account no longer runs), never lost.
+          expect(acc.active, label).toBe(false)
+          expect(acc.superseded, label).toContain(ee)
+        }
+      }
+  }, 120_000)
 
   test('otto/mamoru#140: reconciliation does not apply an older renewal on a head below the account floor', async () => {
     const { w, acc } = await running()
@@ -2564,7 +2615,7 @@ describe('renewing the approval of a running account', () => {
     const ee = `0x${'ee'.repeat(32)}` as Hex
     const ff = `0x${'ff'.repeat(32)}` as Hex
     const fresh = [ee, ff].map((permissionId) => ({ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId }))
-    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: [], safeNonce: '1' } as never)
+    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: [], safeTxHash: keccak256(stringToHex('stx-' + Math.random())), safeNonce: '1' } as never)
     w.chain.nonce = 3n
     type Read = { readContract(a: { functionName: string; args?: readonly unknown[] }): Promise<unknown> }
     const client = (w.op as unknown as { client: Read }).client
@@ -2620,7 +2671,7 @@ describe('renewing the approval of a running account', () => {
     const { w, acc } = await running()
     const ee = `0x${'ee'.repeat(32)}` as Hex
     const ghost = [{ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId: ee }]
-    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: ghost, revokes: [], safeNonce: '1' } as never)
+    acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: ghost, revokes: [], safeTxHash: keccak256(stringToHex('stx-' + Math.random())), safeNonce: '1' } as never)
     // (the chain model: the engine's grants enabled, the other op's not)
     // Its nonce not spent yet: it can still land, so the next renewal revokes its grants.
     expect(w.chain.nonce).toBe(1n)

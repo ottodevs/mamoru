@@ -68,10 +68,6 @@ const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint25
 const GRANTS_CHECK_MS = 300_000
 /** Permission ids per engine-loop grant sweep (one Multicall3 chunk): the engine's always, the others in rotation. */
 const GRANTS_SWEEP_MAX = 100
-/** Other permission ids per full sweep (settle passes, Start), read in sequential batches of BATCH_MAX_CALLS. */
-const GRANTS_FULL_MAX = 500
-/** A full-sweep cycle counts an id read longer ago than this as not read: it is read again before Start passes. */
-const FULL_READ_FRESH_MS = 600_000
 
 /** Engine-loop sweeps within which every non-engine id the account knows is read again (see enforceGrants). */
 export function sweepsToCover(others: number, engine: number): number {
@@ -384,8 +380,6 @@ export class Operator {
   private readonly grantsChecked = new Map<string, number>()
   /** Where the engine loop's rotating grant sweep resumes, per account (enforceGrants). */
   private readonly sweepCursor = new Map<string, number>()
-  /** Full sweeps: the ids read in the account's current cycle, with the block and time each was read at (enforceGrants). */
-  private readonly fullRead = new Map<string, Map<string, { block: bigint; at: number }>>()
   /** Since when (ms) engine review has been held for a pending non-activate prepare on this account; see reviewHold. */
   private readonly reviewHeldSince = new Map<string, number>()
   private armTimer: ReturnType<typeof setTimeout> | null = null
@@ -1164,7 +1158,10 @@ export class Operator {
         this.patchOp(acc, op.opId, { state: 'failed', code: 'RENEWAL_SUPERSEDED' })
         continue
       }
-      const proof = await this.provenOwnerTx(acc, op)
+      const answer = await this.provenOwnerTx(acc, op)
+      // A read error decides nothing: it stays an unread receipt, asked again (#140).
+      if (answer === 'unknown') continue
+      const proof = answer === 'none' ? null : answer
       // Read at a head not below the account's floor nor the renewal's own block: a lagging provider defers (#140).
       const block = await this.headAtLeast(acc, proof ? BigInt(proof.block) : 0n)
       if (block === null) continue
@@ -1193,7 +1190,10 @@ export class Operator {
         continue
       }
       if (nonce <= BigInt(op.safeNonce)) continue
-      this.patchOp(acc, op.opId, { state: 'failed', code: on.some(Boolean) ? 'RENEWAL_UNPROVEN' : 'RENEWAL_SUPERSEDED' })
+      // Its time is kept (findOwnerTx looks around it): reconcileOwner keeps asking an unproven one until its receipt
+      // or log gives a definitive answer.
+      Object.assign(op, { state: 'failed', code: on.some(Boolean) ? 'RENEWAL_UNPROVEN' : 'RENEWAL_SUPERSEDED' })
+      this.store.save()
     }
     // Stops after renewals: a renewal applied above replaced the engine's grants, and the stop is judged on those.
     await this.settleStops(acc)
@@ -1218,7 +1218,8 @@ export class Operator {
     // Every engine grant, at one block: all enabled means the stop has not run.
     const on = await this.enabledAt(acc, acc.grants.map((g) => g.permissionId), block)
     if (!on || on.every(Boolean)) return
-    const proof = await this.provenOwnerTx(acc, op)
+    const answer = await this.provenOwnerTx(acc, op)
+    const proof = typeof answer === 'object' ? answer : null
     if (proof) {
       console.log(`[stop] ${acc.accountKey} ${op.opId} executed on chain (tx ${proof.hash}): applied`)
       this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'stop', tx: undefined as never, safeTxHash: '0x', expires: 0, revokes: ids }, { blockNumber: BigInt(proof.block) } as TransactionReceipt)
@@ -1252,8 +1253,8 @@ export class Operator {
    *   ever knew (its grants, superseded, revoked, every owner op's grants and revocations, an armed approval's) that
    *   reads enabled and is not the engine's is put in `superseded`, so the next stop or renewal revokes it and Start
    *   waits for that stop (STOP_FIRST); one in `superseded` that reads disabled leaves it (recorded as revoked).
-   * A read that fails, or a provider head below the account's floor, changes nothing. Full sweep (every id, chunked)
-   * after every settle pass and before a Start; the engine loop's sweep (every GRANTS_CHECK_MS) reads the engine's
+   * A read that fails, or a provider head below the account's floor, changes nothing. Full sweep (every id at one
+   * pinned block, sequential batches) after every settle pass and before a Start; the engine loop's sweep (every GRANTS_CHECK_MS) reads the engine's
    * grants every time and the other ids in rotation, each again within sweepsToCover(others, engine) sweeps: with 12
    * engine grants, 500 other ids are all re-read within 6 sweeps (30 min).
    */
@@ -1280,34 +1281,22 @@ export class Operator {
     // one is read again within ceil(others / (GRANTS_SWEEP_MAX - engine)) sweeps (sweepsToCover).
     const list = [...others.values()]
     let window = list
-    const full = opts.full !== false
-    if (full) {
-      // A full sweep reads at most GRANTS_FULL_MAX other ids per call, in sequential batches. It keeps, per account,
-      // which ids it has read in the current cycle and at which block (fullRead): each call reads ids not read yet in
-      // it (or read below the floor, or longer ago than FULL_READ_FRESH_MS), and the call is verified only when every
-      // id tracked now, ids added since the cycle began included, has been read in it.
-      const floor = this.floorOf(acc, 0n)
-      const seen = this.fullRead.get(acc.accountKey) ?? new Map<string, { block: bigint; at: number }>()
-      this.fullRead.set(acc.accountKey, seen)
-      const fresh = (id: Hex) => {
-        const r = seen.get(low(id))
-        return !!r && r.block >= floor && Date.now() - r.at < FULL_READ_FRESH_MS
-      }
-      window = list.filter((id) => !fresh(id)).slice(0, GRANTS_FULL_MAX)
-    } else if (list.length > GRANTS_SWEEP_MAX - engine.length) {
+    // A full sweep (settle passes, Start) reads every id the account tracks at one pinned block, in sequential
+    // batches of BATCH_MAX_CALLS at that same block: a consistent view, verified as a whole or not at all. A grant
+    // the owner enables after that block is caught by the engine loop's sweep within sweepsToCover() sweeps.
+    if (opts.full === false && list.length > GRANTS_SWEEP_MAX - engine.length) {
       // The engine loop's sweep: the engine's grants every time, a rotating window of the others.
       const size = Math.max(1, GRANTS_SWEEP_MAX - engine.length)
       const start = (this.sweepCursor.get(acc.accountKey) ?? 0) % list.length
       window = Array.from({ length: size }, (_, i) => list[(start + i) % list.length]!)
       this.sweepCursor.set(acc.accountKey, (start + size) % list.length)
     }
-    const fail = () => false
     const universe = [...engine, ...window]
     if (!universe.length) return true
     const block = await this.headAtLeast(acc, 0n)
-    if (block === null) return fail()
+    if (block === null) return false
     const on = await this.enabledAt(acc, universe, block)
-    if (!on) return fail()
+    if (!on) return false
     const enabled = new Set(universe.filter((_, i) => on[i]).map(low))
     let changed = false
     if (acc.active && engine.some((id) => !enabled.has(low(id)))) {
@@ -1334,31 +1323,9 @@ export class Operator {
       changed = true
     }
     if (changed) this.store.save()
-    if (!full) return true
-    // Recorded as read in this cycle at `block`; verified when every id tracked now (recomputed: this sweep may have
-    // moved ids between superseded and revoked, or the list grown) has been read in it at a block >= the floor.
-    const seen = this.fullRead.get(acc.accountKey)!
-    // Everything read now counts: the engine's grants too (a stop by I1 above makes them `others`).
-    for (const id of universe) seen.set(low(id), { block, at: Date.now() })
-    const floor = this.floorOf(acc, 0n)
-    const all = [...(acc.superseded ?? []), ...this.knownIds(acc)].filter((id) => !acc.grants.some((g) => low(g.permissionId) === low(id)))
-    const done = all.every((id) => {
-      const r = seen.get(low(id))
-      return !!r && r.block >= floor && Date.now() - r.at < FULL_READ_FRESH_MS
-    })
-    // A verified cycle ends: the next full sweep (the next Start) reads everything again.
-    if (done) this.fullRead.delete(acc.accountKey)
-    return done
+    return true
   }
 
-  /** Every permission id the account knows besides `superseded`: pending ops', the armed approval's, every owner op's grants and revocations, the revoked list. */
-  private knownIds(acc: AccountState): Hex[] {
-    return [
-      ...acc.ops.flatMap((o) => [...((o as StoredOp).ownerGrants ?? []).map((g) => g.permissionId), ...((o as StoredOp).revokes ?? [])]),
-      ...(acc.armed?.grants ?? []).map((g) => g.permissionId),
-      ...acc.revoked,
-    ]
-  }
 
   /** The account's floor and `min`: no grant is read at a block below it (see headAtLeast). */
   private floorOf(acc: AccountState, min: bigint): bigint {
@@ -1394,20 +1361,33 @@ export class Operator {
    * tx hash when one is kept), or without a receipt the ExecutionSuccess log of that Safe tx hash (findOwnerTx). Null
    * when nothing proves it ran; any read that fails counts as not proven.
    */
-  private async provenOwnerTx(acc: AccountState, op: StoredOp): Promise<{ hash: Hex; block: number } | null> {
+  private async provenOwnerTx(acc: AccountState, op: StoredOp): Promise<{ hash: Hex; block: number } | 'none' | 'unknown'> {
     const safe = (acc.ctx.address as string).toLowerCase()
     const own = op.safeTxHash?.toLowerCase()
     try {
-      const receipt = op.txHash ? await this.receiptOf(op.txHash as Hex) : null
-      if (receipt) {
-        const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe && l.topics[0] === EXECUTION_SUCCESS && (!own || l.topics[1]?.toLowerCase() === own))
-        return ok ? { hash: receipt.transactionHash, block: Number(receipt.blockNumber) } : null
+      if (op.txHash) {
+        let receipt: TransactionReceipt | null = null
+        try {
+          receipt = await this.client.getTransactionReceipt({ hash: op.txHash as Hex })
+        } catch (e) {
+          // Not found is an answer (the logs below decide); any other error is not one: nothing is decided.
+          if ((e as { name?: string })?.name !== 'TransactionReceiptNotFoundError') {
+            logErr(`[settle] ${acc.accountKey} ${op.opId} receipt unreadable, undecided:`, e)
+            return 'unknown'
+          }
+        }
+        if (receipt) {
+          const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe && l.topics[0] === EXECUTION_SUCCESS && (!own || l.topics[1]?.toLowerCase() === own))
+          return ok ? { hash: receipt.transactionHash, block: Number(receipt.blockNumber) } : 'none'
+        }
       }
+      // Without a Safe tx hash nothing tells its log from another's: undecided, never "not run".
+      if (!own) return 'unknown'
       const found = await this.findOwnerTx(acc, op)
-      return found?.ok ? { hash: found.hash, block: found.block } : null
+      return found?.ok ? { hash: found.hash, block: found.block } : 'none'
     } catch (e) {
-      logErr(`[settle] ${acc.accountKey} ${op.opId} execution unreadable, not proven:`, e)
-      return null
+      logErr(`[settle] ${acc.accountKey} ${op.opId} execution unreadable, undecided:`, e)
+      return 'unknown'
     }
   }
 
@@ -2641,7 +2621,7 @@ export class Operator {
 
   /** Background pass (throttled, under the account lock): owner ops failed only because the receipt poll failed. */
   private reconcileSoon(acc: AccountState): void {
-    if (!acc.ops.some((o) => o.opId.startsWith('own-') && o.state === 'failed' && o.code === RECEIPT_UNKNOWN)) return
+    if (!acc.ops.some((o) => o.opId.startsWith('own-') && o.state === 'failed' && (o.code === RECEIPT_UNKNOWN || o.code === 'RENEWAL_UNPROVEN'))) return
     const last = this.reconciled.get(acc.accountKey) ?? 0
     if (Date.now() - last < RECONCILE_EVERY_MS) return
     this.reconciled.set(acc.accountKey, Date.now())
@@ -2653,7 +2633,8 @@ export class Operator {
   /** Reads every owner op marked failed with an unknown receipt; a tx that executed becomes confirmed with its side effects. */
   async reconcileOwner(acc: AccountState): Promise<void> {
     const safe = (acc.ctx.address as string).toLowerCase()
-    for (const op of acc.ops.filter((o) => o.opId.startsWith('own-') && o.state === 'failed' && o.code === RECEIPT_UNKNOWN)) {
+    // An unproven renewal too (otto/mamoru#140): asked again until its receipt or log answers for good.
+    for (const op of acc.ops.filter((o) => o.opId.startsWith('own-') && o.state === 'failed' && (o.code === RECEIPT_UNKNOWN || (o.kind === 'renew' && o.code === 'RENEWAL_UNPROVEN')))) {
       let found: { hash: Hex; block: number; ok: boolean } | null = null
       const receipt = op.txHash ? await this.receiptOf(op.txHash as Hex) : null
       if (receipt) {
