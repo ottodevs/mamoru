@@ -1,11 +1,11 @@
 import type { ReasonCode } from '@mamoru/domain'
-import { grantKeyFor, hasManageAny, type PolicyVersion } from '@mamoru/policy'
+import { grantKeyFor, hasIncrease, hasManageAny, type PolicyVersion } from '@mamoru/policy'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { safeSavings } from '../enter/index.ts'
 import { depthOf } from '../depth/index.ts'
 import { rangeFor, widthFor, widthOf } from '../geometry/index.ts'
 import { purgaIdentity } from '../gates/index.ts'
-import type { GateStep, Observation, PoolObs, Proposal } from '../types.ts'
+import type { GateStep, Observation, PoolObs, PositionObs, Proposal } from '../types.ts'
 import { amountsForLiquidity, inSavings, volatileOf } from '../value.ts'
 
 /** Default smallest entry when the policy sets none: 0.10 of a 6-decimal savings asset. */
@@ -14,6 +14,14 @@ export const DEFAULT_MIN_ENTRY = 100_000n
 const SWAP_BELOW_BPS = 9_000n
 /** Sell idle volatile only when it exceeds what the mint needs by more than this share (bps) and savings are short to pair it. */
 const SELL_ABOVE_BPS = 11_000n
+/**
+ * otto/mamoru#171: how far (bps of the new range's width) each edge of a held position may sit from the edge of the
+ * range a mint would get, for the entry to add to it instead. 1000 is the re-range trigger's own edge share
+ * (`EDGE_BPS`): a position that close to the fresh range has the price at least 40% of its width from either edge,
+ * so the liquidity added is not taken straight out again by a re-range, and its token split is within a few percent
+ * of the fresh range's. Containing the new range's centre alone would admit a position about to be re-ranged.
+ */
+export const DEFAULT_INCREASE_TOLERANCE_BPS = 1_000
 
 export type BucketValue = {
   bucket: string
@@ -56,9 +64,7 @@ export { widthOf }
  * its tokens at that price: split at the TWAP instead, a narrow range a few ticks off its average ends with one token
  * left over.
  */
-function volatileShareBps(obs: Observation, pool: PoolObs, policy: PolicyVersion): bigint {
-  // Lab geometry (#101): the range the mint below gets; without `policy.geometry`, the centred policy width.
-  const r = rangeFor(obs, policy, pool)
+function volatileShareBps(pool: PoolObs, policy: PolicyVersion, r: { tickLower: number; tickUpper: number }): bigint {
   const p = pool
   const a = amountsForLiquidity(p.sqrtPriceX96, r.tickLower, r.tickUpper, 10n ** 24n)
   const savings = policy.savingsAsset
@@ -66,6 +72,39 @@ function volatileShareBps(obs: Observation, pool: PoolObs, policy: PolicyVersion
   const v1 = inSavings(p, p.token1, a.amount1, savings)
   const vol = p.token0 === savings ? v1 : v0
   return v0 + v1 === 0n ? 5_000n : (vol * 10_000n) / (v0 + v1)
+}
+
+/** A live `increase:<tokenId>` session: enabled, not expired, uses left. */
+function liveIncrease(obs: Observation, tokenId: bigint): boolean {
+  const grant = `increase:${tokenId}`
+  return obs.sessions.some((s) => s.grant === grant && (s.tokenId === undefined || s.tokenId === tokenId) && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
+}
+
+/**
+ * otto/mamoru#171: the held position an entry into `pool` adds liquidity to instead of minting a new NFT, or null to
+ * mint. Only with an `increase` grant for the pool in the policy and a live session of it for that tokenId (the
+ * grant is per position). The position must have liquidity, the price strictly inside its range (both amounts
+ * positive, as the grant's minimums need), and each of its edges within `range.increaseToleranceBps` of the width
+ * of `range` (what a mint would get now) from that range's edge. The nearest such position wins, lowest tokenId on ties.
+ */
+export function reusablePosition(obs: Observation, policy: PolicyVersion, pool: PoolObs, range: { tickLower: number; tickUpper: number }): PositionObs | null {
+  if (!hasIncrease(policy, pool.name)) return null
+  const tolerance = Math.floor(((range.tickUpper - range.tickLower) * (policy.range.increaseToleranceBps ?? DEFAULT_INCREASE_TOLERANCE_BPS)) / 10_000)
+  let best: PositionObs | null = null
+  let bestDistance = 0
+  for (const p of obs.positions) {
+    if (p.pool !== pool.name || p.liquidity <= 0n) continue
+    if (!(p.tickLower < pool.tick && pool.tick < p.tickUpper)) continue
+    const lower = Math.abs(p.tickLower - range.tickLower)
+    const upper = Math.abs(p.tickUpper - range.tickUpper)
+    if (lower > tolerance || upper > tolerance || !liveIncrease(obs, p.tokenId)) continue
+    const distance = lower + upper
+    if (!best || distance < bestDistance || (distance === bestDistance && p.tokenId < best.tokenId)) {
+      best = p
+      bestDistance = distance
+    }
+  }
+  return best
 }
 
 /**
@@ -154,7 +193,12 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     // What the next mint of this bucket holds: the gap, or everything the bucket can gather when that is less.
     const wanted = gap < free + volatileValue ? gap : free + volatileValue
     let size = wanted
-    const volShare = volatileShareBps(obs, pool, policy)
+    // Lab geometry (#101): the range a mint gets now; without `policy.geometry`, the centred policy width. #171: a held
+    // position close enough to it takes the entry instead, and the split follows that position's range.
+    const fresh = rangeFor(obs, policy, pool)
+    const reuse = reusablePosition(obs, policy, pool, fresh)
+    const range = reuse ? { tickLower: reuse.tickLower, tickUpper: reuse.tickUpper } : fresh
+    const volShare = volatileShareBps(pool, policy, range)
     // otto/mamoru#127: no more than the pool can take at its depth; the rest waits as savings, with its reason. The
     // swap toward the mint sells at most the volatile share of that size, so it stays within the allowed impact too.
     const depth = depthOf(obs, policy, pool, widthFor(obs, policy, pool))
@@ -234,26 +278,21 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       if (row) row.code = 'DECIDE_NO_CAPITAL'
       continue
     }
-    const mintGrant = grantKeyFor(policy, 'enter-mint', pool.name) as `enter-mint:${string}`
+    const mintGrant = reuse ? (`increase:${reuse.tokenId}` as const) : (grantKeyFor(policy, 'enter-mint', pool.name) as `enter-mint:${string}`)
     pendingMint.push({ pool: pool.name, grant: mintGrant })
     if (!row) continue
     row.code = 'STRATEGY_PREFERENCE_DEVIATION'
     picked = i
-    const range = rangeFor(obs, policy, pool)
     const savingsIs0 = pool.token0 === savings
-    proposal = {
-      kind: 'enter_mint',
-      grant: mintGrant,
-      pool: pool.name,
-      ...range,
-      amount0Desired: savingsIs0 ? savingsIn : volatileIn,
-      amount1Desired: savingsIs0 ? volatileIn : savingsIn,
-    }
+    const amounts = { amount0Desired: savingsIs0 ? savingsIn : volatileIn, amount1Desired: savingsIs0 ? volatileIn : savingsIn }
+    proposal = reuse
+      ? { kind: 'increase_liquidity', grant: `increase:${reuse.tokenId}`, pool: pool.name, tokenId: reuse.tokenId, ...range, ...amounts }
+      : { kind: 'enter_mint', grant: mintGrant as `enter-mint:${string}`, pool: pool.name, ...range, ...amounts }
   }
   if (total === 0n) for (const row of buckets) if (row.code === 'STRATEGY_PREFERENCE') row.code = 'DECIDE_NO_CAPITAL'
   // Each bucket's wait was measured against the same free savings: together they cannot hold more than what is free
   // once this review's entry has taken its savings. Clipped in the order they were found.
-  const spent = !proposal ? 0n : proposal.kind === 'enter_swap' && proposal.tokenIn === savings ? proposal.amountIn : proposal.kind === 'enter_mint' ? (savingsSide(proposal) === 0 ? proposal.amount0Desired : proposal.amount1Desired) : 0n
+  const spent = !proposal ? 0n : proposal.kind === 'enter_swap' && proposal.tokenIn === savings ? proposal.amountIn : proposal.kind === 'enter_mint' || proposal.kind === 'increase_liquidity' ? (savingsSide(proposal) === 0 ? proposal.amount0Desired : proposal.amount1Desired) : 0n
   let left = free > spent ? free - spent : 0n
   const clipped: Waiting[] = []
   for (const w of waiting) {
