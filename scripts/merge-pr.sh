@@ -14,6 +14,8 @@ repo="ottodevs/mamoru"
 pr="${1:?usage: scripts/merge-pr.sh <pr-number> [--keep-branch]}"
 keep_branch="${2:-}"
 root="$(git rev-parse --show-toplevel)"
+# Coordinator only: MAMORU_COORD_AS must name the session holding the live lease (scripts/release/coord.ts).
+bun "$root/scripts/release/coord.ts" assert || exit 1
 
 state="$(gh pr view "$pr" -R "$repo" --json state,baseRefName,headRefName,isCrossRepository \
   -q '[.state,.baseRefName,.headRefName,.isCrossRepository]|@tsv')"
