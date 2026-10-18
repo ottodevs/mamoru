@@ -1,10 +1,10 @@
-import { isAddressEqual, parseAbi, parseEventLogs, type Hex, type Log, type PublicClient } from 'viem'
+import { encodeFunctionData, isAddressEqual, parseAbi, parseEventLogs, type Hex, type Log, type PublicClient } from 'viem'
 import type { LocalAccount } from 'viem/accounts'
 import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { amountsOf, decide, twapFloor, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
 import { hasManageAny, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
-import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
+import { address, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
 import {
   Batch,
   MULTICALL3,
@@ -27,6 +27,7 @@ import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useMo
 import type { Execution } from '@mamoru/account/safe'
 import { approve, burn, collect, decreaseLiquidity, exactInputSingle, mint, type V3Call } from '@mamoru/uniswap-v3'
 import { minOut, quoteExactInputSingle, quoteMint } from '@mamoru/uniswap-v3/quote'
+import { DEFAULT_BAND_FACTOR_BPS, decreaseMinsAtBand, swapBoundsAtBand } from '@mamoru/uniswap-v3/policy-bounds'
 import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
 import { MemoryJournal, type DecisionRecord, type OpRecord } from './journal.ts'
 
@@ -506,33 +507,56 @@ export class Engine {
   }
 
   /**
+   * The pool's TWAP tick at `blockNumber` (`OracleLibrary.consult`'s own rounding: floor, including for a negative
+   * delta — the same formula `MamoruActionPolicy._twapTick` uses on chain). One `observe` eth_call, shared by depth
+   * sizing (`depthFloor`) and a v4 policy's own band math (`swapBoundsAtBand`/`decreaseMinsAtBand`) for the same
+   * pool, so a swap under both needs only one read (spec 007 T3: "no extra RPC per op if avoidable").
+   */
+  private async poolTwapTick(pool: RegistryName, windowSeconds: number, blockNumber: bigint): Promise<number> {
+    try {
+      const [cumulatives] = await this.client.readContract({ address: entry(pool).address as Address, abi: observeAbi, functionName: 'observe', args: [[windowSeconds, 0]], blockNumber })
+      const delta = cumulatives[1]! - cumulatives[0]!
+      let t = delta / BigInt(windowSeconds)
+      if (delta < 0n && delta % BigInt(windowSeconds) !== 0n) t -= 1n
+      return Number(t)
+    } catch {
+      throw new ReasonError('EHG_TWAP_UNAVAILABLE', `${pool}: observe(${windowSeconds}) did not answer at ${blockNumber}`)
+    }
+  }
+
+  /**
    * otto/mamoru#127, with depth sizing on. Slot0 and a quote at the block we read can both be moved by a swap in that
    * same block, so the entry swap is judged against the pool's TWAP, never against its spot:
    * - the quote (which crosses ticks) must be within `maxImpactBps` of what the input buys at the TWAP, the pool fee
    *   aside; otherwise it is refused before anything is sent (EHG_SWAP_IMPACT_OVER_LIMIT);
    * - the router minimum is the larger of the usual slippage minimum on the quote and that TWAP bound, so whatever
    *   happens to the price before inclusion, the swap never executes worse than the limit against the TWAP.
-   * Returns the minimum out to use, or null when depth sizing is off (the usual minimum applies).
+   * `tick`: the pool's TWAP at the review block, already read once by the caller (`poolTwapTick`). Returns the
+   * minimum out to use, or null when depth sizing is off (the usual minimum applies).
    */
-  private async twapBound(p: Extract<Proposal, { kind: 'enter_swap' }>, amountOut: bigint, blockNumber: bigint): Promise<bigint | null> {
+  private depthFloor(p: Extract<Proposal, { kind: 'enter_swap' }>, amountOut: bigint, tick: number): bigint | null {
     const depth = this.cfg.policy.depth
     if (!depth) return null
     const pool = entry(p.pool)
-    const window = this.cfg.policy.execution.twapWindowSeconds
-    let tick: number
-    try {
-      const [cumulatives] = await this.client.readContract({ address: pool.address as Address, abi: observeAbi, functionName: 'observe', args: [[window, 0]], blockNumber })
-      const delta = cumulatives[1]! - cumulatives[0]!
-      let t = delta / BigInt(window)
-      if (delta < 0n && delta % BigInt(window) !== 0n) t -= 1n
-      tick = Number(t)
-    } catch {
-      throw new ReasonError('EHG_TWAP_UNAVAILABLE', `${p.pool}: observe(${window}) did not answer at ${blockNumber}`)
-    }
     const limit = depth.maxImpactBpsByPool?.[p.pool] ?? depth.maxImpactBps
     const floor = twapFloor(p.amountIn, p.fee, tick, pool.token0 === p.tokenIn, limit)
     if (amountOut < floor) throw new ReasonError('EHG_SWAP_IMPACT_OVER_LIMIT', `${p.pool}: quote ${amountOut} for ${p.amountIn}, under ${floor} (TWAP tick ${tick}, ${limit} bps)`)
     return floor
+  }
+
+  /**
+   * Spec 007 (#151) T3: when the engine's policy carries a deployed MamoruActionPolicy covering `pool`
+   * (`cfg.policy.actionPolicy.bandTicksByPool[pool]`), the narrower band it computes bounds at — the pool's own
+   * `bandTicks` scaled down by `bandFactorBps` (default 0.8x, `DEFAULT_BAND_FACTOR_BPS`). A pool the config does
+   * not list, or no `actionPolicy` at all (every live policy today), returns `undefined`: every call for it stays
+   * byte-identical to today (fail safe — never assume a band the caller did not confirm it enabled on chain).
+   */
+  private v4PoolConfig(pool: RegistryName): { address: Address; bandTicks: number } | undefined {
+    const ap = this.cfg.policy.actionPolicy
+    const bandTicks = ap?.bandTicksByPool[pool]
+    if (!ap || bandTicks === undefined) return undefined
+    const factor = ap.bandFactorBps ?? DEFAULT_BAND_FACTOR_BPS
+    return { address: ap.address, bandTicks: Math.floor((bandTicks * factor) / 10_000) }
   }
 
   /** FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. */
@@ -541,12 +565,33 @@ export class Engine {
     const slippage = this.cfg.policy.execution.slippageBps
     if (p.kind === 'enter_swap') {
       const amountOut = await quoteExactInputSingle(this.client, { tokenIn: address(p.tokenIn), tokenOut: address(p.tokenOut), fee: p.fee, amountIn: p.amountIn, blockNumber })
-      const floor = await this.twapBound(p, amountOut, blockNumber)
+      const v4 = this.v4PoolConfig(p.pool)
+      const needsTwap = !!this.cfg.policy.depth || !!v4
+      const tick = needsTwap ? await this.poolTwapTick(p.pool, this.cfg.policy.execution.twapWindowSeconds, blockNumber) : undefined
+      const floor = tick !== undefined ? this.depthFloor(p, amountOut, tick) : null
       const usual = minOut(amountOut, slippage)
-      const amountOutMinimum = floor !== null && floor > usual ? floor : usual
+      let amountOutMinimum = floor !== null && floor > usual ? floor : usual
+      let sqrtPriceLimitX96: bigint | undefined
+      if (v4 && tick !== undefined) {
+        // Spec 007 T3: amountOutMinimum and sqrtPriceLimitX96 from the same math as MamoruActionPolicy._swapBounds,
+        // at a narrower band (v4.bandTicks is already scaled by bandFactorBps) — "never below today's TWAP floor
+        // (take the max of minimums, the tighter limit)".
+        const pool = entry(p.pool)
+        const bound = swapBoundsAtBand({
+          twap: tick,
+          bandTicks: v4.bandTicks,
+          feePips: p.fee,
+          zeroForOne: pool.token0 === p.tokenIn,
+          tokenIn: address(p.tokenIn),
+          tokenOut: address(p.tokenOut),
+          amountIn: p.amountIn,
+        })
+        if (bound.minOut > amountOutMinimum) amountOutMinimum = bound.minOut
+        sqrtPriceLimitX96 = bound.sqrtPriceLimitX96
+      }
       return {
         quote: { amountIn: p.amountIn, amountOut, amountOutMinimum },
-        calls: [approve(p.tokenIn, 'SwapRouter02', p.amountIn), exactInputSingle({ account: acct, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn: p.amountIn, amountOutMinimum })].map(exec),
+        calls: [approve(p.tokenIn, 'SwapRouter02', p.amountIn), exactInputSingle({ account: acct, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn: p.amountIn, amountOutMinimum, sqrtPriceLimitX96 })].map(exec),
       }
     }
     if (p.kind === 'enter_mint') {
@@ -554,14 +599,46 @@ export class Engine {
       const [sqrtPriceX96] = await this.client.readContract({ address: pool.address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber })
       const q = quoteMint({ sqrtPriceX96, tickLower: p.tickLower, tickUpper: p.tickUpper, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, slippageBps: slippage })
       const deadline = timestamp + BigInt(this.cfg.policy.execution.observationTtlSeconds)
+      const v4 = this.v4PoolConfig(p.pool)
+      if (!v4) {
+        return {
+          calls: [
+            approve(pool.token0!, 'NonfungiblePositionManager', p.amount0Desired),
+            approve(pool.token1!, 'NonfungiblePositionManager', p.amount1Desired),
+            mint({ account: acct, pool: p.pool, tickLower: p.tickLower, tickUpper: p.tickUpper, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, amount0Min: q.amount0Min, amount1Min: q.amount1Min, deadline }),
+            approve(pool.token0!, 'NonfungiblePositionManager', 0n),
+            approve(pool.token1!, 'NonfungiblePositionManager', 0n),
+          ].map(exec),
+        }
+      }
+      // Spec 007 T3 "(b) positions": mint through the policy, not the manager; approvals go to the policy, which
+      // pulls exactly amount*Desired and refunds what it does not use (MamoruActionPolicy.mint), so the allowance
+      // is spent in full without a trailing reset — packages/scenarios/action-policy/t1-fork.ts's "engine op 2"
+      // mint does the same, no zero-approves.
+      const mintParams = {
+        token0: address(pool.token0!),
+        token1: address(pool.token1!),
+        fee: pool.fee!,
+        tickLower: p.tickLower,
+        tickUpper: p.tickUpper,
+        amount0Desired: p.amount0Desired,
+        amount1Desired: p.amount1Desired,
+        amount0Min: q.amount0Min,
+        amount1Min: q.amount1Min,
+        recipient: acct,
+        deadline,
+      }
+      const approveToPolicy = (tokenName: RegistryName, amount: bigint): Execution => ({
+        target: address(tokenName),
+        value: 0n,
+        callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [v4.address, amount] }),
+      })
       return {
         calls: [
-          approve(pool.token0!, 'NonfungiblePositionManager', p.amount0Desired),
-          approve(pool.token1!, 'NonfungiblePositionManager', p.amount1Desired),
-          mint({ account: acct, pool: p.pool, tickLower: p.tickLower, tickUpper: p.tickUpper, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, amount0Min: q.amount0Min, amount1Min: q.amount1Min, deadline }),
-          approve(pool.token0!, 'NonfungiblePositionManager', 0n),
-          approve(pool.token1!, 'NonfungiblePositionManager', 0n),
-        ].map(exec),
+          approveToPolicy(pool.token0!, p.amount0Desired),
+          approveToPolicy(pool.token1!, p.amount1Desired),
+          { target: v4.address, value: 0n, callData: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'mint', args: [mintParams] }) },
+        ],
       }
     }
     if (p.kind === 'rerange' || p.kind === 'reduce') {
@@ -575,7 +652,18 @@ export class Engine {
       const calls: V3Call[] = []
       if (liquidity > 0n) {
         const a = amountsOf(sqrtPriceX96, pos[5], pos[6], liquidity)
-        calls.push(decreaseLiquidity({ tokenId: p.tokenId, liquidity, amount0Min: a.amount0 > 0n ? minOut(a.amount0, slippage) : 0n, amount1Min: a.amount1 > 0n ? minOut(a.amount1, slippage) : 0n, deadline }))
+        let amount0Min = a.amount0 > 0n ? minOut(a.amount0, slippage) : 0n
+        let amount1Min = a.amount1 > 0n ? minOut(a.amount1, slippage) : 0n
+        const v4 = this.v4PoolConfig(p.pool)
+        if (v4) {
+          // Spec 007 T3: decrease minimums from the same math as MamoruActionPolicy._decreaseMins, at the narrower
+          // band; never below the usual slippage minimum either (take the max, same reasoning as the swap floor).
+          const tick = await this.poolTwapTick(p.pool, this.cfg.policy.execution.twapWindowSeconds, blockNumber)
+          const bound = decreaseMinsAtBand({ twap: tick, bandTicks: v4.bandTicks, tickLower: pos[5], tickUpper: pos[6], liquidity })
+          if (bound.amount0Min > amount0Min) amount0Min = bound.amount0Min
+          if (bound.amount1Min > amount1Min) amount1Min = bound.amount1Min
+        }
+        calls.push(decreaseLiquidity({ tokenId: p.tokenId, liquidity, amount0Min, amount1Min, deadline }))
       }
       calls.push(collect({ account: acct, tokenId: p.tokenId }))
       if (p.kind === 'rerange') calls.push(burn(p.tokenId))

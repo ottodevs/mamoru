@@ -20,6 +20,10 @@ import { multicall3Abi } from '../src/multicall.ts'
 const enumerableAbi = parseAbi(['function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)'])
 const observeAbi = parseAbi(['function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128s)'])
 const transferAbi = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)'])
+const quoterV2Abi = parseAbi([
+  'struct QuoteExactInputSingleParams { address tokenIn; address tokenOut; uint256 amountIn; uint24 fee; uint160 sqrtPriceLimitX96; }',
+  'function quoteExactInputSingle(QuoteExactInputSingleParams params) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
+])
 
 export const POOLS = baseRegistry.entries.filter((e) => e.kind === 'pool').map((e) => e.name)
 export const TOKENS = baseRegistry.entries.filter((e) => e.kind === 'token').map((e) => e.name)
@@ -59,6 +63,8 @@ export class FakeChain {
   readonly requests: Recorded[] = []
   /** Called before each request is answered. */
   onRequest: (r: Recorded) => void = () => {}
+  /** QuoterV2.quoteExactInputSingle's `amountOut`: 1:1 with `amountIn` by default (deterministic), override per test. */
+  quoteAmountOut: (args: { tokenIn: Address; tokenOut: Address; fee: number; amountIn: bigint }) => bigint = (args) => args.amountIn
   readonly client: PublicClient
 
   constructor() {
@@ -220,6 +226,12 @@ export class FakeChain {
       return encodeFunctionResult({ abi: smartSessionAbi, functionName: 'isPermissionEnabled', result: !this.disabled.has((call.args[0] as Hex).toLowerCase()) })
     }
     if (at === address('NonfungiblePositionManager').toLowerCase()) return this.npm(from, to, data)
+    if (at === address('QuoterV2').toLowerCase()) {
+      const call = decodeFunctionData({ abi: quoterV2Abi, data })
+      const [params] = call.args
+      const amountOut = this.quoteAmountOut({ tokenIn: params.tokenIn, tokenOut: params.tokenOut, fee: params.fee, amountIn: params.amountIn })
+      return encodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', result: [amountOut, 0n, 0, 0n] })
+    }
     if (at === address('UniswapV3Factory').toLowerCase()) {
       const call = decodeFunctionData({ abi: uniswapV3FactoryAbi, data })
       const [a, b, fee] = call.args
