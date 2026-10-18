@@ -48,7 +48,8 @@ describe('a reverted activation stays unresolved while its Safe nonce is unspent
     const { w, acc, old } = await revertedStart()
     // A third party relays the same signature: the Safe nonce moves and the Safe logs its ExecutionSuccess.
     w.chain.nonce = 1n
-    w.knobs.safeLogs = [{ topics: [EXECUTION_SUCCESS, old.safeTxHash!], data: '0x', transactionHash: keccak256(stringToHex('relay')), blockNumber: 150n }]
+    // Shaped as on Base: topics [ExecutionSuccess, safeTxHash], data the payment only.
+    w.knobs.safeLogs = [{ topics: [EXECUTION_SUCCESS, old.safeTxHash!], data: `0x${'0'.repeat(64)}`, transactionHash: keccak256(stringToHex('relay')), blockNumber: 150n }]
     await quiet(() => w.op.reconcileOwner(acc))
     expect(old).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', block: 150 })
     expect(acc.active).toBe(true)
@@ -84,6 +85,38 @@ describe('a reverted activation stays unresolved while its Safe nonce is unspent
     expect(e).toMatchObject({ status: 409, code: 'OWNER_OP_SETTLING' })
     expect(old).toMatchObject({ code: 'OWNER_TX_ERROR' })
   })
+
+  test('relayed by anyone between Start\'s checks and its nonce read: settled as run, and no approval for the next nonce', async () => {
+    const { w, acc, old } = await revertedStart()
+    // Not reconciled yet: the account still reads as not running when Start checks it.
+    w.chain.nonce = 1n
+    w.knobs.safeLogs = [{ topics: [EXECUTION_SUCCESS, old.safeTxHash!], data: `0x${'0'.repeat(64)}`, transactionHash: keccak256(stringToHex('relay')), blockNumber: 150n }]
+    const before = (w.op as unknown as Prep).prepared.size
+    const e = (await quiet(() => w.op.prepareActivate(ctx).catch((x: unknown) => x))).out
+    expect(e).toMatchObject({ status: 409, code: 'ALREADY_ACTIVE' })
+    expect((w.op as unknown as Prep).prepared.size).toBe(before)
+    expect(old).toMatchObject({ state: 'confirmed' })
+    expect(acc.active).toBe(true)
+  })
+
+  test('our receipt unavailable: a third party\'s execution in another tx confirms it; an unrelated Safe tx moving the nonce closes it, and Start is free again', async () => {
+    const ran = await revertedStart()
+    ran.w.knobs.receipts.clear()
+    ran.w.chain.nonce = 1n
+    ran.w.knobs.safeLogs = [{ topics: [EXECUTION_SUCCESS, ran.old.safeTxHash!], data: `0x${'0'.repeat(64)}`, transactionHash: keccak256(stringToHex('relay')), blockNumber: 150n }]
+    await quiet(() => ran.w.op.reconcileOwner(ran.acc))
+    expect(ran.old).toMatchObject({ state: 'confirmed', block: 150 })
+    expect(ran.acc.active).toBe(true)
+
+    const moved = await revertedStart()
+    moved.w.knobs.receipts.clear()
+    moved.w.chain.nonce = 1n
+    await quiet(() => moved.w.op.reconcileOwner(moved.acc))
+    expect(moved.old).toMatchObject({ state: 'failed', code: 'SAFE_NONCE_MOVED' })
+    const t = await moved.w.op.prepareActivate(ctx)
+    expect(prepared(moved.w.op, t.prepareId).tx.nonce).toBe(1n)
+    // receiptOf waits between its tries on an unreadable receipt.
+  }, 30_000)
 
   test('a Stop revokes the grants of an unresolved start as well as the engine ones', async () => {
     const { w, old } = await revertedStart()

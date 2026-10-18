@@ -1279,6 +1279,10 @@ export class Operator {
           logErr(`[reconcile] ${acc.accountKey} before a Start:`, e)
         }
         n = this.unresolvedNonce(acc)
+        // The earlier start may have just been settled as run (relayed by anyone between Start's checks and the nonce
+        // read): the account runs now, or has grants to revoke first. No approval for the next nonce is handed out.
+        if (acc.active) throw new HttpError(409, 'ALREADY_ACTIVE', 'the engine is already active for this account')
+        if (acc.superseded?.length) throw new HttpError(409, 'STOP_FIRST', 'earlier Mamoru grants are still enabled on your Safe: stop first to revoke them, then start')
       }
       if (n !== null && n < nonce) throw new HttpError(409, 'OWNER_OP_SETTLING', 'an earlier approval of this account is still being settled from the chain: try again in a minute')
     }
@@ -2141,12 +2145,15 @@ export class Operator {
         }
         if (receipt) {
           const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe && l.topics[0] === EXECUTION_SUCCESS && (!own || l.topics[1]?.toLowerCase() === own))
-          return ok ? { hash: receipt.transactionHash, block: Number(receipt.blockNumber) } : 'none'
+          if (ok) return { hash: receipt.transactionHash, block: Number(receipt.blockNumber) }
+          // otto/mamoru#163: our copy reverted, but the same signature may have run in another transaction (anyone can
+          // relay it): with a Safe tx hash, its ExecutionSuccess below decides. Without one, this copy's revert is all.
+          if (!own) return 'none'
         }
       }
       // Without a Safe tx hash nothing tells its log from another's: undecided, never "not run".
       if (!own) return 'unknown'
-      const found = await this.findOwnerTx(acc, op)
+      const found = await this.findOwnerTx(acc, op, { anyTx: true })
       return found?.ok ? { hash: found.hash, block: found.block } : 'none'
     } catch (e) {
       logErr(`[settle] ${acc.accountKey} ${op.opId} execution unreadable, undecided:`, e)
@@ -2683,7 +2690,12 @@ export class Operator {
    */
   private async settleByNonce(acc: AccountState, op: StoredOp): Promise<'open' | { close: string } | { hash: Hex; block: number; ok: true }> {
     const n = BigInt(op.safeNonce!)
-    const { nonce } = await readSafeNonce(this.client, acc.ctx.address as Address)
+    // The nonce is read at a head the log search below reaches (it searches to its own head, read later): an execution
+    // that moved the nonce is in the searched range.
+    const head = await this.client.getBlock()
+    const { deployed } = await readSafeNonce(this.client, acc.ctx.address as Address)
+    if (!deployed) return 'open'
+    const nonce = (await this.client.readContract({ address: acc.ctx.address as Address, abi: safeAbi, functionName: 'nonce', blockNumber: head.number })) as bigint
     if (nonce <= n) return 'open'
     const ran = await this.findOwnerTx(acc, op, { anyTx: true })
     if (ran?.ok) return { hash: ran.hash, block: ran.block, ok: true }
@@ -3900,7 +3912,9 @@ export class Operator {
       // signature. A renewal stays an unread receipt for settleRenewals (applied only once proven; its grants revoked by
       // the next renewal or stop meanwhile). An activation is settled by its Safe nonce (settleByNonce).
       if (found && !found.ok && op.kind === 'renew') continue
-      if (found && !found.ok && op.kind === 'activate' && (op as StoredOp).safeNonce !== undefined) {
+      // An activation not proven by its own receipt (reverted, or not readable, or not found): settled by the Safe
+      // nonce whenever it has moved past its own, by its ExecutionSuccess in whatever transaction carried it.
+      if (!found?.ok && op.kind === 'activate' && (op as StoredOp).safeNonce !== undefined) {
         const s = await this.settleByNonce(acc, op as StoredOp)
         if (s === 'open') continue
         if ('close' in s) {
@@ -3995,9 +4009,10 @@ export class Operator {
    * emits it (engine userOps run through the module), so the log proves the tx executed. otto/mamoru#140: searched
    * from the block it was first handed to a provider around (broadcastAt; else sentAt, else its time) up to the head,
    * at most OWNER_LOG_SEARCH_BLOCKS (about a day) past the latest handover (lastBroadcastAt), in pages of OWNER_LOG_PAGE_BLOCKS sent one after another and filtered by that Safe tx hash, so
-   * a transaction that landed late (sent, its hash lost in a timeout) is still found. With a relayer hash kept the
-   * log must also be in that transaction. Without a Safe tx hash (an op stored before it was kept): only the old
-   * narrow window around its time, and exactly one unclaimed log, or nothing.
+   * a transaction that landed late (sent, its hash lost in a timeout) is still found. The Safe tx hash alone is the
+   * match, in any transaction (otto/mamoru#163: the owner's signature can be relayed by anyone). `anyTx`: searched to
+   * the head (the Safe nonce is past the op's). Without a Safe tx hash (an op stored before it was kept): only the old
+   * narrow window around its time, and the log of the op's own relayer transaction, or nothing.
    */
   private async findOwnerTx(acc: AccountState, op: StoredOp, opts: { anyTx?: boolean } = {}): Promise<{ hash: Hex; block: number; ok: boolean } | null> {
     const head = await this.client.getBlock()
@@ -4032,18 +4047,10 @@ export class Operator {
       logs.push(...(page as typeof logs).filter((l) => l.topics[0] === EXECUTION_SUCCESS && l.transactionHash && l.topics[1]?.toLowerCase() === own))
       if (logs.length) break
     }
-    if (opts.anyTx) return logs[0] ? { hash: logs[0].transactionHash!, block: Number(logs[0].blockNumber), ok: true } : null
-    if (op.txHash) {
-      const l = logs.find((x) => x.transactionHash!.toLowerCase() === op.txHash!.toLowerCase())
-      return l ? { hash: l.transactionHash!, block: Number(l.blockNumber), ok: true } : null
-    }
-    const claimed = new Set(acc.ops.map((o) => o.txHash?.toLowerCase()).filter(Boolean))
-    const free = [...new Map(logs.filter((l) => !claimed.has(l.transactionHash!.toLowerCase())).map((l) => [l.transactionHash!, l])).values()]
-    if (free.length !== 1) {
-      if (free.length > 1) console.log(`[reconcile] ${op.opId} ${free.length} candidate txs, left as is`)
-      return null
-    }
-    return { hash: free[0]!.transactionHash!, block: Number(free[0]!.blockNumber), ok: true }
+    // otto/mamoru#163: the Safe tx hash (topics[1]) is the match, in whatever transaction carried it: the owner's
+    // signature can be relayed by anyone, so a log in another transaction than our copy is still this op's execution.
+    // A Safe tx runs at most once, so there is at most one.
+    return logs[0] ? { hash: logs[0].transactionHash!, block: Number(logs[0].blockNumber), ok: true } : null
   }
 
   // ---- engine side ---------------------------------------------------------

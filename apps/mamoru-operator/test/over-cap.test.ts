@@ -2993,6 +2993,33 @@ describe('renewing the approval of a running account', () => {
     expect(acc.grants.map((g) => g.permissionId)).toEqual(old)
   })
 
+  test('otto/mamoru#163: a reverted renewal relayed later by anyone and run is applied: the engine runs on its grants', async () => {
+    const { w, acc } = await running()
+    const tx = await w.op.prepareRenew(ctx)
+    w.knobs.execOk = false
+    const r = await w.op.submit(ctx, 'renew', sign(tx))
+    // GS013: a reverted execTransaction leaves the Safe nonce where it was.
+    w.chain.nonce--
+    expect(r).toMatchObject({ kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR' })
+    const stored = acc.ops.find((o) => o.opId === r.opId)!
+    // Our copy's receipt reads reverted.
+    type Rc = { client: { getTransactionReceipt(a: { hash: Hex }): Promise<unknown> } }
+    ;(w.op as unknown as Rc).client.getTransactionReceipt = async ({ hash }) => {
+      if (hash.toLowerCase() === stored.txHash!.toLowerCase()) return { transactionHash: hash, status: 'reverted', blockNumber: 99n, logs: [] }
+      throw Object.assign(new Error('not found'), { name: 'TransactionReceiptNotFoundError' })
+    }
+    // A third party relays the same signature in another transaction: its grants enabled, the nonce moves, the Safe logs
+    // ExecutionSuccess(safeTxHash).
+    for (const id of stored.revokes ?? []) w.knobs.enabled.delete(id.toLowerCase())
+    for (const g of stored.ownerGrants ?? []) w.knobs.enabled.add(g.permissionId.toLowerCase())
+    w.chain.nonce++
+    w.knobs.logs.push({ stx: stored.safeTxHash!, hash: `0x${'ab'.repeat(32)}`, block: 100n })
+    await (w.op as unknown as { settleRenewals(a: AccountState): Promise<void> }).settleRenewals(acc)
+    expect(stored).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', txHash: `0x${'ab'.repeat(32)}` })
+    expect(acc.active).toBe(true)
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(expect.arrayContaining((stored.ownerGrants ?? []).map((g) => g.permissionId)))
+  })
+
   test('a renewal that fails on chain changes nothing: the engine keeps the grants it had', async () => {
     const { w, acc } = await running()
     const before = acc.grants.map((g) => g.permissionId)
