@@ -14,7 +14,21 @@ repo="ottodevs/mamoru"
 pr="${1:?usage: scripts/merge-pr.sh <pr-number> [--keep-branch]}"
 keep_branch="${2:-}"
 root="$(git rev-parse --show-toplevel)"
-# Coordinator only: MAMORU_COORD_AS must name the session holding the live lease (scripts/release/coord.ts).
+# Coordinator only, and one coordinator operation at a time: the whole merge (CI wait included) holds the
+# operation lock, so the lease cannot be taken from under it (scripts/release/lib/lease.ts).
+op_lock="$HOME/.local/state/mamoru-coord/op.lock"
+case ":${MAMORU_FLOCK_HELD:-}:" in
+  *":$op_lock:"*) ;;
+  *)
+    mkdir -p "$(dirname "$op_lock")"
+    set +e
+    MAMORU_FLOCK_HELD="${MAMORU_FLOCK_HELD:+$MAMORU_FLOCK_HELD:}$op_lock" flock -n -E 75 "$op_lock" "$0" "$@"
+    rc=$?
+    set -e
+    [ "$rc" = 75 ] && echo "refusing: another coordinator operation (a release, merge or operator redeploy) is running" >&2 && exit 1
+    exit "$rc"
+    ;;
+esac
 bun "$root/scripts/release/coord.ts" assert || exit 1
 
 state="$(gh pr view "$pr" -R "$repo" --json state,baseRefName,headRefName,isCrossRepository \

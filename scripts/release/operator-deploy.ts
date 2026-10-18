@@ -9,7 +9,7 @@ import { $ } from 'bun'
 import { appendFileSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { metricsSignature } from '../../packages/operator-auth/src/index.ts'
 import { fetchRefs, isAncestor } from './lib/git.ts'
-import { OP_LOCK, requireLease, sessionName, underFlock } from './lib/lease.ts'
+import { OP_LOCK, refuseLeftoverWork, requireLease, sessionName, underFlock, WORK_LOCK } from './lib/lease.ts'
 import { fatalLines, healthy, refuseDeploy, type MetricsView } from './lib/operator.ts'
 
 const HOME = process.env.HOME!
@@ -35,6 +35,7 @@ function refuse(why: string): never {
 
 // One coordinator operation at a time, held by the kernel until this process ends (lib/lease.ts).
 underFlock(OP_LOCK, { wait: false, busy: 'another coordinator operation (a release or an operator redeploy) is running' })
+refuseLeftoverWork()
 const who = requireLease(sessionName(argv))
 
 async function metrics(): Promise<MetricsView | null> {
@@ -50,7 +51,8 @@ async function metrics(): Promise<MetricsView | null> {
   }
 }
 
-const stamp = () => new Date(Date.now() - 1_000).toISOString().replace('T', ' ').slice(0, 19)
+// journalctl reads `@<epoch seconds>` as an instant: no time zone to get wrong.
+const stamp = () => `@${Math.floor(Date.now() / 1000) - 1}`
 
 /**
  * Puts `target` in place and waits for it: checkout, its own dependencies when the lockfile differs from what is
@@ -59,9 +61,10 @@ const stamp = () => new Date(Date.now() - 1_000).toISOString().replace('T', ' ')
 async function bringUp(target: string, installDeps: boolean): Promise<{ ok: boolean; why: string }> {
   const since = stamp()
   try {
-    await $`git -C ${opDir} checkout -q --detach ${target}`
-    if (installDeps) await $`bun install --frozen-lockfile`.cwd(opDir).quiet()
-    await $`systemctl --user restart ${unit}`
+    // Each state change holds WORK_LOCK itself: if this script dies mid-way, what it started keeps the lock.
+    await $`flock ${WORK_LOCK} git -C ${opDir} checkout -q --detach ${target}`
+    if (installDeps) await $`flock ${WORK_LOCK} bun install --frozen-lockfile`.cwd(opDir).quiet()
+    await $`flock ${WORK_LOCK} systemctl --user restart ${unit}`
   } catch (e) {
     return { ok: false, why: `step failed: ${String(e instanceof Error ? e.message : e).slice(0, 200)}` }
   }

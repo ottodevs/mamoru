@@ -6,7 +6,7 @@
 // work. Every run that reaches the deploy step is written to the release log (that record is what
 // deploy:prod reads to know how long a sha has soaked) and prints the rollback command.
 // Never creates origin/beta; refuses if it does not exist.
-import { OP_LOCK, requireLease, underFlock } from './lib/lease.ts'
+import { OP_LOCK, refuseLeftoverWork, requireLease, underFlock } from './lib/lease.ts'
 import { runTypecheckAndTest, buildApp } from './lib/check.ts'
 import { betaTarget, parseBetaArgs } from './lib/gate.ts'
 import { withSnapshot } from './lib/snapshot.ts'
@@ -20,6 +20,7 @@ const stableAppDir = `${root}apps/mamoru-app`
 
 // Coordinator only: the session named in MAMORU_COORD_AS must hold the live lease (scripts/release/coord.ts).
 underFlock(OP_LOCK, { wait: false, busy: 'another coordinator operation (a release or an operator redeploy) is running' })
+refuseLeftoverWork()
 requireLease(process.env.MAMORU_COORD_AS)
 console.log('== deploy:beta ==')
 

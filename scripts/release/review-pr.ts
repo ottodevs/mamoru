@@ -79,7 +79,7 @@ const pr = JSON.parse(await $`gh pr view ${number} -R ${REPO} --json title,body,
 }
 if (pr.state !== 'OPEN') stop(`PR #${number} is ${pr.state}`)
 const diff = await $`gh pr diff ${number} -R ${REPO}`.text()
-const previous = pr.comments.map((c) => c.body).filter((b) => /independent review|VERDICT|APTO|NO-GO/i.test(b)).slice(-3).map((b) => b.slice(0, 600).replace(/\s+/g, ' '))
+const previous = pr.comments.map((c) => c.body).filter((b) => /independent review|VERDICT|APTO|NO-GO/i.test(b)).slice(-2).map((b) => b.slice(0, 12_000))
 
 const work = mkdtempSync(join(tmpdir(), `review-${number}-`))
 const dir = join(work, 'checkout')

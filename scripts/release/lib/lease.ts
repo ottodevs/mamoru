@@ -86,6 +86,12 @@ export function withDirLock<T>(dir: string, fn: () => T, staleMs = 30_000): T {
 
 /** Every coordinator operation (a release, an operator redeploy) holds this lock for its whole run. */
 export const OP_LOCK = `${process.env.HOME}/.local/state/mamoru-coord/op.lock`
+/**
+ * Held by each command that changes the operator's state (checkout, install, restart), separately from OP_LOCK: a
+ * command started by a script that then dies keeps this one until it ends, so no new operation starts beside it
+ * (Bun does not pass the OP_LOCK descriptor on to the commands it runs).
+ */
+export const WORK_LOCK = `${process.env.HOME}/.local/state/mamoru-coord/op-work.lock`
 /** One Codex review at a time, across every session. */
 export const REVIEW_LOCK = `${process.env.HOME}/.local/state/mamoru-review/codex.lock`
 
@@ -109,6 +115,14 @@ export function underFlock(lockFile: string, opts: { wait: boolean; busy: string
     process.exit(1)
   }
   process.exit(r.exitCode ?? 1)
+}
+
+/** Under OP_LOCK: refuses when a command of an earlier operation is still running on its own. */
+export function refuseLeftoverWork(): void {
+  if (lockBusy(WORK_LOCK)) {
+    console.error('refusing: a command of an earlier coordinator operation is still running (op-work.lock); wait for it to end')
+    process.exit(1)
+  }
 }
 
 /** True while some process holds `lockFile` (a coordinator operation is running). */
