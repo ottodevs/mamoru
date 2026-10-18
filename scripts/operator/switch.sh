@@ -23,11 +23,14 @@ state_dir="${MAMORU_OPERATOR_STATE_DIR:-$HOME/.local/state/mamoru-operator}"
 log="$state_dir/deploys.log"
 health_secs="${HEALTH_SECS:-90}"
 actor="${MAMORU_ACTOR:-$USER}"
-# Keys whose signatures make a commit deployable (git %GK): main is signed by Ot's key (merge-pr.sh re-signs).
-signers="${MAMORU_SIGNING_KEYS:-53A35CC2D46A3B29}"
+# Full fingerprints (git %GF) whose signatures make a commit deployable. Fixed here, not taken from the environment:
+# main is signed by Ot's key (merge-pr.sh re-signs every merged commit). A new signer is a reviewed change to this line.
+signers="A2C36B5E38869D26A66BE1DE53A35CC2D46A3B29"
 
 # Never a shared /tmp: anyone could hold or plant the lock there.
-lock="${XDG_RUNTIME_DIR:-$HOME/.cache}/mamoru-operator-switch.lock"
+lockdir="${XDG_RUNTIME_DIR:-$HOME/.cache}"
+mkdir -p "$lockdir"
+lock="$lockdir/mamoru-operator-switch.lock"
 exec 9>"$lock"
 flock -n 9 || { echo "another operator switch is running (lock $lock)" >&2; exit 1; }
 
@@ -38,9 +41,9 @@ reviewed() {
   git -C "$op_dir" cat-file -e "$1^{commit}" 2>/dev/null || return 1
   git -C "$op_dir" merge-base --is-ancestor "$1" origin/main || return 1
   [ "$(git -C "$op_dir" log -1 --format=%G? "$1")" = "G" ] || return 1
-  [[ " $signers " == *" $(git -C "$op_dir" log -1 --format=%GK "$1") "* ]]
+  [[ " $signers " == *" $(git -C "$op_dir" log -1 --format=%GF "$1") "* ]]
 }
-reviewed "$target" || { echo "$target is not a commit on origin/main signed by an allowed key ($signers)" >&2; exit 1; }
+reviewed "$target" || { echo "$target is not a commit on origin/main signed by an allowed key" >&2; exit 1; }
 [ -z "$(git -C "$op_dir" status --porcelain)" ] || { echo "$op_dir has local changes: refusing" >&2; exit 1; }
 
 prev="$(git -C "$op_dir" rev-parse HEAD)"
@@ -67,14 +70,17 @@ fi
 active="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(sum(1 for a in d['accounts'].values() if a.get('active')))" "$state_dir/accounts.json")"
 
 # Healthy: the unit is active in the invocation this restart started (no automatic restart since `restarts`), and
-# that invocation logged a started loop for at least `active` distinct accounts.
+# that invocation logged a started loop for at least `active` distinct accounts. The operator names each loop by its
+# accountKey ("[engine <accountKey>] loop started"), one per active account.
 healthy() {
-  local restarts="$1" inv loops
+  local restarts="$1" inv inv2 loops
   for _ in $(seq 1 "$health_secs"); do
+    inv="$(systemctl --user show "$unit" -p InvocationID --value)"
     if systemctl --user is-active -q "$unit" && [ "$(systemctl --user show "$unit" -p NRestarts --value)" = "$restarts" ]; then
-      inv="$(systemctl --user show "$unit" -p InvocationID --value)"
       loops="$(journalctl --user _SYSTEMD_INVOCATION_ID="$inv" -o cat --no-pager 2>/dev/null | grep -o '^\[engine [0-9a-f-]*\] loop started' | sort -u | wc -l)"
-      [ "$loops" -ge "$active" ] && return 0
+      # The same invocation before and after the reads: an automatic restart in between does not count as healthy.
+      inv2="$(systemctl --user show "$unit" -p InvocationID --value)"
+      [ "$inv" = "$inv2" ] && [ "$loops" -ge "$active" ] && return 0
     fi
     sleep 1
   done

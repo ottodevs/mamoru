@@ -25,7 +25,9 @@ read -r pr_state base head cross <<<"$state"
 
 # One merge at a time on this machine: two sessions merging at once each rebase onto a main the other is moving.
 # Never a shared /tmp: anyone could hold or plant the lock there.
-lock="${XDG_RUNTIME_DIR:-$HOME/.cache}/mamoru-merge.lock"
+lockdir="${XDG_RUNTIME_DIR:-$HOME/.cache}"
+mkdir -p "$lockdir"
+lock="$lockdir/mamoru-merge.lock"
 exec 9>"$lock"
 flock -n 9 || { echo "another merge is running (lock $lock): wait for it, then run this again" >&2; exit 1; }
 
