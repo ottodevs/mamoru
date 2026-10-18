@@ -334,6 +334,24 @@ describe('SharedGuardReads: one read per pool per TTL for the whole process (#17
     expect(shared.counts.batches).toBe(2)
   })
 
+  test('two TWAP windows on the same pool never share a read (GPT-6 review, round 2)', async () => {
+    const W2 = W * 2
+    const client = fakeClient(3_600, { growth: 1n })
+    const now = 100 * DAY_S
+    const shared = new SharedGuardReads()
+    const a = await shared.read(client, MULTICALL3, targets, 1n, now, W)
+    const b = await shared.read(client, MULTICALL3, targets, 1n, now + 1, W2)
+    expect(shared.counts.batches).toBe(2)
+    // Each equals what a reader of only that window gets.
+    expect(a).toEqual(await new SharedGuardReads().read(client, MULTICALL3, targets, 1n, now, W))
+    expect(b).toEqual(await new SharedGuardReads().read(client, MULTICALL3, targets, 1n, now + 1, W2))
+    // Within the TTL each window reuses its own read.
+    await shared.read(client, MULTICALL3, targets, 2n, now + 30, W)
+    await shared.read(client, MULTICALL3, targets, 2n, now + 30, W2)
+    expect(shared.counts.batches).toBe(2)
+    expect(shared.seriesOf(W)).not.toBe(shared.seriesOf(W2))
+  })
+
   test('a failed read is not kept: the next engine reads again', async () => {
     const shared = new SharedGuardReads()
     const broken = createPublicClient({ transport: custom({ async request() { throw new Error('down') } }) })

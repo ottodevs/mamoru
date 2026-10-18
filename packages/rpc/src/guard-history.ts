@@ -238,41 +238,60 @@ export const GUARD_CALLS_PER_POOL = 4
  * forgotten, so the next engine tries again.
  */
 export class SharedGuardReads {
-  readonly series = new Map<RegistryName, GuardSeries>()
   readonly fees: FeeGrowthHistory
   /** Batches sent and pool calls in them since the process started (CU estimate, tests). */
   readonly counts = { batches: 0, poolCalls: 0 }
   private readonly ttl: number
-  private readonly last = new Map<RegistryName, { time: number; obs: Promise<PoolGuardObs> }>()
+  /**
+   * Per TWAP window: the read and the fallback series depend on `windowSeconds` (which points are asked, how the
+   * series is spaced), so two policies on the same pool with different windows never share them (GPT-6 review,
+   * round 2). Fee growth is the pool's own cumulative counter, window-independent, so `fees` stays one per pool.
+   */
+  private readonly byWindow = new Map<number, { series: Map<RegistryName, GuardSeries>; last: Map<RegistryName, { time: number; obs: Promise<PoolGuardObs> }> }>()
 
   constructor(private readonly o: { ttlSeconds?: number; fees?: FeeGrowthHistory; onFees?: (fees: FeeGrowthHistory) => void } = {}) {
     this.ttl = o.ttlSeconds ?? SHARED_GUARD_TTL_SECONDS
     this.fees = o.fees ?? new Map()
   }
 
+  /** The fallback series kept for one TWAP window (tests, diagnostics). */
+  seriesOf(windowSeconds: number): ReadonlyMap<RegistryName, GuardSeries> {
+    return this.stateOf(windowSeconds).series
+  }
+
+  private stateOf(windowSeconds: number) {
+    let st = this.byWindow.get(windowSeconds)
+    if (!st) {
+      st = { series: new Map(), last: new Map() }
+      this.byWindow.set(windowSeconds, st)
+    }
+    return st
+  }
+
   async read(client: PublicClient, multicall3: Address | null, targets: readonly PoolGuardTarget[], blockNumber: bigint, now: number, windowSeconds: number): Promise<Partial<Record<RegistryName, PoolGuardObs>>> {
+    const { series, last } = this.stateOf(windowSeconds)
     const due = targets.filter((t) => {
-      const l = this.last.get(t.name)
+      const l = last.get(t.name)
       return !l || Math.abs(now - l.time) >= this.ttl
     })
     if (due.length) {
       this.counts.batches++
       this.counts.poolCalls += due.length * GUARD_CALLS_PER_POOL
-      const batch = observeGuardHistory(client, multicall3, due, blockNumber, now, windowSeconds, this.series, this.fees).then((r) => {
-        for (const [name, s] of r.series) this.series.set(name, s)
+      const batch = observeGuardHistory(client, multicall3, due, blockNumber, now, windowSeconds, series, this.fees).then((r) => {
+        for (const [name, sr] of r.series) series.set(name, sr)
         this.o.onFees?.(this.fees)
         return r
       })
       for (const t of due) {
         const obs = batch.then((r) => r.pools[t.name]!)
         const entry = { time: now, obs }
-        this.last.set(t.name, entry)
+        last.set(t.name, entry)
         obs.catch(() => {
-          if (this.last.get(t.name) === entry) this.last.delete(t.name)
+          if (last.get(t.name) === entry) last.delete(t.name)
         })
       }
     }
-    const reads = targets.map((t) => [t.name, this.last.get(t.name)!.obs] as const)
+    const reads = targets.map((t) => [t.name, last.get(t.name)!.obs] as const)
     return Object.fromEntries(await Promise.all(reads.map(async ([name, obs]) => [name, await obs] as const)))
   }
 }
