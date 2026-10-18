@@ -9,7 +9,7 @@ import { $ } from 'bun'
 import { appendFileSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { metricsSignature } from '../../packages/operator-auth/src/index.ts'
 import { fetchRefs, isAncestor } from './lib/git.ts'
-import { holdDirLock, requireLease, sessionName } from './lib/lease.ts'
+import { OP_LOCK, requireLease, sessionName, underFlock } from './lib/lease.ts'
 import { fatalLines, healthy, refuseDeploy, type MetricsView } from './lib/operator.ts'
 
 const HOME = process.env.HOME!
@@ -33,6 +33,8 @@ function refuse(why: string): never {
   process.exit(1)
 }
 
+// One coordinator operation at a time, held by the kernel until this process ends (lib/lease.ts).
+underFlock(OP_LOCK, { wait: false, busy: 'another coordinator operation (a release or an operator redeploy) is running' })
 const who = requireLease(sessionName(argv))
 
 async function metrics(): Promise<MetricsView | null> {
@@ -48,9 +50,21 @@ async function metrics(): Promise<MetricsView | null> {
   }
 }
 
-async function restartTo(target: string, since: string): Promise<{ ok: boolean; why: string }> {
-  await $`git -C ${opDir} checkout -q --detach ${target}`
-  await $`systemctl --user restart ${unit}`
+const stamp = () => new Date(Date.now() - 1_000).toISOString().replace('T', ' ').slice(0, 19)
+
+/**
+ * Puts `target` in place and waits for it: checkout, its own dependencies when the lockfile differs from what is
+ * installed, restart, health. Never throws: any failing step is the answer.
+ */
+async function bringUp(target: string, installDeps: boolean): Promise<{ ok: boolean; why: string }> {
+  const since = stamp()
+  try {
+    await $`git -C ${opDir} checkout -q --detach ${target}`
+    if (installDeps) await $`bun install --frozen-lockfile`.cwd(opDir).quiet()
+    await $`systemctl --user restart ${unit}`
+  } catch (e) {
+    return { ok: false, why: `step failed: ${String(e instanceof Error ? e.message : e).slice(0, 200)}` }
+  }
   const deadline = Date.now() + BOOT_TIMEOUT_MS
   while (Date.now() < deadline) {
     await Bun.sleep(3_000)
@@ -75,8 +89,6 @@ async function note83(text: string): Promise<void> {
 const before = (await metrics()) ?? {}
 const wasLive = before.live ?? true
 
-// One redeploy at a time, held until this process exits.
-holdDirLock(`${HOME}/.local/state/mamoru-coord/operator.lock`, 15 * 60_000)
 await fetchRefs(root, 'main')
 const running = (await $`git -C ${opDir} rev-parse HEAD`.text()).trim()
 const full = sha.length === 40 ? sha : refuse('the sha is written in full, all 40 characters')
@@ -90,16 +102,11 @@ const why = refuseDeploy({
 if (why) refuse(why)
 if (rollback && !reason) refuse('--rollback needs --reason "<why>"')
 
-const since = new Date(Date.now() - 1_000).toISOString().replace('T', ' ').slice(0, 19)
 console.log(`== operator:deploy ${running.slice(0, 7)} -> ${full.slice(0, 7)}${rollback ? ' (rollback)' : ''} by ${who} ==`)
 await note83(`${who}: ${running.slice(0, 7)} -> ${full.slice(0, 7)}${rollback ? ` (rollback: ${reason})` : ''}. Starting.`)
 
 const lockChanged = (await $`git -C ${opDir} diff --quiet ${running} ${full} -- bun.lock`.nothrow()).exitCode !== 0
-if (lockChanged) {
-  await $`git -C ${opDir} checkout -q --detach ${full}`
-  await $`bun install --frozen-lockfile`.cwd(opDir)
-}
-const result = await restartTo(full, since)
+const result = await bringUp(full, lockChanged)
 if (result.ok) {
   log({ from: running, to: full, rollback, result: 'ok' })
   await note83(`${who}: operator runs ${full.slice(0, 7)}, /metrics answers. Rollback: bun run operator:deploy ${running} --rollback --reason "..." --as <you>`)
@@ -108,8 +115,8 @@ if (result.ok) {
 }
 
 console.error(`deploy failed: ${result.why}. Putting ${running.slice(0, 7)} back.`)
-const back = await restartTo(running, new Date(Date.now() - 1_000).toISOString().replace('T', ' ').slice(0, 19))
-if (lockChanged) await $`bun install --frozen-lockfile`.cwd(opDir).nothrow()
+// The previous sha with its own dependencies installed before it starts, whatever step failed above.
+const back = await bringUp(running, lockChanged)
 log({ from: running, to: full, rollback, result: 'failed', why: result.why, restored: back.ok })
 await note83(`${who}: ${full.slice(0, 7)} FAILED (${result.why}); ${back.ok ? `back on ${running.slice(0, 7)}, healthy` : `restoring ${running.slice(0, 7)} ALSO FAILED (${back.why}): the operator needs a human now`}.`)
 process.exit(1)

@@ -84,33 +84,37 @@ export function withDirLock<T>(dir: string, fn: () => T, staleMs = 30_000): T {
   }
 }
 
+/** Every coordinator operation (a release, an operator redeploy) holds this lock for its whole run. */
+export const OP_LOCK = `${process.env.HOME}/.local/state/mamoru-coord/op.lock`
+/** One Codex review at a time, across every session. */
+export const REVIEW_LOCK = `${process.env.HOME}/.local/state/mamoru-review/codex.lock`
+
+const HELD = 'MAMORU_FLOCK_HELD'
+
 /**
- * A lock held for as long as a whole operation runs (a redeploy), released on exit. Taken atomically; one older than
- * `staleMs` is from a run that died, and is broken.
+ * Runs the rest of this script holding `lockFile` with flock(1): the script is started again under `flock`, which
+ * the kernel releases when the process ends, however it ends. No stale lock to guess about, none to steal. With
+ * `wait: false` a busy lock refuses at once; with `wait: true` it queues.
  */
-export function holdDirLock(dir: string, staleMs: number): () => void {
-  mkdirSync(dirname(dir), { recursive: true })
-  try {
-    mkdirSync(dir)
-  } catch {
-    let age = 0
-    try {
-      age = Date.now() - statSync(dir).mtimeMs
-    } catch {}
-    if (age <= staleMs) {
-      console.error(`refusing: ${dir} is held (${Math.round(age / 1000)} s ago): another run is in progress`)
-      process.exit(1)
-    }
-    rmdirSync(dir)
-    mkdirSync(dir)
+export function underFlock(lockFile: string, opts: { wait: boolean; busy: string }): void {
+  const held = (process.env[HELD] ?? '').split(':').filter(Boolean)
+  if (held.includes(lockFile)) return
+  mkdirSync(dirname(lockFile), { recursive: true })
+  const r = Bun.spawnSync(['flock', ...(opts.wait ? [] : ['-n']), '-E', '75', lockFile, process.execPath, ...process.argv.slice(1)], {
+    stdio: ['inherit', 'inherit', 'inherit'],
+    env: { ...process.env, [HELD]: [...held, lockFile].join(':') },
+  })
+  if (r.exitCode === 75) {
+    console.error(`refusing: ${opts.busy}`)
+    process.exit(1)
   }
-  const release = () => {
-    try {
-      rmdirSync(dir)
-    } catch {}
-  }
-  process.on('exit', release)
-  return release
+  process.exit(r.exitCode ?? 1)
+}
+
+/** True while some process holds `lockFile` (a coordinator operation is running). */
+export function lockBusy(lockFile: string): boolean {
+  mkdirSync(dirname(lockFile), { recursive: true })
+  return Bun.spawnSync(['flock', '-n', '-E', '75', lockFile, 'true']).exitCode === 75
 }
 
 /** For scripts that need the lease: refuses (exit 1) unless the caller is its live holder, and renews it. */

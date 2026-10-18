@@ -7,7 +7,7 @@
 // "whatever main is now": commits merged after the beta was cut cannot ride along.
 // Builds from an immutable detached-worktree snapshot of that sha, never the live working tree. Logs the
 // release and prints the rollback command even if something fails after the deploy itself. Manual only.
-import { requireLease } from './lib/lease.ts'
+import { OP_LOCK, requireLease, underFlock } from './lib/lease.ts'
 import { $ } from 'bun'
 import { fetchRefs, isAncestor, revParse } from './lib/git.ts'
 import { runCheck } from './lib/check.ts'
@@ -21,6 +21,7 @@ const root = new URL('../../', import.meta.url).pathname
 const stableAppDir = `${root}apps/mamoru-app`
 
 // Coordinator only: the session named in MAMORU_COORD_AS must hold the live lease (scripts/release/coord.ts).
+underFlock(OP_LOCK, { wait: false, busy: 'another coordinator operation (a release or an operator redeploy) is running' })
 requireLease(process.env.MAMORU_COORD_AS)
 console.log('== deploy:prod ==')
 

@@ -13,12 +13,12 @@ const EXCL = { flag: 'wx', mode: 0o600 } as const
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { finalMessage, parseVerdict, pickModel, reviewPrompt } from './lib/review.ts'
+import { REVIEW_LOCK, underFlock } from './lib/lease.ts'
 
 const HOME = process.env.HOME!
 const root = new URL('../../', import.meta.url).pathname
 const REPO = 'ottodevs/mamoru'
 const state = `${HOME}/.local/state/mamoru-review`
-const lockDir = `${state}/codex.lock`
 const argv = process.argv.slice(2)
 const number = Number(argv.find((a) => /^\d+$/.test(a)))
 const opt = (name: string, dflt: string) => {
@@ -36,31 +36,12 @@ async function codexRunning(): Promise<boolean> {
   return (await $`pgrep -f ${'^(timeout [0-9]+ )?codex exec'}`.quiet().nothrow()).exitCode === 0
 }
 
-/** One review at a time: a directory lock whose owner pid is written inside; a lock of a dead pid is broken. */
-async function takeTurn(): Promise<() => void> {
-  for (let announced = false; ; ) {
-    try {
-      mkdirSync(lockDir)
-      writeFileSync(join(lockDir, 'pid'), `${process.pid} ${number}`)
-      if (!(await codexRunning())) break
-      await $`rm -rf ${lockDir}`.quiet().nothrow()
-    } catch {
-      const owner = Number((() => {
-        try {
-          return readFileSync(join(lockDir, 'pid'), 'utf8').split(' ')[0]
-        } catch {
-          return '0'
-        }
-      })())
-      if (owner && (await $`kill -0 ${owner}`.quiet().nothrow()).exitCode !== 0) await $`rm -rf ${lockDir}`.quiet().nothrow()
-    }
-    if (!announced) console.log('waiting for the Codex seat (another review is running)…')
-    announced = true
+/** A `codex exec` started outside this tool (by hand, or another flow) also has the seat: wait it out. */
+async function waitForOtherCodex(): Promise<void> {
+  for (let announced = false; await codexRunning(); announced = true) {
+    if (!announced) console.log('waiting for a codex exec started outside review:pr…')
     await Bun.sleep(20_000)
   }
-  const release = () => void Bun.spawnSync(['rm', '-rf', lockDir])
-  process.on('exit', release)
-  return release
 }
 
 async function seatRemaining(): Promise<number | null> {
@@ -74,7 +55,9 @@ async function seatRemaining(): Promise<number | null> {
   }
 }
 
-const release = await takeTurn()
+// One review at a time across every session: queued on a kernel lock, released when this process ends.
+underFlock(REVIEW_LOCK, { wait: true, busy: 'review queue busy' })
+await waitForOtherCodex()
 const lastFile = `${state}/last-model`
 const last = (() => {
   try {
@@ -110,7 +93,6 @@ console.log(`== review:pr #${number} at ${pr.headRefOid.slice(0, 7)} with ${mode
 const run = await $`timeout 1800 codex exec -m ${model} -c model_reasoning_effort=high -s read-only -C ${dir} - < ${promptFile}`.quiet().nothrow()
 const out = `${run.stdout.toString()}\n${run.stderr.toString()}`
 await $`git -C ${root} worktree remove --force ${dir}`.quiet().nothrow()
-release()
 
 const message = finalMessage(run.stdout.toString() || out)
 const verdict = parseVerdict(message)

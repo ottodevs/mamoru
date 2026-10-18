@@ -9,7 +9,7 @@
 //   take       take a live lease from another session; needs --reason, and says so on #83
 //   assert     exit 0 only if you hold the live lease (renews it); scripts/merge-pr.sh calls this
 import { $ } from 'bun'
-import { claim, isLive, leasePath, LEASE_TTL_MS, readLease, requireLease, sessionName, withDirLock, writeLease } from './lib/lease.ts'
+import { claim, isLive, leasePath, LEASE_TTL_MS, lockBusy, OP_LOCK, readLease, requireLease, sessionName, withDirLock, writeLease } from './lib/lease.ts'
 
 const argv = process.argv.slice(2)
 const cmd = argv[0] ?? 'status'
@@ -47,6 +47,8 @@ if (cmd === 'assert') {
 if (cmd === 'claim' || cmd === 'take' || cmd === 'heartbeat') {
   if (cmd === 'take' && !flag('reason')) fail('take needs --reason "<why the holder is gone or agreed>"')
   const prev = readLease(path)
+  // A release or redeploy in progress finishes under the coordinator that started it: nobody takes over mid-way.
+  if (cmd !== 'heartbeat' && lockBusy(OP_LOCK) && prev?.holder !== who) fail(`a coordinator operation is running right now (held by ${prev?.holder ?? 'a lapsed lease'}): try again when it ends`)
   const out = withDirLock(`${path}.lck`, () => {
     const current = readLease(path)
     if (cmd === 'heartbeat' && (!current || !isLive(current, Date.now()) || current.holder !== who)) return { error: 'you do not hold the lease' }

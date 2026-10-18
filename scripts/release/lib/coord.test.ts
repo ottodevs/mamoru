@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { checkHolder, claim, isLive, LEASE_TTL_MS, readLease, writeLease, type Lease } from './lease.ts'
+import { checkHolder, claim, isLive, LEASE_TTL_MS, lockBusy, readLease, writeLease, type Lease } from './lease.ts'
 import { fatalLines, healthy, refuseDeploy } from './operator.ts'
 import { finalMessage, MIN_REMAINING, parseVerdict, pickModel } from './review.ts'
 
@@ -35,6 +35,19 @@ describe('coordinator lease', () => {
     expect('lease' in lapsed && lapsed.lease.holder).toBe('noema-7a')
     const renewed = claim(lease('noema-7a', 60_000), 'noema-7a', '', T0)
     expect('lease' in renewed && renewed.lease).toMatchObject({ claimedAt: new Date(T0 - 3_600_000).toISOString(), heartbeatAt: new Date(T0).toISOString(), note: 'release 48126c1' })
+  })
+
+  test('a kernel lock reads busy while a process holds it and free once it ends, however it ends', async () => {
+    const lock = join(mkdtempSync(join(tmpdir(), 'oplock-')), 'op.lock')
+    expect(lockBusy(lock)).toBe(false)
+    // -o: only the flock process holds the lock (in underFlock the script itself holds it too, so the lock
+    // follows the work); killing it shows the kernel lets go of a lock whose holder died.
+    const holder = Bun.spawn(['flock', '-o', lock, 'sleep', '30'])
+    await Bun.sleep(300)
+    expect(lockBusy(lock)).toBe(true)
+    holder.kill('SIGKILL')
+    await holder.exited
+    expect(lockBusy(lock)).toBe(false)
   })
 
   test('the lease file round-trips and a released lease reads as free', () => {
