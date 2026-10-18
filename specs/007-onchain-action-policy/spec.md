@@ -106,9 +106,11 @@ In `validateUserOp`, for each execution (single or batch, in order) it calls
 `checkAction(configId, account, target, value, callData)`; a return other than 0 reverts with `PolicyViolation`.
 `supportsInterface(type(IActionPolicy).interfaceId)` must be true at enable. Interface from
 `erc7579/smartsessions` `contracts/interfaces/IPolicy.sol`; the deployed SmartSession version at
-`0x00000000002B0eCfbD0496EE71e01257dA0E37DE` must be checked against it before T1 (HEAD has the ERC-7484 check on
-action policies commented out; Mamoru's live accounts self-attest `TimeFramePolicy` and `UsageLimitPolicy`, and
-would self-attest this policy the same way in `registryTrustCalls`).
+`0x00000000002B0eCfbD0496EE71e01257dA0E37DE` was checked in T1 (Sourcify source, and the fork run below): unlike
+smartsessions HEAD, its `enableSessions` runs `registry.checkForAccount` on **action** policies too, so the account
+must attest this policy before the enable, and the registry accepts that attestation only for a module registered
+in it (`registerModule`, permissionless, same resolver as the published Rhinestone policies). The interface check is
+OpenZeppelin's `ERC165Checker` with `type(IActionPolicy).interfaceId`; the policy passes it.
 
 Grant changes it implies (T2): the swap rule `sqrtPriceLimitX96 EQUAL 0` goes; the swap and mint rules
 `amountOutMinimum/amount*Min GREATER_THAN 0` stay (harmless); `manage-any` names `MamoruActionPolicy.mint` and
@@ -202,7 +204,8 @@ Both are visible and far more expensive than the gains above at today's sizes.
 At 0.005 gwei, +330k gas is about 1.7e-6 ETH, under a cent; the L1 data fee does not change materially. The
 userOp `verificationGasLimit` of engine ops grows by up to ~160k per batch (harvest: decrease, collect, approve,
 swap). Enable gas is the one to watch: 14 actions per pool in the v2/v3 grant set, 42 for three pools; at 61-150k
-per action the renewal batch adds about 2.6-6.3M gas against Base's 2^24 per-transaction cap. T1 measures it end to end; the merge of `manage-any` and `convert-any`
+per action the renewal batch adds about 2.6-6.3M gas against Base's 2^24 per-transaction cap. T1 measured it end to end (section T1: +118-139k per action, the merged
+v4 sessions fit, today's layout does not); the merge of `manage-any` and `convert-any`
 and one account-level config write per pool (instead of per action) bring it down.
 
 ## Audit surface
@@ -295,14 +298,71 @@ an owner who does nothing keeps the engine running until the approval expires, t
 
 ## What the PoC does not show
 
-The real SmartSession + Safe7579 path (enable with two action policies, ERC-7484 attestation, a batch userOp
-through `handleOps`): the tests call the policy as SmartSession does (`msg.sender` = SmartSession) and execute from
-the account address. No engine, precheck or grant code uses it yet. No Lab run of blocked exits.
+No engine, precheck or grant code uses the policy yet. No Lab run of blocked exits. The real SmartSession + Safe7579
+path is covered by T1 below.
 
-## Tasks (none of them is started by this unit)
+## T1: the deployed stack (`test/RealStack.t.sol`, 8 tests, all pass)
 
-- T1 Lab: the TS scenario fixtures enable a v4 grant with both policies on a fork and run the engine's ops and the
-  three attacks through `handleOps`; measure enable and renewal gas.
+Fresh Safe 1.4.1 + Safe7579 set up as `safeInitializer` does, owner a test EOA instead of the passkey (owner
+signatures are Safe ECDSA; the passkey path is not exercised). Activation is one owner `execTransaction`
+(`registryTrustCalls` + attest + `enableSessions`) from a relayer; session userOps go through EntryPoint v0.7
+`handleOps` from the relayer EOA. Grant: one v4 session per pool (8 actions: approve token0/token1, swap,
+`policy.mint`, `policy.increase`, decrease, collect, burn), UniActionPolicy + MamoruActionPolicy on each.
+
+- Pass: approve+swap at `swapBounds`, approve x2 + `policy.mint`, approve x2 + `policy.increase` on the admitted
+  NFT, decrease at `decreaseMins` + collect, burn. Refused in validation: loose swap (min 1, limit 0), increase on an
+  attacker's NFT, `approve(NPM)`, a batch over the window budget (all `PolicyViolation` from this policy), direct
+  `NPM.increaseLiquidity` (`NoPoliciesSet`, not an action of the grant). Control: today's enter-swap grant accepts
+  the loose swap.
+- Refusal reasons are invisible in `handleOps`: Safe7579 replaces the validator's revert with `ExecutionFailed()`
+  (`FailedOpWithRevert(0, "AA23 reverted", ExecutionFailed)`). The reason comes from an `eth_call` of
+  `SmartSession.validateUserOp` with `from` = the account. T4 and the operator logs need that call.
+- T2 must use `increase(...)` = `0x4110c363` for the policy's increase (not the manager's `0x219f5d17`); `mint`
+  shares the manager's selector. Merging sessions per pool means one approve action per token for two spenders
+  (router, policy) and one swap action for both directions: UniActionPolicy can pin neither the spender nor a
+  per-token amount cap, so this policy's spender check and budgets are what bind there.
+- `registryTrustCalls` cannot be reused for the v4 upgrade of an existing account: re-attesting `TimeFramePolicy` and
+  `UsageLimitPolicy` reverts `AlreadyAttested`; attest only this policy. The policy must be `registerModule`d once,
+  before any account attests it (T7).
+
+Gas (gasleft deltas with cold accounts, no SSTORE refunds; tx total adds 21k + calldata with the EIP-7623 floor):
+
+| Owner transaction | Tx gas | Calldata |
+|---|---|---|
+| enable 1 v4 session (8 actions), UniActionPolicy only / both | 3,262,578 / 4,427,723 | 29 / 32 KB |
+| second policy per action: first enable / renewal | +139,499 / +118,194 (includes SmartSession's policy list, ERC-165 and registry checks) | |
+| new account, 3 pools: trust + attest + 3 v4 sessions, both / Uni only | **13,683,595** / 10,486,387 | 97 KB |
+| renewal, 3 pools: 3 v4 sessions at generation 2 + 3 `removeSession` | **14,668,006** | 96 KB |
+| today's layout (12 sessions, 42 actions), Uni only / both | 21,872,091 / 28,212,735 (over 2^24) | 157 / 174 KB |
+
+The v4 three-pool activation fits Base's 2^24 cap with 3.09M headroom (under the operator's 15M activation budget);
+the renewal fits under its 16.2M budget. Both policies on today's layout cannot fit in one transaction: v4 depends on
+the merged sessions.
+
+| Session userOp | Validation | Execution | handleOps | actualGasUsed |
+|---|---|---|---|---|
+| approve + swap (UniActionPolicy only, control) | 181,201 | 164,152 | 453,066 | 791,712 |
+| approve + swap | 314,837 | 153,645 | 575,200 | 915,892 |
+| approve x2 + `policy.mint` | 291,068 | 704,058 | 1,047,131 | 1,351,259 |
+| approve x2 + `policy.increase` | 249,723 | 442,734 | 743,498 | 1,073,664 |
+| decrease + collect | 268,846 | 205,670 | 525,148 | 878,574 |
+| burn | 135,232 | 90,796 | 276,680 | 642,346 |
+
+`actualGasUsed` includes the 100k preVerificationGas and v0.7's 10% charge on the unused part of a 3M callGasLimit.
+
+**Multichain ENABLE mode works on the deployed version.** One owner signature over a `multichainDigest` of four
+`ChainDigest` entries (three Base sessions, one chain-1 entry) enabled the three Base sessions, each in its own ENABLE
+userOp with its index; the chain-1 index on Base is refused (`ChainIdMismatch(1)`). Each ENABLE userOp costs about
+5.0M verification gas (enable data FastLZ-compressed: 1.7 KB, 32 KB raw), so three do not fit one `handleOps` under
+2^24: one per transaction. ENABLE mode runs the registry check, so the account must already trust itself and have
+attested this policy: for an existing account the v4 upgrade still needs one owner transaction for the attestation,
+unless the owner signs `UNSAFE_ENABLE` (no registry check, and the digest says so) or Rhinestone attests the policy.
+Not tested: the other chains themselves (same Safe address, passkey verifier there).
+
+## Tasks (T1 done, the rest not started)
+
+- T1 Lab: a v4 grant with both policies on a fork, the engine's ops and the attacks through `handleOps`, enable and
+  renewal gas. Done in Foundry against the deployed stack (section T1); the TS scenario fixtures are T2/T3's.
 - T2 `packages/policy`: v4 grants (above), `Init` encoding in `toSmartSession`; `increase-any` names
   `MamoruActionPolicy.increase` (replaces #171's per-position Lab grant).
 - T3 engine: swap minimum and price limit from `swapBounds` (or the same math off chain), decrease minimums from
