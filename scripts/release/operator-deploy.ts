@@ -37,7 +37,9 @@ function refuse(why: string): never {
 // even when the session that started it is killed: the caller only waits for it and prints its log.
 if (!process.env.MAMORU_DEPLOY_IN_UNIT) {
   const name = `mamoru-operator-deploy-${Date.now()}`
-  const env = { PATH: process.env.PATH ?? '', HOME, MAMORU_COORD_AS: sessionName(argv) ?? '', MAMORU_DEPLOY_IN_UNIT: '1' }
+  // Every MAMORU_* setting reaches the unit (the operator dir, unit, env file and metrics URL overrides included).
+  const mamoru = Object.fromEntries(Object.entries(process.env).filter(([k, v]) => k.startsWith('MAMORU_') && v !== undefined)) as Record<string, string>
+  const env = { ...mamoru, PATH: process.env.PATH ?? '', HOME, MAMORU_COORD_AS: sessionName(argv) ?? '', MAMORU_DEPLOY_IN_UNIT: '1' }
   const setenv = Object.entries(env).map(([k, v]) => `--setenv=${k}=${v}`)
   console.log(`running as unit ${name} (journalctl --user -u ${name} -f to follow; it carries on if this session ends)`)
   const r = Bun.spawnSync(['systemd-run', '--user', '--quiet', '--collect', '--wait', `--unit=${name}`, `--working-directory=${root}`, ...setenv, process.execPath, import.meta.path, ...argv], { stdio: ['ignore', 'inherit', 'inherit'] })
