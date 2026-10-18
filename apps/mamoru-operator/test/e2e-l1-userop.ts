@@ -531,7 +531,9 @@ try {
   clock += 11_000
   check((await cbo2.status(cctx)).route?.state === 'filled', 'status stays filled')
   const mints = JSON.parse(readFileSync(jf, 'utf8')).mints
-  check(mints?.n === 1 && BigInt(mints.wei) === (mintRc ? mintRc.gasUsed * mintRc.effectiveGasPrice : -1n), `Base mint charged to the day at its real cost: ${mints?.wei} wei`)
+  const l1f = (mintRc as { l1Fee?: bigint | null } | null)?.l1Fee
+  const real = mintRc ? mintRc.gasUsed * mintRc.effectiveGasPrice + (l1f ?? 0n) : -1n
+  check(mints?.n === 1 && (l1f != null ? BigInt(mints.wei) === real : BigInt(mints.wei) >= real), `Base mint charged to the day: ${mints?.wei} wei (receipt cost ${real}, l1Fee ${l1f ?? 'absent: the bound stays charged'})`)
 
   // ---- 3. What the first move costs at today's mainnet gas --------------------------------------------------------
   // anvil answers 1 gwei for the priority fee; the upstream node's answer is what a bundler would see today.

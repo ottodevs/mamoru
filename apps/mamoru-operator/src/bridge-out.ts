@@ -252,6 +252,8 @@ export function stubOwnerSignature(validUntil: number): Hex {
 
 const USER_OPERATION_EVENT = parseAbiItem('event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)')
 
+class MintBudget extends Error {}
+
 /** Approvals kept at once, all accounts. One per account; expired ones go first. */
 export const MAX_PREPARED = 256
 
@@ -814,7 +816,9 @@ export class BridgeOut {
    * Last resort when neither the bundler nor the route knows the bundle (only reachable if the journal lost the hash
    * written before the broadcast): when the account's EntryPoint nonce has moved past the signed one, the
    * UserOperationEvent with this userOpHash (an indexed topic, what bundlers answer eth_getUserOperationReceipt from)
-   * in provider-sized chunks from the send block. Nonce unspent: nothing to find.
+   * in provider-sized chunks from the send block. Nonce unspent: nothing to find. The window covers the userOp's
+   * whole life: the SafeOp's validUntil is USEROP_VALID_SEC (10 min, ~50 blocks) after the prepare and the
+   * EntryPoint refuses it after that, so it can only be in the first ~50 of the 7,200 blocks searched.
    */
   private async findUserOpTx(r: Stored): Promise<Hex | undefined> {
     const nonce = await this.l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'getNonce', args: [r.safe, OWNER_NONCE_KEY] })
@@ -1049,10 +1053,13 @@ export class BridgeOut {
       const atts = await cctpAttestation(r.l1Tx, this.fetcher)
       if (!atts) return
       // Only a complete attestation whose message is this route's burn: this account, this amount, Ethereum to Base.
-      // ... and, when the burn's emitted message is known, exactly that message (only Circle's fields may differ).
+      // ... and exactly the message the burn emitted (only Circle's fields may differ). A route without that key (none
+      // is created without it: resolveUserOp sets it with the burn) is never minted.
+      const key = r.cctp?.message
+      if (!key) return
       const att = atts.find((a) => {
         try {
-          return mintIsFor(decodeCctpMessage(a.message), L1_USDC, r.safe, BigInt(r.amountUsdc)) && (!r.cctp?.message || cctpMessageKey(a.message) === r.cctp.message)
+          return mintIsFor(decodeCctpMessage(a.message), L1_USDC, r.safe, BigInt(r.amountUsdc)) && cctpMessageKey(a.message) === key
         } catch {
           return false
         }
@@ -1092,24 +1099,42 @@ export class BridgeOut {
       }
       this.journal.mints = { day, n: m.n + 1, wei: (BigInt(m.wei) + estimate).toString() }
       this.save()
-      let over = false
-      const sent = await base.relayer.send(
-        { to: MESSAGE_TRANSMITTER_V2, data: receiveMessageData(att.message, att.attestation), gas: MINT_GAS },
-        undefined,
-        (maxFeeWei) => {
-          charge(maxFeeWei)
-          over = BigInt(this.journal.mints!.wei) > MINT_BUDGET_WEI
-        },
-        (h) => {
-          // The mint's hash is on disk before the broadcast.
-          r.mintTx = h
-          r.mintAt = new Date(this.now()).toISOString()
-          this.write(accountKey, { ...r })
-        },
-      )
-      if (over) logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, 'this mint took the Base budget past its cap')
-      const l1Fee = (sent.receipt as { l1Fee?: bigint | null }).l1Fee ?? 0n
-      charge(sent.receipt.gasUsed * sent.receipt.effectiveGasPrice + l1Fee)
+      let broadcast = false
+      let sent: { hash: Hex; receipt: TransactionReceipt }
+      try {
+        sent = await base.relayer.send(
+          { to: MESSAGE_TRANSMITTER_V2, data: receiveMessageData(att.message, att.attestation), gas: MINT_GAS },
+          undefined,
+          (maxFeeWei) => {
+            // The relayer's real bound, before anything is broadcast: over the cap, the send stops here.
+            charge(maxFeeWei)
+            if (BigInt(this.journal.mints!.wei) > MINT_BUDGET_WEI) throw new MintBudget()
+          },
+          (h) => {
+            // The mint's hash is on disk before the broadcast.
+            broadcast = true
+            r.mintTx = h
+            r.mintAt = new Date(this.now()).toISOString()
+            this.write(accountKey, { ...r })
+          },
+        )
+      } catch (e) {
+        // Nothing was signed for broadcast: the day gets its count and charge back.
+        if (!broadcast) {
+          charge(0n)
+          const cur = this.journal.mints
+          if (cur && cur.day === day && cur.n > 0) this.journal.mints = { ...cur, n: cur.n - 1 }
+          this.save()
+        }
+        if (e instanceof MintBudget) {
+          logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, 'Base mint budget for today used up, minting tomorrow')
+          return
+        }
+        throw e
+      }
+      // The receipt's cost, L1 data fee included; a receipt without l1Fee keeps the bound charged.
+      const l1Fee = (sent.receipt as { l1Fee?: bigint | null }).l1Fee
+      if (l1Fee !== undefined && l1Fee !== null) charge(sent.receipt.gasUsed * sent.receipt.effectiveGasPrice + l1Fee)
       r.mintTx = sent.hash
       if (sent.receipt.status === 'success') {
         r.state = 'filled'
