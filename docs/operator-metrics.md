@@ -72,6 +72,12 @@ account keys are shortened to 8 chars. Example (values illustrative):
   "engines": [
     { "account": "3f9a7c21", "lastReviewAt": "2026-10-02T09:14:40.000Z", "lastDecisionCode": "DECIDE_HOLD", "consecutiveErrors": 0, "lastErrorClass": null, "lastErrorAt": null, "reviewsLastHour": 58, "errorsLastHour": 0 },
     { "account": "9b0e41aa", "lastReviewAt": "2026-10-02T09:14:55.000Z", "lastDecisionCode": null, "consecutiveErrors": 4, "lastErrorClass": "rpc_other", "lastErrorAt": "2026-10-02T09:14:55.000Z", "reviewsLastHour": 12, "errorsLastHour": 4 }
+  ],
+  // otto/mamoru#129: the newest 300 ops across every account, newest first (Operator.recentOps). Exactly these
+  // five fields — never a grant, session key, signature, salt or userOp.
+  "opsRecent": [
+    { "accountKey": "3f9a7c21", "kind": "enter", "state": "confirmed", "at": "2026-10-02T09:14:41.000Z", "code": null },
+    { "accountKey": "9b0e41aa", "kind": "activate", "state": "failed", "at": "2026-10-02T09:14:30.000Z", "code": "DEPOSIT_OVER_CAP" }
   ]
 }
 ```
@@ -110,6 +116,10 @@ account keys are shortened to 8 chars. Example (values illustrative):
 - **Engine health** is in-memory only (reset on an operator restart) and only lists accounts with a
   running engine loop; it is a live-ops view, not the durable record (`accounts.json`'s per-account
   `ops` journal is).
+- **`opsRecent`** (otto/mamoru#129) reads straight from that durable record (`accounts.json`'s per-account `ops`),
+  across every account, newest `updatedAt` first, capped at 300. Mirrored into D1 (`operator_metrics_latest`,
+  `migrations/d1/0013_operator_metrics.sql`) by `apps/mamoru-app/src/api/operator-metrics.ts`'s cron pull, for the
+  `/ops` console (separate repo) to read without hitting the operator directly.
 - **Relayer balance** is cached 60s so a metrics poll never adds RPC load.
 - **Bounded cardinality**: a method outside the fixed CU table (`eth_call`, `eth_getLogs`, ...) folds
   into an `"other"` method bucket instead of creating a new permanent one, and provider labels beyond

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { runYieldLedger } from '../../src/worker.ts'
+import { runOperatorMetrics, runYieldLedger } from '../../src/worker.ts'
 import type { Env } from '../../src/api/env.ts'
 import { memoryD1 } from './d1.ts'
 
@@ -64,6 +64,39 @@ describe('runYieldLedger cron gate (otto/mamoru#129: D1 flag, not an env var)', 
     turnOn(db)
     await expect(
       runYieldLedger(envOf(db), async () => {
+        throw new Error('connect refused')
+      }),
+    ).resolves.toBeUndefined()
+  })
+})
+
+describe('runOperatorMetrics (otto/mamoru#129 follow-up): ungated, unlike runYieldLedger', () => {
+  test('no ops_flag_changes row at all: the pull still runs (not gated by yield_ledger)', async () => {
+    const db = memoryD1()
+    let called = false
+    await runOperatorMetrics(envOf(db), async () => {
+      called = true
+      return new Response('{}', { status: 404 })
+    })
+    expect(called).toBe(true)
+  })
+
+  test('still needs OPERATOR_URL and OPERATOR_SECRET', async () => {
+    const db = memoryD1()
+    let called = false
+    const fetcher = async () => {
+      called = true
+      return new Response('{}', { status: 404 })
+    }
+    await runOperatorMetrics(envOf(db, { OPERATOR_URL: undefined }), fetcher)
+    await runOperatorMetrics(envOf(db, { OPERATOR_SECRET: undefined }), fetcher)
+    expect(called).toBe(false)
+  })
+
+  test('an operator error during a pull never throws out of the cron', async () => {
+    const db = memoryD1()
+    await expect(
+      runOperatorMetrics(envOf(db), async () => {
         throw new Error('connect refused')
       }),
     ).resolves.toBeUndefined()

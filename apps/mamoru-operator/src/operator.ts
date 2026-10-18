@@ -51,6 +51,9 @@ import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp }
 
 /** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
 export type AccountsSummary = { known: number; active: number; armed: number }
+/** GET /metrics `opsRecent` (otto/mamoru#129): exactly these five fields, never a grant, session key, signature,
+ * salt or userOp — the same trim GET /ops already applies per-account, here across every account at once. */
+export type RecentOp = { accountKey: string; kind: OpView['kind']; state: OpView['state']; at: string; code: string | null }
 const RELAYER_BALANCE_CACHE_MS = 60_000
 /**
  * otto/mamoru#135: how old the shared readSafe behind GET funding may be. 15 s for a poll, 60 s while the keyed
@@ -513,6 +516,15 @@ export class Operator {
   accountsSummary(): AccountsSummary {
     const all = Object.values(this.store.state.accounts)
     return { known: all.length, active: all.filter((a) => a.active).length, armed: all.filter((a) => !!a.armed).length }
+  }
+
+  /** GET /metrics `opsRecent` (otto/mamoru#129): the newest `limit` ops across every account, newest first,
+   * trimmed to accountKey (8 chars), kind, state, updatedAt and code only. */
+  recentOps(limit: number): RecentOp[] {
+    const all: { accountKey: string; op: StoredOp }[] = []
+    for (const acc of Object.values(this.store.state.accounts)) for (const op of acc.ops) all.push({ accountKey: acc.accountKey, op })
+    all.sort((a, b) => Date.parse(b.op.updatedAt) - Date.parse(a.op.updatedAt))
+    return all.slice(0, limit).map(({ accountKey, op }) => ({ accountKey: accountKey.slice(0, 8), kind: op.kind, state: op.state, at: op.updatedAt, code: op.code ?? null }))
   }
 
   /** The Safes the snapshot loop reads (otto/mamoru#136): every active or armed account. */

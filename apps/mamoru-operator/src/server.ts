@@ -68,8 +68,9 @@ function json(status: number, body: unknown): Response {
 
 /**
  * GET /metrics payload: RPC traffic (per provider host, never the URL or a key), engine health per
- * account (key shortened to 8 chars) and operator-level facts. No secrets, no session keys, no full
- * account keys, no RPC URLs. See docs/operator-metrics.md.
+ * account (key shortened to 8 chars), the newest ops across every account (otto/mamoru#129, same
+ * trim) and operator-level facts. No secrets, no session keys, no full account keys, no RPC URLs,
+ * no grants, no signatures, no salts, no userOps. See docs/operator-metrics.md.
  */
 async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha: string, bootedAt: number): Promise<unknown> {
   const rpc = rpcMetrics.snapshot()
@@ -98,6 +99,9 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
       note: 'cuEstimate is a static per-method estimate (see metrics.ts CU_TABLE), not Alchemy\'s billed figure',
     },
     engines: op.engineHealthSnapshot(),
+    // otto/mamoru#129: the newest 300 engine/owner ops across every account, newest first, for the /ops console
+    // (mirrored into D1 by apps/mamoru-app's cron). Trimmed to accountKey/kind/state/at/code only — see Operator.recentOps.
+    opsRecent: op.recentOps(300),
   }
 }
 

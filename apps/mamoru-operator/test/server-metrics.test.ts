@@ -12,6 +12,7 @@ type MetricsPayload = {
   operator: { gitSha: string; chainId: number; policyId: string; relayer: { address: string }; accounts: { known: number; active: number; armed: number } }
   rpc: { cumulative: Record<string, Record<string, { requests: number }>>; last48h: unknown[] }
   engines: { account: string; lastDecisionCode: string | null; lastErrorClass: string | null }[]
+  opsRecent: { accountKey: string; kind: string; state: string; at: string; code: string | null }[]
 }
 
 const SECRET = 'test-operator-secret'
@@ -35,6 +36,10 @@ function fakeOperator(): Operator {
     engineHealthSnapshot: () => [
       { account: '3f9a7c21', lastReviewAt: '2026-10-02T09:14:40.000Z', lastDecisionCode: 'DECIDE_HOLD', consecutiveErrors: 0, lastErrorClass: null, lastErrorAt: null, reviewsLastHour: 58, errorsLastHour: 0 },
       { account: '9b0e41aa', lastReviewAt: '2026-10-02T09:14:55.000Z', lastDecisionCode: null, consecutiveErrors: 4, lastErrorClass: 'rpc_other', lastErrorAt: '2026-10-02T09:14:55.000Z', reviewsLastHour: 12, errorsLastHour: 4 },
+    ],
+    recentOps: () => [
+      { accountKey: '3f9a7c21', kind: 'enter', state: 'confirmed', at: '2026-10-02T09:14:41.000Z', code: null },
+      { accountKey: '9b0e41aa', kind: 'activate', state: 'failed', at: '2026-10-02T09:14:30.000Z', code: 'DEPOSIT_OVER_CAP' },
     ],
   } as unknown as Operator
 }
@@ -149,6 +154,10 @@ describe('GET /metrics payload', () => {
       expect(Array.isArray(body.rpc.last48h)).toBe(true)
       expect(body.engines.length).toBe(2)
       expect(body.engines[0]!.account).toBe('3f9a7c21')
+      expect(body.opsRecent).toEqual([
+        { accountKey: '3f9a7c21', kind: 'enter', state: 'confirmed', at: '2026-10-02T09:14:41.000Z', code: null },
+        { accountKey: '9b0e41aa', kind: 'activate', state: 'failed', at: '2026-10-02T09:14:30.000Z', code: 'DEPOSIT_OVER_CAP' },
+      ])
 
       expect(findSecretLooking(body)).toEqual([])
     } finally {
@@ -183,6 +192,7 @@ describe('GET /metrics never carries injected secret-shaped free text (finding #
       accountsSummary: () => ({ known: 4, active: 4, armed: 0 }),
       settingsStatus: () => null,
       engineHealthSnapshot: () => nasty.map((_, i) => tracker.snapshot(`account-${i}`)),
+      recentOps: () => [],
     } as unknown as Operator
 
     const rpcMetrics = new RpcMetrics(tmpDir())
