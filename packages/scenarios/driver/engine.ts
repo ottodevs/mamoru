@@ -57,7 +57,19 @@ const MAX_WAIT_BLOCKS = 32
 /** Live: after a bundler rejection that left the nonce unmoved, the same premise or kind+pool is not proposed again for this long. */
 export const UNINCLUDABLE_BACKOFF_SECONDS = 600n
 
-export type EngineSession = { name: string; grant: SessionGrant; permissionId: Hex }
+export type EngineSession = {
+  name: string
+  grant: SessionGrant
+  permissionId: Hex
+  /**
+   * Spec 007 T6 (M-4): tokenIds this session's own owner-signed `Init.admit` admitted at enable (positions minted
+   * outside this deployment — the contract's `admittedPool` already has them the moment the session is enabled,
+   * never only from this engine's own later `enter_mint`). Whoever builds the Init and calls `addSession` passes
+   * the same list it signed, so precheck's mirror (`SessionLedger.isAdmitted`) agrees with the chain from the
+   * start, the same way `afterConfirmed` admits a tokenId this engine itself later mints.
+   */
+  admit?: readonly bigint[]
+}
 
 export type EngineConfig = {
   /** 'live' signs and sends on Base only with MAMORU_LIVE=1 (journal signBlocker and the bundler client both check). */
@@ -269,6 +281,9 @@ export class Engine {
     this.sessions.push(s)
     this.ledger.activate(s.permissionId, s.grant)
     if (s.grant.tokenId !== undefined && !this.allowedTokenIds.includes(s.grant.tokenId)) this.allowedTokenIds.push(s.grant.tokenId)
+    // Spec 007 T6 (M-4): this session's own Init.admit, mirrored into the ledger right away — same admitted set the
+    // contract already has the moment the session is enabled, not only from this engine's own later mints.
+    if (s.admit?.length && s.grant.pool) for (const tokenId of s.admit) this.ledger.admitTokenId(tokenId, s.grant.pool)
   }
 
   savingsTotal(): bigint {

@@ -127,7 +127,7 @@ describe('prepareCalls: enter_swap', () => {
     // FakeChain's TWAPs read tick -2 here; an anchor at +1000 +- 40 leaves no range.
     const anchored = withActionPolicy(conservadorLabV4, MAMORU_POLICY, [{ ...V4_POOLS.btc, anchor: { tick: 1000, band: 40 } }])
     await withEngine(anchored, async (e, chain) => {
-      await expect(prepare(e, proposal, chain.head, 1_790_000_000n + chain.head * 2n)).rejects.toMatchObject({ code: 'POLICY_PRICE_BAND' })
+      await expect(prepare(e, proposal, chain.head, 1_790_000_000n + chain.head * 2n, session(proposal.grant))).rejects.toMatchObject({ code: 'POLICY_PRICE_BAND' })
     })
   })
 
@@ -222,6 +222,31 @@ describe('prepareCalls: rerange / reduce (decreaseLiquidity minimums)', () => {
       // non-v4 (spot-only) minimum computed in the sibling test above.
       expect(bound.amount0Min).toBeGreaterThan(0n)
       expect(bound.amount1Min).toBeGreaterThan(0n)
+    })
+  })
+})
+
+describe('addSession: Init.admit mirrored into the ledger (spec 007 T6 M-4)', () => {
+  test('a session carrying admit tokenIds admits them for its pool right away, not only from a later mint', async () => {
+    const policy = withActionPolicy(conservadorLabV4, MAMORU_POLICY, [V4_POOLS.btc])
+    await withEngine(policy, async (e) => {
+      const s = session('manage-any')
+      s.grant.pool = POOL
+      s.admit = [6_100_766n, 6_100_767n]
+      e.addSession(s)
+      expect(e.ledger.isAdmitted(6_100_766n, POOL)).toBe(true)
+      expect(e.ledger.isAdmitted(6_100_767n, POOL)).toBe(true)
+      // Never admitted for a different pool, and never for a tokenId this session did not carry.
+      expect(e.ledger.isAdmitted(6_100_766n, 'pool:USDC/USDT/100')).toBe(false)
+      expect(e.ledger.isAdmitted(1n, POOL)).toBe(false)
+    })
+  })
+
+  test('a session with no admit list (the usual case) admits nothing by itself', async () => {
+    const policy = withActionPolicy(conservadorLabV4, MAMORU_POLICY, [V4_POOLS.btc])
+    await withEngine(policy, async (e) => {
+      e.addSession(session('enter-swap'))
+      expect(e.ledger.isAdmitted(6_100_766n, POOL)).toBe(false)
     })
   })
 })
