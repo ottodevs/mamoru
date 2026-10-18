@@ -1,4 +1,4 @@
-import { encodeFunctionData, getAddress, hexToBigInt, pad, parseAbi, parseEventLogs, sliceHex, type Hex, type Log } from 'viem'
+import { concat, encodeFunctionData, getAddress, hexToBigInt, keccak256, pad, parseAbi, parseEventLogs, sliceHex, type Hex, type Log } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { erc20Abi } from '@mamoru/registry'
 
@@ -136,4 +136,18 @@ export function mintIsFor(m: CctpMessage, usdc: Address, safe: Address, amount: 
 
 export function receiveMessageData(message: Hex, attestation: Hex): Hex {
   return encodeFunctionData({ abi: messageTransmitterV2Abi, functionName: 'receiveMessage', args: [message, attestation] })
+}
+
+/**
+ * The message's identity across Ethereum and Circle: its hash with the fields Circle fills in after the burn zeroed
+ * (nonce, finalityThresholdExecuted, and in the body feeExecuted and expirationBlock). The attested message of a burn
+ * has the same key as the MessageSent it emitted.
+ */
+export function cctpMessageKey(m: Hex): Hex {
+  const n = (m.length - 2) / 2
+  if (n < 148 + 228) throw new Error('CCTP message too short')
+  const z = (len: number): Hex => `0x${'00'.repeat(len)}`
+  // hookData (after the 228-byte body) is empty for Mamoru's burns.
+  const hook: Hex = n > 148 + 228 ? sliceHex(m, 148 + 228) : '0x'
+  return keccak256(concat([sliceHex(m, 0, 12), z(32), sliceHex(m, 44, 144), z(4), sliceHex(m, 148, 148 + 164), z(64), hook]))
 }

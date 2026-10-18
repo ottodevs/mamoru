@@ -308,7 +308,11 @@ try {
   flag = false
   check((await code(bo.submit(ctx, browserSign(pa)))) === 'BRIDGE_OFF', 'userOp path: flag turned off after prepare: BRIDGE_OFF')
   flag = true
+  // A second later the SafeOp differs (validUntil); two prepares from the same state in the same second are the
+  // same userOp, so the same signature is rightly valid for both.
+  await Bun.sleep(1_100)
   const pb = await bo.prepare(ctx)
+  check(pb.safeTxHash !== pa.safeTxHash, 'two prepares a second apart: different SafeOp hashes')
   check((await code(bo.submit(ctx, browserSignChallenge(pa.safeTxHash, pb.prepareId)))) === 'BAD_SIGNATURE', 'a signature over another prepare\'s userOp: BAD_SIGNATURE')
   check((await l1.getTransactionCount({ address: l1Relayer.address })) === sentBefore, 'the relayer sent nothing for either')
   // The relayer path (#72, no paymaster): the same flag check at submit.
@@ -380,6 +384,21 @@ try {
   check((await new L1Bundler(forgetful.url).receipt(r.userOpHash!)) === null, 'a restarted bundler has no receipt for it')
   const recon = await make({ bundlerUrl: forgetful.url }).status(ctx)
   check(recon.route?.state === 'deposited' && recon.route.depositId === realId, `unconfirmed resolved after a restart from the stored bundle hash: deposited, id ${recon.route?.depositId}`)
+  // Even without the bundle hash (a lost journal write): the account's EntryPoint nonce is spent, so the
+  // UserOperationEvent for this userOpHash is looked up by its indexed topic.
+  const j2 = JSON.parse(readFileSync(file, 'utf8'))
+  j2.routes[ctx.accountKey] = { ...j2.routes[ctx.accountKey], state: 'unconfirmed', depositId: undefined, userOpTx: undefined, l1Tx: undefined, at: new Date(Date.now() - 20 * 60_000).toISOString() }
+  writeFileSync(file, JSON.stringify(j2))
+  const recon2 = await make({ bundlerUrl: forgetful.url }).status(ctx)
+  check(recon2.route?.state === 'deposited' && recon2.route.depositId === realId && !!recon2.route.l1Tx, `no hash anywhere, nonce spent: found by the userOp's event, deposited, id ${recon2.route?.depositId}`)
+  // Liveness without fail-open: an unconfirmed route whose nonce was spent stays blocking whatever its age.
+  const j3 = JSON.parse(readFileSync(file, 'utf8'))
+  const keep = j3.routes[ctx.accountKey]
+  j3.routes[ctx.accountKey] = { ...keep, state: 'unconfirmed', userOpHash: `0x${'ee'.repeat(32)}`, userOpTx: undefined, depositId: undefined, safeNonce: '0', at: new Date(Date.now() - 60 * 60_000).toISOString() }
+  writeFileSync(file, JSON.stringify(j3))
+  await fund(safe, 30_000_000n)
+  check((await code(make().prepare(ctx))) === 'BRIDGE_IN_PROGRESS', 'unconfirmed for an hour but its nonce is spent: still blocking (no unblock on time alone)')
+  writeFileSync(file, JSON.stringify({ ...j3, routes: { ...j3.routes, [ctx.accountKey]: keep } }))
   statusAnswer = { status: 'filled', fillTx: `0x${'ab'.repeat(32)}` }
   const after = await make().status(ctx)
   check(after.route?.state === 'filled', 'status follows Across: filled on Base')
@@ -414,6 +433,39 @@ try {
     const got = await rbo.submit(rctx, browserSign(rp)).then((v) => v.route?.state ?? 'none', (e) => (e instanceof HttpError ? e.code : 'unexpected'))
     check(got === want && (await usdcAt(rctx.address)) === 100_000_000n, `bundler error ${rc} "${detail}": ${got}, USDC untouched`)
   }
+
+  // Unconfirmed with its nonce unspent: blocking while young; after UNCONFIRMED_GIVEUP_MS the chain proves it did
+  // not run, so a new move may start (it signs the same nonce: at most one of the two can run).
+  const uctx = newAccount('unblock')
+  await fund(uctx.address, 100_000_000n)
+  const uj = JSON.parse(readFileSync(file, 'utf8'))
+  const stuck = (ageMin: number) => ({ id: 'x', safe: uctx.address, safeNonce: '0', fromBlock: '0', state: 'unconfirmed', amountUsdc: '1', outputUsdc: '1', userOpHash: `0x${'dd'.repeat(32)}`, at: new Date(Date.now() - ageMin * 60_000).toISOString() })
+  writeFileSync(file, JSON.stringify({ ...uj, routes: { ...uj.routes, [uctx.accountKey]: stuck(1) } }))
+  check((await code(make().prepare(uctx))) === 'BRIDGE_IN_PROGRESS', 'unconfirmed, nonce unspent, 1 minute old: blocking')
+  writeFileSync(file, JSON.stringify({ ...uj, routes: { ...uj.routes, [uctx.accountKey]: stuck(20) } }))
+  check((await code(make().prepare(uctx))) === 'ok', 'unconfirmed, nonce unspent, 20 minutes old: the chain proves it did not run, a new move may start')
+
+  // One account's move in flight does not queue another account behind it: BRIDGE_BUSY, its approval kept.
+  const b1 = newAccount('busy1')
+  const b2 = newAccount('busy2')
+  await fund(b1.address, 100_000_000n)
+  await fund(b2.address, 100_000_000n)
+  // A bundler that takes 4 s, like an Ethereum block or two.
+  class Slow extends L1Bundler {
+    override async send(op: Parameters<L1Bundler['send']>[0]): Promise<Hex> {
+      await Bun.sleep(4_000)
+      return super.send(op)
+    }
+  }
+  const bbo = new BridgeOut(l1, l1Relayer, mkdtempSync(join(tmpdir(), 'mamoru-e2e-busy-')), fetcher, Date.now, undefined, () => true, { bundler: new Slow(bundler.url, fetch, L1_BUNDLER_TIMEOUT_MS), paymaster: forkPm })
+  guard = bbo.bundlerGuard()
+  const [q1, q2] = [await bbo.prepare(b1), await bbo.prepare(b2)]
+  const first = bbo.submit(b1, browserSign(q1))
+  await Bun.sleep(1_500)
+  const busy = await code(bbo.submit(b2, browserSign(q2)))
+  check(busy === 'BRIDGE_BUSY', `a second account while a move is being sent: ${busy}`)
+  check((await first).route?.state === 'deposited', 'the first move went through')
+  check((await bbo.submit(b2, browserSign(q2))).route?.state === 'deposited', 'the second account\'s same approval, sent again after: deposited')
 
   // ---- 2. CCTP V2 through BridgeOut: chosen by output, burned on Ethereum, minted on Base by the operator ---------
   const cctx = newAccount('cctp')
@@ -463,13 +515,18 @@ try {
   const capped = make({ now: () => clock, minter: true, stateDir: cdir })
   await capped.tick()
   check((await baseClient.getTransactionCount({ address: baseRelayer.address })) === baseNonce0, 'Base mint budget for the day used up: no mint')
-  writeFileSync(jf, JSON.stringify({ ...JSON.parse(readFileSync(jf, 'utf8')), mints: undefined }))
+  // A mint signed but never broadcast (a crash between the two): its hash has no receipt; after MINT_PENDING_MS the
+  // operator mints again instead of waiting forever.
+  const jm = JSON.parse(readFileSync(jf, 'utf8'))
+  jm.routes[cctx.accountKey] = { ...jm.routes[cctx.accountKey], mintTx: `0x${'cc'.repeat(32)}`, mintAt: new Date(clock - 11 * 60_000).toISOString() }
+  writeFileSync(jf, JSON.stringify({ ...jm, mints: undefined }))
   const cbo2 = make({ now: () => clock, minter: true, stateDir: cdir })
   clock += 11_000
   await cbo2.tick()
   const minted = (await cbo2.status(cctx)).route!
   const baseAfter = await baseClient.readContract({ address: BASE_USDC, abi: erc20Abi, functionName: 'balanceOf', args: [csafe] })
   const mintRc = minted.mintTx ? await baseClient.getTransactionReceipt({ hash: minted.mintTx }) : null
+  check(minted.mintTx !== `0x${'cc'.repeat(32)}`, 'the lost mint was replaced by a new one')
   check(minted.state === 'filled' && minted.fillTx === minted.mintTx && baseAfter - baseBefore === BigInt(cr.outputUsdc), `minted on Base by the operator: +${fmt(baseAfter - baseBefore)} USDC at the same Safe, receiveMessage gas ${mintRc?.gasUsed}`)
   clock += 11_000
   check((await cbo2.status(cctx)).route?.state === 'filled', 'status stays filled')

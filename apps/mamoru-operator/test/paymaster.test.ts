@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { concat, numberToHex, pad, type Hex } from 'viem'
 import type { UserOperation } from 'viem/account-abstraction'
 import type { Address } from '@mamoru/domain'
-import { gasCapUsdc, L1_USDC, stubOwnerSignature } from '../src/bridge-out.ts'
-import { cctpMaxFee, decodeCctpMessage, mintIsFor, TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
+import { admitPrepare, gasCapUsdc, L1_USDC, stubOwnerSignature } from '../src/bridge-out.ts'
+import { cctpMaxFee, cctpMessageKey, decodeCctpMessage, mintIsFor, TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
 import { CANDIDE_TOKEN_PAYMASTER_V07, checkCandide, decodeCandide, paymasterFromEnv, checkPimlicoErc20, decodePimlicoErc20, L1Bundler, MAX_CONSTANT_FEE, PIMLICO_ERC20_PAYMASTER_V07, PimlicoErc20Paymaster, RpcRefused, RpcUnavailable, type GasPrice } from '../src/paymaster.ts'
 
 const TREASURY = '0x000000000000000000000000000000000000bEEF' as Address
@@ -152,5 +152,27 @@ describe('CCTP (#180)', () => {
     expect(cctpMaxFee(146_928_900n, 0)).toBe(0n)
     expect(cctpMaxFee(146_928_900n, 1)).toBe(14_693n)
     expect(cctpMaxFee(100n, 1)).toBe(1n)
+  })
+})
+
+describe('shared limits (#180)', () => {
+  test('one approval per account, a cap across accounts, expired ones make room', () => {
+    const m = new Map<string, { prepareId: string; accountKey: string; expires: number }>()
+    expect(admitPrepare(m, { prepareId: 'a1', accountKey: 'a', expires: 100 }, 2, 0)).toBe(true)
+    expect(admitPrepare(m, { prepareId: 'a2', accountKey: 'a', expires: 100 }, 2, 0)).toBe(true)
+    expect([...m.keys()]).toEqual(['a2'])
+    expect(admitPrepare(m, { prepareId: 'b1', accountKey: 'b', expires: 100 }, 2, 0)).toBe(true)
+    expect(admitPrepare(m, { prepareId: 'c1', accountKey: 'c', expires: 100 }, 2, 0)).toBe(false)
+    expect(admitPrepare(m, { prepareId: 'c1', accountKey: 'c', expires: 300 }, 2, 200)).toBe(true)
+  })
+})
+
+describe('CCTP message key (#180)', () => {
+  test('the emitted message and its attested form share a key; another burn does not', () => {
+    const body = (amount: bigint, fee = 0n) => concat([numberToHex(1, { size: 4 }), `0x${'11'.repeat(32)}`, `0x${'22'.repeat(32)}`, numberToHex(amount, { size: 32 }), `0x${'22'.repeat(32)}`, numberToHex(0, { size: 32 }), numberToHex(fee, { size: 32 }), numberToHex(fee, { size: 32 })])
+    const msg = (nonce: string, fin: number, amount: bigint, fee = 0n) => concat([numberToHex(1, { size: 4 }), numberToHex(0, { size: 4 }), numberToHex(6, { size: 4 }), `0x${nonce.repeat(32)}`, `0x${'33'.repeat(96)}`, numberToHex(2000, { size: 4 }), numberToHex(fin, { size: 4 }), body(amount, fee)])
+    expect(cctpMessageKey(msg('00', 0, 5n))).toBe(cctpMessageKey(msg('ab', 2000, 5n, 0n)))
+    expect(cctpMessageKey(msg('00', 0, 5n))).toBe(cctpMessageKey(msg('ab', 2000, 5n, 3n)))
+    expect(cctpMessageKey(msg('00', 0, 5n))).not.toBe(cctpMessageKey(msg('ab', 2000, 6n)))
   })
 })
