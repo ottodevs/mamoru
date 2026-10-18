@@ -27,7 +27,7 @@ Several agents and sessions work on this repo at once. The rules below keep them
 
 The path from `main` to beta to production, the soak and the rollback are in [`docs/process/releasing.md`](docs/process/releasing.md). `main` is reviewed and merged, not released: `beta` is a pointer the coordinator fast-forwards to a sha of `main`, and production gets the sha that soaked there.
 
-Only the coordinator runs these, one release at a time, and each is announced in Mattermost `#mamoru` by `@mamorusan` and logged:
+Only the coordinator runs these, one release at a time, and each is announced in Mattermost `captains` → `#rep-partes` (not `#chat-mamoru`, which is for Ot and Brais) by `@mamorusan` and logged:
 
 - App: `bun run deploy:beta` (exact tip of `origin/beta`, which must be a commit of `main`; https://beta.mamoru.lol) and `bun run deploy:prod <sha>` (the named sha, which must be the tip of `origin/beta`, on `main`, and on beta for 24 hours by the release log). Both build from an immutable snapshot of the sha, smoke-test, write `~/.local/state/mamoru-app/releases.jsonl` and print the rollback command.
 - Risky UI or API changes soak on beta first. Beta shares D1 and the live operator with production (real funds) but is **not** the same account: session cookies and the passkey RP ID are scoped to the hostname. Do not change the RP ID.

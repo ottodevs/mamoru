@@ -58,7 +58,7 @@ schedule, and not for a change that only touches the operator.
    from a clean snapshot of the tip, runs typecheck and tests, deploys and runs the smoke test. It writes
    the deploy to the release log and prints the rollback command. The soak is counted from that record.
 5. Check that the sha it printed is the one you pushed.
-6. Announce it in `#mamoru` as `@mamorusan`: the sha, the version id before and after, what changes for a
+6. Announce it in `#rep-partes` (team `captains`) as `@mamorusan`: the sha, the version id before and after, what changes for a
    user, what to try, what is known to be broken.
 
 ## Soak
@@ -89,7 +89,7 @@ Needs Otto's GO, given for one sha: the one that soaked. Write it in the trackin
 3. The script ends by printing the two commands that tag and publish the release (`app-YYYY.MM.DD.N`, the
    next free `N` of the day). Run them, writing the one line that says what changes for a user. Check the
    tag push succeeded before `gh release create`: `--verify-tag` refuses to invent a missing tag.
-4. Announce in `#mamoru` with the link to the release.
+4. Announce in `#rep-partes` with the link to the release.
 5. Move the tickets to `done`. A ticket is done when its change is live, not when it merged.
 
 The soak is read from the release log of the machine that ran `deploy:beta`
