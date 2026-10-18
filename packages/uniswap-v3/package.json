@@ -7,7 +7,8 @@
     ".": "./src/index.ts",
     "./quote": "./src/quote.ts",
     "./fees": "./src/fees.ts",
-    "./twap": "./src/twap.ts"
+    "./twap": "./src/twap.ts",
+    "./action-policy": "./src/action-policy.ts"
   },
   "dependencies": {
     "@mamoru/domain": "workspace:*",
