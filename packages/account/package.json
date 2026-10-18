@@ -9,7 +9,8 @@
     "./precheck": "./precheck/index.ts",
     "./owner": "./owner/index.ts",
     "./recovery": "./recovery/index.ts",
-    "./live": "./live/index.ts"
+    "./live": "./live/index.ts",
+    "./userop": "./userop/index.ts"
   },
   "dependencies": {
     "@mamoru/domain": "workspace:*",

@@ -39,7 +39,7 @@ export const otherChainCopy = {
   title: (c: Found) => `${amount(c)} at your address on ${c.name}, not on Base`,
   body: (c: Found, canMove = false) =>
     canMove && movable(c)
-      ? `This is not part of your Mamoru balance and Mamoru has not moved it: when last checked it was at your address on ${c.name}. You can move the USDC to this same account on Base with one passkey approval; Mamoru pays the ${c.name} gas.${BigInt(c.eth) > 0n ? ` The ETH stays on ${c.name}.` : ''} Do not send more on ${c.name}.`
+      ? `This is not part of your Mamoru balance and Mamoru has not moved it: when last checked it was at your address on ${c.name}. You can move the USDC to this same account on Base with one passkey approval, which shows what the move costs, ${c.name} gas included.${BigInt(c.eth) > 0n ? ` The ETH stays on ${c.name}.` : ''} Do not send more on ${c.name}.`
       : `Mamoru works on Base. This is not part of your Mamoru balance and Mamoru has not moved it: when last checked it was at your address on ${c.name}. It has to reach Base before Mamoru can use it, and Mamoru cannot move it from ${c.name} yet. Do not send more on ${c.name}.`,
   move: 'Move to Base',
   preparing: 'Preparing',
@@ -91,7 +91,8 @@ export function BridgeStatus({ route }: { route: BridgeOutRoute }) {
 
 /**
  * Move to Base (#133): the operator prepares one Safe transaction on Ethereum (approve + Across deposit to this same
- * account on Base), the passkey signs it, the operator sends it and pays the gas. Two taps, so the passkey prompt runs
+ * account on Base), the passkey signs it, the operator sends it (relayer path: it pays the gas; userOp path, #180: the
+ * account pays its gas in USDC and the summary says how much). Two taps, so the passkey prompt runs
  * inside a user gesture.
  */
 export function BridgeOutAction({ accountKey }: { accountKey: string }) {

@@ -48,5 +48,21 @@ describe('BundlerClient', () => {
 
   test('the RPC shape round-trips', () => {
     expect(fromRpcUserOp(toRpcUserOp(op))).toEqual(op)
+    expect(Object.keys(toRpcUserOp(op))).not.toContain('factory')
+  })
+
+  test('factory and paymaster fields round-trip (otto/mamoru#180)', () => {
+    const full = {
+      ...op,
+      factory: '0x00000000000000000000000000000000000000fa',
+      factoryData: '0xfeed',
+      paymaster: '0x00000000000000000000000000000000000000bb',
+      paymasterVerificationGasLimit: 7n,
+      paymasterPostOpGasLimit: 8n,
+      paymasterData: '0xbeef',
+    } as const
+    const rpc = toRpcUserOp(full)
+    expect(rpc.paymasterPostOpGasLimit).toBe('0x8')
+    expect(fromRpcUserOp(rpc)).toEqual(full)
   })
 })

@@ -147,7 +147,7 @@ describe('move to Base (#133)', () => {
   test('USDC on Ethereum from 1 USDC up, flag on: the notice says it can be moved and offers the button', () => {
     const { text, html } = mount(flag(client({ ...fixtureFunding, usdc: '0' }, onEthereum), true))
     expect(text).toContain('You can move the USDC to this same account on Base with one passkey approval')
-    expect(text).toContain('Mamoru pays the Ethereum gas')
+    expect(text).toContain('shows what the move costs, Ethereum gas included')
     expect(text).not.toContain('cannot move it')
     expect(text).toContain('Do not send more on Ethereum')
     expect(html).toContain('data-testid="bridge-out"')

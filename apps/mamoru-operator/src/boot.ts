@@ -11,7 +11,8 @@ import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
 import { Operator, type OperatorConfig } from './operator.ts'
 import { Relayer } from './relayer.ts'
-import { BridgeOut, ETHEREUM_CHAIN_ID } from './bridge-out.ts'
+import { BridgeOut, ETHEREUM_CHAIN_ID, L1_USDC } from './bridge-out.ts'
+import { L1Bundler, PimlicoErc20Paymaster } from './paymaster.ts'
 import { startRpcProxy } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
 import { readSnapshot, SnapshotLoop, snapshotIntervalMs, type Snapshot } from './snapshot.ts'
@@ -172,6 +173,9 @@ export type BootOptions = {
   rpcUrl: string
   /** Ethereum Mainnet RPC for bridge-out (#133). Unset: bridge-out off. */
   l1RpcUrl?: string
+  /** #180: ERC-4337 bundler and ERC-20 paymaster on Ethereum (keyed URLs, never logged). Both set: moves are userOps paid in USDC. */
+  l1BundlerUrl?: string
+  l1PaymasterUrl?: string
   secret: string
   stateDir: string
   hostname?: string
@@ -370,7 +374,10 @@ export async function bootOperator(o: BootOptions) {
       throw new Error(`MAMORU_L1_RPC_URL is not a reachable Ethereum Mainnet RPC (${e instanceof Error && e.message === 'wrong chain' ? 'wrong chain' : 'unreachable'})`)
     }
     const enabledFor = (accountKey: string) => settings?.forAccount(accountKey).settings.bridgeOut?.enabled === true
-    bridgeOut = new BridgeOut(l1, new Relayer(relayerKey, l1, o.l1RpcUrl, ETHEREUM_CHAIN_ID), o.stateDir, fetch, Date.now, process.env.ACROSS_API_KEY, enabledFor)
+    // #180: with a bundler and an ERC-20 paymaster the account pays its own gas in USDC and the relayer sends nothing.
+    const aa = o.l1BundlerUrl && o.l1PaymasterUrl ? { bundler: new L1Bundler(o.l1BundlerUrl), paymaster: new PimlicoErc20Paymaster(o.l1PaymasterUrl, ETHEREUM_CHAIN_ID, L1_USDC) } : null
+    bridgeOut = new BridgeOut(l1, new Relayer(relayerKey, l1, o.l1RpcUrl, ETHEREUM_CHAIN_ID), o.stateDir, fetch, Date.now, process.env.ACROSS_API_KEY, enabledFor, aa)
+    if (aa) console.log('[operator] bridge-out uses userOps on Ethereum: gas paid in USDC through the pimlico paymaster, no relayer spend')
     console.log(`[operator] bridge-out from Ethereum available (on per account from /ops), relayer ${relayer.address} (${wei} wei on Ethereum)`)
   }
   const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot, bridgeOut })

@@ -25,6 +25,14 @@ export type RpcUserOperation = {
   maxFeePerGas: Hex
   maxPriorityFeePerGas: Hex
   signature: Hex
+  /** Only when the userOp deploys the account (otto/mamoru#180). */
+  factory?: Address
+  factoryData?: Hex
+  /** Only when a paymaster pays. */
+  paymaster?: Address
+  paymasterVerificationGasLimit?: Hex
+  paymasterPostOpGasLimit?: Hex
+  paymasterData?: Hex
 }
 
 export function toRpcUserOp(op: UserOperation<'0.7'>): RpcUserOperation {
@@ -38,6 +46,10 @@ export function toRpcUserOp(op: UserOperation<'0.7'>): RpcUserOperation {
     maxFeePerGas: toHex(op.maxFeePerGas),
     maxPriorityFeePerGas: toHex(op.maxPriorityFeePerGas),
     signature: op.signature,
+    ...(op.factory ? { factory: op.factory, factoryData: op.factoryData ?? '0x' } : {}),
+    ...(op.paymaster
+      ? { paymaster: op.paymaster, paymasterVerificationGasLimit: toHex(op.paymasterVerificationGasLimit ?? 0n), paymasterPostOpGasLimit: toHex(op.paymasterPostOpGasLimit ?? 0n), paymasterData: op.paymasterData ?? '0x' }
+      : {}),
   }
 }
 
@@ -52,6 +64,10 @@ export function fromRpcUserOp(op: RpcUserOperation): UserOperation<'0.7'> {
     maxFeePerGas: BigInt(op.maxFeePerGas),
     maxPriorityFeePerGas: BigInt(op.maxPriorityFeePerGas),
     signature: op.signature,
+    ...(op.factory ? { factory: op.factory, factoryData: op.factoryData ?? '0x' } : {}),
+    ...(op.paymaster
+      ? { paymaster: op.paymaster, paymasterVerificationGasLimit: BigInt(op.paymasterVerificationGasLimit ?? '0x0'), paymasterPostOpGasLimit: BigInt(op.paymasterPostOpGasLimit ?? '0x0'), paymasterData: op.paymasterData ?? '0x' }
+      : {}),
   }
 }
 

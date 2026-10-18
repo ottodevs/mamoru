@@ -1,11 +1,15 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { encodeFunctionData, getAddress, pad, parseAbi, parseEventLogs, toHex, zeroAddress, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { encodeFunctionData, getAddress, pad, parseAbi, parseEventLogs, toHex, zeroAddress, type Hex, type Log, type PublicClient, type TransactionReceipt } from 'viem'
+import type { UserOperation } from 'viem/account-abstraction'
 import type { AccountContext, Address, BridgeOutRoute, BridgeOutToSign, BridgeOutView, OwnerSignature } from '@mamoru/domain'
-import { erc20Abi } from '@mamoru/registry'
-import { browserOwnerSignature, deployCall, liveAccountFromContext, ownerSafeTx, readSafeNonce, safeTxHashOf, verifyOwnerSignature, type LiveAccount } from '@mamoru/account/live'
+import { address, entryPointV07Abi, erc20Abi } from '@mamoru/registry'
+import { browserOwnerSignature, deployCall, encodeWebAuthnSignature, liveAccountFromContext, ownerSafeTx, readSafeNonce, safeContractSignature, safeTxHashOf, verifyOwnerSignature, type LiveAccount } from '@mamoru/account/live'
 import { execTransactionData, type SafeTx } from '@mamoru/account/safe'
+import { userOpHash } from '@mamoru/account/sessions'
+import { maxGasCostWei, OWNER_NONCE_KEY, ownerUserOp, ownerUserOpSignature, safeOpHash, userOpLogs, type PaymasterFields, type UserOpGas } from '@mamoru/account/userop'
+import { L1Bundler, MAX_CONSTANT_FEE, PaymasterError, RpcRefused, type Erc20Paymaster, type GasPrice } from './paymaster.ts'
 import { Lock } from './lock.ts'
 import { HttpError } from './operator.ts'
 import { logErr } from './metrics.ts'
@@ -18,6 +22,12 @@ import { logErr } from './metrics.ts'
 //
 // Self-contained: its own Ethereum client and relayer, its own prepared map and journal. It never reads or writes the
 // Base account state, and the operator's engine never sees it. Off unless MAMORU_L1_RPC_URL is set.
+//
+// otto/mamoru#180: with a bundler and an ERC-20 paymaster configured, the move is one ERC-4337 v0.7 userOp instead:
+// initCode deploys the account (same setup as Base), the account pays its gas in USDC through the paymaster, and the
+// same batch approves the paymaster for the gas cap, approves the SpokePool and deposits. The passkey signs the
+// SafeOp hash. No relayer transaction, no relayer budget; tracking is eth_getUserOperationReceipt and Across's status.
+// Without them, the relayer path below is the fallback.
 //
 // What the owner is told follows the chain, never a guess: a move is 'failed' only when the owner transaction was
 // never handed to the provider, or when its receipt says it reverted. Anything else that is not proven is
@@ -63,6 +73,28 @@ export const STATUS_CACHE_MS = 10_000
 const LOG_WINDOW_BLOCKS = 7_200n
 export const LOG_CHUNK_BLOCKS = 1_000n
 
+// userOp path (#180). Gas limits from an Ethereum fork (apps/mamoru-operator/test/e2e-l1-userop.ts, 18 Oct, block
+// 26219317) with margin; a bundler that estimates higher wins. Only callGasLimit and the postOp limit cost anything
+// when unused (10% penalty); the verification limit only sizes the cap.
+/** Verification with initCode. Fork: SafeProxyFactory deploy + Safe7579 setup 511k, passkey check 29k. */
+export const USEROP_VERIFY_GAS_DEPLOY = 700_000n
+/** Verification on a deployed account. Fork: 50k (P-256 precompile at 0x100). */
+export const USEROP_VERIFY_GAS = 150_000n
+/** approve x2 + depositV3 through Safe7579.execute. Fork: execution plus the paymaster's postOp 158k-188k. */
+export const USEROP_CALL_GAS = 200_000n
+/** Floor for preVerificationGas; the bundler's estimate wins when higher. */
+export const USEROP_PVG_FLOOR = 80_000n
+/** The SafeOp is valid this long after the prepare. */
+export const USEROP_VALID_SEC = 600
+/** The account pays at most this much for Ethereum gas in one move: 5 USDC. */
+export const MAX_GAS_USDC = 5_000_000n
+/** ... and at most this share of what it holds there (5%). */
+export const MAX_GAS_BPS = 500n
+/** How long submit waits for the bundler's receipt before answering 'unconfirmed' (status() goes on asking). */
+export const USEROP_WAIT_MS = 60_000
+/** Pimlico's paymaster charges 10% of the unused execution gas (callGasLimit + postOp limit) on top. */
+const PENALTY_PERCENT = 10n
+
 export const spokePoolAbi = parseAbi([
   'function depositV3(address depositor, address recipient, address inputToken, address outputToken, uint256 inputAmount, uint256 outputAmount, uint256 destinationChainId, address exclusiveRelayer, uint32 quoteTimestamp, uint32 fillDeadline, uint32 exclusivityDeadline, bytes message) payable',
   'event FundsDeposited(bytes32 inputToken, bytes32 outputToken, uint256 inputAmount, uint256 outputAmount, uint256 indexed destinationChainId, uint256 indexed depositId, uint32 quoteTimestamp, uint32 fillDeadline, uint32 exclusivityDeadline, bytes32 indexed depositor, bytes32 recipient, bytes32 exclusiveRelayer, bytes message)',
@@ -100,10 +132,15 @@ export type L1Sender = {
 
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>
 
-type Prepared = { prepareId: string; accountKey: string; live: LiveAccount; tx: SafeTx; safeTxHash: Hex; deposit: Deposit; deployed: boolean; expires: number }
+/** The userOp the owner signs and what it was built against. */
+type PreparedOp = { op: UserOperation<'0.7'>; validUntil: number; balance: bigint; gasCap: bigint }
+type Prepared = { prepareId: string; accountKey: string; live: LiveAccount; tx: SafeTx; safeTxHash: Hex; deposit: Deposit; deployed: boolean; expires: number; userOp?: PreparedOp }
+
+/** The bundler and paymaster of the userOp path. */
+export type AccountAbstraction = { bundler: L1Bundler; paymaster: Erc20Paymaster }
 
 /** A route as kept on disk: what the owner sees, plus what reconciliation needs. */
-type Stored = BridgeOutRoute & { id: string; safe: Address; safeNonce: string; fromBlock: string; execStarted?: boolean }
+type Stored = BridgeOutRoute & { id: string; safe: Address; safeNonce: string; fromBlock: string; execStarted?: boolean; userOpTx?: Hex }
 type Journal = { routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }> }
 
 const NON_TERMINAL = new Set<BridgeOutRoute['state']>(['sending', 'deposited', 'unconfirmed', 'expired'])
@@ -166,10 +203,37 @@ export function bridgeCalls(safe: Address, d: Deposit): { to: Address; value: bi
   ]
 }
 
+/** userOp path: the paymaster may pull at most the gas cap, in USDC, then the bridge calls. */
+export function userOpCalls(safe: Address, d: Deposit, paymaster: Address, gasCap: bigint): { to: Address; value: bigint; data: Hex }[] {
+  return [{ to: L1_USDC, value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [paymaster, gasCap] }) }, ...bridgeCalls(safe, d)]
+}
+
+/**
+ * The most the paymaster can charge, in USDC base units, rounded up: every gas unit the userOp may use, its postOp
+ * gas and the 10% penalty on unused execution gas, at maxFeePerGas and the quoted rate, plus the largest constant fee
+ * the account accepts.
+ */
+export function gasCapUsdc(op: UserOperation<'0.7'>, q: GasPrice, maxConstantFee: bigint): bigint {
+  const penalty = ((op.callGasLimit + (op.paymasterPostOpGasLimit ?? 0n)) * PENALTY_PERCENT) / 100n
+  const wei = maxGasCostWei(op) + (q.postOpGas + penalty) * op.maxFeePerGas
+  return (wei * q.exchangeRate + 10n ** 18n - 1n) / 10n ** 18n + maxConstantFee
+}
+
+/**
+ * A signature of the right shape for gas estimation: SafeWebAuthnSharedSigner, a 37-byte authenticatorData with
+ * user verification, typical clientData fields. It does not verify; Safe7579 turns that into a failed validation,
+ * which estimation accepts.
+ */
+export function stubOwnerSignature(validUntil: number): Hex {
+  const auth = `0x${'49'.repeat(32)}05${'00'.repeat(4)}` as Hex
+  const sig = encodeWebAuthnSignature({ authenticatorData: auth, clientDataFields: '"origin":"https://app.mamoru.lol","crossOrigin":false', r: 1n, s: 1n })
+  return ownerUserOpSignature(0, validUntil, safeContractSignature(address('SafeWebAuthnSharedSigner'), sig))
+}
+
 const word = (a: Address) => `0x${a.slice(2).toLowerCase().padStart(64, '0')}`
 
 /** The deposit id, when the receipt holds exactly the deposit that was signed. Null otherwise. */
-export function depositIdFrom(receipt: TransactionReceipt, safe: Address, d: Deposit): string | null {
+export function depositIdFrom(receipt: { logs: Log[] }, safe: Address, d: Deposit): string | null {
   const evs = parseEventLogs({ abi: spokePoolAbi, eventName: 'FundsDeposited', logs: receipt.logs.filter((l) => getAddress(l.address) === ACROSS_SPOKE_POOL) })
   if (evs.length !== 1) return null
   const a = evs[0]!.args
@@ -197,7 +261,7 @@ const usdc = (raw: bigint) => {
 /** The owner-facing part of a stored route. */
 function view(r: Stored | undefined, enabled: boolean): BridgeOutView {
   if (!r) return { route: null, enabled }
-  const { id: _id, safe: _safe, safeNonce: _n, fromBlock: _b, execStarted: _e, ...route } = r
+  const { id: _id, safe: _safe, safeNonce: _n, fromBlock: _b, execStarted: _e, userOpTx: _u, ...route } = r
   return { route, enabled }
 }
 
@@ -217,6 +281,8 @@ export class BridgeOut {
     private readonly acrossKey: string | undefined = process.env.ACROSS_API_KEY,
     /** The /ops flag for the account (engine settings bridgeOut). Off: no prepare, no submit; status still answers. */
     private readonly enabledFor: (accountKey: string) => boolean = () => false,
+    /** #180: bundler + ERC-20 paymaster. Set: every move is a userOp paid in USDC. Null: the relayer path. */
+    private readonly aa: AccountAbstraction | null = null,
   ) {
     this.journal = this.load()
   }
@@ -330,14 +396,14 @@ export class BridgeOut {
     if (moves && moves.day === this.day() && moves.n >= MOVES_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
     const amount = await this.usdcAt(live.safe)
     if (amount < MIN_USDC) throw new HttpError(409, 'BRIDGE_NOTHING', 'there is no USDC on Ethereum to move')
+    if (this.aa) return this.prepareUserOp(ctx, live, amount, this.aa)
     const deposit = checkQuote(await this.quote(amount), amount, Math.floor(this.now() / 1000))
     const { deployed, nonce } = await readSafeNonce(this.l1, live.safe)
     const tx = ownerSafeTx(bridgeCalls(live.safe, deposit), nonce)
     const safeTxHash = safeTxHashOf(live, tx)
     const prepareId = toHex(randomBytes(16)).slice(2)
     const expires = this.now() + PREPARE_TTL_MS
-    for (const [id, p] of this.prepared) if (p.accountKey === ctx.accountKey || p.expires < this.now()) this.prepared.delete(id)
-    this.prepared.set(prepareId, { prepareId, accountKey: ctx.accountKey, live, tx, safeTxHash, deposit, deployed, expires })
+    this.remember({ prepareId, accountKey: ctx.accountKey, live, tx, safeTxHash, deposit, deployed, expires })
     const fee = deposit.amount - deposit.outputAmount
     return {
       safe: live.safe,
@@ -351,6 +417,104 @@ export class BridgeOut {
       expiresAt: new Date(expires).toISOString(),
       prepareId,
       route: { outputUsdc: deposit.outputAmount.toString(), feeUsdc: fee.toString(), fillSec: deposit.fillSec },
+    }
+  }
+
+  /** Remembers a prepare, single use, one per account. */
+  private remember(p: Prepared): void {
+    for (const [id, q] of this.prepared) if (q.accountKey === p.accountKey || q.expires < this.now()) this.prepared.delete(id)
+    this.prepared.set(p.prepareId, p)
+  }
+
+  /**
+   * #180: the move as one userOp. The gas cap comes first (it is paid out of the same USDC), then the Across quote
+   * for what is left, then the paymaster's final data over the finished userOp, checked before the owner sees it.
+   */
+  private async prepareUserOp(ctx: AccountContext, live: LiveAccount, balance: bigint, aa: AccountAbstraction): Promise<BridgeOutToSign> {
+    const gasDown = () => new HttpError(503, 'BRIDGE_GAS_UNAVAILABLE', 'paying the Ethereum gas in USDC is not available right now, try later')
+    let q: GasPrice
+    try {
+      q = await aa.paymaster.quote()
+    } catch (e) {
+      logErr(`[bridge-out] paymaster ${aa.paymaster.name} quote:`, e instanceof Error ? e.message : 'failed')
+      throw gasDown()
+    }
+    const [fees, code, nonce] = await Promise.all([
+      aa.bundler.gasPrice().then((g) => g ?? this.l1.estimateFeesPerGas()),
+      this.l1.getCode({ address: live.safe }),
+      this.l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'getNonce', args: [live.safe, OWNER_NONCE_KEY] }),
+    ])
+    if (fees.maxFeePerGas > MAX_GAS_PRICE_WEI) throw new HttpError(503, 'BRIDGE_GAS_HIGH', 'Ethereum gas is too high right now, try later')
+    const deployed = !!code && code !== '0x'
+    const validUntil = Math.floor(this.now() / 1000) + USEROP_VALID_SEC
+    const base: UserOpGas = {
+      verificationGasLimit: deployed ? USEROP_VERIFY_GAS : USEROP_VERIFY_GAS_DEPLOY,
+      callGasLimit: USEROP_CALL_GAS,
+      preVerificationGas: USEROP_PVG_FLOOR,
+      maxFeePerGas: fees.maxFeePerGas,
+      maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+    }
+    // A draft of the same shape (amounts are placeholders) for the paymaster stub and the bundler's estimate.
+    const placeholder: Deposit = { amount: balance, outputAmount: balance, exclusiveRelayer: zeroAddress, quoteTimestamp: 0, fillDeadline: 0, exclusivityDeadline: 0, fillSec: 0 }
+    const build = (d: Deposit, cap: bigint, gas: UserOpGas, pm?: PaymasterFields) => ownerUserOp({ live, deployed, nonce, calls: userOpCalls(live.safe, d, q.paymaster, cap), gas, paymaster: pm })
+    let gas = base
+    let stub: PaymasterFields
+    try {
+      stub = await aa.paymaster.stub(build(placeholder, balance, base))
+      const est = await aa.bundler.estimate({ ...build(placeholder, balance, base, stub), signature: stubOwnerSignature(validUntil) })
+      if (est) {
+        const up = (v: bigint) => (v * 12n) / 10n
+        gas = {
+          ...base,
+          verificationGasLimit: up(est.verificationGasLimit) > base.verificationGasLimit ? up(est.verificationGasLimit) : base.verificationGasLimit,
+          callGasLimit: up(est.callGasLimit) > base.callGasLimit ? up(est.callGasLimit) : base.callGasLimit,
+          preVerificationGas: est.preVerificationGas > base.preVerificationGas ? est.preVerificationGas : base.preVerificationGas,
+        }
+        stub = {
+          ...stub,
+          paymasterVerificationGasLimit: est.paymasterVerificationGasLimit ?? stub.paymasterVerificationGasLimit,
+          paymasterPostOpGasLimit: est.paymasterPostOpGasLimit ?? stub.paymasterPostOpGasLimit,
+        }
+      }
+    } catch (e) {
+      logErr(`[bridge-out] paymaster/bundler estimate:`, e instanceof Error ? e.message : 'failed')
+      throw gasDown()
+    }
+    const gasCap = gasCapUsdc(build(placeholder, balance, gas, stub), q, MAX_CONSTANT_FEE)
+    if (gasCap > MAX_GAS_USDC || gasCap * 10_000n > balance * MAX_GAS_BPS) throw new HttpError(409, 'BRIDGE_GAS_TOO_HIGH', 'Ethereum gas would take too much of this amount, try later or with more')
+    const amount = balance - gasCap
+    if (amount < MIN_USDC) throw new HttpError(409, 'BRIDGE_NOTHING', 'there is no USDC on Ethereum to move')
+    const deposit = checkQuote(await this.quote(amount), amount, Math.floor(this.now() / 1000))
+    let op = build(deposit, gasCap, gas, stub)
+    try {
+      const pm = await aa.paymaster.data(op)
+      aa.paymaster.check(pm, q)
+      // The cap assumed the stub's paymaster gas: larger limits now would make it too small.
+      if (pm.paymasterVerificationGasLimit > stub.paymasterVerificationGasLimit || pm.paymasterPostOpGasLimit > stub.paymasterPostOpGasLimit) throw new PaymasterError('paymaster gas above the stub')
+      op = { ...op, ...pm }
+    } catch (e) {
+      logErr(`[bridge-out] paymaster ${aa.paymaster.name} data:`, e instanceof Error ? e.message : 'failed')
+      throw gasDown()
+    }
+    const challenge = safeOpHash(op, ETHEREUM_CHAIN_ID, 0, validUntil)
+    const prepareId = toHex(randomBytes(16)).slice(2)
+    const expires = this.now() + PREPARE_TTL_MS
+    // tx/safeTxHash keep their meaning for the relayer path; here the passkey signs the SafeOp hash.
+    const tx = ownerSafeTx(bridgeCalls(live.safe, deposit), 0n)
+    this.remember({ prepareId, accountKey: ctx.accountKey, live, tx, safeTxHash: challenge, deposit, deployed, expires, userOp: { op, validUntil, balance, gasCap } })
+    const fee = deposit.amount - deposit.outputAmount
+    return {
+      safe: live.safe,
+      chainId: ETHEREUM_CHAIN_ID,
+      safeTxHash: challenge,
+      summary: [
+        `Move ${usdc(deposit.amount)} USDC from Ethereum to this same account on Base`,
+        `You receive ${usdc(deposit.outputAmount)} USDC on Base, in about ${Math.max(deposit.fillSec, 1)} s`,
+        `Bridge: Across, fee ${usdc(fee)} USDC. Ethereum gas: at most ${usdc(gasCap)} USDC from this amount; what is not used stays at your address on Ethereum`,
+      ],
+      expiresAt: new Date(expires).toISOString(),
+      prepareId,
+      route: { outputUsdc: deposit.outputAmount.toString(), feeUsdc: fee.toString(), fillSec: deposit.fillSec, gasUsdc: gasCap.toString() },
     }
   }
 
@@ -369,7 +533,117 @@ export class BridgeOut {
     if (!(await verifyOwnerSignature(signature, p.safeTxHash, p.live.webauthn))) throw new HttpError(400, 'BAD_SIGNATURE', 'the passkey signature does not match this account')
     // Turned off on /ops between the prepare and the signature: nothing is sent.
     this.on(ctx.accountKey)
+    if (p.userOp) {
+      if (!this.aa) throw new HttpError(404, 'PREPARE_NOT_FOUND', 'that approval is not known, tap again')
+      return this.lock.run(() => this.sendUserOp(ctx, p, p.userOp!, signature, this.aa!))
+    }
     return this.lock.run(() => this.send(ctx, p, signature))
+  }
+
+  /** #180: hands the signed userOp to the bundler, then follows it by its hash. Nothing is spent by Mamoru. */
+  private async sendUserOp(ctx: AccountContext, p: Prepared, u: PreparedOp, signature: Hex, aa: AccountAbstraction): Promise<BridgeOutView> {
+    if (this.blocking(this.journal.routes[ctx.accountKey])) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
+    // Nothing changed on Ethereum since the prepare: same balance, same deploy state, same EntryPoint nonce.
+    const [balance, code, nonce, head] = await Promise.all([
+      this.usdcAt(p.live.safe),
+      this.l1.getCode({ address: p.live.safe }),
+      this.l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'getNonce', args: [p.live.safe, OWNER_NONCE_KEY] }),
+      this.l1.getBlockNumber({ cacheTime: 0 }),
+    ])
+    if (balance !== u.balance || (!!code && code !== '0x') !== p.deployed || nonce !== u.op.nonce) throw new HttpError(409, 'BRIDGE_STALE', 'the balance on Ethereum changed, tap again')
+    const moves = this.journal.moves[ctx.accountKey]
+    if (moves && moves.day === this.day() && moves.n >= MOVES_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
+    const op: UserOperation<'0.7'> = { ...u.op, signature: ownerUserOpSignature(0, u.validUntil, signature) }
+    const hash = userOpHash(op, ETHEREUM_CHAIN_ID)
+    const day = this.day()
+    this.journal.moves[ctx.accountKey] = { day, n: moves && moves.day === day ? moves.n + 1 : 1 }
+    const route: Stored = {
+      id: p.prepareId,
+      safe: p.live.safe,
+      safeNonce: u.op.nonce.toString(),
+      fromBlock: head.toString(),
+      state: 'sending',
+      amountUsdc: p.deposit.amount.toString(),
+      outputUsdc: p.deposit.outputAmount.toString(),
+      userOpHash: hash,
+      at: '',
+    }
+    // The hash is on disk before the bundler sees the userOp: whatever happens next, status() can ask for it.
+    this.journal.routes[ctx.accountKey] = route
+    this.write(ctx.accountKey, route)
+    try {
+      const sent = await aa.bundler.send(op)
+      if (sent.toLowerCase() !== hash.toLowerCase()) logErr(`[bridge-out] ${ctx.accountKey.slice(0, 8)}: bundler answered another userOp hash`, sent)
+      route.state = 'unconfirmed'
+      const until = this.now() + USEROP_WAIT_MS
+      for (;;) {
+        await this.resolveUserOp(route, p.deposit)
+        if (route.state !== 'unconfirmed' || this.now() >= until) break
+        await Bun.sleep(3_000)
+      }
+    } catch (e) {
+      // A JSON-RPC refusal: the bundler did not take it, nothing ran. Anything else: it may have, status() decides.
+      if (e instanceof RpcRefused && e.method === 'eth_sendUserOperation') {
+        logErr(`[bridge-out] ${ctx.accountKey.slice(0, 8)}: bundler refused the userOp`, e.detail)
+        route.state = 'failed'
+      } else {
+        logErr(`[bridge-out] ${ctx.accountKey.slice(0, 8)}:`, e instanceof Error ? e.message : e)
+        route.state = 'unconfirmed'
+      }
+    }
+    this.write(ctx.accountKey, route)
+    if (route.state === 'failed') throw new HttpError(502, 'BRIDGE_FAILED', 'the move from Ethereum did not go through; the USDC is still at your address on Ethereum')
+    return view(route, true)
+  }
+
+  /**
+   * A userOp route from its receipt: the bundler says whether and where it was included, the transaction receipt
+   * holds its logs (only the slice between its boundaries counts), the deposit event must be the one signed.
+   * No receipt yet: unchanged.
+   */
+  private async resolveUserOp(r: Stored, d: Deposit | null): Promise<void> {
+    if (!this.aa || !r.userOpHash) return
+    const br = await this.aa.bundler.receipt(r.userOpHash)
+    if (!br) return
+    r.userOpTx = br.txHash
+    r.l1Tx = br.txHash
+    const receipt = await this.l1.getTransactionReceipt({ hash: br.txHash })
+    const mine = userOpLogs(receipt, r.userOpHash)
+    if (!mine) {
+      logErr(`[bridge-out] ${r.safe.slice(0, 10)}: bundler receipt without the UserOperationEvent`, br.txHash)
+      return
+    }
+    // What the paymaster took: USDC from the account to anyone but the SpokePool, within this userOp.
+    let gasPaid = 0n
+    for (const ev of parseEventLogs({ abi: erc20Abi, eventName: 'Transfer', logs: mine.logs.filter((l) => getAddress(l.address) === L1_USDC) })) {
+      if (getAddress(ev.args.from) === getAddress(r.safe) && getAddress(ev.args.to) !== ACROSS_SPOKE_POOL) gasPaid += ev.args.value
+    }
+    r.gasUsdc = gasPaid.toString()
+    if (!mine.success) {
+      r.state = 'failed'
+      return
+    }
+    const signed: Deposit | null = d
+    const id = signed ? depositIdFrom({ logs: mine.logs }, r.safe, signed) : this.depositIdLoose(mine.logs, r)
+    if (id === null) {
+      logErr(`[bridge-out] ${r.safe.slice(0, 10)}: userOp included without the expected deposit event`, br.txHash)
+      return
+    }
+    r.depositId = id
+    r.state = 'deposited'
+  }
+
+  /** After a restart the signed deposit is gone: who, to whom, how much in and out, and where must match. */
+  private depositIdLoose(logs: Log[], r: Stored): string | null {
+    const evs = parseEventLogs({ abi: spokePoolAbi, eventName: 'FundsDeposited', logs: logs.filter((l) => getAddress(l.address) === ACROSS_SPOKE_POOL) }).filter(
+      (e) =>
+        e.args.depositor.toLowerCase() === word(r.safe) &&
+        e.args.recipient.toLowerCase() === word(r.safe) &&
+        e.args.inputAmount === BigInt(r.amountUsdc) &&
+        e.args.outputAmount === BigInt(r.outputUsdc) &&
+        e.args.destinationChainId === BigInt(BASE_CHAIN_ID),
+    )
+    return evs.length === 1 ? evs[0]!.args.depositId.toString() : null
   }
 
   private async send(ctx: AccountContext, p: Prepared, signature: Hex): Promise<BridgeOutView> {
@@ -457,14 +731,20 @@ export class BridgeOut {
     this.statusAt.set(ctx.accountKey, this.now())
     const next: Stored = { ...route }
     try {
-      if (next.state === 'sending' || next.state === 'unconfirmed') await this.reconcile(next)
+      if ((next.state === 'sending' || next.state === 'unconfirmed') && next.userOpHash) {
+        await this.resolveUserOp(next, null)
+        // A stale 'sending' (stopped mid-send) may or may not have reached the bundler: unknown, not failed, and it
+        // stops blocking after UNCONFIRMED_GIVEUP_MS (same EntryPoint nonce: at most one of two userOps runs).
+        if (next.state === 'sending') next.state = 'unconfirmed'
+      }
+      else if (next.state === 'sending' || next.state === 'unconfirmed') await this.reconcile(next)
       if ((next.state === 'deposited' || next.state === 'expired') && next.depositId) await this.across(next)
     } catch (e) {
       // Unknown is not failed: the route stays as it was and is asked again later.
       logErr(`[bridge-out] status ${ctx.accountKey.slice(0, 8)}:`, e)
       return view(route, enabled)
     }
-    if (next.state !== route.state || next.depositId !== route.depositId || next.fillTx !== route.fillTx) this.write(ctx.accountKey, next)
+    if (next.state !== route.state || next.depositId !== route.depositId || next.fillTx !== route.fillTx || next.l1Tx !== route.l1Tx) this.write(ctx.accountKey, next)
     return view(this.journal.routes[ctx.accountKey], enabled)
   }
 
