@@ -1,8 +1,9 @@
 # 007: An on-chain action policy that bounds what a leaked session key can lose
 
 Ticket: otto/mamoru#151 (from the #140 audit, part 1, and the #149 review). Status: spec, PoC, T1-T5 done, T6
-audit (`results/t6-audit-claude-2026-10-18.md`) and its fixes (`results/t6-fixes-2026-10-18.md`) done. Nothing is
-deployed, no live grant changes.
+audit (`results/t6-audit-claude-2026-10-18.md`) and its fixes (`results/t6-fixes-2026-10-18.md`) done; T7 code (the
+GPT-6 P1s of #97, operator activation and renewal in consecutive owner transactions, the renew row, the budget usage
+signal) in `results/t7-2026-10-18.md`. Nothing is deployed, no live grant changes.
 
 PoC: `contracts/action-policy/` (`MamoruActionPolicy.sol`, Foundry tests on a Base mainnet fork at block 52,700,000,
 public archive RPC `https://mainnet.base.org`, never the operator's provider key). Run:
@@ -159,8 +160,20 @@ never revoked and up to 12.6% revoked within minutes.
 
 Not counted in the table: the 5-minute TWAP lag; a paid TWAP shift (next section; on stables at most the anchor
 edge, about 0.55% per crossing (0.40% + today's 0.14% off parity + fee) instead of 0.11%, which would make the
-never-revoked figure 17.3%); and userOp gas, which without a gas policy is the account's ETH reserve (0.002 ETH) per relayer top-up, and with `MamoruGasPolicy` (T6 L-1, wired
-in T7) about 5e-5 ETH per op at Base's usual base fee, bounded in count by UsageLimitPolicy.
+never-revoked figure 17.3%); and userOp gas, below.
+
+**Gas (T7).** Every v4 session carries `MamoruGasPolicy` (T6 L-1, T7 P1 2/4), which caps the priority fee,
+`maxFeePerGas` and the three gas limits, so one op takes at most `c_op = maxFeePerGas_cap x (verification + call +
+preVerification limits)` = 0.1 gwei x 5.2M = 5.2e14 wei from the Safe, whatever the basefee. The bound becomes
+
+```
+L <= (the token bound above) + min(E, U x c_op)
+```
+
+with `U` the usage limits of the sessions (108,000 ops for `conservadorLiveV4`) and `E` the native ETH the Safe holds
+plus its EntryPoint deposit. `U x c_op` is 56 ETH, so `E` binds: the relayer tops the Safe up to 5e-4 ETH at
+activation only, about one op at the cap (~1.3 USDC at 2,500 USD/ETH, 0.13% of a 1,000 USDC cap). Gas is native ETH
+only; WETH and the other tokens are not reachable through it.
 
 Measured on the fork (`test_manipulatedSwapReverts`): moving USDC/cbBTC by 500 ticks took 1.83M USDC; today's
 grant then fills a 10,000 USDC swap 398 bp under the policy's floor (about 5% under TWAP). The policy refuses that
@@ -220,7 +233,7 @@ and one account-level config write per pool (instead of per action) bring it dow
 
 `src/MamoruActionPolicy.sol`, about 680 lines with comments after T6 (runtime 23,673 bytes, 903 under the 24,576 limit), plus
 Uniswap's `TickMath`, `OracleLibrary`, `LiquidityAmounts` (unchanged, pinned); `src/MamoruGasPolicy.sol`, ~90
-lines (T6 L-1, a separate userOp policy); `script/Deploy.s.sol` (atomic deploy + registration, ring raise). Trust it adds: (1) a refusal it fails to make leaves today's exposure (additive design); (2) a
+lines (T6 L-1, a separate userOp policy; T7 adds the `maxFeePerGas` cap); `script/Deploy.s.sol` (both policies) (atomic deploy + registration, ring raise). Trust it adds: (1) a refusal it fails to make leaves today's exposure (additive design); (2) a
 refusal it makes wrongly stops the engine, never moves funds; (3) `mint` is the one place it holds tokens and
 allowances, for one call, from `msg.sender` only, with a reentrancy lock and approvals reset to 0; (4) account-level
 state is writable only by SmartSession at enable, which needs the owner's signature. Review points: calldata
@@ -254,7 +267,7 @@ session key that was ever enabled for the account; the operator deletes the old 
 chain, the generation retires every older config of this policy even if a `removeSession` were missing. The v2/v3
 grants do not consult this policy, so their `removeSession` in the same batch is required.
 
-## What the PoC shows (`forge test`: 49 tests, 45 of them on the fork, all pass)
+## What the PoC shows (`forge test`: 53 tests, 46 of them on the fork, all pass)
 
 - `test/MamoruActionPolicy.t.sol` (13): the engine's normal swap, mint, decrease, collect and burn pass with the
   minimums from the policy's views; a manipulated-price swap, mint and decrease are refused or revert; unrelated
@@ -264,9 +277,9 @@ grants do not consult this policy, so their `removeSession` in the same batch is
   the spread push against the stables anchor, a dense-core control; M-1, M-2, M-3, M-4 x3, L-4, L-5, L-7, I-1,
   I-2, I-5).
 - `test/T6Before.t.sol` (6): the same attacks against the audited T4 contract (`test/legacy/`), where they succeed.
-- `test/Deploy.t.sol` (2): the T4 two-step registration can be front-run; `deployModule` with a deployer-prefixed
-  salt cannot, and the ring raise lets the stables pool enable.
-- `test/MamoruGasPolicy.t.sol` (4, no fork): the userOp gas caps.
+- `test/Deploy.t.sol` (3): the T4 two-step registration can be front-run; `deployModule` with a deployer-prefixed
+  salt cannot, and the ring raise lets the stables pool enable; the gas policy deploys the same way (T7).
+- `test/MamoruGasPolicy.t.sol` (7, no fork): the userOp gas caps, `maxFeePerGas` included (T7).
 - `test/H1Measure.t.sol` (7, measurement only): liquidity far from price, one- and N-block pushes, the arbitrage
   given away, JIT liquidity against a liquidity floor, the btc spread push.
 
@@ -290,7 +303,11 @@ the stables anchor on historical data, and whether an attacker can hold both end
 - T5 Lab: bands and budgets per pool against 2024-2026 data; how often exits wait.
 - T6 audit (Claude, `results/t6-audit-claude-2026-10-18.md`) and fixes (`results/t6-fixes-2026-10-18.md`). A
   second, independent review of the patched contract (GPT-6, xreview `--high-stakes`) is still to do.
-- T7 deployment and the renew row: coordinator only, after T1-T6 and Ot's decision.
+- T7 code (`results/t7-2026-10-18.md`): the four P1s of GPT-6's review of #97 (v4 grants activatable, the gas policy
+  on every v4 session, the guard bound to the configured addresses and the grant's pool, a `maxFeePerGas` cap), the
+  operator's v4 activation and renewal as consecutive owner transactions behind `MAMORU_ONCHAIN_POLICY_V4=1`, the renew
+  row's move from v2/v3, the usage signal on the policy budgets, `t7-fork.ts` and `e2e-v4.ts`. Deployment and turning
+  the flag on: coordinator only, after Ot's decision.
 
 ## Open questions for Ot
 

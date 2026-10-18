@@ -1334,7 +1334,8 @@ export class Operator {
       const admit = v4 && g.pool && firstOfPool.get(g.pool) === i ? (v4.admitByPool[g.pool] ?? []).map(String) : []
       return { name: keys[i]!, grant: g, permissionId: batch.permissionIds[i]!, ...(admit.length ? { admit } : {}) }
     })
-    return { sessionKey, caps, stored, batch, ...(newKey ? { newKey } : {}), ...(v4 ? { v4: { generation: v4.generation, admitted: Object.values(v4.admitByPool).reduce((n, l) => n + (l?.length ?? 0), 0) } } : {}) }
+    // What this transaction admits (a pool whose sessions all come in a later step is admitted there).
+    return { sessionKey, caps, stored, batch, ...(newKey ? { newKey } : {}), ...(v4 ? { v4: { generation: v4.generation, admitted: stored.reduce((n, g) => n + (g.admit?.length ?? 0), 0) } } : {}) }
   }
 
   /**
@@ -1523,6 +1524,7 @@ export class Operator {
         `Finish Mamoru's approval on your Safe ${live.safe}: ${this.poolsOf(f.stored.map((g) => g.name))}`,
         `Engine key ${f.sessionKey} may, for the rest of this approval and within limits sized for deposits up to ${fmtUsdc(cap)} USDC:`,
         ...this.v4Lines(f.stored, policy, cap),
+        ...(f.v4?.admitted ? [`Your ${f.v4.admitted} open position${f.v4.admitted === 1 ? '' : 's'} there stay under Mamoru's management`] : []),
         ...this.stepLines(f.steps, f.rest),
         ...this.capNotice(acc, cap),
         'Nothing is moved now: your positions stay as they are',

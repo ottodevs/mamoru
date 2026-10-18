@@ -108,7 +108,7 @@ async function forgeDeploy(rpcUrl: string, deployer: PrivateKeyAccount, key: Hex
   if (!/^http:\/\/127\.0\.0\.1:\d+\/?$/.test(rpcUrl)) throw new Error(`refusing to broadcast anywhere but the local fork (${rpcUrl})`)
   const forge = Bun.which('forge') ?? join(process.env.HOME ?? '', '.foundry/bin/forge')
   // Async: the fork's loopback proxy runs in this process and must keep answering anvil while forge runs.
-  const r = Bun.spawn([forge, 'script', 'script/Deploy.s.sol', '--rpc-url', rpcUrl, '--broadcast', '--private-key', key, '--sender', deployer.address, '--slow', '--skip-simulation'], {
+  const r = Bun.spawn([forge, 'script', 'script/Deploy.s.sol', '--rpc-url', rpcUrl, '--broadcast', '--private-key', key, '--sender', deployer.address, '--slow', '--skip-simulation', '--rpc-timeout', '900', '--timeout', '900'], {
     cwd: join(REPO_ROOT, 'contracts/action-policy'),
     env: { ...process.env, POLICY_SALT_NONCE: '7', GAS_POLICY_SALT_NONCE: '8', CARDINALITY_TARGET: '3600' },
     stdout: 'pipe',
