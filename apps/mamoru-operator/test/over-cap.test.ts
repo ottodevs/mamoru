@@ -106,9 +106,10 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
   } as unknown as PublicClient
   const relayer = {
     address: RELAYER,
-    send: async (tx: { to: string; data?: Hex; value?: bigint }, onSent?: (h: Hex) => void, onSending?: () => void) => {
+    send: async (tx: { to: string; data?: Hex; value?: bigint }, onSent?: (h: Hex) => void, onSending?: (maxFeeWei: bigint, signed: { hash: Hex; nonce: number }) => void) => {
       sent.push(tx)
-      if (!knobs.failBeforeSending) onSending?.()
+      // The signed copy's hash is the hash it is sent under (otto/mamoru#163 keeps it before it leaves).
+      if (!knobs.failBeforeSending) onSending?.(0n, { hash: toHex(sent.length, { size: 32 }), nonce: 4 + sent.length })
       knobs.onSend(tx)
       const hash = toHex(sent.length, { size: 32 })
       onSent?.(hash)
@@ -2997,9 +2998,18 @@ describe('renewing the approval of a running account', () => {
     const before = acc.grants.map((g) => g.permissionId)
     const tx = await w.op.prepareRenew(ctx)
     w.knobs.execOk = false
-    expect(await w.op.submit(ctx, 'renew', sign(tx))).toMatchObject({ kind: 'renew', state: 'failed', code: 'OWNER_TX_FAILED' })
+    // otto/mamoru#163: a reverted renewal is not final (its Safe nonce unspent, anyone may relay it): an unread receipt,
+    // never applied until proven, its grants revoked by the next renewal or stop meanwhile.
+    const r = await w.op.submit(ctx, 'renew', sign(tx))
+    expect(r).toMatchObject({ kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR' })
     expect(acc.grants.map((g) => g.permissionId)).toEqual(before)
     expect(acc.active).toBe(true)
+    const stored = acc.ops.find((o) => o.opId === r.opId)!
+    expect(stored.signedTxs).toEqual([{ hash: expect.any(String), nonce: expect.any(Number), reverted: true }])
+    // A stop meanwhile revokes the reverted renewal's grants too: relayed later, they would otherwise stay on.
+    const stop = await w.op.prepareStop(ctx, { revokeOnly: true })
+    const revokes = (w.op as unknown as { prepared: Map<string, { revokes?: string[] }> }).prepared.get(stop.prepareId)!.revokes
+    expect(revokes).toEqual(expect.arrayContaining((stored.ownerGrants ?? []).map((g) => g.permissionId)))
   })
 
   test('a renewal signed by another key is refused before the relayer sends anything', async () => {

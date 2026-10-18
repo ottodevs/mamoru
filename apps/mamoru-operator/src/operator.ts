@@ -214,6 +214,11 @@ export const OWNER_FAILURES_ALERT_PER_DAY = 50
 const DAY_MS = 24 * 3_600_000
 /** What counts: the relayer sent a transaction and it failed, or its outcome is unknown. Refusals before any send cost no gas and do not count. */
 const BUDGET_CODES = new Set(['OWNER_TX_FAILED', 'OWNER_TX_ERROR', 'DEPLOY_FAILED'])
+/**
+ * otto/mamoru#163: owner ops whose Safe tx, once signed, stays executable by anyone until its Safe nonce is spent, and
+ * that enable grants: a revert or a missing log never settles them, only the Safe nonce moving does.
+ */
+const RELAYABLE_KINDS = new Set<string>(['activate', 'renew'])
 /** How long a stored engine operation left `submitted` (sent before a restart) keeps a renewal from revoking its grant. */
 const ENGINE_OP_PENDING_MS = 600_000
 /** How long a stop whose receipt was never read keeps a renewal from being prepared. */
@@ -670,8 +675,40 @@ export class Operator {
     console.log(`[admitted] ${acc.accountKey} seeded with ${acc.admittedTokenIds.length} position(s)`)
   }
 
+  /**
+   * otto/mamoru#163, read only, once at boot: owner activations and renewals closed as OWNER_TX_FAILED before this
+   * change whose Safe nonce has not moved past theirs. Their signature can still be relayed by anyone and enable grants
+   * the operator does not track. Logged for the coordinator; nothing is changed. Returns how many were found.
+   */
+  async scanRevertedExposure(): Promise<number> {
+    let exposed = 0
+    for (const acc of Object.values(this.store.state.accounts)) {
+      const ops = acc.ops.filter((o) => o.opId.startsWith('own-') && RELAYABLE_KINDS.has(o.kind) && o.state === 'failed' && o.code === 'OWNER_TX_FAILED') as StoredOp[]
+      if (!ops.length) continue
+      let nonce: bigint | null = null
+      try {
+        nonce = (await readSafeNonce(this.client, acc.ctx.address as Address)).nonce
+      } catch (e) {
+        logErr(`[exposure#163] ${acc.accountKey} Safe nonce unreadable:`, e)
+      }
+      for (const o of ops) {
+        const at = `${acc.accountKey} ${o.opId} ${o.kind} tx ${o.txHash ?? '-'} at ${o.updatedAt} safe ${acc.ctx.address}`
+        if (o.safeNonce === undefined) {
+          exposed++
+          console.log(`[exposure#163] ${at}: reverted, its Safe nonce was not kept (Safe now at ${nonce ?? 'unknown'}); check by hand`)
+        } else if (nonce === null || nonce <= BigInt(o.safeNonce)) {
+          exposed++
+          console.log(`[exposure#163] ${at}: reverted at Safe nonce ${o.safeNonce}, Safe now at ${nonce ?? 'unknown'}: its signature is still relayable`)
+        }
+      }
+    }
+    if (exposed) logErr('[alert]', `${exposed} reverted owner activation/renewal op(s) may still be relayable: see [exposure#163] lines`)
+    return exposed
+  }
+
   /** Restarts the engine loop of every account that was active. */
   resume(): void {
+    void this.scanRevertedExposure().catch((e) => logErr('[exposure#163] scan failed:', e))
     for (const acc of Object.values(this.store.state.accounts)) if (acc.active) this.startLoop(acc)
     for (const acc of Object.values(this.store.state.accounts)) {
       if (acc.trusted && !acc.admittedTokenIds) void this.lock(acc.accountKey).run(() => this.seedAdmitted(acc)).catch((e) => logErr(`[admitted] ${acc.accountKey} not seeded:`, e))
@@ -1228,6 +1265,23 @@ export class Operator {
 
   private async hold(acc: AccountState, live: LiveAccount, kind: OwnerKind, calls: Parameters<typeof ownerSafeTx>[0], summary: string[], extra: Partial<Prepared> = {}): Promise<OwnerTxToSign> {
     const { nonce, deployed } = await readSafeNonce(this.client, live.safe)
+    // otto/mamoru#163: an activation whose outcome is unresolved can still run while the Safe nonce is its own. One that
+    // replaces it is signed for that same nonce (the current one), so only one of them can ever execute. If the Safe
+    // moved past it, it ran or never will: that is settled first (under this same account lock), and no new start is
+    // signed while it cannot be. (An unresolved renewal is already handled by settleRenewals: the next renewal or stop
+    // revokes its grants, and it is applied only once proven.)
+    if (kind === 'activate') {
+      let n = this.unresolvedNonce(acc)
+      if (n !== null && n < nonce) {
+        try {
+          await this.reconcileOwner(acc)
+        } catch (e) {
+          logErr(`[reconcile] ${acc.accountKey} before a Start:`, e)
+        }
+        n = this.unresolvedNonce(acc)
+      }
+      if (n !== null && n < nonce) throw new HttpError(409, 'OWNER_OP_SETTLING', 'an earlier approval of this account is still being settled from the chain: try again in a minute')
+    }
     // otto/mamoru#140 (part2 #6): past the sponsorship limits the Safe pays its own fee, and the summary says so.
     const fee = await this.feePlan(acc, live, kind, extra.revokeOnly === true, deployed)
     const tx: SafeTx = fee.refund ? { ...ownerSafeTx(calls, nonce), refund: fee.refund } : ownerSafeTx(calls, nonce)
@@ -2594,7 +2648,47 @@ export class Operator {
 
   /** Every grant enabled on the Safe: the ones the engine uses, the ones a renewal left behind, and those of a renewal whose receipt is not known yet, enabled or not. */
   private stopRevokes(acc: AccountState): Hex[] {
-    return [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc)])]
+    return [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc), ...this.unsettledActivationGrants(acc)])]
+  }
+
+  /**
+   * otto/mamoru#163: grants of every activation whose outcome is unresolved. One of its Safe txs may have run unseen
+   * (relayed by anyone) or may still run before the stop takes the nonce: a stop revokes them too (a session that is
+   * not enabled is removed all the same).
+   */
+  private unsettledActivationGrants(acc: AccountState): Hex[] {
+    // A grant id is unique to the Safe tx that enables it, and a Safe tx runs at most once: one already revoked was
+    // enabled by this very op and cannot come back.
+    const revoked = new Set(acc.revoked.map((id) => id.toLowerCase()))
+    return acc.ops
+      .filter((o) => o.opId.startsWith('own-') && o.kind === 'activate' && o.state === 'failed' && o.code === RECEIPT_UNKNOWN)
+      .flatMap((o) => ((o as StoredOp).ownerGrants ?? []).map((g) => g.permissionId))
+      .filter((id) => !revoked.has(id.toLowerCase()))
+  }
+
+  /** The lowest Safe nonce of an activation whose outcome is unresolved, or null (otto/mamoru#163). */
+  private unresolvedNonce(acc: AccountState): bigint | null {
+    const ns = acc.ops
+      .filter((o) => o.opId.startsWith('own-') && o.kind === 'activate' && o.state === 'failed' && o.code === RECEIPT_UNKNOWN && (o as StoredOp).safeNonce !== undefined)
+      .map((o) => BigInt((o as StoredOp).safeNonce!))
+    return ns.length ? ns.reduce((a, b) => (b < a ? b : a)) : null
+  }
+
+  /**
+   * otto/mamoru#163: an activation or renewal with no proof it ran. Its Safe nonce still unspent: it can run, `open`.
+   * Past it: the Safe's ExecutionSuccess of its Safe tx hash, searched from its first handover to the head, in any
+   * transaction (anyone may have relayed it), proves it ran; none means another Safe tx took the nonce: SUPERSEDED when
+   * one of this account's own owner ops of that nonce ran, else SAFE_NONCE_MOVED. A read that fails throws: nothing
+   * is concluded.
+   */
+  private async settleByNonce(acc: AccountState, op: StoredOp): Promise<'open' | { close: string } | { hash: Hex; block: number; ok: true }> {
+    const n = BigInt(op.safeNonce!)
+    const { nonce } = await readSafeNonce(this.client, acc.ctx.address as Address)
+    if (nonce <= n) return 'open'
+    const ran = await this.findOwnerTx(acc, op, { anyTx: true })
+    if (ran?.ok) return { hash: ran.hash, block: ran.block, ok: true }
+    const replaced = acc.ops.some((o) => o !== op && o.opId.startsWith('own-') && o.state === 'confirmed' && (o as StoredOp).safeNonce === op.safeNonce)
+    return { close: replaced ? 'SUPERSEDED' : 'SAFE_NONCE_MOVED' }
   }
 
   /**
@@ -3608,13 +3702,15 @@ export class Operator {
     const sent = this.relayer.send(
       { to: safe, data },
       (h) => this.patchOp(acc, op.opId, { state: 'submitted', txHash: h }),
-      () => {
+      (_maxFeeWei, signed?: { hash: Hex; nonce: number }) => {
         this.execTried.add(opKey(acc, op))
         // otto/mamoru#140: when a copy was really handed to a provider (the first and the latest), not when the op was
         // prepared or armed: findOwnerTx searches for its ExecutionSuccess from there.
         const so = op as StoredOp
         so.broadcastAt ??= Date.now()
         so.lastBroadcastAt = Date.now()
+        // otto/mamoru#163: every copy of an activation or renewal, by hash, before it leaves.
+        if (RELAYABLE_KINDS.has(p.kind) && signed) so.signedTxs = [...(so.signedTxs ?? []), { hash: signed.hash, nonce: signed.nonce }]
         this.store.save()
         // Written before the provider gets it: a restart from here on must know a copy may be out.
         if (acc.armed?.opId === op.opId && !acc.armed.execSent) {
@@ -3636,6 +3732,16 @@ export class Operator {
     console.log(`[owner] ${op.opId} tx ${hash} block ${receipt.blockNumber} ${ok ? 'ok' : 'FAILED'}`)
     // A second copy fails when the first one executed after all (the Safe nonce it was signed for is spent).
     if (!ok && this.settleRetried(acc, op, 'OWNER_TX_FAILED')) return
+    // otto/mamoru#163: a reverted activation or renewal leaves its Safe nonce unspent, and the owner's signature can be
+    // relayed by anyone until something else takes that nonce. Not final: an unread outcome that only the Safe nonce
+    // moving settles (reconcileOwner), and a new approval of it is signed for that same nonce (hold), so only one runs.
+    if (!ok && RELAYABLE_KINDS.has(p.kind)) {
+      const copy = (op as StoredOp).signedTxs?.at(-1)
+      if (copy) copy.reverted = true
+      this.failOwner(acc, op, RECEIPT_UNKNOWN, { block: Number(receipt.blockNumber) })
+      this.reconcileSoon(acc)
+      return
+    }
     if (!ok) return this.failOwner(acc, op, 'OWNER_TX_FAILED', { block: Number(receipt.blockNumber) })
     if (p.kind === 'renew' && p.grants?.length) {
       // The same check as every other path that applies a renewal (otto/mamoru#140): its grants are read at the head.
@@ -3790,6 +3896,20 @@ export class Operator {
         const ok = receipt.status === 'success' && receipt.logs.some((l) => l.address.toLowerCase() === safe && l.topics[0] === EXECUTION_SUCCESS && (!own || l.topics[1]?.toLowerCase() === own))
         found = { hash: receipt.transactionHash, block: Number(receipt.blockNumber), ok }
       } else found = await this.findOwnerTx(acc, op)
+      // otto/mamoru#163: a reverted activation or renewal is not final: its Safe nonce is unspent and anyone may relay its
+      // signature. A renewal stays an unread receipt for settleRenewals (applied only once proven; its grants revoked by
+      // the next renewal or stop meanwhile). An activation is settled by its Safe nonce (settleByNonce).
+      if (found && !found.ok && op.kind === 'renew') continue
+      if (found && !found.ok && op.kind === 'activate' && (op as StoredOp).safeNonce !== undefined) {
+        const s = await this.settleByNonce(acc, op as StoredOp)
+        if (s === 'open') continue
+        if ('close' in s) {
+          console.log(`[reconcile] ${op.opId} ${s.close}: Safe nonce past ${(op as StoredOp).safeNonce}, not by this Safe tx`)
+          this.patchOp(acc, op.opId, { code: s.close, ...(found ? { txHash: found.hash, block: found.block } : {}) })
+          continue
+        }
+        found = s
+      }
       if (!found) continue
       const { hash, block } = found
       if (!found.ok) {
@@ -3879,7 +3999,7 @@ export class Operator {
    * log must also be in that transaction. Without a Safe tx hash (an op stored before it was kept): only the old
    * narrow window around its time, and exactly one unclaimed log, or nothing.
    */
-  private async findOwnerTx(acc: AccountState, op: StoredOp): Promise<{ hash: Hex; block: number; ok: boolean } | null> {
+  private async findOwnerTx(acc: AccountState, op: StoredOp, opts: { anyTx?: boolean } = {}): Promise<{ hash: Hex; block: number; ok: boolean } | null> {
     const head = await this.client.getBlock()
     // From the first time a copy was handed to a provider (an armed Start may wait days between prepare and send),
     // else its creation, else its time; to a day past the latest handover.
@@ -3901,7 +4021,9 @@ export class Operator {
       }
       return null
     }
-    const last = lastAt + OWNER_LOG_SEARCH_BLOCKS < head.number ? lastAt + OWNER_LOG_SEARCH_BLOCKS : head.number
+    // `anyTx` (otto/mamoru#163): the Safe nonce is past this op's, so its Safe tx ran by now or never will: searched to
+    // the head, in whatever transaction carried it.
+    const last = !opts.anyTx && lastAt + OWNER_LOG_SEARCH_BLOCKS < head.number ? lastAt + OWNER_LOG_SEARCH_BLOCKS : head.number
     const logs: Awaited<ReturnType<PublicClient['getLogs']>> = []
     for (let from = fromBlock; from <= last; from += OWNER_LOG_PAGE_BLOCKS) {
       const to = from + OWNER_LOG_PAGE_BLOCKS - 1n < last ? from + OWNER_LOG_PAGE_BLOCKS - 1n : last
@@ -3910,6 +4032,7 @@ export class Operator {
       logs.push(...(page as typeof logs).filter((l) => l.topics[0] === EXECUTION_SUCCESS && l.transactionHash && l.topics[1]?.toLowerCase() === own))
       if (logs.length) break
     }
+    if (opts.anyTx) return logs[0] ? { hash: logs[0].transactionHash!, block: Number(logs[0].blockNumber), ok: true } : null
     if (op.txHash) {
       const l = logs.find((x) => x.transactionHash!.toLowerCase() === op.txHash!.toLowerCase())
       return l ? { hash: l.transactionHash!, block: Number(l.blockNumber), ok: true } : null

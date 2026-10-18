@@ -1,4 +1,4 @@
-import { createWalletClient, defineChain, http, parseAbi, type Chain, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { createWalletClient, defineChain, http, keccak256, parseAbi, type Chain, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import { Lock } from './lock.ts'
@@ -69,9 +69,9 @@ export class Relayer {
    * are done, right before the signed transaction goes to the provider: from there on a failure may have broadcast it.
    * `onSent` runs with the hash once the provider accepts it. `onSending` gets the most the transaction can cost in fees
    * (its gas limit at its signed maxFeePerGas, plus twice the L1 data fee of its bytes), an upper bound on what the
-   * relayer pays for it.
+   * relayer pays for it, and the hash and relayer nonce of the signed transaction, known before anything leaves.
    */
-  send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: (maxFeeWei: bigint) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
+  send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: (maxFeeWei: bigint, signed: { hash: Hex; nonce: number }) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     return this.lock.run(async () => {
       const wallet = createWalletClient({ account: this.account, chain: this.chain, transport: http(this.rpcUrl, { timeout: 60_000 }) })
       // Base rejects a tx over 2^24 gas (EIP-7825): the 30% margin must not push a fitting estimate over the cap.
@@ -98,7 +98,7 @@ export class Relayer {
       })
       // The most it can cost: execution at its signed maxFeePerGas plus the L1 data fee for these bytes, doubled for the L1
       // price moving before inclusion. Only read when someone needs the bound.
-      if (onSending) onSending(gas * fees.maxFeePerGas + 2n * (await this.l1Fee(serializedTransaction)))
+      if (onSending) onSending(gas * fees.maxFeePerGas + 2n * (await this.l1Fee(serializedTransaction)), { hash: keccak256(serializedTransaction), nonce })
       const hash = await wallet.sendRawTransaction({ serializedTransaction })
       this.lastSent = { nonce, at: Date.now() }
       onSent?.(hash)

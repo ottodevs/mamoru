@@ -33,6 +33,12 @@ export type StoredOp = OpView & {
   userOpHash?: Hex
   /** otto/mamoru#129: an op's gas and collected fees, read once from its receipt (yield-receipts.ts). */
   facts?: OpFacts
+  /**
+   * otto/mamoru#163: an owner activation or renewal, every signed copy of its execTransaction (relayer tx hash and
+   * nonce), kept before it left; `reverted` once its receipt says so. A revert leaves the Safe nonce unspent and the
+   * owner's signature relayable by anyone: only the Safe nonce moving settles the op.
+   */
+  signedTxs?: { hash: Hex; nonce: number; reverted?: true }[]
 }
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */

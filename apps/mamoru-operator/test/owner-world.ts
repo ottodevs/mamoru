@@ -69,6 +69,11 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     reenabled: new Set<string>(),
     /** isPermissionEnabled throws (an unreadable chain). */
     grantsDown: false,
+    /** otto/mamoru#163: execTransactions revert (GS013: the Safe nonce stays where it was) while false. */
+    execOk: true,
+    /** Receipts by relayer tx hash, and the Safe's ExecutionSuccess logs (`topics[1]`: the Safe tx hash). */
+    receipts: new Map<string, TransactionReceipt>(),
+    safeLogs: [] as { topics: Hex[]; data: Hex; transactionHash: Hex; blockNumber: bigint }[],
   }
   const npmCalls: string[] = []
   let saves = 0
@@ -84,10 +89,12 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     getBlockNumber: async () => 101n, // at least the block its receipts land in (101): #60 never reads grants below it
     getBlock: async () => ({ number: 100n, timestamp: 1_790_000_000n }),
     getGasPrice: async () => knobs.gasPrice,
-    getTransactionReceipt: async () => {
+    getTransactionReceipt: async ({ hash }: { hash: string }) => {
+      const r = knobs.receipts.get(hash.toLowerCase())
+      if (r) return r
       throw new Error('no receipt')
     },
-    getLogs: async () => [],
+    getLogs: async () => knobs.safeLogs,
     getCode: async () => (chain.deployed ? '0x01' : undefined),
     getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? 10n ** 18n : at.toLowerCase() === SAFE.toLowerCase() ? chain.safeEth : 0n),
     getTransactionCount: async () => 5,
@@ -168,15 +175,15 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
   const recorded = (id: unknown) => Object.values(state.accounts).some((a) => [...a.grants.map((g) => g.permissionId), ...(a.superseded ?? [])].some((x) => x.toLowerCase() === String(id).toLowerCase()))
   const relayer = {
     address: RELAYER,
-    send: async (tx: { to: string; data?: Hex; value?: bigint }, onSent?: (h: Hex) => void, onSending?: () => void) => {
+    send: async (tx: { to: string; data?: Hex; value?: bigint }, onSent?: (h: Hex) => void, onSending?: (maxFeeWei: bigint, signed: { hash: Hex; nonce: number }) => void) => {
       sent.push(tx)
-      onSending?.()
       const hash = toHex(sent.length, { size: 32 })
+      onSending?.(0n, { hash, nonce: 4 + sent.length })
       onSent?.(hash)
       const isDeploy = tx.to.toLowerCase() === factory.to.toLowerCase()
       if (isDeploy) chain.deployed = true
-      else if (tx.data) chain.nonce++
-      const logs = isDeploy ? [] : [{ address: SAFE, topics: [EXECUTION_SUCCESS] }]
+      else if (tx.data && knobs.execOk) chain.nonce++
+      const logs = isDeploy || !knobs.execOk ? [] : [{ address: SAFE, topics: [EXECUTION_SUCCESS] }]
       return { hash, receipt: { transactionHash: hash, status: 'success', blockNumber: 101n, logs, gasUsed: 200_000n, effectiveGasPrice: knobs.gasPrice } as unknown as TransactionReceipt }
     },
   } as unknown as Relayer
