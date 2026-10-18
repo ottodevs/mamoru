@@ -364,8 +364,14 @@ export class BridgeOut {
 
   /** Adds to (or takes back from) today's spend; it never goes below zero. */
   private spend(wei: bigint): void {
-    const next = this.spentToday() + wei
-    this.journal.spent = { day: this.day(), wei: (next > 0n ? next : 0n).toString() }
+    this.spendOn(this.day(), wei)
+  }
+
+  /** The same on the ledger of `day`, read once by the caller: a ledger of another day restarts at zero. */
+  private spendOn(day: string, wei: bigint): void {
+    const cur = this.journal.spent.day === day ? BigInt(this.journal.spent.wei) : 0n
+    const next = cur + wei
+    this.journal.spent = { day, wei: (next > 0n ? next : 0n).toString() }
     this.save()
   }
 
@@ -695,7 +701,8 @@ export class BridgeOut {
     // Every burn's (amount, maxFee) is kept for the account, before it can run: no later burn reuses it.
     if (u.leg.bridge === 'cctp') {
       const all = this.journal.cctpBurns ?? {}
-      all[ctx.accountKey] = [...(all[ctx.accountKey] ?? []), `${u.leg.burn.amount}:${u.leg.burn.maxFee}`].slice(-2_000)
+      // Kept for good (3 moves a day at most: a few kB a year per account), so a tag is never reused.
+      all[ctx.accountKey] = [...(all[ctx.accountKey] ?? []), `${u.leg.burn.amount}:${u.leg.burn.maxFee}`]
       this.journal.cctpBurns = all
     }
     // The hash is on disk before the bundler sees the userOp: whatever happens next, status() can ask for it.
@@ -758,8 +765,9 @@ export class BridgeOut {
     // Moves the reservation to `wei` on today's ledger. A reservation made before midnight is gone with its day
     // (the ledger reset): today is charged the whole new amount, never only a difference against yesterday.
     const reserve = (wei: bigint) => {
+      // One reading of the day for the comparison and the ledger write: midnight cannot fall between them.
       const today = this.day()
-      this.spend(boundDay === today ? wei - bound : wei)
+      this.spendOn(today, boundDay === today ? wei - bound : wei)
       bound = wei
       boundDay = today
     }
@@ -772,7 +780,7 @@ export class BridgeOut {
       // estimate, and over the day's budget or the gas ceiling the send stops here.
       sending: (maxFeeWei: bigint, gas: bigint) => {
         reserve(maxFeeWei)
-        if (this.spentToday() > DAILY_BUDGET_WEI) throw new Error('over the day\'s budget')
+        if (BigInt(this.journal.spent.wei) > DAILY_BUDGET_WEI) throw new Error('over the day\'s budget')
         if (gas > 0n && maxFeeWei / gas > MAX_GAS_PRICE_WEI * 2n) throw new Error('over the gas ceiling')
       },
       sent: (hash: Hex) => {
@@ -1210,10 +1218,10 @@ export class BridgeOut {
     this.save()
   }
 
-  /** The CCTP nonces this account's moves completed (the last 2,000: ~2 years at 3 moves a day). */
+  /** The CCTP nonces this account's moves completed, kept for good. */
   private completed(accountKey: string, nonce: Hex): void {
     const all = this.journal.cctpNonces ?? {}
-    all[accountKey] = [...(all[accountKey] ?? []), nonce.toLowerCase()].slice(-2_000)
+    all[accountKey] = [...(all[accountKey] ?? []), nonce.toLowerCase()]
     this.journal.cctpNonces = all
     this.save()
   }
