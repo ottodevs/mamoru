@@ -845,15 +845,16 @@ export function askedBefore(key: string, storageOf: () => AskStorage | null = ta
   return false
 }
 
-function RenewDialog({ accountKey, approval, open, onClose, onDone }: { accountKey: string; approval: NonNullable<FundingView['approval']>; open: boolean; onClose: () => void; onDone: () => void }) {
+function RenewDialog({ accountKey, approval, open, onClose, onDone }: { accountKey: string; approval: NonNullable<FundingView['approval']>; open: boolean; onClose: () => void; onDone: (signedKey: string) => void }) {
   const flow = useOwnerAction(accountKey, 'renew')
   const prepared = useFittingPrepared(approval, flow)
   const done = !!flow.result && flow.result.state !== 'failed'
   useEffect(() => {
     if (!done) return
-    onDone()
+    // The key of the approval this dialog signed, not whatever the poll shows by now.
+    onDone(approvalRowKey(approval))
     onClose()
-  }, [done, onClose, onDone])
+  }, [done, onClose, onDone, approval])
   const { title, lead } = approvalHeading(approval)
   return (
     <ApprovalDialog title={title} open={open && !done} onClose={onClose}>
@@ -918,7 +919,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // fewer grants missing), so it never offers a button whose dialog has nothing left to do (#176 review).
   const [signedKey, setSignedKey] = useState<string | null>(null)
   const approvalKey = f?.approval ? approvalRowKey(f.approval) : null
-  const markSigned = useCallback(() => setSignedKey(approvalKey), [approvalKey])
+  const markSigned = useCallback((key: string) => setSignedKey(key), [])
   const approvalOpen = !!f?.approval && approvalKey !== signedKey
   // A confirmed activation exists somewhere in this account's history (Stop and restart only matter once this
   // is true); ops history, not the funding poll, so this is never behind it.
