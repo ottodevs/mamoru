@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV1, conservadorLiveV2, grantKey, type PolicyVersion } from '@mamoru/policy'
 import { baseRegistry, address, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { decide, rerangeWorth, weightTargets, type Observation, type PoolObs, type PositionObs } from '../index.ts'
+import { decide, outOfRangeSinceOf, rerangeWorth, weightTargets, withOutOfRangeSince, type Observation, type PoolObs, type PositionObs } from '../index.ts'
 import { levelOf } from './weights.ts'
 
 const USDC = 1_000_000n
@@ -181,5 +181,59 @@ describe('CPPI weights (#101 experiment 6)', () => {
     const both: PolicyVersion = { ...V2, cppi: { floorBps: 9000, multiplier: 3 }, volTarget: { targetVolBps: 4500, bandBps: 2500, stepBps: 2500 } }
     const o = obs(both, { balances: { USDC: 1000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, pools: V2_POOLS, guard: vols(18000, 4500) })
     expect(prefs(weightTargets(o, both))).toEqual({ stables: 8400, 'btc-usdc': 1000, risk: 600 })
+  })
+})
+
+describe('lazy re-range from the engine settings (otto/mamoru#172)', () => {
+  // The knob's overlay, as `withEngineSettings` builds it from the template `conservador-live-v2 + lazy-h24h-b100-d30`.
+  const LAZY_V2: PolicyVersion = { ...V2, range: { ...V2.range, lazy: { edgeBufferTicks: 100, minDwellSeconds: 1800, horizonSeconds: 86_400, lvrWeightBps: 10_000 } } }
+  // c23e94e1, 17 Oct: NFT 6148685 on WETH/USDC 0.3% [-198180, -196200], the pool below it (all WETH).
+  const nft = position({ tokenId: 6_148_685n, pool: ETH_POOL, tickLower: -198_180, tickUpper: -196_200, liquidity: 10n ** 15n, managed: true })
+  const below = -198_600
+  const ethMarket = (growth: bigint) => ({ pools: { [ETH_POOL]: { twap24hAgoTick: below, realizedVol24hBps: 4000, feeGrowth24h: { growth0X128: growth, growth1X128: growth, seconds: 86_400 } } } })
+  const at = (p: PolicyVersion, t: bigint, guard?: Observation['guard']) =>
+    obs(p, { block: { number: 100n, hash: `0x${'11'.repeat(32)}`, timestamp: t }, positions: [nft], pools: [pool(STABLE_POOL, 1), pool(BTC_POOL, -69_080), pool(ETH_POOL, below)], ...(guard ? { guard } : {}) })
+  // Inside the fixture sessions' validity (validUntil 10,000,000).
+  const T0 = 1_000_000n
+
+  test('eager (today): the first review with a session re-ranges the out-of-range position at once', () => {
+    const d = decide(at(V2, T0), V2)
+    expect(d.kind).toBe('rerange')
+  })
+
+  test('lazy: the review that regains the session holds; after the dwell, only a re-range that pays goes through', () => {
+    // The engine just started: it has never seen this position, so its out-of-range clock starts now.
+    const first = at(LAZY_V2, T0, ethMarket(1n << 120n))
+    const since0 = outOfRangeSinceOf(new Map(), first)
+    expect(since0.get(nft.tokenId)).toBe(T0)
+    const d0 = decide(withOutOfRangeSince(first, since0), LAZY_V2)
+    expect(d0.kind).not.toBe('rerange')
+    expect(d0.positions.find((p) => p.tokenId === nft.tokenId)!.codes).toContain('DECIDE_RANGE_COOLDOWN')
+    // 29 minutes later: still inside the dwell.
+    const early = at(LAZY_V2, T0 + 1740n, ethMarket(1n << 120n))
+    expect(decide(withOutOfRangeSince(early, outOfRangeSinceOf(since0, early)), LAZY_V2).kind).not.toBe('rerange')
+    // Past the dwell: the cost test decides. Fees that do not cover gas + swap + LVR hold with DECIDE_RANGE_BELOW_COST.
+    const poor = at(LAZY_V2, T0 + 1800n, ethMarket(1n))
+    const dp = decide(withOutOfRangeSince(poor, outOfRangeSinceOf(since0, poor)), LAZY_V2)
+    expect(dp.kind).not.toBe('rerange')
+    expect(dp.positions.find((p) => p.tokenId === nft.tokenId)!.codes).toContain('DECIDE_RANGE_BELOW_COST')
+    const rich = at(LAZY_V2, T0 + 1800n, ethMarket(1n << 120n))
+    const dr = decide(withOutOfRangeSince(rich, outOfRangeSinceOf(since0, rich)), LAZY_V2)
+    expect(dr.kind).toBe('rerange')
+    expect(dr.proposal).toMatchObject({ kind: 'rerange', tokenId: nft.tokenId, pool: ETH_POOL })
+  })
+
+  test('out-of-range clock: kept while out, cleared when the price comes back, dropped with the position', () => {
+    const out = at(LAZY_V2, T0)
+    const s1 = outOfRangeSinceOf(new Map(), out)
+    const later = at(LAZY_V2, T0 + 600n)
+    expect(outOfRangeSinceOf(s1, later).get(nft.tokenId)).toBe(T0)
+    const back = obs(LAZY_V2, { block: { number: 101n, hash: `0x${'11'.repeat(32)}`, timestamp: T0 + 1200n }, positions: [nft], pools: [pool(ETH_POOL, -197_000)] })
+    const s2 = outOfRangeSinceOf(s1, back)
+    expect(s2.has(nft.tokenId)).toBe(false)
+    expect(withOutOfRangeSince(back, s2).positions[0]!.outOfRangeSince).toBeNull()
+    expect(outOfRangeSinceOf(s1, obs(LAZY_V2, { positions: [], pools: [pool(ETH_POOL, below)] })).size).toBe(0)
+    expect(outOfRangeSinceOf(new Map(), at(LAZY_V2, T0)).size).toBe(1)
+    expect(outOfRangeSinceOf(new Map(), obs(LAZY_V2, { positions: [{ ...nft, liquidity: 0n }], pools: [pool(ETH_POOL, below)] })).size).toBe(0)
   })
 })

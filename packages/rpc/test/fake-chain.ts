@@ -254,6 +254,10 @@ export class FakeChain {
       if (call.functionName === 'token0') return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'token0', result: address(pool.token0!, baseRegistry) })
       if (call.functionName === 'token1') return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'token1', result: address(pool.token1!, baseRegistry) })
       if (call.functionName === 'fee') return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'fee', result: pool.fee! })
+      // #172: fee growth grows with the head, token1 twice token0.
+      if (call.functionName === 'feeGrowthGlobal0X128' || call.functionName === 'feeGrowthGlobal1X128') {
+        return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: call.functionName, result: (1n << 100n) * i * this.head * (call.functionName === 'feeGrowthGlobal1X128' ? 2n : 1n) })
+      }
       return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'tickSpacing', result: pool.tickSpacing! })
     }
     if (TOKENS.some((t) => address(t, baseRegistry).toLowerCase() === at)) {

@@ -1,14 +1,20 @@
 import { describe, expect, test } from 'bun:test'
-import { createPublicClient, custom, decodeFunctionData, encodeFunctionResult, isAddressEqual, parseAbi, type Address, type Hex } from 'viem'
+import { createPublicClient, custom, decodeFunctionData, encodeFunctionData, encodeFunctionResult, isAddressEqual, parseAbi, type Address, type Hex } from 'viem'
 import { marketOf } from '@mamoru/decide'
 import { multicall3Abi } from '../src/multicall.ts'
+import { uniswapV3PoolAbi } from '@mamoru/registry'
 import {
+  addFeePoint,
   addGuardPoint,
   cumulativeAtFromObserve,
   cumulativeAtOf,
   emptyGuardSeries,
+  FEE_POINT_STEP_SECONDS,
+  feeGrowth24hOf,
   guardSecondsAgos,
   observeGuardHistory,
+  type FeeGrowthHistory,
+  type FeePoint,
   type GuardSeries,
 } from '../src/guard-history.ts'
 
@@ -150,7 +156,7 @@ function observeResult(data: Hex, tick: bigint, base: bigint, maxLookback: numbe
 }
 
 /** A client with two pools: one whose oracle answers any lookback (the stables pool today, see LC-T6), one that only answers within `maxLookback` (cbBTC/WETH today). */
-function fakeClient(maxLookback: number) {
+function fakeClient(maxLookback: number, fees?: { growth: bigint; failOn?: Address }) {
   const pools: Record<string, { tick: bigint; base: bigint; maxLookback: number }> = {
     [STABLE_POOL.toLowerCase()]: { tick: 0n, base: 0n, maxLookback: Number.MAX_SAFE_INTEGER },
     [BTC_POOL.toLowerCase()]: { tick: 7n, base: 1_000_000n, maxLookback },
@@ -158,6 +164,12 @@ function fakeClient(maxLookback: number) {
   const answer = (to: Address, data: Hex): { success: boolean; returnData: Hex } => {
     const pool = pools[to.toLowerCase()]
     if (!pool) return { success: false, returnData: '0x' }
+    // #172: fee growth globals, token1 twice token0; one pool may revert them.
+    for (const [i, fn] of (['feeGrowthGlobal0X128', 'feeGrowthGlobal1X128'] as const).entries()) {
+      if (data.slice(0, 10) !== encodeFunctionData({ abi: uniswapV3PoolAbi, functionName: fn }).slice(0, 10)) continue
+      if (!fees || (fees.failOn && isAddressEqual(fees.failOn, to))) return { success: false, returnData: '0x' }
+      return { success: true, returnData: encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: fn, result: fees.growth * BigInt(i + 1) }) }
+    }
     return observeResult(data, pool.tick, pool.base, pool.maxLookback)
   }
   return createPublicClient({
@@ -228,5 +240,61 @@ describe('observeGuardHistory', () => {
     expect(r.pools).toEqual({})
     expect(r.series.size).toBe(0)
     expect(r.onChain.size).toBe(0)
+  })
+})
+
+describe('fee growth history (otto/mamoru#172)', () => {
+  const pt = (time: number, g: bigint): FeePoint => ({ time, growth0X128: g, growth1X128: 2n * g })
+
+  test('addFeePoint keeps points a step apart, drops what is older than a day and an hour, never goes back', () => {
+    let s: readonly FeePoint[] = []
+    for (let t = 0; t <= 3_600; t += 20) s = addFeePoint(s, pt(t, BigInt(t)))
+    expect(s.length).toBeGreaterThan(3_600 / FEE_POINT_STEP_SECONDS - 1)
+    expect(s.length).toBeLessThan(3_600 / FEE_POINT_STEP_SECONDS + 3)
+    expect(s.at(-1)!.time).toBe(3_600)
+    expect(addFeePoint(s, pt(3_000, 0n))).toEqual(s)
+    expect(addFeePoint(s, pt(3_600 + DAY_S + 3_600, 1n))[0]!.time).toBeGreaterThan(3_600)
+  })
+
+  test('feeGrowth24hOf: from the first point at or after 24 h ago; null under 12 h of history; wraps like uint256', () => {
+    const now = 10 * DAY_S
+    expect(feeGrowth24hOf([], pt(now, 5n))).toBeNull()
+    expect(feeGrowth24hOf([pt(now - 11 * 3_600, 1n)], pt(now, 5n))).toBeNull()
+    expect(feeGrowth24hOf([pt(now - 30 * 3_600, 0n), pt(now - 20 * 3_600, 1n), pt(now - 3_600, 4n)], pt(now, 5n))).toEqual({ growth0X128: 4n, growth1X128: 8n, seconds: 20 * 3_600 })
+    const top = (1n << 256n) - 1n
+    expect(feeGrowth24hOf([{ time: now - DAY_S, growth0X128: top, growth1X128: top }], { time: now, growth0X128: 1n, growth1X128: 0n })).toEqual({ growth0X128: 2n, growth1X128: 1n, seconds: DAY_S })
+  })
+
+  const targets = [
+    { name: 'pool:USDC/USDT/100', address: STABLE_POOL },
+    { name: 'pool:USDC/cbBTC/500', address: BTC_POOL },
+  ]
+
+  test('without a fee history no fee growth is read or set (the guard-only shape is unchanged)', async () => {
+    const r = await observeGuardHistory(fakeClient(3_600, { growth: 1n }), MULTICALL3, targets, 1n, 100 * DAY_S, W, new Map())
+    expect(Object.values(r.pools).every((p) => p && !('feeGrowth24h' in p))).toBe(true)
+  })
+
+  test('with one, the shared history fills from every review and answers once it covers 12 h; a failed read is null', async () => {
+    const fees: FeeGrowthHistory = new Map()
+    const growth = { growth: 0n, failOn: undefined as Address | undefined }
+    const client = fakeClient(3_600, growth)
+    let now = 100 * DAY_S
+    let last = await observeGuardHistory(client, MULTICALL3, targets, 1n, now, W, new Map(), fees)
+    expect(last.pools['pool:USDC/cbBTC/500']!.feeGrowth24h).toBeNull()
+    for (let i = 0; i < (13 * 3_600) / 300; i++) {
+      now += 300
+      growth.growth += 10n
+      last = await observeGuardHistory(client, MULTICALL3, targets, 1n, now, W, new Map(), fees)
+    }
+    const g = last.pools['pool:USDC/cbBTC/500']!.feeGrowth24h!
+    expect(g.seconds).toBe(13 * 3_600)
+    expect(g.growth0X128).toBe(growth.growth)
+    expect(g.growth1X128).toBe(2n * growth.growth)
+    expect(fees.get('pool:USDC/cbBTC/500')!.length).toBeGreaterThan(70)
+    growth.failOn = BTC_POOL
+    const failed = await observeGuardHistory(client, MULTICALL3, targets, 1n, now + 300, W, new Map(), fees)
+    expect(failed.pools['pool:USDC/cbBTC/500']!.feeGrowth24h).toBeNull()
+    expect(failed.pools['pool:USDC/USDT/100']!.feeGrowth24h).not.toBeNull()
   })
 })

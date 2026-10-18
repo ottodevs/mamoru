@@ -1,7 +1,7 @@
 import { parseAbi, type PublicClient } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { marketOf, type CumulativePoint, type PoolGuardObs } from '@mamoru/decide'
-import type { RegistryName } from '@mamoru/registry'
+import { uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
 import { Batch, contractRead } from './multicall.ts'
 
 const observeAbi = parseAbi(['function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128s)'])
@@ -93,6 +93,47 @@ export function cumulativeAtFromObserve(now: number, secondsAgos: readonly numbe
 
 export type PoolGuardTarget = { name: RegistryName; address: Address }
 
+/** otto/mamoru#172: a pool's fee growth globals (X128, per unit of liquidity) at a review's block timestamp. */
+export type FeePoint = { time: number; growth0X128: bigint; growth1X128: bigint }
+
+/**
+ * #172: fee growth points per pool for the lazy re-range's cost test (`PoolGuardObs.feeGrowth24h`). One map per
+ * operator process, shared by every engine (a pool's fee growth is the same for every account), so an engine that
+ * just started (a restart, a session that came back) reads the history the others built. In memory only: after an
+ * operator restart the cost test abstains for 12 h, and the buffer and the dwell decide alone.
+ */
+export type FeeGrowthHistory = Map<RegistryName, readonly FeePoint[]>
+
+/** Kept points are at least this far apart: about 150 per pool over a day, whatever the review cadence. */
+export const FEE_POINT_STEP_SECONDS = 600
+const FEE_MAX_AGE_SECONDS = DAY + 3_600
+const U256 = 1n << 256n
+
+/**
+ * Folds one point in, as `addGuardPoint` does: the moving head is replaced until it is a step past the point before
+ * it; points older than a day and an hour are dropped; a point at or before the last kept one is ignored (another
+ * engine already read this block, or a provider answered an older one).
+ */
+export function addFeePoint(points: readonly FeePoint[], point: FeePoint): readonly FeePoint[] {
+  const kept = points.filter((p) => point.time - p.time < FEE_MAX_AGE_SECONDS)
+  const last = kept.at(-1)
+  if (last && point.time <= last.time) return kept
+  const anchor = kept.at(-2)
+  if (anchor && point.time - anchor.time < FEE_POINT_STEP_SECONDS) return [...kept.slice(0, -1), point]
+  return [...kept, point]
+}
+
+/**
+ * Fee growth from the first point at or after 24 h before `cur` to `cur`, as the Lab reads a dataset
+ * (`packages/backtest/src/observe.ts` `feeGrowthOf`). Null when the history covers less than 12 h.
+ */
+export function feeGrowth24hOf(points: readonly FeePoint[], cur: FeePoint): PoolGuardObs['feeGrowth24h'] {
+  const old = points.find((p) => p.time >= cur.time - DAY && p.time < cur.time)
+  if (!old || cur.time - old.time < DAY / 2) return null
+  const growth = (a: bigint, b: bigint) => (((a - b) % U256) + U256) % U256
+  return { growth0X128: growth(cur.growth0X128, old.growth0X128), growth1X128: growth(cur.growth1X128, old.growth1X128), seconds: cur.time - old.time }
+}
+
 export type GuardHistoryResult = {
   /** `Observation.guard.pools`, one entry per target: `marketOf`'s result, on-chain or from the rolling series. */
   pools: Partial<Record<RegistryName, PoolGuardObs>>
@@ -131,11 +172,20 @@ export async function observeGuardHistory(
   now: number,
   windowSeconds: number,
   series: ReadonlyMap<RegistryName, GuardSeries>,
+  /**
+   * #172: when given, the same batch also reads each target's fee growth globals, folds them into this shared
+   * history (mutated in place) and sets `feeGrowth24h` on every target (null while the history is short or the
+   * read failed). Absent: no extra read, and `feeGrowth24h` is never set.
+   */
+  fees?: FeeGrowthHistory,
 ): Promise<GuardHistoryResult> {
   const secondsAgos = guardSecondsAgos(windowSeconds)
   const batch = new Batch(client, multicall3, blockNumber)
   const long = targets.map((t) => (secondsAgos.length > 0 ? batch.add(contractRead(client, { address: t.address, abi: observeAbi, functionName: 'observe', args: [secondsAgos], blockNumber })) : null))
   const nowRead = targets.map((t) => batch.add(contractRead(client, { address: t.address, abi: observeAbi, functionName: 'observe', args: [[0]], blockNumber })))
+  const feeRead = fees
+    ? targets.map((t) => [0, 1].map((i) => batch.add(contractRead(client, { address: t.address, abi: uniswapV3PoolAbi, functionName: i === 0 ? 'feeGrowthGlobal0X128' : 'feeGrowthGlobal1X128', blockNumber }))))
+    : null
   if (batch.size > 0) await batch.run()
 
   const pools: Partial<Record<RegistryName, PoolGuardObs>> = {}
@@ -154,6 +204,17 @@ export async function observeGuardHistory(
       pools[t.name] = marketOf(now, windowSeconds, cumulativeAtFromObserve(now, secondsAgos, longRes[0]))
     } else {
       pools[t.name] = marketOf(now, windowSeconds, cumulativeAtOf(updated))
+    }
+    if (fees && feeRead) {
+      const [g0, g1] = feeRead[i]!.map((h) => h.maybe())
+      if (g0 == null || g1 == null) {
+        pools[t.name] = { ...pools[t.name]!, feeGrowth24h: null }
+        return
+      }
+      const cur = { time: now, growth0X128: g0, growth1X128: g1 }
+      const before = fees.get(t.name) ?? []
+      fees.set(t.name, addFeePoint(before, cur))
+      pools[t.name] = { ...pools[t.name]!, feeGrowth24h: feeGrowth24hOf(before, cur) }
     }
   })
 

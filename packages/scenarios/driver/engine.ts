@@ -1,7 +1,7 @@
 import { encodeFunctionData, isAddressEqual, parseAbi, parseEventLogs, toFunctionSelector, type Hex, type Log, type PublicClient } from 'viem'
 import type { LocalAccount } from 'viem/accounts'
 import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
-import { amountsOf, decide, twapFloor, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
+import { amountsOf, decide, outOfRangeSinceOf, twapFloor, withOutOfRangeSince, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
 import { hasManageAny, TWAP_SHORT_WINDOW_SECONDS, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import { baseRegistry, address, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
@@ -17,6 +17,7 @@ import {
   readUserOpEvent,
   rpcClient,
   simulateFromEntryPoint,
+  type FeeGrowthHistory,
   type GuardSeries,
   type PoolStateCache,
   type Simulation,
@@ -127,7 +128,16 @@ export type EngineConfig = {
    * Enabling a policy's guard rules to act on this is a later decision (LC-T9); conservador-live-v2 itself does
    * not change here.
    */
-  guardHistory?: { pools: readonly RegistryName[]; series?: ReadonlyMap<RegistryName, GuardSeries> }
+  guardHistory?: {
+    pools: readonly RegistryName[]
+    series?: ReadonlyMap<RegistryName, GuardSeries>
+    /**
+     * otto/mamoru#172: the lazy re-range's cost test also needs each pool's fee growth over the last 24 h. Given, the
+     * guard batch reads the fee growth globals too and folds them into this history, which the caller shares between
+     * the engines of a process. Absent: no fee read, and `feeGrowth24h` is never set.
+     */
+    fees?: FeeGrowthHistory
+  }
   /**
    * The owner's intents, read at every observation (plan §9 step 4, US6). Absent: neither paused nor exiting.
    * Paused, decide holds with DECIDE_PAUSED; an operation already out is still reconciled.
@@ -245,6 +255,12 @@ export class Engine {
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. */
   lastRerangeAt: bigint | null = null
   /**
+   * otto/mamoru#172: since when each position has been out of range, as this engine saw it (`outOfRangeSinceOf`).
+   * Kept at every review; handed to `decide` only under a policy with `range.lazy`, so an eager observation stays
+   * byte for byte what it was, and a switch to lazy already knows how long a position has been out.
+   */
+  private outOfRange = new Map<bigint, bigint>()
+  /**
    * Spec 004 (#101) LC-T6: the rolling fallback series `cfg.guardHistory` feeds from each review (per pool),
    * updated after every `observe()`. Read this after a review and persist it (`state.ts`-style, atomic write)
    * so a restart passes `cfg.guardHistory.series` back in instead of starting cold.
@@ -357,7 +373,7 @@ export class Engine {
     if (!gh || gh.pools.length === 0) return obs
     // Pinned to the same block as the rest of the observation (FR-RPC-001): a second Multicall3 batch, never a second block.
     const targets = gh.pools.map((name) => ({ name, address: entry(name, baseRegistry).address }))
-    const result = await observeGuardHistory(this.client, MULTICALL3, targets, obs.block.number, Number(obs.block.timestamp), this.cfg.policy.execution.twapWindowSeconds, this.guardSeries)
+    const result = await observeGuardHistory(this.client, MULTICALL3, targets, obs.block.number, Number(obs.block.timestamp), this.cfg.policy.execution.twapWindowSeconds, this.guardSeries, gh.fees)
     this.guardSeries.clear()
     for (const [name, series] of result.series) this.guardSeries.set(name, series)
     return { ...obs, guard: { pools: result.pools } }
@@ -402,6 +418,8 @@ export class Engine {
       return { kind: 'observation-failed', code: 'EHG_OBSERVATION_STALE', detail: `observed at block ${obs.block.number}, the last operation is in block ${floor}` }
     }
     obs = { ...obs, lastRerangeAt: this.lastRerangeAt }
+    this.outOfRange = outOfRangeSinceOf(this.outOfRange, obs)
+    if (this.cfg.policy.range.lazy) obs = withOutOfRangeSince(obs, this.outOfRange)
     this.lastObservation = obs
     const decision = decide(obs, this.cfg.policy)
     this.depositsAfter = obs.safeBlock.number > this.depositsAfter ? obs.safeBlock.number : this.depositsAfter

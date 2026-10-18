@@ -19,7 +19,7 @@ export { fallBpsOf, fallFreezeOf, marketOf, type CumulativePoint } from './guard
 export { belowShareOf, edgeBpsOf, meanTickAt, rangeFor, realizedVolOf, regimeOf, skewedRange, spiking, volWidthTicks, widenEarly, widthFor, type Regime } from './geometry/index.ts'
 export { allocate, widthOf, type Allocation, type BucketValue, type Waiting } from './allocate/index.ts'
 export { depthOf, twapFloor, type Depth } from './depth/index.ts'
-export { rerangeWorth, RERANGE_OPS, type RerangeWorth } from './rebalance/lazy.ts'
+export { outOfRangeSinceOf, rerangeWorth, RERANGE_OPS, withOutOfRangeSince, type RerangeWorth } from './rebalance/lazy.ts'
 export { weightTargets } from './rebalance/weights.ts'
 export { depegExitOf, depeggedPool, pegDeviationBps, pegStep, PEG_CLEAR, type PegState } from './guard/depeg.ts'
 export { fallFromBps, stageStep, thirdsOut, type StageInput, type StageState } from './rebalance/staged.ts'

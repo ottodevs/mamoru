@@ -42,12 +42,17 @@ const userOperationEvent = parseAbiItem(
 
 export { BATCH_MAX_BYTES, BATCH_MAX_CALLS, Batch, balanceRead, blockNumberRead, chunkCalls, contractRead, multicall3Abi, multicall3Of, type Handle, type Read } from './multicall.ts'
 export {
+  addFeePoint,
   addGuardPoint,
   cumulativeAtFromObserve,
   cumulativeAtOf,
   emptyGuardSeries,
+  FEE_POINT_STEP_SECONDS,
+  feeGrowth24hOf,
   guardSecondsAgos,
   observeGuardHistory,
+  type FeeGrowthHistory,
+  type FeePoint,
   type GuardHistoryResult,
   type GuardPoint,
   type GuardSeries,

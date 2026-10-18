@@ -47,3 +47,27 @@ export function rerangeWorth(obs: Observation, policy: PolicyVersion, p: Positio
   const lvr = inSavings(pool, pool.token1, BigInt(Math.floor(lvr1)), savings)
   return { fees, gas, swap, lvr, worth: fees > gas + swap + lvr }
 }
+
+/**
+ * otto/mamoru#172: `PositionObs.outOfRangeSince` for the live engine, as the Lab simulator keeps it
+ * (`packages/backtest/src/run.ts`): the block time of the first review that saw the pool tick outside the range,
+ * cleared at the first review that sees it back inside. Returns the next map (tokenId to that time); positions
+ * the observation no longer has, or without liquidity, drop out. The clock starts at the engine's first review: an
+ * engine that just started (a restart, a session that came back after days) never counts time it did not see, so
+ * its dwell is never shorter than the real one.
+ */
+export function outOfRangeSinceOf(prev: ReadonlyMap<bigint, bigint>, obs: Observation): Map<bigint, bigint> {
+  const next = new Map<bigint, bigint>()
+  for (const p of obs.positions) {
+    const pool = p.pool ? obs.pools.find((x) => x.name === p.pool) : undefined
+    if (!pool || p.liquidity === 0n) continue
+    if (pool.tick >= p.tickLower && pool.tick < p.tickUpper) continue
+    next.set(p.tokenId, prev.get(p.tokenId) ?? obs.block.timestamp)
+  }
+  return next
+}
+
+/** The observation with each position's `outOfRangeSince` from `since` (null when it is in range). */
+export function withOutOfRangeSince(obs: Observation, since: ReadonlyMap<bigint, bigint>): Observation {
+  return { ...obs, positions: obs.positions.map((p) => ({ ...p, outOfRangeSince: since.get(p.tokenId) ?? null })) }
+}
