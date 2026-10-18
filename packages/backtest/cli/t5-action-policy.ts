@@ -122,19 +122,22 @@ for (const w of LAB_WINDOWS) {
       }
     }
 
-    // (3) Budgets: W_p = 1xCp/day, T_p = 3xCp/approval, resolved at this run's activation prices.
+    // (3) Budgets: W_p = windowMultiple x Cp/day, T_p = totalMultiple x Cp/approval, resolved at this run's
+    // activation prices. T6 M-2 unified MamoruActionPolicy's budget to one value per pool, in the pool's stable
+    // token (both tokens summed at the policy's range edge) — no more separate per-token caps. The per-token spend
+    // scan below stays (it is the Lab's own diagnostic, not a replay of the contract's check): each token's raw
+    // spend is measured against the SAME single cap, a looser bound than the real one (which sums both tokens'
+    // value), never a tighter one — so a breach reported here is real, a clean scan is not proof the combined
+    // check would also pass.
     const price = pricer(ds, conservadorLiveV4)
     const first = ds.samples.find((s) => POOLS.every(({ pool }) => s.pools[ds.pools.indexOf(pool)]))
     if (!first) continue
     const caps = capsAt(conservadorLiveV4, first, price, depositRaw)
     const lastTime = r.window.toTime
     for (const { prefix, pool, spec } of POOLS) {
-      for (const [token, windowCapName, totalCapName] of [
-        [spec.token0, spec.caps.budgetWindow0, spec.caps.budgetTotal0],
-        [spec.token1, spec.caps.budgetWindow1, spec.caps.budgetTotal1],
-      ] as const) {
-        const windowCap = caps[windowCapName] ?? 0n
-        const totalCap = caps[totalCapName] ?? 0n
+      const windowCap = caps[spec.caps.budgetWindow] ?? 0n
+      const totalCap = caps[spec.caps.budgetTotal] ?? 0n
+      for (const token of [spec.token0, spec.token1] as const) {
         const spend = spendOf(r.ops, pool)
         const scan = scanBudget(spend, token, r.window.fromTime, lastTime, BUDGET_WINDOW_SECONDS, windowCap, totalCap)
         budgetRows.push({ window: w.id, split: w.split, deposit, pool: prefix, ...scan })
