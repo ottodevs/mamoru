@@ -71,6 +71,9 @@ async function metrics(): Promise<MetricsView | null> {
  * installed, restart, health. Never throws: any failing step is the answer.
  */
 async function bringUp(target: string, installDeps: boolean): Promise<{ ok: boolean; why: string }> {
+  // Automatic restarts before ours: one more after it means the boot we started crashed and systemd started another.
+  const nRestarts = async () => (await $`systemctl --user show -p NRestarts --value ${unit}`.quiet().nothrow().text()).trim()
+  const restartsBefore = await nRestarts()
   try {
     // One process for the whole change, under WORK_LOCK: if this script dies mid-way, the checkout, install and
     // restart still run to the end holding the lock, and nothing starts beside them.
@@ -89,7 +92,7 @@ async function bringUp(target: string, installDeps: boolean): Promise<{ ok: bool
     const fatal = fatalLines(journal)
     if (fatal.length) return { ok: false, why: `boot journal: ${fatal[0]!.slice(0, 200)}` }
     const sameBoot = (await $`systemctl --user show -p InvocationID --value ${unit}`.quiet().nothrow().text()).trim() === invocation
-    if (!sameBoot) return { ok: false, why: 'the unit restarted on its own after the redeploy (crash loop?)' }
+    if (!sameBoot || (await nRestarts()) !== restartsBefore) return { ok: false, why: 'the unit restarted on its own after the redeploy (crash loop?)' }
     if (healthy(await metrics(), target, wasLive) && loopsStarted(journal) >= activeAccounts) return { ok: true, why: '' }
   }
   return { ok: false, why: `/metrics did not answer with ${target.slice(0, 7)} and ${activeAccounts} engine loops within ${BOOT_TIMEOUT_MS / 1000} s` }
@@ -131,6 +134,8 @@ async function signature(rev: string): Promise<boolean> {
   return signedOk(out[0] ?? '', out[1] ?? '')
 }
 if (!(await signature(full))) refuse(`${full.slice(0, 7)} is not signed by an allowed key (git log --format=%G?%GF)`)
+// A failed redeploy goes back to the running sha: it must be reviewed too, on main as well as signed.
+if (!(await isAncestor(root, running, 'origin/main'))) refuse(`the operator runs ${running.slice(0, 7)}, which is not a commit of origin/main: a failed redeploy could not roll back to reviewed code; fix that by hand first`)
 if (!(await signature(running))) refuse(`the operator runs ${running.slice(0, 7)}, which is not signed by an allowed key: a failed redeploy could not roll back to reviewed code; fix that by hand first`)
 if ((await $`git -C ${opDir} status --porcelain`.text()).trim()) refuse(`${opDir} has local changes`)
 
