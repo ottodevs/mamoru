@@ -3,7 +3,7 @@ import type { LocalAccount } from 'viem/accounts'
 import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { amountsOf, decide, twapFloor, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
-import { hasManageAny, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { hasManageAny, TWAP_SHORT_WINDOW_SECONDS, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import { address, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
 import {
   Batch,
@@ -28,19 +28,23 @@ import type { Execution } from '@mamoru/account/safe'
 import { approve, burn, collect, deadlineCheck, decreaseLiquidity, exactInputSingle, mint, type V3Call } from '@mamoru/uniswap-v3'
 import { minOut, quoteExactInputSingle, quoteMint } from '@mamoru/uniswap-v3/quote'
 import { diverges, swapMinimum, twapFloor as deviationFloor, twapTickAt } from '@mamoru/uniswap-v3/twap'
-import { DEFAULT_BAND_FACTOR_BPS, decreaseMinsAtBand, swapBoundsAtBand } from '@mamoru/uniswap-v3/policy-bounds'
+import { DEFAULT_BAND_FACTOR_BPS, decreaseMinsInRange, oracleFromObserve, priceRange, swapBoundsInRange, type OracleRead, type PriceRange } from '@mamoru/uniswap-v3/policy-bounds'
 import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
 import { MemoryJournal, type DecisionRecord, type OpRecord } from './journal.ts'
 
 /** Spec 007 (#151) T4: the two MamoruActionPolicy views precheck's mirror needs that are not already read for T3's
  * bounds (`swapBounds`/`decreaseMins`, which the engine never calls directly — see `@mamoru/uniswap-v3/policy-bounds`'s
  * TS port). `spendOf` returns the `Spend` struct as one named tuple, same pattern as `findModule` elsewhere in this
- * codebase (`packages/scenarios/action-policy/v4-grant.ts`). */
+ * codebase (`packages/scenarios/action-policy/v4-grant.ts`). T6: the token-bucket `Spend`. */
 const mamoruActionPolicyReadAbi = parseAbi([
-  'struct Spend { uint64 epoch; uint64 generation; uint128 window0; uint128 window1; uint128 total0; uint128 total1; }',
+  'struct Spend { uint64 generation; uint64 updatedAt; bool in1; uint128 debt; uint128 total; }',
   'function spendOf(address account, address pool) view returns (Spend)',
   'function generationOf(address account) view returns (uint64)',
 ])
+
+/** Spec 007 T6: `observe` with the raw `secondsPerLiquidityCumulativeX128s`, which `twapTickAt` (one window, no
+ * liquidity) does not return — `poolOracle` below needs both windows' harmonic-mean liquidity. */
+const observeAbi = parseAbi(['function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128s)'])
 import { reconcileReceipt } from './receipt.ts'
 
 /** Gas limits of every engine userOp. Their sum is the budget `decide` prices for the harvest cost. */
@@ -722,6 +726,24 @@ export class Engine {
   }
 
   /**
+   * Spec 007 T6: `priceGuard` for a v4-covered pool — the same slot0-vs-TWAP divergence check (otto/mamoru#140,
+   * kept for every policy), but the TWAP read is MamoruActionPolicy's own two-window oracle (`poolOracle`, one
+   * `observe([long, short, 0])`) instead of `twapTickAt`'s single-window one: no extra eth_call versus before (T3:
+   * "no extra RPC per op if avoidable"), and the short window and liquidity it also returns feed the range math
+   * (`v4Range`) right below. The divergence check itself still runs against the long TWAP, same as `priceGuard`.
+   */
+  private async priceGuardV4(pool: RegistryName, blockNumber: bigint, shortWindowSeconds: number): Promise<OracleRead> {
+    const e = entry(pool)
+    const { twapWindowSeconds, maxTwapDeviationTicks } = this.cfg.policy.execution
+    const [[, tick], oracle] = await Promise.all([
+      this.client.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
+      this.poolOracle(pool, twapWindowSeconds, shortWindowSeconds, blockNumber),
+    ])
+    if (diverges(tick, oracle.twapLong, maxTwapDeviationTicks)) throw new ReasonError('EHG_PRICE_DIVERGENCE', `${pool}: tick ${tick} at block ${blockNumber}, TWAP ${oracle.twapLong}`)
+    return oracle
+  }
+
+  /**
    * The router minimum of an engine swap, judged at the pool's TWAP and never at its spot: slot0 and a quote at the
    * block we read can both be moved by a swap in that same block, and the grant only asks amountOutMinimum > 0.
    * - otto/mamoru#140: never under what the input buys at the TWAP moved `maxTwapDeviationTicks` against the swap,
@@ -763,14 +785,40 @@ export class Engine {
   }
 
   /**
-   * The pool's TWAP tick at `blockNumber`, shared by depth sizing (`depthFloor`) and a v4 policy's own band math
-   * (`swapBoundsAtBand`/`decreaseMinsAtBand`) for the same pool, so a swap under both needs only one read (spec 007
-   * T3: "no extra RPC per op if avoidable"). otto/mamoru#140 (Sol review of #64) moved the one `observe` eth_call and
-   * its floor rounding (`OracleLibrary.consult`'s own rounding, the same formula `MamoruActionPolicy._twapTick` uses
-   * on chain) into `@mamoru/uniswap-v3/twap`'s `twapTickAt`, which `priceGuard` above also calls: one code path.
+   * The pool's TWAP tick at `blockNumber`, shared by depth sizing (`depthFloor`) for a non-v4 pool, so a swap under
+   * it needs only one read (spec 007 T3: "no extra RPC per op if avoidable"). otto/mamoru#140 (Sol review of #64)
+   * moved the one `observe` eth_call and its floor rounding (`OracleLibrary.consult`'s own rounding, the same
+   * formula `MamoruActionPolicy._twapTick` uses on chain) into `@mamoru/uniswap-v3/twap`'s `twapTickAt`, which
+   * `priceGuard` above also calls: one code path. A v4-covered pool reads `poolOracle`/`priceGuardV4` instead (both
+   * TWAPs in one `observe`).
    */
   private async poolTwapTick(pool: RegistryName, windowSeconds: number, blockNumber: bigint): Promise<number> {
     return twapTickAt(this.client, entry(pool).address as Address, windowSeconds, blockNumber)
+  }
+
+  /**
+   * Spec 007 T6 (M-1, H-1): MamoruActionPolicy's own oracle read — one `observe([long, short, 0])` at `blockNumber`,
+   * folded exactly as `MamoruActionPolicy._oracle` does (`oracleFromObserve`): both TWAP ticks and both windows'
+   * harmonic-mean liquidity. `twapLong` is the same tick `poolTwapTick(pool, long)` returns.
+   */
+  private async poolOracle(pool: RegistryName, longSeconds: number, shortSeconds: number, blockNumber: bigint): Promise<OracleRead> {
+    try {
+      const [ticks, spl] = await this.client.readContract({ address: entry(pool).address as Address, abi: observeAbi, functionName: 'observe', args: [[longSeconds, shortSeconds, 0]], blockNumber })
+      return oracleFromObserve(ticks, spl, longSeconds, shortSeconds)
+    } catch {
+      throw new ReasonError('EHG_TWAP_UNAVAILABLE', `${pool}: observe(${longSeconds}, ${shortSeconds}) did not answer at ${blockNumber}`)
+    }
+  }
+
+  /**
+   * Spec 007 T6: the range the engine builds a v4 call against — MamoruActionPolicy's `_range` at the engine's
+   * narrower band. Refuses (POLICY_PRICE_BAND) where the policy would refuse the oracle anyway: a harmonic-mean
+   * liquidity under the Init's floor, or TWAPs too far apart for any range.
+   */
+  private v4Range(pool: RegistryName, v4: { bandTicks: number; minLiquidity: bigint }, o: OracleRead): PriceRange {
+    const r = priceRange(o, v4.bandTicks, v4.minLiquidity)
+    if (!r) throw new ReasonError('POLICY_PRICE_BAND', `${pool}: oracle refused (twap ${o.twapLong}/${o.twapShort}, liquidity ${o.hmLong}/${o.hmShort}, floor ${v4.minLiquidity})`)
+    return r
   }
 
   /**
@@ -800,12 +848,13 @@ export class Engine {
    * not list, or no `actionPolicy` at all (every live policy today), returns `undefined`: every call for it stays
    * byte-identical to today (fail safe — never assume a band the caller did not confirm it enabled on chain).
    */
-  private v4PoolConfig(pool: RegistryName): { address: Address; bandTicks: number } | undefined {
+  private v4PoolConfig(pool: RegistryName): { address: Address; bandTicks: number; minLiquidity: bigint; twapShortSeconds: number } | undefined {
     const ap = this.cfg.policy.actionPolicy
     const bandTicks = ap?.bandTicksByPool[pool]
     if (!ap || bandTicks === undefined) return undefined
     const factor = ap.bandFactorBps ?? DEFAULT_BAND_FACTOR_BPS
-    return { address: ap.address, bandTicks: Math.floor((bandTicks * factor) / 10_000) }
+    // T6: without a known floor the engine checks none (0n); the policy still enforces its own.
+    return { address: ap.address, bandTicks: Math.floor((bandTicks * factor) / 10_000), minLiquidity: ap.minLiquidityByPool?.[pool] ?? 0n, twapShortSeconds: ap.twapShortWindowSeconds ?? TWAP_SHORT_WINDOW_SECONDS }
   }
 
   /**
@@ -820,7 +869,8 @@ export class Engine {
     const ap = this.cfg.policy.actionPolicy
     const bandTicks = ap?.bandTicksByPool[pool]
     const budget = ap?.budgetsByPool?.[pool]
-    if (!ap || bandTicks === undefined || !budget) return undefined
+    const minLiquidity = ap?.minLiquidityByPool?.[pool]
+    if (!ap || bandTicks === undefined || !budget || minLiquidity === undefined) return undefined
     const e = entry(pool)
     if (!e.token0 || !e.token1 || !e.fee) return undefined
     return {
@@ -830,11 +880,11 @@ export class Engine {
       token1: address(e.token1),
       feePips: e.fee,
       bandTicks,
+      minLiquidity,
+      budgetIn1: budget.in1,
       budgetWindowSeconds: budget.windowSeconds,
-      perWindow0: budget.perWindow0,
-      perWindow1: budget.perWindow1,
-      total0: budget.total0,
-      total1: budget.total1,
+      perWindow: budget.perWindow,
+      total: budget.total,
     }
   }
 
@@ -850,12 +900,12 @@ export class Engine {
     if (!cfg) return
     this.ledger.watchActionPolicyPool(cfg)
     const poolAddress = entry(pool).address
-    const [spend, currentGeneration, twapTick] = await Promise.all([
+    const [spend, currentGeneration, oracle] = await Promise.all([
       this.client.readContract({ address: cfg.address, abi: mamoruActionPolicyReadAbi, functionName: 'spendOf', args: [this.cfg.account, poolAddress], blockNumber }),
       this.client.readContract({ address: cfg.address, abi: mamoruActionPolicyReadAbi, functionName: 'generationOf', args: [this.cfg.account], blockNumber }),
-      this.poolTwapTick(pool, this.cfg.policy.execution.twapWindowSeconds, blockNumber),
+      this.poolOracle(pool, this.cfg.policy.execution.twapWindowSeconds, this.cfg.policy.actionPolicy?.twapShortWindowSeconds ?? TWAP_SHORT_WINDOW_SECONDS, blockNumber),
     ])
-    this.ledger.syncActionPolicyReads(pool, { twapTick, spend, currentGeneration })
+    this.ledger.syncActionPolicyReads(pool, { oracle, spend, currentGeneration })
   }
 
   /** FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. */
@@ -868,19 +918,20 @@ export class Engine {
       const amountOut = await quoteExactInputSingle(this.client, { tokenIn: address(p.tokenIn), tokenOut: address(p.tokenOut), fee: p.fee, amountIn: p.amountIn, blockNumber })
       const v4 = this.v4PoolConfig(p.pool)
       // otto/mamoru#140: every engine swap is judged at the TWAP, not just depth-sized ones — `swapMin` runs the
-      // divergence check (EHG_PRICE_DIVERGENCE) and the TWAP/impact floors unconditionally; a v4-covered pool reads
-      // the same tick once more here for its own narrower band math (spec 007 T3).
-      const twapTick = v4 ? await this.priceGuard(p.pool, blockNumber) : undefined
-      let amountOutMinimum = await this.swapMin(p, amountOut, blockNumber, twapTick)
+      // divergence check (EHG_PRICE_DIVERGENCE) and the TWAP/impact floors unconditionally, for every policy
+      // (spec 007 T6 conflict note: kept as-is here). A v4-covered pool reads both TWAPs in one `observe`
+      // (`priceGuardV4`) instead of `priceGuard`'s single-window one — same eth_call count, no extra RPC per op —
+      // and reuses the long tick for `swapMin` exactly as before (spec 007 T3).
+      const oracle = v4 ? await this.priceGuardV4(p.pool, blockNumber, v4.twapShortSeconds) : undefined
+      let amountOutMinimum = await this.swapMin(p, amountOut, blockNumber, oracle?.twapLong)
       let sqrtPriceLimitX96: bigint | undefined
-      if (v4 && twapTick !== undefined) {
-        // Spec 007 T3: amountOutMinimum and sqrtPriceLimitX96 from the same math as MamoruActionPolicy._swapBounds,
-        // at a narrower band (v4.bandTicks is already scaled by bandFactorBps) — "never below today's TWAP floor
-        // (take the max of minimums, the tighter limit)".
+      if (v4 && oracle) {
+        // Spec 007 T3/T6: amountOutMinimum and sqrtPriceLimitX96 from the same math as MamoruActionPolicy's
+        // `_range`/`_swapBounds`, at a narrower band (v4.bandTicks is already scaled by bandFactorBps) — "never
+        // below today's TWAP floor (take the max of minimums, the tighter limit)".
         const pool = entry(p.pool)
-        const bound = swapBoundsAtBand({
-          twap: twapTick,
-          bandTicks: v4.bandTicks,
+        const bound = swapBoundsInRange({
+          range: this.v4Range(p.pool, v4, oracle),
           feePips: p.fee,
           zeroForOne: pool.token0 === p.tokenIn,
           tokenIn: address(p.tokenIn),
@@ -963,8 +1014,8 @@ export class Engine {
         if (v4) {
           // Spec 007 T3: decrease minimums from the same math as MamoruActionPolicy._decreaseMins, at the narrower
           // band; never below the usual slippage minimum either (take the max, same reasoning as the swap floor).
-          const tick = await this.poolTwapTick(p.pool, this.cfg.policy.execution.twapWindowSeconds, blockNumber)
-          const bound = decreaseMinsAtBand({ twap: tick, bandTicks: v4.bandTicks, tickLower: pos[5], tickUpper: pos[6], liquidity })
+          const oracle = await this.poolOracle(p.pool, this.cfg.policy.execution.twapWindowSeconds, v4.twapShortSeconds, blockNumber)
+          const bound = decreaseMinsInRange({ range: this.v4Range(p.pool, v4, oracle), tickLower: pos[5], tickUpper: pos[6], liquidity })
           if (bound.amount0Min > amount0Min) amount0Min = bound.amount0Min
           if (bound.amount1Min > amount1Min) amount1Min = bound.amount1Min
         }

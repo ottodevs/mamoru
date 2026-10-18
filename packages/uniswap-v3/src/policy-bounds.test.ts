@@ -1,6 +1,25 @@
 import { describe, expect, test } from 'bun:test'
 import type { Address } from '@mamoru/domain'
-import { addBand, amountsForLiquidityAtPrice, decreaseMinsAtBand, DEFAULT_BAND_FACTOR_BPS, MAX_TICK, MIN_TICK, narrowBand, quoteAtTick, subBand, swapBoundsAtBand } from './policy-bounds.ts'
+import {
+  addBand,
+  amountsForLiquidityAtPrice,
+  bucketNow,
+  budgetAllows,
+  budgetValue,
+  decreaseMinsInRange,
+  DEFAULT_BAND_FACTOR_BPS,
+  harmonicMeanLiquidity,
+  MAX_TICK,
+  meanTick,
+  MIN_TICK,
+  narrowBand,
+  oracleFromObserve,
+  priceRange,
+  quoteAtTick,
+  subBand,
+  swapBoundsInRange,
+  type PriceRange,
+} from './policy-bounds.ts'
 import { sqrtRatioAtTick } from './quote.ts'
 
 // Base USDC/cbBTC: USDC < cbBTC numerically is not guaranteed in general, but these two fixed addresses give a
@@ -78,57 +97,134 @@ describe('amountsForLiquidityAtPrice', () => {
   })
 })
 
-describe('swapBoundsAtBand', () => {
-  test('zeroForOne: the worst price is band ticks BELOW the twap, a non-zero limit tighter than the twap price', () => {
-    const b = swapBoundsAtBand({ twap: 0, bandTicks: 100, feePips: 500, zeroForOne: true, tokenIn: LOW, tokenOut: HIGH, amountIn: 1_000_000n })
-    expect(b.sqrtPriceLimitX96).toBe(sqrtRatioAtTick(-100))
+/** The range a single, unshifted TWAP `t` gives at `band` (both windows equal, no liquidity floor). */
+function at(t: number, band: number): PriceRange {
+  return priceRange({ twapLong: t, twapShort: t, hmLong: 1n, hmShort: 1n }, band, 0n)!
+}
+
+describe('meanTick / harmonicMeanLiquidity / oracleFromObserve (MamoruActionPolicy._oracle)', () => {
+  test('meanTick floors toward -infinity like OracleLibrary.consult', () => {
+    expect(meanTick(3_601n, 1800)).toBe(2)
+    expect(meanTick(-3_601n, 1800)).toBe(-3)
+    expect(meanTick(-3_600n, 1800)).toBe(-2)
+  })
+
+  test('harmonicMeanLiquidity inverts secondsPerLiquidity: L constant over the window reads back as L', () => {
+    const L = 297_227_205_812_614n // USDC/USDT in-range liquidity at block 52,700,000
+    const window = 1800
+    const delta = (BigInt(window) << 128n) / L // what the pool accumulates over the window at constant L
+    const hm = harmonicMeanLiquidity(delta, window)
+    expect(hm <= L + 1n && hm >= L - 1n).toBe(true)
+    expect(harmonicMeanLiquidity(0n, window)).toBe((1n << 128n) - 1n)
+  })
+
+  test('oracleFromObserve folds observe([long, short, 0]) into both TWAPs and both harmonic means', () => {
+    const L = 10n ** 12n
+    const o = oracleFromObserve([0n, 1500n * 10n, 1500n * 10n + 300n * 40n], [0n, (1500n << 128n) / L, (1800n << 128n) / L], 1800, 300)
+    expect(o.twapShort).toBe(40)
+    expect(o.twapLong).toBe(Math.floor((1500 * 10 + 300 * 40) / 1800))
+    expect(o.hmLong <= L && o.hmLong >= L - 1n).toBe(true)
+  })
+})
+
+describe('priceRange (MamoruActionPolicy._range)', () => {
+  test('lo = max(long, short) - band + 1, hi = min(long, short) + band', () => {
+    expect(priceRange({ twapLong: 0, twapShort: 30, hmLong: 5n, hmShort: 5n }, 100, 5n)).toEqual({ lo: -69, hi: 100 })
+    expect(priceRange({ twapLong: 30, twapShort: 0, hmLong: 5n, hmShort: 5n }, 100, 5n)).toEqual({ lo: -69, hi: 100 })
+  })
+
+  test('either harmonic mean under the floor: refused (null)', () => {
+    expect(priceRange({ twapLong: 0, twapShort: 0, hmLong: 4n, hmShort: 5n }, 100, 5n)).toBeNull()
+    expect(priceRange({ twapLong: 0, twapShort: 0, hmLong: 5n, hmShort: 4n }, 100, 5n)).toBeNull()
+  })
+
+  test('TWAPs 2 x band apart leave an empty range: refused (null)', () => {
+    expect(priceRange({ twapLong: 0, twapShort: 199, hmLong: 1n, hmShort: 1n }, 100, 0n)).toEqual({ lo: 100, hi: 100 })
+    expect(priceRange({ twapLong: 0, twapShort: 200, hmLong: 1n, hmShort: 1n }, 100, 0n)).toBeNull()
+  })
+
+  test('edges clamp to the tick space', () => {
+    expect(at(MAX_TICK, 100).hi).toBe(MAX_TICK)
+    expect(at(MIN_TICK, 100).lo).toBe(MIN_TICK)
+  })
+})
+
+describe('swapBoundsInRange', () => {
+  test('zeroForOne: the worst price is the lo edge (band - 1 ticks below the twap), a non-zero limit', () => {
+    const b = swapBoundsInRange({ range: at(0, 100), feePips: 500, zeroForOne: true, tokenIn: LOW, tokenOut: HIGH, amountIn: 1_000_000n })
+    expect(b.sqrtPriceLimitX96).toBe(sqrtRatioAtTick(-99))
     expect(b.sqrtPriceLimitX96).toBeLessThan(sqrtRatioAtTick(0))
     expect(b.minOut).toBeGreaterThan(0n)
   })
 
-  test('oneForZero: the worst price is band ticks ABOVE the twap', () => {
-    const b = swapBoundsAtBand({ twap: 0, bandTicks: 100, feePips: 500, zeroForOne: false, tokenIn: HIGH, tokenOut: LOW, amountIn: 1_000_000n })
+  test('oneForZero: the worst price is the hi edge, band ticks above the twap', () => {
+    const b = swapBoundsInRange({ range: at(0, 100), feePips: 500, zeroForOne: false, tokenIn: HIGH, tokenOut: LOW, amountIn: 1_000_000n })
     expect(b.sqrtPriceLimitX96).toBe(sqrtRatioAtTick(100))
     expect(b.sqrtPriceLimitX96).toBeGreaterThan(sqrtRatioAtTick(0))
   })
 
   test('a narrower band (lower bandTicks) is strictly inside a wider one: higher minOut, tighter limit', () => {
-    const wide = swapBoundsAtBand({ twap: 0, bandTicks: 100, feePips: 500, zeroForOne: true, tokenIn: LOW, tokenOut: HIGH, amountIn: 10_000_000_000n })
-    const narrow = swapBoundsAtBand({ twap: 0, bandTicks: 80, feePips: 500, zeroForOne: true, tokenIn: LOW, tokenOut: HIGH, amountIn: 10_000_000_000n })
+    const wide = swapBoundsInRange({ range: at(0, 100), feePips: 500, zeroForOne: true, tokenIn: LOW, tokenOut: HIGH, amountIn: 10_000_000_000n })
+    const narrow = swapBoundsInRange({ range: at(0, 80), feePips: 500, zeroForOne: true, tokenIn: LOW, tokenOut: HIGH, amountIn: 10_000_000_000n })
     expect(narrow.minOut).toBeGreaterThan(wide.minOut)
     expect(narrow.sqrtPriceLimitX96).toBeGreaterThan(wide.sqrtPriceLimitX96) // zeroForOne: tighter = higher floor
   })
 
-  test('the fee is applied after the band quote', () => {
-    const noFee = swapBoundsAtBand({ twap: 0, bandTicks: 0, feePips: 0, zeroForOne: true, tokenIn: LOW, tokenOut: HIGH, amountIn: 1_000_000n })
-    const withFee = swapBoundsAtBand({ twap: 0, bandTicks: 0, feePips: 3_000, zeroForOne: true, tokenIn: LOW, tokenOut: HIGH, amountIn: 1_000_000n })
+  test('the fee is applied after the edge quote', () => {
+    const noFee = swapBoundsInRange({ range: { lo: 0, hi: 0 }, feePips: 0, zeroForOne: true, tokenIn: LOW, tokenOut: HIGH, amountIn: 1_000_000n })
+    const withFee = swapBoundsInRange({ range: { lo: 0, hi: 0 }, feePips: 3_000, zeroForOne: true, tokenIn: LOW, tokenOut: HIGH, amountIn: 1_000_000n })
     expect(withFee.minOut).toBeLessThan(noFee.minOut)
     expect(withFee.minOut).toBe((noFee.minOut * 997_000n) / 1_000_000n)
   })
 })
 
-describe('decreaseMinsAtBand', () => {
+describe('decreaseMinsInRange', () => {
   test('a range centred on the twap: both minimums positive and less than the in-range amounts', () => {
     const liquidity = 10n ** 12n
-    const m = decreaseMinsAtBand({ twap: 0, bandTicks: 50, tickLower: -1000, tickUpper: 1000, liquidity })
+    const m = decreaseMinsInRange({ range: at(0, 50), tickLower: -1000, tickUpper: 1000, liquidity })
     expect(m.amount0Min).toBeGreaterThan(0n)
     expect(m.amount1Min).toBeGreaterThan(0n)
   })
 
   test('a narrower band gives minimums at least as high as a wider one (never a lower floor)', () => {
     const liquidity = 10n ** 12n
-    const tickLower = -1000
-    const tickUpper = 1000
-    const wide = decreaseMinsAtBand({ twap: 0, bandTicks: 100, tickLower, tickUpper, liquidity })
-    const narrow = decreaseMinsAtBand({ twap: 0, bandTicks: 80, tickLower, tickUpper, liquidity })
+    const wide = decreaseMinsInRange({ range: at(0, 100), tickLower: -1000, tickUpper: 1000, liquidity })
+    const narrow = decreaseMinsInRange({ range: at(0, 80), tickLower: -1000, tickUpper: 1000, liquidity })
     expect(narrow.amount0Min).toBeGreaterThanOrEqual(wide.amount0Min)
     expect(narrow.amount1Min).toBeGreaterThanOrEqual(wide.amount1Min)
   })
 
   test('a band that reaches past the range edge floors a minimum to 0, never negative or reverting', () => {
-    const liquidity = 10n ** 12n
-    const m = decreaseMinsAtBand({ twap: 0, bandTicks: 2000, tickLower: -40, tickUpper: 40, liquidity })
-    expect(m.amount0Min).toBe(0n) // top edge (twap+band) is past tickUpper: all-token1 there, amount0 = 0
-    expect(m.amount1Min).toBe(0n) // bottom edge (twap-band) is past tickLower: all-token0 there, amount1 = 0
+    const m = decreaseMinsInRange({ range: at(0, 2000), tickLower: -40, tickUpper: 40, liquidity: 10n ** 12n })
+    expect(m.amount0Min).toBe(0n) // top edge is past tickUpper: all-token1 there, amount0 = 0
+    expect(m.amount1Min).toBe(0n) // bottom edge is past tickLower: all-token0 there, amount1 = 0
+  })
+})
+
+describe('budget (MamoruActionPolicy._value / _bucket / _charge)', () => {
+  test('budgetValue: the other token converts at the edge that values it highest', () => {
+    const r = { lo: -100, hi: 100 }
+    // token1 -> token0 at lo: price of token0 in token1 is lowest there, so token1 buys the most token0.
+    expect(budgetValue({ range: r, in1: false, token0: LOW, token1: HIGH, amount0: 5n, amount1: 1_000_000n })).toBe(5n + quoteAtTick(-100, 1_000_000n, HIGH, LOW))
+    expect(quoteAtTick(-100, 1_000_000n, HIGH, LOW)).toBeGreaterThan(1_000_000n)
+    // token0 -> token1 at hi.
+    expect(budgetValue({ range: r, in1: true, token0: LOW, token1: HIGH, amount0: 1_000_000n, amount1: 5n })).toBe(5n + quoteAtTick(100, 1_000_000n, LOW, HIGH))
+  })
+
+  test('bucketNow refills perWindow/window per second (floored) and resets the total on a new generation only', () => {
+    const budget = { generation: 2n, windowSeconds: 86_400, perWindow: 86_400_000n, total: 10n ** 12n }
+    const spend = { generation: 2n, updatedAt: 100n, in1: false, debt: 50_000_000n, total: 70_000_000n }
+    expect(bucketNow(spend, budget, 100n)).toEqual({ debt: 50_000_000n, spent: 70_000_000n })
+    expect(bucketNow(spend, budget, 110n)).toEqual({ debt: 50_000_000n - 10_000n, spent: 70_000_000n })
+    expect(bucketNow(spend, budget, 100n + 86_400n)).toEqual({ debt: 0n, spent: 70_000_000n })
+    expect(bucketNow({ ...spend, generation: 1n }, budget, 100n)).toEqual({ debt: 50_000_000n, spent: 0n })
+  })
+
+  test('budgetAllows: within both the bucket and the total, never past either', () => {
+    const budget = { generation: 1n, windowSeconds: 86_400, perWindow: 100n, total: 150n }
+    const spend = { generation: 1n, updatedAt: 0n, in1: false, debt: 0n, total: 0n }
+    expect(budgetAllows(spend, budget, 0n, 100n).ok).toBe(true)
+    expect(budgetAllows(spend, budget, 0n, 101n).ok).toBe(false)
+    expect(budgetAllows({ ...spend, total: 100n }, budget, 0n, 51n).ok).toBe(false)
   })
 })
