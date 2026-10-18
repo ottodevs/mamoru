@@ -46,6 +46,7 @@ export {
   BUDGET_WINDOW_SECONDS,
   v4CapFormulas,
   V4_POOLS,
+  withActionPolicy,
   type MamoruInit,
   type V4GasModel,
   type V4PoolSpec,

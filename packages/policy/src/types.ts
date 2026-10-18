@@ -143,6 +143,27 @@ export type PolicyVersion = {
   depegGuard?: DepegGuard
   /** Lab only (#101 round 3): staged exits of the volatile buckets on a fall from the 7-day high. Absent: off. */
   stagedExit?: StagedExit
+  /**
+   * Spec 007 (#151) T3: when set, the engine (`prepareCalls`, packages/scenarios/driver/engine.ts) builds swap
+   * minimums/price limits and decrease minimums with MamoruActionPolicy's own math, ported to TS
+   * (`@mamoru/uniswap-v3/policy-bounds`), at a narrower band than the deployed config, and mints through the
+   * policy instead of the NonfungiblePositionManager (approvals to the policy too). Absent: every call stays
+   * byte-identical to today (every live policy — this field is never set on `POLICIES`, policies.ts). The address
+   * is never a registry entry or a constant (same discipline as v4-grants.ts's `retargetToPolicy`): whoever builds
+   * this PolicyVersion for an actually-deployed contract (a fork scenario today, T7's activation code later) sets
+   * it explicitly, from what it deployed or was told to use.
+   */
+  actionPolicy?: {
+    address: Address
+    /**
+     * MamoruActionPolicy.Init.bandTicks per pool, mirroring the generation actually enabled on chain for the
+     * account this engine runs. A pool not listed here gets today's calls (fail safe: never assume a band for a
+     * pool the caller did not confirm it enabled).
+     */
+    bandTicksByPool: Partial<Record<RegistryName, number>>
+    /** Spec 007 T3: "e.g. 0.8 x band". Default `DEFAULT_BAND_FACTOR_BPS` (`@mamoru/uniswap-v3/policy-bounds`) = 8000 (0.8x). */
+    bandFactorBps?: number
+  }
 }
 
 /**

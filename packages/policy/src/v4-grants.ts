@@ -13,7 +13,7 @@
 import { encodeAbiParameters } from 'viem'
 import type { Address, Hex } from '@mamoru/domain'
 import { address, type RegistryName } from '@mamoru/registry'
-import type { ActionRuleTemplate, CapFormula, GrantName, GrantTemplate, ParamRuleTemplate, ResolvedActionRule, SessionGrant } from './types.ts'
+import type { ActionRuleTemplate, CapFormula, GrantName, GrantTemplate, ParamRuleTemplate, PolicyVersion, ResolvedActionRule, SessionGrant } from './types.ts'
 
 // ---------------------------------------------------------------- signatures (as grants.ts spells them)
 // Kept local, like the T1 fixture did: this module must stand on its own so v2/v3 (grants.ts, policies.ts, both
@@ -302,6 +302,21 @@ export type V4Usage = { enterSwap: number; enterMint: number; manageAny: number 
 /** The three v4 grants of one pool: enter-swap, enter-mint, manage-any (merged). No per-position `manage`. */
 export function grantsV4(p: V4PoolSpec, usage: V4Usage): GrantTemplate[] {
   return [enterSwapV4Grant(p, usage.enterSwap), enterMintV4Grant(p, usage.enterMint), manageAnyV4Grant(p, usage.manageAny)]
+}
+
+// ---------------------------------------------------------------- engine wiring (spec 007 T3)
+
+/**
+ * Attaches a deployed MamoruActionPolicy to a v4 `PolicyVersion` for the engine (spec 007 T3): `prepareCalls`
+ * (packages/scenarios/driver/engine.ts) only builds v4-bounded calls for a pool listed in the result's
+ * `actionPolicy.bandTicksByPool`. The address is always an explicit parameter here, never a registry entry or a
+ * constant (same discipline as `retargetToPolicy` above) — the caller passes the address it deployed (or was
+ * told to use) and the `V4PoolSpec[]` whose `bandTicks` the engine narrows from. Does not mutate `policy`.
+ */
+export function withActionPolicy(policy: PolicyVersion, mamoruPolicy: Address, pools: readonly V4PoolSpec[], bandFactorBps?: number): PolicyVersion {
+  const bandTicksByPool: Partial<Record<RegistryName, number>> = {}
+  for (const p of pools) bandTicksByPool[p.pool] = p.bandTicks
+  return { ...policy, actionPolicy: { address: mamoruPolicy, bandTicksByPool, ...(bandFactorBps !== undefined ? { bandFactorBps } : {}) } }
 }
 
 // ---------------------------------------------------------------- retargeting (template -> policy address)
