@@ -74,30 +74,33 @@ function volatileShareBps(pool: PoolObs, policy: PolicyVersion, r: { tickLower: 
   return v0 + v1 === 0n ? 5_000n : (vol * 10_000n) / (v0 + v1)
 }
 
-/** A live `increase:<tokenId>` session: enabled, not expired, uses left. */
-function liveIncrease(obs: Observation, tokenId: bigint): boolean {
-  const grant = `increase:${tokenId}`
-  return obs.sessions.some((s) => s.grant === grant && (s.tokenId === undefined || s.tokenId === tokenId) && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
+/** A live session named `grant`: enabled, not expired, uses left. */
+function liveSession(obs: Observation, grant: string): boolean {
+  return obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
 }
 
 /**
  * otto/mamoru#171: the held position an entry into `pool` adds liquidity to instead of minting a new NFT, or null to
- * mint. Only with an `increase` grant for the pool in the policy and a live session of it for that tokenId (the
- * grant is per position). The position must have liquidity, the price strictly inside its range (both amounts
- * positive, as the grant's minimums need), and each of its edges within `range.increaseToleranceBps` of the width
- * of `range` (what a mint would get now) from that range's edge. The nearest such position wins, lowest tokenId on ties.
+ * mint. Only under a v4 policy (spec 007: MamoruActionPolicy.increase, the pool's `engine` grant, no grant per
+ * position) with a live session of that grant, and only for a position this engine manages (`managed`: minted by it;
+ * the policy itself adds only to positions it admitted for the account, which the engine re-reads before it builds
+ * the call). The position must have liquidity, the price strictly inside its range (both amounts positive, as the
+ * grant's minimums need), and each of its edges within `range.increaseToleranceBps` of the width of `range` (what a
+ * mint would get now) from that range's edge. The nearest such position wins, lowest tokenId on ties.
  */
 export function reusablePosition(obs: Observation, policy: PolicyVersion, pool: PoolObs, range: { tickLower: number; tickUpper: number }): PositionObs | null {
   if (!hasIncrease(policy, pool.name)) return null
+  const grant = grantKeyFor(policy, 'increase', pool.name)
+  if (!liveSession(obs, grant)) return null
   const tolerance = Math.floor(((range.tickUpper - range.tickLower) * (policy.range.increaseToleranceBps ?? DEFAULT_INCREASE_TOLERANCE_BPS)) / 10_000)
   let best: PositionObs | null = null
   let bestDistance = 0
   for (const p of obs.positions) {
-    if (p.pool !== pool.name || p.liquidity <= 0n) continue
+    if (p.pool !== pool.name || p.liquidity <= 0n || !p.managed) continue
     if (!(p.tickLower < pool.tick && pool.tick < p.tickUpper)) continue
     const lower = Math.abs(p.tickLower - range.tickLower)
     const upper = Math.abs(p.tickUpper - range.tickUpper)
-    if (lower > tolerance || upper > tolerance || !liveIncrease(obs, p.tokenId)) continue
+    if (lower > tolerance || upper > tolerance) continue
     const distance = lower + upper
     if (!best || distance < bestDistance || (distance === bestDistance && p.tokenId < best.tokenId)) {
       best = p
@@ -278,7 +281,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       if (row) row.code = 'DECIDE_NO_CAPITAL'
       continue
     }
-    const mintGrant = reuse ? (`increase:${reuse.tokenId}` as const) : (grantKeyFor(policy, 'enter-mint', pool.name) as `enter-mint:${string}`)
+    const mintGrant = grantKeyFor(policy, reuse ? 'increase' : 'enter-mint', pool.name) as `enter-mint:${string}` | `engine:${string}`
     pendingMint.push({ pool: pool.name, grant: mintGrant })
     if (!row) continue
     row.code = 'STRATEGY_PREFERENCE_DEVIATION'
@@ -286,8 +289,8 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     const savingsIs0 = pool.token0 === savings
     const amounts = { amount0Desired: savingsIs0 ? savingsIn : volatileIn, amount1Desired: savingsIs0 ? volatileIn : savingsIn }
     proposal = reuse
-      ? { kind: 'increase_liquidity', grant: `increase:${reuse.tokenId}`, pool: pool.name, tokenId: reuse.tokenId, ...range, ...amounts }
-      : { kind: 'enter_mint', grant: mintGrant as `enter-mint:${string}`, pool: pool.name, ...range, ...amounts }
+      ? { kind: 'increase_liquidity', grant: mintGrant as `engine:${string}`, pool: pool.name, tokenId: reuse.tokenId, ...range, ...amounts }
+      : { kind: 'enter_mint', grant: mintGrant, pool: pool.name, ...range, ...amounts }
   }
   if (total === 0n) for (const row of buckets) if (row.code === 'STRATEGY_PREFERENCE') row.code = 'DECIDE_NO_CAPITAL'
   // Each bucket's wait was measured against the same free savings: together they cannot hold more than what is free

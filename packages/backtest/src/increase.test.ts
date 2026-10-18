@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { conservadorLabIncreaseV1, conservadorLiveV2 } from '@mamoru/policy'
+import { conservadorLiveV2, conservadorLiveV4 } from '@mamoru/policy'
 import { syntheticDataset } from './fixtures.ts'
 import { runBacktest } from './run.ts'
 
@@ -13,15 +13,15 @@ const config = { deposit: 1_000n * USDC, topUps: [{ at: DAY / 2, amount: 500n * 
 
 describe('Lab: increase instead of a second mint (otto/mamoru#171)', () => {
   const live = runBacktest(calm, conservadorLiveV2, config)
-  const lab = runBacktest(calm, conservadorLabIncreaseV1, config)
+  const lab = runBacktest(calm, conservadorLiveV4, config)
   const nfts = (r: typeof live) => r.ops.filter((o) => o.ok && o.kind === 'enter_mint').length
 
-  test('conservador-live-v2 mints a new NFT for each top-up; the increase policy mints one per pool and adds to it', () => {
+  test('conservador-live-v2 mints a new NFT for each top-up; v4 mints one per pool and adds to it', () => {
     expect(live.metrics.operations.increase_liquidity).toBe(0)
     expect(nfts(lab)).toBe(3)
     expect(nfts(live)).toBeGreaterThan(3)
     expect(lab.metrics.operations.increase_liquidity).toBe(nfts(live) - nfts(lab))
-    for (const o of lab.ops.filter((o) => o.kind === 'increase_liquidity')) expect(o.grant).toMatch(/^increase:\d+$/)
+    for (const o of lab.ops.filter((o) => o.kind === 'increase_liquidity')) expect(o.grant).toMatch(/^engine:pool:/)
   })
 
   test('the same money goes in, for less entry gas', () => {

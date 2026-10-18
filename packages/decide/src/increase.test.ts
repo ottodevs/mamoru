@@ -1,11 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import { conservadorLabIncreaseV1, conservadorLiveV2, grantKey, type PolicyVersion } from '@mamoru/policy'
+import { conservadorLiveV2, conservadorLiveV4, grantKey, type PolicyVersion } from '@mamoru/policy'
 import { address, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick, token1InToken0 } from '@mamoru/uniswap-v3/quote'
 import { decide, rangeFor, reusablePosition, type Observation, type PoolObs, type PositionObs, type SessionObs } from './index.ts'
 
 // otto/mamoru#171: an entry into a pool where the account holds a position of (nearly) the same range adds to it.
-const LAB = conservadorLabIncreaseV1
+// Spec 007: only a v4 policy can (MamoruActionPolicy.increase, under the pool's one `engine` session).
+const LAB = conservadorLiveV4
 const V2 = conservadorLiveV2
 const USDC = 1_000_000n
 const RISK = 'pool:WETH/USDC/3000'
@@ -73,31 +74,39 @@ const held = (tokenId: bigint, shift = 0, over: Partial<PositionObs> = {}): Posi
 })
 
 describe('increase instead of a second mint (otto/mamoru#171)', () => {
-  test('conservador-live-v2 (no increase grant) still mints a second NFT into the same range', () => {
-    const d = decide(obs([held(3n)], [...pairSessions(V2), live('increase:3', 3n)]), V2)
+  test('conservador-live-v2 (no increase) still mints a second NFT into the same range', () => {
+    const d = decide(obs([held(3n)], [...pairSessions(V2), live('increase:3', 3n), live(`engine:${RISK}`)]), V2)
     expect(d.proposal).toMatchObject({ kind: 'enter_mint', grant: `enter-mint:${RISK}`, ...fresh })
   })
 
   test('the identical range (Revert c23e94e1, 6291301/6291328): increase on the held tokenId, same amounts the mint would take', () => {
-    const minted = decide(obs([held(3n)], pairSessions(LAB)), LAB).proposal
-    const d = decide(obs([held(3n)], [...pairSessions(LAB), live('increase:3', 3n)]), LAB)
+    const minted = decide(obs([held(3n, 0, { managed: false })], pairSessions(LAB)), LAB).proposal
+    const d = decide(obs([held(3n)], pairSessions(LAB)), LAB)
     expect(d.code).toBe('DECIDE_ENTER')
-    expect(d.proposal).toMatchObject({ kind: 'increase_liquidity', grant: 'increase:3', pool: RISK, tokenId: 3n, ...fresh })
+    expect(d.proposal).toMatchObject({ kind: 'increase_liquidity', grant: `engine:${RISK}`, pool: RISK, tokenId: 3n, ...fresh })
+    expect(minted).toMatchObject({ grant: `engine:${RISK}` })
     expect(minted?.kind).toBe('enter_mint')
     if (minted?.kind !== 'enter_mint' || d.proposal?.kind !== 'increase_liquidity') throw new Error('unreachable')
     expect([d.proposal.amount0Desired, d.proposal.amount1Desired]).toEqual([minted.amount0Desired, minted.amount1Desired])
     expect(d.trail.at(-1)).toEqual({ gate: 'ehg', verdict: 'GO', reason: 'EHG_OK' })
   })
 
-  test('no live increase session for that tokenId: mint (expired, revoked, spent, or another id)', () => {
-    for (const s of [live('increase:3', 3n, { validUntil: 900 }), live('increase:3', 3n, { active: false }), live('increase:3', 3n, { usesLeft: 0 }), live('increase:4', 4n)]) {
-      expect(decide(obs([held(3n)], [...pairSessions(LAB), s]), LAB).proposal?.kind).toBe('enter_mint')
+  test('no live engine session for the pool (expired, revoked, spent, another pool): no increase', () => {
+    const others = pairSessions(LAB).filter((s) => s.grant !== `engine:${RISK}`)
+    for (const s of [live(`engine:${RISK}`, undefined, { validUntil: 900 }), live(`engine:${RISK}`, undefined, { active: false }), live(`engine:${RISK}`, undefined, { usesLeft: 0 })]) {
+      expect(reusablePosition(obs([held(3n)], [...others, s]), LAB, riskPool, fresh)).toBeNull()
     }
+    expect(reusablePosition(obs([held(3n)], others), LAB, riskPool, fresh)).toBeNull()
+  })
+
+  test('a position the engine does not manage (not minted by it, so not admitted by the policy) is not reused', () => {
+    expect(reusablePosition(obs([held(3n, 0, { managed: false })], pairSessions(LAB)), LAB, riskPool, fresh)).toBeNull()
+    expect(decide(obs([held(3n, 0, { managed: false })], pairSessions(LAB)), LAB).proposal?.kind).toBe('enter_mint')
   })
 
   test('tolerance: each edge within 10% of the width (198 of 1980 ticks at 60 spacing, as the Revert range) adds, past it mints', () => {
     expect(fresh.tickUpper - fresh.tickLower).toBe(1980)
-    const sessions = [...pairSessions(LAB), live('increase:3', 3n)]
+    const sessions = pairSessions(LAB)
     expect(reusablePosition(obs([held(3n, 180)], sessions), LAB, riskPool, fresh)?.tokenId).toBe(3n)
     expect(decide(obs([held(3n, 60)], sessions), LAB).proposal).toMatchObject({ kind: 'increase_liquidity', tokenId: 3n, tickLower: fresh.tickLower + 60, tickUpper: fresh.tickUpper + 60 })
     // Off-centre by 180 the held range needs more WETH than is idle: the swap toward it comes first, not a mint.
@@ -110,23 +119,23 @@ describe('increase instead of a second mint (otto/mamoru#171)', () => {
 
   test('the policy field sets the tolerance: 0 reuses only the exact range', () => {
     const exact: PolicyVersion = { ...LAB, range: { ...LAB.range, increaseToleranceBps: 0 } }
-    const sessions = [...pairSessions(LAB), live('increase:3', 3n)]
+    const sessions = pairSessions(LAB)
     expect(decide(obs([held(3n, 60)], sessions), exact).proposal?.kind).toBe('enter_mint')
     expect(decide(obs([held(3n)], sessions), exact).proposal?.kind).toBe('increase_liquidity')
   })
 
   test('an empty position, or one the price is not strictly inside, is not reused', () => {
-    const sessions = [...pairSessions(LAB), live('increase:3', 3n)]
+    const sessions = pairSessions(LAB)
     expect(decide(obs([held(3n, 0, { liquidity: 0n })], sessions), LAB).proposal?.kind).toBe('enter_mint')
     expect(reusablePosition(obs([], sessions), LAB, { ...riskPool, tick: fresh.tickUpper }, fresh)).toBeNull()
     expect(reusablePosition(obs([held(3n)], sessions), LAB, { ...riskPool, tick: fresh.tickLower }, fresh)).toBeNull()
   })
 
   test('two candidates: the nearer range wins, the lower tokenId on a tie', () => {
-    const sessions = [...pairSessions(LAB), live('increase:3', 3n), live('increase:5', 5n), live('increase:7', 7n)]
+    const sessions = pairSessions(LAB)
     expect(reusablePosition(obs([held(5n, 120), held(7n, 60)], sessions), LAB, riskPool, fresh)?.tokenId).toBe(7n)
     expect(reusablePosition(obs([held(7n, 60), held(5n, -60)], sessions), LAB, riskPool, fresh)?.tokenId).toBe(5n)
-    // A position of another pool, even with a session, is never a candidate.
+    // A position of another pool is never a candidate.
     expect(reusablePosition(obs([held(3n, 0, { pool: 'pool:USDC/cbBTC/500' })], sessions), LAB, riskPool, fresh)).toBeNull()
   })
 })

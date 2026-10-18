@@ -129,7 +129,7 @@ export type ShadowNote = { code: ReasonCode; note: string }
 export type EnterSwapProposal = {
   kind: 'enter_swap'
   /** `enter-swap`, or `enter-swap:<pool>` on a multi-pool policy; `convert-any[:<pool>]` sends the volatile side back to savings before a re-mint. */
-  grant: 'enter-swap' | `enter-swap:${string}` | 'convert-any' | `convert-any:${string}`
+  grant: 'enter-swap' | `enter-swap:${string}` | 'convert-any' | `convert-any:${string}` | EngineGrant
   pool: RegistryName
   tokenIn: RegistryName
   tokenOut: RegistryName
@@ -140,7 +140,7 @@ export type EnterSwapProposal = {
 export type EnterMintProposal = {
   kind: 'enter_mint'
   /** `manage-any[:<pool>]`: re-mints after a re-range are not bounded by enter-mint's one-time cumulative cap. */
-  grant: 'enter-mint' | `enter-mint:${string}` | 'manage-any' | `manage-any:${string}`
+  grant: 'enter-mint' | `enter-mint:${string}` | 'manage-any' | `manage-any:${string}` | EngineGrant
   pool: RegistryName
   tickLower: number
   tickUpper: number
@@ -149,14 +149,21 @@ export type EnterMintProposal = {
 }
 
 /**
+ * Spec 007 (policy v4): the pool's one `engine:<pool>` session, which covers every kind of proposal there; the grant of
+ * a v4 proposal is always this.
+ */
+export type EngineGrant = `engine:${string}`
+
+/**
  * otto/mamoru#171: an entry added to a position the account already holds in the pool, instead of a second NFT:
- * approvals + increaseLiquidity(tokenId) + approvals back to 0. `tickLower`/`tickUpper` are the position's own range,
- * which the amounts are split for; the operator checks them against the chain before it builds the call.
+ * approvals of MamoruActionPolicy + MamoruActionPolicy.increase(tokenId) + approvals back to 0 (spec 007: only a v4
+ * policy proposes it). `tickLower`/`tickUpper` are the position's own range, which the amounts are split for; the
+ * operator checks them against the chain before it builds the call.
  */
 export type IncreaseLiquidityProposal = {
   kind: 'increase_liquidity'
-  /** `increase:<tokenId>`: the per-position grant of that tokenId. */
-  grant: `increase:${string}`
+  /** The pool's v4 `engine` session: no grant per position. */
+  grant: EngineGrant
   pool: RegistryName
   tokenId: bigint
   tickLower: number
@@ -167,7 +174,7 @@ export type IncreaseLiquidityProposal = {
 
 export type HarvestProposal = {
   kind: 'harvest'
-  grant: `manage:${string}` | 'convert-any' | `convert-any:${string}`
+  grant: `manage:${string}` | 'convert-any' | `convert-any:${string}` | EngineGrant
   pool: RegistryName
   tokenId: bigint
   /** Fees only: collectable minus principal owed. */
@@ -180,7 +187,7 @@ export type HarvestProposal = {
 /** Whole position back to the Safe: decreaseLiquidity(all) + collect(to the Safe) + burn. */
 export type RerangeProposal = {
   kind: 'rerange'
-  grant: 'manage-any' | `manage-any:${string}`
+  grant: 'manage-any' | `manage-any:${string}` | EngineGrant
   pool: RegistryName
   tokenId: bigint
   liquidity: bigint
@@ -189,7 +196,7 @@ export type RerangeProposal = {
 /** Part of an over-weight bucket's position back to the Safe: decreaseLiquidity(part) + collect(to the Safe). */
 export type ReduceProposal = {
   kind: 'reduce'
-  grant: 'manage-any' | `manage-any:${string}`
+  grant: 'manage-any' | `manage-any:${string}` | EngineGrant
   pool: RegistryName
   tokenId: bigint
   liquidity: bigint

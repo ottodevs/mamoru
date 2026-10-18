@@ -116,14 +116,10 @@ function drawdowns(time: number[], value: bigint[]): { maxDrawdownBps: number; w
   return { maxDrawdownBps: maxDd, worstWeekBps: worst }
 }
 
-/**
- * The grant template a proposal runs under (`manage:<tokenId>` is the per-position `manage`, `increase:<tokenId>` the
- * per-position `increase` of the proposal's pool), or undefined.
- */
-function templateOf(policy: PolicyVersion, grant: string, pool?: string): GrantTemplate | undefined {
-  const perPosition = /^(manage|increase):\d+$/.exec(grant)?.[1]
-  if (!perPosition) return policy.session.grants.find((g) => grantKey(g) === grant)
-  return policy.session.grants.find((g) => g.name === perPosition && (g.pool === undefined || pool === undefined || g.pool === pool))
+/** The grant template a proposal runs under (`manage:<tokenId>` is the per-position `manage`), or undefined. */
+function templateOf(policy: PolicyVersion, grant: string): GrantTemplate | undefined {
+  const perPosition = /^manage:\d+$/.test(grant)
+  return policy.session.grants.find((g) => (perPosition ? g.name === 'manage' : grantKey(g) === grant))
 }
 
 /** Usage limit of the session a proposal runs under, at the account cap the grants are sized at; null without such a grant. */
@@ -320,7 +316,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
         while (s.time - at >= policy.session.validitySeconds) at += policy.session.validitySeconds
         openWindow(s, at)
       }
-      const t = p ? templateOf(policy, p.grant, p.pool) : undefined
+      const t = p ? templateOf(policy, p.grant) : undefined
       const limit = t ? usageLimitFor(t, capUsdc) : null
       const used = p ? (usedIn.get(p.grant) ?? 0) : 0
       const spend = p && t ? cumulativeSpend(t, p) : []

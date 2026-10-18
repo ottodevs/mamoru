@@ -1,7 +1,7 @@
 import { decodeFunctionData, encodeFunctionData, isAddressEqual, maxUint128, parseEventLogs, type Hex } from 'viem'
 import type { Address, ReasonCode } from '@mamoru/domain'
 import { canonicalJson, decide, type Decision } from '@mamoru/decide'
-import { POLICIES, computeCaps, grantKeyFor, type GrantName, type PolicyVersion, type Price } from '@mamoru/policy'
+import { POLICIES, computeCaps, type PolicyVersion, type Price } from '@mamoru/policy'
 import { address, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, safeProxyFactoryAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { approve, decreaseLiquidity, exactInputSingle } from '@mamoru/uniswap-v3'
 import { minOut, quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
@@ -75,13 +75,6 @@ function engineOf(ctx: ScenarioCtx): Engine {
       requestManageGrant: async (tokenId) => {
         w.a1.managedTokenIds.push(tokenId)
         const [g] = await activateGrants(w, w.a1, [{ name: 'manage', tokenId }])
-        return { name: g!.name, grant: g!.grant, permissionId: g!.permissionId }
-      },
-      // otto/mamoru#171: the owner scopes an increase grant to the new tokenId, under a policy that has one.
-      requestIncreaseGrant: async (tokenId, pool) => {
-        if (!w.a1.managedTokenIds.includes(tokenId)) w.a1.managedTokenIds.push(tokenId)
-        // The pair's template on a multi-pool policy (`increase:<pool>`): its caps are that pair's.
-        const [g] = await activateGrants(w, w.a1, [{ name: grantKeyFor(w.policy, 'increase', pool) as GrantName, tokenId }])
         return { name: g!.name, grant: g!.grant, permissionId: g!.permissionId }
       },
     },
@@ -289,14 +282,6 @@ function callShape(op: OpRecord, account: Address): string[] {
     if (m.tickLower % pool.tickSpacing! !== 0 || m.tickUpper % pool.tickSpacing! !== 0) errs.push(`ticks ${m.tickLower}, ${m.tickUpper} not multiples of ${pool.tickSpacing}`)
     if (m.amount0Min <= 0n || m.amount1Min <= 0n) errs.push('mint minimums are not positive')
     if (!isAddressEqual(m.recipient, account)) errs.push('mint recipient is not the account')
-    for (const i of [3, 4]) if ((calls[i]!.args as [Address, bigint])[1] !== 0n) errs.push(`call ${i} does not reset the approval to 0`)
-  } else if (p.kind === 'increase_liquidity') {
-    const pool = entry(p.pool)
-    const want = `${pool.token0}.approve ${pool.token1}.approve NonfungiblePositionManager.increaseLiquidity ${pool.token0}.approve ${pool.token1}.approve`
-    if (sig !== want) errs.push(`calls ${sig}`)
-    const m = calls[2]!.args[0] as { tokenId: bigint; amount0Min: bigint; amount1Min: bigint }
-    if (m.tokenId !== p.tokenId) errs.push(`increase of ${m.tokenId}, intent ${p.tokenId}`)
-    if (m.amount0Min <= 0n || m.amount1Min <= 0n) errs.push('increase minimums are not positive')
     for (const i of [3, 4]) if ((calls[i]!.args as [Address, bigint])[1] !== 0n) errs.push(`call ${i} does not reset the approval to 0`)
   } else if (p.kind === 'harvest') {
     const want = p.convert ? `NonfungiblePositionManager.collect ${p.convert.token}.approve SwapRouter02.exactInputSingle` : 'NonfungiblePositionManager.collect'
