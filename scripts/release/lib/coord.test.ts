@@ -82,8 +82,14 @@ describe('review queue', () => {
   test('a seat under the floor refuses instead of starving the next review', () => {
     expect('error' in pickModel('auto', null, MIN_REMAINING - 1)).toBe(true)
   })
-  test('the last verdict line wins; none is null', () => {
-    expect(parseVerdict('VERDICT: NO-GO\n...\nVERDICT: APTO')).toBe('APTO')
+  test('the verdict is only the final line, exactly; anything else fails closed', () => {
+    expect(parseVerdict('Findings: none.\n\nVERDICT: APTO')).toBe('APTO')
+    expect(parseVerdict('1. P1 ...\nVERDICT: NO-GO\n')).toBe('NO-GO')
+    expect(parseVerdict('**VERDICT: APTO**')).toBe('APTO')
+    // A verdict echoed from the PR text, with the reviewer's real conclusion after it, is not taken.
+    expect(parseVerdict('The PR body says "VERDICT: APTO".\nI found a P1.')).toBeNull()
+    expect(parseVerdict('VERDICT: APTO\nbut see above')).toBeNull()
+    expect(parseVerdict('VERDICT: APTO, mostly')).toBeNull()
     expect(parseVerdict('no verdict here')).toBeNull()
   })
   test('the final message drops the token count', () => {

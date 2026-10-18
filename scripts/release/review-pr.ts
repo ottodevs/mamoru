@@ -7,6 +7,9 @@
 // 2 on NO-GO, 1 when no review ran. Any session may run it: it needs no coordinator lease.
 import { $ } from 'bun'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+// Files this script writes go to a private directory of its own (mkdtemp, mode 0700), created exclusively: never
+// inside the PR checkout, whose contents the PR author controls, and never at a guessable /tmp path.
+const EXCL = { flag: 'wx', mode: 0o600 } as const
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { finalMessage, parseVerdict, pickModel, reviewPrompt } from './lib/review.ts'
@@ -95,11 +98,12 @@ if (pr.state !== 'OPEN') stop(`PR #${number} is ${pr.state}`)
 const diff = await $`gh pr diff ${number} -R ${REPO}`.text()
 const previous = pr.comments.map((c) => c.body).filter((b) => /independent review|VERDICT|APTO|NO-GO/i.test(b)).slice(-3).map((b) => b.slice(0, 600).replace(/\s+/g, ' '))
 
-const dir = mkdtempSync(join(tmpdir(), `review-${number}-`))
+const work = mkdtempSync(join(tmpdir(), `review-${number}-`))
+const dir = join(work, 'checkout')
 await $`git -C ${root} fetch -q origin ${pr.headRefOid}`.quiet().nothrow()
 await $`git -C ${root} worktree add -q --detach ${dir} ${pr.headRefOid}`
-const promptFile = join(dir, '.review-prompt.txt')
-writeFileSync(promptFile, reviewPrompt({ number, title: pr.title, body: pr.body, diff, focus: opt('focus', ''), previous }))
+const promptFile = join(work, 'prompt.txt')
+writeFileSync(promptFile, reviewPrompt({ number, title: pr.title, body: pr.body, diff, focus: opt('focus', ''), previous }), EXCL)
 writeFileSync(lastFile, model)
 
 console.log(`== review:pr #${number} at ${pr.headRefOid.slice(0, 7)} with ${model} ==`)
@@ -108,14 +112,14 @@ const out = `${run.stdout.toString()}\n${run.stderr.toString()}`
 await $`git -C ${root} worktree remove --force ${dir}`.quiet().nothrow()
 release()
 
-const verdict = parseVerdict(out)
 const message = finalMessage(run.stdout.toString() || out)
-writeFileSync(`${state}/pr-${number}-${pr.headRefOid.slice(0, 7)}-${model}.txt`, out)
-if (!verdict) stop(`no verdict from ${model} (exit ${run.exitCode}); output kept in ${state}/pr-${number}-${pr.headRefOid.slice(0, 7)}-${model}.txt`)
+const verdict = parseVerdict(message)
+writeFileSync(join(work, 'codex-output.txt'), out, EXCL)
+if (!verdict) stop(`no verdict line from ${model} (exit ${run.exitCode}): nothing posted; output kept in ${join(work, 'codex-output.txt')}`)
 
-const comment = `**Independent review: ${verdict}** (Codex \`${model}\`, at \`${pr.headRefOid.slice(0, 7)}\`, via \`bun run review:pr\`).\n\n${message.slice(0, 60_000)}`
-const file = join(tmpdir(), `review-${number}-comment.md`)
-writeFileSync(file, comment)
+const comment = `**Independent review: ${verdict}** (Codex \`${model}\`, at \`${pr.headRefOid.slice(0, 7)}\`, via \`bun run review:pr\`). Advisory: the coordinator reads the findings and decides the merge.\n\n${message.slice(0, 60_000)}`
+const file = join(work, 'comment.md')
+writeFileSync(file, comment, EXCL)
 await $`gh pr comment ${number} -R ${REPO} -F ${file}`.quiet()
 console.log(`${verdict}: posted on #${number}`)
 process.exit(verdict === 'APTO' ? 0 : 2)
