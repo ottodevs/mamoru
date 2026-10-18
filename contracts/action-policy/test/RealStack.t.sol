@@ -270,6 +270,7 @@ contract RealStackTest is Test {
     address constant LAUNCHPAD = 0x7579011aB74c46090561ea277Ba79D510c6C00ff;
     address constant REGISTRY = 0x000000000069E2a187AEFFb852bF3cCdC95151B2;
     address constant ATTESTER = 0x000000333034E9f539ce08819E12c1b8Cb29084d;
+    address constant GUARDIAN = address(0x6A2D);
     address constant SMART_SESSION = 0x00000000002B0eCfbD0496EE71e01257dA0E37DE;
     address constant OWNABLE = 0x2483DA3A338895199E5e538530213157e931Bf06;
     address constant TIMEFRAME = 0x8177451511dE0577b911C254E9551D981C26dc72;
@@ -343,7 +344,7 @@ contract RealStackTest is Test {
         vm.createSelectFork(vm.envOr("BASE_FORK_RPC_URL", string("https://mainnet.base.org")), FORK_BLOCK);
         owner = vm.addr(ownerPk);
         sessionKey = vm.addr(sessionPk);
-        policy = new MamoruActionPolicy(SMART_SESSION, NPM, ROUTER, FACTORY);
+        policy = new MamoruActionPolicy(SMART_SESSION, NPM, ROUTER, FACTORY, GUARDIAN);
         // ERC-7484: the registry refuses an attestation for an unregistered module (ModuleNotFoundInRegistry), so the
         // policy is registered first, permissionless, under the same resolver as the published Rhinestone policies.
         IRegistryLite(REGISTRY).registerModule(RESOLVER, address(policy), "", "");
@@ -1092,7 +1093,7 @@ contract RealStackTest is Test {
     }
 
     function test_realStack_unregisteredPolicyCannotBeAttested() public {
-        MamoruActionPolicy fresh = new MamoruActionPolicy(SMART_SESSION, NPM, ROUTER, FACTORY);
+        MamoruActionPolicy fresh = new MamoruActionPolicy(SMART_SESSION, NPM, ROUTER, FACTORY, GUARDIAN);
         safe = _deploySafe();
         Execution[] memory xs = _trustCalls(safe, true);
         xs[1] = _attestCall(_arr(address(fresh)));

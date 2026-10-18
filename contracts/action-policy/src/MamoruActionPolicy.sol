@@ -132,6 +132,10 @@ contract MamoruActionPolicy is IActionPolicy {
     bytes4 internal constant BURN = 0x42966c68; // burn(uint256)
 
     address public immutable SMART_SESSION;
+    /// Revoke-only watchdog key (spec 007 "Guardian"): may pause and unpause an account's grants, nothing else. It
+    /// cannot widen an envelope, move a token or touch a position; a compromised guardian can only stop the engine.
+    /// address(0) = no guardian.
+    address public immutable GUARDIAN;
     INPM public immutable NPM;
     address public immutable ROUTER;
     IUniswapV3Factory public immutable FACTORY;
@@ -188,11 +192,15 @@ contract MamoruActionPolicy is IActionPolicy {
     /// tokenId => pool, for positions minted through `mint` with this account as recipient.
     mapping(address account => mapping(uint256 tokenId => address pool)) public admittedPool;
     mapping(address pool => PoolInfo) internal _pool;
+    /// generation + 1 at the time of the pause; 0 = not paused. A renewal (higher generation) ends it by itself.
+    mapping(address account => uint64) public pausedAt;
 
     uint256 private _locked = 1;
 
     event PolicySet(ConfigId id, address multiplexer, address account);
     event Admitted(address indexed account, address indexed pool, uint256 indexed tokenId);
+    event Paused(address indexed account, uint64 generation);
+    event Unpaused(address indexed account);
 
     error PolicyNotInitialized(ConfigId id, address multiplexer, address account);
     error OnlySmartSession();
@@ -203,11 +211,14 @@ contract MamoruActionPolicy is IActionPolicy {
     error WrongRecipient();
     error SpotOutsideBand(int24 spot, int24 twap, uint24 band);
     error NotAdmitted(address account, uint256 tokenId);
+    error OnlyGuardian();
+    error AccountPaused(address account);
     error Reentrancy();
     error TransferFailed();
 
-    constructor(address smartSession, address npm, address router, address factory) {
+    constructor(address smartSession, address npm, address router, address factory, address guardian) {
         SMART_SESSION = smartSession;
+        GUARDIAN = guardian;
         NPM = INPM(npm);
         ROUTER = router;
         FACTORY = IUniswapV3Factory(factory);
@@ -254,6 +265,7 @@ contract MamoruActionPolicy is IActionPolicy {
         Config memory c = _config[id][account];
         if (c.pool == address(0)) revert PolicyNotInitialized(id, msg.sender, account);
         if (c.generation != generationOf[account]) return VALIDATION_FAILED; // retired by a renewal
+        if (isPaused(account)) return VALIDATION_FAILED; // the guardian stopped this account's grants
         if (value != 0 || data.length < 4) return VALIDATION_FAILED;
         PoolInfo memory p = _pool[c.pool];
         bytes4 sel = bytes4(data[:4]);
@@ -325,6 +337,7 @@ contract MamoruActionPolicy is IActionPolicy {
         if (pool == address(0) || c.pool != pool || c.generation != generationOf[account]) {
             revert NoConfig(account, pool);
         }
+        if (isPaused(account)) revert AccountPaused(account);
         (, int24 spot,,,,,) = IUniswapV3Pool(pool).slot0();
         int24 twap = _twapTick(c);
         if (_absDiff(spot, twap) > c.bandTicks) revert SpotOutsideBand(spot, twap, c.bandTicks);
@@ -361,6 +374,7 @@ contract MamoruActionPolicy is IActionPolicy {
         if (pool == address(0) || NPM.ownerOf(n.tokenId) != account) revert NotAdmitted(account, n.tokenId);
         Config memory c = _poolConfig[account][pool];
         if (c.pool != pool || c.generation != generationOf[account]) revert NoConfig(account, pool);
+        if (isPaused(account)) revert AccountPaused(account);
         (, int24 spot,,,,,) = IUniswapV3Pool(pool).slot0();
         int24 twap = _twapTick(c);
         if (_absDiff(spot, twap) > c.bandTicks) revert SpotOutsideBand(spot, twap, c.bandTicks);
@@ -376,6 +390,30 @@ contract MamoruActionPolicy is IActionPolicy {
         if (n.amount0Desired > amount0) _push(p.token0, account, n.amount0Desired - amount0);
         if (n.amount1Desired > amount1) _push(p.token1, account, n.amount1Desired - amount1);
         _locked = 1;
+    }
+
+    // ---------------------------------------------------------------- guardian: revoke-only
+
+    /// Refuses every session action of `account` (validation and the policy's own mint/increase) until unpaused or
+    /// until the owner renews (a higher generation). The owner's passkey path is not behind this policy, so the owner
+    /// can always withdraw.
+    function pause(address account) external {
+        if (msg.sender != GUARDIAN || GUARDIAN == address(0)) revert OnlyGuardian();
+        uint64 g = generationOf[account];
+        pausedAt[account] = g + 1;
+        emit Paused(account, g);
+    }
+
+    /// Restores the same owner-signed envelope; it never widens it.
+    function unpause(address account) external {
+        if (msg.sender != GUARDIAN || GUARDIAN == address(0)) revert OnlyGuardian();
+        pausedAt[account] = 0;
+        emit Unpaused(account);
+    }
+
+    function isPaused(address account) public view returns (bool) {
+        uint64 p = pausedAt[account];
+        return p != 0 && p == generationOf[account] + 1;
     }
 
     // ---------------------------------------------------------------- views the engine uses to build calls
