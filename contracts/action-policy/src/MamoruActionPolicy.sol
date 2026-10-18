@@ -90,14 +90,23 @@ interface INPM {
 }
 
 /**
- * @title MamoruActionPolicy (spec 007, otto/mamoru#151). PoC, not audited, not deployed.
+ * @title MamoruActionPolicy (spec 007, otto/mamoru#151). Not deployed. T6 audit fixes applied (see
+ * specs/007-onchain-action-policy/results/t6-fixes-2026-10-18.md).
  * @notice A SmartSession action policy that sits NEXT TO UniActionPolicy on every action of a Mamoru grant. It only
- * adds refusals: price bounds from the pool's own TWAP, a per-account set of admitted positions, cumulative budgets
- * per window and per approval, and a generation number that retires every older grant of the account at renewal.
+ * adds refusals:
+ *  - price: every priced action must stay inside one range [lo, hi] built from TWO TWAPs of the pool's own oracle (a
+ *    long and a short window): lo = max(long, short) - band, hi = min(long, short) + band. Moving either TWAP alone
+ *    can only narrow it. Both windows must also show a harmonic-mean in-range liquidity of at least `minLiquidity`:
+ *    a TWAP pushed by holding the pool in an empty tick range for a block craters it (T6 H-1, measured on a fork).
+ *  - positions: decrease/collect/burn only for tokenIds admitted for this account and pool, minted through `mint`
+ *    or named by the owner in the enable data (`Init.admit`).
+ *  - budget: ONE value budget per account and pool, in units of one of the pool's tokens (the stable one), charged
+ *    for swap `amountIn` and mint `amount*Desired` at the range edge that values them highest. A token bucket of
+ *    capacity `perWindow` refilled at `perWindow / budgetWindow` per second, and a per-approval `total`.
+ *  - renewal: a generation number that retires every older grant of the account.
  *
  * It is also the only way a session can mint: the grant names `MamoruActionPolicy.mint` instead of the position
- * manager's `mint`, so the policy learns the new tokenId from the manager's return value and admits it. A tokenId
- * never minted through here for this account cannot be decreased, collected or burned by a session.
+ * manager's `mint`, so the policy learns the new tokenId from the manager's return value and admits it.
  *
  * Validation-phase reads (pool oracle, position manager, block.timestamp) break ERC-7562 public-mempool rules. Mamoru
  * bundles its own userOps (apps/mamoru-operator/src/bundler.ts); an attacker with a leaked key can call handleOps
@@ -113,28 +122,54 @@ contract MamoruActionPolicy is IActionPolicy {
     bytes4 internal constant COLLECT = 0xfc6f7865; // collect((uint256,address,uint128,uint128))
     bytes4 internal constant BURN = 0x42966c68; // burn(uint256)
 
+    /// Hard bounds on owner-signed Init values (T6 I-2): the owner taps a hash the operator built.
+    uint32 public constant MIN_TWAP_WINDOW = 600;
+    uint32 public constant MAX_TWAP_WINDOW = 86_400;
+    uint32 public constant MIN_SHORT_WINDOW = 60;
+    uint24 public constant MIN_BAND = 2;
+    uint24 public constant MAX_BAND = 500;
+    uint32 public constant MIN_BUDGET_WINDOW = 3_600;
+    uint64 public constant MAX_GENERATION = type(uint32).max;
+    uint256 public constant MAX_ADMIT = 64;
+
     address public immutable SMART_SESSION;
     INPM public immutable NPM;
     address public immutable ROUTER;
     IUniswapV3Factory public immutable FACTORY;
 
-    /// Owner-signed init data of one session action (abi.encode of this struct).
+    /// Owner-signed init data of one session action (abi.encode of this struct). Every action of every session of a
+    /// pool in one generation must carry the same values (only `admit` may differ); see `ConfigMismatch`.
     struct Init {
         address pool; // the one pool the grant covers (a Uniswap v3 factory pool)
-        uint32 twapWindow; // seconds of the pool's own oracle
-        uint24 bandTicks; // max distance of any execution price from the TWAP, in ticks (1 tick = 1 bp of price)
+        uint32 twapWindow; // seconds, the long TWAP (1,800 in production)
+        uint32 twapShortWindow; // seconds, the short TWAP (300 in production); MIN_SHORT_WINDOW <= short < long
+        uint24 bandTicks; // max distance of any execution price from the range built from both TWAPs (1 tick = 1 bp)
         uint64 generation; // approval number of the account; a higher one retires every lower one
-        uint32 budgetWindow; // seconds; spend of token0/token1 is summed per window...
-        uint128 perWindow0;
-        uint128 perWindow1;
-        uint128 total0; // ...and over the whole approval (this generation)
-        uint128 total1;
+        uint128 minLiquidity; // floor of the harmonic-mean in-range liquidity over each window (T6 H-1)
+        bool budgetIn1; // budget unit: false = token0 units, true = token1 units (the pool's stable token)
+        uint32 budgetWindow; // seconds for the bucket to refill from empty to `perWindow`
+        uint128 perWindow; // bucket capacity, in budget units
+        uint128 total; // spend over the whole approval (this generation), in budget units
+        uint256[] admit; // positions the owner admits at enable (minted outside this deployment), T6 M-4
     }
 
+    /// Per account and pool: everything `checkAction`, `mint` and the views use. Written only at enable.
     struct Config {
-        address pool;
         uint32 twapWindow;
+        uint32 twapShortWindow;
         uint24 bandTicks;
+        uint64 generation;
+        bool budgetIn1;
+        uint32 budgetWindow;
+        uint128 minLiquidity;
+        uint128 perWindow;
+        uint128 total;
+        bytes32 initHash; // keccak of the Init without `admit`: a same-generation re-init must match it
+    }
+
+    /// Per ConfigId (one session action): which pool and generation it was enabled for.
+    struct Binding {
+        address pool;
         uint64 generation;
     }
 
@@ -144,30 +179,21 @@ contract MamoruActionPolicy is IActionPolicy {
         uint24 fee;
     }
 
-    struct Budget {
-        uint32 window;
-        uint128 perWindow0;
-        uint128 perWindow1;
-        uint128 total0;
-        uint128 total1;
-    }
-
+    /// Token-bucket state. `debt` is what is spent and not yet refilled (it carries across generations, T6 L-5);
+    /// `total` is the spend of `generation` (it resets when the generation changes).
     struct Spend {
-        uint64 epoch;
         uint64 generation;
-        uint128 window0;
-        uint128 window1;
-        uint128 total0;
-        uint128 total1;
+        uint64 updatedAt;
+        bool in1;
+        uint128 debt;
+        uint128 total;
     }
 
-    mapping(ConfigId => mapping(address account => Config)) internal _config;
+    mapping(ConfigId => mapping(address account => Binding)) internal _binding;
     mapping(address account => uint64) public generationOf;
-    /// Account-level copy of the current config per pool: `mint` runs at execution time, where no ConfigId is known.
-    mapping(address account => mapping(address pool => Config)) internal _poolConfig;
-    mapping(address account => mapping(address pool => Budget)) internal _budget;
+    mapping(address account => mapping(address pool => Config)) internal _config;
     mapping(address account => mapping(address pool => Spend)) internal _spend;
-    /// tokenId => pool, for positions minted through `mint` with this account as recipient.
+    /// tokenId => pool, for positions minted through `mint` with this account as recipient, or admitted at enable.
     mapping(address account => mapping(uint256 tokenId => address pool)) public admittedPool;
     mapping(address pool => PoolInfo) internal _pool;
 
@@ -180,10 +206,15 @@ contract MamoruActionPolicy is IActionPolicy {
     error OnlySmartSession();
     error NotAFactoryPool(address pool);
     error StaleGeneration(uint64 given, uint64 current);
+    error BadInit(uint256 field);
+    error ConfigMismatch(address pool, uint64 generation);
+    error ObservationCardinalityTooLow(uint16 cardinalityNext, uint32 twapWindow);
+    error NotAdmissible(uint256 tokenId);
     error NoConfig(address account, address pool);
-    error WrongPool();
+    error NotAdmitted(uint256 tokenId);
     error WrongRecipient();
-    error SpotOutsideBand(int24 spot, int24 twap, uint24 band);
+    error OracleRefused(int24 twapLong, int24 twapShort, uint128 hmLong, uint128 hmShort);
+    error SpotOutsideRange(uint160 sqrtPriceX96, int24 lo, int24 hi);
     error Reentrancy();
     error TransferFailed();
 
@@ -204,24 +235,51 @@ contract MamoruActionPolicy is IActionPolicy {
 
     function initializeWithMultiplexer(address account, ConfigId configId, bytes calldata initData) external {
         // Account-level state (generation, budgets, admitted set) must never be writable by an arbitrary
-        // "multiplexer", unlike UniActionPolicy's purely per-multiplexer storage.
+        // "multiplexer", unlike UniActionPolicy's purely per-multiplexer storage. SmartSession calls this only from
+        // `enableSessions` (owner-executed) or an ENABLE-mode userOp (owner-signed enable data); account == msg.sender
+        // of SmartSession there, so a session key can neither reach this nor add to `admit`.
         if (msg.sender != SMART_SESSION) revert OnlySmartSession();
         Init memory i = abi.decode(initData, (Init));
-        _poolInfo(i.pool); // refuses a non-factory pool, caches token0/token1/fee
+        PoolInfo memory p = _poolInfo(i.pool); // refuses a non-factory pool, caches token0/token1/fee
+        _validate(i);
+
         uint64 current = generationOf[account];
         if (i.generation < current) revert StaleGeneration(i.generation, current);
+        // A jump of more than one is allowed only on the first enable at this deployment (a migration carries the
+        // old deployment's generation); after that, renewals step by one, so nobody can burn the number space.
+        if (current != 0 && i.generation > current + 1) revert BadInit(4);
         if (i.generation > current) generationOf[account] = i.generation;
-        Config memory c =
-            Config({pool: i.pool, twapWindow: i.twapWindow, bandTicks: i.bandTicks, generation: i.generation});
-        _config[configId][account] = c;
-        _poolConfig[account][i.pool] = c;
-        _budget[account][i.pool] = Budget({
-            window: i.budgetWindow,
-            perWindow0: i.perWindow0,
-            perWindow1: i.perWindow1,
-            total0: i.total0,
-            total1: i.total1
-        });
+
+        bytes32 h = _initHash(i);
+        Config storage c = _config[account][i.pool];
+        if (c.twapWindow != 0 && c.generation == i.generation) {
+            // T6 I-1: one config per (account, pool, generation), whatever ConfigId it arrives under.
+            if (c.initHash != h) revert ConfigMismatch(i.pool, i.generation);
+        } else {
+            _config[account][i.pool] = Config({
+                twapWindow: i.twapWindow,
+                twapShortWindow: i.twapShortWindow,
+                bandTicks: i.bandTicks,
+                generation: i.generation,
+                budgetIn1: i.budgetIn1,
+                budgetWindow: i.budgetWindow,
+                minLiquidity: i.minLiquidity,
+                perWindow: i.perWindow,
+                total: i.total,
+                initHash: h
+            });
+            Spend storage s = _spend[account][i.pool];
+            // Budget unit changed (never in practice: always the pool's stable token): spend in the old unit cannot
+            // be carried, so start with an empty bucket instead of a full one.
+            if (s.in1 != i.budgetIn1) {
+                if (s.updatedAt != 0) (s.debt, s.updatedAt) = (i.perWindow, uint64(block.timestamp));
+                s.in1 = i.budgetIn1;
+            }
+        }
+        _binding[configId][account] = Binding({pool: i.pool, generation: i.generation});
+        for (uint256 k; k < i.admit.length; k++) {
+            _admitAtEnable(account, i.pool, p, i.admit[k]);
+        }
         emit PolicySet(configId, msg.sender, account);
     }
 
@@ -232,45 +290,47 @@ contract MamoruActionPolicy is IActionPolicy {
         returns (uint256)
     {
         if (msg.sender != SMART_SESSION) return VALIDATION_FAILED;
-        Config memory c = _config[id][account];
-        if (c.pool == address(0)) revert PolicyNotInitialized(id, msg.sender, account);
-        if (c.generation != generationOf[account]) return VALIDATION_FAILED; // retired by a renewal
+        Binding memory b = _binding[id][account];
+        if (b.pool == address(0)) revert PolicyNotInitialized(id, msg.sender, account);
+        if (b.generation != generationOf[account]) return VALIDATION_FAILED; // retired by a renewal
         if (value != 0 || data.length < 4) return VALIDATION_FAILED;
-        PoolInfo memory p = _pool[c.pool];
+        Config memory c = _config[account][b.pool];
+        PoolInfo memory p = _pool[b.pool];
         bytes4 sel = bytes4(data[:4]);
 
         if (target == ROUTER && sel == EXACT_INPUT_SINGLE) {
-            ExactInputSingleParams memory s = abi.decode(data[4:], (ExactInputSingleParams));
-            if (!_swapOk(c, p, account, s)) return VALIDATION_FAILED;
-            return
-                _spendOk(
-                    account, c.pool, s.tokenIn == p.token0 ? s.amountIn : 0, s.tokenIn == p.token1 ? s.amountIn : 0
-                );
+            return _checkSwap(account, b.pool, c, p, abi.decode(data[4:], (ExactInputSingleParams)));
         }
         if (target == address(this) && sel == this.mint.selector) {
             MintParams memory m = abi.decode(data[4:], (MintParams));
             if (m.token0 != p.token0 || m.token1 != p.token1 || m.fee != p.fee || m.recipient != account) {
                 return VALIDATION_FAILED;
             }
+            (bool ok, int24 lo, int24 hi) = _range(c, b.pool);
+            if (!ok) return VALIDATION_FAILED;
             // Desired amounts are an upper bound of what the mint takes: the budget is charged conservatively.
-            return _spendOk(account, c.pool, m.amount0Desired, m.amount1Desired);
+            return _charge(account, b.pool, c, _value(c, p, lo, hi, m.amount0Desired, m.amount1Desired))
+                ? VALIDATION_SUCCESS
+                : VALIDATION_FAILED;
         }
         if (target == address(NPM) && sel == DECREASE) {
             DecreaseLiquidityParams memory d = abi.decode(data[4:], (DecreaseLiquidityParams));
-            if (!_isAdmitted(account, c.pool, d.tokenId)) return VALIDATION_FAILED;
-            (uint256 min0, uint256 min1) = _decreaseMins(c, d.tokenId, d.liquidity);
+            if (!_isAdmitted(account, b.pool, d.tokenId)) return VALIDATION_FAILED;
+            (bool ok, int24 lo, int24 hi) = _range(c, b.pool);
+            if (!ok) return VALIDATION_FAILED;
+            (uint256 min0, uint256 min1) = _decreaseMins(lo, hi, d.tokenId, d.liquidity);
             return d.amount0Min >= min0 && d.amount1Min >= min1 ? VALIDATION_SUCCESS : VALIDATION_FAILED;
         }
         if (target == address(NPM) && sel == COLLECT) {
             CollectParams memory k = abi.decode(data[4:], (CollectParams));
             return
-                _isAdmitted(account, c.pool, k.tokenId) && k.recipient == account
+                _isAdmitted(account, b.pool, k.tokenId) && k.recipient == account
                     ? VALIDATION_SUCCESS
                     : VALIDATION_FAILED;
         }
         if (target == address(NPM) && sel == BURN) {
             uint256 tokenId = abi.decode(data[4:], (uint256));
-            return _isAdmitted(account, c.pool, tokenId) ? VALIDATION_SUCCESS : VALIDATION_FAILED;
+            return _isAdmitted(account, b.pool, tokenId) ? VALIDATION_SUCCESS : VALIDATION_FAILED;
         }
         if (sel == APPROVE && (target == p.token0 || target == p.token1)) {
             (address spender,) = abi.decode(data[4:], (address, uint256));
@@ -280,12 +340,34 @@ contract MamoruActionPolicy is IActionPolicy {
         return VALIDATION_FAILED;
     }
 
+    function _checkSwap(
+        address account,
+        address pool,
+        Config memory c,
+        PoolInfo memory p,
+        ExactInputSingleParams memory s
+    ) internal returns (uint256) {
+        if (s.recipient != account || s.fee != p.fee) return VALIDATION_FAILED;
+        bool zeroForOne = s.tokenIn == p.token0 && s.tokenOut == p.token1;
+        if (!zeroForOne && !(s.tokenIn == p.token1 && s.tokenOut == p.token0)) return VALIDATION_FAILED;
+        (bool ok, int24 lo, int24 hi) = _range(c, pool);
+        if (!ok) return VALIDATION_FAILED;
+        (uint256 minOut, uint160 limit) = _swapBounds(p, lo, hi, zeroForOne, s.amountIn);
+        if (s.amountOutMinimum < minOut) return VALIDATION_FAILED;
+        // A zero limit means "no limit" to the pool: refused. zeroForOne moves the price down: the limit is a floor.
+        if (s.sqrtPriceLimitX96 == 0) return VALIDATION_FAILED;
+        if (zeroForOne ? s.sqrtPriceLimitX96 < limit : s.sqrtPriceLimitX96 > limit) return VALIDATION_FAILED;
+        uint256 v = _value(c, p, lo, hi, zeroForOne ? s.amountIn : 0, zeroForOne ? 0 : s.amountIn);
+        return _charge(account, pool, c, v) ? VALIDATION_SUCCESS : VALIDATION_FAILED;
+    }
+
     // ---------------------------------------------------------------- execution: the only session mint path
 
     /**
      * @notice Called BY THE ACCOUNT (msg.sender) inside a session batch, after approving this contract for at most the
-     * desired amounts. Pulls them, mints with the account as recipient, returns what the manager did not take, admits
-     * the new tokenId. Refuses when the pool's spot tick is more than `bandTicks` from its TWAP.
+     * desired amounts. Pulls them, mints with the account as recipient, returns everything the manager did not take,
+     * admits the new tokenId. Refuses when the pool's spot price is outside the range [lo, hi], or the oracle check
+     * fails, right before the manager's call.
      */
     function mint(MintParams calldata m)
         external
@@ -296,30 +378,45 @@ contract MamoruActionPolicy is IActionPolicy {
         address account = msg.sender;
         if (m.recipient != account) revert WrongRecipient();
         address pool = FACTORY.getPool(m.token0, m.token1, m.fee);
-        Config memory c = _poolConfig[account][pool];
-        if (pool == address(0) || c.pool != pool || c.generation != generationOf[account]) {
+        Config memory c = _config[account][pool];
+        if (pool == address(0) || c.twapWindow == 0 || c.generation != generationOf[account]) {
             revert NoConfig(account, pool);
         }
-        (, int24 spot,,,,,) = IUniswapV3Pool(pool).slot0();
-        int24 twap = _twapTick(c);
-        if (_absDiff(spot, twap) > c.bandTicks) revert SpotOutsideBand(spot, twap, c.bandTicks);
-
+        uint256 b0 = IERC20Min(m.token0).balanceOf(address(this));
+        uint256 b1 = IERC20Min(m.token1).balanceOf(address(this));
         _pull(m.token0, account, m.amount0Desired);
         _pull(m.token1, account, m.amount1Desired);
         _approve(m.token0, address(NPM), m.amount0Desired);
         _approve(m.token1, address(NPM), m.amount1Desired);
+        // T6 I-7: checked right before the manager's call, after every token callback of the pulls/approvals.
+        _requireSpotInRange(c, pool);
         (tokenId, liquidity, amount0, amount1) = NPM.mint(m);
         _approve(m.token0, address(NPM), 0);
         _approve(m.token1, address(NPM), 0);
-        if (m.amount0Desired > amount0) _push(m.token0, account, m.amount0Desired - amount0);
-        if (m.amount1Desired > amount1) _push(m.token1, account, m.amount1Desired - amount1);
+        // T6 I-5: refund from the balance delta, so WETH the manager funded from its own ETH comes back too.
+        uint256 r0 = IERC20Min(m.token0).balanceOf(address(this)) - b0;
+        uint256 r1 = IERC20Min(m.token1).balanceOf(address(this)) - b1;
+        if (r0 != 0) _push(m.token0, account, r0);
+        if (r1 != 0) _push(m.token1, account, r1);
 
         admittedPool[account][tokenId] = pool;
         emit Admitted(account, pool, tokenId);
         _locked = 1;
     }
 
-    // ---------------------------------------------------------------- views the engine uses to build calls
+    // ---------------------------------------------------------------- views the engine and precheck use
+
+    /// The price range [lo, hi] (ticks) every priced action of `account` in `pool` must stay in now. Reverts
+    /// `OracleRefused` when the two TWAPs are more than 2 x band apart or either window's liquidity is under the floor.
+    function priceRange(address account, address pool) external view returns (int24 lo, int24 hi) {
+        Config memory c = _current(account, pool);
+        bool ok;
+        (ok, lo, hi) = _range(c, pool);
+        if (!ok) {
+            (int24 tl, int24 ts, uint128 hl, uint128 hs) = _oracle(c, pool);
+            revert OracleRefused(tl, ts, hl, hs);
+        }
+    }
 
     /// Smallest `amountOutMinimum` and the farthest `sqrtPriceLimitX96` the policy accepts for this swap now.
     function swapBounds(address account, address pool, address tokenIn, uint256 amountIn)
@@ -327,11 +424,9 @@ contract MamoruActionPolicy is IActionPolicy {
         view
         returns (uint256 minOut, uint160 sqrtPriceLimitX96)
     {
-        Config memory c = _poolConfig[account][pool];
-        if (c.pool == address(0)) revert NoConfig(account, pool);
+        (int24 lo, int24 hi) = this.priceRange(account, pool);
         PoolInfo memory p = _pool[pool];
-        int24 twap = _twapTick(c);
-        return _swapBounds(c, p, twap, tokenIn, amountIn);
+        return _swapBounds(p, lo, hi, tokenIn == p.token0, amountIn);
     }
 
     /// Smallest amount0Min / amount1Min the policy accepts for decreasing `liquidity` of `tokenId` now.
@@ -340,64 +435,182 @@ contract MamoruActionPolicy is IActionPolicy {
         view
         returns (uint256, uint256)
     {
-        Config memory c = _poolConfig[account][pool];
-        if (c.pool == address(0)) revert NoConfig(account, pool);
-        return _decreaseMins(c, tokenId, liquidity);
+        if (!_isAdmitted(account, pool, tokenId)) revert NotAdmitted(tokenId);
+        (int24 lo, int24 hi) = this.priceRange(account, pool);
+        return _decreaseMins(lo, hi, tokenId, liquidity);
+    }
+
+    function configOf(address account, address pool) external view returns (Config memory) {
+        return _config[account][pool];
     }
 
     function spendOf(address account, address pool) external view returns (Spend memory) {
         return _spend[account][pool];
     }
 
-    // ---------------------------------------------------------------- internals
-
-    function _swapOk(Config memory c, PoolInfo memory p, address account, ExactInputSingleParams memory s)
-        internal
-        view
-        returns (bool)
-    {
-        if (s.recipient != account || s.fee != p.fee) return false;
-        bool pair =
-            (s.tokenIn == p.token0 && s.tokenOut == p.token1) || (s.tokenIn == p.token1 && s.tokenOut == p.token0);
-        if (!pair) return false;
-        (uint256 minOut, uint160 limit) = _swapBounds(c, p, _twapTick(c), s.tokenIn, s.amountIn);
-        if (s.amountOutMinimum < minOut) return false;
-        // A zero limit means "no limit" to the pool: refused. zeroForOne moves the price down, so the limit is a floor.
-        if (s.sqrtPriceLimitX96 == 0) return false;
-        return s.tokenIn == p.token0 ? s.sqrtPriceLimitX96 >= limit : s.sqrtPriceLimitX96 <= limit;
+    /// What one more charge may take now: (bucket room, approval room), in budget units.
+    function budgetLeft(address account, address pool) external view returns (uint256 window, uint256 total) {
+        Config memory c = _config[account][pool];
+        (uint256 debt, uint256 spent) = _bucket(_spend[account][pool], c);
+        window = c.perWindow > debt ? c.perWindow - debt : 0;
+        total = c.total > spent ? c.total - spent : 0;
     }
 
-    function _swapBounds(Config memory c, PoolInfo memory p, int24 twap, address tokenIn, uint256 amountIn)
+    // ---------------------------------------------------------------- internals: price
+
+    /// Two TWAPs and their harmonic-mean liquidity from one `observe([long, short, 0])`, floor-rounded like
+    /// `OracleLibrary.consult`. Same-block swaps cannot move any of them (observations are written per block).
+    function _oracle(Config memory c, address pool) internal view returns (int24 tl, int24 ts, uint128 hl, uint128 hs) {
+        uint32[] memory ago = new uint32[](3);
+        ago[0] = c.twapWindow;
+        ago[1] = c.twapShortWindow;
+        (int56[] memory tc, uint160[] memory sl) = IUniswapV3Pool(pool).observe(ago);
+        tl = _meanTick(tc[2] - tc[0], c.twapWindow);
+        ts = _meanTick(tc[2] - tc[1], c.twapShortWindow);
+        hl = _harmonicMean(sl[2] - sl[0], c.twapWindow);
+        hs = _harmonicMean(sl[2] - sl[1], c.twapShortWindow);
+    }
+
+    /// lo = max(long, short) - band + 1, hi = min(long, short) + band. The +1: both means are floored, so the true
+    /// mean of the higher one can be up to one tick above it (T6 L-7). `ok` is false when either window's
+    /// harmonic-mean liquidity is under `minLiquidity` (T6 H-1) or the range is empty (the TWAPs disagree by more
+    /// than about 2 x band: a fast move or a manipulation, refused either way).
+    function _range(Config memory c, address pool) internal view returns (bool ok, int24 lo, int24 hi) {
+        (int24 tl, int24 ts, uint128 hl, uint128 hs) = _oracle(c, pool);
+        if (hl < c.minLiquidity || hs < c.minLiquidity) return (false, 0, 0);
+        int24 top = tl > ts ? tl : ts;
+        int24 bottom = tl > ts ? ts : tl;
+        lo = _clamp(int256(top) - int256(uint256(c.bandTicks)) + 1);
+        hi = _clamp(int256(bottom) + int256(uint256(c.bandTicks)));
+        ok = lo <= hi;
+    }
+
+    function _swapBounds(PoolInfo memory p, int24 lo, int24 hi, bool zeroForOne, uint256 amountIn)
         internal
         pure
         returns (uint256 minOut, uint160 limit)
     {
-        bool zeroForOne = tokenIn == p.token0;
-        // Worst acceptable price: `bandTicks` against the swapper from the TWAP tick.
-        int24 worst = zeroForOne ? _sub(twap, c.bandTicks) : _add(twap, c.bandTicks);
-        address tokenOut = zeroForOne ? p.token1 : p.token0;
+        // Worst acceptable price: the range edge against the swapper.
+        int24 worst = zeroForOne ? lo : hi;
+        (address tokenIn, address tokenOut) = zeroForOne ? (p.token0, p.token1) : (p.token1, p.token0);
         uint256 quote = OracleLibrary.getQuoteAtTick(worst, _u128(amountIn), tokenIn, tokenOut);
         minOut = (quote * (1e6 - p.fee)) / 1e6;
         limit = TickMath.getSqrtRatioAtTick(worst);
     }
 
-    /// Mins at the band edges: token0 is smallest at the top edge, token1 at the bottom edge. Any spot inside the band
-    /// returns at least these; a spot outside it fails the manager's own slippage check.
-    function _decreaseMins(Config memory c, uint256 tokenId, uint128 liquidity)
+    /// Mins at the range edges: token0 is smallest at the top edge, token1 at the bottom edge. Any spot inside the
+    /// range returns at least these; a spot outside it fails the manager's own slippage check.
+    function _decreaseMins(int24 lo, int24 hi, uint256 tokenId, uint128 liquidity)
         internal
         view
         returns (uint256 min0, uint256 min1)
     {
-        (,,,,, int24 lower, int24 upper,,,,,) = NPM.positions(tokenId);
-        int24 twap = _twapTick(c);
+        (int24 lower, int24 upper) = _ticksOf(tokenId);
         uint160 sa = TickMath.getSqrtRatioAtTick(lower);
         uint160 sb = TickMath.getSqrtRatioAtTick(upper);
-        (min0,) = LiquidityAmounts.getAmountsForLiquidity(
-            TickMath.getSqrtRatioAtTick(_add(twap, c.bandTicks)), sa, sb, liquidity
+        (min0,) = LiquidityAmounts.getAmountsForLiquidity(TickMath.getSqrtRatioAtTick(hi), sa, sb, liquidity);
+        (, min1) = LiquidityAmounts.getAmountsForLiquidity(TickMath.getSqrtRatioAtTick(lo), sa, sb, liquidity);
+    }
+
+    function _requireSpotInRange(Config memory c, address pool) internal view {
+        (bool ok, int24 lo, int24 hi) = _range(c, pool);
+        if (!ok) {
+            (int24 tl, int24 ts, uint128 hl, uint128 hs) = _oracle(c, pool);
+            revert OracleRefused(tl, ts, hl, hs);
+        }
+        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
+        // Compared as sqrt prices, not floored ticks (T6 L-7).
+        if (sqrtPriceX96 < TickMath.getSqrtRatioAtTick(lo) || sqrtPriceX96 > TickMath.getSqrtRatioAtTick(hi)) {
+            revert SpotOutsideRange(sqrtPriceX96, lo, hi);
+        }
+    }
+
+    // ---------------------------------------------------------------- internals: budget
+
+    /// Value of (a0, a1) in the budget unit, the other token converted at the range edge that values it highest:
+    /// token1 -> token0 at lo (lowest price of token0 in token1), token0 -> token1 at hi. T6 M-2.
+    function _value(Config memory c, PoolInfo memory p, int24 lo, int24 hi, uint256 a0, uint256 a1)
+        internal
+        pure
+        returns (uint256)
+    {
+        if (c.budgetIn1) {
+            return a1 + (a0 == 0 ? 0 : OracleLibrary.getQuoteAtTick(hi, _u128(a0), p.token0, p.token1));
+        }
+        return a0 + (a1 == 0 ? 0 : OracleLibrary.getQuoteAtTick(lo, _u128(a1), p.token1, p.token0));
+    }
+
+    /// (debt now, spend of the current generation) after the refill since the last charge. T6 M-3, L-5.
+    function _bucket(Spend memory s, Config memory c) internal view returns (uint256 debt, uint256 spent) {
+        debt = s.debt;
+        if (debt != 0 && block.timestamp > s.updatedAt) {
+            uint256 refill = (uint256(c.perWindow) * (block.timestamp - s.updatedAt)) / c.budgetWindow;
+            debt = refill >= debt ? 0 : debt - refill;
+        }
+        spent = s.generation == c.generation ? s.total : 0;
+    }
+
+    /// Charged at validation: a later revert of the execution does not refund it (conservative by design, T6 L-2).
+    function _charge(address account, address pool, Config memory c, uint256 v) internal returns (bool) {
+        Spend memory s = _spend[account][pool];
+        (uint256 debt, uint256 spent) = _bucket(s, c);
+        debt += v;
+        spent += v;
+        if (debt > c.perWindow || spent > c.total) return false;
+        _spend[account][pool] = Spend({
+            generation: c.generation,
+            updatedAt: uint64(block.timestamp),
+            in1: c.budgetIn1,
+            debt: uint128(debt),
+            total: uint128(spent)
+        });
+        return true;
+    }
+
+    // ---------------------------------------------------------------- internals: init, admission
+
+    function _validate(Init memory i) internal view {
+        if (i.twapWindow < MIN_TWAP_WINDOW || i.twapWindow > MAX_TWAP_WINDOW) revert BadInit(1);
+        if (i.twapShortWindow < MIN_SHORT_WINDOW || i.twapShortWindow >= i.twapWindow) revert BadInit(2);
+        if (i.bandTicks < MIN_BAND || i.bandTicks > MAX_BAND) revert BadInit(3);
+        if (i.generation > MAX_GENERATION) revert BadInit(4);
+        if (i.minLiquidity == 0) revert BadInit(5);
+        if (i.budgetWindow < MIN_BUDGET_WINDOW) revert BadInit(7);
+        if (i.perWindow == 0 || i.total < i.perWindow) revert BadInit(8);
+        if (i.admit.length > MAX_ADMIT) revert BadInit(10);
+        // T6 L-4: at most one observation per block and blocks of at least 1 s, so the ring must hold at least
+        // `twapWindow` observations for the long window to survive a dust swap in every block. Deploy step:
+        // script/Deploy.s.sol raises `observationCardinalityNext` before any enable.
+        (,,,, uint16 cardinalityNext,,) = IUniswapV3Pool(i.pool).slot0();
+        if (cardinalityNext < i.twapWindow) revert ObservationCardinalityTooLow(cardinalityNext, i.twapWindow);
+    }
+
+    function _initHash(Init memory i) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                i.pool,
+                i.twapWindow,
+                i.twapShortWindow,
+                i.bandTicks,
+                i.generation,
+                i.minLiquidity,
+                i.budgetIn1,
+                i.budgetWindow,
+                i.perWindow,
+                i.total
+            )
         );
-        (, min1) = LiquidityAmounts.getAmountsForLiquidity(
-            TickMath.getSqrtRatioAtTick(_sub(twap, c.bandTicks)), sa, sb, liquidity
-        );
+    }
+
+    /// T6 M-4: a position the account owns in this pool, named in owner-signed enable data, becomes manageable.
+    function _admitAtEnable(address account, address pool, PoolInfo memory p, uint256 tokenId) internal {
+        if (NPM.ownerOf(tokenId) != account) revert NotAdmissible(tokenId);
+        (,, address t0, address t1, uint24 fee,,,,,,,) = NPM.positions(tokenId);
+        if (t0 != p.token0 || t1 != p.token1 || fee != p.fee) revert NotAdmissible(tokenId);
+        if (admittedPool[account][tokenId] != pool) {
+            admittedPool[account][tokenId] = pool;
+            emit Admitted(account, pool, tokenId);
+        }
     }
 
     function _isAdmitted(address account, address pool, uint256 tokenId) internal view returns (bool) {
@@ -405,28 +618,13 @@ contract MamoruActionPolicy is IActionPolicy {
         return admittedPool[account][tokenId] == pool && NPM.ownerOf(tokenId) == account;
     }
 
-    function _spendOk(address account, address pool, uint256 a0, uint256 a1) internal returns (uint256) {
-        Budget memory b = _budget[account][pool];
-        Spend memory s = _spend[account][pool];
-        uint64 epoch = b.window == 0 ? 0 : uint64(block.timestamp / b.window);
-        uint64 gen = generationOf[account];
-        if (s.generation != gen) {
-            s = Spend({epoch: epoch, generation: gen, window0: 0, window1: 0, total0: 0, total1: 0});
-        }
-        if (s.epoch != epoch) (s.epoch, s.window0, s.window1) = (epoch, 0, 0);
-        uint256 w0 = s.window0 + a0;
-        uint256 w1 = s.window1 + a1;
-        uint256 t0 = s.total0 + a0;
-        uint256 t1 = s.total1 + a1;
-        if (w0 > b.perWindow0 || w1 > b.perWindow1 || t0 > b.total0 || t1 > b.total1) return VALIDATION_FAILED;
-        // Charged at validation: a later revert of the execution does not refund it (conservative by design).
-        (s.window0, s.window1, s.total0, s.total1) = (uint128(w0), uint128(w1), uint128(t0), uint128(t1));
-        _spend[account][pool] = s;
-        return VALIDATION_SUCCESS;
+    function _current(address account, address pool) internal view returns (Config memory c) {
+        c = _config[account][pool];
+        if (c.twapWindow == 0 || c.generation != generationOf[account]) revert NoConfig(account, pool);
     }
 
-    function _twapTick(Config memory c) internal view returns (int24 tick) {
-        (tick,) = OracleLibrary.consult(c.pool, c.twapWindow);
+    function _ticksOf(uint256 tokenId) internal view returns (int24 lower, int24 upper) {
+        (,,,,, lower, upper,,,,,) = NPM.positions(tokenId);
     }
 
     function _poolInfo(address pool) internal returns (PoolInfo memory p) {
@@ -437,6 +635,8 @@ contract MamoruActionPolicy is IActionPolicy {
         if (FACTORY.getPool(p.token0, p.token1, p.fee) != pool) revert NotAFactoryPool(pool);
         _pool[pool] = p;
     }
+
+    // ---------------------------------------------------------------- internals: tokens, math
 
     function _pull(address token, address from, uint256 amount) internal {
         if (amount == 0) return;
@@ -454,19 +654,21 @@ contract MamoruActionPolicy is IActionPolicy {
         if (!ok || (r.length != 0 && !abi.decode(r, (bool)))) revert TransferFailed();
     }
 
-    function _absDiff(int24 a, int24 b) internal pure returns (uint24) {
-        int256 d = int256(a) - int256(b);
-        return uint24(uint256(d < 0 ? -d : d));
+    function _meanTick(int56 delta, uint32 window) internal pure returns (int24 t) {
+        t = int24(delta / int56(uint56(window)));
+        if (delta < 0 && (delta % int56(uint56(window)) != 0)) t--;
     }
 
-    function _add(int24 t, uint24 band) internal pure returns (int24) {
-        int256 r = int256(t) + int256(uint256(band));
-        return r > TickMath.MAX_TICK ? TickMath.MAX_TICK : int24(r);
+    /// OracleLibrary.consult's harmonic mean; a zero delta (cannot happen over >= 60 s) reads as unlimited.
+    function _harmonicMean(uint160 secondsPerLiquidityDelta, uint32 window) internal pure returns (uint128) {
+        if (secondsPerLiquidityDelta == 0) return type(uint128).max;
+        return uint128((uint192(window) * type(uint160).max) / (uint192(secondsPerLiquidityDelta) << 32));
     }
 
-    function _sub(int24 t, uint24 band) internal pure returns (int24) {
-        int256 r = int256(t) - int256(uint256(band));
-        return r < TickMath.MIN_TICK ? TickMath.MIN_TICK : int24(r);
+    function _clamp(int256 t) internal pure returns (int24) {
+        if (t > TickMath.MAX_TICK) return TickMath.MAX_TICK;
+        if (t < TickMath.MIN_TICK) return TickMath.MIN_TICK;
+        return int24(t);
     }
 
     function _u128(uint256 x) internal pure returns (uint128) {
