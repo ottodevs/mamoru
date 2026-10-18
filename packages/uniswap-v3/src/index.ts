@@ -20,7 +20,12 @@ export function approve(tokenName: RegistryName, spender: 'SwapRouter02' | 'Nonf
   return call(tokenName, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [address(spender), amount] }))
 }
 
-/** FR-UNI-002: SwapRouter02.exactInputSingle, recipient the account, positive minimum, no price limit. */
+/**
+ * FR-UNI-002: SwapRouter02.exactInputSingle, recipient the account, positive minimum. `sqrtPriceLimitX96` omitted
+ * (every caller before spec 007 T3) is `0n`, no price limit — byte-identical to before this parameter existed.
+ * Spec 007 (#151) T3: a v4 policy's swap passes a non-zero limit at its narrower-band edge (`swapBoundsAtBand`,
+ * `@mamoru/uniswap-v3/policy-bounds`); `MamoruActionPolicy._swapOk` refuses a zero limit.
+ */
 export function exactInputSingle(p: {
   account: Address
   tokenIn: RegistryName
@@ -28,6 +33,7 @@ export function exactInputSingle(p: {
   fee: number
   amountIn: bigint
   amountOutMinimum: bigint
+  sqrtPriceLimitX96?: bigint
 }): V3Call {
   if (p.amountOutMinimum <= 0n) throw new Error('amountOutMinimum must be positive')
   return call(
@@ -43,7 +49,7 @@ export function exactInputSingle(p: {
           recipient: p.account,
           amountIn: p.amountIn,
           amountOutMinimum: p.amountOutMinimum,
-          sqrtPriceLimitX96: 0n,
+          sqrtPriceLimitX96: p.sqrtPriceLimitX96 ?? 0n,
         },
       ],
     }),
