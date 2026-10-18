@@ -72,7 +72,8 @@ export function startLiveBundler(client: PublicClient, relayer: Pick<Relayer, 'a
     }
     let receipt: TransactionReceipt
     try {
-      ;({ receipt } = await relayer.send({ to: entryPoint, data, gas: gasLimit }, opts.guard?.sent))
+      // The bundle's hash reaches the guard before the broadcast: a crash right after it cannot lose it.
+      ;({ receipt } = await relayer.send({ to: entryPoint, data, gas: gasLimit }, undefined, undefined, opts.guard?.sent))
     } catch (e) {
       // It may have been broadcast: not a validation refusal (-32603), the caller keeps asking by hash.
       opts.guard?.failed()

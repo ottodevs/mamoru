@@ -18,7 +18,7 @@ import { randomBytes } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { concat, createPublicClient, encodeAbiParameters, encodeFunctionData, http, keccak256, numberToHex, parseAbi, parseEventLogs, sliceHex, toHex, type Hex } from 'viem'
+import { concat, createPublicClient, encodeAbiParameters, encodeFunctionData, http, keccak256, numberToHex, pad, parseAbi, parseEventLogs, sliceHex, toHex, type Hex } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import type { AccountContext, Address, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
@@ -238,6 +238,10 @@ try {
     const body = Buffer.concat([int(r), int(s)])
     return Buffer.concat([Buffer.from([0x30, body.length]), body])
   }
+  /** A signature of `challenge`, presented for `prepareId`. */
+  function browserSignChallenge(challenge: Hex, prepareId: string): OwnerSignature {
+    return browserSign({ safeTxHash: challenge, prepareId })
+  }
   function browserSign(t: Pick<OwnerTxToSign, 'safeTxHash' | 'prepareId'>, by: SoftwarePasskey = passkey): OwnerSignature {
     const a = by.assert(t.safeTxHash)
     const s = randomBytes(1)[0]! & 1 ? P256_N - a.s : a.s
@@ -277,8 +281,9 @@ try {
     return fetch(url, init)
   }
   /** A BridgeOut on the operator's own bundler; with `minter`, CCTP is offered and minted on the Base fork. */
+  let flag = true
   const make = (o: { now?: () => number; minter?: boolean; bundlerUrl?: string; stateDir?: string } = {}) => {
-    const b = new BridgeOut(l1, l1Relayer, o.stateDir ?? dir, fetcher, o.now ?? Date.now, undefined, () => true, { bundler: o.bundlerUrl ? new L1Bundler(o.bundlerUrl, fetch, L1_BUNDLER_TIMEOUT_MS) : l1Bundler, paymaster: forkPm }, o.minter ? { client: baseClient, relayer: baseRelayer } : null)
+    const b = new BridgeOut(l1, l1Relayer, o.stateDir ?? dir, fetcher, o.now ?? Date.now, undefined, () => flag, { bundler: o.bundlerUrl ? new L1Bundler(o.bundlerUrl, fetch, L1_BUNDLER_TIMEOUT_MS) : l1Bundler, paymaster: forkPm }, o.minter ? { client: baseClient, relayer: baseRelayer } : null)
     guard = b.bundlerGuard()
     return b
   }
@@ -296,6 +301,24 @@ try {
   const sentBefore = await l1.getTransactionCount({ address: l1Relayer.address })
   check((await code(bo.submit(ctx, browserSign(p0, new SoftwarePasskey(PASSKEY_SCALARS.a2))))) === 'BAD_SIGNATURE', 'another passkey: BAD_SIGNATURE, nothing reaches the bundler')
   check((await l1.getTransactionCount({ address: l1Relayer.address })) === sentBefore, 'the relayer sent nothing for the refused signature')
+
+  // Gate = action (coordinator review): the /ops flag is checked again at submit, and a signature binds to the exact
+  // prepared userOp: one made for another prepare of the same account is refused.
+  const pa = await bo.prepare(ctx)
+  flag = false
+  check((await code(bo.submit(ctx, browserSign(pa)))) === 'BRIDGE_OFF', 'userOp path: flag turned off after prepare: BRIDGE_OFF')
+  flag = true
+  const pb = await bo.prepare(ctx)
+  check((await code(bo.submit(ctx, browserSignChallenge(pa.safeTxHash, pb.prepareId)))) === 'BAD_SIGNATURE', 'a signature over another prepare\'s userOp: BAD_SIGNATURE')
+  check((await l1.getTransactionCount({ address: l1Relayer.address })) === sentBefore, 'the relayer sent nothing for either')
+  // The relayer path (#72, no paymaster): the same flag check at submit.
+  const rp0 = new BridgeOut(l1, l1Relayer, mkdtempSync(join(tmpdir(), 'mamoru-e2e-relayer-')), fetcher, Date.now, undefined, () => flag)
+  const rpp = await rp0.prepare(ctx)
+  flag = false
+  check((await code(rp0.submit(ctx, browserSign(rpp)))) === 'BRIDGE_OFF', 'relayer path: flag turned off after prepare: BRIDGE_OFF')
+  flag = true
+  check((await l1.getTransactionCount({ address: l1Relayer.address })) === sentBefore && ((await l1.getCode({ address: safe })) ?? '0x') === '0x', 'relayer path: nothing deployed, nothing sent')
+  guard = bo.bundlerGuard()
 
   // A paymaster that names a recipient, or charges above its quote, never reaches the owner.
   forkPm.tamper = { recipient: '0x000000000000000000000000000000000000dEaD' }
@@ -418,16 +441,40 @@ try {
   check(sent.length === 1, 'the burn emitted one CCTP message')
   const raw = sent[0]!.args.message
   const message = concat([sliceHex(raw, 0, 12), toHex(randomBytes(32)), sliceHex(raw, 44, 144), numberToHex(2000, { size: 4 }), sliceHex(raw, 148)])
-  attestation = { message, attestation: await ATTESTER.sign({ hash: keccak256(message) }) }
   const baseBefore = await baseClient.readContract({ address: BASE_USDC, abi: erc20Abi, functionName: 'balanceOf', args: [csafe] })
+  const baseNonce0 = await baseClient.getTransactionCount({ address: baseRelayer.address })
+  // Gate = action: a validly attested message that is not this route's burn (another recipient, another amount) never
+  // gets a receiveMessage from the operator.
+  const otherRecipient = concat([sliceHex(message, 0, 148 + 36), pad(ctx.address, { size: 32 }), sliceHex(message, 148 + 68)])
+  const otherAmount = concat([sliceHex(message, 0, 148 + 68), numberToHex(BigInt(cr.amountUsdc) + 1n, { size: 32 }), sliceHex(message, 148 + 100)])
+  for (const [m, what] of [[otherRecipient, 'another recipient'], [otherAmount, 'another amount']] as const) {
+    attestation = { message: m, attestation: await ATTESTER.sign({ hash: keccak256(m) }) }
+    clock += 11_000
+    await cbo.tick()
+    check((await cbo.status(cctx)).route?.state === 'deposited' && (await baseClient.getTransactionCount({ address: baseRelayer.address })) === baseNonce0, `attested message for ${what}: no mint, nothing sent on Base`)
+  }
+  attestation = { message, attestation: await ATTESTER.sign({ hash: keccak256(message) }) }
+  // The day's Base mint budget used up: no mint (a fresh BridgeOut reads the journal).
+  const cdir = (cbo as unknown as { stateDir: string }).stateDir
+  const jf = join(cdir, 'bridge-out.json')
+  const jj = JSON.parse(readFileSync(jf, 'utf8'))
+  writeFileSync(jf, JSON.stringify({ ...jj, mints: { day: new Date(clock).toISOString().slice(0, 10), n: 100, wei: '0' } }))
   clock += 11_000
-  await cbo.tick()
-  const minted = (await cbo.status(cctx)).route!
+  const capped = make({ now: () => clock, minter: true, stateDir: cdir })
+  await capped.tick()
+  check((await baseClient.getTransactionCount({ address: baseRelayer.address })) === baseNonce0, 'Base mint budget for the day used up: no mint')
+  writeFileSync(jf, JSON.stringify({ ...JSON.parse(readFileSync(jf, 'utf8')), mints: undefined }))
+  const cbo2 = make({ now: () => clock, minter: true, stateDir: cdir })
+  clock += 11_000
+  await cbo2.tick()
+  const minted = (await cbo2.status(cctx)).route!
   const baseAfter = await baseClient.readContract({ address: BASE_USDC, abi: erc20Abi, functionName: 'balanceOf', args: [csafe] })
   const mintRc = minted.mintTx ? await baseClient.getTransactionReceipt({ hash: minted.mintTx }) : null
   check(minted.state === 'filled' && minted.fillTx === minted.mintTx && baseAfter - baseBefore === BigInt(cr.outputUsdc), `minted on Base by the operator: +${fmt(baseAfter - baseBefore)} USDC at the same Safe, receiveMessage gas ${mintRc?.gasUsed}`)
   clock += 11_000
-  check((await cbo.status(cctx)).route?.state === 'filled', 'status stays filled')
+  check((await cbo2.status(cctx)).route?.state === 'filled', 'status stays filled')
+  const mints = JSON.parse(readFileSync(jf, 'utf8')).mints
+  check(mints?.n === 1 && BigInt(mints.wei) === (mintRc ? mintRc.gasUsed * mintRc.effectiveGasPrice : -1n), `Base mint charged to the day at its real cost: ${mints?.wei} wei`)
 
   // ---- 3. What the first move costs at today's mainnet gas --------------------------------------------------------
   // anvil answers 1 gwei for the priority fee; the upstream node's answer is what a bundler would see today.

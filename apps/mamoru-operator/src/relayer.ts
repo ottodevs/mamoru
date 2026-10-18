@@ -71,7 +71,13 @@ export class Relayer {
    * (its gas limit at its signed maxFeePerGas, plus twice the L1 data fee of its bytes), an upper bound on what the
    * relayer pays for it, and the hash and relayer nonce of the signed transaction, known before anything leaves.
    */
-  send(tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: (maxFeeWei: bigint, signed: { hash: Hex; nonce: number }) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
+  send(
+    tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint },
+    onSent?: (hash: Hex) => void,
+    onSending?: (maxFeeWei: bigint, signed: { hash: Hex; nonce: number }) => void,
+    /** #180: the hash of the signed transaction, before it is broadcast, so a caller can persist it first. */
+    onSigned?: (hash: Hex) => void,
+  ): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     return this.lock.run(async () => {
       const wallet = createWalletClient({ account: this.account, chain: this.chain, transport: http(this.rpcUrl, { timeout: 60_000 }) })
       // Base rejects a tx over 2^24 gas (EIP-7825): the 30% margin must not push a fitting estimate over the cap.
@@ -99,6 +105,7 @@ export class Relayer {
       // The most it can cost: execution at its signed maxFeePerGas plus the L1 data fee for these bytes, doubled for the L1
       // price moving before inclusion. Only read when someone needs the bound.
       if (onSending) onSending(gas * fees.maxFeePerGas + 2n * (await this.l1Fee(serializedTransaction)), { hash: keccak256(serializedTransaction), nonce })
+      onSigned?.(keccak256(serializedTransaction))
       const hash = await wallet.sendRawTransaction({ serializedTransaction })
       this.lastSent = { nonce, at: Date.now() }
       onSent?.(hash)

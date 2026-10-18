@@ -133,7 +133,7 @@ export type Deposit = {
 /** The relayer sends this module needs, so tests can stand in for the operator's Relayer. */
 export type L1Sender = {
   readonly address: Address
-  send(tx: { to: Address; data?: Hex; gas?: bigint }, onSent?: (hash: Hex) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }>
+  send(tx: { to: Address; data?: Hex; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: (maxFeeWei: bigint) => void, onSigned?: (hash: Hex) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }>
 }
 
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>
@@ -141,7 +141,7 @@ export type Fetch = (input: string, init?: RequestInit) => Promise<Response>
 /** The userOp the owner signs and what it was built against. */
 /** The bridge leg the owner signs (#180): Across depositV3 or CCTP V2 depositForBurn, both to the same Safe on Base. */
 export type Leg = { bridge: 'across'; deposit: Deposit; output: bigint; fillSec: number } | { bridge: 'cctp'; burn: Burn; output: bigint; fillSec: number }
-type PreparedOp = { op: UserOperation<'0.7'>; validUntil: number; balance: bigint; gasCap: bigint; leg: Leg }
+type PreparedOp = { op: UserOperation<'0.7'>; validUntil: number; balance: bigint; gasCap: bigint; leg: Leg; aa: AccountAbstraction; quote: GasPrice }
 
 /** Base side of CCTP: the operator's Base client and relayer submit receiveMessage once Circle attests. */
 export type BaseMinter = { client: PublicClient; relayer: L1Sender }
@@ -149,6 +149,9 @@ export type BaseMinter = { client: PublicClient; relayer: L1Sender }
 export const MINT_GAS = 300_000n
 /** The relayer does not mint on Base above this gas price (2 gwei: at most ~0.0006 ETH per mint; Base is usually below 0.01 gwei). */
 export const MAX_BASE_GAS_PRICE_WEI = 2_000_000_000n
+/** Most the operator spends on Base mints per UTC day, all accounts (0.002 ETH, ~100 mints at 0.1 gwei), and how many. */
+export const MINT_BUDGET_WEI = 2_000_000_000_000_000n
+export const MINTS_PER_DAY = 100
 type Prepared = { prepareId: string; accountKey: string; live: LiveAccount; tx: SafeTx; safeTxHash: Hex; deposit: Deposit; deployed: boolean; expires: number; userOp?: PreparedOp }
 
 /** The bundler and paymaster of the userOp path. */
@@ -156,7 +159,7 @@ export type AccountAbstraction = { bundler: L1Bundler; paymaster: Erc20Paymaster
 
 /** A route as kept on disk: what the owner sees, plus what reconciliation needs. */
 type Stored = BridgeOutRoute & { id: string; safe: Address; safeNonce: string; fromBlock: string; execStarted?: boolean; userOpTx?: Hex; cctp?: { maxFee: string; minFinality: number } }
-type Journal = { routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }> }
+type Journal = { routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mints?: { day: string; n: number; wei: string } }
 
 const NON_TERMINAL = new Set<BridgeOutRoute['state']>(['sending', 'deposited', 'unconfirmed', 'expired'])
 
@@ -314,7 +317,7 @@ export class BridgeOut {
     // An unreadable journal stops the operator from starting: starting empty would forget moves under way and the
     // day's spend.
     const j = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<Journal>
-    return { routes: j.routes ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {} }
+    return { routes: j.routes ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, ...(j.mints ? { mints: j.mints } : {}) }
   }
 
   private save(): void {
@@ -524,7 +527,7 @@ export class BridgeOut {
     // amount and output for the stored route whatever the bridge.
     const tx = ownerSafeTx(legCalls, 0n)
     const deposit: Deposit = leg.bridge === 'across' ? leg.deposit : { amount, outputAmount: leg.output, exclusiveRelayer: zeroAddress, quoteTimestamp: 0, fillDeadline: 0, exclusivityDeadline: 0, fillSec: leg.fillSec }
-    this.remember({ prepareId, accountKey: ctx.accountKey, live, tx, safeTxHash: challenge, deposit, deployed, expires, userOp: { op, validUntil, balance, gasCap, leg } })
+    this.remember({ prepareId, accountKey: ctx.accountKey, live, tx, safeTxHash: challenge, deposit, deployed, expires, userOp: { op, validUntil, balance, gasCap, leg, aa, quote: q } })
     const fee = amount - leg.output
     const when = leg.fillSec >= 600 ? `in about ${Math.round(leg.fillSec / 60)} minutes` : `in about ${Math.max(leg.fillSec, 1)} s`
     const bridgeLine =
@@ -589,9 +592,14 @@ export class BridgeOut {
     if (!(await verifyOwnerSignature(signature, p.safeTxHash, p.live.webauthn))) throw new HttpError(400, 'BAD_SIGNATURE', 'the passkey signature does not match this account')
     // Turned off on /ops between the prepare and the signature: nothing is sent.
     this.on(ctx.accountKey)
+    // The path, bundler and paymaster that run are the ones the owner's approval was prepared for: a relayer-path
+    // approval never becomes a userOp, nor the reverse, and the userOp sent is the one whose SafeOp hash was signed.
+    if (!!p.userOp !== !!this.aa) throw new HttpError(409, 'PREPARE_MISMATCH', 'that approval was prepared for another way of sending, tap again')
     if (p.userOp) {
-      if (!this.aa) throw new HttpError(404, 'PREPARE_NOT_FOUND', 'that approval is not known, tap again')
-      return this.lock.run(() => this.sendUserOp(ctx, p, p.userOp!, signature, this.aa!))
+      const u = p.userOp
+      if (u.aa !== this.aa || getAddress(u.op.paymaster ?? zeroAddress) !== getAddress(u.quote.paymaster) || safeOpHash(u.op, ETHEREUM_CHAIN_ID, 0, u.validUntil) !== p.safeTxHash)
+        throw new HttpError(409, 'PREPARE_MISMATCH', 'that approval does not match what would be sent, tap again')
+      return this.lock.run(() => this.sendUserOp(ctx, p, u, signature, u.aa))
     }
     return this.lock.run(() => this.send(ctx, p, signature))
   }
@@ -865,6 +873,8 @@ export class BridgeOut {
     const enabled = this.enabledFor(ctx.accountKey)
     const route = this.journal.routes[ctx.accountKey]
     if (!route || !NON_TERMINAL.has(route.state)) return view(route, enabled)
+    // The move this process is sending: its own code writes it; a refresh from a stale copy could undo those writes.
+    if (this.sending && this.sending.route.id === route.id) return view(route, enabled)
     if (route.state === 'sending' && this.now() - Date.parse(route.at) < SENDING_STALE_MS) return view(route, enabled)
     const last = this.statusAt.get(ctx.accountKey) ?? 0
     if (this.now() - last < STATUS_CACHE_MS) return view(route, enabled)
@@ -968,32 +978,50 @@ export class BridgeOut {
         // Reverted: someone else may have minted first; otherwise try again below.
         r.mintTx = undefined
       }
-      const att = await cctpAttestation(r.l1Tx, this.fetcher)
-      if (!att || att.status !== 'complete' || !att.message || !att.attestation) return
-      let msg
-      try {
-        msg = decodeCctpMessage(att.message)
-      } catch {
-        logErr(`[bridge-out] ${r.safe.slice(0, 10)}: attested message does not decode`, r.l1Tx)
+      const atts = await cctpAttestation(r.l1Tx, this.fetcher)
+      if (!atts) return
+      // Only a complete attestation whose message is this route's burn: this account, this amount, Ethereum to Base.
+      const att = atts.find((a) => {
+        try {
+          return mintIsFor(decodeCctpMessage(a.message), L1_USDC, r.safe, BigInt(r.amountUsdc))
+        } catch {
+          return false
+        }
+      })
+      if (!att) {
+        if (atts.length > 0) logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, `no attested message is this burn (${atts.length} complete)`)
         return
       }
-      if (!mintIsFor(msg, L1_USDC, r.safe, BigInt(r.amountUsdc))) {
-        logErr(`[bridge-out] ${r.safe.slice(0, 10)}: attested message is not this burn`, r.l1Tx)
-        return
-      }
+      const msg = decodeCctpMessage(att.message)
       const used = await base.client.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: messageTransmitterV2Abi, functionName: 'usedNonces', args: [msg.nonce] })
       if (used !== 0n) {
         r.state = 'filled'
         return
       }
-      if ((await base.client.getGasPrice()) > MAX_BASE_GAS_PRICE_WEI) {
-        logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, "Base gas above the mint ceiling, minting later")
+      const price = await base.client.getGasPrice()
+      if (price > MAX_BASE_GAS_PRICE_WEI) {
+        logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, 'Base gas above the mint ceiling, minting later')
         return
       }
-      const sent = await base.relayer.send({ to: MESSAGE_TRANSMITTER_V2, data: receiveMessageData(att.message, att.attestation), gas: MINT_GAS }, (h) => {
+      // The day's mint budget, all accounts: charged at the bound before the send, settled to the real cost after.
+      const day = this.day()
+      const m = this.journal.mints && this.journal.mints.day === day ? this.journal.mints : { day, n: 0, wei: '0' }
+      const bound = MINT_GAS * price * 2n
+      if (m.n >= MINTS_PER_DAY || BigInt(m.wei) + bound > MINT_BUDGET_WEI) {
+        logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, 'Base mint budget for today used up, minting tomorrow')
+        return
+      }
+      this.journal.mints = { day, n: m.n + 1, wei: (BigInt(m.wei) + bound).toString() }
+      this.save()
+      // The mint's hash is on disk before the broadcast.
+      const sent = await base.relayer.send({ to: MESSAGE_TRANSMITTER_V2, data: receiveMessageData(att.message, att.attestation), gas: MINT_GAS }, undefined, undefined, (h) => {
         r.mintTx = h
         this.write(accountKey, { ...r })
       })
+      const cost = sent.receipt.gasUsed * sent.receipt.effectiveGasPrice
+      const mm = this.journal.mints!
+      if (mm.day === day && cost < bound) this.journal.mints = { ...mm, wei: (BigInt(mm.wei) - bound + cost).toString() }
+      this.save()
       r.mintTx = sent.hash
       if (sent.receipt.status === 'success') {
         r.state = 'filled'

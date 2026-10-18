@@ -66,16 +66,16 @@ export function burnMatches(logs: Log[], usdc: Address, safe: Address, b: Burn):
   )
 }
 
-/** Circle's attestation for the burn transaction: pending until 'complete', then the message and attestation to mint. */
-export async function cctpAttestation(txHash: Hex, fetcher: (input: string, init?: RequestInit) => Promise<Response> = fetch): Promise<{ status: 'pending' | 'complete'; message?: Hex; attestation?: Hex } | null> {
+/**
+ * Circle's complete attestations for the burn transaction (empty while pending), each with the message to mint.
+ * Null when Circle did not answer. The caller picks the one that is its burn.
+ */
+export async function cctpAttestation(txHash: Hex, fetcher: (input: string, init?: RequestInit) => Promise<Response> = fetch): Promise<{ message: Hex; attestation: Hex }[] | null> {
   const res = await fetcher(`${IRIS_API}/v2/messages/${CCTP_DOMAIN_ETHEREUM}?transactionHash=${txHash}`, { signal: AbortSignal.timeout(8_000) })
-  if (res.status === 404) return { status: 'pending' }
+  if (res.status === 404) return []
   if (!res.ok) return null
   const j = (await res.json()) as { messages?: { status?: string; message?: string; attestation?: string }[] }
-  const m = j.messages?.[0]
-  if (!m) return { status: 'pending' }
-  if (m.status !== 'complete' || !m.message?.startsWith('0x') || !m.attestation?.startsWith('0x')) return { status: 'pending' }
-  return { status: 'complete', message: m.message as Hex, attestation: m.attestation as Hex }
+  return (j.messages ?? []).flatMap((m) => (m.status === 'complete' && /^0x[0-9a-fA-F]+$/.test(m.message ?? '') && /^0x[0-9a-fA-F]+$/.test(m.attestation ?? '') ? [{ message: m.message as Hex, attestation: m.attestation as Hex }] : []))
 }
 
 /** What Circle charges per finality threshold, in basis points (GET /v2/burn/USDC/fees/0/6). */
