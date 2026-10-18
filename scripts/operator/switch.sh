@@ -23,19 +23,30 @@ state_dir="${MAMORU_OPERATOR_STATE_DIR:-$HOME/.local/state/mamoru-operator}"
 log="$state_dir/deploys.log"
 health_secs="${HEALTH_SECS:-90}"
 actor="${MAMORU_ACTOR:-$USER}"
+# Keys whose signatures make a commit deployable (git %GK): main is signed by Ot's key (merge-pr.sh re-signs).
+signers="${MAMORU_SIGNING_KEYS:-53A35CC2D46A3B29}"
 
-lock="${XDG_RUNTIME_DIR:-/tmp}/mamoru-operator-switch.lock"
+# Never a shared /tmp: anyone could hold or plant the lock there.
+lock="${XDG_RUNTIME_DIR:-$HOME/.cache}/mamoru-operator-switch.lock"
 exec 9>"$lock"
 flock -n 9 || { echo "another operator switch is running (lock $lock)" >&2; exit 1; }
 
 git -C "$op_dir" fetch -q origin main
-git -C "$op_dir" cat-file -e "$target^{commit}" 2>/dev/null || { echo "$target is not a commit here" >&2; exit 1; }
-git -C "$op_dir" merge-base --is-ancestor "$target" origin/main || { echo "$target is not on origin/main" >&2; exit 1; }
-[ "$(git -C "$op_dir" log -1 --format=%G? "$target")" = "G" ] || { echo "$target is not signed with a good signature" >&2; exit 1; }
+
+# Reviewed: on origin/main and signed (good signature) by an allowed key.
+reviewed() {
+  git -C "$op_dir" cat-file -e "$1^{commit}" 2>/dev/null || return 1
+  git -C "$op_dir" merge-base --is-ancestor "$1" origin/main || return 1
+  [ "$(git -C "$op_dir" log -1 --format=%G? "$1")" = "G" ] || return 1
+  [[ " $signers " == *" $(git -C "$op_dir" log -1 --format=%GK "$1") "* ]]
+}
+reviewed "$target" || { echo "$target is not a commit on origin/main signed by an allowed key ($signers)" >&2; exit 1; }
 [ -z "$(git -C "$op_dir" status --porcelain)" ] || { echo "$op_dir has local changes: refusing" >&2; exit 1; }
 
 prev="$(git -C "$op_dir" rev-parse HEAD)"
 [ "$prev" != "$target" ] || { echo "the operator already runs $target"; exit 0; }
+# The rollback target must be reviewed too, or a failed switch would "roll back" onto unreviewed code.
+reviewed "$prev" || { echo "the operator runs ${prev:0:12}, which is not a reviewed commit on origin/main: fix that by hand first" >&2; exit 1; }
 
 # Someone moved the worktree without this script: say so (the log is how sessions see each other's switches).
 last="$( { tail -n 1 "$log" 2>/dev/null || true; } | awk -F' \\| ' '{print $4}' | awk '{print $NF}')"
@@ -55,13 +66,14 @@ fi
 
 active="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(sum(1 for a in d['accounts'].values() if a.get('active')))" "$state_dir/accounts.json")"
 
-# Healthy: the unit is active, has not restarted on its own since `since`, and every active account's loop started.
+# Healthy: the unit is active in the invocation this restart started (no automatic restart since `restarts`), and
+# that invocation logged a started loop for at least `active` distinct accounts.
 healthy() {
-  local since="$1" restarts="$2"
+  local restarts="$1" inv loops
   for _ in $(seq 1 "$health_secs"); do
     if systemctl --user is-active -q "$unit" && [ "$(systemctl --user show "$unit" -p NRestarts --value)" = "$restarts" ]; then
-      local loops
-      loops="$(journalctl --user -u "$unit" --since "$since" -o cat --no-pager | grep -c 'loop started' || true)"
+      inv="$(systemctl --user show "$unit" -p InvocationID --value)"
+      loops="$(journalctl --user _SYSTEMD_INVOCATION_ID="$inv" -o cat --no-pager 2>/dev/null | grep -o '^\[engine [0-9a-f-]*\] loop started' | sort -u | wc -l)"
       [ "$loops" -ge "$active" ] && return 0
     fi
     sleep 1
@@ -69,14 +81,15 @@ healthy() {
   return 1
 }
 
+# Every step checked by hand: as an `if` condition, `set -e` does not apply inside this function.
 run_at() {
-  git -C "$op_dir" checkout -q --detach "$1"
-  (cd "$op_dir" && bun install --frozen-lockfile >/dev/null)
+  git -C "$op_dir" checkout -q --detach "$1" || return 1
+  [ "$(git -C "$op_dir" rev-parse HEAD)" = "$1" ] || return 1
+  (cd "$op_dir" && bun install --frozen-lockfile >/dev/null) || return 1
   systemctl --user reset-failed "$unit" 2>/dev/null || true
-  local since; since="$(date '+%Y-%m-%d %H:%M:%S')"
-  systemctl --user restart "$unit"
-  sleep 2
-  healthy "$since" "$(systemctl --user show "$unit" -p NRestarts --value)"
+  local restarts; restarts="$(systemctl --user show "$unit" -p NRestarts --value)" || return 1
+  systemctl --user restart "$unit" || return 1
+  healthy "$restarts"
 }
 
 entry() { echo "$(date -Is) | $actor | $1 | $prev -> $2" >>"$log"; }
@@ -85,6 +98,8 @@ if [ "$check_only" = "--check" ]; then
   echo "check only: would switch $unit ${prev:0:7} -> ${target:0:7}, expecting $active loops"
   exit 0
 fi
+# Logged before anything moves: an unwritable log stops the switch here, not after it.
+entry "start" "$target" || { echo "cannot write the deploy log $log: refusing" >&2; exit 1; }
 echo "switching $unit: ${prev:0:7} -> ${target:0:7} ($active active accounts)"
 if run_at "$target"; then
   entry ok "$target"

@@ -24,7 +24,8 @@ read -r pr_state base head cross <<<"$state"
 [ "$(git config --get commit.gpgsign)" = "true" ] || { echo "commit.gpgsign is not true: the rebase would drop signatures" >&2; exit 1; }
 
 # One merge at a time on this machine: two sessions merging at once each rebase onto a main the other is moving.
-lock="${XDG_RUNTIME_DIR:-/tmp}/mamoru-merge.lock"
+# Never a shared /tmp: anyone could hold or plant the lock there.
+lock="${XDG_RUNTIME_DIR:-$HOME/.cache}/mamoru-merge.lock"
 exec 9>"$lock"
 flock -n 9 || { echo "another merge is running (lock $lock): wait for it, then run this again" >&2; exit 1; }
 
@@ -78,6 +79,8 @@ for _ in $(seq 1 90); do
 done
 [ "$conclusion" = "success" ] || { echo "CI on $new_head did not finish in 15 minutes ($conclusion)" >&2; exit 1; }
 
+# Not forced: if main moved since the fetch above (another machine merged), this push is not a fast-forward and git
+# refuses it, so nothing lands on a main the overlap check did not see.
 git -C "$tmp" push -q origin "$new_head:refs/heads/main"
 echo "main is now $new_head"
 
