@@ -41,7 +41,7 @@ export type ActionRuleTemplate = {
   params: ParamRuleTemplate[]
 }
 
-export type GrantName = 'enter-swap' | 'enter-mint' | 'manage' | 'manage-any' | 'convert-any'
+export type GrantName = 'enter-swap' | 'enter-mint' | 'manage' | 'manage-any' | 'convert-any' | 'increase'
 
 /** Grants that cover any position of the pair the account holds, enabled at activation. */
 export const MANAGE_ANY_GRANTS = ['manage-any', 'convert-any'] as const satisfies readonly GrantName[]
@@ -109,6 +109,12 @@ export type PolicyVersion = {
     widthTicksByPool?: Record<RegistryName, number>
     /** Lab only (#101 experiment 4): re-range only when it pays. Absent: today's trigger byte for byte. */
     lazy?: LazyRerange
+    /**
+     * otto/mamoru#171, read only with an `increase` grant for the pool: an entry adds to a held position instead of
+     * minting when each edge of it is within this share (bps) of the new range's width from the new range's edge.
+     * Absent: DEFAULT_INCREASE_TOLERANCE_BPS (see `reusablePosition` in @mamoru/decide).
+     */
+    increaseToleranceBps?: number
   }
   /**
    * How `decide` enters. `first-entry` (default, v1): one entry per bucket without a managed position.
