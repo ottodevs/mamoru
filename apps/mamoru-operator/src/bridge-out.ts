@@ -160,8 +160,8 @@ type Prepared = { prepareId: string; accountKey: string; live: LiveAccount; tx: 
 export type AccountAbstraction = { bundler: L1Bundler; paymaster: Erc20Paymaster }
 
 /** A route as kept on disk: what the owner sees, plus what reconciliation needs. */
-type Stored = BridgeOutRoute & { id: string; safe: Address; safeNonce: string; fromBlock: string; execStarted?: boolean; userOpTx?: Hex; cctp?: { maxFee: string; minFinality: number; message?: Hex }; mintAt?: string }
-type Journal = { routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
+type Stored = BridgeOutRoute & { id: string; safe: Address; safeNonce: string; fromBlock: string; execStarted?: boolean; userOpTx?: Hex; cctp?: { maxFee: string; minFinality: number; message?: Hex; nonce?: Hex }; mintAt?: string }
+type Journal = { cctpBurns?: Record<string, string[]>; routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
 
 const NON_TERMINAL = new Set<BridgeOutRoute['state']>(['sending', 'deposited', 'unconfirmed', 'expired'])
 
@@ -334,7 +334,7 @@ export class BridgeOut {
     // An unreadable journal stops the operator from starting: starting empty would forget moves under way and the
     // day's spend.
     const j = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<Journal>
-    return { routes: j.routes ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {} }
+    return { routes: j.routes ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {}, cctpBurns: j.cctpBurns ?? {} }
   }
 
   private save(): void {
@@ -362,8 +362,10 @@ export class BridgeOut {
     return BigInt(this.journal.spent.wei)
   }
 
+  /** Adds to (or takes back from) today's spend; it never goes below zero. */
   private spend(wei: bigint): void {
-    this.journal.spent = { day: this.day(), wei: (this.spentToday() + wei).toString() }
+    const next = this.spentToday() + wei
+    this.journal.spent = { day: this.day(), wei: (next > 0n ? next : 0n).toString() }
     this.save()
   }
 
@@ -535,7 +537,7 @@ export class BridgeOut {
     if (gasCap > MAX_GAS_USDC || gasCap * 10_000n > balance * MAX_GAS_BPS) throw new HttpError(409, 'BRIDGE_GAS_TOO_HIGH', 'Ethereum gas would take too much of this amount, try later or with more')
     const amount = balance - gasCap
     if (amount < MIN_USDC) throw new HttpError(409, 'BRIDGE_NOTHING', 'there is no USDC on Ethereum to move')
-    const leg = await this.pickLeg(amount, Math.floor(this.now() / 1000))
+    const leg = await this.pickLeg(amount, Math.floor(this.now() / 1000), ctx.accountKey)
     const legCalls = leg.bridge === 'across' ? bridgeCalls(live.safe, leg.deposit) : cctpCalls(L1_USDC, live.safe, leg.burn)
     const approvePm = { to: L1_USDC, value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [q.paymaster, gasCap] }) }
     let op = ownerUserOp({ live, deployed, nonce, calls: [approvePm, ...legCalls], gas, paymaster: stub })
@@ -582,7 +584,7 @@ export class BridgeOut {
    * Quotes Across and CCTP V2 (Standard and Fast) for the amount and picks the largest output to the Safe on Base;
    * equal outputs go to CCTP (native USDC, no refund path), then to the faster. CCTP only with a Base minter.
    */
-  private async pickLeg(amount: bigint, nowSec: number): Promise<Leg> {
+  private async pickLeg(amount: bigint, nowSec: number, accountKey: string): Promise<Leg> {
     const [across, cctp] = await Promise.allSettled([
       this.quote(amount).then((q) => checkQuote(q, amount, nowSec)),
       this.base ? cctpFees(this.fetcher) : Promise.reject(new Error('no Base minter')),
@@ -592,10 +594,20 @@ export class BridgeOut {
     if (cctp.status === 'fulfilled') {
       for (const f of cctp.value) {
         if (f.finalityThreshold !== FINALITY_STANDARD && f.finalityThreshold !== FINALITY_FAST) continue
-        // A random tag of 1-999 base units (< 0.001 USDC) makes this burn's message unlike any earlier one of the
-        // account, so an attestation of an earlier burn can never complete it. maxFee is a ceiling: a Standard
-        // transfer executes with fee 0 and mints the whole amount.
-        const maxFee = cctpMaxFee(amount, f.minimumFeeBps) + 1n + BigInt(randomBytes(2).readUInt16BE(0) % 999)
+        // A tag of 1-999 base units (< 0.001 USDC) that no earlier burn of this account used with this amount makes
+        // the burn's message unlike any earlier one of the account, so an attestation of an earlier burn can never
+        // match it. maxFee is a ceiling: a Standard transfer executes with fee 0 and mints the whole amount.
+        const used = new Set(this.journal.cctpBurns?.[accountKey] ?? [])
+        const base = cctpMaxFee(amount, f.minimumFeeBps)
+        let maxFee = -1n
+        for (let i = 0, start = randomBytes(2).readUInt16BE(0) % 999; i < 999; i++) {
+          const candidate = base + 1n + BigInt((start + i) % 999)
+          if (!used.has(`${amount}:${candidate}`)) {
+            maxFee = candidate
+            break
+          }
+        }
+        if (maxFee < 0n) continue
         if (maxFee * 10_000n > amount * MAX_FEE_BPS) continue
         legs.push({ bridge: 'cctp', burn: { amount, maxFee, minFinality: f.finalityThreshold }, output: amount - maxFee, fillSec: f.finalityThreshold === FINALITY_FAST ? FAST_FILL_SEC : STANDARD_FILL_SEC })
       }
@@ -680,6 +692,12 @@ export class BridgeOut {
       ...(u.leg.bridge === 'cctp' ? { cctp: { maxFee: u.leg.burn.maxFee.toString(), minFinality: u.leg.burn.minFinality } } : {}),
       at: '',
     }
+    // Every burn's (amount, maxFee) is kept for the account, before it can run: no later burn reuses it.
+    if (u.leg.bridge === 'cctp') {
+      const all = this.journal.cctpBurns ?? {}
+      all[ctx.accountKey] = [...(all[ctx.accountKey] ?? []), `${u.leg.burn.amount}:${u.leg.burn.maxFee}`].slice(-2_000)
+      this.journal.cctpBurns = all
+    }
     // The hash is on disk before the bundler sees the userOp: whatever happens next, status() can ask for it.
     this.journal.routes[ctx.accountKey] = route
     this.write(ctx.accountKey, route)
@@ -736,17 +754,24 @@ export class BridgeOut {
    */
   bundlerGuard(): BundlerGuard & { sent: (hash: Hex) => void; sending: (maxFeeWei: bigint, gas: bigint) => void } {
     let bound = 0n
+    let boundDay = ''
+    // Moves the reservation to `wei` on today's ledger. A reservation made before midnight is gone with its day
+    // (the ledger reset): today is charged the whole new amount, never only a difference against yesterday.
+    const reserve = (wei: bigint) => {
+      const today = this.day()
+      this.spend(boundDay === today ? wei - bound : wei)
+      bound = wei
+      boundDay = today
+    }
     return {
       before: async (gas: bigint) => {
         if (!this.sending) throw new Error('no move under way')
-        bound = await this.affordable(gas)
-        this.spend(bound)
+        reserve(await this.affordable(gas))
       },
       // The signed transaction's own bound (gas at its maxFeePerGas), before the broadcast: it replaces the
       // estimate, and over the day's budget or the gas ceiling the send stops here.
       sending: (maxFeeWei: bigint, gas: bigint) => {
-        this.spend(maxFeeWei - bound)
-        bound = maxFeeWei
+        reserve(maxFeeWei)
         if (this.spentToday() > DAILY_BUDGET_WEI) throw new Error('over the day\'s budget')
         if (gas > 0n && maxFeeWei / gas > MAX_GAS_PRICE_WEI * 2n) throw new Error('over the gas ceiling')
       },
@@ -757,14 +782,15 @@ export class BridgeOut {
         this.write(s.accountKey, s.route)
       },
       after: (cost: bigint, refund: bigint) => {
-        const net = cost > refund ? cost - refund : 0n
-        this.spend(net - bound)
+        reserve(cost > refund ? cost - refund : 0n)
         bound = 0n
+        boundDay = ''
       },
       failed: (signed: boolean) => {
         // Never signed for broadcast: nothing can be spent, the reservation goes back. Signed: unknown, it stays.
-        if (!signed) this.spend(-bound)
+        if (!signed) reserve(0n)
         bound = 0n
+        boundDay = ''
       },
     }
   }
@@ -1052,6 +1078,7 @@ export class BridgeOut {
       if (r.mintTx) {
         const rc = await base.client.getTransactionReceipt({ hash: r.mintTx }).catch(() => null)
         if (rc?.status === 'success') {
+          if (r.cctp?.nonce) this.completed(accountKey, r.cctp.nonce)
           r.state = 'filled'
           r.fillTx = r.mintTx
           return
@@ -1140,8 +1167,9 @@ export class BridgeOut {
             if (BigInt(this.mintDay(day).wei) > MINT_BUDGET_WEI) throw new MintBudget()
           },
           (h) => {
-            // The mint's hash is on disk before the broadcast.
+            // The mint's hash (and the nonce it mints) is on disk before the broadcast.
             broadcast = true
+            r.cctp = { ...r.cctp!, nonce: msg.nonce }
             r.mintTx = h
             r.mintAt = new Date(this.now()).toISOString()
             this.write(accountKey, { ...r })
@@ -1182,10 +1210,10 @@ export class BridgeOut {
     this.save()
   }
 
-  /** The CCTP nonces this account's moves completed (the last 50). */
+  /** The CCTP nonces this account's moves completed (the last 2,000: ~2 years at 3 moves a day). */
   private completed(accountKey: string, nonce: Hex): void {
     const all = this.journal.cctpNonces ?? {}
-    all[accountKey] = [...(all[accountKey] ?? []), nonce.toLowerCase()].slice(-50)
+    all[accountKey] = [...(all[accountKey] ?? []), nonce.toLowerCase()].slice(-2_000)
     this.journal.cctpNonces = all
     this.save()
   }

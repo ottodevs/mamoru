@@ -62,11 +62,11 @@ describe('the operator bundler guard (#180)', () => {
   const { mkdtempSync, readFileSync } = require('node:fs') as typeof import('node:fs')
   const { tmpdir } = require('node:os') as typeof import('node:os')
   const { join } = require('node:path') as typeof import('node:path')
-  const make = () => {
+  const make = (now: () => number = Date.now) => {
     const dir = mkdtempSync(join(tmpdir(), 'mamoru-guard-'))
     const l1 = { getGasPrice: async () => 1_000_000_000n, getBalance: async () => 10n ** 18n } as unknown as import('viem').PublicClient
     const relayer = { address: '0x0000000000000000000000000000000000000001' as const, send: async () => Promise.reject(new Error('unused')) }
-    const bo = new BridgeOut(l1, relayer, dir, fetch, Date.now, undefined, () => true)
+    const bo = new BridgeOut(l1, relayer, dir, fetch, now, undefined, () => true)
     const spent = () => BigInt(JSON.parse(readFileSync(join(dir, 'bridge-out.json'), 'utf8')).spent.wei)
     return { bo, spent }
   }
@@ -100,4 +100,18 @@ describe('the operator bundler guard (#180)', () => {
     g.after(1_000n, 900n)
     expect(spent()).toBe(100n)
   })
+
+  test('a bundle crossing UTC midnight: today is charged the whole signed bound, and a refund never takes it below zero', async () => {
+    let clock = Date.parse('2026-10-18T23:59:50Z')
+    const { bo, spent } = make(() => clock)
+    ;(bo as unknown as { sending: unknown }).sending = { accountKey: 'a', route: { id: 'r' } }
+    const g = bo.bundlerGuard()
+    await g.before(1_400_000n)
+    clock = Date.parse('2026-10-19T00:00:10Z')
+    g.sending(4_200_000_000_000_000n, 1_400_000n)
+    expect(spent()).toBe(4_200_000_000_000_000n)
+    g.after(1_000n, 5_000n)
+    expect(spent()).toBe(0n)
+  })
 })
+
