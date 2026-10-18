@@ -30,11 +30,10 @@ const enginePolicy = withActionPolicy(conservadorLabV4, MAMORU_POLICY, [V4_POOLS
 const apConfig: ActionPolicyPoolConfig = (() => {
   const e = entry(POOL)
   const budget = enginePolicy.actionPolicy!.budgetsByPool![POOL]!
-  const minLiquidity = enginePolicy.actionPolicy!.minLiquidityByPool![POOL]!
-  return { pool: POOL, address: MAMORU_POLICY, token0: address(e.token0!), token1: address(e.token1!), feePips: e.fee!, bandTicks: enginePolicy.actionPolicy!.bandTicksByPool[POOL]!, minLiquidity, budgetIn1: budget.in1, budgetWindowSeconds: budget.windowSeconds, perWindow: budget.perWindow, total: budget.total }
+  return { pool: POOL, address: MAMORU_POLICY, token0: address(e.token0!), token1: address(e.token1!), feePips: e.fee!, bandTicks: enginePolicy.actionPolicy!.bandTicksByPool[POOL]!, budgetIn1: budget.in1, budgetWindowSeconds: budget.windowSeconds, perWindow: budget.perWindow, total: budget.total }
 })()
-const ORACLE: OracleRead = { twapLong: 0, twapShort: 0, hmLong: apConfig.minLiquidity * 4n, hmShort: apConfig.minLiquidity * 4n }
-const RANGE = priceRange(ORACLE, apConfig.bandTicks, apConfig.minLiquidity)!
+const ORACLE: OracleRead = { twapLong: 0, twapShort: 0 }
+const RANGE = priceRange(ORACLE, apConfig.bandTicks)!
 const EMPTY_SPEND = { generation: 1n, updatedAt: 0n, in1: false, debt: 0n, total: 0n }
 
 function exec(c: V3Call): Execution {
@@ -95,9 +94,9 @@ describe('precheck wired to MamoruActionPolicy (spec 007 T4)', () => {
     expect(run(swap, spent(0n, apConfig.total - 1n))).toBe('POLICY_BUDGET')
   })
 
-  test('T6 H-1: a pool whose oracle liquidity is under the Init floor is refused before signing', () => {
+  test('T6 H-1: a pool whose two TWAPs are 2 x band apart (a recent push) is refused before signing', () => {
     const l = ledgerWithActionPolicy()
-    l.syncActionPolicyReads(POOL, { oracle: { ...ORACLE, hmShort: apConfig.minLiquidity - 1n }, spend: EMPTY_SPEND, currentGeneration: 1n })
+    l.syncActionPolicyReads(POOL, { oracle: { twapLong: 0, twapShort: -2 * apConfig.bandTicks }, spend: EMPTY_SPEND, currentGeneration: 1n })
     expect(run(swapCalls(amountIn, bound.minOut, bound.sqrtPriceLimitX96), l)).toBe('POLICY_PRICE_BAND')
   })
 

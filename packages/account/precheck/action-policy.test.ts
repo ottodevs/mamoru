@@ -26,7 +26,6 @@ const cfg: ActionPolicyPoolConfig = {
   token1: address(e.token1!),
   feePips: e.fee!,
   bandTicks: 100,
-  minLiquidity: 1_000_000n,
   budgetIn1: false, // USDC is token0
   budgetWindowSeconds: 86_400,
   perWindow: 60_000_000_000n, // 60,000 USDC of value
@@ -34,10 +33,10 @@ const cfg: ActionPolicyPoolConfig = {
 }
 
 // Tick 0: 1 raw cbBTC unit is worth 1 raw USDC unit, so values below are easy to read.
-const flat: OracleRead = { twapLong: 0, twapShort: 0, hmLong: 10_000_000n, hmShort: 10_000_000n }
+const flat: OracleRead = { twapLong: 0, twapShort: 0 }
 const emptySpend = { generation: 1n, updatedAt: 0n, in1: false, debt: 0n, total: 0n }
 const baseReads: ActionPolicyReads = { oracle: flat, spend: emptySpend, currentGeneration: 1n }
-const range = priceRange(flat, cfg.bandTicks, cfg.minLiquidity)!
+const range = priceRange(flat, cfg.bandTicks)!
 
 function toExecution(c: V3Call): Execution {
   return { target: c.to, value: c.value, callData: c.data }
@@ -80,24 +79,31 @@ describe('(a) price band', () => {
     expect(res).toMatchObject({ ok: false, code: 'POLICY_PRICE_BAND' })
   })
 
-  test('T6 H-1: either window under the liquidity floor refuses the swap', () => {
-    for (const oracle of [{ ...flat, hmLong: cfg.minLiquidity - 1n }, { ...flat, hmShort: cfg.minLiquidity - 1n }]) {
-      const call = toExecution(exactInputSingle({ account: ACCOUNT, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: 500, amountIn, amountOutMinimum: bound.minOut, sqrtPriceLimitX96: bound.sqrtPriceLimitX96 }))
-      const res = checkActionPolicyCall(call, cfg, { ...baseReads, oracle }, NOW, new Map(), never)
-      expect(res).toMatchObject({ ok: false, code: 'POLICY_PRICE_BAND' })
-    }
+  test('T6 H-1: a recent push that moves the short TWAP 2 x band from the long one refuses the swap', () => {
+    const call = toExecution(exactInputSingle({ account: ACCOUNT, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: 500, amountIn, amountOutMinimum: bound.minOut, sqrtPriceLimitX96: bound.sqrtPriceLimitX96 }))
+    const res = checkActionPolicyCall(call, cfg, { ...baseReads, oracle: { twapLong: -100, twapShort: -600 } }, NOW, new Map(), never)
+    expect(res).toMatchObject({ ok: false, code: 'POLICY_PRICE_BAND' })
+  })
+
+  test('T6 H-1: an anchored pool (stables) never prices past the anchor, however far both TWAPs moved', () => {
+    const anchored: ActionPolicyPoolConfig = { ...cfg, bandTicks: 10, anchor: { tick: 0, band: 40 } }
+    const pushed = { twapLong: -36, twapShort: -36 } // unclipped floor would be -45
+    const atPushed = swapBoundsInRange({ range: { lo: -45, hi: -26 }, feePips: cfg.feePips, zeroForOne: true, tokenIn: cfg.token0, tokenOut: cfg.token1, amountIn })
+    const call = toExecution(exactInputSingle({ account: ACCOUNT, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: 500, amountIn, amountOutMinimum: atPushed.minOut, sqrtPriceLimitX96: atPushed.sqrtPriceLimitX96 }))
+    expect(checkActionPolicyCall(call, anchored, { ...baseReads, oracle: pushed }, NOW, new Map(), never)).toMatchObject({ ok: false, code: 'POLICY_PRICE_BAND' })
+    expect(checkActionPolicyCall(call, anchored, { ...baseReads, oracle: { twapLong: -86, twapShort: -86 } }, NOW, new Map(), never)).toMatchObject({ ok: false, code: 'POLICY_PRICE_BAND' })
   })
 
   test('T6 M-1: the safer of the two TWAPs sets the edge (a lagging long TWAP does not loosen it)', () => {
     // Market moved up: short 60 ticks above long. Selling token0, the floor follows the short TWAP.
     const moved = { ...flat, twapLong: 0, twapShort: 60 }
-    const r = priceRange(moved, cfg.bandTicks, cfg.minLiquidity)!
+    const r = priceRange(moved, cfg.bandTicks)!
     expect(r).toEqual({ lo: 60 - 100 + 1, hi: 0 + 100 })
     const atLong = swapBoundsInRange({ range: { lo: -100, hi: 100 }, feePips: cfg.feePips, zeroForOne: true, tokenIn: cfg.token0, tokenOut: cfg.token1, amountIn })
     const call = toExecution(exactInputSingle({ account: ACCOUNT, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: 500, amountIn, amountOutMinimum: atLong.minOut, sqrtPriceLimitX96: atLong.sqrtPriceLimitX96 }))
     expect(checkActionPolicyCall(call, cfg, { ...baseReads, oracle: moved }, NOW, new Map(), never)).toMatchObject({ ok: false, code: 'POLICY_PRICE_BAND' })
     // TWAPs more than ~2 x band apart: no range at all.
-    expect(priceRange({ ...flat, twapShort: 200 }, cfg.bandTicks, cfg.minLiquidity)).toBeNull()
+    expect(priceRange({ ...flat, twapShort: 200 }, cfg.bandTicks)).toBeNull()
   })
 
   test('no oracle/spend read for the pool fails closed', () => {
@@ -130,10 +136,10 @@ describe('(b) positions', () => {
     expect(value - mintArgs.amount0Desired).toBeGreaterThan(mintArgs.amount1Desired) // lo = -99: cbBTC valued at its highest
   })
 
-  test('a decrease is refused when the oracle is refused (its minimums are priced)', () => {
+  test('a decrease is refused when the range is empty (its minimums are priced)', () => {
     const isAdmitted = (tokenId: bigint) => tokenId === 42n
     const call = toExecution(decreaseLiquidity({ tokenId: 42n, liquidity: 1n, amount0Min: 0n, amount1Min: 0n, deadline: 9_999_999_999n }))
-    const res = checkActionPolicyCall(call, cfg, { ...baseReads, oracle: { ...flat, hmShort: 0n } }, NOW, new Map(), isAdmitted)
+    const res = checkActionPolicyCall(call, cfg, { ...baseReads, oracle: { twapLong: 0, twapShort: 300 } }, NOW, new Map(), isAdmitted)
     expect(res).toMatchObject({ ok: false, code: 'POLICY_PRICE_BAND' })
   })
 

@@ -3,11 +3,11 @@
 // (spec 007 "How SmartSession calls it" / "Grant changes it implies (T2)"). This is scenario-fixture code, not
 // production: T2 (packages/policy) owns the real grant builders and must fold this in (or replace it) when the
 // v4 grants ship. Nothing here is imported by packages/policy or packages/account.
-import { createWalletClient, encodeAbiParameters, encodeDeployData, encodeFunctionData, http, type Abi } from 'viem'
+import { encodeDeployData, encodeFunctionData, encodePacked, parseAbi, type Abi } from 'viem'
 import type { PrivateKeyAccount } from 'viem/accounts'
 import type { Address, Hex } from '@mamoru/domain'
 import { address, moduleRegistryAbi } from '@mamoru/registry'
-import type { ResolvedActionRule, SessionGrant } from '@mamoru/policy'
+import { encodeMamoruInit, type MamoruInit, type ResolvedActionRule, type SessionGrant } from '@mamoru/policy'
 import { ATTESTATION_SCHEMA_UID, toSmartSession, uniActionInitData, type ActionData, type SmartSessionStruct } from '@mamoru/account/sessions'
 import type { Lab } from '../fixtures/lab.ts'
 import { repoPath } from '../runner/manifest.ts'
@@ -34,53 +34,56 @@ export async function loadPolicyArtifact(path = ARTIFACT_PATH): Promise<PolicyAr
   return { abi: json.abi, bytecode: json.bytecode.object }
 }
 
-/** Deploys MamoruActionPolicy on the fork, constructor args from the registry (same addresses the Foundry PoC uses). */
-export async function deployMamoruPolicy(lab: Lab, artifact: PolicyArtifact, deployer: PrivateKeyAccount): Promise<Address> {
-  const data = encodeDeployData({
+export { encodeMamoruInit, type MamoruInit }
+
+const registryDeployAbi = parseAbi([
+  'function deployModule(bytes32 salt, bytes32 resolverUID, bytes initCode, bytes metadata, bytes resolverContext) payable returns (address)',
+])
+const poolCardinalityAbi = parseAbi([
+  'function slot0() view returns (uint160, int24, uint16, uint16, uint16 observationCardinalityNext, uint8, bool)',
+  'function increaseObservationCardinalityNext(uint16 observationCardinalityNext)',
+])
+
+/**
+ * Deploys MamoruActionPolicy on the fork the way T7 must (spec 007 T6 L-3, contracts/action-policy/script/
+ * Deploy.s.sol): ONE `ModuleRegistry.deployModule` transaction creates the contract with CREATE2 and writes its
+ * ERC-7484 ModuleRecord under TimeFramePolicy's resolver, so nobody can register it first under another resolver.
+ * The salt starts with the deployer's address, which the registry requires of anyone else using it. Constructor
+ * args from the registry (same addresses the Foundry PoC uses).
+ */
+export async function deployMamoruPolicy(lab: Lab, artifact: PolicyArtifact, deployer: PrivateKeyAccount, nonce = 1n): Promise<Address> {
+  const initCode = encodeDeployData({
     abi: artifact.abi,
     bytecode: artifact.bytecode,
     args: [address('SmartSession'), address('NonfungiblePositionManager'), address('SwapRouter02'), address('UniswapV3Factory')],
   })
-  const wallet = createWalletClient({ account: deployer, chain: lab.chain, transport: http(lab.url, { timeout: 120_000 }) })
-  const hash = await wallet.sendTransaction({ data, gas: 6_000_000n })
-  const receipt = await lab.client.waitForTransactionReceipt({ hash })
-  if (receipt.status !== 'success' || !receipt.contractAddress) throw new Error(`MamoruActionPolicy deployment failed (tx ${hash})`)
-  return receipt.contractAddress
+  const salt = encodePacked(['address', 'uint96'], [deployer.address, nonce])
+  const resolverUID = await resolverUidOf(lab, address('TimeFramePolicy'))
+  const args = [salt, resolverUID, initCode, '0x', '0x'] as const
+  const { result: predicted } = await lab.client.simulateContract({ account: deployer.address, address: address('ModuleRegistry'), abi: registryDeployAbi, functionName: 'deployModule', args })
+  const tx = await lab.send(deployer, address('ModuleRegistry'), encodeFunctionData({ abi: registryDeployAbi, functionName: 'deployModule', args }), 0n, 8_000_000n)
+  if (!tx.ok) throw new Error('ModuleRegistry.deployModule(MamoruActionPolicy) reverted')
+  const record = await lab.client.readContract({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findModule', args: [predicted] })
+  if (record.resolverUID !== resolverUID) throw new Error(`MamoruActionPolicy ${predicted}: ModuleRecord resolver ${record.resolverUID}, expected ${resolverUID}`)
+  return predicted
 }
 
-/** Mirrors `MamoruActionPolicy.Init` (contracts/action-policy/src/MamoruActionPolicy.sol). */
-export type MamoruInit = {
-  pool: Address
-  twapWindow: number
-  bandTicks: number
-  generation: bigint
-  budgetWindow: number
-  perWindow0: bigint
-  perWindow1: bigint
-  total0: bigint
-  total1: bigint
-}
-
-const INIT_TUPLE = [
-  {
-    type: 'tuple',
-    components: [
-      { name: 'pool', type: 'address' },
-      { name: 'twapWindow', type: 'uint32' },
-      { name: 'bandTicks', type: 'uint24' },
-      { name: 'generation', type: 'uint64' },
-      { name: 'budgetWindow', type: 'uint32' },
-      { name: 'perWindow0', type: 'uint128' },
-      { name: 'perWindow1', type: 'uint128' },
-      { name: 'total0', type: 'uint128' },
-      { name: 'total1', type: 'uint128' },
-    ],
-  },
-] as const
-
-/** `abi.encode(Init)`: a static struct, so this is exactly what Solidity's `abi.decode(data, (Init))` expects. */
-export function encodeMamoruInit(i: MamoruInit): Hex {
-  return encodeAbiParameters(INIT_TUPLE, [i])
+/**
+ * Spec 007 T6 L-4, the deploy step T7 runs once per pool (script/Deploy.s.sol `raiseCardinality`): MamoruActionPolicy
+ * refuses to enable a pool whose `observationCardinalityNext` is under the TWAP window. Raised in steps of 600 ring
+ * slots (~13.3M gas each) so every transaction stays under Base's 2^24 gas cap. Anyone may call it.
+ */
+export async function raiseObservationCardinality(lab: Lab, from: PrivateKeyAccount, pool: Address, target: number): Promise<bigint> {
+  let gas = 0n
+  for (;;) {
+    const slot0 = await lab.client.readContract({ address: pool, abi: poolCardinalityAbi, functionName: 'slot0' })
+    const next = slot0[4]
+    if (next >= target) return gas
+    const n = Math.min(next + 600, target)
+    const tx = await lab.send(from, pool, encodeFunctionData({ abi: poolCardinalityAbi, functionName: 'increaseObservationCardinalityNext', args: [n] }), 0n, 16_000_000n)
+    if (!tx.ok) throw new Error(`increaseObservationCardinalityNext(${n}) on ${pool} reverted`)
+    gas += tx.receipt.gasUsed
+  }
 }
 
 /**
@@ -98,19 +101,9 @@ export async function resolverUidOf(lab: Lab, reference: Address): Promise<Hex> 
   return found.resolverUID
 }
 
-/** One-time, per deployed MamoruActionPolicy CONTRACT (not per account): registers the module address in the
- * ERC-7484 registry so any account can later self-attest it. Production (T7) would do this once at deploy time. */
-export function registerMamoruPolicyCall(policy: Address, resolverUID: Hex): { to: Address; value: bigint; data: Hex } {
-  return {
-    to: address('ModuleRegistry'),
-    value: 0n,
-    data: encodeFunctionData({ abi: moduleRegistryAbi, functionName: 'registerModule', args: [resolverUID, policy, '0x', '0x'] }),
-  }
-}
-
 /** Owner call that self-attests MamoruActionPolicy for `account` (once per account), next to the existing
  * `registryTrustCalls` self-attestation of TimeFramePolicy/UsageLimitPolicy (account/sessions/index.ts). Needs
- * the module registered first (`registerMamoruPolicyCall`), once per policy contract. */
+ * the module registered first, which `deployMamoruPolicy` does in its own deploy transaction. */
 export function attestMamoruPolicyCall(policy: Address): { to: Address; value: bigint; data: Hex } {
   return {
     to: address('ModuleRegistry'),

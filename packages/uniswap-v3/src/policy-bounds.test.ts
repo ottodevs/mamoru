@@ -8,7 +8,6 @@ import {
   budgetValue,
   decreaseMinsInRange,
   DEFAULT_BAND_FACTOR_BPS,
-  harmonicMeanLiquidity,
   MAX_TICK,
   meanTick,
   MIN_TICK,
@@ -97,50 +96,42 @@ describe('amountsForLiquidityAtPrice', () => {
   })
 })
 
-/** The range a single, unshifted TWAP `t` gives at `band` (both windows equal, no liquidity floor). */
+/** The range a single, unshifted TWAP `t` gives at `band` (both windows equal, no anchor). */
 function at(t: number, band: number): PriceRange {
-  return priceRange({ twapLong: t, twapShort: t, hmLong: 1n, hmShort: 1n }, band, 0n)!
+  return priceRange({ twapLong: t, twapShort: t }, band)!
 }
 
-describe('meanTick / harmonicMeanLiquidity / oracleFromObserve (MamoruActionPolicy._oracle)', () => {
+describe('meanTick / oracleFromObserve (MamoruActionPolicy._oracle)', () => {
   test('meanTick floors toward -infinity like OracleLibrary.consult', () => {
     expect(meanTick(3_601n, 1800)).toBe(2)
     expect(meanTick(-3_601n, 1800)).toBe(-3)
     expect(meanTick(-3_600n, 1800)).toBe(-2)
   })
 
-  test('harmonicMeanLiquidity inverts secondsPerLiquidity: L constant over the window reads back as L', () => {
-    const L = 297_227_205_812_614n // USDC/USDT in-range liquidity at block 52,700,000
-    const window = 1800
-    const delta = (BigInt(window) << 128n) / L // what the pool accumulates over the window at constant L
-    const hm = harmonicMeanLiquidity(delta, window)
-    expect(hm <= L + 1n && hm >= L - 1n).toBe(true)
-    expect(harmonicMeanLiquidity(0n, window)).toBe((1n << 128n) - 1n)
-  })
-
-  test('oracleFromObserve folds observe([long, short, 0]) into both TWAPs and both harmonic means', () => {
-    const L = 10n ** 12n
-    const o = oracleFromObserve([0n, 1500n * 10n, 1500n * 10n + 300n * 40n], [0n, (1500n << 128n) / L, (1800n << 128n) / L], 1800, 300)
+  test('oracleFromObserve folds observe([long, short, 0]) into both TWAPs', () => {
+    const o = oracleFromObserve([0n, 1500n * 10n, 1500n * 10n + 300n * 40n], 1800, 300)
     expect(o.twapShort).toBe(40)
     expect(o.twapLong).toBe(Math.floor((1500 * 10 + 300 * 40) / 1800))
-    expect(o.hmLong <= L && o.hmLong >= L - 1n).toBe(true)
   })
 })
 
 describe('priceRange (MamoruActionPolicy._range)', () => {
   test('lo = max(long, short) - band + 1, hi = min(long, short) + band', () => {
-    expect(priceRange({ twapLong: 0, twapShort: 30, hmLong: 5n, hmShort: 5n }, 100, 5n)).toEqual({ lo: -69, hi: 100 })
-    expect(priceRange({ twapLong: 30, twapShort: 0, hmLong: 5n, hmShort: 5n }, 100, 5n)).toEqual({ lo: -69, hi: 100 })
-  })
-
-  test('either harmonic mean under the floor: refused (null)', () => {
-    expect(priceRange({ twapLong: 0, twapShort: 0, hmLong: 4n, hmShort: 5n }, 100, 5n)).toBeNull()
-    expect(priceRange({ twapLong: 0, twapShort: 0, hmLong: 5n, hmShort: 4n }, 100, 5n)).toBeNull()
+    expect(priceRange({ twapLong: 0, twapShort: 30 }, 100)).toEqual({ lo: -69, hi: 100 })
+    expect(priceRange({ twapLong: 30, twapShort: 0 }, 100)).toEqual({ lo: -69, hi: 100 })
   })
 
   test('TWAPs 2 x band apart leave an empty range: refused (null)', () => {
-    expect(priceRange({ twapLong: 0, twapShort: 199, hmLong: 1n, hmShort: 1n }, 100, 0n)).toEqual({ lo: 100, hi: 100 })
-    expect(priceRange({ twapLong: 0, twapShort: 200, hmLong: 1n, hmShort: 1n }, 100, 0n)).toBeNull()
+    expect(priceRange({ twapLong: 0, twapShort: 199 }, 100)).toEqual({ lo: 100, hi: 100 })
+    expect(priceRange({ twapLong: 0, twapShort: 200 }, 100)).toBeNull()
+  })
+
+  test('T6 H-1: the anchor clips the range, and a range entirely outside it is refused', () => {
+    const parity = { tick: 0, band: 40 }
+    expect(priceRange({ twapLong: 14, twapShort: 14 }, 10, parity)).toEqual({ lo: 5, hi: 24 })
+    expect(priceRange({ twapLong: -36, twapShort: -36 }, 10, parity)).toEqual({ lo: -40, hi: -26 })
+    expect(priceRange({ twapLong: -86, twapShort: -86 }, 10, parity)).toBeNull()
+    expect(priceRange({ twapLong: -86, twapShort: -86 }, 10, { tick: 0, band: 0 })).toEqual({ lo: -95, hi: -76 })
   })
 
   test('edges clamp to the tick space', () => {

@@ -65,8 +65,6 @@ export class FakeChain {
   onRequest: (r: Recorded) => void = () => {}
   /** QuoterV2.quoteExactInputSingle's `amountOut`: 1:1 with `amountIn` by default (deterministic), override per test. */
   quoteAmountOut: (args: { tokenIn: Address; tokenOut: Address; fee: number; amountIn: bigint }) => bigint = (args) => args.amountIn
-  /** Constant in-range liquidity behind every pool's `observe` (harmonic mean = this). Unset: flat cumulatives. */
-  observeLiquidity: bigint | undefined = undefined
   readonly client: PublicClient
 
   constructor() {
@@ -245,13 +243,10 @@ export class FakeChain {
       const i = BigInt(POOLS.indexOf(pool.name) + 1)
       if (data.startsWith(sel('observe(uint32[])'))) {
         // Tick cumulative falls by 1805*i over 1,800 s, linearly (floored), so any window reads about -1.003*i:
-        // observe([1800, 0]) keeps answering exactly [-7000i, -7000i - 1805i]. Liquidity cumulatives stay 0 (an
-        // unlimited harmonic mean) unless `observeLiquidity` sets a constant in-range liquidity.
+        // observe([1800, 0]) keeps answering exactly [-7000i, -7000i - 1805i]. Liquidity cumulatives stay 0.
         const { args } = decodeFunctionData({ abi: observeAbi, data })
         const at = (ago: bigint) => -7n * i * 1000n - (1805n * i * (1800n - ago)) / 1800n
-        const L = this.observeLiquidity
-        const spl = (ago: bigint) => (L === undefined ? 0n : ((1n << 20n) - ago) * ((1n << 128n) / L))
-        return encodeFunctionResult({ abi: observeAbi, functionName: 'observe', result: [args[0].map((a) => at(BigInt(a))), args[0].map((a) => spl(BigInt(a)))] })
+        return encodeFunctionResult({ abi: observeAbi, functionName: 'observe', result: [args[0].map((a) => at(BigInt(a))), args[0].map(() => 0n)] })
       }
       const call = decodeFunctionData({ abi: uniswapV3PoolAbi, data })
       if (call.functionName === 'slot0') return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [(1n << 96n) * i, Number(i) * 10, 0, 1, 1, 0, true] })

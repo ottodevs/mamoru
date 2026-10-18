@@ -27,7 +27,7 @@ import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useMo
 import type { Execution } from '@mamoru/account/safe'
 import { approve, burn, collect, decreaseLiquidity, exactInputSingle, mint, type V3Call } from '@mamoru/uniswap-v3'
 import { minOut, quoteExactInputSingle, quoteMint } from '@mamoru/uniswap-v3/quote'
-import { DEFAULT_BAND_FACTOR_BPS, decreaseMinsInRange, oracleFromObserve, priceRange, swapBoundsInRange, type OracleRead, type PriceRange } from '@mamoru/uniswap-v3/policy-bounds'
+import { DEFAULT_BAND_FACTOR_BPS, decreaseMinsInRange, oracleFromObserve, priceRange, swapBoundsInRange, type OracleRead, type PriceAnchor, type PriceRange } from '@mamoru/uniswap-v3/policy-bounds'
 import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
 import { MemoryJournal, type DecisionRecord, type OpRecord } from './journal.ts'
 
@@ -540,13 +540,13 @@ export class Engine {
 
   /**
    * Spec 007 T6 (M-1, H-1): MamoruActionPolicy's own oracle read — one `observe([long, short, 0])` at `blockNumber`,
-   * folded exactly as `MamoruActionPolicy._oracle` does (`oracleFromObserve`): both TWAP ticks and both windows'
-   * harmonic-mean liquidity. `twapLong` is the same tick `poolTwapTick(pool, long)` returns.
+   * folded exactly as `MamoruActionPolicy._oracle` does (`oracleFromObserve`): both TWAP ticks. `twapLong` is the
+   * same tick `poolTwapTick(pool, long)` returns.
    */
   private async poolOracle(pool: RegistryName, longSeconds: number, shortSeconds: number, blockNumber: bigint): Promise<OracleRead> {
     try {
-      const [ticks, spl] = await this.client.readContract({ address: entry(pool).address as Address, abi: observeAbi, functionName: 'observe', args: [[longSeconds, shortSeconds, 0]], blockNumber })
-      return oracleFromObserve(ticks, spl, longSeconds, shortSeconds)
+      const [ticks] = await this.client.readContract({ address: entry(pool).address as Address, abi: observeAbi, functionName: 'observe', args: [[longSeconds, shortSeconds, 0]], blockNumber })
+      return oracleFromObserve(ticks, longSeconds, shortSeconds)
     } catch {
       throw new ReasonError('EHG_TWAP_UNAVAILABLE', `${pool}: observe(${longSeconds}, ${shortSeconds}) did not answer at ${blockNumber}`)
     }
@@ -554,12 +554,12 @@ export class Engine {
 
   /**
    * Spec 007 T6: the range the engine builds a v4 call against — MamoruActionPolicy's `_range` at the engine's
-   * narrower band. Refuses (POLICY_PRICE_BAND) where the policy would refuse the oracle anyway: a harmonic-mean
-   * liquidity under the Init's floor, or TWAPs too far apart for any range.
+   * narrower band, clipped to the pool's anchor. Refuses (POLICY_PRICE_BAND) where the policy would find it empty
+   * anyway: TWAPs too far apart, or the price outside the anchor.
    */
-  private v4Range(pool: RegistryName, v4: { bandTicks: number; minLiquidity: bigint }, o: OracleRead): PriceRange {
-    const r = priceRange(o, v4.bandTicks, v4.minLiquidity)
-    if (!r) throw new ReasonError('POLICY_PRICE_BAND', `${pool}: oracle refused (twap ${o.twapLong}/${o.twapShort}, liquidity ${o.hmLong}/${o.hmShort}, floor ${v4.minLiquidity})`)
+  private v4Range(pool: RegistryName, v4: { bandTicks: number; anchor?: PriceAnchor }, o: OracleRead): PriceRange {
+    const r = priceRange(o, v4.bandTicks, v4.anchor)
+    if (!r) throw new ReasonError('POLICY_PRICE_BAND', `${pool}: empty range (twap ${o.twapLong}/${o.twapShort}, band ${v4.bandTicks})`)
     return r
   }
 
@@ -590,13 +590,13 @@ export class Engine {
    * not list, or no `actionPolicy` at all (every live policy today), returns `undefined`: every call for it stays
    * byte-identical to today (fail safe — never assume a band the caller did not confirm it enabled on chain).
    */
-  private v4PoolConfig(pool: RegistryName): { address: Address; bandTicks: number; minLiquidity: bigint; twapShortSeconds: number } | undefined {
+  private v4PoolConfig(pool: RegistryName): { address: Address; bandTicks: number; anchor?: PriceAnchor; twapShortSeconds: number } | undefined {
     const ap = this.cfg.policy.actionPolicy
     const bandTicks = ap?.bandTicksByPool[pool]
     if (!ap || bandTicks === undefined) return undefined
     const factor = ap.bandFactorBps ?? DEFAULT_BAND_FACTOR_BPS
-    // T6: without a known floor the engine checks none (0n); the policy still enforces its own.
-    return { address: ap.address, bandTicks: Math.floor((bandTicks * factor) / 10_000), minLiquidity: ap.minLiquidityByPool?.[pool] ?? 0n, twapShortSeconds: ap.twapShortWindowSeconds ?? TWAP_SHORT_WINDOW_SECONDS }
+    const anchor = ap.anchorByPool?.[pool]
+    return { address: ap.address, bandTicks: Math.floor((bandTicks * factor) / 10_000), ...(anchor ? { anchor } : {}), twapShortSeconds: ap.twapShortWindowSeconds ?? TWAP_SHORT_WINDOW_SECONDS }
   }
 
   /**
@@ -611,8 +611,8 @@ export class Engine {
     const ap = this.cfg.policy.actionPolicy
     const bandTicks = ap?.bandTicksByPool[pool]
     const budget = ap?.budgetsByPool?.[pool]
-    const minLiquidity = ap?.minLiquidityByPool?.[pool]
-    if (!ap || bandTicks === undefined || !budget || minLiquidity === undefined) return undefined
+    if (!ap || bandTicks === undefined || !budget) return undefined
+    const anchor = ap.anchorByPool?.[pool]
     const e = entry(pool)
     if (!e.token0 || !e.token1 || !e.fee) return undefined
     return {
@@ -622,7 +622,7 @@ export class Engine {
       token1: address(e.token1),
       feePips: e.fee,
       bandTicks,
-      minLiquidity,
+      ...(anchor ? { anchor } : {}),
       budgetIn1: budget.in1,
       budgetWindowSeconds: budget.windowSeconds,
       perWindow: budget.perWindow,

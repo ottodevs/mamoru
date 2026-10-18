@@ -3,10 +3,11 @@
 // not the contract's own views (t1-fork.ts, t2-fork.ts did that for the PoC/T1/T2 shapes). Three things:
 //
 // 1. TS-vs-contract cross-check: for a grid of bandTicks and amountIn (swap) / tick ranges (decrease), the TS port
-//    at factor 1.0 equals the contract's `swapBounds`/`decreaseMins` views exactly; at the engine's default 0.8x
-//    factor, the TS bound is strictly inside (a higher minimum, a tighter limit).
-// 2. Engine-equivalent calls — built with the SAME functions `prepareCalls` calls (`swapBoundsAtBand`,
-//    `decreaseMinsAtBand`, mint through the policy with approvals to the policy) — pass `handleOps` validation and
+//    at factor 1.0 (`oracleFromObserve` -> `priceRange` -> `swapBoundsInRange`/`decreaseMinsInRange`, T6) equals
+//    the contract's `priceRange`/`swapBounds`/`decreaseMins` views exactly; at the engine's default 0.8x factor,
+//    the TS bound is strictly inside (a higher minimum, a tighter limit).
+// 2. Engine-equivalent calls — built with the SAME functions `prepareCalls` calls (`priceRange`,
+//    `swapBoundsInRange`, `decreaseMinsInRange`, mint through the policy with approvals to the policy) — pass `handleOps` validation and
 //    execution under T2's production v4 grants (`enter-swap`, `manage-any`, merged mint+decrease+collect+burn).
 // 3. TWAP drift: a swap is "prepared" (bounds computed) at one block; the pool is then pushed and a few blocks
 //    pass before the prepared userOp is actually submitted. The on-chain TWAP has moved by then, but the engine's
@@ -22,11 +23,11 @@
 import { encodeFunctionData, parseAbi, parseEventLogs, type Hex, type TransactionReceipt } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { address, assertCodeHashes, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
-import { computeCaps, conservadorLabV4, encodeMamoruInit, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_POOLS, withActionPolicy, type Price, type SessionGrant } from '@mamoru/policy'
+import { computeCaps, conservadorLabV4, encodeMamoruInit, instantiateGrant, mamoruInitFor, retargetToPolicy, TWAP_SHORT_WINDOW_SECONDS, V4_POOLS, withActionPolicy, type Price, type SessionGrant } from '@mamoru/policy'
 import { permissionIdOf, toSmartSession } from '@mamoru/account/sessions'
 import { approve, collect, decreaseLiquidity, exactInputSingle } from '@mamoru/uniswap-v3'
 import { quoteMint, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { decreaseMinsAtBand, narrowBand, swapBoundsAtBand, DEFAULT_BAND_FACTOR_BPS } from '@mamoru/uniswap-v3/policy-bounds'
+import { decreaseMinsInRange, narrowBand, oracleFromObserve, priceRange, swapBoundsInRange, DEFAULT_BAND_FACTOR_BPS, type OracleRead, type PriceRange } from '@mamoru/uniswap-v3/policy-bounds'
 import { Lab, devAccount } from '../fixtures/lab.ts'
 import { buildBasicWorld, ownerExec, poolTick, rangeAround, WHALE, type World } from '../fixtures/world.ts'
 import { sendSessionOp, type SessionOpOutcome } from '../fixtures/session-op.ts'
@@ -34,7 +35,7 @@ import { startLabFork } from '../fork/lab-fork.ts'
 import { startForkProxy } from '../proxy/index.ts'
 import { artifactsRoot, ensureDir, writeJson } from '../report/index.ts'
 import { loadManifest, REPO_ROOT } from '../runner/manifest.ts'
-import { attestMamoruPolicyCall, deployMamoruPolicy, loadPolicyArtifact, registerMamoruPolicyCall, resolverUidOf } from './v4-grant.ts'
+import { attestMamoruPolicyCall, deployMamoruPolicy, loadPolicyArtifact } from './v4-grant.ts'
 
 const POOL = V4_POOLS.btc.pool // 'pool:USDC/cbBTC/500'
 const DEPOSIT_USDC = 100_000_000_000n // 100,000 USDC
@@ -83,6 +84,20 @@ async function twapTick(lab: Lab, pool: Address, windowSeconds: number): Promise
   let t = delta / BigInt(windowSeconds)
   if (delta < 0n && delta % BigInt(windowSeconds) !== 0n) t -= 1n
   return Number(t)
+}
+
+/** T6: what `Engine.poolOracle` and `MamoruActionPolicy._oracle` read — one `observe([1800, 300, 0])`. */
+async function oracleRead(lab: Lab, pool: Address): Promise<OracleRead> {
+  const long = conservadorLabV4.execution.twapWindowSeconds
+  const [ticks] = await lab.client.readContract({ address: pool, abi: observeAbi, functionName: 'observe', args: [[long, TWAP_SHORT_WINDOW_SECONDS, 0]] })
+  return oracleFromObserve(ticks, long, TWAP_SHORT_WINDOW_SECONDS)
+}
+
+/** The engine's own range: `priceRange` at `bandTicks` (the btc pool has no anchor); throws where the policy refuses. */
+function rangeAt(o: OracleRead, bandTicks: number): PriceRange {
+  const r = priceRange(o, bandTicks, V4_POOLS.btc.anchor)
+  if (!r) throw new Error(`empty range at bandTicks ${bandTicks}: twap ${o.twapLong}/${o.twapShort}`)
+  return r
 }
 
 /** computeCaps needs a price for every non-USDC asset of conservadorLabV4's three pools, even though this
@@ -134,13 +149,10 @@ try {
   const artifact = await loadPolicyArtifact()
   const mamoruPolicy = await deployMamoruPolicy(lab, artifact, relayer)
   const policyAbi = artifact.abi
-  note('MamoruActionPolicy deployed', true, mamoruPolicy)
-  const resolverUID = await resolverUidOf(lab, address('TimeFramePolicy'))
-  const registerTx = await lab.send(relayer, address('ModuleRegistry'), registerMamoruPolicyCall(mamoruPolicy, resolverUID).data)
-  if (!registerTx.ok) throw new Error('registerModule reverted')
+  note('MamoruActionPolicy deployed + registered (one deployModule tx, T6 L-3)', true, mamoruPolicy)
   const attestTx = await ownerExec(lab, relayer, world.a1, attestMamoruPolicyCall(mamoruPolicy))
   if (!attestTx.ok) throw new Error('self-attest reverted')
-  note('register + self-attest MamoruActionPolicy', true, `${registerTx.receipt.gasUsed + attestTx.receipt.gasUsed} gas total`)
+  note('self-attest MamoruActionPolicy', true, `${attestTx.receipt.gasUsed} gas`)
 
   // --------------------------------------------------------------------------------------------- generation 1: enter-swap + manage-any (T2 production builders)
 
@@ -184,22 +196,29 @@ try {
       const amounts = [1_000_000_000n, 50_000_000_000n] // 1,000 / 50,000 USDC
       const bandGrid = [10, 50, 100]
       let checks = 0
-      for (const bandTicks of bandGrid) {
-        // Re-enable a probe enter-swap session at this bandTicks: overwrites _poolConfig[account][pool] (what the
-        // swapBounds/decreaseMins VIEWS read), independent of the generation-1 sessions' own frozen per-configId
-        // bandTicks used at validation (checkAction reads _config[configId][account], never _poolConfig).
-        const probeInit = encodeMamoruInit(mamoruInitFor({ ...V4_POOLS.btc, bandTicks }, 1n, caps))
+      // T6 I-1: one config per (account, pool, generation), so each probe band is enabled at the next generation
+      // (owner-signed, a renewal in all but name). The views read the account's CURRENT config.
+      let generation = 1n
+      const enableProbe = async (bandTicks: number, admit: bigint[] = []) => {
+        generation++
+        const probeInit = encodeMamoruInit(mamoruInitFor({ ...V4_POOLS.btc, bandTicks }, generation, caps, { admit }))
         const probeGrant = retargetToPolicy(instantiateGrant(conservadorLabV4, `enter-swap:${POOL}`, grantCtx()), mamoruPolicy)
         const probeSession = toSmartSession(probeGrant, { policy: mamoruPolicy, initData: probeInit })
         const probeEnable = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession'), data: encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableSessions', args: [[probeSession]] }) })
-        if (!probeEnable.ok) throw new Error(`probe enableSessions (bandTicks ${bandTicks}) reverted`)
-        const tick = await twapTick(lab, pool, conservadorLabV4.execution.twapWindowSeconds)
+        if (!probeEnable.ok) throw new Error(`probe enableSessions (bandTicks ${bandTicks}, generation ${generation}) reverted`)
+      }
+      for (const bandTicks of bandGrid) {
+        await enableProbe(bandTicks)
+        const o = await oracleRead(lab, pool)
+        const [cLo, cHi] = (await lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'priceRange', args: [world.a1.safe, pool] })) as readonly [number, number]
+        const range = rangeAt(o, bandTicks)
+        note(`priceRange cross-check bandTicks=${bandTicks}`, range.lo === cLo && range.hi === cHi, `TS ${range.lo}..${range.hi} vs contract ${cLo}..${cHi} (twap ${o.twapLong}/${o.twapShort})`)
         for (const amountIn of amounts) {
           const [contractMinOut, contractLimit] = (await lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'swapBounds', args: [world.a1.safe, pool, address('USDC'), amountIn] })) as readonly [bigint, bigint]
-          const tsAt1 = swapBoundsAtBand({ twap: tick, bandTicks, feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn })
+          const tsAt1 = swapBoundsInRange({ range, feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn })
           const eq = tsAt1.minOut === contractMinOut && tsAt1.sqrtPriceLimitX96 === contractLimit
           note(`swapBounds cross-check bandTicks=${bandTicks} amountIn=${amountIn}`, eq, eq ? 'TS factor 1.0 == contract view' : `TS ${tsAt1.minOut}/${tsAt1.sqrtPriceLimitX96} != contract ${contractMinOut}/${contractLimit}`)
-          const tsAt08 = swapBoundsAtBand({ twap: tick, bandTicks: narrowBand(bandTicks, bandFactorBps), feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn })
+          const tsAt08 = swapBoundsInRange({ range: rangeAt(o, narrowBand(bandTicks, bandFactorBps)), feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn })
           const inside = tsAt08.minOut >= tsAt1.minOut && tsAt08.sqrtPriceLimitX96 >= tsAt1.sqrtPriceLimitX96
           note(`  at 0.8x: strictly inside bandTicks=${bandTicks} amountIn=${amountIn}`, inside, `minOut ${tsAt08.minOut} >= ${tsAt1.minOut}, limit ${tsAt08.sqrtPriceLimitX96} >= ${tsAt1.sqrtPriceLimitX96}`)
           checks++
@@ -207,20 +226,13 @@ try {
       }
       note('swapBounds cross-check: grid size', checks === bandGrid.length * amounts.length, `${checks} (bandTicks x amountIn) combinations`)
 
-      // decreaseMins cross-check: a grid of tick ranges (owner-minted positions), bandTicks fixed at the real 100
-      // (the generation-1 sessions' own config — re-enabled here last so _poolConfig ends back at the real value,
-      // though the snapshot revert below makes that moot either way).
-      const realInit = encodeMamoruInit(mamoruInitFor(V4_POOLS.btc, 1n, caps))
-      const realGrant = retargetToPolicy(instantiateGrant(conservadorLabV4, `enter-swap:${POOL}`, grantCtx()), mamoruPolicy)
-      const realSession = toSmartSession(realGrant, { policy: mamoruPolicy, initData: realInit })
-      await ownerExec(lab, relayer, world.a1, { to: address('SmartSession'), data: encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableSessions', args: [[realSession]] }) })
+      // decreaseMins cross-check: a grid of tick ranges (owner-minted positions, NonfungiblePositionManager directly
+      // — not through any grant), bandTicks back at the real 100. T6: the view requires admission now, so the
+      // probes are admitted the way T7 admits v2/v3 positions: by the owner-signed Init.admit of an enable (M-4).
       const { tick: spot } = await poolTick(lab)
       const ranges = [rangeAround(spot, 200, 10), rangeAround(spot, 1200, 10), rangeAround(spot, 8000, 10)]
       const deadline = BigInt((await engineNow()) + 3600)
-      let decreaseChecks = 0
-      // Owner-minted probe positions, one call each, NonfungiblePositionManager directly — not through any grant
-      // (decreaseMins's view does not check admission, only NPM.positions(tokenId), so any position on this pool
-      // the account owns works for the cross-check).
+      const probes: { r: { tickLower: number; tickUpper: number }; tokenId: bigint; liquidity: bigint }[] = []
       for (const r of ranges) {
         await lab.whaleTransfer('USDC', WHALE, world.a1.safe, 5_000_000_000n)
         await lab.whaleTransfer('cbBTC', WHALE, world.a1.safe, 5_000_000n)
@@ -230,13 +242,17 @@ try {
         const mintParams = { token0: address('USDC'), token1: address('cbBTC'), fee: 500, tickLower: r.tickLower, tickUpper: r.tickUpper, amount0Desired: 5_000_000_000n, amount1Desired: 5_000_000n, amount0Min: 0n, amount1Min: 0n, recipient: world.a1.safe, deadline }
         const mintTx = await ownerExec(lab, relayer, world.a1, { to: address('NonfungiblePositionManager'), data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'mint', args: [mintParams] }) })
         if (!mintTx.ok) throw new Error(`probe mint (range ${r.tickLower}/${r.tickUpper}) reverted`)
-        const { tokenId, liquidity } = mintedPosition(mintTx.receipt, world.a1.safe)
-        const tick = await twapTick(lab, pool, conservadorLabV4.execution.twapWindowSeconds)
+        probes.push({ r, ...mintedPosition(mintTx.receipt, world.a1.safe) })
+      }
+      await enableProbe(V4_POOLS.btc.bandTicks, probes.map((p) => p.tokenId))
+      let decreaseChecks = 0
+      for (const { r, tokenId, liquidity } of probes) {
+        const o = await oracleRead(lab, pool)
         const [contract0, contract1] = (await lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'decreaseMins', args: [world.a1.safe, pool, tokenId, liquidity] })) as readonly [bigint, bigint]
-        const tsAt1 = decreaseMinsAtBand({ twap: tick, bandTicks: V4_POOLS.btc.bandTicks, tickLower: r.tickLower, tickUpper: r.tickUpper, liquidity })
+        const tsAt1 = decreaseMinsInRange({ range: rangeAt(o, V4_POOLS.btc.bandTicks), tickLower: r.tickLower, tickUpper: r.tickUpper, liquidity })
         const eq = tsAt1.amount0Min === contract0 && tsAt1.amount1Min === contract1
         note(`decreaseMins cross-check range [${r.tickLower},${r.tickUpper}]`, eq, eq ? 'TS factor 1.0 == contract view' : `TS ${tsAt1.amount0Min}/${tsAt1.amount1Min} != contract ${contract0}/${contract1}`)
-        const tsAt08 = decreaseMinsAtBand({ twap: tick, bandTicks: narrowBand(V4_POOLS.btc.bandTicks, bandFactorBps), tickLower: r.tickLower, tickUpper: r.tickUpper, liquidity })
+        const tsAt08 = decreaseMinsInRange({ range: rangeAt(o, narrowBand(V4_POOLS.btc.bandTicks, bandFactorBps)), tickLower: r.tickLower, tickUpper: r.tickUpper, liquidity })
         const inside = tsAt08.amount0Min >= tsAt1.amount0Min && tsAt08.amount1Min >= tsAt1.amount1Min
         note(`  at 0.8x: strictly inside range [${r.tickLower},${r.tickUpper}]`, inside, `amount0Min ${tsAt08.amount0Min} >= ${tsAt1.amount0Min}, amount1Min ${tsAt08.amount1Min} >= ${tsAt1.amount1Min}`)
         decreaseChecks++
@@ -252,8 +268,7 @@ try {
 
   const swapAmountIn = 10_000_000_000n // 10,000 USDC
   {
-    const tick = await twapTick(lab, pool, conservadorLabV4.execution.twapWindowSeconds)
-    const bound = swapBoundsAtBand({ twap: tick, bandTicks: narrowBand(V4_POOLS.btc.bandTicks, bandFactorBps), feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn: swapAmountIn })
+    const bound = swapBoundsInRange({ range: rangeAt(await oracleRead(lab, pool), narrowBand(V4_POOLS.btc.bandTicks, bandFactorBps)), feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn: swapAmountIn })
     const out = expect(
       await sendSessionOp(world, world.a1, { name: 'enter-swap-v4', grant: swapGrant, permissionId: swapPid }, 'engine-swap-v4', [
         approve('USDC', 'SwapRouter02', swapAmountIn),
@@ -290,8 +305,7 @@ try {
 
   if (tokenId > 0n) {
     const { tickLower, tickUpper } = rangeAround((await poolTick(lab)).tick, 1200, 10) // same range the mint used
-    const tick = await twapTick(lab, pool, conservadorLabV4.execution.twapWindowSeconds)
-    const bound = decreaseMinsAtBand({ twap: tick, bandTicks: narrowBand(V4_POOLS.btc.bandTicks, bandFactorBps), tickLower, tickUpper, liquidity })
+    const bound = decreaseMinsInRange({ range: rangeAt(await oracleRead(lab, pool), narrowBand(V4_POOLS.btc.bandTicks, bandFactorBps)), tickLower, tickUpper, liquidity })
     const deadline = BigInt((await engineNow()) + 3600)
     const out = expect(
       await sendSessionOp(world, world.a1, { name: 'manage-any-v4', grant: manageGrant, permissionId: managePid }, 'engine-decrease-v4', [
@@ -310,7 +324,7 @@ try {
     const twapBefore = await twapTick(lab, pool, conservadorLabV4.execution.twapWindowSeconds)
     const bandTicks = narrowBand(V4_POOLS.btc.bandTicks, bandFactorBps)
     const driftAmountIn = 5_000_000_000n // 5,000 USDC
-    const bound = swapBoundsAtBand({ twap: twapBefore, bandTicks, feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn: driftAmountIn })
+    const bound = swapBoundsInRange({ range: rangeAt(await oracleRead(lab, pool), bandTicks), feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn: driftAmountIn })
     const preparedCalls = [
       approve('USDC', 'SwapRouter02', driftAmountIn),
       exactInputSingle({ account: world.a1.safe, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: 500, amountIn: driftAmountIn, amountOutMinimum: bound.minOut, sqrtPriceLimitX96: bound.sqrtPriceLimitX96 }),
