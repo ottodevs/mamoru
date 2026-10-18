@@ -16,6 +16,7 @@ const MINT = 'mint((address,address,uint24,int24,int24,uint256,uint256,uint256,u
 const DECREASE = 'decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))'
 const COLLECT = 'collect((uint256,address,uint128,uint128))'
 const BURN = 'burn(uint256)'
+const INCREASE = 'increaseLiquidity((uint256,uint256,uint256,uint256,uint256,uint256))'
 const MULTICALL_DEADLINE = 'multicall(uint256,bytes[])'
 
 /**
@@ -320,4 +321,62 @@ export function manageAnyGrants(p: PairSpec, usage: { manage: Usage; convert: Us
     },
   ]
   return p.pool ? templates.map((t) => ({ ...t, pool: p.pool })) : templates
+}
+
+/**
+ * otto/mamoru#171: add liquidity to one position the Safe already holds, instead of minting a second one in the same
+ * pool and range. Per position, like `manage`: NonfungiblePositionManager.increaseLiquidity does not check who owns
+ * the tokenId (the caller pays, the position's owner gets the liquidity), so a rule that admitted any id would let a
+ * leaked session key pay the Safe's tokens into a position someone else owns. Only `tokenId EQUAL <id>` keeps it in
+ * the Safe, and Smart Sessions has no set membership: one grant per tokenId, which the owner enables for an id this
+ * session minted (`instantiateGrant` refuses any other). Never part of the activation batch (perPosition).
+ *
+ * The rest bounds it as the mint: approvals only to the position manager up to the per-call mint caps, desired
+ * amounts under the same caps, both minimums positive. No cumulative cap: what it adds stays in the Safe's own
+ * position (as manage-any's re-mint), and the usage limit bounds how many times.
+ */
+export function increaseGrants(p: PairSpec, usage: { increase: Usage }): GrantTemplate[] {
+  const c = p.caps
+  const templates: GrantTemplate[] = [
+    {
+      name: 'increase',
+      perPosition: true,
+      ...usageOf(usage.increase),
+      actions: [
+        {
+          target: p.token0,
+          signature: APPROVE,
+          params: [
+            { field: 'spender', index: 0, condition: 'EQUAL', ref: 'NonfungiblePositionManager', denial: 'POLICY_DENIED_APPROVAL' },
+            { field: 'amount', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.mint0}`, denial: 'POLICY_DENIED_APPROVAL' },
+          ],
+        },
+        {
+          target: p.token1,
+          signature: APPROVE,
+          params: [
+            { field: 'spender', index: 0, condition: 'EQUAL', ref: 'NonfungiblePositionManager', denial: 'POLICY_DENIED_APPROVAL' },
+            { field: 'amount', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.mint1}`, denial: 'POLICY_DENIED_APPROVAL' },
+          ],
+        },
+        {
+          target: 'NonfungiblePositionManager',
+          signature: INCREASE,
+          params: [
+            { field: 'tokenId', index: 0, condition: 'EQUAL', ref: 'tokenId', denial: 'POLICY_DENIED_POSITION' },
+            { field: 'amount0Desired', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.mint0}`, denial: 'POLICY_DENIED_AMOUNT' },
+            { field: 'amount1Desired', index: 2, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.mint1}`, denial: 'POLICY_DENIED_AMOUNT' },
+            { field: 'amount0Min', index: 3, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+            { field: 'amount1Min', index: 4, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+          ],
+        },
+      ],
+    },
+  ]
+  return p.pool ? templates.map((t) => ({ ...t, pool: p.pool })) : templates
+}
+
+/** The policy has an `increase` grant for `pool` (otto/mamoru#171). */
+export function hasIncrease(policy: { session: { grants: GrantTemplate[] } }, pool: string): boolean {
+  return policy.session.grants.some((g) => g.name === 'increase' && (g.pool === undefined || g.pool === pool))
 }
