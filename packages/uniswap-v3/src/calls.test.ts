@@ -2,10 +2,12 @@ import { describe, expect, test } from 'bun:test'
 import { decodeFunctionData, isAddressEqual, type Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { address, baseRegistry, entry, erc20Abi, monadRegistry, nameOf, nonfungiblePositionManagerAbi, swapRouter02Abi, type Registry } from '@mamoru/registry'
+import golden from './base-calls.golden.json' with { type: 'json' }
 import {
   approve,
   burn,
   collect,
+  deadlineCheck,
   decreaseLiquidity,
   exactInputSingle,
   exactInputSingleTo,
@@ -113,6 +115,14 @@ describe('uniswapV3(monadRegistry): every address in the calldata comes from mon
     expect(bd.args).toEqual([9n])
   })
 
+  test('deadlineCheck: SwapRouter02.multicall(deadline, []) on the Monad router', () => {
+    const c = v3.deadlineCheck(1_000n)
+    expectMonad(c.to, 'SwapRouter02')
+    const d = decodeRouter(c.data)
+    expect(d.functionName).toBe('multicall')
+    expect(d.args).toEqual([1_000n, []])
+  })
+
   test('exactInputSingleTo: explicit recipient, Monad router and tokens', () => {
     const c = v3.exactInputSingleTo({ recipient: DESTINATION, tokenIn: 'USDC', tokenOut: 'EURW', fee: 100, amountIn: 10n ** 6n, amountOutMinimum: 1n })
     expectMonad(c.to, 'SwapRouter02')
@@ -189,6 +199,25 @@ describe('Base does not change', () => {
     expect(burn(1n)).toEqual(bound.burn(1n))
     expect(exactInputSingleTo(toParams)).toEqual(bound.exactInputSingleTo(toParams))
     expect(swapToEth(ethParams)).toEqual(bound.swapToNative({ ...ethParams, wrappedNative: 'WETH' }))
+    expect(deadlineCheck(1_000n)).toEqual(bound.deadlineCheck(1_000n))
+  })
+
+  // CHN-04: the bytes the free forms produced before the bound form existed (generated from main at 3cd720a).
+  test('the Base-bound form reproduces the pre-change Base calldata byte for byte', () => {
+    const now: Record<string, V3Call> = {
+      approve: bound.approve('USDC', 'SwapRouter02', 1n),
+      exactInputSingle: bound.exactInputSingle(swapParams),
+      exactInputSingleLimit: bound.exactInputSingle({ ...swapParams, sqrtPriceLimitX96: 4295128740n }),
+      mint: bound.mint(mintParams),
+      decreaseLiquidity: bound.decreaseLiquidity({ tokenId: 1n, liquidity: 1n, amount0Min: 1n, amount1Min: 1n, deadline: 1n }),
+      collect: bound.collect({ account: ACCOUNT, tokenId: 1n }),
+      burn: bound.burn(1n),
+      exactInputSingleTo: bound.exactInputSingleTo(toParams),
+      swapToEth: bound.swapToNative({ ...ethParams, wrappedNative: 'WETH' }),
+      deadlineCheck: bound.deadlineCheck(1_000n),
+    }
+    const ser: Record<string, { target: string; to: string; value: string; data: string }> = Object.fromEntries(Object.entries(now).map(([k, c]) => [k, { target: c.target, to: c.to, value: String(c.value), data: c.data }]))
+    expect(ser).toEqual(golden)
   })
 
   test('the free forms still encode the Base addresses', () => {
