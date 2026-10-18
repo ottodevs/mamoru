@@ -78,6 +78,8 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
     const since = p.outOfRangeSince ?? null
     if (lazy.minDwellSeconds > 0 && (since === null || obs.block.timestamp - since < BigInt(lazy.minDwellSeconds))) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
     const w = rerangeWorth(obs, policy, p, pool, lazy)
+    // Live (#172): no estimate is no re-range. The Lab keeps its measured rule (abstain) unless a variant sets the flag.
+    if (!w && lazy.requireCostEstimate) return { code: 'DECIDE_RANGE_NO_FEE_HISTORY', proposal: null }
     if (w && !w.worth) return { code: 'DECIDE_RANGE_BELOW_COST', proposal: null }
     return { code: 'DECIDE_RANGE_ADJUST', proposal: proposal() }
   }

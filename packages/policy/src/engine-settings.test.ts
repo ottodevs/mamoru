@@ -96,7 +96,8 @@ describe('re-range setting (otto/mamoru#172)', () => {
     const file = join(import.meta.dir, '../../../specs/004-loss-control/results/variants/test-candidates.json')
     const variant = (JSON.parse(readFileSync(file, 'utf8')) as { name: string; policy: string; overrides?: { range?: { lazy?: unknown } } }[]).find((v) => v.name === 'lazy-h24h-b100-d30')!
     expect(variant.policy).toBe('conservador-live-v2')
-    expect(lazyOf(lazyOn)).toEqual(variant.overrides!.range!.lazy as never)
+    // The Lab numbers, plus the live fail-closed flag (GPT-6 review): a missing estimate holds.
+    expect(lazyOf(lazyOn)).toEqual({ ...(variant.overrides!.range!.lazy as object), requireCostEstimate: true } as never)
     // Everything else is today's settings.
     expect({ ...lazyOn, rerange: undefined }).toEqual({ ...DEFAULT_ENGINE_SETTINGS, rerange: undefined })
   })
@@ -150,7 +151,7 @@ describe('re-range setting (otto/mamoru#172)', () => {
   test('overlay: lazy sets range.lazy on a new object; session, buckets, cooldown and widths are the same', () => {
     const p = withEngineSettings(conservadorLiveV2, lazyOn)
     expect(p).not.toBe(conservadorLiveV2)
-    expect(p.range.lazy).toEqual(lazyParams)
+    expect(p.range.lazy).toEqual({ ...lazyParams, requireCostEstimate: true })
     expect({ ...p.range, lazy: undefined }).toEqual({ ...conservadorLiveV2.range, lazy: undefined })
     expect(p.session).toBe(conservadorLiveV2.session)
     expect(p.buckets).toBe(conservadorLiveV2.buckets)

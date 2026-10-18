@@ -186,7 +186,10 @@ describe('CPPI weights (#101 experiment 6)', () => {
 
 describe('lazy re-range from the engine settings (otto/mamoru#172)', () => {
   // The knob's overlay, as `withEngineSettings` builds it from the template `conservador-live-v2 + lazy-h24h-b100-d30`.
-  const LAZY_V2: PolicyVersion = { ...V2, range: { ...V2.range, lazy: { edgeBufferTicks: 100, minDwellSeconds: 1800, horizonSeconds: 86_400, lvrWeightBps: 10_000 } } }
+  const LAB_LAZY = { edgeBufferTicks: 100, minDwellSeconds: 1800, horizonSeconds: 86_400, lvrWeightBps: 10_000 }
+  const LAZY_V2: PolicyVersion = { ...V2, range: { ...V2.range, lazy: { ...LAB_LAZY, requireCostEstimate: true } } }
+  // The Lab variant file: the same numbers without the live flag, so a missing estimate abstains as it was measured.
+  const LAB_V2: PolicyVersion = { ...V2, range: { ...V2.range, lazy: LAB_LAZY } }
   // c23e94e1, 17 Oct: NFT 6148685 on WETH/USDC 0.3% [-198180, -196200], the pool below it (all WETH).
   const nft = position({ tokenId: 6_148_685n, pool: ETH_POOL, tickLower: -198_180, tickUpper: -196_200, liquidity: 10n ** 15n, managed: true })
   const below = -198_600
@@ -221,6 +224,19 @@ describe('lazy re-range from the engine settings (otto/mamoru#172)', () => {
     const dr = decide(withOutOfRangeSince(rich, outOfRangeSinceOf(since0, rich)), LAZY_V2)
     expect(dr.kind).toBe('rerange')
     expect(dr.proposal).toMatchObject({ kind: 'rerange', tokenId: nft.tokenId, pool: ETH_POOL })
+  })
+
+  test('fail closed: past the dwell with no fee or volatility history, live holds; the Lab variant still abstains', () => {
+    const since = new Map([[nft.tokenId, T0]])
+    const cold = withOutOfRangeSince(at(LAZY_V2, T0 + 1800n), since)
+    const live = decide(cold, LAZY_V2)
+    expect(live.kind).not.toBe('rerange')
+    expect(live.positions.find((p) => p.tokenId === nft.tokenId)!.codes).toContain('DECIDE_RANGE_NO_FEE_HISTORY')
+    // Fee growth without volatility is no estimate either.
+    const noVol = { pools: { [ETH_POOL]: { ...ethMarket(1n << 120n).pools[ETH_POOL], realizedVol24hBps: null } } }
+    expect(decide(withOutOfRangeSince(at(LAZY_V2, T0 + 1800n, noVol), since), LAZY_V2).positions.find((p) => p.tokenId === nft.tokenId)!.codes).toContain('DECIDE_RANGE_NO_FEE_HISTORY')
+    const lab = decide(withOutOfRangeSince(at(LAB_V2, T0 + 1800n), since), LAB_V2)
+    expect(lab.kind).toBe('rerange')
   })
 
   test('out-of-range clock: kept while out, cleared when the price comes back, dropped with the position', () => {

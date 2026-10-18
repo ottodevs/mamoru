@@ -220,3 +220,59 @@ export async function observeGuardHistory(
 
   return { pools, series: nextSeries, onChain }
 }
+
+/** #172: how long one process-wide guard read of a pool serves every engine (block-timestamp seconds). */
+export const SHARED_GUARD_TTL_SECONDS = 60
+
+/** Pool calls a guard read of one pool costs with fee growth: the 24.5 h `observe`, `observe([0])`, two fee growth globals. */
+export const GUARD_CALLS_PER_POOL = 4
+
+/**
+ * otto/mamoru#172 (GPT-6 review): the guard history of a pool is the same for every account, so the operator reads it
+ * once per pool per `ttlSeconds` for the whole process instead of once per engine review. An engine whose
+ * observation is within the TTL of the last read of a pool (either side, block timestamps) takes that read; the
+ * first engine past it reads every due pool in one Multicall3 batch, pinned to its own block, and the others
+ * waiting on the same pools await that batch. So these 24 h aggregates (TWAP 24 h ago, realized vol, fee growth) may
+ * be up to the TTL away from an engine's observation block; slot0, liquidity and the account state stay pinned to
+ * it. One rolling fallback series and one fee history per pool, here, for the whole process. A failed read is
+ * forgotten, so the next engine tries again.
+ */
+export class SharedGuardReads {
+  readonly series = new Map<RegistryName, GuardSeries>()
+  readonly fees: FeeGrowthHistory
+  /** Batches sent and pool calls in them since the process started (CU estimate, tests). */
+  readonly counts = { batches: 0, poolCalls: 0 }
+  private readonly ttl: number
+  private readonly last = new Map<RegistryName, { time: number; obs: Promise<PoolGuardObs> }>()
+
+  constructor(private readonly o: { ttlSeconds?: number; fees?: FeeGrowthHistory; onFees?: (fees: FeeGrowthHistory) => void } = {}) {
+    this.ttl = o.ttlSeconds ?? SHARED_GUARD_TTL_SECONDS
+    this.fees = o.fees ?? new Map()
+  }
+
+  async read(client: PublicClient, multicall3: Address | null, targets: readonly PoolGuardTarget[], blockNumber: bigint, now: number, windowSeconds: number): Promise<Partial<Record<RegistryName, PoolGuardObs>>> {
+    const due = targets.filter((t) => {
+      const l = this.last.get(t.name)
+      return !l || Math.abs(now - l.time) >= this.ttl
+    })
+    if (due.length) {
+      this.counts.batches++
+      this.counts.poolCalls += due.length * GUARD_CALLS_PER_POOL
+      const batch = observeGuardHistory(client, multicall3, due, blockNumber, now, windowSeconds, this.series, this.fees).then((r) => {
+        for (const [name, s] of r.series) this.series.set(name, s)
+        this.o.onFees?.(this.fees)
+        return r
+      })
+      for (const t of due) {
+        const obs = batch.then((r) => r.pools[t.name]!)
+        const entry = { time: now, obs }
+        this.last.set(t.name, entry)
+        obs.catch(() => {
+          if (this.last.get(t.name) === entry) this.last.delete(t.name)
+        })
+      }
+    }
+    const reads = targets.map((t) => [t.name, this.last.get(t.name)!.obs] as const)
+    return Object.fromEntries(await Promise.all(reads.map(async ([name, obs]) => [name, await obs] as const)))
+  }
+}

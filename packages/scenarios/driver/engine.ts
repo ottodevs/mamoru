@@ -13,11 +13,11 @@ import {
   isSafeAndCanonical,
   observe,
   observeGuardHistory,
+  SharedGuardReads,
   principalOwedBefore,
   readUserOpEvent,
   rpcClient,
   simulateFromEntryPoint,
-  type FeeGrowthHistory,
   type GuardSeries,
   type PoolStateCache,
   type Simulation,
@@ -133,10 +133,11 @@ export type EngineConfig = {
     series?: ReadonlyMap<RegistryName, GuardSeries>
     /**
      * otto/mamoru#172: the lazy re-range's cost test also needs each pool's fee growth over the last 24 h. Given, the
-     * guard batch reads the fee growth globals too and folds them into this history, which the caller shares between
-     * the engines of a process. Absent: no fee read, and `feeGrowth24h` is never set.
+     * guard history comes from this process-wide reader instead (one read per pool per TTL for every engine, fee
+     * growth included; see `SharedGuardReads`), and `series` above is not used. Absent: this engine's own reads,
+     * pinned to its block, without fee growth, as before.
      */
-    fees?: FeeGrowthHistory
+    shared?: SharedGuardReads
   }
   /**
    * The owner's intents, read at every observation (plan §9 step 4, US6). Absent: neither paused nor exiting.
@@ -373,7 +374,8 @@ export class Engine {
     if (!gh || gh.pools.length === 0) return obs
     // Pinned to the same block as the rest of the observation (FR-RPC-001): a second Multicall3 batch, never a second block.
     const targets = gh.pools.map((name) => ({ name, address: entry(name, baseRegistry).address }))
-    const result = await observeGuardHistory(this.client, MULTICALL3, targets, obs.block.number, Number(obs.block.timestamp), this.cfg.policy.execution.twapWindowSeconds, this.guardSeries, gh.fees)
+    if (gh.shared) return { ...obs, guard: { pools: await gh.shared.read(this.client, MULTICALL3, targets, obs.block.number, Number(obs.block.timestamp), this.cfg.policy.execution.twapWindowSeconds) } }
+    const result = await observeGuardHistory(this.client, MULTICALL3, targets, obs.block.number, Number(obs.block.timestamp), this.cfg.policy.execution.twapWindowSeconds, this.guardSeries)
     this.guardSeries.clear()
     for (const [name, series] of result.series) this.guardSeries.set(name, series)
     return { ...obs, guard: { pools: result.pools } }

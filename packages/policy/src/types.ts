@@ -258,9 +258,11 @@ export type VolWidthRule = { k: number; horizonSeconds: number; minTicks: number
  *   diluted by the pool's active liquidity) must exceed the cost of doing it: three operations of gas at the engine's
  *   userOp budget, the pool fee on the half that the ratio convert swaps, and the LVR of the new range over the horizon
  *   (sigma^2/4 * L * sqrt(P), sigma from the 24 h realized volatility), weighted by `lvrWeightBps` (10000 = all of it).
- * Missing fee or volatility history: the cost test abstains and the first two conditions decide alone.
+ * Missing fee or volatility history: the cost test abstains and the first two conditions decide alone, unless
+ * `requireCostEstimate` (set by the live engine setting, otto/mamoru#172): then the position holds with
+ * DECIDE_RANGE_NO_FEE_HISTORY, so a cold history never lets a re-range through untested. Lab variants leave it unset.
  */
-export type LazyRerange = { edgeBufferTicks: number; minDwellSeconds: number; horizonSeconds: number; lvrWeightBps: number }
+export type LazyRerange = { edgeBufferTicks: number; minDwellSeconds: number; horizonSeconds: number; lvrWeightBps: number; requireCostEstimate?: boolean }
 
 /**
  * Volatility target (#101, experiment 6): a volatile bucket's weight is its preference times

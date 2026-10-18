@@ -61,6 +61,8 @@ export class FakeChain {
   /** `${contract}:${selector}` reads that revert, lowercase. */
   readonly reverting = new Set<string>()
   readonly requests: Recorded[] = []
+  /** #172: pool calls of the guard history (its observe reads and the fee growth globals), inside multicalls or not. */
+  guardCalls = 0
   /** Called before each request is answered. */
   onRequest: (r: Recorded) => void = () => {}
   /** QuoterV2.quoteExactInputSingle's `amountOut`: 1:1 with `amountIn` by default (deterministic), override per test. */
@@ -241,6 +243,8 @@ export class FakeChain {
     const pool = POOLS.map((p) => entry(p, baseRegistry)).find((e) => e.address.toLowerCase() === at)
     if (pool) {
       const i = BigInt(POOLS.indexOf(pool.name) + 1)
+      // The observation's TWAP read asks two offsets; the guard history asks the 24.5 h window or [0].
+      if (data.startsWith(sel('observe(uint32[])')) && (decodeFunctionData({ abi: observeAbi, data }).args[0] as readonly number[]).length !== 2) this.guardCalls++
       if (data.startsWith(sel('observe(uint32[])'))) {
         // Tick cumulative falls by 1805*i over 1,800 s, linearly (floored), so any window reads about -1.003*i:
         // observe([1800, 0]) keeps answering exactly [-7000i, -7000i - 1805i]. Liquidity cumulatives stay 0.
@@ -256,6 +260,7 @@ export class FakeChain {
       if (call.functionName === 'fee') return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'fee', result: pool.fee! })
       // #172: fee growth grows with the head, token1 twice token0.
       if (call.functionName === 'feeGrowthGlobal0X128' || call.functionName === 'feeGrowthGlobal1X128') {
+        this.guardCalls++
         return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: call.functionName, result: (1n << 100n) * i * this.head * (call.functionName === 'feeGrowthGlobal1X128' ? 2n : 1n) })
       }
       return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'tickSpacing', result: pool.tickSpacing! })

@@ -4,7 +4,7 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import { DEFAULT_ENGINE_SETTINGS, ENGINE_SETTINGS_TEMPLATES, grantKey, instantiateGrant, POLICIES, withEngineSettings, type PolicyVersion } from '@mamoru/policy'
-import type { FeeGrowthHistory } from '@mamoru/rpc'
+import { GUARD_CALLS_PER_POOL, SharedGuardReads } from '@mamoru/rpc'
 import { permissionIdOf, toSmartSession } from '@mamoru/account/sessions'
 import { FakeChain } from '../../rpc/test/fake-chain.ts'
 import { Engine, type EngineSession } from './engine.ts'
@@ -32,8 +32,8 @@ Object.assign(chain.positions[0]!, { tickLower: 200, tickUpper: 800 })
 const rpc = chain.serve()
 afterAll(() => rpc.stop())
 
-function engine(policy: PolicyVersion, fees?: FeeGrowthHistory): Engine {
-  const guardHistory = fees ? { pools: policy.buckets.flatMap((b) => b.pools), fees } : undefined
+function engine(policy: PolicyVersion, shared?: SharedGuardReads): Engine {
+  const guardHistory = shared ? { pools: policy.buckets.flatMap((b) => b.pools), shared } : undefined
   const e = new Engine(
     { mode: 'live', chainId: 8453, signingChainIds: [8453], rpcUrl: rpc.url, bundlerUrl: 'http://127.0.0.1:9/', policy, account: ACCOUNT, sessionKey, nonceLane: 0, depositsAfter: 800n, historyFromBlock: 800n, sessions: sessions(), ...(guardHistory ? { guardHistory } : {}) },
     { waitBlock: async () => {} },
@@ -44,13 +44,15 @@ function engine(policy: PolicyVersion, fees?: FeeGrowthHistory): Engine {
 
 describe('engine: lazy re-range history (otto/mamoru#172)', () => {
   test('a lazy engine that just started holds the out-of-range position, keeps its clock, and reads fee growth', async () => {
-    const fees: FeeGrowthHistory = new Map()
-    const e = engine(LAZY, fees)
+    const shared = new SharedGuardReads()
+    const fees = shared.fees
+    const e = engine(LAZY, shared)
     const r1 = await e.review()
     if (r1.kind !== 'decided') throw new Error(`observation failed: ${r1.code}`)
     const t1 = r1.observation.block.timestamp
     expect(r1.observation.positions[0]!.outOfRangeSince).toBe(t1)
     expect(r1.record.decision.positions[0]!.codes).toContain('DECIDE_RANGE_COOLDOWN')
+    expect(r1.record.decision.positions[0]!.codes).not.toContain('DECIDE_RANGE_ADJUST')
     expect(r1.op).toBeNull()
     // Cold history: the cost test would abstain, never guess.
     expect(r1.observation.guard?.pools['pool:USDC/cbBTC/500']?.feeGrowth24h).toBeNull()
@@ -61,6 +63,26 @@ describe('engine: lazy re-range history (otto/mamoru#172)', () => {
     expect(r2.observation.block.timestamp).toBeGreaterThan(t1)
     expect(r2.observation.positions[0]!.outOfRangeSince).toBe(t1)
     expect(r2.op).toBeNull()
+  })
+
+  test('N lazy engines reviewing the same pools within a minute: one guard read per pool for all of them', async () => {
+    const shared = new SharedGuardReads()
+    const engines = Array.from({ length: 5 }, () => engine(LAZY, shared))
+    chain.head += 10n
+    chain.guardCalls = 0
+    for (const e of engines) {
+      const r = await e.review()
+      if (r.kind !== 'decided') throw new Error(`observation failed: ${r.code}`)
+      expect(r.observation.guard?.pools['pool:WETH/USDC/3000']).toBeDefined()
+      chain.head += 2n
+    }
+    expect(shared.counts.batches).toBe(1)
+    expect(chain.guardCalls).toBe(3 * GUARD_CALLS_PER_POOL)
+    // A minute of blocks later (2 s each), the next review reads again, once.
+    chain.head += 30n
+    for (const e of engines) await e.review()
+    expect(shared.counts.batches).toBe(2)
+    expect(chain.guardCalls).toBe(2 * 3 * GUARD_CALLS_PER_POOL)
   })
 
   test('eager: the observation carries no out-of-range clock and no fee growth, as before', async () => {

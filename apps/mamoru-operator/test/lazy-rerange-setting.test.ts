@@ -2,13 +2,14 @@
 // (canary included) and never the policy that grants and policy hashes are built from.
 import { describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { permissionIdOf, toSmartSession } from '@mamoru/account/sessions'
 import { settingsResponseSignature } from '@mamoru/operator-auth'
 import { canonicalSettingsJson, DEFAULT_ENGINE_SETTINGS, ENGINE_SETTINGS_TEMPLATES, grantKey, instantiateGrant, POLICIES, policyHash, type EngineSettings, type PolicyVersion } from '@mamoru/policy'
 import { EngineSettingsSource, type SettingsVersion } from '../src/engine-settings.ts'
+import { FeeHistoryState } from '../src/fee-history-state.ts'
 import { Operator } from '../src/operator.ts'
 
 const SECRET = 'op-secret'
@@ -57,7 +58,7 @@ describe('lazy re-range engine setting (otto/mamoru#172)', () => {
     const canary = account('canary-acct')
     const other = account('other-acct')
     const lazy = op.enginePolicyOf(canary)
-    expect(lazy.range.lazy).toEqual({ edgeBufferTicks: 100, minDwellSeconds: 1800, horizonSeconds: 86_400, lvrWeightBps: 10_000 })
+    expect(lazy.range.lazy).toEqual({ edgeBufferTicks: 100, minDwellSeconds: 1800, horizonSeconds: 86_400, lvrWeightBps: 10_000, requireCostEstimate: true })
     expect(lazy.range.cooldownSeconds).toBe(V2.range.cooldownSeconds)
     expect(op.enginePolicyOf(canary)).toBe(lazy)
     expect(op.enginePolicyOf(other)).toBe(V2)
@@ -68,16 +69,37 @@ describe('lazy re-range engine setting (otto/mamoru#172)', () => {
     // The engine of a lazy account reads volatility and fee growth of every pool of the policy; eager reads nothing.
     const gh = op.guardHistoryOf(lazy)!
     expect(gh.pools).toEqual(['pool:USDC/USDT/100', 'pool:USDC/cbBTC/500', 'pool:WETH/USDC/3000'])
-    expect(gh.fees).toBeInstanceOf(Map)
+    expect(gh.shared).toBe(op.guardReads)
     expect(op.guardHistoryOf(op.enginePolicyOf(other))).toBeUndefined()
-    // One history per process, shared by every engine.
-    expect(op.guardHistoryOf(lazy)!.fees).toBe(gh.fees)
+    // One reader per process, shared by every engine.
+    expect(op.guardHistoryOf(lazy)!.shared).toBe(gh.shared)
   })
 
   test('lazy with the fall guard on: both pool sets are read, the guard pools first', async () => {
     const both = { ...LAZY, guard: { ...LAZY.guard, enabled: true } }
     const op = operator(await sourceWith([version(1, both)]))
     expect(op.guardHistoryOf(op.enginePolicyOf(account('a')))!.pools).toEqual(['pool:USDC/cbBTC/500', 'pool:WETH/USDC/3000', 'pool:USDC/USDT/100'])
+    // Guard only: the engine's own pinned reads, as before; no shared reader.
+    const guardOnly = operator(await sourceWith([version(1, ENGINE_SETTINGS_TEMPLATES['lab guards (fall freeze 7%/9%)']!)]))
+    expect(guardOnly.guardHistoryOf(guardOnly.enginePolicyOf(account('a')))!.shared).toBeUndefined()
+  })
+
+  test('the fee history survives a restart: restored from the state file, saved at most once a minute, bad entries dropped', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fees-'))
+    const state = new FeeHistoryState(dir)
+    expect(state.load().size).toBe(0)
+    const fees = new Map([['pool:WETH/USDC/3000', [{ time: 10, growth0X128: 1n << 200n, growth1X128: 5n }, { time: 20, growth0X128: (1n << 200n) + 1n, growth1X128: 6n }]]]) as never
+    state.update(fees, 1_000)
+    expect(statSync(join(dir, 'fee-history.json')).mode & 0o777).toBe(0o600)
+    state.update(new Map() as never, 30_000)
+    expect(new FeeHistoryState(dir).load()).toEqual(fees)
+    // An operator built with it starts from what was saved.
+    const op = new Operator({ ...base, feeHistory: new FeeHistoryState(dir) } as never, {} as never, {} as never, store as never)
+    expect(op.guardReads.fees).toEqual(fees)
+    writeFileSync(join(dir, 'fee-history.json'), JSON.stringify({ 'pool:WETH/USDC/3000': [{ time: 30, growth0X128: '7', growth1X128: '8' }, { time: 'x' }, { time: 40, growth0X128: '-1', growth1X128: '1' }], bad: 3 }))
+    expect(new FeeHistoryState(dir).load()).toEqual(new Map([['pool:WETH/USDC/3000', [{ time: 30, growth0X128: 7n, growth1X128: 8n }]]]) as never)
+    writeFileSync(join(dir, 'fee-history.json'), '{not json')
+    expect(new FeeHistoryState(dir).load().size).toBe(0)
   })
 
   test('grants are byte-identical with the knob on or off, and so is every policy hash', async () => {

@@ -5,7 +5,7 @@ import { overCap, type AccountContext, type Address, type FundingView, type OpVi
 import { address, entry, erc20Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
-import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, type FeeGrowthHistory, type SimCallResult } from '@mamoru/rpc'
+import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
 import { POLICIES, USAGE_RENEW_BPS, V4_POOLS, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
@@ -34,6 +34,7 @@ import { minOut, quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { Engine, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
+import type { FeeHistoryState } from './fee-history-state.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { Proposal } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
@@ -350,6 +351,8 @@ export type OperatorConfig = {
   v4Policy?: PolicyVersion
   /** otto/mamoru#129 runtime flags from the settings pull; `onchain_action_policy_v4` offers the v4 renewal per account. Absent: every flag off. */
   opsFlags?: () => Partial<Record<OpsFlagName, boolean>>
+  /** otto/mamoru#172: where the lazy re-range's fee history survives a restart (`FeeHistoryState`). Absent: memory only. */
+  feeHistory?: Pick<FeeHistoryState, 'load' | 'update'>
 }
 
 /** Spec 007 T7: the live policies whose accounts the renew row moves to v4 (same three pools and weights). */
@@ -533,15 +536,21 @@ export class Operator {
   private readonly relayerLowLogged = new Map<string, number>()
   /** Pool state of the last few blocks: accounts reviewed at the same block read it once. */
   private readonly poolCache = poolStateCache()
-  /** #172: fee growth per pool for the lazy re-range's cost test, shared by every engine (see `FeeGrowthHistory`). */
-  private readonly feeHistory: FeeGrowthHistory = new Map()
+  /**
+   * #172: guard history of lazy accounts, read once per pool per minute for every engine (see `SharedGuardReads`),
+   * with the fee history the cost test needs, restored from and saved to `cfg.feeHistory` when given.
+   */
+  readonly guardReads: SharedGuardReads
 
   constructor(
     readonly cfg: OperatorConfig,
     private readonly client: PublicClient,
     readonly relayer: Relayer,
     private readonly store: StateStore,
-  ) {}
+  ) {
+    const saved = cfg.feeHistory
+    this.guardReads = new SharedGuardReads({ fees: saved?.load(), onFees: saved ? (fees) => saved.update(fees) : undefined })
+  }
 
   /** GET /metrics: accounts known / active / armed. */
   accountsSummary(): AccountsSummary {
@@ -797,7 +806,8 @@ export class Operator {
     const lazy = policy.range.lazy ? policy.buckets.flatMap((b) => b.pools) : []
     const pools = [...new Set([...guarded, ...lazy])] as RegistryName[]
     if (!pools.length) return undefined
-    return policy.range.lazy ? { pools, fees: this.feeHistory } : { pools }
+    // Guard-only accounts keep their own reads pinned to their block, as before.
+    return policy.range.lazy ? { pools, shared: this.guardReads } : { pools }
   }
 
   /** Spec 006: new settings reach every running engine on its next review; nothing restarts. */

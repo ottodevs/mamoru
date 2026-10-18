@@ -55,9 +55,11 @@ cap also sizes the session limits of approvals signed after it changes, exactly 
 sees that cap in the summary they sign, and an activation never takes in more than the cap its signature named,
 even if the cap is raised while it waits armed. Depth sizing and the guard change how much an entry places and which
 entries pause; the re-range setting changes when a position is re-ranged (it sets `range.lazy` on the policy the
-engine decides with, never on the one grants and policy hashes are built from). Lazy needs history the engine keeps
-in memory: each position's out-of-range clock (per engine, from its first review) and the pools' fee growth (one
-history per operator process; until it covers 12 h the cost test abstains and the buffer and the dwell decide).
+engine decides with, never on the one grants and policy hashes are built from). Lazy needs history: each position's
+out-of-range clock (per engine, in memory, from its first review) and the pools' fee growth and volatility (read once
+per pool per minute for the whole operator process, `SharedGuardReads`; the fee history is saved to
+`stateDir/fee-history.json` and restored at boot). Live lazy fails closed: without a cost estimate (less than 12 h of
+fee history, or no volatility) the position holds with `DECIDE_RANGE_NO_FEE_HISTORY`, never re-ranges untested.
 
 ## Transport
 

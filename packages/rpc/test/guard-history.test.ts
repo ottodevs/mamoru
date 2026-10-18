@@ -12,7 +12,9 @@ import {
   FEE_POINT_STEP_SECONDS,
   feeGrowth24hOf,
   guardSecondsAgos,
+  GUARD_CALLS_PER_POOL,
   observeGuardHistory,
+  SharedGuardReads,
   type FeeGrowthHistory,
   type FeePoint,
   type GuardSeries,
@@ -155,6 +157,9 @@ function observeResult(data: Hex, tick: bigint, base: bigint, maxLookback: numbe
   return { success: true, returnData: encodeFunctionResult({ abi: observeAbi, functionName: 'observe', result: [tickCumulatives, secondsPerLiquidity] }) }
 }
 
+/** Pool calls every fake client answered (observe and fee growth), for the call-count tests of #172. */
+const poolCalls = { n: 0 }
+
 /** A client with two pools: one whose oracle answers any lookback (the stables pool today, see LC-T6), one that only answers within `maxLookback` (cbBTC/WETH today). */
 function fakeClient(maxLookback: number, fees?: { growth: bigint; failOn?: Address }) {
   const pools: Record<string, { tick: bigint; base: bigint; maxLookback: number }> = {
@@ -164,6 +169,7 @@ function fakeClient(maxLookback: number, fees?: { growth: bigint; failOn?: Addre
   const answer = (to: Address, data: Hex): { success: boolean; returnData: Hex } => {
     const pool = pools[to.toLowerCase()]
     if (!pool) return { success: false, returnData: '0x' }
+    poolCalls.n++
     // #172: fee growth globals, token1 twice token0; one pool may revert them.
     for (const [i, fn] of (['feeGrowthGlobal0X128', 'feeGrowthGlobal1X128'] as const).entries()) {
       if (data.slice(0, 10) !== encodeFunctionData({ abi: uniswapV3PoolAbi, functionName: fn }).slice(0, 10)) continue
@@ -297,4 +303,86 @@ describe('fee growth history (otto/mamoru#172)', () => {
     expect(failed.pools['pool:USDC/cbBTC/500']!.feeGrowth24h).toBeNull()
     expect(failed.pools['pool:USDC/USDT/100']!.feeGrowth24h).not.toBeNull()
   })
+})
+
+describe('SharedGuardReads: one read per pool per TTL for the whole process (#172, GPT-6 review)', () => {
+  const targets = [
+    { name: 'pool:USDC/USDT/100', address: STABLE_POOL },
+    { name: 'pool:USDC/cbBTC/500', address: BTC_POOL },
+  ]
+
+  test('N engines in one interval, sequential or at the same time: one batch, one read per pool', async () => {
+    const shared = new SharedGuardReads()
+    const client = fakeClient(3_600, { growth: 1n })
+    poolCalls.n = 0
+    const now = 100 * DAY_S
+    const first = await shared.read(client, MULTICALL3, targets, 1n, now, W)
+    const same = await Promise.all(Array.from({ length: 50 }, (_, i) => shared.read(client, MULTICALL3, targets, 1n + BigInt(i), now + (i % 59), W)))
+    expect(shared.counts).toEqual({ batches: 1, poolCalls: targets.length * GUARD_CALLS_PER_POOL })
+    expect(poolCalls.n).toBe(targets.length * GUARD_CALLS_PER_POOL)
+    for (const r of same) expect(r).toEqual(first)
+    // Concurrent first readers share the batch in flight.
+    const fresh = new SharedGuardReads()
+    poolCalls.n = 0
+    await Promise.all(Array.from({ length: 20 }, () => fresh.read(client, MULTICALL3, targets, 1n, now, W)))
+    expect(fresh.counts.batches).toBe(1)
+    expect(poolCalls.n).toBe(targets.length * GUARD_CALLS_PER_POOL)
+    // Past the TTL the next engine reads again; a pool asked for the first time is read alone.
+    await shared.read(client, MULTICALL3, targets, 2n, now + 60, W)
+    expect(shared.counts.batches).toBe(2)
+    await shared.read(client, MULTICALL3, [targets[0]!], 2n, now + 61, W)
+    expect(shared.counts.batches).toBe(2)
+  })
+
+  test('a failed read is not kept: the next engine reads again', async () => {
+    const shared = new SharedGuardReads()
+    const broken = createPublicClient({ transport: custom({ async request() { throw new Error('down') } }) })
+    await expect(shared.read(broken, MULTICALL3, targets, 1n, 100 * DAY_S, W)).rejects.toThrow()
+    const r = await shared.read(fakeClient(3_600, { growth: 1n }), MULTICALL3, targets, 1n, 100 * DAY_S, W)
+    expect(shared.counts.batches).toBe(2)
+    expect(r['pool:USDC/cbBTC/500']).toBeDefined()
+  })
+
+  test('the shared fee history fills from whichever engine reads, and onFees is told', async () => {
+    let told = 0
+    const shared = new SharedGuardReads({ onFees: () => told++ })
+    const growth = { growth: 0n }
+    const client = fakeClient(3_600, growth)
+    let r: Awaited<ReturnType<SharedGuardReads['read']>> = {}
+    for (let t = 0; t <= 13 * 3_600; t += 20) {
+      growth.growth += 1n
+      r = await shared.read(client, MULTICALL3, targets, 1n, 100 * DAY_S + t, W)
+    }
+    expect(r['pool:USDC/cbBTC/500']!.feeGrowth24h?.seconds).toBeGreaterThanOrEqual(12 * 3_600)
+    expect(told).toBe(shared.counts.batches)
+  })
+
+  test('calls per hour, 100 lazy accounts on the 3 live pools: per engine review (before) and shared (after)', async () => {
+    const three = [...targets, { name: 'pool:WETH/USDC/3000', address: BTC_POOL }]
+    const client = fakeClient(3_600, { growth: 1n })
+    const hour = async (reviewSeconds: number, accounts: number, shared: SharedGuardReads | null) => {
+      poolCalls.n = 0
+      const fees: FeeGrowthHistory = new Map()
+      for (let t = 0; t < 3_600; t += reviewSeconds) {
+        for (let a = 0; a < accounts; a++) {
+          // Accounts are staggered over the review interval, as their loops are.
+          const now = 100 * DAY_S + t + Math.floor((a * reviewSeconds) / accounts)
+          if (shared) await shared.read(client, MULTICALL3, three, 1n, now, W)
+          else await observeGuardHistory(client, MULTICALL3, three, 1n, now, W, new Map(), fees)
+        }
+      }
+      return poolCalls.n
+    }
+    // Before: every review of every account reads its pools, so it is linear in accounts; measured on 10, times 10.
+    const counts = {
+      every20s: { before: (await hour(20, 10, null)) * 10, after: await hour(20, 100, new SharedGuardReads()) },
+      every120s: { before: (await hour(120, 10, null)) * 10, after: await hour(120, 100, new SharedGuardReads()) },
+    }
+    console.log(`[#172] guard pool calls per hour, 100 lazy accounts, 3 pools: ${JSON.stringify(counts)}`)
+    expect(counts.every20s.before).toBe(100 * 180 * 3 * GUARD_CALLS_PER_POOL)
+    expect(counts.every120s.before).toBe(100 * 30 * 3 * GUARD_CALLS_PER_POOL)
+    // After: one read of the 3 pools per TTL (60 s), whatever the number of accounts or their cadence.
+    expect(counts.every20s.after).toBe(60 * 3 * GUARD_CALLS_PER_POOL)
+    expect(counts.every120s.after).toBe(60 * 3 * GUARD_CALLS_PER_POOL)
+  }, 60_000)
 })

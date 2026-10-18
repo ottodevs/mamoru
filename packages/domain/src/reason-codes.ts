@@ -102,6 +102,8 @@ export const REASON_CODES = [
   'DECIDE_RANGE_COOLDOWN',
   // Lab (#101): a re-range that would cost more (gas, swap, LVR) than the fees it earns over the policy horizon waits.
   'DECIDE_RANGE_BELOW_COST',
+  // otto/mamoru#172: live lazy re-range without the fee or volatility history the cost test needs: it holds (fail closed).
+  'DECIDE_RANGE_NO_FEE_HISTORY',
   'DECIDE_ENTRY_PAUSED_FALL',
   // Lab (#101 round 3): the stables pool is off peg past the guard; nothing moves in it, or it is being left.
   'RISK_DEPEG_PAIRED',

@@ -77,11 +77,14 @@ export const ENGINE_SETTINGS_TEMPLATES: Record<string, EngineSettings> = {
 
 const LAZY_KEYS = ['edgeBufferTicks', 'minDwellSeconds', 'horizonSeconds', 'lvrWeightBps'] as const
 
-/** The `range.lazy` these settings ask for, or null for the eager trigger. */
+/**
+ * The `range.lazy` these settings ask for, or null for the eager trigger. Always fail closed (`requireCostEstimate`):
+ * live, a missing fee or volatility history holds the position instead of skipping the cost test (GPT-6 review of #172).
+ */
 export function lazyOf(s: EngineSettings): LazyRerange | null {
   const r = s.rerange
   if (!r || r.mode !== 'lazy') return null
-  return { edgeBufferTicks: r.edgeBufferTicks, minDwellSeconds: r.minDwellSeconds, horizonSeconds: r.horizonSeconds, lvrWeightBps: r.lvrWeightBps }
+  return { edgeBufferTicks: r.edgeBufferTicks, minDwellSeconds: r.minDwellSeconds, horizonSeconds: r.horizonSeconds, lvrWeightBps: r.lvrWeightBps, requireCostEstimate: true }
 }
 
 const isInt = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n)
