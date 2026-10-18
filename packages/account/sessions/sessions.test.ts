@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { address } from '@mamoru/registry'
-import { computeCaps, conservadorLiveV4, conservadorV1, instantiateGrant, V4_POOLS } from '@mamoru/policy'
-import { toSmartSession, type SecondActionPolicy } from './index.ts'
+import { computeCaps, conservadorLiveV4, conservadorV1, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, grantKey, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_GAS_CAPS, V4_POOLS, v4BudgetCaps, type SessionGrant } from '@mamoru/policy'
+import { activationCall, toSmartSession, v4PoliciesFor, type SecondActionPolicy } from './index.ts'
 
 const ctx = {
   account: '0x00000000000000000000000000000000000000aa' as const,
@@ -69,6 +69,17 @@ describe('toSmartSession: authorization-parity guard (otto/mamoru#151 T7, T6 aud
   // they build with `requiresActionPolicy: true`; `toSmartSession` must refuse to encode one without a real
   // second policy, so this cannot silently reach the chain looser than v2/v3.
   const MAMORU_POLICY = '0x00000000000000000000000000000000000000Fe' as const
+  const GAS_POLICY = '0x00000000000000000000000000000000000000Fd' as const
+  const OTHER = '0x00000000000000000000000000000000000000Fc' as const
+  const caps = v4BudgetCaps(conservadorLiveV4, 10_000n * 1_000_000n)
+  const initFor = (g: SessionGrant, poolOverride?: (typeof V4_POOLS)[keyof typeof V4_POOLS]) => encodeMamoruInit(mamoruInitFor(poolOverride ?? Object.values(V4_POOLS).find((p) => p.pool === g.pool)!, 1n, caps))
+  const full = (g: SessionGrant, over: Partial<SecondActionPolicy> = {}): SecondActionPolicy => ({
+    policy: MAMORU_POLICY,
+    initData: initFor(g),
+    gas: { policy: GAS_POLICY, initData: encodeGasCaps(V4_GAS_CAPS) },
+    expected: { actionPolicy: MAMORU_POLICY, gasPolicy: GAS_POLICY },
+    ...over,
+  })
 
   test('a v4 grant without a second policy throws SESSION_ACTION_POLICY_MISSING', () => {
     const grant = instantiateGrant(conservadorLiveV4, 'manage-any:pool:USDC/cbBTC/500', v4Ctx)
@@ -81,18 +92,85 @@ describe('toSmartSession: authorization-parity guard (otto/mamoru#151 T7, T6 aud
     expect(() => toSmartSession(grant, { policy: '0x0000000000000000000000000000000000000000', initData: '0x' })).toThrow('a v4 grant needs MamoruActionPolicy')
   })
 
-  test('a v4 grant WITH a real second policy builds normally', () => {
-    const grant = instantiateGrant(conservadorLiveV4, 'enter-mint:pool:USDC/cbBTC/500', v4Ctx)
-    const session = toSmartSession(grant, { policy: MAMORU_POLICY, initData: '0x1234' })
+  test('a v4 grant WITH both policies, bound to the configured addresses, builds: two action policies, three userOp policies', () => {
+    const grant = retargetToPolicy(instantiateGrant(conservadorLiveV4, 'enter-mint:pool:USDC/cbBTC/500', v4Ctx), MAMORU_POLICY)
+    const session = toSmartSession(grant, full(grant))
     for (const a of session.actions) {
       expect(a.actionPolicies).toHaveLength(2)
       expect(a.actionPolicies[1]!.policy.toLowerCase()).toBe(MAMORU_POLICY.toLowerCase())
     }
+    expect(session.userOpPolicies.map((p) => p.policy.toLowerCase())).toEqual([address('TimeFramePolicy'), address('UsageLimitPolicy'), GAS_POLICY].map((a) => a.toLowerCase()))
+    expect(session.userOpPolicies[2]!.initData).toBe(encodeGasCaps(V4_GAS_CAPS))
   })
 
   test('v2/v3 grants are unflagged and unchanged: no second policy required, no throw', () => {
     const grant = instantiateGrant(conservadorV1, 'enter-swap', ctx)
     expect(grant.requiresActionPolicy).toBeUndefined()
     expect(() => toSmartSession(grant)).not.toThrow()
+  })
+})
+
+describe('T7 (GPT-6 review of #97): P1 1-3', () => {
+  const A = '0x00000000000000000000000000000000000000fe' as const
+  const G = '0x00000000000000000000000000000000000000fd' as const
+  const X = '0x00000000000000000000000000000000000000fc' as const
+  const d = { actionPolicy: A, gasPolicy: G, gasCaps: V4_GAS_CAPS }
+  const caps = v4BudgetCaps(conservadorLiveV4, 10_000n * 1_000_000n)
+  const keys = conservadorLiveV4.session.grants.map(grantKey)
+  const grants = keys.map((k) => retargetToPolicy(instantiateGrant(conservadorLiveV4, k, v4Ctx), A))
+  const btcSwap = grants.find((g) => g.name === 'enter-swap' && g.pool === 'pool:USDC/cbBTC/500')!
+  const ok = (g: SessionGrant): SecondActionPolicy => v4PoliciesFor([g], d, 1n, caps)(g, 0)!
+
+  test('P1 1: activationCall encodes v4 grants with their policies; without them it still refuses', () => {
+    expect(() => activationCall(grants, [])).toThrow('MamoruActionPolicy')
+    const act = activationCall(grants, [], v4PoliciesFor(grants, d, 1n, caps))
+    expect(act.permissionIds).toHaveLength(grants.length)
+  })
+
+  test('P1 1: Init.admit rides on the first grant of each pool only; the rest of the pool carries the same Init without it', () => {
+    const admitByPool = { 'pool:USDC/cbBTC/500': [7n, 9n] }
+    const f = v4PoliciesFor(grants, d, 1n, caps, admitByPool)
+    const btc = grants.map((g, i) => [g, i] as const).filter(([g]) => g.pool === 'pool:USDC/cbBTC/500')
+    const inits = btc.map(([g, i]) => decodeMamoruInit(f(g, i)!.initData))
+    expect(inits[0]!.admit).toEqual([7n, 9n])
+    for (const i of inits.slice(1)) expect(i.admit).toEqual([])
+    expect(new Set(inits.map((i) => i.perWindow)).size).toBe(1)
+  })
+
+  test('P1 2: a v4 grant without MamoruGasPolicy is refused, and so is one with the zero address', () => {
+    expect(() => toSmartSession(btcSwap, { ...ok(btcSwap), gas: undefined })).toThrow('MamoruGasPolicy')
+    expect(() => toSmartSession(btcSwap, { ...ok(btcSwap), gas: { policy: `0x${'0'.repeat(40)}`, initData: encodeGasCaps(V4_GAS_CAPS) } })).toThrow('MamoruGasPolicy')
+  })
+
+  test('P1 2/4: gas caps the contract would refuse (no maxFeePerGas cap, or under the priority cap) are refused', () => {
+    expect(() => toSmartSession(btcSwap, { ...ok(btcSwap), gas: { policy: G, initData: encodeGasCaps({ ...V4_GAS_CAPS, maxFeePerGas: 0n }) } })).toThrow('SESSION_ACTION_POLICY_MISMATCH')
+    expect(() => toSmartSession(btcSwap, { ...ok(btcSwap), gas: { policy: G, initData: '0x1234' } })).toThrow('SESSION_ACTION_POLICY_MISMATCH')
+  })
+
+  test('P1 3: any nonzero second policy is no longer enough — it must be the configured one and the retarget address', () => {
+    expect(() => toSmartSession(btcSwap, { ...ok(btcSwap), policy: X })).toThrow('SESSION_ACTION_POLICY_MISMATCH')
+    expect(() => toSmartSession(btcSwap, { ...ok(btcSwap), expected: { actionPolicy: X, gasPolicy: G } })).toThrow('SESSION_ACTION_POLICY_MISMATCH')
+    expect(() => toSmartSession(btcSwap, { ...ok(btcSwap), gas: { policy: X, initData: encodeGasCaps(V4_GAS_CAPS) } })).toThrow('SESSION_ACTION_POLICY_MISMATCH')
+    expect(() => toSmartSession(btcSwap, { ...ok(btcSwap), expected: undefined })).toThrow('SESSION_ACTION_POLICY_MISMATCH')
+    // retargeted to another deployment than the one configured
+    const elsewhere = retargetToPolicy(instantiateGrant(conservadorLiveV4, grantKey(btcSwap), v4Ctx), X)
+    expect(() => toSmartSession(elsewhere, ok(elsewhere))).toThrow('SESSION_ACTION_POLICY_MISMATCH')
+    // never retargeted (mint and approvals still on the position manager)
+    const raw = instantiateGrant(conservadorLiveV4, 'enter-mint:pool:USDC/cbBTC/500', v4Ctx)
+    expect(() => toSmartSession(raw, ok(raw))).toThrow('SESSION_ACTION_POLICY_MISMATCH')
+    expect(() => toSmartSession(btcSwap, ok(btcSwap))).not.toThrow()
+  })
+
+  test('P1 3: the Init must name the grant\'s pool', () => {
+    const wrongPool = { ...ok(btcSwap), initData: encodeMamoruInit(mamoruInitFor(V4_POOLS.risk, 1n, caps)) }
+    expect(() => toSmartSession(btcSwap, wrongPool)).toThrow('Init pool')
+    expect(() => toSmartSession(btcSwap, { ...ok(btcSwap), initData: '0x00' })).toThrow('SESSION_ACTION_POLICY_MISMATCH')
+  })
+
+  test('P1 3: a grant whose rules pin a token or fee of another pool is refused', () => {
+    const forged: SessionGrant = { ...btcSwap, actions: btcSwap.actions.map((a) => ({ ...a, params: a.params.map((p) => (p.field === 'tokenOut' ? { ...p, ref: BigInt(address('WETH')) } : p)) })) }
+    expect(() => toSmartSession(forged, ok(btcSwap))).toThrow('not a token of the pool')
+    const fee: SessionGrant = { ...btcSwap, actions: btcSwap.actions.map((a) => ({ ...a, params: a.params.map((p) => (p.field === 'fee' ? { ...p, ref: 3000n } : p)) })) }
+    expect(() => toSmartSession(fee, ok(btcSwap))).toThrow("pool's fee")
   })
 })

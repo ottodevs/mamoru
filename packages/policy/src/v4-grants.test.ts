@@ -21,6 +21,15 @@ import {
   v4CapFormulas,
   budgetIn1,
   MAMORU_INIT_TUPLE,
+  budgetUsedBps,
+  decodeGasCaps,
+  encodeGasCaps,
+  GAS_CAPS_TUPLE,
+  maxGasCostPerOp,
+  splitV4Keys,
+  V4_GAS_CAPS,
+  v4BudgetCaps,
+  validGasCaps,
   type MamoruInit,
 } from './v4-grants.ts'
 import { conservadorLiveV4 } from './policies-v4.ts'
@@ -213,7 +222,8 @@ describe('retargetToPolicy', () => {
   test('enter-swap: nothing is retargeted (no mint, approval spender is already the router)', () => {
     const grant = instantiateGrant(conservadorLiveV4, 'enter-swap:pool:USDC/cbBTC/500', ctxFor(V4_POOLS.btc))
     const retargeted = retargetToPolicy(grant, MAMORU_POLICY)
-    expect(retargeted).toEqual(grant)
+    // The actions are untouched; T7 only records the policy the grant is bound to.
+    expect(retargeted).toEqual({ ...grant, actionPolicy: MAMORU_POLICY })
   })
 })
 
@@ -259,5 +269,59 @@ describe('v4CapFormulas', () => {
       expect(byName[`${prefix}BudgetTotal`]!.bpsOfDeposit).toBe(pool.capShareBps * 10)
       expect(Object.keys(byName).filter((n) => n.includes('Budget'))).toEqual([`${prefix}BudgetWindow`, `${prefix}BudgetTotal`])
     }
+  })
+})
+
+describe('T7: MamoruGasPolicy caps, the split of one approval, the budget signal', () => {
+  const GAS_SRC = join(import.meta.dir, '../../../contracts/action-policy/src/MamoruGasPolicy.sol')
+
+  test('GAS_CAPS_TUPLE matches MamoruGasPolicy.Caps field for field (P1 4 adds maxFeePerGas last)', () => {
+    const src = readFileSync(GAS_SRC, 'utf8')
+    const m = src.match(/struct Caps \{([^}]*)\}/)
+    const fields = m![1]!.split('\n').map((l) => l.replace(/\/\/.*$/, '').trim()).filter(Boolean).map((l) => {
+      const [type, name] = l.replace(/;$/, '').split(/\s+/)
+      return { type, name }
+    })
+    expect(fields).toEqual(GAS_CAPS_TUPLE[0].components.map((c) => ({ type: c.type, name: c.name })))
+    expect(decodeGasCaps(encodeGasCaps(V4_GAS_CAPS))).toEqual(V4_GAS_CAPS)
+  })
+
+  test('V4_GAS_CAPS: valid for the contract, 5.2e14 wei per op at most', () => {
+    expect(validGasCaps(V4_GAS_CAPS)).toBe(true)
+    expect(maxGasCostPerOp(V4_GAS_CAPS)).toBe(520_000_000_000_000n)
+    expect(validGasCaps({ ...V4_GAS_CAPS, maxFeePerGas: V4_GAS_CAPS.maxPriorityFeePerGas - 1n })).toBe(false)
+  })
+
+  test('splitV4Keys: the full 3-pool set is two transactions, stables and btc entries first, each under the ceiling', () => {
+    const keys = conservadorLiveV4.session.grants.map((g) => `${g.name}:${g.pool}`)
+    const parts = splitV4Keys(conservadorLiveV4, keys)
+    expect(parts).toHaveLength(2)
+    expect(parts[0]!.slice(0, 3)).toEqual(['enter-swap:pool:USDC/USDT/100', 'enter-mint:pool:USDC/USDT/100', 'manage-any:pool:USDC/USDT/100'])
+    expect(parts.flat().sort()).toEqual([...keys].sort())
+    const actions = (k: string) => conservadorLiveV4.session.grants.find((g) => `${g.name}:${g.pool}` === k)!.actions.length
+    for (const p of parts) expect(estimateSessionGas(p.reduce((n, k) => n + actions(k), 0))).toBeLessThanOrEqual(DEFAULT_GAS_CEILING)
+    // A renewal's revokes come off the first transaction's ceiling: it carries less, never more.
+    const withRevokes = splitV4Keys(conservadorLiveV4, keys, { overheadGas: 12n * 190_000n })
+    expect(withRevokes[0]!.length).toBeLessThanOrEqual(parts[0]!.length)
+    expect(withRevokes.flat().sort()).toEqual([...keys].sort())
+  })
+
+  test('v4BudgetCaps: W_p and T_p in USDC at the account cap, no prices needed', () => {
+    const b = v4BudgetCaps(conservadorLiveV4, 1_000n * 1_000_000n)
+    expect(b.stablesBudgetWindow).toBe(2_500_000_000n) // 5 x 50% x 1,000
+    expect(b.btcBudgetWindow).toBe(800_000_000n) // 2 x 40%
+    expect(b.riskBudgetTotal).toBe(1_000_000_000n) // 10 x 10%
+  })
+
+  test('budgetUsedBps: spent share of T_p from budgetLeft', () => {
+    expect(budgetUsedBps(1_000n, 1_000n)).toBe(0)
+    expect(budgetUsedBps(1_000n, 200n)).toBe(8_000)
+    expect(budgetUsedBps(1_000n, 0n)).toBe(10_000)
+    expect(budgetUsedBps(0n, 0n)).toBe(10_000)
+  })
+
+  test('retargetToPolicy records the address it retargeted to (the guard binds to it)', () => {
+    const g = retargetToPolicy(instantiateGrant(conservadorLiveV4, 'enter-mint:pool:USDC/cbBTC/500', ctxFor(V4_POOLS.btc)), MAMORU_POLICY)
+    expect(g.actionPolicy).toBe(MAMORU_POLICY)
   })
 })

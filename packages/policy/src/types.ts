@@ -194,7 +194,22 @@ export type PolicyVersion = {
      * `bandTicksByPool` — precheck only governs calls for a pool the caller explicitly confirmed is covered.
      */
     budgetsByPool?: Partial<Record<RegistryName, { windowSeconds: number; in1: boolean; perWindow: bigint; total: bigint }>>
+    /**
+     * Spec 007 T7 (GPT-6 review of #97, P1 2): the deployed MamoruGasPolicy every v4 session carries as a userOp
+     * policy, with the owner-signed caps (`MamoruGasPolicy.Caps`). The engine keeps its userOps under them (an op
+     * over a cap is refused at validation). Never a registry entry or a constant (same discipline as `address`).
+     */
+    gasPolicy?: { address: Address; caps: GasCaps }
   }
+}
+
+/** MamoruGasPolicy.Caps (contracts/action-policy/src/MamoruGasPolicy.sol), field for field. Wei and gas units. */
+export type GasCaps = {
+  maxPriorityFeePerGas: bigint
+  maxVerificationGasLimit: bigint
+  maxCallGasLimit: bigint
+  maxPreVerificationGas: bigint
+  maxFeePerGas: bigint
 }
 
 /**
@@ -311,4 +326,9 @@ export type SessionGrant = {
   actions: ResolvedActionRule[]
   /** See `GrantTemplate.requiresActionPolicy` — carried through from the template by `instantiateGrant`. */
   requiresActionPolicy?: true
+  /**
+   * Spec 007 T7 (GPT-6 review of #97, P1 3): the MamoruActionPolicy address `retargetToPolicy` pointed this grant's
+   * mint and approvals at. `toSmartSession` refuses a second policy at any other address. Absent on v2/v3 grants.
+   */
+  actionPolicy?: Address
 }

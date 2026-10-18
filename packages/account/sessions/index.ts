@@ -1,6 +1,7 @@
 import {
   concat,
   encodeAbiParameters,
+  getAddress,
   encodeFunctionData,
   encodePacked,
   isAddressEqual,
@@ -12,8 +13,8 @@ import {
 } from 'viem'
 import { getUserOperationHash, toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import { ReasonError, type Address, type Hex } from '@mamoru/domain'
-import { address, entryPointV07Abi, moduleRegistryAbi, safe7579Abi, smartSessionAbi } from '@mamoru/registry'
-import { PARAM_CONDITIONS, type SessionGrant } from '@mamoru/policy'
+import { address, entry, entryPointV07Abi, moduleRegistryAbi, safe7579Abi, smartSessionAbi } from '@mamoru/registry'
+import { PARAM_CONDITIONS, decodeGasCaps, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, mamoruInitFor, v4PoolOf, validGasCaps, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   CALLTYPE_BATCH,
   CALLTYPE_SINGLE,
@@ -105,26 +106,92 @@ export function ownableValidatorInitData(sessionKey: Address): Hex {
  * Spec 007 (otto/mamoru#151): a second action policy next to UniActionPolicy, same `initData` on every action of
  * the grant it is passed to (`MamoruActionPolicy.Init` is per-pool, not per-action — see `@mamoru/policy`'s v4
  * grant builders, which carry the policy's deployed address: it is a runtime parameter, never hardcoded here).
+ *
+ * T7 (GPT-6 review of #97, P1 2 and 3): a v4 grant also carries `gas`, MamoruGasPolicy as a third userOp policy with
+ * its owner-signed caps, and `expected`, the two deployed addresses the policy config names
+ * (`PolicyVersion.actionPolicy.address` / `.gasPolicy.address`). The guard below refuses any mismatch.
  */
-export type SecondActionPolicy = { policy: Address; initData: Hex }
+export type SecondActionPolicy = {
+  policy: Address
+  initData: Hex
+  gas?: { policy: Address; initData: Hex }
+  expected?: { actionPolicy: Address; gasPolicy: Address }
+}
+
+const MINT_SIG = 'mint((address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256))'
+const APPROVE_SIG = 'approve(address,uint256)'
+const TOKEN_FIELDS = new Set(['token0', 'token1', 'tokenIn', 'tokenOut'])
+
+function mismatch(grant: SessionGrant, why: string): never {
+  throw new ReasonError('SESSION_ACTION_POLICY_MISMATCH', `${grant.name}${grant.pool ? `:${grant.pool}` : ''}: ${why}`)
+}
+
+const same = (a: Address | bigint, b: Address) => BigInt(a) === BigInt(b)
+
+/**
+ * T6 audit H-2 + T7 P1 2/3: what a v4 grant (`requiresActionPolicy`) must be encoded with. Throws
+ * SESSION_ACTION_POLICY_MISSING when a policy is absent and SESSION_ACTION_POLICY_MISMATCH when one is present but
+ * not the expected one:
+ * - the second action policy is nonzero, equals the configured MamoruActionPolicy, and equals the address the grant
+ *   was retargeted to (`grant.actionPolicy`); every mint targets it and no approval still names the position manager;
+ * - MamoruGasPolicy is present, nonzero, equals the configured gas policy, and its caps are ones it accepts;
+ * - the Init's pool is the grant's pool, and every token/fee the grant's rules pin (and every approved token) belongs
+ *   to that pool.
+ */
+export function assertV4Policies(grant: SessionGrant, second: SecondActionPolicy | undefined): asserts second is SecondActionPolicy & { gas: NonNullable<SecondActionPolicy['gas']>; expected: NonNullable<SecondActionPolicy['expected']> } {
+  const label = `${grant.name}${grant.pool ? `:${grant.pool}` : ''}`
+  if (!second || isAddressEqual(second.policy, zeroAddress)) throw new ReasonError('SESSION_ACTION_POLICY_MISSING', `${label}: a v4 grant needs MamoruActionPolicy as its second action policy`)
+  if (!second.gas || isAddressEqual(second.gas.policy, zeroAddress)) throw new ReasonError('SESSION_ACTION_POLICY_MISSING', `${label}: a v4 grant needs MamoruGasPolicy as a userOp policy`)
+  if (!second.expected) mismatch(grant, 'no configured policy addresses to check against')
+  const { actionPolicy, gasPolicy } = second.expected
+  if (isAddressEqual(actionPolicy, zeroAddress) || isAddressEqual(gasPolicy, zeroAddress)) mismatch(grant, 'configured policy address is zero')
+  if (!isAddressEqual(second.policy, actionPolicy)) mismatch(grant, `second policy ${second.policy} is not the configured MamoruActionPolicy ${actionPolicy}`)
+  if (!isAddressEqual(second.gas.policy, gasPolicy)) mismatch(grant, `gas policy ${second.gas.policy} is not the configured MamoruGasPolicy ${gasPolicy}`)
+  if (isAddressEqual(actionPolicy, gasPolicy)) mismatch(grant, 'action and gas policy are the same address')
+  if (!grant.actionPolicy || !isAddressEqual(grant.actionPolicy, second.policy)) mismatch(grant, `grant retargeted to ${grant.actionPolicy ?? 'nothing'}, not ${second.policy}`)
+  const npm = address('NonfungiblePositionManager')
+  for (const a of grant.actions) {
+    if (a.signature === MINT_SIG && !isAddressEqual(a.targetAddress, second.policy)) mismatch(grant, `mint targets ${a.targetAddress}, not the policy`)
+    if (a.signature === APPROVE_SIG && a.params.some((p) => p.field === 'spender' && same(p.ref, npm))) mismatch(grant, 'an approval still names the position manager')
+  }
+  let caps
+  try {
+    caps = decodeGasCaps(second.gas.initData)
+  } catch {
+    mismatch(grant, 'gas policy init data is not MamoruGasPolicy.Caps')
+  }
+  if (!validGasCaps(caps)) mismatch(grant, 'gas caps MamoruGasPolicy would refuse (a zero cap, or maxFeePerGas under the priority cap)')
+  if (!grant.pool) mismatch(grant, 'a v4 grant names its pool')
+  const pool = entry(grant.pool)
+  let init
+  try {
+    init = decodeMamoruInit(second.initData)
+  } catch {
+    mismatch(grant, 'action policy init data is not MamoruActionPolicy.Init')
+  }
+  if (!isAddressEqual(init.pool, getAddress(pool.address))) mismatch(grant, `Init pool ${init.pool} is not the grant's pool ${pool.address}`)
+  const tokens = [pool.token0, pool.token1].map((t) => address(t as never))
+  for (const a of grant.actions) {
+    if (a.signature === APPROVE_SIG && !tokens.some((t) => isAddressEqual(t, a.targetAddress))) mismatch(grant, `approves ${a.targetAddress}, not a token of the pool`)
+    for (const p of a.params) {
+      if (p.condition !== 'EQUAL') continue
+      if (TOKEN_FIELDS.has(p.field) && !tokens.some((t) => same(p.ref, t))) mismatch(grant, `${a.signature} ${p.field} is not a token of the pool`)
+      if (p.field === 'fee' && BigInt(p.ref) !== BigInt(pool.fee ?? -1)) mismatch(grant, `${a.signature} fee ${p.ref} is not the pool's fee ${pool.fee}`)
+    }
+  }
+}
 
 /**
  * Maps a policy grant onto the Smart Sessions Session struct, with the published policies only. `secondPolicy`
- * (spec 007, T2) adds one more `PolicyData` after UniActionPolicy's on every action; omitted, this is byte-for-byte
- * what every live grant (v2/v3) has always produced.
+ * (spec 007, T2) adds one more `PolicyData` after UniActionPolicy's on every action, and (T7) its `gas` a third userOp
+ * policy; omitted, this is byte-for-byte what every live grant (v2/v3) has always produced.
  *
- * Spec 007 (otto/mamoru#151) T7, authorization-parity guard (background security review): a grant the v4 builders
- * marked `requiresActionPolicy` (`packages/policy/src/v4-grants.ts`'s `enterSwapV4Grant`/`enterMintV4Grant`/
- * `manageAnyV4Grant`/`retargetToPolicy`) is only as strict as v2/v3 WITH MamoruActionPolicy in the same session:
- * the merged manage-any's volatile-token approve carries no UniActionPolicy spender rule, and its cumulative caps
- * follow T_p = 10 x Cp — both rely on the second policy's own checks. Encoding such a grant without a real
- * `secondPolicy` (or with the zero address, the same as none) would silently produce a looser session than v2/v3;
- * refused here, the one place every grant goes through on its way to an owner op (`activationCall` below included).
+ * Authorization-parity guard (T6 H-2, T7 P1 2/3): a grant the v4 builders marked `requiresActionPolicy` is only as
+ * strict as v2/v3 WITH MamoruActionPolicy (and MamoruGasPolicy) in the same session — see `assertV4Policies`, run
+ * here, the one place every grant goes through on its way to an owner op (`activationCall` below included).
  */
 export function toSmartSession(grant: SessionGrant, secondPolicy?: SecondActionPolicy): SmartSessionStruct {
-  if (grant.requiresActionPolicy && (!secondPolicy || isAddressEqual(secondPolicy.policy, zeroAddress))) {
-    throw new ReasonError('SESSION_ACTION_POLICY_MISSING', `${grant.name}${grant.pool ? `:${grant.pool}` : ''}: a v4 grant needs MamoruActionPolicy as its second action policy`)
-  }
+  if (grant.requiresActionPolicy) assertV4Policies(grant, secondPolicy)
   return {
     sessionValidator: address('OwnableValidator'),
     sessionValidatorInitData: ownableValidatorInitData(grant.sessionKey),
@@ -135,6 +202,7 @@ export function toSmartSession(grant: SessionGrant, secondPolicy?: SecondActionP
         initData: encodePacked(['uint128', 'uint128'], [BigInt(grant.userOp.validUntil), BigInt(grant.userOp.validAfter)]),
       },
       { policy: address('UsageLimitPolicy'), initData: encodePacked(['uint128'], [BigInt(grant.userOp.usageLimit)]) },
+      ...(secondPolicy?.gas ? [{ policy: secondPolicy.gas.policy, initData: secondPolicy.gas.initData }] : []),
     ],
     erc7739Policies: { allowedERC7739Content: [], erc1271Policies: [] },
     actions: grant.actions.map((a) => ({
@@ -145,6 +213,45 @@ export function toSmartSession(grant: SessionGrant, secondPolicy?: SecondActionP
         : [{ policy: address('UniActionPolicy'), initData: uniActionInitData(a) }],
     })),
     permitERC4337Paymaster: grant.permitERC4337Paymaster,
+  }
+}
+
+/** Spec 007 T7: the two deployed policies and the gas caps a v4 approval enables its sessions with. */
+export type V4Deployment = { actionPolicy: Address; gasPolicy: Address; gasCaps: GasCaps }
+
+/** The deployment a v4 PolicyVersion names (`withActionPolicy(..., { gasPolicy })`), or null (v2/v3, or no gas policy). */
+export function v4DeploymentOf(policy: PolicyVersion): V4Deployment | null {
+  const ap = policy.actionPolicy
+  if (!ap?.gasPolicy) return null
+  return { actionPolicy: ap.address, gasPolicy: ap.gasPolicy.address, gasCaps: ap.gasPolicy.caps }
+}
+
+/**
+ * Spec 007 T7 (c): the `policiesFor` of `activationCall`/`activationBatch` for the grants of ONE owner transaction of
+ * a v4 approval: MamoruActionPolicy with its pool's Init at `generation` (budgets from `budgetCaps`, see
+ * `v4BudgetCaps`), MamoruGasPolicy with `d.gasCaps`, both bound to `d` (the guard in toSmartSession checks them).
+ * `admitByPool` (T6 M-4): positions of each pool the owner admits, carried only by the first grant of that pool in
+ * this transaction (every Init of a pool and generation must match except `admit`, and each admitted id costs an
+ * `ownerOf` + `positions` read per action). Grants without `requiresActionPolicy` get nothing (byte-identical).
+ */
+export function v4PoliciesFor(
+  grants: readonly SessionGrant[],
+  d: V4Deployment,
+  generation: bigint,
+  budgetCaps: Record<string, bigint>,
+  admitByPool: Partial<Record<string, readonly bigint[]>> = {},
+): (grant: SessionGrant, index: number) => SecondActionPolicy | undefined {
+  const firstOfPool = new Map<string, number>()
+  grants.forEach((g, i) => {
+    if (g.pool && !firstOfPool.has(g.pool)) firstOfPool.set(g.pool, i)
+  })
+  const gas = { policy: d.gasPolicy, initData: encodeGasCaps(d.gasCaps) }
+  return (g, i) => {
+    if (!g.requiresActionPolicy) return undefined
+    const spec = v4PoolOf(g.pool)
+    if (!spec) mismatch(g, 'no v4 pool parameters for this pool')
+    const admit = firstOfPool.get(g.pool!) === i ? [...(admitByPool[g.pool!] ?? [])] : []
+    return { policy: d.actionPolicy, initData: encodeMamoruInit(mamoruInitFor(spec, generation, budgetCaps, { admit })), gas, expected: { actionPolicy: d.actionPolicy, gasPolicy: d.gasPolicy } }
   }
 }
 
@@ -165,8 +272,11 @@ export function permissionIdOf(session: SmartSessionStruct): Hex {
 export function activationCall(
   grants: SessionGrant[],
   revokedPermissionIds: readonly Hex[],
+  policiesFor?: (grant: SessionGrant, index: number) => SecondActionPolicy | undefined,
 ): { to: Address; data: Hex; permissionIds: Hex[] } {
-  const sessions = grants.map((g) => toSmartSession(g))
+  // T7 (GPT-6 review of #97, P1 1): a v4 grant is encoded with its policies; without `policiesFor` it is refused
+  // by the guard in toSmartSession, as before. v2/v3 grants get `undefined` and encode byte for byte as always.
+  const sessions = grants.map((g, i) => toSmartSession(g, policiesFor?.(g, i)))
   const permissionIds = sessions.map(permissionIdOf)
   const revoked = new Set(revokedPermissionIds.map((p) => p.toLowerCase()))
   for (const id of permissionIds) {
@@ -212,6 +322,23 @@ export function registryTrustCalls(account: Address): { to: Address; value: bigi
       }),
     },
   ]
+}
+
+/**
+ * Spec 007 T7: the owner call that self-attests modules the Rhinestone attester has not attested (MamoruActionPolicy,
+ * MamoruGasPolicy), once per account, like `registryTrustCalls` does for TimeFramePolicy/UsageLimitPolicy. The
+ * registry refuses to attest a module without a ModuleRecord (Deploy.s.sol's `deployModule` writes it).
+ */
+export function selfAttestCall(modules: readonly Address[]): { to: Address; value: bigint; data: Hex } {
+  return {
+    to: address('ModuleRegistry'),
+    value: 0n,
+    data: encodeFunctionData({
+      abi: moduleRegistryAbi,
+      functionName: 'attest',
+      args: [ATTESTATION_SCHEMA_UID, modules.map((m) => ({ moduleAddress: m, expirationTime: 0, data: '0x' as Hex, moduleTypes: [] }))],
+    }),
+  }
 }
 
 export function revocationCalls(permissionIds: Hex[]): { to: Address; value: bigint; data: Hex }[] {

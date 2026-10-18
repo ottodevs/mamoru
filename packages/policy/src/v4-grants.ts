@@ -10,10 +10,11 @@
 // `toSmartSession(grant, { policy, initData })` wrap (packages/account/sessions, extended for T2 with an optional
 // second action policy) happens at the call site — the fork scenario (t2-fork.ts) today, the operator's
 // activation code at T7. Keeping that import direction one-way avoids a circular package dependency.
-import { encodeAbiParameters } from 'viem'
+import { decodeAbiParameters, encodeAbiParameters } from 'viem'
 import type { Address, Hex } from '@mamoru/domain'
 import { address, type RegistryName } from '@mamoru/registry'
-import type { ActionRuleTemplate, CapFormula, GrantName, GrantTemplate, ParamRuleTemplate, PolicyVersion, ResolvedActionRule, SessionGrant } from './types.ts'
+import { computeCaps } from './instantiate.ts'
+import type { ActionRuleTemplate, CapFormula, GasCaps, GrantName, GrantTemplate, ParamRuleTemplate, PolicyVersion, ResolvedActionRule, SessionGrant } from './types.ts'
 
 // ---------------------------------------------------------------- signatures (as grants.ts spells them)
 // Kept local, like the T1 fixture did: this module must stand on its own so v2/v3 (grants.ts, policies.ts, both
@@ -78,6 +79,75 @@ export const MAMORU_INIT_TUPLE = [
  * `abi.decode(data, (Init))` expects. */
 export function encodeMamoruInit(i: MamoruInit): Hex {
   return encodeAbiParameters(MAMORU_INIT_TUPLE, [i])
+}
+
+/** `abi.decode(initData, (Init))`, for the guard in `toSmartSession` (it checks the Init's pool against the grant). */
+export function decodeMamoruInit(data: Hex): MamoruInit {
+  const [i] = decodeAbiParameters(MAMORU_INIT_TUPLE, data)
+  return i
+}
+
+// ---------------------------------------------------------------- MamoruGasPolicy.Caps (T6 L-1, T7 P1 2 and 4)
+
+export const GAS_CAPS_TUPLE = [
+  {
+    type: 'tuple',
+    components: [
+      { name: 'maxPriorityFeePerGas', type: 'uint64' },
+      { name: 'maxVerificationGasLimit', type: 'uint32' },
+      { name: 'maxCallGasLimit', type: 'uint32' },
+      { name: 'maxPreVerificationGas', type: 'uint32' },
+      { name: 'maxFeePerGas', type: 'uint64' },
+    ],
+  },
+] as const
+
+/** `abi.encode(Caps)`: a static struct, five words. */
+export function encodeGasCaps(c: GasCaps): Hex {
+  return encodeAbiParameters(GAS_CAPS_TUPLE, [
+    {
+      maxPriorityFeePerGas: c.maxPriorityFeePerGas,
+      maxVerificationGasLimit: Number(c.maxVerificationGasLimit),
+      maxCallGasLimit: Number(c.maxCallGasLimit),
+      maxPreVerificationGas: Number(c.maxPreVerificationGas),
+      maxFeePerGas: c.maxFeePerGas,
+    },
+  ])
+}
+
+export function decodeGasCaps(data: Hex): GasCaps {
+  const [c] = decodeAbiParameters(GAS_CAPS_TUPLE, data)
+  return {
+    maxPriorityFeePerGas: c.maxPriorityFeePerGas,
+    maxVerificationGasLimit: BigInt(c.maxVerificationGasLimit),
+    maxCallGasLimit: BigInt(c.maxCallGasLimit),
+    maxPreVerificationGas: BigInt(c.maxPreVerificationGas),
+    maxFeePerGas: c.maxFeePerGas,
+  }
+}
+
+/**
+ * The gas caps every v4 session is enabled with (owner-signed). The engine's userOps (packages/scenarios/driver/
+ * engine.ts: LAB_GAS_LIMITS 3M / 2M / 100k, priority 1e6 wei, maxFeePerGas 2 x basefee + priority) fit under them at
+ * Base basefees up to ~0.0495 gwei (about 10x the usual 0.005); above that the engine waits (GAS_PRICE_OVER_CAP).
+ * What a leaked key can make the Safe pay per op: `maxGasCostPerOp(V4_GAS_CAPS)` = 0.1 gwei x 5.2M gas = 5.2e14 wei.
+ */
+export const V4_GAS_CAPS: GasCaps = {
+  maxPriorityFeePerGas: 10_000_000n,
+  maxVerificationGasLimit: 3_000_000n,
+  maxCallGasLimit: 2_000_000n,
+  maxPreVerificationGas: 200_000n,
+  maxFeePerGas: 100_000_000n,
+}
+
+/** MamoruGasPolicy.maxCostPerOp: the EntryPoint prefund at the capped price and limits, the most one op takes. */
+export function maxGasCostPerOp(c: GasCaps): bigint {
+  return c.maxFeePerGas * (c.maxVerificationGasLimit + c.maxCallGasLimit + c.maxPreVerificationGas)
+}
+
+/** Caps MamoruGasPolicy.initializeWithMultiplexer would accept (it reverts BadInit otherwise). */
+export function validGasCaps(c: GasCaps): boolean {
+  return c.maxPriorityFeePerGas > 0n && c.maxVerificationGasLimit > 0n && c.maxCallGasLimit > 0n && c.maxPreVerificationGas > 0n && c.maxFeePerGas >= c.maxPriorityFeePerGas
 }
 
 // ---------------------------------------------------------------- v4 pool table (spec 007 "Parameters")
@@ -383,7 +453,7 @@ export function withActionPolicy(
   policy: PolicyVersion,
   mamoruPolicy: Address,
   pools: readonly V4PoolSpec[],
-  opts: { bandFactorBps?: number; caps?: Record<string, bigint>; budgetWindowSeconds?: number; twapShortWindowSeconds?: number } = {},
+  opts: { bandFactorBps?: number; caps?: Record<string, bigint>; budgetWindowSeconds?: number; twapShortWindowSeconds?: number; gasPolicy?: { address: Address; caps: GasCaps } } = {},
 ): PolicyVersion {
   const bandTicksByPool: Partial<Record<RegistryName, number>> = {}
   const anchorByPool: Partial<Record<RegistryName, { tick: number; band: number }>> = {}
@@ -414,8 +484,29 @@ export function withActionPolicy(
       twapShortWindowSeconds: opts.twapShortWindowSeconds ?? TWAP_SHORT_WINDOW_SECONDS,
       ...(opts.bandFactorBps !== undefined ? { bandFactorBps: opts.bandFactorBps } : {}),
       ...(opts.caps ? { budgetsByPool } : {}),
+      ...(opts.gasPolicy ? { gasPolicy: opts.gasPolicy } : {}),
     },
   }
+}
+
+/**
+ * The MamoruActionPolicy budget caps (W_p, T_p per pool) of `policy` at an account cap: they are all in the pool's
+ * stable token (USDC), so no price is needed — the same values the owner signs into every Init of that cap. T7: the
+ * operator sizes each v4 account's engine budgets with this (precheck mirror, usage-triggered renewal).
+ */
+export function v4BudgetCaps(policy: PolicyVersion, capUsdc: bigint): Record<string, bigint> {
+  return computeCaps({ ...policy, session: { ...policy.session, caps: policy.session.caps.filter((f) => f.asset === 'USDC') } }, capUsdc, {})
+}
+
+/**
+ * T7 (e): how much of a pool's per-approval budget (T_p) is spent, in bps, from `MamoruActionPolicy.budgetLeft`'s
+ * second value (`totalLeft`) and the Init's `total`. The operator offers a renewal once it reaches USAGE_RENEW_BPS,
+ * before the budget binds (spec 007 "A usage-triggered renewal asks the owner before T_p binds").
+ */
+export function budgetUsedBps(total: bigint, totalLeft: bigint): number {
+  if (total <= 0n) return 10_000
+  const spent = totalLeft >= total ? 0n : total - totalLeft
+  return Number((spent * 10_000n) / total)
 }
 
 // ---------------------------------------------------------------- retargeting (template -> policy address)
@@ -441,7 +532,8 @@ export function retargetToPolicy(grant: SessionGrant, mamoruPolicy: Address): Se
   })
   // A retargeted mint/approve points AT the deployed policy: `toSmartSession` must never encode this grant without
   // that same policy as its second action policy (the authorization-parity guard, see `GrantTemplate.requiresActionPolicy`).
-  return { ...grant, actions, requiresActionPolicy: true }
+  // T7 (P1 3): the address is recorded so the guard can bind the second policy to it.
+  return { ...grant, actions, requiresActionPolicy: true, actionPolicy: mamoruPolicy }
 }
 
 // ---------------------------------------------------------------- gas model + splitter (spec 007 Tasks T2 (b))
@@ -519,6 +611,50 @@ export function splitSessionsByGas<T extends { actions: readonly unknown[] }>(
   ceiling: bigint = DEFAULT_GAS_CEILING,
 ): T[][] {
   return splitBatches(sessions, (s) => estimateSessionGas(s.actions.length, model), ceiling)
+}
+
+// ---------------------------------------------------------------- T7: one approval in consecutive owner transactions
+
+/** Order a v4 approval enables its grants in: buckets by preference (highest first), and in each pool enter-swap,
+ * enter-mint, manage-any. With the full 3-pool set and DEFAULT_GAS_CEILING this is two transactions: stables and the
+ * btc entries first (17 actions), the btc manage-any and risk after (19). */
+const V4_GRANT_ORDER = ['enter-swap', 'enter-mint', 'manage-any']
+
+export function orderV4Keys(policy: PolicyVersion, keys: readonly string[]): string[] {
+  const pools = [...policy.buckets].sort((a, b) => b.preference - a.preference).flatMap((b) => b.pools)
+  const rank = (k: string): number => {
+    const [name, ...rest] = k.split(':')
+    const pool = rest.join(':')
+    const pi = pools.indexOf(pool as RegistryName)
+    return (pi === -1 ? pools.length : pi) * V4_GRANT_ORDER.length + Math.max(0, V4_GRANT_ORDER.indexOf(name!))
+  }
+  return [...keys].sort((a, b) => rank(a) - rank(b))
+}
+
+/**
+ * Spec 007 T7 (c): the grant keys of one v4 approval split into consecutive owner transactions with
+ * `splitSessionsByGas` (whole sessions, in `orderV4Keys` order). `overheadGas` is what the first transaction carries
+ * besides `enableSessions` (the trust/attest calls of an activation, the `removeSession`s of a renewal); it is taken
+ * off that transaction's ceiling. The operator sends `[0]` now; the rest are the account's missing grants, each added
+ * by its own owner approval (the extend route) once the one before has landed.
+ */
+export function splitV4Keys(policy: PolicyVersion, keys: readonly string[], opts: { model?: V4GasModel; ceiling?: bigint; overheadGas?: bigint } = {}): string[][] {
+  const ordered = orderV4Keys(policy, keys)
+  const actions = (k: string) => policy.session.grants.find((g) => grantKeyOf(g) === k)?.actions.length ?? 0
+  const ceiling = opts.ceiling ?? DEFAULT_GAS_CEILING
+  const items = ordered.map((k) => ({ key: k, actions: Array.from({ length: actions(k) }) }))
+  const first = splitSessionsByGas(items, opts.model, ceiling - (opts.overheadGas ?? 0n))[0] ?? []
+  const rest = splitSessionsByGas(items.slice(first.length), opts.model, ceiling)
+  return [first, ...rest].filter((b) => b.length > 0).map((b) => b.map((i) => i.key))
+}
+
+function grantKeyOf(t: { name: string; pool?: string }): string {
+  return t.pool ? `${t.name}:${t.pool}` : t.name
+}
+
+/** The V4PoolSpec of a pool, by registry name (undefined for a pool the v4 table does not have). */
+export function v4PoolOf(pool: string | undefined): V4PoolSpec | undefined {
+  return Object.values(V4_POOLS).find((p) => p.pool === pool)
 }
 
 // re-export so consumers that only need the param rule type don't have to reach into types.ts directly
