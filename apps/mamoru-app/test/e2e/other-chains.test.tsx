@@ -188,4 +188,11 @@ describe('move to Base (#133)', () => {
     }
     expect(otherChainCopy.state.failed).toContain('still at your address on Ethereum')
   })
+
+  test('CCTP (#180): waiting for Circle, then arriving on Base, then the same filled words', () => {
+    const cctp = (over: object) => render(<BridgeStatus route={{ state: 'deposited', amountUsdc: '1', outputUsdc: '1', at, bridge: 'cctp', ...over }} />).html
+    expect(cctp({})).toContain('15 to 20 minutes')
+    expect(cctp({ mintTx: `0x${'ab'.repeat(32)}` })).toContain('Circle confirmed it')
+    expect(cctp({ state: 'filled' })).toContain(otherChainCopy.state.filled)
+  })
 })

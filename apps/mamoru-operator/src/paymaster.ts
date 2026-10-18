@@ -146,12 +146,15 @@ export function decodePimlicoErc20(data: Hex): PimlicoErc20Config {
 /**
  * What the account accepts from Pimlico's ERC-20 paymaster. Mode 1 (ERC-20), the token is USDC, the rate is at most
  * the quoted one, nothing is pulled before the account runs (no preFund: the approve is in the account's own batch),
- * no recipient (it would receive the unused prefund), a constant fee no larger than MAX_CONSTANT_FEE.
+ * no recipient (it would receive the unused prefund), a constant fee no larger than MAX_CONSTANT_FEE, and any
+ * bundler allowed (the operator submits handleOps from its own relayer).
  */
 export function checkPimlicoErc20(f: PaymasterFields, q: GasPrice, usdc: Address): PimlicoErc20Config {
   if (getAddress(f.paymaster) !== getAddress(q.paymaster)) throw new PaymasterError('unexpected paymaster')
   const c = decodePimlicoErc20(f.paymasterData)
   if (c.mode !== 1) throw new PaymasterError('paymaster is not in ERC-20 mode')
+  // The operator bundles itself (#180): data restricted to Pimlico's bundlers would revert in validation.
+  if (!c.allowAllBundlers) throw new PaymasterError('paymaster data limited to its own bundlers')
   if (c.token !== getAddress(usdc)) throw new PaymasterError('paymaster charges another token')
   if (c.exchangeRate <= 0n || c.exchangeRate * 10_000n > q.exchangeRate * (10_000n + RATE_SLACK_BPS)) throw new PaymasterError('paymaster rate above the quote')
   if (c.postOpGas > q.postOpGas) throw new PaymasterError('paymaster postOp gas above the quote')
@@ -209,14 +212,14 @@ export type GasEstimate = { preVerificationGas: bigint; verificationGasLimit: bi
 export type BundlerReceipt = { success: boolean; actualGasCost: bigint; txHash: Hex; blockNumber: bigint }
 
 /**
- * The few bundler methods the L1 path uses. Kept apart from @mamoru/erc4337's BundlerClient, which sends only on
- * Base: this one sends only on Ethereum, only for bridge-out, and only when the operator was configured with it.
+ * The few bundler methods the L1 path uses, against the operator's own loopback bundler on Ethereum. Kept apart from
+ * @mamoru/erc4337's BundlerClient, which sends only on Base: this one serves only bridge-out.
  */
 export class L1Bundler {
   private readonly rpc: Rpc
 
-  constructor(url: string, fetcher: typeof fetch = fetch) {
-    this.rpc = rpcClient(url, fetcher, 15_000)
+  constructor(url: string, fetcher: typeof fetch = fetch, timeoutMs = 15_000) {
+    this.rpc = rpcClient(url, fetcher, timeoutMs)
   }
 
   /** Null when the bundler does not estimate (the lab bundler): the caller uses its fork-measured limits. */
@@ -259,4 +262,107 @@ export class L1Bundler {
     if (!r) return null
     return { success: r.success === true, actualGasCost: BigInt(r.actualGasCost), txHash: r.receipt.transactionHash, blockNumber: BigInt(r.receipt.blockNumber) }
   }
+}
+
+/** Candide's token paymaster for EntryPoint v0.7 (abstractionkit decodeTokenQuote.ts; same address on every chain). */
+export const CANDIDE_TOKEN_PAYMASTER_V07: Address = '0x8b1f6cb5d062aa2Ce8d581942bbb960420d875BA'
+
+export type CandideConfig = { mode: number; markupMode: number; gasTokenSlot: number; validUntil: number; exchangeRate: bigint; priceMarkup: bigint | null }
+
+/**
+ * The leading fields of Candide's v0.7 token paymasterData, as abstractionkit parses them: mode (0 = token), markup
+ * mode, gas token slot, validUntil, exchangeRate, then priceMarkup when the markup mode is explicit (2). The rest
+ * (signature and anything after) is not public; nothing in it can take more than the account's own approve.
+ */
+export function decodeCandide(data: Hex): CandideConfig {
+  const n = (data.length - 2) / 2
+  let p = 0
+  const take = (len: number): Hex => {
+    if (p + len > n) throw new PaymasterError('paymaster data too short')
+    const h = sliceHex(data, p, p + len, { strict: true })
+    p += len
+    return h
+  }
+  const mode = Number(hexToBigInt(take(1)))
+  const markupMode = Number(hexToBigInt(take(1)))
+  const gasTokenSlot = Number(hexToBigInt(take(1)))
+  const validUntil = Number(hexToBigInt(take(6)))
+  const exchangeRate = hexToBigInt(take(32))
+  const priceMarkup = markupMode === 2 ? hexToBigInt(take(32)) : null
+  return { mode, markupMode, gasTokenSlot, validUntil, exchangeRate, priceMarkup }
+}
+
+/** What the account accepts from Candide: its v0.7 paymaster, token mode, a rate at most the quoted one. */
+export function checkCandide(f: PaymasterFields, q: GasPrice): CandideConfig {
+  if (getAddress(f.paymaster) !== getAddress(q.paymaster)) throw new PaymasterError('unexpected paymaster')
+  const c = decodeCandide(f.paymasterData)
+  if (c.mode !== 0) throw new PaymasterError('paymaster is not in token mode')
+  if (c.exchangeRate <= 0n || c.exchangeRate * 10_000n > q.exchangeRate * (10_000n + RATE_SLACK_BPS)) throw new PaymasterError('paymaster rate above the quote')
+  return c
+}
+
+/**
+ * Candide (InstaGas) over ERC-7677 with context { token }, priced by pm_supportedERC20Tokens (exchangeRate: token
+ * units per 1e18 wei). The URL carries the API key: never logged. Candide's v0.7 data has no bundler allowlist
+ * (abstractionkit: the trusted-bundlers byte exists only on its v0.9 paymaster), so the operator's bundler may submit.
+ */
+export class CandideErc20Paymaster implements Erc20Paymaster {
+  readonly name = 'candide'
+  private readonly rpc: Rpc
+  private lastStub: PaymasterFields | undefined
+
+  constructor(
+    url: string,
+    private readonly chainId: number,
+    private readonly usdc: Address,
+    fetcher: typeof fetch = fetch,
+    private readonly expected: Address = CANDIDE_TOKEN_PAYMASTER_V07,
+  ) {
+    this.rpc = rpcClient(url, fetcher)
+  }
+
+  async quote(): Promise<GasPrice> {
+    const r = await this.rpc<{ paymasterMetadata?: { address?: string; dummyPaymasterAndData?: { paymasterPostOpGasLimit?: Hex } }; tokens?: { address: string; exchangeRate: Hex | string }[] }>('pm_supportedERC20Tokens', [address('EntryPointV07')])
+    const pm = r.paymasterMetadata?.address
+    if (!pm || getAddress(pm) !== getAddress(this.expected)) throw new PaymasterError('unexpected paymaster')
+    const t = r.tokens?.find((x) => x.address.toLowerCase() === this.usdc.toLowerCase())
+    if (!t) throw new PaymasterError('no USDC quote')
+    // Candide charges its postOp within paymasterPostOpGasLimit; no separate postOp surcharge in the rate.
+    return { paymaster: getAddress(pm), token: this.usdc, exchangeRate: BigInt(t.exchangeRate), postOpGas: 0n }
+  }
+
+  private params(op: UserOperation<'0.7'>) {
+    return [toRpcUserOp(op), address('EntryPointV07'), toHex(this.chainId), { token: this.usdc }]
+  }
+
+  async stub(op: UserOperation<'0.7'>): Promise<PaymasterFields> {
+    this.lastStub = fields(await this.rpc<RpcPaymasterFields>('pm_getPaymasterStubData', this.params(op)))
+    return this.lastStub
+  }
+
+  async data(op: UserOperation<'0.7'>): Promise<PaymasterFields> {
+    return fields(await this.rpc<RpcPaymasterFields>('pm_getPaymasterData', this.params(op)), this.lastStub)
+  }
+
+  check(f: PaymasterFields, q: GasPrice): void {
+    checkCandide(f, q)
+  }
+}
+
+/**
+ * The configured provider: MAMORU_L1_PAYMASTER=pimlico|candide with its URL, or the provider named by the URL's
+ * host. Null when none is configured: bridge-out keeps the relayer path.
+ */
+export function paymasterFromEnv(kind: string | undefined, url: string | undefined, chainId: number, usdc: Address): Erc20Paymaster | null {
+  if (!url) return null
+  let host = ''
+  try {
+    host = new URL(url).hostname
+  } catch {
+    throw new Error('MAMORU_L1_PAYMASTER_URL is not a URL')
+  }
+  const k = kind ?? (host.endsWith('pimlico.io') ? 'pimlico' : host.endsWith('candide.dev') ? 'candide' : '')
+  if (k === 'pimlico') return new PimlicoErc20Paymaster(url, chainId, usdc)
+  if (k === 'candide') return new CandideErc20Paymaster(url, chainId, usdc)
+  throw new Error('MAMORU_L1_PAYMASTER must be pimlico or candide')
 }

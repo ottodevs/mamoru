@@ -21,6 +21,14 @@ class RpcFailure extends Error {
 
 export type LiveBundler = { url: string; stop: () => void }
 
+/**
+ * What the relayer may front for one handleOps, and what it got back. `before` throws to refuse (nothing is sent);
+ * `after` is told the transaction's cost and the EntryPoint's refund to the beneficiary (the relayer), which the
+ * userOp's paymaster or account pays. Used on Ethereum (otto/mamoru#180); Base runs without one, as before.
+ */
+export type BundlerGuard = { before: (gasLimit: bigint) => Promise<void>; sent?: (txHash: Hex) => void; after: (costWei: bigint, refundWei: bigint) => void; failed: () => void }
+export type LiveBundlerOptions = { handleOpsGas?: bigint; guard?: BundlerGuard; label?: string }
+
 /** Gas for one handleOps with one engine userOp (LAB_GAS_LIMITS sum plus EntryPoint overhead). */
 const HANDLE_OPS_GAS = 6_000_000n
 
@@ -29,8 +37,11 @@ const HANDLE_OPS_GAS = 6_000_000n
  * engine uses. Each userOp is validated with a static handleOps eth_call,
  * then bundled alone by the relayer EOA. Adapted from the lab bundler.
  */
-export function startLiveBundler(client: PublicClient, relayer: Relayer, chainId: number): LiveBundler {
+export function startLiveBundler(client: PublicClient, relayer: Pick<Relayer, 'address' | 'send'>, chainId: number, opts: LiveBundlerOptions = {}): LiveBundler {
+  // EntryPoint v0.7 is the same CREATE2 address on every chain, Ethereum (#180's L1 bundler) included: Base's registry entry.
   const entryPoint = address('EntryPointV07', baseRegistry)
+  const gasLimit = opts.handleOpsGas ?? HANDLE_OPS_GAS
+  const tag = opts.label ?? 'bundler'
   const included = new Map<string, Included>()
 
   async function send(params: unknown[]): Promise<Hex> {
@@ -42,21 +53,38 @@ export function startLiveBundler(client: PublicClient, relayer: Relayer, chainId
     // A load-balanced provider can answer from a node a block or two behind (e.g. before the activation that enabled the session): retry validation briefly.
     for (let attempt = 0; ; attempt++) {
       try {
-        await client.call({ account: relayer.address, to: entryPoint, data, gas: HANDLE_OPS_GAS })
+        await client.call({ account: relayer.address, to: entryPoint, data, gas: gasLimit })
         break
       } catch (e) {
         const reason = entryPointReason(revertData(e)) ?? 'validation reverted'
         if (attempt >= 3) throw new RpcFailure(-32500, reason)
-        logErr(`[bundler] ${hash.slice(0, 10)} validation, retry ${attempt + 1}:`, reason)
+        logErr(`[${tag}] ${hash.slice(0, 10)} validation, retry ${attempt + 1}:`, reason)
         await Bun.sleep(2_500)
       }
     }
-    const { receipt } = await relayer.send({ to: entryPoint, data, gas: HANDLE_OPS_GAS })
+    // A refusal here is a JSON-RPC error before anything is sent: the caller may call the userOp failed.
+    if (opts.guard) {
+      try {
+        await opts.guard.before(gasLimit)
+      } catch (e) {
+        throw new RpcFailure(-32504, `relayer refused to front the gas: ${(e as Error).message.split('\n')[0]}`)
+      }
+    }
+    let receipt: TransactionReceipt
+    try {
+      ;({ receipt } = await relayer.send({ to: entryPoint, data, gas: gasLimit }, opts.guard?.sent))
+    } catch (e) {
+      // It may have been broadcast: not a validation refusal (-32603), the caller keeps asking by hash.
+      opts.guard?.failed()
+      throw e
+    }
     const events = parseEventLogs({ abi: entryPointV07Abi, logs: receipt.logs, eventName: 'UserOperationEvent' })
     const ev = events.find((l) => l.args.userOpHash === hash)
+    // The beneficiary (the relayer) is paid each userOp's actualGasCost by the EntryPoint.
+    opts.guard?.after(receipt.gasUsed * receipt.effectiveGasPrice, events.reduce((a, l) => a + l.args.actualGasCost, 0n))
     if (!ev) throw new RpcFailure(-32500, `handleOps ${receipt.transactionHash} did not emit the UserOperationEvent`)
     included.set(hash.toLowerCase(), { op, hash, receipt, success: ev.args.success, actualGasCost: ev.args.actualGasCost, actualGasUsed: ev.args.actualGasUsed })
-    console.log(`[bundler] ${hash.slice(0, 10)} in ${receipt.transactionHash} block ${receipt.blockNumber} success=${ev.args.success}`)
+    console.log(`[${tag}] ${hash.slice(0, 10)} in ${receipt.transactionHash} block ${receipt.blockNumber} success=${ev.args.success}`)
     return hash
   }
 
@@ -68,7 +96,7 @@ export function startLiveBundler(client: PublicClient, relayer: Relayer, chainId
       entryPoint,
       sender: r.op.sender,
       nonce: toHex(r.op.nonce),
-      paymaster: zeroAddress,
+      paymaster: r.op.paymaster ?? zeroAddress,
       actualGasCost: toHex(r.actualGasCost),
       actualGasUsed: toHex(r.actualGasUsed),
       success: r.success,
@@ -105,7 +133,7 @@ export function startLiveBundler(client: PublicClient, relayer: Relayer, chainId
       return { jsonrpc: '2.0', id: msg.id, result }
     } catch (e) {
       const f = e instanceof RpcFailure ? e : new RpcFailure(-32603, (e as Error).message.split('\n')[0] ?? 'error')
-      logErr(`[bundler] ${msg.method} refused:`, f.message)
+      logErr(`[${tag}] ${msg.method} refused:`, f.message)
       return { jsonrpc: '2.0', id: msg.id, error: { code: f.code, message: f.message } }
     }
   }

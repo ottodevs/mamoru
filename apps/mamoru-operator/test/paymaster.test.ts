@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { concat, numberToHex, type Hex } from 'viem'
+import { concat, numberToHex, pad, type Hex } from 'viem'
 import type { UserOperation } from 'viem/account-abstraction'
 import type { Address } from '@mamoru/domain'
 import { gasCapUsdc, L1_USDC, stubOwnerSignature } from '../src/bridge-out.ts'
-import { checkPimlicoErc20, decodePimlicoErc20, L1Bundler, MAX_CONSTANT_FEE, PIMLICO_ERC20_PAYMASTER_V07, PimlicoErc20Paymaster, RpcRefused, RpcUnavailable, type GasPrice } from '../src/paymaster.ts'
+import { cctpMaxFee, decodeCctpMessage, mintIsFor, TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
+import { CANDIDE_TOKEN_PAYMASTER_V07, checkCandide, decodeCandide, paymasterFromEnv, checkPimlicoErc20, decodePimlicoErc20, L1Bundler, MAX_CONSTANT_FEE, PIMLICO_ERC20_PAYMASTER_V07, PimlicoErc20Paymaster, RpcRefused, RpcUnavailable, type GasPrice } from '../src/paymaster.ts'
 
 const TREASURY = '0x000000000000000000000000000000000000bEEF' as Address
 const RATE = 2_415_300_294n
@@ -95,5 +96,61 @@ describe('provider RPC (#180)', () => {
     await expect(refusing.send(op)).rejects.toBeInstanceOf(RpcRefused)
     const lab = new L1Bundler('http://127.0.0.1:1/', answer({ jsonrpc: '2.0', id: 1, error: { code: -32601, message: 'method not served' } }))
     expect(await lab.estimate(op)).toBeNull()
+  })
+})
+
+describe('Candide token paymaster data (#180)', () => {
+  const cq: GasPrice = { paymaster: CANDIDE_TOKEN_PAYMASTER_V07, token: L1_USDC, exchangeRate: RATE, postOpGas: 0n }
+  const cdata = (mode = 0, markupMode = 0, rate = RATE) =>
+    concat([numberToHex(mode, { size: 1 }), numberToHex(markupMode, { size: 1 }), numberToHex(3, { size: 1 }), numberToHex(1_800_000_000, { size: 6 }), numberToHex(rate, { size: 32 }), ...(markupMode === 2 ? [numberToHex(1_050_000n, { size: 32 })] : []), `0x${'22'.repeat(65)}`])
+  const cwhy = (d: Hex, paymaster: Address = CANDIDE_TOKEN_PAYMASTER_V07) => {
+    try {
+      checkCandide(f(d, paymaster), cq)
+      return 'accepted'
+    } catch (e) {
+      return (e as Error).message
+    }
+  }
+  test('decodes the leading fields and refuses another paymaster, another mode, a dearer rate', () => {
+    expect(decodeCandide(cdata(0, 2))).toMatchObject({ mode: 0, markupMode: 2, gasTokenSlot: 3, validUntil: 1_800_000_000, exchangeRate: RATE, priceMarkup: 1_050_000n })
+    expect(cwhy(cdata())).toBe('accepted')
+    expect(cwhy(cdata(), PIMLICO_ERC20_PAYMASTER_V07)).toContain('unexpected paymaster')
+    expect(cwhy(cdata(1))).toContain('token mode')
+    expect(cwhy(cdata(0, 0, (RATE * 103n) / 100n))).toContain('rate above the quote')
+    expect(() => decodeCandide('0x0000')).toThrow('too short')
+  })
+  test('provider from env: by name or by host; none without a URL', () => {
+    expect(paymasterFromEnv(undefined, undefined, 1, L1_USDC)).toBeNull()
+    expect(paymasterFromEnv(undefined, 'https://api.pimlico.io/v2/1/rpc?apikey=x', 1, L1_USDC)?.name).toBe('pimlico')
+    expect(paymasterFromEnv(undefined, 'https://api.candide.dev/api/v3/1/x', 1, L1_USDC)?.name).toBe('candide')
+    expect(paymasterFromEnv('candide', 'https://proxy.example/x', 1, L1_USDC)?.name).toBe('candide')
+    expect(() => paymasterFromEnv(undefined, 'https://proxy.example/x', 1, L1_USDC)).toThrow('pimlico or candide')
+  })
+  test('Pimlico data limited to its own bundlers is refused (the operator bundles)', () => {
+    const own = `0x02${data().slice(4)}` as Hex
+    expect(why(own)).toContain('its own bundlers')
+  })
+})
+
+describe('CCTP (#180)', () => {
+  const safe = '0x00000000000000000000000000000000000000aA' as Address
+  const w = (a: Address) => pad(a, { size: 32 })
+  const message = (o: { dest?: number; recipient?: Address; amount?: bigint } = {}) =>
+    concat([
+      numberToHex(1, { size: 4 }), numberToHex(0, { size: 4 }), numberToHex(o.dest ?? 6, { size: 4 }), `0x${'aa'.repeat(32)}`,
+      w(TOKEN_MESSENGER_V2), w(TOKEN_MESSENGER_V2), `0x${'00'.repeat(32)}`, numberToHex(2000, { size: 4 }), numberToHex(2000, { size: 4 }),
+      numberToHex(1, { size: 4 }), w(L1_USDC), w(o.recipient ?? safe), numberToHex(o.amount ?? 5_000_000n, { size: 32 }), w(safe), numberToHex(0, { size: 32 }), numberToHex(0, { size: 32 }), numberToHex(0, { size: 32 }),
+    ])
+  test('the operator pays a mint only for this account\'s burn', () => {
+    expect(mintIsFor(decodeCctpMessage(message()), L1_USDC, safe, 5_000_000n)).toBe(true)
+    expect(mintIsFor(decodeCctpMessage(message({ dest: 3 })), L1_USDC, safe, 5_000_000n)).toBe(false)
+    expect(mintIsFor(decodeCctpMessage(message({ recipient: '0x00000000000000000000000000000000000000bB' })), L1_USDC, safe, 5_000_000n)).toBe(false)
+    expect(mintIsFor(decodeCctpMessage(message({ amount: 5_000_001n })), L1_USDC, safe, 5_000_000n)).toBe(false)
+    expect(() => decodeCctpMessage('0x00')).toThrow('too short')
+  })
+  test('maxFee in bps rounds up; Standard is free', () => {
+    expect(cctpMaxFee(146_928_900n, 0)).toBe(0n)
+    expect(cctpMaxFee(146_928_900n, 1)).toBe(14_693n)
+    expect(cctpMaxFee(100n, 1)).toBe(1n)
   })
 })

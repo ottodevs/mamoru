@@ -144,11 +144,15 @@ export type BridgeOutRoute = {
   userOpHash?: Hex0x
   /** USDC the account paid for Ethereum gas, once known. */
   gasUsdc?: string
+  /** Which bridge (#180). Absent: Across (routes stored before CCTP). cctp: deposited = burned, waiting for Circle. */
+  bridge?: 'across' | 'cctp'
+  /** cctp: the operator's receiveMessage on Base, once sent. fillTx is set when it minted. */
+  mintTx?: Hex0x
 }
 // enabled: the /ops flag (engine settings bridgeOut) is on for this account and the operator has an Ethereum RPC.
 export type BridgeOutView = { route: BridgeOutRoute | null; enabled: boolean }
 // gasUsdc (userOp path, #180): the most the account pays for Ethereum gas, in USDC. Absent: Mamoru pays it.
-export type BridgeOutToSign = OwnerTxToSign & { route: { outputUsdc: string; feeUsdc: string; fillSec: number; gasUsdc?: string } }
+export type BridgeOutToSign = OwnerTxToSign & { route: { outputUsdc: string; feeUsdc: string; fillSec: number; gasUsdc?: string; bridge?: 'across' | 'cctp' } }
 
 // What the operator found when a deposit is above the per-account cap. Amounts in USDC base units.
 export type OverCap = { code: 'DEPOSIT_OVER_CAP'; usdc: string; capUsdc: string; excessUsdc: string }

@@ -54,6 +54,11 @@ export const otherChainCopy = {
     expired: 'The bridge did not deliver it in time. It goes back to your address on Ethereum; this can take a few hours.',
     refunded: 'Returned to your address on Ethereum. You can move it again.',
   } satisfies Record<BridgeOutRoute['state'], string>,
+  /** CCTP (#180): burned on Ethereum, Circle attests after Ethereum finality, then Mamoru receives it on Base. */
+  cctp: {
+    deposited: 'On its way to Base through Circle. Circle confirms transfers from Ethereum in about 15 to 20 minutes, then it arrives in this account.',
+    minting: 'Circle confirmed it. Arriving in this account on Base…',
+  },
 }
 
 /** Money sent on the wrong network: where it is and that it is not in the balance. Renders nothing when there is none. */
@@ -84,7 +89,7 @@ const UNDERWAY: BridgeOutRoute['state'][] = ['sending', 'deposited', 'unconfirme
 export function BridgeStatus({ route }: { route: BridgeOutRoute }) {
   return (
     <span className="mt-2 block text-[0.88rem]" data-testid="bridge-status" data-state={route.state} role="status">
-      {otherChainCopy.state[route.state]}
+      {route.bridge === 'cctp' && route.state === 'deposited' ? (route.mintTx ? otherChainCopy.cctp.minting : otherChainCopy.cctp.deposited) : otherChainCopy.state[route.state]}
     </span>
   )
 }

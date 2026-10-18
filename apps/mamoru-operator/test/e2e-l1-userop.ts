@@ -2,36 +2,39 @@
 //
 // USDC sits at a Mamoru account's counterfactual address on Ethereum: no code, no ETH. One ERC-4337 v0.7 userOp,
 // signed by the passkey alone, deploys the Safe (initCode, same setup as Base), pays its gas in USDC through Pimlico's
-// live SingletonPaymasterV7 (0x7777…834C) and, in the same batch, deposits to the same Safe on Base: Across through
-// the real BridgeOut, CCTP V2 depositForBurn built by hand. A dev account bundles it with handleOps (the lab bundler).
+// live SingletonPaymasterV7 (0x7777…834C) and, in the same batch, deposits to the same Safe on Base, through the real
+// BridgeOut: Across, and CCTP V2 (the default when it pays more) with the mint on a Base fork. The operator's own
+// bundler (startLiveBundler) bundles it: its relayer sends handleOps as beneficiary and the EntryPoint refunds it from
+// the paymaster's deposit. Circle's attestation is played by a fork attester on Base.
 //
 // The paymaster is the real contract on the fork. Its paymasterData is normally signed by Pimlico's service; here a
 // dev key is written into its signers mapping (anvil_setStorageAt), and the fork paymaster below signs the same
 // ERC-20-mode layout at the Chainlink ETH/USD price. No API key, nothing sent to a real chain.
 //
 // Run: nix shell nixpkgs#foundry --command bun apps/mamoru-operator/test/e2e-l1-userop.ts
-// Upstream RPC: L1_RPC_URL, or QUICKNODE_ETH_MAINNET_HTTP from ~/.config/quicknode/endpoints.env (never printed).
+// Upstream RPCs: L1_RPC_URL / BASE_RPC_URL, or QUICKNODE_ETH_MAINNET_HTTP / QUICKNODE_BASE_MAINNET_HTTP from
+// ~/.config/quicknode/endpoints.env (never printed).
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { concat, createPublicClient, encodeAbiParameters, encodeFunctionData, http, keccak256, numberToHex, parseAbi, parseEventLogs, toHex, type Hex } from 'viem'
-import { privateKeyToAccount } from 'viem/accounts'
+import { concat, createPublicClient, encodeAbiParameters, encodeFunctionData, http, keccak256, numberToHex, parseAbi, parseEventLogs, sliceHex, toHex, type Hex } from 'viem'
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import type { AccountContext, Address, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
 import { address, entryPointV07Abi, erc20Abi } from '@mamoru/registry'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
-import { browserOwnerSignature, liveAccountFromContext, P256_N } from '@mamoru/account/live'
-import { userOpHash } from '@mamoru/account/sessions'
-import { ownerUserOp, ownerUserOpSignature, safeOpHash, userOpLogs, type PaymasterFields } from '@mamoru/account/userop'
+import { P256_N } from '@mamoru/account/live'
+import { userOpLogs, type PaymasterFields } from '@mamoru/account/userop'
 import { anvilBinary, assertNoKeyInArgv, sanitizedEnv } from '../../../packages/scenarios/fork/anvil.ts'
 import { startForkProxy } from '../../../packages/scenarios/proxy/index.ts'
-import { Lab, devAccount } from '../../../packages/scenarios/fixtures/lab.ts'
-import { startLabBundler } from '../../../packages/scenarios/bundler/index.ts'
+import { Lab } from '../../../packages/scenarios/fixtures/lab.ts'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
-import { ACROSS_SPOKE_POOL, BridgeOut, gasCapUsdc, L1_USDC, USEROP_CALL_GAS, USEROP_PVG_FLOOR, USEROP_VERIFY_GAS_DEPLOY, userOpCalls, type Fetch } from '../src/bridge-out.ts'
-import { burnMatches, cctpCalls, FINALITY_STANDARD, TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
+import { ACROSS_SPOKE_POOL, BASE_USDC, BridgeOut, L1_BUNDLER_TIMEOUT_MS, L1_HANDLE_OPS_GAS, L1_USDC, type Fetch } from '../src/bridge-out.ts'
+import { startLiveBundler, type LiveBundler } from '../src/bundler.ts'
+import { burnMatches, FINALITY_STANDARD, MESSAGE_TRANSMITTER_V2, messageTransmitterV2Abi } from '../src/cctp.ts'
+import { Relayer } from '../src/relayer.ts'
 import { HttpError } from '../src/operator.ts'
 import { checkPimlicoErc20, L1Bundler, MAX_CONSTANT_FEE, PIMLICO_ERC20_PAYMASTER_V07, RpcRefused, type Erc20Paymaster, type GasPrice } from '../src/paymaster.ts'
 
@@ -40,6 +43,14 @@ const CHAINLINK_ETH_USD = '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419' as const
 const AMOUNT = 150_000_000n
 /** A dev key the fork paymaster signs with, written into the real paymaster's signers mapping. */
 const PM_SIGNER = privateKeyToAccount('0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d')
+/** Fresh random relayer keys. Not anvil's dev accounts: on mainnet those carry EIP-7702 delegations to sweeper
+ * contracts that forward any ETH they receive, the EntryPoint's refund included (seen on this fork). */
+const L1_RELAYER_KEY: Hex = generatePrivateKey()
+const BASE_RELAYER_KEY: Hex = generatePrivateKey()
+/** Plays Circle's attester on the Base fork. */
+const ATTESTER = privateKeyToAccount(generatePrivateKey())
+const attestableAbi = parseAbi(['function attesterManager() view returns (address)', 'function enableAttester(address newAttester)', 'function setSignatureThreshold(uint256 newSignatureThreshold)'])
+const supplyAbi = parseAbi(['function totalSupply() view returns (uint256)'])
 const TREASURY = '0x000000000000000000000000000000000000beef' as const
 
 let failures = 0
@@ -61,33 +72,46 @@ const pmAbi = parseAbi([
 ])
 const chainlinkAbi = parseAbi(['function latestRoundData() view returns (uint80, int256 answer, uint256, uint256 updatedAt, uint80)'])
 
-if (!process.env.L1_RPC_URL) {
+for (const [env, name] of [['L1_RPC_URL', 'QUICKNODE_ETH_MAINNET_HTTP'], ['BASE_RPC_URL', 'QUICKNODE_BASE_MAINNET_HTTP']] as const) {
+  if (process.env[env]) continue
   const file = join(homedir(), '.config/quicknode/endpoints.env')
-  const line = existsSync(file) ? readFileSync(file, 'utf8').split('\n').find((l) => l.startsWith('QUICKNODE_ETH_MAINNET_HTTP=')) : undefined
-  if (!line) throw new Error('set L1_RPC_URL')
-  process.env.L1_RPC_URL = line.slice(line.indexOf('=') + 1).replace(/^["']|["']$/g, '').trim()
+  const line = existsSync(file) ? readFileSync(file, 'utf8').split('\n').find((l) => l.startsWith(`${name}=`)) : undefined
+  if (!line) throw new Error(`set ${env}`)
+  process.env[env] = line.slice(line.indexOf('=') + 1).replace(/^["']|["']$/g, '').trim()
 }
-const proxy = startForkProxy('L1_RPC_URL')
-const portProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
-const port = portProbe.port as number
-portProbe.stop(true)
-const argv = ['--fork-url', proxy.url, '--chain-id', '1', '--host', '127.0.0.1', '--port', String(port), '--no-request-size-limit']
-assertNoKeyInArgv(argv, ['L1_RPC_URL'])
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-e2e-l1-userop-'))
-const anvil = Bun.spawn([anvilBinary(), ...argv], { stdout: Bun.file(join(dir, 'anvil.log')), stderr: Bun.file(join(dir, 'anvil.log')), env: sanitizedEnv() })
-const anvilUrl = `http://127.0.0.1:${port}/`
-let bundler: ReturnType<typeof startLabBundler> | null = null
-try {
-  const lab = new Lab(anvilUrl, 1)
+function fork(env: 'L1_RPC_URL' | 'BASE_RPC_URL', chainId: number) {
+  const proxy = startForkProxy(env)
+  const probe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
+  const port = probe.port as number
+  probe.stop(true)
+  const argv = ['--fork-url', proxy.url, '--chain-id', String(chainId), '--host', '127.0.0.1', '--port', String(port), '--no-request-size-limit']
+  assertNoKeyInArgv(argv, ['L1_RPC_URL', 'BASE_RPC_URL'])
+  const log = Bun.file(join(dir, `anvil-${chainId}.log`))
+  const anvil = Bun.spawn([anvilBinary(), ...argv], { stdout: log, stderr: log, env: sanitizedEnv() })
+  return { proxy, anvil, url: `http://127.0.0.1:${port}/` }
+}
+async function ready(lab: Lab) {
   for (let i = 0; ; i++) {
     try {
       await lab.client.getBlockNumber()
-      break
+      return
     } catch {
       if (i > 300) throw new Error('anvil did not start')
       await Bun.sleep(100)
     }
   }
+}
+const eth = fork('L1_RPC_URL', 1)
+const baseFork = fork('BASE_RPC_URL', 8453)
+const proxy = eth.proxy
+const anvilUrl = eth.url
+const bundlers: LiveBundler[] = []
+try {
+  const lab = new Lab(anvilUrl, 1)
+  const baseLab = new Lab(baseFork.url, 8453)
+  await ready(lab)
+  await ready(baseLab)
   const l1 = createPublicClient({ transport: http(anvilUrl) })
   check((await l1.getChainId()) === 1, 'fork keeps chain id 1')
   // Mainnet fees at the fork block, before the fork mines anything: what a real move would pay now.
@@ -158,9 +182,32 @@ try {
   }
   const forkPm = new ForkPimlico()
 
-  const executor = devAccount(0)
-  bundler = startLabBundler(lab, executor)
-  const l1Bundler = new L1Bundler(bundler.url)
+  // The operator's relayer on Ethereum: a fresh key with 0.05 ETH. It fronts handleOps through the bridge-out guard of
+  // whichever BridgeOut is sending.
+  const l1Relayer = new Relayer(L1_RELAYER_KEY, l1, anvilUrl, 1)
+  await lab.setBalance(l1Relayer.address, 50_000_000_000_000_000n)
+  let guard: ReturnType<BridgeOut['bundlerGuard']> | null = null
+  const ownBundler = () => {
+    const b = startLiveBundler(l1, l1Relayer, 1, {
+      handleOpsGas: L1_HANDLE_OPS_GAS,
+      label: 'l1-bundler',
+      guard: { before: (g) => guard!.before(g), sent: (h) => guard?.sent(h), after: (c, r) => guard?.after(c, r), failed: () => guard?.failed() },
+    })
+    bundlers.push(b)
+    return b
+  }
+  const bundler = ownBundler()
+  const l1Bundler = new L1Bundler(bundler.url, fetch, L1_BUNDLER_TIMEOUT_MS)
+
+  // Base fork: the operator's Base relayer (a dev account) and a fork attester in MessageTransmitterV2.
+  const baseClient = createPublicClient({ transport: http(baseFork.url) })
+  const baseRelayer = new Relayer(BASE_RELAYER_KEY, baseClient, baseFork.url, 8453)
+  await baseLab.setBalance(baseRelayer.address, 10n ** 18n)
+  const manager = await baseClient.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: attestableAbi, functionName: 'attesterManager' })
+  await baseLab.setBalance(manager, 10n ** 18n)
+  const en = await baseLab.sendAs(manager, MESSAGE_TRANSMITTER_V2, encodeFunctionData({ abi: attestableAbi, functionName: 'enableAttester', args: [ATTESTER.address] }))
+  const th = await baseLab.sendAs(manager, MESSAGE_TRANSMITTER_V2, encodeFunctionData({ abi: attestableAbi, functionName: 'setSignatureThreshold', args: [1n] }))
+  check(en.ok && th.ok, 'Base fork: a dev attester enabled in MessageTransmitterV2, threshold 1')
 
   const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
   const owners = [address('SafeWebAuthnSharedSigner')]
@@ -223,15 +270,18 @@ try {
   }
 
   let statusAnswer = { status: 'pending' } as { status: string; fillTx?: string }
-  const fetcher: Fetch = (url, init) => (url.includes('/deposit/status') ? Promise.resolve(Response.json(statusAnswer)) : fetch(url, init))
-  // The relayer must never be used on this path: any call to it fails the test.
-  const noRelayer = {
-    address: '0x0000000000000000000000000000000000000001' as Address,
-    send: async () => {
-      throw new Error('relayer used on the userOp path')
-    },
+  let attestation: { message: Hex; attestation: Hex } | null = null
+  const fetcher: Fetch = (url, init) => {
+    if (url.includes('/deposit/status')) return Promise.resolve(Response.json(statusAnswer))
+    if (url.includes('/v2/messages/')) return Promise.resolve(attestation ? Response.json({ messages: [{ status: 'complete', ...attestation }] }) : Response.json({ error: 'Message not found' }, { status: 404 }))
+    return fetch(url, init)
   }
-  const make = (now: () => number = Date.now) => new BridgeOut(l1, noRelayer, dir, fetcher, now, undefined, () => true, { bundler: l1Bundler, paymaster: forkPm })
+  /** A BridgeOut on the operator's own bundler; with `minter`, CCTP is offered and minted on the Base fork. */
+  const make = (o: { now?: () => number; minter?: boolean; bundlerUrl?: string; stateDir?: string } = {}) => {
+    const b = new BridgeOut(l1, l1Relayer, o.stateDir ?? dir, fetcher, o.now ?? Date.now, undefined, () => true, { bundler: o.bundlerUrl ? new L1Bundler(o.bundlerUrl, fetch, L1_BUNDLER_TIMEOUT_MS) : l1Bundler, paymaster: forkPm }, o.minter ? { client: baseClient, relayer: baseRelayer } : null)
+    guard = b.bundlerGuard()
+    return b
+  }
   const bo = make()
 
   // ---- 1. Across through the real BridgeOut: the #117 case -------------------------------------------------------
@@ -243,9 +293,9 @@ try {
   const p0 = await bo.prepare(ctx)
   const cap = BigInt(p0.route.gasUsdc ?? '0')
   check(p0.chainId === 1 && cap > 0n && BigInt(p0.route.outputUsdc) + BigInt(p0.route.feeUsdc) === AMOUNT - cap, `prepare: ${p0.summary.join(' | ')}`)
-  const sentBefore = bundler.received().length
+  const sentBefore = await l1.getTransactionCount({ address: l1Relayer.address })
   check((await code(bo.submit(ctx, browserSign(p0, new SoftwarePasskey(PASSKEY_SCALARS.a2))))) === 'BAD_SIGNATURE', 'another passkey: BAD_SIGNATURE, nothing reaches the bundler')
-  check(bundler.received().length === sentBefore, 'bundler received nothing for the refused signature')
+  check((await l1.getTransactionCount({ address: l1Relayer.address })) === sentBefore, 'the relayer sent nothing for the refused signature')
 
   // A paymaster that names a recipient, or charges above its quote, never reaches the owner.
   forkPm.tamper = { recipient: '0x000000000000000000000000000000000000dEaD' }
@@ -258,7 +308,11 @@ try {
   const cap1 = BigInt(p1.route.gasUsdc!)
   const poolBefore = await usdcAt(ACROSS_SPOKE_POOL)
   const treasuryBefore = await usdcAt(TREASURY)
+  const relayerBefore = await l1.getBalance({ address: l1Relayer.address })
+  const pmDepositBefore = await l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'balanceOf', args: [pm] })
   const done = await bo.submit(ctx, browserSign(p1))
+  const relayerAfter = await l1.getBalance({ address: l1Relayer.address })
+  const pmDepositAfter = await l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'balanceOf', args: [pm] })
   const r = done.route!
   check(r.state === 'deposited' && !!r.userOpHash && !!r.depositId && !r.deployTx, `submit: ${r.state}, deposit id ${r.depositId}, userOp ${r.userOpHash?.slice(0, 18)}…`)
   check(((await l1.getCode({ address: safe })) ?? '0x').length > 2, 'the userOp deployed the account at the same address')
@@ -277,6 +331,12 @@ try {
   const deployTxGas = ev.tx.gasUsed
   const effective = ev.tx.effectiveGasPrice
   console.log(`  deploy+bridge userOp: actualGasUsed ${deployGasUsed} (bundle tx gasUsed ${deployTxGas}), fork gas price ${effective} wei, actualGasCost ${ev.mine.actualGasCost} wei`)
+  const txCost = deployTxGas * effective
+  const net = relayerAfter - relayerBefore
+  check(ev.tx.from.toLowerCase() === l1Relayer.address.toLowerCase() && net === ev.mine.actualGasCost - txCost, `operator's relayer bundled it: paid ${txCost} wei, refunded ${ev.mine.actualGasCost} wei by the EntryPoint, net ${net >= 0n ? '+' : ''}${net} wei`)
+  check(pmDepositBefore - pmDepositAfter === ev.mine.actualGasCost, `the refund came out of the paymaster's EntryPoint deposit (${pmDepositBefore - pmDepositAfter} wei)`)
+  const spent = JSON.parse(readFileSync(join(dir, 'bridge-out.json'), 'utf8')).spent
+  check(BigInt(spent.wei) === (txCost > ev.mine.actualGasCost ? txCost - ev.mine.actualGasCost : 0n), `bridge-out budget charged only the unrefunded part: ${spent.wei} wei`)
   await phases(ev.tx.transactionHash)
   // ERC-7562 STO-022: during deployment, an unstaked factory may not touch storage associated with the account in
   // other contracts. Which contracts outside the account had storage written by this bundle (the execution phase only
@@ -292,8 +352,11 @@ try {
   const realId = j.routes[ctx.accountKey].depositId
   j.routes[ctx.accountKey] = { ...j.routes[ctx.accountKey], state: 'unconfirmed', depositId: undefined, at: new Date(Date.now() - 20 * 60_000).toISOString() }
   writeFileSync(file, JSON.stringify(j))
-  const recon = await make().status(ctx)
-  check(recon.route?.state === 'deposited' && recon.route.depositId === realId, `unconfirmed resolved by userOpHash after a restart: deposited, id ${recon.route?.depositId}`)
+  // A restarted operator: a new bundler that remembers nothing; the bundle hash on the route decides.
+  const forgetful = ownBundler()
+  check((await new L1Bundler(forgetful.url).receipt(r.userOpHash!)) === null, 'a restarted bundler has no receipt for it')
+  const recon = await make({ bundlerUrl: forgetful.url }).status(ctx)
+  check(recon.route?.state === 'deposited' && recon.route.depositId === realId, `unconfirmed resolved after a restart from the stored bundle hash: deposited, id ${recon.route?.depositId}`)
   statusAnswer = { status: 'filled', fillTx: `0x${'ab'.repeat(32)}` }
   const after = await make().status(ctx)
   check(after.route?.state === 'filled', 'status follows Across: filled on Base')
@@ -323,42 +386,48 @@ try {
   for (const [rc, detail, want] of [[-32500, 'AA23 reverted', 'BRIDGE_FAILED'], [-32602, 'already known', 'unconfirmed'], [-32500, 'AA25 invalid account nonce', 'unconfirmed']] as const) {
     const rctx = newAccount(`refused${-rc}`)
     await fund(rctx.address, 100_000_000n)
-    const rbo = new BridgeOut(l1, noRelayer, mkdtempSync(join(tmpdir(), 'mamoru-e2e-refused-')), fetcher, Date.now, undefined, () => true, { bundler: new Refusing(rc, detail), paymaster: forkPm })
+    const rbo = new BridgeOut(l1, l1Relayer, mkdtempSync(join(tmpdir(), 'mamoru-e2e-refused-')), fetcher, Date.now, undefined, () => true, { bundler: new Refusing(rc, detail), paymaster: forkPm })
     const rp = await rbo.prepare(rctx)
     const got = await rbo.submit(rctx, browserSign(rp)).then((v) => v.route?.state ?? 'none', (e) => (e instanceof HttpError ? e.code : 'unexpected'))
     check(got === want && (await usdcAt(rctx.address)) === 100_000_000n, `bundler error ${rc} "${detail}": ${got}, USDC untouched`)
   }
 
-  // ---- 2. CCTP V2 depositForBurn in the same kind of userOp, built by hand ----------------------------------------
+  // ---- 2. CCTP V2 through BridgeOut: chosen by output, burned on Ethereum, minted on Base by the operator ---------
   const cctx = newAccount('cctp')
   const csafe = cctx.address
   await fund(csafe, AMOUNT)
-  const live = liveAccountFromContext(cctx)
-  live.chainId = 1
-  const fees = await l1.estimateFeesPerGas()
-  const gas = { verificationGasLimit: USEROP_VERIFY_GAS_DEPLOY, callGasLimit: USEROP_CALL_GAS, preVerificationGas: USEROP_PVG_FLOOR, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas }
-  const stubPm = await forkPm.stub({} as UserOperation<'0.7'>)
-  const draft = ownerUserOp({ live, deployed: false, nonce: 0n, calls: [{ to: L1_USDC, value: 0n, data: '0x' }], gas, paymaster: stubPm })
-  const ccap = gasCapUsdc(draft, forkPm.quoted, MAX_CONSTANT_FEE)
-  const burn = { amount: AMOUNT - ccap, maxFee: 0n, minFinality: FINALITY_STANDARD }
-  const approvePm = userOpCalls(csafe, { amount: 0n, outputAmount: 0n, exclusiveRelayer: '0x0000000000000000000000000000000000000000', quoteTimestamp: 0, fillDeadline: 0, exclusivityDeadline: 0, fillSec: 0 }, pm, ccap)[0]!
-  let cop = ownerUserOp({ live, deployed: false, nonce: 0n, calls: [approvePm, ...cctpCalls(L1_USDC, csafe, burn)], gas, paymaster: stubPm })
-  cop = { ...cop, ...(await forkPm.data(cop)) }
-  const validUntil = Math.floor(Date.now() / 1000) + 600
-  const challenge = safeOpHash(cop, 1, 0, validUntil)
-  const safeSig = browserOwnerSignature(browserSign({ safeTxHash: challenge, prepareId: 'cctp' }), challenge)
-  cop = { ...cop, signature: ownerUserOpSignature(0, validUntil, safeSig) }
-  const chash = userOpHash(cop, 1)
-  const messengerBefore = await usdcAt(TOKEN_MESSENGER_V2)
-  const supplyBefore = await l1.readContract({ address: L1_USDC, abi: parseAbi(['function totalSupply() view returns (uint256)']), functionName: 'totalSupply' })
-  check((await l1Bundler.send(cop)) === chash, 'CCTP userOp accepted by the bundler, same userOp hash')
-  const cev = (await opEvent(chash))!
-  const supplyAfter = await l1.readContract({ address: L1_USDC, abi: parseAbi(['function totalSupply() view returns (uint256)']), functionName: 'totalSupply' })
-  check(cev.mine.success && ((await l1.getCode({ address: csafe })) ?? '0x').length > 2, 'CCTP userOp: success, account deployed')
-  check(burnMatches(cev.mine.logs, L1_USDC, csafe, burn), `DepositForBurn: ${fmt(burn.amount)} USDC, mintRecipient = the Safe, domain 6 (Base), open caller, no hook`)
-  check(supplyBefore - supplyAfter === burn.amount && (await usdcAt(TOKEN_MESSENGER_V2)) === messengerBefore, 'USDC burned on Ethereum (supply down by the amount)')
-  const cpaid = parseEventLogs({ abi: erc20Abi, eventName: 'Transfer', logs: cev.mine.logs }).filter((e) => getAddressEq(e.args.to, TREASURY)).reduce((a, e) => a + e.args.value, 0n)
-  console.log(`  deploy+CCTP userOp: actualGasUsed ${cev.mine.actualGasUsed}, gas paid ${fmt(cpaid)} USDC at fork price`)
+  let clock = Date.now()
+  const cbo = make({ now: () => clock, minter: true, stateDir: mkdtempSync(join(tmpdir(), 'mamoru-e2e-cctp-')) })
+  const cp = await cbo.prepare(cctx)
+  const across = await fetch(`https://app.across.to/api/suggested-fees?inputToken=${L1_USDC}&outputToken=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&originChainId=1&destinationChainId=8453&amount=${AMOUNT - BigInt(cp.route.gasUsdc!)}`).then((x) => x.json() as Promise<{ outputAmount: string }>)
+  check(cp.route.bridge === 'cctp' && BigInt(cp.route.outputUsdc) >= BigInt(across.outputAmount), `route picked by output: CCTP ${fmt(BigInt(cp.route.outputUsdc))} vs Across ${fmt(BigInt(across.outputAmount))} USDC — ${cp.summary[2]}`)
+  const supplyBefore = await l1.readContract({ address: L1_USDC, abi: supplyAbi, functionName: 'totalSupply' })
+  const cdone = await cbo.submit(cctx, browserSign(cp))
+  const cr = cdone.route!
+  const supplyAfter = await l1.readContract({ address: L1_USDC, abi: supplyAbi, functionName: 'totalSupply' })
+  check(cr.state === 'deposited' && cr.bridge === 'cctp' && supplyBefore - supplyAfter === BigInt(cr.amountUsdc), `CCTP userOp: deployed + burned ${fmt(BigInt(cr.amountUsdc))} USDC on Ethereum, waiting for Circle`)
+  const cev = (await opEvent(cr.userOpHash!))!
+  check(burnMatches(cev.mine.logs, L1_USDC, csafe, { amount: BigInt(cr.amountUsdc), maxFee: BigInt(cr.amountUsdc) - BigInt(cr.outputUsdc), minFinality: FINALITY_STANDARD }), 'DepositForBurn: mintRecipient = the Safe, domain 6 (Base), open caller, no hook')
+  console.log(`  deploy+CCTP userOp: actualGasUsed ${cev.mine.actualGasUsed}, gas ${fmt(BigInt(cr.gasUsdc ?? '0'))} USDC at fork price`)
+  clock += 11_000
+  check((await cbo.status(cctx)).route?.state === 'deposited', 'no attestation yet: still deposited, nothing sent on Base')
+
+  // Circle's part, played on the fork: the message the burn emitted, with the nonce and finality Circle fills in,
+  // signed by the fork attester.
+  const sent = parseEventLogs({ abi: messageTransmitterV2Abi, eventName: 'MessageSent', logs: cev.mine.logs })
+  check(sent.length === 1, 'the burn emitted one CCTP message')
+  const raw = sent[0]!.args.message
+  const message = concat([sliceHex(raw, 0, 12), toHex(randomBytes(32)), sliceHex(raw, 44, 144), numberToHex(2000, { size: 4 }), sliceHex(raw, 148)])
+  attestation = { message, attestation: await ATTESTER.sign({ hash: keccak256(message) }) }
+  const baseBefore = await baseClient.readContract({ address: BASE_USDC, abi: erc20Abi, functionName: 'balanceOf', args: [csafe] })
+  clock += 11_000
+  await cbo.tick()
+  const minted = (await cbo.status(cctx)).route!
+  const baseAfter = await baseClient.readContract({ address: BASE_USDC, abi: erc20Abi, functionName: 'balanceOf', args: [csafe] })
+  const mintRc = minted.mintTx ? await baseClient.getTransactionReceipt({ hash: minted.mintTx }) : null
+  check(minted.state === 'filled' && minted.fillTx === minted.mintTx && baseAfter - baseBefore === BigInt(cr.outputUsdc), `minted on Base by the operator: +${fmt(baseAfter - baseBefore)} USDC at the same Safe, receiveMessage gas ${mintRc?.gasUsed}`)
+  clock += 11_000
+  check((await cbo.status(cctx)).route?.state === 'filled', 'status stays filled')
 
   // ---- 3. What the first move costs at today's mainnet gas --------------------------------------------------------
   // anvil answers 1 gwei for the priority fee; the upstream node's answer is what a bundler would see today.
@@ -373,9 +442,11 @@ try {
     console.log(`  ${label}: ${g} gas (+60k postOp) -> ${parts.join(', ')}`)
   }
 } finally {
-  bundler?.stop()
-  anvil.kill()
-  proxy.stop()
+  for (const b of bundlers) b.stop()
+  for (const f of [eth, baseFork]) {
+    f.anvil.kill()
+    f.proxy.stop()
+  }
 }
 console.log(failures === 0 ? '\nall checks passed' : `\n${failures} check(s) failed`)
 process.exit(failures === 0 ? 0 : 1)

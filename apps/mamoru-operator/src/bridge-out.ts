@@ -9,6 +9,8 @@ import { browserOwnerSignature, deployCall, encodeWebAuthnSignature, liveAccount
 import { execTransactionData, type SafeTx } from '@mamoru/account/safe'
 import { userOpHash } from '@mamoru/account/sessions'
 import { maxGasCostWei, OWNER_NONCE_KEY, ownerUserOp, ownerUserOpSignature, safeOpHash, userOpLogs, type PaymasterFields, type UserOpGas } from '@mamoru/account/userop'
+import { burnMatches, cctpAttestation, cctpCalls, FINALITY_FAST, FINALITY_STANDARD, cctpFees, cctpMaxFee, decodeCctpMessage, FAST_FILL_SEC, MESSAGE_TRANSMITTER_V2, messageTransmitterV2Abi, mintIsFor, receiveMessageData, STANDARD_FILL_SEC, type Burn } from './cctp.ts'
+import type { BundlerGuard } from './bundler.ts'
 import { L1Bundler, MAX_CONSTANT_FEE, PaymasterError, RATE_SLACK_BPS, RpcRefused, type Erc20Paymaster, type GasPrice } from './paymaster.ts'
 import { Lock } from './lock.ts'
 import { HttpError } from './operator.ts'
@@ -82,6 +84,10 @@ export const USEROP_VERIFY_GAS_DEPLOY = 700_000n
 export const USEROP_VERIFY_GAS = 150_000n
 /** approve x2 + depositV3 through Safe7579.execute. Fork: execution plus the paymaster's postOp 158k-188k. */
 export const USEROP_CALL_GAS = 200_000n
+/** Gas limit of the operator's handleOps on Ethereum: the userOp's limits (≈1.11M with deploy) plus EntryPoint overhead. */
+export const L1_HANDLE_OPS_GAS = 1_400_000n
+/** The operator's Ethereum bundler answers eth_sendUserOperation after the bundle's receipt (~1-3 blocks). */
+export const L1_BUNDLER_TIMEOUT_MS = 180_000
 /** Floor for preVerificationGas; the bundler's estimate wins when higher. */
 export const USEROP_PVG_FLOOR = 80_000n
 /** The SafeOp is valid this long after the prepare. */
@@ -133,14 +139,23 @@ export type L1Sender = {
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>
 
 /** The userOp the owner signs and what it was built against. */
-type PreparedOp = { op: UserOperation<'0.7'>; validUntil: number; balance: bigint; gasCap: bigint }
+/** The bridge leg the owner signs (#180): Across depositV3 or CCTP V2 depositForBurn, both to the same Safe on Base. */
+export type Leg = { bridge: 'across'; deposit: Deposit; output: bigint; fillSec: number } | { bridge: 'cctp'; burn: Burn; output: bigint; fillSec: number }
+type PreparedOp = { op: UserOperation<'0.7'>; validUntil: number; balance: bigint; gasCap: bigint; leg: Leg }
+
+/** Base side of CCTP: the operator's Base client and relayer submit receiveMessage once Circle attests. */
+export type BaseMinter = { client: PublicClient; relayer: L1Sender }
+/** Gas limit of one receiveMessage on Base (a CCTP V2 mint is ~120k). */
+export const MINT_GAS = 300_000n
+/** The relayer does not mint on Base above this gas price (2 gwei: at most ~0.0006 ETH per mint; Base is usually below 0.01 gwei). */
+export const MAX_BASE_GAS_PRICE_WEI = 2_000_000_000n
 type Prepared = { prepareId: string; accountKey: string; live: LiveAccount; tx: SafeTx; safeTxHash: Hex; deposit: Deposit; deployed: boolean; expires: number; userOp?: PreparedOp }
 
 /** The bundler and paymaster of the userOp path. */
 export type AccountAbstraction = { bundler: L1Bundler; paymaster: Erc20Paymaster }
 
 /** A route as kept on disk: what the owner sees, plus what reconciliation needs. */
-type Stored = BridgeOutRoute & { id: string; safe: Address; safeNonce: string; fromBlock: string; execStarted?: boolean; userOpTx?: Hex }
+type Stored = BridgeOutRoute & { id: string; safe: Address; safeNonce: string; fromBlock: string; execStarted?: boolean; userOpTx?: Hex; cctp?: { maxFee: string; minFinality: number } }
 type Journal = { routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }> }
 
 const NON_TERMINAL = new Set<BridgeOutRoute['state']>(['sending', 'deposited', 'unconfirmed', 'expired'])
@@ -261,7 +276,7 @@ const usdc = (raw: bigint) => {
 /** The owner-facing part of a stored route. */
 function view(r: Stored | undefined, enabled: boolean): BridgeOutView {
   if (!r) return { route: null, enabled }
-  const { id: _id, safe: _safe, safeNonce: _n, fromBlock: _b, execStarted: _e, userOpTx: _u, ...route } = r
+  const { id: _id, safe: _safe, safeNonce: _n, fromBlock: _b, execStarted: _e, userOpTx: _u, cctp: _c, ...route } = r
   return { route, enabled }
 }
 
@@ -283,6 +298,8 @@ export class BridgeOut {
     private readonly enabledFor: (accountKey: string) => boolean = () => false,
     /** #180: bundler + ERC-20 paymaster. Set: every move is a userOp paid in USDC. Null: the relayer path. */
     private readonly aa: AccountAbstraction | null = null,
+    /** #180: Base client + relayer for the CCTP mint. Null: CCTP is not offered. */
+    private readonly base: BaseMinter | null = null,
   ) {
     this.journal = this.load()
   }
@@ -486,8 +503,10 @@ export class BridgeOut {
     if (gasCap > MAX_GAS_USDC || gasCap * 10_000n > balance * MAX_GAS_BPS) throw new HttpError(409, 'BRIDGE_GAS_TOO_HIGH', 'Ethereum gas would take too much of this amount, try later or with more')
     const amount = balance - gasCap
     if (amount < MIN_USDC) throw new HttpError(409, 'BRIDGE_NOTHING', 'there is no USDC on Ethereum to move')
-    const deposit = checkQuote(await this.quote(amount), amount, Math.floor(this.now() / 1000))
-    let op = build(deposit, gasCap, gas, stub)
+    const leg = await this.pickLeg(amount, Math.floor(this.now() / 1000))
+    const legCalls = leg.bridge === 'across' ? bridgeCalls(live.safe, leg.deposit) : cctpCalls(L1_USDC, live.safe, leg.burn)
+    const approvePm = { to: L1_USDC, value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [q.paymaster, gasCap] }) }
+    let op = ownerUserOp({ live, deployed, nonce, calls: [approvePm, ...legCalls], gas, paymaster: stub })
     try {
       const pm = await aa.paymaster.data(op)
       aa.paymaster.check(pm, q)
@@ -501,23 +520,58 @@ export class BridgeOut {
     const challenge = safeOpHash(op, ETHEREUM_CHAIN_ID, 0, validUntil)
     const prepareId = toHex(randomBytes(16)).slice(2)
     const expires = this.now() + PREPARE_TTL_MS
-    // tx/safeTxHash keep their meaning for the relayer path; here the passkey signs the SafeOp hash.
-    const tx = ownerSafeTx(bridgeCalls(live.safe, deposit), 0n)
-    this.remember({ prepareId, accountKey: ctx.accountKey, live, tx, safeTxHash: challenge, deposit, deployed, expires, userOp: { op, validUntil, balance, gasCap } })
-    const fee = deposit.amount - deposit.outputAmount
+    // tx/safeTxHash keep their meaning for the relayer path; here the passkey signs the SafeOp hash. `deposit` carries
+    // amount and output for the stored route whatever the bridge.
+    const tx = ownerSafeTx(legCalls, 0n)
+    const deposit: Deposit = leg.bridge === 'across' ? leg.deposit : { amount, outputAmount: leg.output, exclusiveRelayer: zeroAddress, quoteTimestamp: 0, fillDeadline: 0, exclusivityDeadline: 0, fillSec: leg.fillSec }
+    this.remember({ prepareId, accountKey: ctx.accountKey, live, tx, safeTxHash: challenge, deposit, deployed, expires, userOp: { op, validUntil, balance, gasCap, leg } })
+    const fee = amount - leg.output
+    const when = leg.fillSec >= 600 ? `in about ${Math.round(leg.fillSec / 60)} minutes` : `in about ${Math.max(leg.fillSec, 1)} s`
+    const bridgeLine =
+      leg.bridge === 'cctp'
+        ? `Bridge: Circle CCTP (native USDC), fee ${usdc(fee)} USDC; Mamoru pays the Base gas to receive it`
+        : `Bridge: Across, fee ${usdc(fee)} USDC`
     return {
       safe: live.safe,
       chainId: ETHEREUM_CHAIN_ID,
       safeTxHash: challenge,
       summary: [
-        `Move ${usdc(deposit.amount)} USDC from Ethereum to this same account on Base`,
-        `You receive ${usdc(deposit.outputAmount)} USDC on Base, in about ${Math.max(deposit.fillSec, 1)} s`,
-        `Bridge: Across, fee ${usdc(fee)} USDC. Ethereum gas: at most ${usdc(gasCap)} USDC from this amount; what is not used stays at your address on Ethereum`,
+        `Move ${usdc(amount)} USDC from Ethereum to this same account on Base`,
+        `You receive ${usdc(leg.output)} USDC on Base, ${when}`,
+        `${bridgeLine}. Ethereum gas: at most ${usdc(gasCap)} USDC from this amount; what is not used stays at your address on Ethereum`,
       ],
       expiresAt: new Date(expires).toISOString(),
       prepareId,
-      route: { outputUsdc: deposit.outputAmount.toString(), feeUsdc: fee.toString(), fillSec: deposit.fillSec, gasUsdc: gasCap.toString() },
+      route: { outputUsdc: leg.output.toString(), feeUsdc: fee.toString(), fillSec: leg.fillSec, gasUsdc: gasCap.toString(), bridge: leg.bridge },
     }
+  }
+
+  /**
+   * Quotes Across and CCTP V2 (Standard and Fast) for the amount and picks the largest output to the Safe on Base;
+   * equal outputs go to CCTP (native USDC, no refund path), then to the faster. CCTP only with a Base minter.
+   */
+  private async pickLeg(amount: bigint, nowSec: number): Promise<Leg> {
+    const [across, cctp] = await Promise.allSettled([
+      this.quote(amount).then((q) => checkQuote(q, amount, nowSec)),
+      this.base ? cctpFees(this.fetcher) : Promise.reject(new Error('no Base minter')),
+    ])
+    const legs: Leg[] = []
+    if (across.status === 'fulfilled') legs.push({ bridge: 'across', deposit: across.value, output: across.value.outputAmount, fillSec: across.value.fillSec })
+    if (cctp.status === 'fulfilled') {
+      for (const f of cctp.value) {
+        if (f.finalityThreshold !== FINALITY_STANDARD && f.finalityThreshold !== FINALITY_FAST) continue
+        const maxFee = cctpMaxFee(amount, f.minimumFeeBps)
+        if (maxFee * 10_000n > amount * MAX_FEE_BPS) continue
+        legs.push({ bridge: 'cctp', burn: { amount, maxFee, minFinality: f.finalityThreshold }, output: amount - maxFee, fillSec: f.finalityThreshold === FINALITY_FAST ? FAST_FILL_SEC : STANDARD_FILL_SEC })
+      }
+    }
+    if (legs.length === 0) {
+      // Across's own refusal (amount too low, quote refused) says more than "unavailable".
+      if (across.status === 'rejected' && across.reason instanceof HttpError) throw across.reason
+      throw new HttpError(502, 'BRIDGE_QUOTE_UNAVAILABLE', 'the bridge did not answer, try again')
+    }
+    legs.sort((a, b) => (a.output !== b.output ? (b.output > a.output ? 1 : -1) : a.bridge !== b.bridge ? (a.bridge === 'cctp' ? -1 : 1) : a.fillSec - b.fillSec))
+    return legs[0]!
   }
 
   async submit(ctx: AccountContext, body: OwnerSignature): Promise<BridgeOutView> {
@@ -568,18 +622,21 @@ export class BridgeOut {
       amountUsdc: p.deposit.amount.toString(),
       outputUsdc: p.deposit.outputAmount.toString(),
       userOpHash: hash,
+      bridge: u.leg.bridge,
+      ...(u.leg.bridge === 'cctp' ? { cctp: { maxFee: u.leg.burn.maxFee.toString(), minFinality: u.leg.burn.minFinality } } : {}),
       at: '',
     }
     // The hash is on disk before the bundler sees the userOp: whatever happens next, status() can ask for it.
     this.journal.routes[ctx.accountKey] = route
     this.write(ctx.accountKey, route)
+    this.sending = { accountKey: ctx.accountKey, route }
     try {
       const sent = await aa.bundler.send(op)
       if (sent.toLowerCase() !== hash.toLowerCase()) logErr(`[bridge-out] ${ctx.accountKey.slice(0, 8)}: bundler answered another userOp hash`, sent)
       route.state = 'unconfirmed'
       const until = this.now() + USEROP_WAIT_MS
       for (;;) {
-        await this.resolveUserOp(route, p.deposit)
+        await this.resolveUserOp(route, u.leg)
         if (route.state !== 'unconfirmed' || this.now() >= until) break
         await Bun.sleep(3_000)
       }
@@ -591,7 +648,7 @@ export class BridgeOut {
         logErr(`[bridge-out] ${ctx.accountKey.slice(0, 8)}: bundler refused the userOp`, (e as RpcRefused).detail)
         route.state = 'unconfirmed'
         try {
-          await this.resolveUserOp(route, p.deposit)
+          await this.resolveUserOp(route, u.leg)
         } catch {
           // no answer: stays unconfirmed
         }
@@ -608,9 +665,45 @@ export class BridgeOut {
         route.state = 'unconfirmed'
       }
     }
+    this.sending = null
     this.write(ctx.accountKey, route)
     if (route.state === 'failed') throw new HttpError(502, 'BRIDGE_FAILED', 'the move from Ethereum did not go through; the USDC is still at your address on Ethereum')
     return view(route, true)
+  }
+
+  /** The move whose userOp the operator's Ethereum bundler is handling (one at a time, under the lock). */
+  private sending: { accountKey: string; route: Stored } | null = null
+
+  /**
+   * #180: the guard of the operator's own Ethereum bundler. The relayer fronts handleOps gas only for the move under
+   * way, within the gas ceiling, the day's budget and its balance (the #72 checks); the EntryPoint pays the
+   * beneficiary (the relayer) the userOp's gas from the paymaster's deposit, and only what was not refunded stays
+   * charged to the day. The bundle's hash is kept on the route: after a restart the receipt is read from the chain.
+   */
+  bundlerGuard(): BundlerGuard & { sent: (hash: Hex) => void } {
+    let bound = 0n
+    return {
+      before: async (gas: bigint) => {
+        if (!this.sending) throw new Error('no move under way')
+        bound = await this.affordable(gas)
+        this.spend(bound)
+      },
+      sent: (hash: Hex) => {
+        const s = this.sending
+        if (!s) return
+        s.route.userOpTx = hash
+        this.write(s.accountKey, s.route)
+      },
+      after: (cost: bigint, refund: bigint) => {
+        const net = cost > refund ? cost - refund : 0n
+        this.spend(net - bound)
+        bound = 0n
+      },
+      failed: () => {
+        // Unknown outcome: the bound stays charged.
+        bound = 0n
+      },
+    }
   }
 
   /**
@@ -618,32 +711,47 @@ export class BridgeOut {
    * holds its logs (only the slice between its boundaries counts), the deposit event must be the one signed.
    * No receipt yet: unchanged.
    */
-  private async resolveUserOp(r: Stored, d: Deposit | null): Promise<void> {
+  private async resolveUserOp(r: Stored, leg: Leg | null): Promise<void> {
     if (!this.aa || !r.userOpHash) return
+    // The bundler's receipt, or (the operator's own bundler forgets on restart) the bundle transaction it reported.
     const br = await this.aa.bundler.receipt(r.userOpHash)
-    if (!br) return
-    r.userOpTx = br.txHash
-    r.l1Tx = br.txHash
-    const receipt = await this.l1.getTransactionReceipt({ hash: br.txHash })
+    const txHash = br?.txHash ?? r.userOpTx
+    if (!txHash) return
+    const receipt = await this.l1.getTransactionReceipt({ hash: txHash }).catch(() => null)
+    if (!receipt) return
+    r.userOpTx = txHash
+    r.l1Tx = txHash
     const mine = userOpLogs(receipt, r.userOpHash)
     if (!mine) {
-      logErr(`[bridge-out] ${r.safe.slice(0, 10)}: bundler receipt without the UserOperationEvent`, br.txHash)
+      // A bundle that reverted (or holds another userOp): this one did not run in it.
+      logErr(`[bridge-out] ${r.safe.slice(0, 10)}: bundle without the UserOperationEvent`, txHash)
+      if (!br && receipt.status === 'reverted') r.userOpTx = undefined
+      if (!br) r.l1Tx = undefined
       return
     }
-    // What the paymaster took: USDC from the account to anyone but the SpokePool, within this userOp.
-    let gasPaid = 0n
+    // What the paymaster took: all USDC out of the account in this userOp, minus what the bridge took (when it ran).
+    let out = 0n
     for (const ev of parseEventLogs({ abi: erc20Abi, eventName: 'Transfer', logs: mine.logs.filter((l) => getAddress(l.address) === L1_USDC) })) {
-      if (getAddress(ev.args.from) === getAddress(r.safe) && getAddress(ev.args.to) !== ACROSS_SPOKE_POOL) gasPaid += ev.args.value
+      if (getAddress(ev.args.from) === getAddress(r.safe)) out += ev.args.value
     }
-    r.gasUsdc = gasPaid.toString()
+    const bridged = mine.success ? BigInt(r.amountUsdc) : 0n
+    r.gasUsdc = (out > bridged ? out - bridged : 0n).toString()
     if (!mine.success) {
       r.state = 'failed'
       return
     }
-    const signed: Deposit | null = d
-    const id = signed ? depositIdFrom({ logs: mine.logs }, r.safe, signed) : this.depositIdLoose(mine.logs, r)
+    if (r.bridge === 'cctp') {
+      const burn: Burn | null = leg?.bridge === 'cctp' ? leg.burn : r.cctp ? { amount: BigInt(r.amountUsdc), maxFee: BigInt(r.cctp.maxFee), minFinality: r.cctp.minFinality } : null
+      if (!burn || !burnMatches(mine.logs, L1_USDC, r.safe, burn)) {
+        logErr(`[bridge-out] ${r.safe.slice(0, 10)}: userOp included without the expected burn`, txHash)
+        return
+      }
+      r.state = 'deposited'
+      return
+    }
+    const id = leg?.bridge === 'across' ? depositIdFrom({ logs: mine.logs }, r.safe, leg.deposit) : this.depositIdLoose(mine.logs, r)
     if (id === null) {
-      logErr(`[bridge-out] ${r.safe.slice(0, 10)}: userOp included without the expected deposit event`, br.txHash)
+      logErr(`[bridge-out] ${r.safe.slice(0, 10)}: userOp included without the expected deposit event`, txHash)
       return
     }
     r.depositId = id
@@ -739,6 +847,21 @@ export class BridgeOut {
 
   /** The last move of the account, brought up to date from the chain and from Across. */
   async status(ctx: AccountContext): Promise<BridgeOutView> {
+    return this.refresh(ctx.accountKey)
+  }
+
+  /**
+   * #180: brings every CCTP move still waiting on Base up to date, so the mint does not wait for the owner to open
+   * the app. The operator calls it on a timer; each account is throttled like status().
+   */
+  async tick(): Promise<void> {
+    for (const [accountKey, r] of Object.entries(this.journal.routes)) {
+      if (r.bridge === 'cctp' && r.state === 'deposited') await this.refresh(accountKey).catch((e) => logErr('[bridge-out] tick:', e instanceof Error ? e.message : e))
+    }
+  }
+
+  private async refresh(accountKey: string): Promise<BridgeOutView> {
+    const ctx = { accountKey }
     const enabled = this.enabledFor(ctx.accountKey)
     const route = this.journal.routes[ctx.accountKey]
     if (!route || !NON_TERMINAL.has(route.state)) return view(route, enabled)
@@ -755,13 +878,14 @@ export class BridgeOut {
         if (next.state === 'sending') next.state = 'unconfirmed'
       }
       else if (next.state === 'sending' || next.state === 'unconfirmed') await this.reconcile(next)
-      if ((next.state === 'deposited' || next.state === 'expired') && next.depositId) await this.across(next)
+      if (next.bridge === 'cctp' && next.state === 'deposited') await this.cctpMint(ctx.accountKey, next)
+      else if ((next.state === 'deposited' || next.state === 'expired') && next.depositId) await this.across(next)
     } catch (e) {
       // Unknown is not failed: the route stays as it was and is asked again later.
       logErr(`[bridge-out] status ${ctx.accountKey.slice(0, 8)}:`, e)
       return view(route, enabled)
     }
-    if (next.state !== route.state || next.depositId !== route.depositId || next.fillTx !== route.fillTx || next.l1Tx !== route.l1Tx) this.write(ctx.accountKey, next)
+    if (next.state !== route.state || next.depositId !== route.depositId || next.fillTx !== route.fillTx || next.l1Tx !== route.l1Tx || next.mintTx !== route.mintTx) this.write(ctx.accountKey, next)
     return view(this.journal.routes[ctx.accountKey], enabled)
   }
 
@@ -819,6 +943,65 @@ export class BridgeOut {
   /** FundsDeposited events whose depositor is the account, in one provider-sized range. */
   private depositLogs(safe: Address, fromBlock: bigint, toBlock: bigint) {
     return this.l1.getLogs({ address: ACROSS_SPOKE_POOL, event: spokePoolAbi[1], args: { depositor: pad(safe.toLowerCase() as Address, { size: 32 }) }, fromBlock, toBlock })
+  }
+
+  private readonly minting = new Set<string>()
+
+  /**
+   * CCTP, after the burn: Circle's attestation, then receiveMessage on Base by the operator. Gas is paid only for an
+   * attested message that is this account's burn (mintIsFor). A nonce already used on Base (anyone may mint: open
+   * caller) is filled without a transaction of ours. The mint transaction's hash is on disk before it is sent.
+   */
+  private async cctpMint(accountKey: string, r: Stored): Promise<void> {
+    if (!this.base || !r.l1Tx || this.minting.has(accountKey)) return
+    this.minting.add(accountKey)
+    try {
+      const base = this.base
+      if (r.mintTx) {
+        const rc = await base.client.getTransactionReceipt({ hash: r.mintTx }).catch(() => null)
+        if (!rc) return
+        if (rc.status === 'success') {
+          r.state = 'filled'
+          r.fillTx = r.mintTx
+          return
+        }
+        // Reverted: someone else may have minted first; otherwise try again below.
+        r.mintTx = undefined
+      }
+      const att = await cctpAttestation(r.l1Tx, this.fetcher)
+      if (!att || att.status !== 'complete' || !att.message || !att.attestation) return
+      let msg
+      try {
+        msg = decodeCctpMessage(att.message)
+      } catch {
+        logErr(`[bridge-out] ${r.safe.slice(0, 10)}: attested message does not decode`, r.l1Tx)
+        return
+      }
+      if (!mintIsFor(msg, L1_USDC, r.safe, BigInt(r.amountUsdc))) {
+        logErr(`[bridge-out] ${r.safe.slice(0, 10)}: attested message is not this burn`, r.l1Tx)
+        return
+      }
+      const used = await base.client.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: messageTransmitterV2Abi, functionName: 'usedNonces', args: [msg.nonce] })
+      if (used !== 0n) {
+        r.state = 'filled'
+        return
+      }
+      if ((await base.client.getGasPrice()) > MAX_BASE_GAS_PRICE_WEI) {
+        logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, "Base gas above the mint ceiling, minting later")
+        return
+      }
+      const sent = await base.relayer.send({ to: MESSAGE_TRANSMITTER_V2, data: receiveMessageData(att.message, att.attestation), gas: MINT_GAS }, (h) => {
+        r.mintTx = h
+        this.write(accountKey, { ...r })
+      })
+      r.mintTx = sent.hash
+      if (sent.receipt.status === 'success') {
+        r.state = 'filled'
+        r.fillTx = sent.hash
+      }
+    } finally {
+      this.minting.delete(accountKey)
+    }
   }
 
   /** Across's answer for a deposit: filled on Base, expired (refund pending) or refunded to the account on Ethereum. */

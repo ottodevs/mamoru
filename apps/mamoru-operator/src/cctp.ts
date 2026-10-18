@@ -1,11 +1,12 @@
-import { encodeFunctionData, getAddress, pad, parseAbi, parseEventLogs, type Hex, type Log } from 'viem'
+import { encodeFunctionData, getAddress, hexToBigInt, pad, parseAbi, parseEventLogs, sliceHex, type Hex, type Log } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { erc20Abi } from '@mamoru/registry'
 
 // CCTP V2 as a route of the L1 userOp (otto/mamoru#180). Native USDC burned on Ethereum, minted to the same Safe on
-// Base. Fork-proven in test/e2e-l1-userop.ts; not yet offered by BridgeOut: the default route is a decision for Ot
-// (design §5.2), and the mint on Base needs receiveMessage with Circle's attestation (destinationCaller is open, so
-// the account's own Base userOp or any relayer can submit it).
+// Base. destinationCaller is open (zero) and there is no hook: once Circle attests the burn, the operator submits
+// receiveMessage on Base itself (Base gas is cents). Circle's Forwarding Service is not used: it charges a USDC fee
+// out of the transfer and needs depositForBurnWithHook, which the design forbids. Fork-proven in
+// test/e2e-l1-userop.ts, mint included (a fork attester).
 
 /** TokenMessengerV2, same address on Ethereum and Base. */
 export const TOKEN_MESSENGER_V2: Address = '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d'
@@ -15,6 +16,17 @@ export const CCTP_DOMAIN_BASE = 6
 export const FINALITY_STANDARD = 2000
 export const FINALITY_FAST = 1000
 export const IRIS_API = 'https://iris-api.circle.com'
+/** MessageTransmitterV2, same address on Ethereum and Base. */
+export const MESSAGE_TRANSMITTER_V2: Address = '0x81D40F21F12A8F0E3252Bccb954D722d4c464B64'
+/** Ethereum finality: Standard transfers are attested after ~13-19 minutes. */
+export const STANDARD_FILL_SEC = 1_200
+export const FAST_FILL_SEC = 30
+
+export const messageTransmitterV2Abi = parseAbi([
+  'function receiveMessage(bytes message, bytes attestation) returns (bool)',
+  'function usedNonces(bytes32 nonce) view returns (uint256)',
+  'event MessageSent(bytes message)',
+])
 
 export const tokenMessengerV2Abi = parseAbi([
   'function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)',
@@ -55,7 +67,7 @@ export function burnMatches(logs: Log[], usdc: Address, safe: Address, b: Burn):
 }
 
 /** Circle's attestation for the burn transaction: pending until 'complete', then the message and attestation to mint. */
-export async function cctpAttestation(txHash: Hex, fetcher: typeof fetch = fetch): Promise<{ status: 'pending' | 'complete'; message?: Hex; attestation?: Hex } | null> {
+export async function cctpAttestation(txHash: Hex, fetcher: (input: string, init?: RequestInit) => Promise<Response> = fetch): Promise<{ status: 'pending' | 'complete'; message?: Hex; attestation?: Hex } | null> {
   const res = await fetcher(`${IRIS_API}/v2/messages/${CCTP_DOMAIN_ETHEREUM}?transactionHash=${txHash}`, { signal: AbortSignal.timeout(8_000) })
   if (res.status === 404) return { status: 'pending' }
   if (!res.ok) return null
@@ -64,4 +76,64 @@ export async function cctpAttestation(txHash: Hex, fetcher: typeof fetch = fetch
   if (!m) return { status: 'pending' }
   if (m.status !== 'complete' || !m.message?.startsWith('0x') || !m.attestation?.startsWith('0x')) return { status: 'pending' }
   return { status: 'complete', message: m.message as Hex, attestation: m.attestation as Hex }
+}
+
+/** What Circle charges per finality threshold, in basis points (GET /v2/burn/USDC/fees/0/6). */
+export async function cctpFees(fetcher: (input: string, init?: RequestInit) => Promise<Response> = fetch): Promise<{ finalityThreshold: number; minimumFeeBps: number }[]> {
+  const res = await fetcher(`${IRIS_API}/v2/burn/USDC/fees/${CCTP_DOMAIN_ETHEREUM}/${CCTP_DOMAIN_BASE}`, { signal: AbortSignal.timeout(8_000) })
+  if (!res.ok) throw new Error(`fees ${res.status}`)
+  const j = (await res.json()) as { finalityThreshold?: unknown; minimumFee?: unknown }[]
+  if (!Array.isArray(j)) throw new Error('fees: not a list')
+  return j.flatMap((x) => (typeof x.finalityThreshold === 'number' && typeof x.minimumFee === 'number' && x.minimumFee >= 0 ? [{ finalityThreshold: x.finalityThreshold, minimumFeeBps: x.minimumFee }] : []))
+}
+
+/** maxFee for a burn: the fee in bps of the amount, rounded up to a whole base unit. */
+export function cctpMaxFee(amount: bigint, bps: number): bigint {
+  const micro = BigInt(Math.ceil(bps * 1_000_000))
+  return (amount * micro + 10_000_000_000n - 1n) / 10_000_000_000n
+}
+
+export type CctpMessage = { sourceDomain: number; destinationDomain: number; nonce: Hex; sender: Hex; recipient: Hex; destinationCaller: Hex; burnToken: Hex; mintRecipient: Hex; amount: bigint; messageSender: Hex; maxFee: bigint }
+
+/** MessageV2 header (148 bytes) and BurnMessageV2 body, as MessageTransmitterV2 and TokenMessengerV2 lay them out. */
+export function decodeCctpMessage(m: Hex): CctpMessage {
+  const n = (m.length - 2) / 2
+  if (n < 148 + 228) throw new Error('CCTP message too short')
+  const at = (o: number, len: number) => sliceHex(m, o, o + len, { strict: true })
+  return {
+    sourceDomain: Number(hexToBigInt(at(4, 4))),
+    destinationDomain: Number(hexToBigInt(at(8, 4))),
+    nonce: at(12, 32),
+    sender: at(44, 32),
+    recipient: at(76, 32),
+    destinationCaller: at(108, 32),
+    burnToken: at(148 + 4, 32),
+    mintRecipient: at(148 + 36, 32),
+    amount: hexToBigInt(at(148 + 68, 32)),
+    messageSender: at(148 + 100, 32),
+    maxFee: hexToBigInt(at(148 + 132, 32)),
+  }
+}
+
+/**
+ * The operator pays Base gas for a mint only when the attested message is this account's burn: Ethereum to Base,
+ * from and to the TokenMessengerV2, USDC, the Safe as recipient, the amount burned, open caller.
+ */
+export function mintIsFor(m: CctpMessage, usdc: Address, safe: Address, amount: bigint): boolean {
+  const w = (a: Address) => pad(a, { size: 32 }).toLowerCase()
+  return (
+    m.sourceDomain === CCTP_DOMAIN_ETHEREUM &&
+    m.destinationDomain === CCTP_DOMAIN_BASE &&
+    m.sender.toLowerCase() === w(TOKEN_MESSENGER_V2) &&
+    m.recipient.toLowerCase() === w(TOKEN_MESSENGER_V2) &&
+    BigInt(m.destinationCaller) === 0n &&
+    m.burnToken.toLowerCase() === w(usdc) &&
+    m.mintRecipient.toLowerCase() === w(safe) &&
+    m.messageSender.toLowerCase() === w(safe) &&
+    m.amount === amount
+  )
+}
+
+export function receiveMessageData(message: Hex, attestation: Hex): Hex {
+  return encodeFunctionData({ abi: messageTransmitterV2Abi, functionName: 'receiveMessage', args: [message, attestation] })
 }
