@@ -17,7 +17,8 @@ export type ParamCondition = (typeof PARAM_CONDITIONS)[number]
  * Reference of a rule, as written in the policy:
  * - `ACCOUNT`: the smart account itself;
  * - a registry name, compared as an address;
- * - `cap:<name>`: an engineering cap fixed at activation;
+ * - `cap:<name>`: an engineering cap fixed at activation; `cap:<a>|<b>` the larger of two (a v4 swap action takes
+ *   either token of its pool, spec 007);
  * - `tokenId`: the position of a per-position grant;
  * - a bigint literal.
  */
@@ -39,9 +40,48 @@ export type ActionRuleTemplate = {
   /** Full function signature, static arguments only. */
   signature: string
   params: ParamRuleTemplate[]
+  /**
+   * Spec 007: on a grant with an `actionPolicy`, this action carries UniActionPolicy only. Set on the swap deadline
+   * (SwapRouter02.multicall(deadline, []), whose rules already pin it to execute nothing): MamoruActionPolicy refuses
+   * every call it does not know, that one included.
+   */
+  uniOnly?: true
 }
 
-export type GrantName = 'enter-swap' | 'enter-mint' | 'manage' | 'manage-any' | 'convert-any' | 'increase'
+/**
+ * `engine` (spec 007, policy v4): one session per pool for everything the engine does there (enter, mint, increase,
+ * re-range, reduce, harvest, convert), bounded on chain by MamoruActionPolicy next to UniActionPolicy.
+ */
+export type GrantName = 'enter-swap' | 'enter-mint' | 'manage' | 'manage-any' | 'convert-any' | 'engine'
+
+/** What a proposal needs a session for. Under v4 the pool's `engine` grant covers every role (see `grantKeyFor`). */
+export type GrantRole = 'enter-swap' | 'enter-mint' | 'manage-any' | 'convert-any' | 'increase'
+
+/**
+ * Spec 007 (otto/mamoru#151): MamoruActionPolicy's Init for one pool, owner-signed with the grant. Caps are names of
+ * the policy's `session.caps`, sized at activation like every other cap.
+ */
+export type ActionPolicyTemplate = {
+  pool: RegistryName
+  twapWindowSeconds: number
+  bandTicks: number
+  budgetWindowSeconds: number
+  perWindow0: `cap:${string}`
+  perWindow1: `cap:${string}`
+  total0: `cap:${string}`
+  total1: `cap:${string}`
+}
+
+/**
+ * Spec 007 parameters of a v4 policy, in one place: the grants, caps and the engine's bounds all derive from these.
+ * Per pool: the band in ticks, and the budgets as multiples of the pool's share of the account cap (C_p, its bucket
+ * preference) in bps, 10000 = 1 x C_p: `perWindowBps` per budget window, `totalBps` over the approval.
+ */
+export type ActionPolicyParams = {
+  twapWindowSeconds: number
+  budgetWindowSeconds: number
+  byPool: Record<RegistryName, { bandTicks: number; perWindowBps: number; totalBps: number }>
+}
 
 /** Grants that cover any position of the pair the account holds, enabled at activation. */
 export const MANAGE_ANY_GRANTS = ['manage-any', 'convert-any'] as const satisfies readonly GrantName[]
@@ -52,6 +92,8 @@ export type GrantTemplate = {
   pool?: RegistryName
   /** Activated by the owner only for a tokenId already admitted from enter-mint. */
   perPosition: boolean
+  /** Spec 007: MamoruActionPolicy on every action (but `uniOnly` ones), with this Init. Absent: UniActionPolicy only. */
+  actionPolicy?: ActionPolicyTemplate
   /** userOps one approval allows under this grant. With `usageByCap`, the limit of an account cap under its first tier. */
   usageLimit: number
   /**
@@ -101,9 +143,10 @@ export type PolicyVersion = {
     /** Lab only (#101 experiment 4): re-range only when it pays. Absent: today's trigger byte for byte. */
     lazy?: LazyRerange
     /**
-     * otto/mamoru#171, read only with an `increase` grant for the pool: an entry adds to a held position instead of
-     * minting when each edge of it is within this share (bps) of the new range's width from the new range's edge.
-     * Absent: DEFAULT_INCREASE_TOLERANCE_BPS (see `reusablePosition` in @mamoru/decide).
+     * otto/mamoru#171, read only where the policy can add to a position (a v4 `engine` grant for the pool, spec 007):
+     * an entry adds to a held position instead of minting when each edge of it is within this share (bps) of the new
+     * range's width from the new range's edge. Absent: DEFAULT_INCREASE_TOLERANCE_BPS (see `reusablePosition` in
+     * @mamoru/decide).
      */
     increaseToleranceBps?: number
   }
@@ -126,6 +169,8 @@ export type PolicyVersion = {
    */
   depth?: { maxImpactBps: number; maxShareBps: number; maxImpactBpsByPool?: Record<string, number> }
   execution: { slippageBps: number; maxTwapDeviationTicks: number; twapWindowSeconds: number; observationTtlSeconds: number }
+  /** Spec 007 (v4): the on-chain action policy's parameters. Absent: v1/v2 grants, UniActionPolicy only. */
+  actionPolicy?: ActionPolicyParams
   session: {
     validitySeconds: number
     renewalWindowSeconds: number
@@ -244,6 +289,21 @@ export type ResolvedActionRule = {
   selector: Hex
   nativeValue: 0n
   params: ResolvedParamRule[]
+  /** See ActionRuleTemplate.uniOnly. Present only on v4 grants. */
+  uniOnly?: true
+}
+
+/** MamoruActionPolicy.Init (contracts/action-policy/src/MamoruActionPolicy.sol), field for field. */
+export type MamoruActionPolicyInit = {
+  pool: Address
+  twapWindow: number
+  bandTicks: number
+  generation: bigint
+  budgetWindow: number
+  perWindow0: bigint
+  perWindow1: bigint
+  total0: bigint
+  total1: bigint
 }
 
 /** Plan section 12.1, with `tokenId` in place of the unexpressible `allowedTokenIds` set. */
@@ -263,4 +323,6 @@ export type SessionGrant = {
   fallbackAction: 'none'
   tokenId?: bigint
   actions: ResolvedActionRule[]
+  /** Spec 007 (v4 grants only): the MamoruActionPolicy every action but the `uniOnly` ones carries, and its Init. */
+  actionPolicy?: { address: Address; init: MamoruActionPolicyInit }
 }

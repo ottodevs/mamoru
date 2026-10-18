@@ -1,5 +1,5 @@
-import { increaseGrants, manageAnyGrants, pairGrants, type PairSpec } from './grants.ts'
-import type { CapFormula, PolicyVersion, UsageTier } from './types.ts'
+import { engineGrants, manageAnyGrants, pairGrants, type PairSpec } from './grants.ts'
+import type { ActionPolicyParams, CapFormula, GrantTemplate, PolicyVersion, UsageTier } from './types.ts'
 
 const usdcCbbtcCaps: CapFormula[] = [
   { name: 'usdcSwapPerCall', asset: 'USDC', bpsOfDeposit: 2500 },
@@ -80,9 +80,12 @@ export const conservadorLiveV1: PolicyVersion = {
   },
 }
 
-/** A policy that enables the live manage grants (manage-any, convert-any) at activation. */
+/**
+ * A policy that enables the live manage grants at activation: manage-any/convert-any (v1/v2), or the v4 `engine`
+ * grant, which covers them (spec 007).
+ */
 export function hasManageAny(policy: PolicyVersion): boolean {
-  return policy.session.grants.some((g) => g.name === 'manage-any')
+  return policy.session.grants.some((g) => g.name === 'manage-any' || g.name === 'engine')
 }
 
 /**
@@ -225,20 +228,88 @@ export const conservadorLabGeometryV1: PolicyVersion = {
 }
 
 /**
- * otto/mamoru#171, Lab only: conservador-live-v2 on a fork with one `increase` grant template per pair, so an entry
- * into a pool where the account holds a position of (nearly) the same range adds to it instead of minting a second
- * NFT. The grant is per position (tokenId EQUAL, see `increaseGrants`): no live account has one, and none is in the
- * activation batch. Usage: as many top-ups per position as enter-mint allows entries per pair.
+ * Spec 007 (otto/mamoru#151), T5 results ("C: no-tap year + guardian"). The ONE place to change the v4 bands and
+ * budgets: the v4 grants, their caps and the engine's bounds all read them from `PolicyVersion.actionPolicy`.
+ * - twapWindow 1800 s = `execution.twapWindowSeconds` (the engine's own TWAP checks read the same window);
+ * - band: stables 20 ticks, cbBTC and WETH 125 (0.8 x 125 = 100 = maxTwapDeviationTicks: no wait beyond today's);
+ * - budget per token per day (1.6 x the worst Lab day): stables 8, btc 3, risk 5 x C_p; per approval, the no-tap year
+ *   backstop: 60 / 42 / 110 x C_p. C_p is the pool's share of the account cap.
  */
-export const conservadorLabIncreaseV1: PolicyVersion = {
-  ...conservadorLiveV2,
-  policyId: 'conservador-lab-increase-v1',
-  version: '1.0.0',
-  chain: 'fork',
-  session: {
-    ...conservadorLiveV2.session,
-    grants: [...conservadorLiveV2.session.grants, ...[stablesPair, btcPair, riskPair].flatMap((p) => increaseGrants(p.spec, { increase: LIVE_USAGE.enterMint }))],
+export const ACTION_POLICY_DEFAULTS: ActionPolicyParams = {
+  twapWindowSeconds: 1800,
+  budgetWindowSeconds: 86_400,
+  byPool: {
+    'pool:USDC/USDT/100': { bandTicks: 20, perWindowBps: 80_000, totalBps: 600_000 },
+    'pool:USDC/cbBTC/500': { bandTicks: 125, perWindowBps: 30_000, totalBps: 420_000 },
+    'pool:WETH/USDC/3000': { bandTicks: 125, perWindowBps: 50_000, totalBps: 1_100_000 },
   },
+}
+
+/**
+ * The v4 grant of one pair: one `engine` session (spec 007), its budgets as caps in bps of the account cap (the
+ * bucket's preference times the policy's multiples), usage the sum of what the v2 grants it replaces allowed.
+ */
+function v4PairOf(prefix: string, spec: PairSpec & { pool: string }, preferenceBps: number, ap: ActionPolicyParams): { caps: CapFormula[]; grants: GrantTemplate[] } {
+  const pp = ap.byPool[spec.pool]
+  if (pp === undefined) throw new Error(`v4: no parameters for ${spec.pool}`)
+  const n = (s: string) => `${prefix}${s}`
+  const bps = (m: number) => {
+    const v = (preferenceBps * m) / 10_000
+    if (!Number.isInteger(v)) throw new Error(`v4: ${spec.pool} budget ${m} bps of a ${preferenceBps} bps bucket is not whole bps`)
+    return v
+  }
+  const caps: CapFormula[] = [
+    { name: n('Window0'), asset: spec.token0, bpsOfDeposit: bps(pp.perWindowBps) },
+    { name: n('Window1'), asset: spec.token1, bpsOfDeposit: bps(pp.perWindowBps) },
+    { name: n('Total0'), asset: spec.token0, bpsOfDeposit: bps(pp.totalBps) },
+    { name: n('Total1'), asset: spec.token1, bpsOfDeposit: bps(pp.totalBps) },
+  ]
+  const usage = CONVERT_ANY_BY_CAP.map((t) => ({ ...t, usageLimit: t.usageLimit + LIVE_USAGE.enterSwap + LIVE_USAGE.enterMint + LIVE_USAGE.manageAny }))
+  const grants = engineGrants(spec, usage, {
+    twapWindowSeconds: ap.twapWindowSeconds,
+    bandTicks: pp.bandTicks,
+    budgetWindowSeconds: ap.budgetWindowSeconds,
+    perWindow0: `cap:${n('Window0')}`,
+    perWindow1: `cap:${n('Window1')}`,
+    total0: `cap:${n('Total0')}`,
+    total1: `cap:${n('Total1')}`,
+  })
+  return { caps, grants }
+}
+
+function v4Session(base: PolicyVersion, ap: ActionPolicyParams): PolicyVersion['session'] {
+  const pairs = [
+    { prefix: 'stables', spec: stablesPair.spec },
+    { prefix: 'btc', spec: btcPair.spec },
+    { prefix: 'risk', spec: riskPair.spec },
+  ].map(({ prefix, spec }) => {
+    const bucket = base.buckets.find((b) => b.pools.includes(spec.pool!))
+    if (!bucket) throw new Error(`v4: ${spec.pool} is in no bucket`)
+    return v4PairOf(prefix, spec as PairSpec & { pool: string }, bucket.preference, ap)
+  })
+  return { ...base.session, caps: pairs.flatMap((p) => p.caps), grants: pairs.flatMap((p) => p.grants) }
+}
+
+/**
+ * Conservador v4 (spec 007, otto/mamoru#151 T2): conservador-live-v2's strategy, buckets and engine settings, with the
+ * on-chain action policy. One `engine` session per pool replaces enter-swap, enter-mint, manage-any and convert-any,
+ * and adds increase (otto/mamoru#171) with no grant per position; MamoruActionPolicy bounds price, positions and
+ * spend on every action. Not activatable while MamoruActionPolicy has no address in the registry (instantiateGrant
+ * refuses its grants). v1/v2 and their hashes are untouched.
+ */
+export const conservadorLiveV4: PolicyVersion = {
+  ...conservadorLiveV2,
+  policyId: 'conservador-live-v4',
+  version: '4.0.0',
+  actionPolicy: ACTION_POLICY_DEFAULTS,
+  session: v4Session(conservadorLiveV2, ACTION_POLICY_DEFAULTS),
+}
+
+/** conservador-live-v4 on a fork: the Lab and the scenario runner, with a MamoruActionPolicy deployed on the fork. */
+export const conservadorLabV4: PolicyVersion = {
+  ...conservadorLiveV4,
+  policyId: 'conservador-lab-v4',
+  chain: 'fork',
 }
 
 /** Scenario policy for M07: LP on WETH/USDC 0.3%, only in the lab. */
@@ -291,5 +362,6 @@ export const POLICIES: Record<string, PolicyVersion> = {
   [labWethUsdcV1.policyId]: labWethUsdcV1,
   [conservadorLabGuardsV1.policyId]: conservadorLabGuardsV1,
   [conservadorLabGeometryV1.policyId]: conservadorLabGeometryV1,
-  [conservadorLabIncreaseV1.policyId]: conservadorLabIncreaseV1,
+  [conservadorLiveV4.policyId]: conservadorLiveV4,
+  [conservadorLabV4.policyId]: conservadorLabV4,
 }

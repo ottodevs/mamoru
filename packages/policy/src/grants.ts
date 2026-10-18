@@ -1,4 +1,4 @@
-import type { GrantName, GrantTemplate, UsageTier } from './types.ts'
+import type { ActionPolicyTemplate, GrantName, GrantRole, GrantTemplate, UsageTier } from './types.ts'
 
 /** A grant's usage limit: one number for every account, or tiers by account cap (#149). */
 export type Usage = number | readonly UsageTier[]
@@ -16,7 +16,8 @@ const MINT = 'mint((address,address,uint24,int24,int24,uint256,uint256,uint256,u
 const DECREASE = 'decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))'
 const COLLECT = 'collect((uint256,address,uint128,uint128))'
 const BURN = 'burn(uint256)'
-const INCREASE = 'increaseLiquidity((uint256,uint256,uint256,uint256,uint256,uint256))'
+/** MamoruActionPolicy.increase(IncreaseLiquidityParams), 0x4110c363: not the position manager's increaseLiquidity. */
+const POLICY_INCREASE = 'increase((uint256,uint256,uint256,uint256,uint256,uint256))'
 const MULTICALL_DEADLINE = 'multicall(uint256,bytes[])'
 
 /**
@@ -219,12 +220,19 @@ export function grantKey(t: { name: GrantName; pool?: string }): string {
   return t.pool ? `${t.name}:${t.pool}` : t.name
 }
 
-/** The key of the grant `name` that covers `pool` in this policy (plain `name` for single-pair policies). */
-export function grantKeyFor(policy: { session: { grants: GrantTemplate[] } }, name: GrantName, pool: string): string {
-  const t = policy.session.grants.find((g) => g.name === name && g.pool === pool) ?? policy.session.grants.find((g) => g.name === name && !g.pool)
+/**
+ * The key of the grant that covers `role` in `pool` under this policy (plain `name` for single-pair policies). Under a
+ * v4 policy (spec 007) the pool's one `engine` grant covers every role; a v1/v2 policy has none, so its keys are the
+ * ones they always were.
+ */
+export function grantKeyFor(policy: { session: { grants: GrantTemplate[] } }, name: GrantName | GrantRole, pool: string): string {
+  const gs = policy.session.grants
+  const t = gs.find((g) => g.name === name && g.pool === pool) ?? gs.find((g) => g.name === name && !g.pool) ?? (ENGINE_ROLES.includes(name as GrantRole) ? gs.find((g) => g.name === 'engine' && g.pool === pool) : undefined)
   if (!t) throw new Error(`no ${name} grant for ${pool}`)
   return grantKey(t)
 }
+
+const ENGINE_ROLES: readonly GrantRole[] = ['enter-swap', 'enter-mint', 'manage-any', 'convert-any', 'increase']
 
 /**
  * Live manage grants (owner decision 2026-09-26), enabled in the one
@@ -324,59 +332,74 @@ export function manageAnyGrants(p: PairSpec, usage: { manage: Usage; convert: Us
 }
 
 /**
- * otto/mamoru#171: add liquidity to one position the Safe already holds, instead of minting a second one in the same
- * pool and range. Per position, like `manage`: NonfungiblePositionManager.increaseLiquidity does not check who owns
- * the tokenId (the caller pays, the position's owner gets the liquidity), so a rule that admitted any id would let a
- * leaked session key pay the Safe's tokens into a position someone else owns. Only `tokenId EQUAL <id>` keeps it in
- * the Safe, and Smart Sessions has no set membership: one grant per tokenId, which the owner enables for an id this
- * session minted (`instantiateGrant` refuses any other). Never part of the activation batch (perPosition).
+ * Spec 007 (otto/mamoru#151), policy v4: ONE session per pool for everything the engine does there, with
+ * MamoruActionPolicy next to UniActionPolicy on every action (but the swap deadline, `uniOnly`). What a leaked key can do
+ * is bounded on chain by the policy, not by splitting grants: prices within `bandTicks` of the pool's TWAP, only
+ * positions minted through the policy for this account and still owned by it, token0/token1 spend per window and per
+ * approval. UniActionPolicy keeps what it can express: recipients pinned to the account, pool tokens and fee, per-call
+ * caps. Smart Sessions keys an action by target and selector, so one approve per token serves both spenders (the router
+ * for a swap, the policy for a mint or an increase): the policy refuses any other spender, the position manager
+ * included. One swap action takes both directions (the policy pins the pair).
  *
- * The rest bounds it as the mint: approvals only to the position manager up to the per-call mint caps, desired
- * amounts under the same caps, both minimums positive. No cumulative cap: what it adds stays in the Safe's own
- * position (as manage-any's re-mint), and the usage limit bounds how many times.
+ * - mint names MamoruActionPolicy.mint (the manager's selector), which mints to the account and admits the tokenId;
+ * - increase names MamoruActionPolicy.increase (otto/mamoru#171), which adds only to an admitted position the account
+ *   still owns: no grant per position, ever;
+ * - the swap has no `sqrtPriceLimitX96 EQUAL 0` rule: the policy requires a non-zero limit inside its band.
  */
-export function increaseGrants(p: PairSpec, usage: { increase: Usage }): GrantTemplate[] {
-  const c = p.caps
-  const templates: GrantTemplate[] = [
+export function engineGrants(p: PairSpec & { pool: string }, usage: Usage, ap: Omit<ActionPolicyTemplate, 'pool'>): GrantTemplate[] {
+  const w0 = ap.perWindow0
+  const w1 = ap.perWindow1
+  const either = `cap:${w0.slice(4)}|${w1.slice(4)}` as const
+  const action = (target: string, signature: string, params: GrantTemplate['actions'][number]['params']) => ({ target, signature, params })
+  return [
     {
-      name: 'increase',
-      perPosition: true,
-      ...usageOf(usage.increase),
+      name: 'engine',
+      pool: p.pool,
+      perPosition: false,
+      ...usageOf(usage),
+      actionPolicy: { pool: p.pool, ...ap },
       actions: [
-        {
-          target: p.token0,
-          signature: APPROVE,
-          params: [
-            { field: 'spender', index: 0, condition: 'EQUAL', ref: 'NonfungiblePositionManager', denial: 'POLICY_DENIED_APPROVAL' },
-            { field: 'amount', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.mint0}`, denial: 'POLICY_DENIED_APPROVAL' },
-          ],
-        },
-        {
-          target: p.token1,
-          signature: APPROVE,
-          params: [
-            { field: 'spender', index: 0, condition: 'EQUAL', ref: 'NonfungiblePositionManager', denial: 'POLICY_DENIED_APPROVAL' },
-            { field: 'amount', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.mint1}`, denial: 'POLICY_DENIED_APPROVAL' },
-          ],
-        },
-        {
-          target: 'NonfungiblePositionManager',
-          signature: INCREASE,
-          params: [
-            { field: 'tokenId', index: 0, condition: 'EQUAL', ref: 'tokenId', denial: 'POLICY_DENIED_POSITION' },
-            { field: 'amount0Desired', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.mint0}`, denial: 'POLICY_DENIED_AMOUNT' },
-            { field: 'amount1Desired', index: 2, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${c.mint1}`, denial: 'POLICY_DENIED_AMOUNT' },
-            { field: 'amount0Min', index: 3, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
-            { field: 'amount1Min', index: 4, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
-          ],
-        },
+        action(p.token0, APPROVE, [{ field: 'amount', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: w0, denial: 'POLICY_DENIED_APPROVAL' }]),
+        action(p.token1, APPROVE, [{ field: 'amount', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: w1, denial: 'POLICY_DENIED_APPROVAL' }]),
+        action('SwapRouter02', EXACT_INPUT_SINGLE, [
+          { field: 'fee', index: 2, condition: 'EQUAL', ref: BigInt(p.fee), denial: 'POLICY_DENIED_TARGET' },
+          { field: 'recipient', index: 3, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },
+          { field: 'amountIn', index: 4, condition: 'LESS_THAN_OR_EQUAL', ref: either, denial: 'POLICY_DENIED_AMOUNT' },
+          { field: 'amountOutMinimum', index: 5, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+        ]),
+        { ...swapDeadline(), uniOnly: true },
+        action('MamoruActionPolicy', MINT, [
+          { field: 'token0', index: 0, condition: 'EQUAL', ref: p.token0, denial: 'POLICY_DENIED_TARGET' },
+          { field: 'token1', index: 1, condition: 'EQUAL', ref: p.token1, denial: 'POLICY_DENIED_TARGET' },
+          { field: 'fee', index: 2, condition: 'EQUAL', ref: BigInt(p.fee), denial: 'POLICY_DENIED_TARGET' },
+          { field: 'amount0Desired', index: 5, condition: 'LESS_THAN_OR_EQUAL', ref: w0, denial: 'POLICY_DENIED_AMOUNT' },
+          { field: 'amount1Desired', index: 6, condition: 'LESS_THAN_OR_EQUAL', ref: w1, denial: 'POLICY_DENIED_AMOUNT' },
+          { field: 'amount0Min', index: 7, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+          { field: 'amount1Min', index: 8, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+          { field: 'recipient', index: 9, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },
+        ]),
+        action('MamoruActionPolicy', POLICY_INCREASE, [
+          { field: 'tokenId', index: 0, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_POSITION' },
+          { field: 'amount0Desired', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: w0, denial: 'POLICY_DENIED_AMOUNT' },
+          { field: 'amount1Desired', index: 2, condition: 'LESS_THAN_OR_EQUAL', ref: w1, denial: 'POLICY_DENIED_AMOUNT' },
+          { field: 'amount0Min', index: 3, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+          { field: 'amount1Min', index: 4, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+        ]),
+        // UniActionPolicy refuses an action with no rule (PolicyNotInitialized): `tokenId > 0`; the policy admits only its own.
+        action('NonfungiblePositionManager', DECREASE, [{ field: 'tokenId', index: 0, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_POSITION' }]),
+        action('NonfungiblePositionManager', COLLECT, [{ field: 'recipient', index: 1, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' }]),
+        action('NonfungiblePositionManager', BURN, [{ field: 'tokenId', index: 0, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_POSITION' }]),
       ],
     },
   ]
-  return p.pool ? templates.map((t) => ({ ...t, pool: p.pool })) : templates
 }
 
-/** The policy has an `increase` grant for `pool` (otto/mamoru#171). */
+/** The policy can add to a held position in `pool` (otto/mamoru#171): only a v4 `engine` grant can (spec 007). */
 export function hasIncrease(policy: { session: { grants: GrantTemplate[] } }, pool: string): boolean {
-  return policy.session.grants.some((g) => g.name === 'increase' && (g.pool === undefined || g.pool === pool))
+  return policy.session.grants.some((g) => g.name === 'engine' && g.pool === pool)
+}
+
+/** Spec 007: the policy's grants carry MamoruActionPolicy (v4). */
+export function usesActionPolicy(policy: { session: { grants: GrantTemplate[] } }): boolean {
+  return policy.session.grants.some((g) => g.actionPolicy !== undefined)
 }

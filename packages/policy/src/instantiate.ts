@@ -1,8 +1,8 @@
 import { keccak256, stringToHex, toFunctionSelector } from 'viem'
 import { FORBIDDEN_LAB_CHAIN_IDS, BASE_CHAIN_ID, ReasonError, type Address, type Hex } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { address, baseRegistry, isDeployed, type Registry } from '@mamoru/registry'
 import { grantKey } from './grants.ts'
-import { MAX_USAGE_LIMIT, type GrantName, type GrantTemplate, type PolicyVersion, type RefTemplate, type ResolvedActionRule, type SessionGrant } from './types.ts'
+import { MAX_USAGE_LIMIT, type GrantName, type GrantTemplate, type MamoruActionPolicyInit, type PolicyVersion, type RefTemplate, type ResolvedActionRule, type SessionGrant } from './types.ts'
 
 function canonical(value: unknown): unknown {
   if (typeof value === 'bigint') return value.toString()
@@ -67,6 +67,14 @@ export type GrantContext = {
   admittedTokenIds?: readonly bigint[]
   /** Account cap the grant is sized at (raw savings units): picks the usage tier (#149). Absent: the template's `usageLimit`. */
   capUsdc?: bigint
+  /**
+   * Spec 007, v4 grants only: the account's MamoruActionPolicy generation these grants are enabled at. An activation
+   * or a renewal is the on-chain `generationOf(account) + 1` (it retires every older grant of the account); a pool added
+   * without a renewal is the current one.
+   */
+  generation?: bigint
+  /** Where registry names resolve. Default: Base. A Lab fork with its own MamoruActionPolicy passes a registry naming it. */
+  registry?: Registry
 }
 
 /**
@@ -80,6 +88,12 @@ export function usageLimitFor(template: Pick<GrantTemplate, 'name' | 'usageLimit
   return limit
 }
 
+function capOf(name: string, ctx: GrantContext): bigint {
+  const v = ctx.caps[name]
+  if (v === undefined) throw new Error(`missing cap cap:${name}`)
+  return v
+}
+
 function resolveRef(ref: RefTemplate, ctx: GrantContext): bigint {
   if (typeof ref === 'bigint') return ref
   if (ref === 'ACCOUNT') return BigInt(ctx.account)
@@ -88,11 +102,55 @@ function resolveRef(ref: RefTemplate, ctx: GrantContext): bigint {
     return ctx.tokenId
   }
   if (ref.startsWith('cap:')) {
-    const v = ctx.caps[ref.slice(4)]
-    if (v === undefined) throw new Error(`missing cap ${ref}`)
+    // `cap:a|b`: the larger of two caps (a v4 swap takes either token of its pool, spec 007).
+    const [a, b, ...rest] = ref.slice(4).split('|')
+    if (rest.length) throw new Error(`cap ${ref}: at most two names`)
+    const x = capOf(a!, ctx)
+    if (b === undefined) return x
+    const y = capOf(b, ctx)
+    return x > y ? x : y
+  }
+  return BigInt(address(ref, ctx.registry ?? baseRegistry))
+}
+
+const UINT24 = 2 ** 24
+const UINT32 = 2 ** 32
+const UINT128 = 1n << 128n
+const UINT64 = 1n << 64n
+
+/**
+ * Spec 007: the Init of a v4 grant, every field range-checked against MamoruActionPolicy.Init (uint24 band, uint32
+ * windows, uint64 generation, uint128 budgets). Refused while MamoruActionPolicy has no address in the registry: no v4
+ * grant can be built, so no v4 activation can be signed, until it is deployed and pinned.
+ */
+function actionPolicyOf(template: GrantTemplate, ctx: GrantContext): SessionGrant['actionPolicy'] {
+  const ap = template.actionPolicy!
+  const registry = ctx.registry ?? baseRegistry
+  if (!isDeployed('MamoruActionPolicy', registry)) throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', `MamoruActionPolicy is not deployed on ${registry.chain}: grant ${template.name} cannot be built`)
+  const g = ctx.generation
+  if (g === undefined || g < 1n || g >= UINT64) throw new Error(`grant ${grantKey(template)}: a v4 grant needs a generation in 1..2^64-1, got ${g}`)
+  const int = (v: number, max: number, what: string) => {
+    if (!Number.isInteger(v) || v < 1 || v >= max) throw new Error(`grant ${grantKey(template)}: ${what} ${v} out of range`)
     return v
   }
-  return BigInt(address(ref))
+  const budget = (ref: `cap:${string}`) => {
+    const v = resolveRef(ref, ctx)
+    if (v < 0n || v >= UINT128) throw new Error(`grant ${grantKey(template)}: budget ${ref} = ${v} out of uint128`)
+    return v
+  }
+  const init: MamoruActionPolicyInit = {
+    pool: address(ap.pool, registry),
+    twapWindow: int(ap.twapWindowSeconds, UINT32, 'twapWindow'),
+    bandTicks: int(ap.bandTicks, UINT24, 'bandTicks'),
+    generation: g,
+    budgetWindow: int(ap.budgetWindowSeconds, UINT32, 'budgetWindow'),
+    perWindow0: budget(ap.perWindow0),
+    perWindow1: budget(ap.perWindow1),
+    total0: budget(ap.total0),
+    total1: budget(ap.total1),
+  }
+  if (init.perWindow0 > init.total0 || init.perWindow1 > init.total1) throw new Error(`grant ${grantKey(template)}: a window budget above the approval total`)
+  return { address: address('MamoruActionPolicy', registry), init }
 }
 
 /** `key` is a grant name or, on a multi-pool policy, `name:pool` (see `grantKey`). A bare name takes the first grant of that name. */
@@ -107,9 +165,11 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
   if (template.perPosition && !ctx.admittedTokenIds?.some((id) => id === ctx.tokenId)) {
     throw new ReasonError('POLICY_DENIED_POSITION', 'tokenId was not minted by enter-mint')
   }
+  if (!template.actionPolicy && ctx.generation !== undefined) throw new Error(`grant ${name} has no action policy: no generation`)
+  const actionPolicy = template.actionPolicy ? actionPolicyOf(template, ctx) : undefined
   const actions: ResolvedActionRule[] = template.actions.map((a) => ({
     target: a.target,
-    targetAddress: address(a.target),
+    targetAddress: address(a.target, ctx.registry ?? baseRegistry),
     signature: a.signature,
     selector: toFunctionSelector(`function ${a.signature}`),
     nativeValue: 0n,
@@ -121,6 +181,7 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
       cumulativeLimit: p.cumulative ? resolveRef(p.cumulative, ctx) : undefined,
       denial: p.denial,
     })),
+    ...(actionPolicy && a.uniOnly ? { uniOnly: true as const } : {}),
   }))
   const seen = new Set<string>()
   for (const a of actions) {
@@ -144,5 +205,6 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
     fallbackAction: 'none',
     tokenId: ctx.tokenId,
     actions,
+    ...(actionPolicy ? { actionPolicy } : {}),
   }
 }

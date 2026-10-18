@@ -11,7 +11,7 @@ import {
 import { getUserOperationHash, toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import { ReasonError, type Address, type Hex } from '@mamoru/domain'
 import { address, entryPointV07Abi, moduleRegistryAbi, safe7579Abi, smartSessionAbi } from '@mamoru/registry'
-import { PARAM_CONDITIONS, type SessionGrant } from '@mamoru/policy'
+import { PARAM_CONDITIONS, type MamoruActionPolicyInit, type SessionGrant } from '@mamoru/policy'
 import {
   CALLTYPE_BATCH,
   CALLTYPE_SINGLE,
@@ -99,8 +99,36 @@ export function ownableValidatorInitData(sessionKey: Address): Hex {
   return encodeAbiParameters([{ type: 'uint256' }, { type: 'address[]' }], [1n, [sessionKey]])
 }
 
-/** Maps a policy grant onto the Smart Sessions Session struct, with the published policies only. */
+const MAMORU_INIT = [
+  {
+    name: 'Init',
+    type: 'tuple',
+    components: [
+      { name: 'pool', type: 'address' },
+      { name: 'twapWindow', type: 'uint32' },
+      { name: 'bandTicks', type: 'uint24' },
+      { name: 'generation', type: 'uint64' },
+      { name: 'budgetWindow', type: 'uint32' },
+      { name: 'perWindow0', type: 'uint128' },
+      { name: 'perWindow1', type: 'uint128' },
+      { name: 'total0', type: 'uint128' },
+      { name: 'total1', type: 'uint128' },
+    ],
+  },
+] as const
+
+/** Spec 007: MamoruActionPolicy init data, `abi.encode(Init)` as `initializeWithMultiplexer` decodes it. */
+export function mamoruActionPolicyInitData(init: MamoruActionPolicyInit): Hex {
+  return encodeAbiParameters(MAMORU_INIT, [init])
+}
+
+/**
+ * Maps a policy grant onto the Smart Sessions Session struct. Every action carries UniActionPolicy; a v4 grant (spec
+ * 007, `grant.actionPolicy`) adds MamoruActionPolicy after it on every action but the `uniOnly` ones. A grant without
+ * `actionPolicy` maps exactly as before.
+ */
 export function toSmartSession(grant: SessionGrant): SmartSessionStruct {
+  const mamoru = grant.actionPolicy ? { policy: grant.actionPolicy.address, initData: mamoruActionPolicyInitData(grant.actionPolicy.init) } : null
   return {
     sessionValidator: address('OwnableValidator'),
     sessionValidatorInitData: ownableValidatorInitData(grant.sessionKey),
@@ -116,7 +144,7 @@ export function toSmartSession(grant: SessionGrant): SmartSessionStruct {
     actions: grant.actions.map((a) => ({
       actionTargetSelector: a.selector,
       actionTarget: a.targetAddress,
-      actionPolicies: [{ policy: address('UniActionPolicy'), initData: uniActionInitData(a) }],
+      actionPolicies: [{ policy: address('UniActionPolicy'), initData: uniActionInitData(a) }, ...(mamoru && !a.uniOnly ? [mamoru] : [])],
     })),
     permitERC4337Paymaster: grant.permitERC4337Paymaster,
   }
@@ -186,6 +214,36 @@ export function registryTrustCalls(account: Address): { to: Address; value: bigi
       }),
     },
   ]
+}
+
+/**
+ * ERC-7484 resolver the published Rhinestone policies are registered under (Registry.findModule), the one
+ * MamoruActionPolicy is registered under too (spec 007 T1).
+ */
+export const POLICY_RESOLVER_UID: Hex = '0xdbca873b13c783c0c9c6ddfc4280e505580bf6cc3dac83f8a0f7b44acaafca4f'
+
+/**
+ * Spec 007 (T1 on the deployed stack): the deployed SmartSession runs the registry check on action policies at enable,
+ * so the account must have attested MamoruActionPolicy before a v4 enableSessions, and the registry takes that
+ * attestation only for a registered module. Owner calls, in order:
+ * - `registered: false`: registerModule (permissionless; T7 does it once at deployment, so normally absent);
+ * - a new account (`trusted: false`): trust the attester and itself, and self-attest TimeFramePolicy, UsageLimitPolicy
+ *   and MamoruActionPolicy in one attest;
+ * - an account that already trusts (v1/v2 upgrade): attest MamoruActionPolicy only (re-attesting the other two
+ *   reverts AlreadyAttested), unless it already attested it (a v4 renewal): nothing.
+ */
+export function actionPolicyTrustCalls(account: Address, policy: Address, s: { trusted: boolean; registered: boolean; attested: boolean }): { to: Address; value: bigint; data: Hex }[] {
+  if (!s.trusted && s.attested) throw new Error('an account that trusts no attester cannot have attested MamoruActionPolicy')
+  const register = s.registered
+    ? []
+    : [{ to: address('ModuleRegistry'), value: 0n, data: encodeFunctionData({ abi: moduleRegistryAbi, functionName: 'registerModule', args: [POLICY_RESOLVER_UID, policy, '0x', '0x'] }) }]
+  const attest = (modules: Address[]) => ({
+    to: address('ModuleRegistry'),
+    value: 0n,
+    data: encodeFunctionData({ abi: moduleRegistryAbi, functionName: 'attest', args: [ATTESTATION_SCHEMA_UID, modules.map((m) => ({ moduleAddress: m, expirationTime: 0, data: '0x' as Hex, moduleTypes: [] }))] }),
+  })
+  if (!s.trusted) return [...register, registryTrustCalls(account)[0]!, attest([...SELF_ATTESTED_POLICIES.map((p) => address(p)), policy])]
+  return [...register, ...(s.attested ? [] : [attest([policy])])]
 }
 
 export function revocationCalls(permissionIds: Hex[]): { to: Address; value: bigint; data: Hex }[] {
