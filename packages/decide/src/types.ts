@@ -95,6 +95,11 @@ export type PositionObs = {
   principalOwed1: bigint
   /** The tokenId is in the account's allowedTokenIds. */
   managed: boolean
+  /**
+   * Spec 007, set only under a v4 session: MamoruActionPolicy admitted this tokenId for the account in its pool (it
+   * was minted through the policy), read at the observation block. Absent: not read (v1/v2), never admitted.
+   */
+  admitted?: boolean
   /** Lab (#101 lazy re-range): block time since which the price has been out of the range without coming back. */
   outOfRangeSince?: bigint | null
 }

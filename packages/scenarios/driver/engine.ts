@@ -27,7 +27,7 @@ import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useMo
 import type { Execution } from '@mamoru/account/safe'
 import { approve, approvePolicy, burn, collect, deadlineCheck, decreaseLiquidity, exactInputSingle, mint, policyIncrease, policyMint, type V3Call } from '@mamoru/uniswap-v3'
 import { decreaseMins, engineBand, swapBounds } from '@mamoru/uniswap-v3/action-policy'
-import { minOut, quoteExactInputSingle, quoteMint } from '@mamoru/uniswap-v3/quote'
+import { minOut, quoteExactInputSingle, quoteExactInputSingleWithLimit, quoteMint } from '@mamoru/uniswap-v3/quote'
 import { diverges, swapMinimum, twapFloor as deviationFloor, twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
 import { MemoryJournal, type DecisionRecord, type OpRecord } from './journal.ts'
@@ -127,6 +127,9 @@ type Prepared = {
   /** See OpRecord.expiresAt. */
   expiresAt: bigint | null
 }
+
+/** Spec 007, #151 review P1-3: how many times a v4 swap is halved to fill within its price limit (down to 1/16). */
+export const V4_SWAP_SIZE_DOWN_STEPS = 4
 
 /** SwapRouter02.multicall(uint256,bytes[]): the action a session grant holds for an on-chain swap expiry. */
 const DEADLINE_SELECTOR = toFunctionSelector('function multicall(uint256,bytes[])').toLowerCase()
@@ -285,6 +288,27 @@ export class Engine {
   }
 
   async observe(): Promise<Observation> {
+    return this.withAdmission(await this.observeChain())
+  }
+
+  /**
+   * Spec 007, v4 sessions only (#151 review P1-1): which of the account's positions MamoruActionPolicy admitted, read at
+   * the observation block, so `decide` never proposes an increase the policy refuses (a v1/v2 position). Without a v4
+   * session the observation is returned unchanged.
+   */
+  private async withAdmission(obs: Observation): Promise<Observation> {
+    const ap = this.sessions.find((s) => s.grant.actionPolicy)?.grant.actionPolicy
+    if (!ap || !obs.positions.length) return obs
+    let pools: Address[]
+    try {
+      pools = await Promise.all(obs.positions.map((p) => this.client.readContract({ address: ap.address, abi: mamoruActionPolicyAbi, functionName: 'admittedPool', args: [this.cfg.account, p.tokenId], blockNumber: obs.block.number })))
+    } catch (e) {
+      throw new ReasonError('OBS_RPC_UNAVAILABLE', `MamoruActionPolicy.admittedPool at ${obs.block.number}: ${(e as Error).message.split('\n')[0]}`)
+    }
+    return { ...obs, positions: obs.positions.map((p, i) => ({ ...p, admitted: p.pool !== null && isAddressEqual(pools[i]!, entry(p.pool).address) })) }
+  }
+
+  private async observeChain(): Promise<Observation> {
     const live = this.journal.live
     const obs = await observe(this.client, {
       chainId: this.cfg.chainId,
@@ -779,6 +803,38 @@ export class Engine {
     if (!isAddressEqual(owner, this.cfg.account)) throw new ReasonError('POLICY_DENIED_POSITION', `position ${tokenId} is no longer owned by the account (owner ${owner})`)
   }
 
+  /**
+   * Spec 007 T3, a swap under a v4 session: minimum and price limit from the policy's bounds at the engine band, and a
+   * quote taken WITH that limit, as the router will run it (#151 review P1-3). Near the band edge the bounded swap stops
+   * at the limit and fills only part of the input, returning less than the full-input minimum: such a size is halved,
+   * at most V4_SWAP_SIZE_DOWN_STEPS times, until the quote fills the whole input within the limit and meets the policy
+   * minimum. No size works: not sent (EHG_SWAP_LIMIT_UNFILLABLE). The prepared quote names the size sent.
+   */
+  private async prepareV4Swap(p: Extract<Proposal, { kind: 'enter_swap' }>, blockNumber: bigint, session: EngineSession, deadline: bigint, ap: NonNullable<SessionGrant['actionPolicy']>): Promise<Prepared> {
+    const { twap, band } = await this.v4Price(p.pool, blockNumber, ap)
+    const tokenInIsToken0 = entry(p.pool).token0 === p.tokenIn
+    let amountIn = p.amountIn
+    for (let step = 0; ; step++) {
+      const b = swapBounds({ twapTick: twap, band, fee: p.fee, tokenInIsToken0, amountIn })
+      const q = await quoteExactInputSingleWithLimit(this.client, { tokenIn: address(p.tokenIn), tokenOut: address(p.tokenOut), fee: p.fee, amountIn, sqrtPriceLimitX96: b.sqrtPriceLimitX96, blockNumber })
+      if (q.filled && q.amountOut >= b.minOut) {
+        let amountOutMinimum = await this.swapMin({ ...p, amountIn }, q.amountOut, blockNumber)
+        if (b.minOut > amountOutMinimum) amountOutMinimum = b.minOut
+        const expiry = this.swapExpiry(session, deadline)
+        const swap = exactInputSingle({ account: this.cfg.account, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn, amountOutMinimum, sqrtPriceLimitX96: b.sqrtPriceLimitX96 })
+        return {
+          quote: { amountIn, amountOut: q.amountOut, amountOutMinimum },
+          calls: [...expiry.calls, approve(p.tokenIn, 'SwapRouter02', amountIn), swap].map(exec),
+          expiresAt: expiry.expiresAt,
+        }
+      }
+      if (step >= V4_SWAP_SIZE_DOWN_STEPS || amountIn / 2n === 0n) {
+        throw new ReasonError('EHG_SWAP_LIMIT_UNFILLABLE', `${p.pool}: ${amountIn} ${p.tokenIn} (of ${p.amountIn}) ${q.filled ? `returns ${q.amountOut}, under the session's bound ${b.minOut}` : 'stops at the price limit'} (TWAP ${twap}, band ${band})`)
+      }
+      amountIn /= 2n
+    }
+  }
+
   /** FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. */
   private async prepareCalls(p: Proposal, blockNumber: bigint, timestamp: bigint, session: EngineSession): Promise<Prepared> {
     const acct = this.cfg.account
@@ -791,23 +847,14 @@ export class Engine {
     if (ap && (await this.client.readContract({ address: ap.address, abi: mamoruActionPolicyAbi, functionName: 'isPaused', args: [this.cfg.account], blockNumber }))) {
       throw new ReasonError('SESSION_REVOKED', `MamoruActionPolicy ${ap.address} has paused ${this.cfg.account} (guardian)`)
     }
+    if (p.kind === 'enter_swap' && ap) return this.prepareV4Swap(p, blockNumber, session, deadline, ap)
     if (p.kind === 'enter_swap') {
       const amountOut = await quoteExactInputSingle(this.client, { tokenIn: address(p.tokenIn), tokenOut: address(p.tokenOut), fee: p.fee, amountIn: p.amountIn, blockNumber })
-      let amountOutMinimum = await this.swapMin(p, amountOut, blockNumber)
-      let sqrtPriceLimitX96: bigint | undefined
-      if (ap) {
-        // The policy's own minimum and price limit at the engine band, from the TWAP over the policy's window.
-        const { twap, band } = await this.v4Price(p.pool, blockNumber, ap)
-        const b = swapBounds({ twapTick: twap, band, fee: p.fee, tokenInIsToken0: entry(p.pool).token0 === p.tokenIn, amountIn: p.amountIn })
-        if (amountOut < b.minOut) throw new ReasonError('EHG_PRICE_DIVERGENCE', `${p.pool}: quote ${amountOut} for ${p.amountIn} ${p.tokenIn}, under the session's bound ${b.minOut} (TWAP ${twap}, band ${band})`)
-        if (b.minOut > amountOutMinimum) amountOutMinimum = b.minOut
-        sqrtPriceLimitX96 = b.sqrtPriceLimitX96
-      }
+      const amountOutMinimum = await this.swapMin(p, amountOut, blockNumber)
       const expiry = this.swapExpiry(session, deadline)
-      const swap = exactInputSingle({ account: acct, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn: p.amountIn, amountOutMinimum, ...(sqrtPriceLimitX96 === undefined ? {} : { sqrtPriceLimitX96 }) })
       return {
         quote: { amountIn: p.amountIn, amountOut, amountOutMinimum },
-        calls: [...expiry.calls, approve(p.tokenIn, 'SwapRouter02', p.amountIn), swap].map(exec),
+        calls: [...expiry.calls, approve(p.tokenIn, 'SwapRouter02', p.amountIn), exactInputSingle({ account: acct, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn: p.amountIn, amountOutMinimum })].map(exec),
         expiresAt: expiry.expiresAt,
       }
     }
@@ -921,7 +968,9 @@ export class Engine {
   private deltaMismatch(p: Proposal, prepared: Prepared, sim: Simulation): string | null {
     const d = (t: string) => sim.deltas[t] ?? 0n
     if (p.kind === 'enter_swap') {
-      if (d(p.tokenIn) !== -p.amountIn) return `${p.tokenIn} moved ${d(p.tokenIn)}, intent ${-p.amountIn}`
+      // A v4 swap may be sized down to fill within its price limit (prepareV4Swap): the size sent is the quote's.
+      const amountIn = prepared.quote?.amountIn ?? p.amountIn
+      if (d(p.tokenIn) !== -amountIn) return `${p.tokenIn} moved ${d(p.tokenIn)}, intent ${-amountIn}`
       if (d(p.tokenOut) < prepared.quote!.amountOutMinimum) return `${p.tokenOut} rose ${d(p.tokenOut)}, below the minimum`
       return null
     }

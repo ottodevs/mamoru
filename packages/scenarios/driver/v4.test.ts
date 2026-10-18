@@ -10,7 +10,7 @@ import { executeCallData, permissionIdOf, toSmartSession, useModeSignature } fro
 import { quoterV2Abi, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { decreaseMins, engineBand, swapBounds } from '@mamoru/uniswap-v3/action-policy'
 import type { Simulation } from '@mamoru/rpc'
-import { Engine, type EngineSession } from './engine.ts'
+import { Engine, V4_SWAP_SIZE_DOWN_STEPS, type EngineSession } from './engine.ts'
 
 // Spec 007 (otto/mamoru#151) T3: the engine's calls under a v4 session, and under v1/v2 sessions exactly as before.
 
@@ -34,10 +34,12 @@ function session(p: PolicyVersion, key: string): EngineSession {
 }
 const v4s = session(V4, `engine:${POOL}`)
 
-type Chain = { spot: number; twap: number; quote: bigint; admitted: Address; owner?: Address; paused?: boolean; pos: { tickLower: number; tickUpper: number; liquidity: bigint } }
+/** `fill(amountIn, limit)`: QuoterV2's answer to a limited quote; default the whole input for `quote`, never at the limit. */
+type Chain = { spot: number; twap: number; quote: bigint; admitted: Address; owner?: Address; paused?: boolean; fill?: (amountIn: bigint, limit: bigint) => { out: bigint; after: bigint }; quoted?: bigint[]; pos: { tickLower: number; tickUpper: number; liquidity: bigint } }
 
 function engineAt(over: Partial<Chain> = {}, policy: PolicyVersion = V4) {
-  const c: Chain = { spot: TICK, twap: TICK, quote: 0n, admitted: address(POOL), pos: { ...RANGE, liquidity: 10n ** 12n }, ...over }
+  // Mutates `over`, so a test sees what the stub recorded (`quoted`).
+  const c = Object.assign(over, { spot: TICK, twap: TICK, quote: 0n, admitted: address(POOL), pos: { ...RANGE, liquidity: 10n ** 12n }, ...over }) as Chain
   const e = new Engine(
     { mode: 'lab', chainId: CHAIN, signingChainIds: [CHAIN], rpcUrl: 'http://127.0.0.1:9/', bundlerUrl: 'http://127.0.0.1:9/', policy, account: ACCOUNT, sessionKey, nonceLane: 0, depositsAfter: 0n, historyFromBlock: 0n, sessions: [] },
     { waitBlock: async () => {} },
@@ -55,12 +57,17 @@ function engineAt(over: Partial<Chain> = {}, policy: PolicyVersion = V4) {
       if (functionName === 'isPaused') return c.paused ?? false
       throw new Error(`unexpected read ${functionName}`)
     },
-    call: async () => ({ data: encodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', result: [c.quote, 0n, 0, 0n] }) }),
+    call: async ({ data }: { data: Hex }) => {
+      const q = decodeFunctionData({ abi: quoterV2Abi, data }).args[0] as { amountIn: bigint; sqrtPriceLimitX96: bigint }
+      ;(c.quoted ??= []).push(q.amountIn)
+      const r = c.fill ? c.fill(q.amountIn, q.sqrtPriceLimitX96) : { out: c.quote, after: 1n }
+      return { data: encodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', result: [r.out, r.after, 0, 0n] }) }
+    },
   } as unknown as PublicClient
   ;(e as unknown as { client: PublicClient }).client = client
   return e as unknown as {
     prepareCalls(p: Proposal, block: bigint, timestamp: bigint, s: EngineSession): Promise<{ calls: { target: Address; callData: Hex }[]; expiresAt: bigint | null; quote?: { amountOutMinimum: bigint } }>
-    deltaMismatch(p: Proposal, prepared: unknown, sim: Pick<Simulation, 'deltas' | 'nftDelta'>): string | null
+    deltaMismatch(p: Proposal, prepared: { quote?: { amountIn: bigint } } | object, sim: Pick<Simulation, 'deltas' | 'nftDelta'>): string | null
   }
 }
 
@@ -140,10 +147,49 @@ describe('engine under a v4 session (spec 007 T3)', () => {
 
   test('swap not sent: a quote under the policy bound, or a spot past the engine band', async () => {
     const bound = swapBounds({ twapTick: TICK, band: engineBand(BAND), fee: 3000, tokenInIsToken0: true, amountIn: sellWeth.amountIn }).minOut
-    await expect(engineAt({ quote: bound - 1n }).prepareCalls(sellWeth, 100n, 1_000n, v4s)).rejects.toMatchObject({ code: 'EHG_PRICE_DIVERGENCE' })
+    // Under the bound at every size (a price that stays below the band): sized down to 1/16, then held.
+    const under = { fill: (a: bigint) => ({ out: (bound * 99n * a) / (100n * sellWeth.amountIn), after: 1n }) }
+    await expect(engineAt(under).prepareCalls(sellWeth, 100n, 1_000n, v4s)).rejects.toMatchObject({ code: 'EHG_SWAP_LIMIT_UNFILLABLE' })
     await expect(engineAt({ quote: QUOTE_SELL, spot: TICK + engineBand(BAND) + 1 }).prepareCalls(sellWeth, 100n, 1_000n, v4s)).rejects.toMatchObject({ code: 'EHG_PRICE_DIVERGENCE' })
     // A swap proposed for another pool than the session's.
     await expect(engineAt({ quote: QUOTE_SELL }).prepareCalls(sellWeth, 100n, 1_000n, session(V4, 'engine:pool:USDC/cbBTC/500'))).rejects.toMatchObject({ code: 'POLICY_DENIED_TARGET' })
+  })
+
+  test('#151 review P1-3: the swap is quoted with its price limit; a size that stops at the limit is halved until it fills', async () => {
+    // The pool can take a quarter of the input before the price reaches the limit; more stops there, returning little.
+    const fair = (a: bigint) => (QUOTE_SELL * a) / sellWeth.amountIn
+    const c: Partial<Chain> = { fill: (a, limit) => (a > sellWeth.amountIn / 4n ? { out: fair(sellWeth.amountIn / 4n), after: limit } : { out: fair(a), after: limit + 1n }) }
+    const e = engineAt(c)
+    const r = await e.prepareCalls(sellWeth, 100n, 1_000n, v4s)
+    const quarter = sellWeth.amountIn / 4n
+    expect(c.quoted).toEqual([sellWeth.amountIn, sellWeth.amountIn / 2n, quarter])
+    expect(decodeFunctionData({ abi: erc20Abi, data: r.calls[1]!.callData }).args).toEqual([address('SwapRouter02'), quarter])
+    const s = decodeFunctionData({ abi: swapRouter02Abi, data: r.calls[2]!.callData }).args![0] as { amountIn: bigint; amountOutMinimum: bigint; sqrtPriceLimitX96: bigint }
+    const b = swapBounds({ twapTick: TICK, band: engineBand(BAND), fee: 3000, tokenInIsToken0: true, amountIn: quarter })
+    expect([s.amountIn, s.sqrtPriceLimitX96]).toEqual([quarter, b.sqrtPriceLimitX96])
+    expect(s.amountOutMinimum).toBeGreaterThanOrEqual(b.minOut)
+    expect(r.quote).toMatchObject({ amountIn: quarter, amountOut: fair(quarter) })
+    // The simulation is judged against the size sent, not the proposal's.
+    expect(e.deltaMismatch(sellWeth, r, { nftDelta: 0n, deltas: { WETH: -quarter, USDC: fair(quarter) } })).toBeNull()
+    expect(e.deltaMismatch(sellWeth, r, { nftDelta: 0n, deltas: { WETH: -sellWeth.amountIn, USDC: fair(quarter) } })).toContain('WETH moved')
+    expect(check(v4s, r.calls)).toMatchObject({ ok: true })
+  })
+
+  test('#151 review P1-3: every size stops at the limit: held, after 1 + V4_SWAP_SIZE_DOWN_STEPS quotes', async () => {
+    const c: Partial<Chain> = { fill: (a, limit) => ({ out: a / 10n ** 9n, after: limit }) }
+    await expect(engineAt(c).prepareCalls(sellWeth, 100n, 1_000n, v4s)).rejects.toMatchObject({ code: 'EHG_SWAP_LIMIT_UNFILLABLE' })
+    expect(c.quoted).toHaveLength(1 + V4_SWAP_SIZE_DOWN_STEPS)
+    expect(c.quoted!.at(-1)).toBe(sellWeth.amountIn / 16n)
+  })
+
+  test('#151 review P1-1: the observation marks which positions the policy admitted', async () => {
+    const e = engineAt({ admitted: address(POOL) }) as unknown as { withAdmission(o: unknown): Promise<{ positions: { tokenId: bigint; admitted?: boolean }[] }> }
+    ;(e as unknown as { sessions: EngineSession[] }).sessions.push(v4s)
+    const base = { block: { number: 100n }, positions: [{ tokenId: 3n, pool: POOL }, { tokenId: 4n, pool: 'pool:USDC/cbBTC/500' }, { tokenId: 5n, pool: null }] }
+    expect((await e.withAdmission(base)).positions.map((p) => p.admitted)).toEqual([true, false, false])
+    // Without a v4 session the observation is not touched.
+    const plain = engineAt() as unknown as { withAdmission(o: unknown): Promise<unknown> }
+    expect(await plain.withAdmission(base)).toBe(base)
   })
 
   test('mint through MamoruActionPolicy.mint: exact approvals of the policy, recipient the account, no approval of the manager', async () => {

@@ -70,6 +70,7 @@ const held = (tokenId: bigint, shift = 0, over: Partial<PositionObs> = {}): Posi
   principalOwed0: 0n,
   principalOwed1: 0n,
   managed: true,
+  admitted: true,
   ...over,
 })
 
@@ -97,6 +98,13 @@ describe('increase instead of a second mint (otto/mamoru#171)', () => {
       expect(reusablePosition(obs([held(3n)], [...others, s]), LAB, riskPool, fresh)).toBeNull()
     }
     expect(reusablePosition(obs([held(3n)], others), LAB, riskPool, fresh)).toBeNull()
+  })
+
+  test('#151 review P1-1: a managed position the policy did not admit (a v2 NFT after an upgrade) is not reused: mint', () => {
+    for (const over of [{ admitted: false }, { admitted: undefined }]) {
+      expect(reusablePosition(obs([held(3n, 0, over)], pairSessions(LAB)), LAB, riskPool, fresh)).toBeNull()
+      expect(decide(obs([held(3n, 0, over)], pairSessions(LAB)), LAB).proposal).toMatchObject({ kind: 'enter_mint', grant: `engine:${RISK}` })
+    }
   })
 
   test('a position the engine does not manage (not minted by it, so not admitted by the policy) is not reused', () => {

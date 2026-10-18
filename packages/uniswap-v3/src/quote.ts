@@ -27,6 +27,27 @@ export async function quoteExactInputSingle(client: PublicClient, q: QuoteReques
   return amountOut
 }
 
+/**
+ * Spec 007 (#151 review P1-3): the same quote with a price limit, as a v4 swap is sent. QuoterV2 stops at the limit and
+ * answers what that partial swap returns; `sqrtPriceX96After` equal to the limit means it did not fill the whole input.
+ */
+export async function quoteExactInputSingleWithLimit(client: PublicClient, q: QuoteRequest & { sqrtPriceLimitX96: bigint }): Promise<{ amountOut: bigint; sqrtPriceX96After: bigint; filled: boolean }> {
+  const data = encodeFunctionData({
+    abi: quoterV2Abi,
+    functionName: 'quoteExactInputSingle',
+    args: [{ tokenIn: q.tokenIn, tokenOut: q.tokenOut, amountIn: q.amountIn, fee: q.fee, sqrtPriceLimitX96: q.sqrtPriceLimitX96 }],
+  })
+  let raw
+  try {
+    raw = await client.call({ to: address('QuoterV2'), data, blockNumber: q.blockNumber })
+  } catch (e) {
+    throw new ReasonError('EHG_QUOTE_UNAVAILABLE', (e as Error).message.split('\n')[0])
+  }
+  if (!raw.data) throw new ReasonError('EHG_QUOTE_UNAVAILABLE', 'empty QuoterV2 answer')
+  const [amountOut, sqrtPriceX96After] = decodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', data: raw.data })
+  return { amountOut, sqrtPriceX96After, filled: sqrtPriceX96After !== q.sqrtPriceLimitX96 }
+}
+
 /** FR-UNI-002: the minimum out from a fresh quote and the policy tolerance. Never zero. */
 export function minOut(quote: bigint, slippageBps: number): bigint {
   const min = (quote * BigInt(10_000 - slippageBps)) / 10_000n

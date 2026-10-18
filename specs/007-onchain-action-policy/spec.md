@@ -403,11 +403,12 @@ Not tested: the other chains themselves (same Safe address, passkey verifier the
 ## T2/T3 results (branch spec/151-t2-t3)
 
 - **Policy `conservador-live-v4`** (and `conservador-lab-v4` for forks): conservador-live-v2's strategy with one `engine`
-  session per pool. 9 actions, UniActionPolicy on all, MamoruActionPolicy with the pool's `Init` on all but the swap
-  deadline (`SwapRouter02.multicall(deadline, [])`, #140, which the policy does not know and refuses; its rules pin it
-  to execute nothing): approve token0 / token1 (amount cap only; the policy pins router or policy as spender), swap
-  (fee, recipient, `amountIn` cap, `amountOutMinimum > 0`; no `sqrtPriceLimitX96 EQUAL 0`), `policy.mint` (manager's
-  selector), `policy.increase` (`0x4110c363`), decrease, collect, burn. Parameters in one place,
+  session per pool. 9 actions, UniActionPolicy and MamoruActionPolicy (the pool's `Init`) on every one: approve token0 /
+  token1 (amount cap only; the policy pins router or policy as spender), swap (fee, recipient, `amountIn` cap,
+  `amountOutMinimum > 0`; no `sqrtPriceLimitX96 EQUAL 0`), the swap deadline `SwapRouter02.multicall(deadline, [])`
+  (#140; the policy accepts only its exact empty encoding, after the generation and pause checks, so a pause or a
+  renewal stops it too: #151 review P1-2), `policy.mint` (manager's selector), `policy.increase` (`0x4110c363`),
+  decrease, collect, burn. Parameters in one place,
   `ACTION_POLICY_DEFAULTS`, set to T5's recommendation C: bands 20 / 125 / 125 ticks, 1-day window, `W_p` 8 / 3 / 5 x C_p,
   `T_p` 60 / 42 / 110 x C_p. Every existing
   policy hash, grant, Session struct and enableSessions calldata is unchanged (golden tests).
@@ -419,13 +420,21 @@ Not tested: the other chains themselves (same Safe address, passkey verifier the
   and attests TimeFrame, Usage and the policy in one attest; a trusting account attests the policy once; a new
   generation needs a never-enabled session key and removes every enabled permissionId; a renewal (generation >= 1)
   must re-enable every pool.
-- **Gas** (fork, `test_t2_*`, EOA owner; the passkey adds its WebAuthn check): new account 3 pools 14.96M; v4 renewal
-  15.57M; **v2 -> v4 upgrade in one tx 17.74M, over 2^24**: split into (A) attest + remove the 12 v2 sessions + 2 pools
-  at generation 1, 12.79M, and (B) the third pool at the same generation, 4.99M (two owner signatures, or B by ENABLE
-  mode). registerModule 37k.
+- **Gas** (fork, `test_t2_*`, EOA owner; the passkey adds its WebAuthn check), after P1-2: new account 3 pools
+  15.32M; v4 renewal 15.98M; **v2 -> v4 upgrade in one tx 18.11M, over 2^24**: split into (A) attest + remove the 12
+  v2 sessions + 2 pools at generation 1, 13.03M, and (B) the third pool at the same generation, 5.11M (two owner
+  signatures, or B by ENABLE mode). registerModule 37k.
+- **Upgrade precondition** (#151 review P1-1): v2 positions are never admitted by the policy, so after the upgrade no
+  session could manage them. `activationBatch` refuses a new generation while the account holds an open position the
+  policy did not admit (`SESSION_UPGRADE_UNADMITTED_POSITIONS`). T7 sequence: the v2 engine closes every position to
+  idle under the v2 grants (decrease + collect + burn), the read of unadmitted open positions is empty, then upgrade
+  tx A and B; the v4 engine re-enters through `policy.mint`. Under v4, `decide` reuses (increase) only positions the
+  observation marks `admitted` (read by the engine from `admittedPool` at the observation block).
 - **Engine** (T3): under a v4 session the swap minimum and price limit come from `swapBounds` at 0.8 x band (TS port,
   same numbers as the Solidity code, `BoundsVector.t.sol`), decrease minimums never under `decreaseMins` at 0.8 x band,
-  mint and increase through the policy. Not sent (minimal T4): spot past 0.8 x band, quote under the bound, a position
+  mint and increase through the policy. The swap is quoted with its price limit; a size that stops at
+  the limit is halved (at most 4 times) until it fills and meets the minimum, else not sent (`EHG_SWAP_LIMIT_UNFILLABLE`,
+  #151 review P1-3). Not sent (minimal T4): spot past 0.8 x band, quote under the bound, a position
   the policy did not admit, an account the guardian paused (`isPaused`). Budgets are not mirrored (T4).
 
 ## Tasks (T1 done; T2, T3 on spec/151-t2-t3; the rest not started)

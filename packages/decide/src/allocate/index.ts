@@ -82,9 +82,10 @@ function liveSession(obs: Observation, grant: string): boolean {
 /**
  * otto/mamoru#171: the held position an entry into `pool` adds liquidity to instead of minting a new NFT, or null to
  * mint. Only under a v4 policy (spec 007: MamoruActionPolicy.increase, the pool's `engine` grant, no grant per
- * position) with a live session of that grant, and only for a position this engine manages (`managed`: minted by it;
- * the policy itself adds only to positions it admitted for the account, which the engine re-reads before it builds
- * the call). The position must have liquidity, the price strictly inside its range (both amounts positive, as the
+ * position) with a live session of that grant, and only for a position this engine manages (`managed`) that
+ * MamoruActionPolicy admitted for the account (`admitted`, read by the engine at the observation block). #151 review
+ * P1-1: a v1/v2 position is managed but never admitted, and the policy refuses an increase on it; such a pool mints.
+ * The engine re-reads admission and ownership before it builds the call. The position must have liquidity, the price strictly inside its range (both amounts positive, as the
  * grant's minimums need), and each of its edges within `range.increaseToleranceBps` of the width of `range` (what a
  * mint would get now) from that range's edge. The nearest such position wins, lowest tokenId on ties.
  */
@@ -96,7 +97,7 @@ export function reusablePosition(obs: Observation, policy: PolicyVersion, pool: 
   let best: PositionObs | null = null
   let bestDistance = 0
   for (const p of obs.positions) {
-    if (p.pool !== pool.name || p.liquidity <= 0n || !p.managed) continue
+    if (p.pool !== pool.name || p.liquidity <= 0n || !p.managed || p.admitted !== true) continue
     if (!(p.tickLower < pool.tick && pool.tick < p.tickUpper)) continue
     const lower = Math.abs(p.tickLower - range.tickLower)
     const upper = Math.abs(p.tickUpper - range.tickUpper)
