@@ -1,5 +1,5 @@
 import { concat, decodeAbiParameters, encodeAbiParameters, encodeFunctionData, hashTypedData, hexToBigInt, hexToBytes, numberToHex, pad, size, toHex, type PublicClient } from 'viem'
-import type { AccountContext, Address, Hex, OwnerSignature } from '@mamoru/domain'
+import { ReasonError, type AccountContext, type Address, type Hex, type OwnerSignature } from '@mamoru/domain'
 import { address, erc20Abi, safeAbi } from '@mamoru/registry'
 import type { SessionGrant } from '@mamoru/policy'
 import { approve, burn, collect, decreaseLiquidity, exactInputSingle, exactInputSingleTo, swapToEth } from '@mamoru/uniswap-v3'
@@ -15,7 +15,7 @@ import {
   type WebAuthnSigner,
 } from '../safe/index.ts'
 import { accountSetup, counterfactualAddress } from '../recovery/index.ts'
-import { activationCall, registryTrustCalls, revocationCalls } from '../sessions/index.ts'
+import { actionPolicyTrustCalls, activationCall, registryTrustCalls, revocationCalls } from '../sessions/index.ts'
 
 /** Owner-authorized cap for the live happy path on Base: 100 USDC per account (6 decimals). */
 export const LIVE_CAP_USDC = 100_000_000n
@@ -71,19 +71,77 @@ export function safeTxHashOf(a: LiveAccount, tx: SafeTx): Hex {
 const strip = (c: { to: Address; value: bigint; data: Hex }): MultiSendCall => ({ to: c.to, value: c.value, data: c.data })
 
 /**
+ * Spec 007: what the chain says about the account and MamoruActionPolicy, read by the caller at the block the batch is
+ * built for, for a batch of v4 grants.
+ */
+export type ActionPolicyState = {
+  /** The policy is registered in the ERC-7484 registry (T7 registers it once at deployment). */
+  registered: boolean
+  /** The account has attested it (any earlier v4 approval did). */
+  attested: boolean
+  /** `generationOf(account)`: 0 before the account's first v4 approval. */
+  generation: bigint
+  /** Every session key ever enabled for the account (v1/v2 and v4): a renewal must use a key that is in none. */
+  enabledKeys: readonly Address[]
+  /** Every permissionId enabled on the account now: a new generation removes them all in the same transaction. */
+  enabledPermissionIds: readonly Hex[]
+  /** Pools (addresses) the account's policy covers: a renewal retires every older config, so it re-enables all. */
+  pools: readonly Address[]
+}
+
+/**
  * Registry trust (Rhinestone attester + self-attestation of the published
  * policies), then SmartSession.enableSessions, in the fork-proven order.
  * `trust: false` skips the registry calls when the account already ran them.
+ *
+ * v4 grants (spec 007, each carries `actionPolicy`) need `actionPolicy`, the account's state on chain, and are checked
+ * against it before anything is built:
+ * - all of one MamoruActionPolicy and one generation; that generation is the account's next (an activation, an upgrade
+ *   from v1/v2, a renewal) or, from the first v4 approval on, its current one (a pool added without a renewal);
+ * - a next generation uses a session key never enabled for the account before and removes every permissionId the
+ *   account has enabled now (v1/v2 grants do not consult the policy: only their removal ends them); from generation 1
+ *   on (a renewal) it retires every older config of the account on chain, so it must re-enable every pool;
+ * - registry calls: registerModule when not registered; a new account trusts and attests TimeFramePolicy,
+ *   UsageLimitPolicy and the policy in one attest; an account that already trusts attests only the policy, once.
+ * Batch order: registry, removeSession of the old grants, enableSessions.
  */
 export function activationBatch(
   a: LiveAccount,
   grants: SessionGrant[],
   revoked: Hex[],
-  opts: { trust?: boolean } = {},
+  opts: { trust?: boolean; actionPolicy?: ActionPolicyState } = {},
 ): { calls: MultiSendCall[]; permissionIds: Hex[] } {
   const act = activationCall(grants, revoked)
-  const trust = opts.trust === false ? [] : registryTrustCalls(a.safe)
-  return { calls: [...trust, { to: act.to, value: 0n, data: act.data }].map(strip), permissionIds: act.permissionIds }
+  const v4 = grants.filter((g) => g.actionPolicy)
+  if (!v4.length) {
+    if (opts.actionPolicy) throw new Error('action policy state given for grants that carry no action policy')
+    const trust = opts.trust === false ? [] : registryTrustCalls(a.safe)
+    return { calls: [...trust, { to: act.to, value: 0n, data: act.data }].map(strip), permissionIds: act.permissionIds }
+  }
+  const s = opts.actionPolicy
+  if (v4.length !== grants.length) throw new Error('v4 and pre-v4 grants in one batch')
+  if (!s) throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', 'v4 grants need the account state of MamoruActionPolicy (registry, generation, keys)')
+  const policy = v4[0]!.actionPolicy!.address
+  const gens = new Set(v4.map((g) => g.actionPolicy!.init.generation))
+  if (v4.some((g) => g.actionPolicy!.address.toLowerCase() !== policy.toLowerCase())) throw new Error('v4 grants of two MamoruActionPolicy addresses in one batch')
+  if (gens.size !== 1) throw new Error(`v4 grants of generations ${[...gens].join(', ')} in one batch`)
+  const gen = [...gens][0]!
+  const next = gen === s.generation + 1n
+  if (!next && !(gen === s.generation && gen >= 1n)) throw new Error(`generation ${gen} for an account at generation ${s.generation}: an approval is ${s.generation + 1n}, an added pool ${s.generation}`)
+  const ownPermissionIds = new Set(act.permissionIds.map((p) => p.toLowerCase()))
+  const remove = next ? s.enabledPermissionIds.filter((p) => !ownPermissionIds.has(p.toLowerCase())) : []
+  if (next) {
+    // A renewal retires the account's v4 configs of every pool: it re-enables them all. A first v4 approval (generation
+    // 0 to 1) retires none, so it may enable some pools and add the others at the same generation later: an upgrade
+    // from v2 does not fit one Base transaction otherwise (spec 007 T2 gas).
+    const covered = new Set(v4.map((g) => g.actionPolicy!.init.pool.toLowerCase()))
+    const missing = s.generation >= 1n ? s.pools.filter((p) => !covered.has(p.toLowerCase())) : []
+    if (missing.length) throw new Error(`generation ${gen} retires every older grant: it must enable every pool, missing ${missing.join(', ')}`)
+    const used = new Set(s.enabledKeys.map((k) => k.toLowerCase()))
+    for (const g of v4) if (used.has(g.sessionKey.toLowerCase())) throw new ReasonError('SESSION_PERMISSION_ID_REUSED', `session key ${g.sessionKey} was enabled for ${a.safe} before: a new generation needs a fresh key`)
+  }
+  const trust = actionPolicyTrustCalls(a.safe, policy, { trusted: opts.trust === false, registered: s.registered, attested: s.attested })
+  return { calls: [...trust, ...revocationCalls(remove), { to: act.to, value: 0n, data: act.data }].map(strip), permissionIds: act.permissionIds }
 }
 
 function closeCalls(account: Address, p: LivePosition, deadline: bigint, burnIt: boolean): MultiSendCall[] {
