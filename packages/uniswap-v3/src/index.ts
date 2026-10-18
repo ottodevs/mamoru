@@ -1,6 +1,6 @@
 import { encodeFunctionData, maxUint128 } from 'viem'
 import { ReasonError, type Address, type Hex } from '@mamoru/domain'
-import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, swapRouter02Abi, type RegistryName } from '@mamoru/registry'
+import { address, entry, erc20Abi, mamoruActionPolicyAbi, nonfungiblePositionManagerAbi, swapRouter02Abi, type RegistryName } from '@mamoru/registry'
 
 /** A call that the session will sign. The target is always a registry entry. */
 export type V3Call = { target: RegistryName; to: Address; value: 0n; data: Hex }
@@ -20,7 +20,19 @@ export function approve(tokenName: RegistryName, spender: 'SwapRouter02' | 'Nonf
   return call(tokenName, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [address(spender), amount] }))
 }
 
-/** FR-UNI-002: SwapRouter02.exactInputSingle, recipient the account, positive minimum, no price limit. */
+/**
+ * Spec 007 (otto/mamoru#151): approve MamoruActionPolicy, which pulls the amount for a `policyMint`/`policyIncrease` in
+ * the same batch. `policy` is the address the session grant names (SessionGrant.actionPolicy).
+ */
+export function approvePolicy(tokenName: RegistryName, policy: Address, amount: bigint): V3Call {
+  token(tokenName)
+  return { target: tokenName, to: address(tokenName), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [policy, amount] }) }
+}
+
+/**
+ * FR-UNI-002: SwapRouter02.exactInputSingle, recipient the account, positive minimum. No price limit (0) unless one is
+ * given: under a v4 grant (spec 007) the policy requires a non-zero limit within its band.
+ */
 export function exactInputSingle(p: {
   account: Address
   tokenIn: RegistryName
@@ -28,6 +40,7 @@ export function exactInputSingle(p: {
   fee: number
   amountIn: bigint
   amountOutMinimum: bigint
+  sqrtPriceLimitX96?: bigint
 }): V3Call {
   if (p.amountOutMinimum <= 0n) throw new Error('amountOutMinimum must be positive')
   return call(
@@ -43,15 +56,14 @@ export function exactInputSingle(p: {
           recipient: p.account,
           amountIn: p.amountIn,
           amountOutMinimum: p.amountOutMinimum,
-          sqrtPriceLimitX96: 0n,
+          sqrtPriceLimitX96: p.sqrtPriceLimitX96 ?? 0n,
         },
       ],
     }),
   )
 }
 
-/** FR-UNI-003: mint to the account, ticks on the pool spacing, both minimums positive, deadline set. */
-export function mint(p: {
+type MintRequest = {
   account: Address
   pool: RegistryName
   tickLower: number
@@ -61,7 +73,22 @@ export function mint(p: {
   amount0Min: bigint
   amount1Min: bigint
   deadline: bigint
-}): V3Call {
+}
+
+/** FR-UNI-003: mint to the account, ticks on the pool spacing, both minimums positive, deadline set. */
+export function mint(p: MintRequest): V3Call {
+  return call('NonfungiblePositionManager', encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'mint', args: [mintParams(p)] }))
+}
+
+/**
+ * Spec 007: the same mint through MamoruActionPolicy.mint (the position manager's selector and arguments), which pulls
+ * the desired amounts the account approved it for, mints to the account, returns the rest and admits the tokenId.
+ */
+export function policyMint(policy: Address, p: MintRequest): V3Call {
+  return { target: 'MamoruActionPolicy', to: policy, value: 0n, data: encodeFunctionData({ abi: mamoruActionPolicyAbi, functionName: 'mint', args: [mintParams(p)] }) }
+}
+
+function mintParams(p: MintRequest) {
   const pool = entry(p.pool)
   if (pool.kind !== 'pool' || !pool.token0 || !pool.token1 || !pool.fee || !pool.tickSpacing) {
     throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', p.pool)
@@ -71,39 +98,31 @@ export function mint(p: {
   }
   if (p.amount0Min <= 0n || p.amount1Min <= 0n) throw new Error('mint minimums must be positive')
   if (p.deadline <= 0n) throw new Error('deadline must be set')
-  return call(
-    'NonfungiblePositionManager',
-    encodeFunctionData({
-      abi: nonfungiblePositionManagerAbi,
-      functionName: 'mint',
-      args: [
-        {
-          token0: token(pool.token0),
-          token1: token(pool.token1),
-          fee: pool.fee,
-          tickLower: p.tickLower,
-          tickUpper: p.tickUpper,
-          amount0Desired: p.amount0Desired,
-          amount1Desired: p.amount1Desired,
-          amount0Min: p.amount0Min,
-          amount1Min: p.amount1Min,
-          recipient: p.account,
-          deadline: p.deadline,
-        },
-      ],
-    }),
-  )
+  return {
+    token0: token(pool.token0),
+    token1: token(pool.token1),
+    fee: pool.fee,
+    tickLower: p.tickLower,
+    tickUpper: p.tickUpper,
+    amount0Desired: p.amount0Desired,
+    amount1Desired: p.amount1Desired,
+    amount0Min: p.amount0Min,
+    amount1Min: p.amount1Min,
+    recipient: p.account,
+    deadline: p.deadline,
+  }
 }
 
 /**
- * otto/mamoru#171: add to a position the account holds, both minimums positive, deadline set. The position manager
- * does not check who owns `tokenId`; the session grant pins it (`increase`, tokenId EQUAL).
+ * otto/mamoru#171, spec 007: add to a position the account holds, through MamoruActionPolicy.increase, both minimums
+ * positive, deadline set. The position manager's own increaseLiquidity does not check who owns `tokenId`, so no session
+ * may call it; the policy adds only to a position it admitted for the account and the account still owns.
  */
-export function increaseLiquidity(p: { tokenId: bigint; amount0Desired: bigint; amount1Desired: bigint; amount0Min: bigint; amount1Min: bigint; deadline: bigint }): V3Call {
+export function policyIncrease(policy: Address, p: { tokenId: bigint; amount0Desired: bigint; amount1Desired: bigint; amount0Min: bigint; amount1Min: bigint; deadline: bigint }): V3Call {
   if (p.tokenId <= 0n) throw new Error('tokenId must be set')
   if (p.amount0Min <= 0n || p.amount1Min <= 0n) throw new Error('increase minimums must be positive')
   if (p.deadline <= 0n) throw new Error('deadline must be set')
-  return call('NonfungiblePositionManager', encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'increaseLiquidity', args: [p] }))
+  return { target: 'MamoruActionPolicy', to: policy, value: 0n, data: encodeFunctionData({ abi: mamoruActionPolicyAbi, functionName: 'increase', args: [p] }) }
 }
 
 export function decreaseLiquidity(p: { tokenId: bigint; liquidity: bigint; amount0Min: bigint; amount1Min: bigint; deadline: bigint }): V3Call {

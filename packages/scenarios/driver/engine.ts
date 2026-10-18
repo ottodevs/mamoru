@@ -3,8 +3,8 @@ import type { LocalAccount } from 'viem/accounts'
 import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { amountsOf, decide, twapFloor, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
-import { hasIncrease, hasManageAny, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
-import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
+import { hasManageAny, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { address, entry, entryPointV07Abi, mamoruActionPolicyAbi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
 import {
   Batch,
   MULTICALL3,
@@ -25,7 +25,8 @@ import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
 import { SessionLedger, precheck } from '@mamoru/account/precheck'
 import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useModeSignature, userOpHash, type GasSettings } from '@mamoru/account/sessions'
 import type { Execution } from '@mamoru/account/safe'
-import { approve, burn, collect, deadlineCheck, decreaseLiquidity, exactInputSingle, increaseLiquidity, mint, type V3Call } from '@mamoru/uniswap-v3'
+import { approve, approvePolicy, burn, collect, deadlineCheck, decreaseLiquidity, exactInputSingle, mint, policyIncrease, policyMint, type V3Call } from '@mamoru/uniswap-v3'
+import { decreaseMins, engineBand, swapBounds } from '@mamoru/uniswap-v3/action-policy'
 import { minOut, quoteExactInputSingle, quoteMint } from '@mamoru/uniswap-v3/quote'
 import { diverges, swapMinimum, twapFloor as deviationFloor, twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
@@ -100,12 +101,6 @@ export type EngineHooks = {
    * Not called under a policy with the live `manage-any` grants, enabled at activation.
    */
   requestManageGrant?: (tokenId: bigint, pool: string) => Promise<EngineSession>
-  /**
-   * otto/mamoru#171: the owner enables `increase:<tokenId>` for a position enter-mint minted, under a policy with an
-   * `increase` grant for its pool. Absent (the live operator today): no such session, and later entries into the
-   * pool mint as before.
-   */
-  requestIncreaseGrant?: (tokenId: bigint, pool: string) => Promise<EngineSession>
   /**
    * A position this engine minted for the account, once its mint is confirmed (otto/mamoru#140 part2 #4: the live
    * operator records it as admitted), with the block it was minted in.
@@ -643,7 +638,6 @@ export class Engine {
         if (!this.hooks.requestManageGrant) throw new Error(`${op.opId}: policy ${this.cfg.policy.policyId} needs a manage grant per position`)
         this.addSession(await this.hooks.requestManageGrant(minted.args.tokenId, proposal.pool))
       }
-      if (this.hooks.requestIncreaseGrant && hasIncrease(this.cfg.policy, proposal.pool)) this.addSession(await this.hooks.requestIncreaseGrant(minted.args.tokenId, proposal.pool))
     }
     if (proposal.kind === 'rerange') {
       const inc = op.included!
@@ -751,20 +745,81 @@ export class Engine {
     return { calls: [], expiresAt: until > 0 ? BigInt(until) : 2n ** 64n }
   }
 
+  /**
+   * Spec 007 T3, v4 grants only: MamoruActionPolicy checks the price against the pool's TWAP over its own window, and a
+   * mint or an increase refuses a spot more than its band away. The engine reads both at the prepare block and builds
+   * at `engineBand` (0.8 x band), so a TWAP that drifts by the rest of the band before the userOp validates is still
+   * accepted. A spot already outside the engine band is not sent (EHG_PRICE_DIVERGENCE): the policy or the pool's own
+   * minimums would refuse it.
+   */
+  private async v4Price(pool: string, blockNumber: bigint, ap: NonNullable<SessionGrant['actionPolicy']>): Promise<{ twap: number; band: number }> {
+    const e = entry(pool)
+    if (!isAddressEqual(e.address, ap.init.pool)) throw new ReasonError('POLICY_DENIED_TARGET', `${pool} is not the pool of this session (${ap.init.pool})`)
+    const band = engineBand(ap.init.bandTicks)
+    const [[, tick], twap] = await Promise.all([
+      this.client.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
+      twapTickAt(this.client, e.address, ap.init.twapWindow, blockNumber),
+    ])
+    if (diverges(tick, twap, band)) throw new ReasonError('EHG_PRICE_DIVERGENCE', `${pool}: tick ${tick} at block ${blockNumber}, TWAP ${twap}, past the session's band ${band} of ${ap.init.bandTicks}`)
+    return { twap, band }
+  }
+
+  /**
+   * Spec 007, v4: decrease, collect, burn and increase are accepted only for a position MamoruActionPolicy admitted for
+   * the account in this pool (one it minted through the policy). Not sent otherwise: the policy would refuse it.
+   */
+  private async v4Admitted(tokenId: bigint, pool: string, blockNumber: bigint, ap: NonNullable<SessionGrant['actionPolicy']>): Promise<void> {
+    const at = await this.client.readContract({ address: ap.address, abi: mamoruActionPolicyAbi, functionName: 'admittedPool', args: [this.cfg.account, tokenId], blockNumber })
+    if (!isAddressEqual(at, entry(pool).address)) throw new ReasonError('POLICY_DENIED_POSITION', `position ${tokenId} is not admitted by MamoruActionPolicy for ${pool} (admitted pool ${at})`)
+  }
+
   /** FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. */
   private async prepareCalls(p: Proposal, blockNumber: bigint, timestamp: bigint, session: EngineSession): Promise<Prepared> {
     const acct = this.cfg.account
     const slippage = this.cfg.policy.execution.slippageBps
     // Every priced call of the batch expires on chain at the same time (NonfungiblePositionManager and SwapRouter02).
     const deadline = timestamp + BigInt(this.cfg.policy.execution.observationTtlSeconds)
+    // Spec 007: a v4 session (MamoruActionPolicy on its actions). Null: the v1/v2 calls, exactly as before.
+    const ap = session.grant.actionPolicy ?? null
+    // The guardian paused the account's grants: the policy refuses every action until unpaused or renewed.
+    if (ap && (await this.client.readContract({ address: ap.address, abi: mamoruActionPolicyAbi, functionName: 'isPaused', args: [this.cfg.account], blockNumber }))) {
+      throw new ReasonError('SESSION_REVOKED', `MamoruActionPolicy ${ap.address} has paused ${this.cfg.account} (guardian)`)
+    }
     if (p.kind === 'enter_swap') {
       const amountOut = await quoteExactInputSingle(this.client, { tokenIn: address(p.tokenIn), tokenOut: address(p.tokenOut), fee: p.fee, amountIn: p.amountIn, blockNumber })
-      const amountOutMinimum = await this.swapMin(p, amountOut, blockNumber)
+      let amountOutMinimum = await this.swapMin(p, amountOut, blockNumber)
+      let sqrtPriceLimitX96: bigint | undefined
+      if (ap) {
+        // The policy's own minimum and price limit at the engine band, from the TWAP over the policy's window.
+        const { twap, band } = await this.v4Price(p.pool, blockNumber, ap)
+        const b = swapBounds({ twapTick: twap, band, fee: p.fee, tokenInIsToken0: entry(p.pool).token0 === p.tokenIn, amountIn: p.amountIn })
+        if (amountOut < b.minOut) throw new ReasonError('EHG_PRICE_DIVERGENCE', `${p.pool}: quote ${amountOut} for ${p.amountIn} ${p.tokenIn}, under the session's bound ${b.minOut} (TWAP ${twap}, band ${band})`)
+        if (b.minOut > amountOutMinimum) amountOutMinimum = b.minOut
+        sqrtPriceLimitX96 = b.sqrtPriceLimitX96
+      }
       const expiry = this.swapExpiry(session, deadline)
+      const swap = exactInputSingle({ account: acct, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn: p.amountIn, amountOutMinimum, ...(sqrtPriceLimitX96 === undefined ? {} : { sqrtPriceLimitX96 }) })
       return {
         quote: { amountIn: p.amountIn, amountOut, amountOutMinimum },
-        calls: [...expiry.calls, approve(p.tokenIn, 'SwapRouter02', p.amountIn), exactInputSingle({ account: acct, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn: p.amountIn, amountOutMinimum })].map(exec),
+        calls: [...expiry.calls, approve(p.tokenIn, 'SwapRouter02', p.amountIn), swap].map(exec),
         expiresAt: expiry.expiresAt,
+      }
+    }
+    if (p.kind === 'enter_mint' && ap) {
+      // Spec 007: through MamoruActionPolicy.mint, which pulls exactly the desired amounts (the allowance is spent in
+      // full, nothing to reset), mints to the account, returns the rest and admits the tokenId.
+      await this.priceGuard(p.pool, blockNumber)
+      await this.v4Price(p.pool, blockNumber, ap)
+      const pool = entry(p.pool)
+      const [sqrtPriceX96] = await this.client.readContract({ address: pool.address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber })
+      const q = quoteMint({ sqrtPriceX96, tickLower: p.tickLower, tickUpper: p.tickUpper, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, slippageBps: slippage })
+      return {
+        expiresAt: deadline,
+        calls: [
+          approvePolicy(pool.token0!, ap.address, p.amount0Desired),
+          approvePolicy(pool.token1!, ap.address, p.amount1Desired),
+          policyMint(ap.address, { account: acct, pool: p.pool, tickLower: p.tickLower, tickUpper: p.tickUpper, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, amount0Min: q.amount0Min, amount1Min: q.amount1Min, deadline }),
+        ].map(exec),
       }
     }
     if (p.kind === 'enter_mint') {
@@ -785,8 +840,12 @@ export class Engine {
     }
     if (p.kind === 'increase_liquidity') {
       // otto/mamoru#171: the position must still be the one decide split the amounts for (pool and range), with
-      // the price strictly inside it; mins as for a mint, from the same quote over the position's range.
+      // the price strictly inside it; mins as for a mint, from the same quote over the position's range. Spec 007:
+      // only through MamoruActionPolicy.increase (a v4 session), for a position it admitted.
+      if (!ap) throw new ReasonError('SESSION_MISSING', `${p.grant} carries no MamoruActionPolicy: no session may call the position manager's increaseLiquidity`)
       await this.priceGuard(p.pool, blockNumber)
+      await this.v4Price(p.pool, blockNumber, ap)
+      await this.v4Admitted(p.tokenId, p.pool, blockNumber, ap)
       const pool = entry(p.pool)
       const [pos, [sqrtPriceX96, tick]] = await Promise.all([
         this.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [p.tokenId], blockNumber }),
@@ -799,17 +858,17 @@ export class Engine {
       return {
         expiresAt: deadline,
         calls: [
-          approve(pool.token0!, 'NonfungiblePositionManager', p.amount0Desired),
-          approve(pool.token1!, 'NonfungiblePositionManager', p.amount1Desired),
-          increaseLiquidity({ tokenId: p.tokenId, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, amount0Min: q.amount0Min, amount1Min: q.amount1Min, deadline }),
-          approve(pool.token0!, 'NonfungiblePositionManager', 0n),
-          approve(pool.token1!, 'NonfungiblePositionManager', 0n),
+          approvePolicy(pool.token0!, ap.address, p.amount0Desired),
+          approvePolicy(pool.token1!, ap.address, p.amount1Desired),
+          policyIncrease(ap.address, { tokenId: p.tokenId, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, amount0Min: q.amount0Min, amount1Min: q.amount1Min, deadline }),
         ].map(exec),
       }
     }
     if (p.kind === 'rerange' || p.kind === 'reduce') {
       // decreaseLiquidity(all or part) + collect(to the Safe) [+ burn]: nothing leaves the account.
       await this.priceGuard(p.pool, blockNumber)
+      const v4 = ap ? await this.v4Price(p.pool, blockNumber, ap) : null
+      if (ap) await this.v4Admitted(p.tokenId, p.pool, blockNumber, ap)
       const [pos, [sqrtPriceX96]] = await Promise.all([
         this.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [p.tokenId], blockNumber }),
         this.client.readContract({ address: entry(p.pool).address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
@@ -818,7 +877,15 @@ export class Engine {
       const calls: V3Call[] = []
       if (liquidity > 0n) {
         const a = amountsOf(sqrtPriceX96, pos[5], pos[6], liquidity)
-        calls.push(decreaseLiquidity({ tokenId: p.tokenId, liquidity, amount0Min: a.amount0 > 0n ? minOut(a.amount0, slippage) : 0n, amount1Min: a.amount1 > 0n ? minOut(a.amount1, slippage) : 0n, deadline }))
+        let amount0Min = a.amount0 > 0n ? minOut(a.amount0, slippage) : 0n
+        let amount1Min = a.amount1 > 0n ? minOut(a.amount1, slippage) : 0n
+        if (v4) {
+          // Spec 007: never under the policy's own minimums (the position's amounts at the band edges), at the engine band.
+          const m = decreaseMins({ twapTick: v4.twap, band: v4.band, tickLower: pos[5], tickUpper: pos[6], liquidity })
+          if (m.amount0Min > amount0Min) amount0Min = m.amount0Min
+          if (m.amount1Min > amount1Min) amount1Min = m.amount1Min
+        }
+        calls.push(decreaseLiquidity({ tokenId: p.tokenId, liquidity, amount0Min, amount1Min, deadline }))
       }
       calls.push(collect({ account: acct, tokenId: p.tokenId }))
       if (p.kind === 'rerange') calls.push(burn(p.tokenId))
@@ -830,6 +897,7 @@ export class Engine {
     // idle principal instead. The volatile fees stay in the account, where a later idle sell-back (priced at the
     // TWAP, on the balance the chain shows then) or an entry uses them.
     if (p.convert) throw new ReasonError('EHG_SIM_DELTA_MISMATCH', `harvest of ${p.tokenId} asks to convert ${p.convert.amount} ${p.convert.token}: harvests only collect`)
+    if (ap) await this.v4Admitted(p.tokenId, p.pool, blockNumber, ap)
     const owedAt = await principalOwedBefore(this.client, [p.tokenId], this.historyFromBlock, { block: blockNumber + 1n, logIndex: 0 })
     const owed = owedAt.get(p.tokenId) ?? [0n, 0n]
     return { calls: [collect({ account: acct, tokenId: p.tokenId })].map(exec), owed, expiresAt: null }
