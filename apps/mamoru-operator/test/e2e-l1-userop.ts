@@ -320,7 +320,7 @@ try {
       throw new RpcRefused('eth_sendUserOperation', this.code, this.detail)
     }
   }
-  for (const [rc, detail, want] of [[-32500, 'AA23 reverted', 'BRIDGE_FAILED'], [-32602, 'already known', 'unconfirmed']] as const) {
+  for (const [rc, detail, want] of [[-32500, 'AA23 reverted', 'BRIDGE_FAILED'], [-32602, 'already known', 'unconfirmed'], [-32500, 'AA25 invalid account nonce', 'unconfirmed']] as const) {
     const rctx = newAccount(`refused${-rc}`)
     await fund(rctx.address, 100_000_000n)
     const rbo = new BridgeOut(l1, noRelayer, mkdtempSync(join(tmpdir(), 'mamoru-e2e-refused-')), fetcher, Date.now, undefined, () => true, { bundler: new Refusing(rc, detail), paymaster: forkPm })

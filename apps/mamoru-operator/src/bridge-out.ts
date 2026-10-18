@@ -584,9 +584,9 @@ export class BridgeOut {
         await Bun.sleep(3_000)
       }
     } catch (e) {
-      // 'failed' only when the bundler refused it in validation (ERC-7769 codes -32500..-32507, not a duplicate) and
-      // it has no receipt. Any other error may come after admission: 'unconfirmed', status() asks by hash.
-      const refused = e instanceof RpcRefused && e.method === 'eth_sendUserOperation' && e.code <= -32500 && e.code >= -32507 && !/already|known|duplicate|exists/i.test(e.detail)
+      // 'failed' only when the bundler refused it in validation (ERC-7769 codes -32500..-32507, not a duplicate or a
+      // nonce conflict), it has no receipt and the account's EntryPoint nonce is still the one signed. Any other error may come after admission: 'unconfirmed', status() asks by hash.
+      const refused = e instanceof RpcRefused && e.method === 'eth_sendUserOperation' && e.code <= -32500 && e.code >= -32507 && !/already|known|duplicate|exists|AA25|nonce/i.test(e.detail)
       if (refused) {
         logErr(`[bridge-out] ${ctx.accountKey.slice(0, 8)}: bundler refused the userOp`, (e as RpcRefused).detail)
         route.state = 'unconfirmed'
@@ -595,7 +595,14 @@ export class BridgeOut {
         } catch {
           // no answer: stays unconfirmed
         }
-        if (route.state === 'unconfirmed' && !route.l1Tx) route.state = (await aa.bundler.receipt(hash).catch(() => undefined)) === null ? 'failed' : 'unconfirmed'
+        // Failed only when nothing with this nonce ran: no receipt for the hash and the EntryPoint nonce not consumed.
+        if (route.state === 'unconfirmed' && !route.l1Tx) {
+          const [receipt, nonceNow] = await Promise.all([
+            aa.bundler.receipt(hash).catch(() => undefined),
+            this.l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'getNonce', args: [p.live.safe, OWNER_NONCE_KEY] }).catch(() => undefined),
+          ])
+          if (receipt === null && nonceNow === u.op.nonce) route.state = 'failed'
+        }
       } else {
         logErr(`[bridge-out] ${ctx.accountKey.slice(0, 8)}:`, e instanceof Error ? e.message : e)
         route.state = 'unconfirmed'
