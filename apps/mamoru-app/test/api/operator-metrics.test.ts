@@ -188,6 +188,25 @@ describe('writeOperatorMetrics / pullOperatorMetrics (otto/mamoru#129 follow-up)
     expect(row(fresh)).toBeNull()
   })
 
+  test('a Date.parse-only timestamp (no ISO date-time with zone) is refused (review r2, PR #92)', async () => {
+    const db = memoryD1()
+    const wrote = await pullOperatorMetrics(db, 'http://operator', SECRET, okFetcher(rawMetrics({ generatedAt: '10/18/2026 09:20:00' })), new Date())
+    expect(wrote).toBe(false)
+    expect(row(db)).toBeNull()
+  })
+
+  test('an offset timestamp is stored as canonical UTC, so an earlier instant never wins the guard (review r2, PR #92)', async () => {
+    const db = memoryD1()
+    await pullOperatorMetrics(db, 'http://operator', SECRET, okFetcher(rawMetrics({ generatedAt: '2026-10-18T10:00:00.000Z', operator: { ...rawMetrics().operator, gitSha: 'ten-utc' } })), new Date())
+    // 11:00+02:00 is 09:00Z: older, even though the raw string sorts after the stored one.
+    await pullOperatorMetrics(db, 'http://operator', SECRET, okFetcher(rawMetrics({ generatedAt: '2026-10-18T11:00:00+02:00', operator: { ...rawMetrics().operator, gitSha: 'nine-utc' } })), new Date())
+    expect(row(db)?.generated_at).toBe('2026-10-18T10:00:00.000Z')
+    expect(JSON.parse(row(db)?.payload_json as string).operator.gitSha).toBe('ten-utc')
+    const fresh = memoryD1()
+    await pullOperatorMetrics(fresh, 'http://operator', SECRET, okFetcher(rawMetrics({ generatedAt: '2026-10-18T13:00:00+02:00' })), new Date())
+    expect(row(fresh)?.generated_at).toBe('2026-10-18T11:00:00.000Z')
+  })
+
   test('a failed fetch writes nothing and does not throw', async () => {
     const db = memoryD1()
     await expect(

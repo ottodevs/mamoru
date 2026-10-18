@@ -123,12 +123,15 @@ function asBool(v: unknown, fallback = false): boolean {
 function asNullableStr(v: unknown): string | null {
   return typeof v === 'string' ? v : null
 }
-/** A non-empty string `Date.parse` accepts. The sole authority for "is this a real timestamp" in this module. */
+/** ISO-8601 date-time with an explicit zone (Z or ±hh:mm). Anything else (`10/18/2026 09:20:00`, a bare date) is refused. */
+const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/
+/** The sole authority for "is this a real timestamp" in this module (review r2, PR #92). */
 function isIsoString(v: unknown): v is string {
-  return typeof v === 'string' && v.length > 0 && !Number.isNaN(Date.parse(v))
+  return typeof v === 'string' && ISO_DATE_TIME.test(v) && !Number.isNaN(Date.parse(v))
 }
+/** Canonical UTC (`toISOString`), so stored timestamps compare lexicographically in chronological order. */
 function asIso(v: unknown): string | null {
-  return isIsoString(v) ? v : null
+  return isIsoString(v) ? new Date(v).toISOString() : null
 }
 
 const RPC_ERROR_CLASSES = ['rateCapacity', 'invalidParams', 'timeout', 'other'] as const
@@ -306,11 +309,14 @@ export async function fetchOperatorMetrics(operatorUrl: string, operatorSecret: 
  *    same as chronologically) — an out-of-order pull, or a stale answer from behind a load balancer, never
  *    overwrites a newer one.
  */
-export async function writeOperatorMetrics(db: Db, metrics: StoredOperatorMetrics, fetchedAt: Date): Promise<void> {
-  if (!isIsoString(metrics.generatedAt)) {
-    console.error('operator-metrics: refusing to store a non-ISO generatedAt', metrics.generatedAt)
+export async function writeOperatorMetrics(db: Db, input: StoredOperatorMetrics, fetchedAt: Date): Promise<void> {
+  // Canonical UTC before the freshness guard compares strings: `11:00+02:00` is 09:00Z, never newer than 10:00Z.
+  const generatedAt = asIso(input.generatedAt)
+  if (!generatedAt) {
+    console.error('operator-metrics: refusing to store a non-ISO generatedAt', input.generatedAt)
     return
   }
+  const metrics = { ...input, generatedAt }
   await db
     .prepare(
       `INSERT INTO operator_metrics_latest (id, payload_json, generated_at, fetched_at)
