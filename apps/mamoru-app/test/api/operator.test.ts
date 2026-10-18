@@ -113,13 +113,14 @@ describe('operator proxy', () => {
     const h = harness(undefined, { env: LIVE, operatorFetch: op.fetch })
     const { cookie, owner } = await onboard(h)
     const k = owner.accountKey
-    for (const p of ['activate/prepare', 'activate', 'transfer/prepare', 'transfer', 'stop/prepare', 'stop']) {
+    for (const p of ['activate/prepare', 'activate', 'transfer/prepare', 'transfer', 'stop/prepare', 'stop', 'bridge-out/prepare', 'bridge-out']) {
       expect((await h.post(`/api/accounts/${k}/${p}`, {}, { cookie })).status).toBe(200)
     }
     expect((await h.request(`/api/accounts/${k}/funding`, { cookie })).status).toBe(200)
     expect((await h.request(`/api/accounts/${k}/withdraw-assets`, { cookie })).status).toBe(200)
+    expect((await h.request(`/api/accounts/${k}/bridge-out`, { cookie })).status).toBe(200)
     expect(op.seen.map((s) => new URL(s.url).pathname.split('/').slice(4).join('/'))).toEqual([
-      'activate/prepare', 'activate', 'transfer/prepare', 'transfer', 'stop/prepare', 'stop', 'funding', 'withdraw-assets',
+      'activate/prepare', 'activate', 'transfer/prepare', 'transfer', 'stop/prepare', 'stop', 'bridge-out/prepare', 'bridge-out', 'funding', 'withdraw-assets', 'bridge-out',
     ])
   })
 

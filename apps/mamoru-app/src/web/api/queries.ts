@@ -13,6 +13,7 @@ export const queryKeys = {
   apy: ['apy'] as const,
   funding: (accountKey: string) => ['funding', accountKey] as const,
   otherChains: (accountKey: string) => ['other-chains', accountKey] as const,
+  bridgeOut: (accountKey: string) => ['bridge-out', accountKey] as const,
   yieldLedger: (accountKey: string) => ['yield-ledger', accountKey] as const,
   ops: (accountKey: string) => ['ops', accountKey] as const,
   withdrawAssets: (accountKey: string) => ['withdraw-assets', accountKey] as const,
@@ -137,6 +138,18 @@ export function useOtherChains(accountKey: string | undefined) {
     enabled: accountKey !== undefined,
     retry: false,
     refetchInterval: 60_000,
+  })
+}
+
+/** The last move from Ethereum (#133). Polls every 5 s while it is on its way; a failed read shows nothing. */
+export function useBridgeOut(accountKey: string | undefined) {
+  const api = useApi()
+  return useQuery({
+    queryKey: queryKeys.bridgeOut(accountKey ?? ''),
+    queryFn: () => api.bridgeOutStatus(accountKey as string),
+    enabled: accountKey !== undefined,
+    retry: false,
+    refetchInterval: (q) => (q.state.data?.route && ['sending', 'deposited', 'unconfirmed'].includes(q.state.data.route.state) ? 5_000 : false),
   })
 }
 

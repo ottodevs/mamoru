@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router'
 import { ApiContext } from '../../src/web/api/client.ts'
 import { queryKeys } from '../../src/web/api/queries.ts'
-import { exact, fundsElsewhere, OtherChainNotice, otherChainCopy, WrongNetwork } from '../../src/web/components/other-chain-notice.tsx'
+import { BridgeStatus, exact, fundsElsewhere, movable, OtherChainNotice, otherChainCopy, WrongNetwork } from '../../src/web/components/other-chain-notice.tsx'
 import { fixtureClient, fixtureConfig, fixtureFunding, fixtureSession } from '../../src/web/fixtures/client.ts'
 import { FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from '../../src/web/fixtures/empty-account.ts'
 import { poolsResponse } from '../../src/web/fixtures/pools.ts'
@@ -118,5 +118,61 @@ describe('wrong-network notice (#117)', () => {
       expect(withL1.html.replace(NOTICE, '')).toBe(without.html)
       expect(withL1.html).not.toContain('data-testid="over-cap"')
     }
+  })
+})
+
+describe('move to Base (#133)', () => {
+  const mount = (qc: QueryClient) =>
+    render(
+      <ApiContext.Provider value={fixtureClient}>
+        <QueryClientProvider client={qc}>
+          <WrongNetwork accountKey={FIXTURE_ACCOUNT_KEY} />
+        </QueryClientProvider>
+      </ApiContext.Provider>,
+    )
+
+  test('USDC on Ethereum from 1 USDC up: the notice says it can be moved and offers the button', () => {
+    const { text, html } = mount(client({ ...fixtureFunding, usdc: '0' }, onEthereum))
+    expect(text).toContain('You can move the USDC to this same account on Base with one passkey approval')
+    expect(text).toContain('Mamoru pays the Ethereum gas')
+    expect(text).not.toContain('cannot move it')
+    expect(text).toContain('Do not send more on Ethereum')
+    expect(html).toContain('data-testid="bridge-out"')
+    expect(text).toContain(otherChainCopy.move)
+  })
+
+  test('below 1 USDC, or only ETH: no button, and the notice says it cannot be moved yet', () => {
+    for (const v of [eth('999999'), eth('0', '20000000000000000')]) {
+      expect(movable(fundsElsewhere(v)[0]!)).toBe(false)
+      const { text, html } = mount(client({ ...fixtureFunding, usdc: '0' }, v))
+      expect(html).not.toContain('data-testid="bridge-out"')
+      expect(text).toContain('cannot move it from Ethereum yet')
+    }
+  })
+
+  test('USDC and ETH: the USDC can move, the ETH is said to stay', () => {
+    expect(otherChainCopy.body(fundsElsewhere(eth('150000000', '1'))[0]!)).toContain('The ETH stays on Ethereum.')
+  })
+
+  test('a move on its way hides the button and shows its state; once the USDC left, the state stays in view', () => {
+    const qc = client({ ...fixtureFunding, usdc: '0' }, onEthereum)
+    qc.setQueryData(queryKeys.bridgeOut(FIXTURE_ACCOUNT_KEY), { route: { state: 'deposited', amountUsdc: '150000000', outputUsdc: '149980000', at: new Date().toISOString(), depositId: '1' } })
+    const during = mount(qc)
+    expect(during.text).toContain(otherChainCopy.state.deposited)
+    expect(during.text).not.toContain(otherChainCopy.move)
+    qc.setQueryData(queryKeys.otherChains(FIXTURE_ACCOUNT_KEY), eth('0'))
+    qc.setQueryData(queryKeys.bridgeOut(FIXTURE_ACCOUNT_KEY), { route: { state: 'filled', amountUsdc: '150000000', outputUsdc: '149980000', at: new Date().toISOString(), depositId: '1' } })
+    const after = mount(qc)
+    expect(after.html).toContain('data-testid="bridge-route"')
+    expect(after.text).toContain('Moving 150.00 USDC from Ethereum to Base')
+    expect(after.text).toContain(otherChainCopy.state.filled)
+  })
+
+  test('every state has its own words', () => {
+    for (const state of ['sending', 'deposited', 'filled', 'failed', 'unconfirmed'] as const) {
+      const { html } = render(<BridgeStatus route={{ state, amountUsdc: '1', outputUsdc: '1', at }} />)
+      expect(html).toContain(`data-state="${state}"`)
+    }
+    expect(otherChainCopy.state.failed).toContain('still at your address on Ethereum')
   })
 })
