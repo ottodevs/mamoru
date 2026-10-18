@@ -17,18 +17,22 @@ struct PackedUserOperation {
 }
 
 /**
- * @title MamoruGasPolicy (spec 007, T6 L-1). Not deployed; wiring into the session grants is T7.
+ * @title MamoruGasPolicy (spec 007, T6 L-1; T7 adds the maxFeePerGas cap). Not deployed.
  * @notice A SmartSession USEROP policy that caps what a session key can make the account pay a bundler. Without it a
- * leaked key signs a valid op with a huge `maxPriorityFeePerGas` / `preVerificationGas`, bundles it itself with
- * `beneficiary = attacker` at a low `tx.gasprice`, and keeps the difference (audit L-1).
+ * leaked key signs a valid op with a huge `maxPriorityFeePerGas` / `maxFeePerGas` / `preVerificationGas`, bundles it
+ * itself with `beneficiary = attacker` at a low `tx.gasprice`, and keeps the difference (audit L-1).
  *
- * Why caps on the priority fee and the gas limits are enough (and `maxFeePerGas` needs none): the EntryPoint charges
- * gasUsed x min(maxFeePerGas, basefee + maxPriorityFeePerGas), and the bundler's own transaction pays at least basefee
- * per gas it burns. What the beneficiary can keep per op is therefore at most
- *   maxPriorityFeePerGas x (gas charged) + gasPrice x (preVerificationGas + the 10% unused-gas penalty),
- * the last two being gas the op is charged for without burning it. Caps on those four fields bound it per op; the
- * session's UsageLimitPolicy bounds the number of ops. A large `maxFeePerGas` only raises the prefund, which is
- * refunded.
+ * Why every price and gas field is capped (T7, GPT-6 review of #97, P1 4): the EntryPoint (v0.7) charges
+ *   actualGas x gasPrice, gasPrice = maxFeePerGas                                   if maxFeePerGas == maxPriorityFeePerGas
+ *                                  = min(maxFeePerGas, basefee + maxPriorityFeePerGas) otherwise,
+ * and takes a prefund of maxFeePerGas x (verificationGasLimit + callGasLimit + preVerificationGas) from the account
+ * (no paymaster: `permitERC4337Paymaster` is false on every Mamoru grant). With the priority fee capped but not
+ * `maxFeePerGas`, the price was bounded only by basefee + cap (Base's basefee is not the account's to choose), and the
+ * prefund was not bounded at all: an op with a huge `maxFeePerGas` moves up to the Safe's whole ETH into its EntryPoint
+ * deposit, where only an owner `withdrawTo` gets it back. Capping `maxFeePerGas` bounds both, whatever the basefee:
+ *   what one op can take from the Safe <= maxFeePerGas_cap x (maxVerificationGasLimit + maxCallGasLimit + maxPreVerificationGas)
+ * (actual gas, the 10% unused-gas penalty and preVerificationGas are all inside those limits). The session's
+ * UsageLimitPolicy bounds the number of ops, and the native ETH the Safe holds bounds the whole.
  *
  * Storage is per (ConfigId, multiplexer, account), like UniActionPolicy: no account-level state, so any caller of
  * `initializeWithMultiplexer` only writes its own slot.
@@ -42,6 +46,7 @@ contract MamoruGasPolicy {
         uint32 maxVerificationGasLimit;
         uint32 maxCallGasLimit;
         uint32 maxPreVerificationGas;
+        uint64 maxFeePerGas; // wei; T7 (appended, so the first four fields keep their ABI offsets)
     }
 
     mapping(ConfigId => mapping(address multiplexer => mapping(address account => Caps))) internal _caps;
@@ -59,7 +64,10 @@ contract MamoruGasPolicy {
 
     function initializeWithMultiplexer(address account, ConfigId configId, bytes calldata initData) external {
         Caps memory c = abi.decode(initData, (Caps));
-        if (c.maxPriorityFeePerGas == 0 || c.maxVerificationGasLimit == 0 || c.maxCallGasLimit == 0) revert BadInit();
+        if (
+            c.maxPriorityFeePerGas == 0 || c.maxVerificationGasLimit == 0 || c.maxCallGasLimit == 0
+                || c.maxPreVerificationGas == 0 || c.maxFeePerGas < c.maxPriorityFeePerGas
+        ) revert BadInit();
         _caps[configId][msg.sender][account] = c;
         emit PolicySet(configId, msg.sender, account);
     }
@@ -70,11 +78,19 @@ contract MamoruGasPolicy {
         uint256 verificationGasLimit = uint256(op.accountGasLimits) >> 128;
         uint256 callGasLimit = uint128(uint256(op.accountGasLimits));
         uint256 maxPriorityFeePerGas = uint256(op.gasFees) >> 128;
+        uint256 maxFeePerGas = uint128(uint256(op.gasFees));
         if (
-            maxPriorityFeePerGas > c.maxPriorityFeePerGas || verificationGasLimit > c.maxVerificationGasLimit
+            maxPriorityFeePerGas > c.maxPriorityFeePerGas || maxFeePerGas > c.maxFeePerGas
+                || verificationGasLimit > c.maxVerificationGasLimit
                 || callGasLimit > c.maxCallGasLimit || op.preVerificationGas > c.maxPreVerificationGas
         ) return VALIDATION_FAILED;
         return VALIDATION_SUCCESS;
+    }
+
+    /// The most one op under `c` can make the account pay (wei): the EntryPoint prefund at the capped price and limits.
+    function maxCostPerOp(Caps memory c) public pure returns (uint256) {
+        return uint256(c.maxFeePerGas)
+            * (uint256(c.maxVerificationGasLimit) + uint256(c.maxCallGasLimit) + uint256(c.maxPreVerificationGas));
     }
 
     function capsOf(ConfigId id, address multiplexer, address account) external view returns (Caps memory) {

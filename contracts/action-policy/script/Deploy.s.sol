@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {MamoruActionPolicy} from "../src/MamoruActionPolicy.sol";
+import {MamoruGasPolicy} from "../src/MamoruGasPolicy.sol";
 
 /// ERC-7484 registry (Rhinestone), the calls this deployment needs.
 interface IModuleRegistry {
@@ -38,6 +39,10 @@ interface IOraclePool {
  * 1. L-3: `ModuleRegistry.deployModule` creates the policy with CREATE2 AND writes its ERC-7484 ModuleRecord in the same
  *    transaction, so nobody can pick the module's resolver between the deploy and the registration. The record is
  *    then checked (resolver and sender) before anything else runs; T7 must not attest a policy whose record differs.
+ * 1b. T7 (GPT-6 review of #97, P1 2): `MamoruGasPolicy`, the userOp policy every v4 session carries, the same way (its own
+ *    `deployModule`, salt nonce `GAS_POLICY_SALT_NONCE`, record checked). Both addresses go to the operator's config
+ *    (MAMORU_ACTION_POLICY_ADDRESS, MAMORU_GAS_POLICY_ADDRESS); the operator checks `findModule` of both before any
+ *    account attests them.
  * 2. L-4: raises `observationCardinalityNext` of every pool a grant covers to CARDINALITY_TARGET (default 3,600 =
  *    2 x twapWindow), in steps that keep each transaction under Base's 2^24 gas cap. `initializeWithMultiplexer`
  *    refuses a pool whose `observationCardinalityNext` is under `twapWindow`.
@@ -58,10 +63,12 @@ contract DeployMamoruActionPolicy is Script {
     /// Each new ring slot costs ~22.1k gas: 600 slots is ~13.3M gas, under the 2^24 per-transaction cap.
     uint16 constant CARDINALITY_STEP = 600;
 
-    function run() external returns (address policy) {
+    function run() external returns (address policy, address gasPolicy) {
         uint96 nonce = uint96(vm.envOr("POLICY_SALT_NONCE", uint256(1)));
+        uint96 gasNonce = uint96(vm.envOr("GAS_POLICY_SALT_NONCE", uint256(2)));
         uint16 target = uint16(vm.envOr("CARDINALITY_TARGET", uint256(3_600)));
         policy = deploy(msg.sender, saltFor(msg.sender, nonce), target);
+        gasPolicy = deployGasPolicy(msg.sender, saltFor(msg.sender, gasNonce));
     }
 
     /// The registry accepts a CREATE2 salt whose first 20 bytes are the caller (or zero): a caller-prefixed salt means
@@ -88,6 +95,23 @@ contract DeployMamoruActionPolicy is Script {
         require(rec.resolverUID == resolverUID, "ModuleRecord: unexpected resolver");
         require(rec.sender == deployer, "ModuleRecord: registered by someone else");
         console2.log("MamoruActionPolicy:", policy);
+    }
+
+    function gasPolicyInitCode() public pure returns (bytes memory) {
+        return type(MamoruGasPolicy).creationCode;
+    }
+
+    /// T7: the userOp gas policy, deployed and registered in one `deployModule` call like the action policy (L-3).
+    function deployGasPolicy(address deployer, bytes32 salt) public returns (address gasPolicy) {
+        IModuleRegistry r = IModuleRegistry(REGISTRY);
+        bytes32 resolverUID = r.findModule(RESOLVER_REFERENCE).resolverUID;
+        vm.startBroadcast(deployer);
+        gasPolicy = r.deployModule(salt, resolverUID, gasPolicyInitCode(), "", "");
+        vm.stopBroadcast();
+        IModuleRegistry.ModuleRecord memory rec = r.findModule(gasPolicy);
+        require(rec.resolverUID == resolverUID, "ModuleRecord: unexpected resolver");
+        require(rec.sender == deployer, "ModuleRecord: registered by someone else");
+        console2.log("MamoruGasPolicy:", gasPolicy);
     }
 
     function raiseCardinality(address pool, uint16 target) public {

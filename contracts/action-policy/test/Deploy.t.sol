@@ -79,4 +79,20 @@ contract DeployTest is Test {
         vm.prank(0x00000000002B0eCfbD0496EE71e01257dA0E37DE);
         MamoruActionPolicy(policy).initializeWithMultiplexer(makeAddr("safe"), ConfigId.wrap(bytes32(0)), abi.encode(i));
     }
+
+    /// T7 (P1 2): the gas policy is deployed and registered in one call too, at a deployer-only address.
+    function test_T7_gasPolicyAtomicDeploy() public {
+        DeployMamoruActionPolicy d = new DeployMamoruActionPolicy();
+        bytes32 salt = d.saltFor(deployer, 2);
+        bytes32 uid = R.findModule(0x8177451511dE0577b911C254E9551D981C26dc72).resolverUID;
+        bytes memory code = d.gasPolicyInitCode();
+        vm.prank(attacker);
+        vm.expectRevert(bytes4(0x81e69d9b)); // InvalidSalt()
+        R.deployModule(salt, uid, code, "", "");
+        address gasPolicy = d.deployGasPolicy(deployer, salt);
+        IModuleRegistry.ModuleRecord memory rec = R.findModule(gasPolicy);
+        assertEq(rec.sender, deployer);
+        assertEq(rec.resolverUID, uid);
+        assertGt(gasPolicy.code.length, 0);
+    }
 }
