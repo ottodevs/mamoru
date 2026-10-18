@@ -118,6 +118,24 @@ describe('a reverted activation stays unresolved while its Safe nonce is unspent
     // receiptOf waits between its tries on an unreadable receipt.
   }, 30_000)
 
+  test('a lagging second view (block B answered with another hash, its log not served yet) concludes nothing; consistent, it confirms', async () => {
+    const { w, acc, old } = await revertedStart()
+    // Executed at block 150 by a relay: the head is 150 and the nonce there is 1, but the node that serves the logs
+    // and block 150 by number is behind (no log yet, another hash for 150).
+    w.knobs.blockHead = 150n
+    w.chain.nonce = 1n
+    w.knobs.blockHashes.set(150n, keccak256(stringToHex('another view of 150')))
+    await quiet(() => w.op.reconcileOwner(acc))
+    expect(old).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    expect(acc.active).toBe(false)
+    // The same view everywhere now: the execution is found and applied.
+    w.knobs.blockHashes.clear()
+    w.knobs.safeLogs = [{ topics: [EXECUTION_SUCCESS, old.safeTxHash!], data: `0x${'0'.repeat(64)}`, transactionHash: keccak256(stringToHex('relay')), blockNumber: 150n }]
+    await quiet(() => w.op.reconcileOwner(acc))
+    expect(old).toMatchObject({ state: 'confirmed', block: 150 })
+    expect(acc.active).toBe(true)
+  })
+
   test('a Stop revokes the grants of an unresolved start as well as the engine ones', async () => {
     const { w, old } = await revertedStart()
     const stop = await w.op.prepareStop(ctx, { revokeOnly: true })

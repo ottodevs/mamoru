@@ -38,14 +38,20 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false as boolean | null, enabled: new Set<string>(), batchGrants: false, head: 100n, batchedGrantReads: 0, multicalls: 0, pending: null as { grants?: { permissionId: string }[]; revokes?: string[] } | null, logs: [] as { stx: Hex; hash: Hex; block: bigint }[], enabledFromBlock: 0n, noHistory: false, usdt: 0n, spotTick: 0, twapTick: 0 as number | null }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false as boolean | null, enabled: new Set<string>(), batchGrants: false, head: 100n, batchedGrantReads: 0, multicalls: 0, pending: null as { grants?: { permissionId: string }[]; revokes?: string[] } | null, logs: [] as { stx: Hex; hash: Hex; block: bigint }[], enabledFromBlock: 0n, noHistory: false, usdt: 0n, spotTick: 0, twapTick: 0 as number | null, blockHashes: new Map<bigint, Hex>() }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
   const factory = deployCall(liveAccountFromContext(ctx))
   const client = {
     getBlockNumber: async () => knobs.head,
-    getBlock: async () => ({ number: 100n, timestamp: 1_790_000_000n }),
+    // A block has a hash of its own; `blockHashes` is what a read of that height by number answers instead (another
+    // node, behind or on another view, than the one that gave the head).
+    getBlock: async (a: { blockNumber?: bigint } = {}) => {
+      // The head is the one getBlockNumber answers (a lagging provider lags in both).
+      const n = a.blockNumber ?? knobs.head
+      return { number: n, hash: (a.blockNumber !== undefined ? knobs.blockHashes.get(n) : undefined) ?? keccak256(stringToHex(`block-${n}`)), timestamp: 1_790_000_000n }
+    },
     getTransactionReceipt: async () => {
       throw new Error('no receipt')
     },
@@ -3017,6 +3023,55 @@ describe('renewing the approval of a running account', () => {
     await (w.op as unknown as { settleRenewals(a: AccountState): Promise<void> }).settleRenewals(acc)
     expect(stored).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', txHash: `0x${'ab'.repeat(32)}` })
     expect(acc.active).toBe(true)
+    expect(acc.grants.map((g) => g.permissionId)).toEqual(expect.arrayContaining((stored.ownerGrants ?? []).map((g) => g.permissionId)))
+  })
+
+  test('otto/mamoru#163: a relayed renewal whose execution the search cannot see yet (a lagging view) is not taken as unproven; applied once seen', async () => {
+    const { w, acc } = await running()
+    const tx = await w.op.prepareRenew(ctx)
+    w.knobs.execOk = false
+    const r = await w.op.submit(ctx, 'renew', sign(tx))
+    w.chain.nonce--
+    const stored = acc.ops.find((o) => o.opId === r.opId)!
+    type Rc = { client: { getTransactionReceipt(a: { hash: Hex }): Promise<unknown> } }
+    ;(w.op as unknown as Rc).client.getTransactionReceipt = async ({ hash }) => {
+      if (hash.toLowerCase() === stored.txHash!.toLowerCase()) return { transactionHash: hash, status: 'reverted', blockNumber: 99n, logs: [] }
+      throw Object.assign(new Error('not found'), { name: 'TransactionReceiptNotFoundError' })
+    }
+    // Relayed and run at block 150: grants enabled, nonce moved. The search is answered by a node behind 150 (no log,
+    // another hash for 150).
+    for (const id of stored.revokes ?? []) w.knobs.enabled.delete(id.toLowerCase())
+    for (const g of stored.ownerGrants ?? []) w.knobs.enabled.add(g.permissionId.toLowerCase())
+    w.chain.nonce++
+    w.knobs.head = 150n
+    w.knobs.blockHashes.set(150n, `0x${'cd'.repeat(32)}`)
+    const settle = (w.op as unknown as { settleRenewals(a: AccountState): Promise<void> }).settleRenewals.bind(w.op)
+    await settle(acc)
+    expect(stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    // Consistent: the log is there and block 150 is the same everywhere.
+    w.knobs.blockHashes.clear()
+    w.knobs.logs.push({ stx: stored.safeTxHash!, hash: `0x${'ab'.repeat(32)}`, block: 150n })
+    await settle(acc)
+    expect(stored).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', txHash: `0x${'ab'.repeat(32)}` })
+    // Meanwhile the engine was stopped for running on grants that read revoked (I1, the renewal not proven yet): its
+    // grants, applied on a stopped account, are tracked for the next stop, none left unrecorded.
+    const tracked = new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? [])].map((id) => id.toLowerCase()))
+    expect((stored.ownerGrants ?? []).every((g) => tracked.has(g.permissionId.toLowerCase()))).toBe(true)
+  })
+
+  test('otto/mamoru#163: a renewal recorded RENEWAL_UNPROVEN is still applied by reconciliation once its relayed execution is seen', async () => {
+    const { w, acc } = await running()
+    const tx = await w.op.prepareRenew(ctx)
+    w.knobs.execOk = false
+    const r = await w.op.submit(ctx, 'renew', sign(tx))
+    const stored = acc.ops.find((o) => o.opId === r.opId)!
+    // An earlier pass (before this change, or on a view without the log) left it unproven.
+    Object.assign(stored, { code: 'RENEWAL_UNPROVEN' })
+    for (const id of stored.revokes ?? []) w.knobs.enabled.delete(id.toLowerCase())
+    for (const g of stored.ownerGrants ?? []) w.knobs.enabled.add(g.permissionId.toLowerCase())
+    w.knobs.logs.push({ stx: stored.safeTxHash!, hash: `0x${'ab'.repeat(32)}`, block: 100n })
+    await w.op.reconcileOwner(acc)
+    expect(stored).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', txHash: `0x${'ab'.repeat(32)}` })
     expect(acc.grants.map((g) => g.permissionId)).toEqual(expect.arrayContaining((stored.ownerGrants ?? []).map((g) => g.permissionId)))
   })
 

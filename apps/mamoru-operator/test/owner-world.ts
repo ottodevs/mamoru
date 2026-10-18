@@ -74,6 +74,9 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     /** Receipts by relayer tx hash, and the Safe's ExecutionSuccess logs (`topics[1]`: the Safe tx hash). */
     receipts: new Map<string, TransactionReceipt>(),
     safeLogs: [] as { topics: Hex[]; data: Hex; transactionHash: Hex; blockNumber: bigint }[],
+    /** The head `getBlock()` answers, and hashes a node answers for a height instead of its own. */
+    blockHead: 100n,
+    blockHashes: new Map<bigint, Hex>(),
   }
   const npmCalls: string[] = []
   let saves = 0
@@ -87,7 +90,12 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
   }
   const client = {
     getBlockNumber: async () => 101n, // at least the block its receipts land in (101): #60 never reads grants below it
-    getBlock: async () => ({ number: 100n, timestamp: 1_790_000_000n }),
+    // A block has a hash of its own; `blockHashes` is what a read of that height by number answers instead (another
+    // node, behind or on another view, than the one that gave the head).
+    getBlock: async (a: { blockNumber?: bigint } = {}) => {
+      const n = a.blockNumber ?? knobs.blockHead
+      return { number: n, hash: (a.blockNumber !== undefined ? knobs.blockHashes.get(n) : undefined) ?? keccak256(stringToHex(`block-${n}`)), timestamp: 1_790_000_000n }
+    },
     getGasPrice: async () => knobs.gasPrice,
     getTransactionReceipt: async ({ hash }: { hash: string }) => {
       const r = knobs.receipts.get(hash.toLowerCase())

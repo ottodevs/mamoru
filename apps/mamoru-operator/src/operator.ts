@@ -1914,12 +1914,24 @@ export class Operator {
         this.patchOp(acc, op.opId, { state: 'failed', code: 'RENEWAL_SUPERSEDED' })
         continue
       }
-      const answer = await this.provenOwnerTx(acc, op)
+      // otto/mamoru#163: one block B for "not run": the execution is searched exactly to B (and B's hash checked), and the
+      // grants and the Safe nonce that decide RENEWAL_UNPROVEN / RENEWAL_SUPERSEDED are read at that same B, never later.
+      let pin: { number: bigint; hash: Hex }
+      try {
+        const b = await this.client.getBlock()
+        if (b.number === null || !b.hash) continue
+        pin = { number: b.number, hash: b.hash }
+      } catch (e) {
+        logErr(`[settle] ${acc.accountKey} head unreadable:`, e)
+        continue
+      }
+      const answer = await this.provenOwnerTx(acc, op, pin)
       // A read error decides nothing: it stays an unread receipt, asked again (#140).
       if (answer === 'unknown') continue
       const proof = answer === 'none' ? null : answer
-      // Read at a head not below the account's floor nor the renewal's own block: a lagging provider defers (#140).
-      const block = await this.headAtLeast(acc, proof ? BigInt(proof.block) : 0n)
+      // Proven: read at a head not below the account's floor nor the renewal's own block (a lagging provider defers,
+      // #140). Not proven: at B itself, which must not be below the account's floor.
+      const block = proof ? await this.headAtLeast(acc, BigInt(proof.block)) : pin.number >= this.floorOf(acc, 0n) ? pin.number : null
       if (block === null) continue
       const on = await this.enabledAt(acc, ids, block)
       if (!on) continue
@@ -2128,7 +2140,8 @@ export class Operator {
    * tx hash when one is kept), or without a receipt the ExecutionSuccess log of that Safe tx hash (findOwnerTx). Null
    * when nothing proves it ran; any read that fails counts as not proven.
    */
-  private async provenOwnerTx(acc: AccountState, op: StoredOp): Promise<{ hash: Hex; block: number } | 'none' | 'unknown'> {
+  /** `pin` (otto/mamoru#163): "none" only from a search that reached exactly that block, whose hash still matches. */
+  private async provenOwnerTx(acc: AccountState, op: StoredOp, pin?: { number: bigint; hash: Hex }): Promise<{ hash: Hex; block: number } | 'none' | 'unknown'> {
     const safe = (acc.ctx.address as string).toLowerCase()
     const own = op.safeTxHash?.toLowerCase()
     try {
@@ -2153,8 +2166,13 @@ export class Operator {
       }
       // Without a Safe tx hash nothing tells its log from another's: undecided, never "not run".
       if (!own) return 'unknown'
-      const found = await this.findOwnerTx(acc, op, { anyTx: true })
-      return found?.ok ? { hash: found.hash, block: found.block } : 'none'
+      const found = await this.findOwnerTx(acc, op, { anyTx: true, ...(pin ? { toBlock: pin.number } : {}) })
+      if (found?.ok) return { hash: found.hash, block: found.block }
+      if (pin) {
+        const again = await this.client.getBlock({ blockNumber: pin.number })
+        if (again.hash?.toLowerCase() !== pin.hash.toLowerCase()) return 'unknown'
+      }
+      return 'none'
     } catch (e) {
       logErr(`[settle] ${acc.accountKey} ${op.opId} execution unreadable, undecided:`, e)
       return 'unknown'
@@ -2689,18 +2707,36 @@ export class Operator {
    * is concluded.
    */
   private async settleByNonce(acc: AccountState, op: StoredOp): Promise<'open' | { close: string } | { hash: Hex; block: number; ok: true }> {
-    const n = BigInt(op.safeNonce!)
-    // The nonce is read at a head the log search below reaches (it searches to its own head, read later): an execution
-    // that moved the nonce is in the searched range.
-    const head = await this.client.getBlock()
-    const { deployed } = await readSafeNonce(this.client, acc.ctx.address as Address)
-    if (!deployed) return 'open'
-    const nonce = (await this.client.readContract({ address: acc.ctx.address as Address, abi: safeAbi, functionName: 'nonce', blockNumber: head.number })) as bigint
-    if (nonce <= n) return 'open'
-    const ran = await this.findOwnerTx(acc, op, { anyTx: true })
-    if (ran?.ok) return { hash: ran.hash, block: ran.block, ok: true }
+    const v = await this.executionAt(acc, op)
+    // Not one consistent view of the chain: nothing is concluded.
+    if (!v) return 'open'
+    if (v.ran) return { ...v.ran, ok: true }
+    if (v.nonce <= BigInt(op.safeNonce!)) return 'open'
     const replaced = acc.ops.some((o) => o !== op && o.opId.startsWith('own-') && o.state === 'confirmed' && (o as StoredOp).safeNonce === op.safeNonce)
     return { close: replaced ? 'SUPERSEDED' : 'SAFE_NONCE_MOVED' }
+  }
+
+  /**
+   * otto/mamoru#163: one view of the chain at a block B (number and hash): the Safe nonce at B, and this op's
+   * ExecutionSuccess (by its Safe tx hash, topics[1], in any transaction) searched from its first handover to B
+   * exactly. A nonce at B past the op's means whatever spent it ran at or before B, so an empty search is complete,
+   * but only if the provider had B: B is read again by number and must carry the same hash. Anything else is null
+   * (no conclusion). A found execution is an answer whatever B shows.
+   */
+  private async executionAt(acc: AccountState, op: StoredOp): Promise<{ block: bigint; nonce: bigint; ran: { hash: Hex; block: number } | null } | null> {
+    const safe = acc.ctx.address as Address
+    const b = await this.client.getBlock()
+    if (b.number === null || !b.hash) return null
+    if (!(await readSafeNonce(this.client, safe)).deployed) return { block: b.number, nonce: 0n, ran: null }
+    const nonce = (await this.client.readContract({ address: safe, abi: safeAbi, functionName: 'nonce', blockNumber: b.number })) as bigint
+    const ran = await this.findOwnerTx(acc, op, { anyTx: true, toBlock: b.number })
+    if (ran?.ok) return { block: b.number, nonce, ran: { hash: ran.hash, block: ran.block } }
+    const again = await this.client.getBlock({ blockNumber: b.number })
+    if (again.hash?.toLowerCase() !== b.hash.toLowerCase()) {
+      console.log(`[reconcile] ${acc.accountKey} ${op.opId} block ${b.number} answered with another hash: no conclusion`)
+      return null
+    }
+    return { block: b.number, nonce, ran: null }
   }
 
   /**
@@ -3911,7 +3947,13 @@ export class Operator {
       // otto/mamoru#163: a reverted activation or renewal is not final: its Safe nonce is unspent and anyone may relay its
       // signature. A renewal stays an unread receipt for settleRenewals (applied only once proven; its grants revoked by
       // the next renewal or stop meanwhile). An activation is settled by its Safe nonce (settleByNonce).
-      if (found && !found.ok && op.kind === 'renew') continue
+      // A renewal not proven by its own receipt (reverted, unreadable, missing; or recorded RENEWAL_UNPROVEN earlier):
+      // its ExecutionSuccess in any transaction applies it (anyone may have relayed it). Not found: left as it is.
+      if (!found?.ok && op.kind === 'renew' && (op as StoredOp).safeTxHash) {
+        const v = await this.executionAt(acc, op as StoredOp)
+        if (!v?.ran) continue
+        found = { ...v.ran, ok: true }
+      }
       // An activation not proven by its own receipt (reverted, or not readable, or not found): settled by the Safe
       // nonce whenever it has moved past its own, by its ExecutionSuccess in whatever transaction carried it.
       if (!found?.ok && op.kind === 'activate' && (op as StoredOp).safeNonce !== undefined) {
@@ -4014,7 +4056,7 @@ export class Operator {
    * the head (the Safe nonce is past the op's). Without a Safe tx hash (an op stored before it was kept): only the old
    * narrow window around its time, and the log of the op's own relayer transaction, or nothing.
    */
-  private async findOwnerTx(acc: AccountState, op: StoredOp, opts: { anyTx?: boolean } = {}): Promise<{ hash: Hex; block: number; ok: boolean } | null> {
+  private async findOwnerTx(acc: AccountState, op: StoredOp, opts: { anyTx?: boolean; toBlock?: bigint } = {}): Promise<{ hash: Hex; block: number; ok: boolean } | null> {
     const head = await this.client.getBlock()
     // From the first time a copy was handed to a provider (an armed Start may wait days between prepare and send),
     // else its creation, else its time; to a day past the latest handover.
@@ -4038,7 +4080,8 @@ export class Operator {
     }
     // `anyTx` (otto/mamoru#163): the Safe nonce is past this op's, so its Safe tx ran by now or never will: searched to
     // the head, in whatever transaction carried it.
-    const last = !opts.anyTx && lastAt + OWNER_LOG_SEARCH_BLOCKS < head.number ? lastAt + OWNER_LOG_SEARCH_BLOCKS : head.number
+    // `toBlock`: exactly to that block (a pinned view, executionAt), whatever this head says.
+    const last = opts.toBlock ?? (!opts.anyTx && lastAt + OWNER_LOG_SEARCH_BLOCKS < head.number ? lastAt + OWNER_LOG_SEARCH_BLOCKS : head.number)
     const logs: Awaited<ReturnType<PublicClient['getLogs']>> = []
     for (let from = fromBlock; from <= last; from += OWNER_LOG_PAGE_BLOCKS) {
       const to = from + OWNER_LOG_PAGE_BLOCKS - 1n < last ? from + OWNER_LOG_PAGE_BLOCKS - 1n : last
