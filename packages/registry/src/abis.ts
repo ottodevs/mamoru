@@ -149,6 +149,7 @@ export const moduleRegistryAbi = parseAbi([
   'function trustAttesters(uint8 threshold, address[] attesters)',
   'function checkForAccount(address smartAccount, address module) view',
   'function findAttestation(address module, address attester) view returns (AttestationRecord)',
+  'function registerModule(bytes32 resolverUID, address moduleAddress, bytes metadata, bytes resolverContext)',
   'error InsufficientAttestations()',
   'error NoTrustedAttestersFound()',
   'error InvalidTrustedAttesterInput()',
@@ -204,4 +205,21 @@ export const multiSendCallOnlyAbi = parseAbi(['function multiSend(bytes transact
 export const erc4626Abi = parseAbi([
   'function deposit(uint256 assets, address receiver) returns (uint256 shares)',
   'function asset() view returns (address)',
+])
+
+/**
+ * Spec 007 (otto/mamoru#151): MamoruActionPolicy, contracts/action-policy/src/MamoruActionPolicy.sol. `mint` takes the
+ * position manager's MintParams and has its selector; `increase` is the policy's own (0x4110c363).
+ */
+export const mamoruActionPolicyAbi = parseAbi([
+  'struct MintParams { address token0; address token1; uint24 fee; int24 tickLower; int24 tickUpper; uint256 amount0Desired; uint256 amount1Desired; uint256 amount0Min; uint256 amount1Min; address recipient; uint256 deadline; }',
+  'struct IncreaseLiquidityParams { uint256 tokenId; uint256 amount0Desired; uint256 amount1Desired; uint256 amount0Min; uint256 amount1Min; uint256 deadline; }',
+  'function mint(MintParams m) returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
+  'function increase(IncreaseLiquidityParams n) returns (uint128 liquidity, uint256 amount0, uint256 amount1)',
+  'function generationOf(address account) view returns (uint64)',
+  'function isPaused(address account) view returns (bool)',
+  'function GUARDIAN() view returns (address)',
+  'function admittedPool(address account, uint256 tokenId) view returns (address)',
+  'function swapBounds(address account, address pool, address tokenIn, uint256 amountIn) view returns (uint256 minOut, uint160 sqrtPriceLimitX96)',
+  'function decreaseMins(address account, address pool, uint256 tokenId, uint128 liquidity) view returns (uint256, uint256)',
 ])

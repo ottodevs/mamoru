@@ -36,18 +36,24 @@ export type Registry = {
   block: number
   blockHash: Hex
   entries: RegistryEntry[]
+  /**
+   * Names the code needs but that have no address on this chain yet (spec 007: MamoruActionPolicy before its
+   * deployment). `entry`/`address` refuse them like an unknown name, so nothing can target them; `isDeployed` says
+   * which they are. Deploying one moves it into `entries` with its address and code hash.
+   */
+  undeployed: string[]
 }
 
-type RegistryFile = { chain: string; chainId: number; block: number; blockHash: string; entries: unknown[] }
+type RegistryFile = { chain: string; chainId: number; block: number; blockHash: string; entries: unknown[]; undeployed?: { name: string; address: null }[] }
 
 function load(file: RegistryFile): Registry {
-  return {
-    chain: file.chain,
-    chainId: file.chainId,
-    block: file.block,
-    blockHash: file.blockHash as Hex,
-    entries: (file.entries as RegistryEntry[]).map((e) => ({ ...e, address: getAddress(e.address) })),
-  }
+  const entries = (file.entries as RegistryEntry[]).map((e) => ({ ...e, address: getAddress(e.address) }))
+  const undeployed = (file.undeployed ?? []).map((u) => {
+    if (u.address !== null) throw new Error(`${file.chain} registry: undeployed ${u.name} has an address; move it to entries`)
+    if (entries.some((e) => e.name === u.name)) throw new Error(`${file.chain} registry: ${u.name} is both deployed and undeployed`)
+    return u.name
+  })
+  return { chain: file.chain, chainId: file.chainId, block: file.block, blockHash: file.blockHash as Hex, entries, undeployed }
 }
 
 export const baseRegistry: Registry = load(base)
@@ -66,8 +72,13 @@ export type RegistryName = string
 
 export function entry(name: RegistryName, registry: Registry = baseRegistry): RegistryEntry {
   const found = registry.entries.find((e) => e.name === name)
-  if (!found) throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', name)
+  if (!found) throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', registry.undeployed?.includes(name) ? `${name} is not deployed on ${registry.chain}` : name)
   return found
+}
+
+/** The name has an address on this registry's chain (false for an `undeployed` name and for an unknown one). */
+export function isDeployed(name: RegistryName, registry: Registry = baseRegistry): boolean {
+  return registry.entries.some((e) => e.name === name)
 }
 
 export function address(name: RegistryName, registry: Registry = baseRegistry): Address {
