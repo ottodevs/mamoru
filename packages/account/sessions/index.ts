@@ -124,7 +124,7 @@ export function mamoruActionPolicyInitData(init: MamoruActionPolicyInit): Hex {
 
 /**
  * Maps a policy grant onto the Smart Sessions Session struct. Every action carries UniActionPolicy; a v4 grant (spec
- * 007, `grant.actionPolicy`) adds MamoruActionPolicy after it on every action but the `uniOnly` ones. A grant without
+ * 007, `grant.actionPolicy`) adds MamoruActionPolicy after it on every action. A grant without
  * `actionPolicy` maps exactly as before.
  */
 export function toSmartSession(grant: SessionGrant): SmartSessionStruct {
@@ -144,7 +144,7 @@ export function toSmartSession(grant: SessionGrant): SmartSessionStruct {
     actions: grant.actions.map((a) => ({
       actionTargetSelector: a.selector,
       actionTarget: a.targetAddress,
-      actionPolicies: [{ policy: address('UniActionPolicy'), initData: uniActionInitData(a) }, ...(mamoru && !a.uniOnly ? [mamoru] : [])],
+      actionPolicies: [{ policy: address('UniActionPolicy'), initData: uniActionInitData(a) }, ...(mamoru ? [mamoru] : [])],
     })),
     permitERC4337Paymaster: grant.permitERC4337Paymaster,
   }

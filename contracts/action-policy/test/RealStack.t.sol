@@ -1319,18 +1319,22 @@ contract RealStackTest is Test {
         a.actionPolicies[0] = PolicyData(UNI, _uniInit(rules));
     }
 
-    function _deadlineAction() internal pure returns (ActionData memory) {
-        Rule[] memory r = new Rule[](3);
+    function _deadlineRules() internal pure returns (Rule[] memory r) {
+        r = new Rule[](3);
         r[0] = Rule(GT, 0, bytes32(0));
         r[1] = Rule(EQ, 1, bytes32(uint256(64)));
         r[2] = Rule(EQ, 2, bytes32(0));
-        return _actUni(ROUTER, MULTICALL_DEADLINE, r);
+    }
+
+    /// The v2 grants' deadline action: UniActionPolicy only.
+    function _deadlineAction() internal pure returns (ActionData memory) {
+        return _actUni(ROUTER, MULTICALL_DEADLINE, _deadlineRules());
     }
 
     /**
      * conservador-live-v4's `engine` grant for one pool, action for action and rule for rule as packages/policy
      * `engineGrants` builds it (pinned by packages/policy/src/v4.test.ts): T1's 8 actions, increase with its two
-     * positive minimums, and the swap deadline on UniActionPolicy only. 9 actions.
+     * positive minimums, and the swap deadline, both policies on all. 9 actions.
      */
     function _t2Actions(Pool memory p, address account, bytes memory mam)
         internal
@@ -1350,7 +1354,7 @@ contract RealStackTest is Test {
         inc[4] = Rule(GT, 4, bytes32(0));
         a[4] = _act(address(policy), MamoruActionPolicy.increase.selector, inc, mam);
         (a[5], a[6], a[7]) = (t1[5], t1[6], t1[7]); // decrease, collect, burn
-        a[8] = _deadlineAction();
+        a[8] = _act(ROUTER, MULTICALL_DEADLINE, _deadlineRules(), mam); // both policies (#151 review P1-2)
     }
 
     /// The live v2 layout per pool with its deadline actions (enter-swap 3, enter-mint 3, manage-any 6, convert-any 4).
@@ -1493,6 +1497,11 @@ contract RealStackTest is Test {
         OpResult memory r = _run(_useOp(safe, pid, _xs(smuggle), sessionPk), "T2: multicall carrying a swap");
         require(!r.included, "a multicall with calls must be refused");
         _expectRefused(r, _violation(pid, UNI));
+        // Paused by the guardian: even the empty deadline is refused (MamoruActionPolicy is on that action too).
+        vm.prank(GUARDIAN);
+        policy.pause(safe);
+        OpResult memory p = _run(_useOp(safe, pid, _xs(deadline), sessionPk), "T2: deadline alone while paused");
+        _expectRefused(p, _violation(pid, address(policy)));
     }
 }
 

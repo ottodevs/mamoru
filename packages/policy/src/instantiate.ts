@@ -181,7 +181,6 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
       cumulativeLimit: p.cumulative ? resolveRef(p.cumulative, ctx) : undefined,
       denial: p.denial,
     })),
-    ...(actionPolicy && a.uniOnly ? { uniOnly: true as const } : {}),
   }))
   const seen = new Set<string>()
   for (const a of actions) {

@@ -333,7 +333,8 @@ export function manageAnyGrants(p: PairSpec, usage: { manage: Usage; convert: Us
 
 /**
  * Spec 007 (otto/mamoru#151), policy v4: ONE session per pool for everything the engine does there, with
- * MamoruActionPolicy next to UniActionPolicy on every action (but the swap deadline, `uniOnly`). What a leaked key can do
+ * MamoruActionPolicy next to UniActionPolicy on every action, the swap deadline included (the policy accepts only its
+ * empty multicall, and refuses it too while the account is paused or the grant retired). What a leaked key can do
  * is bounded on chain by the policy, not by splitting grants: prices within `bandTicks` of the pool's TWAP, only
  * positions minted through the policy for this account and still owned by it, token0/token1 spend per window and per
  * approval. UniActionPolicy keeps what it can express: recipients pinned to the account, pool tokens and fee, per-call
@@ -367,7 +368,7 @@ export function engineGrants(p: PairSpec & { pool: string }, usage: Usage, ap: O
           { field: 'amountIn', index: 4, condition: 'LESS_THAN_OR_EQUAL', ref: either, denial: 'POLICY_DENIED_AMOUNT' },
           { field: 'amountOutMinimum', index: 5, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
         ]),
-        { ...swapDeadline(), uniOnly: true },
+        swapDeadline(),
         action('MamoruActionPolicy', MINT, [
           { field: 'token0', index: 0, condition: 'EQUAL', ref: p.token0, denial: 'POLICY_DENIED_TARGET' },
           { field: 'token1', index: 1, condition: 'EQUAL', ref: p.token1, denial: 'POLICY_DENIED_TARGET' },

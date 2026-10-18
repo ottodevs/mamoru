@@ -90,21 +90,21 @@ describe('policy v4 (spec 007 T2)', () => {
 
   test('the engine grant: every action, rule and policy a session key gets', () => {
     const g = instantiateGrant(conservadorLiveV4, `engine:${BTC}`, ctx)
-    const shape = g.actions.map((a) => [a.target, a.signature.split('(')[0], a.selector, a.uniOnly ?? false, a.params.map((p) => `${p.field} ${p.condition} ${p.ref}`)])
+    const shape = g.actions.map((a) => [a.target, a.signature.split('(')[0], a.selector, a.params.map((p) => `${p.field} ${p.condition} ${p.ref}`)])
     const acct = BigInt(ACCOUNT)
     const w0 = caps.btcWindow0!
     const w1 = caps.btcWindow1!
     const max = w0 > w1 ? w0 : w1
     expect(shape).toEqual([
-      ['USDC', 'approve', '0x095ea7b3', false, [`amount LESS_THAN_OR_EQUAL ${w0}`]],
-      ['cbBTC', 'approve', '0x095ea7b3', false, [`amount LESS_THAN_OR_EQUAL ${w1}`]],
-      ['SwapRouter02', 'exactInputSingle', '0x04e45aaf', false, ['fee EQUAL 500', `recipient EQUAL ${acct}`, `amountIn LESS_THAN_OR_EQUAL ${max}`, 'amountOutMinimum GREATER_THAN 0']],
-      ['SwapRouter02', 'multicall', '0x5ae401dc', true, ['deadline GREATER_THAN 0', 'dataOffset EQUAL 64', 'dataLength EQUAL 0']],
-      ['MamoruActionPolicy', 'mint', '0x88316456', false, [`token0 EQUAL ${BigInt(address('USDC'))}`, `token1 EQUAL ${BigInt(address('cbBTC'))}`, 'fee EQUAL 500', `amount0Desired LESS_THAN_OR_EQUAL ${w0}`, `amount1Desired LESS_THAN_OR_EQUAL ${w1}`, 'amount0Min GREATER_THAN 0', 'amount1Min GREATER_THAN 0', `recipient EQUAL ${acct}`]],
-      ['MamoruActionPolicy', 'increase', '0x4110c363', false, ['tokenId GREATER_THAN 0', `amount0Desired LESS_THAN_OR_EQUAL ${w0}`, `amount1Desired LESS_THAN_OR_EQUAL ${w1}`, 'amount0Min GREATER_THAN 0', 'amount1Min GREATER_THAN 0']],
-      ['NonfungiblePositionManager', 'decreaseLiquidity', '0x0c49ccbe', false, ['tokenId GREATER_THAN 0']],
-      ['NonfungiblePositionManager', 'collect', '0xfc6f7865', false, [`recipient EQUAL ${acct}`]],
-      ['NonfungiblePositionManager', 'burn', '0x42966c68', false, ['tokenId GREATER_THAN 0']],
+      ['USDC', 'approve', '0x095ea7b3', [`amount LESS_THAN_OR_EQUAL ${w0}`]],
+      ['cbBTC', 'approve', '0x095ea7b3', [`amount LESS_THAN_OR_EQUAL ${w1}`]],
+      ['SwapRouter02', 'exactInputSingle', '0x04e45aaf', ['fee EQUAL 500', `recipient EQUAL ${acct}`, `amountIn LESS_THAN_OR_EQUAL ${max}`, 'amountOutMinimum GREATER_THAN 0']],
+      ['SwapRouter02', 'multicall', '0x5ae401dc', ['deadline GREATER_THAN 0', 'dataOffset EQUAL 64', 'dataLength EQUAL 0']],
+      ['MamoruActionPolicy', 'mint', '0x88316456', [`token0 EQUAL ${BigInt(address('USDC'))}`, `token1 EQUAL ${BigInt(address('cbBTC'))}`, 'fee EQUAL 500', `amount0Desired LESS_THAN_OR_EQUAL ${w0}`, `amount1Desired LESS_THAN_OR_EQUAL ${w1}`, 'amount0Min GREATER_THAN 0', 'amount1Min GREATER_THAN 0', `recipient EQUAL ${acct}`]],
+      ['MamoruActionPolicy', 'increase', '0x4110c363', ['tokenId GREATER_THAN 0', `amount0Desired LESS_THAN_OR_EQUAL ${w0}`, `amount1Desired LESS_THAN_OR_EQUAL ${w1}`, 'amount0Min GREATER_THAN 0', 'amount1Min GREATER_THAN 0']],
+      ['NonfungiblePositionManager', 'decreaseLiquidity', '0x0c49ccbe', ['tokenId GREATER_THAN 0']],
+      ['NonfungiblePositionManager', 'collect', '0xfc6f7865', [`recipient EQUAL ${acct}`]],
+      ['NonfungiblePositionManager', 'burn', '0x42966c68', ['tokenId GREATER_THAN 0']],
     ])
     expect(toFunctionSelector('function increase((uint256,uint256,uint256,uint256,uint256,uint256))')).toBe('0x4110c363')
     // Mint and increase go to the policy, never the manager; no action can transfer or approve an NFT; the swap has no
@@ -140,7 +140,6 @@ describe('policy v4 (spec 007 T2)', () => {
     expect(() => instantiateGrant(conservadorLiveV2, `enter-swap:${BTC}`, { ...v2ctx, generation: 1n })).toThrow(/no action policy/)
     const v2 = instantiateGrant(conservadorLiveV2, `enter-swap:${BTC}`, v2ctx)
     expect('actionPolicy' in v2).toBe(false)
-    expect(v2.actions.some((a) => 'uniOnly' in a)).toBe(false)
   })
 
   test('budgets beyond uint128 or a window above the total are refused', () => {

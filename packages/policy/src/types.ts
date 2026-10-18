@@ -40,12 +40,6 @@ export type ActionRuleTemplate = {
   /** Full function signature, static arguments only. */
   signature: string
   params: ParamRuleTemplate[]
-  /**
-   * Spec 007: on a grant with an `actionPolicy`, this action carries UniActionPolicy only. Set on the swap deadline
-   * (SwapRouter02.multicall(deadline, []), whose rules already pin it to execute nothing): MamoruActionPolicy refuses
-   * every call it does not know, that one included.
-   */
-  uniOnly?: true
 }
 
 /**
@@ -92,7 +86,7 @@ export type GrantTemplate = {
   pool?: RegistryName
   /** Activated by the owner only for a tokenId already admitted from enter-mint. */
   perPosition: boolean
-  /** Spec 007: MamoruActionPolicy on every action (but `uniOnly` ones), with this Init. Absent: UniActionPolicy only. */
+  /** Spec 007: MamoruActionPolicy on every action, with this Init. Absent: UniActionPolicy only. */
   actionPolicy?: ActionPolicyTemplate
   /** userOps one approval allows under this grant. With `usageByCap`, the limit of an account cap under its first tier. */
   usageLimit: number
@@ -289,8 +283,6 @@ export type ResolvedActionRule = {
   selector: Hex
   nativeValue: 0n
   params: ResolvedParamRule[]
-  /** See ActionRuleTemplate.uniOnly. Present only on v4 grants. */
-  uniOnly?: true
 }
 
 /** MamoruActionPolicy.Init (contracts/action-policy/src/MamoruActionPolicy.sol), field for field. */
@@ -323,6 +315,6 @@ export type SessionGrant = {
   fallbackAction: 'none'
   tokenId?: bigint
   actions: ResolvedActionRule[]
-  /** Spec 007 (v4 grants only): the MamoruActionPolicy every action but the `uniOnly` ones carries, and its Init. */
+  /** Spec 007 (v4 grants only): the MamoruActionPolicy every action carries, and its Init. */
   actionPolicy?: { address: Address; init: MamoruActionPolicyInit }
 }
