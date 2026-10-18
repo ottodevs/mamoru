@@ -77,6 +77,13 @@ export type OpEntry = {
   gasCost: bigint
   /** Fees taken out of the position by this operation, in raw savings units. */
   feesValue: bigint
+  /**
+   * Lab (otto/mamoru#151 T5): the token amounts this op would spend against MamoruActionPolicy's budget (swaps'
+   * `amountIn`, mints' `amount0Desired`/`amount1Desired`, both of harvest's convert leg) — spec 007 "(c) budgets":
+   * "token0 and token1 spent by swaps (amountIn) and mints (amountDesired)". Present only on an executed op (`ok`)
+   * of kind `enter_swap`, `enter_mint`, or `harvest` with a convert leg; a decrease spends nothing against it.
+   */
+  spend?: { token: RegistryName; amount: bigint }[]
 }
 
 /**

@@ -24,10 +24,10 @@ export const DEFAULT_GAS: GasModel = {
 const WEEK = 7 * 86_400
 const KINDS: readonly OpKind[] = ['enter_swap', 'enter_mint', 'harvest', 'rerange', 'reduce']
 
-type Pricer = (s: Sample, token: RegistryName, amount: bigint) => bigint
+export type Pricer = (s: Sample, token: RegistryName, amount: bigint) => bigint
 
 /** For every token of the dataset, the pool that prices it in the savings asset: a policy pool first. */
-function pricer(ds: Dataset, policy: PolicyVersion): Pricer {
+export function pricer(ds: Dataset, policy: PolicyVersion): Pricer {
   const savings = policy.savingsAsset
   const policyPools = new Set(policy.buckets.flatMap((b) => b.pools))
   const by = new Map<RegistryName, { k: number; e: RegistryEntry }>()
@@ -115,6 +115,18 @@ function drawdowns(time: number[], value: bigint[]): { maxDrawdownBps: number; w
   return { maxDrawdownBps: maxDd, worstWeekBps: worst }
 }
 
+/**
+ * Lab (otto/mamoru#151 T5): the token amounts `p` spends against MamoruActionPolicy's budget — swaps' `amountIn`
+ * (enter_swap and harvest's convert leg) and mints' both desired amounts (spec 007 "(c) budgets"). A decrease
+ * (rerange, reduce) spends nothing against it.
+ */
+function budgetSpend(p: Proposal, e: RegistryEntry): { token: RegistryName; amount: bigint }[] {
+  if (p.kind === 'enter_swap') return [{ token: p.tokenIn, amount: p.amountIn }]
+  if (p.kind === 'enter_mint') return [{ token: e.token0!, amount: p.amount0Desired }, { token: e.token1!, amount: p.amount1Desired }]
+  if (p.kind === 'harvest' && p.convert) return [{ token: p.convert.token, amount: p.convert.amount }]
+  return []
+}
+
 /** The grant template a proposal runs under (`manage:<tokenId>` is the per-position `manage`), or undefined. */
 function templateOf(policy: PolicyVersion, grant: string): GrantTemplate | undefined {
   const perPosition = /^manage:\d+$/.test(grant)
@@ -148,7 +160,7 @@ function cumulativeSpend(t: GrantTemplate, p: Proposal): [string, string, bigint
 }
 
 /** The caps an approval signed at sample `s` carries: bps of the account cap, at that sample's prices (#149). */
-function capsAt(policy: PolicyVersion, s: Sample, price: Pricer, capUsdc: bigint): Caps {
+export function capsAt(policy: PolicyVersion, s: Sample, price: Pricer, capUsdc: bigint): Caps {
   const ONE = 10n ** 24n
   const prices: Record<string, Price> = {}
   for (const f of policy.session.caps) {
@@ -336,7 +348,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
         const cost = done.ok ? gasCost(ds, s, p.kind, gas, savings) : 0n
         ops.push({
           i, block: s.block, time: s.time, kind: p.kind, pool: p.pool, grant: p.grant, code: d.code, reason: d.reason, trail: d.trail, ok: done.ok,
-          ...(done.ok ? {} : { detail: done.detail }),
+          ...(done.ok ? { spend: budgetSpend(p, e) } : { detail: done.detail }),
           gasCost: cost,
           feesValue: done.ok ? price(s, e.token0!, done.fees0) + price(s, e.token1!, done.fees1) : 0n,
         })
