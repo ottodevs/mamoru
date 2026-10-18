@@ -2,9 +2,9 @@ import { join } from 'node:path'
 import { $ } from 'bun'
 import { createPublicClient, http } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
-import { BASE_CHAIN_ID } from '@mamoru/domain'
+import { BASE_CHAIN_ID, type Address } from '@mamoru/domain'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
-import { POLICIES, withTestOverrides, type PolicyVersion } from '@mamoru/policy'
+import { conservadorLabV4, conservadorLiveV4, POLICIES, withActionPolicy, withTestOverrides, V4_POOLS, type PolicyVersion } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
@@ -36,6 +36,35 @@ export function syncYieldLedgerFlag(loop: Pick<SnapshotLoop, 'start' | 'stop'>, 
   else loop.stop()
   log(`[flags] yield_ledger ${on ? 'on' : 'off'}`)
   return on
+}
+
+/** `conservadorLiveV4`/`conservadorLabV4`, keyed by their own `policyId` — never in `POLICIES` (policies.ts). */
+const V4_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV4.policyId]: conservadorLiveV4, [conservadorLabV4.policyId]: conservadorLabV4 }
+
+/**
+ * Spec 007 (otto/mamoru#151) T7: a v2/v3 `policyId` (the only kind any live account names today) resolves exactly
+ * as it always has, straight from `POLICIES` — this function changes nothing for them. A v4 `policyId` resolves
+ * only with both an explicit opt-in, `MAMORU_ONCHAIN_POLICY_V4=1` (read here, not from the D1 ops-flags table:
+ * this runs before `EngineSettingsSource` exists, at the one point `bootOperator` picks the process-wide policy —
+ * see `OPS_FLAGS.onchain_action_policy_v4`'s own doc for the D1-backed flag this mirrors for anything that CAN
+ * wait for the settings pull), and a deployed `MamoruActionPolicy` address, `MAMORU_ACTION_POLICY_ADDRESS` — never
+ * hardcoded, read here and nowhere else. `budgetsByPool` is deliberately left unset (`withActionPolicy` without
+ * `opts.caps`): that budget is sized per account from its own deposit (`computeCaps`), which a per-process,
+ * boot-time policy object cannot carry for every account at once — T7's operator activation wires it in per
+ * account when it builds each account's engine config, not here. Until then precheck's budget mirror is a no-op
+ * (fail safe, same as any pool `actionPolicy.budgetsByPool` does not list) and the deployed contract's own
+ * `checkAction` is still the real enforcement. Off, or the address unset: an unrecognized policyId throws exactly
+ * the same `unknown policy` error it always has — nothing changes for any account while the flag is off.
+ */
+export function resolveNamedPolicy(policyId: string, env: Record<string, string | undefined>): PolicyVersion | undefined {
+  const named = POLICIES[policyId]
+  if (named) return named
+  if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1') return undefined
+  const v4 = V4_POLICIES_BY_ID[policyId]
+  if (!v4) return undefined
+  const deployed = env.MAMORU_ACTION_POLICY_ADDRESS
+  if (!deployed) throw new Error('MAMORU_ONCHAIN_POLICY_V4=1 but MAMORU_ACTION_POLICY_ADDRESS is not set')
+  return withActionPolicy(v4, deployed as Address, Object.values(V4_POOLS))
 }
 
 /** `git rev-parse --short HEAD` at the operator's cwd, read once at boot. 'unknown' outside a git checkout. */
@@ -155,7 +184,7 @@ export async function bootOperator(o: BootOptions) {
   const watchClient = createPublicClient({ transport: http(via('watcher'), { batch: true, timeout: 60_000 }) })
   const chainId = await client.getChainId()
   const live = chainId === BASE_CHAIN_ID && process.env.MAMORU_LIVE === '1'
-  const named = POLICIES[o.policyId ?? 'conservador-live-v2']
+  const named = resolveNamedPolicy(o.policyId ?? 'conservador-live-v2', process.env)
   if (!named) throw new Error(`unknown policy ${o.policyId}`)
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
   const policy = withTestOverrides(named, process.env)

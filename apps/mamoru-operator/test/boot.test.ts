@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { syncYieldLedgerFlag } from '../src/boot.ts'
+import { POLICIES } from '@mamoru/policy'
+import { resolveNamedPolicy, syncYieldLedgerFlag } from '../src/boot.ts'
 
 function fakeLoop() {
   const calls: string[] = []
@@ -44,5 +45,41 @@ describe('syncYieldLedgerFlag (otto/mamoru#129): boot.ts starts/stops the snapsh
     on = syncYieldLedgerFlag(loop, true, on, () => {})
     expect(loop.calls).toEqual(['start', 'stop', 'start'])
     expect(on).toBe(true)
+  })
+})
+
+describe('resolveNamedPolicy (otto/mamoru#151 T7): conservadorLiveV4 is only reachable behind an explicit, env-read opt-in', () => {
+  const ADDR = '0x00000000000000000000000000000000000000Fe'
+
+  test('a v2/v3 policyId resolves exactly as POLICIES[id] always has, whatever the env says', () => {
+    expect(resolveNamedPolicy('conservador-live-v2', {})).toBe(POLICIES['conservador-live-v2'])
+    expect(resolveNamedPolicy('conservador-live-v2', { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: ADDR })).toBe(POLICIES['conservador-live-v2'])
+  })
+
+  test('an unknown policyId with the flag off (default): undefined, same as POLICIES[id] on any unknown name — nothing changes while off', () => {
+    expect(resolveNamedPolicy('conservador-live-v4', {})).toBeUndefined()
+    expect(resolveNamedPolicy('nonsense', {})).toBeUndefined()
+  })
+
+  test('conservador-live-v4 with the flag off: still undefined (not reachable without the opt-in)', () => {
+    expect(resolveNamedPolicy('conservador-live-v4', { MAMORU_ACTION_POLICY_ADDRESS: ADDR })).toBeUndefined()
+  })
+
+  test('conservador-live-v4 with the flag on but no deployed address: throws (never silently unset)', () => {
+    expect(() => resolveNamedPolicy('conservador-live-v4', { MAMORU_ONCHAIN_POLICY_V4: '1' })).toThrow('MAMORU_ACTION_POLICY_ADDRESS')
+  })
+
+  test('conservador-live-v4 with the flag on and a deployed address: resolves with actionPolicy wired to that address, bands only (no per-account budgets yet)', () => {
+    const policy = resolveNamedPolicy('conservador-live-v4', { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: ADDR })
+    expect(policy?.policyId).toBe('conservador-live-v4')
+    expect(policy?.actionPolicy?.address.toLowerCase()).toBe(ADDR.toLowerCase())
+    expect(Object.keys(policy?.actionPolicy?.bandTicksByPool ?? {}).length).toBeGreaterThan(0)
+    expect(policy?.actionPolicy?.budgetsByPool).toBeUndefined()
+  })
+
+  test('conservador-lab-v4 behind the same gate', () => {
+    expect(resolveNamedPolicy('conservador-lab-v4', {})).toBeUndefined()
+    const policy = resolveNamedPolicy('conservador-lab-v4', { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: ADDR })
+    expect(policy?.policyId).toBe('conservador-lab-v4')
   })
 })
