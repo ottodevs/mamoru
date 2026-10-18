@@ -38,7 +38,9 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
   const simulated: { from?: string; to: string; data: Hex }[][] = []
   const chain = { deployed: false, usdc, nonce: 0n }
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
-  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false as boolean | null, enabled: new Set<string>(), batchGrants: false, head: 100n, batchedGrantReads: 0, multicalls: 0, pending: null as { grants?: { permissionId: string }[]; revokes?: string[] } | null, logs: [] as { stx: Hex; hash: Hex; block: bigint }[], enabledFromBlock: 0n, noHistory: false, usdt: 0n, spotTick: 0, twapTick: 0 as number | null, blockHashes: new Map<bigint, Hex>() }
+  const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false as boolean | null, enabled: new Set<string>(), batchGrants: false, head: 100n, batchedGrantReads: 0, multicalls: 0, pending: null as { grants?: { permissionId: string }[]; revokes?: string[] } | null, logs: [] as { stx: Hex; hash: Hex; block: bigint }[], enabledFromBlock: 0n, noHistory: false, usdt: 0n, spotTick: 0, twapTick: 0 as number | null, blockHashes: new Map<bigint, Hex>(),
+    /** otto/mamoru#163: the Safe nonce at a past block (default: today's), Safe txs of others run at a block, and a node that cannot serve a block's logs by hash. */
+    nonceAt: null as ((block: bigint) => bigint) | null, foreign: [] as { stx: Hex; hash: Hex; block: bigint }[], blockLogsDown: false }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -55,7 +57,16 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
     getTransactionReceipt: async () => {
       throw new Error('no receipt')
     },
-    getLogs: async () => knobs.logs.map((l) => ({ address: SAFE, topics: [EXECUTION_SUCCESS, l.stx], transactionHash: l.hash, blockNumber: l.block })),
+    getLogs: async (a: { blockHash?: Hex } = {}) => {
+      // EIP-234, a block's logs by its hash: every Safe execution of that block, ours and others', in order.
+      if (a.blockHash) {
+        if (knobs.blockLogsDown) throw new Error('HTTP request failed. Status: 503')
+        return [...knobs.logs, ...knobs.foreign]
+          .filter((l) => keccak256(stringToHex(`block-${l.block}`)) === a.blockHash)
+          .map((l, i) => ({ address: SAFE, topics: [EXECUTION_SUCCESS, l.stx], transactionHash: l.hash, blockNumber: l.block, logIndex: i }))
+      }
+      return knobs.logs.map((l) => ({ address: SAFE, topics: [EXECUTION_SUCCESS, l.stx], transactionHash: l.hash, blockNumber: l.block }))
+    },
     getCode: async () => (chain.deployed ? '0x01' : undefined),
     getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? knobs.relayerWei : 0n),
     getTransactionCount: async ({ blockTag }: { blockTag?: string }) => (blockTag === 'pending' ? 5 + knobs.relayerPending : 5),
@@ -65,7 +76,7 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
         if (knobs.twapTick === null) throw new Error('execution reverted: OLD')
         return [[0n, BigInt(knobs.twapTick) * 1800n], [0n, 0n]]
       }
-      if (functionName === 'nonce') return chain.nonce
+      if (functionName === 'nonce') return blockNumber !== undefined && knobs.nonceAt ? knobs.nonceAt(blockNumber) : chain.nonce
       if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : 0n
       if (functionName === 'isPermissionEnabled') {
         if (blockNumber !== undefined && knobs.noHistory) throw new Error('missing trie node: historical state not available')
@@ -141,6 +152,16 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
   // The chain model by default: grants enabled and revoked by the owner txs the relayer sent (see track).
   track(w as never)
   return w
+}
+
+/**
+ * otto/mamoru#163: Safe txs of others spent the Safe nonces `before`..`after - 1` at block `at`: the Safe nonce read at
+ * a block, and that block's logs by hash, show it (the evidence settlement now needs to say "not run").
+ */
+function spentElsewhere(w: ReturnType<typeof world>, before: bigint, after: bigint, at = 100n): void {
+  w.chain.nonce = after
+  w.knobs.nonceAt = (b) => (b >= at ? after : before)
+  for (let n = before; n < after; n++) w.knobs.foreign.push({ stx: keccak256(stringToHex(`foreign-stx-${n}`)), hash: keccak256(stringToHex(`foreign-tx-${n}`)), block: at })
 }
 
 function der(r: bigint, s: bigint): Uint8Array {
@@ -2270,10 +2291,10 @@ describe('renewing the approval of a running account', () => {
     const ff = `0x${'ff'.repeat(32)}` as Hex
     const fresh = [ee, ff].map((permissionId) => ({ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId }))
     acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: old, safeTxHash: keccak256(stringToHex('stx-' + Math.random())), safeNonce: '1' } as never)
-    // It ran, unproven (no receipt, no log found); then the owner removed ee elsewhere.
+    // Its nonce spent by other Safe txs (the chain shows which: otto/mamoru#163), its old grants revoked, ff enabled.
     for (const id of old) w.knobs.enabled.delete(id.toLowerCase())
     w.knobs.enabled.add(ff)
-    w.chain.nonce = 3n
+    spentElsewhere(w, 1n, 3n)
     await w.op.prepareRenew(ctx).catch(() => undefined)
     expect(acc.active).toBe(false)
     expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'RENEWAL_UNPROVEN' })
@@ -2498,7 +2519,9 @@ describe('renewing the approval of a running account', () => {
           for (const id of had) w.knobs.enabled.delete(id.toLowerCase())
           w.knobs.enabled.add(ee)
         }
-        w.chain.nonce = 3n
+        // otto/mamoru#163: what spent nonce 1 is in that block's own logs: R itself when it ran, another Safe tx if not.
+        spentElsewhere(w, 1n, 3n)
+        if (ran) w.knobs.foreign[0] = { stx, hash, block: 100n }
         type C = { getTransactionReceipt(a: unknown): Promise<unknown>; getLogs(a: unknown): Promise<unknown> }
         const client = (w.op as unknown as { client: C }).client
         const getReceipt = client.getTransactionReceipt.bind(client)
@@ -2512,8 +2535,14 @@ describe('renewing the approval of a running account', () => {
         }
         await w.op.prepareRenew(ctx).catch(() => undefined)
         const st = () => acc.ops.find((o) => o.opId === R.opId)!
-        // A read error: undecided, still an unread receipt. Reads that answer and find nothing: unproven (retryable).
-        if (failure === 'none') expect(st().code, label).toBe(ran ? 'RENEWAL_UNPROVEN' : 'RENEWAL_SUPERSEDED')
+        // A read error: undecided, still an unread receipt. Reads that answer: the block that spent the nonce says which
+        // Safe tx did (otto/mamoru#163): R itself (applied at once, every grant enabled), or another one (superseded).
+        if (failure === 'none' && ran) {
+          expect(st(), label).toMatchObject({ state: 'confirmed', txHash: hash })
+          expect(acc.grants.map((g) => g.permissionId), label).toEqual([ee])
+          continue
+        }
+        if (failure === 'none') expect(st().code, label).toBe('RENEWAL_SUPERSEDED')
         else expect(st(), label).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
         expect(st().state, label).toBe('failed')
         // The provider recovers and its log (or receipt) is found: a renewal that ran is applied, every grant enabled.
@@ -2801,7 +2830,7 @@ describe('renewing the approval of a running account', () => {
     const ff = `0x${'ff'.repeat(32)}` as Hex
     const fresh = [ee, ff].map((permissionId) => ({ name: acc.grants[0]!.name, grant: acc.grants[0]!.grant, permissionId }))
     acc.ops.push({ opId: 'own-7-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: new Date().toISOString(), ownerGrants: fresh, revokes: [], safeTxHash: keccak256(stringToHex('stx-' + Math.random())), safeNonce: '1' } as never)
-    w.chain.nonce = 3n
+    spentElsewhere(w, 1n, 3n)
     type Read = { readContract(a: { functionName: string; args?: readonly unknown[] }): Promise<unknown> }
     const client = (w.op as unknown as { client: Read }).client
     const read = client.readContract.bind(client)
@@ -2862,8 +2891,8 @@ describe('renewing the approval of a running account', () => {
     expect(w.chain.nonce).toBe(1n)
     await w.op.prepareRenew(ctx)
     expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
-    // A withdrawal spent nonce 1: the renewal can never run, nothing of it is enabled.
-    w.chain.nonce = 2n
+    // A withdrawal spent nonce 1 (its block's log shows it): the renewal can never run, nothing of it is enabled.
+    spentElsewhere(w, 1n, 2n)
     await w.op.submit(ctx, 'renew', sign(await w.op.prepareRenew(ctx)))
     expect(acc.ops.find((o) => o.opId === 'own-7-renew')).toMatchObject({ state: 'failed', code: 'RENEWAL_SUPERSEDED' })
     expect(acc.revoked).not.toContain(ee)

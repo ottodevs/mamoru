@@ -77,6 +77,11 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     /** The head `getBlock()` answers, and hashes a node answers for a height instead of its own. */
     blockHead: 100n,
     blockHashes: new Map<bigint, Hex>(),
+    /** otto/mamoru#163: the Safe nonce at a past block (default: today's), and a node that cannot serve a block's logs by hash. */
+    nonceAt: null as ((block: bigint) => bigint) | null,
+    blockLogsDown: false,
+    /** A log backend behind the chain: a range search answers empty, whatever happened. */
+    rangeLogsLag: false,
   }
   const npmCalls: string[] = []
   let saves = 0
@@ -89,7 +94,7 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     return encodeFunctionResult({ abi: nonfungiblePositionManagerAbi, functionName: 'positions', result: [0n, `0x${'0'.repeat(40)}`, address(e.token0!), address(e.token1!), e.fee!, -600, 600, p.liquidity, 0n, 0n, 0n, 0n] })
   }
   const client = {
-    getBlockNumber: async () => 101n, // at least the block its receipts land in (101): #60 never reads grants below it
+    getBlockNumber: async () => (knobs.blockHead > 101n ? knobs.blockHead : 101n), // at least the block its receipts land in (101): #60 never reads grants below it
     // A block has a hash of its own; `blockHashes` is what a read of that height by number answers instead (another
     // node, behind or on another view, than the one that gave the head).
     getBlock: async (a: { blockNumber?: bigint } = {}) => {
@@ -102,15 +107,22 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
       if (r) return r
       throw new Error('no receipt')
     },
-    getLogs: async () => knobs.safeLogs,
+    getLogs: async (a: { blockHash?: Hex } = {}) => {
+      // EIP-234, a block's logs by its hash: the Safe executions of that block, in order.
+      if (a.blockHash) {
+        if (knobs.blockLogsDown) throw new Error('HTTP request failed. Status: 503')
+        return knobs.safeLogs.filter((l) => keccak256(stringToHex(`block-${l.blockNumber}`)) === a.blockHash).map((l, i) => ({ address: SAFE, logIndex: i, ...l }))
+      }
+      return knobs.rangeLogsLag ? [] : knobs.safeLogs
+    },
     getCode: async () => (chain.deployed ? '0x01' : undefined),
     getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? 10n ** 18n : at.toLowerCase() === SAFE.toLowerCase() ? chain.safeEth : 0n),
     getTransactionCount: async () => 5,
-    readContract: async ({ address: at, functionName, args }: { address: string; functionName: string; args?: readonly unknown[] }) => {
+    readContract: async ({ address: at, functionName, args, blockNumber }: { address: string; functionName: string; args?: readonly unknown[]; blockNumber?: bigint }) => {
       if (functionName === 'slot0') return [1n << 96n, 0, 0, 0, 0, 0, true]
       // #64: activations and engine swaps price at the pool TWAP; tick 0, as slot0.
       if (functionName === 'observe') return [[0n, 0n], [0n, 0n]]
-      if (functionName === 'nonce') return chain.nonce
+      if (functionName === 'nonce') return blockNumber !== undefined && knobs.nonceAt ? knobs.nonceAt(blockNumber) : chain.nonce
       if (functionName === 'balanceOf' && at.toLowerCase() === npm) {
         if (knobs.npmDown) throw new Error('HTTP request failed. Status: 503')
         return BigInt(chain.positions.length)

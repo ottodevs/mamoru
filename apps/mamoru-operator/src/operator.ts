@@ -71,6 +71,7 @@ const FUNDING_STALE_MS = 60_000
 const FUNDING_FRESH_READ_MS = 2_000
 
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
+const EXECUTION_FAILURE = keccak256(stringToHex('ExecutionFailure(bytes32,uint256)'))
 const EXECUTION_SUCCESS_EVENT = parseAbiItem('event ExecutionSuccess(bytes32 indexed txHash, uint256 payment)')
 /** How far past an owner op's send block its ExecutionSuccess is searched for (about a day of Base blocks), and per request. */
 const OWNER_LOG_SEARCH_BLOCKS = 43_200n
@@ -1928,7 +1929,7 @@ export class Operator {
       const answer = await this.provenOwnerTx(acc, op, pin)
       // A read error decides nothing: it stays an unread receipt, asked again (#140).
       if (answer === 'unknown') continue
-      const proof = answer === 'none' ? null : answer
+      let proof = answer === 'none' ? null : answer
       // Proven: read at a head not below the account's floor nor the renewal's own block (a lagging provider defers,
       // #140). Not proven: at B itself, which must not be below the account's floor.
       const block = proof ? await this.headAtLeast(acc, BigInt(proof.block)) : pin.number >= this.floorOf(acc, 0n) ? pin.number : null
@@ -1936,6 +1937,24 @@ export class Operator {
       const on = await this.enabledAt(acc, ids, block)
       if (!on) continue
       if (superseded(op) || op.state !== 'failed' || op.code !== RECEIPT_UNKNOWN) continue
+      // otto/mamoru#163: "not proven" by a search is not "not run". With its Safe nonce spent at B, the block that spent
+      // it is found and its own logs (by block hash) say which Safe tx did: this one (then it is the proof), another
+      // one (then it is not run, for good), or nothing readable (no conclusion).
+      let spent: Awaited<ReturnType<Operator['spentBy']>> = null
+      if (!proof && op.safeNonce !== undefined) {
+        let nonce: bigint
+        try {
+          nonce = (await this.client.readContract({ address: acc.ctx.address as Address, abi: safeAbi, functionName: 'nonce', blockNumber: block })) as bigint
+        } catch (e) {
+          logErr(`[settle] ${acc.accountKey} Safe nonce unreadable, left for later:`, e)
+          continue
+        }
+        // While its Safe nonce is not spent it may still land: left as it is (a stop or renewal revokes its grants).
+        if (nonce <= BigInt(op.safeNonce)) continue
+        spent = await this.spentBy(acc, op, block)
+        if (!spent) continue
+        if (spent.ours && spent.success) proof = { hash: spent.tx, block: Number(spent.block) }
+      }
       if (proof) {
         if (on.every(Boolean)) {
           console.log(`[renew] ${acc.accountKey} ${op.opId} executed on chain (tx ${proof.hash}), every grant enabled at block ${block}: applied`)
@@ -1947,20 +1966,10 @@ export class Operator {
         }
         continue
       }
-      // Not proven. While its Safe nonce is not spent it may still land: left as it is (a stop or renewal revokes its
-      // grants). Spent by whatever transaction: it can no longer be applied from here.
-      if (op.safeNonce === undefined) continue
-      let nonce: bigint
-      try {
-        nonce = (await this.client.readContract({ address: acc.ctx.address as Address, abi: safeAbi, functionName: 'nonce', blockNumber: block })) as bigint
-      } catch (e) {
-        logErr(`[settle] ${acc.accountKey} Safe nonce unreadable, left for later:`, e)
-        continue
-      }
-      if (nonce <= BigInt(op.safeNonce)) continue
-      // Its time is kept (findOwnerTx looks around it): reconcileOwner keeps asking an unproven one until its receipt
-      // or log gives a definitive answer.
-      Object.assign(op, { state: 'failed', code: on.some(Boolean) ? 'RENEWAL_UNPROVEN' : 'RENEWAL_SUPERSEDED' })
+      // Its Safe nonce was spent by another Safe tx (or by this one failing: ExecutionFailure), proven by that block's
+      // own log: it can no longer run. Its time is kept (findOwnerTx looks around it): reconcileOwner still asks.
+      if (!spent) continue
+      Object.assign(op, { state: 'failed', code: on.some(Boolean) ? 'RENEWAL_UNPROVEN' : 'RENEWAL_SUPERSEDED', spentBy: spent.safeTxHash, block: Number(spent.block) })
       this.store.save()
     }
     // Stops after renewals: a renewal applied above replaced the engine's grants, and the stop is judged on those.
@@ -2706,14 +2715,76 @@ export class Operator {
    * one of this account's own owner ops of that nonce ran, else SAFE_NONCE_MOVED. A read that fails throws: nothing
    * is concluded.
    */
-  private async settleByNonce(acc: AccountState, op: StoredOp): Promise<'open' | { close: string } | { hash: Hex; block: number; ok: true }> {
+  private async settleByNonce(acc: AccountState, op: StoredOp): Promise<'open' | { close: string; spentBy?: Hex; block?: number } | { hash: Hex; block: number; ok: true }> {
     const v = await this.executionAt(acc, op)
-    // Not one consistent view of the chain: nothing is concluded.
     if (!v) return 'open'
+    // Found by the range search (fast path): proof. Its emptiness proves nothing: a log backend can lag.
     if (v.ran) return { ...v.ran, ok: true }
     if (v.nonce <= BigInt(op.safeNonce!)) return 'open'
-    const replaced = acc.ops.some((o) => o !== op && o.opId.startsWith('own-') && o.state === 'confirmed' && (o as StoredOp).safeNonce === op.safeNonce)
-    return { close: replaced ? 'SUPERSEDED' : 'SAFE_NONCE_MOVED' }
+    const spent = await this.spentBy(acc, op, v.block)
+    if (!spent) return 'open'
+    if (spent.ours && spent.success) return { hash: spent.tx, block: Number(spent.block), ok: true }
+    if (spent.ours) return { close: 'OWNER_TX_FAILED', spentBy: spent.safeTxHash, block: Number(spent.block) }
+    const replaced = acc.ops.some((o) => o !== op && o.opId.startsWith('own-') && (o as StoredOp).safeTxHash?.toLowerCase() === spent.safeTxHash.toLowerCase())
+    return { close: replaced ? 'SUPERSEDED' : 'SAFE_NONCE_MOVED', spentBy: spent.safeTxHash, block: Number(spent.block) }
+  }
+
+  /**
+   * otto/mamoru#163: positive evidence of which Safe tx spent this op's Safe nonce N, given a block `upTo` at which the
+   * Safe nonce is past N. The block X where it went past N is found by a binary search of the Safe nonce read at block
+   * numbers (from before the op's first handover); X's hash is read, and the Safe's logs of X are fetched by that hash
+   * (EIP-234: a node without the block errors instead of answering empty). The Safe executions of X in log order
+   * (ExecutionSuccess or ExecutionFailure, each spending one nonce) name the one that spent N by its topics[1]. Any read
+   * that fails, or an X with no such log where one must be, is null: no conclusion.
+   */
+  private async spentBy(acc: AccountState, op: StoredOp, upTo: bigint): Promise<{ safeTxHash: Hex; tx: Hex; block: bigint; ours: boolean; success: boolean } | null> {
+    const safe = acc.ctx.address as Address
+    const n = BigInt(op.safeNonce!)
+    try {
+      const nonceAt = async (b: bigint): Promise<bigint> => {
+        if (!(await this.client.getCode({ address: safe, blockNumber: b }))) return 0n
+        return (await this.client.readContract({ address: safe, abi: safeAbi, functionName: 'nonce', blockNumber: b })) as bigint
+      }
+      // From before the op's first handover (the Safe nonce was N or lower then), widened until it is.
+      const top = await this.client.getBlock({ blockNumber: upTo })
+      const since = BigInt(Math.floor((op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt)) / 1000))
+      let back = (top.timestamp > since ? (top.timestamp - since) / BLOCK_SECONDS : 0n) + 150n
+      let lo = upTo > back ? upTo - back : 0n
+      let loNonce = await nonceAt(lo)
+      while (loNonce > n && lo > 0n) {
+        back *= 2n
+        lo = upTo > back ? upTo - back : 0n
+        loNonce = await nonceAt(lo)
+      }
+      if (loNonce > n) return null
+      let hi = upTo
+      while (hi - lo > 1n) {
+        const mid = (lo + hi) / 2n
+        const m = await nonceAt(mid)
+        if (m > n) hi = mid
+        else {
+          lo = mid
+          loNonce = m
+        }
+      }
+      const x = await this.client.getBlock({ blockNumber: hi })
+      if (!x.hash) return null
+      const logs = (await this.client.getLogs({ address: safe, blockHash: x.hash } as never)) as unknown as { address: string; topics: Hex[]; logIndex: number | null; transactionHash: Hex | null }[]
+      const runs = logs
+        .filter((l) => l.address.toLowerCase() === safe.toLowerCase() && (l.topics[0] === EXECUTION_SUCCESS || l.topics[0] === EXECUTION_FAILURE) && l.topics[1] && l.transactionHash)
+        .sort((a, b) => (a.logIndex ?? 0) - (b.logIndex ?? 0))
+      // The nonces from loNonce on are spent in this block's order: the (N - loNonce)-th execution spent N.
+      const run = runs[Number(n - loNonce)]
+      if (!run) {
+        console.log(`[reconcile] ${acc.accountKey} ${op.opId} block ${hi} spent Safe nonce ${n} but shows no Safe execution log for it: no conclusion`)
+        return null
+      }
+      const safeTxHash = run.topics[1]!
+      return { safeTxHash, tx: run.transactionHash!, block: hi, ours: safeTxHash.toLowerCase() === op.safeTxHash?.toLowerCase(), success: run.topics[0] === EXECUTION_SUCCESS }
+    } catch (e) {
+      logErr(`[reconcile] ${acc.accountKey} ${op.opId} the block that spent its Safe nonce could not be read:`, e)
+      return null
+    }
   }
 
   /**
@@ -3961,7 +4032,8 @@ export class Operator {
         if (s === 'open') continue
         if ('close' in s) {
           console.log(`[reconcile] ${op.opId} ${s.close}: Safe nonce past ${(op as StoredOp).safeNonce}, not by this Safe tx`)
-          this.patchOp(acc, op.opId, { code: s.close, ...(found ? { txHash: found.hash, block: found.block } : {}) })
+          if (s.spentBy) (op as StoredOp).spentBy = s.spentBy
+          this.patchOp(acc, op.opId, { code: s.close, ...(found ? { txHash: found.hash } : {}), ...(s.block !== undefined ? { block: s.block } : {}) })
           continue
         }
         found = s

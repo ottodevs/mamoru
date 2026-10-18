@@ -39,6 +39,8 @@ export type StoredOp = OpView & {
    * owner's signature relayable by anyone: only the Safe nonce moving settles the op.
    */
   signedTxs?: { hash: Hex; nonce: number; reverted?: true }[]
+  /** otto/mamoru#163: the Safe tx hash whose execution spent this op's Safe nonce, read from that block's own log. */
+  spentBy?: Hex
 }
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */

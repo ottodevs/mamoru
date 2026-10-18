@@ -12,6 +12,16 @@ const prepared = (op: Operator, id: string) => (op as unknown as Prep).prepared.
 const reverted = (hash: Hex) => ({ transactionHash: hash, status: 'success', blockNumber: 101n, logs: [] }) as unknown as TransactionReceipt
 const ids = (gs?: { permissionId: string }[]) => (gs ?? []).map((g) => g.permissionId)
 
+/** Shaped as on Base: topics [ExecutionSuccess, safeTxHash], data the payment only. */
+const execLog = (safeTxHash: Hex, tx: string, block: bigint) => ({ topics: [EXECUTION_SUCCESS, safeTxHash], data: `0x${'0'.repeat(64)}` as Hex, transactionHash: keccak256(stringToHex(tx)), blockNumber: block })
+
+/** The Safe nonce went from 0 to 1 at block `at`; the head is past it. */
+const spentAt = (w: ReturnType<typeof world>, at: bigint) => {
+  w.chain.nonce = 1n
+  w.knobs.nonceAt = (b) => (b >= at ? 1n : 0n)
+  w.knobs.blockHead = at + 20n
+}
+
 /** A first Start whose execTransaction reverted: the Safe deployed, its nonce still 0. */
 async function revertedStart() {
   const w = world(10_000_000n)
@@ -62,16 +72,46 @@ describe('a reverted activation stays unresolved while its Safe nonce is unspent
     expect(again).toMatchObject({ state: 'confirmed' })
     const replacement = acc.ops.find((o) => o.opId === again.opId) as StoredOp
     expect(replacement.safeNonce).toBe(old.safeNonce)
+    // The chain: the replacement spent nonce 0 at block 101, its log in that block.
+    spentAt(w, 101n)
+    w.knobs.safeLogs = [{ ...execLog(replacement.safeTxHash!, 'replacement', 101n), transactionHash: replacement.txHash as Hex }]
     await quiet(() => w.op.reconcileOwner(acc))
     expect(old).toMatchObject({ state: 'failed', code: 'SUPERSEDED' })
     expect(ids(acc.grants)).toEqual(ids(replacement.ownerGrants))
   })
 
-  test('another Safe tx took the nonce and this one never ran: SAFE_NONCE_MOVED', async () => {
+  test('another Safe tx took the nonce, as its block\'s own log shows: SAFE_NONCE_MOVED, with that Safe tx as evidence', async () => {
     const { w, acc, old } = await revertedStart()
-    w.chain.nonce = 1n
+    const other = keccak256(stringToHex('a withdrawal'))
+    spentAt(w, 110n)
+    w.knobs.safeLogs = [execLog(other, 'withdrawal', 110n)]
     await quiet(() => w.op.reconcileOwner(acc))
-    expect(old).toMatchObject({ state: 'failed', code: 'SAFE_NONCE_MOVED' })
+    expect(old).toMatchObject({ state: 'failed', code: 'SAFE_NONCE_MOVED', block: 110, spentBy: other })
+  })
+
+  test('a log backend behind (a range search answers empty) never closes it: the spending block\'s own logs confirm it', async () => {
+    const { w, acc, old } = await revertedStart()
+    spentAt(w, 110n)
+    w.knobs.safeLogs = [execLog(old.safeTxHash!, 'relay', 110n)]
+    w.knobs.rangeLogsLag = true
+    await quiet(() => w.op.reconcileOwner(acc))
+    expect(old).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', block: 110 })
+    expect(acc.active).toBe(true)
+  })
+
+  test('the spending block\'s logs cannot be read (by hash), or show no Safe execution: no conclusion, it stays open', async () => {
+    for (const how of ['down', 'empty'] as const) {
+      const { w, acc, old } = await revertedStart()
+      spentAt(w, 110n)
+      w.knobs.rangeLogsLag = true
+      if (how === 'down') {
+        w.knobs.safeLogs = [execLog(keccak256(stringToHex('other')), 'other', 110n)]
+        w.knobs.blockLogsDown = true
+      }
+      await quiet(() => w.op.reconcileOwner(acc))
+      expect(old, how).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      expect(old.spentBy, how).toBeUndefined()
+    }
   })
 
   test('a Start while the Safe moved past an unresolved one that cannot be settled yet is refused, nothing signed', async () => {
@@ -110,7 +150,8 @@ describe('a reverted activation stays unresolved while its Safe nonce is unspent
 
     const moved = await revertedStart()
     moved.w.knobs.receipts.clear()
-    moved.w.chain.nonce = 1n
+    spentAt(moved.w, 110n)
+    moved.w.knobs.safeLogs = [execLog(keccak256(stringToHex('a withdrawal')), 'withdrawal', 110n)]
     await quiet(() => moved.w.op.reconcileOwner(moved.acc))
     expect(moved.old).toMatchObject({ state: 'failed', code: 'SAFE_NONCE_MOVED' })
     const t = await moved.w.op.prepareActivate(ctx)
