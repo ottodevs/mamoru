@@ -75,4 +75,49 @@ describe('SnapshotLoop (otto/mamoru#136)', () => {
     expect(snapshotIntervalMs('60000')).toBe(60_000)
     expect(snapshotIntervalMs('1e12')).toBe(2_147_483_647)
   })
+
+  test('a read in flight across stop and start (otto/mamoru#129) is dropped: no stale snapshot, one tick chain', async () => {
+    let n = 0
+    let release: (() => void) | null = null
+    const loop = new SnapshotLoop(async () => {
+      n++
+      if (n === 1) {
+        await new Promise<void>((r) => (release = r))
+        return snap(1n)
+      }
+      return snap(BigInt(100 + n))
+    }, 1_000_000)
+    loop.start()
+    loop.stop()
+    loop.start()
+    await settle()
+    expect(loop.current?.block).toBe(102n)
+    release!()
+    await settle()
+    expect(loop.current?.block).toBe(102n)
+    expect(n).toBe(2)
+    loop.stop()
+  })
+
+  test('a restart (otto/mamoru#129) does not serve the snapshot read before the stop', async () => {
+    let n = 0
+    let hold: Promise<void> = Promise.resolve()
+    let release: (() => void) | null = null
+    const loop = new SnapshotLoop(async () => {
+      n++
+      await hold
+      return snap(BigInt(n))
+    }, 1_000_000)
+    loop.start()
+    await settle()
+    expect(loop.current?.block).toBe(1n)
+    loop.stop()
+    hold = new Promise<void>((r) => (release = r))
+    loop.start()
+    expect(loop.current).toBeNull()
+    release!()
+    await settle()
+    expect(loop.current?.block).toBe(2n)
+    loop.stop()
+  })
 })

@@ -46,6 +46,19 @@ describe('runYieldLedger cron gate (otto/mamoru#129: D1 flag, not an env var)', 
     expect(called).toBe(false)
   })
 
+  test('a D1 read that fails while reading the flag never throws out of the cron, and skips the pull', async () => {
+    const db = memoryD1()
+    const broken = { ...db, prepare: () => { throw new Error('D1_ERROR: network connection lost') } } as unknown as ReturnType<typeof memoryD1>
+    let called = false
+    await expect(
+      runYieldLedger(envOf(broken), async () => {
+        called = true
+        return new Response('{}', { status: 404 })
+      }),
+    ).resolves.toBeUndefined()
+    expect(called).toBe(false)
+  })
+
   test('an operator error during a pull never throws out of the cron', async () => {
     const db = memoryD1()
     turnOn(db)

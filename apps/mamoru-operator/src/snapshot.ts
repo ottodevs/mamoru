@@ -279,6 +279,7 @@ export class SnapshotLoop {
   private latest: Snapshot | null = null
   private timer: ReturnType<typeof setTimeout> | null = null
   private running = false
+  private generation = 0
   lastError: string | null = null
 
   constructor(
@@ -302,20 +303,30 @@ export class SnapshotLoop {
   start(): void {
     if (this.running) return
     this.running = true
+    // otto/mamoru#129: each start is a new generation. A read still in flight from before a stop belongs to an older
+    // one: it neither publishes its snapshot nor schedules a tick, so an off→on flip never serves a pre-stop read
+    // and never leaves two tick chains running.
+    const gen = ++this.generation
+    // A restart never serves what was read before the stop: /snapshot answers "no read yet" until this run's first.
+    this.latest = null
     const tick = async () => {
       try {
-        this.latest = await this.read()
+        const read = await this.read()
+        if (gen !== this.generation) return
+        this.latest = read
         this.lastError = null
       } catch (err) {
+        if (gen !== this.generation) return
         this.lastError = err instanceof Error ? err.message.split('\n')[0]!.slice(0, 200) : 'snapshot failed'
       }
-      if (this.running) this.timer = setTimeout(tick, this.overBudget() ? Math.max(this.slowMs, this.intervalMs) : this.intervalMs)
+      if (this.running && gen === this.generation) this.timer = setTimeout(tick, this.overBudget() ? Math.max(this.slowMs, this.intervalMs) : this.intervalMs)
     }
     void tick()
   }
 
   stop(): void {
     this.running = false
+    this.generation++
     if (this.timer) clearTimeout(this.timer)
     this.timer = null
   }

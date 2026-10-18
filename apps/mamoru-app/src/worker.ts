@@ -14,8 +14,9 @@ const app = createApp()
  */
 export async function runYieldLedger(env: Env, fetcher: OperatorFetch = (input, init) => fetch(input, init)): Promise<void> {
   if (!env.OPERATOR_URL || !env.OPERATOR_SECRET) return
-  if (!(await readOpsFlags(env.DB)).yield_ledger) return
   try {
+    // Inside the try: a D1 read that fails skips this run like any other error, it never fails the cron.
+    if (!(await readOpsFlags(env.DB)).yield_ledger) return
     await pullYieldLedger(env.DB, env.OPERATOR_URL, env.OPERATOR_SECRET, fetcher, new Date())
   } catch (e) {
     console.error('yield-ledger: cron run failed', e instanceof Error ? e.message : String(e))
