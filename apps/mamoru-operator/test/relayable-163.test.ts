@@ -169,12 +169,72 @@ describe('a reverted activation stays unresolved while its Safe nonce is unspent
     await quiet(() => w.op.reconcileOwner(acc))
     expect(old).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
     expect(acc.active).toBe(false)
-    // The same view everywhere now: the execution is found and applied.
+    // The same view everywhere now: the block that spent the nonce is served, its log shows the execution.
     w.knobs.blockHashes.clear()
+    w.knobs.nonceAt = (b) => (b >= 150n ? 1n : 0n)
     w.knobs.safeLogs = [{ topics: [EXECUTION_SUCCESS, old.safeTxHash!], data: `0x${'0'.repeat(64)}`, transactionHash: keccak256(stringToHex('relay')), blockNumber: 150n }]
     await quiet(() => w.op.reconcileOwner(acc))
     expect(old).toMatchObject({ state: 'confirmed', block: 150 })
     expect(acc.active).toBe(true)
+  })
+
+  test('a guard ran another Safe tx inside ours: two executions in X, ours second, decided by its hash (confirmed)', async () => {
+    const { w, acc, old } = await revertedStart()
+    // Nonce 0 (ours) and 1 (run by a guard inside ours) both spent at block 110; the inner one's log comes first.
+    w.chain.nonce = 2n
+    w.knobs.nonceAt = (b) => (b >= 110n ? 2n : 0n)
+    w.knobs.blockHead = 130n
+    w.knobs.rangeLogsLag = true
+    w.knobs.safeLogs = [execLog(keccak256(stringToHex('inner')), 'outer-tx', 110n), execLog(old.safeTxHash!, 'outer-tx', 110n)]
+    await quiet(() => w.op.reconcileOwner(acc))
+    expect(old).toMatchObject({ state: 'confirmed', block: 110, txHash: keccak256(stringToHex('outer-tx')) })
+    expect(acc.active).toBe(true)
+  })
+
+  test('ours absent from X: another Safe tx spent the nonce only with no guard and exactly one execution there; otherwise open', async () => {
+    for (const how of ['guard', 'two-logs'] as const) {
+      const { w, acc, old } = await revertedStart()
+      spentAt(w, 110n)
+      w.knobs.rangeLogsLag = true
+      w.knobs.safeLogs = [execLog(keccak256(stringToHex('a withdrawal')), 'withdrawal', 110n)]
+      if (how === 'guard') w.knobs.guard = `0x${'0'.repeat(24)}${'9'.repeat(40)}`
+      else w.knobs.safeLogs.push(execLog(keccak256(stringToHex('another')), 'another', 110n))
+      await quiet(() => w.op.reconcileOwner(acc))
+      expect(old, how).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      expect(old.spentBy, how).toBeUndefined()
+    }
+  })
+
+  test('while the Safe nonce is still its own, a settle pass reads no logs at all', async () => {
+    const { w, acc, old } = await revertedStart()
+    let calls = 0
+    type L = { client: { getLogs(a: unknown): Promise<unknown> } }
+    const client = (w.op as unknown as L).client
+    const getLogs = client.getLogs.bind(client)
+    client.getLogs = async (a) => (calls++, getLogs(a))
+    for (let i = 0; i < 3; i++) await quiet(() => w.op.reconcileOwner(acc))
+    expect(calls).toBe(0)
+    expect(old).toMatchObject({ code: 'OWNER_TX_ERROR' })
+  })
+
+  test('a long-pending op: each pass scans at most 20 pages, resuming from its checkpoint', async () => {
+    const { w, acc, old } = await revertedStart()
+    w.chain.nonce = 1n
+    w.knobs.nonceAt = (b) => (b >= 199_990n ? 1n : 0n)
+    w.knobs.blockHead = 200_000n
+    w.knobs.rangeLogsLag = true
+    // The spending block cannot be read: the op stays open, pass after pass.
+    w.knobs.blockLogsDown = true
+    old.scannedTo = '0'
+    w.knobs.rangeScans.length = 0
+    await quiet(() => w.op.reconcileOwner(acc))
+    expect(w.knobs.rangeScans).toHaveLength(20)
+    expect(w.knobs.rangeScans[0]).toEqual({ from: 1n, to: 2_000n })
+    expect(old.scannedTo).toBe('40000')
+    await quiet(() => w.op.reconcileOwner(acc))
+    expect(w.knobs.rangeScans).toHaveLength(40)
+    expect(w.knobs.rangeScans[20]).toEqual({ from: 40_001n, to: 42_000n })
+    expect(old).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
   })
 
   test('a Stop revokes the grants of an unresolved start as well as the engine ones', async () => {

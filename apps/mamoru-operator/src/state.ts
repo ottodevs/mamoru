@@ -41,6 +41,8 @@ export type StoredOp = OpView & {
   signedTxs?: { hash: Hex; nonce: number; reverted?: true }[]
   /** otto/mamoru#163: the Safe tx hash whose execution spent this op's Safe nonce, read from that block's own log. */
   spentBy?: Hex
+  /** otto/mamoru#163: the last block the bounded range search for its ExecutionSuccess has covered (checkpoint). */
+  scannedTo?: string
 }
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */

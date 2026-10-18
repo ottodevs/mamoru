@@ -82,6 +82,9 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     blockLogsDown: false,
     /** A log backend behind the chain: a range search answers empty, whatever happened. */
     rangeLogsLag: false,
+    /** The Safe's guard slot, and every range-search request made (block ranges). */
+    guard: `0x${'0'.repeat(64)}` as Hex,
+    rangeScans: [] as { from: bigint; to: bigint }[],
   }
   const npmCalls: string[] = []
   let saves = 0
@@ -113,6 +116,8 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
         if (knobs.blockLogsDown) throw new Error('HTTP request failed. Status: 503')
         return knobs.safeLogs.filter((l) => keccak256(stringToHex(`block-${l.blockNumber}`)) === a.blockHash).map((l, i) => ({ address: SAFE, logIndex: i, ...l }))
       }
+      const r = a as { fromBlock?: bigint; toBlock?: bigint }
+      knobs.rangeScans.push({ from: r.fromBlock ?? 0n, to: r.toBlock ?? 0n })
       return knobs.rangeLogsLag ? [] : knobs.safeLogs
     },
     getCode: async () => (chain.deployed ? '0x01' : undefined),
@@ -131,7 +136,9 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
       if (functionName === 'isPermissionEnabled') return enabled(args?.[0])
       throw new Error(`unexpected read ${functionName}`)
     },
-    request: async ({ params }: { params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {
+    request: async ({ method, params }: { method?: string; params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {
+      // The Safe's guard slot (otto/mamoru#163): no guard unless a test sets one.
+      if (method === 'eth_getStorageAt') return knobs.guard
       const calls = params[0].blockStateCalls[0].calls
       if (knobs.sim === 'down') throw new Error('the method eth_simulateV1 does not exist')
       const last = calls.length - 1

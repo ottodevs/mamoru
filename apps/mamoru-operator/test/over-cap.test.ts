@@ -40,7 +40,7 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
   const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false as boolean | null, enabled: new Set<string>(), batchGrants: false, head: 100n, batchedGrantReads: 0, multicalls: 0, pending: null as { grants?: { permissionId: string }[]; revokes?: string[] } | null, logs: [] as { stx: Hex; hash: Hex; block: bigint }[], enabledFromBlock: 0n, noHistory: false, usdt: 0n, spotTick: 0, twapTick: 0 as number | null, blockHashes: new Map<bigint, Hex>(),
     /** otto/mamoru#163: the Safe nonce at a past block (default: today's), Safe txs of others run at a block, and a node that cannot serve a block's logs by hash. */
-    nonceAt: null as ((block: bigint) => bigint) | null, foreign: [] as { stx: Hex; hash: Hex; block: bigint }[], blockLogsDown: false }
+    nonceAt: null as ((block: bigint) => bigint) | null, foreign: [] as { stx: Hex; hash: Hex; block: bigint }[], blockLogsDown: false, guard: `0x${'0'.repeat(64)}` as Hex }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -86,7 +86,9 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
       }
       throw new Error(`unexpected read ${functionName}`)
     },
-    request: async ({ params }: { params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {
+    request: async ({ method, params }: { method?: string; params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {
+      // The Safe's guard slot (otto/mamoru#163): no guard unless a test sets one.
+      if (method === 'eth_getStorageAt') return knobs.guard
       const calls = params[0].blockStateCalls[0].calls
       simulated.push(calls)
       if (knobs.sim === 'down') throw new Error('the method eth_simulateV1 does not exist')
@@ -159,9 +161,11 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
  * a block, and that block's logs by hash, show it (the evidence settlement now needs to say "not run").
  */
 function spentElsewhere(w: ReturnType<typeof world>, before: bigint, after: bigint, at = 100n): void {
+  // One Safe execution per block, from `at` on (the last one at `at`): nonce `before + k` spent at block `at - (after - before - 1) + k`.
+  const first = at - (after - before - 1n)
   w.chain.nonce = after
-  w.knobs.nonceAt = (b) => (b >= at ? after : before)
-  for (let n = before; n < after; n++) w.knobs.foreign.push({ stx: keccak256(stringToHex(`foreign-stx-${n}`)), hash: keccak256(stringToHex(`foreign-tx-${n}`)), block: at })
+  w.knobs.nonceAt = (b) => (b < first ? before : b >= at ? after : before + (b - first) + 1n)
+  for (let n = before; n < after; n++) w.knobs.foreign.push({ stx: keccak256(stringToHex(`foreign-stx-${n}`)), hash: keccak256(stringToHex(`foreign-tx-${n}`)), block: first + (n - before) })
 }
 
 function der(r: bigint, s: bigint): Uint8Array {
@@ -2521,7 +2525,7 @@ describe('renewing the approval of a running account', () => {
         }
         // otto/mamoru#163: what spent nonce 1 is in that block's own logs: R itself when it ran, another Safe tx if not.
         spentElsewhere(w, 1n, 3n)
-        if (ran) w.knobs.foreign[0] = { stx, hash, block: 100n }
+        if (ran) w.knobs.foreign[0] = { ...w.knobs.foreign[0]!, stx, hash }
         type C = { getTransactionReceipt(a: unknown): Promise<unknown>; getLogs(a: unknown): Promise<unknown> }
         const client = (w.op as unknown as { client: C }).client
         const getReceipt = client.getTransactionReceipt.bind(client)
@@ -3077,8 +3081,9 @@ describe('renewing the approval of a running account', () => {
     const settle = (w.op as unknown as { settleRenewals(a: AccountState): Promise<void> }).settleRenewals.bind(w.op)
     await settle(acc)
     expect(stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
-    // Consistent: the log is there and block 150 is the same everywhere.
+    // Consistent: the node has block 150, where the nonce moved, and its logs (read by its hash) show the renewal.
     w.knobs.blockHashes.clear()
+    w.knobs.nonceAt = (b) => (b >= 150n ? 2n : 1n)
     w.knobs.logs.push({ stx: stored.safeTxHash!, hash: `0x${'ab'.repeat(32)}`, block: 150n })
     await settle(acc)
     expect(stored).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', txHash: `0x${'ab'.repeat(32)}` })
