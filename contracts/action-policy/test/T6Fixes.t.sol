@@ -54,11 +54,11 @@ contract T6FixesTest is PolicyFixture {
 
     /// The attacker is the last swap of block N (USDC/USDT pushed 9,000 ticks down, ~127k USDC of its own capital)
     /// and the first swap of block N+1 (pushed back). Measured on this fork: the 30-min TWAP moves 10 ticks, the
-    /// whole stables band, for ~25 USDC of fees. T4 accepts a swap priced off that shifted TWAP; the liquidity floor
-    /// refuses it, because 2 s in an empty range crater the harmonic-mean liquidity of both windows.
+    /// whole stables band, for ~25 USDC of fees. T4 accepts a swap priced off that shifted TWAP. Now the push also
+    /// moves the 5-min TWAP 60 ticks, the two are more than 2 x band apart, and the range is empty.
     function test_H1_oneBlockOutlierOnStablesIsRefused() public {
         _raiseStableCardinality();
-        _enable(ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_MIN_LIQ, false, 1, 50_000e6, 100_000e6, _none()));
+        _enable(ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, _none()));
         int24 twap0 = _twapOf(POOL_STABLE, TWAP);
         (int24 lo0,) = policy.priceRange(safe, POOL_STABLE);
         assertEq(lo0, twap0 - int24(STABLE_BAND) + 1, "no shift yet: lo = twap - band + 1");
@@ -75,14 +75,61 @@ contract T6FixesTest is PolicyFixture {
         // The Safe sells 10k USDC at the shifted band edge: 2 x band under the market.
         bytes memory swap = _swapAtTick(USDC, USDT, 100, 10_000e6, twap1 - int24(STABLE_BAND) + 1);
         assertEq(_check(ROUTER, swap), 1, "priced off a pushed TWAP: refused");
-        vm.expectPartialRevert(MamoruActionPolicy.OracleRefused.selector);
+        vm.expectPartialRevert(MamoruActionPolicy.RangeEmpty.selector);
         policy.priceRange(safe, POOL_STABLE);
+    }
+
+    /// Pushes that survive the two-TWAP rule: one push far away more than 5 minutes ago (moves only the long TWAP)
+    /// plus one recent push (moves both), sized about 5:1 so the two TWAPs agree. On USDC/USDT both are cheap
+    /// (~25 USDC of fees each). The parity anchor bounds what they buy: the range never leaves
+    /// [anchor - 40, anchor + 40], so it is clipped (a ~50-tick shift) or empty (a ~100-tick shift).
+    function test_H1_spreadPushOnStablesIsBoundedByTheAnchor() public {
+        _raiseStableCardinality();
+        _enable(ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, _none()));
+        uint256 snap = vm.snapshotState();
+        (int24 tl, int24 ts) = _spreadPush(-37_500, -7_500);
+        console2.log(
+            "H-1 spread push ~50: long / short TWAP now (ticks, +1000)",
+            uint256(int256(tl) + 1000),
+            uint256(int256(ts) + 1000)
+        );
+        (int24 lo, int24 hi) = policy.priceRange(safe, POOL_STABLE);
+        int24 top = tl > ts ? tl : ts;
+        assertLt(top - int24(STABLE_BAND) + 1, -int24(STABLE_ANCHOR), "unclipped, the floor would be past the anchor");
+        assertEq(lo, -int24(STABLE_ANCHOR), "clipped to the anchor");
+        assertGe(hi, lo);
+        assertEq(_check(ROUTER, _swapAtTick(USDC, USDT, 100, 10_000e6, top - int24(STABLE_BAND) + 1)), 1);
+        assertEq(_check(ROUTER, _swapAtTick(USDC, USDT, 100, 10_000e6, lo)), 0);
+        vm.revertToState(snap);
+
+        (tl, ts) = _spreadPush(-75_000, -15_000);
+        console2.log(
+            "H-1 spread push ~100: long / short TWAP now (ticks, +1000)",
+            uint256(int256(tl) + 1000),
+            uint256(int256(ts) + 1000)
+        );
+        vm.expectPartialRevert(MamoruActionPolicy.RangeEmpty.selector);
+        policy.priceRange(safe, POOL_STABLE);
+    }
+
+    /// One block at `oldTicks` from spot, 10 minutes of nothing, one block at `recentTicks`; returns both TWAPs.
+    function _spreadPush(int24 oldTicks, int24 recentTicks) internal returns (int24 tl, int24 ts) {
+        (, uint256 usdtOld) = _push(POOL_STABLE, USDC, USDT, 100, oldTicks);
+        _nextBlock(1);
+        _sell(USDT, USDC, 100, usdtOld);
+        vm.warp(block.timestamp + 600);
+        vm.roll(block.number + 300);
+        (, uint256 usdtNew) = _push(POOL_STABLE, USDC, USDT, 100, recentTicks);
+        _nextBlock(1);
+        _sell(USDT, USDC, 100, usdtNew);
+        tl = _twapOf(POOL_STABLE, TWAP);
+        ts = _twapOf(POOL_STABLE, TWAP_SHORT);
     }
 
     /// The same one-block push inside the dense core (10 ticks): no false refusal, and the range moves 1 tick at most.
     function test_H1_denseCoreOutlierPassesAndBarelyMoves() public {
         _raiseStableCardinality();
-        _enable(ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_MIN_LIQ, false, 1, 50_000e6, 100_000e6, _none()));
+        _enable(ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, _none()));
         (int24 lo0, int24 hi0) = policy.priceRange(safe, POOL_STABLE);
         (, uint256 usdtOut) = _push(POOL_STABLE, USDC, USDT, 100, -10);
         _nextBlock(1);
@@ -92,17 +139,38 @@ contract T6FixesTest is PolicyFixture {
         assertLe(hi0 - hi1, 1);
     }
 
-    /// USDC/cbBTC: the same push 9,000 ticks down needs ~4.66M USDC of the attacker's own capital and shifts the long
-    /// TWAP 10 ticks for ~4.4k of fees. The 25% floor refuses it (short-window harmonic mean drops to ~16%).
+    /// USDC/cbBTC: one block 90,000 ticks away (13.5M USDC of the attacker's own capital, ~8.8k of fees) moves the
+    /// long TWAP by the whole 100-tick band; T4 accepted it. It moves the short one 600 ticks: the range is empty.
     function test_H1_oneBlockOutlierOnBtcIsRefused() public {
         _initBtc(ID, 1, 600_000e6, 6_000_000e6);
-        (, uint256 btcOut) = _push(POOL_BTC, USDC, CBBTC, 500, -9_000);
+        int24 tl0 = _twapOf(POOL_BTC, TWAP);
+        (, uint256 btcOut) = _push(POOL_BTC, USDC, CBBTC, 500, -90_000);
         _nextBlock(1);
         _sell(CBBTC, USDC, 500, btcOut);
-        vm.expectPartialRevert(MamoruActionPolicy.OracleRefused.selector);
+        assertGe(tl0 - _twapOf(POOL_BTC, TWAP), int24(BAND));
+        vm.expectPartialRevert(MamoruActionPolicy.RangeEmpty.selector);
         policy.priceRange(safe, POOL_BTC);
         bytes memory swap = _swapAtTick(USDC, CBBTC, 500, 10_000e6, _twapOf(POOL_BTC, TWAP) - int24(BAND) + 1);
         assertEq(_check(ROUTER, swap), 1);
+    }
+
+    /// An old push alone (more than 5 minutes ago) moves only the long TWAP: the range keeps the short one's edge on
+    /// the side that matters, so nothing the Safe does gets a worse price.
+    function test_H1_oldPushAloneDoesNotLoosenTheRange() public {
+        _initBtc(ID, 1, 600_000e6, 6_000_000e6);
+        (int24 lo0,) = policy.priceRange(safe, POOL_BTC);
+        (, uint256 btcOut) = _push(POOL_BTC, USDC, CBBTC, 500, -90_000);
+        _nextBlock(1);
+        _sell(CBBTC, USDC, 500, btcOut);
+        vm.warp(block.timestamp + 400);
+        vm.roll(block.number + 200);
+        int24 tl = _twapOf(POOL_BTC, TWAP);
+        int24 ts = _twapOf(POOL_BTC, TWAP_SHORT);
+        assertGe(ts - tl, 90, "the long TWAP is ~100 ticks down, the short one is not");
+        (int24 lo1, int24 hi1) = policy.priceRange(safe, POOL_BTC);
+        assertEq(lo1, ts - int24(BAND) + 1, "selling token0: the floor follows the unpushed short TWAP");
+        assertGe(lo1, lo0 - 5, "(the round trip itself leaves spot a few ticks lower)");
+        assertEq(hi1, tl + int24(BAND), "buying token0: the ceiling only dropped");
     }
 
     // ================================================================ M-1: safer side of a long and a short TWAP
@@ -238,7 +306,7 @@ contract T6FixesTest is PolicyFixture {
         admit[0] = v3Pos;
         vm.prank(SMART_SESSION);
         policy.initializeWithMultiplexer(
-            safe, ID, _initData(POOL_BTC, BAND, BTC_MIN_LIQ, false, 1, 600_000e6, 6_000_000e6, admit)
+            safe, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, 1, 600_000e6, 6_000_000e6, admit)
         );
         assertEq(policy.admittedPool(safe, v3Pos), POOL_BTC);
         (uint256 min0, uint256 min1) = policy.decreaseMins(safe, POOL_BTC, v3Pos, liq);
@@ -261,7 +329,7 @@ contract T6FixesTest is PolicyFixture {
         vm.prank(SMART_SESSION);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NotAdmissible.selector, theirs));
         policy.initializeWithMultiplexer(
-            safe, ID, _initData(POOL_BTC, BAND, BTC_MIN_LIQ, false, 1, 600_000e6, 6_000_000e6, admit)
+            safe, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, 1, 600_000e6, 6_000_000e6, admit)
         );
 
         // The Safe's own position, but in USDC/USDT, named in a USDC/cbBTC Init.
@@ -276,7 +344,7 @@ contract T6FixesTest is PolicyFixture {
         vm.prank(SMART_SESSION);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NotAdmissible.selector, stablePos));
         policy.initializeWithMultiplexer(
-            safe, ID, _initData(POOL_BTC, BAND, BTC_MIN_LIQ, false, 1, 600_000e6, 6_000_000e6, admit)
+            safe, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, 1, 600_000e6, 6_000_000e6, admit)
         );
     }
 
@@ -287,7 +355,7 @@ contract T6FixesTest is PolicyFixture {
         (uint256 v3Pos,) = _mintDirect(safe, 20_000e6, 0.2e8);
         uint256[] memory admit = new uint256[](1);
         admit[0] = v3Pos;
-        bytes memory initData = _initData(POOL_BTC, BAND, BTC_MIN_LIQ, false, 1, 600_000e6, 6_000_000e6, admit);
+        bytes memory initData = _initData(POOL_BTC, BAND, NO_ANCHOR, false, 1, 600_000e6, 6_000_000e6, admit);
         bytes memory reinit = abi.encodeCall(MamoruActionPolicy.initializeWithMultiplexer, (safe, ID, initData));
         // 1. As an execution of a session userOp, any call to the policy other than `mint` is refused at validation.
         assertEq(_check(address(policy), reinit), 1);
@@ -305,7 +373,7 @@ contract T6FixesTest is PolicyFixture {
     // ================================================================ L-4: oracle history margin at enable
 
     function test_L4_enableRequiresCardinalityForTheWindow() public {
-        bytes memory init = _initData(POOL_STABLE, STABLE_BAND, STABLE_MIN_LIQ, false, 1, 50_000e6, 100_000e6, _none());
+        bytes memory init = _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, _none());
         vm.prank(SMART_SESSION);
         vm.expectRevert(
             abi.encodeWithSelector(MamoruActionPolicy.ObservationCardinalityTooLow.selector, uint16(1000), TWAP)
@@ -325,13 +393,13 @@ contract T6FixesTest is PolicyFixture {
         policy.initializeWithMultiplexer(
             safe,
             ConfigId.wrap(bytes32(uint256(10))),
-            _initData(POOL_BTC, BAND + 1, BTC_MIN_LIQ, false, 1, 600_000e6, 6_000_000e6, _none())
+            _initData(POOL_BTC, BAND + 1, NO_ANCHOR, false, 1, 600_000e6, 6_000_000e6, _none())
         );
         // Views follow the generation: a pool left at an older generation has no config any more.
         _raiseStableCardinality();
         _enable(
             ConfigId.wrap(bytes32(uint256(11))),
-            _initData(POOL_STABLE, STABLE_BAND, STABLE_MIN_LIQ, false, 1, 50_000e6, 100_000e6, _none())
+            _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, _none())
         );
         _initBtc(ConfigId.wrap(bytes32(uint256(12))), 2, 600_000e6, 6_000_000e6);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NoConfig.selector, safe, POOL_STABLE));
@@ -339,17 +407,17 @@ contract T6FixesTest is PolicyFixture {
     }
 
     function test_I2_initBounds() public {
-        _expectBadInit(_raw(POOL_BTC, 1, 300, BAND, 1, 1e6), 1); // twapWindow = 1
-        _expectBadInit(_raw(POOL_BTC, 1800, 1800, BAND, 1, 1e6), 2); // short == long
-        _expectBadInit(_raw(POOL_BTC, 1800, 300, 1, 1, 1e6), 3); // band 1
-        _expectBadInit(_raw(POOL_BTC, 1800, 300, 887_272, 1, 1e6), 3); // band to the end of the tick space
-        _expectBadInit(_raw(POOL_BTC, 1800, 300, BAND, type(uint64).max, 1e6), 4); // bricks later renewals
-        _expectBadInit(_raw(POOL_BTC, 1800, 300, BAND, 1, 0), 5); // no liquidity floor
+        _expectBadInit(_raw(POOL_BTC, 1, 300, BAND, 1, 0), 1); // twapWindow = 1
+        _expectBadInit(_raw(POOL_BTC, 1800, 1800, BAND, 1, 0), 2); // short == long
+        _expectBadInit(_raw(POOL_BTC, 1800, 300, 1, 1, 0), 3); // band 1
+        _expectBadInit(_raw(POOL_BTC, 1800, 300, 887_272, 1, 0), 3); // band to the end of the tick space
+        _expectBadInit(_raw(POOL_BTC, 1800, 300, BAND, type(uint64).max, 0), 4); // bricks later renewals
+        _expectBadInit(_raw(POOL_BTC, 1800, 300, BAND, 1, 501), 5); // anchor band past MAX_BAND
         _initBtc(ID, 1, 600_000e6, 6_000_000e6);
-        _expectBadInit(_raw(POOL_BTC, 1800, 300, BAND, 3, 1e6), 4); // jump of two after the first enable
+        _expectBadInit(_raw(POOL_BTC, 1800, 300, BAND, 3, 0), 4); // jump of two after the first enable
     }
 
-    function _raw(address pool, uint32 w, uint32 ws, uint24 band, uint64 gen, uint128 minLiq)
+    function _raw(address pool, uint32 w, uint32 ws, uint24 band, uint64 gen, uint24 anchorBand)
         internal
         pure
         returns (bytes memory)
@@ -361,7 +429,8 @@ contract T6FixesTest is PolicyFixture {
                 twapShortWindow: ws,
                 bandTicks: band,
                 generation: gen,
-                minLiquidity: minLiq,
+                anchorTick: 0,
+                anchorBand: anchorBand,
                 budgetIn1: false,
                 budgetWindow: 1 days,
                 perWindow: 1e6,
@@ -382,7 +451,7 @@ contract T6FixesTest is PolicyFixture {
     function test_I5_mintRefundsFromTheBalanceDelta() public {
         vm.prank(SMART_SESSION);
         policy.initializeWithMultiplexer(
-            safe, ID, _initData(POOL_ETH, BAND, ETH_MIN_LIQ, true, 1, 600_000e6, 6_000_000e6, _none())
+            safe, ID, _initData(POOL_ETH, BAND, NO_ANCHOR, true, 1, 600_000e6, 6_000_000e6, _none())
         );
         deal(WETH, safe, 10 ether);
         vm.deal(NPM, 10 ether); // anyone can leave ETH in the manager

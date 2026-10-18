@@ -55,11 +55,10 @@ abstract contract PolicyFixture is Test {
     uint24 constant STABLE_BAND = 10;
     uint32 constant TWAP = 1800; // seconds, = execution.twapWindowSeconds
     uint32 constant TWAP_SHORT = 300;
-    // Harmonic-mean liquidity floors (packages/policy/src/v4-grants.ts V4_POOLS.minLiquidity): a share of each pool's
-    // in-range liquidity at block 52,700,000 (btc 2.679e12 x 25%, stables 2.972e14 x 10%, eth 3.40e19 x 10%).
-    uint128 constant BTC_MIN_LIQ = 669_000_000_000;
-    uint128 constant STABLE_MIN_LIQ = 29_700_000_000_000;
-    uint128 constant ETH_MIN_LIQ = 3_400_000_000_000_000_000;
+    // Anchor band around parity (tick 0) for the stables pool (packages/policy/src/v4-grants.ts V4_POOLS.anchor);
+    // the volatile pools have none.
+    uint24 constant STABLE_ANCHOR = 40;
+    uint24 constant NO_ANCHOR = 0;
 
     MamoruActionPolicy policy;
     address safe = makeAddr("safe");
@@ -75,7 +74,7 @@ abstract contract PolicyFixture is Test {
     function _initData(
         address pool,
         uint24 band,
-        uint128 minLiq,
+        uint24 anchorBand,
         bool in1,
         uint64 gen,
         uint128 perWindow,
@@ -89,7 +88,8 @@ abstract contract PolicyFixture is Test {
                 twapShortWindow: TWAP_SHORT,
                 bandTicks: band,
                 generation: gen,
-                minLiquidity: minLiq,
+                anchorTick: 0,
+                anchorBand: anchorBand,
                 budgetIn1: in1,
                 budgetWindow: 1 days,
                 perWindow: perWindow,
@@ -102,7 +102,7 @@ abstract contract PolicyFixture is Test {
     function _initBtc(ConfigId id, uint64 gen, uint128 perWindow, uint128 total) internal {
         vm.prank(SMART_SESSION);
         policy.initializeWithMultiplexer(
-            safe, id, _initData(POOL_BTC, BAND, BTC_MIN_LIQ, false, gen, perWindow, total, new uint256[](0))
+            safe, id, _initData(POOL_BTC, BAND, NO_ANCHOR, false, gen, perWindow, total, new uint256[](0))
         );
     }
 
