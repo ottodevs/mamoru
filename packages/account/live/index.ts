@@ -87,6 +87,12 @@ export type ActionPolicyState = {
   enabledPermissionIds: readonly Hex[]
   /** Pools (addresses) the account's policy covers: a renewal retires every older config, so it re-enables all. */
   pools: readonly Address[]
+  /**
+   * Positions the account owns that are open (liquidity or tokens owed) and that MamoruActionPolicy has not admitted
+   * for it (`admittedPool(account, tokenId)` is not the position's pool): every position of a v1/v2 account. A v4 session
+   * can never decrease, collect, burn or add to them.
+   */
+  unadmittedOpenPositions: readonly bigint[]
 }
 
 /**
@@ -103,6 +109,10 @@ export type ActionPolicyState = {
  *   on (a renewal) it retires every older config of the account on chain, so it must re-enable every pool;
  * - registry calls: registerModule when not registered; a new account trusts and attests TimeFramePolicy,
  *   UsageLimitPolicy and the policy in one attest; an account that already trusts attests only the policy, once.
+ * - no new generation while the account holds an open position the policy did not admit (a v1/v2 position): the
+ *   removal would leave it to the owner alone. The upgrade sequence (T7) is: the v1/v2 engine closes every position
+ *   to idle under the v1/v2 grants (decrease + collect + burn), `unadmittedOpenPositions` reads empty, then this batch
+ *   (split in two transactions on Base, spec 007 T2 gas); the v4 engine re-enters through policy.mint.
  * Batch order: registry, removeSession of the old grants, enableSessions.
  */
 export function activationBatch(
@@ -128,6 +138,12 @@ export function activationBatch(
   const gen = [...gens][0]!
   const next = gen === s.generation + 1n
   if (!next && !(gen === s.generation && gen >= 1n)) throw new Error(`generation ${gen} for an account at generation ${s.generation}: an approval is ${s.generation + 1n}, an added pool ${s.generation}`)
+  // otto/mamoru#151 review P1-1: the batch removes the grants that can still manage the account's positions. Positions
+  // the policy did not admit would be left to the owner alone, so a new generation is refused while any is open: the
+  // v1/v2 engine closes them first (decrease + collect + burn back to idle, under the v1/v2 grants), then the upgrade.
+  if (next && s.unadmittedOpenPositions.length) {
+    throw new ReasonError('SESSION_UPGRADE_UNADMITTED_POSITIONS', `${a.safe} holds open positions MamoruActionPolicy did not admit (${s.unadmittedOpenPositions.join(', ')}): close them under the current grants before the v4 approval`)
+  }
   const ownPermissionIds = new Set(act.permissionIds.map((p) => p.toLowerCase()))
   const remove = next ? s.enabledPermissionIds.filter((p) => !ownPermissionIds.has(p.toLowerCase())) : []
   if (next) {

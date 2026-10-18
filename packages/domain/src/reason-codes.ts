@@ -31,6 +31,8 @@ export const REASON_CODES = [
   'INVENTORY_FULL',
   'SESSION_FOREIGN_USE',
   'SESSION_PERMISSION_ID_REUSED',
+  /** Spec 007: a v2 -> v4 upgrade while the account holds positions MamoruActionPolicy did not admit (close them first). */
+  'SESSION_UPGRADE_UNADMITTED_POSITIONS',
   // Pre-chequeo de política en el motor
   'POLICY_DENIED_TARGET',
   'POLICY_DENIED_RECIPIENT',
@@ -77,6 +79,8 @@ export const REASON_CODES = [
   'DECIDE_WAIT_DEPTH',
   // otto/mamoru#127: the quote of an entry swap is worse than the depth policy allows; refused before sending.
   'EHG_SWAP_IMPACT_OVER_LIMIT',
+  /** Spec 007: no swap size above the dust floor fills within the session's price limit and meets its minimum. */
+  'EHG_SWAP_LIMIT_UNFILLABLE',
   'DECIDE_PAUSED',
   'DECIDE_SLOT_BUSY',
   'DECIDE_IN_RANGE',

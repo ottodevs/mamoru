@@ -35,7 +35,7 @@ function v4Grants(over: Partial<GrantContext> = {}): SessionGrant[] {
 }
 
 const POOLS = conservadorLiveV4.session.grants.map((g) => address(g.pool!))
-const fresh: ActionPolicyState = { registered: true, attested: false, generation: 0n, enabledKeys: [], enabledPermissionIds: [], pools: POOLS }
+const fresh: ActionPolicyState = { registered: true, attested: false, generation: 0n, enabledKeys: [], enabledPermissionIds: [], pools: POOLS, unadmittedOpenPositions: [] }
 
 function decoded(calls: { to: Address; data: Hex }[]) {
   return calls.map((c) => {
@@ -65,17 +65,16 @@ describe('v1/v2 grants are byte-identical (spec 007 T2)', () => {
 })
 
 describe('v4 Session struct (spec 007 T2)', () => {
-  test('UniActionPolicy then MamoruActionPolicy with the pool Init on every action, the deadline on Uni only', () => {
+  test('UniActionPolicy then MamoruActionPolicy with the pool Init on every action, the swap deadline included', () => {
     const [stables] = v4Grants()
     const s = toSmartSession(stables!)
     expect(s.actions).toHaveLength(9)
     const init = mamoruActionPolicyInitData(stables!.actionPolicy!.init)
-    for (const [i, a] of s.actions.entries()) {
-      const uniOnly = stables!.actions[i]!.uniOnly === true
-      expect(a.actionPolicies.map((p) => p.policy)).toEqual(uniOnly ? [address('UniActionPolicy')] : [address('UniActionPolicy'), POLICY])
-      if (!uniOnly) expect(a.actionPolicies[1]!.initData).toBe(init)
+    for (const a of s.actions) {
+      expect(a.actionPolicies.map((p) => p.policy)).toEqual([address('UniActionPolicy'), POLICY])
+      expect(a.actionPolicies[1]!.initData).toBe(init)
     }
-    expect(s.actions.filter((_, i) => stables!.actions[i]!.uniOnly).map((a) => a.actionTargetSelector)).toEqual(['0x5ae401dc'])
+    expect(s.actions.map((a) => a.actionTargetSelector)).toContain('0x5ae401dc')
   })
 
   test('Init is abi.encode(MamoruActionPolicy.Init), field for field', () => {
@@ -116,6 +115,22 @@ describe('v4 activation batch (spec 007 T2)', () => {
       e = x
     }
     expect((e as ReasonError).code).toBe('SESSION_PERMISSION_ID_REUSED')
+  })
+
+  test('an upgrade is refused while a v2 position is open; once closed, it builds', () => {
+    const s: ActionPolicyState = { ...fresh, enabledKeys: ['0x00000000000000000000000000000000000000cc'], enabledPermissionIds: [`0x${'0e'.repeat(32)}`], unadmittedOpenPositions: [6291301n, 6291328n] }
+    let e: unknown
+    try {
+      activationBatch(live, v4Grants(), [], { trust: false, actionPolicy: s })
+    } catch (x) {
+      e = x
+    }
+    expect(e).toBeInstanceOf(ReasonError)
+    expect((e as ReasonError).code).toBe('SESSION_UPGRADE_UNADMITTED_POSITIONS')
+    expect((e as ReasonError).detail).toContain('6291301, 6291328')
+    // A renewal is refused the same way (an admitted position never shows here; one minted elsewhere does).
+    expect(() => activationBatch(live, v4Grants({ generation: 2n }), [], { trust: false, actionPolicy: { ...s, attested: true, generation: 1n } })).toThrow(/did not admit/)
+    expect(decoded(activationBatch(live, v4Grants(), [], { trust: false, actionPolicy: { ...s, unadmittedOpenPositions: [] } }).calls)).toEqual([`attest(${POLICY})`, 'removeSession', 'enableSessions'])
   })
 
   test('an upgrade split in two (it does not fit one Base tx): some pools at generation 1, the rest added at 1 after', () => {
