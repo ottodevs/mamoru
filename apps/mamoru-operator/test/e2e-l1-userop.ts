@@ -33,7 +33,7 @@ import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/we
 import { ACROSS_SPOKE_POOL, BridgeOut, gasCapUsdc, L1_USDC, USEROP_CALL_GAS, USEROP_PVG_FLOOR, USEROP_VERIFY_GAS_DEPLOY, userOpCalls, type Fetch } from '../src/bridge-out.ts'
 import { burnMatches, cctpCalls, FINALITY_STANDARD, TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
 import { HttpError } from '../src/operator.ts'
-import { checkPimlicoErc20, L1Bundler, MAX_CONSTANT_FEE, PIMLICO_ERC20_PAYMASTER_V07, type Erc20Paymaster, type GasPrice } from '../src/paymaster.ts'
+import { checkPimlicoErc20, L1Bundler, MAX_CONSTANT_FEE, PIMLICO_ERC20_PAYMASTER_V07, RpcRefused, type Erc20Paymaster, type GasPrice } from '../src/paymaster.ts'
 
 const L1_USDC_HOLDER = '0x28C6c06298d514Db089934071355E5743bf21d60' as const
 const CHAINLINK_ETH_USD = '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419' as const
@@ -309,6 +309,25 @@ try {
   const ev2 = (await opEvent(second.route!.userOpHash!))!
   check(second.route?.state === 'deposited', `second move on the deployed account: deposited, actualGasUsed ${ev2.mine.actualGasUsed}, gas ${fmt(BigInt(second.route?.gasUsdc ?? '0'))} USDC`)
   await phases(ev2.tx.transactionHash)
+
+  // A bundler refusal in validation, with no receipt: failed, nothing moved. A refusal that may follow admission
+  // ("already known"): unconfirmed, never failed.
+  class Refusing extends L1Bundler {
+    constructor(private readonly code: number, private readonly detail: string) {
+      super(bundler!.url)
+    }
+    override async send(): Promise<Hex> {
+      throw new RpcRefused('eth_sendUserOperation', this.code, this.detail)
+    }
+  }
+  for (const [rc, detail, want] of [[-32500, 'AA23 reverted', 'BRIDGE_FAILED'], [-32602, 'already known', 'unconfirmed']] as const) {
+    const rctx = newAccount(`refused${-rc}`)
+    await fund(rctx.address, 100_000_000n)
+    const rbo = new BridgeOut(l1, noRelayer, mkdtempSync(join(tmpdir(), 'mamoru-e2e-refused-')), fetcher, Date.now, undefined, () => true, { bundler: new Refusing(rc, detail), paymaster: forkPm })
+    const rp = await rbo.prepare(rctx)
+    const got = await rbo.submit(rctx, browserSign(rp)).then((v) => v.route?.state ?? 'none', (e) => (e instanceof HttpError ? e.code : 'unexpected'))
+    check(got === want && (await usdcAt(rctx.address)) === 100_000_000n, `bundler error ${rc} "${detail}": ${got}, USDC untouched`)
+  }
 
   // ---- 2. CCTP V2 depositForBurn in the same kind of userOp, built by hand ----------------------------------------
   const cctx = newAccount('cctp')

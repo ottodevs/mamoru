@@ -9,7 +9,7 @@ import { browserOwnerSignature, deployCall, encodeWebAuthnSignature, liveAccount
 import { execTransactionData, type SafeTx } from '@mamoru/account/safe'
 import { userOpHash } from '@mamoru/account/sessions'
 import { maxGasCostWei, OWNER_NONCE_KEY, ownerUserOp, ownerUserOpSignature, safeOpHash, userOpLogs, type PaymasterFields, type UserOpGas } from '@mamoru/account/userop'
-import { L1Bundler, MAX_CONSTANT_FEE, PaymasterError, RpcRefused, type Erc20Paymaster, type GasPrice } from './paymaster.ts'
+import { L1Bundler, MAX_CONSTANT_FEE, PaymasterError, RATE_SLACK_BPS, RpcRefused, type Erc20Paymaster, type GasPrice } from './paymaster.ts'
 import { Lock } from './lock.ts'
 import { HttpError } from './operator.ts'
 import { logErr } from './metrics.ts'
@@ -480,7 +480,9 @@ export class BridgeOut {
       logErr(`[bridge-out] paymaster/bundler estimate:`, e instanceof Error ? e.message : 'failed')
       throw gasDown()
     }
-    const gasCap = gasCapUsdc(build(placeholder, balance, gas, stub), q, MAX_CONSTANT_FEE)
+    // Priced at the dearest rate check() accepts, so the allowance covers whatever accepted data charges.
+    const dearest: GasPrice = { ...q, exchangeRate: (q.exchangeRate * (10_000n + RATE_SLACK_BPS) + 9_999n) / 10_000n }
+    const gasCap = gasCapUsdc(build(placeholder, balance, gas, stub), dearest, MAX_CONSTANT_FEE)
     if (gasCap > MAX_GAS_USDC || gasCap * 10_000n > balance * MAX_GAS_BPS) throw new HttpError(409, 'BRIDGE_GAS_TOO_HIGH', 'Ethereum gas would take too much of this amount, try later or with more')
     const amount = balance - gasCap
     if (amount < MIN_USDC) throw new HttpError(409, 'BRIDGE_NOTHING', 'there is no USDC on Ethereum to move')
@@ -582,10 +584,18 @@ export class BridgeOut {
         await Bun.sleep(3_000)
       }
     } catch (e) {
-      // A JSON-RPC refusal: the bundler did not take it, nothing ran. Anything else: it may have, status() decides.
-      if (e instanceof RpcRefused && e.method === 'eth_sendUserOperation') {
-        logErr(`[bridge-out] ${ctx.accountKey.slice(0, 8)}: bundler refused the userOp`, e.detail)
-        route.state = 'failed'
+      // 'failed' only when the bundler refused it in validation (ERC-7769 codes -32500..-32507, not a duplicate) and
+      // it has no receipt. Any other error may come after admission: 'unconfirmed', status() asks by hash.
+      const refused = e instanceof RpcRefused && e.method === 'eth_sendUserOperation' && e.code <= -32500 && e.code >= -32507 && !/already|known|duplicate|exists/i.test(e.detail)
+      if (refused) {
+        logErr(`[bridge-out] ${ctx.accountKey.slice(0, 8)}: bundler refused the userOp`, (e as RpcRefused).detail)
+        route.state = 'unconfirmed'
+        try {
+          await this.resolveUserOp(route, p.deposit)
+        } catch {
+          // no answer: stays unconfirmed
+        }
+        if (route.state === 'unconfirmed' && !route.l1Tx) route.state = (await aa.bundler.receipt(hash).catch(() => undefined)) === null ? 'failed' : 'unconfirmed'
       } else {
         logErr(`[bridge-out] ${ctx.accountKey.slice(0, 8)}:`, e instanceof Error ? e.message : e)
         route.state = 'unconfirmed'
