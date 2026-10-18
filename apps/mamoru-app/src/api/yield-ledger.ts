@@ -94,9 +94,25 @@ export async function fetchSnapshot(operatorUrl: string, operatorSecret: string,
 export const dayOf = (iso: string): string => iso.slice(0, 10)
 
 /** The account_key of (chainId, address) from this Worker's own accounts table, or null if none owns it. */
-async function resolveAccountKey(db: Db, chainId: number, address: string): Promise<string | null> {
-  const row = await db.prepare('SELECT account_key FROM accounts WHERE chain_id = ? AND LOWER(address) = LOWER(?)').bind(chainId, address.toLowerCase()).first<{ account_key: string }>()
-  return row?.account_key ?? null
+type LedgerEnv = 'prod' | 'beta' | 'test' | 'unknown'
+type ResolvedAccount = { accountKey: string; env: LedgerEnv }
+
+/**
+ * The account behind a Safe and the environment its ledger rows carry (otto/mamoru#130's accounts.env and
+ * is_test): a test account is 'test' whatever host created it, so /ops keeps it out of prod numbers. Before
+ * migration 0007 (no env/is_test columns) every row stays 'unknown', as before.
+ */
+async function resolveAccount(db: Db, chainId: number, address: string): Promise<ResolvedAccount | null> {
+  try {
+    const row = await db.prepare('SELECT account_key, env, is_test FROM accounts WHERE chain_id = ? AND LOWER(address) = LOWER(?)').bind(chainId, address.toLowerCase()).first<{ account_key: string; env: string | null; is_test: number | null }>()
+    if (!row) return null
+    const env: LedgerEnv = row.is_test === 1 ? 'test' : row.env === 'prod' || row.env === 'beta' ? row.env : 'unknown'
+    return { accountKey: row.account_key, env }
+  } catch (e) {
+    if (!/no such column/i.test(e instanceof Error ? e.message : String(e))) throw e
+    const row = await db.prepare('SELECT account_key FROM accounts WHERE chain_id = ? AND LOWER(address) = LOWER(?)').bind(chainId, address.toLowerCase()).first<{ account_key: string }>()
+    return row ? { accountKey: row.account_key, env: 'unknown' } : null
+  }
 }
 
 /** Cumulative totals for the whole UTC day this call's snapshot falls on, not one tx's delta: COALESCE on a later call with none keeps the running total, so a caller that passed only one harvest's amount would silently drop every earlier one on the same day once a call without a receipt follows it. */
@@ -107,7 +123,8 @@ export type AccountReceipt = { collectedUsd?: number; gasWei?: string }
  * every call) for every safe the snapshot carries, resolving each one's account_key from this Worker's own
  * `accounts` table by address (the operator truncates accountKey to 8 characters on the wire; address is not
  * truncated and is the join key `accounts` already has, migrations/0001_sprint.sql's accounts_chain_address).
- * `env` is always 'unknown' until otto/mamoru#130 gives accounts an environment (same rule as the #136 migration).
+ * `env` comes from the account (resolveAccount); an upsert also refreshes it, so a row written before an account
+ * got its environment is corrected on the next pull.
  * `receipts`, keyed by account_key, carries collected_usdc/gas_paid_wei when a caller already knows them; empty
  * until a harvest-receipt tracker exists to fill it (not built by this PR; account_daily keeps those columns null).
  * Returns how many safes were written and how many had no matching account (not written, not an error).
@@ -117,37 +134,38 @@ export async function writeAccountSnapshot(db: Db, snapshot: SnapshotWire, now: 
   let written = 0
   let unmatched = 0
   for (const safe of snapshot.safes) {
-    const accountKey = await resolveAccountKey(db, snapshot.chainId, safe.safe)
-    if (!accountKey) {
+    const account = await resolveAccount(db, snapshot.chainId, safe.safe)
+    if (!account) {
       unmatched++
       continue
     }
+    const { accountKey, env } = account
     const address = safe.safe.toLowerCase()
     const positionsJson = JSON.stringify(safe.positions.map((p) => ({ tokenId: p.tokenId, pool: p.pool, inRange: p.inRange, valueUsdc: p.valueUsdc, accrued0: p.accrued0, accrued1: p.accrued1, owed0: p.owed0, owed1: p.owed1, feesUsdc: p.feesUsdc, owedUsdc: p.owedUsdc })))
     await db
       .prepare(
         `INSERT INTO account_snapshot_latest (chain_id, address, account_key, env, block, read_at, deployed, idle_usdc, lp_usdc, fees_usdc, owed_usdc, total_usdc, positions_json, updated_at)
-         VALUES (?, ?, ?, 'unknown', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(chain_id, address) DO UPDATE SET
-           account_key = excluded.account_key, block = excluded.block, read_at = excluded.read_at, deployed = excluded.deployed,
+           account_key = excluded.account_key, env = excluded.env, block = excluded.block, read_at = excluded.read_at, deployed = excluded.deployed,
            idle_usdc = excluded.idle_usdc, lp_usdc = excluded.lp_usdc, fees_usdc = excluded.fees_usdc, owed_usdc = excluded.owed_usdc,
            total_usdc = excluded.total_usdc, positions_json = excluded.positions_json, updated_at = excluded.updated_at`,
       )
-      .bind(snapshot.chainId, address, accountKey, Number(snapshot.block), snapshot.readAt, safe.deployed ? 1 : 0, Number(safe.idleUsdc), Number(safe.lpUsdc), Number(safe.feesUsdc), Number(safe.owedUsdc), Number(safe.totalUsdc), positionsJson, now.toISOString())
+      .bind(snapshot.chainId, address, accountKey, env, Number(snapshot.block), snapshot.readAt, safe.deployed ? 1 : 0, Number(safe.idleUsdc), Number(safe.lpUsdc), Number(safe.feesUsdc), Number(safe.owedUsdc), Number(safe.totalUsdc), positionsJson, now.toISOString())
       .run()
 
     const receipt = receipts.get(accountKey)
     await db
       .prepare(
         `INSERT INTO account_daily (day, chain_id, address, account_key, env, block_open, block_close, total_open_usdc, total_close_usdc, idle_close_usdc, lp_close_usdc, fees_open_usdc, fees_close_usdc, collected_usdc, gas_paid_wei)
-         VALUES (?, ?, ?, ?, 'unknown', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(day, chain_id, address) DO UPDATE SET
-           block_close = excluded.block_close, total_close_usdc = excluded.total_close_usdc, idle_close_usdc = excluded.idle_close_usdc,
+           env = excluded.env, block_close = excluded.block_close, total_close_usdc = excluded.total_close_usdc, idle_close_usdc = excluded.idle_close_usdc,
            lp_close_usdc = excluded.lp_close_usdc, fees_close_usdc = excluded.fees_close_usdc,
            collected_usdc = COALESCE(excluded.collected_usdc, account_daily.collected_usdc),
            gas_paid_wei = COALESCE(excluded.gas_paid_wei, account_daily.gas_paid_wei)`,
       )
-      .bind(day, snapshot.chainId, address, accountKey, Number(snapshot.block), Number(snapshot.block), Number(safe.totalUsdc), Number(safe.totalUsdc), Number(safe.idleUsdc), Number(safe.lpUsdc), Number(safe.feesUsdc), Number(safe.feesUsdc), receipt?.collectedUsd ?? null, receipt?.gasWei ?? null)
+      .bind(day, snapshot.chainId, address, accountKey, env, Number(snapshot.block), Number(snapshot.block), Number(safe.totalUsdc), Number(safe.totalUsdc), Number(safe.idleUsdc), Number(safe.lpUsdc), Number(safe.feesUsdc), Number(safe.feesUsdc), receipt?.collectedUsd ?? null, receipt?.gasWei ?? null)
       .run()
     written++
   }
@@ -175,11 +193,12 @@ export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date
   let written = 0
   let skipped = 0
   for (const safe of snapshot.safes) {
-    const accountKey = await resolveAccountKey(db, snapshot.chainId, safe.safe)
-    if (!accountKey) {
+    const account = await resolveAccount(db, snapshot.chainId, safe.safe)
+    if (!account) {
       skipped += safe.positions.length
       continue
     }
+    const { accountKey, env } = account
     const address = safe.safe.toLowerCase()
     for (const p of safe.positions) {
       // holdValueUsdc and the four entry* fields travel together (yield-entries.ts's withHoldValue); any one
@@ -192,10 +211,10 @@ export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date
       await db
         .prepare(
           `INSERT INTO yield_ledger_position_entry (chain_id, token_id, account_key, address, env, pool, entry_day, entry_block, entry_amount0, entry_amount1, captured_at)
-           VALUES (?, ?, ?, ?, 'unknown', ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(chain_id, token_id) DO NOTHING`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(chain_id, token_id) DO UPDATE SET env = excluded.env`,
         )
-        .bind(snapshot.chainId, Number(p.tokenId), accountKey, address, p.pool, p.entryDay, p.entryBlock, p.entryAmount0, p.entryAmount1, now.toISOString())
+        .bind(snapshot.chainId, Number(p.tokenId), accountKey, address, env, p.pool, p.entryDay, p.entryBlock, p.entryAmount0, p.entryAmount1, now.toISOString())
         .run()
 
       const receipt = receipts.get(p.tokenId)
@@ -203,9 +222,9 @@ export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date
       await db
         .prepare(
           `INSERT INTO yield_ledger_position_daily (day, chain_id, token_id, account_key, address, env, pool, block_open, block_close, accrued0_open, accrued1_open, accrued_usd_open, accrued0_close, accrued1_close, accrued_usd_close, value_usd, hold_value_usd, collected0, collected1, collected_usd, fee_accrued_usd, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'unknown', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(day, chain_id, token_id) DO UPDATE SET
-             block_close = excluded.block_close, accrued0_close = excluded.accrued0_close, accrued1_close = excluded.accrued1_close,
+             env = excluded.env, block_close = excluded.block_close, accrued0_close = excluded.accrued0_close, accrued1_close = excluded.accrued1_close,
              accrued_usd_close = excluded.accrued_usd_close, value_usd = excluded.value_usd, hold_value_usd = excluded.hold_value_usd,
              collected0 = COALESCE(excluded.collected0, yield_ledger_position_daily.collected0),
              collected1 = COALESCE(excluded.collected1, yield_ledger_position_daily.collected1),
@@ -214,7 +233,7 @@ export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date
              updated_at = excluded.updated_at`,
         )
         .bind(
-          day, snapshot.chainId, Number(p.tokenId), accountKey, address, p.pool,
+          day, snapshot.chainId, Number(p.tokenId), accountKey, address, env, p.pool,
           Number(snapshot.block), Number(snapshot.block),
           p.accrued0, p.accrued1, Number(p.feesUsdc),
           p.accrued0, p.accrued1, Number(p.feesUsdc),

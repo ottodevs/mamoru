@@ -107,8 +107,30 @@ describe('writeAccountSnapshot (otto/mamoru#129, phase 2 of #136)', () => {
     expect(unmatched).toBe(0)
     const row = db.raw.query('SELECT * FROM account_snapshot_latest WHERE chain_id = ? AND address = ?').get(CHAIN_ID, SAFE.toLowerCase()) as Record<string, unknown>
     expect(row.account_key).toBe(ACCOUNT_KEY)
-    expect(row.env).toBe('unknown')
+    expect(row.env).toBe('prod')
     expect(row.total_usdc).toBe(6_000_000)
+  })
+
+  test('rows carry the account environment (#130): beta stays beta, a test account is test', async () => {
+    db.raw.exec(`UPDATE accounts SET env = 'beta' WHERE account_key = '${ACCOUNT_KEY}'`)
+    await writeAccountSnapshot(db, snapshot(), new Date('2026-10-16T09:00:05Z'))
+    const latest = () => db.raw.query('SELECT env FROM account_snapshot_latest WHERE address = ?').get(SAFE.toLowerCase()) as { env: string }
+    const daily = () => db.raw.query('SELECT env FROM account_daily WHERE address = ?').get(SAFE.toLowerCase()) as { env: string }
+    expect(latest().env).toBe('beta')
+    expect(daily().env).toBe('beta')
+    db.raw.exec(`UPDATE accounts SET is_test = 1 WHERE account_key = '${ACCOUNT_KEY}'`)
+    await writeAccountSnapshot(db, snapshot(), new Date('2026-10-16T09:10:05Z'))
+    expect(latest().env).toBe('test')
+    expect(daily().env).toBe('test')
+  })
+
+  test('a row written as unknown before the account had an environment is corrected on the next pull', async () => {
+    await writeAccountSnapshot(db, snapshot(), new Date('2026-10-16T09:00:05Z'))
+    db.raw.exec(`UPDATE account_snapshot_latest SET env = 'unknown'`)
+    db.raw.exec(`UPDATE account_daily SET env = 'unknown'`)
+    await writeAccountSnapshot(db, snapshot(), new Date('2026-10-16T09:10:05Z'))
+    expect((db.raw.query('SELECT env FROM account_snapshot_latest').get() as { env: string }).env).toBe('prod')
+    expect((db.raw.query('SELECT env FROM account_daily').get() as { env: string }).env).toBe('prod')
   })
 
   test('a safe with no matching account is skipped, not written, not an error', async () => {
@@ -159,6 +181,7 @@ describe('writeYieldLedger (otto/mamoru#129): reconciliation against the fee mat
     expect(written).toBe(1)
     expect(skipped).toBe(0)
     const row = db.raw.query('SELECT * FROM yield_ledger_position_daily WHERE day = ? AND token_id = ?').get('2026-10-16', 42) as Record<string, unknown>
+    expect(row.env).toBe('prod')
     expect(BigInt(row.accrued0_close as string)).toBe(fees.accrued0)
     expect(BigInt(row.accrued1_close as string)).toBe(fees.accrued1)
     expect(row.accrued_usd_close).toBe(Number(fees.accrued0))
@@ -181,6 +204,7 @@ describe('writeYieldLedger (otto/mamoru#129): reconciliation against the fee mat
     await writeYieldLedger(db, snapshot({ readAt: '2026-10-16T18:00:00Z', safes: [safe({ positions: [position({ amount0: '9999999' })] })] }), new Date('2026-10-16T18:00:00Z'))
     const entry = db.raw.query('SELECT * FROM yield_ledger_position_entry WHERE token_id = 42').get() as Record<string, unknown>
     expect(entry.entry_amount0).toBe('5000000')
+    expect(entry.env).toBe('prod')
   })
 
   test('yield_ledger_position_entry stores entryAmount0/1, not the position\'s current amount0/1, even when they differ (code-review finding, PR #43)', async () => {
