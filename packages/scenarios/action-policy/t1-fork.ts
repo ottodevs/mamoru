@@ -16,7 +16,7 @@
 import { encodeFunctionData, maxUint256, parseEventLogs, type Hex, type TransactionReceipt } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { address, assertCodeHashes, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, swapRouter02Abi } from '@mamoru/registry'
-import { conservadorLabGeometryV1, instantiateGrant, type Caps, type SessionGrant } from '@mamoru/policy'
+import { conservadorLabGeometryV1, instantiateGrant, V4_POOLS, type Caps, type SessionGrant } from '@mamoru/policy'
 import { approve, collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { permissionIdOf, revocationCalls } from '@mamoru/account/sessions'
@@ -27,18 +27,17 @@ import { startLabFork } from '../fork/lab-fork.ts'
 import { startForkProxy } from '../proxy/index.ts'
 import { artifactsRoot, ensureDir, writeJson } from '../report/index.ts'
 import { loadManifest, REPO_ROOT } from '../runner/manifest.ts'
-import { attestMamoruPolicyCall, buildV4EnterSwap, buildV4ManageAny, deployMamoruPolicy, encodeMamoruInit, loadPolicyArtifact, registerMamoruPolicyCall, resolverUidOf, type MamoruInit } from './v4-grant.ts'
+import { attestMamoruPolicyCall, buildV4EnterSwap, buildV4ManageAny, deployMamoruPolicy, encodeMamoruInit, loadPolicyArtifact, type MamoruInit } from './v4-grant.ts'
 
 const POOL = 'pool:USDC/cbBTC/500'
 const BAND_TICKS = 100 // = execution.maxTwapDeviationTicks (spec 007 table)
 const TWAP_WINDOW = 1800 // seconds
+const TWAP_SHORT_WINDOW = 300 // seconds (T6 M-1)
 const BUDGET_WINDOW = 86_400 // 1 day
-// Same numbers as the Foundry PoC (contracts/action-policy/test/MamoruActionPolicy.t.sol `_init`), so behaviour
-// and (roughly) gas are comparable across the two harnesses.
+// Same numbers as the Foundry PoC (contracts/action-policy/test/MamoruActionPolicy.t.sol `_initBtc`), so behaviour
+// and (roughly) gas are comparable across the two harnesses. T6 (M-2): one value budget in USDC (token0).
 const PER_WINDOW_USDC = 60_000_000_000n
-const PER_WINDOW_CBBTC = 60_000_000n
 const TOTAL_USDC = 180_000_000_000n
-const TOTAL_CBBTC = 180_000_000n
 
 // ------------------------------------------------------------------------------------------------ reporting
 
@@ -134,8 +133,21 @@ try {
 
   // --------------------------------------------------------------------------------------------- self-attest + enable (generation 1)
 
-  const mamoruInitAt = (generation: bigint): Hex => {
-    const init: MamoruInit = { pool, twapWindow: TWAP_WINDOW, bandTicks: BAND_TICKS, generation, budgetWindow: BUDGET_WINDOW, perWindow0: PER_WINDOW_USDC, perWindow1: PER_WINDOW_CBBTC, total0: TOTAL_USDC, total1: TOTAL_CBBTC }
+  const mamoruInitAt = (generation: bigint, admit: bigint[] = []): Hex => {
+    const init: MamoruInit = {
+      pool,
+      twapWindow: TWAP_WINDOW,
+      twapShortWindow: TWAP_SHORT_WINDOW,
+      bandTicks: BAND_TICKS,
+      generation,
+      anchorTick: 0,
+      anchorBand: 0, // volatile pool: no anchor (V4_POOLS.btc)
+      budgetIn1: false,
+      budgetWindow: BUDGET_WINDOW,
+      perWindow: PER_WINDOW_USDC,
+      total: TOTAL_USDC,
+      admit,
+    }
     return encodeMamoruInit(init)
   }
 
@@ -174,14 +186,10 @@ try {
   const managePid1 = permissionIdOf(v4Manage1)
 
   // ERC-7484: a brand-new module address has no ModuleRecord, and `attest` reverts for it (found empirically —
-  // custom error 0x4eb2dcd7, the module address as its only arg). `registerModule` is a one-time, per-CONTRACT
-  // cost (not per account); production (T7) would pay it once at deploy time, under the same resolverUID the
-  // already-deployed policies use. Only then can an account self-attest it, same as TimeFramePolicy/UsageLimitPolicy.
-  const resolverUID = await resolverUidOf(lab, address('TimeFramePolicy'))
-  const registerTx = await lab.send(relayer, address('ModuleRegistry'), registerMamoruPolicyCall(mamoruPolicy, resolverUID).data)
-  note('registerModule: MamoruActionPolicy (one-time, per contract, ordinary account)', registerTx.ok, registerTx.ok ? `${registerTx.receipt.gasUsed} gas, resolverUID ${resolverUID}` : 'reverted')
-  if (registerTx.ok) recordGas('register-mamoru-policy-one-time', registerTx.receipt.gasUsed)
-  else throw new Error('registerModule reverted — MamoruActionPolicy cannot be attested without it')
+  // custom error 0x4eb2dcd7, the module address as its only arg). T6 L-3: `deployMamoruPolicy` deploys AND
+  // registers in one `ModuleRegistry.deployModule` transaction (under the resolverUID the already-deployed
+  // policies use), so there is no window for anyone else to register it first. Then an account can self-attest
+  // it, same as TimeFramePolicy/UsageLimitPolicy.
 
   // Self-attestation on its own, so its gas (and whether it is even needed) is visible separately from enableSessions.
   const attestTx = await ownerExec(lab, relayer, world.a1, attestMamoruPolicyCall(mamoruPolicy))
@@ -262,8 +270,9 @@ try {
 
   // --------------------------------------------------------------------------------------------- attack (b): manage-any on a position the Safe did not mint through the policy
 
+  let unrelated = 0n
   {
-    const unrelated = await ownerMint(world, world.a1, 5_000_000_000n, 5_000_000n) // owner-minted directly on NPM, never admitted
+    unrelated = await ownerMint(world, world.a1, 5_000_000_000n, 5_000_000n) // owner-minted directly on NPM, never admitted
     const deadline = BigInt(Number(await lab.timestamp()) + 3600)
     const out = expect(
       await sendSessionOp(world, world.a1, { name: 'manage-any-v4', grant: manageGrant1, permissionId: managePid1 }, 'attack-unadmitted-nft-decrease', [decreaseLiquidity({ tokenId: unrelated, liquidity: 1n, amount0Min: 0n, amount1Min: 0n, deadline })]),
@@ -271,6 +280,17 @@ try {
       'CHAIN_REJECTED_VALIDATION',
     )
     note('  (b) detail', out.validator?.includes('PolicyViolation') ?? false, `UniActionPolicy's own rule (tokenId > 0) would pass this calldata; MamoruActionPolicy's admitted-set check is what refuses it — validator says: ${out.validator}`)
+
+    // T6 M-4: the session key cannot admit it itself — initializeWithMultiplexer is not a granted action (and
+    // only SmartSession may call it).
+    const selfAdmit = expect(
+      await sendSessionOp(world, world.a1, { name: 'manage-any-v4', grant: manageGrant1, permissionId: managePid1 }, 'attack-session-self-admit', [
+        { to: mamoruPolicy, data: encodeFunctionData({ abi: policyAbi, functionName: 'initializeWithMultiplexer', args: [world.a1.safe, `0x${'00'.repeat(32)}`, mamoruInitAt(1n, [unrelated])] }) },
+      ]),
+      `M-4: a session op calling initializeWithMultiplexer to admit tokenId ${unrelated} must be refused`,
+      'CHAIN_REJECTED_VALIDATION',
+    )
+    void selfAdmit
   }
 
   // --------------------------------------------------------------------------------------------- attack (c): batch over budget
@@ -359,7 +379,8 @@ try {
     }
     const swapGrant2: SessionGrant = instantiateGrant(policy, `enter-swap:${POOL}`, { ...ctx2, salt: nextSalt() })
     const manageGrant2: SessionGrant = instantiateGrant(policy, `manage-any:${POOL}`, { ...ctx2, salt: nextSalt() })
-    const mamoruInit2 = mamoruInitAt(2n)
+    // T6 M-4: the owner-signed renewal admits the position the owner minted outside the policy.
+    const mamoruInit2 = mamoruInitAt(2n, [unrelated])
     const v4Swap2 = buildV4EnterSwap(swapGrant2, mamoruPolicy, mamoruInit2)
     const v4Manage2 = buildV4ManageAny(manageGrant2, mamoruPolicy, mamoruInit2)
     const swapPid2 = permissionIdOf(v4Swap2)
@@ -405,6 +426,24 @@ try {
       'INCLUDED',
     )
     if (newOut.receipt) recordGas('op-swap-after-renewal', newOut.receipt.gasUsed)
+
+    const admittedNow = await admittedPoolOf(unrelated)
+    note('M-4: the renewal (owner-signed Init.admit) admitted the owner-minted position', admittedNow.toLowerCase() === pool.toLowerCase(), `tokenId ${unrelated}, admittedPool ${admittedNow}`)
+    const unrelatedLiq = (await lab.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [unrelated] }))[7]
+    const [u0, u1] = await decreaseMins(unrelated, unrelatedLiq)
+    const admittedOut = expect(
+      await sendSessionOp(
+        world,
+        world.a1,
+        { name: 'manage-any-v4-gen2', grant: manageGrant2, permissionId: managePid2 },
+        'renewal-admitted-decrease',
+        [decreaseLiquidity({ tokenId: unrelated, liquidity: unrelatedLiq, amount0Min: u0, amount1Min: u1, deadline: BigInt(Number(await lab.timestamp()) + 3600) }), collect({ account: world.a1.safe, tokenId: unrelated })],
+        { sessionKey: renewalKey },
+      ),
+      'M-4: the generation-2 session decreases + collects the admitted owner-minted position',
+      'INCLUDED',
+    )
+    void admittedOut
 
     const revoke = await ownerBatch(lab, relayer, world.a1, revocationCalls([swapPid1, managePid1]))
     note('removeSession: old generation-1 permissionIds (defense in depth, as spec 007 "Re-approval UX" prescribes)', revoke.ok, revoke.ok ? `${revoke.receipt.gasUsed} gas` : 'reverted')

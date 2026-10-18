@@ -43,7 +43,7 @@ import { startLabFork } from '../fork/lab-fork.ts'
 import { startForkProxy } from '../proxy/index.ts'
 import { artifactsRoot, ensureDir, writeJson } from '../report/index.ts'
 import { loadManifest, REPO_ROOT } from '../runner/manifest.ts'
-import { attestMamoruPolicyCall, deployMamoruPolicy, loadPolicyArtifact, registerMamoruPolicyCall, resolverUidOf } from './v4-grant.ts'
+import { attestMamoruPolicyCall, deployMamoruPolicy, loadPolicyArtifact, raiseObservationCardinality } from './v4-grant.ts'
 
 const DEPOSIT_USDC = 100_000_000_000n // 100,000 USDC (spec 007 "Max loss with a leaked key" uses the same example size)
 const GAS_CEILING = 14_000_000n // same default as splitSessionsByGas; kept explicit so the report says what it used
@@ -162,15 +162,19 @@ try {
   const caps = computeCaps(conservadorLabV4, DEPOSIT_USDC, prices)
   note('caps computed for all 3 pools (computeCaps)', true, `deposit ${DEPOSIT_USDC} raw USDC, ${Object.keys(caps).length} cap formulas`)
 
-  // --------------------------------------------------------------------------------------------- deploy + register the policy (one time, per contract)
+  // --------------------------------------------------------------------------------------------- deploy + register the policy (one tx), raise oracle rings
 
   const artifact = await loadPolicyArtifact()
   const mamoruPolicy = await deployMamoruPolicy(lab, artifact, relayer)
-  note('MamoruActionPolicy deployed', true, mamoruPolicy)
-  const resolverUID = await resolverUidOf(lab, address('TimeFramePolicy'))
-  const registerTx = await lab.send(relayer, address('ModuleRegistry'), registerMamoruPolicyCall(mamoruPolicy, resolverUID).data)
-  note('registerModule (one-time, per contract)', registerTx.ok, registerTx.ok ? `${registerTx.receipt.gasUsed} gas` : 'reverted')
-  if (!registerTx.ok) throw new Error('registerModule reverted')
+  note('MamoruActionPolicy deployed and registered in one ModuleRegistry.deployModule tx (T6 L-3)', true, mamoruPolicy)
+
+  // T6 L-4: the policy refuses a pool whose observation ring cannot hold the 1,800 s window at 1 s blocks. USDC/USDT
+  // has 1,000 at this block: the deploy step raises every pool to 3,600 first (script/Deploy.s.sol).
+  for (const p of Object.values(V4_POOLS)) {
+    const gas = await raiseObservationCardinality(lab, relayer, address(p.pool), 3_600)
+    note(`observationCardinalityNext >= 3,600: ${p.pool}`, true, gas > 0n ? `${gas} gas` : 'already there')
+    if (gas > 0n) recordGas(`raise-cardinality-${p.pool}`, gas)
+  }
 
   // self-attest, through the SAME owner batch pattern the app would use (registryTrustCalls already ran in fx-safe)
   const attestTx = await ownerExecGas(lab, relayer, world.a1, attestMamoruPolicyCall(mamoruPolicy), 2_000_000n)

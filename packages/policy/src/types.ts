@@ -178,11 +178,11 @@ export type PolicyVersion = {
      */
     twapShortWindowSeconds?: number
     /**
-     * T6 (H-1): MamoruActionPolicy.Init.minLiquidity per pool, the harmonic-mean liquidity floor of both TWAP
-     * windows. The engine refuses to build a v4 call for a pool whose oracle is under it (the policy would refuse
-     * the call anyway); precheck mirrors it. Missing for a pool: precheck runs no action-policy mirror for it.
+     * T6 (H-1): MamoruActionPolicy.Init.anchorTick/anchorBand per pool — a fixed price the range is clipped to
+     * (the stables pool: parity). A pool not listed has no anchor. The engine and precheck apply it exactly as
+     * the contract does (`@mamoru/uniswap-v3/policy-bounds` `priceRange`).
      */
-    minLiquidityByPool?: Partial<Record<RegistryName, bigint>>
+    anchorByPool?: Partial<Record<RegistryName, { tick: number; band: number }>>
     /**
      * Spec 007 (#151) T4: MamoruActionPolicy.Init's budget per pool (the account's enabled generation): one value
      * budget in the pool's stable token (`in1`: it is token1), a token bucket of `perWindow` refilled over

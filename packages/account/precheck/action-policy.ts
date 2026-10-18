@@ -3,15 +3,15 @@
 // (b) admission of positions for mint/decrease/collect/burn, (c) the per-pool value budget
 // (contracts/action-policy/src/MamoruActionPolicy.sol) — so the engine's precheck (index.ts) refuses a call the
 // deployed policy would refuse BEFORE it is ever signed and sent, never after. Pure: every read this mirror needs
-// (the pool's two TWAPs and their harmonic-mean liquidity, the policy's own on-chain spend counters, which tokenIds
+// (the pool's two TWAPs, the policy's own on-chain spend counters, which tokenIds
 // are admitted) is supplied by the caller (SessionLedger.watchActionPolicyPool / syncActionPolicyReads /
 // admitTokenId in ./index.ts), from the same `observe` eth_call T3's `prepareCalls` already makes for the pool —
 // this module makes no RPC calls of its own.
 //
 // (a): mirrors `_range`/`_swapBounds` at the FULL (1.0x) deployed band — never the engine's own narrower 0.8x
 // band (`@mamoru/uniswap-v3/policy-bounds` does the math; T4 only calls it at a different band than T3's
-// `prepareCalls` does). T6: the range is [max(long, short) - band + 1, min(long, short) + band] and is refused
-// outright when either window's harmonic-mean liquidity is under `minLiquidity` (`priceRange` returns null).
+// `prepareCalls` does). T6: the range is [max(long, short) - band + 1, min(long, short) + band], clipped to the
+// pool's anchor if it has one, and refused outright when empty (`priceRange` returns null).
 // (b): mint must target the policy (spec 007 "mint only through the policy"), with the same token0/token1/fee/
 // recipient checks `checkAction`'s mint branch makes; decrease/collect/burn must name a tokenId the caller's
 // admitted set covers for this pool (the engine's own allowedTokenIds/onMinted, plus tokenIds admitted at enable —
@@ -28,7 +28,7 @@
 import { decodeFunctionData, isAddressEqual, size, slice, toFunctionSelector, type Hex } from 'viem'
 import type { Address, ReasonCode } from '@mamoru/domain'
 import { nonfungiblePositionManagerAbi, swapRouter02Abi, type RegistryName } from '@mamoru/registry'
-import { budgetAllows, budgetValue, priceRange, swapBoundsInRange, type OracleRead, type PolicySpend, type PriceRange } from '@mamoru/uniswap-v3/policy-bounds'
+import { budgetAllows, budgetValue, priceRange, swapBoundsInRange, type OracleRead, type PolicySpend, type PriceAnchor, type PriceRange } from '@mamoru/uniswap-v3/policy-bounds'
 import type { Execution } from '../safe/index.ts'
 
 const SEL_EXACT_INPUT_SINGLE = toFunctionSelector('function exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))')
@@ -49,8 +49,8 @@ export type ActionPolicyPoolConfig = {
   token1: Address
   feePips: number
   bandTicks: number
-  /** T6 H-1: Init.minLiquidity. */
-  minLiquidity: bigint
+  /** T6 H-1: Init.anchorTick/anchorBand (the stables pool's parity); absent = none. */
+  anchor?: PriceAnchor
   /** T6 M-2: the budget unit is token1 (else token0) — the pool's stable token. */
   budgetIn1: boolean
   budgetWindowSeconds: number
@@ -75,12 +75,12 @@ function deny(code: ReasonCode, detail: string): ActionPolicyCheck {
   return { ok: false, code, detail }
 }
 
-/** Mirrors `_range`: the full-band range, or a POLICY_PRICE_BAND denial when the policy would refuse the oracle. */
+/** Mirrors `_range`: the full-band range, or a POLICY_PRICE_BAND denial when the policy would find it empty. */
 function rangeOf(cfg: ActionPolicyPoolConfig, reads: ActionPolicyReads): PriceRange | ActionPolicyCheck {
-  const r = priceRange(reads.oracle, cfg.bandTicks, cfg.minLiquidity)
+  const r = priceRange(reads.oracle, cfg.bandTicks, cfg.anchor)
   if (r) return r
   const o = reads.oracle
-  return deny('POLICY_PRICE_BAND', `${cfg.pool}: oracle refused (twap ${o.twapLong}/${o.twapShort}, harmonic-mean liquidity ${o.hmLong}/${o.hmShort}, floor ${cfg.minLiquidity})`)
+  return deny('POLICY_PRICE_BAND', `${cfg.pool}: empty range (twap ${o.twapLong}/${o.twapShort}, band ${cfg.bandTicks}${cfg.anchor ? `, anchor ${cfg.anchor.tick}+-${cfg.anchor.band}` : ''})`)
 }
 
 /**
@@ -183,7 +183,7 @@ export function checkActionPolicyCall(
       return deny('POLICY_NOT_ADMITTED', 'undecodable decrease/collect/burn')
     }
     if (!isAdmitted(tokenId)) return deny('POLICY_NOT_ADMITTED', `tokenId ${tokenId} is not an admitted position of ${cfg.pool}`)
-    // A decrease is priced (its minimums come from the range): the policy refuses it when the oracle is refused.
+    // A decrease is priced (its minimums come from the range): the policy refuses it when the range is empty.
     if (selector === SEL_DECREASE && reads) {
       const range = rangeOf(cfg, reads)
       if ('ok' in range) return range

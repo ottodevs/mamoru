@@ -39,8 +39,9 @@ export type MamoruInit = {
   bandTicks: number
   /** Account-wide: a higher generation here retires every lower-generation config of the account, all pools. */
   generation: bigint
-  /** Floor of the harmonic-mean in-range liquidity over each TWAP window (T6 H-1). */
-  minLiquidity: bigint
+  /** T6 H-1: fixed reference the range is clipped to (tick), +- `anchorBand` ticks; anchorBand 0 = none. */
+  anchorTick: number
+  anchorBand: number
   /** Budget unit: false = token0, true = token1 — always the pool's stable token (T6 M-2). */
   budgetIn1: boolean
   /** Seconds for the bucket to refill from empty (T6 M-3). */
@@ -62,7 +63,8 @@ export const MAMORU_INIT_TUPLE = [
       { name: 'twapShortWindow', type: 'uint32' },
       { name: 'bandTicks', type: 'uint24' },
       { name: 'generation', type: 'uint64' },
-      { name: 'minLiquidity', type: 'uint128' },
+      { name: 'anchorTick', type: 'int24' },
+      { name: 'anchorBand', type: 'uint24' },
       { name: 'budgetIn1', type: 'bool' },
       { name: 'budgetWindow', type: 'uint32' },
       { name: 'perWindow', type: 'uint128' },
@@ -107,11 +109,12 @@ export type V4PoolSpec = {
   windowMultiple: number
   totalMultiple: number
   /**
-   * MamoruActionPolicy.Init.minLiquidity (T6 H-1): floor of the harmonic-mean in-range liquidity over each TWAP
-   * window. A share of the pool's in-range liquidity at Base block 52,700,000 (see `V4_POOLS`); the fork
-   * measurement and the choice of share are in specs/007-onchain-action-policy/results/t6-fixes-2026-10-18.md.
+   * MamoruActionPolicy.Init.anchorTick/anchorBand (T6 H-1): a fixed price the range is clipped to. Only the stables
+   * pool has one (parity, tick 0, +- 40 ticks): pushing USDC/USDT far for a block costs ~25 USDC, so its TWAPs can
+   * be moved cheaply; the anchor bounds what that buys. Measurement in
+   * specs/007-onchain-action-policy/results/t6-fixes-2026-10-18.md.
    */
-  minLiquidity: bigint
+  anchor?: { tick: number; band: number }
   /** Cap formula names this pool's grants reference (resolved to raw units by `computeCaps`, see instantiate.ts). */
   caps: {
     stableSwapPerCall: string
@@ -171,20 +174,19 @@ export function v4CapFormulas(prefix: string, p: Omit<V4PoolSpec, 'caps'>): CapF
   ]
 }
 
-function v4Pool(pool: RegistryName, stable: RegistryName, volatile: RegistryName, token0: RegistryName, token1: RegistryName, fee: number, bandTicks: number, capShareBps: number, windowMultiple: number, totalMultiple: number, minLiquidity: bigint, prefix: string): V4PoolSpec {
-  return { pool, stable, volatile, token0, token1, fee, bandTicks, capShareBps, windowMultiple, totalMultiple, minLiquidity, caps: v4Caps(prefix) }
+function v4Pool(pool: RegistryName, stable: RegistryName, volatile: RegistryName, token0: RegistryName, token1: RegistryName, fee: number, bandTicks: number, capShareBps: number, windowMultiple: number, totalMultiple: number, anchor: { tick: number; band: number } | undefined, prefix: string): V4PoolSpec {
+  return { pool, stable, volatile, token0, token1, fee, bandTicks, capShareBps, windowMultiple, totalMultiple, ...(anchor ? { anchor } : {}), caps: v4Caps(prefix) }
 }
 
 /**
  * The three pools of conservadorLiveV2, with the v4 band ticks and cap shares of spec 007's "Parameters" table.
- * minLiquidity (T6 H-1), from the in-range liquidity at Base block 52,700,000: stables 2.972e14 x 10%, btc
- * 2.679e12 x 25%, risk 3.402e19 x 10%. btc needs the higher share: a one-block push 9,000 ticks out drops its
- * 5-minute harmonic mean to ~16%, which a 10% floor would let through (results/t6-fixes-2026-10-18.md).
+ * The stables pool's range is clipped to parity +- 40 ticks (T6 H-1): USDC and USDT both have 6 decimals, so
+ * parity is tick 0 (the pool sat at tick 14 at Base block 52,700,000).
  */
 export const V4_POOLS = {
-  stables: v4Pool('pool:USDC/USDT/100', 'USDC', 'USDT', 'USDC', 'USDT', 100, 10, 5000, 5, 10, 29_700_000_000_000n, 'stables'),
-  btc: v4Pool('pool:USDC/cbBTC/500', 'USDC', 'cbBTC', 'USDC', 'cbBTC', 500, 100, 4000, 2, 10, 669_000_000_000n, 'btc'),
-  risk: v4Pool('pool:WETH/USDC/3000', 'USDC', 'WETH', 'WETH', 'USDC', 3000, 100, 1000, 3, 10, 3_400_000_000_000_000_000n, 'risk'),
+  stables: v4Pool('pool:USDC/USDT/100', 'USDC', 'USDT', 'USDC', 'USDT', 100, 10, 5000, 5, 10, { tick: 0, band: 40 }, 'stables'),
+  btc: v4Pool('pool:USDC/cbBTC/500', 'USDC', 'cbBTC', 'USDC', 'cbBTC', 500, 100, 4000, 2, 10, undefined, 'btc'),
+  risk: v4Pool('pool:WETH/USDC/3000', 'USDC', 'WETH', 'WETH', 'USDC', 3000, 100, 1000, 3, 10, undefined, 'risk'),
 } as const satisfies Record<string, V4PoolSpec>
 
 export const TWAP_WINDOW_SECONDS = 1800 // spec 007 "Parameters": = execution.twapWindowSeconds
@@ -221,7 +223,8 @@ export function mamoruInitFor(
     twapShortWindow: opts.twapShortWindow ?? TWAP_SHORT_WINDOW_SECONDS,
     bandTicks: p.bandTicks,
     generation,
-    minLiquidity: p.minLiquidity,
+    anchorTick: p.anchor?.tick ?? 0,
+    anchorBand: p.anchor?.band ?? 0,
     budgetIn1: budgetIn1(p),
     budgetWindow: opts.budgetWindow ?? BUDGET_WINDOW_SECONDS,
     perWindow: need(p.caps.budgetWindow),
@@ -383,11 +386,11 @@ export function withActionPolicy(
   opts: { bandFactorBps?: number; caps?: Record<string, bigint>; budgetWindowSeconds?: number; twapShortWindowSeconds?: number } = {},
 ): PolicyVersion {
   const bandTicksByPool: Partial<Record<RegistryName, number>> = {}
-  const minLiquidityByPool: Partial<Record<RegistryName, bigint>> = {}
+  const anchorByPool: Partial<Record<RegistryName, { tick: number; band: number }>> = {}
   const budgetsByPool: Partial<Record<RegistryName, { windowSeconds: number; in1: boolean; perWindow: bigint; total: bigint }>> = {}
   for (const p of pools) {
     bandTicksByPool[p.pool] = p.bandTicks
-    minLiquidityByPool[p.pool] = p.minLiquidity
+    if (p.anchor) anchorByPool[p.pool] = p.anchor
     if (opts.caps) {
       const need = (name: string): bigint => {
         const v = opts.caps![name]
@@ -407,7 +410,7 @@ export function withActionPolicy(
     actionPolicy: {
       address: mamoruPolicy,
       bandTicksByPool,
-      minLiquidityByPool,
+      anchorByPool,
       twapShortWindowSeconds: opts.twapShortWindowSeconds ?? TWAP_SHORT_WINDOW_SECONDS,
       ...(opts.bandFactorBps !== undefined ? { bandFactorBps: opts.bandFactorBps } : {}),
       ...(opts.caps ? { budgetsByPool } : {}),

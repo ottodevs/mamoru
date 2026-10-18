@@ -9,9 +9,9 @@
 // package's dependency graph stays one layer below `@mamoru/policy`/`@mamoru/decide` (both of which already import
 // FROM `@mamoru/uniswap-v3/quote`, never the other way — same discipline as `packages/policy/src/v4-grants.ts`).
 //
-// T6 (audit H-1, M-1, M-2, M-3, L-7): the contract no longer prices off one TWAP. It reads two (long, short) and
-// their harmonic-mean liquidity (`oracleFromObserve`), refuses when either liquidity is under the Init's floor,
-// and bounds every priced action by one range [lo, hi] (`priceRange`). The budget is one value per pool in the
+// T6 (audit H-1, M-1, M-2, M-3, L-7): the contract no longer prices off one TWAP. It reads two (long, short,
+// `oracleFromObserve`) and bounds every priced action by one range [lo, hi] (`priceRange`), refused when empty and
+// clipped to a fixed anchor on the stables pool. The budget is one value per pool in the
 // pool's stable token (`budgetValue`), charged against a token bucket and a per-approval total (`bucketNow`).
 //
 // `amountsForLiquidityAtPrice` below duplicates a formula that already exists twice in `@mamoru/decide`
@@ -28,7 +28,6 @@ const Q96 = 1n << 96n
 const Q128 = 1n << 128n
 const Q192 = 1n << 192n
 const MAX_UINT128 = (1n << 128n) - 1n
-const MAX_UINT160 = (1n << 160n) - 1n
 
 function clampTick(t: number): number {
   return t > MAX_TICK ? MAX_TICK : t < MIN_TICK ? MIN_TICK : t
@@ -50,13 +49,10 @@ function u128(amount: bigint): bigint {
   return amount
 }
 
-// ---------------------------------------------------------------- the oracle read (T6 H-1, M-1)
+// ---------------------------------------------------------------- the oracle read and the range (T6 H-1, M-1)
 
-/**
- * What MamoruActionPolicy._oracle reads from one `observe([twapWindow, twapShortWindow, 0])`: the long and short
- * TWAP ticks and each window's harmonic-mean in-range liquidity. Build it with `oracleFromObserve`.
- */
-export type OracleRead = { twapLong: number; twapShort: number; hmLong: bigint; hmShort: bigint }
+/** What MamoruActionPolicy._oracle reads from one `observe([twapWindow, twapShortWindow, 0])`: both TWAP ticks. */
+export type OracleRead = { twapLong: number; twapShort: number }
 
 /** Mirrors MamoruActionPolicy._meanTick (= OracleLibrary.consult's tick): floor, also for a negative delta. */
 export function meanTick(tickCumulativeDelta: bigint, windowSeconds: number): number {
@@ -66,40 +62,33 @@ export function meanTick(tickCumulativeDelta: bigint, windowSeconds: number): nu
   return Number(t)
 }
 
-/** Mirrors MamoruActionPolicy._harmonicMean (= OracleLibrary.consult's harmonicMeanLiquidity, uint128-truncated). */
-export function harmonicMeanLiquidity(secondsPerLiquidityDelta: bigint, windowSeconds: number): bigint {
-  if (secondsPerLiquidityDelta === 0n) return MAX_UINT128
-  const x = (BigInt(windowSeconds) * MAX_UINT160) / (secondsPerLiquidityDelta << 32n)
-  return x & MAX_UINT128
-}
-
-/** `observe([long, short, 0])`'s two arrays -> OracleRead, exactly as the contract folds them. */
-export function oracleFromObserve(tickCumulatives: readonly bigint[], secondsPerLiquidityX128: readonly bigint[], longSeconds: number, shortSeconds: number): OracleRead {
+/** `observe([long, short, 0])`'s tick cumulatives -> OracleRead, exactly as the contract folds them. */
+export function oracleFromObserve(tickCumulatives: readonly bigint[], longSeconds: number, shortSeconds: number): OracleRead {
   const [t0, t1, t2] = tickCumulatives as [bigint, bigint, bigint]
-  const [s0, s1, s2] = secondsPerLiquidityX128 as [bigint, bigint, bigint]
-  // uint160 arithmetic in the contract: the cumulative wraps, the checked 0.8 subtraction never sees it in practice.
-  return {
-    twapLong: meanTick(t2 - t0, longSeconds),
-    twapShort: meanTick(t2 - t1, shortSeconds),
-    hmLong: harmonicMeanLiquidity((s2 - s0) & MAX_UINT160, longSeconds),
-    hmShort: harmonicMeanLiquidity((s2 - s1) & MAX_UINT160, shortSeconds),
-  }
+  return { twapLong: meanTick(t2 - t0, longSeconds), twapShort: meanTick(t2 - t1, shortSeconds) }
 }
 
 /** The price range every priced action must stay inside, in ticks: [lo, hi]. */
 export type PriceRange = { lo: number; hi: number }
 
+/** `Init.anchorTick` / `Init.anchorBand`: a fixed reference the range is clipped to (the stables pool: parity). */
+export type PriceAnchor = { tick: number; band: number }
+
 /**
- * Mirrors MamoruActionPolicy._range: lo = max(long, short) - band + 1, hi = min(long, short) + band (both clamped
- * to the tick space). `null` (the contract refuses) when either window's harmonic-mean liquidity is under
- * `minLiquidity`, or the range is empty (the two TWAPs disagree by more than about 2 x band).
+ * Mirrors MamoruActionPolicy._range: lo = max(long, short) - band + 1, hi = min(long, short) + band, clipped to
+ * [anchor.tick - anchor.band, anchor.tick + anchor.band] when there is an anchor, then to the tick space. `null`
+ * (the contract refuses) when the result is empty: the two TWAPs disagree by about 2 x band or more, or the price
+ * left the anchor.
  */
-export function priceRange(o: OracleRead, bandTicks: number, minLiquidity: bigint): PriceRange | null {
-  if (o.hmLong < minLiquidity || o.hmShort < minLiquidity) return null
-  const top = Math.max(o.twapLong, o.twapShort)
-  const bottom = Math.min(o.twapLong, o.twapShort)
-  const lo = clampTick(top - bandTicks + 1)
-  const hi = clampTick(bottom + bandTicks)
+export function priceRange(o: OracleRead, bandTicks: number, anchor?: PriceAnchor): PriceRange | null {
+  let lo = Math.max(o.twapLong, o.twapShort) - bandTicks + 1
+  let hi = Math.min(o.twapLong, o.twapShort) + bandTicks
+  if (anchor && anchor.band !== 0) {
+    lo = Math.max(lo, anchor.tick - anchor.band)
+    hi = Math.min(hi, anchor.tick + anchor.band)
+  }
+  lo = clampTick(lo)
+  hi = clampTick(hi)
   return lo <= hi ? { lo, hi } : null
 }
 

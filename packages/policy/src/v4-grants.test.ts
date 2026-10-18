@@ -62,7 +62,7 @@ describe('MamoruActionPolicy.Init encoding stays in sync with the Solidity struc
         return { type, name }
       })
     expect(fields).toEqual(MAMORU_INIT_TUPLE[0].components.map((c) => ({ type: c.type, name: c.name })))
-    expect(fields.map((f) => f.name)).toEqual(['pool', 'twapWindow', 'twapShortWindow', 'bandTicks', 'generation', 'minLiquidity', 'budgetIn1', 'budgetWindow', 'perWindow', 'total', 'admit'])
+    expect(fields.map((f) => f.name)).toEqual(['pool', 'twapWindow', 'twapShortWindow', 'bandTicks', 'generation', 'anchorTick', 'anchorBand', 'budgetIn1', 'budgetWindow', 'perWindow', 'total', 'admit'])
   })
 
   test('encodeMamoruInit round-trips through abi.decode(data, (Init))', () => {
@@ -72,7 +72,8 @@ describe('MamoruActionPolicy.Init encoding stays in sync with the Solidity struc
       twapShortWindow: 300,
       bandTicks: 100,
       generation: 1n,
-      minLiquidity: 669_000_000_000n,
+      anchorTick: -3,
+      anchorBand: 40,
       budgetIn1: false,
       budgetWindow: 86_400,
       perWindow: 60_000_000_000n,
@@ -94,7 +95,8 @@ describe('MamoruActionPolicy.Init encoding stays in sync with the Solidity struc
     expect(init.twapShortWindow).toBe(300)
     expect(init.bandTicks).toBe(100)
     expect(init.budgetWindow).toBe(86_400)
-    expect(init.minLiquidity).toBe(V4_POOLS.btc.minLiquidity)
+    expect([init.anchorTick, init.anchorBand]).toEqual([0, 0]) // btc: no anchor
+    expect(mamoruInitFor(V4_POOLS.stables, 1n, caps)).toMatchObject({ anchorTick: 0, anchorBand: 40 }) // parity +- 40
     expect(init.admit).toEqual([42n])
     // btc: W_p = 2 x C_p per day, T_p = 10 x C_p per approval (T5, Ot 18-Oct): total is 5x the per-window budget.
     expect(init.total).toBe(init.perWindow * 5n)

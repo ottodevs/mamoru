@@ -20,8 +20,9 @@
 import { encodeFunctionData, parseEventLogs, type Address as ViemAddress, type Hex, type TransactionReceipt } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { address, assertCodeHashes, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
-import { computeCaps, conservadorLabV4, encodeMamoruInit, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_POOLS, withActionPolicy, type Price, type SessionGrant } from '@mamoru/policy'
-import type { ActionPolicyPoolConfig } from '@mamoru/account/precheck'
+import { computeCaps, conservadorLabV4, encodeMamoruInit, instantiateGrant, mamoruInitFor, retargetToPolicy, TWAP_SHORT_WINDOW_SECONDS, V4_POOLS, withActionPolicy, type Price, type SessionGrant } from '@mamoru/policy'
+import type { ActionPolicyPoolConfig, ActionPolicySpend } from '@mamoru/account/precheck'
+import { bucketNow, oracleFromObserve, type OracleRead } from '@mamoru/uniswap-v3/policy-bounds'
 import { permissionIdOf, toSmartSession } from '@mamoru/account/sessions'
 import { approve } from '@mamoru/uniswap-v3'
 import { Lab, devAccount } from '../fixtures/lab.ts'
@@ -31,7 +32,7 @@ import { startLabFork } from '../fork/lab-fork.ts'
 import { startForkProxy } from '../proxy/index.ts'
 import { artifactsRoot, ensureDir, writeJson } from '../report/index.ts'
 import { loadManifest, REPO_ROOT } from '../runner/manifest.ts'
-import { attestMamoruPolicyCall, deployMamoruPolicy, loadPolicyArtifact, registerMamoruPolicyCall, resolverUidOf } from './v4-grant.ts'
+import { attestMamoruPolicyCall, deployMamoruPolicy, loadPolicyArtifact } from './v4-grant.ts'
 
 const POOL = V4_POOLS.btc.pool // 'pool:USDC/cbBTC/500'
 const DEPOSIT_USDC = 100_000_000_000n // 100,000 USDC — same order of magnitude as t3-fork.ts
@@ -88,18 +89,16 @@ async function usdcPrice(lab: Lab, pool: string, token0: string, token1: string,
   throw new Error(`usdcPrice: ${pool} does not pair USDC with ${asset}`)
 }
 
-/** Same floor-rounding `Engine.poolTwapTick` / `OracleLibrary.consult` use. One `observe` eth_call. */
-async function twapTick(lab: Lab, pool: ViemAddress, windowSeconds: number): Promise<number> {
-  const [cumulatives] = await lab.client.readContract({
+/** What `Engine.poolOracle` reads (T6): one `observe([long, short, 0])`, folded like `MamoruActionPolicy._oracle`. */
+async function oracleRead(lab: Lab, pool: ViemAddress): Promise<OracleRead> {
+  const long = conservadorLabV4.execution.twapWindowSeconds
+  const [ticks] = await lab.client.readContract({
     address: pool,
     abi: [{ type: 'function', name: 'observe', stateMutability: 'view', inputs: [{ type: 'uint32[]' }], outputs: [{ type: 'int56[]' }, { type: 'uint160[]' }] }],
     functionName: 'observe',
-    args: [[windowSeconds, 0]],
+    args: [[long, TWAP_SHORT_WINDOW_SECONDS, 0]],
   })
-  const delta = cumulatives[1]! - cumulatives[0]!
-  let t = delta / BigInt(windowSeconds)
-  if (delta < 0n && delta % BigInt(windowSeconds) !== 0n) t -= 1n
-  return Number(t)
+  return oracleFromObserve(ticks, long, TWAP_SHORT_WINDOW_SECONDS)
 }
 
 // ------------------------------------------------------------------------------------------------ setup
@@ -137,13 +136,10 @@ try {
   const artifact = await loadPolicyArtifact()
   const mamoruPolicy = await deployMamoruPolicy(lab, artifact, relayer)
   const policyAbi = artifact.abi
-  note('MamoruActionPolicy deployed', true, mamoruPolicy)
-  const resolverUID = await resolverUidOf(lab, address('TimeFramePolicy'))
-  const registerTx = await lab.send(relayer, address('ModuleRegistry'), registerMamoruPolicyCall(mamoruPolicy, resolverUID).data)
-  if (!registerTx.ok) throw new Error('registerModule reverted')
+  note('MamoruActionPolicy deployed + registered (one deployModule tx, T6 L-3)', true, mamoruPolicy)
   const attestTx = await ownerExec(lab, relayer, world.a1, attestMamoruPolicyCall(mamoruPolicy))
   if (!attestTx.ok) throw new Error('self-attest reverted')
-  note('register + self-attest MamoruActionPolicy', true, `${registerTx.receipt.gasUsed + attestTx.receipt.gasUsed} gas total`)
+  note('self-attest MamoruActionPolicy', true, `${attestTx.receipt.gasUsed} gas`)
 
   // --------------------------------------------------------------------------------------------- generation 1: enter-swap + manage-any
 
@@ -183,24 +179,35 @@ try {
     token1: address('cbBTC'),
     feePips: 500,
     bandTicks: enginePolicy.actionPolicy!.bandTicksByPool[POOL]!,
+    budgetIn1: apBudget.in1,
     budgetWindowSeconds: apBudget.windowSeconds,
-    perWindow0: apBudget.perWindow0,
-    perWindow1: apBudget.perWindow1,
-    total0: apBudget.total0,
-    total1: apBudget.total1,
+    perWindow: apBudget.perWindow,
+    total: apBudget.total,
   }
-  note('engine action-policy config', true, `bandTicks ${apConfig.bandTicks} (full, 1.0x), perWindow0 ${apConfig.perWindow0}, total0 ${apConfig.total0}`)
+  note('engine action-policy config', true, `bandTicks ${apConfig.bandTicks} (full, 1.0x), no anchor (volatile), perWindow ${apConfig.perWindow} / total ${apConfig.total} (USDC, one value budget)`)
 
   /** Exactly what `Engine.syncActionPolicyLedger` does before precheck: watch the pool's config, then refresh the
-   * TWAP + the policy's own on-chain Spend/generation from real eth_calls. */
-  async function syncLedger(): Promise<void> {
+   * oracle (both TWAPs + liquidity) + the policy's own on-chain Spend/generation from real eth_calls. */
+  async function syncLedger(): Promise<{ spend: ActionPolicySpend; currentGeneration: bigint }> {
     world.a1.ledger.watchActionPolicyPool(apConfig)
-    const [spend, currentGeneration, tick] = await Promise.all([
-      lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'spendOf', args: [world.a1.safe, pool] }) as Promise<{ epoch: bigint; generation: bigint; window0: bigint; window1: bigint; total0: bigint; total1: bigint }>,
+    const [spend, currentGeneration, oracle] = await Promise.all([
+      lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'spendOf', args: [world.a1.safe, pool] }) as Promise<ActionPolicySpend>,
       lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'generationOf', args: [world.a1.safe] }) as Promise<bigint>,
-      twapTick(lab, pool, conservadorLabV4.execution.twapWindowSeconds),
+      oracleRead(lab, pool),
     ])
-    world.a1.ledger.syncActionPolicyReads(POOL, { twapTick: tick, spend, currentGeneration })
+    world.a1.ledger.syncActionPolicyReads(POOL, { oracle, spend, currentGeneration })
+    return { spend, currentGeneration }
+  }
+
+  /** T6: the TS bucket (`bucketNow` over `spendOf`) against the contract's own `budgetLeft`, at the same block. */
+  async function crossCheckBudget(label: string): Promise<void> {
+    const { spend, currentGeneration } = await syncLedger()
+    const now = (await lab.client.getBlock()).timestamp
+    const [window, total] = (await lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'budgetLeft', args: [world.a1.safe, pool] })) as readonly [bigint, bigint]
+    const b = bucketNow(spend, { generation: currentGeneration, windowSeconds: apConfig.budgetWindowSeconds, perWindow: apConfig.perWindow, total: apConfig.total }, now)
+    const tsWindow = apConfig.perWindow > b.debt ? apConfig.perWindow - b.debt : 0n
+    const tsTotal = apConfig.total > b.spent ? apConfig.total - b.spent : 0n
+    note(`budget cross-check (${label})`, tsWindow === window && tsTotal === total, `TS bucket room ${tsWindow} / approval room ${tsTotal} vs contract ${window} / ${total}`)
   }
 
   function swapExec(amountIn: bigint, amountOutMinimum: bigint, sqrtPriceLimitX96: bigint) {
@@ -291,11 +298,12 @@ try {
     world.a1.ledger.activate(swapPid2, swapGrant2)
     const freshSwap = { name: 'enter-swap-v4-fresh', grant: swapGrant2, permissionId: swapPid2 }
 
-    await lab.warp(apConfig.budgetWindowSeconds) // a fresh window; the account+pool TOTAL still carries (a)/(b)'s spend
-    await syncLedger()
+    await crossCheckBudget('after (a) and (b)')
+    await lab.warp(apConfig.budgetWindowSeconds) // a full refill; the account+pool TOTAL still carries (a)/(b)'s spend
+    await crossCheckBudget('one budget window later')
     // btc: W_p = 2 x C_p per day and the grant's per-call cap is C_p (T5, Ot 18-Oct): two swaps at the per-call cap
-    // fill the day's window exactly, a third is over it.
-    const perCall = apConfig.perWindow0 / 2n
+    // fill the bucket (less the few seconds of refill between blocks), a third is over it.
+    const perCall = apConfig.perWindow / 2n
     const [minOut, limit] = (await lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'swapBounds', args: [world.a1.safe, pool, address('USDC'), perCall] })) as readonly [bigint, bigint]
     const oneSwap = swapExec(perCall, minOut, limit)
 
@@ -303,7 +311,7 @@ try {
       const ok = await sendSessionOp(world, world.a1, freshSwap, `t4-budget-swap-${n}`, oneSwap)
       expectPrecheck(ok, `(c) swap ${n} of 2 at the per-call cap, inside the day's window: precheck accepts it`, 'ACCEPT')
       expectVerdict(ok, `(c) swap ${n}: the chain includes it`, 'INCLUDED')
-      await syncLedger() // refreshes Spend from the chain
+      await crossCheckBudget(`after swap ${n}`) // also refreshes Spend from the chain
     }
     const third = await sendSessionOp(world, world.a1, freshSwap, 't4-budget-third-swap-refused', oneSwap)
     expectPrecheck(third, '(c) a third swap in the same window: precheck refuses it BEFORE anything is sent', 'POLICY_BUDGET')
