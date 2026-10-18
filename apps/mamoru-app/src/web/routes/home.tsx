@@ -845,13 +845,15 @@ export function askedBefore(key: string, storageOf: () => AskStorage | null = ta
   return false
 }
 
-function RenewDialog({ accountKey, approval, open, onClose }: { accountKey: string; approval: NonNullable<FundingView['approval']>; open: boolean; onClose: () => void }) {
+function RenewDialog({ accountKey, approval, open, onClose, onDone }: { accountKey: string; approval: NonNullable<FundingView['approval']>; open: boolean; onClose: () => void; onDone: () => void }) {
   const flow = useOwnerAction(accountKey, 'renew')
   const prepared = useFittingPrepared(approval, flow)
   const done = !!flow.result && flow.result.state !== 'failed'
   useEffect(() => {
-    if (done) onClose()
-  }, [done, onClose])
+    if (!done) return
+    onDone()
+    onClose()
+  }, [done, onClose, onDone])
   const { title, lead } = approvalHeading(approval)
   return (
     <ApprovalDialog title={title} open={open && !done} onClose={onClose}>
@@ -912,6 +914,12 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   }, [renewAsk])
   const closeRenewAsk = useCallback(() => setRenewAsked(false), [])
   const openApproval = useCallback(() => setRenewAsked(true), [])
+  // The approval just signed here: its row steps aside until the funding poll shows the next one (a new end date,
+  // fewer grants missing), so it never offers a button whose dialog has nothing left to do (#176 review).
+  const [signedKey, setSignedKey] = useState<string | null>(null)
+  const approvalKey = f?.approval ? approvalRowKey(f.approval) : null
+  const markSigned = useCallback(() => setSignedKey(approvalKey), [approvalKey])
+  const approvalOpen = !!f?.approval && approvalKey !== signedKey
   // A confirmed activation exists somewhere in this account's history (Stop and restart only matter once this
   // is true); ops history, not the funding poll, so this is never behind it.
   const ranBefore = everStarted(opList)
@@ -1003,7 +1011,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
             </>
           ) : canStart ? (
             <StartRow accountKey={accountKey} funded={hasMoney(f)} />
-          ) : f.active && f.approval && (f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade) && !renewing ? (
+          ) : f.active && f.approval && approvalOpen && (f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade) && !renewing ? (
             <ApprovalRow key={approvalRowKey(f.approval)} approval={f.approval} onOpen={openApproval} />
           ) : null}
           <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />
@@ -1033,8 +1041,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           <WithdrawDialog key={withdrawSeed} accountKey={accountKey} s={s} open={dialog === 'withdraw'} onClose={() => setDialog(null)} initialAmount={withdrawSeed} deployed={f.deployed} />
           <StopDialog accountKey={accountKey} s={s} open={dialog === 'stop'} onClose={() => setDialog(null)} />
           <StartDialog accountKey={accountKey} s={s} open={dialog === 'start'} onClose={() => setDialog(null)} />
-          {f.approval && f.active && !renewing && (renewAsk || f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade) ? (
-            <RenewDialog key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null && !feedbackOpen} onClose={closeRenewAsk} />
+          {f.approval && f.active && !renewing && approvalOpen && (renewAsk || f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade) ? (
+            <RenewDialog onDone={markSigned} key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null && !feedbackOpen} onClose={closeRenewAsk} />
           ) : null}
         </>
       ) : null}
