@@ -1,4 +1,4 @@
-import { overCap, PRODUCTION_BANNER, type AppConfig, type FundingView, type OpView, type OwnerResponse, type OwnerTxToSign, type PriceDivergenceWarning, type SessionView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
+import { overCap, PRODUCTION_BANNER, type AppConfig, type BridgeOutView, type FundingView, type OpView, type OwnerResponse, type OwnerTxToSign, type PriceDivergenceWarning, type SessionView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
 import type { ApiClient } from '../api/client.ts'
 import { emptyAccount, FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from './empty-account.ts'
 import { poolsResponse } from './pools.ts'
@@ -87,6 +87,9 @@ const liveState = {
     ? [{ opId: 'own-1-activate', kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: OVER_CAP_USDC, capUsdc: fixtureFunding.capUsdc, updatedAt: new Date().toISOString() }]
     : []) as OpView[],
   n: 0,
+  // ?wrongchain: the 150 USDC on Ethereum until the owner moves it (#133).
+  ethereumUsdc: '150000000',
+  bridge: { route: null } as BridgeOutView,
   owner: !fresh,
   transferUsdc: 0n,
 }
@@ -200,7 +203,7 @@ export const fixtureClient: ApiClient = {
       address: FIXTURE_ADDRESS,
       accountChainId: 8453,
       chains: param('wrongchain')
-        ? [{ chainId: 1, name: 'Ethereum', status: 'observed' as const, block: 21_000_000, usdc: '150000000', eth: '0', observedAt: new Date().toISOString() }]
+        ? [{ chainId: 1, name: 'Ethereum', status: 'observed' as const, block: 21_000_000, usdc: liveState.ethereumUsdc, eth: '0', observedAt: new Date().toISOString() }]
         : [{ chainId: 1, name: 'Ethereum', status: 'not_observed' as const, observedAt: new Date().toISOString() }],
     }),
   // otto/mamoru#129: a few cents of uncollected fees, nothing collected yet (true of every live account on 15 Oct).
@@ -283,6 +286,18 @@ export const fixtureClient: ApiClient = {
         f.usdc = '19900000'
       }),
     ),
+  bridgeOutPrepare: () =>
+    delay({ ...fixtureTx(['Move 150.00 USDC from Ethereum to this same account on Base', 'You receive 149.98 USDC on Base, in about 2 s', 'Bridge: Across, fee 0.02 USDC. Mamoru pays the Ethereum gas']), chainId: 1, route: { outputUsdc: '149980000', feeUsdc: '20000', fillSec: 2 } }),
+  bridgeOut: () => {
+    liveState.ethereumUsdc = '0'
+    liveState.bridge = { route: { state: 'deposited', amountUsdc: '150000000', outputUsdc: '149980000', at: new Date().toISOString(), l1Tx: `0x${'1'.repeat(64)}`, depositId: '1' } }
+    setTimeout(() => {
+      liveState.bridge = { route: { ...liveState.bridge.route!, state: 'filled', fillTx: `0x${'2'.repeat(64)}`, at: new Date().toISOString() } }
+      liveState.funding = { ...liveState.funding, usdc: (BigInt(liveState.funding.usdc) + 149_980_000n).toString() }
+    }, 4_000)
+    return delay(liveState.bridge)
+  },
+  bridgeOutStatus: () => delay(liveState.bridge),
   // The shape of a real three-pool renewal (operator planRenew), so the dialog is reviewed on text as long as the real one.
   renewPrepare: () =>
     delay(

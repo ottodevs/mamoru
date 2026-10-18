@@ -4,6 +4,8 @@ import type {
   ApiError,
   ApyView,
   AppConfig,
+  BridgeOutToSign,
+  BridgeOutView,
   DashboardPayload,
   FeedbackRequest,
   FeedbackResponse,
@@ -57,6 +59,10 @@ export type ApiClient = {
   stop(accountKey: string, sig: OwnerSignature): Promise<OpView>
   renewPrepare(accountKey: string): Promise<OwnerTxToSign>
   renew(accountKey: string, sig: OwnerSignature): Promise<OpView>
+  /** #133: move the USDC found on Ethereum to this account on Base. */
+  bridgeOutPrepare(accountKey: string): Promise<BridgeOutToSign>
+  bridgeOut(accountKey: string, sig: OwnerSignature): Promise<BridgeOutView>
+  bridgeOutStatus(accountKey: string): Promise<BridgeOutView>
   /** Works with or without a session. */
   feedback(body: FeedbackRequest): Promise<FeedbackResponse>
 }
@@ -137,6 +143,9 @@ export const httpClient: ApiClient = {
   stop: (k, sig) => post<OpView>(acct(k, 'stop'), sig),
   renewPrepare: (k) => post<OwnerTxToSign>(acct(k, 'renew/prepare')),
   renew: (k, sig) => post<OpView>(acct(k, 'renew'), sig),
+  bridgeOutPrepare: (k) => post<BridgeOutToSign>(acct(k, 'bridge-out/prepare')),
+  bridgeOut: (k, sig) => post<BridgeOutView>(acct(k, 'bridge-out'), sig),
+  bridgeOutStatus: (k) => request<BridgeOutView>(acct(k, 'bridge-out')),
   feedback: (body) => post<FeedbackResponse>('/api/feedback', body),
 }
 

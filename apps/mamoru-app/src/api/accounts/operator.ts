@@ -115,7 +115,8 @@ export function operatorRoutes(operatorFetch: OperatorFetch) {
   routes.get('/:accountKey/funding', forward)
   routes.get('/:accountKey/ops', forward)
   routes.get('/:accountKey/withdraw-assets', forward)
-  for (const action of ['activate', 'transfer', 'stop', 'renew']) {
+  routes.get('/:accountKey/bridge-out', forward)
+  for (const action of ['activate', 'transfer', 'stop', 'renew', 'bridge-out']) {
     routes.post(`/:accountKey/${action}/prepare`, forward)
     routes.post(`/:accountKey/${action}`, forward)
   }

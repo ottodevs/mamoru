@@ -127,6 +127,22 @@ export type OtherChainFunds =
   | { chainId: number; name: string; status: 'not_observed'; observedAt: string }
 export type OtherChainsView = { address: Hex0x; accountChainId: number; chains: OtherChainFunds[] }
 
+// Moving USDC found on Ethereum to the same account on Base (ticket #133). Amounts in USDC base units.
+// sending: the relayer is on it. deposited: the bridge holds it, Base fill pending. filled: on Base.
+// failed: nothing left Ethereum. unconfirmed: the owner transaction was sent and its outcome is not known here.
+export type BridgeOutRoute = {
+  state: 'sending' | 'deposited' | 'filled' | 'failed' | 'unconfirmed'
+  amountUsdc: string
+  outputUsdc: string
+  at: string
+  deployTx?: Hex0x
+  l1Tx?: Hex0x
+  depositId?: string
+  fillTx?: Hex0x
+}
+export type BridgeOutView = { route: BridgeOutRoute | null }
+export type BridgeOutToSign = OwnerTxToSign & { route: { outputUsdc: string; feeUsdc: string; fillSec: number } }
+
 // What the operator found when a deposit is above the per-account cap. Amounts in USDC base units.
 export type OverCap = { code: 'DEPOSIT_OVER_CAP'; usdc: string; capUsdc: string; excessUsdc: string }
 

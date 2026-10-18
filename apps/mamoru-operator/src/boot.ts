@@ -11,6 +11,7 @@ import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
 import { Operator, type OperatorConfig } from './operator.ts'
 import { Relayer } from './relayer.ts'
+import { BridgeOut, ETHEREUM_CHAIN_ID } from './bridge-out.ts'
 import { startRpcProxy } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
 import { readSnapshot, SnapshotLoop, snapshotIntervalMs, type Snapshot } from './snapshot.ts'
@@ -169,6 +170,8 @@ async function gitShaOnce(cwd: string): Promise<string> {
 
 export type BootOptions = {
   rpcUrl: string
+  /** Ethereum Mainnet RPC for bridge-out (#133). Unset: bridge-out off. */
+  l1RpcUrl?: string
   secret: string
   stateDir: string
   hostname?: string
@@ -286,7 +289,8 @@ export async function bootOperator(o: BootOptions) {
   assertV4Resolvable(Object.values(store.state.accounts), process.env)
   // The relayer's own reads (gas estimate, nonce, the wait for a receipt) are counted as the relayer's, like its sends.
   const relayerClient = createPublicClient({ transport: http(via('relayer'), { batch: true, timeout: 60_000 }) })
-  const relayer = new Relayer(loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey), relayerClient, via('relayer'), chainId)
+  const relayerKey = loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey)
+  const relayer = new Relayer(relayerKey, relayerClient, via('relayer'), chainId)
   const bundler = startLiveBundler(client, relayer, chainId)
   const knobs = capAndDepth(o, policy)
   let retune = () => {}
@@ -351,7 +355,15 @@ export async function bootOperator(o: BootOptions) {
     if (!snapshot) return
     yieldLedgerOn = syncYieldLedgerFlag(snapshot, settings?.flags().yield_ledger === true, yieldLedgerOn)
   }
-  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot })
+  // Moving USDC found on Ethereum to Base (#133): off unless an Ethereum RPC is configured. Same relayer key, its own nonce space on Ethereum.
+  let bridgeOut: BridgeOut | null = null
+  if (o.l1RpcUrl) {
+    const l1 = createPublicClient({ transport: http(o.l1RpcUrl, { timeout: 30_000 }) })
+    if ((await l1.getChainId()) !== ETHEREUM_CHAIN_ID) throw new Error('MAMORU_L1_RPC_URL is not Ethereum Mainnet')
+    bridgeOut = new BridgeOut(l1, new Relayer(relayerKey, l1, o.l1RpcUrl, ETHEREUM_CHAIN_ID), o.stateDir)
+    console.log(`[operator] bridge-out from Ethereum on, relayer ${relayer.address} (${await l1.getBalance({ address: relayer.address })} wei on Ethereum)`)
+  }
+  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot, bridgeOut })
   const eth = await client.getBalance({ address: relayer.address })
   console.log(`[operator] chain ${chainId} live=${live} policy ${policy.policyId} relayer ${relayer.address} (${eth} wei) sha ${gitSha} on http://${server.hostname}:${server.port}`)
   retune = () => operator.retuneEngines()

@@ -4,6 +4,7 @@ import type { AccountContext } from '@mamoru/domain'
 import { verifyMetricsSignature } from '@mamoru/operator-auth'
 import { logErr } from './metrics.ts'
 import type { SnapshotLoop } from './snapshot.ts'
+import type { BridgeOut } from './bridge-out.ts'
 import { Admission, authFraming, boundedText, DEFAULT_ADMISSION, type AdmissionLimits, type Bucket } from './admission.ts'
 import type { RpcMetrics } from './metrics.ts'
 import { HttpError, type Operator } from './operator.ts'
@@ -109,7 +110,7 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
 const STOP_BODY_BYTES = 4 * 1024
 const STOP_BODY_MS = 2_000
 
-export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number; rpcMetrics: RpcMetrics; gitSha: string; bootedAt: number; snapshot?: SnapshotLoop | null; admission?: Partial<AdmissionLimits>; /** Tests only: the legacy cutoff (default LEGACY_HMAC_UNTIL). */ legacyHmacUntil?: number }): Server<undefined> {
+export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number; rpcMetrics: RpcMetrics; gitSha: string; bootedAt: number; snapshot?: SnapshotLoop | null; /** Ethereum → Base moves (#133); routes answer 404 without it. */ bridgeOut?: BridgeOut | null; admission?: Partial<AdmissionLimits>; /** Tests only: the legacy cutoff (default LEGACY_HMAC_UNTIL). */ legacyHmacUntil?: number }): Server<undefined> {
   const legacyUntil = opts.legacyHmacUntil ?? LEGACY_HMAC_UNTIL
   const admission = new Admission({ ...DEFAULT_ADMISSION, ...opts.admission })
   return Bun.serve({
@@ -210,6 +211,11 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
     }
   }
 
+  function bridge(): BridgeOut {
+    if (!opts.bridgeOut) throw new HttpError(404, 'BRIDGE_OFF', 'moves from Ethereum are not available')
+    return opts.bridgeOut
+  }
+
   async function dispatch(route: string, ctx: AccountContext, url: URL, body: string): Promise<Response> {
     const parse = () => {
       try {
@@ -242,6 +248,12 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
           return json(200, await op.prepareRenew(ctx))
         case 'POST renew':
           return json(200, await op.submit(ctx, 'renew', parse()))
+        case 'POST bridge-out/prepare':
+          return json(200, await bridge().prepare(ctx))
+        case 'POST bridge-out':
+          return json(200, await bridge().submit(ctx, parse()))
+        case 'GET bridge-out':
+          return json(200, await bridge().status(ctx))
         default:
           return json(405, { error: 'method not allowed' })
       }
