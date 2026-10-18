@@ -124,10 +124,21 @@ function asNullableStr(v: unknown): string | null {
   return typeof v === 'string' ? v : null
 }
 /** ISO-8601 date-time with an explicit zone (Z or ±hh:mm). Anything else (`10/18/2026 09:20:00`, a bare date) is refused. */
-const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/
-/** The sole authority for "is this a real timestamp" in this module (review r2, PR #92). */
+const ISO_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|([+-])(\d{2}):(\d{2}))$/
+/**
+ * The sole authority for "is this a real timestamp" in this module (reviews r2/r3, PR #92). Every component is
+ * checked, because Date.parse rolls impossible dates over (2026-02-30 becomes 2026-03-02) instead of refusing them.
+ */
 function isIsoString(v: unknown): v is string {
-  return typeof v === 'string' && ISO_DATE_TIME.test(v) && !Number.isNaN(Date.parse(v))
+  if (typeof v !== 'string') return false
+  const m = ISO_DATE_TIME.exec(v)
+  if (!m) return false
+  const n = (i: number) => Number(m[i] ?? '0')
+  const [y, mo, d, h, mi, sec, oh, om] = [n(1), n(2), n(3), n(4), n(5), n(6), n(8), n(9)]
+  if (h > 23 || mi > 59 || sec > 59 || oh > 14 || om > 59) return false
+  const day = new Date(Date.UTC(y, mo - 1, d))
+  if (day.getUTCFullYear() !== y || day.getUTCMonth() !== mo - 1 || day.getUTCDate() !== d) return false
+  return !Number.isNaN(Date.parse(v))
 }
 /** Canonical UTC (`toISOString`), so stored timestamps compare lexicographically in chronological order. */
 function asIso(v: unknown): string | null {

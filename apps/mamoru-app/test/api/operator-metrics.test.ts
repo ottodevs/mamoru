@@ -195,6 +195,14 @@ describe('writeOperatorMetrics / pullOperatorMetrics (otto/mamoru#129 follow-up)
     expect(row(db)).toBeNull()
   })
 
+  test('an impossible calendar date is refused, not rolled over by Date.parse (review r3, PR #92)', async () => {
+    for (const bad of ['2026-02-30T00:00:00Z', '2026-13-01T00:00:00Z', '2026-10-18T24:00:00Z', '2026-10-18T10:61:00Z', '2026-10-18T10:00:00+15:00']) {
+      const db = memoryD1()
+      expect(await pullOperatorMetrics(db, 'http://operator', SECRET, okFetcher(rawMetrics({ generatedAt: bad })), new Date())).toBe(false)
+      expect(row(db)).toBeNull()
+    }
+  })
+
   test('an offset timestamp is stored as canonical UTC, so an earlier instant never wins the guard (review r2, PR #92)', async () => {
     const db = memoryD1()
     await pullOperatorMetrics(db, 'http://operator', SECRET, okFetcher(rawMetrics({ generatedAt: '2026-10-18T10:00:00.000Z', operator: { ...rawMetrics().operator, gitSha: 'ten-utc' } })), new Date())
