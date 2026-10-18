@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { getAddress, isHash } from 'viem'
 import { ReasonError } from '@mamoru/domain'
-import { address, baseRegistry, entry, monadRegistry, nameOf, registries, registryFor, type Registry } from './index.ts'
+import { address, assertRegistryChain, baseRegistry, entry, monadRegistry, nameOf, registries, registryFor, type Registry } from './index.ts'
 
 const ACCOUNT_STACK = [
   'EntryPointV07',
@@ -42,15 +42,29 @@ describe('registryFor', () => {
     expect(monadRegistry.chainId).toBe(143)
   })
 
-  test('throws a ReasonError for a chain without a registry', () => {
-    for (const chainId of [1, 10, 84532, 10143, 0, -1]) {
-      expect(code(() => registryFor(chainId))).toBe('OBS_CHAIN_MISMATCH')
+  test('a chain without a registry is CHAIN_UNSUPPORTED, never another chain', () => {
+    const unsupported = [10, 42161, 84532, 10143, 0, -1].filter((id) => !registries.some((r) => r.chainId === id))
+    for (const chainId of unsupported) {
+      expect(code(() => registryFor(chainId))).toBe('CHAIN_UNSUPPORTED')
     }
-    expect(() => registryFor(1)).toThrow(/no registry for chain id 1/)
+    expect(() => registryFor(10)).toThrow(/no registry for chain id 10/)
   })
 
   test('every registered chain id is unique', () => {
     expect(new Set(registries.map((r) => r.chainId)).size).toBe(registries.length)
+  })
+})
+
+describe('assertRegistryChain', () => {
+  test('passes the registry of the source chain through', () => {
+    for (const r of registries) expect(assertRegistryChain(r, r.chainId)).toBe(r)
+  })
+
+  test('a registry read against another chain id is REGISTRY_CHAIN_MISMATCH', () => {
+    expect(code(() => assertRegistryChain(baseRegistry, monadRegistry.chainId))).toBe('REGISTRY_CHAIN_MISMATCH')
+    expect(code(() => assertRegistryChain(monadRegistry, baseRegistry.chainId))).toBe('REGISTRY_CHAIN_MISMATCH')
+    // A lab fork runs under its own chain id; the registry is still the source chain's.
+    expect(code(() => assertRegistryChain(baseRegistry, 31337))).toBe('REGISTRY_CHAIN_MISMATCH')
   })
 })
 

@@ -194,6 +194,9 @@ export const REASON_CODES = [
   'LAB_SNAPSHOT_FOREIGN',
   'LAB_REPRO_OK',
   'LAB_FAULT_INJECTED',
+  // Chain
+  'CHAIN_UNSUPPORTED',
+  'REGISTRY_CHAIN_MISMATCH',
 ] as const
 
 export type ReasonCode = (typeof REASON_CODES)[number]
