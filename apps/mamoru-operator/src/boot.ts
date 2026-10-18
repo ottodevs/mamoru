@@ -1,10 +1,10 @@
 import { join } from 'node:path'
 import { $ } from 'bun'
-import { createPublicClient, http } from 'viem'
+import { createPublicClient, getAddress, http, isAddress } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, type Address } from '@mamoru/domain'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
-import { conservadorLabV4, conservadorLiveV4, POLICIES, withActionPolicy, withTestOverrides, V4_POOLS, type PolicyVersion } from '@mamoru/policy'
+import { conservadorLabV4, conservadorLiveV4, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, type PolicyVersion } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
@@ -62,9 +62,34 @@ export function resolveNamedPolicy(policyId: string, env: Record<string, string 
   if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1') return undefined
   const v4 = V4_POLICIES_BY_ID[policyId]
   if (!v4) return undefined
+  return deployedV4(v4, env)
+}
+
+/**
+ * Spec 007 T7 (GPT-6 review of #97, P1 2/3): the v4 policy wired to BOTH deployed contracts, MamoruActionPolicy
+ * (`MAMORU_ACTION_POLICY_ADDRESS`) and MamoruGasPolicy (`MAMORU_GAS_POLICY_ADDRESS`, with V4_GAS_CAPS). These two
+ * addresses are what every v4 grant's guard (`toSmartSession`) binds to. Either one missing or malformed: throws.
+ */
+function deployedV4(v4: PolicyVersion, env: Record<string, string | undefined>): PolicyVersion {
   const deployed = env.MAMORU_ACTION_POLICY_ADDRESS
   if (!deployed) throw new Error('MAMORU_ONCHAIN_POLICY_V4=1 but MAMORU_ACTION_POLICY_ADDRESS is not set')
-  return withActionPolicy(v4, deployed as Address, Object.values(V4_POOLS))
+  const gas = env.MAMORU_GAS_POLICY_ADDRESS
+  if (!gas) throw new Error('MAMORU_ONCHAIN_POLICY_V4=1 but MAMORU_GAS_POLICY_ADDRESS is not set')
+  for (const [name, a] of [['MAMORU_ACTION_POLICY_ADDRESS', deployed], ['MAMORU_GAS_POLICY_ADDRESS', gas]] as const) {
+    if (!isAddress(a, { strict: false }) || /^0x0{40}$/i.test(a)) throw new Error(`${name} is not a contract address`)
+  }
+  if (deployed.toLowerCase() === gas.toLowerCase()) throw new Error('MAMORU_ACTION_POLICY_ADDRESS and MAMORU_GAS_POLICY_ADDRESS are the same')
+  return withActionPolicy(v4, getAddress(deployed), Object.values(V4_POOLS), { gasPolicy: { address: getAddress(gas), caps: V4_GAS_CAPS } })
+}
+
+/**
+ * Spec 007 T7 (d): the v4 policy the renew row may move this operator's v2/v3 accounts to (same chain as the
+ * operator's own policy), or undefined when the opt-in is off. Read at boot like `resolveNamedPolicy`; whether an
+ * account is offered the move is the D1 flag `onchain_action_policy_v4`, read on every view.
+ */
+export function resolveV4Policy(chain: PolicyVersion['chain'], env: Record<string, string | undefined>): PolicyVersion | undefined {
+  if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1') return undefined
+  return deployedV4(chain === conservadorLiveV4.chain ? conservadorLiveV4 : conservadorLabV4, env)
 }
 
 /** `git rev-parse --short HEAD` at the operator's cwd, read once at boot. 'unknown' outside a git checkout. */
@@ -216,7 +241,8 @@ export async function bootOperator(o: BootOptions) {
       watchClient,
       ...knobs,
       trustedClients: parseTrustedRpc(o.trustedRpc).map((t) => ({ label: t.label, client: createPublicClient({ transport: http(t.url, { timeout: 15_000 }) }) })),
-      ...(settings ? { settings } : {}),
+      ...(settings ? { settings, opsFlags: () => settings.flags() } : {}),
+      ...(resolveV4Policy(policy.chain, process.env) ? { v4Policy: resolveV4Policy(policy.chain, process.env) } : {}),
     },
     client,
     relayer,

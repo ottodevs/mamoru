@@ -2,11 +2,11 @@ import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
-import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
+import { address, entry, erc20Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, type SimCallResult } from '@mamoru/rpc'
-import { POLICIES, USAGE_RENEW_BPS, canonicalSettingsJson, capBaseUnits, computeCaps, grantKey, instantiateGrant, withEngineSettings, type PolicyVersion } from '@mamoru/policy'
+import { POLICIES, USAGE_RENEW_BPS, V4_POOLS, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -29,7 +29,7 @@ import {
   type LiveSwap,
   type SafeTx,
 } from '@mamoru/account/live'
-import { permissionIdOf, revocationCalls, toSmartSession } from '@mamoru/account/sessions'
+import { permissionIdOf, revocationCalls, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
 import { minOut, quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { Engine, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
@@ -45,7 +45,7 @@ import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type EngineHealthSnapshot } from './metrics.ts'
 import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
-import { readChainUsage, type ChainUsage } from './session-usage.ts'
+import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
 import { DEFAULT_SPONSOR, activationRefusal, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
 
@@ -342,6 +342,35 @@ export type OperatorConfig = {
   trustedClients?: { label: string; client: PublicClient }[]
   /** otto/mamoru#140 (part2 #6): what the relayer pays of owner transfers and stops; tests and #147 phase 2 settings only, held to SPONSOR_BOUNDS. Absent: DEFAULT_SPONSOR. */
   sponsor?: SponsorPolicy
+  /**
+   * Spec 007 T7: the deployed v4 policy (conservadorLiveV4 with MamoruActionPolicy and MamoruGasPolicy, boot.ts
+   * `resolveV4Policy`), set only with MAMORU_ONCHAIN_POLICY_V4=1 and both addresses. Absent: nothing of v4 exists for
+   * this operator; every account resolves and renews exactly as before.
+   */
+  v4Policy?: PolicyVersion
+  /** otto/mamoru#129 runtime flags from the settings pull; `onchain_action_policy_v4` offers the v4 renewal per account. Absent: every flag off. */
+  opsFlags?: () => Partial<Record<OpsFlagName, boolean>>
+}
+
+/** Spec 007 T7: the live policies whose accounts the renew row moves to v4 (same three pools and weights). */
+const V4_MIGRATES_FROM = new Set(['conservador-live-v2', 'conservador-live-v3'])
+/** Gas a v4 approval's first transaction carries besides enableSessions, per removeSession (measured: ~1.45M for 8). */
+const REVOKE_GAS_EACH = 190_000n
+/** The registry trust calls of a first activation, and one self-attestation call, with margin. */
+const TRUST_GAS = 400_000n
+const ATTEST_GAS = 150_000n
+/** MamoruActionPolicy.MAX_ADMIT: positions one Init may admit. */
+const MAX_ADMIT = 64
+
+const v4PolicyAbi = parseAbi([
+  'function generationOf(address account) view returns (uint64)',
+  'struct Config { uint32 twapWindow; uint32 twapShortWindow; uint24 bandTicks; uint64 generation; bool budgetIn1; uint32 budgetWindow; int24 anchorTick; uint24 anchorBand; uint128 perWindow; uint128 total; bytes32 initHash; }',
+  'function configOf(address account, address pool) view returns (Config)',
+])
+
+/** A policy whose grants need MamoruActionPolicy (v4). */
+function isV4(policy: PolicyVersion): boolean {
+  return policy.session.grants.some((g) => g.requiresActionPolicy)
 }
 
 type OwnerKind = 'activate' | 'transfer' | 'stop' | 'renew'
@@ -491,7 +520,7 @@ export class Operator {
   /** otto/mamoru#135: one readSafe shared by every open tab and poll of the same account; dropped whenever the account moves (fundingMoved). */
   private readonly fundingCache = new FundingCache<SafeRead>(Date.now, FUNDING_STALE_MS)
   /** #149: usage counters read from the chain per account (readChainUsage), keyed by lower-case permission id. */
-  private readonly chainUsage = new Map<string, { at: number; grants: string; byGrant: Map<string, ChainUsage> }>()
+  private readonly chainUsage = new Map<string, { at: number; grants: string; byGrant: Map<string, ChainUsage>; budgets?: Map<string, number> }>()
   /** Ops whose execTransaction went to the provider in this attempt: only then can a refusal be about a copy already out. */
   private readonly execTried = new Set<string>()
   /** Armed ops being sent again after a failed attempt: an earlier copy may have landed although its reply said no. */
@@ -785,12 +814,13 @@ export class Operator {
    * Grants are always built from `policyOf`: depth sizing changes how much an entry places, never what a session allows.
    */
   enginePolicyOf(acc: AccountState): PolicyVersion {
-    const p = this.policyOf(acc)
+    const p = this.withAccountBudgets(acc, this.policyOf(acc))
     if (this.cfg.settings) {
       // Spec 006: depth sizing and the guard come from the account's engine settings. Memoized per settings, so an
       // unchanged version hands every review the same policy object.
       const s = this.cfg.settings.forAccount(acc.accountKey).settings
-      const key = `${p.policyId}@${p.version} ${canonicalSettingsJson(s)}`
+      // A v4 account's policy carries its own budgets (withAccountBudgets): its signed cap is part of the key.
+      const key = `${p.policyId}@${p.version}${isV4(p) ? ` cap ${this.signedCapOf(acc)}` : ''} ${canonicalSettingsJson(s)}`
       let d = this.settingsPolicies.get(key)
       if (!d) {
         d = withEngineSettings(p, s)
@@ -812,8 +842,48 @@ export class Operator {
   policyOf(acc: AccountState): PolicyVersion {
     if (!acc.policyId) return acc.active || acc.grants.length ? (POLICIES[LEGACY_POLICY] ?? this.cfg.policy) : this.cfg.policy
     const p = POLICIES[acc.policyId]
-    if (!p) throw new Error(`${acc.accountKey}: unknown policy ${acc.policyId}`)
-    return p
+    if (p) return p
+    // Spec 007 T7: a v4 account resolves only to the deployed v4 policy this operator was configured with.
+    if (this.cfg.v4Policy?.policyId === acc.policyId) return this.cfg.v4Policy
+    if (this.cfg.policy.policyId === acc.policyId) return this.cfg.policy
+    throw new Error(`${acc.accountKey}: unknown policy ${acc.policyId}`)
+  }
+
+  /**
+   * Spec 007 T7 (d): the v4 policy the renew row moves this account to, or null: v4 configured (env opt-in and both
+   * deployed addresses), the `onchain_action_policy_v4` ops flag on, the account running on a v2/v3 policy of the
+   * same chain. Accounts that never tap keep their grants.
+   */
+  v4Target(acc: AccountState): PolicyVersion | null {
+    const v4 = this.cfg.v4Policy
+    if (!v4 || !acc.active || this.cfg.opsFlags?.().onchain_action_policy_v4 !== true) return null
+    let cur: PolicyVersion
+    try {
+      cur = this.policyOf(acc)
+    } catch {
+      return null
+    }
+    return V4_MIGRATES_FROM.has(cur.policyId) && cur.chain === v4.chain ? v4 : null
+  }
+
+  private readonly v4Sized = new Map<string, PolicyVersion>()
+
+  /**
+   * Spec 007 T7: a v4 account's engine policy with its own budgets (W_p, T_p at the cap it signed: the same values its
+   * Inits carry), so precheck mirrors the budget check. Unchanged for every other policy.
+   */
+  private withAccountBudgets(acc: AccountState, p: PolicyVersion): PolicyVersion {
+    const ap = p.actionPolicy
+    if (!ap || !isV4(p)) return p
+    const cap = this.signedCapOf(acc)
+    const key = `${p.policyId}@${p.version} ${ap.address} ${cap}`
+    let sized = this.v4Sized.get(key)
+    if (!sized) {
+      const pools = Object.values(V4_POOLS).filter((v) => p.buckets.some((b) => b.pools.includes(v.pool)))
+      sized = withActionPolicy(p, ap.address, pools, { caps: v4BudgetCaps(p, cap), ...(ap.gasPolicy ? { gasPolicy: ap.gasPolicy } : {}), ...(ap.bandFactorBps !== undefined ? { bandFactorBps: ap.bandFactorBps } : {}), ...(ap.twapShortWindowSeconds !== undefined ? { twapShortWindowSeconds: ap.twapShortWindowSeconds } : {}) })
+      this.v4Sized.set(key, sized)
+    }
+    return sized
   }
 
   private bucketPools(acc: AccountState): string[] {
@@ -832,7 +902,8 @@ export class Operator {
     const left = validUntil - Math.floor(Date.now() / 1000)
     const missing = this.missingGrants(acc).length
     const usage = this.usageView(acc)
-    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}) }
+    const upgrade = this.v4Target(acc) !== null
+    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}), ...(upgrade ? { upgrade } : {}) }
   }
 
   /**
@@ -855,6 +926,11 @@ export class Operator {
       const used = Math.max(own, c?.used ?? 0)
       const usedBps = Math.max(limit > 0 ? Math.floor((used * 10_000) / limit) : 10_000, u?.spentBps ?? 0, c?.spentBps ?? 0)
       if (!worst || usedBps > worst.usedBps) worst = { grant: g.name, usedBps }
+    }
+    // Spec 007 T7 (e): a v4 account's MamoruActionPolicy budget per pool (T_p, charged by swaps and mints) counts the
+    // same way, as the pool's entry: the renewal (a new generation) starts it from zero before it binds.
+    for (const [pool, usedBps] of this.chainUsage.get(acc.accountKey)?.budgets ?? []) {
+      if (!worst || usedBps > worst.usedBps) worst = { grant: `enter-swap:${pool}`, usedBps }
     }
     if (!worst || worst.usedBps < USAGE_RENEW_BPS) return null
     const pool = worst.grant.split(':').slice(1).join(':')
@@ -894,14 +970,28 @@ export class Operator {
     // Taken before the read, so a slow or failing RPC is not asked again on every poll.
     this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant: had?.grants === ids ? had.byGrant : new Map() })
     const byGrant = await readChainUsage(this.client as never, acc.ctx.address as Address, acc.grants)
-    if (!byGrant.size) return
-    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant })
+    const budgets = await this.readBudgets(acc)
+    if (!byGrant.size && !budgets?.size) return
+    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant, ...(budgets?.size ? { budgets } : {}) })
     const ledger = this.runners.get(acc.accountKey)?.engine.ledger
     for (const g of acc.grants) {
       const c = byGrant.get(g.permissionId.toLowerCase())
       const own = ledger?.usesOf(g.permissionId) ?? acc.ops.filter((o) => o.state === 'confirmed' && o.permissionId?.toLowerCase() === g.permissionId.toLowerCase()).length
       if (c && c.used > own) console.log(`[usage] ${acc.accountKey} ${g.name}: the chain counts ${c.used} uses, the operator ${own}`)
     }
+  }
+
+  /** Spec 007 T7 (e): the v4 account's policy budgets used per pool (bps of T_p), from the chain; undefined for any other account. */
+  private async readBudgets(acc: AccountState): Promise<Map<string, number> | undefined> {
+    let p: PolicyVersion
+    try {
+      p = this.policyOf(acc)
+    } catch {
+      return undefined
+    }
+    if (!isV4(p) || !p.actionPolicy) return undefined
+    const pools = [...new Set(acc.grants.map((g) => g.grant.pool).filter((x): x is NonNullable<typeof x> => !!x))].map((name) => ({ name, address: address(name) }))
+    return readPolicyBudgets(this.client as never, p.actionPolicy.address, acc.ctx.address as Address, pools, budgetUsedBps)
   }
 
   /** `fresh`: a read at most FUNDING_FRESH_READ_MS old (a deposit lands without anything of the account moving). */
@@ -1164,7 +1254,7 @@ export class Operator {
   }
 
   /** Simulated gas of the activation calls from the Safe plus calldata and Safe/WebAuthn overhead; a static estimate when the simulation is unavailable (e.g. undeployed Safe). */
-  private async activationGas(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], sessions: number, block: bigint): Promise<bigint> {
+  private async activationGas(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], sessions: number, block: bigint, fallback?: bigint): Promise<bigint> {
     const bytes = calls.reduce((n, c) => n + BigInt((c.data.length - 2) / 2), 0n)
     const overhead = 16n * bytes + ACTIVATION_OVERHEAD_GAS
     try {
@@ -1173,14 +1263,14 @@ export class Operator {
     } catch {
       // fall through to the static estimate
     }
-    return 400_000n + BigInt(sessions) * STATIC_GAS_PER_SESSION + overhead
+    return (fallback ?? 400_000n + BigInt(sessions) * STATIC_GAS_PER_SESSION) + overhead
   }
 
   /**
    * The engine's session grants for one owner approval, sized at the account cap and valid from now for the policy's
    * validity, with the Safe transaction that enables them. A first approval and a renewal sign the same thing.
    */
-  private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, only?: string[]) {
+  private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, only?: string[], mode: 'full' | 'extend' = 'full') {
     // otto/mamoru#140 (part2 #7): a new key stays with the prepare (Prepared.sessionKey) until the owner's signature
     // over these grants is proven; nothing is written for an account that only prepares.
     const newKey = acc.sessionKey ? undefined : generatePrivateKey()
@@ -1199,11 +1289,14 @@ export class Operator {
       ),
     )
     const caps = computeCaps(policy, cap, prices)
+    // Spec 007 T7 (P1 1): a v4 policy's grants go out with MamoruActionPolicy (and its per-pool Init) and
+    // MamoruGasPolicy, bound to the deployed addresses the policy config names; never without them.
+    const v4 = isV4(policy) ? await this.v4Context(acc, live, policy, r.block, mode) : null
     const block = await this.client.getBlock({ blockNumber: r.block })
     const t = Number(block.timestamp)
     const allKeys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
-    const build = (keys: string[]) => keys.map((key) =>
-      instantiateGrant(policy, key, {
+    const build = (keys: string[]) => keys.map((key) => {
+      const g = instantiateGrant(policy, key, {
         account: live.safe,
         sessionKey,
         chainId: this.cfg.chainId,
@@ -1215,18 +1308,121 @@ export class Operator {
         // #149: usage limits sized for the approval's validity at this account cap; spec 006: the one cap captured
         // for this prepare, the same one the caps above, the summary and the stored ceiling use.
         capUsdc: cap,
-      }),
-    )
+      })
+      return v4 && g.requiresActionPolicy ? retargetToPolicy(g, v4.d.actionPolicy) : g
+    })
+    const batchOf = (grants: SessionGrant[]) =>
+      activationBatch(live, grants, acc.revoked, {
+        trust: !acc.trusted,
+        ...(v4 ? { policiesFor: v4PoliciesFor(grants, v4.d, v4.generation, v4BudgetCaps(policy, cap), v4.admitByPool), attest: v4.attest } : {}),
+      })
     // A first approval takes as many grants as fit the gas cap. A renewal takes exactly the ones the account has
     // (`only`): it neither loses a grant nor gains one the owner did not have.
     const exact = only?.filter((k) => allKeys.includes(k))
     // Built once: every build draws new salts, and the batch must enable the very grants that are stored.
     const exactGrants = exact ? build(exact) : null
+    if (v4 && !exactGrants) throw new Error('a v4 approval is always built on the keys fitV4 chose')
     const { keys, grants, batch } = exact && exactGrants
-      ? { keys: exact, grants: exactGrants, batch: activationBatch(live, exactGrants, acc.revoked, { trust: !acc.trusted }) }
+      ? { keys: exact, grants: exactGrants, batch: batchOf(exactGrants) }
       : await this.fitActivation(live, policy, allKeys, build, acc, r.block)
-    const stored = grants.map((g, i) => ({ name: keys[i]!, grant: g, permissionId: batch.permissionIds[i]! }))
-    return { sessionKey, caps, stored, batch, ...(newKey ? { newKey } : {}) }
+    // Spec 007 T7: the first grant of each pool carried that pool's Init.admit (v4PoliciesFor); kept for the engine's mirror.
+    const firstOfPool = new Map<string, number>()
+    grants.forEach((g, i) => {
+      if (g.pool && !firstOfPool.has(g.pool)) firstOfPool.set(g.pool, i)
+    })
+    const stored: StoredGrant[] = grants.map((g, i) => {
+      const admit = v4 && g.pool && firstOfPool.get(g.pool) === i ? (v4.admitByPool[g.pool] ?? []).map(String) : []
+      return { name: keys[i]!, grant: g, permissionId: batch.permissionIds[i]!, ...(admit.length ? { admit } : {}) }
+    })
+    return { sessionKey, caps, stored, batch, ...(newKey ? { newKey } : {}), ...(v4 ? { v4: { generation: v4.generation, admitted: Object.values(v4.admitByPool).reduce((n, l) => n + (l?.length ?? 0), 0) } } : {}) }
+  }
+
+  /**
+   * Spec 007 T7 (c): what a v4 approval of `acc` needs from the chain, read at `block`.
+   * - Both policies are registered (`findModule`) under the resolver of Mamoru's other policies, before any account
+   *   attests them (Deploy.s.sol writes the record in the deploy transaction itself); otherwise refused.
+   * - Self-attestation: each policy the Safe has not attested yet (`findAttestation`) is attested in this transaction.
+   * - Generation: a full approval (activation, renewal, the move from v2/v3) enables `generationOf + 1`, which retires
+   *   every older config of the account; an extension (the next transaction of the same approval) enables the current
+   *   one, and only while the pools the account already holds are configured at it (otherwise a full renewal).
+   * - Init.admit (T6 M-4): the positions the operator minted for this Safe (`admittedTokenIds`) that the Safe still
+   *   owns, grouped by the v4 pool they belong to; each Init of a pool admits them again (harmless: same pool).
+   */
+  private async v4Context(acc: AccountState, live: LiveAccount, policy: PolicyVersion, block: bigint, mode: 'full' | 'extend'): Promise<{ d: V4Deployment; generation: bigint; attest: Address[]; admitByPool: Partial<Record<string, bigint[]>> }> {
+    const d = v4DeploymentOf(policy)
+    if (!d) throw new HttpError(503, 'ACTION_POLICY_UNCONFIGURED', 'the on-chain action policy is not configured on this operator')
+    const read = <T,>(args: Parameters<PublicClient['readContract']>[0]) => this.client.readContract({ ...args, blockNumber: block } as never) as Promise<T>
+    const reference = await read<{ resolverUID: Hex; sender: Address }>({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findModule', args: [address('TimeFramePolicy')] })
+    for (const m of [d.actionPolicy, d.gasPolicy]) {
+      const rec = await read<{ resolverUID: Hex; sender: Address }>({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findModule', args: [m] })
+      if (BigInt(rec.sender) === 0n || rec.resolverUID !== reference.resolverUID) {
+        logErr(`[v4] ${m} has no ModuleRecord under Mamoru's resolver (sender ${rec.sender}): not attested`, undefined)
+        throw new HttpError(503, 'ACTION_POLICY_NOT_REGISTERED', 'the on-chain action policy is not registered yet: nothing was changed')
+      }
+    }
+    const attest: Address[] = []
+    for (const m of [d.actionPolicy, d.gasPolicy]) {
+      const a = await read<{ time: number; revocationTime: number; attester: Address }>({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [m, live.safe] })
+      if (Number(a.time) === 0 || Number(a.revocationTime) !== 0) attest.push(m)
+    }
+    const current = await read<bigint>({ address: d.actionPolicy, abi: v4PolicyAbi, functionName: 'generationOf', args: [live.safe] })
+    let generation = current + 1n
+    if (mode === 'extend') {
+      generation = current
+      const held = [...new Set(acc.grants.map((g) => g.grant.pool).filter((x): x is NonNullable<typeof x> => !!x))]
+      const configs = await Promise.all(held.map((pool) => read<{ generation: bigint }>({ address: d.actionPolicy, abi: v4PolicyAbi, functionName: 'configOf', args: [live.safe, address(pool)] })))
+      if (current === 0n || configs.some((c) => c.generation !== current)) {
+        throw new HttpError(409, 'POLICY_GENERATION_MOVED', "the approval on your Safe changed since the last step: renew it in full instead")
+      }
+    }
+    const admitByPool: Partial<Record<string, bigint[]>> = {}
+    for (const id of acc.admittedTokenIds ?? []) {
+      const tokenId = BigInt(id)
+      let owner: Address
+      let pos: readonly unknown[]
+      try {
+        owner = await read<Address>({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [tokenId] })
+        pos = await read<readonly unknown[]>({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] })
+      } catch {
+        continue // burned: nothing to admit
+      }
+      if (owner.toLowerCase() !== live.safe.toLowerCase()) continue
+      const [t0, t1, fee] = [String(pos[2]).toLowerCase(), String(pos[3]).toLowerCase(), Number(pos[4])]
+      const spec = Object.values(V4_POOLS).find((v) => policy.buckets.some((b) => b.pools.includes(v.pool)) && address(v.token0).toLowerCase() === t0 && address(v.token1).toLowerCase() === t1 && v.fee === fee)
+      if (!spec) continue
+      ;(admitByPool[spec.pool] ??= []).push(tokenId)
+    }
+    for (const [pool, ids] of Object.entries(admitByPool)) {
+      if ((ids?.length ?? 0) > MAX_ADMIT) throw new HttpError(409, 'ADMIT_TOO_LARGE', `more than ${MAX_ADMIT} open positions in ${poolLabel(pool)}: close some first`)
+    }
+    return { d, generation, attest, admitByPool }
+  }
+
+  /**
+   * Spec 007 T7 (c): one v4 approval as consecutive owner transactions. The keys are ordered (orderV4Keys) and split by
+   * `splitV4Keys` with this transaction's own overhead (revokes, trust, attest) off its ceiling; the first part is built,
+   * and its simulated gas (a static per-action estimate when it cannot be simulated, e.g. an undeployed Safe) must fit
+   * `budget`, else its last session moves to the next part. What is left over is the account's missing grants: the
+   * renew row offers them, one owner transaction at a time, through planExtend, once this one has landed.
+   */
+  private async fitV4(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, keys: string[], revokes: Hex[], mode: 'full' | 'extend', budget: bigint) {
+    const overheadGas = BigInt(revokes.length) * REVOKE_GAS_EACH + (acc.trusted ? 0n : TRUST_GAS) + ATTEST_GAS
+    const ordered = orderV4Keys(policy, keys)
+    let ks = splitV4Keys(policy, ordered, { overheadGas })[0] ?? []
+    for (;;) {
+      if (!ks.length) throw new HttpError(409, 'RENEWAL_TOO_LARGE', 'this approval does not fit one transaction on Base: nothing was changed, Mamoru keeps running')
+      const a = await this.approval(acc, live, policy, r, cap, ks, mode)
+      const calls = [...revocationCalls(revokes), ...a.batch.calls]
+      const fallback = overheadGas + a.stored.reduce((n, g) => n + estimateSessionGas(g.grant.actions.length), 0n)
+      const gas = await this.activationGas(live, calls, a.stored.length, r.block, fallback)
+      if (gas <= budget) {
+        const rest = ordered.filter((k) => !ks.includes(k))
+        const steps = 1 + (rest.length ? splitV4Keys(policy, rest).length : 0)
+        console.log(`[v4] ${live.safe} ~${gas} gas: ${a.stored.length} sessions now (generation ${a.v4?.generation}), ${rest.length} in ${steps - 1} later step(s)`)
+        return { ...a, calls, rest, steps }
+      }
+      ks = ks.slice(0, -1)
+    }
   }
 
   /**
@@ -1245,7 +1441,9 @@ export class Operator {
     await this.settleRenewals(acc)
     this.assertRenewable(acc)
     const r = await this.readOf(acc, live.safe)
-    const policy = this.policyOf(acc)
+    // Spec 007 T7 (d): the renew row moves a v2/v3 account to the on-chain action policy when that is offered.
+    const target = this.v4Target(acc)
+    const policy = target ?? this.policyOf(acc)
     // Grants the account lacks are added by an approval of their own, unless the renewal is due: then the renewal goes
     // first (it revokes every grant the account has, and the added ones would be revoked with them) and the missing
     // grants are offered once it has landed. Nor while a renewal's outcome is unknown: if it ran unseen, the grants the
@@ -1255,7 +1453,7 @@ export class Operator {
     // #149: a grant near the end of its usage needs fresh counts, which only a full renewal gives (an extension keeps the
     // grants the account has): it goes first, like a due renewal.
     const view = this.approvalView(acc)
-    if (missing.length && !view?.renewDue && !view?.usage && !this.unsettledRenewalGrants(acc).length) return this.planExtend(acc, live, policy, r, missing)
+    if (!target && missing.length && !view?.renewDue && !view?.usage && !this.unsettledRenewalGrants(acc).length) return this.planExtend(acc, live, policy, r, missing)
     // The grants it replaces are revoked in the same Safe transaction, always: two sets are never enabled at once
     // and each limit exists once. Measured on Base: revoking eight grants is about 1.45M gas on top of the 12.7M that
     // enabling eight takes. When the whole does not fit the cap, manage-any/convert-any pairs are left out of the new
@@ -1266,6 +1464,24 @@ export class Operator {
     // A renewal keeps the limits the account signed for (spec 006): a raised cap never enlarges grants under a summary
     // that says they stay the same. The summary names that cap, and says so when the plan now allows a different one.
     const cap = this.signedCapOf(acc)
+    if (isV4(policy)) {
+      // The move to v4 enables every grant of the v4 policy; a v4 renewal the ones the account has, as before.
+      const keys = target ? policy.session.grants.filter((g) => !g.perPosition).map(grantKey) : acc.grants.map((g) => g.name)
+      const f = await this.fitV4(acc, live, policy, r, cap, keys, old, 'full', RENEW_GAS_BUDGET)
+      const summary = [
+        target ? `Renew Mamoru's approval on your Safe ${live.safe} and move it to on-chain limits` : `Renew Mamoru's approval on your Safe ${live.safe}`,
+        ...(target ? ['Mamoru can now trade only near the market price, and only the positions it opened'] : []),
+        `Engine key ${f.sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero, sized for deposits up to ${fmtUsdc(cap)} USDC (the cap you signed):`,
+        ...this.v4Lines(f.stored, policy, cap),
+        ...this.capNotice(acc, cap),
+        ...(f.v4?.admitted ? [`Your ${f.v4.admitted} open position${f.v4.admitted === 1 ? '' : 's'} stay under Mamoru's management`] : []),
+        'The approval it replaces is revoked in the same transaction',
+        ...this.stepLines(f.steps, f.rest),
+        'Nothing is moved: your positions stay as they are',
+        'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
+      ]
+      return this.hold(acc, live, 'renew', f.calls, summary, { grants: f.stored, revokes: old, capUsdc: cap.toString() })
+    }
     const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, acc.grants.map((g) => g.name), old, cap)
     // Named so the renewal says, every time, exactly what the engine keeps doing without asking again: not every
     // renewed account holds manage-any/convert-any (a gas-capped activation can leave them out, see "fitGrants"),
@@ -1300,6 +1516,20 @@ export class Operator {
     const old = [...new Set([...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc)])]
     // The added grants are sized like the ones the account holds: for the cap it signed (spec 006), named below.
     const cap = this.signedCapOf(acc)
+    if (isV4(policy)) {
+      // Spec 007 T7 (c): the next transaction of a v4 approval, at the generation the earlier ones enabled.
+      const f = await this.fitV4(acc, live, policy, r, cap, missing, old, 'extend', RENEW_GAS_BUDGET)
+      const summary = [
+        `Finish Mamoru's approval on your Safe ${live.safe}: ${this.poolsOf(f.stored.map((g) => g.name))}`,
+        `Engine key ${f.sessionKey} may, for the rest of this approval and within limits sized for deposits up to ${fmtUsdc(cap)} USDC:`,
+        ...this.v4Lines(f.stored, policy, cap),
+        ...this.stepLines(f.steps, f.rest),
+        ...this.capNotice(acc, cap),
+        'Nothing is moved now: your positions stay as they are',
+        'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
+      ]
+      return this.hold(acc, live, 'renew', f.calls, summary, { grants: f.stored, revokes: old, extend: true, base: acc.grants.map((g) => g.permissionId), capUsdc: cap.toString() })
+    }
     const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, missing, old, cap)
     const added = stored.map((g) => g.name)
     const summary = [
@@ -1320,6 +1550,7 @@ export class Operator {
    * when nothing is left to enable or it still does not fit; the revokes are never left out.
    */
   private async fitGrants(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, keys: string[], revokes: Hex[], cap: bigint) {
+    if (isV4(policy)) throw new Error('fitGrants: a v4 approval goes through fitV4')
     const droppable = this.droppablePairs(policy, keys)
     let ks = keys
     for (let i = 0; ; i++) {
@@ -1368,6 +1599,39 @@ export class Operator {
       const label = pool ? poolLabel(pool) : bare ? poolLabel(bare) : 'its pool'
       return `In ${label}: ${money}at most ${counts.join(', ')} (one transaction can hold several of these steps)`
     })
+  }
+
+  /**
+   * Spec 007 T7 (d): the v4 limits the owner signs, one line per pool, read from the grants and Inits being enabled:
+   * the price band around the market (two TWAPs, the stables anchor), the policy budget (W_p a day, T_p in total), and
+   * the gas cap per engine transaction with what that allows in all. Short on purpose: the unified approval dialog
+   * (PR #80) shows every line.
+   */
+  private v4Lines(stored: StoredGrant[], policy: PolicyVersion, cap: bigint): string[] {
+    const budgets = v4BudgetCaps(policy, cap)
+    const pools = [...new Set(stored.map((g) => g.grant.pool).filter((x): x is NonNullable<typeof x> => !!x))]
+    const lines = pools.map((pool) => {
+      const spec = v4PoolOf(pool)
+      if (!spec) return `In ${poolLabel(pool)}: no on-chain limits`
+      const band = `${(spec.bandTicks / 100).toFixed(2)}%`
+      const anchor = spec.anchor ? ` and within ${(spec.anchor.band / 100).toFixed(2)}% of 1:1` : ''
+      const day = budgets[spec.caps.budgetWindow] ?? 0n
+      const total = budgets[spec.caps.budgetTotal] ?? 0n
+      return `In ${poolLabel(pool)}: swaps, new positions and withdrawals only within ${band} of the 30- and 5-minute average price${anchor}; swaps and new positions worth at most ${fmtUsdc(day)} USDC a day and ${fmtUsdc(total)} USDC in total on this approval`
+    })
+    const caps = policy.actionPolicy?.gasPolicy?.caps
+    if (caps) {
+      const per = maxGasCostPerOp(caps)
+      const ops = stored.reduce((n, g) => n + BigInt(g.grant.userOp.usageLimit), 0n)
+      lines.push(`Each engine transaction pays at most ${fmtUnits(per, 18)} ETH of network fee (at most ${fmtUnits(caps.maxFeePerGas, 9)} gwei per gas), from your Safe's ETH; these grants allow ${ops.toLocaleString('en-US')} transactions in all`)
+    }
+    return lines
+  }
+
+  /** Spec 007 T7 (c): where this transaction sits in a v4 approval that takes several. */
+  private stepLines(steps: number, rest: string[]): string[] {
+    if (steps <= 1) return []
+    return [`Base limits how much one transaction can carry, so this approval takes ${steps} steps: after this one, ${steps - 1 === 1 ? 'one more' : `${steps - 1} more`} for ${this.poolsOf(rest)} (until then Mamoru does not act there with those permissions)`]
   }
 
   /** "cbBTC and WETH": the tokens other than USDC of the pools named in a set of grant keys (what a harvest converts). */
@@ -1817,6 +2081,24 @@ export class Operator {
     if (r.usdc > cap) throw depositOverCap(r.usdc, cap)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
     const policy = this.cfg.policy
+    if (isV4(policy)) {
+      // Spec 007 T7 (c): a v4 Start enables what fits one Base transaction; the rest follows as one more approval each.
+      const keys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
+      const f = await this.fitV4(acc, live, policy, r, cap, keys, [], 'full', ACTIVATION_GAS_BUDGET)
+      const days = Math.round(policy.session.validitySeconds / 86_400)
+      const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!)} ${b.preference / 100}%`)
+      const summary = [
+        `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
+        r.usdc > 0n
+          ? `Let Mamoru's engine keep your ${fmtUsdc(r.usdc)} USDC invested across Uniswap v3 ${pools.join(', ')}`
+          : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(cap)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
+        `Engine key ${f.sessionKey} may swap USDC into those pools' tokens, open positions there, and take out, collect and close only the positions it opened, only near the market price, for ${days} days:`,
+        ...this.v4Lines(f.stored, policy, cap),
+        ...this.stepLines(f.steps, f.rest),
+        `Whatever it collects, mints or swaps is paid to your Safe, never to anyone else. Cap ${fmtUsdc(cap)} USDC`,
+      ]
+      return this.hold(acc, live, 'activate', f.calls, summary, { grants: f.stored, capUsdc: cap.toString(), gen, ...(f.newKey ? { sessionKey: f.newKey } : {}) })
+    }
     const { sessionKey, caps, stored, batch, newKey } = await this.approval(acc, live, policy, r, cap)
     const bind = { gen, ...(newKey ? { sessionKey: newKey } : {}) }
     // What this activation actually enables, not what the policy could: a gas-capped activation (fitActivation)
@@ -3219,6 +3501,13 @@ export class Operator {
         acc.superseded = kept([...(acc.superseded ?? []), ...replaced.map((g) => g.permissionId)])
         acc.grants = p.extend ? [...acc.grants.filter((g) => !names.has(g.name)), ...p.grants] : p.grants
         if (!p.extend) acc.signedCapUsdc = p.capUsdc ?? LIVE_CAP_USDC.toString()
+        // Spec 007 T7: a full renewal into v4 grants moves the account to their policy (the move from v2/v3). Read from
+        // the grants themselves, so a late receipt (settleRenewals, reconcileOwner) applies it the same way.
+        const first = p.grants[0]?.grant
+        if (!p.extend && first?.requiresActionPolicy && first.policyId !== acc.policyId) {
+          console.log(`[v4] ${acc.accountKey} moved from ${acc.policyId ?? LEGACY_POLICY} to ${first.policyId}`)
+          acc.policyId = first.policyId
+        }
         acc.superseded = unrevokedIds(acc.superseded ?? [], acc.grants.map((g) => g.permissionId))
         // The engine restarts on these grants and must not look at the chain from before they were enabled.
         acc.grantsFromBlock = receipt.blockNumber.toString()
@@ -3457,7 +3746,7 @@ export class Operator {
     if (!acc.sessionKey) throw new Error(`${acc.accountKey} has no session key`)
     acc.runs = (acc.runs ?? 0) + 1
     this.store.save()
-    const sessions: EngineSession[] = [...acc.grants.map((g) => ({ name: g.name, grant: g.grant, permissionId: g.permissionId })), ...acc.managedTokenIds.map((id) => this.manageSession(acc, BigInt(id)))]
+    const sessions: EngineSession[] = [...acc.grants.map((g) => ({ name: g.name, grant: g.grant, permissionId: g.permissionId, ...(g.admit?.length ? { admit: g.admit.map(BigInt) } : {}) })), ...(isV4(this.policyOf(acc)) ? [] : acc.managedTokenIds.map((id) => this.manageSession(acc, BigInt(id))))]
     const priorIncluded = priorIncludedOf(acc.ops, sessions)
     const engine = new Engine(
       {

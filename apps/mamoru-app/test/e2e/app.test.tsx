@@ -511,6 +511,16 @@ describe('renewing the approval', () => {
     expect(new Set([approvalRowKey(year), approvalRowKey({ ...year, usage: { action: 'collect', pool: null, usedBps: 8_000, spent: false } }), approvalRowKey({ ...year, usage: { action: 'collect', pool: null, usedBps: 10_000, spent: true } })]).size).toBe(3)
   })
 
+  test('spec 007 T7: the move to the on-chain action policy is offered on the same row, under a due renewal', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const year = { validUntil: now + 300 * 86_400, renewDue: false, expired: false }
+    const up = await renderRoute('/', fixtureSession, running({ ...year, upgrade: true }))
+    expect(up.text).toContain('it would trade only near the market price, and only the positions it opened')
+    expect(up.text).toContain('Renew approval')
+    expect(approvalTitle({ ...year, renewDue: true, upgrade: true })).toContain('approval ends on')
+    expect(approvalRowKey({ ...year, upgrade: true })).not.toBe(approvalRowKey(year))
+  })
+
     test('once prepared, the row shows every line the passkey is about to sign', () => {
     const summary = ['Let Mamoru\'s engine re-range and collect fees in USDC/cbBTC 0.05%', 'Nothing is moved: your positions stay as they are']
     const { text, html } = render(<ApprovalCard approval={{ validUntil: now + 200 * 86_400, renewDue: false, expired: false, missing: 4 }} summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} />)

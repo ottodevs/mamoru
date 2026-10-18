@@ -31,7 +31,13 @@ export type StoredOp = OpView & {
 }
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */
-export type StoredGrant = { name: string; grant: SessionGrant; permissionId: Hex }
+export type StoredGrant = {
+  name: string
+  grant: SessionGrant
+  permissionId: Hex
+  /** Spec 007 T7: tokenIds this session's owner-signed `Init.admit` admitted at enable (v4 only), for the engine's precheck mirror. */
+  admit?: string[]
+}
 
 /** An activation the owner signed before any USDC arrived; the operator executes it when the deposit lands. */
 export type ArmedActivation = {

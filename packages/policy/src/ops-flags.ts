@@ -12,15 +12,16 @@ export const OPS_FLAGS = {
   },
   /**
    * Spec 007 (otto/mamoru#151) T7, default off. Gates anything v4-related that runs AFTER the operator has pulled
-   * engine settings at least once (per-account activation/renewal into conservadorLiveV4, the usage-triggered
-   * renewal signal for the policy's own budgets). It does NOT gate the one earlier, process-wide decision —
+   * engine settings at least once: the renew row's offer to move a running v2/v3 account to conservadorLiveV4
+   * (`Operator.v4Target`, read on every view). Accounts already on v4 keep their renewals and their usage signal
+   * whatever the flag says (turning it off never strands one half-moved). It does NOT gate the one earlier, process-wide decision —
    * `apps/mamoru-operator/src/boot.ts`'s `resolveNamedPolicy`, which picks the policy an account named BEFORE any
-   * settings pull exists — that one reads `MAMORU_ONCHAIN_POLICY_V4`/`MAMORU_ACTION_POLICY_ADDRESS` from the
+   * settings pull exists — that one reads `MAMORU_ONCHAIN_POLICY_V4`/`MAMORU_ACTION_POLICY_ADDRESS`/`MAMORU_GAS_POLICY_ADDRESS` from the
    * environment instead, for exactly that timing reason (see its own doc comment).
    */
   onchain_action_policy_v4: {
     label: 'On-chain action policy (v4)',
-    description: 'Per-account activation into conservadorLiveV4 and its usage-triggered renewal signal (otto/mamoru#151, T7). The deployed MamoruActionPolicy address is a setting, never hardcoded.',
+    description: 'Offers running v2/v3 accounts the renewal that moves them to conservadorLiveV4 (otto/mamoru#151, T7). The deployed MamoruActionPolicy and MamoruGasPolicy addresses are operator settings, never hardcoded.',
   },
 } as const
 

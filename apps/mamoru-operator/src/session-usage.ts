@@ -71,3 +71,45 @@ export async function readChainUsage(client: Reader, account: Address, grants: r
   )
   return out
 }
+
+const POLICY_BUDGET_ABI = parseAbi([
+  'struct Config { uint32 twapWindow; uint32 twapShortWindow; uint24 bandTicks; uint64 generation; bool budgetIn1; uint32 budgetWindow; int24 anchorTick; uint24 anchorBand; uint128 perWindow; uint128 total; bytes32 initHash; }',
+  'function configOf(address account, address pool) view returns (Config)',
+  'function budgetLeft(address account, address pool) view returns (uint256 window, uint256 total)',
+  'function generationOf(address account) view returns (uint64)',
+])
+
+type BudgetReader = {
+  readContract(args: { address: Address; abi: typeof POLICY_BUDGET_ABI; functionName: 'configOf' | 'budgetLeft' | 'generationOf'; args: readonly unknown[] }): Promise<unknown>
+}
+
+/**
+ * Spec 007 T7 (e): how much of each pool's per-approval budget (T_p, `Init.total`) MamoruActionPolicy has charged,
+ * in bps, as the chain counts it (every call charged at validation, by anyone holding the key). Keyed by registry pool
+ * name. A pool whose config is not at the account's current generation (retired, or never enabled), or whose read
+ * fails, is left out: the caller then shows nothing for it, as before.
+ */
+export async function readPolicyBudgets(client: BudgetReader, policy: Address, account: Address, pools: readonly { name: string; address: Address }[], usedBps: (total: bigint, left: bigint) => number): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  let generation: bigint
+  try {
+    generation = (await client.readContract({ address: policy, abi: POLICY_BUDGET_ABI, functionName: 'generationOf', args: [account] })) as bigint
+  } catch {
+    return out
+  }
+  await Promise.all(
+    pools.map(async (p) => {
+      try {
+        const [c, left] = await Promise.all([
+          client.readContract({ address: policy, abi: POLICY_BUDGET_ABI, functionName: 'configOf', args: [account, p.address] }) as Promise<{ generation: bigint; total: bigint }>,
+          client.readContract({ address: policy, abi: POLICY_BUDGET_ABI, functionName: 'budgetLeft', args: [account, p.address] }) as Promise<readonly [bigint, bigint]>,
+        ])
+        if (c.total === 0n || c.generation !== generation) return
+        out.set(p.name, usedBps(c.total, left[1]))
+      } catch {
+        // Unread: nothing shown for this pool.
+      }
+    }),
+  )
+  return out
+}
