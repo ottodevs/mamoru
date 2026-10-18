@@ -7,8 +7,8 @@ import { encodeDeployData, encodeFunctionData, encodePacked, parseAbi, type Abi 
 import type { PrivateKeyAccount } from 'viem/accounts'
 import type { Address, Hex } from '@mamoru/domain'
 import { address, moduleRegistryAbi } from '@mamoru/registry'
-import { encodeMamoruInit, type MamoruInit, type ResolvedActionRule, type SessionGrant } from '@mamoru/policy'
-import { ATTESTATION_SCHEMA_UID, toSmartSession, uniActionInitData, type ActionData, type SmartSessionStruct } from '@mamoru/account/sessions'
+import { encodeGasCaps, encodeMamoruInit, V4_GAS_CAPS, type GasCaps, type MamoruInit, type ResolvedActionRule, type SessionGrant } from '@mamoru/policy'
+import { ATTESTATION_SCHEMA_UID, toSmartSession, uniActionInitData, type ActionData, type SecondActionPolicy, type SmartSessionStruct } from '@mamoru/account/sessions'
 import type { Lab } from '../fixtures/lab.ts'
 import { repoPath } from '../runner/manifest.ts'
 
@@ -21,6 +21,7 @@ export const COLLECT_SIG = 'collect((uint256,address,uint128,uint128))'
 export const BURN_SIG = 'burn(uint256)'
 
 export const ARTIFACT_PATH = repoPath('contracts/action-policy/out/MamoruActionPolicy.sol/MamoruActionPolicy.json')
+export const GAS_ARTIFACT_PATH = repoPath('contracts/action-policy/out/MamoruGasPolicy.sol/MamoruGasPolicy.json')
 
 export type PolicyArtifact = { abi: Abi; bytecode: Hex }
 
@@ -69,6 +70,28 @@ export async function deployMamoruPolicy(lab: Lab, artifact: PolicyArtifact, dep
 }
 
 /**
+ * Spec 007 T7 (GPT-6 review of #97, P1 2): MamoruGasPolicy, deployed and registered in one `deployModule` call like
+ * the action policy (script/Deploy.s.sol `deployGasPolicy`). No constructor arguments.
+ */
+export async function deployGasPolicy(lab: Lab, deployer: PrivateKeyAccount, nonce = 2n, path = GAS_ARTIFACT_PATH): Promise<Address> {
+  const artifact = await loadPolicyArtifact(path)
+  const salt = encodePacked(['address', 'uint96'], [deployer.address, nonce])
+  const resolverUID = await resolverUidOf(lab, address('TimeFramePolicy'))
+  const args = [salt, resolverUID, artifact.bytecode, '0x', '0x'] as const
+  const { result: predicted } = await lab.client.simulateContract({ account: deployer.address, address: address('ModuleRegistry'), abi: registryDeployAbi, functionName: 'deployModule', args })
+  const tx = await lab.send(deployer, address('ModuleRegistry'), encodeFunctionData({ abi: registryDeployAbi, functionName: 'deployModule', args }), 0n, 4_000_000n)
+  if (!tx.ok) throw new Error('ModuleRegistry.deployModule(MamoruGasPolicy) reverted')
+  const record = await lab.client.readContract({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findModule', args: [predicted] })
+  if (record.resolverUID !== resolverUID) throw new Error(`MamoruGasPolicy ${predicted}: ModuleRecord resolver ${record.resolverUID}, expected ${resolverUID}`)
+  return predicted
+}
+
+/** The full v4 policy set of one session (T7): MamoruActionPolicy + its Init, MamoruGasPolicy + caps, bound to both. */
+export function v4Policies(mamoruPolicy: Address, gasPolicy: Address, initData: Hex, caps: GasCaps = V4_GAS_CAPS): SecondActionPolicy {
+  return { policy: mamoruPolicy, initData, gas: { policy: gasPolicy, initData: encodeGasCaps(caps) }, expected: { actionPolicy: mamoruPolicy, gasPolicy } }
+}
+
+/**
  * Spec 007 T6 L-4, the deploy step T7 runs once per pool (script/Deploy.s.sol `raiseCardinality`): MamoruActionPolicy
  * refuses to enable a pool whose `observationCardinalityNext` is under the TWAP window. Raised in steps of 600 ring
  * slots (~13.3M gas each) so every transaction stays under Base's 2^24 gas cap. Anyone may call it.
@@ -104,14 +127,14 @@ export async function resolverUidOf(lab: Lab, reference: Address): Promise<Hex> 
 /** Owner call that self-attests MamoruActionPolicy for `account` (once per account), next to the existing
  * `registryTrustCalls` self-attestation of TimeFramePolicy/UsageLimitPolicy (account/sessions/index.ts). Needs
  * the module registered first, which `deployMamoruPolicy` does in its own deploy transaction. */
-export function attestMamoruPolicyCall(policy: Address): { to: Address; value: bigint; data: Hex } {
+export function attestMamoruPolicyCall(...policies: Address[]): { to: Address; value: bigint; data: Hex } {
   return {
     to: address('ModuleRegistry'),
     value: 0n,
     data: encodeFunctionData({
       abi: moduleRegistryAbi,
       functionName: 'attest',
-      args: [ATTESTATION_SCHEMA_UID, [{ moduleAddress: policy, expirationTime: 0, data: '0x', moduleTypes: [] }]],
+      args: [ATTESTATION_SCHEMA_UID, policies.map((policy) => ({ moduleAddress: policy, expirationTime: 0, data: '0x' as Hex, moduleTypes: [] }))],
     }),
   }
 }

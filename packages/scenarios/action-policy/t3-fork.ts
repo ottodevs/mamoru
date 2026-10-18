@@ -35,7 +35,7 @@ import { startLabFork } from '../fork/lab-fork.ts'
 import { startForkProxy } from '../proxy/index.ts'
 import { artifactsRoot, ensureDir, writeJson } from '../report/index.ts'
 import { loadManifest, REPO_ROOT } from '../runner/manifest.ts'
-import { attestMamoruPolicyCall, deployMamoruPolicy, loadPolicyArtifact } from './v4-grant.ts'
+import { attestMamoruPolicyCall, deployGasPolicy, deployMamoruPolicy, loadPolicyArtifact, v4Policies } from './v4-grant.ts'
 
 const POOL = V4_POOLS.btc.pool // 'pool:USDC/cbBTC/500'
 const DEPOSIT_USDC = 100_000_000_000n // 100,000 USDC
@@ -148,9 +148,11 @@ try {
 
   const artifact = await loadPolicyArtifact()
   const mamoruPolicy = await deployMamoruPolicy(lab, artifact, relayer)
+  // T7 (P1 2): every v4 session carries MamoruGasPolicy too, deployed and registered the same way.
+  const gasPolicy = await deployGasPolicy(lab, relayer)
   const policyAbi = artifact.abi
   note('MamoruActionPolicy deployed + registered (one deployModule tx, T6 L-3)', true, mamoruPolicy)
-  const attestTx = await ownerExec(lab, relayer, world.a1, attestMamoruPolicyCall(mamoruPolicy))
+  const attestTx = await ownerExec(lab, relayer, world.a1, attestMamoruPolicyCall(mamoruPolicy, gasPolicy))
   if (!attestTx.ok) throw new Error('self-attest reverted')
   note('self-attest MamoruActionPolicy', true, `${attestTx.receipt.gasUsed} gas`)
 
@@ -168,8 +170,8 @@ try {
 
   const swapGrant: SessionGrant = retargetToPolicy(instantiateGrant(conservadorLabV4, `enter-swap:${POOL}`, grantCtx()), mamoruPolicy)
   const manageGrant: SessionGrant = retargetToPolicy(instantiateGrant(conservadorLabV4, `manage-any:${POOL}`, grantCtx()), mamoruPolicy)
-  const swapSession = toSmartSession(swapGrant, { policy: mamoruPolicy, initData: btcMamoruInit })
-  const manageSession = toSmartSession(manageGrant, { policy: mamoruPolicy, initData: btcMamoruInit })
+  const swapSession = toSmartSession(swapGrant, v4Policies(mamoruPolicy, gasPolicy, btcMamoruInit))
+  const manageSession = toSmartSession(manageGrant, v4Policies(mamoruPolicy, gasPolicy, btcMamoruInit))
   note('manage-any: action count', manageGrant.actions.length === 7, `${manageGrant.actions.length} actions (decrease, collect, burn, approve x2, mint, swap)`)
   const swapPid = permissionIdOf(swapSession)
   const managePid = permissionIdOf(manageSession)
@@ -203,7 +205,7 @@ try {
         generation++
         const probeInit = encodeMamoruInit(mamoruInitFor({ ...V4_POOLS.btc, bandTicks }, generation, caps, { admit }))
         const probeGrant = retargetToPolicy(instantiateGrant(conservadorLabV4, `enter-swap:${POOL}`, grantCtx()), mamoruPolicy)
-        const probeSession = toSmartSession(probeGrant, { policy: mamoruPolicy, initData: probeInit })
+        const probeSession = toSmartSession(probeGrant, v4Policies(mamoruPolicy, gasPolicy, probeInit))
         const probeEnable = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession'), data: encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableSessions', args: [[probeSession]] }) })
         if (!probeEnable.ok) throw new Error(`probe enableSessions (bandTicks ${bandTicks}, generation ${generation}) reverted`)
       }

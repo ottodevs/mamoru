@@ -15,7 +15,7 @@ import {
   encodeSingleExecution,
   type Execution,
 } from '@mamoru/account/safe'
-import { draftUserOp, handleOpsData, sessionKeySignature, sessionNonceKey, userOpHash, SMART_SESSION_MODE_ENABLE } from '@mamoru/account/sessions'
+import { draftUserOp, handleOpsData, type GasSettings, sessionKeySignature, sessionNonceKey, userOpHash, SMART_SESSION_MODE_ENABLE } from '@mamoru/account/sessions'
 import { decodeExecute, precheck, type PrecheckResult } from '@mamoru/account/precheck'
 import { decodeEntryPointError, type Lab } from './lab.ts'
 import type { AccountFixture, ActiveGrant, World } from './world.ts'
@@ -38,6 +38,8 @@ export type SessionOpOptions = {
   /** Signs the userOp with this key instead of `acct.sessionKey` — a renewal activates a fresh session key
    * (spec 007 "(d) renewal") before the fixture's `acct.sessionKey` is ever reassigned to it. */
   sessionKey?: PrivateKeyAccount
+  /** Overrides the userOp's gas fields (spec 007 T7: a leaked key signing over MamoruGasPolicy's caps). */
+  gas?: Partial<GasSettings>
 }
 
 export type Verdict = 'INCLUDED' | 'CHAIN_REJECTED_VALIDATION' | 'CHAIN_REVERTED_EXECUTION'
@@ -133,6 +135,7 @@ async function buildAndSend(
     preVerificationGas: 100_000n,
     maxFeePerGas,
     maxPriorityFeePerGas: 1_000_000n,
+    ...opts.gas,
   })
   if (opts.paymaster) {
     op = { ...op, paymaster: opts.paymaster, paymasterVerificationGasLimit: 200_000n, paymasterPostOpGasLimit: 50_000n, paymasterData: '0x' }

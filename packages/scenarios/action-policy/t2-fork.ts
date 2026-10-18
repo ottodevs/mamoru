@@ -43,7 +43,7 @@ import { startLabFork } from '../fork/lab-fork.ts'
 import { startForkProxy } from '../proxy/index.ts'
 import { artifactsRoot, ensureDir, writeJson } from '../report/index.ts'
 import { loadManifest, REPO_ROOT } from '../runner/manifest.ts'
-import { attestMamoruPolicyCall, deployMamoruPolicy, loadPolicyArtifact, raiseObservationCardinality } from './v4-grant.ts'
+import { attestMamoruPolicyCall, deployGasPolicy, deployMamoruPolicy, loadPolicyArtifact, v4Policies, raiseObservationCardinality } from './v4-grant.ts'
 
 const DEPOSIT_USDC = 100_000_000_000n // 100,000 USDC (spec 007 "Max loss with a leaked key" uses the same example size)
 const GAS_CEILING = 14_000_000n // same default as splitSessionsByGas; kept explicit so the report says what it used
@@ -96,7 +96,7 @@ async function usdcPrice(lab: Lab, pool: string, token0: string, token1: string,
 type V4Item = { label: string; grant: SessionGrant; session: SmartSessionStruct; actions: SmartSessionStruct['actions'] }
 
 /** Builds the full 9-session v4 grant set (3 pools x enter-swap/enter-mint/manage-any) at `generation`. */
-function buildV4GrantSet(mamoruPolicy: Address, generation: bigint, caps: Record<string, bigint>, account: Address, sessionKey: Address, chainId: number, now: number, nextSalt: () => Hex): V4Item[] {
+function buildV4GrantSet(mamoruPolicy: Address, gasPolicy: Address, generation: bigint, caps: Record<string, bigint>, account: Address, sessionKey: Address, chainId: number, now: number, nextSalt: () => Hex): V4Item[] {
   const items: V4Item[] = []
   for (const pool of Object.values(V4_POOLS)) {
     const mamoruInit = encodeMamoruInit(mamoruInitFor(pool, generation, caps))
@@ -111,7 +111,7 @@ function buildV4GrantSet(mamoruPolicy: Address, generation: bigint, caps: Record
         caps,
       })
       const retargeted = retargetToPolicy(grant, mamoruPolicy)
-      const session = toSmartSession(retargeted, { policy: mamoruPolicy, initData: mamoruInit })
+      const session = toSmartSession(retargeted, v4Policies(mamoruPolicy, gasPolicy, mamoruInit))
       items.push({ label: `${name}:${pool.pool}`, grant: retargeted, session, actions: session.actions })
     }
   }
@@ -166,6 +166,8 @@ try {
 
   const artifact = await loadPolicyArtifact()
   const mamoruPolicy = await deployMamoruPolicy(lab, artifact, relayer)
+  // T7 (P1 2): every v4 session carries MamoruGasPolicy too, deployed and registered the same way.
+  const gasPolicy = await deployGasPolicy(lab, relayer)
   note('MamoruActionPolicy deployed and registered in one ModuleRegistry.deployModule tx (T6 L-3)', true, mamoruPolicy)
 
   // T6 L-4: the policy refuses a pool whose observation ring cannot hold the 1,800 s window at 1 s blocks. USDC/USDT
@@ -177,7 +179,7 @@ try {
   }
 
   // self-attest, through the SAME owner batch pattern the app would use (registryTrustCalls already ran in fx-safe)
-  const attestTx = await ownerExecGas(lab, relayer, world.a1, attestMamoruPolicyCall(mamoruPolicy), 2_000_000n)
+  const attestTx = await ownerExecGas(lab, relayer, world.a1, attestMamoruPolicyCall(mamoruPolicy, gasPolicy), 2_000_000n)
   note('self-attest MamoruActionPolicy (per account)', attestTx.ok, attestTx.ok ? `${attestTx.receipt.gasUsed} gas` : 'reverted')
   if (!attestTx.ok) throw new Error('attest reverted')
 
@@ -190,7 +192,7 @@ try {
     return `0x${saltCounter.toString(16).padStart(64, '0')}` as Hex
   }
   const now1 = await engineNow()
-  const gen1 = buildV4GrantSet(mamoruPolicy, 1n, caps, world.a1.safe, sessionKey1, lab.chainId, now1, nextSalt)
+  const gen1 = buildV4GrantSet(mamoruPolicy, gasPolicy, 1n, caps, world.a1.safe, sessionKey1, lab.chainId, now1, nextSalt)
   note('generation 1: grant set built', true, `${gen1.length} sessions (enter-swap/enter-mint/manage-any x 3 pools), ${gen1.reduce((n, i) => n + i.actions.length, 0)} actions total`)
   for (const i of gen1) note(`  session: ${i.label}`, null, `${i.actions.length} actions`)
   await enableInBatches(lab, relayer, world.a1, gen1, 'enable-gen1')
@@ -224,7 +226,7 @@ try {
 
   const sessionKey2 = devAccount(6).address
   const now2 = await engineNow()
-  const gen2 = buildV4GrantSet(mamoruPolicy, 2n, caps, world.a1.safe, sessionKey2, lab.chainId, now2, nextSalt)
+  const gen2 = buildV4GrantSet(mamoruPolicy, gasPolicy, 2n, caps, world.a1.safe, sessionKey2, lab.chainId, now2, nextSalt)
   await enableInBatches(lab, relayer, world.a1, gen2, 'enable-gen2-renewal', RENEWAL_GAS_MODEL)
 
   // the generation-1 session is retired by the policy's own generation check, even before removeSession
