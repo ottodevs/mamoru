@@ -2,11 +2,11 @@ import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
-import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
+import { address, entry, erc20Abi, isDeployed, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, type SimCallResult } from '@mamoru/rpc'
-import { POLICIES, USAGE_RENEW_BPS, canonicalSettingsJson, capBaseUnits, computeCaps, grantKey, instantiateGrant, withEngineSettings, type PolicyVersion } from '@mamoru/policy'
+import { POLICIES, USAGE_RENEW_BPS, canonicalSettingsJson, capBaseUnits, computeCaps, grantKey, instantiateGrant, usesActionPolicy, withEngineSettings, type PolicyVersion } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -296,6 +296,18 @@ const SAFE_ERROR_MESSAGE = {
   OWNER_FAILURE_BUDGET: `${MAX_OWNER_FAILURES_PER_DAY} activations of this account failed in 24 hours; withdrawals still work, starting again waits`,
   OPERATOR_BUSY: 'the operator is busy, try again in a moment',
 } as const
+
+/**
+ * Spec 007 (otto/mamoru#151): no approval (activation, renewal, extension) of a v4 policy's grants. While
+ * MamoruActionPolicy has no address in the registry its grants cannot exist at all; once deployed, a v4 approval still
+ * needs what only T7 wires here: the account's on-chain policy state (registry, generation) for activationBatch, and
+ * a fresh session key per generation that the engine switches to when it lands. v1/v2 policies pass untouched.
+ */
+export function assertApprovable(policy: PolicyVersion): void {
+  if (!usesActionPolicy(policy)) return
+  if (!isDeployed('MamoruActionPolicy')) throw new HttpError(503, 'ACTION_POLICY_NOT_DEPLOYED', `${policy.policyId} needs MamoruActionPolicy, which is not deployed: nothing was changed`)
+  throw new HttpError(503, 'ACTION_POLICY_NOT_WIRED', `${policy.policyId} approvals are not enabled in this operator yet (spec 007 T7): nothing was changed`)
+}
 
 export class HttpError extends Error {
   constructor(
@@ -1171,6 +1183,7 @@ export class Operator {
    * validity, with the Safe transaction that enables them. A first approval and a renewal sign the same thing.
    */
   private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, only?: string[]) {
+    assertApprovable(policy)
     // otto/mamoru#140 (part2 #7): a new key stays with the prepare (Prepared.sessionKey) until the owner's signature
     // over these grants is proven; nothing is written for an account that only prepares.
     const newKey = acc.sessionKey ? undefined : generatePrivateKey()
