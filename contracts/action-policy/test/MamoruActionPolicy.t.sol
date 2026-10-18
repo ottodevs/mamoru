@@ -485,7 +485,8 @@ contract MamoruActionPolicyTest is Test {
         );
         _exec(USDC, abi.encodeCall(IERC20Min.approve, (NPM, 1_000e6)));
         _exec(CBBTC, abi.encodeCall(IERC20Min.approve, (NPM, 0.01e8)));
-        (uint256 own,,,) = abi.decode(_exec(NPM, abi.encodeCall(INPMFull.mint, (m))), (uint256, uint128, uint256, uint256));
+        (uint256 own,,,) =
+            abi.decode(_exec(NPM, abi.encodeCall(INPMFull.mint, (m))), (uint256, uint128, uint256, uint256));
         assertEq(_check(address(policy), _increaseData(own, 1_000e6, 0.01e8)), 1, "unadmitted: refused at validation");
         _approvePolicy(1_000e6, 0.01e8);
         vm.prank(safe);
@@ -567,8 +568,19 @@ contract MamoruActionPolicyTest is Test {
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.AccountPaused.selector, safe));
         policy.increase(IncreaseLiquidityParams(tokenId, 1_000e6, 0.01e8, 0, 0, block.timestamp));
         int24 sp = _spot(POOL_BTC);
-        MintParams memory m =
-            MintParams(USDC, CBBTC, 500, ((sp - 600) / 10) * 10, ((sp + 600) / 10) * 10, 1_000e6, 0.01e8, 0, 0, safe, block.timestamp);
+        MintParams memory m = MintParams(
+            USDC,
+            CBBTC,
+            500,
+            ((sp - 600) / 10) * 10,
+            ((sp + 600) / 10) * 10,
+            1_000e6,
+            0.01e8,
+            0,
+            0,
+            safe,
+            block.timestamp
+        );
         vm.prank(safe);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.AccountPaused.selector, safe));
         policy.mint(m);
@@ -682,5 +694,43 @@ contract MamoruActionPolicyTest is Test {
         (uint32 ts,,, bool init) = IUniswapV3Pool(pool).observations((idx + 1) % card);
         if (!init) (ts,,,) = IUniswapV3Pool(pool).observations(0);
         return block.timestamp - ts;
+    }
+
+    // ------------------------------------------------------------ swap deadline (multicall(deadline, []))
+
+    function _deadline(uint256 n) internal view returns (bytes memory) {
+        bytes[] memory inner = new bytes[](n);
+        for (uint256 k; k < n; k++) {
+            inner[k] = _swapData(USDC, CBBTC, 500, 1, 1, 0);
+        }
+        return abi.encodeWithSelector(bytes4(0x5ae401dc), block.timestamp + 120, inner);
+    }
+
+    function test_deadlineEmptyMulticallAccepted() public {
+        assertEq(_deadline(0).length, 100);
+        assertEq(_check(ROUTER, _deadline(0)), 0);
+    }
+
+    function test_deadlineMulticallWithCallsOrPaddingRefused() public {
+        assertEq(_check(ROUTER, _deadline(1)), 1);
+        assertEq(_check(ROUTER, bytes.concat(_deadline(0), bytes32(0))), 1); // trailing bytes
+        bytes memory wrongOffset = _deadline(0);
+        wrongOffset[67] = 0x60; // offset word 0x60 instead of 0x40
+        assertEq(_check(ROUTER, wrongOffset), 1);
+        assertEq(_check(NPM, _deadline(0)), 1); // another target with the same selector
+    }
+
+    function test_deadlineRefusedWhilePaused() public {
+        vm.prank(GUARDIAN);
+        policy.pause(safe);
+        assertEq(_check(ROUTER, _deadline(0)), 1);
+        vm.prank(GUARDIAN);
+        policy.unpause(safe);
+        assertEq(_check(ROUTER, _deadline(0)), 0);
+    }
+
+    function test_deadlineRefusedAtAnOldGeneration() public {
+        _init(ConfigId.wrap(bytes32(uint256(2))), 2, 60_000e6, 0.6e8, 180_000e6, 1.8e8);
+        assertEq(_check(ROUTER, _deadline(0)), 1); // ID is a generation-1 config, retired
     }
 }

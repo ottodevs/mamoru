@@ -130,6 +130,7 @@ contract MamoruActionPolicy is IActionPolicy {
     bytes4 internal constant DECREASE = 0x0c49ccbe; // decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))
     bytes4 internal constant COLLECT = 0xfc6f7865; // collect((uint256,address,uint128,uint128))
     bytes4 internal constant BURN = 0x42966c68; // burn(uint256)
+    bytes4 internal constant MULTICALL_DEADLINE = 0x5ae401dc; // SwapRouter02 multicall(uint256,bytes[])
 
     address public immutable SMART_SESSION;
     /// Revoke-only watchdog key (spec 007 "Guardian"): may pause and unpause an account's grants, nothing else. It
@@ -308,6 +309,14 @@ contract MamoruActionPolicy is IActionPolicy {
         if (target == address(NPM) && sel == BURN) {
             uint256 tokenId = abi.decode(data[4:], (uint256));
             return _isAdmitted(account, c.pool, tokenId) ? VALIDATION_SUCCESS : VALIDATION_FAILED;
+        }
+        if (target == ROUTER && sel == MULTICALL_DEADLINE) {
+            // The engine's swap deadline (otto/mamoru#140): multicall(deadline, []) executes nothing. Only the exact
+            // empty encoding (deadline, offset 0x40, length 0) passes; it is here, after the generation and pause
+            // checks, so a retired or paused grant cannot spend uses on it either.
+            return data.length == 100 && uint256(bytes32(data[36:68])) == 0x40 && uint256(bytes32(data[68:100])) == 0
+                ? VALIDATION_SUCCESS
+                : VALIDATION_FAILED;
         }
         if (sel == APPROVE && (target == p.token0 || target == p.token1)) {
             (address spender,) = abi.decode(data[4:], (address, uint256));
