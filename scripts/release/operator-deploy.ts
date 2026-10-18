@@ -155,6 +155,12 @@ console.log(`== operator:deploy ${running.slice(0, 7)} -> ${full.slice(0, 7)}${r
 await note83(`${who}: ${running.slice(0, 7)} -> ${full.slice(0, 7)}${rollback ? ` (rollback: ${reason})` : ''}. Starting.${added.length ? ` New env: ${added.map((v) => `${v.name}${v.set ? '' : ' (not set)'}`).join(', ')}.` : ''}`)
 
 const lockChanged = (await $`git -C ${opDir} diff --quiet ${running} ${full} -- bun.lock`.nothrow()).exitCode !== 0
+// Logged before anything moves: an unwritable log stops the redeploy here, not after it (as switch.sh did).
+try {
+  log({ from: running, to: full, rollback, result: 'start' })
+} catch (e) {
+  refuse(`cannot write the deploy log ${logFile}: ${e instanceof Error ? e.message : e}`)
+}
 const result = await bringUp(full, lockChanged)
 if (result.ok) {
   log({ from: running, to: full, rollback, result: 'ok' })
