@@ -34,7 +34,7 @@ function session(p: PolicyVersion, key: string): EngineSession {
 }
 const v4s = session(V4, `engine:${POOL}`)
 
-type Chain = { spot: number; twap: number; quote: bigint; admitted: Address; paused?: boolean; pos: { tickLower: number; tickUpper: number; liquidity: bigint } }
+type Chain = { spot: number; twap: number; quote: bigint; admitted: Address; owner?: Address; paused?: boolean; pos: { tickLower: number; tickUpper: number; liquidity: bigint } }
 
 function engineAt(over: Partial<Chain> = {}, policy: PolicyVersion = V4) {
   const c: Chain = { spot: TICK, twap: TICK, quote: 0n, admitted: address(POOL), pos: { ...RANGE, liquidity: 10n ** 12n }, ...over }
@@ -51,6 +51,7 @@ function engineAt(over: Partial<Chain> = {}, policy: PolicyVersion = V4) {
       }
       if (functionName === 'positions') return [0n, address('NonfungiblePositionManager'), address('WETH'), address('USDC'), 3000, c.pos.tickLower, c.pos.tickUpper, c.pos.liquidity, 0n, 0n, 0n, 0n]
       if (functionName === 'admittedPool') return c.admitted
+      if (functionName === 'ownerOf') return c.owner ?? ACCOUNT
       if (functionName === 'isPaused') return c.paused ?? false
       throw new Error(`unexpected read ${functionName}`)
     },
@@ -176,6 +177,9 @@ describe('engine under a v4 session (spec 007 T3)', () => {
     expect(r.calls.some((c) => c.target === address('NonfungiblePositionManager'))).toBe(false)
     await expect(engineAt({ admitted: '0x0000000000000000000000000000000000000000' }).prepareCalls(increaseP, 100n, 1_000n, v4s)).rejects.toMatchObject({ code: 'POLICY_DENIED_POSITION' })
     await expect(engineAt({ admitted: address('pool:USDC/cbBTC/500') }).prepareCalls(increaseP, 100n, 1_000n, v4s)).rejects.toMatchObject({ code: 'POLICY_DENIED_POSITION' })
+    // Admitted but moved out of the Safe since: not sent (the policy would refuse it and the userOp's gas be lost).
+    await expect(engineAt({ owner: '0x00000000000000000000000000000000000000bb' }).prepareCalls(increaseP, 100n, 1_000n, v4s)).rejects.toMatchObject({ code: 'POLICY_DENIED_POSITION' })
+    await expect(engineAt({ owner: '0x00000000000000000000000000000000000000bb' }).prepareCalls(reduceP, 100n, 1_000n, v4s)).rejects.toMatchObject({ code: 'POLICY_DENIED_POSITION' })
     // #171's checks stay: the position must be the one decided on, the price inside it.
     await expect(engineAt({ pos: { tickLower: RANGE.tickLower + 60, tickUpper: RANGE.tickUpper, liquidity: 1n } }).prepareCalls(increaseP, 100n, 1_000n, v4s)).rejects.toMatchObject({ code: 'EHG_OBSERVATION_STALE' })
   })

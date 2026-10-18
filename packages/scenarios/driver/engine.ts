@@ -769,8 +769,14 @@ export class Engine {
    * the account in this pool (one it minted through the policy). Not sent otherwise: the policy would refuse it.
    */
   private async v4Admitted(tokenId: bigint, pool: string, blockNumber: bigint, ap: NonNullable<SessionGrant['actionPolicy']>): Promise<void> {
-    const at = await this.client.readContract({ address: ap.address, abi: mamoruActionPolicyAbi, functionName: 'admittedPool', args: [this.cfg.account, tokenId], blockNumber })
+    // The policy also requires the account to still own the NFT (`_isAdmitted`); checked here so a position moved out of
+    // the Safe after the observation is not sent and refused at the cost of a userOp's gas (GPT-6 review of #96).
+    const [at, owner] = await Promise.all([
+      this.client.readContract({ address: ap.address, abi: mamoruActionPolicyAbi, functionName: 'admittedPool', args: [this.cfg.account, tokenId], blockNumber }),
+      this.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [tokenId], blockNumber }),
+    ])
     if (!isAddressEqual(at, entry(pool).address)) throw new ReasonError('POLICY_DENIED_POSITION', `position ${tokenId} is not admitted by MamoruActionPolicy for ${pool} (admitted pool ${at})`)
+    if (!isAddressEqual(owner, this.cfg.account)) throw new ReasonError('POLICY_DENIED_POSITION', `position ${tokenId} is no longer owned by the account (owner ${owner})`)
   }
 
   /** FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. */
