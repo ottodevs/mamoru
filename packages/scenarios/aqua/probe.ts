@@ -43,7 +43,7 @@ import {
 import { BaseError, createPublicClient, decodeFunctionResult, encodeFunctionData, getAddress, http, keccak256, parseAbi, parseEventLogs } from 'viem'
 import type { Address, Hex } from '@mamoru/domain'
 import { address, erc20Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
-import { approve as v3Approve, collect, decreaseLiquidity, mint as v3Mint } from '@mamoru/uniswap-v3'
+import { approve as v3Approve, burn as v3Burn, collect, decreaseLiquidity, mint as v3Mint } from '@mamoru/uniswap-v3'
 import { conservadorLabV1 } from '@mamoru/policy'
 import { anvilBinary, assertNoKeyInArgv, sanitizedEnv } from '../fork/anvil.ts'
 import { startForkProxy } from '../proxy/index.ts'
@@ -254,6 +254,7 @@ try {
   const controlShipTx = aqua.ship(controlAmounts)
   const controlShip = await ownerExec(lab, world.relayer, world.a1, { to: getAddress(controlShipTx.to), data: controlShipTx.data as Hex }, 'passkey')
   note('control strategy shipped (fee = 0 bps, same size as the real strategy, never filled)', controlShip.ok, `${controlShip.receipt.gasUsed} gas, maker = the Safe (msg.sender)`)
+  if (!controlShip.ok) exitCode = 1
   const controlHash = AquaProtocolContract.calculateStrategyHash(controlOrder.encode())
   const quoteArgs = { order: controlOrder, tokenIn: new AquaAddress(USDC), tokenOut: new AquaAddress(WETH), amount: 500_000_000n, takerTraits: TakerTraits.default() }
   const controlQuoteTx = new SwapVMContract(swapVmAddr).quote(quoteArgs)
@@ -269,6 +270,7 @@ try {
   const dockControlTx = aqua.dock({ app: swapVmAddr, strategyHash: controlHash, tokens: [new AquaAddress(WETH), new AquaAddress(USDC)] })
   const dockControl = await ownerExec(lab, world.relayer, world.a1, { to: getAddress(dockControlTx.to), data: dockControlTx.data as Hex }, 'passkey')
   note('control strategy docked', dockControl.ok, `${dockControl.receipt.gasUsed} gas, no tokens moved`)
+  if (!dockControl.ok) exitCode = 1
 
   // --- 8. Ship the real strategy (fee = 5 bps, concentrated range) ---------------------------------------------
   const shipAmounts = { app: swapVmAddr, strategy: feeOrder.encode(), amountsAndTokens: [{ token: new AquaAddress(WETH), amount: sized.actualLt }, { token: new AquaAddress(USDC), amount: sized.actualGt }] }
@@ -301,28 +303,34 @@ try {
   } catch (e) {
     note('taker fill, dry run (eth_call)', false, reason(e))
   }
+  const virtualUsdcBeforeFill = await lab.client.readContract({ address: AQUA_FROM_DOCS, abi: aquaViewAbi, functionName: 'rawBalances', args: [safe, SWAP_VM_FROM_DOCS, strategyHash.toString(), USDC] })
   const wethBeforeFill = await lab.balanceOf('WETH', taker.address)
   const fill = await lab.send(taker, getAddress(swapTx.to), swapTx.data as Hex)
   const wethOut = (await lab.balanceOf('WETH', taker.address)) - wethBeforeFill
-  note('taker fills 500 USDC -> WETH against the strategy', fill.ok && wethOut > 0n, `${fill.ok ? fill.receipt.gasUsed : 'n/a'} gas, taker received ${wethOut} wei WETH`)
+  const virtualUsdcAfterFill = await lab.client.readContract({ address: AQUA_FROM_DOCS, abi: aquaViewAbi, functionName: 'rawBalances', args: [safe, SWAP_VM_FROM_DOCS, strategyHash.toString(), USDC] })
+  const virtualUsdcDelta = virtualUsdcAfterFill[0] - virtualUsdcBeforeFill[0]
+  note('taker fills 500 USDC -> WETH against the strategy', fill.ok && wethOut > 0n, `${fill.ok ? fill.receipt.gasUsed : 'n/a'} gas, taker received ${wethOut} wei WETH, maker's virtual USDC balance moved by ${virtualUsdcDelta} (observed via Aqua's own rawBalances, not computed)`)
   if (!(fill.ok && wethOut > 0n)) exitCode = 1
 
-  // Fee earned: by construction (withFeeTokenIn), flatFeeAmountInXD takes feeBps of amountIn before the XYC
-  // curve prices it, and the fee stays with the maker (it is never burned or sent to a third party absent an
-  // explicit withProtocolFee()). 500 USDC at 5 bps is a deterministic, protocol-guaranteed 0.25 USDC-equivalent
-  // of extra value captured by the maker's strategy on this one fill. Cross-checked against the identically
-  // sized, fee-free control strategy's quote for the same 500 USDC trade, same block, same price.
-  const feeOnInput = (takerUsdcIn * BigInt(feeBps)) / 10_000n
+  // Fee earned: two independent, separately observed numbers, neither of them the nominal feeBps*amountIn
+  // arithmetic alone.
+  // 1. Input side: the maker's virtual USDC balance (read from Aqua's own rawBalances, before and after the
+  //    fill) moved by more than the taker's 500 USDC input whenever feeBps > 0 on amountIn credits the fee to
+  //    the same balance push() increments; the excess over takerUsdcIn is the fee, observed, not estimated.
+  // 2. Output side: the identically sized (same L, same price band, same block), fee-free control strategy's
+  //    quote for the same 500 USDC trade, compared against what the fee strategy actually delivered.
+  const feeOnInputObserved = virtualUsdcDelta > takerUsdcIn ? virtualUsdcDelta - takerUsdcIn : 0n
   if (controlOut > 0n) {
-    const delta = controlOut > wethOut ? controlOut - wethOut : 0n
-    const deltaBps = controlOut > 0n ? Number((delta * 10_000n) / controlOut) : 0
+    const outputSideDelta = controlOut > wethOut ? controlOut - wethOut : 0n
+    const outputSideBps = controlOut > 0n ? Number((outputSideDelta * 10_000n) / controlOut) : 0
     note(
-      'fee earned by the maker',
+      'fee earned by the maker (observed, two ways)',
       true,
-      `by construction: ${feeOnInput} raw USDC-equivalent (${feeBps} bps of the 500 USDC input), kept by the maker's strategy. Cross-check: the fee-free control quote (same L, same block) returned ${controlOut} wei WETH vs ${wethOut} wei WETH actually delivered, a ${deltaBps} bps difference`,
+      `input side: the maker's virtual USDC balance moved by ${virtualUsdcDelta} against a ${takerUsdcIn} input, ${feeOnInputObserved} more than the taker paid in (Aqua's rawBalances, read before and after the fill). ` +
+        `output side: the fee-free control quote (same L, same block) would have delivered ${controlOut} wei WETH vs ${wethOut} wei WETH actually delivered, a ${outputSideBps} bps difference, against a strategy set to ${feeBps} bps`,
     )
   } else {
-    note('fee earned by the maker', true, `by construction: ${feeOnInput} raw USDC-equivalent (${feeBps} bps of the 500 USDC input), kept by the maker's strategy (control quote cross-check unavailable)`)
+    note('fee earned by the maker (observed)', true, `input side: the maker's virtual USDC balance moved by ${virtualUsdcDelta} against a ${takerUsdcIn} input, ${feeOnInputObserved} more than the taker paid in (Aqua's rawBalances, read before and after the fill); output-side control-quote cross-check unavailable`)
   }
 
   // --- 10. Overcommit: the Safe sends its real WETH away without docking first; the next fill must revert -----
@@ -330,6 +338,7 @@ try {
   const wethLeft = await lab.balanceOf('WETH', safe)
   const drain = await ownerExec(lab, world.relayer, world.a1, { to: WETH, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [dead, wethLeft] }) }, 'passkey')
   note('owner moves the Safe\'s real WETH away (no dock first)', drain.ok, `${drain.ok ? drain.receipt.gasUsed : 'n/a'} gas; the strategy still advertises its old virtual WETH balance`)
+  if (!drain.ok) exitCode = 1
   const takerUsdcIn2 = 200_000_000n
   await lab.whaleTransfer('USDC', WHALE, taker.address, takerUsdcIn2)
   await lab.send(taker, USDC, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [SWAP_VM_FROM_DOCS, takerUsdcIn2] }))
@@ -383,6 +392,7 @@ try {
     'passkey',
   )
   note('rebalance, batched in one Safe transaction (as production would send it)', batched.ok, `${batched.ok ? batched.receipt.gasUsed : 'FAIL'} gas total, signed by the passkey alone`)
+  if (!batched.ok) exitCode = 1
 
   // --- 12. The same Safe's Uniswap v3 cycle on the same fork, for the gas comparison --------------------------
   const v3Pool = address('pool:WETH/USDC/500')
@@ -402,6 +412,7 @@ try {
     'passkey',
   )
   note('v3 baseline: mint', mint1.ok, `${mint1.ok ? mint1.receipt.gasUsed : 'FAIL'} gas`)
+  if (!mint1.ok) exitCode = 1
   const mintedId = mint1.ok
     ? parseEventLogs({ abi: nonfungiblePositionManagerAbi, logs: mint1.receipt.logs, eventName: 'Transfer' }).find((l) => l.args.to.toLowerCase() === safe.toLowerCase())?.args.tokenId
     : undefined
@@ -410,6 +421,10 @@ try {
     const posAbi = parseAbi(['function positions(uint256) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)'])
     const pos = await lab.client.readContract({ address: address('NonfungiblePositionManager'), abi: posAbi, functionName: 'positions', args: [mintedId] })
     const liquidity = pos[7]
+    // decrease + collect + burn + approve*2 + mint: exactly the action set of this repo's own `manage-any`
+    // session grant (packages/policy/src/grants.ts) for re-ranging a position, not an ad-hoc cycle invented for
+    // this comparison. Burning the emptied NFT is part of a real re-range; omitting it would understate v3's
+    // gas cost, not overstate it.
     const rebalance = await ownerBatch(
       lab,
       world.relayer,
@@ -417,6 +432,7 @@ try {
       [
         decreaseLiquidity({ tokenId: mintedId, liquidity, amount0Min: 1n, amount1Min: 1n, deadline: v3Deadline }),
         collect({ account: safe, tokenId: mintedId }),
+        v3Burn(mintedId),
         v3Approve('USDC', 'NonfungiblePositionManager', v3MintUsdc),
         v3Approve('WETH', 'NonfungiblePositionManager', v3MintWeth / 2n),
         v3Mint({ account: safe, pool: 'pool:WETH/USDC/500', tickLower: base, tickUpper: base + width * 2 + spacing, amount0Desired: v3MintWeth / 2n, amount1Desired: v3MintUsdc, amount0Min: 1n, amount1Min: 1n, deadline: v3Deadline }),
@@ -424,9 +440,11 @@ try {
       'passkey',
     )
     v3RebalanceGas = rebalance.ok ? rebalance.receipt.gasUsed : 0n
-    note('v3 baseline: rebalance (decreaseLiquidity + collect + mint), batched in one Safe transaction', rebalance.ok, `${rebalance.ok ? rebalance.receipt.gasUsed : 'FAIL'} gas total, signed by the passkey alone`)
+    note('v3 baseline: rebalance (decreaseLiquidity + collect + burn + approve*2 + mint, the `manage-any` grant\'s own action set), batched in one Safe transaction', rebalance.ok, `${rebalance.ok ? rebalance.receipt.gasUsed : 'FAIL'} gas total, signed by the passkey alone`)
+    if (!rebalance.ok) exitCode = 1
   } else {
     note('v3 baseline: rebalance', false, 'no position minted to read a tokenId from')
+    exitCode = 1
   }
 
   // --- 13. Gas comparison -----------------------------------------------------------------------------------
