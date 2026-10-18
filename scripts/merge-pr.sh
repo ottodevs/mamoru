@@ -23,8 +23,27 @@ read -r pr_state base head cross <<<"$state"
 [ "$cross" = "false" ] || { echo "PR #$pr comes from a fork; merge it by hand" >&2; exit 1; }
 [ "$(git config --get commit.gpgsign)" = "true" ] || { echo "commit.gpgsign is not true: the rebase would drop signatures" >&2; exit 1; }
 
+# One merge at a time on this machine: two sessions merging at once each rebase onto a main the other is moving.
+lock="${XDG_RUNTIME_DIR:-/tmp}/mamoru-merge.lock"
+exec 9>"$lock"
+flock -n 9 || { echo "another merge is running (lock $lock): wait for it, then run this again" >&2; exit 1; }
+
 git -C "$root" fetch -q origin main "$head"
 old_head="$(git -C "$root" rev-parse "origin/$head")"
+
+# A PR reviewed on an older main must not be rebased here onto a main that changed the same files since: the result
+# is code nobody reviewed (two reviewed PRs can still break each other). Rebase the branch yourself, get that rebase
+# reviewed (for funds, grants, signing or auth code: a GPT-6 APTO), push, and merge it then (nothing left to rebase).
+base="$(git -C "$root" merge-base origin/main "origin/$head")"
+if [ "$base" != "$(git -C "$root" rev-parse origin/main)" ]; then
+  overlap="$(comm -12 <(git -C "$root" diff --name-only "$base" origin/main | sort) <(git -C "$root" diff --name-only "$base" "origin/$head" | sort))"
+  if [ -n "$overlap" ]; then
+    echo "PR #$pr was built on ${base:0:7}; main has since changed files it also changes:" >&2
+    echo "$overlap" | sed 's/^/  /' >&2
+    echo "rebase $head onto origin/main, get the rebase reviewed, push it, then run this again" >&2
+    exit 1
+  fi
+fi
 tmp="$(mktemp -d)"
 cleanup() { git -C "$root" worktree remove --force "$tmp" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
