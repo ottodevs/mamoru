@@ -1,5 +1,20 @@
 export type * from './types.ts'
 export { datasetId, decodeDataset, encodeDataset, makeDataset, type DatasetJson } from './dataset.ts'
 export { ETH_PRICE_POOL, OP_GAS_UNITS, observe, twapTick } from './observe.ts'
-export { DEFAULT_GAS, SIM_VERSION, runBacktest } from './run.ts'
+export { DEFAULT_GAS, SIM_VERSION, capsAt, pricer, runBacktest, type Pricer } from './run.ts'
 export { accrue, accrued, accruedX128, apply, inRange, newWorld, swapOut, valueIn, type SimPosition, type World } from './world.ts'
+export {
+  bandGrid,
+  exitWaits,
+  scanBand,
+  scanBudget,
+  spendOf,
+  spotTwapDeviation,
+  waitStats,
+  type BandGridRow,
+  type BandScan,
+  type BudgetScan,
+  type Episode,
+  type ExitWait,
+  type PoolTokenSpend,
+} from './action-policy.ts'
