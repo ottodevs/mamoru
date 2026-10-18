@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@1inch/aqua-sdk": "0.3.4",
+    "@1inch/swap-vm-sdk": "0.4.3",
     "@mamoru/account": "workspace:*",
     "@mamoru/decide": "workspace:*",
     "@mamoru/domain": "workspace:*",

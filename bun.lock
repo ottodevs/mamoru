@@ -185,6 +185,8 @@
       "name": "@mamoru/scenarios",
       "version": "0.0.0",
       "dependencies": {
+        "@1inch/aqua-sdk": "0.3.4",
+        "@1inch/swap-vm-sdk": "0.4.3",
         "@mamoru/account": "workspace:*",
         "@mamoru/decide": "workspace:*",
         "@mamoru/domain": "workspace:*",
@@ -209,6 +211,14 @@
     },
   },
   "packages": {
+    "@1inch/aqua-sdk": ["@1inch/aqua-sdk@0.3.4", "", { "dependencies": { "@1inch/sdk-core": "0.1.5", "tslib": "^2.8.1", "viem": "^2.48.4" } }, "sha512-XrIuUX5FFPf6nEsV+8fCbfNhVDhEQKOGTCQhpFnxNst4ik3IXZTcT6LfCcUfCY/8QWXBlOpI0s1VrZe4fMlf3A=="],
+
+    "@1inch/byte-utils": ["@1inch/byte-utils@3.1.9", "", { "peerDependencies": { "assert": "^2.0.0" }, "optionalPeers": ["assert"] }, "sha512-IedsEDTt7wY411R0cgwoMelsHaDyoyBrrIT6YDl0jgHpXnDKadruy0p71xwHGxG4ZELVAKeow8pQ9YM5KQ/i4A=="],
+
+    "@1inch/sdk-core": ["@1inch/sdk-core@0.1.5", "", { "dependencies": { "@1inch/byte-utils": "^3.1.7", "tslib": "^2.8.1", "viem": "^2.48.4" }, "peerDependencies": { "assert": "*" }, "optionalPeers": ["assert"] }, "sha512-8if32OdJrSnHUnipbdIBGS9zTFnnuCpM/YnSptkL1+p+2iPwlh13yYsI5LGb6GiLk1Z/mfltWqmqReC1yyYrEQ=="],
+
+    "@1inch/swap-vm-sdk": ["@1inch/swap-vm-sdk@0.4.3", "", { "dependencies": { "@1inch/byte-utils": "^3.1.7", "@1inch/sdk-core": "0.1.5", "tslib": "^2.8.1" }, "peerDependencies": { "viem": "^2.21.0" } }, "sha512-m0xo8XLCulq8qLKUz7Imv4V4FnLfNdI5EG7oE8G/1Fjk09P4lsHftapp+LYibkB1/LjTNvNDIj9bFEZ/SByTjA=="],
+
     "@adraffy/ens-normalize": ["@adraffy/ens-normalize@1.11.1", "", {}, "sha512-nhCBV3quEgesuf7c7KYfperqSS14T8bYuvJ8PcLJp6znkZpFc0AuW4qBtr8eKVyPPe/8RSr7sglCWPU5eaxwKQ=="],
 
     "@cloudflare/kv-asset-handler": ["@cloudflare/kv-asset-handler@0.5.0", "", {}, "sha512-jxQYkj8dSIzc0cD6cMMNdOc1UVjqSqu8BZdor5s8cGjW2I8BjODt/kWPVdY+u9zj3ms75Q5qaZgnxUad83+eAg=="],
