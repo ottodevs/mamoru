@@ -3,7 +3,7 @@ import type { ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, hasManageAny, policyHash, type PolicyVersion } from '@mamoru/policy'
 import { allocate, type Waiting } from './allocate/index.ts'
 import { enterBucket, safeSavings } from './enter/index.ts'
-import { ehgPreliminary, purgaIdentity } from './gates/index.ts'
+import { ehgPreliminary, purgaIdentity, registryOf } from './gates/index.ts'
 import { fallFreezeOf } from './guard/index.ts'
 import { depeggedPool, depegExitOf } from './guard/depeg.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
@@ -145,7 +145,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     if (a.proposal) {
       enterEvaluated = true
       const pool = obs.pools.find((x) => x.name === a.proposal!.pool)!
-      trail.push(purgaIdentity(pool), { gate: 'strategy', verdict: 'GO', reason: 'STRATEGY_PREFERENCE_DEVIATION' }, { gate: 'eny', verdict: 'SKIP', reason: 'ENY_SHADOW' })
+      trail.push(purgaIdentity(pool, registryOf(obs)), { gate: 'strategy', verdict: 'GO', reason: 'STRATEGY_PREFERENCE_DEVIATION' }, { gate: 'eny', verdict: 'SKIP', reason: 'ENY_SHADOW' })
       entries.push(remint && a.proposal.kind === 'enter_mint' ? { ...a.proposal, grant: anyKey(policy, 'manage-any', a.proposal.pool) } : a.proposal)
     }
   } else for (const b of policy.buckets) {
@@ -164,7 +164,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
       buckets.push({ bucket: b.id, code: 'DECIDE_ENTRY_PAUSED_FALL' })
       continue
     }
-    const purga = purgaIdentity(pool)
+    const purga = purgaIdentity(pool, registryOf(obs))
     if (purga.verdict !== 'GO') {
       trail.push(purga)
       buckets.push({ bucket: b.id, code: purga.reason })
