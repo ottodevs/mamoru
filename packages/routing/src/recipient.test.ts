@@ -21,6 +21,22 @@ describe('calldataPinsRecipient', () => {
   test('calldata with no body (just a selector) never matches', () => {
     expect(calldataPinsRecipient('0xaabbccdd', ACCOUNT)).toBe(false)
   })
+
+  test('refuses calldata whose body is not a whole number of 32-byte words, even if truncating happens to leave a matching prefix', () => {
+    const truncated = sendTo(ACCOUNT).slice(0, -2) as `0x${string}` // drop the last byte: no longer word-aligned
+    expect(calldataPinsRecipient(truncated, ACCOUNT)).toBe(false)
+  })
+
+  test('known, accepted limitation: a decoy copy of the account elsewhere in the calldata still counts as a match', () => {
+    // This function cannot tell "the real recipient argument" from "the account's bytes appear somewhere in this
+    // call" without knowing the selector ahead of time — which is exactly why Relay/LI.FI/deBridge are owner-only
+    // rather than session-key (see the module doc comment). A call to `send(other, amount)` with the account's
+    // address packed into an unrelated trailing word still passes this check; the owner's own review of the
+    // decoded transaction before signing is the real backstop for owner-only routes, not this function.
+    const abiWithExtra = parseAbi(['function send(address to, uint256 amount, bytes32 memo) returns (bool)'])
+    const decoy = encodeFunctionData({ abi: abiWithExtra, functionName: 'send', args: [OTHER, 150_000_000n, `0x${'0'.repeat(24)}${ACCOUNT.slice(2).toLowerCase()}`] })
+    expect(calldataPinsRecipient(decoy, ACCOUNT)).toBe(true) // true, not false — documented, not a surprise
+  })
 })
 
 describe('parseDeclaredAddress', () => {

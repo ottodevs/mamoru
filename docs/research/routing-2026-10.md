@@ -92,6 +92,26 @@ repeated-digit address `0x1111...1111` as high-risk (`COMPLIANCE_ADDRESS_BLOCKED
 is clean on every provider this package calls — used throughout the recorded test fixtures and the live smoke
 script.
 
+### Hardening pass: every field from a third-party API is untrusted input
+
+`debridge.ts` pins its target contract to the one address this adapter has actually observed identical on
+Ethereum, Base and Monad as the source chain (`0xeF4fB24aD0916217251F553c0596F8Edc630EB66`, checked live 18 Oct
+2026) and refuses any other; cross-checks the native `tx.value` it is about to attach against the fee the
+response separately declares (`fixFee`) — exactly equal for a USDC-input order, `amountIn + fixFee` plus a small
+observed top-up for an ETH-input order — and refuses outside that band, on top of an absolute circuit breaker;
+and cross-checks the response's own echoed chain ids against the request. `relay.ts` and `lifi.ts` were not
+given the same target allowlist: Relay's and LI.FI's router/diamond address was only confirmed stable for one
+origin chain each this round, and guessing it for chains not checked would be worse than not pinning it at all.
+
+`recipient.ts`'s calldata scan (used by all three owner-only adapters) now refuses calldata that is not a whole
+number of 32-byte words after the selector — not standard ABI encoding, never scanned for a "lucky" match. It
+still cannot tell "the real recipient argument" from "the account's bytes appear somewhere in this call"
+without knowing the selector ahead of time, which is exactly why these three routes are owner-only instead of
+session-key in the first place (see `src/types.ts`'s `RecipientCheck` doc comment): pinning a selector would
+mean maintaining an allowlist of every route an aggregator might ever choose, defeating the point of using one.
+The real security boundary for an owner-only route is the owner's own passkey-signed review of the decoded
+transaction before signing — a future, UI-side ticket, not this quoting layer.
+
 ## What was out of scope for adapters, deliberately
 
 - **Fast-withdrawal third parties** (Brid.gg, Garden, Superbridge) for Base's 5-day L2->L1 delay: third-party

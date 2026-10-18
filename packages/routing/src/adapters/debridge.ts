@@ -10,6 +10,11 @@ import type { Adapter, AdapterDeps, Fetch, Quote, QuoteRequest } from '../types.
 // field of its own in the response to cross-check, so the calldata scan is the only check (still a refusal if it
 // fails — see recipient.ts).
 //
+// Every field below is treated as untrusted input from a third-party API, not as a correct answer: the target
+// contract is pinned to the one address this adapter has actually observed (refused otherwise), the native
+// value DLN wants attached is cross-checked against the fee the response itself separately declares and capped
+// (never just trusted), and the response's own echoed chain ids are cross-checked against the request.
+//
 // DLN charges an order-creation fee in the source chain's *native* asset (`tx.value` below, `fixFee` in the
 // response) on top of whatever it takes from the bridged token — Quote.value carries that through so a caller
 // does not silently drop it when building the transaction.
@@ -32,10 +37,28 @@ function debridgeChainId(chainId: number): number {
   return DEBRIDGE_CHAIN_ID[chainId] ?? chainId
 }
 
+/** The DLN order-creation entrypoint this adapter will ever call. Confirmed identical — not merely similar — on
+ * Ethereum, Base and Monad as the source chain (checked live 18 Oct 2026), consistent with a CREATE2 deployment
+ * the same way CCTP's TokenMessengerV2 is. Any other `tx.to` the API returns is refused, not trusted. */
+export const DEBRIDGE_DLN_SOURCE: Address = '0xeF4fB24aD0916217251F553c0596F8Edc630EB66'
+
+/** A circuit breaker on the native-asset order-creation fee DLN asks the caller to attach as `tx.value`, in
+ * addition to requiring it exactly match the response's own separately-declared `fixFee` (defense in depth: a
+ * provider or a MITM response cannot inflate `value` without also inflating `fixFee` to match, and this still
+ * refuses if that declared fee itself is absurd). Generous enough to clear every native asset and fee size
+ * observed this round (ETH: 0.001; Monad: 2 MON) while still catching an order of magnitude mistake or worse. */
+export const MAX_NATIVE_VALUE_WEI = 5_000_000_000_000_000_000n // 5 of whatever the source chain's native asset is
+
+/** How far `tx.value` may exceed `fixFee` (plus `amountIn` for an ETH-input order) before it is refused as
+ * unexplained. Generous relative to the ~0.00013 ETH top-up observed live on a 0.01 ETH order (roughly 16x
+ * headroom), tight relative to the absolute circuit breaker above. */
+export const NATIVE_VALUE_SLACK_WEI = 2_000_000_000_000_000n // 0.002 of the source chain's native asset
+
 type DebridgeResponse = {
-  estimation?: { dstChainTokenOut?: { amount?: string } }
+  estimation?: { srcChainTokenIn?: { chainId?: number }; dstChainTokenOut?: { chainId?: number; amount?: string } }
   order?: { approximateFulfillmentDelay?: number }
   tx?: { to?: string; data?: string; value?: string }
+  fixFee?: string
   errorCode?: number
   errorMessage?: string
 }
@@ -83,6 +106,15 @@ export const debridgeAdapter: Adapter = {
       prependOperatingExpenses: 'true',
     })
 
+    // Cross-check the response's own echoed chain ids against what was actually asked for — a provider or a
+    // MITM response naming the wrong chain is refused here, before anything else is even read.
+    const wantSrc = debridgeChainId(req.sourceChainId)
+    const wantDst = debridgeChainId(req.destChainId)
+    const gotSrc = resp.estimation?.srcChainTokenIn?.chainId
+    const gotDst = resp.estimation?.dstChainTokenOut?.chainId
+    if (gotSrc !== undefined && gotSrc !== wantSrc) throw new RouteError('debridge', 'QUOTE_MALFORMED', `estimation names source chain ${gotSrc}, not the requested ${wantSrc}`)
+    if (gotDst !== undefined && gotDst !== wantDst) throw new RouteError('debridge', 'QUOTE_MALFORMED', `estimation names destination chain ${gotDst}, not the requested ${wantDst}`)
+
     const amountOutRaw = resp.estimation?.dstChainTokenOut?.amount
     if (!amountOutRaw) throw new RouteError('debridge', 'QUOTE_MALFORMED', 'missing estimation.dstChainTokenOut.amount')
     let amountOut: bigint
@@ -97,12 +129,26 @@ export const debridgeAdapter: Adapter = {
     if (!tx?.to || !tx?.data) throw new RouteError('debridge', 'QUOTE_MALFORMED', 'missing tx.to/tx.data — pass sender and recipient addresses')
     let target: Address
     let value: bigint
+    let fixFee: bigint
     try {
       target = getAddress(tx.to)
       value = tx.value ? BigInt(tx.value) : 0n
+      fixFee = resp.fixFee ? BigInt(resp.fixFee) : 0n
     } catch {
-      throw new RouteError('debridge', 'QUOTE_MALFORMED', 'bad target or value field')
+      throw new RouteError('debridge', 'QUOTE_MALFORMED', 'bad target, value or fixFee field')
     }
+    if (target !== DEBRIDGE_DLN_SOURCE) throw new RouteError('debridge', 'QUOTE_MALFORMED', `unexpected target contract ${target}`)
+    // tx.value is the amount this adapter will attach as msg.value; never trust it on its own. For a USDC-input
+    // order it should be exactly `fixFee` — confirmed live 18 Oct 2026. For an ETH-input order it is the bridged
+    // principal (req.amountIn) *plus* fixFee, plus a small gas/slippage top-up DLN itself adds (observed live:
+    // ~0.00013 ETH on a 0.01 ETH order) — not something this adapter can predict exactly, so it is bounded by
+    // NATIVE_VALUE_SLACK_WEI instead of required to match exactly. Either way `value` can never fall short of
+    // `expected` (that would mean the fee silently went missing) and never exceed it by more than the slack, and
+    // the absolute circuit breaker still applies on top.
+    const expected = (req.asset === 'ETH' ? req.amountIn : 0n) + fixFee
+    if (value < expected) throw new RouteError('debridge', 'QUOTE_MALFORMED', `tx.value ${value} is less than the expected ${expected}`)
+    if (value > expected + NATIVE_VALUE_SLACK_WEI) throw new RouteError('debridge', 'QUOTE_MALFORMED', `tx.value ${value} exceeds the expected ${expected} by more than the allowed slack`)
+    if (value > MAX_NATIVE_VALUE_WEI) throw new RouteError('debridge', 'QUOTE_REFUSED', `native value ${value} exceeds the app policy bound`)
     const calldata = tx.data as Hex
     // DLN echoes no recipient field of its own to cross-check against; the calldata scan alone decides.
     assertOwnerOnlyRecipient('debridge', req.account, calldata)
