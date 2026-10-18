@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Test, console2} from "forge-std/Test.sol";
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+import {OracleLibrary} from "@uniswap/v3-periphery/contracts/libraries/OracleLibrary.sol";
 import {
     MamoruActionPolicy,
     ConfigId,
@@ -33,13 +34,8 @@ interface INPMFull {
         returns (uint96, address, address, address, uint24, int24, int24, uint128, uint256, uint256, uint128, uint128);
 }
 
-/**
- * Spec 007 PoC on a Base mainnet fork (public archive RPC, pinned block). The policy is called the way SmartSession
- * calls it during validateUserOp (msg.sender = SmartSession, account = the Safe), and the actions are then executed
- * from the account, as Safe7579 does after validation. The real SmartSession/Safe7579 stack is not in this test; see
- * spec 007 "What the PoC does not show".
- */
-contract MamoruActionPolicyTest is Test {
+/// Shared fork fixture: addresses, the policy, Init builders, pushes.
+abstract contract PolicyFixture is Test {
     uint256 constant FORK_BLOCK = 52_700_000;
 
     // packages/registry/base.json
@@ -56,43 +52,68 @@ contract MamoruActionPolicyTest is Test {
     address constant POOL_ETH = 0x6c561B446416E1A00E8E93E221854d6eA4171372; // WETH/USDC 0.3%, token0 WETH
 
     uint24 constant BAND = 100; // ticks, = execution.maxTwapDeviationTicks of the live policy
+    uint24 constant STABLE_BAND = 10;
     uint32 constant TWAP = 1800; // seconds, = execution.twapWindowSeconds
+    uint32 constant TWAP_SHORT = 300;
+    // Harmonic-mean liquidity floors (packages/policy/src/v4-grants.ts V4_POOLS.minLiquidity): a share of each pool's
+    // in-range liquidity at block 52,700,000 (btc 2.679e12 x 25%, stables 2.972e14 x 10%, eth 3.40e19 x 10%).
+    uint128 constant BTC_MIN_LIQ = 669_000_000_000;
+    uint128 constant STABLE_MIN_LIQ = 29_700_000_000_000;
+    uint128 constant ETH_MIN_LIQ = 3_400_000_000_000_000_000;
 
     MamoruActionPolicy policy;
     address safe = makeAddr("safe");
     address attacker = makeAddr("attacker");
     ConfigId constant ID = ConfigId.wrap(bytes32(uint256(1)));
 
-    function setUp() public {
+    function _fork() internal {
         // Public Base endpoint with archive state; never the operator's provider key.
         vm.createSelectFork(vm.envOr("BASE_FORK_RPC_URL", string("https://mainnet.base.org")), FORK_BLOCK);
         policy = new MamoruActionPolicy(SMART_SESSION, NPM, ROUTER, FACTORY);
-        deal(USDC, safe, 100_000e6);
-        deal(CBBTC, safe, 1e8);
-        _init(ID, 1, 60_000e6, 0.6e8, 180_000e6, 1.8e8);
     }
 
-    // ------------------------------------------------------------ helpers
+    function _initData(
+        address pool,
+        uint24 band,
+        uint128 minLiq,
+        bool in1,
+        uint64 gen,
+        uint128 perWindow,
+        uint128 total,
+        uint256[] memory admit
+    ) internal pure returns (bytes memory) {
+        return abi.encode(
+            MamoruActionPolicy.Init({
+                pool: pool,
+                twapWindow: TWAP,
+                twapShortWindow: TWAP_SHORT,
+                bandTicks: band,
+                generation: gen,
+                minLiquidity: minLiq,
+                budgetIn1: in1,
+                budgetWindow: 1 days,
+                perWindow: perWindow,
+                total: total,
+                admit: admit
+            })
+        );
+    }
 
-    function _init(ConfigId id, uint64 gen, uint128 w0, uint128 w1, uint128 t0, uint128 t1) internal {
-        MamoruActionPolicy.Init memory i = MamoruActionPolicy.Init({
-            pool: POOL_BTC,
-            twapWindow: TWAP,
-            bandTicks: BAND,
-            generation: gen,
-            budgetWindow: 1 days,
-            perWindow0: w0,
-            perWindow1: w1,
-            total0: t0,
-            total1: t1
-        });
+    function _initBtc(ConfigId id, uint64 gen, uint128 perWindow, uint128 total) internal {
         vm.prank(SMART_SESSION);
-        policy.initializeWithMultiplexer(safe, id, abi.encode(i));
+        policy.initializeWithMultiplexer(
+            safe, id, _initData(POOL_BTC, BAND, BTC_MIN_LIQ, false, gen, perWindow, total, new uint256[](0))
+        );
     }
 
     function _check(address target, bytes memory data) internal returns (uint256 r) {
         vm.prank(SMART_SESSION);
         r = policy.checkAction(ID, safe, target, 0, data);
+    }
+
+    function _checkId(ConfigId id, address target, bytes memory data) internal returns (uint256 r) {
+        vm.prank(SMART_SESSION);
+        r = policy.checkAction(id, safe, target, 0, data);
     }
 
     function _checkGas(address target, bytes memory data) internal returns (uint256 r, uint256 gas) {
@@ -127,22 +148,57 @@ contract MamoruActionPolicyTest is Test {
         (, t,,,,,) = IUniswapV3Pool(pool).slot0();
     }
 
-    /// The attacker moves `pool` by `ticks` with its own capital (positive: price of token1 in token0 up).
+    /// The attacker moves `pool` by `ticks` with its own capital (positive: price of token0 in token1 up).
     function _push(address pool, address tokenIn, address tokenOut, uint24 fee, int24 ticks)
         internal
-        returns (uint256 spent)
+        returns (uint256 spent, uint256 got)
     {
         int24 target = _spot(pool) + ticks;
         deal(tokenIn, attacker, 1e30);
         vm.startPrank(attacker);
         IERC20Min(tokenIn).approve(ROUTER, type(uint256).max);
         uint256 before = IERC20Min(tokenIn).balanceOf(attacker);
+        uint256 o0 = IERC20Min(tokenOut).balanceOf(attacker);
         IRouter02(ROUTER)
             .exactInputSingle(
                 ExactInputSingleParams(tokenIn, tokenOut, fee, attacker, 1e29, 0, TickMath.getSqrtRatioAtTick(target))
             );
         spent = before - IERC20Min(tokenIn).balanceOf(attacker);
+        got = IERC20Min(tokenOut).balanceOf(attacker) - o0;
         vm.stopPrank();
+    }
+
+    /// Sells exactly `amountIn` (the attacker's own tokens) with no price limit.
+    function _sell(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn) internal {
+        vm.startPrank(attacker);
+        IERC20Min(tokenIn).approve(ROUTER, type(uint256).max);
+        IRouter02(ROUTER)
+            .exactInputSingle(
+                ExactInputSingleParams(
+                    tokenIn,
+                    tokenOut,
+                    fee,
+                    attacker,
+                    amountIn,
+                    0,
+                    tokenIn < tokenOut ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1
+                )
+            );
+        vm.stopPrank();
+    }
+
+    function _nextBlock(uint256 blocks) internal {
+        vm.roll(block.number + blocks);
+        vm.warp(block.timestamp + 2 * blocks);
+    }
+
+    function _twapOf(address pool, uint32 window) internal view returns (int24 t) {
+        uint32[] memory ago = new uint32[](2);
+        ago[0] = window;
+        (int56[] memory c,) = IUniswapV3Pool(pool).observe(ago);
+        int56 d = c[1] - c[0];
+        t = int24(d / int56(uint56(window)));
+        if (d < 0 && (d % int56(uint56(window)) != 0)) t--;
     }
 
     function _mintThroughPolicy(uint256 usdc, uint256 btc) internal returns (uint256 tokenId, uint128 liquidity) {
@@ -157,12 +213,44 @@ contract MamoruActionPolicyTest is Test {
         assertEq(_check(USDC, a0), 0);
         console2.log("gas checkAction(approve):", ga - gasleft());
         assertEq(_check(CBBTC, a1), 0);
+        uint256 gm = gasleft();
         assertEq(_check(address(policy), mm), 0, "mint refused");
+        console2.log("gas checkAction(mint):", gm - gasleft());
         _exec(USDC, a0);
         _exec(CBBTC, a1);
         uint256 g = gasleft();
         (tokenId, liquidity,,) = abi.decode(_exec(address(policy), mm), (uint256, uint128, uint256, uint256));
         console2.log("gas policy.mint (exec only):", g - gasleft());
+    }
+
+    /// A position minted straight at the manager (outside this policy), as v2/v3 grants and the owner do.
+    function _mintDirect(address owner, uint256 usdc, uint256 btc) internal returns (uint256 id, uint128 liq) {
+        int24 s = _spot(POOL_BTC);
+        MintParams memory m = MintParams(
+            USDC, CBBTC, 500, ((s - 600) / 10) * 10, ((s + 600) / 10) * 10, usdc, btc, 0, 0, owner, block.timestamp
+        );
+        deal(USDC, owner, IERC20Min(USDC).balanceOf(owner) + usdc);
+        deal(CBBTC, owner, IERC20Min(CBBTC).balanceOf(owner) + btc);
+        vm.startPrank(owner);
+        IERC20Min(USDC).approve(NPM, usdc);
+        IERC20Min(CBBTC).approve(NPM, btc);
+        (id, liq,,) = INPMFull(NPM).mint(m);
+        vm.stopPrank();
+    }
+}
+
+/**
+ * Spec 007 PoC on a Base mainnet fork (public archive RPC, pinned block). The policy is called the way SmartSession
+ * calls it during validateUserOp (msg.sender = SmartSession, account = the Safe), and the actions are then executed
+ * from the account, as Safe7579 does after validation. The real SmartSession/Safe7579 stack is in the TS fork
+ * scenarios (packages/scenarios/action-policy/t1..t4-fork.ts).
+ */
+contract MamoruActionPolicyTest is PolicyFixture {
+    function setUp() public {
+        _fork();
+        deal(USDC, safe, 100_000e6);
+        deal(CBBTC, safe, 1e8);
+        _initBtc(ID, 1, 60_000e6, 180_000e6);
     }
 
     // ------------------------------------------------------------ the engine's normal operations pass
@@ -187,6 +275,8 @@ contract MamoruActionPolicyTest is Test {
         (uint256 tokenId, uint128 liq) = _mintThroughPolicy(20_000e6, 0.2e8);
         console2.log("gas approve+approve+policy.mint (exec, incl. checks):", g - gasleft());
         assertEq(policy.admittedPool(safe, tokenId), POOL_BTC);
+        assertEq(IERC20Min(USDC).balanceOf(address(policy)), 0, "nothing left in the policy");
+        assertEq(IERC20Min(CBBTC).balanceOf(address(policy)), 0, "nothing left in the policy");
 
         (uint256 min0, uint256 min1) = policy.decreaseMins(safe, POOL_BTC, tokenId, liq);
         bytes memory dec = abi.encodeCall(
@@ -229,28 +319,25 @@ contract MamoruActionPolicyTest is Test {
 
     function test_manipulatedSwapReverts() public {
         uint256 amountIn = 10_000e6;
-        // Fair quote before the attack, at the TWAP band edge the policy allows.
         (uint256 minOut, uint160 limit) = policy.swapBounds(safe, POOL_BTC, USDC, amountIn);
 
-        // The attacker buys cbBTC with USDC: 500 ticks (~5%) fewer cbBTC per USDC. Same block, so the TWAP is unchanged.
-        uint256 spent = _push(POOL_BTC, USDC, CBBTC, 500, -500);
+        // The attacker buys cbBTC with USDC: 500 ticks (~5%) fewer cbBTC per USDC. Same block, so the TWAPs are unchanged.
+        (uint256 spent,) = _push(POOL_BTC, USDC, CBBTC, 500, -500);
         console2.log("attacker USDC to move USDC/cbBTC by 500 ticks:", spent / 1e6);
 
         // What today's grant accepts (amountOutMinimum > 0, sqrtPriceLimitX96 == 0): the policy refuses it.
         bytes memory loose = _swapData(USDC, CBBTC, 500, amountIn, 1, 0);
         assertEq(_check(ROUTER, loose), 1, "loose swap must be refused");
 
-        // Without the policy it would fill at the manipulated price: measured, then rolled back.
         uint256 snap = vm.snapshotState();
         _exec(USDC, abi.encodeCall(IERC20Min.approve, (ROUTER, amountIn)));
         uint256 b0 = IERC20Min(CBBTC).balanceOf(safe);
         _exec(ROUTER, loose);
         uint256 got = IERC20Min(CBBTC).balanceOf(safe) - b0;
-        console2.log("today's grant: filled sats vs TWAP-band minimum sats", got, minOut);
+        console2.log("today's grant: filled sats vs the policy minimum sats", got, minOut);
         console2.log("today's grant: shortfall vs the policy floor, bps", (minOut - got) * 10_000 / minOut);
         vm.revertToState(snap);
 
-        // A policy-compliant swap passes validation but cannot fill at the manipulated price: it reverts.
         bytes memory tight = _swapData(USDC, CBBTC, 500, amountIn, minOut, limit);
         assertEq(_check(ROUTER, tight), 0);
         _exec(USDC, abi.encodeCall(IERC20Min.approve, (ROUTER, amountIn)));
@@ -277,7 +364,7 @@ contract MamoruActionPolicyTest is Test {
         _exec(USDC, abi.encodeCall(IERC20Min.approve, (address(policy), 10_000e6)));
         _exec(CBBTC, abi.encodeCall(IERC20Min.approve, (address(policy), 0.1e8)));
         vm.prank(safe);
-        vm.expectRevert();
+        vm.expectPartialRevert(MamoruActionPolicy.SpotOutsideRange.selector);
         policy.mint(m);
     }
 
@@ -292,7 +379,6 @@ contract MamoruActionPolicyTest is Test {
         vm.prank(safe);
         vm.expectRevert(bytes("Price slippage check"));
         INPMFull(NPM).decreaseLiquidity(DecreaseLiquidityParams(tokenId, liq, min0, min1, block.timestamp));
-        // Today's grant (no minimums) is refused at validation.
         bytes memory loose =
             abi.encodeCall(INPMFull.decreaseLiquidity, (DecreaseLiquidityParams(tokenId, liq, 0, 0, block.timestamp)));
         assertEq(_check(NPM, loose), 1);
@@ -317,22 +403,12 @@ contract MamoruActionPolicyTest is Test {
             abi.encodeCall(INPMFull.decreaseLiquidity, (DecreaseLiquidityParams(tokenId, liq, 0, 0, block.timestamp)));
         assertEq(_check(NPM, dec), 0);
         (uint256 out0, uint256 out1) = abi.decode(_exec(NPM, dec), (uint256, uint256));
-        // Value in USDC at the TWAP price: what went in vs what came out.
-        int24 twap = _twapOf(POOL_BTC);
+        int24 twap = _twapOf(POOL_BTC, TWAP);
         uint256 vin = in0 + _btcInUsdc(in1, twap);
         uint256 vout = out0 + _btcInUsdc(out1, twap);
         uint256 lossBps = vout >= vin ? 0 : (vin - vout) * 10_000 / vin;
         console2.log("narrow range, spot +2000 ticks: decrease loss vs TWAP value, bps", lossBps);
         assertLe(lossBps, BAND, "loss must stay within the band");
-    }
-
-    function _twapOf(address pool) internal view returns (int24 t) {
-        uint32[] memory ago = new uint32[](2);
-        ago[0] = TWAP;
-        (int56[] memory c,) = IUniswapV3Pool(pool).observe(ago);
-        int56 d = c[1] - c[0];
-        t = int24(d / int56(uint56(TWAP)));
-        if (d < 0 && (d % int56(uint56(TWAP)) != 0)) t--;
     }
 
     /// cbBTC (token1) in USDC (token0) at `tick`: amount1 / 1.0001^tick.
@@ -352,16 +428,7 @@ contract MamoruActionPolicyTest is Test {
     // ------------------------------------------------------------ (b) an unrelated NFT cannot be touched
 
     function test_unrelatedNftDecreaseReverts() public {
-        // A position the Safe minted outside Mamoru (owner, another app): never admitted.
-        int24 s = _spot(POOL_BTC);
-        MintParams memory m = MintParams(
-            USDC, CBBTC, 500, ((s - 600) / 10) * 10, ((s + 600) / 10) * 10, 30_000e6, 0.3e8, 0, 0, safe, block.timestamp
-        );
-        _exec(USDC, abi.encodeCall(IERC20Min.approve, (NPM, 30_000e6)));
-        _exec(CBBTC, abi.encodeCall(IERC20Min.approve, (NPM, 0.3e8)));
-        (uint256 own, uint128 liq,,) =
-            abi.decode(_exec(NPM, abi.encodeCall(INPMFull.mint, (m))), (uint256, uint128, uint256, uint256));
-
+        (uint256 own, uint128 liq) = _mintDirect(safe, 30_000e6, 0.3e8);
         bytes memory dec =
             abi.encodeCall(INPMFull.decreaseLiquidity, (DecreaseLiquidityParams(own, liq, 0, 0, block.timestamp)));
         assertEq(_check(NPM, dec), 1, "unadmitted decrease must be refused");
@@ -370,50 +437,38 @@ contract MamoruActionPolicyTest is Test {
 
         // A position held elsewhere whose owner approved the Safe as operator: also refused.
         address other = makeAddr("other");
-        deal(USDC, other, 1_000e6);
-        deal(CBBTC, other, 0.01e8);
-        vm.startPrank(other);
-        IERC20Min(USDC).approve(NPM, 1_000e6);
-        IERC20Min(CBBTC).approve(NPM, 0.01e8);
-        m.amount0Desired = 1_000e6;
-        m.amount1Desired = 0.01e8;
-        m.recipient = other;
-        (uint256 theirs, uint128 l2,,) = INPMFull(NPM).mint(m);
+        (uint256 theirs, uint128 l2) = _mintDirect(other, 1_000e6, 0.01e8);
+        vm.prank(other);
         INPMFull(NPM).setApprovalForAll(safe, true);
-        vm.stopPrank();
         dec = abi.encodeCall(INPMFull.decreaseLiquidity, (DecreaseLiquidityParams(theirs, l2, 0, 0, block.timestamp)));
         assertEq(_check(NPM, dec), 1, "approved-but-foreign decrease must be refused");
     }
 
-    // ------------------------------------------------------------ (c) cumulative budgets across one batch
+    // ------------------------------------------------------------ (c) cumulative budget across one batch
 
     function test_batchOverBudgetReverts() public {
         // SmartSession validates a batch by calling checkAction once per execution, in order, in one validateUserOp.
-        uint256 amountIn = 25_000e6; // per-window USDC budget is 60k
+        uint256 amountIn = 25_000e6; // bucket capacity 60k USDC of value
         (uint256 minOut, uint160 limit) = policy.swapBounds(safe, POOL_BTC, USDC, amountIn);
         bytes memory swap = _swapData(USDC, CBBTC, 500, amountIn, minOut, limit);
         assertEq(_check(ROUTER, swap), 0);
         assertEq(_check(ROUTER, swap), 0);
         assertEq(_check(ROUTER, swap), 1, "third 25k swap in one window must be refused");
-        // A mint draws on the same token budget.
+        // A mint draws on the same budget.
         MintParams memory m = MintParams(USDC, CBBTC, 500, -70000, -60000, 10_001e6, 0, 0, 0, safe, block.timestamp);
         assertEq(_check(address(policy), abi.encodeCall(MamoruActionPolicy.mint, (m))), 1);
         m.amount0Desired = 10_000e6;
         assertEq(_check(address(policy), abi.encodeCall(MamoruActionPolicy.mint, (m))), 0);
 
-        // Next window: the rate budget refills, the per-approval total (180k) does not.
-        vm.warp(block.timestamp + 1 days);
-        vm.roll(block.number + 43_200);
-        (minOut, limit) = policy.swapBounds(safe, POOL_BTC, USDC, amountIn);
-        swap = _swapData(USDC, CBBTC, 500, amountIn, minOut, limit);
-        assertEq(_check(ROUTER, swap), 0);
-        assertEq(_check(ROUTER, swap), 0);
-        vm.warp(block.timestamp + 1 days);
-        vm.roll(block.number + 43_200);
-        (minOut, limit) = policy.swapBounds(safe, POOL_BTC, USDC, amountIn);
-        swap = _swapData(USDC, CBBTC, 500, amountIn, minOut, limit);
-        assertEq(_check(ROUTER, swap), 0);
-        assertEq(_check(ROUTER, swap), 0); // 160k of the 180k approval total
+        // A day later the bucket is full again; the per-approval total (180k) does not refill.
+        for (uint256 d; d < 2; d++) {
+            vm.warp(block.timestamp + 1 days);
+            vm.roll(block.number + 43_200);
+            (minOut, limit) = policy.swapBounds(safe, POOL_BTC, USDC, amountIn);
+            swap = _swapData(USDC, CBBTC, 500, amountIn, minOut, limit);
+            assertEq(_check(ROUTER, swap), 0);
+            assertEq(_check(ROUTER, swap), 0);
+        }
         vm.warp(block.timestamp + 1 days);
         vm.roll(block.number + 43_200);
         (minOut, limit) = policy.swapBounds(safe, POOL_BTC, USDC, 20_000e6);
@@ -434,18 +489,17 @@ contract MamoruActionPolicyTest is Test {
         assertEq(_check(ROUTER, swap), 0);
         ConfigId fresh = ConfigId.wrap(bytes32(uint256(2))); // new session key -> new permissionId -> new ConfigId
         uint256 g = gasleft();
-        _init(fresh, 2, 60_000e6, 0.6e8, 180_000e6, 1.8e8);
+        _initBtc(fresh, 2, 60_000e6, 180_000e6);
         console2.log("gas initializeWithMultiplexer (one action, renewal):", g - gasleft());
         assertEq(_check(ROUTER, swap), 1, "generation-1 grant must be dead after renewal");
-        vm.prank(SMART_SESSION);
-        assertEq(policy.checkAction(fresh, safe, ROUTER, 0, swap), 0);
+        assertEq(_checkId(fresh, ROUTER, swap), 0);
         // An older approval cannot be re-enabled.
         vm.expectRevert();
         this.initAt(ConfigId.wrap(bytes32(uint256(3))), 1);
     }
 
     function initAt(ConfigId id, uint64 gen) external {
-        _init(id, gen, 1, 1, 1, 1);
+        _initBtc(id, gen, 1, 1);
     }
 
     function test_onlySmartSession() public {
@@ -464,11 +518,11 @@ contract MamoruActionPolicyTest is Test {
         int24[3] memory moves = [int24(10), 100, 500];
         for (uint256 i; i < 3; i++) {
             uint256 snap = vm.snapshotState();
-            uint256 st = _push(POOL_STABLE, USDC, USDT, 100, -moves[i]); // USDC is token0: USDC in lowers the price
+            (uint256 st,) = _push(POOL_STABLE, USDC, USDT, 100, -moves[i]); // USDC is token0: USDC in lowers the price
             vm.revertToState(snap);
-            uint256 bt = _push(POOL_BTC, USDC, CBBTC, 500, -moves[i]);
+            (uint256 bt,) = _push(POOL_BTC, USDC, CBBTC, 500, -moves[i]);
             vm.revertToState(snap);
-            uint256 et = _push(POOL_ETH, USDC, WETH, 3000, moves[i]); // USDC is token1: USDC in raises the price
+            (uint256 et,) = _push(POOL_ETH, USDC, WETH, 3000, moves[i]); // USDC is token1: USDC in raises the price
             vm.revertToState(snap);
             console2.log("ticks", uint256(int256(moves[i])));
             console2.log("  USDC to move USDC/USDT 0.01%:", st / 1e6);
