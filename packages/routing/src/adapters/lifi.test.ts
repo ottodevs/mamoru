@@ -1,0 +1,51 @@
+import { describe, expect, test } from 'bun:test'
+import { lifiAdapter } from './lifi.ts'
+import type { Fetch } from '../types.ts'
+
+const ACCOUNT = '0x1111111111111111111111111111111111111111' as const
+const OTHER = '0x2222222222222222222222222222222222222222' as const
+const NOW = 1_792_325_000_000
+
+// Recorded 18 Oct 2026, GET https://li.quest/v1/quote, Base -> Ethereum, 150 USDC, fromAddress=toAddress=ACCOUNT.
+const LIFI_FIXTURE = {
+  action: { toAddress: ACCOUNT },
+  estimate: { toAmount: '149625000', executionDuration: 1080 },
+  transactionRequest: {
+    value: '0x0',
+    to: '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE',
+    data: '0x17917a4e0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000022000000000000000000000000000000000000000000000000000000000000004207f7fcfd2f69ca27c53c4c7dcb33b5ce7e0c0933d098b3d3ab8d72f975765f2fa000000000000000000000000000000000000000000000000000000000000014000000000000000000000000000000000000000000000000000000000000001800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000011111111111111111111111111111111111111110000000000000000000000000000000000000000000000000000000008eb18a8',
+  },
+}
+
+function fetchReturning(body: unknown, ok = true): Fetch {
+  return (async () => new Response(JSON.stringify(body), { status: ok ? 200 : 502 })) as unknown as Fetch
+}
+
+describe('lifiAdapter', () => {
+  test('Base -> Ethereum, 150 USDC, from the recorded live quote', async () => {
+    const req = { sourceChainId: 8453, destChainId: 1, asset: 'USDC' as const, amountIn: 150_000_000n, account: ACCOUNT }
+    const q = await lifiAdapter.quote(req, { fetch: fetchReturning(LIFI_FIXTURE), now: () => NOW })
+    expect(q.provider).toBe('lifi')
+    expect(q.amountOut).toBe(149_625_000n)
+    expect(q.fee).toBe(150_000_000n - 149_625_000n) // ~0.25% of 150 USDC, consistent with LI.FI's documented fee
+    expect(q.etaSec).toBe(1080)
+    expect(q.mode).toBe('owner-only')
+    expect(q.recipientCheck).toBe('decoded-calldata')
+    expect(q.target.toLowerCase()).toBe('0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae')
+    expect(q.value).toBe(0n)
+    expect(q.calldata).toContain(ACCOUNT.slice(2).toLowerCase())
+  })
+
+  test('refuses when the declared toAddress does not match the account', async () => {
+    const bad = { ...LIFI_FIXTURE, action: { toAddress: OTHER } }
+    const req = { sourceChainId: 8453, destChainId: 1, asset: 'USDC' as const, amountIn: 150_000_000n, account: ACCOUNT }
+    await expect(lifiAdapter.quote(req, { fetch: fetchReturning(bad), now: () => NOW })).rejects.toThrow()
+  })
+
+  test('refuses an output amount above amountIn (malformed) and a non-2xx answer', async () => {
+    const req = { sourceChainId: 8453, destChainId: 1, asset: 'USDC' as const, amountIn: 150_000_000n, account: ACCOUNT }
+    const tooMuch = { ...LIFI_FIXTURE, estimate: { ...LIFI_FIXTURE.estimate, toAmount: '999999999999' } }
+    await expect(lifiAdapter.quote(req, { fetch: fetchReturning(tooMuch), now: () => NOW })).rejects.toThrow()
+    await expect(lifiAdapter.quote(req, { fetch: fetchReturning({}, false), now: () => NOW })).rejects.toThrow()
+  })
+})

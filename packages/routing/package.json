@@ -1,0 +1,27 @@
+{
+  "name": "@mamoru/routing",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts",
+    "./chains": "./src/chains.ts",
+    "./selector": "./src/selector.ts",
+    "./recipient": "./src/recipient.ts",
+    "./errors": "./src/errors.ts",
+    "./adapters/cctp": "./src/adapters/cctp.ts",
+    "./adapters/across": "./src/adapters/across.ts",
+    "./adapters/relay": "./src/adapters/relay.ts",
+    "./adapters/lifi": "./src/adapters/lifi.ts",
+    "./adapters/debridge": "./src/adapters/debridge.ts",
+    "./adapters/canonical": "./src/adapters/canonical.ts"
+  },
+  "scripts": {
+    "smoke:live": "bun test/smoke-live.ts"
+  },
+  "dependencies": {
+    "@mamoru/domain": "workspace:*",
+    "viem": "2.56.9"
+  }
+}

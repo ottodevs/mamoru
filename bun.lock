@@ -162,6 +162,14 @@
         "viem": "2.56.9",
       },
     },
+    "packages/routing": {
+      "name": "@mamoru/routing",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mamoru/domain": "workspace:*",
+        "viem": "2.56.9",
+      },
+    },
     "packages/rpc": {
       "name": "@mamoru/rpc",
       "version": "0.0.0",
@@ -370,6 +378,8 @@
     "@mamoru/projector": ["@mamoru/projector@workspace:packages/projector"],
 
     "@mamoru/registry": ["@mamoru/registry@workspace:packages/registry"],
+
+    "@mamoru/routing": ["@mamoru/routing@workspace:packages/routing"],
 
     "@mamoru/rpc": ["@mamoru/rpc@workspace:packages/rpc"],
 
