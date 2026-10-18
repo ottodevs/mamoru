@@ -38,9 +38,26 @@ refusals. It enforces:
 | | What | Where it binds |
 |---|---|---|
 | (a) price | `exactInputSingle`: `amountOutMinimum >= quoteAtTick(twap -/+ band) x (1 - fee)` and a non-zero `sqrtPriceLimitX96` no farther than the same band edge. `decreaseLiquidity`: `amount0Min`/`amount1Min` at least the position's amounts at the band edges (token0 at `twap + band`, token1 at `twap - band`). Mint: refused at execution when `|spot - twap| > band`. | Swap and decrease: calldata at validation; the router and the position manager enforce the minimums at execution. Mint: execution. |
-| (b) positions | Decrease, collect, burn only for a tokenId in the account's admitted set **and** still owned by the account. Mint goes through `MamoruActionPolicy.mint` (the grant names it instead of the manager's `mint`): the policy pulls the desired amounts, mints with the Safe as recipient, returns the rest, and admits the tokenId the manager returns. Pool and fee must be the grant's pool. | Validation (admission read), execution (admission write). |
+| (b) positions | Decrease, collect, burn, increase only for a tokenId in the account's admitted set **and** still owned by the account. Mint goes through `MamoruActionPolicy.mint` (the grant names it instead of the manager's `mint`): the policy pulls the desired amounts, mints with the Safe as recipient, returns the rest, and admits the tokenId the manager returns. Pool and fee must be the grant's pool. Adding liquidity goes through `MamoruActionPolicy.increase` the same way (below). | Validation (admission read), execution (admission write; increase re-checks admission, owner and spot). |
 | (c) budgets | Per account and pool, token0 and token1 spent by swaps (`amountIn`) and mints (`amountDesired`) are summed per window (`budgetWindow`, e.g. 1 day) and over the whole approval (the generation). Charged at validation, call by call, so every call of a batch counts and a reverted execution is not refunded. | Validation. |
 | (d) renewal | Init data carries a `generation`, account-wide. A higher generation retires every lower-generation config of the account (all pools) on the next check, and a lower one cannot be enabled again. So every renewal re-enables all pools at the new generation; adding a pool without a renewal uses the current generation. The renewal uses a new session key (new permissionId, new ConfigIds). | Validation; key freshness is checked off chain at activation (below). |
+
+### Adding to a held position (otto/mamoru#171)
+
+The engine mints a new NFT for every entry; on c23e94e1 that left two WETH/USDC NFTs with the identical range,
+each paying its own mint, collect and close. The manager's `increaseLiquidity` takes a `tokenId` and **does not
+check who owns it**: the caller pays, the liquidity accrues to the NFT's owner. A session allowed to call it
+directly could push the Safe's tokens into an attacker's position, so it is never a session action (the policy
+refuses it, and refuses approving the manager). UniActionPolicy can only pin `tokenId EQUAL <id>`, which would mean
+one grant, and one owner signature, per position.
+
+`MamoruActionPolicy.increase(IncreaseLiquidityParams)` closes it with no grant per position. Called by the account
+after approving the policy for at most the desired amounts, it requires: the tokenId is admitted for the account,
+the account still owns it, the pool's config is at the current generation, and the spot is within `bandTicks` of
+the TWAP (the mint's execution check). It pulls the desired amounts, calls `increaseLiquidity`, resets the
+approvals and returns what the manager did not take. At validation, `checkAction` requires admission and ownership
+and charges the desired amounts on the pool's budget, like a mint. Admission survives a renewal, so positions opened
+under an older approval stay manageable under the new one.
 
 `initializeWithMultiplexer` accepts only the SmartSession address it was deployed with: unlike `UniActionPolicy`,
 this policy keeps account-level state (generation, budgets, admitted set) that an arbitrary "multiplexer" must not
@@ -179,6 +196,7 @@ Both are visible and far more expensive than the gains above at today's sizes.
 | `checkAction` exactInputSingle (validation) | UniActionPolicy only | +93,912 (oracle `observe`, quote, tick math) |
 | `checkAction` decrease / collect / burn / approve | | +37,036 / +6,207 / +5,858 / +19,989 (cold) |
 | Mint, execution | 378,824 (`NPM.mint`) | 615,688 (`policy.mint`: pull, approve, mint, refund, admit) |
+| Increase, execution | (none: a second mint today) | 230,701 (`policy.increase`: pull, approve, increase, refund); `checkAction` 10,630 |
 | `initializeWithMultiplexer`, per action | | 61,187 (renewal; first enable higher, cold slots) |
 
 At 0.005 gwei, +330k gas is about 1.7e-6 ETH, under a cent; the L1 data fee does not change materially. The
@@ -218,7 +236,42 @@ session key that was ever enabled for the account; the operator deletes the old 
 chain, the generation retires every older config of this policy even if a `removeSession` were missing. The v2/v3
 grants do not consult this policy, so their `removeSession` in the same batch is required.
 
-## What the PoC shows (13 tests, all pass)
+## One signature: the permission tiers (Ot, 18-oct)
+
+Goal: as automatic as possible, as few taps as possible, without giving up what the owner's signature protects.
+The rule that makes it possible: **the owner signs envelopes, not operations.** Inside an envelope the policy
+enforces the bounds on chain, so the engine needs no further signature; only widening an envelope or moving
+money out needs the owner.
+
+| Tier | What | Owner taps | Why it is safe |
+|---|---|---|---|
+| 0, inside the envelope | swap, mint, **increase**, decrease, collect, burn, harvest, compound, re-range, in the signed pools | **none**, ever | (a)-(c) on chain: price within the band of the TWAP, only positions it opened and the Safe still owns, budgets per window and per approval. Loss with a leaked key <= the bound above. |
+| 1, widen the envelope | renewal (yearly, fresh key), new policy version, new pool, bigger budget, new chain | **one tap for all of them**, queued and signed together | Changes what a leaked key can do, so the owner decides. |
+| 2, money out | withdraw, new withdrawal address (24 h timelock, #151), owner change | one tap each, never automated | The session can never send tokens anywhere but the Safe. |
+
+What removes taps that exist or would exist today:
+
+1. **No grant per position.** `increase` (above), and the per-position `manage` grant goes too: admission is on
+   chain. #171 in production needs no signature beyond the v4 upgrade.
+2. **One envelope for every chain.** SmartSession's `ENABLE` mode takes one owner signature over a
+   `multichainDigest` of `ChainDigest[]` (chainId, sessionDigest); each chain checks its own entry
+   (`getAndVerifyDigest`). Base, Ethereum and Monad sessions in one passkey tap. Needs: the Safe at the same
+   address on each chain (same factory and salt) and the passkey verifier deployed there. To verify against the
+   deployed SmartSession version before relying on it.
+3. **Tier-1 changes ride on taps the owner already makes.** The app queues pending envelope changes (renewal due,
+   v4 upgrade, a new curated pool, a budget near its total) and folds them into the next owner signature (a
+   withdrawal, or the yearly renewal), listed line by line on the same confirm screen. A dedicated tap only when
+   something blocks the engine (expiry, budget exhausted) and nothing else is pending.
+4. **Budgets sized for a year.** `T_p` (per-approval total) is what forces an unplanned tap when the engine has
+   turned the capital over enough times. T5 sizes it from a year of Lab turnover, and the app warns at 80 % so the
+   top-up rides on point 3.
+5. **Merged sessions.** `manage-any` and `convert-any` in one session per pool (admission and budgets are on chain),
+   which halves enable gas and keeps a multi-pool, multi-chain renewal inside one transaction.
+
+What does not change: the passkey is the only owner; the operator can never widen an envelope or move funds out;
+an owner who does nothing keeps the engine running until the approval expires, then it stops (decided 17-oct).
+
+## What the PoC shows (20 tests, all pass)
 
 - `test_normalSwapPasses`, `test_normalMintDecreaseCollectBurnPass`: the engine's ops with the minimums from the
   policy's `swapBounds` / `decreaseMins` views pass validation and execute.
@@ -233,6 +286,12 @@ grants do not consult this policy, so their `removeSession` in the same batch is
 - `test_narrowRangeDecreaseLossStaysInBand`, `test_supportsSmartSessionInterfaceIds` (smartsessions' `IActionPolicy`
   inherits `IPolicy`, so its interfaceId is `checkAction.selector` alone).
 - `test_renewalRetiresOldGrant`, `test_onlySmartSession`, `test_measureManipulationDepth`, `test_gasDirectMintBaseline`.
+- Increase (#171): `test_increaseAdmittedPositionPasses` (liquidity lands on the same NFT, the account pays exactly
+  what the manager took, nothing stays in the policy), `test_directManagerIncreaseRefused` (the manager's
+  `increaseLiquidity`, and approving the manager, are refused), `test_increaseUnadmittedOrForeignRefused` (a
+  position the Safe minted elsewhere, and an attacker's position, refused at validation and at execution),
+  `test_increaseRefusedAfterPositionLeavesTheSafe`, `test_increaseRefusedWhenSpotManipulated` (`SpotOutsideBand`),
+  `test_increaseDrawsOnTheSameBudget`, `test_increaseRetiredByRenewal` (old config dead, admission kept).
 
 ## What the PoC does not show
 
@@ -244,7 +303,8 @@ the account address. No engine, precheck or grant code uses it yet. No Lab run o
 
 - T1 Lab: the TS scenario fixtures enable a v4 grant with both policies on a fork and run the engine's ops and the
   three attacks through `handleOps`; measure enable and renewal gas.
-- T2 `packages/policy`: v4 grants (above), `Init` encoding in `toSmartSession`.
+- T2 `packages/policy`: v4 grants (above), `Init` encoding in `toSmartSession`; `increase-any` names
+  `MamoruActionPolicy.increase` (replaces #171's per-position Lab grant).
 - T3 engine: swap minimum and price limit from `swapBounds` (or the same math off chain), decrease minimums from
   `decreaseMins`, mint through the policy. The TWAP drifts between the engine's read and the userOp's validation,
   so the engine computes its bounds at a narrower band (e.g. 0.8 x band): higher minimums, a tighter limit, still

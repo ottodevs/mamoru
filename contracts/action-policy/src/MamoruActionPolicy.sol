@@ -57,6 +57,15 @@ struct DecreaseLiquidityParams {
     uint256 deadline;
 }
 
+struct IncreaseLiquidityParams {
+    uint256 tokenId;
+    uint256 amount0Desired;
+    uint256 amount1Desired;
+    uint256 amount0Min;
+    uint256 amount1Min;
+    uint256 deadline;
+}
+
 struct CollectParams {
     uint256 tokenId;
     address recipient;
@@ -69,6 +78,10 @@ interface INPM {
         external
         payable
         returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
+    function increaseLiquidity(IncreaseLiquidityParams calldata params)
+        external
+        payable
+        returns (uint128 liquidity, uint256 amount0, uint256 amount1);
     function positions(uint256 tokenId)
         external
         view
@@ -97,7 +110,12 @@ interface INPM {
  *
  * It is also the only way a session can mint: the grant names `MamoruActionPolicy.mint` instead of the position
  * manager's `mint`, so the policy learns the new tokenId from the manager's return value and admits it. A tokenId
- * never minted through here for this account cannot be decreased, collected or burned by a session.
+ * never minted through here for this account cannot be decreased, collected, burned or added to by a session.
+ *
+ * Adding liquidity goes through `MamoruActionPolicy.increase` for the same reason (otto/mamoru#171): the manager's
+ * `increaseLiquidity` does not check who owns the tokenId, so a session allowed to call it directly could push the
+ * Safe's tokens into anyone's position. Through here it reaches only admitted positions the account still owns, so one
+ * owner signature covers every position the engine opens later, with no grant per tokenId.
  *
  * Validation-phase reads (pool oracle, position manager, block.timestamp) break ERC-7562 public-mempool rules. Mamoru
  * bundles its own userOps (apps/mamoru-operator/src/bundler.ts); an attacker with a leaked key can call handleOps
@@ -184,6 +202,7 @@ contract MamoruActionPolicy is IActionPolicy {
     error WrongPool();
     error WrongRecipient();
     error SpotOutsideBand(int24 spot, int24 twap, uint24 band);
+    error NotAdmitted(address account, uint256 tokenId);
     error Reentrancy();
     error TransferFailed();
 
@@ -255,6 +274,12 @@ contract MamoruActionPolicy is IActionPolicy {
             // Desired amounts are an upper bound of what the mint takes: the budget is charged conservatively.
             return _spendOk(account, c.pool, m.amount0Desired, m.amount1Desired);
         }
+        if (target == address(this) && sel == this.increase.selector) {
+            IncreaseLiquidityParams memory n = abi.decode(data[4:], (IncreaseLiquidityParams));
+            if (!_isAdmitted(account, c.pool, n.tokenId)) return VALIDATION_FAILED;
+            // Same budget as a mint: desired amounts are an upper bound of what the manager takes.
+            return _spendOk(account, c.pool, n.amount0Desired, n.amount1Desired);
+        }
         if (target == address(NPM) && sel == DECREASE) {
             DecreaseLiquidityParams memory d = abi.decode(data[4:], (DecreaseLiquidityParams));
             if (!_isAdmitted(account, c.pool, d.tokenId)) return VALIDATION_FAILED;
@@ -316,6 +341,40 @@ contract MamoruActionPolicy is IActionPolicy {
 
         admittedPool[account][tokenId] = pool;
         emit Admitted(account, pool, tokenId);
+        _locked = 1;
+    }
+
+    /**
+     * @notice Called BY THE ACCOUNT (msg.sender) inside a session batch, after approving this contract for at most the
+     * desired amounts. Adds liquidity to a position this policy admitted for the account and the account still owns,
+     * at the current generation, with the pool's spot within `bandTicks` of its TWAP (the same execution check as
+     * `mint`). Returns what the manager did not take. Admission does not change.
+     */
+    function increase(IncreaseLiquidityParams calldata n)
+        external
+        returns (uint128 liquidity, uint256 amount0, uint256 amount1)
+    {
+        if (_locked != 1) revert Reentrancy();
+        _locked = 2;
+        address account = msg.sender;
+        address pool = admittedPool[account][n.tokenId];
+        if (pool == address(0) || NPM.ownerOf(n.tokenId) != account) revert NotAdmitted(account, n.tokenId);
+        Config memory c = _poolConfig[account][pool];
+        if (c.pool != pool || c.generation != generationOf[account]) revert NoConfig(account, pool);
+        (, int24 spot,,,,,) = IUniswapV3Pool(pool).slot0();
+        int24 twap = _twapTick(c);
+        if (_absDiff(spot, twap) > c.bandTicks) revert SpotOutsideBand(spot, twap, c.bandTicks);
+
+        PoolInfo memory p = _pool[pool];
+        _pull(p.token0, account, n.amount0Desired);
+        _pull(p.token1, account, n.amount1Desired);
+        _approve(p.token0, address(NPM), n.amount0Desired);
+        _approve(p.token1, address(NPM), n.amount1Desired);
+        (liquidity, amount0, amount1) = NPM.increaseLiquidity(n);
+        _approve(p.token0, address(NPM), 0);
+        _approve(p.token1, address(NPM), 0);
+        if (n.amount0Desired > amount0) _push(p.token0, account, n.amount0Desired - amount0);
+        if (n.amount1Desired > amount1) _push(p.token1, account, n.amount1Desired - amount1);
         _locked = 1;
     }
 

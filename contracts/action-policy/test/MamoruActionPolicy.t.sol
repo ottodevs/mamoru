@@ -10,6 +10,7 @@ import {
     MintParams,
     ExactInputSingleParams,
     DecreaseLiquidityParams,
+    IncreaseLiquidityParams,
     CollectParams,
     IERC20Min
 } from "../src/MamoruActionPolicy.sol";
@@ -26,6 +27,11 @@ interface INPMFull {
     function decreaseLiquidity(DecreaseLiquidityParams calldata) external payable returns (uint256, uint256);
     function collect(CollectParams calldata) external payable returns (uint256, uint256);
     function burn(uint256) external payable;
+    function increaseLiquidity(IncreaseLiquidityParams calldata)
+        external
+        payable
+        returns (uint128 liquidity, uint256 amount0, uint256 amount1);
+    function transferFrom(address, address, uint256) external;
     function setApprovalForAll(address, bool) external;
     function positions(uint256)
         external
@@ -424,6 +430,119 @@ contract MamoruActionPolicyTest is Test {
             1,
             "approval total must hold across windows"
         );
+    }
+
+    // ------------------------------------------------------------ increase (otto/mamoru#171): no grant per tokenId
+
+    function _increaseData(uint256 tokenId, uint256 usdc, uint256 btc) internal view returns (bytes memory) {
+        return abi.encodeCall(
+            MamoruActionPolicy.increase, (IncreaseLiquidityParams(tokenId, usdc, btc, 0, 0, block.timestamp))
+        );
+    }
+
+    function _approvePolicy(uint256 usdc, uint256 btc) internal {
+        _exec(USDC, abi.encodeCall(IERC20Min.approve, (address(policy), usdc)));
+        _exec(CBBTC, abi.encodeCall(IERC20Min.approve, (address(policy), btc)));
+    }
+
+    function test_increaseAdmittedPositionPasses() public {
+        (uint256 tokenId, uint128 liq0) = _mintThroughPolicy(20_000e6, 0.2e8);
+        bytes memory inc = _increaseData(tokenId, 10_000e6, 0.1e8);
+        (uint256 r, uint256 gas) = _checkGas(address(policy), inc);
+        assertEq(r, 0, "increase of an admitted, owned position must pass");
+        console2.log("gas checkAction(increase):", gas);
+        _approvePolicy(10_000e6, 0.1e8);
+        uint256 u0 = IERC20Min(USDC).balanceOf(safe);
+        uint256 b0 = IERC20Min(CBBTC).balanceOf(safe);
+        uint256 g = gasleft();
+        (uint128 added, uint256 a0, uint256 a1) = abi.decode(_exec(address(policy), inc), (uint128, uint256, uint256));
+        console2.log("gas policy.increase (exec only):", g - gasleft());
+        (,,,,,,, uint128 liq1,,,,) = INPMFull(NPM).positions(tokenId);
+        assertEq(liq1, liq0 + added, "liquidity lands on the same NFT");
+        // The account paid exactly what the manager took: the rest came back, nothing stays in the policy.
+        assertEq(u0 - IERC20Min(USDC).balanceOf(safe), a0);
+        assertEq(b0 - IERC20Min(CBBTC).balanceOf(safe), a1);
+        assertEq(IERC20Min(USDC).balanceOf(address(policy)), 0);
+        assertEq(IERC20Min(CBBTC).balanceOf(address(policy)), 0);
+    }
+
+    function test_directManagerIncreaseRefused() public {
+        (uint256 tokenId,) = _mintThroughPolicy(20_000e6, 0.2e8);
+        bytes memory direct = abi.encodeCall(
+            INPMFull.increaseLiquidity, (IncreaseLiquidityParams(tokenId, 1_000e6, 0.01e8, 0, 0, block.timestamp))
+        );
+        assertEq(_check(NPM, direct), 1, "the manager's increaseLiquidity is never a session action");
+        // Nor may a session approve the manager to pull the Safe's tokens.
+        assertEq(_check(USDC, abi.encodeCall(IERC20Min.approve, (NPM, 1_000e6))), 1);
+    }
+
+    function test_increaseUnadmittedOrForeignRefused() public {
+        // A position the Safe minted outside Mamoru.
+        int24 s = _spot(POOL_BTC);
+        MintParams memory m = MintParams(
+            USDC, CBBTC, 500, ((s - 600) / 10) * 10, ((s + 600) / 10) * 10, 1_000e6, 0.01e8, 0, 0, safe, block.timestamp
+        );
+        _exec(USDC, abi.encodeCall(IERC20Min.approve, (NPM, 1_000e6)));
+        _exec(CBBTC, abi.encodeCall(IERC20Min.approve, (NPM, 0.01e8)));
+        (uint256 own,,,) = abi.decode(_exec(NPM, abi.encodeCall(INPMFull.mint, (m))), (uint256, uint128, uint256, uint256));
+        assertEq(_check(address(policy), _increaseData(own, 1_000e6, 0.01e8)), 1, "unadmitted: refused at validation");
+        _approvePolicy(1_000e6, 0.01e8);
+        vm.prank(safe);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NotAdmitted.selector, safe, own));
+        policy.increase(IncreaseLiquidityParams(own, 1_000e6, 0.01e8, 0, 0, block.timestamp));
+
+        // An attacker's position: the leaked-key attack #171 is about. Refused at validation and at execution.
+        address other = makeAddr("other");
+        deal(USDC, other, 1_000e6);
+        deal(CBBTC, other, 0.01e8);
+        vm.startPrank(other);
+        IERC20Min(USDC).approve(NPM, 1_000e6);
+        IERC20Min(CBBTC).approve(NPM, 0.01e8);
+        m.recipient = other;
+        (uint256 theirs,,,) = INPMFull(NPM).mint(m);
+        vm.stopPrank();
+        assertEq(_check(address(policy), _increaseData(theirs, 1_000e6, 0.01e8)), 1, "foreign: refused");
+        vm.prank(safe);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NotAdmitted.selector, safe, theirs));
+        policy.increase(IncreaseLiquidityParams(theirs, 1_000e6, 0.01e8, 0, 0, block.timestamp));
+    }
+
+    function test_increaseRefusedAfterPositionLeavesTheSafe() public {
+        (uint256 tokenId,) = _mintThroughPolicy(20_000e6, 0.2e8);
+        address elsewhere = makeAddr("elsewhere");
+        _exec(NPM, abi.encodeCall(INPMFull.transferFrom, (safe, elsewhere, tokenId)));
+        assertEq(_check(address(policy), _increaseData(tokenId, 1_000e6, 0.01e8)), 1, "moved out: not the session's");
+        _approvePolicy(1_000e6, 0.01e8);
+        vm.prank(safe);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NotAdmitted.selector, safe, tokenId));
+        policy.increase(IncreaseLiquidityParams(tokenId, 1_000e6, 0.01e8, 0, 0, block.timestamp));
+    }
+
+    function test_increaseRefusedWhenSpotManipulated() public {
+        (uint256 tokenId,) = _mintThroughPolicy(20_000e6, 0.2e8);
+        _push(POOL_BTC, USDC, CBBTC, 500, -300);
+        _approvePolicy(10_000e6, 0.1e8);
+        vm.prank(safe);
+        vm.expectPartialRevert(MamoruActionPolicy.SpotOutsideBand.selector);
+        policy.increase(IncreaseLiquidityParams(tokenId, 10_000e6, 0.1e8, 0, 0, block.timestamp));
+    }
+
+    function test_increaseDrawsOnTheSameBudget() public {
+        (uint256 tokenId,) = _mintThroughPolicy(20_000e6, 0.2e8); // 20k of the 60k USDC window budget
+        assertEq(_check(address(policy), _increaseData(tokenId, 40_000e6, 0)), 0); // 60k: exactly the window
+        assertEq(_check(address(policy), _increaseData(tokenId, 1e6, 0)), 1, "increase over the window budget");
+    }
+
+    function test_increaseRetiredByRenewal() public {
+        (uint256 tokenId,) = _mintThroughPolicy(20_000e6, 0.2e8);
+        bytes memory inc = _increaseData(tokenId, 1_000e6, 0.01e8);
+        _init(ConfigId.wrap(bytes32(uint256(2))), 2, 60_000e6, 0.6e8, 180_000e6, 1.8e8);
+        assertEq(_check(address(policy), inc), 1, "generation-1 config dead after renewal");
+        vm.prank(SMART_SESSION);
+        assertEq(policy.checkAction(ConfigId.wrap(bytes32(uint256(2))), safe, address(policy), 0, inc), 0);
+        // Admission survives the renewal: positions opened under the old approval stay manageable.
+        _approvePolicy(1_000e6, 0.01e8);
+        _exec(address(policy), inc);
     }
 
     // ------------------------------------------------------------ (d) renewal retires the old grant
