@@ -33,6 +33,19 @@ function refuse(why: string): never {
   process.exit(1)
 }
 
+// The whole redeploy (change, verification and any restore) runs as its own transient systemd unit, so it finishes
+// even when the session that started it is killed: the caller only waits for it and prints its log.
+if (!process.env.MAMORU_DEPLOY_IN_UNIT) {
+  const name = `mamoru-operator-deploy-${Date.now()}`
+  const env = { PATH: process.env.PATH ?? '', HOME, MAMORU_COORD_AS: sessionName(argv) ?? '', MAMORU_DEPLOY_IN_UNIT: '1' }
+  const setenv = Object.entries(env).map(([k, v]) => `--setenv=${k}=${v}`)
+  console.log(`running as unit ${name} (journalctl --user -u ${name} -f to follow; it carries on if this session ends)`)
+  const r = Bun.spawnSync(['systemd-run', '--user', '--quiet', '--collect', '--wait', `--unit=${name}`, `--working-directory=${root}`, ...setenv, process.execPath, import.meta.path, ...argv], { stdio: ['ignore', 'inherit', 'inherit'] })
+  const log = Bun.spawnSync(['journalctl', '--user', `_SYSTEMD_USER_UNIT=${name}.service`, '-o', 'cat', '--no-pager'], { stdout: 'pipe' })
+  process.stdout.write(log.stdout)
+  process.exit(r.exitCode ?? 1)
+}
+
 // One coordinator operation at a time, held by the kernel until this process ends (lib/lease.ts).
 underFlock(OP_LOCK, { wait: false, busy: 'another coordinator operation (a release or an operator redeploy) is running' })
 refuseLeftoverWork()
