@@ -283,7 +283,21 @@ export const fixtureClient: ApiClient = {
         f.usdc = '19900000'
       }),
     ),
-  renewPrepare: () => delay(fixtureTx(["Renew Mamoru's approval on your Safe", 'Nothing is moved: your positions stay as they are'])),
+  // The shape of a real three-pool renewal (operator planRenew), so the dialog is reviewed on text as long as the real one.
+  renewPrepare: () =>
+    delay(
+      fixtureTx([
+        `Renew Mamoru's approval on your Safe ${FIXTURE_ADDRESS}`,
+        'Engine key 0x7d3E1bA2c4F5a6B7c8D9e0F1a2B3c4D5e6F7a8B9 may keep doing the same kinds of actions for 365 more days, within new limits counted from zero, sized for deposits up to 1,000.00 USDC (the cap you signed):',
+        'In USDC/USDT 0.01%: USDC swapped in at most 166.67 per swap and 333.33 in total, so at most 333.33 in one transaction, which can hold several swaps; at most 8 transactions to swap USDC in, 8 to open a position, 256 to take liquidity out, burn or re-open a position, 64 to collect fees and swap them to USDC (one transaction can hold several of these steps)',
+        'In USDC/cbBTC 0.05%: USDC swapped in at most 116.67 per swap and 233.33 in total, so at most 233.33 in one transaction, which can hold several swaps; at most 8 transactions to swap USDC in, 8 to open a position, 256 to take liquidity out, burn or re-open a position, 64 to collect fees and swap them to USDC (one transaction can hold several of these steps)',
+        'In WETH/USDC 0.3%: USDC swapped in at most 50.00 per swap and 100.00 in total, so at most 100.00 in one transaction, which can hold several swaps; at most 8 transactions to swap USDC in, 8 to open a position, 256 to take liquidity out, burn or re-open a position, 64 to collect fees and swap them to USDC (one transaction can hold several of these steps)',
+        'The approval it replaces is revoked in the same transaction',
+        'It also keeps acting, without asking again, on any Uniswap v3 position your Safe owns, in any pool: take liquidity out, collect fees, burn it once empty, and convert cbBTC and WETH back to USDC',
+        'Nothing is moved: your positions stay as they are',
+        'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
+      ]),
+    ),
   renew: () =>
     delay(
       fixtureOp('renew', () => {

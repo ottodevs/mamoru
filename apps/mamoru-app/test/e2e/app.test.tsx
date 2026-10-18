@@ -16,7 +16,8 @@ import { activationLive, historyOps, needsRetry, opLine } from '../../src/web/li
 import { isAddress, parseUsdc } from '../../src/web/lib/owner-flow.ts'
 import { encodeQr } from '../../src/web/lib/qr.ts'
 import { localTime } from '../../src/web/lib/time.ts'
-import { ApprovalCard, approvalDay, approvalRowKey, approvalTitle, askedBefore, preparedFitsRow, engineLine, History, renewAskFor } from '../../src/web/routes/home.tsx'
+import { ApprovalBody, Emph, signedFacts } from '../../src/web/components/approval-dialog.tsx'
+import { approvalDay, approvalHeading, approvalRowKey, approvalTitle, askedBefore, preparedFitsRow, engineLine, History, renewAskFor } from '../../src/web/routes/home.tsx'
 import { MIX } from '../../src/web/routes/onboarding.tsx'
 import { buildRouter } from '../../src/web/router.tsx'
 import { render } from './render.ts'
@@ -565,6 +566,16 @@ describe('renewing the approval', () => {
     expect(approvalRowKey(after)).not.toBe(approvalRowKey(offered))
   })
 
+  test('#176 on #151: the approval dialog heads a guardian pause and a policy move in their own words', () => {
+    const now = Math.floor(Date.now() / 1000)
+    const year = { validUntil: now + 300 * 86_400, renewDue: false, expired: false }
+    expect(approvalHeading({ ...year, renewDue: true, paused: true }).title).toContain('A guardian key has paused Mamoru')
+    expect(approvalHeading({ ...year, renewDue: true, paused: true }).lead).toContain('Renewing its approval ends that pause')
+    expect(approvalHeading({ ...year, upgrade: true, upgradePolicy: 'conservador-live-v5' }).lead).toContain('a guardian key can pause it but never move funds')
+    expect(approvalHeading({ ...year, upgrade: true, upgradePolicy: 'conservador-live-v4' }).lead).toContain('it would trade only near the market price')
+    expect(approvalHeading({ ...year, upgrade: true }).title).not.toContain('every pool')
+  })
+
   test('otto/mamoru#151: a guardian pause is named on the row, with the renewal ending it', () => {
     const now = Math.floor(Date.now() / 1000)
     const year = { validUntil: now + 300 * 86_400, renewDue: true, expired: false }
@@ -573,12 +584,30 @@ describe('renewing the approval', () => {
     expect(approvalRowKey({ ...year, paused: true })).not.toBe(approvalRowKey(year))
   })
 
-    test('once prepared, the row shows every line the passkey is about to sign', () => {
-    const summary = ['Let Mamoru\'s engine re-range and collect fees in USDC/cbBTC 0.05%', 'Nothing is moved: your positions stay as they are']
-    const { text, html } = render(<ApprovalCard approval={{ validUntil: now + 200 * 86_400, renewDue: false, expired: false, missing: 4 }} summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} />)
+    test('#176: once prepared, the approval dialog lays out every line the passkey signs, word for word, behind a brief', () => {
+    const summary = [
+      "Renew Mamoru's approval on your Safe 0x5af19C48077D38F10B4245a6B2D92478aaEFAcD0",
+      'Engine key 0x1111111111111111111111111111111111111111 may keep doing the same kinds of actions for 365 more days, within new limits counted from zero, sized for deposits up to 1,000.00 USDC (the cap you signed):',
+      'In USDC/cbBTC 0.05%: USDC swapped in at most 25.00 per swap and 50.00 in total',
+      'Nothing is moved: your positions stay as they are',
+    ]
+    const { text, html } = render(<ApprovalBody lead="It ends soon." summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} />)
     expect(html).toContain('data-testid="review"')
     for (const line of summary) expect(text).toContain(line)
-    expect(text).toContain('Confirm')
+    expect(signedFacts(summary)).toEqual({ days: 365, capUsdc: '1,000.00', pools: ['USDC/cbBTC 0.05%'] })
+    expect(text).toContain('Approve with passkey')
+    expect(text).toContain('Nothing moves now')
+    // Figures are emphasized, never rewritten: the text reads as signed, and "v3" stays plain.
+    const line = 'It also keeps acting on any Uniswap v3 position: at most 256 transactions, 1,000.00 USDC'
+    const emph = render(<Emph text={line} />)
+    expect(emph.text).toBe(line)
+    expect(emph.html).toContain('<strong class="signed-num">256</strong>')
+    expect(emph.html).toContain('<strong class="signed-num">1,000.00</strong>')
+    expect(emph.html).not.toContain('<strong class="signed-num">3</strong>')
+    // Before it is prepared: the brief and one action to review it, no signed lines yet.
+    const before = render(<ApprovalBody lead="It ends soon." summary={null} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} />)
+    expect(before.html).not.toContain('data-testid="review"')
+    expect(before.text).toContain('Review')
   })
 
     test('history reads an extension in its own words', () => {

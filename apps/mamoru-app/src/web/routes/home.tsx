@@ -20,6 +20,7 @@ import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-asse
 import { DepositDetails, hasMoney } from './add-money.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { FeedbackDialog, feedbackCopy } from '../components/feedback-dialog.tsx'
+import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
 
 export const homeCopy = {
   total: 'Total balance',
@@ -779,40 +780,34 @@ export function approvalTitle(approval: NonNullable<FundingView['approval']>): s
 /**
  * A running account whose approval is in its last weeks, or over, or has a grant that used 80% of what it allows
  * (#149): one tap renews it, nothing is moved. Or one that lacks grants of its plan (left out to fit Base's gas cap):
- * one tap adds them. The renewal, when due, goes first.
+ * one tap adds them. The renewal, when due, goes first. The row only says so; the approval itself is reviewed and
+ * signed in the approval dialog, the same one Home opens on its own when a renewal is due (#176).
  */
-function RenewRow({ accountKey, approval }: { accountKey: string; approval: NonNullable<FundingView['approval']> }) {
-  const flow = useOwnerAction(accountKey, 'renew')
-  // Every hook before any early return (React's rules of hooks): the row returning null after a renewal must not skip one.
-  const prepared = useFittingPrepared(approval, flow)
-  // A renewal that failed leaves the row in place: this is where it is tried again.
-  if (flow.result && flow.result.state !== 'failed') return null
-  return <ApprovalCard approval={approval} summary={prepared?.tx.summary ?? null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void (prepared ? flow.approve() : flow.prepare())} />
-}
-
-/** The approval row itself: what is asked, and once prepared, every line the passkey is about to sign. */
-export function ApprovalCard({ approval, summary, busy, error, onPrepare, onApprove }: { approval: NonNullable<FundingView['approval']>; summary: string[] | null; busy: string | null; error: string | null; onPrepare: () => void; onApprove: () => void }) {
-  const title = approvalTitle(approval)
-  if (summary) {
-    return (
-      <section className="card grid gap-3" data-testid="renew" role="status">
-        <span className="title">{title}</span>
-        <Review lines={summary} busy={busy} error={error} onApprove={onApprove} />
-      </section>
-    )
-  }
+export function ApprovalRow({ approval, onOpen }: { approval: NonNullable<FundingView['approval']>; onOpen: () => void }) {
   return (
     <section className="card flex flex-wrap items-center justify-between gap-3" data-testid="renew" role="status">
       <span className="max-w-[40rem]">
-        <span className="title">{title}</span>
+        <span className="title">{approvalTitle(approval)}</span>
         <span className="sub">{homeCopy.renewNote}</span>
-        {error ? <span className="err mt-1 block">{error}</span> : null}
       </span>
-      <button type="button" className="act" onClick={onPrepare} disabled={busy !== null}>
-        {busy === 'preparing' ? 'Preparing' : approval.renewDue || approval.usage || approval.upgrade ? homeCopy.renew : homeCopy.extend}
+      <button type="button" className="act" onClick={onOpen}>
+        {approval.renewDue || approval.usage || approval.upgrade || approval.expired ? homeCopy.renew : homeCopy.extend}
       </button>
     </section>
   )
+}
+
+/** The dialog's title and one sentence under it, in the same order of precedence as the row's title. */
+export function approvalHeading(approval: NonNullable<FundingView['approval']>): { title: string; lead: string } {
+  const u = approval.usage
+  const what = u ? `${USAGE_WHAT[u.action]} in ${u.pool ? pairLabel(u.pool) : 'its pools'}` : ''
+  if (approval.paused) return { title: 'A guardian key has paused Mamoru', lead: 'It is not acting on this account. Renewing its approval ends that pause: renew only if you know why it was paused.' }
+  if (approval.expired) return { title: "Mamoru's approval has ended", lead: 'Your money is where it was. Renew it so Mamoru can keep working.' }
+  if (u?.spent) return { title: `Mamoru has stopped ${what}`, lead: 'It used all that this approval allows. Renewing restores its limits, counted from zero.' }
+  if (approval.renewDue) return { title: homeCopy.renewAskTitle, lead: `It ends on ${approvalDay(approval.validUntil)}. Renewing keeps Mamoru working for you.` }
+  if (u) return { title: 'Renew before a limit runs out', lead: `Mamoru has used most of what this approval allows for ${what}. Renew now so that does not stop.` }
+  if (approval.upgrade) return { title: homeCopy.renewAskTitle, lead: approval.upgradePolicy?.includes('-v5') ? homeCopy.upgradeV5Title : homeCopy.upgradeTitle }
+  return { title: 'Let Mamoru work in every pool', lead: 'Part of the approval is missing: in some pools Mamoru cannot re-range or collect fees until you add it.' }
 }
 
 /**
@@ -857,12 +852,11 @@ function RenewDialog({ accountKey, approval, open, onClose }: { accountKey: stri
   useEffect(() => {
     if (done) onClose()
   }, [done, onClose])
+  const { title, lead } = approvalHeading(approval)
   return (
-    <Modal open={open && !done} onClose={onClose} title={homeCopy.renewAskTitle}>
-      <div data-testid="renew-dialog">
-        <ApprovalCard approval={approval} summary={prepared?.tx.summary ?? null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void (prepared ? flow.approve() : flow.prepare())} />
-      </div>
-    </Modal>
+    <ApprovalDialog title={title} open={open && !done} onClose={onClose}>
+      <ApprovalBody lead={lead} summary={prepared?.tx.summary ?? null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void (prepared ? flow.approve() : flow.prepare())} onLater={onClose} />
+    </ApprovalDialog>
   )
 }
 
@@ -917,6 +911,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
     if (renewAsk && !askedBefore(renewAsk)) setRenewAsked(true)
   }, [renewAsk])
   const closeRenewAsk = useCallback(() => setRenewAsked(false), [])
+  const openApproval = useCallback(() => setRenewAsked(true), [])
   // A confirmed activation exists somewhere in this account's history (Stop and restart only matter once this
   // is true); ops history, not the funding poll, so this is never behind it.
   const ranBefore = everStarted(opList)
@@ -1009,7 +1004,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           ) : canStart ? (
             <StartRow accountKey={accountKey} funded={hasMoney(f)} />
           ) : f.active && f.approval && (f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade) && !renewing ? (
-            <RenewRow key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} />
+            <ApprovalRow key={approvalRowKey(f.approval)} approval={f.approval} onOpen={openApproval} />
           ) : null}
           <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />
           <Idle s={s as Split} placing={f.active && (f.engine?.placing === true || !!f.progress)} />
@@ -1038,7 +1033,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           <WithdrawDialog key={withdrawSeed} accountKey={accountKey} s={s} open={dialog === 'withdraw'} onClose={() => setDialog(null)} initialAmount={withdrawSeed} deployed={f.deployed} />
           <StopDialog accountKey={accountKey} s={s} open={dialog === 'stop'} onClose={() => setDialog(null)} />
           <StartDialog accountKey={accountKey} s={s} open={dialog === 'start'} onClose={() => setDialog(null)} />
-          {f.approval && renewAsk ? (
+          {f.approval && f.active && !renewing && (renewAsk || f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade) ? (
             <RenewDialog key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null && !feedbackOpen} onClose={closeRenewAsk} />
           ) : null}
         </>

@@ -77,20 +77,29 @@ export function BasescanLink({ tx }: { tx: string }) {
   )
 }
 
-/** Native modal dialog driven by React state. Closes on Escape and on a backdrop click. */
+/**
+ * Native modal dialog driven by React state. Closes on Escape and on a backdrop click. It opens with the focus on its
+ * title (otto/mamoru#176), not on its first control: the reader starts at the top, and Enter or Space confirms
+ * nothing by accident; Tab reaches the close button and the actions from there.
+ */
 export function Modal({ open, onClose, title, children }: { open: boolean; onClose: () => void; title: string; children: ReactNode }) {
   const ref = useRef<HTMLDialogElement>(null)
+  const titleRef = useRef<HTMLHeadingElement>(null)
+  const titleId = useId()
   useEffect(() => {
     const d = ref.current
     if (!d) return
-    if (open && !d.open) d.showModal?.()
+    if (open && !d.open) {
+      d.showModal?.()
+      titleRef.current?.focus({ preventScroll: true })
+    }
     if (!open && d.open) d.close()
   }, [open])
   return (
     <dialog
       ref={ref}
       className="xfer"
-      aria-label={title}
+      aria-labelledby={titleId}
       onClose={onClose}
       onClick={(e) => {
         if (e.target === ref.current) onClose()
@@ -98,10 +107,14 @@ export function Modal({ open, onClose, title, children }: { open: boolean; onClo
     >
       {open ? (
         <div className="px-[1.35rem] pt-5 pb-[1.4rem]">
-          <header className="mb-4 flex items-baseline justify-between gap-4">
-            <p className="title heavy">{title}</p>
-            <button type="button" className="xfer-close" onClick={onClose}>
-              Close
+          <header className="mb-4 flex items-start justify-between gap-4">
+            <h2 id={titleId} ref={titleRef} tabIndex={-1} className="title heavy xfer-title">
+              {title}
+            </h2>
+            <button type="button" className="xfer-close" onClick={onClose} aria-label="Close">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+                <path d="M3 3l8 8M11 3l-8 8" />
+              </svg>
             </button>
           </header>
           {children}
