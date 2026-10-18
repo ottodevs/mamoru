@@ -127,11 +127,14 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
         return json(200, await buildMetricsPayload(op, opts.rpcMetrics, opts.gitSha, opts.bootedAt))
       }
       if (url.pathname === '/snapshot') {
-        // otto/mamoru#136: the latest snapshot, signed like /metrics. 404 while the loop is off (MAMORU_SNAPSHOT unset).
+        // otto/mamoru#136: the latest snapshot, signed like /metrics. 404 while the loop is off: either this
+        // operator never constructs one (not Base, or no MULTICALL3), or it does but the `yield_ledger` ops flag
+        // (otto/mamoru#129) is off right now — `isRunning`, not `current`, decides that, so a loop stopped after
+        // the flag flipped off never hands out the snapshot it read while it was still on.
         if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
         const sig = req.headers.get('x-mamoru-sig')
         if (!(await verifyMetricsSignature(opts.secret, 'GET', '/snapshot', sig))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
-        if (!opts.snapshot) return json(404, { error: 'snapshot off' })
+        if (!opts.snapshot?.isRunning) return json(404, { error: 'snapshot off' })
         const snap = opts.snapshot.current
         if (!snap) return json(503, { error: 'no snapshot yet', lastError: opts.snapshot.lastError })
         return json(200, { ...snap, safes: snap.safes.map((x) => ({ ...x, accountKey: x.accountKey.slice(0, 8) })), lastError: opts.snapshot.lastError })

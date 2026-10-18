@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { metricsSignature, verifySettingsResponse } from '@mamoru/operator-auth'
-import { canonicalSettingsJson, DEFAULT_CAP_USDC, DEFAULT_ENGINE_SETTINGS, parseEngineSettings, validateEngineSettings, type EngineSettings } from '@mamoru/policy'
+import { canonicalSettingsJson, DEFAULT_CAP_USDC, DEFAULT_ENGINE_SETTINGS, OPS_FLAGS, parseEngineSettings, validateEngineSettings, type EngineSettings, type OpsFlagName } from '@mamoru/policy'
 
 /**
  * Spec 006 (otto/mamoru#147): the operator's side of engine settings. Pulls the active versions from the app Worker
@@ -22,7 +22,7 @@ export const SETTINGS_STALE_MS = 15 * 60_000
 export const LOCAL_OVERRIDE_FILE = 'engine-settings.local.json'
 
 export type SettingsVersion = { id: number; env: 'prod' | 'beta'; accountKeys: string[] | null; template: string; settings: EngineSettings; hash: string; createdAt: string }
-type Payload = { versions: SettingsVersion[]; betaAccounts: string[]; servedAt: string }
+type Payload = { versions: SettingsVersion[]; betaAccounts: string[]; flags: Record<OpsFlagName, boolean>; servedAt: string }
 
 export type ResolvedSettings = {
   settings: EngineSettings
@@ -45,15 +45,34 @@ export type SettingsStatus = {
   lastError: string | null
   versions: { id: number; env: string; canary: boolean; template: string; hash: string }[]
   override: string[]
+  /** otto/mamoru#129: runtime flags from the latest applied pull. No successful pull yet: every flag off. */
+  flags: Record<OpsFlagName, boolean>
 }
 
 type Fetch = (input: string, init?: RequestInit) => Promise<Response>
+
+/**
+ * otto/mamoru#129: the `flags` field of the payload. Absent or explicitly null (an app Worker that has not
+ * deployed the ops-flags read yet, or has nothing to say): every flag reads as off, not a refused pull. Present
+ * but not a plain object: refused outright, that shape is confidently wrong rather than merely incomplete. A
+ * present object with an entry that is not a boolean, or a name this operator does not know: that one entry
+ * reads as off, the rest of the pull still applies.
+ */
+function parseOpsFlags(raw: unknown): Record<OpsFlagName, boolean> {
+  const out = Object.fromEntries(Object.keys(OPS_FLAGS).map((f) => [f, false])) as Record<OpsFlagName, boolean>
+  if (raw === undefined || raw === null) return out
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('flags must be an object')
+  const o = raw as Record<string, unknown>
+  for (const k of Object.keys(out)) if (typeof o[k] === 'boolean') out[k as OpsFlagName] = o[k] as boolean
+  return out
+}
 
 /** Every check a pulled body must pass before anything of it runs. Throws with the reason. */
 export function checkPayload(raw: unknown, applied: Payload | null, opts: { allocation?: string } = {}): Payload {
   if (!raw || typeof raw !== 'object') throw new Error('body is not an object')
   const p = raw as Payload
   if (!Array.isArray(p.versions) || !Array.isArray(p.betaAccounts) || !p.betaAccounts.every((k) => typeof k === 'string')) throw new Error('body has the wrong shape')
+  const flags = parseOpsFlags((raw as { flags?: unknown }).flags)
   const versions: SettingsVersion[] = []
   for (const v of p.versions) {
     if (!v || !Number.isSafeInteger(v.id) || v.id < 1 || (v.env !== 'prod' && v.env !== 'beta')) throw new Error('a version has the wrong shape')
@@ -79,7 +98,7 @@ export function checkPayload(raw: unknown, applied: Payload | null, opts: { allo
   const servedAt = typeof p.servedAt === 'string' ? p.servedAt : ''
   if (!Number.isFinite(Date.parse(servedAt))) throw new Error('body has no valid servedAt')
   if (applied?.servedAt && Date.parse(servedAt) < Date.parse(applied.servedAt)) throw new Error(`stale: served at ${servedAt}, before the applied ${applied.servedAt}`)
-  return { versions, betaAccounts: p.betaAccounts.map((k) => k.toLowerCase()), servedAt }
+  return { versions, betaAccounts: p.betaAccounts.map((k) => k.toLowerCase()), flags, servedAt }
 }
 
 /**
@@ -186,8 +205,10 @@ export class EngineSettingsSource {
       // Checked against the clock after the reply arrived: a pull that crossed a minute boundary still verifies.
       if (!(await verifySettingsResponse(this.o.secret, body, res.headers.get('x-mamoru-sig'), this.now()))) throw new Error('response signature does not verify')
       const next = checkPayload(JSON.parse(body), this.payload, { ...(this.o.allocation ? { allocation: this.o.allocation } : {}) })
-      const changed = JSON.stringify(next.versions.map((v) => [v.id, canonicalSettingsJson(v.settings), v.accountKeys])) + next.betaAccounts.join() !==
-        JSON.stringify((this.payload?.versions ?? []).map((v) => [v.id, canonicalSettingsJson(v.settings), v.accountKeys])) + (this.payload?.betaAccounts ?? []).join()
+      // otto/mamoru#129: flags are part of this diff too, so a /ops flip with no engine-settings change still fires
+      // onChange (boot.ts's syncYieldLedger) and is written to the last-known-good file.
+      const changed = JSON.stringify(next.versions.map((v) => [v.id, canonicalSettingsJson(v.settings), v.accountKeys])) + next.betaAccounts.join() + JSON.stringify(next.flags) !==
+        JSON.stringify((this.payload?.versions ?? []).map((v) => [v.id, canonicalSettingsJson(v.settings), v.accountKeys])) + (this.payload?.betaAccounts ?? []).join() + JSON.stringify(this.payload?.flags ?? {})
       this.payload = next
       this.source = 'd1'
       this.lastPullAt = new Date(at).toISOString()
@@ -237,6 +258,12 @@ export class EngineSettingsSource {
     return [...(o.depth !== undefined ? ['depth'] : []), ...(o.capUsdc !== undefined ? ['capUsdc'] : [])]
   }
 
+  /** otto/mamoru#129: the flags of the latest applied pull. Independent of the local emergency override (that file
+   * is engine settings only); no successful pull yet: every flag off. */
+  flags(): Record<OpsFlagName, boolean> {
+    return this.payload?.flags ?? parseOpsFlags(undefined)
+  }
+
   forAccount(accountKey: string): ResolvedSettings {
     if (this.local) return { settings: this.local, versionId: null, source: 'local', override: [] }
     const r = resolveFor(this.payload, accountKey)
@@ -264,6 +291,7 @@ export class EngineSettingsSource {
       lastError: this.localError ?? this.lastError ?? this.resolveError,
       versions: (this.payload?.versions ?? []).map((v) => ({ id: v.id, env: v.env, canary: v.accountKeys !== null, template: v.template, hash: v.hash })),
       override: this.overrideKeys(),
+      flags: this.flags(),
     }
   }
 }

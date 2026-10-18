@@ -24,6 +24,20 @@ function withYieldLedger(stateDir: string, read: () => Promise<Snapshot>): () =>
   return async () => withHoldValue(await read(), entries)
 }
 
+/**
+ * otto/mamoru#129: starts or stops `loop` to match the `yield_ledger` ops flag, called after every settings pull
+ * (boot.ts's onChange, plus once right after the first pull). A no-op, and silent, when `on` has not changed
+ * since the last call: a steady flag must not restart the loop or spam the boot log on every settings poll.
+ * Returns the value to pass back in as `wasOn` next time.
+ */
+export function syncYieldLedgerFlag(loop: Pick<SnapshotLoop, 'start' | 'stop'>, on: boolean, wasOn: boolean, log: (line: string) => void = console.log): boolean {
+  if (on === wasOn) return wasOn
+  if (on) loop.start()
+  else loop.stop()
+  log(`[flags] yield_ledger ${on ? 'on' : 'off'}`)
+  return on
+}
+
 /** `git rev-parse --short HEAD` at the operator's cwd, read once at boot. 'unknown' outside a git checkout. */
 async function gitShaOnce(cwd: string): Promise<string> {
   try {
@@ -152,8 +166,11 @@ export async function bootOperator(o: BootOptions) {
   const bundler = startLiveBundler(client, relayer, chainId)
   const knobs = capAndDepth(o, policy)
   let retune = () => {}
+  // otto/mamoru#129: reassigned once the snapshot loop exists (it needs `operator`, built below); the settings
+  // source is wired to call whatever this holds at the time, on every change it applies, not only the first.
+  let syncYieldLedger = (): void => {}
   const settings = o.settingsUrl
-    ? new EngineSettingsSource({ url: o.settingsUrl, secret: o.secret, stateDir: o.stateDir, allocation: policy.allocation, override: settingsOverride(knobs, o), onChange: () => retune() })
+    ? new EngineSettingsSource({ url: o.settingsUrl, secret: o.secret, stateDir: o.stateDir, allocation: policy.allocation, override: settingsOverride(knobs, o), onChange: () => { retune(); syncYieldLedger() } })
     : null
   if (settings && settings.status().override.length) console.log(`[settings] EMERGENCY OVERRIDE from env: ${settings.status().override.join(', ')} win over D1 until removed from the env`)
   const operator = new Operator(
@@ -176,20 +193,23 @@ export async function bootOperator(o: BootOptions) {
     relayer,
     store,
   )
-  // otto/mamoru#136 phase 1: one read of every served Safe and its pools, served on GET /snapshot. Off unless MAMORU_SNAPSHOT=1;
-  // nothing decides from it yet.
+  // otto/mamoru#136 phase 1 + otto/mamoru#129: one read of every served Safe and its pools, with the yield-ledger
+  // hold-value baseline always folded in, served on GET /snapshot. Always built when the chain supports it;
+  // started and stopped by the `yield_ledger` ops flag (D1, set from /ops), not MAMORU_SNAPSHOT / MAMORU_YIELD_LEDGER
+  // env vars. Without MAMORU_SETTINGS_URL there is no pull, so the flag is never learned and the loop stays off.
   let snapshot: SnapshotLoop | null = null
   // Base only for now: the reader takes pools and token addresses from the Base registry (chain.ts USDC_POOLS).
-  if (process.env.MAMORU_SNAPSHOT === '1' && MULTICALL3 && chainId === BASE_CHAIN_ID) {
+  if (MULTICALL3 && chainId === BASE_CHAIN_ID) {
     const snapshotClient = createPublicClient({ transport: http(via('snapshot'), { batch: true, timeout: 60_000 }) })
     const multicall3 = MULTICALL3
     const budget = rpcBudget(rpcMetrics)
     const read = (): Promise<Snapshot> => readSnapshot(snapshotClient, multicall3, chainId, operator.snapshotTargets())
-    // otto/mamoru#129: adds each position's hold-value baseline for /ops and the app's "earned so far". Its own
-    // flag: MAMORU_SNAPSHOT alone must keep behaving exactly as #136 shipped it.
-    const withYield = process.env.MAMORU_YIELD_LEDGER === '1' ? withYieldLedger(o.stateDir, read) : read
-    snapshot = new SnapshotLoop(withYield, snapshotIntervalMs(process.env.MAMORU_SNAPSHOT_MS), () => budget.over())
-    snapshot.start()
+    snapshot = new SnapshotLoop(withYieldLedger(o.stateDir, read), snapshotIntervalMs(process.env.MAMORU_SNAPSHOT_MS), () => budget.over())
+  }
+  let yieldLedgerOn = false
+  syncYieldLedger = (): void => {
+    if (!snapshot) return
+    yieldLedgerOn = syncYieldLedgerFlag(snapshot, settings?.flags().yield_ledger === true, yieldLedgerOn)
   }
   const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot })
   const eth = await client.getBalance({ address: relayer.address })
@@ -198,6 +218,7 @@ export async function bootOperator(o: BootOptions) {
   // The first pull before any engine resumes, so a restart never runs a review or a prepare on stale settings when the
   // endpoint answers (bounded by the pull timeout; on failure the last-known-good or the defaults run, reported).
   await settings?.pull()
+  syncYieldLedger()
   operator.resume()
   settings?.start()
   return {

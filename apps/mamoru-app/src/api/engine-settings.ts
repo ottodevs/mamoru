@@ -1,8 +1,9 @@
 import { Hono } from 'hono'
 import { settingsResponseSignature, verifyMetricsSignature } from '@mamoru/operator-auth'
-import { validateEngineSettings, type EngineSettings } from '@mamoru/policy'
+import { validateEngineSettings, type EngineSettings, type OpsFlagName } from '@mamoru/policy'
 import type { AppEnv } from './context.ts'
 import type { Db } from './env.ts'
+import { readOpsFlags } from './ops-flags.ts'
 
 /**
  * Spec 006 (otto/mamoru#147): the operator pulls the active engine settings from here. Read-only: versions are
@@ -28,6 +29,9 @@ export type EngineSettingsPayload = {
   versions: SettingsVersionView[]
   /** Accounts the operator must treat as beta (accounts.env, #130). Every other account is prod. */
   betaAccounts: string[]
+  /** otto/mamoru#129: runtime flags set from /ops, D1-backed (readOpsFlags). Older operators that do not parse this
+   * field yet simply ignore it; it is additive, never required to make sense of `versions`. */
+  flags: Record<OpsFlagName, boolean>
   servedAt: string
 }
 
@@ -97,7 +101,7 @@ export function engineSettingsRoutes(now: () => Date) {
     if (!(await verifyMetricsSignature(secret, 'GET', ENGINE_SETTINGS_PATH, c.req.header('x-mamoru-sig'), at))) return c.json({ error: 'unauthorized' }, 401)
     const versions = await activeVersions(c.env.DB)
     if (versions === null) return c.json({ error: 'engine settings are not set up' }, 404)
-    const payload: EngineSettingsPayload = { versions, betaAccounts: await betaAccounts(c.env.DB), servedAt: new Date(at).toISOString() }
+    const payload: EngineSettingsPayload = { versions, betaAccounts: await betaAccounts(c.env.DB), flags: await readOpsFlags(c.env.DB), servedAt: new Date(at).toISOString() }
     const body = JSON.stringify(payload)
     const sig = await settingsResponseSignature(secret, body, Math.floor(at / 60_000))
     return new Response(body, { status: 200, headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-mamoru-sig': sig } })

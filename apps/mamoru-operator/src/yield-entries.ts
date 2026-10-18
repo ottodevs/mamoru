@@ -4,8 +4,8 @@
 //
 // What "entry" means here: the position's own principal amounts (snapshot.ts's amountsForLiquidity) the first
 // time this operator process observes that token id. Not the mint transaction's amounts: this process does not
-// index historical events (specs/003-snapshot-loop/spec.md phases 3-4), so a position already open when
-// MAMORU_YIELD_LEDGER is first turned on gets its baseline from that moment, not from when it was actually
+// index historical events (specs/003-snapshot-loop/spec.md phases 3-4), so a position already open when the
+// `yield_ledger` ops flag is first turned on gets its baseline from that moment, not from when it was actually
 // opened. Documented, not hidden: a reader compares "value vs hold since this baseline", never "since entry".
 
 import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'

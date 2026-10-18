@@ -23,11 +23,6 @@ export type Env = {
   LIVE_FUNDS?: string
   OPERATOR_URL?: string
   OPERATOR_SECRET?: string
-  // otto/mamoru#129, phase 2 of #136: '1' turns on the cron that pulls the operator's GET /snapshot into D1
-  // (account_snapshot_latest, account_daily, yield_ledger_*). Needs OPERATOR_URL and OPERATOR_SECRET too, and the
-  // operator itself running with MAMORU_SNAPSHOT=1 (positions need MAMORU_YIELD_LEDGER=1 there as well). Off by
-  // default: unset, the cron tick for it is a no-op.
-  YIELD_LEDGER?: string
   // Secret. Read-only Ethereum Mainnet RPC pool for the wrong-network notice (accounts/other-chains.ts): https URLs
   // separated by commas, tried in order (docs/process/rpc-providers.md). Unset: nothing is read.
   ETHEREUM_RPC_URLS?: string

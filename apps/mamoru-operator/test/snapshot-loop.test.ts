@@ -55,6 +55,17 @@ describe('SnapshotLoop (otto/mamoru#136)', () => {
     expect(n).toBe(after)
   })
 
+  test('isRunning (otto/mamoru#129): off until start, on while running, off again after stop, even though current keeps the last read', async () => {
+    const loop = new SnapshotLoop(async () => snap(1n), 1)
+    expect(loop.isRunning).toBe(false)
+    loop.start()
+    expect(loop.isRunning).toBe(true)
+    await settle()
+    loop.stop()
+    expect(loop.isRunning).toBe(false)
+    expect(loop.current).not.toBeNull()
+  })
+
   test('MAMORU_SNAPSHOT_MS: 30 s by default, never under 10 s, garbage is the default', () => {
     expect(snapshotIntervalMs(undefined)).toBe(30_000)
     expect(snapshotIntervalMs('')).toBe(30_000)

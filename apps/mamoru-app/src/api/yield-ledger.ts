@@ -1,7 +1,7 @@
 // Yield ledger writer (otto/mamoru#129), built on the snapshot loop (#136). The operator has no D1 binding
 // (specs/003-snapshot-loop/spec.md), so this Worker pulls GET /snapshot through the same signed path /metrics
 // uses and upserts account_snapshot_latest, account_daily (#136) and the position-level yield tables (#129).
-// Behind MAMORU_YIELD_LEDGER (apps/mamoru-app/src/worker.ts `scheduled`, off by default).
+// Behind the `yield_ledger` ops flag (D1, set from /ops; apps/mamoru-app/src/worker.ts `scheduled`, off by default).
 import { metricsSignature } from '@mamoru/operator-auth'
 import type { Db } from './env.ts'
 
@@ -29,8 +29,9 @@ export type PositionWire = {
   feesUsdc: string
   owedUsdc: string
   /**
-   * otto/mamoru#129: present only when the operator also runs with MAMORU_YIELD_LEDGER=1 (yield-entries.ts), and
-   * only on a tick where the position's pool was priceable. `entryAmount0/1/Block/Day` are the exact baseline
+   * otto/mamoru#129: present only when the operator's snapshot loop is running with the yield wrapper
+   * (yield-entries.ts, gated by the `yield_ledger` ops flag), and only on a tick where the position's pool was
+   * priceable. `entryAmount0/1/Block/Day` are the exact baseline
    * `holdValueUsdc` was computed from: all four travel together with it, and a writer must store these, not a
    * position's current amount0/amount1, into yield_ledger_position_entry (code-review finding, PR #43).
    */
@@ -164,9 +165,9 @@ export type PositionReceipt = { collectedUsd?: number; collected0?: string; coll
 
 /**
  * Upserts yield_ledger_position_entry (once per token id) and yield_ledger_position_daily (open on the day's
- * first call, close on every call) for every position whose `holdValueUsdc` the operator computed (requires
- * MAMORU_YIELD_LEDGER=1 there too; a position without it is skipped, counted, never written with a guessed
- * baseline). `receipts`, keyed by token id, carries collected amounts the same way writeAccountSnapshot's do:
+ * first call, close on every call) for every position whose `holdValueUsdc` the operator computed (the same
+ * `yield_ledger` flag turns that on there too; a position without it is skipped, counted, never written with a
+ * guessed baseline). `receipts`, keyed by token id, carries collected amounts the same way writeAccountSnapshot's do:
  * empty until a harvest-receipt tracker exists.
  */
 export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date, receipts: Map<string, PositionReceipt> = new Map()): Promise<{ written: number; skipped: number }> {

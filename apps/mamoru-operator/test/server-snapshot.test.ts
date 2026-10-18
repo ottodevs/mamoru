@@ -53,7 +53,7 @@ describe('GET /snapshot (otto/mamoru#136)', () => {
     }
   })
 
-  test('signed, with the loop off: 404', async () => {
+  test('signed, no loop at all (not Base, or no MULTICALL3): 404', async () => {
     const { server, base } = boot(null)
     try {
       expect((await fetch(`${base}/snapshot`, { headers: await signed() })).status).toBe(404)
@@ -62,10 +62,36 @@ describe('GET /snapshot (otto/mamoru#136)', () => {
     }
   })
 
-  test('signed, before the first read: 503', async () => {
+  test('signed, a loop exists but was never started (otto/mamoru#129: the yield_ledger flag is off): 404', async () => {
     const { server, base } = boot(new SnapshotLoop(async () => SNAP, 60_000))
     try {
+      expect((await fetch(`${base}/snapshot`, { headers: await signed() })).status).toBe(404)
+    } finally {
+      server.stop(true)
+    }
+  })
+
+  test('signed, running but before the first read lands: 503', async () => {
+    const loop = new SnapshotLoop(() => new Promise<Snapshot>(() => {}), 60_000)
+    loop.start()
+    const { server, base } = boot(loop)
+    try {
       expect((await fetch(`${base}/snapshot`, { headers: await signed() })).status).toBe(503)
+    } finally {
+      loop.stop()
+      server.stop(true)
+    }
+  })
+
+  test('otto/mamoru#129: read once, then the flag turns off (stop) — 404, never the now-stale snapshot', async () => {
+    const loop = new SnapshotLoop(async () => SNAP, 60_000)
+    loop.start()
+    await new Promise((r) => setTimeout(r, 5))
+    expect(loop.current).not.toBeNull()
+    loop.stop()
+    const { server, base } = boot(loop)
+    try {
+      expect((await fetch(`${base}/snapshot`, { headers: await signed() })).status).toBe(404)
     } finally {
       server.stop(true)
     }

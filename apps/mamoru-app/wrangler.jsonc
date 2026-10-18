@@ -27,18 +27,17 @@
     "MODE": "production",
     "CHAIN_ID": "8453",
     "CORE_DRY_RUN": "true",
-    "LIVE_FUNDS": "1",
-    // otto/mamoru#129: off by default ("0"). Set to "1" only once the operator runs with MAMORU_SNAPSHOT=1 (and,
-    // for per-position rows, MAMORU_YIELD_LEDGER=1 there too) and 0010_yield_ledger.sql / 0009_account_snapshots.sql
-    // are applied (docs/process/releasing.md: migration before the Worker that reads it).
-    "YIELD_LEDGER": "0"
+    "LIVE_FUNDS": "1"
   },
   // Ethereum RPC reads for the wrong-network notice, per account (accounts/other-chains.ts). ETHEREUM_RPC_URLS is a secret.
   // FEEDBACK_LIMIT (feedback.ts, otto/mamoru#72): 3 posts per 60 s, keyed by device session or a hashed IP. The
   // Mattermost vars (MATTERMOST_URL, MATTERMOST_BOT_TOKEN, MATTERMOST_SUPPORT_CHANNEL_ID, MATTERMOST_FEEDBACK_CHANNEL_ID)
   // are secrets, set separately; unset, a row is still stored and nothing is posted.
-  // Every 10 minutes: posts the help and feedback notes that are stored and not yet in Mattermost, and (when
-  // YIELD_LEDGER=1) pulls the operator's GET /snapshot into D1 (worker.ts `scheduled`, otto/mamoru#129).
+  // Every 10 minutes: posts the help and feedback notes that are stored and not yet in Mattermost, and (when the
+  // `yield_ledger` ops flag is on — D1, set from /ops, migrations/d1/0012_ops_flags.sql) pulls the operator's
+  // GET /snapshot into D1 (worker.ts `scheduled`, otto/mamoru#129). No longer an env var: 0010_yield_ledger.sql /
+  // 0009_account_snapshots.sql must still be applied first, and the operator still needs MULTICALL3 on Base, but
+  // the on/off switch is the D1 flag both envs share.
   "triggers": { "crons": ["*/10 * * * *"] },
   "ratelimits": [
     { "name": "OTHER_CHAINS_LIMIT", "namespace_id": "117001", "simple": { "limit": 6, "period": 60 } },
@@ -75,10 +74,10 @@
         "MODE": "production",
         "CHAIN_ID": "8453",
         "CORE_DRY_RUN": "true",
-        "LIVE_FUNDS": "1",
-        // Same D1 and operator as prod (see the canary note above): leave this "0" here, prod's cron alone is
-        // enough to keep the yield ledger written. Turning both on only doubles the pull, it does not duplicate rows.
-        "YIELD_LEDGER": "0"
+        "LIVE_FUNDS": "1"
+        // Same D1 and operator as prod (see the canary note above): the `yield_ledger` ops flag is one row in the
+        // shared D1, so flipping it on from /ops turns the cron on for both envs at once. Both pulling is harmless
+        // (the writer upserts, it does not duplicate rows), it only doubles the read.
       },
       "triggers": { "crons": ["*/10 * * * *"] },
       "ratelimits": [

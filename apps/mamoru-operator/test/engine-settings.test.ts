@@ -181,3 +181,64 @@ describe('operator engine settings: Sol review (spec 006)', () => {
     expect(s.status().stale).toBe(true)
   })
 })
+
+describe('operator ops flags (otto/mamoru#129): checkPayload parses `flags`, EngineSettingsSource carries it', () => {
+  test('absent flags: every flag reads as off, the pull is not refused', () => {
+    const p = checkPayload({ versions: [v(1, 'prod')], betaAccounts: [], servedAt: '2026-10-16T12:00:00.000Z' }, null)
+    expect(p.flags).toEqual({ yield_ledger: false })
+  })
+
+  test('explicit null flags: the same as absent', () => {
+    const p = checkPayload({ versions: [v(1, 'prod')], betaAccounts: [], flags: null, servedAt: '2026-10-16T12:00:00.000Z' }, null)
+    expect(p.flags).toEqual({ yield_ledger: false })
+  })
+
+  test('a non-object flags field refuses the whole pull', () => {
+    expect(() => checkPayload({ versions: [v(1, 'prod')], betaAccounts: [], flags: 'on', servedAt: '2026-10-16T12:00:00.000Z' }, null)).toThrow('flags must be an object')
+    expect(() => checkPayload({ versions: [v(1, 'prod')], betaAccounts: [], flags: ['yield_ledger'], servedAt: '2026-10-16T12:00:00.000Z' }, null)).toThrow('flags must be an object')
+  })
+
+  test('a malformed or unknown entry reads as off, the rest of the pull still applies', () => {
+    const p = checkPayload({ versions: [v(1, 'prod')], betaAccounts: [], flags: { yield_ledger: 'yes', some_future_flag: true }, servedAt: '2026-10-16T12:00:00.000Z' }, null)
+    expect(p.versions).toHaveLength(1)
+    expect(p.flags).toEqual({ yield_ledger: false })
+  })
+
+  test('a valid flags object is carried through as-is', () => {
+    const p = checkPayload({ versions: [v(1, 'prod')], betaAccounts: [], flags: { yield_ledger: true }, servedAt: '2026-10-16T12:00:00.000Z' }, null)
+    expect(p.flags).toEqual({ yield_ledger: true })
+  })
+
+  test('EngineSettingsSource.flags() and status().flags reflect the latest applied pull; no pull yet is every flag off', async () => {
+    const s = source(worker(() => ({ versions: [v(1, 'prod')], betaAccounts: [], flags: { yield_ledger: true }, servedAt: '2026-10-16T12:00:00.000Z' })).fetch)
+    expect(s.flags()).toEqual({ yield_ledger: false })
+    await s.pull()
+    expect(s.flags()).toEqual({ yield_ledger: true })
+    expect(s.status().flags).toEqual({ yield_ledger: true })
+  })
+
+  test('a flag flip alone (same versions, same betaAccounts) still reports changed and fires onChange', async () => {
+    let onChangeCalls = 0
+    let body: unknown = { versions: [v(1, 'prod')], betaAccounts: [], flags: { yield_ledger: false }, servedAt: '2026-10-16T12:00:00.000Z' }
+    const s = new EngineSettingsSource({ url: 'https://app.example', secret: SECRET, stateDir: mkdtempSync(join(tmpdir(), 'settings-')), fetch: worker(() => body).fetch, now: () => NOW, onChange: () => onChangeCalls++ })
+    expect(await s.pull()).toBe(true)
+    expect(onChangeCalls).toBe(1)
+    // Same versions and betaAccounts, only the flag moved: still a change.
+    body = { versions: [v(1, 'prod')], betaAccounts: [], flags: { yield_ledger: true }, servedAt: '2026-10-16T12:00:00.000Z' }
+    expect(await s.pull()).toBe(true)
+    expect(onChangeCalls).toBe(2)
+    expect(s.flags()).toEqual({ yield_ledger: true })
+    // Truly nothing changed: no second onChange.
+    expect(await s.pull()).toBe(false)
+    expect(onChangeCalls).toBe(2)
+  })
+
+  test('flags survive via last-known-good: a new process with the endpoint down still knows the flag was on', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'settings-'))
+    const w = worker(() => ({ versions: [v(1, 'prod')], betaAccounts: [], flags: { yield_ledger: true }, servedAt: '2026-10-16T12:00:00.000Z' }))
+    const s = source(w.fetch, dir)
+    await s.pull()
+    const again = source(worker(() => ({}), { status: 503 }).fetch, dir)
+    expect(again.flags()).toEqual({ yield_ledger: true })
+  })
+})

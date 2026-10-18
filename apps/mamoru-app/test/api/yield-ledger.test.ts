@@ -164,7 +164,7 @@ describe('writeYieldLedger (otto/mamoru#129): reconciliation against the fee mat
     expect(row.accrued_usd_close).toBe(Number(fees.accrued0))
   })
 
-  test('a position without holdValueUsdc (operator MAMORU_YIELD_LEDGER off) is skipped, not written with a guessed baseline', async () => {
+  test('a position without holdValueUsdc (the yield_ledger flag off on the operator) is skipped, not written with a guessed baseline', async () => {
     const { written, skipped } = await writeYieldLedger(db, snapshot({ safes: [safe({ positions: [position({ holdValueUsdc: undefined })] })] }), new Date())
     expect(written).toBe(0)
     expect(skipped).toBe(1)

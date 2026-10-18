@@ -24,3 +24,4 @@ export {
   withEngineSettings,
   type EngineSettings,
 } from './engine-settings.ts'
+export { OPS_FLAGS, type OpsFlagName } from './ops-flags.ts'

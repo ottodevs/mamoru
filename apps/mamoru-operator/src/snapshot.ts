@@ -1,6 +1,7 @@
 // One read of every Safe the operator serves and of the pools they hold, pinned to one block (otto/mamoru#136).
-// Phase 1: read-only and off by default (MAMORU_SNAPSHOT=1). Nothing decides from it yet: funding, the armed
-// watcher and the engine keep their own reads, with their own provider and staleness rules.
+// Phase 1: read-only, started and stopped by the `yield_ledger` ops flag (boot.ts), not an env var. Nothing
+// decides from it yet: funding, the armed watcher and the engine keep their own reads, with their own provider
+// and staleness rules.
 
 import { decodeFunctionResult, encodeFunctionData, parseAbi, type PublicClient } from 'viem'
 import type { Address } from '@mamoru/domain'
@@ -62,7 +63,7 @@ export type PositionSnapshot = {
   feesUsdc: bigint
   /** Owed amounts in raw USDC at the pool price. */
   owedUsdc: bigint
-  /** otto/mamoru#129: entry amounts of this position revalued at the current price (yield-entries.ts). Absent unless MAMORU_YIELD_LEDGER=1, or the position's pool was momentarily missing from this read. */
+  /** otto/mamoru#129: entry amounts of this position revalued at the current price (yield-entries.ts). Absent unless the `yield_ledger` ops flag is on, or the position's pool was momentarily missing from this read. */
   holdValueUsdc?: bigint
   /** otto/mamoru#129: the baseline `holdValueUsdc` was computed from (yield-entries.ts's EntryStore). Present exactly when `holdValueUsdc` is; a reader must use these, not the position's current amount0/amount1, when it records the baseline. */
   entryAmount0?: string
@@ -290,6 +291,12 @@ export class SnapshotLoop {
 
   get current(): Snapshot | null {
     return this.latest
+  }
+
+  /** otto/mamoru#129: whether the loop is turned on right now (the `yield_ledger` ops flag). Server GET /snapshot
+   * uses this, not `current`, to tell "off" from "on but the first read has not landed yet". */
+  get isRunning(): boolean {
+    return this.running
   }
 
   start(): void {

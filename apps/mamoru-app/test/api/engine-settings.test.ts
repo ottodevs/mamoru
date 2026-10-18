@@ -57,4 +57,21 @@ describe('GET /api/internal/engine-settings (spec 006)', () => {
     expect(rows.map((r) => r.name).sort()).toEqual(Object.keys(ENGINE_SETTINGS_TEMPLATES).sort())
     for (const r of rows) expect(r.settings_json).toBe(canonicalSettingsJson(ENGINE_SETTINGS_TEMPLATES[r.name]!))
   })
+
+  test('otto/mamoru#129: the payload carries ops flags from D1, every flag off with no rows', async () => {
+    const h = harness(() => NOW, { env: { OPERATOR_SECRET: OP } })
+    insert(h, 'prod', today)
+    const p = JSON.parse(await (await pull(h)).text()) as EngineSettingsPayload
+    expect(p.flags).toEqual({ yield_ledger: false })
+  })
+
+  test('otto/mamoru#129: the payload carries the newest row for a flag that was turned on', async () => {
+    const h = harness(() => NOW, { env: { OPERATOR_SECRET: OP } })
+    insert(h, 'prod', today)
+    h.db.raw
+      .query(`INSERT INTO ops_flag_changes (flag, enabled, author, reason, created_at) VALUES ('yield_ledger', 1, 'ot', 'turn on for canary', ?)`)
+      .run(NOW.toISOString())
+    const p = JSON.parse(await (await pull(h)).text()) as EngineSettingsPayload
+    expect(p.flags).toEqual({ yield_ledger: true })
+  })
 })
