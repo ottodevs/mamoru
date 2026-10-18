@@ -40,11 +40,18 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
   const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false as boolean | null, enabled: new Set<string>(), batchGrants: false, head: 100n, batchedGrantReads: 0, multicalls: 0, pending: null as { grants?: { permissionId: string }[]; revokes?: string[] } | null, logs: [] as { stx: Hex; hash: Hex; block: bigint }[], enabledFromBlock: 0n, noHistory: false, usdt: 0n, spotTick: 0, twapTick: 0 as number | null, blockHashes: new Map<bigint, Hex>(),
     /** otto/mamoru#163: the Safe nonce at a past block (default: today's), Safe txs of others run at a block, and a node that cannot serve a block's logs by hash. */
-    nonceAt: null as ((block: bigint) => bigint) | null, foreign: [] as { stx: Hex; hash: Hex; block: bigint }[], blockLogsDown: false, guard: `0x${'0'.repeat(64)}` as Hex }
+    nonceAt: null as ((block: bigint) => bigint) | null, foreign: [] as { stx: Hex; hash: Hex; block: bigint }[], blockLogsDown: false, guard: `0x${'0'.repeat(64)}` as Hex, forks: new Map<Hex, bigint>(), parents: new Map<bigint, Hex>() }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
   const factory = deployCall(liveAccountFromContext(ctx))
+  /** Canonical block hashes, and the height each one is at (otto/mamoru#163). */
+  const byHash = new Map<Hex, bigint>()
+  const hashOf = (n: bigint): Hex => {
+    const h = keccak256(stringToHex(`block-${n}`))
+    byHash.set(h, n)
+    return h
+  }
   const client = {
     getBlockNumber: async () => knobs.head,
     // A block has a hash of its own; `blockHashes` is what a read of that height by number answers instead (another
@@ -52,7 +59,7 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
     getBlock: async (a: { blockNumber?: bigint } = {}) => {
       // The head is the one getBlockNumber answers (a lagging provider lags in both).
       const n = a.blockNumber ?? knobs.head
-      return { number: n, hash: (a.blockNumber !== undefined ? knobs.blockHashes.get(n) : undefined) ?? keccak256(stringToHex(`block-${n}`)), timestamp: 1_790_000_000n }
+      return { number: n, hash: (a.blockNumber !== undefined ? knobs.blockHashes.get(n) : undefined) ?? hashOf(n), parentHash: knobs.parents.get(n) ?? hashOf(n - 1n), timestamp: 1_790_000_000n }
     },
     getTransactionReceipt: async () => {
       throw new Error('no receipt')
@@ -62,10 +69,10 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
       if (a.blockHash) {
         if (knobs.blockLogsDown) throw new Error('HTTP request failed. Status: 503')
         return [...knobs.logs, ...knobs.foreign]
-          .filter((l) => keccak256(stringToHex(`block-${l.block}`)) === a.blockHash)
+          .filter((l) => hashOf(l.block) === a.blockHash)
           .map((l, i) => ({ address: SAFE, topics: [EXECUTION_SUCCESS, l.stx], transactionHash: l.hash, blockNumber: l.block, logIndex: i }))
       }
-      return knobs.logs.map((l) => ({ address: SAFE, topics: [EXECUTION_SUCCESS, l.stx], transactionHash: l.hash, blockNumber: l.block }))
+      return knobs.logs.map((l) => ({ address: SAFE, topics: [EXECUTION_SUCCESS, l.stx], transactionHash: l.hash, blockNumber: l.block, blockHash: hashOf(l.block) }))
     },
     getCode: async () => (chain.deployed ? '0x01' : undefined),
     getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? knobs.relayerWei : 0n),
@@ -89,6 +96,16 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
     request: async ({ method, params }: { method?: string; params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {
       // The Safe's guard slot (otto/mamoru#163): no guard unless a test sets one.
       if (method === 'eth_getStorageAt') return knobs.guard
+      // otto/mamoru#163: state at a block given by its hash (EIP-1898). A canonical block answers its nonce; a fork block
+      // answers what `forks` says, and a hash this chain never had is an error.
+      if (method === 'eth_getCode' || method === 'eth_call') {
+        const at = (params as unknown as [unknown, { blockHash: Hex }])[1].blockHash
+        const fork = knobs.forks.get(at)
+        const n = byHash.get(at)
+        if (fork === undefined && n === undefined) throw new Error('header not found')
+        if (method === 'eth_getCode') return '0x01'
+        return toHex(fork ?? (knobs.nonceAt ? knobs.nonceAt(n!) : chain.nonce), { size: 32 })
+      }
       const calls = params[0].blockStateCalls[0].calls
       simulated.push(calls)
       if (knobs.sim === 'down') throw new Error('the method eth_simulateV1 does not exist')
@@ -160,7 +177,7 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
  * otto/mamoru#163: Safe txs of others spent the Safe nonces `before`..`after - 1` at block `at`: the Safe nonce read at
  * a block, and that block's logs by hash, show it (the evidence settlement now needs to say "not run").
  */
-function spentElsewhere(w: ReturnType<typeof world>, before: bigint, after: bigint, at = 100n): void {
+function spentElsewhere(w: ReturnType<typeof world>, before: bigint, after: bigint, at = 85n): void {
   // One Safe execution per block, from `at` on (the last one at `at`): nonce `before + k` spent at block `at - (after - before - 1) + k`.
   const first = at - (after - before - 1n)
   w.chain.nonce = after
@@ -1619,7 +1636,8 @@ function landed(w: ReturnType<typeof world>, op: { opId: string; safeTxHash?: He
   op.safeTxHash ??= keccak256(stringToHex(op.opId))
   for (const id of op.revokes ?? []) w.knobs.enabled.delete(id.toLowerCase())
   for (const g of op.ownerGrants ?? []) w.knobs.enabled.add(g.permissionId.toLowerCase())
-  w.knobs.logs.push({ stx: op.safeTxHash, hash: keccak256(stringToHex(`tx-${op.opId}`)), block: 99n })
+  // Twenty blocks below the head (100): deep enough to settle on (otto/mamoru#163).
+  w.knobs.logs.push({ stx: op.safeTxHash, hash: keccak256(stringToHex(`tx-${op.opId}`)), block: 80n })
 }
 
 describe('renewing the approval of a running account', () => {
@@ -3052,7 +3070,8 @@ describe('renewing the approval of a running account', () => {
     for (const id of stored.revokes ?? []) w.knobs.enabled.delete(id.toLowerCase())
     for (const g of stored.ownerGrants ?? []) w.knobs.enabled.add(g.permissionId.toLowerCase())
     w.chain.nonce++
-    w.knobs.logs.push({ stx: stored.safeTxHash!, hash: `0x${'ab'.repeat(32)}`, block: 100n })
+    // Settled on once it is deep enough (12 blocks) and canonical: block 80 under head 100.
+    w.knobs.logs.push({ stx: stored.safeTxHash!, hash: `0x${'ab'.repeat(32)}`, block: 80n })
     await (w.op as unknown as { settleRenewals(a: AccountState): Promise<void> }).settleRenewals(acc)
     expect(stored).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', txHash: `0x${'ab'.repeat(32)}` })
     expect(acc.active).toBe(true)
@@ -3081,8 +3100,10 @@ describe('renewing the approval of a running account', () => {
     const settle = (w.op as unknown as { settleRenewals(a: AccountState): Promise<void> }).settleRenewals.bind(w.op)
     await settle(acc)
     expect(stored).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
-    // Consistent: the node has block 150, where the nonce moved, and its logs (read by its hash) show the renewal.
+    // Consistent: the node has block 150, where the nonce moved, and its logs (read by its hash) show the renewal; the
+    // head has moved 20 blocks past it.
     w.knobs.blockHashes.clear()
+    w.knobs.head = 170n
     w.knobs.nonceAt = (b) => (b >= 150n ? 2n : 1n)
     w.knobs.logs.push({ stx: stored.safeTxHash!, hash: `0x${'ab'.repeat(32)}`, block: 150n })
     await settle(acc)
@@ -3103,7 +3124,7 @@ describe('renewing the approval of a running account', () => {
     Object.assign(stored, { code: 'RENEWAL_UNPROVEN' })
     for (const id of stored.revokes ?? []) w.knobs.enabled.delete(id.toLowerCase())
     for (const g of stored.ownerGrants ?? []) w.knobs.enabled.add(g.permissionId.toLowerCase())
-    w.knobs.logs.push({ stx: stored.safeTxHash!, hash: `0x${'ab'.repeat(32)}`, block: 100n })
+    w.knobs.logs.push({ stx: stored.safeTxHash!, hash: `0x${'ab'.repeat(32)}`, block: 80n })
     await w.op.reconcileOwner(acc)
     expect(stored).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', txHash: `0x${'ab'.repeat(32)}` })
     expect(acc.grants.map((g) => g.permissionId)).toEqual(expect.arrayContaining((stored.ownerGrants ?? []).map((g) => g.permissionId)))

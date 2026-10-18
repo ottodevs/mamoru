@@ -73,7 +73,7 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     execOk: true,
     /** Receipts by relayer tx hash, and the Safe's ExecutionSuccess logs (`topics[1]`: the Safe tx hash). */
     receipts: new Map<string, TransactionReceipt>(),
-    safeLogs: [] as { topics: Hex[]; data: Hex; transactionHash: Hex; blockNumber: bigint }[],
+    safeLogs: [] as { topics: Hex[]; data: Hex; transactionHash: Hex; blockNumber: bigint; blockHash?: Hex }[],
     /** The head `getBlock()` answers, and hashes a node answers for a height instead of its own. */
     blockHead: 100n,
     blockHashes: new Map<bigint, Hex>(),
@@ -84,9 +84,19 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     rangeLogsLag: false,
     /** The Safe's guard slot, and every range-search request made (block ranges). */
     guard: `0x${'0'.repeat(64)}` as Hex,
+    /** Fork blocks (by hash) and the Safe nonce in them; a block's parent hash when not the canonical one. */
+    forks: new Map<Hex, bigint>(),
+    parents: new Map<bigint, Hex>(),
     rangeScans: [] as { from: bigint; to: bigint }[],
   }
   const npmCalls: string[] = []
+  /** Canonical block hashes, and the height each one is at. */
+  const byHash = new Map<Hex, bigint>()
+  const hashOf = (n: bigint): Hex => {
+    const h = keccak256(stringToHex(`block-${n}`))
+    byHash.set(h, n)
+    return h
+  }
   let saves = 0
   const factory = deployCall(liveAccountFromContext(ctx))
   const npm = address('NonfungiblePositionManager').toLowerCase()
@@ -102,7 +112,7 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     // node, behind or on another view, than the one that gave the head).
     getBlock: async (a: { blockNumber?: bigint } = {}) => {
       const n = a.blockNumber ?? knobs.blockHead
-      return { number: n, hash: (a.blockNumber !== undefined ? knobs.blockHashes.get(n) : undefined) ?? keccak256(stringToHex(`block-${n}`)), timestamp: 1_790_000_000n }
+      return { number: n, hash: (a.blockNumber !== undefined ? knobs.blockHashes.get(n) : undefined) ?? hashOf(n), parentHash: knobs.parents.get(n) ?? hashOf(n - 1n), timestamp: 1_790_000_000n }
     },
     getGasPrice: async () => knobs.gasPrice,
     getTransactionReceipt: async ({ hash }: { hash: string }) => {
@@ -114,11 +124,11 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
       // EIP-234, a block's logs by its hash: the Safe executions of that block, in order.
       if (a.blockHash) {
         if (knobs.blockLogsDown) throw new Error('HTTP request failed. Status: 503')
-        return knobs.safeLogs.filter((l) => keccak256(stringToHex(`block-${l.blockNumber}`)) === a.blockHash).map((l, i) => ({ address: SAFE, logIndex: i, ...l }))
+        return knobs.safeLogs.filter((l) => hashOf(l.blockNumber) === a.blockHash).map((l, i) => ({ address: SAFE, logIndex: i, ...l }))
       }
       const r = a as { fromBlock?: bigint; toBlock?: bigint }
       knobs.rangeScans.push({ from: r.fromBlock ?? 0n, to: r.toBlock ?? 0n })
-      return knobs.rangeLogsLag ? [] : knobs.safeLogs
+      return knobs.rangeLogsLag ? [] : knobs.safeLogs.map((l) => ({ blockHash: hashOf(l.blockNumber), ...l }))
     },
     getCode: async () => (chain.deployed ? '0x01' : undefined),
     getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? 10n ** 18n : at.toLowerCase() === SAFE.toLowerCase() ? chain.safeEth : 0n),
@@ -139,6 +149,16 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     request: async ({ method, params }: { method?: string; params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {
       // The Safe's guard slot (otto/mamoru#163): no guard unless a test sets one.
       if (method === 'eth_getStorageAt') return knobs.guard
+      // otto/mamoru#163: state at a block given by its hash (EIP-1898). A canonical block answers its nonce; a fork block
+      // answers what `forks` says, and a hash this chain never had is an error.
+      if (method === 'eth_getCode' || method === 'eth_call') {
+        const at = (params as unknown as [unknown, { blockHash: Hex }])[1].blockHash
+        const fork = knobs.forks.get(at)
+        const n = byHash.get(at)
+        if (fork === undefined && n === undefined) throw new Error('header not found')
+        if (method === 'eth_getCode') return '0x01'
+        return toHex(fork ?? (knobs.nonceAt ? knobs.nonceAt(n!) : chain.nonce), { size: 32 })
+      }
       const calls = params[0].blockStateCalls[0].calls
       if (knobs.sim === 'down') throw new Error('the method eth_simulateV1 does not exist')
       const last = calls.length - 1

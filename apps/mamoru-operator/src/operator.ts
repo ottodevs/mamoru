@@ -76,6 +76,8 @@ const EXECUTION_FAILURE = keccak256(stringToHex('ExecutionFailure(bytes32,uint25
 const GUARD_STORAGE_SLOT = '0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8'
 /** otto/mamoru#163: the range search's pages per settle pass (its checkpoint carries it on next pass). */
 const SCAN_PAGES_PER_PASS = 20
+/** otto/mamoru#163: blocks above the evidence a settlement waits for (~24 s on Base), and the evidence block still canonical. */
+const SETTLE_CONFIRMATIONS = 12n
 /** The Safe tx that spent an op's Safe nonce, read from the spending block's own logs. */
 type SpentBy = { safeTxHash: Hex; tx: Hex; block: bigint; ours: boolean; success: boolean }
 const EXECUTION_SUCCESS_EVENT = parseAbiItem('event ExecutionSuccess(bytes32 indexed txHash, uint256 payment)')
@@ -2775,8 +2777,16 @@ export class Operator {
           loNonce = m
         }
       }
+      // One view, by hash: X's header, the Safe nonce at X and at its parent (X must cross N on that very chain), and
+      // X's own logs. Final only once X is SETTLE_CONFIRMATIONS deep and still canonical.
       const x = await this.client.getBlock({ blockNumber: hi })
-      if (!x.hash) return null
+      if (!x.hash || !x.parentHash || x.number === null) return null
+      const [atX, atParent] = [await this.nonceAtHash(safe, x.hash), await this.nonceAtHash(safe, x.parentHash)]
+      if (!(atX > n && atParent <= n)) {
+        console.log(`[reconcile] ${acc.accountKey} ${op.opId} block ${hi} (${x.hash}) does not cross Safe nonce ${n} on its own chain (parent ${atParent}, block ${atX}): no conclusion`)
+        return null
+      }
+      if (!(await this.finalAt(x.number, x.hash))) return null
       const logs = (await this.client.getLogs({ address: safe, blockHash: x.hash } as never)) as unknown as { address: string; topics: Hex[]; logIndex: number | null; transactionHash: Hex | null }[]
       const runs = logs.filter((l) => l.address.toLowerCase() === safe.toLowerCase() && (l.topics[0] === EXECUTION_SUCCESS || l.topics[0] === EXECUTION_FAILURE) && l.topics[1] && l.transactionHash)
       // Ours in X decides by its own log. Log order is not nonce order (a guard can execute another signed Safe tx
@@ -2849,8 +2859,15 @@ export class Operator {
       for (let i = 0; i < SCAN_PAGES_PER_PASS && from <= upTo; i++) {
         const to = from + OWNER_LOG_PAGE_BLOCKS - 1n < upTo ? from + OWNER_LOG_PAGE_BLOCKS - 1n : upTo
         const page = (await this.client.getLogs({ address: safe, event: EXECUTION_SUCCESS_EVENT, args: { txHash: own }, fromBlock: from, toBlock: to } as never)) as unknown as { address: string; topics: Hex[]; transactionHash: Hex | null; blockNumber: bigint | null }[]
-        const hit = page.find((l) => l.transactionHash && l.topics[0] === EXECUTION_SUCCESS && l.topics[1]?.toLowerCase() === own.toLowerCase())
-        if (hit) return { hash: hit.transactionHash!, block: Number(hit.blockNumber) }
+        const hit = (page as { topics: Hex[]; transactionHash: Hex | null; blockNumber: bigint | null; blockHash?: Hex | null }[]).find((l) => l.transactionHash && l.topics[0] === EXECUTION_SUCCESS && l.topics[1]?.toLowerCase() === own.toLowerCase())
+        // A hit counts only on the canonical chain, deep enough, with the Safe nonce past N at that very block.
+        if (hit && hit.blockHash && hit.blockNumber !== null && (await this.finalAt(hit.blockNumber, hit.blockHash)) && (await this.nonceAtHash(safe, hit.blockHash)) > BigInt(op.safeNonce!)) {
+          return { hash: hit.transactionHash!, block: Number(hit.blockNumber) }
+        }
+        if (hit) {
+          console.log(`[reconcile] ${acc.accountKey} ${op.opId} execution log at block ${hit.blockNumber} not final or not canonical yet: not taken`)
+          return null
+        }
         op.scannedTo = to.toString()
         from = to + 1n
       }
@@ -2858,6 +2875,26 @@ export class Operator {
       this.store.save()
     }
     return null
+  }
+
+  /** The Safe nonce at a block given by its hash (EIP-1898); 0 before the Safe has code there. Throws on any read error. */
+  private async nonceAtHash(safe: Address, blockHash: Hex): Promise<bigint> {
+    const code = (await this.client.request({ method: 'eth_getCode', params: [safe, { blockHash }] } as never)) as Hex
+    if (!code || code === '0x') return 0n
+    const data = encodeFunctionData({ abi: safeAbi, functionName: 'nonce' })
+    const raw = (await this.client.request({ method: 'eth_call', params: [{ to: safe, data }, { blockHash }] } as never)) as Hex
+    return decodeFunctionResult({ abi: safeAbi, functionName: 'nonce', data: raw }) as bigint
+  }
+
+  /**
+   * otto/mamoru#163: whether block `number` with `hash` is final enough to settle on: at least SETTLE_CONFIRMATIONS
+   * below the head, and still the block at that height (read again by number, same hash).
+   */
+  private async finalAt(number: bigint, hash: Hex): Promise<boolean> {
+    const head = await this.client.getBlockNumber({ cacheTime: 0 })
+    if (head < number + SETTLE_CONFIRMATIONS) return false
+    const again = await this.client.getBlock({ blockNumber: number })
+    return again.hash?.toLowerCase() === hash.toLowerCase()
   }
 
   /** A block from before the op's first handover (the Safe nonce was its own or lower then), estimated from `upTo`'s time. */

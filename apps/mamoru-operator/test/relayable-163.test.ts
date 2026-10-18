@@ -60,6 +60,8 @@ describe('a reverted activation stays unresolved while its Safe nonce is unspent
     w.chain.nonce = 1n
     // Shaped as on Base: topics [ExecutionSuccess, safeTxHash], data the payment only.
     w.knobs.safeLogs = [{ topics: [EXECUTION_SUCCESS, old.safeTxHash!], data: `0x${'0'.repeat(64)}`, transactionHash: keccak256(stringToHex('relay')), blockNumber: 150n }]
+    // Twenty blocks past it: deep enough to settle on.
+    w.knobs.blockHead = 170n
     await quiet(() => w.op.reconcileOwner(acc))
     expect(old).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', block: 150 })
     expect(acc.active).toBe(true)
@@ -131,6 +133,8 @@ describe('a reverted activation stays unresolved while its Safe nonce is unspent
     // Not reconciled yet: the account still reads as not running when Start checks it.
     w.chain.nonce = 1n
     w.knobs.safeLogs = [{ topics: [EXECUTION_SUCCESS, old.safeTxHash!], data: `0x${'0'.repeat(64)}`, transactionHash: keccak256(stringToHex('relay')), blockNumber: 150n }]
+    // Twenty blocks past it: deep enough to settle on.
+    w.knobs.blockHead = 170n
     const before = (w.op as unknown as Prep).prepared.size
     const e = (await quiet(() => w.op.prepareActivate(ctx).catch((x: unknown) => x))).out
     expect(e).toMatchObject({ status: 409, code: 'ALREADY_ACTIVE' })
@@ -144,6 +148,7 @@ describe('a reverted activation stays unresolved while its Safe nonce is unspent
     ran.w.knobs.receipts.clear()
     ran.w.chain.nonce = 1n
     ran.w.knobs.safeLogs = [{ topics: [EXECUTION_SUCCESS, ran.old.safeTxHash!], data: `0x${'0'.repeat(64)}`, transactionHash: keccak256(stringToHex('relay')), blockNumber: 150n }]
+    ran.w.knobs.blockHead = 170n
     await quiet(() => ran.w.op.reconcileOwner(ran.acc))
     expect(ran.old).toMatchObject({ state: 'confirmed', block: 150 })
     expect(ran.acc.active).toBe(true)
@@ -173,6 +178,7 @@ describe('a reverted activation stays unresolved while its Safe nonce is unspent
     w.knobs.blockHashes.clear()
     w.knobs.nonceAt = (b) => (b >= 150n ? 1n : 0n)
     w.knobs.safeLogs = [{ topics: [EXECUTION_SUCCESS, old.safeTxHash!], data: `0x${'0'.repeat(64)}`, transactionHash: keccak256(stringToHex('relay')), blockNumber: 150n }]
+    w.knobs.blockHead = 170n
     await quiet(() => w.op.reconcileOwner(acc))
     expect(old).toMatchObject({ state: 'confirmed', block: 150 })
     expect(acc.active).toBe(true)
@@ -235,6 +241,55 @@ describe('a reverted activation stays unresolved while its Safe nonce is unspent
     expect(w.knobs.rangeScans).toHaveLength(40)
     expect(w.knobs.rangeScans[20]).toEqual({ from: 40_001n, to: 42_000n })
     expect(old).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+  })
+
+  describe('one consistent, final view (reorgs)', () => {
+    /** Ours spent nonce 0 at block 110; the head at 130 (20 blocks deep); the range search behind (empty). */
+    const ranAt110 = async () => {
+      const r = await revertedStart()
+      spentAt(r.w, 110n)
+      r.w.knobs.rangeLogsLag = true
+      r.w.knobs.safeLogs = [execLog(r.old.safeTxHash!, 'relay', 110n)]
+      return r
+    }
+
+    test('a reorg between the nonce read and the read of X (X by number is now another block) concludes nothing', async () => {
+      const { w, acc, old } = await ranAt110()
+      // Block 110 by number is a fork block unknown to the node's state.
+      w.knobs.blockHashes.set(110n, keccak256(stringToHex('fork-110')))
+      await quiet(() => w.op.reconcileOwner(acc))
+      expect(old).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    })
+
+    test('X whose own parent is past the nonce too (a fork) does not cross it: open', async () => {
+      const { w, acc, old } = await ranAt110()
+      const forkParent = keccak256(stringToHex('fork-109'))
+      w.knobs.parents.set(110n, forkParent)
+      w.knobs.forks.set(forkParent, 1n)
+      await quiet(() => w.op.reconcileOwner(acc))
+      expect(old).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+    })
+
+    test('fewer than 12 confirmations: open; deep enough later: settled', async () => {
+      const { w, acc, old } = await ranAt110()
+      w.knobs.blockHead = 115n
+      await quiet(() => w.op.reconcileOwner(acc))
+      expect(old).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      w.knobs.blockHead = 122n
+      await quiet(() => w.op.reconcileOwner(acc))
+      expect(old).toMatchObject({ state: 'confirmed', block: 110 })
+    })
+
+    test('a range-search hit in a block that is not canonical any more is not taken', async () => {
+      const { w, acc, old } = await revertedStart()
+      spentAt(w, 110n)
+      // The log backend still serves a log from a block that was reorged out; the spending block cannot be read.
+      w.knobs.safeLogs = [{ ...execLog(old.safeTxHash!, 'orphaned', 110n), blockHash: keccak256(stringToHex('orphan-110')) }]
+      w.knobs.blockLogsDown = true
+      await quiet(() => w.op.reconcileOwner(acc))
+      expect(old).toMatchObject({ state: 'failed', code: 'OWNER_TX_ERROR' })
+      expect(acc.active).toBe(false)
+    })
   })
 
   test('a Stop revokes the grants of an unresolved start as well as the engine ones', async () => {
