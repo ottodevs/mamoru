@@ -519,7 +519,7 @@ try {
   const cdir = (cbo as unknown as { stateDir: string }).stateDir
   const jf = join(cdir, 'bridge-out.json')
   const jj = JSON.parse(readFileSync(jf, 'utf8'))
-  writeFileSync(jf, JSON.stringify({ ...jj, mints: { day: new Date(clock).toISOString().slice(0, 10), n: 100, wei: '0' } }))
+  writeFileSync(jf, JSON.stringify({ ...jj, mintDays: { [new Date(clock).toISOString().slice(0, 10)]: { n: 100, wei: '0' } } }))
   clock += 11_000
   const capped = make({ now: () => clock, minter: true, stateDir: cdir })
   await capped.tick()
@@ -528,7 +528,7 @@ try {
   // operator mints again instead of waiting forever.
   const jm = JSON.parse(readFileSync(jf, 'utf8'))
   jm.routes[cctx.accountKey] = { ...jm.routes[cctx.accountKey], mintTx: `0x${'cc'.repeat(32)}`, mintAt: new Date(clock - 11 * 60_000).toISOString() }
-  writeFileSync(jf, JSON.stringify({ ...jm, mints: undefined }))
+  writeFileSync(jf, JSON.stringify({ ...jm, mintDays: {} }))
   const cbo2 = make({ now: () => clock, minter: true, stateDir: cdir })
   clock += 11_000
   await cbo2.tick()
@@ -536,10 +536,21 @@ try {
   const baseAfter = await baseClient.readContract({ address: BASE_USDC, abi: erc20Abi, functionName: 'balanceOf', args: [csafe] })
   const mintRc = minted.mintTx ? await baseClient.getTransactionReceipt({ hash: minted.mintTx }) : null
   check(minted.mintTx !== `0x${'cc'.repeat(32)}`, 'the lost mint was replaced by a new one')
-  check(minted.state === 'filled' && minted.fillTx === minted.mintTx && baseAfter - baseBefore === BigInt(cr.outputUsdc), `minted on Base by the operator: +${fmt(baseAfter - baseBefore)} USDC at the same Safe, receiveMessage gas ${mintRc?.gasUsed}`)
+  check(minted.state === 'filled' && minted.fillTx === minted.mintTx && baseAfter - baseBefore === BigInt(cr.amountUsdc), `minted on Base by the operator: +${fmt(baseAfter - baseBefore)} USDC at the same Safe, receiveMessage gas ${mintRc?.gasUsed}`)
   clock += 11_000
   check((await cbo2.status(cctx)).route?.state === 'filled', 'status stays filled')
-  const mints = JSON.parse(readFileSync(jf, 'utf8')).mints
+  const nonces = JSON.parse(readFileSync(jf, 'utf8')).cctpNonces?.[cctx.accountKey] ?? []
+  check(nonces.length === 1 && nonces[0] === sliceHex(message, 12, 44).toLowerCase(), 'the minted nonce is recorded for the account')
+  // Replay: the same (genuine) attestation offered for another route of this account is refused.
+  const jr = JSON.parse(readFileSync(jf, 'utf8'))
+  jr.routes[cctx.accountKey] = { ...jr.routes[cctx.accountKey], id: 'replay', state: 'deposited', fillTx: undefined, mintTx: undefined }
+  writeFileSync(jf, JSON.stringify(jr))
+  clock += 11_000
+  const replay = make({ now: () => clock, minter: true, stateDir: cdir })
+  const nonceBefore = await baseClient.getTransactionCount({ address: baseRelayer.address })
+  await replay.tick()
+  check((await replay.status(cctx)).route?.state === 'deposited' && (await baseClient.getTransactionCount({ address: baseRelayer.address })) === nonceBefore, 'an earlier move\'s attestation for another route: not filled, nothing sent')
+  const mints = Object.values(JSON.parse(readFileSync(jf, 'utf8')).mintDays ?? {})[0] as { n: number; wei: string } | undefined
   const l1f = (mintRc as { l1Fee?: bigint | null } | null)?.l1Fee
   const real = mintRc ? mintRc.gasUsed * mintRc.effectiveGasPrice + (l1f ?? 0n) : -1n
   check(mints?.n === 1 && (l1f != null ? BigInt(mints.wei) === real : BigInt(mints.wei) >= real), `Base mint charged to the day: ${mints?.wei} wei (receipt cost ${real}, l1Fee ${l1f ?? 'absent: the bound stays charged'})`)

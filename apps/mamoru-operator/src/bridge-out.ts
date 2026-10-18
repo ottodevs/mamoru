@@ -161,7 +161,7 @@ export type AccountAbstraction = { bundler: L1Bundler; paymaster: Erc20Paymaster
 
 /** A route as kept on disk: what the owner sees, plus what reconciliation needs. */
 type Stored = BridgeOutRoute & { id: string; safe: Address; safeNonce: string; fromBlock: string; execStarted?: boolean; userOpTx?: Hex; cctp?: { maxFee: string; minFinality: number; message?: Hex }; mintAt?: string }
-type Journal = { routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mints?: { day: string; n: number; wei: string } }
+type Journal = { routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
 
 const NON_TERMINAL = new Set<BridgeOutRoute['state']>(['sending', 'deposited', 'unconfirmed', 'expired'])
 
@@ -334,7 +334,7 @@ export class BridgeOut {
     // An unreadable journal stops the operator from starting: starting empty would forget moves under way and the
     // day's spend.
     const j = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<Journal>
-    return { routes: j.routes ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, ...(j.mints ? { mints: j.mints } : {}) }
+    return { routes: j.routes ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {} }
   }
 
   private save(): void {
@@ -561,7 +561,7 @@ export class BridgeOut {
     const when = leg.fillSec >= 600 ? `in about ${Math.round(leg.fillSec / 60)} minutes` : `in about ${Math.max(leg.fillSec, 1)} s`
     const bridgeLine =
       leg.bridge === 'cctp'
-        ? `Bridge: Circle CCTP (native USDC), fee ${usdc(fee)} USDC; Mamoru pays the Base gas to receive it`
+        ? `Bridge: Circle CCTP (native USDC), fee at most ${usdc(fee)} USDC; Mamoru pays the Base gas to receive it`
         : `Bridge: Across, fee ${usdc(fee)} USDC`
     return {
       safe: live.safe,
@@ -569,7 +569,7 @@ export class BridgeOut {
       safeTxHash: challenge,
       summary: [
         `Move ${usdc(amount)} USDC from Ethereum to this same account on Base`,
-        `You receive ${usdc(leg.output)} USDC on Base, ${when}`,
+        `You receive ${leg.bridge === 'cctp' ? 'at least ' : ''}${usdc(leg.output)} USDC on Base, ${when}`,
         `${bridgeLine}. Ethereum gas: at most ${usdc(gasCap)} USDC from this amount; what is not used stays at your address on Ethereum`,
       ],
       expiresAt: new Date(expires).toISOString(),
@@ -592,7 +592,10 @@ export class BridgeOut {
     if (cctp.status === 'fulfilled') {
       for (const f of cctp.value) {
         if (f.finalityThreshold !== FINALITY_STANDARD && f.finalityThreshold !== FINALITY_FAST) continue
-        const maxFee = cctpMaxFee(amount, f.minimumFeeBps)
+        // A random tag of 1-999 base units (< 0.001 USDC) makes this burn's message unlike any earlier one of the
+        // account, so an attestation of an earlier burn can never complete it. maxFee is a ceiling: a Standard
+        // transfer executes with fee 0 and mints the whole amount.
+        const maxFee = cctpMaxFee(amount, f.minimumFeeBps) + 1n + BigInt(randomBytes(2).readUInt16BE(0) % 999)
         if (maxFee * 10_000n > amount * MAX_FEE_BPS) continue
         legs.push({ bridge: 'cctp', burn: { amount, maxFee, minFinality: f.finalityThreshold }, output: amount - maxFee, fillSec: f.finalityThreshold === FINALITY_FAST ? FAST_FILL_SEC : STANDARD_FILL_SEC })
       }
@@ -1085,10 +1088,18 @@ export class BridgeOut {
         logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, 'attestation not signed by the attesters enabled on Base, ignored')
         return
       }
+      // ... and not the attestation of an earlier move of this account (its burns differ by the maxFee tag; this is
+      // the second lock): a nonce this account already completed never completes another route.
+      const done = this.journal.cctpNonces?.[accountKey] ?? []
+      if (done.includes(msg.nonce.toLowerCase())) {
+        logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, 'attestation of an earlier move of this account, ignored')
+        return
+      }
       // A used nonce of an authenticated message of this burn: the transfer was minted to this Safe (anyone may
       // submit it; the message fixes the recipient and amount).
       const used = await base.client.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: messageTransmitterV2Abi, functionName: 'usedNonces', args: [msg.nonce] })
       if (used !== 0n) {
+        this.completed(accountKey, msg.nonce)
         r.state = 'filled'
         return
       }
@@ -1097,9 +1108,11 @@ export class BridgeOut {
         logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, 'Base gas above the mint ceiling, minting later')
         return
       }
-      // The day's mint budget, all accounts: charged at the bound before the send, settled to the real cost after.
+      // The mint budget of the day the mint is admitted on, all accounts. Every charge of this mint (the estimate,
+      // the relayer's signed bound before the broadcast, the receipt's cost after) goes to that same day's record,
+      // and the cap is checked against it before the broadcast, even if the send waited past midnight.
       const day = this.day()
-      const m = this.journal.mints && this.journal.mints.day === day ? this.journal.mints : { day, n: 0, wei: '0' }
+      const m = this.mintDay(day)
       // A first estimate for the admission; the relayer's own bound (gas at its signed maxFeePerGas plus twice the
       // L1 data fee) replaces it before the broadcast, and the receipt's real cost (L1 data fee included) after.
       const estimate = MINT_GAS * price * 2n
@@ -1107,21 +1120,14 @@ export class BridgeOut {
         logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, 'Base mint budget for today used up, minting tomorrow')
         return
       }
-      let charged = estimate
-      const charge = (wei: bigint) => {
-        // Settled into the day it was admitted on only: after midnight the new day's record is not touched.
-        const cur = this.journal.mints
-        if (!cur || cur.day !== day) {
-          charged = wei
-          return
-        }
+      let charged = 0n
+      const charge = (wei: bigint, dn = 0) => {
+        const cur = this.mintDay(day)
         const next = BigInt(cur.wei) - charged + wei
-        this.journal.mints = { day, n: cur.n, wei: (next > 0n ? next : 0n).toString() }
+        this.setMintDay(day, { n: cur.n + dn, wei: next > 0n ? next : 0n })
         charged = wei
-        this.save()
       }
-      this.journal.mints = { day, n: m.n + 1, wei: (BigInt(m.wei) + estimate).toString() }
-      this.save()
+      charge(estimate, 1)
       let broadcast = false
       let sent: { hash: Hex; receipt: TransactionReceipt }
       try {
@@ -1129,9 +1135,9 @@ export class BridgeOut {
           { to: MESSAGE_TRANSMITTER_V2, data: receiveMessageData(att.message, att.attestation), gas: MINT_GAS },
           undefined,
           (maxFeeWei) => {
-            // The relayer's real bound, before anything is broadcast: over the cap, the send stops here.
+            // The relayer's real bound, before anything is broadcast: over the admission day's cap, it stops here.
             charge(maxFeeWei)
-            if (BigInt(this.journal.mints!.wei) > MINT_BUDGET_WEI) throw new MintBudget()
+            if (BigInt(this.mintDay(day).wei) > MINT_BUDGET_WEI) throw new MintBudget()
           },
           (h) => {
             // The mint's hash is on disk before the broadcast.
@@ -1143,14 +1149,7 @@ export class BridgeOut {
         )
       } catch (e) {
         // Nothing was signed for broadcast: the day gets its count and charge back.
-        if (!broadcast) {
-          charge(0n)
-          const cur = this.journal.mints
-          if (cur && cur.day === day && cur.n > 0) {
-            this.journal.mints = { ...cur, n: cur.n - 1 }
-            this.save()
-          }
-        }
+        if (!broadcast) charge(0n, -1)
         if (e instanceof MintBudget) {
           logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, 'Base mint budget for today used up, minting tomorrow')
           return
@@ -1162,12 +1161,33 @@ export class BridgeOut {
       if (l1Fee !== undefined && l1Fee !== null) charge(sent.receipt.gasUsed * sent.receipt.effectiveGasPrice + l1Fee)
       r.mintTx = sent.hash
       if (sent.receipt.status === 'success') {
+        this.completed(accountKey, msg.nonce)
         r.state = 'filled'
         r.fillTx = sent.hash
       }
     } finally {
       this.minting.delete(accountKey)
     }
+  }
+
+  private mintDay(day: string): { n: number; wei: string } {
+    return this.journal.mintDays?.[day] ?? { n: 0, wei: '0' }
+  }
+
+  /** One day's mint record; days older than the last three are dropped. */
+  private setMintDay(day: string, v: { n: number; wei: bigint }): void {
+    const days = { ...(this.journal.mintDays ?? {}), [day]: { n: Math.max(0, v.n), wei: v.wei.toString() } }
+    for (const d of Object.keys(days).sort().slice(0, -3)) delete days[d]
+    this.journal.mintDays = days
+    this.save()
+  }
+
+  /** The CCTP nonces this account's moves completed (the last 50). */
+  private completed(accountKey: string, nonce: Hex): void {
+    const all = this.journal.cctpNonces ?? {}
+    all[accountKey] = [...(all[accountKey] ?? []), nonce.toLowerCase()].slice(-50)
+    this.journal.cctpNonces = all
+    this.save()
   }
 
   /** Across's answer for a deposit: filled on Base, expired (refund pending) or refunded to the account on Ethereum. */
