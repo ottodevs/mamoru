@@ -1,7 +1,11 @@
 import { decodeAbiParameters, hexToBigInt, isAddressEqual, size, slice, toFunctionSelector, type Hex } from 'viem'
 import type { Address, ReasonCode } from '@mamoru/domain'
 import type { ResolvedParamRule, SessionGrant } from '@mamoru/policy'
+import type { RegistryName } from '@mamoru/registry'
 import { CALLTYPE_BATCH, CALLTYPE_SINGLE, EXECTYPE_DEFAULT, type Execution } from '../safe/index.ts'
+import { checkActionPolicyCall, type ActionPolicyPoolConfig, type ActionPolicyReads, type ActionPolicySpend, type ActionPolicySpendAcc } from './action-policy.ts'
+
+export type { ActionPolicyPoolConfig, ActionPolicyReads, ActionPolicySpend } from './action-policy.ts'
 
 const SEL_EXECUTE = toFunctionSelector('function execute(bytes32,bytes)')
 const SEL_EXECUTE_FROM_EXECUTOR = toFunctionSelector('function executeFromExecutor(bytes32,bytes)')
@@ -16,6 +20,13 @@ export class SessionLedger {
   private readonly grants = new Map<string, KnownGrant>()
   private readonly uses = new Map<string, number>()
   private readonly cumulative = new Map<string, bigint>()
+  // Spec 007 (#151) T4: the action-policy pools this engine watches (config known off chain — the contract has no
+  // public getter for Budget), the freshest TWAP/Spend reads for each, and the tokenIds admitted per pool (the
+  // engine's own allowedTokenIds/onMinted). Keyed by RegistryName, like `SessionGrant.pool`: a v4 grant is always
+  // single-pool, so precheck never needs to resolve an on-chain pool address to look one of these up.
+  private readonly actionPools = new Map<RegistryName, ActionPolicyPoolConfig>()
+  private readonly actionReads = new Map<RegistryName, ActionPolicyReads>()
+  private readonly admitted = new Map<bigint, RegistryName>()
 
   activate(permissionId: Hex, grant: SessionGrant): void {
     this.grants.set(permissionId.toLowerCase(), { permissionId, grant, revoked: false })
@@ -78,11 +89,46 @@ export class SessionLedger {
     return { used: this.usesOf(permissionId), limit: known.grant.userOp.usageLimit, spentBps }
   }
 
+  // ---------------------------------------------------------------- spec 007 T4: action-policy watch state
+
+  /** Registers (or updates) the config of a pool covered by a deployed MamoruActionPolicy. Idempotent: call it
+   * every review a covered pool is touched, same as `watchActionPolicyPool` naming suggests — cheap, no RPC. */
+  watchActionPolicyPool(config: ActionPolicyPoolConfig): void {
+    this.actionPools.set(config.pool, config)
+  }
+
+  actionPolicyPool(pool: RegistryName): ActionPolicyPoolConfig | undefined {
+    return this.actionPools.get(pool)
+  }
+
+  /** The fresh TWAP tick + on-chain Spend/generation reads for `pool` (one `observe` + one `spendOf` +
+   * `generationOf` eth_call, made by the caller right before precheck — see action-policy.ts's file header). */
+  syncActionPolicyReads(pool: RegistryName, reads: ActionPolicyReads): void {
+    this.actionReads.set(pool, reads)
+  }
+
+  actionPolicyReads(pool: RegistryName): ActionPolicyReads | undefined {
+    return this.actionReads.get(pool)
+  }
+
+  /** A tokenId minted through `MamoruActionPolicy.mint` for `pool` (mirrors the contract's `admittedPool`,
+   * written only when the engine's own `enter_mint` confirms under a v4 pool — see engine.ts's `afterConfirmed`). */
+  admitTokenId(tokenId: bigint, pool: RegistryName): void {
+    this.admitted.set(tokenId, pool)
+  }
+
+  isAdmitted(tokenId: bigint, pool: RegistryName): boolean {
+    return this.admitted.get(tokenId) === pool
+  }
+
   clone(): SessionLedger {
     const l = new SessionLedger()
     for (const [k, v] of this.grants) l.grants.set(k, { ...v })
     for (const [k, v] of this.uses) l.uses.set(k, v)
     for (const [k, v] of this.cumulative) l.cumulative.set(k, v)
+    for (const [k, v] of this.actionPools) l.actionPools.set(k, v)
+    for (const [k, v] of this.actionReads) l.actionReads.set(k, v)
+    for (const [k, v] of this.admitted) l.admitted.set(k, v)
     return l
   }
 }
@@ -204,6 +250,10 @@ export function precheck(op: SessionUserOp, ctx: { chainId: number; now: number;
   if ('code' in decoded) return deny(decoded.code, decoded.detail, permissionId)
 
   const spent = new Map<string, bigint>()
+  // Spec 007 (#151) T4: MamoruActionPolicy is added as a SECOND policy next to UniActionPolicy (the grant-level
+  // rules above) on a v4 grant's actions; every policy of an action must pass, so this accumulates (c)'s budget
+  // charge across the whole batch the way `_spendOk` does in storage, call by call.
+  const apSpent: ActionPolicySpendAcc = new Map()
   for (const c of decoded.calls) {
     if (c.value > 0n) return deny('POLICY_DENIED_VALUE', `native value to ${c.target}`, permissionId)
     if (isAddressEqual(c.target, g.account)) return deny('POLICY_DENIED_TARGET', 'call to the account itself', permissionId)
@@ -217,6 +267,15 @@ export function precheck(op: SessionUserOp, ctx: { chainId: number; now: number;
         const total = ctx.ledger.usedOf(key) + (spent.get(key) ?? 0n) + v
         if (total > rule.cumulativeLimit) return deny('POLICY_DENIED_CUMULATIVE', `${a.action.signature} ${rule.field}`, permissionId)
         spent.set(key, (spent.get(key) ?? 0n) + v)
+      }
+    }
+    if (g.pool) {
+      const apConfig = ctx.ledger.actionPolicyPool(g.pool)
+      if (apConfig) {
+        const pool = g.pool
+        const apReads = ctx.ledger.actionPolicyReads(pool)
+        const res = checkActionPolicyCall(c, apConfig, apReads, ctx.now, apSpent, (tokenId) => ctx.ledger.isAdmitted(tokenId, pool))
+        if (!res.ok) return deny(res.code, res.detail, permissionId)
       }
     }
   }

@@ -41,6 +41,11 @@ export const REASON_CODES = [
   'POLICY_DENIED_CALLTYPE',
   'POLICY_DENIED_POSITION',
   'POLICY_TARGET_NOT_IN_REGISTRY',
+  // Spec 007 (otto/mamoru#151) T4: precheck's own mirror of MamoruActionPolicy.checkAction (a)-(c), so a call the
+  // deployed policy would refuse at validation is refused here first, before the userOp is ever signed and sent.
+  'POLICY_PRICE_BAND',
+  'POLICY_NOT_ADMITTED',
+  'POLICY_BUDGET',
   // Puertas
   'PURGA_OK',
   'PURGA_NOT_APPLICABLE',

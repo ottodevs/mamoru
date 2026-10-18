@@ -99,8 +99,19 @@ export function ownableValidatorInitData(sessionKey: Address): Hex {
   return encodeAbiParameters([{ type: 'uint256' }, { type: 'address[]' }], [1n, [sessionKey]])
 }
 
-/** Maps a policy grant onto the Smart Sessions Session struct, with the published policies only. */
-export function toSmartSession(grant: SessionGrant): SmartSessionStruct {
+/**
+ * Spec 007 (otto/mamoru#151): a second action policy next to UniActionPolicy, same `initData` on every action of
+ * the grant it is passed to (`MamoruActionPolicy.Init` is per-pool, not per-action — see `@mamoru/policy`'s v4
+ * grant builders, which carry the policy's deployed address: it is a runtime parameter, never hardcoded here).
+ */
+export type SecondActionPolicy = { policy: Address; initData: Hex }
+
+/**
+ * Maps a policy grant onto the Smart Sessions Session struct, with the published policies only. `secondPolicy`
+ * (spec 007, T2) adds one more `PolicyData` after UniActionPolicy's on every action; omitted, this is byte-for-byte
+ * what every live grant (v2/v3) has always produced.
+ */
+export function toSmartSession(grant: SessionGrant, secondPolicy?: SecondActionPolicy): SmartSessionStruct {
   return {
     sessionValidator: address('OwnableValidator'),
     sessionValidatorInitData: ownableValidatorInitData(grant.sessionKey),
@@ -116,7 +127,9 @@ export function toSmartSession(grant: SessionGrant): SmartSessionStruct {
     actions: grant.actions.map((a) => ({
       actionTargetSelector: a.selector,
       actionTarget: a.targetAddress,
-      actionPolicies: [{ policy: address('UniActionPolicy'), initData: uniActionInitData(a) }],
+      actionPolicies: secondPolicy
+        ? [{ policy: address('UniActionPolicy'), initData: uniActionInitData(a) }, { policy: secondPolicy.policy, initData: secondPolicy.initData }]
+        : [{ policy: address('UniActionPolicy'), initData: uniActionInitData(a) }],
     })),
     permitERC4337Paymaster: grant.permitERC4337Paymaster,
   }
@@ -140,7 +153,7 @@ export function activationCall(
   grants: SessionGrant[],
   revokedPermissionIds: readonly Hex[],
 ): { to: Address; data: Hex; permissionIds: Hex[] } {
-  const sessions = grants.map(toSmartSession)
+  const sessions = grants.map((g) => toSmartSession(g))
   const permissionIds = sessions.map(permissionIdOf)
   const revoked = new Set(revokedPermissionIds.map((p) => p.toLowerCase()))
   for (const id of permissionIds) {

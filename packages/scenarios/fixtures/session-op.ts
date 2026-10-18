@@ -1,4 +1,5 @@
 import { concat, decodeErrorResult, encodeFunctionData, parseEventLogs, slice, type Hex, type TransactionReceipt } from 'viem'
+import type { PrivateKeyAccount } from 'viem/accounts'
 import { toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import type { Address } from '@mamoru/domain'
 import { address, entryPointV07Abi, nameOf, safe7579Abi, smartSessionErrorsAbi, smartSessionValidateAbi } from '@mamoru/registry'
@@ -34,6 +35,9 @@ export type SessionOpOptions = {
   /** Where the userOp is submitted. Default: world.lab. */
   submitTo?: Lab
   lane?: number
+  /** Signs the userOp with this key instead of `acct.sessionKey` — a renewal activates a fresh session key
+   * (spec 007 "(d) renewal") before the fixture's `acct.sessionKey` is ever reassigned to it. */
+  sessionKey?: PrivateKeyAccount
 }
 
 export type Verdict = 'INCLUDED' | 'CHAIN_REJECTED_VALIDATION' | 'CHAIN_REVERTED_EXECUTION'
@@ -136,7 +140,7 @@ async function buildAndSend(
   const signChainId = opts.signChainId ?? world.lab.chainId
   const hash = userOpHash(op, signChainId)
   const pid = opts.permissionId ?? grant.permissionId
-  const inner = await sessionKeySignature(acct.sessionKey, hash)
+  const inner = await sessionKeySignature(opts.sessionKey ?? acct.sessionKey, hash)
   const signature = concat([opts.signatureMode === 'enable' ? SMART_SESSION_MODE_ENABLE : '0x00', pid, inner])
   op = { ...op, signature }
 
