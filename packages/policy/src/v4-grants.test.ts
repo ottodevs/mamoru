@@ -166,6 +166,20 @@ describe('v4 grant shapes', () => {
     expect(all.reduce((n, g) => n + g.actions.length, 0)).toBe(36)
   })
 
+  // T6 audit H-2: a v4 grant is only as strict as v2/v3 WITH MamoruActionPolicy in the same session (the merged
+  // manage-any's volatile-token approve has no UniActionPolicy spender rule, and the caps follow T_p = 10 x Cp).
+  // Every v4 builder must mark its output so `toSmartSession` (@mamoru/account/sessions) refuses to encode it
+  // without a real second policy — see sessions.test.ts's "authorization-parity guard" suite for the throw itself.
+  test('every v4 builder marks requiresActionPolicy; instantiateGrant carries it onto the resolved SessionGrant', () => {
+    for (const pool of Object.values(V4_POOLS)) {
+      expect(enterSwapV4Grant(pool, 1).requiresActionPolicy).toBe(true)
+      expect(enterMintV4Grant(pool, 1).requiresActionPolicy).toBe(true)
+      expect(manageAnyV4Grant(pool, 1).requiresActionPolicy).toBe(true)
+    }
+    const resolved = instantiateGrant(conservadorLiveV4, 'manage-any:pool:USDC/cbBTC/500', ctxFor(V4_POOLS.btc))
+    expect(resolved.requiresActionPolicy).toBe(true)
+  })
+
   test('conservadorLiveV4 carries all three pools and is not registered in POLICIES (not wired live)', async () => {
     expect(conservadorLiveV4.session.grants).toHaveLength(9) // 3 grants x 3 pools
     const { POLICIES } = await import('./policies.ts')

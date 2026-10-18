@@ -61,6 +61,15 @@ export type GrantTemplate = {
    */
   usageByCap?: readonly UsageTier[]
   actions: ActionRuleTemplate[]
+  /**
+   * Spec 007 (otto/mamoru#151) T7: set only by the v4 grant builders (`enterSwapV4Grant`/`enterMintV4Grant`/
+   * `manageAnyV4Grant`, `packages/policy/src/v4-grants.ts`) and carried through `instantiateGrant` onto the
+   * resolved `SessionGrant`. A v4 grant is only as strict as v2/v3 WITH MamoruActionPolicy in the same SmartSession
+   * (the merged manage-any's volatile-token approve has no UniActionPolicy spender rule, and the cumulative caps
+   * follow T_p = 10 x Cp): `toSmartSession` (`@mamoru/account/sessions`) refuses to encode a grant with this flag
+   * set unless it is given a real `secondPolicy`. Absent (every v2/v3 grant): no change to today's behaviour.
+   */
+  requiresActionPolicy?: true
 }
 
 export type UsageTier = { upToUsdc: bigint; usageLimit: number }
@@ -288,4 +297,6 @@ export type SessionGrant = {
   fallbackAction: 'none'
   tokenId?: bigint
   actions: ResolvedActionRule[]
+  /** See `GrantTemplate.requiresActionPolicy` — carried through from the template by `instantiateGrant`. */
+  requiresActionPolicy?: true
 }

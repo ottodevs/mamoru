@@ -302,16 +302,16 @@ function manageAnyV4Actions(p: V4PoolSpec): ActionRuleTemplate[] {
 }
 
 export function enterSwapV4Grant(p: V4PoolSpec, usageLimit: number): GrantTemplate {
-  return { name: 'enter-swap', pool: p.pool, perPosition: false, usageLimit, actions: enterSwapV4Actions(p) }
+  return { name: 'enter-swap', pool: p.pool, perPosition: false, usageLimit, actions: enterSwapV4Actions(p), requiresActionPolicy: true }
 }
 
 export function enterMintV4Grant(p: V4PoolSpec, usageLimit: number): GrantTemplate {
-  return { name: 'enter-mint', pool: p.pool, perPosition: false, usageLimit, actions: enterMintV4Actions(p) }
+  return { name: 'enter-mint', pool: p.pool, perPosition: false, usageLimit, actions: enterMintV4Actions(p), requiresActionPolicy: true }
 }
 
 /** The merged manage-any (spec 007: subsumes convert-any; the per-position `manage` grant is unnecessary in v4). */
 export function manageAnyV4Grant(p: V4PoolSpec, usageLimit: number): GrantTemplate {
-  return { name: 'manage-any', pool: p.pool, perPosition: false, usageLimit, actions: manageAnyV4Actions(p) }
+  return { name: 'manage-any', pool: p.pool, perPosition: false, usageLimit, actions: manageAnyV4Actions(p), requiresActionPolicy: true }
 }
 
 export type V4Usage = { enterSwap: number; enterMint: number; manageAny: number }
@@ -392,7 +392,9 @@ export function retargetToPolicy(grant: SessionGrant, mamoruPolicy: Address): Se
     }
     return a
   })
-  return { ...grant, actions }
+  // A retargeted mint/approve points AT the deployed policy: `toSmartSession` must never encode this grant without
+  // that same policy as its second action policy (the authorization-parity guard, see `GrantTemplate.requiresActionPolicy`).
+  return { ...grant, actions, requiresActionPolicy: true }
 }
 
 // ---------------------------------------------------------------- gas model + splitter (spec 007 Tasks T2 (b))

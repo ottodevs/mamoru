@@ -3,9 +3,11 @@ import {
   encodeAbiParameters,
   encodeFunctionData,
   encodePacked,
+  isAddressEqual,
   keccak256,
   pad,
   toHex,
+  zeroAddress,
   type LocalAccount,
 } from 'viem'
 import { getUserOperationHash, toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
@@ -110,8 +112,19 @@ export type SecondActionPolicy = { policy: Address; initData: Hex }
  * Maps a policy grant onto the Smart Sessions Session struct, with the published policies only. `secondPolicy`
  * (spec 007, T2) adds one more `PolicyData` after UniActionPolicy's on every action; omitted, this is byte-for-byte
  * what every live grant (v2/v3) has always produced.
+ *
+ * Spec 007 (otto/mamoru#151) T7, authorization-parity guard (background security review): a grant the v4 builders
+ * marked `requiresActionPolicy` (`packages/policy/src/v4-grants.ts`'s `enterSwapV4Grant`/`enterMintV4Grant`/
+ * `manageAnyV4Grant`/`retargetToPolicy`) is only as strict as v2/v3 WITH MamoruActionPolicy in the same session:
+ * the merged manage-any's volatile-token approve carries no UniActionPolicy spender rule, and its cumulative caps
+ * follow T_p = 10 x Cp — both rely on the second policy's own checks. Encoding such a grant without a real
+ * `secondPolicy` (or with the zero address, the same as none) would silently produce a looser session than v2/v3;
+ * refused here, the one place every grant goes through on its way to an owner op (`activationCall` below included).
  */
 export function toSmartSession(grant: SessionGrant, secondPolicy?: SecondActionPolicy): SmartSessionStruct {
+  if (grant.requiresActionPolicy && (!secondPolicy || isAddressEqual(secondPolicy.policy, zeroAddress))) {
+    throw new ReasonError('SESSION_ACTION_POLICY_MISSING', `${grant.name}${grant.pool ? `:${grant.pool}` : ''}: a v4 grant needs MamoruActionPolicy as its second action policy`)
+  }
   return {
     sessionValidator: address('OwnableValidator'),
     sessionValidatorInitData: ownableValidatorInitData(grant.sessionKey),

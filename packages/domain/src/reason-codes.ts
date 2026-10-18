@@ -31,6 +31,11 @@ export const REASON_CODES = [
   'INVENTORY_FULL',
   'SESSION_FOREIGN_USE',
   'SESSION_PERMISSION_ID_REUSED',
+  // Spec 007 (otto/mamoru#151) T7: a v4 grant (`requiresActionPolicy`) is only as strict as v2/v3 WITH
+  // MamoruActionPolicy in the same session (its merged manage-any has no UniActionPolicy spender rule for the
+  // volatile-token approve, and its cumulative caps follow T_p = 10 x Cp); `toSmartSession` refuses to encode one
+  // without a real second policy, a programming error that must never reach the chain.
+  'SESSION_ACTION_POLICY_MISSING',
   // Pre-chequeo de política en el motor
   'POLICY_DENIED_TARGET',
   'POLICY_DENIED_RECIPIENT',
