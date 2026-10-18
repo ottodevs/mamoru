@@ -29,6 +29,8 @@ case ":${MAMORU_FLOCK_HELD:-}:" in
     exit "$rc"
     ;;
 esac
+work_lock="$HOME/.local/state/mamoru-coord/op-work.lock"
+if ! flock -n "$work_lock" true; then echo "refusing: a command of an earlier coordinator operation is still running (op-work.lock)" >&2; exit 1; fi
 bun "$root/scripts/release/coord.ts" assert || exit 1
 
 state="$(gh pr view "$pr" -R "$repo" --json state,baseRefName,headRefName,isCrossRepository \

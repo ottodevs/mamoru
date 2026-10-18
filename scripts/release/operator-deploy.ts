@@ -51,27 +51,25 @@ async function metrics(): Promise<MetricsView | null> {
   }
 }
 
-// journalctl reads `@<epoch seconds>` as an instant: no time zone to get wrong.
-const stamp = () => `@${Math.floor(Date.now() / 1000) - 1}`
-
 /**
  * Puts `target` in place and waits for it: checkout, its own dependencies when the lockfile differs from what is
  * installed, restart, health. Never throws: any failing step is the answer.
  */
 async function bringUp(target: string, installDeps: boolean): Promise<{ ok: boolean; why: string }> {
-  const since = stamp()
   try {
-    // Each state change holds WORK_LOCK itself: if this script dies mid-way, what it started keeps the lock.
-    await $`flock ${WORK_LOCK} git -C ${opDir} checkout -q --detach ${target}`
-    if (installDeps) await $`flock ${WORK_LOCK} bun install --frozen-lockfile`.cwd(opDir).quiet()
-    await $`flock ${WORK_LOCK} systemctl --user restart ${unit}`
+    // One process for the whole change, under WORK_LOCK: if this script dies mid-way, the checkout, install and
+    // restart still run to the end holding the lock, and nothing starts beside them.
+    const steps = [`git -C '${opDir}' checkout -q --detach ${target}`, ...(installDeps ? [`(cd '${opDir}' && bun install --frozen-lockfile)`] : []), `systemctl --user restart ${unit}`].join(' && ')
+    await $`flock ${WORK_LOCK} sh -c ${steps}`.quiet()
   } catch (e) {
     return { ok: false, why: `step failed: ${String(e instanceof Error ? e.message : e).slice(0, 200)}` }
   }
+  // This boot's own log lines only: the invocation the restart just started.
+  const invocation = (await $`systemctl --user show -p InvocationID --value ${unit}`.quiet().nothrow().text()).trim()
   const deadline = Date.now() + BOOT_TIMEOUT_MS
   while (Date.now() < deadline) {
     await Bun.sleep(3_000)
-    const journal = await $`journalctl --user -u ${unit} --since ${since} --no-pager -o cat`.quiet().nothrow().text()
+    const journal = invocation ? await $`journalctl --user _SYSTEMD_INVOCATION_ID=${invocation} --no-pager -o cat`.quiet().nothrow().text() : ''
     const fatal = fatalLines(journal)
     if (fatal.length) return { ok: false, why: `boot journal: ${fatal[0]!.slice(0, 200)}` }
     if (healthy(await metrics(), target, wasLive)) return { ok: true, why: '' }
@@ -93,7 +91,9 @@ const before = (await metrics()) ?? {}
 const wasLive = before.live ?? true
 
 await fetchRefs(root, 'main')
-const running = (await $`git -C ${opDir} rev-parse HEAD`.text()).trim()
+// What runs is what /metrics says, not what is checked out: a run that died after its checkout leaves the two apart.
+const runningShort = before.gitSha ?? refuse('the operator does not answer /metrics: find out why first (journalctl --user -u mamoru-operator)')
+const running = (await $`git -C ${root} rev-parse ${`${runningShort}^{commit}`}`.text()).trim()
 const full = sha.length === 40 ? sha : refuse('the sha is written in full, all 40 characters')
 const why = refuseDeploy({
   sha: full,

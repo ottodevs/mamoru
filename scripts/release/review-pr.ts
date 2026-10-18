@@ -79,6 +79,9 @@ const pr = JSON.parse(await $`gh pr view ${number} -R ${REPO} --json title,body,
 }
 if (pr.state !== 'OPEN') stop(`PR #${number} is ${pr.state}`)
 const diff = await $`gh pr diff ${number} -R ${REPO}`.text()
+// The diff and the checkout must be the same revision: a push in between would review one against the other.
+const headAfter = (await $`gh pr view ${number} -R ${REPO} --json headRefOid -q .headRefOid`.text()).trim()
+if (headAfter !== pr.headRefOid) stop(`PR #${number} moved (${pr.headRefOid.slice(0, 7)} -> ${headAfter.slice(0, 7)}) while the review was being prepared: run it again`)
 const previous = pr.comments.map((c) => c.body).filter((b) => /independent review|VERDICT|APTO|NO-GO/i.test(b)).slice(-2).map((b) => b.slice(0, 12_000))
 
 const work = mkdtempSync(join(tmpdir(), `review-${number}-`))

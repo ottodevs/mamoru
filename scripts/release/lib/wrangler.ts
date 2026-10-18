@@ -1,6 +1,7 @@
 // Thin wrapper over `wrangler` for the release scripts. The environment is always explicit: ''
 // targets the top-level (production) config, 'beta' targets env.beta. CLOUDFLARE_ENV is stripped
 // from the child process env on every call so it can never silently override `--env`.
+import { WORK_LOCK } from './lease.ts'
 import { $ } from 'bun'
 
 export type WranglerEnv = '' | 'beta'
@@ -43,7 +44,8 @@ export function describeFailure(err: unknown): string {
 /** Runs `wrangler deploy` for the given (explicit) environment and returns stdout plus the new version id. */
 export async function deploy(appDir: string, env: WranglerEnv): Promise<{ output: string; versionId: string | null }> {
   // quiet(): the output is returned and printed by the caller, and on failure it is in the error (describeFailure).
-  const output = await $`bunx wrangler deploy ${envArgs(env)}`.cwd(appDir).env(childEnv()).quiet().text()
+  // Under the work lock (lib/lease.ts): a publish outlives a killed release script with the lock still held.
+  const output = await $`flock ${WORK_LOCK} bunx wrangler deploy ${envArgs(env)}`.cwd(appDir).env(childEnv()).quiet().text()
   // The deploy is done here: a failed version lookup must not turn it into a "deploy failed".
   const versionId = output.match(/Current Version ID:\s*(\S+)/)?.[1] ?? (await currentVersionId(appDir, env).catch(() => null))
   return { output, versionId }
