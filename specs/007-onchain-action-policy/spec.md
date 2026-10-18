@@ -239,6 +239,47 @@ session key that was ever enabled for the account; the operator deletes the old 
 chain, the generation retires every older config of this policy even if a `removeSession` were missing. The v2/v3
 grants do not consult this policy, so their `removeSession` in the same batch is required.
 
+## T5: bands hold, budgets do not; the guardian (18-oct)
+
+Lab, branch `lab/151-t5-year` (`9358d6d`, `packages/backtest/cli/t5-bands-budgets.ts`): 13 approval-years from
+2024-09-30 to 2026-10-16 (hourly, public RPC backfill) plus the 12 native-resolution Lab windows, production
+`decide`. An independent T5 run of the same day (`9255528`, `lab/151-t5-bands`) reached the same conclusion.
+
+- **Bands hold.** The engine's own #46 rule already waits above 100 ticks, so a band of 100 adds no wait on chain;
+  what adds waits is the engine's 0.8 margin (T3). Band 125 on btc/risk (0.8 x 125 = 100 = #46): the engine never
+  waits longer than today. Stables 20 ticks: exits that wait drop from 36 % to 13 %, max 50 min.
+- **Budgets do not, as specified.** Real engine turnover is 10-73 x C_p per approval-year (mostly re-mints; risk at
+  1,000 USDC turns 2.3x more than at 100k). `T_p = 3C` is spent in 19-54 days; no `T_p` is both "never spent in a
+  year" and a useful bound: a no-tap `T_p` (60/42/110 x C_p) puts the never-revoked bound at 70-92 % of the cap.
+- `W_p` per day measured at 1.6x the worst day: stables 8, btc 3, risk 5 x C_p.
+
+| Configuration | Revoked in 1 day | 7 days | Never revoked |
+|---|---|---|---|
+| Spec draft (10/100/100, W=1, T=3) | 1.8 % | 4.3 % | 4.3 % (but spent in 19-54 days: a tap every few weeks) |
+| A: no-tap year (20/125/125, W 8/3/5, T 60/42/110) | 7.2 % | 45 % | 92 % |
+| B: quarterly T (15/12/30), top-up rides on taps | 7.2 % | 26 % | 26 % |
+| **C: A + guardian** | **7.2 %** (the guardian makes "revoked" minutes, not days) | | A's 92 % only if the guardian also fails |
+
+### Guardian (revoke-only)
+
+`GUARDIAN` is an immutable constructor address (`address(0)` = none). It can `pause(account)` and
+`unpause(account)`; while paused, `checkAction` refuses every action of the account and the policy's own `mint`
+and `increase` revert `AccountPaused`. A renewal (higher generation) ends a pause by itself. It cannot initialize or
+change an envelope (SmartSession-only), move a token or touch a position: a compromised guardian can only stop the
+engine, and the owner's passkey path is not behind this policy, so the owner can always withdraw. Tests:
+`test_guardianPauseRefusesEverySessionAction`, `test_onlyGuardianPausesAndItCannotWiden`,
+`test_renewalEndsAPause`, `test_pauseIsPerAccount`, `test_noGuardianMeansNoPause` (33/33 with T1).
+
+The guardian key lives apart from the operator (another host, no session keys) and pauses on signals that need no
+judgement: a userOp of the account sent by any bundler other than Mamoru's relayer (every legitimate one is ours),
+spend above the expected rate, an execution price far from the TWAP. One-shot loss before it reacts is bounded by
+one window (`band x (V + 2W)`), the "1 day" column.
+
+**Recommendation (Ot decides):** C. Bands 20/125/125, `W_p` 8/3/5 x C_p per day, `T_p` at A's no-tap values as a
+backstop, guardian on. Zero tier-1 taps in a year for budgets, effective bound ~7 % of the cap instead of today's
+100 %. Lever to tighten it further: lower turnover (#171 increase instead of re-mint, #172 lazy re-range), then
+re-run T5 with both on and shrink `W_p`.
+
 ## One signature: the permission tiers (Ot, 18-oct)
 
 Goal: as automatic as possible, as few taps as possible, without giving up what the owner's signature protects.
@@ -370,7 +411,7 @@ Not tested: the other chains themselves (same Safe address, passkey verifier the
   so the engine computes its bounds at a narrower band (e.g. 0.8 x band): higher minimums, a tighter limit, still
   inside what the policy accepts a few blocks later.
 - T4 precheck mirrors (a)-(c) so a refused call is not sent.
-- T5 Lab: bands and budgets per pool against 2024-2026 data; how often exits wait.
+- T5 Lab: bands and budgets per pool against 2024-2026 data; how often exits wait. **Done** (above); re-run with #171 + #172 on.
 - T6 third-party audit of the contract (open question).
 - T7 deployment and the renew row: coordinator only, after T1-T6 and Ot's decision.
 

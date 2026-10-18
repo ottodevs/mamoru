@@ -49,6 +49,7 @@ contract MamoruActionPolicyTest is Test {
     uint256 constant FORK_BLOCK = 52_700_000;
 
     // packages/registry/base.json
+    address constant GUARDIAN = address(0x6A2D);
     address constant SMART_SESSION = 0x00000000002B0eCfbD0496EE71e01257dA0E37DE;
     address constant NPM = 0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1;
     address constant ROUTER = 0x2626664c2603336E57B271c5C0b26F421741e481;
@@ -72,7 +73,7 @@ contract MamoruActionPolicyTest is Test {
     function setUp() public {
         // Public Base endpoint with archive state; never the operator's provider key.
         vm.createSelectFork(vm.envOr("BASE_FORK_RPC_URL", string("https://mainnet.base.org")), FORK_BLOCK);
-        policy = new MamoruActionPolicy(SMART_SESSION, NPM, ROUTER, FACTORY);
+        policy = new MamoruActionPolicy(SMART_SESSION, NPM, ROUTER, FACTORY, GUARDIAN);
         deal(USDC, safe, 100_000e6);
         deal(CBBTC, safe, 1e8);
         _init(ID, 1, 60_000e6, 0.6e8, 180_000e6, 1.8e8);
@@ -543,6 +544,84 @@ contract MamoruActionPolicyTest is Test {
         // Admission survives the renewal: positions opened under the old approval stay manageable.
         _approvePolicy(1_000e6, 0.01e8);
         _exec(address(policy), inc);
+    }
+
+    // ------------------------------------------------------------ guardian: revoke-only pause
+
+    function test_guardianPauseRefusesEverySessionAction() public {
+        (uint256 tokenId,) = _mintThroughPolicy(20_000e6, 0.2e8);
+        (uint256 minOut, uint160 limit) = policy.swapBounds(safe, POOL_BTC, USDC, 1_000e6);
+        bytes memory swap = _swapData(USDC, CBBTC, 500, 1_000e6, minOut, limit);
+        bytes memory inc = _increaseData(tokenId, 1_000e6, 0.01e8);
+        bytes memory col = abi.encodeCall(INPMFull.collect, (CollectParams(tokenId, safe, 1, 1)));
+        assertEq(_check(ROUTER, swap), 0);
+
+        vm.prank(GUARDIAN);
+        policy.pause(safe);
+        assertTrue(policy.isPaused(safe));
+        assertEq(_check(ROUTER, swap), 1, "swap refused while paused");
+        assertEq(_check(address(policy), inc), 1, "increase refused while paused");
+        assertEq(_check(NPM, col), 1, "collect refused while paused");
+        _approvePolicy(1_000e6, 0.01e8);
+        vm.prank(safe);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.AccountPaused.selector, safe));
+        policy.increase(IncreaseLiquidityParams(tokenId, 1_000e6, 0.01e8, 0, 0, block.timestamp));
+        int24 sp = _spot(POOL_BTC);
+        MintParams memory m =
+            MintParams(USDC, CBBTC, 500, ((sp - 600) / 10) * 10, ((sp + 600) / 10) * 10, 1_000e6, 0.01e8, 0, 0, safe, block.timestamp);
+        vm.prank(safe);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.AccountPaused.selector, safe));
+        policy.mint(m);
+
+        // The owner's own path is not behind the policy: funds still move out of the Safe.
+        uint256 bal = IERC20Min(USDC).balanceOf(safe);
+        _exec(USDC, abi.encodeWithSelector(0xa9059cbb, makeAddr("ownerWallet"), bal));
+        assertEq(IERC20Min(USDC).balanceOf(safe), 0);
+
+        vm.prank(GUARDIAN);
+        policy.unpause(safe);
+        assertFalse(policy.isPaused(safe));
+        assertEq(_check(NPM, col), 0, "same envelope back after unpause");
+    }
+
+    function test_onlyGuardianPausesAndItCannotWiden() public {
+        vm.expectRevert(MamoruActionPolicy.OnlyGuardian.selector);
+        policy.pause(safe);
+        vm.prank(attacker);
+        vm.expectRevert(MamoruActionPolicy.OnlyGuardian.selector);
+        policy.unpause(safe);
+        // The guardian cannot initialize or change an envelope: that stays SmartSession-only.
+        vm.prank(GUARDIAN);
+        vm.expectRevert(MamoruActionPolicy.OnlySmartSession.selector);
+        policy.initializeWithMultiplexer(safe, ID, "");
+        vm.prank(GUARDIAN);
+        assertEq(policy.checkAction(ID, safe, ROUTER, 0, ""), 1);
+    }
+
+    function test_renewalEndsAPause() public {
+        vm.prank(GUARDIAN);
+        policy.pause(safe);
+        ConfigId fresh = ConfigId.wrap(bytes32(uint256(2)));
+        _init(fresh, 2, 60_000e6, 0.6e8, 180_000e6, 1.8e8);
+        assertFalse(policy.isPaused(safe), "the owner's renewal clears the pause");
+        (uint256 minOut, uint160 limit) = policy.swapBounds(safe, POOL_BTC, USDC, 1_000e6);
+        vm.prank(SMART_SESSION);
+        assertEq(policy.checkAction(fresh, safe, ROUTER, 0, _swapData(USDC, CBBTC, 500, 1_000e6, minOut, limit)), 0);
+    }
+
+    function test_pauseIsPerAccount() public {
+        vm.prank(GUARDIAN);
+        policy.pause(makeAddr("someoneElse"));
+        assertFalse(policy.isPaused(safe));
+        (uint256 minOut, uint160 limit) = policy.swapBounds(safe, POOL_BTC, USDC, 1_000e6);
+        assertEq(_check(ROUTER, _swapData(USDC, CBBTC, 500, 1_000e6, minOut, limit)), 0);
+    }
+
+    function test_noGuardianMeansNoPause() public {
+        MamoruActionPolicy p2 = new MamoruActionPolicy(SMART_SESSION, NPM, ROUTER, FACTORY, address(0));
+        vm.prank(address(0));
+        vm.expectRevert(MamoruActionPolicy.OnlyGuardian.selector);
+        p2.pause(safe);
     }
 
     // ------------------------------------------------------------ (d) renewal retires the old grant
