@@ -151,6 +151,21 @@ export function apply(w: World, p: Proposal, s: PoolSample, time: number, slippa
   }
   const pos = w.positions.find((x) => x.tokenId === p.tokenId)
   if (!pos) return { ok: false, detail: `no position ${p.tokenId}` }
+  if (p.kind === 'increase_liquidity') {
+    // otto/mamoru#171: the same quote as a mint, over the held position's range; it collects nothing.
+    if (pos.pool !== p.pool || pos.tickLower !== p.tickLower || pos.tickUpper !== p.tickUpper) return { ok: false, detail: `position ${p.tokenId} is not ${p.pool} [${p.tickLower}, ${p.tickUpper}]` }
+    let q
+    try {
+      q = quoteMint({ sqrtPriceX96: s.sqrtPriceX96, tickLower: p.tickLower, tickUpper: p.tickUpper, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, slippageBps })
+    } catch (err) {
+      if (err instanceof ReasonError) return { ok: false, detail: `${err.code}${err.detail ? `: ${err.detail}` : ''}` }
+      throw err
+    }
+    debit(w, e.token0!, q.amount0)
+    debit(w, e.token1!, q.amount1)
+    pos.liquidity += q.liquidity
+    return none
+  }
   const fees = { fees0: pos.owed0, fees1: pos.owed1 }
   // Every remaining kind starts with a collect to the account.
   credit(w, e.token0!, pos.owed0)

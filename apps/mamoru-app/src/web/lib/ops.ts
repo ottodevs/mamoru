@@ -7,7 +7,7 @@ const owner = (op: OpView) => op.opId.startsWith('own-')
 /** "USDC/cbBTC": the pool's pair, no spaces, matching the style history lines used before pools were tagged. */
 const pair = (pool: string) => pairLabel(pool).replace(/ /g, '')
 /** Engine op kind from its id (eng-…-enter_swap), or null for an owner op. */
-const engineKind = (op: OpView) => (owner(op) ? null : (/(enter_swap|enter_mint|harvest|close_position|convert)$/.exec(op.opId)?.[1] ?? null))
+const engineKind = (op: OpView) => (owner(op) ? null : (/(enter_swap|enter_mint|increase_liquidity|harvest|close_position|convert)$/.exec(op.opId)?.[1] ?? null))
 
 /** Failures that only mean another op took over (a newer approval, a stop): nothing for the user to do. */
 const INTERNAL_FAILURES = new Set(['ARMED_SUPERSEDED', 'STOPPED', 'ALREADY_ACTIVE'])
@@ -64,6 +64,10 @@ export function opLine(op: OpView): string {
         const from = op.amountIn ? formatAmount(op.amountIn, op.tokenIn) : op.tokenIn
         return done ? `Swapped ${from} to ${op.tokenOut}` : `Swapping ${from} to ${op.tokenOut}`
       }
+      if (engineKind(op) === 'increase_liquidity') {
+        if (!op.pool) return done ? 'Added to a position' : 'Adding to a position'
+        return done ? `Added to ${pair(op.pool)} position` : `Adding to ${pair(op.pool)} position`
+      }
       if (!op.pool) return done ? 'Opened a position' : 'Opening a position'
       return done ? `Opened ${pair(op.pool)} position` : `Opening ${pair(op.pool)} position`
     case 'reduce': {
@@ -89,8 +93,8 @@ export function opTone(op: OpView): 'done' | 'pending' | 'retry' {
  * otto/mamoru#131 asked whether this ever shows genuine duplicates (retries, a top-up into a bucket that
  * already has a position). It does not, by design: a retried failure is already collapsed server-side
  * (`collapseFailed` in the operator, by kind+code, before it ever reaches here), and a top-up mints a second,
- * real position (its own tokenId) rather than reusing the first one, so two rows for two deposits is correct,
- * not a duplicate. The one known way a stale row can linger — an engine op left `submitted` across an operator
+ * real position (its own tokenId), or (otto/mamoru#171) adds to the held one in its own op, so two rows for two
+ * deposits is correct, not a duplicate. The one known way a stale row can linger — an engine op left `submitted` across an operator
  * restart that the next run does not reconcile — is tracked separately (otto/mamoru#124, engine op restart
  * reconciliation) and is not something this function can tell apart from a real pending op with the fields it has.
  */

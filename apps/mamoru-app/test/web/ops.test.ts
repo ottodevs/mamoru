@@ -34,6 +34,13 @@ describe('opLine', () => {
     expect(opLine(op)).toBe('Opened a position')
   })
 
+  test('increase_liquidity (#171) says it added to the pool pair position, not that it opened one', () => {
+    const op = base({ opId: 'eng-1-1-op-4-increase_liquidity', kind: 'enter', state: 'confirmed', pool: 'pool:WETH/USDC/3000' })
+    expect(opLine(op)).toBe('Added to USDC/WETH position')
+    expect(opLine({ ...op, state: 'submitted' })).toBe('Adding to USDC/WETH position')
+    expect(opLine({ ...op, pool: undefined })).toBe('Added to a position')
+  })
+
   test('a different pool pair renders correctly, not hardcoded to USDC/cbBTC', () => {
     const op = base({ opId: 'eng-1-1-op-2-enter_mint', kind: 'enter', state: 'confirmed', pool: 'pool:USDC/USDT/100' })
     expect(opLine(op)).toBe('Opened USDC/USDT position')

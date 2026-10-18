@@ -3,7 +3,7 @@ import type { LocalAccount } from 'viem/accounts'
 import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { amountsOf, decide, twapFloor, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
-import { hasManageAny, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { hasIncrease, hasManageAny, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import { address, entry, entryPointV07Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
 import {
   Batch,
@@ -25,7 +25,7 @@ import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
 import { SessionLedger, precheck } from '@mamoru/account/precheck'
 import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useModeSignature, userOpHash, type GasSettings } from '@mamoru/account/sessions'
 import type { Execution } from '@mamoru/account/safe'
-import { approve, burn, collect, deadlineCheck, decreaseLiquidity, exactInputSingle, mint, type V3Call } from '@mamoru/uniswap-v3'
+import { approve, burn, collect, deadlineCheck, decreaseLiquidity, exactInputSingle, increaseLiquidity, mint, type V3Call } from '@mamoru/uniswap-v3'
 import { minOut, quoteExactInputSingle, quoteMint } from '@mamoru/uniswap-v3/quote'
 import { diverges, swapMinimum, twapFloor as deviationFloor, twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
@@ -100,6 +100,12 @@ export type EngineHooks = {
    * Not called under a policy with the live `manage-any` grants, enabled at activation.
    */
   requestManageGrant?: (tokenId: bigint, pool: string) => Promise<EngineSession>
+  /**
+   * otto/mamoru#171: the owner enables `increase:<tokenId>` for a position enter-mint minted, under a policy with an
+   * `increase` grant for its pool. Absent (the live operator today): no such session, and later entries into the
+   * pool mint as before.
+   */
+  requestIncreaseGrant?: (tokenId: bigint, pool: string) => Promise<EngineSession>
   /**
    * A position this engine minted for the account, once its mint is confirmed (otto/mamoru#140 part2 #4: the live
    * operator records it as admitted), with the block it was minted in.
@@ -637,6 +643,7 @@ export class Engine {
         if (!this.hooks.requestManageGrant) throw new Error(`${op.opId}: policy ${this.cfg.policy.policyId} needs a manage grant per position`)
         this.addSession(await this.hooks.requestManageGrant(minted.args.tokenId, proposal.pool))
       }
+      if (this.hooks.requestIncreaseGrant && hasIncrease(this.cfg.policy, proposal.pool)) this.addSession(await this.hooks.requestIncreaseGrant(minted.args.tokenId, proposal.pool))
     }
     if (proposal.kind === 'rerange') {
       const inc = op.included!
@@ -776,6 +783,30 @@ export class Engine {
         ].map(exec),
       }
     }
+    if (p.kind === 'increase_liquidity') {
+      // otto/mamoru#171: the position must still be the one decide split the amounts for (pool and range), with
+      // the price strictly inside it; mins as for a mint, from the same quote over the position's range.
+      await this.priceGuard(p.pool, blockNumber)
+      const pool = entry(p.pool)
+      const [pos, [sqrtPriceX96, tick]] = await Promise.all([
+        this.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [p.tokenId], blockNumber }),
+        this.client.readContract({ address: pool.address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
+      ])
+      const samePool = isAddressEqual(pos[2], address(pool.token0!)) && isAddressEqual(pos[3], address(pool.token1!)) && pos[4] === pool.fee
+      if (!samePool || pos[5] !== p.tickLower || pos[6] !== p.tickUpper) throw new ReasonError('EHG_OBSERVATION_STALE', `position ${p.tokenId} is not ${p.pool} [${p.tickLower}, ${p.tickUpper}]`)
+      if (!(p.tickLower < tick && tick < p.tickUpper)) throw new ReasonError('EHG_OBSERVATION_STALE', `${p.pool} tick ${tick} is not inside [${p.tickLower}, ${p.tickUpper}]`)
+      const q = quoteMint({ sqrtPriceX96, tickLower: p.tickLower, tickUpper: p.tickUpper, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, slippageBps: slippage })
+      return {
+        expiresAt: deadline,
+        calls: [
+          approve(pool.token0!, 'NonfungiblePositionManager', p.amount0Desired),
+          approve(pool.token1!, 'NonfungiblePositionManager', p.amount1Desired),
+          increaseLiquidity({ tokenId: p.tokenId, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, amount0Min: q.amount0Min, amount1Min: q.amount1Min, deadline }),
+          approve(pool.token0!, 'NonfungiblePositionManager', 0n),
+          approve(pool.token1!, 'NonfungiblePositionManager', 0n),
+        ].map(exec),
+      }
+    }
     if (p.kind === 'rerange' || p.kind === 'reduce') {
       // decreaseLiquidity(all or part) + collect(to the Safe) [+ burn]: nothing leaves the account.
       await this.priceGuard(p.pool, blockNumber)
@@ -820,9 +851,10 @@ export class Engine {
       if (d(p.tokenOut) < prepared.quote!.amountOutMinimum) return `${p.tokenOut} rose ${d(p.tokenOut)}, below the minimum`
       return null
     }
-    if (p.kind === 'enter_mint') {
+    if (p.kind === 'enter_mint' || p.kind === 'increase_liquidity') {
       const pool = entry(p.pool)
-      if (sim.nftDelta !== 1n) return `positions changed by ${sim.nftDelta}`
+      const want = p.kind === 'enter_mint' ? 1n : 0n
+      if (sim.nftDelta !== want) return `positions changed by ${sim.nftDelta}, intent ${want}`
       if (d(pool.token0!) > 0n || -d(pool.token0!) > p.amount0Desired) return `${pool.token0} moved ${d(pool.token0!)}`
       if (d(pool.token1!) > 0n || -d(pool.token1!) > p.amount1Desired) return `${pool.token1} moved ${d(pool.token1!)}`
       return null
