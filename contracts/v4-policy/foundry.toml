@@ -1,0 +1,24 @@
+# otto/mamoru#182: Uniswap v4 liquidity for session keys. Two designs, side by side. Not deployed anywhere.
+# Dependencies are not vendored: ./install.sh fetches them at pinned commits into lib/ (gitignored).
+# The two contracts in src/ import nothing; lib/ is only for the fork tests.
+[profile.default]
+src = "src"
+test = "test"
+libs = ["lib"]
+solc_version = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 10000
+via_ir = false
+remappings = [
+  "forge-std/=lib/forge-std/src/",
+  "@uniswap/v4-core/=lib/v4-core/",
+  "@uniswap/v4-periphery/=lib/v4-periphery/",
+]
+
+[fuzz]
+runs = 512
+
+[lint]
+# Tests cast freely (fixtures, packed fields); src/ is linted clean.
+ignore = ["test/*.sol"]
