@@ -312,11 +312,46 @@ export function grantsV4(p: V4PoolSpec, usage: V4Usage): GrantTemplate[] {
  * `actionPolicy.bandTicksByPool`. The address is always an explicit parameter here, never a registry entry or a
  * constant (same discipline as `retargetToPolicy` above) — the caller passes the address it deployed (or was
  * told to use) and the `V4PoolSpec[]` whose `bandTicks` the engine narrows from. Does not mutate `policy`.
+ *
+ * Spec 007 (#151) T4: `opts.caps` (a resolved `Caps` object, same as `mamoruInitFor`'s own second argument) also
+ * fills `actionPolicy.budgetsByPool` from each pool's `budgetWindow0/1`/`budgetTotal0/1` cap formulas, so precheck
+ * can mirror checkAction's budget check too. Omitted: `budgetsByPool` stays unset, same as before this option
+ * existed (precheck then skips the budget mirror for every pool, fail safe).
  */
-export function withActionPolicy(policy: PolicyVersion, mamoruPolicy: Address, pools: readonly V4PoolSpec[], bandFactorBps?: number): PolicyVersion {
+export function withActionPolicy(
+  policy: PolicyVersion,
+  mamoruPolicy: Address,
+  pools: readonly V4PoolSpec[],
+  opts: { bandFactorBps?: number; caps?: Record<string, bigint>; budgetWindowSeconds?: number } = {},
+): PolicyVersion {
   const bandTicksByPool: Partial<Record<RegistryName, number>> = {}
-  for (const p of pools) bandTicksByPool[p.pool] = p.bandTicks
-  return { ...policy, actionPolicy: { address: mamoruPolicy, bandTicksByPool, ...(bandFactorBps !== undefined ? { bandFactorBps } : {}) } }
+  const budgetsByPool: Partial<Record<RegistryName, { windowSeconds: number; perWindow0: bigint; perWindow1: bigint; total0: bigint; total1: bigint }>> = {}
+  for (const p of pools) {
+    bandTicksByPool[p.pool] = p.bandTicks
+    if (opts.caps) {
+      const need = (name: string): bigint => {
+        const v = opts.caps![name]
+        if (v === undefined) throw new Error(`withActionPolicy: missing cap ${name} (pool ${p.pool})`)
+        return v
+      }
+      budgetsByPool[p.pool] = {
+        windowSeconds: opts.budgetWindowSeconds ?? BUDGET_WINDOW_SECONDS,
+        perWindow0: need(p.caps.budgetWindow0),
+        perWindow1: need(p.caps.budgetWindow1),
+        total0: need(p.caps.budgetTotal0),
+        total1: need(p.caps.budgetTotal1),
+      }
+    }
+  }
+  return {
+    ...policy,
+    actionPolicy: {
+      address: mamoruPolicy,
+      bandTicksByPool,
+      ...(opts.bandFactorBps !== undefined ? { bandFactorBps: opts.bandFactorBps } : {}),
+      ...(opts.caps ? { budgetsByPool } : {}),
+    },
+  }
 }
 
 // ---------------------------------------------------------------- retargeting (template -> policy address)

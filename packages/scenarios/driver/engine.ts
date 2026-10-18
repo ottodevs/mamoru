@@ -22,7 +22,7 @@ import {
   type Simulation,
 } from '@mamoru/rpc'
 import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
-import { SessionLedger, precheck } from '@mamoru/account/precheck'
+import { SessionLedger, precheck, type ActionPolicyPoolConfig } from '@mamoru/account/precheck'
 import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useModeSignature, userOpHash, type GasSettings } from '@mamoru/account/sessions'
 import type { Execution } from '@mamoru/account/safe'
 import { approve, burn, collect, decreaseLiquidity, exactInputSingle, mint, type V3Call } from '@mamoru/uniswap-v3'
@@ -32,6 +32,15 @@ import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow 
 import { MemoryJournal, type DecisionRecord, type OpRecord } from './journal.ts'
 
 const observeAbi = parseAbi(['function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128s)'])
+/** Spec 007 (#151) T4: the two MamoruActionPolicy views precheck's mirror needs that are not already read for T3's
+ * bounds (`swapBounds`/`decreaseMins`, which the engine never calls directly — see `@mamoru/uniswap-v3/policy-bounds`'s
+ * TS port). `spendOf` returns the `Spend` struct as one named tuple, same pattern as `findModule` elsewhere in this
+ * codebase (`packages/scenarios/action-policy/v4-grant.ts`). */
+const mamoruActionPolicyReadAbi = parseAbi([
+  'struct Spend { uint64 epoch; uint64 generation; uint128 window0; uint128 window1; uint128 total0; uint128 total1; }',
+  'function spendOf(address account, address pool) view returns (Spend)',
+  'function generationOf(address account) view returns (uint64)',
+])
 import { reconcileReceipt } from './receipt.ts'
 
 /** Gas limits of every engine userOp. Their sum is the budget `decide` prices for the harvest cost. */
@@ -321,6 +330,7 @@ export class Engine {
       throw e
     }
     const callData = executeCallData(prepared.calls)
+    await this.syncActionPolicyLedger(proposal.pool, block.number)
     const pre = precheck(
       { sender: this.cfg.account, callData, signature: useModeSignature(session.permissionId, '0x') },
       { chainId: this.cfg.chainId, now: Number(block.timestamp), ledger: this.ledger },
@@ -458,6 +468,10 @@ export class Engine {
       if (!minted) throw new Error(`${op.opId}: confirmed mint without a position transfer to the account`)
       op.mintedTokenId = minted.args.tokenId
       if (!this.allowedTokenIds.includes(minted.args.tokenId)) this.allowedTokenIds.push(minted.args.tokenId)
+      // Spec 007 (#151) T4: a tokenId minted under a pool MamoruActionPolicy covers went through the policy's own
+      // `mint` (T3's `prepareCalls`), which is exactly what `admittedPool` on chain records — mirror it here so a
+      // later decrease/collect/burn of this tokenId passes precheck's admission check.
+      if (this.actionPolicyConfigFor(proposal.pool)) this.ledger.admitTokenId(minted.args.tokenId, proposal.pool)
       if (!hasManageAny(this.cfg.policy)) {
         if (!this.hooks.requestManageGrant) throw new Error(`${op.opId}: policy ${this.cfg.policy.policyId} needs a manage grant per position`)
         this.addSession(await this.hooks.requestManageGrant(minted.args.tokenId, proposal.pool))
@@ -557,6 +571,56 @@ export class Engine {
     if (!ap || bandTicks === undefined) return undefined
     const factor = ap.bandFactorBps ?? DEFAULT_BAND_FACTOR_BPS
     return { address: ap.address, bandTicks: Math.floor((bandTicks * factor) / 10_000) }
+  }
+
+  /**
+   * Spec 007 (#151) T4: `pool`'s FULL (1.0x, the account's actually-enabled) MamoruActionPolicy config for
+   * precheck's own mirror of `checkAction` — never `v4PoolConfig`'s narrower band, which only exists to build
+   * calls the policy accepts with margin. `undefined`: same fail-safe as `v4PoolConfig` (no `actionPolicy`, the
+   * pool is not in `bandTicksByPool`, or it has no `budgetsByPool` entry — precheck cannot mirror (c) without
+   * knowing the budget caps, since the contract exposes no getter for them) — precheck then runs grant-only
+   * checks for this pool, exactly as it did before this unit.
+   */
+  private actionPolicyConfigFor(pool: RegistryName): ActionPolicyPoolConfig | undefined {
+    const ap = this.cfg.policy.actionPolicy
+    const bandTicks = ap?.bandTicksByPool[pool]
+    const budget = ap?.budgetsByPool?.[pool]
+    if (!ap || bandTicks === undefined || !budget) return undefined
+    const e = entry(pool)
+    if (!e.token0 || !e.token1 || !e.fee) return undefined
+    return {
+      pool,
+      address: ap.address,
+      token0: address(e.token0),
+      token1: address(e.token1),
+      feePips: e.fee,
+      bandTicks,
+      budgetWindowSeconds: budget.windowSeconds,
+      perWindow0: budget.perWindow0,
+      perWindow1: budget.perWindow1,
+      total0: budget.total0,
+      total1: budget.total1,
+    }
+  }
+
+  /**
+   * Spec 007 (#151) T4: refreshes the ledger's mirror of MamoruActionPolicy for `pool` right before precheck runs
+   * on this op — the same "read right before validating" discipline T3's bound-building already follows for the
+   * TWAP (`poolTwapTick`). Two extra eth_calls (`spendOf`, `generationOf`) plus one `observe`, all at this op's own
+   * block; a no-op for any pool `actionPolicyConfigFor` does not cover — every live policy today, since
+   * `actionPolicy` is never set on `POLICIES`.
+   */
+  private async syncActionPolicyLedger(pool: RegistryName, blockNumber: bigint): Promise<void> {
+    const cfg = this.actionPolicyConfigFor(pool)
+    if (!cfg) return
+    this.ledger.watchActionPolicyPool(cfg)
+    const poolAddress = entry(pool).address
+    const [spend, currentGeneration, twapTick] = await Promise.all([
+      this.client.readContract({ address: cfg.address, abi: mamoruActionPolicyReadAbi, functionName: 'spendOf', args: [this.cfg.account, poolAddress], blockNumber }),
+      this.client.readContract({ address: cfg.address, abi: mamoruActionPolicyReadAbi, functionName: 'generationOf', args: [this.cfg.account], blockNumber }),
+      this.poolTwapTick(pool, this.cfg.policy.execution.twapWindowSeconds, blockNumber),
+    ])
+    this.ledger.syncActionPolicyReads(pool, { twapTick, spend, currentGeneration })
   }
 
   /** FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. */

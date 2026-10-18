@@ -163,6 +163,16 @@ export type PolicyVersion = {
     bandTicksByPool: Partial<Record<RegistryName, number>>
     /** Spec 007 T3: "e.g. 0.8 x band". Default `DEFAULT_BAND_FACTOR_BPS` (`@mamoru/uniswap-v3/policy-bounds`) = 8000 (0.8x). */
     bandFactorBps?: number
+    /**
+     * Spec 007 (#151) T4: MamoruActionPolicy.Init's budget per pool (the account's enabled generation), mirrored
+     * off chain because the contract exposes no public getter for `Budget` (only for `Spend`, via `spendOf`) —
+     * whoever built this `PolicyVersion` for an actually-deployed contract knows it already (it is what it signed
+     * into the Init). precheck (`@mamoru/account/precheck`) uses this, together with a fresh `spendOf` read, to
+     * mirror checkAction's per-window/per-approval budget check. A pool not listed here gets NO action-policy
+     * check at all from the engine's wiring (price band, admission or budget): same fail-safe discipline as
+     * `bandTicksByPool` — precheck only governs calls for a pool the caller explicitly confirmed is covered.
+     */
+    budgetsByPool?: Partial<Record<RegistryName, { windowSeconds: number; perWindow0: bigint; perWindow1: bigint; total0: bigint; total1: bigint }>>
   }
 }
 
