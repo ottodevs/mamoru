@@ -136,7 +136,9 @@ function isIsoString(v: unknown): v is string {
   const n = (i: number) => Number(m[i] ?? '0')
   const [y, mo, d, h, mi, sec, oh, om] = [n(1), n(2), n(3), n(4), n(5), n(6), n(8), n(9)]
   if (h > 23 || mi > 59 || sec > 59 || oh > 14 || om > 59) return false
-  const day = new Date(Date.UTC(y, mo - 1, d))
+  // setUTCFullYear, not Date.UTC: Date.UTC maps years 0-99 to 1900-1999 (review r4).
+  const day = new Date(0)
+  day.setUTCFullYear(y, mo - 1, d)
   if (day.getUTCFullYear() !== y || day.getUTCMonth() !== mo - 1 || day.getUTCDate() !== d) return false
   return !Number.isNaN(Date.parse(v))
 }

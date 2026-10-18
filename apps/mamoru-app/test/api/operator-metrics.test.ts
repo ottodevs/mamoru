@@ -195,6 +195,12 @@ describe('writeOperatorMetrics / pullOperatorMetrics (otto/mamoru#129 follow-up)
     expect(row(db)).toBeNull()
   })
 
+  test('a two-digit year is not remapped to the 1900s by the calendar check (review r4, PR #92)', async () => {
+    const db = memoryD1()
+    expect(await pullOperatorMetrics(db, 'http://operator', SECRET, okFetcher(rawMetrics({ generatedAt: '0099-12-31T23:59:59Z' })), new Date())).toBe(true)
+    expect(row(db)?.generated_at).toBe('0099-12-31T23:59:59.000Z')
+  })
+
   test('an impossible calendar date is refused, not rolled over by Date.parse (review r3, PR #92)', async () => {
     for (const bad of ['2026-02-30T00:00:00Z', '2026-13-01T00:00:00Z', '2026-10-18T24:00:00Z', '2026-10-18T10:61:00Z', '2026-10-18T10:00:00+15:00']) {
       const db = memoryD1()
