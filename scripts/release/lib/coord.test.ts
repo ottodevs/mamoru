@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { checkHolder, claim, isLive, LEASE_TTL_MS, lockBusy, readLease, writeLease, type Lease } from './lease.ts'
-import { fatalLines, healthy, refuseDeploy } from './operator.ts'
+import { envReads, fatalLines, healthy, loopsStarted, newEnv, refuseDeploy, signedOk } from './operator.ts'
 import { finalMessage, MIN_REMAINING, parseVerdict, pickModel } from './review.ts'
 
 const T0 = Date.parse('2026-10-18T09:00:00Z')
@@ -81,6 +81,26 @@ describe('operator deploy rules', () => {
   test('fatal boot lines are found; ordinary engine holds are not', () => {
     expect(fatalLines('[settings] applied none\n[engine x] block 1 hold SESSION_MISSING')).toEqual([])
     expect(fatalLines('ok\nerror: Uncaught TypeError: x\n')).toHaveLength(1)
+  })
+})
+
+describe('operator deploy checks taken from switch.sh', () => {
+  test('only a good signature by an allowed key passes', () => {
+    expect(signedOk('G', 'A2C36B5E38869D26A66BE1DE53A35CC2D46A3B29')).toBe(true)
+    expect(signedOk('U', 'A2C36B5E38869D26A66BE1DE53A35CC2D46A3B29')).toBe(false)
+    expect(signedOk('G', '0000000000000000000000000000000000000000')).toBe(false)
+    expect(signedOk('N', '')).toBe(false)
+  })
+  test('new environment variables are named, with whether the env file sets them', () => {
+    const before = envReads('process.env.MAMORU_LIVE\nprocess.env.HOME\n')
+    const after = envReads('process.env.MAMORU_LIVE\nprocess.env.MAMORU_RPC_TRUSTED\nprocess.env.MAMORU_SETTINGS_URL\n')
+    expect(newEnv(before, after, 'MAMORU_SETTINGS_URL=https://x\n# MAMORU_RPC_TRUSTED=old\n')).toEqual([
+      { name: 'MAMORU_RPC_TRUSTED', set: false },
+      { name: 'MAMORU_SETTINGS_URL', set: true },
+    ])
+  })
+  test('engine loops are counted once per account', () => {
+    expect(loopsStarted('[engine a] loop started\n[engine b] loop started\n[engine a] loop started\nother')).toBe(2)
   })
 })
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// `bun run operator:deploy <sha> --as <session> [--rollback] [--reason "<why>"]` — moves the live operator to ONE
+// `bun run operator:deploy <sha> --as <session> [--check] [--rollback] [--reason "<why>"]` — moves the live operator to ONE
 // named commit of origin/main. Coordinator only (lib/lease.ts). One redeploy at a time (a lock beside the lease).
 // Refuses a sha that would drop work the operator already runs, unless --rollback. Checks out the sha in the
 // operator's worktree, installs dependencies when the lockfile changed, restarts the unit, and waits for the signed
@@ -10,7 +10,7 @@ import { appendFileSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { metricsSignature } from '../../packages/operator-auth/src/index.ts'
 import { fetchRefs, isAncestor } from './lib/git.ts'
 import { OP_LOCK, refuseLeftoverWork, requireLease, sessionName, underFlock, WORK_LOCK } from './lib/lease.ts'
-import { fatalLines, healthy, refuseDeploy, type MetricsView } from './lib/operator.ts'
+import { envReads, fatalLines, healthy, loopsStarted, newEnv, refuseDeploy, signedOk, type MetricsView } from './lib/operator.ts'
 
 const HOME = process.env.HOME!
 const root = new URL('../../', import.meta.url).pathname
@@ -79,7 +79,8 @@ async function bringUp(target: string, installDeps: boolean): Promise<{ ok: bool
   } catch (e) {
     return { ok: false, why: `step failed: ${String(e instanceof Error ? e.message : e).slice(0, 200)}` }
   }
-  // This boot's own log lines only: the invocation the restart just started.
+  // This boot's own log lines only: the invocation the restart just started. Healthy also means it is still that
+  // invocation (no automatic restart since) and it started a loop for every account that was active before.
   const invocation = (await $`systemctl --user show -p InvocationID --value ${unit}`.quiet().nothrow().text()).trim()
   const deadline = Date.now() + BOOT_TIMEOUT_MS
   while (Date.now() < deadline) {
@@ -87,9 +88,11 @@ async function bringUp(target: string, installDeps: boolean): Promise<{ ok: bool
     const journal = invocation ? await $`journalctl --user _SYSTEMD_INVOCATION_ID=${invocation} --no-pager -o cat`.quiet().nothrow().text() : ''
     const fatal = fatalLines(journal)
     if (fatal.length) return { ok: false, why: `boot journal: ${fatal[0]!.slice(0, 200)}` }
-    if (healthy(await metrics(), target, wasLive)) return { ok: true, why: '' }
+    const sameBoot = (await $`systemctl --user show -p InvocationID --value ${unit}`.quiet().nothrow().text()).trim() === invocation
+    if (!sameBoot) return { ok: false, why: 'the unit restarted on its own after the redeploy (crash loop?)' }
+    if (healthy(await metrics(), target, wasLive) && loopsStarted(journal) >= activeAccounts) return { ok: true, why: '' }
   }
-  return { ok: false, why: `/metrics did not answer with ${target.slice(0, 7)} within ${BOOT_TIMEOUT_MS / 1000} s` }
+  return { ok: false, why: `/metrics did not answer with ${target.slice(0, 7)} and ${activeAccounts} engine loops within ${BOOT_TIMEOUT_MS / 1000} s` }
 }
 
 function log(entry: Record<string, unknown>): void {
@@ -104,6 +107,8 @@ async function note83(text: string): Promise<void> {
 
 const before = (await metrics()) ?? {}
 const wasLive = before.live ?? true
+// Engine loops the new boot must start: one per account active now.
+const activeAccounts = (before as { accounts?: { active?: number } }).accounts?.active ?? 0
 
 await fetchRefs(root, 'main')
 // What runs is what /metrics says, not what is checked out: a run that died after its checkout leaves the two apart.
@@ -120,8 +125,34 @@ const why = refuseDeploy({
 if (why) refuse(why)
 if (rollback && !reason) refuse('--rollback needs --reason "<why>"')
 
+// Reviewed means on main and signed by an allowed key, for the target and for the sha a failed redeploy goes back to.
+async function signature(rev: string): Promise<boolean> {
+  const out = (await $`git -C ${root} log -1 --format=%G?%x09%GF ${rev}`.quiet().nothrow().text()).trim().split('\t')
+  return signedOk(out[0] ?? '', out[1] ?? '')
+}
+if (!(await signature(full))) refuse(`${full.slice(0, 7)} is not signed by an allowed key (git log --format=%G?%GF)`)
+if (!(await signature(running))) refuse(`the operator runs ${running.slice(0, 7)}, which is not signed by an allowed key: a failed redeploy could not roll back to reviewed code; fix that by hand first`)
+if ((await $`git -C ${opDir} status --porcelain`.text()).trim()) refuse(`${opDir} has local changes`)
+
+// What the new code reads from the environment that the running code did not: named, with whether the env file sets it.
+const reads = async (rev: string) => envReads(await $`git -C ${root} grep -h -o ${'process\\.env\\.[A-Z0-9_]*'} ${rev} -- apps/mamoru-operator/src`.quiet().nothrow().text())
+const added = newEnv(await reads(running), await reads(full), (() => {
+  try {
+    return readFileSync(envFile, 'utf8')
+  } catch {
+    return ''
+  }
+})())
+if (added.length) console.log(`environment read by ${full.slice(0, 7)} and not by ${running.slice(0, 7)}: ${added.map((v) => `${v.name} (${v.set ? 'set' : 'NOT set'})`).join(', ')}`)
+
+// --check: every check above, then the plan, and nothing moves.
+if (argv.includes('--check')) {
+  console.log(`check only: would move ${unit} ${running.slice(0, 7)} -> ${full.slice(0, 7)}, expecting ${activeAccounts} engine loops`)
+  process.exit(0)
+}
+
 console.log(`== operator:deploy ${running.slice(0, 7)} -> ${full.slice(0, 7)}${rollback ? ' (rollback)' : ''} by ${who} ==`)
-await note83(`${who}: ${running.slice(0, 7)} -> ${full.slice(0, 7)}${rollback ? ` (rollback: ${reason})` : ''}. Starting.`)
+await note83(`${who}: ${running.slice(0, 7)} -> ${full.slice(0, 7)}${rollback ? ` (rollback: ${reason})` : ''}. Starting.${added.length ? ` New env: ${added.map((v) => `${v.name}${v.set ? '' : ' (not set)'}`).join(', ')}.` : ''}`)
 
 const lockChanged = (await $`git -C ${opDir} diff --quiet ${running} ${full} -- bun.lock`.nothrow()).exitCode !== 0
 const result = await bringUp(full, lockChanged)
