@@ -4,7 +4,8 @@
 //   same calls as before this unit: `sqrtPriceLimitX96` zero, minimums from the usual slippage/quote math only,
 //   mint and its approvals targeting the NonfungiblePositionManager.
 // - a policy that carries one (`withActionPolicy`, test-only `conservadorLabV4` here) wires its pool's band into
-//   `@mamoru/uniswap-v3/policy-bounds`'s `swapBoundsAtBand`/`decreaseMinsAtBand` correctly: the right tick, token
+//   `@mamoru/uniswap-v3/policy-bounds`'s `priceRange`/`swapBoundsInRange`/`decreaseMinsInRange` correctly (T6:
+//   both TWAPs from one observe, the liquidity floor): the right range, token
 //   ordering and narrowed `bandTicks`, "take the max" against the usual minimum, and mint/approvals retargeted to
 //   the deployed policy address.
 // `prepareCalls` is private; tests reach it the same way review-requests.test.ts reaches `journal.ops` — a cast,
@@ -17,7 +18,7 @@ import type { Proposal } from '@mamoru/decide'
 import { POLICIES, conservadorLabV4, withActionPolicy, V4_POOLS, type PolicyVersion } from '@mamoru/policy'
 import { address, erc20Abi, nonfungiblePositionManagerAbi, swapRouter02Abi } from '@mamoru/registry'
 import type { Execution } from '@mamoru/account/safe'
-import { amountsForLiquidityAtPrice, decreaseMinsAtBand, narrowBand, swapBoundsAtBand } from '@mamoru/uniswap-v3/policy-bounds'
+import { amountsForLiquidityAtPrice, decreaseMinsInRange, narrowBand, priceRange, swapBoundsInRange } from '@mamoru/uniswap-v3/policy-bounds'
 import { FakeChain } from '../../rpc/test/fake-chain.ts'
 import { Engine } from './engine.ts'
 
@@ -48,11 +49,12 @@ async function withEngine<T>(policy: PolicyVersion, fn: (e: Engine, chain: FakeC
   }
 }
 
-// FakeChain's `observe` answer does not look at the requested window at all: it always returns the same two
-// cumulatives for a pool, keyed only by the pool's index in the registry (see fake-chain.ts). At `pool:USDC/
-// cbBTC/500` (index 0) and twapWindowSeconds 1800 (both conservador-live-v2 and conservadorLabV4 use 1800), that
-// implies tick -2 — the same floor-rounding `poolTwapTick` and the real `OracleLibrary.consult` both apply.
+// FakeChain's `observe` answers a tick cumulative that falls linearly by 1805*i over 1,800 s, i = the pool's index
+// in the registry + 1 (see fake-chain.ts). At `pool:USDC/cbBTC/500` (index 0) both the 1,800 s and the 300 s
+// window read tick -2 — the same floor-rounding `poolTwapTick` and the real `OracleLibrary.consult` both apply —
+// and the liquidity cumulatives are flat (an unlimited harmonic mean, above any floor).
 const FAKE_TWAP_TICK = -2
+const fakeRange = (bandTicks: number) => priceRange({ twapLong: FAKE_TWAP_TICK, twapShort: FAKE_TWAP_TICK, hmLong: 1n << 100n, hmShort: 1n << 100n }, bandTicks, V4_POOLS.btc.minLiquidity)!
 const OBSERVE_SELECTOR = toFunctionSelector('observe(uint32[])')
 
 function observeCalls(chain: FakeChain): number {
@@ -79,7 +81,7 @@ describe('prepareCalls: enter_swap', () => {
     })
   })
 
-  test('v4 (actionPolicy set for this pool): bounds from swapBoundsAtBand at the narrowed band, taking the max over the usual minimum', async () => {
+  test('v4 (actionPolicy set for this pool): bounds from swapBoundsInRange at the narrowed band, taking the max over the usual minimum, one observe', async () => {
     const policy = withActionPolicy(conservadorLabV4, MAMORU_POLICY, [V4_POOLS.btc]) // default bandFactorBps (0.8x)
     await withEngine(policy, async (e, chain) => {
       // A deliberately bad live quote (as a pushed spot would give): the policy's TWAP-anchored bound must still
@@ -89,7 +91,8 @@ describe('prepareCalls: enter_swap', () => {
       const decoded = decodeFunctionData({ abi: swapRouter02Abi, data: prepared.calls[1]!.callData })
       const params = decoded.args[0] as { sqrtPriceLimitX96: bigint; amountOutMinimum: bigint }
       const bandTicks = narrowBand(V4_POOLS.btc.bandTicks) // default factor, same one the engine applies
-      const expected = swapBoundsAtBand({ twap: FAKE_TWAP_TICK, bandTicks, feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn: 10_000_000_000n })
+      const expected = swapBoundsInRange({ range: fakeRange(bandTicks), feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn: 10_000_000_000n })
+      expect(observeCalls(chain)).toBe(1) // both TWAPs and both harmonic means in one observe([1800, 300, 0])
       expect(params.sqrtPriceLimitX96).toBe(expected.sqrtPriceLimitX96)
       expect(params.sqrtPriceLimitX96).not.toBe(0n)
       expect(params.amountOutMinimum).toBe(expected.minOut)
@@ -97,6 +100,19 @@ describe('prepareCalls: enter_swap', () => {
       // The bound dominated the (deliberately bad) usual minimum.
       const usual = (1_000_000n * BigInt(10_000 - policy.execution.slippageBps)) / 10_000n
       expect(expected.minOut).toBeGreaterThan(usual)
+    })
+  })
+
+  test('T6 H-1: a pool whose oracle liquidity is under the Init floor is refused before any call is built', async () => {
+    const strict = withActionPolicy(conservadorLabV4, MAMORU_POLICY, [{ ...V4_POOLS.btc, minLiquidity: (1n << 128n) - 1n }])
+    await withEngine(strict, async (e, chain) => {
+      // FakeChain's liquidity cumulatives are flat: harmonic mean = uint128 max, so a floor of uint128 max still passes.
+      await prepare(e, proposal, chain.head, 1_790_000_000n + chain.head * 2n)
+    })
+    const policy = withActionPolicy(conservadorLabV4, MAMORU_POLICY, [V4_POOLS.btc])
+    await withEngine(policy, async (e, chain) => {
+      chain.observeLiquidity = 1n // every window: harmonic mean ~1, under any real floor
+      await expect(prepare(e, proposal, chain.head, 1_790_000_000n + chain.head * 2n)).rejects.toMatchObject({ code: 'POLICY_PRICE_BAND' })
     })
   })
 
@@ -166,7 +182,7 @@ describe('prepareCalls: rerange / reduce (decreaseLiquidity minimums)', () => {
     })
   })
 
-  test('v4: amount0Min/amount1Min are the max of the usual spot/slippage minimum and decreaseMinsAtBand at the narrowed band', async () => {
+  test('v4: amount0Min/amount1Min are the max of the usual spot/slippage minimum and decreaseMinsInRange at the narrowed band', async () => {
     const policy = withActionPolicy(conservadorLabV4, MAMORU_POLICY, [V4_POOLS.btc])
     await withEngine(policy, async (e, chain) => {
       chain.addPosition(ACCOUNT, TOKEN_ID, POOL) // fixed fixture range: tickLower -600, tickUpper 600
@@ -182,7 +198,7 @@ describe('prepareCalls: rerange / reduce (decreaseLiquidity minimums)', () => {
       const usual0 = spot.amount0 > 0n ? (spot.amount0 * slippage) / 10_000n : 0n
       const usual1 = spot.amount1 > 0n ? (spot.amount1 * slippage) / 10_000n : 0n
       const bandTicks = narrowBand(V4_POOLS.btc.bandTicks)
-      const bound = decreaseMinsAtBand({ twap: FAKE_TWAP_TICK, bandTicks, tickLower: pos.tickLower, tickUpper: pos.tickUpper, liquidity: pos.liquidity })
+      const bound = decreaseMinsInRange({ range: fakeRange(bandTicks), tickLower: pos.tickLower, tickUpper: pos.tickUpper, liquidity: pos.liquidity })
       expect(params.amount0Min).toBe(usual0 > bound.amount0Min ? usual0 : bound.amount0Min)
       expect(params.amount1Min).toBe(usual1 > bound.amount1Min ? usual1 : bound.amount1Min)
       // Sanity: the band math is actually exercised (not a silent no-op) — at least one side differs from the

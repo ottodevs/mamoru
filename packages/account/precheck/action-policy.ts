@@ -1,34 +1,34 @@
-// Spec 007 (otto/mamoru#151), task T4: precheck's own mirror of MamoruActionPolicy.checkAction's three
-// validation-time refusal classes — (a) price band on swaps, (b) admission of positions for mint/decrease/
-// collect/burn, (c) per-window and per-approval budgets (contracts/action-policy/src/MamoruActionPolicy.sol) — so
-// the engine's precheck (index.ts) refuses a call the deployed policy would refuse BEFORE it is ever signed and
-// sent, never after. Pure: every read this mirror needs (the pool's TWAP tick, the policy's own on-chain spend
-// counters, which tokenIds are admitted) is supplied by the caller (SessionLedger.watchActionPolicyPool /
-// syncActionPolicyReads / admitTokenId in ./index.ts), the same one-eth_call-per-review discipline T3's
-// `prepareCalls` already follows for `poolTwapTick` — this module makes no RPC calls of its own.
+// Spec 007 (otto/mamoru#151), tasks T4 and T6: precheck's own mirror of MamoruActionPolicy.checkAction's
+// validation-time refusal classes — (a) price range on swaps (and the oracle check every priced action needs),
+// (b) admission of positions for mint/decrease/collect/burn, (c) the per-pool value budget
+// (contracts/action-policy/src/MamoruActionPolicy.sol) — so the engine's precheck (index.ts) refuses a call the
+// deployed policy would refuse BEFORE it is ever signed and sent, never after. Pure: every read this mirror needs
+// (the pool's two TWAPs and their harmonic-mean liquidity, the policy's own on-chain spend counters, which tokenIds
+// are admitted) is supplied by the caller (SessionLedger.watchActionPolicyPool / syncActionPolicyReads /
+// admitTokenId in ./index.ts), from the same `observe` eth_call T3's `prepareCalls` already makes for the pool —
+// this module makes no RPC calls of its own.
 //
-// (a): mirrors `_swapOk`/`_swapBounds` at the FULL (1.0x) deployed band — never the engine's own narrower 0.8x
-// band (`@mamoru/uniswap-v3/policy-bounds`'s `swapBoundsAtBand` already does the math; T4 only calls it at a
-// different band than T3's `prepareCalls` does).
+// (a): mirrors `_range`/`_swapBounds` at the FULL (1.0x) deployed band — never the engine's own narrower 0.8x
+// band (`@mamoru/uniswap-v3/policy-bounds` does the math; T4 only calls it at a different band than T3's
+// `prepareCalls` does). T6: the range is [max(long, short) - band + 1, min(long, short) + band] and is refused
+// outright when either window's harmonic-mean liquidity is under `minLiquidity` (`priceRange` returns null).
 // (b): mint must target the policy (spec 007 "mint only through the policy"), with the same token0/token1/fee/
 // recipient checks `checkAction`'s mint branch makes; decrease/collect/burn must name a tokenId the caller's
-// admitted set covers for this pool (the engine's own allowedTokenIds/onMinted — `_isAdmitted` also checks
-// `ownerOf`, which this mirror does not re-read: the caller removes a tokenId from its admitted set once it knows
-// the account no longer holds it, same as `_isAdmitted`'s intent).
-// (c): mirrors `_spendOk`'s epoch/generation reset rules exactly, charging swap `amountIn` and mint
-// `amount*Desired` call by call across one batch (a local accumulator here plays the role of the contract's
-// storage write within one `validateUserOp`), against the budget signed into `MamoruActionPolicy.Init` (the
-// contract exposes no public getter for `Budget`, only for `Spend` — `spendOf` — so the caps are known only to
-// whoever built this `PolicyVersion`, same as `@mamoru/policy`'s `mamoruInitFor`).
+// admitted set covers for this pool (the engine's own allowedTokenIds/onMinted, plus tokenIds admitted at enable —
+// `_isAdmitted` also checks `ownerOf`, which this mirror does not re-read). Decrease minimums are not re-checked
+// here (the calldata has no tick range); the engine builds them from `decreaseMinsInRange` at a narrower band.
+// (c): mirrors `_value`/`_bucket`/`_charge` exactly, charging swap `amountIn` and mint `amount*Desired` (both
+// tokens valued in the pool's stable token at the range edge) call by call across one batch (a local accumulator
+// here plays the role of the contract's storage write within one `validateUserOp`).
 //
 // (d) renewal is not mirrored here: a retired grant is already caught by the existing SESSION_REVOKED path (the
 // engine revokes a grant's permissionId in its ledger at the same renewal that bumps the policy's generation), so
-// `checkAction`'s own `c.generation != generationOf[account]` guard would never fire for a grant this engine still
+// `checkAction`'s own `b.generation != generationOf[account]` guard would never fire for a grant this engine still
 // considers active.
 import { decodeFunctionData, isAddressEqual, size, slice, toFunctionSelector, type Hex } from 'viem'
 import type { Address, ReasonCode } from '@mamoru/domain'
 import { nonfungiblePositionManagerAbi, swapRouter02Abi, type RegistryName } from '@mamoru/registry'
-import { swapBoundsAtBand } from '@mamoru/uniswap-v3/policy-bounds'
+import { budgetAllows, budgetValue, priceRange, swapBoundsInRange, type OracleRead, type PolicySpend, type PriceRange } from '@mamoru/uniswap-v3/policy-bounds'
 import type { Execution } from '../safe/index.ts'
 
 const SEL_EXACT_INPUT_SINGLE = toFunctionSelector('function exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))')
@@ -38,10 +38,9 @@ const SEL_COLLECT = toFunctionSelector('function collect((uint256,address,uint12
 const SEL_BURN = toFunctionSelector('function burn(uint256)')
 
 /**
- * `MamoruActionPolicy.Init`, mirrored off chain: the contract exposes no public getter for `Budget` (only for
- * `Spend`, via `spendOf`), so the caps are known only to whoever built this `PolicyVersion` (spec 007 T2's
- * `mamoruInitFor`/`withActionPolicy`). `bandTicks` here is the account's enabled (FULL, 1.0x) config — never the
- * engine's own narrower band used to build calls (`@mamoru/uniswap-v3/policy-bounds`'s `narrowBand`).
+ * `MamoruActionPolicy.Init`, mirrored off chain (spec 007 T2's `mamoruInitFor`/`withActionPolicy` built it).
+ * `bandTicks` here is the account's enabled (FULL, 1.0x) config — never the engine's own narrower band used to
+ * build calls (`@mamoru/uniswap-v3/policy-bounds`'s `narrowBand`).
  */
 export type ActionPolicyPoolConfig = {
   pool: RegistryName
@@ -50,55 +49,54 @@ export type ActionPolicyPoolConfig = {
   token1: Address
   feePips: number
   bandTicks: number
+  /** T6 H-1: Init.minLiquidity. */
+  minLiquidity: bigint
+  /** T6 M-2: the budget unit is token1 (else token0) — the pool's stable token. */
+  budgetIn1: boolean
   budgetWindowSeconds: number
-  perWindow0: bigint
-  perWindow1: bigint
-  total0: bigint
-  total1: bigint
+  perWindow: bigint
+  total: bigint
 }
 
-/** Mirrors `MamoruActionPolicy.Spend`, from one `spendOf(account, pool)` eth_call (spec 007 T4: "read the
- * policy's on-chain counters if there is a view for it, one eth_call"). */
-export type ActionPolicySpend = { epoch: bigint; generation: bigint; window0: bigint; window1: bigint; total0: bigint; total1: bigint }
+/** Mirrors `MamoruActionPolicy.Spend`, from one `spendOf(account, pool)` eth_call. */
+export type ActionPolicySpend = PolicySpend
 
-/** The reads the caller refreshes for a review that touches a covered pool: the pool's own TWAP tick (the same
- * `observe` eth_call T3's bound-building already makes for this pool) and the account's current `Spend` +
- * `generationOf` (two views, or one Multicall3 batch). */
-export type ActionPolicyReads = { twapTick: number; spend: ActionPolicySpend; currentGeneration: bigint }
+/** The reads the caller refreshes for a review that touches a covered pool: the pool's oracle (one
+ * `observe([long, short, 0])`, `oracleFromObserve`) and the account's current `Spend` + `generationOf`. */
+export type ActionPolicyReads = { oracle: OracleRead; spend: ActionPolicySpend; currentGeneration: bigint }
 
 export type ActionPolicyCheck = { ok: true } | { ok: false; code: ReasonCode; detail: string }
 
-/** Running (amount0, amount1) charged against one pool's budget so far in the batch being checked — mirrors what
- * `_spendOk` accumulates in storage, call by call, within one `validateUserOp`. */
-export type ActionPolicySpendAcc = Map<RegistryName, { a0: bigint; a1: bigint }>
+/** Value charged against one pool's budget so far in the batch being checked — mirrors what `_charge` writes to
+ * storage, call by call, within one `validateUserOp`. */
+export type ActionPolicySpendAcc = Map<RegistryName, bigint>
 
 function deny(code: ReasonCode, detail: string): ActionPolicyCheck {
   return { ok: false, code, detail }
 }
 
+/** Mirrors `_range`: the full-band range, or a POLICY_PRICE_BAND denial when the policy would refuse the oracle. */
+function rangeOf(cfg: ActionPolicyPoolConfig, reads: ActionPolicyReads): PriceRange | ActionPolicyCheck {
+  const r = priceRange(reads.oracle, cfg.bandTicks, cfg.minLiquidity)
+  if (r) return r
+  const o = reads.oracle
+  return deny('POLICY_PRICE_BAND', `${cfg.pool}: oracle refused (twap ${o.twapLong}/${o.twapShort}, harmonic-mean liquidity ${o.hmLong}/${o.hmShort}, floor ${cfg.minLiquidity})`)
+}
+
 /**
- * Mirrors `_spendOk`: resets the window on an epoch change, resets everything on a generation change (the policy
- * was renewed since this `Spend` was last written), then charges `a0`/`a1` — failing closed (never charging) if
- * either budget is exceeded.
+ * Mirrors `_charge`: the bucket refills since the last on-chain charge, the approval total resets on a newer
+ * generation, then `value` (plus what this batch already charged) must fit both — failing closed (never charging)
+ * otherwise. `now` is the block time the userOp is expected to validate at.
  */
-function chargeBudget(cfg: ActionPolicyPoolConfig, reads: ActionPolicyReads, now: number, a0: bigint, a1: bigint, acc: ActionPolicySpendAcc): ActionPolicyCheck {
-  const { spend, currentGeneration } = reads
-  const freshGeneration = spend.generation === currentGeneration
-  const nowEpoch = cfg.budgetWindowSeconds === 0 ? 0n : BigInt(Math.floor(now / cfg.budgetWindowSeconds))
-  const sameEpoch = freshGeneration && spend.epoch === nowEpoch
-  const baseWindow0 = sameEpoch ? spend.window0 : 0n
-  const baseWindow1 = sameEpoch ? spend.window1 : 0n
-  const baseTotal0 = freshGeneration ? spend.total0 : 0n
-  const baseTotal1 = freshGeneration ? spend.total1 : 0n
-  const prior = acc.get(cfg.pool) ?? { a0: 0n, a1: 0n }
-  const w0 = baseWindow0 + prior.a0 + a0
-  const w1 = baseWindow1 + prior.a1 + a1
-  const t0 = baseTotal0 + prior.a0 + a0
-  const t1 = baseTotal1 + prior.a1 + a1
-  if (w0 > cfg.perWindow0 || w1 > cfg.perWindow1 || t0 > cfg.total0 || t1 > cfg.total1) {
-    return deny('POLICY_BUDGET', `${cfg.pool}: window ${w0}/${w1} (cap ${cfg.perWindow0}/${cfg.perWindow1}), total ${t0}/${t1} (cap ${cfg.total0}/${cfg.total1})`)
+function chargeBudget(cfg: ActionPolicyPoolConfig, reads: ActionPolicyReads, now: number, value: bigint, acc: ActionPolicySpendAcc): ActionPolicyCheck {
+  const prior = acc.get(cfg.pool) ?? 0n
+  // The binding's generation is the account's current one (a retired one never reaches here, see (d) above).
+  const budget = { generation: reads.currentGeneration, windowSeconds: cfg.budgetWindowSeconds, perWindow: cfg.perWindow, total: cfg.total }
+  const r = budgetAllows(reads.spend, budget, BigInt(now), prior + value)
+  if (!r.ok) {
+    return deny('POLICY_BUDGET', `${cfg.pool}: bucket ${r.debt} (cap ${cfg.perWindow}), approval ${r.spent} (cap ${cfg.total})`)
   }
-  acc.set(cfg.pool, { a0: prior.a0 + a0, a1: prior.a1 + a1 })
+  acc.set(cfg.pool, prior + value)
   return { ok: true }
 }
 
@@ -121,7 +119,7 @@ export function checkActionPolicyCall(
   const selector = slice(c.callData, 0, 4).toLowerCase() as Hex
 
   if (selector === SEL_EXACT_INPUT_SINGLE) {
-    if (!reads) return deny('POLICY_PRICE_BAND', `${cfg.pool}: no TWAP/spend read for the action policy's checks`)
+    if (!reads) return deny('POLICY_PRICE_BAND', `${cfg.pool}: no oracle/spend read for the action policy's checks`)
     let args: { tokenIn: Address; tokenOut: Address; amountIn: bigint; amountOutMinimum: bigint; sqrtPriceLimitX96: bigint }
     try {
       const d = decodeFunctionData({ abi: swapRouter02Abi, data: c.callData })
@@ -131,14 +129,17 @@ export function checkActionPolicyCall(
       return deny('POLICY_PRICE_BAND', 'undecodable exactInputSingle')
     }
     const zeroForOne = isAddressEqual(args.tokenIn, cfg.token0)
-    const bound = swapBoundsAtBand({ twap: reads.twapTick, bandTicks: cfg.bandTicks, feePips: cfg.feePips, zeroForOne, tokenIn: args.tokenIn, tokenOut: args.tokenOut, amountIn: args.amountIn })
+    const range = rangeOf(cfg, reads)
+    if ('ok' in range) return range
+    const bound = swapBoundsInRange({ range, feePips: cfg.feePips, zeroForOne, tokenIn: args.tokenIn, tokenOut: args.tokenOut, amountIn: args.amountIn })
     if (args.amountOutMinimum < bound.minOut) {
-      return deny('POLICY_PRICE_BAND', `amountOutMinimum ${args.amountOutMinimum} under the band minimum ${bound.minOut} (twap ${reads.twapTick}, bandTicks ${cfg.bandTicks})`)
+      return deny('POLICY_PRICE_BAND', `amountOutMinimum ${args.amountOutMinimum} under the range minimum ${bound.minOut} (range ${range.lo}..${range.hi})`)
     }
     if (args.sqrtPriceLimitX96 === 0n) return deny('POLICY_PRICE_BAND', 'sqrtPriceLimitX96 is zero: no limit')
     const limitOk = zeroForOne ? args.sqrtPriceLimitX96 >= bound.sqrtPriceLimitX96 : args.sqrtPriceLimitX96 <= bound.sqrtPriceLimitX96
-    if (!limitOk) return deny('POLICY_PRICE_BAND', `sqrtPriceLimitX96 ${args.sqrtPriceLimitX96} past the band edge ${bound.sqrtPriceLimitX96}`)
-    return chargeBudget(cfg, reads, now, zeroForOne ? args.amountIn : 0n, zeroForOne ? 0n : args.amountIn, acc)
+    if (!limitOk) return deny('POLICY_PRICE_BAND', `sqrtPriceLimitX96 ${args.sqrtPriceLimitX96} past the range edge ${bound.sqrtPriceLimitX96}`)
+    const value = budgetValue({ range, in1: cfg.budgetIn1, token0: cfg.token0, token1: cfg.token1, amount0: zeroForOne ? args.amountIn : 0n, amount1: zeroForOne ? 0n : args.amountIn })
+    return chargeBudget(cfg, reads, now, value, acc)
   }
 
   if (selector === SEL_MINT) {
@@ -159,8 +160,11 @@ export function checkActionPolicyCall(
     if (!isAddressEqual(args.token0, cfg.token0) || !isAddressEqual(args.token1, cfg.token1) || args.fee !== cfg.feePips) {
       return deny('POLICY_NOT_ADMITTED', `mint token0/token1/fee ${args.token0}/${args.token1}/${args.fee} do not match ${cfg.pool}`)
     }
-    if (!reads) return deny('POLICY_BUDGET', `${cfg.pool}: no spend read for the action policy's budget check`)
-    return chargeBudget(cfg, reads, now, args.amount0Desired, args.amount1Desired, acc)
+    if (!reads) return deny('POLICY_BUDGET', `${cfg.pool}: no oracle/spend read for the action policy's budget check`)
+    const range = rangeOf(cfg, reads)
+    if ('ok' in range) return range
+    const value = budgetValue({ range, in1: cfg.budgetIn1, token0: cfg.token0, token1: cfg.token1, amount0: args.amount0Desired, amount1: args.amount1Desired })
+    return chargeBudget(cfg, reads, now, value, acc)
   }
 
   if (selector === SEL_DECREASE || selector === SEL_COLLECT || selector === SEL_BURN) {
@@ -179,6 +183,11 @@ export function checkActionPolicyCall(
       return deny('POLICY_NOT_ADMITTED', 'undecodable decrease/collect/burn')
     }
     if (!isAdmitted(tokenId)) return deny('POLICY_NOT_ADMITTED', `tokenId ${tokenId} is not an admitted position of ${cfg.pool}`)
+    // A decrease is priced (its minimums come from the range): the policy refuses it when the oracle is refused.
+    if (selector === SEL_DECREASE && reads) {
+      const range = rangeOf(cfg, reads)
+      if ('ok' in range) return range
+    }
     return { ok: true }
   }
 

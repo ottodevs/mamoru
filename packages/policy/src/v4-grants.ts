@@ -32,35 +32,48 @@ const BURN_SIG = 'burn(uint256)'
 export type MamoruInit = {
   /** The one Uniswap v3 pool this Init covers (an on-chain pool address, not a registry name). */
   pool: Address
+  /** Long TWAP, seconds (= execution.twapWindowSeconds). */
   twapWindow: number
+  /** Short TWAP, seconds (T6 M-1): the range uses the safer of the two. */
+  twapShortWindow: number
   bandTicks: number
   /** Account-wide: a higher generation here retires every lower-generation config of the account, all pools. */
   generation: bigint
+  /** Floor of the harmonic-mean in-range liquidity over each TWAP window (T6 H-1). */
+  minLiquidity: bigint
+  /** Budget unit: false = token0, true = token1 — always the pool's stable token (T6 M-2). */
+  budgetIn1: boolean
+  /** Seconds for the bucket to refill from empty (T6 M-3). */
   budgetWindow: number
-  perWindow0: bigint
-  perWindow1: bigint
-  total0: bigint
-  total1: bigint
+  /** Bucket capacity (W_p), in the budget unit. */
+  perWindow: bigint
+  /** Per-approval total (T_p), in the budget unit. */
+  total: bigint
+  /** Positions minted outside this deployment that the owner admits at enable (T6 M-4). */
+  admit: readonly bigint[]
 }
 
-const MAMORU_INIT_TUPLE = [
+export const MAMORU_INIT_TUPLE = [
   {
     type: 'tuple',
     components: [
       { name: 'pool', type: 'address' },
       { name: 'twapWindow', type: 'uint32' },
+      { name: 'twapShortWindow', type: 'uint32' },
       { name: 'bandTicks', type: 'uint24' },
       { name: 'generation', type: 'uint64' },
+      { name: 'minLiquidity', type: 'uint128' },
+      { name: 'budgetIn1', type: 'bool' },
       { name: 'budgetWindow', type: 'uint32' },
-      { name: 'perWindow0', type: 'uint128' },
-      { name: 'perWindow1', type: 'uint128' },
-      { name: 'total0', type: 'uint128' },
-      { name: 'total1', type: 'uint128' },
+      { name: 'perWindow', type: 'uint128' },
+      { name: 'total', type: 'uint128' },
+      { name: 'admit', type: 'uint256[]' },
     ],
   },
 ] as const
 
-/** `abi.encode(Init)`: a static struct, so this is exactly what Solidity's `abi.decode(data, (Init))` expects. */
+/** `abi.encode(Init)`: a dynamic struct (the `admit` array), encoded as one tuple, which is exactly what Solidity's
+ * `abi.decode(data, (Init))` expects. */
 export function encodeMamoruInit(i: MamoruInit): Hex {
   return encodeAbiParameters(MAMORU_INIT_TUPLE, [i])
 }
@@ -88,9 +101,17 @@ export type V4PoolSpec = {
    * specs/007-onchain-action-policy/results/t5-bands-2026-10-18.md): W_p per day clears every peak day the Lab
    * measured (stables 4.85x, btc 1.94x, risk 2.38x); T_p per approval at 10x bounds a leaked key's loss near 13% of
    * the cap (spec 007's formula) where 3x ran out within weeks. Usage-triggered renewal asks for a tap before T_p binds.
+   * T6 (M-2): one value budget per pool in the pool's stable token, swaps and mints of both tokens summed — not
+   * one budget per token, which let ~2x the multiple cross.
    */
   windowMultiple: number
   totalMultiple: number
+  /**
+   * MamoruActionPolicy.Init.minLiquidity (T6 H-1): floor of the harmonic-mean in-range liquidity over each TWAP
+   * window. A share of the pool's in-range liquidity at Base block 52,700,000 (see `V4_POOLS`); the fork
+   * measurement and the choice of share are in specs/007-onchain-action-policy/results/t6-fixes-2026-10-18.md.
+   */
+  minLiquidity: bigint
   /** Cap formula names this pool's grants reference (resolved to raw units by `computeCaps`, see instantiate.ts). */
   caps: {
     stableSwapPerCall: string
@@ -102,11 +123,9 @@ export type V4PoolSpec = {
     mint1Total: string
     volatileConvertPerCall: string
     volatileConvertTotal: string
-    /** MamoruActionPolicy.Init budgets (spec 007 "Parameters": W_p = 1xCp, T_p = 3xCp, token0/token1 separately). */
-    budgetWindow0: string
-    budgetWindow1: string
-    budgetTotal0: string
-    budgetTotal1: string
+    /** MamoruActionPolicy.Init budgets in the stable token (spec 007 "Parameters": W_p, T_p; T6 M-2: one per pool). */
+    budgetWindow: string
+    budgetTotal: string
   }
 }
 
@@ -121,10 +140,8 @@ function v4Caps(prefix: string): V4PoolSpec['caps'] {
     mint1Total: n('Mint1Total'),
     volatileConvertPerCall: n('ConvertPerCall'),
     volatileConvertTotal: n('ConvertTotal'),
-    budgetWindow0: n('BudgetWindow0'),
-    budgetWindow1: n('BudgetWindow1'),
-    budgetTotal0: n('BudgetTotal0'),
-    budgetTotal1: n('BudgetTotal1'),
+    budgetWindow: n('BudgetWindow'),
+    budgetTotal: n('BudgetTotal'),
   }
 }
 
@@ -147,30 +164,52 @@ export function v4CapFormulas(prefix: string, p: Omit<V4PoolSpec, 'caps'>): CapF
     { name: c.mint1Total, asset: p.token1, bpsOfDeposit: p.capShareBps * p.totalMultiple },
     { name: c.volatileConvertPerCall, asset: p.volatile, bpsOfDeposit: p.capShareBps * 2 },
     { name: c.volatileConvertTotal, asset: p.volatile, bpsOfDeposit: p.capShareBps * p.totalMultiple },
-    // W_p = windowMultiple x C_p per day, T_p = totalMultiple x C_p per approval (T5, Ot 18-Oct), per token.
-    { name: c.budgetWindow0, asset: p.token0, bpsOfDeposit: p.capShareBps * p.windowMultiple },
-    { name: c.budgetWindow1, asset: p.token1, bpsOfDeposit: p.capShareBps * p.windowMultiple },
-    { name: c.budgetTotal0, asset: p.token0, bpsOfDeposit: p.capShareBps * p.totalMultiple },
-    { name: c.budgetTotal1, asset: p.token1, bpsOfDeposit: p.capShareBps * p.totalMultiple },
+    // W_p = windowMultiple x C_p per day, T_p = totalMultiple x C_p per approval (T5, Ot 18-Oct): one value budget
+    // per pool in the stable token, both tokens summed at the policy's range edge (T6 M-2).
+    { name: c.budgetWindow, asset: p.stable, bpsOfDeposit: p.capShareBps * p.windowMultiple },
+    { name: c.budgetTotal, asset: p.stable, bpsOfDeposit: p.capShareBps * p.totalMultiple },
   ]
 }
 
-function v4Pool(pool: RegistryName, stable: RegistryName, volatile: RegistryName, token0: RegistryName, token1: RegistryName, fee: number, bandTicks: number, capShareBps: number, windowMultiple: number, totalMultiple: number, prefix: string): V4PoolSpec {
-  return { pool, stable, volatile, token0, token1, fee, bandTicks, capShareBps, windowMultiple, totalMultiple, caps: v4Caps(prefix) }
+function v4Pool(pool: RegistryName, stable: RegistryName, volatile: RegistryName, token0: RegistryName, token1: RegistryName, fee: number, bandTicks: number, capShareBps: number, windowMultiple: number, totalMultiple: number, minLiquidity: bigint, prefix: string): V4PoolSpec {
+  return { pool, stable, volatile, token0, token1, fee, bandTicks, capShareBps, windowMultiple, totalMultiple, minLiquidity, caps: v4Caps(prefix) }
 }
 
-/** The three pools of conservadorLiveV2, with the v4 band ticks and cap shares of spec 007's "Parameters" table. */
+/**
+ * The three pools of conservadorLiveV2, with the v4 band ticks and cap shares of spec 007's "Parameters" table.
+ * minLiquidity (T6 H-1), from the in-range liquidity at Base block 52,700,000: stables 2.972e14 x 10%, btc
+ * 2.679e12 x 25%, risk 3.402e19 x 10%. btc needs the higher share: a one-block push 9,000 ticks out drops its
+ * 5-minute harmonic mean to ~16%, which a 10% floor would let through (results/t6-fixes-2026-10-18.md).
+ */
 export const V4_POOLS = {
-  stables: v4Pool('pool:USDC/USDT/100', 'USDC', 'USDT', 'USDC', 'USDT', 100, 10, 5000, 5, 10, 'stables'),
-  btc: v4Pool('pool:USDC/cbBTC/500', 'USDC', 'cbBTC', 'USDC', 'cbBTC', 500, 100, 4000, 2, 10, 'btc'),
-  risk: v4Pool('pool:WETH/USDC/3000', 'USDC', 'WETH', 'WETH', 'USDC', 3000, 100, 1000, 3, 10, 'risk'),
+  stables: v4Pool('pool:USDC/USDT/100', 'USDC', 'USDT', 'USDC', 'USDT', 100, 10, 5000, 5, 10, 29_700_000_000_000n, 'stables'),
+  btc: v4Pool('pool:USDC/cbBTC/500', 'USDC', 'cbBTC', 'USDC', 'cbBTC', 500, 100, 4000, 2, 10, 669_000_000_000n, 'btc'),
+  risk: v4Pool('pool:WETH/USDC/3000', 'USDC', 'WETH', 'WETH', 'USDC', 3000, 100, 1000, 3, 10, 3_400_000_000_000_000_000n, 'risk'),
 } as const satisfies Record<string, V4PoolSpec>
 
 export const TWAP_WINDOW_SECONDS = 1800 // spec 007 "Parameters": = execution.twapWindowSeconds
+export const TWAP_SHORT_WINDOW_SECONDS = 300 // T6 M-1: the short TWAP of the range
 export const BUDGET_WINDOW_SECONDS = 86_400 // spec 007 "Parameters": 1 day
 
-/** MamoruActionPolicy.Init for `p` at `generation`, from a resolved Caps object (see `v4CapFormulas` / `computeCaps`). */
-export function mamoruInitFor(p: V4PoolSpec, generation: bigint, caps: Record<string, bigint>, opts: { twapWindow?: number; budgetWindow?: number } = {}): MamoruInit {
+/** The budget unit of `p`: its stable token, as `Init.budgetIn1`. */
+export function budgetIn1(p: Pick<V4PoolSpec, 'stable' | 'token0' | 'token1'>): boolean {
+  if (p.stable !== p.token0 && p.stable !== p.token1) throw new Error(`budgetIn1: ${p.stable} is neither token of the pool`)
+  return p.stable === p.token1
+}
+
+/**
+ * MamoruActionPolicy.Init for `p` at `generation`, from a resolved Caps object (see `v4CapFormulas` / `computeCaps`).
+ * `opts.admit` (T6 M-4): tokenIds of this pool the account already holds (minted by v2/v3 grants, the owner, or an
+ * earlier policy deployment) that the owner admits with this enable; every action of every session of the pool in
+ * one generation must carry the same Init (the contract refuses a same-generation config that differs, except
+ * `admit`).
+ */
+export function mamoruInitFor(
+  p: V4PoolSpec,
+  generation: bigint,
+  caps: Record<string, bigint>,
+  opts: { twapWindow?: number; twapShortWindow?: number; budgetWindow?: number; admit?: readonly bigint[] } = {},
+): MamoruInit {
   const need = (name: string): bigint => {
     const v = caps[name]
     if (v === undefined) throw new Error(`mamoruInitFor: missing cap ${name} (pool ${p.pool})`)
@@ -179,13 +218,15 @@ export function mamoruInitFor(p: V4PoolSpec, generation: bigint, caps: Record<st
   return {
     pool: address(p.pool),
     twapWindow: opts.twapWindow ?? TWAP_WINDOW_SECONDS,
+    twapShortWindow: opts.twapShortWindow ?? TWAP_SHORT_WINDOW_SECONDS,
     bandTicks: p.bandTicks,
     generation,
+    minLiquidity: p.minLiquidity,
+    budgetIn1: budgetIn1(p),
     budgetWindow: opts.budgetWindow ?? BUDGET_WINDOW_SECONDS,
-    perWindow0: need(p.caps.budgetWindow0),
-    perWindow1: need(p.caps.budgetWindow1),
-    total0: need(p.caps.budgetTotal0),
-    total1: need(p.caps.budgetTotal1),
+    perWindow: need(p.caps.budgetWindow),
+    total: need(p.caps.budgetTotal),
+    admit: opts.admit ?? [],
   }
 }
 
@@ -339,12 +380,14 @@ export function withActionPolicy(
   policy: PolicyVersion,
   mamoruPolicy: Address,
   pools: readonly V4PoolSpec[],
-  opts: { bandFactorBps?: number; caps?: Record<string, bigint>; budgetWindowSeconds?: number } = {},
+  opts: { bandFactorBps?: number; caps?: Record<string, bigint>; budgetWindowSeconds?: number; twapShortWindowSeconds?: number } = {},
 ): PolicyVersion {
   const bandTicksByPool: Partial<Record<RegistryName, number>> = {}
-  const budgetsByPool: Partial<Record<RegistryName, { windowSeconds: number; perWindow0: bigint; perWindow1: bigint; total0: bigint; total1: bigint }>> = {}
+  const minLiquidityByPool: Partial<Record<RegistryName, bigint>> = {}
+  const budgetsByPool: Partial<Record<RegistryName, { windowSeconds: number; in1: boolean; perWindow: bigint; total: bigint }>> = {}
   for (const p of pools) {
     bandTicksByPool[p.pool] = p.bandTicks
+    minLiquidityByPool[p.pool] = p.minLiquidity
     if (opts.caps) {
       const need = (name: string): bigint => {
         const v = opts.caps![name]
@@ -353,10 +396,9 @@ export function withActionPolicy(
       }
       budgetsByPool[p.pool] = {
         windowSeconds: opts.budgetWindowSeconds ?? BUDGET_WINDOW_SECONDS,
-        perWindow0: need(p.caps.budgetWindow0),
-        perWindow1: need(p.caps.budgetWindow1),
-        total0: need(p.caps.budgetTotal0),
-        total1: need(p.caps.budgetTotal1),
+        in1: budgetIn1(p),
+        perWindow: need(p.caps.budgetWindow),
+        total: need(p.caps.budgetTotal),
       }
     }
   }
@@ -365,6 +407,8 @@ export function withActionPolicy(
     actionPolicy: {
       address: mamoruPolicy,
       bandTicksByPool,
+      minLiquidityByPool,
+      twapShortWindowSeconds: opts.twapShortWindowSeconds ?? TWAP_SHORT_WINDOW_SECONDS,
       ...(opts.bandFactorBps !== undefined ? { bandFactorBps: opts.bandFactorBps } : {}),
       ...(opts.caps ? { budgetsByPool } : {}),
     },

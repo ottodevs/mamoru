@@ -1,7 +1,7 @@
-// Spec 007 (otto/mamoru#151), task T4: unit tests of `checkActionPolicyCall` (action-policy.ts) — the pure mirror
-// of MamoruActionPolicy.checkAction's three refusal classes. Calldata is built with the SAME helpers
+// Spec 007 (otto/mamoru#151), tasks T4 and T6: unit tests of `checkActionPolicyCall` (action-policy.ts) — the pure
+// mirror of MamoruActionPolicy.checkAction's refusal classes. Calldata is built with the SAME helpers
 // (`@mamoru/uniswap-v3`) and ABIs (`@mamoru/registry`) the engine itself uses, and swap bounds with the SAME
-// `swapBoundsAtBand` port T3 added, so a passing case here is a passing case for the real engine wiring too — the
+// `priceRange`/`swapBoundsInRange` port the engine uses, so a passing case here is a passing case for the real engine wiring too — the
 // fork scenario (packages/scenarios/action-policy/t4-fork.ts) cross-checks the same three classes against the
 // deployed contract.
 import { describe, expect, test } from 'bun:test'
@@ -9,7 +9,7 @@ import { encodeFunctionData } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { address, entry, nonfungiblePositionManagerAbi } from '@mamoru/registry'
 import { burn, collect, decreaseLiquidity, exactInputSingle, type V3Call } from '@mamoru/uniswap-v3'
-import { swapBoundsAtBand } from '@mamoru/uniswap-v3/policy-bounds'
+import { budgetValue, priceRange, swapBoundsInRange, type OracleRead } from '@mamoru/uniswap-v3/policy-bounds'
 import type { Execution } from '../safe/index.ts'
 import { checkActionPolicyCall, type ActionPolicyPoolConfig, type ActionPolicyReads, type ActionPolicySpendAcc } from './action-policy.ts'
 
@@ -26,14 +26,18 @@ const cfg: ActionPolicyPoolConfig = {
   token1: address(e.token1!),
   feePips: e.fee!,
   bandTicks: 100,
+  minLiquidity: 1_000_000n,
+  budgetIn1: false, // USDC is token0
   budgetWindowSeconds: 86_400,
-  perWindow0: 60_000_000_000n, // 60,000 USDC
-  perWindow1: 60_000_000n, // 0.6 cbBTC
-  total0: 180_000_000_000n,
-  total1: 180_000_000n,
+  perWindow: 60_000_000_000n, // 60,000 USDC of value
+  total: 180_000_000_000n,
 }
 
-const baseReads: ActionPolicyReads = { twapTick: 0, spend: { epoch: 0n, generation: 1n, window0: 0n, window1: 0n, total0: 0n, total1: 0n }, currentGeneration: 1n }
+// Tick 0: 1 raw cbBTC unit is worth 1 raw USDC unit, so values below are easy to read.
+const flat: OracleRead = { twapLong: 0, twapShort: 0, hmLong: 10_000_000n, hmShort: 10_000_000n }
+const emptySpend = { generation: 1n, updatedAt: 0n, in1: false, debt: 0n, total: 0n }
+const baseReads: ActionPolicyReads = { oracle: flat, spend: emptySpend, currentGeneration: 1n }
+const range = priceRange(flat, cfg.bandTicks, cfg.minLiquidity)!
 
 function toExecution(c: V3Call): Execution {
   return { target: c.to, value: c.value, callData: c.data }
@@ -45,14 +49,14 @@ function never(): boolean {
 
 describe('(a) price band', () => {
   const amountIn = 10_000_000_000n // 10,000 USDC
-  const bound = swapBoundsAtBand({ twap: 0, bandTicks: cfg.bandTicks, feePips: cfg.feePips, zeroForOne: true, tokenIn: cfg.token0, tokenOut: cfg.token1, amountIn })
+  const bound = swapBoundsInRange({ range, feePips: cfg.feePips, zeroForOne: true, tokenIn: cfg.token0, tokenOut: cfg.token1, amountIn })
 
   test('a minimum/limit at the full-band edge passes and charges the budget', () => {
     const acc: ActionPolicySpendAcc = new Map()
     const call = toExecution(exactInputSingle({ account: ACCOUNT, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: 500, amountIn, amountOutMinimum: bound.minOut, sqrtPriceLimitX96: bound.sqrtPriceLimitX96 }))
     const res = checkActionPolicyCall(call, cfg, baseReads, NOW, acc, never)
     expect(res.ok).toBe(true)
-    expect(acc.get(POOL)).toEqual({ a0: amountIn, a1: 0n })
+    expect(acc.get(POOL)).toBe(amountIn)
   })
 
   test("today's grant shape (amountOutMinimum=1, sqrtPriceLimitX96=0) is refused: POLICY_PRICE_BAND", () => {
@@ -76,7 +80,27 @@ describe('(a) price band', () => {
     expect(res).toMatchObject({ ok: false, code: 'POLICY_PRICE_BAND' })
   })
 
-  test('no TWAP/spend read for the pool fails closed', () => {
+  test('T6 H-1: either window under the liquidity floor refuses the swap', () => {
+    for (const oracle of [{ ...flat, hmLong: cfg.minLiquidity - 1n }, { ...flat, hmShort: cfg.minLiquidity - 1n }]) {
+      const call = toExecution(exactInputSingle({ account: ACCOUNT, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: 500, amountIn, amountOutMinimum: bound.minOut, sqrtPriceLimitX96: bound.sqrtPriceLimitX96 }))
+      const res = checkActionPolicyCall(call, cfg, { ...baseReads, oracle }, NOW, new Map(), never)
+      expect(res).toMatchObject({ ok: false, code: 'POLICY_PRICE_BAND' })
+    }
+  })
+
+  test('T6 M-1: the safer of the two TWAPs sets the edge (a lagging long TWAP does not loosen it)', () => {
+    // Market moved up: short 60 ticks above long. Selling token0, the floor follows the short TWAP.
+    const moved = { ...flat, twapLong: 0, twapShort: 60 }
+    const r = priceRange(moved, cfg.bandTicks, cfg.minLiquidity)!
+    expect(r).toEqual({ lo: 60 - 100 + 1, hi: 0 + 100 })
+    const atLong = swapBoundsInRange({ range: { lo: -100, hi: 100 }, feePips: cfg.feePips, zeroForOne: true, tokenIn: cfg.token0, tokenOut: cfg.token1, amountIn })
+    const call = toExecution(exactInputSingle({ account: ACCOUNT, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: 500, amountIn, amountOutMinimum: atLong.minOut, sqrtPriceLimitX96: atLong.sqrtPriceLimitX96 }))
+    expect(checkActionPolicyCall(call, cfg, { ...baseReads, oracle: moved }, NOW, new Map(), never)).toMatchObject({ ok: false, code: 'POLICY_PRICE_BAND' })
+    // TWAPs more than ~2 x band apart: no range at all.
+    expect(priceRange({ ...flat, twapShort: 200 }, cfg.bandTicks, cfg.minLiquidity)).toBeNull()
+  })
+
+  test('no oracle/spend read for the pool fails closed', () => {
     const acc: ActionPolicySpendAcc = new Map()
     const call = toExecution(exactInputSingle({ account: ACCOUNT, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: 500, amountIn, amountOutMinimum: bound.minOut, sqrtPriceLimitX96: bound.sqrtPriceLimitX96 }))
     const res = checkActionPolicyCall(call, cfg, undefined, NOW, acc, never)
@@ -100,7 +124,17 @@ describe('(b) positions', () => {
     const call: Execution = { target: MAMORU_POLICY, value: 0n, callData: mintData }
     const res = checkActionPolicyCall(call, cfg, baseReads, NOW, acc, never)
     expect(res.ok).toBe(true)
-    expect(acc.get(POOL)).toEqual({ a0: mintArgs.amount0Desired, a1: mintArgs.amount1Desired })
+    // T6 M-2: one value, both tokens summed (cbBTC valued at the range's lo edge, in USDC).
+    const value = budgetValue({ range, in1: false, token0: cfg.token0, token1: cfg.token1, amount0: mintArgs.amount0Desired, amount1: mintArgs.amount1Desired })
+    expect(acc.get(POOL)).toBe(value)
+    expect(value - mintArgs.amount0Desired).toBeGreaterThan(mintArgs.amount1Desired) // lo = -99: cbBTC valued at its highest
+  })
+
+  test('a decrease is refused when the oracle is refused (its minimums are priced)', () => {
+    const isAdmitted = (tokenId: bigint) => tokenId === 42n
+    const call = toExecution(decreaseLiquidity({ tokenId: 42n, liquidity: 1n, amount0Min: 0n, amount1Min: 0n, deadline: 9_999_999_999n }))
+    const res = checkActionPolicyCall(call, cfg, { ...baseReads, oracle: { ...flat, hmShort: 0n } }, NOW, new Map(), isAdmitted)
+    expect(res).toMatchObject({ ok: false, code: 'POLICY_PRICE_BAND' })
   })
 
   test('mint through the policy for the wrong pool/fee is refused', () => {
@@ -131,8 +165,8 @@ describe('(b) positions', () => {
 })
 
 describe('(c) budgets', () => {
-  const amountIn = 25_000_000_000n // 25,000 USDC; perWindow0 is 60,000
-  const bound = swapBoundsAtBand({ twap: 0, bandTicks: cfg.bandTicks, feePips: cfg.feePips, zeroForOne: true, tokenIn: cfg.token0, tokenOut: cfg.token1, amountIn })
+  const amountIn = 25_000_000_000n // 25,000 USDC; the bucket holds 60,000
+  const bound = swapBoundsInRange({ range, feePips: cfg.feePips, zeroForOne: true, tokenIn: cfg.token0, tokenOut: cfg.token1, amountIn })
   const swapCall = () => toExecution(exactInputSingle({ account: ACCOUNT, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: 500, amountIn, amountOutMinimum: bound.minOut, sqrtPriceLimitX96: bound.sqrtPriceLimitX96 }))
 
   test('a batch of three 25,000 USDC swaps (75,000 total) in one window (budget 60,000): the third is refused', () => {
@@ -142,18 +176,34 @@ describe('(c) budgets', () => {
     expect(checkActionPolicyCall(swapCall(), cfg, baseReads, NOW, acc, never)).toMatchObject({ ok: false, code: 'POLICY_BUDGET' })
   })
 
-  test('a generation rollover zeroes a stale Spend read, even a near-exhausted one', () => {
-    const acc: ActionPolicySpendAcc = new Map()
-    const staleGen: ActionPolicyReads = { twapTick: 0, spend: { epoch: 0n, generation: 1n, window0: 59_000_000_000n, window1: 0n, total0: 179_000_000_000n, total1: 0n }, currentGeneration: 2n }
-    expect(checkActionPolicyCall(swapCall(), cfg, staleGen, NOW, acc, never).ok).toBe(true)
+  test('T6 L-5: a generation rollover resets the approval total but carries the bucket', () => {
+    const nearlyFull: ActionPolicyReads = { ...baseReads, spend: { ...emptySpend, debt: 59_000_000_000n, total: 179_000_000_000n }, currentGeneration: 2n }
+    expect(checkActionPolicyCall(swapCall(), cfg, nearlyFull, NOW, new Map(), never)).toMatchObject({ ok: false, code: 'POLICY_BUDGET' })
+    const drained: ActionPolicyReads = { ...baseReads, spend: { ...emptySpend, debt: 0n, total: 179_000_000_000n }, currentGeneration: 2n }
+    expect(checkActionPolicyCall(swapCall(), cfg, drained, NOW, new Map(), never).ok).toBe(true)
   })
 
-  test('an epoch rollover resets the window but keeps the approval total (same generation)', () => {
+  test('T6 M-3: the bucket refills perWindow/window per second, never a whole window at a boundary', () => {
+    const spent: ActionPolicyReads = { ...baseReads, spend: { ...emptySpend, updatedAt: 1_000n, debt: 60_000_000_000n, total: 60_000_000_000n } }
+    // Two seconds later: 2/86,400 of 60,000 USDC is back (1.388888 USDC), not 60,000.
+    expect(checkActionPolicyCall(swapCall(), cfg, spent, 1_002, new Map(), never)).toMatchObject({ ok: false, code: 'POLICY_BUDGET' })
+    // 10 h later: 25,000 back (60,000 x 36,000 / 86,400), exactly one swap.
+    expect(checkActionPolicyCall(swapCall(), cfg, spent, 1_000 + 36_000, new Map(), never).ok).toBe(true)
+    expect(checkActionPolicyCall(swapCall(), cfg, spent, 1_000 + 35_999, new Map(), never)).toMatchObject({ ok: false, code: 'POLICY_BUDGET' })
+  })
+
+  test('the approval total holds whatever the bucket says', () => {
+    const late: ActionPolicyReads = { ...baseReads, spend: { ...emptySpend, updatedAt: 0n, debt: 0n, total: 170_000_000_000n } }
+    expect(checkActionPolicyCall(swapCall(), cfg, late, 10 * 86_400, new Map(), never)).toMatchObject({ ok: false, code: 'POLICY_BUDGET' })
+  })
+
+  test('T6 M-2: a round trip draws both legs on the one budget', () => {
     const acc: ActionPolicySpendAcc = new Map()
-    const staleEpoch: ActionPolicyReads = { twapTick: 0, spend: { epoch: 0n, generation: 1n, window0: 59_000_000_000n, window1: 0n, total0: 170_000_000_000n, total1: 0n }, currentGeneration: 1n }
-    const nextEpoch = cfg.budgetWindowSeconds // a new window has started; total0 170,000 + 25,000 = 195,000 > 180,000 cap
-    const res = checkActionPolicyCall(swapCall(), cfg, staleEpoch, nextEpoch, acc, never)
-    expect(res).toMatchObject({ ok: false, code: 'POLICY_BUDGET' })
+    expect(checkActionPolicyCall(swapCall(), cfg, baseReads, NOW, acc, never).ok).toBe(true)
+    const back = swapBoundsInRange({ range, feePips: cfg.feePips, zeroForOne: false, tokenIn: cfg.token1, tokenOut: cfg.token0, amountIn: 36_000_000_000n })
+    const leg2 = toExecution(exactInputSingle({ account: ACCOUNT, tokenIn: 'cbBTC', tokenOut: 'USDC', fee: 500, amountIn: 36_000_000_000n, amountOutMinimum: back.minOut, sqrtPriceLimitX96: back.sqrtPriceLimitX96 }))
+    // 25,000 + 36,000 x 1.0001^99 (cbBTC valued at lo = -99) > 60,000; with one budget per token both legs passed.
+    expect(checkActionPolicyCall(leg2, cfg, baseReads, NOW, acc, never)).toMatchObject({ ok: false, code: 'POLICY_BUDGET' })
   })
 
   test('no spend read for a mint fails closed: POLICY_BUDGET', () => {

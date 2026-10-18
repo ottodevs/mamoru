@@ -19,6 +19,8 @@ import {
   splitSessionsByGas,
   V4_POOLS,
   v4CapFormulas,
+  budgetIn1,
+  MAMORU_INIT_TUPLE,
   type MamoruInit,
 } from './v4-grants.ts'
 import { conservadorLiveV4 } from './policies-v4.ts'
@@ -59,64 +61,57 @@ describe('MamoruActionPolicy.Init encoding stays in sync with the Solidity struc
         const [type, name] = l.replace(/;$/, '').split(/\s+/)
         return { type, name }
       })
-    expect(fields).toEqual([
-      { type: 'address', name: 'pool' },
-      { type: 'uint32', name: 'twapWindow' },
-      { type: 'uint24', name: 'bandTicks' },
-      { type: 'uint64', name: 'generation' },
-      { type: 'uint32', name: 'budgetWindow' },
-      { type: 'uint128', name: 'perWindow0' },
-      { type: 'uint128', name: 'perWindow1' },
-      { type: 'uint128', name: 'total0' },
-      { type: 'uint128', name: 'total1' },
-    ])
+    expect(fields).toEqual(MAMORU_INIT_TUPLE[0].components.map((c) => ({ type: c.type, name: c.name })))
+    expect(fields.map((f) => f.name)).toEqual(['pool', 'twapWindow', 'twapShortWindow', 'bandTicks', 'generation', 'minLiquidity', 'budgetIn1', 'budgetWindow', 'perWindow', 'total', 'admit'])
   })
 
   test('encodeMamoruInit round-trips through abi.decode(data, (Init))', () => {
     const init: MamoruInit = {
       pool: address('pool:USDC/cbBTC/500'),
       twapWindow: 1800,
+      twapShortWindow: 300,
       bandTicks: 100,
       generation: 1n,
+      minLiquidity: 669_000_000_000n,
+      budgetIn1: false,
       budgetWindow: 86_400,
-      perWindow0: 60_000_000_000n,
-      perWindow1: 60_000_000n,
-      total0: 180_000_000_000n,
-      total1: 180_000_000n,
+      perWindow: 60_000_000_000n,
+      total: 180_000_000_000n,
+      admit: [7n, 123_456n],
     }
     const encoded = encodeMamoruInit(init)
-    const [decoded] = decodeAbiParameters(
-      [
-        {
-          type: 'tuple',
-          components: [
-            { name: 'pool', type: 'address' },
-            { name: 'twapWindow', type: 'uint32' },
-            { name: 'bandTicks', type: 'uint24' },
-            { name: 'generation', type: 'uint64' },
-            { name: 'budgetWindow', type: 'uint32' },
-            { name: 'perWindow0', type: 'uint128' },
-            { name: 'perWindow1', type: 'uint128' },
-            { name: 'total0', type: 'uint128' },
-            { name: 'total1', type: 'uint128' },
-          ],
-        },
-      ],
-      encoded,
-    )
+    const [decoded] = decodeAbiParameters(MAMORU_INIT_TUPLE, encoded)
     expect(decoded).toEqual(init)
+    // Dynamic struct: abi.encode(Init) starts with the offset of the tuple (0x20), as Solidity's encoder writes it.
+    expect(encoded.slice(0, 66)).toBe(`0x${'0'.repeat(62)}20`)
   })
 
   test('mamoruInitFor resolves a pool spec + caps into a well-formed Init', () => {
     const caps = computeCaps(conservadorLiveV4, 10_000n * 1_000_000n, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
-    const init = mamoruInitFor(V4_POOLS.btc, 1n, caps)
+    const init = mamoruInitFor(V4_POOLS.btc, 1n, caps, { admit: [42n] })
     expect(init.pool.toLowerCase()).toBe(address('pool:USDC/cbBTC/500').toLowerCase())
     expect(init.twapWindow).toBe(1800)
+    expect(init.twapShortWindow).toBe(300)
     expect(init.bandTicks).toBe(100)
     expect(init.budgetWindow).toBe(86_400)
+    expect(init.minLiquidity).toBe(V4_POOLS.btc.minLiquidity)
+    expect(init.admit).toEqual([42n])
     // btc: W_p = 2 x C_p per day, T_p = 10 x C_p per approval (T5, Ot 18-Oct): total is 5x the per-window budget.
-    expect(init.total0).toBe(init.perWindow0 * 5n)
-    expect(init.total1).toBe(init.perWindow1 * 5n)
+    expect(init.total).toBe(init.perWindow * 5n)
+    // T6 M-2: one value budget in USDC (token0 here): 2 x 40% of 10,000 USDC per day.
+    expect(init.budgetIn1).toBe(false)
+    expect(init.perWindow).toBe(8_000_000_000n)
+  })
+
+  test('T6 M-2: the budget unit is each pool\'s stable token (token1 only on WETH/USDC)', () => {
+    expect(budgetIn1(V4_POOLS.stables)).toBe(false)
+    expect(budgetIn1(V4_POOLS.btc)).toBe(false)
+    expect(budgetIn1(V4_POOLS.risk)).toBe(true)
+    for (const p of Object.values(V4_POOLS)) {
+      const f = v4CapFormulas('x', p).filter((c) => c.name === 'xBudgetWindow' || c.name === 'xBudgetTotal')
+      expect(f.map((c) => c.asset)).toEqual([p.stable, p.stable])
+      expect(f.map((c) => c.bpsOfDeposit)).toEqual([p.capShareBps * p.windowMultiple, p.capShareBps * p.totalMultiple])
+    }
   })
 
   test('band ticks follow the spec 007 Parameters table (stables 10, btc 100, risk 100)', () => {
@@ -240,14 +235,13 @@ describe('gas model + splitter (spec 007 Tasks T2 (b))', () => {
 })
 
 describe('v4CapFormulas', () => {
-  test('budgets follow T5 (Ot 18-Oct): W_p per day stables 5x, btc 2x, risk 3x C_p; T_p 10x C_p per approval, per token', () => {
+  test('budgets follow T5 (Ot 18-Oct): W_p per day stables 5x, btc 2x, risk 3x C_p; T_p 10x C_p per approval, one value budget per pool (T6 M-2)', () => {
     expect([V4_POOLS.stables.windowMultiple, V4_POOLS.btc.windowMultiple, V4_POOLS.risk.windowMultiple]).toEqual([5, 2, 3])
     for (const [prefix, pool] of Object.entries(V4_POOLS)) {
       const byName = Object.fromEntries(v4CapFormulas(prefix, pool).map((f) => [f.name, f]))
-      for (const t of ['0', '1']) {
-        expect(byName[`${prefix}BudgetWindow${t}`]!.bpsOfDeposit).toBe(pool.capShareBps * pool.windowMultiple)
-        expect(byName[`${prefix}BudgetTotal${t}`]!.bpsOfDeposit).toBe(pool.capShareBps * 10)
-      }
+      expect(byName[`${prefix}BudgetWindow`]!.bpsOfDeposit).toBe(pool.capShareBps * pool.windowMultiple)
+      expect(byName[`${prefix}BudgetTotal`]!.bpsOfDeposit).toBe(pool.capShareBps * 10)
+      expect(Object.keys(byName).filter((n) => n.includes('Budget'))).toEqual([`${prefix}BudgetWindow`, `${prefix}BudgetTotal`])
     }
   })
 })

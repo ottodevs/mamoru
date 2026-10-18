@@ -9,7 +9,7 @@ import type { Address } from '@mamoru/domain'
 import { address, entry } from '@mamoru/registry'
 import { computeCaps, conservadorLabV1, conservadorLabV4, instantiateGrant, retargetToPolicy, V4_POOLS, withActionPolicy, type Price } from '@mamoru/policy'
 import { approve, decreaseLiquidity, exactInputSingle, type V3Call } from '@mamoru/uniswap-v3'
-import { swapBoundsAtBand } from '@mamoru/uniswap-v3/policy-bounds'
+import { priceRange, swapBoundsInRange, type OracleRead } from '@mamoru/uniswap-v3/policy-bounds'
 import { executeCallData, useModeSignature } from '../sessions/index.ts'
 import type { Execution } from '../safe/index.ts'
 import { SessionLedger, precheck, type ActionPolicyPoolConfig } from './index.ts'
@@ -30,8 +30,12 @@ const enginePolicy = withActionPolicy(conservadorLabV4, MAMORU_POLICY, [V4_POOLS
 const apConfig: ActionPolicyPoolConfig = (() => {
   const e = entry(POOL)
   const budget = enginePolicy.actionPolicy!.budgetsByPool![POOL]!
-  return { pool: POOL, address: MAMORU_POLICY, token0: address(e.token0!), token1: address(e.token1!), feePips: e.fee!, bandTicks: enginePolicy.actionPolicy!.bandTicksByPool[POOL]!, budgetWindowSeconds: budget.windowSeconds, perWindow0: budget.perWindow0, perWindow1: budget.perWindow1, total0: budget.total0, total1: budget.total1 }
+  const minLiquidity = enginePolicy.actionPolicy!.minLiquidityByPool![POOL]!
+  return { pool: POOL, address: MAMORU_POLICY, token0: address(e.token0!), token1: address(e.token1!), feePips: e.fee!, bandTicks: enginePolicy.actionPolicy!.bandTicksByPool[POOL]!, minLiquidity, budgetIn1: budget.in1, budgetWindowSeconds: budget.windowSeconds, perWindow: budget.perWindow, total: budget.total }
 })()
+const ORACLE: OracleRead = { twapLong: 0, twapShort: 0, hmLong: apConfig.minLiquidity * 4n, hmShort: apConfig.minLiquidity * 4n }
+const RANGE = priceRange(ORACLE, apConfig.bandTicks, apConfig.minLiquidity)!
+const EMPTY_SPEND = { generation: 1n, updatedAt: 0n, in1: false, debt: 0n, total: 0n }
 
 function exec(c: V3Call): Execution {
   return { target: c.to, value: c.value, callData: c.data }
@@ -41,7 +45,7 @@ function ledgerWithActionPolicy(): SessionLedger {
   const l = new SessionLedger()
   l.activate(PID, swapGrant)
   l.watchActionPolicyPool(apConfig)
-  l.syncActionPolicyReads(POOL, { twapTick: 0, spend: { epoch: 0n, generation: 1n, window0: 0n, window1: 0n, total0: 0n, total1: 0n }, currentGeneration: 1n })
+  l.syncActionPolicyReads(POOL, { oracle: ORACLE, spend: EMPTY_SPEND, currentGeneration: 1n })
   return l
 }
 
@@ -56,7 +60,7 @@ function swapCalls(amountIn: bigint, amountOutMinimum: bigint, sqrtPriceLimitX96
 
 describe('precheck wired to MamoruActionPolicy (spec 007 T4)', () => {
   const amountIn = 1_000_000_000n // 1,000 USDC — well inside enter-swap's per-call cap
-  const bound = swapBoundsAtBand({ twap: 0, bandTicks: apConfig.bandTicks, feePips: apConfig.feePips, zeroForOne: true, tokenIn: apConfig.token0, tokenOut: apConfig.token1, amountIn })
+  const bound = swapBoundsInRange({ range: RANGE, feePips: apConfig.feePips, zeroForOne: true, tokenIn: apConfig.token0, tokenOut: apConfig.token1, amountIn })
 
   test('a swap within the band and budget passes grant rules AND the action-policy mirror', () => {
     expect(run(swapCalls(amountIn, bound.minOut, bound.sqrtPriceLimitX96), ledgerWithActionPolicy())).toBe('ACCEPT')
@@ -75,21 +79,26 @@ describe('precheck wired to MamoruActionPolicy (spec 007 T4)', () => {
     // Budgets are W_p = windowMultiple x C_p per day and T_p = 10 x C_p per approval (T5, Ot 18-Oct): far above one
     // call at the grant's own caps, so the spend so far (read on chain: spendOf) is what brings a call over them.
     const amount = 1_000_000n // 1 USDC: well inside every grant-level cap
-    const b = swapBoundsAtBand({ twap: 0, bandTicks: apConfig.bandTicks, feePips: apConfig.feePips, zeroForOne: true, tokenIn: apConfig.token0, tokenOut: apConfig.token1, amountIn: amount })
+    const b = swapBoundsInRange({ range: RANGE, feePips: apConfig.feePips, zeroForOne: true, tokenIn: apConfig.token0, tokenOut: apConfig.token1, amountIn: amount })
     const swap = swapCalls(amount, b.minOut, b.sqrtPriceLimitX96)
-    const epoch = BigInt(Math.floor(NOW / apConfig.budgetWindowSeconds))
-    const spent = (window0: bigint, total0: bigint) => {
+    const spent = (debt: bigint, total: bigint) => {
       const l = new SessionLedger()
       l.activate(PID, swapGrant)
       l.watchActionPolicyPool(apConfig)
-      l.syncActionPolicyReads(POOL, { twapTick: 0, spend: { epoch, generation: 1n, window0, window1: 0n, total0, total1: 0n }, currentGeneration: 1n })
+      l.syncActionPolicyReads(POOL, { oracle: ORACLE, spend: { ...EMPTY_SPEND, updatedAt: BigInt(NOW), debt, total }, currentGeneration: 1n })
       return l
     }
     expect(run(swap, spent(0n, 0n))).toBe('ACCEPT')
-    // The day's window has 1 unit left: refused.
-    expect(run(swap, spent(apConfig.perWindow0 - 1n, apConfig.perWindow0 - 1n))).toBe('POLICY_BUDGET')
-    // A fresh day, but the approval's total has 1 unit left: refused all the same.
-    expect(run(swap, spent(0n, apConfig.total0 - 1n))).toBe('POLICY_BUDGET')
+    // The bucket has 1 unit left (charged this very second): refused.
+    expect(run(swap, spent(apConfig.perWindow - 1n, apConfig.perWindow - 1n))).toBe('POLICY_BUDGET')
+    // An empty bucket, but the approval's total has 1 unit left: refused all the same.
+    expect(run(swap, spent(0n, apConfig.total - 1n))).toBe('POLICY_BUDGET')
+  })
+
+  test('T6 H-1: a pool whose oracle liquidity is under the Init floor is refused before signing', () => {
+    const l = ledgerWithActionPolicy()
+    l.syncActionPolicyReads(POOL, { oracle: { ...ORACLE, hmShort: apConfig.minLiquidity - 1n }, spend: EMPTY_SPEND, currentGeneration: 1n })
+    expect(run(swapCalls(amountIn, bound.minOut, bound.sqrtPriceLimitX96), l)).toBe('POLICY_PRICE_BAND')
   })
 
   test('decrease/collect/burn on a position never admitted through the policy is refused: POLICY_NOT_ADMITTED', () => {
@@ -97,7 +106,7 @@ describe('precheck wired to MamoruActionPolicy (spec 007 T4)', () => {
     const ledger = new SessionLedger()
     ledger.activate(PID, manageGrant)
     ledger.watchActionPolicyPool(apConfig)
-    ledger.syncActionPolicyReads(POOL, { twapTick: 0, spend: { epoch: 0n, generation: 1n, window0: 0n, window1: 0n, total0: 0n, total1: 0n }, currentGeneration: 1n })
+    ledger.syncActionPolicyReads(POOL, { oracle: ORACLE, spend: EMPTY_SPEND, currentGeneration: 1n })
     const calls = [exec(decreaseLiquidity({ tokenId: 999n, liquidity: 1n, amount0Min: 0n, amount1Min: 0n, deadline: 9_999_999_999n }))]
     expect(run(calls, ledger)).toBe('POLICY_NOT_ADMITTED')
     ledger.admitTokenId(999n, POOL)
