@@ -1,7 +1,8 @@
 # 007: An on-chain action policy that bounds what a leaked session key can lose
 
-Ticket: otto/mamoru#151 (from the #140 audit, part 1, and the #149 review). Status: spec and PoC. Nothing is
-deployed, no live grant changes, no engine or app code changes in this unit.
+Ticket: otto/mamoru#151 (from the #140 audit, part 1, and the #149 review). Status: spec, PoC, T1-T5 done, T6
+audit (`results/t6-audit-claude-2026-10-18.md`) and its fixes (`results/t6-fixes-2026-10-18.md`) done. Nothing is
+deployed, no live grant changes.
 
 PoC: `contracts/action-policy/` (`MamoruActionPolicy.sol`, Foundry tests on a Base mainnet fork at block 52,700,000,
 public archive RPC `https://mainnet.base.org`, never the operator's provider key). Run:
@@ -37,9 +38,9 @@ refusals. It enforces:
 
 | | What | Where it binds |
 |---|---|---|
-| (a) price | `exactInputSingle`: `amountOutMinimum >= quoteAtTick(twap -/+ band) x (1 - fee)` and a non-zero `sqrtPriceLimitX96` no farther than the same band edge. `decreaseLiquidity`: `amount0Min`/`amount1Min` at least the position's amounts at the band edges (token0 at `twap + band`, token1 at `twap - band`). Mint: refused at execution when `|spot - twap| > band`. | Swap and decrease: calldata at validation; the router and the position manager enforce the minimums at execution. Mint: execution. |
-| (b) positions | Decrease, collect, burn only for a tokenId in the account's admitted set **and** still owned by the account. Mint goes through `MamoruActionPolicy.mint` (the grant names it instead of the manager's `mint`): the policy pulls the desired amounts, mints with the Safe as recipient, returns the rest, and admits the tokenId the manager returns. Pool and fee must be the grant's pool. | Validation (admission read), execution (admission write). |
-| (c) budgets | Per account and pool, token0 and token1 spent by swaps (`amountIn`) and mints (`amountDesired`) are summed per window (`budgetWindow`, e.g. 1 day) and over the whole approval (the generation). Charged at validation, call by call, so every call of a batch counts and a reverted execution is not refunded. | Validation. |
+| (a) price | One range [lo, hi] from two TWAPs of the pool's own oracle, a long (1,800 s) and a short (300 s) one: `lo = max(long, short) - band + 1`, `hi = min(long, short) + band` (T6 M-1, L-7), clipped to a fixed anchor where the Init has one (the stables pool: parity +- 40 ticks, T6 H-1). Refused outright when the range is empty (the TWAPs about 2 x band apart, or the price outside the anchor). `exactInputSingle`: `amountOutMinimum >= quoteAtTick(lo or hi) x (1 - fee)` and a non-zero `sqrtPriceLimitX96` no farther than the same edge. `decreaseLiquidity`: `amount0Min`/`amount1Min` at least the position's amounts at the edges (token0 at `hi`, token1 at `lo`). Mint: refused at execution when the spot sqrt price is outside [lo, hi]. | Swap and decrease: calldata at validation; the router and the position manager enforce the minimums at execution. Mint: execution. |
+| (b) positions | Decrease, collect, burn only for a tokenId in the account's admitted set **and** still owned by the account. Mint goes through `MamoruActionPolicy.mint` (the grant names it instead of the manager's `mint`): the policy pulls the desired amounts, mints with the Safe as recipient, returns the rest, and admits the tokenId the manager returns. Positions minted elsewhere (v2/v3 grants, the owner, an earlier policy address) are admitted by the owner-signed `Init.admit` at enable, after `ownerOf == account` and a pool check (T6 M-4). Pool and fee must be the grant's pool. | Validation (admission read), execution and enable (admission write). |
+| (c) budgets | Per account and pool, ONE value budget in the pool's stable token (T6 M-2): swaps (`amountIn`) and mints (`amountDesired`, both tokens), the other token valued at the range edge that prices it highest. A token bucket of capacity `perWindow`, refilled at `perWindow / budgetWindow` per second (T6 M-3), and a per-approval `total` (the generation). A renewal resets the total, not the bucket (T6 L-5). Charged at validation, call by call, so every call of a batch counts and a reverted execution is not refunded. | Validation. |
 | (d) renewal | Init data carries a `generation`, account-wide. A higher generation retires every lower-generation config of the account (all pools) on the next check, and a lower one cannot be enabled again. So every renewal re-enables all pools at the new generation; adding a pool without a renewal uses the current generation. The renewal uses a new session key (new permissionId, new ConfigIds). | Validation; key freshness is checked off chain at activation (below). |
 
 `initializeWithMultiplexer` accepts only the SmartSession address it was deployed with: unlike `UniActionPolicy`,
@@ -101,77 +102,100 @@ session per pool, which halves the enable gas.
 
 ## Parameters (T5 measured, Ot decided 18 Oct 2026)
 
-Per pool, owner-signed in the grant: `twapWindow = 1800 s` (= `execution.twapWindowSeconds`), band in ticks,
-`budgetWindow = 1 day`, per-window budget `W_p` (stables 5, btc 2, risk 3 x `C_p`), per-approval total
-`T_p = 10 x C_p`, with `C_p` the pool's share of the account cap. The proposal was `W_p = 1 x C_p`, `T_p = 3 x C_p`;
+Per pool, owner-signed in the grant: `twapWindow = 1800 s` (= `execution.twapWindowSeconds`), `twapShortWindow =
+300 s`, band in ticks, an anchor (below), `budgetWindow = 1 day`, bucket `W_p` (stables 5, btc 2, risk 3 x
+`C_p`), per-approval total `T_p = 10 x C_p`, both in the pool's stable token, with `C_p` the pool's share of the
+account cap. The proposal was `W_p = 1 x C_p`, `T_p = 3 x C_p`;
 the T5 Lab run (`results/t5-bands-2026-10-18.md`) found real turnover over it on 1-6% of days and over `T_p` within
 weeks. These values clear every measured peak day; `T_p = 10 x C_p` bounds a leaked key's loss near 13% of the cap
 (formula below) against ~100% today. A usage-triggered renewal asks the owner before `T_p` binds. The grant-level
 (UniActionPolicy) cumulative caps follow `T_p`, so these budgets are the ones that bind. Adjustable as data comes in.
 
-| Pool | Fee | Band | Why |
-|---|---|---|---|
-| USDC/USDT 0.01% | 1 bp | 10 ticks (0.10%) | range +-0.2%; beyond ~100 ticks the pool is nearly empty (below) |
-| USDC/cbBTC 0.05% | 5 bp | 100 ticks (1.0%) | = `maxTwapDeviationTicks`; the engine's own #46 minimum (50 bp) is tighter, so its swaps pass |
-| WETH/USDC 0.3% | 30 bp | 100 ticks (1.0%) | same |
+| Pool | Fee | Band | Anchor | Why |
+|---|---|---|---|---|
+| USDC/USDT 0.01% | 1 bp | 10 ticks (0.10%) | tick 0 +- 40 (parity; the pool sat at 14) | range +-0.2%; beyond ~50 ticks the pool is nearly empty, so its TWAPs are cheap to move (below) |
+| USDC/cbBTC 0.05% | 5 bp | 100 ticks (1.0%) | none | = `maxTwapDeviationTicks`; the engine's own #46 minimum (50 bp) is tighter, so its swaps pass |
+| WETH/USDC 0.3% | 30 bp | 100 ticks (1.0%) | none | same |
 
-Oldest oracle observation at the fork block: 2,379,820 s / 65,584 s / 70,388 s; cardinality 1,000 / 2,000 / 2,000.
-A 30-minute TWAP is available on all three. If a pool's history ever drops below `W`, `observe` reverts and the
-policy refuses (fails closed, engine waits).
+The anchor and the measurement behind it are in `results/t6-fixes-2026-10-18.md` (H-1). Oldest oracle observation at
+the fork block: 2,379,820 s / 65,584 s / 70,388 s; cardinality 1,000 / 2,000 / 2,000. Enable refuses a pool whose
+`observationCardinalityNext` is under `twapWindow` (the ring must hold the window even with a dust swap in every
+1-s block, T6 L-4): the deploy step (`script/Deploy.s.sol`) raises all three to 3,600 first. If a pool's history
+ever drops below `W`, `observe` reverts and the policy refuses (fails closed, engine waits).
 
-**Liveness cost.** When spot moves more than the band away from the 30-minute TWAP (a fast crash), the policy
-refuses swaps, mints and decreases in that pool until the TWAP catches up. The #46 operator rule already waits in
-the same situation, so the engine loses nothing it has today; the owner's passkey path is not behind this policy
-and can always exit. T5 measures how often and how long exits wait on 2024-2026 data.
+**Liveness cost.** When spot moves more than the band away from the TWAPs (a fast crash), the policy refuses swaps,
+mints and decreases in that pool until they catch up; when the two TWAPs are more than about 2 x band apart, or
+USDC/USDT is ~0.5% off parity, it refuses every priced action in the pool. The #46 operator rule already
+waits in the first case, so the engine loses little it has today; the owner's passkey path is not behind this
+policy and can always exit. T5 measured the single-TWAP case on 2024-2026 data; the two-TWAP and anchor refusals,
+and the summed daily value against `W_p`, are not measured yet (T7 Lab follow-up).
 
 ## Max loss with a leaked key
 
-Every unit of value that crosses a priced action (swap, mint, decrease) can lose at most band + fee of it to a
-sandwich at the band edge. Crossings per pool are bounded by the position value at activation `V_p` (each unit of
-liquidity is decreased once unless re-minted) plus twice the total budget (mints and swaps both draw on it, and
-re-minted liquidity can be decreased again):
+Every unit of value that crosses a priced action (swap, mint, decrease) can lose at most `band + fee + lag` of it
+to a sandwich at the range edge, where `lag` is how far the 5-minute TWAP trails the market in the adverse
+direction (the range takes the safer of the two TWAPs, so the 30-minute lag no longer counts). Crossings per pool
+are bounded by the position value at activation `V_p` (each unit of liquidity is decreased once unless re-minted)
+plus twice the budget spent (mints and swaps both draw on it, and re-minted liquidity can be decreased again).
+The budget is one value per pool and a token bucket, so in the `tau` seconds from a leak to the revocation it
+spends at most `W_p x (1 + tau / budgetWindow)`:
 
 ```
-L <= sum_p (band_p + fee_p) x (V_p + 2 x min(T_p, W_p x windows until revoked))
+L <= sum_p (band_p + fee_p) x (V_p + 2 x min(T_p, W_p x (1 + tau / 1 day)))
 ```
 
-Live v3 weights 50/35/15, fully deployed (`V_p = C_p`):
+Agreed parameters (Ot, 18 Oct): `W_p` 5 / 2 / 3 x `C_p` per day, `T_p = 10 x C_p`, weights 50 / 40 / 10
+(`conservadorLiveV4`), fully deployed (`V_p = C_p`):
 
-| Account cap | Today (v2/v3 grants) | After, revoked within 1 day (`V + 2W = 3C`) | After, never revoked (`V + 2T = 7C`) |
-|---|---|---|---|
-| 1,000 USDC | up to ~1,000 (100%) | 18.5 (1.85%) | 43.2 (4.3%) |
-| 100,000 USDC | up to ~100,000 (100%) | 1,850 (1.85%) | 4,320 (4.3%) |
+| Account cap | Today (v2/v3 grants) | Revoked within minutes | Within 1 hour | Within 1 day | Never revoked |
+|---|---|---|---|---|---|
+| 1,000 USDC | up to ~1,000 (100%) | 36.2 (3.6%) | 37.4 (3.7%) | 66.3 (6.6%) | 127.1 (12.7%) |
+| 100,000 USDC | up to ~100,000 (100%) | 3,615 (3.6%) | 3,741 (3.7%) | 6,625 (6.6%) | 12,705 (12.7%) |
 
-By pool at 1,000: stables 0.11% x 1,500 = 1.65 / 0.11% x 3,500 = 3.85; btc 1.05% x 1,050 = 11.0 / 1.05% x 2,450 = 25.7;
-risk 1.3% x 450 = 5.85 / 1.3% x 1,050 = 13.65. The bound is linear in band and in `T_p`: band 50 ticks on the two
-volatile pools and `T_p = 2C` give 1.8% never revoked.
+By pool at 1,000, never revoked: stables 0.11% x 21 x 500 = 11.6; btc 1.05% x 21 x 400 = 88.2; risk 1.30% x 21 x 100
+= 27.3. Within a day: stables 11.6 (`T_p` binds), btc 1.05% x 9 x 400 = 37.8, risk 1.30% x 13 x 100 = 16.9. The
+bound is linear in band and in `T_p`. The audited T4 accounting (one budget per token, fixed UTC epochs) gave 24.8%
+never revoked and up to 12.6% revoked within minutes.
+
+Not counted in the table: the 5-minute TWAP lag; a paid TWAP shift (next section; on stables at most the anchor
+edge, about 0.55% per crossing (0.40% + today's 0.14% off parity + fee) instead of 0.11%, which would make the
+never-revoked figure 17.3%); and userOp gas, which without a gas policy is the account's ETH reserve (0.002 ETH) per relayer top-up, and with `MamoruGasPolicy` (T6 L-1, wired
+in T7) about 5e-5 ETH per op at Base's usual base fee, bounded in count by UsageLimitPolicy.
 
 Measured on the fork (`test_manipulatedSwapReverts`): moving USDC/cbBTC by 500 ticks took 1.83M USDC; today's
-grant then fills a 10,000 USDC swap 397 bp under the policy's floor (about 5% under TWAP). The policy refuses that
+grant then fills a 10,000 USDC swap 398 bp under the policy's floor (about 5% under TWAP). The policy refuses that
 call at validation, and a call with the policy's minimum reverts in the router.
 
-### TWAP manipulation cost (multi-block, Base)
+### TWAP manipulation cost (Base, measured)
 
-To shift a W-second TWAP by d, the pool must be held about d away for the whole window: W / 2 s = 900 Base blocks.
-Arbitrageurs close the gap every block, so each block costs the manipulator about `d/2 x A(d)` (the arbitrage it
-gives away) plus `fee x A(d)` to push again, where `A(d)` is the capital that moves the pool by d. Pushing farther
-for less time costs more (`A` grows with d). Measured `A(d)` at block 52,700,000 (`test_measureManipulationDepth`,
-USDC in):
+A deviation of D ticks held for t seconds moves a W-second TWAP by D x t / W. The T4 spec assumed the pool had to
+be held about d away for the whole window. The T6 audit (H-1) and the fork measurement showed that is false where
+the pool is thin far from price: one block held 9,000 ticks away moves the 30-minute TWAP of USDC/USDT by 10 ticks
+(the whole band) for ~25 USDC of fees and 127k of the attacker's own capital, and one block held 90,000 ticks away
+moves USDC/cbBTC by 100 ticks (its band) for ~8.8k of fees and 13.5M of capital
+(`results/t6-fixes-2026-10-18.md`, `test/H1Measure.t.sol`).
 
-| Pool | 10 ticks | 100 ticks | 500 ticks | Cost to shift the 30-min TWAP by the band |
-|---|---|---|---|---|
-| USDC/USDT 0.01% | 55k | 120k | 121k | 10 ticks: (27.5 + 5.5) x 900 = ~30k USDC |
-| USDC/cbBTC 0.05% | 42k | 384k | 1.83M | 100 ticks: (1,920 + 192) x 900 = ~1.9M USDC |
-| WETH/USDC 0.3% | 840k | 8.4M | 40.8M | 100 ticks: (42k + 25k) x 900 = ~61M USDC |
+What stops it is the two-TWAP range of (a). A recent push (last 5 minutes) moves the 5-minute TWAP six times more
+than the 30-minute one and empties the range; an old push moves only the 30-minute one, which the range ignores on
+the side that matters. What still gets through is one old and one recent push sized about 5:1, so both TWAPs move
+together. On USDC/USDT those cost ~25 USDC each, so that pool's range is also clipped to a fixed anchor, parity +-
+40 ticks. Measured cost to move the range by one band:
 
-What a shift buys: the extra loss is d x crossings. One 100k account, btc pool, one window: 1% x 105k = 1,050
-against ~1.9M of cost. Not profitable per account. **It changes with the fleet**: session keys live in the
-operator, so an operator compromise is every account at once. A 1% shift of the btc TWAP pays once the btc bucket
-crossable in one window (`3 x C_btc` summed over accounts) exceeds ~190M, i.e. ~63M of btc bucket, ~180M of TVL at
-35%. Below that, the per-account bound above holds for the whole fleet. Above it: tighter budgets per window, a
-longer TWAP, or an operator-wide on-chain counter (a shared budget across accounts, a later unit). The stables pool
-is cheap to push in spot (beyond ~100 ticks it is nearly empty), which is why its band is 10 ticks: a TWAP shift of
-even 10 ticks costs ~30k, and buys 0.1% of crossings.
+| Pool | Before (T4) | After (T6) | How |
+|---|---|---|---|
+| USDC/USDT 0.01% | ~25 USDC (one block) | cannot pass the anchor | two pushes (~50 USDC) move both TWAPs, but the range is clipped at parity - 40, or empty |
+| USDC/cbBTC 0.05% | ~8.8k USDC (one block) | ~9k USDC of fees per 1%, <= 5 min | one push 60,000 ticks out 5-30 min earlier, one 30,000 in the last 5 min: ~10M own capital, two block boundaries won |
+| WETH/USDC 0.3% | > 1M | > 1M | ~0.6% of 18,670 WETH per 1,000 ticks |
+
+A liquidity floor (refuse when the window's harmonic-mean liquidity drops, as it does in an empty range) was
+measured and dropped: an attacker who mints ~1,000 USDC of its own liquidity at the pushed tick for the block
+boundary keeps the harmonic mean at 87-98% of normal (`test_h1_jitLiquidityAtThePushedTick`).
+
+What a shift buys: d x crossings during the <= 5 minutes it lasts. Per account that is far below the cost. **It
+changes with the fleet**: session keys live in the operator, so an operator compromise is every account at once.
+A 1% shift of the btc range pays once fleet-wide btc crossings in those minutes exceed ~0.9M: roughly 0.6-1.1M of
+TVL at 40% btc, for an attacker who also holds ~10M. Above that: the fleet-wide on-chain counter (a shared budget
+across accounts, open question 5), a smaller btc bucket, or a longer short window.
 
 Not modelled: an attacker censoring arbitrage by filling Base blocks for 15 minutes, or a sequencer that colludes.
 Both are visible and far more expensive than the gains above at today's sizes.
@@ -180,10 +204,11 @@ Both are visible and far more expensive than the gains above at today's sizes.
 
 | Op | Today | With the policy |
 |---|---|---|
-| `checkAction` exactInputSingle (validation) | UniActionPolicy only | +93,912 (oracle `observe`, quote, tick math) |
-| `checkAction` decrease / collect / burn / approve | | +37,036 / +6,207 / +5,858 / +19,989 (cold) |
-| Mint, execution | 378,824 (`NPM.mint`) | 615,688 (`policy.mint`: pull, approve, mint, refund, admit) |
-| `initializeWithMultiplexer`, per action | | 61,187 (renewal; first enable higher, cold slots) |
+| `checkAction` exactInputSingle (validation) | UniActionPolicy only | +99,046 (oracle `observe` of two windows, quote, tick math, bucket) |
+| `checkAction` mint (validation) | | +149,165 (the oracle read that values the budget) |
+| `checkAction` decrease / collect / burn / approve | | +53,270 / +6,916 / +6,566 / +24,696 (cold) |
+| Mint, execution | 378,824 (`NPM.mint`) | 593,308 (`policy.mint`: pull, approve, oracle check, mint, refund, admit) |
+| `initializeWithMultiplexer`, per action | | 47,405 (renewal; first enable higher, cold slots; + one `ownerOf`/`positions` per admitted tokenId) |
 
 At 0.005 gwei, +330k gas is about 1.7e-6 ETH, under a cent; the L1 data fee does not change materially. The
 userOp `verificationGasLimit` of engine ops grows by up to ~160k per batch (harvest: decrease, collect, approve,
@@ -193,19 +218,23 @@ and one account-level config write per pool (instead of per action) bring it dow
 
 ## Audit surface
 
-`src/MamoruActionPolicy.sol`, about 300 lines plus Uniswap's `TickMath`, `OracleLibrary`, `LiquidityAmounts`
-(unchanged, pinned). Trust it adds: (1) a refusal it fails to make leaves today's exposure (additive design); (2) a
+`src/MamoruActionPolicy.sol`, about 680 lines with comments after T6 (runtime 23,673 bytes, 903 under the 24,576 limit), plus
+Uniswap's `TickMath`, `OracleLibrary`, `LiquidityAmounts` (unchanged, pinned); `src/MamoruGasPolicy.sol`, ~90
+lines (T6 L-1, a separate userOp policy); `script/Deploy.s.sol` (atomic deploy + registration, ring raise). Trust it adds: (1) a refusal it fails to make leaves today's exposure (additive design); (2) a
 refusal it makes wrongly stops the engine, never moves funds; (3) `mint` is the one place it holds tokens and
 allowances, for one call, from `msg.sender` only, with a reentrancy lock and approvals reset to 0; (4) account-level
 state is writable only by SmartSession at enable, which needs the owner's signature. Review points: calldata
-decoding of every selector, rounding at the band edges, budget arithmetic and epoch reset, generation handling,
-`observe` failure modes, token transfer return values (USDC, USDT, cbBTC, WETH on Base).
+decoding of every selector, rounding at the range edges and the anchor clip, the bucket and the value
+conversion, generation handling and `ConfigMismatch`, `Init.admit`, `observe` failure modes, token transfer return
+values (USDC, USDT, cbBTC, WETH on Base).
 
 ## Upgrade and rollback
 
 The contract is immutable and has no owner. A new version is a new address; moving to it, or back to the previous
 one, is a renewal through the #33 `extend` route with a higher generation. The operator cannot switch an account's
-policy by itself, which is the point. Kill switch per account: the owner's `removeSession` (revoke), as today.
+policy by itself, which is the point. Kill switch per account: the owner's `removeSession` (revoke), as today. A
+new address does not know which positions the old one admitted: the moving renewal names them in `Init.admit`
+(owner-signed), as the first v4 renewal does for v2/v3 positions.
 Rollout follows spec 005 phase 2: new accounts first on a `conservador-live-v4` policy version, then the renew row
 for existing accounts.
 
@@ -213,7 +242,10 @@ for existing accounts.
 
 One passkey tap, nothing moves, same screen as the #149 renewal and the #127 cap raise. The batch: self-attest
 `MamoruActionPolicy` (once per account, `registryTrustCalls`), `enableSessions` with a new session key and the v4
-grants at `generation + 1`, `removeSession` for every old permissionId. Copy: the existing renewal lines plus one
+grants at `generation + 1` (each pool's Init naming the account's open positions in that pool in `admit`),
+`removeSession` for every old permissionId. The contract is deployed and registered in one
+`ModuleRegistry.deployModule` transaction (`script/Deploy.s.sol`), and T7 checks `findModule(policy)` before any
+account attests it. Copy: the existing renewal lines plus one
 sentence on what changes ("Mamoru can now trade only near the market price, and only the positions it opened").
 Accounts that do not tap keep their v2/v3 grants and their exposure; the app shows the renew row until they do.
 
@@ -222,29 +254,30 @@ session key that was ever enabled for the account; the operator deletes the old 
 chain, the generation retires every older config of this policy even if a `removeSession` were missing. The v2/v3
 grants do not consult this policy, so their `removeSession` in the same batch is required.
 
-## What the PoC shows (13 tests, all pass)
+## What the PoC shows (`forge test`: 49 tests, 45 of them on the fork, all pass)
 
-- `test_normalSwapPasses`, `test_normalMintDecreaseCollectBurnPass`: the engine's ops with the minimums from the
-  policy's `swapBounds` / `decreaseMins` views pass validation and execute.
-- `test_manipulatedSwapReverts`: today's swap calldata (`min 1`, limit 0) is refused; with the policy's minimum the
-  swap reverts in the router at the manipulated price; a minimum 1 unit lower, a zero limit, or a limit past the
-  band edge is refused.
-- `test_mintRefusedWhenSpotManipulated`, `test_decreaseRefusedWhenSpotManipulated`.
-- `test_unrelatedNftDecreaseReverts`: a position the Safe minted outside Mamoru, and one held elsewhere with the
-  Safe as approved operator: decrease, collect, burn refused.
-- `test_batchOverBudgetReverts`: the third 25k swap of one batch is refused (60k per window), a mint draws on the
-  same budget, the window refills, the approval total does not.
-- `test_narrowRangeDecreaseLossStaysInBand`, `test_supportsSmartSessionInterfaceIds` (smartsessions' `IActionPolicy`
-  inherits `IPolicy`, so its interfaceId is `checkAction.selector` alone).
-- `test_renewalRetiresOldGrant`, `test_onlySmartSession`, `test_measureManipulationDepth`, `test_gasDirectMintBaseline`.
+- `test/MamoruActionPolicy.t.sol` (13): the engine's normal swap, mint, decrease, collect and burn pass with the
+  minimums from the policy's views; a manipulated-price swap, mint and decrease are refused or revert; unrelated
+  and approved-but-foreign positions are refused; a batch over the budget is refused and the approval total holds
+  across windows; renewal retires the old generation; only SmartSession initializes; capital to move each pool.
+- `test/T6Fixes.t.sol` (17): one test per T6 finding (H-1 x5: one-block pushes on stables and btc, an old push,
+  the spread push against the stables anchor, a dense-core control; M-1, M-2, M-3, M-4 x3, L-4, L-5, L-7, I-1,
+  I-2, I-5).
+- `test/T6Before.t.sol` (6): the same attacks against the audited T4 contract (`test/legacy/`), where they succeed.
+- `test/Deploy.t.sol` (2): the T4 two-step registration can be front-run; `deployModule` with a deployer-prefixed
+  salt cannot, and the ring raise lets the stables pool enable.
+- `test/MamoruGasPolicy.t.sol` (4, no fork): the userOp gas caps.
+- `test/H1Measure.t.sol` (7, measurement only): liquidity far from price, one- and N-block pushes, the arbitrage
+  given away, JIT liquidity against a liquidity floor, the btc spread push.
 
 ## What the PoC does not show
 
-The real SmartSession + Safe7579 path (enable with two action policies, ERC-7484 attestation, a batch userOp
-through `handleOps`): the tests call the policy as SmartSession does (`msg.sender` = SmartSession) and execute from
-the account address. No engine, precheck or grant code uses it yet. No Lab run of blocked exits.
+In Foundry, the real SmartSession + Safe7579 path: the tests call the policy as SmartSession does (`msg.sender` =
+SmartSession) and execute from the account address. The TS fork scenarios (`packages/scenarios/action-policy/
+t1..t4-fork.ts`) do run that path through `handleOps`. Not shown anywhere: refusal rates of the two-TWAP range and
+the stables anchor on historical data, and whether an attacker can hold both ends of a Base block boundary.
 
-## Tasks (none of them is started by this unit)
+## Tasks
 
 - T1 Lab: the TS scenario fixtures enable a v4 grant with both policies on a fork and run the engine's ops and the
   three attacks through `handleOps`; measure enable and renewal gas.
@@ -255,17 +288,20 @@ the account address. No engine, precheck or grant code uses it yet. No Lab run o
   inside what the policy accepts a few blocks later.
 - T4 precheck mirrors (a)-(c) so a refused call is not sent.
 - T5 Lab: bands and budgets per pool against 2024-2026 data; how often exits wait.
-- T6 third-party audit of the contract (open question).
+- T6 audit (Claude, `results/t6-audit-claude-2026-10-18.md`) and fixes (`results/t6-fixes-2026-10-18.md`). A
+  second, independent review of the patched contract (GPT-6, xreview `--high-stakes`) is still to do.
 - T7 deployment and the renew row: coordinator only, after T1-T6 and Ot's decision.
 
 ## Open questions for Ot
 
-1. Third-party audit before mainnet? Recommendation: yes. It guards real funds and is ~300 lines; a focused audit
-   is days, not weeks. Who and what budget?
+1. Third-party audit before mainnet? Recommendation: yes. It guards real funds and is ~680 lines with comments
+   after T6; a focused audit is days, not weeks. Who and what budget?
 2. Timeline: T1-T5 are an estimated week of agent work; the renew row needs every account's tap. Before or after the
    cap raise of spec 005 phase 2? Recommendation: before any cap above 1,000.
-3. Bands and budgets: accept 10 / 100 / 100 ticks and 1C per day, 3C per approval as the starting point for T5?
+3. Bands and budgets: decided 18 Oct (10 / 100 / 100 ticks, W_p 5/2/3 x C_p per day, T_p 10 x C_p). Open: the
+   stables anchor (parity +- 40 ticks) and the summed-value budget against T5's peaks.
 4. License: the contract links Uniswap's GPL-2.0 libraries, so it is GPL-2.0-or-later inside an MIT repo. Accept, or
    pay for MIT reimplementations of the tick math (more audit surface)?
-5. Fleet-wide cap: needed only above ~180M TVL by the estimate above. Park it?
+5. Fleet-wide cap: after T6's measurement, needed above roughly 1M of TVL (a ~9k-USDC push shifts the btc range
+   1% for 5 minutes; operator compromise), not 180M as estimated before. Plan it before the cap raise.
 6. Accounts that never tap: keep running them on v2/v3 grants, or stop the engine for them after a deadline?
