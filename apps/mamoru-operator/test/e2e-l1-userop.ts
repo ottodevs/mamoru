@@ -191,7 +191,7 @@ try {
     const b = startLiveBundler(l1, l1Relayer, 1, {
       handleOpsGas: L1_HANDLE_OPS_GAS,
       label: 'l1-bundler',
-      guard: { before: (g) => guard!.before(g), sent: (h) => guard?.sent(h), after: (c, r) => guard?.after(c, r), failed: () => guard?.failed() },
+      guard: { before: (g) => guard!.before(g), sending: (w, g) => guard!.sending(w, g), sent: (h) => guard?.sent(h), after: (c, r) => guard?.after(c, r), failed: (signed) => guard?.failed(signed) },
     })
     bundlers.push(b)
     return b
@@ -499,6 +499,15 @@ try {
   // gets a receiveMessage from the operator.
   const otherRecipient = concat([sliceHex(message, 0, 148 + 36), pad(ctx.address, { size: 32 }), sliceHex(message, 148 + 68)])
   const otherAmount = concat([sliceHex(message, 0, 148 + 68), numberToHex(BigInt(cr.amountUsdc) + 1n, { size: 32 }), sliceHex(message, 148 + 100)])
+  // ... and a forged answer: the raw emitted message (nonce zero, which Base marks used) with a junk attestation, or
+  // the right message signed by a key that is not an enabled attester: never 'filled', never a mint.
+  const outsider = privateKeyToAccount(generatePrivateKey())
+  for (const [m, att, what] of [[raw, '0x01' as Hex, 'the emitted message with nonce zero and a junk attestation'], [message, await outsider.sign({ hash: keccak256(message) }), 'this message signed by a non-attester']] as const) {
+    attestation = { message: m, attestation: att }
+    clock += 11_000
+    await cbo.tick()
+    check((await cbo.status(cctx)).route?.state === 'deposited' && (await baseClient.getTransactionCount({ address: baseRelayer.address })) === baseNonce0, `${what}: not filled, nothing sent on Base`)
+  }
   for (const [m, what] of [[otherRecipient, 'another recipient'], [otherAmount, 'another amount']] as const) {
     attestation = { message: m, attestation: await ATTESTER.sign({ hash: keccak256(m) }) }
     clock += 11_000

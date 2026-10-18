@@ -1,4 +1,4 @@
-import { concat, encodeFunctionData, getAddress, hexToBigInt, keccak256, pad, parseAbi, parseEventLogs, sliceHex, type Hex, type Log } from 'viem'
+import { concat, encodeFunctionData, getAddress, hexToBigInt, keccak256, pad, recoverAddress, type PublicClient, parseAbi, parseEventLogs, sliceHex, type Hex, type Log } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { erc20Abi } from '@mamoru/registry'
 
@@ -25,6 +25,8 @@ export const FAST_FILL_SEC = 30
 export const messageTransmitterV2Abi = parseAbi([
   'function receiveMessage(bytes message, bytes attestation) returns (bool)',
   'function usedNonces(bytes32 nonce) view returns (uint256)',
+  'function isEnabledAttester(address attester) view returns (bool)',
+  'function signatureThreshold() view returns (uint256)',
   'event MessageSent(bytes message)',
 ])
 
@@ -150,4 +152,30 @@ export function cctpMessageKey(m: Hex): Hex {
   // hookData (after the 228-byte body) is empty for Mamoru's burns.
   const hook: Hex = n > 148 + 228 ? sliceHex(m, 148 + 228) : '0x'
   return keccak256(concat([sliceHex(m, 0, 12), z(32), sliceHex(m, 44, 144), z(4), sliceHex(m, 148, 148 + 164), z(64), hook]))
+}
+
+/**
+ * Whether `attestation` is Circle's for `message`, checked the way MessageTransmitterV2 checks it, against the
+ * attesters enabled on Base: 65-byte signatures over keccak256(message), signers in strictly ascending order, each
+ * enabled, at least signatureThreshold of them. Only then are the message's fields (its nonce among them) trusted.
+ */
+export async function attestationValid(client: PublicClient, message: Hex, attestation: Hex): Promise<boolean> {
+  const n = (attestation.length - 2) / 2
+  if (n === 0 || n % 65 !== 0) return false
+  const hash = keccak256(message)
+  const threshold = await client.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: messageTransmitterV2Abi, functionName: 'signatureThreshold' })
+  if (BigInt(n / 65) < threshold || threshold === 0n) return false
+  let last = 0n
+  for (let i = 0; i < n / 65; i++) {
+    let signer: Address
+    try {
+      signer = await recoverAddress({ hash, signature: sliceHex(attestation, i * 65, i * 65 + 65, { strict: true }) })
+    } catch {
+      return false
+    }
+    if (BigInt(signer) <= last) return false
+    last = BigInt(signer)
+    if (!(await client.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: messageTransmitterV2Abi, functionName: 'isEnabledAttester', args: [signer] }))) return false
+  }
+  return true
 }

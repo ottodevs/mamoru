@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { ACROSS_SPOKE_POOL, checkQuote, MAX_FEE_BPS, type AcrossQuote } from '../src/bridge-out.ts'
+import { ACROSS_SPOKE_POOL, BridgeOut, checkQuote, DAILY_BUDGET_WEI, MAX_FEE_BPS, type AcrossQuote } from '../src/bridge-out.ts'
 import { HttpError } from '../src/operator.ts'
 
 const NOW = 1_800_000_000
@@ -55,5 +55,49 @@ describe('bridge-out quote check (#133)', () => {
     expect(refused(good({ exclusiveRelayer: 'nope' }))).toContain('malformed')
     expect(refused(good({ outputAmount: 'x' }))).toContain('malformed')
     expect(refused(good({ isAmountTooLow: true }))).toStartWith('BRIDGE_AMOUNT_TOO_LOW')
+  })
+})
+
+describe('the operator bundler guard (#180)', () => {
+  const { mkdtempSync, readFileSync } = require('node:fs') as typeof import('node:fs')
+  const { tmpdir } = require('node:os') as typeof import('node:os')
+  const { join } = require('node:path') as typeof import('node:path')
+  const make = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mamoru-guard-'))
+    const l1 = { getGasPrice: async () => 1_000_000_000n, getBalance: async () => 10n ** 18n } as unknown as import('viem').PublicClient
+    const relayer = { address: '0x0000000000000000000000000000000000000001' as const, send: async () => Promise.reject(new Error('unused')) }
+    const bo = new BridgeOut(l1, relayer, dir, fetch, Date.now, undefined, () => true)
+    const spent = () => BigInt(JSON.parse(readFileSync(join(dir, 'bridge-out.json'), 'utf8')).spent.wei)
+    return { bo, spent }
+  }
+
+  test('fronts gas only for the move under way', async () => {
+    const { bo } = make()
+    await expect(bo.bundlerGuard().before(1_400_000n)).rejects.toThrow('no move under way')
+  })
+
+  test('the signed bound replaces the estimate; over the budget the send stops and the reservation goes back', async () => {
+    const { bo, spent } = make()
+    ;(bo as unknown as { sending: unknown }).sending = { accountKey: 'a', route: { id: 'r' } }
+    const g = bo.bundlerGuard()
+    await g.before(1_400_000n)
+    expect(spent()).toBe(1_400_000n * 1_000_000_000n * 2n)
+    g.sending(1_400_000n * 1_500_000_000n, 1_400_000n)
+    expect(spent()).toBe(1_400_000n * 1_500_000_000n)
+    expect(() => g.sending(DAILY_BUDGET_WEI + 1n, 1_400_000n)).toThrow("budget")
+    g.failed(false)
+    expect(spent()).toBe(0n)
+  })
+
+  test('a refund larger than the cost leaves nothing charged; a smaller one leaves the difference', async () => {
+    const { bo, spent } = make()
+    ;(bo as unknown as { sending: unknown }).sending = { accountKey: 'a', route: { id: 'r' } }
+    const g = bo.bundlerGuard()
+    await g.before(1_000_000n)
+    g.after(900n, 1_000n)
+    expect(spent()).toBe(0n)
+    await g.before(1_000_000n)
+    g.after(1_000n, 900n)
+    expect(spent()).toBe(100n)
   })
 })

@@ -9,7 +9,7 @@ import { browserOwnerSignature, deployCall, encodeWebAuthnSignature, liveAccount
 import { execTransactionData, type SafeTx } from '@mamoru/account/safe'
 import { userOpHash } from '@mamoru/account/sessions'
 import { maxGasCostWei, OWNER_NONCE_KEY, ownerUserOp, ownerUserOpSignature, safeOpHash, userOpLogs, type PaymasterFields, type UserOpGas } from '@mamoru/account/userop'
-import { burnMatches, cctpAttestation, cctpCalls, cctpMessageKey, FINALITY_FAST, FINALITY_STANDARD, cctpFees, cctpMaxFee, decodeCctpMessage, FAST_FILL_SEC, MESSAGE_TRANSMITTER_V2, messageTransmitterV2Abi, mintIsFor, receiveMessageData, STANDARD_FILL_SEC, type Burn } from './cctp.ts'
+import { attestationValid, burnMatches, cctpAttestation, cctpCalls, cctpMessageKey, FINALITY_FAST, FINALITY_STANDARD, cctpFees, cctpMaxFee, decodeCctpMessage, FAST_FILL_SEC, MESSAGE_TRANSMITTER_V2, messageTransmitterV2Abi, mintIsFor, receiveMessageData, STANDARD_FILL_SEC, type Burn } from './cctp.ts'
 import type { BundlerGuard } from './bundler.ts'
 import { L1Bundler, MAX_CONSTANT_FEE, PaymasterError, RATE_SLACK_BPS, RpcRefused, type Erc20Paymaster, type GasPrice } from './paymaster.ts'
 import { Lock } from './lock.ts'
@@ -731,13 +731,21 @@ export class BridgeOut {
    * beneficiary (the relayer) the userOp's gas from the paymaster's deposit, and only what was not refunded stays
    * charged to the day. The bundle's hash is kept on the route: after a restart the receipt is read from the chain.
    */
-  bundlerGuard(): BundlerGuard & { sent: (hash: Hex) => void } {
+  bundlerGuard(): BundlerGuard & { sent: (hash: Hex) => void; sending: (maxFeeWei: bigint, gas: bigint) => void } {
     let bound = 0n
     return {
       before: async (gas: bigint) => {
         if (!this.sending) throw new Error('no move under way')
         bound = await this.affordable(gas)
         this.spend(bound)
+      },
+      // The signed transaction's own bound (gas at its maxFeePerGas), before the broadcast: it replaces the
+      // estimate, and over the day's budget or the gas ceiling the send stops here.
+      sending: (maxFeeWei: bigint, gas: bigint) => {
+        this.spend(maxFeeWei - bound)
+        bound = maxFeeWei
+        if (this.spentToday() > DAILY_BUDGET_WEI) throw new Error('over the day\'s budget')
+        if (gas > 0n && maxFeeWei / gas > MAX_GAS_PRICE_WEI * 2n) throw new Error('over the gas ceiling')
       },
       sent: (hash: Hex) => {
         const s = this.sending
@@ -750,8 +758,9 @@ export class BridgeOut {
         this.spend(net - bound)
         bound = 0n
       },
-      failed: () => {
-        // Unknown outcome: the bound stays charged.
+      failed: (signed: boolean) => {
+        // Never signed for broadcast: nothing can be spent, the reservation goes back. Signed: unknown, it stays.
+        if (!signed) this.spend(-bound)
         bound = 0n
       },
     }
@@ -933,7 +942,8 @@ export class BridgeOut {
    */
   async tick(): Promise<void> {
     for (const [accountKey, r] of Object.entries(this.journal.routes)) {
-      if (r.bridge === 'cctp' && r.state === 'deposited') await this.refresh(accountKey).catch((e) => logErr('[bridge-out] tick:', e instanceof Error ? e.message : e))
+      // Every unfinished CCTP move, so a burn left 'sending' or 'unconfirmed' by a crash is reconciled and minted too.
+      if (r.bridge === 'cctp' && NON_TERMINAL.has(r.state)) await this.refresh(accountKey).catch((e) => logErr('[bridge-out] tick:', e instanceof Error ? e.message : e))
     }
   }
 
@@ -1069,6 +1079,14 @@ export class BridgeOut {
         return
       }
       const msg = decodeCctpMessage(att.message)
+      // Iris is not trusted: the attestation must be Circle's (signers enabled on Base, threshold met) before its
+      // nonce means anything, and nonce zero is never a transfer (MessageTransmitterV2 marks it used at init).
+      if (BigInt(msg.nonce) === 0n || !(await attestationValid(base.client, att.message, att.attestation))) {
+        logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, 'attestation not signed by the attesters enabled on Base, ignored')
+        return
+      }
+      // A used nonce of an authenticated message of this burn: the transfer was minted to this Safe (anyone may
+      // submit it; the message fixes the recipient and amount).
       const used = await base.client.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: messageTransmitterV2Abi, functionName: 'usedNonces', args: [msg.nonce] })
       if (used !== 0n) {
         r.state = 'filled'
@@ -1091,7 +1109,12 @@ export class BridgeOut {
       }
       let charged = estimate
       const charge = (wei: bigint) => {
-        const cur = this.journal.mints && this.journal.mints.day === day ? this.journal.mints : { day, n: m.n + 1, wei: '0' }
+        // Settled into the day it was admitted on only: after midnight the new day's record is not touched.
+        const cur = this.journal.mints
+        if (!cur || cur.day !== day) {
+          charged = wei
+          return
+        }
         const next = BigInt(cur.wei) - charged + wei
         this.journal.mints = { day, n: cur.n, wei: (next > 0n ? next : 0n).toString() }
         charged = wei
@@ -1123,8 +1146,10 @@ export class BridgeOut {
         if (!broadcast) {
           charge(0n)
           const cur = this.journal.mints
-          if (cur && cur.day === day && cur.n > 0) this.journal.mints = { ...cur, n: cur.n - 1 }
-          this.save()
+          if (cur && cur.day === day && cur.n > 0) {
+            this.journal.mints = { ...cur, n: cur.n - 1 }
+            this.save()
+          }
         }
         if (e instanceof MintBudget) {
           logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, 'Base mint budget for today used up, minting tomorrow')

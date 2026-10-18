@@ -389,9 +389,10 @@ export async function bootOperator(o: BootOptions) {
               if (!guard) throw new Error('not ready')
               await guard.before(g)
             },
+            sending: (w, g) => guard!.sending(w, g),
             sent: (h) => guard?.sent(h),
             after: (c, r) => guard?.after(c, r),
-            failed: () => guard?.failed(),
+            failed: (signed) => guard?.failed(signed),
           },
         })
       : null

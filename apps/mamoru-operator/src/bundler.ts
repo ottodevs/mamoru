@@ -26,7 +26,15 @@ export type LiveBundler = { url: string; stop: () => void }
  * `after` is told the transaction's cost and the EntryPoint's refund to the beneficiary (the relayer), which the
  * userOp's paymaster or account pays. Used on Ethereum (otto/mamoru#180); Base runs without one, as before.
  */
-export type BundlerGuard = { before: (gasLimit: bigint) => Promise<void>; sent?: (txHash: Hex) => void; after: (costWei: bigint, refundWei: bigint) => void; failed: () => void }
+export type BundlerGuard = {
+  before: (gasLimit: bigint) => Promise<void>
+  /** The signed transaction's bound (gas x its maxFeePerGas), before the broadcast; throwing stops the send. */
+  sending?: (maxFeeWei: bigint, gasLimit: bigint) => void
+  sent?: (txHash: Hex) => void
+  after: (costWei: bigint, refundWei: bigint) => void
+  /** The send failed; `signed`: a transaction may have been broadcast. */
+  failed: (signed: boolean) => void
+}
 export type LiveBundlerOptions = { handleOpsGas?: bigint; guard?: BundlerGuard; label?: string }
 
 /** Gas for one handleOps with one engine userOp (LAB_GAS_LIMITS sum plus EntryPoint overhead). */
@@ -71,12 +79,24 @@ export function startLiveBundler(client: PublicClient, relayer: Pick<Relayer, 'a
       }
     }
     let receipt: TransactionReceipt
+    let signed = false
     try {
-      // The bundle's hash reaches the guard before the broadcast: a crash right after it cannot lose it.
-      ;({ receipt } = await relayer.send({ to: entryPoint, data, gas: gasLimit }, undefined, undefined, opts.guard?.sent))
+      // The signed bound is checked, and the bundle's hash reaches the guard, before the broadcast: a crash right
+      // after it cannot lose the hash.
+      ;({ receipt } = await relayer.send(
+        { to: entryPoint, data, gas: gasLimit },
+        undefined,
+        opts.guard?.sending ? (wei) => opts.guard!.sending!(wei, gasLimit) : undefined,
+        (h) => {
+          signed = true
+          opts.guard?.sent?.(h)
+        },
+      ))
     } catch (e) {
-      // It may have been broadcast: not a validation refusal (-32603), the caller keeps asking by hash.
-      opts.guard?.failed()
+      opts.guard?.failed(signed)
+      // Stopped before anything was signed for broadcast: a refusal the caller may call failed. Otherwise it may have
+      // been broadcast (-32603): the caller keeps asking by hash.
+      if (!signed) throw new RpcFailure(-32504, `relayer did not send: ${(e as Error).message.split('\n')[0]}`)
       throw e
     }
     const events = parseEventLogs({ abi: entryPointV07Abi, logs: receipt.logs, eventName: 'UserOperationEvent' })
