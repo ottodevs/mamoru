@@ -42,7 +42,8 @@ interface IERC20Calls {
  * msg.sender; the program is exactly MINT+SETTLE_PAIR, INCREASE+CLOSE+CLOSE, DECREASE+TAKE_PAIR or BURN+TAKE_PAIR;
  * hookData is empty; no native value.
  *
- * Custody: the account approves this contract for ERC-20 amounts (pulled and spent or returned in the same call) and
+ * Custody: the account approves this contract for ERC-20 amounts (pulled and spent or returned in the same call; only
+ * the call's own delta is returned, never a balance already held) and
  * calls PositionManager.setApprovalForAll(this) once, because v4 increase/decrease/burn require the locker to be
  * approved. That approval is the systemic risk of this design: every account's positions are reachable by this one
  * contract, and the only thing standing between them is `ownerOf(tokenId) == msg.sender` below.
@@ -110,6 +111,8 @@ contract MamoruV4Executor {
     ) external nonReentrant returns (uint256 tokenId) {
         _checkKey(key);
         tokenId = POSITION_MANAGER.nextTokenId();
+        uint256 before0 = _balance(key.currency0);
+        uint256 before1 = _balance(key.currency1);
         _pull(key.currency0, amount0Max);
         _pull(key.currency1, amount1Max);
 
@@ -127,8 +130,8 @@ contract MamoruV4Executor {
         params[1] = abi.encode(key.currency0, key.currency1);
         POSITION_MANAGER.modifyLiquidities(abi.encode(abi.encodePacked(MINT_POSITION, SETTLE_PAIR), params), deadline);
 
-        _refund(key.currency0);
-        _refund(key.currency1);
+        _refund(key.currency0, before0);
+        _refund(key.currency1, before1);
         if (POSITION_MANAGER.ownerOf(tokenId) != msg.sender) revert MintedToWrongOwner();
     }
 
@@ -145,6 +148,8 @@ contract MamoruV4Executor {
     ) external nonReentrant {
         _checkKey(key);
         _checkPosition(key, tickLowerBiased, tickUpperBiased, tokenId);
+        uint256 before0 = _balance(key.currency0);
+        uint256 before1 = _balance(key.currency1);
         _pull(key.currency0, amount0Max);
         _pull(key.currency1, amount1Max);
 
@@ -156,8 +161,8 @@ contract MamoruV4Executor {
             abi.encode(abi.encodePacked(INCREASE_LIQUIDITY, CLOSE_CURRENCY, CLOSE_CURRENCY), params), deadline
         );
 
-        _refund(key.currency0);
-        _refund(key.currency1);
+        _refund(key.currency0, before0);
+        _refund(key.currency1, before1);
     }
 
     /// Removes liquidity (0 = collect fees only). Both currencies go straight to msg.sender.
@@ -239,10 +244,17 @@ contract MamoruV4Executor {
         IPermit2Approve(PERMIT2).approve(token, address(POSITION_MANAGER), uint160(amount), 0);
     }
 
-    /// The contract holds nothing between calls; whatever it holds after a step belongs to the caller.
-    function _refund(address token) internal {
-        uint256 bal = IERC20Calls(token).balanceOf(address(this));
-        if (bal != 0) _call(token, abi.encodeCall(IERC20Calls.transfer, (msg.sender, bal)));
+    /// Returns only what this call added to the contract's balance (its unspent pull plus any credit the program took),
+    /// never a balance that was already here: tokens sent to the shared executor by mistake are not claimable by the
+    /// next caller. Permit2 lets PositionManager take at most this call's pull, so the balance never drops below
+    /// `before`; the check is defensive.
+    function _refund(address token, uint256 before) internal {
+        uint256 bal = _balance(token);
+        if (bal > before) _call(token, abi.encodeCall(IERC20Calls.transfer, (msg.sender, bal - before)));
+    }
+
+    function _balance(address token) internal view returns (uint256) {
+        return IERC20Calls(token).balanceOf(address(this));
     }
 
     function _call(address token, bytes memory data) internal {

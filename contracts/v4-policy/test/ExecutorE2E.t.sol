@@ -135,12 +135,14 @@ abstract contract ExecutorE2E is SessionFork {
     }
 
     function _mintNow() internal returns (uint256 tokenId, int24 lo, int24 hi, uint256 gas) {
+        uint256 stray0 = IERC20(key.currency0).balanceOf(address(executor));
+        uint256 stray1 = IERC20(key.currency1).balanceOf(address(executor));
         (lo, hi) = _range(key, 1_000);
         tokenId = IPositionManager(ch.positionManager).nextTokenId();
         gas = _run(_single(address(executor), _mintCall(key, lo, hi)), pid);
         assertEq(IPositionManager(ch.positionManager).ownerOf(tokenId), safe);
-        assertEq(IERC20(key.currency0).balanceOf(address(executor)), 0, "executor keeps nothing");
-        assertEq(IERC20(key.currency1).balanceOf(address(executor)), 0, "executor keeps nothing");
+        assertEq(IERC20(key.currency0).balanceOf(address(executor)), stray0, "executor keeps nothing of the call");
+        assertEq(IERC20(key.currency1).balanceOf(address(executor)), stray1, "executor keeps nothing of the call");
     }
 
     function _decreaseCall(uint256 tokenId, int24 lo, int24 hi, uint256 liq) internal view returns (bytes memory) {
@@ -346,6 +348,44 @@ abstract contract ExecutorE2E is SessionFork {
         (uint256 tokenId, int24 lo2, int24 hi2,) = _mintNow();
         (ok,) = _submit(_op(_single(address(executor), _decreaseCall(tokenId, lo2 - 10, hi2, 1)), pid));
         assertFalse(ok, "tick mismatch must fail");
+    }
+
+    function test_attack_claimStrayBalance() public {
+        // Tokens sent to the shared executor by mistake. A caller (here the attacker with its own position, and the
+        // account's session) runs increase with zero liquidity and zero max amounts: the stray balance must stay put.
+        (uint256 tokenId, int24 lo, int24 hi,) = _mintNow();
+        deal(key.currency0, address(executor), 1_000);
+        deal(key.currency1, address(executor), 2_000);
+
+        uint256 b0 = _bal(key.currency0);
+        uint256 b1 = _bal(key.currency1);
+        bytes memory zero = abi.encodeCall(
+            MamoruV4Executor.increase, (key, _biased(lo), _biased(hi), tokenId, 0, 0, 0, block.timestamp + 600)
+        );
+        _run(_single(address(executor), zero), pid);
+        assertEq(_bal(key.currency0), b0, "no stray token0 to the caller");
+        assertEq(_bal(key.currency1), b1, "no stray token1 to the caller");
+        assertEq(IERC20(key.currency0).balanceOf(address(executor)), 1_000);
+        assertEq(IERC20(key.currency1).balanceOf(address(executor)), 2_000);
+
+        // A real increase and a mint still return exactly their own leftovers and leave the stray balance alone.
+        bytes memory inc = abi.encodeCall(
+            MamoruV4Executor.increase,
+            (
+                key,
+                _biased(lo),
+                _biased(hi),
+                tokenId,
+                1e9,
+                uint128(ch.amount0 * 2),
+                uint128(ch.amount1 * 2),
+                block.timestamp + 600
+            )
+        );
+        _run(_single(address(executor), inc), pid);
+        _run(_single(address(executor), _mintCall(key, lo, hi)), pid);
+        assertEq(IERC20(key.currency0).balanceOf(address(executor)), 1_000);
+        assertEq(IERC20(key.currency1).balanceOf(address(executor)), 2_000);
     }
 
     function test_attack_nativeValue() public {
