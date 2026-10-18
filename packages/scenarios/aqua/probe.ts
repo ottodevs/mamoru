@@ -312,25 +312,28 @@ try {
   note('taker fills 500 USDC -> WETH against the strategy', fill.ok && wethOut > 0n, `${fill.ok ? fill.receipt.gasUsed : 'n/a'} gas, taker received ${wethOut} wei WETH, maker's virtual USDC balance moved by ${virtualUsdcDelta} (observed via Aqua's own rawBalances, not computed)`)
   if (!(fill.ok && wethOut > 0n)) exitCode = 1
 
-  // Fee earned: two independent, separately observed numbers, neither of them the nominal feeBps*amountIn
-  // arithmetic alone.
-  // 1. Input side: the maker's virtual USDC balance (read from Aqua's own rawBalances, before and after the
-  //    fill) moved by more than the taker's 500 USDC input whenever feeBps > 0 on amountIn credits the fee to
-  //    the same balance push() increments; the excess over takerUsdcIn is the fee, observed, not estimated.
-  // 2. Output side: the identically sized (same L, same price band, same block), fee-free control strategy's
-  //    quote for the same 500 USDC trade, compared against what the fee strategy actually delivered.
+  // Fee earned. `rawBalances` is the maker's aggregate virtual reserve, not a line-itemed fee balance, so the
+  // input-side read below only establishes WHERE the fee acts (it does not, by itself, prove a fee was charged:
+  // a push() of the taker's gross amount would look identical with feeBps = 0). What actually demonstrates a fee
+  // was charged is the A/B: an identically sized (same L, same price band, same block), fee-free control
+  // strategy's quote for the same 500 USDC trade, against what the fee strategy actually delivered. `ok` below
+  // is conditioned on that output-side shortfall existing and landing within a wide band of the configured
+  // feeBps (not just logged as true regardless) -- a misencoded or missing fee instruction would show up here
+  // as ok=false, not be masked.
   const feeOnInputObserved = virtualUsdcDelta > takerUsdcIn ? virtualUsdcDelta - takerUsdcIn : 0n
   if (controlOut > 0n) {
     const outputSideDelta = controlOut > wethOut ? controlOut - wethOut : 0n
     const outputSideBps = controlOut > 0n ? Number((outputSideDelta * 10_000n) / controlOut) : 0
+    const feeConfirmed = outputSideBps > 0 && outputSideBps <= feeBps
     note(
-      'fee earned by the maker (observed, two ways)',
-      true,
-      `input side: the maker's virtual USDC balance moved by ${virtualUsdcDelta} against a ${takerUsdcIn} input, ${feeOnInputObserved} more than the taker paid in (Aqua's rawBalances, read before and after the fill). ` +
-        `output side: the fee-free control quote (same L, same block) would have delivered ${controlOut} wei WETH vs ${wethOut} wei WETH actually delivered, a ${outputSideBps} bps difference, against a strategy set to ${feeBps} bps`,
+      'fee earned by the maker',
+      feeConfirmed,
+      `output side (the measurement that actually demonstrates a fee, not just a balance read): the fee-free control quote (same L, same price band, same block) would have delivered ${controlOut} wei WETH vs ${wethOut} wei WETH actually delivered, a ${outputSideBps} bps shortfall against a strategy set to ${feeBps} bps. ` +
+        `input side (where the fee does NOT show up, for completeness): the maker's virtual USDC balance moved by ${virtualUsdcDelta} against a ${takerUsdcIn} gross input -- ${feeOnInputObserved} more than the input, i.e. no premium credited there; the fee is purely an output-side effect`,
     )
+    if (!feeConfirmed) exitCode = 1
   } else {
-    note('fee earned by the maker (observed)', true, `input side: the maker's virtual USDC balance moved by ${virtualUsdcDelta} against a ${takerUsdcIn} input, ${feeOnInputObserved} more than the taker paid in (Aqua's rawBalances, read before and after the fill); output-side control-quote cross-check unavailable`)
+    note('fee earned by the maker', null, `output-side control-quote cross-check unavailable, so the fee cannot be demonstrated this run (only the nominal ${(takerUsdcIn * BigInt(feeBps)) / 10_000n} raw USDC-equivalent by construction); input side showed ${virtualUsdcDelta} against a ${takerUsdcIn} gross input, no premium credited there`)
   }
 
   // --- 10. Overcommit: the Safe sends its real WETH away without docking first; the next fill must revert -----
