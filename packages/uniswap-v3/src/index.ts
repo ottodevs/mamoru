@@ -101,6 +101,17 @@ export function mint(p: {
   )
 }
 
+/**
+ * otto/mamoru#171: add to a position the account holds, both minimums positive, deadline set. The position manager
+ * does not check who owns `tokenId`; the session grant pins it (`increase`, tokenId EQUAL).
+ */
+export function increaseLiquidity(p: { tokenId: bigint; amount0Desired: bigint; amount1Desired: bigint; amount0Min: bigint; amount1Min: bigint; deadline: bigint }): V3Call {
+  if (p.tokenId <= 0n) throw new Error('tokenId must be set')
+  if (p.amount0Min <= 0n || p.amount1Min <= 0n) throw new Error('increase minimums must be positive')
+  if (p.deadline <= 0n) throw new Error('deadline must be set')
+  return call('NonfungiblePositionManager', encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'increaseLiquidity', args: [p] }))
+}
+
 export function decreaseLiquidity(p: { tokenId: bigint; liquidity: bigint; amount0Min: bigint; amount1Min: bigint; deadline: bigint }): V3Call {
   if (p.deadline <= 0n) throw new Error('deadline must be set')
   return call(

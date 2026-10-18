@@ -1,6 +1,6 @@
 import type { Hex } from '@mamoru/domain'
 import { marketOf, meanTickAt, realizedVolOf, thirdsOut, type CumulativePoint, type Observation, type PoolGeometryObs, type PoolGuardObs, type PoolObs, type SessionObs } from '@mamoru/decide'
-import { grantKey, type PolicyVersion } from '@mamoru/policy'
+import { grantKey, hasIncrease, type PolicyVersion } from '@mamoru/policy'
 import { address, entry, type RegistryName } from '@mamoru/registry'
 import type { Dataset, Sample } from './types.ts'
 import type { World } from './world.ts'
@@ -183,6 +183,8 @@ export function geometryOf(ds: Dataset, i: number, windowSeconds: number): NonNu
 function sessions(policy: PolicyVersion, w: World): SessionObs[] {
   const keys = policy.session.grants.filter((g) => !g.perPosition).map((g) => grantKey(g))
   for (const p of w.positions) keys.push(`manage:${p.tokenId}`)
+  // otto/mamoru#171: the owner enabled the per-position increase grant for every position the account minted.
+  for (const p of w.positions) if (hasIncrease(policy, p.pool)) keys.push(`increase:${p.tokenId}`)
   return [...new Set(keys)].map((grant) => ({ grant, permissionId: ID, validUntil: FOREVER, active: true }))
 }
 

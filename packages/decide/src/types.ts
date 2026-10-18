@@ -148,6 +148,23 @@ export type EnterMintProposal = {
   amount1Desired: bigint
 }
 
+/**
+ * otto/mamoru#171: an entry added to a position the account already holds in the pool, instead of a second NFT:
+ * approvals + increaseLiquidity(tokenId) + approvals back to 0. `tickLower`/`tickUpper` are the position's own range,
+ * which the amounts are split for; the operator checks them against the chain before it builds the call.
+ */
+export type IncreaseLiquidityProposal = {
+  kind: 'increase_liquidity'
+  /** `increase:<tokenId>`: the per-position grant of that tokenId. */
+  grant: `increase:${string}`
+  pool: RegistryName
+  tokenId: bigint
+  tickLower: number
+  tickUpper: number
+  amount0Desired: bigint
+  amount1Desired: bigint
+}
+
 export type HarvestProposal = {
   kind: 'harvest'
   grant: `manage:${string}` | 'convert-any' | `convert-any:${string}`
@@ -178,7 +195,7 @@ export type ReduceProposal = {
   liquidity: bigint
 }
 
-export type Proposal = EnterSwapProposal | EnterMintProposal | HarvestProposal | RerangeProposal | ReduceProposal
+export type Proposal = EnterSwapProposal | EnterMintProposal | IncreaseLiquidityProposal | HarvestProposal | RerangeProposal | ReduceProposal
 
 export type DecisionKind = 'hold' | Proposal['kind']
 

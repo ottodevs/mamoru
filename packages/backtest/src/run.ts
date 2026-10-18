@@ -13,16 +13,17 @@ export const SIM_VERSION = 'backtest-1'
 /**
  * Gas of one operation. Swap and mint are the medians of 14 live receipts on Base (2026-09-26 to 2026-10-01): 470,200
  * and 835,285 gas, an L1 data fee near 3.1e9 wei. Harvest, re-range and reduce have no live receipt yet;
- * theirs are estimates between the two.
+ * theirs are estimates between the two. increase_liquidity (#171) has none either: the same batch as a mint less what
+ * only a mint pays in the position manager (the ERC-721 mint and the new position's storage, about 200k), an estimate.
  */
 export const DEFAULT_GAS: GasModel = {
-  unitsByKind: { enter_swap: 470_000n, enter_mint: 835_000n, harvest: 650_000n, rerange: 700_000n, reduce: 600_000n },
+  unitsByKind: { enter_swap: 470_000n, enter_mint: 835_000n, increase_liquidity: 635_000n, harvest: 650_000n, rerange: 700_000n, reduce: 600_000n },
   priorityFeeWei: 1_000_000n,
   l1FeeWei: 3_100_000_000n,
 }
 
 const WEEK = 7 * 86_400
-const KINDS: readonly OpKind[] = ['enter_swap', 'enter_mint', 'harvest', 'rerange', 'reduce']
+const KINDS: readonly OpKind[] = ['enter_swap', 'enter_mint', 'increase_liquidity', 'harvest', 'rerange', 'reduce']
 
 export type Pricer = (s: Sample, token: RegistryName, amount: bigint) => bigint
 
@@ -122,15 +123,20 @@ function drawdowns(time: number[], value: bigint[]): { maxDrawdownBps: number; w
  */
 function budgetSpend(p: Proposal, e: RegistryEntry): { token: RegistryName; amount: bigint }[] {
   if (p.kind === 'enter_swap') return [{ token: p.tokenIn, amount: p.amountIn }]
-  if (p.kind === 'enter_mint') return [{ token: e.token0!, amount: p.amount0Desired }, { token: e.token1!, amount: p.amount1Desired }]
+  // otto/mamoru#151 option C Lab: an increase is charged like a mint (its desired amounts), as MamoruActionPolicy would.
+  if (p.kind === 'enter_mint' || p.kind === 'increase_liquidity') return [{ token: e.token0!, amount: p.amount0Desired }, { token: e.token1!, amount: p.amount1Desired }]
   if (p.kind === 'harvest' && p.convert) return [{ token: p.convert.token, amount: p.convert.amount }]
   return []
 }
 
-/** The grant template a proposal runs under (`manage:<tokenId>` is the per-position `manage`), or undefined. */
-function templateOf(policy: PolicyVersion, grant: string): GrantTemplate | undefined {
-  const perPosition = /^manage:\d+$/.test(grant)
-  return policy.session.grants.find((g) => (perPosition ? g.name === 'manage' : grantKey(g) === grant))
+/**
+ * The grant template a proposal runs under (`manage:<tokenId>` is the per-position `manage`, `increase:<tokenId>` the
+ * per-position `increase` of the proposal's pool), or undefined.
+ */
+function templateOf(policy: PolicyVersion, grant: string, pool?: string): GrantTemplate | undefined {
+  const perPosition = /^(manage|increase):\d+$/.exec(grant)?.[1]
+  if (!perPosition) return policy.session.grants.find((g) => grantKey(g) === grant)
+  return policy.session.grants.find((g) => g.name === perPosition && (g.pool === undefined || pool === undefined || g.pool === pool))
 }
 
 /** Usage limit of the session a proposal runs under, at the account cap the grants are sized at; null without such a grant. */
@@ -150,8 +156,8 @@ function cumulativeSpend(t: GrantTemplate, p: Proposal): [string, string, bigint
       if (typeof r.cumulative !== 'string' || !r.cumulative.startsWith('cap:')) continue
       const v =
         r.field === 'amountIn' ? (p.kind === 'enter_swap' ? p.amountIn : p.kind === 'harvest' ? (p.convert?.amount ?? 0n) : 0n)
-        : r.field === 'amount0Desired' && p.kind === 'enter_mint' ? p.amount0Desired
-        : r.field === 'amount1Desired' && p.kind === 'enter_mint' ? p.amount1Desired
+        : r.field === 'amount0Desired' && (p.kind === 'enter_mint' || p.kind === 'increase_liquidity') ? p.amount0Desired
+        : r.field === 'amount1Desired' && (p.kind === 'enter_mint' || p.kind === 'increase_liquidity') ? p.amount1Desired
         : 0n
       if (v > 0n) out.push([`${ai}:${ri}`, r.cumulative.slice(4), v])
     }
@@ -327,7 +333,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
         while (s.time - at >= policy.session.validitySeconds) at += policy.session.validitySeconds
         openWindow(s, at)
       }
-      const t = p ? templateOf(policy, p.grant) : undefined
+      const t = p ? templateOf(policy, p.grant, p.pool) : undefined
       const limit = t ? usageLimitFor(t, capUsdc) : null
       const used = p ? (usedIn.get(p.grant) ?? 0) : 0
       const spend = p && t ? cumulativeSpend(t, p) : []
