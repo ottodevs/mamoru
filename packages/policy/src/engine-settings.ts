@@ -24,6 +24,8 @@ export type EngineSettings = {
    * form switching back and forth); they are checked against the bounds and ignored.
    */
   rerange?: RerangeSetting
+  /** Move to Base for USDC found on Ethereum (#133). Absent = off, so versions stored before it keep their hash. */
+  bridgeOut?: { enabled: boolean }
 }
 
 export type RerangeSetting = ({ mode: 'eager' } & Partial<LazyRerange>) | ({ mode: 'lazy' } & LazyRerange)
@@ -102,7 +104,11 @@ export function validateEngineSettings(s: unknown): string[] {
   const errors: string[] = []
   if (!s || typeof s !== 'object' || Array.isArray(s)) return ['settings must be an object']
   const o = s as Record<string, unknown>
-  for (const k of Object.keys(o)) if (!['depth', 'capUsdc', 'guard', 'rerange'].includes(k)) errors.push(`unknown setting ${k}`)
+  for (const k of Object.keys(o)) if (!['depth', 'capUsdc', 'guard', 'rerange', 'bridgeOut'].includes(k)) errors.push(`unknown setting ${k}`)
+  if (o.bridgeOut !== undefined) {
+    const b = o.bridgeOut as Record<string, unknown> | null
+    if (!b || typeof b !== 'object' || Array.isArray(b) || Object.keys(b).some((k) => k !== 'enabled') || typeof b.enabled !== 'boolean') errors.push('bridgeOut must be { enabled: true | false }')
+  }
   const B = ENGINE_SETTINGS_BOUNDS
   if (o.depth !== null) {
     if (!o.depth || typeof o.depth !== 'object' || Array.isArray(o.depth)) errors.push('depth must be an object or null')
@@ -170,6 +176,7 @@ export function riskyChanges(from: EngineSettings, to: EngineSettings): string[]
     }
   }
   if (from.depth && !to.depth) out.push('depth sizing turns off')
+  if (!from.bridgeOut?.enabled && to.bridgeOut?.enabled) out.push('owners can move USDC from Ethereum to Base, and the relayer pays the Ethereum gas')
   if (from.depth && to.depth) {
     if (to.depth.impactBps > from.depth.impactBps) out.push('entries may move the pool price more')
     if (to.depth.shareBps > from.depth.shareBps) out.push('entries may take a bigger share of a pool')

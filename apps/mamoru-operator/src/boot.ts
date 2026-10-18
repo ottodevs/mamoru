@@ -356,12 +356,22 @@ export async function bootOperator(o: BootOptions) {
     yieldLedgerOn = syncYieldLedgerFlag(snapshot, settings?.flags().yield_ledger === true, yieldLedgerOn)
   }
   // Moving USDC found on Ethereum to Base (#133): off unless an Ethereum RPC is configured. Same relayer key, its own nonce space on Ethereum.
+  // The RPC URL is a credential: env, like BASE_RPC_URL. Whether owners may use it is the /ops flag (engine settings
+  // bridgeOut), per account, off by default and without a settings source.
   let bridgeOut: BridgeOut | null = null
   if (o.l1RpcUrl) {
     const l1 = createPublicClient({ transport: http(o.l1RpcUrl, { timeout: 30_000 }) })
-    if ((await l1.getChainId()) !== ETHEREUM_CHAIN_ID) throw new Error('MAMORU_L1_RPC_URL is not Ethereum Mainnet')
-    bridgeOut = new BridgeOut(l1, new Relayer(relayerKey, l1, o.l1RpcUrl, ETHEREUM_CHAIN_ID), o.stateDir)
-    console.log(`[operator] bridge-out from Ethereum on, relayer ${relayer.address} (${await l1.getBalance({ address: relayer.address })} wei on Ethereum)`)
+    // viem errors quote the request URL, which carries the provider key: only fixed text leaves this block.
+    let wei: bigint
+    try {
+      if ((await l1.getChainId()) !== ETHEREUM_CHAIN_ID) throw new Error('wrong chain')
+      wei = await l1.getBalance({ address: relayer.address })
+    } catch (e) {
+      throw new Error(`MAMORU_L1_RPC_URL is not a reachable Ethereum Mainnet RPC (${e instanceof Error && e.message === 'wrong chain' ? 'wrong chain' : 'unreachable'})`)
+    }
+    const enabledFor = (accountKey: string) => settings?.forAccount(accountKey).settings.bridgeOut?.enabled === true
+    bridgeOut = new BridgeOut(l1, new Relayer(relayerKey, l1, o.l1RpcUrl, ETHEREUM_CHAIN_ID), o.stateDir, fetch, Date.now, process.env.ACROSS_API_KEY, enabledFor)
+    console.log(`[operator] bridge-out from Ethereum available (on per account from /ops), relayer ${relayer.address} (${wei} wei on Ethereum)`)
   }
   const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot, bridgeOut })
   const eth = await client.getBalance({ address: relayer.address })

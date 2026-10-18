@@ -37,8 +37,8 @@ export const movable = (c: Found) => c.chainId === BRIDGE_CHAIN_ID && BigInt(c.u
 
 export const otherChainCopy = {
   title: (c: Found) => `${amount(c)} at your address on ${c.name}, not on Base`,
-  body: (c: Found) =>
-    movable(c)
+  body: (c: Found, canMove = false) =>
+    canMove && movable(c)
       ? `This is not part of your Mamoru balance and Mamoru has not moved it: when last checked it was at your address on ${c.name}. You can move the USDC to this same account on Base with one passkey approval; Mamoru pays the ${c.name} gas.${BigInt(c.eth) > 0n ? ` The ETH stays on ${c.name}.` : ''} Do not send more on ${c.name}.`
       : `Mamoru works on Base. This is not part of your Mamoru balance and Mamoru has not moved it: when last checked it was at your address on ${c.name}. It has to reach Base before Mamoru can use it, and Mamoru cannot move it from ${c.name} yet. Do not send more on ${c.name}.`,
   move: 'Move to Base',
@@ -51,11 +51,13 @@ export const otherChainCopy = {
     filled: 'Arrived on Base. It is part of your balance now.',
     failed: 'The move did not go through. The USDC is still at your address on Ethereum.',
     unconfirmed: 'Sent from Ethereum; Mamoru is checking where it is. Do not send it again.',
+    expired: 'The bridge did not deliver it in time. It goes back to your address on Ethereum; this can take a few hours.',
+    refunded: 'Returned to your address on Ethereum. You can move it again.',
   } satisfies Record<BridgeOutRoute['state'], string>,
 }
 
 /** Money sent on the wrong network: where it is and that it is not in the balance. Renders nothing when there is none. */
-export function OtherChainNotice({ view, action }: { view: OtherChainsView | undefined; action?: (c: Found) => ReactNode }) {
+export function OtherChainNotice({ view, action, canMove = false }: { view: OtherChainsView | undefined; action?: (c: Found) => ReactNode; canMove?: boolean }) {
   const found = fundsElsewhere(view)
   if (found.length === 0) return null
   return (
@@ -64,17 +66,19 @@ export function OtherChainNotice({ view, action }: { view: OtherChainsView | und
         <section key={c.chainId} className="card" data-testid="other-chain" data-chain-id={c.chainId} role="status">
           <span className="max-w-[40rem]">
             <span className="title text-alert-ink">{otherChainCopy.title(c)}</span>
-            <span className="sub">{otherChainCopy.body(c)}</span>
+            <span className="sub">{otherChainCopy.body(c, canMove)}</span>
             <span className="mt-1 block font-mono text-[0.72rem] text-stone">
               {c.name} block {c.block} · Checked {localTime(c.observedAt)}
             </span>
-            {action && movable(c) ? action(c) : null}
+            {action && canMove && movable(c) ? action(c) : null}
           </span>
         </section>
       ))}
     </>
   )
 }
+
+const UNDERWAY: BridgeOutRoute['state'][] = ['sending', 'deposited', 'unconfirmed', 'expired']
 
 /** The last move's state, as the owner reads it. */
 export function BridgeStatus({ route }: { route: BridgeOutRoute }) {
@@ -98,7 +102,7 @@ export function BridgeOutAction({ accountKey }: { accountKey: string }) {
   const [busy, setBusy] = useState<null | 'preparing' | 'signing'>(null)
   const [error, setError] = useState<string | null>(null)
   const route = status.isError ? null : (status.data?.route ?? null)
-  const underway = route !== null && ['sending', 'deposited', 'unconfirmed'].includes(route.state)
+  const underway = route !== null && UNDERWAY.includes(route.state)
 
   async function prepare() {
     setError(null)
@@ -166,12 +170,15 @@ export function BridgeOutAction({ accountKey }: { accountKey: string }) {
 export function WrongNetwork({ accountKey }: { accountKey: string | undefined }) {
   const other = useOtherChains(accountKey)
   const status = useBridgeOut(accountKey)
+  // Off on /ops, or the operator has no Ethereum RPC (the route answers 404): the notice stays as it was, no button.
+  const canMove = !status.isError && status.data?.enabled === true
   const route = status.isError ? null : (status.data?.route ?? null)
+  const recent = route !== null && (UNDERWAY.includes(route.state) || (route.state === 'filled' && Date.now() - Date.parse(route.at) < 86_400_000))
   return (
     <>
-      <OtherChainNotice view={other.isError ? undefined : other.data} action={accountKey ? () => <BridgeOutAction accountKey={accountKey} /> : undefined} />
+      <OtherChainNotice view={other.isError ? undefined : other.data} canMove={canMove} action={accountKey ? () => <BridgeOutAction accountKey={accountKey} /> : undefined} />
       {/* Once the USDC has left Ethereum the notice above is gone; the move's state stays in view until it lands. */}
-      {route && fundsElsewhere(other.data).every((c) => !movable(c)) && route.state !== 'failed' && Date.now() - Date.parse(route.at) < 86_400_000 ? (
+      {route && recent && fundsElsewhere(other.data).every((c) => !movable(c)) ? (
         <section className="card" data-testid="bridge-route" role="status">
           <span className="max-w-[40rem]">
             <span className="title">Moving {usd(route.amountUsdc)} USDC from Ethereum to Base</span>

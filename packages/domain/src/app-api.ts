@@ -130,8 +130,9 @@ export type OtherChainsView = { address: Hex0x; accountChainId: number; chains: 
 // Moving USDC found on Ethereum to the same account on Base (ticket #133). Amounts in USDC base units.
 // sending: the relayer is on it. deposited: the bridge holds it, Base fill pending. filled: on Base.
 // failed: nothing left Ethereum. unconfirmed: the owner transaction was sent and its outcome is not known here.
+// expired: Across did not fill it in time, refund to the account on Ethereum pending. refunded: back on Ethereum.
 export type BridgeOutRoute = {
-  state: 'sending' | 'deposited' | 'filled' | 'failed' | 'unconfirmed'
+  state: 'sending' | 'deposited' | 'filled' | 'failed' | 'unconfirmed' | 'expired' | 'refunded'
   amountUsdc: string
   outputUsdc: string
   at: string
@@ -140,7 +141,8 @@ export type BridgeOutRoute = {
   depositId?: string
   fillTx?: Hex0x
 }
-export type BridgeOutView = { route: BridgeOutRoute | null }
+// enabled: the /ops flag (engine settings bridgeOut) is on for this account and the operator has an Ethereum RPC.
+export type BridgeOutView = { route: BridgeOutRoute | null; enabled: boolean }
 export type BridgeOutToSign = OwnerTxToSign & { route: { outputUsdc: string; feeUsdc: string; fillSec: number } }
 
 // What the operator found when a deposit is above the per-account cap. Amounts in USDC base units.

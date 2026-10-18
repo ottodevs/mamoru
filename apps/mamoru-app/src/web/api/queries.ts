@@ -149,7 +149,7 @@ export function useBridgeOut(accountKey: string | undefined) {
     queryFn: () => api.bridgeOutStatus(accountKey as string),
     enabled: accountKey !== undefined,
     retry: false,
-    refetchInterval: (q) => (q.state.data?.route && ['sending', 'deposited', 'unconfirmed'].includes(q.state.data.route.state) ? 5_000 : false),
+    refetchInterval: (q) => (q.state.data?.route && ['sending', 'deposited', 'unconfirmed', 'expired'].includes(q.state.data.route.state) ? (q.state.data.route.state === 'expired' ? 60_000 : 5_000) : false),
   })
 }
 
