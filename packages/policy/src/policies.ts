@@ -1,4 +1,4 @@
-import { manageAnyGrants, pairGrants } from './grants.ts'
+import { increaseGrants, manageAnyGrants, pairGrants, type PairSpec } from './grants.ts'
 import type { CapFormula, PolicyVersion, UsageTier } from './types.ts'
 
 const usdcCbbtcCaps: CapFormula[] = [
@@ -133,33 +133,26 @@ function pairOf(prefix: string, pool: string, stable: string, volatile: string, 
     { name: n('ConvertPerCall'), asset: volatile, bpsOfDeposit: bps.mint },
     { name: n('ConvertTotal'), asset: volatile, bpsOfDeposit: bps.mint },
   ]
-  const grants = pairGrants(
-    {
-      stable,
-      volatile,
-      token0,
-      token1,
-      fee,
-      pool,
-      caps: {
-        stableSwapPerCall: n('SwapPerCall'),
-        stableSwapTotal: n('SwapTotal'),
-        mint0: n('Mint0'),
-        mint1: n('Mint1'),
-        volatileConvertPerCall: n('ConvertPerCall'),
-        volatileConvertTotal: n('ConvertTotal'),
-      },
+  const spec: PairSpec = {
+    stable,
+    volatile,
+    token0,
+    token1,
+    fee,
+    pool,
+    caps: {
+      stableSwapPerCall: n('SwapPerCall'),
+      stableSwapTotal: n('SwapTotal'),
+      mint0: n('Mint0'),
+      mint1: n('Mint1'),
+      volatileConvertPerCall: n('ConvertPerCall'),
+      volatileConvertTotal: n('ConvertTotal'),
     },
-    { enterSwap: LIVE_USAGE.enterSwap, enterMint: LIVE_USAGE.enterMint, manage: 64 },
-  )
+  }
+  const grants = pairGrants(spec, { enterSwap: LIVE_USAGE.enterSwap, enterMint: LIVE_USAGE.enterMint, manage: 64 })
   // Live manage grants (owner decision 2026-09-26): re-range, reduce and harvest any position of this pair.
-  grants.push(
-    ...manageAnyGrants(
-      { stable, volatile, token0, token1, fee, pool, caps: { stableSwapPerCall: n('SwapPerCall'), stableSwapTotal: n('SwapTotal'), mint0: n('Mint0'), mint1: n('Mint1'), volatileConvertPerCall: n('ConvertPerCall'), volatileConvertTotal: n('ConvertTotal') } },
-      { manage: LIVE_USAGE.manageAny, convert: CONVERT_ANY_BY_CAP },
-    ),
-  )
-  return { caps, grants }
+  grants.push(...manageAnyGrants(spec, { manage: LIVE_USAGE.manageAny, convert: CONVERT_ANY_BY_CAP }))
+  return { caps, grants, spec }
 }
 
 const stablesPair = pairOf('stables', 'pool:USDC/USDT/100', 'USDC', 'USDT', 'USDC', 'USDT', 100, { swapPerCall: 5000, swapTotal: 10000, mint: 10000 })
@@ -231,6 +224,23 @@ export const conservadorLabGeometryV1: PolicyVersion = {
   chain: 'fork',
 }
 
+/**
+ * otto/mamoru#171, Lab only: conservador-live-v2 on a fork with one `increase` grant template per pair, so an entry
+ * into a pool where the account holds a position of (nearly) the same range adds to it instead of minting a second
+ * NFT. The grant is per position (tokenId EQUAL, see `increaseGrants`): no live account has one, and none is in the
+ * activation batch. Usage: as many top-ups per position as enter-mint allows entries per pair.
+ */
+export const conservadorLabIncreaseV1: PolicyVersion = {
+  ...conservadorLiveV2,
+  policyId: 'conservador-lab-increase-v1',
+  version: '1.0.0',
+  chain: 'fork',
+  session: {
+    ...conservadorLiveV2.session,
+    grants: [...conservadorLiveV2.session.grants, ...[stablesPair, btcPair, riskPair].flatMap((p) => increaseGrants(p.spec, { increase: LIVE_USAGE.enterMint }))],
+  },
+}
+
 /** Scenario policy for M07: LP on WETH/USDC 0.3%, only in the lab. */
 export const labWethUsdcV1: PolicyVersion = {
   ...conservadorV1,
@@ -281,4 +291,5 @@ export const POLICIES: Record<string, PolicyVersion> = {
   [labWethUsdcV1.policyId]: labWethUsdcV1,
   [conservadorLabGuardsV1.policyId]: conservadorLabGuardsV1,
   [conservadorLabGeometryV1.policyId]: conservadorLabGeometryV1,
+  [conservadorLabIncreaseV1.policyId]: conservadorLabIncreaseV1,
 }
