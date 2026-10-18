@@ -160,6 +160,12 @@ try {
   writeFileSync(file, JSON.stringify(j))
   const recon = await make().status(ctx)
   check(recon.route?.state === 'deposited' && recon.route.depositId === realId, `unconfirmed resolved from the receipt: deposited, id ${recon.route?.depositId}`)
+  // No hash at all (the send threw after it may have broadcast): the SpokePool's events from the account decide.
+  const j2 = JSON.parse(readFileSync(file, 'utf8'))
+  j2.routes[ctx.accountKey] = { ...j2.routes[ctx.accountKey], state: 'unconfirmed', depositId: undefined, l1Tx: undefined }
+  writeFileSync(file, JSON.stringify(j2))
+  const recon2 = await make().status(ctx)
+  check(recon2.route?.state === 'deposited' && recon2.route.depositId === realId && !!recon2.route.l1Tx, `unconfirmed without a hash resolved from the deposit events: id ${recon2.route?.depositId}`)
 
   statusAnswer = { status: 'filled', fillTx: `0x${'ab'.repeat(32)}` }
   const reborn = make()

@@ -20,8 +20,8 @@ import { logErr } from './metrics.ts'
 // Base account state, and the operator's engine never sees it. Off unless MAMORU_L1_RPC_URL is set.
 //
 // What the owner is told follows the chain, never a guess: a move is 'failed' only when the owner transaction was
-// never handed to the provider, or when the Safe nonce did not move and the relayer has nothing in flight. Anything
-// else that is not proven is 'unconfirmed', and status() resolves it from the chain.
+// never handed to the provider, or when its receipt says it reverted. Anything else that is not proven is
+// 'unconfirmed', and status() resolves it from the chain.
 
 export const ETHEREUM_CHAIN_ID = 1
 export const BASE_CHAIN_ID = 8453
@@ -50,15 +50,18 @@ export const DEPLOY_GAS = 700_000n
 export const EXEC_GAS = 300_000n
 /** A move left in 'sending' longer than this (the process stopped mid-send) is resolved from the chain. */
 export const SENDING_STALE_MS = 10 * 60_000
-/** An owner transaction not executed after this, with nothing of the relayer in flight, is 'failed'. */
+/** An 'unconfirmed' move not executed after this stops blocking a new one (same Safe nonce: at most one runs). */
 export const UNCONFIRMED_GIVEUP_MS = 15 * 60_000
 /** A prepared move is signable this long. */
 export const PREPARE_TTL_MS = 120_000
 export const QUOTE_TIMEOUT_MS = 8_000
 /** Across status and chain reconciliation run at most this often per account. */
 export const STATUS_CACHE_MS = 10_000
-/** How far back reconciliation looks for the deposit event. */
+/** How far past the send reconciliation looks for the deposit event (~1 day), and in chunks of how many blocks.
+ * Providers cap eth_getLogs ranges (18 Oct: QuickNode answered 1,000 and refused 7,200; Alchemy's free tier allows
+ * 10). The owner transaction lands within minutes of the send, so the first chunk normally holds it. */
 const LOG_WINDOW_BLOCKS = 7_200n
+export const LOG_CHUNK_BLOCKS = 1_000n
 
 export const spokePoolAbi = parseAbi([
   'function depositV3(address depositor, address recipient, address inputToken, address outputToken, uint256 inputAmount, uint256 outputAmount, uint256 destinationChainId, address exclusiveRelayer, uint32 quoteTimestamp, uint32 fillDeadline, uint32 exclusivityDeadline, bytes message) payable',
@@ -296,18 +299,23 @@ export class BridgeOut {
     return bound
   }
 
-  /** One relayer send, charged to the day: what the receipt says it cost, or the bound when the outcome is not known. */
+  /**
+   * One relayer send, charged to the day. The bound is written to disk before the send, so a restart while waiting for
+   * the receipt keeps it charged; a receipt then replaces it with what the transaction really cost.
+   */
   private async charged(tx: { to: Address; data: Hex; gas: bigint }, onSent: (hash: Hex) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     const bound = await this.affordable(tx.gas)
-    let r: { hash: Hex; receipt: TransactionReceipt }
-    try {
-      r = await this.relayer.send(tx, onSent)
-    } catch (e) {
-      this.spend(bound)
-      throw e
-    }
-    this.spend(r.receipt.gasUsed * r.receipt.effectiveGasPrice)
+    this.spend(bound)
+    const r = await this.relayer.send(tx, onSent)
+    const cost = r.receipt.gasUsed * r.receipt.effectiveGasPrice
+    if (cost < bound) this.spend(cost - bound)
     return r
+  }
+
+  /** Whether the account's current route stops a new move. A stale 'unconfirmed' does not (see reconcile()). */
+  private blocking(r: Stored | undefined): boolean {
+    if (!r || !NON_TERMINAL.has(r.state)) return false
+    return !(r.state === 'unconfirmed' && this.now() - Date.parse(r.at) >= UNCONFIRMED_GIVEUP_MS)
   }
 
   private on(accountKey: string): void {
@@ -317,8 +325,7 @@ export class BridgeOut {
   async prepare(ctx: AccountContext): Promise<BridgeOutToSign> {
     this.on(ctx.accountKey)
     const live = this.live(ctx)
-    const cur = this.journal.routes[ctx.accountKey]
-    if (cur && NON_TERMINAL.has(cur.state)) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
+    if (this.blocking(this.journal.routes[ctx.accountKey])) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
     const moves = this.journal.moves[ctx.accountKey]
     if (moves && moves.day === this.day() && moves.n >= MOVES_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
     const amount = await this.usdcAt(live.safe)
@@ -366,11 +373,12 @@ export class BridgeOut {
   }
 
   private async send(ctx: AccountContext, p: Prepared, signature: Hex): Promise<BridgeOutView> {
-    const cur = this.journal.routes[ctx.accountKey]
-    if (cur && NON_TERMINAL.has(cur.state)) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
+    if (this.blocking(this.journal.routes[ctx.accountKey])) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
     // Nothing changed on Ethereum since the prepare: same balance, same deploy state and nonce.
-    const [amount, state, head] = await Promise.all([this.usdcAt(p.live.safe), readSafeNonce(this.l1, p.live.safe), this.l1.getBlockNumber()])
+    const [amount, state, head] = await Promise.all([this.usdcAt(p.live.safe), readSafeNonce(this.l1, p.live.safe), this.l1.getBlockNumber({ cacheTime: 0 })])
     if (amount !== p.deposit.amount || state.deployed !== p.deployed || state.nonce !== p.tx.nonce) throw new HttpError(409, 'BRIDGE_STALE', 'the balance on Ethereum changed, tap again')
+    const moves = this.journal.moves[ctx.accountKey]
+    if (moves && moves.day === this.day() && moves.n >= MOVES_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
     const exec = execTransactionData(p.tx, signature)
     // A deployed account must accept the owner transaction in simulation before the relayer spends anything on it.
     if (p.deployed) await this.simulate(p.live.safe, exec)
@@ -483,32 +491,37 @@ export class BridgeOut {
         }
       }
       // No hash (the send threw after it may have broadcast): the SpokePool's events from the account decide.
-      const head = await this.l1.getBlockNumber()
+      const head = await this.l1.getBlockNumber({ cacheTime: 0 })
       const from = BigInt(r.fromBlock)
-      const logs = await this.l1.getLogs({
-        address: ACROSS_SPOKE_POOL,
-        event: spokePoolAbi[1],
-        args: { depositor: pad(r.safe, { size: 32 }) },
-        fromBlock: from,
-        toBlock: head < from + LOG_WINDOW_BLOCKS ? head : from + LOG_WINDOW_BLOCKS,
-      })
-      const mine = logs.filter((l) => matches(l.args))
+      const end = head < from + LOG_WINDOW_BLOCKS ? head : from + LOG_WINDOW_BLOCKS
+      // An older owner transaction with the same Safe nonce may be the one that ran (signed on another quote): the
+      // output amount is not compared here, only who, to whom, how much in and where.
+      type DepositLog = Awaited<ReturnType<typeof this.depositLogs>>[number]
+      let mine: DepositLog[] = []
+      for (let lo = from; lo <= end && mine.length === 0; lo += LOG_CHUNK_BLOCKS) {
+        const hi = lo + LOG_CHUNK_BLOCKS - 1n < end ? lo + LOG_CHUNK_BLOCKS - 1n : end
+        mine = (await this.depositLogs(r.safe, lo, hi)).filter(
+          (l) => l.args.depositor?.toLowerCase() === word(r.safe) && l.args.recipient?.toLowerCase() === word(r.safe) && l.args.inputAmount === BigInt(r.amountUsdc) && l.args.destinationChainId === BigInt(BASE_CHAIN_ID),
+        )
+      }
       if (mine.length === 1) {
         r.depositId = mine[0]!.args.depositId!.toString()
         r.l1Tx = mine[0]!.transactionHash
         r.state = 'deposited'
       }
       // The nonce moved without a matching deposit: left 'unconfirmed' for a person to look at, never called failed.
-      else logErr(`[bridge-out] reconcile ${r.safe.slice(0, 10)}: nonce moved, ${logs.length} deposit event(s) from the account, ${mine.length} matching`, `blocks ${from}..${head}`)
+      else logErr(`[bridge-out] reconcile ${r.safe.slice(0, 10)}: nonce moved, ${mine.length} matching deposit event(s)`, `blocks ${from}..${end}`)
       return
     }
-    if (this.now() - Date.parse(r.at) < UNCONFIRMED_GIVEUP_MS) return
-    // Not executed, and nothing of the relayer is pending: the owner transaction is not coming.
-    const [latest, pending] = await Promise.all([
-      this.l1.getTransactionCount({ address: this.relayer.address, blockTag: 'latest' }),
-      this.l1.getTransactionCount({ address: this.relayer.address, blockTag: 'pending' }),
-    ])
-    if (latest === pending) r.state = 'failed'
+    // Not executed yet. No node can prove a broadcast transaction will never land, so this is never called failed: the
+    // route stays 'unconfirmed' and is checked again. After UNCONFIRMED_GIVEUP_MS it stops blocking a new move (see
+    // blocking()): the new owner transaction uses the same Safe nonce, so at most one of the two can ever run, and both
+    // deposit to the account itself.
+  }
+
+  /** FundsDeposited events whose depositor is the account, in one provider-sized range. */
+  private depositLogs(safe: Address, fromBlock: bigint, toBlock: bigint) {
+    return this.l1.getLogs({ address: ACROSS_SPOKE_POOL, event: spokePoolAbi[1], args: { depositor: pad(safe.toLowerCase() as Address, { size: 32 }) }, fromBlock, toBlock })
   }
 
   /** Across's answer for a deposit: filled on Base, expired (refund pending) or refunded to the account on Ethereum. */
