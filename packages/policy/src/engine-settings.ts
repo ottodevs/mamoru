@@ -1,5 +1,5 @@
 import { FALL_FREEZE_DEFAULTS } from './policies.ts'
-import type { PolicyVersion } from './types.ts'
+import type { LazyRerange, PolicyVersion } from './types.ts'
 
 /**
  * Spec 006 (otto/mamoru#147): the engine knobs that used to live in the operator's env, as one versioned object.
@@ -15,7 +15,18 @@ export type EngineSettings = {
   capUsdc: number | null
   /** Fall freeze (#101): no new money into a volatile bucket while its pool falls with high volatility. */
   guard: { enabled: boolean; btc: { fallBps: number; volBps: number }; eth: { fallBps: number; volBps: number } }
+  /**
+   * otto/mamoru#172: how the engine re-ranges a position. Absent or `eager`: today's trigger (out of range or within 10%
+   * of an edge, then the policy cooldown). `lazy`: the Lab rule `range.lazy` of spec 004 (#101 experiment 4): past
+   * the edge by `edgeBufferTicks`, out of range for `minDwellSeconds`, and only when the fees of a new range over
+   * `horizonSeconds` beat its gas, swap and LVR (weighted by `lvrWeightBps`); no near-edge trigger. Optional so
+   * every version written before it keeps its canonical JSON and hash. In `eager` the four numbers may be kept (a
+   * form switching back and forth); they are checked against the bounds and ignored.
+   */
+  rerange?: RerangeSetting
 }
+
+export type RerangeSetting = ({ mode: 'eager' } & Partial<LazyRerange>) | ({ mode: 'lazy' } & LazyRerange)
 
 /** The cap the operator ran with before settings existed; above it, depth sizing must be on. */
 export const DEFAULT_CAP_USDC = 100
@@ -27,6 +38,12 @@ export const ENGINE_SETTINGS_BOUNDS = {
   capUsdc: { min: 1, max: 1_000_000 },
   fallBps: { min: 100, max: 3000 },
   volBps: { min: 1000, max: 50_000 },
+  // #172. The Lab grid (spec 004 results/rebalance-policy-2026-10-16.md) ran buffers 0-400 ticks, dwell 0-2 h, H 6-24 h,
+  // LVR weight 1. The bounds leave room around it, never past half a 2000-tick range, a day of waiting or a week of H.
+  edgeBufferTicks: { min: 0, max: 1000 },
+  minDwellSeconds: { min: 0, max: 86_400 },
+  horizonSeconds: { min: 3_600, max: 604_800 },
+  lvrWeightBps: { min: 0, max: 20_000 },
 } as const
 
 export const DEFAULT_ENGINE_SETTINGS: EngineSettings = {
@@ -51,6 +68,20 @@ export const ENGINE_SETTINGS_TEMPLATES: Record<string, EngineSettings> = {
     ...DEFAULT_ENGINE_SETTINGS,
     guard: { ...DEFAULT_ENGINE_SETTINGS.guard, enabled: true },
   },
+  // #172: the TRAIN/TEST candidate `lazy-h24h-b100-d30` of spec 004 (results/variants/test-candidates.json).
+  'conservador-live-v2 + lazy-h24h-b100-d30': {
+    ...DEFAULT_ENGINE_SETTINGS,
+    rerange: { mode: 'lazy', edgeBufferTicks: 100, minDwellSeconds: 1800, horizonSeconds: 86_400, lvrWeightBps: 10_000 },
+  },
+}
+
+const LAZY_KEYS = ['edgeBufferTicks', 'minDwellSeconds', 'horizonSeconds', 'lvrWeightBps'] as const
+
+/** The `range.lazy` these settings ask for, or null for the eager trigger. */
+export function lazyOf(s: EngineSettings): LazyRerange | null {
+  const r = s.rerange
+  if (!r || r.mode !== 'lazy') return null
+  return { edgeBufferTicks: r.edgeBufferTicks, minDwellSeconds: r.minDwellSeconds, horizonSeconds: r.horizonSeconds, lvrWeightBps: r.lvrWeightBps }
 }
 
 const isInt = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n)
@@ -68,7 +99,7 @@ export function validateEngineSettings(s: unknown): string[] {
   const errors: string[] = []
   if (!s || typeof s !== 'object' || Array.isArray(s)) return ['settings must be an object']
   const o = s as Record<string, unknown>
-  for (const k of Object.keys(o)) if (!['depth', 'capUsdc', 'guard'].includes(k)) errors.push(`unknown setting ${k}`)
+  for (const k of Object.keys(o)) if (!['depth', 'capUsdc', 'guard', 'rerange'].includes(k)) errors.push(`unknown setting ${k}`)
   const B = ENGINE_SETTINGS_BOUNDS
   if (o.depth !== null) {
     if (!o.depth || typeof o.depth !== 'object' || Array.isArray(o.depth)) errors.push('depth must be an object or null')
@@ -98,6 +129,16 @@ export function validateEngineSettings(s: unknown): string[] {
       for (const k of Object.keys(r)) if (!['fallBps', 'volBps'].includes(k)) errors.push(`unknown guard.${side} setting ${k}`)
       inRange(errors, `guard.${side}.fallBps`, r.fallBps, B.fallBps)
       inRange(errors, `guard.${side}.volBps`, r.volBps, B.volBps)
+    }
+  }
+  if (o.rerange !== undefined) {
+    if (!o.rerange || typeof o.rerange !== 'object' || Array.isArray(o.rerange)) errors.push('rerange must be an object')
+    else {
+      const r = o.rerange as Record<string, unknown>
+      for (const k of Object.keys(r)) if (!['mode', ...LAZY_KEYS].includes(k)) errors.push(`unknown rerange setting ${k}`)
+      if (r.mode !== 'eager' && r.mode !== 'lazy') errors.push("rerange.mode must be 'eager' or 'lazy'")
+      // Lazy needs every number; eager may carry them, and then they must still be in bounds.
+      for (const k of LAZY_KEYS) if (r.mode === 'lazy' || r[k] !== undefined) inRange(errors, `rerange.${k}`, r[k], B[k])
     }
   }
   return errors
@@ -132,6 +173,19 @@ export function riskyChanges(from: EngineSettings, to: EngineSettings): string[]
     // Without its own value the stables pool uses the general impact limit, so compare what each side really allows.
     if ((to.depth.stablesImpactBps ?? to.depth.impactBps) > (from.depth.stablesImpactBps ?? from.depth.impactBps)) out.push('stables entries may move the pool price more')
   }
+  // #172: lazy re-ranges spend less gas but leave a position out of range (all in one token, earning nothing) for
+  // longer, or for good when the cost test keeps saying no; the Lab measured worst max drawdown +0.4 pp. That is the
+  // direction that needs a second look. Back to eager is today's trigger, measured and live since September: not risky.
+  const lf = lazyOf(from)
+  const lt = lazyOf(to)
+  if (!lf && lt) out.push('re-ranges become lazy: an out-of-range position waits for the buffer, the dwell and the cost test, and may stay out of range')
+  if (lf && lt) {
+    if (lt.edgeBufferTicks > lf.edgeBufferTicks) out.push('a position must be further out of range before it is re-ranged')
+    if (lt.minDwellSeconds > lf.minDwellSeconds) out.push('a position waits longer out of range before it is re-ranged')
+    // Fees and LVR both scale with the horizon and gas does not: a shorter horizon passes the cost test less often.
+    if (lt.horizonSeconds < lf.horizonSeconds) out.push('the cost test counts fewer hours of fees, so it lets fewer re-ranges through')
+    if (lt.lvrWeightBps > lf.lvrWeightBps) out.push('the cost test weighs LVR more, so it lets fewer re-ranges through')
+  }
   return out
 }
 
@@ -149,13 +203,22 @@ export function capBaseUnits(s: EngineSettings): bigint | null {
 
 /**
  * The policy the engine decides with under these settings: the account's policy plus depth sizing (target-weights
- * policies only, as #127) and the fall guard on the buckets the policy has. Grants are untouched.
+ * policies only, as #127), the fall guard on the buckets the policy has, and the lazy re-range (#172) as
+ * `range.lazy`. A new object: the PolicyVersion that grants and `policyHash` are built from is never touched, and
+ * `session` and `buckets` stay the same references (`Engine.retune` checks them).
  */
 export function withEngineSettings(p: PolicyVersion, s: EngineSettings): PolicyVersion {
   let out = p
-  // Off means off, even if a base policy ever carried its own depth or guards.
+  // Off means off, even if a base policy ever carried its own depth, guards or lazy re-range.
   if (!s.depth && out.depth) out = { ...out, depth: undefined }
   if (!s.guard.enabled && out.guards) out = { ...out, guards: undefined }
+  const lazy = lazyOf(s)
+  if (!lazy && out.range.lazy) {
+    const { lazy: _drop, ...range } = out.range
+    out = { ...out, range }
+  }
+  // Lazy replaces the near-edge trigger: `rerangeOf` reads `range.lazy` and never looks at the edge then.
+  if (lazy) out = { ...out, range: { ...out.range, lazy } }
   if (s.depth && p.allocation === 'target-weights') {
     out = {
       ...out,

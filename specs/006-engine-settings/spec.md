@@ -32,8 +32,9 @@ is not the place.
   (/ops) validates against a copy of them for the form; the operator validates again against the code and refuses
   anything out of bounds. Code is the authority: a version the operator refuses never runs.
 - **Risky changes need a confirm step**: raising the cap, turning the guard off, loosening a guard threshold,
-  turning depth sizing off while the cap is above the default, or loosening depth limits. /ops shows the diff and
-  asks again.
+  turning depth sizing off while the cap is above the default, or loosening depth limits, turning the lazy re-range
+  on or making it lazier (larger buffer, longer dwell, shorter horizon, more LVR weight; back to eager is not risky).
+  /ops shows the diff and asks again.
 
 ## Knobs
 
@@ -42,6 +43,7 @@ is not the place.
 | Depth sizing: impact bps, liquidity share bps, stables impact bps, or off | yes | `MAMORU_DEPTH` | impact 1-500, share 1-5000, stables 1-500 |
 | Cap per account, whole USDC | yes | `MAMORU_CAP_USDC` | 1-1,000,000; above 100 needs depth sizing |
 | Fall-freeze guard (#101): on/off, fall and vol thresholds per volatile bucket | yes | lab policy only | fall 100-3000 bps, vol 1000-50000 bps |
+| Re-range (#172): `rerange { mode: eager \| lazy, edgeBufferTicks, minDwellSeconds, horizonSeconds, lvrWeightBps }`, absent = eager | yes | eager trigger in code | buffer 0-1000 ticks, dwell 0-86400 s, horizon 3600-604800 s, LVR weight 0-20000 bps |
 | Widths, bucket weights | phase 2 | code | per policy |
 | Review cadence | phase 2 | `MAMORU_REVIEW_MS` | 60-3600 s |
 | RPC budget brake | phase 2 | `MAMORU_KEYED_CU_PER_HOUR` | 5k-500k CU/h |
@@ -52,7 +54,10 @@ Settings never change a grant an account already holds: grants are built from th
 cap also sizes the session limits of approvals signed after it changes, exactly as `LIVE_CAP_USDC` did; the owner
 sees that cap in the summary they sign, and an activation never takes in more than the cap its signature named,
 even if the cap is raised while it waits armed. Depth sizing and the guard change how much an entry places and which
-entries pause.
+entries pause; the re-range setting changes when a position is re-ranged (it sets `range.lazy` on the policy the
+engine decides with, never on the one grants and policy hashes are built from). Lazy needs history the engine keeps
+in memory: each position's out-of-range clock (per engine, from its first review) and the pools' fee growth (one
+history per operator process; until it covers 12 h the cost test abstains and the buffer and the dwell decide).
 
 ## Transport
 

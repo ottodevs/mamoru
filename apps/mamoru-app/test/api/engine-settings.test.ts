@@ -51,6 +51,22 @@ describe('GET /api/internal/engine-settings (spec 006)', () => {
     expect(p.betaAccounts).toEqual([])
   })
 
+  test('otto/mamoru#172: a lazy re-range version is served; one out of the rerange bounds is not', async () => {
+    const h = harness(() => NOW, { env: { OPERATOR_SECRET: OP } })
+    const lazy = ENGINE_SETTINGS_TEMPLATES['conservador-live-v2 + lazy-h24h-b100-d30']!
+    insert(h, 'prod', today)
+    insert(h, 'prod', lazy, ['acct-canary'])
+    insert(h, 'beta', lazy)
+    insert(h, 'beta', { ...lazy, rerange: { ...lazy.rerange, horizonSeconds: 60 } })
+    const p = JSON.parse(await (await pull(h)).text()) as EngineSettingsPayload
+    expect(p.versions.map((v) => [v.id, v.env, v.accountKeys])).toEqual([
+      [1, 'prod', null],
+      [2, 'prod', ['acct-canary']],
+      [3, 'beta', null],
+    ])
+    expect(p.versions[1]!.settings).toEqual(lazy)
+  })
+
   test('the migration seeds exactly the templates the code defines', () => {
     const h = harness(() => NOW)
     const rows = h.db.raw.query('SELECT name, settings_json FROM engine_settings_templates ORDER BY name').all() as { name: string; settings_json: string }[]

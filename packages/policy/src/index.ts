@@ -18,11 +18,13 @@ export {
   DEFAULT_ENGINE_SETTINGS,
   ENGINE_SETTINGS_BOUNDS,
   ENGINE_SETTINGS_TEMPLATES,
+  lazyOf,
   parseEngineSettings,
   riskyChanges,
   validateEngineSettings,
   withEngineSettings,
   type EngineSettings,
+  type RerangeSetting,
 } from './engine-settings.ts'
 export { OPS_FLAGS, type OpsFlagName } from './ops-flags.ts'
 export {

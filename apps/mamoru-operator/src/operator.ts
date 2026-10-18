@@ -5,7 +5,7 @@ import { overCap, type AccountContext, type Address, type FundingView, type OpVi
 import { address, entry, erc20Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
-import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, type SimCallResult } from '@mamoru/rpc'
+import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, type FeeGrowthHistory, type SimCallResult } from '@mamoru/rpc'
 import { POLICIES, USAGE_RENEW_BPS, V4_POOLS, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
@@ -533,6 +533,8 @@ export class Operator {
   private readonly relayerLowLogged = new Map<string, number>()
   /** Pool state of the last few blocks: accounts reviewed at the same block read it once. */
   private readonly poolCache = poolStateCache()
+  /** #172: fee growth per pool for the lazy re-range's cost test, shared by every engine (see `FeeGrowthHistory`). */
+  private readonly feeHistory: FeeGrowthHistory = new Map()
 
   constructor(
     readonly cfg: OperatorConfig,
@@ -786,11 +788,16 @@ export class Operator {
 
   private readonly settingsPolicies = new Map<string, PolicyVersion>()
 
-  /** The fall guard (#101) reads the 24 h history of the volatile buckets' pools; nothing is read while it is off. */
+  /**
+   * The fall guard (#101) reads the 24 h history of the volatile buckets' pools; the lazy re-range (#172) the volatility
+   * and fee growth of every pool it may re-range in. Nothing is read while both are off.
+   */
   guardHistoryOf(policy: PolicyVersion): EngineConfig['guardHistory'] {
-    if (!policy.guards) return undefined
-    const pools = policy.buckets.filter((b) => policy.guards?.byBucket[b.id]?.fallFreeze).map((b) => b.pools[0]).filter((p): p is NonNullable<typeof p> => !!p)
-    return pools.length ? { pools: pools as RegistryName[] } : undefined
+    const guarded = policy.guards ? policy.buckets.filter((b) => policy.guards?.byBucket[b.id]?.fallFreeze).map((b) => b.pools[0]).filter((p): p is NonNullable<typeof p> => !!p) : []
+    const lazy = policy.range.lazy ? policy.buckets.flatMap((b) => b.pools) : []
+    const pools = [...new Set([...guarded, ...lazy])] as RegistryName[]
+    if (!pools.length) return undefined
+    return policy.range.lazy ? { pools, fees: this.feeHistory } : { pools }
   }
 
   /** Spec 006: new settings reach every running engine on its next review; nothing restarts. */
