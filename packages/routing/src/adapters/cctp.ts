@@ -22,6 +22,15 @@ export const FINALITY_FAST = 1000
 /** Standard attestation, minFinalityThreshold 2000 — always available; the only option Circle lists for Monad. */
 export const FINALITY_STANDARD = 2000
 
+/**
+ * A fee above this share of the amount is refused — same bound and reasoning as Across's proven MAX_FEE_BPS.
+ * This route is session-key: an unattended signer trusts this adapter's output directly, so a malformed or
+ * compromised fee answer (`minimumFee: 9999`, say) must never silently become calldata that burns most of the
+ * amount. Circle's live fees this round were 0-1.3 bps; 50 bps (0.5%) is generous headroom, not a guess at what
+ * a real fee could be.
+ */
+export const MAX_FEE_BPS = 50n
+
 // developers.circle.com does not publish a per-route ETA figure for the fees API response; these are Circle's own
 // marketing-level descriptions of the two attestation speeds ("Fast" in seconds, "Standard" bounded by Ethereum's
 // ~13-19 min hard finality when Ethereum is in the path), not independently timed this round — flagged in
@@ -84,6 +93,7 @@ export const cctpAdapter: Adapter = {
     const entry = entries.find((e) => e.finalityThreshold === threshold)
     if (!entry) throw new RouteError('cctp-v2', 'FEES_MALFORMED', `no fee entry for finalityThreshold ${threshold}`)
 
+    if (entry.minimumFee > Number(MAX_FEE_BPS)) throw new RouteError('cctp-v2', 'FEES_TOO_HIGH', `minimumFee ${entry.minimumFee} bps exceeds the app policy bound`)
     const maxFee = feeFromBps(req.amountIn, entry.minimumFee)
     if (maxFee >= req.amountIn) throw new RouteError('cctp-v2', 'FEES_TOO_HIGH', `fee ${maxFee} would consume the whole amount ${req.amountIn}`)
     const amountOut = req.amountIn - maxFee

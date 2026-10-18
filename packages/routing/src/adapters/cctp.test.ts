@@ -74,4 +74,21 @@ describe('cctpAdapter', () => {
     const req = { sourceChainId: 1, destChainId: 8453, asset: 'USDC' as const, amountIn: 150_000_000n, account: ACCOUNT }
     await expect(cctpAdapter.quote(req, { fetch: fetchReturning({}, false), now: () => NOW })).rejects.toThrow()
   })
+
+  // otto/mamoru#181 follow-up: this route is session-key, so an unattended signer trusts this adapter's output
+  // directly — a malformed or compromised fee answer must never silently become calldata burning most of the
+  // amount. Before this fix, only "fee >= 100%" was refused.
+  test('refuses a minimumFee far above anything Circle has ever quoted, even though it is still under 100%', async () => {
+    const req = { sourceChainId: 1, destChainId: 8453, asset: 'USDC' as const, amountIn: 150_000_000n, account: ACCOUNT }
+    const malicious = [{ finalityThreshold: 1000, minimumFee: 9999 }, { finalityThreshold: 2000, minimumFee: 0 }]
+    await expect(cctpAdapter.quote(req, { fetch: fetchReturning(malicious), now: () => NOW })).rejects.toThrow()
+  })
+
+  test('a fee right at the app policy bound (50 bps) is accepted; one basis point over is refused', async () => {
+    const req = { sourceChainId: 1, destChainId: 8453, asset: 'USDC' as const, amountIn: 150_000_000n, account: ACCOUNT }
+    const atBound = [{ finalityThreshold: 1000, minimumFee: 50 }, { finalityThreshold: 2000, minimumFee: 0 }]
+    await expect(cctpAdapter.quote(req, { fetch: fetchReturning(atBound), now: () => NOW })).resolves.toBeDefined()
+    const overBound = [{ finalityThreshold: 1000, minimumFee: 50.1 }, { finalityThreshold: 2000, minimumFee: 0 }]
+    await expect(cctpAdapter.quote(req, { fetch: fetchReturning(overBound), now: () => NOW })).rejects.toThrow()
+  })
 })

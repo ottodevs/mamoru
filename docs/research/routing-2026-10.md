@@ -112,6 +112,43 @@ mean maintaining an allowlist of every route an aggregator might ever choose, de
 The real security boundary for an owner-only route is the owner's own passkey-signed review of the decoded
 transaction before signing — a future, UI-side ticket, not this quoting layer.
 
+### Second hardening pass, grounded by two cross-model reviews
+
+An independent review (`xreview`, `codex-auto-review@embi` — the designated fallback seat once the primary
+Codex seat here dropped under its 15% floor) found five further issues, checked one by one rather than applied
+blind:
+
+- **Valid, fixed:** `cctp.ts` had no upper bound on Circle's quoted fee — only "fee < 100% of the amount" was
+  refused. This route is session-key, so an unattended signer trusts its output directly; a malformed or
+  compromised `minimumFee` (the review's example: `9999`) would otherwise become calldata burning nearly the
+  whole amount. Capped at 50 bps, the same bound (and reasoning) as Across's already-proven one.
+- **Valid, fixed:** `debridge.ts`'s chain-id cross-check was lenient when the response omitted a field; every
+  real response seen this round echoed both, so it is now required, not merely checked-when-present. Its native
+  value/fixFee check could also be defeated by a response that inflated `value` and `fixFee` together,
+  consistently — passing because they agreed with each other, not because either was plausible. Fixed with a
+  second, chain-scaled cap on `fixFee` alone (0.05 ETH on Ethereum/Base, 20 MON on Monad — 10-50x the one real
+  fee observed per chain), independent of the value/fixFee agreement check.
+- **Valid, fixed — Relay only:** the recipient check previously scanned Relay's calldata for the account at any
+  word. Re-verified live across Ethereum/Base/Monad origin and both ERC20 and native input: Relay's deposit
+  target and the recipient's word-0 offset were identical every time. That is now an exact-offset check
+  (`calldataPinsRecipientAtWord`) plus a pinned target, the real equivalent of a `UniActionPolicy` EQUAL rule —
+  not the fallback scan. LI.FI and deBridge keep the scan: LI.FI's target itself varies by origin chain (see
+  below) and its calldata is a deeply nested multicall encoding, not a leading argument; deBridge's offset was
+  not checked for the same stability.
+- **Valid, fixed — target allowlist generalised:** re-checking LI.FI's target across chains found it is NOT the
+  same everywhere — the standard LiFiDiamond (`0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE`) on Ethereum/Base,
+  but a different executor (`0x026F252016A7C47CDEf1F05a3Fc9E20C92a49C37`) on Monad. `lifi.ts` now pins a
+  per-origin-chain allowlist instead of one address, refusing any chain not in it (this is also why Relay's
+  single-constant pin was only adopted after confirming it does NOT vary the same way).
+- **Checked and rejected as overstated:** the review's claim that `/suggested-fees` "now requires a bearer API
+  key" and "will fail in production" is contradicted by a live, unauthenticated `curl` against it run the same
+  day this was checked — `HTTP 200` with a normal answer, no key, no header. `across.ts` was still given
+  optional `ACROSS_API_KEY` support (parity with the proven `bridge-out.ts` pattern — a key only raises rate
+  limits), but the adapter does not depend on one, and the finding's "will fail" framing does not hold.
+
+Also added: Relay's leading ERC20 `approve` step (when present) is now checked against the pinned deposit
+target as spender and `amountIn` as the amount, not merely assumed consistent.
+
 ## What was out of scope for adapters, deliberately
 
 - **Fast-withdrawal third parties** (Brid.gg, Garden, Superbridge) for Base's 5-day L2->L1 delay: third-party

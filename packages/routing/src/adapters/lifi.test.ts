@@ -48,4 +48,25 @@ describe('lifiAdapter', () => {
     await expect(lifiAdapter.quote(req, { fetch: fetchReturning(tooMuch), now: () => NOW })).rejects.toThrow()
     await expect(lifiAdapter.quote(req, { fetch: fetchReturning({}, false), now: () => NOW })).rejects.toThrow()
   })
+
+  // Hardening pass, otto/mamoru#181 follow-up: the target allowlist is per origin chain, not one global address.
+
+  test('a Monad-origin quote is checked against its own target, the LiFiDiamond is not reused there', async () => {
+    // Recorded live 18 Oct 2026: Monad-origin quotes go to a different executor than Ethereum/Base ones do.
+    const monadFixture = { ...LIFI_FIXTURE, transactionRequest: { ...LIFI_FIXTURE.transactionRequest, to: '0x026F252016A7C47CDEf1F05a3Fc9E20C92a49C37' } }
+    const req = { sourceChainId: 143, destChainId: 8453, asset: 'USDC' as const, amountIn: 150_000_000n, account: ACCOUNT }
+    const q = await lifiAdapter.quote(req, { fetch: fetchReturning(monadFixture), now: () => NOW })
+    expect(q.target.toLowerCase()).toBe('0x026f252016a7c47cdef1f05a3fc9e20c92a49c37')
+  })
+
+  test('refuses a Base-origin quote whose target is the Monad-origin address instead (or vice versa)', async () => {
+    const wrongTarget = { ...LIFI_FIXTURE, transactionRequest: { ...LIFI_FIXTURE.transactionRequest, to: '0x026F252016A7C47CDEf1F05a3Fc9E20C92a49C37' } }
+    const req = { sourceChainId: 8453, destChainId: 1, asset: 'USDC' as const, amountIn: 150_000_000n, account: ACCOUNT }
+    await expect(lifiAdapter.quote(req, { fetch: fetchReturning(wrongTarget), now: () => NOW })).rejects.toThrow()
+  })
+
+  test('refuses (via supports) a source chain with no verified target at all', () => {
+    const req = { sourceChainId: 42161, destChainId: 8453, asset: 'ETH' as const, amountIn: 1n, account: ACCOUNT }
+    expect(lifiAdapter.supports(req)).toBe(false)
+  })
 })

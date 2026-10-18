@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { encodeFunctionData, parseAbi } from 'viem'
-import { assertOwnerOnlyRecipient, calldataPinsRecipient, parseDeclaredAddress } from './recipient.ts'
+import { assertOwnerOnlyRecipient, calldataPinsRecipient, calldataPinsRecipientAtWord, parseDeclaredAddress, wordAt } from './recipient.ts'
 import { RouteError } from './errors.ts'
 
 const ACCOUNT = '0x1111111111111111111111111111111111111111' as const
@@ -36,6 +36,27 @@ describe('calldataPinsRecipient', () => {
     const abiWithExtra = parseAbi(['function send(address to, uint256 amount, bytes32 memo) returns (bool)'])
     const decoy = encodeFunctionData({ abi: abiWithExtra, functionName: 'send', args: [OTHER, 150_000_000n, `0x${'0'.repeat(24)}${ACCOUNT.slice(2).toLowerCase()}`] })
     expect(calldataPinsRecipient(decoy, ACCOUNT)).toBe(true) // true, not false — documented, not a surprise
+  })
+})
+
+describe('wordAt / calldataPinsRecipientAtWord', () => {
+  test('reads the exact word at an index, unlike the scan this backs for providers with a confirmed fixed offset', () => {
+    const data = sendTo(ACCOUNT) // send(address to, uint256 amount): word 0 is `to`, word 1 is `amount`
+    expect(calldataPinsRecipientAtWord(data, ACCOUNT, 0)).toBe(true)
+    expect(calldataPinsRecipientAtWord(data, ACCOUNT, 1)).toBe(false) // the account is not the amount
+  })
+
+  test('a decoy at the WRONG word does not satisfy an exact-offset check, unlike the generic scan', () => {
+    const abiWithExtra = parseAbi(['function send(address to, uint256 amount, bytes32 memo) returns (bool)'])
+    const decoy = encodeFunctionData({ abi: abiWithExtra, functionName: 'send', args: [OTHER, 150_000_000n, `0x${'0'.repeat(24)}${ACCOUNT.slice(2).toLowerCase()}`] })
+    expect(calldataPinsRecipient(decoy, ACCOUNT)).toBe(true) // the generic scan is fooled (documented above)
+    expect(calldataPinsRecipientAtWord(decoy, ACCOUNT, 0)).toBe(false) // the exact-offset check is not: word 0 is OTHER
+  })
+
+  test('out of range or malformed calldata is undefined/false, never a throw', () => {
+    expect(wordAt(sendTo(ACCOUNT), 5)).toBeUndefined()
+    expect(wordAt('0xaabbccdd', 0)).toBeUndefined()
+    expect(calldataPinsRecipientAtWord('0xaabbccdd', ACCOUNT, 0)).toBe(false)
   })
 })
 

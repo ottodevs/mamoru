@@ -34,6 +34,26 @@ export function calldataPinsRecipient(calldata: Hex, account: Address): boolean 
   return false
 }
 
+/** The word at `wordIndex` (0-based) of the calldata body, after the 4-byte selector — or undefined when the
+ * calldata is too short or not whole-word ABI encoding. For a provider/target/selector combination this package
+ * has actually confirmed places the recipient at a fixed word index (verified empirically, not assumed — see
+ * relay.ts), this is the real, offset-exact equivalent of a `UniActionPolicy` EQUAL rule, not the generic scan
+ * `calldataPinsRecipient` falls back to for providers whose offset was not confirmed stable. */
+export function wordAt(calldata: Hex, wordIndex: number): string | undefined {
+  const hex = calldata.slice(2).toLowerCase()
+  if (hex.length <= 8) return undefined
+  const body = hex.slice(8)
+  if (body.length % 64 !== 0) return undefined
+  const start = wordIndex * 64
+  if (start + 64 > body.length) return undefined
+  return body.slice(start, start + 64)
+}
+
+/** Whether the word at `wordIndex` is exactly `account`, left-padded — the exact-offset check `wordAt` backs. */
+export function calldataPinsRecipientAtWord(calldata: Hex, account: Address, wordIndex: number): boolean {
+  return wordAt(calldata, wordIndex) === account.slice(2).toLowerCase().padStart(64, '0')
+}
+
 /** Parses and checksums an address a provider returned in its own JSON (e.g. a declared `recipient` or `user`
  * field), or returns undefined for anything malformed rather than throwing — callers treat undefined as "the
  * provider did not declare one" and fall through to the calldata scan alone. */

@@ -98,9 +98,13 @@ export function checkAcrossQuote(provider: string, expectedSpoke: Address, q: Ac
 
 async function fetchSuggestedFees(fetcher: Fetch, inputToken: Address, outputToken: Address, originChainId: number, destinationChainId: number, amount: bigint): Promise<AcrossSuggestedFees> {
   const url = `${ACROSS_API}/suggested-fees?inputToken=${inputToken}&outputToken=${outputToken}&originChainId=${originChainId}&destinationChainId=${destinationChainId}&amount=${amount}`
+  // Confirmed live 18 Oct 2026: /suggested-fees answers HTTP 200 with no key at all. ACROSS_API_KEY is read only
+  // for parity with the proven apps/mamoru-operator/src/bridge-out.ts pattern (a key raises rate limits; never
+  // required, never paid-tier-only — the "no paid APIs" rule holds either way).
+  const key = process.env.ACROSS_API_KEY
   let res: Response
   try {
-    res = await fetcher(url, { signal: AbortSignal.timeout(QUOTE_TIMEOUT_MS) })
+    res = await fetcher(url, { headers: key ? { authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(QUOTE_TIMEOUT_MS) })
   } catch {
     throw new RouteError('across', 'BRIDGE_QUOTE_UNAVAILABLE', 'Across did not answer')
   }

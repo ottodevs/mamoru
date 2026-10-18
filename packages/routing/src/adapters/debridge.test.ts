@@ -41,14 +41,13 @@ describe('debridgeAdapter', () => {
   })
 
   test("Monad's dstChainId is remapped to deBridge's internal id (100000030), not its EVM chain id (143)", async () => {
-    // Only the outgoing request is under test here, so the stubbed response's own chain-id fields are left out
-    // (undefined skips the cross-check against the request — see debridge.ts) rather than asserting an unrelated
-    // chain pair for this request.
-    const fixtureWithoutChainIds = { ...DEBRIDGE_FIXTURE, estimation: { dstChainTokenOut: { amount: DEBRIDGE_FIXTURE.estimation.dstChainTokenOut.amount } } }
+    // The response's own echoed chain ids must now agree with the remapped id too (chain-id validation is
+    // mandatory, not merely checked-when-present — see debridge.ts).
+    const monadFixture = { ...DEBRIDGE_FIXTURE, estimation: { srcChainTokenIn: { chainId: 8453 }, dstChainTokenOut: { chainId: 100_000_030, amount: DEBRIDGE_FIXTURE.estimation.dstChainTokenOut.amount } } }
     const seen: string[] = []
     const spy: Fetch = (async (input: string) => {
       seen.push(input)
-      return new Response(JSON.stringify(fixtureWithoutChainIds), { status: 200 })
+      return new Response(JSON.stringify(monadFixture), { status: 200 })
     }) as unknown as Fetch
     const req = { sourceChainId: 8453, destChainId: 143, asset: 'USDC' as const, amountIn: 150_000_000n, account: ACCOUNT }
     await debridgeAdapter.quote(req, { fetch: spy, now: () => NOW })
@@ -99,7 +98,7 @@ describe('debridgeAdapter', () => {
     // Recorded 18 Oct 2026, same endpoint, Ethereum -> Base, 0.01 ETH: tx.value legitimately includes the bridged
     // principal, unlike the USDC-input fixture above where value == fixFee exactly.
     const ethFixture = {
-      estimation: { dstChainTokenOut: { amount: '9974851836328536' } },
+      estimation: { srcChainTokenIn: { chainId: 1 }, dstChainTokenOut: { chainId: 8453, amount: '9974851836328536' } },
       order: { approximateFulfillmentDelay: 3 },
       fixFee: '1000000000000000',
       tx: { ...DEBRIDGE_FIXTURE.tx, value: '11126206620740072' }, // 0.01 ETH principal + 0.001 ETH fee + ~0.00013 ETH top-up
@@ -107,6 +106,19 @@ describe('debridgeAdapter', () => {
     const req = { sourceChainId: 1, destChainId: 8453, asset: 'ETH' as const, amountIn: 10_000_000_000_000_000n, account: ACCOUNT }
     const q = await debridgeAdapter.quote(req, { fetch: fetchReturning(ethFixture), now: () => NOW })
     expect(q.value).toBe(11_126_206_620_740_072n)
+  })
+
+  test("refuses when either side's chain id is missing from the response, not only when it disagrees", async () => {
+    const req = { sourceChainId: 8453, destChainId: 1, asset: 'USDC' as const, amountIn: 150_000_000n, account: ACCOUNT }
+    const missingSrc = { ...DEBRIDGE_FIXTURE, estimation: { dstChainTokenOut: DEBRIDGE_FIXTURE.estimation.dstChainTokenOut } }
+    await expect(debridgeAdapter.quote(req, { fetch: fetchReturning(missingSrc), now: () => NOW })).rejects.toThrow()
+  })
+
+  test('refuses a declared fixFee above the per-chain cap even when tx.value agrees with it exactly', async () => {
+    const req = { sourceChainId: 8453, destChainId: 1, asset: 'USDC' as const, amountIn: 150_000_000n, account: ACCOUNT }
+    const tooMuch = '1000000000000000000' // 1 ETH-equivalent — well under the old 5 ETH breaker, over the new 0.05 ETH fee cap
+    const tampered = { ...DEBRIDGE_FIXTURE, fixFee: tooMuch, tx: { ...DEBRIDGE_FIXTURE.tx, value: tooMuch } }
+    await expect(debridgeAdapter.quote(req, { fetch: fetchReturning(tampered), now: () => NOW })).rejects.toThrow()
   })
 
   test('refuses an ETH-input order whose tx.value overshoots amountIn + fixFee by more than the allowed slack', async () => {

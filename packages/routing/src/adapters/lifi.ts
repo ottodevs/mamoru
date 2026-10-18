@@ -9,6 +9,15 @@ import type { Adapter, AdapterDeps, Fetch, Quote, QuoteRequest } from '../types.
 // underlying route costs (docs.li.fi/overview/faq), which shows up simply as a smaller `amountOut` here; this
 // adapter does not special-case it.
 //
+// Unlike Relay, LI.FI's target is NOT the same across every origin chain: it is the standard LiFiDiamond
+// (`0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE`) on Ethereum- and Base-origin quotes, but a different executor
+// contract on Monad-origin ones — confirmed live 18 Oct 2026. Pinning one address for every chain would have
+// been wrong (it would refuse every legitimate Monad quote); this adapter pins a per-origin-chain allowlist
+// instead, with only what has actually been checked, and refuses any chain not in it rather than trusting
+// whatever `transactionRequest.to` the response names. The recipient offset inside that calldata was not found
+// to be as stable as Relay's (deeply nested, multicall-style encoding, not a leading argument), so this adapter
+// still falls back to the generic any-word scan (`assertOwnerOnlyRecipient`) rather than an exact-offset check.
+//
 // Verified live against li.quest/v1/quote on 18 Oct 2026 (empirical response shape below) and
 // docs.li.fi/li.fi-api/li.fi-api/requesting-a-quote/token-transfer, docs.li.fi/api-reference/rate-limits
 // (unauthenticated: 75 req/2h, enough for occasional quoting and the smoke script, not for polling).
@@ -17,6 +26,15 @@ export const LIFI_QUOTE_URL = 'https://li.quest/v1/quote'
 export const QUOTE_TIMEOUT_MS = 8_000
 /** LI.FI does not publish a quote validity window either; same conservative default as relay.ts. */
 const DEFAULT_TTL_MS = 30_000
+
+/** The only `transactionRequest.to` observed for a quote whose source chain is the given id (18 Oct 2026).
+ * Ethereum and Base share the standard LiFiDiamond; Monad does not. Any chain not in this table is refused by
+ * `supports`, not silently allowed through with an unverified target. */
+const LIFI_TARGET_BY_SOURCE_CHAIN: Readonly<Record<number, Address>> = {
+  1: '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE',
+  8453: '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE',
+  143: '0x026F252016A7C47CDEf1F05a3Fc9E20C92a49C37',
+}
 
 type LifiQuoteResponse = {
   action?: { toAddress?: string }
@@ -43,6 +61,7 @@ export const lifiAdapter: Adapter = {
 
   supports(req: QuoteRequest): boolean {
     if (req.sourceChainId === req.destChainId) return false
+    if (LIFI_TARGET_BY_SOURCE_CHAIN[req.sourceChainId] === undefined) return false
     return tokenAddress(req.asset, req.sourceChainId) !== undefined && tokenAddress(req.asset, req.destChainId) !== undefined
   },
 
@@ -79,6 +98,8 @@ export const lifiAdapter: Adapter = {
     } catch {
       throw new RouteError('lifi', 'QUOTE_MALFORMED', 'bad target address')
     }
+    const expectedTarget = LIFI_TARGET_BY_SOURCE_CHAIN[req.sourceChainId]
+    if (expectedTarget === undefined || target !== getAddress(expectedTarget)) throw new RouteError('lifi', 'QUOTE_MALFORMED', `unexpected target contract ${target} for source chain ${req.sourceChainId}`)
     const calldata = tx.data as Hex
     let value = 0n
     try {

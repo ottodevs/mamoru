@@ -54,6 +54,21 @@ export const MAX_NATIVE_VALUE_WEI = 5_000_000_000_000_000_000n // 5 of whatever 
  * headroom), tight relative to the absolute circuit breaker above. */
 export const NATIVE_VALUE_SLACK_WEI = 2_000_000_000_000_000n // 0.002 of the source chain's native asset
 
+/**
+ * `fixFee` is checked against this REGARDLESS of asset, on top of the value/expected band above — not just
+ * "value matches fixFee", but "fixFee itself is a plausible order-creation fee, not a disguised transfer".
+ * Without this, a response that reports `fixFee = tx.value = 4 ETH` would otherwise pass (value matches the
+ * fee it declares, and 4 ETH clears the 5 ETH circuit breaker) even though no real order-creation fee is ever
+ * that large. Chain-scaled because the three native assets in scope are not comparable 1 wei to 1 wei: 50x
+ * headroom over the 0.001 ETH observed on Ethereum/Base, 10x over the 2 MON observed on Monad (less margin —
+ * less data on Monad's real range). A chain with no entry refuses rather than falling back to a guessed number.
+ */
+const MAX_FEE_WEI_BY_SOURCE_CHAIN: Readonly<Record<number, bigint>> = {
+  1: 50_000_000_000_000_000n, // 0.05 ETH, 50x the observed 0.001 ETH
+  8453: 50_000_000_000_000_000n, // 0.05 ETH, same basis — Base's fee was observed identical to Ethereum's
+  143: 20_000_000_000_000_000_000n, // 20 MON, 10x the observed 2 MON
+}
+
 type DebridgeResponse = {
   estimation?: { srcChainTokenIn?: { chainId?: number }; dstChainTokenOut?: { chainId?: number; amount?: string } }
   order?: { approximateFulfillmentDelay?: number }
@@ -107,13 +122,15 @@ export const debridgeAdapter: Adapter = {
     })
 
     // Cross-check the response's own echoed chain ids against what was actually asked for — a provider or a
-    // MITM response naming the wrong chain is refused here, before anything else is even read.
+    // MITM response naming the wrong chain is refused here, before anything else is even read. Required, not
+    // merely checked-when-present: every real response seen this round (Ethereum, Base and Monad as source)
+    // echoed both, so an answer that omits either is treated the same as one that disagrees.
     const wantSrc = debridgeChainId(req.sourceChainId)
     const wantDst = debridgeChainId(req.destChainId)
     const gotSrc = resp.estimation?.srcChainTokenIn?.chainId
     const gotDst = resp.estimation?.dstChainTokenOut?.chainId
-    if (gotSrc !== undefined && gotSrc !== wantSrc) throw new RouteError('debridge', 'QUOTE_MALFORMED', `estimation names source chain ${gotSrc}, not the requested ${wantSrc}`)
-    if (gotDst !== undefined && gotDst !== wantDst) throw new RouteError('debridge', 'QUOTE_MALFORMED', `estimation names destination chain ${gotDst}, not the requested ${wantDst}`)
+    if (gotSrc !== wantSrc) throw new RouteError('debridge', 'QUOTE_MALFORMED', `estimation names source chain ${gotSrc}, not the requested ${wantSrc}`)
+    if (gotDst !== wantDst) throw new RouteError('debridge', 'QUOTE_MALFORMED', `estimation names destination chain ${gotDst}, not the requested ${wantDst}`)
 
     const amountOutRaw = resp.estimation?.dstChainTokenOut?.amount
     if (!amountOutRaw) throw new RouteError('debridge', 'QUOTE_MALFORMED', 'missing estimation.dstChainTokenOut.amount')
@@ -149,6 +166,11 @@ export const debridgeAdapter: Adapter = {
     if (value < expected) throw new RouteError('debridge', 'QUOTE_MALFORMED', `tx.value ${value} is less than the expected ${expected}`)
     if (value > expected + NATIVE_VALUE_SLACK_WEI) throw new RouteError('debridge', 'QUOTE_MALFORMED', `tx.value ${value} exceeds the expected ${expected} by more than the allowed slack`)
     if (value > MAX_NATIVE_VALUE_WEI) throw new RouteError('debridge', 'QUOTE_REFUSED', `native value ${value} exceeds the app policy bound`)
+    // The fee component itself, independent of what `value` otherwise allows: a response cannot pass by
+    // inflating `value` and `fixFee` together, consistently, to something the bands above would still accept.
+    const feeCap = MAX_FEE_WEI_BY_SOURCE_CHAIN[req.sourceChainId]
+    if (feeCap === undefined) throw new RouteError('debridge', 'UNSUPPORTED', `no verified fee cap for source chain ${req.sourceChainId}`)
+    if (fixFee > feeCap) throw new RouteError('debridge', 'QUOTE_REFUSED', `declared fixFee ${fixFee} exceeds the app policy bound for this chain`)
     const calldata = tx.data as Hex
     // DLN echoes no recipient field of its own to cross-check against; the calldata scan alone decides.
     assertOwnerOnlyRecipient('debridge', req.account, calldata)

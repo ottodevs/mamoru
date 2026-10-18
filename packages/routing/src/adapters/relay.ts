@@ -1,16 +1,25 @@
 import { getAddress, type Address, type Hex } from 'viem'
 import { tokenAddress } from '../chains.ts'
 import { RouteError } from '../errors.ts'
-import { assertOwnerOnlyRecipient, parseDeclaredAddress } from '../recipient.ts'
+import { calldataPinsRecipientAtWord, parseDeclaredAddress, wordAt } from '../recipient.ts'
 import type { Adapter, AdapterDeps, Fetch, Quote, QuoteRequest } from '../types.ts'
 
-// otto/mamoru#181. Relay (relay.link) picks a solver/route per request, so there is no fixed calldata offset to
-// pin ahead of time — owner-only, with this adapter decoding and refusing before the owner ever sees it (see
-// recipient.ts). Verified live against the v1 endpoint on 18 Oct 2026 (empirical response shape below); docs.
-// relay.link's v2 page now states v2 requires an API key as of 2 Oct 2026 — this adapter stays on v1 to keep the
-// "no paid APIs" rule, flagged in docs/research/routing-2026-10.md as a risk if v1 is retired the same way.
+// otto/mamoru#181. Relay (relay.link) picks a solver/route per request — owner-only, with this adapter decoding
+// and refusing before the owner ever sees it (see recipient.ts). Verified live against the v1 endpoint on 18 Oct
+// 2026 (empirical response shape below); docs.relay.link's v2 page now states v2 requires an API key as of 2 Oct
+// 2026 — this adapter stays on v1 to keep the "no paid APIs" rule, flagged in docs/research/routing-2026-10.md
+// as a risk if v1 is retired the same way.
+//
+// Unlike LI.FI and deBridge, Relay's final deposit step was observed, live, going to the *same* target contract
+// and placing the recipient at the *same* word-0 offset across every combination checked (ERC20 and native
+// input; Ethereum, Base and Monad as origin). That is strong enough empirical grounding to pin both: the target
+// is refused if it is ever anything else, and the recipient check is the exact-offset equivalent of a
+// `UniActionPolicy` EQUAL rule (`calldataPinsRecipientAtWord`), not the generic any-word scan LI.FI/deBridge
+// still rely on. If Relay ever changes this and `target`/`word 0` diverge, every quote fails closed, not open.
 
 export const RELAY_QUOTE_URL = 'https://api.relay.link/quote'
+/** The only deposit target observed across Ethereum/Base/Monad origin, ERC20 and native input (18 Oct 2026). */
+export const RELAY_DEPOSIT_TARGET: Address = '0x4cd00e387622c35bddb9b4c962c136462338bc31'
 export const QUOTE_TIMEOUT_MS = 8_000
 /** Relay does not publish a quote validity window; this is a conservative app-side default — solver prices move
  * faster than CCTP's or Across's. */
@@ -60,6 +69,31 @@ function finalCall(resp: RelayQuoteResponse): { target: Address; calldata: Hex; 
   return { target, calldata: data.data as Hex, value }
 }
 
+/** `approve(address spender, uint256 amount)`'s selector — only form this adapter will ever accept for a leading
+ * approve step. */
+const APPROVE_SELECTOR = '0x095ea7b3'
+
+/**
+ * When Relay's plan starts with an ERC20 `approve` step (an ERC20-input order; a native-input one has none —
+ * observed live 18 Oct 2026 on every chain checked), that approval must name `RELAY_DEPOSIT_TARGET` as spender
+ * and `amountIn` as the amount — not merely some spender and some amount. A response that tried to get the
+ * owner to approve a different contract, or more than was quoted, is refused here before anything else runs.
+ * No approve step at all is fine (native input); a step whose calldata doesn't match `approve`'s known fixed
+ * shape is not.
+ */
+function checkLeadingApprove(resp: RelayQuoteResponse, amountIn: bigint): void {
+  const steps = resp.steps ?? []
+  if (steps.length < 2) return // native input: no approve step to check
+  const first = steps[0]?.items?.[0]?.data
+  if (first?.data === undefined) throw new RouteError('relay', 'QUOTE_MALFORMED', 'missing leading approve calldata')
+  if (!first.data.toLowerCase().startsWith(APPROVE_SELECTOR)) throw new RouteError('relay', 'QUOTE_MALFORMED', 'leading step is not a plain ERC20 approve')
+  const spenderWord = wordAt(first.data as Hex, 0)
+  const amountWord = wordAt(first.data as Hex, 1)
+  if (spenderWord === undefined || amountWord === undefined) throw new RouteError('relay', 'QUOTE_MALFORMED', 'malformed approve calldata')
+  if (spenderWord !== RELAY_DEPOSIT_TARGET.slice(2).toLowerCase().padStart(64, '0')) throw new RouteError('relay', 'QUOTE_MALFORMED', 'approve names a spender other than the deposit target')
+  if (BigInt(`0x${amountWord}`) !== amountIn) throw new RouteError('relay', 'QUOTE_MALFORMED', 'approve amount does not match amountIn')
+}
+
 export const relayAdapter: Adapter = {
   name: 'relay',
 
@@ -94,9 +128,13 @@ export const relayAdapter: Adapter = {
       throw new RouteError('relay', 'QUOTE_MALFORMED', 'unparseable output amount')
     }
     if (amountOut <= 0n || amountOut > req.amountIn) throw new RouteError('relay', 'QUOTE_MALFORMED', 'output amount out of range')
+    checkLeadingApprove(resp, req.amountIn)
 
     const { target, calldata, value } = finalCall(resp)
-    assertOwnerOnlyRecipient('relay', req.account, calldata, parseDeclaredAddress(resp.details?.recipient))
+    if (target !== getAddress(RELAY_DEPOSIT_TARGET)) throw new RouteError('relay', 'QUOTE_MALFORMED', `unexpected target contract ${target}`)
+    const declared = parseDeclaredAddress(resp.details?.recipient)
+    if (declared !== undefined && getAddress(declared) !== getAddress(req.account)) throw new RouteError('relay', 'RECIPIENT_REFUSED', `declared recipient ${declared} is not the account ${req.account}`)
+    if (!calldataPinsRecipientAtWord(calldata, req.account, 0)) throw new RouteError('relay', 'RECIPIENT_REFUSED', 'the account is not word 0 of the deposit call, where it was always observed to be')
 
     const etaSec = typeof resp.details?.timeEstimate === 'number' && resp.details.timeEstimate >= 0 ? resp.details.timeEstimate : DEFAULT_ETA_SEC
 
