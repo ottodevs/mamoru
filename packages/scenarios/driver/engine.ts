@@ -3,7 +3,7 @@ import type { LocalAccount } from 'viem/accounts'
 import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { amountsOf, decide, twapFloor, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
-import { hasManageAny, TWAP_SHORT_WINDOW_SECONDS, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { hasManageAny, TWAP_SHORT_WINDOW_SECONDS, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import { address, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
 import {
   Batch,
@@ -40,6 +40,7 @@ const mamoruActionPolicyReadAbi = parseAbi([
   'struct Spend { uint64 generation; uint64 updatedAt; bool in1; uint128 debt; uint128 total; }',
   'function spendOf(address account, address pool) view returns (Spend)',
   'function generationOf(address account) view returns (uint64)',
+  'function admittedPool(address account, uint256 tokenId) view returns (address)',
 ])
 
 /** Spec 007 T6: `observe` with the raw `secondsPerLiquidityCumulativeX128s`, which `twapTickAt` (one window, no
@@ -50,6 +51,24 @@ import { reconcileReceipt } from './receipt.ts'
 /** Gas limits of every engine userOp. Their sum is the budget `decide` prices for the harvest cost. */
 export const LAB_GAS_LIMITS = { verificationGasLimit: 3_000_000n, callGasLimit: 2_000_000n, preVerificationGas: 100_000n } as const
 export const MAX_PRIORITY_FEE_PER_GAS = 1_000_000n
+/**
+ * The gas of an engine userOp at `baseFee`: maxFeePerGas = 2 x basefee + priority, as always. Spec 007 T7: under a
+ * v4 session's MamoruGasPolicy `caps`, maxFeePerGas is clamped to the cap while basefee + priority still fits under
+ * it, and `null` (wait) when it does not; the fixed limits and priority fee are under the caps by construction.
+ * Without caps (every live policy): exactly today's settings.
+ */
+export function engineGas(baseFee: bigint, caps?: GasCaps): GasSettings | null {
+  const want = baseFee * 2n + MAX_PRIORITY_FEE_PER_GAS
+  const gas: GasSettings = { ...LAB_GAS_LIMITS, maxFeePerGas: want, maxPriorityFeePerGas: MAX_PRIORITY_FEE_PER_GAS }
+  if (!caps) return gas
+  if (
+    LAB_GAS_LIMITS.verificationGasLimit > caps.maxVerificationGasLimit || LAB_GAS_LIMITS.callGasLimit > caps.maxCallGasLimit ||
+    LAB_GAS_LIMITS.preVerificationGas > caps.maxPreVerificationGas || MAX_PRIORITY_FEE_PER_GAS > caps.maxPriorityFeePerGas
+  ) return null
+  if (want <= caps.maxFeePerGas) return gas
+  if (baseFee + MAX_PRIORITY_FEE_PER_GAS > caps.maxFeePerGas) return null
+  return { ...gas, maxFeePerGas: caps.maxFeePerGas }
+}
 const OP_GAS_UNITS = LAB_GAS_LIMITS.verificationGasLimit + LAB_GAS_LIMITS.callGasLimit + LAB_GAS_LIMITS.preVerificationGas
 const ETH_PRICE_POOL = 'pool:WETH/USDC/3000'
 /** Bounded waits for the bundler receipt and for `safe`, in blocks the lab lets pass. */
@@ -418,7 +437,7 @@ export class Engine {
       throw e
     }
     const callData = executeCallData(prepared.calls)
-    await this.syncActionPolicyLedger(proposal.pool, block.number)
+    await this.syncActionPolicyLedger(proposal.pool, block.number, 'tokenId' in proposal && typeof proposal.tokenId === 'bigint' ? proposal.tokenId : undefined)
     const pre = precheck(
       { sender: this.cfg.account, callData, signature: useModeSignature(session.permissionId, '0x') },
       { chainId: this.cfg.chainId, now: Number(block.timestamp), ledger: this.ledger },
@@ -426,7 +445,10 @@ export class Engine {
     if (!pre.ok && pre.code.startsWith('SESSION_')) return void j.move(op.opId, 'discarded', pre.code, {}, pre.detail)
     const nonce = await this.entryPointNonce(block.number)
     const baseFee = block.baseFeePerGas ?? 0n
-    const gas: GasSettings = { ...LAB_GAS_LIMITS, maxFeePerGas: baseFee * 2n + MAX_PRIORITY_FEE_PER_GAS, maxPriorityFeePerGas: MAX_PRIORITY_FEE_PER_GAS }
+    const gas = engineGas(baseFee, this.cfg.policy.actionPolicy?.gasPolicy?.caps)
+    // Spec 007 T7: a v4 session's MamoruGasPolicy refuses an op over its owner-signed caps; at a basefee that leaves no
+    // room under maxFeePerGas the engine waits instead of sending one that cannot validate.
+    if (!gas) return void j.move(op.opId, 'discarded', 'GAS_PRICE_OVER_CAP', {}, `basefee ${baseFee}`)
     const userOp = draftUserOp(this.cfg.account, nonce, callData, gas)
     j.move(op.opId, 'prepared', 'EHG_OK', {
       prepareBlock: block.number,
@@ -910,11 +932,18 @@ export class Engine {
    * block; a no-op for any pool `actionPolicyConfigFor` does not cover — every live policy today, since
    * `actionPolicy` is never set on `POLICIES`.
    */
-  private async syncActionPolicyLedger(pool: RegistryName, blockNumber: bigint): Promise<void> {
+  private async syncActionPolicyLedger(pool: RegistryName, blockNumber: bigint, tokenId?: bigint): Promise<void> {
     const cfg = this.actionPolicyConfigFor(pool)
     if (!cfg) return
     this.ledger.watchActionPolicyPool(cfg)
     const poolAddress = entry(pool).address
+    // Spec 007 T7: a position admitted on chain before this engine started (an earlier run's mint through the policy,
+    // or a renewal's owner-signed Init.admit) is read from `admittedPool` once, so precheck's mirror agrees with the
+    // chain after an operator restart too. Only ever adds what the chain already has.
+    if (tokenId !== undefined && !this.ledger.isAdmitted(tokenId, pool)) {
+      const at = await this.client.readContract({ address: cfg.address, abi: mamoruActionPolicyReadAbi, functionName: 'admittedPool', args: [this.cfg.account, tokenId], blockNumber })
+      if (at.toLowerCase() === poolAddress.toLowerCase()) this.ledger.admitTokenId(tokenId, pool)
+    }
     const [spend, currentGeneration, oracle] = await Promise.all([
       this.client.readContract({ address: cfg.address, abi: mamoruActionPolicyReadAbi, functionName: 'spendOf', args: [this.cfg.account, poolAddress], blockNumber }),
       this.client.readContract({ address: cfg.address, abi: mamoruActionPolicyReadAbi, functionName: 'generationOf', args: [this.cfg.account], blockNumber }),
