@@ -400,7 +400,35 @@ attested this policy: for an existing account the v4 upgrade still needs one own
 unless the owner signs `UNSAFE_ENABLE` (no registry check, and the digest says so) or Rhinestone attests the policy.
 Not tested: the other chains themselves (same Safe address, passkey verifier there).
 
-## Tasks (T1 done, the rest not started)
+## T2/T3 results (branch spec/151-t2-t3)
+
+- **Policy `conservador-live-v4`** (and `conservador-lab-v4` for forks): conservador-live-v2's strategy with one `engine`
+  session per pool. 9 actions, UniActionPolicy on all, MamoruActionPolicy with the pool's `Init` on all but the swap
+  deadline (`SwapRouter02.multicall(deadline, [])`, #140, which the policy does not know and refuses; its rules pin it
+  to execute nothing): approve token0 / token1 (amount cap only; the policy pins router or policy as spender), swap
+  (fee, recipient, `amountIn` cap, `amountOutMinimum > 0`; no `sqrtPriceLimitX96 EQUAL 0`), `policy.mint` (manager's
+  selector), `policy.increase` (`0x4110c363`), decrease, collect, burn. Parameters in one place,
+  `ACTION_POLICY_DEFAULTS`, set to T5's recommendation C: bands 20 / 125 / 125 ticks, 1-day window, `W_p` 8 / 3 / 5 x C_p,
+  `T_p` 60 / 42 / 110 x C_p. Every existing
+  policy hash, grant, Session struct and enableSessions calldata is unchanged (golden tests).
+- **Registry**: `MamoruActionPolicy` and `MamoruGuardian` (its constructor's guardian) are listed as `undeployed` in
+  `packages/registry/base.json`; no v4 grant can be
+  built until T7 gives it an address, and the operator refuses any v4 approval (`ACTION_POLICY_NOT_DEPLOYED`; after
+  deployment `ACTION_POLICY_NOT_WIRED` until T7 wires the account's registry/generation reads and the key rotation).
+- **Batch** (`activationBatch` with the account's `ActionPolicyState`): registerModule if needed; a new account trusts
+  and attests TimeFrame, Usage and the policy in one attest; a trusting account attests the policy once; a new
+  generation needs a never-enabled session key and removes every enabled permissionId; a renewal (generation >= 1)
+  must re-enable every pool.
+- **Gas** (fork, `test_t2_*`, EOA owner; the passkey adds its WebAuthn check): new account 3 pools 14.96M; v4 renewal
+  15.57M; **v2 -> v4 upgrade in one tx 17.74M, over 2^24**: split into (A) attest + remove the 12 v2 sessions + 2 pools
+  at generation 1, 12.79M, and (B) the third pool at the same generation, 4.99M (two owner signatures, or B by ENABLE
+  mode). registerModule 37k.
+- **Engine** (T3): under a v4 session the swap minimum and price limit come from `swapBounds` at 0.8 x band (TS port,
+  same numbers as the Solidity code, `BoundsVector.t.sol`), decrease minimums never under `decreaseMins` at 0.8 x band,
+  mint and increase through the policy. Not sent (minimal T4): spot past 0.8 x band, quote under the bound, a position
+  the policy did not admit, an account the guardian paused (`isPaused`). Budgets are not mirrored (T4).
+
+## Tasks (T1 done; T2, T3 on spec/151-t2-t3; the rest not started)
 
 - T1 Lab: a v4 grant with both policies on a fork, the engine's ops and the attacks through `handleOps`, enable and
   renewal gas. Done in Foundry against the deployed stack (section T1); the TS scenario fixtures are T2/T3's.

@@ -240,6 +240,7 @@ interface INPMLite {
 
 interface IRouter02Lite {
     function exactInputSingle(ExactInputSingleParams calldata) external payable returns (uint256);
+    function multicall(uint256 deadline, bytes[] calldata data) external payable returns (bytes[] memory);
 }
 
 interface ISafe7579Exec {
@@ -1304,6 +1305,194 @@ contract RealStackTest is Test {
             );
         }
         lane = 0;
+    }
+
+    // ================================================================ 6: T2, the grant packages/policy builds
+
+    /// SwapRouter02.multicall(uint256,bytes[]): the swap deadline (#140), UniActionPolicy only in the v4 grant.
+    bytes4 constant MULTICALL_DEADLINE = 0x5ae401dc;
+
+    function _actUni(address target, bytes4 sel, Rule[] memory rules) internal pure returns (ActionData memory a) {
+        a.actionTargetSelector = sel;
+        a.actionTarget = target;
+        a.actionPolicies = new PolicyData[](1);
+        a.actionPolicies[0] = PolicyData(UNI, _uniInit(rules));
+    }
+
+    function _deadlineAction() internal pure returns (ActionData memory) {
+        Rule[] memory r = new Rule[](3);
+        r[0] = Rule(GT, 0, bytes32(0));
+        r[1] = Rule(EQ, 1, bytes32(uint256(64)));
+        r[2] = Rule(EQ, 2, bytes32(0));
+        return _actUni(ROUTER, MULTICALL_DEADLINE, r);
+    }
+
+    /**
+     * conservador-live-v4's `engine` grant for one pool, action for action and rule for rule as packages/policy
+     * `engineGrants` builds it (pinned by packages/policy/src/v4.test.ts): T1's 8 actions, increase with its two
+     * positive minimums, and the swap deadline on UniActionPolicy only. 9 actions.
+     */
+    function _t2Actions(Pool memory p, address account, bytes memory mam)
+        internal
+        view
+        returns (ActionData[] memory a)
+    {
+        ActionData[] memory t1 = _v4Actions(p, account, mam);
+        a = new ActionData[](9);
+        for (uint256 i; i < 4; i++) {
+            a[i] = t1[i]; // approve0, approve1, swap, policy.mint
+        }
+        Rule[] memory inc = new Rule[](5);
+        inc[0] = Rule(GT, 0, bytes32(0));
+        inc[1] = Rule(LTE, 1, bytes32(uint256(p.w0)));
+        inc[2] = Rule(LTE, 2, bytes32(uint256(p.w1)));
+        inc[3] = Rule(GT, 3, bytes32(0));
+        inc[4] = Rule(GT, 4, bytes32(0));
+        a[4] = _act(address(policy), MamoruActionPolicy.increase.selector, inc, mam);
+        (a[5], a[6], a[7]) = (t1[5], t1[6], t1[7]); // decrease, collect, burn
+        a[8] = _deadlineAction();
+    }
+
+    /// The live v2 layout per pool with its deadline actions (enter-swap 3, enter-mint 3, manage-any 6, convert-any 4).
+    function _v2Sessions(Pool memory p, address account, uint256 keySeed) internal view returns (Session[] memory s) {
+        s = _todaySessions(p, account, "", keySeed);
+        s[0].actions = _withAction(s[0].actions, _deadlineAction());
+        s[3].actions = _withAction(s[3].actions, _deadlineAction());
+    }
+
+    function _withAction(ActionData[] memory xs, ActionData memory x) internal pure returns (ActionData[] memory r) {
+        r = new ActionData[](xs.length + 1);
+        for (uint256 i; i < xs.length; i++) {
+            r[i] = xs[i];
+        }
+        r[xs.length] = x;
+    }
+
+    function _t2Three(uint64 gen, uint256 keySeed) internal view returns (Session[] memory s) {
+        Pool[3] memory ps = [stable, btc, eth];
+        s = new Session[](3);
+        for (uint256 i; i < 3; i++) {
+            s[i] = _session(_t2Actions(ps[i], safe, _mamInit(ps[i], gen)), vm.addr(keySeed + i), bytes32(keySeed + i));
+        }
+    }
+
+    function _removeAll(Execution[] memory xs, Session[] memory old) internal view returns (Execution[] memory r) {
+        r = xs;
+        for (uint256 i; i < old.length; i++) {
+            bytes32 pid = ISmartSessionLite(SMART_SESSION).getPermissionId(old[i]);
+            r = _with(r, Execution(SMART_SESSION, 0, abi.encodeCall(ISmartSessionLite.removeSession, (pid))));
+        }
+    }
+
+    /**
+     * T2 gas against Base's 2^24: the three owner transactions the v4 grants need, built as packages/account
+     * `activationBatch` orders them (registry calls, removeSession of the old grants, enableSessions).
+     */
+    function test_t2_gasActivationAndRenewal() public {
+        safe = _deploySafe();
+        // New account: trust + attest(TimeFrame, Usage, policy) + 3 engine sessions at generation 1.
+        Session[] memory g1 = _t2Three(1, 0x81);
+        TxGas memory act = _ownerBatch(safe, _with(_activationTrust(safe), _enableCall(g1)));
+        console2.log("T2 ACTIVATION new account, 3 pools x 9 actions: exec / tx total", act.exec, act.total);
+        console2.log("  calldata bytes", act.calldataBytes);
+        assertLt(act.total, BASE_TX_GAS_CAP, "activation fits one Base tx");
+        // v4 renewal: removeSession x3 + 3 engine sessions at generation 2, fresh key, no registry call.
+        TxGas memory rn = _ownerBatch(safe, _with(_removeAll(new Execution[](0), g1), _enableCall(_t2Three(2, 0x91))));
+        console2.log("T2 RENEWAL v4 (remove 3 + enable 3 at gen 2): exec / tx total", rn.exec, rn.total);
+        console2.log("  calldata bytes", rn.calldataBytes);
+        assertLt(rn.total, BASE_TX_GAS_CAP, "renewal fits one Base tx");
+        assertEq(policy.generationOf(safe), 2);
+        _assertEnabled(g1, false);
+    }
+
+    function _assertEnabled(Session[] memory s, bool want) internal view {
+        for (uint256 i; i < s.length; i++) {
+            bytes32 pid = ISmartSessionLite(SMART_SESSION).getPermissionId(s[i]);
+            assertEq(ISmartSessionLite(SMART_SESSION).isPermissionEnabled(pid, safe), want);
+        }
+    }
+
+    /// A v2 account as the live one: trusts, attested TimeFrame/Usage, holds the 12 live v2 sessions (48 actions).
+    function _v2Account() internal returns (Session[] memory v2) {
+        safe = _deploySafe();
+        v2 = new Session[](12);
+        Pool[3] memory ps = [stable, btc, eth];
+        for (uint256 i; i < 3; i++) {
+            Session[] memory s = _v2Sessions(ps[i], safe, 0x2000 + i * 16);
+            for (uint256 j; j < 4; j++) {
+                v2[i * 4 + j] = s[j];
+            }
+        }
+        Execution[] memory trust = _trustCalls(safe, true);
+        address[] memory pub = new address[](2);
+        (pub[0], pub[1]) = (TIMEFRAME, USAGE);
+        trust[1] = _attestCall(pub);
+        _ownerBatch(safe, trust);
+        // Enabled in four transactions (gas not measured here).
+        for (uint256 k; k < 4; k++) {
+            Session[] memory part = new Session[](3);
+            for (uint256 j; j < 3; j++) {
+                part[j] = v2[k * 3 + j];
+            }
+            _ownerBatch(safe, _xs(_enableCall(part)));
+        }
+    }
+
+    /// v2 -> v4 in one owner tx (attest the policy only, remove the 12 v2 sessions, enable 3): over Base's cap.
+    function test_t2_gasUpgradeOneTxDoesNotFit() public {
+        Session[] memory v2 = _v2Account();
+        Execution[] memory up = _removeAll(_xs(_attestCall(_arr(address(policy)))), v2);
+        TxGas memory ug = _ownerBatch(safe, _with(up, _enableCall(_t2Three(1, 0xA1))));
+        console2.log(
+            "T2 UPGRADE v2 -> v4 in ONE tx (attest + remove 12 + enable 3): exec / tx total", ug.exec, ug.total
+        );
+        assertGt(ug.total, BASE_TX_GAS_CAP, "the one-tx upgrade does not fit Base's cap");
+    }
+
+    /// v2 -> v4 in two owner txs: (A) attest + remove the 12 v2 sessions + 2 pools at generation 1; (B) the third pool.
+    function test_t2_gasUpgradeSplitFits() public {
+        Session[] memory v2 = _v2Account();
+        Session[] memory u1 = _t2Three(1, 0xA1);
+        Session[] memory a2 = new Session[](2);
+        (a2[0], a2[1]) = (u1[0], u1[1]);
+        Execution[] memory up = _removeAll(_xs(_attestCall(_arr(address(policy)))), v2);
+        TxGas memory ua = _ownerBatch(safe, _with(up, _enableCall(a2)));
+        TxGas memory ub = _ownerBatch(safe, _xs(_enableCall(_one(u1[2]))));
+        console2.log("T2 UPGRADE split, tx A (attest + remove 12 + enable 2): exec / tx total", ua.exec, ua.total);
+        console2.log("T2 UPGRADE split, tx B (enable 1 at the same generation): exec / tx total", ub.exec, ub.total);
+        assertLt(ua.total, BASE_TX_GAS_CAP, "upgrade tx A fits");
+        assertLt(ub.total, BASE_TX_GAS_CAP, "upgrade tx B fits");
+        _assertEnabled(u1, true);
+        _assertEnabled(v2, false);
+        // registerModule, in case T7 has not registered the policy: a fresh instance.
+        MamoruActionPolicy fresh = new MamoruActionPolicy(SMART_SESSION, NPM, ROUTER, FACTORY, GUARDIAN);
+        uint256 g0 = gasleft();
+        IRegistryLite(REGISTRY).registerModule(RESOLVER, address(fresh), "", "");
+        console2.log("registerModule (if T7 has not):", g0 - gasleft());
+    }
+
+    /// The engine's swap batch under the T2 grant: deadline (UniActionPolicy only) + approve + swap at the bounds.
+    function test_t2_swapWithDeadlinePasses() public {
+        safe = _deploySafe();
+        Session memory s = _session(_t2Actions(btc, safe, _mamInit(btc, 1)), sessionKey, bytes32(uint256(7)));
+        bytes32 pid = ISmartSessionLite(SMART_SESSION).getPermissionId(s);
+        _ownerBatch(safe, _with(_activationTrust(safe), _enableCall(_one(s))));
+        uint256 amountIn = 10_000e6;
+        (uint256 minOut, uint160 limit) = policy.swapBounds(safe, POOL_BTC, USDC, amountIn);
+        Execution memory deadline =
+            _x(ROUTER, abi.encodeCall(IRouter02Lite.multicall, (block.timestamp + 120, new bytes[](0))));
+        Execution[] memory xs =
+            _xs(deadline, _approve(USDC, ROUTER, amountIn), _swap(USDC, CBBTC, 500, amountIn, minOut, limit));
+        _expectPass(_run(_useOp(safe, pid, xs, sessionPk), "T2: deadline + approve + swap"));
+        // The deadline action executes nothing: a multicall that carries a call is refused by UniActionPolicy.
+        bytes[] memory inner = new bytes[](1);
+        inner[0] = abi.encodeCall(
+            IRouter02Lite.exactInputSingle, (ExactInputSingleParams(USDC, CBBTC, 500, relayer, 1, 1, 0))
+        );
+        Execution memory smuggle = _x(ROUTER, abi.encodeCall(IRouter02Lite.multicall, (block.timestamp + 120, inner)));
+        OpResult memory r = _run(_useOp(safe, pid, _xs(smuggle), sessionPk), "T2: multicall carrying a swap");
+        require(!r.included, "a multicall with calls must be refused");
+        _expectRefused(r, _violation(pid, UNI));
     }
 }
 
