@@ -71,17 +71,25 @@ describe('precheck wired to MamoruActionPolicy (spec 007 T4)', () => {
     expect(run(swapCalls(amountIn, 1n, 0n), ledgerWithActionPolicy())).toBe('POLICY_PRICE_BAND')
   })
 
-  test('a batch over the action-policy per-window budget is refused even though every call fits the grant-level caps', () => {
-    // At this deposit, the grant's own per-call/cumulative approve+swap caps (stableSwapPerCall 4,000, stableSwapTotal
-    // 8,000 USDC) are LOOSER than MamoruActionPolicy's own per-window budget (4,000 USDC, W_p = 1xC_p): two calls of
-    // exactly the per-call cap pass every grant-level rule (4,000 + 4,000 = 8,000 <= stableSwapTotal), but the second
-    // pushes the action-policy window to 8,000 > its 4,000 cap.
-    const atCap = apConfig.perWindow0 // 4,000 USDC: equals the grant's own stableSwapPerCall cap at this deposit
-    const b = swapBoundsAtBand({ twap: 0, bandTicks: apConfig.bandTicks, feePips: apConfig.feePips, zeroForOne: true, tokenIn: apConfig.token0, tokenOut: apConfig.token1, amountIn: atCap })
-    const oneSwap = swapCalls(atCap, b.minOut, b.sqrtPriceLimitX96)
-    const ledger = ledgerWithActionPolicy()
-    expect(run(oneSwap, ledger)).toBe('ACCEPT') // first call alone: exactly at both caps, passes
-    expect(run([...oneSwap, ...oneSwap], ledger)).toBe('POLICY_BUDGET') // the second call in the same batch pushes the window over
+  test('a call over what is left of the action-policy budgets is refused, even when it fits the grant-level caps', () => {
+    // Budgets are W_p = windowMultiple x C_p per day and T_p = 10 x C_p per approval (T5, Ot 18-Oct): far above one
+    // call at the grant's own caps, so the spend so far (read on chain: spendOf) is what brings a call over them.
+    const amount = 1_000_000n // 1 USDC: well inside every grant-level cap
+    const b = swapBoundsAtBand({ twap: 0, bandTicks: apConfig.bandTicks, feePips: apConfig.feePips, zeroForOne: true, tokenIn: apConfig.token0, tokenOut: apConfig.token1, amountIn: amount })
+    const swap = swapCalls(amount, b.minOut, b.sqrtPriceLimitX96)
+    const epoch = BigInt(Math.floor(NOW / apConfig.budgetWindowSeconds))
+    const spent = (window0: bigint, total0: bigint) => {
+      const l = new SessionLedger()
+      l.activate(PID, swapGrant)
+      l.watchActionPolicyPool(apConfig)
+      l.syncActionPolicyReads(POOL, { twapTick: 0, spend: { epoch, generation: 1n, window0, window1: 0n, total0, total1: 0n }, currentGeneration: 1n })
+      return l
+    }
+    expect(run(swap, spent(0n, 0n))).toBe('ACCEPT')
+    // The day's window has 1 unit left: refused.
+    expect(run(swap, spent(apConfig.perWindow0 - 1n, apConfig.perWindow0 - 1n))).toBe('POLICY_BUDGET')
+    // A fresh day, but the approval's total has 1 unit left: refused all the same.
+    expect(run(swap, spent(0n, apConfig.total0 - 1n))).toBe('POLICY_BUDGET')
   })
 
   test('decrease/collect/burn on a position never admitted through the policy is refused: POLICY_NOT_ADMITTED', () => {

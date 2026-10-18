@@ -293,18 +293,21 @@ try {
 
     await lab.warp(apConfig.budgetWindowSeconds) // a fresh window; the account+pool TOTAL still carries (a)/(b)'s spend
     await syncLedger()
-    const atCap = apConfig.perWindow0 // exactly the per-window budget; also the grant's own per-call cap at this deposit
-    const [minOut, limit] = (await lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'swapBounds', args: [world.a1.safe, pool, address('USDC'), atCap] })) as readonly [bigint, bigint]
-    const oneSwap = swapExec(atCap, minOut, limit)
+    // btc: W_p = 2 x C_p per day and the grant's per-call cap is C_p (T5, Ot 18-Oct): two swaps at the per-call cap
+    // fill the day's window exactly, a third is over it.
+    const perCall = apConfig.perWindow0 / 2n
+    const [minOut, limit] = (await lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'swapBounds', args: [world.a1.safe, pool, address('USDC'), perCall] })) as readonly [bigint, bigint]
+    const oneSwap = swapExec(perCall, minOut, limit)
 
-    const first = await sendSessionOp(world, world.a1, freshSwap, 't4-budget-one-swap-at-cap', oneSwap)
-    expectPrecheck(first, '(c) one swap exactly at the per-window cap: precheck accepts it', 'ACCEPT')
-    expectVerdict(first, '(c) the chain includes it', 'INCLUDED')
-
-    await syncLedger() // refreshes Spend: window0 now == perWindow0 on chain
-    const second = await sendSessionOp(world, world.a1, freshSwap, 't4-budget-second-swap-refused', oneSwap)
-    expectPrecheck(second, '(c) a second identical swap in the same window: precheck refuses it BEFORE anything is sent', 'POLICY_BUDGET')
-    expectVerdict(second, '(c) the chain independently refuses it too', 'CHAIN_REJECTED_VALIDATION')
+    for (const n of [1, 2]) {
+      const ok = await sendSessionOp(world, world.a1, freshSwap, `t4-budget-swap-${n}`, oneSwap)
+      expectPrecheck(ok, `(c) swap ${n} of 2 at the per-call cap, inside the day's window: precheck accepts it`, 'ACCEPT')
+      expectVerdict(ok, `(c) swap ${n}: the chain includes it`, 'INCLUDED')
+      await syncLedger() // refreshes Spend from the chain
+    }
+    const third = await sendSessionOp(world, world.a1, freshSwap, 't4-budget-third-swap-refused', oneSwap)
+    expectPrecheck(third, '(c) a third swap in the same window: precheck refuses it BEFORE anything is sent', 'POLICY_BUDGET')
+    expectVerdict(third, '(c) the chain independently refuses it too', 'CHAIN_REJECTED_VALIDATION')
   }
 
   // --------------------------------------------------------------------------------------------- report

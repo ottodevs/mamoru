@@ -83,12 +83,23 @@ export type V4PoolSpec = {
    * risk 10%) so `W_p = 1 x C_p` and `T_p = 3 x C_p` resolve to the same shares the account already runs at.
    */
   capShareBps: number
+  /**
+   * MamoruActionPolicy budgets as multiples of Cp (otto/mamoru#151, Ot 18-Oct on the T5 Lab report
+   * specs/007-onchain-action-policy/results/t5-bands-2026-10-18.md): W_p per day clears every peak day the Lab
+   * measured (stables 4.85x, btc 1.94x, risk 2.38x); T_p per approval at 10x bounds a leaked key's loss near 13% of
+   * the cap (spec 007's formula) where 3x ran out within weeks. Usage-triggered renewal asks for a tap before T_p binds.
+   */
+  windowMultiple: number
+  totalMultiple: number
   /** Cap formula names this pool's grants reference (resolved to raw units by `computeCaps`, see instantiate.ts). */
   caps: {
     stableSwapPerCall: string
     stableSwapTotal: string
     mint0: string
     mint1: string
+    /** Cumulative mint per approval (T_p): the per-call caps above stay small, the total follows the approval. */
+    mint0Total: string
+    mint1Total: string
     volatileConvertPerCall: string
     volatileConvertTotal: string
     /** MamoruActionPolicy.Init budgets (spec 007 "Parameters": W_p = 1xCp, T_p = 3xCp, token0/token1 separately). */
@@ -106,6 +117,8 @@ function v4Caps(prefix: string): V4PoolSpec['caps'] {
     stableSwapTotal: n('SwapTotal'),
     mint0: n('Mint0'),
     mint1: n('Mint1'),
+    mint0Total: n('Mint0Total'),
+    mint1Total: n('Mint1Total'),
     volatileConvertPerCall: n('ConvertPerCall'),
     volatileConvertTotal: n('ConvertTotal'),
     budgetWindow0: n('BudgetWindow0'),
@@ -125,28 +138,32 @@ export function v4CapFormulas(prefix: string, p: Omit<V4PoolSpec, 'caps'>): CapF
   const c = v4Caps(prefix)
   return [
     { name: c.stableSwapPerCall, asset: p.stable, bpsOfDeposit: p.capShareBps },
-    { name: c.stableSwapTotal, asset: p.stable, bpsOfDeposit: p.capShareBps * 2 },
+    // Cumulative grant-level caps follow the approval's T_p, so MamoruActionPolicy's budgets (measured in T5) are the
+    // ones that bind; a 2x cumulative here would stall the engine within weeks, as T5 showed for 3x.
+    { name: c.stableSwapTotal, asset: p.stable, bpsOfDeposit: p.capShareBps * p.totalMultiple },
     { name: c.mint0, asset: p.token0, bpsOfDeposit: p.capShareBps * 2 },
     { name: c.mint1, asset: p.token1, bpsOfDeposit: p.capShareBps * 2 },
+    { name: c.mint0Total, asset: p.token0, bpsOfDeposit: p.capShareBps * p.totalMultiple },
+    { name: c.mint1Total, asset: p.token1, bpsOfDeposit: p.capShareBps * p.totalMultiple },
     { name: c.volatileConvertPerCall, asset: p.volatile, bpsOfDeposit: p.capShareBps * 2 },
-    { name: c.volatileConvertTotal, asset: p.volatile, bpsOfDeposit: p.capShareBps * 2 },
-    // W_p = 1 x C_p, T_p = 3 x C_p (spec 007 "Parameters"), per token.
-    { name: c.budgetWindow0, asset: p.token0, bpsOfDeposit: p.capShareBps },
-    { name: c.budgetWindow1, asset: p.token1, bpsOfDeposit: p.capShareBps },
-    { name: c.budgetTotal0, asset: p.token0, bpsOfDeposit: p.capShareBps * 3 },
-    { name: c.budgetTotal1, asset: p.token1, bpsOfDeposit: p.capShareBps * 3 },
+    { name: c.volatileConvertTotal, asset: p.volatile, bpsOfDeposit: p.capShareBps * p.totalMultiple },
+    // W_p = windowMultiple x C_p per day, T_p = totalMultiple x C_p per approval (T5, Ot 18-Oct), per token.
+    { name: c.budgetWindow0, asset: p.token0, bpsOfDeposit: p.capShareBps * p.windowMultiple },
+    { name: c.budgetWindow1, asset: p.token1, bpsOfDeposit: p.capShareBps * p.windowMultiple },
+    { name: c.budgetTotal0, asset: p.token0, bpsOfDeposit: p.capShareBps * p.totalMultiple },
+    { name: c.budgetTotal1, asset: p.token1, bpsOfDeposit: p.capShareBps * p.totalMultiple },
   ]
 }
 
-function v4Pool(pool: RegistryName, stable: RegistryName, volatile: RegistryName, token0: RegistryName, token1: RegistryName, fee: number, bandTicks: number, capShareBps: number, prefix: string): V4PoolSpec {
-  return { pool, stable, volatile, token0, token1, fee, bandTicks, capShareBps, caps: v4Caps(prefix) }
+function v4Pool(pool: RegistryName, stable: RegistryName, volatile: RegistryName, token0: RegistryName, token1: RegistryName, fee: number, bandTicks: number, capShareBps: number, windowMultiple: number, totalMultiple: number, prefix: string): V4PoolSpec {
+  return { pool, stable, volatile, token0, token1, fee, bandTicks, capShareBps, windowMultiple, totalMultiple, caps: v4Caps(prefix) }
 }
 
 /** The three pools of conservadorLiveV2, with the v4 band ticks and cap shares of spec 007's "Parameters" table. */
 export const V4_POOLS = {
-  stables: v4Pool('pool:USDC/USDT/100', 'USDC', 'USDT', 'USDC', 'USDT', 100, 10, 5000, 'stables'),
-  btc: v4Pool('pool:USDC/cbBTC/500', 'USDC', 'cbBTC', 'USDC', 'cbBTC', 500, 100, 4000, 'btc'),
-  risk: v4Pool('pool:WETH/USDC/3000', 'USDC', 'WETH', 'WETH', 'USDC', 3000, 100, 1000, 'risk'),
+  stables: v4Pool('pool:USDC/USDT/100', 'USDC', 'USDT', 'USDC', 'USDT', 100, 10, 5000, 5, 10, 'stables'),
+  btc: v4Pool('pool:USDC/cbBTC/500', 'USDC', 'cbBTC', 'USDC', 'cbBTC', 500, 100, 4000, 2, 10, 'btc'),
+  risk: v4Pool('pool:WETH/USDC/3000', 'USDC', 'WETH', 'WETH', 'USDC', 3000, 100, 1000, 3, 10, 'risk'),
 } as const satisfies Record<string, V4PoolSpec>
 
 export const TWAP_WINDOW_SECONDS = 1800 // spec 007 "Parameters": = execution.twapWindowSeconds
@@ -217,8 +234,8 @@ function enterMintV4Actions(p: V4PoolSpec): ActionRuleTemplate[] {
         { field: 'token0', index: 0, condition: 'EQUAL', ref: p.token0, denial: 'POLICY_DENIED_TARGET' },
         { field: 'token1', index: 1, condition: 'EQUAL', ref: p.token1, denial: 'POLICY_DENIED_TARGET' },
         { field: 'fee', index: 2, condition: 'EQUAL', ref: BigInt(p.fee), denial: 'POLICY_DENIED_TARGET' },
-        { field: 'amount0Desired', index: 5, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.mint0}`, cumulative: `cap:${p.caps.mint0}`, denial: 'POLICY_DENIED_AMOUNT' },
-        { field: 'amount1Desired', index: 6, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.mint1}`, cumulative: `cap:${p.caps.mint1}`, denial: 'POLICY_DENIED_AMOUNT' },
+        { field: 'amount0Desired', index: 5, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.mint0}`, cumulative: `cap:${p.caps.mint0Total}`, denial: 'POLICY_DENIED_AMOUNT' },
+        { field: 'amount1Desired', index: 6, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.mint1}`, cumulative: `cap:${p.caps.mint1Total}`, denial: 'POLICY_DENIED_AMOUNT' },
         { field: 'amount0Min', index: 7, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
         { field: 'amount1Min', index: 8, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
         { field: 'recipient', index: 9, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },

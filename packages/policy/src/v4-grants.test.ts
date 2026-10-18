@@ -114,9 +114,9 @@ describe('MamoruActionPolicy.Init encoding stays in sync with the Solidity struc
     expect(init.twapWindow).toBe(1800)
     expect(init.bandTicks).toBe(100)
     expect(init.budgetWindow).toBe(86_400)
-    // W_p = 1 x C_p, T_p = 3 x C_p (spec 007 "Parameters"): total is exactly 3x the per-window budget.
-    expect(init.total0).toBe(init.perWindow0 * 3n)
-    expect(init.total1).toBe(init.perWindow1 * 3n)
+    // btc: W_p = 2 x C_p per day, T_p = 10 x C_p per approval (T5, Ot 18-Oct): total is 5x the per-window budget.
+    expect(init.total0).toBe(init.perWindow0 * 5n)
+    expect(init.total1).toBe(init.perWindow1 * 5n)
   })
 
   test('band ticks follow the spec 007 Parameters table (stables 10, btc 100, risk 100)', () => {
@@ -240,12 +240,14 @@ describe('gas model + splitter (spec 007 Tasks T2 (b))', () => {
 })
 
 describe('v4CapFormulas', () => {
-  test('W_p (budget window) is 1x the pool cap share, T_p (budget total) is 3x, per token', () => {
-    const formulas = v4CapFormulas('btc', V4_POOLS.btc)
-    const byName = Object.fromEntries(formulas.map((f) => [f.name, f]))
-    expect(byName.btcBudgetWindow0!.bpsOfDeposit).toBe(V4_POOLS.btc.capShareBps)
-    expect(byName.btcBudgetTotal0!.bpsOfDeposit).toBe(V4_POOLS.btc.capShareBps * 3)
-    expect(byName.btcBudgetWindow1!.bpsOfDeposit).toBe(V4_POOLS.btc.capShareBps)
-    expect(byName.btcBudgetTotal1!.bpsOfDeposit).toBe(V4_POOLS.btc.capShareBps * 3)
+  test('budgets follow T5 (Ot 18-Oct): W_p per day stables 5x, btc 2x, risk 3x C_p; T_p 10x C_p per approval, per token', () => {
+    expect([V4_POOLS.stables.windowMultiple, V4_POOLS.btc.windowMultiple, V4_POOLS.risk.windowMultiple]).toEqual([5, 2, 3])
+    for (const [prefix, pool] of Object.entries(V4_POOLS)) {
+      const byName = Object.fromEntries(v4CapFormulas(prefix, pool).map((f) => [f.name, f]))
+      for (const t of ['0', '1']) {
+        expect(byName[`${prefix}BudgetWindow${t}`]!.bpsOfDeposit).toBe(pool.capShareBps * pool.windowMultiple)
+        expect(byName[`${prefix}BudgetTotal${t}`]!.bpsOfDeposit).toBe(pool.capShareBps * 10)
+      }
+    }
   })
 })

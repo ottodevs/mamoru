@@ -99,11 +99,15 @@ approves the policy, not the manager; `enter-mint` the same; the per-position `m
 (admission is on chain). With admission and budgets on chain, `manage-any` and `convert-any` can merge into one
 session per pool, which halves the enable gas.
 
-## Parameters (proposal, Lab to confirm in T5)
+## Parameters (T5 measured, Ot decided 18 Oct 2026)
 
 Per pool, owner-signed in the grant: `twapWindow = 1800 s` (= `execution.twapWindowSeconds`), band in ticks,
-`budgetWindow = 1 day`, per-window budget `W_p = 1 x C_p`, per-approval total `T_p = 3 x C_p`, with `C_p` the
-pool's share of the account cap (#149's turnover target: loss <= band x turnover cap per pair per approval).
+`budgetWindow = 1 day`, per-window budget `W_p` (stables 5, btc 2, risk 3 x `C_p`), per-approval total
+`T_p = 10 x C_p`, with `C_p` the pool's share of the account cap. The proposal was `W_p = 1 x C_p`, `T_p = 3 x C_p`;
+the T5 Lab run (`results/t5-bands-2026-10-18.md`) found real turnover over it on 1-6% of days and over `T_p` within
+weeks. These values clear every measured peak day; `T_p = 10 x C_p` bounds a leaked key's loss near 13% of the cap
+(formula below) against ~100% today. A usage-triggered renewal asks the owner before `T_p` binds. The grant-level
+(UniActionPolicy) cumulative caps follow `T_p`, so these budgets are the ones that bind. Adjustable as data comes in.
 
 | Pool | Fee | Band | Why |
 |---|---|---|---|
