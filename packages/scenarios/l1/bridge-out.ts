@@ -81,6 +81,7 @@ function loadUpstream(): void {
 
 // --- 1. The live route ------------------------------------------------------------------------------------------
 type AcrossQuote = {
+  outputAmount: string
   totalRelayFee: { total: string; pct: string }
   timestamp: string
   fillDeadline: string
@@ -91,11 +92,16 @@ type AcrossQuote = {
   isAmountTooLow: boolean
 }
 const url = `https://app.across.to/api/suggested-fees?inputToken=${L1_USDC}&outputToken=${BASE_USDC}&originChainId=1&destinationChainId=${BASE_CHAIN_ID}&amount=${AMOUNT}`
-const quote = (await (await fetch(url)).json()) as AcrossQuote
+// Across documents API keys (ACROSS_API_KEY, Bearer); the public endpoint answered without one on 18 Oct.
+const res = await fetch(url, { headers: process.env.ACROSS_API_KEY ? { authorization: `Bearer ${process.env.ACROSS_API_KEY}` } : {} })
+if (!res.ok) throw new Error(`Across suggested-fees answered ${res.status}${res.status === 401 ? ' (set ACROSS_API_KEY)' : ''}`)
+const quote = (await res.json()) as AcrossQuote
 if (getAddress(quote.spokePoolAddress) !== getAddress(ACROSS_SPOKE_POOL)) throw new Error(`Across quotes SpokePool ${quote.spokePoolAddress}, pinned ${ACROSS_SPOKE_POOL}`)
 if (quote.isAmountTooLow) throw new Error('Across says the amount is too low')
 const fee = BigInt(quote.totalRelayFee.total)
-const outputAmount = AMOUNT - fee
+// The API's outputAmount is authoritative; a deposit with any other amount may not be filled.
+const outputAmount = BigInt(quote.outputAmount)
+if (outputAmount <= 0n || outputAmount > AMOUNT) throw new Error(`Across quotes outputAmount ${quote.outputAmount} for ${AMOUNT}`)
 note('route', true, `Across, ${Number(AMOUNT) / 1e6} USDC → ${Number(outputAmount) / 1e6} USDC on Base, fee ${Number(fee) / 1e6} USDC, fill ~${quote.estimatedFillTimeSec} s`)
 
 // --- 2. Fork ----------------------------------------------------------------------------------------------------
@@ -170,8 +176,21 @@ try {
     note('deposit event', false, 'SpokePool emitted no deposit event')
     exitCode = 1
   } else {
-    const a = ev.args as { depositor: Hex; recipient: Hex; destinationChainId: bigint; inputAmount: bigint; outputAmount: bigint; depositId: bigint | number; outputToken: Hex }
-    const ok = asAddr(a.depositor) === safe && asAddr(a.recipient) === safe && a.destinationChainId === BigInt(BASE_CHAIN_ID) && a.inputAmount === AMOUNT && a.outputAmount === outputAmount && asAddr(a.outputToken) === BASE_USDC
+    const a = ev.args as { depositor: Hex; recipient: Hex; destinationChainId: bigint; inputAmount: bigint; outputAmount: bigint; depositId: bigint | number; inputToken: Hex; outputToken: Hex; exclusiveRelayer: Hex; quoteTimestamp: number; fillDeadline: number; exclusivityDeadline: number; message: Hex }
+    // Every field the deposit was asked for comes back as asked: a fill needs all of them.
+    const ok =
+      asAddr(a.depositor) === safe &&
+      asAddr(a.recipient) === safe &&
+      a.destinationChainId === BigInt(BASE_CHAIN_ID) &&
+      a.inputAmount === AMOUNT &&
+      a.outputAmount === outputAmount &&
+      asAddr(a.inputToken) === L1_USDC &&
+      asAddr(a.outputToken) === BASE_USDC &&
+      asAddr(a.exclusiveRelayer) === getAddress(quote.exclusiveRelayer) &&
+      a.quoteTimestamp === quoteTimestamp &&
+      a.fillDeadline === Number(quote.fillDeadline) &&
+      a.exclusivityDeadline === quote.exclusivityDeadline &&
+      a.message === '0x'
     note(`deposit event (${ev.eventName})`, ok, `id ${a.depositId}, depositor and recipient ${ok ? '= the account' : `${asAddr(a.depositor)} / ${asAddr(a.recipient)}`}, chain ${a.destinationChainId}, out ${Number(a.outputAmount) / 1e6} USDC (native USDC on Base)`)
     if (!ok) exitCode = 1
   }
@@ -180,7 +199,7 @@ try {
   const allowance = await lab.client.readContract({ address: L1_USDC, abi: erc20Abi, functionName: 'allowance', args: [safe, ACROSS_SPOKE_POOL] })
   const clean = left === 0n && poolAfter - poolBefore === AMOUNT && allowance === 0n
   note('nothing left behind', clean, `account USDC ${left}, SpokePool +${Number(poolAfter - poolBefore) / 1e6} USDC, allowance ${allowance}`)
-  if (!(sent.ok && deployed.ok && hasCode && tx.ok && clean)) exitCode = 1
+  if (!(sent.ok && codeBefore === '0x' && ethBefore === 0n && deployed.ok && hasCode && tx.ok && clean)) exitCode = 1
 
   const gas = deployed.receipt.gasUsed + tx.receipt.gasUsed
   const price = await real.getGasPrice()
