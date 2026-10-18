@@ -95,9 +95,11 @@ interface INPM {
  * @notice A SmartSession action policy that sits NEXT TO UniActionPolicy on every action of a Mamoru grant. It only
  * adds refusals:
  *  - price: every priced action must stay inside one range [lo, hi] built from TWO TWAPs of the pool's own oracle (a
- *    long and a short window): lo = max(long, short) - band, hi = min(long, short) + band. Moving either TWAP alone
- *    can only narrow it. Both windows must also show a harmonic-mean in-range liquidity of at least `minLiquidity`:
- *    a TWAP pushed by holding the pool in an empty tick range for a block craters it (T6 H-1, measured on a fork).
+ *    long and a short window): lo = max(long, short) - band + 1, hi = min(long, short) + band, and refused when that
+ *    is empty. Moving either TWAP alone can only narrow it; a recent one-block push moves the short one ~6x more
+ *    and empties it (T6 H-1, M-1, measured on a fork). A pool may also carry a fixed anchor (the stables pool:
+ *    parity): the range is clipped to [anchorTick - anchorBand, anchorTick + anchorBand], which no amount of TWAP
+ *    manipulation moves.
  *  - positions: decrease/collect/burn only for tokenIds admitted for this account and pool, minted through `mint`
  *    or named by the owner in the enable data (`Init.admit`).
  *  - budget: ONE value budget per account and pool, in units of one of the pool's tokens (the stable one), charged
@@ -145,7 +147,8 @@ contract MamoruActionPolicy is IActionPolicy {
         uint32 twapShortWindow; // seconds, the short TWAP (300 in production); MIN_SHORT_WINDOW <= short < long
         uint24 bandTicks; // max distance of any execution price from the range built from both TWAPs (1 tick = 1 bp)
         uint64 generation; // approval number of the account; a higher one retires every lower one
-        uint128 minLiquidity; // floor of the harmonic-mean in-range liquidity over each window (T6 H-1)
+        int24 anchorTick; // fixed reference the range is clipped to (T6 H-1; parity for a stable pair)...
+        uint24 anchorBand; // ...+- this many ticks; 0 = no anchor (volatile pools)
         bool budgetIn1; // budget unit: false = token0 units, true = token1 units (the pool's stable token)
         uint32 budgetWindow; // seconds for the bucket to refill from empty to `perWindow`
         uint128 perWindow; // bucket capacity, in budget units
@@ -161,7 +164,8 @@ contract MamoruActionPolicy is IActionPolicy {
         uint64 generation;
         bool budgetIn1;
         uint32 budgetWindow;
-        uint128 minLiquidity;
+        int24 anchorTick;
+        uint24 anchorBand;
         uint128 perWindow;
         uint128 total;
         bytes32 initHash; // keccak of the Init without `admit`: a same-generation re-init must match it
@@ -213,7 +217,7 @@ contract MamoruActionPolicy is IActionPolicy {
     error NoConfig(address account, address pool);
     error NotAdmitted(uint256 tokenId);
     error WrongRecipient();
-    error OracleRefused(int24 twapLong, int24 twapShort, uint128 hmLong, uint128 hmShort);
+    error RangeEmpty(int24 twapLong, int24 twapShort);
     error SpotOutsideRange(uint160 sqrtPriceX96, int24 lo, int24 hi);
     error Reentrancy();
     error TransferFailed();
@@ -263,7 +267,8 @@ contract MamoruActionPolicy is IActionPolicy {
                 generation: i.generation,
                 budgetIn1: i.budgetIn1,
                 budgetWindow: i.budgetWindow,
-                minLiquidity: i.minLiquidity,
+                anchorTick: i.anchorTick,
+                anchorBand: i.anchorBand,
                 perWindow: i.perWindow,
                 total: i.total,
                 initHash: h
@@ -407,14 +412,14 @@ contract MamoruActionPolicy is IActionPolicy {
     // ---------------------------------------------------------------- views the engine and precheck use
 
     /// The price range [lo, hi] (ticks) every priced action of `account` in `pool` must stay in now. Reverts
-    /// `OracleRefused` when the two TWAPs are more than 2 x band apart or either window's liquidity is under the floor.
+    /// `RangeEmpty` when the two TWAPs are about 2 x band apart, or the range misses the anchor.
     function priceRange(address account, address pool) external view returns (int24 lo, int24 hi) {
         Config memory c = _current(account, pool);
         bool ok;
         (ok, lo, hi) = _range(c, pool);
         if (!ok) {
-            (int24 tl, int24 ts, uint128 hl, uint128 hs) = _oracle(c, pool);
-            revert OracleRefused(tl, ts, hl, hs);
+            (int24 tl, int24 ts) = _oracle(c, pool);
+            revert RangeEmpty(tl, ts);
         }
     }
 
@@ -458,30 +463,35 @@ contract MamoruActionPolicy is IActionPolicy {
 
     // ---------------------------------------------------------------- internals: price
 
-    /// Two TWAPs and their harmonic-mean liquidity from one `observe([long, short, 0])`, floor-rounded like
-    /// `OracleLibrary.consult`. Same-block swaps cannot move any of them (observations are written per block).
-    function _oracle(Config memory c, address pool) internal view returns (int24 tl, int24 ts, uint128 hl, uint128 hs) {
+    /// Two TWAPs from one `observe([long, short, 0])`, floor-rounded like `OracleLibrary.consult`. Same-block swaps
+    /// cannot move either (observations are written per block).
+    function _oracle(Config memory c, address pool) internal view returns (int24 tl, int24 ts) {
         uint32[] memory ago = new uint32[](3);
         ago[0] = c.twapWindow;
         ago[1] = c.twapShortWindow;
-        (int56[] memory tc, uint160[] memory sl) = IUniswapV3Pool(pool).observe(ago);
+        (int56[] memory tc,) = IUniswapV3Pool(pool).observe(ago);
         tl = _meanTick(tc[2] - tc[0], c.twapWindow);
         ts = _meanTick(tc[2] - tc[1], c.twapShortWindow);
-        hl = _harmonicMean(sl[2] - sl[0], c.twapWindow);
-        hs = _harmonicMean(sl[2] - sl[1], c.twapShortWindow);
     }
 
     /// lo = max(long, short) - band + 1, hi = min(long, short) + band. The +1: both means are floored, so the true
-    /// mean of the higher one can be up to one tick above it (T6 L-7). `ok` is false when either window's
-    /// harmonic-mean liquidity is under `minLiquidity` (T6 H-1) or the range is empty (the TWAPs disagree by more
-    /// than about 2 x band: a fast move or a manipulation, refused either way).
+    /// mean of the higher one can be up to one tick above it (T6 L-7). Then clipped to the anchor, if any. `ok` is
+    /// false when the result is empty: the TWAPs disagree by about 2 x band or more (a fast move, or a recent push:
+    /// one block held D ticks away moves the short TWAP D/150 and the long D/900), or the price left the anchor.
     function _range(Config memory c, address pool) internal view returns (bool ok, int24 lo, int24 hi) {
-        (int24 tl, int24 ts, uint128 hl, uint128 hs) = _oracle(c, pool);
-        if (hl < c.minLiquidity || hs < c.minLiquidity) return (false, 0, 0);
+        (int24 tl, int24 ts) = _oracle(c, pool);
         int24 top = tl > ts ? tl : ts;
         int24 bottom = tl > ts ? ts : tl;
-        lo = _clamp(int256(top) - int256(uint256(c.bandTicks)) + 1);
-        hi = _clamp(int256(bottom) + int256(uint256(c.bandTicks)));
+        int256 l = int256(top) - int256(uint256(c.bandTicks)) + 1;
+        int256 h = int256(bottom) + int256(uint256(c.bandTicks));
+        if (c.anchorBand != 0) {
+            int256 al = int256(c.anchorTick) - int256(uint256(c.anchorBand));
+            int256 ah = int256(c.anchorTick) + int256(uint256(c.anchorBand));
+            if (l < al) l = al;
+            if (h > ah) h = ah;
+        }
+        lo = _clamp(l);
+        hi = _clamp(h);
         ok = lo <= hi;
     }
 
@@ -515,8 +525,8 @@ contract MamoruActionPolicy is IActionPolicy {
     function _requireSpotInRange(Config memory c, address pool) internal view {
         (bool ok, int24 lo, int24 hi) = _range(c, pool);
         if (!ok) {
-            (int24 tl, int24 ts, uint128 hl, uint128 hs) = _oracle(c, pool);
-            revert OracleRefused(tl, ts, hl, hs);
+            (int24 tl, int24 ts) = _oracle(c, pool);
+            revert RangeEmpty(tl, ts);
         }
         (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
         // Compared as sqrt prices, not floored ticks (T6 L-7).
@@ -574,7 +584,9 @@ contract MamoruActionPolicy is IActionPolicy {
         if (i.twapShortWindow < MIN_SHORT_WINDOW || i.twapShortWindow >= i.twapWindow) revert BadInit(2);
         if (i.bandTicks < MIN_BAND || i.bandTicks > MAX_BAND) revert BadInit(3);
         if (i.generation > MAX_GENERATION) revert BadInit(4);
-        if (i.minLiquidity == 0) revert BadInit(5);
+        if (i.anchorBand > MAX_BAND || i.anchorTick < TickMath.MIN_TICK || i.anchorTick > TickMath.MAX_TICK) {
+            revert BadInit(5);
+        }
         if (i.budgetWindow < MIN_BUDGET_WINDOW) revert BadInit(7);
         if (i.perWindow == 0 || i.total < i.perWindow) revert BadInit(8);
         if (i.admit.length > MAX_ADMIT) revert BadInit(10);
@@ -593,7 +605,8 @@ contract MamoruActionPolicy is IActionPolicy {
                 i.twapShortWindow,
                 i.bandTicks,
                 i.generation,
-                i.minLiquidity,
+                i.anchorTick,
+                i.anchorBand,
                 i.budgetIn1,
                 i.budgetWindow,
                 i.perWindow,
@@ -657,12 +670,6 @@ contract MamoruActionPolicy is IActionPolicy {
     function _meanTick(int56 delta, uint32 window) internal pure returns (int24 t) {
         t = int24(delta / int56(uint56(window)));
         if (delta < 0 && (delta % int56(uint56(window)) != 0)) t--;
-    }
-
-    /// OracleLibrary.consult's harmonic mean; a zero delta (cannot happen over >= 60 s) reads as unlimited.
-    function _harmonicMean(uint160 secondsPerLiquidityDelta, uint32 window) internal pure returns (uint128) {
-        if (secondsPerLiquidityDelta == 0) return type(uint128).max;
-        return uint128((uint192(window) * type(uint160).max) / (uint192(secondsPerLiquidityDelta) << 32));
     }
 
     function _clamp(int256 t) internal pure returns (int24) {

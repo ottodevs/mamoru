@@ -10,6 +10,41 @@ interface IRouter02M {
     function exactInputSingle(ExactInputSingleParams calldata) external payable returns (uint256);
 }
 
+interface INPMMeasure {
+    struct MintParams {
+        address token0;
+        address token1;
+        uint24 fee;
+        int24 tickLower;
+        int24 tickUpper;
+        uint256 amount0Desired;
+        uint256 amount1Desired;
+        uint256 amount0Min;
+        uint256 amount1Min;
+        address recipient;
+        uint256 deadline;
+    }
+
+    struct DecreaseParams {
+        uint256 tokenId;
+        uint128 liquidity;
+        uint256 amount0Min;
+        uint256 amount1Min;
+        uint256 deadline;
+    }
+
+    struct CollectParams {
+        uint256 tokenId;
+        address recipient;
+        uint128 amount0Max;
+        uint128 amount1Max;
+    }
+
+    function mint(MintParams calldata) external payable returns (uint256, uint128, uint256, uint256);
+    function decreaseLiquidity(DecreaseParams calldata) external payable returns (uint256, uint256);
+    function collect(CollectParams calldata) external payable returns (uint256, uint256);
+}
+
 /**
  * T6 H-1 measurement (spec 007, otto/mamoru#151). Not a pass/fail test: it prints the numbers
  * results/t6-fixes-2026-10-18.md quotes. Run alone:
@@ -26,6 +61,7 @@ contract H1Measure is Test {
     address constant POOL_BTC = 0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef; // USDC/cbBTC 0.05%, token0 USDC
     address constant POOL_ETH = 0x6c561B446416E1A00E8E93E221854d6eA4171372; // WETH/USDC 0.3%, token0 WETH
 
+    address constant NPM_ADDR = 0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1;
     address attacker = makeAddr("attacker");
 
     function setUp() public {
@@ -211,6 +247,90 @@ contract H1Measure is Test {
             console2.log("  HM short before/after:", uint256(hs0), uint256(hs1));
             vm.revertToState(snap);
         }
+    }
+
+    /// Does the harmonic-mean liquidity floor survive an attacker who also mints its own narrow position at the
+    /// pushed tick for the block boundary (JIT liquidity)? Push 9,000 ticks, mint ~`jit` USDC of liquidity in a
+    /// 2-tick range around the pushed tick, cross the block boundary, swap back, burn.
+    function test_h1_jitLiquidityAtThePushedTick() public {
+        uint256[3] memory jit = [uint256(100e6), 1_000e6, 10_000e6];
+        for (uint256 i; i < jit.length; i++) {
+            uint256 snap = vm.snapshotState();
+            Obs memory b = _obs(300);
+            deal(USDC, attacker, 0);
+            deal(USDT, attacker, 0);
+            (uint256 usdcIn, uint256 usdtOut) = _swapTo(POOL_STABLE, USDC, USDT, 100, _spot(POOL_STABLE) - 9_000);
+            int24 t = _spot(POOL_STABLE);
+            deal(USDC, attacker, IERC20Min(USDC).balanceOf(attacker) + jit[i]);
+            deal(USDT, attacker, IERC20Min(USDT).balanceOf(attacker) + jit[i]);
+            vm.startPrank(attacker);
+            IERC20Min(USDC).approve(NPM_ADDR, type(uint256).max);
+            IERC20Min(USDT).approve(NPM_ADDR, type(uint256).max);
+            (uint256 id, uint128 liq,,) = INPMMeasure(NPM_ADDR)
+                .mint(
+                    INPMMeasure.MintParams(
+                        USDC, USDT, 100, t - 1, t + 1, jit[i], jit[i], 0, 0, attacker, block.timestamp
+                    )
+                );
+            vm.stopPrank();
+            vm.roll(block.number + 1);
+            vm.warp(block.timestamp + 2);
+            _swapExact(USDT, USDC, 100, usdtOut);
+            vm.startPrank(attacker);
+            INPMMeasure(NPM_ADDR).decreaseLiquidity(INPMMeasure.DecreaseParams(id, liq, 0, 0, block.timestamp));
+            INPMMeasure(NPM_ADDR).collect(INPMMeasure.CollectParams(id, attacker, type(uint128).max, type(uint128).max));
+            vm.stopPrank();
+            Obs memory a = _obs(300);
+            console2.log("JIT USDC+USDT each / liquidity minted at the pushed tick:", jit[i] / 1e6, uint256(liq));
+            console2.log("  push capital (USDC):", usdcIn / 1e6);
+            console2.log(
+                "  long / short TWAP shift:", uint256(int256(b.tl) - int256(a.tl)), uint256(int256(b.ts) - int256(a.ts))
+            );
+            console2.log(
+                "  HM long / short after, bps of before:", uint256(a.hl) * 10_000 / b.hl, uint256(a.hs) * 10_000 / b.hs
+            );
+            vm.revertToState(snap);
+        }
+    }
+
+    /// The residual on USDC/cbBTC after T6: one push more than 5 minutes ago (long TWAP only) plus one recent push
+    /// (both), sized so the two TWAPs stay within 2 x band of each other. Prints what the range's floor for a
+    /// token0 sale (max(long, short) - 99) moves, and what it cost: fees (round-trip loss) and own capital.
+    function test_h1_spreadPushOnBtc() public {
+        _spreadBtc(-75_000, -15_000);
+        _spreadBtc(-60_000, -30_000);
+        _spreadBtc(-45_000, -15_000);
+    }
+
+    function _spreadBtc(int24 oldTicks, int24 recentTicks) internal {
+        uint256 snap = vm.snapshotState();
+        (int24 tl0, int24 ts0,,) = _oracle(POOL_BTC, 1800, 300);
+        int24 top0 = tl0 > ts0 ? tl0 : ts0;
+        (uint256 inOld, uint256 lossOld) = _roundTrip(oldTicks);
+        vm.warp(block.timestamp + 600);
+        vm.roll(block.number + 300);
+        (uint256 inNew, uint256 lossNew) = _roundTrip(recentTicks);
+        (int24 tl1, int24 ts1,,) = _oracle(POOL_BTC, 1800, 300);
+        int24 top1 = tl1 > ts1 ? tl1 : ts1;
+        int256 gap = int256(tl1) - int256(ts1);
+        console2.log("btc spread push, old / recent ticks:", uint256(int256(-oldTicks)), uint256(int256(-recentTicks)));
+        console2.log("  capital old / recent (USDC):", inOld / 1e6, inNew / 1e6);
+        console2.log("  fees (round-trip loss, USDC):", (lossOld + lossNew) / 1e6);
+        console2.log("  long / short shift:", uint256(int256(tl0 - tl1)), uint256(int256(ts0 - ts1)));
+        console2.log(
+            "  token0-sale floor moved; range empty?", uint256(int256(top0 - top1)), (gap < 0 ? -gap : gap) > 199
+        );
+        vm.revertToState(snap);
+    }
+
+    function _roundTrip(int24 ticks) internal returns (uint256 usdcIn, uint256 loss) {
+        deal(USDC, attacker, 0);
+        deal(CBBTC, attacker, 0);
+        uint256 btcOut;
+        (usdcIn, btcOut) = _swapTo(POOL_BTC, USDC, CBBTC, 500, _spot(POOL_BTC) + ticks);
+        vm.roll(block.number + 1);
+        vm.warp(block.timestamp + 2);
+        loss = usdcIn - _swapExact(CBBTC, USDC, 500, btcOut);
     }
 
     function test_h1_arbGiveaway() public {
