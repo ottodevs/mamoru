@@ -77,7 +77,7 @@ healthy() {
   for _ in $(seq 1 "$health_secs"); do
     inv="$(systemctl --user show "$unit" -p InvocationID --value)"
     if systemctl --user is-active -q "$unit" && [ "$(systemctl --user show "$unit" -p NRestarts --value)" = "$restarts" ]; then
-      loops="$(journalctl --user _SYSTEMD_INVOCATION_ID="$inv" -o cat --no-pager 2>/dev/null | grep -o '^\[engine [0-9a-f-]*\] loop started' | sort -u | wc -l)"
+      loops="$(journalctl --user _SYSTEMD_INVOCATION_ID="$inv" -o cat --no-pager 2>/dev/null | grep -o '^\[engine [^]]*\] loop started' | sort -u | wc -l)"
       # The same invocation before and after the reads: an automatic restart in between does not count as healthy.
       inv2="$(systemctl --user show "$unit" -p InvocationID --value)"
       [ "$inv" = "$inv2" ] && [ "$loops" -ge "$active" ] && return 0
