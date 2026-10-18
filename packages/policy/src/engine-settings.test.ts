@@ -69,4 +69,14 @@ describe('engine settings (spec 006)', () => {
     expect(off.depth).toBeUndefined()
     expect(off.guards).toBeUndefined()
   })
+
+  test('bridgeOut (#133): optional, strict, absent keeps the hash, turning it on is a risky change', () => {
+    expect(validateEngineSettings({ ...DEFAULT_ENGINE_SETTINGS, bridgeOut: { enabled: true } })).toEqual([])
+    expect(validateEngineSettings({ ...DEFAULT_ENGINE_SETTINGS, bridgeOut: { enabled: 'yes' } })).toContain('bridgeOut must be { enabled: true | false }')
+    expect(validateEngineSettings({ ...DEFAULT_ENGINE_SETTINGS, bridgeOut: { enabled: true, extra: 1 } })).toContain('bridgeOut must be { enabled: true | false }')
+    expect(validateEngineSettings({ ...DEFAULT_ENGINE_SETTINGS, bridgeOut: null })).toContain('bridgeOut must be { enabled: true | false }')
+    expect(canonicalSettingsJson(DEFAULT_ENGINE_SETTINGS)).not.toContain('bridgeOut')
+    expect(riskyChanges(DEFAULT_ENGINE_SETTINGS, { ...DEFAULT_ENGINE_SETTINGS, bridgeOut: { enabled: true } })).toEqual(['owners can move USDC from Ethereum to Base, and the relayer pays the Ethereum gas'])
+    expect(riskyChanges({ ...DEFAULT_ENGINE_SETTINGS, bridgeOut: { enabled: true } }, DEFAULT_ENGINE_SETTINGS)).toEqual([])
+  })
 })

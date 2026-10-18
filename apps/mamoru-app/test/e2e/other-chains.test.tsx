@@ -122,6 +122,11 @@ describe('wrong-network notice (#117)', () => {
 })
 
 describe('move to Base (#133)', () => {
+  /** The /ops flag as the operator reports it for this account. */
+  const flag = (qc: QueryClient, enabled: boolean, route: unknown = null) => {
+    qc.setQueryData(queryKeys.bridgeOut(FIXTURE_ACCOUNT_KEY), { route, enabled })
+    return qc
+  }
   const mount = (qc: QueryClient) =>
     render(
       <ApiContext.Provider value={fixtureClient}>
@@ -131,8 +136,16 @@ describe('move to Base (#133)', () => {
       </ApiContext.Provider>,
     )
 
-  test('USDC on Ethereum from 1 USDC up: the notice says it can be moved and offers the button', () => {
-    const { text, html } = mount(client({ ...fixtureFunding, usdc: '0' }, onEthereum))
+  test('flag off on /ops (or no answer): the notice is as before, no button', () => {
+    for (const qc of [flag(client({ ...fixtureFunding, usdc: '0' }, onEthereum), false), client({ ...fixtureFunding, usdc: '0' }, onEthereum)]) {
+      const { text, html } = mount(qc)
+      expect(html).not.toContain('data-testid="bridge-out"')
+      expect(text).toContain('cannot move it from Ethereum yet')
+    }
+  })
+
+  test('USDC on Ethereum from 1 USDC up, flag on: the notice says it can be moved and offers the button', () => {
+    const { text, html } = mount(flag(client({ ...fixtureFunding, usdc: '0' }, onEthereum), true))
     expect(text).toContain('You can move the USDC to this same account on Base with one passkey approval')
     expect(text).toContain('Mamoru pays the Ethereum gas')
     expect(text).not.toContain('cannot move it')
@@ -144,24 +157,24 @@ describe('move to Base (#133)', () => {
   test('below 1 USDC, or only ETH: no button, and the notice says it cannot be moved yet', () => {
     for (const v of [eth('999999'), eth('0', '20000000000000000')]) {
       expect(movable(fundsElsewhere(v)[0]!)).toBe(false)
-      const { text, html } = mount(client({ ...fixtureFunding, usdc: '0' }, v))
+      const { text, html } = mount(flag(client({ ...fixtureFunding, usdc: '0' }, v), true))
       expect(html).not.toContain('data-testid="bridge-out"')
       expect(text).toContain('cannot move it from Ethereum yet')
     }
   })
 
   test('USDC and ETH: the USDC can move, the ETH is said to stay', () => {
-    expect(otherChainCopy.body(fundsElsewhere(eth('150000000', '1'))[0]!)).toContain('The ETH stays on Ethereum.')
+    expect(otherChainCopy.body(fundsElsewhere(eth('150000000', '1'))[0]!, true)).toContain('The ETH stays on Ethereum.')
   })
 
   test('a move on its way hides the button and shows its state; once the USDC left, the state stays in view', () => {
     const qc = client({ ...fixtureFunding, usdc: '0' }, onEthereum)
-    qc.setQueryData(queryKeys.bridgeOut(FIXTURE_ACCOUNT_KEY), { route: { state: 'deposited', amountUsdc: '150000000', outputUsdc: '149980000', at: new Date().toISOString(), depositId: '1' } })
+    flag(qc, true, { state: 'deposited', amountUsdc: '150000000', outputUsdc: '149980000', at: new Date().toISOString(), depositId: '1' })
     const during = mount(qc)
     expect(during.text).toContain(otherChainCopy.state.deposited)
     expect(during.text).not.toContain(otherChainCopy.move)
     qc.setQueryData(queryKeys.otherChains(FIXTURE_ACCOUNT_KEY), eth('0'))
-    qc.setQueryData(queryKeys.bridgeOut(FIXTURE_ACCOUNT_KEY), { route: { state: 'filled', amountUsdc: '150000000', outputUsdc: '149980000', at: new Date().toISOString(), depositId: '1' } })
+    flag(qc, true, { state: 'filled', amountUsdc: '150000000', outputUsdc: '149980000', at: new Date().toISOString(), depositId: '1' })
     const after = mount(qc)
     expect(after.html).toContain('data-testid="bridge-route"')
     expect(after.text).toContain('Moving 150.00 USDC from Ethereum to Base')
@@ -169,7 +182,7 @@ describe('move to Base (#133)', () => {
   })
 
   test('every state has its own words', () => {
-    for (const state of ['sending', 'deposited', 'filled', 'failed', 'unconfirmed'] as const) {
+    for (const state of ['sending', 'deposited', 'filled', 'failed', 'unconfirmed', 'expired', 'refunded'] as const) {
       const { html } = render(<BridgeStatus route={{ state, amountUsdc: '1', outputUsdc: '1', at }} />)
       expect(html).toContain(`data-state="${state}"`)
     }

@@ -87,7 +87,7 @@ const liveState = {
   n: 0,
   // ?wrongchain: the 150 USDC on Ethereum until the owner moves it (#133).
   ethereumUsdc: '150000000',
-  bridge: { route: null } as BridgeOutView,
+  bridge: { route: null, enabled: true } as BridgeOutView,
   owner: !fresh,
   transferUsdc: 0n,
 }
@@ -256,9 +256,9 @@ export const fixtureClient: ApiClient = {
     delay({ ...fixtureTx(['Move 150.00 USDC from Ethereum to this same account on Base', 'You receive 149.98 USDC on Base, in about 2 s', 'Bridge: Across, fee 0.02 USDC. Mamoru pays the Ethereum gas']), chainId: 1, route: { outputUsdc: '149980000', feeUsdc: '20000', fillSec: 2 } }),
   bridgeOut: () => {
     liveState.ethereumUsdc = '0'
-    liveState.bridge = { route: { state: 'deposited', amountUsdc: '150000000', outputUsdc: '149980000', at: new Date().toISOString(), l1Tx: `0x${'1'.repeat(64)}`, depositId: '1' } }
+    liveState.bridge = { enabled: true, route: { state: 'deposited', amountUsdc: '150000000', outputUsdc: '149980000', at: new Date().toISOString(), l1Tx: `0x${'1'.repeat(64)}`, depositId: '1' } }
     setTimeout(() => {
-      liveState.bridge = { route: { ...liveState.bridge.route!, state: 'filled', fillTx: `0x${'2'.repeat(64)}`, at: new Date().toISOString() } }
+      liveState.bridge = { enabled: true, route: { ...liveState.bridge.route!, state: 'filled', fillTx: `0x${'2'.repeat(64)}`, at: new Date().toISOString() } }
       liveState.funding = { ...liveState.funding, usdc: (BigInt(liveState.funding.usdc) + 149_980_000n).toString() }
     }, 4_000)
     return delay(liveState.bridge)

@@ -39,6 +39,16 @@ describe('bridge-out quote check (#133)', () => {
     expect(refused(good({ outputAmount: String(AMOUNT + 1n), totalRelayFee: { total: '-1' } }))).toContain('out of range')
   })
 
+  test('an exclusive relayer may hold the fill for minutes, not until the deadline', () => {
+    const relayer = '0xFD03AbCAdaF3F930fA4E37Eb2f6ea3A44a41b7F0'
+    expect(refused(good({ exclusiveRelayer: relayer, exclusivityDeadline: NOW + 208 }))).toBe('accepted')
+    expect(refused(good({ exclusiveRelayer: relayer, exclusivityDeadline: 120 }))).toBe('accepted')
+    expect(refused(good({ exclusiveRelayer: relayer, exclusivityDeadline: NOW + 4 * 3600 }))).toContain('exclusivity too long')
+    expect(refused(good({ exclusiveRelayer: relayer, exclusivityDeadline: 3600 }))).toContain('exclusivity too long')
+    expect(refused(good({ exclusivityDeadline: 60 }))).toContain('exclusivity without a relayer')
+    expect(refused(good({ fillDeadline: String(NOW + 3 * 86_400) }))).toContain('fill deadline too far')
+  })
+
   test('refuses a stale quote, a close fill deadline, malformed fields, and an amount Across calls too low', () => {
     expect(refused(good({ timestamp: String(NOW - 3600) }))).toContain('stale')
     expect(refused(good({ fillDeadline: String(NOW + 60) }))).toContain('fill deadline too close')

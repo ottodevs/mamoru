@@ -5,7 +5,7 @@
 // Run: nix shell nixpkgs#foundry --command bun apps/mamoru-operator/test/e2e-bridge-out.ts
 // Upstream RPC: L1_RPC_URL, or QUICKNODE_ETH_MAINNET_HTTP from ~/.config/quicknode/endpoints.env (never printed).
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPublicClient, encodeFunctionData, http, toHex, type Hex } from 'viem'
@@ -89,7 +89,9 @@ try {
   let statusAnswer = { status: 'pending' } as { status: string; fillTx?: string }
   const fetcher: Fetch = (url, init) => (url.includes('/deposit/status') ? Promise.resolve(Response.json(statusAnswer)) : fetch(url, init))
   const relayer = new Relayer(DEV_KEY, l1, anvilUrl, 1)
-  const bo = new BridgeOut(l1, relayer, dir, fetcher)
+  const on = () => true
+  const make = (now: () => number = Date.now) => new BridgeOut(l1, relayer, dir, fetcher, now, undefined, on)
+  const bo = make()
 
   function der(r: bigint, s: bigint): Uint8Array {
     const int = (v: bigint) => {
@@ -111,6 +113,10 @@ try {
       signature: Buffer.from(der(a.r, s)).toString('base64url'),
     }
   }
+
+  // Off on /ops: nothing prepared, status says so.
+  const off = new BridgeOut(l1, relayer, dir, fetcher)
+  check((await code(off.prepare(ctx))) === 'BRIDGE_OFF' && (await off.status(ctx)).enabled === false, 'flag off on /ops: BRIDGE_OFF, status enabled=false')
 
   // Nothing there: nothing offered.
   check((await code(bo.prepare(ctx))) === 'BRIDGE_NOTHING', 'no USDC on Ethereum: prepare refuses (BRIDGE_NOTHING)')
@@ -141,12 +147,22 @@ try {
   check(r.amountUsdc === AMOUNT.toString() && BigInt(r.outputUsdc) === BigInt(p2.route.outputUsdc), `amounts: ${r.amountUsdc} in, ${r.outputUsdc} out`)
   check((await usdcAt(safe)) === 0n && (await usdcAt(ACROSS_SPOKE_POOL)) - poolBefore === AMOUNT, 'account emptied on Ethereum, SpokePool got the amount')
   check((await l1.readContract({ address: L1_USDC, abi: erc20Abi, functionName: 'allowance', args: [safe, ACROSS_SPOKE_POOL] })) === 0n, 'no allowance left')
-  check((await code(bo.prepare(ctx))) === 'BRIDGE_NOTHING', 'after the move: nothing more to move')
+  check((await code(bo.prepare(ctx))) === 'BRIDGE_IN_PROGRESS', 'after the move, while it is on its way: no second one')
 
   // Status follows Across, and the journal survives a restart.
   check((await bo.status(ctx)).route?.state === 'deposited', 'status: deposited while Across has not filled')
+
+  // A move whose outcome was lost (the hash came back, the wait for the receipt did not): the chain decides, not a guess.
+  const file = join(dir, 'bridge-out.json')
+  const j = JSON.parse(readFileSync(file, 'utf8'))
+  const realId = j.routes[ctx.accountKey].depositId
+  j.routes[ctx.accountKey] = { ...j.routes[ctx.accountKey], state: 'unconfirmed', depositId: undefined }
+  writeFileSync(file, JSON.stringify(j))
+  const recon = await make().status(ctx)
+  check(recon.route?.state === 'deposited' && recon.route.depositId === realId, `unconfirmed resolved from the receipt: deposited, id ${recon.route?.depositId}`)
+
   statusAnswer = { status: 'filled', fillTx: `0x${'ab'.repeat(32)}` }
-  const reborn = new BridgeOut(l1, relayer, dir, fetcher)
+  const reborn = make()
   const after = await reborn.status(ctx)
   check(after.route?.state === 'filled' && after.route.fillTx === `0x${'ab'.repeat(32)}`, 'status after a restart: filled on Base')
 
@@ -162,10 +178,27 @@ try {
   // An approval that ran out is refused.
   await fundSafe(5_000_000n)
   let clock = Date.now()
-  const timed = new BridgeOut(l1, relayer, dir, fetcher, () => clock)
+  const timed = make(() => clock)
+  // The second move is still 'deposited': a third waits for it.
+  check((await code(timed.prepare(ctx))) === 'BRIDGE_IN_PROGRESS', 'a move under way blocks the next one')
+  statusAnswer = { status: 'expired' }
+  clock += 11_000
+  check((await timed.status(ctx)).route?.state === 'expired', 'Across expired: shown as expired (refund pending), not as on its way')
+  statusAnswer = { status: 'refunded' }
+  clock += 11_000
+  check((await timed.status(ctx)).route?.state === 'refunded', 'Across refunded: shown as back on Ethereum')
   const p5 = await timed.prepare(ctx)
   clock += 121_000
   check((await code(timed.submit(ctx, browserSign(p5)))) === 'PREPARE_EXPIRED', 'expired approval: PREPARE_EXPIRED')
+  const p6 = await timed.prepare(ctx)
+  check((await timed.submit(ctx, browserSign(p6))).route?.state === 'deposited', 'after a refund the owner can move again: deposited')
+  statusAnswer = { status: 'filled' }
+  clock += 11_000
+  await timed.status(ctx)
+  await fundSafe(2_000_000n)
+  check((await code(timed.prepare(ctx))) === 'BRIDGE_ACCOUNT_LIMIT', 'three moves started today: the fourth waits for tomorrow')
+  const spent = JSON.parse(readFileSync(file, 'utf8')).spent
+  check(BigInt(spent.wei) > 0n, `the day's relayer spend is on disk (${spent.day}: ${spent.wei} wei)`)
 } finally {
   anvil.kill()
   proxy.stop()
