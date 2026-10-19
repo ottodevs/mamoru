@@ -1361,14 +1361,16 @@ export class Operator {
         throw new HttpError(503, 'ACTION_POLICY_NOT_REGISTERED', 'the on-chain action policy is not registered yet: nothing was changed')
       }
     }
-    // An attestation counts only while it is in force: made, not revoked, and not expired (review round 2). One that
-    // lapsed is made again in this owner transaction, or the registry would refuse every userOp after the enable.
+    // An attestation counts only if it stays in force for the whole approval being signed: made, not revoked, and with
+    // no expiry before the approval ends (review rounds 2 and 3). Otherwise it is made again in this owner transaction,
+    // or the registry would refuse every userOp from the day it lapses. Mamoru's own self-attestations never expire.
     const now = Number((await this.client.getBlock({ blockNumber: block })).timestamp)
+    const approvalEnd = now + policy.session.validitySeconds
     const attest: Address[] = []
     for (const m of [d.actionPolicy, d.gasPolicy]) {
       const a = await read<{ time: number; expirationTime: number; revocationTime: number; attester: Address }>({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [m, live.safe] })
-      const expired = Number(a.expirationTime) !== 0 && Number(a.expirationTime) <= now
-      if (Number(a.time) === 0 || Number(a.revocationTime) !== 0 || expired) attest.push(m)
+      const lapses = Number(a.expirationTime) !== 0 && Number(a.expirationTime) <= approvalEnd
+      if (Number(a.time) === 0 || Number(a.revocationTime) !== 0 || lapses) attest.push(m)
     }
     const current = await read<bigint>({ address: d.actionPolicy, abi: v4PolicyAbi, functionName: 'generationOf', args: [live.safe] })
     let generation = current + 1n
@@ -1388,8 +1390,13 @@ export class Operator {
       try {
         owner = await read<Address>({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [tokenId] })
         pos = await read<readonly unknown[]>({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] })
-      } catch {
-        continue // burned: nothing to admit
+      } catch (e) {
+        // Only the position manager's own answer that the token does not exist means burned (review round 3). Any
+        // other failure (a provider error) refuses the prepare: a renewal signed without a position the Safe still
+        // owns would leave it out of the new generation's admitted set.
+        if (/invalid token id|nonexistent token|ERC721: (owner query for nonexistent|invalid token)/i.test(e instanceof Error ? e.message : String(e))) continue
+        logErr(`[v4] ${acc.accountKey} position ${tokenId} unreadable while preparing the approval:`, e)
+        throw new HttpError(503, 'POSITION_READ_UNAVAILABLE', 'your positions could not be read just now: nothing was changed, try again in a minute')
       }
       if (owner.toLowerCase() !== live.safe.toLowerCase()) continue
       const [t0, t1, fee] = [String(pos[2]).toLowerCase(), String(pos[3]).toLowerCase(), Number(pos[4])]
