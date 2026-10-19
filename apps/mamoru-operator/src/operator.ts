@@ -1361,10 +1361,14 @@ export class Operator {
         throw new HttpError(503, 'ACTION_POLICY_NOT_REGISTERED', 'the on-chain action policy is not registered yet: nothing was changed')
       }
     }
+    // An attestation counts only while it is in force: made, not revoked, and not expired (review round 2). One that
+    // lapsed is made again in this owner transaction, or the registry would refuse every userOp after the enable.
+    const now = Number((await this.client.getBlock({ blockNumber: block })).timestamp)
     const attest: Address[] = []
     for (const m of [d.actionPolicy, d.gasPolicy]) {
-      const a = await read<{ time: number; revocationTime: number; attester: Address }>({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [m, live.safe] })
-      if (Number(a.time) === 0 || Number(a.revocationTime) !== 0) attest.push(m)
+      const a = await read<{ time: number; expirationTime: number; revocationTime: number; attester: Address }>({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [m, live.safe] })
+      const expired = Number(a.expirationTime) !== 0 && Number(a.expirationTime) <= now
+      if (Number(a.time) === 0 || Number(a.revocationTime) !== 0 || expired) attest.push(m)
     }
     const current = await read<bigint>({ address: d.actionPolicy, abi: v4PolicyAbi, functionName: 'generationOf', args: [live.safe] })
     let generation = current + 1n

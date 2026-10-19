@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { POLICIES } from '@mamoru/policy'
-import { resolveNamedPolicy, resolveV4Policy, syncYieldLedgerFlag } from '../src/boot.ts'
+import { assertV4Resolvable, resolveNamedPolicy, resolveV4Policy, syncYieldLedgerFlag } from '../src/boot.ts'
 
 function fakeLoop() {
   const calls: string[] = []
@@ -96,5 +96,23 @@ describe('resolveNamedPolicy (otto/mamoru#151 T7): conservadorLiveV4 is only rea
     expect(resolveNamedPolicy('conservador-lab-v4', {})).toBeUndefined()
     const policy = resolveNamedPolicy('conservador-lab-v4', { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: ADDR, MAMORU_GAS_POLICY_ADDRESS: GAS })
     expect(policy?.policyId).toBe('conservador-lab-v4')
+  })
+})
+
+// otto/mamoru#151 review round 2: an account already on the on-chain action policy must resolve after a restart.
+describe('assertV4Resolvable', () => {
+  const v4 = { accountKey: 'aaaaaaaa-0000', policyId: 'conservador-live-v4' }
+  const v2 = { accountKey: 'bbbbbbbb-0000', policyId: 'conservador-live-v2' }
+  const ok = { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: `0x${'11'.repeat(20)}`, MAMORU_GAS_POLICY_ADDRESS: `0x${'22'.repeat(20)}` }
+  test('no account on v4: boots whatever the env says', () => {
+    expect(() => assertV4Resolvable([v2], {})).not.toThrow()
+  })
+  test('an account on v4 with the opt-in and both addresses: boots', () => {
+    expect(() => assertV4Resolvable([v2, v4], ok)).not.toThrow()
+  })
+  test('an account on v4 without the opt-in or an address: refused at boot, the account named', () => {
+    expect(() => assertV4Resolvable([v4], {})).toThrow(/aaaaaaaa/)
+    expect(() => assertV4Resolvable([v4], { ...ok, MAMORU_ONCHAIN_POLICY_V4: '0' })).toThrow(/MAMORU_ONCHAIN_POLICY_V4/)
+    expect(() => assertV4Resolvable([v4], { ...ok, MAMORU_GAS_POLICY_ADDRESS: undefined })).toThrow(/aaaaaaaa/)
   })
 })

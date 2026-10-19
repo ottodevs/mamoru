@@ -92,6 +92,22 @@ export function resolveV4Policy(chain: PolicyVersion['chain'], env: Record<strin
   return deployedV4(chain === conservadorLiveV4.chain ? conservadorLiveV4 : conservadorLabV4, env)
 }
 
+/** Accounts whose stored policy is a v4 one, when this operator was started without the v4 opt-in or its addresses. */
+export function assertV4Resolvable(accounts: readonly { accountKey: string; policyId?: string }[], env: Record<string, string | undefined>): void {
+  const v4Ids = new Set([conservadorLiveV4.policyId, conservadorLabV4.policyId])
+  const onV4 = accounts.filter((a) => a.policyId && v4Ids.has(a.policyId))
+  if (!onV4.length) return
+  let resolved: PolicyVersion | undefined
+  try {
+    resolved = resolveV4Policy(conservadorLiveV4.chain, env) ?? resolveV4Policy(conservadorLabV4.chain, env)
+  } catch {
+    resolved = undefined
+  }
+  if (!resolved) {
+    throw new Error(`${onV4.length} account(s) run the on-chain action policy (${onV4.map((a) => a.accountKey.slice(0, 8)).join(', ')}): start with MAMORU_ONCHAIN_POLICY_V4=1, MAMORU_ACTION_POLICY_ADDRESS and MAMORU_GAS_POLICY_ADDRESS set`)
+  }
+}
+
 /** `git rev-parse --short HEAD` at the operator's cwd, read once at boot. 'unknown' outside a git checkout. */
 async function gitShaOnce(cwd: string): Promise<string> {
   try {
@@ -214,6 +230,10 @@ export async function bootOperator(o: BootOptions) {
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
   const policy = withTestOverrides(named, process.env)
   const store = new StateStore(o.stateDir)
+  // Review round 2: an account already moved to the on-chain action policy needs that policy to resolve after a
+  // restart (funding, engine, renewals and Stop all read it). Refused at boot, with the accounts named, rather than
+  // failing on each of them later while their Safes hold positions.
+  assertV4Resolvable(Object.values(store.state.accounts), process.env)
   // The relayer's own reads (gas estimate, nonce, the wait for a receipt) are counted as the relayer's, like its sends.
   const relayerClient = createPublicClient({ transport: http(via('relayer'), { batch: true, timeout: 60_000 }) })
   const relayer = new Relayer(loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey), relayerClient, via('relayer'), chainId)
