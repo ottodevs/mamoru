@@ -329,15 +329,33 @@ export function registryTrustCalls(account: Address): { to: Address; value: bigi
  * MamoruGasPolicy), once per account, like `registryTrustCalls` does for TimeFramePolicy/UsageLimitPolicy. The
  * registry refuses to attest a module without a ModuleRecord (Deploy.s.sol's `deployModule` writes it).
  */
-export function selfAttestCall(modules: readonly Address[]): { to: Address; value: bigint; data: Hex } {
+/**
+ * `data`: what the registry stores for this attestation. It must differ from any earlier attestation of the same
+ * module by this account: the registry writes it with CREATE2, so attesting again the same bytes after a revoke
+ * reverts with DeploymentFailed (verified on a Base fork, review round 4). Callers pass something unique per prepare.
+ */
+export function selfAttestCall(modules: readonly Address[], data: Hex = '0x'): { to: Address; value: bigint; data: Hex } {
   return {
     to: address('ModuleRegistry'),
     value: 0n,
     data: encodeFunctionData({
       abi: moduleRegistryAbi,
       functionName: 'attest',
-      args: [ATTESTATION_SCHEMA_UID, modules.map((m) => ({ moduleAddress: m, expirationTime: 0, data: '0x' as Hex, moduleTypes: [] }))],
+      args: [ATTESTATION_SCHEMA_UID, modules.map((m) => ({ moduleAddress: m, expirationTime: 0, data, moduleTypes: [] }))],
     }),
+  }
+}
+
+/**
+ * Revokes this account's own attestations of `modules` (spec 007 T7, review round 4): the Rhinestone registry refuses
+ * to attest again over an unrevoked record (`AlreadyAttested`), expired or not, so one that lapses before the new
+ * approval ends is revoked first, in the same owner transaction, then attested again.
+ */
+export function selfRevokeAttestationCall(modules: readonly Address[]): { to: Address; value: bigint; data: Hex } {
+  return {
+    to: address('ModuleRegistry'),
+    value: 0n,
+    data: encodeFunctionData({ abi: moduleRegistryAbi, functionName: 'revoke', args: [modules.map((m) => ({ moduleAddress: m }))] }),
   }
 }
 

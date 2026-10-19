@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { decodeErrorResult, decodeFunctionResult, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { decodeErrorResult, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, entry, erc20Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
@@ -1314,7 +1314,7 @@ export class Operator {
     const batchOf = (grants: SessionGrant[]) =>
       activationBatch(live, grants, acc.revoked, {
         trust: !acc.trusted,
-        ...(v4 ? { policiesFor: v4PoliciesFor(grants, v4.d, v4.generation, v4BudgetCaps(policy, cap), v4.admitByPool), attest: v4.attest } : {}),
+        ...(v4 ? { policiesFor: v4PoliciesFor(grants, v4.d, v4.generation, v4BudgetCaps(policy, cap), v4.admitByPool), attest: v4.attest, reattest: v4.reattest, attestData: v4.attestData } : {}),
       })
     // A first approval takes as many grants as fit the gas cap. A renewal takes exactly the ones the account has
     // (`only`): it neither loses a grant nor gains one the owner did not have.
@@ -1349,7 +1349,7 @@ export class Operator {
    * - Init.admit (T6 M-4): the positions the operator minted for this Safe (`admittedTokenIds`) that the Safe still
    *   owns, grouped by the v4 pool they belong to; each Init of a pool admits them again (harmless: same pool).
    */
-  private async v4Context(acc: AccountState, live: LiveAccount, policy: PolicyVersion, block: bigint, mode: 'full' | 'extend'): Promise<{ d: V4Deployment; generation: bigint; attest: Address[]; admitByPool: Partial<Record<string, bigint[]>> }> {
+  private async v4Context(acc: AccountState, live: LiveAccount, policy: PolicyVersion, block: bigint, mode: 'full' | 'extend'): Promise<{ d: V4Deployment; generation: bigint; attest: Address[]; reattest: Address[]; attestData: Hex; admitByPool: Partial<Record<string, bigint[]>> }> {
     const d = v4DeploymentOf(policy)
     if (!d) throw new HttpError(503, 'ACTION_POLICY_UNCONFIGURED', 'the on-chain action policy is not configured on this operator')
     const read = <T,>(args: Parameters<PublicClient['readContract']>[0]) => this.client.readContract({ ...args, blockNumber: block } as never) as Promise<T>
@@ -1367,10 +1367,14 @@ export class Operator {
     const now = Number((await this.client.getBlock({ blockNumber: block })).timestamp)
     const approvalEnd = now + policy.session.validitySeconds
     const attest: Address[] = []
+    // Unrevoked but lapsing: the registry refuses a new attestation over it (AlreadyAttested), so it is revoked first.
+    const reattest: Address[] = []
     for (const m of [d.actionPolicy, d.gasPolicy]) {
       const a = await read<{ time: number; expirationTime: number; revocationTime: number; attester: Address }>({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [m, live.safe] })
       const lapses = Number(a.expirationTime) !== 0 && Number(a.expirationTime) <= approvalEnd
-      if (Number(a.time) === 0 || Number(a.revocationTime) !== 0 || lapses) attest.push(m)
+      const inForce = Number(a.time) !== 0 && Number(a.revocationTime) === 0
+      if (!inForce || lapses) attest.push(m)
+      if (inForce && lapses) reattest.push(m)
     }
     const current = await read<bigint>({ address: d.actionPolicy, abi: v4PolicyAbi, functionName: 'generationOf', args: [live.safe] })
     let generation = current + 1n
@@ -1407,7 +1411,9 @@ export class Operator {
     for (const [pool, ids] of Object.entries(admitByPool)) {
       if ((ids?.length ?? 0) > MAX_ADMIT) throw new HttpError(409, 'ADMIT_TOO_LARGE', `more than ${MAX_ADMIT} open positions in ${poolLabel(pool)}: close some first`)
     }
-    return { d, generation, attest, admitByPool }
+    // Unique per prepare (generation and block time): the registry cannot store the same attestation bytes twice.
+    const attestData = encodeAbiParameters([{ type: 'uint256' }, { type: 'uint256' }], [generation, BigInt(now)])
+    return { d, generation, attest, reattest, attestData, admitByPool }
   }
 
   /**

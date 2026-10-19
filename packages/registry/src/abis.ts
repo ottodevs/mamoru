@@ -148,6 +148,8 @@ export const moduleRegistryAbi = parseAbi([
   'struct ModuleRecord { bytes32 resolverUID; address sender; bytes metadata }',
   'struct ResolverRecord { address resolver; address resolverOwner }',
   'function attest(bytes32 schemaUID, AttestationRequest[] requests)',
+  'struct RevocationRequest { address moduleAddress; }',
+  'function revoke(RevocationRequest[] requests)',
   'function trustAttesters(uint8 threshold, address[] attesters)',
   'function checkForAccount(address smartAccount, address module) view',
   'function findAttestation(address module, address attester) view returns (AttestationRecord)',

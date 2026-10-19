@@ -15,7 +15,7 @@ import {
   type WebAuthnSigner,
 } from '../safe/index.ts'
 import { accountSetup, counterfactualAddress } from '../recovery/index.ts'
-import { activationCall, registryTrustCalls, revocationCalls, selfAttestCall, type SecondActionPolicy } from '../sessions/index.ts'
+import { activationCall, registryTrustCalls, revocationCalls, selfAttestCall, selfRevokeAttestationCall, type SecondActionPolicy } from '../sessions/index.ts'
 
 /** Owner-authorized cap for the live happy path on Base: 100 USDC per account (6 decimals). */
 export const LIVE_CAP_USDC = 100_000_000n
@@ -79,12 +79,15 @@ export function activationBatch(
   a: LiveAccount,
   grants: SessionGrant[],
   revoked: Hex[],
-  opts: { trust?: boolean; policiesFor?: (grant: SessionGrant, index: number) => SecondActionPolicy | undefined; attest?: readonly Address[] } = {},
+  opts: { trust?: boolean; policiesFor?: (grant: SessionGrant, index: number) => SecondActionPolicy | undefined; attest?: readonly Address[]; reattest?: readonly Address[]; attestData?: Hex } = {},
 ): { calls: MultiSendCall[]; permissionIds: Hex[] } {
   const act = activationCall(grants, revoked, opts.policiesFor)
   const trust = opts.trust === false ? [] : registryTrustCalls(a.safe)
   // Spec 007 T7: self-attest the v4 policies (after the trust calls, which make the account an attester it trusts).
-  const attest = opts.attest?.length ? [selfAttestCall(opts.attest)] : []
+  // An attestation that lapses before this approval ends is revoked first (the registry refuses to attest over an
+  // unrevoked record), then made again with the others.
+  const revoke = opts.reattest?.length ? [selfRevokeAttestationCall(opts.reattest)] : []
+  const attest = opts.attest?.length ? [...revoke, selfAttestCall(opts.attest, opts.attestData)] : revoke
   return { calls: [...trust, ...attest, { to: act.to, value: 0n, data: act.data }].map(strip), permissionIds: act.permissionIds }
 }
 

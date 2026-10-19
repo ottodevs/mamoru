@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { address } from '@mamoru/registry'
 import { computeCaps, conservadorLiveV4, conservadorV1, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, grantKey, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_GAS_CAPS, V4_POOLS, v4BudgetCaps, type SessionGrant } from '@mamoru/policy'
-import { activationCall, toSmartSession, v4PoliciesFor, type SecondActionPolicy } from './index.ts'
+import { activationCall, selfAttestCall, selfRevokeAttestationCall, toSmartSession, v4PoliciesFor, type SecondActionPolicy } from './index.ts'
 
 const ctx = {
   account: '0x00000000000000000000000000000000000000aa' as const,
@@ -172,5 +172,26 @@ describe('T7 (GPT-6 review of #97): P1 1-3', () => {
     expect(() => toSmartSession(forged, ok(btcSwap))).toThrow('not a token of the pool')
     const fee: SessionGrant = { ...btcSwap, actions: btcSwap.actions.map((a) => ({ ...a, params: a.params.map((p) => (p.field === 'fee' ? { ...p, ref: 3000n } : p)) })) }
     expect(() => toSmartSession(fee, ok(btcSwap))).toThrow("pool's fee")
+  })
+})
+
+// otto/mamoru#151 review round 4: an unrevoked attestation that lapses is revoked, then attested again, same tx.
+describe('selfRevokeAttestationCall', () => {
+  test('revoke((address)[]) on the ModuleRegistry, one request per module', () => {
+    const m = `0x${'ab'.repeat(20)}` as const
+    const call = selfRevokeAttestationCall([m])
+    expect(call.to).toBe(address('ModuleRegistry'))
+    expect(call.data.slice(0, 10)).toBe('0x4990a682') // revoke((address)[]), present in the Base registry's bytecode
+    expect(call.data.toLowerCase()).toContain('ab'.repeat(20))
+  })
+})
+
+describe('selfAttestCall data', () => {
+  test('carries the caller-given bytes, so an attestation made again after a revoke is not the same CREATE2 data', () => {
+    const m = `0x${'cd'.repeat(20)}` as const
+    const a = selfAttestCall([m], '0x01')
+    const b = selfAttestCall([m], '0x02')
+    expect(a.data).not.toBe(b.data)
+    expect(selfAttestCall([m]).data).toBe(selfAttestCall([m], '0x').data) // default unchanged for first attestations
   })
 })
