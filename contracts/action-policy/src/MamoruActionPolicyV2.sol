@@ -105,12 +105,15 @@ interface INPM {
 /**
  * @title MamoruActionPolicyV2 (spec 007, otto/mamoru#151, #171). Not deployed. MamoruActionPolicy as deployed on Base
  * at 0x0083A9ca619f22A4f29704F97981dfFe8CD35215 (T6 audit fixes applied, see
- * specs/007-onchain-action-policy/results/t6-fixes-2026-10-18.md), plus one addition, a path a session could not
- * take before:
+ * specs/007-onchain-action-policy/results/t6-fixes-2026-10-18.md), plus two additions, each only a refusal or a
+ * path a session could not take before:
  *  - `increase` (#171): the only way a session adds liquidity to a position. The position manager's
  *    `increaseLiquidity` does not check who owns the tokenId, so it is never a session action; through here it
  *    reaches only positions admitted for the account that the account still owns, with the same spot check and the
  *    same budget charge as `mint`.
+ *  - a revoke-only guardian (immutable `GUARDIAN`, address(0) = none): `pause(account)` refuses every session action
+ *    of the account (checkAction, `mint`, `increase`) until `unpause` or the owner's next renewal. It cannot enable,
+ *    widen, or move a token.
  * Everything else is the deployed contract's logic; mint's pull, approve and refund steps moved, in the same order, into
  * `_fund` and `_settle`, which increase shares (with `_checkProvide` at validation), and the file compiles at 1,000
  * optimizer runs instead of 10,000 to fit EIP-170 (foundry.toml).
@@ -157,6 +160,10 @@ contract MamoruActionPolicyV2 is IActionPolicy {
     uint256 public constant MAX_ADMIT = 64;
 
     address public immutable SMART_SESSION;
+    /// Revoke-only watchdog key: may pause and unpause an account's session actions, nothing else. It cannot enable or
+    /// widen an envelope, move a token or touch a position; a compromised guardian can only stop the engine, and the
+    /// owner's next renewal ends any pause. address(0) = no guardian.
+    address public immutable GUARDIAN;
     INPM public immutable NPM;
     address public immutable ROUTER;
     IUniswapV3Factory public immutable FACTORY;
@@ -222,11 +229,15 @@ contract MamoruActionPolicyV2 is IActionPolicy {
     /// tokenId => pool, for positions minted through `mint` with this account as recipient, or admitted at enable.
     mapping(address account => mapping(uint256 tokenId => address pool)) public admittedPool;
     mapping(address pool => PoolInfo) internal _pool;
+    /// generation + 1 at the time of the pause; 0 = not paused. A renewal (a higher generation) ends it by itself.
+    mapping(address account => uint64) public pausedAt;
 
     uint256 private _locked = 1;
 
     event PolicySet(ConfigId id, address multiplexer, address account);
     event Admitted(address indexed account, address indexed pool, uint256 indexed tokenId);
+    event Paused(address indexed account, uint64 generation);
+    event Unpaused(address indexed account);
 
     error PolicyNotInitialized(ConfigId id, address multiplexer, address account);
     error OnlySmartSession();
@@ -243,9 +254,12 @@ contract MamoruActionPolicyV2 is IActionPolicy {
     error SpotOutsideRange(uint160 sqrtPriceX96, int24 lo, int24 hi);
     error Reentrancy();
     error TransferFailed();
+    error OnlyGuardian();
+    error AccountPaused(address account);
 
-    constructor(address smartSession, address npm, address router, address factory) {
+    constructor(address smartSession, address npm, address router, address factory, address guardian) {
         SMART_SESSION = smartSession;
+        GUARDIAN = guardian;
         NPM = INPM(npm);
         ROUTER = router;
         FACTORY = IUniswapV3Factory(factory);
@@ -320,6 +334,7 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         Binding memory b = _binding[id][account];
         if (b.pool == address(0)) revert PolicyNotInitialized(id, msg.sender, account);
         if (b.generation != generationOf[account]) return VALIDATION_FAILED; // retired by a renewal
+        if (isPaused(account)) return VALIDATION_FAILED; // the guardian stopped this account's session actions
         if (value != 0 || data.length < 4) return VALIDATION_FAILED;
         Config memory c = _config[account][b.pool];
         PoolInfo memory p = _pool[b.pool];
@@ -422,6 +437,7 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         if (pool == address(0) || c.twapWindow == 0 || c.generation != generationOf[account]) {
             revert NoConfig(account, pool);
         }
+        if (isPaused(account)) revert AccountPaused(account);
         (uint256 b0, uint256 b1) = _fund(account, m.token0, m.token1, m.amount0Desired, m.amount1Desired);
         // T6 I-7: checked right before the manager's call, after every token callback of the pulls/approvals.
         _requireSpotInRange(c, pool);
@@ -436,8 +452,8 @@ contract MamoruActionPolicyV2 is IActionPolicy {
     /**
      * @notice Called BY THE ACCOUNT (msg.sender) inside a session batch, after approving this contract for at most the
      * desired amounts (#171). Adds liquidity to a position admitted for the account that the account still owns, under
-     * the account's current config of that position's pool, with the same check as `mint`: the pool's spot price inside
-     * the range [lo, hi] right before the manager's call. Returns everything the manager did not
+     * the account's current config of that position's pool, with the same checks as `mint`: not paused, and the pool's
+     * spot price inside the range [lo, hi] right before the manager's call. Returns everything the manager did not
      * take. Admission does not change.
      */
     function increase(IncreaseLiquidityParams calldata n)
@@ -451,6 +467,7 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         if (pool == address(0) || NPM.ownerOf(n.tokenId) != account) revert NotAdmitted(n.tokenId);
         Config memory c = _config[account][pool];
         if (c.twapWindow == 0 || c.generation != generationOf[account]) revert NoConfig(account, pool);
+        if (isPaused(account)) revert AccountPaused(account);
         PoolInfo memory p = _pool[pool];
         (uint256 b0, uint256 b1) = _fund(account, p.token0, p.token1, n.amount0Desired, n.amount1Desired);
         // As in mint (T6 I-7): checked right before the manager's call, after every token callback.
@@ -484,6 +501,29 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         uint256 r1 = IERC20Min(t1).balanceOf(address(this)) - b1;
         if (r0 != 0) _push(t0, account, r0);
         if (r1 != 0) _push(t1, account, r1);
+    }
+
+    // ---------------------------------------------------------------- guardian: revoke-only
+
+    /// Refuses every session action of `account` (checkAction, `mint`, `increase`) until `unpause` or until the owner
+    /// renews (a higher generation). The owner's own path (the passkey, Stop, withdrawals) is not behind this policy.
+    function pause(address account) external {
+        if (msg.sender != GUARDIAN || GUARDIAN == address(0)) revert OnlyGuardian();
+        uint64 g = generationOf[account];
+        pausedAt[account] = g + 1;
+        emit Paused(account, g);
+    }
+
+    /// Restores the same owner-signed envelope; it never widens it.
+    function unpause(address account) external {
+        if (msg.sender != GUARDIAN || GUARDIAN == address(0)) revert OnlyGuardian();
+        pausedAt[account] = 0;
+        emit Unpaused(account);
+    }
+
+    function isPaused(address account) public view returns (bool) {
+        uint64 p = pausedAt[account];
+        return p != 0 && p == generationOf[account] + 1;
     }
 
     // ---------------------------------------------------------------- views the engine and precheck use

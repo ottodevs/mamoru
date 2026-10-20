@@ -26,11 +26,14 @@ interface IAllowance {
     function allowance(address owner, address spender) external view returns (uint256);
 }
 
+// The guardian every V2 test deploys with (otto/mamoru#151: revoke-only).
+address constant GUARDIAN = address(0x6A2d1A9);
+
 function deployV2(address smartSession, address npm, address router, address factory)
     returns (MamoruActionPolicy)
 {
     // V2's ABI is a superset of V1's (same selectors, errors, Init): the V1 fixture drives it through V1's type.
-    return MamoruActionPolicy(address(new MamoruActionPolicyV2(smartSession, npm, router, factory)));
+    return MamoruActionPolicy(address(new MamoruActionPolicyV2(smartSession, npm, router, factory, GUARDIAN)));
 }
 
 /// Every test of MamoruActionPolicy.t.sol, against V2: nothing the deployed contract does changes.
@@ -48,7 +51,8 @@ contract T6FixesTestOnV2 is T6FixesTest {
 }
 
 /**
- * What V2 adds (otto/mamoru#171), on the same Base fork: `increase` through the policy.
+ * What V2 adds (otto/mamoru#151, #171), on the same Base fork: `increase` through the policy and the revoke-only
+ * guardian.
  */
 contract MamoruActionPolicyV2Test is PolicyFixture {
     function _newPolicy() internal override returns (MamoruActionPolicy) {
@@ -69,6 +73,7 @@ contract MamoruActionPolicyV2Test is PolicyFixture {
     function test_v2FitsEip170() public view {
         console2.log("MamoruActionPolicyV2 runtime bytes:", address(policy).code.length);
         assertLe(address(policy).code.length, 24_576);
+        assertEq(v2().GUARDIAN(), GUARDIAN);
     }
 
     // ------------------------------------------------------------ increase (#171): no grant per tokenId
@@ -218,5 +223,123 @@ contract MamoruActionPolicyV2Test is PolicyFixture {
         vm.prank(safe);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NoConfig.selector, safe, POOL_BTC));
         v2().increase(IncreaseLiquidityParams(tokenId, 1_000e6, 0.01e8, 0, 0, block.timestamp));
+    }
+
+    // ------------------------------------------------------------ guardian: revoke-only pause
+
+    function test_guardianPauseRefusesEverySessionAction() public {
+        (uint256 tokenId, uint128 liq) = _mintThroughPolicy(20_000e6, 0.2e8);
+        (uint256 minOut, uint160 limit) = policy.swapBounds(safe, POOL_BTC, USDC, 1_000e6);
+        (uint256 min0, uint256 min1) = policy.decreaseMins(safe, POOL_BTC, tokenId, liq);
+        int24 sp = _spot(POOL_BTC);
+        MintParams memory m = MintParams(
+            USDC, CBBTC, 500, ((sp - 600) / 10) * 10, ((sp + 600) / 10) * 10, 1_000e6, 0.01e8, 0, 0, safe, block.timestamp
+        );
+        bytes[7] memory calls = [
+            _swapData(USDC, CBBTC, 500, 1_000e6, minOut, limit),
+            _increaseData(tokenId, 1_000e6, 0.01e8),
+            abi.encodeCall(MamoruActionPolicy.mint, (m)),
+            abi.encodeCall(
+                INPMFull.decreaseLiquidity, (DecreaseLiquidityParams(tokenId, liq, min0, min1, block.timestamp))
+            ),
+            abi.encodeCall(INPMFull.collect, (CollectParams(tokenId, safe, 1, 1))),
+            abi.encodeCall(INPMFull.burn, (tokenId)),
+            abi.encodeCall(IERC20Min.approve, (address(policy), 1))
+        ];
+        address[7] memory targets = [ROUTER, address(policy), address(policy), NPM, NPM, NPM, USDC];
+        for (uint256 i; i < 7; i++) {
+            uint256 snap = vm.snapshotState();
+            assertEq(_check(targets[i], calls[i]), 0, "passes before the pause");
+            vm.revertToState(snap);
+        }
+
+        vm.prank(GUARDIAN);
+        v2().pause(safe);
+        assertTrue(v2().isPaused(safe));
+        assertEq(v2().pausedAt(safe), 2, "generation 1 + 1");
+        for (uint256 i; i < 7; i++) {
+            assertEq(_check(targets[i], calls[i]), 1, "refused while paused");
+        }
+        _approvePolicy(2_000e6, 0.02e8);
+        vm.prank(safe);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV2.AccountPaused.selector, safe));
+        v2().increase(IncreaseLiquidityParams(tokenId, 1_000e6, 0.01e8, 0, 0, block.timestamp));
+        vm.prank(safe);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV2.AccountPaused.selector, safe));
+        policy.mint(m);
+
+        // The owner's own path is not behind the policy: funds still move out of the Safe.
+        uint256 bal = IERC20Min(USDC).balanceOf(safe);
+        _exec(USDC, abi.encodeWithSelector(0xa9059cbb, makeAddr("ownerWallet"), bal));
+        assertEq(IERC20Min(USDC).balanceOf(safe), 0);
+
+        vm.prank(GUARDIAN);
+        v2().unpause(safe);
+        assertFalse(v2().isPaused(safe));
+        assertEq(_check(NPM, calls[4]), 0, "the same envelope back after unpause");
+    }
+
+    function test_onlyGuardianPausesAndItCannotWiden() public {
+        vm.expectRevert(MamoruActionPolicyV2.OnlyGuardian.selector);
+        v2().pause(safe);
+        vm.prank(attacker);
+        vm.expectRevert(MamoruActionPolicyV2.OnlyGuardian.selector);
+        v2().pause(safe);
+        vm.prank(attacker);
+        vm.expectRevert(MamoruActionPolicyV2.OnlyGuardian.selector);
+        v2().unpause(safe);
+        vm.prank(SMART_SESSION);
+        vm.expectRevert(MamoruActionPolicyV2.OnlyGuardian.selector);
+        v2().pause(safe);
+        // The guardian cannot initialize or change an envelope (SmartSession only), nor pass a check.
+        vm.prank(GUARDIAN);
+        vm.expectRevert(MamoruActionPolicy.OnlySmartSession.selector);
+        policy.initializeWithMultiplexer(safe, ID, "");
+        bytes memory burn = abi.encodeCall(INPMFull.burn, (uint256(1)));
+        vm.prank(GUARDIAN);
+        assertEq(policy.checkAction(ID, safe, NPM, 0, burn), 1);
+        // Nor move anyone's tokens: mint and increase only ever pull from msg.sender, and the guardian has no config.
+        (uint256 tokenId,) = _mintThroughPolicy(1_000e6, 0.01e8);
+        vm.prank(GUARDIAN);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NotAdmitted.selector, tokenId));
+        v2().increase(IncreaseLiquidityParams(tokenId, 1_000e6, 0, 0, 0, block.timestamp));
+    }
+
+    function test_renewalEndsAPause() public {
+        vm.prank(GUARDIAN);
+        v2().pause(safe);
+        ConfigId fresh = ConfigId.wrap(bytes32(uint256(2)));
+        _initBtc(fresh, 2, 60_000e6, 180_000e6);
+        assertFalse(v2().isPaused(safe), "the owner's renewal clears the pause");
+        (uint256 minOut, uint160 limit) = policy.swapBounds(safe, POOL_BTC, USDC, 1_000e6);
+        assertEq(_checkId(fresh, ROUTER, _swapData(USDC, CBBTC, 500, 1_000e6, minOut, limit)), 0);
+    }
+
+    function test_unpauseDoesNotReviveARetiredGrant() public {
+        vm.prank(GUARDIAN);
+        v2().pause(safe);
+        _initBtc(ConfigId.wrap(bytes32(uint256(2))), 2, 60_000e6, 180_000e6);
+        vm.prank(GUARDIAN);
+        v2().unpause(safe);
+        (uint256 minOut, uint160 limit) = policy.swapBounds(safe, POOL_BTC, USDC, 1_000e6);
+        assertEq(_check(ROUTER, _swapData(USDC, CBBTC, 500, 1_000e6, minOut, limit)), 1, "generation 1 stays retired");
+    }
+
+    function test_pauseIsPerAccount() public {
+        vm.prank(GUARDIAN);
+        v2().pause(makeAddr("someoneElse"));
+        assertFalse(v2().isPaused(safe));
+        (uint256 minOut, uint160 limit) = policy.swapBounds(safe, POOL_BTC, USDC, 1_000e6);
+        assertEq(_check(ROUTER, _swapData(USDC, CBBTC, 500, 1_000e6, minOut, limit)), 0);
+    }
+
+    function test_noGuardianMeansNoPause() public {
+        MamoruActionPolicyV2 p2 = new MamoruActionPolicyV2(SMART_SESSION, NPM, ROUTER, FACTORY, address(0));
+        vm.prank(address(0));
+        vm.expectRevert(MamoruActionPolicyV2.OnlyGuardian.selector);
+        p2.pause(safe);
+        vm.prank(address(0));
+        vm.expectRevert(MamoruActionPolicyV2.OnlyGuardian.selector);
+        p2.unpause(safe);
     }
 }
