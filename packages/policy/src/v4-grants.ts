@@ -718,6 +718,60 @@ export function splitV4Keys(policy: PolicyVersion, keys: readonly string[], opts
   return [first, ...rest].filter((b) => b.length > 0).map((b) => b.map((i) => i.key))
 }
 
+/**
+ * otto/mamoru#151: the gas one owner transaction of a v4/v5 approval may take, by SIMULATION: about 2.2M under Base's
+ * 2^24 = 16,777,216 per-transaction cap, for the relayer's estimate margin and state drift between the prepare and
+ * the landing. The static model (`DEFAULT_GAS_MODEL`, 590k per action) only seeds the search; it no longer decides how
+ * many transactions an approval takes.
+ */
+export const V4_TX_GAS_TARGET = 14_500_000n
+
+/**
+ * otto/mamoru#151: the longest prefix of `ordered` (whole sessions, in order) whose SIMULATED owner transaction stays at
+ * or under `target`. Starts at `guess` (the static model's split), then grows one session at a time while the next
+ * prefix still simulates under `target`, or shrinks while it does not. `simulate` answers null when the transaction
+ * cannot be simulated (an undeployed Safe): then the static guess stands, as before. Never more than one simulation per
+ * prefix length. Returns `n` = 0 when not even one session fits.
+ */
+export async function fitPrefixBySimulation(
+  ordered: readonly string[],
+  guess: number,
+  simulate: (keys: string[]) => Promise<bigint | null>,
+  target: bigint = V4_TX_GAS_TARGET,
+): Promise<{ n: number; gas: bigint | null; simulated: boolean }> {
+  if (!ordered.length) return { n: 0, gas: null, simulated: false }
+  let n = Math.min(Math.max(guess, 1), ordered.length)
+  const seen = new Map<number, bigint | null>()
+  const sim = async (k: number) => {
+    if (!seen.has(k)) seen.set(k, await simulate(ordered.slice(0, k)))
+    return seen.get(k)!
+  }
+  let gas = await sim(n)
+  if (gas === null) return { n, gas: null, simulated: false }
+  if (gas <= target) {
+    while (n < ordered.length) {
+      const next = await sim(n + 1)
+      if (next === null || next > target) break
+      n += 1
+      gas = next
+    }
+    return { n, gas, simulated: true }
+  }
+  while (n > 1) {
+    n -= 1
+    gas = (await sim(n))!
+    if (gas === null) return { n, gas: null, simulated: false }
+    if (gas <= target) return { n, gas, simulated: true }
+  }
+  return { n: 0, gas, simulated: true }
+}
+
+/** The static model calibrated on one simulated transaction: its gas less `overheadGas`, per action (never below 1). */
+export function calibratedGasModel(gas: bigint, overheadGas: bigint, actions: number): V4GasModel {
+  const per = actions > 0 && gas > overheadGas ? (gas - overheadGas + BigInt(actions) - 1n) / BigInt(actions) : DEFAULT_GAS_MODEL.perActionGas
+  return { perActionGas: per > 0n ? per : 1n, perSessionGas: 0n }
+}
+
 function grantKeyOf(t: { name: string; pool?: string }): string {
   return t.pool ? `${t.name}:${t.pool}` : t.name
 }
