@@ -723,9 +723,10 @@ export function approvalTitle(approval: NonNullable<FundingView['approval']>): s
  */
 function RenewRow({ accountKey, approval }: { accountKey: string; approval: NonNullable<FundingView['approval']> }) {
   const flow = useOwnerAction(accountKey, 'renew')
+  // Every hook before any early return (React's rules of hooks): the row returning null after a renewal must not skip one.
+  const prepared = useFittingPrepared(approval, flow)
   // A renewal that failed leaves the row in place: this is where it is tried again.
   if (flow.result && flow.result.state !== 'failed') return null
-  const prepared = useFittingPrepared(approval, flow)
   return <ApprovalCard approval={approval} summary={prepared?.tx.summary ?? null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void (prepared ? flow.approve() : flow.prepare())} />
 }
 
