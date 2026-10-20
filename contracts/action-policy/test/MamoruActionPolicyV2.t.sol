@@ -338,6 +338,35 @@ contract MamoruActionPolicyV2Test is PolicyFixture {
         assertEq(_check(ROUTER, _swapData(USDC, CBBTC, 500, 1_000e6, minOut, limit)), 0);
     }
 
+    /// Init bounds generation to uint32 (MAX_GENERATION, BadInit(4)), so pausedAt = generation + 1 never nears uint64.
+    function test_pauseAtTheGenerationBound() public {
+        address other = makeAddr("boundSafe");
+        uint64 max = policy.MAX_GENERATION();
+        vm.prank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.BadInit.selector, 4));
+        policy.initializeWithMultiplexer(
+            other, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, max + 1, 1e6, 1e6, new uint256[](0))
+        );
+        // A first enable may jump (a migration carries the old generation): straight to the bound.
+        vm.prank(SMART_SESSION);
+        policy.initializeWithMultiplexer(
+            other, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, max, 1e6, 1e6, new uint256[](0))
+        );
+        assertEq(policy.generationOf(other), max);
+        vm.prank(GUARDIAN);
+        v2().pause(other);
+        assertTrue(v2().isPaused(other));
+        assertEq(v2().pausedAt(other), uint64(max) + 1);
+        // No renewal past the bound: the pause can only be lifted by the guardian, never overflow.
+        vm.prank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.BadInit.selector, 4));
+        policy.initializeWithMultiplexer(
+            other,
+            ConfigId.wrap(bytes32(uint256(5))),
+            _initData(POOL_BTC, BAND, NO_ANCHOR, false, max + 1, 1e6, 1e6, new uint256[](0))
+        );
+    }
+
     function test_noGuardianMeansNoPause() public {
         MamoruActionPolicyV2 p2 = new MamoruActionPolicyV2(SMART_SESSION, NPM, ROUTER, FACTORY, address(0));
         vm.prank(address(0));
