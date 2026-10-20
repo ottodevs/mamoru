@@ -333,10 +333,50 @@ try {
     )
     if (!feeConfirmed) exitCode = 1
   } else {
-    note('fee earned by the maker', null, `output-side control-quote cross-check unavailable, so the fee cannot be demonstrated this run (only the nominal ${(takerUsdcIn * BigInt(feeBps)) / 10_000n} raw USDC-equivalent by construction); input side showed ${virtualUsdcDelta} against a ${takerUsdcIn} gross input, no premium credited there`)
+    // An unavailable control quote means the fee could not be demonstrated this run: that is a probe failure,
+    // not an informational footnote, since the whole point of this section is to show the fee was actually
+    // charged, not just assert it.
+    note('fee earned by the maker', false, `output-side control-quote cross-check unavailable, so the fee was NOT demonstrated this run (only the nominal ${(takerUsdcIn * BigInt(feeBps)) / 10_000n} raw USDC-equivalent by construction, unverified); input side showed ${virtualUsdcDelta} against a ${takerUsdcIn} gross input, no premium credited there`)
+    exitCode = 1
   }
 
-  // --- 10. Overcommit: the Safe sends its real WETH away without docking first; the next fill must revert -----
+  // --- 10a. Overcommit by allowance: ship() never checks allowance either, only a fill does -------------------
+  // Aqua.sol's ship() does no ERC-20 calls at all (confirmed against github.com/1inch/aqua/blob/main/src/Aqua.sol):
+  // it writes straight to storage. Neither real balance (10b, below) nor allowance is checked until a fill calls
+  // pull()/push(), which do `IERC20(token).safeTransferFrom(...)`. So a Safe with ZERO allowance can still ship()
+  // an arbitrary WETH-denominated virtual balance without reverting; only the fill that tries to move it fails.
+  const allowanceDrop = await ownerExec(lab, world.relayer, world.a1, { to: WETH, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [AQUA_FROM_DOCS, 0n] }) }, 'passkey')
+  note('owner drops the Safe\'s WETH allowance to Aqua.sol to zero', allowanceDrop.ok, `${allowanceDrop.ok ? allowanceDrop.receipt.gasUsed : 'n/a'} gas`)
+  if (!allowanceDrop.ok) exitCode = 1
+  const zeroAllowanceProgram = AquaXYCAmmStrategy.newConcentrate({ sqrtPriceMin: sqrtMin, sqrtPriceMax: sqrtMax }).withSalt(999n).build()
+  const zeroAllowanceOrder = Order.new({ maker: makerAddr, program: zeroAllowanceProgram, traits: MakerTraits.default() })
+  const zeroAllowanceShipTx = aqua.ship({ app: swapVmAddr, strategy: zeroAllowanceOrder.encode(), amountsAndTokens: [{ token: new AquaAddress(WETH), amount: 100_000_000_000_000_000n }, { token: new AquaAddress(USDC), amount: 200_000_000n }] })
+  const zeroAllowanceShip = await ownerExec(lab, world.relayer, world.a1, { to: getAddress(zeroAllowanceShipTx.to), data: zeroAllowanceShipTx.data as Hex }, 'passkey')
+  note('ship() succeeds with zero WETH allowance (0.1 WETH virtual balance, unbacked)', zeroAllowanceShip.ok, `${zeroAllowanceShip.ok ? zeroAllowanceShip.receipt.gasUsed : 'n/a'} gas; real WETH balance and allowance are both irrelevant to ship() -- it is pure storage, no IERC20 call`)
+  if (!zeroAllowanceShip.ok) exitCode = 1
+  const zeroAllowanceSwap = swapVm.swap({ order: zeroAllowanceOrder, tokenIn: new AquaAddress(USDC), tokenOut: new AquaAddress(WETH), amount: 50_000_000n, takerTraits: TakerTraits.default() })
+  let allowanceRevertSeen = false
+  let allowanceRevertDetail = ''
+  try {
+    await lab.client.call({ account: taker.address, to: getAddress(zeroAllowanceSwap.to), data: zeroAllowanceSwap.data as Hex, gas: 5_000_000n })
+    allowanceRevertDetail = 'the call did NOT revert'
+  } catch (e) {
+    allowanceRevertSeen = true
+    allowanceRevertDetail = reason(e)
+  }
+  note(
+    'overcommit by allowance: a fill that would pull WETH out reverts (real WETH balance is ample; only the allowance is zero)',
+    allowanceRevertSeen,
+    allowanceRevertDetail,
+  )
+  if (!allowanceRevertSeen) exitCode = 1
+  const zeroAllowanceDock = aqua.dock({ app: swapVmAddr, strategyHash: AquaProtocolContract.calculateStrategyHash(zeroAllowanceOrder.encode()), tokens: [new AquaAddress(WETH), new AquaAddress(USDC)] })
+  await ownerExec(lab, world.relayer, world.a1, { to: getAddress(zeroAllowanceDock.to), data: zeroAllowanceDock.data as Hex }, 'passkey')
+  const allowanceRestore = await ownerExec(lab, world.relayer, world.a1, { to: WETH, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [AQUA_FROM_DOCS, wethAmount] }) }, 'passkey')
+  note('WETH allowance restored (so the rest of this probe is unaffected)', allowanceRestore.ok, `${allowanceRestore.ok ? allowanceRestore.receipt.gasUsed : 'n/a'} gas, back to ${wethAmount}`)
+  if (!allowanceRestore.ok) exitCode = 1
+
+  // --- 10b. Overcommit by real balance: the Safe sends its real WETH away without docking first -----------------
   const dead: Address = '0x000000000000000000000000000000000000dEaD'
   const wethLeft = await lab.balanceOf('WETH', safe)
   const drain = await ownerExec(lab, world.relayer, world.a1, { to: WETH, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [dead, wethLeft] }) }, 'passkey')
