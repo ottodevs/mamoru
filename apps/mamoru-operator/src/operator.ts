@@ -6,7 +6,7 @@ import { address, entry, erc20Abi, moduleRegistryAbi, nonfungiblePositionManager
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
-import { POLICIES, USAGE_RENEW_BPS, V4_POOLS, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { POLICIES, USAGE_RENEW_BPS, V4_POOLS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -29,6 +29,7 @@ import {
   type LiveSwap,
   type SafeTx,
 } from '@mamoru/account/live'
+import { multiSendCallOnly } from '@mamoru/account/safe'
 import { permissionIdOf, revocationCalls, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
 import { minOut, quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
@@ -371,6 +372,12 @@ const TRUST_GAS = 400_000n
 const ATTEST_GAS = 150_000n
 /** MamoruActionPolicy.MAX_ADMIT: positions one Init may admit. */
 const MAX_ADMIT = 64
+
+/** The owner's WebAuthn signature check on top of a Safe transaction's own gas (shared signer + P-256 verification), with margin. */
+const PASSKEY_VERIFY_GAS = 300_000n
+
+/** Safe StorageAccessible: delegatecall `targetContract` with `calldataPayload`, then revert with (success, returndata). */
+const storageAccessibleAbi = parseAbi(['function simulateAndRevert(address targetContract, bytes calldataPayload)'])
 
 const v4PolicyAbi = parseAbi([
   'function generationOf(address account) view returns (uint64)',
@@ -1289,15 +1296,44 @@ export class Operator {
 
   /** Simulated gas of the activation calls from the Safe plus calldata and Safe/WebAuthn overhead; a static estimate when the simulation is unavailable (e.g. undeployed Safe). */
   private async activationGas(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], sessions: number, block: bigint, fallback?: bigint): Promise<bigint> {
+    return (await this.activationGasOf(live, calls, sessions, block, fallback)).gas
+  }
+
+  /**
+   * otto/mamoru#151: the gas limit the owner's Safe transaction carrying `calls` needs, or null when it cannot be read.
+   * The batch runs in one simulation in the Safe's own context: `Safe.simulateAndRevert(MultiSendCallOnly, multiSend)`
+   * delegatecalls the batch exactly as execTransaction does, then reverts, so no refund is netted out of the gas used
+   * (a reverted call refunds nothing). Inner success is the first word of the revert data. Scaled by 9/8 and plus
+   * PASSKEY_VERIFY_GAS: on a Base fork eth_estimateGas of the signed owner transaction was 1.10-1.113 x this figure over
+   * eight v4/v5 approval transactions (t8-fork.ts prints both), from execTransaction around the batch and the nested
+   * calls' 63/64 rule; the passkey (WebAuthn) check replaces the fork's EOA signature.
+   */
+  private async ownerTxGasLimit(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], block: bigint): Promise<bigint | null> {
+    if (!calls.length) return null
+    try {
+      // One call or many, through MultiSendCallOnly: the same execution as the owner transaction (a single call is sent
+      // to its target directly; through MultiSend it costs a little more, so the figure stays on the safe side).
+      const ms = multiSendCallOnly(calls.map((c) => ({ to: c.to, value: c.value ?? 0n, data: c.data })))
+      const data = encodeFunctionData({ abi: storageAccessibleAbi, functionName: 'simulateAndRevert', args: [ms.to, ms.data] })
+      const [res] = await simulateCalls(this.client, [{ from: this.relayer.address, to: live.safe, data }], block)
+      if (!res || res.returnData.length < 2 + 64 * 2 || BigInt(res.returnData.slice(0, 66)) !== 1n) return null
+      return (res.gasUsed * 9n) / 8n + PASSKEY_VERIFY_GAS
+    } catch {
+      return null
+    }
+  }
+
+  /** `activationGas`, and whether it was simulated (false: the static estimate). */
+  private async activationGasOf(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], sessions: number, block: bigint, fallback?: bigint): Promise<{ gas: bigint; simulated: boolean }> {
     const bytes = calls.reduce((n, c) => n + BigInt((c.data.length - 2) / 2), 0n)
     const overhead = 16n * bytes + ACTIVATION_OVERHEAD_GAS
     try {
       const res = await simulateCalls(this.client, calls.map((c) => ({ from: live.safe, to: c.to, data: c.data })), block)
-      if (res.every((x) => x.status === 'success')) return res.reduce((n, x) => n + x.gasUsed, 0n) + overhead
+      if (res.every((x) => x.status === 'success')) return { gas: res.reduce((n, x) => n + x.gasUsed, 0n) + overhead, simulated: true }
     } catch {
       // fall through to the static estimate
     }
-    return (fallback ?? 400_000n + BigInt(sessions) * STATIC_GAS_PER_SESSION) + overhead
+    return { gas: (fallback ?? 400_000n + BigInt(sessions) * STATIC_GAS_PER_SESSION) + overhead, simulated: false }
   }
 
   /**
@@ -1468,30 +1504,50 @@ export class Operator {
   }
 
   /**
-   * Spec 007 T7 (c): one v4 approval as consecutive owner transactions. The keys are ordered (orderV4Keys) and split by
-   * `splitV4Keys` with this transaction's own overhead (revokes, trust, attest) off its ceiling; the first part is built,
-   * and its simulated gas (a static per-action estimate when it cannot be simulated, e.g. an undeployed Safe) must fit
-   * `budget`, else its last session moves to the next part. What is left over is the account's missing grants: the
-   * renew row offers them, one owner transaction at a time, through planExtend, once this one has landed.
+   * Spec 007 T7 (c): one v4 approval as consecutive owner transactions. The keys are ordered (orderV4Keys); the first
+   * transaction takes the longest prefix of whole sessions whose SIMULATED gas (bounded up to the gas limit it needs,
+   * refunds included), revokes, trust and attest included, stays at or under min(`budget`, V4_TX_GAS_TARGET) (otto/mamoru#151: ~2.2M under 2^24). The static per-action model only
+   * seeds that search (`fitPrefixBySimulation`); when the Safe cannot be simulated (undeployed) the model's split stands
+   * and must fit `budget` as before. What is left over is the account's missing grants: the renew row offers them, one
+   * owner transaction at a time, through planExtend (fitted the same way), once this one has landed.
    */
   private async fitV4(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, keys: string[], revokes: Hex[], mode: 'full' | 'extend', budget: bigint) {
     const overheadGas = BigInt(revokes.length) * REVOKE_GAS_EACH + (acc.trusted ? 0n : TRUST_GAS) + ATTEST_GAS
     const ordered = orderV4Keys(policy, keys)
-    let ks = splitV4Keys(policy, ordered, { overheadGas })[0] ?? []
-    for (;;) {
-      if (!ks.length) throw new HttpError(409, 'RENEWAL_TOO_LARGE', 'this approval does not fit one transaction on Base: nothing was changed, Mamoru keeps running')
+    const target = budget < V4_TX_GAS_TARGET ? budget : V4_TX_GAS_TARGET
+    const guess = splitV4Keys(policy, ordered, { overheadGas, ceiling: target })[0]?.length ?? 0
+    const built = new Map<number, { a: Awaited<ReturnType<Operator['approval']>>; calls: ReturnType<typeof revocationCalls>; gas: bigint; simulated: boolean }>()
+    const build = async (ks: string[]) => {
       const a = await this.approval(acc, live, policy, r, cap, ks, mode)
       const calls = [...revocationCalls(revokes), ...a.batch.calls]
       const fallback = overheadGas + a.stored.reduce((n, g) => n + estimateSessionGas(g.grant.actions.length), 0n)
-      const gas = await this.activationGas(live, calls, a.stored.length, r.block, fallback)
-      if (gas <= budget) {
-        const rest = ordered.filter((k) => !ks.includes(k))
-        const steps = 1 + (rest.length ? splitV4Keys(policy, rest).length : 0)
-        console.log(`[v4] ${live.safe} ~${gas} gas: ${a.stored.length} sessions now (generation ${a.v4?.generation}), ${rest.length} in ${steps - 1} later step(s)`)
-        return { ...a, calls, rest, steps }
-      }
-      ks = ks.slice(0, -1)
+      // The gas LIMIT the owner transaction needs, before refunds (a revoke clears storage: t8-fork measured
+      // eth_estimateGas 13.78M against a receipt of 11.31M on the v5 move's first transaction), from one simulation of
+      // the whole batch in the Safe's own context. Not available (an undeployed Safe): the per-call simulation, bounded
+      // up by 5/4 (EIP-3529: a refund is at most 1/5 of the gas before it), else the static estimate.
+      const limit = await this.ownerTxGasLimit(live, calls, r.block)
+      const sim = limit === null ? await this.activationGasOf(live, calls, a.stored.length, r.block, fallback) : { gas: limit, simulated: true }
+      const gas = limit !== null || !sim.simulated ? sim.gas : (sim.gas * 5n) / 4n
+      built.set(ks.length, { a, calls, gas, simulated: sim.simulated })
+      return built.get(ks.length)!
     }
+    const fit = await fitPrefixBySimulation(ordered, guess, async (ks) => {
+      const b = await build(ks)
+      return b.simulated ? b.gas : null
+    }, target)
+    let n = fit.n
+    // Not simulable: the static split, held to `budget` (its estimate shrinks it one session at a time, as before).
+    while (n > 0 && !fit.simulated && (built.get(n) ?? (await build(ordered.slice(0, n)))).gas > budget) n -= 1
+    if (n === 0) throw new HttpError(409, 'RENEWAL_TOO_LARGE', 'this approval does not fit one transaction on Base: nothing was changed, Mamoru keeps running')
+    const { a, calls, gas, simulated } = built.get(n) ?? (await build(ordered.slice(0, n)))
+    const ks = ordered.slice(0, n)
+    const rest = ordered.filter((k) => !ks.includes(k))
+    // How many more owner transactions the rest takes, priced per action as this one simulated (else the static model).
+    const actions = a.stored.reduce((m, g) => m + g.grant.actions.length, 0)
+    const model = simulated ? calibratedGasModel(gas, overheadGas, actions) : undefined
+    const steps = 1 + (rest.length ? splitV4Keys(policy, rest, { ...(model ? { model } : {}), ceiling: target }).length : 0)
+    console.log(`[v4] ${live.safe} ~${gas} gas${simulated ? ' (simulated)' : ' (estimated)'}: ${a.stored.length} sessions now (generation ${a.v4?.generation}), ${rest.length} in ${steps - 1} later step(s)`)
+    return { ...a, calls, rest, steps }
   }
 
   /**
