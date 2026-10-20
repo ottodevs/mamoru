@@ -1,7 +1,7 @@
 import { encodeFunctionData, maxUint128, type PublicClient } from 'viem'
 import { ReasonError, type Address, type Hex } from '@mamoru/domain'
-import { address, baseRegistry, entry, erc20Abi, nonfungiblePositionManagerAbi, swapRouter02Abi, type Registry, type RegistryName } from '@mamoru/registry'
-import { quoterV2, type QuoteRequest } from './quote.ts'
+import { address, baseRegistry, entry, erc20Abi, mamoruActionPolicyV2Abi, nonfungiblePositionManagerAbi, swapRouter02Abi, type Registry, type RegistryName } from '@mamoru/registry'
+import { quoterV2, type QuoteRequest, type QuoterV2 } from './quote.ts'
 
 /** A call that the session will sign. The target is always a registry entry. */
 export type V3Call = { target: RegistryName; to: Address; value: 0n; data: Hex }
@@ -62,6 +62,8 @@ export type SwapToNativeParams = {
 export type UniswapV3 = {
   readonly registry: Registry
   approve(tokenName: RegistryName, spender: 'SwapRouter02' | 'NonfungiblePositionManager', amount: bigint): V3Call
+  /** An approval of a registry token of this registry to a spender given by address (the deployed action policy, spec 007). */
+  approveTo(tokenName: RegistryName, spender: Address, amount: bigint): V3Call
   /** FR-UNI-002: SwapRouter02.exactInputSingle, recipient the account, positive minimum; no price limit unless `sqrtPriceLimitX96` is given. */
   exactInputSingle(p: ExactInputSingleParams): V3Call
   /** FR-UNI-003: mint to the account, ticks on the pool spacing, both minimums positive, deadline set. */
@@ -85,6 +87,8 @@ export type UniswapV3 = {
   deadlineCheck(deadline: bigint): V3Call
   /** FR-UNI-001: QuoterV2.quoteExactInputSingle of this registry, at the block of the operation. */
   quoteExactInputSingle(client: PublicClient, q: QuoteRequest): Promise<bigint>
+  /** Spec 007: the same quote with a price limit (`quoterV2(registry).quoteExactInputSingleWithLimit`). */
+  quoteExactInputSingleWithLimit: QuoterV2['quoteExactInputSingleWithLimit']
 }
 
 /**
@@ -105,6 +109,11 @@ export function uniswapV3(registry: Registry): UniswapV3 {
   function approve(tokenName: RegistryName, spender: 'SwapRouter02' | 'NonfungiblePositionManager', amount: bigint): V3Call {
     token(tokenName)
     return call(tokenName, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [address(spender, registry), amount] }))
+  }
+
+  function approveTo(tokenName: RegistryName, spender: Address, amount: bigint): V3Call {
+    token(tokenName)
+    return call(tokenName, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [spender, amount] }))
   }
 
   function exactInputSingle(p: ExactInputSingleParams): V3Call {
@@ -213,7 +222,7 @@ export function uniswapV3(registry: Registry): UniswapV3 {
 
   const quoter = quoterV2(registry)
 
-  return { registry, approve, exactInputSingle, mint, decreaseLiquidity, collect, burn, exactInputSingleTo, swapToNative, deadlineCheck, quoteExactInputSingle: quoter.quoteExactInputSingle }
+  return { registry, approve, approveTo, exactInputSingle, mint, decreaseLiquidity, collect, burn, exactInputSingleTo, swapToNative, deadlineCheck, quoteExactInputSingle: quoter.quoteExactInputSingle, quoteExactInputSingleWithLimit: quoter.quoteExactInputSingleWithLimit }
 }
 
 // Free forms, bound to the Base registry. They go away with the registry default; new code uses `uniswapV3(registry)`.
@@ -263,3 +272,24 @@ export function swapToEth(p: { recipient: Address; tokenIn: RegistryName; fee: n
 export function deadlineCheck(deadline: bigint): V3Call {
   return base.deadlineCheck(deadline)
 }
+
+/**
+ * otto/mamoru#171, spec 007: add liquidity to a position the account holds, ONLY through MamoruActionPolicyV2.increase
+ * at `policy` (the deployed address, never a registry name: it is a runtime parameter like the policy's `mint`). The
+ * position manager's own `increaseLiquidity` does not check who owns the tokenId, so no session ever calls it; the
+ * policy adds only to positions it admitted for the account that the account still owns, after the account approved
+ * the policy for at most the desired amounts (`approveTo`). Both minimums positive and a deadline set, as for a mint.
+ * Chain-neutral: it encodes no registry address, only `policy`.
+ */
+export function policyIncrease(policy: Address, p: { tokenId: bigint; amount0Desired: bigint; amount1Desired: bigint; amount0Min: bigint; amount1Min: bigint; deadline: bigint }): V3Call {
+  if (p.tokenId <= 0n) throw new Error('tokenId must be set')
+  if (p.amount0Min <= 0n || p.amount1Min <= 0n) throw new Error('increase minimums must be positive')
+  if (p.deadline <= 0n) throw new Error('deadline must be set')
+  return { target: 'MamoruActionPolicyV2', to: policy, value: 0n, data: encodeFunctionData({ abi: mamoruActionPolicyV2Abi, functionName: 'increase', args: [p] }) }
+}
+
+/** @deprecated Bound to `baseRegistry`. Use `uniswapV3(registry).approveTo`. */
+export function approveTo(tokenName: RegistryName, spender: Address, amount: bigint): V3Call {
+  return base.approveTo(tokenName, spender, amount)
+}
+

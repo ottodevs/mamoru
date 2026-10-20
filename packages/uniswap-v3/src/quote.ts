@@ -9,10 +9,19 @@ export const quoterV2Abi = parseAbi([
 
 export type QuoteRequest = { tokenIn: Address; tokenOut: Address; fee: number; amountIn: bigint; blockNumber: bigint }
 
+/** A quote taken with a price limit: `filled` false when QuoterV2 stopped at the limit before the whole input. */
+export type LimitQuote = { amountOut: bigint; sqrtPriceX96After: bigint; filled: boolean }
+
 export type QuoterV2 = {
   readonly registry: Registry
   /** FR-UNI-001: QuoterV2.quoteExactInputSingle at the block of the operation, as an eth_call to this registry's QuoterV2. */
   quoteExactInputSingle(client: PublicClient, q: QuoteRequest): Promise<bigint>
+  /**
+   * Spec 007 (#151 review P1-3): the same quote with the price limit a swap under MamoruActionPolicyV2 is sent with.
+   * QuoterV2 stops at the limit and answers what that partial swap returns; `sqrtPriceX96After` equal to the limit
+   * means it did not fill the whole input (`filled` false), so the router would take less than `amountIn`.
+   */
+  quoteExactInputSingleWithLimit(client: PublicClient, q: QuoteRequest & { sqrtPriceLimitX96: bigint }): Promise<LimitQuote>
 }
 
 /**
@@ -29,13 +38,13 @@ export function quoterV2(registry: Registry): QuoterV2 {
     return addr
   }
 
-  async function quoteExactInputSingle(client: PublicClient, q: QuoteRequest): Promise<bigint> {
+  async function quote(client: PublicClient, q: QuoteRequest, sqrtPriceLimitX96: bigint): Promise<{ amountOut: bigint; sqrtPriceX96After: bigint }> {
     const tokenIn = registryToken(q.tokenIn, 'tokenIn')
     const tokenOut = registryToken(q.tokenOut, 'tokenOut')
     const data = encodeFunctionData({
       abi: quoterV2Abi,
       functionName: 'quoteExactInputSingle',
-      args: [{ tokenIn, tokenOut, amountIn: q.amountIn, fee: q.fee, sqrtPriceLimitX96: 0n }],
+      args: [{ tokenIn, tokenOut, amountIn: q.amountIn, fee: q.fee, sqrtPriceLimitX96 }],
     })
     let raw
     try {
@@ -44,15 +53,30 @@ export function quoterV2(registry: Registry): QuoterV2 {
       throw new ReasonError('EHG_QUOTE_UNAVAILABLE', (e as Error).message.split('\n')[0])
     }
     if (!raw.data) throw new ReasonError('EHG_QUOTE_UNAVAILABLE', 'empty QuoterV2 answer')
-    const [amountOut] = decodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', data: raw.data })
-    return amountOut
+    const [amountOut, sqrtPriceX96After] = decodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', data: raw.data })
+    return { amountOut, sqrtPriceX96After }
   }
-  return { registry, quoteExactInputSingle }
+
+  async function quoteExactInputSingle(client: PublicClient, q: QuoteRequest): Promise<bigint> {
+    return (await quote(client, q, 0n)).amountOut
+  }
+
+  async function quoteExactInputSingleWithLimit(client: PublicClient, q: QuoteRequest & { sqrtPriceLimitX96: bigint }): Promise<LimitQuote> {
+    if (q.sqrtPriceLimitX96 === 0n) throw new Error('quoteExactInputSingleWithLimit: a zero limit is no limit')
+    const r = await quote(client, q, q.sqrtPriceLimitX96)
+    return { ...r, filled: r.sqrtPriceX96After !== q.sqrtPriceLimitX96 }
+  }
+  return { registry, quoteExactInputSingle, quoteExactInputSingleWithLimit }
 }
 
 /** @deprecated Bound to `baseRegistry`. Use `quoterV2(registry).quoteExactInputSingle` or `uniswapV3(registry).quoteExactInputSingle`. */
 export async function quoteExactInputSingle(client: PublicClient, q: QuoteRequest): Promise<bigint> {
   return quoterV2(baseRegistry).quoteExactInputSingle(client, q)
+}
+
+/** @deprecated Bound to `baseRegistry`. Use `quoterV2(registry).quoteExactInputSingleWithLimit`. */
+export async function quoteExactInputSingleWithLimit(client: PublicClient, q: QuoteRequest & { sqrtPriceLimitX96: bigint }): Promise<LimitQuote> {
+  return quoterV2(baseRegistry).quoteExactInputSingleWithLimit(client, q)
 }
 
 /** FR-UNI-002: the minimum out from a fresh quote and the policy tolerance. Never zero. */
