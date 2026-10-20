@@ -251,6 +251,39 @@ new address does not know which positions the old one admitted: the moving renew
 Rollout follows spec 005 phase 2: new accounts first on a `conservador-live-v4` policy version, then the renew row
 for existing accounts.
 
+## V2: MamoruActionPolicyV2 (otto/mamoru#151, #171)
+
+The deployed contract (V1, `0x0083A9ca619f22A4f29704F97981dfFe8CD35215`) stays as it is; its source is not touched
+(`verify-deployed-policy.ts` still matches it byte for byte). `src/MamoruActionPolicyV2.sol` is V1 plus three things,
+each a refusal or a path a session could not take before:
+
+- `increase(IncreaseLiquidityParams)`: the only way a session adds liquidity. The manager's `increaseLiquidity` does
+  not check who owns the tokenId, so it is never a session action. V2 requires the tokenId admitted for the account
+  and `ownerOf == account`, the current-generation config of that position's pool, then does what `mint` does: pull,
+  approve the manager for exactly the desired amounts, spot inside [lo, hi] right before the call, reset, refund the
+  balance delta. `checkAction(increase)`: admitted and owned, a non-empty range, the desired amounts charged to the
+  pool's budget like a mint.
+- A revoke-only guardian: immutable `GUARDIAN` (address(0) = none) may `pause(account)` / `unpause(account)`, nothing
+  else. `pausedAt = generation + 1`, so the owner's next renewal ends a pause and an unpause never revives a retired
+  generation. While paused `checkAction` refuses every action and `mint`/`increase` revert `AccountPaused`.
+- The swap deadline `SwapRouter02.multicall(deadline, [])` (#140), accepted only in its exact 100-byte empty encoding,
+  after the generation and pause checks. The v4 grants never carried it (V1 refuses it); v5 grants carry it under the
+  policy, so a pause stops it too.
+
+Size: at 10,000 optimizer runs V2 is over EIP-170; `foundry.toml` compiles only V2 at 1,000 runs (23,519 bytes).
+`script/DeployV2.s.sol` deploys and registers it in one `deployModule` call; `GUARDIAN` is a required input.
+
+Policy `conservador-live-v5` (`policies-v4.ts`): v4's pools, caps, bands and budgets; enter-swap + the deadline,
+manage-any + increase + the deadline (15 actions per pool, 45 in all). Every earlier policy hash is pinned by test.
+The operator resolves it only with `MAMORU_ACTION_POLICY_V2_ADDRESS` (never the V1 address); the D1 flag
+`onchain_action_policy_v5` offers v2/v3/v4 accounts the move, a renewal on V2 at the V1 generation + 1 with every old
+session revoked and the Safe's positions in `Init.admit`. The engine reads `isPaused` before each op (POLICY_PAUSED)
+and adds to an admitted position within `range.increaseToleranceBps` instead of minting a second NFT.
+
+Gas (`packages/scenarios/action-policy/t8-fork.ts`, Base fork): the move from v4 is three owner transactions,
+11.31M / 10.45M / 4.44M; a v5 renewal 10.96M / 10.32M / 4.44M (all under 2^24 = 16.78M; v4 needs two). A guardian
+pause is 47,894 gas. `checkAction(increase)` 65,525, `policy.increase` 237,723 (exec), the deadline 27,965 (cold).
+
 ## Re-approval UX (#33 extend)
 
 One passkey tap, nothing moves, same screen as the #149 renewal and the #127 cap raise. The batch: self-attest
