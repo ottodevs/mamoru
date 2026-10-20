@@ -101,6 +101,11 @@ export type PositionObs = {
   principalOwed1: bigint
   /** The tokenId is in the account's allowedTokenIds. */
   managed: boolean
+  /**
+   * Spec 007, set only when the engine runs a session that can increase (MamoruActionPolicyV2): the policy admitted this
+   * tokenId for the account in its pool, read at the observation block. Absent: not read; never treated as admitted.
+   */
+  admitted?: boolean
   /** Lab (#101 lazy re-range): block time since which the price has been out of the range without coming back. */
   outOfRangeSince?: bigint | null
 }
@@ -154,6 +159,25 @@ export type EnterMintProposal = {
   amount1Desired: bigint
 }
 
+/**
+ * otto/mamoru#171: an entry added to a position the account already holds in the pool, instead of a second NFT:
+ * approvals of MamoruActionPolicyV2 + MamoruActionPolicyV2.increase(tokenId) (spec 007: only a policy whose manage-any
+ * carries that action proposes it, and only for a position the policy admitted). `tickLower`/`tickUpper` are the
+ * position's own range, which the amounts are split for; the engine checks them against the chain before it builds
+ * the call.
+ */
+export type IncreaseLiquidityProposal = {
+  kind: 'increase_liquidity'
+  /** The pool's manage-any session (v5): no grant per position. */
+  grant: 'manage-any' | `manage-any:${string}`
+  pool: RegistryName
+  tokenId: bigint
+  tickLower: number
+  tickUpper: number
+  amount0Desired: bigint
+  amount1Desired: bigint
+}
+
 export type HarvestProposal = {
   kind: 'harvest'
   grant: `manage:${string}` | 'convert-any' | `convert-any:${string}` | 'manage-any' | `manage-any:${string}`
@@ -184,7 +208,7 @@ export type ReduceProposal = {
   liquidity: bigint
 }
 
-export type Proposal = EnterSwapProposal | EnterMintProposal | HarvestProposal | RerangeProposal | ReduceProposal
+export type Proposal = EnterSwapProposal | EnterMintProposal | IncreaseLiquidityProposal | HarvestProposal | RerangeProposal | ReduceProposal
 
 export type DecisionKind = 'hold' | Proposal['kind']
 

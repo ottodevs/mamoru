@@ -7,7 +7,7 @@ const owner = (op: OpView) => op.opId.startsWith('own-')
 /** "USDC/cbBTC": the pool's pair, no spaces, matching the style history lines used before pools were tagged. */
 const pair = (pool: string) => pairLabel(pool).replace(/ /g, '')
 /** Engine op kind from its id (eng-…-enter_swap), or null for an owner op. */
-const engineKind = (op: OpView) => (owner(op) ? null : (/(enter_swap|enter_mint|harvest|close_position|convert)$/.exec(op.opId)?.[1] ?? null))
+const engineKind = (op: OpView) => (owner(op) ? null : (/(enter_swap|enter_mint|increase_liquidity|harvest|close_position|convert)$/.exec(op.opId)?.[1] ?? null))
 
 /** Failures that only mean another op took over (a newer approval, a stop): nothing for the user to do. */
 const INTERNAL_FAILURES = new Set(['ARMED_SUPERSEDED', 'STOPPED', 'ALREADY_ACTIVE'])
@@ -63,6 +63,11 @@ export function opLine(op: OpView): string {
         if (!op.tokenIn || !op.tokenOut) return done ? 'Swapped' : 'Swapping'
         const from = op.amountIn ? formatAmount(op.amountIn, op.tokenIn) : op.tokenIn
         return done ? `Swapped ${from} to ${op.tokenOut}` : `Swapping ${from} to ${op.tokenOut}`
+      }
+      // otto/mamoru#171: an entry added to the position the account already holds there, not a new one.
+      if (engineKind(op) === 'increase_liquidity') {
+        if (!op.pool) return done ? 'Added to a position' : 'Adding to a position'
+        return done ? `Added to ${pair(op.pool)} position` : `Adding to ${pair(op.pool)} position`
       }
       if (!op.pool) return done ? 'Opened a position' : 'Opening a position'
       return done ? `Opened ${pair(op.pool)} position` : `Opening ${pair(op.pool)} position`

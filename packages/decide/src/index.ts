@@ -17,7 +17,7 @@ export { safeSavings } from './enter/index.ts'
 export { amountsForLiquidity, inSavings, volatileOf } from './value.ts'
 export { fallBpsOf, fallFreezeOf, marketOf, type CumulativePoint } from './guard/index.ts'
 export { belowShareOf, edgeBpsOf, meanTickAt, rangeFor, realizedVolOf, regimeOf, skewedRange, spiking, volWidthTicks, widenEarly, widthFor, type Regime } from './geometry/index.ts'
-export { allocate, widthOf, type Allocation, type BucketValue, type Waiting } from './allocate/index.ts'
+export { allocate, reusablePosition, DEFAULT_INCREASE_TOLERANCE_BPS, widthOf, type Allocation, type BucketValue, type Waiting } from './allocate/index.ts'
 export { depthOf, twapFloor, type Depth } from './depth/index.ts'
 export { MAX_FEE_APR_BPS, outOfRangeSinceOf, rerangeWorth, RERANGE_OPS, withOutOfRangeSince, type RerangeWorth } from './rebalance/lazy.ts'
 export { weightTargets } from './rebalance/weights.ts'
@@ -31,6 +31,7 @@ const STAGED_DRIFT_BPS = 100
 const PROPOSAL_CODE = {
   enter_swap: 'DECIDE_ENTER',
   enter_mint: 'DECIDE_ENTER',
+  increase_liquidity: 'DECIDE_ENTER',
   harvest: 'DECIDE_HARVEST',
   rerange: 'DECIDE_RANGE_ADJUST',
   reduce: 'STRATEGY_PREFERENCE_DEVIATION',

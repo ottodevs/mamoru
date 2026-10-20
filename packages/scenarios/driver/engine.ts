@@ -1090,6 +1090,7 @@ export class Engine {
       // Without a decrease the batch prices nothing (collect and burn to the account): late, it is harmless.
       return { calls: calls.map(exec), expiresAt: liquidity > 0n ? deadline : null }
     }
+    if (p.kind === 'increase_liquidity') throw new ReasonError('SESSION_MISSING', `${p.grant}: this engine does not build increase_liquidity`)
     // otto/mamoru#140: a harvest only collects, to the account. A conversion in the same batch swapped a fixed amount
     // checked against the simulated Collect only: if the fees were collected elsewhere before inclusion, it swapped
     // idle principal instead. The volatile fees stay in the account, where a later idle sell-back (priced at the

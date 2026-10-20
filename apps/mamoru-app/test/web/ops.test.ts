@@ -29,6 +29,11 @@ describe('opLine', () => {
     expect(opLine({ ...op, state: 'submitted' })).toBe('Opening USDC/cbBTC position')
   })
 
+  test('increase_liquidity adds to the held position (otto/mamoru#171), it does not open one', () => {
+    expect(opLine(base({ opId: 'eng-1-1-op-3-increase_liquidity', kind: 'enter', state: 'confirmed', pool: 'pool:USDC/cbBTC/500' }))).toBe('Added to USDC/cbBTC position')
+    expect(opLine(base({ opId: 'eng-1-1-op-3-increase_liquidity', kind: 'enter', state: 'submitted' }))).toBe('Adding to a position')
+  })
+
   test('enter_mint without a pool (old row) is neutral, not a guess', () => {
     const op = base({ opId: 'eng-1-1-op-2-enter_mint', kind: 'enter', state: 'confirmed' })
     expect(opLine(op)).toBe('Opened a position')

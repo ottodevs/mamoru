@@ -450,6 +450,8 @@ type Progress = NonNullable<FundingView['progress']>
 const ENGINE_STEP: Record<OpRecord['kind'], Progress['step']> = {
   enter_swap: 'swapping',
   enter_mint: 'opening',
+  // otto/mamoru#171: adding to a held position is the same step for the owner as opening one.
+  increase_liquidity: 'opening',
   close_position: 'reranging',
   harvest: 'rebalancing',
   convert: 'rebalancing',

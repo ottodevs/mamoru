@@ -1,6 +1,6 @@
 import type { Hex } from '@mamoru/domain'
 import { marketOf, meanTickAt, realizedVolOf, thirdsOut, type CumulativePoint, type Observation, type PoolGeometryObs, type PoolGuardObs, type PoolObs, type SessionObs } from '@mamoru/decide'
-import { grantKey, type PolicyVersion } from '@mamoru/policy'
+import { grantKey, hasIncrease, type PolicyVersion } from '@mamoru/policy'
 import { baseRegistry, address, entry, type RegistryName } from '@mamoru/registry'
 import type { Dataset, Sample } from './types.ts'
 import type { World } from './world.ts'
@@ -224,6 +224,9 @@ export function observe(ds: Dataset, i: number, w: World, policy: PolicyVersion,
     positions: w.positions.map((p) => ({
       tokenId: p.tokenId, pool: p.pool, tickLower: p.tickLower, tickUpper: p.tickUpper, liquidity: p.liquidity,
       collectable0: p.owed0, collectable1: p.owed1, principalOwed0: 0n, principalOwed1: 0n, managed: true,
+      // otto/mamoru#171: every position of the run was minted by its engine, so under a policy that increases through
+      // MamoruActionPolicyV2 the policy admitted it.
+      ...(hasIncrease(policy, p.pool) ? { admitted: true } : {}),
       ...(policy.range.lazy ? { outOfRangeSince: p.outSince === undefined || p.outSince === null ? null : BigInt(p.outSince) } : {}),
     })),
     pools,
