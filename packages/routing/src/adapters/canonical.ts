@@ -55,6 +55,9 @@ export const canonicalBaseAdapter: Adapter = {
     return {
       provider: 'canonical-base',
       route: l1ToL2 ? 'Base StandardBridge (deposit)' : 'Base StandardBridge (withdrawal, single-proof path)',
+      sourceChainId: req.sourceChainId,
+      destChainId: req.destChainId,
+      asset: req.asset,
       amountIn: req.amountIn,
       // The protocol itself charges nothing beyond the L1/L2 gas of calling it: 1:1 ETH credited, same as sent.
       amountOut: req.amountIn,

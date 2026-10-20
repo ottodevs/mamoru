@@ -69,4 +69,33 @@ describe('lifiAdapter', () => {
     const req = { sourceChainId: 42161, destChainId: 8453, asset: 'ETH' as const, amountIn: 1n, account: ACCOUNT }
     expect(lifiAdapter.supports(req)).toBe(false)
   })
+
+  // otto/mamoru#181, review round 3: the same confound that broke relay.ts's recipient check (every earlier
+  // fixture used the same address for sender and recipient) was checked here too. Recorded live 18 Oct 2026
+  // with DISTINCT fromAddress (0x5555...) and toAddress (0x6666...): unlike Relay, LI.FI's calldata genuinely
+  // carries the real recipient — this fixture's account is the recipient, not the sender, and the quote
+  // succeeds only when `account` matches the recipient.
+  const LIFI_DISTINCT_FIXTURE = {
+    action: { toAddress: '0x6666666666666666666666666666666666666666' },
+    estimate: { toAmount: '149625000', executionDuration: 1080 },
+    transactionRequest: {
+      value: '0x0',
+      to: '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE',
+      data: '0x17917a4e0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000022000000000000000000000000000000000000000000000000000000000000004200f3a233b0f2485c6ab7ef016932cf125e2084cb67f107f92d67569e1da760969000000000000000000000000000000000000000000000000000000000000014000000000000000000000000000000000000000000000000000000000000001800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda0291300000000000000000000000066666666666666666666666666666666666666660000000000000000000000000000000000000000000000000000000008eb18a8',
+    },
+  }
+
+  test("with distinct sender and recipient, the quote succeeds for the RECIPIENT's account (proving the calldata genuinely carries it, unlike Relay)", async () => {
+    const recipient = '0x6666666666666666666666666666666666666666' as const
+    const req = { sourceChainId: 8453, destChainId: 1, asset: 'USDC' as const, amountIn: 150_000_000n, account: recipient }
+    const q = await lifiAdapter.quote(req, { fetch: fetchReturning(LIFI_DISTINCT_FIXTURE), now: () => NOW })
+    expect(q.recipientCheck).toBe('decoded-calldata')
+    expect(q.calldata).toContain(recipient.slice(2).toLowerCase())
+  })
+
+  test("the same fixture refuses for the SENDER's account — LI.FI's own declared action.toAddress (the recipient) does not match it, even though the sender's bytes also appear somewhere in this calldata", async () => {
+    const sender = '0x5555555555555555555555555555555555555555' as const
+    const req = { sourceChainId: 8453, destChainId: 1, asset: 'USDC' as const, amountIn: 150_000_000n, account: sender }
+    await expect(lifiAdapter.quote(req, { fetch: fetchReturning(LIFI_DISTINCT_FIXTURE), now: () => NOW })).rejects.toThrow()
+  })
 })

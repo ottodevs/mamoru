@@ -72,14 +72,14 @@ address, an API — something to call).
 
 ## Adapters implemented, and why each one is scoped the way it is
 
-| Adapter | Asset(s) | Chains | Mode | Why |
-|---|---|---|---|---|
-| `cctp.ts` | USDC | Ethereum, Base, Monad (any pair) | session-key | Circle's own official route. `mintRecipient` is `depositForBurn`'s 3rd argument, fixed-position bytes32 — EQUAL-pinnable by a `UniActionPolicy`. Domains: Ethereum 0, Base 6, Monad 15. Monad has no Fast transfer (Circle's docs mark it N/A — Standard attestation is already fast there). `TokenMessengerV2` = `0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d`, identical across all three chains (CREATE2). |
-| `across.ts` | USDC only | Ethereum, Base, Monad (any pair) | session-key | `depositV3`'s `depositor`/`recipient` are fixed-position addresses. ETH deliberately excluded: Across bridges it via WETH, and no WETH address per chain was verified to the same standard as USDC this round. SpokePool addresses: Ethereum `0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5`, Base `0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64`, Monad `0xd2ecb3afe598b746F8123CaE365a598DA831A449` (Across supports Monad). Validation logic mirrors the proven `checkQuote` in `apps/mamoru-operator/src/bridge-out.ts` (otto/mamoru#133). |
-| `canonical.ts` | ETH only | Ethereum <-> Base only | session-key | Base's own StandardBridge. USDC explicitly refused (see direction table). |
-| `relay.ts` | USDC, ETH | any pair both sides support | owner-only | Relay (relay.link) picks a solver/route per request — no fixed calldata offset to pin ahead of time. Stayed on the v1 endpoint: v2 began requiring an API key from 2 Oct 2026, which would break the "no paid APIs" rule — **flag: if v1 is retired the same way, this adapter needs re-pointing or dropping.** |
-| `lifi.ts` | USDC, ETH | any pair both sides support | owner-only | LI.FI (li.quest), same "picks its own route" reasoning. Charges a documented 0.25% service fee on top of whatever the underlying route costs. |
-| `debridge.ts` | USDC, ETH | any pair both sides support | owner-only | deBridge DLN — the "one more aggregator" slot, chosen over Bungee/Socket because its quote+tx endpoint was confirmed genuinely keyless (50 req/min public tier). Charges an order-creation fee in the source chain's native asset on top of whatever it takes from the bridged token (carried in `Quote.value`). Monad must be addressed as deBridge's internal id `100000030`, not its EVM chain id `143` — confirmed live. |
+| Adapter | Asset(s) | Chains | Mode | recipientCheck | Why |
+|---|---|---|---|---|---|
+| `cctp.ts` | USDC | Ethereum, Base, Monad (any pair) | session-key | onchain-pinnable | Circle's own official route. `mintRecipient` is `depositForBurn`'s 3rd argument, fixed-position bytes32 — EQUAL-pinnable by a `UniActionPolicy`. Domains: Ethereum 0, Base 6, Monad 15. Monad has no Fast transfer (Circle's docs mark it N/A — Standard attestation is already fast there). `TokenMessengerV2` = `0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d`, identical across all three chains (CREATE2). |
+| `across.ts` | USDC only | Ethereum, Base, Monad (any pair) | session-key | onchain-pinnable | `depositV3`'s `depositor`/`recipient` are fixed-position addresses. ETH deliberately excluded: Across bridges it via WETH, and no WETH address per chain was verified to the same standard as USDC this round. SpokePool addresses: Ethereum `0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5`, Base `0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64`, Monad `0xd2ecb3afe598b746F8123CaE365a598DA831A449` (Across supports Monad). Validation logic mirrors the proven `checkQuote` in `apps/mamoru-operator/src/bridge-out.ts` (otto/mamoru#133). |
+| `canonical.ts` | ETH only | Ethereum <-> Base only | session-key | onchain-pinnable | Base's own StandardBridge. USDC explicitly refused (see direction table). ETH only on a chain confirmed ETH-native (`chains.ts`'s `nativeAsset`). |
+| `relay.ts` | USDC, ETH | any pair both sides support, both ETH-native-verified for ETH requests | owner-only, **quote-only in practice** | **none** | Relay's deposit calldata carries the depositor, never the on-chain recipient (confirmed by testing with a different sender and recipient — see "Third hardening pass" below) — not executable by this package's own rule. Still decodes and refuses on a token/amount/value mismatch, to protect the quoted price's trustworthiness. Stayed on the v1 endpoint: v2 began requiring an API key from 2 Oct 2026 — **flag: if v1 is retired the same way, this adapter needs re-pointing or dropping.** |
+| `lifi.ts` | USDC, ETH | per-origin-chain target allowlist (Ethereum, Base, Monad), both ETH-native-verified for ETH requests | owner-only | decoded-calldata | LI.FI (li.quest) picks its own route per request, but genuinely carries the recipient — confirmed with distinct sender/recipient addresses, corroborated by its own declared `action.toAddress` field. Charges a documented 0.25% service fee. |
+| `debridge.ts` | USDC, ETH | any pair both sides support, both ETH-native-verified for ETH requests | owner-only, **quote-only in practice** | **none** | deBridge's recipient argument is right-padded inside its word, not left-padded — the generic calldata scan never actually matches it (confirmed against the real function with distinct sender/recipient addresses), and deBridge has no declared recipient field to catch the gap the way LI.FI does. Not executable by this package's own rule. Still decodes/cross-checks target, value/fixFee and chain ids to protect the quoted price. Monad addressed as deBridge's internal id `100000030`, not its EVM chain id `143` — confirmed live. |
 
 All three aggregator adapters decode the calldata they are about to return and refuse the quote outright if the
 account's address cannot be found among its ABI-encoded words (`src/recipient.ts`) — this is the "decode the
@@ -148,6 +148,59 @@ blind:
 
 Also added: Relay's leading ERC20 `approve` step (when present) is now checked against the pinned deposit
 target as spender and `amountIn` as the amount, not merely assumed consistent.
+
+### Third hardening pass: a chain's native asset is a fact, not an assumption; two adapters' recipient checks never actually worked; ranking now prices native cost
+
+A third review (GPT-6/`gpt-6-sol`, `review:pr` at `013b79d`) found four more issues. Three were confirmed by
+direct testing before any code changed, and the fourth (Relay's recipient) led to re-testing LI.FI and deBridge
+the same way, which surfaced a second, more serious finding the review itself did not name.
+
+- **`chains.ts`: `tokenAddress('ETH', 143)` returned the native pseudo-address unconditionally.** Monad's native
+  asset is MON, not ETH — ETH does not exist there natively at all. `ChainConfig` now carries a `nativeAsset`
+  field (`'ETH' | 'MON'`), and `tokenAddress('ETH', chainId)` only resolves on a chain confirmed to use ETH as
+  its own native asset (Ethereum, Base); it is `undefined` on Monad and on any chain not in the registry at
+  all — never assumed. This closes a real gap: before the fix, a request to bridge "ETH" to or from Monad would
+  have been treated as supported by Relay/LI.FI/deBridge.
+
+- **Relay's deposit calldata carries no on-chain recipient at all.** Checked directly: a quote requested with a
+  DIFFERENT `user` (0x5555...) and `recipient` (0x6666...) showed the deposit calldata's first word is the
+  depositor (0x5555...) — the recipient does not appear anywhere in it. Every earlier fixture set `user ===
+  recipient === account`, which made "this word is the depositor" and "this word is the recipient"
+  indistinguishable; that confound, not a correct check, is what made the earlier version look right. Per the
+  project's rule — if the destination recipient cannot be verified, the route is not offered — Relay is now
+  quote-only: `recipientCheck: 'none'`, `calldata` and `value` always `undefined`. The decode-and-refuse checks
+  on token/amount/native-value it still runs protect the TRUSTWORTHINESS OF THE QUOTED PRICE (so a comparison
+  against other adapters isn't built on a mismatched quantity), not the safety of executing it — there is
+  nothing here safe to execute.
+
+- **Applying that same distinct-sender/recipient test to LI.FI and deBridge surfaced a second bug the review
+  did not name.** LI.FI genuinely carries the recipient (confirmed: querying with `account` set to the real
+  recipient succeeds, set to the sender fails, because LI.FI's own declared `action.toAddress` field catches
+  the mismatch) — it keeps `recipientCheck: 'decoded-calldata'`. deBridge does not: its recipient argument is
+  **right-padded** inside its 32-byte word (`7777...7777000...000`), not left-padded the way a plain ABI address
+  argument is, so `calldataPinsRecipient`'s exact-word match never finds it — confirmed by running the actual
+  function against real captured calldata, not a loose substring search. Only the sender's (correctly
+  left-padded) word ever matched, indistinguishable from a correct recipient match under the same
+  same-sender-and-recipient confound that broke Relay. deBridge has no declared recipient field to catch this
+  the way LI.FI does, so it is now quote-only too (`recipientCheck: 'none'`, no `calldata`/`value`) — a
+  correction beyond what the review literally asked for, but required by its own stated rule once tested.
+
+- **`selector.ts` ranked by raw `amountOut`**, ignoring that a route can also spend the account's native balance
+  (`value`) without that showing up in `amountOut` at all. `pricing.ts` (new) converts `value` into the same
+  units as `amountOut` so they can be subtracted, using a stated, deliberately conservative (high) price —
+  $5,000/ETH, no entry for MON (nothing this round establishes a trustworthy MON/USD price). A quote whose
+  native cost cannot be priced this way never outranks one with a known cost, not even a known cost of zero.
+  Mid-implementation, a real bug surfaced: `value` is not always pure cost — when the bridged asset IS the
+  source chain's native asset (canonical.ts's ETH bridge, `value == amountIn` exactly), the whole principal has
+  to move as `value`, and an early version of this fix subtracted all of it, double-counting the principal as
+  if it were a fee. `pricing.ts` now only counts the excess of `value` over `amountIn` as a real cost — caught
+  by re-running the live smoke script and noticing `canonical-base` had dropped out of first place on the ETH
+  direction for no real reason, not by a unit test (one was added afterward, `pricing.test.ts`).
+
+Not done, and why: no selector or adapter tries to price Monad's native asset in USD. Stating a number for an
+asset nobody on this ticket has verified a price for would be guessing a fact, which the "don't guess" rule
+this package has followed throughout forbids just as much for a price as for a contract address. Any nonzero
+native cost on a Monad-sourced quote is instead treated as unpriceable, which is the safe default, not a gap.
 
 ## What was out of scope for adapters, deliberately
 

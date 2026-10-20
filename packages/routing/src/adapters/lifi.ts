@@ -114,6 +114,9 @@ export const lifiAdapter: Adapter = {
     return {
       provider: 'lifi',
       route: 'LI.FI',
+      sourceChainId: req.sourceChainId,
+      destChainId: req.destChainId,
+      asset: req.asset,
       amountIn: req.amountIn,
       amountOut,
       fee: req.amountIn - amountOut,

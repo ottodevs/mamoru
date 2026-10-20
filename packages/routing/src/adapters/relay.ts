@@ -1,21 +1,34 @@
 import { getAddress, type Address, type Hex } from 'viem'
 import { tokenAddress } from '../chains.ts'
 import { RouteError } from '../errors.ts'
-import { calldataPinsRecipientAtWord, parseDeclaredAddress, wordAt } from '../recipient.ts'
+import { wordAt } from '../recipient.ts'
 import type { Adapter, AdapterDeps, Fetch, Quote, QuoteRequest } from '../types.ts'
 
-// otto/mamoru#181. Relay (relay.link) picks a solver/route per request — owner-only, with this adapter decoding
-// and refusing before the owner ever sees it (see recipient.ts). Verified live against the v1 endpoint on 18 Oct
-// 2026 (empirical response shape below); docs.relay.link's v2 page now states v2 requires an API key as of 2 Oct
-// 2026 — this adapter stays on v1 to keep the "no paid APIs" rule, flagged in docs/research/routing-2026-10.md
-// as a risk if v1 is retired the same way.
+// otto/mamoru#181. Relay (relay.link) picks a solver/route per request. Verified live against the v1 endpoint
+// on 18 Oct 2026 (empirical response shape below); docs.relay.link's v2 page now states v2 requires an API key
+// as of 2 Oct 2026 — this adapter stays on v1 to keep the "no paid APIs" rule, flagged in
+// docs/research/routing-2026-10.md as a risk if v1 is retired the same way.
 //
-// Unlike LI.FI and deBridge, Relay's final deposit step was observed, live, going to the *same* target contract
-// and placing the recipient at the *same* word-0 offset across every combination checked (ERC20 and native
-// input; Ethereum, Base and Monad as origin). That is strong enough empirical grounding to pin both: the target
-// is refused if it is ever anything else, and the recipient check is the exact-offset equivalent of a
-// `UniActionPolicy` EQUAL rule (`calldataPinsRecipientAtWord`), not the generic any-word scan LI.FI/deBridge
-// still rely on. If Relay ever changes this and `target`/`word 0` diverge, every quote fails closed, not open.
+// otto/mamoru#181 CORRECTION (review round 3, 20 Oct 2026): an earlier version of this adapter pinned "word 0
+// of the deposit calldata" as the recipient and treated Relay as owner-only with recipientCheck
+// 'decoded-calldata'. That was wrong. Tested live with a DIFFERENT `user` and `recipient` in the same quote
+// request (0x5555...->user, 0x6666...->recipient): word 0 is the DEPOSITOR (0x5555...), and the recipient
+// (0x6666...) does not appear anywhere in the deposit calldata at all — Relay tracks the destination off-chain,
+// correlated by the opaque request-id word that follows. Every earlier test had `user === recipient`, which
+// made "this is the depositor" and "this is the recipient" indistinguishable; that confound is exactly what
+// produced the wrong conclusion. (LI.FI and deBridge were re-tested the same way after this was found: both DO
+// carry the real recipient in their calldata with distinct sender/recipient values — see their test files —
+// so they keep `recipientCheck: 'decoded-calldata'`. Relay alone fails this test.)
+//
+// Per the project's rule — if the destination recipient cannot be verified, the route is not offered — Relay is
+// now quote-only: a price point for comparison, `recipientCheck: 'none'`, `calldata` and `value` always
+// undefined so nothing here can be mistaken for something safe to sign. `target` is still reported as
+// descriptive metadata (which contract Relay would use), never as "safe to call with this calldata".
+//
+// The decode-and-refuse check this adapter still runs isn't about the recipient — it never could verify that —
+// it is a quality gate on the OUTPUT NUMBER: this adapter decodes the deposit calldata's embedded token and
+// amount (and the attached native value) and refuses the whole quote if they don't match the request, so a
+// comparison against the other adapters' amountOut is never built on a mismatched quantity.
 
 export const RELAY_QUOTE_URL = 'https://api.relay.link/quote'
 /** The only deposit target observed across Ethereum/Base/Monad origin, ERC20 and native input (18 Oct 2026). */
@@ -28,10 +41,17 @@ const DEFAULT_TTL_MS = 30_000
  * in the 18 Oct 2026 sample this adapter was built against). */
 const DEFAULT_ETA_SEC = 60
 
+/** `depositV3`/`deposit`-style ERC20 call: selector, then depositor, token, amount, request id. Confirmed live
+ * 18 Oct 2026 — word 1 is the input token, word 2 is the amount. */
+const ERC20_SELECTOR = '0xe8017952'
+/** Native-asset deposit: selector, then depositor, request id. No token or amount word — the amount is
+ * `msg.value`, confirmed exactly equal to the requested amount (no top-up, unlike deBridge). */
+const NATIVE_SELECTOR = '0x49290c1c'
+
 type RelayStepItem = { data?: { to?: string; data?: string; value?: string } }
 type RelayStep = { items?: RelayStepItem[] }
 type RelayQuoteResponse = {
-  details?: { currencyOut?: { amount?: string }; recipient?: string; timeEstimate?: number }
+  details?: { currencyOut?: { amount?: string }; timeEstimate?: number }
   steps?: RelayStep[]
 }
 
@@ -48,9 +68,7 @@ async function postQuote(fetcher: Fetch, body: Record<string, unknown>): Promise
   return body2 as RelayQuoteResponse
 }
 
-/** The final action's call — the one that actually moves funds, as opposed to an earlier ERC20 `approve` step
- * (which carries a spender, not the end recipient). Relay orders `steps` in execution order; the last step's last
- * item is the one this adapter checks and signs. */
+/** The final action's call — the one that actually moves funds, as opposed to an earlier ERC20 `approve` step. */
 function finalCall(resp: RelayQuoteResponse): { target: Address; calldata: Hex; value: bigint } {
   const data = resp.steps?.at(-1)?.items?.at(-1)?.data
   if (!data?.to || !data?.data) throw new RouteError('relay', 'QUOTE_MALFORMED', 'missing steps[].items[].data')
@@ -73,14 +91,8 @@ function finalCall(resp: RelayQuoteResponse): { target: Address; calldata: Hex; 
  * approve step. */
 const APPROVE_SELECTOR = '0x095ea7b3'
 
-/**
- * When Relay's plan starts with an ERC20 `approve` step (an ERC20-input order; a native-input one has none —
- * observed live 18 Oct 2026 on every chain checked), that approval must name `RELAY_DEPOSIT_TARGET` as spender
- * and `amountIn` as the amount — not merely some spender and some amount. A response that tried to get the
- * owner to approve a different contract, or more than was quoted, is refused here before anything else runs.
- * No approve step at all is fine (native input); a step whose calldata doesn't match `approve`'s known fixed
- * shape is not.
- */
+/** When Relay's plan starts with an ERC20 `approve` step (an ERC20-input order; a native-input one has none),
+ * that approval must name `RELAY_DEPOSIT_TARGET` as spender and `amountIn` as the amount. */
 function checkLeadingApprove(resp: RelayQuoteResponse, amountIn: bigint): void {
   const steps = resp.steps ?? []
   if (steps.length < 2) return // native input: no approve step to check
@@ -92,6 +104,31 @@ function checkLeadingApprove(resp: RelayQuoteResponse, amountIn: bigint): void {
   if (spenderWord === undefined || amountWord === undefined) throw new RouteError('relay', 'QUOTE_MALFORMED', 'malformed approve calldata')
   if (spenderWord !== RELAY_DEPOSIT_TARGET.slice(2).toLowerCase().padStart(64, '0')) throw new RouteError('relay', 'QUOTE_MALFORMED', 'approve names a spender other than the deposit target')
   if (BigInt(`0x${amountWord}`) !== amountIn) throw new RouteError('relay', 'QUOTE_MALFORMED', 'approve amount does not match amountIn')
+}
+
+/**
+ * Decodes the deposit call itself and refuses unless it genuinely matches the request: the right selector for
+ * the asset, the right token and amount (ERC20 case) embedded in the calldata, and the right native value (0
+ * for ERC20; exactly `amountIn` for native — Relay adds no top-up, confirmed live, unlike deBridge). This never
+ * touches the recipient question — see the module comment — it only makes sure the quoted amountOut is priced
+ * against the transaction that was actually asked for.
+ */
+function checkDepositMatchesRequest(req: QuoteRequest, calldata: Hex, value: bigint): void {
+  const selector = calldata.slice(0, 10).toLowerCase()
+  if (req.asset === 'ETH') {
+    if (selector !== NATIVE_SELECTOR) throw new RouteError('relay', 'QUOTE_MALFORMED', `expected a native deposit selector, got ${selector}`)
+    if (value !== req.amountIn) throw new RouteError('relay', 'QUOTE_MALFORMED', `native value ${value} does not match amountIn ${req.amountIn}`)
+    return
+  }
+  if (selector !== ERC20_SELECTOR) throw new RouteError('relay', 'QUOTE_MALFORMED', `expected the ERC20 deposit selector, got ${selector}`)
+  if (value !== 0n) throw new RouteError('relay', 'QUOTE_MALFORMED', `an ERC20 deposit must attach no native value, got ${value}`)
+  const tokenWord = wordAt(calldata, 1)
+  const amountWord = wordAt(calldata, 2)
+  if (tokenWord === undefined || amountWord === undefined) throw new RouteError('relay', 'QUOTE_MALFORMED', 'malformed deposit calldata')
+  const expectedToken = tokenAddress(req.asset, req.sourceChainId)
+  if (expectedToken === undefined) throw new RouteError('relay', 'UNSUPPORTED', `no token address for ${req.asset} on chain ${req.sourceChainId}`)
+  if (tokenWord !== expectedToken.slice(2).toLowerCase().padStart(64, '0')) throw new RouteError('relay', 'QUOTE_MALFORMED', 'deposit names a token other than the one requested')
+  if (BigInt(`0x${amountWord}`) !== req.amountIn) throw new RouteError('relay', 'QUOTE_MALFORMED', 'deposit amount does not match amountIn')
 }
 
 export const relayAdapter: Adapter = {
@@ -132,23 +169,24 @@ export const relayAdapter: Adapter = {
 
     const { target, calldata, value } = finalCall(resp)
     if (target !== getAddress(RELAY_DEPOSIT_TARGET)) throw new RouteError('relay', 'QUOTE_MALFORMED', `unexpected target contract ${target}`)
-    const declared = parseDeclaredAddress(resp.details?.recipient)
-    if (declared !== undefined && getAddress(declared) !== getAddress(req.account)) throw new RouteError('relay', 'RECIPIENT_REFUSED', `declared recipient ${declared} is not the account ${req.account}`)
-    if (!calldataPinsRecipientAtWord(calldata, req.account, 0)) throw new RouteError('relay', 'RECIPIENT_REFUSED', 'the account is not word 0 of the deposit call, where it was always observed to be')
+    checkDepositMatchesRequest(req, calldata, value)
 
     const etaSec = typeof resp.details?.timeEstimate === 'number' && resp.details.timeEstimate >= 0 ? resp.details.timeEstimate : DEFAULT_ETA_SEC
 
     return {
       provider: 'relay',
       route: 'Relay',
+      sourceChainId: req.sourceChainId,
+      destChainId: req.destChainId,
+      asset: req.asset,
       amountIn: req.amountIn,
       amountOut,
       fee: req.amountIn - amountOut,
       etaSec,
       target,
-      calldata,
-      value,
-      recipientCheck: 'decoded-calldata',
+      // No calldata, no value: Relay's deposit carries no on-chain destination recipient at all (see module
+      // comment) — this is a price point, never something to sign.
+      recipientCheck: 'none',
       mode: 'owner-only',
       expiresAt: new Date(now + DEFAULT_TTL_MS).toISOString(),
     }

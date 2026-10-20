@@ -8,6 +8,9 @@ const REQ: QuoteRequest = { sourceChainId: 1, destChainId: 8453, asset: 'USDC', 
 function quote(partial: Partial<Quote> & { provider: string; amountOut: bigint }): Quote {
   return {
     route: partial.provider,
+    sourceChainId: REQ.sourceChainId,
+    destChainId: REQ.destChainId,
+    asset: REQ.asset,
     amountIn: 150_000_000n,
     fee: 150_000_000n - partial.amountOut,
     etaSec: 60,
@@ -44,6 +47,43 @@ describe('selectBest', () => {
   test('rank orders every quote best-first', () => {
     const q = [quote({ provider: 'mid', amountOut: 149_900_000n }), quote({ provider: 'best', amountOut: 149_980_000n }), quote({ provider: 'worst', amountOut: 149_000_000n })]
     expect(rank(q).map((r) => r.provider)).toEqual(['best', 'mid', 'worst'])
+  })
+
+  // otto/mamoru#181, review round 3: ranking is by net output (amountOut minus any priced native-asset `value`
+  // surcharge, see pricing.ts), not raw amountOut — two quotes landing on the same amountOut are not equally
+  // good if one of them also spends the account's native balance on the source chain.
+
+  test("never prefers a route that charges native value over one that doesn't, unless its USDC advantage clears that value at the stated conservative price", () => {
+    // Free route: 149.90 USDC, no native cost. Value-charging route: 149.95 USDC (0.05 USDC better on paper)
+    // but attaches 0.001 ETH, priced at the stated $5,000/ETH = $5.00 = 5_000_000 base units — a cost that
+    // dwarfs the 0.05 USDC advantage, so the free route must still win.
+    const free = quote({ provider: 'free', amountOut: 149_900_000n })
+    const costsValue = quote({ provider: 'costly', amountOut: 149_950_000n, value: 1_000_000_000_000_000n })
+    expect(selectBest([free, costsValue])?.provider).toBe('free')
+  })
+
+  test('a value-charging route DOES win once its USDC advantage genuinely exceeds the priced native cost', () => {
+    // Same 0.001 ETH ($5.00) cost, but this route's raw output is 10 USDC better — comfortably past the cost.
+    const free = quote({ provider: 'free', amountOut: 149_900_000n })
+    const worthIt = quote({ provider: 'worth-it', amountOut: 159_900_000n, value: 1_000_000_000_000_000n })
+    expect(selectBest([free, worthIt])?.provider).toBe('worth-it')
+  })
+
+  test('a quote whose native cost cannot be priced at all (e.g. Monad/MON) never outranks one with a known cost — not even a known cost of zero', () => {
+    const known = quote({ provider: 'known', amountOut: 100_000_000n }) // deliberately low amountOut
+    const unpriceable = quote({ provider: 'unpriceable', sourceChainId: 143, amountOut: 999_000_000n, value: 1n }) // deliberately huge amountOut
+    expect(selectBest([known, unpriceable])?.provider).toBe('known')
+    expect(rank([known, unpriceable]).map((r) => r.provider)).toEqual(['known', 'unpriceable'])
+  })
+
+  test('bridging ETH on an ETH-native source chain, value beyond the principal: only the excess over amountIn is a real cost', () => {
+    // amountIn 10 ETH on both. a: value is exactly amountIn (no real extra cost, like canonical.ts) -> net ==
+    // amountOut. b: value is amountIn + 0.05 ETH extra, but amountOut is 0.1 ETH higher than a's -> net is still
+    // 0.05 ETH ahead of a's once that real extra cost is subtracted, so b wins.
+    const amountIn = 10_000_000_000_000_000_000n // 10 ETH
+    const a = quote({ provider: 'a', asset: 'ETH', amountIn, amountOut: 10_000_000_000_000_000_000n, value: amountIn })
+    const b = quote({ provider: 'b', asset: 'ETH', amountIn, amountOut: 10_100_000_000_000_000_000n, value: amountIn + 50_000_000_000_000_000n })
+    expect(selectBest([a, b])?.provider).toBe('b')
   })
 })
 

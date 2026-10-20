@@ -14,9 +14,16 @@ export const MONAD_CHAIN_ID = 143
 /** The pseudo-address most bridge/aggregator APIs use for the native asset (ETH) instead of a token contract. */
 export const NATIVE_ASSET_ADDRESS: Address = zeroAddress
 
+/** otto/mamoru#181 fix: a chain's native gas asset is a fact about that chain, never assumed to be ETH. Monad's
+ * is MON, not ETH — ETH does not natively exist there at all (only as a bridged ERC-20, not modelled by this
+ * package). A request for `asset: 'ETH'` naming a chain whose native asset isn't ETH must be refused, not
+ * silently treated as "the native asset, whatever it is" the way `NATIVE_ASSET_ADDRESS` used to. */
+export type NativeAsset = 'ETH' | 'MON'
+
 export type ChainConfig = {
   chainId: number
   name: string
+  nativeAsset: NativeAsset
   usdc: Address
   /** Circle CCTP V2 domain id. developers.circle.com/cctp/cctp-supported-blockchains */
   cctpDomain: number
@@ -30,6 +37,7 @@ export type ChainConfig = {
 const ETHEREUM: ChainConfig = {
   chainId: ETHEREUM_CHAIN_ID,
   name: 'ethereum',
+  nativeAsset: 'ETH',
   usdc: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
   cctpDomain: 0,
   cctpFastSupported: true,
@@ -39,6 +47,7 @@ const ETHEREUM: ChainConfig = {
 const BASE: ChainConfig = {
   chainId: BASE_CHAIN_ID,
   name: 'base',
+  nativeAsset: 'ETH',
   usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
   cctpDomain: 6,
   cctpFastSupported: true,
@@ -48,6 +57,7 @@ const BASE: ChainConfig = {
 const MONAD: ChainConfig = {
   chainId: MONAD_CHAIN_ID,
   name: 'monad',
+  nativeAsset: 'MON',
   usdc: '0x754704Bc059F8C67012fEd69BC8A327a5aafb603',
   cctpDomain: 15,
   cctpFastSupported: false,
@@ -60,10 +70,16 @@ export function chainConfig(chainId: number): ChainConfig | undefined {
   return CHAINS.find((c) => c.chainId === chainId)
 }
 
-/** The token address an adapter should pass to a provider for `asset` on `chainId`. ETH is the pseudo-address
- * every aggregator here accepts in place of a real contract. USDC is undefined on a chain this table does not
- * cover (an aggregator adapter that reaches further chains must be given the address directly by its caller). */
+/**
+ * The token address an adapter should pass to a provider for `asset` on `chainId` — or undefined when that
+ * asset is not known to exist on that chain, in which case the caller must refuse the request rather than
+ * guess. `ETH` resolves to the native pseudo-address only on a chain whose own native asset is confirmed ETH
+ * (Ethereum, Base); it is undefined on Monad (native asset MON) and on any chain not in `CHAINS` at all — this
+ * package does not assume every EVM chain's native asset is ETH. `USDC` is undefined the same way it always
+ * was, for a chain this table does not cover.
+ */
 export function tokenAddress(asset: Asset, chainId: number): Address | undefined {
-  if (asset === 'ETH') return NATIVE_ASSET_ADDRESS
-  return chainConfig(chainId)?.usdc
+  const chain = chainConfig(chainId)
+  if (asset === 'ETH') return chain?.nativeAsset === 'ETH' ? NATIVE_ASSET_ADDRESS : undefined
+  return chain?.usdc
 }

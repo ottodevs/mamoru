@@ -161,6 +161,9 @@ export const acrossAdapter: Adapter = {
     return {
       provider: 'across',
       route: 'Across depositV3',
+      sourceChainId: req.sourceChainId,
+      destChainId: req.destChainId,
+      asset: req.asset,
       amountIn: deposit.amount,
       amountOut: deposit.outputAmount,
       fee: deposit.amount - deposit.outputAmount,

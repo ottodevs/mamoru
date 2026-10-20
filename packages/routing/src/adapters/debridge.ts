@@ -1,23 +1,34 @@
-import { getAddress, type Address, type Hex } from 'viem'
+import { getAddress, type Address } from 'viem'
 import { tokenAddress } from '../chains.ts'
 import { RouteError } from '../errors.ts'
-import { assertOwnerOnlyRecipient } from '../recipient.ts'
 import type { Adapter, AdapterDeps, Fetch, Quote, QuoteRequest } from '../types.ts'
 
 // otto/mamoru#181. deBridge DLN (dln.debridge.finance), the "at least one more aggregator" adapter — picked over
 // Bungee/Socket because its quote-and-build endpoint is confirmed genuinely keyless as of 18 Oct 2026 (50 req/min
-// public tier). Owner-only, same decode-and-refuse discipline as relay.ts / lifi.ts; DLN echoes no recipient
-// field of its own in the response to cross-check, so the calldata scan is the only check (still a refusal if it
-// fails — see recipient.ts).
+// public tier).
 //
-// Every field below is treated as untrusted input from a third-party API, not as a correct answer: the target
-// contract is pinned to the one address this adapter has actually observed (refused otherwise), the native
-// value DLN wants attached is cross-checked against the fee the response itself separately declares and capped
-// (never just trusted), and the response's own echoed chain ids are cross-checked against the request.
+// otto/mamoru#181 CORRECTION (review round 3, 20 Oct 2026): an earlier version of this adapter claimed
+// `recipientCheck: 'decoded-calldata'` on the strength of `calldataPinsRecipient` finding the account's bytes
+// somewhere in `tx.data`. Re-tested with DISTINCT sender (0x4444...) and recipient (0x7777...) addresses and
+// checked against the actual function (not a loose substring search): the recipient's bytes are present in the
+// calldata, but RIGHT-padded inside their word (`7777...7777000...000`), not left-padded the way a plain ABI
+// address argument is — `calldataPinsRecipient` never matches it. Only the sender's word (correctly
+// left-padded, since it doubles as an authority/approval address DLN needs to be real) matched — which is
+// indistinguishable from a correct recipient match in every earlier test, because every earlier test set
+// sender === recipient === account, the exact same confound that broke relay.ts. Unlike LI.FI (which has an
+// independently-declared `action.toAddress` field to cross-check), deBridge's response echoes no recipient
+// field of its own — there is nothing here that provably ties the account to where funds actually arrive.
 //
-// DLN charges an order-creation fee in the source chain's *native* asset (`tx.value` below, `fixFee` in the
-// response) on top of whatever it takes from the bridged token — Quote.value carries that through so a caller
-// does not silently drop it when building the transaction.
+// Per the project's rule — if the destination recipient cannot be verified, the route is not offered — deBridge
+// is now quote-only: a price point for comparison, `recipientCheck: 'none'`, `calldata` and `value` always
+// undefined. Every other check below still runs and still refuses on a mismatch, because they protect the
+// TRUSTWORTHINESS OF THE PRICE (amountOut, fee), which matters for quote-only comparison too, not because they
+// make this route safe to execute:
+//
+// the target contract is pinned to the one address this adapter has actually observed (refused otherwise), the
+// native value DLN would want attached is cross-checked against the fee the response itself separately
+// declares and capped (never just trusted), and the response's own echoed chain ids are cross-checked against
+// the request.
 //
 // Verified live against dln.debridge.finance on 18 Oct 2026 (empirical response shape below) and
 // docs.debridge.com/dln-the-debridge-liquidity-network-protocol/interacting-with-the-api,
@@ -171,23 +182,24 @@ export const debridgeAdapter: Adapter = {
     const feeCap = MAX_FEE_WEI_BY_SOURCE_CHAIN[req.sourceChainId]
     if (feeCap === undefined) throw new RouteError('debridge', 'UNSUPPORTED', `no verified fee cap for source chain ${req.sourceChainId}`)
     if (fixFee > feeCap) throw new RouteError('debridge', 'QUOTE_REFUSED', `declared fixFee ${fixFee} exceeds the app policy bound for this chain`)
-    const calldata = tx.data as Hex
-    // DLN echoes no recipient field of its own to cross-check against; the calldata scan alone decides.
-    assertOwnerOnlyRecipient('debridge', req.account, calldata)
+    // No recipient check: deBridge echoes no recipient field of its own, and the generic calldata scan does not
+    // actually match its recipient argument at all (right-padded within its word, not left-padded — see the
+    // module comment). This route is quote-only; `calldata`/`value` are never returned (below).
 
     const etaSec = typeof resp.order?.approximateFulfillmentDelay === 'number' && resp.order.approximateFulfillmentDelay >= 0 ? resp.order.approximateFulfillmentDelay : 60
 
     return {
       provider: 'debridge',
       route: 'deBridge DLN',
+      sourceChainId: req.sourceChainId,
+      destChainId: req.destChainId,
+      asset: req.asset,
       amountIn: req.amountIn,
       amountOut,
       fee: req.amountIn - amountOut,
       etaSec,
       target,
-      calldata,
-      value,
-      recipientCheck: 'decoded-calldata',
+      recipientCheck: 'none',
       mode: 'owner-only',
       expiresAt: new Date(now + DEFAULT_TTL_MS).toISOString(),
     }

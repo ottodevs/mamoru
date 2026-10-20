@@ -9,9 +9,13 @@ import type { Address, Hex } from '@mamoru/domain'
  *   offset can be pinned ahead of time by a session policy. This adapter decoded the calldata it is about to hand
  *   back and found the account's own address among its 32-byte words — the owner still signs, but the app refused
  *   the quote before ever showing it if that check failed. See recipient.ts.
- * - 'none': no on-chain or calldata evidence exists that the recipient is the account (used only by
- *   informational/manual routes, e.g. documentation of a canonical bridge direction with no self-serve calldata).
- *   A quote with 'none' must never be auto-executed, session-key or owner-signed.
+ * - 'none': no on-chain or calldata evidence exists that the recipient is the account (used by informational
+ *   routes with no self-serve calldata, and by a provider whose calldata was checked and found to carry no
+ *   recipient at all — e.g. relay.ts: Relay's deposit calldata carries only the depositor and an opaque
+ *   request id; the destination recipient lives off-chain in Relay's own intent system and cannot be verified
+ *   from anything the chain can see). A quote with 'none' must never be auto-executed, session-key or
+ *   owner-signed — `calldata`/`value` are left undefined for exactly this reason; `target` may still be
+ *   populated as descriptive metadata about which contract the route would use.
  */
 export type RecipientCheck = 'onchain-pinnable' | 'decoded-calldata' | 'none'
 
@@ -44,6 +48,16 @@ export type Quote = {
   provider: string
   /** Human label for the specific route within the provider, e.g. 'CCTP V2 Fast', 'Across depositV3'. */
   route: string
+  /** Echoed from the request — a selector ranking several quotes needs the chain context (e.g. to price
+   * `value`, which is denominated in sourceChainId's native asset) without re-threading the original request
+   * through every call site. */
+  sourceChainId: number
+  destChainId: number
+  /** Echoed from the request — which asset amountIn/amountOut are denominated in. Needed by the selector to
+   * know whether a native `value` surcharge (always the source chain's native asset) is already the same
+   * asset as the output (bridging ETH itself) or a different one that needs pricing (bridging USDC while
+   * paying a native-asset fee) — see selector.ts. */
+  asset: Asset
   amountIn: bigint
   amountOut: bigint
   /** amountIn - amountOut, same asset and decimals as amountIn. Never negative. */

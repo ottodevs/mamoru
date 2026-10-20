@@ -110,6 +110,9 @@ export const cctpAdapter: Adapter = {
     return {
       provider: 'cctp-v2',
       route: wantFast ? 'CCTP V2 Fast' : 'CCTP V2 Standard',
+      sourceChainId: req.sourceChainId,
+      destChainId: req.destChainId,
+      asset: req.asset,
       amountIn: req.amountIn,
       amountOut,
       fee: maxFee,

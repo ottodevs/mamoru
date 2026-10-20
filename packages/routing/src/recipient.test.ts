@@ -37,6 +37,18 @@ describe('calldataPinsRecipient', () => {
     const decoy = encodeFunctionData({ abi: abiWithExtra, functionName: 'send', args: [OTHER, 150_000_000n, `0x${'0'.repeat(24)}${ACCOUNT.slice(2).toLowerCase()}`] })
     expect(calldataPinsRecipient(decoy, ACCOUNT)).toBe(true) // true, not false — documented, not a surprise
   })
+
+  // otto/mamoru#181, review round 3: this is the precise bug that made debridge.ts's recipient check a no-op.
+  // A plain `address` argument is always ABI-encoded left-padded (`000...00` then the 20 address bytes). deBridge's
+  // DLN order format instead right-pads the recipient inside its word for at least one argument — this function
+  // requires an exact left-padded match and, correctly, does NOT find a right-padded occurrence. The lesson is
+  // NOT "scan for the address anywhere in the word" (that would accept a coincidental substring inside unrelated
+  // packed data); it is "every provider's actual encoding must be checked before trusting this function to find
+  // its recipient at all" — which is why deBridge is quote-only now, not why this function was loosened.
+  test('does not match an address that is right-padded within its word instead of left-padded', () => {
+    const rightPadded: `0x${string}` = `0xaabbccdd${ACCOUNT.slice(2).toLowerCase()}${'0'.repeat(24)}`
+    expect(calldataPinsRecipient(rightPadded, ACCOUNT)).toBe(false)
+  })
 })
 
 describe('wordAt / calldataPinsRecipientAtWord', () => {
