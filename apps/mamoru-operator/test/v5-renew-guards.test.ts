@@ -107,3 +107,45 @@ describe('a prepared renewal is sent only for the policy the row offers now (P1)
     expect(() => renewPolicyOf([g('conservador-live-v4'), g('conservador-live-v5')])).toThrow('mixes policies')
   })
 })
+
+describe('a full v5 renewal reads the pause again at submit (GPT-6 round 2, P1)', () => {
+  /** A v5 account, a prepared renewal of it (as planRenew holds one), and the pause read `isPaused` answers. */
+  function preparedV5(pausedWarned: boolean, answer: () => boolean) {
+    const w = world(0n, { v4Policy: v4, v5Policy: v5 })
+    const acc = running(w, 'conservador-live-v5')
+    const p = priv(w.op)
+    p.prepared.set('pr', { prepareId: 'pr', accountKey: 'k', kind: 'renew', safeTxHash: `0x${'00'.repeat(32)}`, expires: Date.now() + 60_000, policyId: 'conservador-live-v5', move: false, pauseChecked: true, pausedWarned, safe: ctx.address.toLowerCase() })
+    const client = (w.op as unknown as { client: { readContract: (a: { functionName: string }) => Promise<unknown> } }).client
+    const read = client.readContract
+    client.readContract = async (a) => (a.functionName === 'isPaused' ? answer() : read(a))
+    return { w, acc, p }
+  }
+  const body = { prepareId: 'pr', authenticatorData: '', clientDataJSON: '', signature: '' }
+
+  test('paused after a prepare that did not warn: PAUSE_STATE_CHANGED, dropped, nothing sent', async () => {
+    const { w, p } = preparedV5(false, () => true)
+    expect(await code(() => w.op.submit(ctx, 'renew', body))).toBe('PAUSE_STATE_CHANGED')
+    expect(p.prepared.has('pr')).toBe(false)
+    expect(w.sent).toHaveLength(0)
+  })
+
+  test('the prepared warning matches the pause now (paused and warned, or not paused): it goes on to the signature check', async () => {
+    for (const [warned, paused] of [[true, true], [false, false], [true, false]] as const) {
+      const { w, p } = preparedV5(warned, () => paused)
+      const r = await code(() => w.op.submit(ctx, 'renew', body))
+      expect(r).not.toBe('PAUSE_STATE_CHANGED')
+      expect(r).not.toBe('PAUSE_STATE_UNAVAILABLE')
+      expect(r).toBe('BAD_SIGNATURE')
+      expect(p.prepared.has('pr')).toBe(true)
+    }
+  })
+
+  test('the pause cannot be read at submit: PAUSE_STATE_UNAVAILABLE (retryable), kept, nothing sent', async () => {
+    const { w, p } = preparedV5(false, () => {
+      throw new Error('HTTP request failed. Status: 503')
+    })
+    expect(await code(() => w.op.submit(ctx, 'renew', body))).toBe('PAUSE_STATE_UNAVAILABLE')
+    expect(p.prepared.has('pr')).toBe(true)
+    expect(w.sent).toHaveLength(0)
+  })
+})

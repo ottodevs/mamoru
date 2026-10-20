@@ -439,6 +439,13 @@ type Prepared = {
    * refuses it when the policy a renewal would now move the account to is another (a flag flipped since the prepare).
    */
   policyId?: string
+  /**
+   * renew (otto/mamoru#151, GPT-6 round 2): a full renewal of an account on MamoruActionPolicyV2 ends a guardian pause.
+   * `pauseChecked`: the pause state was read for this prepare; `pausedWarned`: it was paused and the summary says the
+   * renewal ends it. Submit reads it again and refuses one whose warning no longer matches (PAUSE_STATE_CHANGED).
+   */
+  pauseChecked?: boolean
+  pausedWarned?: boolean
 }
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
@@ -1659,7 +1666,7 @@ export class Operator {
         'Nothing is moved: your positions stay as they are',
         'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
       ]
-      return this.hold(acc, live, 'renew', f.calls, summary, { grants: f.stored, revokes: old, capUsdc: cap.toString() })
+      return this.hold(acc, live, 'renew', f.calls, summary, { grants: f.stored, revokes: old, capUsdc: cap.toString(), pauseChecked: true, pausedWarned: paused })
     }
     const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, acc.grants.map((g) => g.name), old, cap)
     // Named so the renewal says, every time, exactly what the engine keeps doing without asking again: not every
@@ -2710,6 +2717,17 @@ export class Operator {
     if (kind === 'renew' && p.policyId !== undefined && p.policyId !== this.renewTarget(acc)) {
       this.prepared.delete(p.prepareId)
       throw new HttpError(409, 'APPROVAL_TARGET_CHANGED', 'what this approval would move your Safe to changed since it was prepared: prepare it again')
+    }
+    // otto/mamoru#151 (GPT-6 round 2): a full renewal ends a guardian pause. The pause is read again now, before any
+    // signature check or send: one set after the prepare (whose summary did not warn) is refused and the approval
+    // dropped, so the next tap prepares it with the warning; an unreadable pause is refused as retryable (fail closed).
+    if (kind === 'renew' && p.pauseChecked) {
+      const paused = await this.readPaused(acc)
+      if (paused === null) throw new HttpError(503, 'PAUSE_STATE_UNAVAILABLE', "whether a guardian has paused Mamoru on your Safe could not be read just now: nothing was sent, try again in a minute")
+      if (paused && !p.pausedWarned) {
+        this.prepared.delete(p.prepareId)
+        throw new HttpError(409, 'PAUSE_STATE_CHANGED', 'a guardian paused Mamoru on your Safe after this approval was prepared, and this renewal would end that pause: prepare it again to read why')
+      }
     }
     let signature: Hex
     try {
