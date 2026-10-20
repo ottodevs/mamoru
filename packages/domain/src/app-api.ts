@@ -84,9 +84,10 @@ export type FundingView = {
   // in which pool, how much is used (bps) and whether it is `spent` (the engine has stopped doing it,
   // SESSION_USAGE_SPENT). The renew route then renews every grant with fresh counts. Absent under 80%.
   // `upgrade` (spec 007 T7): the renew route moves this account's approval to the on-chain action policy (v4): one
-  // more tap, nothing moved. Absent when not offered.
+  // more tap, nothing moved. Absent when not offered. `upgradePolicy` (otto/mamoru#151): the policy id it moves to
+  // (conservador-live-v4, or conservador-live-v5 on MamoruActionPolicyV2), so the row says what changes.
   approval?: {
-    validUntil: number; renewDue: boolean; expired: boolean; missing?: number; upgrade?: boolean
+    validUntil: number; renewDue: boolean; expired: boolean; missing?: number; upgrade?: boolean; upgradePolicy?: string
     usage?: { action: 'collect' | 'rerange' | 'enter'; pool: string | null; usedBps: number; spent: boolean }
   } | null
   positions: {

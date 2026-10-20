@@ -23,6 +23,16 @@ export const OPS_FLAGS = {
     label: 'On-chain action policy (v4)',
     description: 'Offers running v2/v3 accounts the renewal that moves them to conservadorLiveV4 (otto/mamoru#151, T7). The deployed MamoruActionPolicy and MamoruGasPolicy addresses are operator settings, never hardcoded.',
   },
+  /**
+   * otto/mamoru#151, default off: offers running v2/v3/v4 accounts the renewal that moves them to conservadorLiveV5, the
+   * policy version for MamoruActionPolicyV2 (increase through the policy, the guardian pause, the swap deadline under
+   * the policy). Only where the operator has `MAMORU_ACTION_POLICY_V2_ADDRESS` (V2 deployed); while it is on it takes
+   * precedence over `onchain_action_policy_v4` for v2/v3 accounts. Accounts already on v5 keep their renewals whatever it says.
+   */
+  onchain_action_policy_v5: {
+    label: 'On-chain action policy (v5, MamoruActionPolicyV2)',
+    description: 'Offers running v2/v3/v4 accounts the renewal that moves them to conservadorLiveV5 on MamoruActionPolicyV2 (otto/mamoru#151, #171). The V2 address is an operator setting, never hardcoded.',
+  },
 } as const
 
 export type OpsFlagName = keyof typeof OPS_FLAGS

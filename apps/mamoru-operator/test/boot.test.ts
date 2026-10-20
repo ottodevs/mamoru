@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { POLICIES } from '@mamoru/policy'
-import { assertV4Resolvable, resolveNamedPolicy, resolveV4Policy, syncYieldLedgerFlag } from '../src/boot.ts'
+import { assertV4Resolvable, resolveNamedPolicy, resolveV4Policy, resolveV5Policy, syncYieldLedgerFlag } from '../src/boot.ts'
 
 function fakeLoop() {
   const calls: string[] = []
@@ -116,3 +116,48 @@ describe('assertV4Resolvable', () => {
     expect(() => assertV4Resolvable([v4], { ...ok, MAMORU_GAS_POLICY_ADDRESS: undefined })).toThrow(/aaaaaaaa/)
   })
 })
+
+// otto/mamoru#151: conservador-live-v5 on MamoruActionPolicyV2, a new address next to V1's.
+describe('v5 (MamoruActionPolicyV2): resolved only with the v4 opt-in and MAMORU_ACTION_POLICY_V2_ADDRESS', () => {
+  const V1 = `0x${'11'.repeat(20)}`
+  const GAS = `0x${'22'.repeat(20)}`
+  const V2 = `0x${'33'.repeat(20)}`
+  const ok = { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: V1, MAMORU_GAS_POLICY_ADDRESS: GAS, MAMORU_ACTION_POLICY_V2_ADDRESS: V2 }
+
+  test('off without the opt-in or the V2 address: v5 does not exist, v4 resolves as before', () => {
+    expect(resolveNamedPolicy('conservador-live-v5', {})).toBeUndefined()
+    expect(resolveNamedPolicy('conservador-live-v5', { ...ok, MAMORU_ONCHAIN_POLICY_V4: '0' })).toBeUndefined()
+    expect(resolveNamedPolicy('conservador-live-v5', { ...ok, MAMORU_ACTION_POLICY_V2_ADDRESS: undefined })).toBeUndefined()
+    expect(resolveV5Policy('base', { ...ok, MAMORU_ACTION_POLICY_V2_ADDRESS: undefined })).toBeUndefined()
+    const v4 = resolveNamedPolicy('conservador-live-v4', ok)!
+    expect(v4.actionPolicy?.address.toLowerCase()).toBe(V1)
+    expect(v4.actionPolicy?.contractVersion).toBeUndefined()
+  })
+
+  test('on: wired to V2 (contractVersion 2) and the same gas policy, for each chain twin', () => {
+    const v5 = resolveNamedPolicy('conservador-live-v5', ok)!
+    expect(v5.policyId).toBe('conservador-live-v5')
+    expect(v5.actionPolicy?.address.toLowerCase()).toBe(V2)
+    expect(v5.actionPolicy?.contractVersion).toBe(2)
+    expect(v5.actionPolicy?.gasPolicy?.address.toLowerCase()).toBe(GAS)
+    expect(resolveV5Policy('base', ok)?.policyId).toBe('conservador-live-v5')
+    expect(resolveV5Policy('fork', ok)?.policyId).toBe('conservador-lab-v5')
+    expect(resolveNamedPolicy('conservador-lab-v5', ok)?.chain).toBe('fork')
+  })
+
+  test('the V1 address, the gas policy, zero or a malformed one can never stand in for V2', () => {
+    expect(() => resolveNamedPolicy('conservador-live-v5', { ...ok, MAMORU_ACTION_POLICY_V2_ADDRESS: V1 })).toThrow('is the V1 address')
+    expect(() => resolveNamedPolicy('conservador-live-v5', { ...ok, MAMORU_ACTION_POLICY_V2_ADDRESS: GAS })).toThrow('are the same')
+    expect(() => resolveNamedPolicy('conservador-live-v5', { ...ok, MAMORU_ACTION_POLICY_V2_ADDRESS: `0x${'00'.repeat(20)}` })).toThrow('not a contract address')
+    expect(() => resolveNamedPolicy('conservador-live-v5', { ...ok, MAMORU_ACTION_POLICY_V2_ADDRESS: '0x1234' })).toThrow('not a contract address')
+    expect(() => resolveNamedPolicy('conservador-live-v5', { ...ok, MAMORU_GAS_POLICY_ADDRESS: undefined })).toThrow('MAMORU_GAS_POLICY_ADDRESS')
+  })
+
+  test('assertV4Resolvable: an account on v5 needs V2 configured, or boot refuses naming it', () => {
+    const v5 = { accountKey: 'cccccccc-0000', policyId: 'conservador-live-v5' }
+    expect(() => assertV4Resolvable([v5], ok)).not.toThrow()
+    expect(() => assertV4Resolvable([v5], { ...ok, MAMORU_ACTION_POLICY_V2_ADDRESS: undefined })).toThrow(/cccccccc.*MAMORU_ACTION_POLICY_V2_ADDRESS/)
+    expect(() => assertV4Resolvable([v5], { ...ok, MAMORU_ACTION_POLICY_V2_ADDRESS: V1 })).toThrow(/cccccccc/)
+  })
+})
+

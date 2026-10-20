@@ -59,6 +59,8 @@ export const homeCopy = {
   extend: 'Approve',
   // Spec 007 T7: the move of a running v2/v3 approval to the on-chain action policy.
   upgradeTitle: 'Mamoru can now be limited on chain: it would trade only near the market price, and only the positions it opened. Renew its approval to turn this on.',
+  // otto/mamoru#151, #171: the move to MamoruActionPolicyV2 (conservador-live-v5), from v2/v3 or from v4.
+  upgradeV5Title: "Mamoru's on-chain limits have a new version: it trades only near the market price and only the positions it opened, adds to a position it already holds instead of opening another, and a guardian key can pause it but never move funds. Renew its approval to turn this on.",
   // otto/mamoru#149: a grant that has used 80% or all of what the approval allows.
   usageSoon: (what: string, pair: string) => `Mamoru has used most of what this approval allows for ${what} in ${pair}. Renew it now so that does not stop.`,
   usageSpent: (what: string, pair: string) => `Mamoru has used all that this approval allows for ${what} in ${pair}, so it has stopped doing that. Renew it to start again.`,
@@ -683,7 +685,7 @@ export function approvalTitle(approval: NonNullable<FundingView['approval']>): s
   if (approval.expired) return homeCopy.renewEnded
   if (u?.spent) return usage!
   if (approval.renewDue) return homeCopy.renewSoon(approvalDay(approval.validUntil))
-  return usage ?? (approval.upgrade ? homeCopy.upgradeTitle : homeCopy.extendTitle)
+  return usage ?? (approval.upgrade ? (approval.upgradePolicy?.includes('-v5') ? homeCopy.upgradeV5Title : homeCopy.upgradeTitle) : homeCopy.extendTitle)
 }
 
 /**

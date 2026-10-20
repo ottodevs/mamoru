@@ -5,7 +5,7 @@ import { createPublicClient, getAddress, http, isAddress } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, type Address } from '@mamoru/domain'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
-import { conservadorLabV4, conservadorLiveV4, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, type PolicyVersion } from '@mamoru/policy'
+import { conservadorLabV4, conservadorLabV5, conservadorLiveV4, conservadorLiveV5, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, type PolicyVersion } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
@@ -41,6 +41,8 @@ export function syncYieldLedgerFlag(loop: Pick<SnapshotLoop, 'start' | 'stop'>, 
 
 /** `conservadorLiveV4`/`conservadorLabV4`, keyed by their own `policyId` — never in `POLICIES` (policies.ts). */
 const V4_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV4.policyId]: conservadorLiveV4, [conservadorLabV4.policyId]: conservadorLabV4 }
+/** otto/mamoru#151: `conservadorLiveV5`/`conservadorLabV5`, the policy version for MamoruActionPolicyV2 — never in `POLICIES` either. */
+const V5_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV5.policyId]: conservadorLiveV5, [conservadorLabV5.policyId]: conservadorLabV5 }
 
 /**
  * Spec 007 (otto/mamoru#151) T7: a v2/v3 `policyId` (the only kind any live account names today) resolves exactly
@@ -61,6 +63,8 @@ export function resolveNamedPolicy(policyId: string, env: Record<string, string 
   const named = POLICIES[policyId]
   if (named) return named
   if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1') return undefined
+  const v5 = V5_POLICIES_BY_ID[policyId]
+  if (v5) return env.MAMORU_ACTION_POLICY_V2_ADDRESS ? deployedV5(v5, env) : undefined
   const v4 = V4_POLICIES_BY_ID[policyId]
   if (!v4) return undefined
   return deployedV4(v4, env)
@@ -84,6 +88,35 @@ function deployedV4(v4: PolicyVersion, env: Record<string, string | undefined>):
 }
 
 /**
+ * otto/mamoru#151: the v5 policy wired to MamoruActionPolicyV2 (`MAMORU_ACTION_POLICY_V2_ADDRESS`, a new address, not
+ * the V1 one) and the same MamoruGasPolicy (`MAMORU_GAS_POLICY_ADDRESS`), marked `contractVersion: 2` (the engine reads
+ * the guardian pause). Needs the same opt-in as v4. Malformed, zero, or equal to the V1 or the gas policy address:
+ * throws, so a V1 address can never stand in for V2 (V1 refuses increase and the deadline: the engine would stall).
+ */
+function deployedV5(v5: PolicyVersion, env: Record<string, string | undefined>): PolicyVersion {
+  const v2 = env.MAMORU_ACTION_POLICY_V2_ADDRESS
+  if (!v2) throw new Error('MAMORU_ACTION_POLICY_V2_ADDRESS is not set')
+  const gas = env.MAMORU_GAS_POLICY_ADDRESS
+  if (!gas) throw new Error('MAMORU_ACTION_POLICY_V2_ADDRESS is set but MAMORU_GAS_POLICY_ADDRESS is not')
+  for (const [name, a] of [['MAMORU_ACTION_POLICY_V2_ADDRESS', v2], ['MAMORU_GAS_POLICY_ADDRESS', gas]] as const) {
+    if (!isAddress(a, { strict: false }) || /^0x0{40}$/i.test(a)) throw new Error(`${name} is not a contract address`)
+  }
+  if (v2.toLowerCase() === gas.toLowerCase()) throw new Error('MAMORU_ACTION_POLICY_V2_ADDRESS and MAMORU_GAS_POLICY_ADDRESS are the same')
+  if (env.MAMORU_ACTION_POLICY_ADDRESS && v2.toLowerCase() === env.MAMORU_ACTION_POLICY_ADDRESS.toLowerCase()) throw new Error('MAMORU_ACTION_POLICY_V2_ADDRESS is the V1 address (MAMORU_ACTION_POLICY_ADDRESS)')
+  return withActionPolicy(v5, getAddress(v2), Object.values(V4_POOLS), { gasPolicy: { address: getAddress(gas), caps: V4_GAS_CAPS }, contractVersion: 2 })
+}
+
+/**
+ * otto/mamoru#151: the v5 policy (MamoruActionPolicyV2) the renew row may move this operator's v2/v3/v4 accounts to,
+ * or undefined when the v4 opt-in is off or `MAMORU_ACTION_POLICY_V2_ADDRESS` is unset (V2 undeployed: nothing of v5
+ * exists). Whether an account is offered the move is the D1 flag `onchain_action_policy_v5`, read on every view.
+ */
+export function resolveV5Policy(chain: PolicyVersion['chain'], env: Record<string, string | undefined>): PolicyVersion | undefined {
+  if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1' || !env.MAMORU_ACTION_POLICY_V2_ADDRESS) return undefined
+  return deployedV5(chain === conservadorLiveV5.chain ? conservadorLiveV5 : conservadorLabV5, env)
+}
+
+/**
  * Spec 007 T7 (d): the v4 policy the renew row may move this operator's v2/v3 accounts to (same chain as the
  * operator's own policy), or undefined when the opt-in is off. Read at boot like `resolveNamedPolicy`; whether an
  * account is offered the move is the D1 flag `onchain_action_policy_v4`, read on every view.
@@ -95,6 +128,17 @@ export function resolveV4Policy(chain: PolicyVersion['chain'], env: Record<strin
 
 /** Accounts whose stored policy is a v4 one, when this operator was started without the v4 opt-in or its addresses. */
 export function assertV4Resolvable(accounts: readonly { accountKey: string; policyId?: string }[], env: Record<string, string | undefined>): void {
+  const v5Ids = new Set([conservadorLiveV5.policyId, conservadorLabV5.policyId])
+  const onV5 = accounts.filter((a) => a.policyId && v5Ids.has(a.policyId))
+  if (onV5.length) {
+    let v5: PolicyVersion | undefined
+    try {
+      v5 = resolveV5Policy(conservadorLiveV5.chain, env) ?? resolveV5Policy(conservadorLabV5.chain, env)
+    } catch {
+      v5 = undefined
+    }
+    if (!v5) throw new Error(`${onV5.length} account(s) run MamoruActionPolicyV2 (${onV5.map((a) => a.accountKey.slice(0, 8)).join(', ')}): start with MAMORU_ONCHAIN_POLICY_V4=1, MAMORU_ACTION_POLICY_V2_ADDRESS and MAMORU_GAS_POLICY_ADDRESS set`)
+  }
   const v4Ids = new Set([conservadorLiveV4.policyId, conservadorLabV4.policyId])
   const onV4 = accounts.filter((a) => a.policyId && v4Ids.has(a.policyId))
   if (!onV4.length) return
@@ -264,6 +308,7 @@ export async function bootOperator(o: BootOptions) {
       trustedClients: parseTrustedRpc(o.trustedRpc).map((t) => ({ label: t.label, client: createPublicClient({ transport: http(t.url, { timeout: 15_000 }) }) })),
       ...(settings ? { settings, opsFlags: () => settings.flags() } : {}),
       ...(resolveV4Policy(policy.chain, process.env) ? { v4Policy: resolveV4Policy(policy.chain, process.env) } : {}),
+      ...(resolveV5Policy(policy.chain, process.env) ? { v5Policy: resolveV5Policy(policy.chain, process.env) } : {}),
       guardReadsState: new GuardReadsState(o.stateDir),
     },
     client,

@@ -519,6 +519,10 @@ describe('renewing the approval', () => {
     expect(up.text).toContain('Renew approval')
     expect(approvalTitle({ ...year, renewDue: true, upgrade: true })).toContain('approval ends on')
     expect(approvalRowKey({ ...year, upgrade: true })).not.toBe(approvalRowKey(year))
+    // otto/mamoru#151: the move to MamoruActionPolicyV2 (v5) says what it adds.
+    expect(approvalTitle({ ...year, upgrade: true, upgradePolicy: 'conservador-live-v5' })).toContain('adds to a position it already holds instead of opening another')
+    expect(approvalTitle({ ...year, upgrade: true, upgradePolicy: 'conservador-live-v5' })).toContain('a guardian key can pause it but never move funds')
+    expect(approvalTitle({ ...year, upgrade: true, upgradePolicy: 'conservador-live-v4' })).toContain('it would trade only near the market price')
   })
 
     test('once prepared, the row shows every line the passkey is about to sign', () => {

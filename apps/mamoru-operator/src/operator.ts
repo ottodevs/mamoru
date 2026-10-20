@@ -349,6 +349,11 @@ export type OperatorConfig = {
    * this operator; every account resolves and renews exactly as before.
    */
   v4Policy?: PolicyVersion
+  /**
+   * otto/mamoru#151: the deployed v5 policy (conservadorLiveV5 with MamoruActionPolicyV2 and MamoruGasPolicy, boot.ts
+   * `resolveV5Policy`), set only with the v4 opt-in and MAMORU_ACTION_POLICY_V2_ADDRESS. Absent: nothing of v5 exists.
+   */
+  v5Policy?: PolicyVersion
   /** otto/mamoru#129 runtime flags from the settings pull; `onchain_action_policy_v4` offers the v4 renewal per account. Absent: every flag off. */
   opsFlags?: () => Partial<Record<OpsFlagName, boolean>>
   /** otto/mamoru#172: where the shared guard reads' fee history and fallback series survive a restart (`GuardReadsState`). Absent: memory only. */
@@ -357,6 +362,8 @@ export type OperatorConfig = {
 
 /** Spec 007 T7: the live policies whose accounts the renew row moves to v4 (same three pools and weights). */
 const V4_MIGRATES_FROM = new Set(['conservador-live-v2', 'conservador-live-v3'])
+/** otto/mamoru#151: the policies whose accounts the renew row moves to v5 (MamoruActionPolicyV2): v2/v3, and v4 (V1). */
+const V5_MIGRATES_FROM = new Set(['conservador-live-v2', 'conservador-live-v3', 'conservador-live-v4', 'conservador-lab-v4'])
 /** Gas a v4 approval's first transaction carries besides enableSessions, per removeSession (measured: ~1.45M for 8). */
 const REVOKE_GAS_EACH = 190_000n
 /** The registry trust calls of a first activation, and one self-attestation call, with margin. */
@@ -865,6 +872,7 @@ export class Operator {
     if (p) return p
     // Spec 007 T7: a v4 account resolves only to the deployed v4 policy this operator was configured with.
     if (this.cfg.v4Policy?.policyId === acc.policyId) return this.cfg.v4Policy
+    if (this.cfg.v5Policy?.policyId === acc.policyId) return this.cfg.v5Policy
     if (this.cfg.policy.policyId === acc.policyId) return this.cfg.policy
     throw new Error(`${acc.accountKey}: unknown policy ${acc.policyId}`)
   }
@@ -875,14 +883,19 @@ export class Operator {
    * same chain. Accounts that never tap keep their grants.
    */
   v4Target(acc: AccountState): PolicyVersion | null {
-    const v4 = this.cfg.v4Policy
-    if (!v4 || !acc.active || this.cfg.opsFlags?.().onchain_action_policy_v4 !== true) return null
+    if (!acc.active) return null
     let cur: PolicyVersion
     try {
       cur = this.policyOf(acc)
     } catch {
       return null
     }
+    const flags = this.cfg.opsFlags?.()
+    // otto/mamoru#151: MamoruActionPolicyV2 deployed and offered: v2/v3 and v4 accounts move to v5.
+    const v5 = this.cfg.v5Policy
+    if (v5 && flags?.onchain_action_policy_v5 === true && V5_MIGRATES_FROM.has(cur.policyId) && cur.chain === v5.chain) return v5
+    const v4 = this.cfg.v4Policy
+    if (!v4 || flags?.onchain_action_policy_v4 !== true) return null
     return V4_MIGRATES_FROM.has(cur.policyId) && cur.chain === v4.chain ? v4 : null
   }
 
@@ -900,7 +913,7 @@ export class Operator {
     let sized = this.v4Sized.get(key)
     if (!sized) {
       const pools = Object.values(V4_POOLS).filter((v) => p.buckets.some((b) => b.pools.includes(v.pool)))
-      sized = withActionPolicy(p, ap.address, pools, { caps: v4BudgetCaps(p, cap), ...(ap.gasPolicy ? { gasPolicy: ap.gasPolicy } : {}), ...(ap.bandFactorBps !== undefined ? { bandFactorBps: ap.bandFactorBps } : {}), ...(ap.twapShortWindowSeconds !== undefined ? { twapShortWindowSeconds: ap.twapShortWindowSeconds } : {}) })
+      sized = withActionPolicy(p, ap.address, pools, { caps: v4BudgetCaps(p, cap), ...(ap.gasPolicy ? { gasPolicy: ap.gasPolicy } : {}), ...(ap.bandFactorBps !== undefined ? { bandFactorBps: ap.bandFactorBps } : {}), ...(ap.twapShortWindowSeconds !== undefined ? { twapShortWindowSeconds: ap.twapShortWindowSeconds } : {}), ...(ap.contractVersion ? { contractVersion: ap.contractVersion } : {}) })
       this.v4Sized.set(key, sized)
     }
     return sized
@@ -922,8 +935,9 @@ export class Operator {
     const left = validUntil - Math.floor(Date.now() / 1000)
     const missing = this.missingGrants(acc).length
     const usage = this.usageView(acc)
-    const upgrade = this.v4Target(acc) !== null
-    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}), ...(upgrade ? { upgrade } : {}) }
+    const target = this.v4Target(acc)
+    const upgrade = target !== null
+    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}), ...(upgrade ? { upgrade, upgradePolicy: target.policyId } : {}) }
   }
 
   /**
@@ -1397,7 +1411,11 @@ export class Operator {
       if (inForce && lapses) reattest.push(m)
     }
     const current = await read<bigint>({ address: d.actionPolicy, abi: v4PolicyAbi, functionName: 'generationOf', args: [live.safe] })
-    let generation = current + 1n
+    // otto/mamoru#151: the move to another policy contract (v4 on V1 -> v5 on V2) is a renewal at the old contract's
+    // generation + 1 (spec 007: "a migration carries the old deployment's generation"; V2 accepts that jump only on its
+    // first enable for the account). Read at the same block as the rest.
+    const prior = mode === 'full' ? await this.priorGeneration(acc, live.safe, d, read) : 0n
+    let generation = (prior > current ? prior : current) + 1n
     if (mode === 'extend') {
       generation = current
       const held = [...new Set(acc.grants.map((g) => g.grant.pool).filter((x): x is NonNullable<typeof x> => !!x))]
@@ -1434,6 +1452,19 @@ export class Operator {
     // Unique per prepare (generation and block time): the registry cannot store the same attestation bytes twice.
     const attestData = encodeAbiParameters([{ type: 'uint256' }, { type: 'uint256' }], [generation, BigInt(now)])
     return { d, generation, attest, reattest, attestData, admitByPool }
+  }
+
+  /** The account's generation at the action policy contract it runs on now, when that is another one than `d`'s; else 0. */
+  private async priorGeneration(acc: AccountState, safe: Address, d: V4Deployment, read: <T>(args: Parameters<PublicClient['readContract']>[0]) => Promise<T>): Promise<bigint> {
+    let cur: PolicyVersion
+    try {
+      cur = this.policyOf(acc)
+    } catch {
+      return 0n
+    }
+    const old = cur.actionPolicy?.address
+    if (!isV4(cur) || !old || old.toLowerCase() === d.actionPolicy.toLowerCase()) return 0n
+    return read<bigint>({ address: old, abi: v4PolicyAbi, functionName: 'generationOf', args: [safe] })
   }
 
   /**
@@ -1506,9 +1537,12 @@ export class Operator {
       // The move to v4 enables every grant of the v4 policy; a v4 renewal the ones the account has, as before.
       const keys = target ? policy.session.grants.filter((g) => !g.perPosition).map(grantKey) : acc.grants.map((g) => g.name)
       const f = await this.fitV4(acc, live, policy, r, cap, keys, old, 'full', RENEW_GAS_BUDGET)
+      // otto/mamoru#151: the move to MamoruActionPolicyV2 (v5) names what it adds besides the on-chain limits.
+      const toV5 = !!target && !!target.actionPolicy && target.actionPolicy.contractVersion === 2
       const summary = [
-        target ? `Renew Mamoru's approval on your Safe ${live.safe} and move it to on-chain limits` : `Renew Mamoru's approval on your Safe ${live.safe}`,
+        target ? `Renew Mamoru's approval on your Safe ${live.safe} and move it to ${toV5 ? 'the new version of its on-chain limits' : 'on-chain limits'}` : `Renew Mamoru's approval on your Safe ${live.safe}`,
         ...(target ? ['Mamoru can now trade only near the market price, and only the positions it opened'] : []),
+        ...(toV5 ? ['It can add to a position it already holds instead of opening another one', 'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause'] : []),
         `Engine key ${f.sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero, sized for deposits up to ${fmtUsdc(cap)} USDC (the cap you signed):`,
         ...this.v4Lines(f.stored, policy, cap),
         ...this.capNotice(acc, cap),

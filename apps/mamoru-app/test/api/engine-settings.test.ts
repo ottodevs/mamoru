@@ -78,7 +78,7 @@ describe('GET /api/internal/engine-settings (spec 006)', () => {
     const h = harness(() => NOW, { env: { OPERATOR_SECRET: OP } })
     insert(h, 'prod', today)
     const p = JSON.parse(await (await pull(h)).text()) as EngineSettingsPayload
-    expect(p.flags).toEqual({ yield_ledger: false, onchain_action_policy_v4: false })
+    expect(p.flags).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false })
   })
 
   test('otto/mamoru#129: the payload carries the newest row for a flag that was turned on', async () => {
@@ -88,6 +88,6 @@ describe('GET /api/internal/engine-settings (spec 006)', () => {
       .query(`INSERT INTO ops_flag_changes (flag, enabled, author, reason, created_at) VALUES ('yield_ledger', 1, 'ot', 'turn on for canary', ?)`)
       .run(NOW.toISOString())
     const p = JSON.parse(await (await pull(h)).text()) as EngineSettingsPayload
-    expect(p.flags).toEqual({ yield_ledger: true, onchain_action_policy_v4: false })
+    expect(p.flags).toEqual({ yield_ledger: true, onchain_action_policy_v4: false, onchain_action_policy_v5: false })
   })
 })
