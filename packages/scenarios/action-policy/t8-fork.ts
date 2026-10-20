@@ -6,7 +6,8 @@
 //      GUARDIAN a dev account), each in one `deployModule` call; the operator's `findModule` check on V2;
 //   2. a v4 account as in production: v4 activation on V1 (generation 1), and an engine mint through V1's `mint`;
 //      the owner also mints a position outside any policy;
-//   3. the move to v5 (the operator's renew row): a new key, consecutive owner transactions on V2 at the V1
+//   3. the move to v5 (the operator's renew row): a new key, consecutive owner transactions (each fitted by simulated
+//      gas under V4_TX_GAS_TARGET, as the operator's fitV4) on V2 at the V1
 //      generation + 1, every v4 session revoked in the first, V2 self-attested, the V1-minted position named in
 //      Init.admit; each transaction under Base's 2^24; a v4 session is refused afterwards;
 //   4. increase through V2 (approve V2 + V2.increase) on the admitted position is included and adds liquidity to the
@@ -36,6 +37,9 @@ import {
   instantiateGrant,
   retargetToPolicy,
   splitV4Keys,
+  orderV4Keys,
+  fitPrefixBySimulation,
+  V4_TX_GAS_TARGET,
   v4BudgetCaps,
   withActionPolicy,
   type PolicyVersion,
@@ -85,12 +89,16 @@ process.on('unhandledRejection', (e) => {
   process.exit(1)
 })
 
-async function ownerCalls(lab: Lab, relayer: PrivateKeyAccount, acct: AccountFixture, calls: MultiSendCall[], gasLimit = 20_000_000n): Promise<TxResult> {
+/** The owner's signed Safe transaction carrying `calls` (MultiSend), as calldata to the Safe. */
+async function ownerTxData(lab: Lab, acct: AccountFixture, calls: MultiSendCall[]): Promise<Hex> {
   const nonce = await lab.client.readContract({ address: acct.safe, abi: safeAbi, functionName: 'nonce' })
   const op = (calls.length === 1 ? { to: calls[0]!.to, data: calls[0]!.data, operation: OPERATION_CALL } : multiSendCallOnly(calls)) as { to: Address; data: Hex; operation: 0 | 1 }
   const tx: SafeTx = { to: op.to, value: 0n, data: op.data, operation: op.operation, nonce }
-  const signature = await signSafeTx(acct.backupOwner, acct.safe, lab.chainId, tx)
-  return lab.send(relayer, acct.safe, execTransactionData(tx, signature), 0n, gasLimit)
+  return execTransactionData(tx, await signSafeTx(acct.backupOwner, acct.safe, lab.chainId, tx))
+}
+
+async function ownerCalls(lab: Lab, relayer: PrivateKeyAccount, acct: AccountFixture, calls: MultiSendCall[], gasLimit = 20_000_000n): Promise<TxResult> {
+  return lab.send(relayer, acct.safe, await ownerTxData(lab, acct, calls), 0n, gasLimit)
 }
 
 async function usdcPrice(lab: Lab, pool: string, token0: string, token1: string, asset: string): Promise<Price> {
@@ -170,26 +178,45 @@ try {
   let salt = 0
   const nextSalt = (): Hex => `0x${(++salt).toString(16).padStart(64, '0')}` as Hex
 
-  /** One approval of `policy` at `generation`, split like the operator, every part sent. */
+  /**
+   * One approval of `policy` at `generation`, split as the operator's fitV4 does (otto/mamoru#151): each owner
+   * transaction takes the longest prefix of whole sessions whose SIMULATED gas (eth_estimateGas of the signed Safe
+   * transaction) stays at or under V4_TX_GAS_TARGET, the static model only seeding the search; every part is sent.
+   */
   async function approveAll(label: string, policy: PolicyVersion, generation: bigint, sessionKey: Address, admitByPool: Partial<Record<string, bigint[]>>, attest: Address[], revokes: Hex[]): Promise<Built[]> {
     const d: V4Deployment = v4DeploymentOf(policy)!
     const caps = computeCaps(policy, CAP_USDC, prices)
     const budgets = v4BudgetCaps(policy, CAP_USDC)
-    const allKeys = policy.session.grants.map(grantKey)
-    const parts = splitV4Keys(policy, allKeys, { overheadGas: BigInt(revokes.length) * 190_000n + 150_000n })
-    note(`${label}: split`, null, `${parts.length} owner transactions: ${parts.map((p) => p.length).join(' + ')} sessions, ${parts.map((p) => p.reduce((n, k) => n + policy.session.grants.find((x) => grantKey(x) === k)!.actions.length, 0)).join(' + ')} actions`)
+    const actionsOf = (k: string) => policy.session.grants.find((x) => grantKey(x) === k)!.actions.length
+    let remaining = orderV4Keys(policy, policy.session.grants.map(grantKey))
     const out: Built[] = []
-    for (const [i, keys] of parts.entries()) {
-      const now = await engineNow()
-      const grants = keys.map((k) => retargetToPolicy(instantiateGrant(policy, k, { account: safe, sessionKey, chainId: lab.chainId, salt: nextSalt(), validAfter: now - 60, validUntil: now + policy.session.validitySeconds, caps, capUsdc: CAP_USDC }), d.actionPolicy))
-      const batch = activationBatch({ safe } as LiveAccount, grants, [], { trust: false, policiesFor: v4PoliciesFor(grants, d, generation, budgets, admitByPool), attest: i === 0 ? attest : [] })
-      const calls = [...revocationCalls(i === 0 ? revokes : []), ...batch.calls]
-      const r = await ownerCalls(lab, relayer, world.a1, calls)
-      note(`${label}: tx ${i + 1}/${parts.length}`, r.ok && r.receipt.gasUsed < BASE_PER_TX_GAS_CAP, `${r.receipt.gasUsed} gas (< 2^24 = ${BASE_PER_TX_GAS_CAP}), ${keys.length} sessions`)
+    for (let i = 0; remaining.length; i++) {
+      const first = i === 0
+      const build = async (keys: string[]): Promise<Built> => {
+        const now = await engineNow()
+        const grants = keys.map((k) => retargetToPolicy(instantiateGrant(policy, k, { account: safe, sessionKey, chainId: lab.chainId, salt: nextSalt(), validAfter: now - 60, validUntil: now + policy.session.validitySeconds, caps, capUsdc: CAP_USDC }), d.actionPolicy))
+        const batch = activationBatch({ safe } as LiveAccount, grants, [], { trust: false, policiesFor: v4PoliciesFor(grants, d, generation, budgets, admitByPool), attest: first ? attest : [] })
+        return { keys, grants, permissionIds: batch.permissionIds, calls: [...revocationCalls(first ? revokes : []), ...batch.calls] }
+      }
+      const overheadGas = (first ? BigInt(revokes.length) * 190_000n : 0n) + 150_000n
+      const guess = splitV4Keys(policy, remaining, { overheadGas, ceiling: V4_TX_GAS_TARGET })[0]?.length ?? 1
+      const tried: string[] = []
+      const fit = await fitPrefixBySimulation(remaining, guess, async (keys) => {
+        const g = await lab.client.estimateGas({ account: relayer.address, to: safe, data: await ownerTxData(lab, world.a1, (await build(keys)).calls) })
+        tried.push(`${keys.length}:${g}`)
+        return g
+      })
+      if (fit.n === 0) throw new Error(`${label}: not even one session fits ${V4_TX_GAS_TARGET}`)
+      const b = await build(remaining.slice(0, fit.n))
+      note(`${label}: tx ${i + 1} fitted by simulation`, null, `guess ${guess} sessions, simulated sessions:gas ${tried.join(' ')} -> ${fit.n} sessions (${b.keys.reduce((n, k) => n + actionsOf(k), 0)} actions), ${fit.gas} <= ${V4_TX_GAS_TARGET}`)
+      const r = await ownerCalls(lab, relayer, world.a1, b.calls)
+      note(`${label}: tx ${i + 1}`, r.ok && r.receipt.gasUsed <= V4_TX_GAS_TARGET, `${r.receipt.gasUsed} gas used (target ${V4_TX_GAS_TARGET}, cap 2^24 = ${BASE_PER_TX_GAS_CAP}), ${b.keys.length} sessions`)
       gas[`${label}-tx${i + 1}`] = r.receipt.gasUsed.toString()
       if (!r.ok) throw new Error(`${label} tx ${i + 1} reverted`)
-      out.push({ keys, grants, permissionIds: batch.permissionIds, calls })
+      out.push(b)
+      remaining = remaining.slice(fit.n)
     }
+    note(`${label}: owner transactions`, null, `${out.length}`)
     const onChain = await lab.client.readContract({ address: d.actionPolicy, abi: policyAbi, functionName: 'generationOf', args: [safe] })
     note(`${label}: generation on chain`, onChain === generation, `${onChain}`)
     return out

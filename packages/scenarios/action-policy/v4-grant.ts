@@ -69,6 +69,30 @@ export async function deployMamoruPolicy(lab: Lab, artifact: PolicyArtifact, dep
   return predicted
 }
 
+export const ARTIFACT_PATH_V2 = repoPath('contracts/action-policy/out/MamoruActionPolicyV2.sol/MamoruActionPolicyV2.json')
+
+/**
+ * otto/mamoru#151: MamoruActionPolicyV2 deployed and registered in one `deployModule` call, as script/DeployV2.s.sol
+ * does (deployer-prefixed salt nonce 3), with `guardian` as its immutable revoke-only pause key.
+ */
+export async function deployMamoruPolicyV2(lab: Lab, deployer: PrivateKeyAccount, guardian: Address, nonce = 3n): Promise<Address> {
+  const artifact = await loadPolicyArtifact(ARTIFACT_PATH_V2)
+  const initCode = encodeDeployData({
+    abi: artifact.abi,
+    bytecode: artifact.bytecode,
+    args: [address('SmartSession', baseRegistry), address('NonfungiblePositionManager', baseRegistry), address('SwapRouter02', baseRegistry), address('UniswapV3Factory', baseRegistry), guardian],
+  })
+  const salt = encodePacked(['address', 'uint96'], [deployer.address, nonce])
+  const resolverUID = await resolverUidOf(lab, address('TimeFramePolicy', baseRegistry))
+  const args = [salt, resolverUID, initCode, '0x', '0x'] as const
+  const { result: predicted } = await lab.client.simulateContract({ account: deployer.address, address: address('ModuleRegistry', baseRegistry), abi: registryDeployAbi, functionName: 'deployModule', args })
+  const tx = await lab.send(deployer, address('ModuleRegistry', baseRegistry), encodeFunctionData({ abi: registryDeployAbi, functionName: 'deployModule', args }), 0n, 8_000_000n)
+  if (!tx.ok) throw new Error('ModuleRegistry.deployModule(MamoruActionPolicyV2) reverted')
+  const record = await lab.client.readContract({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findModule', args: [predicted] })
+  if (record.resolverUID !== resolverUID) throw new Error(`MamoruActionPolicyV2 ${predicted}: ModuleRecord resolver ${record.resolverUID}, expected ${resolverUID}`)
+  return predicted
+}
+
 /**
  * Spec 007 T7 (GPT-6 review of #97, P1 2): MamoruGasPolicy, deployed and registered in one `deployModule` call like
  * the action policy (script/Deploy.s.sol `deployGasPolicy`). No constructor arguments.
