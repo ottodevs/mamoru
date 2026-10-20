@@ -59,59 +59,82 @@ describe('bridge-out quote check (#133)', () => {
 })
 
 describe('the operator bundler guard (#180)', () => {
-  const { mkdtempSync, readFileSync } = require('node:fs') as typeof import('node:fs')
+  const { mkdtempSync, readFileSync, writeFileSync } = require('node:fs') as typeof import('node:fs')
   const { tmpdir } = require('node:os') as typeof import('node:os')
   const { join } = require('node:path') as typeof import('node:path')
-  const make = (now: () => number = Date.now) => {
-    const dir = mkdtempSync(join(tmpdir(), 'mamoru-guard-'))
-    const l1 = { getGasPrice: async () => 1_000_000_000n, getBalance: async () => 10n ** 18n } as unknown as import('viem').PublicClient
+  type Hex = `0x${string}`
+  const K1 = `0x${'01'.repeat(32)}` as Hex
+  const K2 = `0x${'02'.repeat(32)}` as Hex
+  const T1 = `0x${'a1'.repeat(32)}` as Hex
+  const route = (id: string, userOpHash: Hex) => ({ id, safe: '0x0000000000000000000000000000000000000aaa', safeNonce: '0', fromBlock: '0', state: 'sending', amountUsdc: '1', outputUsdc: '1', userOpHash, at: new Date().toISOString() })
+  const make = (o: { now?: () => number; dir?: string; chain?: Partial<Record<string, unknown>> } = {}) => {
+    const dir = o.dir ?? mkdtempSync(join(tmpdir(), 'mamoru-guard-'))
+    if (!o.dir) writeFileSync(join(dir, 'bridge-out.json'), JSON.stringify({ routes: { a: route('r1', K1), b: route('r2', K2) }, spent: { day: '', wei: '0' }, moves: {} }))
+    const l1 = { getGasPrice: async () => 1_000_000_000n, getBalance: async () => 10n ** 18n, getTransactionReceipt: async () => null, getTransactionCount: async () => 0, ...o.chain } as unknown as import('viem').PublicClient
     const relayer = { address: '0x0000000000000000000000000000000000000001' as const, send: async () => Promise.reject(new Error('unused')) }
-    const bo = new BridgeOut(l1, relayer, dir, fetch, now, undefined, () => true)
-    const spent = () => BigInt(JSON.parse(readFileSync(join(dir, 'bridge-out.json'), 'utf8')).spent.wei)
-    return { bo, spent }
+    const bo = new BridgeOut(l1, relayer, dir, fetch, o.now ?? Date.now, undefined, () => true)
+    const j = () => JSON.parse(readFileSync(join(dir, 'bridge-out.json'), 'utf8'))
+    return { bo, dir, spent: () => BigInt(j().spent.wei), reserved: () => j().reservations ?? {} }
   }
 
-  test('fronts gas only for the move under way', async () => {
+  test('fronts gas only for a userOp of a move under way, one bundle at a time', async () => {
     const { bo } = make()
-    await expect(bo.bundlerGuard().before(1_400_000n)).rejects.toThrow('no move under way')
-  })
-
-  test('the signed bound replaces the estimate; over the budget the send stops and the reservation goes back', async () => {
-    const { bo, spent } = make()
-    ;(bo as unknown as { sending: unknown }).sending = { accountKey: 'a', route: { id: 'r' } }
     const g = bo.bundlerGuard()
-    await g.before(1_400_000n)
-    expect(spent()).toBe(1_400_000n * 1_000_000_000n * 2n)
-    g.sending(1_400_000n * 1_500_000_000n, 1_400_000n)
-    expect(spent()).toBe(1_400_000n * 1_500_000_000n)
-    expect(() => g.sending(DAILY_BUDGET_WEI + 1n, 1_400_000n)).toThrow("budget")
-    g.failed(false)
-    expect(spent()).toBe(0n)
+    await expect(g.before(`0x${'09'.repeat(32)}`, 1_400_000n)).rejects.toThrow('no move under way')
+    await g.before(K1, 1_400_000n)
+    await expect(g.before(K2, 1_400_000n)).rejects.toThrow('another bundle is in flight')
   })
 
-  test('a refund larger than the cost leaves nothing charged; a smaller one leaves the difference', async () => {
-    const { bo, spent } = make()
-    ;(bo as unknown as { sending: unknown }).sending = { accountKey: 'a', route: { id: 'r' } }
+  test('reservations are per userOp: a failed signed send of one never clears another; unsigned ones go back', async () => {
+    const { bo, reserved } = make()
     const g = bo.bundlerGuard()
-    await g.before(1_000_000n)
-    g.after(900n, 1_000n)
-    expect(spent()).toBe(0n)
-    await g.before(1_000_000n)
-    g.after(1_000n, 900n)
-    expect(spent()).toBe(100n)
+    await g.before(K1, 1_400_000n)
+    g.sending(K1, 3_000_000_000_000_000n, 1_400_000n)
+    g.sent(K1, T1, 7)
+    g.failed(K1, true)
+    await g.before(K2, 1_000_000n)
+    g.failed(K2, false)
+    expect(Object.keys(reserved())).toEqual([K1])
+    expect(reserved()[K1]).toMatchObject({ wei: '3000000000000000', tx: T1, nonce: 7 })
+    // The held 0.003 ETH counts against the budget: a second bundle bound of 0.0028 ETH is refused before any send.
+    await expect(g.before(K2, 1_400_000n)).rejects.toThrow('paused for today')
   })
 
-  test('a bundle crossing UTC midnight: today is charged the whole signed bound, and a refund never takes it below zero', async () => {
+  test('a held reservation is released only on proof: a receipt settles cost minus refund; a taken nonce without a receipt settles 0', async () => {
+    let receipt: unknown = null
+    let count = 5
+    const { bo, dir, reserved, spent } = make({ chain: { getTransactionReceipt: async () => receipt, getTransactionCount: async () => count } })
+    const g = bo.bundlerGuard()
+    await g.before(K1, 1_000_000n)
+    g.sending(K1, 2_000_000_000_000_000n, 1_000_000n)
+    g.sent(K1, T1, 7)
+    g.failed(K1, true)
+    await bo.tick()
+    expect(Object.keys(reserved())).toEqual([K1])
+    count = 8
+    await bo.tick()
+    expect(reserved()).toEqual({})
+    expect(spent()).toBe(0n)
+    // A restart keeps a signed reservation and drops one that was never signed.
+    const { bo: b2, reserved: r2 } = make({ dir })
+    const g2 = b2.bundlerGuard()
+    await g2.before(K2, 1_000_000n)
+    expect(Object.keys(r2())).toEqual([K2])
+    expect(Object.keys(make({ dir }).reserved())).toEqual([])
+    void receipt
+  })
+
+  test('after(): cost minus refund, never below zero; across midnight the reservation still counts until settled', async () => {
     let clock = Date.parse('2026-10-18T23:59:50Z')
-    const { bo, spent } = make(() => clock)
-    ;(bo as unknown as { sending: unknown }).sending = { accountKey: 'a', route: { id: 'r' } }
+    const { bo, spent, reserved } = make({ now: () => clock })
     const g = bo.bundlerGuard()
-    await g.before(1_400_000n)
+    await g.before(K1, 1_000_000n)
+    g.sending(K1, 4_000_000_000_000_000n, 1_000_000n)
     clock = Date.parse('2026-10-19T00:00:10Z')
-    g.sending(4_200_000_000_000_000n, 1_400_000n)
-    expect(spent()).toBe(4_200_000_000_000_000n)
-    g.after(1_000n, 5_000n)
-    expect(spent()).toBe(0n)
+    await expect(g.before(K2, 1_000_000n)).rejects.toThrow()
+    g.after(K1, 1_000n, 900n)
+    expect(spent()).toBe(100n)
+    expect(reserved()).toEqual({})
+    expect(() => g.sending(K2, DAILY_BUDGET_WEI + 1n, 1_000_000n)).toThrow('budget')
   })
 })
-

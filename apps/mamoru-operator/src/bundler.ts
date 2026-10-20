@@ -27,13 +27,15 @@ export type LiveBundler = { url: string; stop: () => void }
  * userOp's paymaster or account pays. Used on Ethereum (otto/mamoru#180); Base runs without one, as before.
  */
 export type BundlerGuard = {
-  before: (gasLimit: bigint) => Promise<void>
+  /** Every call names the userOp (its hash): what the relayer fronts is reserved per bundle. */
+  before: (userOpHash: Hex, gasLimit: bigint) => Promise<void>
   /** The signed transaction's bound (gas x its maxFeePerGas), before the broadcast; throwing stops the send. */
-  sending?: (maxFeeWei: bigint, gasLimit: bigint) => void
-  sent?: (txHash: Hex) => void
-  after: (costWei: bigint, refundWei: bigint) => void
+  sending?: (userOpHash: Hex, maxFeeWei: bigint, gasLimit: bigint) => void
+  /** The signed transaction's hash and the relayer nonce it uses, before the broadcast. */
+  sent?: (userOpHash: Hex, txHash: Hex, nonce: number) => void
+  after: (userOpHash: Hex, costWei: bigint, refundWei: bigint) => void
   /** The send failed; `signed`: a transaction may have been broadcast. */
-  failed: (signed: boolean) => void
+  failed: (userOpHash: Hex, signed: boolean) => void
 }
 export type LiveBundlerOptions = { handleOpsGas?: bigint; guard?: BundlerGuard; label?: string }
 
@@ -73,7 +75,7 @@ export function startLiveBundler(client: PublicClient, relayer: Pick<Relayer, 'a
     // A refusal here is a JSON-RPC error before anything is sent: the caller may call the userOp failed.
     if (opts.guard) {
       try {
-        await opts.guard.before(gasLimit)
+        await opts.guard.before(hash, gasLimit)
       } catch (e) {
         throw new RpcFailure(-32504, `relayer refused to front the gas: ${(e as Error).message.split('\n')[0]}`)
       }
@@ -86,14 +88,14 @@ export function startLiveBundler(client: PublicClient, relayer: Pick<Relayer, 'a
       ;({ receipt } = await relayer.send(
         { to: entryPoint, data, gas: gasLimit },
         undefined,
-        opts.guard?.sending ? (wei) => opts.guard!.sending!(wei, gasLimit) : undefined,
-        (h) => {
+        opts.guard?.sending ? (wei) => opts.guard!.sending!(hash, wei, gasLimit) : undefined,
+        (h, nonce) => {
           signed = true
-          opts.guard?.sent?.(h)
+          opts.guard?.sent?.(hash, h, nonce)
         },
       ))
     } catch (e) {
-      opts.guard?.failed(signed)
+      opts.guard?.failed(hash, signed)
       // Stopped before anything was signed for broadcast: a refusal the caller may call failed. Otherwise it may have
       // been broadcast (-32603): the caller keeps asking by hash.
       if (!signed) throw new RpcFailure(-32504, `relayer did not send: ${(e as Error).message.split('\n')[0]}`)
@@ -102,7 +104,7 @@ export function startLiveBundler(client: PublicClient, relayer: Pick<Relayer, 'a
     const events = parseEventLogs({ abi: entryPointV07Abi, logs: receipt.logs, eventName: 'UserOperationEvent' })
     const ev = events.find((l) => l.args.userOpHash === hash)
     // The beneficiary (the relayer) is paid each userOp's actualGasCost by the EntryPoint.
-    opts.guard?.after(receipt.gasUsed * receipt.effectiveGasPrice, events.reduce((a, l) => a + l.args.actualGasCost, 0n))
+    opts.guard?.after(hash, receipt.gasUsed * receipt.effectiveGasPrice, events.reduce((a, l) => a + l.args.actualGasCost, 0n))
     if (!ev) throw new RpcFailure(-32500, `handleOps ${receipt.transactionHash} did not emit the UserOperationEvent`)
     included.set(hash.toLowerCase(), { op, hash, receipt, success: ev.args.success, actualGasCost: ev.args.actualGasCost, actualGasUsed: ev.args.actualGasUsed })
     console.log(`[${tag}] ${hash.slice(0, 10)} in ${receipt.transactionHash} block ${receipt.blockNumber} success=${ev.args.success}`)

@@ -133,7 +133,7 @@ export type Deposit = {
 /** The relayer sends this module needs, so tests can stand in for the operator's Relayer. */
 export type L1Sender = {
   readonly address: Address
-  send(tx: { to: Address; data?: Hex; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: (maxFeeWei: bigint) => void, onSigned?: (hash: Hex) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }>
+  send(tx: { to: Address; data?: Hex; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: (maxFeeWei: bigint) => void, onSigned?: (hash: Hex, nonce: number) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }>
 }
 
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>
@@ -161,7 +161,13 @@ export type AccountAbstraction = { bundler: L1Bundler; paymaster: Erc20Paymaster
 
 /** A route as kept on disk: what the owner sees, plus what reconciliation needs. */
 type Stored = BridgeOutRoute & { id: string; safe: Address; safeNonce: string; fromBlock: string; execStarted?: boolean; userOpTx?: Hex; cctp?: { maxFee: string; minFinality: number; message?: Hex; nonce?: Hex }; mintAt?: string }
-type Journal = { cctpBurns?: Record<string, string[]>; routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
+/**
+ * What the relayer fronted for one handleOps on Ethereum, keyed by the userOp hash, until its outcome is proven: the
+ * bundle's receipt (settled to cost minus the EntryPoint's refund), or its relayer nonce taken by another transaction
+ * with no receipt for it (it can never land: released). `tx`/`nonce` are written before the broadcast.
+ */
+type Reservation = { wei: string; tx?: Hex; nonce?: number; at: string }
+type Journal = { reservations?: Record<string, Reservation>; cctpBurns?: Record<string, string[]>; routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
 
 const NON_TERMINAL = new Set<BridgeOutRoute['state']>(['sending', 'deposited', 'unconfirmed', 'expired'])
 
@@ -322,11 +328,14 @@ export class BridgeOut {
     private readonly base: BaseMinter | null = null,
   ) {
     this.journal = this.load()
+    if (this.droppedReservations > 0) this.save()
   }
 
   private get file(): string {
     return join(this.stateDir, 'bridge-out.json')
   }
+
+  private droppedReservations = 0
 
   private load(): Journal {
     const empty: Journal = { routes: {}, spent: { day: '', wei: '0' }, moves: {} }
@@ -334,7 +343,10 @@ export class BridgeOut {
     // An unreadable journal stops the operator from starting: starting empty would forget moves under way and the
     // day's spend.
     const j = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<Journal>
-    return { routes: j.routes ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {}, cctpBurns: j.cctpBurns ?? {} }
+    // A reservation without a signed transaction was never broadcast (the hash is written before it): nothing to hold.
+    const reservations = Object.fromEntries(Object.entries(j.reservations ?? {}).filter(([, r]) => !!r.tx))
+    this.droppedReservations = Object.keys(j.reservations ?? {}).length - Object.keys(reservations).length
+    return { routes: j.routes ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {}, cctpBurns: j.cctpBurns ?? {}, reservations }
   }
 
   private save(): void {
@@ -354,6 +366,11 @@ export class BridgeOut {
     route.at = new Date(this.now()).toISOString()
     this.journal.routes[accountKey] = route
     this.save()
+  }
+
+  /** What the relayer may still lose: today's settled spend plus every open reservation, whatever day it was made. */
+  private committed(): bigint {
+    return this.spentToday() + Object.values(this.journal.reservations ?? {}).reduce((a, r) => a + BigInt(r.wei), 0n)
   }
 
   /** The day's spend so far, reset at UTC midnight. */
@@ -405,7 +422,7 @@ export class BridgeOut {
     const price = await this.l1.getGasPrice()
     if (price > MAX_GAS_PRICE_WEI) throw new HttpError(503, 'BRIDGE_GAS_HIGH', 'Ethereum gas is too high right now, try later')
     const bound = gas * price * 2n
-    if (this.spentToday() + bound > DAILY_BUDGET_WEI) throw new HttpError(503, 'BRIDGE_BUDGET', 'moves from Ethereum are paused for today, try tomorrow')
+    if (this.committed() + bound > DAILY_BUDGET_WEI) throw new HttpError(503, 'BRIDGE_BUDGET', 'moves from Ethereum are paused for today, try tomorrow')
     if ((await this.l1.getBalance({ address: this.relayer.address })) < bound) throw new HttpError(503, 'BRIDGE_RELAYER_EMPTY', 'moves from Ethereum are paused, try later')
     return bound
   }
@@ -630,7 +647,7 @@ export class BridgeOut {
   async submit(ctx: AccountContext, body: OwnerSignature): Promise<BridgeOutView> {
     // One move is sent at a time (the guard of the operator's bundler is per move). Another account's submit does
     // not queue behind it: it is told to retry, its approval still valid.
-    if (this.inFlight) throw new HttpError(503, 'BRIDGE_BUSY', 'another move from Ethereum is being sent, try again in a minute')
+    if (this.inFlight || this.bundling.size > 0) throw new HttpError(503, 'BRIDGE_BUSY', 'another move from Ethereum is being sent, try again in a minute')
     const p = body && typeof body.prepareId === 'string' ? this.prepared.get(body.prepareId) : undefined
     if (!p || p.accountKey !== ctx.accountKey) throw new HttpError(404, 'PREPARE_NOT_FOUND', 'that approval is not known, tap again')
     // Single use, whatever happens next.
@@ -661,7 +678,8 @@ export class BridgeOut {
 
   /** The lock, never queued: a move already being sent answers BRIDGE_BUSY. Bounded by the bundler/relayer timeouts. */
   private exclusive<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.inFlight) return Promise.reject(new HttpError(503, 'BRIDGE_BUSY', 'another move from Ethereum is being sent, try again in a minute'))
+    // The bundler may still hold a userOp whose client call timed out: that counts as being sent.
+    if (this.inFlight || this.bundling.size > 0) return Promise.reject(new HttpError(503, 'BRIDGE_BUSY', 'another move from Ethereum is being sent, try again in a minute'))
     this.inFlight = true
     return this.lock.run(fn).finally(() => {
       this.inFlight = false
@@ -759,46 +777,89 @@ export class BridgeOut {
    * beneficiary (the relayer) the userOp's gas from the paymaster's deposit, and only what was not refunded stays
    * charged to the day. The bundle's hash is kept on the route: after a restart the receipt is read from the chain.
    */
-  bundlerGuard(): BundlerGuard & { sent: (hash: Hex) => void; sending: (maxFeeWei: bigint, gas: bigint) => void } {
-    let bound = 0n
-    let boundDay = ''
-    // Moves the reservation to `wei` on today's ledger. A reservation made before midnight is gone with its day
-    // (the ledger reset): today is charged the whole new amount, never only a difference against yesterday.
-    const reserve = (wei: bigint) => {
-      // One reading of the day for the comparison and the ledger write: midnight cannot fall between them.
-      const today = this.day()
-      this.spendOn(today, boundDay === today ? wei - bound : wei)
-      bound = wei
-      boundDay = today
+  /** userOps the operator's bundler is working on in this process (between before() and after()/failed()). */
+  private readonly bundling = new Set<string>()
+
+  private reserve(key: string, wei: bigint, extra: Partial<Reservation> = {}): void {
+    const all = this.journal.reservations ?? {}
+    const cur = all[key]
+    all[key] = { at: cur?.at ?? new Date(this.now()).toISOString(), ...cur, ...extra, wei: wei.toString() }
+    this.journal.reservations = all
+    this.save()
+  }
+
+  /** The bundle's outcome is proven: the reservation goes, the unrefunded part (if any) is spent today. */
+  private settle(key: string, net: bigint): void {
+    const all = this.journal.reservations ?? {}
+    if (!all[key]) return
+    delete all[key]
+    this.journal.reservations = all
+    this.spend(net > 0n ? net : 0n)
+  }
+
+  /**
+   * Open reservations whose bundle has an outcome: a receipt (cost minus the EntryPoint's refund to the relayer is
+   * spent), or the relayer nonce it was signed with taken by another transaction while it has no receipt (it can
+   * never land: nothing spent). Anything else stays reserved. Runs on the tick.
+   */
+  private async settleReservations(): Promise<void> {
+    for (const [key, r] of Object.entries(this.journal.reservations ?? {})) {
+      if (this.bundling.has(key) || !r.tx) continue
+      const rc = await this.l1.getTransactionReceipt({ hash: r.tx }).catch(() => null)
+      if (rc) {
+        const refund = parseEventLogs({ abi: entryPointV07Abi, eventName: 'UserOperationEvent', logs: rc.logs.filter((l) => getAddress(l.address) === address('EntryPointV07')) }).reduce((a, l) => a + l.args.actualGasCost, 0n)
+        // The refund goes to the beneficiary, the relayer itself (bundler.ts handleOpsData).
+        this.settle(key, rc.gasUsed * rc.effectiveGasPrice - refund)
+        continue
+      }
+      if (r.nonce === undefined) continue
+      const mined = await this.l1.getTransactionCount({ address: this.relayer.address, blockTag: 'latest' }).catch(() => -1)
+      if (mined > r.nonce && !(await this.l1.getTransactionReceipt({ hash: r.tx }).catch(() => null))) this.settle(key, 0n)
     }
+  }
+
+  /**
+   * #180: the guard of the operator's own Ethereum bundler. The relayer fronts handleOps gas only for a move this
+   * operator is sending (its route names the userOp), one bundle at a time, within the gas ceiling, the daily budget
+   * (open reservations of any day included) and its balance. Each bundle's reservation is keyed by its userOp hash and
+   * persisted with the signed transaction's hash and nonce before the broadcast; it is released only on a proven
+   * outcome (after(), or settleReservations()). A client that stopped waiting releases nothing.
+   */
+  bundlerGuard(): Required<BundlerGuard> {
     return {
-      before: async (gas: bigint) => {
-        if (!this.sending) throw new Error('no move under way')
-        reserve(await this.affordable(gas))
+      before: async (key: Hex, gas: bigint) => {
+        const route = Object.values(this.journal.routes).find((r) => r.userOpHash?.toLowerCase() === key.toLowerCase())
+        if (!route || (route.state !== 'sending' && route.state !== 'unconfirmed')) throw new Error('no move under way for this userOp')
+        if (this.bundling.size > 0) throw new Error('another bundle is in flight')
+        if (this.journal.reservations?.[key]) throw new Error('this userOp already has a bundle')
+        const bound = await this.affordable(gas)
+        this.bundling.add(key)
+        this.reserve(key, bound)
       },
       // The signed transaction's own bound (gas at its maxFeePerGas), before the broadcast: it replaces the
-      // estimate, and over the day's budget or the gas ceiling the send stops here.
-      sending: (maxFeeWei: bigint, gas: bigint) => {
-        reserve(maxFeeWei)
-        if (BigInt(this.journal.spent.wei) > DAILY_BUDGET_WEI) throw new Error('over the day\'s budget')
+      // estimate, and over the budget or the gas ceiling the send stops here.
+      sending: (key: Hex, maxFeeWei: bigint, gas: bigint) => {
+        this.reserve(key, maxFeeWei)
+        if (this.committed() > DAILY_BUDGET_WEI) throw new Error("over the day's budget")
         if (gas > 0n && maxFeeWei / gas > MAX_GAS_PRICE_WEI * 2n) throw new Error('over the gas ceiling')
       },
-      sent: (hash: Hex) => {
-        const s = this.sending
-        if (!s) return
-        s.route.userOpTx = hash
-        this.write(s.accountKey, s.route)
+      sent: (key: Hex, tx: Hex, nonce: number) => {
+        this.reserve(key, BigInt(this.journal.reservations?.[key]?.wei ?? '0'), { tx, nonce })
+        for (const [accountKey, r] of Object.entries(this.journal.routes)) {
+          if (r.userOpHash?.toLowerCase() !== key.toLowerCase()) continue
+          r.userOpTx = tx
+          this.write(accountKey, r)
+          if (this.sending?.route.id === r.id) this.sending.route.userOpTx = tx
+        }
       },
-      after: (cost: bigint, refund: bigint) => {
-        reserve(cost > refund ? cost - refund : 0n)
-        bound = 0n
-        boundDay = ''
+      after: (key: Hex, cost: bigint, refund: bigint) => {
+        this.bundling.delete(key)
+        this.settle(key, cost - refund)
       },
-      failed: (signed: boolean) => {
-        // Never signed for broadcast: nothing can be spent, the reservation goes back. Signed: unknown, it stays.
-        if (!signed) reserve(0n)
-        bound = 0n
-        boundDay = ''
+      failed: (key: Hex, signed: boolean) => {
+        this.bundling.delete(key)
+        // Never signed for broadcast: nothing can be spent. Signed: unknown, it stays until settleReservations().
+        if (!signed) this.settle(key, 0n)
       },
     }
   }
@@ -809,9 +870,10 @@ export class BridgeOut {
    * No receipt yet: unchanged.
    */
   private async resolveUserOp(r: Stored, leg: Leg | null): Promise<void> {
-    if (!this.aa || !r.userOpHash) return
-    // The bundler's receipt, or (the operator's own bundler forgets on restart) the bundle transaction it reported.
-    const br = await this.aa.bundler.receipt(r.userOpHash)
+    if (!r.userOpHash) return
+    // The bundler's receipt, or (the operator's own bundler forgets on restart, or the userOp path is off after a
+    // rollback) the bundle transaction it reported, or the userOp's event.
+    const br = this.aa ? await this.aa.bundler.receipt(r.userOpHash).catch(() => null) : null
     const txHash = br?.txHash ?? r.userOpTx ?? (await this.findUserOpTx(r))
     if (!txHash) return
     const receipt = await this.l1.getTransactionReceipt({ hash: txHash }).catch(() => null)
@@ -978,10 +1040,16 @@ export class BridgeOut {
    * the app. The operator calls it on a timer; each account is throttled like status().
    */
   async tick(): Promise<void> {
+    await this.settleReservations().catch((e) => logErr('[bridge-out] tick reservations:', e instanceof Error ? e.message : e))
     for (const [accountKey, r] of Object.entries(this.journal.routes)) {
       // Every unfinished CCTP move, so a burn left 'sending' or 'unconfirmed' by a crash is reconciled and minted too.
       if (r.bridge === 'cctp' && NON_TERMINAL.has(r.state)) await this.refresh(accountKey).catch((e) => logErr('[bridge-out] tick:', e instanceof Error ? e.message : e))
     }
+  }
+
+  /** CCTP moves not finished on Base (burned or possibly burned, not minted). */
+  pendingCctp(): number {
+    return Object.values(this.journal.routes).filter((r) => r.bridge === 'cctp' && NON_TERMINAL.has(r.state)).length
   }
 
   private async refresh(accountKey: string): Promise<BridgeOutView> {

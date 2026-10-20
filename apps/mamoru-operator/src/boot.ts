@@ -385,26 +385,28 @@ export async function bootOperator(o: BootOptions) {
           handleOpsGas: L1_HANDLE_OPS_GAS,
           label: 'l1-bundler',
           guard: {
-            before: async (g) => {
+            before: async (k, g) => {
               if (!guard) throw new Error('not ready')
-              await guard.before(g)
+              await guard.before(k, g)
             },
-            sending: (w, g) => guard!.sending(w, g),
-            sent: (h) => guard?.sent(h),
-            after: (c, r) => guard?.after(c, r),
-            failed: (signed) => guard?.failed(signed),
+            sending: (k, w, g) => guard!.sending(k, w, g),
+            sent: (k, h, n) => guard?.sent(k, h, n),
+            after: (k, c, r) => guard?.after(k, c, r),
+            failed: (k, signed) => guard?.failed(k, signed),
           },
         })
       : null
     const aa = paymaster && l1Bundler ? { bundler: new L1Bundler(l1Bundler.url, fetch, L1_BUNDLER_TIMEOUT_MS), paymaster } : null
-    // CCTP mints on Base go through the operator's Base client and relayer.
-    bridgeOut = new BridgeOut(l1, l1Relayer, o.stateDir, fetch, Date.now, process.env.ACROSS_API_KEY, enabledFor, aa, aa && chainId === BASE_CHAIN_ID ? { client, relayer } : null)
+    // CCTP mints on Base go through the operator's Base client and relayer. The minter and the timer run whatever the
+    // paymaster config: after a rollback to the relayer path, burns already made still get minted, and open bundle
+    // reservations still settle.
+    bridgeOut = new BridgeOut(l1, l1Relayer, o.stateDir, fetch, Date.now, process.env.ACROSS_API_KEY, enabledFor, aa, chainId === BASE_CHAIN_ID ? { client, relayer } : null)
     guard = bridgeOut.bundlerGuard()
-    if (aa) {
-      const bo = bridgeOut
-      setInterval(() => void bo.tick(), 60_000)
-      console.log(`[operator] bridge-out uses userOps on Ethereum: gas paid in USDC through the ${paymaster!.name} paymaster, bundled by the operator`)
-    }
+    const bo = bridgeOut
+    setInterval(() => void bo.tick(), 60_000)
+    void bo.tick()
+    if (aa) console.log(`[operator] bridge-out uses userOps on Ethereum: gas paid in USDC through the ${paymaster!.name} paymaster, bundled by the operator`)
+    if (bo.pendingCctp() > 0) console.log(`[operator] bridge-out: ${bo.pendingCctp()} CCTP move(s) to finish on Base`)
     console.log(`[operator] bridge-out from Ethereum available (on per account from /ops), relayer ${relayer.address} (${wei} wei on Ethereum)`)
   }
   const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot, bridgeOut })

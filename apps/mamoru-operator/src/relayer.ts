@@ -76,7 +76,7 @@ export class Relayer {
     onSent?: (hash: Hex) => void,
     onSending?: (maxFeeWei: bigint, signed: { hash: Hex; nonce: number }) => void,
     /** #180: the hash of the signed transaction, before it is broadcast, so a caller can persist it first. */
-    onSigned?: (hash: Hex) => void,
+    onSigned?: (hash: Hex, nonce: number) => void,
   ): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     return this.lock.run(async () => {
       const wallet = createWalletClient({ account: this.account, chain: this.chain, transport: http(this.rpcUrl, { timeout: 60_000 }) })
@@ -105,7 +105,7 @@ export class Relayer {
       // The most it can cost: execution at its signed maxFeePerGas plus the L1 data fee for these bytes, doubled for the L1
       // price moving before inclusion. Only read when someone needs the bound.
       if (onSending) onSending(gas * fees.maxFeePerGas + 2n * (await this.l1Fee(serializedTransaction)), { hash: keccak256(serializedTransaction), nonce })
-      onSigned?.(keccak256(serializedTransaction))
+      onSigned?.(keccak256(serializedTransaction), nonce)
       const hash = await wallet.sendRawTransaction({ serializedTransaction })
       this.lastSent = { nonce, at: Date.now() }
       onSent?.(hash)

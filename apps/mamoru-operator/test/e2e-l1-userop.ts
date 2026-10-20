@@ -191,7 +191,7 @@ try {
     const b = startLiveBundler(l1, l1Relayer, 1, {
       handleOpsGas: L1_HANDLE_OPS_GAS,
       label: 'l1-bundler',
-      guard: { before: (g) => guard!.before(g), sending: (w, g) => guard!.sending(w, g), sent: (h) => guard?.sent(h), after: (c, r) => guard?.after(c, r), failed: (signed) => guard?.failed(signed) },
+      guard: { before: (k, g) => guard!.before(k, g), sending: (k, w, g) => guard!.sending(k, w, g), sent: (k, h, n) => guard?.sent(k, h, n), after: (k, c, r) => guard?.after(k, c, r), failed: (k, signed) => guard?.failed(k, signed) },
     })
     bundlers.push(b)
     return b
@@ -282,8 +282,9 @@ try {
   }
   /** A BridgeOut on the operator's own bundler; with `minter`, CCTP is offered and minted on the Base fork. */
   let flag = true
-  const make = (o: { now?: () => number; minter?: boolean; bundlerUrl?: string; stateDir?: string } = {}) => {
-    const b = new BridgeOut(l1, l1Relayer, o.stateDir ?? dir, fetcher, o.now ?? Date.now, undefined, () => flag, { bundler: o.bundlerUrl ? new L1Bundler(o.bundlerUrl, fetch, L1_BUNDLER_TIMEOUT_MS) : l1Bundler, paymaster: forkPm }, o.minter ? { client: baseClient, relayer: baseRelayer } : null)
+  const make = (o: { now?: () => number; minter?: boolean; bundlerUrl?: string; stateDir?: string; noPaymaster?: boolean } = {}) => {
+    const aa = o.noPaymaster ? null : { bundler: o.bundlerUrl ? new L1Bundler(o.bundlerUrl, fetch, L1_BUNDLER_TIMEOUT_MS) : l1Bundler, paymaster: forkPm }
+    const b = new BridgeOut(l1, l1Relayer, o.stateDir ?? dir, fetcher, o.now ?? Date.now, undefined, () => flag, aa, o.minter ? { client: baseClient, relayer: baseRelayer } : null)
     guard = b.bundlerGuard()
     return b
   }
@@ -467,6 +468,43 @@ try {
   check((await first).route?.state === 'deposited', 'the first move went through')
   check((await bbo.submit(b2, browserSign(q2))).route?.state === 'deposited', 'the second account\'s same approval, sent again after: deposited')
 
+  // The client gives up while the operator's bundler still holds the userOp (here: its relayer takes 3 s to send).
+  // Nothing is released by the client's timeout: another account's submit is BRIDGE_BUSY until the bundle has an
+  // outcome, the reservation is keyed by the userOp and settled from the receipt, and the route resolves by its hash.
+  {
+    const slowRelayer = { address: l1Relayer.address, send: async (...a: Parameters<Relayer['send']>) => (await Bun.sleep(3_000), l1Relayer.send(...a)) }
+    let tguard: ReturnType<BridgeOut['bundlerGuard']> | null = null
+    const slow = startLiveBundler(l1, slowRelayer, 1, {
+      handleOpsGas: L1_HANDLE_OPS_GAS,
+      label: 'slow-bundler',
+      guard: { before: (k, g) => tguard!.before(k, g), sending: (k, w, g) => tguard!.sending(k, w, g), sent: (k, h, n) => tguard?.sent(k, h, n), after: (k, c, r) => tguard?.after(k, c, r), failed: (k, signed) => tguard?.failed(k, signed) },
+    })
+    bundlers.push(slow)
+    const tdir = mkdtempSync(join(tmpdir(), 'mamoru-e2e-timeout-'))
+    const tbo = new BridgeOut(l1, l1Relayer, tdir, fetcher, Date.now, undefined, () => true, { bundler: new L1Bundler(slow.url, fetch, 1_000), paymaster: forkPm })
+    tguard = tbo.bundlerGuard()
+    const t1 = newAccount('timeout1')
+    const t2 = newAccount('timeout2')
+    await fund(t1.address, 100_000_000n)
+    await fund(t2.address, 100_000_000n)
+    const [tp1, tp2] = [await tbo.prepare(t1), await tbo.prepare(t2)]
+    const first = await tbo.submit(t1, browserSign(tp1))
+    check(first.route?.state === 'unconfirmed', `client timed out after 1 s: ${first.route?.state}`)
+    const tj = () => JSON.parse(readFileSync(join(tdir, 'bridge-out.json'), 'utf8'))
+    check((await code(tbo.submit(t2, browserSign(tp2)))) === 'BRIDGE_BUSY', 'while the bundler still holds the first userOp: another account gets BRIDGE_BUSY')
+    check(Object.keys(tj().reservations ?? {}).length === 1, 'one reservation, keyed by the first userOp, held while the bundler works')
+    for (let i = 0; i < 60 && Object.keys(tj().reservations ?? {}).length > 0; i++) await Bun.sleep(250)
+    check(Object.keys(tj().reservations ?? {}).length === 0 && BigInt(tj().spent.wei) === 0n, 'bundle included: reservation settled from the receipt, refunded, nothing spent')
+    await Bun.sleep(11_000)
+    const late = await tbo.status(t1)
+    check(['deposited', 'filled'].includes(String(late.route?.state)) && !!late.route?.depositId, `the timed-out move resolves by its stored bundle hash: ${late.route?.state}, deposit id ${late.route?.depositId}`)
+    const tp2b = await tbo.prepare(t2)
+    const second = await tbo.submit(t2, browserSign(tp2b)).catch((e) => ({ route: { state: e instanceof HttpError ? e.code : 'error' } }))
+    check(['unconfirmed', 'deposited'].includes(String(second.route?.state)), `then the other account goes through: ${second.route?.state}`)
+    for (let i = 0; i < 60 && Object.keys(tj().reservations ?? {}).length > 0; i++) await Bun.sleep(250)
+    check(Object.keys(tj().reservations ?? {}).length === 0, 'its reservation settled too')
+  }
+
   // ---- 2. CCTP V2 through BridgeOut: chosen by output, burned on Ethereum, minted on Base by the operator ---------
   const cctx = newAccount('cctp')
   const csafe = cctx.address
@@ -527,15 +565,19 @@ try {
   // A mint signed but never broadcast (a crash between the two): its hash has no receipt; after MINT_PENDING_MS the
   // operator mints again instead of waiting forever.
   const jm = JSON.parse(readFileSync(jf, 'utf8'))
-  jm.routes[cctx.accountKey] = { ...jm.routes[cctx.accountKey], mintTx: `0x${'cc'.repeat(32)}`, mintAt: new Date(clock - 11 * 60_000).toISOString() }
+  // ... and a rollback: the operator restarts without a paymaster (relayer path) while this burn is unminted and its
+  // route is 'unconfirmed'. The minter and the tick run anyway (boot.ts), resolve the burn from the stored bundle hash
+  // and mint it.
+  jm.routes[cctx.accountKey] = { ...jm.routes[cctx.accountKey], state: 'unconfirmed', mintTx: `0x${'cc'.repeat(32)}`, mintAt: new Date(clock - 11 * 60_000).toISOString() }
   writeFileSync(jf, JSON.stringify({ ...jm, mintDays: {} }))
-  const cbo2 = make({ now: () => clock, minter: true, stateDir: cdir })
+  const cbo2 = make({ now: () => clock, minter: true, stateDir: cdir, noPaymaster: true })
+  check(cbo2.pendingCctp() === 1, 'after the rollback: one CCTP move to finish on Base')
   clock += 11_000
   await cbo2.tick()
   const minted = (await cbo2.status(cctx)).route!
   const baseAfter = await baseClient.readContract({ address: BASE_USDC, abi: erc20Abi, functionName: 'balanceOf', args: [csafe] })
   const mintRc = minted.mintTx ? await baseClient.getTransactionReceipt({ hash: minted.mintTx }) : null
-  check(minted.mintTx !== `0x${'cc'.repeat(32)}`, 'the lost mint was replaced by a new one')
+  check(minted.mintTx !== `0x${'cc'.repeat(32)}`, 'rolled back to the relayer path: the unconfirmed burn resolved and the lost mint replaced by a new one')
   check(minted.state === 'filled' && minted.fillTx === minted.mintTx && baseAfter - baseBefore === BigInt(cr.amountUsdc), `minted on Base by the operator: +${fmt(baseAfter - baseBefore)} USDC at the same Safe, receiveMessage gas ${mintRc?.gasUsed}`)
   clock += 11_000
   check((await cbo2.status(cctx)).route?.state === 'filled', 'status stays filled')
