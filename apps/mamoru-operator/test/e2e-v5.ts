@@ -286,6 +286,9 @@ try {
   }
   const unpause = await lab.send(GUARDIAN, dep.v2 as Hex, encodeFunctionData({ abi: mamoruActionPolicyV2Abi, functionName: 'unpause', args: [ctx.address] }), 0n, 200_000n)
   check(unpause.ok, 'guardian unpaused')
+  // The engine does not repeat a discarded decision with the same premise (REVIEW_DEDUPED): on Base the premise moves
+  // with every price change within seconds; on this quiet fork a new deposit moves it.
+  await lab.whaleTransfer('USDC', WHALE, ctx.address, 5_000_000n)
   // An op the bundler refused during the pause holds its kind and pool back for UNINCLUDABLE_BACKOFF_SECONDS (600 s).
   await engineSettled('engine after unpause', Date.now() + 900_000, async () => (await engineOps()).filter((o) => o.state === 'confirmed').length > confirmedBefore)
   check(true, 'unpaused: the engine invests again')
