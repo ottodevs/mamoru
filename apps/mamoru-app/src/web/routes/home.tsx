@@ -60,6 +60,8 @@ export const homeCopy = {
   // Spec 007 T7: the move of a running v2/v3 approval to the on-chain action policy.
   upgradeTitle: 'Mamoru can now be limited on chain: it would trade only near the market price, and only the positions it opened. Renew its approval to turn this on.',
   // otto/mamoru#151, #171: the move to MamoruActionPolicyV2 (conservador-live-v5), from v2/v3 or from v4.
+  // otto/mamoru#151: the guardian paused the account; the owner's renewal would end the pause.
+  pausedTitle: 'A guardian key has paused Mamoru on this account, so it is not acting. Renewing its approval ends that pause: renew only if you know why it was paused.',
   upgradeV5Title: "Mamoru's on-chain limits have a new version: it trades only near the market price and only the positions it opened, adds to a position it already holds instead of opening another, and a guardian key can pause it but never move funds. Renew its approval to turn this on.",
   // otto/mamoru#149: a grant that has used 80% or all of what the approval allows.
   usageSoon: (what: string, pair: string) => `Mamoru has used most of what this approval allows for ${what} in ${pair}. Renew it now so that does not stop.`,
@@ -673,7 +675,7 @@ export function approvalDay(validUntil: number): string {
  * grants missing), so the row mounts afresh and offers the next approval instead of staying hidden on the last result.
  */
 export function approvalRowKey(approval: NonNullable<FundingView['approval']>): string {
-  return `${approval.validUntil}-${approval.missing ?? 0}${approval.usage ? `-${approval.usage.spent ? 'spent' : 'used'}` : ''}${approval.upgrade ? '-upgrade' : ''}`
+  return `${approval.validUntil}-${approval.missing ?? 0}${approval.usage ? `-${approval.usage.spent ? 'spent' : 'used'}` : ''}${approval.upgrade ? '-upgrade' : ''}${approval.paused ? '-paused' : ''}`
 }
 
 const USAGE_WHAT: Record<NonNullable<NonNullable<FundingView['approval']>['usage']>['action'], string> = { collect: 'collecting fees', rerange: 're-ranging', enter: 'adding money' }
@@ -682,6 +684,7 @@ const USAGE_WHAT: Record<NonNullable<NonNullable<FundingView['approval']>['usage
 export function approvalTitle(approval: NonNullable<FundingView['approval']>): string {
   const u = approval.usage
   const usage = u ? (u.spent ? homeCopy.usageSpent : homeCopy.usageSoon)(USAGE_WHAT[u.action], u.pool ? pairLabel(u.pool) : 'its pools') : null
+  if (approval.paused) return homeCopy.pausedTitle
   if (approval.expired) return homeCopy.renewEnded
   if (u?.spent) return usage!
   if (approval.renewDue) return homeCopy.renewSoon(approvalDay(approval.validUntil))

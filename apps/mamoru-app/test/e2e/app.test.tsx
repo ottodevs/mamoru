@@ -525,6 +525,14 @@ describe('renewing the approval', () => {
     expect(approvalTitle({ ...year, upgrade: true, upgradePolicy: 'conservador-live-v4' })).toContain('it would trade only near the market price')
   })
 
+  test('otto/mamoru#151: a guardian pause is named on the row, with the renewal ending it', () => {
+    const now = Math.floor(Date.now() / 1000)
+    const year = { validUntil: now + 300 * 86_400, renewDue: true, expired: false }
+    expect(approvalTitle({ ...year, paused: true })).toContain('A guardian key has paused Mamoru')
+    expect(approvalTitle({ ...year, paused: true })).toContain('Renewing its approval ends that pause')
+    expect(approvalRowKey({ ...year, paused: true })).not.toBe(approvalRowKey(year))
+  })
+
     test('once prepared, the row shows every line the passkey is about to sign', () => {
     const summary = ['Let Mamoru\'s engine re-range and collect fees in USDC/cbBTC 0.05%', 'Nothing is moved: your positions stay as they are']
     const { text, html } = render(<ApprovalCard approval={{ validUntil: now + 200 * 86_400, renewDue: false, expired: false, missing: 4 }} summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} />)

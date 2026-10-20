@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
-import { address, entry, erc20Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
+import { address, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
@@ -539,7 +539,7 @@ export class Operator {
   /** otto/mamoru#135: one readSafe shared by every open tab and poll of the same account; dropped whenever the account moves (fundingMoved). */
   private readonly fundingCache = new FundingCache<SafeRead>(Date.now, FUNDING_STALE_MS)
   /** #149: usage counters read from the chain per account (readChainUsage), keyed by lower-case permission id. */
-  private readonly chainUsage = new Map<string, { at: number; grants: string; byGrant: Map<string, ChainUsage>; budgets?: Map<string, number> }>()
+  private readonly chainUsage = new Map<string, { at: number; grants: string; byGrant: Map<string, ChainUsage>; budgets?: Map<string, number>; paused?: boolean }>()
   /** Ops whose execTransaction went to the provider in this attempt: only then can a refusal be about a copy already out. */
   private readonly execTried = new Set<string>()
   /** Armed ops being sent again after a failed attempt: an earlier copy may have landed although its reply said no. */
@@ -944,7 +944,8 @@ export class Operator {
     const usage = this.usageView(acc)
     const target = this.v4Target(acc)
     const upgrade = target !== null
-    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}), ...(upgrade ? { upgrade, upgradePolicy: target.policyId } : {}) }
+    const paused = this.chainUsage.get(acc.accountKey)?.paused === true
+    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}), ...(upgrade ? { upgrade, upgradePolicy: target.policyId } : {}), ...(paused ? { paused } : {}) }
   }
 
   /**
@@ -1012,13 +1013,34 @@ export class Operator {
     this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant: had?.grants === ids ? had.byGrant : new Map() })
     const byGrant = await readChainUsage(this.client as never, acc.ctx.address as Address, acc.grants)
     const budgets = await this.readBudgets(acc)
-    if (!byGrant.size && !budgets?.size) return
-    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant, ...(budgets?.size ? { budgets } : {}) })
+    const paused = await this.readPaused(acc)
+    if (!byGrant.size && !budgets?.size && !paused) return
+    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant, ...(budgets?.size ? { budgets } : {}), ...(paused ? { paused } : {}) })
     const ledger = this.runners.get(acc.accountKey)?.engine.ledger
     for (const g of acc.grants) {
       const c = byGrant.get(g.permissionId.toLowerCase())
       const own = ledger?.usesOf(g.permissionId) ?? acc.ops.filter((o) => o.state === 'confirmed' && o.permissionId?.toLowerCase() === g.permissionId.toLowerCase()).length
       if (c && c.used > own) console.log(`[usage] ${acc.accountKey} ${g.name}: the chain counts ${c.used} uses, the operator ${own}`)
+    }
+  }
+
+  /**
+   * otto/mamoru#151: whether MamoruActionPolicyV2's guardian has paused this account (v5 only; false for any other policy
+   * or when the read fails). The renew row says so: the owner's renewal ends a pause.
+   */
+  private async readPaused(acc: AccountState, blockNumber?: bigint): Promise<boolean> {
+    let p: PolicyVersion
+    try {
+      p = this.policyOf(acc)
+    } catch {
+      return false
+    }
+    const ap = p.actionPolicy
+    if (!ap || ap.contractVersion !== 2) return false
+    try {
+      return await this.client.readContract({ address: ap.address, abi: mamoruActionPolicyV2Abi, functionName: 'isPaused', args: [acc.ctx.address as Address], ...(blockNumber !== undefined ? { blockNumber } : {}) })
+    } catch {
+      return false
     }
   }
 
@@ -1595,7 +1617,10 @@ export class Operator {
       const f = await this.fitV4(acc, live, policy, r, cap, keys, old, 'full', RENEW_GAS_BUDGET)
       // otto/mamoru#151: the move to MamoruActionPolicyV2 (v5) names what it adds besides the on-chain limits.
       const toV5 = !!target && !!target.actionPolicy && target.actionPolicy.contractVersion === 2
+      // otto/mamoru#151: a renewal on MamoruActionPolicyV2 ends a guardian pause; the owner signs knowing it.
+      const paused = await this.readPaused(acc, r.block)
       const summary = [
+        ...(paused ? ['A guardian key has paused Mamoru on this Safe. This renewal ends that pause: approve it only if you know why it was paused'] : []),
         target ? `Renew Mamoru's approval on your Safe ${live.safe} and move it to ${toV5 ? 'the new version of its on-chain limits' : 'on-chain limits'}` : `Renew Mamoru's approval on your Safe ${live.safe}`,
         ...(target ? ['Mamoru can now trade only near the market price, and only the positions it opened'] : []),
         ...(toV5 ? ['It can add to a position it already holds instead of opening another one', 'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause'] : []),

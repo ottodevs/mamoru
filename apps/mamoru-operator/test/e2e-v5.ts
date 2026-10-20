@@ -275,6 +275,15 @@ try {
   log(`ops refused while paused: ${refused.join(', ') || 'none'}`)
   check(refused.includes('POLICY_PAUSED'), 'paused: the engine discards its op with POLICY_PAUSED instead of sending it')
   check((await engineOps()).filter((o) => o.state === 'confirmed').length === confirmedBefore, 'paused: no engine op confirmed')
+  {
+    let shown = false
+    // Read with the chain usage, at most CHAIN_USAGE_TTL_MS (10 min) old; the signed renewal summary reads it live.
+    for (const until2 = Date.now() + 700_000; !shown && Date.now() < until2; ) {
+      shown = (await funding()).approval?.paused === true
+      if (!shown) await Bun.sleep(5_000)
+    }
+    check(shown, 'paused: the renew row says so (approval.paused), since a renewal would end the pause')
+  }
   const unpause = await lab.send(GUARDIAN, dep.v2 as Hex, encodeFunctionData({ abi: mamoruActionPolicyV2Abi, functionName: 'unpause', args: [ctx.address] }), 0n, 200_000n)
   check(unpause.ok, 'guardian unpaused')
   // An op the bundler refused during the pause holds its kind and pool back for UNINCLUDABLE_BACKOFF_SECONDS (600 s).
