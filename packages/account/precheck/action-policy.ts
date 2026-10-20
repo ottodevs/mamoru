@@ -1,6 +1,6 @@
 // Spec 007 (otto/mamoru#151), tasks T4 and T6: precheck's own mirror of MamoruActionPolicy.checkAction's
 // validation-time refusal classes — (a) price range on swaps (and the oracle check every priced action needs),
-// (b) admission of positions for mint/decrease/collect/burn, (c) the per-pool value budget
+// (b) admission of positions for mint/increase/decrease/collect/burn, (c) the per-pool value budget
 // (contracts/action-policy/src/MamoruActionPolicy.sol) — so the engine's precheck (index.ts) refuses a call the
 // deployed policy would refuse BEFORE it is ever signed and sent, never after. Pure: every read this mirror needs
 // (the pool's two TWAPs, the policy's own on-chain spend counters, which tokenIds
@@ -27,7 +27,7 @@
 // considers active.
 import { decodeFunctionData, isAddressEqual, size, slice, toFunctionSelector, type Hex } from 'viem'
 import type { Address, ReasonCode } from '@mamoru/domain'
-import { nonfungiblePositionManagerAbi, swapRouter02Abi, type RegistryName } from '@mamoru/registry'
+import { mamoruActionPolicyV2Abi, nonfungiblePositionManagerAbi, swapRouter02Abi, type RegistryName } from '@mamoru/registry'
 import { budgetAllows, budgetValue, priceRange, swapBoundsInRange, type OracleRead, type PolicySpend, type PriceAnchor, type PriceRange } from '@mamoru/uniswap-v3/policy-bounds'
 import type { Execution } from '../safe/index.ts'
 
@@ -36,6 +36,9 @@ const SEL_MINT = toFunctionSelector('function mint((address,address,uint24,int24
 const SEL_DECREASE = toFunctionSelector('function decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))')
 const SEL_COLLECT = toFunctionSelector('function collect((uint256,address,uint128,uint128))')
 const SEL_BURN = toFunctionSelector('function burn(uint256)')
+/** MamoruActionPolicyV2.increase (otto/mamoru#171), not the position manager's increaseLiquidity. */
+const SEL_INCREASE = toFunctionSelector('function increase((uint256,uint256,uint256,uint256,uint256,uint256))')
+const SEL_NPM_INCREASE = toFunctionSelector('function increaseLiquidity((uint256,uint256,uint256,uint256,uint256,uint256))')
 
 /**
  * `MamoruActionPolicy.Init`, mirrored off chain (spec 007 T2's `mamoruInitFor`/`withActionPolicy` built it).
@@ -160,6 +163,28 @@ export function checkActionPolicyCall(
     if (!isAddressEqual(args.token0, cfg.token0) || !isAddressEqual(args.token1, cfg.token1) || args.fee !== cfg.feePips) {
       return deny('POLICY_NOT_ADMITTED', `mint token0/token1/fee ${args.token0}/${args.token1}/${args.fee} do not match ${cfg.pool}`)
     }
+    if (!reads) return deny('POLICY_BUDGET', `${cfg.pool}: no oracle/spend read for the action policy's budget check`)
+    const range = rangeOf(cfg, reads)
+    if ('ok' in range) return range
+    const value = budgetValue({ range, in1: cfg.budgetIn1, token0: cfg.token0, token1: cfg.token1, amount0: args.amount0Desired, amount1: args.amount1Desired })
+    return chargeBudget(cfg, reads, now, value, acc)
+  }
+
+  // otto/mamoru#171, MamoruActionPolicyV2: increase only at the policy, only for an admitted position of this pool, and
+  // charged to the budget like a mint (desired amounts at the range edge). The manager's own increaseLiquidity is never
+  // a session action (it funds any tokenId); the policy refuses it, and so does this mirror.
+  if (selector === SEL_NPM_INCREASE) return deny('POLICY_NOT_ADMITTED', `increaseLiquidity at ${c.target}: only MamoruActionPolicyV2.increase adds liquidity`)
+  if (selector === SEL_INCREASE) {
+    if (!isAddressEqual(c.target, cfg.address)) return deny('POLICY_NOT_ADMITTED', `increase at ${c.target}, not the policy ${cfg.address}`)
+    let args: { tokenId: bigint; amount0Desired: bigint; amount1Desired: bigint }
+    try {
+      const d = decodeFunctionData({ abi: mamoruActionPolicyV2Abi, data: c.callData })
+      if (d.functionName !== 'increase') return deny('POLICY_NOT_ADMITTED', 'undecodable increase')
+      args = d.args[0] as typeof args
+    } catch {
+      return deny('POLICY_NOT_ADMITTED', 'undecodable increase')
+    }
+    if (!isAdmitted(args.tokenId)) return deny('POLICY_NOT_ADMITTED', `tokenId ${args.tokenId} is not an admitted position of ${cfg.pool}`)
     if (!reads) return deny('POLICY_BUDGET', `${cfg.pool}: no oracle/spend read for the action policy's budget check`)
     const range = rangeOf(cfg, reads)
     if ('ok' in range) return range

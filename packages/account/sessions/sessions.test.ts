@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { baseRegistry, address } from '@mamoru/registry'
-import { computeCaps, conservadorLiveV4, conservadorV1, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, grantKey, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_GAS_CAPS, V4_POOLS, v4BudgetCaps, type SessionGrant } from '@mamoru/policy'
+import { computeCaps, conservadorLiveV4, conservadorLiveV5, POLICY_INCREASE_SIG, conservadorV1, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, grantKey, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_GAS_CAPS, V4_POOLS, v4BudgetCaps, type SessionGrant } from '@mamoru/policy'
 import { activationCall, selfAttestCall, selfRevokeAttestationCall, toSmartSession, v4PoliciesFor, type SecondActionPolicy } from './index.ts'
 
 const ctx = {
@@ -172,6 +172,42 @@ describe('T7 (GPT-6 review of #97): P1 1-3', () => {
     expect(() => toSmartSession(forged, ok(btcSwap))).toThrow('not a token of the pool')
     const fee: SessionGrant = { ...btcSwap, actions: btcSwap.actions.map((a) => ({ ...a, params: a.params.map((p) => (p.field === 'fee' ? { ...p, ref: 3000n } : p)) })) }
     expect(() => toSmartSession(fee, ok(btcSwap))).toThrow("pool's fee")
+  })
+})
+
+describe('v5 grants (MamoruActionPolicyV2, otto/mamoru#151, #171): increase and the swap deadline', () => {
+  const A = '0x00000000000000000000000000000000000000fe' as const
+  const G = '0x00000000000000000000000000000000000000fd' as const
+  const X = '0x00000000000000000000000000000000000000fc' as const
+  const d = { actionPolicy: A, gasPolicy: G, gasCaps: V4_GAS_CAPS }
+  const caps = v4BudgetCaps(conservadorLiveV5, 10_000n * 1_000_000n)
+  const keys = conservadorLiveV5.session.grants.map(grantKey)
+  const grants = keys.map((k) => retargetToPolicy(instantiateGrant(conservadorLiveV5, k, v4Ctx), A))
+  const manage = grants.find((g) => g.name === 'manage-any' && g.pool === 'pool:USDC/cbBTC/500')!
+  const ok = (g: SessionGrant): SecondActionPolicy => v4PoliciesFor([g], d, 1n, caps)(g, 0)!
+
+  test('every v5 grant encodes with MamoruActionPolicyV2 on every action, the deadline and increase included', () => {
+    const act = activationCall(grants, [], v4PoliciesFor(grants, d, 1n, caps))
+    expect(act.permissionIds).toHaveLength(9)
+    for (const g of grants) {
+      const s = toSmartSession(g, ok(g))
+      for (const a of s.actions) expect(a.actionPolicies.map((p) => p.policy.toLowerCase())).toEqual([address('UniActionPolicy', baseRegistry).toLowerCase(), A])
+    }
+    const s = toSmartSession(manage, ok(manage))
+    expect(s.actions.find((a) => a.actionTargetSelector === '0x5ae401dc')!.actionTarget).toBe(address('SwapRouter02', baseRegistry))
+    expect(s.actions.filter((a) => a.actionTarget.toLowerCase() === A).length).toBe(2) // mint and increase
+  })
+
+  test('increase anywhere but the policy is refused, and so is the manager\'s increaseLiquidity', () => {
+    const atNpm: SessionGrant = { ...manage, actions: manage.actions.map((a) => (a.signature === POLICY_INCREASE_SIG ? { ...a, targetAddress: address('NonfungiblePositionManager', baseRegistry) } : a)) }
+    expect(() => toSmartSession(atNpm, ok(manage))).toThrow('increase targets')
+    const atOther: SessionGrant = { ...manage, actions: manage.actions.map((a) => (a.signature === POLICY_INCREASE_SIG ? { ...a, targetAddress: X } : a)) }
+    expect(() => toSmartSession(atOther, ok(manage))).toThrow('increase targets')
+    const npmIncrease: SessionGrant = { ...manage, actions: [...manage.actions, { ...manage.actions.find((a) => a.signature === POLICY_INCREASE_SIG)!, signature: 'increaseLiquidity((uint256,uint256,uint256,uint256,uint256,uint256))', selector: '0x219f5d17', targetAddress: address('NonfungiblePositionManager', baseRegistry) }] }
+    expect(() => toSmartSession(npmIncrease, ok(manage))).toThrow("increaseLiquidity is never a session action")
+    // Never retargeted: increase still names the manager (where it does not exist), refused all the same.
+    const raw = instantiateGrant(conservadorLiveV5, grantKey(manage), v4Ctx)
+    expect(() => toSmartSession(raw, ok(raw))).toThrow('SESSION_ACTION_POLICY_MISMATCH')
   })
 })
 

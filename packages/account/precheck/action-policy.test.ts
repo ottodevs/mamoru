@@ -5,10 +5,10 @@
 // fork scenario (packages/scenarios/action-policy/t4-fork.ts) cross-checks the same three classes against the
 // deployed contract.
 import { describe, expect, test } from 'bun:test'
-import { encodeFunctionData } from 'viem'
+import { encodeFunctionData, parseAbi } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { baseRegistry, address, entry, nonfungiblePositionManagerAbi } from '@mamoru/registry'
-import { burn, collect, decreaseLiquidity, exactInputSingle, type V3Call } from '@mamoru/uniswap-v3'
+import { burn, collect, decreaseLiquidity, exactInputSingle, policyIncrease, type V3Call } from '@mamoru/uniswap-v3'
 import { budgetValue, priceRange, swapBoundsInRange, type OracleRead } from '@mamoru/uniswap-v3/policy-bounds'
 import type { Execution } from '../safe/index.ts'
 import { checkActionPolicyCall, type ActionPolicyPoolConfig, type ActionPolicyReads, type ActionPolicySpendAcc } from './action-policy.ts'
@@ -17,6 +17,7 @@ const ACCOUNT: Address = '0x00000000000000000000000000000000000000a1'
 const MAMORU_POLICY: Address = '0x00000000000000000000000000000000000000fe'
 const POOL = 'pool:USDC/cbBTC/500'
 const NOW = 0
+const increaseLiquidityAbi = parseAbi(['struct P { uint256 tokenId; uint256 amount0Desired; uint256 amount1Desired; uint256 amount0Min; uint256 amount1Min; uint256 deadline; }', 'function increaseLiquidity(P p)'])
 const e = entry(POOL, baseRegistry)
 
 const cfg: ActionPolicyPoolConfig = {
@@ -227,5 +228,38 @@ describe('calls outside this mirror', () => {
     const call: Execution = { target: cfg.token0, value: 0n, callData: encodeFunctionData({ abi: [{ type: 'function', name: 'approve', stateMutability: 'nonpayable', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'bool' }] }], functionName: 'approve', args: [MAMORU_POLICY, 1n] }) }
     const res = checkActionPolicyCall(call, cfg, baseReads, NOW, acc, never)
     expect(res.ok).toBe(true)
+  })
+})
+
+describe('(b)+(c) increase through MamoruActionPolicyV2 (otto/mamoru#171)', () => {
+  const p = { tokenId: 42n, amount0Desired: 1_000_000_000n, amount1Desired: 0n, amount0Min: 1n, amount1Min: 1n, deadline: 1n }
+  const admitted = (id: bigint) => id === 42n
+
+  test('at the policy, for an admitted position: passes and charges the budget like a mint', () => {
+    const acc: ActionPolicySpendAcc = new Map()
+    const res = checkActionPolicyCall(toExecution(policyIncrease(MAMORU_POLICY, p)), cfg, baseReads, NOW, acc, admitted)
+    expect(res.ok).toBe(true)
+    expect(acc.get(POOL)).toBe(budgetValue({ range, in1: false, token0: cfg.token0, token1: cfg.token1, amount0: p.amount0Desired, amount1: 0n }))
+  })
+
+  test('an unadmitted tokenId, another target, or no reads: refused', () => {
+    const acc: ActionPolicySpendAcc = new Map()
+    expect(checkActionPolicyCall(toExecution(policyIncrease(MAMORU_POLICY, { ...p, tokenId: 7n })), cfg, baseReads, NOW, acc, admitted)).toMatchObject({ ok: false, code: 'POLICY_NOT_ADMITTED' })
+    expect(checkActionPolicyCall(toExecution(policyIncrease(address('NonfungiblePositionManager', baseRegistry), p)), cfg, baseReads, NOW, acc, admitted)).toMatchObject({ ok: false, code: 'POLICY_NOT_ADMITTED' })
+    expect(checkActionPolicyCall(toExecution(policyIncrease(MAMORU_POLICY, p)), cfg, undefined, NOW, acc, admitted)).toMatchObject({ ok: false, code: 'POLICY_BUDGET' })
+    expect(acc.size).toBe(0)
+  })
+
+  test('over the bucket: refused (POLICY_BUDGET), nothing charged', () => {
+    const acc: ActionPolicySpendAcc = new Map()
+    const res = checkActionPolicyCall(toExecution(policyIncrease(MAMORU_POLICY, { ...p, amount0Desired: cfg.perWindow + 1n })), cfg, baseReads, NOW, acc, admitted)
+    expect(res).toMatchObject({ ok: false, code: 'POLICY_BUDGET' })
+    expect(acc.size).toBe(0)
+  })
+
+  test("the position manager's own increaseLiquidity is refused outright", () => {
+    const data = encodeFunctionData({ abi: increaseLiquidityAbi, functionName: 'increaseLiquidity', args: [p] })
+    const res = checkActionPolicyCall({ target: address('NonfungiblePositionManager', baseRegistry), value: 0n, callData: data }, cfg, baseReads, NOW, new Map(), admitted)
+    expect(res).toMatchObject({ ok: false, code: 'POLICY_NOT_ADMITTED' })
   })
 })

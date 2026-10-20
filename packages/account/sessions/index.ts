@@ -14,7 +14,7 @@ import {
 import { getUserOperationHash, toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import { ReasonError, type Address, type Hex } from '@mamoru/domain'
 import { baseRegistry, address, entry, entryPointV07Abi, moduleRegistryAbi, safe7579Abi, smartSessionAbi } from '@mamoru/registry'
-import { PARAM_CONDITIONS, decodeGasCaps, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, mamoruInitFor, v4PoolOf, validGasCaps, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { PARAM_CONDITIONS, POLICY_INCREASE_SIG, decodeGasCaps, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, mamoruInitFor, v4PoolOf, validGasCaps, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   CALLTYPE_BATCH,
   CALLTYPE_SINGLE,
@@ -119,6 +119,8 @@ export type SecondActionPolicy = {
 }
 
 const MINT_SIG = 'mint((address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256))'
+/** The position manager's own increaseLiquidity: never a session action of a v4 grant (otto/mamoru#171). */
+const NPM_INCREASE_SIG = 'increaseLiquidity((uint256,uint256,uint256,uint256,uint256,uint256))'
 const APPROVE_SIG = 'approve(address,uint256)'
 const TOKEN_FIELDS = new Set(['token0', 'token1', 'tokenIn', 'tokenOut'])
 
@@ -133,7 +135,8 @@ const same = (a: Address | bigint, b: Address) => BigInt(a) === BigInt(b)
  * SESSION_ACTION_POLICY_MISSING when a policy is absent and SESSION_ACTION_POLICY_MISMATCH when one is present but
  * not the expected one:
  * - the second action policy is nonzero, equals the configured MamoruActionPolicy, and equals the address the grant
- *   was retargeted to (`grant.actionPolicy`); every mint targets it and no approval still names the position manager;
+ *   was retargeted to (`grant.actionPolicy`); every mint and increase targets it, no approval still names the position
+ *   manager, and no action is the manager's increaseLiquidity (otto/mamoru#171);
  * - MamoruGasPolicy is present, nonzero, equals the configured gas policy, and its caps are ones it accepts;
  * - the Init's pool is the grant's pool, and every token/fee the grant's rules pin (and every approved token) belongs
  *   to that pool.
@@ -152,6 +155,9 @@ export function assertV4Policies(grant: SessionGrant, second: SecondActionPolicy
   const npm = address('NonfungiblePositionManager', baseRegistry)
   for (const a of grant.actions) {
     if (a.signature === MINT_SIG && !isAddressEqual(a.targetAddress, second.policy)) mismatch(grant, `mint targets ${a.targetAddress}, not the policy`)
+    // otto/mamoru#171: the policy's increase only at the policy; the manager's increaseLiquidity never (it funds any tokenId).
+    if (a.signature === POLICY_INCREASE_SIG && !isAddressEqual(a.targetAddress, second.policy)) mismatch(grant, `increase targets ${a.targetAddress}, not the policy`)
+    if (a.signature === NPM_INCREASE_SIG) mismatch(grant, "the position manager's increaseLiquidity is never a session action")
     if (a.signature === APPROVE_SIG && a.params.some((p) => p.field === 'spender' && same(p.ref, npm))) mismatch(grant, 'an approval still names the position manager')
   }
   let caps
