@@ -68,7 +68,13 @@ abstract contract PolicyFixture is Test {
     function _fork() internal {
         // Public Base endpoint with archive state; never the operator's provider key.
         vm.createSelectFork(vm.envOr("BASE_FORK_RPC_URL", string("https://mainnet.base.org")), FORK_BLOCK);
-        policy = new MamoruActionPolicy(SMART_SESSION, NPM, ROUTER, FACTORY);
+        policy = _newPolicy();
+    }
+
+    /// The contract under test. MamoruActionPolicyV2.t.sol overrides it to run every test of this fixture against V2,
+    /// whose ABI is a superset of this one (same selectors, errors and Init).
+    function _newPolicy() internal virtual returns (MamoruActionPolicy) {
+        return new MamoruActionPolicy(SMART_SESSION, NPM, ROUTER, FACTORY);
     }
 
     function _initData(
