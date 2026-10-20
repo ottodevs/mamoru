@@ -191,7 +191,9 @@ try {
   check((await funding()).approval?.upgrade === true, 'flag on: approval.upgrade offered on the renew row')
 
   const step1 = await ownerAction('renew')
-  check(step1.summary.some((l) => l.includes('only near the market price')) && step1.summary.some((l) => l.includes('network fee')) && step1.summary.some((l) => l.includes('2 steps')), 'step 1 summary names bands, budgets, gas caps and the 2 steps')
+  // otto/mamoru#151: the number of steps follows the simulated gas of each owner transaction (fitV4).
+  const steps = Number(/takes (\d+) steps/.exec(step1.summary.join('\n'))?.[1] ?? 0)
+  check(step1.summary.some((l) => l.includes('only near the market price')) && step1.summary.some((l) => l.includes('network fee')) && steps >= 2, `step 1 summary names bands, budgets, gas caps and the ${steps} steps`)
   const f1 = await funding()
   check(!f1.approval?.upgrade && (f1.approval?.missing ?? 0) > 0, `after step 1: account on v4, ${f1.approval?.missing} grants offered as the next step`)
   const gen = await lab.client.readContract({ address: dep.policy as Hex, abi: policyAbi, functionName: 'generationOf', args: [ctx.address] })
@@ -208,7 +210,8 @@ try {
     const at = await lab.client.readContract({ address: dep.policy as Hex, abi: policyAbi, functionName: 'admittedPool', args: [ctx.address, p.tokenId] })
     check(at.toLowerCase() === address(p.pool as never).toLowerCase(), `step 1 admitted ${p.tokenId} to ${p.pool}`)
   }
-  await ownerAction('renew')
+  // Each later step is fitted again by simulation, so the count can grow by one past the first summary's forecast.
+  for (let i = 2; i <= 6 && ((await funding()).approval?.missing ?? 0) > 0; i++) await ownerAction('renew')
   const f2 = await funding()
   check(!f2.approval?.missing && !f2.approval?.upgrade, 'after step 2: the full v4 set, nothing missing')
   const admitted2 = await Promise.all(v2Positions.map((id) => lab.client.readContract({ address: dep.policy as Hex, abi: policyAbi, functionName: 'admittedPool', args: [ctx.address, id] })))

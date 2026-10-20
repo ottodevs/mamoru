@@ -58,6 +58,7 @@ import { startLabFork } from '../fork/lab-fork.ts'
 import { startForkProxy } from '../proxy/index.ts'
 import { artifactsRoot, ensureDir, writeJson } from '../report/index.ts'
 import { loadManifest, REPO_ROOT } from '../runner/manifest.ts'
+import { simulateCalls } from '@mamoru/rpc'
 
 const CAP_USDC = 1_000_000_000n // 1,000 USDC, as t7
 const BASE_PER_TX_GAS_CAP = 16_777_216n
@@ -202,8 +203,12 @@ try {
       const guess = splitV4Keys(policy, remaining, { overheadGas, ceiling: V4_TX_GAS_TARGET })[0]?.length ?? 1
       const tried: string[] = []
       const fit = await fitPrefixBySimulation(remaining, guess, async (keys) => {
-        const g = await lab.client.estimateGas({ account: relayer.address, to: safe, data: await ownerTxData(lab, world.a1, (await build(keys)).calls) })
-        tried.push(`${keys.length}:${g}`)
+        const calls = (await build(keys)).calls
+        const g = await lab.client.estimateGas({ account: relayer.address, to: safe, data: await ownerTxData(lab, world.a1, calls) })
+        // The operator's own measure (fitV4 -> ownerTxGasLimit): the batch once in the Safe's context, reverted.
+        const ms = multiSendCallOnly(calls)
+        const [sar] = await simulateCalls(lab.client as never, [{ from: relayer.address, to: safe, data: encodeFunctionData({ abi: parseAbi(['function simulateAndRevert(address, bytes)']), functionName: 'simulateAndRevert', args: [ms.to, ms.data] }) }], await lab.client.getBlockNumber())
+        tried.push(`${keys.length}:${g} (simulateAndRevert ${sar?.gasUsed})`)
         return g
       })
       if (fit.n === 0) throw new Error(`${label}: not even one session fits ${V4_TX_GAS_TARGET}`)
