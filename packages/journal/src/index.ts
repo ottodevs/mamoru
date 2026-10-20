@@ -28,9 +28,13 @@ export function isTerminal(state: OpState): boolean {
 type CodeRule = ReasonCode | `${string}_*`
 
 const EDGES: Record<string, readonly CodeRule[]> = {
-  'proposed>discarded': ['EHG_*', 'PURGA_*', 'SESSION_*', 'OP_PREEMPTED_BY_EXIT'],
+  // Every code Engine.run discards an op with before it is signed must be on its edge: a code missing here throws
+  // SIGN_STATE_INVALID out of the move and leaves the op live, so the slot stays busy (DECIDE_SLOT_BUSY) until a restart
+  // (otto/mamoru#151: POLICY_PAUSED found it on the fork; POLICY_PRICE_BAND, INVENTORY_FULL, GAS_PRICE_OVER_CAP and a
+  // precheck POLICY_BUDGET / POLICY_NOT_ADMITTED had the same gap).
+  'proposed>discarded': ['EHG_*', 'PURGA_*', 'SESSION_*', 'POLICY_*', 'OP_DECISION_STALE', 'INVENTORY_FULL', 'GAS_PRICE_OVER_CAP', 'OP_PREEMPTED_BY_EXIT'],
   'proposed>prepared': ['EHG_OK'],
-  'prepared>discarded': ['EHG_*', 'POLICY_DENIED_*', 'OP_PREEMPTED_BY_EXIT'],
+  'prepared>discarded': ['EHG_*', 'POLICY_*', 'OP_PREEMPTED_BY_EXIT'],
   'prepared>simulated': ['EHG_OK', 'EHG_NO_GO_OVERRIDDEN_BY_EXIT'],
   'simulated>discarded': ['DRY_RUN_STOP', 'OP_DECISION_STALE', 'OP_NONCE_MOVED', 'EHG_OBSERVATION_STALE', 'EHG_OBSERVATION_REORGED', 'OP_PREEMPTED_BY_EXIT', 'SIGN_CHAIN_NOT_ALLOWED'],
   'simulated>signed': ['OP_SIGNED'],

@@ -17,6 +17,15 @@ describe('checkTransition', () => {
     expect(checkTransition('simulated', 'discarded', 'DRY_RUN_STOP').ok).toBe(true)
   })
 
+  test('every code the engine discards an unsigned op with has its edge (a missing one wedges the slot)', () => {
+    for (const code of ['POLICY_PRICE_BAND', 'POLICY_NOT_ADMITTED', 'POLICY_DENIED_POSITION', 'POLICY_BUDGET', 'OP_DECISION_STALE', 'INVENTORY_FULL', 'GAS_PRICE_OVER_CAP', 'SESSION_MISSING'] as const) {
+      expect(checkTransition('proposed', 'discarded', code).ok).toBe(true)
+    }
+    for (const code of ['POLICY_BUDGET', 'POLICY_NOT_ADMITTED', 'POLICY_PRICE_BAND', 'EHG_SIM_REVERT'] as const) {
+      expect(checkTransition('prepared', 'discarded', code).ok).toBe(true)
+    }
+  })
+
   test('never cancels a signed operation', () => {
     for (const from of ['signed', 'submitted', 'pending_reconciliation'] as const) {
       const r = checkTransition(from, 'discarded', 'OP_PREEMPTED_BY_EXIT')
