@@ -10,10 +10,13 @@ import { settingsResponseSignature } from '@mamoru/operator-auth'
 import { canonicalSettingsJson, DEFAULT_ENGINE_SETTINGS, ENGINE_SETTINGS_TEMPLATES, grantKey, instantiateGrant, POLICIES, policyHash, retargetToPolicy, type EngineSettings, type PolicyVersion } from '@mamoru/policy'
 import { resolveV4Policy } from '../src/boot.ts'
 import { EngineSettingsSource, type SettingsVersion } from '../src/engine-settings.ts'
-import { FeeHistoryState } from '../src/fee-history-state.ts'
+import { BTC_POOL, fakeClient, MULTICALL3 } from '../../../packages/rpc/test/fake-guard-client.ts'
+import { SharedGuardReads } from '@mamoru/rpc'
+import { GuardReadsState } from '../src/guard-reads-state.ts'
 import { Operator } from '../src/operator.ts'
 
 const SECRET = 'op-secret'
+const DAY_S = 86_400
 const NOW = 1_760_616_000_000
 const LAZY = ENGINE_SETTINGS_TEMPLATES['conservador-live-v2 + lazy-h24h-b100-d30']!
 const V2 = POLICIES['conservador-live-v2']!
@@ -85,22 +88,74 @@ describe('lazy re-range engine setting (otto/mamoru#172)', () => {
     expect(guardOnly.guardHistoryOf(guardOnly.enginePolicyOf(account('a')))!.shared).toBeUndefined()
   })
 
-  test('the fee history survives a restart: restored from the state file, saved at most once a minute, bad entries dropped', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'fees-'))
-    const state = new FeeHistoryState(dir)
-    expect(state.load().size).toBe(0)
-    const fees = new Map([['pool:WETH/USDC/3000', [{ time: 10, growth0X128: 1n << 200n, growth1X128: 5n }, { time: 20, growth0X128: (1n << 200n) + 1n, growth1X128: 6n }]]]) as never
-    state.update(fees, 1_000)
-    expect(statSync(join(dir, 'fee-history.json')).mode & 0o777).toBe(0o600)
-    state.update(new Map() as never, 30_000)
-    expect(new FeeHistoryState(dir).load()).toEqual(fees)
-    // An operator built with it starts from what was saved.
-    const op = new Operator({ ...base, feeHistory: new FeeHistoryState(dir) } as never, {} as never, {} as never, store as never)
-    expect(op.guardReads.fees).toEqual(fees)
-    writeFileSync(join(dir, 'fee-history.json'), JSON.stringify({ 'pool:WETH/USDC/3000': [{ time: 30, growth0X128: '7', growth1X128: '8' }, { time: 'x' }, { time: 40, growth0X128: '-1', growth1X128: '1' }], bad: 3 }))
-    expect(new FeeHistoryState(dir).load()).toEqual(new Map([['pool:WETH/USDC/3000', [{ time: 30, growth0X128: 7n, growth1X128: 8n }]]]) as never)
-    writeFileSync(join(dir, 'fee-history.json'), '{not json')
-    expect(new FeeHistoryState(dir).load().size).toBe(0)
+  test('restart: fee history and fallback series come back from the state file, and give the cost test its inputs', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'guard-reads-'))
+    const state = new GuardReadsState(dir)
+    expect(state.load()).toEqual({ fees: new Map(), series: new Map() })
+    // One process: cbBTC's long observe fails (the oracle answers an hour), so its volatility is the series alone.
+    let saves = 0
+    const first = new SharedGuardReads({ onUpdate: (st) => (saves++, state.update(st, saves * 60_000)) })
+    const client = fakeClient(3_600, { growth: 1n })
+    const targets = [{ name: 'pool:USDC/cbBTC/500', address: BTC_POOL }]
+    let now = 100 * DAY_S
+    for (; now < 100 * DAY_S + 25 * 3_600; now += 300) await first.read(client, MULTICALL3, targets, 1n, now, 1_800)
+    expect(statSync(join(dir, 'guard-reads.json')).mode & 0o777).toBe(0o600)
+    const loaded = new GuardReadsState(dir).load(now)
+    expect(loaded.series.get(1_800)!.get('pool:USDC/cbBTC/500')!.points.length).toBeGreaterThan(40)
+    // What was saved at the last write (throttled: a minute of reads may be missing) is what the process held then.
+    expect(loaded.fees.get('pool:USDC/cbBTC/500')!.length).toBeGreaterThan(100)
+    expect(loaded.series.get(1_800)!.get('pool:USDC/cbBTC/500')!.points.every((p, i, a) => i === 0 || p.time > a[i - 1]!.time)).toBe(true)
+    // The next process, built at boot from the file: the first read after the restart has volatility and fee growth.
+    const op = new Operator({ ...base, guardReadsState: { load: () => new GuardReadsState(dir).load(now), update: () => {} } } as never, {} as never, {} as never, store as never)
+    const after = await op.guardReads.read(client, MULTICALL3, targets, 2n, now + 60, 1_800)
+    expect(after['pool:USDC/cbBTC/500']!.realizedVol24hBps).not.toBeNull()
+    expect(after['pool:USDC/cbBTC/500']!.feeGrowth24h).not.toBeNull()
+    // A file from two days ago is all stale: nothing is restored, and the lazy rule has no estimate (holds).
+    const late = now + 2 * DAY_S
+    expect(new GuardReadsState(dir).load(late)).toEqual({ fees: new Map(), series: new Map() })
+    const stale = new Operator({ ...base, guardReadsState: { load: () => new GuardReadsState(dir).load(late), update: () => {} } } as never, {} as never, {} as never, store as never)
+    const blind = await stale.guardReads.read(client, MULTICALL3, targets, 3n, late, 1_800)
+    expect(blind['pool:USDC/cbBTC/500']!.realizedVol24hBps).toBeNull()
+    expect(blind['pool:USDC/cbBTC/500']!.feeGrowth24h).toBeNull()
+  }, 60_000)
+
+  test('the state file is loaded strictly: malformed, unknown, future or oversized entries are dropped; writes are throttled', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'guard-reads-'))
+    const file = join(dir, 'guard-reads.json')
+    const now = 1_800_000_000
+    const pt = (time: number, c: string) => ({ time, tickCumulative: c })
+    writeFileSync(file, JSON.stringify({
+      fees: {
+        'pool:WETH/USDC/3000': [{ time: now - 10, growth0X128: '7', growth1X128: '8' }, { time: 'x' }, { time: now - 5, growth0X128: '-1', growth1X128: '1' }, { time: now - 4, growth0X128: (1n << 256n).toString(), growth1X128: '1' }, { time: now + 3_600, growth0X128: '1', growth1X128: '1' }],
+        'not a pool': [{ time: now, growth0X128: '1', growth1X128: '1' }],
+      },
+      series: {
+        '1800': { 'pool:USDC/cbBTC/500': [pt(now - 20, '-5'), pt(now - 30, '-4'), pt(now - 30, '-3'), pt(now - 10, '1.5'), pt(now - 200_000, '1')], bad: 3 },
+        '1234': { 'pool:USDC/cbBTC/500': [pt(now, '1')] },
+        '01800': { 'pool:USDC/cbBTC/500': [pt(now, '1')] },
+      },
+    }))
+    const st = new GuardReadsState(dir).load(now)
+    expect(st.fees).toEqual(new Map([['pool:WETH/USDC/3000', [{ time: now - 10, growth0X128: 7n, growth1X128: 8n }]]]) as never)
+    // Sorted, one point per time (the last), the malformed and the too-old dropped; unknown windows dropped.
+    expect([...st.series.keys()]).toEqual([1_800])
+    expect(st.series.get(1_800)!.get('pool:USDC/cbBTC/500')!.points).toEqual([{ time: now - 30, tickCumulative: -3n }, { time: now - 20, tickCumulative: -5n }])
+    // Capped at what the series ever holds: the newest only.
+    const many = Array.from({ length: 1_000 }, (_, i) => pt(now - 1_000 + i, String(i)))
+    writeFileSync(file, JSON.stringify({ fees: {}, series: { '1800': { 'pool:USDC/cbBTC/500': many } } }))
+    const capped = new GuardReadsState(dir).load(now).series.get(1_800)!.get('pool:USDC/cbBTC/500')!.points
+    expect(capped.length).toBe((4 * DAY_S) / 1_800 + 8)
+    expect(capped.at(-1)!.time).toBe(now - 1)
+    for (const bad of ['{not json', '[]', 'null', '{"fees":3,"series":[]}']) {
+      writeFileSync(file, bad)
+      expect(new GuardReadsState(dir).load(now)).toEqual({ fees: new Map(), series: new Map() })
+    }
+    // At most one write a minute.
+    const w = new GuardReadsState(dir)
+    const one = { fees: new Map([['pool:WETH/USDC/3000', [{ time: now, growth0X128: 1n, growth1X128: 2n }]]]), series: new Map() } as never
+    w.update(one, 1_000)
+    w.update({ fees: new Map(), series: new Map() } as never, 30_000)
+    expect(new GuardReadsState(dir).load(now).fees.size).toBe(1)
   })
 
   test('grants are byte-identical with the knob on or off, and so is every policy hash', async () => {

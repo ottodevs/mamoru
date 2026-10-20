@@ -34,7 +34,7 @@ import { minOut, quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { Engine, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
-import type { FeeHistoryState } from './fee-history-state.ts'
+import type { GuardReadsState } from './guard-reads-state.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { Proposal } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
@@ -351,8 +351,8 @@ export type OperatorConfig = {
   v4Policy?: PolicyVersion
   /** otto/mamoru#129 runtime flags from the settings pull; `onchain_action_policy_v4` offers the v4 renewal per account. Absent: every flag off. */
   opsFlags?: () => Partial<Record<OpsFlagName, boolean>>
-  /** otto/mamoru#172: where the lazy re-range's fee history survives a restart (`FeeHistoryState`). Absent: memory only. */
-  feeHistory?: Pick<FeeHistoryState, 'load' | 'update'>
+  /** otto/mamoru#172: where the shared guard reads' fee history and fallback series survive a restart (`GuardReadsState`). Absent: memory only. */
+  guardReadsState?: Pick<GuardReadsState, 'load' | 'update'>
 }
 
 /** Spec 007 T7: the live policies whose accounts the renew row moves to v4 (same three pools and weights). */
@@ -538,7 +538,7 @@ export class Operator {
   private readonly poolCache = poolStateCache()
   /**
    * #172: guard history of lazy accounts, read once per pool per minute for every engine (see `SharedGuardReads`),
-   * with the fee history the cost test needs, restored from and saved to `cfg.feeHistory` when given.
+   * with the fee history and fallback series the cost test needs, restored from and saved to `cfg.guardReadsState`.
    */
   readonly guardReads: SharedGuardReads
 
@@ -548,8 +548,9 @@ export class Operator {
     readonly relayer: Relayer,
     private readonly store: StateStore,
   ) {
-    const saved = cfg.feeHistory
-    this.guardReads = new SharedGuardReads({ fees: saved?.load(), onFees: saved ? (fees) => saved.update(fees) : undefined })
+    const saved = cfg.guardReadsState
+    const restored = saved?.load()
+    this.guardReads = new SharedGuardReads({ fees: restored?.fees, series: restored?.series, onUpdate: saved ? (s) => saved.update(s) : undefined })
   }
 
   /** GET /metrics: accounts known / active / armed. */

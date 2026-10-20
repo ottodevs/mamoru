@@ -1,4 +1,4 @@
-import { FeeHistoryState } from './fee-history-state.ts'
+import { GuardReadsState } from './guard-reads-state.ts'
 import { join } from 'node:path'
 import { $ } from 'bun'
 import { createPublicClient, getAddress, http, isAddress } from 'viem'
@@ -264,7 +264,7 @@ export async function bootOperator(o: BootOptions) {
       trustedClients: parseTrustedRpc(o.trustedRpc).map((t) => ({ label: t.label, client: createPublicClient({ transport: http(t.url, { timeout: 15_000 }) }) })),
       ...(settings ? { settings, opsFlags: () => settings.flags() } : {}),
       ...(resolveV4Policy(policy.chain, process.env) ? { v4Policy: resolveV4Policy(policy.chain, process.env) } : {}),
-      feeHistory: new FeeHistoryState(o.stateDir),
+      guardReadsState: new GuardReadsState(o.stateDir),
     },
     client,
     relayer,

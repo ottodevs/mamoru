@@ -51,6 +51,7 @@ export {
   GUARD_CALLS_PER_POOL,
   SHARED_GUARD_TTL_SECONDS,
   SharedGuardReads,
+  type SharedGuardState,
   feeGrowth24hOf,
   guardSecondsAgos,
   observeGuardHistory,

@@ -23,9 +23,6 @@ import {
 const observeAbi = parseAbi(['function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128s)'])
 const W = 1_800
 const DAY_S = 86_400
-const MULTICALL3 = `0x${'ca11'.repeat(10)}` as Address
-const BTC_POOL = `0x${'b7c0'.repeat(10)}` as Address
-const STABLE_POOL = `0x${'5ab1'.repeat(10)}` as Address
 
 describe('guardSecondsAgos', () => {
   test('matches marketOf\'s own windowing: oldest first, 0 last, segments+2 points', () => {
@@ -147,55 +144,7 @@ describe('cumulativeAtFromObserve', () => {
 
 // ---- observeGuardHistory against a minimal fake chain --------------------------------------------------------
 
-/** Decodes one `observe(uint32[])` call and answers it: reverts if any requested offset is past `maxLookback`. */
-function observeResult(data: Hex, tick: bigint, base: bigint, maxLookback: number): { success: boolean; returnData: Hex } {
-  const { args } = decodeFunctionData({ abi: observeAbi, data })
-  const secondsAgos = args[0] as readonly number[]
-  if (secondsAgos.some((s) => s > maxLookback)) return { success: false, returnData: '0x' }
-  const tickCumulatives = secondsAgos.map((s) => base - BigInt(s) * tick)
-  const secondsPerLiquidity = secondsAgos.map(() => 0n)
-  return { success: true, returnData: encodeFunctionResult({ abi: observeAbi, functionName: 'observe', result: [tickCumulatives, secondsPerLiquidity] }) }
-}
-
-/** Pool calls every fake client answered (observe and fee growth), for the call-count tests of #172. */
-const poolCalls = { n: 0 }
-
-/** A client with two pools: one whose oracle answers any lookback (the stables pool today, see LC-T6), one that only answers within `maxLookback` (cbBTC/WETH today). */
-function fakeClient(maxLookback: number, fees?: { growth: bigint; failOn?: Address }) {
-  const pools: Record<string, { tick: bigint; base: bigint; maxLookback: number }> = {
-    [STABLE_POOL.toLowerCase()]: { tick: 0n, base: 0n, maxLookback: Number.MAX_SAFE_INTEGER },
-    [BTC_POOL.toLowerCase()]: { tick: 7n, base: 1_000_000n, maxLookback },
-  }
-  const answer = (to: Address, data: Hex): { success: boolean; returnData: Hex } => {
-    const pool = pools[to.toLowerCase()]
-    if (!pool) return { success: false, returnData: '0x' }
-    poolCalls.n++
-    // #172: fee growth globals, token1 twice token0; one pool may revert them.
-    for (const [i, fn] of (['feeGrowthGlobal0X128', 'feeGrowthGlobal1X128'] as const).entries()) {
-      if (data.slice(0, 10) !== encodeFunctionData({ abi: uniswapV3PoolAbi, functionName: fn }).slice(0, 10)) continue
-      if (!fees || (fees.failOn && isAddressEqual(fees.failOn, to))) return { success: false, returnData: '0x' }
-      return { success: true, returnData: encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: fn, result: fees.growth * BigInt(i + 1) }) }
-    }
-    return observeResult(data, pool.tick, pool.base, pool.maxLookback)
-  }
-  return createPublicClient({
-    transport: custom({
-      async request({ method, params }: { method: string; params?: readonly unknown[] }) {
-        if (method !== 'eth_call') throw new Error(`unexpected method ${method}`)
-        const { to, data } = (params as readonly [{ to: Address; data: Hex }])[0]!
-        if (isAddressEqual(to, MULTICALL3)) {
-          const { args } = decodeFunctionData({ abi: multicall3Abi, data })
-          const calls = args[0] as readonly { target: Address; allowFailure: boolean; callData: Hex }[]
-          const results = calls.map((c) => answer(c.target, c.callData))
-          return encodeFunctionResult({ abi: multicall3Abi, functionName: 'aggregate3', result: results })
-        }
-        const r = answer(to, data)
-        if (!r.success) throw Object.assign(new Error('execution reverted'), { code: 3, data: '0x' })
-        return r.returnData
-      },
-    }),
-  })
-}
+import { BTC_POOL, fakeClient, MULTICALL3, poolCalls, STABLE_POOL } from './fake-guard-client.ts'
 
 describe('observeGuardHistory', () => {
   const targets = [
@@ -352,6 +301,25 @@ describe('SharedGuardReads: one read per pool per TTL for the whole process (#17
     expect(shared.seriesOf(W)).not.toBe(shared.seriesOf(W2))
   })
 
+  test('restart: restored series give the volatility a failed long read cannot; without them it is missing', async () => {
+    // cbBTC's oracle answers one hour only, so its volatility comes from the fallback series alone.
+    const client = fakeClient(3_600, { growth: 1n })
+    const before = new SharedGuardReads()
+    let now = 100 * DAY_S
+    for (; now < 100 * DAY_S + 25 * 3_600; now += 300) await before.read(client, MULTICALL3, targets, 1n, now, W)
+    const warm = await before.read(client, MULTICALL3, targets, 1n, now, W)
+    expect(warm['pool:USDC/cbBTC/500']!.realizedVol24hBps).not.toBeNull()
+    // A new process, a minute later.
+    const saved = before.state()
+    const restored = new SharedGuardReads({ fees: saved.fees, series: saved.series })
+    const after = await restored.read(client, MULTICALL3, targets, 2n, now + 60, W)
+    expect(after['pool:USDC/cbBTC/500']!.realizedVol24hBps).not.toBeNull()
+    expect(after['pool:USDC/cbBTC/500']!.feeGrowth24h).not.toBeNull()
+    const cold = await new SharedGuardReads().read(client, MULTICALL3, targets, 2n, now + 60, W)
+    expect(cold['pool:USDC/cbBTC/500']!.realizedVol24hBps).toBeNull()
+    expect(cold['pool:USDC/cbBTC/500']!.feeGrowth24h).toBeNull()
+  }, 30_000)
+
   test('a failed read is not kept: the next engine reads again', async () => {
     const shared = new SharedGuardReads()
     const broken = createPublicClient({ transport: custom({ async request() { throw new Error('down') } }) })
@@ -361,9 +329,9 @@ describe('SharedGuardReads: one read per pool per TTL for the whole process (#17
     expect(r['pool:USDC/cbBTC/500']).toBeDefined()
   })
 
-  test('the shared fee history fills from whichever engine reads, and onFees is told', async () => {
+  test('the shared fee history fills from whichever engine reads, and onUpdate is told', async () => {
     let told = 0
-    const shared = new SharedGuardReads({ onFees: () => told++ })
+    const shared = new SharedGuardReads({ onUpdate: () => told++ })
     const growth = { growth: 0n }
     const client = fakeClient(3_600, growth)
     let r: Awaited<ReturnType<SharedGuardReads['read']>> = {}

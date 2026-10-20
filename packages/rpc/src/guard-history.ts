@@ -235,8 +235,13 @@ export const GUARD_CALLS_PER_POOL = 4
  * waiting on the same pools await that batch. So these 24 h aggregates (TWAP 24 h ago, realized vol, fee growth) may
  * be up to the TTL away from an engine's observation block; slot0, liquidity and the account state stay pinned to
  * it. One rolling fallback series and one fee history per pool, here, for the whole process. A failed read is
- * forgotten, so the next engine tries again.
+ * forgotten, so the next engine tries again. Both histories can be restored at construction (`fees`, `series`) and
+ * are handed to `onUpdate` after every read, so the operator keeps them across restarts (GPT-6 review, round 3):
+ * without the series, a pool whose long `observe` cannot answer has no volatility for 24.5 h after each restart, and
+ * live lazy holds (fail closed) all that time.
  */
+export type SharedGuardState = { fees: FeeGrowthHistory; series: ReadonlyMap<number, ReadonlyMap<RegistryName, GuardSeries>> }
+
 export class SharedGuardReads {
   readonly fees: FeeGrowthHistory
   /** Batches sent and pool calls in them since the process started (CU estimate, tests). */
@@ -249,9 +254,23 @@ export class SharedGuardReads {
    */
   private readonly byWindow = new Map<number, { series: Map<RegistryName, GuardSeries>; last: Map<RegistryName, { time: number; obs: Promise<PoolGuardObs> }> }>()
 
-  constructor(private readonly o: { ttlSeconds?: number; fees?: FeeGrowthHistory; onFees?: (fees: FeeGrowthHistory) => void } = {}) {
+  constructor(
+    private readonly o: {
+      ttlSeconds?: number
+      fees?: FeeGrowthHistory
+      /** Fallback series per TWAP window, as `state()` returned them before a restart. */
+      series?: ReadonlyMap<number, ReadonlyMap<RegistryName, GuardSeries>>
+      onUpdate?: (state: SharedGuardState) => void
+    } = {},
+  ) {
     this.ttl = o.ttlSeconds ?? SHARED_GUARD_TTL_SECONDS
     this.fees = o.fees ?? new Map()
+    for (const [w, s] of o.series ?? []) this.byWindow.set(w, { series: new Map(s), last: new Map() })
+  }
+
+  /** Both histories, for the caller to persist: the fee history and the fallback series of every window. */
+  state(): SharedGuardState {
+    return { fees: this.fees, series: new Map([...this.byWindow].map(([w, st]) => [w, st.series] as const)) }
   }
 
   /** The fallback series kept for one TWAP window (tests, diagnostics). */
@@ -279,7 +298,7 @@ export class SharedGuardReads {
       this.counts.poolCalls += due.length * GUARD_CALLS_PER_POOL
       const batch = observeGuardHistory(client, multicall3, due, blockNumber, now, windowSeconds, series, this.fees).then((r) => {
         for (const [name, sr] of r.series) series.set(name, sr)
-        this.o.onFees?.(this.fees)
+        this.o.onUpdate?.(this.state())
         return r
       })
       for (const t of due) {
