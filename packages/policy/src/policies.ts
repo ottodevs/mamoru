@@ -291,5 +291,4 @@ export const POLICIES: Record<string, PolicyVersion> = {
   [labWethUsdcV1.policyId]: labWethUsdcV1,
   [conservadorLabGuardsV1.policyId]: conservadorLabGuardsV1,
   [conservadorLabGeometryV1.policyId]: conservadorLabGeometryV1,
-  [conservadorLabIncreaseV1.policyId]: conservadorLabIncreaseV1,
 }

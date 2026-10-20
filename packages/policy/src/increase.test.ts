@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { ReasonError } from '@mamoru/domain'
 import { address } from '@mamoru/registry'
-import { conservadorLabIncreaseV1, grantKey, hasIncrease, instantiateGrant, POLICIES } from './index.ts'
+import { conservadorLabIncreaseV1, conservadorLiveV2, grantKey, hasIncrease, instantiateGrant, POLICIES, type GrantTemplate } from './index.ts'
 
 // otto/mamoru#171: the `increase` grant, per position. NonfungiblePositionManager.increaseLiquidity does not check who
 // owns the tokenId, so only `tokenId EQUAL <id>` keeps what it pays in the Safe's own position.
@@ -25,8 +25,8 @@ describe('increase grant (otto/mamoru#171)', () => {
   test('per position: never in the activation batch, and the owner enables it only for an admitted tokenId', () => {
     for (const g of LAB.session.grants.filter((g) => g.name === 'increase')) expect(g.perPosition).toBe(true)
     // The activation batch is the non-perPosition grants: the same keys as conservador-live-v2's.
-    const batch = (id: string) => POLICIES[id]!.session.grants.filter((g) => !g.perPosition).map(grantKey)
-    expect(batch('conservador-lab-increase-v1')).toEqual(batch('conservador-live-v2'))
+    const batch = (p: { session: { grants: GrantTemplate[] } }) => p.session.grants.filter((g) => !g.perPosition).map(grantKey)
+    expect(batch(LAB)).toEqual(batch(conservadorLiveV2))
     expect(() => instantiateGrant(LAB, 'increase:pool:WETH/USDC/3000', ctx)).toThrow('needs a tokenId')
     let denied: unknown
     try {
