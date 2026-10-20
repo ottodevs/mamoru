@@ -78,13 +78,16 @@ address, an API — something to call).
 | `across.ts` | USDC only | Ethereum, Base, Monad (any pair) | session-key | onchain-pinnable | `depositV3`'s `depositor`/`recipient` are fixed-position addresses. ETH deliberately excluded: Across bridges it via WETH, and no WETH address per chain was verified to the same standard as USDC this round. SpokePool addresses: Ethereum `0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5`, Base `0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64`, Monad `0xd2ecb3afe598b746F8123CaE365a598DA831A449` (Across supports Monad). Validation logic mirrors the proven `checkQuote` in `apps/mamoru-operator/src/bridge-out.ts` (otto/mamoru#133). |
 | `canonical.ts` | ETH only | Ethereum <-> Base only | session-key | onchain-pinnable | Base's own StandardBridge. USDC explicitly refused (see direction table). ETH only on a chain confirmed ETH-native (`chains.ts`'s `nativeAsset`). |
 | `relay.ts` | USDC, ETH | any pair both sides support, both ETH-native-verified for ETH requests | owner-only, **quote-only in practice** | **none** | Relay's deposit calldata carries the depositor, never the on-chain recipient (confirmed by testing with a different sender and recipient — see "Third hardening pass" below) — not executable by this package's own rule. Still decodes and refuses on a token/amount/value mismatch, to protect the quoted price's trustworthiness. Stayed on the v1 endpoint: v2 began requiring an API key from 2 Oct 2026 — **flag: if v1 is retired the same way, this adapter needs re-pointing or dropping.** |
-| `lifi.ts` | USDC: decoded-calldata (PolymerCCTPFacet, live-verified). ETH: quote-only (AcrossV4SwapFacet, not allowlisted) | per-origin-chain target allowlist (Ethereum, Base, Monad) | owner-only | decoded-calldata only for the one allowlisted selector (`0x17917a4e`, `swapAndStartBridgeTokensViaPolymerCCTP`); quote-only for any other selector, a failed decode, or a non-canonical re-encode | LI.FI (li.quest) picks a different facet per request; only the specific selector this round's live USDC quotes actually used is decoded with its exact real ABI (`BridgeData`+`SwapData[]`+`PolymerCCTPData`) and re-encoded to check for canonical bytes, checking `receiver`, `destinationChainId`, `hasDestinationCall`, and (mirroring `swapData[0]` the way LI.FI's own `extractMainParameters` does when `hasSourceSwaps`) the sending asset and amount against the request. The ETH-quoting facet (`AcrossV4SwapFacet`) is excluded: its own docs say its receiver "cannot be fully validated on-chain". Native `value` checked against `amountIn` (ERC20: must be 0) regardless of which facet. Charges a documented 0.25% service fee. |
-| `debridge.ts` | USDC, ETH | any pair both sides support, both ETH-native-verified for ETH requests | owner-only, **quote-only in practice** | **none** | deBridge's recipient argument is right-padded inside its word, not left-padded — the generic calldata scan never actually matches it (confirmed against the real function with distinct sender/recipient addresses), and deBridge has no declared recipient field to catch the gap the way LI.FI does. Not executable by this package's own rule. Still decodes/cross-checks target, value/fixFee and chain ids to protect the quoted price. Monad addressed as deBridge's internal id `100000030`, not its EVM chain id `143` — confirmed live. |
+| `lifi.ts` | USDC, ETH | per-origin-chain target allowlist (Ethereum, Base, Monad) | owner-only | **none, always (price oracle only — see "Decision" below)** | LI.FI (li.quest) picks a different underlying facet per request from a set that changes over time; after three rounds of trying to certify its recipient from facet calldata, the coordinator decided it is quote-only, the same footing as Relay and deBridge. Target per origin chain, output amount, and native `value` (0 for ERC20 input, `amountIn` plus a small slack for native input) are still checked, to keep the quoted price itself trustworthy for comparison — never to prove a recipient. Charges a documented 0.25% service fee, consistent with being the worst-priced owner-only quote on every live direction checked this ticket. |
+| `debridge.ts` | USDC, ETH | any pair both sides support, both ETH-native-verified for ETH requests | owner-only, **quote-only in practice** | **none** | deBridge's recipient argument is right-padded inside its word, not left-padded — the generic calldata scan never actually matches it (confirmed against the real function with distinct sender/recipient addresses), and deBridge has no declared recipient field to independently catch that gap. Not executable by this package's own rule. Still decodes/cross-checks target, value/fixFee and chain ids to protect the quoted price. Monad addressed as deBridge's internal id `100000030`, not its EVM chain id `143` — confirmed live. |
 
-All three aggregator adapters decode the calldata they are about to return and refuse the quote outright if the
-account's address cannot be found among its ABI-encoded words (`src/recipient.ts`) — this is the "decode the
-returned calldata and refuse it unless the recipient is the account" rule from the design note, applied before
-the owner ever sees the quote, not just before signing it.
+**As of the final state in this document, none of the three aggregators (Relay, deBridge, LI.FI) are
+executable.** Each was tried as a session-key-adjacent "owner-only, recipient proven by decoded calldata"
+route at some point in this ticket's history; each turned out not to prove what it claimed to (see each
+adapter's module comment and the hardening-pass sections below), and each is now `recipientCheck: 'none'`,
+`calldata`/`value` always `undefined` — a price point for comparison, nothing more. The three that remain
+executable (`recipientCheck: 'onchain-pinnable'`) are CCTP V2, Across and the canonical Base bridge, whose
+contract, function and argument position are each fixed and were verified once, not re-derived per request.
 
 **Compliance-screen false positive, worth knowing when testing by hand:** deBridge's compliance check flags the
 repeated-digit address `0x1111...1111` as high-risk (`COMPLIANCE_ADDRESS_BLOCKED`); LI.FI rejects both
@@ -288,6 +291,51 @@ Net effect: LI.FI's USDC quotes keep `recipientCheck: 'decoded-calldata'` (the l
 verified one); LI.FI's ETH quotes became `recipientCheck: 'none'` (quote-only) this round, confirmed against a
 live smoke run, because the facet LI.FI actually uses for ETH documents its own receiver as unverifiable
 on-chain.
+
+### Decision: LI.FI is a price oracle only — the facet-decoding code is removed, not left dormant
+
+A sixth review flagged `lifi.ts` again — insufficient validation and an unverified-contract-semantics trust
+boundary, on the very code the fifth round had just narrowed to one verified facet selector. The coordinator
+stopped the loop here rather than adding a seventh layer: **LI.FI is now quote-only, the same footing as Relay
+and deBridge** — `recipientCheck: 'none'`, `calldata` and `value` are never returned, this route is never
+executable.
+
+Three rounds tried to certify LI.FI's recipient, each finding a real, specific problem in the previous
+attempt's foundation:
+
+1. A generic "scan every word of the calldata for the account", corroborated by LI.FI's own declared
+   `action.toAddress` field — broke the same way it broke for Relay and deBridge (round 3).
+2. A generic "decode the first struct as `ILiFi.BridgeData` and trust it, regardless of selector" — a parser
+   differential: decode success proves nothing about what the actually-dispatched function does with those
+   bytes (round 4's own fix, found wanting by round 5).
+3. An allowlist of the one specific facet selector (`swapAndStartBridgeTokensViaPolymerCCTP`) verified safe by
+   reading its real on-chain source, decoded with its exact ABI, re-encoded and byte-compared for canonical
+   bytes (round 5) — and still flagged (round 6) for validation this adapter cannot keep re-deriving every
+   time LI.FI adds, removes or changes a facet, which it does routinely (new facets appear in
+   `lifinance/contracts` regularly; this ticket is not positioned to re-verify that on every LI.FI deploy).
+
+Each fix was correct for the specific gap it closed — this was not three rounds of guessing. The actual lesson
+is about the shape of the problem, not any one implementation: LI.FI picks a different underlying contract per
+request from a set that changes over time and is not within this project's control, which is structurally
+unlike CCTP V2, Across and the canonical Base bridge, whose contracts, functions and argument positions are
+each fixed and were verified once. Re-certifying LI.FI's calldata every time its facet set changes is not a
+cost this ticket should keep paying, especially since **LI.FI was the worst-priced owner-only quote on every
+live direction checked throughout this ticket** (consistently ~149.625 USDC on a 150 USDC quote, against
+Relay's ~149.96 and deBridge's ~149.88) — it adds a comparison data point, nothing a real caller would prefer
+to execute anyway.
+
+What stays, and why: the target contract per origin chain, the output amount, and the attached native value
+are still checked — not because any of them prove a recipient, but because they keep the QUOTED PRICE itself
+trustworthy for comparison against every other adapter (a quote naming an unverified contract, or an
+implausible native value, isn't a trustworthy price point either, even when nothing about it will ever be
+signed). The facet-decoding code itself — `ILiFi.BridgeData`/`LibSwap.SwapData`/`PolymerCCTPData` ABIs, the
+selector allowlist, the canonical re-encode check — is deleted from `lifi.ts`, not commented out or left
+behind unused: keeping dead facet-specific code around invites exactly the kind of "it still looks like it
+checks something" confusion this decision is meant to end.
+
+**Executable routes in this package are now exactly three: CCTP V2, Across, and the Base canonical bridge** —
+every one of them `recipientCheck: 'onchain-pinnable'`, backed by a contract and argument position this round
+actually verified against source and live calls. Relay, deBridge and LI.FI are quote-only.
 
 ## What was out of scope for adapters, deliberately
 
