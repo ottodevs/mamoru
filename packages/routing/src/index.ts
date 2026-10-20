@@ -1,9 +1,10 @@
 export type { Adapter, AdapterDeps, Asset, Direction, Fetch, Quote, QuoteRequest, RecipientCheck, SigningMode } from './types.ts'
 export { directionOf, isL1 } from './types.ts'
 export { RouteError } from './errors.ts'
-export { assertOwnerOnlyRecipient, calldataPinsRecipient, parseDeclaredAddress } from './recipient.ts'
+export { calldataPinsRecipientAtWord, parseDeclaredAddress, wordAt } from './recipient.ts'
 export { quoteAll, rank, selectBest, type QuoteFailure, type QuoteRun, type SelectOptions } from './selector.ts'
 export * from './chains.ts'
+export { netOutput, valueCostInAsset } from './pricing.ts'
 
 export { cctpAdapter } from './adapters/cctp.ts'
 export { acrossAdapter } from './adapters/across.ts'

@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { encodeFunctionData, parseAbi } from 'viem'
-import { assertOwnerOnlyRecipient, calldataPinsRecipient, calldataPinsRecipientAtWord, parseDeclaredAddress, wordAt } from './recipient.ts'
-import { RouteError } from './errors.ts'
+import { calldataPinsRecipientAtWord, parseDeclaredAddress, wordAt } from './recipient.ts'
 
 const ACCOUNT = '0x1111111111111111111111111111111111111111' as const
 const OTHER = '0x2222222222222222222222222222222222222222' as const
@@ -9,66 +8,42 @@ const OTHER = '0x2222222222222222222222222222222222222222' as const
 const abi = parseAbi(['function send(address to, uint256 amount) returns (bool)'])
 const sendTo = (to: `0x${string}`) => encodeFunctionData({ abi, functionName: 'send', args: [to, 150_000_000n] })
 
-describe('calldataPinsRecipient', () => {
-  test('finds the account as one of the ABI-encoded words', () => {
-    expect(calldataPinsRecipient(sendTo(ACCOUNT), ACCOUNT)).toBe(true)
-  })
-
-  test('does not find an account that is not in the calldata', () => {
-    expect(calldataPinsRecipient(sendTo(OTHER), ACCOUNT)).toBe(false)
-  })
-
-  test('calldata with no body (just a selector) never matches', () => {
-    expect(calldataPinsRecipient('0xaabbccdd', ACCOUNT)).toBe(false)
-  })
-
-  test('refuses calldata whose body is not a whole number of 32-byte words, even if truncating happens to leave a matching prefix', () => {
-    const truncated = sendTo(ACCOUNT).slice(0, -2) as `0x${string}` // drop the last byte: no longer word-aligned
-    expect(calldataPinsRecipient(truncated, ACCOUNT)).toBe(false)
-  })
-
-  test('known, accepted limitation: a decoy copy of the account elsewhere in the calldata still counts as a match', () => {
-    // This function cannot tell "the real recipient argument" from "the account's bytes appear somewhere in this
-    // call" without knowing the selector ahead of time — which is exactly why Relay/LI.FI/deBridge are owner-only
-    // rather than session-key (see the module doc comment). A call to `send(other, amount)` with the account's
-    // address packed into an unrelated trailing word still passes this check; the owner's own review of the
-    // decoded transaction before signing is the real backstop for owner-only routes, not this function.
-    const abiWithExtra = parseAbi(['function send(address to, uint256 amount, bytes32 memo) returns (bool)'])
-    const decoy = encodeFunctionData({ abi: abiWithExtra, functionName: 'send', args: [OTHER, 150_000_000n, `0x${'0'.repeat(24)}${ACCOUNT.slice(2).toLowerCase()}`] })
-    expect(calldataPinsRecipient(decoy, ACCOUNT)).toBe(true) // true, not false — documented, not a surprise
-  })
-
-  // otto/mamoru#181, review round 3: this is the precise bug that made debridge.ts's recipient check a no-op.
-  // A plain `address` argument is always ABI-encoded left-padded (`000...00` then the 20 address bytes). deBridge's
-  // DLN order format instead right-pads the recipient inside its word for at least one argument — this function
-  // requires an exact left-padded match and, correctly, does NOT find a right-padded occurrence. The lesson is
-  // NOT "scan for the address anywhere in the word" (that would accept a coincidental substring inside unrelated
-  // packed data); it is "every provider's actual encoding must be checked before trusting this function to find
-  // its recipient at all" — which is why deBridge is quote-only now, not why this function was loosened.
-  test('does not match an address that is right-padded within its word instead of left-padded', () => {
-    const rightPadded: `0x${string}` = `0xaabbccdd${ACCOUNT.slice(2).toLowerCase()}${'0'.repeat(24)}`
-    expect(calldataPinsRecipient(rightPadded, ACCOUNT)).toBe(false)
-  })
-})
+// otto/mamoru#181, review round 4: this file used to also test `calldataPinsRecipient` and
+// `assertOwnerOnlyRecipient`, a generic "scan every word for the account" check. It was removed from recipient.ts
+// entirely after direct testing showed it made Relay's and deBridge's recipient checks into no-ops (see their
+// module comments) — no adapter in this package may rely on a generic scan for a recipient claim again. What
+// remains are exact-position reads only, used at offsets a provider's calldata shape was actually confirmed
+// (by direct testing) to place a specific field at.
 
 describe('wordAt / calldataPinsRecipientAtWord', () => {
-  test('reads the exact word at an index, unlike the scan this backs for providers with a confirmed fixed offset', () => {
+  test('reads the exact word at an index', () => {
     const data = sendTo(ACCOUNT) // send(address to, uint256 amount): word 0 is `to`, word 1 is `amount`
     expect(calldataPinsRecipientAtWord(data, ACCOUNT, 0)).toBe(true)
     expect(calldataPinsRecipientAtWord(data, ACCOUNT, 1)).toBe(false) // the account is not the amount
   })
 
-  test('a decoy at the WRONG word does not satisfy an exact-offset check, unlike the generic scan', () => {
+  test('a decoy at an unrelated word does not satisfy an exact-offset check', () => {
     const abiWithExtra = parseAbi(['function send(address to, uint256 amount, bytes32 memo) returns (bool)'])
     const decoy = encodeFunctionData({ abi: abiWithExtra, functionName: 'send', args: [OTHER, 150_000_000n, `0x${'0'.repeat(24)}${ACCOUNT.slice(2).toLowerCase()}`] })
-    expect(calldataPinsRecipient(decoy, ACCOUNT)).toBe(true) // the generic scan is fooled (documented above)
-    expect(calldataPinsRecipientAtWord(decoy, ACCOUNT, 0)).toBe(false) // the exact-offset check is not: word 0 is OTHER
+    expect(calldataPinsRecipientAtWord(decoy, ACCOUNT, 0)).toBe(false) // word 0 is OTHER, not ACCOUNT
+  })
+
+  test('does not match an address that is right-padded within its word instead of left-padded', () => {
+    // otto/mamoru#181, review round 3: the precise bug that made debridge.ts's recipient check a no-op before
+    // it was made quote-only — a plain `address` argument is always left-padded; some encodings are not.
+    const rightPadded: `0x${string}` = `0xaabbccdd${ACCOUNT.slice(2).toLowerCase()}${'0'.repeat(24)}`
+    expect(calldataPinsRecipientAtWord(rightPadded, ACCOUNT, 0)).toBe(false)
   })
 
   test('out of range or malformed calldata is undefined/false, never a throw', () => {
     expect(wordAt(sendTo(ACCOUNT), 5)).toBeUndefined()
     expect(wordAt('0xaabbccdd', 0)).toBeUndefined()
     expect(calldataPinsRecipientAtWord('0xaabbccdd', ACCOUNT, 0)).toBe(false)
+  })
+
+  test('refuses calldata whose body is not a whole number of 32-byte words', () => {
+    const truncated = sendTo(ACCOUNT).slice(0, -2) as `0x${string}` // drop the last byte: no longer word-aligned
+    expect(wordAt(truncated, 0)).toBeUndefined()
   })
 })
 
@@ -81,23 +56,5 @@ describe('parseDeclaredAddress', () => {
     expect(parseDeclaredAddress('not-an-address')).toBeUndefined()
     expect(parseDeclaredAddress(undefined)).toBeUndefined()
     expect(parseDeclaredAddress(42)).toBeUndefined()
-  })
-})
-
-describe('assertOwnerOnlyRecipient', () => {
-  test('passes when the declared recipient and the calldata both agree with the account', () => {
-    expect(() => assertOwnerOnlyRecipient('relay', ACCOUNT, sendTo(ACCOUNT), ACCOUNT)).not.toThrow()
-  })
-
-  test('passes with no declared recipient, as long as the calldata carries the account', () => {
-    expect(() => assertOwnerOnlyRecipient('relay', ACCOUNT, sendTo(ACCOUNT))).not.toThrow()
-  })
-
-  test('refuses when the declared recipient is a different address', () => {
-    expect(() => assertOwnerOnlyRecipient('relay', ACCOUNT, sendTo(ACCOUNT), OTHER)).toThrow(RouteError)
-  })
-
-  test('refuses when the calldata does not actually carry the account, even if declared matches', () => {
-    expect(() => assertOwnerOnlyRecipient('relay', ACCOUNT, sendTo(OTHER), ACCOUNT)).toThrow(RouteError)
   })
 })
