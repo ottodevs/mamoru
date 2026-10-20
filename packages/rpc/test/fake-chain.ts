@@ -63,6 +63,8 @@ export class FakeChain {
   readonly requests: Recorded[] = []
   /** #172: pool calls of the guard history (its observe reads and the fee growth globals), inside multicalls or not. */
   guardCalls = 0
+  /** Extra contracts by lowercase address (a deployed action policy in a test): answer `eth_call` data, or throw Revert. */
+  readonly contracts = new Map<string, (data: Hex, from: Address) => Hex>()
   /** Called before each request is answered. */
   onRequest: (r: Recorded) => void = () => {}
   /** QuoterV2.quoteExactInputSingle's `amountOut`: 1:1 with `amountIn` by default (deterministic), override per test. */
@@ -203,6 +205,8 @@ export class FakeChain {
   private execute(from: Address, to: Address, data: Hex): Hex {
     const at = to.toLowerCase()
     if (this.reverting.has(`${at}:${data.slice(0, 10)}`)) throw new Revert('forced')
+    const extra = this.contracts.get(at)
+    if (extra) return extra(data, from)
     if (at === address('Multicall3', baseRegistry).toLowerCase()) {
       const call = decodeFunctionData({ abi: multicall3Abi, data })
       if (call.functionName === 'getEthBalance') return encodeFunctionResult({ abi: multicall3Abi, functionName: 'getEthBalance', result: this.native.get(call.args[0].toLowerCase()) ?? 0n })

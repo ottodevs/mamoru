@@ -3,8 +3,8 @@ import type { LocalAccount } from 'viem/accounts'
 import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { amountsOf, decide, outOfRangeSinceOf, twapFloor, withOutOfRangeSince, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
-import { hasManageAny, TWAP_SHORT_WINDOW_SECONDS, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
-import { baseRegistry, address, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
+import { hasIncrease, hasManageAny, TWAP_SHORT_WINDOW_SECONDS, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { baseRegistry, address, entry, entryPointV07Abi, erc20Abi, mamoruActionPolicyV2Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
 import {
   Batch,
   MULTICALL3,
@@ -26,8 +26,8 @@ import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
 import { SessionLedger, precheck, type ActionPolicyPoolConfig } from '@mamoru/account/precheck'
 import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useModeSignature, userOpHash, type GasSettings } from '@mamoru/account/sessions'
 import type { Execution } from '@mamoru/account/safe'
-import { approve, burn, collect, deadlineCheck, decreaseLiquidity, exactInputSingle, mint, type V3Call } from '@mamoru/uniswap-v3'
-import { minOut, quoteExactInputSingle, quoteMint } from '@mamoru/uniswap-v3/quote'
+import { approve, approveTo, burn, collect, deadlineCheck, decreaseLiquidity, exactInputSingle, mint, policyIncrease, type V3Call } from '@mamoru/uniswap-v3'
+import { minOut, quoteExactInputSingle, quoteExactInputSingleWithLimit, quoteMint } from '@mamoru/uniswap-v3/quote'
 import { diverges, swapMinimum, twapFloor as deviationFloor, twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { DEFAULT_BAND_FACTOR_BPS, decreaseMinsInRange, oracleFromObserve, priceRange, swapBoundsInRange, type OracleRead, type PriceAnchor, type PriceRange } from '@mamoru/uniswap-v3/policy-bounds'
 import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
@@ -183,6 +183,9 @@ type Prepared = {
   /** See OpRecord.expiresAt. */
   expiresAt: bigint | null
 }
+
+/** Spec 007, #151 review P1-3: how many times a swap under the action policy is halved to fill within its price limit (down to 1/16). */
+export const V4_SWAP_SIZE_DOWN_STEPS = 4
 
 /** SwapRouter02.multicall(uint256,bytes[]): the action a session grant holds for an on-chain swap expiry. */
 const DEADLINE_SELECTOR = toFunctionSelector('function multicall(uint256,bytes[])').toLowerCase()
@@ -350,6 +353,32 @@ export class Engine {
   }
 
   async observe(): Promise<Observation> {
+    return this.withAdmission(await this.observeChain())
+  }
+
+  /**
+   * otto/mamoru#171: under a policy that increases through MamoruActionPolicyV2 (`hasIncrease`), which of the account's
+   * positions the policy admitted, read at the observation block, so `decide` never proposes an increase the policy
+   * refuses (a v2/v3 or V1 position it never admitted). Any other policy: the observation is returned unchanged, and
+   * no read is made.
+   */
+  private async withAdmission(obs: Observation): Promise<Observation> {
+    const ap = this.cfg.policy.actionPolicy
+    if (!ap || !obs.positions.length) return obs
+    const pools = this.cfg.policy.buckets.flatMap((b) => b.pools).filter((p) => hasIncrease(this.cfg.policy, p))
+    if (!pools.length) return obs
+    const asked = obs.positions.filter((p) => p.pool !== null && pools.includes(p.pool))
+    let at: Address[]
+    try {
+      at = await Promise.all(asked.map((p) => this.client.readContract({ address: ap.address, abi: mamoruActionPolicyV2Abi, functionName: 'admittedPool', args: [this.cfg.account, p.tokenId], blockNumber: obs.block.number })))
+    } catch (e) {
+      throw new ReasonError('OBS_RPC_UNAVAILABLE', `MamoruActionPolicy.admittedPool at ${obs.block.number}: ${(e as Error).message.split('\n')[0]}`)
+    }
+    const admitted = new Map(asked.map((p, i) => [p.tokenId, isAddressEqual(at[i]!, entry(p.pool!, baseRegistry).address)]))
+    return { ...obs, positions: obs.positions.map((p) => (admitted.has(p.tokenId) ? { ...p, admitted: admitted.get(p.tokenId)! } : p)) }
+  }
+
+  private async observeChain(): Promise<Observation> {
     const live = this.journal.live
     const obs = await observe(this.client, {
       chainId: this.cfg.chainId,
@@ -972,12 +1001,103 @@ export class Engine {
     this.ledger.syncActionPolicyReads(pool, { oracle, spend, currentGeneration })
   }
 
+  /**
+   * otto/mamoru#151: under MamoruActionPolicyV2 (`actionPolicy.contractVersion` 2), a guardian pause refuses every session
+   * action at validation; the engine reads it at the prepare block and waits (POLICY_PAUSED) instead of sending an op
+   * that cannot validate. V1 has no pause: no read.
+   */
+  private async refuseWhilePaused(blockNumber: bigint): Promise<void> {
+    const ap = this.cfg.policy.actionPolicy
+    if (ap?.contractVersion !== 2) return
+    let paused: boolean
+    try {
+      paused = await this.client.readContract({ address: ap.address, abi: mamoruActionPolicyV2Abi, functionName: 'isPaused', args: [this.cfg.account], blockNumber })
+    } catch (e) {
+      throw new ReasonError('EHG_TWAP_UNAVAILABLE', `MamoruActionPolicyV2.isPaused at ${blockNumber}: ${(e as Error).message.split('\n')[0]}`)
+    }
+    if (paused) throw new ReasonError('POLICY_PAUSED', `MamoruActionPolicyV2 ${ap.address}: the guardian paused ${this.cfg.account}`)
+  }
+
+  /**
+   * Spec 007 T3, a swap in a pool MamoruActionPolicyV2 covers: minimum and price limit from the policy's range at the
+   * engine band, and a quote taken WITH that limit, as the router will run it (#151 review P1-3). Near the band edge the
+   * bounded swap stops at the limit and fills only part of the input, so the batch's deltas would not match: such a size
+   * is halved, at most V4_SWAP_SIZE_DOWN_STEPS times, until the quote fills the whole input within the limit and meets
+   * the bound. No size works: not sent (EHG_PRICE_DIVERGENCE). The prepared quote names the size sent.
+   */
+  private async prepareV4Swap(p: Extract<Proposal, { kind: 'enter_swap' }>, blockNumber: bigint, session: EngineSession, deadline: bigint, v4: NonNullable<ReturnType<Engine['v4PoolConfig']>>): Promise<Prepared> {
+    const oracle = await this.priceGuardV4(p.pool, blockNumber, v4.twapShortSeconds)
+    const range = this.v4Range(p.pool, v4, oracle)
+    const zeroForOne = entry(p.pool, baseRegistry).token0 === p.tokenIn
+    let amountIn = p.amountIn
+    for (let step = 0; ; step++) {
+      const bound = swapBoundsInRange({ range, feePips: p.fee, zeroForOne, tokenIn: address(p.tokenIn, baseRegistry), tokenOut: address(p.tokenOut, baseRegistry), amountIn })
+      const q = await quoteExactInputSingleWithLimit(this.client, { tokenIn: address(p.tokenIn, baseRegistry), tokenOut: address(p.tokenOut, baseRegistry), fee: p.fee, amountIn, sqrtPriceLimitX96: bound.sqrtPriceLimitX96, blockNumber })
+      if (q.filled && q.amountOut >= bound.minOut) {
+        // otto/mamoru#140: never under today's TWAP floors either (the max of the minimums, the tighter limit).
+        let amountOutMinimum = await this.swapMin({ ...p, amountIn }, q.amountOut, blockNumber, oracle.twapLong)
+        if (bound.minOut > amountOutMinimum) amountOutMinimum = bound.minOut
+        const expiry = this.swapExpiry(session, deadline)
+        return {
+          quote: { amountIn, amountOut: q.amountOut, amountOutMinimum },
+          calls: [...expiry.calls, approve(p.tokenIn, 'SwapRouter02', amountIn), exactInputSingle({ account: this.cfg.account, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn, amountOutMinimum, sqrtPriceLimitX96: bound.sqrtPriceLimitX96 })].map(exec),
+          expiresAt: expiry.expiresAt,
+        }
+      }
+      if (step >= V4_SWAP_SIZE_DOWN_STEPS || amountIn / 2n === 0n) {
+        throw new ReasonError('EHG_PRICE_DIVERGENCE', `${p.pool}: ${amountIn} ${p.tokenIn} (of ${p.amountIn}) ${q.filled ? `returns ${q.amountOut}, under the policy bound ${bound.minOut}` : 'stops at the price limit'} (range ${range.lo}..${range.hi})`)
+      }
+      amountIn /= 2n
+    }
+  }
+
+  /**
+   * otto/mamoru#171: an entry added to a held position, only through MamoruActionPolicyV2.increase (`policyIncrease`):
+   * approvals of the policy for the desired amounts (it pulls exactly them and refunds the rest, like its mint), then the
+   * policy's increase. Re-read at the prepare block: the policy admitted the tokenId for this pool and the account still
+   * owns it (the policy refuses otherwise), the position is the one decide split the amounts for (pool and range) with
+   * the price strictly inside it, the divergence check and a non-empty policy range. Minimums as for a mint, from the
+   * same quote over the position's range.
+   */
+  private async prepareIncrease(p: Extract<Proposal, { kind: 'increase_liquidity' }>, blockNumber: bigint, deadline: bigint): Promise<Prepared> {
+    const v4 = this.v4PoolConfig(p.pool)
+    if (!v4 || this.cfg.policy.actionPolicy?.contractVersion !== 2) throw new ReasonError('SESSION_MISSING', `${p.grant}: no MamoruActionPolicyV2 covers ${p.pool}; no session may call the position manager's increaseLiquidity`)
+    const oracle = await this.priceGuardV4(p.pool, blockNumber, v4.twapShortSeconds)
+    this.v4Range(p.pool, v4, oracle)
+    const pool = entry(p.pool, baseRegistry)
+    const [admittedAt, owner, pos, [sqrtPriceX96, tick]] = await Promise.all([
+      this.client.readContract({ address: v4.address, abi: mamoruActionPolicyV2Abi, functionName: 'admittedPool', args: [this.cfg.account, p.tokenId], blockNumber }),
+      this.client.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [p.tokenId], blockNumber }),
+      this.client.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [p.tokenId], blockNumber }),
+      this.client.readContract({ address: pool.address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
+    ])
+    if (!isAddressEqual(admittedAt, pool.address)) throw new ReasonError('POLICY_NOT_ADMITTED', `position ${p.tokenId} is not admitted for ${p.pool} by ${v4.address}`)
+    if (!isAddressEqual(owner, this.cfg.account)) throw new ReasonError('POLICY_DENIED_POSITION', `position ${p.tokenId} is no longer owned by the account (owner ${owner})`)
+    if (!isAddressEqual(pos[2], address(pool.token0!, baseRegistry)) || !isAddressEqual(pos[3], address(pool.token1!, baseRegistry)) || pos[4] !== pool.fee || pos[5] !== p.tickLower || pos[6] !== p.tickUpper) {
+      throw new ReasonError('OP_DECISION_STALE', `position ${p.tokenId} is not ${p.pool} [${p.tickLower}, ${p.tickUpper}]`)
+    }
+    if (!(p.tickLower < tick && tick < p.tickUpper)) throw new ReasonError('OP_DECISION_STALE', `${p.pool}: tick ${tick} is not inside [${p.tickLower}, ${p.tickUpper}]`)
+    const q = quoteMint({ sqrtPriceX96, tickLower: p.tickLower, tickUpper: p.tickUpper, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, slippageBps: this.cfg.policy.execution.slippageBps })
+    return {
+      expiresAt: deadline,
+      calls: [
+        approveTo(pool.token0!, v4.address, p.amount0Desired),
+        approveTo(pool.token1!, v4.address, p.amount1Desired),
+        policyIncrease(v4.address, { tokenId: p.tokenId, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, amount0Min: q.amount0Min, amount1Min: q.amount1Min, deadline }),
+      ].map(exec),
+    }
+  }
+
   /** FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. */
   private async prepareCalls(p: Proposal, blockNumber: bigint, timestamp: bigint, session: EngineSession): Promise<Prepared> {
     const acct = this.cfg.account
     const slippage = this.cfg.policy.execution.slippageBps
     // Every priced call of the batch expires on chain at the same time (NonfungiblePositionManager and SwapRouter02).
     const deadline = timestamp + BigInt(this.cfg.policy.execution.observationTtlSeconds)
+    await this.refuseWhilePaused(blockNumber)
+    // MamoruActionPolicyV2 accounts (v5) quote their swaps with the price limit; the deployed V1's (v4) keep the path below.
+    const v4Swap = p.kind === 'enter_swap' && this.cfg.policy.actionPolicy?.contractVersion === 2 ? this.v4PoolConfig(p.pool) : undefined
+    if (p.kind === 'enter_swap' && v4Swap) return this.prepareV4Swap(p, blockNumber, session, deadline, v4Swap)
     if (p.kind === 'enter_swap') {
       const amountOut = await quoteExactInputSingle(this.client, { tokenIn: address(p.tokenIn, baseRegistry), tokenOut: address(p.tokenOut, baseRegistry), fee: p.fee, amountIn: p.amountIn, blockNumber })
       const v4 = this.v4PoolConfig(p.pool)
@@ -1090,7 +1210,7 @@ export class Engine {
       // Without a decrease the batch prices nothing (collect and burn to the account): late, it is harmless.
       return { calls: calls.map(exec), expiresAt: liquidity > 0n ? deadline : null }
     }
-    if (p.kind === 'increase_liquidity') throw new ReasonError('SESSION_MISSING', `${p.grant}: this engine does not build increase_liquidity`)
+    if (p.kind === 'increase_liquidity') return this.prepareIncrease(p, blockNumber, deadline)
     // otto/mamoru#140: a harvest only collects, to the account. A conversion in the same batch swapped a fixed amount
     // checked against the simulated Collect only: if the fees were collected elsewhere before inclusion, it swapped
     // idle principal instead. The volatile fees stay in the account, where a later idle sell-back (priced at the
@@ -1113,7 +1233,9 @@ export class Engine {
   private deltaMismatch(p: Proposal, prepared: Prepared, sim: Simulation): string | null {
     const d = (t: string) => sim.deltas[t] ?? 0n
     if (p.kind === 'enter_swap') {
-      if (d(p.tokenIn) !== -p.amountIn) return `${p.tokenIn} moved ${d(p.tokenIn)}, intent ${-p.amountIn}`
+      // A swap under the action policy may be sized down to fill within its price limit (prepareV4Swap): the size sent is the quote's.
+      const amountIn = prepared.quote?.amountIn ?? p.amountIn
+      if (d(p.tokenIn) !== -amountIn) return `${p.tokenIn} moved ${d(p.tokenIn)}, intent ${-amountIn}`
       if (d(p.tokenOut) < prepared.quote!.amountOutMinimum) return `${p.tokenOut} rose ${d(p.tokenOut)}, below the minimum`
       return null
     }
@@ -1122,6 +1244,15 @@ export class Engine {
       if (sim.nftDelta !== 1n) return `positions changed by ${sim.nftDelta}`
       if (d(pool.token0!) > 0n || -d(pool.token0!) > p.amount0Desired) return `${pool.token0} moved ${d(pool.token0!)}`
       if (d(pool.token1!) > 0n || -d(pool.token1!) > p.amount1Desired) return `${pool.token1} moved ${d(pool.token1!)}`
+      return null
+    }
+    if (p.kind === 'increase_liquidity') {
+      // otto/mamoru#171: no new NFT, and nothing but the pool's two tokens leaves, at most the desired amounts.
+      const pool = entry(p.pool, baseRegistry)
+      if (sim.nftDelta !== 0n) return `positions changed by ${sim.nftDelta}`
+      if (d(pool.token0!) > 0n || -d(pool.token0!) > p.amount0Desired) return `${pool.token0} moved ${d(pool.token0!)}`
+      if (d(pool.token1!) > 0n || -d(pool.token1!) > p.amount1Desired) return `${pool.token1} moved ${d(pool.token1!)}`
+      if (d(pool.token0!) === 0n && d(pool.token1!) === 0n) return 'the increase took nothing'
       return null
     }
     if (p.kind === 'rerange' || p.kind === 'reduce') {

@@ -522,7 +522,7 @@ export function withActionPolicy(
   policy: PolicyVersion,
   mamoruPolicy: Address,
   pools: readonly V4PoolSpec[],
-  opts: { bandFactorBps?: number; caps?: Record<string, bigint>; budgetWindowSeconds?: number; twapShortWindowSeconds?: number; gasPolicy?: { address: Address; caps: GasCaps } } = {},
+  opts: { bandFactorBps?: number; caps?: Record<string, bigint>; budgetWindowSeconds?: number; twapShortWindowSeconds?: number; gasPolicy?: { address: Address; caps: GasCaps }; contractVersion?: 2 } = {},
 ): PolicyVersion {
   const bandTicksByPool: Partial<Record<RegistryName, number>> = {}
   const anchorByPool: Partial<Record<RegistryName, { tick: number; band: number }>> = {}
@@ -554,6 +554,7 @@ export function withActionPolicy(
       ...(opts.bandFactorBps !== undefined ? { bandFactorBps: opts.bandFactorBps } : {}),
       ...(opts.caps ? { budgetsByPool } : {}),
       ...(opts.gasPolicy ? { gasPolicy: opts.gasPolicy } : {}),
+      ...(opts.contractVersion ? { contractVersion: opts.contractVersion } : {}),
     },
   }
 }

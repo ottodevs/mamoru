@@ -207,6 +207,12 @@ export type PolicyVersion = {
      * over a cap is refused at validation). Never a registry entry or a constant (same discipline as `address`).
      */
     gasPolicy?: { address: Address; caps: GasCaps }
+    /**
+     * otto/mamoru#151: which MamoruActionPolicy contract `address` is. 2 = MamoruActionPolicyV2 (increase, the guardian
+     * pause, the swap deadline): the engine reads `isPaused` before it prepares an op and waits (POLICY_PAUSED) instead
+     * of sending one the policy refuses. Absent: the deployed V1, which has no pause.
+     */
+    contractVersion?: 2
   }
 }
 

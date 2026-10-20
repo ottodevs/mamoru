@@ -56,6 +56,9 @@ export const REASON_CODES = [
   'POLICY_PRICE_BAND',
   'POLICY_NOT_ADMITTED',
   'POLICY_BUDGET',
+  // otto/mamoru#151: MamoruActionPolicyV2's guardian paused the account; every session action is refused until it
+  // unpauses or the owner renews. The engine waits; the owner's own path is not behind the policy.
+  'POLICY_PAUSED',
   // Puertas
   'PURGA_OK',
   'PURGA_NOT_APPLICABLE',
