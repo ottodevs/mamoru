@@ -105,7 +105,7 @@ interface INPM {
 /**
  * @title MamoruActionPolicyV2 (spec 007, otto/mamoru#151, #171). Not deployed. MamoruActionPolicy as deployed on Base
  * at 0x0083A9ca619f22A4f29704F97981dfFe8CD35215 (T6 audit fixes applied, see
- * specs/007-onchain-action-policy/results/t6-fixes-2026-10-18.md), plus two additions, each only a refusal or a
+ * specs/007-onchain-action-policy/results/t6-fixes-2026-10-18.md), plus three additions, each only a refusal or a
  * path a session could not take before:
  *  - `increase` (#171): the only way a session adds liquidity to a position. The position manager's
  *    `increaseLiquidity` does not check who owns the tokenId, so it is never a session action; through here it
@@ -114,6 +114,8 @@ interface INPM {
  *  - a revoke-only guardian (immutable `GUARDIAN`, address(0) = none): `pause(account)` refuses every session action
  *    of the account (checkAction, `mint`, `increase`) until `unpause` or the owner's next renewal. It cannot enable,
  *    widen, or move a token.
+ *  - the engine's swap deadline, `SwapRouter02.multicall(deadline, [])` (#140), in its exact empty encoding only, so
+ *    a grant can carry this policy on that action too and a pause or a renewal stops it like any other.
  * Everything else is the deployed contract's logic; mint's pull, approve and refund steps moved, in the same order, into
  * `_fund` and `_settle`, which increase shares (with `_checkProvide` at validation), and the file compiles at 1,000
  * optimizer runs instead of 10,000 to fit EIP-170 (foundry.toml).
@@ -148,6 +150,7 @@ contract MamoruActionPolicyV2 is IActionPolicy {
     bytes4 internal constant DECREASE = 0x0c49ccbe; // decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))
     bytes4 internal constant COLLECT = 0xfc6f7865; // collect((uint256,address,uint128,uint128))
     bytes4 internal constant BURN = 0x42966c68; // burn(uint256)
+    bytes4 internal constant MULTICALL_DEADLINE = 0x5ae401dc; // SwapRouter02 multicall(uint256,bytes[])
 
     /// Hard bounds on owner-signed Init values (T6 I-2): the owner taps a hash the operator built.
     uint32 public constant MIN_TWAP_WINDOW = 600;
@@ -374,6 +377,15 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         if (target == address(NPM) && sel == BURN) {
             uint256 tokenId = abi.decode(data[4:], (uint256));
             return _isAdmitted(account, b.pool, tokenId) ? VALIDATION_SUCCESS : VALIDATION_FAILED;
+        }
+        if (target == ROUTER && sel == MULTICALL_DEADLINE) {
+            // The engine's swap deadline (#140): multicall(deadline, []) executes nothing and reverts once the block is
+            // past `deadline`. Only the exact empty encoding passes (selector, deadline, offset 0x40, length 0: 100
+            // bytes); it is here, after the generation and pause checks, so a retired or paused grant cannot spend uses
+            // on it either.
+            return data.length == 100 && uint256(bytes32(data[36:68])) == 0x40 && uint256(bytes32(data[68:100])) == 0
+                ? VALIDATION_SUCCESS
+                : VALIDATION_FAILED;
         }
         if (sel == APPROVE && (target == p.token0 || target == p.token1)) {
             (address spender,) = abi.decode(data[4:], (address, uint256));

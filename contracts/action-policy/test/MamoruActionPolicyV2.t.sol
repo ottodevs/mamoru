@@ -26,6 +26,10 @@ interface IAllowance {
     function allowance(address owner, address spender) external view returns (uint256);
 }
 
+interface IRouterMulticall {
+    function multicall(uint256 deadline, bytes[] calldata data) external payable returns (bytes[] memory);
+}
+
 // The guardian every V2 test deploys with (otto/mamoru#151: revoke-only).
 address constant GUARDIAN = address(0x6A2d1A9);
 
@@ -51,8 +55,8 @@ contract T6FixesTestOnV2 is T6FixesTest {
 }
 
 /**
- * What V2 adds (otto/mamoru#151, #171), on the same Base fork: `increase` through the policy and the revoke-only
- * guardian.
+ * What V2 adds (otto/mamoru#151, #171), on the same Base fork: `increase` through the policy, the revoke-only
+ * guardian, and the empty swap deadline `multicall(deadline, [])`.
  */
 contract MamoruActionPolicyV2Test is PolicyFixture {
     function _newPolicy() internal override returns (MamoruActionPolicy) {
@@ -235,7 +239,7 @@ contract MamoruActionPolicyV2Test is PolicyFixture {
         MintParams memory m = MintParams(
             USDC, CBBTC, 500, ((sp - 600) / 10) * 10, ((sp + 600) / 10) * 10, 1_000e6, 0.01e8, 0, 0, safe, block.timestamp
         );
-        bytes[7] memory calls = [
+        bytes[8] memory calls = [
             _swapData(USDC, CBBTC, 500, 1_000e6, minOut, limit),
             _increaseData(tokenId, 1_000e6, 0.01e8),
             abi.encodeCall(MamoruActionPolicy.mint, (m)),
@@ -244,10 +248,11 @@ contract MamoruActionPolicyV2Test is PolicyFixture {
             ),
             abi.encodeCall(INPMFull.collect, (CollectParams(tokenId, safe, 1, 1))),
             abi.encodeCall(INPMFull.burn, (tokenId)),
-            abi.encodeCall(IERC20Min.approve, (address(policy), 1))
+            abi.encodeCall(IERC20Min.approve, (address(policy), 1)),
+            _deadline(0)
         ];
-        address[7] memory targets = [ROUTER, address(policy), address(policy), NPM, NPM, NPM, USDC];
-        for (uint256 i; i < 7; i++) {
+        address[8] memory targets = [ROUTER, address(policy), address(policy), NPM, NPM, NPM, USDC, ROUTER];
+        for (uint256 i; i < 8; i++) {
             uint256 snap = vm.snapshotState();
             assertEq(_check(targets[i], calls[i]), 0, "passes before the pause");
             vm.revertToState(snap);
@@ -257,7 +262,7 @@ contract MamoruActionPolicyV2Test is PolicyFixture {
         v2().pause(safe);
         assertTrue(v2().isPaused(safe));
         assertEq(v2().pausedAt(safe), 2, "generation 1 + 1");
-        for (uint256 i; i < 7; i++) {
+        for (uint256 i; i < 8; i++) {
             assertEq(_check(targets[i], calls[i]), 1, "refused while paused");
         }
         _approvePolicy(2_000e6, 0.02e8);
@@ -341,5 +346,76 @@ contract MamoruActionPolicyV2Test is PolicyFixture {
         vm.prank(address(0));
         vm.expectRevert(MamoruActionPolicyV2.OnlyGuardian.selector);
         p2.unpause(safe);
+    }
+
+    // ------------------------------------------------------------ swap deadline: multicall(deadline, [])
+
+    function _deadline(uint256 n) internal view returns (bytes memory) {
+        bytes[] memory inner = new bytes[](n);
+        for (uint256 k; k < n; k++) {
+            inner[k] = _swapData(USDC, CBBTC, 500, 1, 1, 0);
+        }
+        return abi.encodeCall(IRouterMulticall.multicall, (block.timestamp + 120, inner));
+    }
+
+    function test_deadlineSelector() public pure {
+        assertEq(IRouterMulticall.multicall.selector, bytes4(0x5ae401dc));
+    }
+
+    function test_deadlineEmptyMulticallAccepted() public {
+        assertEq(_deadline(0).length, 100);
+        (uint256 r, uint256 gas) = _checkGas(ROUTER, _deadline(0));
+        assertEq(r, 0);
+        console2.log("gas checkAction(multicall deadline):", gas);
+        // It executes nothing before the deadline and reverts after it.
+        _exec(ROUTER, _deadline(0));
+        bytes memory late = abi.encodeCall(IRouterMulticall.multicall, (block.timestamp - 1, new bytes[](0)));
+        vm.prank(safe);
+        (bool ok,) = ROUTER.call(late);
+        assertFalse(ok, "past the deadline the router reverts");
+    }
+
+    function test_deadlineMulticallWithCallsOrPaddingRefused() public {
+        assertEq(_check(ROUTER, _deadline(1)), 1, "one inner call");
+        assertEq(_check(ROUTER, bytes.concat(_deadline(0), bytes32(0))), 1, "trailing bytes");
+        bytes memory wrongOffset = _deadline(0);
+        wrongOffset[67] = 0x60; // offset word 0x60 instead of 0x40
+        assertEq(_check(ROUTER, wrongOffset), 1);
+        bytes memory wrongLength = _deadline(0);
+        wrongLength[99] = 0x01; // length 1, no element
+        assertEq(_check(ROUTER, wrongLength), 1);
+        bytes memory full = _deadline(0);
+        bytes memory short = new bytes(99);
+        for (uint256 i; i < 99; i++) {
+            short[i] = full[i];
+        }
+        assertEq(_check(ROUTER, short), 1, "truncated");
+        assertEq(_check(NPM, _deadline(0)), 1, "another target with the same selector");
+        // The multicall without a deadline (multicall(bytes[]), 0xac9650d8) is not this action.
+        assertEq(_check(ROUTER, abi.encodeWithSelector(bytes4(0xac9650d8), new bytes[](0))), 1);
+        vm.prank(SMART_SESSION);
+        assertEq(policy.checkAction(ID, safe, ROUTER, 1, _deadline(0)), 1, "with value");
+    }
+
+    function test_deadlineRefusedWhilePaused() public {
+        vm.prank(GUARDIAN);
+        v2().pause(safe);
+        assertEq(_check(ROUTER, _deadline(0)), 1);
+        vm.prank(GUARDIAN);
+        v2().unpause(safe);
+        assertEq(_check(ROUTER, _deadline(0)), 0);
+    }
+
+    function test_deadlineRefusedAtAnOldGeneration() public {
+        _initBtc(ConfigId.wrap(bytes32(uint256(2))), 2, 60_000e6, 180_000e6);
+        assertEq(_check(ROUTER, _deadline(0)), 1); // ID is a generation-1 config, retired
+    }
+
+    function test_deadlineChargesNoBudget() public {
+        (uint256 w0, uint256 t0) = policy.budgetLeft(safe, POOL_BTC);
+        assertEq(_check(ROUTER, _deadline(0)), 0);
+        (uint256 w1, uint256 t1) = policy.budgetLeft(safe, POOL_BTC);
+        assertEq(w0, w1);
+        assertEq(t0, t1);
     }
 }
