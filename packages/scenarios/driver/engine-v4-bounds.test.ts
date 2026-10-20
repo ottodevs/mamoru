@@ -279,4 +279,20 @@ describe('v4 converts go through the merged manage-any session (#189)', () => {
       expect(r).toMatchObject({ ok: true })
     })
   })
+
+  test('a harvest (collect only, #64) built for the v4 manage-any session, passes the pre-check of that real grant (review of #98)', async () => {
+    const policy = withActionPolicy(conservadorLiveV4, MAMORU_POLICY, Object.values(V4_POOLS))
+    const key = `manage-any:${POOL}`
+    const harvest: Proposal = { kind: 'harvest', grant: key as never, pool: POOL, tokenId: 7n, fees0: 5_000_000n, fees1: 50_000n, convert: null } // harvests only collect (#64); the convert goes as an idle convert, covered above
+    const caps = computeCaps(conservadorLiveV4, 10_000n * 1_000_000n, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
+    const grant = retargetToPolicy(instantiateGrant(conservadorLiveV4, key, { account: ACCOUNT, sessionKey: sessionKey.address, chainId: 8453, salt: `0x${'04'.repeat(32)}`, validAfter: 0, validUntil: 2_000_000_000, caps, admittedTokenIds: [7n] }), MAMORU_POLICY)
+    const s: EngineSession = { name: key, grant, permissionId: `0x${'0d'.repeat(32)}` }
+    await withEngine(policy, async (e, chain) => {
+      const prepared = await prepare(e, harvest, chain.head, 1_790_000_000n + chain.head * 2n, s)
+      const ledger = new SessionLedger()
+      ledger.activate(s.permissionId, s.grant)
+      const r = precheck({ sender: ACCOUNT, callData: executeCallData(prepared.calls.map((c) => ({ target: c.target, value: 0n, callData: c.callData }))), signature: useModeSignature(s.permissionId, '0x') }, { chainId: 8453, now: 1_000, ledger })
+      expect(r).toMatchObject({ ok: true })
+    })
+  })
 })
