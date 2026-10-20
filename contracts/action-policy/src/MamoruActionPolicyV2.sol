@@ -64,11 +64,24 @@ struct CollectParams {
     uint128 amount1Max;
 }
 
+struct IncreaseLiquidityParams {
+    uint256 tokenId;
+    uint256 amount0Desired;
+    uint256 amount1Desired;
+    uint256 amount0Min;
+    uint256 amount1Min;
+    uint256 deadline;
+}
+
 interface INPM {
     function mint(MintParams calldata params)
         external
         payable
         returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
+    function increaseLiquidity(IncreaseLiquidityParams calldata params)
+        external
+        payable
+        returns (uint128 liquidity, uint256 amount0, uint256 amount1);
     function positions(uint256 tokenId)
         external
         view
@@ -90,8 +103,17 @@ interface INPM {
 }
 
 /**
- * @title MamoruActionPolicy (spec 007, otto/mamoru#151). Not deployed. T6 audit fixes applied (see
- * specs/007-onchain-action-policy/results/t6-fixes-2026-10-18.md).
+ * @title MamoruActionPolicyV2 (spec 007, otto/mamoru#151, #171). Not deployed. MamoruActionPolicy as deployed on Base
+ * at 0x0083A9ca619f22A4f29704F97981dfFe8CD35215 (T6 audit fixes applied, see
+ * specs/007-onchain-action-policy/results/t6-fixes-2026-10-18.md), plus one addition, a path a session could not
+ * take before:
+ *  - `increase` (#171): the only way a session adds liquidity to a position. The position manager's
+ *    `increaseLiquidity` does not check who owns the tokenId, so it is never a session action; through here it
+ *    reaches only positions admitted for the account that the account still owns, with the same spot check and the
+ *    same budget charge as `mint`.
+ * Everything else is the deployed contract's logic; mint's pull, approve and refund steps moved, in the same order, into
+ * `_fund` and `_settle`, which increase shares (with `_checkProvide` at validation), and the file compiles at 1,000
+ * optimizer runs instead of 10,000 to fit EIP-170 (foundry.toml).
  * @notice A SmartSession action policy that sits NEXT TO UniActionPolicy on every action of a Mamoru grant. It only
  * adds refusals:
  *  - price: every priced action must stay inside one range [lo, hi] built from TWO TWAPs of the pool's own oracle (a
@@ -311,12 +333,13 @@ contract MamoruActionPolicyV2 is IActionPolicy {
             if (m.token0 != p.token0 || m.token1 != p.token1 || m.fee != p.fee || m.recipient != account) {
                 return VALIDATION_FAILED;
             }
-            (bool ok, int24 lo, int24 hi) = _range(c, b.pool);
-            if (!ok) return VALIDATION_FAILED;
-            // Desired amounts are an upper bound of what the mint takes: the budget is charged conservatively.
-            return _charge(account, b.pool, c, _value(c, p, lo, hi, m.amount0Desired, m.amount1Desired))
-                ? VALIDATION_SUCCESS
-                : VALIDATION_FAILED;
+            return _checkProvide(account, b.pool, c, p, m.amount0Desired, m.amount1Desired);
+        }
+        if (target == address(this) && sel == this.increase.selector) {
+            IncreaseLiquidityParams memory n = abi.decode(data[4:], (IncreaseLiquidityParams));
+            // #171: only a position admitted for this account and pool that the account still owns.
+            if (!_isAdmitted(account, b.pool, n.tokenId)) return VALIDATION_FAILED;
+            return _checkProvide(account, b.pool, c, p, n.amount0Desired, n.amount1Desired);
         }
         if (target == address(NPM) && sel == DECREASE) {
             DecreaseLiquidityParams memory d = abi.decode(data[4:], (DecreaseLiquidityParams));
@@ -339,7 +362,8 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         }
         if (sel == APPROVE && (target == p.token0 || target == p.token1)) {
             (address spender,) = abi.decode(data[4:], (address, uint256));
-            // Caps on the amount stay in UniActionPolicy; here only who may pull: the router or this policy's mint.
+            // Caps on the amount stay in UniActionPolicy; here only who may pull: the router or this policy's mint and
+            // increase. Never the position manager: its increaseLiquidity would fund any tokenId (#171).
             return spender == ROUTER || spender == address(this) ? VALIDATION_SUCCESS : VALIDATION_FAILED;
         }
         return VALIDATION_FAILED;
@@ -366,6 +390,17 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         return _charge(account, pool, c, v) ? VALIDATION_SUCCESS : VALIDATION_FAILED;
     }
 
+    /// Mint and increase at validation: a non-empty range, and the desired amounts charged to the budget. Desired
+    /// amounts are an upper bound of what the manager takes: the budget is charged conservatively.
+    function _checkProvide(address account, address pool, Config memory c, PoolInfo memory p, uint256 a0, uint256 a1)
+        internal
+        returns (uint256)
+    {
+        (bool ok, int24 lo, int24 hi) = _range(c, pool);
+        if (!ok) return VALIDATION_FAILED;
+        return _charge(account, pool, c, _value(c, p, lo, hi, a0, a1)) ? VALIDATION_SUCCESS : VALIDATION_FAILED;
+    }
+
     // ---------------------------------------------------------------- execution: the only session mint path
 
     /**
@@ -387,26 +422,68 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         if (pool == address(0) || c.twapWindow == 0 || c.generation != generationOf[account]) {
             revert NoConfig(account, pool);
         }
-        uint256 b0 = IERC20Min(m.token0).balanceOf(address(this));
-        uint256 b1 = IERC20Min(m.token1).balanceOf(address(this));
-        _pull(m.token0, account, m.amount0Desired);
-        _pull(m.token1, account, m.amount1Desired);
-        _approve(m.token0, address(NPM), m.amount0Desired);
-        _approve(m.token1, address(NPM), m.amount1Desired);
+        (uint256 b0, uint256 b1) = _fund(account, m.token0, m.token1, m.amount0Desired, m.amount1Desired);
         // T6 I-7: checked right before the manager's call, after every token callback of the pulls/approvals.
         _requireSpotInRange(c, pool);
         (tokenId, liquidity, amount0, amount1) = NPM.mint(m);
-        _approve(m.token0, address(NPM), 0);
-        _approve(m.token1, address(NPM), 0);
-        // T6 I-5: refund from the balance delta, so WETH the manager funded from its own ETH comes back too.
-        uint256 r0 = IERC20Min(m.token0).balanceOf(address(this)) - b0;
-        uint256 r1 = IERC20Min(m.token1).balanceOf(address(this)) - b1;
-        if (r0 != 0) _push(m.token0, account, r0);
-        if (r1 != 0) _push(m.token1, account, r1);
+        _settle(account, m.token0, m.token1, b0, b1);
 
         admittedPool[account][tokenId] = pool;
         emit Admitted(account, pool, tokenId);
         _locked = 1;
+    }
+
+    /**
+     * @notice Called BY THE ACCOUNT (msg.sender) inside a session batch, after approving this contract for at most the
+     * desired amounts (#171). Adds liquidity to a position admitted for the account that the account still owns, under
+     * the account's current config of that position's pool, with the same check as `mint`: the pool's spot price inside
+     * the range [lo, hi] right before the manager's call. Returns everything the manager did not
+     * take. Admission does not change.
+     */
+    function increase(IncreaseLiquidityParams calldata n)
+        external
+        returns (uint128 liquidity, uint256 amount0, uint256 amount1)
+    {
+        if (_locked != 1) revert Reentrancy();
+        _locked = 2;
+        address account = msg.sender;
+        address pool = admittedPool[account][n.tokenId];
+        if (pool == address(0) || NPM.ownerOf(n.tokenId) != account) revert NotAdmitted(n.tokenId);
+        Config memory c = _config[account][pool];
+        if (c.twapWindow == 0 || c.generation != generationOf[account]) revert NoConfig(account, pool);
+        PoolInfo memory p = _pool[pool];
+        (uint256 b0, uint256 b1) = _fund(account, p.token0, p.token1, n.amount0Desired, n.amount1Desired);
+        // As in mint (T6 I-7): checked right before the manager's call, after every token callback.
+        _requireSpotInRange(c, pool);
+        (liquidity, amount0, amount1) = NPM.increaseLiquidity(n);
+        _settle(account, p.token0, p.token1, b0, b1);
+        _locked = 1;
+    }
+
+    /// Mint and increase, before the manager's call: this contract's balances (for the refund), then the pull of the
+    /// desired amounts from the account and the manager's approval for exactly them. The caller checks the spot after
+    /// this (T6 I-7).
+    function _fund(address account, address t0, address t1, uint256 a0, uint256 a1)
+        internal
+        returns (uint256 b0, uint256 b1)
+    {
+        b0 = IERC20Min(t0).balanceOf(address(this));
+        b1 = IERC20Min(t1).balanceOf(address(this));
+        _pull(t0, account, a0);
+        _pull(t1, account, a1);
+        _approve(t0, address(NPM), a0);
+        _approve(t1, address(NPM), a1);
+    }
+
+    /// Mint and increase, after the manager's call: approvals back to 0, and everything the manager did not take back
+    /// to the account. T6 I-5: from the balance delta, so WETH the manager funded from its own ETH comes back too.
+    function _settle(address account, address t0, address t1, uint256 b0, uint256 b1) internal {
+        _approve(t0, address(NPM), 0);
+        _approve(t1, address(NPM), 0);
+        uint256 r0 = IERC20Min(t0).balanceOf(address(this)) - b0;
+        uint256 r1 = IERC20Min(t1).balanceOf(address(this)) - b1;
+        if (r0 != 0) _push(t0, account, r0);
+        if (r1 != 0) _push(t1, account, r1);
     }
 
     // ---------------------------------------------------------------- views the engine and precheck use
