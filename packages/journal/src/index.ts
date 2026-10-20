@@ -24,17 +24,21 @@ export function isTerminal(state: OpState): boolean {
   return TERMINAL.has(state)
 }
 
-/** A code matches an edge by exact value or by a `PREFIX_*` family. */
-type CodeRule = ReasonCode | `${string}_*`
+/** Before an op is signed there is nothing on chain to keep track of, so a pre-sign discard takes any refusal. */
+const ANY_CODE = '*'
+/** A code matches an edge by exact value, by a `PREFIX_*` family, or by `ANY_CODE` (every code). */
+type CodeRule = ReasonCode | `${string}_*` | typeof ANY_CODE
 
 const EDGES: Record<string, readonly CodeRule[]> = {
-  // Every code Engine.run discards an op with before it is signed must be on its edge: a code missing here throws
-  // SIGN_STATE_INVALID out of the move and leaves the op live, so the slot stays busy (DECIDE_SLOT_BUSY) until a restart
-  // (otto/mamoru#151: POLICY_PAUSED found it on the fork; POLICY_PRICE_BAND, INVENTORY_FULL, GAS_PRICE_OVER_CAP and a
-  // precheck POLICY_BUDGET / POLICY_NOT_ADMITTED had the same gap).
-  'proposed>discarded': ['EHG_*', 'PURGA_*', 'SESSION_*', 'POLICY_*', 'OP_DECISION_STALE', 'INVENTORY_FULL', 'GAS_PRICE_OVER_CAP', 'OP_PREEMPTED_BY_EXIT'],
+  // otto/mamoru#190: Engine.run discards an unsigned op with the code of whatever refused it, and from proposed and
+  // prepared that includes any ReasonError out of prepareCalls or the simulation. A code missing from a list here threw
+  // SIGN_STATE_INVALID out of the move and left the op live: DECIDE_SLOT_BUSY on every review until a restart
+  // (POLICY_PRICE_BAND, INVENTORY_FULL, GAS_PRICE_OVER_CAP and precheck POLICY_BUDGET / POLICY_NOT_ADMITTED did). Nothing is
+  // signed in these states, so they take any code. simulated keeps its list: its discards are the fixed signBlocker codes
+  // and OP_DECISION_STALE, and it is the last state before a userOp exists. Signed ops have no discard edge at all.
+  'proposed>discarded': [ANY_CODE],
   'proposed>prepared': ['EHG_OK'],
-  'prepared>discarded': ['EHG_*', 'POLICY_*', 'OP_PREEMPTED_BY_EXIT'],
+  'prepared>discarded': [ANY_CODE],
   'prepared>simulated': ['EHG_OK', 'EHG_NO_GO_OVERRIDDEN_BY_EXIT'],
   'simulated>discarded': ['DRY_RUN_STOP', 'OP_DECISION_STALE', 'OP_NONCE_MOVED', 'EHG_OBSERVATION_STALE', 'EHG_OBSERVATION_REORGED', 'OP_PREEMPTED_BY_EXIT', 'SIGN_CHAIN_NOT_ALLOWED'],
   'simulated>signed': ['OP_SIGNED'],
@@ -51,6 +55,7 @@ const EDGES: Record<string, readonly CodeRule[]> = {
 }
 
 function matches(rule: CodeRule, code: ReasonCode): boolean {
+  if (rule === ANY_CODE) return true
   return rule.endsWith('_*') ? code.startsWith(rule.slice(0, -1)) : rule === code
 }
 
