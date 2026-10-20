@@ -135,7 +135,7 @@ export type ShadowNote = { code: ReasonCode; note: string }
 export type EnterSwapProposal = {
   kind: 'enter_swap'
   /** `enter-swap`, or `enter-swap:<pool>` on a multi-pool policy; `convert-any[:<pool>]` sends the volatile side back to savings before a re-mint. */
-  grant: 'enter-swap' | `enter-swap:${string}` | 'convert-any' | `convert-any:${string}`
+  grant: 'enter-swap' | `enter-swap:${string}` | 'convert-any' | `convert-any:${string}` | 'manage-any' | `manage-any:${string}`
   pool: RegistryName
   tokenIn: RegistryName
   tokenOut: RegistryName
@@ -156,7 +156,7 @@ export type EnterMintProposal = {
 
 export type HarvestProposal = {
   kind: 'harvest'
-  grant: `manage:${string}` | 'convert-any' | `convert-any:${string}`
+  grant: `manage:${string}` | 'convert-any' | `convert-any:${string}` | 'manage-any' | `manage-any:${string}`
   pool: RegistryName
   tokenId: bigint
   /** Fees only: collectable minus principal owed. */

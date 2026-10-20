@@ -8,7 +8,7 @@ import { fallFreezeOf } from './guard/index.ts'
 import { depeggedPool, depegExitOf } from './guard/depeg.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
 import { weightTargets } from './rebalance/weights.ts'
-import { anyKey, idleConvertOf, isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
+import { anyKey, convertKey, idleConvertOf, isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
 import type { Decision, GateStep, GuardNote, Observation, Proposal, ShadowNote } from './types.ts'
 
 export type * from './types.ts'
@@ -114,7 +114,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
         if (r.proposal) reranges.push(r.proposal)
         const h = harvestOf(p, pool, policy, est)
         codes.push(h.code)
-        if (h.proposal) harvests.push(manageAny ? { ...h.proposal, grant: anyKey(policy, 'convert-any', pool.name) } : h.proposal)
+        if (h.proposal) harvests.push(manageAny ? { ...h.proposal, grant: convertKey(policy, pool.name) } : h.proposal)
       }
     }
     positions.push({ tokenId: p.tokenId, codes })

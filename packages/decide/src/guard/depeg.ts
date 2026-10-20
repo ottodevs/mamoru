@@ -1,7 +1,7 @@
 // Lab (#101 round 3): stables depeg guard. Pure; read only by a policy with `depegGuard`.
 import type { DepegGuard, PolicyVersion } from '@mamoru/policy'
 import { depthOf } from '../depth/index.ts'
-import { anyKey, isManaged } from '../rerange/index.ts'
+import { anyKey, convertKey, isManaged } from '../rerange/index.ts'
 import type { EnterSwapProposal, Observation, PoolObs, ReduceProposal } from '../types.ts'
 import { inSavings, opCostInSavings, volatileOf } from '../value.ts'
 
@@ -59,5 +59,5 @@ export function depegExitOf(obs: Observation, policy: PolicyVersion, pool: PoolO
   const room = depthOf(obs, { ...policy, depth: { maxImpactBps: rule.exitImpactBps, maxShareBps: 10_000 } }, pool, policy.range.widthTicksByPool?.[pool.name] ?? policy.range.widthTicks)?.sellRoom ?? 0n
   const amountIn = held < room ? held : room
   if (amountIn === 0n) return null
-  return { kind: 'enter_swap', grant: anyKey(policy, 'convert-any', pool.name), pool: pool.name, tokenIn: token, tokenOut: savings, fee: pool.fee, amountIn }
+  return { kind: 'enter_swap', grant: convertKey(policy, pool.name), pool: pool.name, tokenIn: token, tokenOut: savings, fee: pool.fee, amountIn }
 }

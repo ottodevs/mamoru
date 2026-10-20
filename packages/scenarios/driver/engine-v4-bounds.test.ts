@@ -15,7 +15,9 @@ import { decodeFunctionData, toFunctionSelector, type Hex } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import type { Proposal } from '@mamoru/decide'
-import { POLICIES, conservadorLabV4, withActionPolicy, V4_POOLS, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { POLICIES, computeCaps, conservadorLabV4, conservadorLiveV4, grantKeyFor, instantiateGrant, retargetToPolicy, withActionPolicy, V4_POOLS, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { precheck, SessionLedger } from '@mamoru/account/precheck'
+import { executeCallData, useModeSignature } from '@mamoru/account/sessions'
 import { baseRegistry, address, erc20Abi, nonfungiblePositionManagerAbi, swapRouter02Abi } from '@mamoru/registry'
 import type { Execution } from '@mamoru/account/safe'
 import { amountsForLiquidityAtPrice, decreaseMinsInRange, narrowBand, priceRange, swapBoundsInRange } from '@mamoru/uniswap-v3/policy-bounds'
@@ -247,6 +249,34 @@ describe('addSession: Init.admit mirrored into the ledger (spec 007 T6 M-4)', ()
     await withEngine(policy, async (e) => {
       e.addSession(session('enter-swap'))
       expect(e.ledger.isAdmitted(6_100_766n, POOL)).toBe(false)
+    })
+  })
+})
+
+// otto/mamoru#189: v4 merges convert-any into manage-any, so every convert (harvest, re-range convert, idle convert,
+// depeg exit, bucket sell) must name the pool's manage-any session; asking v4 for convert-any threw on every review.
+describe('v4 converts go through the merged manage-any session (#189)', () => {
+  test('convertKey: manage-any of the pool under v4, convert-any (unchanged) under v2', async () => {
+    const { convertKey } = await import('../../decide/src/rerange/index.ts')
+    const v4 = withActionPolicy(conservadorLiveV4, MAMORU_POLICY, Object.values(V4_POOLS))
+    for (const p of Object.values(V4_POOLS)) expect(convertKey(v4, p.pool)).toBe(`manage-any:${p.pool}`)
+    const v2 = POLICIES['conservador-live-v2']!
+    expect<string>(convertKey(v2, 'pool:USDC/cbBTC/500')).toBe(grantKeyFor(v2, 'convert-any', 'pool:USDC/cbBTC/500'))
+  })
+
+  test('a convert swap built for the v4 manage-any session passes the pre-check of that real grant', async () => {
+    const policy = withActionPolicy(conservadorLiveV4, MAMORU_POLICY, Object.values(V4_POOLS))
+    const key = `manage-any:${POOL}`
+    const convert: Proposal = { kind: 'enter_swap', grant: key as never, pool: POOL, tokenIn: 'cbBTC', tokenOut: 'USDC', fee: 500, amountIn: 50_000n } // under the grant's 80,000-sat convert cap, as in v2's convert-any
+    const caps = computeCaps(conservadorLiveV4, 10_000n * 1_000_000n, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
+    const grant = retargetToPolicy(instantiateGrant(conservadorLiveV4, key, { account: ACCOUNT, sessionKey: sessionKey.address, chainId: 8453, salt: `0x${'03'.repeat(32)}`, validAfter: 0, validUntil: 2_000_000_000, caps }), MAMORU_POLICY)
+    const s: EngineSession = { name: key, grant, permissionId: `0x${'0c'.repeat(32)}` }
+    await withEngine(policy, async (e, chain) => {
+      const prepared = await prepare(e, convert, chain.head, 1_790_000_000n + chain.head * 2n, s)
+      const ledger = new SessionLedger()
+      ledger.activate(s.permissionId, s.grant)
+      const r = precheck({ sender: ACCOUNT, callData: executeCallData(prepared.calls.map((c) => ({ target: c.target, value: 0n, callData: c.callData }))), signature: useModeSignature(s.permissionId, '0x') }, { chainId: 8453, now: 1_000, ledger })
+      expect(r).toMatchObject({ ok: true })
     })
   })
 })

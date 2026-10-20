@@ -13,6 +13,18 @@ const Q96 = 1n << 96n
 export function anyKey<N extends 'manage-any' | 'convert-any'>(policy: PolicyVersion, name: N, pool: string): N | `${N}:${string}` {
   return grantKeyFor(policy, name, pool) as N | `${N}:${string}`
 }
+
+/**
+ * The session that converts a volatile token back to savings in `pool`: `convert-any` where the policy has one (v1 to
+ * v3), else the pool's `manage-any`. Spec 007 v4 merges convert-any into manage-any, one session per pool that holds
+ * the harvest/convert swap; asking v4 for convert-any threw "no convert-any grant" on every harvest, re-range convert
+ * and idle convert (otto/mamoru#189).
+ */
+export function convertKey(policy: PolicyVersion, pool: string): ConvertKey {
+  const own = policy.session.grants.some((g) => g.name === 'convert-any' && (g.pool === pool || !g.pool))
+  return (own ? grantKeyFor(policy, 'convert-any', pool) : grantKeyFor(policy, 'manage-any', pool)) as ConvertKey
+}
+export type ConvertKey = 'convert-any' | `convert-any:${string}` | 'manage-any' | `manage-any:${string}`
 /** Re-range when the price is within this share of the width from an edge. */
 export const EDGE_BPS = 1000
 /** Reduce a bucket that sits more than this many basis points of total value above its target. */
@@ -166,7 +178,7 @@ export function ratioConvertOf(obs: Observation, policy: PolicyVersion, preferen
   if (value * 2n <= half * 3n || free >= half) return null
   const amountIn = (held * (value - half)) / value
   if (amountIn === 0n) return null
-  return { kind: 'enter_swap', grant: anyKey(policy, 'convert-any', pool.name), pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn }
+  return { kind: 'enter_swap', grant: convertKey(policy, pool.name), pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn }
 }
 
 /**
@@ -193,7 +205,7 @@ export function idleConvertOf(obs: Observation, policy: PolicyVersion, policyPoo
     const volatile = volatileOf(pool, savings)
     const held = obs.balances[volatile] ?? 0n
     if (held === 0n || inSavings(pool, volatile, held, savings) * 10_000n <= floor) continue
-    return { kind: 'enter_swap', grant: anyKey(policy, 'convert-any', pool.name), pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn: held }
+    return { kind: 'enter_swap', grant: convertKey(policy, pool.name), pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn: held }
   }
   return null
 }

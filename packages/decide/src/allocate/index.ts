@@ -2,6 +2,7 @@ import type { ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, hasManageAny, type PolicyVersion } from '@mamoru/policy'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { safeSavings } from '../enter/index.ts'
+import { convertKey } from '../rerange/index.ts'
 import { depthOf } from '../depth/index.ts'
 import { rangeFor, widthFor, widthOf } from '../geometry/index.ts'
 import { purgaIdentity, registryOf } from '../gates/index.ts'
@@ -210,7 +211,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
         continue
       }
       // The rest of the idle token is the volatile side of the mint that follows.
-      const sellGrant = grantKeyFor(policy, 'convert-any', pool.name) as `convert-any:${string}`
+      const sellGrant = convertKey(policy, pool.name)
       pendingMint.push({ pool: pool.name, grant: sellGrant })
       if (row || excess > pickedSale) {
         // The bucket it displaces keeps waiting for a later review, as any bucket after the one that acts.
