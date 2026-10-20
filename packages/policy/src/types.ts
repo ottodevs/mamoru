@@ -109,6 +109,13 @@ export type PolicyVersion = {
     widthTicksByPool?: Record<RegistryName, number>
     /** Lab only (#101 experiment 4): re-range only when it pays. Absent: today's trigger byte for byte. */
     lazy?: LazyRerange
+    /**
+     * otto/mamoru#171, policies whose grants carry MamoruActionPolicyV2.increase (conservadorLiveV5): an entry adds to a
+     * held, admitted position when each of its edges is within this share (bps) of the fresh range's width from that
+     * range's edge, instead of minting a second NFT. Absent: `DEFAULT_INCREASE_TOLERANCE_BPS` where the grants can
+     * increase; a policy without that action never increases, whatever this says.
+     */
+    increaseToleranceBps?: number
   }
   /**
    * How `decide` enters. `first-entry` (default, v1): one entry per bucket without a managed position.

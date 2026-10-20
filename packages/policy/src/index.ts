@@ -29,18 +29,26 @@ export {
 export { OPS_FLAGS, type OpsFlagName } from './ops-flags.ts'
 export {
   conservadorLabV4,
+  conservadorLabV5,
   conservadorLiveV4,
+  conservadorLiveV5,
+  INCREASE_TOLERANCE_BPS,
 } from './policies-v4.ts'
 export {
   DEFAULT_GAS_CEILING,
   DEFAULT_GAS_MODEL,
   enterMintV4Grant,
   enterSwapV4Grant,
+  enterSwapV5Grant,
   encodeMamoruInit,
   estimateSessionGas,
   grantsV4,
+  grantsV5,
+  hasIncrease,
   mamoruInitFor,
   manageAnyV4Grant,
+  manageAnyV5Grant,
+  POLICY_INCREASE_SIG,
   RENEWAL_GAS_MODEL,
   retargetToPolicy,
   splitBatches,

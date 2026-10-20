@@ -25,6 +25,10 @@ const MINT_SIG = 'mint((address,address,uint24,int24,int24,uint256,uint256,uint2
 const DECREASE_SIG = 'decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))'
 const COLLECT_SIG = 'collect((uint256,address,uint128,uint128))'
 const BURN_SIG = 'burn(uint256)'
+/** MamoruActionPolicyV2.increase(IncreaseLiquidityParams) (otto/mamoru#171): the policy's own, not the manager's increaseLiquidity. */
+export const POLICY_INCREASE_SIG = 'increase((uint256,uint256,uint256,uint256,uint256,uint256))'
+/** SwapRouter02.multicall(uint256,bytes[]): the engine's swap deadline (otto/mamoru#140). */
+const MULTICALL_DEADLINE_SIG = 'multicall(uint256,bytes[])'
 
 // ---------------------------------------------------------------- MamoruActionPolicy.Init encoding
 // Mirrors contracts/action-policy/src/MamoruActionPolicy.sol's `Init` struct field for field. A unit test
@@ -415,6 +419,71 @@ function manageAnyV4Actions(p: V4PoolSpec): ActionRuleTemplate[] {
   ]
 }
 
+// ---------------------------------------------------------------- v5 grant templates (MamoruActionPolicyV2)
+// Spec 007 (otto/mamoru#151, #171): the v4 grants plus two actions only MamoruActionPolicyV2 can carry. The v4
+// builders above are untouched, so conservador-live-v4 and its hash do not change.
+
+/**
+ * The swap deadline (otto/mamoru#140), `SwapRouter02.multicall(deadline, [])`, with the same UniActionPolicy rules as
+ * the v2/v3 grants (grants.ts SWAP_DEADLINE: deadline > 0, the array offset 0x40 and length 0) and, unlike them,
+ * MamoruActionPolicyV2 next to it: V2 accepts only that exact empty encoding, after its generation and guardian-pause
+ * checks, so a paused or retired grant cannot spend uses on it. V1 (the deployed v4 policy) refuses it, which is why
+ * the v4 grants never had it.
+ */
+function swapDeadlineV5Action(): ActionRuleTemplate {
+  return {
+    target: 'SwapRouter02',
+    signature: MULTICALL_DEADLINE_SIG,
+    params: [
+      { field: 'deadline', index: 0, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+      { field: 'dataOffset', index: 1, condition: 'EQUAL', ref: 64n, denial: 'POLICY_DENIED_TARGET' },
+      { field: 'dataLength', index: 2, condition: 'EQUAL', ref: 0n, denial: 'POLICY_DENIED_TARGET' },
+    ],
+  }
+}
+
+/**
+ * otto/mamoru#171: add to a held position through MamoruActionPolicyV2.increase, never the manager's increaseLiquidity
+ * (which does not check who owns the tokenId). The template names the position manager as a placeholder target, like
+ * mint (a template has no address for the policy); `retargetToPolicy` points it at the deployed policy and the guard in
+ * `toSmartSession` refuses a grant where it does not. Left un-retargeted it could not do anything either: the manager
+ * has no `increase` function. UniActionPolicy keeps what it can express: a tokenId, the per-call amount caps of a mint,
+ * positive minimums; the policy adds admission + ownership, the spot check at execution and the value budget.
+ */
+function increaseV5Action(p: V4PoolSpec): ActionRuleTemplate {
+  return {
+    target: 'NonfungiblePositionManager',
+    signature: POLICY_INCREASE_SIG,
+    params: [
+      { field: 'tokenId', index: 0, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_POSITION' },
+      { field: 'amount0Desired', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.mint0}`, denial: 'POLICY_DENIED_AMOUNT' },
+      { field: 'amount1Desired', index: 2, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.mint1}`, denial: 'POLICY_DENIED_AMOUNT' },
+      { field: 'amount0Min', index: 3, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+      { field: 'amount1Min', index: 4, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+    ],
+  }
+}
+
+/** v5 `enter-swap`: v4's approve and swap, then the swap deadline under the policy. */
+export function enterSwapV5Grant(p: V4PoolSpec, usageLimit: number): GrantTemplate {
+  return { name: 'enter-swap', pool: p.pool, perPosition: false, usageLimit, actions: [...enterSwapV4Actions(p), swapDeadlineV5Action()], requiresActionPolicy: true }
+}
+
+/** v5 `manage-any`: v4's seven actions, then increase through the policy and the swap deadline (its harvest swap). */
+export function manageAnyV5Grant(p: V4PoolSpec, usageLimit: number): GrantTemplate {
+  return { name: 'manage-any', pool: p.pool, perPosition: false, usageLimit, actions: [...manageAnyV4Actions(p), increaseV5Action(p), swapDeadlineV5Action()], requiresActionPolicy: true }
+}
+
+/** The three v5 grants of one pool: enter-swap (+deadline), enter-mint (as v4), manage-any (+increase, +deadline). */
+export function grantsV5(p: V4PoolSpec, usage: V4Usage): GrantTemplate[] {
+  return [enterSwapV5Grant(p, usage.enterSwap), enterMintV4Grant(p, usage.enterMint), manageAnyV5Grant(p, usage.manageAny)]
+}
+
+/** The policy can add to a held position in `pool` (otto/mamoru#171): its manage-any there carries the policy's increase. */
+export function hasIncrease(policy: { session: { grants: readonly GrantTemplate[] } }, pool: string): boolean {
+  return policy.session.grants.some((g) => g.name === 'manage-any' && g.pool === pool && g.actions.some((a) => a.signature === POLICY_INCREASE_SIG))
+}
+
 export function enterSwapV4Grant(p: V4PoolSpec, usageLimit: number): GrantTemplate {
   return { name: 'enter-swap', pool: p.pool, perPosition: false, usageLimit, actions: enterSwapV4Actions(p), requiresActionPolicy: true }
 }
@@ -513,7 +582,7 @@ export function budgetUsedBps(total: bigint, totalLeft: bigint): number {
 
 /**
  * After `instantiateGrant` resolves a v4 template against the registry (mint and its approvals still pointing at
- * the NonfungiblePositionManager), rewrite them to the deployed MamoruActionPolicy: `mint`'s target, and the
+ * the NonfungiblePositionManager), rewrite them to the deployed MamoruActionPolicy: `mint`'s target (and, v5, `increase`'s), and the
  * `spender` of any approval that currently names the position manager (never the router-spender approvals of
  * enter-swap or the harvest leg of manage-any, left untouched). Spec 007: "`manage-any` names
  * `MamoruActionPolicy.mint` and approves the policy, not the NonfungiblePositionManager; `enter-mint` the same."
@@ -522,7 +591,7 @@ export function retargetToPolicy(grant: SessionGrant, mamoruPolicy: Address): Se
   const npm = BigInt(address('NonfungiblePositionManager', baseRegistry))
   const policyRef = BigInt(mamoruPolicy)
   const actions: ResolvedActionRule[] = grant.actions.map((a) => {
-    if (a.signature === MINT_SIG) return { ...a, targetAddress: mamoruPolicy }
+    if (a.signature === MINT_SIG || a.signature === POLICY_INCREASE_SIG) return { ...a, targetAddress: mamoruPolicy }
     if (a.signature === APPROVE_SIG) {
       const i = a.params.findIndex((p) => p.field === 'spender' && p.ref === npm)
       if (i === -1) return a

@@ -6,7 +6,7 @@
 // 007 "Upgrade and rollback"). Kept in its own file rather than policies.ts, which PR #62 (otto/mamoru#151-adjacent,
 // conservador-live-v3) is editing concurrently.
 import type { PolicyVersion } from './types.ts'
-import { grantsV4, v4CapFormulas, V4_POOLS, type V4Usage } from './v4-grants.ts'
+import { grantsV4, grantsV5, v4CapFormulas, V4_POOLS, type V4Usage } from './v4-grants.ts'
 
 /**
  * Placeholder sizing (spec 007 "Open questions" #3: "accept 10/100/100 ticks and 1C per day, 3C per approval as
@@ -60,3 +60,33 @@ export const conservadorLiveV4: PolicyVersion = {
 
 /** Fork-only twin of conservadorLiveV4 (same shape, signed only for the Lab's fork chain id). */
 export const conservadorLabV4: PolicyVersion = { ...conservadorLiveV4, policyId: 'conservador-lab-v4', chain: 'fork' }
+
+/**
+ * otto/mamoru#171: how far (bps of the new range's width) each edge of a held position may sit from the edge of the
+ * range a mint would get, for an entry to add to that position instead of minting a second NFT. 1000 is the re-range
+ * trigger's own edge share: a position that close to the fresh range has the price well inside it, so the liquidity
+ * added is not taken straight out again by a re-range, and its token split is within a few percent of the fresh one.
+ */
+export const INCREASE_TOLERANCE_BPS = 1_000
+
+/**
+ * Conservador v5 (spec 007, otto/mamoru#151 and #171): conservadorLiveV4 for MamoruActionPolicyV2 (a new address, so a
+ * new policy version). Same pools, weights, caps, bands and budgets; the grants add MamoruActionPolicyV2.increase to
+ * each pool's manage-any (an entry adds to a held, admitted position instead of minting a second NFT:
+ * `range.increaseToleranceBps`) and the swap deadline under the policy to enter-swap and manage-any, so a guardian pause
+ * or a renewal stops every action of the session. conservadorLiveV4 itself is unchanged (its hash is pinned by test).
+ */
+export const conservadorLiveV5: PolicyVersion = {
+  ...conservadorLiveV4,
+  policyId: 'conservador-live-v5',
+  version: '0.1.0',
+  range: { ...conservadorLiveV4.range, increaseToleranceBps: INCREASE_TOLERANCE_BPS },
+  session: {
+    ...conservadorLiveV4.session,
+    grants: [...grantsV5(V4_POOLS.stables, V4_USAGE), ...grantsV5(V4_POOLS.btc, V4_USAGE), ...grantsV5(V4_POOLS.risk, V4_USAGE)],
+  },
+}
+
+/** Fork-only twin of conservadorLiveV5. */
+export const conservadorLabV5: PolicyVersion = { ...conservadorLiveV5, policyId: 'conservador-lab-v5', chain: 'fork' }
+
