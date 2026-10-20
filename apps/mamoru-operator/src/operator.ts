@@ -1013,7 +1013,7 @@ export class Operator {
     this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant: had?.grants === ids ? had.byGrant : new Map() })
     const byGrant = await readChainUsage(this.client as never, acc.ctx.address as Address, acc.grants)
     const budgets = await this.readBudgets(acc)
-    const paused = await this.readPaused(acc)
+    const paused = (await this.readPaused(acc)) === true
     if (!byGrant.size && !budgets?.size && !paused) return
     this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant, ...(budgets?.size ? { budgets } : {}), ...(paused ? { paused } : {}) })
     const ledger = this.runners.get(acc.accountKey)?.engine.ledger
@@ -1025,10 +1025,10 @@ export class Operator {
   }
 
   /**
-   * otto/mamoru#151: whether MamoruActionPolicyV2's guardian has paused this account (v5 only; false for any other policy
-   * or when the read fails). The renew row says so: the owner's renewal ends a pause.
+   * otto/mamoru#151: whether MamoruActionPolicyV2's guardian has paused this account (v5 only; false for any other policy;
+   * null when the read fails). The renew row says so, and a renewal is not prepared without knowing: it ends a pause.
    */
-  private async readPaused(acc: AccountState, blockNumber?: bigint): Promise<boolean> {
+  private async readPaused(acc: AccountState, blockNumber?: bigint): Promise<boolean | null> {
     let p: PolicyVersion
     try {
       p = this.policyOf(acc)
@@ -1039,8 +1039,10 @@ export class Operator {
     if (!ap || ap.contractVersion !== 2) return false
     try {
       return await this.client.readContract({ address: ap.address, abi: mamoruActionPolicyV2Abi, functionName: 'isPaused', args: [acc.ctx.address as Address], ...(blockNumber !== undefined ? { blockNumber } : {}) })
-    } catch {
-      return false
+    } catch (e) {
+      // GPT-6 review of the v2 diffs (P1): an unreadable pause is not "not paused". null: the renewal refuses to prepare.
+      logErr(`[v5] ${acc.accountKey} isPaused unreadable:`, e)
+      return null
     }
   }
 
@@ -1219,6 +1221,7 @@ export class Operator {
     this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
     return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId }
   }
+
 
   // ---- owner side: who pays (otto/mamoru#140 part2 #6) -----------------------
 
@@ -1613,12 +1616,14 @@ export class Operator {
     const cap = this.signedCapOf(acc)
     if (isV4(policy)) {
       // The move to v4 enables every grant of the v4 policy; a v4 renewal the ones the account has, as before.
+      // otto/mamoru#151: a renewal on MamoruActionPolicyV2 ends a guardian pause; the owner signs knowing it. Fails
+      // closed: when the pause cannot be read, nothing is prepared (the owner could otherwise end one unaware).
+      const paused = await this.readPaused(acc, r.block)
+      if (paused === null) throw new HttpError(503, 'PAUSE_STATE_UNAVAILABLE', "whether a guardian has paused Mamoru on your Safe could not be read just now: nothing was changed, try again in a minute")
       const keys = target ? policy.session.grants.filter((g) => !g.perPosition).map(grantKey) : acc.grants.map((g) => g.name)
       const f = await this.fitV4(acc, live, policy, r, cap, keys, old, 'full', RENEW_GAS_BUDGET)
       // otto/mamoru#151: the move to MamoruActionPolicyV2 (v5) names what it adds besides the on-chain limits.
       const toV5 = !!target && !!target.actionPolicy && target.actionPolicy.contractVersion === 2
-      // otto/mamoru#151: a renewal on MamoruActionPolicyV2 ends a guardian pause; the owner signs knowing it.
-      const paused = await this.readPaused(acc, r.block)
       const summary = [
         ...(paused ? ['A guardian key has paused Mamoru on this Safe. This renewal ends that pause: approve it only if you know why it was paused'] : []),
         target ? `Renew Mamoru's approval on your Safe ${live.safe} and move it to ${toV5 ? 'the new version of its on-chain limits' : 'on-chain limits'}` : `Renew Mamoru's approval on your Safe ${live.safe}`,
