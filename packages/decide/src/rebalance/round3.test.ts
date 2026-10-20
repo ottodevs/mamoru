@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV2, grantKey, type DepegGuard, type PolicyVersion, type StagedExit } from '@mamoru/policy'
-import { address, entry } from '@mamoru/registry'
+import { baseRegistry, address, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { decide, fallFromBps, pegDeviationBps, pegStep, PEG_CLEAR, stageStep, thirdsOut, weightTargets, type Observation, type PoolObs, type PegState, type PositionObs, type StageState } from '../index.ts'
 
@@ -14,11 +14,11 @@ const ETH_TICK = -193_380
 const V2 = conservadorLiveV2
 
 function pool(name: string, tick: number): PoolObs {
-  const e = entry(name)
+  const e = entry(name, baseRegistry)
   return {
     name, address: e.address, token0: e.token0!, token1: e.token1!, fee: e.fee!, tickSpacing: e.tickSpacing!,
     sqrtPriceX96: sqrtRatioAtTick(tick), tick, liquidity: 10n ** 18n, twapTick: tick, twapLiquidity: 10n ** 18n,
-    identity: { factoryPool: e.address, token0: address(e.token0!), token1: address(e.token1!), fee: e.fee!, tickSpacing: e.tickSpacing! },
+    identity: { factoryPool: e.address, token0: address(e.token0!, baseRegistry), token1: address(e.token1!, baseRegistry), fee: e.fee!, tickSpacing: e.tickSpacing! },
   }
 }
 

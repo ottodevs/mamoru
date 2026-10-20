@@ -1,6 +1,6 @@
 import { keccak256, stringToHex, toFunctionSelector } from 'viem'
 import { FORBIDDEN_LAB_CHAIN_IDS, BASE_CHAIN_ID, ReasonError, type Address, type Hex } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { grantKey } from './grants.ts'
 import { MAX_USAGE_LIMIT, type GrantName, type GrantTemplate, type PolicyVersion, type RefTemplate, type ResolvedActionRule, type SessionGrant } from './types.ts'
 
@@ -92,7 +92,7 @@ function resolveRef(ref: RefTemplate, ctx: GrantContext): bigint {
     if (v === undefined) throw new Error(`missing cap ${ref}`)
     return v
   }
-  return BigInt(address(ref))
+  return BigInt(address(ref, baseRegistry))
 }
 
 /** `key` is a grant name or, on a multi-pool policy, `name:pool` (see `grantKey`). A bare name takes the first grant of that name. */
@@ -109,7 +109,7 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
   }
   const actions: ResolvedActionRule[] = template.actions.map((a) => ({
     target: a.target,
-    targetAddress: address(a.target),
+    targetAddress: address(a.target, baseRegistry),
     signature: a.signature,
     selector: toFunctionSelector(`function ${a.signature}`),
     nativeValue: 0n,

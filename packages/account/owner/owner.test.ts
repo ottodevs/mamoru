@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { decodeFunctionData, hexToBigInt, size, slice, toFunctionSelector, type Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, erc20Abi, multiSendCallOnlyAbi, nonfungiblePositionManagerAbi, smartSessionAbi } from '@mamoru/registry'
+import { baseRegistry, address, erc20Abi, multiSendCallOnlyAbi, nonfungiblePositionManagerAbi, smartSessionAbi } from '@mamoru/registry'
 import { multiSendCallOnly } from '../safe/index.ts'
 import { walkawayCalls, type WalkawayInput } from './index.ts'
 
@@ -49,25 +49,25 @@ describe('owner walkaway batch', () => {
   const entries = unpack(batch.data)
 
   test('packs into one MultiSendCallOnly delegatecall of plain CALLs with no value', () => {
-    expect(same(batch.to, address('MultiSendCallOnly_141'))).toBe(true)
+    expect(same(batch.to, address('MultiSendCallOnly_141', baseRegistry))).toBe(true)
     expect(batch.operation).toBe(1)
     expect(entries.length).toBe(calls.length)
     expect(entries.every((e) => e.operation === 0 && e.value === 0n)).toBe(true)
   })
 
   test('order: revoke every grant, close each position, then transfer', () => {
-    const npm = address('NonfungiblePositionManager')
+    const npm = address('NonfungiblePositionManager', baseRegistry)
     const expected: [Address, string][] = [
-      [address('SmartSession'), 'removeSession(bytes32)'],
-      [address('SmartSession'), 'removeSession(bytes32)'],
+      [address('SmartSession', baseRegistry), 'removeSession(bytes32)'],
+      [address('SmartSession', baseRegistry), 'removeSession(bytes32)'],
       [npm, 'decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))'],
       [npm, 'collect((uint256,address,uint128,uint128))'],
       [npm, 'burn(uint256)'],
       [npm, 'decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))'],
       [npm, 'collect((uint256,address,uint128,uint128))'],
       [npm, 'burn(uint256)'],
-      [address('USDC'), 'transfer(address,uint256)'],
-      [address('cbBTC'), 'transfer(address,uint256)'],
+      [address('USDC', baseRegistry), 'transfer(address,uint256)'],
+      [address('cbBTC', baseRegistry), 'transfer(address,uint256)'],
     ]
     expect(entries.map((e) => [e.to.toLowerCase(), slice(e.data, 0, 4)])).toEqual(
       expected.map(([to, sig]) => [to.toLowerCase(), toFunctionSelector(sig)]),
@@ -119,7 +119,7 @@ describe('owner walkaway batch', () => {
   test('an account with no grants and no positions only withdraws', () => {
     const c = walkawayCalls({ ...input, permissionIds: [], positions: [], amounts: { USDC: 10n, cbBTC: 0n } })
     expect(c.length).toBe(1)
-    expect(same(c[0]!.to, address('USDC'))).toBe(true)
+    expect(same(c[0]!.to, address('USDC', baseRegistry))).toBe(true)
   })
 
   test('rejects a missing or self recipient and duplicates', () => {

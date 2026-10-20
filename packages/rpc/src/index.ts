@@ -196,20 +196,20 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const [block, safe] = await Promise.all([client.getBlock({ blockTag: 'latest' }), client.getBlock({ blockTag: 'safe' })])
   const blockNumber = block.number
   const acct = input.account
-  const npm = address('NonfungiblePositionManager')
+  const npm = address('NonfungiblePositionManager', baseRegistry)
   const multicall3 = input.multicall3 === undefined ? MULTICALL3 : input.multicall3
 
   // Round 1: the account's balances, nonce and position ids, and the pool state unless another account read it at this block.
   const first = new Batch(client, multicall3, blockNumber)
   const native = first.add(balanceRead(client, multicall3, acct, blockNumber))
-  const nonce = first.add(contractRead(client, { address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'getNonce', args: [acct, input.nonceKey], blockNumber }))
+  const nonce = first.add(contractRead(client, { address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'getNonce', args: [acct, input.nonceKey], blockNumber }))
   const nftCount = first.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [acct], blockNumber }))
-  const balances = TOKENS.map((t) => first.add(contractRead(client, { address: address(t), abi: erc20Abi, functionName: 'balanceOf', args: [acct], blockNumber })))
+  const balances = TOKENS.map((t) => first.add(contractRead(client, { address: address(t, baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [acct], blockNumber })))
   const idsOf = tokenIdReads(client, multicall3, first, acct, blockNumber)
   const poolKey = `${chainId}:${blockNumber}:${block.hash}:${input.twapWindowSeconds}`
   const shared = input.poolCache?.get(poolKey)
   const own = shared ? null : POOLS.map((p) => poolReads(first, client, p, blockNumber, input.twapWindowSeconds))
-  const priceSlot0 = POOLS.includes(input.ethPricePool) ? null : first.add(contractRead(client, { address: address(input.ethPricePool), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }))
+  const priceSlot0 = POOLS.includes(input.ethPricePool) ? null : first.add(contractRead(client, { address: address(input.ethPricePool, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }))
   const afterFirst = input.firstBatch?.(first, blockNumber)
   const round = Promise.all([isDeployed(client, acct, blockNumber, safe.number), first.run()])
   const ownPools = own ? round.then(() => Promise.all(own.map((finish) => finish()))) : null
@@ -271,7 +271,7 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
     balances: Object.fromEntries(TOKENS.map((t, i) => [t, tokenBalances[i]!])),
     positions,
     pools,
-    ethPrice: { pool: input.ethPricePool, sqrtPriceX96: ethSqrtPriceX96, token0: entry(input.ethPricePool).token0! },
+    ethPrice: { pool: input.ethPricePool, sqrtPriceX96: ethSqrtPriceX96, token0: entry(input.ethPricePool, baseRegistry).token0! },
     gas: { maxFeePerGas: baseFee * 2n + input.maxPriorityFeePerGas, opGasUnits: input.opGasUnits },
     deposits,
     intents: input.intents,
@@ -288,7 +288,7 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
  * to the block the caller passes once it knows it.
  */
 export function tokenIdReads(client: PublicClient, multicall3: Address | null, first: Batch, owner: Address, blockNumber?: bigint): (count: number, restBlock?: bigint) => Promise<bigint[]> {
-  const at = (i: number, n: bigint | undefined) => contractRead(client, { address: address('NonfungiblePositionManager'), abi: enumerableAbi, functionName: 'tokenOfOwnerByIndex', args: [owner, BigInt(i)], blockNumber: n })
+  const at = (i: number, n: bigint | undefined) => contractRead(client, { address: address('NonfungiblePositionManager', baseRegistry), abi: enumerableAbi, functionName: 'tokenOfOwnerByIndex', args: [owner, BigInt(i)], blockNumber: n })
   const ahead = multicall3 === null ? [] : Array.from({ length: SPECULATIVE_TOKEN_IDS }, (_, i) => first.add(at(i, blockNumber)))
   return async (count, restBlock = blockNumber) => {
     const rest = new Batch(client, multicall3, restBlock)
@@ -312,7 +312,7 @@ async function readPositions(
   if (tokenIds.length === 0) return []
   const oneByOne = () => Promise.all(tokenIds.map((id) => readPosition(client, acct, id, blockNumber, input, principal)))
   if (multicall3 === null) return oneByOne()
-  const npm = address('NonfungiblePositionManager')
+  const npm = address('NonfungiblePositionManager', baseRegistry)
   const calls = [
     ...tokenIds.map((tokenId) => ({ data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] }) })),
     ...tokenIds.map((tokenId) => ({
@@ -342,22 +342,22 @@ async function readPositions(
   // A registry pool's factory address was read in round 1 for the same token pair and fee; anything else asks the factory.
   const known = (token0: Address, token1: Address, fee: number): Address | null => {
     const hit = pools.find((pool) => {
-      const [a, b] = [address(pool.token0), address(pool.token1)]
+      const [a, b] = [address(pool.token0, baseRegistry), address(pool.token1, baseRegistry)]
       return pool.fee === fee && ((isAddressEqual(a, token0) && isAddressEqual(b, token1)) || (isAddressEqual(a, token1) && isAddressEqual(b, token0)))
     })
     return hit && hit.identity.factoryPool !== zeroAddress ? hit.identity.factoryPool : null
   }
   const asked = new Batch(client, multicall3, blockNumber)
-  const poolAddrs = rows.map(({ p }) => known(p[2], p[3], p[4]) ?? asked.add(contractRead(client, { address: address('UniswapV3Factory'), abi: uniswapV3FactoryAbi, functionName: 'getPool', args: [p[2], p[3], p[4]], blockNumber })))
+  const poolAddrs = rows.map(({ p }) => known(p[2], p[3], p[4]) ?? asked.add(contractRead(client, { address: address('UniswapV3Factory', baseRegistry), abi: uniswapV3FactoryAbi, functionName: 'getPool', args: [p[2], p[3], p[4]], blockNumber })))
   if (asked.size > 0) await asked.run()
   return Promise.all(
     rows.map(async ({ tokenId, p, collectable }, i) => {
       const at = poolAddrs[i]!
-      const name = nameOf(typeof at === 'string' ? at : await at.need())
+      const name = nameOf(typeof at === 'string' ? at : await at.need(), baseRegistry)
       const owed = principal.get(tokenId) ?? [0n, 0n]
       return {
         tokenId,
-        pool: name && entry(name).kind === 'pool' ? name : null,
+        pool: name && entry(name, baseRegistry).kind === 'pool' ? name : null,
         tickLower: p[5],
         tickUpper: p[6],
         liquidity: p[7],
@@ -373,11 +373,11 @@ async function readPositions(
 
 /** One position with unbatched reads: the path without Multicall3, and the one that reports a failing read. */
 async function readPosition(client: PublicClient, acct: Address, tokenId: bigint, blockNumber: bigint, input: ObserveInput, principal: ReadonlyMap<bigint, Pair>): Promise<PositionObs> {
-  const npm = address('NonfungiblePositionManager')
+  const npm = address('NonfungiblePositionManager', baseRegistry)
   const p = await client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId], blockNumber })
-  const poolAddr = await client.readContract({ address: address('UniswapV3Factory'), abi: uniswapV3FactoryAbi, functionName: 'getPool', args: [p[2], p[3], p[4]], blockNumber })
-  const name = nameOf(poolAddr)
-  const pool = name && entry(name).kind === 'pool' ? name : null
+  const poolAddr = await client.readContract({ address: address('UniswapV3Factory', baseRegistry), abi: uniswapV3FactoryAbi, functionName: 'getPool', args: [p[2], p[3], p[4]], blockNumber })
+  const name = nameOf(poolAddr, baseRegistry)
+  const pool = name && entry(name, baseRegistry).kind === 'pool' ? name : null
   const collectData = encodeFunctionData({
     abi: nonfungiblePositionManagerAbi,
     functionName: 'collect',
@@ -402,7 +402,7 @@ async function readPosition(client: PublicClient, acct: Address, tokenId: bigint
 
 /** Adds the reads of one pool to `batch`; the returned function builds the pool once the batch ran. */
 function poolReads(batch: Batch, client: PublicClient, name: RegistryName, blockNumber: bigint, windowSeconds: number): () => Promise<PoolObs> {
-  const e = entry(name)
+  const e = entry(name, baseRegistry)
   const at = { address: e.address, abi: uniswapV3PoolAbi, blockNumber } as const
   const slot0 = batch.add(contractRead(client, { ...at, functionName: 'slot0' }))
   const liquidity = batch.add(contractRead(client, { ...at, functionName: 'liquidity' }))
@@ -411,7 +411,7 @@ function poolReads(batch: Batch, client: PublicClient, name: RegistryName, block
   const fee = batch.add(contractRead(client, { ...at, functionName: 'fee' }))
   const tickSpacing = batch.add(contractRead(client, { ...at, functionName: 'tickSpacing' }))
   const factoryPool = batch.add(
-    contractRead(client, { address: address('UniswapV3Factory'), abi: uniswapV3FactoryAbi, functionName: 'getPool', args: [address(e.token0!), address(e.token1!), e.fee!], blockNumber }),
+    contractRead(client, { address: address('UniswapV3Factory', baseRegistry), abi: uniswapV3FactoryAbi, functionName: 'getPool', args: [address(e.token0!, baseRegistry), address(e.token1!, baseRegistry), e.fee!], blockNumber }),
   )
   // FR-UNI-009: `observe` may fail when the pool cannot answer for the window; the TWAP is then null.
   const cumulatives = batch.add(contractRead(client, { address: e.address, abi: observeAbi, functionName: 'observe', args: [[windowSeconds, 0]], blockNumber }))
@@ -457,9 +457,9 @@ function twapTick(cumulatives: readonly bigint[] | undefined, windowSeconds: num
 
 async function readDeposits(client: PublicClient, acct: Address, input: ObserveInput, blockNumber: bigint, safeNumber: bigint): Promise<DepositObs[]> {
   if (input.depositsAfter >= blockNumber) return []
-  const logs = await client.getLogs({ address: address(input.savingsAsset), event: transferEvent, args: { to: acct }, fromBlock: input.depositsAfter + 1n, toBlock: blockNumber })
-  const pools = new Set(POOLS.map((p) => address(p).toLowerCase()))
-  const npm = address('NonfungiblePositionManager').toLowerCase()
+  const logs = await client.getLogs({ address: address(input.savingsAsset, baseRegistry), event: transferEvent, args: { to: acct }, fromBlock: input.depositsAfter + 1n, toBlock: blockNumber })
+  const pools = new Set(POOLS.map((p) => address(p, baseRegistry).toLowerCase()))
+  const npm = address('NonfungiblePositionManager', baseRegistry).toLowerCase()
   return logs
     .filter((l) => !pools.has(l.args.from!.toLowerCase()) && l.args.from!.toLowerCase() !== npm)
     .map((l) => ({ token: input.savingsAsset, amount: l.args.value!, block: l.blockNumber!, txHash: l.transactionHash!, logIndex: l.logIndex!, safe: l.blockNumber! <= safeNumber }))
@@ -478,7 +478,7 @@ export async function readPositionHistory(client: PublicClient, tokenIds: readon
   // Both events carry the tokenId as their first indexed topic: one eth_getLogs serves the two.
   const raw = await client.request({
     method: 'eth_getLogs',
-    params: [{ address: address('NonfungiblePositionManager'), topics: [POSITION_EVENT_TOPICS, tokenIds.map((id) => numberToHex(id, { size: 32 }))], fromBlock: numberToHex(fromBlock), toBlock: numberToHex(toBlock) }],
+    params: [{ address: address('NonfungiblePositionManager', baseRegistry), topics: [POSITION_EVENT_TOPICS, tokenIds.map((id) => numberToHex(id, { size: 32 }))], fromBlock: numberToHex(fromBlock), toBlock: numberToHex(toBlock) }],
   })
   const events = parseEventLogs({ abi: positionEventsAbi, logs: raw.map((l) => formatLog(l)) }).map((l) => ({
     kind: l.eventName === 'Collect' ? ('collect' as const) : ('decrease' as const),
@@ -618,12 +618,12 @@ export type Simulation = {
  * the change in the account's position count.
  */
 export async function simulateFromEntryPoint(client: PublicClient, account: Address, callData: Hex, blockNumber: bigint): Promise<Simulation> {
-  const npm = address('NonfungiblePositionManager')
+  const npm = address('NonfungiblePositionManager', baseRegistry)
   const reads: SimCall[] = [
-    ...TOKENS.map((t) => ({ to: address(t), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [account] }) })),
+    ...TOKENS.map((t) => ({ to: address(t, baseRegistry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [account] }) })),
     { to: npm, data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [account] }) },
   ]
-  const res = await simulateCalls(client, [...reads, { from: address('EntryPointV07'), to: account, data: callData }, ...reads], blockNumber)
+  const res = await simulateCalls(client, [...reads, { from: address('EntryPointV07', baseRegistry), to: account, data: callData }, ...reads], blockNumber)
   const n = reads.length
   const exec = res[n]!
   const word = (r: SimCallResult) => BigInt(r.returnData === '0x' ? 0 : r.returnData)
@@ -665,7 +665,7 @@ const USER_OPERATION_EVENT = toEventSelector(userOperationEvent)
  * `eventLogIndex` are the ones after the previous boundary and before it.
  */
 export function userOpLogs<L extends Log>(txLogs: readonly L[], eventLogIndex: number): L[] {
-  const ep = address('EntryPointV07')
+  const ep = address('EntryPointV07', baseRegistry)
   const ordered = [...txLogs].sort((a, b) => a.logIndex! - b.logIndex!)
   const boundary = (topic: Hex) => (l: L) => isAddressEqual(l.address, ep) && l.topics[0] === topic
   const event = ordered.find((l) => l.logIndex === eventLogIndex)
@@ -678,7 +678,7 @@ export function userOpLogs<L extends Log>(txLogs: readonly L[], eventLogIndex: n
 
 /** FR-AA-004 and FR-ENG-008: the UserOperationEvent of a hash, read from the RPC, with the logs of that userOp only. */
 export async function readUserOpEvent(client: PublicClient, userOpHash: Hex, fromBlock: bigint): Promise<UserOpEventRead | null> {
-  const logs = await client.getLogs({ address: address('EntryPointV07'), event: userOperationEvent, args: { userOpHash }, fromBlock, toBlock: 'latest' })
+  const logs = await client.getLogs({ address: address('EntryPointV07', baseRegistry), event: userOperationEvent, args: { userOpHash }, fromBlock, toBlock: 'latest' })
   if (logs.length > 1) throw new Error(`${logs.length} UserOperationEvents for ${userOpHash}`)
   const ev = logs[0]
   if (!ev) return null

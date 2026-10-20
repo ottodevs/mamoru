@@ -1,23 +1,23 @@
 import { encodeFunctionData, maxUint128 } from 'viem'
 import { ReasonError, type Address, type Hex } from '@mamoru/domain'
-import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, swapRouter02Abi, type RegistryName } from '@mamoru/registry'
+import { baseRegistry, address, entry, erc20Abi, nonfungiblePositionManagerAbi, swapRouter02Abi, type RegistryName } from '@mamoru/registry'
 
 /** A call that the session will sign. The target is always a registry entry. */
 export type V3Call = { target: RegistryName; to: Address; value: 0n; data: Hex }
 
 function call(target: RegistryName, data: Hex): V3Call {
-  return { target, to: address(target), value: 0n, data }
+  return { target, to: address(target, baseRegistry), value: 0n, data }
 }
 
 function token(name: RegistryName): Address {
-  const e = entry(name)
+  const e = entry(name, baseRegistry)
   if (e.kind !== 'token') throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', `${name} is not a registry token`)
   return e.address
 }
 
 export function approve(tokenName: RegistryName, spender: 'SwapRouter02' | 'NonfungiblePositionManager', amount: bigint): V3Call {
   token(tokenName)
-  return call(tokenName, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [address(spender), amount] }))
+  return call(tokenName, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [address(spender, baseRegistry), amount] }))
 }
 
 /**
@@ -68,7 +68,7 @@ export function mint(p: {
   amount1Min: bigint
   deadline: bigint
 }): V3Call {
-  const pool = entry(p.pool)
+  const pool = entry(p.pool, baseRegistry)
   if (pool.kind !== 'pool' || !pool.token0 || !pool.token1 || !pool.fee || !pool.tickSpacing) {
     throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', p.pool)
   }

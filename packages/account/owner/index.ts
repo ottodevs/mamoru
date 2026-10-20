@@ -1,6 +1,6 @@
 import { encodeFunctionData, zeroAddress } from 'viem'
 import type { Address, Hex } from '@mamoru/domain'
-import { address, erc20Abi } from '@mamoru/registry'
+import { baseRegistry, address, erc20Abi } from '@mamoru/registry'
 import { burn, collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import type { MultiSendCall } from '../safe/index.ts'
 import { revocationCalls } from '../sessions/index.ts'
@@ -60,7 +60,7 @@ export function walkawayCalls(input: WalkawayInput): MultiSendCall[] {
   ])
 
   const transfers = WALKAWAY_TOKENS.filter((t) => input.amounts[t] > 0n).map((t) => ({
-    to: address(t),
+    to: address(t, baseRegistry),
     value: 0n,
     data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [input.recipient, input.amounts[t]] }),
   }))

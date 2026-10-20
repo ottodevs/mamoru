@@ -12,7 +12,7 @@
 // activation code at T7. Keeping that import direction one-way avoids a circular package dependency.
 import { decodeAbiParameters, encodeAbiParameters } from 'viem'
 import type { Address, Hex } from '@mamoru/domain'
-import { address, type RegistryName } from '@mamoru/registry'
+import { baseRegistry, address, type RegistryName } from '@mamoru/registry'
 import { computeCaps } from './instantiate.ts'
 import type { ActionRuleTemplate, CapFormula, GasCaps, GrantName, GrantTemplate, ParamRuleTemplate, PolicyVersion, ResolvedActionRule, SessionGrant } from './types.ts'
 
@@ -288,7 +288,7 @@ export function mamoruInitFor(
     return v
   }
   return {
-    pool: address(p.pool),
+    pool: address(p.pool, baseRegistry),
     twapWindow: opts.twapWindow ?? TWAP_WINDOW_SECONDS,
     twapShortWindow: opts.twapShortWindow ?? TWAP_SHORT_WINDOW_SECONDS,
     bandTicks: p.bandTicks,
@@ -519,7 +519,7 @@ export function budgetUsedBps(total: bigint, totalLeft: bigint): number {
  * `MamoruActionPolicy.mint` and approves the policy, not the NonfungiblePositionManager; `enter-mint` the same."
  */
 export function retargetToPolicy(grant: SessionGrant, mamoruPolicy: Address): SessionGrant {
-  const npm = BigInt(address('NonfungiblePositionManager'))
+  const npm = BigInt(address('NonfungiblePositionManager', baseRegistry))
   const policyRef = BigInt(mamoruPolicy)
   const actions: ResolvedActionRule[] = grant.actions.map((a) => {
     if (a.signature === MINT_SIG) return { ...a, targetAddress: mamoruPolicy }

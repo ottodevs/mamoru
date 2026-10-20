@@ -8,7 +8,7 @@ import { FakeChain, POOLS, Revert } from './fake-chain.ts'
 const ACCOUNT = '0x00000000000000000000000000000000000000aa' as Address
 const OTHER = '0x00000000000000000000000000000000000000bb' as Address
 const DEPOSITOR = '0x00000000000000000000000000000000000000cc' as Address
-const MC3 = address('Multicall3')
+const MC3 = address('Multicall3', baseRegistry)
 
 /** An account with three managed positions, a deposit and some position history, mid-life (the cursor already holds a safe block). */
 function chain(): FakeChain {
@@ -28,7 +28,7 @@ function chain(): FakeChain {
   c.addPositionEvent('Collect', 99n, 950n, 4)
   c.addDeposit('USDC', DEPOSITOR, ACCOUNT, 5_000_000n, 890n, 2)
   c.addDeposit('USDC', DEPOSITOR, ACCOUNT, 1_000_000n, 990n, 0)
-  c.addDeposit('USDC', address('pool:USDC/cbBTC/500'), ACCOUNT, 777n, 991n, 0)
+  c.addDeposit('USDC', address('pool:USDC/cbBTC/500', baseRegistry), ACCOUNT, 777n, 991n, 0)
   return c
 }
 
@@ -253,7 +253,7 @@ describe('observe through Multicall3', () => {
     c.safe = 1050n
     // Deposits are the last log read: the history was read, and its cursor must still not be committed.
     c.onRequest = (r) => {
-      if (r.method === 'eth_getLogs' && r.params[0].address.toLowerCase() === address('USDC').toLowerCase()) throw Object.assign(new Error('no provider has the chain view of block 1150'), { code: -32603 })
+      if (r.method === 'eth_getLogs' && r.params[0].address.toLowerCase() === address('USDC', baseRegistry).toLowerCase()) throw Object.assign(new Error('no provider has the chain view of block 1150'), { code: -32603 })
     }
     const err = await observe(c.client, input({ historyCursor: cursor, depositsAfter: 900n })).catch((e) => e)
     expect(err).toBeInstanceOf(ReasonError)
@@ -279,7 +279,7 @@ describe('observe through Multicall3', () => {
   })
 
   test('a pool that cannot answer `observe` has a null TWAP, batched or not; nothing else changes', async () => {
-    const pool = address('pool:USDC/cbBTC/500')
+    const pool = address('pool:USDC/cbBTC/500', baseRegistry)
     const twaps = []
     for (const multicall3 of [undefined, null]) {
       const c = chain()
@@ -294,13 +294,13 @@ describe('observe through Multicall3', () => {
 
   test('a factory that cannot answer for a registry pool gives the zero address, and its positions ask the factory again', async () => {
     const c = chain()
-    c.failRead(address('UniswapV3Factory'), 'getPool(address,address,uint24)')
+    c.failRead(address('UniswapV3Factory', baseRegistry), 'getPool(address,address,uint24)')
     const err = await observe(c.client, input()).catch((e) => e)
     // As before batching: the identity read tolerates the failure, the position's own getPool does not.
     expect(err.name).toBe('ContractFunctionExecutionError')
     const none = chain()
     none.positions.splice(0)
-    none.failRead(address('UniswapV3Factory'), 'getPool(address,address,uint24)')
+    none.failRead(address('UniswapV3Factory', baseRegistry), 'getPool(address,address,uint24)')
     const obs = await observe(none.client, input({ allowedTokenIds: [] }))
     expect(obs.pools.every((p) => p.identity.factoryPool === zeroAddress)).toBe(true)
   })
@@ -309,7 +309,7 @@ describe('observe through Multicall3', () => {
     const errors = []
     for (const multicall3 of [undefined, null]) {
       const c = chain()
-      c.failRead(address('USDC'), 'balanceOf(address)')
+      c.failRead(address('USDC', baseRegistry), 'balanceOf(address)')
       const err = await observe(c.client, input({ multicall3 })).catch((e) => e)
       expect(err).toBeInstanceOf(Error)
       errors.push({ name: err.name, short: err.shortMessage, fn: err.functionName, contract: err.contractAddress })
@@ -321,7 +321,7 @@ describe('observe through Multicall3', () => {
 
   test('a read that fails only inside the batch is asked again on its own, before the block is checked again', async () => {
     const c = chain()
-    const usdc = address('USDC').toLowerCase()
+    const usdc = address('USDC', baseRegistry).toLowerCase()
     const execute = (c as any).execute.bind(c)
     ;(c as any).execute = (from: Address, to: Address, data: Hex) => {
       if (to.toLowerCase() === usdc && from.toLowerCase() === MC3.toLowerCase()) throw new Revert('only in the batch')
@@ -338,7 +338,7 @@ describe('observe through Multicall3', () => {
 
   test('a token with no contract behind it throws, never reads as zero', async () => {
     const c = chain()
-    const usdc = address('USDC').toLowerCase()
+    const usdc = address('USDC', baseRegistry).toLowerCase()
     const execute = (c as any).execute.bind(c)
     ;(c as any).execute = (from: Address, to: Address, data: Hex) => (to.toLowerCase() === usdc ? '0x' : execute(from, to, data))
     const err = await observe(c.client, input()).catch((e) => e)
@@ -347,7 +347,7 @@ describe('observe through Multicall3', () => {
 
   test('a collect that reverts is reported by the position reads one by one', async () => {
     const c = chain()
-    c.failRead(address('NonfungiblePositionManager'), 'collect((uint256,address,uint128,uint128))')
+    c.failRead(address('NonfungiblePositionManager', baseRegistry), 'collect((uint256,address,uint128,uint128))')
     const err = await observe(c.client, input()).catch((e) => e)
     expect(err.name).toBe('CallExecutionError')
     // The batched attempt, then positions/getPool/collect per position as before batching.
@@ -356,7 +356,7 @@ describe('observe through Multicall3', () => {
 
   test('a position outside the registry pools asks the factory and has no pool', async () => {
     const c = chain()
-    c.positions.push({ tokenId: 14n, owner: ACCOUNT, token0: address('USDC'), token1: address('cbBTC'), fee: 10_000, tickLower: -10, tickUpper: 10, liquidity: 1n, collectable: [0n, 0n] })
+    c.positions.push({ tokenId: 14n, owner: ACCOUNT, token0: address('USDC', baseRegistry), token1: address('cbBTC', baseRegistry), fee: 10_000, tickLower: -10, tickUpper: 10, liquidity: 1n, collectable: [0n, 0n] })
     const obs = await observe(c.client, input())
     expect(obs.positions.find((p) => p.tokenId === 14n)!.pool).toBeNull()
     expect(c.count('eth_call')).toBe(3)
@@ -396,7 +396,7 @@ describe('pool state shared per block', () => {
     const poolCache = poolStateCache()
     const a = await observe(c.client, input({ poolCache }))
     const firstRound = aggregates(c)[0]!
-    const poolTargets = new Set(POOLS.map((p) => address(p).toLowerCase()))
+    const poolTargets = new Set(POOLS.map((p) => address(p, baseRegistry).toLowerCase()))
     expect(firstRound.filter((x) => poolTargets.has(x.target.toLowerCase())).length).toBe(POOLS.length * 7)
     c.requests.length = 0
     const b = await observe(c.client, input({ poolCache, account: OTHER, allowedTokenIds: [99n] }))
@@ -410,7 +410,7 @@ describe('pool state shared per block', () => {
     const c = chain()
     const poolCache = poolStateCache()
     const [a, b] = await Promise.all([observe(c.client, input({ poolCache })), observe(c.client, input({ poolCache, account: OTHER, allowedTokenIds: [99n] }))])
-    const poolTargets = new Set(POOLS.map((p) => address(p).toLowerCase()))
+    const poolTargets = new Set(POOLS.map((p) => address(p, baseRegistry).toLowerCase()))
     expect(aggregates(c).flat().filter((x) => poolTargets.has(x.target.toLowerCase())).length).toBe(POOLS.length * 7)
     expect(b.pools).toEqual(a.pools)
   })
@@ -454,7 +454,7 @@ describe('pool state shared per block', () => {
   test('a failed shared read is not kept, and the account waiting on it reads the pools itself', async () => {
     const c = chain()
     const poolCache = poolStateCache()
-    c.failRead(address('pool:USDC/cbBTC/500'), 'liquidity()')
+    c.failRead(address('pool:USDC/cbBTC/500', baseRegistry), 'liquidity()')
     const results = await Promise.allSettled([observe(c.client, input({ poolCache })), observe(c.client, input({ poolCache, account: OTHER, allowedTokenIds: [99n] }))])
     expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected'])
     expect(poolCache.size).toBe(0)

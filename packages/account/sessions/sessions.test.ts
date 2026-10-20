@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { computeCaps, conservadorLiveV4, conservadorV1, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, grantKey, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_GAS_CAPS, V4_POOLS, v4BudgetCaps, type SessionGrant } from '@mamoru/policy'
 import { activationCall, selfAttestCall, selfRevokeAttestationCall, toSmartSession, v4PoliciesFor, type SecondActionPolicy } from './index.ts'
 
@@ -30,7 +30,7 @@ describe('toSmartSession (spec 007 otto/mamoru#151, T2)', () => {
     expect(session.actions).toHaveLength(grant.actions.length)
     for (const a of session.actions) {
       expect(a.actionPolicies).toHaveLength(1)
-      expect(a.actionPolicies[0]!.policy.toLowerCase()).toBe(address('UniActionPolicy').toLowerCase())
+      expect(a.actionPolicies[0]!.policy.toLowerCase()).toBe(address('UniActionPolicy', baseRegistry).toLowerCase())
     }
   })
 
@@ -43,7 +43,7 @@ describe('toSmartSession (spec 007 otto/mamoru#151, T2)', () => {
     expect(session.actions).toHaveLength(grant.actions.length)
     for (const a of session.actions) {
       expect(a.actionPolicies).toHaveLength(2)
-      expect(a.actionPolicies[0]!.policy.toLowerCase()).toBe(address('UniActionPolicy').toLowerCase())
+      expect(a.actionPolicies[0]!.policy.toLowerCase()).toBe(address('UniActionPolicy', baseRegistry).toLowerCase())
       expect(a.actionPolicies[1]!.policy.toLowerCase()).toBe(mamoruPolicy.toLowerCase())
       expect(a.actionPolicies[1]!.initData).toBe(initData)
     }
@@ -99,7 +99,7 @@ describe('toSmartSession: authorization-parity guard (otto/mamoru#151 T7, T6 aud
       expect(a.actionPolicies).toHaveLength(2)
       expect(a.actionPolicies[1]!.policy.toLowerCase()).toBe(MAMORU_POLICY.toLowerCase())
     }
-    expect(session.userOpPolicies.map((p) => p.policy.toLowerCase())).toEqual([address('TimeFramePolicy'), address('UsageLimitPolicy'), GAS_POLICY].map((a) => a.toLowerCase()))
+    expect(session.userOpPolicies.map((p) => p.policy.toLowerCase())).toEqual([address('TimeFramePolicy', baseRegistry), address('UsageLimitPolicy', baseRegistry), GAS_POLICY].map((a) => a.toLowerCase()))
     expect(session.userOpPolicies[2]!.initData).toBe(encodeGasCaps(V4_GAS_CAPS))
   })
 
@@ -168,7 +168,7 @@ describe('T7 (GPT-6 review of #97): P1 1-3', () => {
   })
 
   test('P1 3: a grant whose rules pin a token or fee of another pool is refused', () => {
-    const forged: SessionGrant = { ...btcSwap, actions: btcSwap.actions.map((a) => ({ ...a, params: a.params.map((p) => (p.field === 'tokenOut' ? { ...p, ref: BigInt(address('WETH')) } : p)) })) }
+    const forged: SessionGrant = { ...btcSwap, actions: btcSwap.actions.map((a) => ({ ...a, params: a.params.map((p) => (p.field === 'tokenOut' ? { ...p, ref: BigInt(address('WETH', baseRegistry)) } : p)) })) }
     expect(() => toSmartSession(forged, ok(btcSwap))).toThrow('not a token of the pool')
     const fee: SessionGrant = { ...btcSwap, actions: btcSwap.actions.map((a) => ({ ...a, params: a.params.map((p) => (p.field === 'fee' ? { ...p, ref: 3000n } : p)) })) }
     expect(() => toSmartSession(fee, ok(btcSwap))).toThrow("pool's fee")
@@ -180,7 +180,7 @@ describe('selfRevokeAttestationCall', () => {
   test('revoke((address)[]) on the ModuleRegistry, one request per module', () => {
     const m = `0x${'ab'.repeat(20)}` as const
     const call = selfRevokeAttestationCall([m])
-    expect(call.to).toBe(address('ModuleRegistry'))
+    expect(call.to).toBe(address('ModuleRegistry', baseRegistry))
     expect(call.data.slice(0, 10)).toBe('0x4990a682') // revoke((address)[]), present in the Base registry's bytecode
     expect(call.data.toLowerCase()).toContain('ab'.repeat(20))
   })

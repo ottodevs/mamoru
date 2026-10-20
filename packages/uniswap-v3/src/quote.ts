@@ -1,6 +1,6 @@
 import { decodeFunctionResult, encodeFunctionData, parseAbi, type PublicClient } from 'viem'
 import { ReasonError, type Address } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 
 export const quoterV2Abi = parseAbi([
   'struct QuoteExactInputSingleParams { address tokenIn; address tokenOut; uint256 amountIn; uint24 fee; uint160 sqrtPriceLimitX96; }',
@@ -18,7 +18,7 @@ export async function quoteExactInputSingle(client: PublicClient, q: QuoteReques
   })
   let raw
   try {
-    raw = await client.call({ to: address('QuoterV2'), data, blockNumber: q.blockNumber })
+    raw = await client.call({ to: address('QuoterV2', baseRegistry), data, blockNumber: q.blockNumber })
   } catch (e) {
     throw new ReasonError('EHG_QUOTE_UNAVAILABLE', (e as Error).message.split('\n')[0])
   }

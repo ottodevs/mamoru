@@ -1,6 +1,6 @@
 import { isAddressEqual, parseAbi, parseEventLogs, type Hex, type Log } from 'viem'
 import type { Address, Provenance, ReasonCode, SavingsRowView } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 
 export const positionEventsAbi = parseAbi([
   'event Collect(uint256 indexed tokenId, address recipient, uint256 amount0, uint256 amount1)',
@@ -31,7 +31,7 @@ export type PositionEvent =
 
 /** Collect and DecreaseLiquidity of the NonfungiblePositionManager, in log order. */
 export function positionEvents(logs: Log[]): PositionEvent[] {
-  const npm = address('NonfungiblePositionManager')
+  const npm = address('NonfungiblePositionManager', baseRegistry)
   return parseEventLogs({ abi: positionEventsAbi, logs: logs.filter((l) => isAddressEqual(l.address, npm)) }).map((e) => ({
     kind: e.eventName === 'Collect' ? 'collect' : 'decrease',
     tokenId: e.args.tokenId,

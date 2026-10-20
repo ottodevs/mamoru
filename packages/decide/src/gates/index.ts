@@ -1,19 +1,19 @@
 import { isAddressEqual, zeroAddress } from 'viem'
 import type { PolicyVersion } from '@mamoru/policy'
-import { address, entry } from '@mamoru/registry'
+import { baseRegistry, address, entry } from '@mamoru/registry'
 import type { GateStep, Observation, PoolObs } from '../types.ts'
 
 /** Purga, identity part: the pool the chain returns is the registry's, with the registry's tokens, fee and spacing. */
 export function purgaIdentity(pool: PoolObs): GateStep {
-  const e = entry(pool.name)
+  const e = entry(pool.name, baseRegistry)
   const id = pool.identity
   if (!e.token0 || !e.token1 || !e.fee || !e.tickSpacing || isAddressEqual(id.factoryPool, zeroAddress)) {
     return { gate: 'purga', verdict: 'NO_GO', reason: 'PURGA_IDENTITY_INCOMPLETE' }
   }
   const same =
     isAddressEqual(id.factoryPool, e.address) &&
-    isAddressEqual(id.token0, address(e.token0)) &&
-    isAddressEqual(id.token1, address(e.token1)) &&
+    isAddressEqual(id.token0, address(e.token0, baseRegistry)) &&
+    isAddressEqual(id.token1, address(e.token1, baseRegistry)) &&
     id.fee === e.fee &&
     id.tickSpacing === e.tickSpacing
   return same ? { gate: 'purga', verdict: 'GO', reason: 'PURGA_OK' } : { gate: 'purga', verdict: 'NO_GO', reason: 'PURGA_IDENTITY_MISMATCH' }

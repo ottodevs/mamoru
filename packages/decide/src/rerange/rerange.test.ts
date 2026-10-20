@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { conservadorLabV1, conservadorLiveV1 } from '@mamoru/policy'
-import { address, entry } from '@mamoru/registry'
+import { baseRegistry, address, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { decide, type Observation, type PoolObs, type PositionObs } from '../index.ts'
 
@@ -9,7 +9,7 @@ const TICK = 69_000
 const live = conservadorLiveV1
 
 function pool(tick = TICK): PoolObs {
-  const e = entry(POOL)
+  const e = entry(POOL, baseRegistry)
   return {
     name: POOL,
     address: e.address,
@@ -21,7 +21,7 @@ function pool(tick = TICK): PoolObs {
     tick,
     liquidity: 10n ** 18n,
     twapTick: tick,
-    identity: { factoryPool: e.address, token0: address('USDC'), token1: address('cbBTC'), fee: 500, tickSpacing: 10 },
+    identity: { factoryPool: e.address, token0: address('USDC', baseRegistry), token1: address('cbBTC', baseRegistry), fee: 500, tickSpacing: 10 },
   }
 }
 

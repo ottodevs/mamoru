@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { conservadorLabGeometryV1, conservadorLiveV2, grantKey, type PolicyVersion, type SkewRule, type VolWidthRule } from '@mamoru/policy'
-import { address, entry } from '@mamoru/registry'
+import { baseRegistry, address, entry } from '@mamoru/registry'
 import { rangeAround, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { decide, edgeBpsOf, rangeFor, realizedVolOf, regimeOf, rerangeOf, skewedRange, volWidthTicks, widenEarly, widthFor, type Observation, type PoolGeometryObs, type PoolObs, type PositionObs } from '../index.ts'
 
@@ -13,11 +13,11 @@ const ETH_TICK = -193_380
 const LAB = conservadorLabGeometryV1
 
 function pool(name: string, tick: number): PoolObs {
-  const e = entry(name)
+  const e = entry(name, baseRegistry)
   return {
     name, address: e.address, token0: e.token0!, token1: e.token1!, fee: e.fee!, tickSpacing: e.tickSpacing!,
     sqrtPriceX96: sqrtRatioAtTick(tick), tick, liquidity: 10n ** 18n, twapTick: tick,
-    identity: { factoryPool: e.address, token0: address(e.token0!), token1: address(e.token1!), fee: e.fee!, tickSpacing: e.tickSpacing! },
+    identity: { factoryPool: e.address, token0: address(e.token0!, baseRegistry), token1: address(e.token1!, baseRegistry), fee: e.fee!, tickSpacing: e.tickSpacing! },
   }
 }
 const BTC = pool(BTC_POOL, BTC_TICK)

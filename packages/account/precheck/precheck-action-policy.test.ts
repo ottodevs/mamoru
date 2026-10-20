@@ -6,7 +6,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, entry } from '@mamoru/registry'
+import { baseRegistry, address, entry } from '@mamoru/registry'
 import { computeCaps, conservadorLabV1, conservadorLabV4, instantiateGrant, retargetToPolicy, V4_POOLS, withActionPolicy, type Price } from '@mamoru/policy'
 import { approve, decreaseLiquidity, exactInputSingle, type V3Call } from '@mamoru/uniswap-v3'
 import { priceRange, swapBoundsInRange, type OracleRead } from '@mamoru/uniswap-v3/policy-bounds'
@@ -28,9 +28,9 @@ const swapGrant = retargetToPolicy(instantiateGrant(conservadorLabV4, `enter-swa
 const SIG = useModeSignature(PID, `0x${'22'.repeat(65)}`)
 const enginePolicy = withActionPolicy(conservadorLabV4, MAMORU_POLICY, [V4_POOLS.btc], { caps })
 const apConfig: ActionPolicyPoolConfig = (() => {
-  const e = entry(POOL)
+  const e = entry(POOL, baseRegistry)
   const budget = enginePolicy.actionPolicy!.budgetsByPool![POOL]!
-  return { pool: POOL, address: MAMORU_POLICY, token0: address(e.token0!), token1: address(e.token1!), feePips: e.fee!, bandTicks: enginePolicy.actionPolicy!.bandTicksByPool[POOL]!, budgetIn1: budget.in1, budgetWindowSeconds: budget.windowSeconds, perWindow: budget.perWindow, total: budget.total }
+  return { pool: POOL, address: MAMORU_POLICY, token0: address(e.token0!, baseRegistry), token1: address(e.token1!, baseRegistry), feePips: e.fee!, bandTicks: enginePolicy.actionPolicy!.bandTicksByPool[POOL]!, budgetIn1: budget.in1, budgetWindowSeconds: budget.windowSeconds, perWindow: budget.perWindow, total: budget.total }
 })()
 const ORACLE: OracleRead = { twapLong: 0, twapShort: 0 }
 const RANGE = priceRange(ORACLE, apConfig.bandTicks)!

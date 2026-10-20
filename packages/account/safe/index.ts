@@ -11,6 +11,7 @@ import {
 } from 'viem'
 import type { Address, Hex } from '@mamoru/domain'
 import {
+  baseRegistry,
   address,
   multiSendCallOnlyAbi,
   safe7579LaunchpadAbi,
@@ -44,16 +45,16 @@ export type SafeSetup = {
  * also delegatecalls SafeWebAuthnSharedSigner.configure in the same setup.
  */
 export function setupDelegate(setup: SafeSetup): { to: Address; data: Hex } {
-  const sharedSigner = address('SafeWebAuthnSharedSigner').toLowerCase()
+  const sharedSigner = address('SafeWebAuthnSharedSigner', baseRegistry).toLowerCase()
   const ownsWithPasskey = setup.owners.some((o) => o.toLowerCase() === sharedSigner)
   if (ownsWithPasskey !== !!setup.webauthn) throw new Error('SafeWebAuthnSharedSigner is an owner exactly when the setup carries its passkey')
-  const safe7579 = address('Safe7579')
+  const safe7579 = address('Safe7579', baseRegistry)
   const launch = {
-    to: address('Safe7579Launchpad'),
+    to: address('Safe7579Launchpad', baseRegistry),
     data: encodeFunctionData({
       abi: safe7579LaunchpadAbi,
       functionName: 'addSafe7579',
-      args: [safe7579, setup.validators, [], [], [], [address('RhinestoneAttester')], 1],
+      args: [safe7579, setup.validators, [], [], [], [address('RhinestoneAttester', baseRegistry)], 1],
     }),
   }
   if (!setup.webauthn) return launch
@@ -62,7 +63,7 @@ export function setupDelegate(setup: SafeSetup): { to: Address; data: Hex } {
     [launch, cfg].map((c) => encodePacked(['uint8', 'address', 'uint256', 'uint256', 'bytes'], [OPERATION_DELEGATECALL, c.to, 0n, BigInt(size(c.data)), c.data])),
   )
   // MultiSend 1.4.1 has the same multiSend(bytes) signature as MultiSendCallOnly, but allows delegatecall entries.
-  return { to: address('MultiSend_141'), data: encodeFunctionData({ abi: multiSendCallOnlyAbi, functionName: 'multiSend', args: [packed] }) }
+  return { to: address('MultiSend_141', baseRegistry), data: encodeFunctionData({ abi: multiSendCallOnlyAbi, functionName: 'multiSend', args: [packed] }) }
 }
 
 /** Safe.setup with Safe7579 as fallback handler and setupDelegate as the setup delegatecall. */
@@ -71,17 +72,17 @@ export function safeInitializer(setup: SafeSetup): Hex {
   return encodeFunctionData({
     abi: safeAbi,
     functionName: 'setup',
-    args: [setup.owners, setup.threshold, delegate.to, delegate.data, address('Safe7579'), zeroAddress, 0n, zeroAddress],
+    args: [setup.owners, setup.threshold, delegate.to, delegate.data, address('Safe7579', baseRegistry), zeroAddress, 0n, zeroAddress],
   })
 }
 
 export function createProxyCall(setup: SafeSetup): { to: Address; data: Hex } {
   return {
-    to: address('SafeProxyFactory_141'),
+    to: address('SafeProxyFactory_141', baseRegistry),
     data: encodeFunctionData({
       abi: safeProxyFactoryAbi,
       functionName: 'createProxyWithNonce',
-      args: [address('SafeL2_141'), safeInitializer(setup), setup.saltNonce],
+      args: [address('SafeL2_141', baseRegistry), safeInitializer(setup), setup.saltNonce],
     }),
   }
 }
@@ -159,7 +160,7 @@ export function multiSendCallOnly(calls: MultiSendCall[]): { to: Address; data: 
     ),
   )
   return {
-    to: address('MultiSendCallOnly_141'),
+    to: address('MultiSendCallOnly_141', baseRegistry),
     data: encodeFunctionData({ abi: multiSendCallOnlyAbi, functionName: 'multiSend', args: [packed] }),
     operation: OPERATION_DELEGATECALL,
   }
@@ -168,7 +169,7 @@ export function multiSendCallOnly(calls: MultiSendCall[]): { to: Address; data: 
 /** Owner transaction that stores the passkey coordinates in SafeWebAuthnSharedSigner (delegatecall). */
 export function configureSharedSigner(x: bigint, y: bigint, verifiers: bigint): { to: Address; data: Hex; operation: 1 } {
   return {
-    to: address('SafeWebAuthnSharedSigner'),
+    to: address('SafeWebAuthnSharedSigner', baseRegistry),
     data: encodeFunctionData({ abi: safeWebAuthnSharedSignerAbi, functionName: 'configure', args: [{ x, y, verifiers }] }),
     operation: OPERATION_DELEGATECALL,
   }
@@ -187,7 +188,7 @@ export const P256_PRECOMPILE_ADDRESS = 0x100
 
 /** A passkey owner verified by the RIP-7212 precompile, with the pinned P256Verifier as fallback. */
 export function webAuthnSigner(x: bigint, y: bigint): WebAuthnSigner {
-  return { x, y, verifiers: packVerifiers(P256_PRECOMPILE_ADDRESS, address('P256Verifier')) }
+  return { x, y, verifiers: packVerifiers(P256_PRECOMPILE_ADDRESS, address('P256Verifier', baseRegistry)) }
 }
 
 // ERC-7579 execution modes (Safe7579.execute)

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { keccak256, parseEventLogs, stringToHex, toHex, type Hex } from 'viem'
 import type { AccountContext, Address, OwnerSignature } from '@mamoru/domain'
-import { address, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi } from '@mamoru/registry'
+import { baseRegistry, address, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi } from '@mamoru/registry'
 import { computeCaps, conservadorLabV1, instantiateGrant } from '@mamoru/policy'
 import { approve, mint } from '@mamoru/uniswap-v3'
 import { counterfactualAddress, accountSetup } from '../recovery/index.ts'
@@ -67,7 +67,7 @@ function browserAssert(passkey: SoftwarePasskey, challenge: Hex, highS = false):
 }
 
 function contextFor(passkey: SoftwarePasskey, chainId: number, saltNonce: bigint): AccountContext {
-  const owners = [address('SafeWebAuthnSharedSigner')]
+  const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
   const webauthn = webAuthnSigner(passkey.x, passkey.y)
   return {
     accountKey: 'test',
@@ -144,7 +144,7 @@ describe('live owner path: pure', () => {
       expect(await verifyOwnerSignature(sig, `0x${'ac'.repeat(32)}`, passkey)).toBe(false)
       expect(await verifyOwnerSignature(browserOwnerSignature(browserAssert(other, hash, highS), hash), hash, passkey)).toBe(false)
       const d = decodeOwnerSignature(sig)
-      const forge = (p: Partial<typeof d>) => safeContractSignature(address('SafeWebAuthnSharedSigner'), encodeWebAuthnSignature({ ...d, ...p }))
+      const forge = (p: Partial<typeof d>) => safeContractSignature(address('SafeWebAuthnSharedSigner', baseRegistry), encodeWebAuthnSignature({ ...d, ...p }))
       expect(await verifyOwnerSignature(forge({}), hash, passkey)).toBe(true)
       expect(await verifyOwnerSignature(forge({ r: d.r + 1n }), hash, passkey)).toBe(false)
       expect(await verifyOwnerSignature(forge({ s: 0n }), hash, passkey)).toBe(false)
@@ -248,7 +248,7 @@ describe.skipIf(!RUN_FORK)('live owner path on a Base fork', () => {
     expect(r.ok).toBe(true)
     const proxy = parseEventLogs({ abi: safeProxyFactoryAbi, logs: r.receipt.logs, eventName: 'ProxyCreation' })[0]!.args.proxy
     expect(proxy.toLowerCase()).toBe(acct.safe.toLowerCase())
-    const bound = await lab.client.readContract({ address: address('SafeWebAuthnSharedSigner'), abi: safeWebAuthnSharedSignerAbi, functionName: 'getConfiguration', args: [acct.safe] })
+    const bound = await lab.client.readContract({ address: address('SafeWebAuthnSharedSigner', baseRegistry), abi: safeWebAuthnSharedSignerAbi, functionName: 'getConfiguration', args: [acct.safe] })
     expect(bound.x).toBe(passkey.x)
     await lab.whaleTransfer('USDC', WHALE, acct.safe, 20_000_000n)
     expect(await lab.balanceOf('USDC', acct.safe)).toBe(20_000_000n)
@@ -301,10 +301,10 @@ describe.skipIf(!RUN_FORK)('live owner path on a Base fork', () => {
         approve('cbBTC', 'NonfungiblePositionManager', 0n),
       ].map((c) => ({ to: c.to, value: 0n, data: c.data })),
     )
-    const npm = address('NonfungiblePositionManager').toLowerCase()
+    const npm = address('NonfungiblePositionManager', baseRegistry).toLowerCase()
     const { nonfungiblePositionManagerAbi } = await import('@mamoru/registry')
     const tokenId = parseEventLogs({ abi: nonfungiblePositionManagerAbi, logs: m.receipt.logs, eventName: 'Transfer' }).find((l) => l.address.toLowerCase() === npm)!.args.tokenId
-    const pos = await lab.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] })
+    const pos = await lab.client.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] })
     const liquidity = pos[7]
     expect(liquidity > 0n).toBe(true)
 
@@ -324,7 +324,7 @@ describe.skipIf(!RUN_FORK)('live owner path on a Base fork', () => {
     expect(await lab.balanceOf('cbBTC', acct.safe) < cbbtcHeld + cbbtcIn).toBe(true)
     // the position is burned
     await expect(
-      lab.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] }),
+      lab.client.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] }),
     ).rejects.toThrow()
   }, 180_000)
 })

@@ -80,12 +80,12 @@ export class FakeChain {
   }
 
   setBalance(token: string, holder: Address, amount: bigint): void {
-    this.erc20.set(`${address(token).toLowerCase()}:${holder.toLowerCase()}`, amount)
+    this.erc20.set(`${address(token, baseRegistry).toLowerCase()}:${holder.toLowerCase()}`, amount)
   }
 
   addPosition(owner: Address, tokenId: bigint, pool: string, collectable: [bigint, bigint] = [0n, 0n]): void {
-    const e = entry(pool)
-    this.positions.push({ tokenId, owner, token0: address(e.token0!), token1: address(e.token1!), fee: e.fee!, tickLower: -600, tickUpper: 600, liquidity: 10n ** 12n + tokenId, collectable })
+    const e = entry(pool, baseRegistry)
+    this.positions.push({ tokenId, owner, token0: address(e.token0!, baseRegistry), token1: address(e.token1!, baseRegistry), fee: e.fee!, tickLower: -600, tickUpper: 600, liquidity: 10n ** 12n + tokenId, collectable })
   }
 
   addPositionEvent(eventName: 'Collect' | 'DecreaseLiquidity', tokenId: bigint, blockNumber: bigint, logIndex: number, amounts: [bigint, bigint] = [1n, 2n]): void {
@@ -94,12 +94,12 @@ export class FakeChain {
       eventName === 'Collect'
         ? encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'uint256' }], [zeroAddress, ...amounts])
         : encodeAbiParameters([{ type: 'uint128' }, { type: 'uint256' }, { type: 'uint256' }], [5n, ...amounts])
-    this.logs.push({ address: address('NonfungiblePositionManager'), topics, data, blockNumber, logIndex })
+    this.logs.push({ address: address('NonfungiblePositionManager', baseRegistry), topics, data, blockNumber, logIndex })
   }
 
   addDeposit(token: string, from: Address, to: Address, value: bigint, blockNumber: bigint, logIndex: number): void {
     const topics = encodeEventTopics({ abi: transferAbi, eventName: 'Transfer', args: { from, to } }) as Hex[]
-    this.logs.push({ address: address(token), topics, data: encodeAbiParameters([{ type: 'uint256' }], [value]), blockNumber, logIndex })
+    this.logs.push({ address: address(token, baseRegistry), topics, data: encodeAbiParameters([{ type: 'uint256' }], [value]), blockNumber, logIndex })
   }
 
   count(method?: string): number {
@@ -201,7 +201,7 @@ export class FakeChain {
   private execute(from: Address, to: Address, data: Hex): Hex {
     const at = to.toLowerCase()
     if (this.reverting.has(`${at}:${data.slice(0, 10)}`)) throw new Revert('forced')
-    if (at === address('Multicall3').toLowerCase()) {
+    if (at === address('Multicall3', baseRegistry).toLowerCase()) {
       const call = decodeFunctionData({ abi: multicall3Abi, data })
       if (call.functionName === 'getEthBalance') return encodeFunctionResult({ abi: multicall3Abi, functionName: 'getEthBalance', result: this.native.get(call.args[0].toLowerCase()) ?? 0n })
       if (call.functionName === 'getBlockNumber') return encodeFunctionResult({ abi: multicall3Abi, functionName: 'getBlockNumber', result: this.head })
@@ -215,30 +215,30 @@ export class FakeChain {
       })
       return encodeFunctionResult({ abi: multicall3Abi, functionName: 'aggregate3', result: results })
     }
-    if (at === address('EntryPointV07').toLowerCase()) {
+    if (at === address('EntryPointV07', baseRegistry).toLowerCase()) {
       const call = decodeFunctionData({ abi: entryPointV07Abi, data })
       if (call.functionName !== 'getNonce') throw new Revert('unknown EntryPoint call')
       return encodeFunctionResult({ abi: entryPointV07Abi, functionName: 'getNonce', result: this.nonces.get(call.args[0].toLowerCase()) ?? 0n })
     }
-    if (at === address('SmartSession').toLowerCase()) {
+    if (at === address('SmartSession', baseRegistry).toLowerCase()) {
       const call = decodeFunctionData({ abi: smartSessionAbi, data })
       if (call.functionName !== 'isPermissionEnabled') throw new Revert('unknown SmartSession call')
       return encodeFunctionResult({ abi: smartSessionAbi, functionName: 'isPermissionEnabled', result: !this.disabled.has((call.args[0] as Hex).toLowerCase()) })
     }
-    if (at === address('NonfungiblePositionManager').toLowerCase()) return this.npm(from, to, data)
-    if (at === address('QuoterV2').toLowerCase()) {
+    if (at === address('NonfungiblePositionManager', baseRegistry).toLowerCase()) return this.npm(from, to, data)
+    if (at === address('QuoterV2', baseRegistry).toLowerCase()) {
       const call = decodeFunctionData({ abi: quoterV2Abi, data })
       const [params] = call.args
       const amountOut = this.quoteAmountOut({ tokenIn: params.tokenIn, tokenOut: params.tokenOut, fee: params.fee, amountIn: params.amountIn })
       return encodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', result: [amountOut, 0n, 0, 0n] })
     }
-    if (at === address('UniswapV3Factory').toLowerCase()) {
+    if (at === address('UniswapV3Factory', baseRegistry).toLowerCase()) {
       const call = decodeFunctionData({ abi: uniswapV3FactoryAbi, data })
       const [a, b, fee] = call.args
-      const pool = POOLS.map((p) => entry(p)).find((e) => e.fee === fee && [address(e.token0!), address(e.token1!)].every((t) => [a.toLowerCase(), b.toLowerCase()].includes(t.toLowerCase())))
+      const pool = POOLS.map((p) => entry(p, baseRegistry)).find((e) => e.fee === fee && [address(e.token0!, baseRegistry), address(e.token1!, baseRegistry)].every((t) => [a.toLowerCase(), b.toLowerCase()].includes(t.toLowerCase())))
       return encodeFunctionResult({ abi: uniswapV3FactoryAbi, functionName: 'getPool', result: pool?.address ?? zeroAddress })
     }
-    const pool = POOLS.map((p) => entry(p)).find((e) => e.address.toLowerCase() === at)
+    const pool = POOLS.map((p) => entry(p, baseRegistry)).find((e) => e.address.toLowerCase() === at)
     if (pool) {
       const i = BigInt(POOLS.indexOf(pool.name) + 1)
       if (data.startsWith(sel('observe(uint32[])'))) {
@@ -251,12 +251,12 @@ export class FakeChain {
       const call = decodeFunctionData({ abi: uniswapV3PoolAbi, data })
       if (call.functionName === 'slot0') return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [(1n << 96n) * i, Number(i) * 10, 0, 1, 1, 0, true] })
       if (call.functionName === 'liquidity') return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'liquidity', result: 10n ** 18n * i })
-      if (call.functionName === 'token0') return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'token0', result: address(pool.token0!) })
-      if (call.functionName === 'token1') return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'token1', result: address(pool.token1!) })
+      if (call.functionName === 'token0') return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'token0', result: address(pool.token0!, baseRegistry) })
+      if (call.functionName === 'token1') return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'token1', result: address(pool.token1!, baseRegistry) })
       if (call.functionName === 'fee') return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'fee', result: pool.fee! })
       return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'tickSpacing', result: pool.tickSpacing! })
     }
-    if (TOKENS.some((t) => address(t).toLowerCase() === at)) {
+    if (TOKENS.some((t) => address(t, baseRegistry).toLowerCase() === at)) {
       const call = decodeFunctionData({ abi: erc20Abi, data })
       if (call.functionName !== 'balanceOf') throw new Revert('unknown token call')
       return encodeFunctionResult({ abi: erc20Abi, functionName: 'balanceOf', result: this.erc20.get(`${at}:${call.args[0].toLowerCase()}`) ?? 0n })

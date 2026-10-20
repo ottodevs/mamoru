@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV2, grantKey, type PolicyVersion } from '@mamoru/policy'
-import { address, entry } from '@mamoru/registry'
+import { baseRegistry, address, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { decide, type Observation, type PoolObs } from './index.ts'
 import { depthOf, twapFloor } from './depth/index.ts'
@@ -9,7 +9,7 @@ const USDC = 1_000_000n
 const DEPTH: PolicyVersion = { ...conservadorLiveV2, depth: { maxImpactBps: 30, maxShareBps: 500, maxImpactBpsByPool: { 'pool:USDC/USDT/100': 5 } } }
 
 function pool(name: string, tick: number, liquidity: bigint): PoolObs {
-  const e = entry(name)
+  const e = entry(name, baseRegistry)
   return {
     name,
     address: e.address,
@@ -22,7 +22,7 @@ function pool(name: string, tick: number, liquidity: bigint): PoolObs {
     liquidity,
     twapTick: tick,
     twapLiquidity: liquidity,
-    identity: { factoryPool: e.address, token0: address(e.token0!), token1: address(e.token1!), fee: e.fee!, tickSpacing: e.tickSpacing! },
+    identity: { factoryPool: e.address, token0: address(e.token0!, baseRegistry), token1: address(e.token1!, baseRegistry), fee: e.fee!, tickSpacing: e.tickSpacing! },
   }
 }
 

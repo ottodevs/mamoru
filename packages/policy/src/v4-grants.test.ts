@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { decodeAbiParameters } from 'viem'
 import { describe, expect, test } from 'bun:test'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { computeCaps, instantiateGrant, type GrantContext } from './instantiate.ts'
 import {
   DEFAULT_GAS_CEILING,
@@ -76,7 +76,7 @@ describe('MamoruActionPolicy.Init encoding stays in sync with the Solidity struc
 
   test('encodeMamoruInit round-trips through abi.decode(data, (Init))', () => {
     const init: MamoruInit = {
-      pool: address('pool:USDC/cbBTC/500'),
+      pool: address('pool:USDC/cbBTC/500', baseRegistry),
       twapWindow: 1800,
       twapShortWindow: 300,
       bandTicks: 100,
@@ -99,7 +99,7 @@ describe('MamoruActionPolicy.Init encoding stays in sync with the Solidity struc
   test('mamoruInitFor resolves a pool spec + caps into a well-formed Init', () => {
     const caps = computeCaps(conservadorLiveV4, 10_000n * 1_000_000n, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
     const init = mamoruInitFor(V4_POOLS.btc, 1n, caps, { admit: [42n] })
-    expect(init.pool.toLowerCase()).toBe(address('pool:USDC/cbBTC/500').toLowerCase())
+    expect(init.pool.toLowerCase()).toBe(address('pool:USDC/cbBTC/500', baseRegistry).toLowerCase())
     expect(init.twapWindow).toBe(1800)
     expect(init.twapShortWindow).toBe(300)
     expect(init.bandTicks).toBe(100)

@@ -1,6 +1,6 @@
 import { concat, decodeAbiParameters, encodeAbiParameters, encodeFunctionData, hashTypedData, hexToBigInt, hexToBytes, numberToHex, pad, size, toHex, type PublicClient } from 'viem'
 import type { AccountContext, Address, Hex, OwnerSignature } from '@mamoru/domain'
-import { address, erc20Abi, safeAbi } from '@mamoru/registry'
+import { baseRegistry, address, erc20Abi, safeAbi } from '@mamoru/registry'
 import type { SessionGrant } from '@mamoru/policy'
 import { approve, burn, collect, decreaseLiquidity, exactInputSingle, exactInputSingleTo, swapToEth } from '@mamoru/uniswap-v3'
 import {
@@ -129,7 +129,7 @@ export function transferBatch(i: {
   return [
     ...i.reduce.flatMap((p) => closeCalls(i.account, p, i.deadline, false)),
     ...(i.swapCbbtc ? swapCbbtcCalls(i.account, i.swapCbbtc) : []),
-    ...(i.receive ? receiveCalls(i.to, i.amountUsdc, i.receive, i.deadline) : [{ to: address('USDC'), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [i.to, i.amountUsdc] }) }]),
+    ...(i.receive ? receiveCalls(i.to, i.amountUsdc, i.receive, i.deadline) : [{ to: address('USDC', baseRegistry), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [i.to, i.amountUsdc] }) }]),
   ]
 }
 
@@ -319,7 +319,7 @@ export function browserOwnerSignature(sig: OwnerSignature, safeTxHash?: Hex): He
   const { challenge, fields } = clientDataFieldsOf(clientDataJSON)
   if (safeTxHash && toHex(fromB64url(challenge)).toLowerCase() !== safeTxHash.toLowerCase()) throw new Error('assertion challenge is not the safeTxHash')
   const { r, s } = parseDerSignature(fromB64url(sig.signature))
-  return safeContractSignature(address('SafeWebAuthnSharedSigner'), encodeWebAuthnSignature({ authenticatorData, clientDataFields: fields, r, s }))
+  return safeContractSignature(address('SafeWebAuthnSharedSigner', baseRegistry), encodeWebAuthnSignature({ authenticatorData, clientDataFields: fields, r, s }))
 }
 
 /** authenticatorData flag SafeWebAuthnSharedSigner requires (WebAuthn.USER_VERIFICATION). */
@@ -337,7 +337,7 @@ export function decodeOwnerSignature(signature: Hex): { authenticatorData: Hex; 
   if (bytes.length < 97) throw new Error('owner signature too short')
   const signer = toHex(bytes.subarray(12, 32))
   const padding = hexToBigInt(toHex(bytes.subarray(0, 12)))
-  if (padding !== 0n || signer.toLowerCase() !== address('SafeWebAuthnSharedSigner').toLowerCase()) throw new Error('owner signature is not from SafeWebAuthnSharedSigner')
+  if (padding !== 0n || signer.toLowerCase() !== address('SafeWebAuthnSharedSigner', baseRegistry).toLowerCase()) throw new Error('owner signature is not from SafeWebAuthnSharedSigner')
   if (hexToBigInt(toHex(bytes.subarray(32, 64))) !== 65n || bytes[64] !== 0) throw new Error('owner signature is not one contract signature')
   if (hexToBigInt(toHex(bytes.subarray(65, 97))) !== BigInt(bytes.length - 97)) throw new Error('owner signature length mismatch')
   const [authenticatorData, clientDataFields, r, s] = decodeAbiParameters([{ type: 'bytes' }, { type: 'string' }, { type: 'uint256' }, { type: 'uint256' }], toHex(bytes.subarray(97)))

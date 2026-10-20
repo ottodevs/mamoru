@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { concat, decodeFunctionData, getAddress, keccak256, numberToHex, pad, slice, type Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, multiSendCallOnlyAbi, safe7579LaunchpadAbi, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi } from '@mamoru/registry'
+import { baseRegistry, address, multiSendCallOnlyAbi, safe7579LaunchpadAbi, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi } from '@mamoru/registry'
 import { OPERATION_DELEGATECALL, createProxyCall, packVerifiers, safeInitializer, webAuthnSigner, type WebAuthnSigner } from '../safe/index.ts'
 import {
   SAFE_PROXY_141_CREATION_CODE,
@@ -14,7 +14,7 @@ import {
 } from './index.ts'
 
 const BACKUP: Address = getAddress('0x00000000000000000000000000000000000000b1')
-const OWNERS: Address[] = [address('SafeWebAuthnSharedSigner'), BACKUP]
+const OWNERS: Address[] = [address('SafeWebAuthnSharedSigner', baseRegistry), BACKUP]
 const SALT_NONCE = 7n
 // Public key of the software passkey a1 (packages/scenarios/webauthn); test material only.
 const PASSKEY: WebAuthnSigner = webAuthnSigner(
@@ -42,8 +42,8 @@ const PIDS: Hex[] = [`0x${'11'.repeat(32)}`, `0x${'22'.repeat(32)}`]
 /** CREATE2 as SafeProxyFactory 1.4.1 computes it, written out byte by byte. */
 function factoryCreate2(initializer: Hex, saltNonce: bigint): Address {
   const salt = keccak256(concat([keccak256(initializer), numberToHex(saltNonce, { size: 32 })]))
-  const initCode = concat([SAFE_PROXY_141_CREATION_CODE, pad(address('SafeL2_141'), { size: 32 })])
-  const hash = keccak256(concat(['0xff', address('SafeProxyFactory_141'), salt, keccak256(initCode)]))
+  const initCode = concat([SAFE_PROXY_141_CREATION_CODE, pad(address('SafeL2_141', baseRegistry), { size: 32 })])
+  const hash = keccak256(concat(['0xff', address('SafeProxyFactory_141', baseRegistry), salt, keccak256(initCode)]))
   return getAddress(slice(hash, 12))
 }
 
@@ -56,29 +56,29 @@ describe('counterfactual address', () => {
     const [owners, threshold, to, data, fallbackHandler] = decoded.args
     expect(owners).toEqual(OWNERS)
     expect(threshold).toBe(1n)
-    expect(to).toBe(address('MultiSend_141'))
-    expect(fallbackHandler).toBe(address('Safe7579'))
+    expect(to).toBe(address('MultiSend_141', baseRegistry))
+    expect(fallbackHandler).toBe(address('Safe7579', baseRegistry))
     const batch = decodeFunctionData({ abi: multiSendCallOnlyAbi, data })
     const [launchCall, configureCall] = unpackMultiSend(batch.args[0])
     expect(unpackMultiSend(batch.args[0])).toHaveLength(2)
-    expect([launchCall!.operation, launchCall!.to, launchCall!.value]).toEqual([OPERATION_DELEGATECALL, address('Safe7579Launchpad'), 0n])
-    expect([configureCall!.operation, configureCall!.to, configureCall!.value]).toEqual([OPERATION_DELEGATECALL, address('SafeWebAuthnSharedSigner'), 0n])
+    expect([launchCall!.operation, launchCall!.to, launchCall!.value]).toEqual([OPERATION_DELEGATECALL, address('Safe7579Launchpad', baseRegistry), 0n])
+    expect([configureCall!.operation, configureCall!.to, configureCall!.value]).toEqual([OPERATION_DELEGATECALL, address('SafeWebAuthnSharedSigner', baseRegistry), 0n])
     const cfg = decodeFunctionData({ abi: safeWebAuthnSharedSignerAbi, data: configureCall!.data })
-    expect(cfg.args[0]).toEqual({ x: PASSKEY.x, y: PASSKEY.y, verifiers: packVerifiers(0x100, address('P256Verifier')) })
+    expect(cfg.args[0]).toEqual({ x: PASSKEY.x, y: PASSKEY.y, verifiers: packVerifiers(0x100, address('P256Verifier', baseRegistry)) })
     const launch = decodeFunctionData({ abi: safe7579LaunchpadAbi, data: launchCall!.data })
     const [adapter, validators, executors, fallbacks, hooks, attesters, attesterThreshold] = launch.args
-    expect(adapter).toBe(address('Safe7579'))
-    expect(validators).toEqual([{ module: address('SmartSession'), initData: '0x' }])
+    expect(adapter).toBe(address('Safe7579', baseRegistry))
+    expect(validators).toEqual([{ module: address('SmartSession', baseRegistry), initData: '0x' }])
     expect([executors, fallbacks, hooks]).toEqual([[], [], []])
-    expect(attesters).toEqual([address('RhinestoneAttester')])
+    expect(attesters).toEqual([address('RhinestoneAttester', baseRegistry)])
     expect(attesterThreshold).toBe(1)
   })
 
   test('matches the factory CREATE2 formula for the createProxyCall setup', () => {
     const call = createProxyCall(setup)
-    expect(call.to).toBe(address('SafeProxyFactory_141'))
+    expect(call.to).toBe(address('SafeProxyFactory_141', baseRegistry))
     const { args } = decodeFunctionData({ abi: safeProxyFactoryAbi, data: call.data })
-    expect(args[0]).toBe(address('SafeL2_141'))
+    expect(args[0]).toBe(address('SafeL2_141', baseRegistry))
     expect(args[1]).toBe(safeInitializer(setup))
     expect(args[2]).toBe(SALT_NONCE)
     expect(counterfactualAddress(setup)).toBe(factoryCreate2(args[1], args[2]))
@@ -103,7 +103,7 @@ describe('counterfactual address', () => {
 
   test('without a passkey owner the setup delegatecalls the launchpad directly', () => {
     const decoded = decodeFunctionData({ abi: safeAbi, data: safeInitializer(accountSetup([BACKUP], SALT_NONCE, null)) })
-    expect(decoded.args[2]).toBe(address('Safe7579Launchpad'))
+    expect(decoded.args[2]).toBe(address('Safe7579Launchpad', baseRegistry))
   })
 
   test('refuses an account with no owner', () => expect(() => accountSetup([], 0n, null)).toThrow())
@@ -117,7 +117,7 @@ describe('recovery kit', () => {
     expect(Object.keys(kit).sort()).toEqual(['address', 'chainId', 'modules', 'owners', 'permissionIds', 'setup', 'tokenIds', 'walkaway', 'webauthn'])
     expect(kit.chainId).toBe(31337)
     expect(kit.address).toBe(counterfactualAddress(accountSetup(OWNERS, SALT_NONCE, PASSKEY)))
-    expect(kit.webauthn).toEqual({ signer: address('SafeWebAuthnSharedSigner'), x: PASSKEY.x.toString(), y: PASSKEY.y.toString(), verifiers: PASSKEY.verifiers.toString() })
+    expect(kit.webauthn).toEqual({ signer: address('SafeWebAuthnSharedSigner', baseRegistry), x: PASSKEY.x.toString(), y: PASSKEY.y.toString(), verifiers: PASSKEY.verifiers.toString() })
     const [, , to, data] = decodeFunctionData({ abi: safeAbi, data: kit.setup.initializer }).args as unknown as [unknown, unknown, Address, Hex]
     expect([kit.setup.to, kit.setup.data]).toEqual([to, data])
     expect(kit.owners).toEqual(OWNERS)
@@ -125,8 +125,8 @@ describe('recovery kit', () => {
     expect(kit.tokenIds).toEqual(['42', '43'])
     expect(kit.walkaway).toBe(WALKAWAY_DOC)
     expect(WALKAWAY_DOC).toBe('docs/walkaway.md')
-    expect(kit.modules.adapter).toBe(address('Safe7579'))
-    expect(kit.modules.validators).toEqual([{ module: address('SmartSession'), initData: '0x' }])
+    expect(kit.modules.adapter).toBe(address('Safe7579', baseRegistry))
+    expect(kit.modules.validators).toEqual([{ module: address('SmartSession', baseRegistry), initData: '0x' }])
   })
 
   test('is plain JSON and round-trips', () => {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { concat, encodeFunctionData, erc20Abi, maxUint256, parseAbi, type Hex } from 'viem'
 import { ReasonError, type Address } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { conservadorLabV1, instantiateGrant } from '@mamoru/policy'
 import { encodeMode, CALLTYPE_DELEGATECALL, EXECTYPE_DEFAULT, type Execution } from '../safe/index.ts'
 import { executeCallData, useModeSignature } from '../sessions/index.ts'
@@ -29,7 +29,7 @@ function ledger(): SessionLedger {
   return l
 }
 function approve(spender: Address, amount: bigint, value = 0n): Execution {
-  return { target: address('USDC'), value, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [spender, amount] }) }
+  return { target: address('USDC', baseRegistry), value, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [spender, amount] }) }
 }
 function run(calls: Execution[], over: { signature?: Hex; paymaster?: Address; chainId?: number; now?: number; ledger?: SessionLedger; callData?: Hex } = {}) {
   const r = precheck(
@@ -40,7 +40,7 @@ function run(calls: Execution[], over: { signature?: Hex; paymaster?: Address; c
 }
 
 describe('session pre-check', () => {
-  const router = address('SwapRouter02')
+  const router = address('SwapRouter02', baseRegistry)
   test('a granted call within caps is accepted', () => expect(run([approve(router, 1_000_000_000n)])).toBe('ACCEPT'))
   test('approval rules', () => {
     expect(run([approve(router, maxUint256)])).toBe('POLICY_DENIED_APPROVAL')
@@ -64,7 +64,7 @@ describe('session pre-check', () => {
     const l = ledger()
     expect(l.usageOf(PID)).toEqual({ used: 0, limit: grant.userOp.usageLimit, spentBps: 0 })
     const amountIn = caps.usdcSwapTotal / 4n
-    const swap = { target: address('SwapRouter02'), value: 0n, callData: encodeFunctionData({ abi: parseAbi(['function exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))']), functionName: 'exactInputSingle', args: [[address('USDC'), address('cbBTC'), 500, ACCOUNT, amountIn, 1n, 0n]] }) }
+    const swap = { target: address('SwapRouter02', baseRegistry), value: 0n, callData: encodeFunctionData({ abi: parseAbi(['function exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))']), functionName: 'exactInputSingle', args: [[address('USDC', baseRegistry), address('cbBTC', baseRegistry), 500, ACCOUNT, amountIn, 1n, 0n]] }) }
     l.recordIncluded(PID, [swap])
     expect(l.usageOf(PID)).toEqual({ used: 1, limit: grant.userOp.usageLimit, spentBps: 2_500 })
     expect(l.usageOf(`0x${'99'.repeat(32)}`)).toBeUndefined()

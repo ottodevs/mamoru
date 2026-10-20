@@ -7,7 +7,7 @@
 import { describe, expect, test } from 'bun:test'
 import { encodeFunctionData } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, entry, nonfungiblePositionManagerAbi } from '@mamoru/registry'
+import { baseRegistry, address, entry, nonfungiblePositionManagerAbi } from '@mamoru/registry'
 import { burn, collect, decreaseLiquidity, exactInputSingle, type V3Call } from '@mamoru/uniswap-v3'
 import { budgetValue, priceRange, swapBoundsInRange, type OracleRead } from '@mamoru/uniswap-v3/policy-bounds'
 import type { Execution } from '../safe/index.ts'
@@ -17,13 +17,13 @@ const ACCOUNT: Address = '0x00000000000000000000000000000000000000a1'
 const MAMORU_POLICY: Address = '0x00000000000000000000000000000000000000fe'
 const POOL = 'pool:USDC/cbBTC/500'
 const NOW = 0
-const e = entry(POOL)
+const e = entry(POOL, baseRegistry)
 
 const cfg: ActionPolicyPoolConfig = {
   pool: POOL,
   address: MAMORU_POLICY,
-  token0: address(e.token0!),
-  token1: address(e.token1!),
+  token0: address(e.token0!, baseRegistry),
+  token1: address(e.token1!, baseRegistry),
   feePips: e.fee!,
   bandTicks: 100,
   budgetIn1: false, // USDC is token0
@@ -120,7 +120,7 @@ describe('(b) positions', () => {
 
   test('mint to the manager directly (not through the policy) is refused: POLICY_NOT_ADMITTED', () => {
     const acc: ActionPolicySpendAcc = new Map()
-    const call: Execution = { target: address('NonfungiblePositionManager'), value: 0n, callData: mintData }
+    const call: Execution = { target: address('NonfungiblePositionManager', baseRegistry), value: 0n, callData: mintData }
     const res = checkActionPolicyCall(call, cfg, baseReads, NOW, acc, never)
     expect(res).toMatchObject({ ok: false, code: 'POLICY_NOT_ADMITTED' })
   })

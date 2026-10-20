@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { encodeAbiParameters, encodeEventTopics, numberToHex, zeroAddress, type Hex, type PublicClient } from 'viem'
 import { positionEventsAbi } from '@mamoru/projector'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { historyCursor, readPositionHistory, readPositionHistoryFrom as readFrom, type HistoryCursor } from '../src/index.ts'
 
 // Read and commit, as a consistent observe() does.
@@ -11,7 +11,7 @@ async function readPositionHistoryFrom(client: PublicClient, cursor: HistoryCurs
   return events
 }
 
-const NPM = address('NonfungiblePositionManager')
+const NPM = address('NonfungiblePositionManager', baseRegistry)
 
 type Raw = { eventName: 'DecreaseLiquidity' | 'Collect'; tokenId: bigint; block: bigint; logIndex: number }
 

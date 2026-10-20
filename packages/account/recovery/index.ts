@@ -1,6 +1,6 @@
 import { concat, decodeFunctionData, encodeFunctionData, encodePacked, getContractAddress, keccak256, pad } from 'viem'
 import type { Address, Hex } from '@mamoru/domain'
-import { address, safeProxyFactoryAbi } from '@mamoru/registry'
+import { baseRegistry, address, safeProxyFactoryAbi } from '@mamoru/registry'
 import { createProxyCall, safeInitializer, setupDelegate, type SafeSetup, type WebAuthnSigner } from '../safe/index.ts'
 
 /**
@@ -17,7 +17,7 @@ export const SAFE_PROXY_141_CREATION_CODE: Hex =
  */
 export function accountSetup(owners: Address[], saltNonce: bigint, webauthn: WebAuthnSigner | null): SafeSetup {
   if (owners.length === 0) throw new Error('at least one owner')
-  const setup: SafeSetup = { owners, threshold: 1n, validators: [{ module: address('SmartSession'), initData: '0x' }], saltNonce }
+  const setup: SafeSetup = { owners, threshold: 1n, validators: [{ module: address('SmartSession', baseRegistry), initData: '0x' }], saltNonce }
   if (webauthn) setup.webauthn = { ...webauthn }
   setupDelegate(setup)
   return setup
@@ -86,8 +86,8 @@ export function recoveryKit(input: RecoveryKitInput): RecoveryKit {
     chainId: input.chainId,
     address: counterfactualAddress(setup),
     setup: {
-      factory: address('SafeProxyFactory_141'),
-      singleton: address('SafeL2_141'),
+      factory: address('SafeProxyFactory_141', baseRegistry),
+      singleton: address('SafeL2_141', baseRegistry),
       owners: [...setup.owners],
       threshold: setup.threshold.toString(),
       saltNonce: setup.saltNonce.toString(),
@@ -97,18 +97,18 @@ export function recoveryKit(input: RecoveryKitInput): RecoveryKit {
     },
     webauthn: setup.webauthn
       ? {
-          signer: address('SafeWebAuthnSharedSigner'),
+          signer: address('SafeWebAuthnSharedSigner', baseRegistry),
           x: setup.webauthn.x.toString(),
           y: setup.webauthn.y.toString(),
           verifiers: setup.webauthn.verifiers.toString(),
         }
       : null,
     modules: {
-      adapter: address('Safe7579'),
-      launchpad: address('Safe7579Launchpad'),
+      adapter: address('Safe7579', baseRegistry),
+      launchpad: address('Safe7579Launchpad', baseRegistry),
       validators: setup.validators.map((v) => ({ module: v.module, initData: v.initData })),
-      registry: address('ModuleRegistry'),
-      attesters: [address('RhinestoneAttester')],
+      registry: address('ModuleRegistry', baseRegistry),
+      attesters: [address('RhinestoneAttester', baseRegistry)],
       attesterThreshold: 1,
     },
     owners: [...setup.owners],

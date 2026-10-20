@@ -1,7 +1,7 @@
 import { toHex, type Hex } from 'viem'
 import type { UserOperation } from 'viem/account-abstraction'
 import { BASE_CHAIN_ID, FORBIDDEN_LAB_CHAIN_IDS, ReasonError, type Address } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 
 /** FR-AA-002: the only bundler methods on the critical path. */
 export const STANDARD_METHODS = [
@@ -125,7 +125,7 @@ export class BundlerClient {
     } else if (FORBIDDEN_LAB_CHAIN_IDS.includes(this.cfg.chainId) || !this.cfg.signingChainIds.includes(this.cfg.chainId)) {
       throw new ReasonError('SIGN_CHAIN_NOT_ALLOWED', `chain ${this.cfg.chainId}`)
     }
-    return this.call('eth_sendUserOperation', [toRpcUserOp(op), address('EntryPointV07')])
+    return this.call('eth_sendUserOperation', [toRpcUserOp(op), address('EntryPointV07', baseRegistry)])
   }
 
   async getUserOperationReceipt(hash: Hex): Promise<BundlerReceipt | null> {

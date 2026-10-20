@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { toEventSelector, type Hex, type Log } from 'viem'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { userOpLogs } from './index.ts'
 
-const EP = address('EntryPointV07')
-const POOL = address('pool:USDC/cbBTC/500')
+const EP = address('EntryPointV07', baseRegistry)
+const POOL = address('pool:USDC/cbBTC/500', baseRegistry)
 const BEFORE = toEventSelector('BeforeExecution()')
 const UOE = toEventSelector('UserOperationEvent(bytes32,address,address,uint256,bool,uint256,uint256)')
 const OTHER = toEventSelector('Swap(address,address,int256,int256,uint160,uint128,int24)')

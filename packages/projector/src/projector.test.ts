@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { encodeAbiParameters, encodeEventTopics, toHex, type Log } from 'viem'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { applyPrincipal, harvestRow, ledgerTotal, poolSwapAbi, positionEventsAbi, savingsRowView, splitCollect } from './index.ts'
 
-const POOL = address('pool:USDC/cbBTC/500')
-const NPM = address('NonfungiblePositionManager')
+const POOL = address('pool:USDC/cbBTC/500', baseRegistry)
+const NPM = address('NonfungiblePositionManager', baseRegistry)
 const ACCOUNT = '0x00000000000000000000000000000000000000aa'
 
 function log(addr: `0x${string}`, topics: `0x${string}`[], data: `0x${string}`, logIndex: number): Log {
@@ -19,7 +19,7 @@ const OTHER = '0x00000000000000000000000000000000000000bb'
 const swapLog = (a0: bigint, a1: bigint, i: number, recipient: `0x${string}` = ACCOUNT) =>
   log(
     POOL,
-    encodeEventTopics({ abi: poolSwapAbi, eventName: 'Swap', args: { sender: address('SwapRouter02'), recipient } }) as `0x${string}`[],
+    encodeEventTopics({ abi: poolSwapAbi, eventName: 'Swap', args: { sender: address('SwapRouter02', baseRegistry), recipient } }) as `0x${string}`[],
     encodeAbiParameters([{ type: 'int256' }, { type: 'int256' }, { type: 'uint160' }, { type: 'uint128' }, { type: 'int24' }], [a0, a1, 1n << 96n, 1n, 69_000]),
     i,
   )
