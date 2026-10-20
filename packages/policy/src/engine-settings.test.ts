@@ -16,6 +16,9 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { policyHash } from './instantiate.ts'
 import { conservadorLiveV2, POLICIES } from './policies.ts'
+import { conservadorLabV4, conservadorLiveV4 } from './policies-v4.ts'
+import { V4_GAS_CAPS, V4_POOLS, withActionPolicy } from './v4-grants.ts'
+import type { PolicyVersion } from './types.ts'
 
 const depthOn: EngineSettings = { ...DEFAULT_ENGINE_SETTINGS, depth: { impactBps: 30, shareBps: 500, stablesImpactBps: 5 }, capUsdc: 1000 }
 
@@ -172,6 +175,34 @@ describe('re-range setting (otto/mamoru#172)', () => {
       expect({ k, hash: policyHash(p) as string }).toEqual({ k, hash: PINNED_HASHES[k]! })
       // Not mutated either (policyHash memoizes per object, so compare the content as well).
       expect(JSON.stringify(p, (_, v) => (typeof v === 'bigint' ? `${v}n` : v))).toBe(before[k]!)
+    }
+  })
+
+  // Spec 007 (merged after this knob was written): the v4 policies are kept out of POLICIES and reach the operator as
+  // `withActionPolicy(conservadorLiveV4, …)` (boot.ts deployedV4). The overlay must leave them, and what their grants
+  // bind to (actionPolicy, gas policy), exactly as unchanged as the v2 family.
+  test('v4 policies: no setting changes their hash, mutates them, or touches session, buckets or actionPolicy', () => {
+    const deployed = withActionPolicy(conservadorLiveV4, '0x00000000000000000000000000000000000000a1', Object.values(V4_POOLS), {
+      gasPolicy: { address: '0x00000000000000000000000000000000000000a2', caps: V4_GAS_CAPS },
+    })
+    // Hashes on origin/main 3cd720a, before this knob.
+    const pinned: [PolicyVersion, string][] = [
+      [conservadorLiveV4, '0xdabdedb0d116c1135a085c3f295e8d3297c37e9ae11165c172fde776e0121955'],
+      [conservadorLabV4, '0x732bd7b8afa2d27805941c8f6aae0facdf57ebe2895b2e136828599f3875d429'],
+      [deployed, '0x5d5041adb7a9bec244c3188c5d59776d24862d0d07735af5dc3143c9d12fcc01'],
+    ]
+    const json = (p: PolicyVersion) => JSON.stringify(p, (_, v) => (typeof v === 'bigint' ? `${v}n` : v))
+    for (const [p, hash] of pinned) {
+      const before = json(p)
+      for (const s of Object.values(ENGINE_SETTINGS_TEMPLATES)) withEngineSettings(p, s)
+      expect({ id: p.policyId, hash: policyHash(p) as string }).toEqual({ id: p.policyId, hash })
+      expect(json(p)).toBe(before)
+      const lazy = withEngineSettings(p, lazyOn)
+      expect(lazy.range.lazy).toEqual({ ...lazyParams, requireCostEstimate: true })
+      expect(lazy.session).toBe(p.session)
+      expect(lazy.buckets).toBe(p.buckets)
+      expect(lazy.actionPolicy).toBe(p.actionPolicy)
+      expect(withEngineSettings(lazy, DEFAULT_ENGINE_SETTINGS).range).toEqual(p.range)
     }
   })
 })

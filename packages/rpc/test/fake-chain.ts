@@ -243,8 +243,12 @@ export class FakeChain {
     const pool = POOLS.map((p) => entry(p, baseRegistry)).find((e) => e.address.toLowerCase() === at)
     if (pool) {
       const i = BigInt(POOLS.indexOf(pool.name) + 1)
-      // The observation's TWAP read asks two offsets; the guard history asks the 24.5 h window or [0].
-      if (data.startsWith(sel('observe(uint32[])')) && (decodeFunctionData({ abi: observeAbi, data }).args[0] as readonly number[]).length !== 2) this.guardCalls++
+      // The observation's TWAP read asks two offsets and the v4 oracle read (spec 007, engine `poolOracle`) three; the
+      // guard history asks [0] or the 24.5 h window (50 points). Only the guard history's are counted.
+      if (data.startsWith(sel('observe(uint32[])'))) {
+        const n = (decodeFunctionData({ abi: observeAbi, data }).args[0] as readonly number[]).length
+        if (n === 1 || n > 3) this.guardCalls++
+      }
       if (data.startsWith(sel('observe(uint32[])'))) {
         // Tick cumulative falls by 1805*i over 1,800 s, linearly (floored), so any window reads about -1.003*i:
         // observe([1800, 0]) keeps answering exactly [-7000i, -7000i - 1805i]. Liquidity cumulatives stay 0.

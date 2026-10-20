@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { permissionIdOf, toSmartSession } from '@mamoru/account/sessions'
 import { settingsResponseSignature } from '@mamoru/operator-auth'
-import { canonicalSettingsJson, DEFAULT_ENGINE_SETTINGS, ENGINE_SETTINGS_TEMPLATES, grantKey, instantiateGrant, POLICIES, policyHash, type EngineSettings, type PolicyVersion } from '@mamoru/policy'
+import { canonicalSettingsJson, DEFAULT_ENGINE_SETTINGS, ENGINE_SETTINGS_TEMPLATES, grantKey, instantiateGrant, POLICIES, policyHash, retargetToPolicy, type EngineSettings, type PolicyVersion } from '@mamoru/policy'
+import { resolveV4Policy } from '../src/boot.ts'
 import { EngineSettingsSource, type SettingsVersion } from '../src/engine-settings.ts'
 import { FeeHistoryState } from '../src/fee-history-state.ts'
 import { Operator } from '../src/operator.ts'
@@ -118,6 +119,40 @@ describe('lazy re-range engine setting (otto/mamoru#172)', () => {
     expect(on.enginePolicyOf(acc)).not.toBe(V2)
     expect(grantsOf(on.enginePolicyOf(acc))).not.toBe(grantsOf(V2))
     for (const [k, p] of Object.entries(POLICIES)) expect({ k, h: policyHash(p) }).toEqual({ k, h: hashes[k]! })
+  })
+
+  test('v4 (spec 007): a conservador-live-v4 account keeps its policy object, hash and grants with the knob on', async () => {
+    const v4Policy = resolveV4Policy('base', { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: '0x00000000000000000000000000000000000000a1', MAMORU_GAS_POLICY_ADDRESS: '0x00000000000000000000000000000000000000a2' })!
+    const v4op = (settings?: EngineSettingsSource) => new Operator({ ...base, v4Policy, ...(settings ? { settings } : {}) } as never, {} as never, {} as never, store as never)
+    const off = v4op()
+    const on = v4op(await sourceWith([version(1, LAZY)]))
+    const acc = { accountKey: 'v4-acct', policyId: 'conservador-live-v4', active: true, grants: [] } as never
+    const hash = policyHash(v4Policy)
+    expect(on.policyOf(acc)).toBe(v4Policy)
+    expect(off.policyOf(acc)).toBe(v4Policy)
+    // What the operator signs for a v4 account (operator.ts prepare): every grant instantiated from `policyOf`, then
+    // retargeted to the deployed MamoruActionPolicy.
+    const signed = (op: Operator) => {
+      const p = op.policyOf(acc)
+      const ctx = { account: '0x00000000000000000000000000000000000000aa' as const, sessionKey: '0x00000000000000000000000000000000000000bb' as const, chainId: 8453, salt: `0x${'42'.repeat(32)}` as const, validAfter: 1_760_000_000, validUntil: 1_760_000_000 + p.session.validitySeconds, caps: Object.fromEntries(p.session.caps.map((c, i) => [c.name, BigInt(i + 1) * 1_000_000n])), admittedTokenIds: [], capUsdc: 100_000_000n }
+      const grants = p.session.grants.filter((g) => !g.perPosition).map((t) => {
+        const g = instantiateGrant(p, grantKey(t), ctx)
+        return t.requiresActionPolicy ? retargetToPolicy(g, p.actionPolicy!.address) : g
+      })
+      expect(grants.every((g) => g.policyHash === hash)).toBe(true)
+      return JSON.stringify(grants, (_, v) => (typeof v === 'bigint' ? `${v}n` : v))
+    }
+    expect(signed(on)).toBe(signed(off))
+    // The engine copy is lazy, keeps the account-sized action policy and the session/buckets Engine.retune checks.
+    const engine = on.enginePolicyOf(acc)
+    const eager = off.enginePolicyOf(acc)
+    expect(engine.range.lazy).toEqual({ edgeBufferTicks: 100, minDwellSeconds: 1800, horizonSeconds: 86_400, lvrWeightBps: 10_000, requireCostEstimate: true })
+    expect(eager.range.lazy).toBeUndefined()
+    expect(engine.actionPolicy).toEqual(eager.actionPolicy)
+    expect(engine.session).toBe(v4Policy.session)
+    expect(engine.buckets).toBe(v4Policy.buckets)
+    expect(on.guardHistoryOf(engine)!.shared).toBe(on.guardReads)
+    expect(policyHash(v4Policy)).toBe(hash)
   })
 
   test('a version out of the lazy bounds refuses the whole pull: the engine keeps what it ran', async () => {
