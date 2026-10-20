@@ -212,3 +212,23 @@ export const erc4626Abi = parseAbi([
   'function deposit(uint256 assets, address receiver) returns (uint256 shares)',
   'function asset() view returns (address)',
 ])
+
+/**
+ * Spec 007 (otto/mamoru#151, #171): MamoruActionPolicyV2, contracts/action-policy/src/MamoruActionPolicyV2.sol, what the
+ * engine and the operator call or read beyond V1's views. `increase` is the policy's own (not the position manager's
+ * `increaseLiquidity`); `pause`/`unpause` only the guardian may call.
+ */
+export const mamoruActionPolicyV2Abi = parseAbi([
+  'struct IncreaseLiquidityParams { uint256 tokenId; uint256 amount0Desired; uint256 amount1Desired; uint256 amount0Min; uint256 amount1Min; uint256 deadline; }',
+  'function increase(IncreaseLiquidityParams n) returns (uint128 liquidity, uint256 amount0, uint256 amount1)',
+  'function isPaused(address account) view returns (bool)',
+  'function pausedAt(address account) view returns (uint64)',
+  'function pause(address account)',
+  'function unpause(address account)',
+  'function GUARDIAN() view returns (address)',
+  'function generationOf(address account) view returns (uint64)',
+  'function admittedPool(address account, uint256 tokenId) view returns (address)',
+  'error AccountPaused(address account)',
+  'error OnlyGuardian()',
+  'error NotAdmitted(uint256 tokenId)',
+])

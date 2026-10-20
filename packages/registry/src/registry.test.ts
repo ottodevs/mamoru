@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { getAddress, isHash } from 'viem'
 import { ReasonError } from '@mamoru/domain'
-import { address, assertRegistryChain, baseRegistry, entry, monadRegistry, nameOf, registries, registryFor, type Registry } from './index.ts'
+import { address, assertRegistryChain, baseRegistry, entry, isDeployed, monadRegistry, nameOf, registries, registryFor, type Registry } from './index.ts'
 
 const ACCOUNT_STACK = [
   'EntryPointV07',
@@ -134,6 +134,21 @@ describe('monad registry', () => {
     }
     expect(nameOf(address('USDC', baseRegistry), monadRegistry)).toBeUndefined()
     expect(nameOf(address('USDC', monadRegistry), baseRegistry)).toBeUndefined()
+  })
+})
+
+describe('undeployed names (spec 007, otto/mamoru#151)', () => {
+  test('MamoruActionPolicyV2 and MamoruGuardian are named on Base without an address: nothing resolves them, so nothing can target them', () => {
+    expect(baseRegistry.undeployed).toEqual(['MamoruActionPolicyV2', 'MamoruGuardian'])
+    expect(monadRegistry.undeployed).toEqual([])
+    for (const name of ['MamoruActionPolicyV2', 'MamoruGuardian']) {
+      expect(isDeployed(name, baseRegistry)).toBe(false)
+      expect(isDeployed(name, monadRegistry)).toBe(false)
+      expect(code(() => address(name, baseRegistry))).toBe('POLICY_TARGET_NOT_IN_REGISTRY')
+      expect(() => entry(name, baseRegistry)).toThrow(/not deployed on base/)
+      expect(baseRegistry.entries.some((e) => e.name === name)).toBe(false)
+    }
+    expect(isDeployed('UniActionPolicy', baseRegistry)).toBe(true)
   })
 })
 
