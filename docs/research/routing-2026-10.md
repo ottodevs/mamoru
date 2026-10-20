@@ -78,7 +78,7 @@ address, an API — something to call).
 | `across.ts` | USDC only | Ethereum, Base, Monad (any pair) | session-key | onchain-pinnable | `depositV3`'s `depositor`/`recipient` are fixed-position addresses. ETH deliberately excluded: Across bridges it via WETH, and no WETH address per chain was verified to the same standard as USDC this round. SpokePool addresses: Ethereum `0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5`, Base `0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64`, Monad `0xd2ecb3afe598b746F8123CaE365a598DA831A449` (Across supports Monad). Validation logic mirrors the proven `checkQuote` in `apps/mamoru-operator/src/bridge-out.ts` (otto/mamoru#133). |
 | `canonical.ts` | ETH only | Ethereum <-> Base only | session-key | onchain-pinnable | Base's own StandardBridge. USDC explicitly refused (see direction table). ETH only on a chain confirmed ETH-native (`chains.ts`'s `nativeAsset`). |
 | `relay.ts` | USDC, ETH | any pair both sides support, both ETH-native-verified for ETH requests | owner-only, **quote-only in practice** | **none** | Relay's deposit calldata carries the depositor, never the on-chain recipient (confirmed by testing with a different sender and recipient — see "Third hardening pass" below) — not executable by this package's own rule. Still decodes and refuses on a token/amount/value mismatch, to protect the quoted price's trustworthiness. Stayed on the v1 endpoint: v2 began requiring an API key from 2 Oct 2026 — **flag: if v1 is retired the same way, this adapter needs re-pointing or dropping.** |
-| `lifi.ts` | USDC, ETH | per-origin-chain target allowlist (Ethereum, Base, Monad), both ETH-native-verified for ETH requests | owner-only | decoded-calldata (quote-only fallback if a facet layout can't be decoded) | LI.FI (li.quest) picks a different facet per request, but every facet's first parameter is `ILiFi.BridgeData` — decoded the same way LI.FI's own `CalldataVerificationFacet.extractBridgeData` does, checking `receiver`, `destinationChainId`, `sendingAssetId`, `minAmount` against the request. Native `value` checked against `amountIn` (ERC20: must be 0). Charges a documented 0.25% service fee. |
+| `lifi.ts` | USDC: decoded-calldata (PolymerCCTPFacet, live-verified). ETH: quote-only (AcrossV4SwapFacet, not allowlisted) | per-origin-chain target allowlist (Ethereum, Base, Monad) | owner-only | decoded-calldata only for the one allowlisted selector (`0x17917a4e`, `swapAndStartBridgeTokensViaPolymerCCTP`); quote-only for any other selector, a failed decode, or a non-canonical re-encode | LI.FI (li.quest) picks a different facet per request; only the specific selector this round's live USDC quotes actually used is decoded with its exact real ABI (`BridgeData`+`SwapData[]`+`PolymerCCTPData`) and re-encoded to check for canonical bytes, checking `receiver`, `destinationChainId`, `hasDestinationCall`, and (mirroring `swapData[0]` the way LI.FI's own `extractMainParameters` does when `hasSourceSwaps`) the sending asset and amount against the request. The ETH-quoting facet (`AcrossV4SwapFacet`) is excluded: its own docs say its receiver "cannot be fully validated on-chain". Native `value` checked against `amountIn` (ERC20: must be 0) regardless of which facet. Charges a documented 0.25% service fee. |
 | `debridge.ts` | USDC, ETH | any pair both sides support, both ETH-native-verified for ETH requests | owner-only, **quote-only in practice** | **none** | deBridge's recipient argument is right-padded inside its word, not left-padded — the generic calldata scan never actually matches it (confirmed against the real function with distinct sender/recipient addresses), and deBridge has no declared recipient field to catch the gap the way LI.FI does. Not executable by this package's own rule. Still decodes/cross-checks target, value/fixFee and chain ids to protect the quoted price. Monad addressed as deBridge's internal id `100000030`, not its EVM chain id `143` — confirmed live. |
 
 All three aggregator adapters decode the calldata they are about to return and refuse the quote outright if the
@@ -236,6 +236,58 @@ patching `lifi.ts`.
   deBridge's value checks closed earlier. Fixed: 0 for an ERC20-input order; `amountIn` (plus a small bounded
   slack, mirroring deBridge's — LI.FI attached exactly `amountIn` with no top-up in every live sample checked)
   for a native-input one.
+
+### Fifth hardening pass: a generic "decode the first struct and trust it" is its own parser-differential risk
+
+A fifth review (GPT-6/`gpt-6-sol`, queued after the 20 Oct 12:58 UTC reset) found that decoding `BridgeData`
+generically off ANY selector — the fourth pass's fix — is itself not enough: decoding successfully proves
+nothing about what the real, selector-dispatched function will actually do with those bytes unless the
+selector is known to genuinely take `BridgeData` first and use `receiver` the way assumed.
+
+- **Checked by fetching the actual facets this round's live quotes used**, not assumed. Two selectors appeared:
+  `0x17917a4e` on every USDC quote, `0x1794958f` on the native-ETH one. Computed both from
+  `lifinance/contracts` source (`toFunctionSelector` against the full parameter types) and confirmed they match
+  exactly, not merely resemble, what LI.FI returned:
+  - `0x17917a4e` = `swapAndStartBridgeTokensViaPolymerCCTP(BridgeData, LibSwap.SwapData[], PolymerCCTPData)`
+    (`PolymerCCTPFacet.sol`). Read the facet's own on-chain `_startBridge`: for any ordinary EVM
+    `destinationChainId` (never LI.FI's own non-EVM sentinel ids for Solana/Stellar/HyperCore — none of which
+    equal 1, 8453 or 143, the only ids this package ever requests), it calls Circle's `depositForBurn` directly
+    with `BridgeData.receiver` — genuinely on-chain-enforced. The facet function itself also carries a
+    `doesNotContainDestinationCalls` modifier, so `hasDestinationCall: true` reverts on-chain regardless of
+    what this adapter decodes (checked anyway, for defense in depth, since that guarantee is specific to this
+    one facet). **This is the only selector `lifi.ts` treats as decodable with certainty.**
+  - `0x1794958f` = `swapAndStartBridgeTokensViaAcrossV4(...)` (`AcrossV4SwapFacet.sol`) is **deliberately not
+    allowlisted**: the facet's own doc comment states "the final receiver is encoded inside dynamic calldata
+    that cannot be fully validated on-chain against `BridgeData.receiver`" for the paths it uses, and that
+    LI.FI's backend signs over the calldata hash specifically because the facet itself cannot verify it — LI.FI
+    is telling integrators not to trust this one the way `extractBridgeData` suggests every facet can be
+    trusted. Every native-ETH quote this round went through this facet, so LI.FI for ETH is quote-only now, not
+    decoded-calldata (CCTP/Across/the canonical bridge already cover ETH and USDC with session-key routes
+    where it matters more).
+  - Any other selector: quote-only, the same as a decode that fails outright.
+- **A successful decode is re-encoded with the exact same ABI and byte-compared against the original
+  calldata** (`canonicalDecode` in `lifi.ts`); a mismatch — extra, padded, or otherwise non-canonical bytes a
+  low-level read inside the real facet could in principle interpret differently from a standard `abi.decode` —
+  is treated the same as a decode that threw: quote-only, never trusted.
+- **`PolymerCCTPFacet._startBridge` overwrites `BridgeData.minAmount` on-chain with the real output of the
+  source swap** when `hasSourceSwaps` is true (true on every live USDC sample this round — LI.FI's own
+  fee-collection step), so the number actually entering the bridge is not a value this adapter can read
+  statically; `CalldataVerificationFacet.extractMainParameters` uses `swapData[0]`'s own fields for exactly
+  this reason, and `lifi.ts` now mirrors that convention (`swapData[0].sendingAssetId` and `.fromAmount`,
+  checked against the request) rather than trusting `BridgeData.sendingAssetId`/`minAmount` directly when
+  swaps are present. The swap step's own `callTo`/`callData` (arbitrary execution on the source chain) is not
+  independently audited — that risk is the same one every owner-only route in this package already carries,
+  backstopped by the owner's own review before signing, not by this quoting layer.
+- **The non-EVM receiver sentinel is checked explicitly** (`BridgeData.receiver !== NON_EVM_ADDRESS`), even
+  though the `destinationChainId` equality check already makes it structurally unreachable for this package's
+  three configured chains (1, 8453, 143 — none of which collide with any of LI.FI's non-EVM chain-id
+  constants, confirmed by reading `LiFiData.sol`, where `LIFI_CHAIN_ID_HYPERCORE` is a plain `1337` and the
+  others are large made-up numbers).
+
+Net effect: LI.FI's USDC quotes keep `recipientCheck: 'decoded-calldata'` (the live-observed facet is the
+verified one); LI.FI's ETH quotes became `recipientCheck: 'none'` (quote-only) this round, confirmed against a
+live smoke run, because the facet LI.FI actually uses for ETH documents its own receiver as unverifiable
+on-chain.
 
 ## What was out of scope for adapters, deliberately
 
