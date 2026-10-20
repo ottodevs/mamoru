@@ -107,7 +107,6 @@ export type FeeGrowthHistory = Map<RegistryName, readonly FeePoint[]>
 /** Kept points are at least this far apart: about 150 per pool over a day, whatever the review cadence. */
 export const FEE_POINT_STEP_SECONDS = 600
 const FEE_MAX_AGE_SECONDS = DAY + 3_600
-const U256 = 1n << 256n
 
 /**
  * Folds one point in, as `addGuardPoint` does: the moving head is replaced until it is a step past the point before
@@ -125,13 +124,29 @@ export function addFeePoint(points: readonly FeePoint[], point: FeePoint): reado
 
 /**
  * Fee growth from the first point at or after 24 h before `cur` to `cur`, as the Lab reads a dataset
- * (`packages/backtest/src/observe.ts` `feeGrowthOf`). Null when the history covers less than 12 h.
+ * (`packages/backtest/src/observe.ts` `feeGrowthOf`). Null when the history covers less than 12 h, or when either
+ * counter goes down anywhere between that point and `cur` (GPT-6 review, round 4): the cost estimate never reads a
+ * decrease as a uint256 wrap. A real wrap is astronomically rare; a decrease is far more likely a bad saved point,
+ * and a wrap read would mean enormous fees that approve a re-range. No estimate: the live lazy rule holds.
  */
 export function feeGrowth24hOf(points: readonly FeePoint[], cur: FeePoint): PoolGuardObs['feeGrowth24h'] {
-  const old = points.find((p) => p.time >= cur.time - DAY && p.time < cur.time)
-  if (!old || cur.time - old.time < DAY / 2) return null
-  const growth = (a: bigint, b: bigint) => (((a - b) % U256) + U256) % U256
-  return { growth0X128: growth(cur.growth0X128, old.growth0X128), growth1X128: growth(cur.growth1X128, old.growth1X128), seconds: cur.time - old.time }
+  const from = points.findIndex((p) => p.time >= cur.time - DAY && p.time < cur.time)
+  if (from < 0) return null
+  const old = points[from]!
+  if (cur.time - old.time < DAY / 2) return null
+  const path = [...points.slice(from).filter((p) => p.time < cur.time), cur]
+  for (let i = 1; i < path.length; i++) if (path[i]!.growth0X128 < path[i - 1]!.growth0X128 || path[i]!.growth1X128 < path[i - 1]!.growth1X128) return null
+  return { growth0X128: cur.growth0X128 - old.growth0X128, growth1X128: cur.growth1X128 - old.growth1X128, seconds: cur.time - old.time }
+}
+
+/**
+ * A live point below the last kept one (both later in time) means the kept history is wrong (a bad restore, a
+ * different chain): it is dropped and the pool starts again from the live point (GPT-6 review, round 4).
+ */
+export function feeHistoryAfter(points: readonly FeePoint[], cur: FeePoint): readonly FeePoint[] {
+  const last = points.at(-1)
+  if (last && cur.time > last.time && (cur.growth0X128 < last.growth0X128 || cur.growth1X128 < last.growth1X128)) return []
+  return points
 }
 
 export type GuardHistoryResult = {
@@ -212,7 +227,7 @@ export async function observeGuardHistory(
         return
       }
       const cur = { time: now, growth0X128: g0, growth1X128: g1 }
-      const before = fees.get(t.name) ?? []
+      const before = feeHistoryAfter(fees.get(t.name) ?? [], cur)
       fees.set(t.name, addFeePoint(before, cur))
       pools[t.name] = { ...pools[t.name]!, feeGrowth24h: feeGrowth24hOf(before, cur) }
     }

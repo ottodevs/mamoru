@@ -11,6 +11,7 @@ import {
   emptyGuardSeries,
   FEE_POINT_STEP_SECONDS,
   feeGrowth24hOf,
+  feeHistoryAfter,
   guardSecondsAgos,
   GUARD_CALLS_PER_POOL,
   observeGuardHistory,
@@ -211,13 +212,37 @@ describe('fee growth history (otto/mamoru#172)', () => {
     expect(addFeePoint(s, pt(3_600 + DAY_S + 3_600, 1n))[0]!.time).toBeGreaterThan(3_600)
   })
 
-  test('feeGrowth24hOf: from the first point at or after 24 h ago; null under 12 h of history; wraps like uint256', () => {
+  test('feeGrowth24hOf: from the first point at or after 24 h ago; null under 12 h of history; a decrease is no estimate, never a wrap', () => {
     const now = 10 * DAY_S
     expect(feeGrowth24hOf([], pt(now, 5n))).toBeNull()
     expect(feeGrowth24hOf([pt(now - 11 * 3_600, 1n)], pt(now, 5n))).toBeNull()
     expect(feeGrowth24hOf([pt(now - 30 * 3_600, 0n), pt(now - 20 * 3_600, 1n), pt(now - 3_600, 4n)], pt(now, 5n))).toEqual({ growth0X128: 4n, growth1X128: 8n, seconds: 20 * 3_600 })
+    // A saved value above the live one (GPT-6 review, round 4): read as a wrap it would be ~2^256 of fees. No estimate.
     const top = (1n << 256n) - 1n
-    expect(feeGrowth24hOf([{ time: now - DAY_S, growth0X128: top, growth1X128: top }], { time: now, growth0X128: 1n, growth1X128: 0n })).toEqual({ growth0X128: 2n, growth1X128: 1n, seconds: DAY_S })
+    expect(feeGrowth24hOf([{ time: now - DAY_S, growth0X128: top, growth1X128: top }], { time: now, growth0X128: 1n, growth1X128: 0n })).toBeNull()
+    // A dip anywhere in the window, even if the ends look fine, is no estimate either; so is one counter going down.
+    expect(feeGrowth24hOf([pt(now - 20 * 3_600, 1n), pt(now - 10 * 3_600, 9n), pt(now - 3_600, 4n)], pt(now, 10n))).toBeNull()
+    expect(feeGrowth24hOf([{ time: now - 20 * 3_600, growth0X128: 1n, growth1X128: 9n }], { time: now, growth0X128: 5n, growth1X128: 8n })).toBeNull()
+    // Points before the window do not count.
+    expect(feeGrowth24hOf([pt(now - 30 * 3_600, 99n), pt(now - 20 * 3_600, 1n)], pt(now, 5n))).toEqual({ growth0X128: 4n, growth1X128: 8n, seconds: 20 * 3_600 })
+  })
+
+  test('feeHistoryAfter: a later live point below the last kept one drops the history; an older or equal one does not', () => {
+    const h = [pt(100, 10n), pt(700, 20n)]
+    expect(feeHistoryAfter(h, pt(800, 19n))).toEqual([])
+    expect(feeHistoryAfter(h, { time: 800, growth0X128: 21n, growth1X128: 39n })).toEqual([])
+    expect(feeHistoryAfter(h, pt(800, 20n))).toBe(h)
+    expect(feeHistoryAfter(h, pt(600, 1n))).toBe(h)
+    expect(feeHistoryAfter([], pt(1, 0n))).toEqual([])
+  })
+
+  test('a restored history above the chain: the first live read drops it, gives no estimate, and starts again', async () => {
+    const now = 100 * DAY_S
+    const fees: FeeGrowthHistory = new Map([['pool:USDC/cbBTC/500', [{ time: now - 20 * 3_600, growth0X128: 1n << 200n, growth1X128: 1n << 200n }]]])
+    const shared = new SharedGuardReads({ fees })
+    const r = await shared.read(fakeClient(3_600, { growth: 5n }), MULTICALL3, [{ name: 'pool:USDC/cbBTC/500', address: BTC_POOL }], 1n, now, W)
+    expect(r['pool:USDC/cbBTC/500']!.feeGrowth24h).toBeNull()
+    expect(shared.fees.get('pool:USDC/cbBTC/500')).toEqual([{ time: now, growth0X128: 5n, growth1X128: 10n }])
   })
 
   const targets = [

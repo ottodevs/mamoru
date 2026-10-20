@@ -53,6 +53,7 @@ export {
   SharedGuardReads,
   type SharedGuardState,
   feeGrowth24hOf,
+  feeHistoryAfter,
   guardSecondsAgos,
   observeGuardHistory,
   type FeeGrowthHistory,

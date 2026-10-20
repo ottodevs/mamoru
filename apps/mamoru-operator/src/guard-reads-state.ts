@@ -1,7 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { FeeGrowthHistory, FeePoint, GuardPoint, GuardSeries, SharedGuardState } from '@mamoru/rpc'
-import type { RegistryName } from '@mamoru/registry'
+import { baseRegistry, type RegistryName } from '@mamoru/registry'
 
 const DAY = 86_400
 /** Kept fee points are a day and an hour back at most (`addFeePoint`), 600 s apart at least. */
@@ -11,7 +11,8 @@ const MAX_POOLS = 32
 const MAX_WINDOWS = 8
 /** A saved point stamped this far in the future is not trusted. */
 const FUTURE_SLACK = 300
-const POOL = /^pool:[A-Za-z0-9]+\/[A-Za-z0-9]+\/\d+$/
+/** The real file is a few KB (3 pools, about 150 fee points and 100 series points each); anything this big is refused unread. */
+export const GUARD_READS_MAX_BYTES = 1 << 20
 const UINT = /^\d{1,78}$/
 const INT = /^-?\d{1,78}$/
 const U256 = 1n << 256n
@@ -32,11 +33,19 @@ function tidy<T extends { time: number }>(points: T[], max: number): T[] {
   return points.filter((p, i) => i === points.length - 1 || p.time !== points[i + 1]!.time).slice(-max)
 }
 
-function poolEntries(raw: unknown): [RegistryName, unknown[]][] {
+/** The pools of the operator's registry: a saved name it does not know is never restored (GPT-6 review, round 4). */
+const REGISTRY_POOLS: ReadonlySet<string> = new Set(baseRegistry.entries.map((e) => e.name).filter((n) => n.startsWith('pool:')))
+
+/** Known pools only, at most MAX_POOLS; for each, the newest `max` raw points (saved oldest first), walked no further. */
+function poolEntries(raw: unknown, known: ReadonlySet<string>, max: number): [RegistryName, unknown[]][] {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
-  return Object.entries(raw as Record<string, unknown>)
-    .filter((e): e is [string, unknown[]] => POOL.test(e[0]) && Array.isArray(e[1]))
-    .slice(0, MAX_POOLS) as [RegistryName, unknown[]][]
+  const out: [RegistryName, unknown[]][] = []
+  for (const name of known) {
+    if (out.length >= MAX_POOLS) break
+    const points = Object.hasOwn(raw, name) ? (raw as Record<string, unknown>)[name] : undefined
+    if (Array.isArray(points)) out.push([name, points.slice(Math.max(0, points.length - max))])
+  }
+  return out
 }
 
 /**
@@ -53,7 +62,11 @@ export class GuardReadsState {
   private readonly file: string
   private lastPersistAt = -Infinity
 
-  constructor(private readonly stateDir: string) {
+  constructor(
+    private readonly stateDir: string,
+    /** Pools that may be restored; default: the pools of the base registry. */
+    private readonly known: ReadonlySet<string> = REGISTRY_POOLS,
+  ) {
     this.file = join(stateDir, 'guard-reads.json')
   }
 
@@ -65,14 +78,21 @@ export class GuardReadsState {
     if (!existsSync(this.file)) return empty
     let raw: unknown
     try {
+      // Sized before it is read: a huge file must not take the operator's memory at boot (GPT-6 review, round 4).
+      const size = statSync(this.file).size
+      if (size > GUARD_READS_MAX_BYTES) {
+        console.error(`[guard-reads] ${this.file} is ${size} bytes, over ${GUARD_READS_MAX_BYTES}: not read, starting empty`)
+        return empty
+      }
       raw = JSON.parse(readFileSync(this.file, 'utf8'))
-    } catch {
+    } catch (e) {
+      console.error(`[guard-reads] ${this.file} not restored: ${(e as Error)?.message?.split('\n')[0] ?? e}`)
       return empty
     }
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return empty
     const o = raw as Record<string, unknown>
     const fresh = (t: number, maxAge: number) => now - t <= maxAge && t <= now + FUTURE_SLACK
-    for (const [name, points] of poolEntries(o.fees)) {
+    for (const [name, points] of poolEntries(o.fees, this.known, FEE_MAX_POINTS)) {
       const ok: FeePoint[] = []
       for (const p of points as Record<string, unknown>[]) {
         if (!p || typeof p !== 'object' || !isTime(p.time) || !fresh(p.time, FEE_MAX_AGE)) continue
@@ -84,15 +104,23 @@ export class GuardReadsState {
       }
       if (ok.length) fees.set(name, tidy(ok, FEE_MAX_POINTS))
     }
-    const windows = o.series && typeof o.series === 'object' && !Array.isArray(o.series) ? Object.entries(o.series as Record<string, unknown>) : []
-    for (const [key, pools] of windows.slice(0, MAX_WINDOWS)) {
+    const windows: [string, unknown][] = []
+    if (o.series && typeof o.series === 'object' && !Array.isArray(o.series)) {
+      for (const key in o.series as Record<string, unknown>) {
+        if (!Object.hasOwn(o.series, key)) continue
+        const w = Number(key)
+        if (String(w) !== key || !isWindow(w)) continue
+        windows.push([key, (o.series as Record<string, unknown>)[key]])
+        if (windows.length >= MAX_WINDOWS) break
+      }
+    }
+    for (const [key, pools] of windows) {
       const w = Number(key)
-      if (String(w) !== key || !isWindow(w)) continue
       // What `observeGuardHistory` keeps (`maxAgeOf`): the 24.5 h window plus one more, about one point per half window.
       const maxAge = DAY + 2 * w
       const maxPoints = (4 * DAY) / w + 8
       const byPool = new Map<RegistryName, GuardSeries>()
-      for (const [name, points] of poolEntries(pools)) {
+      for (const [name, points] of poolEntries(pools, this.known, maxPoints)) {
         const ok: GuardPoint[] = []
         for (const p of points as Record<string, unknown>[]) {
           if (!p || typeof p !== 'object' || !isTime(p.time) || !fresh(p.time, maxAge)) continue

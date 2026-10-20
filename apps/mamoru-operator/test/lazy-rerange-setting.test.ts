@@ -12,7 +12,7 @@ import { resolveV4Policy } from '../src/boot.ts'
 import { EngineSettingsSource, type SettingsVersion } from '../src/engine-settings.ts'
 import { BTC_POOL, fakeClient, MULTICALL3 } from '../../../packages/rpc/test/fake-guard-client.ts'
 import { SharedGuardReads } from '@mamoru/rpc'
-import { GuardReadsState } from '../src/guard-reads-state.ts'
+import { GUARD_READS_MAX_BYTES, GuardReadsState } from '../src/guard-reads-state.ts'
 import { Operator } from '../src/operator.ts'
 
 const SECRET = 'op-secret'
@@ -150,12 +150,43 @@ describe('lazy re-range engine setting (otto/mamoru#172)', () => {
       writeFileSync(file, bad)
       expect(new GuardReadsState(dir).load(now)).toEqual({ fees: new Map(), series: new Map() })
     }
+    // Only pools the operator's registry knows: 40 plausible strangers cannot push a real pool out (GPT-6 review, round 4).
+    const strangers = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`pool:AAA${i}/BBB/${i + 1}`, [{ time: now - 10, growth0X128: '1', growth1X128: '1' }]]))
+    writeFileSync(file, JSON.stringify({ fees: { ...strangers, 'pool:WETH/USDC/3000': [{ time: now - 10, growth0X128: '7', growth1X128: '8' }] }, series: {} }))
+    expect([...new GuardReadsState(dir).load(now).fees.keys()]).toEqual(['pool:WETH/USDC/3000'])
+    expect(new GuardReadsState(dir, new Set(['pool:AAA1/BBB/2'])).load(now).fees.size).toBe(1)
     // At most one write a minute.
     const w = new GuardReadsState(dir)
     const one = { fees: new Map([['pool:WETH/USDC/3000', [{ time: now, growth0X128: 1n, growth1X128: 2n }]]]), series: new Map() } as never
     w.update(one, 1_000)
     w.update({ fees: new Map(), series: new Map() } as never, 30_000)
     expect(new GuardReadsState(dir).load(now).fees.size).toBe(1)
+  })
+
+  test('an oversized state file is refused unread: the operator starts empty, never crashes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'guard-reads-'))
+    const now = 1_800_000_000
+    // Valid JSON, just big: 2 MiB of points for a real pool.
+    const point = { time: now - 10, growth0X128: '7', growth1X128: '8' }
+    const big = JSON.stringify({ fees: { 'pool:WETH/USDC/3000': Array.from({ length: 40_000 }, () => point) }, series: {} })
+    expect(big.length).toBeGreaterThan(GUARD_READS_MAX_BYTES)
+    writeFileSync(join(dir, 'guard-reads.json'), big)
+    const errors: string[] = []
+    const orig = console.error
+    console.error = (m: string) => errors.push(m)
+    try {
+      expect(new GuardReadsState(dir).load(now)).toEqual({ fees: new Map(), series: new Map() })
+      const op = new Operator({ ...base, guardReadsState: new GuardReadsState(dir) } as never, {} as never, {} as never, store as never)
+      expect(op.guardReads.fees.size).toBe(0)
+    } finally {
+      console.error = orig
+    }
+    expect(errors.some((e) => e.includes('not read, starting empty'))).toBe(true)
+    // Just under the cap it is read, and capped to the newest points the history keeps.
+    writeFileSync(join(dir, 'guard-reads.json'), JSON.stringify({ fees: { 'pool:WETH/USDC/3000': Array.from({ length: 5_000 }, (_, i) => ({ ...point, time: now - 5_000 + i })) }, series: {} }))
+    const fees = new GuardReadsState(dir).load(now).fees.get('pool:WETH/USDC/3000')!
+    expect(fees.length).toBe((2 * DAY_S) / 600 + 8)
+    expect(fees.at(-1)!.time).toBe(now - 1)
   })
 
   test('grants are byte-identical with the knob on or off, and so is every policy hash', async () => {
