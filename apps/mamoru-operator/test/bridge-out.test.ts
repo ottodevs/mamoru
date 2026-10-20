@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { TransactionNotFoundError, TransactionReceiptNotFoundError } from 'viem'
 import { ACROSS_SPOKE_POOL, BridgeOut, checkQuote, DAILY_BUDGET_WEI, MAX_FEE_BPS, type AcrossQuote } from '../src/bridge-out.ts'
 import { HttpError } from '../src/operator.ts'
 
@@ -70,7 +71,10 @@ describe('the operator bundler guard (#180)', () => {
   const make = (o: { now?: () => number; dir?: string; chain?: Partial<Record<string, unknown>> } = {}) => {
     const dir = o.dir ?? mkdtempSync(join(tmpdir(), 'mamoru-guard-'))
     if (!o.dir) writeFileSync(join(dir, 'bridge-out.json'), JSON.stringify({ routes: { a: route('r1', K1), b: route('r2', K2) }, spent: { day: '', wei: '0' }, moves: {} }))
-    const l1 = { getGasPrice: async () => 1_000_000_000n, getBalance: async () => 10n ** 18n, getTransactionReceipt: async () => null, getTransactionCount: async () => 0, ...o.chain } as unknown as import('viem').PublicClient
+    const notFound = async ({ hash }: { hash: Hex }) => {
+      throw new TransactionReceiptNotFoundError({ hash })
+    }
+    const l1 = { getGasPrice: async () => 1_000_000_000n, getBalance: async () => 10n ** 18n, getTransactionReceipt: notFound, getTransaction: async ({ hash }: { hash: Hex }) => Promise.reject(new TransactionNotFoundError({ hash })), getTransactionCount: async () => 0, ...o.chain } as unknown as import('viem').PublicClient
     const relayer = { address: '0x0000000000000000000000000000000000000001' as const, send: async () => Promise.reject(new Error('unused')) }
     const bo = new BridgeOut(l1, relayer, dir, fetch, o.now ?? Date.now, undefined, () => true)
     const j = () => JSON.parse(readFileSync(join(dir, 'bridge-out.json'), 'utf8'))
@@ -100,28 +104,44 @@ describe('the operator bundler guard (#180)', () => {
     await expect(g.before(K2, 1_400_000n)).rejects.toThrow('paused for today')
   })
 
-  test('a held reservation is released only on proof: a receipt settles cost minus refund; a taken nonce without a receipt settles 0', async () => {
-    let receipt: unknown = null
+  test('a held reservation is released only on proof: a node error changes nothing; a taken nonce with no receipt and no transaction, seen twice 30 min apart, settles 0', async () => {
+    let receiptMode: 'error' | 'none' = 'error'
     let count = 5
-    const { bo, dir, reserved, spent } = make({ chain: { getTransactionReceipt: async () => receipt, getTransactionCount: async () => count } })
+    let clock = Date.parse('2026-10-20T10:00:00Z')
+    const { bo, dir, reserved, spent } = make({
+      now: () => clock,
+      chain: {
+        getTransactionReceipt: async ({ hash }: { hash: Hex }) => {
+          if (receiptMode === 'error') throw new Error('node down')
+          throw new TransactionReceiptNotFoundError({ hash })
+        },
+        getTransactionCount: async () => count,
+      },
+    })
     const g = bo.bundlerGuard()
     await g.before(K1, 1_000_000n)
     g.sending(K1, 2_000_000_000_000_000n, 1_000_000n)
     g.sent(K1, T1, 7)
     g.failed(K1, true)
+    count = 8
     await bo.tick()
     expect(Object.keys(reserved())).toEqual([K1])
-    count = 8
+    receiptMode = 'none'
+    await bo.tick()
+    expect(reserved()[K1]?.goneAt).toBeDefined()
+    clock += 10 * 60_000
+    await bo.tick()
+    expect(Object.keys(reserved())).toEqual([K1])
+    clock += 25 * 60_000
     await bo.tick()
     expect(reserved()).toEqual({})
     expect(spent()).toBe(0n)
     // A restart keeps a signed reservation and drops one that was never signed.
-    const { bo: b2, reserved: r2 } = make({ dir })
+    const { bo: b2, reserved: r2 } = make({ dir, now: () => clock })
     const g2 = b2.bundlerGuard()
     await g2.before(K2, 1_000_000n)
     expect(Object.keys(r2())).toEqual([K2])
     expect(Object.keys(make({ dir }).reserved())).toEqual([])
-    void receipt
   })
 
   test('after(): cost minus refund, never below zero; across midnight the reservation still counts until settled', async () => {

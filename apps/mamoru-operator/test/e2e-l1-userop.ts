@@ -570,6 +570,20 @@ try {
   // and mint it.
   jm.routes[cctx.accountKey] = { ...jm.routes[cctx.accountKey], state: 'unconfirmed', mintTx: `0x${'cc'.repeat(32)}`, mintAt: new Date(clock - 11 * 60_000).toISOString() }
   writeFileSync(jf, JSON.stringify({ ...jm, mintDays: {} }))
+  // Base gas just under the 2 gwei ceiling, so the relayer would sign maxFeePerGas = 2 x base + tip above it: the
+  // signed fee cap is checked before the broadcast and nothing is sent.
+  {
+    const hot = make({ now: () => clock, minter: true, stateDir: cdir, noPaymaster: true })
+    await baseLab.rpc('anvil_setNextBlockBaseFeePerGas', ['0x' + (950_000_000).toString(16)])
+    await baseLab.rpc('evm_mine', [])
+    await baseLab.rpc('anvil_setNextBlockBaseFeePerGas', ['0x' + (950_000_000).toString(16)])
+    const gp = await baseClient.getGasPrice()
+    clock += 11_000
+    await hot.tick()
+    check(gp <= 2_000_000_000n && (await baseClient.getTransactionCount({ address: baseRelayer.address })) === baseNonce0 && (await hot.status(cctx)).route?.state === 'deposited', `Base gas ${gp} wei (under the ceiling) but the signed fee cap above 2 gwei: no mint sent (rolled-back operator, burn resolved first)`)
+    await baseLab.rpc('anvil_setNextBlockBaseFeePerGas', ['0x' + (10_000_000).toString(16)])
+    await baseLab.rpc('evm_mine', [])
+  }
   const cbo2 = make({ now: () => clock, minter: true, stateDir: cdir, noPaymaster: true })
   check(cbo2.pendingCctp() === 1, 'after the rollback: one CCTP move to finish on Base')
   clock += 11_000

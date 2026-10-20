@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { encodeFunctionData, getAddress, pad, parseAbi, parseAbiItem, parseEventLogs, toHex, zeroAddress, type Hex, type Log, type PublicClient, type TransactionReceipt } from 'viem'
+import { encodeFunctionData, getAddress, pad, parseAbi, parseAbiItem, parseEventLogs, TransactionNotFoundError, TransactionReceiptNotFoundError, toHex, zeroAddress, type Hex, type Log, type PublicClient, type TransactionReceipt } from 'viem'
 import type { UserOperation } from 'viem/account-abstraction'
 import type { AccountContext, Address, BridgeOutRoute, BridgeOutToSign, BridgeOutView, OwnerSignature } from '@mamoru/domain'
 import { address, entryPointV07Abi, erc20Abi } from '@mamoru/registry'
@@ -133,7 +133,7 @@ export type Deposit = {
 /** The relayer sends this module needs, so tests can stand in for the operator's Relayer. */
 export type L1Sender = {
   readonly address: Address
-  send(tx: { to: Address; data?: Hex; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: (maxFeeWei: bigint) => void, onSigned?: (hash: Hex, nonce: number) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }>
+  send(tx: { to: Address; data?: Hex; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: (maxFeeWei: bigint, signed: { hash: Hex; nonce: number; maxFeePerGas: bigint }) => void, onSigned?: (hash: Hex, nonce: number) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }>
 }
 
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>
@@ -154,6 +154,8 @@ export const MINT_BUDGET_WEI = 2_000_000_000_000_000n
 export const MINTS_PER_DAY = 100
 /** A mint signed but without a receipt after this long is tried again (it may never have been broadcast). */
 export const MINT_PENDING_MS = 10 * 60_000
+/** A reservation whose transaction can never land is released after it looked so for this long. */
+export const RESERVATION_GONE_MS = 30 * 60_000
 type Prepared = { prepareId: string; accountKey: string; live: LiveAccount; tx: SafeTx; safeTxHash: Hex; deposit: Deposit; deployed: boolean; expires: number; userOp?: PreparedOp }
 
 /** The bundler and paymaster of the userOp path. */
@@ -166,7 +168,7 @@ type Stored = BridgeOutRoute & { id: string; safe: Address; safeNonce: string; f
  * bundle's receipt (settled to cost minus the EntryPoint's refund), or its relayer nonce taken by another transaction
  * with no receipt for it (it can never land: released). `tx`/`nonce` are written before the broadcast.
  */
-type Reservation = { wei: string; tx?: Hex; nonce?: number; at: string }
+type Reservation = { wei: string; tx?: Hex; nonce?: number; at: string; goneAt?: string }
 type Journal = { reservations?: Record<string, Reservation>; cctpBurns?: Record<string, string[]>; routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
 
 const NON_TERMINAL = new Set<BridgeOutRoute['state']>(['sending', 'deposited', 'unconfirmed', 'expired'])
@@ -805,7 +807,9 @@ export class BridgeOut {
   private async settleReservations(): Promise<void> {
     for (const [key, r] of Object.entries(this.journal.reservations ?? {})) {
       if (this.bundling.has(key) || !r.tx) continue
-      const rc = await this.l1.getTransactionReceipt({ hash: r.tx }).catch(() => null)
+      // undefined: the node did not answer (unknown, nothing changes); null: the node says there is no receipt.
+      const rc = await this.l1.getTransactionReceipt({ hash: r.tx }).catch((e) => (e instanceof TransactionReceiptNotFoundError ? null : undefined))
+      if (rc === undefined) continue
       if (rc) {
         const refund = parseEventLogs({ abi: entryPointV07Abi, eventName: 'UserOperationEvent', logs: rc.logs.filter((l) => getAddress(l.address) === address('EntryPointV07')) }).reduce((a, l) => a + l.args.actualGasCost, 0n)
         // The refund goes to the beneficiary, the relayer itself (bundler.ts handleOpsData).
@@ -813,8 +817,22 @@ export class BridgeOut {
         continue
       }
       if (r.nonce === undefined) continue
+      // Its relayer nonce taken by another transaction and no receipt for it: it can never land. Released only when
+      // that holds on ticks at least RESERVATION_GONE_MS apart (a lagging node cannot release it in one reading), and
+      // the node also does not know the transaction.
       const mined = await this.l1.getTransactionCount({ address: this.relayer.address, blockTag: 'latest' }).catch(() => -1)
-      if (mined > r.nonce && !(await this.l1.getTransactionReceipt({ hash: r.tx }).catch(() => null))) this.settle(key, 0n)
+      const known = await this.l1.getTransaction({ hash: r.tx }).then(
+        () => true,
+        (e) => (e instanceof TransactionNotFoundError ? false : undefined),
+      )
+      if (mined > r.nonce && known === false) {
+        if (!r.goneAt) this.reserve(key, BigInt(r.wei), { goneAt: new Date(this.now()).toISOString() })
+        else if (this.now() - Date.parse(r.goneAt) >= RESERVATION_GONE_MS) this.settle(key, 0n)
+      } else if (r.goneAt) {
+        const { goneAt: _g, ...rest } = r
+        this.journal.reservations![key] = rest
+        this.save()
+      }
     }
   }
 
@@ -1237,10 +1255,12 @@ export class BridgeOut {
         sent = await base.relayer.send(
           { to: MESSAGE_TRANSMITTER_V2, data: receiveMessageData(att.message, att.attestation), gas: MINT_GAS },
           undefined,
-          (maxFeeWei) => {
-            // The relayer's real bound, before anything is broadcast: over the admission day's cap, it stops here.
+          (maxFeeWei, { maxFeePerGas }) => {
+            // The relayer's real bound, before anything is broadcast: over the admission day's cap, or signed above the
+            // Base gas ceiling, it stops here.
             charge(maxFeeWei)
-            if (BigInt(this.mintDay(day).wei) > MINT_BUDGET_WEI) throw new MintBudget()
+            if (BigInt(this.mintDay(day).wei) > MINT_BUDGET_WEI) throw new MintBudget('Base mint budget for today used up, minting tomorrow')
+            if (maxFeePerGas > MAX_BASE_GAS_PRICE_WEI) throw new MintBudget('Base gas above the mint ceiling, minting later')
           },
           (h) => {
             // The mint's hash (and the nonce it mints) is on disk before the broadcast.
@@ -1255,7 +1275,7 @@ export class BridgeOut {
         // Nothing was signed for broadcast: the day gets its count and charge back.
         if (!broadcast) charge(0n, -1)
         if (e instanceof MintBudget) {
-          logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, 'Base mint budget for today used up, minting tomorrow')
+          logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, e.message)
           return
         }
         throw e
