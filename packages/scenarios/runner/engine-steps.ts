@@ -2,7 +2,7 @@ import { decodeFunctionData, encodeFunctionData, isAddressEqual, maxUint128, par
 import type { Address, ReasonCode } from '@mamoru/domain'
 import { canonicalJson, decide, type Decision } from '@mamoru/decide'
 import { POLICIES, computeCaps, type PolicyVersion, type Price } from '@mamoru/policy'
-import { address, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, safeProxyFactoryAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { baseRegistry, address, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, safeProxyFactoryAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { approve, decreaseLiquidity, exactInputSingle } from '@mamoru/uniswap-v3'
 import { minOut, quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { toPackedUserOperation } from 'viem/account-abstraction'
@@ -93,7 +93,7 @@ async function activationPrices(ctx: ScenarioCtx, policy: PolicyVersion): Promis
   const lab = worldOf(ctx).lab
   const prices: Record<string, Price> = {}
   for (const name of policy.buckets.flatMap((b) => b.pools)) {
-    const e = entry(name)
+    const e = entry(name, baseRegistry)
     const [sqrt] = await lab.client.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'slot0' })
     const q192 = 1n << 192n
     if (e.token0 === 'USDC') prices[e.token1!] = { num: sqrt * sqrt, den: q192 }
@@ -176,11 +176,11 @@ async function snapshot(ctx: ScenarioCtx, engine: Engine): Promise<AccountSnapsh
   for (const t of ['USDC', 'cbBTC', 'WETH']) tokens[t] = await w.lab.balanceOf(t, w.a1.safe)
   const liquidity: Record<string, bigint> = {}
   for (const id of engine.allowedTokenIds) {
-    const p = await c.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [id] })
+    const p = await c.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [id] })
     liquidity[String(id)] = p[7]
   }
   return {
-    eth: (await c.getBalance({ address: w.a1.safe })) + (await c.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'balanceOf', args: [w.a1.safe] })),
+    eth: (await c.getBalance({ address: w.a1.safe })) + (await c.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'balanceOf', args: [w.a1.safe] })),
     nonce: await w.lab.entryPointNonce(w.a1.safe, sessionNonceKey(engine.cfg.nonceLane)),
     tokens,
     liquidity,
@@ -200,8 +200,8 @@ function decisionCodes(d: Decision): Set<string> {
 }
 
 function policyTargets(policy: PolicyVersion): Set<string> {
-  const tokens = policy.buckets.flatMap((b) => b.pools).flatMap((p) => [entry(p).token0!, entry(p).token1!])
-  return new Set([...tokens, 'NonfungiblePositionManager', 'SwapRouter02'].map((n) => address(n).toLowerCase()))
+  const tokens = policy.buckets.flatMap((b) => b.pools).flatMap((p) => [entry(p, baseRegistry).token0!, entry(p, baseRegistry).token1!])
+  return new Set([...tokens, 'NonfungiblePositionManager', 'SwapRouter02'].map((n) => address(n, baseRegistry).toLowerCase()))
 }
 
 /** INV-RECIPIENT, INV-TARGETS, INV-ETH-GAS, INV-NONCE and zero allowances, on one operation. */
@@ -227,7 +227,7 @@ async function checkOp(ctx: ScenarioCtx, engine: Engine, op: OpRecord, before: A
   const allowances: string[] = []
   for (const t of ['USDC', 'cbBTC', 'WETH']) {
     for (const s of ['SwapRouter02', 'NonfungiblePositionManager']) {
-      const a = await w.lab.client.readContract({ address: address(t), abi: erc20Abi, functionName: 'allowance', args: [w.a1.safe, address(s)] })
+      const a = await w.lab.client.readContract({ address: address(t, baseRegistry), abi: erc20Abi, functionName: 'allowance', args: [w.a1.safe, address(s, baseRegistry)] })
       if (a !== 0n) allowances.push(`${t}->${s} ${a}`)
     }
   }
@@ -247,7 +247,7 @@ type CallView = { target: string; fn: string; args: readonly unknown[] }
 
 function viewCalls(op: OpRecord): CallView[] {
   return (op.calls ?? []).map((c) => {
-    const target = entry(nameFor(c.target)).name
+    const target = entry(nameFor(c.target), baseRegistry).name
     const abi = target === 'SwapRouter02' ? swapRouter02Abi : target === 'NonfungiblePositionManager' ? nonfungiblePositionManagerAbi : erc20Abi
     const d = decodeFunctionData({ abi, data: c.callData })
     return { target, fn: d.functionName, args: d.args ?? [] }
@@ -255,7 +255,7 @@ function viewCalls(op: OpRecord): CallView[] {
 }
 
 function nameFor(a: Address): string {
-  for (const n of ['USDC', 'cbBTC', 'WETH', 'SwapRouter02', 'NonfungiblePositionManager']) if (isAddressEqual(address(n), a)) return n
+  for (const n of ['USDC', 'cbBTC', 'WETH', 'SwapRouter02', 'NonfungiblePositionManager']) if (isAddressEqual(address(n, baseRegistry), a)) return n
   throw new Error(`call to ${a} outside the policy targets`)
 }
 
@@ -268,14 +268,14 @@ function callShape(op: OpRecord, account: Address): string[] {
   if (p.kind === 'enter_swap') {
     if (sig !== `${p.tokenIn}.approve SwapRouter02.exactInputSingle`) errs.push(`calls ${sig}`)
     const [spender, amount] = calls[0]!.args as [Address, bigint]
-    if (!isAddressEqual(spender, address('SwapRouter02')) || amount !== p.amountIn) errs.push('approve is not exact to SwapRouter02')
+    if (!isAddressEqual(spender, address('SwapRouter02', baseRegistry)) || amount !== p.amountIn) errs.push('approve is not exact to SwapRouter02')
     const s = calls[1]!.args[0] as { tokenIn: Address; tokenOut: Address; fee: number; recipient: Address; amountOutMinimum: bigint; sqrtPriceLimitX96: bigint }
-    if (!isAddressEqual(s.tokenIn, address(p.tokenIn)) || !isAddressEqual(s.tokenOut, address(p.tokenOut)) || s.fee !== p.fee) errs.push('swap pair or fee')
+    if (!isAddressEqual(s.tokenIn, address(p.tokenIn, baseRegistry)) || !isAddressEqual(s.tokenOut, address(p.tokenOut, baseRegistry)) || s.fee !== p.fee) errs.push('swap pair or fee')
     if (!isAddressEqual(s.recipient, account)) errs.push('swap recipient is not the account')
     if (s.amountOutMinimum <= 0n) errs.push('amountOutMinimum is not positive')
     if (s.sqrtPriceLimitX96 !== 0n) errs.push('sqrtPriceLimitX96 is not 0')
   } else if (p.kind === 'enter_mint') {
-    const pool = entry(p.pool)
+    const pool = entry(p.pool, baseRegistry)
     const want = `${pool.token0}.approve ${pool.token1}.approve NonfungiblePositionManager.mint ${pool.token0}.approve ${pool.token1}.approve`
     if (sig !== want) errs.push(`calls ${sig}`)
     const m = calls[2]!.args[0] as { tickLower: number; tickUpper: number; amount0Min: bigint; amount1Min: bigint; recipient: Address }
@@ -290,9 +290,9 @@ function callShape(op: OpRecord, account: Address): string[] {
     if (c.tokenId !== p.tokenId || !isAddressEqual(c.recipient, account) || c.amount0Max !== maxUint128 || c.amount1Max !== maxUint128) errs.push('collect is not tokenId, account, max')
     if (p.convert) {
       const [spender, amount] = calls[1]!.args as [Address, bigint]
-      if (!isAddressEqual(spender, address('SwapRouter02')) || amount !== p.convert.amount) errs.push('convert approve is not exact')
+      if (!isAddressEqual(spender, address('SwapRouter02', baseRegistry)) || amount !== p.convert.amount) errs.push('convert approve is not exact')
       const s = calls[2]!.args[0] as { tokenIn: Address; tokenOut: Address; amountIn: bigint; recipient: Address }
-      if (!isAddressEqual(s.tokenIn, address(p.convert.token)) || !isAddressEqual(s.tokenOut, address('USDC')) || s.amountIn !== p.convert.amount) errs.push('convert swap')
+      if (!isAddressEqual(s.tokenIn, address(p.convert.token, baseRegistry)) || !isAddressEqual(s.tokenOut, address('USDC', baseRegistry)) || s.amountIn !== p.convert.amount) errs.push('convert swap')
       if (!isAddressEqual(s.recipient, account)) errs.push('convert recipient is not the account')
     }
     if (calls.some((c) => c.fn === 'decreaseLiquidity')) errs.push('harvest decreases liquidity')
@@ -384,7 +384,7 @@ async function checkReview(ctx: ScenarioCtx, label: string, expect: ReviewExpect
   }
   if (expect.managed) {
     const id = op?.mintedTokenId
-    const owner = id === undefined ? undefined : await w.lab.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [id] })
+    const owner = id === undefined ? undefined : await w.lab.client.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [id] })
     const ok = id !== undefined && engine.allowedTokenIds.includes(id) && !!owner && isAddressEqual(owner, w.a1.safe) && engine.sessions.some((s) => s.name === `manage:${id}`)
     out.push({ step: `${label}: new position is managed`, ok, detail: ok ? `tokenId ${id} owned by the account, in allowedTokenIds, grant manage:${id}` : `tokenId ${id ?? 'none'}` })
   }
@@ -432,10 +432,10 @@ const decideWithPolicyStep: StepHandler = async (ctx, args) => {
  */
 async function inRangeSwapUsdc(ctx: ScenarioCtx, poolName: string, tokenId: bigint): Promise<bigint> {
   const c = worldOf(ctx).lab.client
-  const e = entry(poolName)
+  const e = entry(poolName, baseRegistry)
   const [sqrt, tick] = await c.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'slot0' })
   const liquidity = await c.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'liquidity' })
-  const pos = await c.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] })
+  const pos = await c.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] })
   const [lower, upper] = [pos[5], pos[6]]
   if (e.token0 === 'USDC') {
     const target = sqrtRatioAtTick(tick - Math.floor((tick - lower) / 2))
@@ -448,7 +448,7 @@ async function inRangeSwapUsdc(ctx: ScenarioCtx, poolName: string, tokenId: bigi
 /** swaps-in-range: the whale swaps both ways on the pool without leaving the range. */
 async function swapsInRange(ctx: ScenarioCtx, poolName: string, tokenId: bigint): Promise<bigint> {
   const w = worldOf(ctx)
-  const e = entry(poolName)
+  const e = entry(poolName, baseRegistry)
   const volatile = e.token0 === 'USDC' ? e.token1! : e.token0!
   const amount = await inRangeSwapUsdc(ctx, poolName, tokenId)
   await w.lab.setBalance(WHALE, 10n ** 18n)
@@ -499,7 +499,7 @@ const harvestStateStep: StepHandler = async (ctx) => {
   if (!pre || !row) throw new Error('harvest-state needs a confirmed harvest first')
   const post = await snapshot(ctx, run.engine)
   const id = String(run.engine.allowedTokenIds[0])
-  const pool = entry((run.engine.journal.op(row.opId).intent as { pool: string }).pool)
+  const pool = entry((run.engine.journal.op(row.opId).intent as { pool: string }).pool, baseRegistry)
   const savingsIs0 = pool.token0 === 'USDC'
   const [principalUsdc, principalVolatile] = savingsIs0 ? row.principal : [row.principal[1], row.principal[0]]
   const volatile = savingsIs0 ? pool.token1! : pool.token0!
@@ -531,7 +531,7 @@ const savingsLogStep: StepHandler = async (ctx, args) => {
   if (!row) return { step: 'Savings Log harvest row', ok: false, detail: 'no row' }
   const op = engine.journal.op(row.opId)
   const logs = await opLogs(ctx, op)
-  const pool = entry((op.intent as { pool: string }).pool)
+  const pool = entry((op.intent as { pool: string }).pool, baseRegistry)
   const savingsIs0 = pool.token0 === 'USDC'
   const expected: Pair = args.principal === 'owner' ? (run.ownerPrincipal ?? [-1n, -1n]) : [0n, 0n]
   const collect = positionEvents(logs).find((e) => e.kind === 'collect' && e.tokenId === row.tokenId)
@@ -574,7 +574,7 @@ const ownerWithdrawsStep: StepHandler = async (ctx, args) => {
   const run = runOf(ctx)
   const tokenId = run.engine.allowedTokenIds[0]
   if (tokenId === undefined) throw new Error('owner-withdraws needs a managed position')
-  const npm = address('NonfungiblePositionManager')
+  const npm = address('NonfungiblePositionManager', baseRegistry)
   const pos = await w.lab.client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] })
   const liquidity = (pos[7] * BigInt(Number(args.decreasePercent ?? 10))) / 100n
   const dec = decreaseLiquidity({ tokenId, liquidity, amount0Min: 0n, amount1Min: 0n, deadline: (await w.lab.timestamp()) + 600n })
@@ -611,9 +611,9 @@ const foreignSwapInBundleStep: StepHandler = async (ctx) => {
   const backupOwner = devAccount(6)
   const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a2)
   const call = createProxyCall({
-    owners: [address('SafeWebAuthnSharedSigner'), backupOwner.address],
+    owners: [address('SafeWebAuthnSharedSigner', baseRegistry), backupOwner.address],
     threshold: 1n,
-    validators: [{ module: address('SmartSession'), initData: '0x' }],
+    validators: [{ module: address('SmartSession', baseRegistry), initData: '0x' }],
     saltNonce: 2n,
     webauthn: webAuthnSigner(passkey.x, passkey.y),
   })
@@ -637,10 +637,10 @@ const foreignSwapInBundleStep: StepHandler = async (ctx) => {
   if (!(await lab.send(w.gasPayer, safe, '0x', GAS_RESERVE_WEI)).ok) throw new Error('second account gas failed')
   if (!(await lab.whaleTransfer('USDC', WHALE, safe, SECOND_DEPOSIT_USDC)).ok) throw new Error('second account deposit failed')
   const [grant] = await activateGrants(w, a2, [{ name: 'enter-swap' }])
-  const pool = entry('pool:USDC/cbBTC/500')
+  const pool = entry('pool:USDC/cbBTC/500', baseRegistry)
   const amountIn = 100_000_000n
   const block = await lab.client.getBlock({ blockTag: 'latest' })
-  const quote = await quoteExactInputSingle(lab.client, { tokenIn: address('USDC'), tokenOut: address('cbBTC'), fee: pool.fee!, amountIn, blockNumber: block.number })
+  const quote = await quoteExactInputSingle(lab.client, { tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), fee: pool.fee!, amountIn, blockNumber: block.number })
   const calls = [approve('USDC', 'SwapRouter02', amountIn), exactInputSingle({ account: safe, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: pool.fee!, amountIn, amountOutMinimum: minOut(quote, policy.execution.slippageBps) })]
   const nonce = await lab.entryPointNonce(safe, sessionNonceKey(0))
   const gas = { ...LAB_GAS_LIMITS, maxFeePerGas: (block.baseFeePerGas ?? 0n) * 4n + MAX_PRIORITY_FEE_PER_GAS, maxPriorityFeePerGas: MAX_PRIORITY_FEE_PER_GAS }
@@ -664,7 +664,7 @@ const sharedBundleStep: StepHandler = async (ctx) => {
   const events = parseEventLogs({ abi: entryPointV07Abi, logs: receipt.logs, eventName: 'UserOperationEvent' })
   const theirs = events.find((e) => e.args.userOpHash === foreign.hash)
   const ours = events.find((e) => e.args.userOpHash === run.engine.journal.op(row.opId).userOpHash)
-  const pool = entry('pool:USDC/cbBTC/500').address
+  const pool = entry('pool:USDC/cbBTC/500', baseRegistry).address
   const all = swapFills(receipt.logs, pool)
   const errs: string[] = []
   if (events.length !== 2 || !theirs || !ours) errs.push(`${events.length} userOps in the bundle`)
@@ -710,7 +710,7 @@ export function signedAmountOutMinimum(callData: Hex): bigint | null {
   const decoded = decodeExecute(callData)
   if ('code' in decoded) return null
   const swaps = decoded.calls
-    .filter((c) => isAddressEqual(c.target, address('SwapRouter02')))
+    .filter((c) => isAddressEqual(c.target, address('SwapRouter02', baseRegistry)))
     .map((c) => decodeFunctionData({ abi: swapRouter02Abi, data: c.callData }))
     .filter((d) => d.functionName === 'exactInputSingle')
   if (swaps.length !== 1) return null
@@ -723,7 +723,7 @@ function withAmountOutMinimum(callData: Hex, amountOutMinimum: bigint): Hex {
   if ('code' in decoded) throw new Error(decoded.detail)
   return executeCallData(
     decoded.calls.map((c) => {
-      if (!isAddressEqual(c.target, address('SwapRouter02'))) return c
+      if (!isAddressEqual(c.target, address('SwapRouter02', baseRegistry))) return c
       const d = decodeFunctionData({ abi: swapRouter02Abi, data: c.callData })
       if (d.functionName !== 'exactInputSingle') return c
       const params = d.args[0] as Parameters<typeof exactInputSingleArgs>[0]
@@ -744,7 +744,7 @@ const swapChecksStep: StepHandler = async (ctx) => {
   if (!op || op.intent.kind !== 'enter_swap' || !op.quote || !op.userOp || !op.included) return { step: 'swap checks', ok: false, detail: 'no confirmed enter_swap' }
   const p = op.intent
   const out: StepResult[] = []
-  const quote = await quoteExactInputSingle(w.lab.client, { tokenIn: address(p.tokenIn), tokenOut: address(p.tokenOut), fee: p.fee, amountIn: p.amountIn, blockNumber: op.prepareBlock! })
+  const quote = await quoteExactInputSingle(w.lab.client, { tokenIn: address(p.tokenIn, baseRegistry), tokenOut: address(p.tokenOut, baseRegistry), fee: p.fee, amountIn: p.amountIn, blockNumber: op.prepareBlock! })
   const recomputed = minOut(quote, run.engine.cfg.policy.execution.slippageBps)
   // The minimum that was signed is the one encoded in the userOp's callData, not the journal's quote field.
   const signed = signedAmountOutMinimum(op.userOp.callData)
@@ -753,11 +753,11 @@ const swapChecksStep: StepHandler = async (ctx) => {
   out.push({ step: 'a callData with another minimum is caught', ok: tampered === recomputed - 1n && tampered !== recomputed, detail: `tampered callData decodes to ${tampered}, recomputed ${recomputed}: mismatch detected` })
   const simOut = op.simulation!.deltas[p.tokenOut] ?? 0n
   const receipt = await w.lab.client.getTransactionReceipt({ hash: op.included.txHash })
-  const fill = swapFills(receipt.logs, entry(p.pool).address)[0]
+  const fill = swapFills(receipt.logs, entry(p.pool, baseRegistry).address)[0]
   out.push({ step: `${p.tokenOut} delta >= minimum`, ok: simOut >= op.quote.amountOutMinimum && !!fill && fill.amountOut >= op.quote.amountOutMinimum, detail: `simulation ${simOut}, Swap event ${fill?.amountOut}, minimum ${op.quote.amountOutMinimum}` })
-  const allowance = await w.lab.client.readContract({ address: address(p.tokenIn), abi: erc20Abi, functionName: 'allowance', args: [w.a1.safe, address('SwapRouter02')] })
+  const allowance = await w.lab.client.readContract({ address: address(p.tokenIn, baseRegistry), abi: erc20Abi, functionName: 'allowance', args: [w.a1.safe, address('SwapRouter02', baseRegistry)] })
   out.push({ step: `${p.tokenIn} allowance to SwapRouter02`, ok: allowance === 0n, detail: `${allowance}` })
-  const epHash = (await w.lab.client.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'getUserOpHash', args: [toPackedUserOperation(op.userOp)] })) as Hex
+  const epHash = (await w.lab.client.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'getUserOpHash', args: [toPackedUserOperation(op.userOp)] })) as Hex
   out.push({ step: 'journal userOpHash equals EntryPoint.getUserOpHash', ok: epHash === op.userOpHash, detail: `${op.userOpHash}` })
   const b = op.bundlerReceipt
   const check = op.receiptCheck
@@ -772,15 +772,15 @@ const swapChecksStep: StepHandler = async (ctx) => {
 const lpPairStep: StepHandler = async (ctx, args) => {
   const engine = engineOf(ctx)
   const c = worldOf(ctx).lab.client
-  const pool = entry(String(args.pool))
+  const pool = entry(String(args.pool), baseRegistry)
   const errs: string[] = []
   const swap = engine.journal.ops.find((o) => o.kind === 'enter_swap' && o.state === 'confirmed')
   if (swap?.intent.kind !== 'enter_swap') errs.push('no confirmed enter_swap')
   else if (swap.intent.tokenIn !== 'USDC' || swap.intent.tokenOut !== String(args.token0) || swap.intent.fee !== pool.fee) errs.push(`swap ${swap.intent.tokenIn}->${swap.intent.tokenOut} fee ${swap.intent.fee}`)
   const id = engine.allowedTokenIds[0]
   if (id === undefined) return { step: 'LP pair and spacing', ok: false, detail: [...errs, 'no managed position'].join('; ') }
-  const p = await c.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [id] })
-  if (!isAddressEqual(p[2], address(String(args.token0))) || !isAddressEqual(p[3], address(String(args.token1))) || p[4] !== pool.fee) errs.push(`position pair ${p[2]}/${p[3]} fee ${p[4]}`)
+  const p = await c.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [id] })
+  if (!isAddressEqual(p[2], address(String(args.token0), baseRegistry)) || !isAddressEqual(p[3], address(String(args.token1), baseRegistry)) || p[4] !== pool.fee) errs.push(`position pair ${p[2]}/${p[3]} fee ${p[4]}`)
   if (p[5] % pool.tickSpacing! !== 0 || p[6] % pool.tickSpacing! !== 0) errs.push(`ticks ${p[5]}, ${p[6]}`)
   return {
     step: 'LP pair and spacing',

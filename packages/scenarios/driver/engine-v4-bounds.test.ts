@@ -16,7 +16,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import type { Proposal } from '@mamoru/decide'
 import { POLICIES, conservadorLabV4, withActionPolicy, V4_POOLS, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
-import { address, erc20Abi, nonfungiblePositionManagerAbi, swapRouter02Abi } from '@mamoru/registry'
+import { baseRegistry, address, erc20Abi, nonfungiblePositionManagerAbi, swapRouter02Abi } from '@mamoru/registry'
 import type { Execution } from '@mamoru/account/safe'
 import { amountsForLiquidityAtPrice, decreaseMinsInRange, narrowBand, priceRange, swapBoundsInRange } from '@mamoru/uniswap-v3/policy-bounds'
 import { FakeChain } from '../../rpc/test/fake-chain.ts'
@@ -111,7 +111,7 @@ describe('prepareCalls: enter_swap', () => {
       const decoded = decodeFunctionData({ abi: swapRouter02Abi, data: prepared.calls[1]!.callData })
       const params = decoded.args[0] as { sqrtPriceLimitX96: bigint; amountOutMinimum: bigint }
       const bandTicks = narrowBand(V4_POOLS.btc.bandTicks) // default factor, same one the engine applies
-      const expected = swapBoundsInRange({ range: fakeRange(bandTicks), feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn: 10_000_000_000n })
+      const expected = swapBoundsInRange({ range: fakeRange(bandTicks), feePips: 500, zeroForOne: true, tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), amountIn: 10_000_000_000n })
       expect(observeCalls(chain)).toBe(1) // both TWAPs in one observe([1800, 300, 0])
       expect(params.sqrtPriceLimitX96).toBe(expected.sqrtPriceLimitX96)
       expect(params.sqrtPriceLimitX96).not.toBe(0n)
@@ -151,7 +151,7 @@ describe('prepareCalls: enter_mint', () => {
       const prepared = await prepare(e, proposal, chain.head, 1_790_000_000n + chain.head * 2n, session(proposal.grant))
       expect(prepared.calls).toHaveLength(5)
       for (const c of prepared.calls) expect(c.target.toLowerCase()).not.toBe(MAMORU_POLICY.toLowerCase())
-      expect(prepared.calls[2]!.target.toLowerCase()).toBe(address('NonfungiblePositionManager').toLowerCase())
+      expect(prepared.calls[2]!.target.toLowerCase()).toBe(address('NonfungiblePositionManager', baseRegistry).toLowerCase())
       const mintDecoded = decodeFunctionData({ abi: nonfungiblePositionManagerAbi, data: prepared.calls[2]!.callData })
       expect(mintDecoded.functionName).toBe('mint')
     })

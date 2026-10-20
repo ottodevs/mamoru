@@ -26,12 +26,12 @@ async function accountDigest(w: World, a: AccountFixture, out: Digest): Promise<
   const c = w.lab.client
   const p = `${a.label}.`
   out[`${p}eth`] = String(await c.getBalance({ address: a.safe }))
-  out[`${p}entryPointDeposit`] = String(await c.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'balanceOf', args: [a.safe] }))
-  const spenders: Record<string, Address> = { router: address('SwapRouter02'), npm: address('NonfungiblePositionManager'), attacker: w.attacker.address, permit2: PERMIT2 }
+  out[`${p}entryPointDeposit`] = String(await c.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'balanceOf', args: [a.safe] }))
+  const spenders: Record<string, Address> = { router: address('SwapRouter02', baseRegistry), npm: address('NonfungiblePositionManager', baseRegistry), attacker: w.attacker.address, permit2: PERMIT2 }
   for (const t of ['USDC', 'cbBTC', 'WETH']) {
     out[`${p}${t}`] = String(await w.lab.balanceOf(t, a.safe))
     for (const [sn, s] of Object.entries(spenders)) {
-      out[`${p}${t}.allowance.${sn}`] = String(await c.readContract({ address: address(t), abi: erc20Abi, functionName: 'allowance', args: [a.safe, s] }))
+      out[`${p}${t}.allowance.${sn}`] = String(await c.readContract({ address: address(t, baseRegistry), abi: erc20Abi, functionName: 'allowance', args: [a.safe, s] }))
     }
   }
   out[`${p}owners`] = (await c.readContract({ address: a.safe, abi: safeAbi, functionName: 'getOwners' })).join(',')
@@ -41,22 +41,22 @@ async function accountDigest(w: World, a: AccountFixture, out: Digest): Promise<
   out[`${p}modules`] = modules.join(',')
   out[`${p}fallbackHandler`] = (await c.getStorageAt({ address: a.safe, slot: FALLBACK_HANDLER_SLOT })) ?? '0x'
   out[`${p}guard`] = (await c.getStorageAt({ address: a.safe, slot: GUARD_SLOT })) ?? '0x'
-  out[`${p}smartSessionInstalled`] = String(await c.readContract({ address: a.safe, abi: safe7579Abi, functionName: 'isModuleInstalled', args: [1n, address('SmartSession'), '0x'] }))
+  out[`${p}smartSessionInstalled`] = String(await c.readContract({ address: a.safe, abi: safe7579Abi, functionName: 'isModuleInstalled', args: [1n, address('SmartSession', baseRegistry), '0x'] }))
   for (const g of a.grants) {
     out[`${p}session.${g.name}.${g.permissionId.slice(0, 10)}`] = String(
-      await c.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [g.permissionId, a.safe] }),
+      await c.readContract({ address: address('SmartSession', baseRegistry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [g.permissionId, a.safe] }),
     )
   }
   out[`${p}entryPointNonce`] = String(await w.lab.entryPointNonce(a.safe, sessionNonceKey(0)))
-  out[`${p}nftBalance`] = String(await c.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [a.safe] }))
+  out[`${p}nftBalance`] = String(await c.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [a.safe] }))
   for (const id of [...a.managedTokenIds, ...a.ownerTokenIds]) {
-    const owner = await c.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [id] }).catch(() => 'burned')
-    const pos = await c.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [id] }).catch(() => null)
-    const approved = await c.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'getApproved', args: [id] }).catch(() => 'none')
+    const owner = await c.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [id] }).catch(() => 'burned')
+    const pos = await c.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [id] }).catch(() => null)
+    const approved = await c.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'getApproved', args: [id] }).catch(() => 'none')
     out[`${p}nft.${id}`] = `${owner}|${pos ? `${pos[7]}|${pos[10]}|${pos[11]}` : 'none'}|${approved}`
   }
   out[`${p}nftApprovedForAll.attacker`] = String(
-    await c.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'isApprovedForAll', args: [a.safe, w.attacker.address] }),
+    await c.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'isApprovedForAll', args: [a.safe, w.attacker.address] }),
   )
 }
 
@@ -68,7 +68,7 @@ export async function stateDigest(w: World): Promise<Digest> {
   out['attacker.eth'] = String(await w.lab.client.getBalance({ address: w.attacker.address }))
   for (const t of ['USDC', 'cbBTC', 'WETH']) out[`attacker.${t}`] = String(await w.lab.balanceOf(t, w.attacker.address))
   out['attacker.nftBalance'] = String(
-    await w.lab.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [w.attacker.address] }),
+    await w.lab.client.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [w.attacker.address] }),
   )
   return out
 }
@@ -98,7 +98,7 @@ const RECIPIENT_WORD: Record<string, number> = {
 export function checkRecipient(account: Address, calls: Execution[], receipt: TransactionReceipt): string[] {
   const errors: string[] = []
   const pools = new Set(baseRegistry.entries.filter((e) => e.kind === 'pool').map((e) => e.address.toLowerCase()))
-  const npm = address('NonfungiblePositionManager').toLowerCase()
+  const npm = address('NonfungiblePositionManager', baseRegistry).toLowerCase()
   const acct = account.toLowerCase()
   for (const c of calls) {
     const sel = c.callData.slice(0, 10).toLowerCase()
@@ -113,7 +113,7 @@ export function checkRecipient(account: Address, calls: Execution[], receipt: Tr
     const to = String(t.args.to ?? '').toLowerCase()
     if (from === acct && !pools.has(to)) errors.push(`Transfer from the account to ${to}`)
     if ((pools.has(from) || from === npm) && to !== acct && !pools.has(to) && to !== npm) {
-      if (t.address.toLowerCase() !== npm) errors.push(`Transfer from ${nameOf(from as Address) ?? from} to ${to}`)
+      if (t.address.toLowerCase() !== npm) errors.push(`Transfer from ${nameOf(from as Address, baseRegistry) ?? from} to ${to}`)
     }
   }
   return errors
@@ -121,6 +121,6 @@ export function checkRecipient(account: Address, calls: Execution[], receipt: Tr
 
 /** INV-TARGETS on an included session userOp: every call goes to a target of the policy's grants. */
 export function checkTargets(calls: Execution[]): string[] {
-  const allowed = new Set(['USDC', 'cbBTC', 'NonfungiblePositionManager', 'SwapRouter02'].map((n) => address(n).toLowerCase()))
+  const allowed = new Set(['USDC', 'cbBTC', 'NonfungiblePositionManager', 'SwapRouter02'].map((n) => address(n, baseRegistry).toLowerCase()))
   return calls.filter((c) => !allowed.has(c.target.toLowerCase())).map((c) => `call to ${c.target}`)
 }

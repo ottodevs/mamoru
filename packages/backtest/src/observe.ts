@@ -1,7 +1,7 @@
 import type { Hex } from '@mamoru/domain'
 import { marketOf, meanTickAt, realizedVolOf, thirdsOut, type CumulativePoint, type Observation, type PoolGeometryObs, type PoolGuardObs, type PoolObs, type SessionObs } from '@mamoru/decide'
 import { grantKey, type PolicyVersion } from '@mamoru/policy'
-import { address, entry, type RegistryName } from '@mamoru/registry'
+import { baseRegistry, address, entry, type RegistryName } from '@mamoru/registry'
 import type { Dataset, Sample } from './types.ts'
 import type { World } from './world.ts'
 
@@ -193,7 +193,7 @@ export function observe(ds: Dataset, i: number, w: World, policy: PolicyVersion,
   ds.pools.forEach((name, k) => {
     const ps = s.pools[k]
     if (!ps) return
-    const e = entry(name)
+    const e = entry(name, baseRegistry)
     pools.push({
       name,
       address: e.address,
@@ -206,7 +206,7 @@ export function observe(ds: Dataset, i: number, w: World, policy: PolicyVersion,
       liquidity: ps.liquidity,
       twapTick: twapTick(ds, k, i, policy.execution.twapWindowSeconds),
       twapLiquidity: windowMinLiquidity(ds, k, i, policy.execution.twapWindowSeconds),
-      identity: { factoryPool: e.address, token0: address(e.token0!), token1: address(e.token1!), fee: e.fee!, tickSpacing: e.tickSpacing! },
+      identity: { factoryPool: e.address, token0: address(e.token0!, baseRegistry), token1: address(e.token1!, baseRegistry), fee: e.fee!, tickSpacing: e.tickSpacing! },
     })
   })
   const eth = s.pools[ds.pools.indexOf(ETH_PRICE_POOL)]
@@ -227,7 +227,7 @@ export function observe(ds: Dataset, i: number, w: World, policy: PolicyVersion,
       ...(policy.range.lazy ? { outOfRangeSince: p.outSince === undefined || p.outSince === null ? null : BigInt(p.outSince) } : {}),
     })),
     pools,
-    ethPrice: { pool: ETH_PRICE_POOL, sqrtPriceX96: eth.sqrtPriceX96, token0: entry(ETH_PRICE_POOL).token0! },
+    ethPrice: { pool: ETH_PRICE_POOL, sqrtPriceX96: eth.sqrtPriceX96, token0: entry(ETH_PRICE_POOL, baseRegistry).token0! },
     gas: { maxFeePerGas: s.baseFeeWei * 2n + priorityFeeWei, opGasUnits: OP_GAS_UNITS },
     deposits: [],
     intents: { paused: false, exitRequested: false },

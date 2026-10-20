@@ -1,7 +1,7 @@
 import { createECDH, createHash, createPrivateKey, sign, type KeyObject } from 'node:crypto'
 import { concat, encodeAbiParameters, hashTypedData, numberToHex, pad, size, toHex, type Hex, type PublicClient } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { safeTxTypedData, type SafeTx } from '@mamoru/account/safe'
 
 /** Fixed test scalars for the software passkeys. Test material only. */
@@ -123,7 +123,7 @@ export async function checkP256(client: PublicClient, passkey = new SoftwarePass
     const ask = (data: Hex) => client.call({ to, data }).then((r) => r.data === ONE, () => false)
     return (await ask(v.valid)) && !(await ask(v.tampered))
   }
-  const fallbackAddress = address('P256Verifier')
+  const fallbackAddress = address('P256Verifier', baseRegistry)
   const code = await client.getCode({ address: fallbackAddress })
   const fallbackCode = code ? size(code) : 0
   const precompile = await verifies(pad(numberToHex(P256_PRECOMPILE), { size: 20 }))
@@ -135,5 +135,5 @@ export async function checkP256(client: PublicClient, passkey = new SoftwarePass
 /** The owner signature SafeWebAuthnSharedSigner accepts for a Safe transaction: a WebAuthn assertion over the SafeTx hash. */
 export function signSafeTxWithPasskey(passkey: SoftwarePasskey, safe: Address, chainId: number, tx: SafeTx): Hex {
   const challenge = hashTypedData(safeTxTypedData(safe, chainId, tx))
-  return safeContractSignature(address('SafeWebAuthnSharedSigner'), encodeWebAuthnSignature(passkey.assert(challenge)))
+  return safeContractSignature(address('SafeWebAuthnSharedSigner', baseRegistry), encodeWebAuthnSignature(passkey.assert(challenge)))
 }

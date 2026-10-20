@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV2, policyHash } from '@mamoru/policy'
-import { entry } from '@mamoru/registry'
+import { baseRegistry, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick, token0InToken1 } from '@mamoru/uniswap-v3/quote'
 import { decodeDataset, encodeDataset } from './dataset.ts'
 import { POOLS, syntheticDataset } from './fixtures.ts'
@@ -65,7 +65,7 @@ describe('fee accrual', () => {
 })
 
 describe('swap model', () => {
-  const e = entry('pool:USDC/cbBTC/500')
+  const e = entry('pool:USDC/cbBTC/500', baseRegistry)
   const s = sample({ sqrtPriceX96: sqrtRatioAtTick(-67_420), tick: -67_420, liquidity: 2_225_251_034_900n })
 
   test('a small swap pays the pool fee and almost no impact', () => {

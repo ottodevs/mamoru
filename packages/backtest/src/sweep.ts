@@ -1,7 +1,7 @@
 // Lab sweep (spec 004, #101): one policy variant over every Lab window and deposit, metrics per cell, TRAIN and TEST
 // reported apart. Pure parts live here (overrides, metrics, tables); cli/sweep.ts runs the cells in parallel.
 import { POLICIES, type PolicyVersion } from '@mamoru/policy'
-import { entry } from '@mamoru/registry'
+import { baseRegistry, entry } from '@mamoru/registry'
 import type { RunResult } from './types.ts'
 import type { LabWindow, Split } from './windows.ts'
 
@@ -175,7 +175,7 @@ export function cellMetrics(r: RunResult, decimals: number): CellMetrics {
 }
 
 export function decimalsOf(policy: PolicyVersion): number {
-  return entry(policy.savingsAsset).decimals ?? 6
+  return entry(policy.savingsAsset, baseRegistry).decimals ?? 6
 }
 
 export type Cell = { window: string; split: Split; regime: string; deposit: number; variant: string; policyId: string } & ({ status: 'ok'; metrics: CellMetrics } | { status: 'skipped'; reason: string })

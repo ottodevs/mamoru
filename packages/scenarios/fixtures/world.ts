@@ -1,7 +1,7 @@
 import { encodeFunctionData, getAddress, parseEventLogs, type Hex } from 'viem'
 import type { PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
-import { address, nonfungiblePositionManagerAbi, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { baseRegistry, address, nonfungiblePositionManagerAbi, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { computeCaps, instantiateGrant, type Caps, type GrantName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   OPERATION_CALL,
@@ -110,7 +110,7 @@ function must(r: TxResult, what: string): void {
 }
 
 export async function poolTick(lab: Lab): Promise<{ sqrtPriceX96: bigint; tick: number }> {
-  const s = await lab.client.readContract({ address: address(POOL), abi: uniswapV3PoolAbi, functionName: 'slot0' })
+  const s = await lab.client.readContract({ address: address(POOL, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0' })
   return { sqrtPriceX96: s[0], tick: s[1] }
 }
 
@@ -122,7 +122,7 @@ export function rangeAround(tick: number, width: number, spacing: number): { tic
 
 function mintedTokenId(r: TxResult, safe: Address): bigint {
   const logs = parseEventLogs({ abi: nonfungiblePositionManagerAbi, logs: r.receipt.logs, eventName: 'Transfer' })
-  const t = logs.find((l) => l.address.toLowerCase() === address('NonfungiblePositionManager').toLowerCase() && l.args.to.toLowerCase() === safe.toLowerCase())
+  const t = logs.find((l) => l.address.toLowerCase() === address('NonfungiblePositionManager', baseRegistry).toLowerCase() && l.args.to.toLowerCase() === safe.toLowerCase())
   if (!t) throw new Error('no position minted to the account')
   return t.args.tokenId
 }
@@ -139,9 +139,9 @@ async function deployAccount(lab: Lab, relayer: PrivateKeyAccount, label: string
   // The passkey is configured inside Safe.setup, so the Safe address commits to it.
   const webauthn = webAuthnSigner(passkey.x, passkey.y)
   const call = createProxyCall({
-    owners: [address('SafeWebAuthnSharedSigner'), backupOwner.address],
+    owners: [address('SafeWebAuthnSharedSigner', baseRegistry), backupOwner.address],
     threshold: 1n,
-    validators: [{ module: address('SmartSession'), initData: '0x' }],
+    validators: [{ module: address('SmartSession', baseRegistry), initData: '0x' }],
     saltNonce,
     webauthn,
   })
@@ -161,7 +161,7 @@ async function deployAccount(lab: Lab, relayer: PrivateKeyAccount, label: string
     ledger: new SessionLedger(),
     signedOwnerTxs: [],
   }
-  const bound = await lab.client.readContract({ address: address('SafeWebAuthnSharedSigner'), abi: safeWebAuthnSharedSignerAbi, functionName: 'getConfiguration', args: [safe] })
+  const bound = await lab.client.readContract({ address: address('SafeWebAuthnSharedSigner', baseRegistry), abi: safeWebAuthnSharedSignerAbi, functionName: 'getConfiguration', args: [safe] })
   if (bound.x !== webauthn.x || bound.y !== webauthn.y || bound.verifiers !== webauthn.verifiers) throw new Error(`fixture step failed: ${label} passkey not bound at deploy`)
   must(await ownerBatch(lab, relayer, acct, registryTrustCalls(safe)), `${label} registry trust`)
   return acct

@@ -1,6 +1,6 @@
 import { ReasonError } from '@mamoru/domain'
 import { amountsOf, type PegState, type Proposal, type StageState } from '@mamoru/decide'
-import { entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
+import { baseRegistry, entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
 import { quoteMint, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
 import type { PoolSample } from './types.ts'
 
@@ -129,7 +129,7 @@ export type Applied = { ok: true; fees0: bigint; fees1: bigint } | { ok: false; 
 
 /** One proposal of `decide`, executed the way the engine builds its calls. */
 export function apply(w: World, p: Proposal, s: PoolSample, time: number, slippageBps: number): Applied {
-  const e = entry(p.pool)
+  const e = entry(p.pool, baseRegistry)
   const none = { ok: true as const, fees0: 0n, fees1: 0n }
   if (p.kind === 'enter_swap') {
     debit(w, p.tokenIn, p.amountIn)

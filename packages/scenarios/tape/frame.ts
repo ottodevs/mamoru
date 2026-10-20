@@ -1,7 +1,7 @@
 import type { ScenarioTape, TapeFrame, TapeGate } from '@mamoru/domain'
 import { amountsForLiquidity, estimateFees, inSavings, type Decision, type Observation, type PoolObs } from '@mamoru/decide'
 import type { PolicyVersion } from '@mamoru/policy'
-import { entry } from '@mamoru/registry'
+import { baseRegistry, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 
 const Q96 = 1n << 96n
@@ -31,7 +31,7 @@ export function priceDec(sqrtPriceX96: bigint, pool: { token0: string; token1: s
 }
 
 export function decimalsOf(token: string): number {
-  const d = entry(token).decimals
+  const d = entry(token, baseRegistry).decimals
   if (d === undefined || d === null) throw new Error(`${token} has no decimals in the registry`)
   return d
 }

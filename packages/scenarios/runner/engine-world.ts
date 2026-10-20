@@ -1,6 +1,6 @@
 import { parseEventLogs } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { address, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi } from '@mamoru/registry'
+import { baseRegistry, address, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi } from '@mamoru/registry'
 import type { PolicyVersion } from '@mamoru/policy'
 import { createProxyCall, webAuthnSigner } from '@mamoru/account/safe'
 import { registryTrustCalls } from '@mamoru/account/sessions'
@@ -21,9 +21,9 @@ export async function buildEngineWorld(lab: Lab, policy: PolicyVersion, engineNo
   // The passkey is configured inside Safe.setup, so the Safe address commits to it.
   const webauthn = webAuthnSigner(passkey.x, passkey.y)
   const call = createProxyCall({
-    owners: [address('SafeWebAuthnSharedSigner'), backupOwner.address],
+    owners: [address('SafeWebAuthnSharedSigner', baseRegistry), backupOwner.address],
     threshold: 1n,
-    validators: [{ module: address('SmartSession'), initData: '0x' }],
+    validators: [{ module: address('SmartSession', baseRegistry), initData: '0x' }],
     saltNonce: 1n,
     webauthn,
   })
@@ -43,7 +43,7 @@ export async function buildEngineWorld(lab: Lab, policy: PolicyVersion, engineNo
     ledger: new SessionLedger(),
     signedOwnerTxs: [],
   }
-  const bound = await lab.client.readContract({ address: address('SafeWebAuthnSharedSigner'), abi: safeWebAuthnSharedSignerAbi, functionName: 'getConfiguration', args: [safe] })
+  const bound = await lab.client.readContract({ address: address('SafeWebAuthnSharedSigner', baseRegistry), abi: safeWebAuthnSharedSignerAbi, functionName: 'getConfiguration', args: [safe] })
   if (bound.x !== webauthn.x || bound.y !== webauthn.y || bound.verifiers !== webauthn.verifiers) throw new Error('engine world: passkey not bound at deploy')
   if (!(await ownerBatch(lab, relayer, a1, registryTrustCalls(safe))).ok) throw new Error('engine world: registry trust failed')
   const gasPayer = devAccount(2)

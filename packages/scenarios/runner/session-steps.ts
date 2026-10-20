@@ -1,6 +1,6 @@
 import { concat, decodeErrorResult, encodeAbiParameters, encodeFunctionData, keccak256, parseAbi, slice, stringToHex, type Hex } from 'viem'
 import { ReasonError, isReasonCode } from '@mamoru/domain'
-import { address, erc20Abi, safe7579Abi, smartSessionAbi, smartSessionErrorsAbi } from '@mamoru/registry'
+import { baseRegistry, address, erc20Abi, safe7579Abi, smartSessionAbi, smartSessionErrorsAbi } from '@mamoru/registry'
 import { activationCall, revocationCalls } from '@mamoru/account/sessions'
 import { sendSessionOp, type SessionOpOutcome } from '../fixtures/session-op.ts'
 import { WHALE, activateGrants, grantOf, ownerMint, revokeGrants, type ActiveGrant, type OpRecord, type World } from '../fixtures/world.ts'
@@ -133,7 +133,7 @@ const ownerRevoke: StepHandler = async (ctx, args) => {
   const still: string[] = []
   for (const n of names) {
     const g = resolveGrant(w, n)
-    const on = await w.lab.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [g.permissionId, w.a1.safe] })
+    const on = await w.lab.client.readContract({ address: address('SmartSession', baseRegistry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [g.permissionId, w.a1.safe] })
     if (on) still.push(n)
   }
   return { step: `owner revokes ${names.join(', ')}`, ok: r.ok && still.length === 0, detail: still.length ? `still enabled: ${still.join(', ')}` : 'removed on chain' }
@@ -143,7 +143,7 @@ const ownerReplay: StepHandler = async (ctx, args) => {
   const w = world(ctx)
   const which = (args.which as string) ?? 'activation'
   const txs = w.a1.signedOwnerTxs
-  const target = which === 'activation' ? txs.find((t) => t.tx.to.toLowerCase() === address('SmartSession').toLowerCase()) : txs.at(-1)
+  const target = which === 'activation' ? txs.find((t) => t.tx.to.toLowerCase() === address('SmartSession', baseRegistry).toLowerCase()) : txs.at(-1)
   if (!target) return { step: `replay ${which}`, ok: false, detail: 'no signed owner transaction to replay' }
   const before = await stateDigest(w)
   const r = await w.lab.send(w.relayer, w.a1.safe, target.data)
@@ -173,7 +173,7 @@ const ownerRenew: StepHandler = async (ctx, args) => {
   const w = world(ctx)
   const old = resolveGrant(w, args.grant as string)
   const [renewed] = await activateGrants(w, w.a1, [{ name: old.grant.name, tokenId: old.grant.tokenId }])
-  const on = await w.lab.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [renewed!.permissionId, w.a1.safe] })
+  const on = await w.lab.client.readContract({ address: address('SmartSession', baseRegistry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [renewed!.permissionId, w.a1.safe] })
   const ok = renewed!.permissionId !== old.permissionId && renewed!.grant.salt !== old.grant.salt && on
   return { step: `owner renews ${old.name}`, ok, detail: `new permissionId ${renewed!.permissionId.slice(0, 10)}… (old ${old.permissionId.slice(0, 10)}…), enabled ${on}` }
 }
@@ -203,15 +203,15 @@ const erc1271: StepHandler = async (ctx, args) => {
   const sk = w.a1.sessionKey
   const raw = await sk.sign!({ hash })
   const personal = await sk.signMessage({ message: { raw: hash } })
-  const usdcDomain = await w.lab.client.readContract({ address: address('USDC'), abi: erc20Abi, functionName: 'DOMAIN_SEPARATOR' })
+  const usdcDomain = await w.lab.client.readContract({ address: address('USDC', baseRegistry), abi: erc20Abi, functionName: 'DOMAIN_SEPARATOR' })
   const contentsDescription = 'Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)'
   const envelope = concat([personal, usdcDomain, hash, stringToHex(contentsDescription), `0x${contentsDescription.length.toString(16).padStart(4, '0')}`])
   const variants: Record<string, Hex> = {
     raw,
     'eth-signed': personal,
-    'smartsession-prefix': concat([address('SmartSession'), g.permissionId, personal]),
-    'smartsession-mode-prefix': concat([address('SmartSession'), '0x00', g.permissionId, personal]),
-    erc7739: concat([address('SmartSession'), g.permissionId, envelope]),
+    'smartsession-prefix': concat([address('SmartSession', baseRegistry), g.permissionId, personal]),
+    'smartsession-mode-prefix': concat([address('SmartSession', baseRegistry), '0x00', g.permissionId, personal]),
+    erc7739: concat([address('SmartSession', baseRegistry), g.permissionId, envelope]),
   }
   const out: StepResult[] = []
   for (const [name, data] of Object.entries(variants)) {
@@ -230,7 +230,7 @@ const permitStep: StepHandler = async (ctx) => {
   const w = world(ctx)
   const g = resolveGrant(w, 'enter-swap')
   const c = w.lab.client
-  const usdc = address('USDC')
+  const usdc = address('USDC', baseRegistry)
   const nonce = await c.readContract({ address: usdc, abi: erc20Abi, functionName: 'nonces', args: [w.a1.safe] })
   const domain = await c.readContract({ address: usdc, abi: erc20Abi, functionName: 'DOMAIN_SEPARATOR' })
   const value = 1_000_000_000n
@@ -242,7 +242,7 @@ const permitStep: StepHandler = async (ctx) => {
   const digest = keccak256(concat(['0x1901', domain, structHash]))
   const raw = await w.a1.sessionKey.sign!({ hash: digest })
   const out: StepResult[] = []
-  for (const [name, sig] of Object.entries({ raw, 'smartsession-prefix': concat([address('SmartSession'), g.permissionId, raw]) })) {
+  for (const [name, sig] of Object.entries({ raw, 'smartsession-prefix': concat([address('SmartSession', baseRegistry), g.permissionId, raw]) })) {
     const before = await stateDigest(w)
     const r = await w.lab.send(w.attacker, usdc, encodeFunctionData({ abi: erc20Abi, functionName: 'permit', args: [w.a1.safe, w.attacker.address, value, deadline, sig as Hex] }))
     const diff = diffDigest(before, await stateDigest(w)).filter((d) => !d.startsWith('attacker.eth'))

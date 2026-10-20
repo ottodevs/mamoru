@@ -1,6 +1,6 @@
 import { toHex } from 'viem'
 import type { Hex } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import type { Lab } from '../fixtures/lab.ts'
 import { startAnvil, postStartChecks, type AnvilHandle } from '../fork/anvil.ts'
 import { startEnginePort, type EnginePort } from '../proxy/index.ts'
@@ -13,7 +13,7 @@ export async function timeWarp(lab: Lab, seconds: number): Promise<void> {
 
 /** Preparation-phase write: replaces the runtime code of a registry entry (LAB-05). */
 export async function setRegistryCode(lab: Lab, name: string, code: Hex = '0x00'): Promise<void> {
-  await lab.rpc('anvil_setCode', [address(name), code])
+  await lab.rpc('anvil_setCode', [address(name, baseRegistry), code])
 }
 
 /** A port in front of anvil whose eth_chainId answers another chain id (LAB-01). */

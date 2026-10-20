@@ -1,5 +1,5 @@
 // What the market did in a dataset, read from the pools' ticks: the label of a Lab window, not a policy result.
-import { entry, type RegistryName } from '@mamoru/registry'
+import { baseRegistry, entry, type RegistryName } from '@mamoru/registry'
 import type { Dataset } from './types.ts'
 
 export type AssetMove = {
@@ -23,7 +23,7 @@ const DAY = 86_400
 function logPrices(ds: Dataset, pool: RegistryName, token: RegistryName): { time: number[]; lp: number[] } | null {
   const k = ds.pools.indexOf(pool)
   if (k < 0) return null
-  const e = entry(pool)
+  const e = entry(pool, baseRegistry)
   // tick = log_1.0001(token1 per token0): the price of token0 rises with the tick, the price of token1 falls.
   const sign = e.token0 === token ? 1 : -1
   const time: number[] = []

@@ -6,7 +6,7 @@
 import { readFileSync } from 'node:fs'
 import { createPublicClient, encodeFunctionData, decodeFunctionResult, http, maxUint128, parseAbi, type Address, type PublicClient } from 'viem'
 import { base } from 'viem/chains'
-import { address, entry, nameOf } from '@mamoru/registry'
+import { baseRegistry, address, entry, nameOf } from '@mamoru/registry'
 import { decodeDataset, type DatasetJson } from '../src/dataset.ts'
 import { accrue, valueIn, type SimPosition } from '../src/world.ts'
 
@@ -36,7 +36,7 @@ for (const event of ['uncaughtException', 'unhandledRejection'] as const) {
 
 const ds = decodeDataset(JSON.parse(readFileSync(args('dataset')[0]!, 'utf8')) as DatasetJson)
 const client = createPublicClient({ chain: base, transport: http(process.env.BACKFILL_RPC_URL ?? 'https://mainnet.base.org', { retryCount: 4, retryDelay: 800, timeout: 30_000 }) }) as PublicClient
-const npm = address('NonfungiblePositionManager')
+const npm = address('NonfungiblePositionManager', baseRegistry)
 
 async function collectable(owner: Address, tokenId: bigint, block: bigint): Promise<[bigint, bigint] | null> {
   const data = encodeFunctionData({ abi: npmAbi, functionName: 'collect', args: [{ tokenId, recipient: owner, amount0Max: maxUint128, amount1Max: maxUint128 }] })
@@ -57,8 +57,8 @@ for (const owner of args('owner') as Address[]) {
   for (let i = 0n; i < n; i++) {
     const tokenId = await client.readContract({ address: npm, abi: npmAbi, functionName: 'tokenOfOwnerByIndex', args: [owner, i], blockNumber: BigInt(last.block) })
     const pos = await client.readContract({ address: npm, abi: npmAbi, functionName: 'positions', args: [tokenId], blockNumber: BigInt(last.block) })
-    const poolAddr = await client.readContract({ address: address('UniswapV3Factory'), abi: factoryAbi, functionName: 'getPool', args: [pos[2], pos[3], pos[4]] })
-    const name = nameOf(poolAddr)
+    const poolAddr = await client.readContract({ address: address('UniswapV3Factory', baseRegistry), abi: factoryAbi, functionName: 'getPool', args: [pos[2], pos[3], pos[4]] })
+    const name = nameOf(poolAddr, baseRegistry)
     const k = name ? ds.pools.indexOf(name) : -1
     if (!name || k < 0 || pos[7] === 0n) continue
     // Every touch of a position (a collect, an increase, a decrease) changes at least one of five stored values:
@@ -95,7 +95,7 @@ for (const owner of args('owner') as Address[]) {
       f1 += f.fees1
       prev = cur
     }
-    const e = entry(name)
+    const e = entry(name, baseRegistry)
     const savings = e.token0 === 'USDC' ? 'USDC' : e.token1!
     const end = ds.samples.at(-1)!.pools[k]!
     const chain = valueIn(e, end, e.token0!, after[0] - before[0], savings) + valueIn(e, end, e.token1!, after[1] - before[1], savings)

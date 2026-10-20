@@ -4,7 +4,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import type { Decision, Proposal } from '@mamoru/decide'
 import { POLICIES, grantKey, instantiateGrant, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
-import { address, swapRouter02Abi } from '@mamoru/registry'
+import { baseRegistry, address, swapRouter02Abi } from '@mamoru/registry'
 import { precheck, SessionLedger } from '@mamoru/account/precheck'
 import { executeCallData, permissionIdOf, toSmartSession, useModeSignature } from '@mamoru/account/sessions'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
@@ -49,8 +49,8 @@ function engineAt(chain: Partial<Chain> = {}, p: PolicyVersion = policy, extra: 
     // The bundle's logs: BeforeExecution, then the op's UserOperationEvent (what readUserOpEvent slices on).
     getTransactionReceipt: async () => ({
       logs: [
-        { address: address('EntryPointV07'), logIndex: 0, topics: [toEventSelector('event BeforeExecution()')], data: '0x' },
-        { address: address('EntryPointV07'), logIndex: 1, topics: [toEventSelector('event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)')], data: '0x' },
+        { address: address('EntryPointV07', baseRegistry), logIndex: 0, topics: [toEventSelector('event BeforeExecution()')], data: '0x' },
+        { address: address('EntryPointV07', baseRegistry), logIndex: 1, topics: [toEventSelector('event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)')], data: '0x' },
       ],
     }),
     readContract: async ({ functionName, blockNumber }: { functionName: string; blockNumber?: bigint }) => {
@@ -165,10 +165,10 @@ describe('every engine swap expires on chain (otto/mamoru#140)', () => {
       precheck({ sender: ACCOUNT, callData: executeCallData(calls.map((c) => ({ target: c.target, value: 0n, callData: c.callData }))), signature: useModeSignature(s.permissionId, '0x') }, { chainId: 8453, now: 1_000, ledger })
     expect(check(p.calls)).toMatchObject({ ok: true })
     // The same action with a call inside the array: the pre-check (as UniActionPolicy on chain) refuses it.
-    const smuggled = { target: address('SwapRouter02'), callData: p.calls[2]!.callData }
+    const smuggled = { target: address('SwapRouter02', baseRegistry), callData: p.calls[2]!.callData }
     const { encodeFunctionData } = await import('viem')
     const inner = encodeFunctionData({ abi: swapRouter02Abi, functionName: 'multicall', args: [2_000n, [smuggled.callData]] })
-    expect(check([{ target: address('SwapRouter02'), callData: inner }])).toMatchObject({ ok: false, code: 'POLICY_DENIED_TARGET' })
+    expect(check([{ target: address('SwapRouter02', baseRegistry), callData: inner }])).toMatchObject({ ok: false, code: 'POLICY_DENIED_TARGET' })
   })
 
   test('a grant from before has no deadline action: no deadline call, and the expiry is the session validUntil', async () => {
@@ -243,7 +243,7 @@ describe('a rejected or unseen userOp is settled from the chain only (otto/mamor
   /** A UserOperationEvent log of `op`, in block 160 (at or below a safe head of 160). */
   function eventOf(op: OpRecord, success: boolean) {
     return {
-      address: address('EntryPointV07'),
+      address: address('EntryPointV07', baseRegistry),
       blockNumber: 160n,
       blockHash: `0x${'33'.repeat(32)}`,
       transactionHash: `0x${'44'.repeat(32)}`,

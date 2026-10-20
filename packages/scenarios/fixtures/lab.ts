@@ -12,7 +12,7 @@ import {
 } from 'viem'
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
-import { address, entryPointV07Abi, erc20Abi } from '@mamoru/registry'
+import { baseRegistry, address, entryPointV07Abi, erc20Abi } from '@mamoru/registry'
 
 /** anvil's public development keys (mnemonic "test test ... junk"). Never real funds. */
 export const ANVIL_DEV_KEYS = [
@@ -90,13 +90,13 @@ export class Lab {
   }
 
   async balanceOf(token: string, who: Address): Promise<bigint> {
-    return this.client.readContract({ address: address(token), abi: erc20Abi, functionName: 'balanceOf', args: [who] })
+    return this.client.readContract({ address: address(token, baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [who] })
   }
 
   /** ERC-20 transfer from an impersonated holder: a real Transfer event on the fork. */
   async whaleTransfer(token: string, whale: Address, to: Address, amount: bigint): Promise<TxResult> {
     await this.setBalance(whale, 10n ** 18n)
-    const r = await this.sendAs(whale, address(token), encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [to, amount] }))
+    const r = await this.sendAs(whale, address(token, baseRegistry), encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [to, amount] }))
     if (!r.ok) throw new Error(`whale transfer of ${token} failed`)
     return r
   }
@@ -119,7 +119,7 @@ export class Lab {
   }
 
   async entryPointNonce(sender: Address, key: bigint): Promise<bigint> {
-    return this.client.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'getNonce', args: [sender, key] })
+    return this.client.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'getNonce', args: [sender, key] })
   }
 }
 

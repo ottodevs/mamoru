@@ -2,7 +2,7 @@ import { concat, decodeErrorResult, encodeFunctionData, parseEventLogs, slice, t
 import type { PrivateKeyAccount } from 'viem/accounts'
 import { toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import type { Address } from '@mamoru/domain'
-import { address, entryPointV07Abi, nameOf, safe7579Abi, smartSessionErrorsAbi, smartSessionValidateAbi } from '@mamoru/registry'
+import { baseRegistry, address, entryPointV07Abi, nameOf, safe7579Abi, smartSessionErrorsAbi, smartSessionValidateAbi } from '@mamoru/registry'
 import {
   CALLTYPE_BATCH,
   CALLTYPE_DELEGATECALL,
@@ -158,12 +158,12 @@ async function buildAndSend(
   let failedOp: SessionOpOutcome['failedOp'] = null
   let validator: string | undefined
   try {
-    await lab.client.call({ account: world.relayer.address, to: address('EntryPointV07'), data, gas: 15_000_000n })
+    await lab.client.call({ account: world.relayer.address, to: address('EntryPointV07', baseRegistry), data, gas: 15_000_000n })
   } catch (e) {
     failedOp = decodeEntryPointError(revertData(e)) ?? { name: 'unknown' }
     validator = await smartSessionVerdict(lab, op)
   }
-  const sent = await lab.send(world.relayer, address('EntryPointV07'), data)
+  const sent = await lab.send(world.relayer, address('EntryPointV07', baseRegistry), data)
   const base = { precheck: pre, validator, userOp: op, userOpHash: hash, txHash: sent.hash, receipt: sent.receipt, calls: execs, handleOpsData: data }
   if (!sent.ok) return { ...base, verdict: 'CHAIN_REJECTED_VALIDATION', failedOp }
   const ev = parseEventLogs({ abi: entryPointV07Abi, logs: sent.receipt.logs, eventName: 'UserOperationEvent' })[0]
@@ -176,7 +176,7 @@ async function buildAndSend(
 async function smartSessionVerdict(lab: Lab, op: UserOperation<'0.7'>): Promise<string> {
   const data = encodeFunctionData({ abi: smartSessionValidateAbi, functionName: 'validateUserOp', args: [toPackedUserOperation(op), userOpHash(op, lab.chainId)] })
   try {
-    const r = await lab.client.call({ account: op.sender, to: address('SmartSession'), data, gas: 10_000_000n })
+    const r = await lab.client.call({ account: op.sender, to: address('SmartSession', baseRegistry), data, gas: 10_000_000n })
     const v = BigInt(r.data ?? '0x0')
     if (v === 0n) return 'valid'
     if ((v & ((1n << 160n) - 1n)) === 1n) return 'SIG_VALIDATION_FAILED'
@@ -186,7 +186,7 @@ async function smartSessionVerdict(lab: Lab, op: UserOperation<'0.7'>): Promise<
     if (!d || d === '0x') return 'revert without data'
     try {
       const x = decodeErrorResult({ abi: smartSessionErrorsAbi, data: d })
-      if (x.errorName === 'PolicyViolation') return `PolicyViolation(${nameOf(x.args[1]) ?? x.args[1]})`
+      if (x.errorName === 'PolicyViolation') return `PolicyViolation(${nameOf(x.args[1], baseRegistry) ?? x.args[1]})`
       return x.errorName
     } catch {
       return `revert ${slice(d, 0, 4)}`

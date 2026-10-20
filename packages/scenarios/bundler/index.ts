@@ -2,7 +2,7 @@ import type { Server } from 'bun'
 import { parseEventLogs, toHex, zeroAddress, type Hex, type TransactionReceipt } from 'viem'
 import type { PrivateKeyAccount } from 'viem/accounts'
 import type { UserOperation } from 'viem/account-abstraction'
-import { address, entryPointV07Abi } from '@mamoru/registry'
+import { baseRegistry, address, entryPointV07Abi } from '@mamoru/registry'
 import { handleOpsData, userOpHash } from '@mamoru/account/sessions'
 import { fromRpcUserOp, toRpcUserOp, type RpcUserOperation } from '@mamoru/erc4337'
 import { decodeEntryPointError, type Lab } from '../fixtures/lab.ts'
@@ -48,7 +48,7 @@ class RpcFailure extends Error {
  * It is not Alto: the manifest pins Alto, which is not installed yet.
  */
 export function startLabBundler(lab: Lab, executor: PrivateKeyAccount): LabBundler {
-  const entryPoint = address('EntryPointV07')
+  const entryPoint = address('EntryPointV07', baseRegistry)
   const included = new Map<string, Included>()
   const received: Hex[] = []
   let holding = false

@@ -2,7 +2,7 @@ import { keccak256, stringToHex } from 'viem'
 import type { Hex } from '@mamoru/domain'
 import { amountsOf, canonicalJson, decide, pegDeviationBps, pegStep, PEG_CLEAR, stageStep, type Proposal } from '@mamoru/decide'
 import { computeCaps, grantKey, policyHash, usageLimitFor, type Caps, type GrantTemplate, type PolicyVersion, type Price } from '@mamoru/policy'
-import { entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
+import { baseRegistry, entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
 import { token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
 import { emaTickOf, ETH_PRICE_POOL, observe, twapTick } from './observe.ts'
 import type { Dataset, GasModel, Metrics, OpEntry, OpKind, PoolSample, RunResult, Sample, SessionUse, SimConfig } from './types.ts'
@@ -31,7 +31,7 @@ export function pricer(ds: Dataset, policy: PolicyVersion): Pricer {
   const savings = policy.savingsAsset
   const policyPools = new Set(policy.buckets.flatMap((b) => b.pools))
   const by = new Map<RegistryName, { k: number; e: RegistryEntry }>()
-  const order = ds.pools.map((name, k) => ({ k, e: entry(name) })).sort((a, b) => Number(policyPools.has(b.e.name)) - Number(policyPools.has(a.e.name)))
+  const order = ds.pools.map((name, k) => ({ k, e: entry(name, baseRegistry) })).sort((a, b) => Number(policyPools.has(b.e.name)) - Number(policyPools.has(a.e.name)))
   for (const { k, e } of order) {
     const other = e.token0 === savings ? e.token1 : e.token1 === savings ? e.token0 : undefined
     if (other && !by.has(other)) by.set(other, { k, e })
@@ -54,7 +54,7 @@ function accountValue(ds: Dataset, s: Sample, w: World, price: Pricer): { total:
   for (const p of w.positions) {
     const ps = s.pools[ds.pools.indexOf(p.pool)]
     if (!ps) continue
-    const e = entry(p.pool)
+    const e = entry(p.pool, baseRegistry)
     const a = amountsOf(ps.sqrtPriceX96, p.tickLower, p.tickUpper, p.liquidity)
     const v = price(s, e.token0!, a.amount0 + p.owed0) + price(s, e.token1!, a.amount1 + p.owed1)
     total += v
@@ -67,7 +67,7 @@ function accountValue(ds: Dataset, s: Sample, w: World, price: Pricer): { total:
 /** Gas of one operation in raw savings units, through the ETH price pool. */
 function gasCost(ds: Dataset, s: Sample, kind: OpKind, gas: GasModel, savings: RegistryName): bigint {
   const wei = gas.unitsByKind[kind] * (s.baseFeeWei + gas.priorityFeeWei) + gas.l1FeeWei
-  const e = entry(ETH_PRICE_POOL)
+  const e = entry(ETH_PRICE_POOL, baseRegistry)
   const ps = s.pools[ds.pools.indexOf(ETH_PRICE_POOL)]!
   if (e.token0 !== savings && e.token1 !== savings) throw new Error(`${ETH_PRICE_POOL} does not price gas in ${savings}`)
   return e.token0 === savings ? token1InToken0(wei, ps.sqrtPriceX96) : token0InToken1(wei, ps.sqrtPriceX96)
@@ -86,7 +86,7 @@ function hodlBasket(ds: Dataset, s: Sample, policy: PolicyVersion, deposit: bigi
       held[savings]! += share
       continue
     }
-    const e = entry(name)
+    const e = entry(name, baseRegistry)
     const half = share / 2n
     const other = e.token0 === savings ? e.token1! : e.token0!
     held[savings]! += share - half
@@ -221,7 +221,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   const stablesK = stablesPool ? ds.pools.indexOf(stablesPool) : -1
   // Volatile buckets: their pool, and the sign that turns its tick into the volatile token's price (an up tick).
   const staged = policy.buckets.filter((b) => b.id !== 'stables' && b.pools[0]).map((b) => {
-    const e = entry(b.pools[0]!)
+    const e = entry(b.pools[0]!, baseRegistry)
     return { bucket: b.id, k: ds.pools.indexOf(b.pools[0]!), sign: e.token0 === savings ? -1 : 1, highs: [] as { time: number; up: number }[] }
   })
 
@@ -264,7 +264,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
         const b = s.pools[k]
         if (!a || !b) continue
         const f = accrue(p, a, b)
-        const e = entry(p.pool)
+        const e = entry(p.pool, baseRegistry)
         fees += price(s, e.token0!, f.fees0) + price(s, e.token1!, f.fees1)
       }
     }
@@ -344,7 +344,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
       } else if (p) {
         const ps = s.pools[ds.pools.indexOf(p.pool)] as PoolSample
         const done = apply(w, p, ps, s.time, policy.execution.slippageBps)
-        const e = entry(p.pool)
+        const e = entry(p.pool, baseRegistry)
         const cost = done.ok ? gasCost(ds, s, p.kind, gas, savings) : 0n
         ops.push({
           i, block: s.block, time: s.time, kind: p.kind, pool: p.pool, grant: p.grant, code: d.code, reason: d.reason, trail: d.trail, ok: done.ok,

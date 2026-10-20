@@ -19,7 +19,7 @@
 // RPC: BASE_FORK_RPC_URL (default https://mainnet.base.org), through the loopback proxy, same as t1/t2/t3-fork.ts.
 import { encodeFunctionData, parseEventLogs, type Address as ViemAddress, type Hex, type TransactionReceipt } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, assertCodeHashes, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { baseRegistry, address, assertCodeHashes, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { computeCaps, conservadorLabV4, encodeMamoruInit, instantiateGrant, mamoruInitFor, retargetToPolicy, TWAP_SHORT_WINDOW_SECONDS, V4_POOLS, withActionPolicy, type Price, type SessionGrant } from '@mamoru/policy'
 import type { ActionPolicyPoolConfig, ActionPolicySpend } from '@mamoru/account/precheck'
 import { bucketNow, oracleFromObserve, type OracleRead } from '@mamoru/uniswap-v3/policy-bounds'
@@ -73,7 +73,7 @@ function expectVerdict(o: SessionOpOutcome, label: string, want: SessionOpOutcom
 }
 
 function mintedPosition(receipt: TransactionReceipt, safe: Address): { tokenId: bigint; liquidity: bigint } {
-  const npm = address('NonfungiblePositionManager')
+  const npm = address('NonfungiblePositionManager', baseRegistry)
   const t = parseEventLogs({ abi: nonfungiblePositionManagerAbi, logs: receipt.logs, eventName: 'Transfer' }).find((l) => l.address.toLowerCase() === npm.toLowerCase() && l.args.to.toLowerCase() === safe.toLowerCase())
   if (!t) throw new Error('no position minted to the account (no NPM Transfer log)')
   const inc = parseEventLogs({ abi: nonfungiblePositionManagerAbi, logs: receipt.logs, eventName: 'IncreaseLiquidity' }).find((l) => l.args.tokenId === t.args.tokenId)
@@ -82,7 +82,7 @@ function mintedPosition(receipt: TransactionReceipt, safe: Address): { tokenId: 
 }
 
 async function usdcPrice(lab: Lab, pool: string, token0: string, token1: string, asset: string): Promise<Price> {
-  const [sqrtPriceX96] = await lab.client.readContract({ address: address(pool), abi: uniswapV3PoolAbi, functionName: 'slot0' })
+  const [sqrtPriceX96] = await lab.client.readContract({ address: address(pool, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0' })
   const ratio: Price = { num: sqrtPriceX96 * sqrtPriceX96, den: 1n << 192n }
   if (token0 === 'USDC' && token1 === asset) return ratio
   if (token1 === 'USDC' && token0 === asset) return { num: ratio.den, den: ratio.num }
@@ -111,7 +111,7 @@ const { handle } = await startLabFork({ manifest, forkUrl: proxy.url, logPath: `
 const lab = new Lab(handle.url, manifest.fork.chainId)
 
 try {
-  await assertCodeHashes(lab.client)
+  await assertCodeHashes(lab.client, baseRegistry)
   note('fork', true, `Base block ${manifest.fork.block} on anvil, chain id ${lab.chainId}`)
 
   const relayer = devAccount(0)
@@ -122,7 +122,7 @@ try {
   await lab.whaleTransfer('cbBTC', WHALE, world.a1.safe, 10_000_000n)
   note('fx-usdc / fx-cbbtc top-up', true, 'A1 funded with 100,000 USDC and 0.1 cbBTC total (on top of fx-usdc\'s own 10,000 USDC)')
 
-  const pool = address(POOL)
+  const pool = address(POOL, baseRegistry)
   const prices: Record<string, Price> = {
     USDT: await usdcPrice(lab, 'pool:USDC/USDT/100', 'USDC', 'USDT', 'USDT'),
     cbBTC: await usdcPrice(lab, 'pool:USDC/cbBTC/500', 'USDC', 'cbBTC', 'cbBTC'),
@@ -163,7 +163,7 @@ try {
   const managePid = permissionIdOf(manageSession)
 
   const enableData = encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableSessions', args: [[swapSession, manageSession]] })
-  const enableTx = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession'), data: enableData })
+  const enableTx = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession', baseRegistry), data: enableData })
   if (!enableTx.ok) throw new Error('enableSessions reverted')
   note('enableSessions: enter-swap + manage-any (gen 1)', true, `${enableTx.receipt.gasUsed} gas`)
   world.a1.ledger.activate(swapPid, swapGrant)
@@ -177,8 +177,8 @@ try {
   const apConfig: ActionPolicyPoolConfig = {
     pool: POOL,
     address: mamoruPolicy,
-    token0: address('USDC'),
-    token1: address('cbBTC'),
+    token0: address('USDC', baseRegistry),
+    token1: address('cbBTC', baseRegistry),
     feePips: 500,
     bandTicks: enginePolicy.actionPolicy!.bandTicksByPool[POOL]!,
     budgetIn1: apBudget.in1,
@@ -215,7 +215,7 @@ try {
   function swapExec(amountIn: bigint, amountOutMinimum: bigint, sqrtPriceLimitX96: bigint) {
     return [
       approve('USDC', 'SwapRouter02', amountIn),
-      { to: address('SwapRouter02') as Address, data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC'), tokenOut: address('cbBTC'), fee: 500, recipient: world.a1.safe, amountIn, amountOutMinimum, sqrtPriceLimitX96 }] }) },
+      { to: address('SwapRouter02', baseRegistry) as Address, data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), fee: 500, recipient: world.a1.safe, amountIn, amountOutMinimum, sqrtPriceLimitX96 }] }) },
     ]
   }
 
@@ -230,7 +230,7 @@ try {
     expectVerdict(loose, '(a) the chain independently refuses the same calldata too', 'CHAIN_REJECTED_VALIDATION')
 
     await syncLedger()
-    const [minOut, limit] = (await lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'swapBounds', args: [world.a1.safe, pool, address('USDC'), looseAmount] })) as readonly [bigint, bigint]
+    const [minOut, limit] = (await lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'swapBounds', args: [world.a1.safe, pool, address('USDC', baseRegistry), looseAmount] })) as readonly [bigint, bigint]
     const valid = await sendSessionOp(world, world.a1, { name: 'enter-swap-v4', grant: swapGrant, permissionId: swapPid }, 't4-price-band-valid', swapExec(looseAmount, minOut, limit))
     expectPrecheck(valid, "(a) the policy's own swapBounds minimum/limit: precheck accepts it", 'ACCEPT')
     expectVerdict(valid, '(a) the chain includes it', 'INCLUDED')
@@ -250,7 +250,7 @@ try {
 
     await syncLedger()
     const refused = await sendSessionOp(world, world.a1, { name: 'manage-any-v4', grant: manageGrant, permissionId: managePid }, 't4-admission-refused', [
-      { to: address('NonfungiblePositionManager') as Address, data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'decreaseLiquidity', args: [{ tokenId: unrelatedTokenId, liquidity: 1n, amount0Min: 0n, amount1Min: 0n, deadline }] }) },
+      { to: address('NonfungiblePositionManager', baseRegistry) as Address, data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'decreaseLiquidity', args: [{ tokenId: unrelatedTokenId, liquidity: 1n, amount0Min: 0n, amount1Min: 0n, deadline }] }) },
     ])
     expectPrecheck(refused, '(b) decreaseLiquidity on a never-admitted tokenId: precheck refuses it BEFORE anything is sent', 'POLICY_NOT_ADMITTED')
     expectVerdict(refused, '(b) the chain independently refuses the same calldata too', 'CHAIN_REJECTED_VALIDATION')
@@ -258,11 +258,11 @@ try {
     // Mint a position THROUGH the policy (admits it on chain and in our ledger mirror), then decrease it.
     const mintUsdc = 10_000_000_000n
     const mintCbbtc = 2_000_000n
-    const mintThroughPolicy = { token0: address('USDC'), token1: address('cbBTC'), fee: 500, tickLower: -600, tickUpper: 600, amount0Desired: mintUsdc, amount1Desired: mintCbbtc, amount0Min: 0n, amount1Min: 0n, recipient: world.a1.safe, deadline }
+    const mintThroughPolicy = { token0: address('USDC', baseRegistry), token1: address('cbBTC', baseRegistry), fee: 500, tickLower: -600, tickUpper: 600, amount0Desired: mintUsdc, amount1Desired: mintCbbtc, amount0Min: 0n, amount1Min: 0n, recipient: world.a1.safe, deadline }
     await syncLedger()
     const minted = await sendSessionOp(world, world.a1, { name: 'manage-any-v4', grant: manageGrant, permissionId: managePid }, 't4-admission-mint', [
-      { to: address('USDC') as Address, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [mamoruPolicy, mintUsdc] }) },
-      { to: address('cbBTC') as Address, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [mamoruPolicy, mintCbbtc] }) },
+      { to: address('USDC', baseRegistry) as Address, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [mamoruPolicy, mintUsdc] }) },
+      { to: address('cbBTC', baseRegistry) as Address, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [mamoruPolicy, mintCbbtc] }) },
       { to: mamoruPolicy, data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'mint', args: [mintThroughPolicy] }) },
     ])
     expectPrecheck(minted, '(b) mint through the policy: precheck accepts it (admission + budget both ok)', 'ACCEPT')
@@ -277,7 +277,7 @@ try {
     if (admittedTokenId > 0n) {
       await syncLedger()
       const valid = await sendSessionOp(world, world.a1, { name: 'manage-any-v4', grant: manageGrant, permissionId: managePid }, 't4-admission-valid-decrease', [
-        { to: address('NonfungiblePositionManager') as Address, data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'decreaseLiquidity', args: [{ tokenId: admittedTokenId, liquidity: 1n, amount0Min: 0n, amount1Min: 0n, deadline: BigInt((await engineNow()) + 3600) }] }) },
+        { to: address('NonfungiblePositionManager', baseRegistry) as Address, data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'decreaseLiquidity', args: [{ tokenId: admittedTokenId, liquidity: 1n, amount0Min: 0n, amount1Min: 0n, deadline: BigInt((await engineNow()) + 3600) }] }) },
       ])
       expectPrecheck(valid, '(b) decreaseLiquidity on the now-admitted tokenId: precheck accepts it', 'ACCEPT')
       expectVerdict(valid, '(b) the chain includes it', 'INCLUDED')
@@ -295,7 +295,7 @@ try {
     const swapGrant2: SessionGrant = retargetToPolicy(instantiateGrant(conservadorLabV4, `enter-swap:${POOL}`, grantCtx()), mamoruPolicy)
     const swapSession2 = toSmartSession(swapGrant2, v4Policies(mamoruPolicy, gasPolicy, btcMamoruInit))
     const swapPid2 = permissionIdOf(swapSession2)
-    const enableTx2 = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession'), data: encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableSessions', args: [[swapSession2]] }) })
+    const enableTx2 = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession', baseRegistry), data: encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableSessions', args: [[swapSession2]] }) })
     if (!enableTx2.ok) throw new Error('enableSessions (fresh enter-swap for the budget test) reverted')
     world.a1.ledger.activate(swapPid2, swapGrant2)
     const freshSwap = { name: 'enter-swap-v4-fresh', grant: swapGrant2, permissionId: swapPid2 }
@@ -306,7 +306,7 @@ try {
     // btc: W_p = 2 x C_p per day and the grant's per-call cap is C_p (T5, Ot 18-Oct): two swaps at the per-call cap
     // fill the bucket (less the few seconds of refill between blocks), a third is over it.
     const perCall = apConfig.perWindow / 2n
-    const [minOut, limit] = (await lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'swapBounds', args: [world.a1.safe, pool, address('USDC'), perCall] })) as readonly [bigint, bigint]
+    const [minOut, limit] = (await lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'swapBounds', args: [world.a1.safe, pool, address('USDC', baseRegistry), perCall] })) as readonly [bigint, bigint]
     const oneSwap = swapExec(perCall, minOut, limit)
 
     for (const n of [1, 2]) {

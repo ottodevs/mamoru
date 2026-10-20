@@ -18,7 +18,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createPublicClient, http, parseAbi, type Address, type Hex } from 'viem'
-import { address as registryAddress } from '@mamoru/registry'
+import { baseRegistry, address as registryAddress } from '@mamoru/registry'
 
 const ARTIFACT_PATH = join(import.meta.dir, '../../../contracts/action-policy/out/MamoruActionPolicy.sol/MamoruActionPolicy.json')
 
@@ -80,10 +80,10 @@ export async function verifyDeployedPolicy(client: PolicyReaderClient, deployed:
   if (!onChainCode || onChainCode === '0x') return { ok: false, reason: `no code at ${deployed}` }
 
   const expected: Record<'SMART_SESSION' | 'NPM' | 'ROUTER' | 'FACTORY', Address> = {
-    SMART_SESSION: registryAddress('SmartSession'),
-    NPM: registryAddress('NonfungiblePositionManager'),
-    ROUTER: registryAddress('SwapRouter02'),
-    FACTORY: registryAddress('UniswapV3Factory'),
+    SMART_SESSION: registryAddress('SmartSession', baseRegistry),
+    NPM: registryAddress('NonfungiblePositionManager', baseRegistry),
+    ROUTER: registryAddress('SwapRouter02', baseRegistry),
+    FACTORY: registryAddress('UniswapV3Factory', baseRegistry),
   }
   let read: Record<'SMART_SESSION' | 'NPM' | 'ROUTER' | 'FACTORY', Address>
   try {

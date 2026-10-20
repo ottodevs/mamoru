@@ -1,6 +1,7 @@
 import { encodeFunctionData, encodePacked, getAddress, maxUint128, maxUint256, parseAbi, type Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
 import {
+  baseRegistry,
   address,
   erc20Abi,
   erc4626Abi,
@@ -29,10 +30,10 @@ export type AttackCtx = { world: World; params: Record<string, unknown> }
 type Builder = (ctx: AttackCtx) => CallLike[] | Promise<CallLike[]>
 
 const call = (to: Address, data: Hex, value = 0n): CallLike => ({ to, data, value })
-const usdc = () => address('USDC')
-const cbbtc = () => address('cbBTC')
-const npm = () => address('NonfungiblePositionManager')
-const router = () => address('SwapRouter02')
+const usdc = () => address('USDC', baseRegistry)
+const cbbtc = () => address('cbBTC', baseRegistry)
+const npm = () => address('NonfungiblePositionManager', baseRegistry)
+const router = () => address('SwapRouter02', baseRegistry)
 
 function managed(w: World): bigint {
   const id = w.a1.managedTokenIds[0]
@@ -135,19 +136,19 @@ export const ATTACKS: Record<string, Builder> = {
     call(npm(), encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'increaseLiquidity', args: [{ tokenId: managed(ctx.world), amount0Desired: 1_000_000n, amount1Desired: 1_000n, amount0Min: 0n, amount1Min: 0n, deadline: await deadline(ctx.world) }] })),
   ],
   'contract-not-in-grant': () => [
-    call(address('QuoterV2'), encodeFunctionData({ abi: quoterAbi, functionName: 'quoteExactInputSingle', args: [{ tokenIn: usdc(), tokenOut: cbbtc(), amountIn: 1_000_000n, fee: 500, sqrtPriceLimitX96: 0n }] })),
+    call(address('QuoterV2', baseRegistry), encodeFunctionData({ abi: quoterAbi, functionName: 'quoteExactInputSingle', args: [{ tokenIn: usdc(), tokenOut: cbbtc(), amountIn: 1_000_000n, fee: 500, sqrtPriceLimitX96: 0n }] })),
   ],
 
   // SESS-14
   'safe-addOwnerWithThreshold': (ctx) => [call(ctx.world.a1.safe, encodeFunctionData({ abi: safeAbi, functionName: 'addOwnerWithThreshold', args: [ctx.world.attacker.address, 1n] }))],
-  'safe-swapOwner': (ctx) => [call(ctx.world.a1.safe, encodeFunctionData({ abi: safeAbi, functionName: 'swapOwner', args: [SENTINEL, address('SafeWebAuthnSharedSigner'), ctx.world.attacker.address] }))],
-  'safe-removeOwner': (ctx) => [call(ctx.world.a1.safe, encodeFunctionData({ abi: safeAbi, functionName: 'removeOwner', args: [address('SafeWebAuthnSharedSigner'), ctx.world.a1.backupOwner.address, 1n] }))],
+  'safe-swapOwner': (ctx) => [call(ctx.world.a1.safe, encodeFunctionData({ abi: safeAbi, functionName: 'swapOwner', args: [SENTINEL, address('SafeWebAuthnSharedSigner', baseRegistry), ctx.world.attacker.address] }))],
+  'safe-removeOwner': (ctx) => [call(ctx.world.a1.safe, encodeFunctionData({ abi: safeAbi, functionName: 'removeOwner', args: [address('SafeWebAuthnSharedSigner', baseRegistry), ctx.world.a1.backupOwner.address, 1n] }))],
   'safe-changeThreshold': (ctx) => [call(ctx.world.a1.safe, encodeFunctionData({ abi: safeAbi, functionName: 'changeThreshold', args: [2n] }))],
 
   // SESS-15
   'account-installModule': (ctx) => [call(ctx.world.a1.safe, encodeFunctionData({ abi: safe7579Abi, functionName: 'installModule', args: [2n, ctx.world.attacker.address, '0x'] }))],
   'account-uninstallModule': (ctx) => [
-    call(ctx.world.a1.safe, encodeFunctionData({ abi: safe7579Abi, functionName: 'uninstallModule', args: [1n, address('SmartSession'), encodePacked(['bytes32', 'bytes32'], [`0x${'00'.repeat(31)}01`, `0x${'00'.repeat(32)}`])] })),
+    call(ctx.world.a1.safe, encodeFunctionData({ abi: safe7579Abi, functionName: 'uninstallModule', args: [1n, address('SmartSession', baseRegistry), encodePacked(['bytes32', 'bytes32'], [`0x${'00'.repeat(31)}01`, `0x${'00'.repeat(32)}`])] })),
   ],
   'safe-setGuard': (ctx) => [call(ctx.world.a1.safe, encodeFunctionData({ abi: safeAbi, functionName: 'setGuard', args: [ctx.world.attacker.address] }))],
   'safe-setFallbackHandler': (ctx) => [call(ctx.world.a1.safe, encodeFunctionData({ abi: safeAbi, functionName: 'setFallbackHandler', args: [ctx.world.attacker.address] }))],
@@ -156,14 +157,14 @@ export const ATTACKS: Record<string, Builder> = {
   // SESS-16
   'smartsession-enableSessions': (ctx) => [
     call(
-      address('SmartSession'),
+      address('SmartSession', baseRegistry),
       encodeFunctionData({
         abi: smartSessionAbi,
         functionName: 'enableSessions',
         args: [
           [
             {
-              sessionValidator: address('OwnableValidator'),
+              sessionValidator: address('OwnableValidator', baseRegistry),
               sessionValidatorInitData: encodePacked(['uint256', 'uint256', 'uint256', 'address'], [1n, 64n, 1n, ctx.world.attacker.address]),
               salt: `0x${'ee'.repeat(32)}`,
               userOpPolicies: [{ policy: SUDO_POLICY, initData: '0x' }],
@@ -178,7 +179,7 @@ export const ATTACKS: Record<string, Builder> = {
   ],
   'smartsession-enableActionPolicies': (ctx) => [
     call(
-      address('SmartSession'),
+      address('SmartSession', baseRegistry),
       encodeFunctionData({
         abi: smartSessionAbi,
         functionName: 'enableActionPolicies',
@@ -187,7 +188,7 @@ export const ATTACKS: Record<string, Builder> = {
     ),
   ],
   'smartsession-enableUserOpPolicies': (ctx) => [
-    call(address('SmartSession'), encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableUserOpPolicies', args: [ctx.params.permissionId as Hex, [{ policy: SUDO_POLICY, initData: '0x' }]] })),
+    call(address('SmartSession', baseRegistry), encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableUserOpPolicies', args: [ctx.params.permissionId as Hex, [{ policy: SUDO_POLICY, initData: '0x' }]] })),
   ],
 
   // SESS-21
@@ -221,7 +222,7 @@ export const ATTACKS: Record<string, Builder> = {
   'delegatecall-multisend-transfer': (ctx) => {
     const t = encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [ctx.world.attacker.address, 1_000_000n] })
     const packed = encodePacked(['uint8', 'address', 'uint256', 'uint256', 'bytes'], [0, usdc(), 0n, BigInt((t.length - 2) / 2), t])
-    return [call(address('MultiSendCallOnly_141'), encodeFunctionData({ abi: parseAbi(['function multiSend(bytes)']), functionName: 'multiSend', args: [packed] }))]
+    return [call(address('MultiSendCallOnly_141', baseRegistry), encodeFunctionData({ abi: parseAbi(['function multiSend(bytes)']), functionName: 'multiSend', args: [packed] }))]
   },
 }
 

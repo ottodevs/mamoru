@@ -1,7 +1,7 @@
 import { copyFileSync } from 'node:fs'
 import { createPublicClient, http, toHex } from 'viem'
 import { ReasonError, isReasonCode } from '@mamoru/domain'
-import { assertCodeHashes } from '@mamoru/registry'
+import { baseRegistry, assertCodeHashes } from '@mamoru/registry'
 import { POLICIES } from '@mamoru/policy'
 import { Lab } from '../fixtures/lab.ts'
 import { buildBasicWorld, buildSessWorld, checkpointWorld, restoreWorld, type World, type WorldCheckpoint } from '../fixtures/world.ts'
@@ -45,7 +45,7 @@ async function startWorld(run: RunCtx, kind: 'sess' | 'basic' | 'engine', policy
   run.anvils.push(handle)
   run.rpcUrls.add(handle.url)
   const lab = new Lab(handle.url, run.manifest.fork.chainId)
-  await assertCodeHashes(lab.client)
+  await assertCodeHashes(lab.client, baseRegistry)
   const enginePort = startEnginePort(handle.url)
   run.rpcUrls.add(enginePort.url)
   const engineClient = createPublicClient({ transport: http(enginePort.url) })
@@ -90,7 +90,7 @@ async function runScenario(run: RunCtx, s: Scenario, env: WorldEnv, first: boole
         else if (k !== 'require-p256') throw new Error(`unknown preparation ${k}`)
       }
       try {
-        await assertCodeHashes(env.lab.client)
+        await assertCodeHashes(env.lab.client, baseRegistry)
       } catch (e) {
         if (!(e instanceof ReasonError)) throw e
         ctx.codes.add(e.code)

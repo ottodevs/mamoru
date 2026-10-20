@@ -24,7 +24,7 @@ import { join } from 'node:path'
 import { encodeFunctionData, parseAbi, parseEventLogs, type Hex } from 'viem'
 import type { PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
-import { address, assertCodeHashes, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { baseRegistry, address, assertCodeHashes, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
 import {
   USAGE_RENEW_BPS,
   V4_GAS_CAPS,
@@ -96,7 +96,7 @@ async function ownerCalls(lab: Lab, relayer: PrivateKeyAccount, acct: AccountFix
 }
 
 async function usdcPrice(lab: Lab, pool: string, token0: string, token1: string, asset: string): Promise<Price> {
-  const [sqrtPriceX96] = await lab.client.readContract({ address: address(pool), abi: uniswapV3PoolAbi, functionName: 'slot0' })
+  const [sqrtPriceX96] = await lab.client.readContract({ address: address(pool, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0' })
   const ratio: Price = { num: sqrtPriceX96 * sqrtPriceX96, den: 1n << 192n }
   if (token0 === 'USDC' && token1 === asset) return ratio
   if (token1 === 'USDC' && token0 === asset) return { num: ratio.den, den: ratio.num }
@@ -135,7 +135,7 @@ const { handle } = await startLabFork({ manifest, forkUrl: proxy.url, logPath: `
 const lab = new Lab(handle.url, manifest.fork.chainId)
 
 try {
-  await assertCodeHashes(lab.client)
+  await assertCodeHashes(lab.client, baseRegistry)
   note('fork', true, `Base block ${manifest.fork.block} on anvil, chain id ${lab.chainId}`)
   const relayer = devAccount(0)
   const engineNow = async () => Number((await lab.client.getBlock()).timestamp)
@@ -149,13 +149,13 @@ try {
   const deployer = devAccount(9)
   const dep = await forgeDeploy(handle.url, deployer, deployerKey)
   note('Deploy.s.sol --broadcast on the local fork', true, `MamoruActionPolicy ${dep.policy}, MamoruGasPolicy ${dep.gasPolicy}`)
-  const reference = await lab.client.readContract({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findModule', args: [address('TimeFramePolicy')] })
+  const reference = await lab.client.readContract({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findModule', args: [address('TimeFramePolicy', baseRegistry)] })
   for (const [name, m] of [['MamoruActionPolicy', dep.policy], ['MamoruGasPolicy', dep.gasPolicy]] as const) {
-    const rec = await lab.client.readContract({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findModule', args: [m] })
+    const rec = await lab.client.readContract({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findModule', args: [m] })
     note(`findModule(${name}): registered by the deployer under Mamoru's resolver (the operator's check before any attest)`, rec.sender.toLowerCase() === deployer.address.toLowerCase() && rec.resolverUID === reference.resolverUID, `sender ${rec.sender}`)
   }
   for (const p of Object.values(V4_POOLS)) {
-    const s = await lab.client.readContract({ address: address(p.pool), abi: parseAbi(['function slot0() view returns (uint160, int24, uint16, uint16, uint16, uint8, bool)']), functionName: 'slot0' })
+    const s = await lab.client.readContract({ address: address(p.pool, baseRegistry), abi: parseAbi(['function slot0() view returns (uint160, int24, uint16, uint16, uint16, uint8, bool)']), functionName: 'slot0' })
     note(`ring raised: ${p.pool}`, s[4] >= 3_600, `observationCardinalityNext ${s[4]}`)
   }
 
@@ -220,10 +220,10 @@ try {
   }
 
   async function swapCalls(pool: string, tokenIn: string, tokenOut: string, fee: number, amountIn: bigint): Promise<{ to: Address; data: Hex }[]> {
-    const [minOut, limit] = await lab.client.readContract({ address: d.actionPolicy, abi: policyAbi, functionName: 'swapBounds', args: [safe, address(pool), address(tokenIn), amountIn] })
+    const [minOut, limit] = await lab.client.readContract({ address: d.actionPolicy, abi: policyAbi, functionName: 'swapBounds', args: [safe, address(pool, baseRegistry), address(tokenIn, baseRegistry), amountIn] })
     return [
       approve(tokenIn, 'SwapRouter02', amountIn),
-      { to: address('SwapRouter02'), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address(tokenIn), tokenOut: address(tokenOut), fee, recipient: safe, amountIn, amountOutMinimum: minOut, sqrtPriceLimitX96: limit }] }) },
+      { to: address('SwapRouter02', baseRegistry), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address(tokenIn, baseRegistry), tokenOut: address(tokenOut, baseRegistry), fee, recipient: safe, amountIn, amountOutMinimum: minOut, sqrtPriceLimitX96: limit }] }) },
     ]
   }
 
@@ -232,7 +232,7 @@ try {
   const key1 = devAccount(5) // A1's session key in buildBasicWorld
   const gen1 = await approveV4('activation (generation 1)', 1n, key1.address, {}, [])
   for (const m of [d.actionPolicy, d.gasPolicy]) {
-    const a = await lab.client.readContract({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [m, safe] })
+    const a = await lab.client.readContract({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [m, safe] })
     note(`self-attested by the Safe in tx 1: ${m}`, Number(a.time) > 0 && Number(a.revocationTime) === 0, `time ${a.time}`)
   }
   {
@@ -264,7 +264,7 @@ try {
 
   // ---------------------------------------------------------------------------------------------- 5. a position minted outside, then the renewal admits it
 
-  const tick = (await lab.client.readContract({ address: address(V4_POOLS.btc.pool), abi: uniswapV3PoolAbi, functionName: 'slot0' }))[1]
+  const tick = (await lab.client.readContract({ address: address(V4_POOLS.btc.pool, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0' }))[1]
   const { tickLower, tickUpper } = rangeAround(tick, 2_000, 10)
   const cbbtc = await lab.balanceOf('cbBTC', safe)
   const deadline = BigInt(await engineNow()) + 3_600n
@@ -275,7 +275,7 @@ try {
   ].map((c) => ({ ...c, value: 0n })))
   const tokenId = parseEventLogs({ abi: nonfungiblePositionManagerAbi, logs: minted.receipt.logs, eventName: 'Transfer' }).find((l) => l.args.to.toLowerCase() === safe.toLowerCase())?.args.tokenId
   note('owner mints a btc position outside the policy (as v2/v3 grants did)', minted.ok && tokenId !== undefined, `tokenId ${tokenId}`)
-  const liquidity = (await lab.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId!] }))[7]
+  const liquidity = (await lab.client.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId!] }))[7]
   const manage1 = session(gen1, `manage-any:${V4_POOLS.btc.pool}`)
   {
     const out = await engineOp('t7-decrease-not-admitted', manage1, [decreaseLiquidity({ tokenId: tokenId!, liquidity: liquidity / 2n, amount0Min: 1n, amount1Min: 1n, deadline })])
@@ -284,12 +284,12 @@ try {
   const key2 = devAccount(6)
   const gen2 = await approveV4('renewal (generation 2, admit)', 2n, key2.address, { [V4_POOLS.btc.pool]: [tokenId!] }, gen1.flatMap((b) => b.permissionIds))
   const at = await lab.client.readContract({ address: d.actionPolicy, abi: policyAbi, functionName: 'admittedPool', args: [safe, tokenId!] })
-  note('Init.admit: the position is admitted to its pool at enable', at.toLowerCase() === address(V4_POOLS.btc.pool).toLowerCase(), at)
+  note('Init.admit: the position is admitted to its pool at enable', at.toLowerCase() === address(V4_POOLS.btc.pool, baseRegistry).toLowerCase(), at)
   {
     const old = await engineOp('t7-gen1-after-renewal', btcSwap1, await swapCalls(V4_POOLS.btc.pool, 'USDC', 'cbBTC', 500, 10_000_000n))
     note('a generation-1 session after the renewal (revoked and retired) is refused', old.verdict === 'CHAIN_REJECTED_VALIDATION', `${old.verdict} validator=${old.validator}`)
     const manage2 = session(gen2, `manage-any:${V4_POOLS.btc.pool}`)
-    const [m0, m1] = await lab.client.readContract({ address: d.actionPolicy, abi: policyAbi, functionName: 'decreaseMins', args: [safe, address(V4_POOLS.btc.pool), tokenId!, liquidity / 2n] })
+    const [m0, m1] = await lab.client.readContract({ address: d.actionPolicy, abi: policyAbi, functionName: 'decreaseMins', args: [safe, address(V4_POOLS.btc.pool, baseRegistry), tokenId!, liquidity / 2n] })
     const out = await engineOp('t7-decrease-admitted', manage2, [decreaseLiquidity({ tokenId: tokenId!, liquidity: liquidity / 2n, amount0Min: m0 > 0n ? m0 : 1n, amount1Min: m1 > 0n ? m1 : 1n, deadline }), { ...collect({ account: safe, tokenId: tokenId! }) }], key2)
     note('generation 2 (new key): the admitted position is decreased and collected at decreaseMins', out.verdict === 'INCLUDED', `${out.verdict}${out.failedOp?.reason ? ` (${out.failedOp.reason})` : ''} mins ${m0}/${m1}`)
   }
@@ -302,7 +302,7 @@ try {
     await lab.whaleTransfer('USDC', WHALE, safe, 10_000_000_000n)
     const total = budgets[V4_POOLS.stables.caps.budgetTotal]!
     const perCall = caps[V4_POOLS.stables.caps.stableSwapPerCall]!
-    const read = async () => (await readPolicyBudgets(lab.client as never, d.actionPolicy, safe, [{ name: stables, address: address(stables) }], budgetUsedBps)).get(stables) ?? -1
+    const read = async () => (await readPolicyBudgets(lab.client as never, d.actionPolicy, safe, [{ name: stables, address: address(stables, baseRegistry) }], budgetUsedBps)).get(stables) ?? -1
     note('budget before', null, `stables T_p ${total}, used ${await read()} bps, per call ${perCall}`)
     for (const day of [1, 2]) {
       const calls: { to: Address; data: Hex }[] = []

@@ -16,7 +16,7 @@
 import { encodeFunctionData, type Hex } from 'viem'
 import type { PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
-import { address, assertCodeHashes, safeAbi, smartSessionAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { baseRegistry, address, assertCodeHashes, safeAbi, smartSessionAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
 import {
   computeCaps,
   conservadorLabV4,
@@ -86,7 +86,7 @@ async function ownerExecGas(lab: Lab, relayer: PrivateKeyAccount, acct: AccountF
 }
 
 async function usdcPrice(lab: Lab, pool: string, token0: string, token1: string, asset: string): Promise<Price> {
-  const [sqrtPriceX96] = await lab.client.readContract({ address: address(pool), abi: uniswapV3PoolAbi, functionName: 'slot0' })
+  const [sqrtPriceX96] = await lab.client.readContract({ address: address(pool, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0' })
   const ratio: Price = { num: sqrtPriceX96 * sqrtPriceX96, den: 1n << 192n } // token1 per token0, raw units
   if (token0 === 'USDC' && token1 === asset) return ratio
   if (token1 === 'USDC' && token0 === asset) return { num: ratio.den, den: ratio.num }
@@ -126,7 +126,7 @@ async function enableInBatches(lab: Lab, relayer: PrivateKeyAccount, acct: Accou
     txIndex++
     const data = encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableSessions', args: [batch.map((i) => i.session)] })
     const modeled = batch.reduce((n, i) => n + estimateSessionGas(i.actions.length, model), 0n)
-    const r = await ownerExecGas(lab, relayer, acct, { to: address('SmartSession'), data }, 20_000_000n)
+    const r = await ownerExecGas(lab, relayer, acct, { to: address('SmartSession', baseRegistry), data }, 20_000_000n)
     const names = batch.map((i) => i.label).join(', ')
     note(`${label}: tx ${txIndex}/${batches.length}`, r.ok, r.ok ? `${r.receipt.gasUsed} gas (modeled ${modeled}), sessions: ${names}` : `reverted (${r.hash})`)
     if (!r.ok) throw new Error(`${label}: enableSessions batch ${txIndex} reverted`)
@@ -146,7 +146,7 @@ const { handle } = await startLabFork({ manifest, forkUrl: proxy.url, logPath: `
 const lab = new Lab(handle.url, manifest.fork.chainId)
 
 try {
-  await assertCodeHashes(lab.client)
+  await assertCodeHashes(lab.client, baseRegistry)
   note('fork', true, `Base block ${manifest.fork.block} on anvil, chain id ${lab.chainId}`)
 
   const relayer = devAccount(0)
@@ -173,7 +173,7 @@ try {
   // T6 L-4: the policy refuses a pool whose observation ring cannot hold the 1,800 s window at 1 s blocks. USDC/USDT
   // has 1,000 at this block: the deploy step raises every pool to 3,600 first (script/Deploy.s.sol).
   for (const p of Object.values(V4_POOLS)) {
-    const gas = await raiseObservationCardinality(lab, relayer, address(p.pool), 3_600)
+    const gas = await raiseObservationCardinality(lab, relayer, address(p.pool, baseRegistry), 3_600)
     note(`observationCardinalityNext >= 3,600: ${p.pool}`, true, gas > 0n ? `${gas} gas` : 'already there')
     if (gas > 0n) recordGas(`raise-cardinality-${p.pool}`, gas)
   }
@@ -210,13 +210,13 @@ try {
       address: mamoruPolicy,
       abi: policyAbi,
       functionName: 'swapBounds',
-      args: [world.a1.safe, address(V4_POOLS.btc.pool), address('USDC'), 10_000_000_000n],
+      args: [world.a1.safe, address(V4_POOLS.btc.pool, baseRegistry), address('USDC', baseRegistry), 10_000_000_000n],
     })) as readonly [bigint, bigint]
     const out = await sendSessionOp(world, world.a1, { name: btcSwap.label, grant: btcSwap.grant, permissionId }, 'engine-op-swap-v4', [
       approve('USDC', 'SwapRouter02', 10_000_000_000n),
       {
-        to: address('SwapRouter02'),
-        data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC'), tokenOut: address('cbBTC'), fee: 500, recipient: world.a1.safe, amountIn: 10_000_000_000n, amountOutMinimum: minOut, sqrtPriceLimitX96: limit }] }),
+        to: address('SwapRouter02', baseRegistry),
+        data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), fee: 500, recipient: world.a1.safe, amountIn: 10_000_000_000n, amountOutMinimum: minOut, sqrtPriceLimitX96: limit }] }),
       },
     ])
     note('functional check: production-built v4 enter-swap session, 10,000 USDC -> cbBTC within band', out.verdict === 'INCLUDED', `${out.verdict}${out.failedOp?.reason ? ` (${out.failedOp.reason})` : ''}`)

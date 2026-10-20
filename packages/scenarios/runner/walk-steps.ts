@@ -1,7 +1,7 @@
 import { readdirSync } from 'node:fs'
 import { decodeFunctionResult, encodeFunctionData, keccak256, parseEventLogs, stringToHex, toEventSelector, type Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, erc20Abi, nonfungiblePositionManagerAbi, safe7579Abi, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi, smartSessionAbi } from '@mamoru/registry'
+import { baseRegistry, address, erc20Abi, nonfungiblePositionManagerAbi, safe7579Abi, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi, smartSessionAbi } from '@mamoru/registry'
 import type { PrivateKeyAccount } from 'viem/accounts'
 import { OPERATION_CALL, execTransactionData, multiSendCallOnly, webAuthnSigner, type MultiSendCall, type SafeTx } from '@mamoru/account/safe'
 import { WALKAWAY_TOKENS, walkawayCalls, type WalkawayPosition } from '@mamoru/account/owner'
@@ -63,7 +63,7 @@ const servicesOff: StepHandler = async () => {
 /** Liquidity and tokens owed per position, read from the NonfungiblePositionManager. */
 async function readPositions(w: World, account: Address, tokenIds: bigint[]) {
   const c = w.lab.client
-  const npm = address('NonfungiblePositionManager')
+  const npm = address('NonfungiblePositionManager', baseRegistry)
   const deadline = BigInt(Number(await w.lab.timestamp()) + 3600)
   const positions: WalkawayPosition[] = []
   const collected: Record<string, bigint> = { USDC: 0n, cbBTC: 0n }
@@ -82,7 +82,7 @@ async function readPositions(w: World, account: Address, tokenIds: bigint[]) {
     const results = decodeFunctionResult({ abi: nonfungiblePositionManagerAbi, functionName: 'multicall', data: r.data! })
     const [a0, a1] = decodeFunctionResult({ abi: nonfungiblePositionManagerAbi, functionName: 'collect', data: results.at(-1)! })
     for (const [token, amount] of [[p[2], a0], [p[3], a1]] as const) {
-      const name = WALKAWAY_TOKENS.find((t) => address(t).toLowerCase() === token.toLowerCase())
+      const name = WALKAWAY_TOKENS.find((t) => address(t, baseRegistry).toLowerCase() === token.toLowerCase())
       if (!name) throw new Error(`position ${tokenId} holds ${token}, outside the walkaway tokens`)
       collected[name]! += amount
     }
@@ -139,7 +139,7 @@ const ownerWalkaway: StepHandler = async (ctx, args) => {
     ownerCbBTC: await w.lab.balanceOf('cbBTC', recipient),
     ownerEth: await c.getBalance({ address: recipient }),
     safeEth: await c.getBalance({ address: safe }),
-    nfts: await c.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe] }),
+    nfts: await c.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe] }),
   }
   const amounts = { USDC: before.USDC + collected.USDC!, cbBTC: before.cbBTC + collected.cbBTC! }
   const calls = walkawayCalls({ account: safe, permissionIds: kit.permissionIds, positions, recipient, amounts, deadline })
@@ -148,7 +148,7 @@ const ownerWalkaway: StepHandler = async (ctx, args) => {
   const r = await ownerBatch(w.lab, sender, acct, calls, by)
   const success = r.receipt.logs.filter((l) => l.address.toLowerCase() === safe.toLowerCase() && l.topics[0] === EXECUTION_SUCCESS)
   const signer = `0x${r.signature.slice(26, 66)}`.toLowerCase()
-  const signedBy = by === 'passkey' ? signer === address('SafeWebAuthnSharedSigner').toLowerCase() : true
+  const signedBy = by === 'passkey' ? signer === address('SafeWebAuthnSharedSigner', baseRegistry).toLowerCase() : true
   out.push(
     check(
       by === 'passkey' ? 'the passkey signs one Safe transaction through SafeWebAuthnSharedSigner, a development account sends it' : 'backup owner signs one Safe transaction, the gas payer sends it',
@@ -159,17 +159,17 @@ const ownerWalkaway: StepHandler = async (ctx, args) => {
 
   const enabled: string[] = []
   for (const pid of kit.permissionIds) {
-    const on = await c.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [pid, safe] })
+    const on = await c.readContract({ address: address('SmartSession', baseRegistry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [pid, safe] })
     if (on) enabled.push(pid.slice(0, 10))
   }
   out.push(check('every grant in the kit is revoked', enabled.length === 0 && kit.permissionIds.length > 0, enabled.length ? `still enabled: ${enabled.join(', ')}` : `${kit.permissionIds.length} removed`))
 
   const alive: string[] = []
   for (const id of tokenIds) {
-    const owner = await c.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [id] }).catch(() => null)
+    const owner = await c.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [id] }).catch(() => null)
     if (owner) alive.push(`${id} owned by ${owner}`)
   }
-  const nfts = await c.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe] })
+  const nfts = await c.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe] })
   out.push(check('every managed position is burned', alive.length === 0 && tokenIds.length > 0 && nfts === before.nfts - BigInt(tokenIds.length), alive.join('; ') || `${tokenIds.join(', ')} burned`))
 
   const after = {
@@ -212,7 +212,7 @@ const counterfactualWalkaway: StepHandler = async (ctx, args) => {
     ctx,
     recoveryKit({
       chainId: w.lab.chainId,
-      owners: [address('SafeWebAuthnSharedSigner'), owner.address],
+      owners: [address('SafeWebAuthnSharedSigner', baseRegistry), owner.address],
       saltNonce: BigInt((args.saltNonce as number | undefined) ?? 4),
       webauthn: webAuthnSigner(passkey.x, passkey.y),
       permissionIds: [],
@@ -240,7 +240,7 @@ const counterfactualWalkaway: StepHandler = async (ctx, args) => {
   const threshold = await c.readContract({ address: safe, abi: safeAbi, functionName: 'getThreshold' })
   const adapter = await c.readContract({ address: safe, abi: safeAbi, functionName: 'isModuleEnabled', args: [kit.modules.adapter] })
   const handler = await c.getStorageAt({ address: safe, slot: FALLBACK_HANDLER_SLOT })
-  const sessions = await c.readContract({ address: safe, abi: safe7579Abi, functionName: 'isModuleInstalled', args: [1n, address('SmartSession'), '0x'] })
+  const sessions = await c.readContract({ address: safe, abi: safe7579Abi, functionName: 'isModuleInstalled', args: [1n, address('SmartSession', baseRegistry), '0x'] })
   const setupOk =
     owners.map((o) => o.toLowerCase()).join() === kit.owners.map((o) => o.toLowerCase()).join() &&
     threshold.toString() === kit.setup.threshold &&
@@ -250,7 +250,7 @@ const counterfactualWalkaway: StepHandler = async (ctx, args) => {
   out.push(check('the deployed Safe has the kit owners and modules', setupOk, `owners ${owners.length}, threshold ${threshold}, Safe7579 ${adapter}, SmartSession ${sessions}`))
 
   // The passkey was bound by the deploy itself: the kit's x, y and verifiers are in SafeWebAuthnSharedSigner.
-  const bound = await c.readContract({ address: address('SafeWebAuthnSharedSigner'), abi: safeWebAuthnSharedSignerAbi, functionName: 'getConfiguration', args: [safe] })
+  const bound = await c.readContract({ address: address('SafeWebAuthnSharedSigner', baseRegistry), abi: safeWebAuthnSharedSignerAbi, functionName: 'getConfiguration', args: [safe] })
   const kitSigner = kit.webauthn
   const boundOk = !!kitSigner && bound.x.toString() === kitSigner.x && bound.y.toString() === kitSigner.y && bound.verifiers.toString() === kitSigner.verifiers
   out.push(check('the deploy bound the kit passkey as owner', boundOk, `x ${bound.x === 0n ? 'unset' : 'set'}, verifiers ${bound.verifiers}`))
@@ -258,7 +258,7 @@ const counterfactualWalkaway: StepHandler = async (ctx, args) => {
   // The owner withdraws with one Safe transaction the passkey signs; the development account sends it.
   const ownerBefore = await w.lab.balanceOf('USDC', owner.address)
   const nonce = await c.readContract({ address: safe, abi: safeAbi, functionName: 'nonce' })
-  const tx = { to: address('USDC'), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [owner.address, deposit] }), operation: OPERATION_CALL as 0, nonce }
+  const tx = { to: address('USDC', baseRegistry), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [owner.address, deposit] }), operation: OPERATION_CALL as 0, nonce }
   const signature = signSafeTxWithPasskey(passkey, safe, w.lab.chainId, tx)
   const r = await w.lab.send(owner, safe, execTransactionData(tx, signature))
   const ownerAfter = await w.lab.balanceOf('USDC', owner.address)

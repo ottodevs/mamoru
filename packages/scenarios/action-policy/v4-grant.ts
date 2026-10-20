@@ -6,7 +6,7 @@
 import { encodeDeployData, encodeFunctionData, encodePacked, parseAbi, type Abi } from 'viem'
 import type { PrivateKeyAccount } from 'viem/accounts'
 import type { Address, Hex } from '@mamoru/domain'
-import { address, moduleRegistryAbi } from '@mamoru/registry'
+import { baseRegistry, address, moduleRegistryAbi } from '@mamoru/registry'
 import { encodeGasCaps, encodeMamoruInit, V4_GAS_CAPS, type GasCaps, type MamoruInit, type ResolvedActionRule, type SessionGrant } from '@mamoru/policy'
 import { ATTESTATION_SCHEMA_UID, toSmartSession, uniActionInitData, type ActionData, type SecondActionPolicy, type SmartSessionStruct } from '@mamoru/account/sessions'
 import type { Lab } from '../fixtures/lab.ts'
@@ -56,15 +56,15 @@ export async function deployMamoruPolicy(lab: Lab, artifact: PolicyArtifact, dep
   const initCode = encodeDeployData({
     abi: artifact.abi,
     bytecode: artifact.bytecode,
-    args: [address('SmartSession'), address('NonfungiblePositionManager'), address('SwapRouter02'), address('UniswapV3Factory')],
+    args: [address('SmartSession', baseRegistry), address('NonfungiblePositionManager', baseRegistry), address('SwapRouter02', baseRegistry), address('UniswapV3Factory', baseRegistry)],
   })
   const salt = encodePacked(['address', 'uint96'], [deployer.address, nonce])
-  const resolverUID = await resolverUidOf(lab, address('TimeFramePolicy'))
+  const resolverUID = await resolverUidOf(lab, address('TimeFramePolicy', baseRegistry))
   const args = [salt, resolverUID, initCode, '0x', '0x'] as const
-  const { result: predicted } = await lab.client.simulateContract({ account: deployer.address, address: address('ModuleRegistry'), abi: registryDeployAbi, functionName: 'deployModule', args })
-  const tx = await lab.send(deployer, address('ModuleRegistry'), encodeFunctionData({ abi: registryDeployAbi, functionName: 'deployModule', args }), 0n, 8_000_000n)
+  const { result: predicted } = await lab.client.simulateContract({ account: deployer.address, address: address('ModuleRegistry', baseRegistry), abi: registryDeployAbi, functionName: 'deployModule', args })
+  const tx = await lab.send(deployer, address('ModuleRegistry', baseRegistry), encodeFunctionData({ abi: registryDeployAbi, functionName: 'deployModule', args }), 0n, 8_000_000n)
   if (!tx.ok) throw new Error('ModuleRegistry.deployModule(MamoruActionPolicy) reverted')
-  const record = await lab.client.readContract({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findModule', args: [predicted] })
+  const record = await lab.client.readContract({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findModule', args: [predicted] })
   if (record.resolverUID !== resolverUID) throw new Error(`MamoruActionPolicy ${predicted}: ModuleRecord resolver ${record.resolverUID}, expected ${resolverUID}`)
   return predicted
 }
@@ -76,12 +76,12 @@ export async function deployMamoruPolicy(lab: Lab, artifact: PolicyArtifact, dep
 export async function deployGasPolicy(lab: Lab, deployer: PrivateKeyAccount, nonce = 2n, path = GAS_ARTIFACT_PATH): Promise<Address> {
   const artifact = await loadPolicyArtifact(path)
   const salt = encodePacked(['address', 'uint96'], [deployer.address, nonce])
-  const resolverUID = await resolverUidOf(lab, address('TimeFramePolicy'))
+  const resolverUID = await resolverUidOf(lab, address('TimeFramePolicy', baseRegistry))
   const args = [salt, resolverUID, artifact.bytecode, '0x', '0x'] as const
-  const { result: predicted } = await lab.client.simulateContract({ account: deployer.address, address: address('ModuleRegistry'), abi: registryDeployAbi, functionName: 'deployModule', args })
-  const tx = await lab.send(deployer, address('ModuleRegistry'), encodeFunctionData({ abi: registryDeployAbi, functionName: 'deployModule', args }), 0n, 4_000_000n)
+  const { result: predicted } = await lab.client.simulateContract({ account: deployer.address, address: address('ModuleRegistry', baseRegistry), abi: registryDeployAbi, functionName: 'deployModule', args })
+  const tx = await lab.send(deployer, address('ModuleRegistry', baseRegistry), encodeFunctionData({ abi: registryDeployAbi, functionName: 'deployModule', args }), 0n, 4_000_000n)
   if (!tx.ok) throw new Error('ModuleRegistry.deployModule(MamoruGasPolicy) reverted')
-  const record = await lab.client.readContract({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findModule', args: [predicted] })
+  const record = await lab.client.readContract({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findModule', args: [predicted] })
   if (record.resolverUID !== resolverUID) throw new Error(`MamoruGasPolicy ${predicted}: ModuleRecord resolver ${record.resolverUID}, expected ${resolverUID}`)
   return predicted
 }
@@ -120,7 +120,7 @@ export async function raiseObservationCardinality(lab: Lab, from: PrivateKeyAcco
  * third-party modules, only that it did not revert here.
  */
 export async function resolverUidOf(lab: Lab, reference: Address): Promise<Hex> {
-  const found = await lab.client.readContract({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findModule', args: [reference] })
+  const found = await lab.client.readContract({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findModule', args: [reference] })
   return found.resolverUID
 }
 
@@ -129,7 +129,7 @@ export async function resolverUidOf(lab: Lab, reference: Address): Promise<Hex> 
  * the module registered first, which `deployMamoruPolicy` does in its own deploy transaction. */
 export function attestMamoruPolicyCall(...policies: Address[]): { to: Address; value: bigint; data: Hex } {
   return {
-    to: address('ModuleRegistry'),
+    to: address('ModuleRegistry', baseRegistry),
     value: 0n,
     data: encodeFunctionData({
       abi: moduleRegistryAbi,
@@ -150,7 +150,7 @@ function dualPolicy(action: ResolvedActionRule, mamoruPolicy: Address, mamoruIni
     actionTargetSelector: action.selector,
     actionTarget: targetOverride ?? action.targetAddress,
     actionPolicies: [
-      { policy: address('UniActionPolicy'), initData: uniActionInitData(action) },
+      { policy: address('UniActionPolicy', baseRegistry), initData: uniActionInitData(action) },
       { policy: mamoruPolicy, initData: mamoruInit },
     ],
   }

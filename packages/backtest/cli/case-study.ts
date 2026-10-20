@@ -52,7 +52,7 @@ function usd(e: RegistryEntry, s: PoolSample, token: RegistryName, amount: bigin
 /** Raw USDC of `units` gas at the sample's base fee, plus the L1 data fee. */
 function gasUsd(s: Sample, units: bigint): bigint {
   const wei = units * (s.baseFeeWei + DEFAULT_GAS.priorityFeeWei) + DEFAULT_GAS.l1FeeWei
-  return usd(entry(ETH_POOL), at(ETH_POOL, s)!, 'WETH', wei)
+  return usd(entry(ETH_POOL, baseRegistry), at(ETH_POOL, s)!, 'WETH', wei)
 }
 const REBUILD = DEFAULT_GAS.unitsByKind.rerange + DEFAULT_GAS.unitsByKind.enter_swap + DEFAULT_GAS.unitsByKind.enter_mint
 const HARVEST = DEFAULT_GAS.unitsByKind.harvest + DEFAULT_GAS.unitsByKind.enter_swap
@@ -180,7 +180,7 @@ const toUsd = (raw: bigint) => Number(raw) / 1e6
 /** Starting capital: what the real mint put in, valued at the first sample. */
 function startUsd(): bigint {
   const s = at(CASE_POOL, S[0]!)!
-  return REAL.amount0 + usd(entry(CASE_POOL), s, 'cbBTC', REAL.amount1)
+  return REAL.amount0 + usd(entry(CASE_POOL, baseRegistry), s, 'cbBTC', REAL.amount1)
 }
 
 class Drawdown {
@@ -196,7 +196,7 @@ class Drawdown {
 }
 
 export function simulate(st: Strategy, capital = startUsd()): Result {
-  const e = entry(st.pool)
+  const e = entry(st.pool, baseRegistry)
   const s0 = at(st.pool, S[0]!)
   if (!s0) throw new Error(`${st.pool} has no first sample`)
   const book: Book = { b0: 0n, b1: 0n, pos: null, gas: 0n, debt: 0n, swapFees: 0n, feesUsd: 0n, ops: 0, reranges: 0, inRangeH: 0 }
@@ -294,7 +294,7 @@ export function simulate(st: Strategy, capital = startUsd()): Result {
 }
 
 function hold(name: string, share1: number): Result {
-  const e = entry(CASE_POOL)
+  const e = entry(CASE_POOL, baseRegistry)
   const a = at(CASE_POOL, S[0]!)!
   const cap = startUsd()
   const usdc = (cap * BigInt(Math.round((1 - share1) * 10_000))) / 10_000n

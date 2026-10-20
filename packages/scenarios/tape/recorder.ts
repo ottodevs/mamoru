@@ -2,7 +2,7 @@ import { createPublicClient, http, toHex } from 'viem'
 import type { Address, ReasonCode, ScenarioTape, TapeFrame, TapeId } from '@mamoru/domain'
 import { decide, type Decision, type Observation } from '@mamoru/decide'
 import { POLICIES, computeCaps, type PolicyVersion, type Price } from '@mamoru/policy'
-import { assertCodeHashes, entry, uniswapV3PoolAbi } from '@mamoru/registry'
+import { baseRegistry, assertCodeHashes, entry, uniswapV3PoolAbi } from '@mamoru/registry'
 import { approve, exactInputSingle } from '@mamoru/uniswap-v3'
 import { Engine, MAX_PRIORITY_FEE_PER_GAS, type ReviewResult } from '../driver/engine.ts'
 import { startLabBundler, type LabBundler } from '../bundler/index.ts'
@@ -46,7 +46,7 @@ export class TapeSession {
     const { handle } = await startLabFork({ manifest, forkUrl: proxy.url, logPath: `${dir}/anvil-${tag}.log` })
     try {
       const lab = new Lab(handle.url, manifest.fork.chainId)
-      await assertCodeHashes(lab.client)
+      await assertCodeHashes(lab.client, baseRegistry)
       const enginePort = startEnginePort(handle.url)
       const engineClient = createPublicClient({ transport: http(enginePort.url) })
       const policy = POLICIES[POLICY_ID]!
@@ -98,7 +98,7 @@ export class TapeSession {
   private async activateEntryGrants(): Promise<void> {
     const prices: Record<string, Price> = {}
     for (const name of this.policy.buckets.flatMap((b) => b.pools)) {
-      const e = entry(name)
+      const e = entry(name, baseRegistry)
       const [sqrt] = await this.lab.client.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'slot0' })
       const q192 = 1n << 192n
       if (e.token0 === 'USDC') prices[e.token1!] = { num: sqrt * sqrt, den: q192 }
@@ -143,7 +143,7 @@ export class TapeSession {
   }
 
   async slot0(): Promise<{ sqrtPriceX96: bigint; tick: number; liquidity: bigint }> {
-    const e = entry(POOL)
+    const e = entry(POOL, baseRegistry)
     const [sqrtPriceX96, tick] = await this.lab.client.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'slot0' })
     const liquidity = await this.lab.client.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'liquidity' })
     return { sqrtPriceX96, tick, liquidity }
@@ -151,7 +151,7 @@ export class TapeSession {
 
   /** A whale swap on the policy pool; returns what it received. */
   async swap(tokenIn: string, amountIn: bigint): Promise<bigint> {
-    const e = entry(POOL)
+    const e = entry(POOL, baseRegistry)
     const tokenOut = tokenIn === e.token0 ? e.token1! : e.token0!
     await this.lab.setBalance(WHALE, 10n ** 18n)
     const a = approve(tokenIn, 'SwapRouter02', amountIn)
@@ -164,7 +164,7 @@ export class TapeSession {
 
   /** Moves the pool toward `targetTick` in one swap at the current in-range liquidity; returns the token in and what came out. */
   async swapToward(targetTick: number): Promise<{ tokenIn: string; out: bigint }> {
-    const e = entry(POOL)
+    const e = entry(POOL, baseRegistry)
     const s = await this.slot0()
     const { zeroForOne, amountIn } = amountToTick(s.sqrtPriceX96, s.liquidity, targetTick)
     const tokenIn = zeroForOne ? e.token0! : e.token1!
@@ -187,7 +187,7 @@ export class TapeSession {
     const s = await this.slot0()
     const target = s.tick - Math.floor((s.tick - tickLower) / 2)
     const { tokenIn, out } = await this.swapToward(target)
-    const e = entry(POOL)
+    const e = entry(POOL, baseRegistry)
     await this.swap(tokenIn === e.token0 ? e.token1! : e.token0!, out)
   }
 

@@ -4,7 +4,7 @@
 // --no-limits runs operations past their session usage limit and only reports the overuse.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { POLICIES } from '@mamoru/policy'
-import { entry } from '@mamoru/registry'
+import { baseRegistry, entry } from '@mamoru/registry'
 import { decodeDataset, type DatasetJson } from '../src/dataset.ts'
 import { runBacktest } from '../src/run.ts'
 
@@ -18,7 +18,7 @@ function arg(name: string, fallback?: string): string {
 const ds = decodeDataset(JSON.parse(readFileSync(arg('dataset'), 'utf8')) as DatasetJson)
 const policy = POLICIES[arg('policy', 'conservador-live-v2')]
 if (!policy) throw new Error(`unknown policy; known: ${Object.keys(POLICIES).join(', ')}`)
-const decimals = entry(policy.savingsAsset).decimals ?? 6
+const decimals = entry(policy.savingsAsset, baseRegistry).decimals ?? 6
 const unit = 10n ** BigInt(decimals)
 const deposit = BigInt(Math.round(Number(arg('deposit', '1000')) * 100)) * (unit / 100n)
 

@@ -172,14 +172,14 @@ try {
     'function findModule(address moduleAddress) view returns ((bytes32 resolverUID, address sender, bytes metadata))',
     'function findSchema(bytes32 uid) view returns ((uint48 registeredAt, address validator, string schema))',
   ])
-  const registry = address('ModuleRegistry')
-  const attester = address('RhinestoneAttester')
+  const registry = address('ModuleRegistry', baseRegistry)
+  const attester = address('RhinestoneAttester', baseRegistry)
   const reason = (e: unknown) => (e instanceof BaseError ? ((e.walk() as { data?: string; shortMessage?: string }).data ?? e.shortMessage) : String(e)).slice(0, 140)
   for (const [chain, client] of [['Base', baseClient], ['Ethereum', lab.client]] as const) {
     const schema = await client.readContract({ address: registry, abi: registryAbi, functionName: 'findSchema', args: [ATTESTATION_SCHEMA_UID] }).then((r) => (r.registeredAt > 0 ? `registered, validator ${r.validator}` : 'NOT registered'), reason)
     note(`registry on ${chain}: attestation schema`, null, schema)
     for (const name of ['SmartSession', 'OwnableValidator', 'UniActionPolicy', 'TimeFramePolicy', 'UsageLimitPolicy', 'Safe7579']) {
-      const module = address(name)
+      const module = address(name, baseRegistry)
       const registered = await client.readContract({ address: registry, abi: registryAbi, functionName: 'findModule', args: [module] }).then((r) => (/^0x0+$/.test(r.resolverUID) ? 'not registered' : `registered by ${r.sender}`), reason)
       const now = (await client.getBlock()).timestamp
       // The record as the registry's own ABI describes it. A record that was revoked or has expired does not count.
@@ -197,7 +197,7 @@ try {
   const trusted = await tried(trust)
   note('registry on Ethereum: trustAttesters', trusted.ok, trusted.detail)
   for (const name of ['TimeFramePolicy', 'UsageLimitPolicy']) {
-    const attested = await tried(encodeFunctionData({ abi: moduleRegistryAbi, functionName: 'attest', args: [ATTESTATION_SCHEMA_UID, [{ moduleAddress: address(name), expirationTime: 0, data: '0x', moduleTypes: [] }]] }))
+    const attested = await tried(encodeFunctionData({ abi: moduleRegistryAbi, functionName: 'attest', args: [ATTESTATION_SCHEMA_UID, [{ moduleAddress: address(name, baseRegistry), expirationTime: 0, data: '0x', moduleTypes: [] }]] }))
     note(`registry on Ethereum: an account attests ${name} before it is registered`, attested.ok ? true : null, attested.detail)
   }
 
@@ -275,14 +275,14 @@ try {
     // chain by SafeWebAuthnSharedSigner.
     const sink: Address = '0x000000000000000000000000000000000000dEaD'
     const usdcBefore = await lab.balanceOf('USDC', sink)
-    const byPasskey = await ownerExec(lab, relayer, a1, { to: address('USDC'), data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [sink, 1_000_000n] }) }, 'passkey').catch((e) => ({ ok: false, error: reason(e) }) as const)
+    const byPasskey = await ownerExec(lab, relayer, a1, { to: address('USDC', baseRegistry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [sink, 1_000_000n] }) }, 'passkey').catch((e) => ({ ok: false, error: reason(e) }) as const)
     const moved = (await lab.balanceOf('USDC', sink)) - usdcBefore
     note('owner transaction signed by the passkey alone', byPasskey.ok && moved === 1_000_000n, byPasskey.ok ? `1 USDC left the account; ${'receipt' in byPasskey ? byPasskey.receipt.gasUsed : '?'} gas` : `refused: ${'error' in byPasskey ? byPasskey.error : 'reverted'}`)
     if (!(byPasskey.ok && moved === 1_000_000n)) exitCode = 1
     // What the account's own check says today, module by module: this is the call SmartSession makes before it lets a
     // module act for the account.
     for (const name of ['SmartSession', 'OwnableValidator', 'UniActionPolicy', 'TimeFramePolicy', 'UsageLimitPolicy']) {
-      const passes = await lab.client.readContract({ address: registry, abi: moduleRegistryAbi, functionName: 'checkForAccount', args: [a1.safe, address(name)] }).then(() => true, () => false)
+      const passes = await lab.client.readContract({ address: registry, abi: moduleRegistryAbi, functionName: 'checkForAccount', args: [a1.safe, address(name, baseRegistry)] }).then(() => true, () => false)
       note(`registry check for the account: ${name}`, passes, passes ? 'trusted for this account' : 'NOT trusted for this account')
       if (!passes) exitCode = 1
     }
@@ -299,7 +299,7 @@ try {
       const { sendSessionOp } = await import('../fixtures/session-op.ts')
       const { SoftwarePasskey, PASSKEY_SCALARS } = await import('../webauthn/index.ts')
       const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
-      const setup = accountSetup([address('SafeWebAuthnSharedSigner')], 3n, webAuthnSigner(passkey.x, passkey.y))
+      const setup = accountSetup([address('SafeWebAuthnSharedSigner', baseRegistry)], 3n, webAuthnSigner(passkey.x, passkey.y))
       const safe = counterfactualAddress(setup)
       const deploy = createProxyCall(setup)
       const deployed = await lab.send(relayer, deploy.to, deploy.data)

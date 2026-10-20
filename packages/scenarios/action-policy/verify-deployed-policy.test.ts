@@ -5,13 +5,13 @@
 // mismatched address and a too-short address both refused cleanly (exit 1, no uncaught throw).
 import { describe, expect, test } from 'bun:test'
 import type { Address, Hex } from 'viem'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { verifyDeployedPolicy } from './verify-deployed-policy.ts'
 
-const SMART_SESSION = address('SmartSession')
-const NPM = address('NonfungiblePositionManager')
-const ROUTER = address('SwapRouter02')
-const FACTORY = address('UniswapV3Factory')
+const SMART_SESSION = address('SmartSession', baseRegistry)
+const NPM = address('NonfungiblePositionManager', baseRegistry)
+const ROUTER = address('SwapRouter02', baseRegistry)
+const FACTORY = address('UniswapV3Factory', baseRegistry)
 
 // A tiny synthetic "deployedBytecode": 4 words (32 bytes each) of logic, then 4 immutable words (one per
 // constructor arg, in SMART_SESSION/NPM/ROUTER/FACTORY order — order does not matter to the check, only that each

@@ -22,7 +22,7 @@
 // RPC: BASE_FORK_RPC_URL (default https://mainnet.base.org), through the loopback proxy, same as t1/t2-fork.ts.
 import { encodeFunctionData, parseAbi, parseEventLogs, type Hex, type TransactionReceipt } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, assertCodeHashes, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { baseRegistry, address, assertCodeHashes, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { computeCaps, conservadorLabV4, encodeMamoruInit, instantiateGrant, mamoruInitFor, retargetToPolicy, TWAP_SHORT_WINDOW_SECONDS, V4_POOLS, withActionPolicy, type Price, type SessionGrant } from '@mamoru/policy'
 import { permissionIdOf, toSmartSession } from '@mamoru/account/sessions'
 import { approve, collect, decreaseLiquidity, exactInputSingle } from '@mamoru/uniswap-v3'
@@ -69,7 +69,7 @@ function expect(outcome: SessionOpOutcome, label: string, want: SessionOpOutcome
 }
 
 function mintedPosition(receipt: TransactionReceipt, safe: Address): { tokenId: bigint; liquidity: bigint } {
-  const npm = address('NonfungiblePositionManager')
+  const npm = address('NonfungiblePositionManager', baseRegistry)
   const t = parseEventLogs({ abi: nonfungiblePositionManagerAbi, logs: receipt.logs, eventName: 'Transfer' }).find((l) => l.address.toLowerCase() === npm.toLowerCase() && l.args.to.toLowerCase() === safe.toLowerCase())
   if (!t) throw new Error('no position minted to the account (no NPM Transfer log)')
   const inc = parseEventLogs({ abi: nonfungiblePositionManagerAbi, logs: receipt.logs, eventName: 'IncreaseLiquidity' }).find((l) => l.args.tokenId === t.args.tokenId)
@@ -103,7 +103,7 @@ function rangeAt(o: OracleRead, bandTicks: number): PriceRange {
 /** computeCaps needs a price for every non-USDC asset of conservadorLabV4's three pools, even though this
  * scenario only enables the btc pool's grants (packages/scenarios/action-policy/t2-fork.ts's own helper). */
 async function usdcPrice(lab: Lab, pool: string, token0: string, token1: string, asset: string): Promise<Price> {
-  const [sqrtPriceX96] = await lab.client.readContract({ address: address(pool), abi: uniswapV3PoolAbi, functionName: 'slot0' })
+  const [sqrtPriceX96] = await lab.client.readContract({ address: address(pool, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0' })
   const ratio: Price = { num: sqrtPriceX96 * sqrtPriceX96, den: 1n << 192n }
   if (token0 === 'USDC' && token1 === asset) return ratio
   if (token1 === 'USDC' && token0 === asset) return { num: ratio.den, den: ratio.num }
@@ -120,7 +120,7 @@ const { handle } = await startLabFork({ manifest, forkUrl: proxy.url, logPath: `
 const lab = new Lab(handle.url, manifest.fork.chainId)
 
 try {
-  await assertCodeHashes(lab.client)
+  await assertCodeHashes(lab.client, baseRegistry)
   note('fork', true, `Base block ${manifest.fork.block} on anvil, chain id ${lab.chainId}`)
 
   const relayer = devAccount(0)
@@ -133,7 +133,7 @@ try {
   await lab.whaleTransfer('cbBTC', WHALE, world.a1.safe, 50_000_000n) // 0.5 cbBTC, for the mint leg
   note('fx-usdc / fx-cbbtc top-up', true, 'A1 funded with 100,000 USDC and 0.5 cbBTC total (on top of fx-usdc\'s own 10,000 USDC from buildBasicWorld)')
 
-  const pool = address(POOL)
+  const pool = address(POOL, baseRegistry)
   const prices: Record<string, Price> = {
     USDT: await usdcPrice(lab, 'pool:USDC/USDT/100', 'USDC', 'USDT', 'USDT'),
     cbBTC: await usdcPrice(lab, 'pool:USDC/cbBTC/500', 'USDC', 'cbBTC', 'cbBTC'),
@@ -177,7 +177,7 @@ try {
   const managePid = permissionIdOf(manageSession)
 
   const enableData = encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableSessions', args: [[swapSession, manageSession]] })
-  const enableTx = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession'), data: enableData })
+  const enableTx = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession', baseRegistry), data: enableData })
   if (!enableTx.ok) throw new Error('enableSessions reverted')
   note('enableSessions: enter-swap + manage-any (gen 1)', true, `${enableTx.receipt.gasUsed} gas`)
   world.a1.ledger.activate(swapPid, swapGrant)
@@ -206,7 +206,7 @@ try {
         const probeInit = encodeMamoruInit(mamoruInitFor({ ...V4_POOLS.btc, bandTicks }, generation, caps, { admit }))
         const probeGrant = retargetToPolicy(instantiateGrant(conservadorLabV4, `enter-swap:${POOL}`, grantCtx()), mamoruPolicy)
         const probeSession = toSmartSession(probeGrant, v4Policies(mamoruPolicy, gasPolicy, probeInit))
-        const probeEnable = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession'), data: encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableSessions', args: [[probeSession]] }) })
+        const probeEnable = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession', baseRegistry), data: encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableSessions', args: [[probeSession]] }) })
         if (!probeEnable.ok) throw new Error(`probe enableSessions (bandTicks ${bandTicks}, generation ${generation}) reverted`)
       }
       for (const bandTicks of bandGrid) {
@@ -216,11 +216,11 @@ try {
         const range = rangeAt(o, bandTicks)
         note(`priceRange cross-check bandTicks=${bandTicks}`, range.lo === cLo && range.hi === cHi, `TS ${range.lo}..${range.hi} vs contract ${cLo}..${cHi} (twap ${o.twapLong}/${o.twapShort})`)
         for (const amountIn of amounts) {
-          const [contractMinOut, contractLimit] = (await lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'swapBounds', args: [world.a1.safe, pool, address('USDC'), amountIn] })) as readonly [bigint, bigint]
-          const tsAt1 = swapBoundsInRange({ range, feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn })
+          const [contractMinOut, contractLimit] = (await lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'swapBounds', args: [world.a1.safe, pool, address('USDC', baseRegistry), amountIn] })) as readonly [bigint, bigint]
+          const tsAt1 = swapBoundsInRange({ range, feePips: 500, zeroForOne: true, tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), amountIn })
           const eq = tsAt1.minOut === contractMinOut && tsAt1.sqrtPriceLimitX96 === contractLimit
           note(`swapBounds cross-check bandTicks=${bandTicks} amountIn=${amountIn}`, eq, eq ? 'TS factor 1.0 == contract view' : `TS ${tsAt1.minOut}/${tsAt1.sqrtPriceLimitX96} != contract ${contractMinOut}/${contractLimit}`)
-          const tsAt08 = swapBoundsInRange({ range: rangeAt(o, narrowBand(bandTicks, bandFactorBps)), feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn })
+          const tsAt08 = swapBoundsInRange({ range: rangeAt(o, narrowBand(bandTicks, bandFactorBps)), feePips: 500, zeroForOne: true, tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), amountIn })
           const inside = tsAt08.minOut >= tsAt1.minOut && tsAt08.sqrtPriceLimitX96 >= tsAt1.sqrtPriceLimitX96
           note(`  at 0.8x: strictly inside bandTicks=${bandTicks} amountIn=${amountIn}`, inside, `minOut ${tsAt08.minOut} >= ${tsAt1.minOut}, limit ${tsAt08.sqrtPriceLimitX96} >= ${tsAt1.sqrtPriceLimitX96}`)
           checks++
@@ -238,11 +238,11 @@ try {
       for (const r of ranges) {
         await lab.whaleTransfer('USDC', WHALE, world.a1.safe, 5_000_000_000n)
         await lab.whaleTransfer('cbBTC', WHALE, world.a1.safe, 5_000_000n)
-        const approve0 = await ownerExec(lab, relayer, world.a1, { to: address('USDC'), data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [address('NonfungiblePositionManager'), 5_000_000_000n] }) })
-        const approve1 = await ownerExec(lab, relayer, world.a1, { to: address('cbBTC'), data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [address('NonfungiblePositionManager'), 5_000_000n] }) })
+        const approve0 = await ownerExec(lab, relayer, world.a1, { to: address('USDC', baseRegistry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [address('NonfungiblePositionManager', baseRegistry), 5_000_000_000n] }) })
+        const approve1 = await ownerExec(lab, relayer, world.a1, { to: address('cbBTC', baseRegistry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [address('NonfungiblePositionManager', baseRegistry), 5_000_000n] }) })
         if (!approve0.ok || !approve1.ok) throw new Error('owner approve for probe mint reverted')
-        const mintParams = { token0: address('USDC'), token1: address('cbBTC'), fee: 500, tickLower: r.tickLower, tickUpper: r.tickUpper, amount0Desired: 5_000_000_000n, amount1Desired: 5_000_000n, amount0Min: 0n, amount1Min: 0n, recipient: world.a1.safe, deadline }
-        const mintTx = await ownerExec(lab, relayer, world.a1, { to: address('NonfungiblePositionManager'), data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'mint', args: [mintParams] }) })
+        const mintParams = { token0: address('USDC', baseRegistry), token1: address('cbBTC', baseRegistry), fee: 500, tickLower: r.tickLower, tickUpper: r.tickUpper, amount0Desired: 5_000_000_000n, amount1Desired: 5_000_000n, amount0Min: 0n, amount1Min: 0n, recipient: world.a1.safe, deadline }
+        const mintTx = await ownerExec(lab, relayer, world.a1, { to: address('NonfungiblePositionManager', baseRegistry), data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'mint', args: [mintParams] }) })
         if (!mintTx.ok) throw new Error(`probe mint (range ${r.tickLower}/${r.tickUpper}) reverted`)
         probes.push({ r, ...mintedPosition(mintTx.receipt, world.a1.safe) })
       }
@@ -270,7 +270,7 @@ try {
 
   const swapAmountIn = 10_000_000_000n // 10,000 USDC
   {
-    const bound = swapBoundsInRange({ range: rangeAt(await oracleRead(lab, pool), narrowBand(V4_POOLS.btc.bandTicks, bandFactorBps)), feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn: swapAmountIn })
+    const bound = swapBoundsInRange({ range: rangeAt(await oracleRead(lab, pool), narrowBand(V4_POOLS.btc.bandTicks, bandFactorBps)), feePips: 500, zeroForOne: true, tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), amountIn: swapAmountIn })
     const out = expect(
       await sendSessionOp(world, world.a1, { name: 'enter-swap-v4', grant: swapGrant, permissionId: swapPid }, 'engine-swap-v4', [
         approve('USDC', 'SwapRouter02', swapAmountIn),
@@ -292,11 +292,11 @@ try {
     const mintCbbtc = 10_000_000n
     const q = quoteMint({ sqrtPriceX96, tickLower, tickUpper, amount0Desired: mintUsdc, amount1Desired: mintCbbtc, slippageBps: conservadorLabV4.execution.slippageBps })
     const deadline = BigInt((await engineNow()) + 3600)
-    const mintParams = { token0: address('USDC'), token1: address('cbBTC'), fee: 500, tickLower, tickUpper, amount0Desired: mintUsdc, amount1Desired: mintCbbtc, amount0Min: q.amount0Min, amount1Min: q.amount1Min, recipient: world.a1.safe, deadline }
+    const mintParams = { token0: address('USDC', baseRegistry), token1: address('cbBTC', baseRegistry), fee: 500, tickLower, tickUpper, amount0Desired: mintUsdc, amount1Desired: mintCbbtc, amount0Min: q.amount0Min, amount1Min: q.amount1Min, recipient: world.a1.safe, deadline }
     const out = expect(
       await sendSessionOp(world, world.a1, { name: 'manage-any-v4', grant: manageGrant, permissionId: managePid }, 'engine-mint-v4', [
-        { to: address('USDC'), data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [mamoruPolicy, mintUsdc] }) },
-        { to: address('cbBTC'), data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [mamoruPolicy, mintCbbtc] }) },
+        { to: address('USDC', baseRegistry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [mamoruPolicy, mintUsdc] }) },
+        { to: address('cbBTC', baseRegistry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [mamoruPolicy, mintCbbtc] }) },
         { to: mamoruPolicy, data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'mint', args: [mintParams] }) },
       ]),
       'engine mint: prepareCalls-equivalent (mint through the policy, quoteMint minimums) passes',
@@ -326,7 +326,7 @@ try {
     const twapBefore = await twapTick(lab, pool, conservadorLabV4.execution.twapWindowSeconds)
     const bandTicks = narrowBand(V4_POOLS.btc.bandTicks, bandFactorBps)
     const driftAmountIn = 5_000_000_000n // 5,000 USDC
-    const bound = swapBoundsInRange({ range: rangeAt(await oracleRead(lab, pool), bandTicks), feePips: 500, zeroForOne: true, tokenIn: address('USDC'), tokenOut: address('cbBTC'), amountIn: driftAmountIn })
+    const bound = swapBoundsInRange({ range: rangeAt(await oracleRead(lab, pool), bandTicks), feePips: 500, zeroForOne: true, tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), amountIn: driftAmountIn })
     const preparedCalls = [
       approve('USDC', 'SwapRouter02', driftAmountIn),
       exactInputSingle({ account: world.a1.safe, tokenIn: 'USDC', tokenOut: 'cbBTC', fee: 500, amountIn: driftAmountIn, amountOutMinimum: bound.minOut, sqrtPriceLimitX96: bound.sqrtPriceLimitX96 }),
@@ -346,8 +346,8 @@ try {
     const target = spotBefore - pushTicks
     const limitAtTarget = sqrtRatioAtTick(target)
     await lab.whaleTransfer('USDC', WHALE, world.attacker.address, 1_000_000_000_000n)
-    await lab.send(world.attacker, address('USDC'), encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [address('SwapRouter02'), 1_000_000_000_000n] }))
-    await lab.send(world.attacker, address('SwapRouter02'), encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC'), tokenOut: address('cbBTC'), fee: 500, recipient: world.attacker.address, amountIn: 1_000_000_000_000n, amountOutMinimum: 0n, sqrtPriceLimitX96: limitAtTarget }] }))
+    await lab.send(world.attacker, address('USDC', baseRegistry), encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [address('SwapRouter02', baseRegistry), 1_000_000_000_000n] }))
+    await lab.send(world.attacker, address('SwapRouter02', baseRegistry), encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), fee: 500, recipient: world.attacker.address, amountIn: 1_000_000_000_000n, amountOutMinimum: 0n, sqrtPriceLimitX96: limitAtTarget }] }))
     await lab.warp(900) // half the 1800s window, held at the pushed price — "a few blocks" of inclusion latency in spirit, scaled up so the TWAP shift is actually observable
     const { tick: spotAfter } = await poolTick(lab)
     const twapAfter = await twapTick(lab, pool, conservadorLabV4.execution.twapWindowSeconds)

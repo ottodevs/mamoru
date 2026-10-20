@@ -1,7 +1,7 @@
 import { readdirSync } from 'node:fs'
 import { encodeFunctionData, keccak256, stringToHex, type PublicClient } from 'viem'
 import { ReasonError, type Hex } from '@mamoru/domain'
-import { address, erc20Abi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { baseRegistry, address, erc20Abi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { Lab } from '../fixtures/lab.ts'
 import { DEPOSIT_USDC, GAS_RESERVE_WEI, ownerExec, type World } from '../fixtures/world.ts'
 import { assertNoKeyInArgv } from '../fork/anvil.ts'
@@ -145,7 +145,7 @@ const mutateStateStep: StepHandler = async (ctx) => {
   const w = world(ctx)
   const before = await stateDigest(w)
   const r = await ownerExec(w.lab, w.relayer, w.a1, {
-    to: address('USDC'),
+    to: address('USDC', baseRegistry),
     data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [w.a1.backupOwner.address, 1_000_000n] }),
   })
   await w.lab.setBalance(w.a1.safe, 1n)
@@ -180,7 +180,7 @@ const enginePortCallStep: StepHandler = async (ctx, args) => {
 
 async function observation(w: World): Promise<Hex> {
   const d = await stateDigest(w)
-  const s = await w.lab.client.readContract({ address: address('pool:USDC/cbBTC/500'), abi: uniswapV3PoolAbi, functionName: 'slot0' })
+  const s = await w.lab.client.readContract({ address: address('pool:USDC/cbBTC/500', baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0' })
   d['pool.slot0'] = `${s[0]}|${s[1]}`
   return digestHash(d)
 }

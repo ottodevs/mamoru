@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { ScenarioTape, TapeFrame } from '@mamoru/domain'
 import { decide, type Observation } from '@mamoru/decide'
 import { POLICIES } from '@mamoru/policy'
-import { address, entry } from '@mamoru/registry'
+import { baseRegistry, address, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { amountToTick, buildFrame, checkTape, priceDec, toDec } from './frame.ts'
 
@@ -51,7 +51,7 @@ describe('amountToTick', () => {
 })
 
 function observation(tick: number, over: Partial<{ collectable0: bigint; managed: boolean; baseFee: bigint }> = {}): Observation {
-  const e = entry(POOL)
+  const e = entry(POOL, baseRegistry)
   const sqrt = sqrtRatioAtTick(tick)
   return {
     chainId: 31337,
@@ -76,7 +76,7 @@ function observation(tick: number, over: Partial<{ collectable0: bigint; managed
         tick,
         liquidity: 10n ** 15n,
         twapTick: tick,
-        identity: { factoryPool: e.address, token0: address('USDC'), token1: address('cbBTC'), fee: 500, tickSpacing: 10 },
+        identity: { factoryPool: e.address, token0: address('USDC', baseRegistry), token1: address('cbBTC', baseRegistry), fee: 500, tickSpacing: 10 },
       },
     ],
     ethPrice: { pool: 'pool:WETH/USDC/3000', sqrtPriceX96: sqrtRatioAtTick(-196_000), token0: 'WETH' },

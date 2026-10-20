@@ -15,7 +15,7 @@
 // proxy so the upstream URL never reaches anvil's argv or this script's own log output.
 import { encodeFunctionData, maxUint256, parseEventLogs, type Hex, type TransactionReceipt } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, assertCodeHashes, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, swapRouter02Abi } from '@mamoru/registry'
+import { baseRegistry, address, assertCodeHashes, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, swapRouter02Abi } from '@mamoru/registry'
 import { conservadorLabGeometryV1, instantiateGrant, V4_POOLS, type Caps, type SessionGrant } from '@mamoru/policy'
 import { approve, collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
@@ -82,7 +82,7 @@ function expect(outcome: SessionOpOutcome, label: string, want: SessionOpOutcome
 }
 
 function mintedPosition(receipt: TransactionReceipt, safe: Address): { tokenId: bigint; liquidity: bigint } {
-  const npm = address('NonfungiblePositionManager')
+  const npm = address('NonfungiblePositionManager', baseRegistry)
   const transfers = parseEventLogs({ abi: nonfungiblePositionManagerAbi, logs: receipt.logs, eventName: 'Transfer' })
   const t = transfers.find((l) => l.address.toLowerCase() === npm.toLowerCase() && l.args.to.toLowerCase() === safe.toLowerCase())
   if (!t) throw new Error('no position minted to the account (no NPM Transfer log)')
@@ -102,7 +102,7 @@ const { handle } = await startLabFork({ manifest, forkUrl: proxy.url, logPath: `
 const lab = new Lab(handle.url, manifest.fork.chainId)
 
 try {
-  await assertCodeHashes(lab.client)
+  await assertCodeHashes(lab.client, baseRegistry)
   note('fork', true, `Base block ${manifest.fork.block} on anvil, chain id ${lab.chainId} (harness pin; the Foundry PoC pins 52,700,000 — see report)`)
 
   const relayer = devAccount(0)
@@ -123,10 +123,10 @@ try {
   const mamoruPolicy = await deployMamoruPolicy(lab, artifact, relayer)
   note('MamoruActionPolicy deployed', true, mamoruPolicy)
   const policyAbi = artifact.abi
-  const pool = address(POOL)
+  const pool = address(POOL, baseRegistry)
 
   const swapBounds = async (amountIn: bigint) =>
-    lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'swapBounds', args: [world.a1.safe, pool, address('USDC'), amountIn] }) as Promise<readonly [bigint, bigint]>
+    lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'swapBounds', args: [world.a1.safe, pool, address('USDC', baseRegistry), amountIn] }) as Promise<readonly [bigint, bigint]>
   const decreaseMins = async (tokenId: bigint, liquidity: bigint) =>
     lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'decreaseMins', args: [world.a1.safe, pool, tokenId, liquidity] }) as Promise<readonly [bigint, bigint]>
   const admittedPoolOf = async (tokenId: bigint) => lab.client.readContract({ address: mamoruPolicy, abi: policyAbi, functionName: 'admittedPool', args: [world.a1.safe, tokenId] }) as Promise<Address>
@@ -198,7 +198,7 @@ try {
   else throw new Error('attest (self-attestation) reverted even after registerModule')
 
   const enableData1 = encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableSessions', args: [[v4Swap1, v4Manage1]] })
-  const enable1 = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession'), data: enableData1 })
+  const enable1 = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession', baseRegistry), data: enableData1 })
   note('enableSessions: v4 grants (generation 1, first enable)', enable1.ok, enable1.ok ? `${enable1.receipt.gasUsed} gas, permissionIds ${swapPid1.slice(0, 10)}…, ${managePid1.slice(0, 10)}…` : 'reverted')
   if (enable1.ok) recordGas('enable-v4-gen1-first-enable', enable1.receipt.gasUsed)
   else throw new Error('enableSessions (generation 1) reverted — see report for ERC-7484/attestation findings')
@@ -215,7 +215,7 @@ try {
     const out = expect(
       await sendSessionOp(world, world.a1, { name: 'enter-swap-v4', grant: swapGrant1, permissionId: swapPid1 }, 'engine-op-swap', [
         approve('USDC', 'SwapRouter02', swapAmountIn),
-        { to: address('SwapRouter02'), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC'), tokenOut: address('cbBTC'), fee: 500, recipient: world.a1.safe, amountIn: swapAmountIn, amountOutMinimum: minOut, sqrtPriceLimitX96: limit }] }) },
+        { to: address('SwapRouter02', baseRegistry), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), fee: 500, recipient: world.a1.safe, amountIn: swapAmountIn, amountOutMinimum: minOut, sqrtPriceLimitX96: limit }] }) },
       ]),
       'engine op 1: swap 10,000 USDC -> cbBTC within band',
       'INCLUDED',
@@ -233,11 +233,11 @@ try {
     const deadline = BigInt(Number(await lab.timestamp()) + 3600)
     const mintUsdc = 20_000_000_000n
     const mintCbbtc = 20_000_000n
-    const mintParams = { token0: address('USDC'), token1: address('cbBTC'), fee: 500, tickLower, tickUpper, amount0Desired: mintUsdc, amount1Desired: mintCbbtc, amount0Min: 0n, amount1Min: 0n, recipient: world.a1.safe, deadline }
+    const mintParams = { token0: address('USDC', baseRegistry), token1: address('cbBTC', baseRegistry), fee: 500, tickLower, tickUpper, amount0Desired: mintUsdc, amount1Desired: mintCbbtc, amount0Min: 0n, amount1Min: 0n, recipient: world.a1.safe, deadline }
     const out = expect(
       await sendSessionOp(world, world.a1, { name: 'manage-any-v4', grant: manageGrant1, permissionId: managePid1 }, 'engine-op-mint', [
-        { to: address('USDC'), data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [mamoruPolicy, mintUsdc] }) },
-        { to: address('cbBTC'), data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [mamoruPolicy, mintCbbtc] }) },
+        { to: address('USDC', baseRegistry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [mamoruPolicy, mintUsdc] }) },
+        { to: address('cbBTC', baseRegistry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [mamoruPolicy, mintCbbtc] }) },
         { to: mamoruPolicy, data: encodeFunctionData({ abi: policyAbi, functionName: 'mint', args: [mintParams] }) },
       ]),
       'engine op 2: mint 20,000 USDC + 0.2 cbBTC through MamoruActionPolicy.mint',
@@ -299,7 +299,7 @@ try {
     await lab.warp(BUDGET_WINDOW) // fresh window, so the test is not sensitive to engine-op-1's prior spend
     const amountIn = 25_000_000_000n // 25,000 USDC; per-window budget is 60,000
     const [minOut, limit] = await swapBounds(amountIn)
-    const swapCall = (n: bigint) => ({ to: address('SwapRouter02') as Address, data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC'), tokenOut: address('cbBTC'), fee: 500, recipient: world.a1.safe, amountIn: n, amountOutMinimum: minOut, sqrtPriceLimitX96: limit }] }) })
+    const swapCall = (n: bigint) => ({ to: address('SwapRouter02', baseRegistry) as Address, data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), fee: 500, recipient: world.a1.safe, amountIn: n, amountOutMinimum: minOut, sqrtPriceLimitX96: limit }] }) })
     const out = expect(
       await sendSessionOp(world, world.a1, { name: 'enter-swap-v4', grant: swapGrant1, permissionId: swapPid1 }, 'attack-batch-over-budget', [
         approve('USDC', 'SwapRouter02', amountIn),
@@ -325,8 +325,8 @@ try {
       const target = spotBefore - 500
       const limitAtTarget = sqrtRatioAtTick(target)
       const before = await lab.balanceOf('USDC', world.attacker.address)
-      await lab.send(world.attacker, address('USDC'), encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [address('SwapRouter02'), maxUint256] }))
-      await lab.send(world.attacker, address('SwapRouter02'), encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC'), tokenOut: address('cbBTC'), fee: 500, recipient: world.attacker.address, amountIn: 5_000_000_000_000n, amountOutMinimum: 0n, sqrtPriceLimitX96: limitAtTarget }] }))
+      await lab.send(world.attacker, address('USDC', baseRegistry), encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [address('SwapRouter02', baseRegistry), maxUint256] }))
+      await lab.send(world.attacker, address('SwapRouter02', baseRegistry), encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), fee: 500, recipient: world.attacker.address, amountIn: 5_000_000_000_000n, amountOutMinimum: 0n, sqrtPriceLimitX96: limitAtTarget }] }))
       const spent = before - (await lab.balanceOf('USDC', world.attacker.address))
       const { tick: spotAfter } = await poolTick(lab)
       note('attacker pushes USDC/cbBTC by ~500 ticks', true, `spot ${spotBefore} -> ${spotAfter}, spent ${spent} raw USDC (${(Number(spent) / 1e6).toFixed(0)} USDC); same block, so the 1800s TWAP is unchanged`)
@@ -336,7 +336,7 @@ try {
       const loose = expect(
         await sendSessionOp(world, world.a1, { name: 'enter-swap-v4', grant: swapGrant1, permissionId: swapPid1 }, 'attack-manipulated-swap-loose', [
           approve('USDC', 'SwapRouter02', looseAmount),
-          { to: address('SwapRouter02'), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC'), tokenOut: address('cbBTC'), fee: 500, recipient: world.a1.safe, amountIn: looseAmount, amountOutMinimum: 1n, sqrtPriceLimitX96: 0n }] }) },
+          { to: address('SwapRouter02', baseRegistry), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), fee: 500, recipient: world.a1.safe, amountIn: looseAmount, amountOutMinimum: 1n, sqrtPriceLimitX96: 0n }] }) },
         ]),
         'attack (a.1): today\'s grant (amountOutMinimum=1, sqrtPriceLimitX96=0) must be refused at validation',
         'CHAIN_REJECTED_VALIDATION',
@@ -349,7 +349,7 @@ try {
       const tight = expect(
         await sendSessionOp(world, world.a1, { name: 'enter-swap-v4', grant: swapGrant1, permissionId: swapPid1 }, 'attack-manipulated-swap-tight', [
           approve('USDC', 'SwapRouter02', looseAmount),
-          { to: address('SwapRouter02'), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC'), tokenOut: address('cbBTC'), fee: 500, recipient: world.a1.safe, amountIn: looseAmount, amountOutMinimum: tightMin, sqrtPriceLimitX96: tightLimit }] }) },
+          { to: address('SwapRouter02', baseRegistry), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), fee: 500, recipient: world.a1.safe, amountIn: looseAmount, amountOutMinimum: tightMin, sqrtPriceLimitX96: tightLimit }] }) },
         ]),
         'attack (a.2): a policy-compliant minimum passes validation but reverts in the router at the manipulated price',
         'CHAIN_REVERTED_EXECUTION',
@@ -387,7 +387,7 @@ try {
     const managePid2 = permissionIdOf(v4Manage2)
 
     const enableData2 = encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableSessions', args: [[v4Swap2, v4Manage2]] })
-    const enable2 = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession'), data: enableData2 })
+    const enable2 = await ownerExec(lab, relayer, world.a1, { to: address('SmartSession', baseRegistry), data: enableData2 })
     note('enableSessions: v4 grants (generation 2, renewal)', enable2.ok, enable2.ok ? `${enable2.receipt.gasUsed} gas, old permissionIds NOT removed yet` : 'reverted')
     if (enable2.ok) recordGas('enable-v4-gen2-renewal', enable2.receipt.gasUsed)
     else throw new Error('enableSessions (generation 2, renewal) reverted')
@@ -399,7 +399,7 @@ try {
     const oldOut = expect(
       await sendSessionOp(world, world.a1, { name: 'enter-swap-v4', grant: swapGrant1, permissionId: swapPid1 }, 'renewal-old-session-after-gen2', [
         approve('USDC', 'SwapRouter02', 1_000_000_000n),
-        { to: address('SwapRouter02'), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC'), tokenOut: address('cbBTC'), fee: 500, recipient: world.a1.safe, amountIn: 1_000_000_000n, amountOutMinimum: oldMin, sqrtPriceLimitX96: oldLimit }] }) },
+        { to: address('SwapRouter02', baseRegistry), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), fee: 500, recipient: world.a1.safe, amountIn: 1_000_000_000n, amountOutMinimum: oldMin, sqrtPriceLimitX96: oldLimit }] }) },
       ]),
       '(d) the generation-1 session (still SmartSession-enabled) is refused after the generation-2 renewal',
       'CHAIN_REJECTED_VALIDATION',
@@ -418,7 +418,7 @@ try {
         'renewal-new-session',
         [
           approve('USDC', 'SwapRouter02', 1_000_000_000n),
-          { to: address('SwapRouter02'), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC'), tokenOut: address('cbBTC'), fee: 500, recipient: world.a1.safe, amountIn: 1_000_000_000n, amountOutMinimum: oldMin, sqrtPriceLimitX96: oldLimit }] }) },
+          { to: address('SwapRouter02', baseRegistry), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), fee: 500, recipient: world.a1.safe, amountIn: 1_000_000_000n, amountOutMinimum: oldMin, sqrtPriceLimitX96: oldLimit }] }) },
         ],
         { sessionKey: renewalKey },
       ),
@@ -429,7 +429,7 @@ try {
 
     const admittedNow = await admittedPoolOf(unrelated)
     note('M-4: the renewal (owner-signed Init.admit) admitted the owner-minted position', admittedNow.toLowerCase() === pool.toLowerCase(), `tokenId ${unrelated}, admittedPool ${admittedNow}`)
-    const unrelatedLiq = (await lab.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [unrelated] }))[7]
+    const unrelatedLiq = (await lab.client.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [unrelated] }))[7]
     const [u0, u1] = await decreaseMins(unrelated, unrelatedLiq)
     const admittedOut = expect(
       await sendSessionOp(

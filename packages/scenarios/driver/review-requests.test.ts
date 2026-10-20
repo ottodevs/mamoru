@@ -3,7 +3,7 @@ import { decodeFunctionData, type Hex } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import { POLICIES, grantKey, instantiateGrant } from '@mamoru/policy'
-import { address, smartSessionAbi } from '@mamoru/registry'
+import { baseRegistry, address, smartSessionAbi } from '@mamoru/registry'
 import { multicall3Abi } from '@mamoru/rpc'
 import { permissionIdOf, toSmartSession } from '@mamoru/account/sessions'
 import { FakeChain } from '../../rpc/test/fake-chain.ts'
@@ -60,7 +60,7 @@ describe('one live review', () => {
     // The session checks ride in the observation's first aggregate3, pinned to its block: every permission, once.
     const first = chain.requests.find((x) => x.method === 'eth_call')!
     expect(first.params[1]).toBe('0x47e')
-    const inner = (decodeFunctionData({ abi: multicall3Abi, data: first.params[0].data }).args[0] as readonly { target: Address; callData: Hex }[]).filter((c) => c.target.toLowerCase() === address('SmartSession').toLowerCase())
+    const inner = (decodeFunctionData({ abi: multicall3Abi, data: first.params[0].data }).args[0] as readonly { target: Address; callData: Hex }[]).filter((c) => c.target.toLowerCase() === address('SmartSession', baseRegistry).toLowerCase())
     expect(inner.length).toBe(12)
     expect(inner.map((c) => decodeFunctionData({ abi: smartSessionAbi, data: c.callData }).args![0])).toEqual(all.map((s) => s.permissionId))
   })
@@ -78,7 +78,7 @@ describe('one live review', () => {
     chain.requests.length = 0
     await e.review()
     const first = chain.requests.find((x) => x.method === 'eth_call')!
-    const asked = (decodeFunctionData({ abi: multicall3Abi, data: first.params[0].data }).args[0] as readonly { target: Address }[]).filter((c) => c.target.toLowerCase() === address('SmartSession').toLowerCase())
+    const asked = (decodeFunctionData({ abi: multicall3Abi, data: first.params[0].data }).args[0] as readonly { target: Address }[]).filter((c) => c.target.toLowerCase() === address('SmartSession', baseRegistry).toLowerCase())
     expect(asked.length).toBe(11)
   })
 
@@ -130,7 +130,7 @@ describe('one live review', () => {
   test('a session read that fails does not revoke anything: the review throws as before', async () => {
     const all = sessions()
     const e = engine(all)
-    chain.failRead(address('SmartSession'), 'isPermissionEnabled(bytes32,address)')
+    chain.failRead(address('SmartSession', baseRegistry), 'isPermissionEnabled(bytes32,address)')
     const err = await e.review().catch((x) => x)
     chain.reverting.clear()
     expect(err).toBeInstanceOf(Error)
