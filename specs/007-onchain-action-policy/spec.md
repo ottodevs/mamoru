@@ -263,19 +263,54 @@ each a refusal or a path a session could not take before:
   approve the manager for exactly the desired amounts, spot inside [lo, hi] right before the call, reset, refund the
   balance delta. `checkAction(increase)`: admitted and owned, a non-empty range, the desired amounts charged to the
   pool's budget like a mint.
-- A revoke-only guardian: immutable `GUARDIAN` (address(0) = none) may `pause(account)` / `unpause(account)`, nothing
-  else. `pausedAt = generation + 1`, so the owner's next renewal ends a pause and an unpause never revives a retired
+- A guardian: immutable `GUARDIAN` (address(0) = none) may `pause(account)` / `unpause(account)`, nothing else.
+  `pausedAt = generation + 1`, so the owner's next renewal ends a pause and an unpause never revives a retired
   generation. While paused `checkAction` refuses every action and `mint`/`increase` revert `AccountPaused`.
+  `generation` is capped at `MAX_GENERATION` (uint32) by every Init, so `generation + 1` never overflows
+  (`test_pauseAtTheGenerationBound`).
+  What the guardian can and cannot do, exactly. It can never widen an envelope, enable, or move a token (`mint` and
+  `increase` pull only from `msg.sender`, `initializeWithMultiplexer` is SmartSession-only): its power is over
+  liveness, both ways. A compromised guardian key can (a) lift a legitimate pause with `unpause`, so the account runs
+  again inside the same owner-signed envelope it had before the pause, and (b) pause an account again after every
+  renewal, stopping its engine for as long as that key is in hostile hands. Neither moves funds or loosens a limit,
+  and the owner's own path (passkey, Stop, withdrawals) is never behind the policy. It is not "revoke-only" in the
+  strict sense: (a) undoes a revocation.
+  Rotation: `GUARDIAN` is immutable, so a lost or compromised guardian key is replaced by deploying a new V2 with the
+  new key (`script/DeployV2.s.sol`, a new address) and moving each account to it with one renewal, the same move as
+  V1 -> V2 (generation carried as old + 1, every old session revoked, positions in `Init.admit`). Until an account
+  renews, the old key keeps its liveness power over it.
   An owner action ending a pause is the design, with no exception: a pause set before the account's first enable on
   V2 (generation 0, `pausedAt` 1) is ended by that first enable, because the move or activation that enables V2 is the
   owner's own signed renewal. The guardian pauses again after it if it still wants the account stopped; it can never
-  keep the owner from enabling, and the owner's passkey path is never behind the policy.
+  keep the owner from enabling. The owner is told before signing: while the account is paused the renewal summary
+  opens with "A guardian key has paused Mamoru on this Safe. This renewal ends that pause: approve it only if you know
+  why it was paused" (read live at the prepare block), and the renew row's title says the account is paused
+  (`FundingView.approval.paused`, read with the chain usage, at most 10 minutes old).
 - The swap deadline `SwapRouter02.multicall(deadline, [])` (#140), accepted only in its exact 100-byte empty encoding,
   after the generation and pause checks. The v4 grants never carried it (V1 refuses it); v5 grants carry it under the
   policy, so a pause stops it too.
 
 Size: at 10,000 optimizer runs V2 is over EIP-170; `foundry.toml` compiles only V2 at 1,000 runs (23,519 bytes).
 `script/DeployV2.s.sol` deploys and registers it in one `deployModule` call; `GUARDIAN` is a required input.
+
+Compiler profiles. The `v2` profile (`compilation_restrictions` on `src/MamoruActionPolicyV2.sol`) sets only
+`optimizer_runs = 1000`; everything else is inherited from the default profile, checked in both artifacts' metadata:
+solc 0.8.28+commit.7893614a, `evm_version` cancun, `via_ir` false, `bytecode_hash` ipfs (CBOR appended), optimizer
+on. Files that import V2 compile under the `v2` profile too, so `out/` also holds `MamoruActionPolicy.v2.json` (V1 at
+1,000 runs); `verify-deployed-policy.ts` reads `out/MamoruActionPolicy.sol/MamoruActionPolicy.json` (10,000 runs)
+for V1 and `MamoruActionPolicyV2.json` for V2 (`--v2 --guardian`), and still verifies the deployed V1 byte for byte
+on this branch. Basescan (or `forge verify-contract`) must verify V2 with 1,000 optimizer runs
+(`--num-of-optimizations 1000`, or the standard JSON input of its artifact): the default profile's 10,000 would not
+match. Constructor arguments: SMART_SESSION, NPM, ROUTER, FACTORY, GUARDIAN.
+
+Test coverage of V2. Every deployment in `T6Fixes.t.sol` and `MamoruActionPolicy.t.sol` goes through
+`PolicyFixture._fork()` -> `_newPolicy()` (the only `new MamoruActionPolicy` in either file is its default body), so
+`T6FixesTestOnV2` and `MamoruActionPolicyTestOnV2` run every V1 finding's test against V2. `T6Before.t.sol` targets
+the audited T4 contract on purpose and is not rerun. `Init.admit` (`_admitAtEnable`, unchanged from V1) admits a
+tokenId only when `NPM.ownerOf == account` and the position's token0, token1 and fee equal the Init pool's (cached from
+the pool, which must be the factory's pool for them); `mint` admits only the pool `FACTORY.getPool(token0, token1,
+fee)` of what it minted. `increase` therefore reads a correct `admittedPool` (`test_M4_admitRefusesForeignOrOtherPoolPositions`
+runs on V2).
 
 Policy `conservador-live-v5` (`policies-v4.ts`): v4's pools, caps, bands and budgets; enter-swap + the deadline,
 manage-any + increase + the deadline (15 actions per pool, 45 in all). Every earlier policy hash is pinned by test.
