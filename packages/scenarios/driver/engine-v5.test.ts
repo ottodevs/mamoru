@@ -8,7 +8,10 @@ import { decodeFunctionData, encodeFunctionResult, toFunctionSelector, zeroAddre
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { ReasonError, type Address } from '@mamoru/domain'
 import type { Observation, Proposal } from '@mamoru/decide'
-import { conservadorLabV4, conservadorLabV5, withActionPolicy, V4_POOLS, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { POLICIES, computeCaps, conservadorLabV4, conservadorLabV5, conservadorLiveV5, grantKeyFor, instantiateGrant, retargetToPolicy, withActionPolicy, V4_POOLS, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { precheck, SessionLedger } from '@mamoru/account/precheck'
+import { executeCallData, useModeSignature } from '@mamoru/account/sessions'
+import { convertKey } from '../../decide/src/rerange/index.ts'
 import { address, entry, erc20Abi, mamoruActionPolicyV2Abi, swapRouter02Abi, baseRegistry } from '@mamoru/registry'
 import type { Execution } from '@mamoru/account/safe'
 import { FakeChain, Revert } from '../../rpc/test/fake-chain.ts'
@@ -184,3 +187,30 @@ describe('observation: admitted positions (otto/mamoru#171)', () => {
     })
   })
 })
+
+// otto/mamoru#189 for v5: v5 merges convert-any into manage-any like v4, so every convert names the pool's manage-any,
+// whose v5 session also holds the swap deadline under MamoruActionPolicyV2.
+describe('v5 converts go through the merged manage-any session (#189)', () => {
+  test('convertKey: manage-any of the pool under v5; convert-any (unchanged) under v2', () => {
+    for (const p of Object.values(V4_POOLS)) expect(convertKey(V5, p.pool)).toBe(`manage-any:${p.pool}`)
+    const v2 = POLICIES['conservador-live-v2']!
+    expect<string>(convertKey(v2, POOL)).toBe(grantKeyFor(v2, 'convert-any', POOL))
+  })
+
+  test('a convert swap under the real v5 manage-any grant: deadline + approve + swap, and it passes that grant\'s pre-check', async () => {
+    const key = `manage-any:${POOL}`
+    const caps = computeCaps(conservadorLiveV5, 10_000n * 1_000_000n, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
+    const grant = retargetToPolicy(instantiateGrant(conservadorLiveV5, key, { account: ACCOUNT, sessionKey: sessionKey.address, chainId: 8453, salt: `0x${'03'.repeat(32)}`, validAfter: 0, validUntil: 2_000_000_000, caps }), POLICY_V2)
+    const s: EngineSession = { name: key, grant, permissionId: `0x${'0c'.repeat(32)}` }
+    const convert: Proposal = { kind: 'enter_swap', grant: convertKey(V5, POOL) as never, pool: POOL, tokenIn: 'cbBTC', tokenOut: 'USDC', fee: 500, amountIn: 50_000n }
+    await withEngine(V5, async (e) => {
+      const prepared = await prepare(e, convert, s)
+      expect(prepared.calls[0]!.callData.startsWith('0x5ae401dc')).toBe(true) // multicall(deadline, [])
+      const ledger = new SessionLedger()
+      ledger.activate(s.permissionId, s.grant)
+      const r = precheck({ sender: ACCOUNT, callData: executeCallData(prepared.calls), signature: useModeSignature(s.permissionId, '0x') }, { chainId: 8453, now: 1_000, ledger })
+      expect(r).toMatchObject({ ok: true })
+    })
+  })
+})
+
