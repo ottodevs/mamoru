@@ -117,6 +117,24 @@ function reason(e: unknown): string {
   return (e instanceof Error ? e.message : String(e)).slice(0, 300)
 }
 
+/**
+ * Walks an error's cause chain for genuine on-chain revert data (a hex string carrying at least a 4-byte
+ * selector), as opposed to an RPC/network/timeout failure that never reached the EVM. Returns the selector, or
+ * null when nothing in the chain looks like a decoded revert -- used so "the call threw" is never mistaken for
+ * "the call reverted for the reason this probe is testing".
+ */
+function decodedRevertSelector(e: unknown): Hex | null {
+  let cur: unknown = e
+  for (let i = 0; i < 10 && cur; i++) {
+    const c = cur as { data?: unknown; cause?: unknown }
+    if (typeof c.data === 'string' && c.data.startsWith('0x') && c.data.length >= 10) return c.data.slice(0, 10) as Hex
+    const inner = c.data as { data?: unknown } | undefined
+    if (inner && typeof inner.data === 'string' && inner.data.startsWith('0x') && inner.data.length >= 10) return inner.data.slice(0, 10) as Hex
+    cur = c.cause
+  }
+  return null
+}
+
 loadUpstream()
 const proxy = startForkProxy('RPC_URL')
 const real = createPublicClient({ transport: http(proxy.url, { timeout: 60_000 }) })
@@ -344,9 +362,13 @@ try {
   // Aqua.sol's ship() does no ERC-20 calls at all (confirmed against github.com/1inch/aqua/blob/main/src/Aqua.sol):
   // it writes straight to storage. Neither real balance (10b, below) nor allowance is checked until a fill calls
   // pull()/push(), which do `IERC20(token).safeTransferFrom(...)`. So a Safe with ZERO allowance can still ship()
-  // an arbitrary WETH-denominated virtual balance without reverting; only the fill that tries to move it fails.
+  // an arbitrary WETH-denominated virtual balance without reverting; only the fill that tries to move it fails --
+  // and only in the direction that would pull the token whose allowance is zero. Both claims are proved, not
+  // asserted: a decoded revert, a same-strategy same-call success once allowance is restored (ruling out every
+  // other variable), and a same-strategy fill in the OTHER direction (pulling the token whose allowance was never
+  // touched) succeeding regardless, because a one-sided allowance does not make a two-token strategy unfillable.
   const allowanceDrop = await ownerExec(lab, world.relayer, world.a1, { to: WETH, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [AQUA_FROM_DOCS, 0n] }) }, 'passkey')
-  note('owner drops the Safe\'s WETH allowance to Aqua.sol to zero', allowanceDrop.ok, `${allowanceDrop.ok ? allowanceDrop.receipt.gasUsed : 'n/a'} gas`)
+  note('owner drops the Safe\'s WETH allowance to Aqua.sol to zero (USDC allowance untouched)', allowanceDrop.ok, `${allowanceDrop.ok ? allowanceDrop.receipt.gasUsed : 'n/a'} gas`)
   if (!allowanceDrop.ok) exitCode = 1
   const zeroAllowanceProgram = AquaXYCAmmStrategy.newConcentrate({ sqrtPriceMin: sqrtMin, sqrtPriceMax: sqrtMax }).withSalt(999n).build()
   const zeroAllowanceOrder = Order.new({ maker: makerAddr, program: zeroAllowanceProgram, traits: MakerTraits.default() })
@@ -354,27 +376,73 @@ try {
   const zeroAllowanceShip = await ownerExec(lab, world.relayer, world.a1, { to: getAddress(zeroAllowanceShipTx.to), data: zeroAllowanceShipTx.data as Hex }, 'passkey')
   note('ship() succeeds with zero WETH allowance (0.1 WETH virtual balance, unbacked)', zeroAllowanceShip.ok, `${zeroAllowanceShip.ok ? zeroAllowanceShip.receipt.gasUsed : 'n/a'} gas; real WETH balance and allowance are both irrelevant to ship() -- it is pure storage, no IERC20 call`)
   if (!zeroAllowanceShip.ok) exitCode = 1
-  const zeroAllowanceSwap = swapVm.swap({ order: zeroAllowanceOrder, tokenIn: new AquaAddress(USDC), tokenOut: new AquaAddress(WETH), amount: 50_000_000n, takerTraits: TakerTraits.default() })
-  let allowanceRevertSeen = false
+
+  // The taker's own USDC balance and allowance to the router (the push side) are separate things from the
+  // maker's WETH allowance to Aqua (the pull side) being tested here; the taker spent its entire USDC balance in
+  // the step 9 fill, so both are refreshed explicitly -- a stale allowance or an empty wallet on the taker's side
+  // must never be the confound behind a revert this step is trying to attribute to the maker.
+  const pullWethAmount = 50_000_000n
+  await lab.whaleTransfer('USDC', WHALE, taker.address, pullWethAmount)
+  await lab.send(taker, USDC, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [SWAP_VM_FROM_DOCS, pullWethAmount] }))
+  const pullWeth = swapVm.swap({ order: zeroAllowanceOrder, tokenIn: new AquaAddress(USDC), tokenOut: new AquaAddress(WETH), amount: pullWethAmount, takerTraits: TakerTraits.default() })
+  const dryRunPullWeth = () => lab.client.call({ account: taker.address, to: getAddress(pullWeth.to), data: pullWeth.data as Hex, gas: 5_000_000n })
+  let revertSelector: Hex | null = null
   let allowanceRevertDetail = ''
   try {
-    await lab.client.call({ account: taker.address, to: getAddress(zeroAllowanceSwap.to), data: zeroAllowanceSwap.data as Hex, gas: 5_000_000n })
+    await dryRunPullWeth()
     allowanceRevertDetail = 'the call did NOT revert'
   } catch (e) {
-    allowanceRevertSeen = true
+    revertSelector = decodedRevertSelector(e)
     allowanceRevertDetail = reason(e)
   }
   note(
-    'overcommit by allowance: a fill that would pull WETH out reverts (real WETH balance is ample; only the allowance is zero)',
-    allowanceRevertSeen,
-    allowanceRevertDetail,
+    'overcommit by allowance: a fill pulling WETH out reverts with a decoded revert (real WETH balance is ample; only the allowance is zero)',
+    revertSelector !== null,
+    `${allowanceRevertDetail}${revertSelector ? ` (selector ${revertSelector})` : ''}`,
   )
-  if (!allowanceRevertSeen) exitCode = 1
-  const zeroAllowanceDock = aqua.dock({ app: swapVmAddr, strategyHash: AquaProtocolContract.calculateStrategyHash(zeroAllowanceOrder.encode()), tokens: [new AquaAddress(WETH), new AquaAddress(USDC)] })
-  await ownerExec(lab, world.relayer, world.a1, { to: getAddress(zeroAllowanceDock.to), data: zeroAllowanceDock.data as Hex }, 'passkey')
+  if (revertSelector === null) exitCode = 1
+
+  // The other direction: pulling USDC out. USDC allowance was never touched, so the SAME strategy should still
+  // fill in that direction -- a one-sided allowance gap does not make a two-token strategy wholesale unfillable.
+  const takerWeth = 10_000_000_000_000_000n // 0.01 WETH
+  await lab.setBalance(funder.address, takerWeth + 10n ** 18n)
+  await lab.send(funder, WETH, encodeFunctionData({ abi: depositAbi, functionName: 'deposit' }), takerWeth)
+  await lab.send(funder, WETH, encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [taker.address, takerWeth] }))
+  await lab.send(taker, WETH, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [SWAP_VM_FROM_DOCS, takerWeth] }))
+  const pullUsdc = swapVm.swap({ order: zeroAllowanceOrder, tokenIn: new AquaAddress(WETH), tokenOut: new AquaAddress(USDC), amount: takerWeth, takerTraits: TakerTraits.default() })
+  let pullUsdcSucceeded = false
+  let pullUsdcDetail = ''
+  try {
+    await lab.client.call({ account: taker.address, to: getAddress(pullUsdc.to), data: pullUsdc.data as Hex, gas: 5_000_000n })
+    pullUsdcSucceeded = true
+    pullUsdcDetail = 'would succeed: the same strategy, pulling the token whose allowance was never touched'
+  } catch (e) {
+    pullUsdcDetail = reason(e)
+  }
+  note('the same strategy, pulled in the other direction (USDC out, allowance untouched), is still fillable', pullUsdcSucceeded, pullUsdcDetail)
+  if (!pullUsdcSucceeded) exitCode = 1
+
+  // Causality, not correlation: restore the allowance and re-run the exact same WETH-out call. Nothing else
+  // changed between the two calls -- if it now succeeds, the allowance was the only variable that mattered.
   const allowanceRestore = await ownerExec(lab, world.relayer, world.a1, { to: WETH, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [AQUA_FROM_DOCS, wethAmount] }) }, 'passkey')
   note('WETH allowance restored (so the rest of this probe is unaffected)', allowanceRestore.ok, `${allowanceRestore.ok ? allowanceRestore.receipt.gasUsed : 'n/a'} gas, back to ${wethAmount}`)
   if (!allowanceRestore.ok) exitCode = 1
+  let sameCallNowSucceeds = false
+  let sameCallDetail = ''
+  try {
+    await dryRunPullWeth()
+    sameCallNowSucceeds = true
+    sameCallDetail = 'the identical call that reverted above now succeeds, allowance restored, nothing else changed'
+  } catch (e) {
+    const liveAllowance = await lab.client.readContract({ address: WETH, abi: erc20Abi, functionName: 'allowance', args: [safe, AQUA_FROM_DOCS] })
+    const liveBalance = await lab.balanceOf('WETH', safe)
+    sameCallDetail = `${reason(e)} [diagnostic: live WETH allowance ${liveAllowance}, live WETH balance ${liveBalance}, pullWethAmount ${pullWethAmount}]`
+  }
+  note('causality check: the exact same call that reverted now succeeds once allowance alone is restored', sameCallNowSucceeds, sameCallDetail)
+  if (!sameCallNowSucceeds) exitCode = 1
+
+  const zeroAllowanceDock = aqua.dock({ app: swapVmAddr, strategyHash: AquaProtocolContract.calculateStrategyHash(zeroAllowanceOrder.encode()), tokens: [new AquaAddress(WETH), new AquaAddress(USDC)] })
+  await ownerExec(lab, world.relayer, world.a1, { to: getAddress(zeroAllowanceDock.to), data: zeroAllowanceDock.data as Hex }, 'passkey')
 
   // --- 10b. Overcommit by real balance: the Safe sends its real WETH away without docking first -----------------
   const dead: Address = '0x000000000000000000000000000000000000dEaD'
