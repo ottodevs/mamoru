@@ -266,6 +266,10 @@ each a refusal or a path a session could not take before:
 - A revoke-only guardian: immutable `GUARDIAN` (address(0) = none) may `pause(account)` / `unpause(account)`, nothing
   else. `pausedAt = generation + 1`, so the owner's next renewal ends a pause and an unpause never revives a retired
   generation. While paused `checkAction` refuses every action and `mint`/`increase` revert `AccountPaused`.
+  An owner action ending a pause is the design, with no exception: a pause set before the account's first enable on
+  V2 (generation 0, `pausedAt` 1) is ended by that first enable, because the move or activation that enables V2 is the
+  owner's own signed renewal. The guardian pauses again after it if it still wants the account stopped; it can never
+  keep the owner from enabling, and the owner's passkey path is never behind the policy.
 - The swap deadline `SwapRouter02.multicall(deadline, [])` (#140), accepted only in its exact 100-byte empty encoding,
   after the generation and pause checks. The v4 grants never carried it (V1 refuses it); v5 grants carry it under the
   policy, so a pause stops it too.
@@ -280,9 +284,35 @@ The operator resolves it only with `MAMORU_ACTION_POLICY_V2_ADDRESS` (never the 
 session revoked and the Safe's positions in `Init.admit`. The engine reads `isPaused` before each op (POLICY_PAUSED)
 and adds to an admitted position within `range.increaseToleranceBps` instead of minting a second NFT.
 
-Gas (`packages/scenarios/action-policy/t8-fork.ts`, Base fork): the move from v4 is three owner transactions,
-11.31M / 10.45M / 4.44M; a v5 renewal 10.96M / 10.32M / 4.44M (all under 2^24 = 16.78M; v4 needs two). A guardian
-pause is 47,894 gas. `checkAction(increase)` 65,525, `policy.increase` 237,723 (exec), the deadline 27,965 (cold).
+Gas and the split. Each owner transaction of an approval takes the longest run of whole sessions whose SIMULATED gas
+stays at or under `V4_TX_GAS_TARGET` = 14.5M (about 2.2M under 2^24 = 16,777,216); the 590k-per-action model only
+seeds the search (`fitPrefixBySimulation`, the operator's `fitV4`). What is simulated is the gas LIMIT the owner
+transaction needs, before refunds: a revoke clears storage, so a receipt shows ~2.5M less than the transaction must be
+given. The operator runs the whole batch once in the Safe's own context, `Safe.simulateAndRevert(MultiSendCallOnly,
+multiSend)` under eth_simulateV1 (a reverted call refunds nothing), scaled by 9/8 and plus 300k for the passkey
+check: eth_estimateGas of the signed transaction measured 1.10-1.113 x that figure over eight fork transactions. When
+that cannot run (an undeployed Safe), the per-call simulation bounded up by 5/4 (EIP-3529), else the static estimate. Measured on a Base fork (`t8-fork.ts`,
+eth_estimateGas of the signed Safe transaction):
+
+| Approval | Sessions per transaction | Simulated (gas limit needed) | Receipt gas used |
+|---|---|---|---|
+| v4 activation (V1) | 5 + 4 | 11.55M, 10.87M | 11.06M, 10.56M |
+| Move v4 -> v5 (V2, revokes 9) | 4 + 4 + 1 | 13.78M, 10.75M, 4.57M | 11.31M, 10.45M, 4.44M |
+| v5 renewal (V2, revokes 9) | 4 + 4 + 1 | 13.73M, 10.63M, 4.57M | 10.96M, 10.32M, 4.44M |
+
+The operator itself (`apps/mamoru-operator/test/e2e-v5.ts`, through its renew route with a passkey-signed Safe, the
+figure being its `fitV4` simulation):
+
+| Approval (operator) | Sessions per transaction | Simulated gas limit | Receipt gas used |
+|---|---|---|---|
+| Move v2 -> v4 (V1, revokes the v2 grants) | 5 + 4 | 13.28M, 11.56M | 11.72M, 11.04M |
+| Move v4 -> v5 (V2, revokes 9) | 4 + 4 + 1 | 14.50M, 11.40M, 5.02M | 11.75M, 10.87M, 4.88M |
+| v5 renewal (V2, revokes 9) | 4 + 4 + 1 | 14.41M, 11.24M, 5.02M | 11.36M, 10.73M, 4.90M |
+
+v5 cannot be two transactions at 14.5M: a fifth session in the first one simulates 15.82M (move) / 15.77M (renewal),
+and the three together need about 29.1M, over 2 x 14.5M. Two would need about 15.8M each, 1M under the cap. A
+guardian pause is 47,894 gas. `checkAction(increase)` 65,525, `policy.increase` 237,723 (exec), the deadline 27,965
+(cold).
 
 ## Re-approval UX (#33 extend)
 
