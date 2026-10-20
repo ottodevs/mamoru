@@ -33,16 +33,18 @@ function buildArtifact(values: { smartSession: Address; npm: Address; router: Ad
 
 const GOOD_ARTIFACT = buildArtifact({ smartSession: SMART_SESSION, npm: NPM, router: ROUTER, factory: FACTORY })
 
-function fakeClient(opts: { code?: Hex | undefined; reads?: Partial<Record<'SMART_SESSION' | 'NPM' | 'ROUTER' | 'FACTORY', Address>>; throwOnRead?: boolean; throwOnCode?: boolean }) {
-  const reads = { SMART_SESSION, NPM, ROUTER, FACTORY, ...opts.reads }
+function fakeClient(opts: { code?: Hex | undefined; reads?: Partial<Record<'SMART_SESSION' | 'NPM' | 'ROUTER' | 'FACTORY' | 'GUARDIAN', Address>>; throwOnRead?: boolean; throwOnCode?: boolean }) {
+  const reads: Partial<Record<string, Address>> = { SMART_SESSION, NPM, ROUTER, FACTORY, ...opts.reads }
   return {
     getCode: async () => {
       if (opts.throwOnCode) throw new Error('rpc down')
       return opts.code
     },
-    readContract: async ({ functionName }: { functionName: keyof typeof reads }) => {
+    readContract: async ({ functionName }: { functionName: string }): Promise<Address> => {
       if (opts.throwOnRead) throw new Error('execution reverted')
-      return reads[functionName]
+      const r = reads[functionName]
+      if (!r) throw new Error('execution reverted')
+      return r
     },
   }
 }
@@ -96,5 +98,22 @@ describe('verifyDeployedPolicy (otto/mamoru#151 T7a)', () => {
     const result = await verifyDeployedPolicy(client, '0x1234567890123456789012345678901234567890', GOOD_ARTIFACT)
     expect(result.ok).toBe(false)
     expect(!result.ok && result.reason).toContain('length')
+  })
+})
+
+describe('verifyDeployedPolicy, MamoruActionPolicyV2 (otto/mamoru#151): the GUARDIAN immutable is checked by value', () => {
+  const G = '0x00000000000000000000000000000000000006a2' as Address
+  const code = GOOD_ARTIFACT.deployedBytecode.object
+
+  test('the guardian the coordinator names: ok', async () => {
+    expect(await verifyDeployedPolicy(fakeClient({ code, reads: { GUARDIAN: G } }), '0x1234567890123456789012345678901234567890', GOOD_ARTIFACT, { guardian: G })).toEqual({ ok: true })
+  })
+
+  test('another guardian, or none answered (a V1): refused', async () => {
+    const other = await verifyDeployedPolicy(fakeClient({ code, reads: { GUARDIAN: '0x0000000000000000000000000000000000000bad' } }), '0x1234567890123456789012345678901234567890', GOOD_ARTIFACT, { guardian: G })
+    expect(other.ok).toBe(false)
+    if (!other.ok) expect(other.reason).toContain('GUARDIAN')
+    const none = await verifyDeployedPolicy(fakeClient({ code }), '0x1234567890123456789012345678901234567890', GOOD_ARTIFACT, { guardian: G })
+    expect(none.ok).toBe(false)
   })
 })

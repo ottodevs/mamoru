@@ -12,6 +12,9 @@
 // Usage (read-only, no transaction):
 //   cd contracts/action-policy && ./install.sh && forge build --silent && cd ../.. &&
 //   BASE_RPC_URL=https://mainnet.base.org bun packages/scenarios/action-policy/verify-deployed-policy.ts <address>
+// otto/mamoru#151, MamoruActionPolicyV2 (its artifact, and its fifth immutable GUARDIAN, which must equal the key the
+// coordinator names; MamoruGuardian has no registry address until it is deployed):
+//   ... verify-deployed-policy.ts <address> --v2 --guardian <address>
 //
 // Exit 0: verified. Exit 1: refused (print the reason; never caught and ignored by a caller — treat as "do not
 // trust this address"). Exit 2: usage error (no address given, or the artifact has not been built).
@@ -21,12 +24,15 @@ import { createPublicClient, http, parseAbi, type Address, type Hex } from 'viem
 import { baseRegistry, address as registryAddress } from '@mamoru/registry'
 
 const ARTIFACT_PATH = join(import.meta.dir, '../../../contracts/action-policy/out/MamoruActionPolicy.sol/MamoruActionPolicy.json')
+/** MamoruActionPolicyV2's artifact: compiled at its own 1,000 optimizer runs (foundry.toml compilation_restrictions). */
+const ARTIFACT_PATH_V2 = join(import.meta.dir, '../../../contracts/action-policy/out/MamoruActionPolicyV2.sol/MamoruActionPolicyV2.json')
 
 const READ_ABI = parseAbi([
   'function SMART_SESSION() view returns (address)',
   'function NPM() view returns (address)',
   'function ROUTER() view returns (address)',
   'function FACTORY() view returns (address)',
+  'function GUARDIAN() view returns (address)',
 ])
 
 /**
@@ -38,7 +44,7 @@ const READ_ABI = parseAbi([
  */
 export type PolicyReaderClient = {
   getCode: (args: { address: Address }) => Promise<Hex | undefined>
-  readContract: (args: { address: Address; abi: typeof READ_ABI; functionName: 'SMART_SESSION' | 'NPM' | 'ROUTER' | 'FACTORY' }) => Promise<Address>
+  readContract: (args: { address: Address; abi: typeof READ_ABI; functionName: 'SMART_SESSION' | 'NPM' | 'ROUTER' | 'FACTORY' | 'GUARDIAN' }) => Promise<Address>
 }
 
 type ImmutableRanges = Record<string, { start: number; length: number }[]>
@@ -51,12 +57,13 @@ function maskImmutables(hex: Hex, ranges: ImmutableRanges): Hex {
   return `0x${bytes.toString('hex')}`
 }
 
-function loadArtifact(): Artifact {
+export function loadArtifact(v2 = false): Artifact {
+  const path = v2 ? ARTIFACT_PATH_V2 : ARTIFACT_PATH
   let raw: string
   try {
-    raw = readFileSync(ARTIFACT_PATH, 'utf8')
+    raw = readFileSync(path, 'utf8')
   } catch {
-    throw new Error(`MamoruActionPolicy artifact not built: ${ARTIFACT_PATH} (run: cd contracts/action-policy && ./install.sh && forge build)`)
+    throw new Error(`${v2 ? 'MamoruActionPolicyV2' : 'MamoruActionPolicy'} artifact not built: ${path} (run: cd contracts/action-policy && ./install.sh && forge build)`)
   }
   return JSON.parse(raw) as Artifact
 }
@@ -67,7 +74,7 @@ export type VerifyResult = { ok: true } | { ok: false; reason: string }
  * `client` takes the minimal shape this needs (so a test can fake it): `getCode` and `readContract` from viem's
  * PublicClient. Pass a real one (createPublicClient) for an actual on-chain check.
  */
-export async function verifyDeployedPolicy(client: PolicyReaderClient, deployed: Address, artifact: Artifact = loadArtifact()): Promise<VerifyResult> {
+export async function verifyDeployedPolicy(client: PolicyReaderClient, deployed: Address, artifact: Artifact = loadArtifact(), opts: { guardian?: Address } = {}): Promise<VerifyResult> {
   // Never throw out of this function: a bad RPC answer, a revert, or an address with no code must all come back as
   // a clean `{ ok: false }`, exactly like a genuine mismatch — this is the one function an operator trusts before
   // trusting a contract, and "crashed, caller decides what that means" is not an acceptable answer for it.
@@ -102,25 +109,38 @@ export async function verifyDeployedPolicy(client: PolicyReaderClient, deployed:
   for (const k of Object.keys(expected) as (keyof typeof expected)[]) {
     if (read[k].toLowerCase() !== expected[k].toLowerCase()) return { ok: false, reason: `${k}: on-chain ${read[k]}, expected ${expected[k]} (packages/registry)` }
   }
+  // otto/mamoru#151: V2's guardian is an immutable too; masked below like the others, so it is checked here, by value.
+  if (opts.guardian !== undefined) {
+    let guardian: Address
+    try {
+      guardian = await client.readContract({ address: deployed, abi: READ_ABI, functionName: 'GUARDIAN' })
+    } catch (e) {
+      return { ok: false, reason: `${deployed} does not answer GUARDIAN() as MamoruActionPolicyV2 would: ${e instanceof Error ? e.message : String(e)}` }
+    }
+    if (guardian.toLowerCase() !== opts.guardian.toLowerCase()) return { ok: false, reason: `GUARDIAN: on-chain ${guardian}, expected ${opts.guardian}` }
+  }
 
   const ranges = artifact.deployedBytecode.immutableReferences
   const maskedChain = maskImmutables(onChainCode, ranges)
   const maskedLocal = maskImmutables(artifact.deployedBytecode.object, ranges)
   if (maskedChain.length !== maskedLocal.length) return { ok: false, reason: `deployed bytecode length ${maskedChain.length / 2 - 1} bytes, compiled artifact ${maskedLocal.length / 2 - 1} bytes -- different contract` }
-  if (maskedChain.toLowerCase() !== maskedLocal.toLowerCase()) return { ok: false, reason: 'deployed bytecode (immutables masked) does not match the locally compiled MamoruActionPolicy.sol -- different source or compiler settings' }
+  if (maskedChain.toLowerCase() !== maskedLocal.toLowerCase()) return { ok: false, reason: 'deployed bytecode (immutables masked) does not match the locally compiled artifact -- different source or compiler settings' }
   return { ok: true }
 }
 
 if (import.meta.main) {
   const addr = process.argv[2] as Address | undefined
-  if (!addr) {
-    console.error('usage: BASE_RPC_URL=... bun packages/scenarios/action-policy/verify-deployed-policy.ts <address>')
+  const v2 = process.argv.includes('--v2')
+  const g = process.argv.indexOf('--guardian')
+  const guardian = g > 0 ? (process.argv[g + 1] as Address | undefined) : undefined
+  if (!addr || (v2 && !guardian)) {
+    console.error('usage: BASE_RPC_URL=... bun packages/scenarios/action-policy/verify-deployed-policy.ts <address> [--v2 --guardian <address>]')
     process.exit(2)
   }
   const client = createPublicClient({ transport: http(process.env.BASE_RPC_URL ?? 'https://mainnet.base.org') })
-  const result = await verifyDeployedPolicy(client, addr)
+  const result = await verifyDeployedPolicy(client, addr, loadArtifact(v2), guardian ? { guardian } : {})
   if (result.ok) {
-    console.log(`OK: ${addr} is MamoruActionPolicy with the expected constructor args and unmodified bytecode`)
+    console.log(`OK: ${addr} is ${v2 ? 'MamoruActionPolicyV2' : 'MamoruActionPolicy'} with the expected constructor args and unmodified bytecode`)
     process.exit(0)
   }
   console.error(`REFUSED: ${addr} -- ${result.reason}`)
