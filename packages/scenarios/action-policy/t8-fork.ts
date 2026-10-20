@@ -25,7 +25,7 @@ import { join } from 'node:path'
 import { encodeFunctionData, parseAbi, parseEventLogs, type Hex } from 'viem'
 import type { PrivateKeyAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
-import { address, assertCodeHashes, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, swapRouter02Abi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { address, assertCodeHashes, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, swapRouter02Abi, uniswapV3PoolAbi, baseRegistry } from '@mamoru/registry'
 import {
   V4_GAS_CAPS,
   V4_POOLS,
@@ -94,7 +94,7 @@ async function ownerCalls(lab: Lab, relayer: PrivateKeyAccount, acct: AccountFix
 }
 
 async function usdcPrice(lab: Lab, pool: string, token0: string, token1: string, asset: string): Promise<Price> {
-  const [sqrtPriceX96] = await lab.client.readContract({ address: address(pool), abi: uniswapV3PoolAbi, functionName: 'slot0' })
+  const [sqrtPriceX96] = await lab.client.readContract({ address: address(pool, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0' })
   const ratio: Price = { num: sqrtPriceX96 * sqrtPriceX96, den: 1n << 192n }
   if (token0 === 'USDC' && token1 === asset) return ratio
   if (token1 === 'USDC' && token0 === asset) return { num: ratio.den, den: ratio.num }
@@ -130,7 +130,7 @@ const { handle } = await startLabFork({ manifest, forkUrl: proxy.url, logPath: `
 const lab = new Lab(handle.url, manifest.fork.chainId)
 
 try {
-  await assertCodeHashes(lab.client)
+  await assertCodeHashes(lab.client, baseRegistry)
   note('fork', true, `Base block ${manifest.fork.block} on anvil, chain id ${lab.chainId}`)
   const relayer = devAccount(0)
   const engineNow = async () => Number((await lab.client.getBlock()).timestamp)
@@ -150,8 +150,8 @@ try {
   const v2 = /MamoruActionPolicyV2:\s*(0x[0-9a-fA-F]{40})/.exec(outV2)?.[1] as Address
   if (!v1 || !gasPolicy || !v2) throw new Error('forge scripts printed no addresses')
   note('Deploy.s.sol + DeployV2.s.sol --broadcast on the local fork', true, `V1 ${v1}, MamoruGasPolicy ${gasPolicy}, V2 ${v2}`)
-  const reference = await lab.client.readContract({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findModule', args: [address('TimeFramePolicy')] })
-  const rec = await lab.client.readContract({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findModule', args: [v2] })
+  const reference = await lab.client.readContract({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findModule', args: [address('TimeFramePolicy', baseRegistry)] })
+  const rec = await lab.client.readContract({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findModule', args: [v2] })
   note("findModule(MamoruActionPolicyV2): the deployer's record under Mamoru's resolver", rec.sender.toLowerCase() === deployer.address.toLowerCase() && rec.resolverUID === reference.resolverUID, `sender ${rec.sender}`)
   const g = await lab.client.readContract({ address: v2, abi: mamoruActionPolicyV2Abi, functionName: 'GUARDIAN' })
   note('V2.GUARDIAN is the key the deploy named', g.toLowerCase() === guardian.address.toLowerCase(), g)
@@ -213,15 +213,15 @@ try {
   }
 
   async function swapBatch(policyAddr: Address, pool: string, tokenIn: string, tokenOut: string, fee: number, amountIn: bigint, withDeadline: boolean): Promise<{ to: Address; data: Hex }[]> {
-    const [minOut, limit] = await lab.client.readContract({ address: policyAddr, abi: policyAbi, functionName: 'swapBounds', args: [safe, address(pool), address(tokenIn), amountIn] })
+    const [minOut, limit] = await lab.client.readContract({ address: policyAddr, abi: policyAbi, functionName: 'swapBounds', args: [safe, address(pool, baseRegistry), address(tokenIn, baseRegistry), amountIn] })
     return [
       ...(withDeadline ? [deadlineCheck(BigInt(await engineNow()) + 300n)] : []),
       approve(tokenIn, 'SwapRouter02', amountIn),
-      { to: address('SwapRouter02'), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address(tokenIn), tokenOut: address(tokenOut), fee, recipient: safe, amountIn, amountOutMinimum: minOut, sqrtPriceLimitX96: limit }] }) },
+      { to: address('SwapRouter02', baseRegistry), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address(tokenIn, baseRegistry), tokenOut: address(tokenOut, baseRegistry), fee, recipient: safe, amountIn, amountOutMinimum: minOut, sqrtPriceLimitX96: limit }] }) },
     ]
   }
 
-  const liquidityOf = async (tokenId: bigint) => (await lab.client.readContract({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] }))[7]
+  const liquidityOf = async (tokenId: bigint) => (await lab.client.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] }))[7]
   const verdict = (o: SessionOpOutcome) => `${o.verdict}${o.failedOp?.reason ? ` (${o.failedOp.reason})` : ''}${o.validator ? ` validator=${o.validator}` : ''}`
 
   // ---------------------------------------------------------------------------------------------- 2. a v4 account on V1
@@ -235,7 +235,7 @@ try {
     const out = await op('t8-v4-swap', v4Swap, await swapBatch(v1, BTC, 'USDC', 'cbBTC', 500, 300_000_000n, false), key1)
     note('v4: 300 USDC -> cbBTC at V1 bounds', out.verdict === 'INCLUDED', verdict(out))
   }
-  const tick = (await lab.client.readContract({ address: address(BTC), abi: uniswapV3PoolAbi, functionName: 'slot0' }))[1]
+  const tick = (await lab.client.readContract({ address: address(BTC, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0' }))[1]
   const { tickLower, tickUpper } = rangeAround(tick, 2_000, 10)
   const cbbtc = await lab.balanceOf('cbBTC', safe)
   const deadline = BigInt(await engineNow()) + 3_600n
@@ -243,7 +243,7 @@ try {
   {
     const v4Mint = session(gen1, `enter-mint:${BTC}`)
     const e = V4_POOLS.btc
-    const params = { token0: address(e.token0), token1: address(e.token1), fee: e.fee, tickLower, tickUpper, amount0Desired: 300_000_000n, amount1Desired: cbbtc / 2n, amount0Min: 1n, amount1Min: 1n, recipient: safe, deadline }
+    const params = { token0: address(e.token0, baseRegistry), token1: address(e.token1, baseRegistry), fee: e.fee, tickLower, tickUpper, amount0Desired: 300_000_000n, amount1Desired: cbbtc / 2n, amount0Min: 1n, amount1Min: 1n, recipient: safe, deadline }
     const out = await op('t8-v4-mint', v4Mint, [approveTo('USDC', v1, params.amount0Desired), approveTo('cbBTC', v1, params.amount1Desired), { to: v1, data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'mint', args: [params] }) }], key1)
     const id = out.receipt ? parseEventLogs({ abi: nonfungiblePositionManagerAbi, logs: out.receipt.logs, eventName: 'Transfer' }).find((l) => l.args.to.toLowerCase() === safe.toLowerCase())?.args.tokenId : undefined
     note('v4: the engine mints a btc position through V1.mint (admitted at V1)', out.verdict === 'INCLUDED' && id !== undefined, `${verdict(out)} tokenId ${id}`)
@@ -269,8 +269,8 @@ try {
   const moved = await approveAll('move v4 -> v5 (V2 first enable, revokes v4)', p5, moveGen, key2.address, { [BTC]: [admitted] }, [v2], gen1.flatMap((b) => b.permissionIds))
   note('move: V2 generation carries V1 + 1', moveGen === 2n, `${moveGen}`)
   const at = await lab.client.readContract({ address: v2, abi: policyAbi, functionName: 'admittedPool', args: [safe, admitted] })
-  note('Init.admit: the V1-minted position is admitted at V2', at.toLowerCase() === address(BTC).toLowerCase(), at)
-  const a = await lab.client.readContract({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [v2, safe] })
+  note('Init.admit: the V1-minted position is admitted at V2', at.toLowerCase() === address(BTC, baseRegistry).toLowerCase(), at)
+  const a = await lab.client.readContract({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [v2, safe] })
   note('the Safe self-attested V2 in the first move transaction', Number(a.time) > 0 && Number(a.revocationTime) === 0, `time ${a.time}`)
   {
     const out = await op('t8-v4-after-move', v4Swap, await swapBatch(v1, BTC, 'USDC', 'cbBTC', 500, 10_000_000n, false), key1)
@@ -292,7 +292,7 @@ try {
     const after = await liquidityOf(admitted)
     note('increase through V2 on the admitted position: included, liquidity on the same NFT', out.verdict === 'INCLUDED' && after > before, `${verdict(out)}, liquidity ${before} -> ${after}`)
     if (out.receipt) gas['increase-userop-tx'] = out.receipt.gasUsed.toString()
-    const left = await lab.client.readContract({ address: address('USDC'), abi: erc20Abi, functionName: 'balanceOf', args: [v2] })
+    const left = await lab.client.readContract({ address: address('USDC', baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [v2] })
     note('nothing stays in V2; the Safe paid at most the desired USDC', left === 0n && u0 - (await lab.balanceOf('USDC', safe)) <= 50_000_000n, `V2 USDC ${left}`)
   }
   {

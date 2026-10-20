@@ -12,7 +12,7 @@ describe('policyIncrease (otto/mamoru#171)', () => {
   test('calls MamoruActionPolicyV2.increase at the given address, never the position manager', () => {
     const c = policyIncrease(POLICY, p)
     expect(c.to).toBe(POLICY)
-    expect(c.to).not.toBe(address('NonfungiblePositionManager'))
+    expect(c.to).not.toBe(address('NonfungiblePositionManager', baseRegistry))
     expect(c.data.slice(0, 10)).toBe(toFunctionSelector('function increase((uint256,uint256,uint256,uint256,uint256,uint256))'))
     // Not the manager's increaseLiquidity selector: the same struct under another name.
     expect(c.data.slice(0, 10)).not.toBe(toFunctionSelector('function increaseLiquidity((uint256,uint256,uint256,uint256,uint256,uint256))'))
@@ -31,7 +31,7 @@ describe('policyIncrease (otto/mamoru#171)', () => {
 
   test('approveTo approves a pool token to the policy address', () => {
     const c = approveTo('USDC', POLICY, 5n)
-    expect(c.to).toBe(address('USDC'))
+    expect(c.to).toBe(address('USDC', baseRegistry))
     expect(decodeFunctionData({ abi: erc20Abi, data: c.data }).args).toEqual([POLICY, 5n])
     expect(() => approveTo('pool:USDC/cbBTC/500', POLICY, 5n)).toThrow()
   })
@@ -40,7 +40,7 @@ describe('policyIncrease (otto/mamoru#171)', () => {
 describe('quoteExactInputSingleWithLimit (#151 review P1-3)', () => {
   const answer = (amountOut: bigint, after: bigint) =>
     ({ call: async () => ({ data: encodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', result: [amountOut, after, 1, 100_000n] }) }) }) as unknown as PublicClient
-  const q = { tokenIn: address('USDC'), tokenOut: address('cbBTC'), fee: 500, amountIn: 1_000n, blockNumber: 1n, sqrtPriceLimitX96: 12345n }
+  const q = { tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry), fee: 500, amountIn: 1_000n, blockNumber: 1n, sqrtPriceLimitX96: 12345n }
 
   test('filled when the price after is short of the limit; not filled when it stops at it', async () => {
     expect(await quoteExactInputSingleWithLimit(answer(900n, 20000n), q)).toEqual({ amountOut: 900n, sqrtPriceX96After: 20000n, filled: true })

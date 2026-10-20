@@ -9,7 +9,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { ReasonError, type Address } from '@mamoru/domain'
 import type { Observation, Proposal } from '@mamoru/decide'
 import { conservadorLabV4, conservadorLabV5, withActionPolicy, V4_POOLS, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
-import { address, entry, erc20Abi, mamoruActionPolicyV2Abi, swapRouter02Abi } from '@mamoru/registry'
+import { address, entry, erc20Abi, mamoruActionPolicyV2Abi, swapRouter02Abi, baseRegistry } from '@mamoru/registry'
 import type { Execution } from '@mamoru/account/safe'
 import { FakeChain, Revert } from '../../rpc/test/fake-chain.ts'
 import { Engine, V4_SWAP_SIZE_DOWN_STEPS, type EngineSession } from './engine.ts'
@@ -40,7 +40,7 @@ function policyAt(chain: FakeChain, state: { admitted: Set<bigint>; paused: bool
   chain.contracts.set(POLICY_V2.toLowerCase(), (data: Hex) => {
     const call = decodeFunctionData({ abi: mamoruActionPolicyV2Abi, data })
     if (call.functionName === 'isPaused') return encodeFunctionResult({ abi: mamoruActionPolicyV2Abi, functionName: 'isPaused', result: state.paused })
-    if (call.functionName === 'admittedPool') return encodeFunctionResult({ abi: mamoruActionPolicyV2Abi, functionName: 'admittedPool', result: state.admitted.has(call.args[1] as bigint) ? entry(POOL).address : zeroAddress })
+    if (call.functionName === 'admittedPool') return encodeFunctionResult({ abi: mamoruActionPolicyV2Abi, functionName: 'admittedPool', result: state.admitted.has(call.args[1] as bigint) ? entry(POOL, baseRegistry).address : zeroAddress })
     throw new Revert('unknown policy call')
   })
 }
@@ -86,14 +86,14 @@ describe('increase through MamoruActionPolicyV2 (otto/mamoru#171)', () => {
       chain.addPosition(ACCOUNT, 7n, POOL)
       state.admitted.add(7n)
       const out = await prepare(e, increase(7n), session(`manage-any:${POOL}`))
-      expect(out.calls.map((c) => c.target)).toEqual([address('USDC'), address('cbBTC'), POLICY_V2])
+      expect(out.calls.map((c) => c.target)).toEqual([address('USDC', baseRegistry), address('cbBTC', baseRegistry), POLICY_V2])
       for (const c of out.calls.slice(0, 2)) expect(decodeFunctionData({ abi: erc20Abi, data: c.callData }).args).toEqual([POLICY_V2, 1_000_000n])
       expect(out.calls[2]!.callData.startsWith(POLICY_INCREASE)).toBe(true)
       const d = decodeFunctionData({ abi: mamoruActionPolicyV2Abi, data: out.calls[2]!.callData })
       expect(d.args[0]).toMatchObject({ tokenId: 7n, amount0Desired: 1_000_000n, amount1Desired: 1_000_000n })
       const args = d.args[0] as { amount0Min: bigint; amount1Min: bigint; deadline: bigint }
       expect(args.amount0Min > 0n && args.amount1Min > 0n && args.deadline > 0n).toBe(true)
-      expect(out.calls.some((c) => c.callData.startsWith(NPM_INCREASE) || c.target === address('NonfungiblePositionManager'))).toBe(false)
+      expect(out.calls.some((c) => c.callData.startsWith(NPM_INCREASE) || c.target === address('NonfungiblePositionManager', baseRegistry))).toBe(false)
     })
   })
 

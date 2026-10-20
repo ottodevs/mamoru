@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 import { toFunctionSelector } from 'viem'
-import { address } from '@mamoru/registry'
+import { address, baseRegistry } from '@mamoru/registry'
 import { computeCaps, instantiateGrant, policyHash, type GrantContext } from './instantiate.ts'
 import { POLICIES } from './policies.ts'
 import { conservadorLabV4, conservadorLabV5, conservadorLiveV4, conservadorLiveV5, INCREASE_TOLERANCE_BPS } from './policies-v4.ts'
@@ -104,8 +104,8 @@ describe('v5 grants', () => {
       const g = retargetToPolicy(raw, POLICY_V2)
       const after = g.actions.find((a) => a.signature === POLICY_INCREASE_SIG)!
       expect(after.targetAddress).toBe(POLICY_V2)
-      expect(g.actions.find((a) => a.selector === DEADLINE)!.targetAddress).toBe(address('SwapRouter02'))
-      expect(g.actions.some((a) => a.targetAddress === address('NonfungiblePositionManager') && a.selector === INCREASE)).toBe(false)
+      expect(g.actions.find((a) => a.selector === DEADLINE)!.targetAddress).toBe(address('SwapRouter02', baseRegistry))
+      expect(g.actions.some((a) => a.targetAddress === address('NonfungiblePositionManager', baseRegistry) && a.selector === INCREASE)).toBe(false)
     }
   })
 
