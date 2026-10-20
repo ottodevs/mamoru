@@ -1,6 +1,6 @@
 import { decodeFunctionResult, encodeFunctionData, parseAbi, type PublicClient } from 'viem'
 import { ReasonError, type Address } from '@mamoru/domain'
-import { address, baseRegistry, type Registry } from '@mamoru/registry'
+import { address, baseRegistry, entry, nameOf, type Registry } from '@mamoru/registry'
 
 export const quoterV2Abi = parseAbi([
   'struct QuoteExactInputSingleParams { address tokenIn; address tokenOut; uint256 amountIn; uint24 fee; uint160 sqrtPriceLimitX96; }',
@@ -15,13 +15,27 @@ export type QuoterV2 = {
   quoteExactInputSingle(client: PublicClient, q: QuoteRequest): Promise<bigint>
 }
 
-/** The quoter of one registry. The QuoterV2 address comes from it and from nothing else. */
+/**
+ * The quoter of one registry. The QuoterV2 address comes from it and from nothing else, and both tokens of a request
+ * must be token entries of it: an address from another chain's registry (or no registry) is refused with
+ * POLICY_TARGET_NOT_IN_REGISTRY before any RPC, never quoted as some other pair.
+ */
 export function quoterV2(registry: Registry): QuoterV2 {
+  function registryToken(addr: Address, side: 'tokenIn' | 'tokenOut'): Address {
+    const name = nameOf(addr, registry)
+    if (name === undefined || entry(name, registry).kind !== 'token') {
+      throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', `${side} ${addr} is not a token of the ${registry.chain} registry`)
+    }
+    return addr
+  }
+
   async function quoteExactInputSingle(client: PublicClient, q: QuoteRequest): Promise<bigint> {
+    const tokenIn = registryToken(q.tokenIn, 'tokenIn')
+    const tokenOut = registryToken(q.tokenOut, 'tokenOut')
     const data = encodeFunctionData({
       abi: quoterV2Abi,
       functionName: 'quoteExactInputSingle',
-      args: [{ tokenIn: q.tokenIn, tokenOut: q.tokenOut, amountIn: q.amountIn, fee: q.fee, sqrtPriceLimitX96: 0n }],
+      args: [{ tokenIn, tokenOut, amountIn: q.amountIn, fee: q.fee, sqrtPriceLimitX96: 0n }],
     })
     let raw
     try {

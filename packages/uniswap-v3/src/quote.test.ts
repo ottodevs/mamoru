@@ -3,6 +3,7 @@ import { decodeFunctionData, encodeFunctionResult, isAddressEqual, type Hex, typ
 import type { Address } from '@mamoru/domain'
 import { address, baseRegistry, monadRegistry, nameOf, type Registry } from '@mamoru/registry'
 import { minOut, quoteExactInputSingle, quoteMint, quoterV2, quoterV2Abi, rangeAround, sqrtRatioAtTick, token0InToken1, token1InToken0 } from './quote.ts'
+import { uniswapV3 } from './index.ts'
 
 /** A client that records the eth_call and answers a fixed quote. */
 function fakeClient(amountOut: bigint) {
@@ -46,6 +47,37 @@ describe('quoterV2(registry)', () => {
     await quoterV2(baseRegistry).quoteExactInputSingle(bound.client, req(baseRegistry))
     expect(free.calls).toEqual(bound.calls)
     expect(isAddressEqual(free.calls[0]!.to!, address('QuoterV2', baseRegistry))).toBe(true)
+  })
+
+  test('the Monad-bound quoter refuses Base token addresses before any RPC', async () => {
+    const { client, calls } = fakeClient(1n)
+    const monad = quoterV2(monadRegistry)
+    const usdcMonad = address('USDC', monadRegistry)
+    const wmon = address('WMON', monadRegistry)
+    const cases = [
+      { tokenIn: address('USDC', baseRegistry), tokenOut: wmon },
+      { tokenIn: usdcMonad, tokenOut: address('WETH', baseRegistry) },
+      { tokenIn: address('USDC', baseRegistry), tokenOut: address('cbBTC', baseRegistry) },
+    ]
+    for (const t of cases) {
+      await expect(monad.quoteExactInputSingle(client, { ...t, fee: 3000, amountIn: 10n ** 6n, blockNumber: 1n })).rejects.toThrow('POLICY_TARGET_NOT_IN_REGISTRY')
+    }
+    // the same goes through uniswapV3(registry), which shares the quoter
+    await expect(
+      uniswapV3(monadRegistry).quoteExactInputSingle(client, { tokenIn: address('USDC', baseRegistry), tokenOut: wmon, fee: 3000, amountIn: 1n, blockNumber: 1n }),
+    ).rejects.toThrow('POLICY_TARGET_NOT_IN_REGISTRY')
+    expect(calls).toHaveLength(0)
+  })
+
+  test('a registry entry that is not a token (a pool, the router) is refused as a quote token', async () => {
+    const { client, calls } = fakeClient(1n)
+    const r = monadRegistry
+    for (const notToken of ['pool:WMON/USDC/3000', 'SwapRouter02']) {
+      await expect(
+        quoterV2(r).quoteExactInputSingle(client, { tokenIn: address('USDC', r), tokenOut: address(notToken, r), fee: 3000, amountIn: 1n, blockNumber: 1n }),
+      ).rejects.toThrow('POLICY_TARGET_NOT_IN_REGISTRY')
+    }
+    expect(calls).toHaveLength(0)
   })
 
   test('a failed or empty eth_call is EHG_QUOTE_UNAVAILABLE', async () => {
