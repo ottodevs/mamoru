@@ -2,7 +2,7 @@
 // MBQ-07 aggregates and the events of one transaction. Prints JSON without URLs or keys.
 // Run: set -a; . ~/.config/mamoru/multibaas.env; . ~/.config/mamoru/alchemy.env; set +a; bun run --cwd apps/mamoru-engine mb:probe [blocks]
 import { LINKED, MultiBaasClient, MultiBaasError, mbq07SwapAggregates, poolActivity } from '@mamoru/multibaas'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { makeClient, publicTransport } from '../src/sync/client.ts'
 import { readPoolEvents } from '../src/sync/logs.ts'
 import { mbKey, rpcKey } from '../src/sync/multibaas-index.ts'
@@ -24,7 +24,7 @@ for (const [name, link] of Object.entries(LINKED)) {
 }
 evidence.contracts = contracts
 
-const pool = address('pool:USDC/cbBTC/500')
+const pool = address('pool:USDC/cbBTC/500', baseRegistry)
 const safe = Number((await rpc.getBlock({ blockTag: 'safe' })).number)
 const from = safe - span + 1
 const rows = await mb.query(poolActivity(pool, from, safe))

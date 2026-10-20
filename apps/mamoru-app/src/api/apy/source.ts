@@ -1,6 +1,6 @@
 import type { ApyView } from '@mamoru/domain'
 import { conservadorLiveV2 } from '@mamoru/policy'
-import { entry } from '@mamoru/registry'
+import { baseRegistry, entry } from '@mamoru/registry'
 
 export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>
 /** The slice of the Workers Cache API used here; tests pass an in-memory one. */
@@ -27,7 +27,7 @@ export function planPools(policy = APY_POLICY): PlanPool[] {
     const name = b.pools[0]
     const llamaId = name ? LLAMA_POOL_IDS[name] : undefined
     if (!name || !llamaId) return []
-    const e = entry(name)
+    const e = entry(name, baseRegistry)
     return [{ name, address: e.address, fee: e.fee ?? 500, llamaId, weight: b.preference }]
   })
 }

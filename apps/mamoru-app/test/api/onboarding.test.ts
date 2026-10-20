@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { getAddress } from 'viem'
 import type { AppConfig, OwnerResponse, SessionView, SignInChallenge } from '@mamoru/domain'
 import { PRODUCTION_BANNER } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { accountSetup, counterfactualAddress, type RecoveryKit } from '@mamoru/account/recovery'
 import { counterfactualAccount, passkeySigner, saltNonceOf } from '../../src/api/onboarding/account.ts'
 import { isP256Point } from '../../src/api/onboarding/passkey.ts'
@@ -88,7 +88,7 @@ describe('owner', () => {
     const { owner } = await onboard(h)
     expect(owner.chainId).toBe(8453)
     expect(owner.deployed).toBe(false)
-    expect(owner.owners).toEqual([address('SafeWebAuthnSharedSigner')])
+    expect(owner.owners).toEqual([address('SafeWebAuthnSharedSigner', baseRegistry)])
     const expected = counterfactualAddress(accountSetup(owner.owners, saltNonceOf(owner.accountKey), passkeySigner(PASSKEY_A.x, PASSKEY_A.y)))
     expect(owner.address).toBe(expected)
     expect(getAddress(owner.address)).toBe(owner.address)
@@ -349,7 +349,7 @@ describe('recovery kit', () => {
     expect(kit.chainId).toBe(8453)
     expect(kit.owners).toEqual(owner.owners)
     expect(kit.webauthn).toMatchObject({ x: BigInt(PASSKEY_A.x).toString(), y: BigInt(PASSKEY_A.y).toString() })
-    expect(kit.setup.to).toBe(address('MultiSend_141'))
+    expect(kit.setup.to).toBe(address('MultiSend_141', baseRegistry))
     expect(JSON.stringify(kit)).not.toContain(PASSKEY_A.credentialId)
 
     expect((await h.post('/api/onboarding/recovery-ack', { accountKey: owner.accountKey }, { cookie })).status).toBe(200)

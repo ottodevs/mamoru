@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPublicClient, custom, http, parseAbiItem, zeroAddress, type PublicClient } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, nonfungiblePositionManagerAbi } from '@mamoru/registry'
+import { baseRegistry, address, nonfungiblePositionManagerAbi } from '@mamoru/registry'
 import { historyCursor, observe, type ObserveInput } from '@mamoru/rpc'
 import { assertNoKeyInArgv, sanitizedEnv } from '../../../packages/scenarios/fork/anvil.ts'
 import { startForkProxy } from '../../../packages/scenarios/proxy/index.ts'
@@ -67,7 +67,7 @@ async function retry<T>(what: string, fn: () => Promise<T>, tries = 4): Promise<
 /** Owners with 3 to 40 positions: MAMORU_E2E_ACCOUNT, or the busiest minters of the last blocks. */
 async function findAccounts(client: PublicClient, head: bigint): Promise<Address[]> {
   if (process.env.MAMORU_E2E_ACCOUNT) return [process.env.MAMORU_E2E_ACCOUNT as Address]
-  const npm = address('NonfungiblePositionManager')
+  const npm = address('NonfungiblePositionManager', baseRegistry)
   const transfer = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)')
   const upstream = createPublicClient({ transport: http(proxy.url, { timeout: 30_000 }) })
   const mints = await upstream.getLogs({ address: npm, event: transfer, args: { from: zeroAddress }, fromBlock: head - 1_999n, toBlock: head })

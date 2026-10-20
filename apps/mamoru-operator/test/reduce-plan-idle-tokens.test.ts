@@ -6,7 +6,7 @@
 import { describe, expect, test } from 'bun:test'
 import { decodeFunctionData, encodeFunctionResult, toFunctionSelector, type Hex, type PublicClient } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, nonfungiblePositionManagerAbi } from '@mamoru/registry'
+import { baseRegistry, address, nonfungiblePositionManagerAbi } from '@mamoru/registry'
 import { POLICIES } from '@mamoru/policy'
 import { quoterV2Abi } from '@mamoru/uniswap-v3/quote'
 import { HttpError, Operator, type OperatorConfig } from '../src/operator.ts'
@@ -37,7 +37,7 @@ function world(collectReturns: Record<string, [bigint, bigint]> = {}) {
       return [{ calls: out }]
     },
     call: async ({ to, data }: { to: string; data: Hex }) => {
-      if (to.toLowerCase() === address('QuoterV2').toLowerCase()) {
+      if (to.toLowerCase() === address('QuoterV2', baseRegistry).toLowerCase()) {
         const { args } = decodeFunctionData({ abi: quoterV2Abi, data })
         const amountIn = (args[0] as { amountIn: bigint }).amountIn
         return { data: encodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', result: [amountIn, 0n, 0, 0n] }) }

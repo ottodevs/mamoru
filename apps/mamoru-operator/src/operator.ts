@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
-import { address, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
+import { baseRegistry, address, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
@@ -538,7 +538,7 @@ function unrevokedIds(ids: Hex[], gone: Hex[]): Hex[] {
 
 /** "USDC/cbBTC 0.05%" for pool:USDC/cbBTC/500. */
 function poolLabel(pool: string): string {
-  const e = entry(pool)
+  const e = entry(pool, baseRegistry)
   return `${e.token0}/${e.token1} ${(e.fee! / 10_000).toFixed(2)}%`
 }
 
@@ -1145,7 +1145,7 @@ export class Operator {
       return undefined
     }
     if (!isV4(p) || !p.actionPolicy) return undefined
-    const pools = [...new Set(acc.grants.map((g) => g.grant.pool).filter((x): x is NonNullable<typeof x> => !!x))].map((name) => ({ name, address: address(name) }))
+    const pools = [...new Set(acc.grants.map((g) => g.grant.pool).filter((x): x is NonNullable<typeof x> => !!x))].map((name) => ({ name, address: address(name, baseRegistry) }))
     return readPolicyBudgets(this.client as never, p.actionPolicy.address, acc.ctx.address as Address, pools, budgetUsedBps)
   }
 
@@ -1181,8 +1181,8 @@ export class Operator {
         amountUsdc: (p.token0 === 'USDC' ? p.amount0 : p.amount1).toString(),
         amountCbbtc: (p.token0 === 'cbBTC' ? p.amount0 : p.token1 === 'cbBTC' ? p.amount1 : 0n).toString(),
         amounts: [
-          { token: p.token0, amount: p.amount0.toString(), decimals: entry(p.token0).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token0, p.amount0, r.prices[p.pool]!.sqrtPriceX96).toString() },
-          { token: p.token1, amount: p.amount1.toString(), decimals: entry(p.token1).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token1, p.amount1, r.prices[p.pool]!.sqrtPriceX96).toString() },
+          { token: p.token0, amount: p.amount0.toString(), decimals: entry(p.token0, baseRegistry).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token0, p.amount0, r.prices[p.pool]!.sqrtPriceX96).toString() },
+          { token: p.token1, amount: p.amount1.toString(), decimals: entry(p.token1, baseRegistry).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token1, p.amount1, r.prices[p.pool]!.sqrtPriceX96).toString() },
         ],
         valueUsdc: positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96).toString(),
       })),
@@ -1493,7 +1493,7 @@ export class Operator {
     const prices = Object.fromEntries(
       await Promise.all(
         [...new Set([LIVE_POOL_NAME, ...policy.buckets.flatMap((b) => b.pools)])].map(async (pool) => {
-          const tick = await twapTickAt(this.client, address(pool), policy.execution.twapWindowSeconds, r.block).catch(() => null)
+          const tick = await twapTickAt(this.client, address(pool, baseRegistry), policy.execution.twapWindowSeconds, r.block).catch(() => null)
           if (tick === null) throw new HttpError(503, 'PRICE_UNAVAILABLE', 'a pool price could not be checked right now; try again in a moment')
           const pr = priceOf(pool, sqrtRatioAtTick(tick))
           return [pr.asset, { num: pr.num, den: pr.den }]
@@ -1565,9 +1565,9 @@ export class Operator {
     const d = v4DeploymentOf(policy)
     if (!d) throw new HttpError(503, 'ACTION_POLICY_UNCONFIGURED', 'the on-chain action policy is not configured on this operator')
     const read = <T,>(args: Parameters<PublicClient['readContract']>[0]) => this.client.readContract({ ...args, blockNumber: block } as never) as Promise<T>
-    const reference = await read<{ resolverUID: Hex; sender: Address }>({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findModule', args: [address('TimeFramePolicy')] })
+    const reference = await read<{ resolverUID: Hex; sender: Address }>({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findModule', args: [address('TimeFramePolicy', baseRegistry)] })
     for (const m of [d.actionPolicy, d.gasPolicy]) {
-      const rec = await read<{ resolverUID: Hex; sender: Address }>({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findModule', args: [m] })
+      const rec = await read<{ resolverUID: Hex; sender: Address }>({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findModule', args: [m] })
       if (BigInt(rec.sender) === 0n || rec.resolverUID !== reference.resolverUID) {
         logErr(`[v4] ${m} has no ModuleRecord under Mamoru's resolver (sender ${rec.sender}): not attested`, undefined)
         throw new HttpError(503, 'ACTION_POLICY_NOT_REGISTERED', 'the on-chain action policy is not registered yet: nothing was changed')
@@ -1582,7 +1582,7 @@ export class Operator {
     // Unrevoked but lapsing: the registry refuses a new attestation over it (AlreadyAttested), so it is revoked first.
     const reattest: Address[] = []
     for (const m of [d.actionPolicy, d.gasPolicy]) {
-      const a = await read<{ time: number; expirationTime: number; revocationTime: number; attester: Address }>({ address: address('ModuleRegistry'), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [m, live.safe] })
+      const a = await read<{ time: number; expirationTime: number; revocationTime: number; attester: Address }>({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [m, live.safe] })
       const lapses = Number(a.expirationTime) !== 0 && Number(a.expirationTime) <= approvalEnd
       const inForce = Number(a.time) !== 0 && Number(a.revocationTime) === 0
       if (!inForce || lapses) attest.push(m)
@@ -1597,7 +1597,7 @@ export class Operator {
     if (mode === 'extend') {
       generation = current
       const held = [...new Set(acc.grants.map((g) => g.grant.pool).filter((x): x is NonNullable<typeof x> => !!x))]
-      const configs = await Promise.all(held.map((pool) => read<{ generation: bigint }>({ address: d.actionPolicy, abi: v4PolicyAbi, functionName: 'configOf', args: [live.safe, address(pool)] })))
+      const configs = await Promise.all(held.map((pool) => read<{ generation: bigint }>({ address: d.actionPolicy, abi: v4PolicyAbi, functionName: 'configOf', args: [live.safe, address(pool, baseRegistry)] })))
       if (current === 0n || configs.some((c) => c.generation !== current)) {
         throw new HttpError(409, 'POLICY_GENERATION_MOVED', "the approval on your Safe changed since the last step: renew it in full instead")
       }
@@ -1608,8 +1608,8 @@ export class Operator {
       let owner: Address
       let pos: readonly unknown[]
       try {
-        owner = await read<Address>({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [tokenId] })
-        pos = await read<readonly unknown[]>({ address: address('NonfungiblePositionManager'), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] })
+        owner = await read<Address>({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [tokenId] })
+        pos = await read<readonly unknown[]>({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] })
       } catch (e) {
         // Only the position manager's own answer that the token does not exist means burned (review round 3). Any
         // other failure (a provider error) refuses the prepare: a renewal signed without a position the Safe still
@@ -1620,7 +1620,7 @@ export class Operator {
       }
       if (owner.toLowerCase() !== live.safe.toLowerCase()) continue
       const [t0, t1, fee] = [String(pos[2]).toLowerCase(), String(pos[3]).toLowerCase(), Number(pos[4])]
-      const spec = Object.values(V4_POOLS).find((v) => policy.buckets.some((b) => b.pools.includes(v.pool)) && address(v.token0).toLowerCase() === t0 && address(v.token1).toLowerCase() === t1 && v.fee === fee)
+      const spec = Object.values(V4_POOLS).find((v) => policy.buckets.some((b) => b.pools.includes(v.pool)) && address(v.token0, baseRegistry).toLowerCase() === t0 && address(v.token1, baseRegistry).toLowerCase() === t1 && v.fee === fee)
       if (!spec) continue
       ;(admitByPool[spec.pool] ??= []).push(tokenId)
     }
@@ -1913,7 +1913,7 @@ export class Operator {
   /** "cbBTC and WETH": the tokens other than USDC of the pools named in a set of grant keys (what a harvest converts). */
   private volatileOf(keys: string[]): string {
     const pools = [...new Set(keys.map((k) => k.split(':').slice(1).join(':')).filter((p) => p.startsWith('pool:')))]
-    const tokens = [...new Set(pools.flatMap((p) => [entry(p).token0, entry(p).token1]).filter((t): t is string => !!t && t !== 'USDC'))]
+    const tokens = [...new Set(pools.flatMap((p) => [entry(p, baseRegistry).token0, entry(p, baseRegistry).token1]).filter((t): t is string => !!t && t !== 'USDC'))]
     return tokens.length ? tokens.join(' and ') : 'what it collects'
   }
 
@@ -2274,7 +2274,7 @@ export class Operator {
       const out: boolean[] = []
       for (let i = 0; i < ids.length; i += BATCH_MAX_CALLS) {
         const batch = new Batch(this.client, MULTICALL3, block)
-        const handles = ids.slice(i, i + BATCH_MAX_CALLS).map((id) => batch.add(contractRead(this.client, { address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [id, acc.ctx.address as Address], blockNumber: block })))
+        const handles = ids.slice(i, i + BATCH_MAX_CALLS).map((id) => batch.add(contractRead(this.client, { address: address('SmartSession', baseRegistry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [id, acc.ctx.address as Address], blockNumber: block })))
         await batch.run()
         for (const h of handles) out.push(!!(await h.need()))
       }
@@ -2545,9 +2545,9 @@ export class Operator {
     if (!routes) throw new HttpError(409, 'ASSET_UNAVAILABLE', `${asset} is not available`)
     let best: { pool: string; fee: number; out: bigint } | undefined
     for (const pool of routes.pools) {
-      const fee = entry(pool).fee!
+      const fee = entry(pool, baseRegistry).fee!
       try {
-        const out = await quoteExactInputSingle(this.client, { tokenIn: address('USDC'), tokenOut: address(routes.tokenOut), fee, amountIn, blockNumber })
+        const out = await quoteExactInputSingle(this.client, { tokenIn: address('USDC', baseRegistry), tokenOut: address(routes.tokenOut, baseRegistry), fee, amountIn, blockNumber })
         if (!best || out > best.out) best = { pool, fee, out }
       } catch {
         // an empty or broken pool only drops out of the route set
@@ -2556,7 +2556,7 @@ export class Operator {
     if (!best) throw new HttpError(503, 'QUOTE_UNAVAILABLE', `no Uniswap v3 quote for USDC -> ${asset}`)
     const pair = `USDC/${routes.tokenOut}`
     const route = `Uniswap v3 ${pair} ${(best.fee / 10_000).toFixed(2)}%${asset === 'ETH' ? ' + unwrap' : ''}`
-    return { receive: { asset: routes.receive, fee: best.fee, amountOutMinimum: minOut(best.out, slip) }, quoted: best.out, decimals: entry(routes.tokenOut).decimals!, route }
+    return { receive: { asset: routes.receive, fee: best.fee, amountOutMinimum: minOut(best.out, slip) }, quoted: best.out, decimals: entry(routes.tokenOut, baseRegistry).decimals!, route }
   }
 
   /**
@@ -2640,7 +2640,7 @@ export class Operator {
       if (amountIn <= 0n) continue
       const pool = routeOf(token, this.bucketPools(acc), USDC_POOLS)
       if (!pool) continue
-      const q = await quoteExactInputSingle(this.client, { tokenIn: address(token), tokenOut: address('USDC'), fee: entry(pool).fee!, amountIn, blockNumber }).catch(() => 0n)
+      const q = await quoteExactInputSingle(this.client, { tokenIn: address(token, baseRegistry), tokenOut: address('USDC', baseRegistry), fee: entry(pool, baseRegistry).fee!, amountIn, blockNumber }).catch(() => 0n)
       if (q <= 1n) continue
       const amountOutMinimum = minOut(q, slip)
       if (amountOutMinimum > 0n) out.push({ token, pool, amountIn, amountOutMinimum })
@@ -2697,7 +2697,7 @@ export class Operator {
 
   private async swapQuote(amountIn: bigint, blockNumber: bigint, slip: number): Promise<LiveSwap | undefined> {
     if (amountIn <= 0n) return undefined
-    const out = await quoteExactInputSingle(this.client, { tokenIn: address('cbBTC'), tokenOut: address('USDC'), fee: 500, amountIn, blockNumber })
+    const out = await quoteExactInputSingle(this.client, { tokenIn: address('cbBTC', baseRegistry), tokenOut: address('USDC', baseRegistry), fee: 500, amountIn, blockNumber })
     return { amountIn, amountOutMinimum: minOut(out, slip) }
   }
 
@@ -3412,7 +3412,7 @@ export class Operator {
   }
 
   private usdcOf(safe: Address): Promise<bigint> {
-    return this.client.readContract({ address: address('USDC'), abi: erc20Abi, functionName: 'balanceOf', args: [safe] })
+    return this.client.readContract({ address: address('USDC', baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [safe] })
   }
 
   /** otto/mamoru#140 (part2 #3): refuses a stale activation; synchronous, so nothing lands between it and what follows. */
@@ -3489,7 +3489,7 @@ export class Operator {
   private async checkArmedGroup(armed: AccountState[], at: number): Promise<void> {
     const client = this.cfg.watchClient ?? this.client
     const batch = new Batch(client, MULTICALL3)
-    const balances = armed.map((acc) => batch.add(contractRead(client, { address: address('USDC'), abi: erc20Abi, functionName: 'balanceOf', args: [acc.ctx.address as Address] })))
+    const balances = armed.map((acc) => batch.add(contractRead(client, { address: address('USDC', baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [acc.ctx.address as Address] })))
     try {
       await batch.run()
     } catch (e) {
@@ -3560,7 +3560,7 @@ export class Operator {
     const permissionId = a.grants[0]?.permissionId
     if (op && permissionId) {
       const enabledAt = (blockNumber?: bigint) =>
-        this.client.readContract({ address: address('SmartSession'), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [permissionId, acc.ctx.address as Address], ...(blockNumber === undefined ? {} : { blockNumber }) })
+        this.client.readContract({ address: address('SmartSession', baseRegistry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [permissionId, acc.ctx.address as Address], ...(blockNumber === undefined ? {} : { blockNumber }) })
       const enabled = await enabledAt()
       if (acc.armed?.opId !== a.opId) return
       if (enabled) {
@@ -4689,10 +4689,10 @@ export function idleTokens(r: Awaited<ReturnType<typeof readSafe>>): NonNullable
   const out: NonNullable<FundingView['idle']> = []
   for (const [token, amount] of Object.entries(r.tokens)) {
     if (amount === 0n) continue
-    const pool = token === 'USDC' ? undefined : USDC_POOLS.find((p) => r.prices[p] && (entry(p).token0 === token || entry(p).token1 === token))
+    const pool = token === 'USDC' ? undefined : USDC_POOLS.find((p) => r.prices[p] && (entry(p, baseRegistry).token0 === token || entry(p, baseRegistry).token1 === token))
     if (token !== 'USDC' && !pool) continue
     const valueUsdc = pool ? inUsdc(pool, token, amount, r.prices[pool]!.sqrtPriceX96) : amount
-    out.push({ token, amount: amount.toString(), decimals: entry(token).decimals ?? 18, valueUsdc: valueUsdc.toString() })
+    out.push({ token, amount: amount.toString(), decimals: entry(token, baseRegistry).decimals ?? 18, valueUsdc: valueUsdc.toString() })
   }
   // USDC first, then by value.
   return out.sort((a, b) => (a.token === 'USDC' ? -1 : b.token === 'USDC' ? 1 : Number(BigInt(b.valueUsdc) - BigInt(a.valueUsdc))))
@@ -4760,9 +4760,9 @@ const multicall3Abi = parseAbi(['function getEthBalance(address addr) view retur
 /** A read of the recipient's balance of `asset`, run before and after the batch in the same simulation. */
 function balanceProbe(asset: WithdrawAsset, holder: Address): Probe {
   if (asset === 'ETH') {
-    return { to: address('Multicall3'), data: encodeFunctionData({ abi: multicall3Abi, functionName: 'getEthBalance', args: [holder] }), decode: (d) => decodeFunctionResult({ abi: multicall3Abi, functionName: 'getEthBalance', data: d }) }
+    return { to: address('Multicall3', baseRegistry), data: encodeFunctionData({ abi: multicall3Abi, functionName: 'getEthBalance', args: [holder] }), decode: (d) => decodeFunctionResult({ abi: multicall3Abi, functionName: 'getEthBalance', data: d }) }
   }
-  return { to: address(RECEIVE_ROUTES[asset as ReceiveAsset]?.tokenOut ?? asset), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [holder] }), decode: (d) => decodeFunctionResult({ abi: erc20Abi, functionName: 'balanceOf', data: d }) }
+  return { to: address(RECEIVE_ROUTES[asset as ReceiveAsset]?.tokenOut ?? asset, baseRegistry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [holder] }), decode: (d) => decodeFunctionResult({ abi: erc20Abi, functionName: 'balanceOf', data: d }) }
 }
 
 /** Registered pools a withdraw may route through, best quote wins. */

@@ -3,7 +3,7 @@
 // trusted providers. Kept apart from over-cap.test.ts's world so the two evolve without stepping on each other.
 import { decodeFunctionData, encodeFunctionResult, getAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import type { AccountContext, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
-import { address, entry, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { baseRegistry, address, entry, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { POLICIES } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
@@ -22,7 +22,7 @@ const POOL = 'pool:USDC/cbBTC/500'
 
 export const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
 export const odd = new SoftwarePasskey(PASSKEY_SCALARS.a2)
-const owners = [address('SafeWebAuthnSharedSigner')]
+const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
 const saltNonce = 42n
 export const ctx: AccountContext = {
   accountKey: 'k',
@@ -99,12 +99,12 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
   }
   let saves = 0
   const factory = deployCall(liveAccountFromContext(ctx))
-  const npm = address('NonfungiblePositionManager').toLowerCase()
+  const npm = address('NonfungiblePositionManager', baseRegistry).toLowerCase()
   const positionResult = (tokenId: bigint) => {
     const p = chain.positions.find((x) => x.tokenId === tokenId)
     if (!p) throw new Error('Invalid token ID')
-    const e = entry(POOL)
-    return encodeFunctionResult({ abi: nonfungiblePositionManagerAbi, functionName: 'positions', result: [0n, `0x${'0'.repeat(40)}`, address(e.token0!), address(e.token1!), e.fee!, -600, 600, p.liquidity, 0n, 0n, 0n, 0n] })
+    const e = entry(POOL, baseRegistry)
+    return encodeFunctionResult({ abi: nonfungiblePositionManagerAbi, functionName: 'positions', result: [0n, `0x${'0'.repeat(40)}`, address(e.token0!, baseRegistry), address(e.token1!, baseRegistry), e.fee!, -600, 600, p.liquidity, 0n, 0n, 0n, 0n] })
   }
   const client = {
     getBlockNumber: async () => (knobs.blockHead > 101n ? knobs.blockHead : 101n), // at least the block its receipts land in (101): #60 never reads grants below it
@@ -142,7 +142,7 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
         if (knobs.npmDown) throw new Error('HTTP request failed. Status: 503')
         return BigInt(chain.positions.length)
       }
-      if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : 0n
+      if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC', baseRegistry).toLowerCase() ? chain.usdc : 0n
       if (functionName === 'isPermissionEnabled') return enabled(args?.[0])
       throw new Error(`unexpected read ${functionName}`)
     },
@@ -177,7 +177,7 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
       ]
     },
     call: async ({ to, data }: { to: string; data: Hex }) => {
-      if (to.toLowerCase() === address('Multicall3').toLowerCase()) {
+      if (to.toLowerCase() === address('Multicall3', baseRegistry).toLowerCase()) {
         if (knobs.stall) await knobs.stall
         const word = (v: bigint) => toHex(v, { size: 32 })
         return {
@@ -201,7 +201,7 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
               throw new Error('execution reverted')
             }
             if (callData.startsWith('0x3850c7bd')) return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [1n << 96n, 0, 0, 0, 0, 0, true] })
-            if (callData.startsWith('0x70a08231')) return word(target.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : 0n)
+            if (callData.startsWith('0x70a08231')) return word(target.toLowerCase() === address('USDC', baseRegistry).toLowerCase() ? chain.usdc : 0n)
             if (callData.startsWith('0x4d2301cc')) return word(chain.safeEth)
             if (callData.startsWith(toFunctionSelector('getBlockNumber()'))) return word(100n)
             if (callData.startsWith(toFunctionSelector('isPermissionEnabled(bytes32,address)'))) return word(enabled(`0x${callData.slice(10, 74)}`) ? 1n : 0n)

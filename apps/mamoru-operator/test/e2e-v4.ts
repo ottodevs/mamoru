@@ -15,7 +15,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseAbi, toHex, type Hex } from 'viem'
 import type { AccountContext, FundingView, OpView, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
 import { P256_N } from '@mamoru/account/live'
@@ -84,7 +84,7 @@ async function deployPolicies(): Promise<{ policy: string; gasPolicy: string }> 
   const deployer = devAccount(9)
   const policy = await deployMamoruPolicy(lab, await loadPolicyArtifact(), deployer)
   const gasPolicy = await deployGasPolicy(lab, deployer)
-  for (const pool of ['pool:USDC/USDT/100', 'pool:USDC/cbBTC/500', 'pool:WETH/USDC/3000'] as const) await raiseObservationCardinality(lab, deployer, address(pool), 1_800)
+  for (const pool of ['pool:USDC/USDT/100', 'pool:USDC/cbBTC/500', 'pool:WETH/USDC/3000'] as const) await raiseObservationCardinality(lab, deployer, address(pool, baseRegistry), 1_800)
   return { policy, gasPolicy }
 }
 
@@ -94,7 +94,7 @@ try {
   log(`deployed MamoruActionPolicy ${dep.policy}, MamoruGasPolicy ${dep.gasPolicy}`)
 
   const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
-  const owners = [address('SafeWebAuthnSharedSigner')]
+  const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
   const saltNonce = BigInt(Date.now())
   const ctx: AccountContext = {
     accountKey: `e2e-v4-${saltNonce}`,
@@ -208,14 +208,14 @@ try {
   const step1Pools = new Set(['pool:USDC/USDT/100', 'pool:USDC/cbBTC/500'])
   for (const p of r0.positions.filter((x) => step1Pools.has(x.pool))) {
     const at = await lab.client.readContract({ address: dep.policy as Hex, abi: policyAbi, functionName: 'admittedPool', args: [ctx.address, p.tokenId] })
-    check(at.toLowerCase() === address(p.pool as never).toLowerCase(), `step 1 admitted ${p.tokenId} to ${p.pool}`)
+    check(at.toLowerCase() === address(p.pool as never, baseRegistry).toLowerCase(), `step 1 admitted ${p.tokenId} to ${p.pool}`)
   }
   // Each later step is fitted again by simulation, so the count can grow by one past the first summary's forecast.
   for (let i = 2; i <= 6 && ((await funding()).approval?.missing ?? 0) > 0; i++) await ownerAction('renew')
   const f2 = await funding()
   check(!f2.approval?.missing && !f2.approval?.upgrade, 'after step 2: the full v4 set, nothing missing')
   const admitted2 = await Promise.all(v2Positions.map((id) => lab.client.readContract({ address: dep.policy as Hex, abi: policyAbi, functionName: 'admittedPool', args: [ctx.address, id] })))
-  check(admitted2.every((a, i) => a.toLowerCase() === address(r0.positions.find((p) => p.tokenId === v2Positions[i])!.pool as never).toLowerCase()), 'every v2 position admitted to its own pool after both steps')
+  check(admitted2.every((a, i) => a.toLowerCase() === address(r0.positions.find((p) => p.tokenId === v2Positions[i])!.pool as never, baseRegistry).toLowerCase()), 'every v2 position admitted to its own pool after both steps')
 
   // --- the engine works under v4: a new deposit is invested through the policy ---------------------
   const before = (await ops()).filter((o) => o.opId.startsWith('eng-') && o.state === 'confirmed').length

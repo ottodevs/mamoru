@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test'
 import { decodeFunctionData, encodeFunctionResult, getAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import type { AccountContext, OpView, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
-import { address, erc20Abi, safeAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { baseRegistry, address, erc20Abi, safeAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { POLICIES } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
@@ -19,7 +19,7 @@ const OVER = 101_920_000n
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
 
 const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
-const owners = [address('SafeWebAuthnSharedSigner')]
+const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
 const saltNonce = 42n
 const ctx: AccountContext = {
   accountKey: 'k',
@@ -84,7 +84,7 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
         return [[0n, BigInt(knobs.twapTick) * 1800n], [0n, 0n]]
       }
       if (functionName === 'nonce') return blockNumber !== undefined && knobs.nonceAt ? knobs.nonceAt(blockNumber) : chain.nonce
-      if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : 0n
+      if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC', baseRegistry).toLowerCase() ? chain.usdc : 0n
       if (functionName === 'isPermissionEnabled') {
         if (blockNumber !== undefined && knobs.noHistory) throw new Error('missing trie node: historical state not available')
         // grantsEnabled null: the chain model, `enabled` (what the owner txs sent through the relayer enabled and revoked).
@@ -114,13 +114,13 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
     },
     call: async ({ to, data }: { to: string; data: Hex }) => {
       // readSafe batches its reads through Multicall3: same answers as readContract above.
-      if (to.toLowerCase() === address('Multicall3').toLowerCase()) {
+      if (to.toLowerCase() === address('Multicall3', baseRegistry).toLowerCase()) {
         knobs.multicalls++
         const word = (v: bigint) => toHex(v, { size: 32 })
         return {
           data: answerAggregate3(data, (target, callData) => {
             if (callData.startsWith('0x3850c7bd')) return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [sqrtRatioAtTick(knobs.spotTick), knobs.spotTick, 0, 0, 0, 0, true] })
-            if (callData.startsWith('0x70a08231')) return word(target.toLowerCase() === address('USDC').toLowerCase() ? chain.usdc : target.toLowerCase() === address('USDT').toLowerCase() ? knobs.usdt : 0n)
+            if (callData.startsWith('0x70a08231')) return word(target.toLowerCase() === address('USDC', baseRegistry).toLowerCase() ? chain.usdc : target.toLowerCase() === address('USDT', baseRegistry).toLowerCase() ? knobs.usdt : 0n)
             if (callData.startsWith('0x4d2301cc')) return word(0n)
             // readSafe (otto/mamoru#135): the block number rides inside this same call.
             if (callData.startsWith(toFunctionSelector('getBlockNumber()'))) return word(100n)
@@ -268,7 +268,7 @@ describe('deposit over the cap', () => {
     expect(sim[1]!.data).toBe(w.sent[1]!.data!)
     const exec = decodeFunctionData({ abi: safeAbi, data: w.sent[1]!.data! })
     expect(exec.functionName).toBe('execTransaction')
-    expect((exec.args[0] as string).toLowerCase()).toBe(address('USDC').toLowerCase())
+    expect((exec.args[0] as string).toLowerCase()).toBe(address('USDC', baseRegistry).toLowerCase())
     expect(decodeFunctionData({ abi: erc20Abi, data: exec.args[2] as Hex })).toMatchObject({ functionName: 'transfer', args: [TO, 1_920_000n] })
     // The engine did not start and no session exists.
     expect(w.state.accounts.k).toMatchObject({ active: false, trusted: false, grants: [] })
@@ -752,7 +752,7 @@ describe('the armed watcher reads every armed Safe in one request', () => {
   const priv = (op: Operator) => op as unknown as Watcher
   const pass = (op: Operator) => priv(op).checkArmed()
   const clientOf = (op: Operator) => (op as unknown as { client: Reads }).client
-  const isMulticall = (to: string) => to.toLowerCase() === address('Multicall3').toLowerCase()
+  const isMulticall = (to: string) => to.toLowerCase() === address('Multicall3', baseRegistry).toLowerCase()
   const word = (v: bigint) => toHex(v, { size: 32 })
   /** The holder a balanceOf(address) calldata asks about. */
   const holderOf = (callData: Hex) => getAddress(`0x${callData.slice(34)}`)
@@ -1059,7 +1059,7 @@ describe('over the RPC budget the background loops slow down', () => {
     const client = (w.op as unknown as { client: { call(a: { to: string; data: Hex }): Promise<unknown> } }).client
     const { call } = client
     let multicalls = 0
-    client.call = (a) => (a.to.toLowerCase() === address('Multicall3').toLowerCase() && multicalls++, call(a))
+    client.call = (a) => (a.to.toLowerCase() === address('Multicall3', baseRegistry).toLowerCase() && multicalls++, call(a))
     // Under the budget a freshly armed Safe is read on every pass.
     const b = budget(w.op, false)
     await priv(w.op).checkArmed()
@@ -3242,7 +3242,7 @@ describe('funding caches its readSafe for a few seconds, shared across polls', (
 // otto/mamoru#135: fresh=1 on GET funding (the add-money screen, a dialog opening) asks for a read at most 2 s
 // old. A deposit moves nothing of the account, so only this, never an invalidation, shows it before 15 s.
 describe('fresh funding: a read at most 2 s old, never held back by an earlier one', () => {
-  const isMulticall = (to: string) => to.toLowerCase() === address('Multicall3').toLowerCase()
+  const isMulticall = (to: string) => to.toLowerCase() === address('Multicall3', baseRegistry).toLowerCase()
   /** How many Multicall3 reads (one per readSafe) have run since this was called. */
   const reads = (op: Operator) => {
     const client = (op as unknown as { client: { call: (a: { to: string }) => Promise<unknown> } }).client

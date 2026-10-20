@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { toHex, type Hex } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { AccountContext, FundingView, OpView, OwnerSignature, OwnerTxToSign, TransferPlan, WithdrawAsset } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
 import { P256_N } from '@mamoru/account/live'
@@ -78,7 +78,7 @@ try {
 
   // --- the account, as the Worker would describe it ------------------------
   const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
-  const owners = [address('SafeWebAuthnSharedSigner')]
+  const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
   const saltNonce = BigInt(Date.now())
   const ctx: AccountContext = {
     accountKey: `e2e-${saltNonce}`,

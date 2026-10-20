@@ -1,7 +1,7 @@
 import type { Address } from '@mamoru/domain'
 import type { MultiSendCall } from '@mamoru/account/safe'
 import type { LivePosition } from '@mamoru/account/live'
-import { entry } from '@mamoru/registry'
+import { baseRegistry, entry } from '@mamoru/registry'
 import { approve, burn, collect, decreaseLiquidity, exactInputSingle } from '@mamoru/uniswap-v3'
 import { positionUsdc, type PoolPosition, type PoolPrice } from './chain.ts'
 
@@ -64,7 +64,7 @@ export function swapBackCalls(account: Address, swaps: SwapBack[]): MultiSendCal
     .flatMap((s) =>
       [
         approve(s.token, 'SwapRouter02', s.amountIn),
-        exactInputSingle({ account, tokenIn: s.token, tokenOut: 'USDC', fee: entry(s.pool).fee!, amountIn: s.amountIn, amountOutMinimum: s.amountOutMinimum }),
+        exactInputSingle({ account, tokenIn: s.token, tokenOut: 'USDC', fee: entry(s.pool, baseRegistry).fee!, amountIn: s.amountIn, amountOutMinimum: s.amountOutMinimum }),
         approve(s.token, 'SwapRouter02', 0n),
       ].map(strip),
     )
@@ -72,6 +72,6 @@ export function swapBackCalls(account: Address, swaps: SwapBack[]): MultiSendCal
 
 /** The pool a token is swapped back to USDC on: the policy's pool for it, else the first registry USDC pool that has it. */
 export function routeOf(token: string, bucketPools: string[], usdcPools: string[]): string | undefined {
-  const has = (p: string) => entry(p).token0 === token || entry(p).token1 === token
+  const has = (p: string) => entry(p, baseRegistry).token0 === token || entry(p, baseRegistry).token1 === token
   return bucketPools.find(has) ?? usdcPools.find(has)
 }

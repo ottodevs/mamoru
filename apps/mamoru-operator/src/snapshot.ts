@@ -5,7 +5,7 @@
 
 import { decodeFunctionResult, encodeFunctionData, parseAbi, type PublicClient } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { baseRegistry, address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { BATCH_MAX_CALLS, Batch, balanceRead, contractRead, type Handle, type Read } from '@mamoru/rpc'
 import { feeGrowthInside, positionFees } from '@mamoru/uniswap-v3/fees'
 import { amountsForLiquidity, inUsdc, USDC_POOLS } from './chain.ts'
@@ -105,7 +105,7 @@ export type Snapshot = {
 
 /** The pool of USDC_POOLS that prices `token` in USDC: the first one pairing it with USDC. */
 function pricingPool(token: string): string | null {
-  return USDC_POOLS.find((p) => entry(p).token0 === token || entry(p).token1 === token) ?? null
+  return USDC_POOLS.find((p) => entry(p, baseRegistry).token0 === token || entry(p, baseRegistry).token1 === token) ?? null
 }
 
 function tokenUsdc(token: string, amount: bigint, pools: Record<string, PoolState>): bigint {
@@ -134,22 +134,22 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
     calls += Math.ceil(b.size / BATCH_MAX_CALLS)
     await b.run()
   }
-  const npm = address('NonfungiblePositionManager')
-  const tokenNames = [...new Set(USDC_POOLS.flatMap((p) => [entry(p).token0!, entry(p).token1!]))]
+  const npm = address('NonfungiblePositionManager', baseRegistry)
+  const tokenNames = [...new Set(USDC_POOLS.flatMap((p) => [entry(p, baseRegistry).token0!, entry(p, baseRegistry).token1!]))]
 
   const first = new Batch(client, multicall3, block)
   const poolReads = USDC_POOLS.map((p) => ({
     pool: p,
-    slot0: first.add(contractRead(client, { address: address(p), abi: uniswapV3PoolAbi, functionName: 'slot0', ...at })),
-    fg0: first.add(contractRead(client, { address: address(p), abi: uniswapV3PoolAbi, functionName: 'feeGrowthGlobal0X128', ...at })),
-    fg1: first.add(contractRead(client, { address: address(p), abi: uniswapV3PoolAbi, functionName: 'feeGrowthGlobal1X128', ...at })),
+    slot0: first.add(contractRead(client, { address: address(p, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0', ...at })),
+    fg0: first.add(contractRead(client, { address: address(p, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'feeGrowthGlobal0X128', ...at })),
+    fg1: first.add(contractRead(client, { address: address(p, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'feeGrowthGlobal1X128', ...at })),
   }))
   const safeReads = targets.map((t) => ({
     t,
     eth: first.add(balanceRead(client, multicall3, t.safe, block)),
     nfts: first.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [t.safe], ...at })),
     deployed: first.add(deployedRead(client, t.safe, block)),
-    tokens: tokenNames.map((name) => ({ name, read: first.add(contractRead(client, { address: address(name), abi: erc20Abi, functionName: 'balanceOf', args: [t.safe], ...at })) })),
+    tokens: tokenNames.map((name) => ({ name, read: first.add(contractRead(client, { address: address(name, baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [t.safe], ...at })) })),
   }))
   await run(first)
 
@@ -181,8 +181,8 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
       const p = await read.need()
       // A position outside the USDC pools of the registry is not one Mamoru opened: left out, as readSafe does.
       const pool = USDC_POOLS.find((n) => {
-        const e = entry(n)
-        return p[2].toLowerCase() === address(e.token0!).toLowerCase() && p[3].toLowerCase() === address(e.token1!).toLowerCase() && p[4] === e.fee
+        const e = entry(n, baseRegistry)
+        return p[2].toLowerCase() === address(e.token0!, baseRegistry).toLowerCase() && p[3].toLowerCase() === address(e.token1!, baseRegistry).toLowerCase() && p[4] === e.fee
       })
       if (!pool) continue
       out.push({ tokenId, pool, tickLower: p[5], tickUpper: p[6], liquidity: p[7], in0: p[8], in1: p[9], owed0: p[10], owed1: p[11] })
@@ -196,7 +196,7 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
   for (const r of raws.flat()) {
     for (const tick of [r.tickLower, r.tickUpper]) {
       const key = `${r.pool}:${tick}`
-      if (!tickReads.has(key)) tickReads.set(key, fourth.add(contractRead(client, { address: address(r.pool), abi: uniswapV3PoolAbi, functionName: 'ticks', args: [tick], ...at })))
+      if (!tickReads.has(key)) tickReads.set(key, fourth.add(contractRead(client, { address: address(r.pool, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'ticks', args: [tick], ...at })))
     }
   }
   await run(fourth)
@@ -210,7 +210,7 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
     const eth = await s.eth.need()
     const positions: PositionSnapshot[] = []
     for (const r of raws[i]!) {
-      const e = entry(r.pool)
+      const e = entry(r.pool, baseRegistry)
       const ps = pools[r.pool]!
       const lower = ticks.get(`${r.pool}:${r.tickLower}`)!
       const upper = ticks.get(`${r.pool}:${r.tickUpper}`)!

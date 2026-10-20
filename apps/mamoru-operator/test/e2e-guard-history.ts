@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPublicClient, custom, type PublicClient } from 'viem'
-import { entry } from '@mamoru/registry'
+import { baseRegistry, entry } from '@mamoru/registry'
 import { MULTICALL3, observeGuardHistory, type PoolGuardTarget } from '@mamoru/rpc'
 import { assertNoKeyInArgv, sanitizedEnv } from '../../../packages/scenarios/fork/anvil.ts'
 import { startForkProxy } from '../../../packages/scenarios/proxy/index.ts'
@@ -74,7 +74,7 @@ try {
     }
   }
   const block = await setup.getBlock({ blockTag: 'latest' })
-  const targets: PoolGuardTarget[] = LIVE_POOLS.map((name) => ({ name, address: entry(name).address }))
+  const targets: PoolGuardTarget[] = LIVE_POOLS.map((name) => ({ name, address: entry(name, baseRegistry).address }))
 
   const first = counting()
   const r1 = await retry('first guard-history observation', () => observeGuardHistory(first.client, MULTICALL3, targets, block.number, Number(block.timestamp), WINDOW_SECONDS, new Map()))

@@ -1,5 +1,5 @@
 import type { Figure, PoolView, Provenance, TokenHolding } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 
 export const BLOCK = 36_000_000
 export const BLOCK_HASH = `0x${'ab'.repeat(32)}` as const
@@ -13,7 +13,7 @@ export function fig<T>(value: T, observedAt: string, unit?: string): Figure<T> {
 export function poolView(observedAt: string): PoolView {
   const f = <T>(v: T, unit?: string) => fig(v, observedAt, unit)
   return {
-    pool: { address: address('pool:USDC/cbBTC/500'), token0: 'USDC', token1: 'cbBTC', fee: 500, tickSpacing: 10, name: 'pool:USDC/cbBTC/500' },
+    pool: { address: address('pool:USDC/cbBTC/500', baseRegistry), token0: 'USDC', token1: 'cbBTC', fee: 500, tickSpacing: 10, name: 'pool:USDC/cbBTC/500' },
     block: BLOCK,
     price: f('65000.12', 'USDC'),
     tick: f(-68000),

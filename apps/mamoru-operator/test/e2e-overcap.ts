@@ -10,7 +10,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { getAddress, toHex } from 'viem'
 import type { AccountContext, FundingView, OpView, OwnerSignature, OwnerTxToSign, TransferPlan } from '@mamoru/domain'
-import { address, erc20Abi } from '@mamoru/registry'
+import { baseRegistry, address, erc20Abi } from '@mamoru/registry'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
 import { LIVE_CAP_USDC, P256_N } from '@mamoru/account/live'
@@ -77,7 +77,7 @@ try {
 
   // --- the account, as the Worker would describe it ------------------------
   const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
-  const owners = [address('SafeWebAuthnSharedSigner')]
+  const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
   const saltNonce = BigInt(Date.now())
   const ctx: AccountContext = {
     accountKey: `e2e-${saltNonce}`,
@@ -157,7 +157,7 @@ try {
     return waitOp(res.json.opId, `owner ${kind}`)
   }
 
-  const usdcOf = (who: `0x${string}`) => lab.client.readContract({ address: address('USDC'), abi: erc20Abi, functionName: 'balanceOf', args: [who] })
+  const usdcOf = (who: `0x${string}`) => lab.client.readContract({ address: address('USDC', baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [who] })
   const f0 = await funding()
   check(!f0.deployed && f0.usdc === '0' && !f0.active && !f0.overCap && f0.capUsdc === LIVE_CAP_USDC.toString(), `funding before arming: not deployed, 0 USDC, cap ${f0.capUsdc}, no over-cap report`)
 

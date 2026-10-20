@@ -1,6 +1,6 @@
 import { hexToBigInt, keccak256, stringToBytes } from 'viem'
 import type { Address, Hex0x } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { webAuthnSigner, type WebAuthnSigner } from '@mamoru/account/safe'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 
@@ -17,7 +17,7 @@ export function passkeySigner(x: Hex0x, y: Hex0x): WebAuthnSigner {
 }
 
 export function accountOwners(): Address[] {
-  return [address('SafeWebAuthnSharedSigner')]
+  return [address('SafeWebAuthnSharedSigner', baseRegistry)]
 }
 
 /** Counterfactual Safe on Base whose address commits to the passkey. Nothing is signed or sent. */

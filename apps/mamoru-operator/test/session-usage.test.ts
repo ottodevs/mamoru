@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { hexToBigInt, pad, toHex, type Hex } from 'viem'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { conservadorLiveV2, instantiateGrant } from '@mamoru/policy'
 import { actionConfigId, cumulativeLimitSlot, readChainUsage, userOpConfigId } from '../src/session-usage.ts'
 
@@ -13,7 +13,7 @@ const rule = swap.params.findIndex((p) => p.cumulativeLimit !== undefined)
 
 /** A chain that holds `used` userOps and `spent` of the swap total for the grant, at the slots Smart Sessions uses. */
 function chain(o: { limit?: bigint; used: bigint; capWord?: bigint; spent: bigint }) {
-  const slot = cumulativeLimitSlot(actionConfigId(ACCOUNT, PID, swap.targetAddress, swap.selector), address('SmartSession'), ACCOUNT, rule)
+  const slot = cumulativeLimitSlot(actionConfigId(ACCOUNT, PID, swap.targetAddress, swap.selector), address('SmartSession', baseRegistry), ACCOUNT, rule)
   const words = new Map<bigint, bigint>([[slot, o.capWord ?? swap.params[rule]!.cumulativeLimit!], [slot + 1n, o.spent]])
   return {
     async readContract(a: { args: readonly [Hex, string, string] }) {
@@ -42,6 +42,6 @@ describe('usage counters read from the chain (#149)', () => {
 
   test('the ids follow Smart Sessions: verified on Base for a live grant (limit 25,000,000 at the computed slot)', () => {
     expect(userOpConfigId(ACCOUNT, PID)).toMatch(/^0x[0-9a-f]{64}$/)
-    expect(cumulativeLimitSlot(actionConfigId(ACCOUNT, PID, swap.targetAddress, swap.selector), address('SmartSession'), ACCOUNT, 1) - cumulativeLimitSlot(actionConfigId(ACCOUNT, PID, swap.targetAddress, swap.selector), address('SmartSession'), ACCOUNT, 0)).toBe(4n)
+    expect(cumulativeLimitSlot(actionConfigId(ACCOUNT, PID, swap.targetAddress, swap.selector), address('SmartSession', baseRegistry), ACCOUNT, 1) - cumulativeLimitSlot(actionConfigId(ACCOUNT, PID, swap.targetAddress, swap.selector), address('SmartSession', baseRegistry), ACCOUNT, 0)).toBe(4n)
   })
 })

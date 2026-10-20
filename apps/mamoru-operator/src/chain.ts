@@ -84,13 +84,13 @@ export function cbbtcInUsdc(amount1: bigint, sqrtPriceX96: bigint): bigint {
 /** Raw USDC worth `amount` of `token` at the slot0 of `pool` (a USDC pool). */
 export function inUsdc(pool: string, token: string, amount: bigint, sqrtPriceX96: bigint): bigint {
   if (token === 'USDC' || amount === 0n) return amount
-  const e = entry(pool)
+  const e = entry(pool, baseRegistry)
   return e.token0 === 'USDC' ? (amount * Q192) / (sqrtPriceX96 * sqrtPriceX96) : (amount * sqrtPriceX96 * sqrtPriceX96) / Q192
 }
 
 /** Raw units of the pool's other token per raw USDC, for computeCaps. */
 export function priceOf(pool: string, sqrtPriceX96: bigint): { asset: string; num: bigint; den: bigint } {
-  const e = entry(pool)
+  const e = entry(pool, baseRegistry)
   return e.token0 === 'USDC' ? { asset: e.token1!, num: sqrtPriceX96 * sqrtPriceX96, den: Q192 } : { asset: e.token0!, num: Q192, den: sqrtPriceX96 * sqrtPriceX96 }
 }
 
@@ -110,14 +110,14 @@ export function positionUsdc(p: PoolPosition, sqrtPriceX96: bigint): bigint {
  * confirmed (see `isDeployed`).
  */
 export async function readSafe(client: PublicClient, safe: Address, opts: { admitted?: readonly bigint[] } = {}): Promise<SafeRead> {
-  const npm = address('NonfungiblePositionManager')
-  const tokenNames = [...new Set(USDC_POOLS.flatMap((p) => [entry(p).token0!, entry(p).token1!]))]
+  const npm = address('NonfungiblePositionManager', baseRegistry)
+  const tokenNames = [...new Set(USDC_POOLS.flatMap((p) => [entry(p, baseRegistry).token0!, entry(p, baseRegistry).token1!]))]
   const first = new Batch(client, MULTICALL3, undefined)
   const blockRead = first.add(blockNumberRead(client, MULTICALL3))
   const ethRead = first.add(balanceRead(client, MULTICALL3, safe))
   const nftRead = first.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe] }))
-  const balanceReads = tokenNames.map((t) => first.add(contractRead(client, { address: address(t), abi: erc20Abi, functionName: 'balanceOf', args: [safe] })))
-  const slotReads = USDC_POOLS.map((p) => first.add(contractRead(client, { address: address(p), abi: uniswapV3PoolAbi, functionName: 'slot0' })))
+  const balanceReads = tokenNames.map((t) => first.add(contractRead(client, { address: address(t, baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [safe] })))
+  const slotReads = USDC_POOLS.map((p) => first.add(contractRead(client, { address: address(p, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0' })))
   // The block is known only once `first` has run: the speculative ids carry none (they resolve through
   // `.maybe()` only), the one-more-request round of an account with more positions is pinned to it below.
   const idsOf = tokenIdReads(client, MULTICALL3, first, safe)
@@ -143,8 +143,8 @@ export async function readSafe(client: PublicClient, safe: Address, opts: { admi
     isSafeDeployed(client, safe, blockNumber, safeNumber),
     needAt(ethRead, () => client.getBalance({ address: safe, blockNumber })),
     needAt(nftRead, () => client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe], blockNumber })),
-    Promise.all(balanceReads.map((r, i) => needAt(r, () => client.readContract({ address: address(tokenNames[i]!), abi: erc20Abi, functionName: 'balanceOf', args: [safe], blockNumber })))),
-    Promise.all(slotReads.map((r, i) => needAt(r, () => client.readContract({ address: address(USDC_POOLS[i]!), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber })))),
+    Promise.all(balanceReads.map((r, i) => needAt(r, () => client.readContract({ address: address(tokenNames[i]!, baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [safe], blockNumber })))),
+    Promise.all(slotReads.map((r, i) => needAt(r, () => client.readContract({ address: address(USDC_POOLS[i]!, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber })))),
   ])
   const tokens = Object.fromEntries(tokenNames.map((t, i) => [t, balances[i]!]))
   const prices: Record<string, PoolPrice> = Object.fromEntries(USDC_POOLS.map((p, i) => [p, { sqrtPriceX96: slots[i]![0], tick: slots[i]![1] }]))
@@ -175,11 +175,11 @@ export async function readSafe(client: PublicClient, safe: Address, opts: { admi
   for (const tokenId of ids) {
     const p = await positionReads[listed.indexOf(tokenId)]!.need()
     const pool = USDC_POOLS.find((n) => {
-      const e = entry(n)
-      return p[2].toLowerCase() === address(e.token0!).toLowerCase() && p[3].toLowerCase() === address(e.token1!).toLowerCase() && p[4] === e.fee
+      const e = entry(n, baseRegistry)
+      return p[2].toLowerCase() === address(e.token0!, baseRegistry).toLowerCase() && p[3].toLowerCase() === address(e.token1!, baseRegistry).toLowerCase() && p[4] === e.fee
     })
     if (!pool) continue
-    const e = entry(pool)
+    const e = entry(pool, baseRegistry)
     const price = prices[pool]!
     const [tickLower, tickUpper, liquidity, tokensOwed0, tokensOwed1] = [p[5], p[6], p[7], p[10], p[11]]
     const { amount0, amount1 } = amountsForLiquidity(price.sqrtPriceX96, tickLower, tickUpper, liquidity)

@@ -8,13 +8,13 @@ import { toHex, type PublicClient } from 'viem'
 import type { AccountContext } from '@mamoru/domain'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { POLICIES } from '@mamoru/policy'
 import { HttpError, Operator, type OperatorConfig } from '../src/operator.ts'
 import type { Relayer } from '../src/relayer.ts'
 import type { AccountState, StateStore } from '../src/state.ts'
 
-const owners = [address('SafeWebAuthnSharedSigner')]
+const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
 const saltNonce = 7n
 const passkey = { x: 11n, y: 22n }
 const SAFE = counterfactualAddress(accountSetup(owners, saltNonce, webAuthnSigner(passkey.x, passkey.y)))

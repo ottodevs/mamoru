@@ -10,7 +10,7 @@ import {
   type ReasonCode,
   type TokenHolding,
 } from '@mamoru/domain'
-import { entry } from '@mamoru/registry'
+import { baseRegistry, entry } from '@mamoru/registry'
 import { conservadorV1 } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import type { Db } from '../env.ts'
@@ -62,7 +62,7 @@ export async function loadDashboardInput(db: Db, account: AccountRow): Promise<D
 const ACTIONS_INPUTS_NOT_PROJECTED = ['journal', 'decisions', 'sessions', 'positions', 'savings ledger'] as const
 
 function poolRef(name: string): PoolRef {
-  const e = entry(name)
+  const e = entry(name, baseRegistry)
   if (e.kind !== 'pool' || !e.token0 || !e.token1 || e.fee === undefined || e.tickSpacing === undefined) throw new Error(`${name} is not a pool entry`)
   return { address: e.address, token0: e.token0, token1: e.token1, fee: e.fee, tickSpacing: e.tickSpacing, name: e.name }
 }

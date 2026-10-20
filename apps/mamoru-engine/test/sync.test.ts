@@ -1,17 +1,17 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import type { PoolView, TokenHolding } from '@mamoru/domain'
-import { address, type Registry } from '@mamoru/registry'
+import { baseRegistry, address, type Registry } from '@mamoru/registry'
 import { sqliteD1 } from '../scripts/sqlite-d1.ts'
 import { custom, HttpRequestError } from 'viem'
 import { makeClient } from '../src/sync/client.ts'
 import { syncOnce } from '../src/sync/run.ts'
 import { FakeChain } from './fake-chain.ts'
 
-const POOL = address('pool:USDC/cbBTC/500')
-const WETH_POOL = address('pool:WETH/USDC/3000')
-const USDC = address('USDC')
-const CBBTC = address('cbBTC')
-const WETH = address('WETH')
+const POOL = address('pool:USDC/cbBTC/500', baseRegistry)
+const WETH_POOL = address('pool:WETH/USDC/3000', baseRegistry)
+const USDC = address('USDC', baseRegistry)
+const CBBTC = address('cbBTC', baseRegistry)
+const WETH = address('WETH', baseRegistry)
 const NOW = new Date('2026-09-26T18:00:00.000Z')
 const W = 100
 

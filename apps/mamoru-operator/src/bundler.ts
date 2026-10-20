@@ -1,7 +1,7 @@
 import type { Server } from 'bun'
 import { decodeErrorResult, parseEventLogs, toHex, zeroAddress, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import type { UserOperation } from 'viem/account-abstraction'
-import { address, entryPointV07Abi } from '@mamoru/registry'
+import { baseRegistry, address, entryPointV07Abi } from '@mamoru/registry'
 import { handleOpsData, userOpHash } from '@mamoru/account/sessions'
 import { fromRpcUserOp, toRpcUserOp, type RpcUserOperation } from '@mamoru/erc4337'
 import { logErr } from './metrics.ts'
@@ -30,7 +30,7 @@ const HANDLE_OPS_GAS = 6_000_000n
  * then bundled alone by the relayer EOA. Adapted from the lab bundler.
  */
 export function startLiveBundler(client: PublicClient, relayer: Relayer, chainId: number): LiveBundler {
-  const entryPoint = address('EntryPointV07')
+  const entryPoint = address('EntryPointV07', baseRegistry)
   const included = new Map<string, Included>()
 
   async function send(params: unknown[]): Promise<Hex> {

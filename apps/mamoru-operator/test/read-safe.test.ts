@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Address } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { baseRegistry, address } from '@mamoru/registry'
 import { FakeChain } from '../../../packages/rpc/test/fake-chain.ts'
 import { readSafe } from '../src/chain.ts'
 
@@ -93,7 +93,7 @@ describe('readSafe (otto/mamoru#135)', () => {
   // the rest of this same batch actually read.
   test('the block-number sub-call failing inside the batch fails the whole read, never an inconsistent one', async () => {
     const chain = new FakeChain()
-    chain.failRead(address('Multicall3'), 'getBlockNumber()')
+    chain.failRead(address('Multicall3', baseRegistry), 'getBlockNumber()')
     await expect(readSafe(chain.client, SAFE)).rejects.toThrow()
     // Every other sub-call of that same batch still ran: only the one call failed.
     expect(chain.count('eth_call')).toBe(1)

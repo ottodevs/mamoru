@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import type { PoolView } from '@mamoru/domain'
 import { MultiBaasClient, SIG, type QueryRow } from '@mamoru/multibaas'
-import { address, type Registry } from '@mamoru/registry'
+import { baseRegistry, address, type Registry } from '@mamoru/registry'
 import { sqliteD1 } from '../scripts/sqlite-d1.ts'
 import { readPoolEvents, type PoolEvent } from '../src/sync/logs.ts'
 import { syncOnce } from '../src/sync/run.ts'
 import { FakeChain } from './fake-chain.ts'
 
-const POOL = address('pool:USDC/cbBTC/500')
+const POOL = address('pool:USDC/cbBTC/500', baseRegistry)
 const W = 100
 const SQRT = 2n ** 91n
 

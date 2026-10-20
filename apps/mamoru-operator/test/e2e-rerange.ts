@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import { encodeFunctionData, keccak256, pad, parseAbi, parseEventLogs, toHex, type Address, type Hex } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { AccountContext, FundingView, OpView, OwnerSignature, OwnerTxToSign, TransferPlan, WithdrawAsset } from '@mamoru/domain'
-import { address, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { baseRegistry, address, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { collect } from '@mamoru/uniswap-v3'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { draftUserOp, executeCallData, handleOpsData, sessionNonceKey, signSessionUserOp } from '@mamoru/account/sessions'
@@ -83,7 +83,7 @@ try {
 
   // --- the account, as the Worker would describe it ------------------------
   const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
-  const owners = [address('SafeWebAuthnSharedSigner')]
+  const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
   const saltNonce = BigInt(Date.now())
   const ctx: AccountContext = {
     accountKey: `e2e-${saltNonce}`,
@@ -172,9 +172,9 @@ try {
     return f.positions.find((p) => p.pool === BTC && BigInt(p.liquidity) > 0n) ?? null
   })
   const id1 = BigInt(pos1.tokenId)
-  const npm = address('NonfungiblePositionManager')
+  const npm = address('NonfungiblePositionManager', baseRegistry)
   const p1 = await lab.client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [id1] })
-  const pool = entry(BTC)
+  const pool = entry(BTC, baseRegistry)
   const tick0 = (await lab.client.readContract({ address: pool.address, abi: uniswapV3PoolAbi, functionName: 'slot0' }))[1]
   check(p1[5] <= tick0 && tick0 < p1[6], `engine entered: position #${id1} [${p1[5]}, ${p1[6]}) around tick ${tick0}`)
 
@@ -189,7 +189,7 @@ try {
     const u = draftUserOp(safe, nonce, callData, { verificationGasLimit: 3_000_000n, callGasLimit: 1_000_000n, preVerificationGas: 100_000n, maxFeePerGas: (blk.baseFeePerGas ?? 0n) * 2n + 1_000_000n, maxPriorityFeePerGas: 1_000_000n })
     const signed = await signSessionUserOp(u, 8453, manageAny.permissionId, sessionKey)
     try {
-      await lab.client.call({ account: op.operator.relayer.address, to: address('EntryPointV07'), data: handleOpsData([signed], op.operator.relayer.address), gas: 10_000_000n })
+      await lab.client.call({ account: op.operator.relayer.address, to: address('EntryPointV07', baseRegistry), data: handleOpsData([signed], op.operator.relayer.address), gas: 10_000_000n })
       return 'ok'
     } catch (e) {
       const m = /custom error (0x[0-9a-f]{8}):\s*([0-9a-f]+)/i.exec((e as Error).message)
@@ -203,7 +203,7 @@ try {
   check((await validate(safe)) === 'ok', `control: the same userOp with recipient = Safe validates`)
 
   // --- TEST ONLY: push the pool price out of range with a whale swap on anvil ----------
-  const usdc = address('USDC')
+  const usdc = address('USDC', baseRegistry)
   const slot = keccak256(`0x${pad(MOVER).slice(2)}${pad(toHex(9n)).slice(2)}` as Hex)
   const huge = 10n ** 15n
   await lab.rpc('anvil_setStorageAt', [usdc, slot, pad(toHex(huge))])
@@ -223,11 +223,11 @@ try {
     }
     throw new Error(`E2E FAILED: no receipt for ${hash}`)
   }
-  const router = address('SwapRouter02')
+  const router = address('SwapRouter02', baseRegistry)
   await sendAs(MOVER, usdc, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [router, huge] }))
   const target = p1[5] - 400
   const swapAbi = parseAbi(['function exactInputSingle((address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96)) payable returns (uint256)'])
-  const sw = await sendAs(MOVER, router, encodeFunctionData({ abi: swapAbi, functionName: 'exactInputSingle', args: [{ tokenIn: usdc, tokenOut: address('cbBTC'), fee: 500, recipient: MOVER, amountIn: huge, amountOutMinimum: 0n, sqrtPriceLimitX96: sqrtRatioAtTick(target) }] }))
+  const sw = await sendAs(MOVER, router, encodeFunctionData({ abi: swapAbi, functionName: 'exactInputSingle', args: [{ tokenIn: usdc, tokenOut: address('cbBTC', baseRegistry), fee: 500, recipient: MOVER, amountIn: huge, amountOutMinimum: 0n, sqrtPriceLimitX96: sqrtRatioAtTick(target) }] }))
   const tick1 = (await lab.client.readContract({ address: pool.address, abi: uniswapV3PoolAbi, functionName: 'slot0' }))[1]
   check(sw.ok && tick1 < p1[5], `whale swap moved the pool tick ${tick0} -> ${tick1}, below the range [${p1[5]}, ${p1[6]})`)
   // Let the TWAP (policy window) catch up with the new price so the EHG accepts it.
@@ -248,8 +248,8 @@ try {
   // --- funds never left the Safe ---------------------------------------------------------
   const toBlock = await lab.client.getBlockNumber()
   const transferEvt = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)'])
-  const policyPools = op.operator.cfg.policy.buckets.flatMap((b) => b.pools).map((n) => entry(n))
-  const tokens = [...new Set(policyPools.flatMap((p) => [p.token0!, p.token1!]))].map((t) => address(t))
+  const policyPools = op.operator.cfg.policy.buckets.flatMap((b) => b.pools).map((n) => entry(n, baseRegistry))
+  const tokens = [...new Set(policyPools.flatMap((p) => [p.token0!, p.token1!]))].map((t) => address(t, baseRegistry))
   const poolAddrs = new Set(policyPools.map((p) => p.address.toLowerCase()))
   const erc20Out = await lab.client.getLogs({ address: tokens, event: transferEvt[0], args: { from: safe }, fromBlock, toBlock })
   const strays = erc20Out.filter((l) => !poolAddrs.has(l.args.to!.toLowerCase()))
