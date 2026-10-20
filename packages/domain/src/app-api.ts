@@ -87,8 +87,9 @@ export type FundingView = {
   // more tap, nothing moved. Absent when not offered. `upgradePolicy` (otto/mamoru#151): the policy id it moves to
   // (conservador-live-v4, or conservador-live-v5 on MamoruActionPolicyV2), so the row says what changes.
   // `paused` (otto/mamoru#151): MamoruActionPolicyV2's guardian has paused the account; a renewal would end that pause.
+  // `policyId`: the account's own policy, what a renewal that moves nothing renews.
   approval?: {
-    validUntil: number; renewDue: boolean; expired: boolean; missing?: number; upgrade?: boolean; upgradePolicy?: string; paused?: boolean
+    validUntil: number; renewDue: boolean; expired: boolean; missing?: number; upgrade?: boolean; upgradePolicy?: string; paused?: boolean; policyId?: string
     usage?: { action: 'collect' | 'rerange' | 'enter'; pool: string | null; usedBps: number; spent: boolean }
   } | null
   positions: {
@@ -160,6 +161,7 @@ export type OwnerTxToSign = {
   expiresAt: string
   prepareId: string
   policyId?: string        // renew (otto/mamoru#151): the policy the summary describes; the row shows it only while it is still the offered one
+  move?: boolean           // renew: it moves the account to another policy (true) or renews the account's own (false)
 }
 // WebAuthn assertion for SafeWebAuthnSharedSigner (base64url fields as returned by the browser).
 export type OwnerSignature = {

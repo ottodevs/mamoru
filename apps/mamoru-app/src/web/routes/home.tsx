@@ -679,14 +679,28 @@ export function approvalRowKey(approval: NonNullable<FundingView['approval']>): 
 }
 
 /**
- * otto/mamoru#151 (GPT-6 review P1): a prepared renewal is shown for signing only while it is for the policy the row
- * offers now. A move prepared for v4 after which the row offers v5 is prepared again, never signed under the v5 title
- * (the operator refuses it as well, APPROVAL_TARGET_CHANGED). A prepare that names no policy, or a row that offers no
- * move, is not judged here.
+ * otto/mamoru#151 (GPT-6 review P1, round 2): a prepared renewal is shown and approved only while it is what the row
+ * offers right now: the same kind (a move to another policy, or a renewal of the account's own) and the same policy
+ * (`upgradePolicy` for a move, the account's `policyId` otherwise). A v4 move prepared before the v5 flag came on, or a
+ * v5 move prepared before the flag went off, is dropped and prepared again; the operator refuses both as well
+ * (APPROVAL_TARGET_CHANGED). A prepare from an operator that names neither is judged on what it does name.
  */
-export function preparedFitsRow(approval: NonNullable<FundingView['approval']>, tx: { policyId?: string }): boolean {
-  if (!approval.upgrade || !approval.upgradePolicy || tx.policyId === undefined) return true
-  return tx.policyId === approval.upgradePolicy
+export function preparedFitsRow(approval: NonNullable<FundingView['approval']>, tx: { policyId?: string; move?: boolean }): boolean {
+  const move = approval.upgrade === true
+  if (tx.move !== undefined && tx.move !== move) return false
+  const offered = move ? approval.upgradePolicy : approval.policyId
+  if (tx.policyId !== undefined && offered !== undefined && tx.policyId !== offered) return false
+  return true
+}
+
+/** The renew flow's prepared transaction while it fits the row; one that no longer does is dropped (the next tap prepares). */
+function useFittingPrepared(approval: NonNullable<FundingView['approval']>, flow: ReturnType<typeof useOwnerAction>) {
+  const fits = !flow.prepared || preparedFitsRow(approval, flow.prepared.tx)
+  const { reset } = flow
+  useEffect(() => {
+    if (!fits) reset()
+  }, [fits, reset])
+  return fits ? flow.prepared : null
 }
 
 const USAGE_WHAT: Record<NonNullable<NonNullable<FundingView['approval']>['usage']>['action'], string> = { collect: 'collecting fees', rerange: 're-ranging', enter: 'adding money' }
@@ -711,8 +725,8 @@ function RenewRow({ accountKey, approval }: { accountKey: string; approval: NonN
   const flow = useOwnerAction(accountKey, 'renew')
   // A renewal that failed leaves the row in place: this is where it is tried again.
   if (flow.result && flow.result.state !== 'failed') return null
-  const fits = !flow.prepared || preparedFitsRow(approval, flow.prepared.tx)
-  return <ApprovalCard approval={approval} summary={fits ? (flow.prepared?.tx.summary ?? null) : null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void (fits ? flow.approve() : flow.prepare())} />
+  const prepared = useFittingPrepared(approval, flow)
+  return <ApprovalCard approval={approval} summary={prepared?.tx.summary ?? null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void (prepared ? flow.approve() : flow.prepare())} />
 }
 
 /** The approval row itself: what is asked, and once prepared, every line the passkey is about to sign. */
@@ -777,6 +791,7 @@ export function askedBefore(key: string, storageOf: () => AskStorage | null = ta
 
 function RenewDialog({ accountKey, approval, open, onClose }: { accountKey: string; approval: NonNullable<FundingView['approval']>; open: boolean; onClose: () => void }) {
   const flow = useOwnerAction(accountKey, 'renew')
+  const prepared = useFittingPrepared(approval, flow)
   const done = !!flow.result && flow.result.state !== 'failed'
   useEffect(() => {
     if (done) onClose()
@@ -784,7 +799,7 @@ function RenewDialog({ accountKey, approval, open, onClose }: { accountKey: stri
   return (
     <Modal open={open && !done} onClose={onClose} title={homeCopy.renewAskTitle}>
       <div data-testid="renew-dialog">
-        <ApprovalCard approval={approval} summary={!flow.prepared || preparedFitsRow(approval, flow.prepared.tx) ? (flow.prepared?.tx.summary ?? null) : null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void (!flow.prepared || preparedFitsRow(approval, flow.prepared.tx) ? flow.approve() : flow.prepare())} />
+        <ApprovalCard approval={approval} summary={prepared?.tx.summary ?? null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void (prepared ? flow.approve() : flow.prepare())} />
       </div>
     </Modal>
   )

@@ -538,6 +538,22 @@ describe('renewing the approval', () => {
     expect(preparedFitsRow(toV5, {})).toBe(true)
   })
 
+  test('otto/mamoru#151 (GPT-6 round 2): v5 flag off with the dialog open: the prepared v5 move no longer fits, nothing to approve', () => {
+    const now = Math.floor(Date.now() / 1000)
+    const year = { validUntil: now + 300 * 86_400, renewDue: false, expired: false }
+    const offered = { ...year, upgrade: true, upgradePolicy: 'conservador-live-v5', policyId: 'conservador-live-v4' }
+    const v5Move = { policyId: 'conservador-live-v5', move: true }
+    expect(preparedFitsRow(offered, v5Move)).toBe(true)
+    // The flag goes off: the row offers a plain renewal of the account's own v4.
+    const after = { ...year, renewDue: true, policyId: 'conservador-live-v4' }
+    expect(preparedFitsRow(after, v5Move)).toBe(false)
+    expect(preparedFitsRow(after, { policyId: 'conservador-live-v4', move: true })).toBe(false) // a move where none is offered
+    expect(preparedFitsRow(after, { policyId: 'conservador-live-v4', move: false })).toBe(true)
+    expect(preparedFitsRow(after, { policyId: 'conservador-live-v5', move: false })).toBe(false)
+    expect(preparedFitsRow(offered, { policyId: 'conservador-live-v4', move: false })).toBe(false) // a renewal where a move is offered
+    expect(approvalRowKey(after)).not.toBe(approvalRowKey(offered))
+  })
+
   test('otto/mamoru#151: a guardian pause is named on the row, with the renewal ending it', () => {
     const now = Math.floor(Date.now() / 1000)
     const year = { validUntil: now + 300 * 86_400, renewDue: true, expired: false }

@@ -1631,7 +1631,8 @@ describe('renewing the approval of a running account', () => {
       acc.grants = acc.grants.map((g) => ({ ...g, grant: { ...g.grant, userOp: { ...g.grant.userOp, validUntil } } }))
     }
     until(now + 200 * 86_400)
-    expect((await w.op.funding(ctx)).approval).toEqual({ validUntil: now + 200 * 86_400, renewDue: false, expired: false })
+    // otto/mamoru#151: the approval names the account's own policy (what a renewal that moves nothing renews).
+    expect((await w.op.funding(ctx)).approval).toEqual({ validUntil: now + 200 * 86_400, renewDue: false, expired: false, policyId: w.op.policyOf(acc).policyId })
     until(now + 15 * 86_400)
     expect((await w.op.funding(ctx)).approval).toMatchObject({ renewDue: true, expired: false })
     until(now - 60)

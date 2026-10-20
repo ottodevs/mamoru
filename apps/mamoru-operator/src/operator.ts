@@ -439,6 +439,8 @@ type Prepared = {
    * refuses it when the policy a renewal would now move the account to is another (a flag flipped since the prepare).
    */
   policyId?: string
+  /** renew: it moves the account to another policy (the row's `upgrade`), not a renewal of its own. */
+  move?: boolean
   /**
    * renew (otto/mamoru#151, GPT-6 round 2): a full renewal of an account on MamoruActionPolicyV2 ends a guardian pause.
    * `pauseChecked`: the pause state was read for this prepare; `pausedWarned`: it was paused and the summary says the
@@ -967,7 +969,7 @@ export class Operator {
     const target = this.v4Target(acc)
     const upgrade = target !== null
     const paused = this.chainUsage.get(acc.accountKey)?.paused === true
-    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}), ...(upgrade ? { upgrade, upgradePolicy: target.policyId } : {}), ...(paused ? { paused } : {}) }
+    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, policyId: this.policyOf(acc).policyId, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}), ...(upgrade ? { upgrade, upgradePolicy: target.policyId } : {}), ...(paused ? { paused } : {}) }
   }
 
   /**
@@ -1243,7 +1245,7 @@ export class Operator {
     // otto/mamoru#151: a renewal's grants are all of one policy, the one its summary was built from (renewPolicyOf).
     const policyId = kind === 'renew' ? renewPolicyOf(extra.grants ?? []) : undefined
     this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, ...(policyId ? { policyId } : {}), safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
-    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}) }
+    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}) }
   }
 
   /** The policy a renewal of `acc` targets now: the move's target when one is offered, else the account's own. */
@@ -1666,7 +1668,7 @@ export class Operator {
         'Nothing is moved: your positions stay as they are',
         'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
       ]
-      return this.hold(acc, live, 'renew', f.calls, summary, { grants: f.stored, revokes: old, capUsdc: cap.toString(), pauseChecked: true, pausedWarned: paused })
+      return this.hold(acc, live, 'renew', f.calls, summary, { grants: f.stored, revokes: old, capUsdc: cap.toString(), move: !!target, pauseChecked: true, pausedWarned: paused })
     }
     const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, acc.grants.map((g) => g.name), old, cap)
     // Named so the renewal says, every time, exactly what the engine keeps doing without asking again: not every
