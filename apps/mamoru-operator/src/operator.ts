@@ -385,6 +385,16 @@ const v4PolicyAbi = parseAbi([
   'function configOf(address account, address pool) view returns (Config)',
 ])
 
+/**
+ * otto/mamoru#151: the one policy a renewal's grants are of. Throws when they mix policies: the summary describes one
+ * policy, so a transaction carrying another's grants is never held for signing.
+ */
+export function renewPolicyOf(grants: readonly Pick<StoredGrant, 'grant'>[]): string | undefined {
+  const ids = [...new Set(grants.map((g) => g.grant.policyId))]
+  if (ids.length > 1) throw new Error(`a renewal mixes policies ${ids.join(', ')}`)
+  return ids[0]
+}
+
 /** A policy whose grants need MamoruActionPolicy (v4). */
 function isV4(policy: PolicyVersion): boolean {
   return policy.session.grants.some((g) => g.requiresActionPolicy)
@@ -424,6 +434,11 @@ type Prepared = {
   safe?: string
   /** Safe-paid (`tx.refund`): the fee the summary named, in wei; the Safe must hold it when the transaction is sent. */
   feeWei?: string
+  /**
+   * renew (otto/mamoru#151, GPT-6 review P1): the policy the summary describes and every grant of `tx` is of. Submit
+   * refuses it when the policy a renewal would now move the account to is another (a flag flipped since the prepare).
+   */
+  policyId?: string
 }
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
@@ -1218,10 +1233,16 @@ export class Operator {
     const mine = [...this.prepared.values()].filter((p) => (p.safe ?? '') === safe && (p.kind === 'stop') === stop).sort((a, b) => a.expires - b.expires)
     for (const p of mine.slice(0, Math.max(0, mine.length - PREPARED_PER_ACCOUNT + 1))) this.prepared.delete(p.prepareId)
     if (!stop && this.prepared.size >= PREPARED_MAX) throw safeHttpError(503, 'OPERATOR_BUSY')
-    this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
-    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId }
+    // otto/mamoru#151: a renewal's grants are all of one policy, the one its summary was built from (renewPolicyOf).
+    const policyId = kind === 'renew' ? renewPolicyOf(extra.grants ?? []) : undefined
+    this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, ...(policyId ? { policyId } : {}), safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
+    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}) }
   }
 
+  /** The policy a renewal of `acc` targets now: the move's target when one is offered, else the account's own. */
+  renewTarget(acc: AccountState): string {
+    return (this.v4Target(acc) ?? this.policyOf(acc)).policyId
+  }
 
   // ---- owner side: who pays (otto/mamoru#140 part2 #6) -----------------------
 
@@ -2683,6 +2704,12 @@ export class Operator {
     if (p.expires < Date.now()) {
       this.prepared.delete(p.prepareId)
       throw new HttpError(410, 'PREPARE_EXPIRED', 'the prepared transaction expired, prepare again')
+    }
+    // otto/mamoru#151 (GPT-6 review P1): the renewal signed is the one the row offers now. A move prepared for one policy
+    // (v4) after which the offer changed (the v5 flag on) is not sent: the owner prepares again and reads the new summary.
+    if (kind === 'renew' && p.policyId !== undefined && p.policyId !== this.renewTarget(acc)) {
+      this.prepared.delete(p.prepareId)
+      throw new HttpError(409, 'APPROVAL_TARGET_CHANGED', 'what this approval would move your Safe to changed since it was prepared: prepare it again')
     }
     let signature: Hex
     try {

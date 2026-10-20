@@ -16,7 +16,7 @@ import { activationLive, historyOps, needsRetry, opLine } from '../../src/web/li
 import { isAddress, parseUsdc } from '../../src/web/lib/owner-flow.ts'
 import { encodeQr } from '../../src/web/lib/qr.ts'
 import { localTime } from '../../src/web/lib/time.ts'
-import { ApprovalCard, approvalDay, approvalRowKey, approvalTitle, askedBefore, engineLine, History, renewAskFor } from '../../src/web/routes/home.tsx'
+import { ApprovalCard, approvalDay, approvalRowKey, approvalTitle, askedBefore, preparedFitsRow, engineLine, History, renewAskFor } from '../../src/web/routes/home.tsx'
 import { MIX } from '../../src/web/routes/onboarding.tsx'
 import { buildRouter } from '../../src/web/router.tsx'
 import { render } from './render.ts'
@@ -523,6 +523,19 @@ describe('renewing the approval', () => {
     expect(approvalTitle({ ...year, upgrade: true, upgradePolicy: 'conservador-live-v5' })).toContain('adds to a position it already holds instead of opening another')
     expect(approvalTitle({ ...year, upgrade: true, upgradePolicy: 'conservador-live-v5' })).toContain('a guardian key can pause it but never move funds')
     expect(approvalTitle({ ...year, upgrade: true, upgradePolicy: 'conservador-live-v4' })).toContain('it would trade only near the market price')
+  })
+
+  test('otto/mamoru#151 (GPT-6 review P1): the row is keyed on the policy it moves to; a prepared move for another is not signed', () => {
+    const now = Math.floor(Date.now() / 1000)
+    const year = { validUntil: now + 300 * 86_400, renewDue: false, expired: false }
+    const toV4 = { ...year, upgrade: true, upgradePolicy: 'conservador-live-v4' }
+    const toV5 = { ...year, upgrade: true, upgradePolicy: 'conservador-live-v5' }
+    expect(approvalRowKey(toV4)).not.toBe(approvalRowKey(toV5))
+    expect(preparedFitsRow(toV5, { policyId: 'conservador-live-v4' })).toBe(false)
+    expect(preparedFitsRow(toV5, { policyId: 'conservador-live-v5' })).toBe(true)
+    expect(preparedFitsRow(toV4, { policyId: 'conservador-live-v4' })).toBe(true)
+    expect(preparedFitsRow(year, { policyId: 'conservador-live-v2' })).toBe(true)
+    expect(preparedFitsRow(toV5, {})).toBe(true)
   })
 
   test('otto/mamoru#151: a guardian pause is named on the row, with the renewal ending it', () => {

@@ -675,7 +675,18 @@ export function approvalDay(validUntil: number): string {
  * grants missing), so the row mounts afresh and offers the next approval instead of staying hidden on the last result.
  */
 export function approvalRowKey(approval: NonNullable<FundingView['approval']>): string {
-  return `${approval.validUntil}-${approval.missing ?? 0}${approval.usage ? `-${approval.usage.spent ? 'spent' : 'used'}` : ''}${approval.upgrade ? '-upgrade' : ''}${approval.paused ? '-paused' : ''}`
+  return `${approval.validUntil}-${approval.missing ?? 0}${approval.usage ? `-${approval.usage.spent ? 'spent' : 'used'}` : ''}${approval.upgrade ? `-upgrade-${approval.upgradePolicy ?? ''}` : ''}${approval.paused ? '-paused' : ''}`
+}
+
+/**
+ * otto/mamoru#151 (GPT-6 review P1): a prepared renewal is shown for signing only while it is for the policy the row
+ * offers now. A move prepared for v4 after which the row offers v5 is prepared again, never signed under the v5 title
+ * (the operator refuses it as well, APPROVAL_TARGET_CHANGED). A prepare that names no policy, or a row that offers no
+ * move, is not judged here.
+ */
+export function preparedFitsRow(approval: NonNullable<FundingView['approval']>, tx: { policyId?: string }): boolean {
+  if (!approval.upgrade || !approval.upgradePolicy || tx.policyId === undefined) return true
+  return tx.policyId === approval.upgradePolicy
 }
 
 const USAGE_WHAT: Record<NonNullable<NonNullable<FundingView['approval']>['usage']>['action'], string> = { collect: 'collecting fees', rerange: 're-ranging', enter: 'adding money' }
@@ -700,7 +711,8 @@ function RenewRow({ accountKey, approval }: { accountKey: string; approval: NonN
   const flow = useOwnerAction(accountKey, 'renew')
   // A renewal that failed leaves the row in place: this is where it is tried again.
   if (flow.result && flow.result.state !== 'failed') return null
-  return <ApprovalCard approval={approval} summary={flow.prepared?.tx.summary ?? null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void flow.approve()} />
+  const fits = !flow.prepared || preparedFitsRow(approval, flow.prepared.tx)
+  return <ApprovalCard approval={approval} summary={fits ? (flow.prepared?.tx.summary ?? null) : null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void (fits ? flow.approve() : flow.prepare())} />
 }
 
 /** The approval row itself: what is asked, and once prepared, every line the passkey is about to sign. */
@@ -772,7 +784,7 @@ function RenewDialog({ accountKey, approval, open, onClose }: { accountKey: stri
   return (
     <Modal open={open && !done} onClose={onClose} title={homeCopy.renewAskTitle}>
       <div data-testid="renew-dialog">
-        <ApprovalCard approval={approval} summary={flow.prepared?.tx.summary ?? null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void flow.approve()} />
+        <ApprovalCard approval={approval} summary={!flow.prepared || preparedFitsRow(approval, flow.prepared.tx) ? (flow.prepared?.tx.summary ?? null) : null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void (!flow.prepared || preparedFitsRow(approval, flow.prepared.tx) ? flow.approve() : flow.prepare())} />
       </div>
     </Modal>
   )

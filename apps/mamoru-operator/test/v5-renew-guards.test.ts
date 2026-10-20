@@ -1,11 +1,11 @@
-// otto/mamoru#151, GPT-6 review of the v2 TS diffs (part 3, P1): a v5 renewal is never prepared without knowing
-// whether a guardian paused the account.
+// otto/mamoru#151, GPT-6 review of the v2 TS diffs (part 3, two P1s): a v5 renewal is never prepared without knowing
+// whether a guardian paused the account, and a prepared renewal is never sent when the row now offers another policy.
 import { describe, expect, test } from 'bun:test'
 import type { Hex } from '@mamoru/domain'
 import { V4_GAS_CAPS, V4_POOLS, conservadorLiveV4, conservadorLiveV5, grantKey, withActionPolicy, type PolicyVersion } from '@mamoru/policy'
-import { HttpError, type Operator } from '../src/operator.ts'
+import { HttpError, renewPolicyOf, type Operator } from '../src/operator.ts'
 import type { AccountState } from '../src/state.ts'
-import { ctx, world } from './owner-world.ts'
+import { ctx, sign, world } from './owner-world.ts'
 
 const V1 = `0x${'11'.repeat(20)}` as Hex
 const V2 = `0x${'33'.repeat(20)}` as Hex
@@ -71,5 +71,39 @@ describe('a v5 renewal fails closed when the guardian pause cannot be read (P1)'
       throw new HttpError(409, 'FITTED', 'reached the fit')
     }
     expect(await code(() => w.op.prepareRenew(ctx))).toBe('FITTED')
+  })
+})
+
+describe('a prepared renewal is sent only for the policy the row offers now (P1)', () => {
+  test('a v4 move prepared, then the v5 flag on: submit refuses APPROVAL_TARGET_CHANGED and drops it', async () => {
+    const flags: Record<string, boolean> = { onchain_action_policy_v4: true }
+    const w = world(0n, { v4Policy: v4, v5Policy: v5, opsFlags: () => flags })
+    const acc = running(w, 'conservador-live-v2')
+    expect(w.op.renewTarget(acc)).toBe('conservador-live-v4')
+    const p = priv(w.op)
+    p.prepared.set('pv4', { prepareId: 'pv4', accountKey: 'k', kind: 'renew', safeTxHash: `0x${'00'.repeat(32)}`, expires: Date.now() + 60_000, policyId: 'conservador-live-v4', safe: ctx.address.toLowerCase() })
+    flags.onchain_action_policy_v5 = true
+    expect(w.op.renewTarget(acc)).toBe('conservador-live-v5')
+    const body = { ...sign({ safe: ctx.address, chainId: 8453, safeTxHash: `0x${'00'.repeat(32)}`, summary: [], expiresAt: '', prepareId: 'pv4' }) }
+    expect(await code(() => w.op.submit(ctx, 'renew', body))).toBe('APPROVAL_TARGET_CHANGED')
+    expect(p.prepared.has('pv4')).toBe(false)
+    expect(w.sent).toHaveLength(0)
+  })
+
+  test('the same policy still offered: not refused for its target (it goes on to the signature check)', async () => {
+    const flags: Record<string, boolean> = { onchain_action_policy_v4: true }
+    const w = world(0n, { v4Policy: v4, v5Policy: v5, opsFlags: () => flags })
+    running(w, 'conservador-live-v2')
+    const p = priv(w.op)
+    p.prepared.set('pv4', { prepareId: 'pv4', accountKey: 'k', kind: 'renew', safeTxHash: `0x${'00'.repeat(32)}`, expires: Date.now() + 60_000, policyId: 'conservador-live-v4', safe: ctx.address.toLowerCase() })
+    const r = await code(() => w.op.submit(ctx, 'renew', { prepareId: 'pv4', authenticatorData: '', clientDataJSON: '', signature: '' }))
+    expect(r).not.toBe('APPROVAL_TARGET_CHANGED')
+  })
+
+  test('renewPolicyOf: one policy per renewal; mixed grants are never held for signing', () => {
+    const g = (policyId: string) => ({ grant: { policyId } }) as never
+    expect(renewPolicyOf([g('conservador-live-v5'), g('conservador-live-v5')])).toBe('conservador-live-v5')
+    expect(renewPolicyOf([])).toBeUndefined()
+    expect(() => renewPolicyOf([g('conservador-live-v4'), g('conservador-live-v5')])).toThrow('mixes policies')
   })
 })

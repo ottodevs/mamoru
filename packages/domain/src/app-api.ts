@@ -159,6 +159,7 @@ export type OwnerTxToSign = {
   summary: string[]        // human lines shown before signing
   expiresAt: string
   prepareId: string
+  policyId?: string        // renew (otto/mamoru#151): the policy the summary describes; the row shows it only while it is still the offered one
 }
 // WebAuthn assertion for SafeWebAuthnSharedSigner (base64url fields as returned by the browser).
 export type OwnerSignature = {
