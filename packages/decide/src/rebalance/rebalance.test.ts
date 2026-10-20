@@ -198,6 +198,8 @@ describe('lazy re-range from the engine settings (otto/mamoru#172)', () => {
     obs(p, { block: { number: 100n, hash: `0x${'11'.repeat(32)}`, timestamp: t }, positions: [nft], pools: [pool(STABLE_POOL, 1), pool(BTC_POOL, -69_080), pool(ETH_POOL, below)], ...(guard ? { guard } : {}) })
   // Inside the fixture sessions' validity (validUntil 10,000,000).
   const T0 = 1_000_000n
+  // Fees that pay for the re-range at a plausible rate (under MAX_FEE_APR_BPS); 1 << 120 is far above it.
+  const RICH = 1n << 104n
 
   test('eager (today): the first review with a session re-ranges the out-of-range position at once', () => {
     const d = decide(at(V2, T0), V2)
@@ -206,24 +208,40 @@ describe('lazy re-range from the engine settings (otto/mamoru#172)', () => {
 
   test('lazy: the review that regains the session holds; after the dwell, only a re-range that pays goes through', () => {
     // The engine just started: it has never seen this position, so its out-of-range clock starts now.
-    const first = at(LAZY_V2, T0, ethMarket(1n << 120n))
+    const first = at(LAZY_V2, T0, ethMarket(RICH))
     const since0 = outOfRangeSinceOf(new Map(), first)
     expect(since0.get(nft.tokenId)).toBe(T0)
     const d0 = decide(withOutOfRangeSince(first, since0), LAZY_V2)
     expect(d0.kind).not.toBe('rerange')
     expect(d0.positions.find((p) => p.tokenId === nft.tokenId)!.codes).toContain('DECIDE_RANGE_COOLDOWN')
     // 29 minutes later: still inside the dwell.
-    const early = at(LAZY_V2, T0 + 1740n, ethMarket(1n << 120n))
+    const early = at(LAZY_V2, T0 + 1740n, ethMarket(RICH))
     expect(decide(withOutOfRangeSince(early, outOfRangeSinceOf(since0, early)), LAZY_V2).kind).not.toBe('rerange')
     // Past the dwell: the cost test decides. Fees that do not cover gas + swap + LVR hold with DECIDE_RANGE_BELOW_COST.
     const poor = at(LAZY_V2, T0 + 1800n, ethMarket(1n))
     const dp = decide(withOutOfRangeSince(poor, outOfRangeSinceOf(since0, poor)), LAZY_V2)
     expect(dp.kind).not.toBe('rerange')
     expect(dp.positions.find((p) => p.tokenId === nft.tokenId)!.codes).toContain('DECIDE_RANGE_BELOW_COST')
-    const rich = at(LAZY_V2, T0 + 1800n, ethMarket(1n << 120n))
+    const rich = at(LAZY_V2, T0 + 1800n, ethMarket(RICH))
     const dr = decide(withOutOfRangeSince(rich, outOfRangeSinceOf(since0, rich)), LAZY_V2)
     expect(dr.kind).toBe('rerange')
     expect(dr.proposal).toMatchObject({ kind: 'rerange', tokenId: nft.tokenId, pool: ETH_POOL })
+  })
+
+  test('implausible fees (a restored fee point far below the real counter adds a lifetime of fees to 24 h): live has no estimate and holds; the Lab variant is not bounded', () => {
+    const since = new Map([[nft.tokenId, T0]])
+    const absurd = withOutOfRangeSince(at(LAZY_V2, T0 + 1800n, ethMarket(1n << 120n)), since)
+    const poolObs = absurd.pools.find((x) => x.name === ETH_POOL)!
+    expect(rerangeWorth(absurd, LAZY_V2, absurd.positions[0]!, poolObs, LAZY_V2.range.lazy!)).toBeNull()
+    const d = decide(absurd, LAZY_V2)
+    expect(d.kind).not.toBe('rerange')
+    expect(d.positions.find((p) => p.tokenId === nft.tokenId)!.codes).toContain('DECIDE_RANGE_NO_FEE_HISTORY')
+    expect(rerangeWorth(absurd, LAB_V2, absurd.positions[0]!, poolObs, LAB_V2.range.lazy!)!.worth).toBe(true)
+    // A plausible rate still gives its estimate, under the bound.
+    const fine = withOutOfRangeSince(at(LAZY_V2, T0 + 1800n, ethMarket(RICH)), since)
+    const w = rerangeWorth(fine, LAZY_V2, fine.positions[0]!, poolObs, LAZY_V2.range.lazy!)!
+    expect(w.worth).toBe(true)
+    expect(decide(fine, LAZY_V2).kind).toBe('rerange')
   })
 
   test('fail closed: past the dwell with no fee or volatility history, live holds; the Lab variant still abstains', () => {
@@ -233,7 +251,7 @@ describe('lazy re-range from the engine settings (otto/mamoru#172)', () => {
     expect(live.kind).not.toBe('rerange')
     expect(live.positions.find((p) => p.tokenId === nft.tokenId)!.codes).toContain('DECIDE_RANGE_NO_FEE_HISTORY')
     // Fee growth without volatility is no estimate either.
-    const noVol = { pools: { [ETH_POOL]: { ...ethMarket(1n << 120n).pools[ETH_POOL], realizedVol24hBps: null } } }
+    const noVol = { pools: { [ETH_POOL]: { ...ethMarket(RICH).pools[ETH_POOL], realizedVol24hBps: null } } }
     expect(decide(withOutOfRangeSince(at(LAZY_V2, T0 + 1800n, noVol), since), LAZY_V2).positions.find((p) => p.tokenId === nft.tokenId)!.codes).toContain('DECIDE_RANGE_NO_FEE_HISTORY')
     const lab = decide(withOutOfRangeSince(at(LAB_V2, T0 + 1800n), since), LAB_V2)
     expect(lab.kind).toBe('rerange')

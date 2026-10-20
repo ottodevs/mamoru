@@ -236,6 +236,13 @@ describe('fee growth history (otto/mamoru#172)', () => {
     expect(feeHistoryAfter([], pt(1, 0n))).toEqual([])
   })
 
+  test('a restored point far below the chain passes here as a huge 24 h growth: the APR bound of the cost test (decide) is what refuses it', async () => {
+    const now = 100 * DAY_S
+    const fees: FeeGrowthHistory = new Map([['pool:USDC/cbBTC/500', [{ time: now - 20 * 3_600, growth0X128: 0n, growth1X128: 0n }]]])
+    const r = await new SharedGuardReads({ fees }).read(fakeClient(3_600, { growth: 1n << 200n }), MULTICALL3, [{ name: 'pool:USDC/cbBTC/500', address: BTC_POOL }], 1n, now, W)
+    expect(r['pool:USDC/cbBTC/500']!.feeGrowth24h).toEqual({ growth0X128: 1n << 200n, growth1X128: 1n << 201n, seconds: 20 * 3_600 })
+  })
+
   test('a restored history above the chain: the first live read drops it, gives no estimate, and starts again', async () => {
     const now = 100 * DAY_S
     const fees: FeeGrowthHistory = new Map([['pool:USDC/cbBTC/500', [{ time: now - 20 * 3_600, growth0X128: 1n << 200n, growth1X128: 1n << 200n }]]])

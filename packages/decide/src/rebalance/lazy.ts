@@ -13,6 +13,16 @@ export const RERANGE_OPS = 3n
 export type RerangeWorth = { fees: bigint; gas: bigint; swap: bigint; lvr: bigint; worth: boolean }
 
 /**
+ * otto/mamoru#172 (peer review, round 5): live, an estimate whose fees over the horizon mean more than this annual
+ * rate on the position's value is no estimate (the lazy rule holds): it can only come from a bad fee point (a saved
+ * one below the real counter adds days or months of fees to "the last 24 h"). 20,000% a year: 5x the highest rate
+ * measured on the Lab datasets (Aug 2024 to Oct 2026, the three live pools, a centred range of the policy width,
+ * undiluted, 24 h fee growth): WETH/USDC 0.3% 4,003% (6 Feb 2026), USDC/USDT 3,894%, USDC/cbBTC 1,302%; medians
+ * 61%, 1% and 25%. Lab variants (no `requireCostEstimate`) are not bounded, so their measured results do not move.
+ */
+export const MAX_FEE_APR_BPS = 2_000_000n
+
+/**
  * What a new centred range of the position's value would earn over `lazy.horizonSeconds`, against what moving there
  * costs (see `LazyRerange`). Null when the pool's fee growth or volatility history is missing: the test abstains.
  */
@@ -45,6 +55,7 @@ export function rerangeWorth(obs: Observation, policy: PolicyVersion, p: Positio
   const sigma = vol / 10_000
   const lvr1 = ((sigma * sigma) / 4) * Number(L) * (Number(pool.sqrtPriceX96) / Q96) * (lazy.horizonSeconds / YEAR) * (lazy.lvrWeightBps / 10_000)
   const lvr = inSavings(pool, pool.token1, BigInt(Math.floor(lvr1)), savings)
+  if (lazy.requireCostEstimate && fees * BigInt(YEAR) * 10_000n > value * H * MAX_FEE_APR_BPS) return null
   return { fees, gas, swap, lvr, worth: fees > gas + swap + lvr }
 }
 

@@ -2,7 +2,7 @@
 // (canary included) and never the policy that grants and policy hashes are built from.
 import { describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, statSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { permissionIdOf, toSmartSession } from '@mamoru/account/sessions'
@@ -14,8 +14,11 @@ import { BTC_POOL, fakeClient, MULTICALL3 } from '../../../packages/rpc/test/fak
 import { SharedGuardReads } from '@mamoru/rpc'
 import { GUARD_READS_MAX_BYTES, GuardReadsState } from '../src/guard-reads-state.ts'
 import { Operator } from '../src/operator.ts'
+import { address, baseRegistry } from '@mamoru/registry'
 
 const SECRET = 'op-secret'
+/** What the operator writes next to the histories: its chain and the address of every pool in them. */
+const BIND = { chainId: 8453, pools: { 'pool:WETH/USDC/3000': address('pool:WETH/USDC/3000'), 'pool:USDC/cbBTC/500': address('pool:USDC/cbBTC/500') } }
 const DAY_S = 86_400
 const NOW = 1_760_616_000_000
 const LAZY = ENGINE_SETTINGS_TEMPLATES['conservador-live-v2 + lazy-h24h-b100-d30']!
@@ -125,6 +128,7 @@ describe('lazy re-range engine setting (otto/mamoru#172)', () => {
     const now = 1_800_000_000
     const pt = (time: number, c: string) => ({ time, tickCumulative: c })
     writeFileSync(file, JSON.stringify({
+      ...BIND,
       fees: {
         'pool:WETH/USDC/3000': [{ time: now - 10, growth0X128: '7', growth1X128: '8' }, { time: 'x' }, { time: now - 5, growth0X128: '-1', growth1X128: '1' }, { time: now - 4, growth0X128: (1n << 256n).toString(), growth1X128: '1' }, { time: now + 3_600, growth0X128: '1', growth1X128: '1' }],
         'not a pool': [{ time: now, growth0X128: '1', growth1X128: '1' }],
@@ -142,7 +146,7 @@ describe('lazy re-range engine setting (otto/mamoru#172)', () => {
     expect(st.series.get(1_800)!.get('pool:USDC/cbBTC/500')!.points).toEqual([{ time: now - 30, tickCumulative: -3n }, { time: now - 20, tickCumulative: -5n }])
     // Capped at what the series ever holds: the newest only.
     const many = Array.from({ length: 1_000 }, (_, i) => pt(now - 1_000 + i, String(i)))
-    writeFileSync(file, JSON.stringify({ fees: {}, series: { '1800': { 'pool:USDC/cbBTC/500': many } } }))
+    writeFileSync(file, JSON.stringify({ ...BIND, fees: {}, series: { '1800': { 'pool:USDC/cbBTC/500': many } } }))
     const capped = new GuardReadsState(dir).load(now).series.get(1_800)!.get('pool:USDC/cbBTC/500')!.points
     expect(capped.length).toBe((4 * DAY_S) / 1_800 + 8)
     expect(capped.at(-1)!.time).toBe(now - 1)
@@ -152,9 +156,11 @@ describe('lazy re-range engine setting (otto/mamoru#172)', () => {
     }
     // Only pools the operator's registry knows: 40 plausible strangers cannot push a real pool out (GPT-6 review, round 4).
     const strangers = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`pool:AAA${i}/BBB/${i + 1}`, [{ time: now - 10, growth0X128: '1', growth1X128: '1' }]]))
-    writeFileSync(file, JSON.stringify({ fees: { ...strangers, 'pool:WETH/USDC/3000': [{ time: now - 10, growth0X128: '7', growth1X128: '8' }] }, series: {} }))
+    writeFileSync(file, JSON.stringify({ ...BIND, fees: { ...strangers, 'pool:WETH/USDC/3000': [{ time: now - 10, growth0X128: '7', growth1X128: '8' }] }, series: {} }))
     expect([...new GuardReadsState(dir).load(now).fees.keys()]).toEqual(['pool:WETH/USDC/3000'])
-    expect(new GuardReadsState(dir, new Set(['pool:AAA1/BBB/2'])).load(now).fees.size).toBe(1)
+    const other = { ...baseRegistry, entries: [{ name: 'pool:AAA1/BBB/2', address: '0x00000000000000000000000000000000000000a1' }] } as never
+    writeFileSync(file, JSON.stringify({ chainId: 8453, pools: { 'pool:AAA1/BBB/2': '0x00000000000000000000000000000000000000A1' }, fees: strangers, series: {} }))
+    expect([...new GuardReadsState(dir, other).load(now).fees.keys()]).toEqual(['pool:AAA1/BBB/2'])
     // At most one write a minute.
     const w = new GuardReadsState(dir)
     const one = { fees: new Map([['pool:WETH/USDC/3000', [{ time: now, growth0X128: 1n, growth1X128: 2n }]]]), series: new Map() } as never
@@ -163,12 +169,58 @@ describe('lazy re-range engine setting (otto/mamoru#172)', () => {
     expect(new GuardReadsState(dir).load(now).fees.size).toBe(1)
   })
 
+  test('bound to the chain and the pool addresses: a file from another chain or pool restores nothing of it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'guard-reads-'))
+    const file = join(dir, 'guard-reads.json')
+    const now = 1_800_000_000
+    const fees = { 'pool:WETH/USDC/3000': [{ time: now - 10, growth0X128: '7', growth1X128: '8' }], 'pool:USDC/cbBTC/500': [{ time: now - 10, growth0X128: '1', growth1X128: '2' }] }
+    const series = { '1800': { 'pool:USDC/cbBTC/500': [{ time: now - 10, tickCumulative: '5' }] } }
+    const quiet = console.error
+    console.error = () => {}
+    try {
+      // Same file, as the operator writes it: both pools come back.
+      writeFileSync(file, JSON.stringify({ ...BIND, fees, series }))
+      expect(new GuardReadsState(dir).load(now).fees.size).toBe(2)
+      // Another chain (Monad's id), or none: nothing.
+      for (const chainId of [10_143, undefined, '8453']) {
+        writeFileSync(file, JSON.stringify({ ...BIND, chainId, fees, series }))
+        expect(new GuardReadsState(dir).load(now)).toEqual({ fees: new Map(), series: new Map() })
+      }
+      // A pool saved at another address, or with no address: that pool's fees and series are dropped.
+      writeFileSync(file, JSON.stringify({ ...BIND, pools: { ...BIND.pools, 'pool:USDC/cbBTC/500': '0x00000000000000000000000000000000000000b7' }, fees, series }))
+      const st = new GuardReadsState(dir).load(now)
+      expect([...st.fees.keys()]).toEqual(['pool:WETH/USDC/3000'])
+      expect(st.series.size).toBe(0)
+      writeFileSync(file, JSON.stringify({ chainId: 8453, fees, series }))
+      expect(new GuardReadsState(dir).load(now).fees.size).toBe(0)
+    } finally {
+      console.error = quiet
+    }
+  })
+
+  test('not a regular file (a FIFO, a symlink to a device): refused without blocking, starting empty', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'guard-reads-'))
+    const quiet = console.error
+    const errors: string[] = []
+    console.error = (m: string) => errors.push(m)
+    try {
+      symlinkSync('/dev/zero', join(dir, 'guard-reads.json'))
+      expect(new GuardReadsState(dir).load()).toEqual({ fees: new Map(), series: new Map() })
+      rmSync(join(dir, 'guard-reads.json'))
+      Bun.spawnSync(['mkfifo', join(dir, 'guard-reads.json')])
+      expect(new GuardReadsState(dir).load()).toEqual({ fees: new Map(), series: new Map() })
+    } finally {
+      console.error = quiet
+    }
+    expect(errors.filter((e) => e.includes('not a regular file')).length).toBe(2)
+  })
+
   test('an oversized state file is refused unread: the operator starts empty, never crashes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'guard-reads-'))
     const now = 1_800_000_000
     // Valid JSON, just big: 2 MiB of points for a real pool.
     const point = { time: now - 10, growth0X128: '7', growth1X128: '8' }
-    const big = JSON.stringify({ fees: { 'pool:WETH/USDC/3000': Array.from({ length: 40_000 }, () => point) }, series: {} })
+    const big = JSON.stringify({ ...BIND, fees: { 'pool:WETH/USDC/3000': Array.from({ length: 40_000 }, () => point) }, series: {} })
     expect(big.length).toBeGreaterThan(GUARD_READS_MAX_BYTES)
     writeFileSync(join(dir, 'guard-reads.json'), big)
     const errors: string[] = []
@@ -183,7 +235,7 @@ describe('lazy re-range engine setting (otto/mamoru#172)', () => {
     }
     expect(errors.some((e) => e.includes('not read, starting empty'))).toBe(true)
     // Just under the cap it is read, and capped to the newest points the history keeps.
-    writeFileSync(join(dir, 'guard-reads.json'), JSON.stringify({ fees: { 'pool:WETH/USDC/3000': Array.from({ length: 5_000 }, (_, i) => ({ ...point, time: now - 5_000 + i })) }, series: {} }))
+    writeFileSync(join(dir, 'guard-reads.json'), JSON.stringify({ ...BIND, fees: { 'pool:WETH/USDC/3000': Array.from({ length: 5_000 }, (_, i) => ({ ...point, time: now - 5_000 + i })) }, series: {} }))
     const fees = new GuardReadsState(dir).load(now).fees.get('pool:WETH/USDC/3000')!
     expect(fees.length).toBe((2 * DAY_S) / 600 + 8)
     expect(fees.at(-1)!.time).toBe(now - 1)
