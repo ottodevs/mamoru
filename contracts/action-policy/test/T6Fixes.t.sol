@@ -99,7 +99,9 @@ contract T6FixesTest is PolicyFixture {
         assertEq(lo, -int24(STABLE_ANCHOR), "clipped to the anchor");
         assertGe(hi, lo);
         assertEq(_check(ROUTER, _swapAtTick(USDC, USDT, 100, 10_000e6, top - int24(STABLE_BAND) + 1)), 1);
-        assertEq(_check(ROUTER, _swapAtTick(USDC, USDT, 100, 10_000e6, lo)), 0);
+        // V2 refuses it at validation while the spot itself sits outside the clipped range (LeftClaw M-2).
+        uint256 expected = _validatesSpot() && !_spotInRange(POOL_STABLE, lo, hi) ? 1 : 0;
+        assertEq(_check(ROUTER, _swapAtTick(USDC, USDT, 100, 10_000e6, lo)), expected);
         vm.revertToState(snap);
 
         (tl, ts) = _spreadPush(-75_000, -15_000);

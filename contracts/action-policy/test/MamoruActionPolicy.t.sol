@@ -77,6 +77,17 @@ abstract contract PolicyFixture is Test {
         return new MamoruActionPolicy(SMART_SESSION, NPM, ROUTER, FACTORY);
     }
 
+    /// V2 also checks the spot at validation (LeftClaw M-2): a priced action with the spot outside [lo, hi] fails
+    /// there, before the budget charge, instead of passing and reverting at execution.
+    function _validatesSpot() internal pure virtual returns (bool) {
+        return false;
+    }
+
+    function _spotInRange(address pool, int24 lo, int24 hi) internal view returns (bool) {
+        (uint160 p,,,,,,) = IUniswapV3Pool(pool).slot0();
+        return p >= TickMath.getSqrtRatioAtTick(lo) && p <= TickMath.getSqrtRatioAtTick(hi);
+    }
+
     function _initData(
         address pool,
         uint24 band,
@@ -345,6 +356,14 @@ contract MamoruActionPolicyTest is PolicyFixture {
         vm.revertToState(snap);
 
         bytes memory tight = _swapData(USDC, CBBTC, 500, amountIn, minOut, limit);
+        if (_validatesSpot()) {
+            // V2: refused at validation, nothing charged (LeftClaw M-2).
+            (uint256 room,) = policy.budgetLeft(safe, POOL_BTC);
+            assertEq(_check(ROUTER, tight), 1);
+            (uint256 roomAfter,) = policy.budgetLeft(safe, POOL_BTC);
+            assertEq(roomAfter, room);
+            return;
+        }
         assertEq(_check(ROUTER, tight), 0);
         _exec(USDC, abi.encodeCall(IERC20Min.approve, (ROUTER, amountIn)));
         vm.prank(safe);

@@ -116,6 +116,11 @@ interface INPM {
  *    widen, or move a token.
  *  - the engine's swap deadline, `SwapRouter02.multicall(deadline, [])` (#140), in its exact empty encoding only, so
  *    a grant can carry this policy on that action too and a pause or a renewal stops it like any other.
+ *  - the LeftClaw audit's fixes (job #1041 on d9e53b8; test/LeftClawV2.t.sol): a first enable jumps at most to
+ *    MAX_FIRST_GENERATION (H-1); the long TWAP window is at least MIN_WINDOW_RATIO short ones (M-1); swap, mint and
+ *    increase check the spot at validation, before the charge (M-2); a renewal clamps the carried debt to the new
+ *    perWindow (M-3); admission is per generation, so a renewal keeps only the positions its Init.admit names (M-4);
+ *    a swap of amountIn 0 is refused (L-7).
  * Everything else is the deployed contract's logic; mint's pull, approve and refund steps moved, in the same order, into
  * `_fund` and `_settle`, which increase shares (with `_checkProvide` at validation), and the file compiles at 1,000
  * optimizer runs instead of 10,000 to fit EIP-170 (foundry.toml).
@@ -160,6 +165,12 @@ contract MamoruActionPolicyV2 is IActionPolicy {
     uint24 public constant MAX_BAND = 500;
     uint32 public constant MIN_BUDGET_WINDOW = 3_600;
     uint64 public constant MAX_GENERATION = type(uint32).max;
+    /// LeftClaw H-1: the first enable at this deployment may jump (a migration carries the old generation), but only
+    /// this far, so no Init can park an account at MAX_GENERATION and freeze every later renewal.
+    uint64 public constant MAX_FIRST_GENERATION = type(uint16).max;
+    /// LeftClaw M-1: the long window is at least this many short windows (production: 1800 s / 300 s = 6), so the two
+    /// TWAPs keep apart enough for the range to empty under a held push.
+    uint32 public constant MIN_WINDOW_RATIO = 4;
     uint256 public constant MAX_ADMIT = 64;
 
     address public immutable SMART_SESSION;
@@ -231,6 +242,9 @@ contract MamoruActionPolicyV2 is IActionPolicy {
     mapping(address account => mapping(address pool => Spend)) internal _spend;
     /// tokenId => pool, for positions minted through `mint` with this account as recipient, or admitted at enable.
     mapping(address account => mapping(uint256 tokenId => address pool)) public admittedPool;
+    /// LeftClaw M-4: the generation that admitted the tokenId. Only the current generation's admissions count, so a
+    /// renewal that leaves a position out of `Init.admit` retires it for the new key.
+    mapping(address account => mapping(uint256 tokenId => uint64 generation)) public admittedAt;
     mapping(address pool => PoolInfo) internal _pool;
     /// generation + 1 at the time of the pause; 0 = not paused. A renewal (a higher generation) ends it by itself.
     mapping(address account => uint64) public pausedAt;
@@ -291,6 +305,7 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         // A jump of more than one is allowed only on the first enable at this deployment (a migration carries the
         // old deployment's generation); after that, renewals step by one, so nobody can burn the number space.
         if (current != 0 && i.generation > current + 1) revert BadInit(4);
+        if (current == 0 && i.generation > MAX_FIRST_GENERATION) revert BadInit(4); // LeftClaw H-1
         if (i.generation > current) generationOf[account] = i.generation;
 
         bytes32 h = _initHash(i);
@@ -319,10 +334,13 @@ contract MamoruActionPolicyV2 is IActionPolicy {
                 if (s.updatedAt != 0) (s.debt, s.updatedAt) = (i.perWindow, uint64(block.timestamp));
                 s.in1 = i.budgetIn1;
             }
+            // LeftClaw M-3: a renewal that lowers perWindow carries at most a full bucket, refilling from now, never
+            // a debt above the new capacity (which would refuse every charge for weeks).
+            if (s.debt > i.perWindow) (s.debt, s.updatedAt) = (i.perWindow, uint64(block.timestamp));
         }
         _binding[configId][account] = Binding({pool: i.pool, generation: i.generation});
         for (uint256 k; k < i.admit.length; k++) {
-            _admitAtEnable(account, i.pool, p, i.admit[k]);
+            _admitAtEnable(account, i.pool, p, i.admit[k], i.generation);
         }
         emit PolicySet(configId, msg.sender, account);
     }
@@ -403,11 +421,11 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         PoolInfo memory p,
         ExactInputSingleParams memory s
     ) internal returns (uint256) {
-        if (s.recipient != account || s.fee != p.fee) return VALIDATION_FAILED;
+        if (s.recipient != account || s.fee != p.fee || s.amountIn == 0) return VALIDATION_FAILED; // 0: LeftClaw L-7
         bool zeroForOne = s.tokenIn == p.token0 && s.tokenOut == p.token1;
         if (!zeroForOne && !(s.tokenIn == p.token1 && s.tokenOut == p.token0)) return VALIDATION_FAILED;
         (bool ok, int24 lo, int24 hi) = _range(c, pool);
-        if (!ok) return VALIDATION_FAILED;
+        if (!ok || !_spotIn(pool, lo, hi)) return VALIDATION_FAILED;
         (uint256 minOut, uint160 limit) = _swapBounds(p, lo, hi, zeroForOne, s.amountIn);
         if (s.amountOutMinimum < minOut) return VALIDATION_FAILED;
         // A zero limit means "no limit" to the pool: refused. zeroForOne moves the price down: the limit is a floor.
@@ -424,7 +442,7 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         returns (uint256)
     {
         (bool ok, int24 lo, int24 hi) = _range(c, pool);
-        if (!ok) return VALIDATION_FAILED;
+        if (!ok || !_spotIn(pool, lo, hi)) return VALIDATION_FAILED;
         return _charge(account, pool, c, _value(c, p, lo, hi, a0, a1)) ? VALIDATION_SUCCESS : VALIDATION_FAILED;
     }
 
@@ -457,6 +475,7 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         _settle(account, m.token0, m.token1, b0, b1);
 
         admittedPool[account][tokenId] = pool;
+        admittedAt[account][tokenId] = c.generation;
         emit Admitted(account, pool, tokenId);
         _locked = 1;
     }
@@ -476,7 +495,7 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         _locked = 2;
         address account = msg.sender;
         address pool = admittedPool[account][n.tokenId];
-        if (pool == address(0) || NPM.ownerOf(n.tokenId) != account) revert NotAdmitted(n.tokenId);
+        if (pool == address(0) || !_isAdmitted(account, pool, n.tokenId)) revert NotAdmitted(n.tokenId);
         Config memory c = _config[account][pool];
         if (c.twapWindow == 0 || c.generation != generationOf[account]) revert NoConfig(account, pool);
         if (isPaused(account)) revert AccountPaused(account);
@@ -657,11 +676,18 @@ contract MamoruActionPolicyV2 is IActionPolicy {
             (int24 tl, int24 ts) = _oracle(c, pool);
             revert RangeEmpty(tl, ts);
         }
-        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
-        // Compared as sqrt prices, not floored ticks (T6 L-7).
-        if (sqrtPriceX96 < TickMath.getSqrtRatioAtTick(lo) || sqrtPriceX96 > TickMath.getSqrtRatioAtTick(hi)) {
+        if (!_spotIn(pool, lo, hi)) {
+            (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
             revert SpotOutsideRange(sqrtPriceX96, lo, hi);
         }
+    }
+
+    /// The pool's spot inside [lo, hi], compared as sqrt prices, not floored ticks (T6 L-7). Also at validation
+    /// (LeftClaw M-2): a third party who pushed the spot out before the bundle lands makes the action fail before the
+    /// budget is charged, instead of charging it for an execution that `mint`/`increase` or the router would refuse.
+    function _spotIn(address pool, int24 lo, int24 hi) internal view returns (bool) {
+        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
+        return sqrtPriceX96 >= TickMath.getSqrtRatioAtTick(lo) && sqrtPriceX96 <= TickMath.getSqrtRatioAtTick(hi);
     }
 
     // ---------------------------------------------------------------- internals: budget
@@ -710,7 +736,9 @@ contract MamoruActionPolicyV2 is IActionPolicy {
 
     function _validate(Init memory i) internal view {
         if (i.twapWindow < MIN_TWAP_WINDOW || i.twapWindow > MAX_TWAP_WINDOW) revert BadInit(1);
-        if (i.twapShortWindow < MIN_SHORT_WINDOW || i.twapShortWindow >= i.twapWindow) revert BadInit(2);
+        if (i.twapShortWindow < MIN_SHORT_WINDOW || uint256(i.twapShortWindow) * MIN_WINDOW_RATIO > i.twapWindow) {
+            revert BadInit(2); // LeftClaw M-1: also at least MIN_WINDOW_RATIO short windows in the long one
+        }
         if (i.bandTicks < MIN_BAND || i.bandTicks > MAX_BAND) revert BadInit(3);
         if (i.generation > MAX_GENERATION) revert BadInit(4);
         if (i.anchorBand > MAX_BAND || i.anchorTick < TickMath.MIN_TICK || i.anchorTick > TickMath.MAX_TICK) {
@@ -745,10 +773,13 @@ contract MamoruActionPolicyV2 is IActionPolicy {
     }
 
     /// T6 M-4: a position the account owns in this pool, named in owner-signed enable data, becomes manageable.
-    function _admitAtEnable(address account, address pool, PoolInfo memory p, uint256 tokenId) internal {
+    function _admitAtEnable(address account, address pool, PoolInfo memory p, uint256 tokenId, uint64 generation)
+        internal
+    {
         if (NPM.ownerOf(tokenId) != account) revert NotAdmissible(tokenId);
         (,, address t0, address t1, uint24 fee,,,,,,,) = NPM.positions(tokenId);
         if (t0 != p.token0 || t1 != p.token1 || fee != p.fee) revert NotAdmissible(tokenId);
+        admittedAt[account][tokenId] = generation;
         if (admittedPool[account][tokenId] != pool) {
             admittedPool[account][tokenId] = pool;
             emit Admitted(account, pool, tokenId);
@@ -757,7 +788,9 @@ contract MamoruActionPolicyV2 is IActionPolicy {
 
     function _isAdmitted(address account, address pool, uint256 tokenId) internal view returns (bool) {
         // ownerOf: an admitted position the owner later moved out of the Safe is not the session's any more.
-        return admittedPool[account][tokenId] == pool && NPM.ownerOf(tokenId) == account;
+        // admittedAt: one admitted by an older generation is not the renewed key's unless the renewal named it again.
+        return admittedPool[account][tokenId] == pool && admittedAt[account][tokenId] == generationOf[account]
+            && NPM.ownerOf(tokenId) == account;
     }
 
     function _current(address account, address pool) internal view returns (Config memory c) {

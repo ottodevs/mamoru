@@ -45,12 +45,20 @@ contract MamoruActionPolicyTestOnV2 is MamoruActionPolicyTest {
     function _newPolicy() internal override returns (MamoruActionPolicy) {
         return deployV2(SMART_SESSION, NPM, ROUTER, FACTORY);
     }
+
+    function _validatesSpot() internal pure override returns (bool) {
+        return true;
+    }
 }
 
 /// Every T6 finding's test, against V2.
 contract T6FixesTestOnV2 is T6FixesTest {
     function _newPolicy() internal override returns (MamoruActionPolicy) {
         return deployV2(SMART_SESSION, NPM, ROUTER, FACTORY);
+    }
+
+    function _validatesSpot() internal pure override returns (bool) {
+        return true;
     }
 }
 
@@ -208,15 +216,28 @@ contract MamoruActionPolicyV2Test is PolicyFixture {
         ConfigId fresh = ConfigId.wrap(bytes32(uint256(2)));
         _initBtc(fresh, 2, 60_000e6, 180_000e6);
         assertEq(_check(address(policy), inc), 1, "generation-1 config dead after renewal");
-        assertEq(_checkId(fresh, address(policy), inc), 0);
-        // Admission survives the renewal: positions opened under the old approval stay manageable.
+        // LeftClaw M-4: admission is per generation; a renewal that does not name the position retires it.
+        assertEq(_checkId(fresh, address(policy), inc), 1, "renewal without admit");
         _approvePolicy(1_000e6, 0.01e8);
+        vm.prank(safe);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NotAdmitted.selector, tokenId));
+        v2().increase(IncreaseLiquidityParams(tokenId, 1_000e6, 0.01e8, 0, 0, block.timestamp));
+        // The operator's renewal names every position the Safe still owns (Init.admit): manageable again.
+        uint256[] memory admit = new uint256[](1);
+        admit[0] = tokenId;
+        ConfigId third = ConfigId.wrap(bytes32(uint256(3)));
+        vm.prank(SMART_SESSION);
+        policy.initializeWithMultiplexer(
+            safe, third, _initData(POOL_BTC, BAND, NO_ANCHOR, false, 3, 60_000e6, 180_000e6, admit)
+        );
+        assertEq(_checkId(third, address(policy), inc), 0);
         _exec(address(policy), inc);
     }
 
     function test_increaseNeedsTheCurrentConfig() public {
         (uint256 tokenId,) = _mintThroughPolicy(20_000e6, 0.2e8);
-        // A renewal that does not re-enable the btc pool leaves its config at the old generation.
+        // A renewal that does not re-enable the btc pool leaves its config at the old generation, and the position's
+        // admission with it (LeftClaw M-4): refused as not admitted, before the config check.
         vm.prank(SMART_SESSION);
         policy.initializeWithMultiplexer(
             safe,
@@ -225,7 +246,7 @@ contract MamoruActionPolicyV2Test is PolicyFixture {
         );
         _approvePolicy(1_000e6, 0.01e8);
         vm.prank(safe);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NoConfig.selector, safe, POOL_BTC));
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NotAdmitted.selector, tokenId));
         v2().increase(IncreaseLiquidityParams(tokenId, 1_000e6, 0.01e8, 0, 0, block.timestamp));
     }
 
@@ -342,28 +363,35 @@ contract MamoruActionPolicyV2Test is PolicyFixture {
     function test_pauseAtTheGenerationBound() public {
         address other = makeAddr("boundSafe");
         uint64 max = policy.MAX_GENERATION();
+        uint64 firstMax = v2().MAX_FIRST_GENERATION();
         vm.prank(SMART_SESSION);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.BadInit.selector, 4));
         policy.initializeWithMultiplexer(
             other, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, max + 1, 1e6, 1e6, new uint256[](0))
         );
-        // A first enable may jump (a migration carries the old generation): straight to the bound.
+        // LeftClaw H-1: a first enable may jump (a migration carries the old generation), but not to the bound.
         vm.prank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.BadInit.selector, 4));
         policy.initializeWithMultiplexer(
             other, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, max, 1e6, 1e6, new uint256[](0))
         );
-        assertEq(policy.generationOf(other), max);
+        vm.prank(SMART_SESSION);
+        policy.initializeWithMultiplexer(
+            other, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, firstMax, 1e6, 1e6, new uint256[](0))
+        );
+        assertEq(policy.generationOf(other), firstMax);
         vm.prank(GUARDIAN);
         v2().pause(other);
         assertTrue(v2().isPaused(other));
-        assertEq(v2().pausedAt(other), uint64(max) + 1);
-        // No renewal past the bound: the pause can only be lifted by the guardian, never overflow.
+        // generation <= MAX_GENERATION (uint32) in a uint64: pausedAt = generation + 1 cannot overflow.
+        assertEq(v2().pausedAt(other), uint64(firstMax) + 1);
+        // After the first enable, one step at a time.
         vm.prank(SMART_SESSION);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.BadInit.selector, 4));
         policy.initializeWithMultiplexer(
             other,
             ConfigId.wrap(bytes32(uint256(5))),
-            _initData(POOL_BTC, BAND, NO_ANCHOR, false, max + 1, 1e6, 1e6, new uint256[](0))
+            _initData(POOL_BTC, BAND, NO_ANCHOR, false, firstMax + 2, 1e6, 1e6, new uint256[](0))
         );
     }
 
