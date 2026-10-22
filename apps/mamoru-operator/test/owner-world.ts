@@ -5,6 +5,7 @@ import { decodeFunctionData, encodeFunctionResult, getAddress, keccak256, string
 import type { AccountContext, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
 import { baseRegistry, address, entry, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { POLICIES } from '@mamoru/policy'
+import { quoterV2Abi, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
 import { deployCall, liveAccountFromContext } from '@mamoru/account/live'
@@ -88,6 +89,17 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     forks: new Map<Hex, bigint>(),
     parents: new Map<bigint, Hex>(),
     rangeScans: [] as { from: bigint; to: bigint }[],
+    /**
+     * otto/mamoru#155: every pool's slot0 tick and 30-minute TWAP tick (null: observe reverts), what QuoterV2 answers
+     * (default: the input after the pool fee, the fair price at tick 0), the Safe's idle balance of non-USDC tokens by
+     * registry name, and the recipient's balance gain a payout simulation shows.
+     */
+    spotTick: 0,
+    twapTick: 0 as number | null,
+    quote: null as ((q: { tokenIn: string; tokenOut: string; fee: number; amountIn: bigint }) => bigint) | null,
+    quotes: 0,
+    idle: {} as Record<string, bigint>,
+    payoutGain: null as bigint | null,
   }
   const npmCalls: string[] = []
   /** Canonical block hashes, and the height each one is at. */
@@ -134,9 +146,12 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? 10n ** 18n : at.toLowerCase() === SAFE.toLowerCase() ? chain.safeEth : 0n),
     getTransactionCount: async () => 5,
     readContract: async ({ address: at, functionName, args, blockNumber }: { address: string; functionName: string; args?: readonly unknown[]; blockNumber?: bigint }) => {
-      if (functionName === 'slot0') return [1n << 96n, 0, 0, 0, 0, 0, true]
-      // #64: activations and engine swaps price at the pool TWAP; tick 0, as slot0.
-      if (functionName === 'observe') return [[0n, 0n], [0n, 0n]]
+      if (functionName === 'slot0') return [sqrtRatioAtTick(knobs.spotTick), knobs.spotTick, 0, 0, 0, 0, true]
+      // #64: activations and engine swaps price at the pool TWAP; tick 0, as slot0, unless a test moves it.
+      if (functionName === 'observe') {
+        if (knobs.twapTick === null) throw new Error('execution reverted: OLD')
+        return [[0n, BigInt(knobs.twapTick) * 1800n], [0n, 0n]]
+      }
       if (functionName === 'nonce') return blockNumber !== undefined && knobs.nonceAt ? knobs.nonceAt(blockNumber) : chain.nonce
       if (functionName === 'balanceOf' && at.toLowerCase() === npm) {
         if (knobs.npmDown) throw new Error('HTTP request failed. Status: 503')
@@ -162,10 +177,13 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
       const calls = params[0].blockStateCalls[0].calls
       if (knobs.sim === 'down') throw new Error('the method eth_simulateV1 does not exist')
       const last = calls.length - 1
+      // A payout's recipient balance probe: read first and last from the Safe, around the batch.
+      const probed = knobs.payoutGain !== null && last > 0 && calls[0]!.data.startsWith('0x70a08231') && calls[last]!.data === calls[0]!.data
       return [
         {
           calls: calls.map((c, i) => {
             if (knobs.sim === 'revert' && i === last) return { status: '0x0', returnData: '0x', gasUsed: '0x5208', logs: [], error: { message: 'GS026' } }
+            if (probed && (i === 0 || i === last)) return { status: '0x1', returnData: toHex(i === 0 ? 0n : knobs.payoutGain!, { size: 32 }), gasUsed: '0x5208', logs: [] }
             // A collect of a position pays out USDC worth a fiftieth of its liquidity, whatever the decrease before it.
             const isCollect = c.data.startsWith(toFunctionSelector('collect((uint256,address,uint128,uint128))'))
             const tokenId = isCollect ? (decodeFunctionData({ abi: nonfungiblePositionManagerAbi, data: c.data }).args[0] as { tokenId: bigint }).tokenId : 0n
@@ -200,14 +218,24 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
               }
               throw new Error('execution reverted')
             }
-            if (callData.startsWith('0x3850c7bd')) return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [1n << 96n, 0, 0, 0, 0, 0, true] })
-            if (callData.startsWith('0x70a08231')) return word(target.toLowerCase() === address('USDC', baseRegistry).toLowerCase() ? chain.usdc : 0n)
+            if (callData.startsWith('0x3850c7bd')) return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [sqrtRatioAtTick(knobs.spotTick), knobs.spotTick, 0, 0, 0, 0, true] })
+            if (callData.startsWith('0x70a08231')) {
+              if (target.toLowerCase() === address('USDC', baseRegistry).toLowerCase()) return word(chain.usdc)
+              const idle = Object.entries(knobs.idle).find(([t]) => address(t as never, baseRegistry).toLowerCase() === target.toLowerCase())
+              return word(idle?.[1] ?? 0n)
+            }
             if (callData.startsWith('0x4d2301cc')) return word(chain.safeEth)
             if (callData.startsWith(toFunctionSelector('getBlockNumber()'))) return word(100n)
             if (callData.startsWith(toFunctionSelector('isPermissionEnabled(bytes32,address)'))) return word(enabled(`0x${callData.slice(10, 74)}`) ? 1n : 0n)
             throw new Error('execution reverted')
           }),
         }
+      }
+      if (to.toLowerCase() === address('QuoterV2', baseRegistry).toLowerCase()) {
+        knobs.quotes++
+        const q = decodeFunctionData({ abi: quoterV2Abi, data }).args[0] as { tokenIn: string; tokenOut: string; fee: number; amountIn: bigint }
+        const out = knobs.quote ? knobs.quote(q) : (q.amountIn * BigInt(1_000_000 - q.fee)) / 1_000_000n
+        return { data: encodeFunctionResult({ abi: quoterV2Abi, functionName: 'quoteExactInputSingle', result: [out, 0n, 0, 0n] }) }
       }
       if (knobs.call === 'revert') throw Object.assign(new Error('execution reverted: GS026'), { code: 3, data: '0x08c379a0' })
       if (knobs.call === 'down') throw new Error('HTTP request failed. Status: 429')

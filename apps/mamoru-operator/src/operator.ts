@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
+import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { baseRegistry, address, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
 import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
@@ -43,6 +43,7 @@ import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, USDC_POOLS, amountsForLiquidity, inUsdc, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
+import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
 import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, logErr, safeMetrics, type EngineHealthSnapshot } from './metrics.ts'
 import type { Relayer } from './relayer.ts'
@@ -431,6 +432,12 @@ type Prepared = {
   base?: Hex[]
   /** transfer: what the history line shows. */
   meta?: { amountUsdc: string; asset?: string; to: Hex }
+  /**
+   * transfer (otto/mamoru#155): the price divergence warning this prepare returned, and each diverging swap with the
+   * minimum its calldata carries. Submit runs only with this quoteId accepted and no live quote under a minimum.
+   */
+  divergence?: PriceDivergenceWarning
+  accepted?: AcceptedSwap[]
   /** activate (spec 006): the cap, in base units, that the owner's summary named. A later raise of the cap never lets more in under this signature. */
   capUsdc?: string
   /** activate (otto/mamoru#140 part2 #3): the account's owner generation it was prepared at; any owner change since makes it stale. */
@@ -2478,7 +2485,7 @@ export class Operator {
     if (!r.deployed && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
     const slip = this.policyOf(acc).execution.slippageBps
     let reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[] = []
-    let swaps: SwapBack[] = []
+    let swaps: QuotedSwap[] = []
     if (r.usdc < amount) {
       const plan = await this.reducePlan(acc, live.safe, r, amount, slip)
       reduce = plan.reduce
@@ -2509,8 +2516,12 @@ export class Operator {
           ]
         : [`Send ${fmtUsdc(amount)} USDC from your Safe to ${to}`]),
     ]
-    const ownerTx = await this.hold(acc, live, 'transfer', calls, summary, { meta: { amountUsdc: amount.toString(), ...(asset === 'USDC' ? {} : { asset }), to } })
+    // otto/mamoru#155: a swap under its pool's TWAP is never refused. The plan (and the minimums the owner signs) stay
+    // what they are without it; prepare adds the warning, and submit runs only with it accepted.
+    const div = await this.divergenceOf(acc, r, slip, swaps, out ? { ...out, amountIn: amount } : undefined)
+    const ownerTx = await this.hold(acc, live, 'transfer', calls, summary, { meta: { amountUsdc: amount.toString(), ...(asset === 'USDC' ? {} : { asset }), to }, ...(div ? { divergence: div.warning, accepted: div.accepted } : {}) })
     return {
+      ...(div ? { divergence: div.warning } : {}),
       reduce: reduce.map((x) => ({ tokenId: x.pos.tokenId.toString(), liquidityBps: x.bps })),
       ...(out
         ? { receive: { asset, quoted: out.quoted.toString(), minimum: out.receive.amountOutMinimum.toString(), decimals: out.decimals, route: out.route } }
@@ -2540,7 +2551,7 @@ export class Operator {
   }
 
   /** QuoterV2 at the prepare block over every registered pool for the asset; the best output wins. */
-  private async receiveQuote(asset: WithdrawAsset, amountIn: bigint, blockNumber: bigint, slip: number): Promise<{ receive: LiveReceive; quoted: bigint; decimals: number; route: string }> {
+  private async receiveQuote(asset: WithdrawAsset, amountIn: bigint, blockNumber: bigint, slip: number): Promise<{ receive: LiveReceive; quoted: bigint; decimals: number; route: string; pool: string; tokenOut: string }> {
     const routes = RECEIVE_ROUTES[asset as ReceiveAsset]
     if (!routes) throw new HttpError(409, 'ASSET_UNAVAILABLE', `${asset} is not available`)
     let best: { pool: string; fee: number; out: bigint } | undefined
@@ -2556,14 +2567,60 @@ export class Operator {
     if (!best) throw new HttpError(503, 'QUOTE_UNAVAILABLE', `no Uniswap v3 quote for USDC -> ${asset}`)
     const pair = `USDC/${routes.tokenOut}`
     const route = `Uniswap v3 ${pair} ${(best.fee / 10_000).toFixed(2)}%${asset === 'ETH' ? ' + unwrap' : ''}`
-    return { receive: { asset: routes.receive, fee: best.fee, amountOutMinimum: minOut(best.out, slip) }, quoted: best.out, decimals: entry(routes.tokenOut, baseRegistry).decimals!, route }
+    return { receive: { asset: routes.receive, fee: best.fee, amountOutMinimum: minOut(best.out, slip) }, quoted: best.out, decimals: entry(routes.tokenOut, baseRegistry).decimals!, route, pool: best.pool, tokenOut: routes.tokenOut }
+  }
+
+  /**
+   * otto/mamoru#155: every swap of a withdrawal (each swap back to USDC, and the payout) judged against its pool's TWAP
+   * at the prepare block. A diverging one becomes a leg of the warning, at the minimum the batch already carries. A
+   * pool whose TWAP cannot be read is judged as before this check (no warning), and logged.
+   */
+  private async divergenceOf(
+    acc: AccountState,
+    r: SafeRead,
+    slip: number,
+    swaps: QuotedSwap[],
+    payout: { pool: string; tokenOut: string; amountIn: bigint; quoted: bigint; decimals: number; receive: LiveReceive } | undefined,
+  ): Promise<{ warning: PriceDivergenceWarning; accepted: AcceptedSwap[] } | undefined> {
+    const policy = this.policyOf(acc)
+    const legs: { leg: PriceDivergenceLeg; usdcIn?: bigint }[] = []
+    const accepted: AcceptedSwap[] = []
+    const judge = async (pool: string, tokenIn: string, amountIn: bigint, quote: bigint, minimum: bigint) => {
+      const e = entry(pool, baseRegistry)
+      let twapTick: number
+      try {
+        twapTick = await twapTickAt(this.client, address(pool, baseRegistry), policy.execution.twapWindowSeconds, r.block)
+      } catch (err) {
+        logErr(`[owner] ${acc.accountKey} withdrawal: ${poolLabel(pool)} TWAP unreadable, priced without the divergence check:`, err)
+        return null
+      }
+      const j = judgeSwap({ amountIn, fee: e.fee!, tokenInIsToken0: e.token0 === tokenIn, twapTick, spotTick: r.prices[pool]?.tick, quote, minimum, maxTwapDeviationTicks: policy.execution.maxTwapDeviationTicks, slippageBps: slip })
+      return j.divergent ? j.fair : null
+    }
+    for (const sw of swaps) {
+      const fair = await judge(sw.pool, sw.token, sw.amountIn, sw.quoted, sw.amountOutMinimum)
+      if (fair === null) continue
+      legs.push({ leg: divergenceLeg({ kind: 'swap-back', token: 'USDC', sellToken: sw.token, decimals: 6, fair, quote: sw.quoted, minimum: sw.amountOutMinimum }) })
+      accepted.push({ pool: sw.pool, tokenIn: sw.token, tokenOut: 'USDC', fee: entry(sw.pool, baseRegistry).fee!, amountIn: sw.amountIn, minimum: sw.amountOutMinimum })
+    }
+    if (payout) {
+      const fair = await judge(payout.pool, 'USDC', payout.amountIn, payout.quoted, payout.receive.amountOutMinimum)
+      if (fair !== null) {
+        legs.push({ leg: divergenceLeg({ kind: 'payout', token: payout.receive.asset, decimals: payout.decimals, fair, quote: payout.quoted, minimum: payout.receive.amountOutMinimum }), usdcIn: payout.amountIn })
+        accepted.push({ pool: payout.pool, tokenIn: 'USDC', tokenOut: payout.tokenOut, fee: payout.receive.fee, amountIn: payout.amountIn, minimum: payout.receive.amountOutMinimum })
+      }
+    }
+    const warning = divergenceWarning(legs)
+    if (!warning) return undefined
+    console.log(`[owner] ${acc.accountKey} withdrawal under the TWAP: ${warning.legs.map((l) => `${l.kind} ${l.sellToken ?? 'USDC'}->${l.token} fair ${l.fairAmount} min ${l.minAmount} (${l.shortfallBps} bps)`).join('; ')}, quote ${warning.quoteId}`)
+    return { warning, accepted }
   }
 
   /**
    * Withdraw: reduce the stables bucket first, then BTC, then risk (policy bucket order), only as far as needed,
    * plus swaps of what the reduce frees back to USDC; sized from a simulated decrease+collect at the prepare block.
    */
-  private async reducePlan(acc: AccountState, safe: Address, r: SafeRead, amount: bigint, slip: number): Promise<{ reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[]; swaps: SwapBack[] }> {
+  private async reducePlan(acc: AccountState, safe: Address, r: SafeRead, amount: bigint, slip: number): Promise<{ reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[]; swaps: QuotedSwap[] }> {
     // A position can be worth collecting at 0 current liquidity if a past decrease left tokensOwed uncollected.
     // otto/mamoru#140 (part2 #4): only the positions Mamoru admitted, never dust or ones sent to the Safe unasked.
     const open = this.sizingPositions(acc, r).filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n)
@@ -2630,9 +2687,12 @@ export class Operator {
     return out
   }
 
-  /** Quotes every non-USDC amount back to USDC on its route; amounts too small to quote a positive minimum stay in the Safe. */
-  private async swapQuotes(acc: AccountState, amounts: Record<string, bigint>, blockNumber: bigint, slip: number): Promise<SwapBack[]> {
-    const out: SwapBack[] = []
+  /**
+   * Quotes every non-USDC amount back to USDC on its route; amounts too small to quote a positive minimum stay in the
+   * Safe. Each swap keeps its quote (`quoted`) for the withdrawal's price divergence check (otto/mamoru#155).
+   */
+  private async swapQuotes(acc: AccountState, amounts: Record<string, bigint>, blockNumber: bigint, slip: number): Promise<QuotedSwap[]> {
+    const out: QuotedSwap[] = []
     for (const [token, raw] of Object.entries(amounts)) {
       if (token === 'USDC') continue
       // one unit less: collect rounding can leave the Safe a unit short of the simulated amount
@@ -2643,7 +2703,7 @@ export class Operator {
       const q = await quoteExactInputSingle(this.client, { tokenIn: address(token, baseRegistry), tokenOut: address('USDC', baseRegistry), fee: entry(pool, baseRegistry).fee!, amountIn, blockNumber }).catch(() => 0n)
       if (q <= 1n) continue
       const amountOutMinimum = minOut(q, slip)
-      if (amountOutMinimum > 0n) out.push({ token, pool, amountIn, amountOutMinimum })
+      if (amountOutMinimum > 0n) out.push({ token, pool, amountIn, amountOutMinimum, quoted: q })
     }
     return out
   }
@@ -3042,6 +3102,12 @@ export class Operator {
       this.prepared.delete(p.prepareId)
       throw new HttpError(410, 'PREPARE_EXPIRED', 'the prepared transaction expired, prepare again')
     }
+    // otto/mamoru#155: a withdrawal prepared under a price divergence runs only with that warning's quote accepted.
+    // Anything else drops the approval (nothing signed stays usable) and the app prepares again, with fresh numbers.
+    if (p.divergence && !accepts(p.divergence, body.acceptDivergence)) {
+      this.prepared.delete(p.prepareId)
+      throw divergenceStale()
+    }
     // otto/mamoru#151 (GPT-6 review P1): the renewal signed is the one the row offers now. A move prepared for one policy
     // (v4) after which the offer changed (the v5 flag on) is not sent: the owner prepares again and reads the new summary.
     if (kind === 'renew' && p.policyId !== undefined && p.policyId !== this.renewTarget(acc)) {
@@ -3109,6 +3175,12 @@ export class Operator {
       }
     }
     this.prepared.delete(p.prepareId)
+    // otto/mamoru#155: the accepted minimums are in the signed calldata; one the live price has fallen under would only
+    // revert. Nothing is sent: the approval is already dropped above, and the app prepares again.
+    if (p.accepted?.length && staleAcceptance(p.accepted, await this.liveQuotes(p.accepted))) {
+      console.log(`[owner] ${acc.accountKey} ${p.prepareId} accepted quote ${p.divergence?.quoteId} went stale: not sent`)
+      throw divergenceStale()
+    }
     if (kind === 'renew') {
       // It sends the same costly grant transaction as an activation: the same failure budget applies.
       this.assertBudget(acc)
@@ -3160,6 +3232,20 @@ export class Operator {
     })
     await Promise.race([run.catch(() => undefined), Bun.sleep(POST_WAIT_MS)])
     return { ...acc.ops.find((o) => o.opId === op.opId)! }
+  }
+
+  /** QuoterV2 at the head for each accepted swap; null where it cannot answer. */
+  private async liveQuotes(swaps: readonly AcceptedSwap[]): Promise<(bigint | null)[]> {
+    const blockNumber = await this.client.getBlockNumber().catch(() => null)
+    if (blockNumber === null) return swaps.map(() => null)
+    return Promise.all(
+      swaps.map((s) =>
+        quoteExactInputSingle(this.client, { tokenIn: address(s.tokenIn, baseRegistry), tokenOut: address(s.tokenOut, baseRegistry), fee: s.fee, amountIn: s.amountIn, blockNumber }).catch((e: unknown) => {
+          logErr(`[owner] accepted ${s.tokenIn}->${s.tokenOut} quote unavailable at submit:`, e)
+          return null
+        }),
+      ),
+    )
   }
 
   // ---- owner side: what the relayer will not pay for ------------------------
@@ -4754,6 +4840,14 @@ function providerRefused(e: unknown): boolean {
 }
 
 type Probe = { to: Address; data: Hex; decode: (ret: Hex) => bigint }
+
+/** otto/mamoru#155: the owner's accepted quote is no longer on file or the price moved past it; nothing was sent. */
+function divergenceStale(): HttpError {
+  return new HttpError(409, 'PRICE_DIVERGENCE_STALE', 'the price moved since you accepted it: nothing was sent, review the new numbers')
+}
+
+/** A swap back to USDC with the quote its minimum was taken from (otto/mamoru#155). */
+type QuotedSwap = SwapBack & { quoted: bigint }
 
 const multicall3Abi = parseAbi(['function getEthBalance(address addr) view returns (uint256 balance)'])
 
