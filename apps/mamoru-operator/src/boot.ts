@@ -1,7 +1,7 @@
 import { GuardReadsState } from './guard-reads-state.ts'
 import { join } from 'node:path'
 import { $ } from 'bun'
-import { createPublicClient, getAddress, http, isAddress } from 'viem'
+import { TransactionReceiptNotFoundError, createPublicClient, getAddress, http, isAddress, type Hex } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, type Address } from '@mamoru/domain'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
@@ -17,12 +17,16 @@ import { readSnapshot, SnapshotLoop, snapshotIntervalMs, type Snapshot } from '.
 import { MULTICALL3 } from '@mamoru/rpc'
 import { StateStore, loadOrCreateKey } from './state.ts'
 import { EntryStore, withHoldValue } from './yield-entries.ts'
+import { withReceipts, type BlockTimeReader, type ReceiptReader, type ReceiptSource } from './yield-receipts.ts'
 import { EngineSettingsSource, type SettingsOverride } from './engine-settings.ts'
 
-/** Wraps a snapshot reader with #129's hold-value baseline, stored in its own file under `stateDir`. */
-function withYieldLedger(stateDir: string, read: () => Promise<Snapshot>): () => Promise<Snapshot> {
+/**
+ * Wraps a snapshot reader with #129's hold-value baseline, stored in its own file under `stateDir`, and the per-day
+ * gas and collected fees of every account's engine ops (yield-receipts.ts), kept on their stored rows.
+ */
+function withYieldLedger(stateDir: string, read: () => Promise<Snapshot>, receipts: { source: ReceiptSource; readReceipt: ReceiptReader; blockTime: BlockTimeReader }): () => Promise<Snapshot> {
   const entries = new EntryStore(stateDir)
-  return async () => withHoldValue(await read(), entries)
+  return async () => withReceipts(withHoldValue(await read(), entries), receipts.source, receipts.readReceipt, receipts.blockTime)
 }
 
 /**
@@ -326,7 +330,19 @@ export async function bootOperator(o: BootOptions) {
     const multicall3 = MULTICALL3
     const budget = rpcBudget(rpcMetrics)
     const read = (): Promise<Snapshot> => readSnapshot(snapshotClient, multicall3, chainId, operator.snapshotTargets())
-    snapshot = new SnapshotLoop(withYieldLedger(o.stateDir, read), snapshotIntervalMs(process.env.MAMORU_SNAPSHOT_MS), () => budget.over())
+    const receipts = {
+      source: { opsOf: (key: string) => store.state.accounts[key]?.ops, save: () => store.save() },
+      // Same transport as the read: these calls count against the snapshot's RPC budget, not the engines'.
+      readReceipt: async (hash: Hex) => {
+        const r = await snapshotClient.getTransactionReceipt({ hash }).catch((e: unknown) => {
+          if (e instanceof TransactionReceiptNotFoundError) return null
+          throw e
+        })
+        return r ? { logs: r.logs, blockNumber: r.blockNumber } : null
+      },
+      blockTime: async (blockNumber: bigint) => (await snapshotClient.getBlock({ blockNumber })).timestamp,
+    }
+    snapshot = new SnapshotLoop(withYieldLedger(o.stateDir, read, receipts), snapshotIntervalMs(process.env.MAMORU_SNAPSHOT_MS), () => budget.over())
   }
   let yieldLedgerOn = false
   syncYieldLedger = (): void => {

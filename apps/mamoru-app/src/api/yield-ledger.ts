@@ -55,6 +55,15 @@ export type SafeWire = {
   feesUsdc: string
   owedUsdc: string
   totalUsdc: string
+  /** otto/mamoru#129: gas and collected fees of this account's engine ops per UTC day (operator yield-receipts.ts), the last few days only. Absent from an operator older than this field. */
+  receipts?: DayReceiptWire[]
+}
+/** One UTC day's full totals, not a delta: writing them again is a no-op. `collectedUsdc` is absent while a fee of that day is unpriced. */
+export type DayReceiptWire = {
+  day: string
+  gasWei: string
+  collectedUsdc?: string
+  positions: { tokenId: string; collected0: string; collected1: string; collectedUsdc?: string }[]
 }
 export type SnapshotWire = {
   chainId: number
@@ -125,8 +134,8 @@ export type AccountReceipt = { collectedUsd?: number; gasWei?: string }
  * truncated and is the join key `accounts` already has, migrations/0001_sprint.sql's accounts_chain_address).
  * `env` comes from the account (resolveAccount); an upsert also refreshes it, so a row written before an account
  * got its environment is corrected on the next pull.
- * `receipts`, keyed by account_key, carries collected_usdc/gas_paid_wei when a caller already knows them; empty
- * until a harvest-receipt tracker exists to fill it (not built by this PR; account_daily keeps those columns null).
+ * `receipts`, keyed by account_key, carries collected_usdc/gas_paid_wei when a caller already knows them. The cron
+ * fills those columns with writeReceipts instead, from the operator's per-day totals on the snapshot.
  * Returns how many safes were written and how many had no matching account (not written, not an error).
  */
 export async function writeAccountSnapshot(db: Db, snapshot: SnapshotWire, now: Date, receipts: Map<string, AccountReceipt> = new Map()): Promise<{ written: number; unmatched: number }> {
@@ -185,8 +194,8 @@ export type PositionReceipt = { collectedUsd?: number; collected0?: string; coll
  * Upserts yield_ledger_position_entry (once per token id) and yield_ledger_position_daily (open on the day's
  * first call, close on every call) for every position whose `holdValueUsdc` the operator computed (the same
  * `yield_ledger` flag turns that on there too; a position without it is skipped, counted, never written with a
- * guessed baseline). `receipts`, keyed by token id, carries collected amounts the same way writeAccountSnapshot's do:
- * empty until a harvest-receipt tracker exists.
+ * guessed baseline). `receipts`, keyed by token id, carries collected amounts the same way writeAccountSnapshot's do;
+ * the cron fills them with writeReceipts.
  */
 export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date, receipts: Map<string, PositionReceipt> = new Map()): Promise<{ written: number; skipped: number }> {
   const day = dayOf(snapshot.readAt)
@@ -248,11 +257,44 @@ export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date
   return { written, skipped }
 }
 
+/**
+ * Writes the operator's per-day receipts (gas paid, fees collected) onto the account_daily and
+ * yield_ledger_position_daily rows the snapshot writers already made for those days. UPDATE only: a day with no
+ * snapshot row has no open/close figures to sit next to, so it is not invented here. The totals are absolute, so
+ * gas_paid_wei and collected0/1 are replaced; a collected USD figure the operator could not price yet leaves the
+ * stored one as it was.
+ */
+export async function writeReceipts(db: Db, snapshot: SnapshotWire): Promise<void> {
+  for (const safe of snapshot.safes) {
+    if (!safe.receipts?.length) continue
+    if (!(await resolveAccount(db, snapshot.chainId, safe.safe))) continue
+    const address = safe.safe.toLowerCase()
+    for (const d of safe.receipts) {
+      const collected = d.collectedUsdc === undefined ? null : Number(d.collectedUsdc)
+      await db
+        .prepare('UPDATE account_daily SET gas_paid_wei = ?, collected_usdc = COALESCE(?, collected_usdc) WHERE day = ? AND chain_id = ? AND address = ?')
+        .bind(d.gasWei, collected, d.day, snapshot.chainId, address)
+        .run()
+      for (const p of d.positions) {
+        const usd = p.collectedUsdc === undefined ? null : Number(p.collectedUsdc)
+        await db
+          .prepare(
+            `UPDATE yield_ledger_position_daily SET collected0 = ?, collected1 = ?, collected_usd = COALESCE(?, collected_usd), fee_accrued_usd = COALESCE(?, fee_accrued_usd)
+             WHERE day = ? AND chain_id = ? AND token_id = ? AND address = ?`,
+          )
+          .bind(p.collected0, p.collected1, usd, feeReadinessUsd(usd), d.day, snapshot.chainId, Number(p.tokenId), address)
+          .run()
+      }
+    }
+  }
+}
+
 /** One cron tick: pull the operator's snapshot and write everything it can. No-op, never throws, when the operator answers nothing (loop off, not reachable, or no read yet). */
 export async function pullYieldLedger(db: Db, operatorUrl: string, operatorSecret: string, fetcher: OperatorFetch, now: Date): Promise<{ accounts: number; positions: number } | null> {
   const snapshot = await fetchSnapshot(operatorUrl, operatorSecret, fetcher)
   if (!snapshot) return null
   const accounts = await writeAccountSnapshot(db, snapshot, now)
   const positions = await writeYieldLedger(db, snapshot, now)
+  await writeReceipts(db, snapshot)
   return { accounts: accounts.written, positions: positions.written }
 }

@@ -6,6 +6,7 @@ import type { SafeTx } from '@mamoru/account/live'
 import type { Execution } from '@mamoru/account/safe'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { SponsorEntry } from './sponsorship.ts'
+import type { OpFacts } from './yield-receipts.ts'
 
 /** An op as GET /ops serves it, plus what the operator keeps: repeat count of an identical failure, and for a confirmed engine op the session and calls it used (ledger replay on restart). */
 export type StoredOp = OpView & {
@@ -28,6 +29,8 @@ export type StoredOp = OpView & {
   /** When (ms) a copy of its transaction was first, and last, handed to a provider (an armed Start: maybe days after sentAt). */
   broadcastAt?: number
   lastBroadcastAt?: number
+  /** otto/mamoru#129: an engine op's gas and collected fees, read once from its receipt (yield-receipts.ts). */
+  facts?: OpFacts
 }
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */

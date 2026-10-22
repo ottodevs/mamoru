@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 import { feeGrowthInside, positionFees } from '@mamoru/uniswap-v3/fees'
 import { memoryD1 } from './d1.ts'
 import {
+  writeReceipts,
   dayOf,
   feeReadinessUsd,
   fetchSnapshot,
@@ -235,6 +236,45 @@ describe('writeYieldLedger (otto/mamoru#129): reconciliation against the fee mat
     row = db.raw.query('SELECT collected_usd, fee_accrued_usd FROM yield_ledger_position_daily WHERE token_id = 42').get() as Record<string, unknown>
     expect(row.collected_usd).toBe(100)
     expect(row.fee_accrued_usd).toBe(10)
+  })
+})
+
+describe('writeReceipts (otto/mamoru#129): the operator\'s per-day gas and collected fees', () => {
+  let db: ReturnType<typeof memoryD1>
+  beforeEach(() => {
+    db = memoryD1()
+    seedAccount(db)
+  })
+  const day = '2026-10-16'
+  const withReceipts = (receipts: SafeWire['receipts']) => snapshot({ safes: [safe({ receipts })] })
+  const accountRow = () => db.raw.query('SELECT collected_usdc, gas_paid_wei FROM account_daily WHERE day = ?').get(day) as Record<string, unknown>
+  const positionRow = () => db.raw.query('SELECT collected0, collected1, collected_usd, fee_accrued_usd FROM yield_ledger_position_daily WHERE day = ? AND token_id = 42').get(day) as Record<string, unknown>
+
+  test('fills the day\'s rows the snapshot writers made, and writing the same totals again changes nothing', async () => {
+    await writeAccountSnapshot(db, snapshot(), new Date('2026-10-16T09:00:05Z'))
+    await writeYieldLedger(db, snapshot(), new Date('2026-10-16T09:00:05Z'))
+    const r = withReceipts([{ day, gasWei: '777', collectedUsdc: '500', positions: [{ tokenId: '42', collected0: '500', collected1: '3', collectedUsdc: '500' }] }])
+    await writeReceipts(db, r)
+    await writeReceipts(db, r)
+    expect(accountRow()).toEqual({ collected_usdc: 500, gas_paid_wei: '777' })
+    expect(positionRow()).toEqual({ collected0: '500', collected1: '3', collected_usd: 500, fee_accrued_usd: 50 })
+  })
+
+  test('a day not priced yet keeps the stored USD figure but still takes the gas and raw amounts', async () => {
+    await writeAccountSnapshot(db, snapshot(), new Date('2026-10-16T09:00:05Z'))
+    await writeYieldLedger(db, snapshot(), new Date('2026-10-16T09:00:05Z'))
+    await writeReceipts(db, withReceipts([{ day, gasWei: '1', collectedUsdc: '9', positions: [{ tokenId: '42', collected0: '9', collected1: '0', collectedUsdc: '9' }] }]))
+    await writeReceipts(db, withReceipts([{ day, gasWei: '2', positions: [{ tokenId: '42', collected0: '10', collected1: '0' }] }]))
+    expect(accountRow()).toEqual({ collected_usdc: 9, gas_paid_wei: '2' })
+    expect(positionRow()).toEqual({ collected0: '10', collected1: '0', collected_usd: 9, fee_accrued_usd: 1 })
+  })
+
+  test('never creates a row for a day without a snapshot, and skips a safe no account owns', async () => {
+    await writeReceipts(db, withReceipts([{ day, gasWei: '5', collectedUsdc: '0', positions: [] }]))
+    expect(db.raw.query('SELECT COUNT(*) AS n FROM account_daily').get()).toEqual({ n: 0 })
+    await writeAccountSnapshot(db, snapshot(), new Date('2026-10-16T09:00:05Z'))
+    await writeReceipts(db, snapshot({ safes: [safe({ safe: '0x0000000000000000000000000000000000dEaD', receipts: [{ day, gasWei: '5', positions: [] }] })] }))
+    expect(accountRow().gas_paid_wei).toBeNull()
   })
 })
 
