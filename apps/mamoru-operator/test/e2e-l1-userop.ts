@@ -22,7 +22,7 @@ import { concat, createPublicClient, encodeAbiParameters, encodeFunctionData, ht
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import type { AccountContext, Address, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
-import { address, entryPointV07Abi, erc20Abi } from '@mamoru/registry'
+import { address, baseRegistry, entryPointV07Abi, erc20Abi } from '@mamoru/registry'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
 import { P256_N } from '@mamoru/account/live'
@@ -122,7 +122,7 @@ try {
   // The real Pimlico paymaster: code, EntryPoint deposit, and a dev signer written into signers[].
   const pm = PIMLICO_ERC20_PAYMASTER_V07
   check(((await l1.getCode({ address: pm })) ?? '0x').length > 2, `Pimlico ERC-20 paymaster v0.7 has code at ${pm}`)
-  const pmDeposit = await l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'balanceOf', args: [pm] })
+  const pmDeposit = await l1.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'balanceOf', args: [pm] })
   console.log(`  its EntryPoint v0.7 deposit: ${Number(pmDeposit) / 1e18} ETH`)
   let slot = -1
   for (let i = 0; i < 64 && slot < 0; i++) {
@@ -210,7 +210,7 @@ try {
   check(en.ok && th.ok, 'Base fork: a dev attester enabled in MessageTransmitterV2, threshold 1')
 
   const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
-  const owners = [address('SafeWebAuthnSharedSigner')]
+  const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
   const newAccount = (tag: string): AccountContext => {
     const saltNonce = BigInt(Date.now()) * 1000n + BigInt(randomBytes(1)[0]!)
     return {
@@ -337,10 +337,10 @@ try {
   const poolBefore = await usdcAt(ACROSS_SPOKE_POOL)
   const treasuryBefore = await usdcAt(TREASURY)
   const relayerBefore = await l1.getBalance({ address: l1Relayer.address })
-  const pmDepositBefore = await l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'balanceOf', args: [pm] })
+  const pmDepositBefore = await l1.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'balanceOf', args: [pm] })
   const done = await bo.submit(ctx, browserSign(p1))
   const relayerAfter = await l1.getBalance({ address: l1Relayer.address })
-  const pmDepositAfter = await l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'balanceOf', args: [pm] })
+  const pmDepositAfter = await l1.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'balanceOf', args: [pm] })
   const r = done.route!
   check(r.state === 'deposited' && !!r.userOpHash && !!r.depositId && !r.deployTx, `submit: ${r.state}, deposit id ${r.depositId}, userOp ${r.userOpHash?.slice(0, 18)}…`)
   check(((await l1.getCode({ address: safe })) ?? '0x').length > 2, 'the userOp deployed the account at the same address')

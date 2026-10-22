@@ -1,7 +1,7 @@
 import { concat, decodeEventLog, getAddress, hashTypedData, numberToHex, toEventSelector, type Log, type TransactionReceipt } from 'viem'
 import type { UserOperation } from 'viem/account-abstraction'
 import type { Address, Hex } from '@mamoru/domain'
-import { address, entryPointV07Abi } from '@mamoru/registry'
+import { address, baseRegistry, entryPointV07Abi } from '@mamoru/registry'
 import { executeCallData } from '../sessions/index.ts'
 import { deployCall, type LiveAccount } from '../live/index.ts'
 import type { MultiSendCall } from '../safe/index.ts'
@@ -65,7 +65,7 @@ export function packedPaymasterAndData(op: UserOperation<'0.7'>): Hex {
 /** The EIP-712 SafeOp Safe7579 rebuilds in validateUserOp. validAfter/validUntil travel in the signature. */
 export function safeOpTypedData(op: UserOperation<'0.7'>, chainId: number, validAfter: number, validUntil: number) {
   return {
-    domain: { chainId, verifyingContract: address('Safe7579') },
+    domain: { chainId, verifyingContract: address('Safe7579', baseRegistry) },
     types: {
       SafeOp: [
         { name: 'safe', type: 'address' },
@@ -97,7 +97,7 @@ export function safeOpTypedData(op: UserOperation<'0.7'>, chainId: number, valid
       paymasterAndData: packedPaymasterAndData(op),
       validAfter,
       validUntil,
-      entryPoint: address('EntryPointV07'),
+      entryPoint: address('EntryPointV07', baseRegistry),
     },
   }
 }
@@ -128,7 +128,7 @@ const USER_OPERATION_EVENT = toEventSelector('UserOperationEvent(bytes32,address
  * the hash. Another userOp in the same bundle cannot put logs inside this slice.
  */
 export function userOpLogs(receipt: TransactionReceipt, userOpHash: Hex): { logs: Log[]; success: boolean; actualGasCost: bigint; actualGasUsed: bigint; paymaster: Address } | null {
-  const ep = address('EntryPointV07').toLowerCase()
+  const ep = address('EntryPointV07', baseRegistry).toLowerCase()
   let start = -1
   for (let i = 0; i < receipt.logs.length; i++) {
     const l = receipt.logs[i]!

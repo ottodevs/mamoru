@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import { encodeAbiParameters, encodeEventTopics, keccak256, toEventSelector, type Log, type TransactionReceipt } from 'viem'
 import type { Address, Hex } from '@mamoru/domain'
-import { address, entryPointV07Abi } from '@mamoru/registry'
+import { address, baseRegistry, entryPointV07Abi } from '@mamoru/registry'
 import { accountSetup, counterfactualAddress } from '../recovery/index.ts'
 import { webAuthnSigner } from '../safe/index.ts'
 import { deployCall, type LiveAccount } from '../live/index.ts'
 import { maxGasCostWei, ownerUserOp, ownerUserOpSignature, packedInitCode, packedPaymasterAndData, safeOpHash, userOpLogs } from './index.ts'
 
-const owners = [address('SafeWebAuthnSharedSigner')]
+const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
 const webauthn = webAuthnSigner(1n, 2n)
 const live: LiveAccount = { safe: counterfactualAddress(accountSetup(owners, 7n, webauthn)), chainId: 1, owners, saltNonce: 7n, webauthn }
 const gas = { verificationGasLimit: 700_000n, callGasLimit: 200_000n, preVerificationGas: 80_000n, maxFeePerGas: 2_000_000_000n, maxPriorityFeePerGas: 1_000_000n }
@@ -54,7 +54,7 @@ describe('owner userOp (#180)', () => {
 })
 
 describe('userOpLogs (#180)', () => {
-  const ep = address('EntryPointV07')
+  const ep = address('EntryPointV07', baseRegistry)
   const other = '0x00000000000000000000000000000000000000cc' as Address
   const before: Log = { address: ep, topics: [toEventSelector('BeforeExecution()')], data: '0x' } as unknown as Log
   const plain = (n: number): Log => ({ address: other, topics: [keccak256(`0x0${n}`)], data: '0x' }) as unknown as Log

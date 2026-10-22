@@ -10,7 +10,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPublicClient, encodeFunctionData, http, toHex, type Hex } from 'viem'
 import type { AccountContext, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
-import { address, erc20Abi } from '@mamoru/registry'
+import { address, baseRegistry, erc20Abi } from '@mamoru/registry'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
 import { P256_N } from '@mamoru/account/live'
@@ -68,7 +68,7 @@ try {
   check((await l1.getChainId()) === 1, 'fork keeps chain id 1')
 
   const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
-  const owners = [address('SafeWebAuthnSharedSigner')]
+  const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
   const saltNonce = BigInt(Date.now())
   const ctx: AccountContext = {
     accountKey: `e2e-${saltNonce}`,

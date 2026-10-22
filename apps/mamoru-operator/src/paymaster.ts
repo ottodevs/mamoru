@@ -1,7 +1,7 @@
 import { getAddress, hexToBigInt, sliceHex, toHex, type Hex } from 'viem'
 import type { UserOperation } from 'viem/account-abstraction'
 import type { Address } from '@mamoru/domain'
-import { address } from '@mamoru/registry'
+import { address, baseRegistry } from '@mamoru/registry'
 import { toRpcUserOp } from '@mamoru/erc4337'
 import type { PaymasterFields } from '@mamoru/account/userop'
 
@@ -181,7 +181,7 @@ export class PimlicoErc20Paymaster implements Erc20Paymaster {
   }
 
   async quote(): Promise<GasPrice> {
-    const r = await this.rpc<{ quotes?: { paymaster: string; token: string; exchangeRate: Hex; postOpGas: Hex }[] }>('pimlico_getTokenQuotes', [{ tokens: [this.usdc] }, address('EntryPointV07'), toHex(this.chainId)])
+    const r = await this.rpc<{ quotes?: { paymaster: string; token: string; exchangeRate: Hex; postOpGas: Hex }[] }>('pimlico_getTokenQuotes', [{ tokens: [this.usdc] }, address('EntryPointV07', baseRegistry), toHex(this.chainId)])
     const q = r.quotes?.find((x) => x.token.toLowerCase() === this.usdc.toLowerCase())
     if (!q) throw new PaymasterError('no USDC quote')
     const paymaster = getAddress(q.paymaster)
@@ -190,7 +190,7 @@ export class PimlicoErc20Paymaster implements Erc20Paymaster {
   }
 
   private params(op: UserOperation<'0.7'>) {
-    return [toRpcUserOp(op), address('EntryPointV07'), toHex(this.chainId), { token: this.usdc }]
+    return [toRpcUserOp(op), address('EntryPointV07', baseRegistry), toHex(this.chainId), { token: this.usdc }]
   }
 
   async stub(op: UserOperation<'0.7'>): Promise<PaymasterFields> {
@@ -226,7 +226,7 @@ export class L1Bundler {
   async estimate(op: UserOperation<'0.7'>): Promise<GasEstimate | null> {
     let r: Record<string, Hex | undefined>
     try {
-      r = await this.rpc<Record<string, Hex | undefined>>('eth_estimateUserOperationGas', [toRpcUserOp(op), address('EntryPointV07')])
+      r = await this.rpc<Record<string, Hex | undefined>>('eth_estimateUserOperationGas', [toRpcUserOp(op), address('EntryPointV07', baseRegistry)])
     } catch (e) {
       if (e instanceof RpcRefused && e.code === -32601) return null
       throw e
@@ -254,7 +254,7 @@ export class L1Bundler {
   }
 
   async send(op: UserOperation<'0.7'>): Promise<Hex> {
-    return this.rpc<Hex>('eth_sendUserOperation', [toRpcUserOp(op), address('EntryPointV07')])
+    return this.rpc<Hex>('eth_sendUserOperation', [toRpcUserOp(op), address('EntryPointV07', baseRegistry)])
   }
 
   async receipt(userOpHash: Hex): Promise<BundlerReceipt | null> {
@@ -322,7 +322,7 @@ export class CandideErc20Paymaster implements Erc20Paymaster {
   }
 
   async quote(): Promise<GasPrice> {
-    const r = await this.rpc<{ paymasterMetadata?: { address?: string; dummyPaymasterAndData?: { paymasterPostOpGasLimit?: Hex } }; tokens?: { address: string; exchangeRate: Hex | string }[] }>('pm_supportedERC20Tokens', [address('EntryPointV07')])
+    const r = await this.rpc<{ paymasterMetadata?: { address?: string; dummyPaymasterAndData?: { paymasterPostOpGasLimit?: Hex } }; tokens?: { address: string; exchangeRate: Hex | string }[] }>('pm_supportedERC20Tokens', [address('EntryPointV07', baseRegistry)])
     const pm = r.paymasterMetadata?.address
     if (!pm || getAddress(pm) !== getAddress(this.expected)) throw new PaymasterError('unexpected paymaster')
     const t = r.tokens?.find((x) => x.address.toLowerCase() === this.usdc.toLowerCase())
@@ -332,7 +332,7 @@ export class CandideErc20Paymaster implements Erc20Paymaster {
   }
 
   private params(op: UserOperation<'0.7'>) {
-    return [toRpcUserOp(op), address('EntryPointV07'), toHex(this.chainId), { token: this.usdc }]
+    return [toRpcUserOp(op), address('EntryPointV07', baseRegistry), toHex(this.chainId), { token: this.usdc }]
   }
 
   async stub(op: UserOperation<'0.7'>): Promise<PaymasterFields> {

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { encodeFunctionData, getAddress, pad, parseAbi, parseAbiItem, parseEventLogs, TransactionNotFoundError, TransactionReceiptNotFoundError, toHex, zeroAddress, type Hex, type Log, type PublicClient, type TransactionReceipt } from 'viem'
 import type { UserOperation } from 'viem/account-abstraction'
 import type { AccountContext, Address, BridgeOutRoute, BridgeOutToSign, BridgeOutView, OwnerSignature } from '@mamoru/domain'
-import { address, entryPointV07Abi, erc20Abi } from '@mamoru/registry'
+import { address, baseRegistry, entryPointV07Abi, erc20Abi } from '@mamoru/registry'
 import { browserOwnerSignature, deployCall, encodeWebAuthnSignature, liveAccountFromContext, ownerSafeTx, readSafeNonce, safeContractSignature, safeTxHashOf, verifyOwnerSignature, type LiveAccount } from '@mamoru/account/live'
 import { execTransactionData, type SafeTx } from '@mamoru/account/safe'
 import { userOpHash } from '@mamoru/account/sessions'
@@ -255,7 +255,7 @@ export function gasCapUsdc(op: UserOperation<'0.7'>, q: GasPrice, maxConstantFee
 export function stubOwnerSignature(validUntil: number): Hex {
   const auth = `0x${'49'.repeat(32)}05${'00'.repeat(4)}` as Hex
   const sig = encodeWebAuthnSignature({ authenticatorData: auth, clientDataFields: '"origin":"https://app.mamoru.lol","crossOrigin":false', r: 1n, s: 1n })
-  return ownerUserOpSignature(0, validUntil, safeContractSignature(address('SafeWebAuthnSharedSigner'), sig))
+  return ownerUserOpSignature(0, validUntil, safeContractSignature(address('SafeWebAuthnSharedSigner', baseRegistry), sig))
 }
 
 const USER_OPERATION_EVENT = parseAbiItem('event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)')
@@ -453,7 +453,7 @@ export class BridgeOut {
     if (r.state !== 'unconfirmed' || this.now() - Date.parse(r.at) < UNCONFIRMED_GIVEUP_MS) return true
     try {
       const nonce = r.userOpHash
-        ? await this.l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'getNonce', args: [r.safe, OWNER_NONCE_KEY] })
+        ? await this.l1.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'getNonce', args: [r.safe, OWNER_NONCE_KEY] })
         : (await readSafeNonce(this.l1, r.safe)).nonce
       return nonce !== BigInt(r.safeNonce)
     } catch {
@@ -518,7 +518,7 @@ export class BridgeOut {
     const [fees, code, nonce] = await Promise.all([
       aa.bundler.gasPrice().then((g) => g ?? this.l1.estimateFeesPerGas()),
       this.l1.getCode({ address: live.safe }),
-      this.l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'getNonce', args: [live.safe, OWNER_NONCE_KEY] }),
+      this.l1.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'getNonce', args: [live.safe, OWNER_NONCE_KEY] }),
     ])
     if (fees.maxFeePerGas > MAX_GAS_PRICE_WEI) throw new HttpError(503, 'BRIDGE_GAS_HIGH', 'Ethereum gas is too high right now, try later')
     const deployed = !!code && code !== '0x'
@@ -695,7 +695,7 @@ export class BridgeOut {
     const [balance, code, nonce, head] = await Promise.all([
       this.usdcAt(p.live.safe),
       this.l1.getCode({ address: p.live.safe }),
-      this.l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'getNonce', args: [p.live.safe, OWNER_NONCE_KEY] }),
+      this.l1.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'getNonce', args: [p.live.safe, OWNER_NONCE_KEY] }),
       this.l1.getBlockNumber({ cacheTime: 0 }),
     ])
     if (balance !== u.balance || (!!code && code !== '0x') !== p.deployed || nonce !== u.op.nonce) throw new HttpError(409, 'BRIDGE_STALE', 'the balance on Ethereum changed, tap again')
@@ -755,7 +755,7 @@ export class BridgeOut {
         if (route.state === 'unconfirmed' && !route.l1Tx) {
           const [receipt, nonceNow] = await Promise.all([
             aa.bundler.receipt(hash).catch(() => undefined),
-            this.l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'getNonce', args: [p.live.safe, OWNER_NONCE_KEY] }).catch(() => undefined),
+            this.l1.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'getNonce', args: [p.live.safe, OWNER_NONCE_KEY] }).catch(() => undefined),
           ])
           if (receipt === null && nonceNow === u.op.nonce) route.state = 'failed'
         }
@@ -811,7 +811,7 @@ export class BridgeOut {
       const rc = await this.l1.getTransactionReceipt({ hash: r.tx }).catch((e) => (e instanceof TransactionReceiptNotFoundError ? null : undefined))
       if (rc === undefined) continue
       if (rc) {
-        const refund = parseEventLogs({ abi: entryPointV07Abi, eventName: 'UserOperationEvent', logs: rc.logs.filter((l) => getAddress(l.address) === address('EntryPointV07')) }).reduce((a, l) => a + l.args.actualGasCost, 0n)
+        const refund = parseEventLogs({ abi: entryPointV07Abi, eventName: 'UserOperationEvent', logs: rc.logs.filter((l) => getAddress(l.address) === address('EntryPointV07', baseRegistry)) }).reduce((a, l) => a + l.args.actualGasCost, 0n)
         // The refund goes to the beneficiary, the relayer itself (bundler.ts handleOpsData).
         this.settle(key, rc.gasUsed * rc.effectiveGasPrice - refund)
         continue
@@ -947,14 +947,14 @@ export class BridgeOut {
    * EntryPoint refuses it after that, so it can only be in the first ~50 of the 7,200 blocks searched.
    */
   private async findUserOpTx(r: Stored): Promise<Hex | undefined> {
-    const nonce = await this.l1.readContract({ address: address('EntryPointV07'), abi: entryPointV07Abi, functionName: 'getNonce', args: [r.safe, OWNER_NONCE_KEY] })
+    const nonce = await this.l1.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'getNonce', args: [r.safe, OWNER_NONCE_KEY] })
     if (nonce <= BigInt(r.safeNonce)) return undefined
     const head = await this.l1.getBlockNumber({ cacheTime: 0 })
     const from = BigInt(r.fromBlock)
     const end = head < from + LOG_WINDOW_BLOCKS ? head : from + LOG_WINDOW_BLOCKS
     for (let lo = from; lo <= end; lo += LOG_CHUNK_BLOCKS) {
       const hi = lo + LOG_CHUNK_BLOCKS - 1n < end ? lo + LOG_CHUNK_BLOCKS - 1n : end
-      const logs = await this.l1.getLogs({ address: address('EntryPointV07'), event: USER_OPERATION_EVENT, args: { userOpHash: r.userOpHash }, fromBlock: lo, toBlock: hi })
+      const logs = await this.l1.getLogs({ address: address('EntryPointV07', baseRegistry), event: USER_OPERATION_EVENT, args: { userOpHash: r.userOpHash }, fromBlock: lo, toBlock: hi })
       if (logs.length > 0) return logs[0]!.transactionHash ?? undefined
     }
     logErr(`[bridge-out] ${r.safe.slice(0, 10)}:`, `EntryPoint nonce spent but no UserOperationEvent for the userOp in blocks ${from}..${end}`)
