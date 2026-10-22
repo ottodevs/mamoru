@@ -452,25 +452,46 @@ try {
   if (!drain.ok) exitCode = 1
   const takerUsdcIn2 = 200_000_000n
   await lab.whaleTransfer('USDC', WHALE, taker.address, takerUsdcIn2)
-  await lab.send(taker, USDC, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [SWAP_VM_FROM_DOCS, takerUsdcIn2] }))
+  // The taker side must be provably fine, so a revert below can only come from the maker's missing WETH: the
+  // approval's result is checked, and the taker's USDC balance and allowance are read back, not assumed.
+  const takerApprove2 = await lab.send(taker, USDC, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [SWAP_VM_FROM_DOCS, takerUsdcIn2] }))
+  const takerUsdcBal2 = await lab.balanceOf('USDC', taker.address)
+  const takerUsdcAllow2 = await lab.client.readContract({ address: USDC, abi: erc20Abi, functionName: 'allowance', args: [taker.address, SWAP_VM_FROM_DOCS] })
+  const takerSideReady = takerApprove2.ok && takerUsdcBal2 >= takerUsdcIn2 && takerUsdcAllow2 >= takerUsdcIn2
+  note('overcommit setup: the taker holds the USDC and has approved it (taker side cannot be the cause of a revert)', takerSideReady, `approve ${takerApprove2.ok ? 'ok' : 'FAILED'}, USDC balance ${takerUsdcBal2}, allowance ${takerUsdcAllow2}, needed ${takerUsdcIn2}`)
+  if (!takerSideReady) exitCode = 1
   const swapArgs2 = { order: feeOrder, tokenIn: new AquaAddress(USDC), tokenOut: new AquaAddress(WETH), amount: takerUsdcIn2, takerTraits: TakerTraits.default() }
   const swapTx2 = swapVm.swap(swapArgs2)
-  let overcommitReverted = false
+  const dryRunOvercommit = () => lab.client.call({ account: taker.address, to: getAddress(swapTx2.to), data: swapTx2.data as Hex, gas: 5_000_000n })
+  let overcommitSelector: Hex | null = null
   let overcommitDetail = ''
   try {
-    await lab.client.call({ account: taker.address, to: getAddress(swapTx2.to), data: swapTx2.data as Hex, gas: 5_000_000n })
+    await dryRunOvercommit()
     overcommitDetail = 'the call did NOT revert'
   } catch (e) {
-    overcommitReverted = true
-    overcommitDetail = reason(e)
+    // Only a genuine on-chain revert counts; an RPC or network failure never reached the EVM.
+    overcommitSelector = decodedRevertSelector(e)
+    overcommitDetail = `${reason(e)}${overcommitSelector ? ` (selector ${overcommitSelector})` : ' (no decoded revert data: not shown to be an EVM revert)'}`
   }
-  note('overcommit: a fill against a strategy with no real tokens left reverts', overcommitReverted, overcommitDetail)
-  if (!overcommitReverted) exitCode = 1
+  note('overcommit: a fill against a strategy with no real tokens left reverts', takerSideReady && overcommitSelector !== null, overcommitDetail)
+  if (!(takerSideReady && overcommitSelector !== null)) exitCode = 1
 
   // --- 11. Rebalance: dock the old strategy, ship a new one at a shifted range, with what is left ---------------
   await lab.setBalance(funder.address, wethLeft + 10n ** 18n)
   await lab.send(funder, WETH, encodeFunctionData({ abi: depositAbi, functionName: 'deposit' }), wethLeft)
   await lab.send(funder, WETH, encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [safe, wethLeft] }))
+  // Causality for 10b: the same fill, same caller, same calldata, with only the maker's WETH put back.
+  let overcommitCauseConfirmed = false
+  let overcommitCauseDetail = ''
+  try {
+    await dryRunOvercommit()
+    overcommitCauseConfirmed = true
+    overcommitCauseDetail = 'the identical fill now succeeds with the maker\'s real WETH restored, nothing else changed'
+  } catch (e) {
+    overcommitCauseDetail = reason(e)
+  }
+  note('overcommit causality: the same fill succeeds once the maker\'s WETH is restored', overcommitCauseConfirmed, overcommitCauseDetail)
+  if (!overcommitCauseConfirmed) exitCode = 1
   const sqrtMinShifted = (sqrtSpot * 10n) / 9n // the old max becomes the new min: price moved up
   const sqrtMaxShifted = (sqrtMinShifted * 10n) / 9n
   const newProgram = AquaXYCAmmStrategy.newConcentrate({ sqrtPriceMin: sqrtMinShifted, sqrtPriceMax: sqrtMaxShifted }).withFeeTokenIn(feeBps).build()
