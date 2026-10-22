@@ -99,16 +99,22 @@ describe('positions without valueUsdc', () => {
     // A leg holding nothing needs no price.
     expect(valueOf(noValue('4', 'pool:USDC/USDT/100', [{ token: 'USDC', amount: '1000000', decimals: 6 }, { token: 'USDT', amount: '0', decimals: 6 }]), null)).toEqual({ value: 1_000_000n, unpriced: [] })
   })
-  test('n/a value and share for every position, rates over the valued ones with N of M', () => {
+  test('an unvalued position makes value, share and both account rates n/a, even with the rest valued', () => {
     const f = { ...placed, positions: [pos('1', 'pool:USDC/cbBTC/500', '5000000'), usdt] }
     const rows = positionRates(f, apy)
     expect(rows.map((r) => r.valueUsdc)).toEqual([5_000_000n, null])
     expect(rows.map((r) => r.sharePct)).toEqual([null, null])
-    expect(currentRate(rows, apy)).toMatchObject({ pct: 7.3, covered: 1, of: 2 })
-    expect(monthlyRate(rows, apy)).toMatchObject({ pct: 18.9, covered: 1, of: 2 })
+    // Round 2: the unvalued one may hold most of the capital, so no rate that leaves it out.
+    expect(currentRate(rows, apy)).toMatchObject({ pct: null, gap: 'no-value', of: 2 })
+    expect(monthlyRate(rows, apy)).toMatchObject({ pct: null, gap: 'no-value', of: 2 })
     const { text } = render(<Working f={f} s={split(f, null)} apy={apy} onStop={null} />)
-    expect(text).toContain('n/a: no USDC price for USDT in this view yet')
+    expect(text).toContain('n/a: no USDC price for USDT in this view yet, so its value, its share and the account rates show n/a.')
     expect(text).toContain('Share n/a')
+  })
+  test('a paused unvalued position leaves the current rate alone but makes the monthly rate n/a', () => {
+    const rows = positionRates({ ...placed, positions: [pos('1', 'pool:USDC/USDT/100', '1000000'), noValue('2', 'pool:WETH/USDC/3000', undefined, false)] }, apy)
+    expect(currentRate(rows, apy)).toMatchObject({ pct: 3, gap: null })
+    expect(monthlyRate(rows, apy)).toMatchObject({ pct: null, gap: 'no-value' })
   })
   test('nothing valued: n/a for the account rates, with the reason', () => {
     const rows = positionRates({ ...placed, positions: [weth] }, apy)
@@ -160,7 +166,22 @@ describe('idle breakdown without the operator list', () => {
     ])
     const { text } = render(<Idle f={old} s={s} />)
     expect(text).toContain('cbBTC not priced yet, not counted in the total')
+    expect(text).not.toContain('nothing idle')
     expect(text).toContain('0.00005 cbBTC n/a USDC')
+  })
+  test('only unpriced cbBTC idle: listed, never "nothing idle"', () => {
+    const only = { ...old, usdc: '0' }
+    const s = split(only, null)
+    expect(s.idle).toBe(0n)
+    expect(idleReason(only, s)).toBe('waiting to be placed')
+    const { text } = render(<Idle f={only} s={s} />)
+    expect(text).toContain('0.00005 cbBTC')
+    expect(text).not.toContain('nothing idle')
+  })
+  test('compact rows keep the token line and range in the markup', () => {
+    const { html } = render(<Working f={placed} s={split(placed, null)} apy={apy} onStop={null} />)
+    expect(html).toContain('class="wc-legs"')
+    expect(html).toContain('In range')
   })
   test('a single non-USDC idle token is named on the line', () => {
     const only = { ...old, usdc: '0' }

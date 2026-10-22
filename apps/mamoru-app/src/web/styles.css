@@ -1323,12 +1323,18 @@
   .wc-cols + ul > .wc-row:first-child {
     border-top: 1px solid var(--color-wash);
   }
+  /* Token amounts and range stay visible: with no separate token card they are the only per-token view. */
   .wc-marks,
-  .wc-venue,
-  .wc-legs,
   .wc-bar,
   .wc-rate {
     display: none;
+  }
+  .wc-venue,
+  .wc-legs {
+    font-size: 0.72rem;
+  }
+  .wc-legs {
+    white-space: normal;
   }
   .wc-name {
     grid-column: 1;
@@ -1345,6 +1351,7 @@
     grid-column: 1;
     grid-row: 2;
     align-items: flex-start;
+    text-align: left;
   }
   .wc-amount .wc-num {
     font-family: var(--font-mono);

@@ -120,9 +120,11 @@ export function currentRate(rows: PositionRate[], apy: ApyView | undefined): Acc
   if (rows.length === 0) return { pct: null, gap: 'no-positions', covered: 0, of: 0 }
   const earning = rows.filter((r) => r.inRange)
   if (earning.length === 0) return { pct: null, gap: 'all-paused', covered: 0, of: 0 }
-  // A position that cannot be valued is left out of the weights and counted: "N of M positions with a rate".
+  // A position earning now that cannot be valued may hold most of the capital: no account rate rather than one
+  // that leaves it out (otto/mamoru#193 review round 2). A pool with no rate today is left out and counted.
+  if (earning.some((r) => r.valueUsdc === null)) return { pct: null, gap: 'no-value', covered: 0, of: earning.length }
   const { pct, covered } = weighted(earning, (r) => r.currentPct)
-  return { pct, gap: pct !== null ? null : earning.some((r) => r.valueUsdc === null) ? 'no-value' : 'no-data', covered, of: earning.length }
+  return { pct, gap: pct === null ? 'no-data' : null, covered, of: earning.length }
 }
 
 /**
@@ -132,8 +134,10 @@ export function currentRate(rows: PositionRate[], apy: ApyView | undefined): Acc
 export function monthlyRate(rows: PositionRate[], apy: ApyView | undefined): AccountRate & { plan: boolean } {
   if (!apy) return { pct: null, gap: 'loading', covered: 0, of: 0, plan: false }
   if (rows.length === 0) return { pct: apy.monthlyPct, gap: apy.monthlyPct === null ? 'no-data' : null, covered: 0, of: 0, plan: true }
+  // Every position counts for the month, paused ones too: any unvalued one makes the rate n/a.
+  if (rows.some((r) => r.valueUsdc === null)) return { pct: null, gap: 'no-value', covered: 0, of: rows.length, plan: false }
   const { pct, covered } = weighted(rows, (r) => r.monthlyPct)
-  return { pct, gap: pct !== null ? null : rows.some((r) => r.valueUsdc === null) ? 'no-value' : 'no-data', covered, of: rows.length, plan: false }
+  return { pct, gap: pct === null ? 'no-data' : null, covered, of: rows.length, plan: false }
 }
 
 /** The data source named in an ApyView source line ("Plan pools, 30-day mean · DefiLlama" -> "DefiLlama"). */
@@ -145,7 +149,8 @@ export function sourceName(line: string | undefined): string | null {
 
 /** What the idle line says after the amount. */
 export function idleReason(f: FundingView, s: Split): string {
-  if (s.idle < DUST_USDC) return 'nothing idle'
+  // A listed token (unpriced cbBTC, say) is idle even when its USDC value is unknown.
+  if (s.idle < DUST_USDC && s.idleTokens.length === 0) return 'nothing idle'
   if (!f.active) return f.positions.length > 0 ? 'Mamoru is stopped' : 'Mamoru is not running yet'
   if (f.engine?.placing || f.progress) return 'being placed'
   return 'waiting to be placed'

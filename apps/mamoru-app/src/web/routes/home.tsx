@@ -62,7 +62,7 @@ export const homeCopy = {
   inRange: 'In range',
   paused: 'Paused: out of range. Mamoru puts it back to work automatically.',
   noRate: 'n/a: no rate source for this pool yet.',
-  unpriced: (tokens: string) => `n/a: no USDC price for ${tokens} in this view yet, so its value and share are not shown and the rates above leave it out.`,
+  unpriced: (tokens: string) => `n/a: no USDC price for ${tokens} in this view yet, so its value, its share and the account rates show n/a.`,
   unpricedIdle: (tokens: string) => `${tokens} not priced yet, not counted in the total`,
   nothingPlaced: 'Nothing in a position right now.',
   placing: 'Placing your money. The next step starts in a few seconds.',
