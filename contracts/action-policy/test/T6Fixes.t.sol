@@ -144,7 +144,7 @@ contract T6FixesTest is PolicyFixture {
     /// USDC/cbBTC: one block 90,000 ticks away (13.5M USDC of the attacker's own capital, ~8.8k of fees) moves the
     /// long TWAP by the whole 100-tick band; T4 accepted it. It moves the short one 600 ticks: the range is empty.
     function test_H1_oneBlockOutlierOnBtcIsRefused() public {
-        _initBtc(ID, 1, 600_000e6, 6_000_000e6);
+        _initBtc(ID, 1, 300_000e6, 3_000_000e6);
         int24 tl0 = _twapOf(POOL_BTC, TWAP);
         (, uint256 btcOut) = _push(POOL_BTC, USDC, CBBTC, 500, -90_000);
         _nextBlock(1);
@@ -159,7 +159,7 @@ contract T6FixesTest is PolicyFixture {
     /// An old push alone (more than 5 minutes ago) moves only the long TWAP: the range keeps the short one's edge on
     /// the side that matters, so nothing the Safe does gets a worse price.
     function test_H1_oldPushAloneDoesNotLoosenTheRange() public {
-        _initBtc(ID, 1, 600_000e6, 6_000_000e6);
+        _initBtc(ID, 1, 300_000e6, 3_000_000e6);
         (int24 lo0,) = policy.priceRange(safe, POOL_BTC);
         (, uint256 btcOut) = _push(POOL_BTC, USDC, CBBTC, 500, -90_000);
         _nextBlock(1);
@@ -181,7 +181,7 @@ contract T6FixesTest is PolicyFixture {
     /// ~60 ticks, the 5-min one by ~10. T4 put the Safe's USDC sale floor at twap30 - band (~160 ticks under the
     /// market); now it is max(twap30, twap5) - band + 1, and the same for the mint's spot check.
     function test_M1_rangeUsesTheSaferOfTwoTwaps() public {
-        _initBtc(ID, 1, 600_000e6, 6_000_000e6);
+        _initBtc(ID, 1, 300_000e6, 3_000_000e6);
         for (uint256 i; i < 30; i++) {
             _nextBlock(30);
             _push(POOL_BTC, CBBTC, USDC, 500, 4);
@@ -218,7 +218,7 @@ contract T6FixesTest is PolicyFixture {
 
     /// L-7: the range edges are floored ticks; lo gets +1 so the true mean is never more than `band` away.
     function test_L7_loIsOneTickInsideTheFlooredMean() public {
-        _initBtc(ID, 1, 600_000e6, 6_000_000e6);
+        _initBtc(ID, 1, 300_000e6, 3_000_000e6);
         int24 tl = _twapOf(POOL_BTC, TWAP);
         int24 ts = _twapOf(POOL_BTC, TWAP_SHORT);
         int24 top = tl > ts ? tl : ts;
@@ -308,7 +308,7 @@ contract T6FixesTest is PolicyFixture {
         admit[0] = v3Pos;
         vm.prank(SMART_SESSION);
         policy.initializeWithMultiplexer(
-            safe, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, 1, 600_000e6, 6_000_000e6, admit)
+            safe, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, 1, 300_000e6, 3_000_000e6, admit)
         );
         assertEq(policy.admittedPool(safe, v3Pos), POOL_BTC);
         (uint256 min0, uint256 min1) = policy.decreaseMins(safe, POOL_BTC, v3Pos, liq);
@@ -331,7 +331,7 @@ contract T6FixesTest is PolicyFixture {
         vm.prank(SMART_SESSION);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NotAdmissible.selector, theirs));
         policy.initializeWithMultiplexer(
-            safe, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, 1, 600_000e6, 6_000_000e6, admit)
+            safe, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, 1, 300_000e6, 3_000_000e6, admit)
         );
 
         // The Safe's own position, but in USDC/USDT, named in a USDC/cbBTC Init.
@@ -346,18 +346,18 @@ contract T6FixesTest is PolicyFixture {
         vm.prank(SMART_SESSION);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NotAdmissible.selector, stablePos));
         policy.initializeWithMultiplexer(
-            safe, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, 1, 600_000e6, 6_000_000e6, admit)
+            safe, ID, _initData(POOL_BTC, BAND, NO_ANCHOR, false, 1, 300_000e6, 3_000_000e6, admit)
         );
     }
 
     /// A session key can reach the policy only through checkAction-validated executions from the account. None of
     /// them can write the admitted set except `mint` (which admits only the tokenId it just minted for the account).
     function test_M4_sessionKeyCannotAddToTheAdmitList() public {
-        _initBtc(ID, 1, 600_000e6, 6_000_000e6);
+        _initBtc(ID, 1, 300_000e6, 3_000_000e6);
         (uint256 v3Pos,) = _mintDirect(safe, 20_000e6, 0.2e8);
         uint256[] memory admit = new uint256[](1);
         admit[0] = v3Pos;
-        bytes memory initData = _initData(POOL_BTC, BAND, NO_ANCHOR, false, 1, 600_000e6, 6_000_000e6, admit);
+        bytes memory initData = _initData(POOL_BTC, BAND, NO_ANCHOR, false, 1, 300_000e6, 3_000_000e6, admit);
         bytes memory reinit = abi.encodeCall(MamoruActionPolicy.initializeWithMultiplexer, (safe, ID, initData));
         // 1. As an execution of a session userOp, any call to the policy other than `mint` is refused at validation.
         assertEq(_check(address(policy), reinit), 1);
@@ -388,14 +388,14 @@ contract T6FixesTest is PolicyFixture {
     // ================================================================ I-1, I-2: Init checks
 
     function test_I1_sameGenerationDifferentConfigReverts() public {
-        _initBtc(ID, 1, 600_000e6, 6_000_000e6);
-        _initBtc(ConfigId.wrap(bytes32(uint256(9))), 1, 600_000e6, 6_000_000e6); // same values: fine
+        _initBtc(ID, 1, 300_000e6, 3_000_000e6);
+        _initBtc(ConfigId.wrap(bytes32(uint256(9))), 1, 300_000e6, 3_000_000e6); // same values: fine
         vm.prank(SMART_SESSION);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.ConfigMismatch.selector, POOL_BTC, uint64(1)));
         policy.initializeWithMultiplexer(
             safe,
             ConfigId.wrap(bytes32(uint256(10))),
-            _initData(POOL_BTC, BAND + 1, NO_ANCHOR, false, 1, 600_000e6, 6_000_000e6, _none())
+            _initData(POOL_BTC, BAND + 1, NO_ANCHOR, false, 1, 300_000e6, 3_000_000e6, _none())
         );
         // Views follow the generation: a pool left at an older generation has no config any more.
         _raiseStableCardinality();
@@ -403,7 +403,7 @@ contract T6FixesTest is PolicyFixture {
             ConfigId.wrap(bytes32(uint256(11))),
             _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, _none())
         );
-        _initBtc(ConfigId.wrap(bytes32(uint256(12))), 2, 600_000e6, 6_000_000e6);
+        _initBtc(ConfigId.wrap(bytes32(uint256(12))), 2, 300_000e6, 3_000_000e6);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NoConfig.selector, safe, POOL_STABLE));
         policy.priceRange(safe, POOL_STABLE);
     }
@@ -415,7 +415,7 @@ contract T6FixesTest is PolicyFixture {
         _expectBadInit(_raw(POOL_BTC, 1800, 300, 887_272, 1, 0), 3); // band to the end of the tick space
         _expectBadInit(_raw(POOL_BTC, 1800, 300, BAND, type(uint64).max, 0), 4); // bricks later renewals
         _expectBadInit(_raw(POOL_BTC, 1800, 300, BAND, 1, 501), 5); // anchor band past MAX_BAND
-        _initBtc(ID, 1, 600_000e6, 6_000_000e6);
+        _initBtc(ID, 1, 300_000e6, 3_000_000e6);
         _expectBadInit(_raw(POOL_BTC, 1800, 300, BAND, 3, 0), 4); // jump of two after the first enable
     }
 

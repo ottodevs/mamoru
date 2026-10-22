@@ -2,16 +2,27 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
+import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {PolicyFixture, INPMFull} from "./MamoruActionPolicy.t.sol";
 import {deployV2} from "./MamoruActionPolicyV2.t.sol";
-import {MamoruActionPolicy, ConfigId, CollectParams} from "../src/MamoruActionPolicy.sol";
+import {
+    MamoruActionPolicy,
+    ConfigId,
+    CollectParams,
+    DecreaseLiquidityParams,
+    MintParams,
+    IERC20Min
+} from "../src/MamoruActionPolicy.sol";
 
 /**
  * LeftClaw Services audit, job #1041 (2026-10-20, pinned d9e53b8), against MamoruActionPolicyV2 on the Base fork.
- * Each test is the finding's scenario and fails on V2 before its fix: H-1, M-1, M-2, M-3, M-4, L-7.
+ * Each test is the finding's scenario and fails on V2 before its fix: H-1, M-1, M-2, M-3, M-4, M-5, M-6, L-7. The
+ * M-2 limit test and the M-4 renewal-race test are the two P2s of the independent review of PR #102 (bcf6bf5).
  */
 abstract contract LeftClawFixture is PolicyFixture {
     uint256 constant FAILED = 1;
+    uint256 constant REVOKE = 1 << 255; // MamoruActionPolicyV2.REVOKE_FLAG
     ConfigId constant ID2 = ConfigId.wrap(bytes32(uint256(2)));
     ConfigId constant ID3 = ConfigId.wrap(bytes32(uint256(3)));
 
@@ -43,6 +54,20 @@ abstract contract LeftClawFixture is PolicyFixture {
                 admit: new uint256[](0)
             })
         );
+    }
+
+    /// A USDC/USDT position minted straight at the manager, +-100 ticks around the spot (tick spacing 1).
+    function _mintStableDirect(address owner, uint256 usdc, uint256 usdt) internal returns (uint256 id, uint128 liq) {
+        int24 sp = _spot(POOL_STABLE);
+        MintParams memory m =
+            MintParams(USDC, USDT, 100, sp - 100, sp + 100, usdc, usdt, 0, 0, owner, block.timestamp);
+        deal(USDC, owner, IERC20Min(USDC).balanceOf(owner) + usdc);
+        deal(USDT, owner, IERC20Min(USDT).balanceOf(owner) + usdt);
+        vm.startPrank(owner);
+        IERC20Min(USDC).approve(NPM, usdc);
+        IERC20Min(USDT).approve(NPM, usdt);
+        (id, liq,,) = INPMFull(NPM).mint(m);
+        vm.stopPrank();
     }
 
     /// A USDC -> cbBTC swap at the policy's own bounds, through `checkAction` under `id`.
@@ -118,8 +143,9 @@ contract LeftClawV2Test is LeftClawFixture {
         assertEq(_swapCheck(ID2, 100e6), 0);
     }
 
-    /// M-4: a renewal that leaves a position out of Init.admit used to keep it manageable by the new key.
-    function test_M4_renewalWithoutAdmitRetiresThePosition() public {
+    /// M-4 (option C): admission survives a renewal; an owner-signed Init revokes a position explicitly, and only then
+    /// the new key cannot manage it. Naming it again re-admits it.
+    function test_M4_renewalKeepsPositionUntilRevoked() public {
         (uint256 tokenId,) = _mintDirect(safe, 1_000e6, 1e6);
         uint256[] memory admit = new uint256[](1);
         admit[0] = tokenId;
@@ -129,9 +155,85 @@ contract LeftClawV2Test is LeftClawFixture {
         _enable(ID, 1, 1_000e6, admit);
         assertEq(_checkId(ID, NPM, collect), 0);
         _enable(ID2, 2, 1_000e6, new uint256[](0));
-        assertEq(_checkId(ID2, NPM, collect), FAILED, "position still managed after a renewal that left it out");
-        _enable(ID3, 3, 1_000e6, admit);
-        assertEq(_checkId(ID3, NPM, collect), 0, "renewal that names it again");
+        assertEq(_checkId(ID2, NPM, collect), 0, "renewal without admit keeps the position");
+        uint256[] memory revoke = new uint256[](1);
+        revoke[0] = tokenId | REVOKE;
+        _enable(ID3, 3, 1_000e6, revoke);
+        assertEq(_checkId(ID3, NPM, collect), FAILED, "position still managed after an explicit revoke");
+        assertEq(MamoruActionPolicy(address(policy)).admittedPool(safe, tokenId), address(0));
+        _enable(ConfigId.wrap(bytes32(uint256(4))), 4, 1_000e6, admit);
+        assertEq(_checkId(ConfigId.wrap(bytes32(uint256(4))), NPM, collect), 0, "named again");
+    }
+
+    /// Review P2 (#102, bcf6bf5): a renewal prepared before the engine minted a position, submitted after, must not
+    /// retire the new position (it was never named because it did not exist yet).
+    function test_M4_staleRenewalDoesNotRetireANewMint() public {
+        deal(USDC, safe, 100_000e6);
+        deal(CBBTC, safe, 1e8);
+        _enable(ID, 1, 60_000e6, new uint256[](0));
+        bytes memory renewal = _initData(POOL_BTC, BAND, NO_ANCHOR, false, 2, 60_000e6, 1_000_000e6, new uint256[](0));
+        (uint256 tokenId,) = _mintThroughPolicy(20_000e6, 0.2e8); // under generation 1, after the renewal was built
+        vm.prank(SMART_SESSION);
+        policy.initializeWithMultiplexer(safe, ID2, renewal);
+        bytes memory collect =
+            abi.encodeCall(INPMFull.collect, (CollectParams(tokenId, safe, type(uint128).max, type(uint128).max)));
+        assertEq(_checkId(ID2, NPM, collect), 0, "new position retired by a stale renewal");
+    }
+
+    /// Review P2 (#102, bcf6bf5): the engine's limit is narrower than the range edge; a third party pushes the spot
+    /// to between the two. The router would revert (SPL: the limit must be strictly past the spot), so validation must
+    /// refuse before charging.
+    function test_M2_spotPastTheSubmittedLimitFailsBeforeCharging() public {
+        _enable(ID, 1, 10_000e6, new uint256[](0));
+        (uint256 before,) = policy.budgetLeft(safe, POOL_BTC);
+        (int24 lo,) = policy.priceRange(safe, POOL_BTC);
+        (uint256 minOut,) = policy.swapBounds(safe, POOL_BTC, USDC, 1_000e6);
+        uint160 engineLimit = TickMath.getSqrtRatioAtTick(lo + 20); // narrower than the policy's floor at lo
+        bytes memory swap = _swapData(USDC, CBBTC, 500, 1_000e6, minOut, engineLimit);
+        _push(POOL_BTC, USDC, CBBTC, 500, (lo + 9) - _spot(POOL_BTC)); // spot in [lo, limit): inside the range
+        assertEq(_checkId(ID, ROUTER, swap), FAILED, "validated a swap the pool will revert");
+        (uint256 afterPush,) = policy.budgetLeft(safe, POOL_BTC);
+        assertEq(afterPush, before, "budget charged");
+    }
+
+    /// M-5: an enable whose window budget could walk a thin pool across its band is refused; a normal one passes.
+    function test_M5_poolDepthMustCoverTheWindowBudget() public {
+        IUniswapV3Pool(POOL_STABLE).increaseObservationCardinalityNext(uint16(TWAP));
+        vm.startPrank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.BadInit.selector, 11));
+        policy.initializeWithMultiplexer(
+            safe,
+            ID,
+            _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 10_000_000e6, 10_000_000e6, new uint256[](0))
+        );
+        policy.initializeWithMultiplexer(
+            safe, ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, new uint256[](0))
+        );
+        vm.stopPrank();
+    }
+
+    /// M-6: a depeg held past the stables anchor emptied the anchored range, and with it every decrease: the engine
+    /// could not take the position out. Decrease now uses the TWAP range alone; swaps keep the anchor.
+    function test_M6_depegDoesNotLockTheExit() public {
+        IUniswapV3Pool(POOL_STABLE).increaseObservationCardinalityNext(uint16(TWAP));
+        (uint256 tokenId, uint128 liq) = _mintStableDirect(safe, 10_000e6, 10_000e6);
+        uint256[] memory admit = new uint256[](1);
+        admit[0] = tokenId;
+        vm.prank(SMART_SESSION);
+        policy.initializeWithMultiplexer(
+            safe, ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, admit)
+        );
+        // USDC up 120 ticks against USDT (outside parity +- 40), held for two hours: both TWAPs follow.
+        _push(POOL_STABLE, USDT, USDC, 100, 120 - _spot(POOL_STABLE));
+        vm.roll(block.number + 3_600);
+        vm.warp(block.timestamp + 7_200);
+        vm.expectPartialRevert(MamoruActionPolicy.RangeEmpty.selector);
+        policy.priceRange(safe, POOL_STABLE); // the anchored range (swaps, mint, increase) is empty
+        (uint256 min0, uint256 min1) = policy.decreaseMins(safe, POOL_STABLE, tokenId, liq);
+        bytes memory dec = abi.encodeCall(
+            INPMFull.decreaseLiquidity, (DecreaseLiquidityParams(tokenId, liq, min0, min1, block.timestamp))
+        );
+        assertEq(_checkId(ID, NPM, dec), 0, "exit locked by the anchor");
     }
 
     /// L-7: amountIn 0 is SwapRouter02's "contract balance" sentinel: no floor and no charge.

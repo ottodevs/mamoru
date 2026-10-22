@@ -210,34 +210,33 @@ contract MamoruActionPolicyV2Test is PolicyFixture {
         assertEq(_check(address(policy), _increaseData(tokenId, 1, 0)), 1, "increase over the bucket");
     }
 
-    function test_increaseRetiredByRenewal() public {
+    function test_increaseSurvivesRenewalUntilRevoked() public {
         (uint256 tokenId,) = _mintThroughPolicy(20_000e6, 0.2e8);
         bytes memory inc = _increaseData(tokenId, 1_000e6, 0.01e8);
         ConfigId fresh = ConfigId.wrap(bytes32(uint256(2)));
         _initBtc(fresh, 2, 60_000e6, 180_000e6);
         assertEq(_check(address(policy), inc), 1, "generation-1 config dead after renewal");
-        // LeftClaw M-4: admission is per generation; a renewal that does not name the position retires it.
-        assertEq(_checkId(fresh, address(policy), inc), 1, "renewal without admit");
+        // LeftClaw M-4, option C: admission survives a renewal that does not name the position.
+        assertEq(_checkId(fresh, address(policy), inc), 0, "renewal without admit keeps it");
+        // An owner-signed Init revokes it explicitly (REVOKE_FLAG): the new key cannot manage it any more.
+        uint256[] memory revoke = new uint256[](1);
+        revoke[0] = tokenId | v2().REVOKE_FLAG();
+        ConfigId third = ConfigId.wrap(bytes32(uint256(3)));
+        vm.prank(SMART_SESSION);
+        policy.initializeWithMultiplexer(
+            safe, third, _initData(POOL_BTC, BAND, NO_ANCHOR, false, 3, 60_000e6, 180_000e6, revoke)
+        );
+        assertEq(_checkId(third, address(policy), inc), 1, "revoked");
         _approvePolicy(1_000e6, 0.01e8);
         vm.prank(safe);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NotAdmitted.selector, tokenId));
         v2().increase(IncreaseLiquidityParams(tokenId, 1_000e6, 0.01e8, 0, 0, block.timestamp));
-        // The operator's renewal names every position the Safe still owns (Init.admit): manageable again.
-        uint256[] memory admit = new uint256[](1);
-        admit[0] = tokenId;
-        ConfigId third = ConfigId.wrap(bytes32(uint256(3)));
-        vm.prank(SMART_SESSION);
-        policy.initializeWithMultiplexer(
-            safe, third, _initData(POOL_BTC, BAND, NO_ANCHOR, false, 3, 60_000e6, 180_000e6, admit)
-        );
-        assertEq(_checkId(third, address(policy), inc), 0);
-        _exec(address(policy), inc);
     }
 
     function test_increaseNeedsTheCurrentConfig() public {
         (uint256 tokenId,) = _mintThroughPolicy(20_000e6, 0.2e8);
-        // A renewal that does not re-enable the btc pool leaves its config at the old generation, and the position's
-        // admission with it (LeftClaw M-4): refused as not admitted, before the config check.
+        // A renewal that does not re-enable the btc pool leaves its config at the old generation: the position is
+        // still admitted (M-4 option C), but there is no current config to act under.
         vm.prank(SMART_SESSION);
         policy.initializeWithMultiplexer(
             safe,
@@ -246,7 +245,7 @@ contract MamoruActionPolicyV2Test is PolicyFixture {
         );
         _approvePolicy(1_000e6, 0.01e8);
         vm.prank(safe);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NotAdmitted.selector, tokenId));
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NoConfig.selector, safe, POOL_BTC));
         v2().increase(IncreaseLiquidityParams(tokenId, 1_000e6, 0.01e8, 0, 0, block.timestamp));
     }
 
