@@ -10,7 +10,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createPublicClient, http } from 'viem'
 import { base } from 'viem/chains'
-import { address, nonfungiblePositionManagerAbi } from '@mamoru/registry'
+import { address, baseRegistry, nonfungiblePositionManagerAbi } from '@mamoru/registry'
 import { MULTICALL3 } from '@mamoru/rpc'
 import { readSnapshot, type SnapshotTarget } from '../src/snapshot.ts'
 
@@ -37,7 +37,7 @@ const rows: { account: string; tokenId: string; pool: string; collectable0: stri
 for (const s of snap.safes) {
   for (const p of s.positions) {
     const { result } = await client.simulateContract({
-      address: address('NonfungiblePositionManager'),
+      address: address('NonfungiblePositionManager', baseRegistry),
       abi: nonfungiblePositionManagerAbi,
       functionName: 'collect',
       args: [{ tokenId: p.tokenId, recipient: s.safe, amount0Max: MAX, amount1Max: MAX }],
