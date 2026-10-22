@@ -263,26 +263,84 @@ contract LeftClawV2Test is LeftClawFixture {
         assertEq(afterPush, before, "budget charged");
     }
 
+    /// Peer gate P2 (#102, db09921): a renewal that lowers perWindow after the bucket fully refilled used to clamp the
+    /// stale raw debt and read empty for a whole window. The refill is settled at the old rate first.
+    function test_M3_clampSettlesTheRefillFirst() public {
+        _enable(ID, 1, 10_000e6, new uint256[](0));
+        assertEq(_swapCheck(ID, 10_000e6), 0);
+        _nextBlock(1 days / 2); // a full budget window: refilled
+        _enable(ID2, 2, 100e6, new uint256[](0));
+        (uint256 window,) = policy.budgetLeft(safe, POOL_BTC);
+        assertEq(window, 100e6, "refilled bucket read as spent");
+    }
+
+    /// Peer gate P2 (#102, db09921): revoking, under another pool's Init, a token admitted for this pool reverts
+    /// instead of being silently ignored (the owner would think it worked).
+    function test_M4_revokeUnderAnotherPoolReverts() public {
+        (uint256 tokenId,) = _mintDirect(safe, 1_000e6, 1e6);
+        uint256[] memory admit = new uint256[](1);
+        admit[0] = tokenId;
+        _enable(ID, 1, 1_000e6, admit);
+        uint256[] memory revoke = new uint256[](1);
+        revoke[0] = tokenId | REVOKE;
+        vm.prank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NotAdmissible.selector, tokenId));
+        policy.initializeWithMultiplexer(
+            safe, ID2, _initData(POOL_ETH, BAND, NO_ANCHOR, true, 1, 1_000e6, 1_000_000e6, revoke)
+        );
+    }
+
+    /// Peer gate P1-1 (#102, db09921): the depth floor measured only the budget token's direction. A fresh 0.05 % pool
+    /// (budget = token0) with deep liquidity below the spot and a thin range above: selling a little token1 walks the
+    /// price the whole band up. The floor is the smaller of both directions now.
+    function test_M5_thinSideAgainstTheBudgetTokenIsRefused() public {
+        LcToken a = new LcToken();
+        LcToken b = new LcToken();
+        (LcToken t0, LcToken t1) = address(a) < address(b) ? (a, b) : (b, a);
+        address pool = IFactoryLc(FACTORY).createPool(address(t0), address(t1), 500);
+        IUniswapV3Pool(pool).initialize(TickMath.getSqrtRatioAtTick(0));
+        IUniswapV3Pool(pool).increaseObservationCardinalityNext(uint16(TWAP));
+        t0.approve(NPM, type(uint256).max);
+        t1.approve(NPM, type(uint256).max);
+        // deep below the spot (token1 only), thin above it (token0 only)
+        INPMFull(NPM).mint(MintParams(address(t0), address(t1), 500, -200, 0, 0, 1_000_000e18, 0, 0, address(this), block.timestamp));
+        INPMFull(NPM).mint(MintParams(address(t0), address(t1), 500, 0, 200, 1e18, 0, 0, 0, address(this), block.timestamp));
+        MamoruActionPolicy.Init memory i = abi.decode(
+            _initData(pool, BAND, NO_ANCHOR, false, 1, 1_000e18, 1_000_000e18, new uint256[](0)), (MamoruActionPolicy.Init)
+        );
+        vm.prank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.BadInit.selector, 11));
+        policy.initializeWithMultiplexer(safe, ID, abi.encode(i));
+        i.perWindow = 0.1e18; // under the thin side's ~0.5 token1 of depth over 100 ticks
+        i.total = 1e18;
+        vm.prank(SMART_SESSION);
+        policy.initializeWithMultiplexer(safe, ID, abi.encode(i));
+    }
+
     /// M-5, measured against the pool itself: the floor is what an actual swap needs to move the price `band` ticks
-    /// (the attacker's push to exactly tick - band, net of the pool fee), crossing every tick boundary on the way.
-    /// Review P2 (#102, 45832e1): the in-range liquidity at the spot alone is not that amount.
+    /// in the cheaper direction (pushes to exactly tick - band and tick + band, net of the pool fee), crossing every
+    /// tick boundary on the way. Review P2 (#102, 45832e1): the in-range liquidity at the spot alone is not that
+    /// amount. Peer gate P1-1 (db09921): nor is one direction alone. USDT ~ USDC within 1 % here, so the bounds are
+    /// +- 1 %.
     function test_M5_depthIsWhatTheSwapAcrossTheBandTakes() public {
         IUniswapV3Pool(POOL_STABLE).increaseObservationCardinalityNext(uint16(TWAP));
         uint256 snap = vm.snapshotState();
-        (uint256 spent,) = _push(POOL_STABLE, USDC, USDT, 100, -int24(STABLE_BAND));
+        (uint256 down,) = _push(POOL_STABLE, USDC, USDT, 100, -int24(STABLE_BAND));
         vm.revertToState(snap);
-        uint256 net = spent * (1e6 - 100) / 1e6;
+        (uint256 up,) = _push(POOL_STABLE, USDT, USDC, 100, int24(STABLE_BAND));
+        vm.revertToState(snap);
+        uint256 net = (up < down ? up : down) * (1e6 - 100) / 1e6;
         vm.startPrank(SMART_SESSION);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.BadInit.selector, 11));
         policy.initializeWithMultiplexer(
             safe,
             ID,
-            _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, uint128(net * 1001 / 1000), 1e15, new uint256[](0))
+            _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, uint128(net * 101 / 100), 1e15, new uint256[](0))
         );
         policy.initializeWithMultiplexer(
             safe,
             ID,
-            _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, uint128(net * 999 / 1000), 1e15, new uint256[](0))
+            _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, uint128(net * 99 / 100), 1e15, new uint256[](0))
         );
         vm.stopPrank();
     }
@@ -298,7 +356,7 @@ contract LeftClawV2Test is LeftClawFixture {
             _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 10_000_000e6, 10_000_000e6, new uint256[](0))
         );
         policy.initializeWithMultiplexer(
-            safe, ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, new uint256[](0))
+            safe, ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 20_000e6, 100_000e6, new uint256[](0))
         );
         vm.stopPrank();
     }
@@ -312,7 +370,7 @@ contract LeftClawV2Test is LeftClawFixture {
         admit[0] = tokenId;
         vm.prank(SMART_SESSION);
         policy.initializeWithMultiplexer(
-            safe, ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, admit)
+            safe, ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 20_000e6, 100_000e6, admit)
         );
         // USDC up 120 ticks against USDT (outside parity +- 40), held for two hours: both TWAPs follow.
         _push(POOL_STABLE, USDT, USDC, 100, 120 - _spot(POOL_STABLE));
@@ -424,5 +482,37 @@ contract LeftClawV2Invariants is LeftClawFixture {
     /// forge-config: default.invariant.depth = 24
     function invariant_generationStepsByOne() public view {
         assertEq(policy.generationOf(safe), handler.renewals());
+    }
+}
+
+interface IFactoryLc {
+    function createPool(address, address, uint24) external returns (address);
+}
+
+/// Minimal ERC-20 for the fresh pool of the M-5 asymmetric-liquidity test: the deployer holds the whole supply.
+contract LcToken {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    constructor() {
+        balanceOf[msg.sender] = type(uint128).max;
+    }
+
+    function approve(address s, uint256 v) external returns (bool) {
+        allowance[msg.sender][s] = v;
+        return true;
+    }
+
+    function transfer(address to, uint256 v) external returns (bool) {
+        balanceOf[msg.sender] -= v;
+        balanceOf[to] += v;
+        return true;
+    }
+
+    function transferFrom(address f, address to, uint256 v) external returns (bool) {
+        if (allowance[f][msg.sender] != type(uint256).max) allowance[f][msg.sender] -= v;
+        balanceOf[f] -= v;
+        balanceOf[to] += v;
+        return true;
     }
 }

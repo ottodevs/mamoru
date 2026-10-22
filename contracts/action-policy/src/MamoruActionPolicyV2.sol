@@ -326,7 +326,8 @@ contract MamoruActionPolicyV2 is IActionPolicy {
             // LeftClaw M-5, once per (account, pool, generation): selling `perWindow` of the budget unit into the pool
             // must not move its price `bandTicks`, so the session's own spend cannot walk the pool across its band
             // and the oracle is not a thin pool's.
-            if (_depth(i.pool, i.bandTicks, i.budgetIn1) < i.perWindow) revert BadInit(11);
+            if (_depthIn(i.pool, p, i.bandTicks, i.budgetIn1) < i.perWindow) revert BadInit(11);
+            Config memory old = c;
             _config[account][i.pool] = Config({
                 twapWindow: i.twapWindow,
                 twapShortWindow: i.twapShortWindow,
@@ -346,6 +347,10 @@ contract MamoruActionPolicyV2 is IActionPolicy {
             if (s.in1 != i.budgetIn1) {
                 if (s.updatedAt != 0) (s.debt, s.updatedAt) = (i.perWindow, uint64(block.timestamp));
                 s.in1 = i.budgetIn1;
+            } else if (old.budgetWindow != 0 && s.debt != 0) {
+                // Settle the refill so far at the old rate, so the clamp below compares the debt as it is now.
+                (uint256 d,) = _bucket(s, old);
+                (s.debt, s.updatedAt) = (uint128(d), uint64(block.timestamp));
             }
             // LeftClaw M-3: a renewal that lowers perWindow carries at most a full bucket, refilling from now, never
             // a debt above the new capacity (which would refuse every charge for weeks).
@@ -359,7 +364,9 @@ contract MamoruActionPolicyV2 is IActionPolicy {
             } else {
                 id ^= REVOKE_FLAG;
                 address was = admittedPool[account][id];
-                if (was == i.pool || was == address(0)) {
+                if (was != REVOKED) {
+                    // Admitted under another pool: that pool's Init revokes it, never this one silently.
+                    if (was != i.pool && was != address(0)) revert NotAdmissible(id);
                     admittedPool[account][id] = REVOKED;
                     emit Revoked(account, i.pool, id);
                 }
@@ -806,10 +813,27 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         if (cardinalityNext < i.twapWindow) revert ObservationCardinalityTooLow(cardinalityNext, i.twapWindow);
     }
 
-    /// What selling the budget unit into `pool` takes to move its price `band` ticks (token1 moves it up, token0
-    /// down), walking every tick boundary in between and applying its liquidityNet, as the pool's own swap would. At
-    /// most band / tickSpacing + 1 steps (MAX_BAND 500); only at a config write, never at validation. (Base, block of
-    /// the fork tests, at the spot: stables ~138k USDC over 10 ticks, cbBTC ~378k and WETH ~8.3M over 100.)
+    /// LeftClaw M-5: the smaller, in the budget unit, of what moving `pool`'s price `band` ticks takes in either
+    /// direction, since a session's swap may sell either token. The other token's depth is valued at the band edge
+    /// that values it lowest (token1 at the top edge, token0 at the bottom edge), as `_value` would charge at most.
+    function _depthIn(address pool, PoolInfo memory p, uint24 band, bool in1) internal view returns (uint256) {
+        (, int24 tick,,,,,) = IUniswapV3Pool(pool).slot0();
+        uint256 up = _depth(pool, band, true); // token1 sold
+        uint256 down = _depth(pool, band, false); // token0 sold
+        if (in1) {
+            down = OracleLibrary.getQuoteAtTick(_clamp(int256(tick) - int256(uint256(band))), _u128(down), p.token0, p.token1);
+        } else {
+            up = OracleLibrary.getQuoteAtTick(_clamp(int256(tick) + int256(uint256(band))), _u128(up), p.token1, p.token0);
+        }
+        return up < down ? up : down;
+    }
+
+    /// What selling into `pool` takes to move its price `band` ticks (token1 moves it up, token0 down), walking every
+    /// tick boundary in between and applying its liquidityNet, as the pool's own swap would. At most
+    /// band / tickSpacing + 1 steps (MAX_BAND 500: ~501 cold `ticks` reads on a spacing-1 pool; production bands are
+    /// 10 and 100); only at a config write, never at validation. (Base, block of the fork tests: stables ~48k USDT up
+    /// / ~55k USDC down over 10 ticks; cbBTC ~4.6 BTC up / ~384k USDC down and WETH ~8.4M USDC up / ~3,455 WETH down
+    /// over 100.)
     function _depth(address pool, uint24 band, bool up) internal view returns (uint256 d) {
         IUniswapV3Pool v = IUniswapV3Pool(pool);
         (uint160 sp, int24 tick,,,,,) = v.slot0();

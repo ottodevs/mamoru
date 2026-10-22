@@ -58,7 +58,7 @@ contract T6FixesTest is PolicyFixture {
     /// moves the 5-min TWAP 60 ticks, the two are more than 2 x band apart, and the range is empty.
     function test_H1_oneBlockOutlierOnStablesIsRefused() public {
         _raiseStableCardinality();
-        _enable(ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, _none()));
+        _enable(ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 20_000e6, 100_000e6, _none()));
         int24 twap0 = _twapOf(POOL_STABLE, TWAP);
         (int24 lo0,) = policy.priceRange(safe, POOL_STABLE);
         assertEq(lo0, twap0 - int24(STABLE_BAND) + 1, "no shift yet: lo = twap - band + 1");
@@ -85,7 +85,7 @@ contract T6FixesTest is PolicyFixture {
     /// [anchor - 40, anchor + 40], so it is clipped (a ~50-tick shift) or empty (a ~100-tick shift).
     function test_H1_spreadPushOnStablesIsBoundedByTheAnchor() public {
         _raiseStableCardinality();
-        _enable(ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, _none()));
+        _enable(ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 20_000e6, 100_000e6, _none()));
         uint256 snap = vm.snapshotState();
         (int24 tl, int24 ts) = _spreadPush(-37_500, -7_500);
         console2.log(
@@ -131,7 +131,7 @@ contract T6FixesTest is PolicyFixture {
     /// The same one-block push inside the dense core (10 ticks): no false refusal, and the range moves 1 tick at most.
     function test_H1_denseCoreOutlierPassesAndBarelyMoves() public {
         _raiseStableCardinality();
-        _enable(ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, _none()));
+        _enable(ID, _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 20_000e6, 100_000e6, _none()));
         (int24 lo0, int24 hi0) = policy.priceRange(safe, POOL_STABLE);
         (, uint256 usdtOut) = _push(POOL_STABLE, USDC, USDT, 100, -10);
         _nextBlock(1);
@@ -375,7 +375,7 @@ contract T6FixesTest is PolicyFixture {
     // ================================================================ L-4: oracle history margin at enable
 
     function test_L4_enableRequiresCardinalityForTheWindow() public {
-        bytes memory init = _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, _none());
+        bytes memory init = _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 20_000e6, 100_000e6, _none());
         vm.prank(SMART_SESSION);
         vm.expectRevert(
             abi.encodeWithSelector(MamoruActionPolicy.ObservationCardinalityTooLow.selector, uint16(1000), TWAP)
@@ -401,7 +401,7 @@ contract T6FixesTest is PolicyFixture {
         _raiseStableCardinality();
         _enable(
             ConfigId.wrap(bytes32(uint256(11))),
-            _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 50_000e6, 100_000e6, _none())
+            _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, 20_000e6, 100_000e6, _none())
         );
         _initBtc(ConfigId.wrap(bytes32(uint256(12))), 2, 300_000e6, 3_000_000e6);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.NoConfig.selector, safe, POOL_STABLE));
