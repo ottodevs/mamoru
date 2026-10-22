@@ -1,5 +1,5 @@
 import type { PublicClient } from 'viem'
-import { ReasonError, type Address, type ChainId } from '@mamoru/domain'
+import { BASE_CHAIN_ID, ReasonError, type Address, type ChainId } from '@mamoru/domain'
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
 import { Batch, balanceRead, blockNumberRead, contractRead, createDeployedChecker, multicall3Of, tokenIdReads, type Handle } from '@mamoru/rpc'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
@@ -29,6 +29,16 @@ const LIVE_POOLS: Record<ChainId, string> = {
 export const MAX_INVENTORY = 64
 const Q96 = 1n << 96n
 const Q192 = 1n << 192n
+
+/**
+ * otto/mamoru#63: why the operator may not sign or send on `registry`'s chain, or null when it may. Only Base is
+ * written to: on any other registry (Monad mainnet, its testnet, or a lab fork of either) the relayer refuses every
+ * send, the loopback bundler is not started, owner prepares and submits answer CHAIN_READ_ONLY and no engine or
+ * armed loop starts. Reading and valuing a Safe stay open. A live path for another chain lifts this for it alone.
+ */
+export function writeRefusal(registry: Registry): string | null {
+  return registry.chainId === BASE_CHAIN_ID ? null : `read only on ${registry.chain} (registry chain ${registry.chainId}): the operator signs and sends nothing off Base`
+}
 
 const usdcPoolsOf = new WeakMap<Registry, string[]>()
 

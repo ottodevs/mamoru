@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
+import { overCap, ReasonError, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
@@ -42,7 +42,7 @@ import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { Proposal } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
-import { MAX_INVENTORY, amountsForLiquidity, inUsdc, livePool, positionUsdc, priceOf, readSafe, usdcPools, type PoolPosition, type SafeRead } from './chain.ts'
+import { MAX_INVENTORY, amountsForLiquidity, inUsdc, livePool, positionUsdc, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
@@ -781,6 +781,13 @@ export class Operator {
 
   /** Restarts the engine loop of every account that was active. */
   resume(): void {
+    // otto/mamoru#63: off Base no engine loop, armed watcher or reconciliation starts: the operator only reads.
+    const refusal = writeRefusal(this.cfg.registry)
+    if (refusal) {
+      const active = Object.values(this.store.state.accounts).filter((a) => a.active || a.armed).length
+      console.log(`[operator] ${refusal}${active ? `; ${active} active or armed account(s) left untouched` : ''}`)
+      return
+    }
     void this.scanRevertedExposure().catch((e) => logErr('[exposure#163] scan failed:', e))
     for (const acc of Object.values(this.store.state.accounts)) if (acc.active) this.startLoop(acc)
     for (const acc of Object.values(this.store.state.accounts)) {
@@ -1333,6 +1340,9 @@ export class Operator {
   // ---- owner side: prepare -------------------------------------------------
 
   private assertLive(): void {
+    // otto/mamoru#63: off Base nothing is prepared or signed, live or not, fork or mainnet (fail closed).
+    const refusal = writeRefusal(this.cfg.registry)
+    if (refusal) throw new HttpError(503, 'CHAIN_READ_ONLY', refusal)
     if (!this.cfg.live) throw new HttpError(503, 'DRY_RUN_STOP', 'operator is not live (MAMORU_LIVE=1 on chain 8453 required)')
   }
 
@@ -4581,6 +4591,8 @@ export class Operator {
   }
 
   private startLoop(acc: AccountState): void {
+    const refusal = writeRefusal(this.cfg.registry)
+    if (refusal) throw new ReasonError('CHAIN_UNSUPPORTED', `${acc.accountKey} engine not started: ${refusal}`)
     this.stopLoop(acc.accountKey)
     if (!acc.sessionKey) throw new Error(`${acc.accountKey} has no session key`)
     acc.runs = (acc.runs ?? 0) + 1

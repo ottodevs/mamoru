@@ -10,7 +10,7 @@ import { conservadorLabV4, conservadorLabV5, conservadorLiveV4, conservadorLiveV
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
-import { livePool } from './chain.ts'
+import { livePool, writeRefusal } from './chain.ts'
 import { Operator, type OperatorConfig } from './operator.ts'
 import { Relayer } from './relayer.ts'
 import { BridgeOut, ETHEREUM_CHAIN_ID, L1_BUNDLER_TIMEOUT_MS, L1_HANDLE_OPS_GAS, L1_USDC } from './bridge-out.ts'
@@ -299,11 +299,13 @@ export function assertPolicyOnRegistry(policy: PolicyVersion, registry: Registry
 
 /**
  * otto/mamoru#63: what only exists on Base is refused on any other chain at boot: the v4/v5 on-chain action policies
- * (deployed on Base only) and bridge-out (moves USDC from Ethereum to Base).
+ * (deployed on Base only; v5 through its V2 address as well) and bridge-out (moves USDC from Ethereum to Base).
  */
 export function assertBaseOnlyFeatures(registry: Registry, env: Record<string, string | undefined>, o: Pick<BootOptions, 'l1RpcUrl'>): void {
   if (registry.chainId === BASE_CHAIN_ID) return
   if (env.MAMORU_ONCHAIN_POLICY_V4 === '1') throw new Error(`MAMORU_ONCHAIN_POLICY_V4 is Base only; this operator reads ${registry.chain}`)
+  // v5 needs the v4 opt-in above; its deployed address alone is refused too, so no env turns it on off Base.
+  if (env.MAMORU_ACTION_POLICY_V2_ADDRESS) throw new Error(`MAMORU_ACTION_POLICY_V2_ADDRESS is Base only; this operator reads ${registry.chain}`)
   if (o.l1RpcUrl) throw new Error(`MAMORU_L1_RPC_URL (bridge-out to Base) is Base only; this operator reads ${registry.chain}`)
 }
 
@@ -337,8 +339,10 @@ export async function bootOperator(o: BootOptions) {
   // The relayer's own reads (gas estimate, nonce, the wait for a receipt) are counted as the relayer's, like its sends.
   const relayerClient = createPublicClient({ transport: http(via('relayer'), { batch: true, timeout: 60_000 }) })
   const relayerKey = loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey)
-  const relayer = new Relayer(relayerKey, relayerClient, via('relayer'), chainId)
-  const bundler = startLiveBundler(client, relayer, chainId)
+  // otto/mamoru#63: off Base the relayer refuses every send and no loopback bundler starts (fail closed).
+  const refusal = writeRefusal(registry)
+  const relayer = new Relayer(relayerKey, relayerClient, via('relayer'), chainId, refusal)
+  const bundler = refusal === null ? startLiveBundler(client, relayer, chainId) : null
   const knobs = capAndDepth(o, policy)
   let retune = () => {}
   // otto/mamoru#129: reassigned once the snapshot loop exists (it needs `operator`, built below); the settings
@@ -354,7 +358,7 @@ export async function bootOperator(o: BootOptions) {
       registry,
       live,
       rpcUrl: o.rpcUrl,
-      bundlerUrl: bundler.url,
+      bundlerUrl: bundler?.url ?? '',
       policy,
       reviewMs: o.reviewMs ?? 20_000,
       waitBlockMs: o.waitBlockMs ?? 2_100,
@@ -377,8 +381,8 @@ export async function bootOperator(o: BootOptions) {
   // started and stopped by the `yield_ledger` ops flag (D1, set from /ops), not MAMORU_SNAPSHOT / MAMORU_YIELD_LEDGER
   // env vars. Without MAMORU_SETTINGS_URL there is no pull, so the flag is never learned and the loop stays off.
   let snapshot: SnapshotLoop | null = null
-  // Base only for now: the reader takes pools and token addresses from the Base registry (chain.ts USDC_POOLS).
-  if (MULTICALL3 && chainId === BASE_CHAIN_ID) {
+  // The snapshot, yield entries and yield receipts read Base (baseRegistry): started on chain 8453 with the Base registry only.
+  if (MULTICALL3 && chainId === BASE_CHAIN_ID && registry.chainId === BASE_CHAIN_ID) {
     const snapshotClient = createPublicClient({ transport: http(via('snapshot'), { batch: true, timeout: 60_000 }) })
     const multicall3 = MULTICALL3
     const budget = rpcBudget(rpcMetrics)
@@ -457,7 +461,7 @@ export async function bootOperator(o: BootOptions) {
   const eth = await client.getBalance({ address: relayer.address })
   console.log(`[operator] chain ${chainId} live=${live} policy ${policy.policyId} relayer ${relayer.address} (${eth} wei) sha ${gitSha} on http://${server.hostname}:${server.port}`)
   // Base keeps its boot line byte for byte; any other chain says whose contracts it reads and the relayer's unit.
-  if (registry.chainId !== BASE_CHAIN_ID) console.log(`[operator] reads ${registry.chain} contracts (registry chain ${registry.chainId}, block ${registry.block}); relayer balance in ${chainOf(registry.chainId).native.symbol} wei; read only (not live)`)
+  if (registry.chainId !== BASE_CHAIN_ID) console.log(`[operator] reads ${registry.chain} contracts (registry chain ${registry.chainId}, block ${registry.block}); relayer balance in ${chainOf(registry.chainId).native.symbol} wei; ${writeRefusal(registry)}`)
   retune = () => operator.retuneEngines()
   // The first pull before any engine resumes, so a restart never runs a review or a prepare on stale settings when the
   // endpoint answers (bounded by the pull timeout; on failure the last-known-good or the defaults run, reported).
@@ -473,7 +477,7 @@ export async function bootOperator(o: BootOptions) {
       snapshot?.stop()
       settings?.stop()
       server.stop(true)
-      bundler.stop()
+      bundler?.stop()
       proxy.stop()
       rpcMetrics.persist()
     },

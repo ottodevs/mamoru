@@ -1,6 +1,6 @@
 import { createWalletClient, defineChain, http, keccak256, parseAbi, type Chain, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
-import type { Address } from '@mamoru/domain'
+import { ReasonError, type Address } from '@mamoru/domain'
 import { Lock } from './lock.ts'
 import { logErr } from './metrics.ts'
 
@@ -27,6 +27,11 @@ export class Relayer {
     private readonly client: PublicClient,
     private readonly rpcUrl: string,
     chainId: number,
+    /**
+     * otto/mamoru#63: set, the relayer signs nothing and every send is refused with CHAIN_UNSUPPORTED and this text,
+     * before any read. boot.ts sets it when the operator reads a chain other than Base (`writeRefusal`).
+     */
+    private readonly refusal: string | null = null,
   ) {
     this.account = privateKeyToAccount(key)
     this.chain = defineChain({ id: chainId, name: `chain-${chainId}`, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } })
@@ -79,6 +84,7 @@ export class Relayer {
     /** #180: the hash of the signed transaction, before it is broadcast, so a caller can persist it first. */
     onSigned?: (hash: Hex, nonce: number) => void,
   ): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
+    if (this.refusal !== null) return Promise.reject(new ReasonError('CHAIN_UNSUPPORTED', this.refusal))
     return this.lock.run(async () => {
       const wallet = createWalletClient({ account: this.account, chain: this.chain, transport: http(this.rpcUrl, { timeout: 60_000 }) })
       // Base rejects a tx over 2^24 gas (EIP-7825): the 30% margin must not push a fitting estimate over the cap.
