@@ -3,8 +3,11 @@ import { LAB_GAS_LIMITS, MAX_PRIORITY_FEE_PER_GAS } from '@mamoru/scenarios/driv
 type Env = Record<string, string | undefined>
 
 /**
- * otto/mamoru#8: the relayer funds a Safe's gas reserve once, at activation (operator.ts's activation top-up to
- * `policy.gasReserveWei + TOP_UP_MARGIN_WEI`, about 0.0005 ETH live, charged to sponsorship.ts's activation budget). Every engine rebalance and fee collection
+ * otto/mamoru#8: a Safe's gas reserve is funded once, at activation, to `policy.gasReserveWei + TOP_UP_MARGIN_WEI`
+ * (about 0.0005 ETH live): by the Safe itself through the USDC -> ETH swap in its activation batch when it can
+ * (otto/mamoru#15, self-reserve.ts; the swap's minimum out is exactly what the Safe lacks of that target), else by
+ * operator.ts's activation top-up, charged to sponsorship.ts's activation budget. Either way the Safe starts at that
+ * same target, so the threshold below applies unchanged. Every engine rebalance and fee collection
  * since then spends from that same balance and nothing ever tops it back up, so an active account's native
  * balance drifts down towards the policy's own floor (`ehgPreliminary`'s `ACCT_GAS_RESERVE_LOW`,
  * `packages/decide/src/gates/index.ts`), at which point the engine stops reviewing it entirely: no more

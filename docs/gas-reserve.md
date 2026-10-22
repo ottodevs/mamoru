@@ -79,3 +79,10 @@ reserve + margin + gas (0.0007 ETH); a signed approval that has to wait for the 
 (`armed.reserveWei`) and still sends no top-up when it runs. Refunding that gas from the Safe through the Safe's own
 `gasPrice`/`refundReceiver` was left out on purpose: with `gasPrice > 0` a failed inner call no longer reverts the
 `execTransaction`, so a broken activation would still pay.
+
+## The low-reserve alert (otto/mamoru#8)
+
+A self-funded Safe starts at the same target as a topped-up one (the swap's minimum out is exactly what it lacks of
+`gasReserveWei + TOP_UP_MARGIN_WEI`, any surplus stays in the Safe), so the alert threshold in `gas-reserve.ts`
+(`gasReserveWei` + two engine prefunds, 412.2e12 wei at Base's minimum fee) holds for both: a freshly started
+account is never low.
