@@ -13,7 +13,7 @@
 //   cd contracts/action-policy && ./install.sh && forge build --silent && cd ../.. &&
 //   BASE_RPC_URL=https://mainnet.base.org bun packages/scenarios/action-policy/verify-deployed-policy.ts <address>
 // otto/mamoru#151, MamoruActionPolicyV2 (its artifact, and its fifth immutable GUARDIAN, which must equal the key the
-// coordinator names; MamoruGuardian has no registry address until it is deployed):
+// coordinator names; the guardian is an EOA, not a registry entry):
 //   ... verify-deployed-policy.ts <address> --v2 --guardian <address>
 //
 // Exit 0: verified. Exit 1: refused (print the reason; never caught and ignored by a caller — treat as "do not

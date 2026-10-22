@@ -137,17 +137,17 @@ describe('monad registry', () => {
   })
 })
 
-describe('undeployed names (spec 007, otto/mamoru#151)', () => {
-  test('MamoruActionPolicyV2 and MamoruGuardian are named on Base without an address: nothing resolves them, so nothing can target them', () => {
-    expect(baseRegistry.undeployed).toEqual(['MamoruActionPolicyV2', 'MamoruGuardian'])
+describe('MamoruActionPolicyV2 (spec 007, otto/mamoru#151)', () => {
+  test('is deployed on Base at the address and code hash read on chain; the guardian is an EOA, not an entry', () => {
+    expect(baseRegistry.undeployed).toEqual([])
     expect(monadRegistry.undeployed).toEqual([])
-    for (const name of ['MamoruActionPolicyV2', 'MamoruGuardian']) {
-      expect(isDeployed(name, baseRegistry)).toBe(false)
-      expect(isDeployed(name, monadRegistry)).toBe(false)
-      expect(code(() => address(name, baseRegistry))).toBe('POLICY_TARGET_NOT_IN_REGISTRY')
-      expect(() => entry(name, baseRegistry)).toThrow(/not deployed on base/)
-      expect(baseRegistry.entries.some((e) => e.name === name)).toBe(false)
-    }
+    expect(isDeployed('MamoruActionPolicyV2', baseRegistry)).toBe(true)
+    expect(isDeployed('MamoruActionPolicyV2', monadRegistry)).toBe(false)
+    expect(address('MamoruActionPolicyV2', baseRegistry)).toBe('0x9ef35e544C93A6722a13473AB9EF115f719bbE6B')
+    expect(entry('MamoruActionPolicyV2', baseRegistry).codeHash).toBe('0x4a72ac333dd6c4b6fd81d586be5149dbea79aedd8aa28bb350f3600ab72570f9')
+    expect(nameOf('0x9ef35e544C93A6722a13473AB9EF115f719bbE6B', baseRegistry)).toBe('MamoruActionPolicyV2')
+    expect(isDeployed('MamoruGuardian', baseRegistry)).toBe(false)
+    expect(code(() => address('MamoruActionPolicyV2', monadRegistry))).toBe('POLICY_TARGET_NOT_IN_REGISTRY')
     expect(isDeployed('UniActionPolicy', baseRegistry)).toBe(true)
   })
 })
