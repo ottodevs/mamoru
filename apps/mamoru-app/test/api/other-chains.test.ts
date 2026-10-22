@@ -179,8 +179,14 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
 
   test('the RPC URL never reaches the log or the response, whatever the failure quotes', async () => {
     const logged: string[] = []
+    const leaked: string[] = []
     const original = console.error
-    console.error = (...args: unknown[]) => void logged.push(args.map(String).join(' '))
+    // Only this test's lines: a timer left by another test file in the same process can log here too.
+    console.error = (...args: unknown[]) => {
+      const line = args.map(String).join(' ')
+      leaked.push(line)
+      if (line.startsWith('other chain')) logged.push(line)
+    }
     try {
       const failures: ChainFetch[] = [
         async () => {
@@ -202,8 +208,8 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
       console.error = original
     }
     expect(logged.length).toBe(5)
-    expect(logged.join('\n')).not.toContain('l1.example')
-    expect(logged.join('\n')).not.toContain('rpc-key')
+    expect(leaked.join('\n')).not.toContain('l1.example')
+    expect(leaked.join('\n')).not.toContain('rpc-key')
   })
 
   test('only the owner reads it; another session and no session get what the dashboard gives them', async () => {
@@ -465,8 +471,14 @@ describe('other chains: USDC sent on Ethereum to the Base address (#117)', () =>
       return nodes[input]!.fetch(input, init)
     }
     const logged: string[] = []
+    const leaked: string[] = []
     const original = console.error
-    console.error = (...args: unknown[]) => void logged.push(args.map(String).join(' '))
+    // Only this test's lines: a timer left by another test file in the same process can log here too.
+    console.error = (...args: unknown[]) => {
+      const line = args.map(String).join(' ')
+      leaked.push(line)
+      if (line.startsWith('other chain')) logged.push(line)
+    }
     try {
       const h = harness(() => T0, { env: { ETHEREUM_RPC_URLS: `${A}, ${B}\n${C}` }, chainFetch })
       const { cookie, owner } = await onboard(h)
