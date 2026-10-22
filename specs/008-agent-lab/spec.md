@@ -71,8 +71,10 @@ Lab tables; the Lab's numbers enter the production views (Constitution XVI).
   `holdout_check({policyId, overrides})`, which returns the gate's pass/fail per TEST window and the totals, never the
   per-window metrics; it is limited to 3 calls per requester per day, and each call is logged with its overrides in
   `lab_holdout_checks`. An answer that recommends an override says it was explored on TRAIN and names its holdout
-  checks. A single `run_backtest` on a TEST window is allowed only for a policy in `POLICIES` with no overrides
-  (what is live, not a candidate).
+  checks. A single `run_backtest` on a TEST window is allowed only for the configuration that runs in production
+  at the job's time: the policy and settings of the active `prod` engine-settings version (spec 006), resolved by
+  the server, with no overrides. Being in `POLICIES` is not enough: it also holds experimental policies
+  (`conservador-lab-guards-v1`, `lab-weth-usdc-v1`).
 - **AL-13** Overrides are validated against the `PolicyVersion` schema and bounds in code before a run. An unknown
   key is a tool error (`LAB_OVERRIDE_UNKNOWN`), never ignored. The agent must report it, not try another policy.
 - **AL-14** The catalog (windows with regime, dates, chain, pools, market moves; policies with a one-line
@@ -96,17 +98,25 @@ Lab tables; the Lab's numbers enter the production views (Constitution XVI).
 - **AL-20b** A `verdict` is a sentence the server writes from the stored runs ("ended 16.44 USDC below holding the
   mix"); its direction (better, worse, equal within 0.01) comes from the sign of the run difference. The model chooses
   which comparison to show, never its direction.
+- **AL-20c** A verdict between two runs is allowed only when they share dataset id, window bounds, deposit, savings
+  asset and `SIM_VERSION`; they may differ only in policy and overrides. Otherwise the verifier refuses it with
+  `LAB_VERDICT_INCOMPARABLE`. A verdict against `hold` or `usdc` compares a run with its own baselines, which share
+  all of these by construction.
 - **AL-21** A deterministic verifier checks: schema; each claim's `value` equals the code-mapped metric of the stored
   run (tolerance 0.005 absolute or 0.1% relative); each verdict's runs exist; text has no untraceable digits; each
   chart's run ids exist and the kind fits the runs.
-- **AL-21a** Text and caveat blocks may not judge a run: a closed list of directional terms per language (better,
-  worse, beats, loses, gains, outperforms, protects, mejor, peor, gana, pierde, supera, protege…) inside a text block
-  that references a claim or a run fails the check and asks for a `verdict` block instead. This is a lexical guard,
-  not proof of meaning: the screen also shows each verdict and claim with its run, so a reader can check it.
+- **AL-21a** Only `claim` and `verdict` blocks are verified results. The screen draws them apart from prose: the
+  answer's headline is always the first verdict (or, with none, the first claim), never a text block, and text and
+  caveat blocks render under a "the agent's explanation, not verified" label. A reader can always tell a checked
+  figure or conclusion from the agent's words.
+- **AL-21b** As a second guard, any text or caveat block containing a performance judgement term from a closed list
+  per language (better, worse, beats, loses, gains, outperforms, protects, mejor, peor, gana, pierde, supera,
+  protege…) fails the check, whether or not it references a run, and the repair turn asks for a `verdict` block. A
+  closed list misses synonyms; AL-21a, not this list, is what keeps an unverified conclusion from passing as verified.
 - **AL-22** On a failed check the errors go back to the model once (repair turn). If it still fails, the answer
   shows its verified claims and charts only, flagged `LAB_ANSWER_PARTIAL`. A refusal or a "the data does not exist"
   answer with no claims is valid and is never emptied (fixes the PoC-2 fallback bug).
-- **AL-23** Nothing reaches the screen that did not pass AL-21 and AL-21a. The screen labels every answer as a simulation over
+- **AL-23** Nothing reaches the screen that did not pass AL-21, AL-20c and AL-21b, and it is laid out per AL-21a. The screen labels every answer as a simulation over
   history, with the window and `SIM_VERSION` (Constitution XVI).
 - **AL-24** The question is data, never instructions to the runner: it cannot change tools, budgets, model route or
   the catalog. A question asking for future prices, live funds or actions outside the tools gets a caveat block.
@@ -205,7 +215,7 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
 | A captured runner request is replayed or its body swapped | Body hash + nonce + 60 s timestamp in the HMAC (Architecture) |
 | Two runners answer the same job | Lease renewal + fencing on every write (AL-02, AL-02a) |
 | Chat studies overfit the release gate's TEST windows | Exploration on TRAIN only; TEST via rationed, logged `holdout_check` (AL-12a) |
-| A number is shown under the wrong meaning, or a verdict points the wrong way | Closed metric enum mapped in code; server-written verdicts; lexical guard on text (AL-20a, AL-20b, AL-21a) |
+| A number is shown under the wrong meaning, or a verdict points the wrong way | Closed metric enum mapped in code; server-written verdicts on comparable runs only; prose labeled not verified (AL-20a…c, AL-21a, AL-21b) |
 | A heavy sweep starves the operator on lady | Runner is its own unit with `CPUQuota` and `Nice`; one sweep at a time |
 | Cost runs away on included quota | Per-day job cap per requester; AL-41 shows the burn |
 | Model resource dies mid-job | AL-30 next peer; job keeps finished runs |
@@ -224,8 +234,13 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
 - **LAB-AL-06** Runner killed mid-job → lease expires, job re-queued once, then `LAB_JOB_LEASE_LOST`. (AL-02)
 - **LAB-AL-07** Sweep of one override over the TRAIN windows → per-window table with run ids within 15 min; the same
   sweep naming a TEST window → tool error. (AL-12, AL-12a, AL-04)
-- **LAB-AL-11** A claim whose value is `metrics.gas` submitted as `net` → rejected; a text block saying "Mamoru gana"
-  next to a claim → rejected and asked for a verdict block. (AL-20a, AL-21a)
+- **LAB-AL-11** A claim whose value is `metrics.gas` submitted as `net` → rejected; a standalone text block saying
+  "Mamoru gana" → rejected and asked for a verdict block; an accepted text block renders under the not-verified
+  label, below the verdict headline. (AL-20a, AL-21a, AL-21b)
+- **LAB-AL-15** A verdict between a 100,000 USDC run and a 1,000 USDC run, or between two windows →
+  `LAB_VERDICT_INCOMPARABLE`. (AL-20c)
+- **LAB-AL-16** `run_backtest` of `conservador-lab-guards-v1` on a TEST window → tool error; the active prod
+  configuration on the same window → runs. (AL-12a)
 - **LAB-AL-12** A stale runner (lease expired, job re-claimed) posts an answer → refused, the new runner's answer
   stands. (AL-02a)
 - **LAB-AL-13** A captured signed `answer` request replayed with another body, or replayed as is → both refused.
@@ -238,7 +253,7 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
 
 ## New reason codes
 
-`LAB_JOB_LEASE_LOST`, `LAB_JOB_TIMEOUT`, `LAB_OVERRIDE_UNKNOWN`, `LAB_DATASET_MISSING`, `LAB_ANSWER_PARTIAL`,
+`LAB_JOB_LEASE_LOST`, `LAB_JOB_TIMEOUT`, `LAB_OVERRIDE_UNKNOWN`, `LAB_VERDICT_INCOMPARABLE`, `LAB_HOLDOUT_DENIED`, `LAB_DATASET_MISSING`, `LAB_ANSWER_PARTIAL`,
 `LAB_MODEL_UNAVAILABLE`.
 
 ## Tasks (next sessions, in order)
@@ -255,7 +270,7 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
    (AL-30…AL-32, AL-04) Not: wallet keys, RPC keys.
 5. `/ops/lab` in `ottodevs/mamoru-landing`: threads, chat, block renderer with view-A components, run panel, cost
    page; screenshots desktop + 390 light/dark against PoC-1 before merge. (AL-50…AL-53, AL-41)
-6. Scenarios LAB-AL-01…14 green; Ot and Brais use it for a week; cost per archetype reported for pricing. (AL-42)
+6. Scenarios LAB-AL-01…16 green; Ot and Brais use it for a week; cost per archetype reported for pricing. (AL-42)
 
 Later tickets: x402 endpoint (AL-60…62), fork scenarios as a tool, Ethereum windows backfill, Monad forward
 collector, export a study as a 006 draft template.
