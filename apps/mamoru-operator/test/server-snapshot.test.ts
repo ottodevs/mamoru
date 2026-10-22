@@ -7,6 +7,7 @@ import { RpcMetrics } from '../src/metrics.ts'
 import type { Operator } from '../src/operator.ts'
 import { startServer } from '../src/server.ts'
 import { SnapshotLoop, type Snapshot } from '../src/snapshot.ts'
+import { baseRegistry } from '@mamoru/registry'
 
 const SECRET = 'test-operator-secret'
 const dirs: string[] = []
@@ -26,7 +27,7 @@ const SNAP: Snapshot = {
 function boot(snapshot: SnapshotLoop | null) {
   const d = mkdtempSync(join(tmpdir(), 'mamoru-server-snapshot-'))
   dirs.push(d)
-  const op = { cfg: { chainId: 8453, live: true, policy: { policyId: 'p' } }, relayer: { address: '0x1111111111111111111111111111111111111111' } } as unknown as Operator
+  const op = { cfg: { chainId: 8453, registry: baseRegistry, live: true, policy: { policyId: 'p' } }, relayer: { address: '0x1111111111111111111111111111111111111111' } } as unknown as Operator
   const server = startServer(op, { secret: SECRET, hostname: '127.0.0.1', port: 0, rpcMetrics: new RpcMetrics(d), gitSha: 'x', bootedAt: Date.now(), snapshot })
   return { server, base: `http://127.0.0.1:${server.port}` }
 }

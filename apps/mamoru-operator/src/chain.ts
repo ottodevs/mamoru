@@ -1,6 +1,6 @@
 import type { PublicClient } from 'viem'
-import type { Address } from '@mamoru/domain'
-import { address, baseRegistry, entry, erc20Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { ReasonError, type Address, type ChainId } from '@mamoru/domain'
+import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
 import { Batch, MULTICALL3, balanceRead, blockNumberRead, contractRead, createDeployedChecker, tokenIdReads, type Handle } from '@mamoru/rpc'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 
@@ -14,7 +14,14 @@ import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 const SAFE_SIGHTING_LAG = 450n
 const isSafeDeployed = createDeployedChecker()
 
-export const LIVE_POOL = 'pool:USDC/cbBTC/500'
+/**
+ * otto/mamoru#63: the pool whose slot0 readSafe reports as `sqrtPriceX96`/`tick`, per chain. A name here must be a
+ * USDC pool of that chain's registry (`livePool` checks it). A chain without one has no live pool and readSafe refuses.
+ */
+const LIVE_POOLS: Record<ChainId, string> = {
+  8453: 'pool:USDC/cbBTC/500',
+  143: 'pool:WMON/USDC/3000',
+}
 /**
  * otto/mamoru#140 (part2 #4): position NFTs readSafe inspects at most. Anyone can send a Safe position NFTs; past
  * this many, only the ones Mamoru admitted are read (when the caller names them), else the first MAX_INVENTORY.
@@ -23,8 +30,24 @@ export const MAX_INVENTORY = 64
 const Q96 = 1n << 96n
 const Q192 = 1n << 192n
 
+const usdcPoolsOf = new WeakMap<Registry, string[]>()
+
 /** Registry pools that pair USDC: the pools a position of the account can be read, valued and unwound in. */
-export const USDC_POOLS = baseRegistry.entries.filter((e) => e.kind === 'pool' && (e.token0 === 'USDC' || e.token1 === 'USDC')).map((e) => e.name)
+export function usdcPools(registry: Registry): string[] {
+  let pools = usdcPoolsOf.get(registry)
+  if (!pools) {
+    pools = registry.entries.filter((e) => e.kind === 'pool' && (e.token0 === 'USDC' || e.token1 === 'USDC')).map((e) => e.name)
+    usdcPoolsOf.set(registry, pools)
+  }
+  return pools
+}
+
+/** The live pool of `registry`'s chain (see LIVE_POOLS), or CHAIN_UNSUPPORTED. */
+export function livePool(registry: Registry): string {
+  const pool = (LIVE_POOLS as Record<number, string | undefined>)[registry.chainId]
+  if (!pool || !usdcPools(registry).includes(pool)) throw new ReasonError('CHAIN_UNSUPPORTED', `no live USDC pool for ${registry.chain}`)
+  return pool
+}
 
 export type PoolPosition = {
   tokenId: bigint
@@ -50,14 +73,13 @@ export type SafeRead = {
   deployed: boolean
   eth: bigint
   usdc: bigint
-  cbbtc: bigint
-  /** pool:USDC/cbBTC/500 slot0. */
+  /** slot0 of the chain's live pool (`livePool`). */
   sqrtPriceX96: bigint
   tick: number
-  /** Balance of every token of USDC_POOLS. */
+  /** Balance of every token of the registry's USDC pools (`usdcPools`), by registry name. */
   tokens: Record<string, bigint>
   prices: Record<string, PoolPrice>
-  /** Positions in any of USDC_POOLS. */
+  /** Positions in any of the registry's USDC pools. */
   positions: PoolPosition[]
   /** Position NFTs the Safe holds in all, read or not (see MAX_INVENTORY). */
   positionCount?: number
@@ -81,16 +103,16 @@ export function cbbtcInUsdc(amount1: bigint, sqrtPriceX96: bigint): bigint {
   return (amount1 << 192n) / (sqrtPriceX96 * sqrtPriceX96)
 }
 
-/** Raw USDC worth `amount` of `token` at the slot0 of `pool` (a USDC pool). */
-export function inUsdc(pool: string, token: string, amount: bigint, sqrtPriceX96: bigint): bigint {
+/** Raw USDC worth `amount` of `token` at the slot0 of `pool` (a USDC pool of `registry`). */
+export function inUsdc(pool: string, token: string, amount: bigint, sqrtPriceX96: bigint, registry: Registry): bigint {
   if (token === 'USDC' || amount === 0n) return amount
-  const e = entry(pool, baseRegistry)
+  const e = entry(pool, registry)
   return e.token0 === 'USDC' ? (amount * Q192) / (sqrtPriceX96 * sqrtPriceX96) : (amount * sqrtPriceX96 * sqrtPriceX96) / Q192
 }
 
 /** Raw units of the pool's other token per raw USDC, for computeCaps. */
-export function priceOf(pool: string, sqrtPriceX96: bigint): { asset: string; num: bigint; den: bigint } {
-  const e = entry(pool, baseRegistry)
+export function priceOf(pool: string, sqrtPriceX96: bigint, registry: Registry): { asset: string; num: bigint; den: bigint } {
+  const e = entry(pool, registry)
   return e.token0 === 'USDC' ? { asset: e.token1!, num: sqrtPriceX96 * sqrtPriceX96, den: Q192 } : { asset: e.token0!, num: Q192, den: sqrtPriceX96 * sqrtPriceX96 }
 }
 
@@ -99,25 +121,28 @@ export function priceOf(pool: string, sqrtPriceX96: bigint): { asset: string; nu
  * principal left by a decrease whose collect has not run yet) sit on the position too and are just as collectible
  * — collect() always sweeps both. Valuation counts them so a position is never reported worth less than it is.
  */
-export function positionUsdc(p: PoolPosition, sqrtPriceX96: bigint): bigint {
-  return inUsdc(p.pool, p.token0, p.amount0 + p.tokensOwed0, sqrtPriceX96) + inUsdc(p.pool, p.token1, p.amount1 + p.tokensOwed1, sqrtPriceX96)
+export function positionUsdc(p: PoolPosition, sqrtPriceX96: bigint, registry: Registry): bigint {
+  return inUsdc(p.pool, p.token0, p.amount0 + p.tokensOwed0, sqrtPriceX96, registry) + inUsdc(p.pool, p.token1, p.amount1 + p.tokensOwed1, sqrtPriceX96, registry)
 }
 
 /**
- * Everything the Safe holds at one block: balances and its positions in every registry pool that pairs USDC.
+ * Everything the Safe holds at one block: balances and its positions in every pool of `registry` that pairs USDC.
+ * `registry` is the one of the chain `client` reads (otto/mamoru#63): every address comes from it.
  * One eth_call when it holds no position, two when it does: the block number rides inside the first Multicall3
  * call instead of a separate eth_blockNumber, and eth_getCode is asked only until the Safe's deployment is
  * confirmed (see `isDeployed`).
  */
-export async function readSafe(client: PublicClient, safe: Address, opts: { admitted?: readonly bigint[] } = {}): Promise<SafeRead> {
-  const npm = address('NonfungiblePositionManager', baseRegistry)
-  const tokenNames = [...new Set(USDC_POOLS.flatMap((p) => [entry(p, baseRegistry).token0!, entry(p, baseRegistry).token1!]))]
+export async function readSafe(client: PublicClient, safe: Address, registry: Registry, opts: { admitted?: readonly bigint[] } = {}): Promise<SafeRead> {
+  const pools = usdcPools(registry)
+  const live = livePool(registry)
+  const npm = address('NonfungiblePositionManager', registry)
+  const tokenNames = [...new Set(pools.flatMap((p) => [entry(p, registry).token0!, entry(p, registry).token1!]))]
   const first = new Batch(client, MULTICALL3, undefined)
   const blockRead = first.add(blockNumberRead(client, MULTICALL3))
   const ethRead = first.add(balanceRead(client, MULTICALL3, safe))
   const nftRead = first.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe] }))
-  const balanceReads = tokenNames.map((t) => first.add(contractRead(client, { address: address(t, baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [safe] })))
-  const slotReads = USDC_POOLS.map((p) => first.add(contractRead(client, { address: address(p, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0' })))
+  const balanceReads = tokenNames.map((t) => first.add(contractRead(client, { address: address(t, registry), abi: erc20Abi, functionName: 'balanceOf', args: [safe] })))
+  const slotReads = pools.map((p) => first.add(contractRead(client, { address: address(p, registry), abi: uniswapV3PoolAbi, functionName: 'slot0' })))
   // The block is known only once `first` has run: the speculative ids carry none (they resolve through
   // `.maybe()` only), the one-more-request round of an account with more positions is pinned to it below.
   const idsOf = tokenIdReads(client, MULTICALL3, first, safe)
@@ -143,11 +168,11 @@ export async function readSafe(client: PublicClient, safe: Address, opts: { admi
     isSafeDeployed(client, safe, blockNumber, safeNumber),
     needAt(ethRead, () => client.getBalance({ address: safe, blockNumber })),
     needAt(nftRead, () => client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe], blockNumber })),
-    Promise.all(balanceReads.map((r, i) => needAt(r, () => client.readContract({ address: address(tokenNames[i]!, baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [safe], blockNumber })))),
-    Promise.all(slotReads.map((r, i) => needAt(r, () => client.readContract({ address: address(USDC_POOLS[i]!, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber })))),
+    Promise.all(balanceReads.map((r, i) => needAt(r, () => client.readContract({ address: address(tokenNames[i]!, registry), abi: erc20Abi, functionName: 'balanceOf', args: [safe], blockNumber })))),
+    Promise.all(slotReads.map((r, i) => needAt(r, () => client.readContract({ address: address(pools[i]!, registry), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber })))),
   ])
   const tokens = Object.fromEntries(tokenNames.map((t, i) => [t, balances[i]!]))
-  const prices: Record<string, PoolPrice> = Object.fromEntries(USDC_POOLS.map((p, i) => [p, { sqrtPriceX96: slots[i]![0], tick: slots[i]![1] }]))
+  const prices: Record<string, PoolPrice> = Object.fromEntries(pools.map((p, i) => [p, { sqrtPriceX96: slots[i]![0], tick: slots[i]![1] }]))
   const count = Number(nfts)
   // Over MAX_INVENTORY the ids are not enumerated: the admitted ones are read by id, each checked to still be the
   // Safe's (ownerOf), a burned or moved one skipped; without them, the first MAX_INVENTORY.
@@ -174,17 +199,17 @@ export async function readSafe(client: PublicClient, safe: Address, opts: { admi
   const positions: PoolPosition[] = []
   for (const tokenId of ids) {
     const p = await positionReads[listed.indexOf(tokenId)]!.need()
-    const pool = USDC_POOLS.find((n) => {
-      const e = entry(n, baseRegistry)
-      return p[2].toLowerCase() === address(e.token0!, baseRegistry).toLowerCase() && p[3].toLowerCase() === address(e.token1!, baseRegistry).toLowerCase() && p[4] === e.fee
+    const pool = pools.find((n) => {
+      const e = entry(n, registry)
+      return p[2].toLowerCase() === address(e.token0!, registry).toLowerCase() && p[3].toLowerCase() === address(e.token1!, registry).toLowerCase() && p[4] === e.fee
     })
     if (!pool) continue
-    const e = entry(pool, baseRegistry)
+    const e = entry(pool, registry)
     const price = prices[pool]!
     const [tickLower, tickUpper, liquidity, tokensOwed0, tokensOwed1] = [p[5], p[6], p[7], p[10], p[11]]
     const { amount0, amount1 } = amountsForLiquidity(price.sqrtPriceX96, tickLower, tickUpper, liquidity)
     positions.push({ tokenId, pool, token0: e.token0!, token1: e.token1!, fee: e.fee!, liquidity, tickLower, tickUpper, inRange: price.tick >= tickLower && price.tick < tickUpper, amount0, amount1, tokensOwed0, tokensOwed1 })
   }
-  const live = prices[LIVE_POOL]!
-  return { block: blockNumber, deployed, eth, usdc: tokens.USDC ?? 0n, cbbtc: tokens.cbBTC ?? 0n, sqrtPriceX96: live.sqrtPriceX96, tick: live.tick, tokens, prices, positions, positionCount: count, ...(byId ? { byId, ownedIds: ids } : {}) }
+  const livePrice = prices[live]!
+  return { block: blockNumber, deployed, eth, usdc: tokens.USDC ?? 0n, sqrtPriceX96: livePrice.sqrtPriceX96, tick: livePrice.tick, tokens, prices, positions, positionCount: count, ...(byId ? { byId, ownedIds: ids } : {}) }
 }

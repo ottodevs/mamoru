@@ -6,6 +6,7 @@ import { metricsSignature } from '@mamoru/operator-auth'
 import { classifyEngineError, EngineHealthTracker, RpcMetrics } from '../src/metrics.ts'
 import type { Operator } from '../src/operator.ts'
 import { startServer } from '../src/server.ts'
+import { baseRegistry } from '@mamoru/registry'
 
 type MetricsPayload = {
   generatedAt: string
@@ -29,7 +30,7 @@ afterEach(() => {
 
 function fakeOperator(): Operator {
   return {
-    cfg: { chainId: 8453, live: true, policy: { policyId: 'conservador-live-v2' } },
+    cfg: { chainId: 8453, registry: baseRegistry, live: true, policy: { policyId: 'conservador-live-v2' } },
     relayer: { address: '0x1111111111111111111111111111111111111111' },
     relayerBalance: async () => ({ wei: '812345678901234567', cachedAgeMs: 12 }),
     accountsSummary: () => ({ known: 14, active: 9, armed: 1 }),
@@ -195,7 +196,7 @@ describe('GET /metrics never carries injected secret-shaped free text (finding #
     })
 
     const op = {
-      cfg: { chainId: 8453, live: true, policy: { policyId: 'conservador-live-v2' } },
+      cfg: { chainId: 8453, registry: baseRegistry, live: true, policy: { policyId: 'conservador-live-v2' } },
       relayer: { address: '0x1111111111111111111111111111111111111111' },
       relayerBalance: async () => ({ wei: '1', cachedAgeMs: 1 }),
       accountsSummary: () => ({ known: 4, active: 4, armed: 0 }),

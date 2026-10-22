@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV2 } from '@mamoru/policy'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
+import { baseRegistry } from '@mamoru/registry'
 import type { PoolPosition, PoolPrice } from '../src/chain.ts'
 import { planReduce, reduceOrder, routeOf } from '../src/unwind.ts'
 
@@ -36,13 +37,13 @@ describe('withdraw reduce order', () => {
   })
 
   test('a withdraw the stables bucket covers only touches stables, partially', () => {
-    const plan = planReduce([risk, btc, stables], PRICES, 4_000_000n, ORDER)
+    const plan = planReduce([risk, btc, stables], PRICES, 4_000_000n, ORDER, baseRegistry)
     expect(plan.map((x) => x.pos.tokenId)).toEqual([1n])
     expect(plan[0]!.bps).toBe(4001)
   })
 
   test('past stables: all of stables, then BTC as far as needed, risk untouched', () => {
-    const plan = planReduce([risk, btc, stables], PRICES, 14_000_000n, ORDER)
+    const plan = planReduce([risk, btc, stables], PRICES, 14_000_000n, ORDER, baseRegistry)
     expect(plan.map((x) => [x.pos.tokenId, x.bps])).toEqual([
       [1n, 10_000],
       [2n, 5001],
@@ -50,7 +51,7 @@ describe('withdraw reduce order', () => {
   })
 
   test('risk only when stables and BTC are not enough', () => {
-    const plan = planReduce([risk, btc, stables], PRICES, 19_000_000n, ORDER)
+    const plan = planReduce([risk, btc, stables], PRICES, 19_000_000n, ORDER, baseRegistry)
     expect(plan.map((x) => [x.pos.tokenId, x.bps])).toEqual([
       [1n, 10_000],
       [2n, 10_000],
@@ -59,8 +60,8 @@ describe('withdraw reduce order', () => {
   })
 
   test('volatile tokens swap back on the policy pool', () => {
-    expect(routeOf('USDT', ORDER, [])).toBe('pool:USDC/USDT/100')
-    expect(routeOf('WETH', ORDER, ['pool:WETH/USDC/500'])).toBe('pool:WETH/USDC/3000')
-    expect(routeOf('EURC', ORDER, ['pool:EURC/USDC/500'])).toBe('pool:EURC/USDC/500')
+    expect(routeOf('USDT', ORDER, [], baseRegistry)).toBe('pool:USDC/USDT/100')
+    expect(routeOf('WETH', ORDER, ['pool:WETH/USDC/500'], baseRegistry)).toBe('pool:WETH/USDC/3000')
+    expect(routeOf('EURC', ORDER, ['pool:EURC/USDC/500'], baseRegistry)).toBe('pool:EURC/USDC/500')
   })
 })

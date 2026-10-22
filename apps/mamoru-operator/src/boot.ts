@@ -3,12 +3,14 @@ import { join } from 'node:path'
 import { $ } from 'bun'
 import { TransactionReceiptNotFoundError, createPublicClient, getAddress, http, isAddress, type Hex } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
-import { BASE_CHAIN_ID, type Address } from '@mamoru/domain'
+import { BASE_CHAIN_ID, chainOf, isChainId, type Address } from '@mamoru/domain'
+import { entry, registryFor, type Registry } from '@mamoru/registry'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
 import { conservadorLabV4, conservadorLabV5, conservadorLiveV4, conservadorLiveV5, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, type PolicyVersion } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
+import { livePool } from './chain.ts'
 import { Operator, type OperatorConfig } from './operator.ts'
 import { Relayer } from './relayer.ts'
 import { BridgeOut, ETHEREUM_CHAIN_ID, L1_BUNDLER_TIMEOUT_MS, L1_HANDLE_OPS_GAS, L1_USDC } from './bridge-out.ts'
@@ -268,6 +270,43 @@ export function capAndDepth(o: Pick<BootOptions, 'capUsdc' | 'depth'>, policy: P
   return { ...(capUsdc === undefined ? {} : { capUsdc }), ...(depth ? { depth } : {}) }
 }
 
+/**
+ * otto/mamoru#63: the registry of the chain the operator reads. On a supported chain (8453, 143) it is that chain's.
+ * On any other chain id (a lab fork) it is the forked chain's, named by MAMORU_SOURCE_CHAIN_ID; unset, Base, which
+ * is what every fork the operator ran on so far was. A MAMORU_SOURCE_CHAIN_ID that is not a supported chain, or that
+ * contradicts the chain the RPC answers, is refused.
+ */
+export function operatorRegistry(chainId: number, env: Record<string, string | undefined>): Registry {
+  const raw = env.MAMORU_SOURCE_CHAIN_ID
+  const source = raw === undefined || raw === '' ? undefined : Number(raw)
+  if (source !== undefined && !isChainId(source)) throw new Error(`MAMORU_SOURCE_CHAIN_ID=${raw} is not a supported chain`)
+  if (isChainId(chainId)) {
+    if (source !== undefined && source !== chainId) throw new Error(`MAMORU_SOURCE_CHAIN_ID=${raw} but the RPC is chain ${chainId}`)
+    return registryFor(chainId)
+  }
+  return registryFor(source ?? BASE_CHAIN_ID)
+}
+
+/**
+ * otto/mamoru#63: every pool the policy allocates to, and the chain's live pool, are entries of `registry`; else
+ * POLICY_TARGET_NOT_IN_REGISTRY / CHAIN_UNSUPPORTED at boot, before any account is read. A Base policy on a Monad
+ * registry stops here instead of resolving Base names later.
+ */
+export function assertPolicyOnRegistry(policy: PolicyVersion, registry: Registry): void {
+  for (const pool of policy.buckets.flatMap((b) => b.pools)) entry(pool, registry)
+  livePool(registry)
+}
+
+/**
+ * otto/mamoru#63: what only exists on Base is refused on any other chain at boot: the v4/v5 on-chain action policies
+ * (deployed on Base only) and bridge-out (moves USDC from Ethereum to Base).
+ */
+export function assertBaseOnlyFeatures(registry: Registry, env: Record<string, string | undefined>, o: Pick<BootOptions, 'l1RpcUrl'>): void {
+  if (registry.chainId === BASE_CHAIN_ID) return
+  if (env.MAMORU_ONCHAIN_POLICY_V4 === '1') throw new Error(`MAMORU_ONCHAIN_POLICY_V4 is Base only; this operator reads ${registry.chain}`)
+  if (o.l1RpcUrl) throw new Error(`MAMORU_L1_RPC_URL (bridge-out to Base) is Base only; this operator reads ${registry.chain}`)
+}
+
 /** Starts the operator: relayer key, state, loopback bundler, HTTP server, and the engine loops that were active. */
 export async function bootOperator(o: BootOptions) {
   const bootedAt = Date.now()
@@ -281,11 +320,15 @@ export async function bootOperator(o: BootOptions) {
   const client = createPublicClient({ transport: http(via('operator'), { batch: true, timeout: 60_000 }) })
   const watchClient = createPublicClient({ transport: http(via('watcher'), { batch: true, timeout: 60_000 }) })
   const chainId = await client.getChainId()
+  const registry = operatorRegistry(chainId, process.env)
+  assertBaseOnlyFeatures(registry, process.env, o)
+  // Live (owner transactions and engine loops) needs Base itself: chain id 8453, hence the Base registry.
   const live = chainId === BASE_CHAIN_ID && process.env.MAMORU_LIVE === '1'
   const named = resolveNamedPolicy(o.policyId ?? 'conservador-live-v2', process.env)
   if (!named) throw new Error(`unknown policy ${o.policyId}`)
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
   const policy = withTestOverrides(named, process.env)
+  assertPolicyOnRegistry(policy, registry)
   const store = new StateStore(o.stateDir)
   // Review round 2: an account already moved to the on-chain action policy needs that policy to resolve after a
   // restart (funding, engine, renewals and Stop all read it). Refused at boot, with the accounts named, rather than
@@ -308,6 +351,7 @@ export async function bootOperator(o: BootOptions) {
   const operator = new Operator(
     {
       chainId,
+      registry,
       live,
       rpcUrl: o.rpcUrl,
       bundlerUrl: bundler.url,
@@ -338,7 +382,7 @@ export async function bootOperator(o: BootOptions) {
     const snapshotClient = createPublicClient({ transport: http(via('snapshot'), { batch: true, timeout: 60_000 }) })
     const multicall3 = MULTICALL3
     const budget = rpcBudget(rpcMetrics)
-    const read = (): Promise<Snapshot> => readSnapshot(snapshotClient, multicall3, chainId, operator.snapshotTargets())
+    const read = (): Promise<Snapshot> => readSnapshot(snapshotClient, multicall3, chainId, registry, operator.snapshotTargets())
     const receipts = {
       source: { accounts: () => Object.values(store.state.accounts).map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, ops: a.ops })), save: () => store.save() },
       // Same transport as the read: these calls count against the snapshot's RPC budget, not the engines'.
@@ -412,6 +456,8 @@ export async function bootOperator(o: BootOptions) {
   const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot, bridgeOut })
   const eth = await client.getBalance({ address: relayer.address })
   console.log(`[operator] chain ${chainId} live=${live} policy ${policy.policyId} relayer ${relayer.address} (${eth} wei) sha ${gitSha} on http://${server.hostname}:${server.port}`)
+  // Base keeps its boot line byte for byte; any other chain says whose contracts it reads and the relayer's unit.
+  if (registry.chainId !== BASE_CHAIN_ID) console.log(`[operator] reads ${registry.chain} contracts (registry chain ${registry.chainId}, block ${registry.block}); relayer balance in ${chainOf(registry.chainId).native.symbol} wei; read only (not live)`)
   retune = () => operator.retuneEngines()
   // The first pull before any engine resumes, so a restart never runs a review or a prepare on stale settings when the
   // endpoint answers (bounded by the pull timeout; on failure the last-known-good or the defaults run, reported).

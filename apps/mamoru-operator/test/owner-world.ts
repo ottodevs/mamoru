@@ -269,7 +269,7 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
   } as unknown as Relayer
   const state = { accounts: {} as Record<string, AccountState> }
   const store = { state, save: () => void saves++ } as unknown as StateStore
-  const cfg = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1, ...cfgExtra } satisfies OperatorConfig
+  const cfg = { chainId: 8453, registry: baseRegistry, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1, ...cfgExtra } satisfies OperatorConfig
   const op = new Operator(cfg, client, relayer, store)
   ;(op as unknown as { retryMs: number }).retryMs = 0
   return { op, chain, sent, knobs, factory, state, npmCalls, saves: () => saves }

@@ -209,8 +209,8 @@ try {
 
   // --- v2 activation, the engine invests --------------------------------------------------------
   await ownerAction('activate')
-  await engineSettled('v2 allocation', Date.now() + 480_000, async () => (await readSafe(lab.client, ctx.address)).positions.length >= 2)
-  const r0 = await readSafe(lab.client, ctx.address)
+  await engineSettled('v2 allocation', Date.now() + 480_000, async () => (await readSafe(lab.client, ctx.address, baseRegistry)).positions.length >= 2)
+  const r0 = await readSafe(lab.client, ctx.address, baseRegistry)
   const v2Positions = r0.positions.map((p) => p.tokenId)
   log(`v2 positions: ${r0.positions.map((p) => `${p.tokenId} ${p.pool}`).join(', ')}`)
 
@@ -230,7 +230,7 @@ try {
   log(`the move to v5 took ${v5Gas.length} owner transaction(s): ${v5Gas.join(' + ')}`)
   const genV2 = await lab.client.readContract({ address: dep.v2 as Hex, abi: policyAbi, functionName: 'generationOf', args: [ctx.address] })
   check(genV2 === genV1 + 1n, `V2 generation ${genV2} = V1 + 1`)
-  const r1 = await readSafe(lab.client, ctx.address)
+  const r1 = await readSafe(lab.client, ctx.address, baseRegistry)
   for (const p of r1.positions) {
     const at = await lab.client.readContract({ address: dep.v2 as Hex, abi: policyAbi, functionName: 'admittedPool', args: [ctx.address, p.tokenId] })
     check(at.toLowerCase() === address(p.pool as never, baseRegistry).toLowerCase(), `position ${p.tokenId} admitted to ${p.pool} at V2`)

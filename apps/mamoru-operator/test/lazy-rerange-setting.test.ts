@@ -37,7 +37,7 @@ async function sourceWith(versions: SettingsVersion[]): Promise<EngineSettingsSo
   return s
 }
 
-const base = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: V2, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
+const base = { chainId: 8453, registry: baseRegistry, live: true, rpcUrl: '', bundlerUrl: '', policy: V2, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
 const store = { state: { accounts: {} }, save: () => {} }
 const account = (key: string) => ({ accountKey: key, policyId: 'conservador-live-v2', active: true, grants: [] }) as never
 const operator = (settings?: EngineSettingsSource) => new Operator({ ...base, ...(settings ? { settings } : {}) } as never, {} as never, {} as never, store as never)

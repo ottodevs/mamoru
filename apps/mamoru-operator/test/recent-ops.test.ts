@@ -7,12 +7,13 @@ import { POLICIES } from '@mamoru/policy'
 import { Operator, type OperatorConfig } from '../src/operator.ts'
 import type { Relayer } from '../src/relayer.ts'
 import type { AccountState, StateStore, StoredOp } from '../src/state.ts'
+import { baseRegistry } from '@mamoru/registry'
 
 function world(accounts: Record<string, AccountState>) {
   const client = { getBlockNumber: async () => 1n } as unknown as PublicClient
   const relayer = { address: `0x${'7'.repeat(40)}` } as unknown as Relayer
   const store = { state: { accounts }, save: () => {} } as unknown as StateStore
-  const cfg = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 } satisfies OperatorConfig
+  const cfg = { chainId: 8453, registry: baseRegistry, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 } satisfies OperatorConfig
   return new Operator(cfg, client, relayer, store)
 }
 

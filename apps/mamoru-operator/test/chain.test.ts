@@ -4,6 +4,7 @@
 // in the worst case reporting it worth 0 even though collect() would still sweep real tokens from it.
 import { describe, expect, test } from 'bun:test'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
+import { baseRegistry } from '@mamoru/registry'
 import { positionUsdc, type PoolPosition } from '../src/chain.ts'
 
 const PRICE = sqrtRatioAtTick(0) // pool:USDC/USDT/100 at 1:1
@@ -28,16 +29,16 @@ const pos = (over: Partial<PoolPosition>): PoolPosition => ({
 describe('positionUsdc counts tokensOwed, not only the liquidity-derived amounts', () => {
   test('a position with liquidity decreased to 0 but USDC still owed is not valued at 0', () => {
     const p = pos({ liquidity: 0n, amount0: 0n, amount1: 0n, tokensOwed0: 3_000_000n })
-    expect(positionUsdc(p, PRICE)).toBe(3_000_000n)
+    expect(positionUsdc(p, PRICE, baseRegistry)).toBe(3_000_000n)
   })
 
   test('owed accrues on top of the liquidity-derived amount, on either token', () => {
     const p = pos({ amount0: 1_000_000n, tokensOwed0: 500_000n, amount1: 2_000_000n, tokensOwed1: 250_000n })
-    expect(positionUsdc(p, PRICE)).toBe(3_750_000n)
+    expect(positionUsdc(p, PRICE, baseRegistry)).toBe(3_750_000n)
   })
 
   test('no owed tokens: unchanged from the liquidity-derived amounts alone', () => {
     const p = pos({ amount0: 1_000_000n, amount1: 2_000_000n })
-    expect(positionUsdc(p, PRICE)).toBe(3_000_000n)
+    expect(positionUsdc(p, PRICE, baseRegistry)).toBe(3_000_000n)
   })
 })

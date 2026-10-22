@@ -180,8 +180,8 @@ try {
 
   // --- v2 activation, the engine invests --------------------------------------------------------
   await ownerAction('activate')
-  await engineSettled('v2 allocation', Date.now() + 480_000, async () => (await readSafe(lab.client, ctx.address)).positions.length >= 2)
-  const r0 = await readSafe(lab.client, ctx.address)
+  await engineSettled('v2 allocation', Date.now() + 480_000, async () => (await readSafe(lab.client, ctx.address, baseRegistry)).positions.length >= 2)
+  const r0 = await readSafe(lab.client, ctx.address, baseRegistry)
   const v2Positions = r0.positions.map((p) => p.tokenId)
   log(`v2 positions: ${r0.positions.map((p) => `${p.tokenId} ${p.pool}`).join(', ')}`)
 

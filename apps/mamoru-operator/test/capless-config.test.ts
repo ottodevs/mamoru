@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { POLICIES } from '@mamoru/policy'
 import { capAndDepth, parseCapUsdc, parseDepth, settingsOverride } from '../src/boot.ts'
 import { Operator } from '../src/operator.ts'
+import { baseRegistry } from '@mamoru/registry'
 
 describe('MAMORU_CAP_USDC and MAMORU_DEPTH', () => {
   test('the cap is a whole number of USDC, in base units', () => {
@@ -32,7 +33,7 @@ test('a cap above the default needs depth sizing; at or under it, it does not', 
 })
 
 describe('Operator: cap and depth sizing (otto/mamoru#127)', () => {
-  const base = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
+  const base = { chainId: 8453, registry: baseRegistry, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
   const store = { state: { accounts: {} }, save: () => {} }
   const acc = { accountKey: 'k', policyId: 'conservador-live-v2', active: true, grants: [] } as never
   const make = (extra: object) => new Operator({ ...base, ...extra } as never, {} as never, {} as never, store as never)
@@ -55,7 +56,7 @@ describe('Operator: cap and depth sizing (otto/mamoru#127)', () => {
 })
 
 describe('Operator: engine settings from D1 (spec 006, otto/mamoru#147)', () => {
-  const base = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
+  const base = { chainId: 8453, registry: baseRegistry, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
   const store = { state: { accounts: {} }, save: () => {} }
   const acc = { accountKey: 'k', policyId: 'conservador-live-v2', active: true, grants: [] } as never
   const settingsWith = (s: object) => ({ forAccount: () => ({ settings: s, versionId: 7, source: 'd1', override: [] }), status: () => ({}) }) as never
@@ -90,7 +91,7 @@ test('spec 006: the env knobs become an emergency override in the settings shape
 })
 
 test('spec 006: an activation never takes in more than the cap its signature named', () => {
-  const base = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
+  const base = { chainId: 8453, registry: baseRegistry, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
   const store = { state: { accounts: {} }, save: () => {} }
   const acc = { accountKey: 'k', policyId: 'conservador-live-v2', active: false, grants: [] } as never
   const settings = { forAccount: () => ({ settings: { depth: { impactBps: 30, shareBps: 500 }, capUsdc: 1000, guard: { enabled: false, btc: { fallBps: 700, volBps: 8000 }, eth: { fallBps: 900, volBps: 10000 } } }, versionId: 2, source: 'd1', override: [] }), status: () => ({}) }
@@ -101,7 +102,7 @@ test('spec 006: an activation never takes in more than the cap its signature nam
 })
 
 test('spec 006 (Sol review): a legacy approval with no signed cap is bounded by the default cap, never the raised one', () => {
-  const base = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
+  const base = { chainId: 8453, registry: baseRegistry, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
   const store = { state: { accounts: {} }, save: () => {} }
   const acc = { accountKey: 'k', policyId: 'conservador-live-v2', active: false, grants: [] } as never
   const settings = { forAccount: () => ({ settings: { depth: { impactBps: 30, shareBps: 500 }, capUsdc: 1000, guard: { enabled: false, btc: { fallBps: 700, volBps: 8000 }, eth: { fallBps: 900, volBps: 10000 } } }, versionId: 2, source: 'd1', override: [] }), status: () => ({}) }
@@ -111,7 +112,7 @@ test('spec 006 (Sol review): a legacy approval with no signed cap is bounded by 
 })
 
 test('spec 006 (Sol review): a raised pulled cap is refused for an account whose policy cannot size to depth', () => {
-  const base = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
+  const base = { chainId: 8453, registry: baseRegistry, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
   const store = { state: { accounts: {} }, save: () => {} }
   const v1 = Object.values(POLICIES).find((p) => p.allocation !== 'target-weights')!
   const acc = { accountKey: 'legacy-acct', policyId: v1.policyId, active: true, grants: [] } as never

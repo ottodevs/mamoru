@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { encodeAbiParameters, encodeEventTopics, parseAbi, type Address, type Hex, type Log } from 'viem'
 import { address, baseRegistry, entryPointV07Abi } from '@mamoru/registry'
-import { LIVE_POOL } from '../src/chain.ts'
+import { livePool } from '../src/chain.ts'
 import type { StoredOp } from '../src/state.ts'
 import type { Snapshot } from '../src/snapshot.ts'
 import { dayReceipts, factsFromLogs, FACTS_PER_TICK, needsFacts, priceFees, withReceipts, type OpFacts } from '../src/yield-receipts.ts'
@@ -10,6 +10,7 @@ const SAFE = '0x1111111111111111111111111111111111111111' as Address
 const OTHER = '0x2222222222222222222222222222222222222222' as Address
 const NPM = address('NonfungiblePositionManager', baseRegistry)
 const EP = address('EntryPointV07', baseRegistry)
+const LIVE_POOL = livePool(baseRegistry)
 const POOL = address(LIVE_POOL, baseRegistry)
 
 const poolAbi = parseAbi(['event Collect(address indexed owner, address recipient, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount0, uint128 amount1)'])

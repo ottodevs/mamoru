@@ -172,11 +172,11 @@ try {
   const VOLATILE: Record<string, string> = { 'pool:USDC/USDT/100': 'USDT', 'pool:USDC/cbBTC/500': 'cbBTC', 'pool:WETH/USDC/3000': 'WETH' }
   /** Value per bucket in USDC units (positions + idle volatile, at slot0), idle USDC and the total. */
   async function mix() {
-    const r = await readSafe(lab.client, ctx.address)
+    const r = await readSafe(lab.client, ctx.address, baseRegistry)
     const per = BUCKETS.map(([b, pool]) => {
       const px = r.prices[pool]!.sqrtPriceX96
-      const pos = r.positions.filter((p) => p.pool === pool).reduce((s, p) => s + positionUsdc(p, px), 0n)
-      return { b, pool, value: pos + inUsdc(pool, VOLATILE[pool]!, r.tokens[VOLATILE[pool]!] ?? 0n, px), positions: r.positions.filter((p) => p.pool === pool).length }
+      const pos = r.positions.filter((p) => p.pool === pool).reduce((s, p) => s + positionUsdc(p, px, baseRegistry), 0n)
+      return { b, pool, value: pos + inUsdc(pool, VOLATILE[pool]!, r.tokens[VOLATILE[pool]!] ?? 0n, px, baseRegistry), positions: r.positions.filter((p) => p.pool === pool).length }
     })
     const total = r.usdc + per.reduce((s, x) => s + x.value, 0n)
     const pct = (v: bigint) => Number((v * 10_000n) / (total || 1n)) / 100

@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto'
 import { POLICIES, computeCaps, grantKey, instantiateGrant } from '@mamoru/policy'
 import { LIVE_CAP_USDC, activationBatch, liveAccountFromContext } from '@mamoru/account/live'
 import { simulateCalls } from '@mamoru/rpc'
+import { baseRegistry } from '@mamoru/registry'
 import { priceOf, readSafe } from '../src/chain.ts'
 
 const acc = JSON.parse(await Bun.file(process.argv[2]!).text())
@@ -13,8 +14,8 @@ const policyId = process.argv[3] ?? 'conservador-live-v2'
 const policy = (POLICIES as any)[policyId] ?? Object.values(POLICIES as any).find((p: any) => p.id === policyId)
 const client = createPublicClient({ chain: base, transport: http(process.env.BASE_RPC_URL) }) as any
 const live = liveAccountFromContext(acc.ctx)
-const r = await readSafe(client, live.safe)
-const prices = Object.fromEntries([...new Set(['pool:USDC/cbBTC/500', ...policy.buckets.flatMap((b: any) => b.pools)])].map((pool: any) => { const pr = priceOf(pool, r.prices[pool]!.sqrtPriceX96); return [pr.asset, { num: pr.num, den: pr.den }] }))
+const r = await readSafe(client, live.safe, baseRegistry)
+const prices = Object.fromEntries([...new Set(['pool:USDC/cbBTC/500', ...policy.buckets.flatMap((b: any) => b.pools)])].map((pool: any) => { const pr = priceOf(pool, r.prices[pool]!.sqrtPriceX96, baseRegistry); return [pr.asset, { num: pr.num, den: pr.den }] }))
 const caps = computeCaps(policy, LIVE_CAP_USDC, prices)
 const t = Number((await client.getBlock({ blockNumber: r.block })).timestamp)
 const sessionKey = privateKeyToAccount(acc.sessionKey).address

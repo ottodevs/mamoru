@@ -1,7 +1,7 @@
 // otto/mamoru#140, Astra audit part 2, findings 3-7 on the owner flows of the live operator.
 import { describe, expect, test } from 'bun:test'
 import { decodeFunctionData, type Hex } from 'viem'
-import { safeAbi } from '@mamoru/registry'
+import { baseRegistry, safeAbi } from '@mamoru/registry'
 import type { Address } from '@mamoru/domain'
 import { FakeChain } from '../../../packages/rpc/test/fake-chain.ts'
 import { MAX_INVENTORY, readSafe } from '../src/chain.ts'
@@ -151,10 +151,10 @@ describe('#4 position NFTs sent to the Safe never block Stop', () => {
     const safe = '0x00000000000000000000000000000000000000aa' as Address
     chain.code.set(safe.toLowerCase(), '0x6001')
     for (let i = 1n; i <= BigInt(MAX_INVENTORY + 36); i++) chain.addPosition(safe, i, 'pool:USDC/cbBTC/500')
-    const all = await readSafe(chain.client, safe)
+    const all = await readSafe(chain.client, safe, baseRegistry)
     expect(all.positionCount).toBe(MAX_INVENTORY + 36)
     expect(all.positions).toHaveLength(MAX_INVENTORY)
-    const named = await readSafe(chain.client, safe, { admitted: [3n, 99n, 5_000n] })
+    const named = await readSafe(chain.client, safe, baseRegistry, { admitted: [3n, 99n, 5_000n] })
     expect(named.positions.map((p) => p.tokenId)).toEqual([3n, 99n])
   })
 })

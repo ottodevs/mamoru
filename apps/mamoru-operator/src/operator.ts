@@ -2,10 +2,10 @@ import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { overCap, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
-import { baseRegistry, address, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type RegistryName } from '@mamoru/registry'
-import { collect, decreaseLiquidity } from '@mamoru/uniswap-v3'
+import { address, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
+import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
-import { BATCH_MAX_CALLS, Batch, MULTICALL3, contractRead, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
+import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
 import { POLICIES, USAGE_RENEW_BPS, V4_POOLS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
@@ -32,7 +32,7 @@ import {
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { permissionIdOf, revocationCalls, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
-import { minOut, quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
+import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
 import { Engine, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
@@ -42,7 +42,7 @@ import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { Proposal } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
-import { MAX_INVENTORY, USDC_POOLS, amountsForLiquidity, inUsdc, positionUsdc, priceOf, readSafe, type PoolPosition, type SafeRead } from './chain.ts'
+import { MAX_INVENTORY, amountsForLiquidity, inUsdc, livePool, positionUsdc, priceOf, readSafe, usdcPools, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
@@ -337,6 +337,11 @@ export function safeHttpError(status: number, code: keyof typeof SAFE_ERROR_MESS
 
 export type OperatorConfig = {
   chainId: number
+  /**
+   * otto/mamoru#63: the registry of the chain this operator reads (boot.ts `operatorRegistry`): pools, tokens, the
+   * live pool and every contract address come from it. On a lab fork it is the registry of the forked chain.
+   */
+  registry: Registry
   live: boolean
   rpcUrl: string
   bundlerUrl: string
@@ -527,7 +532,6 @@ const ENGINE_STEP: Record<OpRecord['kind'], Progress['step']> = {
 
 /** Accounts activated before the operator stored a policy id per account ran this policy. */
 const LEGACY_POLICY = 'conservador-live-v1'
-const LIVE_POOL_NAME = 'pool:USDC/cbBTC/500'
 /** Base's per-tx gas cap is 2^24 (EIP-7825). Budget the activation well under it: the relayer adds a margin on top of its estimate. */
 export const BASE_TX_GAS_CAP = 16_777_216n
 const ACTIVATION_GAS_BUDGET = 15_000_000n
@@ -555,8 +559,8 @@ function unrevokedIds(ids: Hex[], gone: Hex[]): Hex[] {
 }
 
 /** "USDC/cbBTC 0.05%" for pool:USDC/cbBTC/500. */
-function poolLabel(pool: string): string {
-  const e = entry(pool, baseRegistry)
+function poolLabel(pool: string, registry: Registry): string {
+  const e = entry(pool, registry)
   return `${e.token0}/${e.token1} ${(e.fee! / 10_000).toFixed(2)}%`
 }
 
@@ -616,6 +620,8 @@ export class Operator {
    * with the fee history and fallback series the cost test needs, restored from and saved to `cfg.guardReadsState`.
    */
   readonly guardReads: SharedGuardReads
+  /** Uniswap V3 calls and quotes bound to `cfg.registry`. */
+  private readonly v3: UniswapV3
 
   constructor(
     readonly cfg: OperatorConfig,
@@ -623,6 +629,7 @@ export class Operator {
     readonly relayer: Relayer,
     private readonly store: StateStore,
   ) {
+    this.v3 = uniswapV3(cfg.registry)
     const saved = cfg.guardReadsState
     const restored = saved?.load()
     this.guardReads = new SharedGuardReads({ fees: restored?.fees, series: restored?.series, onUpdate: saved ? (s) => saved.update(s) : undefined })
@@ -713,7 +720,7 @@ export class Operator {
    */
   private async seedAdmitted(acc: AccountState): Promise<void> {
     if (acc.admittedTokenIds) return
-    const r = await readSafe(this.client, acc.ctx.address as Address)
+    const r = await readSafe(this.client, acc.ctx.address as Address, this.cfg.registry)
     if (acc.admittedTokenIds) return
     if ((r.positionCount ?? 0) > MAX_INVENTORY) logErr('[alert]', `${acc.accountKey} holds ${r.positionCount} position NFTs: admitted seeded from the first ${MAX_INVENTORY} only`)
     acc.admittedTokenIds = r.positions.map((p) => p.tokenId.toString())
@@ -1182,7 +1189,7 @@ export class Operator {
       return undefined
     }
     if (!isV4(p) || !p.actionPolicy) return undefined
-    const pools = [...new Set(acc.grants.map((g) => g.grant.pool).filter((x): x is NonNullable<typeof x> => !!x))].map((name) => ({ name, address: address(name, baseRegistry) }))
+    const pools = [...new Set(acc.grants.map((g) => g.grant.pool).filter((x): x is NonNullable<typeof x> => !!x))].map((name) => ({ name, address: address(name, this.cfg.registry) }))
     return readPolicyBudgets(this.client as never, p.actionPolicy.address, acc.ctx.address as Address, pools, budgetUsedBps)
   }
 
@@ -1204,11 +1211,11 @@ export class Operator {
       // Only while the engine is off: that is when the cap refuses Start.
       overCap: acc.active ? null : overCap(r.usdc, this.capFor(acc)),
       deployMinUsdc: MIN_DEPLOY_USDC.toString(),
-      cbbtc: r.cbbtc.toString(),
+      cbbtc: (r.tokens.cbBTC ?? 0n).toString(),
       gasReserveWei: this.policyOf(acc).gasReserveWei.toString(),
       active: acc.active,
       approval: this.approvalView(acc),
-      idle: idleTokens(r),
+      idle: idleTokens(r, this.cfg.registry),
       engine: this.engineView(acc),
       positions: this.sizingPositions(acc, r).map((p) => ({
         tokenId: p.tokenId.toString(),
@@ -1218,10 +1225,10 @@ export class Operator {
         amountUsdc: (p.token0 === 'USDC' ? p.amount0 : p.amount1).toString(),
         amountCbbtc: (p.token0 === 'cbBTC' ? p.amount0 : p.token1 === 'cbBTC' ? p.amount1 : 0n).toString(),
         amounts: [
-          { token: p.token0, amount: p.amount0.toString(), decimals: entry(p.token0, baseRegistry).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token0, p.amount0, r.prices[p.pool]!.sqrtPriceX96).toString() },
-          { token: p.token1, amount: p.amount1.toString(), decimals: entry(p.token1, baseRegistry).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token1, p.amount1, r.prices[p.pool]!.sqrtPriceX96).toString() },
+          { token: p.token0, amount: p.amount0.toString(), decimals: entry(p.token0, this.cfg.registry).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token0, p.amount0, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry).toString() },
+          { token: p.token1, amount: p.amount1.toString(), decimals: entry(p.token1, this.cfg.registry).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token1, p.amount1, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry).toString() },
         ],
-        valueUsdc: positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96).toString(),
+        valueUsdc: positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry).toString(),
       })),
       progress: this.progressOf(acc),
     }
@@ -1243,7 +1250,7 @@ export class Operator {
     // The ids as they were when the read started: an id admitted while it was in flight (onMinted) was not looked
     // for, and is never pruned on this read's word.
     const asked = acc.admittedTokenIds ? [...acc.admittedTokenIds] : undefined
-    const r = await readSafe(this.client, safe, asked ? { admitted: asked.map((id) => BigInt(id)) } : {})
+    const r = await readSafe(this.client, safe, this.cfg.registry, asked ? { admitted: asked.map((id) => BigInt(id)) } : {})
     // Sol review #6: the record holds what the Safe still owns, so it stays bounded. Pruned from a read that saw every
     // NFT (enumerated) or checked the admitted ids one by one (ownerOf), never from a capped enumeration.
     const sawAll = r.byId ? (asked?.length ?? 0) <= MAX_INVENTORY : (r.positionCount ?? 0) <= MAX_INVENTORY
@@ -1532,10 +1539,10 @@ export class Operator {
     // swap in the read block could move to shrink or inflate the volatile caps the owner signs (otto/mamoru#140).
     const prices = Object.fromEntries(
       await Promise.all(
-        [...new Set([LIVE_POOL_NAME, ...policy.buckets.flatMap((b) => b.pools)])].map(async (pool) => {
-          const tick = await twapTickAt(this.client, address(pool, baseRegistry), policy.execution.twapWindowSeconds, r.block).catch(() => null)
+        [...new Set([livePool(this.cfg.registry), ...policy.buckets.flatMap((b) => b.pools)])].map(async (pool) => {
+          const tick = await twapTickAt(this.client, address(pool, this.cfg.registry), policy.execution.twapWindowSeconds, r.block).catch(() => null)
           if (tick === null) throw new HttpError(503, 'PRICE_UNAVAILABLE', 'a pool price could not be checked right now; try again in a moment')
-          const pr = priceOf(pool, sqrtRatioAtTick(tick))
+          const pr = priceOf(pool, sqrtRatioAtTick(tick), this.cfg.registry)
           return [pr.asset, { num: pr.num, den: pr.den }]
         }),
       ),
@@ -1606,9 +1613,9 @@ export class Operator {
     const d = v4DeploymentOf(policy)
     if (!d) throw new HttpError(503, 'ACTION_POLICY_UNCONFIGURED', 'the on-chain action policy is not configured on this operator')
     const read = <T,>(args: Parameters<PublicClient['readContract']>[0]) => this.client.readContract({ ...args, blockNumber: block } as never) as Promise<T>
-    const reference = await read<{ resolverUID: Hex; sender: Address }>({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findModule', args: [address('TimeFramePolicy', baseRegistry)] })
+    const reference = await read<{ resolverUID: Hex; sender: Address }>({ address: address('ModuleRegistry', this.cfg.registry), abi: moduleRegistryAbi, functionName: 'findModule', args: [address('TimeFramePolicy', this.cfg.registry)] })
     for (const m of [d.actionPolicy, d.gasPolicy]) {
-      const rec = await read<{ resolverUID: Hex; sender: Address }>({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findModule', args: [m] })
+      const rec = await read<{ resolverUID: Hex; sender: Address }>({ address: address('ModuleRegistry', this.cfg.registry), abi: moduleRegistryAbi, functionName: 'findModule', args: [m] })
       if (BigInt(rec.sender) === 0n || rec.resolverUID !== reference.resolverUID) {
         logErr(`[v4] ${m} has no ModuleRecord under Mamoru's resolver (sender ${rec.sender}): not attested`, undefined)
         throw new HttpError(503, 'ACTION_POLICY_NOT_REGISTERED', 'the on-chain action policy is not registered yet: nothing was changed')
@@ -1623,7 +1630,7 @@ export class Operator {
     // Unrevoked but lapsing: the registry refuses a new attestation over it (AlreadyAttested), so it is revoked first.
     const reattest: Address[] = []
     for (const m of [d.actionPolicy, d.gasPolicy]) {
-      const a = await read<{ time: number; expirationTime: number; revocationTime: number; attester: Address }>({ address: address('ModuleRegistry', baseRegistry), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [m, live.safe] })
+      const a = await read<{ time: number; expirationTime: number; revocationTime: number; attester: Address }>({ address: address('ModuleRegistry', this.cfg.registry), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [m, live.safe] })
       const lapses = Number(a.expirationTime) !== 0 && Number(a.expirationTime) <= approvalEnd
       const inForce = Number(a.time) !== 0 && Number(a.revocationTime) === 0
       if (!inForce || lapses) attest.push(m)
@@ -1638,7 +1645,7 @@ export class Operator {
     if (mode === 'extend') {
       generation = current
       const held = [...new Set(acc.grants.map((g) => g.grant.pool).filter((x): x is NonNullable<typeof x> => !!x))]
-      const configs = await Promise.all(held.map((pool) => read<{ generation: bigint }>({ address: d.actionPolicy, abi: v4PolicyAbi, functionName: 'configOf', args: [live.safe, address(pool, baseRegistry)] })))
+      const configs = await Promise.all(held.map((pool) => read<{ generation: bigint }>({ address: d.actionPolicy, abi: v4PolicyAbi, functionName: 'configOf', args: [live.safe, address(pool, this.cfg.registry)] })))
       if (current === 0n || configs.some((c) => c.generation !== current)) {
         throw new HttpError(409, 'POLICY_GENERATION_MOVED', "the approval on your Safe changed since the last step: renew it in full instead")
       }
@@ -1649,8 +1656,8 @@ export class Operator {
       let owner: Address
       let pos: readonly unknown[]
       try {
-        owner = await read<Address>({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [tokenId] })
-        pos = await read<readonly unknown[]>({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] })
+        owner = await read<Address>({ address: address('NonfungiblePositionManager', this.cfg.registry), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [tokenId] })
+        pos = await read<readonly unknown[]>({ address: address('NonfungiblePositionManager', this.cfg.registry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] })
       } catch (e) {
         // Only the position manager's own answer that the token does not exist means burned (review round 3). Any
         // other failure (a provider error) refuses the prepare: a renewal signed without a position the Safe still
@@ -1661,12 +1668,12 @@ export class Operator {
       }
       if (owner.toLowerCase() !== live.safe.toLowerCase()) continue
       const [t0, t1, fee] = [String(pos[2]).toLowerCase(), String(pos[3]).toLowerCase(), Number(pos[4])]
-      const spec = Object.values(V4_POOLS).find((v) => policy.buckets.some((b) => b.pools.includes(v.pool)) && address(v.token0, baseRegistry).toLowerCase() === t0 && address(v.token1, baseRegistry).toLowerCase() === t1 && v.fee === fee)
+      const spec = Object.values(V4_POOLS).find((v) => policy.buckets.some((b) => b.pools.includes(v.pool)) && address(v.token0, this.cfg.registry).toLowerCase() === t0 && address(v.token1, this.cfg.registry).toLowerCase() === t1 && v.fee === fee)
       if (!spec) continue
       ;(admitByPool[spec.pool] ??= []).push(tokenId)
     }
     for (const [pool, ids] of Object.entries(admitByPool)) {
-      if ((ids?.length ?? 0) > MAX_ADMIT) throw new HttpError(409, 'ADMIT_TOO_LARGE', `more than ${MAX_ADMIT} open positions in ${poolLabel(pool)}: close some first`)
+      if ((ids?.length ?? 0) > MAX_ADMIT) throw new HttpError(409, 'ADMIT_TOO_LARGE', `more than ${MAX_ADMIT} open positions in ${poolLabel(pool, this.cfg.registry)}: close some first`)
     }
     // Unique per prepare (generation and block time): the registry cannot store the same attestation bytes twice.
     const attestData = encodeAbiParameters([{ type: 'uint256' }, { type: 'uint256' }], [generation, BigInt(now)])
@@ -1914,7 +1921,7 @@ export class Operator {
       // The per-call cap binds each swap call; a transaction may batch several, so only the total bounds one transaction.
       const total = swap ? fmtUsdc(swap.cumulativeLimit ?? swap.ref) : ''
       const money = swap ? `USDC swapped in at most ${fmtUsdc(swap.ref)} per swap and ${total} in total, so at most ${total} in one transaction, which can hold several swaps; ` : ''
-      const label = pool ? poolLabel(pool) : bare ? poolLabel(bare) : 'its pool'
+      const label = pool ? poolLabel(pool, this.cfg.registry) : bare ? poolLabel(bare, this.cfg.registry) : 'its pool'
       return `In ${label}: ${money}at most ${counts.join(', ')} (one transaction can hold several of these steps)`
     })
   }
@@ -1930,12 +1937,12 @@ export class Operator {
     const pools = [...new Set(stored.map((g) => g.grant.pool).filter((x): x is NonNullable<typeof x> => !!x))]
     const lines = pools.map((pool) => {
       const spec = v4PoolOf(pool)
-      if (!spec) return `In ${poolLabel(pool)}: no on-chain limits`
+      if (!spec) return `In ${poolLabel(pool, this.cfg.registry)}: no on-chain limits`
       const band = `${(spec.bandTicks / 100).toFixed(2)}%`
       const anchor = spec.anchor ? ` and within ${(spec.anchor.band / 100).toFixed(2)}% of 1:1` : ''
       const day = budgets[spec.caps.budgetWindow] ?? 0n
       const total = budgets[spec.caps.budgetTotal] ?? 0n
-      return `In ${poolLabel(pool)}: swaps, new positions and withdrawals only within ${band} of the 30- and 5-minute average price${anchor}; swaps and new positions worth at most ${fmtUsdc(day)} USDC a day and ${fmtUsdc(total)} USDC in total on this approval`
+      return `In ${poolLabel(pool, this.cfg.registry)}: swaps, new positions and withdrawals only within ${band} of the 30- and 5-minute average price${anchor}; swaps and new positions worth at most ${fmtUsdc(day)} USDC a day and ${fmtUsdc(total)} USDC in total on this approval`
     })
     const caps = policy.actionPolicy?.gasPolicy?.caps
     if (caps) {
@@ -1955,14 +1962,14 @@ export class Operator {
   /** "cbBTC and WETH": the tokens other than USDC of the pools named in a set of grant keys (what a harvest converts). */
   private volatileOf(keys: string[]): string {
     const pools = [...new Set(keys.map((k) => k.split(':').slice(1).join(':')).filter((p) => p.startsWith('pool:')))]
-    const tokens = [...new Set(pools.flatMap((p) => [entry(p, baseRegistry).token0, entry(p, baseRegistry).token1]).filter((t): t is string => !!t && t !== 'USDC'))]
+    const tokens = [...new Set(pools.flatMap((p) => [entry(p, this.cfg.registry).token0, entry(p, this.cfg.registry).token1]).filter((t): t is string => !!t && t !== 'USDC'))]
     return tokens.length ? tokens.join(' and ') : 'what it collects'
   }
 
   /** "USDC/cbBTC 0.05% and WETH/USDC 0.30%" for the pools named in a set of grant keys. */
   private poolsOf(keys: string[]): string {
     const pools = [...new Set(keys.map((k) => k.split(':').slice(1).join(':')).filter((p) => p.startsWith('pool:')))]
-    return pools.length ? pools.map(poolLabel).join(' and ') : 'its pools'
+    return pools.length ? pools.map((p) => poolLabel(p, this.cfg.registry)).join(' and ') : 'its pools'
   }
 
   /**
@@ -2315,8 +2322,8 @@ export class Operator {
       // fails in its batch is read on its own.
       const out: boolean[] = []
       for (let i = 0; i < ids.length; i += BATCH_MAX_CALLS) {
-        const batch = new Batch(this.client, MULTICALL3, block)
-        const handles = ids.slice(i, i + BATCH_MAX_CALLS).map((id) => batch.add(contractRead(this.client, { address: address('SmartSession', baseRegistry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [id, acc.ctx.address as Address], blockNumber: block })))
+        const batch = new Batch(this.client, multicall3Of(this.cfg.registry), block)
+        const handles = ids.slice(i, i + BATCH_MAX_CALLS).map((id) => batch.add(contractRead(this.client, { address: address('SmartSession', this.cfg.registry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [id, acc.ctx.address as Address], blockNumber: block })))
         await batch.run()
         for (const h of handles) out.push(!!(await h.need()))
       }
@@ -2443,7 +2450,7 @@ export class Operator {
       const keys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
       const f = await this.fitV4(acc, live, policy, r, cap, keys, [], 'full', ACTIVATION_GAS_BUDGET, reserve)
       const days = Math.round(policy.session.validitySeconds / 86_400)
-      const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!)} ${b.preference / 100}%`)
+      const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!, this.cfg.registry)} ${b.preference / 100}%`)
       const summary = [
         `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
         ...reserveLine,
@@ -2469,7 +2476,7 @@ export class Operator {
     const liveManage = stored.filter((g) => g.name.startsWith('manage-any') || g.name.startsWith('convert-any')).map((g) => g.name)
     const days = Math.round(policy.session.validitySeconds / 86_400)
     const paidToSafe = `It does this without asking you again, within these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else. For ${days} days; cap ${fmtUsdc(cap)} USDC`
-    const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!)} ${b.preference / 100}%`)
+    const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!, this.cfg.registry)} ${b.preference / 100}%`)
     if (pools.length > 1) {
       const summary = [
         `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
@@ -2584,11 +2591,11 @@ export class Operator {
     const out = asset === 'USDC' ? undefined : await this.receiveQuote(asset, amount, r.block, slip)
     const deadline = (await this.client.getBlock()).timestamp + 1800n
     const calls = [
-      ...closeCalls(live.safe, reduce.map((x) => x.lp), deadline, false),
-      ...swapBackCalls(live.safe, swaps),
+      ...closeCalls(live.safe, reduce.map((x) => x.lp), deadline, false, this.cfg.registry),
+      ...swapBackCalls(live.safe, swaps, this.cfg.registry),
       ...transferBatch({ account: live.safe, to, amountUsdc: amount, reduce: [], deadline, receive: out?.receive }),
     ]
-    const probe = out ? balanceProbe(asset, to) : undefined
+    const probe = out ? balanceProbe(asset, to, this.cfg.registry) : undefined
     const sim = await this.checkFromSafe(live.safe, calls, r.block, probe)
     if (out && probe) {
       const delta = probe.decode(sim.after!) - probe.decode(sim.before!)
@@ -2597,7 +2604,7 @@ export class Operator {
     const short = `${to.slice(0, 6)}…${to.slice(-4)}`
     const summary = [
       ...(r.deployed ? [] : [`Create your Safe ${live.safe} on Base`]),
-      ...reduce.map((x) => `Withdraw ${(x.bps / 100).toFixed(2)}% of position #${x.pos.tokenId} (${poolLabel(x.pos.pool)})`),
+      ...reduce.map((x) => `Withdraw ${(x.bps / 100).toFixed(2)}% of position #${x.pos.tokenId} (${poolLabel(x.pos.pool, this.cfg.registry)})`),
       ...swaps.map((sw) => `Swap ${sw.amountIn} ${sw.token} units to at least ${fmtUsdc(sw.amountOutMinimum)} USDC`),
       ...(out
         ? [
@@ -2646,9 +2653,9 @@ export class Operator {
     if (!routes) throw new HttpError(409, 'ASSET_UNAVAILABLE', `${asset} is not available`)
     let best: { pool: string; fee: number; out: bigint } | undefined
     for (const pool of routes.pools) {
-      const fee = entry(pool, baseRegistry).fee!
+      const fee = entry(pool, this.cfg.registry).fee!
       try {
-        const out = await quoteExactInputSingle(this.client, { tokenIn: address('USDC', baseRegistry), tokenOut: address(routes.tokenOut, baseRegistry), fee, amountIn, blockNumber })
+        const out = await this.v3.quoteExactInputSingle(this.client, { tokenIn: address('USDC', this.cfg.registry), tokenOut: address(routes.tokenOut, this.cfg.registry), fee, amountIn, blockNumber })
         if (!best || out > best.out) best = { pool, fee, out }
       } catch {
         // an empty or broken pool only drops out of the route set
@@ -2657,7 +2664,7 @@ export class Operator {
     if (!best) throw new HttpError(503, 'QUOTE_UNAVAILABLE', `no Uniswap v3 quote for USDC -> ${asset}`)
     const pair = `USDC/${routes.tokenOut}`
     const route = `Uniswap v3 ${pair} ${(best.fee / 10_000).toFixed(2)}%${asset === 'ETH' ? ' + unwrap' : ''}`
-    return { receive: { asset: routes.receive, fee: best.fee, amountOutMinimum: minOut(best.out, slip) }, quoted: best.out, decimals: entry(routes.tokenOut, baseRegistry).decimals!, route, pool: best.pool, tokenOut: routes.tokenOut }
+    return { receive: { asset: routes.receive, fee: best.fee, amountOutMinimum: minOut(best.out, slip) }, quoted: best.out, decimals: entry(routes.tokenOut, this.cfg.registry).decimals!, route, pool: best.pool, tokenOut: routes.tokenOut }
   }
 
   /**
@@ -2676,12 +2683,12 @@ export class Operator {
     const legs: { leg: PriceDivergenceLeg; usdcIn?: bigint }[] = []
     const accepted: AcceptedSwap[] = []
     const judge = async (pool: string, tokenIn: string, amountIn: bigint, quote: bigint, minimum: bigint) => {
-      const e = entry(pool, baseRegistry)
+      const e = entry(pool, this.cfg.registry)
       let twapTick: number
       try {
-        twapTick = await twapTickAt(this.client, address(pool, baseRegistry), policy.execution.twapWindowSeconds, r.block)
+        twapTick = await twapTickAt(this.client, address(pool, this.cfg.registry), policy.execution.twapWindowSeconds, r.block)
       } catch (err) {
-        logErr(`[owner] ${acc.accountKey} withdrawal: ${poolLabel(pool)} TWAP unreadable, priced without the divergence check:`, err)
+        logErr(`[owner] ${acc.accountKey} withdrawal: ${poolLabel(pool, this.cfg.registry)} TWAP unreadable, priced without the divergence check:`, err)
         return null
       }
       const j = judgeSwap({ amountIn, fee: e.fee!, tokenInIsToken0: e.token0 === tokenIn, twapTick, spotTick: r.prices[pool]?.tick, quote, minimum, maxTwapDeviationTicks: policy.execution.maxTwapDeviationTicks, slippageBps: slip })
@@ -2691,7 +2698,7 @@ export class Operator {
       const fair = await judge(sw.pool, sw.token, sw.amountIn, sw.quoted, sw.amountOutMinimum)
       if (fair === null) continue
       legs.push({ leg: divergenceLeg({ kind: 'swap-back', token: 'USDC', sellToken: sw.token, decimals: 6, fair, quote: sw.quoted, minimum: sw.amountOutMinimum }) })
-      accepted.push({ pool: sw.pool, tokenIn: sw.token, tokenOut: 'USDC', fee: entry(sw.pool, baseRegistry).fee!, amountIn: sw.amountIn, minimum: sw.amountOutMinimum })
+      accepted.push({ pool: sw.pool, tokenIn: sw.token, tokenOut: 'USDC', fee: entry(sw.pool, this.cfg.registry).fee!, amountIn: sw.amountIn, minimum: sw.amountOutMinimum })
     }
     if (payout) {
       const fair = await judge(payout.pool, 'USDC', payout.amountIn, payout.quoted, payout.receive.amountOutMinimum)
@@ -2714,7 +2721,7 @@ export class Operator {
     // A position can be worth collecting at 0 current liquidity if a past decrease left tokensOwed uncollected.
     // otto/mamoru#140 (part2 #4): only the positions Mamoru admitted, never dust or ones sent to the Safe unasked.
     const open = this.sizingPositions(acc, r).filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n)
-    const value = open.reduce((s, p) => s + positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96), 0n)
+    const value = open.reduce((s, p) => s + positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry), 0n)
     const need = amount - r.usdc
     // otto/mamoru#140 (part1 #4): no open position is not "nothing to withdraw" — idle non-USDC tokens (left by an
     // enter_swap, a close_position, or a failed enter_mint) still swap back below. The loop's own check a few lines
@@ -2724,7 +2731,7 @@ export class Operator {
     let margin = 103n
     for (;;) {
       const target = (need * margin) / 100n
-      const plan = planReduce(open, r.prices, target > value ? value : target, order)
+      const plan = planReduce(open, r.prices, target > value ? value : target, order, this.cfg.registry)
       const reduce = plan.map(({ pos, bps }) => {
         const liquidity = (pos.liquidity * BigInt(bps)) / 10_000n
         const a = amountsForLiquidity(r.prices[pos.pool]!.sqrtPriceX96, pos.tickLower, pos.tickUpper, liquidity)
@@ -2750,8 +2757,8 @@ export class Operator {
   private sizingPositions(acc: AccountState, r: SafeRead): PoolPosition[] {
     const admitted = acc.admittedTokenIds ? new Set(acc.admittedTokenIds) : null
     return r.positions
-      .filter((p) => (admitted ? admitted.has(p.tokenId.toString()) : positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96) >= POSITION_DUST_USDC))
-      .map((p) => ({ p, v: positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96) }))
+      .filter((p) => (admitted ? admitted.has(p.tokenId.toString()) : positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry) >= POSITION_DUST_USDC))
+      .map((p) => ({ p, v: positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry) }))
       .sort((a, b) => (a.v === b.v ? 0 : a.v > b.v ? -1 : 1))
       .slice(0, MAX_SIZING_POSITIONS)
       .map((x) => x.p)
@@ -2761,8 +2768,8 @@ export class Operator {
   private async simulateCollect(safe: Address, lps: { lp: LivePosition; pos: PoolPosition }[], block: bigint): Promise<Record<string, bigint>> {
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600)
     const calls: { to: Address; data: Hex; pos?: PoolPosition }[] = lps.flatMap(({ lp: p, pos }) => [
-      ...(p.liquidity > 0n ? [decreaseLiquidity({ tokenId: p.tokenId, liquidity: p.liquidity, amount0Min: p.amount0Min, amount1Min: p.amount1Min, deadline })] : []),
-      { ...collect({ account: safe, tokenId: p.tokenId }), pos },
+      ...(p.liquidity > 0n ? [this.v3.decreaseLiquidity({ tokenId: p.tokenId, liquidity: p.liquidity, amount0Min: p.amount0Min, amount1Min: p.amount1Min, deadline })] : []),
+      { ...this.v3.collect({ account: safe, tokenId: p.tokenId }), pos },
     ])
     const res = await this.simulateFromSafe(safe, calls, block)
     const out: Record<string, bigint> = {}
@@ -2788,9 +2795,9 @@ export class Operator {
       // one unit less: collect rounding can leave the Safe a unit short of the simulated amount
       const amountIn = raw > 1n ? raw - 1n : 0n
       if (amountIn <= 0n) continue
-      const pool = routeOf(token, this.bucketPools(acc), USDC_POOLS)
+      const pool = routeOf(token, this.bucketPools(acc), usdcPools(this.cfg.registry), this.cfg.registry)
       if (!pool) continue
-      const q = await quoteExactInputSingle(this.client, { tokenIn: address(token, baseRegistry), tokenOut: address('USDC', baseRegistry), fee: entry(pool, baseRegistry).fee!, amountIn, blockNumber }).catch(() => 0n)
+      const q = await this.v3.quoteExactInputSingle(this.client, { tokenIn: address(token, this.cfg.registry), tokenOut: address('USDC', this.cfg.registry), fee: entry(pool, this.cfg.registry).fee!, amountIn, blockNumber }).catch(() => 0n)
       if (q <= 1n) continue
       const amountOutMinimum = minOut(q, slip)
       if (amountOutMinimum > 0n) out.push({ token, pool, amountIn, amountOutMinimum, quoted: q })
@@ -2847,7 +2854,7 @@ export class Operator {
 
   private async swapQuote(amountIn: bigint, blockNumber: bigint, slip: number): Promise<LiveSwap | undefined> {
     if (amountIn <= 0n) return undefined
-    const out = await quoteExactInputSingle(this.client, { tokenIn: address('cbBTC', baseRegistry), tokenOut: address('USDC', baseRegistry), fee: 500, amountIn, blockNumber })
+    const out = await this.v3.quoteExactInputSingle(this.client, { tokenIn: address('cbBTC', this.cfg.registry), tokenOut: address('USDC', this.cfg.registry), fee: 500, amountIn, blockNumber })
     return { amountIn, amountOutMinimum: minOut(out, slip) }
   }
 
@@ -3174,7 +3181,7 @@ export class Operator {
     const slip = this.policyOf(acc).execution.slippageBps
     const keep = BigInt(10_000 - slip)
     const admitted = new Set(acc.admittedTokenIds ?? [])
-    const worth = (p: PoolPosition) => positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96)
+    const worth = (p: PoolPosition) => positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry)
     // Only what Mamoru admitted, once that is recorded: a position sent to the Safe unasked is never part of a Stop, so
     // it cannot make the unwind revert and keep the admitted ones from being closed.
     const ranked = r.positions
@@ -3192,12 +3199,12 @@ export class Operator {
     const deadline = (await this.client.getBlock()).timestamp + 1800n
     const calls = [
       ...(revokes.length || positions.length ? stopBatch({ account: live.safe, permissionIds: revokes, positions, deadline }) : []),
-      ...swapBackCalls(live.safe, swaps),
+      ...swapBackCalls(live.safe, swaps, this.cfg.registry),
     ]
     await this.checkFromSafe(live.safe, calls, r.block, undefined)
     const summary = [
       ...(revokes.length ? [`Revoke the engine's ${revokes.length} session grant(s)`] : []),
-      ...chosen.map((p) => `Close and burn position #${p.tokenId} (${poolLabel(p.pool)})`),
+      ...chosen.map((p) => `Close and burn position #${p.tokenId} (${poolLabel(p.pool, this.cfg.registry)})`),
       ...swaps.map((sw) => `Swap ${sw.amountIn} ${sw.token} units to at least ${fmtUsdc(sw.amountOutMinimum)} USDC`),
       'Everything stays in your Safe as USDC',
       ...(left > 0 ? [`${left} more position(s) stay in your Safe: Stop again to close them`] : []),
@@ -3358,7 +3365,7 @@ export class Operator {
     if (blockNumber === null) return swaps.map(() => null)
     return Promise.all(
       swaps.map((s) =>
-        quoteExactInputSingle(this.client, { tokenIn: address(s.tokenIn, baseRegistry), tokenOut: address(s.tokenOut, baseRegistry), fee: s.fee, amountIn: s.amountIn, blockNumber }).catch((e: unknown) => {
+        this.v3.quoteExactInputSingle(this.client, { tokenIn: address(s.tokenIn, this.cfg.registry), tokenOut: address(s.tokenOut, this.cfg.registry), fee: s.fee, amountIn: s.amountIn, blockNumber }).catch((e: unknown) => {
           logErr(`[owner] accepted ${s.tokenIn}->${s.tokenOut} quote unavailable at submit:`, e)
           return null
         }),
@@ -3632,7 +3639,7 @@ export class Operator {
   }
 
   private usdcOf(safe: Address): Promise<bigint> {
-    return this.client.readContract({ address: address('USDC', baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [safe] })
+    return this.client.readContract({ address: address('USDC', this.cfg.registry), abi: erc20Abi, functionName: 'balanceOf', args: [safe] })
   }
 
   /** otto/mamoru#140 (part2 #3): refuses a stale activation; synchronous, so nothing lands between it and what follows. */
@@ -3708,8 +3715,8 @@ export class Operator {
 
   private async checkArmedGroup(armed: AccountState[], at: number): Promise<void> {
     const client = this.cfg.watchClient ?? this.client
-    const batch = new Batch(client, MULTICALL3)
-    const balances = armed.map((acc) => batch.add(contractRead(client, { address: address('USDC', baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [acc.ctx.address as Address] })))
+    const batch = new Batch(client, multicall3Of(this.cfg.registry))
+    const balances = armed.map((acc) => batch.add(contractRead(client, { address: address('USDC', this.cfg.registry), abi: erc20Abi, functionName: 'balanceOf', args: [acc.ctx.address as Address] })))
     try {
       await batch.run()
     } catch (e) {
@@ -3780,7 +3787,7 @@ export class Operator {
     const permissionId = a.grants[0]?.permissionId
     if (op && permissionId) {
       const enabledAt = (blockNumber?: bigint) =>
-        this.client.readContract({ address: address('SmartSession', baseRegistry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [permissionId, acc.ctx.address as Address], ...(blockNumber === undefined ? {} : { blockNumber }) })
+        this.client.readContract({ address: address('SmartSession', this.cfg.registry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [permissionId, acc.ctx.address as Address], ...(blockNumber === undefined ? {} : { blockNumber }) })
       const enabled = await enabledAt()
       if (acc.armed?.opId !== a.opId) return
       if (enabled) {
@@ -4954,14 +4961,14 @@ function isRevert(e: unknown): boolean {
  * Every token of the USDC pools the Safe holds outside a position, with its value in USDC at the pool's price. A
  * swap leaves its output there until the mint that follows; leaving it out would show the account short of it.
  */
-export function idleTokens(r: Awaited<ReturnType<typeof readSafe>>): NonNullable<FundingView['idle']> {
+export function idleTokens(r: Awaited<ReturnType<typeof readSafe>>, registry: Registry): NonNullable<FundingView['idle']> {
   const out: NonNullable<FundingView['idle']> = []
   for (const [token, amount] of Object.entries(r.tokens)) {
     if (amount === 0n) continue
-    const pool = token === 'USDC' ? undefined : USDC_POOLS.find((p) => r.prices[p] && (entry(p, baseRegistry).token0 === token || entry(p, baseRegistry).token1 === token))
+    const pool = token === 'USDC' ? undefined : usdcPools(registry).find((p) => r.prices[p] && (entry(p, registry).token0 === token || entry(p, registry).token1 === token))
     if (token !== 'USDC' && !pool) continue
-    const valueUsdc = pool ? inUsdc(pool, token, amount, r.prices[pool]!.sqrtPriceX96) : amount
-    out.push({ token, amount: amount.toString(), decimals: entry(token, baseRegistry).decimals ?? 18, valueUsdc: valueUsdc.toString() })
+    const valueUsdc = pool ? inUsdc(pool, token, amount, r.prices[pool]!.sqrtPriceX96, registry) : amount
+    out.push({ token, amount: amount.toString(), decimals: entry(token, registry).decimals ?? 18, valueUsdc: valueUsdc.toString() })
   }
   // USDC first, then by value.
   return out.sort((a, b) => (a.token === 'USDC' ? -1 : b.token === 'USDC' ? 1 : Number(BigInt(b.valueUsdc) - BigInt(a.valueUsdc))))
@@ -5035,11 +5042,11 @@ type QuotedSwap = SwapBack & { quoted: bigint }
 const multicall3Abi = parseAbi(['function getEthBalance(address addr) view returns (uint256 balance)'])
 
 /** A read of the recipient's balance of `asset`, run before and after the batch in the same simulation. */
-function balanceProbe(asset: WithdrawAsset, holder: Address): Probe {
+function balanceProbe(asset: WithdrawAsset, holder: Address, registry: Registry): Probe {
   if (asset === 'ETH') {
-    return { to: address('Multicall3', baseRegistry), data: encodeFunctionData({ abi: multicall3Abi, functionName: 'getEthBalance', args: [holder] }), decode: (d) => decodeFunctionResult({ abi: multicall3Abi, functionName: 'getEthBalance', data: d }) }
+    return { to: address('Multicall3', registry), data: encodeFunctionData({ abi: multicall3Abi, functionName: 'getEthBalance', args: [holder] }), decode: (d) => decodeFunctionResult({ abi: multicall3Abi, functionName: 'getEthBalance', data: d }) }
   }
-  return { to: address(RECEIVE_ROUTES[asset as ReceiveAsset]?.tokenOut ?? asset, baseRegistry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [holder] }), decode: (d) => decodeFunctionResult({ abi: erc20Abi, functionName: 'balanceOf', data: d }) }
+  return { to: address(RECEIVE_ROUTES[asset as ReceiveAsset]?.tokenOut ?? asset, registry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [holder] }), decode: (d) => decodeFunctionResult({ abi: erc20Abi, functionName: 'balanceOf', data: d }) }
 }
 
 /** Registered pools a withdraw may route through, best quote wins. */

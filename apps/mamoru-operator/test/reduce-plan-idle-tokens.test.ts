@@ -47,7 +47,7 @@ function world(collectReturns: Record<string, [bigint, bigint]> = {}) {
   } as unknown as PublicClient
   const relayer = { address: RELAYER } as unknown as Relayer
   const store = { state: { accounts: {} }, save: () => {} } as unknown as StateStore
-  const cfg = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 } satisfies OperatorConfig
+  const cfg = { chainId: 8453, registry: baseRegistry, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 } satisfies OperatorConfig
   return { op: new Operator(cfg, client, relayer, store) }
 }
 
@@ -66,7 +66,6 @@ describe('otto/mamoru#140 part1 #4: idle non-USDC tokens and stranded tokensOwed
       deployed: true,
       eth: 0n,
       usdc: 1_000_000n,
-      cbbtc: 0n,
       sqrtPriceX96: Q96,
       tick: 0,
       tokens: { USDC: 1_000_000n, USDT: 5_000_000n },
@@ -86,7 +85,6 @@ describe('otto/mamoru#140 part1 #4: idle non-USDC tokens and stranded tokensOwed
       deployed: true,
       eth: 0n,
       usdc: 1_000_000n,
-      cbbtc: 0n,
       sqrtPriceX96: Q96,
       tick: 0,
       tokens: { USDC: 1_000_000n },
@@ -120,7 +118,6 @@ describe('otto/mamoru#140 part1 #4: idle non-USDC tokens and stranded tokensOwed
       deployed: true,
       eth: 0n,
       usdc: 1_000_000n,
-      cbbtc: 0n,
       sqrtPriceX96: Q96,
       tick: 0,
       tokens: { USDC: 1_000_000n },

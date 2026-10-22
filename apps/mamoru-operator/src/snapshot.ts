@@ -5,10 +5,10 @@
 
 import { decodeFunctionResult, encodeFunctionData, parseAbi, type PublicClient } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { baseRegistry, address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
 import { BATCH_MAX_CALLS, Batch, balanceRead, contractRead, type Handle, type Read } from '@mamoru/rpc'
 import { feeGrowthInside, positionFees } from '@mamoru/uniswap-v3/fees'
-import { amountsForLiquidity, inUsdc, USDC_POOLS } from './chain.ts'
+import { amountsForLiquidity, inUsdc, usdcPools } from './chain.ts'
 
 const enumerableAbi = parseAbi(['function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)'])
 
@@ -79,7 +79,7 @@ export type SafeSnapshot = {
   armed: boolean
   deployed: boolean
   eth: bigint
-  /** Balance of every token of USDC_POOLS, raw units. */
+  /** Balance of every token of the registry's USDC pools, raw units. */
   tokens: Record<string, bigint>
   positions: PositionSnapshot[]
   /** Tokens held outside positions, in raw USDC. ETH (gas) is left out. */
@@ -103,16 +103,16 @@ export type Snapshot = {
   calls: number
 }
 
-/** The pool of USDC_POOLS that prices `token` in USDC: the first one pairing it with USDC. */
-function pricingPool(token: string): string | null {
-  return USDC_POOLS.find((p) => entry(p, baseRegistry).token0 === token || entry(p, baseRegistry).token1 === token) ?? null
+/** The USDC pool of `registry` that prices `token` in USDC: the first one pairing it with USDC. */
+function pricingPool(token: string, registry: Registry): string | null {
+  return usdcPools(registry).find((p) => entry(p, registry).token0 === token || entry(p, registry).token1 === token) ?? null
 }
 
-function tokenUsdc(token: string, amount: bigint, pools: Record<string, PoolState>): bigint {
+function tokenUsdc(token: string, amount: bigint, pools: Record<string, PoolState>, registry: Registry): bigint {
   if (token === 'USDC' || amount === 0n) return amount
-  const pool = pricingPool(token)
+  const pool = pricingPool(token, registry)
   if (!pool || !pools[pool]) throw new Error(`snapshot: no USDC pool prices ${token}`)
-  return inUsdc(pool, token, amount, pools[pool]!.sqrtPriceX96)
+  return inUsdc(pool, token, amount, pools[pool]!.sqrtPriceX96, registry)
 }
 
 /**
@@ -123,7 +123,8 @@ function tokenUsdc(token: string, amount: bigint, pools: Record<string, PoolStat
  * 4. ticks(lower) and ticks(upper) of every position, deduplicated per pool.
  * The cost is a handful of eth_call whatever the number of Safes, split only by Multicall3's per-call limits.
  */
-export async function readSnapshot(client: PublicClient, multicall3: Address, chainId: number, targets: SnapshotTarget[]): Promise<Snapshot> {
+export async function readSnapshot(client: PublicClient, multicall3: Address, chainId: number, registry: Registry, targets: SnapshotTarget[]): Promise<Snapshot> {
+  const usdcPoolNames = usdcPools(registry)
   // One eth_blockNumber pins every batch to the same block, however many Multicall3 chunks they split into.
   const block = await client.getBlockNumber({ cacheTime: 0 })
   const at = { blockNumber: block } as const
@@ -134,22 +135,22 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
     calls += Math.ceil(b.size / BATCH_MAX_CALLS)
     await b.run()
   }
-  const npm = address('NonfungiblePositionManager', baseRegistry)
-  const tokenNames = [...new Set(USDC_POOLS.flatMap((p) => [entry(p, baseRegistry).token0!, entry(p, baseRegistry).token1!]))]
+  const npm = address('NonfungiblePositionManager', registry)
+  const tokenNames = [...new Set(usdcPoolNames.flatMap((p) => [entry(p, registry).token0!, entry(p, registry).token1!]))]
 
   const first = new Batch(client, multicall3, block)
-  const poolReads = USDC_POOLS.map((p) => ({
+  const poolReads = usdcPoolNames.map((p) => ({
     pool: p,
-    slot0: first.add(contractRead(client, { address: address(p, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0', ...at })),
-    fg0: first.add(contractRead(client, { address: address(p, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'feeGrowthGlobal0X128', ...at })),
-    fg1: first.add(contractRead(client, { address: address(p, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'feeGrowthGlobal1X128', ...at })),
+    slot0: first.add(contractRead(client, { address: address(p, registry), abi: uniswapV3PoolAbi, functionName: 'slot0', ...at })),
+    fg0: first.add(contractRead(client, { address: address(p, registry), abi: uniswapV3PoolAbi, functionName: 'feeGrowthGlobal0X128', ...at })),
+    fg1: first.add(contractRead(client, { address: address(p, registry), abi: uniswapV3PoolAbi, functionName: 'feeGrowthGlobal1X128', ...at })),
   }))
   const safeReads = targets.map((t) => ({
     t,
     eth: first.add(balanceRead(client, multicall3, t.safe, block)),
     nfts: first.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [t.safe], ...at })),
     deployed: first.add(deployedRead(client, t.safe, block)),
-    tokens: tokenNames.map((name) => ({ name, read: first.add(contractRead(client, { address: address(name, baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [t.safe], ...at })) })),
+    tokens: tokenNames.map((name) => ({ name, read: first.add(contractRead(client, { address: address(name, registry), abi: erc20Abi, functionName: 'balanceOf', args: [t.safe], ...at })) })),
   }))
   await run(first)
 
@@ -180,9 +181,9 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
     for (const { tokenId, read } of list) {
       const p = await read.need()
       // A position outside the USDC pools of the registry is not one Mamoru opened: left out, as readSafe does.
-      const pool = USDC_POOLS.find((n) => {
-        const e = entry(n, baseRegistry)
-        return p[2].toLowerCase() === address(e.token0!, baseRegistry).toLowerCase() && p[3].toLowerCase() === address(e.token1!, baseRegistry).toLowerCase() && p[4] === e.fee
+      const pool = usdcPoolNames.find((n) => {
+        const e = entry(n, registry)
+        return p[2].toLowerCase() === address(e.token0!, registry).toLowerCase() && p[3].toLowerCase() === address(e.token1!, registry).toLowerCase() && p[4] === e.fee
       })
       if (!pool) continue
       out.push({ tokenId, pool, tickLower: p[5], tickUpper: p[6], liquidity: p[7], in0: p[8], in1: p[9], owed0: p[10], owed1: p[11] })
@@ -196,7 +197,7 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
   for (const r of raws.flat()) {
     for (const tick of [r.tickLower, r.tickUpper]) {
       const key = `${r.pool}:${tick}`
-      if (!tickReads.has(key)) tickReads.set(key, fourth.add(contractRead(client, { address: address(r.pool, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'ticks', args: [tick], ...at })))
+      if (!tickReads.has(key)) tickReads.set(key, fourth.add(contractRead(client, { address: address(r.pool, registry), abi: uniswapV3PoolAbi, functionName: 'ticks', args: [tick], ...at })))
     }
   }
   await run(fourth)
@@ -210,14 +211,14 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
     const eth = await s.eth.need()
     const positions: PositionSnapshot[] = []
     for (const r of raws[i]!) {
-      const e = entry(r.pool, baseRegistry)
+      const e = entry(r.pool, registry)
       const ps = pools[r.pool]!
       const lower = ticks.get(`${r.pool}:${r.tickLower}`)!
       const upper = ticks.get(`${r.pool}:${r.tickUpper}`)!
       const { amount0, amount1 } = amountsForLiquidity(ps.sqrtPriceX96, r.tickLower, r.tickUpper, r.liquidity)
       const inside = feeGrowthInside(ps.tick, r.tickLower, r.tickUpper, ps.feeGrowthGlobal0X128, ps.feeGrowthGlobal1X128, { feeGrowthOutside0X128: lower[2], feeGrowthOutside1X128: lower[3] }, { feeGrowthOutside0X128: upper[2], feeGrowthOutside1X128: upper[3] })
       const f = positionFees({ liquidity: r.liquidity, feeGrowthInside0LastX128: r.in0, feeGrowthInside1LastX128: r.in1, tokensOwed0: r.owed0, tokensOwed1: r.owed1 }, inside)
-      const usdc = (a0: bigint, a1: bigint) => inUsdc(r.pool, e.token0!, a0, ps.sqrtPriceX96) + inUsdc(r.pool, e.token1!, a1, ps.sqrtPriceX96)
+      const usdc = (a0: bigint, a1: bigint) => inUsdc(r.pool, e.token0!, a0, ps.sqrtPriceX96, registry) + inUsdc(r.pool, e.token1!, a1, ps.sqrtPriceX96, registry)
       positions.push({
         tokenId: r.tokenId,
         pool: r.pool,
@@ -240,7 +241,7 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
         owedUsdc: usdc(r.owed0, r.owed1),
       })
     }
-    const idleUsdc = Object.entries(tokens).reduce((n, [name, amt]) => n + tokenUsdc(name, amt, pools), 0n)
+    const idleUsdc = Object.entries(tokens).reduce((n, [name, amt]) => n + tokenUsdc(name, amt, pools, registry), 0n)
     const lpUsdc = positions.reduce((n, p) => n + p.valueUsdc, 0n)
     const feesUsdc = positions.reduce((n, p) => n + p.feesUsdc, 0n)
     const owedUsdc = positions.reduce((n, p) => n + p.owedUsdc, 0n)

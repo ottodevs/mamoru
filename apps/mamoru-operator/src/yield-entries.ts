@@ -10,6 +10,7 @@
 
 import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { baseRegistry } from '@mamoru/registry'
 import { inUsdc } from './chain.ts'
 import type { PositionSnapshot, Snapshot } from './snapshot.ts'
 
@@ -58,9 +59,12 @@ export class EntryStore {
   }
 }
 
-/** Entry amounts of a position revalued at the pool's current price: the no-LP, no-harvest baseline. */
+/**
+ * Entry amounts of a position revalued at the pool's current price: the no-LP, no-harvest baseline. Base only, like
+ * the snapshot loop that feeds it (boot.ts starts it on chain 8453 only).
+ */
 export function holdValueUsdc(entry: EntryBaseline, token0: string, token1: string, sqrtPriceX96: bigint): bigint {
-  return inUsdc(entry.pool, token0, BigInt(entry.amount0), sqrtPriceX96) + inUsdc(entry.pool, token1, BigInt(entry.amount1), sqrtPriceX96)
+  return inUsdc(entry.pool, token0, BigInt(entry.amount0), sqrtPriceX96, baseRegistry) + inUsdc(entry.pool, token1, BigInt(entry.amount1), sqrtPriceX96, baseRegistry)
 }
 
 /**

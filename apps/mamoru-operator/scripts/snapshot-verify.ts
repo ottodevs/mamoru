@@ -29,7 +29,7 @@ const targets: SnapshotTarget[] = accounts.filter((a) => a.active || a.armed).ma
 const client = createPublicClient({ chain: base, transport: http(rpc, { timeout: 60_000 }) })
 if (!MULTICALL3) throw new Error('no Multicall3 in the registry')
 const t0 = Date.now()
-const snap = await readSnapshot(client, MULTICALL3, base.id, targets)
+const snap = await readSnapshot(client, MULTICALL3, base.id, baseRegistry, targets)
 console.log(`snapshot block ${snap.block}: ${snap.safes.length} Safes, ${snap.safes.reduce((n, s) => n + s.positions.length, 0)} positions, ${snap.calls} requests, ${Date.now() - t0} ms`)
 
 const MAX = (1n << 128n) - 1n

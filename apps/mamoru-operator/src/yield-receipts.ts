@@ -121,7 +121,7 @@ export function priceFees(facts: OpFacts, pools: Snapshot['pools']): boolean {
     if (!state) continue
     const e = baseRegistry.entries.find((x) => x.name === f.pool)
     if (!e?.token0 || !e.token1) continue
-    f.usdc = (inUsdc(f.pool, e.token0, BigInt(f.fee0), state.sqrtPriceX96) + inUsdc(f.pool, e.token1, BigInt(f.fee1), state.sqrtPriceX96)).toString()
+    f.usdc = (inUsdc(f.pool, e.token0, BigInt(f.fee0), state.sqrtPriceX96, baseRegistry) + inUsdc(f.pool, e.token1, BigInt(f.fee1), state.sqrtPriceX96, baseRegistry)).toString()
     changed = true
   }
   return changed
