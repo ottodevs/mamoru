@@ -18,7 +18,7 @@ import { address, baseRegistry } from '@mamoru/registry'
 
 const SECRET = 'op-secret'
 /** What the operator writes next to the histories: its chain and the address of every pool in them. */
-const BIND = { chainId: 8453, pools: { 'pool:WETH/USDC/3000': address('pool:WETH/USDC/3000'), 'pool:USDC/cbBTC/500': address('pool:USDC/cbBTC/500') } }
+const BIND = { chainId: 8453, pools: { 'pool:WETH/USDC/3000': address('pool:WETH/USDC/3000', baseRegistry), 'pool:USDC/cbBTC/500': address('pool:USDC/cbBTC/500', baseRegistry) } }
 const DAY_S = 86_400
 const NOW = 1_760_616_000_000
 const LAZY = ENGINE_SETTINGS_TEMPLATES['conservador-live-v2 + lazy-h24h-b100-d30']!
