@@ -178,6 +178,9 @@ contract MamoruActionPolicyV2 is IActionPolicy {
     /// LeftClaw M-4: an `Init.admit` entry with this bit set revokes the tokenId in the low bits (NPM tokenIds never
     /// reach it), so the Init struct and its encoding stay those of the deployed policy.
     uint256 public constant REVOKE_FLAG = 1 << 255;
+    /// `admittedPool` of a revoked tokenId: never a pool, so it never matches, and a later `admit` of it is skipped (an
+    /// operator that still lists it cannot undo the owner's revocation, nor block a renewal by naming it).
+    address internal constant REVOKED = address(1);
 
     address public immutable SMART_SESSION;
     /// Revoke-only watchdog key: may pause and unpause an account's session actions, nothing else. It cannot enable or
@@ -248,7 +251,7 @@ contract MamoruActionPolicyV2 is IActionPolicy {
     mapping(address account => mapping(address pool => Spend)) internal _spend;
     /// tokenId => pool, for positions minted through `mint` with this account as recipient, or admitted at enable.
     /// It survives renewals (a position minted while a renewal was being prepared stays manageable); an owner-signed
-    /// Init revokes one explicitly (REVOKE_FLAG, LeftClaw M-4).
+    /// Init revokes one explicitly and for good (REVOKE_FLAG, LeftClaw M-4): it is then REVOKED.
     mapping(address account => mapping(uint256 tokenId => address pool)) public admittedPool;
     mapping(address pool => PoolInfo) internal _pool;
     /// generation + 1 at the time of the pause; 0 = not paused. A renewal (a higher generation) ends it by itself.
@@ -320,6 +323,10 @@ contract MamoruActionPolicyV2 is IActionPolicy {
             // T6 I-1: one config per (account, pool, generation), whatever ConfigId it arrives under.
             if (c.initHash != h) revert ConfigMismatch(i.pool, i.generation);
         } else {
+            // LeftClaw M-5, once per (account, pool, generation): selling `perWindow` of the budget unit into the pool
+            // must not move its price `bandTicks`, so the session's own spend cannot walk the pool across its band
+            // and the oracle is not a thin pool's.
+            if (_depth(i.pool, i.bandTicks, i.budgetIn1) < i.perWindow) revert BadInit(11);
             _config[account][i.pool] = Config({
                 twapWindow: i.twapWindow,
                 twapShortWindow: i.twapShortWindow,
@@ -351,8 +358,9 @@ contract MamoruActionPolicyV2 is IActionPolicy {
                 _admitAtEnable(account, i.pool, p, id);
             } else {
                 id ^= REVOKE_FLAG;
-                if (admittedPool[account][id] == i.pool) {
-                    delete admittedPool[account][id];
+                address was = admittedPool[account][id];
+                if (was == i.pool || was == address(0)) {
+                    admittedPool[account][id] = REVOKED;
                     emit Revoked(account, i.pool, id);
                 }
             }
@@ -769,19 +777,34 @@ contract MamoruActionPolicyV2 is IActionPolicy {
         // T6 L-4: at most one observation per block and blocks of at least 1 s, so the ring must hold at least
         // `twapWindow` observations for the long window to survive a dust swap in every block. Deploy step:
         // script/Deploy.s.sol raises `observationCardinalityNext` before any enable.
-        (uint160 spot, int24 tick,,, uint16 cardinalityNext,,) = IUniswapV3Pool(i.pool).slot0();
+        (,,,, uint16 cardinalityNext,,) = IUniswapV3Pool(i.pool).slot0();
         if (cardinalityNext < i.twapWindow) revert ObservationCardinalityTooLow(cardinalityNext, i.twapWindow);
-        // LeftClaw M-5: selling budget-unit tokens into the pool's in-range liquidity until the price has moved
-        // `bandTicks` must take at least one full window budget, so the session's own spend cannot walk the pool
-        // across its band and the oracle is not a thin pool's (in-range liquidity at the spot, as a measure). (Base, block of the fork tests: stables ~138k USDC over 10 ticks, cbBTC ~378k
-        // and WETH ~8.3M over 100; perWindow at a 1,000 USDC cap: 2,500 / 800 / 300.)
-        uint128 L = IUniswapV3Pool(i.pool).liquidity();
-        int24 band = int24(i.bandTicks);
-        // Selling token1 moves the price up, selling token0 moves it down.
-        uint256 depth = i.budgetIn1
-            ? LiquidityAmounts.getAmount1ForLiquidity(spot, TickMath.getSqrtRatioAtTick(_clamp(int256(tick) + band)), L)
-            : LiquidityAmounts.getAmount0ForLiquidity(TickMath.getSqrtRatioAtTick(_clamp(int256(tick) - band)), spot, L);
-        if (depth < i.perWindow) revert BadInit(11);
+    }
+
+    /// What selling the budget unit into `pool` takes to move its price `band` ticks (token1 moves it up, token0
+    /// down), walking every tick boundary in between and applying its liquidityNet, as the pool's own swap would. At
+    /// most band / tickSpacing + 1 steps (MAX_BAND 500); only at a config write, never at validation. (Base, block of
+    /// the fork tests, at the spot: stables ~138k USDC over 10 ticks, cbBTC ~378k and WETH ~8.3M over 100.)
+    function _depth(address pool, uint24 band, bool up) internal view returns (uint256 d) {
+        IUniswapV3Pool v = IUniswapV3Pool(pool);
+        (uint160 sp, int24 tick,,,,,) = v.slot0();
+        int256 liq = int256(uint256(v.liquidity()));
+        int24 spacing = v.tickSpacing();
+        int24 end = _clamp(up ? int256(tick) + int256(uint256(band)) : int256(tick) - int256(uint256(band)));
+        int24 b = tick / spacing * spacing; // the boundary at or below the spot
+        if (tick < 0 && tick % spacing != 0) b -= spacing;
+        if (up) b += spacing;
+        while (true) {
+            bool last = up ? b >= end : b <= end;
+            uint160 sb = TickMath.getSqrtRatioAtTick(last ? end : b);
+            uint128 l = liq > 0 ? uint128(uint256(liq)) : 0;
+            d += up ? LiquidityAmounts.getAmount1ForLiquidity(sp, sb, l) : LiquidityAmounts.getAmount0ForLiquidity(sb, sp, l);
+            if (last) return d;
+            (, int128 net,,,,,,) = v.ticks(b);
+            liq = up ? liq + net : liq - net;
+            sp = sb;
+            b = up ? b + spacing : b - spacing;
+        }
     }
 
     function _initHash(Init memory i) internal pure returns (bytes32) {
@@ -804,6 +827,7 @@ contract MamoruActionPolicyV2 is IActionPolicy {
 
     /// T6 M-4: a position the account owns in this pool, named in owner-signed enable data, becomes manageable.
     function _admitAtEnable(address account, address pool, PoolInfo memory p, uint256 tokenId) internal {
+        if (admittedPool[account][tokenId] == REVOKED) return; // the owner revoked it: never again (M-4)
         if (NPM.ownerOf(tokenId) != account) revert NotAdmissible(tokenId);
         (,, address t0, address t1, uint24 fee,,,,,,,) = NPM.positions(tokenId);
         if (t0 != p.token0 || t1 != p.token1 || fee != p.fee) revert NotAdmissible(tokenId);
@@ -815,7 +839,7 @@ contract MamoruActionPolicyV2 is IActionPolicy {
 
     function _isAdmitted(address account, address pool, uint256 tokenId) internal view returns (bool) {
         // ownerOf: an admitted position the owner later moved out of the Safe is not the session's any more.
-        return admittedPool[account][tokenId] == pool && NPM.ownerOf(tokenId) == account;
+        return pool != REVOKED && admittedPool[account][tokenId] == pool && NPM.ownerOf(tokenId) == account;
     }
 
     function _current(address account, address pool) internal view returns (Config memory c) {

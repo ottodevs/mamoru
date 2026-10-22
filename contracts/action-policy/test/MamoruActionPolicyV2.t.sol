@@ -218,7 +218,7 @@ contract MamoruActionPolicyV2Test is PolicyFixture {
         assertEq(_check(address(policy), inc), 1, "generation-1 config dead after renewal");
         // LeftClaw M-4, option C: admission survives a renewal that does not name the position.
         assertEq(_checkId(fresh, address(policy), inc), 0, "renewal without admit keeps it");
-        // An owner-signed Init revokes it explicitly (REVOKE_FLAG): the new key cannot manage it any more.
+        // An owner-signed Init revokes it explicitly and for good (REVOKE_FLAG): the new key cannot manage it.
         uint256[] memory revoke = new uint256[](1);
         revoke[0] = tokenId | v2().REVOKE_FLAG();
         ConfigId third = ConfigId.wrap(bytes32(uint256(3)));

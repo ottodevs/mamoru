@@ -15,8 +15,10 @@ remappings = [
   "forge-std/=lib/forge-std/src/",
 ]
 
-# MamoruActionPolicyV2 (#151, #171) at 1,000 optimizer runs: at 10,000 its runtime is over EIP-170's 24,576 bytes.
+# MamoruActionPolicyV2 (#151, #171) at 1,000 optimizer runs with via_ir: at 10,000 runs, and after the LeftClaw M-5
+# tick walk even at 1 run without via_ir, its runtime is over EIP-170's 24,576 bytes (via_ir: 23,102). Verify it the
+# same way: solc 0.8.28, cancun, 1,000 runs, viaIR true.
 # Only that file (and what imports it) gets this profile; MamoruActionPolicy (deployed, verified byte for byte by
 # packages/scenarios/action-policy/verify-deployed-policy.ts) keeps the default 10,000.
-additional_compiler_profiles = [{ name = "v2", optimizer_runs = 1000 }]
-compilation_restrictions = [{ paths = "src/MamoruActionPolicyV2.sol", optimizer_runs = 1000 }]
+additional_compiler_profiles = [{ name = "v2", optimizer_runs = 1000, via_ir = true }]
+compilation_restrictions = [{ paths = "src/MamoruActionPolicyV2.sol", optimizer_runs = 1000, via_ir = true }]

@@ -160,9 +160,11 @@ contract LeftClawV2Test is LeftClawFixture {
         revoke[0] = tokenId | REVOKE;
         _enable(ID3, 3, 1_000e6, revoke);
         assertEq(_checkId(ID3, NPM, collect), FAILED, "position still managed after an explicit revoke");
-        assertEq(MamoruActionPolicy(address(policy)).admittedPool(safe, tokenId), address(0));
+        assertEq(MamoruActionPolicy(address(policy)).admittedPool(safe, tokenId), address(1), "REVOKED");
+        // Review P2 (#102, 45832e1): the operator's next ordinary renewal still lists it in admit. It neither undoes
+        // the owner's revocation nor reverts the renewal.
         _enable(ConfigId.wrap(bytes32(uint256(4))), 4, 1_000e6, admit);
-        assertEq(_checkId(ConfigId.wrap(bytes32(uint256(4))), NPM, collect), 0, "named again");
+        assertEq(_checkId(ConfigId.wrap(bytes32(uint256(4))), NPM, collect), FAILED, "revocation undone by a renewal");
     }
 
     /// Review P2 (#102, bcf6bf5): a renewal prepared before the engine minted a position, submitted after, must not
@@ -194,6 +196,30 @@ contract LeftClawV2Test is LeftClawFixture {
         assertEq(_checkId(ID, ROUTER, swap), FAILED, "validated a swap the pool will revert");
         (uint256 afterPush,) = policy.budgetLeft(safe, POOL_BTC);
         assertEq(afterPush, before, "budget charged");
+    }
+
+    /// M-5, measured against the pool itself: the floor is what an actual swap needs to move the price `band` ticks
+    /// (the attacker's push to exactly tick - band, net of the pool fee), crossing every tick boundary on the way.
+    /// Review P2 (#102, 45832e1): the in-range liquidity at the spot alone is not that amount.
+    function test_M5_depthIsWhatTheSwapAcrossTheBandTakes() public {
+        IUniswapV3Pool(POOL_STABLE).increaseObservationCardinalityNext(uint16(TWAP));
+        uint256 snap = vm.snapshotState();
+        (uint256 spent,) = _push(POOL_STABLE, USDC, USDT, 100, -int24(STABLE_BAND));
+        vm.revertToState(snap);
+        uint256 net = spent * (1e6 - 100) / 1e6;
+        vm.startPrank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicy.BadInit.selector, 11));
+        policy.initializeWithMultiplexer(
+            safe,
+            ID,
+            _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, uint128(net * 1001 / 1000), 1e15, new uint256[](0))
+        );
+        policy.initializeWithMultiplexer(
+            safe,
+            ID,
+            _initData(POOL_STABLE, STABLE_BAND, STABLE_ANCHOR, false, 1, uint128(net * 999 / 1000), 1e15, new uint256[](0))
+        );
+        vm.stopPrank();
     }
 
     /// M-5: an enable whose window budget could walk a thin pool across its band is refused; a normal one passes.
