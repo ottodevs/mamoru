@@ -4184,7 +4184,7 @@ export class Operator {
       if (row && !row.lateIncluded) {
         // An op carried while still in flight (not settled failed first) is simply settled: confirmed or reverted.
         const inFlight = row.state === 'submitted'
-        Object.assign(row, { lateIncluded: true, txHash: moved.included.txHash, block: Number(moved.included.blockNumber), updatedAt: now(), ...(inFlight ? { state: moved.included.success ? 'confirmed' : 'failed', code: moved.included.success ? 'EXEC_OK' : 'EXEC_INNER_REVERT' } : {}), ...(moved.permissionId && moved.calls ? { permissionId: moved.permissionId, calls: moved.calls } : {}) })
+        Object.assign(row, { lateIncluded: true, txHash: moved.included.txHash, block: Number(moved.included.blockNumber), ...(moved.userOpHash ? { userOpHash: moved.userOpHash } : {}), updatedAt: now(), ...(inFlight ? { state: moved.included.success ? 'confirmed' : 'failed', code: moved.included.success ? 'EXEC_OK' : 'EXEC_INNER_REVERT' } : {}), ...(moved.permissionId && moved.calls ? { permissionId: moved.permissionId, calls: moved.calls } : {}) })
         changed = true
       }
     }
@@ -4200,6 +4200,7 @@ export class Operator {
         code: o.stateCode,
         txHash: o.included?.txHash,
         block: o.included ? Number(o.included.blockNumber) : undefined,
+        ...(o.userOpHash ? { userOpHash: o.userOpHash } : {}),
         updatedAt: now(),
         ...opIntentView(o.intent),
         ...((o.state === 'confirmed' || o.lateIncluded) && o.permissionId && o.calls ? { permissionId: o.permissionId, calls: o.calls } : {}),

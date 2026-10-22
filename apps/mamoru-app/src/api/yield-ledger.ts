@@ -168,17 +168,21 @@ export async function writeAccountSnapshot(db: Db, snapshot: SnapshotWire, now: 
       .run()
 
     const receipt = receipts.get(accountKey)
+    // collected/gas fall back to yield_ledger_account_receipts: a row created after that day's receipt was delivered
+    // (an account stopped, then restarted the same day) still carries it; writeReceipts skips an unchanged day.
     await db
       .prepare(
         `INSERT INTO account_daily (day, chain_id, address, account_key, env, block_open, block_close, total_open_usdc, total_close_usdc, idle_close_usdc, lp_close_usdc, fees_open_usdc, fees_close_usdc, collected_usdc, gas_paid_wei)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+           COALESCE(?, (SELECT r.collected_usdc FROM yield_ledger_account_receipts r WHERE r.day = ? AND r.chain_id = ? AND r.address = ?)),
+           COALESCE(?, (SELECT r.gas_paid_wei FROM yield_ledger_account_receipts r WHERE r.day = ? AND r.chain_id = ? AND r.address = ?)))
          ON CONFLICT(day, chain_id, address) DO UPDATE SET
            env = excluded.env, block_close = excluded.block_close, total_close_usdc = excluded.total_close_usdc, idle_close_usdc = excluded.idle_close_usdc,
            lp_close_usdc = excluded.lp_close_usdc, fees_close_usdc = excluded.fees_close_usdc,
            collected_usdc = COALESCE(excluded.collected_usdc, account_daily.collected_usdc),
            gas_paid_wei = COALESCE(excluded.gas_paid_wei, account_daily.gas_paid_wei)`,
       )
-      .bind(day, snapshot.chainId, address, accountKey, env, Number(snapshot.block), Number(snapshot.block), Number(safe.totalUsdc), Number(safe.totalUsdc), Number(safe.idleUsdc), Number(safe.lpUsdc), Number(safe.feesUsdc), Number(safe.feesUsdc), receipt?.collectedUsd ?? null, receipt?.gasWei ?? null)
+      .bind(day, snapshot.chainId, address, accountKey, env, Number(snapshot.block), Number(snapshot.block), Number(safe.totalUsdc), Number(safe.totalUsdc), Number(safe.idleUsdc), Number(safe.lpUsdc), Number(safe.feesUsdc), Number(safe.feesUsdc), receipt?.collectedUsd ?? null, day, snapshot.chainId, address, receipt?.gasWei ?? null, day, snapshot.chainId, address)
       .run()
     written++
   }
@@ -233,9 +237,17 @@ export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date
       const receipt = receipts.get(p.tokenId)
       const feeAccruedUsd = feeReadinessUsd(receipt?.collectedUsd)
       await db
+        // The collected columns fall back to yield_ledger_position_collected (writeReceipts), so a row this day's
+        // first snapshot creates after the receipt was delivered still carries it (writeReceipts skips an
+        // unchanged day by digest and would not write it again).
         .prepare(
           `INSERT INTO yield_ledger_position_daily (day, chain_id, token_id, account_key, address, env, pool, block_open, block_close, accrued0_open, accrued1_open, accrued_usd_open, accrued0_close, accrued1_close, accrued_usd_close, value_usd, hold_value_usd, collected0, collected1, collected_usd, fee_accrued_usd, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+             COALESCE(?, (SELECT c.collected0 FROM yield_ledger_position_collected c WHERE c.day = ? AND c.chain_id = ? AND c.token_id = ?)),
+             COALESCE(?, (SELECT c.collected1 FROM yield_ledger_position_collected c WHERE c.day = ? AND c.chain_id = ? AND c.token_id = ?)),
+             COALESCE(?, (SELECT c.collected_usd FROM yield_ledger_position_collected c WHERE c.day = ? AND c.chain_id = ? AND c.token_id = ?)),
+             COALESCE(?, (SELECT CAST(ROUND(c.collected_usd * ${FEE_ON_YIELD_BPS} / 10000.0) AS INTEGER) FROM yield_ledger_position_collected c WHERE c.day = ? AND c.chain_id = ? AND c.token_id = ?)),
+             ?)
            ON CONFLICT(day, chain_id, token_id) DO UPDATE SET
              env = excluded.env, block_close = excluded.block_close, accrued0_close = excluded.accrued0_close, accrued1_close = excluded.accrued1_close,
              accrued_usd_close = excluded.accrued_usd_close, value_usd = excluded.value_usd, hold_value_usd = excluded.hold_value_usd,
@@ -251,7 +263,7 @@ export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date
           p.accrued0, p.accrued1, Number(p.feesUsdc),
           p.accrued0, p.accrued1, Number(p.feesUsdc),
           Number(p.valueUsdc), Number(p.holdValueUsdc),
-          receipt?.collected0 ?? null, receipt?.collected1 ?? null, receipt?.collectedUsd ?? null, feeAccruedUsd,
+          ...[receipt?.collected0 ?? null, receipt?.collected1 ?? null, receipt?.collectedUsd ?? null, feeAccruedUsd].flatMap((v) => [v, day, snapshot.chainId, Number(p.tokenId)]),
           now.toISOString(),
         )
         .run()

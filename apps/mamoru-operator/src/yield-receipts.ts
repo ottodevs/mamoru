@@ -47,13 +47,27 @@ export type OpFacts = {
   fees: FeeFact[]
 }
 
-/** Reads what a receipt says this Safe paid and collected. Pure: the caller fetched `logs` and the block time. */
-export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint): OpFacts {
+/**
+ * Reads what a receipt says this Safe paid and collected. Pure: the caller fetched `logs` and the block time.
+ * With `userOpHash` (an engine op), only that userOp counts: its gas, and the logs it emitted, which in EntryPoint
+ * v0.7 sit after the previous UserOperationEvent of the bundle and before its own. The operator's bundler sends one
+ * userOp per handleOps (bundler.ts), so this matters only for a bundle someone else built. Without it (an owner
+ * transaction, or an engine op stored before its hash was kept) the whole transaction counts.
+ */
+export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, userOpHash?: Hex): OpFacts {
   const entryPoint = address('EntryPointV07', baseRegistry)
   const npm = address('NonfungiblePositionManager', baseRegistry)
+  const opEvents = parseEventLogs({ abi: entryPointV07Abi, eventName: 'UserOperationEvent', logs: logs.filter((l) => isAddressEqual(l.address, entryPoint)) })
   let gas = 0n
-  for (const e of parseEventLogs({ abi: entryPointV07Abi, eventName: 'UserOperationEvent', logs: logs.filter((l) => isAddressEqual(l.address, entryPoint)) })) {
-    if (isAddressEqual(e.args.sender, safe)) gas += e.args.actualGasCost
+  if (userOpHash) {
+    const i = opEvents.findIndex((e) => e.args.userOpHash.toLowerCase() === userOpHash.toLowerCase() && isAddressEqual(e.args.sender, safe))
+    const own = opEvents[i]
+    if (!own) return { at: new Date(Number(blockTime) * 1000).toISOString(), gasWei: '0', fees: [] }
+    gas = own.args.actualGasCost
+    const from = i > 0 ? opEvents[i - 1]!.logIndex : -1
+    logs = logs.filter((l) => l.logIndex !== null && l.logIndex > from && l.logIndex < own.logIndex)
+  } else {
+    for (const e of opEvents) if (isAddressEqual(e.args.sender, safe)) gas += e.args.actualGasCost
   }
 
   // The pool emits its Collect right before the manager's: the nearest one earlier in the log names the pool.
@@ -87,13 +101,15 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint): Op
 }
 
 /**
- * An engine op with a transaction and no facts for that transaction yet, whatever its stored state: an op stored
- * `submitted` whose engine stopped before confirming it is still read here. Finality is not taken from the state
+ * An op with a transaction and no facts for that transaction yet, whatever its stored state: an engine op stored
+ * `submitted` whose engine stopped before confirming it is still read here, and so is an owner op (a stop or a
+ * withdrawal collects the positions' fees to the Safe too; its gas is the relayer's or a refund, not a userOp's, so
+ * it counts no gas here: the relayer's side is in acc.sponsored). Finality is not taken from the state
  * but checked on the receipt itself (withReceipts: at or below the chain's `safe` block), so a reorged inclusion
  * is never frozen and an account stopped mid-confirmation still gets its op counted.
  */
 export function needsFacts(op: StoredOp): boolean {
-  return op.opId.startsWith('eng-') && !!op.txHash && op.facts?.txHash?.toLowerCase() !== op.txHash.toLowerCase()
+  return (op.opId.startsWith('eng-') || op.opId.startsWith('own-')) && !!op.txHash && op.facts?.txHash?.toLowerCase() !== op.txHash.toLowerCase()
 }
 
 /** Sets `usdc` on every fee the snapshot can price. Returns whether anything changed (the caller saves). */
@@ -206,7 +222,7 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
       if (!r || r.blockNumber > safe!) continue
       const t = times.get(r.blockNumber) ?? (await blockTime(r.blockNumber))
       times.set(r.blockNumber, t)
-      op.facts = { txHash, ...factsFromLogs(r.logs, a.safe, t) }
+      op.facts = { txHash, ...factsFromLogs(r.logs, a.safe, t, op.opId.startsWith('eng-') ? op.userOpHash : undefined) }
       tried.delete(key)
       changed = true
     } catch (e) {

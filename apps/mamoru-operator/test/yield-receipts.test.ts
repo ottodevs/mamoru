@@ -21,8 +21,8 @@ const npmAbi = parseAbi([
 let idx = 0
 const log = (addr: Address, topics: Hex[], data: Hex): Log => ({ address: addr, topics: topics as [Hex, ...Hex[]], data, logIndex: idx++, blockNumber: 1n, blockHash: '0x01', transactionHash: '0x02', transactionIndex: 0, removed: false }) as Log
 
-const userOp = (sender: Address, gas: bigint) =>
-  log(EP, encodeEventTopics({ abi: entryPointV07Abi, eventName: 'UserOperationEvent', args: { userOpHash: `0x${'ab'.repeat(32)}`, sender, paymaster: '0x0000000000000000000000000000000000000000' } }) as Hex[], encodeAbiParameters([{ type: 'uint256' }, { type: 'bool' }, { type: 'uint256' }, { type: 'uint256' }], [0n, true, gas, 100_000n]))
+const userOp = (sender: Address, gas: bigint, hash: Hex = `0x${'ab'.repeat(32)}`) =>
+  log(EP, encodeEventTopics({ abi: entryPointV07Abi, eventName: 'UserOperationEvent', args: { userOpHash: hash, sender, paymaster: '0x0000000000000000000000000000000000000000' } }) as Hex[], encodeAbiParameters([{ type: 'uint256' }, { type: 'bool' }, { type: 'uint256' }, { type: 'uint256' }], [0n, true, gas, 100_000n]))
 const poolCollect = (a0: bigint, a1: bigint) =>
   log(POOL, encodeEventTopics({ abi: poolAbi, eventName: 'Collect', args: { owner: NPM, tickLower: -10, tickUpper: 10 } }) as Hex[], encodeAbiParameters([{ type: 'address' }, { type: 'uint128' }, { type: 'uint128' }], [NPM, a0, a1]))
 const npmCollect = (tokenId: bigint, recipient: Address, a0: bigint, a1: bigint) =>
@@ -44,6 +44,16 @@ describe('factsFromLogs (otto/mamoru#129)', () => {
   test('a collect after a decrease in the same tx counts only what it paid above the freed principal', () => {
     const f = factsFromLogs([userOp(SAFE, 1n), decrease(7n, 100n, 200n), poolCollect(103n, 199n), npmCollect(7n, SAFE, 103n, 199n)], SAFE, T)
     expect(f.fees).toEqual([{ tokenId: '7', pool: LIVE_POOL, fee0: '3', fee1: '0' }])
+  })
+
+  test('with a userOpHash, only that userOp\'s gas and the logs it emitted count (a bundle of two ops of the same Safe)', () => {
+    const h1 = `0x${'01'.repeat(32)}` as Hex
+    const h2 = `0x${'02'.repeat(32)}` as Hex
+    const logs = [poolCollect(5n, 0n), npmCollect(1n, SAFE, 5n, 0n), userOp(SAFE, 100n, h1), poolCollect(7n, 0n), npmCollect(2n, SAFE, 7n, 0n), userOp(SAFE, 200n, h2)]
+    expect(factsFromLogs(logs, SAFE, T, h1)).toMatchObject({ gasWei: '100', fees: [{ tokenId: '1', fee0: '5' }] })
+    expect(factsFromLogs(logs, SAFE, T, h2)).toMatchObject({ gasWei: '200', fees: [{ tokenId: '2', fee0: '7' }] })
+    expect(factsFromLogs(logs, SAFE, T, `0x${'03'.repeat(32)}`)).toMatchObject({ gasWei: '0', fees: [] })
+    expect(factsFromLogs(logs, SAFE, T).gasWei).toBe('300')
   })
 
   test('a full unwind with no fees and a collect to another recipient record no fee', () => {
@@ -77,7 +87,7 @@ describe('needsFacts', () => {
     expect(needsFacts(op('eng-1'))).toBe(true)
     expect(needsFacts({ ...op('eng-1'), state: 'submitted' } as StoredOp)).toBe(true)
     expect(needsFacts({ ...op('eng-1'), state: 'failed', code: 'EXEC_INNER_REVERT' } as StoredOp)).toBe(true)
-    expect(needsFacts(op('own-1'))).toBe(false)
+    expect(needsFacts(op('own-1'))).toBe(true)
     expect(needsFacts(op('eng-1', undefined, null))).toBe(false)
   })
 
@@ -93,7 +103,7 @@ describe('withReceipts', () => {
   const one = (ops: StoredOp[], save = () => {}) => ({ accounts: () => [{ accountKey: 'acct-1-full-key', safe: SAFE, ops }], save })
 
   test('reads each receipt once, keeps facts on the row, saves, and retries a missing one later', async () => {
-    const ops = [op('eng-1', undefined, '0x01'), op('eng-2', undefined, '0x02'), op('own-1', undefined, '0x03'), op('eng-3', undefined, null)]
+    const ops = [op('eng-1', undefined, '0x01'), op('eng-2', undefined, '0x02'), op('own-1', undefined, null), op('eng-3', undefined, null)]
     let saves = 0
     const reads: Hex[] = []
     const readReceipt = async (h: Hex) => {

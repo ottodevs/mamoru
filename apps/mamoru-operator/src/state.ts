@@ -29,7 +29,9 @@ export type StoredOp = OpView & {
   /** When (ms) a copy of its transaction was first, and last, handed to a provider (an armed Start: maybe days after sentAt). */
   broadcastAt?: number
   lastBroadcastAt?: number
-  /** otto/mamoru#129: an engine op's gas and collected fees, read once from its receipt (yield-receipts.ts). */
+  /** otto/mamoru#129: an engine op's userOp hash, so its facts count that userOp only (yield-receipts.ts). */
+  userOpHash?: Hex
+  /** otto/mamoru#129: an op's gas and collected fees, read once from its receipt (yield-receipts.ts). */
   facts?: OpFacts
 }
 

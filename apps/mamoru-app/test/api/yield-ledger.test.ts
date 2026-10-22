@@ -302,6 +302,16 @@ describe('writeReceipts (otto/mamoru#129): the operator\'s per-day gas and colle
     expect(receiptsRow('2025-01-01')?.gas_paid_wei).toBe('9')
   })
 
+  test('a snapshot row created after the day\'s receipt was delivered (stopped, then restarted) still carries it', async () => {
+    await writeReceipts(db, withReceipts([{ day, gasWei: '5', collectedUsdc: '95', positions: [{ tokenId: '42', collected0: '95', collected1: '0', collectedUsdc: '95' }] }]), now)
+    await writeAccountSnapshot(db, snapshot(), now)
+    await writeYieldLedger(db, snapshot(), now)
+    expect(accountRow()).toEqual({ collected_usdc: 95, gas_paid_wei: '5' })
+    expect(positionRow()).toEqual({ collected0: '95', collected1: '0', collected_usd: 95, fee_accrued_usd: 10 })
+    await writeAccountSnapshot(db, snapshot({ readAt: '2026-10-16T18:00:00.000Z' }), now)
+    expect(accountRow()).toEqual({ collected_usdc: 95, gas_paid_wei: '5' })
+  })
+
   test('skips a safe no account owns', async () => {
     await writeAccountSnapshot(db, snapshot(), now)
     await writeReceipts(db, withReceipts([{ day, gasWei: '5', positions: [{ tokenId: '9', collected0: '1', collected1: '1' }] }], '0x0000000000000000000000000000000000dEaD'), now)
