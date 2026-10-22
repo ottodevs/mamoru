@@ -565,7 +565,7 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
           confirmDisabled={transferConfirmDisabled(flow.busy, divergence, acceptedWarning)}
         >
           <p className="m-0 text-[2rem] leading-none text-emerald tabular-nums">
-            ${usd(BigInt(parseUsdc(amount) ?? '0'))}
+            ${usdExactInput(BigInt(parseUsdc(amount) ?? '0'))}
           </p>
           {flow.prepared.receive && flow.prepared.receive.asset !== 'USDC' ? (
             <div className="grid gap-1" data-testid="receive">

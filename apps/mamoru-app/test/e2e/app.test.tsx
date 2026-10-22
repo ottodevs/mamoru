@@ -352,6 +352,9 @@ describe('helpers', () => {
     expect(parseUsdc(usdExactInput(s.maxWithdraw))).toBe('26983456')
     expect(usdExactInput(26_900_000n)).toBe('26.90')
     expect(usdExactInput(10_000n)).toBe('0.01')
+    // the approval screen shows what is sent, not a cents-truncated figure (usd() would say 26.98)
+    expect(usdExactInput(BigInt(parseUsdc('26.983456') ?? '0'))).toBe('26.983456')
+    expect(usdExactInput(BigInt(parseUsdc('5') ?? '0'))).toBe('5.00')
   })
   test('operator errors become plain USDC copy', () => {
     expect(humanMessage('the Safe cannot free 2000000 USDC base units', 1_930_000n)).toBe('You can withdraw up to 1.93 USDC right now.')
