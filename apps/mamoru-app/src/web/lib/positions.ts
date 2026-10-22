@@ -30,6 +30,11 @@ export function pairLabel(pool: string | undefined, amounts?: Position['amounts'
   return b === 'USDC' ? `USDC / ${a}` : `${a} / ${b}`
 }
 
+/** The pool's registry name ("pool:USDC/USDT/100") whether the view carries the name or the address; null when unknown. */
+export function poolName(pool: string | undefined): string | null {
+  return poolEntry(pool)?.name ?? (pool && /^pool:/.test(pool) ? pool : null)
+}
+
 /** The pool's contract address for Basescan, whether the view carries the name or the address. */
 export function poolAddress(pool: string): string | null {
   return poolEntry(pool)?.address ?? (/^0x[0-9a-fA-F]{40}$/.test(pool) ? pool : null)

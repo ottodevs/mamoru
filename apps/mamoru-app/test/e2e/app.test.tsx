@@ -61,15 +61,17 @@ describe('routes', () => {
     const { text } = await renderRoute('/', fixtureSession, funded)
     expect(text).toContain('Total balance')
     expect(text).toContain('Working capital')
-    expect(text).toContain('1 open position')
-    expect(text).toContain('Idle assets 10.00 USDC')
+    expect(text).toContain('1 position')
+    expect(text).toContain('Idle capital 10.00 USDC · waiting to be placed')
     expect(text).toContain('Stop allocation')
-    expect(text).toContain('Current APY —')
+    // Rates not loaded: n/a with the reason, never a figure.
+    expect(text).toContain('Current rate n/a')
+    expect(text).toContain('Monthly rate n/a')
     expect(text).not.toContain('UTC')
   })
-  // otto/mamoru#132: the APY card shows the blended figures plainly; the sources/method text and the
-  // per-pool breakdown live behind an info button instead of sitting under the numbers by default.
-  test('APY: the numbers show, the sources/method and per-pool breakdown wait behind the info button', async () => {
+  // otto/mamoru#193: three indicators in a row with their source visible under each figure, no info button;
+  // the per-pool rates sit next to each position in the Working capital table.
+  test('rates: monthly and current with their sources, per-pool rates beside each position', async () => {
     const apy: ApyView = {
       pool: 'conservador-live-v2',
       currentPct: 6.4,
@@ -80,17 +82,14 @@ describe('routes', () => {
       byPool: [{ pool: 'pool:USDC/cbBTC/500', weight: 10000, currentPct: 6.4, monthlyPct: 5.9 }],
       asOf: '2026-10-10T00:00:00.000Z',
     }
-    const { text, html } = await renderRoute('/', fixtureSession, funded, { apy })
-    expect(text).toContain('Current APY 6.4%')
-    expect(text).toContain('Monthly average 5.9%')
-    // Closed by default: the method text and the per-pool table are not in the painted output.
-    expect(text).not.toContain('GeckoTerminal')
-    expect(text).not.toContain('DefiLlama')
-    expect(text).not.toContain('USDC/cbBTC')
-    // The trigger is a real, labelled, collapsed toggle.
-    expect(html).toContain('aria-label="Sources and method"')
-    expect(html).toContain('aria-haspopup="dialog"')
-    expect(html).toContain('aria-expanded="false"')
+    const one: FundingView = { ...funded, positions: [{ tokenId: '1', pool: 'pool:USDC/cbBTC/500', liquidity: '1', inRange: true, amountUsdc: '5000000', amountCbbtc: '0', valueUsdc: '5000000' }] }
+    const { text, html } = await renderRoute('/', fixtureSession, one, { apy })
+    expect(text).toContain('Monthly rate 5.9% APY · 30-day mean APY · 30d · DefiLlama')
+    expect(text).toContain('Current rate 6.4% APY · today · on positions earning now APY · today · earning now · GeckoTerminal/DefiLlama')
+    expect(text).toContain('Earned so far')
+    expect(text).toContain('Balanced · USDC/cbBTC')
+    expect(html).not.toContain('aria-label="Sources and method"')
+    expect(html).toMatch(/<details class="dash-fold" open/)
   })
   test('funds present but not running: one Start button', async () => {
     const { text } = await renderRoute('/', fixtureSession, { ...fixtureFunding, active: false })
@@ -641,16 +640,13 @@ describe('funds by token and what Mamoru is doing', () => {
     expect(usd(split({ ...midEntry, idle: undefined }, null).total)).toBe('3.74')
   })
 
-  test('Home says the money is being placed, lists each token outside a position and shows the split by token', async () => {
+  test('Home says the money is being placed and lists each idle token when there is more than one', async () => {
     const { text, html } = await renderRoute('/', fixtureSession, midEntry)
     expect(text).toContain('Total balance 5.00 USDC')
-    expect(text).toContain('Being placed 5.00 USDC')
-    expect(text).not.toContain('Idle assets')
+    expect(text).toContain('Idle capital 5.00 USDC · being placed')
     expect(html).toContain('data-testid="idle-tokens"')
     expect(text).toContain('3.74 USDC')
     expect(text).toContain('1.25 USDT')
-    expect(html).toContain('data-testid="by-token"')
-    expect(text).toContain('By token')
     expect(text).toContain('Placing your money. The next step starts in a few seconds.')
   })
 
@@ -726,11 +722,11 @@ describe('funds by token and what Mamoru is doing', () => {
     expect(holdings(placed)!.map((h) => h.token)).toEqual(['USDT', 'USDC'])
     const { text, html } = await renderRoute('/', fixtureSession, placed)
     expect(html).not.toContain('data-testid="idle-tokens"')
-    expect(text).toContain('Idle assets 0.00 USDC 0 tokens idle')
+    expect(text).toContain('Idle capital 0.00 USDC · nothing idle')
   })
 
   test('an account with nothing in progress keeps the plain label', async () => {
     const { text } = await renderRoute('/', fixtureSession, { ...midEntry, engine: { placing: false, nextReviewAt: null } })
-    expect(text).toContain('Idle assets 5.00 USDC')
+    expect(text).toContain('Idle capital 5.00 USDC · waiting to be placed')
   })
 })

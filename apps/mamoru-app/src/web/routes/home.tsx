@@ -2,18 +2,19 @@ import type { ApyView, FundingView, Hex0x, OpView, OverCap, PriceDivergenceWarni
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
-import { APY_REFRESH_MS, queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
+import { queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { PriceDivergenceNotice } from '../components/price-divergence-notice.tsx'
 import { TokenMark } from '../components/token-mark.tsx'
-import { BasescanLink, Brand, InfoPopover, Modal, Waiting } from '../components/ui.tsx'
+import { BasescanLink, Brand, Modal } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
-import { belowMinimumOf, cbbtcPrice, ceilCents, DUST_USDC, holdings, humanMessage, overCapOf, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
+import { belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, overCapOf, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
-import { pairLabel, poolAddress, positionAmounts, positionTokens, progressLine } from '../lib/positions.ts'
+import { pairLabel, poolAddress, poolTokens, positionAmounts, progressLine } from '../lib/positions.ts'
+import { currentRate, idleReason, monthlyRate, positionRates, sourceName, type AccountRate, type PositionRate } from '../lib/rates.ts'
 import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel } from '../lib/price-divergence.ts'
 import { localTime } from '../lib/time.ts'
 import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
@@ -24,10 +25,26 @@ import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
 
 export const homeCopy = {
   total: 'Total balance',
-  apy: 'Current APY',
-  month: 'Monthly average',
-  apyInfo: 'Sources and method',
-  apyByPool: 'By pool',
+  // otto/mamoru#193: the three indicators. "Rate" is the label; APY and the source sit under the figure.
+  monthly: 'Monthly rate',
+  current: 'Current rate',
+  earnedSoFar: 'Earned so far',
+  monthlySub: 'APY · 30-day mean',
+  monthlySubShort: 'APY · 30d',
+  currentSub: 'APY · today · on positions earning now',
+  currentSubShort: 'APY · today · earning now',
+  planPools: 'plan pools, nothing placed yet',
+  profits: 'Profits become USDC.',
+  saves: 'Saves automatically.',
+  na: 'n/a',
+  gap: {
+    loading: 'loading',
+    'no-positions': 'no position earning now',
+    'all-paused': 'every position is paused',
+    'no-data': 'no rate from the source today',
+    'no-value': 'a position has no USDC value yet',
+  } as Record<NonNullable<AccountRate['gap']>, string>,
+  earnedGap: 'not measured yet',
   add: 'Add capital',
   withdraw: 'Withdraw',
   stop: 'Stop allocation',
@@ -36,9 +53,16 @@ export const homeCopy = {
   retry: 'Approve again',
   start: 'Start',
   working: 'Working capital',
-  idle: 'Idle assets',
-  idlePlacing: 'Being placed',
-  byToken: 'By token',
+  idle: 'Idle capital',
+  show: 'Show',
+  hide: 'Hide',
+  colPosition: 'Position',
+  colAmount: 'Amount',
+  colShare: 'Share',
+  inRange: 'In range',
+  paused: 'Paused: out of range. Mamoru puts it back to work automatically.',
+  noRate: 'n/a: no rate source for this pool yet.',
+  nothingPlaced: 'Nothing in a position right now.',
   placing: 'Placing your money. The next step starts in a few seconds.',
   upToDate: (time: string) => `Nothing to do right now. Mamoru looks again at ${time}.`,
   waitDepth: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: the ${pair} pool is not deep enough for more right now. Checked at ${time}.`,
@@ -48,7 +72,6 @@ export const homeCopy = {
   whyFall: 'their markets are falling fast',
   whyBoth: 'some are not deep enough for more right now, some are falling fast',
   history: 'Savings history',
-  earnedSoFar: 'Earned so far',
   notRunning: 'Mamoru is not running on this money yet.',
   armFirst: 'Approve once. Mamoru starts when your money lands.',
   stopBody: 'Mamoru closes every position and swaps back to USDC. Your USDC stays in your account.',
@@ -85,101 +108,21 @@ function plural(n: number, one: string, many: string) {
   return `${n} ${n === 1 ? one : many}`
 }
 
-const pct = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${v.toFixed(1)}%`)
-
-/** The sources and method behind the two figures, and the figure behind each pool in the blend, for the info popover. */
-function ApyDetail({ data }: { data: ApyView }) {
-  return (
-    <div className="info-body">
-      <p className="info-row">
-        <b>{homeCopy.apy}</b>
-        {data.currentSource}
-      </p>
-      <p className="info-row">
-        <b>{homeCopy.month}</b>
-        {data.monthlySource}
-      </p>
-      {data.byPool && data.byPool.length > 0 && (
-        <div>
-          <p className="info-row mb-1">
-            <b>{homeCopy.apyByPool}</b>
-          </p>
-          <table className="info-table">
-            <thead>
-              <tr>
-                <th scope="col">Pool</th>
-                <th scope="col">Weight</th>
-                <th scope="col">{homeCopy.apy}</th>
-                <th scope="col">{homeCopy.month}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.byPool.map((p) => (
-                <tr key={p.pool}>
-                  <td>{pairLabel(p.pool).replace(/ /g, '')}</td>
-                  <td>{(p.weight / 100).toFixed(0)}%</td>
-                  <td>{pct(p.currentPct)}</td>
-                  <td>{pct(p.monthlyPct)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  )
-}
-
-/**
- * One current and one monthly APY: the plan's pools weighted by bucket weights until positions earn fees.
- * The info trigger renders outside both tiles (as its own flex item in the caller's list): `.apr-live`
- * clips overflow for its refresh hairline, which would also clip an absolutely positioned popover nested
- * inside it.
- */
-function ApyTiles() {
-  const { data, dataUpdatedAt } = useApy()
-  return (
-    <>
-      <li className="apr apr-live flex-1">
-        <span className="apr-label whitespace-nowrap">{homeCopy.apy}</span>
-        <strong key={`v-${dataUpdatedAt}`} className="apr-fade" data-testid="apy-current">
-          {pct(data?.currentPct)}
-        </strong>
-        {data && <span key={`t-${dataUpdatedAt}`} className="apr-tick" style={{ animationDuration: `${APY_REFRESH_MS}ms` }} aria-hidden="true" />}
-      </li>
-      <li className="apr flex-1">
-        <span className="apr-label whitespace-nowrap">{homeCopy.month}</span>
-        <strong data-testid="apy-month">{pct(data?.monthlyPct)}</strong>
-      </li>
-      {data && (
-        <li className="flex items-end pb-[0.3rem]">
-          <InfoPopover label={homeCopy.apyInfo}>
-            <ApyDetail data={data} />
-          </InfoPopover>
-        </li>
-      )}
-    </>
-  )
-}
+const pct = (v: number | null | undefined) => (v === null || v === undefined ? homeCopy.na : `${v.toFixed(1)}%`)
 
 export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () => void; onWithdraw: () => void }) {
   return (
-    <section className="mb-8" aria-labelledby="total-title">
-      <div className="flex flex-wrap items-start justify-between gap-5">
-        <div>
-          <p className="kicker text-[0.86rem]! font-bold tracking-[0.14em]! text-ink!" id="total-title">
-            {homeCopy.total}
-          </p>
-          <p className="sum" data-testid="total">
-            {s ? usd(s.total) : '0.00'}
-            <span className="unit">USDC</span>
-          </p>
-        </div>
-        <ul className="m-0 flex w-full flex-wrap gap-[0.7rem] list-none p-0 self-center min-[761px]:w-auto min-[761px]:flex-nowrap">
-          <ApyTiles />
-        </ul>
+    <section className="balance" aria-labelledby="total-title">
+      <div>
+        <p className="kicker text-[0.86rem]! font-bold tracking-[0.14em]! text-ink!" id="total-title">
+          {homeCopy.total}
+        </p>
+        <p className="sum" data-testid="total">
+          {s ? usd(s.total) : '0.00'}
+          <span className="unit">USDC</span>
+        </p>
       </div>
-      <div className="mt-[1.15rem] flex flex-wrap gap-[0.7rem]">
+      <div className="balance-acts">
         <button type="button" className="act" onClick={onAdd}>
           {homeCopy.add}
         </button>
@@ -193,115 +136,169 @@ export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () =
   )
 }
 
-/**
- * otto/mamoru#129: uncollected fees plus anything collected, plain English, no extra claim. Only renders once
- * the yield ledger has a figure (the Worker's cron has pulled at least one operator snapshot for this account);
- * before then this is simply absent, never a placeholder zero.
- */
-export function EarnedSoFar({ earnedSoFarUsd }: { earnedSoFarUsd: string | null | undefined }) {
-  if (earnedSoFarUsd == null) return null
+/** The line under a rate: what the figure is and where it comes from, or why there is none. */
+function RateSub({ long, short, tail }: { long: string; short: string; tail: string | null }) {
   return (
-    <p className="mb-5 text-[0.9rem] text-stone" data-testid="earned-so-far">
-      {homeCopy.earnedSoFar}: <span className="font-medium text-ink">{usd(earnedSoFarUsd)} USDC</span>
+    <p className="rate-sub">
+      <span className="rate-long">{long}</span>
+      <span className="rate-short">{short}</span>
+      {tail ? ` · ${tail}` : null}
     </p>
   )
 }
 
-export function Working({ f, s, onStop, onStart = null }: { f: FundingView; s: Split; onStop: (() => void) | null; onStart?: (() => void) | null }) {
+/**
+ * otto/mamoru#193: Monthly rate, Current rate and Earned so far, one row of the same size. Each rate says its
+ * source under the figure (no info button). A figure that is not known says n/a and why, never a guess.
+ */
+export function Indicators({ f, apy, price, earnedSoFarUsd }: { f: FundingView | undefined; apy: ApyView | undefined; price: bigint | null; earnedSoFarUsd: string | null | undefined }) {
+  const rows = f ? positionRates(f, apy, price) : []
+  const monthly = f ? monthlyRate(rows, apy) : { pct: null, gap: 'loading' as const, covered: 0, of: 0, plan: false }
+  const current = f ? currentRate(rows, apy) : { pct: null, gap: 'loading' as const, covered: 0, of: 0 }
+  const partial = (r: AccountRate) => (r.pct !== null && r.covered < r.of ? `${r.covered} of ${r.of} positions with a rate` : null)
+  const monthlySrc = sourceName(apy?.monthlySource)
+  const currentSrc = sourceName(apy?.currentSource)
+  const monthlyTail = monthly.gap ? homeCopy.gap[monthly.gap] : [monthlySrc, monthly.plan ? homeCopy.planPools : null, partial(monthly)].filter(Boolean).join(' · ') || null
+  const currentTail = current.gap ? homeCopy.gap[current.gap] : [currentSrc, partial(current)].filter(Boolean).join(' · ') || null
+  return (
+    <section className="rates" aria-label="Rates and earnings">
+      <div className="rate">
+        <p className="rate-label">{homeCopy.monthly}</p>
+        <p className={`rate-value${monthly.pct === null ? ' rate-na' : ''}`} data-testid="rate-monthly">
+          {pct(monthly.pct)}
+        </p>
+        <RateSub long={homeCopy.monthlySub} short={homeCopy.monthlySubShort} tail={monthlyTail} />
+      </div>
+      <div className="rate">
+        <p className="rate-label">{homeCopy.current}</p>
+        <p className={`rate-value${current.pct === null ? ' rate-na' : ''}`} data-testid="rate-current">
+          {pct(current.pct)}
+        </p>
+        <RateSub long={homeCopy.currentSub} short={homeCopy.currentSubShort} tail={currentTail} />
+      </div>
+      <div className="rate rate-earned">
+        <p className="rate-label">{homeCopy.earnedSoFar}</p>
+        <p className={`rate-value${earnedSoFarUsd == null ? ' rate-na' : ''}`} data-testid="earned-so-far">
+          {earnedSoFarUsd == null ? homeCopy.na : usd(earnedSoFarUsd)}
+          {earnedSoFarUsd == null ? null : <span className="rate-unit">USDC</span>}
+        </p>
+        <p className="rate-sub">{earnedSoFarUsd == null ? `${homeCopy.earnedGap} · ${homeCopy.profits}` : homeCopy.profits}</p>
+      </div>
+    </section>
+  )
+}
+
+/** The pool's pair in pool order, as the venue names it: "USDC/USDT", "WETH/USDC". */
+function pair(p: FundingView['positions'][number]): string {
+  return poolTokens(p.pool, p.amounts).join('/')
+}
+
+function PositionRow({ p, r }: { p: FundingView['positions'][number]; r: PositionRate }) {
+  const legs = positionAmounts(p).filter((l) => l.amount !== '0')
+  const addr = poolAddress(p.pool)
+  const venue = 'Uniswap v3'
+  const share = r.sharePct === null ? null : Math.round(r.sharePct)
+  return (
+    <li data-testid="position" className="wc-row">
+      <span className="wc-marks" aria-hidden="true">
+        {poolTokens(p.pool, p.amounts).map((t, i) => (
+          <span key={t} className={i > 0 ? '-ml-[0.55rem]' : undefined}>
+            <TokenMark symbol={t} size={30} />
+          </span>
+        ))}
+      </span>
+      <span className="wc-name">
+        <span className="wc-pair">
+          {r.bucket} · {pair(p)}
+        </span>
+        <span className="wc-venue">
+          {addr ? (
+            <a href={`https://basescan.org/address/${addr}`} target="_blank" rel="noreferrer">
+              {venue}
+            </a>
+          ) : (
+            venue
+          )}
+          {p.inRange ? <span className="text-emerald"> · {homeCopy.inRange}</span> : null}
+        </span>
+      </span>
+      <span className="wc-amount">
+        <span className="wc-num">{r.valueUsdc === null ? homeCopy.na : `${usd(r.valueUsdc)} USDC`}</span>
+        <span className="wc-legs">{legs.map((l) => `${tokenAmount(l.amount, l.token, l.decimals)} ${l.token}`).join(' · ')}</span>
+      </span>
+      <span className="wc-share">
+        <span className="wc-num">{share === null ? homeCopy.na : `${share}%`}</span>
+        <span className="wc-bar" aria-hidden="true">
+          <span style={{ width: `${Math.min(100, Math.max(0, r.sharePct ?? 0))}%` }} />
+        </span>
+      </span>
+      <span className={`wc-rate wc-num${r.currentPct === 0 || r.currentPct === null ? ' text-stone' : ''}`} data-testid="position-current">
+        {r.currentPct === 0 ? '0%' : pct(r.currentPct)}
+      </span>
+      <span className={`wc-rate wc-num${r.monthlyPct === null ? ' text-stone' : ''}`} data-testid="position-monthly">
+        {pct(r.monthlyPct)}
+      </span>
+      <span className="wc-rates-m" aria-hidden="true">
+        <span className={r.currentPct ? undefined : 'text-stone'}>{r.currentPct === 0 ? '0%' : pct(r.currentPct)}</span>
+        <span className="text-stone"> · 30d {pct(r.monthlyPct)}</span>
+      </span>
+      {p.inRange ? null : <span className="wc-paused">{homeCopy.paused}</span>}
+    </li>
+  )
+}
+
+/**
+ * otto/mamoru#193: Working capital, open by default: one row per position with its bucket and pair, venue and
+ * range, value in USDC with each token, share of working capital and the pool's current and monthly rates. A
+ * paused (out-of-range) position earns 0% today and says Mamoru puts it back to work.
+ */
+export function Working({ f, s, apy, price = null, onStop, onStart = null }: { f: FundingView; s: Split; apy?: ApyView; price?: bigint | null; onStop: (() => void) | null; onStart?: (() => void) | null }) {
   const n = f.positions.length
-  const assets = [...new Set([...positionTokens(f), ...(s.idleCbbtc > 0n ? ['cbBTC'] : []), ...s.idleTokens.map((t) => t.token)])]
+  const rows = positionRates(f, apy, price)
   // An operation in flight says what it is; between operations the engine says whether more is coming and when it looks next.
   const line = progressLine(f.progress) ?? engineLine(f)
+  const noRate = apy !== undefined && rows.some((r) => r.monthlyPct === null || (r.inRange && r.currentPct === null))
   return (
-    <details className="card fold">
+    <details className="dash-fold" open>
       <summary>
-        <span className="flex min-w-0 flex-col">
-          <span className="flex flex-wrap items-baseline gap-x-[0.7rem]">
-            <span className="title heavy">{homeCopy.working}</span>
-            <span className="title heavy text-emerald">{usd(s.working)} USDC</span>
-          </span>
-          {line ? (
-            <span className="progress mono-label text-stone" role="status" aria-live="polite" data-testid="progress">
-              <span className="progress-dot" aria-hidden="true" />
-              {line}
-            </span>
-          ) : null}
-          <span className="sub">{plural(n, 'open position', 'open positions')}</span>
+        <span className="wc-head">
+          <span className="dash-title heavy">{homeCopy.working}</span>
+          <span className="dash-title heavy text-emerald">{usd(s.working)} USDC</span>
+          <span className="wc-count">· {plural(n, 'position', 'positions')}</span>
         </span>
-        {onStop ? (
-          <button
-            type="button"
-            className="act stop ml-auto shrink-0"
-            onClick={(e) => {
-              e.preventDefault()
-              onStop()
-            }}
-          >
-            {homeCopy.stop}
-          </button>
-        ) : onStart ? (
-          <button
-            type="button"
-            className="act ml-auto shrink-0"
-            onClick={(e) => {
-              e.preventDefault()
-              onStart()
-            }}
-          >
-            {homeCopy.startAllocation}
-          </button>
-        ) : (
-          <span className="ml-auto" />
-        )}
       </summary>
-      <div className="grid gap-[0.7rem] pt-[0.7rem]">
-        <p className="kicker">Assets in use</p>
-        <ul className="m-0 flex list-none flex-wrap gap-x-[0.9rem] gap-y-[0.4rem] p-0">
-          {assets.map((a) => (
-            <li key={a} className="flex items-center gap-[0.45rem] font-mono text-[0.8rem] tracking-[0.06em]">
-              <TokenMark symbol={a} />
-              {a}
-            </li>
-          ))}
-        </ul>
-        <p className="kicker">Where it sits</p>
-        {n === 0 ? (
-          <p className="m-0 text-[0.92rem] text-stone">Nothing in a pool right now.</p>
-        ) : (
-          <ul className="m-0 grid list-none gap-[0.4rem] p-0">
-            {f.positions.map((p) => {
-              const legs = positionAmounts(p)
-              const addr = poolAddress(p.pool)
-              return (
-                <li key={p.tokenId} data-testid="position" className="grid grid-cols-1 items-center gap-1 border-t border-wash pt-[0.45rem] min-[761px]:grid-cols-[auto_1fr_auto] min-[761px]:gap-[0.7rem]">
-                  <span className="flex items-center">
-                    {legs.map((l, i) => (
-                      <span key={l.token} className={i > 0 ? '-ml-[0.45rem]' : undefined}>
-                        <TokenMark symbol={l.token} />
-                      </span>
-                    ))}
-                  </span>
-                  <span className="flex min-w-0 flex-col gap-[0.05rem]">
-                    <span className="text-base">{pairLabel(p.pool, p.amounts)}</span>
-                    {addr ? (
-                      <a className="truncate font-mono text-[0.78rem] text-stone no-underline hover:text-emerald" href={`https://basescan.org/address/${addr}`} target="_blank" rel="noreferrer">
-                        Uniswap v3 · Base · {shortHex(addr)}
-                      </a>
-                    ) : null}
-                    <span className={`font-mono text-[0.78rem] ${p.inRange ? 'text-stone' : 'text-alert-ink'}`}>{p.inRange ? 'In range' : 'Out of range'}</span>
-                  </span>
-                  <span className="flex flex-col font-mono text-[0.85rem] min-[761px]:items-end">
-                    {p.valueUsdc !== undefined ? <span className="font-medium text-emerald">${usd(p.valueUsdc)}</span> : null}
-                    <span className={p.valueUsdc !== undefined ? 'text-[0.78rem] text-stone' : 'font-medium text-emerald'}>
-                      {legs.map((l) => `${tokenAmount(l.amount, l.token, l.decimals)} ${l.token}`).join(' + ')}
-                    </span>
-                  </span>
-                </li>
-              )
-            })}
+      {line ? (
+        <p className="progress mono-label text-stone" role="status" aria-live="polite" data-testid="progress">
+          <span className="progress-dot" aria-hidden="true" />
+          {line}
+        </p>
+      ) : null}
+      {n === 0 ? (
+        <p className="m-0 pt-3 text-[0.95rem] text-stone">{homeCopy.nothingPlaced}</p>
+      ) : (
+        <>
+          <div className="wc-row wc-cols" aria-hidden="true">
+            <span className="wc-name">{homeCopy.colPosition}</span>
+            <span className="wc-amount">{homeCopy.colAmount}</span>
+            <span className="wc-share">{homeCopy.colShare}</span>
+            <span className="wc-rate">{homeCopy.current}</span>
+            <span className="wc-rate">{homeCopy.monthly}</span>
+          </div>
+          <ul className="m-0 list-none p-0">
+            {f.positions.map((p, i) => (
+              <PositionRow key={p.tokenId} p={p} r={rows[i]!} />
+            ))}
           </ul>
-        )}
-      </div>
+          {noRate ? <p className="m-0 pt-2 font-mono text-[0.72rem] text-stone">{homeCopy.noRate}</p> : null}
+        </>
+      )}
+      {onStop || onStart ? (
+        <div className="flex justify-end pt-4">
+          <button type="button" className={onStop ? 'act stop' : 'act'} onClick={() => (onStop ?? onStart)!()}>
+            {onStop ? homeCopy.stop : homeCopy.startAllocation}
+          </button>
+        </div>
+      ) : null}
     </details>
   )
 }
@@ -335,76 +332,48 @@ export function engineLine(f: FundingView): string | null {
   return homeCopy.upToDate(new Date(f.engine.nextReviewAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
 }
 
-/** `placing`: the engine is working through an entry, so what is outside a position is on its way in, not idle. */
-export function Idle({ s, placing = false }: { s: Split; placing?: boolean }) {
-  const listed = s.idleTokens.length > 0
-  // Nothing from a cent up outside a position: say so rather than count the rounding left in each token.
-  const tokens = listed ? s.idleTokens.length : s.idle < DUST_USDC ? 0 : (s.idleUsdc > 0n ? 1 : 0) + (s.idleCbbtc > 0n ? 1 : 0)
-  return (
-    <section className="card" aria-labelledby="idle-title">
-      <p className="m-0 flex flex-wrap items-baseline gap-x-[0.7rem]">
-        <span className="title" id="idle-title">
-          {placing ? homeCopy.idlePlacing : homeCopy.idle}
-        </span>
-        <span className="title">{usd(s.idle)} USDC</span>
-      </p>
-      {listed ? (
-        <ul className="m-0 mt-[0.35rem] grid list-none gap-[0.3rem] p-0" data-testid="idle-tokens">
-          {s.idleTokens.map((t) => (
-            <li key={t.token} className="flex items-center gap-[0.5rem] font-mono text-[0.82rem]">
-              <TokenMark symbol={t.token} size={20} />
-              <span>
-                {tokenAmount(String(t.amount), t.token, t.decimals)} {t.token}
-              </span>
-              {t.token === 'USDC' ? null : <span className="text-stone">${usd(t.valueUsdc)}</span>}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="sub">
-          {plural(tokens, placing ? 'token' : 'token idle', placing ? 'tokens' : 'tokens idle')}
-          {s.idle >= DUST_USDC && s.idleCbbtc > 0n ? ` · ${formatUnits(String(s.idleCbbtc), 'cbBTC')} cbBTC` : ''}
-        </p>
-      )}
-    </section>
+/**
+ * otto/mamoru#193: Idle capital on one line, with why it is idle. Everything outside a position is here (USDC
+ * and any other token left over), so this replaces the separate token list. It opens per token only when more
+ * than one token is idle.
+ */
+export function Idle({ f, s }: { f: FundingView; s: Split }) {
+  const head = (
+    <span className="idle-head">
+      <span className="dash-title" id="idle-title">
+        {homeCopy.idle}
+      </span>
+      <span className="dash-title">{usd(s.idle)} USDC</span>
+      <span className="wc-count" data-testid="idle-reason">
+        · {idleReason(f, s)}
+      </span>
+    </span>
   )
-}
-
-/** The whole account by token: idle plus both sides of every position, with what each is worth and its share. */
-export function ByToken({ f, s }: { f: FundingView; s: Split }) {
-  const rows = holdings(f)
-  if (!rows || rows.length === 0 || s.total === 0n) return null
+  if (s.idleTokens.length <= 1) {
+    return (
+      <section className="dash-fold dash-flat" aria-labelledby="idle-title">
+        <div className="dash-summary">{head}</div>
+      </section>
+    )
+  }
   return (
-    <section className="card" aria-labelledby="by-token-title" data-testid="by-token">
-      <p className="title m-0" id="by-token-title">
-        {homeCopy.byToken}
-      </p>
-      <ul className="m-0 mt-[0.45rem] grid list-none gap-[0.4rem] p-0">
-        {rows.map((h) => (
-          <li key={h.token} className="grid grid-cols-[auto_1fr_auto] items-center gap-[0.6rem] border-t border-wash pt-[0.4rem] font-mono text-[0.85rem]">
-            <TokenMark symbol={h.token} size={22} />
-            <span className="flex min-w-0 flex-col">
-              <span>
-                {tokenAmount(String(h.amount), h.token, h.decimals)} {h.token}
-              </span>
-              {h.idle > 0n && h.working > 0n ? (
-                <span className="text-[0.76rem] text-stone">
-                  {tokenAmount(String(h.working), h.token, h.decimals)} in positions · {tokenAmount(String(h.idle), h.token, h.decimals)} outside
-                </span>
-              ) : (
-                <span className="text-[0.76rem] text-stone">{h.working > 0n ? 'In positions' : 'Outside a position'}</span>
-              )}
+    <details className="dash-fold" aria-labelledby="idle-title">
+      <summary>{head}</summary>
+      <ul className="m-0 grid list-none gap-[0.45rem] p-0 pt-3" data-testid="idle-tokens">
+        {s.idleTokens.map((t) => (
+          <li key={t.token} className="flex items-center gap-[0.55rem] font-mono text-[0.85rem]">
+            <TokenMark symbol={t.token} size={20} />
+            <span>
+              {tokenAmount(String(t.amount), t.token, t.decimals)} {t.token}
             </span>
-            <span className="flex flex-col items-end">
-              <span className="font-medium">${usd(h.valueUsdc)}</span>
-              <span className="text-[0.76rem] text-stone">{Number((h.valueUsdc * 1000n) / s.total) / 10}%</span>
-            </span>
+            {t.token === 'USDC' ? null : <span className="text-stone">{usd(t.valueUsdc)} USDC</span>}
           </li>
         ))}
       </ul>
-    </section>
+    </details>
   )
 }
+
 
 export function History({ ops, onRetry }: { ops: OpView[]; onRetry?: (kind: OpView['kind']) => void }) {
   const sorted = historyOps(ops)
@@ -906,7 +875,9 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   useEffect(() => {
     if (signedOut) void qc.invalidateQueries({ queryKey: queryKeys.session })
   }, [signedOut, qc])
-  const s = f ? split(f, cbbtcPrice(pools.data)) : null
+  const price = cbbtcPrice(pools.data)
+  const s = f ? split(f, price) : null
+  const apy = useApy()
   const armed = activationLive(opList)
   // A renewal the owner signed is on its way: the row that asks for it steps aside until it settles.
   const renewing = opList.some((o) => o.kind === 'renew' && !TERMINAL.has(o.state))
@@ -989,7 +960,13 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         <Brand />
       </header>
       <Balance s={s} onAdd={addMoney} onWithdraw={() => withdraw()} />
-      <EarnedSoFar earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd} />
+      <Indicators f={f} apy={apy.data} price={price} earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd} />
+      {f?.active ? (
+        <p className="saves">
+          <span aria-hidden="true" />
+          {homeCopy.saves}
+        </p>
+      ) : null}
       <WrongNetwork accountKey={accountKey} />
       {!f ? (
         funding.isError ? (
@@ -1027,9 +1004,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           ) : f.active && f.approval && approvalOpen && (f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade) && !renewing ? (
             <ApprovalRow key={approvalRowKey(f.approval)} approval={f.approval} onOpen={openApproval} />
           ) : null}
-          <Working f={f} s={s as Split} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />
-          <Idle s={s as Split} placing={f.active && (f.engine?.placing === true || !!f.progress)} />
-          <ByToken f={f} s={s as Split} />
+          <Working f={f} s={s as Split} apy={apy.data} price={price} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />
+          <Idle f={f} s={s as Split} />
           <History ops={opList} onRetry={retry} />
         </>
       )}

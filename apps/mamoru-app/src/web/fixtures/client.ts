@@ -76,13 +76,48 @@ const midEntry = (): Partial<FundingView> => ({
     },
   ],
 })
+// ?dashboard (dev only, otto/mamoru#193): a running account placed in three positions, the Growth one out of
+// range, a few cents idle. The shape of the beta dashboard mockup; the rates come from the APY fixture below.
+const dashboard = param('dashboard')
+const placedThree = (): Partial<FundingView> => ({
+  deployed: true,
+  active: true,
+  usdc: '110000',
+  cbbtc: '0',
+  capUsdc: '100000000',
+  idle: [{ token: 'USDC', amount: '110000', decimals: 6, valueUsdc: '110000' }],
+  engine: { placing: false, nextReviewAt: null },
+  positions: [
+    {
+      tokenId: '5101', pool: 'pool:USDC/USDT/100', liquidity: '1', inRange: true, amountUsdc: '25100000', amountCbbtc: '0', valueUsdc: '50120000',
+      amounts: [
+        { token: 'USDC', amount: '25100000', decimals: 6, valueUsdc: '25100000' },
+        { token: 'USDT', amount: '25020000', decimals: 6, valueUsdc: '25020000' },
+      ],
+    },
+    {
+      tokenId: '5102', pool: 'pool:USDC/cbBTC/500', liquidity: '1', inRange: true, amountUsdc: '19920000', amountCbbtc: '17000', valueUsdc: '39800000',
+      amounts: [
+        { token: 'USDC', amount: '19920000', decimals: 6, valueUsdc: '19920000' },
+        { token: 'cbBTC', amount: '17000', decimals: 8, valueUsdc: '19880000' },
+      ],
+    },
+    {
+      tokenId: '5103', pool: 'pool:WETH/USDC/3000', liquidity: '1', inRange: false, amountUsdc: '0', amountCbbtc: '0', valueUsdc: '9970000',
+      amounts: [
+        { token: 'WETH', amount: '2600000000000000', decimals: 18, valueUsdc: '9970000' },
+        { token: 'USDC', amount: '0', decimals: 6, valueUsdc: '0' },
+      ],
+    },
+  ],
+})
 // ?renewdue (dev only): a running account whose approval ends in 10 days. Home asks for the renewal on arrival (#148).
 const renewdue = param('renewdue')
 // ?divergence (dev only, otto/mamoru#155): every withdraw prepare returns a PriceDivergenceWarning.
 const divergenceOn = param('divergence')
 const dueApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 86_400_000) * 86_400 + 10 * 86_400, renewDue: true, expired: false } })
 const liveState = {
-  funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}), ...(renewdue ? dueApproval() : {}) } as FundingView,
+  funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}), ...(renewdue ? dueApproval() : {}), ...(dashboard ? placedThree() : {}) } as FundingView,
   ops: (overcap
     ? [{ opId: 'own-1-activate', kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: OVER_CAP_USDC, capUsdc: fixtureFunding.capUsdc, updatedAt: new Date().toISOString() }]
     : []) as OpView[],
