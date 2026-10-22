@@ -3371,8 +3371,9 @@ export class Operator {
    * account crosses the threshold, in either direction — not every cycle, which would flood the journal for an
    * account that stays low (nothing refills it today; see gas-reserve.ts's module doc).
    */
-  private recordGasReserve(acc: AccountState, nativeWei: bigint): void {
-    const threshold = gasReserveAlertWei(this.policyOf(acc).gasReserveWei, this.gasReserveAlertOverride)
+  private recordGasReserve(acc: AccountState, nativeWei: bigint, gas: { maxFeePerGas: bigint; opGasUnits: bigint }): void {
+    // The floor the engine's own gate checks (the policy it reviews with), and one prefund at the fee it bid this review.
+    const threshold = gasReserveAlertWei(this.enginePolicyOf(acc).gasReserveWei, this.gasReserveAlertOverride, gas.maxFeePerGas, gas.opGasUnits)
     const { low, transitioned } = this.gasReserve.record(acc.accountKey, nativeWei, threshold)
     if (transitioned) {
       const state = low ? 'below' : 'back above'
@@ -4567,7 +4568,7 @@ export class Operator {
             else console.log(prefix)
             safeMetrics(() => this.engineHealth.record(acc.accountKey, true, d.code, undefined))
             // otto/mamoru#8: this review's own balance read (no extra RPC call), against the account's alert threshold.
-            safeMetrics(() => this.recordGasReserve(acc, r.observation.native))
+            safeMetrics(() => this.recordGasReserve(acc, r.observation.native, r.observation.gas))
             // Only a review that reached a decision counts, from when it started (it may then wait minutes on its
             // operation): one that was held, failed to observe or threw is tried again on the next tick.
             runner.reviewedAt = startedAt

@@ -138,23 +138,20 @@ account keys are shortened to 8 chars. Example (values illustrative):
     that same EHG gate. `GasReserveTracker` (`src/metrics.ts`) reuses that read — nothing extra is
     sent to a provider (RPC cost is a live concern, otto/mamoru#135).
   - **Threshold**: `gasReserveAlertWei` (`src/gas-reserve.ts`) defaults to `policy.gasReserveWei`
-    (the hard floor itself) plus `ALERT_RUNWAY_ACTIONS` (3) times `ONE_ACTION_WEI`, an estimate of
-    what one engine action (a rebalance or a fee collection) costs — the same gas-budget figure the
-    engine itself prices a harvest's worth against (`opCostInSavings`, `packages/decide/src/value.ts`),
-    evaluated at a representative (not worst-case) gas price. On the live policy that is
-    `300_000_000_000_000 + 3 × 15_300_000_000_000 = 345_900_000_000_000` wei (~0.000346 ETH): a
-    freshly activated account (funded to ~0.0005 ETH) can run roughly ten ordinary actions before
-    ever crossing it, and then exactly 3 more (by construction) before it would actually reach the
-    hard floor and freeze.
-    An earlier version of this threshold used `policy.gasReserveWei + TOP_UP_MARGIN_WEI` — the
-    *full* amount the relayer originally funded the Safe to. Independent review on this ticket
-    (NO-GO) caught that this was wrong: that margin equals the Safe's *entire* funded balance, so
-    every account that ran even one action went low immediately and stayed low forever, making the
-    alert meaningless. The mistake was conflating two different things — `TOP_UP_MARGIN_WEI` in
-    `operator.ts` is sized for the *first* userOp's worst-case prefund specifically (the one-time
-    cost of seeding the account's EntryPoint deposit at activation), not an ongoing per-action cost.
-    `ONE_ACTION_WEI` is sized instead, and is far smaller (see `gas-reserve.ts` for the exact figures
-    and reasoning).
+    (the hard floor the gate checks, from the policy the engine reviews with) plus
+    `ALERT_RUNWAY_PREFUNDS` (2) worst-case ERC-4337 prefunds: the userOp's declared gas units
+    (5,100,000) times the `maxFeePerGas` the engine bid on that same review (`Observation.gas`, no extra
+    RPC call), never priced below what it bids at Base's minimum base fee (5,000,000 wei → 11,000,000
+    wei `maxFeePerGas`). On the live policy at the minimum fee that is
+    `300_000_000_000_000 + 2 × 56_100_000_000_000 = 412_200_000_000_000` wei (~0.000412 ETH), under the
+    0.0005 ETH activation target, and still above it after activation's first userOp seeds the
+    EntryPoint deposit. One prefund of runway is what guarantees the alert fires at least one review
+    before the gate refuses (a Safe seen at the threshold can lose a full empty-deposit prefund and
+    still sit on the floor); the second absorbs a fee rise between reviews. The threshold moves with
+    the fee: when base fees rise it rises too, and can exceed a funded target, which is a real signal.
+    Earlier versions (reviews on #53, NO-GO): `policy.gasReserveWei + TOP_UP_MARGIN_WEI` made every
+    account low after one action; a runway priced on an assumed 3,000,000 wei fee was smaller than one
+    prefund at Base's minimum, so the alert could fire only after the gate already refused.
     Override with `MAMORU_GAS_RESERVE_ALERT_WEI` (absolute wei, applied to every account regardless
     of its own policy's `gasReserveWei`); unset, non-numeric or negative falls back to the default.
   - **What happens when low**: nothing is sent on chain. `gasReserve[].low` flips, `operator.gasReserveLow`
