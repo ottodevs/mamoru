@@ -36,7 +36,7 @@ export type Split = {
 export const DUST_USDC = 10_000n
 
 /** An amount of one token (base units) and what it is worth in USDC base units. */
-export type Holding = { token: string; amount: bigint; decimals: number; valueUsdc: bigint }
+export type Holding = { token: string; amount: bigint; decimals: number; valueUsdc: bigint; /** No USDC price in the view: `valueUsdc` is 0 and must not be shown. */ unpriced?: boolean }
 
 export function split(f: FundingView, price: bigint | null): Split {
   const workingUsdc = f.positions.reduce((a, p) => a + BigInt(p.amountUsdc), 0n)
@@ -45,11 +45,18 @@ export function split(f: FundingView, price: bigint | null): Split {
   const idleCbbtc = BigInt(f.cbbtc)
   // valueUsdc covers every pool (USDT, WETH too); older views fall back to the USDC + cbBTC legs.
   const working = f.positions.reduce((a, p) => a + (p.valueUsdc !== undefined ? BigInt(p.valueUsdc) : BigInt(p.amountUsdc) + cbbtcToUsdc(BigInt(p.amountCbbtc), price)), 0n)
-  const everyIdle: Holding[] = (f.idle ?? []).map((t) => ({ token: t.token, amount: BigInt(t.amount), decimals: t.decimals, valueUsdc: BigInt(t.valueUsdc) }))
+  // Without the operator's list (an older view), the breakdown is rebuilt from the USDC and cbBTC it does report,
+  // so the part of idle that is not USDC stays visible (otto/mamoru#193 review).
+  const everyIdle: Holding[] = f.idle
+    ? f.idle.map((t) => ({ token: t.token, amount: BigInt(t.amount), decimals: t.decimals, valueUsdc: BigInt(t.valueUsdc) }))
+    : [
+        ...(idleUsdc > 0n ? [{ token: 'USDC', amount: idleUsdc, decimals: 6, valueUsdc: idleUsdc }] : []),
+        ...(idleCbbtc > 0n ? [{ token: 'cbBTC', amount: idleCbbtc, decimals: 8, valueUsdc: cbbtcToUsdc(idleCbbtc, price), ...(price === null ? { unpriced: true } : {}) }] : []),
+      ]
   // The operator's list covers every token (USDT and WETH between a swap and its mint too); without it, USDC + cbBTC.
   const idle = f.idle ? everyIdle.reduce((a, t) => a + t.valueUsdc, 0n) : idleUsdc + cbbtcToUsdc(idleCbbtc, price)
   // Listed token by token only from a cent up; the sum above keeps the rest.
-  const idleTokens = everyIdle.filter((t) => t.valueUsdc >= DUST_USDC)
+  const idleTokens = everyIdle.filter((t) => t.valueUsdc >= DUST_USDC || t.unpriced)
   const total = working + idle
   const margin = (total * 99n) / 100n
   return {

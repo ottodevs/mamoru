@@ -33,9 +33,11 @@ export type PositionRate = {
   pool: string
   bucket: Bucket
   inRange: boolean
-  /** USDC base units; null when the position cannot be valued (cbBTC held, no price observed). */
+  /** USDC base units; null when a leg cannot be priced (see `unpriced`). */
   valueUsdc: bigint | null
-  /** Share of working capital, 0..100; null when any position cannot be valued. */
+  /** Tokens of this position with no USDC price in the view; empty when the value is known. */
+  unpriced: string[]
+  /** Share of working capital, 0..100; null when any position cannot be valued (a share of a partial total would be wrong). */
   sharePct: number | null
   /** Today's rate: 0 while out of range (it earns nothing), null when its pool has no rate today. */
   currentPct: number | null
@@ -43,14 +45,31 @@ export type PositionRate = {
   monthlyPct: number | null
 }
 
-function valueOf(p: Position, price: bigint | null): bigint | null {
-  if (p.valueUsdc !== undefined) return BigInt(p.valueUsdc)
-  if (p.amountCbbtc !== '0' && price === null) return null
-  return BigInt(p.amountUsdc) + cbbtcToUsdc(BigInt(p.amountCbbtc), price)
+/**
+ * A position's value in USDC base units from what the view carries: the operator's `valueUsdc`, else each leg's
+ * own value, USDC at face, cbBTC at the observed pool price. A leg that none of those prices (USDT or WETH in a view
+ * without values, or cbBTC with no price observed) leaves the value unknown, never counted as 0.
+ */
+export function valueOf(p: Position, price: bigint | null): { value: bigint | null; unpriced: string[] } {
+  if (p.valueUsdc !== undefined) return { value: BigInt(p.valueUsdc), unpriced: [] }
+  let sum = 0n
+  const unpriced: string[] = []
+  const leg = (token: string, amount: string | null, valueUsdc?: string) => {
+    if (amount === '0') return
+    if (valueUsdc !== undefined) sum += BigInt(valueUsdc)
+    else if (token === 'USDC' && amount !== null) sum += BigInt(amount)
+    else if (token === 'cbBTC' && amount !== null && price !== null) sum += cbbtcToUsdc(BigInt(amount), price)
+    else unpriced.push(token)
+  }
+  if (p.amounts?.length) for (const a of p.amounts) leg(a.token, a.amount, a.valueUsdc)
+  // An older view without `amounts` only carries the USDC and cbBTC legs: any other token's amount is unknown.
+  else for (const t of poolTokens(p.pool)) leg(t, t === 'USDC' ? p.amountUsdc : t === 'cbBTC' ? p.amountCbbtc : null)
+  return { value: unpriced.length ? null : sum, unpriced }
 }
 
 export function positionRates(f: FundingView, apy: ApyView | undefined, price: bigint | null = null): PositionRate[] {
-  const values = f.positions.map((p) => valueOf(p, price))
+  const valued = f.positions.map((p) => valueOf(p, price))
+  const values = valued.map((v) => v.value)
   const known = values.every((v) => v !== null)
   const total = known ? values.reduce<bigint>((a, v) => a + v!, 0n) : 0n
   return f.positions.map((p, i) => {
@@ -63,6 +82,7 @@ export function positionRates(f: FundingView, apy: ApyView | undefined, price: b
       bucket: bucketOf(p.pool, p.amounts),
       inRange: p.inRange,
       valueUsdc: value,
+      unpriced: valued[i]!.unpriced,
       sharePct: known && total > 0n ? Number((value! * 10_000n) / total) / 100 : null,
       currentPct: !p.inRange ? 0 : src?.currentPct ?? null,
       monthlyPct: src?.monthlyPct ?? null,
@@ -100,9 +120,9 @@ export function currentRate(rows: PositionRate[], apy: ApyView | undefined): Acc
   if (rows.length === 0) return { pct: null, gap: 'no-positions', covered: 0, of: 0 }
   const earning = rows.filter((r) => r.inRange)
   if (earning.length === 0) return { pct: null, gap: 'all-paused', covered: 0, of: 0 }
-  if (earning.some((r) => r.valueUsdc === null)) return { pct: null, gap: 'no-value', covered: 0, of: earning.length }
+  // A position that cannot be valued is left out of the weights and counted: "N of M positions with a rate".
   const { pct, covered } = weighted(earning, (r) => r.currentPct)
-  return { pct, gap: pct === null ? 'no-data' : null, covered, of: earning.length }
+  return { pct, gap: pct !== null ? null : earning.some((r) => r.valueUsdc === null) ? 'no-value' : 'no-data', covered, of: earning.length }
 }
 
 /**
@@ -112,9 +132,8 @@ export function currentRate(rows: PositionRate[], apy: ApyView | undefined): Acc
 export function monthlyRate(rows: PositionRate[], apy: ApyView | undefined): AccountRate & { plan: boolean } {
   if (!apy) return { pct: null, gap: 'loading', covered: 0, of: 0, plan: false }
   if (rows.length === 0) return { pct: apy.monthlyPct, gap: apy.monthlyPct === null ? 'no-data' : null, covered: 0, of: 0, plan: true }
-  if (rows.some((r) => r.valueUsdc === null)) return { pct: null, gap: 'no-value', covered: 0, of: rows.length, plan: false }
   const { pct, covered } = weighted(rows, (r) => r.monthlyPct)
-  return { pct, gap: pct === null ? 'no-data' : null, covered, of: rows.length, plan: false }
+  return { pct, gap: pct !== null ? null : rows.some((r) => r.valueUsdc === null) ? 'no-value' : 'no-data', covered, of: rows.length, plan: false }
 }
 
 /** The data source named in an ApyView source line ("Plan pools, 30-day mean · DefiLlama" -> "DefiLlama"). */

@@ -1168,7 +1168,7 @@
 }
 .wc-row {
   display: grid;
-  grid-template-columns: 2.6rem minmax(0, 1fr) minmax(9rem, auto) 8.5rem 7.5rem 7.5rem;
+  grid-template-columns: 3.3rem minmax(0, 1fr) minmax(9rem, auto) 8.5rem 7.5rem 7.5rem;
   column-gap: 1.25rem;
   align-items: start;
   padding: 1.15rem 0;
@@ -1278,6 +1278,95 @@
 .dash-flat {
   padding: 1.75rem 0;
 }
+.wc-why {
+  grid-column: 1 / -1;
+  margin-top: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--color-stone);
+}
+
+/* Narrower desktops: no token marks, slimmer numeric columns, token amounts may wrap. */
+@media (max-width: 1100px) {
+  .wc-row {
+    grid-template-columns: minmax(0, 1fr) minmax(7.5rem, auto) 6.5rem 6rem 6rem;
+    column-gap: 1rem;
+  }
+  .wc-marks {
+    display: none;
+  }
+  .wc-cols .wc-name {
+    grid-column: 1;
+  }
+  .wc-cols {
+    letter-spacing: 0.1em;
+  }
+  .wc-legs {
+    white-space: normal;
+  }
+}
+
+/* The table goes compact before its columns run out of room (otto/mamoru#193 review). */
+@media (max-width: 900px) {
+  .wc-cols {
+    display: none;
+  }
+  .wc-cols + ul {
+    margin-top: 1rem;
+  }
+  .wc-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 0.35rem;
+    padding: 0.95rem 0;
+  }
+  .wc-cols + ul > .wc-row:first-child {
+    border-top: 1px solid var(--color-wash);
+  }
+  .wc-marks,
+  .wc-venue,
+  .wc-legs,
+  .wc-bar,
+  .wc-rate {
+    display: none;
+  }
+  .wc-name {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .wc-pair {
+    font-size: 1.1rem;
+  }
+  .wc-share {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .wc-amount {
+    grid-column: 1;
+    grid-row: 2;
+    align-items: flex-start;
+  }
+  .wc-amount .wc-num {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    letter-spacing: 0.04em;
+  }
+  .wc-rates-m {
+    display: block;
+    grid-column: 2;
+    grid-row: 2;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    letter-spacing: 0.04em;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .wc-paused {
+    justify-self: stretch;
+    margin-top: 0.5rem;
+    font-size: 0.95rem;
+  }
+}
 
 @media (max-width: 760px) {
   .balance {
@@ -1349,60 +1438,6 @@
   }
   .dash-fold[open] > summary::after {
     content: "\2212";
-  }
-  .wc-cols {
-    display: none;
-  }
-  .wc-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-    row-gap: 0.35rem;
-    padding: 0.95rem 0;
-  }
-  .wc-cols + ul > .wc-row:first-child {
-    border-top: 1px solid var(--color-wash);
-  }
-  .wc-marks,
-  .wc-venue,
-  .wc-legs,
-  .wc-bar,
-  .wc-rate {
-    display: none;
-  }
-  .wc-name {
-    grid-column: 1;
-    grid-row: 1;
-  }
-  .wc-pair {
-    font-size: 1.1rem;
-  }
-  .wc-share {
-    grid-column: 2;
-    grid-row: 1;
-  }
-  .wc-amount {
-    grid-column: 1;
-    grid-row: 2;
-    align-items: flex-start;
-  }
-  .wc-amount .wc-num {
-    font-family: var(--font-mono);
-    font-size: 0.85rem;
-    letter-spacing: 0.04em;
-  }
-  .wc-rates-m {
-    display: block;
-    grid-column: 2;
-    grid-row: 2;
-    font-family: var(--font-mono);
-    font-size: 0.85rem;
-    letter-spacing: 0.04em;
-    text-align: right;
-    white-space: nowrap;
-  }
-  .wc-paused {
-    justify-self: stretch;
-    margin-top: 0.5rem;
-    font-size: 0.95rem;
   }
   .idle-head {
     flex: 1;

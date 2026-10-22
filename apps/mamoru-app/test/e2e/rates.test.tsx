@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test'
 import type { ApyView, FundingView } from '@mamoru/domain'
 import { fixtureFunding } from '../../src/web/fixtures/client.ts'
 import { split } from '../../src/web/lib/money.ts'
-import { bucketOf, currentRate, idleReason, monthlyRate, positionRates, sourceName } from '../../src/web/lib/rates.ts'
+import { bucketOf, currentRate, idleReason, monthlyRate, positionRates, sourceName, valueOf } from '../../src/web/lib/rates.ts'
+import { Idle, Working } from '../../src/web/routes/home.tsx'
+import { render } from './render.ts'
 
 // otto/mamoru#193: the dashboard's rates and the idle/working split.
 
@@ -84,6 +86,44 @@ describe('current rate', () => {
   })
 })
 
+// otto/mamoru#193 review (P2 1): a view without valueUsdc never values a USDT or WETH leg at 0.
+describe('positions without valueUsdc', () => {
+  const noValue = (tokenId: string, pool: string, amounts?: NonNullable<FundingView['positions'][number]['amounts']>, inRange = true): FundingView['positions'][number] => ({ tokenId, pool, liquidity: '1', inRange, amountUsdc: '1000000', amountCbbtc: '0', ...(amounts ? { amounts } : {}) })
+  const usdt = noValue('2', 'pool:USDC/USDT/100', [{ token: 'USDC', amount: '1000000', decimals: 6 }, { token: 'USDT', amount: '1000000', decimals: 6 }])
+  const weth = noValue('3', 'pool:WETH/USDC/3000')
+  test('each leg with its own value counts; a leg nothing prices leaves the value unknown', () => {
+    expect(valueOf(noValue('1', 'pool:USDC/USDT/100', [{ token: 'USDC', amount: '1000000', decimals: 6, valueUsdc: '1000000' }, { token: 'USDT', amount: '1000000', decimals: 6, valueUsdc: '999000' }]), null)).toEqual({ value: 1_999_000n, unpriced: [] })
+    expect(valueOf(usdt, null)).toEqual({ value: null, unpriced: ['USDT'] })
+    // An older view without amounts: the WETH leg's amount is not even known.
+    expect(valueOf(weth, null)).toEqual({ value: null, unpriced: ['WETH'] })
+    // A leg holding nothing needs no price.
+    expect(valueOf(noValue('4', 'pool:USDC/USDT/100', [{ token: 'USDC', amount: '1000000', decimals: 6 }, { token: 'USDT', amount: '0', decimals: 6 }]), null)).toEqual({ value: 1_000_000n, unpriced: [] })
+  })
+  test('n/a value and share for every position, rates over the valued ones with N of M', () => {
+    const f = { ...placed, positions: [pos('1', 'pool:USDC/cbBTC/500', '5000000'), usdt] }
+    const rows = positionRates(f, apy)
+    expect(rows.map((r) => r.valueUsdc)).toEqual([5_000_000n, null])
+    expect(rows.map((r) => r.sharePct)).toEqual([null, null])
+    expect(currentRate(rows, apy)).toMatchObject({ pct: 7.3, covered: 1, of: 2 })
+    expect(monthlyRate(rows, apy)).toMatchObject({ pct: 18.9, covered: 1, of: 2 })
+    const { text } = render(<Working f={f} s={split(f, null)} apy={apy} onStop={null} />)
+    expect(text).toContain('n/a: no USDC price for USDT in this view yet')
+    expect(text).toContain('Share n/a')
+  })
+  test('nothing valued: n/a for the account rates, with the reason', () => {
+    const rows = positionRates({ ...placed, positions: [weth] }, apy)
+    expect(currentRate(rows, apy)).toMatchObject({ pct: null, gap: 'no-value', covered: 0, of: 1 })
+    expect(monthlyRate(rows, apy)).toMatchObject({ pct: null, gap: 'no-value' })
+  })
+  test('the compact rates line carries labels for screen readers, not aria-hidden', () => {
+    const { html } = render(<Working f={placed} s={split(placed, null)} apy={apy} onStop={null} />)
+    const compact = html.match(/<span class="wc-rates-m"[^>]*>.*?<\/span><\/span><\/span>/)?.[0] ?? ''
+    expect(html).not.toMatch(/class="wc-rates-m"[^>]*aria-hidden/)
+    expect(compact).toContain('<span class="sr-only">Current rate </span>')
+    expect(compact).toContain('<span class="sr-only">, Monthly rate </span>')
+  })
+})
+
 describe('monthly rate', () => {
   test('every position, paused ones included, weighted by USDC value', () => {
     // (50.12 * 4.5 + 39.80 * 18.9 + 9.97 * 55.1) / 99.89 = 15.3
@@ -96,6 +136,37 @@ describe('monthly rate', () => {
     expect(sourceName(apy.monthlySource)).toBe('DefiLlama')
     expect(sourceName(apy.currentSource)).toBe('GeckoTerminal/DefiLlama')
     expect(sourceName(undefined)).toBeNull()
+  })
+})
+
+// otto/mamoru#193 review (P2 2): a view without the operator's idle list keeps its cbBTC visible.
+describe('idle breakdown without the operator list', () => {
+  const old: FundingView = { ...placed, idle: undefined, usdc: '2000000', cbbtc: '5000', positions: [] }
+  test('USDC and cbBTC rebuilt from the view, cbBTC valued at the pool price', () => {
+    const s = split(old, 100_000_000_000n)
+    expect(s.idleTokens.map((t) => [t.token, String(t.amount), String(t.valueUsdc)])).toEqual([
+      ['USDC', '2000000', '2000000'],
+      ['cbBTC', '5000', '5000000'],
+    ])
+    const { text, html } = render(<Idle f={old} s={s} />)
+    expect(html).toContain('data-testid="idle-tokens"')
+    expect(text).toContain('0.00005 cbBTC 5.00 USDC')
+  })
+  test('cbBTC with no price stays listed, its value n/a and named on the line', () => {
+    const s = split(old, null)
+    expect(s.idleTokens.map((t) => [t.token, t.unpriced ?? false])).toEqual([
+      ['USDC', false],
+      ['cbBTC', true],
+    ])
+    const { text } = render(<Idle f={old} s={s} />)
+    expect(text).toContain('cbBTC not priced yet, not counted in the total')
+    expect(text).toContain('0.00005 cbBTC n/a USDC')
+  })
+  test('a single non-USDC idle token is named on the line', () => {
+    const only = { ...old, usdc: '0' }
+    const { text, html } = render(<Idle f={only} s={split(only, 100_000_000_000n)} />)
+    expect(html).not.toContain('data-testid="idle-tokens"')
+    expect(text).toContain('Idle capital 5.00 USDC · 0.00005 cbBTC')
   })
 })
 

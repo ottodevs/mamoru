@@ -62,6 +62,8 @@ export const homeCopy = {
   inRange: 'In range',
   paused: 'Paused: out of range. Mamoru puts it back to work automatically.',
   noRate: 'n/a: no rate source for this pool yet.',
+  unpriced: (tokens: string) => `n/a: no USDC price for ${tokens} in this view yet, so its value and share are not shown and the rates above leave it out.`,
+  unpricedIdle: (tokens: string) => `${tokens} not priced yet, not counted in the total`,
   nothingPlaced: 'Nothing in a position right now.',
   placing: 'Placing your money. The next step starts in a few seconds.',
   upToDate: (time: string) => `Nothing to do right now. Mamoru looks again at ${time}.`,
@@ -227,21 +229,38 @@ function PositionRow({ p, r }: { p: FundingView['positions'][number]; r: Positio
         <span className="wc-legs">{legs.map((l) => `${tokenAmount(l.amount, l.token, l.decimals)} ${l.token}`).join(' · ')}</span>
       </span>
       <span className="wc-share">
-        <span className="wc-num">{share === null ? homeCopy.na : `${share}%`}</span>
+        <span className="wc-num">
+          <span className="sr-only">{homeCopy.colShare} </span>
+          {share === null ? homeCopy.na : `${share}%`}
+        </span>
         <span className="wc-bar" aria-hidden="true">
           <span style={{ width: `${Math.min(100, Math.max(0, r.sharePct ?? 0))}%` }} />
         </span>
       </span>
+      {/* Desktop cells and the compact mobile line are never shown together (CSS), so each carries its own
+          visually hidden labels and screen readers get the rates at every width. */}
       <span className={`wc-rate wc-num${r.currentPct === 0 || r.currentPct === null ? ' text-stone' : ''}`} data-testid="position-current">
+        <span className="sr-only">{homeCopy.current} </span>
         {r.currentPct === 0 ? '0%' : pct(r.currentPct)}
       </span>
       <span className={`wc-rate wc-num${r.monthlyPct === null ? ' text-stone' : ''}`} data-testid="position-monthly">
+        <span className="sr-only">{homeCopy.monthly} </span>
         {pct(r.monthlyPct)}
       </span>
-      <span className="wc-rates-m" aria-hidden="true">
+      <span className="wc-rates-m" data-testid="position-rates-compact">
+        <span className="sr-only">{homeCopy.current} </span>
         <span className={r.currentPct ? undefined : 'text-stone'}>{r.currentPct === 0 ? '0%' : pct(r.currentPct)}</span>
-        <span className="text-stone"> · 30d {pct(r.monthlyPct)}</span>
+        <span className="sr-only">, {homeCopy.monthly} </span>
+        <span className="text-stone">
+          <span aria-hidden="true"> · 30d </span>
+          {pct(r.monthlyPct)}
+        </span>
       </span>
+      {r.unpriced.length ? (
+        <span className="wc-why" data-testid="position-unpriced">
+          {homeCopy.unpriced(r.unpriced.join(', '))}
+        </span>
+      ) : null}
       {p.inRange ? null : <span className="wc-paused">{homeCopy.paused}</span>}
     </li>
   )
@@ -338,14 +357,23 @@ export function engineLine(f: FundingView): string | null {
  * than one token is idle.
  */
 export function Idle({ f, s }: { f: FundingView; s: Split }) {
+  // One idle token that is not USDC (cbBTC left over, say) is named on the line itself, since nothing opens.
+  const only = s.idleTokens.length === 1 && s.idleTokens[0]!.token !== 'USDC' ? s.idleTokens[0]! : null
+  const unpriced = s.idleTokens.filter((t) => t.unpriced).map((t) => t.token)
   const head = (
     <span className="idle-head">
       <span className="dash-title" id="idle-title">
         {homeCopy.idle}
       </span>
       <span className="dash-title">{usd(s.idle)} USDC</span>
+      {only ? (
+        <span className="wc-count" data-testid="idle-only">
+          · {tokenAmount(String(only.amount), only.token, only.decimals)} {only.token}
+        </span>
+      ) : null}
       <span className="wc-count" data-testid="idle-reason">
         · {idleReason(f, s)}
+        {unpriced.length ? ` · ${homeCopy.unpricedIdle(unpriced.join(', '))}` : ''}
       </span>
     </span>
   )
@@ -366,7 +394,7 @@ export function Idle({ f, s }: { f: FundingView; s: Split }) {
             <span>
               {tokenAmount(String(t.amount), t.token, t.decimals)} {t.token}
             </span>
-            {t.token === 'USDC' ? null : <span className="text-stone">{usd(t.valueUsdc)} USDC</span>}
+            {t.token === 'USDC' ? null : <span className="text-stone">{t.unpriced ? `${homeCopy.na} USDC` : `${usd(t.valueUsdc)} USDC`}</span>}
           </li>
         ))}
       </ul>
