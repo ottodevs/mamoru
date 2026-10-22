@@ -6,8 +6,8 @@ import type { YieldLedgerView } from '@mamoru/domain'
 import type { Db } from '../env.ts'
 import { feeReadinessUsd } from '../yield-ledger.ts'
 
-type LatestRow = { fees_usdc: number; read_at: string; positions_json: string }
-type DailyRow = { collected_usdc: number | null; gas_paid_wei: string | null }
+type LatestRow = { fees_usdc: number; read_at: string; positions_json: string; updated_at: string }
+type DailyRow = { collected_usdc: number | null; gas_paid_wei: string | null; updated_at: string }
 type PositionRow = { value_usd: number; accrued_usd_close: number; hold_value_usd: number }
 
 const dayOf = (iso: string): string => iso.slice(0, 10)
@@ -35,10 +35,10 @@ async function openPositionsValueVsHold(db: Db, chainId: number, accountKey: str
 
 export async function loadYieldLedger(db: Db, chainId: number, accountKey: string): Promise<YieldLedgerView> {
   const [latest, daily] = await Promise.all([
-    db.prepare('SELECT fees_usdc, read_at, positions_json FROM account_snapshot_latest WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).first<LatestRow>(),
+    db.prepare('SELECT fees_usdc, read_at, positions_json, updated_at FROM account_snapshot_latest WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).first<LatestRow>(),
     // migrations/d1/0015_yield_ledger_receipts.sql: written for every day an op reached the chain, with or without
     // an account_daily row for that day (an account stopped right after an op has none).
-    db.prepare('SELECT collected_usdc, gas_paid_wei FROM yield_ledger_account_receipts WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<DailyRow>(),
+    db.prepare('SELECT collected_usdc, gas_paid_wei, updated_at FROM yield_ledger_account_receipts WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<DailyRow>(),
   ])
 
   let collected = 0n
@@ -69,10 +69,15 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
     }
   }
 
-  const valueVsHold = await openPositionsValueVsHold(db, chainId, accountKey, latest)
-  const accrued = latest ? BigInt(latest.fees_usdc) : null
+  // A receipt written after the latest snapshot (both Worker clock; one pull writes the snapshot first, same
+  // `now`) may have collected fees that snapshot still counts as accrued: a Stop collects everything, and a stopped
+  // account is not read again. Adding the two would count those fees twice, so accrued and earned-so-far are
+  // withheld until a snapshot newer than every receipt reconciles them; collected stays.
+  const stale = latest !== null && daily.results.some((r) => r.updated_at > latest.updated_at)
+  const valueVsHold = stale ? null : await openPositionsValueVsHold(db, chainId, accountKey, latest)
+  const accrued = latest && !stale ? BigInt(latest.fees_usdc) : null
   return {
-    asOf: latest?.read_at ?? null,
+    asOf: stale ? null : (latest?.read_at ?? null),
     accruedUsd: accrued !== null ? accrued.toString() : null,
     collectedUsd: anyCollected ? collected.toString() : null,
     earnedSoFarUsd: accrued !== null ? (accrued + collected).toString() : null,

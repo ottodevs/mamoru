@@ -36,6 +36,22 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     )
   }
 
+  test('a receipt newer than the latest snapshot (a Stop collected what it still shows as accrued) withholds accrued and earned-so-far, never adds them twice', async () => {
+    db.raw.exec(
+      `INSERT INTO account_snapshot_latest (chain_id, address, account_key, env, block, read_at, deployed, idle_usdc, lp_usdc, fees_usdc, owed_usdc, total_usdc, positions_json, updated_at)
+       VALUES (${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1000, '2026-10-16T09:00:00.000Z', 1, 0, 0, 1000000, 0, 1000000, '[]', '2026-10-16T09:00:05.000Z')`,
+    )
+    seedReceipts(db, '2026-10-16', 1_000_000, '1')
+    db.raw.exec(`UPDATE yield_ledger_account_receipts SET updated_at = '2026-10-16T09:10:05.000Z'`)
+    let view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
+    expect(view.collectedUsd).toBe('1000000')
+    expect(view.accruedUsd).toBeNull()
+    expect(view.earnedSoFarUsd).toBeNull()
+    db.raw.exec(`UPDATE account_snapshot_latest SET fees_usdc = 0, updated_at = '2026-10-16T09:10:05.000Z'`)
+    view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
+    expect(view.earnedSoFarUsd).toBe('1000000')
+  })
+
   test('collectedUsd and gasPaidWei sum across yield_ledger_account_receipts rows once any is known', async () => {
     seedReceipts(db, '2026-10-15', 100, '1000000000000000')
     seedReceipts(db, '2026-10-16', 50, '2000000000000000')
