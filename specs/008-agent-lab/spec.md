@@ -47,8 +47,13 @@ Lab tables; the Lab's numbers enter the production views (Constitution XVI).
 
 - **AL-01** A thread is a list of turns. A user turn creates one job: `{id, threadId, origin: 'ops', requester (ops
   email), question, status, createdAt}`. Status moves `queued → running → done | failed | refused`, only forward.
-- **AL-02** One runner claims a job with a lease (claim id + expiry, 10 min); an expired lease returns the job to
-  `queued` once; a second expiry marks it `failed` with `LAB_JOB_LEASE_LOST`.
+- **AL-02** One runner claims a job with a lease: a new `leaseId` and an expiry 120 s ahead. The runner renews it
+  every 30 s with an atomic update that matches `leaseId` and an unexpired `leaseUntil`; a renewal that matches no
+  row means the lease is lost and the runner stops the job at once. An expired lease returns the job to `queued`
+  with a new `leaseId` on the next claim, once; a second expiry marks it `failed` with `LAB_JOB_LEASE_LOST`.
+- **AL-02a** Every status, run and answer write carries the current `leaseId` and is applied only if it still
+  matches (fencing). A write from a stale runner is refused with `LAB_JOB_LEASE_LOST` and changes nothing, so one job
+  never gets two answers.
 - **AL-03** A job carries the thread's earlier turns (questions and verified answers, never raw tool output) so a
   follow-up ("and with the range twice as wide?") works.
 - **AL-04** Each job has a wall-clock budget (120 s for chat tools, 15 min when it starts a sweep) and stops with
@@ -60,7 +65,14 @@ Lab tables; the Lab's numbers enter the production views (Constitution XVI).
   window, opsCount}`. Pure, in-process, < 5 s on the largest window.
 - **AL-11** `compare({runs: RunSpec[]})` → the same per run, max 8 runs per call.
 - **AL-12** `sweep({policyId, overrides[], windows?})` → async: returns `{sweepId}` and the job waits for it inside its
-  budget; result is the per-window table the release gate reads, each row with its `runId`.
+  budget; result is the per-window table, each row with its `runId`. `windows` may name TRAIN windows only.
+- **AL-12a** TEST windows are the release gate's holdout and the agent may not explore on them. Exploration
+  (sweeps, overrides, comparisons of variants) runs on TRAIN. A TEST window is reachable only through
+  `holdout_check({policyId, overrides})`, which returns the gate's pass/fail per TEST window and the totals, never the
+  per-window metrics; it is limited to 3 calls per requester per day, and each call is logged with its overrides in
+  `lab_holdout_checks`. An answer that recommends an override says it was explored on TRAIN and names its holdout
+  checks. A single `run_backtest` on a TEST window is allowed only for a policy in `POLICIES` with no overrides
+  (what is live, not a candidate).
 - **AL-13** Overrides are validated against the `PolicyVersion` schema and bounds in code before a run. An unknown
   key is a tool error (`LAB_OVERRIDE_UNKNOWN`), never ignored. The agent must report it, not try another policy.
 - **AL-14** The catalog (windows with regime, dates, chain, pools, market moves; policies with a one-line
@@ -73,16 +85,28 @@ Lab tables; the Lab's numbers enter the production views (Constitution XVI).
 ### Answer contract and verifier
 
 - **AL-20** The agent's final action is a `submit_answer` call with `{blocks: Block[]}`:
-  `text {md}`, `claim {label, value, unit: 'USDC'|'%'|'ops'|'days', runId, path}`, `chart {kind: 'equity' |
-  'decomposition' | 'pool_range', runIds, pool?}`, `caveat {md}`. Text and caveat carry no figures: they reference
-  claims as `{{c0}}`. Allowed digits in text: years, window ids, dataset and policy ids.
-- **AL-21** A deterministic verifier checks: schema; each claim's value equals the stored run at `path` (tolerance
-  0.005 absolute or 0.1% relative; `%` may be bps/100); text has no untraceable digits; each chart's run ids exist
-  and the kind fits the runs.
+  `text {md}`, `claim {metric, runId, value}`, `verdict {runId, against: 'hold' | 'usdc' | runId}`,
+  `chart {kind: 'equity' | 'decomposition' | 'pool_range', runIds, pool?}`, `caveat {md}`. Text and caveat carry no
+  figures: they reference claims as `{{c0}}` and verdicts as `{{v0}}`. Allowed digits in text: years, window ids,
+  dataset and policy ids.
+- **AL-20a** `metric` is a closed enum defined in code (`end`, `net`, `vsHodl`, `vsUsdc`, `fees`, `gas`,
+  `priceMove`, `timeInRange`, `maxDrawdown`, `return`, `operations.<kind>`, `days`). The code maps each metric to
+  its path in the run, its unit and its label in each language. The model never writes a label, a unit or a path, so
+  a number cannot be shown under the wrong meaning.
+- **AL-20b** A `verdict` is a sentence the server writes from the stored runs ("ended 16.44 USDC below holding the
+  mix"); its direction (better, worse, equal within 0.01) comes from the sign of the run difference. The model chooses
+  which comparison to show, never its direction.
+- **AL-21** A deterministic verifier checks: schema; each claim's `value` equals the code-mapped metric of the stored
+  run (tolerance 0.005 absolute or 0.1% relative); each verdict's runs exist; text has no untraceable digits; each
+  chart's run ids exist and the kind fits the runs.
+- **AL-21a** Text and caveat blocks may not judge a run: a closed list of directional terms per language (better,
+  worse, beats, loses, gains, outperforms, protects, mejor, peor, gana, pierde, supera, protege…) inside a text block
+  that references a claim or a run fails the check and asks for a `verdict` block instead. This is a lexical guard,
+  not proof of meaning: the screen also shows each verdict and claim with its run, so a reader can check it.
 - **AL-22** On a failed check the errors go back to the model once (repair turn). If it still fails, the answer
   shows its verified claims and charts only, flagged `LAB_ANSWER_PARTIAL`. A refusal or a "the data does not exist"
   answer with no claims is valid and is never emptied (fixes the PoC-2 fallback bug).
-- **AL-23** Nothing reaches the screen that did not pass AL-21. The screen labels every answer as a simulation over
+- **AL-23** Nothing reaches the screen that did not pass AL-21 and AL-21a. The screen labels every answer as a simulation over
   history, with the window and `SIM_VERSION` (Constitution XVI).
 - **AL-24** The question is data, never instructions to the runner: it cannot change tools, budgets, model route or
   the catalog. A question asking for future prices, live funds or actions outside the tools gets a caveat block.
@@ -150,6 +174,10 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
 
 - The runner holds no wallet key, no RPC key and no D1 credential: only the runner signing secret and the model-plane
   route. Datasets are local files; a missing dataset is a tool error.
+- Runner requests are signed differently from the engine-settings pull (which signs method, path and minute and is a
+  read): the HMAC covers method, path, timestamp, a random nonce and the SHA-256 of the body. The Worker refuses a
+  timestamp older than 60 s, a nonce it has seen in the last 10 min (`lab_nonces`, pruned), and a body whose hash
+  does not match. A captured request cannot be replayed or carry another body.
 - D1 is a projection for the screen (Constitution VII): the runner's run store is the record; D1 holds job rows,
   verified answers and run summaries + visual series.
 - Why the runner on lady and not a Worker: the models are reached through model-plane on lady, the 103 MB dataset
@@ -163,6 +191,8 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
   verifier_json, cost_json, error_code, quote_json, payer, created_at, updated_at)`
 - `lab_runs (result_hash PK, spec_json, metrics_json, series_json, sim_version, created_at)`
 - `lab_prices (resource, unit, usd, valid_from)` — shadow prices for AL-40.
+- `lab_holdout_checks (id, requester, job_id, policy_id, overrides_json, result_json, created_at)` — AL-12a.
+- `lab_nonces (nonce PK, seen_at)` — replay guard, rows older than 10 min pruned.
 
 ## Threats and answers
 
@@ -171,7 +201,11 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
 | Prompt injection in a question makes the agent act | Tools are pure simulation; no tool writes outside the run store; AL-24 |
 | The model invents or rounds a number into a claim | AL-21 verifier against the stored run; AL-23 nothing unverified on screen |
 | A Lab result is read as a promise | Every answer labeled simulation over history with window and `SIM_VERSION`; never in production views |
-| A runner secret leaks | Signed requests expire; the secret only reads/writes Lab rows; rotate via Worker secret |
+| A runner secret leaks | It only reads/writes Lab rows; rotate via Worker secret |
+| A captured runner request is replayed or its body swapped | Body hash + nonce + 60 s timestamp in the HMAC (Architecture) |
+| Two runners answer the same job | Lease renewal + fencing on every write (AL-02, AL-02a) |
+| Chat studies overfit the release gate's TEST windows | Exploration on TRAIN only; TEST via rationed, logged `holdout_check` (AL-12a) |
+| A number is shown under the wrong meaning, or a verdict points the wrong way | Closed metric enum mapped in code; server-written verdicts; lexical guard on text (AL-20a, AL-20b, AL-21a) |
 | A heavy sweep starves the operator on lady | Runner is its own unit with `CPUQuota` and `Nice`; one sweep at a time |
 | Cost runs away on included quota | Per-day job cap per requester; AL-41 shows the burn |
 | Model resource dies mid-job | AL-30 next peer; job keeps finished runs |
@@ -188,7 +222,16 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
 - **LAB-AL-04** "¿Cuánto rendirá el mes que viene?" → caveat only, valid answer, not emptied. (AL-22, AL-24)
 - **LAB-AL-05** A forged answer whose claim is off by 1% → verifier rejects; repair; partial render flagged. (AL-21, AL-22)
 - **LAB-AL-06** Runner killed mid-job → lease expires, job re-queued once, then `LAB_JOB_LEASE_LOST`. (AL-02)
-- **LAB-AL-07** Sweep of one override over all windows → per-window table with run ids within 15 min. (AL-12, AL-04)
+- **LAB-AL-07** Sweep of one override over the TRAIN windows → per-window table with run ids within 15 min; the same
+  sweep naming a TEST window → tool error. (AL-12, AL-12a, AL-04)
+- **LAB-AL-11** A claim whose value is `metrics.gas` submitted as `net` → rejected; a text block saying "Mamoru gana"
+  next to a claim → rejected and asked for a verdict block. (AL-20a, AL-21a)
+- **LAB-AL-12** A stale runner (lease expired, job re-claimed) posts an answer → refused, the new runner's answer
+  stands. (AL-02a)
+- **LAB-AL-13** A captured signed `answer` request replayed with another body, or replayed as is → both refused.
+  (signing)
+- **LAB-AL-14** Fourth `holdout_check` of the day → refused; the three earlier ones are in `lab_holdout_checks`.
+  (AL-12a)
 - **LAB-AL-08** Every job row has tokens, CPU ms, wall time, shadow cost; `/ops/lab` totals match the rows. (AL-40, AL-41)
 - **LAB-AL-09** Same spec twice → same `resultHash`, second served from the store. (AL-16)
 - **LAB-AL-10** Monad question → caveat naming the missing data, no run. (AL-70)
@@ -202,16 +245,17 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
 
 1. `packages/backtest`: `onSample` hook + visual-series extractor; tests that a run's hash does not change with or
    without the hook. (AL-52, AL-16) Not: change `decide` or metrics.
-2. `packages/lab-agent`: catalog prompt builder, tools over `packages/backtest`, contract + verifier with LAB-AL-05
-   fixtures, agent loop with round limit and repair, cost meter. Runs offline against recorded model replies.
+2. `packages/lab-agent`: catalog prompt builder, tools over `packages/backtest` (TRAIN/TEST split, `holdout_check`),
+   contract + metric enum + verdict writer + verifier with LAB-AL-05 and LAB-AL-11 fixtures, agent loop with round limit and repair, cost meter. Runs offline against recorded model replies.
    (AL-10…AL-24, AL-40) Not: network beyond the model route.
-3. Migration `XXXX_agent_lab.sql` + `/api/lab/runner/*` in mamoru-app with signed requests. (AL-01, AL-02, data)
+3. Migration `XXXX_agent_lab.sql` + `/api/lab/runner/*` in mamoru-app with body-bound signed requests, nonce store,
+   lease renewal and fencing. (AL-01, AL-02, AL-02a, data; LAB-AL-12, LAB-AL-13)
    Not: any route reachable without the runner signature.
 4. Lab runner unit on lady (`apps/mamoru-lab-runner`), systemd with CPU quota, model-plane route `agent-lab`.
    (AL-30…AL-32, AL-04) Not: wallet keys, RPC keys.
 5. `/ops/lab` in `ottodevs/mamoru-landing`: threads, chat, block renderer with view-A components, run panel, cost
    page; screenshots desktop + 390 light/dark against PoC-1 before merge. (AL-50…AL-53, AL-41)
-6. Scenarios LAB-AL-01…10 green; Ot and Brais use it for a week; cost per archetype reported for pricing. (AL-42)
+6. Scenarios LAB-AL-01…14 green; Ot and Brais use it for a week; cost per archetype reported for pricing. (AL-42)
 
 Later tickets: x402 endpoint (AL-60…62), fork scenarios as a tool, Ethereum windows backfill, Monad forward
 collector, export a study as a 006 draft template.
