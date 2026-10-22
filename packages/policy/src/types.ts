@@ -1,4 +1,4 @@
-import type { Address, Hex, ReasonCode } from '@mamoru/domain'
+import type { Address, ChainId, Hex, ReasonCode } from '@mamoru/domain'
 import type { RegistryName } from '@mamoru/registry'
 
 /** Rhinestone UniActionPolicy ParamCondition, in enum order. */
@@ -97,6 +97,11 @@ export type PolicyVersion = {
   version: string
   preset: 'conservador'
   chain: 'base' | 'fork'
+  /**
+   * otto/mamoru#65: the chain whose registry resolves every name of this policy (pools, tokens, grant targets).
+   * Absent: Base (8453), which every policy before Monad is; it is left out of them so their policyHash stays.
+   */
+  sourceChainId?: ChainId
   buckets: { id: 'stables' | 'btc-usdc' | 'risk'; preference: number; pools: RegistryName[] }[]
   savingsAsset: RegistryName
   gasReserveWei: bigint

@@ -1,6 +1,6 @@
 import { keccak256, stringToHex, toFunctionSelector } from 'viem'
 import { FORBIDDEN_LAB_CHAIN_IDS, BASE_CHAIN_ID, ReasonError, type Address, type Hex } from '@mamoru/domain'
-import { baseRegistry, address } from '@mamoru/registry'
+import { address, registryFor, type Registry } from '@mamoru/registry'
 import { grantKey } from './grants.ts'
 import { MAX_USAGE_LIMIT, type GrantName, type GrantTemplate, type PolicyVersion, type RefTemplate, type ResolvedActionRule, type SessionGrant } from './types.ts'
 
@@ -80,7 +80,12 @@ export function usageLimitFor(template: Pick<GrantTemplate, 'name' | 'usageLimit
   return limit
 }
 
-function resolveRef(ref: RefTemplate, ctx: GrantContext): bigint {
+/** otto/mamoru#65: the registry a policy's names resolve in: its source chain's, Base when it names none. */
+export function policyRegistry(policy: Pick<PolicyVersion, 'sourceChainId'>): Registry {
+  return registryFor(policy.sourceChainId ?? BASE_CHAIN_ID)
+}
+
+function resolveRef(ref: RefTemplate, ctx: GrantContext, registry: Registry): bigint {
   if (typeof ref === 'bigint') return ref
   if (ref === 'ACCOUNT') return BigInt(ctx.account)
   if (ref === 'tokenId') {
@@ -92,7 +97,7 @@ function resolveRef(ref: RefTemplate, ctx: GrantContext): bigint {
     if (v === undefined) throw new Error(`missing cap ${ref}`)
     return v
   }
-  return BigInt(address(ref, baseRegistry))
+  return BigInt(address(ref, registry))
 }
 
 /** `key` is a grant name or, on a multi-pool policy, `name:pool` (see `grantKey`). A bare name takes the first grant of that name. */
@@ -101,6 +106,7 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
   const template = policy.session.grants.find((g) => grantKey(g) === key) ?? policy.session.grants.find((g) => g.name === key)
   if (!template) throw new Error(`${policy.policyId} has no grant ${key}`)
   const name = template.name
+  const registry = policyRegistry(policy)
   if (template.perPosition !== (ctx.tokenId !== undefined)) {
     throw new Error(`grant ${name} ${template.perPosition ? 'needs' : 'does not take'} a tokenId`)
   }
@@ -109,7 +115,7 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
   }
   const actions: ResolvedActionRule[] = template.actions.map((a) => ({
     target: a.target,
-    targetAddress: address(a.target, baseRegistry),
+    targetAddress: address(a.target, registry),
     signature: a.signature,
     selector: toFunctionSelector(`function ${a.signature}`),
     nativeValue: 0n,
@@ -117,8 +123,8 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
       field: p.field,
       index: p.index,
       condition: p.condition,
-      ref: resolveRef(p.ref, ctx),
-      cumulativeLimit: p.cumulative ? resolveRef(p.cumulative, ctx) : undefined,
+      ref: resolveRef(p.ref, ctx, registry),
+      cumulativeLimit: p.cumulative ? resolveRef(p.cumulative, ctx, registry) : undefined,
       denial: p.denial,
     })),
   }))

@@ -1,0 +1,54 @@
+{
+  "id": "MONAD-01",
+  "requirements": [
+    "otto/mamoru#65",
+    "otto/mamoru#62",
+    "otto/mamoru#63"
+  ],
+  "source": {
+    "chain": "monad",
+    "chainId": 143
+  },
+  "fork": {
+    "block": 115696274,
+    "blockHash": "0x1ba03045c419aa8f93c94d708ea53c93b4033d1211bdd74845893f6c5d2defab",
+    "timestamp": 1792697697,
+    "chainId": 314143,
+    "pinnedAt": "2026-10-22"
+  },
+  "pinNote": "The public Monad RPC keeps about 21 hours of state (about 250,000 blocks): a fork at this block works for about a day after pinnedAt. Re-pin with `bun run scenarios:monad pin` (latest finalized block), or replay offline from the state dumped by a forked run (`bun run scenarios:monad replay <state>`).",
+  "pool": "pool:WMON/USDC/3000",
+  "policy": "lab-wmon-usdc-monad-v1",
+  "gaps": [
+    {
+      "id": "G1-gas-limit",
+      "what": "Monad charges value + gas_bid * gas_limit; anvil charges gas used.",
+      "consequence": "Gas costs measured on the fork are not Monad's: a userOp or relayer transaction with a loose gas limit costs more on Monad than here. No gas or cost figure from this scenario is a Monad figure."
+    },
+    {
+      "id": "G2-reserve-balance",
+      "what": "Monad's reserve balance (default 10 MON per account) and the execution-time reverts it causes are not emulated.",
+      "consequence": "A relayer or Safe whose MON balance goes near 10 MON can fail on Monad where it passes here. The fork funds every account far above it."
+    },
+    {
+      "id": "G3-p256",
+      "what": "eth_call to the RIP-7212 precompile at 0x100 runs anvil's precompile, not Monad's.",
+      "consequence": "The passkey owner signature passing here proves the account path, not Monad's precompile. Monad's was checked separately against mainnet (a valid vector returns 1, 2026-10-01); P256Verifier is the fallback either way."
+    },
+    {
+      "id": "G4-blocks-finality",
+      "what": "anvil mines on demand; Monad has ~300 ms blocks, finalized two blocks behind latest, no global mempool, asynchronous execution.",
+      "consequence": "Head lag, finality tags, receipt timing and bundler inclusion are not exercised."
+    },
+    {
+      "id": "G5-bundler",
+      "what": "userOps go to EntryPoint.handleOps from an anvil dev account, not through a bundler.",
+      "consequence": "Bundler simulation rules (ERC-7562) and Alchemy's Monad bundler are not exercised."
+    },
+    {
+      "id": "G6-policies-mainnet",
+      "what": "TimeFramePolicy and UsageLimitPolicy are deployed on the fork by the scenario (Base calldata through the Arachnid CREATE2 deployer); they have no code on Monad mainnet yet.",
+      "consequence": "Nothing in this scenario runs on Monad mainnet until both are deployed there (otto/mamoru#62) and pinned in monad.json."
+    }
+  ]
+}

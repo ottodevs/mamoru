@@ -6,7 +6,7 @@ import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, isChainId, type Address } from '@mamoru/domain'
 import { entry, registryFor, type Registry } from '@mamoru/registry'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
-import { conservadorLabV4, conservadorLabV5, conservadorLiveV4, conservadorLiveV5, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, type PolicyVersion } from '@mamoru/policy'
+import { conservadorLabV4, conservadorLabV5, conservadorLiveV4, conservadorLiveV5, MONAD_LAB_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, type PolicyVersion } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
@@ -69,7 +69,7 @@ const V5_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV5.po
  * the same `unknown policy` error it always has — nothing changes for any account while the flag is off.
  */
 export function resolveNamedPolicy(policyId: string, env: Record<string, string | undefined>): PolicyVersion | undefined {
-  const named = POLICIES[policyId]
+  const named = POLICIES[policyId] ?? MONAD_LAB_POLICIES[policyId]
   if (named) return named
   if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1') return undefined
   const v5 = V5_POLICIES_BY_ID[policyId]
