@@ -1281,8 +1281,11 @@ export class BridgeOut {
         throw e
       }
       // The receipt's cost, L1 data fee included; a receipt without l1Fee keeps the bound charged.
-      const l1Fee = (sent.receipt as { l1Fee?: bigint | null }).l1Fee
-      if (l1Fee !== undefined && l1Fee !== null) charge(sent.receipt.gasUsed * sent.receipt.effectiveGasPrice + l1Fee)
+      // viem's default receipt formatter (the relayer's client has no OP-stack chain) leaves l1Fee as the node's hex
+      // string: parsed here, never added to a bigint as a string (that zeroed the day's ledger). Unparseable: bound kept.
+      const rawL1Fee = (sent.receipt as { l1Fee?: unknown }).l1Fee
+      const l1Fee = typeof rawL1Fee === 'bigint' ? rawL1Fee : typeof rawL1Fee === 'string' && /^(0x[0-9a-fA-F]+|[0-9]+)$/.test(rawL1Fee) ? BigInt(rawL1Fee) : null
+      if (l1Fee !== null && l1Fee >= 0n) charge(sent.receipt.gasUsed * sent.receipt.effectiveGasPrice + l1Fee)
       r.mintTx = sent.hash
       if (sent.receipt.status === 'success') {
         this.completed(accountKey, msg.nonce)

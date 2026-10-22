@@ -181,7 +181,7 @@ describe('the CCTP mint on Base (#180): replayed attestations and the admission-
   const attest = async (m: Hex) => ({ message: m, attestation: await attester.sign({ hash: keccak256(m) }) })
   const day = (d: string) => Date.parse(`${d}Z`)
 
-  const make = (o: { iris: Record<string, { message: Hex; attestation: Hex }[]>; used?: Set<string>; now: () => number; send?: (onSending: (w: bigint, p: bigint) => void) => Promise<void>; journal?: object }) => {
+  const make = (o: { iris: Record<string, { message: Hex; attestation: Hex }[]>; used?: Set<string>; now: () => number; send?: (onSending: (w: bigint, p: bigint) => void) => Promise<void>; journal?: object; l1Fee?: unknown }) => {
     const dir = mkdtempSync(join(tmpdir(), 'mamoru-mint-'))
     if (o.journal) writeFileSync(join(dir, 'bridge-out.json'), JSON.stringify({ routes: {}, spent: { day: '', wei: '0' }, moves: {}, ...o.journal }))
     const used = o.used ?? new Set<string>()
@@ -205,7 +205,7 @@ describe('the CCTP mint on Base (#180): replayed attestations and the admission-
         const hash = u(++n, 32)
         onSigned!(hash, n)
         sent.push(tx.data!)
-        return { hash, receipt: { status: 'success', gasUsed: 150_000n, effectiveGasPrice: 100_000_000n, logs: [] } }
+        return { hash, receipt: { status: 'success', gasUsed: 150_000n, effectiveGasPrice: 100_000_000n, logs: [], ...(o.l1Fee !== undefined ? { l1Fee: o.l1Fee } : {}) } }
       },
     }
     const fetcher = async (url: string) => {
@@ -299,5 +299,17 @@ describe('the CCTP mint on Base (#180): replayed attestations and the admission-
     expect(days['2026-10-20']).toEqual({ n: 0, wei: '0' })
     expect(days['2026-10-21'].n).toBe(1)
     expect(BigInt(days['2026-10-21'].wei)).toBeLessThan(MINT_BUDGET_WEI)
+  })
+  test('opus P1 (55be0fb): the receipt charge parses l1Fee as the node sends it (hex string) and never zeroes the day', async () => {
+    const TA = u(0xc1, 32)
+    const TB = u(0xc2, 32)
+    const iris = { [TA]: [await attest(message(0x31n, 21n))], [TB]: [await attest(message(0x32n, 22n))] }
+    const { priv, sent, j } = make({ iris, now: () => day('2026-10-21T12:00:00'), l1Fee: '0x5af3107a4000' })
+    await priv.cctpMint('a', route('ra', TA, 21n))
+    await priv.cctpMint('b', route('rb', TB, 22n))
+    expect(sent.length).toBe(2)
+    // Two mints, each 150k gas at 0.1 gwei plus an L1 data fee of 0x5af3107a4000 wei: both stay on the day.
+    const each = 150_000n * 100_000_000n + 0x5af3107a4000n
+    expect(j().mintDays['2026-10-21']).toEqual({ n: 2, wei: (2n * each).toString() })
   })
 })
