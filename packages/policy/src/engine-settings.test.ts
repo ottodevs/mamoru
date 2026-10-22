@@ -8,6 +8,8 @@ import {
   lazyOf,
   parseEngineSettings,
   riskyChanges,
+  validateAccountCapOverride,
+  validateAccountCaps,
   validateEngineSettings,
   withEngineSettings,
   type EngineSettings,
@@ -214,5 +216,23 @@ describe('re-range setting (otto/mamoru#172)', () => {
       expect(lazy.actionPolicy).toBe(p.actionPolicy)
       expect(withEngineSettings(lazy, DEFAULT_ENGINE_SETTINGS).range).toEqual(p.range)
     }
+  })
+})
+
+describe('per-account cap overrides (otto/mamoru#26)', () => {
+  const key = '00a7a1df-0000-4000-8000-000000000001'
+  test('whole USDC within the cap bounds, or null to remove; a sane account key', () => {
+    expect(validateAccountCapOverride({ accountKey: key, capUsdc: 2000 })).toEqual([])
+    expect(validateAccountCapOverride({ accountKey: key, capUsdc: null })).toEqual([])
+    expect(validateAccountCapOverride({ accountKey: key, capUsdc: ENGINE_SETTINGS_BOUNDS.capUsdc.min })).toEqual([])
+    expect(validateAccountCapOverride({ accountKey: key, capUsdc: ENGINE_SETTINGS_BOUNDS.capUsdc.max })).toEqual([])
+    for (const bad of [0, -1, 1_000_001, 1.5, '2000', Number.NaN, undefined]) expect(validateAccountCapOverride({ accountKey: key, capUsdc: bad })).not.toEqual([])
+    for (const bad of ['', 'a b', 'x'.repeat(129), 7, null, "k'; DROP"]) expect(validateAccountCapOverride({ accountKey: bad, capUsdc: 2000 })).not.toEqual([])
+  })
+
+  test('the payload map: lowercase keys to in-bounds numbers, nothing else', () => {
+    expect(validateAccountCaps({})).toEqual([])
+    expect(validateAccountCaps({ [key]: 2000, other: 5000 })).toEqual([])
+    for (const bad of [null, [], 'x', { [key]: null }, { [key]: 0 }, { [key.toUpperCase()]: 2000 }, { 'a b': 5 }]) expect(validateAccountCaps(bad)).not.toEqual([])
   })
 })

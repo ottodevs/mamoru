@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { settingsResponseSignature, verifyMetricsSignature } from '@mamoru/operator-auth'
-import { validateEngineSettings, type EngineSettings, type OpsFlagName } from '@mamoru/policy'
+import { validateAccountCapOverride, validateEngineSettings, type EngineSettings, type OpsFlagName } from '@mamoru/policy'
 import type { AppEnv } from './context.ts'
 import type { Db } from './env.ts'
 import { readOpsFlags } from './ops-flags.ts'
@@ -32,6 +32,9 @@ export type EngineSettingsPayload = {
   /** otto/mamoru#129: runtime flags set from /ops, D1-backed (readOpsFlags). Older operators that do not parse this
    * field yet simply ignore it; it is additive, never required to make sense of `versions`. */
   flags: Record<OpsFlagName, boolean>
+  /** otto/mamoru#26: per-account cap overrides, lowercase account key to whole USDC (newest row per account; a removal
+   * or no row: absent, the account runs its environment's cap). Older operators ignore it. */
+  accountCaps: Record<string, number>
   servedAt: string
 }
 
@@ -92,6 +95,31 @@ async function betaAccounts(db: Db): Promise<string[]> {
   }
 }
 
+type CapRow = { account_key: string; cap_usdc: number | null }
+
+/**
+ * otto/mamoru#26: the newest row of every account in `account_cap_overrides`, removals left out. A row the code would
+ * refuse is skipped (the account keeps what its previous valid row said), as for versions. No table yet (the migration
+ * is not applied): an empty map, every account on its environment's cap.
+ */
+export async function accountCaps(db: Db): Promise<Record<string, number>> {
+  let rows: CapRow[]
+  try {
+    rows = (await db.prepare(`SELECT account_key, cap_usdc FROM account_cap_overrides ORDER BY id`).all<CapRow>()).results
+  } catch (e) {
+    if (missingTable(e)) return {}
+    throw e
+  }
+  const latest = new Map<string, number | null>()
+  for (const r of rows) {
+    if (validateAccountCapOverride({ accountKey: r.account_key, capUsdc: r.cap_usdc }).length) continue
+    latest.set(r.account_key.toLowerCase(), r.cap_usdc)
+  }
+  const out: Record<string, number> = {}
+  for (const [k, cap] of [...latest].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) if (cap !== null) out[k] = cap
+  return out
+}
+
 export function engineSettingsRoutes(now: () => Date) {
   const app = new Hono<AppEnv>()
   app.get(ENGINE_SETTINGS_PATH, async (c) => {
@@ -101,7 +129,7 @@ export function engineSettingsRoutes(now: () => Date) {
     if (!(await verifyMetricsSignature(secret, 'GET', ENGINE_SETTINGS_PATH, c.req.header('x-mamoru-sig'), at))) return c.json({ error: 'unauthorized' }, 401)
     const versions = await activeVersions(c.env.DB)
     if (versions === null) return c.json({ error: 'engine settings are not set up' }, 404)
-    const payload: EngineSettingsPayload = { versions, betaAccounts: await betaAccounts(c.env.DB), flags: await readOpsFlags(c.env.DB), servedAt: new Date(at).toISOString() }
+    const payload: EngineSettingsPayload = { versions, betaAccounts: await betaAccounts(c.env.DB), flags: await readOpsFlags(c.env.DB), accountCaps: await accountCaps(c.env.DB), servedAt: new Date(at).toISOString() }
     const body = JSON.stringify(payload)
     const sig = await settingsResponseSignature(secret, body, Math.floor(at / 60_000))
     return new Response(body, { status: 200, headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-mamoru-sig': sig } })

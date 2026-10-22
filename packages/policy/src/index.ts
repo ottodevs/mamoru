@@ -22,6 +22,8 @@ export {
   lazyOf,
   parseEngineSettings,
   riskyChanges,
+  validateAccountCapOverride,
+  validateAccountCaps,
   validateEngineSettings,
   withEngineSettings,
   type EngineSettings,

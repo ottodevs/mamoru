@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { metricsSignature, verifySettingsResponse } from '@mamoru/operator-auth'
-import { canonicalSettingsJson, DEFAULT_CAP_USDC, DEFAULT_ENGINE_SETTINGS, OPS_FLAGS, parseEngineSettings, validateEngineSettings, type EngineSettings, type OpsFlagName } from '@mamoru/policy'
+import { canonicalSettingsJson, DEFAULT_CAP_USDC, DEFAULT_ENGINE_SETTINGS, OPS_FLAGS, parseEngineSettings, validateAccountCaps, validateEngineSettings, type EngineSettings, type OpsFlagName } from '@mamoru/policy'
 
 /**
  * Spec 006 (otto/mamoru#147): the operator's side of engine settings. Pulls the active versions from the app Worker
@@ -22,7 +22,8 @@ export const SETTINGS_STALE_MS = 15 * 60_000
 export const LOCAL_OVERRIDE_FILE = 'engine-settings.local.json'
 
 export type SettingsVersion = { id: number; env: 'prod' | 'beta'; accountKeys: string[] | null; template: string; settings: EngineSettings; hash: string; createdAt: string }
-type Payload = { versions: SettingsVersion[]; betaAccounts: string[]; flags: Record<OpsFlagName, boolean>; servedAt: string }
+/** `accountCaps` (otto/mamoru#26): lowercase account key to whole USDC, over the environment's cap. */
+type Payload = { versions: SettingsVersion[]; betaAccounts: string[]; flags: Record<OpsFlagName, boolean>; accountCaps: Record<string, number>; servedAt: string }
 
 export type ResolvedSettings = {
   settings: EngineSettings
@@ -31,6 +32,13 @@ export type ResolvedSettings = {
   source: 'd1' | 'last-known-good' | 'default' | 'local'
   /** Knobs forced by the emergency env override (MAMORU_DEPTH / MAMORU_CAP_USDC). */
   override: string[]
+  /**
+   * otto/mamoru#26: this account's own cap from D1 (whole USDC), over the canary and environment cap; null without one,
+   * and always null under the local emergency file or MAMORU_CAP_USDC (those win). Optional for older callers.
+   */
+  accountCapUsdc?: number | null
+  /** The D1 version is this environment's canary (otto/mamoru#26: where the cap came from, for /metrics). */
+  canary?: boolean
 }
 
 /** Emergency override from env: wins over D1 for the knobs it names, and is reported so it cannot stay on unseen. */
@@ -67,12 +75,30 @@ function parseOpsFlags(raw: unknown): Record<OpsFlagName, boolean> {
   return out
 }
 
+/**
+ * otto/mamoru#26: the `accountCaps` field. Absent or null (an app Worker that does not serve it yet): no override.
+ * Present: every entry must be valid (validateAccountCaps), else the whole pull is refused, as for a bad version.
+ */
+function parseAccountCaps(raw: unknown): Record<string, number> {
+  if (raw === undefined || raw === null) return {}
+  const errors = validateAccountCaps(raw)
+  if (errors.length) throw new Error(`bad accountCaps: ${errors.join('; ')}`)
+  return { ...(raw as Record<string, number>) }
+}
+
+/** One line for the log: 8-character keys and caps, sorted, or `none`. */
+export function describeAccountCaps(m: Record<string, number>): string {
+  const keys = Object.keys(m).sort()
+  return keys.length ? keys.map((k) => `${k.slice(0, 8)}=${m[k]}`).join(', ') : 'none'
+}
+
 /** Every check a pulled body must pass before anything of it runs. Throws with the reason. */
 export function checkPayload(raw: unknown, applied: Payload | null, opts: { allocation?: string } = {}): Payload {
   if (!raw || typeof raw !== 'object') throw new Error('body is not an object')
   const p = raw as Payload
   if (!Array.isArray(p.versions) || !Array.isArray(p.betaAccounts) || !p.betaAccounts.every((k) => typeof k === 'string')) throw new Error('body has the wrong shape')
   const flags = parseOpsFlags((raw as { flags?: unknown }).flags)
+  const accountCaps = parseAccountCaps((raw as { accountCaps?: unknown }).accountCaps)
   const versions: SettingsVersion[] = []
   for (const v of p.versions) {
     if (!v || !Number.isSafeInteger(v.id) || v.id < 1 || (v.env !== 'prod' && v.env !== 'beta')) throw new Error('a version has the wrong shape')
@@ -98,7 +124,7 @@ export function checkPayload(raw: unknown, applied: Payload | null, opts: { allo
   const servedAt = typeof p.servedAt === 'string' ? p.servedAt : ''
   if (!Number.isFinite(Date.parse(servedAt))) throw new Error('body has no valid servedAt')
   if (applied?.servedAt && Date.parse(servedAt) < Date.parse(applied.servedAt)) throw new Error(`stale: served at ${servedAt}, before the applied ${applied.servedAt}`)
-  return { versions, betaAccounts: p.betaAccounts.map((k) => k.toLowerCase()), flags, servedAt }
+  return { versions, betaAccounts: p.betaAccounts.map((k) => k.toLowerCase()), flags, accountCaps, servedAt }
 }
 
 /**
@@ -106,15 +132,15 @@ export function checkPayload(raw: unknown, applied: Payload | null, opts: { allo
  * environment-wide version. An account it names runs it; every other account runs the environment-wide version (or
  * the code defaults). Writing a new canary therefore retires the previous one for every account.
  */
-export function resolveFor(p: Payload | null, accountKey: string): { settings: EngineSettings; versionId: number | null } {
-  if (!p) return { settings: DEFAULT_ENGINE_SETTINGS, versionId: null }
+export function resolveFor(p: Payload | null, accountKey: string): { settings: EngineSettings; versionId: number | null; canary: boolean } {
+  if (!p) return { settings: DEFAULT_ENGINE_SETTINGS, versionId: null, canary: false }
   const key = accountKey.toLowerCase()
   const env = p.betaAccounts.includes(key) ? 'beta' : 'prod'
   const ofEnv = p.versions.filter((v) => v.env === env).sort((a, b) => b.id - a.id)
   const wide = ofEnv.find((x) => x.accountKeys === null)
   const canary = ofEnv.find((x) => x.accountKeys !== null && (!wide || x.id > wide.id))
   const v = canary?.accountKeys?.includes(key) ? canary : wide
-  return v ? { settings: v.settings, versionId: v.id } : { settings: DEFAULT_ENGINE_SETTINGS, versionId: null }
+  return v ? { settings: v.settings, versionId: v.id, canary: v !== wide } : { settings: DEFAULT_ENGINE_SETTINGS, versionId: null, canary: false }
 }
 
 export class EngineSettingsSource {
@@ -153,6 +179,7 @@ export class EngineSettingsSource {
     try {
       this.payload = checkPayload(JSON.parse(readFileSync(this.file, 'utf8')), null, { ...(this.o.allocation ? { allocation: this.o.allocation } : {}) })
       this.source = 'last-known-good'
+      if (Object.keys(this.payload.accountCaps).length) console.log(`[settings] account caps: ${describeAccountCaps(this.payload.accountCaps)} (last-known-good)`)
     } catch (e) {
       this.lastError = `last-known-good unreadable: ${(e as Error).message}`
     }
@@ -207,7 +234,9 @@ export class EngineSettingsSource {
       const next = checkPayload(JSON.parse(body), this.payload, { ...(this.o.allocation ? { allocation: this.o.allocation } : {}) })
       // otto/mamoru#129: flags are part of this diff too, so a /ops flip with no engine-settings change still fires
       // onChange (boot.ts's syncYieldLedger) and is written to the last-known-good file.
-      const changed = JSON.stringify(next.versions.map((v) => [v.id, canonicalSettingsJson(v.settings), v.accountKeys])) + next.betaAccounts.join() + JSON.stringify(next.flags) !==
+      // otto/mamoru#26: account caps too, compared on full keys (the log line's 8-character keys could collide).
+      const capsChanged = canonicalCaps(next.accountCaps) !== canonicalCaps(this.payload?.accountCaps ?? {})
+      const changed = capsChanged || JSON.stringify(next.versions.map((v) => [v.id, canonicalSettingsJson(v.settings), v.accountKeys])) + next.betaAccounts.join() + JSON.stringify(next.flags) !==
         JSON.stringify((this.payload?.versions ?? []).map((v) => [v.id, canonicalSettingsJson(v.settings), v.accountKeys])) + (this.payload?.betaAccounts ?? []).join() + JSON.stringify(this.payload?.flags ?? {})
       this.payload = next
       this.source = 'd1'
@@ -226,6 +255,7 @@ export class EngineSettingsSource {
         }
       }
       if (changed) {
+        if (capsChanged) console.log(`[settings] account caps: ${describeAccountCaps(next.accountCaps)}`)
         console.log(`[settings] applied ${next.versions.map((v) => `v${v.id} ${v.env}${v.accountKeys ? ' canary' : ''} "${v.template}"`).join(', ') || 'none (defaults)'}`)
         this.o.onChange?.()
       }
@@ -265,7 +295,7 @@ export class EngineSettingsSource {
   }
 
   forAccount(accountKey: string): ResolvedSettings {
-    if (this.local) return { settings: this.local, versionId: null, source: 'local', override: [] }
+    if (this.local) return { settings: this.local, versionId: null, source: 'local', override: [], accountCapUsdc: null }
     const r = resolveFor(this.payload, accountKey)
     const o = this.o.override ?? {}
     const merge = (base: EngineSettings): EngineSettings => ({ ...base, ...(o.depth !== undefined ? { depth: o.depth } : {}), ...(o.capUsdc !== undefined ? { capUsdc: o.capUsdc } : {}) })
@@ -276,10 +306,13 @@ export class EngineSettingsSource {
       // Then the code defaults run, without the override (the defaults are valid by construction; the override on top
       // of them might not be), and the status says why.
       this.resolveError = `settings for ${accountKey.slice(0, 8)} are out of bounds with the env override; running the code defaults`
-      return { settings: DEFAULT_ENGINE_SETTINGS, versionId: null, source: 'default', override: [] }
+      return { settings: DEFAULT_ENGINE_SETTINGS, versionId: null, source: 'default', override: [], accountCapUsdc: null }
     }
     this.resolveError = null
-    return { settings, versionId: r.versionId, source: r.versionId === null ? 'default' : this.source, override: this.overrideKeys() }
+    // otto/mamoru#26: the account's own cap replaces the canary or environment cap, unless MAMORU_CAP_USDC forces one.
+    // Not merged into `settings`: whether it may run (depth sizing, target-weights) is the operator's capFor rule.
+    const own = o.capUsdc === undefined ? this.payload?.accountCaps[accountKey.toLowerCase()] ?? null : null
+    return { settings, versionId: r.versionId, source: r.versionId === null ? 'default' : this.source, override: this.overrideKeys(), accountCapUsdc: own, canary: r.canary }
   }
 
   status(): SettingsStatus {
@@ -296,4 +329,5 @@ export class EngineSettingsSource {
   }
 }
 
+const canonicalCaps = (m: Record<string, number>) => JSON.stringify(Object.keys(m).sort().map((k) => [k, m[k]]))
 const canonical = (s: EngineSettings | null) => (s ? canonicalSettingsJson(s) : '')

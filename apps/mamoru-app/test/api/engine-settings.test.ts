@@ -90,4 +90,29 @@ describe('GET /api/internal/engine-settings (spec 006)', () => {
     const p = JSON.parse(await (await pull(h)).text()) as EngineSettingsPayload
     expect(p.flags).toEqual({ yield_ledger: true, onchain_action_policy_v4: false, onchain_action_policy_v5: false })
   })
+  test('otto/mamoru#26: accountCaps carries the newest valid row per account; a removal and bad rows are left out', async () => {
+    const h = harness(() => NOW, { env: { OPERATOR_SECRET: OP } })
+    insert(h, 'prod', depth)
+    const cap = (key: string, usdc: number | null, env = 'prod') =>
+      h.db.raw.query(`INSERT INTO account_cap_overrides (env, account_key, cap_usdc, author, reason, created_at) VALUES (?, ?, ?, 'ot', 'test', ?)`).run(env, key, usdc, NOW.toISOString())
+    cap('AAAA-1', 2000)
+    cap('bbbb-2', 2000)
+    cap('cccc-3', 5000)
+    cap('bbbb-2', null) // removed: back on the env cap
+    cap('aaaa-1', 3000) // newest wins, keys compared lowercase
+    cap('cccc-3', 2_000_000) // out of bounds: skipped, the previous row stands
+    cap('dddd-4', 0)
+    cap('eeee 5', 100, 'beta')
+    const p = JSON.parse(await (await pull(h)).text()) as EngineSettingsPayload
+    expect(p.accountCaps).toEqual({ 'aaaa-1': 3000, 'cccc-3': 5000 })
+  })
+
+  test('otto/mamoru#26: without the account_cap_overrides table (migration not applied) the map is empty', async () => {
+    const h = harness(() => NOW, { env: { OPERATOR_SECRET: OP } })
+    insert(h, 'prod', depth)
+    h.db.raw.query('DROP TABLE account_cap_overrides').run()
+    const res = await pull(h)
+    expect(res.status).toBe(200)
+    expect((JSON.parse(await res.text()) as EngineSettingsPayload).accountCaps).toEqual({})
+  })
 })

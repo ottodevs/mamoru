@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { settingsResponseSignature, verifyMetricsSignature } from '@mamoru/operator-auth'
 import { createHash } from 'node:crypto'
 import { canonicalSettingsJson, DEFAULT_ENGINE_SETTINGS, ENGINE_SETTINGS_TEMPLATES, type EngineSettings } from '@mamoru/policy'
-import { checkPayload, ENGINE_SETTINGS_PATH, EngineSettingsSource, resolveFor, type SettingsVersion } from '../src/engine-settings.ts'
+import { checkPayload, describeAccountCaps, ENGINE_SETTINGS_PATH, LOCAL_OVERRIDE_FILE, EngineSettingsSource, resolveFor, type SettingsVersion } from '../src/engine-settings.ts'
 
 const SECRET = 'op-secret'
 const NOW = 1_760_616_000_000
@@ -240,5 +240,66 @@ describe('operator ops flags (otto/mamoru#129): checkPayload parses `flags`, Eng
     await s.pull()
     const again = source(worker(() => ({}), { status: 503 }).fetch, dir)
     expect(again.flags()).toEqual({ yield_ledger: true, onchain_action_policy_v4: false, onchain_action_policy_v5: false })
+  })
+})
+
+describe('per-account cap overrides (otto/mamoru#26)', () => {
+  const at = '2026-10-16T12:00:00.000Z'
+  test('absent or null accountCaps is no override; a bad entry refuses the whole pull', () => {
+    expect(checkPayload({ versions: [v(1, 'prod')], betaAccounts: [], servedAt: at }, null).accountCaps).toEqual({})
+    expect(checkPayload({ versions: [v(1, 'prod')], betaAccounts: [], accountCaps: null, servedAt: at }, null).accountCaps).toEqual({})
+    expect(checkPayload({ versions: [v(1, 'prod')], betaAccounts: [], accountCaps: { 'acct-a': 2000 }, servedAt: at }, null).accountCaps).toEqual({ 'acct-a': 2000 })
+    for (const bad of [[], 'x', { 'acct-a': 0 }, { 'acct-a': 1_000_001 }, { 'acct-a': '2000' }, { 'acct-a': null }, { 'ACCT-A': 2000 }])
+      expect(() => checkPayload({ versions: [v(1, 'prod')], betaAccounts: [], accountCaps: bad, servedAt: at }, null)).toThrow('accountCaps')
+  })
+
+  test('precedence: account cap over canary over environment over default; only the named account', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'settings-'))
+    const w = worker(() => ({ versions: [v(1, 'prod'), v(2, 'prod', { ...depth, capUsdc: 1500 }, ['canary-acct', 'big-canary'])], betaAccounts: [], accountCaps: { 'big-acct': 2000, 'big-canary': 5000 }, servedAt: at }))
+    const s = source(w.fetch, dir)
+    const logs: string[] = []
+    const log = console.log
+    console.log = (m: string) => void logs.push(m)
+    try {
+      expect(await s.pull()).toBe(true)
+    } finally {
+      console.log = log
+    }
+    expect(logs).toContain('[settings] account caps: big-acct=2000, big-cana=5000')
+    expect(s.forAccount('BIG-ACCT').accountCapUsdc).toBe(2000)
+    expect(s.forAccount('big-acct').settings.capUsdc).toBe(1000) // the settings themselves are untouched
+    expect(s.forAccount('big-canary').accountCapUsdc).toBe(5000)
+    expect(s.forAccount('canary-acct').accountCapUsdc).toBeNull()
+    expect(s.forAccount('canary-acct').settings.capUsdc).toBe(1500)
+    expect(s.forAccount('any').accountCapUsdc).toBeNull()
+    expect(s.forAccount('any').settings.capUsdc).toBe(1000)
+    // Last-known-good keeps the caps: a new process with the endpoint down still runs them.
+    expect(JSON.parse(readFileSync(join(dir, 'engine-settings.json'), 'utf8')).accountCaps).toEqual({ 'big-acct': 2000, 'big-canary': 5000 })
+    const again = source(worker(() => ({}), { status: 503 }).fetch, dir)
+    expect(again.forAccount('big-acct').accountCapUsdc).toBe(2000)
+  })
+
+  test('a change in caps alone is a change; MAMORU_CAP_USDC and the local file win over an account cap', async () => {
+    let caps: Record<string, number> = { 'big-acct': 2000 }
+    const s = source(worker(() => ({ versions: [v(1, 'prod')], betaAccounts: [], accountCaps: caps, servedAt: at })).fetch)
+    expect(await s.pull()).toBe(true)
+    expect(await s.pull()).toBe(false)
+    caps = {}
+    expect(await s.pull()).toBe(true)
+    expect(s.forAccount('big-acct').accountCapUsdc).toBeNull()
+    const env = source(worker(() => ({ versions: [v(1, 'prod')], betaAccounts: [], accountCaps: { 'big-acct': 2000 }, servedAt: at })).fetch, undefined, { override: { capUsdc: 50 } })
+    await env.pull()
+    expect(env.forAccount('big-acct').accountCapUsdc).toBeNull()
+    const dir = mkdtempSync(join(tmpdir(), 'settings-'))
+    const local = source(worker(() => ({ versions: [v(1, 'prod')], betaAccounts: [], accountCaps: { 'big-acct': 2000 }, servedAt: at })).fetch, dir)
+    await local.pull()
+    writeFileSync(join(dir, LOCAL_OVERRIDE_FILE), JSON.stringify(DEFAULT_ENGINE_SETTINGS))
+    await local.pull()
+    expect(local.forAccount('big-acct').accountCapUsdc).toBeNull()
+  })
+
+  test('the log line uses 8-character keys, sorted', () => {
+    expect(describeAccountCaps({})).toBe('none')
+    expect(describeAccountCaps({ 'zz-123456789': 5, '00a7a1df-0000': 2000 })).toBe('00a7a1df=2000, zz-12345=5')
   })
 })

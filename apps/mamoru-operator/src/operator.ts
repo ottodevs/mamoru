@@ -60,6 +60,34 @@ export type AccountsSummary = { known: number; active: number; armed: number }
 /** GET /metrics `opsRecent` (otto/mamoru#129): exactly these five fields, never a grant, session key, signature,
  * salt or userOp — the same trim GET /ops already applies per-account, here across every account at once. */
 export type RecentOp = { accountKey: string; kind: OpView['kind']; state: OpView['state']; at: string; code: string | null }
+
+/** Where an account's cap at Start came from (otto/mamoru#26). */
+export type CapSource = 'override' | 'canary' | 'env' | 'default' | 'emergency'
+
+/**
+ * GET /metrics `authorizations` (otto/mamoru#26, for /ops): what the operator already holds in memory about each
+ * account's approval. Never a session key, signature, permission id or grant body. Whole USDC; ISO times.
+ */
+export type AuthorizationSnapshot = {
+  account: string
+  active: boolean
+  policyId: string
+  policyVersion: string
+  /** Pools the held grants name (`pool:...`), sorted. */
+  pools: string[]
+  /** The earliest validUntil of the held grants, or null without grants. */
+  validUntil: string | null
+  /** Per held grant (and v4 per-pool budget), how much of its allowance is used, bps. */
+  grants: { grant: string; usedBps: number }[]
+  capUsdc: number
+  capSource: CapSource
+  /** The cap the held grants were sized for. */
+  signedCapUsdc: number
+  /** SESSION_* conditions on the held approval (expired, renewal due, grants missing, usage spent, last engine code). */
+  holds: string[]
+  /** otto/mamoru#140: why the account stopped without its own owner op, or null. */
+  deactivated: string | null
+}
 const RELAYER_BALANCE_CACHE_MS = 60_000
 /**
  * otto/mamoru#135: how old the shared readSafe behind GET funding may be. 15 s for a poll, 60 s while the keyed
@@ -677,6 +705,40 @@ export class Operator {
     return this.gasReserveSnapshot().filter((s) => s.low).length
   }
 
+  /** GET /metrics `authorizations` (otto/mamoru#26): every known account, from memory only (no RPC). */
+  authorizationsSnapshot(): AuthorizationSnapshot[] {
+    return Object.values(this.store.state.accounts).map((acc) => {
+      const policy = this.policyOf(acc)
+      const { cap, source } = this.capOf(acc)
+      const untils = acc.grants.map((g) => g.grant.userOp.validUntil).filter((v) => v > 0)
+      // Multi-pool policies name the pool in the grant key; a single-pair policy's grants cover its bucket pools.
+      const named = [...new Set(acc.grants.map((g) => g.name.split(':').slice(1).join(':')).filter((p) => p.startsWith('pool:')))]
+      const pools = (named.length || !acc.grants.length ? named : this.bucketPools(acc)).sort()
+      const view = this.approvalView(acc)
+      const last = this.runners.has(acc.accountKey) ? this.engineHealth.snapshot(acc.accountKey).lastDecisionCode : null
+      const holds = [
+        ...(view?.expired ? ['SESSION_EXPIRED'] : view?.renewDue ? ['SESSION_RENEWAL_DUE'] : []),
+        ...(view?.missing ? ['SESSION_MISSING'] : []),
+        ...(view?.usage?.spent ? ['SESSION_USAGE_SPENT'] : []),
+      ]
+      if (last?.startsWith('SESSION_') && !holds.includes(last)) holds.push(last)
+      return {
+        account: acc.accountKey.slice(0, 8),
+        active: acc.active,
+        policyId: policy.policyId,
+        policyVersion: policy.version,
+        pools,
+        validUntil: untils.length ? new Date(Math.min(...untils) * 1000).toISOString() : null,
+        grants: this.grantUsage(acc),
+        capUsdc: Number(cap / 1_000_000n),
+        capSource: source,
+        signedCapUsdc: Number(this.signedCapOf(acc) / 1_000_000n),
+        holds,
+        deactivated: acc.deactivated?.code ?? null,
+      }
+    })
+  }
+
   /** GET /metrics: relayer ETH balance, cached 60s so a metrics poll never adds RPC load. */
   async relayerBalance(): Promise<{ wei: string; cachedAgeMs: number }> {
     const now = Date.now()
@@ -905,22 +967,35 @@ export class Operator {
     return acc
   }
 
-  /** The per-account cap at Start (otto/mamoru#127): from the account's engine settings (spec 006), else configured, else the code default. */
+  /** The per-account cap at Start (otto/mamoru#127, #26): see capOf. */
   capFor(acc: AccountState): bigint {
-    // With settings, they are the whole answer (the env override is already merged into them): no fall-through to the env cap.
+    return this.capOf(acc).cap
+  }
+
+  /**
+   * The per-account cap at Start and where it came from: the account's own cap (otto/mamoru#26), else its engine
+   * settings (spec 006: canary, else environment), else configured, else the code default. `emergency`: the local
+   * emergency file or MAMORU_CAP_USDC.
+   */
+  capOf(acc: AccountState): { cap: bigint; source: CapSource } {
+    // With settings, they are the whole answer (the env override is already merged into them, and an account cap is
+    // dropped under it): no fall-through to the env cap.
     const s = this.cfg.settings?.forAccount(acc.accountKey)
-    if (!s) return this.cfg.capUsdc ?? LIVE_CAP_USDC
-    const cap = capBaseUnits(s.settings) ?? LIVE_CAP_USDC
-    // The same rule as the boot check on MAMORU_CAP_USDC, for pulled settings: a cap above the default needs depth
-    // sizing actually applied to this account, which happens under a target-weights policy only. Otherwise the
-    // account keeps the default cap and the status names it.
+    if (!s) return this.cfg.capUsdc !== undefined ? { cap: this.cfg.capUsdc, source: 'emergency' } : { cap: LIVE_CAP_USDC, source: 'default' }
+    const own = s.accountCapUsdc ?? null
+    const cap = own !== null ? BigInt(own) * 1_000_000n : (capBaseUnits(s.settings) ?? LIVE_CAP_USDC)
+    // The same rule as the boot check on MAMORU_CAP_USDC, for pulled settings and account caps alike: a cap above the
+    // default needs depth sizing actually applied to this account, which happens under a target-weights policy only.
+    // Otherwise the account keeps the default cap and the status names it.
     if (cap > LIVE_CAP_USDC && (!s.settings.depth || this.policyOf(acc).allocation !== 'target-weights')) {
-      if (!this.capRefused.has(acc.accountKey)) console.log(`[alert] engine settings: cap ${fmtUsdc(cap)} refused for ${acc.accountKey.slice(0, 8)} (policy ${this.policyOf(acc).policyId} cannot size entries to depth); default cap kept`)
+      if (!this.capRefused.has(acc.accountKey)) console.log(`[alert] engine settings: ${own !== null ? 'account cap' : 'cap'} ${fmtUsdc(cap)} refused for ${acc.accountKey.slice(0, 8)} (${s.settings.depth ? `policy ${this.policyOf(acc).policyId} cannot size entries to depth` : 'depth sizing is off'}); default cap kept`)
       this.capRefused.add(acc.accountKey)
-      return LIVE_CAP_USDC
+      return { cap: LIVE_CAP_USDC, source: 'default' }
     }
     this.capRefused.delete(acc.accountKey)
-    return cap
+    const source: CapSource =
+      own !== null ? 'override' : s.source === 'local' || s.override.includes('capUsdc') ? 'emergency' : s.settings.capUsdc === null ? 'default' : s.canary ? 'canary' : 'env'
+    return { cap, source }
   }
 
   /** Accounts whose pulled cap was refused by capFor; reported in /metrics. */
@@ -1090,16 +1165,14 @@ export class Operator {
   }
 
   /**
-   * otto/mamoru#149: the engine grant closest to the end of what its approval allows, once it has used USAGE_RENEW_BPS
-   * of it: its usage limit (userOps included under it) or, for an entry grant, its fullest cumulative cap. Counted by
-   * the chain (refreshChainUsage: uses made with the key by anyone), or by the operator's own count where that is
-   * higher or the chain was not read. The renewal row offers a renewal from then on, so the engine is never blocked
-   * silently; `spent` says it already is (SESSION_USAGE_SPENT). Null when every grant is under the threshold.
+   * otto/mamoru#149: how much of what its approval allows each engine grant has used, in bps (its usage limit or, for
+   * an entry grant, its fullest cumulative cap), counted by the chain or the operator's own count, whichever is
+   * higher; then a v4 account's per-pool MamoruActionPolicy budgets as `enter-swap:<pool>`. In memory, no RPC.
    */
-  usageView(acc: AccountState): NonNullable<NonNullable<FundingView['approval']>['usage']> | null {
+  private grantUsage(acc: AccountState): { grant: string; usedBps: number }[] {
     const ledger = this.runners.get(acc.accountKey)?.engine.ledger
     const chain = this.chainUsage.get(acc.accountKey)?.byGrant
-    let worst: { grant: string; usedBps: number } | null = null
+    const out: { grant: string; usedBps: number }[] = []
     for (const g of acc.grants) {
       const u = ledger?.usageOf(g.permissionId)
       const limit = g.grant.userOp.usageLimit
@@ -1108,13 +1181,26 @@ export class Operator {
       const own = u?.used ?? acc.ops.filter((o) => o.state === 'confirmed' && o.permissionId?.toLowerCase() === id).length
       const used = Math.max(own, c?.used ?? 0)
       const usedBps = Math.max(limit > 0 ? Math.floor((used * 10_000) / limit) : 10_000, u?.spentBps ?? 0, c?.spentBps ?? 0)
-      if (!worst || usedBps > worst.usedBps) worst = { grant: g.name, usedBps }
+      out.push({ grant: g.name, usedBps })
     }
     // Spec 007 T7 (e): a v4 account's MamoruActionPolicy budget per pool (T_p, charged by swaps and mints) counts the
     // same way, as the pool's entry: the renewal (a new generation) starts it from zero before it binds.
     for (const [pool, usedBps] of this.chainUsage.get(acc.accountKey)?.budgets ?? []) {
-      if (!worst || usedBps > worst.usedBps) worst = { grant: `enter-swap:${pool}`, usedBps }
+      out.push({ grant: `enter-swap:${pool}`, usedBps })
     }
+    return out
+  }
+
+  /**
+   * otto/mamoru#149: the engine grant closest to the end of what its approval allows, once it has used USAGE_RENEW_BPS
+   * of it: its usage limit (userOps included under it) or, for an entry grant, its fullest cumulative cap. Counted by
+   * the chain (refreshChainUsage: uses made with the key by anyone), or by the operator's own count where that is
+   * higher or the chain was not read. The renewal row offers a renewal from then on, so the engine is never blocked
+   * silently; `spent` says it already is (SESSION_USAGE_SPENT). Null when every grant is under the threshold.
+   */
+  usageView(acc: AccountState): NonNullable<NonNullable<FundingView['approval']>['usage']> | null {
+    let worst: { grant: string; usedBps: number } | null = null
+    for (const u of this.grantUsage(acc)) if (!worst || u.usedBps > worst.usedBps) worst = u
     if (!worst || worst.usedBps < USAGE_RENEW_BPS) return null
     const pool = worst.grant.split(':').slice(1).join(':')
     const name = worst.grant.split(':')[0]!

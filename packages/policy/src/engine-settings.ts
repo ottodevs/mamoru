@@ -153,6 +153,37 @@ export function validateEngineSettings(s: unknown): string[] {
   return errors
 }
 
+/** An account key as the app stores it (a UUID today): letters, digits, `-` and `_`, at most 128 characters. */
+const ACCOUNT_KEY = /^[0-9A-Za-z_-]{1,128}$/
+
+/**
+ * otto/mamoru#26 (UI: otto/mamoru-astro#25): one row of `account_cap_overrides`. `capUsdc` is whole USDC within the
+ * same bounds as the environment cap, or null to remove the override (the account is back on its environment's cap).
+ * The /ops writer, the app Worker and the operator all check with this. Whether a cap above the default may run is
+ * decided at the operator (depth sizing applied, target-weights policy), as for the environment cap.
+ */
+export function validateAccountCapOverride(o: { accountKey: unknown; capUsdc: unknown }): string[] {
+  const errors: string[] = []
+  if (typeof o.accountKey !== 'string' || !ACCOUNT_KEY.test(o.accountKey)) errors.push('accountKey must be 1 to 128 letters, digits, - or _')
+  if (o.capUsdc !== null) inRange(errors, 'capUsdc', o.capUsdc, ENGINE_SETTINGS_BOUNDS.capUsdc)
+  return errors
+}
+
+/**
+ * The `accountCaps` map of the engine-settings payload: lowercase account key to whole USDC, removals already left
+ * out. Every reason it is not valid, empty when it is.
+ */
+export function validateAccountCaps(m: unknown): string[] {
+  if (!m || typeof m !== 'object' || Array.isArray(m)) return ['accountCaps must be an object']
+  const errors: string[] = []
+  for (const [k, v] of Object.entries(m as Record<string, unknown>)) {
+    if (k !== k.toLowerCase()) errors.push(`accountCaps key ${k.slice(0, 8)} must be lowercase`)
+    if (v === null) errors.push(`accountCaps.${k.slice(0, 8)} must be a number`)
+    else errors.push(...validateAccountCapOverride({ accountKey: k, capUsdc: v }).map((e) => `accountCaps.${k.slice(0, 8)}: ${e}`))
+  }
+  return errors
+}
+
 /** The validated value, or throws with every reason. */
 export function parseEngineSettings(s: unknown): EngineSettings {
   const errors = validateEngineSettings(s)
