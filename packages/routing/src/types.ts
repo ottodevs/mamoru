@@ -14,7 +14,8 @@ import type { Address, Hex } from '@mamoru/domain'
  *   recipient at all — e.g. relay.ts: Relay's deposit calldata carries only the depositor and an opaque
  *   request id; the destination recipient lives off-chain in Relay's own intent system and cannot be verified
  *   from anything the chain can see). A quote with 'none' must never be auto-executed, session-key or
- *   owner-signed — `calldata`/`value` are left undefined for exactly this reason; `target` may still be
+ *   owner-signed — `calldata` is left undefined for exactly this reason (`value` may still be set as an informational
+ *   native cost for ranking, e.g. deBridge's fixFee; without calldata it is never sent); `target` may still be
  *   populated as descriptive metadata about which contract the route would use.
  */
 export type RecipientCheck = 'onchain-pinnable' | 'decoded-calldata' | 'none'

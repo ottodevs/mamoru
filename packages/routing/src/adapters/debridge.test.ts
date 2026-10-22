@@ -1,3 +1,4 @@
+import { selectBest } from '../selector.ts'
 import { describe, expect, test } from 'bun:test'
 import { DEBRIDGE_DLN_SOURCE, debridgeAdapter } from './debridge.ts'
 import type { Fetch } from '../types.ts'
@@ -52,7 +53,16 @@ describe('debridgeAdapter', () => {
     expect(q.recipientCheck).toBe('none')
     expect(q.target.toLowerCase()).toBe('0xef4fb24ad0916217251f553c0596f8edc630eb66')
     expect(q.calldata).toBeUndefined()
-    expect(q.value).toBeUndefined()
+    // value is informational for ranking (the native fixFee), not an instruction: with no calldata it is never executable
+    expect(q.value).toBe(1_000_000_000_000_000n)
+  })
+
+  test('the native fixFee reaches the ranking: a deBridge USDC quote charging 0.001 ETH loses to a cheaper-all-in USDC route', async () => {
+    const req = { sourceChainId: 8453, destChainId: 1, asset: 'USDC' as const, amountIn: 150_000_000n, account: ACCOUNT }
+    const q = await debridgeAdapter.quote(req, { fetch: fetchReturning(DEBRIDGE_FIXTURE), now: () => NOW })
+    const other = { ...q, provider: 'other', amountOut: q.amountOut - 1_000_000n, value: undefined, calldata: '0x1234' as const, recipientCheck: 'onchain-pinnable' as const }
+    // 0.001 ETH at the conservative $5,000 is ~5 USDC, far above the 1 USDC output advantage
+    expect(selectBest([q, other])?.provider).toBe('other')
   })
 
   // otto/mamoru#181, review round 3: the recipient check never actually worked (see the module comment and the

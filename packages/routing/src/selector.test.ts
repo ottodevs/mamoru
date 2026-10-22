@@ -15,12 +15,26 @@ function quote(partial: Partial<Quote> & { provider: string; amountOut: bigint }
     fee: 150_000_000n - partial.amountOut,
     etaSec: 60,
     target: '0x2222222222222222222222222222222222222222',
+    calldata: '0x1234',
     recipientCheck: 'onchain-pinnable',
     mode: 'session-key',
     expiresAt: new Date(1_000_000).toISOString(),
     ...partial,
   }
 }
+
+describe('selectBest, executable only when a mode is requested', () => {
+  test('owner-only never returns a quote-only route (no calldata / recipientCheck none), even when it ranks best', () => {
+    const quoteOnly = quote({ provider: 'quoteonly', amountOut: 150_000_000n, mode: 'owner-only', recipientCheck: 'none', calldata: undefined })
+    const noCalldata = quote({ provider: 'nocalldata', amountOut: 149_999_000n, mode: 'owner-only', calldata: undefined })
+    const exec = quote({ provider: 'exec', amountOut: 149_000_000n, mode: 'owner-only', recipientCheck: 'decoded-calldata' })
+    expect(selectBest([quoteOnly, noCalldata, exec], { mode: 'owner-only' })?.provider).toBe('exec')
+    expect(selectBest([quoteOnly, noCalldata], { mode: 'owner-only' })).toBeNull()
+    expect(rank([quoteOnly, noCalldata, exec], { mode: 'owner-only' }).map((q) => q.provider)).toEqual(['exec'])
+    // no mode: a UI comparison still sees quote-only routes
+    expect(selectBest([quoteOnly, exec])?.provider).toBe('quoteonly')
+  })
+})
 
 describe('selectBest', () => {
   test('picks the highest net output', () => {

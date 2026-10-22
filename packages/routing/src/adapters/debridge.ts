@@ -199,6 +199,9 @@ export const debridgeAdapter: Adapter = {
       fee: req.amountIn - amountOut,
       etaSec,
       target,
+      // Informational: the native cost (tx.value, already validated against fixFee above) so ranking prices it
+      // instead of treating it as zero. No calldata accompanies it, so it is never an instruction to send.
+      value,
       recipientCheck: 'none',
       mode: 'owner-only',
       expiresAt: new Date(now + DEFAULT_TTL_MS).toISOString(),

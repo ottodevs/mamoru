@@ -31,7 +31,7 @@ export async function quoteAll(req: QuoteRequest, adapters: readonly Adapter[], 
 }
 
 export type SelectOptions = {
-  /** Keep only quotes signable in this mode. Omit to consider every mode (useful for a UI that shows both). */
+  /** Keep only EXECUTABLE quotes (calldata present, recipient verified) signable in this mode. Omit to consider every mode (useful for a UI that shows both). */
   mode?: SigningMode
 }
 
@@ -67,8 +67,18 @@ function compareQuotes(a: Quote, b: Quote): number {
   return a.etaSec - b.etaSec
 }
 
+/** A quote the caller could actually send: it carries the exact call and its recipient is verified somehow.
+ * Quote-only routes (`recipientCheck: 'none'`, no calldata) are price oracles for a comparison UI. */
+function executable(q: Quote): boolean {
+  return q.calldata !== undefined && q.recipientCheck !== 'none'
+}
+
+function poolFor(quotes: readonly Quote[], opts: SelectOptions): readonly Quote[] {
+  return opts.mode === undefined ? quotes : quotes.filter((q) => q.mode === opts.mode && executable(q))
+}
+
 export function selectBest(quotes: readonly Quote[], opts: SelectOptions = {}): Quote | null {
-  const pool = opts.mode === undefined ? quotes : quotes.filter((q) => q.mode === opts.mode)
+  const pool = poolFor(quotes, opts)
   if (pool.length === 0) return null
   return pool.reduce((best, q) => (compareQuotes(q, best) < 0 ? q : best))
 }
@@ -76,6 +86,6 @@ export function selectBest(quotes: readonly Quote[], opts: SelectOptions = {}): 
 /** Ranks every quote best-first, same ordering as `selectBest`. Lets a caller show "Across — fastest, 2nd best
  * net output" style comparisons instead of only the single winner. */
 export function rank(quotes: readonly Quote[], opts: SelectOptions = {}): Quote[] {
-  const pool = opts.mode === undefined ? quotes : quotes.filter((q) => q.mode === opts.mode)
+  const pool = poolFor(quotes, opts)
   return [...pool].sort(compareQuotes)
 }
