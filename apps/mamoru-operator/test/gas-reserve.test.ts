@@ -4,7 +4,7 @@ import { ALERT_RUNWAY_ACTIONS, ONE_ACTION_WEI, defaultGasReserveAlertWei, gasRes
 
 // Real live-policy numbers, not invented ones (operator#8 review, finding #4): the hard floor the engine
 // freezes at (ehgPreliminary's ACCT_GAS_RESERVE_LOW) and the target the relayer actually funds a Safe to at
-// activation (gasReserveWei + TOP_UP_MARGIN_WEI, subsidy.ts/operator.ts). TOP_UP_MARGIN_WEI itself is not
+// activation (gasReserveWei + TOP_UP_MARGIN_WEI, operator.ts activation top-up). TOP_UP_MARGIN_WEI itself is not
 // exported from operator.ts; its value (200_000_000_000_000n) is pinned here so a change to either constant
 // breaks this test loudly instead of silently drifting the "freshly activated is not low" guarantee.
 const GAS_RESERVE_WEI = conservadorLiveV1.gasReserveWei

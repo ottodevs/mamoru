@@ -3,16 +3,16 @@ import { LAB_GAS_LIMITS, MAX_PRIORITY_FEE_PER_GAS } from '@mamoru/scenarios/driv
 type Env = Record<string, string | undefined>
 
 /**
- * otto/mamoru#8: the relayer funds a Safe's gas reserve once, at activation (otto/mamoru#82's top-up, subsidy.ts:
- * `policy.gasReserveWei + TOP_UP_MARGIN_WEI`, about 0.0005 ETH live). Every engine rebalance and fee collection
+ * otto/mamoru#8: the relayer funds a Safe's gas reserve once, at activation (operator.ts's activation top-up to
+ * `policy.gasReserveWei + TOP_UP_MARGIN_WEI`, about 0.0005 ETH live, charged to sponsorship.ts's activation budget). Every engine rebalance and fee collection
  * since then spends from that same balance and nothing ever tops it back up, so an active account's native
  * balance drifts down towards the policy's own floor (`ehgPreliminary`'s `ACCT_GAS_RESERVE_LOW`,
  * `packages/decide/src/gates/index.ts`), at which point the engine stops reviewing it entirely: no more
  * rebalances, no more fee collection, with nothing in the journal louder than one decision line saying so.
  *
  * This module only detects that drift and says so (alert, not top-up). An automatic refill spends relayer ETH on
- * real funds and must respect otto/mamoru#82's subsidy limits (per-Safe, per-passkey and daily caps) — that is a
- * follow-up gated on #82 landing first, not this ticket.
+ * real funds and must go through sponsorship.ts's limits (per-account counts and the daily relayer budget, as the
+ * activation top-up does) so a drained account cannot be cycled into repeated payouts — a follow-up, not this ticket.
  */
 
 /**

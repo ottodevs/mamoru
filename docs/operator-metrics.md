@@ -126,8 +126,9 @@ account keys are shortened to 8 chars. Example (values illustrative):
   `migrations/d1/0013_operator_metrics.sql`) by `apps/mamoru-app/src/api/operator-metrics.ts`'s cron pull, for the
   `/ops` console (separate repo) to read without hitting the operator directly.
 - **Gas reserve (otto/mamoru#8), detection + alert only, no automatic top-up**: the relayer funds a
-  Safe's gas reserve exactly once, at activation (otto/mamoru#82's top-up, `apps/mamoru-operator/src/subsidy.ts`:
-  `policy.gasReserveWei + TOP_UP_MARGIN_WEI`, ~0.0005 ETH on the live policy). Every engine rebalance
+  Safe's gas reserve exactly once, at activation (the activation top-up in `apps/mamoru-operator/src/operator.ts`
+  to `policy.gasReserveWei + TOP_UP_MARGIN_WEI`, ~0.0005 ETH on the live policy, charged to the daily
+  activation budget in `src/sponsorship.ts`). Every engine rebalance
   and fee collection since then spends from that same balance and nothing refills it, so an active
   account drifts toward the policy's own floor (`ehgPreliminary`'s `ACCT_GAS_RESERVE_LOW`,
   `packages/decide/src/gates/index.ts`), at which point the engine stops reviewing it entirely — no
@@ -170,15 +171,14 @@ account keys are shortened to 8 chars. Example (values illustrative):
     `gasReserveLow` forever, and a re-armed account's first `/metrics` read never shows its stale
     pre-stop balance before its own first new review has run.
   - **Known gap**: `Observation.native` is the Safe's own address balance; it does not see ETH already
-    sitting as an EntryPoint deposit credit from a prior userOp's unused prefund (noted in otto/mamoru#82
-    too — "not known at signing"), so the true usable reserve can be slightly understated.
-  - **Follow-up, gated on otto/mamoru#82**: turning this alert into an automatic top-up means spending
-    more relayer ETH on real funds, and must go through #82's subsidy limits (per-Safe, per-passkey and
-    daily budget caps) so a drained account cannot be cycled into a repeated payout the same way the
-    original one-time activation reserve could. Until that lands, a low reserve is an operator-ops
-    signal only: top up the Safe by hand, or ask the owner to (the app already tells an owner who
-    cannot *start* for lack of gas via the `SUBSIDY_*` refusal codes in `apps/mamoru-app/src/web/lib/ops.ts`;
-    this ticket is about an account already running, which that path does not cover).
+    sitting as an EntryPoint deposit credit from a prior userOp's unused prefund, so the true usable
+    reserve can be slightly understated.
+  - **Follow-up**: turning this alert into an automatic top-up means spending more relayer ETH on real
+    funds, and must go through `src/sponsorship.ts`'s limits (per-account counts and the daily relayer
+    budget, as the activation top-up already does) so a drained account cannot be cycled into repeated
+    payouts. Until then, a low reserve is an operator-ops signal only: top up the Safe by hand, or ask
+    the owner to. Activation-time refusals (`ACTIVATION_LIMIT`, `SPONSOR_*`) cover an account that
+    cannot *start*; this alert is about an account already running, which that path does not cover.
 - **Relayer balance** is cached 60s so a metrics poll never adds RPC load.
 - **Bounded cardinality**: a method outside the fixed CU table (`eth_call`, `eth_getLogs`, ...) folds
   into an `"other"` method bucket instead of creating a new permanent one, and provider labels beyond
