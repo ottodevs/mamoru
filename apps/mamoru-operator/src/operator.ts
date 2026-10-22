@@ -2527,8 +2527,8 @@ export class Operator {
     let fairCost: bigint | null = null
     if (probe) {
       try {
-        const tick = await twapTickAt(this.client, address(probe.pool, baseRegistry), SELF_RESERVE_TWAP_SECONDS, r.block)
-        fairCost = usdcForWeiAtTick(target - r.eth, tick, entry(probe.pool, baseRegistry).token0 === 'WETH')
+        const tick = await twapTickAt(this.client, address(probe.pool, this.cfg.registry), SELF_RESERVE_TWAP_SECONDS, r.block)
+        fairCost = usdcForWeiAtTick(target - r.eth, tick, entry(probe.pool, this.cfg.registry).token0 === 'WETH')
       } catch (e) {
         logErr(`[activate] ${safe} no TWAP for the gas reserve swap:`, e)
       }
@@ -2540,7 +2540,7 @@ export class Operator {
       return null
     }
     try {
-      const quoted = await quoteExactInputSingle(this.client, { tokenIn: address('USDC', baseRegistry), tokenOut: address('WETH', baseRegistry), fee, amountIn: plan.amountIn, blockNumber: r.block })
+      const quoted = await this.v3.quoteExactInputSingle(this.client, { tokenIn: address('USDC', this.cfg.registry), tokenOut: address('WETH', this.cfg.registry), fee, amountIn: plan.amountIn, blockNumber: r.block })
       if (!selfReserveConfirmed(plan.minOut, quoted)) {
         console.log(`[activate] ${safe} gas reserve not bought in the batch: QUOTE_SHORT (${plan.amountIn} USDC -> ${quoted} wei, need ${plan.minOut})`)
         return null
