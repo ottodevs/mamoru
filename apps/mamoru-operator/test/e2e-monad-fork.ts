@@ -1,7 +1,7 @@
 // otto/mamoru#63: the operator boots against a fork of Monad, reads a Safe and values its position without any Base
 // constant. The Safe and its WMON/USDC position come from the Monad lab (packages/scenarios/monad, MONAD-01 up to the
 // open position). The operator talks to anvil through the engine port (no anvil_* methods) and reads the Monad
-// registry (MAMORU_SOURCE_CHAIN_ID=143 on a lab chain id). It is not live: owner transactions are refused.
+// registry (MAMORU_SOURCE_CHAIN_ID=143 on a lab chain id). Off Base it signs and sends nothing (CHAIN_READ_ONLY).
 //   bun apps/mamoru-operator/test/e2e-monad-fork.ts [prestate.json.gz]
 // With a prestate it runs offline on a plain anvil (bun run scenarios:monad replay's state); without, it forks Monad
 // at the block pinned in scenarios/monad/manifest.json through the public RPC (MONAD_RPC_URL overrides it).
@@ -101,7 +101,10 @@ try {
 
   // --- not live: an owner transaction is refused ----------------------------------------------------------------
   const prep = await call<{ code?: string }>('POST', `${base}/activate/prepare`, {})
-  check(prep.status === 503 && prep.json.code === 'DRY_RUN_STOP', `activate/prepare refused on Monad: ${prep.status} ${prep.json.code}`)
+  check(prep.status === 503 && prep.json.code === 'CHAIN_READ_ONLY', `activate/prepare refused on Monad: ${prep.status} ${prep.json.code}`)
+  const sent = (await op.operator.relayer.send({ to: acct.safe, value: 1n }).catch((e: unknown) => e)) as { code?: string }
+  check(sent.code === 'CHAIN_UNSUPPORTED', `the relayer refuses to send on Monad: ${sent.code}`)
+  check(op.operator.cfg.bundlerUrl === '', 'no loopback bundler was started')
   check(enginePort.stats().rejectedLabMethods === 0, 'the operator never asked anvil for a lab method')
 
   console.log(`\nE2E MONAD PASS: ${checks} checks. The operator booted on the Monad registry, read Safe ${acct.safe} and valued position #${tokenId} at ${fmt(value, 6)} USDC.`)
