@@ -686,8 +686,12 @@ export class Operator {
 
   /**
    * otto/mamoru#163, read only, once at boot: owner activations and renewals closed as OWNER_TX_FAILED before this
-   * change whose Safe nonce has not moved past theirs. Their signature can still be relayed by anyone and enable grants
-   * the operator does not track. Logged for the coordinator; nothing is changed. Returns how many were found.
+   * change that may have enabled grants the operator does not track. Their Safe nonce not moved past theirs: the
+   * signature can still be relayed by anyone. Moved past it: the block that spent it is read (spentBy); the op is
+   * dismissed only when that block proves its own Safe tx did not succeed there (another Safe tx, or its own
+   * ExecutionFailure). Its own ExecutionSuccess (a later relay of the reverted signature) means its grants are enabled
+   * and must be revoked; no conclusion means a check by hand. Logged for the coordinator; nothing is changed. Returns
+   * how many were found.
    */
   async scanRevertedExposure(): Promise<number> {
     let exposed = 0
@@ -708,6 +712,22 @@ export class Operator {
         } else if (nonce === null || nonce <= BigInt(o.safeNonce)) {
           exposed++
           console.log(`[exposure#163] ${at}: reverted at Safe nonce ${o.safeNonce}, Safe now at ${nonce ?? 'unknown'}: its signature is still relayable`)
+        } else {
+          // Past its nonce: whatever spent it may be this very signature, relayed after the revert.
+          const grants = (o.ownerGrants ?? []).map((g) => g.permissionId).join(',') || 'none kept'
+          let spent: SpentBy | null = null
+          if (o.safeTxHash) {
+            try {
+              const head = await this.client.getBlockNumber({ cacheTime: 0 })
+              spent = await this.spentBy(acc, o, head)
+            } catch (e) {
+              logErr(`[exposure#163] ${acc.accountKey} ${o.opId} spending block unreadable:`, e)
+            }
+          }
+          if (spent && (!spent.ours || !spent.success)) continue
+          exposed++
+          if (spent) console.log(`[exposure#163] ${at}: reverted at Safe nonce ${o.safeNonce}, then relayed and executed in tx ${spent.tx} at block ${spent.block}: its grants are enabled (${grants}); revoke them`)
+          else console.log(`[exposure#163] ${at}: reverted at Safe nonce ${o.safeNonce}, Safe now at ${nonce}: what spent that nonce is not proven${o.safeTxHash ? '' : ' (no Safe tx hash kept)'}; its grants (${grants}) may be enabled, check by hand`)
         }
       }
     }

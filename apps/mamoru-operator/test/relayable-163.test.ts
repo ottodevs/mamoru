@@ -322,10 +322,70 @@ describe('boot-time exposure scan (read only)', () => {
     } finally {
       console.log = log
     }
-    // own-1 (nonce 2, Safe at 2): relayable; own-3 (no nonce kept): to check by hand; own-2 (Safe past it) and the transfer: not listed.
-    expect(n).toBe(2)
-    expect(lines.filter((l) => l.startsWith('[exposure#163]')).map((l) => l.split(' ')[2])).toEqual(['own-1-activate', 'own-3-activate'])
+    // own-1 (nonce 2, Safe at 2): relayable; own-2 (Safe past it, no Safe tx hash kept: what spent it is unproven) and
+    // own-3 (no nonce kept): to check by hand; the transfer: not listed.
+    expect(n).toBe(3)
+    expect(lines.filter((l) => l.startsWith('[exposure#163]')).map((l) => l.split(' ')[2])).toEqual(['own-1-activate', 'own-2-renew', 'own-3-activate'])
     expect(lines.join('\n')).toContain(SAFE)
     expect(JSON.stringify(acc.ops.map((o) => [o.opId, o.state, o.code]))).toBe(before)
+  })
+})
+
+describe('boot-time exposure scan: a pre-upgrade op whose Safe nonce moved past it (read only)', () => {
+  const hash = keccak256(stringToHex('old renewal safe tx'))
+  /** A renewal closed OWNER_TX_FAILED before this change at Safe nonce 1; the Safe moved to 2 at block 110, head 130. */
+  const scan = async (logs: (w: ReturnType<typeof world>) => void) => {
+    const w = world(10_000_000n)
+    w.chain.deployed = true
+    w.chain.nonce = 2n
+    w.knobs.nonceAt = (b) => (b >= 110n ? 2n : 1n)
+    w.knobs.blockHead = 130n
+    logs(w)
+    const acc = w.op.account(ctx).acc
+    acc.active = false
+    const at = new Date(Date.now() - 600_000).toISOString()
+    acc.ops.push({ opId: 'own-9-renew', kind: 'renew', state: 'failed', code: 'OWNER_TX_FAILED', updatedAt: at, safeNonce: '1', safeTxHash: hash, ownerGrants: [{ permissionId: `0x${'ab'.repeat(32)}` }] } as never)
+    const before = JSON.stringify(acc.ops)
+    const lines: string[] = []
+    const log = console.log
+    console.log = (...a: unknown[]) => void lines.push(a.map(String).join(' '))
+    let n = 0
+    try {
+      n = (await quiet(() => w.op.scanRevertedExposure())).out
+    } finally {
+      console.log = log
+    }
+    expect(JSON.stringify(acc.ops)).toBe(before)
+    return { n, out: lines.filter((l) => l.startsWith('[exposure#163]')).join('\n') }
+  }
+
+  test('its reverted signature was relayed later and executed: listed, its grants to revoke', async () => {
+    const r = await scan((w) => void (w.knobs.safeLogs = [execLog(hash, 'third-party relay', 110n)]))
+    expect(r.n).toBe(1)
+    expect(r.out).toContain('own-9-renew')
+    expect(r.out).toContain(keccak256(stringToHex('third-party relay')))
+    expect(r.out).toContain('ab'.repeat(32))
+  })
+
+  test('the spending block cannot be read: listed, to check by hand', async () => {
+    const r = await scan((w) => {
+      w.knobs.safeLogs = [execLog(hash, 'third-party relay', 110n)]
+      w.knobs.blockLogsDown = true
+    })
+    expect(r.n).toBe(1)
+    expect(r.out).toContain('check by hand')
+  })
+
+  test('another Safe tx provably spent its nonce: not listed', async () => {
+    const r = await scan((w) => void (w.knobs.safeLogs = [execLog(keccak256(stringToHex('a withdrawal')), 'withdrawal', 110n)]))
+    expect(r.n).toBe(0)
+  })
+
+  test('another Safe tx in that block but a guard is set (no proof): listed', async () => {
+    const r = await scan((w) => {
+      w.knobs.safeLogs = [execLog(keccak256(stringToHex('a withdrawal')), 'withdrawal', 110n)]
+      w.knobs.guard = `0x${'0'.repeat(24)}${'9'.repeat(40)}`
+    })
+    expect(r.n).toBe(1)
   })
 })
