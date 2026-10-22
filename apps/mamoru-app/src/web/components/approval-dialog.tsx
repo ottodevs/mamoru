@@ -126,23 +126,26 @@ function Facts({ facts }: { facts: SignedFacts }) {
   )
 }
 
-/** Every signed line, in its order: per-pool limits as their own block, the rest as a list. */
+/**
+ * Every signed line, in its order: per-pool limits as their own block, the rest as a list. Open from the start: the
+ * owner sees every line next to the Approve button and may fold it, never has to unfold it to read it (#41).
+ */
 export function SignedLines({ lines }: { lines: string[] }) {
   return (
-    <details className="signed" data-testid="review">
+    <details className="signed" data-testid="review" open>
       <summary>
         {approvalCopy.details}
         <span className="signed-count">{lines.length} lines</span>
       </summary>
       <ol className="signed-list">
-        {lines.map((l) => {
+        {lines.map((l, i) => {
           const pool = l.match(POOL_LINE)
           return pool ? (
-            <li key={l} className="signed-pool">
+            <li key={i} className="signed-pool">
               <span className="signed-pool-name">In {pool[1]}:</span> <Emph text={pool[2]!} />
             </li>
           ) : (
-            <li key={l}>
+            <li key={i}>
               <Emph text={l} />
             </li>
           )
@@ -170,11 +173,11 @@ export function ApprovalBody({ lead, summary, busy, error, onPrepare, onApprove,
           {approvalCopy.later}
         </button>
         {summary ? (
-          <button type="button" className="cta" onClick={onApprove} disabled={busy !== null}>
+          <button key="approve" type="button" className="cta" onClick={onApprove} disabled={busy !== null}>
             {busy === 'signing' ? approvalCopy.signing : approvalCopy.approve}
           </button>
         ) : (
-          <button type="button" className="cta" onClick={onPrepare} disabled={busy !== null}>
+          <button key="review" type="button" className="cta" onClick={onPrepare} disabled={busy !== null}>
             {busy === 'preparing' ? approvalCopy.preparing : approvalCopy.review}
           </button>
         )}

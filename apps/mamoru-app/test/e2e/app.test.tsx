@@ -593,6 +593,8 @@ describe('renewing the approval', () => {
     ]
     const { text, html } = render(<ApprovalBody lead="It ends soon." summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} />)
     expect(html).toContain('data-testid="review"')
+    // #41 / #176 review: the signed lines are open next to Approve, never folded away by default.
+    expect(html).toMatch(/<details[^>]*data-testid="review"[^>]*\bopen/)
     for (const line of summary) expect(text).toContain(line)
     expect(signedFacts(summary)).toEqual({ days: 365, capUsdc: '1,000.00', pools: ['USDC/cbBTC 0.05%'] })
     expect(text).toContain('Approve with passkey')

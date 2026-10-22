@@ -845,16 +845,17 @@ export function askedBefore(key: string, storageOf: () => AskStorage | null = ta
   return false
 }
 
-function RenewDialog({ accountKey, approval, open, onClose, onDone }: { accountKey: string; approval: NonNullable<FundingView['approval']>; open: boolean; onClose: () => void; onDone: (signedKey: string) => void }) {
+function RenewDialog({ accountKey, approval, open, onClose, onDone }: { accountKey: string; approval: NonNullable<FundingView['approval']>; open: boolean; onClose: () => void; onDone: (signedKey: string, opId: string) => void }) {
   const flow = useOwnerAction(accountKey, 'renew')
   const prepared = useFittingPrepared(approval, flow)
   const done = !!flow.result && flow.result.state !== 'failed'
+  const doneOp = done ? flow.result!.opId : null
   useEffect(() => {
-    if (!done) return
-    // The key of the approval this dialog signed, not whatever the poll shows by now.
-    onDone(approvalRowKey(approval))
+    if (!doneOp) return
+    // The key of the approval this dialog signed, not whatever the poll shows by now, and the op that carries it.
+    onDone(approvalRowKey(approval), doneOp)
     onClose()
-  }, [done, onClose, onDone, approval])
+  }, [doneOp, onClose, onDone, approval])
   const { title, lead } = approvalHeading(approval)
   return (
     <ApprovalDialog title={title} open={open && !done} onClose={onClose}>
@@ -917,10 +918,21 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const openApproval = useCallback(() => setRenewAsked(true), [])
   // The approval just signed here: its row steps aside until the funding poll shows the next one (a new end date,
   // fewer grants missing), so it never offers a button whose dialog has nothing left to do (#176 review).
-  const [signedKey, setSignedKey] = useState<string | null>(null)
+  // #176 review (Opus P1 2, 3): the signed approval is tied to its op. If that op fails, the row comes back so the
+  // renewal can be tried again; while a renewal is on its way the dialog's gate drops, so the ask is closed too and
+  // nothing reopens on its own for an approval just renewed.
+  const [signed, setSigned] = useState<{ key: string; opId: string } | null>(null)
   const approvalKey = f?.approval ? approvalRowKey(f.approval) : null
-  const markSigned = useCallback((key: string) => setSignedKey(key), [])
-  const approvalOpen = !!f?.approval && approvalKey !== signedKey
+  const markSigned = useCallback((key: string, opId: string) => setSigned({ key, opId }), [])
+  const inFlightRenew = opList.find((o) => o.kind === 'renew' && !TERMINAL.has(o.state))?.opId ?? null
+  useEffect(() => {
+    if (!inFlightRenew) return
+    setRenewAsked(false)
+    // A renewal sent from elsewhere (another tab) marks the approval shown now as the one it renews.
+    setSigned((s) => (s?.opId === inFlightRenew ? s : approvalKey ? { key: approvalKey, opId: inFlightRenew } : s))
+  }, [inFlightRenew, approvalKey])
+  const signedFailed = !!signed && opList.some((o) => o.opId === signed.opId && o.state === 'failed')
+  const approvalOpen = !!f?.approval && (approvalKey !== signed?.key || signedFailed)
   // A confirmed activation exists somewhere in this account's history (Stop and restart only matter once this
   // is true); ops history, not the funding poll, so this is never behind it.
   const ranBefore = everStarted(opList)
