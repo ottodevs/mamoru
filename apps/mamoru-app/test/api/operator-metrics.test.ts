@@ -5,6 +5,8 @@ import type { OperatorFetch } from '../../src/api/yield-ledger.ts'
 
 const SECRET = 'test-operator-secret'
 
+const AUTH = { account: '3f9a7c21', active: true, policyId: 'conservador-live-v2', policyVersion: '2', pools: ['pool:USDC/cbBTC/500'], validUntil: '2026-11-01T00:00:00.000Z', grants: [{ grant: 'enter-swap:pool:USDC/cbBTC/500', usedBps: 1200 }], capUsdc: 2000, capSource: 'override' as const, signedCapUsdc: 1000, holds: ['SESSION_RENEWAL_DUE'], deactivated: null }
+
 function rawMetrics(over: Partial<OperatorMetricsWire> = {}): OperatorMetricsWire {
   return {
     generatedAt: '2026-10-18T09:00:00.000Z',
@@ -28,6 +30,7 @@ function rawMetrics(over: Partial<OperatorMetricsWire> = {}): OperatorMetricsWir
     },
     engines: [{ account: '3f9a7c21', lastReviewAt: '2026-10-18T08:59:00.000Z', lastDecisionCode: 'DECIDE_HOLD', consecutiveErrors: 0, lastErrorClass: null, lastErrorAt: null, reviewsLastHour: 58, errorsLastHour: 0 }],
     opsRecent: [{ accountKey: '3f9a7c21', kind: 'enter', state: 'confirmed', at: '2026-10-18T08:58:00.000Z', code: null }],
+    authorizations: [AUTH],
     ...over,
   }
 }
@@ -130,6 +133,7 @@ describe('toStoredMetrics never spreads the input (code-review finding, PR #92)'
       rpc: { last48h: [], cuEstimateTotal: 0, byComponent: { cumulative: {}, last48h: [] } },
       engines: [],
       opsRecent: [],
+      authorizations: [],
     })
     expect(toStoredMetrics(null)).toEqual(toStoredMetrics({}))
     expect(toStoredMetrics('garbage')).toEqual(toStoredMetrics({}))
@@ -250,5 +254,24 @@ describe('writeOperatorMetrics / pullOperatorMetrics (otto/mamoru#129 follow-up)
     expect('chainId' in payload.operator).toBe(false)
     expect('live' in payload.operator).toBe(false)
     expect('policyId' in payload.operator).toBe(false)
+  })
+})
+
+describe('toStoredMetrics: authorizations (otto/mamoru#26)', () => {
+  test('kept field by field; extra fields, bad entries and bad values dropped; an older operator stores []', () => {
+    expect(toStoredMetrics(rawMetrics()).authorizations).toEqual([AUTH])
+    const dirty = rawMetrics({
+      authorizations: [
+        { ...AUTH, account: '3f9a7c21-full-key', sessionKey: '0x' + 'ab'.repeat(32), grants: [{ grant: 'x', usedBps: 5, permissionId: '0x01' }, { usedBps: 1 }], capSource: 'whatever', validUntil: 'tomorrow', holds: ['SESSION_EXPIRED', 7] },
+        { capUsdc: 5 },
+      ] as never,
+    })
+    const [a, ...rest] = toStoredMetrics(dirty).authorizations
+    expect(rest).toEqual([])
+    expect(a).toEqual({ ...AUTH, account: '3f9a7c21', grants: [{ grant: 'x', usedBps: 5 }], capSource: 'default', validUntil: null, holds: ['SESSION_EXPIRED'] })
+    expect(JSON.stringify(a)).not.toContain('abab')
+    const old = rawMetrics() as Partial<OperatorMetricsWire>
+    delete old.authorizations
+    expect(toStoredMetrics(old).authorizations).toEqual([])
   })
 })

@@ -39,6 +39,9 @@ function fakeOperator(): Operator {
       { account: '3f9a7c21', lastReviewAt: '2026-10-02T09:14:40.000Z', lastDecisionCode: 'DECIDE_HOLD', consecutiveErrors: 0, lastErrorClass: null, lastErrorAt: null, reviewsLastHour: 58, errorsLastHour: 0 },
       { account: '9b0e41aa', lastReviewAt: '2026-10-02T09:14:55.000Z', lastDecisionCode: null, consecutiveErrors: 4, lastErrorClass: 'rpc_other', lastErrorAt: '2026-10-02T09:14:55.000Z', reviewsLastHour: 12, errorsLastHour: 4 },
     ],
+    authorizationsSnapshot: () => [
+      { account: '3f9a7c21', active: true, policyId: 'conservador-live-v2', policyVersion: '2', pools: ['pool:USDC/cbBTC/500'], validUntil: '2026-11-01T00:00:00.000Z', grants: [{ grant: 'enter-swap:pool:USDC/cbBTC/500', usedBps: 1200 }], capUsdc: 2000, capSource: 'override', signedCapUsdc: 1000, holds: [], deactivated: null },
+    ],
     recentOps: () => [
       { accountKey: '3f9a7c21', kind: 'enter', state: 'confirmed', at: '2026-10-02T09:14:41.000Z', code: null },
       { accountKey: '9b0e41aa', kind: 'activate', state: 'failed', at: '2026-10-02T09:14:30.000Z', code: 'DEPOSIT_OVER_CAP' },
@@ -205,6 +208,7 @@ describe('GET /metrics never carries injected secret-shaped free text (finding #
       recentOps: () => [],
       gasReserveLowCount: () => 0,
       gasReserveSnapshot: () => [],
+      authorizationsSnapshot: () => [],
     } as unknown as Operator
 
     const rpcMetrics = new RpcMetrics(tmpDir())

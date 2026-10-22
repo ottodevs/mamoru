@@ -108,6 +108,8 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
     opsRecent: op.recentOps(300),
     // otto/mamoru#8: per-account gas-reserve alert state (native balance vs threshold), running accounts only.
     gasReserve: op.gasReserveSnapshot(),
+    // otto/mamoru#26: each account's approval as the operator holds it (policy, pools, validity, usage, cap and its source).
+    authorizations: op.authorizationsSnapshot(),
   }
 }
 

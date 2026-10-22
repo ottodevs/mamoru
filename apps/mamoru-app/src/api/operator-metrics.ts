@@ -29,6 +29,25 @@ export type EngineHealthWire = {
 }
 
 /**
+ * apps/mamoru-operator/src/operator.ts AuthorizationSnapshot, as GET /metrics `authorizations` serves it
+ * (otto/mamoru#26): per account (8 chars) the approval the operator holds, and the cap in effect with its source.
+ */
+export type AuthorizationWire = {
+  account: string
+  active: boolean
+  policyId: string
+  policyVersion: string
+  pools: string[]
+  validUntil: string | null
+  grants: { grant: string; usedBps: number }[]
+  capUsdc: number
+  capSource: 'override' | 'canary' | 'env' | 'default' | 'emergency'
+  signedCapUsdc: number
+  holds: string[]
+  deactivated: string | null
+}
+
+/**
  * GET /metrics `opsRecent` (otto/mamoru#129, apps/mamoru-operator/src/operator.ts Operator.recentOps): exactly
  * these five fields, never a grant, session key, signature, salt or userOp.
  */
@@ -74,6 +93,7 @@ export type OperatorMetricsWire = {
   }
   engines: EngineHealthWire[]
   opsRecent: RecentOpWire[]
+  authorizations: AuthorizationWire[]
 }
 
 /**
@@ -100,6 +120,7 @@ export type StoredOperatorMetrics = {
   }
   engines: EngineHealthWire[]
   opsRecent: RecentOpWire[]
+  authorizations: AuthorizationWire[]
 }
 
 // ---- allow-list readers: every one below reads a single, type-checked value out of an `unknown` and either
@@ -238,6 +259,34 @@ function engineHealth(v: unknown): EngineHealthWire | null {
   }
 }
 
+const CAP_SOURCES = ['override', 'canary', 'env', 'default', 'emergency'] as const
+
+/** otto/mamoru#26: one `authorizations` entry rebuilt field by field; one without an account string is dropped. */
+function authorization(v: unknown): AuthorizationWire | null {
+  const o = asObj(v)
+  if (typeof o.account !== 'string') return null
+  const strs = (x: unknown) => asArr(x).filter((y): y is string => typeof y === 'string')
+  return {
+    account: o.account.slice(0, 8),
+    active: asBool(o.active),
+    policyId: asStr(o.policyId),
+    policyVersion: asStr(o.policyVersion),
+    pools: strs(o.pools),
+    validUntil: asIso(o.validUntil),
+    grants: asArr(o.grants)
+      .map((g) => {
+        const go = asObj(g)
+        return typeof go.grant === 'string' ? { grant: go.grant, usedBps: asNum(go.usedBps) } : null
+      })
+      .filter((x): x is { grant: string; usedBps: number } => x !== null),
+    capUsdc: asNum(o.capUsdc),
+    capSource: (CAP_SOURCES as readonly string[]).includes(o.capSource as string) ? (o.capSource as AuthorizationWire['capSource']) : 'default',
+    signedCapUsdc: asNum(o.signedCapUsdc),
+    holds: strs(o.holds),
+    deactivated: asNullableStr(o.deactivated),
+  }
+}
+
 /** Exactly the five fields `opsRecent` carries, rebuilt field by field — never a grant, session key, signature,
  * permissionId, calls or any other StoredOp field, whatever the input object actually has on it. A malformed
  * entry (missing accountKey/kind/state, or an `at` that does not parse as a date) is dropped, not stored. */
@@ -285,6 +334,10 @@ export function toStoredMetrics(raw: unknown): StoredOperatorMetrics {
     opsRecent: asArr(root.opsRecent)
       .map(recentOp)
       .filter((x): x is RecentOpWire => x !== null),
+    // otto/mamoru#26: an older operator without `authorizations` stores [].
+    authorizations: asArr(root.authorizations)
+      .map(authorization)
+      .filter((x): x is AuthorizationWire => x !== null),
   }
 }
 
