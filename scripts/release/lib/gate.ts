@@ -2,8 +2,8 @@
 // clock), so every refusal is tested without git, wrangler or a network.
 import type { ReleaseRecord } from './release-log.ts'
 
-export const DEFAULT_SOAK_HOURS = 24
-/** The shortest soak a release may ask for without calling itself a hotfix (copy and read-only views). */
+export const DEFAULT_SOAK_HOURS = 2
+/** The shortest soak a release may ask for without calling itself a hotfix. Equal to the default since 22-oct-2026. */
 export const SHORT_SOAK_HOURS = 2
 
 export type Verdict = { ok: true } | { ok: false; reason: string }

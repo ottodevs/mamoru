@@ -29,7 +29,7 @@ describe('prodTarget', () => {
 
 describe('parseProdArgs: the command line of deploy:prod', () => {
   it('takes one full sha as written, and the options', () => {
-    expect(parseProdArgs([A])).toEqual({ ok: true, sha: A, options: { minHours: 24 } })
+    expect(parseProdArgs([A])).toEqual({ ok: true, sha: A, options: { minHours: 2 } })
     expect(parseProdArgs(['--min-soak-hours=2', A])).toEqual({ ok: true, sha: A, options: { minHours: 2 } })
   })
   it('refuses when no sha is named: nothing is taken from the tip of a branch', () => {
@@ -81,9 +81,9 @@ describe('betaTarget', () => {
 })
 
 describe('parseSoakOptions', () => {
-  it('defaults to 24 hours', () => {
-    expect(DEFAULT_SOAK_HOURS).toBe(24)
-    expect(parseSoakOptions([])).toEqual({ ok: true, options: { minHours: 24 } })
+  it('defaults to 2 hours', () => {
+    expect(DEFAULT_SOAK_HOURS).toBe(2)
+    expect(parseSoakOptions([])).toEqual({ ok: true, options: { minHours: 2 } })
   })
   it('takes a shorter soak down to 2 hours without a reason', () => {
     expect(parseSoakOptions(['--min-soak-hours=2'])).toEqual({ ok: true, options: { minHours: 2 } })

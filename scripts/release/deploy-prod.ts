@@ -2,8 +2,8 @@
 // `bun run deploy:prod <sha> [--min-soak-hours=N] [--hotfix="<reason>"]` — deploys ONE named commit to the
 // mamoru-app Worker (default env, app.mamoru.lol). The sha must be the tip of origin/beta (what is running
 // on beta), must be on origin/main (reviewed and merged) and must have soaked: the release log has to show
-// beta running it without interruption, smoke test passing, for at least 24 hours (or the hours asked
-// for). The sha is a full 40-character commit id: a branch, a tag or a short sha is refused. It is never
+// beta running it without interruption, smoke test passing, for at least 2 hours (or the hours asked
+// for; `--min-soak-hours=24` for a risky release). The sha is a full 40-character commit id: a branch, a tag or a short sha is refused. It is never
 // "whatever main is now": commits merged after the beta was cut cannot ride along.
 // Builds from an immutable detached-worktree snapshot of that sha, never the live working tree. Logs the
 // release and prints the rollback command even if something fails after the deploy itself. Manual only.

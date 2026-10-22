@@ -65,8 +65,9 @@ schedule, and not for a change that only touches the operator.
 
 A sha is ready for production when all of this is true and written in the tracking thread:
 
-- It has been on beta for at least **24 hours**, or **2 hours** for a change that only adds copy or a
-  read-only view. A fix for an incident in production may go sooner, on Otto's word, and says so.
+- It has been on beta for at least **2 hours** (Ot's decision, 22-oct-2026, to keep the pace to the Mumbai
+  hackathon). A fix for an incident in production may go sooner, on Otto's word, and says so. For a risky
+  release (funds, contract changes) the coordinator may ask for longer: `--min-soak-hours=24` stays available.
 - Someone used the changed path on beta with a real passkey, and says what they did.
 - No new error in the Worker logs of `mamoru-app-beta` that the change could explain.
 - The deploy notes that apply to production (secrets, migrations) are done.
@@ -80,11 +81,11 @@ Needs Otto's GO, given for one sha: the one that soaked. Write it in the trackin
      and so is any second word on the command line;
    - it must be the tip of `origin/beta`, so it is what is running on beta;
    - it must be a commit of `origin/main`;
-   - by the release log, beta must have been running it without interruption for at least 24 hours: the
+   - by the release log, beta must have been running it without interruption for at least 2 hours: the
      latest beta deploy is this sha with a passing smoke test, and no other commit and no failed smoke
      test since the run began. Putting another commit on beta and coming back starts the soak again.
    `main` may be ahead: commits merged after the beta was cut are not in the release, and the script says so.
-2. Shorter soak, when "Soak" above allows it: `--min-soak-hours=2`. Under two hours is a hotfix and needs
+2. Longer soak, at the coordinator's judgement: `--min-soak-hours=24`. Under two hours is a hotfix and needs
    the reason, which goes into the release log: `--min-soak-hours=0.5 --hotfix="withdrawals answer 500"`.
 3. The script ends by printing the two commands that tag and publish the release (`app-YYYY.MM.DD.N`, the
    next free `N` of the day). Run them, writing the one line that says what changes for a user. Check the
