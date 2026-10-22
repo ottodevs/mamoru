@@ -199,10 +199,12 @@ describe('the CCTP mint on Base (#180): replayed attestations and the admission-
     let n = 0
     const relayer = {
       address: '0x0000000000000000000000000000000000000002' as const,
-      send: async (tx: { data?: Hex }, _onSent?: unknown, onSending?: (w: bigint, p: bigint) => void, onSigned?: (h: Hex, nonce: number) => void) => {
-        if (o.send) await o.send(onSending!)
-        else onSending!(MINT_BUDGET_WEI / 100n, 1_000_000_000n)
+      send: async (tx: { data?: Hex }, _onSent?: unknown, onSending?: (w: bigint, signed: { hash: Hex; nonce: number; maxFeePerGas: bigint }) => void, onSigned?: (h: Hex, nonce: number) => void) => {
         const hash = u(++n, 32)
+        // As the Relayer: the bound, then the signed transaction's hash, nonce and fee cap, before the broadcast.
+        const bound = (w: bigint, p: bigint) => onSending!(w, { hash, nonce: n, maxFeePerGas: p })
+        if (o.send) await o.send(bound)
+        else bound(MINT_BUDGET_WEI / 100n, 1_000_000_000n)
         onSigned!(hash, n)
         sent.push(tx.data!)
         return { hash, receipt: { status: 'success', gasUsed: 150_000n, effectiveGasPrice: 100_000_000n, logs: [], ...(o.l1Fee !== undefined ? { l1Fee: o.l1Fee } : {}) } }
@@ -311,5 +313,15 @@ describe('the CCTP mint on Base (#180): replayed attestations and the admission-
     // Two mints, each 150k gas at 0.1 gwei plus an L1 data fee of 0x5af3107a4000 wei: both stay on the day.
     const each = 150_000n * 100_000_000n + 0x5af3107a4000n
     expect(j().mintDays['2026-10-21']).toEqual({ n: 2, wei: (2n * each).toString() })
+  })
+  test('sol P2 (b29179d): a mint signed above the 2 gwei Base ceiling is stopped before the broadcast (signed.maxFeePerGas)', async () => {
+    const TA = u(0xd1, 32)
+    const iris = { [TA]: [await attest(message(0x41n, 31n))] }
+    const { priv, sent, j } = make({ iris, now: () => day('2026-10-21T12:00:00'), send: async (onSending) => onSending(1_000_000_000_000n, 2_000_000_001n) })
+    const r = route('ra', TA, 31n)
+    await priv.cctpMint('a', r)
+    expect(sent.length).toBe(0)
+    expect((r as { state: string }).state).toBe('deposited')
+    expect(j().mintDays['2026-10-21']).toEqual({ n: 0, wei: '0' })
   })
 })
