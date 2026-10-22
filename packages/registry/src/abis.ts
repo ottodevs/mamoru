@@ -104,8 +104,9 @@ export const safeAbi = parseAbi([
   'function enableModule(address module)',
   'function setGuard(address guard)',
   'function setFallbackHandler(address handler)',
-  'event ExecutionSuccess(bytes32 txHash, uint256 payment)',
-  'event ExecutionFailure(bytes32 txHash, uint256 payment)',
+  // Safe 1.4.1 indexes the Safe tx hash: topics[1], the data holds only the payment.
+  'event ExecutionSuccess(bytes32 indexed txHash, uint256 payment)',
+  'event ExecutionFailure(bytes32 indexed txHash, uint256 payment)',
 ])
 
 export const safeProxyFactoryAbi = parseAbi([

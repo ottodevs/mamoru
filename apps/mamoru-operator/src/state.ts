@@ -43,6 +43,8 @@ export type StoredOp = OpView & {
   spentBy?: Hex
   /** otto/mamoru#163: the last block the bounded range search for its ExecutionSuccess has covered (checkpoint). */
   scannedTo?: string
+  /** otto/mamoru#15: an activation whose batch buys its own gas reserve: the unix time its swap reverts after. */
+  reserveDeadline?: string
 }
 
 /** A grant the owner enabled on chain (enter-swap, enter-mint). */
@@ -76,6 +78,10 @@ export type ArmedActivation = {
   capUsdc?: string
   /** otto/mamoru#140 (part2 #3): the account's owner generation it was prepared at. Absent: armed before generations were kept. */
   gen?: number
+  /** otto/mamoru#15: wei of gas reserve the signed batch buys into the Safe at least (USDC -> ETH swap); absent: none. */
+  reserveWei?: string
+  /** otto/mamoru#15: unix time after which that swap reverts: an approval never sent is dropped near it. */
+  reserveDeadline?: string
 }
 
 export type AccountState = {

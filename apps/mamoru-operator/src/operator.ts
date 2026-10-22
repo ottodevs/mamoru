@@ -24,6 +24,7 @@ import {
   transferBatch,
   verifyOwnerSignature,
   type LiveAccount,
+  type LiveGasReserve,
   type LivePosition,
   type LiveReceive,
   type LiveSwap,
@@ -33,6 +34,7 @@ import { multiSendCallOnly } from '@mamoru/account/safe'
 import { permissionIdOf, revocationCalls, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
 import { minOut, quoteExactInputSingle, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
+import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
 import { Engine, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
 import type { GuardReadsState } from './guard-reads-state.ts'
@@ -443,6 +445,10 @@ type Prepared = {
   capUsdc?: string
   /** activate (otto/mamoru#140 part2 #3): the account's owner generation it was prepared at; any owner change since makes it stale. */
   gen?: number
+  /** activate (otto/mamoru#15): wei of gas reserve the batch's own USDC -> ETH swap pays into the Safe at least (self-reserve.ts). */
+  reserveWei?: string
+  /** activate (otto/mamoru#15): the unix time after which that swap reverts; nothing is simulated or sent near it (reserveExpired). */
+  reserveDeadline?: string
   /**
    * activate (part2 #7): a session key generated for this prepare, for an account that has none yet. It is written
    * to the account only once the owner's signature over these grants is proven.
@@ -531,6 +537,10 @@ const RENEW_GAS_BUDGET = 16_200_000n
 const ACTIVATION_OVERHEAD_GAS = 600_000n
 /** Measured on Base: enableSessions costs 1.4-2.1M gas per session of the live policies; 2.1M is the conservative bound. */
 const STATIC_GAS_PER_SESSION = 2_100_000n
+/** otto/mamoru#15: static bound for a self-funded activation's reserve swap (approve, exactInputSingle + unwrapWETH9, approve 0). */
+const STATIC_GAS_RESERVE_SWAP = 300_000n
+/** otto/mamoru#15: an activation whose gas reserve swap reached its deadline: it never ran and never can, the owner approves again. */
+const RESERVE_SWAP_EXPIRED = 'RESERVE_SWAP_EXPIRED'
 
 /** The engine's and left-behind grants of `acc` that a stop revoking `revokes` leaves enabled: remembered for the next stop. */
 function unrevoked(acc: AccountState, revokes: Hex[]): Hex[] {
@@ -680,11 +690,12 @@ export class Operator {
   }
 
   /**
-   * Whether the relayer can pay one activation now: the Safe top-up plus the deploy and execTransaction gas. When it
-   * cannot, the owner's signed activation waits armed instead of failing; a relayer short of ETH is ours to fix.
+   * Whether the relayer can pay one activation now: the Safe top-up plus the deploy and execTransaction gas, or only
+   * the gas when the batch buys the Safe's reserve itself (`selfFunded`, otto/mamoru#15). When it cannot, the owner's
+   * signed activation waits armed instead of failing; a relayer short of ETH is ours to fix.
    */
-  private async relayerCanActivate(acc: AccountState): Promise<boolean> {
-    const need = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI + ACTIVATION_GAS_WEI
+  private async relayerCanActivate(acc: AccountState, selfFunded = false): Promise<boolean> {
+    const need = (selfFunded ? 0n : this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI) + ACTIVATION_GAS_WEI
     const have = BigInt((await this.relayerBalance()).wei)
     if (have >= need) return true
     const at = Date.now()
@@ -1447,13 +1458,15 @@ export class Operator {
     build: (keys: string[]) => ReturnType<typeof instantiateGrant>[],
     acc: AccountState,
     block: bigint,
+    reserve?: LiveGasReserve,
   ): Promise<{ keys: string[]; grants: ReturnType<typeof instantiateGrant>[]; batch: ReturnType<typeof activationBatch> }> {
     const droppable = this.droppablePairs(policy, allKeys)
     let keys = allKeys
     for (let i = 0; ; i++) {
       const grants = build(keys)
-      const batch = activationBatch(live, grants, acc.revoked, { trust: !acc.trusted })
-      const gas = await this.activationGas(live, batch.calls, grants.length, block)
+      const batch = activationBatch(live, grants, acc.revoked, { trust: !acc.trusted, ...(reserve ? { reserve } : {}) })
+      // otto/mamoru#15: the static estimate counts the reserve swap too (the simulation sees it).
+      const gas = await this.activationGas(live, batch.calls, grants.length, block, reserve ? 400_000n + BigInt(grants.length) * STATIC_GAS_PER_SESSION + STATIC_GAS_RESERVE_SWAP : undefined)
       if (gas <= ACTIVATION_GAS_BUDGET || i >= droppable.length) {
         if (keys.length < allKeys.length) console.log(`[activate] ${live.safe} ~${gas} gas: dropped ${allKeys.filter((k) => !keys.includes(k)).join(', ')} to fit Base's per-tx gas cap`)
         return { keys, grants, batch }
@@ -1508,7 +1521,8 @@ export class Operator {
    * The engine's session grants for one owner approval, sized at the account cap and valid from now for the policy's
    * validity, with the Safe transaction that enables them. A first approval and a renewal sign the same thing.
    */
-  private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, only?: string[], mode: 'full' | 'extend' = 'full') {
+  /** `reserve`: a first activation that buys the Safe's own gas reserve in the same transaction (otto/mamoru#15, self-reserve.ts). */
+  private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, only?: string[], mode: 'full' | 'extend' = 'full', reserve?: LiveGasReserve) {
     // otto/mamoru#140 (part2 #7): a new key stays with the prepare (Prepared.sessionKey) until the owner's signature
     // over these grants is proven; nothing is written for an account that only prepares.
     const newKey = acc.sessionKey ? undefined : generatePrivateKey()
@@ -1553,6 +1567,7 @@ export class Operator {
       activationBatch(live, grants, acc.revoked, {
         trust: !acc.trusted,
         ...(v4 ? { policiesFor: v4PoliciesFor(grants, v4.d, v4.generation, v4BudgetCaps(policy, cap), v4.admitByPool), attest: v4.attest, reattest: v4.reattest, attestData: v4.attestData } : {}),
+        ...(reserve ? { reserve } : {}),
       })
     // A first approval takes as many grants as fit the gas cap. A renewal takes exactly the ones the account has
     // (`only`): it neither loses a grant nor gains one the owner did not have.
@@ -1562,7 +1577,7 @@ export class Operator {
     if (v4 && !exactGrants) throw new Error('a v4 approval is always built on the keys fitV4 chose')
     const { keys, grants, batch } = exact && exactGrants
       ? { keys: exact, grants: exactGrants, batch: batchOf(exactGrants) }
-      : await this.fitActivation(live, policy, allKeys, build, acc, r.block)
+      : await this.fitActivation(live, policy, allKeys, build, acc, r.block, reserve)
     // Spec 007 T7: the first grant of each pool carried that pool's Init.admit (v4PoliciesFor); kept for the engine's mirror.
     const firstOfPool = new Map<string, number>()
     grants.forEach((g, i) => {
@@ -1679,14 +1694,15 @@ export class Operator {
    * and must fit `budget` as before. What is left over is the account's missing grants: the renew row offers them, one
    * owner transaction at a time, through planExtend (fitted the same way), once this one has landed.
    */
-  private async fitV4(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, keys: string[], revokes: Hex[], mode: 'full' | 'extend', budget: bigint) {
-    const overheadGas = BigInt(revokes.length) * REVOKE_GAS_EACH + (acc.trusted ? 0n : TRUST_GAS) + ATTEST_GAS
+  private async fitV4(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, keys: string[], revokes: Hex[], mode: 'full' | 'extend', budget: bigint, reserve?: LiveGasReserve) {
+    // otto/mamoru#15: a self-funded activation's reserve swap rides in the same transaction, after the grants.
+    const overheadGas = BigInt(revokes.length) * REVOKE_GAS_EACH + (acc.trusted ? 0n : TRUST_GAS) + ATTEST_GAS + (reserve ? STATIC_GAS_RESERVE_SWAP : 0n)
     const ordered = orderV4Keys(policy, keys)
     const target = budget < V4_TX_GAS_TARGET ? budget : V4_TX_GAS_TARGET
     const guess = splitV4Keys(policy, ordered, { overheadGas, ceiling: target })[0]?.length ?? 0
     const built = new Map<number, { a: Awaited<ReturnType<Operator['approval']>>; calls: ReturnType<typeof revocationCalls>; gas: bigint; simulated: boolean }>()
     const build = async (ks: string[]) => {
-      const a = await this.approval(acc, live, policy, r, cap, ks, mode)
+      const a = await this.approval(acc, live, policy, r, cap, ks, mode, reserve)
       const calls = [...revocationCalls(revokes), ...a.batch.calls]
       const fallback = overheadGas + a.stored.reduce((n, g) => n + estimateSessionGas(g.grant.actions.length), 0n)
       // The gas LIMIT the owner transaction needs, before refunds (a revoke clears storage: t8-fork measured
@@ -2415,26 +2431,34 @@ export class Operator {
     if (r.usdc > cap) throw depositOverCap(r.usdc, cap)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
     const policy = this.cfg.policy
+    // otto/mamoru#15: a Safe holding enough USDC buys its own gas reserve in this very transaction (self-reserve.ts):
+    // the relayer then sends no top-up. Any other start keeps the relayer's top-up, within the activation budget.
+    const self = r.usdc > 0n ? await this.selfReserve(live.safe, r) : null
+    const reserve = self?.reserve
+    const invested = r.usdc - (reserve?.amountIn ?? 0n)
+    const reserveLine = self ? [`Convert ${fmtUnitsExact(self.reserve.amountIn, 6)} USDC to at least ${fmtUnits(self.reserve.amountOutMinimum, 18)} ETH on ${self.route}, kept in your Safe as its gas reserve`] : []
+    const own = reserve ? { reserveWei: reserve.amountOutMinimum.toString(), reserveDeadline: reserve.deadline.toString() } : {}
     if (isV4(policy)) {
       // Spec 007 T7 (c): a v4 Start enables what fits one Base transaction; the rest follows as one more approval each.
       const keys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
-      const f = await this.fitV4(acc, live, policy, r, cap, keys, [], 'full', ACTIVATION_GAS_BUDGET)
+      const f = await this.fitV4(acc, live, policy, r, cap, keys, [], 'full', ACTIVATION_GAS_BUDGET, reserve)
       const days = Math.round(policy.session.validitySeconds / 86_400)
       const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!)} ${b.preference / 100}%`)
       const summary = [
         `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
+        ...reserveLine,
         r.usdc > 0n
-          ? `Let Mamoru's engine keep your ${fmtUsdc(r.usdc)} USDC invested across Uniswap v3 ${pools.join(', ')}`
+          ? `Let Mamoru's engine keep your ${fmtUsdc(invested)} USDC invested across Uniswap v3 ${pools.join(', ')}`
           : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(cap)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
         `Engine key ${f.sessionKey} may swap USDC into those pools' tokens, open positions there, and take out, collect and close only the positions it opened, only near the market price, for ${days} days:`,
         ...this.v4Lines(f.stored, policy, cap),
         ...this.stepLines(f.steps, f.rest),
         `Whatever it collects, mints or swaps is paid to your Safe, never to anyone else. Cap ${fmtUsdc(cap)} USDC`,
       ]
-      return this.hold(acc, live, 'activate', f.calls, summary, { grants: f.stored, capUsdc: cap.toString(), gen, ...(f.newKey ? { sessionKey: f.newKey } : {}) })
+      return this.hold(acc, live, 'activate', f.calls, summary, { grants: f.stored, capUsdc: cap.toString(), gen, ...(f.newKey ? { sessionKey: f.newKey } : {}), ...own })
     }
-    const { sessionKey, caps, stored, batch, newKey } = await this.approval(acc, live, policy, r, cap)
-    const bind = { gen, ...(newKey ? { sessionKey: newKey } : {}) }
+    const { sessionKey, caps, stored, batch, newKey } = await this.approval(acc, live, policy, r, cap, undefined, 'full', reserve)
+    const bind = { gen, ...(newKey ? { sessionKey: newKey } : {}), ...own }
     // What this activation actually enables, not what the policy could: a gas-capped activation (fitActivation)
     // can leave manage-any/convert-any out of `stored`, and the summary must not claim authority that is not
     // in `batch.calls`. manage-any's decrease/collect/burn take any tokenId the Safe owns (grants.ts), in any
@@ -2449,8 +2473,9 @@ export class Operator {
     if (pools.length > 1) {
       const summary = [
         `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
+        ...reserveLine,
         r.usdc > 0n
-          ? `Let Mamoru's engine keep your ${fmtUsdc(r.usdc)} USDC invested across Uniswap v3 ${pools.join(', ')}`
+          ? `Let Mamoru's engine keep your ${fmtUsdc(invested)} USDC invested across Uniswap v3 ${pools.join(', ')}`
           : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(cap)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
         `Engine key ${sessionKey} may swap USDC into those pools' tokens and mint positions there`,
         ...(liveManage.length
@@ -2463,8 +2488,9 @@ export class Operator {
     }
     const summary = [
       `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
+      ...reserveLine,
       r.usdc > 0n
-        ? `Let Mamoru's engine allocate your ${fmtUsdc(r.usdc)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
+        ? `Let Mamoru's engine allocate your ${fmtUsdc(invested)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
         : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(cap)} USDC) into Uniswap v3 USDC/cbBTC 0.05% as soon as it arrives`,
       `Engine key ${sessionKey} may swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap) and mint that pool`,
       ...(liveManage.length
@@ -2473,6 +2499,51 @@ export class Operator {
       paidToSafe,
     ]
     return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored, capUsdc: cap.toString(), ...bind })
+  }
+
+  /**
+   * otto/mamoru#15: the Safe's own gas reserve, bought in the activation batch (self-reserve.ts), or null when this
+   * start keeps the relayer's top-up. Quoted at the prepare block on the WETH/USDC pools a withdrawal to ETH uses (best
+   * rate wins), priced at that pool's TWAP, and confirmed by a quote of the exact amount.
+   */
+  private async selfReserve(safe: Address, r: SafeRead): Promise<{ reserve: LiveGasReserve; route: string } | null> {
+    const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
+    let probe: { receive: LiveReceive; quoted: bigint; route: string; pool: string } | null = null
+    if (r.eth < target && r.usdc > 0n) {
+      try {
+        probe = await this.receiveQuote('ETH', SELF_RESERVE_PROBE_USDC, r.block, this.cfg.policy.execution.slippageBps)
+      } catch (e) {
+        logErr(`[activate] ${safe} no USDC -> ETH quote for the gas reserve:`, e)
+      }
+    }
+    // The pool the spot quote chose, read for its TWAP: no answer (window not covered, provider down) means no swap.
+    let fairCost: bigint | null = null
+    if (probe) {
+      try {
+        const tick = await twapTickAt(this.client, address(probe.pool, baseRegistry), SELF_RESERVE_TWAP_SECONDS, r.block)
+        fairCost = usdcForWeiAtTick(target - r.eth, tick, entry(probe.pool, baseRegistry).token0 === 'WETH')
+      } catch (e) {
+        logErr(`[activate] ${safe} no TWAP for the gas reserve swap:`, e)
+      }
+    }
+    const fee = probe?.receive.fee ?? 0
+    const plan = selfReservePlan({ usdc: r.usdc, eth: r.eth, target, probeOut: probe?.quoted ?? null, fairCost, feeBps: BigInt(fee / 100) })
+    if ('skip' in plan) {
+      if (plan.skip !== 'FUNDED') console.log(`[activate] ${safe} gas reserve not bought in the batch: ${plan.skip}${fairCost !== null ? ` (TWAP cost ${fairCost} USDC units)` : ''}`)
+      return null
+    }
+    try {
+      const quoted = await quoteExactInputSingle(this.client, { tokenIn: address('USDC', baseRegistry), tokenOut: address('WETH', baseRegistry), fee, amountIn: plan.amountIn, blockNumber: r.block })
+      if (!selfReserveConfirmed(plan.minOut, quoted)) {
+        console.log(`[activate] ${safe} gas reserve not bought in the batch: QUOTE_SHORT (${plan.amountIn} USDC -> ${quoted} wei, need ${plan.minOut})`)
+        return null
+      }
+    } catch (e) {
+      logErr(`[activate] ${safe} no quote for the gas reserve swap:`, e)
+      return null
+    }
+    const { timestamp } = await this.client.getBlock({ blockNumber: r.block })
+    return { reserve: { fee, amountIn: plan.amountIn, amountOutMinimum: plan.minOut, deadline: timestamp + SELF_RESERVE_DEADLINE_SECONDS }, route: probe!.route }
   }
 
   /** Planned under the account lock: an in-flight engine op (reduce, re-range) lands first, so the plan sees its liquidity. */
@@ -2830,12 +2901,39 @@ export class Operator {
     if (!v) return 'open'
     // Found (by the range search, or in the block that spent the nonce): proof.
     if (v.ran) return { ...v.ran, ok: true }
-    if (v.nonce <= BigInt(op.safeNonce!)) return 'open'
+    if (v.nonce <= BigInt(op.safeNonce!)) {
+      // otto/mamoru#15: its reserve swap past its deadline at a final block with the nonce still unspent: it never ran,
+      // and never can. Closed, so the owner can approve again; anything short of that proof leaves it open.
+      const past = await this.reserveSwapPast(acc, op)
+      return past ? { close: RESERVE_SWAP_EXPIRED, block: Number(past) } : 'open'
+    }
     const spent = v.spent
     if (!spent) return 'open'
     if (spent.ours) return { close: 'OWNER_TX_FAILED', spentBy: spent.safeTxHash, block: Number(spent.block) }
     const replaced = acc.ops.some((o) => o !== op && o.opId.startsWith('own-') && (o as StoredOp).safeTxHash?.toLowerCase() === spent.safeTxHash.toLowerCase())
     return { close: replaced ? 'SUPERSEDED' : 'SAFE_NONCE_MOVED', spentBy: spent.safeTxHash, block: Number(spent.block) }
+  }
+
+  /**
+   * otto/mamoru#15: the block that proves an activation's reserve swap can never run, or null. One block B, read by
+   * hash, SETTLE_CONFIRMATIONS below the head and still canonical (finalAt), whose own timestamp is past the swap's
+   * deadline and at which the Safe nonce is still the op's: up to B the SafeTx did not run, and from B on SwapRouter02
+   * refuses the swap ("Transaction too old"), and with it the whole execTransaction (safeTxGas 0: GS013). Any read that
+   * fails, or a B not past the deadline yet, is null: no conclusion.
+   */
+  private async reserveSwapPast(acc: AccountState, op: StoredOp): Promise<bigint | null> {
+    if (op.kind !== 'activate' || !op.reserveDeadline || op.safeNonce === undefined) return null
+    try {
+      const head = await this.client.getBlockNumber({ cacheTime: 0 })
+      if (head < SETTLE_CONFIRMATIONS) return null
+      const b = await this.client.getBlock({ blockNumber: head - SETTLE_CONFIRMATIONS })
+      if (!b.hash || b.number === null || b.timestamp <= BigInt(op.reserveDeadline)) return null
+      if ((await this.nonceAtHash(acc.ctx.address as Address, b.hash)) > BigInt(op.safeNonce)) return null
+      return (await this.finalAt(b.number, b.hash)) ? b.number : null
+    } catch (e) {
+      logErr(`[reconcile] ${acc.accountKey} ${op.opId} reserve swap deadline not checked:`, e)
+      return null
+    }
   }
 
   /**
@@ -3226,7 +3324,8 @@ export class Operator {
       if (usdc === 0n) return this.armFresh(acc, p, signature)
       if (usdc > this.activationCap(acc, p.capUsdc)) throw depositOverCap(usdc, this.activationCap(acc, p.capUsdc))
       // The relayer cannot pay for it now: the signature waits armed and the watcher runs it once the relayer is funded.
-      if (!(await this.relayerCanActivate(acc))) return this.armFresh(acc, p, signature)
+      // A batch that buys its own gas reserve needs no top-up from it (otto/mamoru#15).
+      if (!(await this.relayerCanActivate(acc, BigInt(p.reserveWei ?? 0) > 0n))) return this.armFresh(acc, p, signature)
       // part2 #3: checked again after the reads above, with no await before the approval it supersedes is dropped.
       this.assertFresh(acc, p)
       this.disarm(acc, 'ARMED_SUPERSEDED')
@@ -3557,7 +3656,7 @@ export class Operator {
     const op = this.newOp(acc, 'activate')
     op.code = 'ARMED'
     this.stash(acc, op, p)
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}), ...(p.gen !== undefined ? { gen: p.gen } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}), ...(p.gen !== undefined ? { gen: p.gen } : {}), ...(p.reserveWei ? { reserveWei: p.reserveWei, reserveDeadline: p.reserveDeadline } : {}) }
     this.store.save()
     console.log(`[armed] ${acc.accountKey} ${op.opId} armed for ${acc.ctx.address} at Safe nonce ${p.tx.nonce}`)
     return { ...op }
@@ -3573,7 +3672,7 @@ export class Operator {
     const current = acc.ops.find((o) => o.opId === op.opId)
     if (current?.txHash) return this.failOwner(acc, op, 'OWNER_TX_ERROR')
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}), ...(p.gen !== undefined ? { gen: p.gen } : {}), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}), ...(p.gen !== undefined ? { gen: p.gen } : {}), ...(p.reserveWei ? { reserveWei: p.reserveWei, reserveDeadline: p.reserveDeadline } : {}), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
     this.armHold.delete(acc.accountKey)
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
     this.execTried.delete(opKey(acc, op))
@@ -3770,6 +3869,12 @@ export class Operator {
       const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
       if (deployed && nonce !== a.tx.nonce) return this.nonceMoved(acc, a, nonce)
     }
+    // otto/mamoru#15: its reserve swap at or near its deadline can never run. An approval never sent is dropped and the
+    // owner asked for a new one (a failed start); one sent before goes on to executeOwner, which leaves it to the chain.
+    if (!tried && a.reserveDeadline && reserveExpired(BigInt(a.reserveDeadline), BigInt(Math.floor(Date.now() / 1000)))) {
+      console.log(`[armed] ${acc.accountKey} ${a.opId} gas reserve swap near its deadline, never sent: dropped, the owner approves again`)
+      return this.disarm(acc, RESERVE_SWAP_EXPIRED)
+    }
     // Nothing in the Safe: the look was only for the nonce of an approval already sent once.
     if (usdc === 0n) return
     // otto/mamoru#140: earlier grants still enabled on the Safe (STOP_FIRST): not run beside them, held until a stop.
@@ -3792,12 +3897,13 @@ export class Operator {
     }
     // The relayer cannot pay for it yet: stay armed, without using up a try. Waiting is not activity, so the watcher
     // slows down on this account as it does on an idle one, instead of reading it every pass.
-    if (!tried && !(await this.relayerCanActivate(acc))) return this.park(acc, ARM_IDLE_MS)
+    const selfFunded = BigInt(a.reserveWei ?? 0) > 0n
+    if (!tried && !(await this.relayerCanActivate(acc, selfFunded))) return this.park(acc, ARM_IDLE_MS)
     const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
     if (deployed && nonce !== a.tx.nonce) return this.nonceMoved(acc, a, nonce)
     // Too little to deploy a Safe for: stay armed and wait for more (funding reports deployMinUsdc).
     if (!deployed && usdc < MIN_DEPLOY_USDC) return
-    if (tried && !(await this.relayerCanActivate(acc))) return this.park(acc, ARM_IDLE_MS)
+    if (tried && !(await this.relayerCanActivate(acc, selfFunded))) return this.park(acc, ARM_IDLE_MS)
     // A copy handed to a provider earlier may still be pending: while the relayer has a transaction not yet mined,
     // nothing is sent again. Mined, it shows in the Safe nonce above; dropped, the pending count falls back.
     if (tried && (await this.relayerHasPending())) return this.park(acc, ARM_RETRY_MS)
@@ -3815,7 +3921,7 @@ export class Operator {
     // cleared when the account starts, or when the attempt ends in a failure that is final.
     this.patchOp(acc, a.opId, { code: undefined })
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
-    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants, ...(a.capUsdc ? { capUsdc: a.capUsdc } : {}), ...(a.gen !== undefined ? { gen: a.gen } : {}) }
+    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants, ...(a.capUsdc ? { capUsdc: a.capUsdc } : {}), ...(a.gen !== undefined ? { gen: a.gen } : {}), ...(a.reserveWei ? { reserveWei: a.reserveWei, reserveDeadline: a.reserveDeadline } : {}) }
     const op = acc.ops.find((o) => o.opId === a.opId)!
     if (a.execSent) this.retried.add(opKey(acc, op))
     try {
@@ -3876,6 +3982,8 @@ export class Operator {
     if (p.kind === 'renew' && p.extend) o.extend = true
     o.safeTxHash = p.safeTxHash
     o.safeNonce = p.tx.nonce.toString()
+    // otto/mamoru#15: past this time (at a final block, Safe nonce unspent) the activation can never run (settleByNonce).
+    if (p.kind === 'activate' && p.reserveDeadline) o.reserveDeadline = p.reserveDeadline
     if (p.meta) Object.assign(o, p.meta)
     this.store.save()
   }
@@ -3915,8 +4023,36 @@ export class Operator {
     return true
   }
 
+  /**
+   * otto/mamoru#15: an activation whose reserve swap can no longer be sent (at or near its deadline): nothing more is
+   * sent for it. A copy an earlier attempt may have handed to a provider may have landed before the deadline: that op
+   * is an unread receipt, settled from the chain (settleByNonce). Otherwise the owner approves again.
+   */
+  private async reserveExpiredOwner(acc: AccountState, op: OpView, p: Prepared): Promise<boolean> {
+    if (p.kind !== 'activate' || !p.reserveDeadline || !reserveExpired(BigInt(p.reserveDeadline), await this.chainNow())) return false
+    logErr(`[owner] ${op.opId} gas reserve swap near its deadline, not sent:`, { deadline: p.reserveDeadline })
+    if (this.retried.has(opKey(acc, op)) || this.execTried.has(opKey(acc, op))) {
+      this.failOwner(acc, op, RECEIPT_UNKNOWN, { txHash: undefined })
+      this.reconcileSoon(acc)
+    } else this.failOwner(acc, op, RESERVE_SWAP_EXPIRED)
+    return true
+  }
+
+  /** Unix seconds: the later of this clock and the provider's head, so neither one lagging lets a stale swap through. */
+  private async chainNow(): Promise<bigint> {
+    const wall = BigInt(Math.floor(Date.now() / 1000))
+    try {
+      const { timestamp } = await this.client.getBlock()
+      return timestamp > wall ? timestamp : wall
+    } catch {
+      return wall
+    }
+  }
+
   private async executeOwner(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView): Promise<void> {
     let activation: SponsorEntry | null = null
+    // otto/mamoru#15: a reserve swap at or near its deadline reverts: nothing is reserved, simulated or sent for it.
+    if (await this.reserveExpiredOwner(acc, op, p)) return
     // Under the account lock, right before anything is sent: what was true at submit may not be any more.
     if (p.kind === 'renew') {
       await this.settleRenewals(acc)
@@ -3941,7 +4077,9 @@ export class Operator {
       // against the daily activation budget before anything is sent, so fresh Safes cannot drain it either.
       const price = await this.gasPrice()
       const { deployed } = await readSafeNonce(this.client, live.safe)
-      const eth = await this.client.getBalance({ address: live.safe })
+      // otto/mamoru#15: what the batch's own swap pays into the Safe (at least its minimum, or the whole transaction
+      // reverts) counts as held: a self-funded activation reserves only its deploy and exec gas, never a top-up.
+      const eth = (await this.client.getBalance({ address: live.safe })) + BigInt(p.reserveWei ?? 0)
       const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
       const reserved = this.chargeActivation(acc, op.opId, ((deployed ? 0n : DEPLOY_GAS) + ACTIVATE_TX_GAS) * price + (eth < target ? target - eth : 0n))
       if ('code' in reserved) return this.failOwner(acc, op, reserved.code)
@@ -4008,7 +4146,10 @@ export class Operator {
     }
     if (p.kind === 'activate') {
       const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
-      const eth = await this.client.getBalance({ address: safe })
+      // otto/mamoru#15: the batch's own swap fills the reserve (or the whole activation reverts): no top-up for it.
+      const own = BigInt(p.reserveWei ?? 0)
+      if (own > 0n) console.log(`[owner] ${op.opId} the batch buys the gas reserve: at least ${own} wei into ${safe}`)
+      const eth = (await this.client.getBalance({ address: safe })) + own
       if (eth < target) {
         const { hash, receipt } = await this.relayer.send({ to: safe, value: target - eth, gas: 50_000n }, undefined, () => {
           spent.any = true
@@ -4053,6 +4194,8 @@ export class Operator {
         return this.failOwner(acc, op, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: cap.toString() })
       }
     }
+    // otto/mamoru#15: checked again right before the exec leaves (the deploy and the simulation took time).
+    if (await this.reserveExpiredOwner(acc, op, p)) return
     // Keep the hash as soon as the tx is out: if the receipt poll fails, reconciliation reads it later.
     const sent = this.relayer.send(
       { to: safe, data },
@@ -4269,7 +4412,7 @@ export class Operator {
         const s = await this.settleByNonce(acc, op as StoredOp)
         if (s === 'open') continue
         if ('close' in s) {
-          console.log(`[reconcile] ${op.opId} ${s.close}: Safe nonce past ${(op as StoredOp).safeNonce}, not by this Safe tx`)
+          console.log(`[reconcile] ${op.opId} ${s.close}: ${s.close === RESERVE_SWAP_EXPIRED ? `Safe nonce still ${(op as StoredOp).safeNonce} at final block ${s.block}, past the reserve swap's deadline` : `Safe nonce past ${(op as StoredOp).safeNonce}, not by this Safe tx`}`)
           if (s.spentBy) (op as StoredOp).spentBy = s.spentBy
           this.patchOp(acc, op.opId, { code: s.close, ...(found ? { txHash: found.hash } : {}), ...(s.block !== undefined ? { block: s.block } : {}) })
           continue
@@ -4937,6 +5080,13 @@ function fmtUnits(v: bigint, decimals: number): string {
 function fmtUsdc(v: bigint): string {
   const s = v.toString().padStart(7, '0')
   return `${s.slice(0, -6)}.${s.slice(-6, -4)}`
+}
+
+/** Every decimal that is there, none that is not: an amount the owner signs to spend, shown exactly. */
+function fmtUnitsExact(v: bigint, decimals: number): string {
+  const s = v.toString().padStart(decimals + 1, '0')
+  const frac = s.slice(-decimals).replace(/0+$/, '')
+  return frac ? `${s.slice(0, -decimals)}.${frac}` : s.slice(0, -decimals)
 }
 
 /** Cents rounded up: an amount the owner must reach is never understated. */

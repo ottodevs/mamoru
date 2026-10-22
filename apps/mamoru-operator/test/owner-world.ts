@@ -100,6 +100,10 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     quotes: 0,
     idle: {} as Record<string, bigint>,
     payoutGain: null as bigint | null,
+    /** otto/mamoru#15: every block's timestamp, the relayer's ETH, and a pool's own TWAP tick (by address) over `twapTick`. */
+    blockTime: 1_790_000_000n,
+    relayerWei: 10n ** 18n,
+    twapByPool: new Map<string, number | null>(),
   }
   const npmCalls: string[] = []
   /** Canonical block hashes, and the height each one is at. */
@@ -124,7 +128,7 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     // node, behind or on another view, than the one that gave the head).
     getBlock: async (a: { blockNumber?: bigint } = {}) => {
       const n = a.blockNumber ?? knobs.blockHead
-      return { number: n, hash: (a.blockNumber !== undefined ? knobs.blockHashes.get(n) : undefined) ?? hashOf(n), parentHash: knobs.parents.get(n) ?? hashOf(n - 1n), timestamp: 1_790_000_000n }
+      return { number: n, hash: (a.blockNumber !== undefined ? knobs.blockHashes.get(n) : undefined) ?? hashOf(n), parentHash: knobs.parents.get(n) ?? hashOf(n - 1n), timestamp: knobs.blockTime }
     },
     getGasPrice: async () => knobs.gasPrice,
     getTransactionReceipt: async ({ hash }: { hash: string }) => {
@@ -143,14 +147,15 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
       return knobs.rangeLogsLag ? [] : knobs.safeLogs.map((l) => ({ blockHash: hashOf(l.blockNumber), ...l }))
     },
     getCode: async () => (chain.deployed ? '0x01' : undefined),
-    getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? 10n ** 18n : at.toLowerCase() === SAFE.toLowerCase() ? chain.safeEth : 0n),
+    getBalance: async ({ address: at }: { address: string }) => (at.toLowerCase() === RELAYER.toLowerCase() ? knobs.relayerWei : at.toLowerCase() === SAFE.toLowerCase() ? chain.safeEth : 0n),
     getTransactionCount: async () => 5,
     readContract: async ({ address: at, functionName, args, blockNumber }: { address: string; functionName: string; args?: readonly unknown[]; blockNumber?: bigint }) => {
       if (functionName === 'slot0') return [sqrtRatioAtTick(knobs.spotTick), knobs.spotTick, 0, 0, 0, 0, true]
       // #64: activations and engine swaps price at the pool TWAP; tick 0, as slot0, unless a test moves it.
       if (functionName === 'observe') {
-        if (knobs.twapTick === null) throw new Error('execution reverted: OLD')
-        return [[0n, BigInt(knobs.twapTick) * 1800n], [0n, 0n]]
+        const tick = knobs.twapByPool.has(at.toLowerCase()) ? knobs.twapByPool.get(at.toLowerCase())! : knobs.twapTick
+        if (tick === null) throw new Error('execution reverted: OLD')
+        return [[0n, BigInt(tick) * 1800n], [0n, 0n]]
       }
       if (functionName === 'nonce') return blockNumber !== undefined && knobs.nonceAt ? knobs.nonceAt(blockNumber) : chain.nonce
       if (functionName === 'balanceOf' && at.toLowerCase() === npm) {
