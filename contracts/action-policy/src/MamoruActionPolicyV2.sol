@@ -392,13 +392,18 @@ contract MamoruActionPolicyV2 is IActionPolicy {
             if (m.token0 != p.token0 || m.token1 != p.token1 || m.fee != p.fee || m.recipient != account) {
                 return VALIDATION_FAILED;
             }
-            return _checkProvide(account, b.pool, c, p, m.amount0Desired, m.amount1Desired);
+            return _checkProvide(
+                account, b.pool, c, p, m.amount0Desired, m.amount1Desired, m.tickLower, m.tickUpper, m.amount0Min, m.amount1Min
+            );
         }
         if (target == address(this) && sel == this.increase.selector) {
             IncreaseLiquidityParams memory n = abi.decode(data[4:], (IncreaseLiquidityParams));
             // #171: only a position admitted for this account and pool that the account still owns.
             if (!_isAdmitted(account, b.pool, n.tokenId)) return VALIDATION_FAILED;
-            return _checkProvide(account, b.pool, c, p, n.amount0Desired, n.amount1Desired);
+            (int24 lower, int24 upper) = _ticksOf(n.tokenId);
+            return _checkProvide(
+                account, b.pool, c, p, n.amount0Desired, n.amount1Desired, lower, upper, n.amount0Min, n.amount1Min
+            );
         }
         if (target == address(NPM) && sel == DECREASE) {
             DecreaseLiquidityParams memory d = abi.decode(data[4:], (DecreaseLiquidityParams));
@@ -464,13 +469,33 @@ contract MamoruActionPolicyV2 is IActionPolicy {
     }
 
     /// Mint and increase at validation: a non-empty range, and the desired amounts charged to the budget. Desired
-    /// amounts are an upper bound of what the manager takes: the budget is charged conservatively.
-    function _checkProvide(address account, address pool, Config memory c, PoolInfo memory p, uint256 a0, uint256 a1)
-        internal
-        returns (uint256)
-    {
+    /// amounts are an upper bound of what the manager takes: the budget is charged conservatively. LeftClaw M-2 (review
+    /// P2 on ecc1c14): what the manager would take at the validation spot must also meet the submitted minimums, or the
+    /// manager's own slippage check reverts the execution after the charge; refused here first (the library rounds
+    /// down where the pool rounds up, so this errs on refusing).
+    function _checkProvide(
+        address account,
+        address pool,
+        Config memory c,
+        PoolInfo memory p,
+        uint256 a0,
+        uint256 a1,
+        int24 lower,
+        int24 upper,
+        uint256 min0,
+        uint256 min1
+    ) internal returns (uint256) {
         (bool ok, int24 lo, int24 hi) = _range(c, pool, true);
         if (!ok || !_spotIn(pool, lo, hi)) return VALIDATION_FAILED;
+        {
+            (uint160 spot,,,,,,) = IUniswapV3Pool(pool).slot0();
+            uint160 sa = TickMath.getSqrtRatioAtTick(lower);
+            uint160 sb = TickMath.getSqrtRatioAtTick(upper);
+            (uint256 u0, uint256 u1) = LiquidityAmounts.getAmountsForLiquidity(
+                spot, sa, sb, LiquidityAmounts.getLiquidityForAmounts(spot, sa, sb, a0, a1)
+            );
+            if (u0 < min0 || u1 < min1) return VALIDATION_FAILED;
+        }
         return _charge(account, pool, c, _value(c, p, lo, hi, a0, a1)) ? VALIDATION_SUCCESS : VALIDATION_FAILED;
     }
 

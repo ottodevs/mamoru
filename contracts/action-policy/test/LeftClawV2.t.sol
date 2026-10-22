@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 import {PolicyFixture, INPMFull} from "./MamoruActionPolicy.t.sol";
 import {deployV2} from "./MamoruActionPolicyV2.t.sol";
 import {
@@ -194,6 +195,70 @@ contract LeftClawV2Test is LeftClawFixture {
         bytes memory swap = _swapData(USDC, CBBTC, 500, 1_000e6, minOut, engineLimit);
         _push(POOL_BTC, USDC, CBBTC, 500, (lo + 9) - _spot(POOL_BTC)); // spot in [lo, limit): inside the range
         assertEq(_checkId(ID, ROUTER, swap), FAILED, "validated a swap the pool will revert");
+        (uint256 afterPush,) = policy.budgetLeft(safe, POOL_BTC);
+        assertEq(afterPush, before, "budget charged");
+    }
+
+    /// The minimums the engine would submit for (a0, a1) over [lower, upper] at today's spot, at 50 bps slippage.
+    function _minsAtSpot(int24 lower, int24 upper, uint256 a0, uint256 a1) internal view returns (uint256, uint256) {
+        (uint160 sp,,,,,,) = IUniswapV3Pool(POOL_BTC).slot0();
+        uint160 sa = TickMath.getSqrtRatioAtTick(lower);
+        uint160 sb = TickMath.getSqrtRatioAtTick(upper);
+        (uint256 u0, uint256 u1) = LiquidityAmounts.getAmountsForLiquidity(
+            sp, sa, sb, LiquidityAmounts.getLiquidityForAmounts(sp, sa, sb, a0, a1)
+        );
+        return (u0 * 995 / 1000, u1 * 995 / 1000);
+    }
+
+    /// Review P2 (#102, ecc1c14): a push that keeps the spot inside [lo, hi] but moves it enough that the manager's
+    /// slippage check (amount*Min) will revert the mint used to pass validation and charge the budget.
+    function test_M2_mintWhoseMinimumsTheSpotBreaksFailsBeforeCharging() public {
+        _enable(ID, 1, 60_000e6, new uint256[](0));
+        int24 sp = _spot(POOL_BTC);
+        int24 lower = ((sp - 100) / 10) * 10;
+        int24 upper = ((sp + 100) / 10) * 10;
+        (uint256 min0, uint256 min1) = _minsAtSpot(lower, upper, 10_000e6, 0.1e8);
+        bytes memory mm = abi.encodeCall(
+            MamoruActionPolicy.mint,
+            (MintParams(USDC, CBBTC, 500, lower, upper, 10_000e6, 0.1e8, min0, min1, safe, block.timestamp))
+        );
+        uint256 snap = vm.snapshotState();
+        assertEq(_checkId(ID, address(policy), mm), 0, "the engine's mint at today's spot passes");
+        vm.revertToState(snap);
+        (uint256 before,) = policy.budgetLeft(safe, POOL_BTC);
+        _push(POOL_BTC, CBBTC, USDC, 500, 20);
+        (int24 lo, int24 hi) = policy.priceRange(safe, POOL_BTC);
+        assertTrue(_spotInRange(POOL_BTC, lo, hi), "spot left the policy range: not this finding"); // inside the policy range, outside what the minimums allow
+        assertEq(_checkId(ID, address(policy), mm), FAILED, "validated a mint the manager will revert");
+        (uint256 afterPush,) = policy.budgetLeft(safe, POOL_BTC);
+        assertEq(afterPush, before, "budget charged");
+    }
+
+    /// Same for increase (#171), with the position's own ticks.
+    function test_M2_increaseWhoseMinimumsTheSpotBreaksFailsBeforeCharging() public {
+        deal(USDC, safe, 100_000e6);
+        deal(CBBTC, safe, 1e8);
+        _enable(ID, 1, 60_000e6, new uint256[](0));
+        (uint256 tokenId,) = _mintThroughPolicy(10_000e6, 0.1e8); // +-600 ticks around the spot
+        int24 sp = _spot(POOL_BTC);
+        (uint256 min0, uint256 min1) = _minsAtSpot(((sp - 600) / 10) * 10, ((sp + 600) / 10) * 10, 1_000e6, 0.01e8);
+        bytes memory inc = abi.encodeWithSignature(
+            "increase((uint256,uint256,uint256,uint256,uint256,uint256))",
+            tokenId,
+            uint256(1_000e6),
+            uint256(0.01e8),
+            min0,
+            min1,
+            block.timestamp
+        );
+        uint256 snap = vm.snapshotState();
+        assertEq(_checkId(ID, address(policy), inc), 0, "the engine's increase at today's spot passes");
+        vm.revertToState(snap);
+        (uint256 before,) = policy.budgetLeft(safe, POOL_BTC);
+        _push(POOL_BTC, CBBTC, USDC, 500, 40);
+        (int24 lo, int24 hi) = policy.priceRange(safe, POOL_BTC);
+        assertTrue(_spotInRange(POOL_BTC, lo, hi), "spot left the policy range: not this finding");
+        assertEq(_checkId(ID, address(policy), inc), FAILED, "validated an increase the manager will revert");
         (uint256 afterPush,) = policy.budgetLeft(safe, POOL_BTC);
         assertEq(afterPush, before, "budget charged");
     }
