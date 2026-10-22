@@ -63,6 +63,7 @@ export {
   encodeGasCaps,
   GAS_CAPS_TUPLE,
   MAMORU_INIT_TUPLE,
+  REVOKE_FLAG,
   maxGasCostPerOp,
   orderV4Keys,
   splitV4Keys,

@@ -967,6 +967,7 @@ export class Engine {
       feePips: e.fee,
       bandTicks,
       ...(anchor ? { anchor } : {}),
+      ...(ap.contractVersion === 2 ? { exitIgnoresAnchor: true } : {}),
       budgetIn1: budget.in1,
       budgetWindowSeconds: budget.windowSeconds,
       perWindow: budget.perWindow,
@@ -1199,7 +1200,10 @@ export class Engine {
           // Spec 007 T3: decrease minimums from the same math as MamoruActionPolicy._decreaseMins, at the narrower
           // band; never below the usual slippage minimum either (take the max, same reasoning as the swap floor).
           const oracle = await this.poolOracle(p.pool, this.cfg.policy.execution.twapWindowSeconds, v4.twapShortSeconds, blockNumber)
-          const bound = decreaseMinsInRange({ range: this.v4Range(p.pool, v4, oracle), tickLower: pos[5], tickUpper: pos[6], liquidity })
+          // LeftClaw M-6: MamoruActionPolicyV2 prices a decrease off the TWAP range alone, so a depeg past the anchor
+          // does not lock the exit; V1 still clips it to the anchor.
+          const exitRange = this.cfg.policy.actionPolicy?.contractVersion === 2 ? { bandTicks: v4.bandTicks } : v4
+          const bound = decreaseMinsInRange({ range: this.v4Range(p.pool, exitRange, oracle), tickLower: pos[5], tickUpper: pos[6], liquidity })
           if (bound.amount0Min > amount0Min) amount0Min = bound.amount0Min
           if (bound.amount1Min > amount1Min) amount1Min = bound.amount1Min
         }

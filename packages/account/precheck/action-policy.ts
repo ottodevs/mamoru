@@ -54,6 +54,8 @@ export type ActionPolicyPoolConfig = {
   bandTicks: number
   /** T6 H-1: Init.anchorTick/anchorBand (the stables pool's parity); absent = none. */
   anchor?: PriceAnchor
+  /** LeftClaw M-6 (MamoruActionPolicyV2): a decrease is priced off the TWAP range alone, never clipped to `anchor`. */
+  exitIgnoresAnchor?: boolean
   /** T6 M-2: the budget unit is token1 (else token0) — the pool's stable token. */
   budgetIn1: boolean
   budgetWindowSeconds: number
@@ -208,9 +210,11 @@ export function checkActionPolicyCall(
       return deny('POLICY_NOT_ADMITTED', 'undecodable decrease/collect/burn')
     }
     if (!isAdmitted(tokenId)) return deny('POLICY_NOT_ADMITTED', `tokenId ${tokenId} is not an admitted position of ${cfg.pool}`)
-    // A decrease is priced (its minimums come from the range): the policy refuses it when the range is empty.
+    // A decrease is priced (its minimums come from the range): the policy refuses it when the range is empty. V2
+    // (LeftClaw M-6) builds that range without the anchor, so a depeg never locks an exit.
     if (selector === SEL_DECREASE && reads) {
-      const range = rangeOf(cfg, reads)
+      const { anchor: _anchor, ...unanchored } = cfg
+      const range = rangeOf(cfg.exitIgnoresAnchor ? unanchored : cfg, reads)
       if ('ok' in range) return range
     }
     return { ok: true }

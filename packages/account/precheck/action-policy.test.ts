@@ -144,6 +144,15 @@ describe('(b) positions', () => {
     expect(res).toMatchObject({ ok: false, code: 'POLICY_PRICE_BAND' })
   })
 
+  test('LeftClaw M-6: under V2 a depeg past the anchor does not refuse a decrease; V1 still does', () => {
+    const isAdmitted = (tokenId: bigint) => tokenId === 42n
+    const call = toExecution(decreaseLiquidity({ tokenId: 42n, liquidity: 1n, amount0Min: 0n, amount1Min: 0n, deadline: 9_999_999_999n }))
+    const depeg = { ...baseReads, oracle: { twapLong: 120, twapShort: 120 } }
+    const v1: ActionPolicyPoolConfig = { ...cfg, bandTicks: 10, anchor: { tick: 0, band: 40 } }
+    expect(checkActionPolicyCall(call, v1, depeg, NOW, new Map(), isAdmitted)).toMatchObject({ ok: false, code: 'POLICY_PRICE_BAND' })
+    expect(checkActionPolicyCall(call, { ...v1, exitIgnoresAnchor: true }, depeg, NOW, new Map(), isAdmitted).ok).toBe(true)
+  })
+
   test('mint through the policy for the wrong pool/fee is refused', () => {
     const acc: ActionPolicySpendAcc = new Map()
     const wrongFee = encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'mint', args: [{ ...mintArgs, fee: 3000 }] })

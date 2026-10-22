@@ -55,9 +55,14 @@ export type MamoruInit = {
   perWindow: bigint
   /** Per-approval total (T_p), in the budget unit. */
   total: bigint
-  /** Positions minted outside this deployment that the owner admits at enable (T6 M-4). */
+  /** Positions minted outside this deployment that the owner admits at enable (T6 M-4). MamoruActionPolicyV2 only:
+   * an entry with REVOKE_FLAG set revokes that tokenId instead (LeftClaw M-4); admission otherwise survives renewals. */
   admit: readonly bigint[]
 }
+
+/** MamoruActionPolicyV2.REVOKE_FLAG: `tokenId | REVOKE_FLAG` in `Init.admit` revokes the position (V2 only; V1 would
+ * read it as a tokenId and revert the enable). */
+export const REVOKE_FLAG = 1n << 255n
 
 export const MAMORU_INIT_TUPLE = [
   {

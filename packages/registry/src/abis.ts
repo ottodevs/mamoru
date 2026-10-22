@@ -228,6 +228,8 @@ export const mamoruActionPolicyV2Abi = parseAbi([
   'function GUARDIAN() view returns (address)',
   'function generationOf(address account) view returns (uint64)',
   'function admittedPool(address account, uint256 tokenId) view returns (address)',
+  'function REVOKE_FLAG() view returns (uint256)',
+  'event Revoked(address indexed account, address indexed pool, uint256 indexed tokenId)',
   'error AccountPaused(address account)',
   'error OnlyGuardian()',
   'error NotAdmitted(uint256 tokenId)',
