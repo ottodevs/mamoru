@@ -83,6 +83,10 @@ account keys are shortened to 8 chars. Example (values illustrative):
   "gasReserve": [
     { "account": "3f9a7c21", "nativeWei": "250000000000000", "thresholdWei": "500000000000000", "low": true, "lowSince": "2026-10-02T09:00:00.000Z" },
     { "account": "9b0e41aa", "nativeWei": "900000000000000", "thresholdWei": "500000000000000", "low": false, "lowSince": null }
+  ],
+  // otto/mamoru#26: every known account's approval as the operator holds it (Operator.authorizationsSnapshot).
+  "authorizations": [
+    { "account": "3f9a7c21", "active": true, "policyId": "conservador-live-v2", "policyVersion": "2", "pools": ["pool:USDC/cbBTC/500", "pool:WETH/USDC/3000"], "validUntil": "2026-11-01T00:00:00.000Z", "grants": [{ "grant": "enter-swap:pool:USDC/cbBTC/500", "usedBps": 1200 }], "capUsdc": 2000, "capSource": "override", "signedCapUsdc": 1000, "holds": [], "deactivated": null }
   ]
 }
 ```
@@ -176,6 +180,13 @@ account keys are shortened to 8 chars. Example (values illustrative):
     payouts. Until then, a low reserve is an operator-ops signal only: top up the Safe by hand, or ask
     the owner to. Activation-time refusals (`ACTIVATION_LIMIT`, `SPONSOR_*`) cover an account that
     cannot *start*; this alert is about an account already running, which that path does not cover.
+- **`authorizations`** (otto/mamoru#26) is read from memory only (`accounts.json` and the last chain usage read), no
+  RPC: per account the policy, the pools its held grants name, the earliest `validUntil`, each grant's used share of
+  its allowance (bps, as the renewal row counts it), the cap in effect at Start (`capFor`, whole USDC) and its source
+  (`override`: the account's own cap; `canary`/`env`: the engine settings version; `default`: the code default,
+  also when a raised cap is refused; `emergency`: `MAMORU_CAP_USDC` or the local settings file), the cap the held
+  grants were signed for, SESSION_* holds, and the otto/mamoru#140 deactivation code. Never a session key,
+  permission id, signature or grant body. Mirrored into D1 like `opsRecent`, field by field.
 - **Relayer balance** is cached 60s so a metrics poll never adds RPC load.
 - **Bounded cardinality**: a method outside the fixed CU table (`eth_call`, `eth_getLogs`, ...) folds
   into an `"other"` method bucket instead of creating a new permanent one, and provider labels beyond
