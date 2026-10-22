@@ -69,17 +69,14 @@ describe('priceFees and dayReceipts', () => {
     expect(days[0]).toEqual({ day: '2026-10-21', gasWei: '8', collectedUsdc: priced!, positions: [{ tokenId: '1', collected0: '10', collected1: '0', collectedUsdc: priced! }] })
     expect(days[1]!.collectedUsdc).toBeUndefined()
     expect(days[1]!.positions[0]!.collectedUsdc).toBeUndefined()
-    expect(dayReceipts([op('eng-a', facts), op('eng-c', unpriced)], '2026-10-22').map((d) => d.day)).toEqual(['2026-10-22'])
   })
 })
 
 describe('needsFacts', () => {
-  test('only a final inclusion: confirmed, reverted at a safe block, or late-included; never a submitted op', () => {
+  test('any engine op with a transaction, whatever its stored state (finality is checked on the receipt)', () => {
     expect(needsFacts(op('eng-1'))).toBe(true)
-    expect(needsFacts({ ...op('eng-1'), state: 'submitted' } as StoredOp)).toBe(false)
+    expect(needsFacts({ ...op('eng-1'), state: 'submitted' } as StoredOp)).toBe(true)
     expect(needsFacts({ ...op('eng-1'), state: 'failed', code: 'EXEC_INNER_REVERT' } as StoredOp)).toBe(true)
-    expect(needsFacts({ ...op('eng-1'), state: 'failed', code: 'RECON_UNINCLUDABLE' } as StoredOp)).toBe(false)
-    expect(needsFacts({ ...op('eng-1'), state: 'failed', code: 'RECON_UNINCLUDABLE', lateIncluded: true } as StoredOp)).toBe(true)
     expect(needsFacts(op('own-1'))).toBe(false)
     expect(needsFacts(op('eng-1', undefined, null))).toBe(false)
   })
@@ -92,6 +89,7 @@ describe('needsFacts', () => {
 
 describe('withReceipts', () => {
   const snapshot = (): Snapshot => ({ chainId: 8453, block: 10n, readAt: '2026-10-22T08:00:00.000Z', pools: {}, safes: [], calls: 1 })
+  const SAFE_BLOCK = async () => 100n
   const one = (ops: StoredOp[], save = () => {}) => ({ accounts: () => [{ accountKey: 'acct-1-full-key', safe: SAFE, ops }], save })
 
   test('reads each receipt once, keeps facts on the row, saves, and retries a missing one later', async () => {
@@ -103,20 +101,49 @@ describe('withReceipts', () => {
       return h === '0x02' ? null : { logs: [userOp(SAFE, 4n)], blockNumber: 9n }
     }
     const tried = new Map<string, number>()
-    const out = await withReceipts(snapshot(), one(ops, () => void saves++), readReceipt, async () => T, tried)
+    const out = await withReceipts(snapshot(), one(ops, () => void saves++), readReceipt, async () => T, SAFE_BLOCK, tried)
     expect(reads).toEqual(['0x01', '0x02'])
     expect(saves).toBe(1)
     expect(ops[0]!.facts).toMatchObject({ txHash: '0x01', gasWei: '4' })
     expect(ops[1]!.facts).toBeUndefined()
     expect(out.receipts).toEqual([{ safe: SAFE, days: [{ day: '2026-10-22', gasWei: '4', collectedUsdc: '0', positions: [] }] }])
 
-    await withReceipts(snapshot(), one(ops), readReceipt, async () => T, tried)
+    await withReceipts(snapshot(), one(ops), readReceipt, async () => T, SAFE_BLOCK, tried)
     expect(reads).toEqual(['0x01', '0x02', '0x02'])
+  })
+
+  test('a receipt above the safe block is not frozen: read again once it is safe; a submitted op of a stopped engine counts', async () => {
+    const pending = { ...op('eng-1', undefined, '0x01'), state: 'submitted' } as StoredOp
+    let safe = 5n
+    const read = async () => ({ logs: [userOp(SAFE, 6n)], blockNumber: 9n })
+    const tried = new Map<string, number>()
+    await withReceipts(snapshot(), one([pending]), read, async () => T, async () => safe, tried)
+    expect(pending.facts).toBeUndefined()
+    safe = 9n
+    const out = await withReceipts(snapshot(), one([pending]), read, async () => T, async () => safe, tried)
+    expect(pending.facts?.gasWei).toBe('6')
+    expect(out.receipts[0]!.days[0]!.gasWei).toBe('6')
+  })
+
+  test('the safe block not readable: nothing is read or frozen this tick', async () => {
+    const o = op('eng-1', undefined, '0x01')
+    let reads = 0
+    await withReceipts(snapshot(), one([o]), async () => (reads++, { logs: [], blockNumber: 1n }), async () => T, async () => {
+      throw new Error('rpc down')
+    })
+    expect(reads).toBe(0)
+    expect(o.facts).toBeUndefined()
+  })
+
+  test('the whole history is published, however old the day', async () => {
+    const old: OpFacts = { txHash: '0xaa', at: '2025-01-01T00:00:00.000Z', gasWei: '1', fees: [] }
+    const out = await withReceipts(snapshot(), one([op('eng-1', old)]), async () => null, async () => T, SAFE_BLOCK)
+    expect(out.receipts[0]!.days.map((d) => d.day)).toEqual(['2025-01-01'])
   })
 
   test('an account the snapshot did not read (stopped) still gets its ops read and published', async () => {
     const ops = [op('eng-1', undefined, '0x01')]
-    const out = await withReceipts(snapshot(), one(ops), async () => ({ logs: [userOp(SAFE, 3n)], blockNumber: 1n }), async () => T)
+    const out = await withReceipts(snapshot(), one(ops), async () => ({ logs: [userOp(SAFE, 3n)], blockNumber: 1n }), async () => T, SAFE_BLOCK)
     expect(out.safes).toEqual([])
     expect(out.receipts[0]!.days[0]!.gasWei).toBe('3')
   })
@@ -132,10 +159,10 @@ describe('withReceipts', () => {
     }
     let n = 0
     const counting = async (h: Hex) => (n++, read(h))
-    await withReceipts(snapshot(), one(ops), counting, async () => T, tried)
+    await withReceipts(snapshot(), one(ops), counting, async () => T, SAFE_BLOCK, tried)
     expect(n).toBe(FACTS_PER_TICK)
     expect(fresh.facts).toBeUndefined()
-    await withReceipts(snapshot(), one(ops), counting, async () => T, tried)
+    await withReceipts(snapshot(), one(ops), counting, async () => T, SAFE_BLOCK, tried)
     expect(fresh.facts).toBeDefined()
   })
 })

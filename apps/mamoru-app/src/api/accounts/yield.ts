@@ -36,7 +36,9 @@ async function openPositionsValueVsHold(db: Db, chainId: number, accountKey: str
 export async function loadYieldLedger(db: Db, chainId: number, accountKey: string): Promise<YieldLedgerView> {
   const [latest, daily] = await Promise.all([
     db.prepare('SELECT fees_usdc, read_at, positions_json FROM account_snapshot_latest WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).first<LatestRow>(),
-    db.prepare('SELECT collected_usdc, gas_paid_wei FROM account_daily WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<DailyRow>(),
+    // migrations/d1/0015_yield_ledger_receipts.sql: written for every day an op reached the chain, with or without
+    // an account_daily row for that day (an account stopped right after an op has none).
+    db.prepare('SELECT collected_usdc, gas_paid_wei FROM yield_ledger_account_receipts WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<DailyRow>(),
   ])
 
   let collected = 0n
@@ -56,7 +58,7 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
 
   // Lifetime, matching collectedUsd and from the same rows: each day's own 10% of that day's collected_usdc. Not
   // from yield_ledger_position_daily, which has no row for a position a rerange burned before a snapshot saw it
-  // that day (migrations/d1/0015_yield_ledger_position_collected.sql).
+  // that day (migrations/d1/0015_yield_ledger_receipts.sql).
   let feeAccrued = 0n
   let anyFeeAccrued = false
   for (const row of daily.results) {

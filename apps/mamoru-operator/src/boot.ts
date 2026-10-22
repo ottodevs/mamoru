@@ -17,17 +17,17 @@ import { readSnapshot, SnapshotLoop, snapshotIntervalMs, type Snapshot } from '.
 import { MULTICALL3 } from '@mamoru/rpc'
 import { StateStore, loadOrCreateKey } from './state.ts'
 import { EntryStore, withHoldValue } from './yield-entries.ts'
-import { withReceipts, type BlockTimeReader, type ReceiptReader, type ReceiptSource } from './yield-receipts.ts'
+import { withReceipts, type BlockTimeReader, type ReceiptReader, type ReceiptSource, type SafeBlockReader } from './yield-receipts.ts'
 import { EngineSettingsSource, type SettingsOverride } from './engine-settings.ts'
 
 /**
  * Wraps a snapshot reader with #129's hold-value baseline, stored in its own file under `stateDir`, and the per-day
  * gas and collected fees of every account's engine ops (yield-receipts.ts), kept on their stored rows.
  */
-function withYieldLedger(stateDir: string, read: () => Promise<Snapshot>, receipts: { source: ReceiptSource; readReceipt: ReceiptReader; blockTime: BlockTimeReader }): () => Promise<Snapshot> {
+function withYieldLedger(stateDir: string, read: () => Promise<Snapshot>, receipts: { source: ReceiptSource; readReceipt: ReceiptReader; blockTime: BlockTimeReader; safeBlock: SafeBlockReader }): () => Promise<Snapshot> {
   const entries = new EntryStore(stateDir)
   const tried = new Map<string, number>()
-  return async () => withReceipts(withHoldValue(await read(), entries), receipts.source, receipts.readReceipt, receipts.blockTime, tried)
+  return async () => withReceipts(withHoldValue(await read(), entries), receipts.source, receipts.readReceipt, receipts.blockTime, receipts.safeBlock, tried)
 }
 
 /**
@@ -342,6 +342,7 @@ export async function bootOperator(o: BootOptions) {
         return r ? { logs: r.logs, blockNumber: r.blockNumber } : null
       },
       blockTime: async (blockNumber: bigint) => (await snapshotClient.getBlock({ blockNumber })).timestamp,
+      safeBlock: async () => (await snapshotClient.getBlock({ blockTag: 'safe' })).number,
     }
     snapshot = new SnapshotLoop(withYieldLedger(o.stateDir, read, receipts), snapshotIntervalMs(process.env.MAMORU_SNAPSHOT_MS), () => budget.over())
   }

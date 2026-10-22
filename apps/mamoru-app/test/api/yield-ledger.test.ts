@@ -283,13 +283,31 @@ describe('writeReceipts (otto/mamoru#129): the operator\'s per-day gas and colle
     expect(accountRow().collected_usdc).toBe(70)
   })
 
-  test('never creates an account_daily row for a day without a snapshot, and skips a safe no account owns', async () => {
+  const receiptsRow = (d = day) => db.raw.query('SELECT account_key, gas_paid_wei, collected_usdc FROM yield_ledger_account_receipts WHERE day = ?').get(d) as Record<string, unknown> | null
+
+  test('a day with no snapshot row (account stopped right after an op) is kept in the account receipts, never as an invented account_daily row', async () => {
     await writeReceipts(db, withReceipts([{ day, gasWei: '5', collectedUsdc: '0', positions: [] }]), now)
     expect(db.raw.query('SELECT COUNT(*) AS n FROM account_daily').get()).toEqual({ n: 0 })
+    expect(receiptsRow()).toEqual({ account_key: ACCOUNT_KEY, gas_paid_wei: '5', collected_usdc: 0 })
+  })
+
+  test('an unchanged day is skipped by digest; a changed or long-past day is written', async () => {
+    const d = { day, gasWei: '5', collectedUsdc: '1', positions: [] }
+    await writeReceipts(db, withReceipts([d]), now)
+    db.raw.exec(`UPDATE yield_ledger_account_receipts SET gas_paid_wei = 'tampered'`)
+    await writeReceipts(db, withReceipts([d]), now)
+    expect(receiptsRow()?.gas_paid_wei).toBe('tampered')
+    await writeReceipts(db, withReceipts([{ ...d, gasWei: '6' }, { day: '2025-01-01', gasWei: '9', positions: [] }]), now)
+    expect(receiptsRow()?.gas_paid_wei).toBe('6')
+    expect(receiptsRow('2025-01-01')?.gas_paid_wei).toBe('9')
+  })
+
+  test('skips a safe no account owns', async () => {
     await writeAccountSnapshot(db, snapshot(), now)
     await writeReceipts(db, withReceipts([{ day, gasWei: '5', positions: [{ tokenId: '9', collected0: '1', collected1: '1' }] }], '0x0000000000000000000000000000000000dEaD'), now)
     expect(accountRow().gas_paid_wei).toBeNull()
     expect(collectedRow(9)).toBeNull()
+    expect(db.raw.query('SELECT COUNT(*) AS n FROM yield_ledger_account_receipts').get()).toEqual({ n: 0 })
   })
 })
 

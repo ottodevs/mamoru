@@ -261,21 +261,35 @@ export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date
   return { written, skipped }
 }
 
+async function digestOf(day: DayReceiptWire): Promise<string> {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(day)))
+  return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
 /**
- * Writes the operator's per-day receipts (gas paid, fees collected). The totals are absolute, so writing them again
- * is a no-op; a collected USD figure the operator could not price yet leaves the stored one as it was.
- * - account_daily: UPDATE only, onto the row the snapshot writer made for that day (a day with no snapshot has no
- *   open/close figures to sit next to, so it is not invented here).
- * - yield_ledger_position_collected: always written (migration 0015), so a position a rerange burned before any
- *   snapshot of that day saw it keeps its collected fees.
- * - yield_ledger_position_daily: its collected columns follow when that day's row exists.
+ * Writes the operator's per-day receipts (gas paid, fees collected). The operator serves every day it has, every
+ * pull; a day is written only when its digest differs from the stored one (migration 0015), so the D1 work per pull
+ * is the days that changed, and a day recovered late is still delivered. The totals are absolute, so a rewrite is a
+ * no-op; a collected USD figure the operator could not price yet leaves the stored one as it was.
+ * - yield_ledger_account_receipts and yield_ledger_position_collected: always written, with or without a snapshot
+ *   row for that day (an account stopped right after an op, a position a rerange burned). loadYieldLedger reads these.
+ * - account_daily and yield_ledger_position_daily: their collected/gas columns follow when that day's row exists.
  */
 export async function writeReceipts(db: Db, snapshot: SnapshotWire, now: Date): Promise<void> {
-  for (const r of snapshot.receipts ?? []) {
+  if (!snapshot.receipts?.length) return
+  const stored = await db.prepare('SELECT address, day, digest FROM yield_ledger_account_receipts WHERE chain_id = ?').bind(snapshot.chainId).all<{ address: string; day: string; digest: string }>()
+  const seen = new Map(stored.results.map((r) => [`${r.address}|${r.day}`, r.digest]))
+  for (const r of snapshot.receipts) {
+    const address = r.safe.toLowerCase()
+    const pending: { d: DayReceiptWire; digest: string }[] = []
+    for (const d of r.days) {
+      const digest = await digestOf(d)
+      if (seen.get(`${address}|${d.day}`) !== digest) pending.push({ d, digest })
+    }
+    if (!pending.length) continue
     const account = await resolveAccount(db, snapshot.chainId, r.safe)
     if (!account) continue
-    const address = r.safe.toLowerCase()
-    for (const d of r.days) {
+    for (const { d, digest } of pending) {
       const collected = d.collectedUsdc === undefined ? null : Number(d.collectedUsdc)
       await db
         .prepare('UPDATE account_daily SET gas_paid_wei = ?, collected_usdc = COALESCE(?, collected_usdc) WHERE day = ? AND chain_id = ? AND address = ?')
@@ -301,6 +315,18 @@ export async function writeReceipts(db: Db, snapshot: SnapshotWire, now: Date): 
           .bind(p.collected0, p.collected1, usd, feeReadinessUsd(usd), d.day, snapshot.chainId, Number(p.tokenId), address)
           .run()
       }
+      // Last: if a write above failed, the digest is not stored and the day is written again next pull.
+      await db
+        .prepare(
+          `INSERT INTO yield_ledger_account_receipts (day, chain_id, address, account_key, env, gas_paid_wei, collected_usdc, digest, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(day, chain_id, address) DO UPDATE SET
+             account_key = excluded.account_key, env = excluded.env, gas_paid_wei = excluded.gas_paid_wei,
+             collected_usdc = COALESCE(excluded.collected_usdc, yield_ledger_account_receipts.collected_usdc),
+             digest = excluded.digest, updated_at = excluded.updated_at`,
+        )
+        .bind(d.day, snapshot.chainId, address, account.accountKey, account.env, d.gasWei, collected, digest, now.toISOString())
+        .run()
     }
   }
 }

@@ -29,15 +29,16 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     expect(view.gasPaidWei).toBeNull()
   })
 
-  test('collectedUsd and gasPaidWei sum across account_daily rows once any is known', async () => {
+  function seedReceipts(db: ReturnType<typeof memoryD1>, day: string, collected: number | null, gasWei: string) {
     db.raw.exec(
-      `INSERT INTO account_daily (day, chain_id, address, account_key, env, block_open, block_close, total_open_usdc, total_close_usdc, idle_close_usdc, lp_close_usdc, fees_open_usdc, fees_close_usdc, collected_usdc, gas_paid_wei)
-       VALUES ('2026-10-15', ${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1, 1, 0, 0, 0, 0, 0, 0, 100, '1000000000000000')`,
+      `INSERT INTO yield_ledger_account_receipts (day, chain_id, address, account_key, env, gas_paid_wei, collected_usdc, digest, updated_at)
+       VALUES ('${day}', ${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', '${gasWei}', ${collected === null ? 'NULL' : collected}, 'x', '${day}T00:00:00.000Z')`,
     )
-    db.raw.exec(
-      `INSERT INTO account_daily (day, chain_id, address, account_key, env, block_open, block_close, total_open_usdc, total_close_usdc, idle_close_usdc, lp_close_usdc, fees_open_usdc, fees_close_usdc, collected_usdc, gas_paid_wei)
-       VALUES ('2026-10-16', ${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1, 1, 0, 0, 0, 0, 0, 0, 50, '2000000000000000')`,
-    )
+  }
+
+  test('collectedUsd and gasPaidWei sum across yield_ledger_account_receipts rows once any is known', async () => {
+    seedReceipts(db, '2026-10-15', 100, '1000000000000000')
+    seedReceipts(db, '2026-10-16', 50, '2000000000000000')
     const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
     expect(view.collectedUsd).toBe('150')
     expect(view.gasPaidWei).toBe('3000000000000000')
@@ -66,13 +67,9 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     expect(view.valueVsHoldUsd).toBe('601500')
   })
 
-  test('feeAccruedUsd is a lifetime sum of each day\'s 10% of account_daily.collected_usdc, the same rows as collectedUsd (a burned position may have no position row)', async () => {
-    for (const [day, collected] of [['2026-10-15', 100], ['2026-10-16', 500]] as const) {
-      db.raw.exec(
-        `INSERT INTO account_daily (day, chain_id, address, account_key, env, block_open, block_close, total_open_usdc, total_close_usdc, idle_close_usdc, lp_close_usdc, fees_open_usdc, fees_close_usdc, collected_usdc, gas_paid_wei)
-         VALUES ('${day}', ${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1, 1, 0, 0, 0, 0, 0, 0, ${collected}, '1')`,
-      )
-    }
+  test('feeAccruedUsd is a lifetime sum of each day\'s 10% of the account receipts\' collected_usdc, the same rows as collectedUsd (a burned position may have no position row)', async () => {
+    seedReceipts(db, '2026-10-15', 100, '1')
+    seedReceipts(db, '2026-10-16', 500, '1')
     seedPositionDaily(db, '2026-10-16', 1, 5_000_000, 1_000, 4_500_000, 999)
     seedLatest(db, '2026-10-16T09:00:00.000Z', [1])
     const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
