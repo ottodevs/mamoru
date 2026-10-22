@@ -55,8 +55,6 @@ export type SafeWire = {
   feesUsdc: string
   owedUsdc: string
   totalUsdc: string
-  /** otto/mamoru#129: gas and collected fees of this account's engine ops per UTC day (operator yield-receipts.ts), the last few days only. Absent from an operator older than this field. */
-  receipts?: DayReceiptWire[]
 }
 /** One UTC day's full totals, not a delta: writing them again is a no-op. `collectedUsdc` is absent while a fee of that day is unpriced. */
 export type DayReceiptWire = {
@@ -73,6 +71,12 @@ export type SnapshotWire = {
   safes: SafeWire[]
   calls: number
   lastError: string | null
+  /**
+   * otto/mamoru#129: gas and collected fees of every stored account's engine ops per UTC day (operator
+   * yield-receipts.ts), the last few days only, including accounts the snapshot did not read (stopped). Absent from
+   * an operator older than this field.
+   */
+  receipts?: { safe: string; days: DayReceiptWire[] }[]
 }
 
 export const SNAPSHOT_TIMEOUT_MS = 30_000
@@ -258,18 +262,20 @@ export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date
 }
 
 /**
- * Writes the operator's per-day receipts (gas paid, fees collected) onto the account_daily and
- * yield_ledger_position_daily rows the snapshot writers already made for those days. UPDATE only: a day with no
- * snapshot row has no open/close figures to sit next to, so it is not invented here. The totals are absolute, so
- * gas_paid_wei and collected0/1 are replaced; a collected USD figure the operator could not price yet leaves the
- * stored one as it was.
+ * Writes the operator's per-day receipts (gas paid, fees collected). The totals are absolute, so writing them again
+ * is a no-op; a collected USD figure the operator could not price yet leaves the stored one as it was.
+ * - account_daily: UPDATE only, onto the row the snapshot writer made for that day (a day with no snapshot has no
+ *   open/close figures to sit next to, so it is not invented here).
+ * - yield_ledger_position_collected: always written (migration 0015), so a position a rerange burned before any
+ *   snapshot of that day saw it keeps its collected fees.
+ * - yield_ledger_position_daily: its collected columns follow when that day's row exists.
  */
-export async function writeReceipts(db: Db, snapshot: SnapshotWire): Promise<void> {
-  for (const safe of snapshot.safes) {
-    if (!safe.receipts?.length) continue
-    if (!(await resolveAccount(db, snapshot.chainId, safe.safe))) continue
-    const address = safe.safe.toLowerCase()
-    for (const d of safe.receipts) {
+export async function writeReceipts(db: Db, snapshot: SnapshotWire, now: Date): Promise<void> {
+  for (const r of snapshot.receipts ?? []) {
+    const account = await resolveAccount(db, snapshot.chainId, r.safe)
+    if (!account) continue
+    const address = r.safe.toLowerCase()
+    for (const d of r.days) {
       const collected = d.collectedUsdc === undefined ? null : Number(d.collectedUsdc)
       await db
         .prepare('UPDATE account_daily SET gas_paid_wei = ?, collected_usdc = COALESCE(?, collected_usdc) WHERE day = ? AND chain_id = ? AND address = ?')
@@ -277,6 +283,16 @@ export async function writeReceipts(db: Db, snapshot: SnapshotWire): Promise<voi
         .run()
       for (const p of d.positions) {
         const usd = p.collectedUsdc === undefined ? null : Number(p.collectedUsdc)
+        await db
+          .prepare(
+            `INSERT INTO yield_ledger_position_collected (day, chain_id, token_id, account_key, address, env, collected0, collected1, collected_usd, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(day, chain_id, token_id) DO UPDATE SET
+               env = excluded.env, collected0 = excluded.collected0, collected1 = excluded.collected1,
+               collected_usd = COALESCE(excluded.collected_usd, yield_ledger_position_collected.collected_usd), updated_at = excluded.updated_at`,
+          )
+          .bind(d.day, snapshot.chainId, Number(p.tokenId), account.accountKey, address, account.env, p.collected0, p.collected1, usd, now.toISOString())
+          .run()
         await db
           .prepare(
             `UPDATE yield_ledger_position_daily SET collected0 = ?, collected1 = ?, collected_usd = COALESCE(?, collected_usd), fee_accrued_usd = COALESCE(?, fee_accrued_usd)
@@ -295,6 +311,6 @@ export async function pullYieldLedger(db: Db, operatorUrl: string, operatorSecre
   if (!snapshot) return null
   const accounts = await writeAccountSnapshot(db, snapshot, now)
   const positions = await writeYieldLedger(db, snapshot, now)
-  await writeReceipts(db, snapshot)
+  await writeReceipts(db, snapshot, now)
   return { accounts: accounts.written, positions: positions.written }
 }

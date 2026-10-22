@@ -39,6 +39,8 @@ export type FeeFact = {
 }
 
 export type OpFacts = {
+  /** The transaction these facts were read from: a row whose txHash changed is read again. */
+  txHash?: string
   /** Block timestamp, ISO: the UTC day the op counts on. */
   at: string
   gasWei: string
@@ -84,9 +86,15 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint): Op
   return { at: new Date(Number(blockTime) * 1000).toISOString(), gasWei: gas.toString(), fees }
 }
 
-/** An engine op whose transaction reached the chain and has no facts yet. */
+/**
+ * An engine op whose inclusion is final and has no facts for that transaction yet. Final: confirmed or reverted at
+ * a safe block (the engine waits for one before either), or a late inclusion the engine applied after the same
+ * check. A `submitted` op can still be reorged out, so it waits.
+ */
 export function needsFacts(op: StoredOp): boolean {
-  return op.opId.startsWith('eng-') && !!op.txHash && !op.facts
+  if (!op.opId.startsWith('eng-') || !op.txHash) return false
+  const final = op.state === 'confirmed' || op.lateIncluded === true || (op.state === 'failed' && op.code === 'EXEC_INNER_REVERT')
+  return final && op.facts?.txHash?.toLowerCase() !== op.txHash.toLowerCase()
 }
 
 /** Sets `usdc` on every fee the snapshot can price. Returns whether anything changed (the caller saves). */
@@ -151,9 +159,9 @@ export function dayReceipts(ops: readonly StoredOp[], since = ''): DayReceiptWir
     }))
 }
 
-/** What the snapshot wrapper needs from the operator: the stored ops per account, and a way to persist them. */
+/** What the snapshot wrapper needs from the operator: every account it has stored (stopped ones too), and a way to persist them. */
 export type ReceiptSource = {
-  opsOf(accountKey: string): StoredOp[] | undefined
+  accounts(): { accountKey: string; safe: Address; ops: StoredOp[] }[]
   save(): void
 }
 
@@ -163,35 +171,41 @@ export type BlockTimeReader = (block: bigint) => Promise<bigint>
 /** Receipts read per snapshot tick at most: a backfill of old ops spreads over a few ticks instead of one burst. */
 export const FACTS_PER_TICK = 20
 
+export type AccountReceiptsWire = { safe: string; days: DayReceiptWire[] }
+
 /**
- * Reads facts for up to FACTS_PER_TICK ops that lack them, prices what the snapshot can, and adds `receipts` to
- * every safe. A receipt that cannot be read now (RPC error, not found) is tried again next tick; nothing here
- * throws into the snapshot loop.
+ * Reads facts for up to FACTS_PER_TICK ops that need them, prices what the snapshot can, and adds `receipts` for
+ * every stored account with an op in the window, whether or not the snapshot read its Safe (an account stopped
+ * right after an op still gets that op counted). Ops are taken least recently tried first (`tried`, kept by the
+ * caller across ticks), so receipts that keep failing go to the back instead of using every tick. A receipt that
+ * cannot be read now (RPC error, not found) is tried again later; nothing here throws into the snapshot loop.
  */
-export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, readReceipt: ReceiptReader, blockTime: BlockTimeReader): Promise<Snapshot & { safes: (Snapshot['safes'][number] & { receipts: DayReceiptWire[] })[] }> {
-  let budget = FACTS_PER_TICK
+export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, readReceipt: ReceiptReader, blockTime: BlockTimeReader, tried: Map<string, number> = new Map()): Promise<Snapshot & { receipts: AccountReceiptsWire[] }> {
+  const accounts = source.accounts()
+  const due = accounts
+    .flatMap((a) => a.ops.filter(needsFacts).map((op) => ({ a, op, key: `${a.accountKey}:${op.opId}` })))
+    .sort((x, y) => (tried.get(x.key) ?? -1) - (tried.get(y.key) ?? -1))
+    .slice(0, FACTS_PER_TICK)
   let changed = false
   const times = new Map<bigint, bigint>()
-  for (const safe of snapshot.safes) {
-    for (const op of source.opsOf(safe.accountKey) ?? []) {
-      if (budget > 0 && needsFacts(op)) {
-        budget--
-        try {
-          const r = await readReceipt(op.txHash as Hex)
-          if (r) {
-            const t = times.get(r.blockNumber) ?? (await blockTime(r.blockNumber))
-            times.set(r.blockNumber, t)
-            op.facts = factsFromLogs(r.logs, safe.safe, t)
-            changed = true
-          }
-        } catch (e) {
-          console.error(`yield-receipts: ${safe.accountKey.slice(0, 8)} ${op.opId} receipt not read`, e instanceof Error ? e.message : String(e))
-        }
-      }
-      if (op.facts && priceFees(op.facts, snapshot.pools)) changed = true
+  for (const { a, op, key } of due) {
+    tried.set(key, Date.now())
+    try {
+      const txHash = op.txHash as Hex
+      const r = await readReceipt(txHash)
+      if (!r) continue
+      const t = times.get(r.blockNumber) ?? (await blockTime(r.blockNumber))
+      times.set(r.blockNumber, t)
+      op.facts = { txHash, ...factsFromLogs(r.logs, a.safe, t) }
+      tried.delete(key)
+      changed = true
+    } catch (e) {
+      console.error(`yield-receipts: ${a.accountKey.slice(0, 8)} ${op.opId} receipt not read`, e instanceof Error ? e.message : String(e))
     }
   }
+  for (const a of accounts) for (const op of a.ops) if (op.facts && priceFees(op.facts, snapshot.pools)) changed = true
   if (changed) source.save()
   const since = new Date(Date.parse(snapshot.readAt) - (RECEIPT_DAYS - 1) * 86_400_000).toISOString().slice(0, 10)
-  return { ...snapshot, safes: snapshot.safes.map((s) => ({ ...s, receipts: dayReceipts(source.opsOf(s.accountKey) ?? [], since) })) }
+  const receipts = accounts.map((a) => ({ safe: a.safe, days: dayReceipts(a.ops, since) })).filter((r) => r.days.length > 0)
+  return { ...snapshot, receipts }
 }

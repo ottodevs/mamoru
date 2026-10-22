@@ -26,7 +26,8 @@ import { EngineSettingsSource, type SettingsOverride } from './engine-settings.t
  */
 function withYieldLedger(stateDir: string, read: () => Promise<Snapshot>, receipts: { source: ReceiptSource; readReceipt: ReceiptReader; blockTime: BlockTimeReader }): () => Promise<Snapshot> {
   const entries = new EntryStore(stateDir)
-  return async () => withReceipts(withHoldValue(await read(), entries), receipts.source, receipts.readReceipt, receipts.blockTime)
+  const tried = new Map<string, number>()
+  return async () => withReceipts(withHoldValue(await read(), entries), receipts.source, receipts.readReceipt, receipts.blockTime, tried)
 }
 
 /**
@@ -331,7 +332,7 @@ export async function bootOperator(o: BootOptions) {
     const budget = rpcBudget(rpcMetrics)
     const read = (): Promise<Snapshot> => readSnapshot(snapshotClient, multicall3, chainId, operator.snapshotTargets())
     const receipts = {
-      source: { opsOf: (key: string) => store.state.accounts[key]?.ops, save: () => store.save() },
+      source: { accounts: () => Object.values(store.state.accounts).map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, ops: a.ops })), save: () => store.save() },
       // Same transport as the read: these calls count against the snapshot's RPC budget, not the engines'.
       readReceipt: async (hash: Hex) => {
         const r = await snapshotClient.getTransactionReceipt({ hash }).catch((e: unknown) => {

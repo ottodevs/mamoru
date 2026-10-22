@@ -4,11 +4,11 @@
 // dashboard route, so the two never drift.
 import type { YieldLedgerView } from '@mamoru/domain'
 import type { Db } from '../env.ts'
+import { feeReadinessUsd } from '../yield-ledger.ts'
 
 type LatestRow = { fees_usdc: number; read_at: string; positions_json: string }
 type DailyRow = { collected_usdc: number | null; gas_paid_wei: string | null }
 type PositionRow = { value_usd: number; accrued_usd_close: number; hold_value_usd: number }
-type FeeRow = { fee_accrued_usd: number | null }
 
 const dayOf = (iso: string): string => iso.slice(0, 10)
 
@@ -34,12 +34,9 @@ async function openPositionsValueVsHold(db: Db, chainId: number, accountKey: str
 }
 
 export async function loadYieldLedger(db: Db, chainId: number, accountKey: string): Promise<YieldLedgerView> {
-  const [latest, daily, feeRows] = await Promise.all([
+  const [latest, daily] = await Promise.all([
     db.prepare('SELECT fees_usdc, read_at, positions_json FROM account_snapshot_latest WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).first<LatestRow>(),
     db.prepare('SELECT collected_usdc, gas_paid_wei FROM account_daily WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<DailyRow>(),
-    // Lifetime, matching collectedUsd: every day's fee_accrued_usd is already that day's own 10% of that day's
-    // collected_usd (migrations/d1/0010_yield_ledger.sql), so summing every row is the lifetime readiness figure.
-    db.prepare('SELECT fee_accrued_usd FROM yield_ledger_position_daily WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<FeeRow>(),
   ])
 
   let collected = 0n
@@ -57,11 +54,15 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
     }
   }
 
+  // Lifetime, matching collectedUsd and from the same rows: each day's own 10% of that day's collected_usdc. Not
+  // from yield_ledger_position_daily, which has no row for a position a rerange burned before a snapshot saw it
+  // that day (migrations/d1/0015_yield_ledger_position_collected.sql).
   let feeAccrued = 0n
   let anyFeeAccrued = false
-  for (const row of feeRows.results) {
-    if (row.fee_accrued_usd != null) {
-      feeAccrued += BigInt(row.fee_accrued_usd)
+  for (const row of daily.results) {
+    const fee = feeReadinessUsd(row.collected_usdc)
+    if (fee != null) {
+      feeAccrued += BigInt(fee)
       anyFeeAccrued = true
     }
   }

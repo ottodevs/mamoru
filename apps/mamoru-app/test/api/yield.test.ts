@@ -66,11 +66,17 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     expect(view.valueVsHoldUsd).toBe('601500')
   })
 
-  test('feeAccruedUsd is a lifetime sum, matching collectedUsd, not scoped to the latest day (code-review finding: these must agree)', async () => {
-    seedPositionDaily(db, '2026-10-15', 1, 4_000_000, 0, 4_000_000, 10)
-    seedPositionDaily(db, '2026-10-16', 1, 5_000_000, 1_000, 4_500_000, 50)
+  test('feeAccruedUsd is a lifetime sum of each day\'s 10% of account_daily.collected_usdc, the same rows as collectedUsd (a burned position may have no position row)', async () => {
+    for (const [day, collected] of [['2026-10-15', 100], ['2026-10-16', 500]] as const) {
+      db.raw.exec(
+        `INSERT INTO account_daily (day, chain_id, address, account_key, env, block_open, block_close, total_open_usdc, total_close_usdc, idle_close_usdc, lp_close_usdc, fees_open_usdc, fees_close_usdc, collected_usdc, gas_paid_wei)
+         VALUES ('${day}', ${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1, 1, 0, 0, 0, 0, 0, 0, ${collected}, '1')`,
+      )
+    }
+    seedPositionDaily(db, '2026-10-16', 1, 5_000_000, 1_000, 4_500_000, 999)
     seedLatest(db, '2026-10-16T09:00:00.000Z', [1])
     const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
+    expect(view.collectedUsd).toBe('600')
     expect(view.feeAccruedUsd).toBe('60')
   })
 

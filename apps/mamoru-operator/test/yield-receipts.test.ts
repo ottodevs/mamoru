@@ -4,7 +4,7 @@ import { address, baseRegistry, entryPointV07Abi } from '@mamoru/registry'
 import { LIVE_POOL } from '../src/chain.ts'
 import type { StoredOp } from '../src/state.ts'
 import type { Snapshot } from '../src/snapshot.ts'
-import { dayReceipts, factsFromLogs, FACTS_PER_TICK, priceFees, withReceipts, type OpFacts } from '../src/yield-receipts.ts'
+import { dayReceipts, factsFromLogs, FACTS_PER_TICK, needsFacts, priceFees, withReceipts, type OpFacts } from '../src/yield-receipts.ts'
 
 const SAFE = '0x1111111111111111111111111111111111111111' as Address
 const OTHER = '0x2222222222222222222222222222222222222222' as Address
@@ -73,39 +73,69 @@ describe('priceFees and dayReceipts', () => {
   })
 })
 
-describe('withReceipts', () => {
-  const snapshot = (): Snapshot => ({ chainId: 8453, block: 10n, readAt: '2026-10-22T08:00:00.000Z', pools: {}, safes: [{ accountKey: 'acct-1-full-key', safe: SAFE } as Snapshot['safes'][number]], calls: 1 })
+describe('needsFacts', () => {
+  test('only a final inclusion: confirmed, reverted at a safe block, or late-included; never a submitted op', () => {
+    expect(needsFacts(op('eng-1'))).toBe(true)
+    expect(needsFacts({ ...op('eng-1'), state: 'submitted' } as StoredOp)).toBe(false)
+    expect(needsFacts({ ...op('eng-1'), state: 'failed', code: 'EXEC_INNER_REVERT' } as StoredOp)).toBe(true)
+    expect(needsFacts({ ...op('eng-1'), state: 'failed', code: 'RECON_UNINCLUDABLE' } as StoredOp)).toBe(false)
+    expect(needsFacts({ ...op('eng-1'), state: 'failed', code: 'RECON_UNINCLUDABLE', lateIncluded: true } as StoredOp)).toBe(true)
+    expect(needsFacts(op('own-1'))).toBe(false)
+    expect(needsFacts(op('eng-1', undefined, null))).toBe(false)
+  })
 
-  test('reads each receipt once, keeps facts on the row, saves, and retries a missing one next tick', async () => {
+  test('facts of another transaction are read again', () => {
+    expect(needsFacts(op('eng-1', { txHash: '0xAA', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [] }, '0xaa'))).toBe(false)
+    expect(needsFacts(op('eng-1', { txHash: '0xbb', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [] }, '0xaa'))).toBe(true)
+  })
+})
+
+describe('withReceipts', () => {
+  const snapshot = (): Snapshot => ({ chainId: 8453, block: 10n, readAt: '2026-10-22T08:00:00.000Z', pools: {}, safes: [], calls: 1 })
+  const one = (ops: StoredOp[], save = () => {}) => ({ accounts: () => [{ accountKey: 'acct-1-full-key', safe: SAFE, ops }], save })
+
+  test('reads each receipt once, keeps facts on the row, saves, and retries a missing one later', async () => {
     const ops = [op('eng-1', undefined, '0x01'), op('eng-2', undefined, '0x02'), op('own-1', undefined, '0x03'), op('eng-3', undefined, null)]
     let saves = 0
     const reads: Hex[] = []
-    const source = { opsOf: () => ops, save: () => void saves++ }
     const readReceipt = async (h: Hex) => {
       reads.push(h)
       return h === '0x02' ? null : { logs: [userOp(SAFE, 4n)], blockNumber: 9n }
     }
-    const out = await withReceipts(snapshot(), source, readReceipt, async () => T)
+    const tried = new Map<string, number>()
+    const out = await withReceipts(snapshot(), one(ops, () => void saves++), readReceipt, async () => T, tried)
     expect(reads).toEqual(['0x01', '0x02'])
     expect(saves).toBe(1)
-    expect(ops[0]!.facts?.gasWei).toBe('4')
+    expect(ops[0]!.facts).toMatchObject({ txHash: '0x01', gasWei: '4' })
     expect(ops[1]!.facts).toBeUndefined()
-    expect(out.safes[0]!.receipts).toHaveLength(1)
+    expect(out.receipts).toEqual([{ safe: SAFE, days: [{ day: '2026-10-22', gasWei: '4', collectedUsdc: '0', positions: [] }] }])
 
-    await withReceipts(snapshot(), source, readReceipt, async () => T)
+    await withReceipts(snapshot(), one(ops), readReceipt, async () => T, tried)
     expect(reads).toEqual(['0x01', '0x02', '0x02'])
   })
 
-  test('a receipt that throws is logged and skipped, never thrown into the loop; reads are capped per tick', async () => {
-    const ops = Array.from({ length: FACTS_PER_TICK + 5 }, (_, i) => op(`eng-${i}`, undefined, `0x${(i + 1).toString(16).padStart(2, '0')}` as Hex))
-    let n = 0
-    const out = await withReceipts(snapshot(), { opsOf: () => ops, save: () => {} }, async () => {
-      n++
-      if (n === 1) throw new Error('rpc down')
+  test('an account the snapshot did not read (stopped) still gets its ops read and published', async () => {
+    const ops = [op('eng-1', undefined, '0x01')]
+    const out = await withReceipts(snapshot(), one(ops), async () => ({ logs: [userOp(SAFE, 3n)], blockNumber: 1n }), async () => T)
+    expect(out.safes).toEqual([])
+    expect(out.receipts[0]!.days[0]!.gasWei).toBe('3')
+  })
+
+  test('receipts that keep failing go to the back: newer ops get read within the next ticks', async () => {
+    const stuck = Array.from({ length: FACTS_PER_TICK }, (_, i) => op(`eng-old-${i}`, undefined, `0x${(i + 1).toString(16).padStart(2, '0')}` as Hex))
+    const fresh = op('eng-new', undefined, '0xff')
+    const ops = [...stuck, fresh]
+    const tried = new Map<string, number>()
+    const read = async (h: Hex) => {
+      if (h !== '0xff') throw new Error('rpc down')
       return { logs: [], blockNumber: 1n }
-    }, async () => T)
+    }
+    let n = 0
+    const counting = async (h: Hex) => (n++, read(h))
+    await withReceipts(snapshot(), one(ops), counting, async () => T, tried)
     expect(n).toBe(FACTS_PER_TICK)
-    expect(ops.filter((o) => o.facts).length).toBe(FACTS_PER_TICK - 1)
-    expect(out.safes[0]!.receipts[0]!.gasWei).toBe('0')
+    expect(fresh.facts).toBeUndefined()
+    await withReceipts(snapshot(), one(ops), counting, async () => T, tried)
+    expect(fresh.facts).toBeDefined()
   })
 })
