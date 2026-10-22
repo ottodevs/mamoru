@@ -296,9 +296,12 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
  * Without `blockNumber` (a caller that learns the block from `first` itself), the ids asked in `first` carry
  * none: they only ever resolve through `.maybe()`, never `.direct()`. The one-more-request round is then pinned
  * to the block the caller passes once it knows it.
+ *
+ * `npm` is the NonfungiblePositionManager of the chain read (otto/mamoru#63: the operator passes its registry's);
+ * omitted, Base's, as the engine's observe has always read.
  */
-export function tokenIdReads(client: PublicClient, multicall3: Address | null, first: Batch, owner: Address, blockNumber?: bigint): (count: number, restBlock?: bigint) => Promise<bigint[]> {
-  const at = (i: number, n: bigint | undefined) => contractRead(client, { address: address('NonfungiblePositionManager', baseRegistry), abi: enumerableAbi, functionName: 'tokenOfOwnerByIndex', args: [owner, BigInt(i)], blockNumber: n })
+export function tokenIdReads(client: PublicClient, multicall3: Address | null, first: Batch, owner: Address, blockNumber?: bigint, npm: Address = address('NonfungiblePositionManager', baseRegistry)): (count: number, restBlock?: bigint) => Promise<bigint[]> {
+  const at = (i: number, n: bigint | undefined) => contractRead(client, { address: npm, abi: enumerableAbi, functionName: 'tokenOfOwnerByIndex', args: [owner, BigInt(i)], blockNumber: n })
   const ahead = multicall3 === null ? [] : Array.from({ length: SPECULATIVE_TOKEN_IDS }, (_, i) => first.add(at(i, blockNumber)))
   return async (count, restBlock = blockNumber) => {
     const rest = new Batch(client, multicall3, restBlock)

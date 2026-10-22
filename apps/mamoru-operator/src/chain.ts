@@ -1,7 +1,7 @@
 import type { PublicClient } from 'viem'
 import { ReasonError, type Address, type ChainId } from '@mamoru/domain'
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
-import { Batch, MULTICALL3, balanceRead, blockNumberRead, contractRead, createDeployedChecker, tokenIdReads, type Handle } from '@mamoru/rpc'
+import { Batch, balanceRead, blockNumberRead, contractRead, createDeployedChecker, multicall3Of, tokenIdReads, type Handle } from '@mamoru/rpc'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 
 /**
@@ -136,16 +136,17 @@ export async function readSafe(client: PublicClient, safe: Address, registry: Re
   const pools = usdcPools(registry)
   const live = livePool(registry)
   const npm = address('NonfungiblePositionManager', registry)
+  const multicall3 = multicall3Of(registry)
   const tokenNames = [...new Set(pools.flatMap((p) => [entry(p, registry).token0!, entry(p, registry).token1!]))]
-  const first = new Batch(client, MULTICALL3, undefined)
-  const blockRead = first.add(blockNumberRead(client, MULTICALL3))
-  const ethRead = first.add(balanceRead(client, MULTICALL3, safe))
+  const first = new Batch(client, multicall3, undefined)
+  const blockRead = first.add(blockNumberRead(client, multicall3))
+  const ethRead = first.add(balanceRead(client, multicall3, safe))
   const nftRead = first.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe] }))
   const balanceReads = tokenNames.map((t) => first.add(contractRead(client, { address: address(t, registry), abi: erc20Abi, functionName: 'balanceOf', args: [safe] })))
   const slotReads = pools.map((p) => first.add(contractRead(client, { address: address(p, registry), abi: uniswapV3PoolAbi, functionName: 'slot0' })))
   // The block is known only once `first` has run: the speculative ids carry none (they resolve through
   // `.maybe()` only), the one-more-request round of an account with more positions is pinned to it below.
-  const idsOf = tokenIdReads(client, MULTICALL3, first, safe)
+  const idsOf = tokenIdReads(client, multicall3, first, safe, undefined, npm)
   await first.run()
   // Not `.need()`: its retry falls back to an unpinned, unbatched getBlockNumber(), which can answer from a
   // later block than the one `first`'s other reads actually came from (the head may have moved by then).
@@ -180,7 +181,7 @@ export async function readSafe(client: PublicClient, safe: Address, registry: Re
   if (count > MAX_INVENTORY) console.log(`[read] ${safe} holds ${count} position NFTs; reading ${byId ? `the ${opts.admitted!.length} admitted` : `the first ${MAX_INVENTORY}`}`)
   // At most MAX_INVENTORY admitted ids, the newest: the record is pruned to what the Safe still owns (operator readOf).
   const listed = byId ? [...opts.admitted!].slice(-MAX_INVENTORY) : await idsOf(Math.min(count, MAX_INVENTORY), blockNumber)
-  const second = new Batch(client, MULTICALL3, blockNumber)
+  const second = new Batch(client, multicall3, blockNumber)
   const positionReads = listed.map((tokenId) => second.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId], ...at })))
   const ownerReads = byId ? listed.map((tokenId) => second.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [tokenId], ...at }))) : []
   if (second.size > 0) await second.run()
