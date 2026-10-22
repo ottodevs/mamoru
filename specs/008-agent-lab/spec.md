@@ -38,8 +38,8 @@ backtests, comparisons and sweeps over the dataset catalog with the policies in 
 datasets; a public or premium surface; exporting a study as an engine-settings draft template (006 phase 2 already
 names the Lab as a source).
 
-**Never:** the agent writes engine settings, touches the operator, a session key, an account or D1 outside the two
-Lab tables; the Lab's numbers enter the production views (Constitution XVI).
+**Never:** the agent does not write engine settings or touch the operator, a session key, an account, or any D1
+table outside the Lab tables. The Lab's numbers never appear in the production views (Constitution XVI).
 
 ## Requirements
 
@@ -66,15 +66,12 @@ Lab tables; the Lab's numbers enter the production views (Constitution XVI).
 - **AL-11** `compare({runs: RunSpec[]})` → the same per run, max 8 runs per call.
 - **AL-12** `sweep({policyId, overrides[], windows?})` → async: returns `{sweepId}` and the job waits for it inside its
   budget; result is the per-window table, each row with its `runId`. `windows` may name TRAIN windows only.
-- **AL-12a** TEST windows are the release gate's holdout and the agent may not explore on them. Exploration
-  (sweeps, overrides, comparisons of variants) runs on TRAIN. A TEST window is reachable only through
-  `holdout_check({policyId, overrides})`, which returns the gate's pass/fail per TEST window and the totals, never the
-  per-window metrics; it is limited to 3 calls per requester per day, and each call is logged with its overrides in
-  `lab_holdout_checks`. An answer that recommends an override says it was explored on TRAIN and names its holdout
-  checks. A single `run_backtest` on a TEST window is allowed only for the configuration that runs in production
-  at the job's time: the policy and settings of the active `prod` engine-settings version (spec 006), resolved by
-  the server, with no overrides. Being in `POLICIES` is not enough: it also holds experimental policies
-  (`conservador-lab-guards-v1`, `lab-weth-usdc-v1`).
+- **AL-12a** The agent never reaches a TEST window in v1. They are the release gate's holdout (run by the
+  coordinator, `docs/process/releasing.md`), and every look at them from a chat would spend that holdout. The
+  catalog lists TRAIN windows only; the tools resolve a window name or a `datasetId` against that TRAIN list and refuse
+  anything else with `LAB_HOLDOUT_DENIED`, before loading data. A question about a TEST window gets a caveat saying it
+  is the release holdout. Reaching TEST from the Lab (a rationed, audited holdout check) is a later ticket that must
+  define a holdout budget across all requesters and time.
 - **AL-13** Overrides are validated against the `PolicyVersion` schema and bounds in code before a run. An unknown
   key is a tool error (`LAB_OVERRIDE_UNKNOWN`), never ignored. The agent must report it, not try another policy.
 - **AL-14** The catalog (windows with regime, dates, chain, pools, market moves; policies with a one-line
@@ -103,8 +100,10 @@ Lab tables; the Lab's numbers enter the production views (Constitution XVI).
   `LAB_VERDICT_INCOMPARABLE`. A verdict against `hold` or `usdc` compares a run with its own baselines, which share
   all of these by construction.
 - **AL-21** A deterministic verifier checks: schema; each claim's `value` equals the code-mapped metric of the stored
-  run (tolerance 0.005 absolute or 0.1% relative); each verdict's runs exist; text has no untraceable digits; each
-  chart's run ids exist and the kind fits the runs.
+  run (tolerance 0.005 absolute or 0.1% relative); every run a claim, verdict or chart cites is in the job's own
+  run list (the runs its tool calls produced or fetched from the store in this job, recorded server-side as the calls
+  happen; a follow-up turn re-fetches earlier runs through a tool to cite them); text has no untraceable digits; each
+  chart's kind fits its runs. A run that merely exists in the store is not citable.
 - **AL-21a** Only `claim` and `verdict` blocks are verified results. The screen draws them apart from prose: the
   answer's headline is always the first verdict (or, with none, the first claim), never a text block, and text and
   caveat blocks render under a "the agent's explanation, not verified" label. A reader can always tell a checked
@@ -201,7 +200,7 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
   verifier_json, cost_json, error_code, quote_json, payer, created_at, updated_at)`
 - `lab_runs (result_hash PK, spec_json, metrics_json, series_json, sim_version, created_at)`
 - `lab_prices (resource, unit, usd, valid_from)` — shadow prices for AL-40.
-- `lab_holdout_checks (id, requester, job_id, policy_id, overrides_json, result_json, created_at)` — AL-12a.
+- `lab_job_runs (job_id, result_hash)` — the runs each job may cite (AL-21).
 - `lab_nonces (nonce PK, seen_at)` — replay guard, rows older than 10 min pruned.
 
 ## Threats and answers
@@ -214,7 +213,7 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
 | A runner secret leaks | It only reads/writes Lab rows; rotate via Worker secret |
 | A captured runner request is replayed or its body swapped | Body hash + nonce + 60 s timestamp in the HMAC (Architecture) |
 | Two runners answer the same job | Lease renewal + fencing on every write (AL-02, AL-02a) |
-| Chat studies overfit the release gate's TEST windows | Exploration on TRAIN only; TEST via rationed, logged `holdout_check` (AL-12a) |
+| Chat studies overfit the release gate's TEST windows | The agent cannot reach TEST in v1, by name or dataset id (AL-12a) |
 | A number is shown under the wrong meaning, or a verdict points the wrong way | Closed metric enum mapped in code; server-written verdicts on comparable runs only; prose labeled not verified (AL-20a…c, AL-21a, AL-21b) |
 | A heavy sweep starves the operator on lady | Runner is its own unit with `CPUQuota` and `Nice`; one sweep at a time |
 | Cost runs away on included quota | Per-day job cap per requester; AL-41 shows the burn |
@@ -233,20 +232,19 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
 - **LAB-AL-05** A forged answer whose claim is off by 1% → verifier rejects; repair; partial render flagged. (AL-21, AL-22)
 - **LAB-AL-06** Runner killed mid-job → lease expires, job re-queued once, then `LAB_JOB_LEASE_LOST`. (AL-02)
 - **LAB-AL-07** Sweep of one override over the TRAIN windows → per-window table with run ids within 15 min; the same
-  sweep naming a TEST window → tool error. (AL-12, AL-12a, AL-04)
+  sweep naming a TEST window, or a TEST `datasetId` → `LAB_HOLDOUT_DENIED` before any data loads. (AL-12, AL-12a, AL-04)
 - **LAB-AL-11** A claim whose value is `metrics.gas` submitted as `net` → rejected; a standalone text block saying
   "Mamoru gana" → rejected and asked for a verdict block; an accepted text block renders under the not-verified
   label, below the verdict headline. (AL-20a, AL-21a, AL-21b)
 - **LAB-AL-15** A verdict between a 100,000 USDC run and a 1,000 USDC run, or between two windows →
   `LAB_VERDICT_INCOMPARABLE`. (AL-20c)
-- **LAB-AL-16** `run_backtest` of `conservador-lab-guards-v1` on a TEST window → tool error; the active prod
-  configuration on the same window → runs. (AL-12a)
+- **LAB-AL-16** `run_backtest` of any policy on a TEST window or TEST `datasetId` → `LAB_HOLDOUT_DENIED`; the
+  catalog in the prompt lists no TEST window. (AL-12a, AL-14)
 - **LAB-AL-12** A stale runner (lease expired, job re-claimed) posts an answer → refused, the new runner's answer
   stands. (AL-02a)
 - **LAB-AL-13** A captured signed `answer` request replayed with another body, or replayed as is → both refused.
   (signing)
-- **LAB-AL-14** Fourth `holdout_check` of the day → refused; the three earlier ones are in `lab_holdout_checks`.
-  (AL-12a)
+- **LAB-AL-14** An answer citing a stored run its job did not produce or fetch → rejected. (AL-21)
 - **LAB-AL-08** Every job row has tokens, CPU ms, wall time, shadow cost; `/ops/lab` totals match the rows. (AL-40, AL-41)
 - **LAB-AL-09** Same spec twice → same `resultHash`, second served from the store. (AL-16)
 - **LAB-AL-10** Monad question → caveat naming the missing data, no run. (AL-70)
@@ -260,8 +258,8 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
 
 1. `packages/backtest`: `onSample` hook + visual-series extractor; tests that a run's hash does not change with or
    without the hook. (AL-52, AL-16) Not: change `decide` or metrics.
-2. `packages/lab-agent`: catalog prompt builder, tools over `packages/backtest` (TRAIN/TEST split, `holdout_check`),
-   contract + metric enum + verdict writer + verifier with LAB-AL-05 and LAB-AL-11 fixtures, agent loop with round limit and repair, cost meter. Runs offline against recorded model replies.
+2. `packages/lab-agent`: catalog prompt builder, tools over `packages/backtest` (TRAIN only, `LAB_HOLDOUT_DENIED`),
+   contract + metric enum + verdict writer + verifier with LAB-AL-05, 11, 14 and 15 fixtures, agent loop with round limit and repair, cost meter. Runs offline against recorded model replies.
    (AL-10…AL-24, AL-40) Not: network beyond the model route.
 3. Migration `XXXX_agent_lab.sql` + `/api/lab/runner/*` in mamoru-app with body-bound signed requests, nonce store,
    lease renewal and fencing. (AL-01, AL-02, AL-02a, data; LAB-AL-12, LAB-AL-13)
@@ -272,7 +270,7 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
    page; screenshots desktop + 390 light/dark against PoC-1 before merge. (AL-50…AL-53, AL-41)
 6. Scenarios LAB-AL-01…16 green; Ot and Brais use it for a week; cost per archetype reported for pricing. (AL-42)
 
-Later tickets: x402 endpoint (AL-60…62), fork scenarios as a tool, Ethereum windows backfill, Monad forward
+Later tickets: x402 endpoint (AL-60…62), a budgeted holdout check, fork scenarios as a tool, Ethereum windows backfill, Monad forward
 collector, export a study as a 006 draft template.
 
 ## Decisions for Ot
