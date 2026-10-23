@@ -3,7 +3,7 @@ import type { ApyView, FundingView } from '@mamoru/domain'
 import { fixtureFunding } from '../../src/web/fixtures/client.ts'
 import { split } from '../../src/web/lib/money.ts'
 import { bucketOf, currentRate, idleReason, monthlyRate, positionRates, sourceName, valueOf } from '../../src/web/lib/rates.ts'
-import { Idle, Working } from '../../src/web/routes/home.tsx'
+import { Balance, Idle, Working } from '../../src/web/routes/home.tsx'
 import { render } from './render.ts'
 
 // otto/mamoru#193: the dashboard's rates and the idle/working split.
@@ -206,5 +206,19 @@ describe('idle and working split', () => {
     expect(idleReason(stopped, split(stopped, null))).toBe('Mamoru is stopped')
     const dust = { ...placed, usdc: '300', idle: [{ token: 'USDC', amount: '300', decimals: 6, valueUsdc: '300' }] }
     expect(idleReason(dust, split(dust, null))).toBe('nothing idle')
+  })
+})
+
+// otto/mamoru#198: earned so far sits under the balance as its gain; not measured yet says so, never a guess.
+describe('earned so far with the balance', () => {
+  const s = split(fixtureFunding, null)
+  test('a known figure is a gain in USDC', () => {
+    const { text } = render(<Balance s={s} earnedSoFarUsd="42000" onAdd={() => {}} onWithdraw={() => {}} />)
+    expect(text).toContain('+0.04 USDC earned so far')
+  })
+  test('no figure yet: n/a and why', () => {
+    const { text } = render(<Balance s={s} earnedSoFarUsd={null} onAdd={() => {}} onWithdraw={() => {}} />)
+    expect(text).toContain('n/a earned so far not measured yet')
+    expect(text).not.toContain('+')
   })
 })
