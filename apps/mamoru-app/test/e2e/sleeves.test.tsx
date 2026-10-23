@@ -12,6 +12,9 @@ import { ChainProvider } from '../../src/web/lib/chain.tsx'
 import { DepositDetails } from '../../src/web/routes/add-money.tsx'
 import { History, Working } from '../../src/web/routes/home.tsx'
 import { split } from '../../src/web/lib/money.ts'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { BasescanLink } from '../../src/web/components/ui.tsx'
 import { render } from './render.ts'
 
 // otto/mamoru#67: a Monad sleeve shows its chain, its positions, Monad links and Monad's USDC; Base is unchanged.
@@ -98,10 +101,14 @@ describe('deposit names the chain and its USDC contract', () => {
     expect(html).toContain(`https://monadscan.com/address/${address('USDC', monadRegistry)}`)
   })
 
-  test('Base: byte-identical inside or outside the provider', () => {
-    const plain = render(wrap(<DepositDetails address={FIXTURE_ADDRESS} />)).html
-    expect(render(wrap(<ChainProvider chainId={8453}><DepositDetails address={FIXTURE_ADDRESS} /></ChainProvider>)).html).toBe(plain)
-    expect(plain).toContain('Your address on Base')
-    expect(plain).not.toContain('data-testid="deposit-usdc"')
+  // Review of PR #115 (P1 3): Base is compared with the markup origin/main rendered before this change, not with
+  // itself. __golden__/*.html were rendered from origin/main's add-money.tsx and ui.tsx (2026-10-23) with these props.
+  test('Base: the deposit and the explorer link are byte-identical to origin/main, inside or outside the provider', () => {
+    const golden = (f: string) => readFileSync(join(import.meta.dir, '__golden__', f), 'utf8').trimEnd()
+    const deposit = golden('deposit-base.html')
+    expect(render(wrap(<DepositDetails address={FIXTURE_ADDRESS} capUsdc="100000000" />)).html).toBe(deposit)
+    expect(render(wrap(<ChainProvider chainId={8453}><DepositDetails address={FIXTURE_ADDRESS} capUsdc="100000000" /></ChainProvider>)).html).toBe(deposit)
+    expect(render(<BasescanLink tx={`0x${'5'.repeat(64)}`} />).html).toBe(golden('explorer-link-base.html'))
+    expect(deposit).not.toContain('deposit-chain')
   })
 })

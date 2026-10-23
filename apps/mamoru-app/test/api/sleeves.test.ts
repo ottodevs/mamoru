@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { SessionView, SleeveView } from '@mamoru/domain'
 import { baseRegistry, monadRegistry, type Registry } from '@mamoru/registry'
-import { safeDerivationDiff, SAFE_DERIVATION_NAMES } from '../../src/api/sleeves.ts'
+import { resetOperatorHealth, safeDerivationDiff, SAFE_DERIVATION_NAMES } from '../../src/api/sleeves.ts'
 import { upsertActivity } from '../../src/api/accounts/activity.ts'
 import { harness, ORIGIN, PASSKEY_A, register, sessionCookie } from './helpers.ts'
 
@@ -15,6 +15,26 @@ const OPERATOR_SECRET = 'operator-secret-for-tests-only-0123456789'
 
 function flag(h: ReturnType<typeof harness>, on: 0 | 1) {
   h.db.raw.query(`INSERT INTO ops_flag_changes (flag, enabled, author, reason, created_at) VALUES ('monad_sleeves', ?, 'ot', 'test', '2026-10-23T00:00:00Z')`).run(on)
+}
+
+const MONAD_OPERATOR = 'https://operator-monad.test'
+
+/**
+ * A harness whose Monad chain is ready (review of PR #115): live funds, OPERATOR_URL_143 set and its /health
+ * reporting `healthChain` (143 unless a test says otherwise). `monadUrl: null` leaves OPERATOR_URL_143 unset.
+ * Every operator call is recorded.
+ */
+function monadHarness(opts: { monadUrl?: string | null; healthChain?: number } = {}) {
+  resetOperatorHealth()
+  const calls: { url: string; account: string }[] = []
+  const operatorFetch = async (url: string, init: RequestInit) => {
+    calls.push({ url, account: new Headers(init.headers).get('x-mamoru-account') ?? '' })
+    const body = url.endsWith('/health') ? { ok: true, chainId: url.startsWith(MONAD_OPERATOR) ? (opts.healthChain ?? 143) : 8453 } : { ok: true }
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
+  }
+  const monadUrl = opts.monadUrl === undefined ? `${MONAD_OPERATOR}/` : opts.monadUrl
+  const env = { LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.test', OPERATOR_SECRET, ...(monadUrl ? { OPERATOR_URL_143: monadUrl } : {}) }
+  return { h: harness(undefined, { env, operatorFetch }), calls }
 }
 
 async function owner(h: ReturnType<typeof harness>) {
@@ -70,7 +90,7 @@ describe('the monad_sleeves gate', () => {
 
 describe('a Monad sleeve on beta', () => {
   test('opens with the same address on chain 143, its own key, Base stays the default; a second POST returns it', async () => {
-    const h = harness()
+    const { h } = monadHarness()
     flag(h, 1)
     const { cookie, base } = await owner(h)
     const before = (await (await at(h, BETA, '/api/session', cookie)).json()) as SessionView
@@ -97,7 +117,7 @@ describe('a Monad sleeve on beta', () => {
   })
 
   test('a chain outside the sleeve set is refused, and Base cannot be opened twice', async () => {
-    const h = harness()
+    const { h } = monadHarness()
     flag(h, 1)
     const { cookie } = await owner(h)
     for (const chainId of [8453, 1, 10143]) {
@@ -118,41 +138,82 @@ describe('a Monad sleeve on beta', () => {
     expect(() => row('k2', '0xb', 'c2')).toThrow(/UNIQUE/)
   })
 
-  test('operator routes of the Monad sleeve go to OPERATOR_URL_143 with chain 143 in the context; unset, nothing is sent', async () => {
-    const calls: { url: string; account: string }[] = []
-    const operatorFetch = async (url: string, init: RequestInit) => {
-      calls.push({ url, account: new Headers(init.headers).get('x-mamoru-account') ?? '' })
-      return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } })
-    }
-    const env = { LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.test', OPERATOR_SECRET }
-    for (const monadUrl of ['https://operator-monad.test/', undefined]) {
-      const h = harness(undefined, { env: { ...env, ...(monadUrl ? { OPERATOR_URL_143: monadUrl } : {}) }, operatorFetch })
-      flag(h, 1)
-      const { cookie, base } = await owner(h)
-      const sleeve = (await (await at(h, BETA, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })).json()) as SleeveView
-      calls.length = 0
-      const monad = await at(h, BETA, `/api/accounts/${sleeve.accountKey}/funding`, cookie)
-      const baseRes = await at(h, BETA, `/api/accounts/${base.accountKey}/funding`, cookie)
-      expect(baseRes.status).toBe(200)
-      if (monadUrl) {
-        expect(monad.status).toBe(200)
-        expect(calls[0]!.url).toBe(`https://operator-monad.test/api/accounts/${sleeve.accountKey}/funding`)
-        expect(JSON.parse(Buffer.from(calls[0]!.account, 'base64url').toString()).chainId).toBe(143)
-        expect(calls[1]!.url.startsWith('https://operator.test/')).toBe(true)
-      } else {
-        expect(monad.status).toBe(503)
-        expect(calls.map((c) => c.url)).toEqual([`https://operator.test/api/accounts/${base.accountKey}/funding`])
-      }
-    }
+  test('operator routes of the Monad sleeve go to OPERATOR_URL_143 with chain 143 in the context; Base to OPERATOR_URL', async () => {
+    const { h, calls } = monadHarness()
+    flag(h, 1)
+    const { cookie, base } = await owner(h)
+    const sleeve = (await (await at(h, BETA, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })).json()) as SleeveView
+    calls.length = 0
+    expect((await at(h, BETA, `/api/accounts/${sleeve.accountKey}/funding`, cookie)).status).toBe(200)
+    expect((await at(h, BETA, `/api/accounts/${base.accountKey}/funding`, cookie)).status).toBe(200)
+    const forwarded = calls.filter((c) => !c.url.endsWith('/health'))
+    expect(forwarded.map((c) => c.url)).toEqual([`${MONAD_OPERATOR}/api/accounts/${sleeve.accountKey}/funding`, `https://operator.test/api/accounts/${base.accountKey}/funding`])
+    expect(JSON.parse(Buffer.from(forwarded[0]!.account, 'base64url').toString()).chainId).toBe(143)
   })
 
   test('activity carries the chain of the sleeve it was recorded for', async () => {
-    const h = harness()
+    const { h } = monadHarness()
     flag(h, 1)
     const { cookie } = await owner(h)
     const sleeve = (await (await at(h, BETA, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })).json()) as SleeveView
     await upsertActivity(h.db, sleeve.accountKey, new Date('2026-10-23T08:00:00Z'))
     expect(h.db.raw.query('SELECT chain_id, hits FROM account_activity WHERE account_key = ? AND day = ?').get(sleeve.accountKey, '2026-10-23')).toEqual({ chain_id: 143, hits: 1 })
+  })
+})
+
+describe('review of PR #115: a Monad sleeve only where someone can operate it, fail closed', () => {
+  async function withSleeve(opts: Parameters<typeof monadHarness>[0] = {}) {
+    // The sleeve is opened while everything is ready, then the condition under test is broken on the same D1.
+    const ready = monadHarness()
+    flag(ready.h, 1)
+    const { cookie, base } = await owner(ready.h)
+    const sleeve = (await (await at(ready.h, BETA, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })).json()) as SleeveView
+    const broken = monadHarness(opts)
+    broken.h.env.DB = ready.h.env.DB
+    return { ...broken, db: ready.h.db, cookie, base, sleeve }
+  }
+
+  async function hidden(h: ReturnType<typeof harness>, calls: { url: string }[], origin: string, cookie: string, base: { accountKey: string }, sleeve: SleeveView) {
+    calls.length = 0
+    for (const path of ['funding', 'ops', 'dashboard', 'yield', 'other-chains']) {
+      expect((await at(h, origin, `/api/accounts/${sleeve.accountKey}/${path}`, cookie)).status).toBe(404)
+    }
+    expect((await at(h, origin, `/api/accounts/${sleeve.accountKey}/activate/prepare`, cookie, { method: 'POST', body: '{}' })).status).toBe(404)
+    expect((await at(h, origin, `/api/onboarding/kit?accountKey=${sleeve.accountKey}`, cookie)).status).toBe(404)
+    // Nothing reached any operator for the Monad account.
+    expect(calls.filter((c) => c.url.includes(sleeve.accountKey))).toEqual([])
+    const session = (await (await at(h, origin, '/api/session', cookie)).json()) as SessionView
+    expect(session.accountKey).toBe(base.accountKey)
+    expect((session.sleeves ?? []).map((s) => s.chainId)).not.toContain(143)
+    expect(session.addableChains ?? []).toEqual([])
+  }
+
+  test('prod host: the Monad account is hidden on every route, and nothing is forwarded', async () => {
+    const t = await withSleeve()
+    await hidden(t.h, t.calls, ORIGIN, t.cookie, t.base, t.sleeve)
+  })
+
+  test('flag turned off on beta: the same', async () => {
+    const t = await withSleeve()
+    t.db.raw.query(`INSERT INTO ops_flag_changes (flag, enabled, author, reason, created_at) VALUES ('monad_sleeves', 0, 'ot', 'test', '2026-10-23T01:00:00Z')`).run()
+    await hidden(t.h, t.calls, BETA, t.cookie, t.base, t.sleeve)
+  })
+
+  test('OPERATOR_URL_143 unset: not offered, not opened (503, no row), an existing one hidden', async () => {
+    const t = await withSleeve({ monadUrl: null })
+    await hidden(t.h, t.calls, BETA, t.cookie, t.base, t.sleeve)
+    const fresh = monadHarness({ monadUrl: null })
+    flag(fresh.h, 1)
+    const o = await owner(fresh.h)
+    const res = await at(fresh.h, BETA, '/api/sleeves', o.cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })
+    expect(res.status).toBe(503)
+    expect(fresh.h.db.raw.query('SELECT COUNT(*) AS n FROM accounts WHERE chain_id = 143').get()).toEqual({ n: 0 })
+  })
+
+  test('an operator at OPERATOR_URL_143 that reports another chain (or no health) is not ready', async () => {
+    const t = await withSleeve({ healthChain: 8453 })
+    await hidden(t.h, t.calls, BETA, t.cookie, t.base, t.sleeve)
+    expect(t.calls.some((c) => c.url === `${MONAD_OPERATOR}/health`)).toBe(true)
   })
 })
 

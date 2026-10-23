@@ -3,11 +3,11 @@ import { chainOf, isChainId, type SessionView, type SleeveView } from '@mamoru/d
 import { baseRegistry, registryFor, type Registry } from '@mamoru/registry'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import type { AppEnv } from './context.ts'
-import type { Db } from './env.ts'
+import { liveFunds, operatorUrlFor, type Db } from './env.ts'
 import { apiError } from './errors.ts'
 import { readOpsFlags } from './ops-flags.ts'
 import { envOfHostname } from './accounts/env-of-host.ts'
-import { accountOfUser, insertAccount, ownersOf, sleevesOfUser, type AccountRow } from './accounts/store.ts'
+import { accountOfUser, insertAccount, ownedAccount, ownersOf, sleevesOfUser, type AccountRow } from './accounts/store.ts'
 import { passkeySigner } from './onboarding/account.ts'
 
 /**
@@ -28,6 +28,57 @@ export const SLEEVE_CHAINS: readonly number[] = [143]
 export async function sleevesOn(c: Context<AppEnv>): Promise<boolean> {
   if (envOfHostname(new URL(c.req.url).hostname) !== 'beta') return false
   return (await readOpsFlags(c.env.DB)).monad_sleeves
+}
+
+const HEALTH_TTL_MS = 60_000
+const HEALTH_TIMEOUT_MS = 3_000
+const health = new Map<string, { ok: boolean; at: number }>()
+
+/** Test hook: forget every cached operator /health answer. */
+export function resetOperatorHealth(): void {
+  health.clear()
+}
+
+/**
+ * The operator at `url` answers GET /health with `ok: true` and the chain id it runs. One answer per isolate per
+ * minute, healthy or not; a timeout, an error or another chain id is unhealthy.
+ */
+async function operatorServes(c: Context<AppEnv>, url: string, chainId: number): Promise<boolean> {
+  const now = c.var.now().getTime()
+  const cached = health.get(url)
+  if (cached && now - cached.at < HEALTH_TTL_MS) return cached.ok
+  let ok = false
+  try {
+    const res = await c.var.operatorFetch(`${url}/health`, { method: 'GET', headers: { accept: 'application/json' }, signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
+    const body = res.ok ? ((await res.json()) as { ok?: unknown; chainId?: unknown }) : null
+    ok = body?.ok === true && body.chainId === chainId
+  } catch (e) {
+    console.error(`operator health ${chainId} failed`, e instanceof Error ? e.message : String(e))
+  }
+  health.set(url, { ok, at: now })
+  return ok
+}
+
+/**
+ * Review of PR #115 (P1 1, 2): a sleeve off Base exists for the owner only while all of this holds, and every route
+ * that resolves an account (session, operator, dashboard, yield, kit) asks it, failing closed: the beta host, the
+ * `monad_sleeves` flag, live funds with an operator secret, OPERATOR_URL_<chain> set, and that operator's /health
+ * reporting this very chain. Otherwise nobody could operate the sleeve, so its address is never offered for a deposit.
+ */
+export async function chainReady(c: Context<AppEnv>, chainId: number): Promise<boolean> {
+  if (chainId === BASE) return true
+  if (!SLEEVE_CHAINS.includes(chainId)) return false
+  const url = operatorUrlFor(c.env, chainId)
+  if (!url || !liveFunds(c.env) || !c.env.OPERATOR_SECRET) return false
+  if (!(await sleevesOn(c))) return false
+  return operatorServes(c, url, chainId)
+}
+
+/** `ownedAccount`, and a sleeve off Base reads as absent (the same 404) unless its chain is ready. */
+export async function ownedSleeve(c: Context<AppEnv>, userId: string, accountKey: string): Promise<AccountRow | null> {
+  const row = await ownedAccount(c.env.DB, userId, accountKey)
+  if (!row || row.chain_id === BASE) return row
+  return (await chainReady(c, row.chain_id)) ? row : null
 }
 
 /**
@@ -78,8 +129,13 @@ export async function sessionSleeves(c: Context<AppEnv>, db: Db, userId: string)
   if (!(await sleevesOn(c))) return {}
   const rows = await sleevesOfUser(db, userId)
   if (!rows.some((r) => r.chain_id === BASE)) return {}
+  const ready = new Set<number>([BASE])
+  for (const id of SLEEVE_CHAINS) if (await chainReady(c, id)) ready.add(id)
   const have = new Set(rows.map((r) => r.chain_id))
-  return { sleeves: rows.filter((r) => isChainId(r.chain_id)).map(sleeveView), addableChains: SLEEVE_CHAINS.filter((id) => !have.has(id)) }
+  return {
+    sleeves: rows.filter((r) => isChainId(r.chain_id) && ready.has(r.chain_id)).map(sleeveView),
+    addableChains: SLEEVE_CHAINS.filter((id) => ready.has(id) && !have.has(id)),
+  }
 }
 
 export const sleeves = new Hono<AppEnv>()
@@ -93,6 +149,8 @@ sleeves.post('/', async (c) => {
   const body = (await c.req.json().catch(() => null)) as { chainId?: unknown } | null
   const chainId = typeof body?.chainId === 'number' ? body.chainId : NaN
   if (!SLEEVE_CHAINS.includes(chainId)) return apiError(c, 400, 'Mamoru does not open a sleeve on that chain.', 'CHAIN_UNSUPPORTED')
+  // No operator for the chain (or not healthy): no sleeve is opened, so no address is ever offered for a deposit.
+  if (!(await chainReady(c, chainId))) return apiError(c, 503, 'Mamoru cannot open a sleeve on that chain right now. Nothing was created.', 'OPERATOR_UNAVAILABLE')
 
   const db = c.env.DB
   const base = await accountOfUser(db, session.userId)

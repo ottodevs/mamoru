@@ -6,7 +6,8 @@ import type { AppEnv } from '../context.ts'
 import { accountNotFound, apiError } from '../errors.ts'
 import { deleteCookie } from 'hono/cookie'
 import { SESSION_COOKIE } from '../auth/device-session.ts'
-import { acknowledgeRecovery, accountByCredential, accountOfUser, insertAccount, ownedAccount, ownersOf, type AccountRow } from '../accounts/store.ts'
+import { acknowledgeRecovery, accountByCredential, accountOfUser, insertAccount, ownersOf, type AccountRow } from '../accounts/store.ts'
+import { ownedSleeve } from '../sleeves.ts'
 import { envOfHostname } from '../accounts/env-of-host.ts'
 import { ACCOUNT_KEY, counterfactualAccount, passkeySigner } from './account.ts'
 import { parsePasskey } from './passkey.ts'
@@ -127,7 +128,7 @@ onboarding.post('/recovery-ack', async (c) => {
   const body = await jsonBody(c)
   const accountKey = body?.accountKey
   if (typeof accountKey !== 'string' || !ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
-  const row = await ownedAccount(c.env.DB, session.userId, accountKey)
+  const row = await ownedSleeve(c, session.userId, accountKey)
   if (!row) return accountNotFound(c)
   c.set('accountKey', row.account_key)
   await acknowledgeRecovery(c.env.DB, accountKey, c.var.now().toISOString())
@@ -140,7 +141,7 @@ onboarding.get('/kit', async (c) => {
   if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
   const accountKey = c.req.query('accountKey')
   if (!accountKey || !ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
-  const row = await ownedAccount(c.env.DB, session.userId, accountKey)
+  const row = await ownedSleeve(c, session.userId, accountKey)
   if (!row) return accountNotFound(c)
   c.set('accountKey', row.account_key)
   const kit = recoveryKit({ chainId: row.chain_id, owners: ownersOf(row), saltNonce: BigInt(row.salt_nonce), webauthn: passkeySigner(row.passkey_x, row.passkey_y), permissionIds: [], tokenIds: [] })

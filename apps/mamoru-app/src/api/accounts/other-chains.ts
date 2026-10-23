@@ -5,7 +5,7 @@ import type { AppEnv } from '../context.ts'
 import type { RateLimiter } from '../env.ts'
 import { accountNotFound, apiError } from '../errors.ts'
 import { ACCOUNT_KEY } from '../onboarding/account.ts'
-import { ownedAccount } from './store.ts'
+import { ownedSleeve } from '../sleeves.ts'
 
 // Wrong-network notice (ticket #117). An owner who sends USDC on Ethereum to the address shown for Base
 // sees nothing arrive, because every Mamoru balance is a read of Base. This reads the same address on
@@ -217,7 +217,7 @@ export function otherChainRoutes(fetcher: ChainFetch, gate = new ReadGate()) {
     if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
     const accountKey = c.req.param('accountKey')
     if (!ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
-    const account = await ownedAccount(c.env.DB, session.userId, accountKey)
+    const account = await ownedSleeve(c, session.userId, accountKey)
     if (!account) return accountNotFound(c)
     c.set('accountKey', account.account_key)
 

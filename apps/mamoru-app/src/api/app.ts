@@ -35,6 +35,7 @@ export const LIVE_CAP_USDC = '100000000'
 
 export function createApp(options: AppOptions = {}) {
   const now = options.now ?? (() => new Date())
+  const operatorFetch: OperatorFetch = options.operatorFetch ?? ((input, init) => fetch(input, init))
   const app = new Hono<AppEnv>()
 
   app.use('/api/*', async (c, next) => {
@@ -47,6 +48,7 @@ export function createApp(options: AppOptions = {}) {
     }
     c.set('settings', settings)
     c.set('now', now)
+    c.set('operatorFetch', operatorFetch)
     c.set('auth', new DeviceSessionAuth(c.env.DB, settings.sessionSecret, now))
     c.header('cache-control', 'no-store')
     // Single choke point: any route that resolves an account sets c.var.accountKey; this records it.
@@ -82,7 +84,7 @@ export function createApp(options: AppOptions = {}) {
 
   app.route('/api/auth', signIn)
   app.route('/api/onboarding', onboarding)
-  app.route('/api/accounts', operatorRoutes(options.operatorFetch ?? ((input, init) => fetch(input, init))))
+  app.route('/api/accounts', operatorRoutes(operatorFetch))
   app.route('/api/accounts', accounts)
   app.route('/api/accounts', otherChainRoutes(options.chainFetch ?? ((input, init) => fetch(input, init)), options.chainGate))
   app.route('/api/sleeves', sleeves)

@@ -4,7 +4,8 @@ import type { AppEnv } from '../context.ts'
 import { liveFunds, operatorUrlFor } from '../env.ts'
 import { accountNotFound, apiError } from '../errors.ts'
 import { ACCOUNT_KEY } from '../onboarding/account.ts'
-import { ownedAccount, ownersOf, type AccountRow } from './store.ts'
+import { ownersOf, type AccountRow } from './store.ts'
+import { ownedSleeve } from '../sleeves.ts'
 
 // Live funds (sprint amendment 2026-09-26 21:40): after the device session proves it owns the account,
 // the Worker forwards the same route to the operator with a signed account context (app-api.ts AccountContext).
@@ -69,7 +70,9 @@ export function operatorRoutes(operatorFetch: OperatorFetch) {
     if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
     const accountKey = c.req.param('accountKey') ?? ''
     if (!ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
-    const row = await ownedAccount(c.env.DB, session.userId, accountKey)
+    // Review of PR #115 (P1 1): a chain-143 account is forwarded only while its chain is ready (beta host, flag,
+    // OPERATOR_URL_143, a healthy operator of 143); otherwise it is the same 404 as a foreign key.
+    const row = await ownedSleeve(c, session.userId, accountKey)
     if (!row) return accountNotFound(c)
     c.set('accountKey', row.account_key)
 

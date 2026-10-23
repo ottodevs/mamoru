@@ -38,9 +38,13 @@ export function DepositDetails({ address, capUsdc }: { address: string; capUsdc?
       <div className="grid gap-5 sm:grid-cols-[auto_1fr] sm:items-center sm:gap-7">
         <Qr text={address} />
         <div className="grid min-w-0 gap-3">
-          <p className="kicker" data-testid="deposit-chain">
-            {base ? 'Your address on Base' : addCopy.addressOn(chain)}
-          </p>
+          {base ? (
+            <p className="kicker">Your address on Base</p>
+          ) : (
+            <p className="kicker" data-testid="deposit-chain">
+              {addCopy.addressOn(chain)}
+            </p>
+          )}
           <AddressBlock address={address} />
           <div className="flex flex-wrap items-center gap-3">
             <Copy text={address} label="Copy address" />

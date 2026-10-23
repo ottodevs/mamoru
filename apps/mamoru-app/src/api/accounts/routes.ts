@@ -5,7 +5,7 @@ import type { AppEnv } from '../context.ts'
 import { accountNotFound, apiError } from '../errors.ts'
 import { ACCOUNT_KEY } from '../onboarding/account.ts'
 import { buildDashboard, loadDashboardInput } from './dashboard.ts'
-import { ownedAccount } from './store.ts'
+import { ownedSleeve } from '../sleeves.ts'
 import { loadYieldLedger } from './yield.ts'
 
 export const accounts = new Hono<AppEnv>()
@@ -16,7 +16,7 @@ accounts.get('/:accountKey/dashboard', async (c) => {
   if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
   const accountKey = c.req.param('accountKey')
   if (!ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
-  const account = await ownedAccount(c.env.DB, session.userId, accountKey)
+  const account = await ownedSleeve(c, session.userId, accountKey)
   if (!account) return accountNotFound(c)
   c.set('accountKey', account.account_key)
   // Independent D1 reads (code-review finding, PR #43): the dashboard projection and the yield ledger share no
@@ -35,7 +35,7 @@ accounts.get('/:accountKey/yield', async (c) => {
   if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
   const accountKey = c.req.param('accountKey')
   if (!ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
-  const account = await ownedAccount(c.env.DB, session.userId, accountKey)
+  const account = await ownedSleeve(c, session.userId, accountKey)
   if (!account) return accountNotFound(c)
   c.set('accountKey', account.account_key)
   return c.json(await loadYieldLedger(c.env.DB, account.chain_id, account.account_key))

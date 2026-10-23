@@ -4,5 +4,12 @@ import type { ProductAuthPort } from './auth/port.ts'
 export type AppEnv = {
   Bindings: Env
   // accountKey: set by a route once it resolves the session to an account; read by the activity-tracking middleware.
-  Variables: { settings: AppSettings; auth: ProductAuthPort; now: () => Date; accountKey?: string }
+  Variables: {
+    settings: AppSettings
+    auth: ProductAuthPort
+    now: () => Date
+    accountKey?: string
+    /** otto/mamoru#67: the fetch the operator routes use, also used to ask a chain's operator for /health. */
+    operatorFetch: (input: string, init: RequestInit) => Promise<Response>
+  }
 }
