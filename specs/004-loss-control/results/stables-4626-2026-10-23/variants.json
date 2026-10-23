@@ -1,0 +1,16 @@
+[
+ {
+  "name": "live-mix",
+  "policy": "conservador-live-v2"
+ },
+ {
+  "name": "stables-only",
+  "policy": "conservador-live-v2",
+  "overrides": { "buckets": [{ "id": "stables", "preference": 10000, "pools": ["pool:USDC/USDT/100"] }] }
+ },
+ {
+  "name": "volatile-only",
+  "policy": "conservador-live-v2",
+  "overrides": { "buckets": [{ "id": "btc-usdc", "preference": 8000, "pools": ["pool:USDC/cbBTC/500"] }, { "id": "risk", "preference": 2000, "pools": ["pool:WETH/USDC/3000"] }] }
+ }
+]
