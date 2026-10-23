@@ -321,6 +321,14 @@ const ACTIVATE_TX_GAS = 16_777_216n
 const DEPLOY_GAS = 500_000n
 
 /**
+ * Balance a sender must keep on chains with a protocol reserve. Monad (143): a transaction whose MON value transfer
+ * leaves the sender under 10 MON reverts and still pays its gas (docs.monad.xyz/developer-essentials/reserve-balance;
+ * the one-off "emptying" exception does not cover an activation's several relayer transactions). The relayer only
+ * activates when it can pay the activation and still keep this reserve; otherwise the Start waits armed.
+ */
+export const SENDER_RESERVE_WEI: Readonly<Record<number, bigint>> = { 143: 10n * 10n ** 18n }
+
+/**
  * Every `HttpError` message is either a static string or built only from values this operator
  * computed itself (an amount, an address, an asset name from a closed set, a call index) — never
  * from a caught exception's own `.message`, which could carry upstream/provider-originated text (an
@@ -772,13 +780,13 @@ export class Operator {
     // otto/mamoru#61: ACTIVATION_GAS_WEI is in Base ETH. Off Base the deploy and the exec are priced at the chain's gas
     // price (twice it: the bound it may move to), at their full limits, as the chain charges them.
     const gasWei = this.offBase() ? (DEPLOY_GAS + ACTIVATE_TX_GAS) * (await this.gasPrice()) * 2n : ACTIVATION_GAS_WEI
-    const need = (selfFunded ? 0n : this.cfg.policy.gasReserveWei + (await this.topUpMarginWei())) + gasWei
+    const need = (selfFunded ? 0n : this.cfg.policy.gasReserveWei + (await this.topUpMarginWei())) + gasWei + (SENDER_RESERVE_WEI[this.cfg.registry.chainId] ?? 0n)
     const have = BigInt((await this.relayerBalance()).wei)
     if (have >= need) return true
     const at = Date.now()
     if (at - (this.relayerLowLogged.get(acc.accountKey) ?? 0) >= RELAYER_LOW_LOG_MS) {
       this.relayerLowLogged.set(acc.accountKey, at)
-      logErr(`[armed] ${acc.accountKey} relayer short of ETH, activation waits armed:`, { have: have.toString(), need: need.toString() })
+      logErr(`[armed] ${acc.accountKey} relayer short of gas funds (chain reserve included), activation waits armed:`, { have: have.toString(), need: need.toString() })
     }
     return false
   }
