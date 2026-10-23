@@ -1,17 +1,21 @@
 import type { FundingView } from '@mamoru/domain'
 import registry from '@mamoru/registry/base.json'
+import monad from '@mamoru/registry/monad.json'
 
 type Position = FundingView['positions'][number]
 type Progress = NonNullable<FundingView['progress']>
 type Entry = { name: string; kind: string; address: string; decimals?: number; token0?: string; token1?: string }
 
 const ENTRIES = registry.entries as Entry[]
+// otto/mamoru#67: pools of every chain a sleeve runs on, Base first. Pool names and addresses do not repeat across
+// the two pinned registries, so a lookup by either finds the one pool it names.
+const POOLS = [...ENTRIES, ...(monad.entries as Entry[])].filter((e) => e.kind === 'pool')
 const DEFAULT_PAIR: [string, string] = ['USDC', 'cbBTC']
 
 function poolEntry(pool: string | undefined): Entry | undefined {
   if (!pool) return undefined
   const p = pool.toLowerCase()
-  return ENTRIES.find((e) => e.kind === 'pool' && (e.name.toLowerCase() === p || e.address.toLowerCase() === p))
+  return POOLS.find((e) => e.name.toLowerCase() === p || e.address.toLowerCase() === p)
 }
 
 /** The two tokens of a pool, from its registry name or address, else from the position amounts. */
@@ -35,7 +39,7 @@ export function poolName(pool: string | undefined): string | null {
   return poolEntry(pool)?.name ?? (pool && /^pool:/.test(pool) ? pool : null)
 }
 
-/** The pool's contract address for Basescan, whether the view carries the name or the address. */
+/** The pool's contract address for the explorer of its chain, whether the view carries the name or the address. */
 export function poolAddress(pool: string): string | null {
   return poolEntry(pool)?.address ?? (/^0x[0-9a-fA-F]{40}$/.test(pool) ? pool : null)
 }

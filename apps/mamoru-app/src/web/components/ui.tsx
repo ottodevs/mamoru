@@ -1,6 +1,7 @@
 import { Link } from '@tanstack/react-router'
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { encodeQr, qrPath } from '../lib/qr.ts'
+import { explorerTx, useChain } from '../lib/chain.tsx'
 
 export function Brand() {
   return (
@@ -60,15 +61,17 @@ export function AddressBlock({ address }: { address: string }) {
   )
 }
 
+/** The tx on the explorer of the sleeve's chain (Basescan on Base, Monadscan on Monad; otto/mamoru#67). */
 export function BasescanLink({ tx }: { tx: string }) {
+  const chain = useChain()
   return (
     <a
-      href={`https://basescan.org/tx/${tx}`}
+      href={explorerTx(chain, tx)}
       target="_blank"
       rel="noreferrer"
       className="inline-flex h-6 w-6 shrink-0 items-center justify-center text-stone hover:text-emerald"
-      aria-label="View on Basescan"
-      title="View on Basescan"
+      aria-label={`View on ${chain.explorer.name}`}
+      title={`View on ${chain.explorer.name}`}
     >
       <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
         <path d="M9 2h5v5M14 2 7 9M12 10v4H2V4h4" />

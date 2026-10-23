@@ -23,6 +23,10 @@ export type Env = {
   LIVE_FUNDS?: string
   OPERATOR_URL?: string
   OPERATOR_SECRET?: string
+  // Secret, optional (otto/mamoru#67): the operator that runs Monad (143). The operator refuses an account of another
+  // chain (CHAIN_MISMATCH), so a Monad sleeve is forwarded here, signed with the same OPERATOR_SECRET. Unset: every
+  // operator route of a Monad sleeve answers OPERATOR_UNAVAILABLE and nothing is sent.
+  OPERATOR_URL_143?: string
   // Secret. Read-only Ethereum Mainnet RPC pool for the wrong-network notice (accounts/other-chains.ts): https URLs
   // separated by commas, tried in order (docs/process/rpc-providers.md). Unset: nothing is read.
   ETHEREUM_RPC_URLS?: string
@@ -69,4 +73,10 @@ export function readSettings(env: Env): AppSettings {
 /** Live funds are on only when the var says so and an operator is configured. */
 export function liveFunds(env: Env): boolean {
   return env.LIVE_FUNDS === '1' && !!env.OPERATOR_URL
+}
+
+/** The operator that serves accounts of `chainId`: OPERATOR_URL for Base, OPERATOR_URL_<chainId> otherwise; null when none is set. */
+export function operatorUrlFor(env: Env, chainId: number): string | null {
+  const url = chainId === BASE_CHAIN_ID ? env.OPERATOR_URL : chainId === 143 ? env.OPERATOR_URL_143 : undefined
+  return url ? url.replace(/\/+$/, '') : null
 }

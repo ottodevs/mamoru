@@ -33,6 +33,15 @@ export const OPS_FLAGS = {
     label: 'On-chain action policy (v5, MamoruActionPolicyV2)',
     description: 'Offers running v2/v3/v4 accounts the renewal that moves them to conservadorLiveV5 on MamoruActionPolicyV2 (otto/mamoru#151, #171). The V2 address is an operator setting, never hardcoded.',
   },
+  /**
+   * otto/mamoru#67, default off: a signed-in owner can open a second sleeve of the same account on Monad (chain 143)
+   * and Home shows it next to the Base one. Honored ONLY on beta.mamoru.lol: app.mamoru.lol reads it as off whatever
+   * the row says (apps/mamoru-app/src/api/sleeves.ts), since prod and beta share this D1 and its flags.
+   */
+  monad_sleeves: {
+    label: 'Monad sleeves (beta only)',
+    description: 'Beta only: owners can add a Monad (143) sleeve, deposit USDC there and see its WMON/USDC positions (otto/mamoru#67). Prod ignores it.',
+  },
 } as const
 
 export type OpsFlagName = keyof typeof OPS_FLAGS

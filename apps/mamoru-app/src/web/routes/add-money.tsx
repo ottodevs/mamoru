@@ -5,6 +5,7 @@ import { useFunding, useSession } from '../api/queries.ts'
 import { ConnectWallet } from '../components/connect-wallet.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { AddressBlock, Brand, Copy, Qr, Waiting } from '../components/ui.tsx'
+import { BASE_SLEEVE, explorerAddress, useChain, type SleeveChain } from '../lib/chain.tsx'
 import { capNote, ceilCents, overCapOf, usd, usdPlain } from '../lib/money.ts'
 import { localTime } from '../lib/time.ts'
 import { useInjectedWallets } from '../lib/wallets.ts'
@@ -18,30 +19,48 @@ export const addCopy = {
   overCap: (o: OverCap) =>
     `${usd(o.usdc)} USDC arrived. That is ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC over the ${usdPlain(o.capUsdc)} USDC cap, so Mamoru has not started. Your money is in your account and nothing was moved.`,
   overCapNext: 'See what you can do',
+  // otto/mamoru#67: a sleeve on another chain. A deposit address is never shown without its chain and its USDC contract.
+  sendOn: (c: SleeveChain) => `Send USDC on ${c.name}.`,
+  onlyOn: (c: SleeveChain) => `Only USDC sent on the ${c.name} network arrives. The same address on Base or any other network is not this ${c.name} balance.`,
+  addressOn: (c: SleeveChain) => `Your address on ${c.name}`,
+  usdcContract: (c: SleeveChain) => `USDC on ${c.name}`,
 }
 
 /** Address, QR and Connect wallet. Shared by the Add money screen and the Home modal. */
 export function DepositDetails({ address, capUsdc }: { address: string; capUsdc?: string }) {
   const wallets = useInjectedWallets()
+  const chain = useChain()
+  const base = chain.chainId === BASE_SLEEVE.chainId
   return (
     <div className="grid gap-6">
-      <ConnectWallet to={address} wallets={wallets} />
+      {/* The wallet send is wired to Base (lib/wallet-client.ts); a Monad sleeve takes the address or the QR. */}
+      {base ? <ConnectWallet to={address} wallets={wallets} /> : null}
       <div className="grid gap-5 sm:grid-cols-[auto_1fr] sm:items-center sm:gap-7">
         <Qr text={address} />
         <div className="grid min-w-0 gap-3">
-          <p className="kicker">Your address on Base</p>
+          <p className="kicker" data-testid="deposit-chain">
+            {base ? 'Your address on Base' : addCopy.addressOn(chain)}
+          </p>
           <AddressBlock address={address} />
           <div className="flex flex-wrap items-center gap-3">
             <Copy text={address} label="Copy address" />
             <span className="text-[0.88rem] text-stone">
-              {addCopy.send}
+              {base ? addCopy.send : addCopy.sendOn(chain)}
               {capUsdc ? ` ${capNote(capUsdc)}` : ''}
             </span>
           </div>
+          {base ? null : (
+            <p className="m-0 font-mono text-[0.78rem] text-stone [overflow-wrap:anywhere]" data-testid="deposit-usdc">
+              {addCopy.usdcContract(chain)}{' '}
+              <a className="underline decoration-wash underline-offset-4 hover:text-emerald" href={explorerAddress(chain, chain.usdc)} target="_blank" rel="noreferrer">
+                {chain.usdc}
+              </a>
+            </p>
+          )}
         </div>
       </div>
       <p className="m-0 text-[0.88rem] leading-[1.45] text-stone" data-testid="base-only">
-        {addCopy.baseOnly}
+        {base ? addCopy.baseOnly : addCopy.onlyOn(chain)}
       </p>
     </div>
   )

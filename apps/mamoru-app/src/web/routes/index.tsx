@@ -1,7 +1,9 @@
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
 import { useSession } from '../api/queries.ts'
+import { SleeveSwitch } from '../components/sleeves.tsx'
 import { Brand } from '../components/ui.tsx'
+import { ChainProvider } from '../lib/chain.tsx'
 import { knownCredentials } from '../lib/signin.ts'
 import { HomeView } from './home.tsx'
 import { Onboarding } from './onboarding.tsx'
@@ -28,9 +30,20 @@ export function IndexPage() {
   if (!cards) opened.current = null
   else if (opened.current === null) opened.current = asked || known || had.current ? 'signin' : 'create'
   const signin = (choice ?? opened.current) === 'signin'
+  // otto/mamoru#67: the sleeve on screen. Base (the session's accountKey) unless the owner picked another one the
+  // session lists; a key the session no longer lists falls back to Base.
+  const [picked, setPicked] = useState<string | null>(null)
+  const sleeves = session.data?.sleeves ?? []
+  const sleeve = sleeves.find((s) => s.accountKey === picked) ?? sleeves.find((s) => s.accountKey === accountKey)
   if (accountKey && !cards) {
     had.current = true
-    return <HomeView accountKey={accountKey} />
+    const shown = sleeve?.accountKey ?? accountKey
+    const switcher = session.data?.sleeves ? <SleeveSwitch sleeves={sleeves} addable={session.data.addableChains ?? []} selected={shown} onSelect={setPicked} /> : null
+    return (
+      <ChainProvider chainId={sleeve?.chainId}>
+        <HomeView key={shown} accountKey={shown} sleeves={switcher} />
+      </ChainProvider>
+    )
   }
   const signedIn = () => {
     setBoarding(false)

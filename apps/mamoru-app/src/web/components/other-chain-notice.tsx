@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 import { useApi } from '../api/client.ts'
 import { queryKeys, useBridgeOut, useOtherChains } from '../api/queries.ts'
+import { BASE_SLEEVE, useChain } from '../lib/chain.tsx'
 import { errorText } from '../lib/owner-flow.ts'
 import { signOwnerTx, storedCredential } from '../lib/passkey-sign.ts'
 import { usd } from '../lib/money.ts'
@@ -173,7 +174,9 @@ export function BridgeOutAction({ accountKey }: { accountKey: string }) {
 }
 
 /** The notice for the signed-in account. A check that failed shows nothing: an amount seen earlier is not claimed to be there now. */
-export function WrongNetwork({ accountKey }: { accountKey: string | undefined }) {
+export function WrongNetwork({ accountKey: sleeveKey }: { accountKey: string | undefined }) {
+  // otto/mamoru#67: the notice and its move are about reaching Base; a Monad sleeve reads nothing here.
+  const accountKey = useChain().chainId === BASE_SLEEVE.chainId ? sleeveKey : undefined
   const other = useOtherChains(accountKey)
   const status = useBridgeOut(accountKey)
   // Off on /ops, or the operator has no Ethereum RPC (the route answers 404): the notice stays as it was, no button.

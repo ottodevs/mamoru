@@ -17,6 +17,7 @@ import { apyRoutes } from './apy/routes.ts'
 import { ens } from './ens/routes.ts'
 import { feedbackRoutes, type MattermostFetch } from './feedback.ts'
 import { engineSettingsRoutes } from './engine-settings.ts'
+import { sessionSleeves, sleeves } from './sleeves.ts'
 import type { ApyCache, Fetcher } from './apy/source.ts'
 
 export type AppOptions = {
@@ -75,7 +76,7 @@ export function createApp(options: AppOptions = {}) {
     if (!session) return apiError(c, 401, 'No session yet. It starts with onboarding.', 'AUTH_REQUIRED')
     const account = await accountOfUser(c.env.DB, session.userId)
     if (account) c.set('accountKey', account.account_key)
-    const view: SessionView = { ...session, ...(account ? { accountKey: account.account_key } : {}) }
+    const view: SessionView = { ...session, ...(account ? { accountKey: account.account_key, ...(await sessionSleeves(c, c.env.DB, session.userId)) } : {}) }
     return c.json(view)
   })
 
@@ -84,6 +85,7 @@ export function createApp(options: AppOptions = {}) {
   app.route('/api/accounts', operatorRoutes(options.operatorFetch ?? ((input, init) => fetch(input, init))))
   app.route('/api/accounts', accounts)
   app.route('/api/accounts', otherChainRoutes(options.chainFetch ?? ((input, init) => fetch(input, init)), options.chainGate))
+  app.route('/api/sleeves', sleeves)
   app.route('/api/pools', pools)
   app.route('/api/ens', ens)
   app.route('/api/apy', apyRoutes(options.apyFetch ?? ((input, init) => fetch(input, init)), options.apyCache))

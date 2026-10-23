@@ -23,8 +23,19 @@ export type AccountRow = {
   is_test: number
 }
 
+/** The owner's default sleeve: the Base account (otto/mamoru#67: a Monad sleeve is never the one a session opens on). */
 export function accountOfUser(db: Db, userId: string): Promise<AccountRow | null> {
-  return db.prepare('SELECT * FROM accounts WHERE user_id = ? ORDER BY created_at LIMIT 1').bind(userId).first<AccountRow>()
+  return db.prepare('SELECT * FROM accounts WHERE user_id = ? AND chain_id = 8453 ORDER BY created_at LIMIT 1').bind(userId).first<AccountRow>()
+}
+
+/** Every sleeve of the owner, Base first, then by chain id; within a chain the oldest (the one accountOfUser picks). */
+export async function sleevesOfUser(db: Db, userId: string): Promise<AccountRow[]> {
+  const { results } = await db
+    .prepare('SELECT * FROM accounts WHERE user_id = ? ORDER BY (chain_id = 8453) DESC, chain_id, created_at')
+    .bind(userId)
+    .all<AccountRow>()
+  const seen = new Set<number>()
+  return results.filter((r) => !seen.has(r.chain_id) && (seen.add(r.chain_id), true))
 }
 
 /** The account this credential id owns on this chain. At most one: the pair is unique (migration 0005). */

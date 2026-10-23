@@ -11,16 +11,28 @@ function utcDay(now: Date): string {
   return now.toISOString().slice(0, 10)
 }
 
+const UPSERT_TAIL = `ON CONFLICT(account_key, day) DO UPDATE SET hits = hits + 1, last_at = MAX(last_at, excluded.last_at), first_at = MIN(first_at, excluded.first_at)`
+
+/**
+ * otto/mamoru#64: the row carries the chain of the account's sleeve (read from accounts, Base when the account is
+ * gone), so DAU splits by chain. Before migrations/d1/XXXX_chain_keyed_sleeves.sql is applied the column is not
+ * there yet: the write falls back to the exact statement it ran before, never a 500 or a lost row.
+ */
 export async function upsertActivity(db: Db, accountKey: string, now: Date): Promise<void> {
   const day = utcDay(now)
   const iso = now.toISOString()
-  await db
-    .prepare(
-      `INSERT INTO account_activity (account_key, day, hits, first_at, last_at) VALUES (?, ?, 1, ?, ?)
-       ON CONFLICT(account_key, day) DO UPDATE SET hits = hits + 1, last_at = MAX(last_at, excluded.last_at), first_at = MIN(first_at, excluded.first_at)`,
-    )
-    .bind(accountKey, day, iso, iso)
-    .run()
+  try {
+    await db
+      .prepare(
+        `INSERT INTO account_activity (account_key, day, hits, first_at, last_at, chain_id)
+         VALUES (?, ?, 1, ?, ?, COALESCE((SELECT chain_id FROM accounts WHERE account_key = ?), 8453)) ${UPSERT_TAIL}`,
+      )
+      .bind(accountKey, day, iso, iso, accountKey)
+      .run()
+  } catch (e) {
+    if (!/no column named chain_id|no such column: chain_id/i.test(e instanceof Error ? e.message : String(e))) throw e
+    await db.prepare(`INSERT INTO account_activity (account_key, day, hits, first_at, last_at) VALUES (?, ?, 1, ?, ?) ${UPSERT_TAIL}`).bind(accountKey, day, iso, iso).run()
+  }
 }
 
 /**

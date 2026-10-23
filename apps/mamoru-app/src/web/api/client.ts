@@ -20,6 +20,7 @@ import type {
   SessionView,
   SignInChallenge,
   SignInRequest,
+  SleeveView,
   TransferPlan,
   TransferRequest,
   WithdrawAsset,
@@ -65,6 +66,8 @@ export type ApiClient = {
   bridgeOutStatus(accountKey: string): Promise<BridgeOutView>
   /** Works with or without a session. */
   feedback(body: FeedbackRequest): Promise<FeedbackResponse>
+  /** otto/mamoru#67: open (or find) the owner's sleeve on `chainId`. Only where the session lists `addableChains`. */
+  addSleeve(chainId: number): Promise<SleeveView>
 }
 
 export class ApiRequestError extends Error {
@@ -147,6 +150,7 @@ export const httpClient: ApiClient = {
   bridgeOut: (k, sig) => post<BridgeOutView>(acct(k, 'bridge-out'), sig),
   bridgeOutStatus: (k) => request<BridgeOutView>(acct(k, 'bridge-out')),
   feedback: (body) => post<FeedbackResponse>('/api/feedback', body),
+  addSleeve: (chainId) => post<SleeveView>('/api/sleeves', { chainId }),
 }
 
 export const ApiContext = createContext<ApiClient>(httpClient)

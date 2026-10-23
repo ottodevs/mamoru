@@ -1,4 +1,5 @@
 import {
+  chainOf,
   PRODUCTION_BANNER,
   type DashboardPayload,
   type Figure,
@@ -10,7 +11,7 @@ import {
   type ReasonCode,
   type TokenHolding,
 } from '@mamoru/domain'
-import { baseRegistry, entry } from '@mamoru/registry'
+import { entry, registryFor } from '@mamoru/registry'
 import { conservadorV1 } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import type { Db } from '../env.ts'
@@ -61,8 +62,11 @@ export async function loadDashboardInput(db: Db, account: AccountRow): Promise<D
 // Inputs Actions needs that the sprint does not project yet (packages/projector derives Actions later).
 const ACTIONS_INPUTS_NOT_PROJECTED = ['journal', 'decisions', 'sessions', 'positions', 'savings ledger'] as const
 
-function poolRef(name: string): PoolRef {
-  const e = entry(name, baseRegistry)
+/** otto/mamoru#64: the pool the convert route names, per chain: cbBTC back to USDC on Base, WMON on Monad. */
+const CONVERT_POOL: Record<number, string> = { 8453: 'pool:USDC/cbBTC/500', 143: 'pool:WMON/USDC/3000' }
+
+function poolRef(name: string, chainId: number): PoolRef {
+  const e = entry(name, registryFor(chainId))
   if (e.kind !== 'pool' || !e.token0 || !e.token1 || e.fee === undefined || e.tickSpacing === undefined) throw new Error(`${name} is not a pool entry`)
   return { address: e.address, token0: e.token0, token1: e.token1, fee: e.fee, tickSpacing: e.tickSpacing, name: e.name }
 }
@@ -109,7 +113,7 @@ export function buildDashboard(input: DashboardInput, now: Date): DashboardPaylo
   const payload: DashboardPayload = {
     mode: 'production',
     chainId,
-    chains: [{ chainId, name: 'Base', observed: true }],
+    chains: [{ chainId, name: chainOf(chainId).name as 'Base' | 'Monad', observed: true }],
     sources: source
       ? {
           rpc: {
@@ -162,7 +166,7 @@ export function buildDashboard(input: DashboardInput, now: Date): DashboardPaylo
       gasReserve: amountOf('ETH', 'gas'),
       outsidePlan: miss('estimate', 'USDC'),
       convert: {
-        route: { protocol: 'uniswap-v3', pool: poolRef('pool:USDC/cbBTC/500'), router: 'SwapRouter02', method: 'exactInputSingle', quoter: 'QuoterV2' },
+        route: { protocol: 'uniswap-v3', pool: poolRef(CONVERT_POOL[chainId] ?? 'pool:USDC/cbBTC/500', chainId), router: 'SwapRouter02', method: 'exactInputSingle', quoter: 'QuoterV2' },
         pending: miss('journal', 'cbBTC'),
         quote: miss('estimate', 'USDC'),
         state: 'held',

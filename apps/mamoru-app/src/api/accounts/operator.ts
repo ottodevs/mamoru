@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono'
 import type { AccountContext } from '@mamoru/domain'
 import type { AppEnv } from '../context.ts'
-import { liveFunds } from '../env.ts'
+import { liveFunds, operatorUrlFor } from '../env.ts'
 import { accountNotFound, apiError } from '../errors.ts'
 import { ACCOUNT_KEY } from '../onboarding/account.ts'
 import { ownedAccount, ownersOf, type AccountRow } from './store.ts'
@@ -83,7 +83,8 @@ export function operatorRoutes(operatorFetch: OperatorFetch) {
     }
 
     const env = c.env
-    if (!liveFunds(env) || !env.OPERATOR_SECRET) return unavailable(c)
+    const operatorUrl = operatorUrlFor(env, row.chain_id)
+    if (!liveFunds(env) || !env.OPERATOR_SECRET || !operatorUrl) return unavailable(c)
     const url = new URL(c.req.url)
     const path = url.pathname + url.search
     const header = base64url(JSON.stringify(accountContext(row)))
@@ -95,7 +96,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch) {
     let res: Response
     let text: string
     try {
-      res = await operatorFetch(env.OPERATOR_URL!.replace(/\/+$/, '') + path, {
+      res = await operatorFetch(operatorUrl + path, {
         method,
         headers,
         ...(method !== 'GET' ? { body } : {}),

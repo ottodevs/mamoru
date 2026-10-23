@@ -13,7 +13,24 @@ export type AppConfig = {
 }
 
 // GET /api/session -> 200 SessionView | 401
-export type SessionView = { userId: string; email?: string; accountKey?: string }
+export type SessionView = {
+  userId: string
+  email?: string
+  /** The Base account: the default sleeve, what every screen opens on. */
+  accountKey?: string
+  /**
+   * otto/mamoru#67: every sleeve of this owner, Base first, each with its chain. Present only where Monad sleeves are
+   * on (the `monad_sleeves` ops flag, beta host only); absent, the SPA behaves exactly as with Base alone.
+   */
+  sleeves?: SleeveView[]
+  /** Chain ids the owner may open a sleeve on now (POST /api/sleeves). Same gate as `sleeves`. */
+  addableChains?: number[]
+}
+
+/** One sleeve: the account of an owner on one chain. The address is never shown without its chain. */
+export type SleeveView = { accountKey: string; chainId: number; chain: string; address: Hex0x }
+// POST /api/sleeves  body: { chainId } -> 201 SleeveView | 200 SleeveView (already there) | 404 when the gate is off
+//   | 409 CHAIN_ADDRESS_UNVERIFIED (the chain's Safe contracts differ from Base's: no address is claimed)
 
 // Returning owner: sign in with the passkey that owns the account. Grants what the device session grants, nothing more.
 // POST /api/auth/challenge -> SignInChallenge (single use, 5 minutes, bound to this host)

@@ -1,9 +1,14 @@
 import registry from '@mamoru/registry/base.json'
+import monad from '@mamoru/registry/monad.json'
 
 type RegistryToken = { name: string; kind: string; decimals?: number }
 
-// Decimals come from the registry (dashboard.md §2 rule 11). ETH is native, 18.
+// Decimals come from the registry (dashboard.md §2 rule 11). ETH is native, 18. Monad's tokens (otto/mamoru#67) come
+// first so that a name both registries carry (USDC) keeps Base's entry, which the Map sets last.
 const DECIMALS: ReadonlyMap<string, number> = new Map([
+  ...(monad.entries as RegistryToken[])
+    .filter((e) => e.kind === 'token' && typeof e.decimals === 'number')
+    .map((e) => [e.name, e.decimals as number] as const),
   ...(registry.entries as RegistryToken[])
     .filter((e) => e.kind === 'token' && typeof e.decimals === 'number')
     .map((e) => [e.name, e.decimals as number] as const),
@@ -14,7 +19,7 @@ export function decimalsOf(unit: string | undefined): number | undefined {
   return unit === undefined ? undefined : DECIMALS.get(unit)
 }
 
-const MAX_FRACTION_DIGITS: Readonly<Record<string, number>> = { USDC: 2, cbBTC: 8, WETH: 6, ETH: 6 }
+const MAX_FRACTION_DIGITS: Readonly<Record<string, number>> = { USDC: 2, cbBTC: 8, WETH: 6, ETH: 6, WMON: 4 }
 
 function groupThousands(digits: string): string {
   return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',')

@@ -1,4 +1,4 @@
-import { overCap, PRODUCTION_BANNER, type AppConfig, type BridgeOutView, type FundingView, type OpView, type OwnerResponse, type OwnerTxToSign, type PriceDivergenceWarning, type SessionView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
+import { overCap, PRODUCTION_BANNER, type AppConfig, type BridgeOutView, type FundingView, type OpView, type OwnerResponse, type OwnerTxToSign, type PriceDivergenceWarning, type SessionView, type SleeveView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
 import type { ApiClient } from '../api/client.ts'
 import { emptyAccount, FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from './empty-account.ts'
 import { poolsResponse } from './pools.ts'
@@ -111,6 +111,42 @@ const placedThree = (): Partial<FundingView> => ({
     },
   ],
 })
+// ?monad (dev only, otto/mamoru#67): the owner also has a Monad sleeve, same address, running in WMON/USDC 0.30%. With
+// ?monadadd instead, the Monad sleeve is not there yet and Home offers to add it.
+export const MONAD_FIXTURE_KEY = 'acct_fixture_monad'
+const monadOn = param('monad')
+const monadAdd = param('monadadd')
+const sleeveOf = (accountKey: string, chainId: number): SleeveView => ({ accountKey, chainId, chain: chainId === 143 ? 'Monad' : 'Base', address: FIXTURE_ADDRESS })
+const monadState = {
+  funding: {
+    ...structuredClone(fixtureFunding),
+    deployed: true,
+    active: true,
+    block: 41_802_330,
+    usdc: '420000',
+    cbbtc: '0',
+    capUsdc: '100000000',
+    idle: [{ token: 'USDC', amount: '420000', decimals: 6, valueUsdc: '420000' }],
+    engine: { placing: false, nextReviewAt: new Date(Date.now() + 4 * 60_000).toISOString() },
+    positions: [
+      {
+        tokenId: '9001', pool: 'pool:WMON/USDC/3000', liquidity: '1', inRange: true, amountUsdc: '24050000', amountCbbtc: '0', valueUsdc: '48120000',
+        amounts: [
+          { token: 'WMON', amount: '682140000000000000000', decimals: 18, valueUsdc: '24070000' },
+          { token: 'USDC', amount: '24050000', decimals: 6, valueUsdc: '24050000' },
+        ],
+      },
+    ],
+  } as FundingView,
+  ops: [
+    { opId: 'own-m1-activate', kind: 'activate', state: 'confirmed', txHash: `0x${'4'.repeat(64)}`, updatedAt: new Date(Date.now() - 50 * 60_000).toISOString() },
+    { opId: 'eng-m1-enter_mint', kind: 'enter', state: 'confirmed', pool: 'pool:WMON/USDC/3000', txHash: `0x${'5'.repeat(64)}`, updatedAt: new Date(Date.now() - 48 * 60_000).toISOString() },
+  ] as OpView[],
+}
+const sleeveState = { sleeves: monadOn ? [sleeveOf(FIXTURE_ACCOUNT_KEY, 8453), sleeveOf(MONAD_FIXTURE_KEY, 143)] : monadAdd ? [sleeveOf(FIXTURE_ACCOUNT_KEY, 8453)] : null }
+const sessionNow = (): SessionView =>
+  sleeveState.sleeves ? { ...fixtureSession, sleeves: sleeveState.sleeves, addableChains: sleeveState.sleeves.some((x) => x.chainId === 143) ? [] : [143] } : fixtureSession
+const isMonad = (k: string | undefined) => k === MONAD_FIXTURE_KEY
 // ?renewdue (dev only): a running account whose approval ends in 10 days. Home asks for the renewal on arrival (#148).
 const renewdue = param('renewdue')
 // ?divergence (dev only, otto/mamoru#155): every withdraw prepare returns a PriceDivergenceWarning.
@@ -201,7 +237,7 @@ export function fixtureDivergence(amountUsdc: bigint): PriceDivergenceWarning {
 
 export const fixtureClient: ApiClient = {
   config: () => delay(liveGate ? { ...fixtureConfig, fundsGate: 'live', dryRun: false, capUsdc: '25000000' } : fixtureConfig),
-  session: () => delay(liveState.owner ? fixtureSession : null),
+  session: () => delay(liveState.owner ? sessionNow() : null),
   dashboard: () => delay(emptyAccount),
   pools: () => delay(poolsResponse),
   apy: () =>
@@ -231,7 +267,7 @@ export const fixtureClient: ApiClient = {
   },
   recoveryKit: () => delay({ chainId: 8453, address: FIXTURE_ADDRESS, fixture: true }),
   ackRecovery: () => delay({ ok: true as const }),
-  funding: () => delay(liveState.funding),
+  funding: (k) => delay(isMonad(k) ? monadState.funding : liveState.funding),
   // ?wrongchain (dev only): 150 USDC was sent on Ethereum to the Base address.
   otherChains: () =>
     delay({
@@ -252,7 +288,7 @@ export const fixtureClient: ApiClient = {
       valueVsHoldUsd: '15000',
       feeAccruedUsd: null,
     }),
-  ops: () => delay({ ops: liveState.ops }),
+  ops: (k) => delay({ ops: isMonad(k) ? monadState.ops : liveState.ops }),
   activatePrepare: () => delay(fixtureTx(['Deploy your Safe on Base', 'Enable the engine session for up to 20 USDC', 'Top up gas reserve to 0.0003 ETH'])),
   activate: () => {
     if (fresh && BigInt(liveState.funding.usdc) === 0n) {
@@ -355,4 +391,11 @@ export const fixtureClient: ApiClient = {
       }),
     ),
   feedback: () => delay({ id: `fixture_fb_${liveState.n++}`, received: true as const }),
+  addSleeve: (chainId) => {
+    const s = sleeveOf(MONAD_FIXTURE_KEY, chainId)
+    // A sleeve just opened: counterfactual, nothing in it yet.
+    if (!monadOn) Object.assign(monadState, { funding: { ...structuredClone(fixtureFunding), usdc: '0', capUsdc: '100000000' }, ops: [] })
+    sleeveState.sleeves = [...(sleeveState.sleeves ?? [sleeveOf(FIXTURE_ACCOUNT_KEY, 8453)]).filter((x) => x.chainId !== chainId), s]
+    return delay(s)
+  },
 }

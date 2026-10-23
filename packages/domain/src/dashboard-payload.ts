@@ -20,7 +20,7 @@ export type Provenance = {
 
 export type Figure<T> = { value: T | null; unit?: string; provenance: Provenance }
 
-export type ChainRef = { chainId: number; name: 'Base' | 'Base fork'; observed: true }
+export type ChainRef = { chainId: number; name: 'Base' | 'Base fork' | 'Monad'; observed: true }
 
 export type IndexHealth = {
   provider: 'multibaas' | 'fork_index'

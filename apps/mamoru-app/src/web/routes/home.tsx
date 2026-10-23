@@ -17,6 +17,7 @@ import { pairLabel, poolAddress, poolTokens, positionAmounts, progressLine } fro
 import { currentRate, idleReason, monthlyRate, positionRates, sourceName, type AccountRate, type PositionRate } from '../lib/rates.ts'
 import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel } from '../lib/price-divergence.ts'
 import { localTime } from '../lib/time.ts'
+import { explorerAddress, useChain } from '../lib/chain.tsx'
 import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
 import { DepositDetails, hasMoney } from './add-money.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
@@ -198,6 +199,7 @@ function pair(p: FundingView['positions'][number]): string {
 function PositionRow({ p, r }: { p: FundingView['positions'][number]; r: PositionRate }) {
   const legs = positionAmounts(p).filter((l) => l.amount !== '0')
   const addr = poolAddress(p.pool)
+  const chain = useChain()
   const venue = 'Uniswap v3'
   const share = r.sharePct === null ? null : Math.round(r.sharePct)
   return (
@@ -215,7 +217,7 @@ function PositionRow({ p, r }: { p: FundingView['positions'][number]; r: Positio
         </span>
         <span className="wc-venue">
           {addr ? (
-            <a href={`https://basescan.org/address/${addr}`} target="_blank" rel="noreferrer">
+            <a href={explorerAddress(chain, addr)} target="_blank" rel="noreferrer">
               {venue}
             </a>
           ) : (
@@ -516,6 +518,7 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
   // reuse the same quoteId by mistake.
   const [acceptedWarning, setAcceptedWarning] = useState<PriceDivergenceWarning | null>(null)
   const dest = useDestination(to)
+  const chain = useChain()
   const assetsQ = useWithdrawAssets(accountKey, open)
   const options = withdrawOptions(assetsQ.data?.assets)
   const locale = detectLocale()
@@ -544,7 +547,7 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
     <Modal open={open} onClose={close} title={homeCopy.withdraw}>
       {done ? (
         <div className="grid gap-4">
-          <p className="m-0 text-[1.05rem]">Sent. It shows in your history once it settles on Base.</p>
+          <p className="m-0 text-[1.05rem]">Sent. It shows in your history once it settles on {chain.name}.</p>
           <div className="flex justify-end">
             <button type="button" className="cta" onClick={close}>
               Done
@@ -878,7 +881,7 @@ function StartRow({ accountKey, funded }: { accountKey: string; funded: boolean 
   )
 }
 
-export function HomeView({ accountKey }: { accountKey: string }) {
+export function HomeView({ accountKey, sleeves = null }: { accountKey: string; sleeves?: ReactNode }) {
   const api = useApi()
   const ops = useOps(accountKey, true)
   const yieldLedger = useYieldLedger(accountKey)
@@ -987,6 +990,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       <header className="mb-7">
         <Brand />
       </header>
+      {sleeves}
       <Balance s={s} onAdd={addMoney} onWithdraw={() => withdraw()} />
       <Indicators f={f} apy={apy.data} price={price} earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd} />
       {f?.active ? (
