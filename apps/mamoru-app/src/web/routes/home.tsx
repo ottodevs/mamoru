@@ -33,11 +33,11 @@ export const homeCopy = {
   current: 'Current rate',
   earnedSoFar: 'earned so far',
   monthlyWhat: '30-day avg',
-  // Now, not "last 24h": the figure is the present state at today's pool rates, not the account's history (#112 review).
-  currentWhat: 'now',
+  // Brais's label, literal (otto/mamoru#198, 23-oct): the figure is the whole balance's last 24 h.
+  currentWhat: '24h avg',
   sources: 'Rate sources',
   monthlySource: 'Monthly',
-  currentSource: 'Today',
+  currentSource: '24h avg',
   planPools: 'plan pools, nothing placed yet',
   na: 'n/a',
   gap: {
@@ -161,17 +161,20 @@ export function Balance({ s, earnedSoFarUsd, onAdd, onWithdraw }: { s: Split | n
 }
 
 /** The label under a rate: "APY · what", then why there is none or what it covers, never the source. */
-function RateSub({ name, what, tail }: { name: string; what: string; tail: string | null }) {
+function RateSub({ name, what, tail, info = null }: { name: string; what: string; tail: string | null; info?: ReactNode }) {
   return (
-    <p className="rate-sub">
-      <span className="sr-only">{name} </span>
-      APY
-      <span className="rate-what">
-        <span className="rate-dot"> · </span>
-        {what}
-        {tail ? ` · ${tail}` : null}
-      </span>
-    </p>
+    <div className="rate-label">
+      <p className="rate-sub">
+        <span className="sr-only">{name} </span>
+        APY
+        <span className="rate-what">
+          <span className="rate-dot"> · </span>
+          {what}
+          {tail ? ` · ${tail}` : null}
+        </span>
+      </p>
+      {info}
+    </div>
   )
 }
 
@@ -189,6 +192,19 @@ export function Indicators({ f, apy, price }: { f: FundingView | undefined; apy:
   const monthlyTail = monthly.gap ? homeCopy.gap[monthly.gap] : [monthly.plan ? homeCopy.planPools : null, partial(monthly)].filter(Boolean).join(' · ') || null
   // otto/mamoru#198: the current rate is the whole balance's (paused and idle at 0%), so it needs no scope words.
   const currentTail = current.gap ? homeCopy.gap[current.gap] : partial(current)
+  // Brais, 23-oct: the (i) sits right after the label it explains, not floating at the end of the row.
+  const info =
+    monthlySrc || currentSrc ? (
+      <details className="rate-info" data-testid="rate-sources">
+        <summary aria-label={homeCopy.sources}>
+          <span aria-hidden="true">i</span>
+        </summary>
+        <p className="rate-sources">
+          {monthlySrc ? <span>{homeCopy.monthlySource}: {monthlySrc}</span> : null}
+          {currentSrc ? <span>{homeCopy.currentSource}: {currentSrc}</span> : null}
+        </p>
+      </details>
+    ) : null
   return (
     <section className="rates" aria-label="Rates">
       <div className="rate">
@@ -201,19 +217,8 @@ export function Indicators({ f, apy, price }: { f: FundingView | undefined; apy:
         <p className={`rate-value${current.pct === null ? ' rate-na' : ''}`} data-testid="rate-current">
           {pct(current.pct)}
         </p>
-        <RateSub name={homeCopy.current} what={homeCopy.currentWhat} tail={currentTail} />
+        <RateSub name={homeCopy.current} what={homeCopy.currentWhat} tail={currentTail} info={info} />
       </div>
-      {monthlySrc || currentSrc ? (
-        <details className="rate-info" data-testid="rate-sources">
-          <summary aria-label={homeCopy.sources}>
-            <span aria-hidden="true">i</span>
-          </summary>
-          <p className="rate-sources">
-            {monthlySrc ? <span>{homeCopy.monthlySource}: {monthlySrc}</span> : null}
-            {currentSrc ? <span>{homeCopy.currentSource}: {currentSrc}</span> : null}
-          </p>
-        </details>
-      ) : null}
     </section>
   )
 }
