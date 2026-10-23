@@ -780,7 +780,9 @@ export class Operator {
     // otto/mamoru#61: ACTIVATION_GAS_WEI is in Base ETH. Off Base the deploy and the exec are priced at the chain's gas
     // price (twice it: the bound it may move to), at their full limits, as the chain charges them.
     const gasWei = this.offBase() ? (DEPLOY_GAS + ACTIVATE_TX_GAS) * (await this.gasPrice()) * 2n : ACTIVATION_GAS_WEI
-    const need = (selfFunded ? 0n : this.cfg.policy.gasReserveWei + (await this.topUpMarginWei())) + gasWei + (SENDER_RESERVE_WEI[this.cfg.registry.chainId] ?? 0n)
+    // The protocol reserve only binds a value transfer: a self-funded activation sends the Safe no MON, gas alone.
+    const reserve = selfFunded ? 0n : (SENDER_RESERVE_WEI[this.cfg.registry.chainId] ?? 0n)
+    const need = (selfFunded ? 0n : this.cfg.policy.gasReserveWei + (await this.topUpMarginWei())) + gasWei + reserve
     const have = BigInt((await this.relayerBalance()).wei)
     if (have >= need) return true
     const at = Date.now()
