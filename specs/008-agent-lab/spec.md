@@ -64,6 +64,9 @@ table outside the Lab tables. The Lab's numbers never appear in the production v
   rounded to 4 decimals. The band comes from an `onSample` hook in `runBacktest` that does not change `resultHash`.
 - **B-03 Seed.** `mamoru-lab-runner seed` computes the catalog matrix (every TRAIN window × {live 2000, live 4000,
   guard 2000} × 1000 USDC) and publishes it, so the bench opens full. Re-seeding the same spec is a no-op (same hash).
+  A window whose dataset lacks a pool a base needs (today `aug2024`: no cbBTC on Base yet) is skipped for that base
+  with `LAB_DATASET_MISSING`, as the sweep already does; the catalog lists, per window, the bases it can run, the
+  screen offers only those, and `POST /ops/lab/api/jobs` refuses the others with the same code.
 - **B-04 Jobs.** "Run scenario" writes a `lab_jobs` row `{id, requester, kind: 'bench', spec, status: queued}`;
   the runner claims, heartbeats and finishes it with the lease and fencing rules of AL-02/AL-02a; a spec whose run
   already exists finishes at once with that run. Limit: 20 jobs per requester per day, 3 queued at a time.
@@ -151,7 +154,8 @@ table outside the Lab tables. The Lab's numbers never appear in the production v
   `LAB_VERDICT_INCOMPARABLE`. A verdict against `hold` or `usdc` compares a run with its own baselines, which share
   all of these by construction.
 - **AL-21** A deterministic verifier checks: schema; each claim's `value` equals the code-mapped metric of the stored
-  run (tolerance 0.005 absolute or 0.1% relative); every run a claim, verdict or chart cites is in the job's own
+  run rounded to its display precision (USDC to 2 decimals, percentages to 1 decimal: the claim must equal that
+  rounded value exactly; the screen always shows the stored value, never the model's); every run a claim, verdict or chart cites is in the job's own
   run list (the runs its tool calls produced or fetched from the store in this job, recorded server-side as the calls
   happen; a follow-up turn re-fetches earlier runs through a tool to cite them); text has no untraceable digits; each
   chart's kind fits its runs. A run that merely exists in the store is not citable.
