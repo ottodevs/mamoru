@@ -353,6 +353,18 @@ describe('runAgentJob — loop mechanics (AL-15, AL-03)', () => {
     expect(testWindowResult.runs).toHaveLength(0)
   })
 
+  test('otto/mamoru#204: onToolCall fires once per dispatched investigative call, by name, never for a skipped one', async () => {
+    const seen: string[] = []
+    const model = new RecordedModel([
+      { toolCalls: [toolCall('sweep', { base: 'live', widthTicks: [2000], deposit: 1000 })] },
+      { toolCalls: [submitAnswerCall([{ type: 'caveat', md: 'sin reclamos en esta prueba.' }])] },
+    ])
+    const ctx: JobContext = { ...ctxWith(model), onToolCall: (name) => seen.push(name) }
+    const result = await runAgentJob({ question: 'sweep de prueba' }, ctx)
+    expect(result.verifierOutcome).toBe('ok')
+    expect(seen).toEqual(['sweep'])
+  })
+
   test('AL-03: a follow-up turn carries the prior verified answer as context; citing its run again needs a fresh fetch', async () => {
     const priorAnswer: Answer = { blocks: [{ type: 'claim', metric: 'end', runId: liveRun.resultHash, value: val(liveRun, 'end') }] }
     const model = new RecordedModel([
