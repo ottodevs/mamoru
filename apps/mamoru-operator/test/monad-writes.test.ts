@@ -17,6 +17,7 @@ import { LAB_GAS_LIMITS, TIGHT_CALL_GAS, tightUserOpGas } from '@mamoru/scenario
 import { assertWritePolicy, bootOperator, chainWritesFor, resolveNamedPolicy } from '../src/boot.ts'
 import { nativePricePool, writeRefusal } from '../src/chain.ts'
 import { relayerGasProfile } from '../src/relayer.ts'
+import { MONAD_SPONSOR, monadSponsor, type SponsorPolicy } from '../src/sponsorship.ts'
 import { operatorSignature } from '../src/server.ts'
 import { ctx } from './owner-world.ts'
 
@@ -211,6 +212,56 @@ describe('boot on chain 143', () => {
     } finally {
       process.env = saved
     }
+  })
+
+  test('flag on but MAMORU_LIVE off (review of #116, P1-1): read only exactly as without the flag, nothing signed', async () => {
+    const saved = { ...process.env }
+    delete process.env.MAMORU_LIVE
+    process.env.MAMORU_CHAIN_WRITES = '143'
+    const before = methods.length
+    let op: Awaited<ReturnType<typeof bootOperator>> | null = null
+    try {
+      // The Monad mainnet policy does not resolve: writes are not on.
+      await expect(bootOperator({ rpcUrl, secret, stateDir: mkdtempSync(join(tmpdir(), 'mamoru-143-flag-nolive-p-')), port: 0, policyId: 'live-wmon-usdc-monad-v1' })).rejects.toThrow('unknown policy')
+      op = await bootOperator({ rpcUrl, secret, stateDir: mkdtempSync(join(tmpdir(), 'mamoru-143-flag-nolive-')), port: 0, policyId: 'lab-wmon-usdc-monad-v1' })
+    } finally {
+      process.env = saved
+    }
+    try {
+      expect(op.operator.cfg.live).toBe(false)
+      expect(op.operator.cfg.chainWrites).toBeUndefined()
+      expect(op.operator.cfg.bundlerUrl).toBe('')
+      // The registry is monad.json as pinned: no write registry was built (no getCode of the session policies).
+      expect(op.operator.cfg.registry).toBe(monadRegistry)
+      const e = (await op.operator.relayer.send({ to: op.operator.relayer.address, value: 1n }).catch((x: unknown) => x)) as { code?: string }
+      expect(e.code).toBe('CHAIN_UNSUPPORTED')
+      const c = { ...ctx, chainId: 143 }
+      const header = Buffer.from(JSON.stringify(c)).toString('base64url')
+      const p = `/api/accounts/${c.accountKey}/activate/prepare`
+      const ts = Math.floor(Date.now() / 1000).toString()
+      const res = await fetch(op.url + p, { method: 'POST', headers: { 'x-mamoru-account': header, 'x-mamoru-ts': ts, 'x-mamoru-sig': operatorSignature(secret, 'POST', p, header, '{}', ts), 'content-type': 'application/json' }, body: '{}' })
+      expect({ status: res.status, code: ((await res.json()) as { code?: string }).code }).toEqual({ status: 503, code: 'CHAIN_READ_ONLY' })
+      expect(op.operator.engineHealthSnapshot()).toEqual([])
+      expect(methods.slice(before).filter((m) => m === 'eth_sendRawTransaction' || m === 'eth_estimateGas' || m === 'eth_getCode')).toEqual([])
+    } finally {
+      op.stop()
+    }
+  })
+
+  test('sponsorship off Base: a configured policy is never loosened by the Monad default (review of #116, P1-2)', () => {
+    const policyOf = (o: typeof off.operator) => (o as unknown as { sponsorPolicy(): SponsorPolicy }).sponsorPolicy()
+    expect(policyOf(off.operator)).toEqual(MONAD_SPONSOR)
+    const small: SponsorPolicy = { perAccount: 1, stopsPerAccount: 1, weiPerDay: 1_000n, reserveBps: 5_000, activationWeiPerDay: 2_000n }
+    ;(off.operator.cfg as { sponsor?: SponsorPolicy }).sponsor = small
+    try {
+      expect(policyOf(off.operator)).toEqual(small)
+    } finally {
+      delete (off.operator.cfg as { sponsor?: SponsorPolicy }).sponsor
+    }
+    // Field by field, the stricter: a configured value above Monad's default is capped, a broken one takes the default.
+    const big = monadSponsor({ perAccount: 50, stopsPerAccount: 2, weiPerDay: 10n ** 30n, reserveBps: 0, activationWeiPerDay: undefined })
+    expect(big).toEqual({ perAccount: MONAD_SPONSOR.perAccount, stopsPerAccount: 2, weiPerDay: MONAD_SPONSOR.weiPerDay, reserveBps: MONAD_SPONSOR.reserveBps, activationWeiPerDay: MONAD_SPONSOR.activationWeiPerDay })
+    expect(monadSponsor({ perAccount: -1, stopsPerAccount: 1.5, weiPerDay: -1n, reserveBps: 20_000 }).perAccount).toBe(MONAD_SPONSOR.perAccount)
   })
 
   test('flag on, but the session policies are not on the chain: the boot is refused, nothing sent', async () => {

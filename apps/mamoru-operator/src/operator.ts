@@ -52,7 +52,7 @@ import { classifyEngineError, EngineHealthTracker, GasReserveTracker, logErr, sa
 import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
-import { DEFAULT_SPONSOR, MONAD_SPONSOR, activationRefusal, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
+import { DEFAULT_SPONSOR, activationRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
 
 /** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
@@ -1522,8 +1522,9 @@ export class Operator {
   // ---- owner side: who pays (otto/mamoru#140 part2 #6) -----------------------
 
   private sponsorPolicy(): SponsorPolicy {
-    // otto/mamoru#61: DEFAULT_SPONSOR and SPONSOR_BOUNDS are Base ETH; an operator writing to Monad counts in MON.
-    if (this.offBase()) return MONAD_SPONSOR
+    // otto/mamoru#61: DEFAULT_SPONSOR and SPONSOR_BOUNDS are Base ETH; an operator writing to Monad counts in MON, and a
+    // configured policy is never loosened by the Monad default (monadSponsor: the stricter of the two, field by field).
+    if (this.offBase()) return monadSponsor(this.cfg.sponsor)
     return this.cfg.sponsor ? boundedSponsor(this.cfg.sponsor) : DEFAULT_SPONSOR
   }
 

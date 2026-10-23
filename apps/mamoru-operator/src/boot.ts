@@ -354,11 +354,14 @@ export async function bootOperator(o: BootOptions) {
   assertBaseOnlyFeatures(readRegistry, process.env, o)
   // otto/mamoru#61: writing off Base is an explicit opt-in (MAMORU_CHAIN_WRITES), and only on a registry verified
   // against the chain itself (writeRegistry). Without it, nothing below changes for any chain.
-  const writes = chainWritesFor(chainId, readRegistry, process.env)
+  // Writes off Base need BOTH the opt-in and MAMORU_LIVE=1 (review of #116, P1-1): the flag alone, without live, leaves
+  // the operator read only exactly as without it (no write registry, relayer refusal, no bundler, no Monad policy).
+  const flagged = chainWritesFor(chainId, readRegistry, process.env)
+  const writes = { ...flagged, on: flagged.on && process.env.MAMORU_LIVE === '1' }
   const registry = writes.on ? await writeRegistry(client, readRegistry) : readRegistry
   // Live (owner transactions and engine loops) needs Base itself: chain id 8453, hence the Base registry; or the chain
-  // this operator was opted into writing to (otto/mamoru#61), on its own chain id.
-  const live = (chainId === BASE_CHAIN_ID || writes.on) && process.env.MAMORU_LIVE === '1'
+  // this operator was opted into writing to (otto/mamoru#61), on its own chain id, MAMORU_LIVE=1 included in writes.on.
+  const live = (chainId === BASE_CHAIN_ID && process.env.MAMORU_LIVE === '1') || writes.on
   const named = resolveNamedPolicy(o.policyId ?? 'conservador-live-v2', process.env, { chainWrites: writes.on })
   if (!named) throw new Error(`unknown policy ${o.policyId}`)
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.

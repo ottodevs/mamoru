@@ -115,3 +115,24 @@ export function activationRefusal(policy: SponsorPolicy, all: readonly SponsorEn
   const until = Math.min(...mine.map((e) => (Date.parse(e.at) || 0) + SPONSOR_WINDOW_MS), now + SPONSOR_WINDOW_MS)
   return { code: 'SPONSOR_DAILY_BUDGET', until }
 }
+
+/**
+ * Review of #116 (P1-2): the sponsorship an operator writing to Monad runs with. A configured policy (`cfg.sponsor`) is
+ * never loosened by MONAD_SPONSOR: each count and budget is the smaller of the configured value and MONAD_SPONSOR's,
+ * and the stops-only reserve the larger. A configured field that is not a valid value takes MONAD_SPONSOR's. Without a
+ * configured policy: MONAD_SPONSOR.
+ */
+export function monadSponsor(configured?: SponsorPolicy): SponsorPolicy {
+  if (!configured) return MONAD_SPONSOR
+  const d = MONAD_SPONSOR
+  const n = (v: number, dv: number) => (Number.isInteger(v) && v >= 0 ? Math.min(v, dv) : dv)
+  const w = (v: bigint | undefined, dv: bigint) => (typeof v === 'bigint' && v >= 0n ? (v < dv ? v : dv) : dv)
+  const bps = Number.isInteger(configured.reserveBps) && configured.reserveBps >= 0 && configured.reserveBps <= 10_000 ? Math.max(configured.reserveBps, d.reserveBps) : d.reserveBps
+  return {
+    perAccount: n(configured.perAccount, d.perAccount),
+    stopsPerAccount: n(configured.stopsPerAccount, d.stopsPerAccount),
+    weiPerDay: w(configured.weiPerDay, d.weiPerDay),
+    reserveBps: bps,
+    activationWeiPerDay: w(configured.activationWeiPerDay, d.activationWeiPerDay!),
+  }
+}
