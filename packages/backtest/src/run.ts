@@ -4,7 +4,7 @@ import { amountsOf, canonicalJson, decide, pegDeviationBps, pegStep, PEG_CLEAR, 
 import { computeCaps, grantKey, policyHash, usageLimitFor, type Caps, type GrantTemplate, type PolicyVersion, type Price } from '@mamoru/policy'
 import { baseRegistry, entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
 import { token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
-import { accrueYield, divertFees, driftStep, harvestReport, heldOutside, labHarvest, newLedger, poolLedger, recordCollect, type HarvestLedger } from './harvest.ts'
+import { accrueYield, compoundedShare, divertFees, driftStep, harvestReport, heldOutside, keepInKind, labHarvest, newLedger, poolLedger, recordCollect, recordEarned, type HarvestLedger } from './harvest.ts'
 import { emaTickOf, ETH_PRICE_POOL, observe, twapTick } from './observe.ts'
 import type { Dataset, GasModel, Metrics, OpEntry, OpKind, PoolSample, RunResult, Sample, SessionUse, SimConfig } from './types.ts'
 import { accrue, apply, inRange, newWorld, valueIn, type World } from './world.ts'
@@ -276,7 +276,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
         const v = price(s, e.token0!, f.fees0) + price(s, e.token1!, f.fees1)
         fees += v
         if (lab) {
-          poolLedger(lab, p.pool).fees += v
+          recordEarned(lab, e, f.fees0, f.fees1, v)
           if (k === stablesK && lab.savings > 0n) {
             const amt = amountsOf(b.sqrtPriceX96, p.tickLower, p.tickUpper, p.liquidity)
             stableFees += v
@@ -380,9 +380,9 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
       } else if (p) {
         const ps = s.pools[ds.pools.indexOf(p.pool)] as PoolSample
         const e = entry(p.pool, baseRegistry)
-        // Lab (#178) savings arm: the fees a re-range or reduce collects go to the savings layer, not the account.
+        // Lab (#178) compound arm: the compounded share of what a re-range or reduce takes out, booked if it goes through.
         const held = 'tokenId' in p ? w.positions.find((x) => x.tokenId === p.tokenId) : undefined
-        if (lab?.arm.kind === 'savings' && held && (p.kind === 'rerange' || p.kind === 'reduce')) divertFees(lab, held, e, ps, savings)
+        const share = lab?.arm.kind === 'compound' && held && (p.kind === 'rerange' || p.kind === 'reduce') ? compoundedShare(lab, held, p.kind === 'reduce' ? p.liquidity : held.liquidity, ps.sqrtPriceX96) : null
         const done = apply(w, p, ps, s.time, policy.execution.slippageBps)
         const cost = done.ok ? gasCost(ds, s, p.kind, gas, savings) : 0n
         ops.push({
@@ -395,7 +395,13 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
           gasSpent += cost
           count[p.kind]++
           if (lab && (p.kind === 'harvest' || p.kind === 'rerange' || p.kind === 'reduce')) {
-            recordCollect(lab, e, ps, done.fees0, done.fees1, savings)
+            // Savings arm: the fees a re-range or reduce collected go to the savings layer, not the account (#178).
+            if (lab.arm.kind === 'savings' && p.kind !== 'harvest') divertFees(lab, w, e, ps, done.fees0, done.fees1, savings)
+            else recordCollect(lab, e, ps, done.fees0, done.fees1, savings)
+            if (lab.arm.kind === 'compound' && p.kind !== 'harvest') {
+              keepInKind(lab, e, done.fees0, done.fees1)
+              share?.commit()
+            }
             if (p.kind === 'harvest') {
               const pl = poolLedger(lab, p.pool)
               pl.harvests++
@@ -465,7 +471,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
     returnBps: bps(end - deposited, deposited),
   }
   const sessions = sessionUses(policy, tally, capUsdc)
-  const harvest = lab ? harvestReport(lab, w, last, price, minValue!) : undefined
+  const harvest = lab ? harvestReport(lab, w, ds, last, price, minValue!) : undefined
   const pHash = policyHash(policy)
   const facts = { simVersion: SIM_VERSION, datasetId: ds.id, policyHash: pHash, from, to, every, gaps, enforce, renewal, refused, deposit: config.deposit, topUps, gas, end, hodlEnd, fees, gasSpent, ops: ops.map(({ trail: _t, ...o }) => o), reasons, sessions, ...(config.capUsdc === undefined ? {} : { capUsdc }), ...(refresh ? { refresh, usageRefreshes } : {}), ...(harvest ? { harvestArm: config.harvest, harvest } : {}) }
   return {

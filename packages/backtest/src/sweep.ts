@@ -157,13 +157,15 @@ export type CellMetrics = {
   harvest?: HarvestCellMetrics
 }
 
-export type HarvestPoolMetrics = { fees: number; harvests: number; swaps: number; increases: number; cost: number; captured: number; exposureRemoved: number; uncollected: number }
+export type HarvestPoolMetrics = { fees: number; harvests: number; swaps: number; increases: number; cost: number; captured: number; unconverted: number; exposureRemoved: number; uncollected: number }
 
 export type HarvestCellMetrics = {
   arm: string
   savings: number
   yieldEarned: number
   captured: number
+  /** Volatile fees collected and not sold yet (savings arm), at the end price; not part of `captured`. */
+  unconverted: number
   exposureRemoved: number
   cost: number
   fees: number
@@ -210,6 +212,7 @@ function harvestMetrics(r: RunResult, n: (v: bigint) => number): HarvestCellMetr
     savings: n(h.savings),
     yieldEarned: n(h.yieldEarned),
     captured: n(h.captured),
+    unconverted: n(h.unconverted),
     exposureRemoved: n(h.exposureRemoved),
     cost: n(h.cost),
     fees: n(h.fees),
@@ -220,7 +223,7 @@ function harvestMetrics(r: RunResult, n: (v: bigint) => number): HarvestCellMetr
     driftMaxPct: h.driftMaxBps / 100,
     driftMeanPct: h.driftMeanBps / 100,
     minValue: n(h.minValue),
-    byPool: Object.fromEntries(h.pools.map((p) => [p.pool, { fees: n(p.fees), harvests: p.harvests, swaps: p.swaps, increases: p.increases, cost: n(p.gas + p.swapLoss), captured: n(p.captured), exposureRemoved: n(p.exposureRemoved), uncollected: n(p.uncollected) }])),
+    byPool: Object.fromEntries(h.pools.map((p) => [p.pool, { fees: n(p.fees), harvests: p.harvests, swaps: p.swaps, increases: p.increases, cost: n(p.gas + p.swapLoss), captured: n(p.captured), unconverted: n(p.unconverted), exposureRemoved: n(p.exposureRemoved), uncollected: n(p.uncollected) }])),
   }
 }
 

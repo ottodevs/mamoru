@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs'
 import { labWindow } from '../../../../packages/backtest/src/windows.ts'
 
 type Pool = { fees: number; harvests: number; swaps: number; increases: number; cost: number; captured: number; exposureRemoved: number; uncollected: number }
-type H = { arm: string; captured: number; exposureRemoved: number; cost: number; fees: number; costToFeesPct: number | null; harvests: number; swaps: number; increases: number; driftMaxPct: number; driftMeanPct: number; minValue: number; savings: number; yieldEarned: number; byPool: Record<string, Pool> }
+type H = { arm: string; captured: number; unconverted: number; exposureRemoved: number; cost: number; fees: number; costToFeesPct: number | null; harvests: number; swaps: number; increases: number; driftMaxPct: number; driftMeanPct: number; minValue: number; savings: number; yieldEarned: number; byPool: Record<string, Pool> }
 type M = { returnPct: number; vsHoldPct: number; harvest?: H }
 type Cell = { window: string; split: string; regime: string; deposit: number; variant: string; status: string; reason?: string; metrics?: M }
 type Report = { cells: Cell[]; variants: { name: string; harvest?: { kind: string; k?: number; capSeconds?: number } }[] }
@@ -46,11 +46,11 @@ if (argv.includes('--cells')) {
     const rows = cells.filter((c) => c.split === split)
     if (!rows.length) continue
     console.log(`### ${split.toUpperCase()}\n`)
-    console.log('| Window | Regime | Deposit | Arm | Captured | Exposure removed | Cost / fees % | Harvests | Swaps | Increases | Drift max % | Drift mean % | vs hold % | Return % | Min value |')
-    console.log('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|')
+    console.log('| Window | Regime | Deposit | Arm | Captured | Unconverted | Exposure removed | Cost / fees % | Harvests | Swaps | Increases | Drift max % | Drift mean % | vs hold % | Return % | Min value |')
+    console.log('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|')
     for (const c of rows) {
       const h = c.metrics!.harvest!
-      console.log(`| ${c.window} | ${c.regime} | ${c.deposit} | ${c.variant} | ${f4(h.captured)} | ${f4(h.exposureRemoved)} | ${h.costToFeesPct === null ? 'n/a' : f2(h.costToFeesPct)} | ${h.harvests} | ${h.swaps} | ${h.increases} | ${f2(h.driftMaxPct)} | ${f2(h.driftMeanPct)} | ${f2(c.metrics!.vsHoldPct)} | ${f2(c.metrics!.returnPct)} | ${f2(h.minValue)} |`)
+      console.log(`| ${c.window} | ${c.regime} | ${c.deposit} | ${c.variant} | ${f4(h.captured)} | ${f4(h.unconverted ?? 0)} | ${f4(h.exposureRemoved)} | ${h.costToFeesPct === null ? 'n/a' : f2(h.costToFeesPct)} | ${h.harvests} | ${h.swaps} | ${h.increases} | ${f2(h.driftMaxPct)} | ${f2(h.driftMeanPct)} | ${f2(c.metrics!.vsHoldPct)} | ${f2(c.metrics!.returnPct)} | ${f2(h.minValue)} |`)
     }
     console.log('')
   }
