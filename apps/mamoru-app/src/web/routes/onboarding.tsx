@@ -9,6 +9,7 @@ import { capNote } from '../lib/money.ts'
 import { errorText, useOwnerAction } from '../lib/owner-flow.ts'
 import { createOwnerPasskey } from '../lib/passkey.ts'
 import { rememberCredential } from '../lib/passkey-sign.ts'
+import { signatureCopy } from '../lib/signature.ts'
 import { challengeUsable, signInCopy } from '../lib/signin.ts'
 
 export const onboardingCopy = {
@@ -19,7 +20,6 @@ export const onboardingCopy = {
     { title: 'All your USDC has a job.', body: 'Mamoru opens positions for you. Profits become USDC.' },
     { title: 'You keep control. No lockups.', body: 'Withdraw anytime. Only you can take it out.' },
   ],
-  approve: { title: 'Approve once', body: 'Approve once. Mamoru starts when your money lands.' },
 }
 
 // A text link on the card: the card is darker than the page, so stone on wash would not read.
@@ -33,6 +33,37 @@ export function CardFrame({ label, testId, children }: { label: string; testId: 
         <section className="ob-card rise" aria-live="polite" data-testid={testId}>
           {children}
         </section>
+      </div>
+    </div>
+  )
+}
+
+/** otto/mamoru#19: which of the two onboarding signatures this is, in words and as a two-part bar. */
+function SignStep({ n }: { n: 1 | 2 }) {
+  return (
+    <>
+      <p className="ob-step uppercase">{n === 1 ? signatureCopy.create.step : signatureCopy.activate.step}</p>
+      <div className="mb-5 flex gap-2" aria-hidden="true">
+        <span className="h-[3px] flex-1 bg-ink" />
+        <span className={`h-[3px] flex-1 ${n === 2 ? 'bg-ink' : 'bg-[color-mix(in_srgb,var(--color-ink)_18%,transparent)]'}`} />
+      </div>
+    </>
+  )
+}
+
+/** Signature 1 of 2: what creating the passkey does, said before the prompt opens. */
+export function CreateSignature({ creating, error, onApprove }: { creating: boolean; error: string | null; onApprove: () => void }) {
+  return (
+    <div className="enter">
+      <SignStep n={1} />
+      <h1 className="ob-title">{signatureCopy.create.title}</h1>
+      <p className="ob-body">{signatureCopy.create.body}</p>
+      {error ? <p className="err mt-3">{error}</p> : null}
+      <div className="mt-[1.6rem] flex flex-wrap items-center justify-between gap-3">
+        <span className="text-[0.95rem] text-[color-mix(in_srgb,var(--color-ink)_60%,transparent)]">{signatureCopy.create.next}</span>
+        <button type="button" className="ob-btn solid ml-auto" onClick={onApprove} disabled={creating}>
+          {creating ? 'Waiting for passkey' : 'Approve with passkey'}
+        </button>
       </div>
     </div>
   )
@@ -64,16 +95,33 @@ function Approve({ owner }: { owner: OwnerResponse }) {
     if (op) void navigate({ to: '/add' })
   }
 
+  const summary = prepared?.tx.summary ?? null
+
   return (
     <div className="enter">
-      <h1 className="ob-title">{onboardingCopy.approve.title}</h1>
-      <p className="ob-body">{onboardingCopy.approve.body}</p>
-      {act.error ? <p className="err mt-3">{act.error}</p> : null}
-      <div className="mt-[1.6rem] flex flex-wrap items-center justify-between gap-3">
-        <button type="button" className="text-[0.88rem] text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => kit.mutate(owner)} disabled={kit.isPending}>
+      <SignStep n={2} />
+      <h1 className="ob-title">{signatureCopy.activate.title}</h1>
+      <p className="ob-body">{signatureCopy.activate.body}</p>
+      <p className="ob-body font-semibold">{signatureCopy.activate.never}</p>
+      <div className="mt-3 flex flex-wrap items-start gap-x-5 gap-y-2">
+        {summary ? (
+          <details className="min-w-0 basis-full" data-testid="sign-details">
+            <summary className={`${CARD_LINK} cursor-pointer`}>{signatureCopy.activate.details}</summary>
+            <ul className="mt-2 mb-0 grid gap-1 pl-5 text-[0.88rem] leading-[1.45] [overflow-wrap:anywhere]">
+              {summary.map((l) => (
+                <li key={l}>{l}</li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
+        <button type="button" className={CARD_LINK} onClick={() => kit.mutate(owner)} disabled={kit.isPending}>
           {kitSaved ? 'Recovery kit saved' : 'Save recovery kit'}
         </button>
-        <button type="button" className="ob-btn solid" onClick={approve} disabled={busy !== null}>
+      </div>
+      {act.error ? <p className="err mt-3">{act.error}</p> : null}
+      <div className="mt-[1.6rem] flex flex-wrap items-center justify-between gap-3">
+        <span className="text-[0.95rem] text-[color-mix(in_srgb,var(--color-ink)_60%,transparent)]">{signatureCopy.activate.next}</span>
+        <button type="button" className="ob-btn solid ml-auto" onClick={approve} disabled={busy !== null}>
           {busy === 'signing' ? 'Waiting for passkey' : busy === 'preparing' ? 'Preparing' : 'Approve with passkey'}
         </button>
       </div>
@@ -106,11 +154,15 @@ export function Onboarding({ onSignIn }: { onSignIn: () => void }) {
   const capUsdc = useConfig().data?.capUsdc
   const points = onboardingCopy.points.map((p, i) => (i === 0 && capUsdc ? { ...p, body: capNote(capUsdc) } : p))
   const creating = owner.isPending
+  // otto/mamoru#19: «Create account» first says what the passkey is about to sign; the prompt opens from that card.
+  const [signing, setSigning] = useState(false)
 
   return (
-    <CardFrame label="Welcome to Mamoru" testId={owner.data ? 'onboarding-approve' : 'onboarding'}>
+    <CardFrame label="Welcome to Mamoru" testId={owner.data ? 'onboarding-approve' : signing ? 'onboarding-create' : 'onboarding'}>
       {owner.data ? (
         <Approve owner={owner.data} />
+      ) : signing ? (
+        <CreateSignature creating={creating} error={owner.error ? errorText(owner.error) : null} onApprove={() => owner.mutate()} />
       ) : (
         <div className="enter">
           <p className="ob-step uppercase">{onboardingCopy.brand}</p>
@@ -126,13 +178,12 @@ export function Onboarding({ onSignIn }: { onSignIn: () => void }) {
               </li>
             ))}
           </ol>
-          {owner.error ? <p className="err mt-3">{errorText(owner.error)}</p> : null}
           <div className="mt-[1.6rem] flex flex-wrap items-center justify-between gap-3">
-            <button type="button" className={CARD_LINK} onClick={onSignIn} disabled={creating}>
+            <button type="button" className={CARD_LINK} onClick={onSignIn}>
               {signInCopy.link}
             </button>
-            <button type="button" className="ob-btn solid ml-auto" onClick={() => owner.mutate()} disabled={creating}>
-              {creating ? 'Creating account' : 'Create account'}
+            <button type="button" className="ob-btn solid ml-auto" onClick={() => setSigning(true)}>
+              Create account
             </button>
           </div>
         </div>

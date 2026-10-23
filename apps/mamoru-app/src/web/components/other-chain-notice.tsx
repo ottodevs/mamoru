@@ -8,6 +8,7 @@ import { errorText } from '../lib/owner-flow.ts'
 import { signOwnerTx, storedCredential } from '../lib/passkey-sign.ts'
 import { usd } from '../lib/money.ts'
 import { localTime } from '../lib/time.ts'
+import { signatureCopy } from '../lib/signature.ts'
 
 type Found = Extract<OtherChainFunds, { status: 'observed' }>
 
@@ -150,6 +151,9 @@ export function BridgeOutAction({ accountKey }: { accountKey: string }) {
       {route ? <BridgeStatus route={route} /> : null}
       {prepared ? (
         <span className="grid gap-2" data-testid="bridge-review">
+          <span className="text-[0.95rem]" data-testid="sign-scope">
+            {signatureCopy.move}
+          </span>
           <ul className="m-0 grid gap-1 pl-5 text-[0.9rem]">
             {prepared.summary.map((l) => (
               <li key={l}>{l}</li>

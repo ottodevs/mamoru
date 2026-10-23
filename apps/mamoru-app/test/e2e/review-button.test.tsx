@@ -30,7 +30,7 @@ describe('Review: its buttons never forward their click argument to the handler 
     const onApprove = (...args: unknown[]) => {
       calls.push(args)
     }
-    const el = Review({ lines: ['a line'], busy: null, error: null, onApprove })
+    const el = Review({ scope: 's', lines: ['a line'], busy: null, error: null, onApprove })
     const buttons = findButtons(el)
     expect(buttons).toHaveLength(1)
     buttons[0]!.props.onClick?.(fakeEvent)
@@ -41,7 +41,7 @@ describe('Review: its buttons never forward their click argument to the handler 
     const cancelCalls: unknown[][] = []
     const onApprove = (...args: unknown[]) => approveCalls.push(args)
     const onCancel = (...args: unknown[]) => cancelCalls.push(args)
-    const el = Review({ lines: [], busy: null, error: null, onApprove, onCancel, cancelLabel: 'Wait', confirmLabel: 'Withdraw anyway' })
+    const el = Review({ scope: 's', lines: [], busy: null, error: null, onApprove, onCancel, cancelLabel: 'Wait', confirmLabel: 'Withdraw anyway' })
     const buttons = findButtons(el)
     expect(buttons).toHaveLength(2)
     buttons[0]!.props.onClick?.(fakeEvent) // Wait

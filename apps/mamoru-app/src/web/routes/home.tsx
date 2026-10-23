@@ -14,6 +14,7 @@ import { belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, MIN_ENTRY_USDC, ov
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, poolTokens, positionAmounts, progressLine } from '../lib/positions.ts'
+import { signatureCopy } from '../lib/signature.ts'
 import { currentRate, idleReason, monthlyRate, positionRates, sourceName, type AccountRate, type PositionRate } from '../lib/rates.ts'
 import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel } from '../lib/price-divergence.ts'
 import { localTime } from '../lib/time.ts'
@@ -471,8 +472,11 @@ export function Review({
   cancelLabel,
   confirmLabel,
   confirmDisabled = false,
+  scope,
   children,
 }: {
+  /** otto/mamoru#19: one plain line on what this signature does, said before the passkey prompt. */
+  scope: ReactNode
   lines: string[]
   busy: string | null
   error: string | null
@@ -486,6 +490,9 @@ export function Review({
   return (
     <div className="grid min-w-0 gap-3 [overflow-wrap:anywhere]" data-testid="review">
       {children}
+      <p className="m-0 text-[0.95rem] leading-[1.45]" data-testid="sign-scope">
+        {scope}
+      </p>
       {lines.length ? (
         <ul className="m-0 grid gap-1 pl-5 text-[0.95rem]">
           {lines.map((l) => (
@@ -559,6 +566,7 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
         </div>
       ) : flow.prepared ? (
         <Review
+          scope={signatureCopy.withdraw(asset)}
           lines={[...(deployed ? [] : [homeCopy.createFirst]), ...(flow.prepared.reduce?.length ? ['Mamoru first takes the missing USDC out of the pool.'] : [])]}
           busy={flow.busy}
           error={error}
@@ -661,7 +669,7 @@ function StopDialog({ accountKey, s, open, onClose }: { accountKey: string; s: S
             </div>
           </div>
         ) : flow.prepared ? (
-          <Review lines={flow.prepared.tx.summary} busy={flow.busy} error={flow.error} onApprove={() => void flow.approve()} />
+          <Review scope={signatureCopy.stop} lines={flow.prepared.tx.summary} busy={flow.busy} error={flow.error} onApprove={() => void flow.approve()} />
         ) : (
           <>
             {flow.error ? <p className="err mb-3">{flow.error}</p> : null}
@@ -698,7 +706,7 @@ function StartDialog({ accountKey, s, open, onClose }: { accountKey: string; s: 
             </div>
           </div>
         ) : flow.prepared ? (
-          <Review lines={flow.prepared.tx.summary} busy={flow.busy} error={flow.error} onApprove={() => void flow.approve()} />
+          <Review scope={<ActivateScope />} lines={flow.prepared.tx.summary} busy={flow.busy} error={flow.error} onApprove={() => void flow.approve()} />
         ) : (
           <>
             {flow.error ? <p className="err mb-3">{flow.error}</p> : null}
@@ -867,6 +875,15 @@ function RenewDialog({ accountKey, approval, open, onClose, onDone }: { accountK
   )
 }
 
+/** What the activation signature allows, and the one thing it never does. */
+export function ActivateScope() {
+  return (
+    <>
+      {signatureCopy.activate.body} <strong>{signatureCopy.activate.never}</strong>
+    </>
+  )
+}
+
 function StartRow({ accountKey, funded }: { accountKey: string; funded: boolean }) {
   const flow = useOwnerAction(accountKey, 'activate')
   const tap = () => void (flow.prepared ? flow.approve() : flow.prepare())
@@ -875,6 +892,11 @@ function StartRow({ accountKey, funded }: { accountKey: string; funded: boolean 
     <section className="card flex flex-wrap items-center justify-between gap-3" data-testid="start">
       <span>
         <span className="title">{funded ? homeCopy.notRunning : homeCopy.armFirst}</span>
+        {flow.prepared ? (
+          <span className="mt-1 block text-[0.95rem]" data-testid="sign-scope">
+            <ActivateScope />
+          </span>
+        ) : null}
         {flow.error ? <span className="err mt-1 block">{flow.error}</span> : null}
       </span>
       <button type="button" className="act" onClick={tap} disabled={flow.busy !== null}>
