@@ -49,16 +49,12 @@ export function SignInCard({ busy, problem, remembered, onSignIn, onRemembered, 
             {busy ? signInCopy.waiting : signInCopy.act}
           </button>
         </div>
-        <div className="mt-6 grid gap-2 border-t border-[color-mix(in_srgb,var(--color-ink)_22%,transparent)] pt-4 text-[0.88rem] leading-[1.45] text-[color-mix(in_srgb,var(--color-ink)_68%,transparent)]">
-          <p className="m-0 text-ink">{signInCopy.helpTitle}</p>
-          <p className="m-0">{signInCopy.help}</p>
-          <p className="m-0">
-            {signInCopy.kit}{' '}
-            <a className="underline decoration-[color-mix(in_srgb,var(--color-ink)_35%,transparent)] underline-offset-4 hover:text-ink" href={WALKAWAY_URL} target="_blank" rel="noreferrer">
-              {signInCopy.kitLink}
-            </a>
-          </p>
-        </div>
+        <p className="mt-6 mb-0 border-t border-[color-mix(in_srgb,var(--color-ink)_22%,transparent)] pt-4 text-[0.95rem] leading-[1.45]" data-testid="signin-help">
+          {signInCopy.helpTitle}{' '}
+          <a className={CARD_LINK} href={WALKAWAY_URL} target="_blank" rel="noreferrer">
+            {signInCopy.kitLink}
+          </a>
+        </p>
       </div>
     </CardFrame>
   )

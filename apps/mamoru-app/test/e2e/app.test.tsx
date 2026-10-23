@@ -18,7 +18,6 @@ import { encodeQr } from '../../src/web/lib/qr.ts'
 import { localTime } from '../../src/web/lib/time.ts'
 import { ApprovalBody, Emph, signedFacts } from '../../src/web/components/approval-dialog.tsx'
 import { approvalDay, approvalHeading, approvalRowKey, approvalTitle, askedBefore, preparedFitsRow, engineLine, History, renewAskFor } from '../../src/web/routes/home.tsx'
-import { MIX } from '../../src/web/routes/onboarding.tsx'
 import { buildRouter } from '../../src/web/router.tsx'
 import { render } from './render.ts'
 
@@ -52,9 +51,13 @@ async function renderRoute(path: string, session: SessionView | null, funding?: 
 describe('routes', () => {
   test('no account: the first onboarding card, no marketing page', async () => {
     const { text } = await renderRoute('/', null)
-    expect(text).toContain('01 / 03')
-    expect(text).toContain('Fund Mamoru')
-    expect(text).toContain('Skip')
+    expect(text).toContain('Savings, automated.')
+    expect(text).toContain('All your USDC has a job.')
+    expect(text).toContain('Create account')
+    expect(text).toContain('I already have an account')
+    // otto/mamoru#192: the mix chart is gone (its «Off for now» was false), and there are no steps to skip.
+    expect(text).not.toContain('Off for now')
+    expect(text).not.toContain('Skip')
     expect(text).not.toContain('SAVINGS. EXPLAINED.')
   })
   test('account: Home with total, working capital, idle and history', async () => {
@@ -128,7 +131,7 @@ describe('deposit cap', () => {
   const live: AppConfig = { ...fixtureConfig, fundsGate: 'live', dryRun: false, capUsdc: '25000000' }
 
   test('the cap is said before funding: on the first card when the API runs live, and next to the deposit address', async () => {
-    expect((await renderRoute('/', null, undefined, { config: live })).text).toContain('Send the USDC you want to invest. Up to 25 USDC per account for now.')
+    expect((await renderRoute('/', null, undefined, { config: live })).text).toContain('Add USDC on Base. Up to 25 USDC per account for now.')
     expect((await renderRoute('/', null)).text).not.toContain('per account for now')
     expect((await renderRoute('/add', fixtureSession, { ...fixtureFunding, usdc: '0' })).text).toContain('Send USDC on Base. Up to 25 USDC per account for now.')
   })
@@ -230,21 +233,21 @@ describe('sign in', () => {
   const noop = () => {}
   const card = (p: Partial<Parameters<typeof SignInCard>[0]>) => render(<SignInCard busy={false} problem={null} remembered={false} onSignIn={noop} onRemembered={noop} onCreate={noop} {...p} />)
 
-  test('the first screen offers the way back in, on every card', async () => {
+  test('the first screen offers the way back in', async () => {
     const { text } = await renderRoute('/', null)
-    expect(text).toContain('01 / 03')
     expect(text).toContain('I already have an account')
   })
   test('?signin=true opens on the sign-in card: what it does, the passkey button, and help for a device without the passkey', async () => {
     const { text, html } = await renderRoute('/?signin=true', null)
     expect(html).toContain('data-testid="signin"')
-    expect(text).not.toContain('01 / 03')
+    expect(text).not.toContain('Savings, automated.')
     expect(text).toContain('Open your account')
     expect(text).toContain('This only signs you in. No money moves.')
     expect(text).toContain('Sign in with passkey')
     expect(text).toContain('Create a new account')
-    expect(text).toContain('Passkeys sync through your Apple, Google or password manager account.')
-    expect(text).toContain('The recovery kit cannot sign you in: it holds no key.')
+    // otto/mamoru#192: one line and the link, no explanatory paragraph.
+    expect(text).toContain('No passkey on this device? How the recovery kit works')
+    expect(text).not.toContain('Passkeys sync through')
     expect(html).toContain(`href="${WALKAWAY_URL}"`)
   })
   test('a session with an account goes straight to Home, whatever the link says', async () => {
@@ -400,9 +403,6 @@ describe('helpers', () => {
     expect(m.length).toBe(29)
     expect(m[0]!.slice(0, 7).every(Boolean)).toBe(true)
     expect(m[1]![1]).toBe(false)
-  })
-  test('the mix is the Conservador policy', () => {
-    expect(MIX.reduce((a, s) => a + s.pct, 0)).toBe(100)
   })
 })
 

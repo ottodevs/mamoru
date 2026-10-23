@@ -1,8 +1,7 @@
 import type { OwnerResponse } from '@mamoru/domain'
-import { conservadorV1 } from '@mamoru/policy'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { type CSSProperties, type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
 import { useApi } from '../api/client.ts'
 import { queryKeys, useConfig, useRegistrationChallenge } from '../api/queries.ts'
 import { downloadJson, kitFilename } from '../lib/download.ts'
@@ -12,71 +11,15 @@ import { createOwnerPasskey } from '../lib/passkey.ts'
 import { rememberCredential } from '../lib/passkey-sign.ts'
 import { challengeUsable, signInCopy } from '../lib/signin.ts'
 
-// The Conservador mix as the policy defines it (basis points), drawn like the mockup's mix bar.
-const BUCKET: Record<string, { name: string; note: string; tone: string }> = {
-  risk: { name: 'Higher yield', note: 'Off for now', tone: 'mercenary' },
-  'btc-usdc': { name: 'BTC + stablecoins', note: 'USDC/cbBTC on Uniswap', tone: 'paired' },
-  stables: { name: 'Stablecoins', note: 'Kept in USDC', tone: 'stables' },
-}
-export const MIX = [...conservadorV1.buckets]
-  .reverse()
-  .map((b) => ({ id: b.id, pct: b.preference / 100, ...(BUCKET[b.id] ?? { name: b.id, note: '', tone: 'stables' }) }))
-
 export const onboardingCopy = {
-  screens: [
-    { title: 'Fund Mamoru', body: ['Send the USDC you want to invest.'] },
-    { title: "What's next?", body: ['Yield is reinvested. You can transfer part or all of it whenever you want.'] },
+  brand: 'Mamoru',
+  title: 'Savings, automated.',
+  points: [
+    { title: 'Add USDC on Base.', body: '' },
+    { title: 'All your USDC has a job.', body: 'Mamoru opens positions for you. Profits become USDC.' },
+    { title: 'You keep control. No lockups.', body: 'Withdraw anytime. Only you can take it out.' },
   ],
-  create: { title: 'You keep control', body: ['No forced lockups or third-party dependencies.', 'Free to exit anytime.'] },
   approve: { title: 'Approve once', body: 'Approve once. Mamoru starts when your money lands.' },
-}
-
-// The bar fills bottom-up like a single pour: each band starts when the one below it is full, at one speed.
-const POUR_MS = 1000
-const POUR_START_MS = 220
-const EASE = { first: 'cubic-bezier(0.5, 0, 0.75, 0.75)', mid: 'linear', last: 'cubic-bezier(0.25, 0.25, 0.3, 1)' }
-function pour() {
-  const up = [...MIX].reverse()
-  let at = POUR_START_MS
-  return new Map(
-    up.map((s, i) => {
-      const ms = Math.max(180, (POUR_MS * s.pct) / 100)
-      const ease = i === 0 ? EASE.first : i === up.length - 1 ? EASE.last : EASE.mid
-      const t = { delay: at, ms, ease }
-      at += ms
-      return [s.id, t]
-    }),
-  )
-}
-const fill = (t: { delay: number; ms: number; ease: string }) =>
-  ({ animationDelay: `${t.delay}ms`, animationDuration: `${t.ms}ms`, animationTimingFunction: t.ease }) as const
-
-function Mix() {
-  const t = pour()
-  return (
-    <figure className="mix" aria-label="Conservador mix">
-      <div className="mix-bar" aria-hidden="true">
-        {MIX.map((s) => (
-          <div key={s.id} className={`mix-seg ${s.tone}`} style={{ flex: s.pct, ...fill(t.get(s.id)!) }}>
-            <span className="mix-pct" style={{ ...fill(t.get(s.id)!), '--to': s.pct } as CSSProperties} />
-          </div>
-        ))}
-      </div>
-      <ul className="m-0 grid list-none justify-items-start gap-[0.95rem] p-0">
-        {MIX.map((s) => (
-          <li key={s.id} className={`mix-row ${s.tone} grid grid-cols-[0.7rem_1fr] items-start gap-[0.65rem]`} style={{ animationDelay: `${t.get(s.id)!.delay}ms` }}>
-            <span className={`mix-dot ${s.tone}`} style={fill(t.get(s.id)!)} />
-            <span>
-              <span className="block text-base leading-tight">
-                {s.name} {s.pct}%
-              </span>
-              <span className="mt-[0.2rem] block text-[0.85rem] leading-snug text-stone">{s.note}</span>
-            </span>
-          </li>
-        ))}
-      </ul>
-    </figure>
-  )
 }
 
 // A text link on the card: the card is darker than the page, so stone on wash would not read.
@@ -95,10 +38,11 @@ export function CardFrame({ label, testId, children }: { label: string; testId: 
   )
 }
 
-function Identity({ owner, onCreate, creating, createError, onSignIn }: { owner: OwnerResponse | null; onCreate: () => void; creating: boolean; createError: string | null; onSignIn: () => void }) {
+/** After the passkey is made: the one approval that lets Mamoru put the money to work. */
+function Approve({ owner }: { owner: OwnerResponse }) {
   const api = useApi()
   const navigate = useNavigate()
-  const act = useOwnerAction(owner?.accountKey, 'activate')
+  const act = useOwnerAction(owner.accountKey, 'activate')
   const [kitSaved, setKitSaved] = useState(false)
   const kit = useMutation({
     mutationFn: async (o: OwnerResponse) => {
@@ -113,28 +57,6 @@ function Identity({ owner, onCreate, creating, createError, onSignIn }: { owner:
   useEffect(() => {
     if (owner && !prepared && busy === null && !act.error && !act.result) void prepare()
   }, [owner, prepared, busy, act.error, act.result, prepare])
-
-  if (!owner) {
-    return (
-      <>
-        <h1 className="ob-title">{onboardingCopy.create.title}</h1>
-        {onboardingCopy.create.body.map((p) => (
-          <p key={p} className="ob-body">
-            {p}
-          </p>
-        ))}
-        {createError ? <p className="err mt-3">{createError}</p> : null}
-        <div className="mt-[1.6rem] flex flex-wrap items-center justify-between gap-3">
-          <button type="button" className={CARD_LINK} onClick={onSignIn} disabled={creating}>
-            {signInCopy.link}
-          </button>
-          <button type="button" className="ob-btn solid ml-auto" onClick={onCreate} disabled={creating}>
-            {creating ? 'Creating account' : 'Create account'}
-          </button>
-        </div>
-      </>
-    )
-  }
 
   const approve = async () => {
     const op = prepared ? await act.approve() : null
@@ -159,13 +81,13 @@ function Identity({ owner, onCreate, creating, createError, onSignIn }: { owner:
   )
 }
 
+/** The first screen: what Mamoru does in three points, then the passkey that creates the account. */
 export function Onboarding({ onSignIn }: { onSignIn: () => void }) {
   const api = useApi()
   const qc = useQueryClient()
-  const [step, setStep] = useState(0)
   const owner = useMutation({
     mutationFn: async () => {
-      // Fetched ahead while the create step is on screen; a stale one is replaced first. One challenge is one attempt.
+      // Fetched ahead while the screen is up; a stale one is replaced first. One challenge is one attempt.
       const challenge = challengeUsable(ready.data) ? ready.data : await api.registrationChallenge()
       try {
         const made = await createOwnerPasskey(challenge)
@@ -179,50 +101,42 @@ export function Onboarding({ onSignIn }: { onSignIn: () => void }) {
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.session }),
   })
-  const last = onboardingCopy.screens.length
-  const screen = onboardingCopy.screens[step]
-  const ready = useRegistrationChallenge(step === last && !owner.data)
-  // The cap is said before any money moves: on the funding card, when the API runs live.
+  const ready = useRegistrationChallenge(!owner.data)
+  // The cap is said before any money moves, when the API runs live.
   const capUsdc = useConfig().data?.capUsdc
-  const body = screen ? [...screen.body, ...(step === 0 && capUsdc ? [capNote(capUsdc)] : [])] : []
+  const points = onboardingCopy.points.map((p, i) => (i === 0 && capUsdc ? { ...p, body: capNote(capUsdc) } : p))
+  const creating = owner.isPending
 
   return (
-    <CardFrame label="Welcome to Mamoru" testId={`onboarding-${step + 1}`}>
-          <div key={step} className="enter">
-            <p className="ob-step">{String(step + 1).padStart(2, '0')} / 03</p>
-            {screen ? (
-              <>
-                <h1 className="ob-title">{screen.title}</h1>
-                {body.map((p) => (
-                  <p key={p} className="ob-body">
-                    {p}
-                  </p>
-                ))}
-                {step === 1 ? <Mix /> : null}
-                <div className="mt-[1.6rem] flex flex-wrap items-center justify-between gap-3">
-                  <button type="button" className={CARD_LINK} onClick={onSignIn}>
-                    {signInCopy.link}
-                  </button>
-                  <span className="ml-auto flex flex-wrap gap-[0.65rem]">
-                    <button type="button" className="ob-btn ghost" onClick={() => setStep(last)}>
-                      Skip
-                    </button>
-                    <button type="button" className="ob-btn solid" onClick={() => setStep(step + 1)}>
-                      Next
-                    </button>
-                  </span>
-                </div>
-              </>
-            ) : (
-              <Identity
-                owner={owner.data ?? null}
-                onCreate={() => owner.mutate()}
-                creating={owner.isPending}
-                createError={owner.error ? errorText(owner.error) : null}
-                onSignIn={onSignIn}
-              />
-            )}
+    <CardFrame label="Welcome to Mamoru" testId={owner.data ? 'onboarding-approve' : 'onboarding'}>
+      {owner.data ? (
+        <Approve owner={owner.data} />
+      ) : (
+        <div className="enter">
+          <p className="ob-step uppercase">{onboardingCopy.brand}</p>
+          <h1 className="ob-title">{onboardingCopy.title}</h1>
+          <ol className="mt-[1.4rem] mb-0 grid list-none gap-[1.1rem] p-0">
+            {points.map((p, i) => (
+              <li key={p.title} className="grid grid-cols-[2.2rem_1fr]">
+                <span className="font-mono text-[0.8rem] leading-[1.9] text-emerald">{String(i + 1).padStart(2, '0')}</span>
+                <span>
+                  <b className="block text-[1.12rem] leading-snug font-semibold">{p.title}</b>
+                  {p.body ? <span className="mt-[0.2rem] block leading-normal text-[color-mix(in_srgb,var(--color-ink)_72%,transparent)]">{p.body}</span> : null}
+                </span>
+              </li>
+            ))}
+          </ol>
+          {owner.error ? <p className="err mt-3">{errorText(owner.error)}</p> : null}
+          <div className="mt-[1.6rem] flex flex-wrap items-center justify-between gap-3">
+            <button type="button" className={CARD_LINK} onClick={onSignIn} disabled={creating}>
+              {signInCopy.link}
+            </button>
+            <button type="button" className="ob-btn solid ml-auto" onClick={() => owner.mutate()} disabled={creating}>
+              {creating ? 'Creating account' : 'Create account'}
+            </button>
           </div>
+        </div>
+      )}
     </CardFrame>
   )
 }

@@ -20,8 +20,6 @@ export const signInCopy = {
   unsupported: 'This browser does not support passkeys. Open Mamoru in the browser that holds your passkey.',
   failed: 'Mamoru did not answer. Try again.',
   helpTitle: 'No passkey on this device?',
-  help: 'Passkeys sync through your Apple, Google or password manager account. Sign in to that account on this device, or choose another device in the passkey prompt and scan the code with the phone that has it.',
-  kit: 'The recovery kit cannot sign you in: it holds no key. With it, your passkey can still take everything out without Mamoru.',
   kitLink: 'How the recovery kit works',
 }
 

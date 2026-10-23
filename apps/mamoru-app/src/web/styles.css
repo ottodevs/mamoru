@@ -773,97 +773,6 @@
     outline: 2px solid var(--color-emerald);
     outline-offset: 3px;
   }
-  .ob-dots {
-    display: flex;
-    gap: 0.35rem;
-  }
-  .ob-dots span {
-    width: 1.4rem;
-    height: 2px;
-    background: color-mix(in srgb, var(--color-ink) 22%, transparent);
-    transition: background 200ms;
-  }
-  .ob-dots span[data-on="true"] {
-    background: var(--color-ink);
-  }
-  .mix {
-    --mix-ink: #0f0f0e;
-    --mix-navy: #0e1b2e;
-    --mix-emerald: #6fa78f;
-    --mix-stone: #a7a9ac;
-    display: grid;
-    grid-template-columns: 3.5rem 1fr;
-    gap: 1rem 1.25rem;
-    align-items: center;
-    margin: 1.25rem 0 0;
-  }
-  .mix-bar {
-    display: flex;
-    flex-direction: column;
-    height: 10.5rem;
-    overflow: hidden;
-    border: 1px solid color-mix(in srgb, var(--color-ink) 12%, transparent);
-  }
-  .mix-seg {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--color-paper);
-    font-size: 0.8rem;
-    letter-spacing: 0.04em;
-    box-shadow: inset 0 1px 0 color-mix(in srgb, white 22%, transparent);
-    transition: opacity 180ms ease;
-    animation-name: mix-fill;
-    animation-fill-mode: both;
-  }
-  /* The label counts up while its band fills; the legend carries the readable text. */
-  .mix-pct {
-    counter-reset: mix-n var(--n);
-    animation-name: mix-count;
-    animation-fill-mode: both;
-    --n: var(--to);
-  }
-  .mix-pct::after {
-    content: counter(mix-n) "%";
-    font-variant-numeric: tabular-nums;
-  }
-  .mix-row {
-    transition: opacity 180ms ease;
-    animation: mix-row 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
-  }
-  .mix-row .mix-dot {
-    animation-name: mix-fill;
-    animation-fill-mode: both;
-  }
-  /* Pointing at a legend row lights its band and quiets the others. */
-  @media (hover: hover) {
-    .mix:has(.mix-row.mercenary:hover) .mix-seg:not(.mercenary),
-    .mix:has(.mix-row.paired:hover) .mix-seg:not(.paired),
-    .mix:has(.mix-row.stables:hover) .mix-seg:not(.stables),
-    .mix:has(.mix-row:hover) .mix-row:not(:hover) {
-      opacity: 0.35;
-    }
-  }
-  .mix-seg.mercenary,
-  .mix-dot.mercenary {
-    background: var(--mix-emerald);
-    color: var(--mix-ink);
-  }
-  .mix-seg.paired,
-  .mix-dot.paired {
-    background: var(--mix-navy);
-  }
-  .mix-seg.stables,
-  .mix-dot.stables {
-    background: var(--mix-stone);
-    color: var(--mix-ink);
-  }
-  .mix-dot {
-    width: 0.7rem;
-    height: 0.7rem;
-    margin-top: 0.28rem;
-    display: block;
-  }
   .qr {
     background: var(--color-paper);
     border: 1px solid var(--color-wash);
@@ -928,41 +837,6 @@
     transform: scale(1);
   }
 }
-@property --n {
-  syntax: "<integer>";
-  inherits: false;
-  initial-value: 0;
-}
-@keyframes mix-fill {
-  from {
-    clip-path: inset(100% 0 0 0);
-  }
-  to {
-    clip-path: inset(0 0 0 0);
-  }
-}
-@keyframes mix-count {
-  from {
-    --n: 0;
-  }
-}
-@keyframes mix-row {
-  from {
-    opacity: 0;
-    transform: translateX(-6px);
-  }
-}
-
-@media (min-width: 761px) {
-  .mix {
-    grid-template-columns: 4.5rem 1fr;
-    gap: 1.25rem 1.5rem;
-  }
-  .mix-bar {
-    height: 12.5rem;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -970,16 +844,6 @@
     animation-duration: 1ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
-  }
-}
-
-/* Reduced motion: the mix is drawn full at once, with no staggered delays. */
-@media (prefers-reduced-motion: reduce) {
-  .mix-seg,
-  .mix-pct,
-  .mix-row,
-  .mix-row .mix-dot {
-    animation: none !important;
   }
 }
 
