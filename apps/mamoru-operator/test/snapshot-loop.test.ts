@@ -3,6 +3,11 @@ import { SnapshotLoop, snapshotIntervalMs, type Snapshot } from '../src/snapshot
 
 const snap = (block: bigint): Snapshot => ({ chainId: 8453, block, readAt: new Date(0).toISOString(), pools: {}, safes: [], calls: 1 })
 const settle = () => new Promise((r) => setTimeout(r, 5))
+// otto/mamoru#197: poll for the event instead of sleeping a fixed 5 ms; a saturated host can run fewer ticks in that window.
+const until = async (cond: () => boolean, ms = 5_000) => {
+  const end = Date.now() + ms
+  while (!cond() && Date.now() < end) await new Promise((r) => setTimeout(r, 1))
+}
 
 describe('SnapshotLoop (otto/mamoru#136)', () => {
   test('keeps the previous snapshot when a read fails, and says why', async () => {
@@ -13,7 +18,7 @@ describe('SnapshotLoop (otto/mamoru#136)', () => {
       return snap(BigInt(n))
     }, 1)
     loop.start()
-    await settle()
+    await until(() => n >= 3)
     loop.stop()
     expect(loop.current).not.toBeNull()
     expect(n).toBeGreaterThanOrEqual(3)
@@ -27,7 +32,7 @@ describe('SnapshotLoop (otto/mamoru#136)', () => {
       return snap(7n)
     }, 1)
     loop.start()
-    await settle()
+    await until(() => n >= 2 && loop.lastError === 'boom')
     loop.stop()
     expect(loop.current?.block).toBe(7n)
     expect(loop.lastError).toBe('boom')

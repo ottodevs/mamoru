@@ -31,6 +31,12 @@ const ctx: AccountContext = {
 }
 const SAFE = ctx.address
 
+// otto/mamoru#197: the first send attempt runs in the background after submit; wait for it, not a fixed 5 ms a saturated host overruns.
+const armedTries = async (acc: AccountState, n: number, ms = 10_000) => {
+  const end = Date.now() + ms
+  while ((acc.armed?.tries ?? 0) < n && Date.now() < end) await Bun.sleep(1)
+}
+
 /** A chain with one counterfactual Safe holding `usdc`: no code until the relayer sends the factory call. */
 function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live-v2') {
   const sent: { to: string; data?: Hex; value?: bigint }[] = []
@@ -1183,8 +1189,8 @@ describe('an activation waits for the relayer instead of failing', () => {
     }
     const tx = await w.op.prepareActivate(ctx)
     const op = await w.op.submit(ctx, 'activate', sign(tx))
-    await Bun.sleep(5)
     const acc = w.state.accounts.k!
+    await armedTries(acc, 1)
     expect(acc.armed).toMatchObject({ opId: op.opId, tries: 1 })
     expect(acc.ops.find((o) => o.opId === op.opId)).toMatchObject({ state: 'proposed', code: 'ARMED' })
     expect(acc.ownerFailures ?? []).toHaveLength(0)
@@ -1371,8 +1377,8 @@ describe('an activation waits for the relayer instead of failing', () => {
     }
     const tx = await w.op.prepareActivate(ctx)
     const op = await w.op.submit(ctx, 'activate', sign(tx))
-    await Bun.sleep(5)
     const acc = w.state.accounts.k!
+    await armedTries(acc, 1)
     expect(acc.armed).toMatchObject({ opId: op.opId, tries: 1 })
     expect(acc.armed!.execSent).toBeUndefined()
     w.chain.nonce = 1n
@@ -1391,8 +1397,8 @@ describe('an activation waits for the relayer instead of failing', () => {
     }
     const tx = await w.op.prepareActivate(ctx)
     const op = await w.op.submit(ctx, 'activate', sign(tx))
-    await Bun.sleep(5)
     const acc = w.state.accounts.k!
+    await armedTries(acc, 1)
     for (let i = 0; i < 25; i++) {
       acc.armed!.retryAt = Date.now() - 1
       await priv(w.op).fireArmed(acc, 20_000_000n)
@@ -1553,7 +1559,7 @@ describe('an activation waits for the relayer instead of failing', () => {
     }
     const tx = await w.op.prepareActivate(ctx)
     const op = await w.op.submit(ctx, 'activate', sign(tx))
-    await Bun.sleep(5)
+    await armedTries(w.state.accounts.k!, 1)
     expect(w.state.accounts.k!.armed).toMatchObject({ opId: op.opId, tries: 1 })
   })
 
@@ -2844,7 +2850,8 @@ describe('renewing the approval of a running account', () => {
         check('after Start and settle')
       }
     }
-  }, 240_000)
+  // otto/mamoru#197: 288 cases, ~30 s of CPU when idle; give a saturated host room.
+  }, 600_000)
 
   test('otto/mamoru#140: an unread renewal is forgotten only when every one of its grants reads disabled', async () => {
     const { w, acc } = await running()
@@ -3125,6 +3132,8 @@ describe('renewing the approval of a running account', () => {
     for (const id of stored.revokes ?? []) w.knobs.enabled.delete(id.toLowerCase())
     for (const g of stored.ownerGrants ?? []) w.knobs.enabled.add(g.permissionId.toLowerCase())
     w.knobs.logs.push({ stx: stored.safeTxHash!, hash: `0x${'ab'.repeat(32)}`, block: 80n })
+    // otto/mamoru#197: no receipt exists; the real receiptOf sleeps 1.5 s x 3 on the fake's throw, which took 4.6 of the 5 s timeout. The log is the proof here.
+    ;(w.op as unknown as { receiptOf(h: Hex): Promise<unknown> }).receiptOf = async () => null
     await w.op.reconcileOwner(acc)
     expect(stored).toMatchObject({ state: 'confirmed', code: 'EXEC_OK', txHash: `0x${'ab'.repeat(32)}` })
     expect(acc.grants.map((g) => g.permissionId)).toEqual(expect.arrayContaining((stored.ownerGrants ?? []).map((g) => g.permissionId)))

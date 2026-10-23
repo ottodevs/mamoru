@@ -373,7 +373,8 @@ describe('SharedGuardReads: one read per pool per TTL for the whole process (#17
     }
     expect(r['pool:USDC/cbBTC/500']!.feeGrowth24h?.seconds).toBeGreaterThanOrEqual(12 * 3_600)
     expect(told).toBe(shared.counts.batches)
-  })
+    // otto/mamoru#197: ~2 s of pure CPU (2,340 reads); the 5 s default left no headroom on a saturated host.
+  }, 60_000)
 
   test('calls per hour, 100 lazy accounts on the 3 live pools: per engine review (before) and shared (after)', async () => {
     const three = [...targets, { name: 'pool:WETH/USDC/3000', address: BTC_POOL }]
