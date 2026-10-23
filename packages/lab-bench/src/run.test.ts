@@ -1,10 +1,41 @@
 import { describe, expect, test } from 'bun:test'
 import { ReasonError } from '@mamoru/domain'
-import { basesForWindow, runBench } from './run.ts'
+import { basesForWindow, downsampleIndices, MAX_SERIES_POINTS, runBench } from './run.ts'
 import type { BenchSpec } from './spec.ts'
 
 /** Slow: a real backtest over a real dataset file. */
 const SLOW = 30_000
+
+function assertWellFormed(idx: number[], n: number, max: number): void {
+  expect(idx.length).toBeLessThanOrEqual(max)
+  expect(idx.length).toBeGreaterThan(0)
+  expect(idx[0]).toBe(0)
+  expect(idx.at(-1)).toBe(n - 1)
+  for (let i = 1; i < idx.length; i++) expect(idx[i]!).toBeGreaterThan(idx[i - 1]!) // strictly increasing
+}
+
+describe('downsampleIndices (review of #117 P3: must never exceed max, including the forced last point)', () => {
+  test('n <= max: every index, unchanged', () => {
+    expect(downsampleIndices(5, MAX_SERIES_POINTS)).toEqual([0, 1, 2, 3, 4])
+    expect(downsampleIndices(MAX_SERIES_POINTS, MAX_SERIES_POINTS)).toHaveLength(MAX_SERIES_POINTS)
+  })
+
+  test('exactly at the boundary, one past it, and the off-by-one bug\'s own numbers (800, 801)', () => {
+    for (const n of [MAX_SERIES_POINTS - 1, MAX_SERIES_POINTS, MAX_SERIES_POINTS + 1, MAX_SERIES_POINTS + 2, 799, 800, 801, 802, 8641])
+      assertWellFormed(downsampleIndices(n, MAX_SERIES_POINTS), n, MAX_SERIES_POINTS)
+  })
+
+  test('the regression this was caught by: n=800 used to come back as 401, not <= 400', () => {
+    const idx = downsampleIndices(800, MAX_SERIES_POINTS)
+    expect(idx.length).toBeLessThanOrEqual(MAX_SERIES_POINTS)
+    expect(idx.at(-1)).toBe(799)
+  })
+
+  test('zero samples is empty; one sample is just index 0', () => {
+    expect(downsampleIndices(0, MAX_SERIES_POINTS)).toEqual([])
+    expect(downsampleIndices(1, MAX_SERIES_POINTS)).toEqual([0])
+  })
+})
 
 describe('basesForWindow (B-03)', () => {
   test('aug2024 (no cbBTC on Base yet) has no base that can run', () => {
@@ -78,7 +109,7 @@ describe('runBench', () => {
     expect(r.reasons).toEqual(expect.any(Object))
 
     expect(r.series.length).toBeGreaterThan(0)
-    expect(r.series.length).toBeLessThanOrEqual(400)
+    expect(r.series.length).toBeLessThanOrEqual(MAX_SERIES_POINTS)
     const first = r.series[0]!
     expect(first).toEqual({ t: expect.any(Number), v: expect.any(Number), h: expect.any(Number), price: expect.any(Object), band: expect.any(Object) })
     for (const p of r.pools) {

@@ -18,4 +18,4 @@ export {
   type BenchSpec,
   type ManifestWindow,
 } from './spec.ts'
-export { basesForWindow, MAX_SERIES_POINTS, runBench, type RunResult } from './run.ts'
+export { basesForWindow, downsampleIndices, MAX_SERIES_POINTS, runBench, type RunResult } from './run.ts'

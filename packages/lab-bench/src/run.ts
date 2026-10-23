@@ -62,6 +62,22 @@ function loadDataset(datasetsDir: string, file: string): Dataset {
 }
 
 /**
+ * At most `max` strictly increasing indices into `0..n-1`, evenly spaced, always starting at `0` and ending at
+ * `n - 1` (review of #117 P3: the previous step-based scheme could return `max + 1` — e.g. 401 for `n = 800`, since
+ * appending the forced last point was never accounted for in the loop bound). This is correct by construction
+ * instead: the loop itself runs at most `max` times, so the output can never exceed `max` regardless of `n`;
+ * `Math.round` can only ever collide adjacent picks into fewer, never more, and any collision is deduped.
+ */
+export function downsampleIndices(n: number, max: number): number[] {
+  if (n <= 0) return []
+  if (max <= 1) return [0]
+  if (n <= max) return Array.from({ length: n }, (_, i) => i)
+  const idx = new Set<number>()
+  for (let k = 0; k < max; k++) idx.add(Math.round((k * (n - 1)) / (max - 1)))
+  return [...idx]
+}
+
+/**
  * Which bases have real data to run on this window (B-03): a base whose policy needs a pool the window's dataset
  * never read (e.g. `aug2024`, before cbBTC was on Base) is left out. Pure data-availability, not a holdout check:
  * callers that must stay off TEST windows apply `validateSpec`/the manifest split themselves.
@@ -109,12 +125,7 @@ export function runBench(spec: BenchSpec, datasetsDir: string = defaultDatasetsD
     },
   })
 
-  // Downsample to <= MAX_SERIES_POINTS, keeping the last point exactly.
-  const n = snaps.length
-  const step = Math.max(1, Math.ceil(n / MAX_SERIES_POINTS))
-  const idx: number[] = []
-  for (let k = 0; k * step < n; k++) idx.push(Math.min(k * step, n - 1))
-  if (idx.at(-1) !== n - 1) idx.push(n - 1)
+  const idx = downsampleIndices(snaps.length, MAX_SERIES_POINTS)
 
   const usd = (v: bigint): number => Number(v) / unit
   const round4 = (v: number): number => +v.toFixed(4)
