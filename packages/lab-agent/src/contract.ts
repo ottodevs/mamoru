@@ -66,6 +66,17 @@ export function isMetricKey(x: unknown): x is MetricKey {
   return (METRIC_BASE_KEYS as readonly string[]).includes(x) || x.startsWith('operations.')
 }
 
+/**
+ * The closed set of operation kinds a backtest run can count (`@mamoru/backtest`'s `OpKind` — `DEFAULT_GAS`'s
+ * `unitsByKind` and `Proposal`'s variants are the authority; backtest doesn't export a runtime array of them).
+ * `operations.<kind>` only ever resolves for one of these — never for an arbitrary own-or-inherited property
+ * name of the `operations` record (review finding: "operations.toString" / "operations.__proto__").
+ */
+const OP_KINDS = ['enter_swap', 'enter_mint', 'increase_liquidity', 'harvest', 'rerange', 'reduce'] as const
+function isOpKind(x: string): boolean {
+  return (OP_KINDS as readonly string[]).includes(x)
+}
+
 export type MetricUnit = 'USDC' | '%' | 'ops' | 'days'
 export type MetricLabel = { es: string; en: string }
 export type MetricInfo = { rawValue: number; unit: MetricUnit; decimals: number; label: MetricLabel }
@@ -102,6 +113,10 @@ function marketBtcMovePct(market: unknown): number | undefined {
  * never as zero.
  */
 export function resolveMetric(run: RunResult, metric: MetricKey): MetricInfo | undefined {
+  // Defensive: `metric` is typed `MetricKey` (always a string) but a candidate answer is untrusted JSON until
+  // the verifier's schema check narrows it — a caller that skips that (the AL-22 fallback, by design) can hand
+  // this a non-string. Guard here too so this function is safe to call with genuinely arbitrary input.
+  if (typeof metric !== 'string') return undefined
   const m = run.metrics
   switch (metric) {
     case 'end':
@@ -131,13 +146,14 @@ export function resolveMetric(run: RunResult, metric: MetricKey): MetricInfo | u
     default: {
       if (!metric.startsWith('operations.')) return undefined
       const kind = metric.slice('operations.'.length)
-      if (!(kind in m.operations)) return undefined
-      return {
-        rawValue: m.operations[kind]!,
-        unit: 'ops',
-        decimals: 0,
-        label: { es: `Operaciones: ${kind}`, en: `Operations: ${kind}` },
-      }
+      // Closed list, never a bare `kind in m.operations`: `in` walks the prototype chain, so a kind string
+      // like "toString" or "__proto__" would otherwise resolve to an inherited function/object (not a count),
+      // and `.toFixed` on that in `displayValue` would throw. `Object.hasOwn` + `typeof` is belt-and-suspenders
+      // on top of the closed `OP_KINDS` check, not a substitute for it.
+      if (!isOpKind(kind) || !Object.hasOwn(m.operations, kind)) return undefined
+      const count = m.operations[kind]
+      if (typeof count !== 'number' || !Number.isFinite(count)) return undefined
+      return { rawValue: count, unit: 'ops', decimals: 0, label: { es: `Operaciones: ${kind}`, en: `Operations: ${kind}` } }
     }
   }
 }

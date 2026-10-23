@@ -29,6 +29,22 @@ describe('buildCatalogPrompt (AL-14)', () => {
     expect(catalog.systemPrompt).toContain('100..10000')
   })
 
+  test('each window lists which bases and pools can actually run there (B-03 basesForWindow)', () => {
+    const catalog = buildCatalogPrompt(FIXTURE_DIR)
+    const fullLine = catalog.systemPrompt.split('\n').find((l) => l.includes('"fix-full"'))!
+    expect(fullLine).toContain('bases: live, guard')
+    expect(fullLine).toContain('pool:USDC/USDT/100')
+    expect(fullLine).toContain('pool:USDC/cbBTC/500')
+    expect(fullLine).toContain('pool:WETH/USDC/3000')
+  })
+
+  test('a window with no runnable base reads "no runs available" instead of a bare bases list (fix-nobtc)', () => {
+    const catalog = buildCatalogPrompt(FIXTURE_DIR)
+    const nobtcLine = catalog.systemPrompt.split('\n').find((l) => l.includes('"fix-nobtc"'))!
+    expect(nobtcLine).toContain('no runs available')
+    expect(nobtcLine).not.toContain('bases: live')
+  })
+
   test('rules cover the answer contract, no-retry-after-tool-error, and the Monad/future caveat (AL-24, AL-70)', () => {
     const catalog = buildCatalogPrompt(FIXTURE_DIR)
     expect(catalog.systemPrompt).toContain('submit_answer')

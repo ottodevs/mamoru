@@ -121,6 +121,22 @@ describe('buildAllowedTokenRegex / findUntraceableDigits / findDirectionalTerm',
     expect(findDirectionalTerm('Mamoru OUTPERFORMS hold')).toBe('OUTPERFORMS')
     expect(findDirectionalTerm('el resultado total fue positivo')).toBeNull()
   })
+
+  test('review finding (P2-6): accented conjugations are detected — plain ASCII \\b silently missed these', () => {
+    // `\bganó\b` never matched at all: ASCII `\w` doesn't include `ó`, so there is no word/non-word transition
+    // right after it, and `\b` only fires at a transition. Unicode-aware boundaries fix this for every
+    // accented-ending term in the closed list.
+    expect(findDirectionalTerm('Mamoru ganó la comparación')).toBe('ganó')
+    expect(findDirectionalTerm('Mamoru superó al hold')).toBe('superó')
+    expect(findDirectionalTerm('la política perdió frente al mercado')).toBe('perdió')
+    expect(findDirectionalTerm('la guarda protegió el capital')).toBe('protegió')
+    expect(findDirectionalTerm('Mamoru ganó.')).toBe('ganó') // end of sentence, no trailing space either
+    expect(findDirectionalTerm('Mamoru ganó')).toBe('ganó') // end of string
+  })
+
+  test('the Unicode-aware boundary still rejects a false positive inside a longer accented word', () => {
+    expect(findDirectionalTerm('el superávit fue alto')).toBeNull() // "á" right after "supera" is itself a letter
+  })
 })
 
 describe('fallbackAnswer (AL-22)', () => {
@@ -151,5 +167,48 @@ describe('fallbackAnswer (AL-22)', () => {
     const candidate: Answer = { blocks: [{ type: 'caveat', md: 'El Lab no tiene datos de Monad todavía.' }] }
     const { answer } = fallbackAnswer(candidate, ctxOf())
     expect(answer.blocks).toEqual(candidate.blocks)
+  })
+
+  test('review finding (P1-3): fuzz garbage block elements — never throws, drops every malformed one', () => {
+    const run = makeRun()
+    const validWithExtra: unknown = { type: 'claim', metric: 'end', runId: run.resultHash, value: 983.56, extra: { a: { b: { c: [null, {}] } } } } // nested garbage alongside an otherwise-valid block is fine
+    const garbageBlocks: unknown[] = [
+      null,
+      undefined,
+      42,
+      'a string',
+      true,
+      [1, 2, 3],
+      {},
+      { type: 'nope' },
+      { type: 'claim' }, // missing metric/runId/value entirely
+      { type: 'claim', metric: 123, runId: null, value: 'not-a-number' },
+      { type: 'claim', metric: 'end', runId: run.resultHash, value: { nested: 'garbage' } },
+      { type: 'verdict', runId: 1, against: null },
+      { type: 'chart', kind: 'equity', runIds: 'not-an-array' },
+      { type: 'chart', kind: 'equity', runIds: [null, 123, {}] },
+      { type: 'text', md: 42 },
+      { type: 'text', md: null },
+      { type: 'caveat' }, // missing md
+      validWithExtra,
+    ]
+
+    // `candidate.blocks` is typed `Block[]`, but at runtime (this is literally the untrusted-JSON salvage path)
+    // it can be anything — cast through `unknown` the way a real `JSON.parse`'d candidate would arrive.
+    const candidate = { blocks: garbageBlocks } as unknown as Answer
+    let result: ReturnType<typeof fallbackAnswer> | undefined
+    expect(() => {
+      result = fallbackAnswer(candidate, ctxOf(run))
+    }).not.toThrow()
+    expect(result!.flagged).toBe(true)
+    // the one well-formed, verifying claim survives; everything else (garbage or malformed) is dropped.
+    expect(result!.answer.blocks).toEqual([validWithExtra] as unknown as Answer['blocks'])
+  })
+
+  test('review finding (P1-3): blocks itself not an array, or the whole candidate garbage, never throws', () => {
+    expect(() => fallbackAnswer({ blocks: 'not-an-array' } as unknown as Answer, ctxOf())).not.toThrow()
+    expect(fallbackAnswer({ blocks: 'not-an-array' } as unknown as Answer, ctxOf()).answer.blocks).toEqual([])
+    expect(() => fallbackAnswer({ blocks: null } as unknown as Answer, ctxOf())).not.toThrow()
+    expect(() => fallbackAnswer({ blocks: [null, null, null] } as unknown as Answer, ctxOf())).not.toThrow()
   })
 })

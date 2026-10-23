@@ -46,6 +46,50 @@ export type VerifyContext = {
 // Schema (structural shape only; AL-20's TS type is what this checks against at runtime)
 // ---------------------------------------------------------------------------
 
+/**
+ * Every field-shape check for one block, shared by `validateAnswerSchema` (the whole-answer schema gate) and
+ * `fallbackAnswer` (AL-22's per-block salvage, which must never assume a block it is about to inspect — e.g.
+ * read `.type` off, or hand to `claimErrors`/`chartErrors`/`proseErrors` — is actually well-formed: the very
+ * candidate it is salvaging from is often the one that just failed this exact check). A block that passes this
+ * with zero errors is safe to treat as its `Block` union member: every field `claimErrors`/`verdictErrors`/
+ * `chartErrors`/`proseErrors` read is guaranteed the right primitive type, so none of them can throw.
+ */
+function blockShapeErrors(b: unknown, blockIndex: number | null): VerifyError[] {
+  const errors: VerifyError[] = []
+  const push = (detail: string): void => {
+    errors.push({ kind: 'schema', blockIndex, detail })
+  }
+  if (typeof b !== 'object' || b === null || Array.isArray(b)) {
+    push('block is not an object')
+    return errors
+  }
+  const blk = b as Record<string, unknown>
+  switch (blk.type) {
+    case 'text':
+    case 'caveat':
+      if (typeof blk.md !== 'string' || blk.md.trim() === '') push(`${blk.type} block missing non-empty "md"`)
+      break
+    case 'claim':
+      if (!isMetricKey(blk.metric)) push(`claim block "metric" is invalid: ${JSON.stringify(blk.metric)}`)
+      if (typeof blk.runId !== 'string' || blk.runId.trim() === '') push('claim block missing "runId"')
+      if (typeof blk.value !== 'number' || !Number.isFinite(blk.value)) push('claim block "value" is not a finite number')
+      break
+    case 'verdict':
+      if (typeof blk.runId !== 'string' || blk.runId.trim() === '') push('verdict block missing "runId"')
+      if (typeof blk.against !== 'string' || blk.against.trim() === '') push('verdict block missing "against"')
+      break
+    case 'chart':
+      if (!isChartKind(blk.kind)) push(`chart block "kind" is invalid: ${JSON.stringify(blk.kind)}`)
+      if (!Array.isArray(blk.runIds) || blk.runIds.length === 0 || !blk.runIds.every((r) => typeof r === 'string'))
+        push('chart block "runIds" must be a non-empty string array')
+      if (blk.pool !== undefined && typeof blk.pool !== 'string') push('chart block "pool" must be a string if present')
+      break
+    default:
+      push(`unknown block "type": ${JSON.stringify(blk.type)}`)
+  }
+  return errors
+}
+
 export function validateAnswerSchema(answerRaw: unknown): VerifyError[] {
   const errors: VerifyError[] = []
   const push = (blockIndex: number | null, detail: string): void => {
@@ -63,36 +107,7 @@ export function validateAnswerSchema(answerRaw: unknown): VerifyError[] {
   }
   if (a.blocks.length === 0) push(null, '"blocks" is empty')
 
-  a.blocks.forEach((b: unknown, i: number) => {
-    if (typeof b !== 'object' || b === null) {
-      push(i, 'block is not an object')
-      return
-    }
-    const blk = b as Record<string, unknown>
-    switch (blk.type) {
-      case 'text':
-      case 'caveat':
-        if (typeof blk.md !== 'string' || blk.md.trim() === '') push(i, `${blk.type} block missing non-empty "md"`)
-        break
-      case 'claim':
-        if (!isMetricKey(blk.metric)) push(i, `claim block "metric" is invalid: ${JSON.stringify(blk.metric)}`)
-        if (typeof blk.runId !== 'string' || blk.runId.trim() === '') push(i, 'claim block missing "runId"')
-        if (typeof blk.value !== 'number' || !Number.isFinite(blk.value)) push(i, 'claim block "value" is not a finite number')
-        break
-      case 'verdict':
-        if (typeof blk.runId !== 'string' || blk.runId.trim() === '') push(i, 'verdict block missing "runId"')
-        if (typeof blk.against !== 'string' || blk.against.trim() === '') push(i, 'verdict block missing "against"')
-        break
-      case 'chart':
-        if (!isChartKind(blk.kind)) push(i, `chart block "kind" is invalid: ${JSON.stringify(blk.kind)}`)
-        if (!Array.isArray(blk.runIds) || blk.runIds.length === 0 || !blk.runIds.every((r) => typeof r === 'string'))
-          push(i, 'chart block "runIds" must be a non-empty string array')
-        if (blk.pool !== undefined && typeof blk.pool !== 'string') push(i, 'chart block "pool" must be a string if present')
-        break
-      default:
-        push(i, `unknown block "type": ${JSON.stringify(blk.type)}`)
-    }
-  })
+  a.blocks.forEach((b: unknown, i: number) => errors.push(...blockShapeErrors(b, i)))
   return errors
 }
 
@@ -140,18 +155,37 @@ const DIRECTIONAL_TERMS = [
   'peor',
   'gana',
   'ganamos',
+  'ganaron',
   'ganó',
+  'gané',
   'gane',
   'pierde',
   'perdió',
+  'perdieron',
   'perdemos',
   'supera',
   'superó',
+  'superaron',
+  'superamos',
   'protege',
   'protegió',
+  'protegieron',
+  'protegimos',
 ] as const
 
-const DIRECTIONAL_TERM_REGEX = new RegExp(`\\b(${DIRECTIONAL_TERMS.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'iu')
+/**
+ * Plain `\b` is ASCII-only: `\w` = `[A-Za-z0-9_]`, so it does not treat an accented letter as a "word"
+ * character. That makes `\bganó\b` fail to match "ganó" at all when it is followed by a space or the end of a
+ * sentence — the `ó` isn't \w, so there is no word/non-word *transition* right after it, and `\b` only matches
+ * at a transition (review finding: Spanish conjugations like "ganó"/"superó"/"perdió"/"protegió" were silently
+ * never detected). `(?<![\p{L}\p{N}])`/`(?![\p{L}\p{N}])` are Unicode-letter/number-aware boundaries instead —
+ * they also correctly still reject matching "supera" as a false positive inside "superávit", since the `á`
+ * right after it IS `\p{L}`.
+ */
+const DIRECTIONAL_TERM_REGEX = new RegExp(
+  `(?<![\\p{L}\\p{N}])(${DIRECTIONAL_TERMS.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?![\\p{L}\\p{N}])`,
+  'iu',
+)
 
 export function findDirectionalTerm(md: string): string | null {
   return DIRECTIONAL_TERM_REGEX.exec(md)?.[0] ?? null
@@ -243,10 +277,21 @@ export function verify(answerRaw: unknown, ctx: VerifyContext): VerifyResult {
 export type FallbackResult = { answer: Answer; flagged: boolean }
 
 export function fallbackAnswer(candidate: Answer, ctx: VerifyContext): FallbackResult {
-  const allowedTokenRegex = buildAllowedTokenRegex(ctx.catalogIds)
-  const hadVerifiedKind = candidate.blocks.some(isVerifiedBlock)
+  if (!Array.isArray(candidate.blocks)) return { answer: { blocks: [] }, flagged: true } // defensive: see below
 
-  const keptResults = candidate.blocks.filter((b) => {
+  const allowedTokenRegex = buildAllowedTokenRegex(ctx.catalogIds)
+
+  // `candidate` is the very answer that may have just failed validateAnswerSchema (this IS the salvage path for
+  // that failure) — its blocks are untrusted JSON, not a trusted `Block[]`. A raw element can be `null`, a
+  // number, a string, or a `{type: 'claim', ...}` with garbage field types; none of that is safe to hand to
+  // `isVerifiedBlock`/`isProseBlock`/`claimErrors`/`chartErrors`/`proseErrors`, which all assume well-typed
+  // fields. Filter to only the blocks that pass the exact same per-block shape check `validateAnswerSchema`
+  // uses — every one of those is now guaranteed safe — and drop anything else outright (review finding:
+  // `{"blocks":[null]}` used to throw here).
+  const blocks = candidate.blocks.filter((b): b is Block => blockShapeErrors(b, null).length === 0)
+  const hadVerifiedKind = blocks.some(isVerifiedBlock)
+
+  const keptResults = blocks.filter((b) => {
     if (b.type === 'claim') return claimErrors(b, null, ctx).length === 0
     if (b.type === 'chart') return chartErrors(b, null, ctx).length === 0
     return false
@@ -254,7 +299,7 @@ export function fallbackAnswer(candidate: Answer, ctx: VerifyContext): FallbackR
   if (keptResults.length > 0) return { answer: { blocks: keptResults }, flagged: true }
 
   if (!hadVerifiedKind) {
-    const keptProse = candidate.blocks.filter((b) => isProseBlock(b) && proseErrors(b, null, allowedTokenRegex).length === 0)
+    const keptProse = blocks.filter((b) => isProseBlock(b) && proseErrors(b, null, allowedTokenRegex).length === 0)
     if (keptProse.length > 0) return { answer: { blocks: keptProse }, flagged: true }
   }
   return { answer: { blocks: [] }, flagged: true }

@@ -41,12 +41,18 @@ export {
   LabBenchRunner,
   RUN_BACKTEST_SCHEMA,
   runBacktestTool,
+  SWEEP_MAX_ROWS,
+  SWEEP_MAX_WIDTHS,
   SWEEP_SCHEMA,
   sweepTool,
   TOOL_REASON_CODES,
   type RunBacktestArgs,
   type RunPublicView,
   type RunStore,
+  type SweepArgs,
+  type SweepResult,
+  type SweepRow,
+  type SweepRowMetrics,
   type ToolError,
   type ToolOutcome,
 } from './tools.ts'
@@ -82,7 +88,18 @@ export {
   type VerifierOutcome as MeterVerifierOutcome,
 } from './cost-meter.ts'
 
-export { MAX_TOOL_ROUNDS, renderAnswerForHistory, runAgentJob, type JobContext, type JobInput, type JobResult, type PriorTurn, type VerifierOutcome } from './agent.ts'
+export {
+  LAB_TOOL_SEQUENCE,
+  LAB_TOOL_SKIPPED,
+  MAX_TOOL_ROUNDS,
+  renderAnswerForHistory,
+  runAgentJob,
+  type JobContext,
+  type JobInput,
+  type JobResult,
+  type PriorTurn,
+  type VerifierOutcome,
+} from './agent.ts'
 
 export { RecordedModel, submitAnswerCall, toolCall, type RecordedTurn } from './recorded-model.ts'
 

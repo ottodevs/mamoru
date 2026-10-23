@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { newCostMeter } from './cost-meter.ts'
-import { compareTool, COMPARE_MAX_RUNS, KNOWN_OVERRIDE_KEYS, LabBenchRunner, LAB_TOOL_UNAVAILABLE, runBacktestTool, sweepTool, type RunStore } from './tools.ts'
+import { compareTool, COMPARE_MAX_RUNS, KNOWN_OVERRIDE_KEYS, LabBenchRunner, runBacktestTool, sweepTool, type RunStore } from './tools.ts'
 
 const FIXTURE_DIR = `${import.meta.dir}/../../lab-bench/src/__fixtures__`
 
@@ -119,9 +119,76 @@ describe('compareTool (AL-11)', () => {
   })
 })
 
-describe('sweepTool (AL-12, v1 stub)', () => {
-  test('always answers LAB_TOOL_UNAVAILABLE — no runner call, no budget spent', () => {
-    const outcome = sweepTool()
-    expect(outcome).toEqual({ ok: false, error: { code: LAB_TOOL_UNAVAILABLE, message: expect.any(String) } })
+describe('sweepTool (AL-12, LAB-AL-07)', () => {
+  test('default windows: every TRAIN window that can run the base — one row per (window, widthTicks)', () => {
+    const runner = new LabBenchRunner(FIXTURE_DIR)
+    const runStore: RunStore = new Map()
+    const outcome = sweepTool({ base: 'live', widthTicks: [2000, 4000], deposit: 1000 }, runner, runStore, undefined, FIXTURE_DIR)
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    // fix-nobtc has no runnable base at all (B-03) and is never defaulted in; only fix-full x {2000,4000}.
+    expect(outcome.result.rows).toHaveLength(2)
+    expect(outcome.result.rows.every((r) => r.windowId === 'fix-full')).toBe(true)
+    for (const row of outcome.result.rows) {
+      expect('runId' in row).toBe(true)
+      if ('runId' in row) expect(runStore.has(row.runId)).toBe(true)
+    }
+    expect(runStore.size).toBe(2)
+  })
+
+  test('a named TEST window is LAB_HOLDOUT_DENIED for the WHOLE sweep, before any row runs', () => {
+    const runner = new LabBenchRunner(FIXTURE_DIR)
+    const runStore: RunStore = new Map()
+    const outcome = sweepTool({ base: 'live', widthTicks: [2000], deposit: 1000, windows: ['fix-full', 'fix-test'] }, runner, runStore, undefined, FIXTURE_DIR)
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.error.code).toBe('LAB_HOLDOUT_DENIED')
+    expect(runStore.size).toBe(0) // not even fix-full ran — the holdout check happens before any run (AL-12a)
+  })
+
+  test('a named window with no data for the base is a per-row LAB_DATASET_MISSING error, alongside good rows', () => {
+    const runner = new LabBenchRunner(FIXTURE_DIR)
+    const runStore: RunStore = new Map()
+    const outcome = sweepTool({ base: 'live', widthTicks: [2000], deposit: 1000, windows: ['fix-full', 'fix-nobtc'] }, runner, runStore, undefined, FIXTURE_DIR)
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.result.rows).toHaveLength(2)
+    const full = outcome.result.rows.find((r) => r.windowId === 'fix-full')!
+    const nobtc = outcome.result.rows.find((r) => r.windowId === 'fix-nobtc')!
+    expect('runId' in full).toBe(true)
+    expect('error' in nobtc && nobtc.error.code === 'LAB_DATASET_MISSING').toBe(true)
+    expect(runStore.size).toBe(1) // only the good row was recorded
+  })
+
+  test('more than 6 widthTicks values, or more than 24 total (window x width) rows, is a tool error', () => {
+    const runner = new LabBenchRunner(FIXTURE_DIR)
+    const tooManyWidths = sweepTool({ base: 'live', widthTicks: [500, 1000, 1500, 2000, 2500, 3000, 3500], deposit: 1000 }, runner, new Map(), undefined, FIXTURE_DIR)
+    expect(tooManyWidths.ok).toBe(false)
+    const tooManyRows = sweepTool(
+      { base: 'live', widthTicks: [500, 1000, 1500, 2000, 2500, 3000], deposit: 1000, windows: Array.from({ length: 5 }, () => 'fix-full') },
+      runner,
+      new Map(),
+      undefined,
+      FIXTURE_DIR,
+    )
+    expect(tooManyRows.ok).toBe(false)
+    if (tooManyRows.ok) return
+    expect(tooManyRows.error.code).toBe('LAB_SPEC_INVALID')
+  })
+
+  test('an out-of-bounds widthTicks value, or deposit, is LAB_SPEC_INVALID before any run', () => {
+    const runner = new LabBenchRunner(FIXTURE_DIR)
+    expect(sweepTool({ base: 'live', widthTicks: [123], deposit: 1000 }, runner, new Map(), undefined, FIXTURE_DIR).ok).toBe(false)
+    expect(sweepTool({ base: 'live', widthTicks: [2000], deposit: 99 }, runner, new Map(), undefined, FIXTURE_DIR).ok).toBe(false)
+    expect(sweepTool({ base: 'live', widthTicks: [], deposit: 1000 }, runner, new Map(), undefined, FIXTURE_DIR).ok).toBe(false)
+  })
+
+  test('every successful row is recorded in the run store and meter, just like run_backtest', () => {
+    const runner = new LabBenchRunner(FIXTURE_DIR)
+    const runStore: RunStore = new Map()
+    const meter = newCostMeter()
+    const outcome = sweepTool({ base: 'live', widthTicks: [2000], deposit: 1000 }, runner, runStore, meter, FIXTURE_DIR)
+    expect(outcome.ok).toBe(true)
+    expect(meter.runs).toHaveLength(1)
   })
 })

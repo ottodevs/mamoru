@@ -1,7 +1,7 @@
 // Agent Lab agent (008 task 4, otto/mamoru#200): the catalog prompt builder (AL-14). Regenerated from code and
 // the dataset manifest per job — never cached, never a `list_*` tool. Only TRAIN windows ever appear (AL-12a):
 // `trainWindows` (lab-bench) already filters out every TEST window before this file ever sees one.
-import { basePolicyOf, DEPOSIT_MAX_USDC, DEPOSIT_MIN_USDC, trainWindows, WIDTH_TICKS_MAX, WIDTH_TICKS_MIN, WIDTH_TICKS_STEP, type ManifestWindow } from '@mamoru/lab-bench'
+import { basePolicyOf, basesForWindow, DEPOSIT_MAX_USDC, DEPOSIT_MIN_USDC, trainWindows, WIDTH_TICKS_MAX, WIDTH_TICKS_MIN, WIDTH_TICKS_STEP, type ManifestWindow } from '@mamoru/lab-bench'
 
 export type Catalog = {
   systemPrompt: string
@@ -41,9 +41,22 @@ function describeMarket(market: unknown): string {
   return parts.length > 0 ? parts.join(', ') : 'sin datos de mercado'
 }
 
-/** AL-70: v1 serves Base windows only — the manifest carries no per-window chain field yet, so this is fixed. */
-function describeWindow(w: ManifestWindow): string {
-  return `- "${w.id}" [${w.regime}] ${w.label} (Base, ${fmtDate(w.from)}..${fmtDate(w.to)}) — ${describeMarket(w.market)}`
+/** The pool set every base policy trades (B-01: both "live" and "guard" share it) — shown per window alongside which bases can actually run there. */
+const ALL_POOLS: readonly string[] = [...new Set(basePolicyOf('live').buckets.flatMap((b) => b.pools))]
+
+/**
+ * AL-70: v1 serves Base windows only — the manifest carries no per-window chain field yet, so this is fixed.
+ * Review finding: the catalog must say, per window, which pools and bases it can actually run (B-03's
+ * `basesForWindow`) — a window whose dataset is missing a bucket pool (e.g. `aug2024`, no cbBTC yet) must read
+ * as "no runs available" in the prompt itself, not only surface as a `LAB_DATASET_MISSING` tool error later.
+ */
+function describeWindow(w: ManifestWindow, datasetsDir: string | undefined): string {
+  const bases = datasetsDir === undefined ? basesForWindow(w.id) : basesForWindow(w.id, datasetsDir)
+  const availability =
+    bases.length > 0
+      ? `bases: ${bases.join(', ')}; pools: ${ALL_POOLS.join(', ')}`
+      : `no runs available: ningún base tiene datos completos de pool para esta ventana (LAB_DATASET_MISSING)`
+  return `- "${w.id}" [${w.regime}] ${w.label} (Base, ${fmtDate(w.from)}..${fmtDate(w.to)}) — ${describeMarket(w.market)} — ${availability}`
 }
 
 const BASE_DESCRIPTIONS = {
@@ -71,7 +84,7 @@ export const CATALOG_RULES = `Reglas:
 export function buildCatalogPrompt(datasetsDir?: string): Catalog {
   const windows = datasetsDir === undefined ? trainWindows() : trainWindows(datasetsDir)
   const windowIds = windows.map((w) => w.id)
-  const windowsText = windows.length > 0 ? windows.map(describeWindow).join('\n') : '(sin ventanas TRAIN en este manifiesto)'
+  const windowsText = windows.length > 0 ? windows.map((w) => describeWindow(w, datasetsDir)).join('\n') : '(sin ventanas TRAIN en este manifiesto)'
   const basesText = [BASE_DESCRIPTIONS.live(), BASE_DESCRIPTIONS.guard()].join('\n')
   const overridesText = [
     `- widthTicks: ${WIDTH_TICKS_MIN}..${WIDTH_TICKS_MAX}, paso ${WIDTH_TICKS_STEP} (ancho del rango de las pools volátiles; la pool de stables mantiene su propio ancho).`,

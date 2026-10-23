@@ -63,6 +63,28 @@ describe('resolveMetric / displayValue (AL-20a)', () => {
     expect(resolveMetric(r, 'operations.not_a_real_kind' as MetricKey)).toBeUndefined()
   })
 
+  test('review finding (P1-2): "operations.toString"/"operations.__proto__" never resolve to an inherited property', () => {
+    // `"toString" in m.operations` and `"__proto__" in m.operations` are both true (prototype-chain lookup) even
+    // though neither is an own count — the old `kind in m.operations` check would resolve to the inherited
+    // function/object, and `displayValue`'s `.toFixed` on that would throw. Both are outside the closed
+    // OP_KINDS list, so resolveMetric must return undefined for them, never throw, regardless of `hasOwn`.
+    const r = makeRun()
+    expect(() => resolveMetric(r, 'operations.toString' as MetricKey)).not.toThrow()
+    expect(resolveMetric(r, 'operations.toString' as MetricKey)).toBeUndefined()
+    expect(() => resolveMetric(r, 'operations.__proto__' as MetricKey)).not.toThrow()
+    expect(resolveMetric(r, 'operations.__proto__' as MetricKey)).toBeUndefined()
+    expect(() => resolveMetric(r, 'operations.hasOwnProperty' as MetricKey)).not.toThrow()
+    expect(resolveMetric(r, 'operations.hasOwnProperty' as MetricKey)).toBeUndefined()
+  })
+
+  test('resolveMetric never throws on a non-string metric (defensive: untrusted candidates before shape validation)', () => {
+    const r = makeRun()
+    expect(() => resolveMetric(r, 42 as unknown as MetricKey)).not.toThrow()
+    expect(resolveMetric(r, 42 as unknown as MetricKey)).toBeUndefined()
+    expect(() => resolveMetric(r, null as unknown as MetricKey)).not.toThrow()
+    expect(resolveMetric(r, { toString: () => 'end' } as unknown as MetricKey)).toBeUndefined()
+  })
+
   test('priceMove is unresolvable when the window carries no market stats (the fixture manifest case)', () => {
     const r = makeRun() // window.market = { note: 'fixture' }, no btc field
     expect(resolveMetric(r, 'priceMove')).toBeUndefined()
