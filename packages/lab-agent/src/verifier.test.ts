@@ -25,7 +25,14 @@ function makeRun(over: Partial<RunResult> = {}): RunResult {
 
 function ctxOf(...runs: RunResult[]): VerifyContext {
   const runStore = new Map(runs.map((r) => [r.resultHash, r]))
-  return { runStore, catalogIds: ['fix-full', 'fix-nobtc', 'conservador-live-v2', 'conservador-lab-guards-v1'] }
+  // No years here on purpose: none of the general-purpose tests below are about the year token, so no bare
+  // year should be allowed by accident. The year-focused tests use `ctxWithYears` instead.
+  return { runStore, catalogIds: ['fix-full', 'fix-nobtc', 'conservador-live-v2', 'conservador-lab-guards-v1'], catalogYears: [] }
+}
+
+/** Same catalog ids (and runs) as `ctxOf`, but with an explicit set of allowed years — for the year-token tests. */
+function ctxWithYears(years: readonly number[], ...runs: RunResult[]): VerifyContext {
+  return { ...ctxOf(...runs), catalogYears: years }
 }
 
 describe('validateAnswerSchema', () => {
@@ -98,7 +105,7 @@ describe('verify (AL-21)', () => {
     expect(verify(answer, ctxOf()).errors[0]?.kind).toBe('untraceable-digit')
   })
 
-  test('{{c0}}/{{v0}} references, 4-digit years and catalog ids are allowed digits in text', () => {
+  test('{{c0}}/{{v0}} references, a catalog-covered year, and catalog ids are allowed digits in text', () => {
     const run = makeRun()
     const answer: Answer = {
       blocks: [
@@ -107,7 +114,7 @@ describe('verify (AL-21)', () => {
         { type: 'text', md: 'En 2025, sobre fix-full con conservador-live-v2, terminaste en {{c0}}: {{v0}}' },
       ],
     }
-    expect(verify(answer, ctxOf(run)).ok).toBe(true)
+    expect(verify(answer, ctxWithYears([2025], run)).ok).toBe(true)
   })
 
   test('review finding (P2, verifier.ts:127): {{cN}}/{{vN}} must reference a claim/verdict this answer actually has (LAB_REF_UNKNOWN)', () => {
@@ -142,19 +149,38 @@ describe('buildAllowedTokenRegex / findUntraceableDigits / findDirectionalTerm',
     expect(findUntraceableDigits('calma de 2026-04 aquí', re)).toBe(false)
   })
 
-  test('review finding: "2025.2026" is a compound number, not two allowed years', () => {
-    const re = buildAllowedTokenRegex([])
+  test('review finding: "2025.2026" is a compound number, not two allowed years (even when both are catalog years)', () => {
+    const re = buildAllowedTokenRegex([], [2025, 2026])
     expect(findUntraceableDigits('El resultado fue 2025.2026.', re)).toBe(true)
     // a year immediately followed by a digit, or immediately preceded by one, is the same case.
     expect(findUntraceableDigits('la cifra fue 20259', re)).toBe(true)
     expect(findUntraceableDigits('el código fue 92025', re)).toBe(true)
   })
 
-  test('a standalone year is still allowed even right before ordinary prose punctuation', () => {
-    const re = buildAllowedTokenRegex([])
+  test('a standalone catalog year is still allowed even right before ordinary prose punctuation', () => {
+    const re = buildAllowedTokenRegex([], [2025, 2026])
     expect(findUntraceableDigits('En 2025, hubo una caída.', re)).toBe(false)
     expect(findUntraceableDigits('Para 2026: el plan cambia.', re)).toBe(false)
     expect(findUntraceableDigits('(2025) fue un año difícil.', re)).toBe(false)
+  })
+
+  test('review finding (verifier.ts:127): a bare year is only allowed if the catalog actually covers it', () => {
+    const re = buildAllowedTokenRegex([], [2025, 2026])
+    expect(findUntraceableDigits('En 1999, hubo una caída.', re)).toBe(true) // 1999 is not a catalog year
+    expect(findUntraceableDigits('En 2025, hubo una caída.', buildAllowedTokenRegex([]))).toBe(true) // no years given at all -> no bare year is ever allowed
+  })
+
+  test('review finding (verifier.ts:127): "El saldo final fue 2025 USDC." is rejected — a year right before a unit/currency token is an amount, not a date', () => {
+    const re = buildAllowedTokenRegex([], [2025])
+    expect(findUntraceableDigits('El saldo final fue 2025 USDC.', re)).toBe(true)
+    expect(findUntraceableDigits('el retorno fue 2025%', re)).toBe(true)
+    expect(findUntraceableDigits('costó $2025', re)).toBe(true) // preceded by a currency symbol
+    expect(findUntraceableDigits('fueron 2025 puntos', re)).toBe(true)
+  })
+
+  test('review finding (verifier.ts:127): "en febrero de 2025 cayó" passes — a catalog year with no currency/unit context', () => {
+    const re = buildAllowedTokenRegex([], [2025])
+    expect(findUntraceableDigits('en febrero de 2025 cayó', re)).toBe(false)
   })
 
   test('review finding: a Unicode (fullwidth) digit is detected — plain ASCII \\d missed it', () => {

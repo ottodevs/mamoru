@@ -56,7 +56,15 @@ async function runAgentJob(input: JobInput, ctx: JobContext): Promise<JobResult>
 }
 
 function ctxWith(model: ModelClient, maxToolRounds?: number): JobContext {
-  return { model: new ValidatingModel(model), runner, systemPrompt: catalog.systemPrompt, catalogIds: catalog.catalogIds, maxToolRounds, datasetsDir: FIXTURE_DIR }
+  return {
+    model: new ValidatingModel(model),
+    runner,
+    systemPrompt: catalog.systemPrompt,
+    catalogIds: catalog.catalogIds,
+    catalogYears: catalog.years,
+    maxToolRounds,
+    datasetsDir: FIXTURE_DIR,
+  }
 }
 
 // Real runs over the fixture, precomputed once — deterministic (AL-16), so the agent's own run_backtest calls

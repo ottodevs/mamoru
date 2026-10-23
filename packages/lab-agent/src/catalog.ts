@@ -9,6 +9,21 @@ export type Catalog = {
   catalogIds: string[]
   /** TRAIN window ids only (AL-12a) — what a caller can validate a `windowId` tool argument against up front. */
   windowIds: string[]
+  /**
+   * Every calendar year a TRAIN window's `from`..`to` touches — fed to the verifier as `catalogYears`, the only
+   * years a bare "19xx/20xx" is ever allowed as a year in prose (review finding: otherwise "1999", or any year
+   * nobody's window covers, passed just as freely as a real one).
+   */
+  years: number[]
+}
+
+/** Every calendar year between a window's `from` and `to` (inclusive) — almost always just one, but a window spanning New Year's Eve touches two. */
+function yearsOf(w: ManifestWindow): number[] {
+  const fromYear = Number(w.from.slice(0, 4))
+  const toYear = Number(w.to.slice(0, 4))
+  const years: number[] = []
+  for (let y = fromYear; y <= toYear; y++) years.push(y)
+  return years
 }
 
 function fmtDate(iso: string): string {
@@ -109,5 +124,6 @@ ${CATALOG_RULES}`
   // the same way a window id already is — `windows` here is `trainWindows()`, so every id collected this way
   // is TRAIN-only by construction; a TEST window's dataset id is never in this list (it's never even read).
   const datasetIds = windows.map((w) => w.datasetId).filter((id): id is string => typeof id === 'string' && id.length > 0)
-  return { systemPrompt, catalogIds: [...windowIds, ...datasetIds, ...policyIds], windowIds }
+  const years = [...new Set(windows.flatMap(yearsOf))].sort((a, b) => a - b)
+  return { systemPrompt, catalogIds: [...windowIds, ...datasetIds, ...policyIds], windowIds, years }
 }

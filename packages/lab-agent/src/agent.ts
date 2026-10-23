@@ -36,6 +36,8 @@ export type JobContext = {
   /** AL-14: built once per job by `buildCatalogPrompt` (catalog.ts) and passed in here. */
   systemPrompt: string
   catalogIds: string[]
+  /** `Catalog.years` (catalog.ts) — the only years the verifier's untraceable-digit check ever allows as a bare year in prose. */
+  catalogYears: readonly number[]
   maxToolRounds?: number
   /** Only `sweep` needs this (it resolves a TRAIN window list independent of `runner`) — pass the same value given to `buildCatalogPrompt`/`LabBenchRunner`. Omit for the real datasets dir. */
   datasetsDir?: string
@@ -291,7 +293,7 @@ export async function runAgentJob(input: JobInput, ctx: JobContext): Promise<Job
 
   if (rawAnswer === null) rawAnswer = { blocks: [] }
 
-  const verifyCtx = { runStore, catalogIds: ctx.catalogIds }
+  const verifyCtx = { runStore, catalogIds: ctx.catalogIds, catalogYears: ctx.catalogYears }
   const firstVerify = verify(rawAnswer, verifyCtx)
 
   // P1-1: answer the pending submit_answer tool_call now — with the verifier's own result. This IS the repair

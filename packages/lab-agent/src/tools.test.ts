@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { newCostMeter } from './cost-meter.ts'
 import { compareTool, COMPARE_MAX_RUNS, KNOWN_OVERRIDE_KEYS, LabBenchRunner, runBacktestTool, sweepTool, type RunStore } from './tools.ts'
+import type { BenchRunner } from './types.ts'
 
 const FIXTURE_DIR = `${import.meta.dir}/../../lab-bench/src/__fixtures__`
 
@@ -74,6 +75,7 @@ describe('runBacktestTool (AL-10, AL-13)', () => {
 
   describe('datasetId as an alternative to windowId (review finding, AL-10)', () => {
     const FIX_FULL_DATASET_ID = '0x852bf32acfea20911aaa2572caf1fe3d759b94ff543593b6a9ee49673e29f828'
+    const FIX_NOBTC_DATASET_ID = '0xec3b3d809e7efe55c3a19ab6fe686103f4713aa5398d104032c59897e34f5af0'
     const FIX_TEST_DATASET_ID = '0x6669782d746573742d686f6c646f75742d666978747572652d6f6e6c792d3030' // manifest-fixture-only, see __fixtures__/manifest.json
 
     test('a TRAIN dataset id resolves and runs as its window', () => {
@@ -114,11 +116,73 @@ describe('runBacktestTool (AL-10, AL-13)', () => {
       expect(outcome.error.code).toBe('LAB_SPEC_INVALID')
     })
 
-    test('datasetId takes precedence when both it and windowId are given', () => {
+    test('review finding: windowId and datasetId together, resolving to DIFFERENT windows, is LAB_SPEC_INVALID — checked before any data loads', () => {
       const runner = new LabBenchRunner(FIXTURE_DIR)
-      const outcome = runBacktestTool({ datasetId: FIX_FULL_DATASET_ID, windowId: 'fix-nobtc', base: 'live', deposit: 1000 }, runner, new Map(), undefined, FIXTURE_DIR)
+      const runStore: RunStore = new Map()
+      const outcome = runBacktestTool({ datasetId: FIX_FULL_DATASET_ID, windowId: 'fix-nobtc', base: 'live', deposit: 1000 }, runner, runStore, undefined, FIXTURE_DIR)
+      expect(outcome.ok).toBe(false)
+      if (outcome.ok) return
+      expect(outcome.error.code).toBe('LAB_SPEC_INVALID')
+      expect(runStore.size).toBe(0)
+    })
+
+    test('review finding: windowId and datasetId together, resolving to the SAME window, runs that window', () => {
+      const runner = new LabBenchRunner(FIXTURE_DIR)
+      const outcome = runBacktestTool({ datasetId: FIX_FULL_DATASET_ID, windowId: 'fix-full', base: 'live', deposit: 1000 }, runner, new Map(), undefined, FIXTURE_DIR)
       expect(outcome.ok).toBe(true)
       if (outcome.ok) expect(outcome.result.window.id).toBe('fix-full')
+    })
+
+    test('review finding: windowId and datasetId together, resolving to the SAME TEST window, is LAB_HOLDOUT_DENIED before any data loads', () => {
+      const runner = new LabBenchRunner(FIXTURE_DIR)
+      const runStore: RunStore = new Map()
+      const outcome = runBacktestTool({ datasetId: FIX_TEST_DATASET_ID, windowId: 'fix-test', base: 'live', deposit: 1000 }, runner, runStore, undefined, FIXTURE_DIR)
+      expect(outcome.ok).toBe(false)
+      if (outcome.ok) return
+      expect(outcome.error.code).toBe('LAB_HOLDOUT_DENIED')
+      expect(runStore.size).toBe(0)
+    })
+
+    test('review finding: a mismatch involving fix-nobtc is still LAB_SPEC_INVALID (not LAB_DATASET_MISSING — never even gets that far)', () => {
+      const runner = new LabBenchRunner(FIXTURE_DIR)
+      const outcome = runBacktestTool({ datasetId: FIX_NOBTC_DATASET_ID, windowId: 'fix-full', base: 'live', deposit: 1000 }, runner, new Map(), undefined, FIXTURE_DIR)
+      expect(outcome.ok).toBe(false)
+      if (outcome.ok) return
+      expect(outcome.error.code).toBe('LAB_SPEC_INVALID')
+    })
+  })
+
+  describe('run-store memoization (review finding, AL-16/LAB-AL-09)', () => {
+    test('the same spec called twice only ever calls runner.run once — the second is served from the run store', () => {
+      let runCalls = 0
+      const real = new LabBenchRunner(FIXTURE_DIR)
+      const countingRunner: BenchRunner = { run: (spec) => { runCalls += 1; return real.run(spec) } }
+      const runStore: RunStore = new Map()
+      const meter = newCostMeter()
+
+      const a = runBacktestTool({ windowId: 'fix-full', base: 'live', deposit: 1000 }, countingRunner, runStore, meter)
+      const b = runBacktestTool({ windowId: 'fix-full', base: 'live', deposit: 1000 }, countingRunner, runStore, meter)
+
+      expect(a.ok && b.ok).toBe(true)
+      if (a.ok && b.ok) expect(a.result.runId).toBe(b.result.runId)
+      expect(runCalls).toBe(1) // runner.run was never called a second time for the identical spec
+      expect(meter.runs).toHaveLength(1) // and its CPU ms was never metered a second time either
+      expect(runStore.size).toBe(1)
+    })
+
+    test('a different spec (different width) still runs for real, not served from the first spec\'s cache entry', () => {
+      let runCalls = 0
+      const real = new LabBenchRunner(FIXTURE_DIR)
+      const countingRunner: BenchRunner = { run: (spec) => { runCalls += 1; return real.run(spec) } }
+      const runStore: RunStore = new Map()
+      const meter = newCostMeter()
+
+      runBacktestTool({ windowId: 'fix-full', base: 'live', deposit: 1000 }, countingRunner, runStore, meter)
+      runBacktestTool({ windowId: 'fix-full', base: 'live', deposit: 1000, overrides: { widthTicks: 4000 } }, countingRunner, runStore, meter)
+
+      expect(runCalls).toBe(2)
+      expect(meter.runs).toHaveLength(2)
+      expect(runStore.size).toBe(2)
     })
   })
 })

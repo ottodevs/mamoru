@@ -41,6 +41,13 @@ export type VerifyContext = {
   runStore: ReadonlyMap<string, RunResult>
   /** Dataset/window/policy ids allowed as literal digits in prose (the untraceable-digit check). */
   catalogIds: string[]
+  /**
+   * The years the catalog's TRAIN windows actually cover (from `Catalog.years`, catalog.ts) — review finding:
+   * a bare "19xx/20xx" used to be allowed as a year unconditionally, so "El saldo final fue 2025 USDC." passed
+   * even though that "2025" is an amount, not a date, and even a year nobody's window ever covers (e.g. "1999")
+   * slipped through. Only a year in this set, in a date-like context (see `YEAR_TOKEN`), is ever allowed.
+   */
+  catalogYears: readonly number[]
 }
 
 // ---------------------------------------------------------------------------
@@ -116,18 +123,40 @@ export function validateAnswerSchema(answerRaw: unknown): VerifyError[] {
 // Untraceable-digit guard (AL-21) and directional-term guard (AL-21b)
 // ---------------------------------------------------------------------------
 
-/**
- * A standalone 4-digit 19xx/20xx year: not preceded or followed by another digit (any `\p{Nd}`, not just
- * ASCII), and not preceded/followed by a `.`/`,` that itself sits against a digit — that second check is what
- * keeps a compound number like "2025.2026" from reading as two separate allowed years (review finding:
- * `\b` treated the `.` as an ordinary boundary, same as a space, so both halves slipped through). A year
- * followed by ordinary prose punctuation ("en 2025, hubo...") still passes: the comma there is not itself
- * followed by a digit.
- */
-const YEAR_TOKEN = '(?<!\\p{Nd})(?<!\\p{Nd}[.,])(?:19|20)\\d{2}(?!\\p{Nd})(?![.,]\\p{Nd})'
+/** `USDC 2025`, `2025%`, `$2025`, `2025 points`... — any of these means that "2025" is an amount, not a date. */
+const CURRENCY_UNIT_WORDS = ['USDC', 'USDT', 'USD', 'ETH', 'BTC', 'ticks', 'puntos', 'points'] as const
+const CURRENCY_SYMBOLS = '$€'
 
-/** `{{c0}}`/`{{v0}}` reference tokens, bare standalone 4-digit years, and catalog (window/policy) ids are allowed digits. */
-export function buildAllowedTokenRegex(catalogIds: string[]): RegExp {
+/**
+ * A year token is only ever one of the catalog's own TRAIN-window years (review finding: a bare "19xx/20xx"
+ * used to be allowed unconditionally — "1999" passed even though no window covers it, and "2025 USDC" passed
+ * even though that "2025" is plainly an amount). `years` is `Catalog.years` (catalog.ts), passed in via
+ * `VerifyContext.catalogYears`; with none given, no bare year is ever allowed (`null`, no alternative added).
+ *
+ * On top of the literal year match: not preceded or followed by another digit (any `\p{Nd}`, not just ASCII),
+ * nor by a `.`/`,` that itself sits against a digit — that is what keeps a compound number like "2025.2026"
+ * from reading as two separate allowed years (`\b` used to treat the `.` as an ordinary boundary, same as a
+ * space). And now: not preceded by a currency symbol, not followed (after optional whitespace) by a
+ * currency/unit word or symbol — that is what rejects "2025 USDC" while still allowing "en 2025, hubo..." (the
+ * comma there is not itself followed by a digit or a unit word).
+ */
+function buildYearToken(years: readonly number[]): string | null {
+  const uniqueYears = [...new Set(years)].filter((y) => Number.isInteger(y))
+  if (uniqueYears.length === 0) return null
+  const yearAlt = uniqueYears.map(String).join('|')
+  const unitAlt = CURRENCY_UNIT_WORDS.join('|')
+  return [
+    `(?<![${CURRENCY_SYMBOLS}])`,
+    '(?<!\\p{Nd})(?<!\\p{Nd}[.,])',
+    `(?:${yearAlt})`,
+    '(?!\\p{Nd})(?![.,]\\p{Nd})',
+    `(?!\\s*(?:${unitAlt}))`,
+    `(?!\\s*[%${CURRENCY_SYMBOLS}])`,
+  ].join('')
+}
+
+/** `{{c0}}`/`{{v0}}` reference tokens, a catalog TRAIN-window year in a date-like context, and catalog (window/policy/dataset) ids are allowed digits. */
+export function buildAllowedTokenRegex(catalogIds: string[], catalogYears: readonly number[] = []): RegExp {
   const ids = catalogIds
     .filter(Boolean)
     .sort((a, b) => b.length - a.length) // longest-first: a longer id wins over a shorter one it contains
@@ -135,8 +164,9 @@ export function buildAllowedTokenRegex(catalogIds: string[]): RegExp {
   // Longer/more-specific alternatives first: regex alternation picks the first one that matches at a position,
   // not the longest, so a catalog id like "calm-2026-04" must be tried before the bare 4-digit-year pattern or
   // the year alone would match its "2026" prefix and strand the rest ("-04") as untraceable digits.
-  const alts = [...ids, '\\{\\{c\\d+\\}\\}', '\\{\\{v\\d+\\}\\}', YEAR_TOKEN]
-  return new RegExp(alts.join('|'), 'gu')
+  const yearToken = buildYearToken(catalogYears)
+  const alts = [...ids, '\\{\\{c\\d+\\}\\}', '\\{\\{v\\d+\\}\\}', ...(yearToken ? [yearToken] : [])]
+  return new RegExp(alts.join('|'), 'giu')
 }
 
 /** Any Unicode decimal digit (`\p{Nd}`), not just ASCII `0-9` — review finding: a fullwidth digit like "２０%" was not detected by plain `\d`. */
@@ -296,7 +326,7 @@ export function verify(answerRaw: unknown, ctx: VerifyContext): VerifyResult {
   if (schemaErrors.length > 0) return { ok: false, errors: schemaErrors }
 
   const answer = answerRaw as Answer
-  const allowedTokenRegex = buildAllowedTokenRegex(ctx.catalogIds)
+  const allowedTokenRegex = buildAllowedTokenRegex(ctx.catalogIds, ctx.catalogYears)
   const claimCount = answer.blocks.filter((b) => b.type === 'claim').length
   const verdictCount = answer.blocks.filter((b) => b.type === 'verdict').length
   const errors = answer.blocks.flatMap((block, i) => blockErrors(block, i, ctx, allowedTokenRegex, claimCount, verdictCount))
@@ -313,7 +343,7 @@ export type FallbackResult = { answer: Answer; flagged: boolean }
 export function fallbackAnswer(candidate: Answer, ctx: VerifyContext): FallbackResult {
   if (!Array.isArray(candidate.blocks)) return { answer: { blocks: [] }, flagged: true } // defensive: see below
 
-  const allowedTokenRegex = buildAllowedTokenRegex(ctx.catalogIds)
+  const allowedTokenRegex = buildAllowedTokenRegex(ctx.catalogIds, ctx.catalogYears)
 
   // `candidate` is the very answer that may have just failed validateAnswerSchema (this IS the salvage path for
   // that failure) — its blocks are untrusted JSON, not a trusted `Block[]`. A raw element can be `null`, a

@@ -20,6 +20,11 @@ describe('buildCatalogPrompt (AL-14)', () => {
     expect(catalog.systemPrompt).not.toContain('fix-test')
   })
 
+  test('years carries every calendar year a TRAIN window touches — the fixture windows are all 2026-09', () => {
+    const catalog = buildCatalogPrompt(FIXTURE_DIR)
+    expect(catalog.years).toEqual([2026])
+  })
+
   test('catalogIds carries the window ids, the TRAIN dataset ids, and both base policy ids (the untraceable-digit allowlist)', () => {
     const catalog = buildCatalogPrompt(FIXTURE_DIR)
     expect(catalog.catalogIds).toEqual(['fix-full', 'fix-nobtc', FIX_FULL_DATASET_ID, FIX_NOBTC_DATASET_ID, 'conservador-live-v2', 'conservador-lab-guards-v1'])
@@ -30,7 +35,7 @@ describe('buildCatalogPrompt (AL-14)', () => {
 
   test('review finding: a caveat naming a TRAIN dataset id passes verification; one naming the TEST dataset id fails', () => {
     const catalog = buildCatalogPrompt(FIXTURE_DIR)
-    const ctx = { runStore: new Map(), catalogIds: catalog.catalogIds }
+    const ctx = { runStore: new Map(), catalogIds: catalog.catalogIds, catalogYears: catalog.years }
 
     const trainAnswer = { blocks: [{ type: 'caveat' as const, md: `El dataset ${FIX_FULL_DATASET_ID} ya tiene una corrida citable.` }] }
     expect(verify(trainAnswer, ctx).ok).toBe(true)

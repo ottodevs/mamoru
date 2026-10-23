@@ -10,6 +10,7 @@ import {
   manifestWindow,
   manifestWindowByDatasetId,
   runBench,
+  specKey as benchSpecKey,
   trainWindows,
   WIDTH_TICKS_MAX,
   WIDTH_TICKS_MIN,
@@ -66,22 +67,45 @@ function manifestWindowByDatasetIdIn(datasetId: string, datasetsDir?: string) {
 
 /**
  * AL-10: `run_backtest`'s window may be named by `windowId` OR by `datasetId` (the dataset the window is backed
- * by) — resolved against the manifest before anything else. A TEST dataset is `LAB_HOLDOUT_DENIED` right here,
- * before any data loads (AL-12a) — the same guarantee `windowId` already got from `runner.run`'s own
- * `validateSpec`, just reached one step earlier since resolving `datasetId` needs the manifest anyway.
+ * by) — resolved against the manifest before anything else, before any data loads (AL-12a).
+ *
+ * Review finding: when BOTH are given, they must agree. `windowId` alone is still never pre-validated against
+ * the manifest here (unchanged from before this fix) — `runner.run`'s own `validateSpec` catches an unknown or
+ * TEST window for that path, still before loading any data, one step later. But once `datasetId` is ALSO
+ * given, resolving it needs the manifest anyway, so both sides are checked right here: a mismatch between what
+ * `windowId` and `datasetId` each resolve to is `LAB_SPEC_INVALID` (checked first); only once they agree is the
+ * TRAIN/TEST split checked, `LAB_HOLDOUT_DENIED` for either side being a TEST window/dataset.
  */
 function resolveWindowId(a: Record<string, unknown>, datasetsDir: string | undefined): string | ToolError {
-  if (typeof a.datasetId === 'string' && a.datasetId.length > 0) {
+  const hasDatasetId = typeof a.datasetId === 'string' && a.datasetId.length > 0
+  const hasWindowId = typeof a.windowId === 'string' && a.windowId.length > 0
+  if (!hasDatasetId && !hasWindowId) return { code: 'LAB_SPEC_INVALID', message: 'windowId or datasetId is required' }
+
+  if (!hasDatasetId) return a.windowId as string // windowId only: unchanged, not pre-validated here
+
+  let byDatasetId: ReturnType<typeof manifestWindowIn>
+  try {
+    byDatasetId = manifestWindowByDatasetIdIn(a.datasetId as string, datasetsDir)
+  } catch (e) {
+    return reasonToolError(e)
+  }
+
+  if (hasWindowId) {
+    let byWindowId: ReturnType<typeof manifestWindowIn>
     try {
-      const w = manifestWindowByDatasetIdIn(a.datasetId, datasetsDir)
-      if (w.split !== 'train') return { code: 'LAB_HOLDOUT_DENIED', message: `datasetId ${a.datasetId} is a TEST dataset; the Lab never reaches the release gate's holdout` }
-      return w.id
+      byWindowId = manifestWindowIn(a.windowId as string, datasetsDir)
     } catch (e) {
       return reasonToolError(e)
     }
+    if (byWindowId.id !== byDatasetId.id) {
+      return { code: 'LAB_SPEC_INVALID', message: `windowId "${a.windowId}" and datasetId "${a.datasetId}" resolve to different windows (${byWindowId.id} vs ${byDatasetId.id})` }
+    }
   }
-  if (typeof a.windowId === 'string' && a.windowId.length > 0) return a.windowId
-  return { code: 'LAB_SPEC_INVALID', message: 'windowId or datasetId is required' }
+
+  if (byDatasetId.split !== 'train') {
+    return { code: 'LAB_HOLDOUT_DENIED', message: `datasetId ${a.datasetId} is a TEST dataset; the Lab never reaches the release gate's holdout` }
+  }
+  return byDatasetId.id
 }
 
 function parseRunBacktestArgs(raw: unknown, datasetsDir: string | undefined): RunBacktestArgs | ToolError {
@@ -106,10 +130,23 @@ function parseRunBacktestArgs(raw: unknown, datasetsDir: string | undefined): Ru
 /** B-01's default width (the base policy's own `range.widthTicks`, 2000) when no override is given. */
 const DEFAULT_WIDTH_TICKS = 2000
 
+/** The first run already in `runStore` whose own `specKey` matches — `undefined` when this job hasn't produced it yet. */
+function cachedRun(runStore: RunStore, key: string): RunResult | undefined {
+  for (const r of runStore.values()) if (r.specKey === key) return r
+  return undefined
+}
+
 export function runBacktestTool(raw: unknown, runner: BenchRunner, runStore: RunStore, meter?: CostMeter, datasetsDir?: string): ToolOutcome<RunPublicView> {
   const parsed = parseRunBacktestArgs(raw, datasetsDir)
   if ('code' in parsed) return { ok: false, error: parsed }
   const widthTicks = parsed.overrides?.widthTicks ?? DEFAULT_WIDTH_TICKS
+
+  // AL-16/LAB-AL-09: the same spec gives the same resultHash — if THIS job already produced it, serve it from
+  // the run store instead of calling `runner.run` (and metering its CPU ms) a second time.
+  const key = benchSpecKey({ windowId: parsed.windowId, base: parsed.base, widthTicks, deposit: parsed.deposit })
+  const cached = cachedRun(runStore, key)
+  if (cached) return { ok: true, result: toPublicView(cached) }
+
   try {
     const { result: r, cpuMs } = measureCpuMs(() => runner.run({ windowId: parsed.windowId, base: parsed.base, widthTicks, deposit: parsed.deposit }))
     runStore.set(r.resultHash, r)
