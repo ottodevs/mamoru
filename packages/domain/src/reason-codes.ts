@@ -226,14 +226,20 @@ export const REASON_CODES = [
   'LAB_SPEC_INVALID',
   'LAB_HOLDOUT_DENIED',
   'LAB_DATASET_MISSING',
-  // Agent Lab agent (008, otto/mamoru#200): tool + answer-verifier reason codes. LAB_JOB_LEASE_LOST,
-  // LAB_JOB_TIMEOUT and LAB_MODEL_UNAVAILABLE are the runner's (task 5, otto/mamoru#201), not added here yet.
+  // Agent Lab agent (008, otto/mamoru#200): tool + answer-verifier reason codes.
   'LAB_OVERRIDE_UNKNOWN',
   'LAB_VERDICT_INCOMPARABLE',
   'LAB_ANSWER_PARTIAL',
   // Round 2 review of otto/mamoru#200/#126: a text/caveat block's {{cN}}/{{vN}} reference token names a claim
   // or verdict index the answer doesn't actually have.
   'LAB_REF_UNKNOWN',
+  // Agent Lab runner (008 task 5, otto/mamoru#204): the runner's own job-lifecycle and model-plane codes.
+  'LAB_JOB_LEASE_LOST',
+  'LAB_JOB_TIMEOUT',
+  'LAB_MODEL_UNAVAILABLE',
+  // Not in spec 008's own "New reason codes" list — the daily cap this task's contract adds on top of it
+  // (max 30 agent jobs/day across requesters, enforced on the runner side).
+  'LAB_AGENT_BUDGET',
 ] as const
 
 export type ReasonCode = (typeof REASON_CODES)[number]
