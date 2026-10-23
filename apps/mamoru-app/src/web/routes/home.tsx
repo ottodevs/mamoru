@@ -32,9 +32,8 @@ export const homeCopy = {
   monthly: 'Monthly rate',
   current: 'Current rate',
   earnedSoFar: 'earned so far',
-  monthlyWhat: '30-day average',
-  currentWhat: 'today',
-  earningNow: 'on positions earning now',
+  monthlyWhat: 'last 30 days',
+  currentWhat: 'last 24h',
   sources: 'Rate sources',
   monthlySource: 'Monthly',
   currentSource: 'Today',
@@ -43,7 +42,6 @@ export const homeCopy = {
   gap: {
     loading: 'loading',
     'no-positions': 'no position earning now',
-    'all-paused': 'every position is paused',
     'no-data': 'no rate from the source today',
     'no-value': 'a position has no USDC value yet',
   } as Record<NonNullable<AccountRate['gap']>, string>,
@@ -183,13 +181,13 @@ function RateSub({ name, what, tail }: { name: string; what: string; tail: strin
 export function Indicators({ f, apy, price }: { f: FundingView | undefined; apy: ApyView | undefined; price: bigint | null }) {
   const rows = f ? positionRates(f, apy, price) : []
   const monthly = f ? monthlyRate(rows, apy) : { pct: null, gap: 'loading' as const, covered: 0, of: 0, plan: false }
-  const current = f ? currentRate(rows, apy) : { pct: null, gap: 'loading' as const, covered: 0, of: 0 }
+  const current = f ? currentRate(rows, apy, split(f, price)) : { pct: null, gap: 'loading' as const, covered: 0, of: 0 }
   const partial = (r: AccountRate) => (r.pct !== null && r.covered < r.of ? `${r.covered} of ${r.of} positions with a rate` : null)
   const monthlySrc = sourceName(apy?.monthlySource)
   const currentSrc = sourceName(apy?.currentSource)
   const monthlyTail = monthly.gap ? homeCopy.gap[monthly.gap] : [monthly.plan ? homeCopy.planPools : null, partial(monthly)].filter(Boolean).join(' · ') || null
-  // #112 review: the current rate leaves paused positions and idle money out, so a figure always says what it covers.
-  const currentTail = current.gap ? homeCopy.gap[current.gap] : [homeCopy.earningNow, partial(current)].filter(Boolean).join(' · ')
+  // otto/mamoru#198: the current rate is the whole balance's (paused and idle at 0%), so it needs no scope words.
+  const currentTail = current.gap ? homeCopy.gap[current.gap] : partial(current)
   return (
     <section className="rates" aria-label="Rates">
       <div className="rate">
