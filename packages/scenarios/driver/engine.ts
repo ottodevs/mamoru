@@ -195,6 +195,11 @@ export type EngineConfig = {
    * Paused, decide holds with DECIDE_PAUSED; an operation already out is still reconciled.
    */
   intents?: () => Observation['intents']
+  /**
+   * otto/mamoru#184: every other Mamoru account's positions on the chain, read at every review for depth sizing
+   * (`Observation.peerPositions`). Absent: a single-account run.
+   */
+  peerPositions?: () => Observation['peerPositions']
 }
 
 /** Live op states whose signed bytes may still land or have landed without being settled here (Engine.carried). */
@@ -507,7 +512,7 @@ export class Engine {
     if (obs.block.number < floor) {
       return { kind: 'observation-failed', code: 'EHG_OBSERVATION_STALE', detail: `observed at block ${obs.block.number}, the last operation is in block ${floor}` }
     }
-    obs = { ...obs, lastRerangeAt: this.lastRerangeAt }
+    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(this.cfg.peerPositions ? { peerPositions: this.cfg.peerPositions() } : {}) }
     this.outOfRange = outOfRangeSinceOf(this.outOfRange, obs)
     if (this.cfg.policy.range.lazy) obs = withOutOfRangeSince(obs, this.outOfRange)
     this.lastObservation = obs

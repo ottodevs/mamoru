@@ -28,6 +28,13 @@ export type Observation = {
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. Absent or null: none yet. */
   lastRerangeAt?: bigint | null
   /**
+   * otto/mamoru#184: the positions every other Mamoru account holds on this chain, as the operator last observed them.
+   * Depth sizing counts them with the account's own, so Mamoru as a whole stays under the share limit of a pool.
+   * Absent: a single-account run (backtest, lab), nothing else to count. Null: the operator has not yet observed every
+   * running account since it started, so the pool-wide share is unknown and depth gives no share room.
+   */
+  peerPositions?: PeerPositionObs[] | null
+  /**
    * Spec 004: 24 h history per pool, from TWAP samples (see `marketOf`). Read only by a policy with `guards`;
    * absent or null fields make the guard rules abstain.
    */
@@ -85,6 +92,9 @@ export type SessionObs = {
   /** otto/mamoru#149: userOps the grant has left before its usage limit. Absent: not known (no gate on it). */
   usesLeft?: number
 }
+
+/** otto/mamoru#184: another Mamoru account's position, only what depth sizing needs. */
+export type PeerPositionObs = Pick<PositionObs, 'pool' | 'tickLower' | 'tickUpper' | 'liquidity'>
 
 export type PositionObs = {
   tokenId: bigint

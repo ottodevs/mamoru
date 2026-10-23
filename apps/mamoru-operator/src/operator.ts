@@ -39,7 +39,7 @@ import { Engine, type EngineConfig, type EngineSession } from '@mamoru/scenarios
 import type { EngineSettingsSource } from './engine-settings.ts'
 import type { GuardReadsState } from './guard-reads-state.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
-import type { Proposal } from '@mamoru/decide'
+import type { PeerPositionObs, Proposal } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, amountsForLiquidity, inUsdc, livePool, nativePricePool, positionUsdc, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
@@ -516,7 +516,7 @@ type Prepared = {
   pausedWarned?: boolean
 }
 
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; /** otto/mamoru#184: this loop has reached a decided review, so `peerSeen` holds the account's positions. */ seenPositions?: boolean; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -601,6 +601,8 @@ export class Operator {
   private readonly prepared = new Map<string, Prepared>()
   private readonly locks = new Map<string, Lock>()
   private readonly runners = new Map<string, Runner>()
+  /** otto/mamoru#184: each account's positions at its last decided review (see peerPositionsOf). */
+  private readonly peerSeen = new Map<string, PeerPositionObs[]>()
   private readonly reconciled = new Map<string, number>()
   /** Per account: the pending reconciliation timer and its current backoff (reconcileLater). */
   private readonly reconcileTimers = new Map<string, { timer: ReturnType<typeof setTimeout> | null; delay: number }>()
@@ -4766,6 +4768,7 @@ export class Operator {
         ...(this.offBase() ? { registry: this.cfg.registry, nativePricePool: nativePricePool(this.cfg.registry), gasModel: chainOf(this.cfg.registry.chainId).gasModel } : {}),
         // The only owner intent the operator has today: a stop on its way pauses the engine (US6).
         intents: () => ({ paused: this.stopInFlight(acc), exitRequested: false }),
+        peerPositions: () => this.peerPositionsOf(acc.accountKey),
       },
       {
         waitBlock: () => Bun.sleep(this.cfg.waitBlockMs),
@@ -4860,6 +4863,8 @@ export class Operator {
             if (r.code === 'EHG_OBSERVATION_STALE') more = true
             safeMetrics(() => this.engineHealth.record(acc.accountKey, false, r.code, classifyEngineError(r.code, r.detail)))
           } else {
+            this.peerSeen.set(acc.accountKey, r.observation.positions.map(({ pool, tickLower, tickUpper, liquidity }) => ({ pool, tickLower, tickUpper, liquidity })))
+            runner.seenPositions = true
             const d = r.record.decision
             const pools = new Map<string, string | null>(this.enginePolicyOf(acc).buckets.map((b) => [b.id, b.pools[0] ?? null]))
             const waiting = (d.waiting ?? []).map((w) => ({ bucket: w.bucket, pool: pools.get(w.bucket) ?? null, code: w.code, amountUsdc: w.amount.toString() }))
@@ -4956,6 +4961,18 @@ export class Operator {
   private setFollowUps(acc: AccountState, runner: Runner, followUps: number): void {
     if ((runner.followUps ?? 0) > 0 !== followUps > 0) this.fundingMoved(acc)
     runner.followUps = followUps
+  }
+
+  /**
+   * otto/mamoru#184: every other account's positions, as its last decided review saw them, so depth sizing holds
+   * Mamoru as a whole under the share limit of a pool. Null while some running account has not reached a decided
+   * review since its loop started: the pool-wide share is unknown, and the account gets no share room until it is.
+   * An account whose loop stopped keeps counting with what it last held (a lapsed session leaves its positions in the
+   * pool), until the process restarts: an overcount, never an undercount, for positions a stop did withdraw.
+   */
+  private peerPositionsOf(key: string): PeerPositionObs[] | null {
+    for (const [k, r] of this.runners) if (k !== key && !r.stopped && !r.seenPositions) return null
+    return [...this.peerSeen].flatMap(([k, ps]) => (k === key ? [] : ps))
   }
 
   private stopLoop(key: string): void {

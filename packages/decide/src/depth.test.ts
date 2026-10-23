@@ -104,6 +104,30 @@ describe('depth sizing (otto/mamoru#127)', () => {
     expect(held.shareRoom).toBe(0n)
   })
 
+  test('the share limit counts every Mamoru account in the pool, not only this one (otto/mamoru#184)', () => {
+    const o = obs(10n ** 15n, 1_000n * USDC)
+    const p = o.pools[0]!
+    const half = (p.liquidity * 250n) / 10_000n
+    const peer = (pool: string, tickLower: number, tickUpper: number, liquidity: bigint) => ({ pool, tickLower, tickUpper, liquidity })
+    const alone = depthOf({ ...o, peerPositions: [] }, DEPTH, p, 40)!
+    const shared = depthOf({ ...o, peerPositions: [peer(p.name, -20, 20, half)] }, DEPTH, p, 40)!
+    const full = depthOf({ ...o, peerPositions: [peer(p.name, -20, 20, half), peer(p.name, -10, 10, half)] }, DEPTH, p, 40)!
+    expect(alone).toEqual(depthOf(o, DEPTH, p, 40)!)
+    expect(shared.shareRoom > 0n && shared.shareRoom < alone.shareRoom).toBe(true)
+    expect(full.shareRoom).toBe(0n)
+    // Out of range at the TWAP tick, or in another pool: not part of the active liquidity, not counted.
+    const elsewhere = depthOf({ ...o, peerPositions: [peer(p.name, 100, 200, p.liquidity), peer('pool:USDC/cbBTC/500', -20, 20, p.liquidity)] }, DEPTH, p, 40)!
+    expect(elsewhere.shareRoom).toBe(alone.shareRoom)
+  })
+
+  test('peers not yet known: no share room, while the swap and sell rooms stand (otto/mamoru#184)', () => {
+    const o = obs(10n ** 15n, 1_000n * USDC)
+    const p = o.pools[0]!
+    const known = depthOf(o, DEPTH, p, 40)!
+    const unknown = depthOf({ ...o, peerPositions: null }, DEPTH, p, 40)!
+    expect(unknown).toEqual({ ...known, shareRoom: 0n })
+  })
+
   test('what waits is reported beside the decision: amounts move, the premise does not', () => {
     const a = decide(obs(1_000n, 10_000n * USDC, 1_000n), DEPTH)
     const b = decide(obs(1_000n, 12_000n * USDC, 1_000n), DEPTH)
