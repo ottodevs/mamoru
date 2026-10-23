@@ -1452,9 +1452,19 @@
     width: 100%;
     padding-bottom: 0;
   }
+  /* Two columns, so a long qualifier wraps inside its rate and both stay on one row (#112 review). */
   .rates {
-    gap: 1rem 2rem;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    gap: 1rem 1.25rem;
+    align-items: start;
     margin-bottom: 2rem;
+  }
+  .rate-info {
+    align-self: end;
+  }
+  .rate-info[open] {
+    grid-column: 1 / -1;
   }
   .rate-value {
     font-size: 2.1rem;
