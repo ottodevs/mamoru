@@ -82,9 +82,9 @@ describe('current rate', () => {
     const noData = { ...apy, byPool: [] }
     expect(currentRate(positionRates(placed, noData), noData)).toMatchObject({ pct: null, gap: 'no-data' })
   })
-  test('a position without a rate is left out of both sides and counted', () => {
-    const mixed = { ...placed, positions: [pos('1', 'pool:USDC/USDT/100', '1000000'), pos('2', 'pool:WETH/USDC/500', '1000000')] }
-    expect(currentRate(positionRates(mixed, apy), apy)).toMatchObject({ pct: 3, covered: 1, of: 2 })
+  test('a position earning at an unknown rate makes the account rate n/a, never dropped from the base', () => {
+    const mixed = { ...placed, positions: [pos('1', 'pool:USDC/USDT/100', '10000000'), pos('2', 'pool:WETH/USDC/500', '90000000')] }
+    expect(currentRate(positionRates(mixed, apy), apy)).toMatchObject({ pct: null, gap: 'no-data', covered: 1, of: 2 })
   })
   test('a cbBTC position with no price is not weighted on a guess', () => {
     const old = { ...placed, positions: [{ tokenId: '1', pool: 'pool:USDC/cbBTC/500', liquidity: '1', inRange: true, amountUsdc: '1000000', amountCbbtc: '1000' }] }
@@ -243,10 +243,11 @@ describe('earned so far with the balance', () => {
 })
 
 // otto/mamoru#198: the current rate is the account's, so its label is one line with no scope words.
-describe('current rate label', () => {
-  test('"APY · last 24h", one line', () => {
+describe('rate labels', () => {
+  test('"APY · now" and "APY · 30-day avg", one line each', () => {
     const { text } = render(<Indicators f={placed} apy={apy} price={null} />)
-    expect(text).toContain('Current rate APY · last 24h')
+    expect(text).toContain('Current rate APY · now')
+    expect(text).toContain('Monthly rate APY · 30-day avg')
     expect(text).not.toContain('earning now')
   })
 })
