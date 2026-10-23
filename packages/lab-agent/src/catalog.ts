@@ -105,5 +105,9 @@ ${overridesText}
 ${CATALOG_RULES}`
 
   const policyIds = [basePolicyOf('live').policyId, basePolicyOf('guard').policyId]
-  return { systemPrompt, catalogIds: [...windowIds, ...policyIds], windowIds }
+  // Review finding: a caveat naming a dataset id (AL-10's datasetId alternative to windowId) must be allowed
+  // the same way a window id already is — `windows` here is `trainWindows()`, so every id collected this way
+  // is TRAIN-only by construction; a TEST window's dataset id is never in this list (it's never even read).
+  const datasetIds = windows.map((w) => w.datasetId).filter((id): id is string => typeof id === 'string' && id.length > 0)
+  return { systemPrompt, catalogIds: [...windowIds, ...datasetIds, ...policyIds], windowIds }
 }

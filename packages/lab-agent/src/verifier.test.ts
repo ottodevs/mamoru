@@ -142,6 +142,26 @@ describe('buildAllowedTokenRegex / findUntraceableDigits / findDirectionalTerm',
     expect(findUntraceableDigits('calma de 2026-04 aquí', re)).toBe(false)
   })
 
+  test('review finding: "2025.2026" is a compound number, not two allowed years', () => {
+    const re = buildAllowedTokenRegex([])
+    expect(findUntraceableDigits('El resultado fue 2025.2026.', re)).toBe(true)
+    // a year immediately followed by a digit, or immediately preceded by one, is the same case.
+    expect(findUntraceableDigits('la cifra fue 20259', re)).toBe(true)
+    expect(findUntraceableDigits('el código fue 92025', re)).toBe(true)
+  })
+
+  test('a standalone year is still allowed even right before ordinary prose punctuation', () => {
+    const re = buildAllowedTokenRegex([])
+    expect(findUntraceableDigits('En 2025, hubo una caída.', re)).toBe(false)
+    expect(findUntraceableDigits('Para 2026: el plan cambia.', re)).toBe(false)
+    expect(findUntraceableDigits('(2025) fue un año difícil.', re)).toBe(false)
+  })
+
+  test('review finding: a Unicode (fullwidth) digit is detected — plain ASCII \\d missed it', () => {
+    const re = buildAllowedTokenRegex([])
+    expect(findUntraceableDigits('el retorno fue ２０%', re)).toBe(true)
+  })
+
   test('findDirectionalTerm matches the closed es/en list, case-insensitively', () => {
     expect(findDirectionalTerm('Mamoru supera al hold')).toBe('supera')
     expect(findDirectionalTerm('Mamoru OUTPERFORMS hold')).toBe('OUTPERFORMS')

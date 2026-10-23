@@ -116,7 +116,17 @@ export function validateAnswerSchema(answerRaw: unknown): VerifyError[] {
 // Untraceable-digit guard (AL-21) and directional-term guard (AL-21b)
 // ---------------------------------------------------------------------------
 
-/** `{{c0}}`/`{{v0}}` reference tokens, bare 4-digit years, and catalog (window/policy) ids are allowed digits. */
+/**
+ * A standalone 4-digit 19xx/20xx year: not preceded or followed by another digit (any `\p{Nd}`, not just
+ * ASCII), and not preceded/followed by a `.`/`,` that itself sits against a digit — that second check is what
+ * keeps a compound number like "2025.2026" from reading as two separate allowed years (review finding:
+ * `\b` treated the `.` as an ordinary boundary, same as a space, so both halves slipped through). A year
+ * followed by ordinary prose punctuation ("en 2025, hubo...") still passes: the comma there is not itself
+ * followed by a digit.
+ */
+const YEAR_TOKEN = '(?<!\\p{Nd})(?<!\\p{Nd}[.,])(?:19|20)\\d{2}(?!\\p{Nd})(?![.,]\\p{Nd})'
+
+/** `{{c0}}`/`{{v0}}` reference tokens, bare standalone 4-digit years, and catalog (window/policy) ids are allowed digits. */
 export function buildAllowedTokenRegex(catalogIds: string[]): RegExp {
   const ids = catalogIds
     .filter(Boolean)
@@ -125,13 +135,14 @@ export function buildAllowedTokenRegex(catalogIds: string[]): RegExp {
   // Longer/more-specific alternatives first: regex alternation picks the first one that matches at a position,
   // not the longest, so a catalog id like "calm-2026-04" must be tried before the bare 4-digit-year pattern or
   // the year alone would match its "2026" prefix and strand the rest ("-04") as untraceable digits.
-  const alts = [...ids, '\\{\\{c\\d+\\}\\}', '\\{\\{v\\d+\\}\\}', '\\b(19|20)\\d{2}\\b']
-  return new RegExp(alts.join('|'), 'g')
+  const alts = [...ids, '\\{\\{c\\d+\\}\\}', '\\{\\{v\\d+\\}\\}', YEAR_TOKEN]
+  return new RegExp(alts.join('|'), 'gu')
 }
 
+/** Any Unicode decimal digit (`\p{Nd}`), not just ASCII `0-9` — review finding: a fullwidth digit like "２０%" was not detected by plain `\d`. */
 export function findUntraceableDigits(md: string, allowedTokenRegex: RegExp): boolean {
   const stripped = md.replace(allowedTokenRegex, '')
-  return /\d/.test(stripped)
+  return /\p{Nd}/u.test(stripped)
 }
 
 /**
