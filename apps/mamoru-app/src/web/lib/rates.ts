@@ -91,7 +91,7 @@ export function positionRates(f: FundingView, apy: ApyView | undefined, price: b
 }
 
 /** Why a rate is n/a; null when there is a figure. */
-export type RateGap = 'loading' | 'no-positions' | 'all-paused' | 'no-data' | 'no-value'
+export type RateGap = 'loading' | 'no-positions' | 'no-data' | 'no-value'
 
 export type AccountRate = { pct: number | null; gap: RateGap | null; covered: number; of: number }
 
@@ -111,20 +111,35 @@ function weighted(rows: PositionRate[], pick: (r: PositionRate) => number | null
 }
 
 /**
- * Current rate: today's rate of the positions earning now (in range), weighted by their USDC value. Paused
- * (out-of-range) positions are left out, as agreed with Brais on 20 Oct. A position whose pool has no rate
- * today is left out too, and `covered < of` says so.
+ * Current rate: what the whole balance earned over the last 24 h, as an APY (otto/mamoru#198, Brais 23 Oct). Each
+ * position earning now (in range) at its pool's rate today, weighted by its USDC value, over the whole balance:
+ * paused positions and idle money count at 0%, since that is what they earn. A position whose pool has no rate
+ * today is left out of both sides, and `covered < of` says so. Replaces the 20 Oct reading (in-range positions
+ * only), which showed a rate that could cover a tenth of the money as if it were the account's.
  */
-export function currentRate(rows: PositionRate[], apy: ApyView | undefined): AccountRate {
+export function currentRate(rows: PositionRate[], apy: ApyView | undefined, idle: Pick<Split, 'idle' | 'idleTokens'> | null = null): AccountRate {
   if (!apy) return { pct: null, gap: 'loading', covered: 0, of: 0 }
   if (rows.length === 0) return { pct: null, gap: 'no-positions', covered: 0, of: 0 }
   const earning = rows.filter((r) => r.inRange)
-  if (earning.length === 0) return { pct: null, gap: 'all-paused', covered: 0, of: 0 }
-  // A position earning now that cannot be valued may hold most of the capital: no account rate rather than one
-  // that leaves it out (otto/mamoru#193 review round 2). A pool with no rate today is left out and counted.
-  if (earning.some((r) => r.valueUsdc === null)) return { pct: null, gap: 'no-value', covered: 0, of: earning.length }
-  const { pct, covered } = weighted(earning, (r) => r.currentPct)
-  return { pct, gap: pct === null ? 'no-data' : null, covered, of: earning.length }
+  // Every position and every idle token is in the denominator now: one that cannot be valued makes the rate n/a.
+  if (rows.some((r) => r.valueUsdc === null) || idle?.idleTokens.some((t) => t.unpriced)) return { pct: null, gap: 'no-value', covered: 0, of: earning.length }
+  let earned = 0
+  let base = Number(idle?.idle ?? 0n)
+  let covered = 0
+  for (const r of rows) {
+    const v = Number(r.valueUsdc!)
+    if (!r.inRange) {
+      base += v
+      continue
+    }
+    if (r.currentPct === null) continue
+    earned += r.currentPct * v
+    base += v
+    covered++
+  }
+  if (earning.length > 0 && covered === 0) return { pct: null, gap: 'no-data', covered: 0, of: earning.length }
+  if (base <= 0) return { pct: null, gap: 'no-value', covered, of: earning.length }
+  return { pct: Math.round((earned / base) * 100) / 100, gap: null, covered, of: earning.length }
 }
 
 /**

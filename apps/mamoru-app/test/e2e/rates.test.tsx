@@ -55,27 +55,34 @@ describe('rates per position', () => {
   })
 })
 
+// otto/mamoru#198: the current rate is the whole balance's last 24 h: paused positions and idle money at 0%.
 describe('current rate', () => {
-  test('leaves paused positions out and weights the rest by USDC value', () => {
-    const r = currentRate(positionRates(placed, apy), apy)
-    // (50.12 * 3.0 + 39.80 * 7.3) / 89.92 = 4.9
-    expect(r.pct).toBeCloseTo(4.9, 1)
+  test('over the whole balance: paused and idle count at 0%', () => {
+    const r = currentRate(positionRates(placed, apy), apy, split(placed, null))
+    // (50.12 * 3.0 + 39.80 * 7.3) / (50.12 + 39.80 + 9.97 + 0.11) = 4.41
+    expect(r.pct).toBeCloseTo(4.41, 2)
     expect(r.gap).toBeNull()
     expect([r.covered, r.of]).toEqual([2, 2])
   })
-  test('a large paused position does not drag the rate down', () => {
+  test('10 USDC earning 3% beside 90 paused is 0.3% for the account, never 3%', () => {
     const big = { ...placed, positions: [pos('1', 'pool:USDC/USDT/100', '10000000'), pos('2', 'pool:WETH/USDC/3000', '90000000', false)] }
-    expect(currentRate(positionRates(big, apy), apy).pct).toBe(3)
+    expect(currentRate(positionRates(big, apy), apy).pct).toBe(0.3)
   })
-  test('n/a with a reason: loading, nothing placed, everything paused, no data', () => {
+  test('idle money counts at 0% too', () => {
+    const idle = { ...placed, positions: [pos('1', 'pool:USDC/USDT/100', '10000000')], usdc: '90000000', idle: [{ token: 'USDC', amount: '90000000', decimals: 6, valueUsdc: '90000000' }] }
+    expect(currentRate(positionRates(idle, apy), apy, split(idle, null)).pct).toBe(0.3)
+  })
+  test('everything paused earns 0%, said as a figure', () => {
+    const paused = { ...placed, positions: [pos('1', 'pool:USDC/USDT/100', '1000000', false)] }
+    expect(currentRate(positionRates(paused, apy), apy)).toMatchObject({ pct: 0, gap: null })
+  })
+  test('n/a with a reason: loading, nothing placed, no data', () => {
     expect(currentRate([], undefined).gap).toBe('loading')
     expect(currentRate([], apy).gap).toBe('no-positions')
-    const paused = { ...placed, positions: [pos('1', 'pool:USDC/USDT/100', '1000000', false)] }
-    expect(currentRate(positionRates(paused, apy), apy)).toMatchObject({ pct: null, gap: 'all-paused' })
     const noData = { ...apy, byPool: [] }
     expect(currentRate(positionRates(placed, noData), noData)).toMatchObject({ pct: null, gap: 'no-data' })
   })
-  test('a position without a rate is left out and counted', () => {
+  test('a position without a rate is left out of both sides and counted', () => {
     const mixed = { ...placed, positions: [pos('1', 'pool:USDC/USDT/100', '1000000'), pos('2', 'pool:WETH/USDC/500', '1000000')] }
     expect(currentRate(positionRates(mixed, apy), apy)).toMatchObject({ pct: 3, covered: 1, of: 2 })
   })
@@ -83,6 +90,10 @@ describe('current rate', () => {
     const old = { ...placed, positions: [{ tokenId: '1', pool: 'pool:USDC/cbBTC/500', liquidity: '1', inRange: true, amountUsdc: '1000000', amountCbbtc: '1000' }] }
     expect(currentRate(positionRates(old, apy, null), apy)).toMatchObject({ pct: null, gap: 'no-value' })
     expect(currentRate(positionRates(old, apy, 100_000_000_000n), apy).pct).toBe(7.3)
+  })
+  test('an unpriced idle token makes it n/a: the base would be short', () => {
+    const s = { ...split(placed, null), idleTokens: [{ token: 'cbBTC', amount: 1000n, decimals: 8, valueUsdc: 0n, unpriced: true }] }
+    expect(currentRate(positionRates(placed, apy), apy, s)).toMatchObject({ pct: null, gap: 'no-value' })
   })
 })
 
@@ -111,9 +122,10 @@ describe('positions without valueUsdc', () => {
     expect(text).toContain('n/a: no USDC price for USDT in this view yet, so its value, its share and the account rates show n/a.')
     expect(text).toContain('Share n/a')
   })
-  test('a paused unvalued position leaves the current rate alone but makes the monthly rate n/a', () => {
+  test('a paused unvalued position makes both account rates n/a', () => {
     const rows = positionRates({ ...placed, positions: [pos('1', 'pool:USDC/USDT/100', '1000000'), noValue('2', 'pool:WETH/USDC/3000', undefined, false)] }, apy)
-    expect(currentRate(rows, apy)).toMatchObject({ pct: 3, gap: null })
+    // A paused unvalued position is in the base now (#198): no current rate without its value either.
+    expect(currentRate(rows, apy)).toMatchObject({ pct: null, gap: 'no-value' })
     expect(monthlyRate(rows, apy)).toMatchObject({ pct: null, gap: 'no-value' })
   })
   test('nothing valued: n/a for the account rates, with the reason', () => {
@@ -223,12 +235,11 @@ describe('earned so far with the balance', () => {
   })
 })
 
-// #112 review: the current rate covers only positions earning now (not paused ones, not idle money): its label says so.
-describe('current rate scope on its face', () => {
-  test('a figure always says "on positions earning now", paused or not', () => {
-    const mixed = render(<Indicators f={placed} apy={apy} price={null} />).text
-    const allIn = render(<Indicators f={{ ...placed, positions: placed.positions.map((p) => ({ ...p, inRange: true })) }} apy={apy} price={null} />).text
-    expect(mixed).toContain('APY · today · on positions earning now')
-    expect(allIn).toContain('APY · today · on positions earning now')
+// otto/mamoru#198: the current rate is the account's, so its label is one line with no scope words.
+describe('current rate label', () => {
+  test('"APY · last 24h", one line', () => {
+    const { text } = render(<Indicators f={placed} apy={apy} price={null} />)
+    expect(text).toContain('Current rate APY · last 24h')
+    expect(text).not.toContain('earning now')
   })
 })
