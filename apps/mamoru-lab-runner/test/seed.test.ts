@@ -1,15 +1,25 @@
+import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { specKey, type RunResult } from '@mamoru/lab-bench'
 import { cmdSeed, publish, seedExitCode } from '../src/cli.ts'
 
-/** A real seed run over every TRAIN window, against a local mock — several real backtests. */
+/** A seed run over every TRAIN window of the fixture manifest, against a local mock. */
 const SLOW = 90_000
+
+/**
+ * Committed, synthetic, tiny (review of #117 round 2: CI has no `~/.local/share/mamoru-lab/datasets`; `cmdSeed`
+ * resolves its dataset dir from `LAB_DATASETS`, so pointing that at the fixture directory `@mamoru/lab-bench`'s
+ * own tests use is enough — no change to `cmdSeed` itself). Two TRAIN windows: `fix-full` (both bases run) and
+ * `fix-nobtc` (neither does, aug2024-shaped) — so the expected matrix is 3 skipped (fix-nobtc) + 3 attempted
+ * (fix-full), one of which this file forces to fail.
+ */
+const FIXTURE_DIR = join(import.meta.dir, '../../../packages/lab-bench/src/__fixtures__')
 
 describe('publish / cmdSeed (review of #117 P2: publish must throw on non-2xx; seed counts failures and exits non-zero)', () => {
   let server: ReturnType<typeof Bun.serve>
   let publishedKeys: string[]
   let failSpecKey: string | null
-  const PREVIOUS_ENV = { url: process.env.LAB_RUNNER_URL, secret: process.env.LAB_RUNNER_SECRET }
+  const PREVIOUS_ENV = { url: process.env.LAB_RUNNER_URL, secret: process.env.LAB_RUNNER_SECRET, datasets: process.env.LAB_DATASETS }
 
   beforeAll(() => {
     publishedKeys = []
@@ -26,6 +36,7 @@ describe('publish / cmdSeed (review of #117 P2: publish must throw on non-2xx; s
     })
     process.env.LAB_RUNNER_URL = `http://127.0.0.1:${server.port}`
     process.env.LAB_RUNNER_SECRET = 'seed-test-secret'
+    process.env.LAB_DATASETS = FIXTURE_DIR
   })
 
   afterAll(() => {
@@ -34,6 +45,8 @@ describe('publish / cmdSeed (review of #117 P2: publish must throw on non-2xx; s
     else process.env.LAB_RUNNER_URL = PREVIOUS_ENV.url
     if (PREVIOUS_ENV.secret === undefined) delete process.env.LAB_RUNNER_SECRET
     else process.env.LAB_RUNNER_SECRET = PREVIOUS_ENV.secret
+    if (PREVIOUS_ENV.datasets === undefined) delete process.env.LAB_DATASETS
+    else process.env.LAB_DATASETS = PREVIOUS_ENV.datasets
   })
 
   test('publish resolves on 200 and the body actually lands on the mock', async () => {
@@ -53,9 +66,9 @@ describe('publish / cmdSeed (review of #117 P2: publish must throw on non-2xx; s
 
   test('cmdSeed: published/skipped/failed are counted apart, and that count is what decides the exit code', async () => {
     publishedKeys = []
-    // sep2026 x {live, 2000} x 1000: the first spec cmdSeed actually attempts (the three aug2024 variants are
+    // fix-full x {live, 2000} x 1000: one of the three specs cmdSeed actually attempts (the fix-nobtc variants are
     // skipped before ever reaching publish, so failing one of those would prove nothing about this code path).
-    const failing = specKey({ windowId: 'sep2026', base: 'live', widthTicks: 2000, deposit: 1000 })
+    const failing = specKey({ windowId: 'fix-full', base: 'live', widthTicks: 2000, deposit: 1000 })
     failSpecKey = failing
     let summary: { published: number; skipped: number; failed: number }
     try {
@@ -64,8 +77,8 @@ describe('publish / cmdSeed (review of #117 P2: publish must throw on non-2xx; s
       failSpecKey = null
     }
 
-    // aug2024 x {live 2000, live 4000, guard 2000} is always skipped (B-03); we forced exactly one more failure.
-    expect(summary).toEqual({ published: 20, skipped: 3, failed: 1 })
+    // fix-nobtc x {live 2000, live 4000, guard 2000} is always skipped (B-03); we forced one more to fail.
+    expect(summary).toEqual({ published: 2, skipped: 3, failed: 1 })
     expect(publishedKeys).not.toContain(failing)
     // `cmdSeed` never touches the real `process.exitCode` itself (review of #117 P2 follow-up: a prior version of
     // this test set and "restored" it directly and corrupted the whole `bun test` process's own exit code — Bun

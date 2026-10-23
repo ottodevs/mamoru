@@ -1,0 +1,44 @@
+{
+ "format": "mamoru-lab-manifest-fixture-v1",
+ "windows": [
+  {
+   "id": "fix-full",
+   "file": "pools-full.json",
+   "split": "train",
+   "regime": "calm",
+   "label": "fixture: all three pools present",
+   "from": "2026-09-01T00:00:00Z",
+   "to": "2026-09-02T00:00:00Z",
+   "step": 300,
+   "market": {
+    "note": "fixture, not real history"
+   }
+  },
+  {
+   "id": "fix-nobtc",
+   "file": "pools-no-btc.json",
+   "split": "train",
+   "regime": "calm",
+   "label": "fixture: no cbBTC data, aug2024-style",
+   "from": "2026-09-01T00:00:00Z",
+   "to": "2026-09-02T00:00:00Z",
+   "step": 300,
+   "market": {
+    "note": "fixture, not real history"
+   }
+  },
+  {
+   "id": "fix-test",
+   "file": "pools-full.json",
+   "split": "test",
+   "regime": "calm",
+   "label": "fixture: the release holdout",
+   "from": "2026-09-01T00:00:00Z",
+   "to": "2026-09-02T00:00:00Z",
+   "step": 300,
+   "market": {
+    "note": "fixture, not real history"
+   }
+  }
+ ]
+}

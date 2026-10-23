@@ -1,7 +1,19 @@
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 import { ReasonError } from '@mamoru/domain'
-import { basePolicyOf, parseSpecKey, policyOf, specKey, validateSpec, variantLabel, type BenchSpec } from './spec.ts'
+import { basePolicyOf, defaultDatasetsDir, parseSpecKey, policyOf, specKey, validateSpec, variantLabel, type BenchSpec } from './spec.ts'
 
+/**
+ * Committed, synthetic, tiny (review of #117 round 2: CI has no `~/.local/share/mamoru-lab/datasets` — the real
+ * manifest and dataset files never ship, so a test that reaches the filesystem through the default `datasetsDir`
+ * throws ENOENT on a fresh box). `fix-full` has all three pools; `fix-nobtc` is aug2024-shaped (no cbBTC data);
+ * `fix-test` is a TEST-split window. See `__fixtures__/manifest.json` and run.test.ts for the generator's intent.
+ */
+const FIXTURE_DIR = `${import.meta.dir}/__fixtures__`
+
+// windowId here is never resolved against a manifest — specKey/policyOf/variantLabel are pure string/catalog
+// functions — so an arbitrary id is fine for them; validateSpec's own describe block below overrides it.
 const spec = (over: Partial<BenchSpec> = {}): BenchSpec => ({ windowId: 'feb2025', base: 'live', widthTicks: 2000, deposit: 1000, ...over })
 
 describe('specKey', () => {
@@ -59,17 +71,19 @@ describe('variantLabel', () => {
 })
 
 describe('validateSpec (B-01)', () => {
+  // Every call below passes FIXTURE_DIR: validateSpec resolves windowId against a manifest, so this must never
+  // reach the default (the real ~/.local/share/mamoru-lab/datasets), which CI does not have.
   test('a well-formed TRAIN spec passes', () => {
-    expect(() => validateSpec(spec())).not.toThrow()
-    expect(() => validateSpec(spec({ widthTicks: 8000, deposit: 10_000 }))).not.toThrow()
-    expect(() => validateSpec(spec({ widthTicks: 500, deposit: 100 }))).not.toThrow()
+    expect(() => validateSpec(spec({ windowId: 'fix-full' }), FIXTURE_DIR)).not.toThrow()
+    expect(() => validateSpec(spec({ windowId: 'fix-full', widthTicks: 8000, deposit: 10_000 }), FIXTURE_DIR)).not.toThrow()
+    expect(() => validateSpec(spec({ windowId: 'fix-full', widthTicks: 500, deposit: 100 }), FIXTURE_DIR)).not.toThrow()
   })
 
   test('widthTicks out of 500..8000 or off the 500 step is LAB_SPEC_INVALID', () => {
     for (const widthTicks of [0, 400, 8500, 2001, -2000]) {
-      expect(() => validateSpec(spec({ widthTicks }))).toThrow(ReasonError)
+      expect(() => validateSpec(spec({ windowId: 'fix-full', widthTicks }), FIXTURE_DIR)).toThrow(ReasonError)
       try {
-        validateSpec(spec({ widthTicks }))
+        validateSpec(spec({ windowId: 'fix-full', widthTicks }), FIXTURE_DIR)
       } catch (e) {
         expect((e as ReasonError).code).toBe('LAB_SPEC_INVALID')
       }
@@ -79,7 +93,7 @@ describe('validateSpec (B-01)', () => {
   test('deposit out of 100..10000 or not a whole number is LAB_SPEC_INVALID', () => {
     for (const deposit of [0, 99, 10_001, 500.5]) {
       try {
-        validateSpec(spec({ deposit }))
+        validateSpec(spec({ windowId: 'fix-full', deposit }), FIXTURE_DIR)
         throw new Error('expected validateSpec to throw')
       } catch (e) {
         expect(e).toBeInstanceOf(ReasonError)
@@ -90,7 +104,7 @@ describe('validateSpec (B-01)', () => {
 
   test('an unknown windowId is LAB_SPEC_INVALID', () => {
     try {
-      validateSpec(spec({ windowId: 'not-a-window' }))
+      validateSpec(spec({ windowId: 'not-a-window' }), FIXTURE_DIR)
       throw new Error('expected validateSpec to throw')
     } catch (e) {
       expect(e).toBeInstanceOf(ReasonError)
@@ -99,6 +113,25 @@ describe('validateSpec (B-01)', () => {
   })
 
   test('a TEST window is LAB_HOLDOUT_DENIED, never LAB_SPEC_INVALID (AL-12a)', () => {
+    try {
+      validateSpec(spec({ windowId: 'fix-test' }), FIXTURE_DIR)
+      throw new Error('expected validateSpec(fix-test) to throw')
+    } catch (e) {
+      expect(e).toBeInstanceOf(ReasonError)
+      expect((e as ReasonError).code).toBe('LAB_HOLDOUT_DENIED')
+    }
+  })
+
+  test('every TRAIN window of the manifest passes', () => {
+    for (const windowId of ['fix-full', 'fix-nobtc']) {
+      expect(() => validateSpec(spec({ windowId }), FIXTURE_DIR)).not.toThrow()
+    }
+  })
+})
+
+describe('validateSpec against the real Lab datasets', () => {
+  test.skipIf(!existsSync(join(defaultDatasetsDir(), 'manifest.json')))('needs local Lab datasets: every real TRAIN window passes, every real TEST window is denied', () => {
+    for (const windowId of ['sep2026', 'oct2025', 'feb2025', 'mar2025', 'dec2024', 'aug2024', 'calm-2025-09', 'calm-2026-04']) expect(() => validateSpec(spec({ windowId }))).not.toThrow()
     for (const windowId of ['apr2025', 'may2025', 'jun2025', 'calm-2026-05', 'feb2026']) {
       try {
         validateSpec(spec({ windowId }))
@@ -107,12 +140,6 @@ describe('validateSpec (B-01)', () => {
         expect(e).toBeInstanceOf(ReasonError)
         expect((e as ReasonError).code).toBe('LAB_HOLDOUT_DENIED')
       }
-    }
-  })
-
-  test('every TRAIN window of the manifest passes', () => {
-    for (const windowId of ['sep2026', 'oct2025', 'feb2025', 'mar2025', 'dec2024', 'aug2024', 'calm-2025-09', 'calm-2026-04']) {
-      expect(() => validateSpec(spec({ windowId }))).not.toThrow()
     }
   })
 })

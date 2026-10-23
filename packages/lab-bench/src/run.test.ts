@@ -1,10 +1,23 @@
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 import { ReasonError } from '@mamoru/domain'
 import { basesForWindow, downsampleIndices, MAX_SERIES_POINTS, runBench } from './run.ts'
-import type { BenchSpec } from './spec.ts'
+import { defaultDatasetsDir, type BenchSpec } from './spec.ts'
 
-/** Slow: a real backtest over a real dataset file. */
+/** Slow: a real backtest. */
 const SLOW = 30_000
+
+/**
+ * Committed, synthetic, tiny (review of #117 round 2: CI has no `~/.local/share/mamoru-lab/datasets`, so a test
+ * that reaches the filesystem through the default `datasetsDir` throws ENOENT on a fresh box). `fix-full` has all
+ * three pools over 24 flat synthetic samples; `fix-nobtc` is the same window with every `pool:USDC/cbBTC/500`
+ * sample null, aug2024-shaped; `fix-test` (same dataset as `fix-full`) is TEST split. Generated once from
+ * `@mamoru/backtest`'s `makeDataset`/`encodeDataset` and `@mamoru/uniswap-v3`'s `sqrtRatioAtTick` — see
+ * `__fixtures__/manifest.json`.
+ */
+const FIXTURE_DIR = `${import.meta.dir}/__fixtures__`
+const HAS_REAL_DATASETS = existsSync(join(defaultDatasetsDir(), 'manifest.json'))
 
 function assertWellFormed(idx: number[], n: number, max: number): void {
   expect(idx.length).toBeLessThanOrEqual(max)
@@ -38,21 +51,21 @@ describe('downsampleIndices (review of #117 P3: must never exceed max, including
 })
 
 describe('basesForWindow (B-03)', () => {
-  test('aug2024 (no cbBTC on Base yet) has no base that can run', () => {
-    expect(basesForWindow('aug2024')).toEqual([])
+  test('a window missing a bucket pool (fixture, aug2024-shaped) has no base that can run', () => {
+    expect(basesForWindow('fix-nobtc', FIXTURE_DIR)).toEqual([])
   })
 
   test('a window with every pool offers both bases', () => {
-    expect(basesForWindow('feb2025')).toEqual(['live', 'guard'])
+    expect(basesForWindow('fix-full', FIXTURE_DIR)).toEqual(['live', 'guard'])
   })
 })
 
 describe('runBench', () => {
-  test('a spec on aug2024 is LAB_DATASET_MISSING for either base', () => {
+  test('a spec on a dataset missing a bucket pool is LAB_DATASET_MISSING for either base', () => {
     for (const base of ['live', 'guard'] as const) {
       try {
-        runBench({ windowId: 'aug2024', base, widthTicks: 2000, deposit: 1000 })
-        throw new Error(`expected runBench(aug2024, ${base}) to throw`)
+        runBench({ windowId: 'fix-nobtc', base, widthTicks: 2000, deposit: 1000 }, FIXTURE_DIR)
+        throw new Error(`expected runBench(fix-nobtc, ${base}) to throw`)
       } catch (e) {
         expect(e).toBeInstanceOf(ReasonError)
         expect((e as ReasonError).code).toBe('LAB_DATASET_MISSING')
@@ -62,7 +75,7 @@ describe('runBench', () => {
 
   test('refuses a spec validateSpec itself refuses, before touching any dataset', () => {
     try {
-      runBench({ windowId: 'may2025', base: 'live', widthTicks: 2000, deposit: 1000 }) // TEST window
+      runBench({ windowId: 'fix-test', base: 'live', widthTicks: 2000, deposit: 1000 }, FIXTURE_DIR) // TEST window
       throw new Error('expected runBench to throw')
     } catch (e) {
       expect(e).toBeInstanceOf(ReasonError)
@@ -70,11 +83,11 @@ describe('runBench', () => {
     }
   })
 
-  test('the smallest usable TRAIN window (mar2025) gives the exact B-02 shape', () => {
-    const spec: BenchSpec = { windowId: 'mar2025', base: 'live', widthTicks: 2000, deposit: 1000 }
-    const r = runBench(spec)
+  test('a TRAIN window gives the exact B-02 shape', () => {
+    const spec: BenchSpec = { windowId: 'fix-full', base: 'live', widthTicks: 2000, deposit: 1000 }
+    const r = runBench(spec, FIXTURE_DIR)
 
-    expect(r.specKey).toBe('mar2025|live|2000|1000')
+    expect(r.specKey).toBe('fix-full|live|2000|1000')
     expect(r.spec).toEqual(spec)
     expect(r.variantLabel).toBe('Política actual')
     expect(r.policyId).toBe('conservador-live-v2')
@@ -82,12 +95,12 @@ describe('runBench', () => {
     expect(r.resultHash.startsWith('0x')).toBe(true)
     expect(r.simVersion).toBe('backtest-1')
     expect(r.window).toEqual({
-      id: 'mar2025',
+      id: 'fix-full',
       label: expect.any(String),
-      regime: 'crash',
+      regime: 'calm',
       split: 'train',
-      from: '2025-03-03T00:00:00Z',
-      to: '2025-03-10T00:00:00Z',
+      from: '2026-09-01T00:00:00Z',
+      to: '2026-09-02T00:00:00Z',
       market: expect.anything(),
     })
     expect(r.deposit).toBe(1000)
@@ -123,13 +136,26 @@ describe('runBench', () => {
     for (const op of r.ops) expect(op).toEqual({ t: expect.any(Number), kind: expect.any(String), pool: expect.any(String), gas: expect.any(Number), fees: expect.any(Number), code: expect.any(String), reason: expect.any(String) })
 
     // Same spec, same hash: a second run is the same simulation.
-    expect(runBench(spec).resultHash).toBe(r.resultHash)
+    expect(runBench(spec, FIXTURE_DIR).resultHash).toBe(r.resultHash)
   }, SLOW)
 
-  test('feb2025, live, width 4000, 1000 USDC: vsHodl matches the proven visual PoC (otto/mamoru#175)', () => {
+  test.skipIf(!HAS_REAL_DATASETS)('needs local Lab datasets: feb2025, live, width 4000, 1000 USDC — vsHodl matches the proven visual PoC (otto/mamoru#175)', () => {
     const r = runBench({ windowId: 'feb2025', base: 'live', widthTicks: 4000, deposit: 1000 })
     expect(r.metrics.vsHodl).toBeCloseTo(-3.26, 1)
     expect(r.policyId).toBe('conservador-live-v2+w4000')
     expect(r.variantLabel).toBe('Rango 4.000 ticks')
   }, SLOW)
+
+  test.skipIf(!HAS_REAL_DATASETS)('needs local Lab datasets: aug2024 (no cbBTC on Base yet) is LAB_DATASET_MISSING for either base, against the real manifest too', () => {
+    expect(basesForWindow('aug2024')).toEqual([])
+    for (const base of ['live', 'guard'] as const) {
+      try {
+        runBench({ windowId: 'aug2024', base, widthTicks: 2000, deposit: 1000 })
+        throw new Error(`expected runBench(aug2024, ${base}) to throw`)
+      } catch (e) {
+        expect(e).toBeInstanceOf(ReasonError)
+        expect((e as ReasonError).code).toBe('LAB_DATASET_MISSING')
+      }
+    }
+  })
 })
