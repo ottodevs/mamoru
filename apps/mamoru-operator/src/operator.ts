@@ -516,10 +516,7 @@ type Prepared = {
   pausedWarned?: boolean
 }
 
-/** otto/mamoru#184: how long an account not yet observed since its loop started holds back the others' share room. */
-const PEER_GRACE_MS = 10 * 60_000
-
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; /** When (ms) this loop started. */ startedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -4770,6 +4767,7 @@ export class Operator {
         // The only owner intent the operator has today: a stop on its way pauses the engine (US6).
         intents: () => ({ paused: this.stopInFlight(acc), exitRequested: false }),
         peerPositions: () => this.peerPositionsOf(acc.accountKey),
+        onEntering: (pool) => this.markEntering(acc, pool),
       },
       {
         waitBlock: () => Bun.sleep(this.cfg.waitBlockMs),
@@ -4800,7 +4798,7 @@ export class Operator {
     // first tick then puts the floor a margin past the head it reads, so a provider still before it is not believed.
     const unsettled = acc.ops.some((o) => o.opId.startsWith('eng-') && o.state === 'submitted' && o.block === undefined)
     this.revokeManage(engine)
-    const runner: Runner = { engine, timer: null, stopped: false, startedAt: Date.now(), epoch: acc.epoch, run: acc.runs, seen: new Map(), alias: new Map() }
+    const runner: Runner = { engine, timer: null, stopped: false, epoch: acc.epoch, run: acc.runs, seen: new Map(), alias: new Map() }
     this.runners.set(acc.accountKey, runner)
     runner.floorPending = unsettled
     // Every move of an engine operation is stored as it happens: a restart in the middle of a review still knows
@@ -4967,9 +4965,9 @@ export class Operator {
    * otto/mamoru#184: every other account's positions, as its last decided review saw them, so depth sizing holds
    * Mamoru as a whole under the share limit of a pool, from `peerView`, which every account keeps across stops and
    * restarts (a lapsed session leaves its positions in the pool; a stop that withdrew them overcounts until the account
-   * runs again, never undercounts). Null while a running account with no view yet has not reached a decided review:
-   * the pool-wide share is unknown, and the account gets no share room until it is. One whose reviews keep failing
-   * holds the others back for PEER_GRACE_MS at most, then is left out.
+   * runs again, never undercounts). Null while an account that may hold positions (activated, with any admitted or
+   * managed id or none recorded yet) has no view: the pool-wide share is unknown and no account gets share room until it is seen. That
+   * fails closed for entries only, and is logged with the account that holds it up.
    */
   private peerPositionsOf(key: string): Pick<Observation, 'peerPositions' | 'peerEntering'> {
     const now = Date.now()
@@ -4979,14 +4977,27 @@ export class Operator {
       if (acc.accountKey === key) continue
       const v = acc.peerView
       if (!v) {
-        const r = this.runners.get(acc.accountKey)
-        if (r && !r.stopped && now - (r.startedAt ?? 0) < PEER_GRACE_MS) return { peerPositions: null }
-        continue
+        // Holds no Mamoru position: none admitted or managed, or never activated (the engine mints only after that).
+        if (acc.admittedTokenIds && acc.admittedTokenIds.length === 0 && acc.managedTokenIds.length === 0) continue
+        if (!acc.runs && !acc.ops.some((o) => o.kind === 'activate' && o.state === 'confirmed')) continue
+        if (now - this.peerUnknownLoggedAt > 60_000) {
+          this.peerUnknownLoggedAt = now
+          console.log(`[depth] no share room for new entries: ${acc.accountKey} may hold positions and has not been observed yet (otto/mamoru#184)`)
+        }
+        return { peerPositions: null }
       }
       for (const p of v.positions) positions.push({ ...p, pool: p.pool as RegistryName | null, liquidity: BigInt(p.liquidity) })
       if (v.entering) entering.add(v.entering as RegistryName)
     }
     return { peerPositions: positions, ...(entering.size ? { peerEntering: [...entering] } : {}) }
+  }
+
+  private peerUnknownLoggedAt = 0
+
+  /** otto/mamoru#184: an entry into `pool` was just proposed; the others see the pool as taken from this same step on. */
+  private markEntering(acc: AccountState, pool: RegistryName): void {
+    acc.peerView = { positions: acc.peerView?.positions ?? [], entering: pool }
+    this.store.save()
   }
 
   /**

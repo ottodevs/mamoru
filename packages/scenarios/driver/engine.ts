@@ -200,6 +200,12 @@ export type EngineConfig = {
    * (`Observation.peerPositions`, `peerEntering`). Absent: a single-account run.
    */
   peerPositions?: () => Pick<Observation, 'peerPositions' | 'peerEntering'>
+  /**
+   * otto/mamoru#184 (Sol review round 2): an operation that adds liquidity to `pool` was just proposed. Called in the
+   * same synchronous step as `peerPositions` and `decide`, before any await, so no other account's review can size
+   * against the room this one is taking.
+   */
+  onEntering?: (pool: RegistryName) => void
 }
 
 /** Live op states whose signed bytes may still land or have landed without being settled here (Engine.carried). */
@@ -524,6 +530,8 @@ export class Engine {
     const record = this.journal.recordDecision(decision, deduped ? 'REVIEW_DEDUPED' : undefined)
     if (!decision.proposal || deduped) return { kind: 'decided', observation: obs, record, op: null }
     const op = this.journal.propose(record, decision.proposal.grant)
+    const p = decision.proposal
+    if (p.kind === 'enter_mint' || p.kind === 'increase_liquidity' || p.kind === 'rerange') this.cfg.onEntering?.(p.pool)
     // An op settled RECON_UNINCLUDABLE is backed off where it is settled (`settlePending`).
     await this.run(op, obs, decision)
     return { kind: 'decided', observation: obs, record, op }
