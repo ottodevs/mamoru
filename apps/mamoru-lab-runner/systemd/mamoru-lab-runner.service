@@ -1,0 +1,40 @@
+# User unit (systemctl --user). Install at ~/.config/systemd/user/mamoru-lab-runner.service — see README.md in
+# this directory for the one-time setup (checkout path, env file, enabling it) and for why it is not installed by
+# this change.
+#
+# otto/mamoru#199, spec 008 phase 1 (B-12): claims Agent Lab bench jobs from the landing Worker's signed runner API
+# (`/ops/lab/runner/*`) and computes them with the production engine. Holds no wallet key, no RPC key and no D1
+# credential — only LAB_RUNNER_SECRET (the env file below) and local dataset files.
+#
+# WorkingDirectory/ExecStart point at a literal placeholder, REPLACE_WITH_MAMORU_CHECKOUT: a durable checkout of
+# ottodevs/mamoru on lady, never a Cursor worktree (this must survive the worktree it was built in being removed).
+# README.md documents creating it and keeping it on `main`.
+
+[Unit]
+Description=Mamoru Agent Lab bench runner (spec 008 phase 1, otto/mamoru#199)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/REPLACE_WITH_MAMORU_CHECKOUT
+ExecStart=/etc/profiles/per-user/otto/bin/bun run %h/REPLACE_WITH_MAMORU_CHECKOUT/apps/mamoru-lab-runner/src/cli.ts run
+EnvironmentFile=%h/.config/mamoru-lab-runner/env
+Restart=on-failure
+RestartSec=5
+# One sweep-sized job at a time, and never ahead of the operator or the app for CPU: half a core, lower priority.
+CPUQuota=50%
+Nice=10
+UMask=0077
+
+# Hardening: no privilege escalation, a private /tmp, and the whole home directory read-only — this unit writes
+# nothing under $HOME (no state dir, no generated secret) and nothing under the checkout; it only reads the env
+# file (systemd, before exec) and the dataset files.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target
