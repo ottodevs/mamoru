@@ -12,6 +12,7 @@
     "test": "bun test packages apps",
     "scenarios": "bun packages/scenarios/runner/cli.ts",
     "scenarios:monad": "bun packages/scenarios/monad/cli.ts",
+    "monad:deploy-policies": "bun scripts/monad/deploy-policies.ts",
     "sync:once": "bun run --cwd apps/mamoru-engine sync:once",
     "mb:probe": "bun run --cwd apps/mamoru-engine mb:probe",
     "operator": "bun apps/mamoru-operator/src/main.ts",
