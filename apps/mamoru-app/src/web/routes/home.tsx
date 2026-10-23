@@ -255,6 +255,7 @@ function PositionRow({ p, r }: { p: FundingView['positions'][number]; r: Positio
           ) : (
             venue
           )}
+          <span data-testid="position-chain"> · {chain.name}</span>
           {p.inRange ? <span className="text-emerald"> · {homeCopy.inRange}</span> : null}
         </span>
       </span>
@@ -935,7 +936,7 @@ function StartRow({ accountKey, funded }: { accountKey: string; funded: boolean 
   )
 }
 
-export function HomeView({ accountKey, sleeves = null }: { accountKey: string; sleeves?: ReactNode }) {
+export function HomeView({ accountKey }: { accountKey: string }) {
   const api = useApi()
   const ops = useOps(accountKey, true)
   const yieldLedger = useYieldLedger(accountKey)
@@ -1044,7 +1045,6 @@ export function HomeView({ accountKey, sleeves = null }: { accountKey: string; s
       <header className="mb-7">
         <Brand />
       </header>
-      {sleeves}
       <Balance s={s} earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd} onAdd={addMoney} onWithdraw={() => withdraw()} />
       <Indicators f={f} apy={apy.data} price={price} />
       <WrongNetwork accountKey={accountKey} />
