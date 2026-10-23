@@ -21,6 +21,11 @@ const opt = (n: string, d: string) => (argv.includes(`--${n}`) ? argv[argv.index
 const here = import.meta.dir
 const sweep = JSON.parse(readFileSync(opt('sweep', join(here, 'lp.sweep.json')), 'utf8')) as { cells: Cell[] }
 const data = JSON.parse(readFileSync(opt('data', join(here, '..', 'raw', 'stables-4626-data.json')), 'utf8')) as Data
+// Review #186 round 2: data fetched before the creation gate has no `created` or `convention`; scoring it would let a
+// vault count before its contract existed. Refuse it instead of reading it as the new shape.
+for (const v of data.vaults as unknown as Record<string, unknown>[]) {
+  if (typeof v.created !== 'number' || (v.convention !== 'apy' && v.convention !== 'apr')) throw new Error(`stale data for ${String(v.name)}: re-run fetch.ts`)
+}
 
 type Cell = { window: string; split: string; regime: string; variant: string; deposit: number; status: string; metrics?: { returnPct: number; vsHoldPct: number; end: number; hold: number; ops: number; gas: number; fees: number } }
 type VaultData = { id: string; name: string; address: string; created: number; convention: RateConvention; llamaIs: 'vault' | 'reserve'; apy: [number, number | null, number | null][]; morpho: null | { created: number; now: Record<string, unknown>; sharePrice: [number, number][]; totalAssetsUsdM: [number, number][] } }
