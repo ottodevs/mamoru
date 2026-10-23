@@ -61,6 +61,11 @@ export type PoolLedger = {
    * or reduce) and the compounded liquidity's share of a position a re-range or reduce took out, per token.
    */
   inKind: Record<RegistryName, bigint>
+  /**
+   * Compound arm: the compounded share a re-range or reduce took out, per token, until the pool's next mint or increase
+   * takes it back in (then it is compounded liquidity of that position again). What is left at the end counts in kind.
+   */
+  carry: Record<RegistryName, bigint>
 }
 
 export type HarvestLedger = {
@@ -91,7 +96,7 @@ export function recordEarned(l: HarvestLedger, e: RegistryEntry, fees0: bigint, 
 }
 
 export function poolLedger(l: HarvestLedger, pool: RegistryName): PoolLedger {
-  return (l.pools[pool] ??= { collected: {}, collectedValue: 0n, fees: 0n, earned: {}, harvests: 0, swaps: 0, increases: 0, converted: {}, convertedValue: 0n, swapOut: 0n, direct: 0n, gas: 0n, swapLoss: 0n, pending: {}, inKind: {} })
+  return (l.pools[pool] ??= { collected: {}, collectedValue: 0n, fees: 0n, earned: {}, harvests: 0, swaps: 0, increases: 0, converted: {}, convertedValue: 0n, swapOut: 0n, direct: 0n, gas: 0n, swapLoss: 0n, pending: {}, inKind: {}, carry: {} })
 }
 
 function add(r: Record<RegistryName, bigint>, token: RegistryName, amount: bigint): void {
@@ -135,7 +140,8 @@ export function divertFees(l: HarvestLedger, w: World, e: RegistryEntry, ps: Poo
 
 /**
  * Compound arm, before a re-range or reduce of `pos` takes out `removed` liquidity: the compounded share of what comes
- * out. `commit` books it once the operation went through: those tokens are in the account in kind from then on.
+ * out. `commit` books it once the operation went through: those tokens wait in `carry` for the pool's next mint or
+ * increase (a re-range's replacement position), which takes them back as compounded liquidity (`absorbCarry`).
  */
 export function compoundedShare(l: HarvestLedger, pos: SimPosition, removed: bigint, sqrtPriceX96: bigint): { commit: () => void } {
   const added = l.compounded.get(pos.tokenId) ?? 0n
@@ -146,11 +152,24 @@ export function compoundedShare(l: HarvestLedger, pos: SimPosition, removed: big
   return {
     commit: () => {
       const pl = poolLedger(l, pos.pool)
-      add(pl.inKind, e.token0!, out.amount0)
-      add(pl.inKind, e.token1!, out.amount1)
+      add(pl.carry, e.token0!, out.amount0)
+      add(pl.carry, e.token1!, out.amount1)
       l.compounded.set(pos.tokenId, added - share)
     },
   }
+}
+
+/**
+ * Compound arm, after a mint or increase in a pool with a carried compounded share: the new liquidity `added`, bought
+ * with tokens worth `usedValue`, is compounded liquidity of `tokenId` up to what the carry is worth (`carryValue`, same
+ * price); the carry shrinks by the part taken, token by token in proportion.
+ */
+export function absorbCarry(l: HarvestLedger, pool: RegistryName, tokenId: bigint, added: bigint, usedValue: bigint, carryValue: bigint): void {
+  const pl = l.pools[pool]
+  if (!pl || carryValue === 0n || usedValue === 0n || added === 0n) return
+  const taken = carryValue < usedValue ? carryValue : usedValue
+  l.compounded.set(tokenId, (l.compounded.get(tokenId) ?? 0n) + (added * taken) / usedValue)
+  for (const t of Object.keys(pl.carry)) pl.carry[t] = pl.carry[t]! - (pl.carry[t]! * taken) / carryValue
 }
 
 /** Compound arm: fees a re-range or reduce collected stay in the account in kind. */
@@ -311,6 +330,9 @@ export function accrueYield(l: HarvestLedger, stableFees: bigint, stableValue: b
  */
 export function driftStep(l: HarvestLedger, obs: Observation, policy: PolicyVersion): void {
   const savings = policy.savingsAsset
+  // A pool listed by two buckets would give each the full value of its positions: no policy under test does it.
+  const listed = policy.buckets.flatMap((b) => b.pools)
+  if (new Set(listed).size !== listed.length) throw new Error(`${policy.policyId}: two buckets share a pool; drift would count its positions twice`)
   const live = policy.buckets.filter((b) => b.pools.length > 0)
   if (!l.drift.entered) l.drift.entered = live.length > 0 && live.every((b) => obs.positions.some((x) => !!x.pool && b.pools.includes(x.pool)))
   if (!l.drift.entered) return
@@ -420,7 +442,7 @@ export function harvestReport(l: HarvestLedger, w: World, ds: { pools: RegistryN
         const whole = price(last, e.token0!, a.amount0 + p.owed0) + price(last, e.token1!, a.amount1 + p.owed1)
         return n + (whole * added) / p.liquidity
       }, 0n)
-      const captured = l.arm.kind === 'savings' ? pl.direct + pl.swapOut - pl.gas : l.arm.kind === 'compound' ? lpShare + atEnd(pl.inKind) - pl.gas : atEnd(pl.collected) - pl.gas
+      const captured = l.arm.kind === 'savings' ? pl.direct + pl.swapOut - pl.gas : l.arm.kind === 'compound' ? lpShare + atEnd(pl.inKind) + atEnd(pl.carry) - pl.gas : atEnd(pl.collected) - pl.gas
       const unconverted = l.arm.kind === 'savings' ? atEnd(pl.pending) : 0n
       const exposureRemoved = l.arm.kind === 'savings' ? pl.convertedValue - atEnd(pl.converted) : 0n
       const uncollected = w.positions.filter((p) => p.pool === pool).reduce((n, p) => n + price(last, e.token0!, p.owed0) + price(last, e.token1!, p.owed1), 0n)

@@ -4,7 +4,7 @@ import { amountsOf, canonicalJson, decide, pegDeviationBps, pegStep, PEG_CLEAR, 
 import { computeCaps, grantKey, policyHash, usageLimitFor, type Caps, type GrantTemplate, type PolicyVersion, type Price } from '@mamoru/policy'
 import { baseRegistry, entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
 import { token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
-import { accrueYield, compoundedShare, divertFees, driftStep, harvestReport, heldOutside, keepInKind, labHarvest, newLedger, poolLedger, recordCollect, recordEarned, type HarvestLedger } from './harvest.ts'
+import { absorbCarry, accrueYield, compoundedShare, divertFees, driftStep, harvestReport, heldOutside, keepInKind, labHarvest, newLedger, poolLedger, recordCollect, recordEarned, type HarvestLedger } from './harvest.ts'
 import { emaTickOf, ETH_PRICE_POOL, observe, twapTick } from './observe.ts'
 import type { Dataset, GasModel, Metrics, OpEntry, OpKind, PoolSample, RunResult, Sample, SessionUse, SimConfig } from './types.ts'
 import { accrue, apply, inRange, newWorld, valueIn, type World } from './world.ts'
@@ -383,7 +383,16 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
         // Lab (#178) compound arm: the compounded share of what a re-range or reduce takes out, booked if it goes through.
         const held = 'tokenId' in p ? w.positions.find((x) => x.tokenId === p.tokenId) : undefined
         const share = lab?.arm.kind === 'compound' && held && (p.kind === 'rerange' || p.kind === 'reduce') ? compoundedShare(lab, held, p.kind === 'reduce' ? p.liquidity : held.liquidity, ps.sqrtPriceX96) : null
+        // Lab (#178) compound arm: what a mint or increase spends, to take a carried compounded share back in.
+        const carrying = lab?.arm.kind === 'compound' && (p.kind === 'enter_mint' || p.kind === 'increase_liquidity') ? Object.entries(lab.pools[p.pool]?.carry ?? {}).reduce((n, [t, a]) => n + price(s, t, a), 0n) : 0n
+        const before = carrying > 0n ? { b0: w.balances[e.token0!] ?? 0n, b1: w.balances[e.token1!] ?? 0n, l: 'tokenId' in p ? (held?.liquidity ?? 0n) : 0n } : null
         const done = apply(w, p, ps, s.time, policy.execution.slippageBps)
+        if (lab && before && done.ok) {
+          const id = p.kind === 'enter_mint' ? w.nextTokenId - 1n : (p as { tokenId: bigint }).tokenId
+          const pos = w.positions.find((x) => x.tokenId === id)
+          const used = price(s, e.token0!, before.b0 - (w.balances[e.token0!] ?? 0n)) + price(s, e.token1!, before.b1 - (w.balances[e.token1!] ?? 0n))
+          if (pos) absorbCarry(lab, p.pool, id, pos.liquidity - before.l, used, carrying)
+        }
         const cost = done.ok ? gasCost(ds, s, p.kind, gas, savings) : 0n
         ops.push({
           i, block: s.block, time: s.time, kind: p.kind, pool: p.pool, grant: p.grant, code: d.code, reason: d.reason, trail: d.trail, ok: done.ok,

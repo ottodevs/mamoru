@@ -4,11 +4,11 @@ import { baseRegistry, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { POOLS, syntheticDataset } from './fixtures.ts'
 import { amountsOf, type Observation } from '@mamoru/decide'
-import { accrueYield, armName, divertFees, driftStep, estimate, harvestReport, labHarvest, newLedger, poolLedger, recordEarned, triggers, type HarvestArm } from './harvest.ts'
+import { absorbCarry, accrueYield, armName, compoundedShare, divertFees, driftStep, estimate, harvestReport, labHarvest, newLedger, poolLedger, recordEarned, triggers, type HarvestArm } from './harvest.ts'
 import { runBacktest } from './run.ts'
 import { policyOf } from './sweep.ts'
 import type { PoolSample } from './types.ts'
-import { newWorld, type SimPosition } from './world.ts'
+import { apply, newWorld, type SimPosition } from './world.ts'
 
 const USDC = 1_000_000n
 const SLOW = 60_000
@@ -261,4 +261,65 @@ describe('review fixes', () => {
     expect(run.increases).toBeGreaterThan(0)
     expect(run.captured).toBeGreaterThan(0n)
   }, SLOW)
+})
+
+// Review round 2 of c9971fc (GPT-6 Sol), one test per finding.
+describe('review fixes, round 2', () => {
+  const ds = syntheticDataset({ samples: 2 })
+  const s0 = ds.samples[0]!
+  const eth = entry(POOLS[2], baseRegistry)
+  const ps = s0.pools[2]!
+  const tick = ps.tick
+
+  test('1: a re-range mints nothing in the same call; diverting its fees takes exactly them, never other balances', () => {
+    const l = newLedger(SAVINGS)
+    const w = newWorld('USDC', 0n)
+    // Spare tokens the fees must not be taken from.
+    w.balances = { USDC: 5n * USDC, WETH: 3n * 10n ** 15n }
+    w.positions.push({ tokenId: 1n, pool: POOLS[2], tickLower: tick - 600, tickUpper: tick + 600, liquidity: 10n ** 15n, owed0: 10n ** 14n, owed1: 300_000n })
+    const out = amountsOf(ps.sqrtPriceX96, tick - 600, tick + 600, 10n ** 15n)
+    const done = apply(w, { kind: 'rerange', grant: 'manage:1', pool: POOLS[2], tokenId: 1n } as never, ps, s0.time, 50)
+    expect(done.ok).toBe(true)
+    // The replacement is a later mint of `decide`: the account holds every token of the old position until then.
+    expect(w.positions).toHaveLength(0)
+    if (!done.ok) return
+    divertFees(l, w, eth, ps, done.fees0, done.fees1, 'USDC')
+    expect(w.balances).toEqual({ USDC: 5n * USDC + out.amount1, WETH: 3n * 10n ** 15n + out.amount0 })
+    expect(l.savings).toBe(300_000n)
+    expect(poolLedger(l, POOLS[2]).pending.WETH).toBe(10n ** 14n)
+  })
+
+  test('2: the compounded share a re-range takes out is carried into the replacement position', () => {
+    const l = newLedger(COMPOUND)
+    const old: SimPosition = { tokenId: 1n, pool: POOLS[2], tickLower: tick - 600, tickUpper: tick + 600, liquidity: 4n * 10n ** 15n, owed0: 0n, owed1: 0n }
+    l.compounded.set(1n, 10n ** 15n)
+    compoundedShare(l, old, old.liquidity, ps.sqrtPriceX96).commit()
+    const pl = poolLedger(l, POOLS[2])
+    expect(l.compounded.get(1n)).toBe(0n)
+    expect(pl.carry.WETH).toBeGreaterThan(0n)
+    // The re-mint spends 4 units of value, the carry is worth 1: a quarter of its liquidity is compounded again.
+    absorbCarry(l, POOLS[2], 2n, 8n * 10n ** 15n, 4_000n, 1_000n)
+    expect(l.compounded.get(2n)).toBe(2n * 10n ** 15n)
+    expect(pl.carry.WETH).toBe(0n)
+    expect(pl.carry.USDC ?? 0n).toBe(0n)
+    // A mint smaller than the carry takes part of it; the rest waits.
+    const l2 = newLedger(COMPOUND)
+    poolLedger(l2, POOLS[2]).carry = { WETH: 1_000n, USDC: 2_000n }
+    absorbCarry(l2, POOLS[2], 3n, 100n, 1_000n, 4_000n)
+    expect(l2.compounded.get(3n)).toBe(100n)
+    expect(poolLedger(l2, POOLS[2]).carry).toEqual({ WETH: 750n, USDC: 1_500n })
+  })
+
+  test('2: in a run with re-ranges, B never values more than the fees it earned plus their compounding', () => {
+    const path = (k: number, i: number) => (k === 0 ? 0 : Math.round(Math.sin(i / 25) * 2_500))
+    const r = runBacktest(syntheticDataset({ samples: 400, growth: GROWTH, tick: path }), conservadorLiveV2, { deposit: DEPOSIT, harvest: COMPOUND })
+    expect(r.metrics.operations.rerange).toBeGreaterThan(0)
+    expect(r.harvest!.increases).toBeGreaterThan(0)
+    expect(r.harvest!.captured).toBeGreaterThan(0n)
+  }, SLOW)
+
+  test('3: drift refuses a policy whose buckets share a pool', () => {
+    const shared = { ...conservadorLiveV2, buckets: conservadorLiveV2.buckets.map((b) => (b.id === 'risk' ? { ...b, pools: [POOLS[1]] } : b)) }
+    expect(() => driftStep(newLedger(SAVINGS), { pools: [], positions: [], balances: {} } as unknown as Observation, shared)).toThrow(/share a pool/)
+  })
 })

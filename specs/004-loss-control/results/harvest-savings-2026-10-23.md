@@ -8,10 +8,9 @@ Simulator `backtest-1`, production `decide`, policy `conservador-live-v2` (50/40
 1,000, 5,000 and 25,000 USDC. TRAIN: 7 windows (aug2024 skipped: no cbBTC on Base yet). TEST: 5 windows, run **once**
 with the TRAIN picks. Datasets already on disk, no RPC.
 
-**Revision 2 (after review of a1637b0, GPT-6 Sol, five P1 measurement findings).** All numbers below are from the
-re-run; the change log and a before/after table are at the end ("Revision after review"). The picks, the ordering of
-the arms, the minimum-deposit result and the recommendation did not change; A's captured fell slightly at most
-deposits and B's fell at every deposit.
+**Revision 3 (after two review rounds, GPT-6 Sol: five, then three P1 measurement findings).** All numbers below are
+from the latest re-run; the change log and before/after tables are at the end ("Revision after review"). The picks,
+the ordering of the arms, the minimum-deposit result and the recommendation did not change.
 
 ## Arms
 
@@ -43,8 +42,9 @@ Sessions do not limit the arm's own operations (the live `convert-any` grant wou
   swaps; volatile fees collected and not sold yet are reported as *unconverted*, not captured. Live: every fee
   collected, held in kind and valued at the end price, − the gas of its collects. B: the compounded liquidity's share
   of each position at the end (its amounts and the fees owed on it), plus what stayed in the account in kind (what an
-  increase could not take, the collect of a re-range or reduce, the compounded share a re-range or reduce took out) at
-  the end price, − the gas of its collects and increases. Fees still in positions at the end count for no arm
+  increase could not take, the collect of a re-range or reduce) at the end price. The compounded share a re-range or
+  reduce takes out is carried into the pool's next mint or increase (a re-range's replacement) as compounded liquidity
+  again, up to its value; what no mint takes back counts in kind at the end price. Then − the gas of its collects and increases. Fees still in positions at the end count for no arm
   (reported apart). Every run checks, token by token, that each fee unit earned was either collected or is still owed.
 - **Exposure removed (metric 3).** A: Σ over sales of (value of the volatile fees sold, at the pool mid, at the sale) −
   (the same tokens at the window's end price). Positive: holding them would have lost that much. Live and B: 0.
@@ -79,9 +79,9 @@ Score, % of fees captured net of cost (`raw/harvest-train-score.md`):
 | A-k10 / -T7d | 88.46 / 88.87 | 82.48 / 84.01 | 89.58 / 90.04 | 87.69 / 87.77 | 8,746 |
 | **A-k20 / -T7d** | 89.80 / **90.87** | 83.66 / **85.24** | 90.64 / **91.84** | 89.58 / **90.32** | 5,284 / 5,334 |
 | A-k50 / -T7d | 83.76 / 87.14 | 69.93 / 78.75 | 86.97 / 89.22 | 81.14 / 85.22 | 2,512 |
-| B-k10 | 89.03 | 84.55 | 89.73 | 88.90 | 8,185 |
-| **B-k20** | **89.78** | 86.58 | 90.82 | 88.70 | 4,938 |
-| B-k50 | 87.84 | 78.03 | 89.03 | 88.07 | 2,344 |
+| B-k10 | 88.59 | 84.55 | 89.49 | 88.00 | 8,185 |
+| **B-k20** | **89.43** | 86.57 | 90.72 | 87.82 | 4,938 |
+| B-k50 | 87.53 | 78.03 | 88.92 | 87.35 | 2,344 |
 
 (B-k2..k5 track A-k2..k5 within a point; full table in the raw file.)
 
@@ -98,10 +98,10 @@ At the pick, per deposit (means over the 7 windows; exposure summed over the 4 c
 | 100 | B-k20 | 0.99 | 0 | 0 | 2.16 | 18 | 0 | 0.83 | -1.68 |
 | 1,000 | live | 12.54 | 0 | 0 | 1.92 | 237 | 0 | 0.84 | -0.36 |
 | 1,000 | A-k20-T7d | 12.18 | 0.57 | -0.21 | 4.47 | 273 | 275 | 0.87 | -0.43 |
-| 1,000 | B-k20 | 12.12 | 0 | 0 | 3.87 | 234 | 0 | 0.82 | -0.51 |
+| 1,000 | B-k20 | 12.06 | 0 | 0 | 3.87 | 234 | 0 | 0.82 | -0.51 |
 | 25,000 | live | 310.17 | 0 | 0 | 1.66 | 3,421 | 0 | 0.83 | -0.27 |
 | 25,000 | A-k20-T7d | 301.53 | 16.11 | -5.57 | 3.65 | 3,791 | 3,749 | 0.99 | -0.62 |
-| 25,000 | B-k20 | 304.93 | 0 | 0 | 3.63 | 3,573 | 0 | 0.86 | -0.43 |
+| 25,000 | B-k20 | 302.87 | 0 | 0 | 3.63 | 3,573 | 0 | 0.86 | -0.43 |
 
 Swaps can exceed harvests: a swap of its own sells volatile fees a re-range left in a pool with no position.
 
@@ -111,44 +111,45 @@ Swaps can exceed harvests: a swap of its own sells volatile fees a re-range left
 |---|---|---|---|---|---|---|---|---|---|
 | 100 | live | 1.77 | 0 | 0 | 1.47 | 41 | 0 | 0.75 | -2.75 |
 | 100 | A-k20-T7d | 1.70 | 0.03 | -0.04 | 4.97 | 53 | 56 | 0.85 | -2.59 |
-| 100 | B-k20 | 1.71 | 0 | 0 | 2.69 | 35 | 0 | 0.75 | -2.47 |
+| 100 | B-k20 | 1.70 | 0 | 0 | 2.69 | 35 | 0 | 0.75 | -2.47 |
 | 500 | live | 9.28 | 0 | 0 | 1.76 | 190 | 0 | 0.77 | -0.42 |
 | 500 | A-k20-T7d | 8.88 | 0.20 | -0.15 | 4.00 | 206 | 206 | 0.79 | -0.43 |
-| 500 | B-k20 | 8.99 | 0 | 0 | 3.68 | 185 | 0 | 0.76 | -0.39 |
+| 500 | B-k20 | 8.92 | 0 | 0 | 3.68 | 185 | 0 | 0.76 | -0.39 |
 | 1,000 | live | 18.54 | 0 | 0 | 1.70 | 345 | 0 | 0.77 | -0.08 |
 | 1,000 | A-k20-T7d | 17.88 | 0.41 | -0.29 | 3.87 | 355 | 358 | 0.80 | -0.12 |
-| 1,000 | B-k20 | 18.15 | 0 | 0 | 3.65 | 337 | 0 | 0.73 | -0.01 |
+| 1,000 | B-k20 | 18.04 | 0 | 0 | 3.65 | 337 | 0 | 0.73 | -0.01 |
 | 5,000 | live | 89.61 | 0 | 0 | 1.52 | 1,260 | 0 | 1.02 | +0.22 |
 | 5,000 | A-k20-T7d | 89.64 | 2.11 | -1.67 | 3.22 | 1,310 | 1,296 | 0.76 | +0.26 |
-| 5,000 | B-k20 | 90.04 | 0 | 0 | 3.18 | 1,257 | 0 | 0.76 | +0.23 |
+| 5,000 | B-k20 | 89.48 | 0 | 0 | 3.18 | 1,257 | 0 | 0.76 | +0.23 |
 | 25,000 | live | 417.21 | 0 | 0 | 1.14 | 3,726 | 0 | 1.23 | +0.18 |
 | 25,000 | A-k20-T7d | 415.45 | 9.13 | -8.45 | 2.71 | 3,930 | 3,712 | 0.81 | +0.04 |
-| 25,000 | B-k20 | 421.19 | 0 | 0 | 2.70 | 3,757 | 0 | 0.77 | +0.05 |
+| 25,000 | B-k20 | 418.62 | 0 | 0 | 2.70 | 3,757 | 0 | 0.77 | +0.05 |
 
 Per pool on TEST (all deposits pooled; captured and cost as % of the pool's fees):
 
 | Pool | live captured / cost | A-k20-T7d captured / cost | B-k20 captured / cost | A exposure removed, crash / all |
 |---|---|---|---|---|
-| USDC/USDT 0.01% | 99.02 / 0.51 | 98.55 / 1.03 | 98.69 / 0.93 | 0 / -0.26 |
-| USDC/cbBTC 0.05% | 98.81 / 1.28 | 96.92 / 2.94 | 96.48 / 3.10 | +5.95 / -2.45 |
-| WETH/USDC 0.3% | 99.45 / 1.33 | 96.59 / 3.25 | 96.69 / 2.95 | +5.94 / -7.90 |
+| USDC/USDT 0.01% | 99.02 / 0.51 | 98.55 / 1.03 | 98.67 / 0.93 | 0 / -0.26 |
+| USDC/cbBTC 0.05% | 98.81 / 1.28 | 96.92 / 2.94 | 95.82 / 3.10 | +5.95 / -2.45 |
+| WETH/USDC 0.3% | 99.45 / 1.33 | 96.59 / 3.25 | 96.03 / 2.95 | +5.94 / -7.90 |
 
-TEST confirms TRAIN: same ordering (live > B-k20 ≥ A-k20-T7d on captured, A ahead of B on cbBTC alone), cost/fees 2.7-5.0% for A against 1.1-1.8%
+TEST confirms TRAIN: same ordering (live > B-k20 ≥ A-k20-T7d on captured overall; per pool A is ahead of B on cbBTC and WETH, behind on the stables pool), cost/fees 2.7-5.0% for A against 1.1-1.8%
 for live, A removes exposure in the crash window at every deposit, and gives it back in the rally and calm windows.
 
 ## Where A beats B, window by window (A-k20-T7d − B-k20, captured)
 
 | Window | Regime | 1,000 | 25,000 | A exposure removed at 25,000 |
 |---|---|---|---|---|
-| mar2025 (T) | crash | +1.33 | +12.36 | +14.89 |
-| apr2025 (TEST) | crash | +0.31 | +9.76 | +9.13 |
-| calm-2026-05 (TEST) | calm | +0.32 | +10.55 | +6.88 |
-| sep2026 (T) | calm | +0.05 | -9.30 | -7.50 |
-| feb2025 (T) | crash | -0.28 | -5.99 | +2.47 |
-| oct2025 (T) | crash | -0.30 | -2.49 | -1.25 |
-| dec2024 (T) | rally | -0.03 | -10.99 | -10.40 |
-| feb2026 (TEST) | stable-stress | -1.39 | -34.09 | -17.00 |
-| other calm and rally windows | | -0.11 to -0.48 | -2.1 to -10.5 | -4.7 to +0.9 |
+| mar2025 (T) | crash | +1.44 | +19.67 | +14.89 |
+| apr2025 (TEST) | crash | +0.23 | +10.06 | +9.13 |
+| calm-2026-05 (TEST) | calm | +0.30 | +10.35 | +6.88 |
+| calm-2025-09 (T) | calm | -0.04 | +0.69 | +0.94 |
+| sep2026 (T) | calm | +0.03 | -9.64 | -7.50 |
+| feb2025 (T) | crash | -0.14 | -4.03 | +2.47 |
+| oct2025 (T) | crash | -0.28 | -1.41 | -1.25 |
+| dec2024 (T) | rally | -0.01 | -9.00 | -10.40 |
+| feb2026 (TEST) | stable-stress | -1.00 | -24.11 | -17.00 |
+| other calm and rally windows | | -0.13 to -0.20 | -5.0 to -7.2 | -4.7 to -3.0 |
 
 The sign follows the path of BTC/ETH between each sale and the window's end, not the deposit. In oct2025 and feb2026
 the fall came and recovered inside the window, so fees sold near the low lost against holding them; in feb2025 the
@@ -158,7 +159,7 @@ fall was early and the end price was still lower, but A's extra swap cost was la
 
 | | TRAIN | TEST |
 |---|---|---|
-| A-k20-T7d beats B-k20 on (1) mean captured **and** (3) crash exposure, at every deposit from | **none in the grid** (wins at 100 and 1,000, loses at 500, 5,000, 25,000) | **none in the grid** (loses at every deposit, by 0.5-1.5% of fees) |
+| A-k20-T7d beats B-k20 on (1) mean captured **and** (3) crash exposure, at every deposit from | **none in the grid** (wins at 100 and 1,000, loses at 500, 5,000, 25,000) | **none in the grid** (wins only at 5,000, by 0.2% of fees; loses at 100, 500, 1,000 and 25,000, by 0.2-0.9%) |
 | A captures positive net USDC savings from | 100 | 100 |
 | A removes exposure in the crash windows (sum > 0) from | 100 | 100 |
 
@@ -184,7 +185,7 @@ floor 10× up.
 
 1. **"Profits become USDC" is honest at k = 20, T = 7 d, for all three pools**, priced on the real cost of a collect
    plus a swap (not the 5.1M-gas userOp budget live uses). It keeps almost all the fees: 95-97% net of cost against
-   96-99% for live and B. What it costs: about **2 pp more of the fees** than live (3.9% vs 1.7% at 1,000, TEST),
+   96-99% for live and B (B 96-99% after the round-2 correction). What it costs: about **2 pp more of the fees** than live (3.9% vs 1.7% at 1,000, TEST),
    i.e. 0.4-0.6 USDC per 1,000 per month; the same as compounding in kind (B).
 2. **Do not sell it as protection.** The exposure it removes is small and two-sided: +0.4 USDC per 1,000 in the
    TEST crash week (0.04% of the account), −0.3 over all TEST windows. It neither raises nor lowers value vs hold in a
@@ -281,3 +282,25 @@ by up to 0.7% of fees; A at 100 USDC was overstated by the pending fees (finding
 because selling stranded fees changed later harvests (path). What did not: the picks (k = 20, T = 7 d), the arm
 order, A losing to B on mean captured at every TEST deposit and winning on crash exposure, no minimum deposit in the
 grid, the floor (~250 USDC volatile pools, ~1,000 stables pool), and the recommendation.
+
+### Round 2 (review of c9971fc)
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | Diversion debits the account after `apply`; if the re-range reinvested its fees into the replacement position the debit would take unrelated balances. | Checked: `apply`'s re-range collects to the account, takes the liquidity out and removes the position; it mints nothing. The replacement is a later enter-mint of `decide`, a separate review. So diverting right after `apply`, in the same step, takes exactly the fees that call credited. A test pins it (spare balances untouched, no position after the re-range). No change to the code path, no number changes. |
+| 2 | B: the compounded share a re-range takes out was booked as tokens held in kind and dropped from the replacement position. | The share is carried (`carry`) into the pool's next mint or increase and becomes compounded liquidity of that position again, up to its value; what no mint takes back counts in kind. Tests on the carry and on a run with re-ranges. |
+| 3 | Drift: two buckets listing the same pool would each count its positions. | No policy under test shares a pool; `driftStep` now refuses such a policy with an error (test). No number changes. |
+
+Re-run: only B cells changed result hash (every live and A cell is identical). Before → after, B-k20 mean captured:
+
+| Deposit | TRAIN | TEST | TEST A − B |
+|---|---|---|---|
+| 100 | 0.99 → 0.99 | 1.71 → 1.70 | -0.01 → -0.00 |
+| 500 | 5.99 → 5.97 | 8.99 → 8.92 | -0.10 → -0.04 |
+| 1,000 | 12.12 → 12.06 | 18.15 → 18.04 | -0.28 → -0.16 |
+| 5,000 | 61.29 → 61.05 | 90.04 → 89.48 | -0.41 → +0.16 |
+| 25,000 | 304.93 → 302.87 | 421.19 → 418.62 | -5.75 → -3.18 |
+
+TRAIN score B-k20 89.78 → 89.43% (still the B pick; B-k10..k50 each fell 0.3-0.4 pp). Changed: B is lower by
+0.2-0.7% of fees; on TEST A now edges B at 5,000. Not changed: picks, overall order, no minimum deposit in the grid
+(A still loses at 25,000 on TEST and at 500, 5,000, 25,000 on TRAIN), floor, recommendation.
