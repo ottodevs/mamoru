@@ -8,12 +8,14 @@
 //
 // Idempotent: a policy with its Base code is not redeployed, one with its ModuleRecord is not re-registered. The key is
 // read from the environment only and never printed.
-import { createPublicClient, createWalletClient, defineChain, http, type Hex, type PublicClient } from 'viem'
+import { createPublicClient, createWalletClient, defineChain, http, keccak256, type Hex, type PublicClient } from 'viem'
+import { entry, monadRegistry } from '@mamoru/registry'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import {
   ARACHNID_DEPLOYER,
   MODULE_REGISTRY,
+  MULTICALL3,
   MONAD_CHAIN_ID,
   RESOLVER_UID,
   estimate,
@@ -79,15 +81,13 @@ async function main(): Promise<void> {
   // Preconditions on the chain: the Arachnid deployer and ModuleRegistry exist.
   if (((await client.getCode({ address: ARACHNID_DEPLOYER })) ?? '0x') === '0x') fail(`Arachnid CREATE2 deployer ${ARACHNID_DEPLOYER} has no code`)
   if (((await client.getCode({ address: MODULE_REGISTRY })) ?? '0x') === '0x') fail(`ModuleRegistry ${MODULE_REGISTRY} has no code`)
+  const mc = (await client.getCode({ address: MULTICALL3 })) ?? '0x'
+  if (mc === '0x') fail(`Multicall3 ${MULTICALL3} has no code (deploy+register must be one tx)`)
+  if (keccak256(mc) !== entry('Multicall3', monadRegistry).codeHash) fail(`Multicall3 ${MULTICALL3} code hash ${keccak256(mc)} is not monad.json's pin`)
 
   // The specs check (offline) that the Base calldata CREATE2s to the Base registry address.
   const specs = policySpecs()
-  const baseRuntime: Record<string, Hex> = {}
-  for (const s of specs) {
-    const code = (await base.getCode({ address: s.address })) ?? '0x'
-    if (code === '0x') fail(`${s.name}: no code on Base at ${s.address}`)
-    baseRuntime[s.name] = code
-  }
+  for (const s of specs) if (((await base.getCode({ address: s.address })) ?? '0x') === '0x') fail(`${s.name}: no code on Base at ${s.address}`)
 
   const plans: PolicyPlan[] = []
   for (const s of specs) {
@@ -108,15 +108,15 @@ async function main(): Promise<void> {
     return
   }
 
-  const lines = await estimate(client, from, steps, baseRuntime)
+  const lines = await estimate(client, from, steps)
   const gasPrice = await client.getGasPrice()
   const fees = await client.estimateFeesPerGas().catch(() => null)
   const maxFee = fees?.maxFeePerGas ?? gasPrice
   const need = totalCost(lines, maxFee)
   const balance = await client.getBalance({ address: from })
 
-  console.log(`\nplan (Monad charges gas LIMIT x price):`)
-  for (const l of lines) console.log(`  ${l.step.kind.padEnd(8)} ${l.step.name.padEnd(17)} estimate ${l.estimate} (${l.estimatedWith}) -> limit ${l.limit} = ${formatMon(l.limit * maxFee)} MON`)
+  console.log(`\nplan (one tx per line; deploy+register is atomic via Multicall3 ${MULTICALL3}; Monad charges gas LIMIT x price):`)
+  for (const l of lines) console.log(`  ${l.step.kind.padEnd(15)} ${l.step.name.padEnd(17)} estimate ${l.estimate} -> limit ${l.limit} = ${formatMon(l.limit * maxFee)} MON`)
   console.log(`  gas price ${gasPrice} wei (${Number(gasPrice) / 1e9} gwei), max fee used ${maxFee} wei`)
   console.log(`  total     ${formatMon(totalCost(lines, gasPrice))} MON at gas price, ${formatMon(need)} MON at max fee`)
   console.log(`  balance   ${formatMon(balance)} MON at ${from}`)
