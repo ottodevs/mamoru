@@ -84,8 +84,8 @@ describe('routes', () => {
     }
     const one: FundingView = { ...funded, positions: [{ tokenId: '1', pool: 'pool:USDC/cbBTC/500', liquidity: '1', inRange: true, amountUsdc: '5000000', amountCbbtc: '0', valueUsdc: '5000000' }] }
     const { text, html } = await renderRoute('/', fixtureSession, one, { apy })
-    expect(text).toContain('5.9% Monthly rate APY · last 30 days')
-    expect(text).toContain('Current rate APY · last 24h')
+    expect(text).toContain('5.9% Monthly rate APY · 30-day avg')
+    expect(text).toContain('Current rate APY · now')
     expect(text).toContain('Monthly: DefiLlama')
     expect(text).toContain('Today: GeckoTerminal/DefiLlama')
     expect(html).toContain('aria-label="Rate sources"')

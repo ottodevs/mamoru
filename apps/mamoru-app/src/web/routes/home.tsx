@@ -30,8 +30,9 @@ export const homeCopy = {
   monthly: 'Monthly rate',
   current: 'Current rate',
   earnedSoFar: 'earned so far',
-  monthlyWhat: 'last 30 days',
-  currentWhat: 'last 24h',
+  monthlyWhat: '30-day avg',
+  // Now, not "last 24h": the figure is the present state at today's pool rates, not the account's history (#112 review).
+  currentWhat: 'now',
   sources: 'Rate sources',
   monthlySource: 'Monthly',
   currentSource: 'Today',

@@ -111,11 +111,12 @@ function weighted(rows: PositionRate[], pick: (r: PositionRate) => number | null
 }
 
 /**
- * Current rate: what the whole balance earned over the last 24 h, as an APY (otto/mamoru#198, Brais 23 Oct). Each
- * position earning now (in range) at its pool's rate today, weighted by its USDC value, over the whole balance:
- * paused positions and idle money count at 0%, since that is what they earn. A position whose pool has no rate
- * today is left out of both sides, and `covered < of` says so. Replaces the 20 Oct reading (in-range positions
- * only), which showed a rate that could cover a tenth of the money as if it were the account's.
+ * Current rate: the whole balance's rate now, as an APY (otto/mamoru#198, Brais 23 Oct). An estimate from the
+ * present state, not the account's history: each position earning now (in range) at its pool's rate today,
+ * weighted by its USDC value, over the whole balance; paused positions and idle money count at 0%, since that is
+ * what they earn. A position earning now whose pool has no rate today leaves the figure unknown (n/a), never
+ * dropped from the base. Replaces the 20 Oct reading (in-range positions only), which showed a rate that could
+ * cover a tenth of the money as if it were the account's.
  */
 export function currentRate(rows: PositionRate[], apy: ApyView | undefined, idle: Pick<Split, 'idle' | 'idleTokens'> | null = null): AccountRate {
   if (!apy) return { pct: null, gap: 'loading', covered: 0, of: 0 }
@@ -123,21 +124,16 @@ export function currentRate(rows: PositionRate[], apy: ApyView | undefined, idle
   const earning = rows.filter((r) => r.inRange)
   // Every position and every idle token is in the denominator now: one that cannot be valued makes the rate n/a.
   if (rows.some((r) => r.valueUsdc === null) || idle?.idleTokens.some((t) => t.unpriced)) return { pct: null, gap: 'no-value', covered: 0, of: earning.length }
+  // #112 review: a position earning at an unknown rate makes the whole balance's rate unknown too.
+  const covered = earning.filter((r) => r.currentPct !== null).length
+  if (covered < earning.length) return { pct: null, gap: 'no-data', covered, of: earning.length }
   let earned = 0
   let base = Number(idle?.idle ?? 0n)
-  let covered = 0
   for (const r of rows) {
     const v = Number(r.valueUsdc!)
-    if (!r.inRange) {
-      base += v
-      continue
-    }
-    if (r.currentPct === null) continue
-    earned += r.currentPct * v
     base += v
-    covered++
+    if (r.inRange) earned += r.currentPct! * v
   }
-  if (earning.length > 0 && covered === 0) return { pct: null, gap: 'no-data', covered: 0, of: earning.length }
   if (base <= 0) return { pct: null, gap: 'no-value', covered, of: earning.length }
   return { pct: Math.round((earned / base) * 100) / 100, gap: null, covered, of: earning.length }
 }
