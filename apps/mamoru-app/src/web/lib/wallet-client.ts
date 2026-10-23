@@ -1,4 +1,4 @@
-import { createPublicClient, createWalletClient, custom, erc20Abi, getAddress, parseUnits, type EIP1193Provider, type Hex } from 'viem'
+import { createPublicClient, createWalletClient, custom, erc20Abi, getAddress, http, isAddressEqual, parseEventLogs, parseUnits, type EIP1193Provider, type Hex, type Log } from 'viem'
 import { base } from 'viem/chains'
 
 // Loaded on demand by the Connect wallet flow, so viem stays out of the first paint.
@@ -62,11 +62,22 @@ export async function sendUsdc(provider: EIP1193Provider, from: Hex, to: Hex, ra
   })
 }
 
-/** otto/mamoru#191: waits for Base to include the transfer. True when it succeeded, false when it reverted. */
-export async function confirmed(provider: EIP1193Provider, hash: Hex): Promise<boolean> {
-  const pc = createPublicClient({ chain: base, transport: custom(provider) })
+/**
+ * otto/mamoru#191: waits for Base to include the transfer, read from Base itself (the wallet may have moved to
+ * another network since). Returns the hash that landed when its receipt moves exactly `raw` USDC from `from` to `to`
+ * (a sped-up transaction lands under a new hash); false when it reverted or was replaced by anything else (a cancel).
+ */
+export async function confirmed(hash: Hex, from: Hex, to: Hex, raw: bigint): Promise<Hex | false> {
+  const pc = createPublicClient({ chain: base, transport: http() })
   const r = await pc.waitForTransactionReceipt({ hash, pollingInterval: 1_000, timeout: 180_000 })
-  return r.status === 'success'
+  return r.status === 'success' && movedUsdc(r.logs, from, to, raw) ? r.transactionHash : false
+}
+
+/** Whether the logs hold a USDC-on-Base Transfer of exactly `raw` from `from` to `to`. */
+export function movedUsdc(logs: Log[], from: Hex, to: Hex, raw: bigint): boolean {
+  return parseEventLogs({ abi: erc20Abi, eventName: 'Transfer', logs }).some(
+    (l) => isAddressEqual(l.address, USDC_BASE) && isAddressEqual(l.args.from, from) && isAddressEqual(l.args.to, to) && l.args.value === raw,
+  )
 }
 
 export function parseUsdc(s: string): bigint | null {

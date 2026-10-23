@@ -13,8 +13,8 @@ export function RootLayout() {
           BETA · real funds · separate sign-in from app.mamoru.lol
         </p>
       ) : null}
-      <Outlet />
       <Toast />
+      <Outlet />
     </div>
   )
 }

@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Hex } from 'viem'
 import { shortHex } from '../lib/format.ts'
+import { toastConfirmed } from './toast.tsx'
 import { usd, usdInput } from '../lib/money.ts'
 import { type InjectedWallet } from '../lib/wallets.ts'
 
@@ -26,16 +27,23 @@ function WalletIcon({ w }: { w: InjectedWallet }) {
 
 /**
  * Connect a browser wallet and send USDC on Base to the account address. Hidden when no wallet is found.
- * otto/mamoru#191: once Base confirms the transfer, `onConfirmed` takes over (the screen closes and says so); until
- * then, and when it is absent, the sent line stays.
+ * otto/mamoru#191: once Base confirms the transfer, the dark notice says so wherever the owner is by then, and
+ * `onConfirmed` closes this screen, only while it is still the one open. Until then the sent line stays.
  */
-export function ConnectWallet({ to, wallets, onConfirmed }: { to: string; wallets: InjectedWallet[]; onConfirmed?: (tx: Hex, raw: bigint) => void }) {
+export function ConnectWallet({ to, wallets, onConfirmed }: { to: string; wallets: InjectedWallet[]; onConfirmed?: () => void }) {
   const [picking, setPicking] = useState(false)
   const [conn, setConn] = useState<Conn | null>(null)
   const [busy, setBusy] = useState<null | 'connecting' | 'sending'>(null)
   const [amount, setAmount] = useState('')
   const [tx, setTx] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
 
   if (wallets.length === 0) return null
 
@@ -68,12 +76,15 @@ export function ConnectWallet({ to, wallets, onConfirmed }: { to: string; wallet
       const hash = await c.sendUsdc(conn.wallet.provider, conn.account, to as Hex, raw)
       setTx(hash)
       setBusy(null)
-      // A wallet that cannot report the receipt leaves the sent line: the balance poll still shows the arrival.
-      const ok = await c.confirmed(conn.wallet.provider, hash).catch(() => null)
-      if (ok === false) {
+      // No receipt in time (or no read): the sent line stays, and the balance poll still shows the arrival.
+      const landed = await c.confirmed(hash, conn.account, to as Hex, raw).catch(() => null)
+      if (landed) {
+        toastConfirmed(landed, raw)
+        if (mounted.current) onConfirmed?.()
+      } else if (landed === false && mounted.current) {
         setTx(null)
-        setError('The transfer failed on Base. Nothing was sent.')
-      } else if (ok) onConfirmed?.(hash, raw)
+        setError('This transfer did not reach your account on Base. Check your wallet.')
+      }
     } catch (e) {
       setError(message(e))
     } finally {

@@ -19,7 +19,7 @@ import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, wi
 import { localTime } from '../lib/time.ts'
 import { explorerAddress, useChain } from '../lib/chain.tsx'
 import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
-import { DepositDetails, hasMoney, toastConfirmed } from './add-money.tsx'
+import { DepositDetails, hasMoney } from './add-money.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { FeedbackDialog, feedbackCopy } from '../components/feedback-dialog.tsx'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
@@ -1063,10 +1063,9 @@ export function HomeView({ accountKey, sleeves = null }: { accountKey: string; s
             <DepositDetails
               address={f.address}
               capUsdc={f.capUsdc}
-              onConfirmed={(tx, raw) => {
-                // otto/mamoru#191: no Sent screen to close by hand. Base confirmed: close, say so, read the balance now.
+              onConfirmed={() => {
+                // otto/mamoru#191: no Sent screen to close by hand. Base confirmed (and said so): close, read the balance now.
                 setDialog(null)
-                toastConfirmed(tx, raw)
                 void qc.invalidateQueries({ queryKey: queryKeys.funding(accountKey) })
               }}
             />

@@ -5,9 +5,7 @@ import { useFunding, useSession } from '../api/queries.ts'
 import { ConnectWallet } from '../components/connect-wallet.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { AddressBlock, Brand, Copy, Qr, Waiting } from '../components/ui.tsx'
-import type { Hex } from 'viem'
-import { showToast } from '../components/toast.tsx'
-import { BASE_SLEEVE, explorerAddress, explorerTx, useChain, type SleeveChain } from '../lib/chain.tsx'
+import { BASE_SLEEVE, explorerAddress, useChain, type SleeveChain } from '../lib/chain.tsx'
 import { capNote, ceilCents, overCapOf, usd, usdPlain } from '../lib/money.ts'
 import { localTime } from '../lib/time.ts'
 import { useInjectedWallets } from '../lib/wallets.ts'
@@ -28,18 +26,12 @@ export const addCopy = {
   sendOn: (c: SleeveChain) => `Send USDC on ${c.name}.`,
   onlyOnLead: (c: SleeveChain) => `Only USDC on ${c.name}.`,
   onlyOnRest: (c: SleeveChain) => `Any other token or network won't reach this ${c.name} balance.`,
-  confirmed: (amount: string) => `Confirmed on Base. ${amount} USDC added.`,
   addressOn: (c: SleeveChain) => `Your address on ${c.name}`,
   usdcContract: (c: SleeveChain) => `USDC on ${c.name}`,
 }
 
-/** otto/mamoru#191: a wallet transfer Base confirmed, said once in the dark notice with its explorer link. */
-export function toastConfirmed(tx: string, raw: bigint): void {
-  showToast({ text: addCopy.confirmed(usd(raw)), href: explorerTx(BASE_SLEEVE, tx), linkLabel: `View on ${BASE_SLEEVE.explorer.name}` })
-}
-
 /** Address, QR and Connect wallet. Shared by the Add money screen and the Home modal. */
-export function DepositDetails({ address, capUsdc, onConfirmed }: { address: string; capUsdc?: string; onConfirmed?: (tx: Hex, raw: bigint) => void }) {
+export function DepositDetails({ address, capUsdc, onConfirmed }: { address: string; capUsdc?: string; onConfirmed?: () => void }) {
   const wallets = useInjectedWallets()
   const chain = useChain()
   const base = chain.chainId === BASE_SLEEVE.chainId
@@ -129,10 +121,7 @@ export function AddMoneyPage() {
           <DepositDetails
             address={f.address}
             capUsdc={f.capUsdc}
-            onConfirmed={(tx, raw) => {
-              toastConfirmed(tx, raw)
-              void navigate({ to: '/', replace: true })
-            }}
+            onConfirmed={() => void navigate({ to: '/', replace: true })}
           />
         ) : <div className="h-44 animate-pulse bg-wash/40" aria-hidden="true" />}
         <div className="card flex flex-wrap items-center justify-between gap-3">
