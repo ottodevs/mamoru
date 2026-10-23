@@ -10,12 +10,18 @@ const OUT = process.argv.includes('--out') ? process.argv[process.argv.indexOf('
 const START = 1_717_200_000 // 2024-06-01
 const END = Math.floor(Date.now() / 1000)
 
-/** The shortlist. `llama`: DefiLlama pool id; `morpho`: MetaMorpho vault (null for Aave). */
+/**
+ * The shortlist. `llama`: DefiLlama pool id. For the MetaMorpho vaults it is the vault itself and its base APY is an
+ * effective APY net of the vault fee; the vault's creation comes from the Morpho API. For waBasUSDC it is the Aave
+ * reserve under the wrapper (aBasUSDC): its base APY is the reserve's `liquidityRate`, an APR, and its TVL is the
+ * reserve's available liquidity, not the wrapper's assets. The wrapper's own creation is its Basescan creation tx
+ * 0x60176d0a43937dbfdd12c891a288ea022b51a658c9e9e89fa1a73ee607733e39, 20 Jan 2025 18:15:39 UTC.
+ */
 export const VAULTS = [
-  { id: 'gtUSDCp', name: 'Gauntlet USDC Prime (MetaMorpho)', address: '0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61', llama: 'e0672197-9f3e-4414-bca5-e6b4c90aa469', morpho: true },
-  { id: 'sparkUSDC', name: 'Spark USDC Vault (MetaMorpho v1.1)', address: '0x7BfA7C4f149E7415b73bdeDfe609237e29CBF34A', llama: 'a5fab52f-73fa-4f44-9c09-9af1eb20996c', morpho: true },
-  { id: 'steakUSDC', name: 'Steakhouse USDC (MetaMorpho)', address: '0xbeeF010f9cb27031ad51e3333f9aF9C6B1228183', llama: '81ae8812-f04f-4f6e-9d71-ee5778f3a178', morpho: true },
-  { id: 'waBasUSDC', name: 'Aave v3 Base USDC, static aToken v2 (waBasUSDC)', address: '0xC768c589647798a6EE01A91FdE98EF2ed046DBD6', llama: '7e0661bf-8cf3-45e6-9424-31916d4c7b84', morpho: false },
+  { id: 'gtUSDCp', name: 'Gauntlet USDC Prime (MetaMorpho)', address: '0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61', llama: 'e0672197-9f3e-4414-bca5-e6b4c90aa469', morpho: true, convention: 'apy', created: null },
+  { id: 'sparkUSDC', name: 'Spark USDC Vault (MetaMorpho v1.1)', address: '0x7BfA7C4f149E7415b73bdeDfe609237e29CBF34A', llama: 'a5fab52f-73fa-4f44-9c09-9af1eb20996c', morpho: true, convention: 'apy', created: null },
+  { id: 'steakUSDC', name: 'Steakhouse USDC (MetaMorpho)', address: '0xbeeF010f9cb27031ad51e3333f9aF9C6B1228183', llama: '81ae8812-f04f-4f6e-9d71-ee5778f3a178', morpho: true, convention: 'apy', created: null },
+  { id: 'waBasUSDC', name: 'Aave v3 Base USDC, static aToken v2 (waBasUSDC)', address: '0xC768c589647798a6EE01A91FdE98EF2ed046DBD6', llama: '7e0661bf-8cf3-45e6-9424-31916d4c7b84', morpho: false, convention: 'apr', created: Date.parse('2025-01-20T18:15:39Z') / 1000 },
 ] as const
 
 /** Morpho Blue markets the MetaMorpho vaults above held more than 1M USDC in on the fetch day. */
@@ -39,9 +45,14 @@ const r4 = (x: number) => Math.round(x * 1e4) / 1e4
 const vaults = []
 for (const v of VAULTS) {
   const chart = await json(`https://yields.llama.fi/chart/${v.llama}`)
-  // [unix, apyBase %, tvlUsd (M)]; DefiLlama's base APY of a MetaMorpho vault is net of its fee. For Aave its TVL is
-  // the reserve's available liquidity (supply − borrow), not its supply.
-  const apy = (chart.data as any[]).map((p) => [Math.floor(Date.parse(p.timestamp) / 1000), r4(p.apyBase ?? p.apy ?? 0), r4((p.tvlUsd ?? 0) / 1e6)])
+  // [unix, base rate % or null, tvlUsd (M) or null]. Only the base rate: rewards (apyReward) never count as share
+  // value, and a day without a base rate is a gap (null), not zero.
+  const num = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : null)
+  const apy = (chart.data as any[]).map((p) => {
+    const base = num(p.apyBase)
+    const tvl = num(p.tvlUsd)
+    return [Math.floor(Date.parse(p.timestamp) / 1000), base === null ? null : r4(base), tvl === null ? null : r4(tvl / 1e6)]
+  })
   let morphoData: unknown = null
   if (v.morpho) {
     const d = await morpho(`{ vaultByAddress(address: "${v.address}", chainId: 8453) { creationTimestamp state { totalAssetsUsd netApy apy fee timelock curator owner guardian curators { name } } liquidity { usd } historicalState { sharePriceNumber(${opts}) { x y } totalAssetsUsd(${opts}) { x y } } } }`)
@@ -53,7 +64,8 @@ for (const v of VAULTS) {
       totalAssetsUsdM: (s.historicalState.totalAssetsUsd as any[]).filter((p) => p.y !== null).map((p) => [p.x, r4(p.y / 1e6)]).sort((a, b) => a[0] - b[0]),
     }
   }
-  vaults.push({ id: v.id, name: v.name, address: v.address, llamaPool: v.llama, apy, morpho: morphoData })
+  const created = v.created ?? (morphoData as { created: number }).created
+  vaults.push({ id: v.id, name: v.name, address: v.address, created, convention: v.convention, llamaPool: v.llama, llamaIs: v.morpho ? 'vault' : 'reserve', apy, morpho: morphoData })
   console.error(`${v.id}: ${apy.length} APY points`)
 }
 

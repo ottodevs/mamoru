@@ -1,39 +1,62 @@
 import { describe, expect, test } from 'bun:test'
 import { syntheticDataset } from './fixtures.ts'
 import { DEFAULT_GAS } from './run.ts'
-import { breakEvenDays, breakEvenDeposit, growthFromApy, growthFromPrice, opGasRaw, priceAt, vaultRun, type RatePoint } from './vault4626.ts'
+import { breakEvenDays, breakEvenDeposit, effectiveApyPct, growthFromPrice, growthFromRates, opGasRaw, priceAt, vaultGrowth, vaultRun, type RatePoint } from './vault4626.ts'
 
 const DAY = 86_400
 const YEAR = 365 * DAY
 
-describe('growth from a daily APY series', () => {
-  test('a flat rate compounds to the APY over a year', () => {
-    const pts: RatePoint[] = Array.from({ length: 400 }, (_, i) => ({ time: i * DAY, apyPct: 5 }))
-    expect(growthFromApy(pts, 0, YEAR)!).toBeCloseTo(1.05, 10)
-    expect(growthFromApy(pts, 10 * DAY, 10 * DAY)!).toBe(1)
+describe('growth from a daily rate series', () => {
+  const flat = (pct: number, n = 400): RatePoint[] => Array.from({ length: n }, (_, i) => ({ time: i * DAY, ratePct: pct }))
+
+  test('a flat APY compounds to itself over a year; an APR read daily compounds daily', () => {
+    expect(growthFromRates(flat(5), 0, YEAR, 'apy')!).toBeCloseTo(1.05, 10)
+    expect(growthFromRates(flat(5), 0, YEAR, 'apr')!).toBeCloseTo((1 + 0.05 / 365) ** 365, 10)
+    expect(growthFromRates(flat(5), 10 * DAY, 10 * DAY, 'apy')!).toBe(1)
   })
 
-  test('the rate between two readings is the later one (trailing)', () => {
+  test('review #186 (2): each reading applies forward from its own time', () => {
     const pts: RatePoint[] = [
-      { time: 0, apyPct: 0 },
-      { time: DAY, apyPct: 10 },
-      { time: 2 * DAY, apyPct: 0 },
+      { time: 0, ratePct: 10 },
+      { time: DAY, ratePct: 0 },
+      { time: 2 * DAY, ratePct: 0 },
     ]
-    // Day 0-1 at 10%, day 1-2 at 0%.
-    expect(growthFromApy(pts, 0, 2 * DAY)!).toBeCloseTo(1.1 ** (1 / 365), 12)
-    // Half of the first day only.
-    expect(growthFromApy(pts, DAY / 2, DAY)!).toBeCloseTo(1.1 ** (0.5 / 365), 12)
+    // Day 0-1 at 10% (the reading of day 0), day 1-2 at 0%.
+    expect(growthFromRates(pts, 0, 2 * DAY, 'apy')!).toBeCloseTo(1.1 ** (1 / 365), 12)
+    expect(growthFromRates(pts, DAY / 2, 2 * DAY, 'apy')!).toBeCloseTo(1.1 ** (0.5 / 365), 12)
+    // APR: linear inside the reading's day.
+    expect(growthFromRates(pts, 0, DAY, 'apr')!).toBeCloseTo(1 + 0.1 / 365, 12)
   })
 
-  test('after the last reading its rate goes on; before the first there is no vault', () => {
-    const pts: RatePoint[] = [{ time: 100, apyPct: 4 }]
-    expect(growthFromApy(pts, 100, 100 + YEAR)!).toBeCloseTo(1.04, 10)
-    expect(growthFromApy(pts, 99, 200)).toBeNull()
-    expect(growthFromApy([], 0, 1)).toBeNull()
+  test('review #186 (4): a missing base rate is a gap, not zero', () => {
+    const pts: RatePoint[] = [
+      { time: 0, ratePct: 4 },
+      { time: DAY, ratePct: null },
+      { time: 2 * DAY, ratePct: 4 },
+      { time: 3 * DAY, ratePct: 4 },
+    ]
+    expect(growthFromRates(pts, 0, 3 * DAY, 'apy')).toBeNull()
+    expect(growthFromRates(pts, 2 * DAY, 3 * DAY, 'apy')).not.toBeNull()
+  })
+
+  test('review #186 (6): the series must cover the whole window', () => {
+    const pts: RatePoint[] = [{ time: 100, ratePct: 4 }]
+    // Before the first reading: unavailable.
+    expect(growthFromRates(pts, 99, 200, 'apy')).toBeNull()
+    expect(growthFromRates([], 0, 1, 'apy')).toBeNull()
+    // The last reading is not carried past the gap limit.
+    expect(growthFromRates(pts, 100, 100 + DAY, 'apy')).not.toBeNull()
+    expect(growthFromRates(pts, 100, 100 + 3 * DAY, 'apy')).toBeNull()
+    // A gap of 3 days inside the window.
+    const gappy: RatePoint[] = [{ time: 0, ratePct: 4 }, { time: 3 * DAY, ratePct: 4 }, { time: 4 * DAY, ratePct: 4 }]
+    expect(growthFromRates(gappy, 0, 4 * DAY, 'apy')).toBeNull()
+    expect(growthFromRates(gappy, 3 * DAY, 4 * DAY, 'apy')).not.toBeNull()
+    // A stale reading before the window's start counts as a gap too.
+    expect(growthFromRates(gappy, 2.5 * DAY, 4 * DAY, 'apy')).toBeNull()
   })
 
   test('refuses an interval that runs backwards', () => {
-    expect(() => growthFromApy([{ time: 0, apyPct: 1 }], 5, 1)).toThrow()
+    expect(() => growthFromRates([{ time: 0, ratePct: 1 }], 5, 1, 'apy')).toThrow()
   })
 })
 
@@ -42,13 +65,38 @@ describe('growth from the share price', () => {
     { time: 0, price: 1 },
     { time: DAY, price: 1.01 },
     { time: 2 * DAY, price: 1.0201 },
+    { time: 5 * DAY, price: 1.03 },
   ]
-  test('geometric between readings, null outside', () => {
+  test('geometric between readings, null outside or across a gap', () => {
     expect(priceAt(pts, DAY)).toBe(1.01)
     expect(priceAt(pts, DAY / 2)!).toBeCloseTo(Math.sqrt(1.01), 12)
+    expect(priceAt(pts, 6 * DAY)).toBeNull()
     expect(priceAt(pts, 3 * DAY)).toBeNull()
     expect(growthFromPrice(pts, DAY / 2, 2 * DAY)!).toBeCloseTo(1.0201 / Math.sqrt(1.01), 12)
     expect(growthFromPrice(pts, -1, DAY)).toBeNull()
+  })
+})
+
+describe('review #186 (1, 5): which growth a window gets', () => {
+  const rates: RatePoint[] = Array.from({ length: 40 }, (_, i) => ({ time: i * DAY, ratePct: 5 }))
+  const prices = Array.from({ length: 40 }, (_, i) => ({ time: i * DAY, price: 1 + i * 0.001 }))
+  test('a window before the vault contract existed is unavailable, whatever the reserve history', () => {
+    const g = vaultGrowth({ created: 10 * DAY, rates, convention: 'apr' }, 5 * DAY, 12 * DAY)
+    expect(g.status).toBe('predates')
+    expect(g.growth).toBeNull()
+    expect(vaultGrowth({ created: 10 * DAY, rates, convention: 'apr' }, 10 * DAY, 12 * DAY).status).toBe('ok')
+  })
+  test('the observed share price wins over the rate model, which is kept for the discrepancy', () => {
+    const g = vaultGrowth({ created: 0, rates, convention: 'apy', prices }, 2 * DAY, 12 * DAY)
+    expect(g.source).toBe('price')
+    expect(g.growth!).toBeCloseTo(1.012 / 1.002, 12)
+    expect(g.model!).toBeCloseTo(1.05 ** (10 / 365), 12)
+    expect(vaultGrowth({ created: 0, rates, convention: 'apy' }, 2 * DAY, 12 * DAY).source).toBe('rates')
+  })
+  test('a price series that does not cover the window is a gap, not a fallback to the model', () => {
+    const g = vaultGrowth({ created: 0, rates, convention: 'apy', prices: prices.slice(0, 5) }, 2 * DAY, 12 * DAY)
+    expect(g.status).toBe('gap')
+    expect(g.model).not.toBeNull()
   })
 })
 
@@ -71,6 +119,8 @@ describe('the vault arm', () => {
     expect(breakEvenDays(50, 0, 0.1)).toBe(Number.POSITIVE_INFINITY)
     expect(breakEvenDays(50, 4, 0)).toBe(0)
     expect(breakEvenDeposit(0, 4, 0.1)).toBe(Number.POSITIVE_INFINITY)
+    expect(effectiveApyPct(4, 'apy')).toBe(4)
+    expect(effectiveApyPct(4, 'apr')).toBeCloseTo(4.0808, 3)
   })
 })
 

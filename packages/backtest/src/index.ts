@@ -19,4 +19,4 @@ export {
   type PoolTokenSpend,
 } from './action-policy.ts'
 export { armName, type HarvestArm, type HarvestReport, type PoolHarvestReport } from './harvest.ts'
-export { breakEvenDays, breakEvenDeposit, growthFromApy, growthFromPrice, opGasRaw, priceAt, vaultRun, type PricePoint, type RatePoint, type VaultGas, type VaultRun } from './vault4626.ts'
+export { breakEvenDays, breakEvenDeposit, effectiveApyPct, growthFromPrice, growthFromRates, MAX_GAP_SECONDS, opGasRaw, priceAt, vaultGrowth, vaultRun, type PricePoint, type RateConvention, type RatePoint, type VaultGas, type VaultGrowth, type VaultRun, type VaultSeries } from './vault4626.ts'
