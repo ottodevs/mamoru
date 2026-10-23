@@ -4,7 +4,6 @@ import { monadRegistry, address } from '@mamoru/registry'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ApiContext } from '../../src/web/api/client.ts'
 import { queryKeys } from '../../src/web/api/queries.ts'
-import { SleeveSwitch } from '../../src/web/components/sleeves.tsx'
 import { fixtureClient, fixtureConfig, fixtureFunding, fixtureSession } from '../../src/web/fixtures/client.ts'
 import { FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from '../../src/web/fixtures/empty-account.ts'
 import { poolsResponse } from '../../src/web/fixtures/pools.ts'
@@ -79,14 +78,11 @@ describe('Monad sleeve on Home', () => {
     expect(html).not.toContain('basescan.org')
   })
 
-  test('the switch names each chain with its address and total, and offers what can be added', () => {
-    const both = render(wrap(<SleeveSwitch sleeves={sleeves} addable={[]} selected={MONAD_KEY} onSelect={() => {}} />)).text
-    expect(both).toContain('Base')
-    expect(both).toContain('Monad 48.54 USDC')
-    const offer = render(wrap(<SleeveSwitch sleeves={sleeves.slice(0, 1)} addable={[143]} selected={FIXTURE_ACCOUNT_KEY} onSelect={() => {}} />)).text
-    expect(offer).toContain('Add a Monad sleeve')
-    // Base alone with nothing to add (the flag off): nothing is drawn.
-    expect(render(wrap(<SleeveSwitch sleeves={sleeves.slice(0, 1)} addable={[]} selected={FIXTURE_ACCOUNT_KEY} onSelect={() => {}} />)).html).toBe('')
+  test('each position names its chain beside the venue (otto/mamoru#201: no switch, the chain is a position detail)', () => {
+    const monad = render(wrap(<ChainProvider chainId={143}><Working f={monadFunding} s={split(monadFunding, null)} onStop={null} /></ChainProvider>)).text
+    expect(monad).toContain('Uniswap v3 · Monad')
+    const base = render(wrap(<Working f={monadFunding} s={split(monadFunding, null)} onStop={null} />)).text
+    expect(base).toContain('Uniswap v3 · Base')
   })
 })
 
