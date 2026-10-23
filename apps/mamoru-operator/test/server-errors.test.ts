@@ -20,8 +20,10 @@ function header(): string {
 
 async function signedGet(base: string, path: string): Promise<Response> {
   const h = header()
-  const sig = operatorSignature(SECRET, 'GET', path, h, '')
-  return fetch(`${base}${path}`, { headers: { 'x-mamoru-account': h, 'x-mamoru-sig': sig } })
+  // #140: the no-ts HMAC is refused past LEGACY_HMAC_UNTIL, so sign as the app Worker does, with x-mamoru-ts.
+  const ts = Math.floor(Date.now() / 1000).toString()
+  const sig = operatorSignature(SECRET, 'GET', path, h, '', ts)
+  return fetch(`${base}${path}`, { headers: { 'x-mamoru-account': h, 'x-mamoru-ts': ts, 'x-mamoru-sig': sig } })
 }
 
 function fakeOperator(funding: () => Promise<unknown>): Operator {

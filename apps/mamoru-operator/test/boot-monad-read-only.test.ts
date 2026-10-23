@@ -1,12 +1,13 @@
 // otto/mamoru#63 (review of #110, P1-2): the operator booted on a chain 143 RPC with the Monad lab policy reads, and
 // can neither sign nor submit: relayer refused, no bundler, owner prepare/submit CHAIN_READ_ONLY, no engine loop.
 import { afterAll, describe, expect, test } from 'bun:test'
-import { createHmac, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { monadRegistry } from '@mamoru/registry'
 import { bootOperator } from '../src/boot.ts'
+import { operatorSignature } from '../src/server.ts'
 import { ctx } from './owner-world.ts'
 
 // A JSON-RPC stub that is Monad mainnet as far as boot can tell: chain id 143, an empty relayer. Anything else errors.
@@ -61,8 +62,10 @@ describe('operator booted on chain 143', () => {
     ] as const) {
       const raw = JSON.stringify(body)
       const p = `/api/accounts/${c.accountKey}/${path}`
-      const sig = createHmac('sha256', secret).update(`${method} ${p}\n${header}\n${raw}`).digest('hex')
-      const res = await fetch(op.url + p, { method, headers: { 'x-mamoru-account': header, 'x-mamoru-sig': sig, 'content-type': 'application/json' }, body: raw })
+      // #140: the no-ts HMAC is refused past LEGACY_HMAC_UNTIL, so sign as the app Worker does, with x-mamoru-ts.
+      const ts = Math.floor(Date.now() / 1000).toString()
+      const sig = operatorSignature(secret, method, p, header, raw, ts)
+      const res = await fetch(op.url + p, { method, headers: { 'x-mamoru-account': header, 'x-mamoru-ts': ts, 'x-mamoru-sig': sig, 'content-type': 'application/json' }, body: raw })
       expect({ path, status: res.status, code: ((await res.json()) as { code?: string }).code }).toEqual({ path, status: 503, code: 'CHAIN_READ_ONLY' })
     }
     expect(methods).not.toContain('eth_sendRawTransaction')
