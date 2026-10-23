@@ -8,6 +8,7 @@ import {
   DEPOSIT_MAX_USDC,
   DEPOSIT_MIN_USDC,
   manifestWindow,
+  manifestWindowByDatasetId,
   runBench,
   trainWindows,
   WIDTH_TICKS_MAX,
@@ -59,10 +60,35 @@ function reasonToolError(e: unknown): ToolError {
   return { code: 'LAB_SPEC_INVALID', message: e instanceof Error ? e.message : String(e) }
 }
 
-function parseRunBacktestArgs(raw: unknown): RunBacktestArgs | ToolError {
+function manifestWindowByDatasetIdIn(datasetId: string, datasetsDir?: string) {
+  return datasetsDir === undefined ? manifestWindowByDatasetId(datasetId) : manifestWindowByDatasetId(datasetId, datasetsDir)
+}
+
+/**
+ * AL-10: `run_backtest`'s window may be named by `windowId` OR by `datasetId` (the dataset the window is backed
+ * by) — resolved against the manifest before anything else. A TEST dataset is `LAB_HOLDOUT_DENIED` right here,
+ * before any data loads (AL-12a) — the same guarantee `windowId` already got from `runner.run`'s own
+ * `validateSpec`, just reached one step earlier since resolving `datasetId` needs the manifest anyway.
+ */
+function resolveWindowId(a: Record<string, unknown>, datasetsDir: string | undefined): string | ToolError {
+  if (typeof a.datasetId === 'string' && a.datasetId.length > 0) {
+    try {
+      const w = manifestWindowByDatasetIdIn(a.datasetId, datasetsDir)
+      if (w.split !== 'train') return { code: 'LAB_HOLDOUT_DENIED', message: `datasetId ${a.datasetId} is a TEST dataset; the Lab never reaches the release gate's holdout` }
+      return w.id
+    } catch (e) {
+      return reasonToolError(e)
+    }
+  }
+  if (typeof a.windowId === 'string' && a.windowId.length > 0) return a.windowId
+  return { code: 'LAB_SPEC_INVALID', message: 'windowId or datasetId is required' }
+}
+
+function parseRunBacktestArgs(raw: unknown, datasetsDir: string | undefined): RunBacktestArgs | ToolError {
   if (typeof raw !== 'object' || raw === null) return { code: 'LAB_SPEC_INVALID', message: 'run_backtest args must be an object' }
   const a = raw as Record<string, unknown>
-  if (typeof a.windowId !== 'string' || a.windowId.length === 0) return { code: 'LAB_SPEC_INVALID', message: 'windowId must be a non-empty string' }
+  const windowId = resolveWindowId(a, datasetsDir)
+  if (typeof windowId !== 'string') return windowId
   if (a.base !== 'live' && a.base !== 'guard') return { code: 'LAB_SPEC_INVALID', message: `base must be "live" or "guard", got ${JSON.stringify(a.base)}` }
   if (typeof a.deposit !== 'number') return { code: 'LAB_SPEC_INVALID', message: 'deposit must be a number' }
   if (a.overrides !== undefined) {
@@ -74,14 +100,14 @@ function parseRunBacktestArgs(raw: unknown): RunBacktestArgs | ToolError {
     const wt = (a.overrides as Record<string, unknown>).widthTicks
     if (wt !== undefined && typeof wt !== 'number') return { code: 'LAB_SPEC_INVALID', message: 'overrides.widthTicks must be a number' }
   }
-  return { windowId: a.windowId, base: a.base, deposit: a.deposit, overrides: a.overrides as RunBacktestArgs['overrides'] }
+  return { windowId, base: a.base, deposit: a.deposit, overrides: a.overrides as RunBacktestArgs['overrides'] }
 }
 
 /** B-01's default width (the base policy's own `range.widthTicks`, 2000) when no override is given. */
 const DEFAULT_WIDTH_TICKS = 2000
 
-export function runBacktestTool(raw: unknown, runner: BenchRunner, runStore: RunStore, meter?: CostMeter): ToolOutcome<RunPublicView> {
-  const parsed = parseRunBacktestArgs(raw)
+export function runBacktestTool(raw: unknown, runner: BenchRunner, runStore: RunStore, meter?: CostMeter, datasetsDir?: string): ToolOutcome<RunPublicView> {
+  const parsed = parseRunBacktestArgs(raw, datasetsDir)
   if ('code' in parsed) return { ok: false, error: parsed }
   const widthTicks = parsed.overrides?.widthTicks ?? DEFAULT_WIDTH_TICKS
   try {
@@ -98,11 +124,12 @@ export const RUN_BACKTEST_SCHEMA: ToolSchema = {
   type: 'function',
   function: {
     name: 'run_backtest',
-    description: 'Replay one TRAIN window through one base policy and return its metrics, window and op count.',
+    description: 'Replay one TRAIN window through one base policy and return its metrics, window and op count. Name the window by windowId OR by datasetId — exactly one of the two is required.',
     parameters: {
       type: 'object',
       properties: {
-        windowId: { type: 'string', description: 'A TRAIN window id from the catalog in the system prompt.' },
+        windowId: { type: 'string', description: 'A TRAIN window id from the catalog in the system prompt. Alternative to datasetId; give exactly one.' },
+        datasetId: { type: 'string', description: 'A TRAIN window\'s dataset id, as an alternative to windowId. Give exactly one.' },
         base: { type: 'string', enum: ['live', 'guard'], description: '"live" (conservador-live-v2) or "guard" (conservador-lab-guards-v1).' },
         deposit: { type: 'number', description: `Whole USDC, ${DEPOSIT_MIN_USDC}..${DEPOSIT_MAX_USDC}.` },
         overrides: {
@@ -112,7 +139,7 @@ export const RUN_BACKTEST_SCHEMA: ToolSchema = {
           description: 'Optional. The only known override key is widthTicks; any other key is a tool error.',
         },
       },
-      required: ['windowId', 'base', 'deposit'],
+      required: ['base', 'deposit'],
       additionalProperties: false,
     },
   },
@@ -125,7 +152,7 @@ export const RUN_BACKTEST_SCHEMA: ToolSchema = {
 
 export const COMPARE_MAX_RUNS = 8
 
-export function compareTool(raw: unknown, runner: BenchRunner, runStore: RunStore, meter?: CostMeter): ToolOutcome<RunPublicView[]> {
+export function compareTool(raw: unknown, runner: BenchRunner, runStore: RunStore, meter?: CostMeter, datasetsDir?: string): ToolOutcome<RunPublicView[]> {
   if (typeof raw !== 'object' || raw === null) return { ok: false, error: { code: 'LAB_SPEC_INVALID', message: 'compare args must be an object' } }
   const runs = (raw as Record<string, unknown>).runs
   if (!Array.isArray(runs) || runs.length === 0) return { ok: false, error: { code: 'LAB_SPEC_INVALID', message: 'compare.runs must be a non-empty array' } }
@@ -133,7 +160,7 @@ export function compareTool(raw: unknown, runner: BenchRunner, runStore: RunStor
 
   const out: RunPublicView[] = []
   for (const leg of runs) {
-    const outcome = runBacktestTool(leg, runner, runStore, meter)
+    const outcome = runBacktestTool(leg, runner, runStore, meter, datasetsDir)
     if (!outcome.ok) return { ok: false, error: outcome.error }
     out.push(outcome.result)
   }

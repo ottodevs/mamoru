@@ -79,8 +79,10 @@ export const LAB_TOOL_SEQUENCE = 'LAB_TOOL_SEQUENCE'
 export const LAB_TOOL_IGNORED = 'LAB_TOOL_IGNORED'
 
 function dispatchTool(name: string, args: unknown, runner: BenchRunner, runStore: RunStore, meter: CostMeter, datasetsDir: string | undefined): ToolOutcome<unknown> {
-  if (name === 'run_backtest') return runBacktestTool(args, runner, runStore, meter)
-  if (name === 'compare') return compareTool(args, runner, runStore, meter)
+  // run_backtest and compare both need datasetsDir now too — AL-10's datasetId alternative to windowId
+  // resolves against the manifest, same as sweep's window list already does.
+  if (name === 'run_backtest') return runBacktestTool(args, runner, runStore, meter, datasetsDir)
+  if (name === 'compare') return compareTool(args, runner, runStore, meter, datasetsDir)
   if (name === 'sweep') return sweepTool(args, runner, runStore, meter, datasetsDir)
   return { ok: false, error: { code: LAB_TOOL_UNAVAILABLE, message: `unknown tool "${name}"` } }
 }
@@ -328,7 +330,11 @@ export async function runAgentJob(input: JobInput, ctx: JobContext): Promise<Job
     for (const c of repairOthers) messages.push(skipMessage(c, LAB_TOOL_SKIPPED, 'skipped: the repair turn must call submit_answer'))
     for (const c of repairExtraSubmits) messages.push(skipMessage(c, LAB_TOOL_IGNORED, 'ignored: only one submit_answer per turn'))
 
-    const repaired = repairSubmit ? safeJsonParse(repairSubmit.function.arguments) : safeJsonParse(repairReply.message.content ?? null)
+    // Review finding (P2, agent.ts:331): a repair reply with no submit_answer call must never be parsed from
+    // plain `content` — the repair's only legitimate output is a tool call. Treating stray prose as a repaired
+    // answer let a model skip the actual protocol and still reach 'repaired'. No submit_answer here means no
+    // repair happened: `repaired` stays `null`, and `candidate` below falls back to the FIRST submission.
+    const repaired = repairSubmit ? safeJsonParse(repairSubmit.function.arguments) : null
     const secondVerify = repaired !== null ? verify(repaired, verifyCtx) : { ok: false, errors: [] }
 
     if (repairSubmit) {

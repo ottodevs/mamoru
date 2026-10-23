@@ -94,6 +94,9 @@ describe('runBench', () => {
     expect(typeof r.resultHash).toBe('string')
     expect(r.resultHash.startsWith('0x')).toBe(true)
     expect(r.simVersion).toBe('backtest-1')
+    // otto/mamoru#200 review (AL-20c): the decoded dataset's own id, not the window id — fix-full's dataset
+    // file starts "id":"0x852bf32a...".
+    expect(r.datasetId).toBe('0x852bf32acfea20911aaa2572caf1fe3d759b94ff543593b6a9ee49673e29f828')
     expect(r.window).toEqual({
       id: 'fix-full',
       label: expect.any(String),
@@ -138,6 +141,14 @@ describe('runBench', () => {
     // Same spec, same hash: a second run is the same simulation.
     expect(runBench(spec, FIXTURE_DIR).resultHash).toBe(r.resultHash)
   }, SLOW)
+
+  test('datasetId tracks the underlying data, not the policy — same window/dataset, different base, same datasetId', () => {
+    const live = runBench({ windowId: 'fix-full', base: 'live', widthTicks: 2000, deposit: 1000 }, FIXTURE_DIR)
+    const guard = runBench({ windowId: 'fix-full', base: 'guard', widthTicks: 2000, deposit: 1000 }, FIXTURE_DIR)
+    expect(live.datasetId).toBe(guard.datasetId)
+    expect(live.resultHash).not.toBe(guard.resultHash) // different policy, different simulation
+  })
+
 
   test.skipIf(!HAS_REAL_DATASETS)('needs local Lab datasets: feb2025, live, width 4000, 1000 USDC — vsHodl matches the proven visual PoC (otto/mamoru#175)', () => {
     const r = runBench({ windowId: 'feb2025', base: 'live', widthTicks: 4000, deposit: 1000 })

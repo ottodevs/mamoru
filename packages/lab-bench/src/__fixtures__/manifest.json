@@ -12,7 +12,8 @@
    "step": 300,
    "market": {
     "note": "fixture, not real history"
-   }
+   },
+   "datasetId": "0x852bf32acfea20911aaa2572caf1fe3d759b94ff543593b6a9ee49673e29f828"
   },
   {
    "id": "fix-nobtc",
@@ -25,7 +26,8 @@
    "step": 300,
    "market": {
     "note": "fixture, not real history"
-   }
+   },
+   "datasetId": "0xec3b3d809e7efe55c3a19ab6fe686103f4713aa5398d104032c59897e34f5af0"
   },
   {
    "id": "fix-test",
@@ -38,7 +40,8 @@
    "step": 300,
    "market": {
     "note": "fixture, not real history"
-   }
+   },
+   "datasetId": "0x6669782d746573742d686f6c646f75742d666978747572652d6f6e6c792d3030"
   }
  ]
 }

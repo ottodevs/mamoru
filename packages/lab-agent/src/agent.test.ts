@@ -437,4 +437,36 @@ describe('runAgentJob — loop mechanics (AL-15, AL-03)', () => {
     expect(answeredExtra).toBeDefined()
     expect(JSON.parse(answeredExtra!.content as string).error.code).toBe('LAB_TOOL_IGNORED')
   })
+
+  test('review finding (P2, agent.ts:331): a repair reply with no submit_answer call is never parsed from plain content', async () => {
+    const badSubmit = submitAnswerCall([
+      { type: 'claim', metric: 'end', runId: liveRun.resultHash, value: val(liveRun, 'end') }, // correct
+      { type: 'claim', metric: 'vsHodl', runId: liveRun.resultHash, value: val(liveRun, 'vsHodl') + 50 }, // forged
+    ])
+    // A perfectly valid, correctly-shaped Answer — but delivered as plain `content`, no tool_calls at all. The
+    // old code's `safeJsonParse(repairReply.message.content ?? null)` fallback would have accepted this and
+    // reported 'repaired'; it must now be ignored exactly like an empty reply would be.
+    const contentOnlyRepair = { content: JSON.stringify({ blocks: [{ type: 'claim', metric: 'vsHodl', runId: liveRun.resultHash, value: val(liveRun, 'vsHodl') }] }) }
+    const model = new RecordedModel([
+      { toolCalls: [toolCall('run_backtest', { windowId: 'fix-full', base: 'live', deposit: 1000 })] },
+      { toolCalls: [badSubmit] },
+      contentOnlyRepair,
+    ])
+    const result = await runAgentJob({ question: '¿Qué habría pasado con 1000 USDC en fix-full?' }, ctxWith(model))
+    expect(result.verifierOutcome).toBe('partial') // never 'repaired' — the content-only reply must not count
+    expect(result.flagged).toBe('LAB_ANSWER_PARTIAL')
+    // the fallback comes from the FIRST submission (the one correct claim it had), not from the repair's content.
+    expect(result.answer.blocks).toEqual([{ type: 'claim', metric: 'end', runId: liveRun.resultHash, value: val(liveRun, 'end') }])
+  })
+
+  test('review finding (P2, tools.ts:65): run_backtest by datasetId resolves end to end through the full agent loop', async () => {
+    const model = new RecordedModel([
+      { toolCalls: [toolCall('run_backtest', { datasetId: '0x852bf32acfea20911aaa2572caf1fe3d759b94ff543593b6a9ee49673e29f828', base: 'live', deposit: 1000 })] },
+      { toolCalls: [submitAnswerCall([{ type: 'claim', metric: 'end', runId: liveRun.resultHash, value: val(liveRun, 'end') }])] },
+    ])
+    const result = await runAgentJob({ question: '¿Qué habría pasado con 1000 USDC en el dataset 0x852bf...?' }, ctxWith(model))
+    expect(result.verifierOutcome).toBe('ok')
+    expect(result.runs).toHaveLength(1)
+    expect(result.runs[0]!.resultHash).toBe(liveRun.resultHash) // same window/base/deposit resolved either way
+  })
 })

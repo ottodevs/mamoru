@@ -188,12 +188,18 @@ function savingsAssetOf(run: RunResult): string {
 }
 
 /**
- * AL-20c: two runs may carry a verdict only when they share window bounds, deposit, savings asset and
- * `simVersion` — they may differ in policy/overrides (that is the point of comparing two strategies). `window.id`
- * stands in for "dataset id": one window is one dataset slice in this manifest format.
+ * AL-20c: two runs may carry a verdict only when they share the same dataset, window bounds, deposit, savings
+ * asset and `simVersion` — they may differ in policy/overrides (that is the point of comparing two strategies).
+ *
+ * Review finding: `window.id` is a manifest label, not the dataset — two windows could in principle share an id
+ * (or window bounds) by coincidence without being the same underlying data. `datasetId` (the decoded dataset's
+ * own id, `@mamoru/lab-bench` since the round-2 review) is what AL-20c actually means by "same dataset", so it
+ * is checked directly; a run missing `datasetId` entirely (an older/malformed record) is never comparable.
  */
 export function verdictsComparable(a: RunResult, b: RunResult): boolean {
+  if (!a.datasetId || !b.datasetId) return false
   return (
+    a.datasetId === b.datasetId &&
     a.window.id === b.window.id &&
     a.window.from === b.window.from &&
     a.window.to === b.window.to &&

@@ -18,6 +18,9 @@ export type RunResult = {
   policyId: string
   resultHash: string
   simVersion: string
+  /** otto/mamoru#200 review (AL-20c): the decoded dataset's own `id`, not the manifest window id — two windows
+   * can share a window id's *bounds* by coincidence, but AL-20c's "same dataset" means the same underlying data. */
+  datasetId: string
   window: { id: string; label: string; regime: string; split: 'train' | 'test'; from: string; to: string; market: unknown }
   deposit: number
   pools: string[]
@@ -152,6 +155,7 @@ export function runBench(spec: BenchSpec, datasetsDir: string = defaultDatasetsD
     policyId: r.policyId,
     resultHash: r.resultHash,
     simVersion: r.simVersion,
+    datasetId: ds.id,
     window: { id: w.id, label: w.label, regime: w.regime, split: w.split, from: w.from, to: w.to, market: w.market },
     deposit: spec.deposit,
     pools,

@@ -82,6 +82,8 @@ export type ManifestWindow = {
   to: string
   step: number
   market: unknown
+  /** The real manifest already carries this per window; optional here so a manifest/fixture without it still parses. */
+  datasetId?: string
 }
 
 type Manifest = { format: string; windows: ManifestWindow[] }
@@ -98,6 +100,18 @@ function readManifest(datasetsDir: string): Manifest {
 export function manifestWindow(windowId: string, datasetsDir: string = defaultDatasetsDir()): ManifestWindow {
   const w = readManifest(datasetsDir).windows.find((x) => x.id === windowId)
   if (!w) throw new ReasonError('LAB_SPEC_INVALID', `unknown window ${windowId}`)
+  return w
+}
+
+/**
+ * otto/mamoru#200 review (AL-10): `run_backtest` may name a window by its dataset id instead of its window id.
+ * Resolved against the manifest alone (never loads the dataset file) — the caller decides what a TEST split
+ * means (AL-12a: `LAB_HOLDOUT_DENIED`, not `LAB_SPEC_INVALID`, and before any data loads). Throws
+ * `LAB_SPEC_INVALID` when no window's manifest entry carries this dataset id.
+ */
+export function manifestWindowByDatasetId(datasetId: string, datasetsDir: string = defaultDatasetsDir()): ManifestWindow {
+  const w = readManifest(datasetsDir).windows.find((x) => x.datasetId === datasetId)
+  if (!w) throw new ReasonError('LAB_SPEC_INVALID', `unknown datasetId ${datasetId}`)
   return w
 }
 

@@ -12,6 +12,7 @@ function makeRun(over: Partial<RunResult> = {}): RunResult {
     policyId: 'conservador-live-v2',
     resultHash: '0xaaa',
     simVersion: 'backtest-1',
+    datasetId: '0xdataset-a',
     window: { id: 'fix-full', label: 'fixture', regime: 'calm', split: 'train', from: '2026-09-01T00:00:00Z', to: '2026-09-02T00:00:00Z', market: { note: 'fixture' } },
     deposit: 1000,
     pools: ['pool:USDC/USDT/100', 'pool:USDC/cbBTC/500', 'pool:WETH/USDC/3000'],
@@ -149,5 +150,21 @@ describe('verdictsComparable / writeVerdictSentence (AL-20b, AL-20c)', () => {
 
     const otherWindow = makeRun({ resultHash: '0xc', window: { ...a.window, id: 'fix-other' } })
     expect(verdictsComparable(a, otherWindow)).toBe(false)
+  })
+
+  test('review finding (P1, contract.ts:195): AL-20c means the same dataset, not just the same window id/bounds', () => {
+    const a = makeRun({ resultHash: '0xa', datasetId: '0xdataset-a' })
+    // same window id and bounds, deposit, simVersion — but a DIFFERENT dataset backs it (e.g. the manifest
+    // reused a window id, or this run is simply from a different data snapshot). Must not be comparable.
+    const sameWindowDifferentDataset = makeRun({ resultHash: '0xd', datasetId: '0xdataset-b' })
+    expect(verdictsComparable(a, sameWindowDifferentDataset)).toBe(false)
+    expect(() => writeVerdictSentence(a, sameWindowDifferentDataset.resultHash, sameWindowDifferentDataset)).toThrow(ReasonError)
+  })
+
+  test('review finding (P1): a run missing datasetId entirely is never comparable, even to an otherwise-identical run', () => {
+    const a = makeRun({ resultHash: '0xa' })
+    const noDatasetId = makeRun({ resultHash: '0xb', datasetId: undefined as unknown as string })
+    expect(verdictsComparable(a, noDatasetId)).toBe(false)
+    expect(verdictsComparable(noDatasetId, a)).toBe(false)
   })
 })

@@ -71,6 +71,56 @@ describe('runBacktestTool (AL-10, AL-13)', () => {
     expect(a.ok && b.ok).toBe(true)
     if (a.ok && b.ok) expect(a.result.runId).toBe(b.result.runId)
   })
+
+  describe('datasetId as an alternative to windowId (review finding, AL-10)', () => {
+    const FIX_FULL_DATASET_ID = '0x852bf32acfea20911aaa2572caf1fe3d759b94ff543593b6a9ee49673e29f828'
+    const FIX_TEST_DATASET_ID = '0x6669782d746573742d686f6c646f75742d666978747572652d6f6e6c792d3030' // manifest-fixture-only, see __fixtures__/manifest.json
+
+    test('a TRAIN dataset id resolves and runs as its window', () => {
+      const runner = new LabBenchRunner(FIXTURE_DIR)
+      const runStore: RunStore = new Map()
+      const outcome = runBacktestTool({ datasetId: FIX_FULL_DATASET_ID, base: 'live', deposit: 1000 }, runner, runStore, undefined, FIXTURE_DIR)
+      expect(outcome.ok).toBe(true)
+      if (!outcome.ok) return
+      expect(outcome.result.window.id).toBe('fix-full')
+      // same resolved window, same spec -> identical resultHash to naming it by windowId directly.
+      const byWindow = runBacktestTool({ windowId: 'fix-full', base: 'live', deposit: 1000 }, runner, new Map(), undefined, FIXTURE_DIR)
+      expect(byWindow.ok && outcome.result.runId === byWindow.result.runId).toBe(true)
+    })
+
+    test('a TEST dataset id is LAB_HOLDOUT_DENIED before any data loads', () => {
+      const runner = new LabBenchRunner(FIXTURE_DIR)
+      const runStore: RunStore = new Map()
+      const outcome = runBacktestTool({ datasetId: FIX_TEST_DATASET_ID, base: 'live', deposit: 1000 }, runner, runStore, undefined, FIXTURE_DIR)
+      expect(outcome.ok).toBe(false)
+      if (outcome.ok) return
+      expect(outcome.error.code).toBe('LAB_HOLDOUT_DENIED')
+      expect(runStore.size).toBe(0)
+    })
+
+    test('an unknown dataset id is LAB_SPEC_INVALID', () => {
+      const runner = new LabBenchRunner(FIXTURE_DIR)
+      const outcome = runBacktestTool({ datasetId: '0xnot-a-real-dataset', base: 'live', deposit: 1000 }, runner, new Map(), undefined, FIXTURE_DIR)
+      expect(outcome.ok).toBe(false)
+      if (outcome.ok) return
+      expect(outcome.error.code).toBe('LAB_SPEC_INVALID')
+    })
+
+    test('neither windowId nor datasetId is LAB_SPEC_INVALID', () => {
+      const runner = new LabBenchRunner(FIXTURE_DIR)
+      const outcome = runBacktestTool({ base: 'live', deposit: 1000 }, runner, new Map(), undefined, FIXTURE_DIR)
+      expect(outcome.ok).toBe(false)
+      if (outcome.ok) return
+      expect(outcome.error.code).toBe('LAB_SPEC_INVALID')
+    })
+
+    test('datasetId takes precedence when both it and windowId are given', () => {
+      const runner = new LabBenchRunner(FIXTURE_DIR)
+      const outcome = runBacktestTool({ datasetId: FIX_FULL_DATASET_ID, windowId: 'fix-nobtc', base: 'live', deposit: 1000 }, runner, new Map(), undefined, FIXTURE_DIR)
+      expect(outcome.ok).toBe(true)
+      if (outcome.ok) expect(outcome.result.window.id).toBe('fix-full')
+    })
+  })
 })
 
 describe('compareTool (AL-11)', () => {

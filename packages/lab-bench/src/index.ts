@@ -5,6 +5,7 @@ export {
   DEPOSIT_MIN_USDC,
   defaultDatasetsDir,
   manifestWindow,
+  manifestWindowByDatasetId,
   parseSpecKey,
   policyOf,
   specKey,

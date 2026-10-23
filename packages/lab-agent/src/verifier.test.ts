@@ -11,6 +11,7 @@ function makeRun(over: Partial<RunResult> = {}): RunResult {
     policyId: 'conservador-live-v2',
     resultHash: '0xaaa',
     simVersion: 'backtest-1',
+    datasetId: '0xdataset-a',
     window: { id: 'fix-full', label: 'fixture', regime: 'calm', split: 'train', from: '2026-09-01T00:00:00Z', to: '2026-09-02T00:00:00Z', market: { note: 'fixture' } },
     deposit: 1000,
     pools: ['pool:USDC/USDT/100', 'pool:USDC/cbBTC/500', 'pool:WETH/USDC/3000'],

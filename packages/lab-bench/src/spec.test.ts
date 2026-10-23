@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 import { ReasonError } from '@mamoru/domain'
-import { basePolicyOf, defaultDatasetsDir, parseSpecKey, policyOf, specKey, validateSpec, variantLabel, type BenchSpec } from './spec.ts'
+import { basePolicyOf, defaultDatasetsDir, manifestWindowByDatasetId, parseSpecKey, policyOf, specKey, validateSpec, variantLabel, type BenchSpec } from './spec.ts'
 
 /**
  * Committed, synthetic, tiny (review of #117 round 2: CI has no `~/.local/share/mamoru-lab/datasets` — the real
@@ -125,6 +125,30 @@ describe('validateSpec (B-01)', () => {
   test('every TRAIN window of the manifest passes', () => {
     for (const windowId of ['fix-full', 'fix-nobtc']) {
       expect(() => validateSpec(spec({ windowId }), FIXTURE_DIR)).not.toThrow()
+    }
+  })
+})
+
+describe('manifestWindowByDatasetId (otto/mamoru#200 review, AL-10: run_backtest may name a window by dataset id)', () => {
+  test('resolves a TRAIN dataset id to its window, without loading the dataset file', () => {
+    const w = manifestWindowByDatasetId('0x852bf32acfea20911aaa2572caf1fe3d759b94ff543593b6a9ee49673e29f828', FIXTURE_DIR)
+    expect(w.id).toBe('fix-full')
+    expect(w.split).toBe('train')
+  })
+
+  test('resolves a TEST dataset id too — the caller decides what that means (AL-12a), this is manifest-only', () => {
+    const w = manifestWindowByDatasetId('0x6669782d746573742d686f6c646f75742d666978747572652d6f6e6c792d3030', FIXTURE_DIR)
+    expect(w.id).toBe('fix-test')
+    expect(w.split).toBe('test')
+  })
+
+  test('an unknown dataset id is LAB_SPEC_INVALID', () => {
+    try {
+      manifestWindowByDatasetId('0xnot-a-real-dataset', FIXTURE_DIR)
+      throw new Error('expected manifestWindowByDatasetId to throw')
+    } catch (e) {
+      expect(e).toBeInstanceOf(ReasonError)
+      expect((e as ReasonError).code).toBe('LAB_SPEC_INVALID')
     }
   })
 })
