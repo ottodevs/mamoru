@@ -2,13 +2,18 @@
 // reported apart. Pure parts live here (overrides, metrics, tables); cli/sweep.ts runs the cells in parallel.
 import { POLICIES, type PolicyVersion } from '@mamoru/policy'
 import { baseRegistry, entry } from '@mamoru/registry'
+import type { HarvestArm } from './harvest.ts'
 import type { RunResult } from './types.ts'
 import type { LabWindow, Split } from './windows.ts'
 
 const DAY = 86_400
 
-/** A policy of `POLICIES` with parameters replaced. Its id is `<base>+<name>` so a result names the variant. */
-export type Variant = { name: string; policy: string; overrides?: Record<string, unknown> }
+/**
+ * A policy of `POLICIES` with parameters replaced. Its id is `<base>+<name>` so a result names the variant. Lab #178:
+ * `harvest` runs the variant under a harvest arm instead; with no overrides the policy is then the base one, unchanged,
+ * and the arm is named by the result hash.
+ */
+export type Variant = { name: string; policy: string; overrides?: Record<string, unknown>; harvest?: HarvestArm }
 
 /**
  * Deep merge for parameter overrides: objects merge key by key, anything else (arrays included) replaces. A string
@@ -88,7 +93,7 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 export function policyOf(v: Variant): PolicyVersion {
   const base = POLICIES[v.policy]
   if (!base) throw new Error(`unknown policy ${v.policy}; known: ${Object.keys(POLICIES).join(', ')}`)
-  if (!v.overrides || Object.keys(v.overrides).length === 0) return v.name === v.policy ? base : { ...base, policyId: `${base.policyId}+${v.name}` }
+  if (!v.overrides || Object.keys(v.overrides).length === 0) return v.name === v.policy || v.harvest ? base : { ...base, policyId: `${base.policyId}+${v.name}` }
   return { ...applyOverrides(base, v.overrides), policyId: `${base.policyId}+${v.name}` }
 }
 
@@ -148,6 +153,29 @@ export type CellMetrics = {
   samples: number
   gaps: number
   resultHash: string
+  /** Lab #178, under a harvest arm: its report in the savings asset. */
+  harvest?: HarvestCellMetrics
+}
+
+export type HarvestPoolMetrics = { fees: number; harvests: number; swaps: number; increases: number; cost: number; captured: number; exposureRemoved: number; uncollected: number }
+
+export type HarvestCellMetrics = {
+  arm: string
+  savings: number
+  yieldEarned: number
+  captured: number
+  exposureRemoved: number
+  cost: number
+  fees: number
+  /** Harvest cost over fees accrued, percent; null without fees. */
+  costToFeesPct: number | null
+  harvests: number
+  swaps: number
+  increases: number
+  driftMaxPct: number
+  driftMeanPct: number
+  minValue: number
+  byPool: Record<string, HarvestPoolMetrics>
 }
 
 export function cellMetrics(r: RunResult, decimals: number): CellMetrics {
@@ -171,6 +199,28 @@ export function cellMetrics(r: RunResult, decimals: number): CellMetrics {
     samples: r.window.samples,
     gaps: r.window.gaps,
     resultHash: r.resultHash,
+    ...(r.harvest ? { harvest: harvestMetrics(r, n) } : {}),
+  }
+}
+
+function harvestMetrics(r: RunResult, n: (v: bigint) => number): HarvestCellMetrics {
+  const h = r.harvest!
+  return {
+    arm: h.arm,
+    savings: n(h.savings),
+    yieldEarned: n(h.yieldEarned),
+    captured: n(h.captured),
+    exposureRemoved: n(h.exposureRemoved),
+    cost: n(h.cost),
+    fees: n(h.fees),
+    costToFeesPct: h.fees === 0n ? null : Number((h.cost * 1_000_000n) / h.fees) / 10_000,
+    harvests: h.harvests,
+    swaps: h.swaps,
+    increases: h.increases,
+    driftMaxPct: h.driftMaxBps / 100,
+    driftMeanPct: h.driftMeanBps / 100,
+    minValue: n(h.minValue),
+    byPool: Object.fromEntries(h.pools.map((p) => [p.pool, { fees: n(p.fees), harvests: p.harvests, swaps: p.swaps, increases: p.increases, cost: n(p.gas + p.swapLoss), captured: n(p.captured), exposureRemoved: n(p.exposureRemoved), uncollected: n(p.uncollected) }])),
   }
 }
 

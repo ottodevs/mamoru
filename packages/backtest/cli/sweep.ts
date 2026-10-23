@@ -52,7 +52,7 @@ function runJob(job: Job): Cell[] {
       }
       const unit = 10n ** BigInt(decimalsOf(policy))
       // Cents of the savings asset, as cli/run.ts takes a deposit.
-      const r = runBacktest(own, policy, { deposit: (BigInt(Math.round(deposit * 100)) * unit) / 100n, reviewEvery: 1, sessions: 'enforce', sessionRenewal: 'renewed' })
+      const r = runBacktest(own, policy, { deposit: (BigInt(Math.round(deposit * 100)) * unit) / 100n, reviewEvery: 1, sessions: 'enforce', sessionRenewal: 'renewed', ...(v.harvest ? { harvest: v.harvest } : {}) })
       cells.push({ ...head, deposit, status: 'ok', metrics: cellMetrics(r, decimalsOf(policy)) })
     }
   }

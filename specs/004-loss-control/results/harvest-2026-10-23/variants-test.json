@@ -1,0 +1,34 @@
+[
+ {
+  "name": "live",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "live"
+  }
+ },
+ {
+  "name": "A-k20",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 20
+  }
+ },
+ {
+  "name": "A-k20-T7d",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 20,
+   "capSeconds": 604800
+  }
+ },
+ {
+  "name": "B-k20",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "compound",
+   "k": 20
+  }
+ }
+]

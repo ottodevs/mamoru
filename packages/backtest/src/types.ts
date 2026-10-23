@@ -1,6 +1,7 @@
 import type { Hex, ReasonCode } from '@mamoru/domain'
 import type { GateStep, Proposal } from '@mamoru/decide'
 import type { RegistryName } from '@mamoru/registry'
+import type { HarvestArm, HarvestReport } from './harvest.ts'
 
 /** One pool at one block: what `pool_snapshots` stores. */
 export type PoolSample = {
@@ -54,6 +55,12 @@ export type SimConfig = {
   capUsdc?: bigint
   /** Later deposits of the savings asset: `at` is a sample index, the amount lands before that sample's review. */
   topUps?: { at: number; amount: bigint }[]
+  /**
+   * Lab (otto/mamoru#178): the harvest arm. `live` only measures what `decide` does; `savings` (A·k) and `compound` (B)
+   * turn the engine's own harvest off and harvest by their rule (`harvest.ts`). Absent: nothing is measured and the
+   * result hash is the one of before. Present, the arm and its report are part of the hash.
+   */
+  harvest?: HarvestArm
   /** First and last sample to replay, inclusive. Default: the whole dataset. */
   from?: number
   to?: number
@@ -150,6 +157,8 @@ export type RunResult = {
    * the account held as idle savings over the reviews (basis points).
    */
   capacity: { depthWaits: number; idleBps: number }
+  /** Lab (#178): what the harvest arm did, when the run had one. */
+  harvest?: HarvestReport
   /** Hash of the integer facts above. Same dataset, policy and simulator version give the same hash on any machine. */
   resultHash: Hex
 }

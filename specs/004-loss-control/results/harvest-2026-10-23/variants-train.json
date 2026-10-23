@@ -1,0 +1,159 @@
+[
+ {
+  "name": "live",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "live"
+  }
+ },
+ {
+  "name": "A-k2",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 2
+  }
+ },
+ {
+  "name": "A-k2-T7d",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 2,
+   "capSeconds": 604800
+  }
+ },
+ {
+  "name": "A-k3",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 3
+  }
+ },
+ {
+  "name": "A-k3-T7d",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 3,
+   "capSeconds": 604800
+  }
+ },
+ {
+  "name": "A-k5",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 5
+  }
+ },
+ {
+  "name": "A-k5-T7d",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 5,
+   "capSeconds": 604800
+  }
+ },
+ {
+  "name": "A-k10",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 10
+  }
+ },
+ {
+  "name": "A-k10-T7d",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 10,
+   "capSeconds": 604800
+  }
+ },
+ {
+  "name": "A-k20",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 20
+  }
+ },
+ {
+  "name": "A-k20-T7d",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 20,
+   "capSeconds": 604800
+  }
+ },
+ {
+  "name": "A-k50",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 50
+  }
+ },
+ {
+  "name": "A-k50-T7d",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "savings",
+   "k": 50,
+   "capSeconds": 604800
+  }
+ },
+ {
+  "name": "B-k2",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "compound",
+   "k": 2
+  }
+ },
+ {
+  "name": "B-k3",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "compound",
+   "k": 3
+  }
+ },
+ {
+  "name": "B-k5",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "compound",
+   "k": 5
+  }
+ },
+ {
+  "name": "B-k10",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "compound",
+   "k": 10
+  }
+ },
+ {
+  "name": "B-k20",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "compound",
+   "k": 20
+  }
+ },
+ {
+  "name": "B-k50",
+  "policy": "conservador-live-v2",
+  "harvest": {
+   "kind": "compound",
+   "k": 50
+  }
+ }
+]

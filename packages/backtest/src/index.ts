@@ -18,3 +18,4 @@ export {
   type ExitWait,
   type PoolTokenSpend,
 } from './action-policy.ts'
+export { armName, type HarvestArm, type HarvestReport, type PoolHarvestReport } from './harvest.ts'
