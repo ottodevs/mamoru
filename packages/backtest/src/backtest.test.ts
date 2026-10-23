@@ -352,4 +352,48 @@ describe('onSample (otto/mamoru#199, spec 008 B-02)', () => {
     // Before any entry, the hook sees none.
     expect(seen[0]).toBe(0)
   }, SLOW)
+
+  test('review of #117 P2: the hook cannot corrupt the world — a callback that tries to mutate a position leaves resultHash unchanged', () => {
+    const ds = syntheticDataset({ samples: 80 })
+    const plain = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT })
+    let mutationAttempts = 0
+    let mutationThrew = 0
+    const watched = runBacktest(ds, conservadorLiveV2, {
+      deposit: DEPOSIT,
+      onSample: (_i, _time, positions) => {
+        for (const p of positions) {
+          mutationAttempts++
+          try {
+            // @ts-expect-error -- deliberately trying to write through the readonly type, as a hostile callback would
+            p.liquidity = 999_999n
+            // @ts-expect-error -- same, on a different field
+            p.tickLower = -1
+          } catch {
+            mutationThrew++
+          }
+        }
+      },
+    })
+    expect(mutationAttempts).toBeGreaterThan(0)
+    // Frozen: every attempted write throws (strict-mode ESM), it never silently no-ops past a frozen object.
+    expect(mutationThrew).toBe(mutationAttempts)
+    expect(watched.resultHash).toBe(plain.resultHash)
+  }, SLOW)
+
+  test('review of #117 P2: positions are snapshots, never the same object the world holds', () => {
+    const ds = syntheticDataset({ samples: 20 })
+    let sawAny = false
+    runBacktest(ds, conservadorLiveV2, {
+      deposit: DEPOSIT,
+      onSample: (_i, _time, positions) => {
+        for (const p of positions) {
+          sawAny = true
+          expect(Object.isFrozen(p)).toBe(true)
+          expect(Object.keys(p).sort()).toEqual(['liquidity', 'pool', 'tickLower', 'tickUpper'])
+        }
+        expect(Object.isFrozen(positions)).toBe(true)
+      },
+    })
+    expect(sawAny).toBe(true)
+  }, SLOW)
 })

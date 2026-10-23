@@ -59,10 +59,16 @@ export type SimConfig = {
   to?: number
   /**
    * otto/mamoru#199 (spec 008 B-02, the Lab bench): called after every recorded sample with the world's open
-   * positions at that sample, read-only. Used to chart the active range band per pool; it reads no state the facts
-   * object below does not already fold in, so it never changes `resultHash`.
+   * positions at that sample, read-only — a fresh, frozen snapshot (review of #117 P2), never the world's own
+   * objects: every field is `readonly` here and actually frozen at the call site, so a callback can neither read a
+   * live reference it could later corrupt nor assign through this one. Used to chart the active range band per
+   * pool; it reads no state the facts object below does not already fold in, so it never changes `resultHash`.
    */
-  onSample?: (i: number, time: number, positions: readonly { pool: RegistryName; tickLower: number; tickUpper: number; liquidity: bigint }[]) => void
+  onSample?: (
+    i: number,
+    time: number,
+    positions: readonly { readonly pool: RegistryName; readonly tickLower: number; readonly tickUpper: number; readonly liquidity: bigint }[],
+  ) => void
 }
 
 export type OpEntry = {

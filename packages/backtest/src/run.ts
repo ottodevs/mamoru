@@ -380,7 +380,16 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
     const v = accountValue(ds, s, w, price)
     series.time.push(s.time)
     series.value.push(v.total - gasSpent)
-    config.onSample?.(i, s.time, w.positions)
+    // Review of #117 P2: never hand out the live SimPosition objects. w.positions' entries are mutated in place as
+    // the run continues (fee accrual, outSince, ...); a callback that grabbed a field off one of them — or, worse,
+    // assigned to one — would corrupt the simulation's own state and change resultHash from inside a "read-only"
+    // hook. A fresh, frozen, data-only snapshot can't do either: it shares no reference with the world, and
+    // assigning to it throws (this is strict-mode ESM) instead of silently doing nothing.
+    config.onSample?.(
+      i,
+      s.time,
+      Object.freeze(w.positions.map((p) => Object.freeze({ pool: p.pool, tickLower: p.tickLower, tickUpper: p.tickUpper, liquidity: p.liquidity }))),
+    )
     series.hodl.push(Object.entries(hodl).reduce((n, [token, amount]) => n + price(s, token, amount), 0n))
     if (v.lp > 0n) {
       rangeSum += bps(v.lpInRange, v.lp)
