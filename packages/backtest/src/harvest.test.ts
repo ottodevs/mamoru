@@ -4,11 +4,11 @@ import { baseRegistry, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { POOLS, syntheticDataset } from './fixtures.ts'
 import { amountsOf, type Observation } from '@mamoru/decide'
-import { absorbCarry, accrueYield, armName, compoundedShare, divertFees, driftStep, estimate, harvestReport, labHarvest, newLedger, poolLedger, recordEarned, triggers, type HarvestArm } from './harvest.ts'
+import { accrueYield, armName, compoundedShare, divertFees, driftStep, estimate, harvestReport, labHarvest, newLedger, poolLedger, recordEarned, triggers, type HarvestArm } from './harvest.ts'
 import { runBacktest } from './run.ts'
 import { policyOf } from './sweep.ts'
 import type { PoolSample } from './types.ts'
-import { apply, newWorld, type SimPosition } from './world.ts'
+import { apply, newWorld, valueIn, type SimPosition } from './world.ts'
 
 const USDC = 1_000_000n
 const SLOW = 60_000
@@ -289,25 +289,27 @@ describe('review fixes, round 2', () => {
     expect(poolLedger(l, POOLS[2]).pending.WETH).toBe(10n ** 14n)
   })
 
-  test('2: the compounded share a re-range takes out is carried into the replacement position', () => {
+  test('2: the compounded share a re-range takes out is frozen in USDC at the TWAP, with no later price exposure', () => {
     const l = newLedger(COMPOUND)
     const old: SimPosition = { tokenId: 1n, pool: POOLS[2], tickLower: tick - 600, tickUpper: tick + 600, liquidity: 4n * 10n ** 15n, owed0: 0n, owed1: 0n }
     l.compounded.set(1n, 10n ** 15n)
-    compoundedShare(l, old, old.liquidity, ps.sqrtPriceX96).commit()
-    const pl = poolLedger(l, POOLS[2])
+    const twap = sqrtRatioAtTick(tick - 50)
+    compoundedShare(l, old, old.liquidity, twap, 'USDC').commit()
+    const a = amountsOf(twap, tick - 600, tick + 600, 10n ** 15n)
+    const at = { ...ps, sqrtPriceX96: twap }
+    const value = valueIn(eth, at, 'WETH', a.amount0, 'USDC') + valueIn(eth, at, 'USDC', a.amount1, 'USDC')
+    expect(poolLedger(l, POOLS[2]).frozen).toBe(value)
     expect(l.compounded.get(1n)).toBe(0n)
-    expect(pl.carry.WETH).toBeGreaterThan(0n)
-    // The re-mint spends 4 units of value, the carry is worth 1: a quarter of its liquidity is compounded again.
-    absorbCarry(l, POOLS[2], 2n, 8n * 10n ** 15n, 4_000n, 1_000n)
-    expect(l.compounded.get(2n)).toBe(2n * 10n ** 15n)
-    expect(pl.carry.WETH).toBe(0n)
-    expect(pl.carry.USDC ?? 0n).toBe(0n)
-    // A mint smaller than the carry takes part of it; the rest waits.
+    // At the end it counts as that fixed amount, whatever the price; a new position starts with nothing compounded.
+    const w = newWorld('USDC', 0n)
+    w.positions.push({ ...old, tokenId: 2n, owed0: 0n, owed1: 0n })
+    const r = harvestReport(l, w, ds, s0, (_s, t, x) => (t === 'USDC' ? x : x * 7n), 0n)
+    expect(r.captured).toBe(value)
+    // A reduce takes its part only.
     const l2 = newLedger(COMPOUND)
-    poolLedger(l2, POOLS[2]).carry = { WETH: 1_000n, USDC: 2_000n }
-    absorbCarry(l2, POOLS[2], 3n, 100n, 1_000n, 4_000n)
-    expect(l2.compounded.get(3n)).toBe(100n)
-    expect(poolLedger(l2, POOLS[2]).carry).toEqual({ WETH: 750n, USDC: 1_500n })
+    l2.compounded.set(1n, 10n ** 15n)
+    compoundedShare(l2, old, old.liquidity / 2n, twap, 'USDC').commit()
+    expect(l2.compounded.get(1n)).toBe(10n ** 15n / 2n)
   })
 
   test('2: in a run with re-ranges, B never values more than the fees it earned plus their compounding', () => {

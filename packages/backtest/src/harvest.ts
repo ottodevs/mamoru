@@ -62,10 +62,10 @@ export type PoolLedger = {
    */
   inKind: Record<RegistryName, bigint>
   /**
-   * Compound arm: the compounded share a re-range or reduce took out, per token, until the pool's next mint or increase
-   * takes it back in (then it is compounded liquidity of that position again). What is left at the end counts in kind.
+   * Compound arm: the value, in the savings asset at the TWAP of that moment, of every compounded share a re-range or
+   * reduce took out. Fixed from then on: no later price exposure, and its re-compounding is not attributed.
    */
-  carry: Record<RegistryName, bigint>
+  frozen: bigint
 }
 
 export type HarvestLedger = {
@@ -96,7 +96,7 @@ export function recordEarned(l: HarvestLedger, e: RegistryEntry, fees0: bigint, 
 }
 
 export function poolLedger(l: HarvestLedger, pool: RegistryName): PoolLedger {
-  return (l.pools[pool] ??= { collected: {}, collectedValue: 0n, fees: 0n, earned: {}, harvests: 0, swaps: 0, increases: 0, converted: {}, convertedValue: 0n, swapOut: 0n, direct: 0n, gas: 0n, swapLoss: 0n, pending: {}, inKind: {}, carry: {} })
+  return (l.pools[pool] ??= { collected: {}, collectedValue: 0n, fees: 0n, earned: {}, harvests: 0, swaps: 0, increases: 0, converted: {}, convertedValue: 0n, swapOut: 0n, direct: 0n, gas: 0n, swapLoss: 0n, pending: {}, inKind: {}, frozen: 0n })
 }
 
 function add(r: Record<RegistryName, bigint>, token: RegistryName, amount: bigint): void {
@@ -140,36 +140,25 @@ export function divertFees(l: HarvestLedger, w: World, e: RegistryEntry, ps: Poo
 
 /**
  * Compound arm, before a re-range or reduce of `pos` takes out `removed` liquidity: the compounded share of what comes
- * out. `commit` books it once the operation went through: those tokens wait in `carry` for the pool's next mint or
- * increase (a re-range's replacement position), which takes them back as compounded liquidity (`absorbCarry`).
+ * out, valued in the savings asset at `twapSqrtPriceX96`. `commit` books it once the operation went through: it is
+ * added to B's captured as a fixed amount and the position's compounded liquidity shrinks by it. A replacement position
+ * starts with no compounded liquidity (a stated limit of B: what it later re-compounds from that value is not
+ * attributed).
  */
-export function compoundedShare(l: HarvestLedger, pos: SimPosition, removed: bigint, sqrtPriceX96: bigint): { commit: () => void } {
+export function compoundedShare(l: HarvestLedger, pos: SimPosition, removed: bigint, twapSqrtPriceX96: bigint, savings: RegistryName): { commit: () => void } {
   const added = l.compounded.get(pos.tokenId) ?? 0n
   if (added === 0n || pos.liquidity === 0n) return { commit: () => {} }
   const share = (added * (removed < pos.liquidity ? removed : pos.liquidity)) / pos.liquidity
-  const out = amountsOf(sqrtPriceX96, pos.tickLower, pos.tickUpper, share)
+  const out = amountsOf(twapSqrtPriceX96, pos.tickLower, pos.tickUpper, share)
   const e = entry(pos.pool, baseRegistry)
+  const at = { sqrtPriceX96: twapSqrtPriceX96 } as PoolSample
+  const value = valueIn(e, at, e.token0!, out.amount0, savings) + valueIn(e, at, e.token1!, out.amount1, savings)
   return {
     commit: () => {
-      const pl = poolLedger(l, pos.pool)
-      add(pl.carry, e.token0!, out.amount0)
-      add(pl.carry, e.token1!, out.amount1)
+      poolLedger(l, pos.pool).frozen += value
       l.compounded.set(pos.tokenId, added - share)
     },
   }
-}
-
-/**
- * Compound arm, after a mint or increase in a pool with a carried compounded share: the new liquidity `added`, bought
- * with tokens worth `usedValue`, is compounded liquidity of `tokenId` up to what the carry is worth (`carryValue`, same
- * price); the carry shrinks by the part taken, token by token in proportion.
- */
-export function absorbCarry(l: HarvestLedger, pool: RegistryName, tokenId: bigint, added: bigint, usedValue: bigint, carryValue: bigint): void {
-  const pl = l.pools[pool]
-  if (!pl || carryValue === 0n || usedValue === 0n || added === 0n) return
-  const taken = carryValue < usedValue ? carryValue : usedValue
-  l.compounded.set(tokenId, (l.compounded.get(tokenId) ?? 0n) + (added * taken) / usedValue)
-  for (const t of Object.keys(pl.carry)) pl.carry[t] = pl.carry[t]! - (pl.carry[t]! * taken) / carryValue
 }
 
 /** Compound arm: fees a re-range or reduce collected stay in the account in kind. */
@@ -442,7 +431,7 @@ export function harvestReport(l: HarvestLedger, w: World, ds: { pools: RegistryN
         const whole = price(last, e.token0!, a.amount0 + p.owed0) + price(last, e.token1!, a.amount1 + p.owed1)
         return n + (whole * added) / p.liquidity
       }, 0n)
-      const captured = l.arm.kind === 'savings' ? pl.direct + pl.swapOut - pl.gas : l.arm.kind === 'compound' ? lpShare + atEnd(pl.inKind) + atEnd(pl.carry) - pl.gas : atEnd(pl.collected) - pl.gas
+      const captured = l.arm.kind === 'savings' ? pl.direct + pl.swapOut - pl.gas : l.arm.kind === 'compound' ? lpShare + atEnd(pl.inKind) + pl.frozen - pl.gas : atEnd(pl.collected) - pl.gas
       const unconverted = l.arm.kind === 'savings' ? atEnd(pl.pending) : 0n
       const exposureRemoved = l.arm.kind === 'savings' ? pl.convertedValue - atEnd(pl.converted) : 0n
       const uncollected = w.positions.filter((p) => p.pool === pool).reduce((n, p) => n + price(last, e.token0!, p.owed0) + price(last, e.token1!, p.owed1), 0n)
