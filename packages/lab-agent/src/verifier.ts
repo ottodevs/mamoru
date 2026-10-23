@@ -31,6 +31,7 @@ export type VerifyErrorKind =
   | 'chart-kind-mismatch'
   | 'untraceable-digit'
   | 'directional-term'
+  | 'ref-unknown'
 
 export type VerifyError = { kind: VerifyErrorKind; blockIndex: number | null; detail: string }
 export type VerifyResult = { ok: boolean; errors: VerifyError[] }
@@ -238,21 +239,41 @@ function chartErrors(block: ChartBlock, blockIndex: number | null, ctx: VerifyCo
   return errors
 }
 
-function proseErrors(block: TextBlock | CaveatBlock, blockIndex: number | null, allowedTokenRegex: RegExp): VerifyError[] {
+/**
+ * `{{cN}}`/`{{vN}}` are only ever a reference to the Nth claim/verdict block of THIS answer (0-based, in
+ * document order — AL-20's own convention). The untraceable-digit check only checks that the *pattern*
+ * `{{c\d+}}` is well-formed; it was never checking that claim/verdict `N` actually exists (review finding,
+ * P2/verifier.ts:127) — a text block could cite `{{c5}}` with only two claim blocks and pass clean.
+ */
+function refIndexErrors(block: TextBlock | CaveatBlock, blockIndex: number | null, claimCount: number, verdictCount: number): VerifyError[] {
+  const errors: VerifyError[] = []
+  for (const m of block.md.matchAll(/\{\{c(\d+)\}\}/g)) {
+    const n = Number(m[1])
+    if (n >= claimCount) errors.push({ kind: 'ref-unknown', blockIndex, detail: `LAB_REF_UNKNOWN: {{c${n}}} references claim ${n}, but this answer has ${claimCount} claim block(s)` })
+  }
+  for (const m of block.md.matchAll(/\{\{v(\d+)\}\}/g)) {
+    const n = Number(m[1])
+    if (n >= verdictCount) errors.push({ kind: 'ref-unknown', blockIndex, detail: `LAB_REF_UNKNOWN: {{v${n}}} references verdict ${n}, but this answer has ${verdictCount} verdict block(s)` })
+  }
+  return errors
+}
+
+function proseErrors(block: TextBlock | CaveatBlock, blockIndex: number | null, allowedTokenRegex: RegExp, claimCount: number, verdictCount: number): VerifyError[] {
   const errors: VerifyError[] = []
   if (findUntraceableDigits(block.md, allowedTokenRegex)) {
     errors.push({ kind: 'untraceable-digit', blockIndex, detail: `"${block.type}" block has a digit not covered by a {{cN}}/{{vN}} reference or a known id/year` })
   }
   const term = findDirectionalTerm(block.md)
   if (term) errors.push({ kind: 'directional-term', blockIndex, detail: `"${block.type}" block uses performance-judgement term "${term}"; use a verdict block instead` })
+  errors.push(...refIndexErrors(block, blockIndex, claimCount, verdictCount))
   return errors
 }
 
-function blockErrors(block: Block, blockIndex: number | null, ctx: VerifyContext, allowedTokenRegex: RegExp): VerifyError[] {
+function blockErrors(block: Block, blockIndex: number | null, ctx: VerifyContext, allowedTokenRegex: RegExp, claimCount: number, verdictCount: number): VerifyError[] {
   if (block.type === 'claim') return claimErrors(block, blockIndex, ctx)
   if (block.type === 'verdict') return verdictErrors(block, blockIndex, ctx)
   if (block.type === 'chart') return chartErrors(block, blockIndex, ctx)
-  return proseErrors(block, blockIndex, allowedTokenRegex)
+  return proseErrors(block, blockIndex, allowedTokenRegex, claimCount, verdictCount)
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +286,9 @@ export function verify(answerRaw: unknown, ctx: VerifyContext): VerifyResult {
 
   const answer = answerRaw as Answer
   const allowedTokenRegex = buildAllowedTokenRegex(ctx.catalogIds)
-  const errors = answer.blocks.flatMap((block, i) => blockErrors(block, i, ctx, allowedTokenRegex))
+  const claimCount = answer.blocks.filter((b) => b.type === 'claim').length
+  const verdictCount = answer.blocks.filter((b) => b.type === 'verdict').length
+  const errors = answer.blocks.flatMap((block, i) => blockErrors(block, i, ctx, allowedTokenRegex, claimCount, verdictCount))
   return { ok: errors.length === 0, errors }
 }
 
@@ -290,6 +313,10 @@ export function fallbackAnswer(candidate: Answer, ctx: VerifyContext): FallbackR
   // `{"blocks":[null]}` used to throw here).
   const blocks = candidate.blocks.filter((b): b is Block => blockShapeErrors(b, null).length === 0)
   const hadVerifiedKind = blocks.some(isVerifiedBlock)
+  // {{cN}}/{{vN}} numbering is fixed by the model's own (shape-valid) blocks array, independent of which of
+  // those blocks individually survive the checks below.
+  const claimCount = blocks.filter((b) => b.type === 'claim').length
+  const verdictCount = blocks.filter((b) => b.type === 'verdict').length
 
   const keptResults = blocks.filter((b) => {
     if (b.type === 'claim') return claimErrors(b, null, ctx).length === 0
@@ -299,7 +326,9 @@ export function fallbackAnswer(candidate: Answer, ctx: VerifyContext): FallbackR
   if (keptResults.length > 0) return { answer: { blocks: keptResults }, flagged: true }
 
   if (!hadVerifiedKind) {
-    const keptProse = blocks.filter((b) => isProseBlock(b) && proseErrors(b, null, allowedTokenRegex).length === 0)
+    // A caveat/text block whose {{cN}}/{{vN}} reference doesn't resolve is dropped here too (review finding) —
+    // a refusal that cites a claim it never made is not a safe thing to render as "verified" prose either.
+    const keptProse = blocks.filter((b) => isProseBlock(b) && proseErrors(b, null, allowedTokenRegex, claimCount, verdictCount).length === 0)
     if (keptProse.length > 0) return { answer: { blocks: keptProse }, flagged: true }
   }
   return { answer: { blocks: [] }, flagged: true }

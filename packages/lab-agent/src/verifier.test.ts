@@ -108,6 +108,31 @@ describe('verify (AL-21)', () => {
     }
     expect(verify(answer, ctxOf(run)).ok).toBe(true)
   })
+
+  test('review finding (P2, verifier.ts:127): {{cN}}/{{vN}} must reference a claim/verdict this answer actually has (LAB_REF_UNKNOWN)', () => {
+    const run = makeRun()
+    // only one claim (index 0) and no verdict at all — {{c1}} and {{v0}} both reference nothing.
+    const answer: Answer = {
+      blocks: [
+        { type: 'claim', metric: 'end', runId: run.resultHash, value: 983.56 },
+        { type: 'text', md: 'El segundo número fue {{c1}} y el veredicto {{v0}}.' },
+      ],
+    }
+    const result = verify(answer, ctxOf(run))
+    expect(result.ok).toBe(false)
+    expect(result.errors.filter((e) => e.kind === 'ref-unknown')).toHaveLength(2)
+    expect(result.errors.some((e) => e.detail.includes('LAB_REF_UNKNOWN'))).toBe(true)
+  })
+
+  test('{{c0}} is valid when there is exactly one claim; {{c1}} on the same answer is not (off-by-one)', () => {
+    const run = makeRun()
+    const oneClaim: Answer = { blocks: [{ type: 'claim', metric: 'end', runId: run.resultHash, value: 983.56 }, { type: 'text', md: 'Terminaste en {{c0}}.' }] }
+    expect(verify(oneClaim, ctxOf(run)).ok).toBe(true)
+    const offByOne: Answer = { blocks: [{ type: 'claim', metric: 'end', runId: run.resultHash, value: 983.56 }, { type: 'text', md: 'Terminaste en {{c1}}.' }] }
+    const result = verify(offByOne, ctxOf(run))
+    expect(result.ok).toBe(false)
+    expect(result.errors[0]?.kind).toBe('ref-unknown')
+  })
 })
 
 describe('buildAllowedTokenRegex / findUntraceableDigits / findDirectionalTerm', () => {
@@ -160,6 +185,15 @@ describe('fallbackAnswer (AL-22)', () => {
     expect(flagged).toBe(true)
     // the caveat itself still has an untraceable digit, so it cannot be rescued verbatim either — but a
     // refusal WITH a clean caveat must survive (this is the shape LAB-AL-04/LAB-AL-10 exercise end to end):
+    expect(answer.blocks).toEqual([])
+  })
+
+  test('review finding (P2): a pure-refusal caveat whose {{cN}} ref does not resolve is dropped, not rescued verbatim', () => {
+    // no claim block at all in this candidate, yet the caveat cites {{c0}} — LAB_REF_UNKNOWN, so it cannot be
+    // rendered as a trustworthy refusal even though it has no other problem (no digit, no directional term).
+    const candidate: Answer = { blocks: [{ type: 'caveat', md: 'No hay datos suficientes para confirmar {{c0}}.' }] }
+    const { answer, flagged } = fallbackAnswer(candidate, ctxOf())
+    expect(flagged).toBe(true)
     expect(answer.blocks).toEqual([])
   })
 

@@ -89,6 +89,7 @@ export {
 } from './cost-meter.ts'
 
 export {
+  LAB_TOOL_IGNORED,
   LAB_TOOL_SEQUENCE,
   LAB_TOOL_SKIPPED,
   MAX_TOOL_ROUNDS,

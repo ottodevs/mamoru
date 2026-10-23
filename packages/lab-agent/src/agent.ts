@@ -10,6 +10,7 @@ import {
   writeVerdictSentence,
   type Answer,
   type Block,
+  type ChartBlock,
   type ClaimBlock,
   type VerdictBlock,
 } from './contract.ts'
@@ -50,6 +51,13 @@ export type JobResult = {
   runs: RunResult[]
   toolRounds: number
   meter: CostMeter
+  /**
+   * The full conversation this job sent/received, in order — useful for logging (task 5/6), and lets a caller
+   * (or a test) check the truly final state for well-formedness. A `ModelClient` wrapper that only validates
+   * what it is handed at each `complete()` call can never see what happens to the LAST reply once the loop
+   * returns without calling `complete()` again (e.g. a clean first-pass success) — this field closes that gap.
+   */
+  messages: ChatMessage[]
 }
 
 function safeJsonParse(s: string | null | undefined): unknown {
@@ -68,6 +76,7 @@ function isAnswerShaped(x: unknown): x is Answer {
 /** Tool-local protocol codes (never a `ReasonError`, never added to the domain's closed `ReasonCode` enum) for a tool_call this loop refuses to execute — always still answered (P1-1), never silently dropped. */
 export const LAB_TOOL_SKIPPED = 'LAB_TOOL_SKIPPED'
 export const LAB_TOOL_SEQUENCE = 'LAB_TOOL_SEQUENCE'
+export const LAB_TOOL_IGNORED = 'LAB_TOOL_IGNORED'
 
 function dispatchTool(name: string, args: unknown, runner: BenchRunner, runStore: RunStore, meter: CostMeter, datasetsDir: string | undefined): ToolOutcome<unknown> {
   if (name === 'run_backtest') return runBacktestTool(args, runner, runStore, meter)
@@ -91,24 +100,47 @@ function runsMapOf(runs: RunResult[]): RunStore {
   return m
 }
 
+/**
+ * Review finding (P2, agent.ts:127): the old rendering kept only a claim's label/value, losing which run (and
+ * which spec) produced it — a follow-up like "double that width" has nothing to resolve "that" against.
+ * `run.specKey` is already `windowId|base|widthTicks|deposit` (lab-bench's own `specKey()`), so this tag alone
+ * is enough for the model to reconstruct the spec it should vary.
+ */
+function runTag(run: RunResult): string {
+  return `(run ${run.resultHash}, spec ${run.specKey})`
+}
+
 function renderVerdictText(block: VerdictBlock, runStore: RunStore): string {
   const run = runStore.get(block.runId)
   if (!run) return ''
-  if (isVerdictBaseline(block.against)) return writeVerdictSentence(run, block.against)
+  if (isVerdictBaseline(block.against)) {
+    const sentence = writeVerdictSentence(run, block.against)
+    return `${sentence} ${runTag(run)} vs ${block.against}`
+  }
   const other = runStore.get(block.against)
+  let sentence: string
   try {
-    return writeVerdictSentence(run, block.against, other)
+    sentence = writeVerdictSentence(run, block.against, other)
   } catch {
     return ''
   }
+  return `${sentence} ${runTag(run)} vs ${other ? runTag(other) : block.against}`
 }
 
 function renderClaimText(block: ClaimBlock, runStore: RunStore): string {
   const run = runStore.get(block.runId)
   const info = run ? resolveMetric(run, block.metric) : undefined
-  if (!info) return ''
+  if (!run || !info) return ''
   const suffix = info.unit === 'USDC' ? ' USDC' : info.unit === '%' ? '%' : info.unit === 'days' ? ' días' : ' ops'
-  return `${info.label.es}: ${displayValue(info)}${suffix}`
+  return `${info.label.es}: ${displayValue(info)}${suffix} ${runTag(run)}`
+}
+
+function renderChartText(block: ChartBlock, runStore: RunStore): string {
+  const refs = block.runIds.map((id) => {
+    const run = runStore.get(id)
+    return run ? runTag(run) : id
+  })
+  return `[gráfico ${block.kind}: ${refs.join(', ')}]`
 }
 
 function substituteRefs(md: string, claims: ClaimBlock[], verdicts: VerdictBlock[], runStore: RunStore): string {
@@ -123,7 +155,11 @@ function substituteRefs(md: string, claims: ClaimBlock[], verdicts: VerdictBlock
     })
 }
 
-/** Flattens a verified `Answer` into plain prose for thread history — never shown to a verifier again. */
+/**
+ * Flattens a verified `Answer` into plain prose for thread history — never shown to a verifier again. Every
+ * claim/verdict/chart line carries the run(s) it cites, by `resultHash` and `specKey`, so a follow-up question
+ * can resolve "that run"/"double that width" against a concrete spec instead of just a rendered number.
+ */
 export function renderAnswerForHistory(answer: Answer, runs: RunResult[]): string {
   const runStore = runsMapOf(runs)
   const claims = answer.blocks.filter((b): b is ClaimBlock => b.type === 'claim')
@@ -133,7 +169,7 @@ export function renderAnswerForHistory(answer: Answer, runs: RunResult[]): strin
       if (b.type === 'text' || b.type === 'caveat') return substituteRefs(b.md, claims, verdicts, runStore)
       if (b.type === 'claim') return renderClaimText(b, runStore)
       if (b.type === 'verdict') return renderVerdictText(b, runStore)
-      return `[gráfico ${b.kind}]`
+      return renderChartText(b, runStore)
     })
     .filter((s) => s.length > 0)
   return lines.length > 0 ? lines.join('\n') : '(respuesta verificada previa sin texto)'
@@ -196,17 +232,21 @@ export async function runAgentJob(input: JobInput, ctx: JobContext): Promise<Job
       continue
     }
 
-    const submitCall = calls.find((c) => c.function.name === 'submit_answer')
+    const submitCalls = calls.filter((c) => c.function.name === 'submit_answer')
     const investigative = calls.filter((c) => c.function.name !== 'submit_answer')
 
-    if (submitCall) {
+    if (submitCalls.length > 0) {
       // P1-1: every tool_call in THIS message needs a tool-role response before any further message is sent —
       // an OpenAI-compatible API refuses a history where one doesn't. A model that (wrongly) mixes
-      // submit_answer with investigative calls in the same turn gets those others answered as skipped;
-      // submit_answer itself is answered with the verify() result right below, once we have it.
+      // submit_answer with investigative calls in the same turn gets those others answered as skipped. A
+      // model that calls submit_answer TWICE in one turn (review finding, P1/agent.ts:199: the old code used
+      // `.find()`, which silently left the second tool_call id unanswered — malformed for the repair request
+      // that could follow) gets every extra one answered "ignored", and only the first is actually used.
+      const [primarySubmit, ...extraSubmits] = submitCalls
       for (const c of investigative) messages.push(skipMessage(c, LAB_TOOL_SKIPPED, 'skipped: a submit_answer call was present in the same turn'))
-      rawAnswer = safeJsonParse(submitCall.function.arguments)
-      submitCallId = submitCall.id
+      for (const c of extraSubmits) messages.push(skipMessage(c, LAB_TOOL_IGNORED, 'ignored: only one submit_answer per turn'))
+      rawAnswer = safeJsonParse(primarySubmit!.function.arguments)
+      submitCallId = primarySubmit!.id
       break
     }
 
@@ -279,11 +319,14 @@ export async function runAgentJob(input: JobInput, ctx: JobContext): Promise<Job
     messages.push(repairReply.message)
 
     const repairCalls = repairReply.message.tool_calls ?? []
-    const repairSubmit = repairCalls.find((c) => c.function.name === 'submit_answer')
+    const repairSubmits = repairCalls.filter((c) => c.function.name === 'submit_answer')
     const repairOthers = repairCalls.filter((c) => c.function.name !== 'submit_answer')
     // The repair turn's only valid action is submit_answer — a repair is not another chance to run backtests.
-    // Still answered (P1-1), never executed.
+    // Still answered (P1-1), never executed. Same P1 fix as the main loop: a second submit_answer call here
+    // must also be answered, not silently left dangling.
+    const [repairSubmit, ...repairExtraSubmits] = repairSubmits
     for (const c of repairOthers) messages.push(skipMessage(c, LAB_TOOL_SKIPPED, 'skipped: the repair turn must call submit_answer'))
+    for (const c of repairExtraSubmits) messages.push(skipMessage(c, LAB_TOOL_IGNORED, 'ignored: only one submit_answer per turn'))
 
     const repaired = repairSubmit ? safeJsonParse(repairSubmit.function.arguments) : safeJsonParse(repairReply.message.content ?? null)
     const secondVerify = repaired !== null ? verify(repaired, verifyCtx) : { ok: false, errors: [] }
@@ -312,5 +355,5 @@ export async function runAgentJob(input: JobInput, ctx: JobContext): Promise<Job
   meter.wallMs = Math.round(performance.now() - wallStart)
   meter.verifierOutcome = outcome
 
-  return { answer: finalAnswer, verifierOutcome: outcome, flagged, runs: [...runStore.values()], toolRounds: investigativeRounds, meter }
+  return { answer: finalAnswer, verifierOutcome: outcome, flagged, runs: [...runStore.values()], toolRounds: investigativeRounds, meter, messages }
 }

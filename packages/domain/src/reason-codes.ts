@@ -231,6 +231,9 @@ export const REASON_CODES = [
   'LAB_OVERRIDE_UNKNOWN',
   'LAB_VERDICT_INCOMPARABLE',
   'LAB_ANSWER_PARTIAL',
+  // Round 2 review of otto/mamoru#200/#126: a text/caveat block's {{cN}}/{{vN}} reference token names a claim
+  // or verdict index the answer doesn't actually have.
+  'LAB_REF_UNKNOWN',
 ] as const
 
 export type ReasonCode = (typeof REASON_CODES)[number]

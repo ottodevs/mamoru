@@ -7,7 +7,7 @@ import { buildCatalogPrompt } from './catalog.ts'
 import { displayValue, resolveMetric, type Answer } from './contract.ts'
 import { RecordedModel, submitAnswerCall, toolCall } from './recorded-model.ts'
 import { LabBenchRunner } from './tools.ts'
-import { renderAnswerForHistory, runAgentJob, type JobContext } from './agent.ts'
+import { renderAnswerForHistory, runAgentJob as runAgentJobUnvalidated, type JobContext, type JobInput, type JobResult } from './agent.ts'
 import type { ChatMessage, ModelClient, ModelReply, RunResult, ToolSchema } from './types.ts'
 
 const FIXTURE_DIR = `${import.meta.dir}/../../lab-bench/src/__fixtures__`
@@ -40,6 +40,19 @@ function assertWellFormedToolCallSequence(messages: ChatMessage[]): void {
     pending = m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0 ? new Set(m.tool_calls.map((c) => c.id)) : null
   }
   if (pending && pending.size > 0) throw new Error(`malformed history: pending tool_call id(s) [${[...pending].join(', ')}] were never answered by the end of the sent history`)
+}
+
+/**
+ * Review finding: `ValidatingModel` only ever sees the `messages` array as of each `complete()` call — it has
+ * no way to check what happens to the LAST reply once the loop returns without calling `complete()` again (a
+ * clean first-pass success never triggers another call). Shadowing `runAgentJob` here with a wrapper that also
+ * asserts on `result.messages` — the full final transcript `JobResult` now carries — closes that gap for every
+ * test in this file, not just the ones that happen to drive a repair turn.
+ */
+async function runAgentJob(input: JobInput, ctx: JobContext): Promise<JobResult> {
+  const result = await runAgentJobUnvalidated(input, ctx)
+  assertWellFormedToolCallSequence(result.messages)
+  return result
 }
 
 function ctxWith(model: ModelClient, maxToolRounds?: number): JobContext {
@@ -362,5 +375,66 @@ describe('runAgentJob — loop mechanics (AL-15, AL-03)', () => {
     const text = renderAnswerForHistory(answer, [liveRun])
     expect(text).toContain(String(val(liveRun, 'end')))
     expect(text).toContain('mantener la mezcla')
+  })
+
+  test('review finding (P2, agent.ts:127): history carries each cited run\'s specKey and runId, not just its label/value', () => {
+    const answer: Answer = {
+      blocks: [
+        { type: 'claim', metric: 'end', runId: liveRun.resultHash, value: val(liveRun, 'end') },
+        { type: 'verdict', runId: liveRun.resultHash, against: 'hold' },
+        { type: 'chart', kind: 'equity', runIds: [liveRun.resultHash] },
+      ],
+    }
+    const text = renderAnswerForHistory(answer, [liveRun])
+    // specKey is lab-bench's own "windowId|base|widthTicks|deposit" — enough to resolve "double that width".
+    expect(text).toContain(liveRun.specKey)
+    expect(text).toContain(liveRun.resultHash)
+    expect(liveRun.specKey).toBe('fix-full|live|2000|1000')
+  })
+
+  test('review finding (P2): a follow-up can resolve "double that width" from the rendered history alone', async () => {
+    // The prior turn ran widthTicks=2000; this test only asserts the history text a follow-up job would see
+    // actually carries that width (via specKey) — a real model reads this string, not test code, to decide the
+    // next run_backtest's overrides.widthTicks. We still drive one real follow-up job to prove the mechanism end
+    // to end: the scripted model "reads" the prior spec and asks for double the width (4000).
+    const priorAnswer: Answer = { blocks: [{ type: 'claim', metric: 'end', runId: liveRun.resultHash, value: val(liveRun, 'end') }] }
+    const historyText = renderAnswerForHistory(priorAnswer, [liveRun])
+    expect(historyText).toContain('fix-full|live|2000|1000') // the exact spec a "double the width" follow-up must read off
+
+    const model = new RecordedModel([
+      { toolCalls: [toolCall('run_backtest', { windowId: 'fix-full', base: 'live', deposit: 1000, overrides: { widthTicks: 4000 } })] },
+      { toolCalls: [submitAnswerCall([{ type: 'claim', metric: 'end', runId: liveW4000Run.resultHash, value: val(liveW4000Run, 'end') }])] },
+    ])
+    const result = await runAgentJob(
+      { question: 'Dobla el ancho de la última corrida.', priorTurns: [{ question: '¿Qué habría pasado con 1000 USDC en fix-full?', answer: priorAnswer, runs: [liveRun] }] },
+      ctxWith(model),
+    )
+    expect(result.verifierOutcome).toBe('ok')
+    expect(result.runs[0]!.resultHash).toBe(liveW4000Run.resultHash)
+  })
+
+  test('review finding (P1, agent.ts:199): two submit_answer calls in one reply — the extra is answered "ignored", never left dangling', async () => {
+    const badSubmit = submitAnswerCall([{ type: 'claim', metric: 'end', runId: liveRun.resultHash, value: val(liveRun, 'end') + 50 }]) // forged
+    const extraSubmit = submitAnswerCall([{ type: 'caveat', md: 'segunda llamada, debe ser ignorada' }])
+    const fixedSubmit = submitAnswerCall([{ type: 'claim', metric: 'end', runId: liveRun.resultHash, value: val(liveRun, 'end') }])
+    const model = new RecordedModel([
+      { toolCalls: [toolCall('run_backtest', { windowId: 'fix-full', base: 'live', deposit: 1000 })] },
+      // the assistant message that breaks it: TWO submit_answer tool_calls in one turn, and the first fails
+      // verification. The old code's `.find()` would leave `extraSubmit`'s id unanswered — `runAgentJob` must
+      // now answer it "ignored" immediately, and the repair request that follows must still be well-formed
+      // (checked by `runAgentJob`'s wrapped `ValidatingModel` in this file, on every turn including this one).
+      { toolCalls: [badSubmit, extraSubmit] },
+      { toolCalls: [fixedSubmit] }, // the repair turn
+    ])
+    const result = await runAgentJob({ question: '¿Qué habría pasado con 1000 USDC en fix-full?' }, ctxWith(model))
+    expect(result.verifierOutcome).toBe('repaired')
+    expect(result.answer.blocks).toEqual([{ type: 'claim', metric: 'end', runId: liveRun.resultHash, value: val(liveRun, 'end') }])
+    // the second submit_answer call from the broken turn was answered (not dropped) — find it in the transcript.
+    const brokenTurnIndex = result.messages.findIndex((m) => m.role === 'assistant' && (m.tool_calls?.length ?? 0) === 2)
+    expect(brokenTurnIndex).toBeGreaterThanOrEqual(0)
+    const extraCallId = result.messages[brokenTurnIndex]!.tool_calls![1]!.id
+    const answeredExtra = result.messages.find((m) => m.role === 'tool' && m.tool_call_id === extraCallId)
+    expect(answeredExtra).toBeDefined()
+    expect(JSON.parse(answeredExtra!.content as string).error.code).toBe('LAB_TOOL_IGNORED')
   })
 })
