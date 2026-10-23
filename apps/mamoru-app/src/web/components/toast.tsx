@@ -12,14 +12,15 @@ export type ToastMsg = { text: string; href?: string; linkLabel?: string }
 const TOAST_MS = 4_000
 let current: ToastMsg | null = null
 let timer: ReturnType<typeof setTimeout> | null = null
-let held = false
+// Held while the pointer is over it or the focus is in it; either alone keeps it.
+const held = { hover: false, focus: false }
 let duration = TOAST_MS
 const listeners = new Set<() => void>()
 const emit = () => listeners.forEach((l) => l())
 
 function arm() {
   if (timer) clearTimeout(timer)
-  timer = held || !current ? null : setTimeout(() => {
+  timer = held.hover || held.focus || !current ? null : setTimeout(() => {
     current = null
     timer = null
     emit()
@@ -33,8 +34,8 @@ export function showToast(msg: ToastMsg, ms = TOAST_MS): void {
   emit()
 }
 
-function hold(on: boolean) {
-  held = on
+function hold(kind: keyof typeof held, on: boolean) {
+  held[kind] = on
   arm()
 }
 
@@ -53,7 +54,15 @@ function subscribe(l: () => void) {
 export function Toast() {
   const msg = useSyncExternalStore(subscribe, () => current, () => current)
   return (
-    <div role="status" aria-live="polite" data-testid="toast" onMouseEnter={() => hold(true)} onMouseLeave={() => hold(false)} onFocus={() => hold(true)} onBlur={() => hold(false)}>
+    <div
+      role="status"
+      aria-live="polite"
+      data-testid="toast"
+      onMouseEnter={() => hold('hover', true)}
+      onMouseLeave={() => hold('hover', false)}
+      onFocus={() => hold('focus', true)}
+      onBlur={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && hold('focus', false)}
+    >
       {msg ? (
         <div className="fixed inset-x-4 top-9 z-50 mx-auto flex w-fit max-w-[calc(100%-2rem)] flex-wrap items-center gap-x-5 gap-y-1 bg-ink px-5 py-3 text-paper shadow-lg">
           <span className="flex items-center gap-3 text-[0.98rem]">
