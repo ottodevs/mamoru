@@ -14,7 +14,7 @@ import { belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, MIN_ENTRY_USDC, ov
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, poolTokens, positionAmounts, progressLine } from '../lib/positions.ts'
-import { signatureCopy } from '../lib/signature.ts'
+import { activateLine, signatureCopy } from '../lib/signature.ts'
 import { currentRate, idleReason, monthlyRate, positionRates, sourceName, type AccountRate, type PositionRate } from '../lib/rates.ts'
 import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel } from '../lib/price-divergence.ts'
 import { localTime } from '../lib/time.ts'
@@ -98,7 +98,6 @@ export const homeCopy = {
   // otto/mamoru#149: a grant that has used 80% or all of what the approval allows.
   usageSoon: (what: string, pair: string) => `Mamoru has used most of what this approval allows for ${what} in ${pair}. Renew it now so that does not stop.`,
   usageSpent: (what: string, pair: string) => `Mamoru has used all that this approval allows for ${what} in ${pair}, so it has stopped doing that. Renew it to start again.`,
-  createFirst: 'Your account is created on Base first, then the USDC is sent.',
   overCapTitle: (o: OverCap) => `This account is over the ${usdPlain(o.capUsdc)} USDC cap, so Mamoru has not started.`,
   overCapBody: (o: OverCap) => `It holds ${usd(o.usdc)} USDC. Nothing was moved. Withdraw at least ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC to an address you control, then start Mamoru.`,
   belowTitle: (min: bigint) => `Mamoru starts from ${usdPlain(min)} USDC.`,
@@ -566,8 +565,8 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
         </div>
       ) : flow.prepared ? (
         <Review
-          scope={signatureCopy.withdraw(asset)}
-          lines={[...(deployed ? [] : [homeCopy.createFirst]), ...(flow.prepared.reduce?.length ? ['Mamoru first takes the missing USDC out of the pool.'] : [])]}
+          scope={signatureCopy.withdraw(asset, { create: !deployed, fromPool: !!flow.prepared.reduce?.length })}
+          lines={[]}
           busy={flow.busy}
           error={error}
           onApprove={() => void flow.approve(acceptancePayload(divergence, acceptedWarning))}
@@ -706,7 +705,7 @@ function StartDialog({ accountKey, s, open, onClose }: { accountKey: string; s: 
             </div>
           </div>
         ) : flow.prepared ? (
-          <Review scope={<ActivateScope />} lines={flow.prepared.tx.summary} busy={flow.busy} error={flow.error} onApprove={() => void flow.approve()} />
+          <Review scope={<ActivateScope summary={flow.prepared.tx.summary} />} lines={flow.prepared.tx.summary} busy={flow.busy} error={flow.error} onApprove={() => void flow.approve()} />
         ) : (
           <>
             {flow.error ? <p className="err mb-3">{flow.error}</p> : null}
@@ -875,11 +874,11 @@ function RenewDialog({ accountKey, approval, open, onClose, onDone }: { accountK
   )
 }
 
-/** What the activation signature allows, and the one thing it never does. */
-export function ActivateScope() {
+/** The activation line, with the one thing it never does in bold. */
+export function ActivateScope({ summary }: { summary: string[] }) {
   return (
     <>
-      {signatureCopy.activate.body} <strong>{signatureCopy.activate.never}</strong>
+      {activateLine(summary)} <strong>{signatureCopy.activate.never}</strong>
     </>
   )
 }
@@ -894,7 +893,7 @@ function StartRow({ accountKey, funded }: { accountKey: string; funded: boolean 
         <span className="title">{funded ? homeCopy.notRunning : homeCopy.armFirst}</span>
         {flow.prepared ? (
           <span className="mt-1 block text-[0.95rem]" data-testid="sign-scope">
-            <ActivateScope />
+            <ActivateScope summary={flow.prepared.tx.summary} />
           </span>
         ) : null}
         {flow.error ? <span className="err mt-1 block">{flow.error}</span> : null}

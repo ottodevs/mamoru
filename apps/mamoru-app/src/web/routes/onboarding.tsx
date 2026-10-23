@@ -9,7 +9,7 @@ import { capNote } from '../lib/money.ts'
 import { errorText, useOwnerAction } from '../lib/owner-flow.ts'
 import { createOwnerPasskey } from '../lib/passkey.ts'
 import { rememberCredential } from '../lib/passkey-sign.ts'
-import { signatureCopy } from '../lib/signature.ts'
+import { activateLine, signatureCopy } from '../lib/signature.ts'
 import { challengeUsable, signInCopy } from '../lib/signin.ts'
 
 export const onboardingCopy = {
@@ -101,7 +101,7 @@ function Approve({ owner }: { owner: OwnerResponse }) {
     <div className="enter">
       <SignStep n={2} />
       <h1 className="ob-title">{signatureCopy.activate.title}</h1>
-      <p className="ob-body">{signatureCopy.activate.body}</p>
+      <p className="ob-body">{summary ? activateLine(summary) : `${signatureCopy.activate.body} ${signatureCopy.activate.setup}`}</p>
       <p className="ob-body font-semibold">{signatureCopy.activate.never}</p>
       <div className="mt-3 flex flex-wrap items-start gap-x-5 gap-y-2">
         {summary ? (
