@@ -35,6 +35,11 @@ export type Observation = {
    */
   peerPositions?: PeerPositionObs[] | null
   /**
+   * otto/mamoru#184 (Sol review): pools where another account has an entry decided whose liquidity no observation
+   * shows yet. Depth gives no share room in them until that account observes again. Absent: none.
+   */
+  peerEntering?: RegistryName[]
+  /**
    * Spec 004: 24 h history per pool, from TWAP samples (see `marketOf`). Read only by a policy with `guards`;
    * absent or null fields make the guard rules abstain.
    */

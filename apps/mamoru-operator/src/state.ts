@@ -144,6 +144,12 @@ export type AccountState = {
   admittedTokenIds?: string[]
   /** Sol review round 2 #3: the block each admitted id was minted in; a read from before it never prunes the id. */
   admittedAt?: Record<string, string>
+  /**
+   * otto/mamoru#184: the account's admitted positions at its last decided review, for the other accounts' depth
+   * sizing. Kept across stops and restarts: a lapsed session leaves its positions in the pool. Liquidity as a decimal
+   * string. `entering`: the pool of an entry (mint, increase, re-range) decided then and not yet observed.
+   */
+  peerView?: { positions: { pool: string | null; tickLower: number; tickUpper: number; liquidity: string }[]; entering: string | null }
   /** otto/mamoru#140 (part2 #6): owner transactions of this account the relayer paid for, last 24 h (sponsorship limits). */
   sponsored?: SponsorEntry[]
 }

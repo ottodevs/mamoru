@@ -128,6 +128,14 @@ describe('depth sizing (otto/mamoru#127)', () => {
     expect(unknown).toEqual({ ...known, shareRoom: 0n })
   })
 
+  test('another account entering the pool, not yet observed: no share room there, other pools unchanged (otto/mamoru#184)', () => {
+    const o = obs(10n ** 15n, 1_000n * USDC)
+    const [stables, btc] = [o.pools[0]!, o.pools[1]!]
+    const entering = { ...o, peerPositions: [], peerEntering: [stables.name] }
+    expect(depthOf(entering, DEPTH, stables, 40)).toEqual({ ...depthOf(o, DEPTH, stables, 40)!, shareRoom: 0n })
+    expect(depthOf(entering, DEPTH, btc, 40)).toEqual(depthOf(o, DEPTH, btc, 40))
+  })
+
   test('what waits is reported beside the decision: amounts move, the premise does not', () => {
     const a = decide(obs(1_000n, 10_000n * USDC, 1_000n), DEPTH)
     const b = decide(obs(1_000n, 12_000n * USDC, 1_000n), DEPTH)

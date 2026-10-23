@@ -39,7 +39,7 @@ import { Engine, type EngineConfig, type EngineSession } from '@mamoru/scenarios
 import type { EngineSettingsSource } from './engine-settings.ts'
 import type { GuardReadsState } from './guard-reads-state.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
-import type { PeerPositionObs, Proposal } from '@mamoru/decide'
+import type { Observation, PeerPositionObs, Proposal } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, amountsForLiquidity, inUsdc, livePool, nativePricePool, positionUsdc, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
@@ -519,7 +519,7 @@ type Prepared = {
 /** otto/mamoru#184: how long an account not yet observed since its loop started holds back the others' share room. */
 const PEER_GRACE_MS = 10 * 60_000
 
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; /** otto/mamoru#184: this loop has reached a decided review, so `peerSeen` holds the account's positions. */ seenPositions?: boolean; /** When (ms) this loop started. */ startedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; /** When (ms) this loop started. */ startedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -604,8 +604,6 @@ export class Operator {
   private readonly prepared = new Map<string, Prepared>()
   private readonly locks = new Map<string, Lock>()
   private readonly runners = new Map<string, Runner>()
-  /** otto/mamoru#184: each account's positions at its last decided review (see peerPositionsOf). */
-  private readonly peerSeen = new Map<string, PeerPositionObs[]>()
   private readonly reconciled = new Map<string, number>()
   /** Per account: the pending reconciliation timer and its current backoff (reconcileLater). */
   private readonly reconcileTimers = new Map<string, { timer: ReturnType<typeof setTimeout> | null; delay: number }>()
@@ -4866,11 +4864,7 @@ export class Operator {
             if (r.code === 'EHG_OBSERVATION_STALE') more = true
             safeMetrics(() => this.engineHealth.record(acc.accountKey, false, r.code, classifyEngineError(r.code, r.detail)))
           } else {
-            // Only positions Mamoru opened or was handed to manage: an NFT anyone transfers into a Safe must not take
-            // share room from the other accounts. An account from before the admitted record counts all of its own.
-            const ours = acc.admittedTokenIds ? new Set([...acc.admittedTokenIds, ...acc.managedTokenIds]) : null
-            this.peerSeen.set(acc.accountKey, r.observation.positions.filter((p) => !ours || ours.has(p.tokenId.toString())).map(({ pool, tickLower, tickUpper, liquidity }) => ({ pool, tickLower, tickUpper, liquidity })))
-            runner.seenPositions = true
+            this.recordPeerView(acc, r.observation, r.op)
             const d = r.record.decision
             const pools = new Map<string, string | null>(this.enginePolicyOf(acc).buckets.map((b) => [b.id, b.pools[0] ?? null]))
             const waiting = (d.waiting ?? []).map((w) => ({ bucket: w.bucket, pool: pools.get(w.bucket) ?? null, code: w.code, amountUsdc: w.amount.toString() }))
@@ -4971,17 +4965,45 @@ export class Operator {
 
   /**
    * otto/mamoru#184: every other account's positions, as its last decided review saw them, so depth sizing holds
-   * Mamoru as a whole under the share limit of a pool. Null while some running account has not reached a decided
-   * review since its loop started: the pool-wide share is unknown, and the account gets no share room until it is.
-   * One account whose reviews keep failing holds the others back for PEER_GRACE_MS at most, then is left out (with
-   * what it last held, if anything).
-   * An account whose loop stopped keeps counting with what it last held (a lapsed session leaves its positions in the
-   * pool), until the process restarts: an overcount, never an undercount, for positions a stop did withdraw.
+   * Mamoru as a whole under the share limit of a pool, from `peerView`, which every account keeps across stops and
+   * restarts (a lapsed session leaves its positions in the pool; a stop that withdrew them overcounts until the account
+   * runs again, never undercounts). Null while a running account with no view yet has not reached a decided review:
+   * the pool-wide share is unknown, and the account gets no share room until it is. One whose reviews keep failing
+   * holds the others back for PEER_GRACE_MS at most, then is left out.
    */
-  private peerPositionsOf(key: string): PeerPositionObs[] | null {
+  private peerPositionsOf(key: string): Pick<Observation, 'peerPositions' | 'peerEntering'> {
     const now = Date.now()
-    for (const [k, r] of this.runners) if (k !== key && !r.stopped && !r.seenPositions && now - (r.startedAt ?? 0) < PEER_GRACE_MS) return null
-    return [...this.peerSeen].flatMap(([k, ps]) => (k === key ? [] : ps))
+    const positions: PeerPositionObs[] = []
+    const entering = new Set<RegistryName>()
+    for (const acc of Object.values(this.store.state.accounts)) {
+      if (acc.accountKey === key) continue
+      const v = acc.peerView
+      if (!v) {
+        const r = this.runners.get(acc.accountKey)
+        if (r && !r.stopped && now - (r.startedAt ?? 0) < PEER_GRACE_MS) return { peerPositions: null }
+        continue
+      }
+      for (const p of v.positions) positions.push({ ...p, pool: p.pool as RegistryName | null, liquidity: BigInt(p.liquidity) })
+      if (v.entering) entering.add(v.entering as RegistryName)
+    }
+    return { peerPositions: positions, ...(entering.size ? { peerEntering: [...entering] } : {}) }
+  }
+
+  /**
+   * otto/mamoru#184: what the other accounts' depth sizing counts of this one, from a decided review. Only positions
+   * Mamoru opened or was handed to manage: an NFT anyone transfers into a Safe must not take share room from the other
+   * accounts (an account from before the admitted record counts all of its own). An entry decided now is not in this
+   * observation: its pool stays marked until a review sees it, i.e. one with no operation of the account still out.
+   */
+  private recordPeerView(acc: AccountState, obs: Observation, op: OpRecord | null): void {
+    const ours = acc.admittedTokenIds ? new Set([...acc.admittedTokenIds, ...acc.managedTokenIds]) : null
+    const positions = obs.positions.filter((p) => !ours || ours.has(p.tokenId.toString())).map((p) => ({ pool: p.pool, tickLower: p.tickLower, tickUpper: p.tickUpper, liquidity: p.liquidity.toString() }))
+    const i = op?.intent
+    const entering = i && (i.kind === 'enter_mint' || i.kind === 'increase_liquidity' || i.kind === 'rerange') ? i.pool : obs.slot ? (acc.peerView?.entering ?? null) : null
+    const view = { positions, entering }
+    if (JSON.stringify(view) === JSON.stringify(acc.peerView)) return
+    acc.peerView = view
+    this.store.save()
   }
 
   private stopLoop(key: string): void {

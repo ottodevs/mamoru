@@ -50,12 +50,13 @@ export function depthOf(obs: Observation, policy: PolicyVersion, pool: PoolObs, 
   const savings = policy.savingsAsset
   // otto/mamoru#184: the limit is Mamoru's share of the pool, not one account's: every other account's in-range
   // liquidity counts too. Unknown until the operator has seen every account (null): no share room until then, while
-  // the swap and sell rooms (exits, the depeg guard) do not depend on it.
+  // the swap and sell rooms (exits, the depeg guard) do not depend on it. Nor while another account's entry into the
+  // pool is out and not yet observed (peerEntering): its liquidity is unknown.
   const inPool = (p: PeerPositionObs) => p.pool === pool.name && tick >= p.tickLower && tick < p.tickUpper
   const ours = [...obs.positions, ...(obs.peerPositions ?? [])].filter(inPool).reduce((s, p) => s + p.liquidity, 0n)
   const maxL = (L * BigInt(d.maxShareBps)) / 10_000n
   const roomL = maxL > ours ? maxL - ours : 0n
-  const shareRoom = obs.peerPositions === null ? 0n : (roomL * refValue(at, width, savings)) / REF_L
+  const shareRoom = obs.peerPositions === null || obs.peerEntering?.includes(pool.name) ? 0n : (roomL * refValue(at, width, savings)) / REF_L
   // Half of the impact budget for sizing: the other half is headroom for the price to move until inclusion. The
   // engine holds the whole budget against the TWAP when it quotes (EHG_SWAP_IMPACT_OVER_LIMIT) and in the minimum out.
   const impact = BigInt(d.maxImpactBpsByPool?.[pool.name] ?? d.maxImpactBps)
