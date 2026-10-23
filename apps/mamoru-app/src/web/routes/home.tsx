@@ -201,7 +201,9 @@ export function Indicators({ f, apy, price }: { f: FundingView | undefined; apy:
       </div>
       {monthlySrc || currentSrc ? (
         <details className="rate-info" data-testid="rate-sources">
-          <summary aria-label={homeCopy.sources}>i</summary>
+          <summary aria-label={homeCopy.sources}>
+            <span aria-hidden="true">i</span>
+          </summary>
           <p className="rate-sources">
             {monthlySrc ? <span>{homeCopy.monthlySource}: {monthlySrc}</span> : null}
             {currentSrc ? <span>{homeCopy.currentSource}: {currentSrc}</span> : null}

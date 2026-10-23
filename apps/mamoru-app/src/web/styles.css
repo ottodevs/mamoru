@@ -1130,8 +1130,17 @@
   align-self: flex-end;
   margin-bottom: 0.05rem;
 }
+/* A 44 px tap target around the small circle (WCAG 2.5.5): the sources are only reachable through it. */
 .rate-info > summary {
   list-style: none;
+  display: inline-grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  margin: -0.8rem;
+  cursor: pointer;
+}
+.rate-info > summary > span {
   display: inline-grid;
   place-items: center;
   width: 1.15rem;
@@ -1141,7 +1150,6 @@
   font-size: 0.72rem;
   font-style: italic;
   color: var(--color-muted);
-  cursor: pointer;
 }
 .rate-info > summary::-webkit-details-marker {
   display: none;
@@ -1149,7 +1157,7 @@
 .rate-info[open] {
   flex-basis: 100%;
 }
-.rate-info[open] > summary {
+.rate-info[open] > summary > span {
   color: var(--color-ink);
   border-color: var(--color-ink);
 }
