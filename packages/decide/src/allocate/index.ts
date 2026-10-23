@@ -130,10 +130,12 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   const savings = policy.savingsAsset
   /** 0 when savings is token0 of the proposal's pool, else 1. */
   const savingsSide = (p: { pool: string }) => (obs.pools.find((x) => x.name === p.pool)?.token0 === savings ? 0 : 1)
-  // otto/mamoru#195: never under the floor, and never under k times what the entry's swap and mint cost in gas now.
-  const floor = policy.minEntry ?? DEFAULT_MIN_ENTRY
+  const minEntry = policy.minEntry ?? DEFAULT_MIN_ENTRY
+  // otto/mamoru#195: whether a bucket takes an entry at all, and how small that entry may be, also needs k times what
+  // its swap and mint cost in gas now. Only that decision: the swap, the sale of idle volatile and the mint inside an
+  // entry keep `minEntry`, so a gas price never strands a conversion an entry or a re-range needs.
   const byGas = policy.minEntryGasMultiple ? BigInt(policy.minEntryGasMultiple) * ENTRY_OPS * opCostInSavings(obs, savings) : 0n
-  const minEntry = byGas > floor ? byGas : floor
+  const entryMin = byGas > minEntry ? byGas : minEntry
   const free = safeSavings(obs, policy)
   const trail: GateStep[] = []
   const rows = policy.buckets.map((b) => {
@@ -171,7 +173,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     if (r.blocked === 'DECIDE_ENTRY_PAUSED_FALL' && gap >= minEntry && free > 0n) waiting.push({ bucket: r.b.id, code: 'DECIDE_ENTRY_PAUSED_FALL', amount: gap < free ? gap : free })
     // A bucket short by more than the floor but not by enough to pay for its gas waits, and says so (#195).
     const band = gap * 10_000n > buckets[i]!.target * BigInt(policy.rebalanceBandBps ?? 0)
-    if (r.pool && !r.blocked && gap >= floor && gap < minEntry && band && free > 0n) {
+    if (r.pool && !r.blocked && gap >= minEntry && gap < entryMin && band && free > 0n) {
       waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_GAS', amount: gap < free ? gap : free })
       buckets[i]!.code = 'DECIDE_WAIT_GAS'
     }
@@ -180,7 +182,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   // Short buckets, most under-weight first (relative deficit), policy order on ties.
   const order = rows
     .map((r, i) => ({ r, i, deficit: buckets[i]!.target - r.value, gap: buckets[i]!.target - r.deployed, target: buckets[i]!.target }))
-    .filter((x) => x.r.pool && !x.r.blocked && x.gap >= minEntry && x.gap * 10_000n > x.target * BigInt(policy.rebalanceBandBps ?? 0))
+    .filter((x) => x.r.pool && !x.r.blocked && x.gap >= entryMin && x.gap * 10_000n > x.target * BigInt(policy.rebalanceBandBps ?? 0))
     .sort((x, y) => {
       const dx = (x.deficit * 1_000_000n) / x.target
       const dy = (y.deficit * 1_000_000n) / y.target
@@ -220,7 +222,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       const bySwap = volShare > 0n ? (depth.swapRoom * 10_000n) / volShare : size
       const room = depth.shareRoom < bySwap ? depth.shareRoom : bySwap
       if (room < size) {
-        size = room < minEntry ? 0n : room
+        size = room < entryMin ? 0n : room
         // What does not fit waits as savings, whether this review places part of the bucket or none of it.
         // The bucket stays short by what this entry does not cover; what of it is savings is what waits.
         const short = gap - size
@@ -311,8 +313,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   const clipped: Waiting[] = []
   for (const w of waiting) {
     const amount = w.amount < left ? w.amount : left
-    // A gas wait is under the gas minimum by definition: it is kept while it is over the floor.
-    if (amount >= (w.code === 'DECIDE_WAIT_GAS' ? floor : minEntry)) clipped.push({ ...w, amount })
+    if (amount >= minEntry) clipped.push({ ...w, amount })
     left -= amount
   }
   return { total, free, buckets, proposal, trail, pendingMint, waiting: clipped }

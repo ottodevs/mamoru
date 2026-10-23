@@ -49,8 +49,8 @@ function obs(over: Partial<Observation> = {}): Observation {
 }
 
 /** Applies a proposal the way the chain would (no fees): swaps at slot0, mints what quoteMint uses. */
-function apply(o: Observation, nextId: bigint): Observation {
-  const d = decide(o, V2)
+function apply(o: Observation, nextId: bigint, policy = V2): Observation {
+  const d = decide(o, policy)
   const p = d.proposal
   if (!p) return o
   const balances = { ...o.balances }
@@ -149,14 +149,14 @@ describe('allocate (conservador-live-v2, target weights)', () => {
   }
 
   /** Reviews until `decide` holds. Returns every proposal on the way, as `kind:pool:tokenOut`. */
-  function settle(start: Observation, id: bigint, max = 24): { o: Observation; steps: string[] } {
+  function settle(start: Observation, id: bigint, max = 24, policy = V2): { o: Observation; steps: string[] } {
     let o = start
     const steps: string[] = []
     for (let n = 0; n < max; n++, id++) {
-      const p = decide(o, V2).proposal
+      const p = decide(o, policy).proposal
       if (!p) return { o, steps }
       steps.push(`${p.kind}:${p.pool}${p.kind === 'enter_swap' ? `:${p.tokenOut}` : ''}`)
-      o = apply(o, id)
+      o = apply(o, id, policy)
     }
     throw new Error(`still proposing after ${max} reviews: ${steps.join(' | ')}`)
   }
@@ -224,6 +224,13 @@ describe('allocate (conservador-live-v2, target weights)', () => {
     expect(allocate(idle, V2, false).pendingMint).toEqual([])
     const { steps } = settle(idle, id)
     expect(steps).toEqual(['enter_swap:pool:USDC/cbBTC/500:USDC'])
+  })
+  // GPT-6 review of #195: a gas minimum never strands idle volatile that has no mint to wait for.
+  test('the same idle volatile is sold back under a high gas multiple', () => {
+    const { o: base, id } = invested()
+    const cbbtc = token0InToken1(200_000n, POOLS[1]!.sqrtPriceX96)
+    const idle = { ...base, balances: { ...base.balances, USDC: 0n, cbBTC: (base.balances.cbBTC ?? 0n) + cbbtc } }
+    expect(settle(idle, id, 24, { ...V2, minEntryGasMultiple: 50 }).steps).toEqual(['enter_swap:pool:USDC/cbBTC/500:USDC'])
   })
 
   // otto/mamoru#141: one op per review. Idle volatile beyond what its bucket's mint needs is unmanaged exposure, so its
@@ -357,6 +364,16 @@ describe('minimum entry by gas', () => {
     const a = allocate(cheap, { ...V2, minEntryGasMultiple: 5 }, false)
     expect(a.proposal).toBeNull()
     expect(a.waiting.map((w) => w.code)).not.toContain('DECIDE_WAIT_GAS')
+  })
+
+  // GPT-6 review of #195: the gas minimum gates the entry, never the swap or the sale inside it.
+  test('an entry over the gas minimum still makes a balancing swap smaller than that minimum', () => {
+    const k = 50
+    const deposit = 150n * entryGas
+    const o2 = obs({ balances: { USDC: deposit, USDT: 0n, cbBTC: 0n, WETH: 0n } })
+    const p = allocate(o2, { ...V2, minEntryGasMultiple: k }, false).proposal as { kind: string; pool: string; amountIn: bigint }
+    expect(p).toMatchObject({ kind: 'enter_swap', pool: 'pool:USDC/USDT/100' })
+    expect(p.amountIn < BigInt(k) * entryGas).toBe(true)
   })
 
   test('a deposit large enough for its gas enters as before', () => {
