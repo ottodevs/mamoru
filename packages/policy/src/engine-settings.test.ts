@@ -236,3 +236,34 @@ describe('per-account cap overrides (otto/mamoru#26)', () => {
     for (const bad of [null, [], 'x', { [key]: null }, { [key]: 0 }, { [key.toUpperCase()]: 2000 }, { 'a b': 5 }]) expect(validateAccountCaps(bad)).not.toEqual([])
   })
 })
+
+// otto/mamoru#195: the gas multiple of the smallest entry.
+describe('minEntry.gasMultiple', () => {
+  const on = { ...DEFAULT_ENGINE_SETTINGS, minEntry: { gasMultiple: 5 } }
+
+  test('is validated: a whole number from 1 to 50, nothing else in the object', () => {
+    expect(validateEngineSettings(on)).toEqual([])
+    expect(validateEngineSettings({ ...on, minEntry: { gasMultiple: 0 } })).toEqual(['minEntry.gasMultiple must be a whole number from 1 to 50'])
+    expect(validateEngineSettings({ ...on, minEntry: { gasMultiple: 2.5 } })).toHaveLength(1)
+    expect(validateEngineSettings({ ...on, minEntry: { gasMultiple: 5, extra: 1 } })).toEqual(['minEntry must be { gasMultiple }'])
+    expect(validateEngineSettings({ ...on, minEntry: null })).toEqual(['minEntry must be { gasMultiple }'])
+  })
+
+  test('reaches the policy the engine decides with; the policy grants are built from is untouched', () => {
+    const p = withEngineSettings(conservadorLiveV2, on)
+    expect(p.minEntryGasMultiple).toBe(5)
+    expect(conservadorLiveV2.minEntryGasMultiple).toBeUndefined()
+    expect(p.session).toBe(conservadorLiveV2.session)
+    expect(withEngineSettings({ ...conservadorLiveV2, minEntryGasMultiple: 3 }, DEFAULT_ENGINE_SETTINGS).minEntryGasMultiple).toBeUndefined()
+  })
+
+  test('absent keeps the stored hash of every older version', () => {
+    expect(canonicalSettingsJson(DEFAULT_ENGINE_SETTINGS)).not.toContain('minEntry')
+  })
+
+  test('lowering it or turning it off asks for a confirm; raising it does not', () => {
+    expect(riskyChanges(on, DEFAULT_ENGINE_SETTINGS)).toContain('smaller entries go through, where gas is a larger share of what they place')
+    expect(riskyChanges(on, { ...on, minEntry: { gasMultiple: 2 } })).toHaveLength(1)
+    expect(riskyChanges(DEFAULT_ENGINE_SETTINGS, on)).toEqual([])
+  })
+})

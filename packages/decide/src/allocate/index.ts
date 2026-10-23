@@ -7,10 +7,12 @@ import { depthOf } from '../depth/index.ts'
 import { rangeFor, widthFor, widthOf } from '../geometry/index.ts'
 import { purgaIdentity, registryOf } from '../gates/index.ts'
 import type { GateStep, Observation, PoolObs, PositionObs, Proposal } from '../types.ts'
-import { amountsForLiquidity, inSavings, volatileOf } from '../value.ts'
+import { amountsForLiquidity, inSavings, opCostInSavings, volatileOf } from '../value.ts'
 
 /** Default smallest entry when the policy sets none: 0.10 of a 6-decimal savings asset. */
 export const DEFAULT_MIN_ENTRY = 100_000n
+/** otto/mamoru#195: the userOps an entry costs, a swap and a mint, for the gas floor of `minEntryGasMultiple`. */
+const ENTRY_OPS = 2n
 /** Swap only when the idle volatile covers less than this share (bps) of what the mint needs. */
 const SWAP_BELOW_BPS = 9_000n
 /** Sell idle volatile only when it exceeds what the mint needs by more than this share (bps) and savings are short to pair it. */
@@ -35,7 +37,7 @@ export type BucketValue = {
 }
 
 /** otto/mamoru#127, #128: savings a bucket is short of its target and holds back on purpose, and why. */
-export type Waiting = { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_ENTRY_PAUSED_FALL'; amount: bigint }
+export type Waiting = { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL'; amount: bigint }
 
 export type Allocation = {
   total: bigint
@@ -128,7 +130,10 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   const savings = policy.savingsAsset
   /** 0 when savings is token0 of the proposal's pool, else 1. */
   const savingsSide = (p: { pool: string }) => (obs.pools.find((x) => x.name === p.pool)?.token0 === savings ? 0 : 1)
-  const minEntry = policy.minEntry ?? DEFAULT_MIN_ENTRY
+  // otto/mamoru#195: never under the floor, and never under k times what the entry's swap and mint cost in gas now.
+  const floor = policy.minEntry ?? DEFAULT_MIN_ENTRY
+  const byGas = policy.minEntryGasMultiple ? BigInt(policy.minEntryGasMultiple) * ENTRY_OPS * opCostInSavings(obs, savings) : 0n
+  const minEntry = byGas > floor ? byGas : floor
   const free = safeSavings(obs, policy)
   const trail: GateStep[] = []
   const rows = policy.buckets.map((b) => {
@@ -164,6 +169,12 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   rows.forEach((r, i) => {
     const gap = buckets[i]!.target - r.deployed
     if (r.blocked === 'DECIDE_ENTRY_PAUSED_FALL' && gap >= minEntry && free > 0n) waiting.push({ bucket: r.b.id, code: 'DECIDE_ENTRY_PAUSED_FALL', amount: gap < free ? gap : free })
+    // A bucket short by more than the floor but not by enough to pay for its gas waits, and says so (#195).
+    const band = gap * 10_000n > buckets[i]!.target * BigInt(policy.rebalanceBandBps ?? 0)
+    if (r.pool && !r.blocked && gap >= floor && gap < minEntry && band && free > 0n) {
+      waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_GAS', amount: gap < free ? gap : free })
+      buckets[i]!.code = 'DECIDE_WAIT_GAS'
+    }
   })
 
   // Short buckets, most under-weight first (relative deficit), policy order on ties.
@@ -300,7 +311,8 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   const clipped: Waiting[] = []
   for (const w of waiting) {
     const amount = w.amount < left ? w.amount : left
-    if (amount >= minEntry) clipped.push({ ...w, amount })
+    // A gas wait is under the gas minimum by definition: it is kept while it is over the floor.
+    if (amount >= (w.code === 'DECIDE_WAIT_GAS' ? floor : minEntry)) clipped.push({ ...w, amount })
     left -= amount
   }
   return { total, free, buckets, proposal, trail, pendingMint, waiting: clipped }

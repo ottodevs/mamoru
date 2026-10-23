@@ -256,5 +256,5 @@ export type Decision = {
    * otto/mamoru#127, #128: savings held back on purpose, per bucket, with why. Outside the premise hash and the id
    * (the amounts move with every price). Absent when nothing waits.
    */
-  waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_ENTRY_PAUSED_FALL'; amount: bigint }[]
+  waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL'; amount: bigint }[]
 }

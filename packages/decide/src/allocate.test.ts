@@ -3,6 +3,7 @@ import { conservadorLiveV2, grantKey } from '@mamoru/policy'
 import { baseRegistry, address, entry } from '@mamoru/registry'
 import { quoteMint, sqrtRatioAtTick, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
 import { allocate, decide, type Observation, type PoolObs, type PositionObs } from './index.ts'
+import { opCostInSavings } from './value.ts'
 
 const V2 = conservadorLiveV2
 const USDC = 1_000_000n
@@ -330,5 +331,36 @@ describe('allocate (conservador-live-v2, target weights)', () => {
     const d = decide(obs({ balances: { USDC: 20n * USDC }, deposits: [{ token: 'USDC', amount: 20n * USDC, block: 99n, txHash: `0x${'33'.repeat(32)}`, logIndex: 0, safe: false }] }), V2)
     expect(d.proposal).toBeNull()
     expect(d.reason).toBe('OBS_DEPOSIT_UNSAFE')
+  })
+})
+
+// otto/mamoru#195 (Brais 21-oct): the smallest entry also covers k times its swap and mint gas at the review's fee.
+describe('minimum entry by gas', () => {
+  const o = obs({ balances: { USDC: USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })
+  const entryGas = 2n * opCostInSavings(o, 'USDC')
+
+  test('without a multiple, 1 USDC enters on the 0.10 floor', () => {
+    expect(allocate(o, V2, false).proposal).toMatchObject({ kind: 'enter_swap', pool: 'pool:USDC/USDT/100' })
+  })
+
+  test('with k = 20 an entry under twenty times its gas waits as USDC, with the reason', () => {
+    // The stables bucket is short by half of 1 USDC; twenty entries' gas is more than that here.
+    expect(20n * entryGas > USDC / 2n).toBe(true)
+    const a = allocate(o, { ...V2, minEntryGasMultiple: 20 }, false)
+    expect(a.proposal).toBeNull()
+    expect(a.waiting.map((w) => w.code)).toContain('DECIDE_WAIT_GAS')
+    expect(a.buckets.find((b) => b.bucket === 'stables')!.code).toBe('DECIDE_WAIT_GAS')
+  })
+
+  test('the floor still holds when gas is nearly free', () => {
+    const cheap = obs({ balances: { USDC: 50_000n, USDT: 0n, cbBTC: 0n, WETH: 0n }, gas: { maxFeePerGas: 1n, opGasUnits: 1n } })
+    const a = allocate(cheap, { ...V2, minEntryGasMultiple: 5 }, false)
+    expect(a.proposal).toBeNull()
+    expect(a.waiting.map((w) => w.code)).not.toContain('DECIDE_WAIT_GAS')
+  })
+
+  test('a deposit large enough for its gas enters as before', () => {
+    const big = obs({ balances: { USDC: 20n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })
+    expect(allocate(big, { ...V2, minEntryGasMultiple: 5 }, false).proposal).toMatchObject({ kind: 'enter_swap', pool: 'pool:USDC/USDT/100' })
   })
 })

@@ -26,6 +26,11 @@ export type EngineSettings = {
   rerange?: RerangeSetting
   /** Move to Base for USDC found on Ethereum (#133). Absent = off, so versions stored before it keep their hash. */
   bridgeOut?: { enabled: boolean }
+  /**
+   * otto/mamoru#195: the smallest entry is also `gasMultiple` times the gas of its swap and mint at the current fee,
+   * never under the policy's own minimum (0.10 USDC). Absent = only the policy minimum, so older versions keep their hash.
+   */
+  minEntry?: { gasMultiple: number }
 }
 
 export type RerangeSetting = ({ mode: 'eager' } & Partial<LazyRerange>) | ({ mode: 'lazy' } & LazyRerange)
@@ -46,6 +51,8 @@ export const ENGINE_SETTINGS_BOUNDS = {
   minDwellSeconds: { min: 0, max: 86_400 },
   horizonSeconds: { min: 3_600, max: 604_800 },
   lvrWeightBps: { min: 0, max: 20_000 },
+  // #195: 1x is break-even on gas alone; past 50x a 2-cent entry gas would hold back a dollar.
+  gasMultiple: { min: 1, max: 50 },
 } as const
 
 export const DEFAULT_ENGINE_SETTINGS: EngineSettings = {
@@ -104,12 +111,17 @@ export function validateEngineSettings(s: unknown): string[] {
   const errors: string[] = []
   if (!s || typeof s !== 'object' || Array.isArray(s)) return ['settings must be an object']
   const o = s as Record<string, unknown>
-  for (const k of Object.keys(o)) if (!['depth', 'capUsdc', 'guard', 'rerange', 'bridgeOut'].includes(k)) errors.push(`unknown setting ${k}`)
+  for (const k of Object.keys(o)) if (!['depth', 'capUsdc', 'guard', 'rerange', 'bridgeOut', 'minEntry'].includes(k)) errors.push(`unknown setting ${k}`)
   if (o.bridgeOut !== undefined) {
     const b = o.bridgeOut as Record<string, unknown> | null
     if (!b || typeof b !== 'object' || Array.isArray(b) || Object.keys(b).some((k) => k !== 'enabled') || typeof b.enabled !== 'boolean') errors.push('bridgeOut must be { enabled: true | false }')
   }
   const B = ENGINE_SETTINGS_BOUNDS
+  if (o.minEntry !== undefined) {
+    const m = o.minEntry as Record<string, unknown> | null
+    if (!m || typeof m !== 'object' || Array.isArray(m) || Object.keys(m).some((k) => k !== 'gasMultiple')) errors.push('minEntry must be { gasMultiple }')
+    else inRange(errors, 'minEntry.gasMultiple', m.gasMultiple, B.gasMultiple)
+  }
   if (o.depth !== null) {
     if (!o.depth || typeof o.depth !== 'object' || Array.isArray(o.depth)) errors.push('depth must be an object or null')
     else {
@@ -207,6 +219,8 @@ export function riskyChanges(from: EngineSettings, to: EngineSettings): string[]
     }
   }
   if (from.depth && !to.depth) out.push('depth sizing turns off')
+  // #195: a lower multiple lets through entries whose gas is a larger share of what they place.
+  if (from.minEntry && (!to.minEntry || to.minEntry.gasMultiple < from.minEntry.gasMultiple)) out.push('smaller entries go through, where gas is a larger share of what they place')
   if (!from.bridgeOut?.enabled && to.bridgeOut?.enabled) out.push('owners can move USDC from Ethereum to Base, and the relayer pays the Ethereum gas')
   if (from.depth && to.depth) {
     if (to.depth.impactBps > from.depth.impactBps) out.push('entries may move the pool price more')
@@ -260,6 +274,9 @@ export function withEngineSettings(p: PolicyVersion, s: EngineSettings): PolicyV
   }
   // Lazy replaces the near-edge trigger: `rerangeOf` reads `range.lazy` and never looks at the edge then.
   if (lazy) out = { ...out, range: { ...out.range, lazy } }
+  // #195: off means only the policy minimum, even if a base policy ever carried a multiple.
+  if (s.minEntry) out = { ...out, minEntryGasMultiple: s.minEntry.gasMultiple }
+  else if (out.minEntryGasMultiple !== undefined) out = { ...out, minEntryGasMultiple: undefined }
   if (s.depth && p.allocation === 'target-weights') {
     out = {
       ...out,

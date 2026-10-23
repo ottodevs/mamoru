@@ -93,6 +93,8 @@ export const REASON_CODES = [
   'DECIDE_NO_CAPITAL',
   // otto/mamoru#127: the bucket's pool cannot take more without moving its price or making Mamoru too large a share of it; the rest waits as USDC.
   'DECIDE_WAIT_DEPTH',
+  // otto/mamoru#195: the entry would be under k times what its swap and mint cost in gas; it waits as USDC until it grows.
+  'DECIDE_WAIT_GAS',
   // otto/mamoru#127: the quote of an entry swap is worse than the depth policy allows; refused before sending.
   'EHG_SWAP_IMPACT_OVER_LIMIT',
   'DECIDE_PAUSED',

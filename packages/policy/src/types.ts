@@ -135,6 +135,11 @@ export type PolicyVersion = {
   allocation?: 'first-entry' | 'target-weights'
   /** target-weights: smallest entry, in raw savings units. */
   minEntry?: bigint
+  /**
+   * otto/mamoru#195, target-weights: the smallest entry also covers this many times the gas of the entry's swap and
+   * mint, priced at the review's fee. Absent: only `minEntry`. Set from engine settings (`withEngineSettings`); grants never read it.
+   */
+  minEntryGasMultiple?: number
   /** target-weights: a bucket is topped up only when it is short of its target by more than this share of it (bps). */
   rebalanceBandBps?: number
   /**
