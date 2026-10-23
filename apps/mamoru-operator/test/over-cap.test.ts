@@ -710,6 +710,19 @@ describe('cap re-check at send time', () => {
     expect((await w.op.funding(ctx)).overCap?.excessUsdc).toBe('1920000')
   })
 
+  // otto/mamoru#140 (part 1 #5): the Safe nonce is read before the gas top-up, so the relayer's ETH never goes to a
+  // Safe whose activation can no longer run.
+  test('a Safe nonce that moves while the Safe is being deployed stops the activation before the gas top-up', async () => {
+    const w = world(20_000_000n)
+    const tx = await w.op.prepareActivate(ctx)
+    w.knobs.onSend = () => {
+      w.chain.nonce = 1n
+    }
+    await w.op.submit(ctx, 'activate', sign(tx)).catch(() => undefined)
+    expect(w.sent.some((t) => t.to === SAFE && (t.value ?? 0n) > 0n)).toBe(false)
+    expect(w.sent.some((t) => t.to === SAFE && t.data !== undefined)).toBe(false)
+  })
+
   test('a deposit that lands before the preflight is refused before any relayer transaction', async () => {
     const w = world(0n)
     const tx = await w.op.prepareActivate(ctx)

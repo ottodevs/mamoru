@@ -4314,6 +4314,10 @@ export class Operator {
         this.setBusy(acc, p.kind === 'activate' ? 'activating' : 'withdrawing')
       }
     }
+    // otto/mamoru#140 (part 1 #5): the nonce is read before the top-up, not after it, so a Safe whose nonce moved since
+    // the preflight never receives the relayer's ETH for a transaction that can no longer run.
+    const { nonce } = await readSafeNonce(this.client, safe)
+    if (nonce !== p.tx.nonce) return this.settleRetried(acc, op, 'SAFE_NONCE_MOVED') ? undefined : this.patchOp(acc, op.opId, { state: 'failed', code: 'SAFE_NONCE_MOVED' })
     if (p.kind === 'activate') {
       const target = this.cfg.policy.gasReserveWei + (await this.topUpMarginWei())
       // otto/mamoru#15: the batch's own swap fills the reserve (or the whole activation reverts): no top-up for it.
@@ -4327,8 +4331,6 @@ export class Operator {
         console.log(`[owner] top-up ${safe} +${target - eth} wei tx ${hash} ${receipt.status}`)
       }
     }
-    const { nonce } = await readSafeNonce(this.client, safe)
-    if (nonce !== p.tx.nonce) return this.settleRetried(acc, op, 'SAFE_NONCE_MOVED') ? undefined : this.patchOp(acc, op.opId, { state: 'failed', code: 'SAFE_NONCE_MOVED' })
     const data = execData(p.tx, signature)
     // A load-balanced provider can answer from a lagging node: retry the static check before failing the op.
     for (let attempt = 0; ; attempt++) {
