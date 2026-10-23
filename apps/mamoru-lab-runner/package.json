@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@mamoru/domain": "workspace:*",
+    "@mamoru/lab-agent": "workspace:*",
     "@mamoru/lab-bench": "workspace:*"
   }
 }
