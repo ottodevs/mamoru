@@ -72,9 +72,9 @@ describe('routes', () => {
     expect(text).toContain('Monthly rate n/a')
     expect(text).not.toContain('UTC')
   })
-  // otto/mamoru#193: three indicators in a row with their source visible under each figure, no info button;
-  // the per-pool rates sit next to each position in the Working capital table.
-  test('rates: monthly and current with their sources, per-pool rates beside each position', async () => {
+  // otto/mamoru#198: the two rates under the balance, figure over "APY · what", sources behind (i); earned so
+  // far with the balance. The per-pool rates sit next to each position in the Working capital table.
+  test('rates: monthly and current under the balance, sources behind (i), per-pool rates beside each position', async () => {
     const apy: ApyView = {
       pool: 'conservador-live-v2',
       currentPct: 6.4,
@@ -87,9 +87,13 @@ describe('routes', () => {
     }
     const one: FundingView = { ...funded, positions: [{ tokenId: '1', pool: 'pool:USDC/cbBTC/500', liquidity: '1', inRange: true, amountUsdc: '5000000', amountCbbtc: '0', valueUsdc: '5000000' }] }
     const { text, html } = await renderRoute('/', fixtureSession, one, { apy })
-    expect(text).toContain('Monthly rate 5.9% APY · 30-day mean APY · 30d · DefiLlama')
-    expect(text).toContain('Current rate 6.4% APY · today · on positions earning now APY · today · earning now · GeckoTerminal/DefiLlama')
-    expect(text).toContain('Earned so far')
+    expect(text).toContain('5.9% Monthly rate APY · 30-day avg')
+    expect(text).toContain('Current rate APY · 24h avg')
+    expect(text).toContain('Monthly: DefiLlama')
+    expect(text).toContain('24h avg: GeckoTerminal/DefiLlama')
+    expect(html).toContain('aria-label="Rate sources"')
+    expect(text).toContain('earned so far')
+    expect(text).not.toContain('Saves automatically')
     expect(text).toContain('Balanced · USDC/cbBTC')
     expect(html).not.toContain('aria-label="Sources and method"')
     expect(html).toMatch(/<details class="dash-fold" open/)
