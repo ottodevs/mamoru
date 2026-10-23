@@ -223,13 +223,12 @@ describe('earned so far with the balance', () => {
   })
 })
 
-// #112 review: the current rate covers only positions earning now; with one paused, the label says so.
+// #112 review: the current rate covers only positions earning now (not paused ones, not idle money): its label says so.
 describe('current rate scope on its face', () => {
-  test('a paused position adds "on positions earning now"; none paused, just "today"', () => {
+  test('a figure always says "on positions earning now", paused or not', () => {
     const mixed = render(<Indicators f={placed} apy={apy} price={null} />).text
     const allIn = render(<Indicators f={{ ...placed, positions: placed.positions.map((p) => ({ ...p, inRange: true })) }} apy={apy} price={null} />).text
-    expect(placed.positions.some((p) => !p.inRange)).toBe(true)
     expect(mixed).toContain('APY · today · on positions earning now')
-    expect(allIn).not.toContain('earning now')
+    expect(allIn).toContain('APY · today · on positions earning now')
   })
 })

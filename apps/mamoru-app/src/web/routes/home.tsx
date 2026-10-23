@@ -185,9 +185,8 @@ export function Indicators({ f, apy, price }: { f: FundingView | undefined; apy:
   const monthlySrc = sourceName(apy?.monthlySource)
   const currentSrc = sourceName(apy?.currentSource)
   const monthlyTail = monthly.gap ? homeCopy.gap[monthly.gap] : [monthly.plan ? homeCopy.planPools : null, partial(monthly)].filter(Boolean).join(' · ') || null
-  // #112 review: the current rate leaves paused positions out; when some are paused, say so on its face.
-  const somePaused = rows.some((r) => !r.inRange)
-  const currentTail = current.gap ? homeCopy.gap[current.gap] : [somePaused ? homeCopy.earningNow : null, partial(current)].filter(Boolean).join(' · ') || null
+  // #112 review: the current rate leaves paused positions and idle money out, so a figure always says what it covers.
+  const currentTail = current.gap ? homeCopy.gap[current.gap] : [homeCopy.earningNow, partial(current)].filter(Boolean).join(' · ')
   return (
     <section className="rates" aria-label="Rates">
       <div className="rate">
