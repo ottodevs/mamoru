@@ -1,0 +1,15 @@
+{
+  "name": "@mamoru/lab-bench",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@mamoru/backtest": "workspace:*",
+    "@mamoru/domain": "workspace:*",
+    "@mamoru/policy": "workspace:*",
+    "@mamoru/registry": "workspace:*"
+  }
+}

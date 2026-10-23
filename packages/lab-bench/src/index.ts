@@ -1,0 +1,21 @@
+export {
+  BASES,
+  basePolicyOf,
+  DEPOSIT_MAX_USDC,
+  DEPOSIT_MIN_USDC,
+  defaultDatasetsDir,
+  manifestWindow,
+  parseSpecKey,
+  policyOf,
+  specKey,
+  trainWindows,
+  validateSpec,
+  variantLabel,
+  WIDTH_TICKS_MAX,
+  WIDTH_TICKS_MIN,
+  WIDTH_TICKS_STEP,
+  type Base,
+  type BenchSpec,
+  type ManifestWindow,
+} from './spec.ts'
+export { basesForWindow, MAX_SERIES_POINTS, runBench, type RunResult } from './run.ts'
