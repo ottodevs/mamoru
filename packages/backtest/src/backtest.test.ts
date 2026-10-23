@@ -319,3 +319,37 @@ describe('Lab round 3 options in a run (#101)', () => {
     expect(reduces(run(ds, staged))).toBeGreaterThan(0)
   })
 })
+
+describe('onSample (otto/mamoru#199, spec 008 B-02)', () => {
+  test('a run with the hook gives the same resultHash as without it', () => {
+    const ds = syntheticDataset({ samples: 80 })
+    const plain = runBacktest(ds, conservadorLiveV2, { deposit: DEPOSIT })
+    let calls = 0
+    const watched = runBacktest(ds, conservadorLiveV2, {
+      deposit: DEPOSIT,
+      onSample: (i, time, positions) => {
+        calls++
+        expect(time).toBe(ds.samples[i]!.time)
+        for (const p of positions) expect(typeof p.liquidity).toBe('bigint')
+      },
+    })
+    expect(watched.resultHash).toBe(plain.resultHash)
+    expect(calls).toBe(plain.series.time.length)
+  }, SLOW)
+
+  test('positions passed to the hook mirror the world at that sample, read-only', () => {
+    const ds = syntheticDataset({ samples: 60 })
+    const seen: number[] = []
+    const r = runBacktest(ds, conservadorLiveV2, {
+      deposit: DEPOSIT,
+      onSample: (_i, _time, positions) => {
+        seen.push(positions.filter((p) => p.liquidity > 0n).length)
+      },
+    })
+    // The three buckets have all entered by the end of the run; the hook sees exactly as many open positions.
+    expect(r.metrics.operations.enter_mint).toBe(3)
+    expect(seen.at(-1)).toBe(3)
+    // Before any entry, the hook sees none.
+    expect(seen[0]).toBe(0)
+  }, SLOW)
+})

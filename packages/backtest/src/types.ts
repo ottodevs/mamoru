@@ -57,6 +57,12 @@ export type SimConfig = {
   /** First and last sample to replay, inclusive. Default: the whole dataset. */
   from?: number
   to?: number
+  /**
+   * otto/mamoru#199 (spec 008 B-02, the Lab bench): called after every recorded sample with the world's open
+   * positions at that sample, read-only. Used to chart the active range band per pool; it reads no state the facts
+   * object below does not already fold in, so it never changes `resultHash`.
+   */
+  onSample?: (i: number, time: number, positions: readonly { pool: RegistryName; tickLower: number; tickUpper: number; liquidity: bigint }[]) => void
 }
 
 export type OpEntry = {

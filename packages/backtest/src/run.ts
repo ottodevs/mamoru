@@ -380,6 +380,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
     const v = accountValue(ds, s, w, price)
     series.time.push(s.time)
     series.value.push(v.total - gasSpent)
+    config.onSample?.(i, s.time, w.positions)
     series.hodl.push(Object.entries(hodl).reduce((n, [token, amount]) => n + price(s, token, amount), 0n))
     if (v.lp > 0n) {
       rangeSum += bps(v.lpInRange, v.lp)
