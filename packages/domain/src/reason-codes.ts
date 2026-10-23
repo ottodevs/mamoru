@@ -220,6 +220,10 @@ export const REASON_CODES = [
   'MB_CHAIN_INDEXING_ABSENT',
   'LAB_FORK_GAP_INCONCLUSIVE',
   'LAB_CODE_INJECTION_FORBIDDEN',
+  // Agent Lab bench (008, otto/mamoru#199)
+  'LAB_SPEC_INVALID',
+  'LAB_HOLDOUT_DENIED',
+  'LAB_DATASET_MISSING',
 ] as const
 
 export type ReasonCode = (typeof REASON_CODES)[number]
