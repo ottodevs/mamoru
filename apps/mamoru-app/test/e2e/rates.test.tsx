@@ -244,9 +244,9 @@ describe('earned so far with the balance', () => {
 
 // otto/mamoru#198: the current rate is the account's, so its label is one line with no scope words.
 describe('rate labels', () => {
-  test('"APY · now" and "APY · 30-day avg", one line each', () => {
+  test('"APY · 24h avg" and "APY · 30-day avg", one line each', () => {
     const { text } = render(<Indicators f={placed} apy={apy} price={null} />)
-    expect(text).toContain('Current rate APY · now')
+    expect(text).toContain('Current rate APY · 24h avg')
     expect(text).toContain('Monthly rate APY · 30-day avg')
     expect(text).not.toContain('earning now')
   })

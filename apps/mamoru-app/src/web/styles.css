@@ -957,7 +957,7 @@
 .rates {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 1rem 4rem;
   margin: 0 0 2.6rem;
 }
@@ -990,9 +990,16 @@
 .rate-what {
   color: var(--color-muted);
 }
+/* The label and its (i) on one line: the sources sit next to the figure they explain (Brais, 23-oct). */
+.rate-label {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
 .rate-info {
-  align-self: flex-end;
-  margin-bottom: 0.05rem;
+  position: relative;
+  flex: none;
 }
 /* A 44 px tap target around the small circle (WCAG 2.5.5): the sources are only reachable through it. */
 .rate-info > summary {
@@ -1018,15 +1025,21 @@
 .rate-info > summary::-webkit-details-marker {
   display: none;
 }
-.rate-info[open] {
-  flex-basis: 100%;
-}
 .rate-info[open] > summary > span {
   color: var(--color-ink);
   border-color: var(--color-ink);
 }
 .rate-sources {
-  margin: 0.6rem 0 0;
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  z-index: 2;
+  width: max-content;
+  max-width: min(22rem, 80vw);
+  padding: 0.6rem 0.8rem;
+  background: var(--color-paper);
+  border: 1px solid var(--color-wash);
+  margin: 0;
   display: grid;
   gap: 0.25rem;
   font-family: var(--font-mono);
@@ -1319,16 +1332,10 @@
   /* Two columns, so a long qualifier wraps inside its rate and both stay on one row (#112 review). */
   .rates {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 1rem 1.25rem;
     align-items: start;
     margin-bottom: 2rem;
-  }
-  .rate-info {
-    align-self: end;
-  }
-  .rate-info[open] {
-    grid-column: 1 / -1;
   }
   .rate-value {
     font-size: 2.1rem;
