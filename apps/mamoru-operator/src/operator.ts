@@ -516,7 +516,10 @@ type Prepared = {
   pausedWarned?: boolean
 }
 
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; /** otto/mamoru#184: this loop has reached a decided review, so `peerSeen` holds the account's positions. */ seenPositions?: boolean; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
+/** otto/mamoru#184: how long an account not yet observed since its loop started holds back the others' share room. */
+const PEER_GRACE_MS = 10 * 60_000
+
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; /** otto/mamoru#184: this loop has reached a decided review, so `peerSeen` holds the account's positions. */ seenPositions?: boolean; /** When (ms) this loop started. */ startedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -4799,7 +4802,7 @@ export class Operator {
     // first tick then puts the floor a margin past the head it reads, so a provider still before it is not believed.
     const unsettled = acc.ops.some((o) => o.opId.startsWith('eng-') && o.state === 'submitted' && o.block === undefined)
     this.revokeManage(engine)
-    const runner: Runner = { engine, timer: null, stopped: false, epoch: acc.epoch, run: acc.runs, seen: new Map(), alias: new Map() }
+    const runner: Runner = { engine, timer: null, stopped: false, startedAt: Date.now(), epoch: acc.epoch, run: acc.runs, seen: new Map(), alias: new Map() }
     this.runners.set(acc.accountKey, runner)
     runner.floorPending = unsettled
     // Every move of an engine operation is stored as it happens: a restart in the middle of a review still knows
@@ -4863,7 +4866,10 @@ export class Operator {
             if (r.code === 'EHG_OBSERVATION_STALE') more = true
             safeMetrics(() => this.engineHealth.record(acc.accountKey, false, r.code, classifyEngineError(r.code, r.detail)))
           } else {
-            this.peerSeen.set(acc.accountKey, r.observation.positions.map(({ pool, tickLower, tickUpper, liquidity }) => ({ pool, tickLower, tickUpper, liquidity })))
+            // Only positions Mamoru opened or was handed to manage: an NFT anyone transfers into a Safe must not take
+            // share room from the other accounts. An account from before the admitted record counts all of its own.
+            const ours = acc.admittedTokenIds ? new Set([...acc.admittedTokenIds, ...acc.managedTokenIds]) : null
+            this.peerSeen.set(acc.accountKey, r.observation.positions.filter((p) => !ours || ours.has(p.tokenId.toString())).map(({ pool, tickLower, tickUpper, liquidity }) => ({ pool, tickLower, tickUpper, liquidity })))
             runner.seenPositions = true
             const d = r.record.decision
             const pools = new Map<string, string | null>(this.enginePolicyOf(acc).buckets.map((b) => [b.id, b.pools[0] ?? null]))
@@ -4967,11 +4973,14 @@ export class Operator {
    * otto/mamoru#184: every other account's positions, as its last decided review saw them, so depth sizing holds
    * Mamoru as a whole under the share limit of a pool. Null while some running account has not reached a decided
    * review since its loop started: the pool-wide share is unknown, and the account gets no share room until it is.
+   * One account whose reviews keep failing holds the others back for PEER_GRACE_MS at most, then is left out (with
+   * what it last held, if anything).
    * An account whose loop stopped keeps counting with what it last held (a lapsed session leaves its positions in the
    * pool), until the process restarts: an overcount, never an undercount, for positions a stop did withdraw.
    */
   private peerPositionsOf(key: string): PeerPositionObs[] | null {
-    for (const [k, r] of this.runners) if (k !== key && !r.stopped && !r.seenPositions) return null
+    const now = Date.now()
+    for (const [k, r] of this.runners) if (k !== key && !r.stopped && !r.seenPositions && now - (r.startedAt ?? 0) < PEER_GRACE_MS) return null
     return [...this.peerSeen].flatMap(([k, ps]) => (k === key ? [] : ps))
   }
 
