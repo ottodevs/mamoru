@@ -5,7 +5,9 @@ import { useFunding, useSession } from '../api/queries.ts'
 import { ConnectWallet } from '../components/connect-wallet.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { AddressBlock, Brand, Copy, Qr, Waiting } from '../components/ui.tsx'
-import { BASE_SLEEVE, explorerAddress, useChain, type SleeveChain } from '../lib/chain.tsx'
+import type { Hex } from 'viem'
+import { showToast } from '../components/toast.tsx'
+import { BASE_SLEEVE, explorerAddress, explorerTx, useChain, type SleeveChain } from '../lib/chain.tsx'
 import { capNote, ceilCents, overCapOf, usd, usdPlain } from '../lib/money.ts'
 import { localTime } from '../lib/time.ts'
 import { useInjectedWallets } from '../lib/wallets.ts'
@@ -13,7 +15,10 @@ import { useInjectedWallets } from '../lib/wallets.ts'
 export const addCopy = {
   title: 'Add capital',
   send: 'Send USDC on Base.',
-  baseOnly: 'Only USDC sent on the Base network arrives. The same address on Ethereum or any other network is not your Mamoru balance.',
+  // otto/mamoru#191 (Brais and Ot, 20-22 Oct): one bordered notice above the address, on both Add capital screens.
+  baseOnlyLead: 'Only USDC on Base.',
+  baseOnlyRest: "Any other token or network won't reach your account.",
+  baseOnly: "Only USDC on Base. Any other token or network won't reach your account.",
   waiting: 'Waiting for your USDC',
   arrived: (amount: string) => `${amount} USDC arrived`,
   overCap: (o: OverCap) =>
@@ -21,20 +26,30 @@ export const addCopy = {
   overCapNext: 'See what you can do',
   // otto/mamoru#67: a sleeve on another chain. A deposit address is never shown without its chain and its USDC contract.
   sendOn: (c: SleeveChain) => `Send USDC on ${c.name}.`,
-  onlyOn: (c: SleeveChain) => `Only USDC sent on the ${c.name} network arrives. The same address on Base or any other network is not this ${c.name} balance.`,
+  onlyOnLead: (c: SleeveChain) => `Only USDC on ${c.name}.`,
+  onlyOnRest: (c: SleeveChain) => `Any other token or network won't reach this ${c.name} balance.`,
+  confirmed: (amount: string) => `Confirmed on Base. ${amount} USDC added.`,
   addressOn: (c: SleeveChain) => `Your address on ${c.name}`,
   usdcContract: (c: SleeveChain) => `USDC on ${c.name}`,
 }
 
+/** otto/mamoru#191: a wallet transfer Base confirmed, said once in the dark notice with its explorer link. */
+export function toastConfirmed(tx: string, raw: bigint): void {
+  showToast({ text: addCopy.confirmed(usd(raw)), href: explorerTx(BASE_SLEEVE, tx), linkLabel: `View on ${BASE_SLEEVE.explorer.name}` })
+}
+
 /** Address, QR and Connect wallet. Shared by the Add money screen and the Home modal. */
-export function DepositDetails({ address, capUsdc }: { address: string; capUsdc?: string }) {
+export function DepositDetails({ address, capUsdc, onConfirmed }: { address: string; capUsdc?: string; onConfirmed?: (tx: Hex, raw: bigint) => void }) {
   const wallets = useInjectedWallets()
   const chain = useChain()
   const base = chain.chainId === BASE_SLEEVE.chainId
   return (
     <div className="grid gap-6">
+      <p className="m-0 border-2 border-ink px-4 py-3 text-[1rem] leading-[1.45] text-ink" data-testid="base-only">
+        <strong className="font-bold">{base ? addCopy.baseOnlyLead : addCopy.onlyOnLead(chain)}</strong> {base ? addCopy.baseOnlyRest : addCopy.onlyOnRest(chain)}
+      </p>
       {/* The wallet send is wired to Base (lib/wallet-client.ts); a Monad sleeve takes the address or the QR. */}
-      {base ? <ConnectWallet to={address} wallets={wallets} /> : null}
+      {base ? <ConnectWallet to={address} wallets={wallets} onConfirmed={onConfirmed} /> : null}
       <div className="grid gap-5 sm:grid-cols-[auto_1fr] sm:items-center sm:gap-7">
         <Qr text={address} />
         <div className="grid min-w-0 gap-3">
@@ -63,9 +78,6 @@ export function DepositDetails({ address, capUsdc }: { address: string; capUsdc?
           )}
         </div>
       </div>
-      <p className="m-0 text-[0.88rem] leading-[1.45] text-stone" data-testid="base-only">
-        {base ? addCopy.baseOnly : addCopy.onlyOn(chain)}
-      </p>
     </div>
   )
 }
@@ -113,7 +125,16 @@ export function AddMoneyPage() {
         <div>
           <h1 className="m-0 text-[clamp(2rem,7vw,3rem)] font-normal leading-[1.05]">{addCopy.title}</h1>
         </div>
-        {f ? <DepositDetails address={f.address} capUsdc={f.capUsdc} /> : <div className="h-44 animate-pulse bg-wash/40" aria-hidden="true" />}
+        {f ? (
+          <DepositDetails
+            address={f.address}
+            capUsdc={f.capUsdc}
+            onConfirmed={(tx, raw) => {
+              toastConfirmed(tx, raw)
+              void navigate({ to: '/', replace: true })
+            }}
+          />
+        ) : <div className="h-44 animate-pulse bg-wash/40" aria-hidden="true" />}
         <div className="card flex flex-wrap items-center justify-between gap-3">
           {over ? (
             <p className="m-0 max-w-[34rem] text-[0.95rem] leading-[1.45] text-alert-ink" role="status" data-testid="over-cap">

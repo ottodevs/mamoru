@@ -647,7 +647,7 @@ describe('funds by token and what Mamoru is doing', () => {
     expect(html).toContain('data-testid="idle-tokens"')
     expect(text).toContain('3.74 USDC')
     expect(text).toContain('1.25 USDT')
-    expect(text).toContain('Placing your money. The next step starts in a few seconds.')
+    expect(text).toContain('Putting 3.74 USDC to work. This takes a few seconds.')
   })
 
   test('holdings add what is outside and what is in positions, per token, largest first', () => {
@@ -676,7 +676,8 @@ describe('funds by token and what Mamoru is doing', () => {
     const at = new Date('2026-10-11T21:30:00Z').toISOString()
     const line = engineLine({ ...midEntry, engine: { placing: false, nextReviewAt: at } })!
     expect(line.startsWith('Nothing to do right now. Mamoru looks again at ')).toBe(true)
-    expect(engineLine({ ...midEntry, engine: { placing: true, nextReviewAt: at } })).toBe('Placing your money. The next step starts in a few seconds.')
+    expect(engineLine({ ...midEntry, engine: { placing: true, nextReviewAt: at } })).toBe('Putting 3.74 USDC to work. This takes a few seconds.')
+    expect(engineLine({ ...midEntry, usdc: '10000', engine: { placing: true, nextReviewAt: at } })).toBe('Placing your money. The next step starts in a few seconds.')
     expect(engineLine({ ...midEntry, active: false })).toBeNull()
     expect(engineLine({ ...midEntry, engine: null })).toBeNull()
   })
@@ -690,7 +691,7 @@ describe('funds by token and what Mamoru is doing', () => {
     const many = engineLine({ ...midEntry, engine: { placing: false, nextReviewAt: at, reviewedAt: at, waiting: [{ bucket: 'stables', pool: 'pool:USDC/USDT/100', code: 'DECIDE_WAIT_DEPTH', amountUsdc: '40000000' }, { bucket: 'btc-usdc', pool: 'pool:USDC/cbBTC/500', code: 'DECIDE_ENTRY_PAUSED_FALL', amountUsdc: '10000000' }] } })!
     expect(many.startsWith('50.00 USDC is waiting in 2 pools: some are not deep enough for more right now, some are falling fast. Checked at ')).toBe(true)
     // Placing wins: the engine is already moving that money.
-    expect(engineLine({ ...midEntry, engine: { placing: true, nextReviewAt: at, waiting: [{ bucket: 'stables', pool: null, code: 'DECIDE_WAIT_DEPTH', amountUsdc: '1' }] } })).toBe('Placing your money. The next step starts in a few seconds.')
+    expect(engineLine({ ...midEntry, engine: { placing: true, nextReviewAt: at, waiting: [{ bucket: 'stables', pool: null, code: 'DECIDE_WAIT_DEPTH', amountUsdc: '1' }] } })).toBe('Putting 3.74 USDC to work. This takes a few seconds.')
   })
 
   test('what a swap or a mint rounds off (under a cent per token) counts in the total and is not listed', async () => {

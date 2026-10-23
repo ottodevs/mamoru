@@ -96,13 +96,14 @@ describe('deposit names the chain and its USDC contract', () => {
     expect(text).toContain('Your address on Monad')
     expect(text).toContain('Send USDC on Monad.')
     expect(text).toContain(`USDC on Monad ${address('USDC', monadRegistry)}`)
-    expect(text).toContain('Only USDC sent on the Monad network arrives.')
+    expect(text).toContain("Only USDC on Monad. Any other token or network won't reach this Monad balance.")
     expect(text).not.toContain('Send USDC on Base')
     expect(html).toContain(`https://monadscan.com/address/${address('USDC', monadRegistry)}`)
   })
 
   // Review of PR #115 (P1 3): Base is compared with the markup origin/main rendered before this change, not with
-  // itself. __golden__/*.html were rendered from origin/main's add-money.tsx and ui.tsx (2026-10-23) with these props.
+  // itself. __golden__/*.html were rendered from origin/main's add-money.tsx and ui.tsx (2026-10-23) with these props;
+  // deposit-base.html again with otto/mamoru#191's bordered Base-only notice (the one intended change).
   test('Base: the deposit and the explorer link are byte-identical to origin/main, inside or outside the provider', () => {
     const golden = (f: string) => readFileSync(join(import.meta.dir, '__golden__', f), 'utf8').trimEnd()
     const deposit = golden('deposit-base.html')

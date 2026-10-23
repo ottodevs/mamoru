@@ -19,7 +19,7 @@ import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, wi
 import { localTime } from '../lib/time.ts'
 import { explorerAddress, useChain } from '../lib/chain.tsx'
 import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
-import { DepositDetails, hasMoney } from './add-money.tsx'
+import { DepositDetails, hasMoney, toastConfirmed } from './add-money.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { FeedbackDialog, feedbackCopy } from '../components/feedback-dialog.tsx'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
@@ -67,6 +67,8 @@ export const homeCopy = {
   unpricedIdle: (tokens: string) => `${tokens} not priced yet, not counted in the total`,
   nothingPlaced: 'Nothing in a position right now.',
   placing: 'Placing your money. The next step starts in a few seconds.',
+  // otto/mamoru#191: right after a deposit the dashboard names the amount on its way in.
+  putting: (amount: string) => `Putting ${amount} USDC to work. This takes a few seconds.`,
   upToDate: (time: string) => `Nothing to do right now. Mamoru looks again at ${time}.`,
   waitDepth: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: the ${pair} pool is not deep enough for more right now. Checked at ${time}.`,
   waitFall: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: ${pair} is falling fast, so Mamoru adds nothing there until it settles. Checked at ${time}.`,
@@ -335,7 +337,8 @@ function tokenAmount(raw: string, token: string, decimals: number): string {
 /** What the engine of a running account says between operations; null when it is not running or says nothing. */
 export function engineLine(f: FundingView): string | null {
   if (!f.active || !f.engine) return null
-  if (f.engine.placing) return homeCopy.placing
+  // Under the smallest entry (10 cents) a remainder is rounding, never named as money on its way (otto/mamoru#194).
+  if (f.engine.placing) return BigInt(f.usdc) >= 100_000n ? homeCopy.putting(usd(f.usdc)) : homeCopy.placing
   // otto/mamoru#128: money held back on purpose says why, so a still account never looks stopped.
   const waits = (f.engine.waiting ?? []).filter((w) => w.code === 'DECIDE_WAIT_DEPTH' || w.code === 'DECIDE_ENTRY_PAUSED_FALL')
   if (waits.length) {
@@ -1057,7 +1060,16 @@ export function HomeView({ accountKey, sleeves = null }: { accountKey: string; s
       {f && s ? (
         <>
           <Modal open={dialog === 'add'} onClose={() => setDialog(null)} title={homeCopy.add}>
-            <DepositDetails address={f.address} capUsdc={f.capUsdc} />
+            <DepositDetails
+              address={f.address}
+              capUsdc={f.capUsdc}
+              onConfirmed={(tx, raw) => {
+                // otto/mamoru#191: no Sent screen to close by hand. Base confirmed: close, say so, read the balance now.
+                setDialog(null)
+                toastConfirmed(tx, raw)
+                void qc.invalidateQueries({ queryKey: queryKeys.funding(accountKey) })
+              }}
+            />
           </Modal>
           <WithdrawDialog key={withdrawSeed} accountKey={accountKey} s={s} open={dialog === 'withdraw'} onClose={() => setDialog(null)} initialAmount={withdrawSeed} deployed={f.deployed} />
           <StopDialog accountKey={accountKey} s={s} open={dialog === 'stop'} onClose={() => setDialog(null)} />

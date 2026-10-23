@@ -62,6 +62,13 @@ export async function sendUsdc(provider: EIP1193Provider, from: Hex, to: Hex, ra
   })
 }
 
+/** otto/mamoru#191: waits for Base to include the transfer. True when it succeeded, false when it reverted. */
+export async function confirmed(provider: EIP1193Provider, hash: Hex): Promise<boolean> {
+  const pc = createPublicClient({ chain: base, transport: custom(provider) })
+  const r = await pc.waitForTransactionReceipt({ hash, pollingInterval: 1_000, timeout: 180_000 })
+  return r.status === 'success'
+}
+
 export function parseUsdc(s: string): bigint | null {
   const t = s.trim().replace(/,/g, '')
   if (!/^\d+(\.\d{0,6})?$/.test(t)) return null

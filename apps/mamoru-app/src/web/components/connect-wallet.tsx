@@ -24,8 +24,12 @@ function WalletIcon({ w }: { w: InjectedWallet }) {
   return w.icon ? <img src={w.icon} alt="" width={20} height={20} className="h-5 w-5 shrink-0" /> : <span className="h-5 w-5 shrink-0 border border-wash" aria-hidden="true" />
 }
 
-/** Connect a browser wallet and send USDC on Base to the account address. Hidden when no wallet is found. */
-export function ConnectWallet({ to, wallets }: { to: string; wallets: InjectedWallet[] }) {
+/**
+ * Connect a browser wallet and send USDC on Base to the account address. Hidden when no wallet is found.
+ * otto/mamoru#191: once Base confirms the transfer, `onConfirmed` takes over (the screen closes and says so); until
+ * then, and when it is absent, the sent line stays.
+ */
+export function ConnectWallet({ to, wallets, onConfirmed }: { to: string; wallets: InjectedWallet[]; onConfirmed?: (tx: Hex, raw: bigint) => void }) {
   const [picking, setPicking] = useState(false)
   const [conn, setConn] = useState<Conn | null>(null)
   const [busy, setBusy] = useState<null | 'connecting' | 'sending'>(null)
@@ -63,6 +67,13 @@ export function ConnectWallet({ to, wallets }: { to: string; wallets: InjectedWa
     try {
       const hash = await c.sendUsdc(conn.wallet.provider, conn.account, to as Hex, raw)
       setTx(hash)
+      setBusy(null)
+      // A wallet that cannot report the receipt leaves the sent line: the balance poll still shows the arrival.
+      const ok = await c.confirmed(conn.wallet.provider, hash).catch(() => null)
+      if (ok === false) {
+        setTx(null)
+        setError('The transfer failed on Base. Nothing was sent.')
+      } else if (ok) onConfirmed?.(hash, raw)
     } catch (e) {
       setError(message(e))
     } finally {

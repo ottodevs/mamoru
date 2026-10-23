@@ -1,4 +1,5 @@
 import { Link, Outlet } from '@tanstack/react-router'
+import { Toast } from '../components/toast.tsx'
 import { Brand } from '../components/ui.tsx'
 
 export function RootLayout() {
@@ -13,6 +14,7 @@ export function RootLayout() {
         </p>
       ) : null}
       <Outlet />
+      <Toast />
     </div>
   )
 }
