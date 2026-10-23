@@ -4976,7 +4976,8 @@ export class Operator {
     for (const acc of Object.values(this.store.state.accounts)) {
       if (acc.accountKey === key) continue
       const v = acc.peerView
-      if (!v) {
+      if (v?.entering) entering.add(v.entering as RegistryName)
+      if (!v?.positions) {
         // Holds no Mamoru position: none admitted or managed, or never activated (the engine mints only after that).
         if (acc.admittedTokenIds && acc.admittedTokenIds.length === 0 && acc.managedTokenIds.length === 0) continue
         if (!acc.runs && !acc.ops.some((o) => o.kind === 'activate' && o.state === 'confirmed')) continue
@@ -4987,7 +4988,6 @@ export class Operator {
         return { peerPositions: null }
       }
       for (const p of v.positions) positions.push({ ...p, pool: p.pool as RegistryName | null, liquidity: BigInt(p.liquidity) })
-      if (v.entering) entering.add(v.entering as RegistryName)
     }
     return { peerPositions: positions, ...(entering.size ? { peerEntering: [...entering] } : {}) }
   }
@@ -4996,7 +4996,7 @@ export class Operator {
 
   /** otto/mamoru#184: an entry into `pool` was just proposed; the others see the pool as taken from this same step on. */
   private markEntering(acc: AccountState, pool: RegistryName): void {
-    acc.peerView = { positions: acc.peerView?.positions ?? [], entering: pool }
+    acc.peerView = { positions: acc.peerView?.positions ?? null, entering: pool }
     this.store.save()
   }
 
