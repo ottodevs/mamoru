@@ -3,7 +3,7 @@ import type { ApyView, FundingView } from '@mamoru/domain'
 import { fixtureFunding } from '../../src/web/fixtures/client.ts'
 import { split } from '../../src/web/lib/money.ts'
 import { bucketOf, currentRate, idleReason, monthlyRate, positionRates, sourceName, valueOf } from '../../src/web/lib/rates.ts'
-import { Balance, Idle, Working } from '../../src/web/routes/home.tsx'
+import { Balance, Idle, Indicators, Working } from '../../src/web/routes/home.tsx'
 import { render } from './render.ts'
 
 // otto/mamoru#193: the dashboard's rates and the idle/working split.
@@ -220,5 +220,16 @@ describe('earned so far with the balance', () => {
     const { text } = render(<Balance s={s} earnedSoFarUsd={null} onAdd={() => {}} onWithdraw={() => {}} />)
     expect(text).toContain('n/a earned so far not measured yet')
     expect(text).not.toContain('+')
+  })
+})
+
+// #112 review: the current rate covers only positions earning now; with one paused, the label says so.
+describe('current rate scope on its face', () => {
+  test('a paused position adds "on positions earning now"; none paused, just "today"', () => {
+    const mixed = render(<Indicators f={placed} apy={apy} price={null} />).text
+    const allIn = render(<Indicators f={{ ...placed, positions: placed.positions.map((p) => ({ ...p, inRange: true })) }} apy={apy} price={null} />).text
+    expect(placed.positions.some((p) => !p.inRange)).toBe(true)
+    expect(mixed).toContain('APY · today · on positions earning now')
+    expect(allIn).not.toContain('earning now')
   })
 })
