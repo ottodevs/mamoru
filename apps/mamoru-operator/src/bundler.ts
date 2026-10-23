@@ -1,7 +1,7 @@
 import type { Server } from 'bun'
 import { decodeErrorResult, parseEventLogs, toHex, zeroAddress, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import type { UserOperation } from 'viem/account-abstraction'
-import { baseRegistry, address, entryPointV07Abi } from '@mamoru/registry'
+import { baseRegistry, address, entryPointV07Abi, type Registry } from '@mamoru/registry'
 import { handleOpsData, userOpHash } from '@mamoru/account/sessions'
 import { fromRpcUserOp, toRpcUserOp, type RpcUserOperation } from '@mamoru/erc4337'
 import { logErr } from './metrics.ts'
@@ -37,7 +37,22 @@ export type BundlerGuard = {
   /** The send failed; `signed`: a transaction may have been broadcast. */
   failed: (userOpHash: Hex, signed: boolean) => void
 }
-export type LiveBundlerOptions = { handleOpsGas?: bigint; guard?: BundlerGuard; label?: string }
+export type LiveBundlerOptions = {
+  handleOpsGas?: bigint
+  guard?: BundlerGuard
+  label?: string
+  /** otto/mamoru#61: the registry of the chain bundled on (its EntryPoint). Absent: Base's (the same address everywhere). */
+  registry?: Registry
+  /**
+   * otto/mamoru#61: 'gas_limit' (Monad, which charges the declared limit): each handleOps carries eth_estimateGas of
+   * that very bundle plus BUNDLE_GAS_MARGIN, never the fixed `handleOpsGas`, which stays the ceiling. No estimate, or
+   * one over the ceiling: refused before anything is signed. Absent or 'gas_used': `handleOpsGas`, as always.
+   */
+  gasModel?: 'gas_used' | 'gas_limit'
+}
+
+/** otto/mamoru#61: margin over the handleOps estimate on a gas-limit chain (state moving between estimate and inclusion). */
+export const BUNDLE_GAS_MARGIN = { num: 11n, den: 10n } as const
 
 /** Gas for one handleOps with one engine userOp (LAB_GAS_LIMITS sum plus EntryPoint overhead). */
 const HANDLE_OPS_GAS = 6_000_000n
@@ -48,8 +63,10 @@ const HANDLE_OPS_GAS = 6_000_000n
  * then bundled alone by the relayer EOA. Adapted from the lab bundler.
  */
 export function startLiveBundler(client: PublicClient, relayer: Pick<Relayer, 'address' | 'send'>, chainId: number, opts: LiveBundlerOptions = {}): LiveBundler {
-  // EntryPoint v0.7 is the same CREATE2 address on every chain, Ethereum (#180's L1 bundler) included: Base's registry entry.
-  const entryPoint = address('EntryPointV07', baseRegistry)
+  // EntryPoint v0.7 is the same CREATE2 address on every chain, Ethereum (#180's L1 bundler) included: Base's registry
+  // entry, or the chain's own when given (otto/mamoru#61).
+  const registry = opts.registry ?? baseRegistry
+  const entryPoint = address('EntryPointV07', registry)
   const gasLimit = opts.handleOpsGas ?? HANDLE_OPS_GAS
   const tag = opts.label ?? 'bundler'
   const included = new Map<string, Included>()
@@ -58,7 +75,7 @@ export function startLiveBundler(client: PublicClient, relayer: Pick<Relayer, 'a
     const [rpcOp, ep] = params as [RpcUserOperation, string]
     if (!ep || ep.toLowerCase() !== entryPoint.toLowerCase()) throw new RpcFailure(-32602, `unsupported entry point ${ep}`)
     const op = fromRpcUserOp(rpcOp)
-    const hash = userOpHash(op, chainId)
+    const hash = userOpHash(op, chainId, registry)
     const data = handleOpsData([op], relayer.address)
     // A load-balanced provider can answer from a node a block or two behind (e.g. before the activation that enabled the session): retry validation briefly.
     for (let attempt = 0; ; attempt++) {
@@ -72,10 +89,24 @@ export function startLiveBundler(client: PublicClient, relayer: Pick<Relayer, 'a
         await Bun.sleep(2_500)
       }
     }
+    // otto/mamoru#61: on a gas-limit chain the bundle carries its own estimate plus the margin, under the ceiling.
+    let txGas = gasLimit
+    if (opts.gasModel === 'gas_limit') {
+      let est: bigint
+      try {
+        est = await client.estimateGas({ account: relayer.address, to: entryPoint, data })
+      } catch (e) {
+        logErr(`[${tag}] ${hash.slice(0, 10)} handleOps estimate failed:`, e)
+        throw new RpcFailure(-32500, 'handleOps gas could not be estimated')
+      }
+      txGas = (est * BUNDLE_GAS_MARGIN.num) / BUNDLE_GAS_MARGIN.den
+      if (txGas > gasLimit) throw new RpcFailure(-32500, `handleOps needs ${txGas} gas, over the bundle ceiling ${gasLimit}`)
+      console.log(`[${tag}] ${hash.slice(0, 10)} handleOps gas ${txGas} (estimate ${est}, ceiling ${gasLimit})`)
+    }
     // A refusal here is a JSON-RPC error before anything is sent: the caller may call the userOp failed.
     if (opts.guard) {
       try {
-        await opts.guard.before(hash, gasLimit)
+        await opts.guard.before(hash, txGas)
       } catch (e) {
         throw new RpcFailure(-32504, `relayer refused to front the gas: ${(e as Error).message.split('\n')[0]}`)
       }
@@ -86,9 +117,9 @@ export function startLiveBundler(client: PublicClient, relayer: Pick<Relayer, 'a
       // The signed bound is checked, and the bundle's hash reaches the guard, before the broadcast: a crash right
       // after it cannot lose the hash.
       ;({ receipt } = await relayer.send(
-        { to: entryPoint, data, gas: gasLimit },
+        { to: entryPoint, data, gas: txGas },
         undefined,
-        opts.guard?.sending ? (wei) => opts.guard!.sending!(hash, wei, gasLimit) : undefined,
+        opts.guard?.sending ? (wei) => opts.guard!.sending!(hash, wei, txGas) : undefined,
         (h, nonce) => {
           signed = true
           opts.guard?.sent?.(hash, h, nonce)

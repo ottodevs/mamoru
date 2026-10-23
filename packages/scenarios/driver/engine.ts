@@ -4,11 +4,11 @@ import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { amountsOf, decide, outOfRangeSinceOf, twapFloor, withOutOfRangeSince, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
 import { hasIncrease, hasManageAny, TWAP_SHORT_WINDOW_SECONDS, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
-import { baseRegistry, address, entry, entryPointV07Abi, erc20Abi, mamoruActionPolicyV2Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type RegistryName } from '@mamoru/registry'
+import { baseRegistry, address, entry, entryPointV07Abi, erc20Abi, mamoruActionPolicyV2Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import {
   Batch,
-  MULTICALL3,
   contractRead,
+  multicall3Of,
   historyCursor,
   isSafeAndCanonical,
   observe,
@@ -24,10 +24,10 @@ import {
 } from '@mamoru/rpc'
 import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
 import { SessionLedger, precheck, type ActionPolicyPoolConfig } from '@mamoru/account/precheck'
-import { draftUserOp, executeCallData, sessionNonceKey, signSessionUserOp, useModeSignature, userOpHash, type GasSettings } from '@mamoru/account/sessions'
+import { draftUserOp, executeCallData, handleOpsData, sessionNonceKey, signSessionUserOp, useModeSignature, userOpHash, type GasSettings } from '@mamoru/account/sessions'
 import type { Execution } from '@mamoru/account/safe'
-import { approve, approveTo, burn, collect, deadlineCheck, decreaseLiquidity, exactInputSingle, mint, policyIncrease, type V3Call } from '@mamoru/uniswap-v3'
-import { minOut, quoteExactInputSingle, quoteExactInputSingleWithLimit, quoteMint } from '@mamoru/uniswap-v3/quote'
+import { policyIncrease, uniswapV3, type UniswapV3, type V3Call } from '@mamoru/uniswap-v3'
+import { minOut, quoteMint } from '@mamoru/uniswap-v3/quote'
 import { diverges, swapMinimum, twapFloor as deviationFloor, twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { DEFAULT_BAND_FACTOR_BPS, decreaseMinsInRange, oracleFromObserve, priceRange, swapBoundsInRange, type OracleRead, type PriceAnchor, type PriceRange } from '@mamoru/uniswap-v3/policy-bounds'
 import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
@@ -71,6 +71,45 @@ export function engineGas(baseFee: bigint, caps?: GasCaps): GasSettings | null {
   return { ...gas, maxFeePerGas: caps.maxFeePerGas }
 }
 const OP_GAS_UNITS = LAB_GAS_LIMITS.verificationGasLimit + LAB_GAS_LIMITS.callGasLimit + LAB_GAS_LIMITS.preVerificationGas
+
+/**
+ * otto/mamoru#61: on a chain that charges the gas LIMIT (Monad, `gasModel: 'gas_limit'`) the bundler's handleOps pays
+ * for every unit the userOp declares, used or not, and the EntryPoint keeps 10% of unused execution gas. There the
+ * limits come from the simulation the engine already runs, plus this stated margin, never from LAB_GAS_LIMITS:
+ * - callGasLimit: the gas the account's execute used from the EntryPoint (`simulateFromEntryPoint`), x 5/4 + 30,000
+ *   (the 63/64 rule over the nested calls of a mint or a swap, and state that moves between simulation and inclusion);
+ * - verificationGasLimit: TIGHT_VERIFICATION_GAS, the SmartSession use-mode validation of one Mamoru session (UniAction,
+ *   TimeFrame and UsageLimit policies, OwnableValidator) plus the prefund transfer: 310k-330k gas for an account's
+ *   first userOp on the Monad fork (e2e-monad-writes.ts prints the figures), so 500k is a 60% margin. It only bounds
+ *   the prefund: the bundle's own gas comes from its estimate (the operator's bundler), not from this limit;
+ * - preVerificationGas: what the EntryPoint does not meter, from the bytes of the packed userOp: 21,000 intrinsic, the
+ *   calldata at 16 gas a byte (4 for a zero byte) of a handleOps carrying this op, and 30,000 for handleOps' own loop,
+ *   the UserOperationEvent and the beneficiary payment.
+ * Never above LAB_GAS_LIMITS: a limit that would be is refused (AA_GAS_MARGIN_EXCEEDED), not raised.
+ */
+export const TIGHT_CALL_GAS = { num: 5n, den: 4n, plus: 30_000n } as const
+export const TIGHT_VERIFICATION_GAS = 500_000n
+export const TIGHT_PRE_VERIFICATION_OVERHEAD = 21_000n + 30_000n
+
+/** Calldata gas of `data` at the pre-EIP-7623 schedule: 16 per non-zero byte, 4 per zero byte. */
+function calldataGas(data: Hex): bigint {
+  let gas = 0n
+  for (let i = 2; i < data.length; i += 2) gas += data.slice(i, i + 2) === '00' ? 4n : 16n
+  return gas
+}
+
+/** otto/mamoru#61: the userOp limits on a gas-limit chain (see TIGHT_CALL_GAS), or null when they exceed LAB_GAS_LIMITS. */
+export function tightUserOpGas(op: { sender: Address; nonce: bigint; callData: Hex } & GasSettings, simulatedCallGas: bigint): GasSettings | null {
+  if (simulatedCallGas <= 0n) return null
+  const callGasLimit = (simulatedCallGas * TIGHT_CALL_GAS.num) / TIGHT_CALL_GAS.den + TIGHT_CALL_GAS.plus
+  const verificationGasLimit = TIGHT_VERIFICATION_GAS
+  // The signature is not known yet: a use-mode signature of the same length, every byte non-zero (the dearest case).
+  const signature = useModeSignature(`0x${'11'.repeat(32)}`, `0x${'11'.repeat(65)}`)
+  const draft = draftUserOp(op.sender, op.nonce, op.callData, { ...op, callGasLimit, verificationGasLimit })
+  const preVerificationGas = TIGHT_PRE_VERIFICATION_OVERHEAD + calldataGas(handleOpsData([{ ...draft, signature }], op.sender))
+  if (callGasLimit > LAB_GAS_LIMITS.callGasLimit || verificationGasLimit > LAB_GAS_LIMITS.verificationGasLimit || preVerificationGas > LAB_GAS_LIMITS.preVerificationGas) return null
+  return { verificationGasLimit, callGasLimit, preVerificationGas, maxFeePerGas: op.maxFeePerGas, maxPriorityFeePerGas: op.maxPriorityFeePerGas }
+}
 const ETH_PRICE_POOL = 'pool:WETH/USDC/3000'
 /** Bounded waits for the bundler receipt and for `safe`, in blocks the lab lets pass. */
 const MAX_WAIT_BLOCKS = 32
@@ -107,6 +146,18 @@ export type EngineConfig = {
   sessions: EngineSession[]
   /** Blocks to wait for the UserOperationEvent and for `safe`. Default 32; live Base needs more for its safe head. */
   maxWaitBlocks?: number
+  /**
+   * otto/mamoru#61: the registry of the chain the engine runs on: tokens, pools, the position manager, the router, the
+   * quoter, SmartSession and the EntryPoint all come from it. Absent: Base's, as every engine before Monad.
+   */
+  registry?: Registry
+  /** The pool that prices the native asset in the savings asset (decide's gas cost). Absent: Base's WETH/USDC 0.3%. */
+  nativePricePool?: RegistryName
+  /**
+   * How the chain charges gas (`ChainDescriptor.gasModel`). 'gas_limit' (Monad): the userOp limits are sized from the
+   * simulation (`tightUserOpGas`), never the fixed LAB_GAS_LIMITS. Absent or 'gas_used': LAB_GAS_LIMITS, as always.
+   */
+  gasModel?: 'gas_used' | 'gas_limit'
   /** First block of the managed positions' history on a restarted engine. Default: depositsAfter. */
   historyFromBlock?: bigint
   /** Session uses already confirmed on chain before this engine started (restart): replayed into the ledger so caps and usage limits count them. */
@@ -191,8 +242,8 @@ export const V4_SWAP_SIZE_DOWN_STEPS = 4
 const DEADLINE_SELECTOR = toFunctionSelector('function multicall(uint256,bytes[])').toLowerCase()
 
 /** The grant has the SwapRouter02 deadline action (grants from before otto/mamoru#140 do not). */
-export function grantHasSwapDeadline(grant: SessionGrant): boolean {
-  return grant.actions.some((a) => a.selector.toLowerCase() === DEADLINE_SELECTOR && isAddressEqual(a.targetAddress, address('SwapRouter02', baseRegistry)))
+export function grantHasSwapDeadline(grant: SessionGrant, registry: Registry = baseRegistry): boolean {
+  return grant.actions.some((a) => a.selector.toLowerCase() === DEADLINE_SELECTOR && isAddressEqual(a.targetAddress, address('SwapRouter02', registry)))
 }
 
 /**
@@ -273,14 +324,21 @@ export class Engine {
   private readonly client: PublicClient
   private readonly bundler: BundlerClient
   private readonly nonceKey: bigint
+  /** otto/mamoru#61: the chain's registry (`cfg.registry`, else Base's), its Uniswap calls and its Multicall3. */
+  private readonly registry: Registry
+  private readonly v3: UniswapV3
+  private readonly multicall3: Address | null
 
   constructor(
     readonly cfg: EngineConfig,
     private readonly hooks: EngineHooks,
   ) {
     this.client = rpcClient(cfg.rpcUrl)
-    this.bundler = new BundlerClient({ url: cfg.bundlerUrl, mode: cfg.mode, chainId: cfg.chainId, signingChainIds: cfg.signingChainIds })
-    this.nonceKey = sessionNonceKey(cfg.nonceLane)
+    this.registry = cfg.registry ?? baseRegistry
+    this.v3 = uniswapV3(this.registry)
+    this.multicall3 = multicall3Of(this.registry)
+    this.bundler = new BundlerClient({ url: cfg.bundlerUrl, mode: cfg.mode, chainId: cfg.chainId, signingChainIds: cfg.signingChainIds, ...(cfg.registry ? { registry: cfg.registry } : {}) })
+    this.nonceKey = sessionNonceKey(cfg.nonceLane, address('SmartSession', this.registry))
     this.depositsAfter = cfg.depositsAfter
     this.historyFromBlock = cfg.historyFromBlock ?? cfg.depositsAfter
     for (const s of cfg.sessions) this.addSession(s)
@@ -308,7 +366,7 @@ export class Engine {
     if (blockNumber < floor) throw new ReasonError('EHG_OBSERVATION_STALE', `observed at block ${blockNumber}, not before block ${floor}`)
     const sessions = this.sessions.filter((s) => !this.ledger.get(s.permissionId)?.revoked)
     if (sessions.length === 0) return
-    const enabled = sessions.map((s) => batch.add(contractRead(this.client, { address: address('SmartSession', baseRegistry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [s.permissionId, this.cfg.account], blockNumber })))
+    const enabled = sessions.map((s) => batch.add(contractRead(this.client, { address: address('SmartSession', this.registry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [s.permissionId, this.cfg.account], blockNumber })))
     return async () => {
       // Every answer first: a read that fails revokes nothing.
       const answers = await Promise.all(enabled.map((h) => h.need()))
@@ -374,7 +432,7 @@ export class Engine {
     } catch (e) {
       throw new ReasonError('OBS_RPC_UNAVAILABLE', `MamoruActionPolicy.admittedPool at ${obs.block.number}: ${(e as Error).message.split('\n')[0]}`)
     }
-    const admitted = new Map(asked.map((p, i) => [p.tokenId, isAddressEqual(at[i]!, entry(p.pool!, baseRegistry).address)]))
+    const admitted = new Map(asked.map((p, i) => [p.tokenId, isAddressEqual(at[i]!, entry(p.pool!, this.registry).address)]))
     return { ...obs, positions: obs.positions.map((p) => (admitted.has(p.tokenId) ? { ...p, admitted: admitted.get(p.tokenId)! } : p)) }
   }
 
@@ -397,14 +455,15 @@ export class Engine {
       opGasUnits: OP_GAS_UNITS,
       maxPriorityFeePerGas: MAX_PRIORITY_FEE_PER_GAS,
       savingsAsset: this.cfg.policy.savingsAsset,
-      ethPricePool: ETH_PRICE_POOL,
+      ethPricePool: this.cfg.nativePricePool ?? ETH_PRICE_POOL,
+      ...(this.cfg.registry ? { registry: this.cfg.registry } : {}),
     })
     const gh = this.cfg.guardHistory
     if (!gh || gh.pools.length === 0) return obs
     // Pinned to the same block as the rest of the observation (FR-RPC-001): a second Multicall3 batch, never a second block.
-    const targets = gh.pools.map((name) => ({ name, address: entry(name, baseRegistry).address }))
-    if (gh.shared) return { ...obs, guard: { pools: await gh.shared.read(this.client, MULTICALL3, targets, obs.block.number, Number(obs.block.timestamp), this.cfg.policy.execution.twapWindowSeconds) } }
-    const result = await observeGuardHistory(this.client, MULTICALL3, targets, obs.block.number, Number(obs.block.timestamp), this.cfg.policy.execution.twapWindowSeconds, this.guardSeries)
+    const targets = gh.pools.map((name) => ({ name, address: entry(name, this.registry).address }))
+    if (gh.shared) return { ...obs, guard: { pools: await gh.shared.read(this.client, this.multicall3, targets, obs.block.number, Number(obs.block.timestamp), this.cfg.policy.execution.twapWindowSeconds) } }
+    const result = await observeGuardHistory(this.client, this.multicall3, targets, obs.block.number, Number(obs.block.timestamp), this.cfg.policy.execution.twapWindowSeconds, this.guardSeries)
     this.guardSeries.clear()
     for (const [name, series] of result.series) this.guardSeries.set(name, series)
     return { ...obs, guard: { pools: result.pools } }
@@ -498,7 +557,7 @@ export class Engine {
     // Spec 007 T7: a v4 session's MamoruGasPolicy refuses an op over its owner-signed caps; at a basefee that leaves no
     // room under maxFeePerGas the engine waits instead of sending one that cannot validate.
     if (!gas) return void j.move(op.opId, 'discarded', 'GAS_PRICE_OVER_CAP', {}, `basefee ${baseFee}`)
-    const userOp = draftUserOp(this.cfg.account, nonce, callData, gas)
+    let userOp = draftUserOp(this.cfg.account, nonce, callData, gas)
     j.move(op.opId, 'prepared', 'EHG_OK', {
       prepareBlock: block.number,
       permissionId: session.permissionId,
@@ -517,7 +576,7 @@ export class Engine {
     // simulate: eth_simulateV1 from the EntryPoint, deltas against the intent.
     let sim: Simulation
     try {
-      sim = await simulateFromEntryPoint(this.client, this.cfg.account, callData, block.number)
+      sim = await simulateFromEntryPoint(this.client, this.cfg.account, callData, block.number, this.registry)
     } catch (e) {
       if (e instanceof ReasonError) return void j.move(op.opId, 'discarded', e.code, {}, e.detail)
       throw e
@@ -525,7 +584,13 @@ export class Engine {
     if (!sim.ok) return void j.move(op.opId, 'discarded', 'EHG_SIM_REVERT', { simulation: sim }, sim.revert)
     const mismatch = this.deltaMismatch(proposal, prepared, sim)
     if (mismatch) return void j.move(op.opId, 'discarded', 'EHG_SIM_DELTA_MISMATCH', { simulation: sim }, mismatch)
-    j.move(op.opId, 'simulated', 'EHG_OK', { simulation: sim, ehg: [...op.ehg, { gate: 'ehg', verdict: 'GO', reason: 'EHG_OK' }] })
+    // otto/mamoru#61: a chain that charges the gas limit gets limits sized from this simulation (tightUserOpGas).
+    if (this.cfg.gasModel === 'gas_limit') {
+      const tight = tightUserOpGas(userOp, sim.gasUsed)
+      if (!tight) return void j.move(op.opId, 'discarded', 'AA_GAS_MARGIN_EXCEEDED', { simulation: sim }, `simulated ${sim.gasUsed} gas: the tight limits would exceed the engine's`)
+      userOp = draftUserOp(this.cfg.account, nonce, callData, tight)
+    }
+    j.move(op.opId, 'simulated', 'EHG_OK', { simulation: sim, ...(this.cfg.gasModel === 'gas_limit' ? { userOp } : {}), ehg: [...op.ehg, { gate: 'ehg', verdict: 'GO', reason: 'EHG_OK' }] })
     if (proposal.kind === 'harvest' && !this.harvestCollectsFees(proposal, prepared, sim)) {
       return void j.move(op.opId, 'discarded', 'OP_DECISION_STALE', {}, 'the harvest no longer collects any fees')
     }
@@ -544,8 +609,8 @@ export class Engine {
       chainNonce: await this.entryPointNonce(now.number),
     })
     if (blocker) return void j.move(op.opId, 'discarded', blocker)
-    const signed = await signSessionUserOp(userOp, this.cfg.chainId, session.permissionId, this.cfg.sessionKey)
-    const hash = userOpHash(userOp, this.cfg.chainId)
+    const signed = await signSessionUserOp(userOp, this.cfg.chainId, session.permissionId, this.cfg.sessionKey, this.registry)
+    const hash = userOpHash(userOp, this.cfg.chainId, this.registry)
     j.move(op.opId, 'signed', 'OP_SIGNED', { userOp: signed, userOpHash: hash })
 
     // send: the same bytes to a standard ERC-4337 endpoint.
@@ -569,7 +634,7 @@ export class Engine {
     let ev = null
     const maxWait = this.cfg.maxWaitBlocks ?? MAX_WAIT_BLOCKS
     for (let i = 0; i < maxWait && !ev; i++) {
-      ev = await readUserOpEvent(this.client, hash, block.number)
+      ev = await readUserOpEvent(this.client, hash, block.number, this.registry)
       if (!ev) await this.hooks.waitBlock()
     }
     if (!ev) return void j.move(op.opId, 'pending_reconciliation', 'RECON_TIMEOUT')
@@ -617,8 +682,8 @@ export class Engine {
     const safe = await this.client.getBlock({ blockTag: 'safe' })
     const [nonceAtSafe, permissionEnabledAtSafe, ev] = await Promise.all([
       this.entryPointNonce(safe.number),
-      this.client.readContract({ address: address('SmartSession', baseRegistry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [op.permissionId, this.cfg.account], blockNumber: safe.number }),
-      readUserOpEvent(this.client, op.userOpHash, op.prepareBlock),
+      this.client.readContract({ address: address('SmartSession', this.registry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [op.permissionId, this.cfg.account], blockNumber: safe.number }),
+      readUserOpEvent(this.client, op.userOpHash, op.prepareBlock, this.registry),
     ])
     const verdict = settleUnincluded({
       opNonce: op.nonce,
@@ -672,7 +737,7 @@ export class Engine {
     const safe = await this.client.getBlock({ blockTag: 'safe' })
     const nonceAtSafe = await this.entryPointNonce(safe.number)
     for (const op of [...this.released]) {
-      const ev = await readUserOpEvent(this.client, op.userOpHash!, op.prepareBlock!)
+      const ev = await readUserOpEvent(this.client, op.userOpHash!, op.prepareBlock!, this.registry)
       if (!ev) {
         if (nonceAtSafe !== op.nonce) {
           this.released.splice(this.released.indexOf(op), 1)
@@ -717,7 +782,7 @@ export class Engine {
     if (!s.canonical) return void this.journal.move(op.opId, 'pending_reconciliation', 'RECON_REORGED')
     if (!s.safe) return
     if (!op.included.success) return void this.journal.move(op.opId, 'failed', 'EXEC_INNER_REVERT', { confirmedSafeBlock: s.safeBlock })
-    const ev = await readUserOpEvent(this.client, op.userOpHash, op.included.blockNumber)
+    const ev = await readUserOpEvent(this.client, op.userOpHash, op.included.blockNumber, this.registry)
     if (!ev) return
     this.journal.move(op.opId, 'confirmed', 'EXEC_OK', { confirmedSafeBlock: s.safeBlock })
     await this.afterConfirmed(op, op.intent, op.calls ?? [], ev.logs)
@@ -729,7 +794,7 @@ export class Engine {
     this.recordUse(op, calls)
     if (proposal.kind === 'enter_mint') {
       const minted = parseEventLogs({ abi: nonfungiblePositionManagerAbi, logs, eventName: 'Transfer' }).find(
-        (l) => isAddressEqual(l.address, address('NonfungiblePositionManager', baseRegistry)) && isAddressEqual(l.args.to, this.cfg.account),
+        (l) => isAddressEqual(l.address, address('NonfungiblePositionManager', this.registry)) && isAddressEqual(l.args.to, this.cfg.account),
       )
       if (!minted) throw new Error(`${op.opId}: confirmed mint without a position transfer to the account`)
       op.mintedTokenId = minted.args.tokenId
@@ -752,11 +817,11 @@ export class Engine {
     }
     if (proposal.kind === 'harvest') {
       const inc = op.included!
-      const pool = entry(proposal.pool, baseRegistry)
-      const collect = positionEvents(logs).find((e) => e.kind === 'collect' && e.tokenId === proposal.tokenId)
+      const pool = entry(proposal.pool, this.registry)
+      const collect = positionEvents(logs, this.registry).find((e) => e.kind === 'collect' && e.tokenId === proposal.tokenId)
       if (!collect) throw new Error(`${op.opId}: confirmed harvest without a Collect of ${proposal.tokenId}`)
       // FR-PRJ-003: the principal owed right before this Collect, folded from the canonical history, owner actions included.
-      const owed = await principalOwedBefore(this.client, [proposal.tokenId], this.historyFromBlock, { block: inc.blockNumber, logIndex: collect.logIndex })
+      const owed = await principalOwedBefore(this.client, [proposal.tokenId], this.historyFromBlock, { block: inc.blockNumber, logIndex: collect.logIndex }, this.registry)
       this.savingsLog.push(
         harvestRow({
           opId: op.opId,
@@ -787,7 +852,7 @@ export class Engine {
 
   private async entryPointNonce(blockNumber: bigint): Promise<bigint> {
     return this.client.readContract({
-      address: address('EntryPointV07', baseRegistry),
+      address: address('EntryPointV07', this.registry),
       abi: entryPointV07Abi,
       functionName: 'getNonce',
       args: [this.cfg.account, this.nonceKey],
@@ -801,7 +866,7 @@ export class Engine {
    * prepare block, for every operation that prices a pool. Returns the TWAP tick.
    */
   private async priceGuard(pool: string, blockNumber: bigint): Promise<number> {
-    const e = entry(pool, baseRegistry)
+    const e = entry(pool, this.registry)
     const { twapWindowSeconds, maxTwapDeviationTicks } = this.cfg.policy.execution
     const [[, tick], twap] = await Promise.all([
       this.client.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
@@ -819,7 +884,7 @@ export class Engine {
    * (`v4Range`) right below. The divergence check itself still runs against the long TWAP, same as `priceGuard`.
    */
   private async priceGuardV4(pool: RegistryName, blockNumber: bigint, shortWindowSeconds: number): Promise<OracleRead> {
-    const e = entry(pool, baseRegistry)
+    const e = entry(pool, this.registry)
     const { twapWindowSeconds, maxTwapDeviationTicks } = this.cfg.policy.execution
     const [[, tick], oracle] = await Promise.all([
       this.client.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
@@ -840,7 +905,7 @@ export class Engine {
    * The minimum is the largest of the usual slippage minimum on the quote and both floors.
    */
   private async swapMin(p: { pool: string; tokenIn: string; fee: number; amountIn: bigint }, amountOut: bigint, blockNumber: bigint, knownTwapTick?: number): Promise<bigint> {
-    const e = entry(p.pool, baseRegistry)
+    const e = entry(p.pool, this.registry)
     const { slippageBps, maxTwapDeviationTicks } = this.cfg.policy.execution
     const depth = this.cfg.policy.depth
     const impactBps = depth ? (depth.maxImpactBpsByPool?.[p.pool] ?? depth.maxImpactBps) : null
@@ -864,7 +929,7 @@ export class Engine {
    * renews to grants that have it.
    */
   private swapExpiry(session: EngineSession, deadline: bigint): { calls: V3Call[]; expiresAt: bigint } {
-    if (grantHasSwapDeadline(session.grant)) return { calls: [deadlineCheck(deadline)], expiresAt: deadline }
+    if (grantHasSwapDeadline(session.grant, this.registry)) return { calls: [this.v3.deadlineCheck(deadline)], expiresAt: deadline }
     // validUntil 0 is no bound at all (ERC-4337 validationData): nothing settles the op but its nonce then.
     const until = session.grant.userOp.validUntil
     return { calls: [], expiresAt: until > 0 ? BigInt(until) : 2n ** 64n }
@@ -879,7 +944,7 @@ export class Engine {
    * TWAPs in one `observe`).
    */
   private async poolTwapTick(pool: RegistryName, windowSeconds: number, blockNumber: bigint): Promise<number> {
-    return twapTickAt(this.client, entry(pool, baseRegistry).address as Address, windowSeconds, blockNumber)
+    return twapTickAt(this.client, entry(pool, this.registry).address as Address, windowSeconds, blockNumber)
   }
 
   /**
@@ -889,7 +954,7 @@ export class Engine {
    */
   private async poolOracle(pool: RegistryName, longSeconds: number, shortSeconds: number, blockNumber: bigint): Promise<OracleRead> {
     try {
-      const [ticks] = await this.client.readContract({ address: entry(pool, baseRegistry).address as Address, abi: observeAbi, functionName: 'observe', args: [[longSeconds, shortSeconds, 0]], blockNumber })
+      const [ticks] = await this.client.readContract({ address: entry(pool, this.registry).address as Address, abi: observeAbi, functionName: 'observe', args: [[longSeconds, shortSeconds, 0]], blockNumber })
       return oracleFromObserve(ticks, longSeconds, shortSeconds)
     } catch {
       throw new ReasonError('EHG_TWAP_UNAVAILABLE', `${pool}: observe(${longSeconds}, ${shortSeconds}) did not answer at ${blockNumber}`)
@@ -920,7 +985,7 @@ export class Engine {
   private depthFloor(p: Extract<Proposal, { kind: 'enter_swap' }>, amountOut: bigint, tick: number): bigint | null {
     const depth = this.cfg.policy.depth
     if (!depth) return null
-    const pool = entry(p.pool, baseRegistry)
+    const pool = entry(p.pool, this.registry)
     const limit = depth.maxImpactBpsByPool?.[p.pool] ?? depth.maxImpactBps
     const floor = twapFloor(p.amountIn, p.fee, tick, pool.token0 === p.tokenIn, limit)
     if (amountOut < floor) throw new ReasonError('EHG_SWAP_IMPACT_OVER_LIMIT', `${p.pool}: quote ${amountOut} for ${p.amountIn}, under ${floor} (TWAP tick ${tick}, ${limit} bps)`)
@@ -957,13 +1022,13 @@ export class Engine {
     const budget = ap?.budgetsByPool?.[pool]
     if (!ap || bandTicks === undefined || !budget) return undefined
     const anchor = ap.anchorByPool?.[pool]
-    const e = entry(pool, baseRegistry)
+    const e = entry(pool, this.registry)
     if (!e.token0 || !e.token1 || !e.fee) return undefined
     return {
       pool,
       address: ap.address,
-      token0: address(e.token0, baseRegistry),
-      token1: address(e.token1, baseRegistry),
+      token0: address(e.token0, this.registry),
+      token1: address(e.token1, this.registry),
       feePips: e.fee,
       bandTicks,
       ...(anchor ? { anchor } : {}),
@@ -986,7 +1051,7 @@ export class Engine {
     const cfg = this.actionPolicyConfigFor(pool)
     if (!cfg) return
     this.ledger.watchActionPolicyPool(cfg)
-    const poolAddress = entry(pool, baseRegistry).address
+    const poolAddress = entry(pool, this.registry).address
     // Spec 007 T7: a position admitted on chain before this engine started (an earlier run's mint through the policy,
     // or a renewal's owner-signed Init.admit) is read from `admittedPool` once, so precheck's mirror agrees with the
     // chain after an operator restart too. Only ever adds what the chain already has.
@@ -1029,11 +1094,11 @@ export class Engine {
   private async prepareV4Swap(p: Extract<Proposal, { kind: 'enter_swap' }>, blockNumber: bigint, session: EngineSession, deadline: bigint, v4: NonNullable<ReturnType<Engine['v4PoolConfig']>>): Promise<Prepared> {
     const oracle = await this.priceGuardV4(p.pool, blockNumber, v4.twapShortSeconds)
     const range = this.v4Range(p.pool, v4, oracle)
-    const zeroForOne = entry(p.pool, baseRegistry).token0 === p.tokenIn
+    const zeroForOne = entry(p.pool, this.registry).token0 === p.tokenIn
     let amountIn = p.amountIn
     for (let step = 0; ; step++) {
-      const bound = swapBoundsInRange({ range, feePips: p.fee, zeroForOne, tokenIn: address(p.tokenIn, baseRegistry), tokenOut: address(p.tokenOut, baseRegistry), amountIn })
-      const q = await quoteExactInputSingleWithLimit(this.client, { tokenIn: address(p.tokenIn, baseRegistry), tokenOut: address(p.tokenOut, baseRegistry), fee: p.fee, amountIn, sqrtPriceLimitX96: bound.sqrtPriceLimitX96, blockNumber })
+      const bound = swapBoundsInRange({ range, feePips: p.fee, zeroForOne, tokenIn: address(p.tokenIn, this.registry), tokenOut: address(p.tokenOut, this.registry), amountIn })
+      const q = await this.v3.quoteExactInputSingleWithLimit(this.client, { tokenIn: address(p.tokenIn, this.registry), tokenOut: address(p.tokenOut, this.registry), fee: p.fee, amountIn, sqrtPriceLimitX96: bound.sqrtPriceLimitX96, blockNumber })
       if (q.filled && q.amountOut >= bound.minOut) {
         // otto/mamoru#140: never under today's TWAP floors either (the max of the minimums, the tighter limit).
         let amountOutMinimum = await this.swapMin({ ...p, amountIn }, q.amountOut, blockNumber, oracle.twapLong)
@@ -1041,7 +1106,7 @@ export class Engine {
         const expiry = this.swapExpiry(session, deadline)
         return {
           quote: { amountIn, amountOut: q.amountOut, amountOutMinimum },
-          calls: [...expiry.calls, approve(p.tokenIn, 'SwapRouter02', amountIn), exactInputSingle({ account: this.cfg.account, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn, amountOutMinimum, sqrtPriceLimitX96: bound.sqrtPriceLimitX96 })].map(exec),
+          calls: [...expiry.calls, this.v3.approve(p.tokenIn, 'SwapRouter02', amountIn), this.v3.exactInputSingle({ account: this.cfg.account, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn, amountOutMinimum, sqrtPriceLimitX96: bound.sqrtPriceLimitX96 })].map(exec),
           expiresAt: expiry.expiresAt,
         }
       }
@@ -1065,16 +1130,16 @@ export class Engine {
     if (!v4 || this.cfg.policy.actionPolicy?.contractVersion !== 2) throw new ReasonError('SESSION_MISSING', `${p.grant}: no MamoruActionPolicyV2 covers ${p.pool}; no session may call the position manager's increaseLiquidity`)
     const oracle = await this.priceGuardV4(p.pool, blockNumber, v4.twapShortSeconds)
     this.v4Range(p.pool, v4, oracle)
-    const pool = entry(p.pool, baseRegistry)
+    const pool = entry(p.pool, this.registry)
     const [admittedAt, owner, pos, [sqrtPriceX96, tick]] = await Promise.all([
       this.client.readContract({ address: v4.address, abi: mamoruActionPolicyV2Abi, functionName: 'admittedPool', args: [this.cfg.account, p.tokenId], blockNumber }),
-      this.client.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [p.tokenId], blockNumber }),
-      this.client.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [p.tokenId], blockNumber }),
+      this.client.readContract({ address: address('NonfungiblePositionManager', this.registry), abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [p.tokenId], blockNumber }),
+      this.client.readContract({ address: address('NonfungiblePositionManager', this.registry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [p.tokenId], blockNumber }),
       this.client.readContract({ address: pool.address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
     ])
     if (!isAddressEqual(admittedAt, pool.address)) throw new ReasonError('POLICY_NOT_ADMITTED', `position ${p.tokenId} is not admitted for ${p.pool} by ${v4.address}`)
     if (!isAddressEqual(owner, this.cfg.account)) throw new ReasonError('POLICY_DENIED_POSITION', `position ${p.tokenId} is no longer owned by the account (owner ${owner})`)
-    if (!isAddressEqual(pos[2], address(pool.token0!, baseRegistry)) || !isAddressEqual(pos[3], address(pool.token1!, baseRegistry)) || pos[4] !== pool.fee || pos[5] !== p.tickLower || pos[6] !== p.tickUpper) {
+    if (!isAddressEqual(pos[2], address(pool.token0!, this.registry)) || !isAddressEqual(pos[3], address(pool.token1!, this.registry)) || pos[4] !== pool.fee || pos[5] !== p.tickLower || pos[6] !== p.tickUpper) {
       throw new ReasonError('OP_DECISION_STALE', `position ${p.tokenId} is not ${p.pool} [${p.tickLower}, ${p.tickUpper}]`)
     }
     if (!(p.tickLower < tick && tick < p.tickUpper)) throw new ReasonError('OP_DECISION_STALE', `${p.pool}: tick ${tick} is not inside [${p.tickLower}, ${p.tickUpper}]`)
@@ -1082,8 +1147,8 @@ export class Engine {
     return {
       expiresAt: deadline,
       calls: [
-        approveTo(pool.token0!, v4.address, p.amount0Desired),
-        approveTo(pool.token1!, v4.address, p.amount1Desired),
+        this.v3.approveTo(pool.token0!, v4.address, p.amount0Desired),
+        this.v3.approveTo(pool.token1!, v4.address, p.amount1Desired),
         policyIncrease(v4.address, { tokenId: p.tokenId, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, amount0Min: q.amount0Min, amount1Min: q.amount1Min, deadline }),
       ].map(exec),
     }
@@ -1100,7 +1165,7 @@ export class Engine {
     const v4Swap = p.kind === 'enter_swap' && this.cfg.policy.actionPolicy?.contractVersion === 2 ? this.v4PoolConfig(p.pool) : undefined
     if (p.kind === 'enter_swap' && v4Swap) return this.prepareV4Swap(p, blockNumber, session, deadline, v4Swap)
     if (p.kind === 'enter_swap') {
-      const amountOut = await quoteExactInputSingle(this.client, { tokenIn: address(p.tokenIn, baseRegistry), tokenOut: address(p.tokenOut, baseRegistry), fee: p.fee, amountIn: p.amountIn, blockNumber })
+      const amountOut = await this.v3.quoteExactInputSingle(this.client, { tokenIn: address(p.tokenIn, this.registry), tokenOut: address(p.tokenOut, this.registry), fee: p.fee, amountIn: p.amountIn, blockNumber })
       const v4 = this.v4PoolConfig(p.pool)
       // otto/mamoru#140: every engine swap is judged at the TWAP, not just depth-sized ones — `swapMin` runs the
       // divergence check (EHG_PRICE_DIVERGENCE) and the TWAP/impact floors unconditionally, for every policy
@@ -1114,13 +1179,13 @@ export class Engine {
         // Spec 007 T3/T6: amountOutMinimum and sqrtPriceLimitX96 from the same math as MamoruActionPolicy's
         // `_range`/`_swapBounds`, at a narrower band (v4.bandTicks is already scaled by bandFactorBps) — "never
         // below today's TWAP floor (take the max of minimums, the tighter limit)".
-        const pool = entry(p.pool, baseRegistry)
+        const pool = entry(p.pool, this.registry)
         const bound = swapBoundsInRange({
           range: this.v4Range(p.pool, v4, oracle),
           feePips: p.fee,
           zeroForOne: pool.token0 === p.tokenIn,
-          tokenIn: address(p.tokenIn, baseRegistry),
-          tokenOut: address(p.tokenOut, baseRegistry),
+          tokenIn: address(p.tokenIn, this.registry),
+          tokenOut: address(p.tokenOut, this.registry),
           amountIn: p.amountIn,
         })
         if (bound.minOut > amountOutMinimum) amountOutMinimum = bound.minOut
@@ -1129,13 +1194,13 @@ export class Engine {
       const expiry = this.swapExpiry(session, deadline)
       return {
         quote: { amountIn: p.amountIn, amountOut, amountOutMinimum },
-        calls: [...expiry.calls, approve(p.tokenIn, 'SwapRouter02', p.amountIn), exactInputSingle({ account: acct, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn: p.amountIn, amountOutMinimum, sqrtPriceLimitX96 })].map(exec),
+        calls: [...expiry.calls, this.v3.approve(p.tokenIn, 'SwapRouter02', p.amountIn), this.v3.exactInputSingle({ account: acct, tokenIn: p.tokenIn, tokenOut: p.tokenOut, fee: p.fee, amountIn: p.amountIn, amountOutMinimum, sqrtPriceLimitX96 })].map(exec),
         expiresAt: expiry.expiresAt,
       }
     }
     if (p.kind === 'enter_mint') {
       await this.priceGuard(p.pool, blockNumber)
-      const pool = entry(p.pool, baseRegistry)
+      const pool = entry(p.pool, this.registry)
       const [sqrtPriceX96] = await this.client.readContract({ address: pool.address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber })
       const q = quoteMint({ sqrtPriceX96, tickLower: p.tickLower, tickUpper: p.tickUpper, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, slippageBps: slippage })
       const v4 = this.v4PoolConfig(p.pool)
@@ -1143,11 +1208,11 @@ export class Engine {
         return {
           expiresAt: deadline,
           calls: [
-            approve(pool.token0!, 'NonfungiblePositionManager', p.amount0Desired),
-            approve(pool.token1!, 'NonfungiblePositionManager', p.amount1Desired),
-            mint({ account: acct, pool: p.pool, tickLower: p.tickLower, tickUpper: p.tickUpper, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, amount0Min: q.amount0Min, amount1Min: q.amount1Min, deadline }),
-            approve(pool.token0!, 'NonfungiblePositionManager', 0n),
-            approve(pool.token1!, 'NonfungiblePositionManager', 0n),
+            this.v3.approve(pool.token0!, 'NonfungiblePositionManager', p.amount0Desired),
+            this.v3.approve(pool.token1!, 'NonfungiblePositionManager', p.amount1Desired),
+            this.v3.mint({ account: acct, pool: p.pool, tickLower: p.tickLower, tickUpper: p.tickUpper, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, amount0Min: q.amount0Min, amount1Min: q.amount1Min, deadline }),
+            this.v3.approve(pool.token0!, 'NonfungiblePositionManager', 0n),
+            this.v3.approve(pool.token1!, 'NonfungiblePositionManager', 0n),
           ].map(exec),
         }
       }
@@ -1156,8 +1221,8 @@ export class Engine {
       // is spent in full without a trailing reset — packages/scenarios/action-policy/t1-fork.ts's "engine op 2"
       // mint does the same, no zero-approves.
       const mintParams = {
-        token0: address(pool.token0!, baseRegistry),
-        token1: address(pool.token1!, baseRegistry),
+        token0: address(pool.token0!, this.registry),
+        token1: address(pool.token1!, this.registry),
         fee: pool.fee!,
         tickLower: p.tickLower,
         tickUpper: p.tickUpper,
@@ -1169,7 +1234,7 @@ export class Engine {
         deadline,
       }
       const approveToPolicy = (tokenName: RegistryName, amount: bigint): Execution => ({
-        target: address(tokenName, baseRegistry),
+        target: address(tokenName, this.registry),
         value: 0n,
         callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [v4.address, amount] }),
       })
@@ -1186,8 +1251,8 @@ export class Engine {
       // decreaseLiquidity(all or part) + collect(to the Safe) [+ burn]: nothing leaves the account.
       await this.priceGuard(p.pool, blockNumber)
       const [pos, [sqrtPriceX96]] = await Promise.all([
-        this.client.readContract({ address: address('NonfungiblePositionManager', baseRegistry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [p.tokenId], blockNumber }),
-        this.client.readContract({ address: entry(p.pool, baseRegistry).address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
+        this.client.readContract({ address: address('NonfungiblePositionManager', this.registry), abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [p.tokenId], blockNumber }),
+        this.client.readContract({ address: entry(p.pool, this.registry).address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
       ])
       const liquidity = p.kind === 'rerange' ? pos[7] : p.liquidity < pos[7] ? p.liquidity : pos[7]
       const calls: V3Call[] = []
@@ -1207,10 +1272,10 @@ export class Engine {
           if (bound.amount0Min > amount0Min) amount0Min = bound.amount0Min
           if (bound.amount1Min > amount1Min) amount1Min = bound.amount1Min
         }
-        calls.push(decreaseLiquidity({ tokenId: p.tokenId, liquidity, amount0Min, amount1Min, deadline }))
+        calls.push(this.v3.decreaseLiquidity({ tokenId: p.tokenId, liquidity, amount0Min, amount1Min, deadline }))
       }
-      calls.push(collect({ account: acct, tokenId: p.tokenId }))
-      if (p.kind === 'rerange') calls.push(burn(p.tokenId))
+      calls.push(this.v3.collect({ account: acct, tokenId: p.tokenId }))
+      if (p.kind === 'rerange') calls.push(this.v3.burn(p.tokenId))
       // Without a decrease the batch prices nothing (collect and burn to the account): late, it is harmless.
       return { calls: calls.map(exec), expiresAt: liquidity > 0n ? deadline : null }
     }
@@ -1220,14 +1285,14 @@ export class Engine {
     // idle principal instead. The volatile fees stay in the account, where a later idle sell-back (priced at the
     // TWAP, on the balance the chain shows then) or an entry uses them.
     if (p.convert) throw new ReasonError('EHG_SIM_DELTA_MISMATCH', `harvest of ${p.tokenId} asks to convert ${p.convert.amount} ${p.convert.token}: harvests only collect`)
-    const owedAt = await principalOwedBefore(this.client, [p.tokenId], this.historyFromBlock, { block: blockNumber + 1n, logIndex: 0 })
+    const owedAt = await principalOwedBefore(this.client, [p.tokenId], this.historyFromBlock, { block: blockNumber + 1n, logIndex: 0 }, this.registry)
     const owed = owedAt.get(p.tokenId) ?? [0n, 0n]
-    return { calls: [collect({ account: acct, tokenId: p.tokenId })].map(exec), owed, expiresAt: null }
+    return { calls: [this.v3.collect({ account: acct, tokenId: p.tokenId })].map(exec), owed, expiresAt: null }
   }
 
   /** The harvest's simulated Collect pays more than the principal owed on at least one side. */
   private harvestCollectsFees(p: Extract<Proposal, { kind: 'harvest' }>, prepared: Prepared, sim: Simulation): boolean {
-    const c = positionEvents(sim.logs).find((e) => e.kind === 'collect' && e.tokenId === p.tokenId)
+    const c = positionEvents(sim.logs, this.registry).find((e) => e.kind === 'collect' && e.tokenId === p.tokenId)
     if (!c) return false
     const [owed0, owed1] = prepared.owed ?? [0n, 0n]
     return c.amount0 > owed0 || c.amount1 > owed1
@@ -1244,7 +1309,7 @@ export class Engine {
       return null
     }
     if (p.kind === 'enter_mint') {
-      const pool = entry(p.pool, baseRegistry)
+      const pool = entry(p.pool, this.registry)
       if (sim.nftDelta !== 1n) return `positions changed by ${sim.nftDelta}`
       if (d(pool.token0!) > 0n || -d(pool.token0!) > p.amount0Desired) return `${pool.token0} moved ${d(pool.token0!)}`
       if (d(pool.token1!) > 0n || -d(pool.token1!) > p.amount1Desired) return `${pool.token1} moved ${d(pool.token1!)}`
@@ -1252,7 +1317,7 @@ export class Engine {
     }
     if (p.kind === 'increase_liquidity') {
       // otto/mamoru#171: no new NFT, and nothing but the pool's two tokens leaves, at most the desired amounts.
-      const pool = entry(p.pool, baseRegistry)
+      const pool = entry(p.pool, this.registry)
       if (sim.nftDelta !== 0n) return `positions changed by ${sim.nftDelta}`
       if (d(pool.token0!) > 0n || -d(pool.token0!) > p.amount0Desired) return `${pool.token0} moved ${d(pool.token0!)}`
       if (d(pool.token1!) > 0n || -d(pool.token1!) > p.amount1Desired) return `${pool.token1} moved ${d(pool.token1!)}`
@@ -1262,14 +1327,14 @@ export class Engine {
     if (p.kind === 'rerange' || p.kind === 'reduce') {
       const want = p.kind === 'rerange' ? -1n : 0n
       if (sim.nftDelta !== want) return `positions changed by ${sim.nftDelta}, intent ${want}`
-      const pool = entry(p.pool, baseRegistry)
+      const pool = entry(p.pool, this.registry)
       if (d(pool.token0!) < 0n || d(pool.token1!) < 0n) return `${pool.token0} moved ${d(pool.token0!)}, ${pool.token1} moved ${d(pool.token1!)}: a ${p.kind} only returns tokens to the account`
       return null
     }
     if (sim.nftDelta !== 0n) return `positions changed by ${sim.nftDelta}`
     // FR-UNI-005, otto/mamoru#140: a harvest only collects to the account; nothing else moves.
-    const pool = entry(p.pool, baseRegistry)
-    const collects = positionEvents(sim.logs).filter((e) => e.kind === 'collect' && e.tokenId === p.tokenId)
+    const pool = entry(p.pool, this.registry)
+    const collects = positionEvents(sim.logs, this.registry).filter((e) => e.kind === 'collect' && e.tokenId === p.tokenId)
     if (collects.length !== 1) return `${collects.length} Collect events for ${p.tokenId}`
     const c = collects[0]!
     if (d(pool.token0!) !== c.amount0) return `${pool.token0} moved ${d(pool.token0!)}, the Collect paid ${c.amount0}`

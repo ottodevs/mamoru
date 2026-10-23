@@ -13,7 +13,7 @@ import {
 } from 'viem'
 import { getUserOperationHash, toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import { ReasonError, type Address, type Hex } from '@mamoru/domain'
-import { baseRegistry, address, entry, entryPointV07Abi, moduleRegistryAbi, safe7579Abi, smartSessionAbi } from '@mamoru/registry'
+import { baseRegistry, address, entry, entryPointV07Abi, moduleRegistryAbi, safe7579Abi, smartSessionAbi, type Registry } from '@mamoru/registry'
 import { PARAM_CONDITIONS, POLICY_INCREASE_SIG, decodeGasCaps, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, mamoruInitFor, v4PoolOf, validGasCaps, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   CALLTYPE_BATCH,
@@ -196,18 +196,18 @@ export function assertV4Policies(grant: SessionGrant, second: SecondActionPolicy
  * strict as v2/v3 WITH MamoruActionPolicy (and MamoruGasPolicy) in the same session — see `assertV4Policies`, run
  * here, the one place every grant goes through on its way to an owner op (`activationCall` below included).
  */
-export function toSmartSession(grant: SessionGrant, secondPolicy?: SecondActionPolicy): SmartSessionStruct {
+export function toSmartSession(grant: SessionGrant, secondPolicy?: SecondActionPolicy, registry: Registry = baseRegistry): SmartSessionStruct {
   if (grant.requiresActionPolicy) assertV4Policies(grant, secondPolicy)
   return {
-    sessionValidator: address('OwnableValidator', baseRegistry),
+    sessionValidator: address('OwnableValidator', registry),
     sessionValidatorInitData: ownableValidatorInitData(grant.sessionKey),
     salt: grant.salt,
     userOpPolicies: [
       {
-        policy: address('TimeFramePolicy', baseRegistry),
+        policy: address('TimeFramePolicy', registry),
         initData: encodePacked(['uint128', 'uint128'], [BigInt(grant.userOp.validUntil), BigInt(grant.userOp.validAfter)]),
       },
-      { policy: address('UsageLimitPolicy', baseRegistry), initData: encodePacked(['uint128'], [BigInt(grant.userOp.usageLimit)]) },
+      { policy: address('UsageLimitPolicy', registry), initData: encodePacked(['uint128'], [BigInt(grant.userOp.usageLimit)]) },
       ...(secondPolicy?.gas ? [{ policy: secondPolicy.gas.policy, initData: secondPolicy.gas.initData }] : []),
     ],
     erc7739Policies: { allowedERC7739Content: [], erc1271Policies: [] },
@@ -215,8 +215,8 @@ export function toSmartSession(grant: SessionGrant, secondPolicy?: SecondActionP
       actionTargetSelector: a.selector,
       actionTarget: a.targetAddress,
       actionPolicies: secondPolicy
-        ? [{ policy: address('UniActionPolicy', baseRegistry), initData: uniActionInitData(a) }, { policy: secondPolicy.policy, initData: secondPolicy.initData }]
-        : [{ policy: address('UniActionPolicy', baseRegistry), initData: uniActionInitData(a) }],
+        ? [{ policy: address('UniActionPolicy', registry), initData: uniActionInitData(a) }, { policy: secondPolicy.policy, initData: secondPolicy.initData }]
+        : [{ policy: address('UniActionPolicy', registry), initData: uniActionInitData(a) }],
     })),
     permitERC4337Paymaster: grant.permitERC4337Paymaster,
   }
@@ -279,17 +279,18 @@ export function activationCall(
   grants: SessionGrant[],
   revokedPermissionIds: readonly Hex[],
   policiesFor?: (grant: SessionGrant, index: number) => SecondActionPolicy | undefined,
+  registry: Registry = baseRegistry,
 ): { to: Address; data: Hex; permissionIds: Hex[] } {
   // T7 (GPT-6 review of #97, P1 1): a v4 grant is encoded with its policies; without `policiesFor` it is refused
   // by the guard in toSmartSession, as before. v2/v3 grants get `undefined` and encode byte for byte as always.
-  const sessions = grants.map((g, i) => toSmartSession(g, policiesFor?.(g, i)))
+  const sessions = grants.map((g, i) => toSmartSession(g, policiesFor?.(g, i), registry))
   const permissionIds = sessions.map(permissionIdOf)
   const revoked = new Set(revokedPermissionIds.map((p) => p.toLowerCase()))
   for (const id of permissionIds) {
     if (revoked.has(id.toLowerCase())) throw new ReasonError('SESSION_PERMISSION_ID_REUSED', id)
   }
   return {
-    to: address('SmartSession', baseRegistry),
+    to: address('SmartSession', registry),
     data: encodeFunctionData({ abi: smartSessionAbi, functionName: 'enableSessions', args: [sessions] }),
     permissionIds,
   }
@@ -307,23 +308,23 @@ export const SELF_ATTESTED_POLICIES = ['TimeFramePolicy', 'UsageLimitPolicy'] as
  * Rhinestone attester and itself (threshold 1) and attests the published
  * policies above, with empty data and no module types.
  */
-export function registryTrustCalls(account: Address): { to: Address; value: bigint; data: Hex }[] {
-  const attesters = [address('RhinestoneAttester', baseRegistry), account].sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1))
+export function registryTrustCalls(account: Address, registry: Registry = baseRegistry): { to: Address; value: bigint; data: Hex }[] {
+  const attesters = [address('RhinestoneAttester', registry), account].sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1))
   return [
     {
-      to: address('ModuleRegistry', baseRegistry),
+      to: address('ModuleRegistry', registry),
       value: 0n,
       data: encodeFunctionData({ abi: moduleRegistryAbi, functionName: 'trustAttesters', args: [1, attesters] }),
     },
     {
-      to: address('ModuleRegistry', baseRegistry),
+      to: address('ModuleRegistry', registry),
       value: 0n,
       data: encodeFunctionData({
         abi: moduleRegistryAbi,
         functionName: 'attest',
         args: [
           ATTESTATION_SCHEMA_UID,
-          SELF_ATTESTED_POLICIES.map((p) => ({ moduleAddress: address(p, baseRegistry), expirationTime: 0, data: '0x' as Hex, moduleTypes: [] })),
+          SELF_ATTESTED_POLICIES.map((p) => ({ moduleAddress: address(p, registry), expirationTime: 0, data: '0x' as Hex, moduleTypes: [] })),
         ],
       }),
     },
@@ -365,9 +366,9 @@ export function selfRevokeAttestationCall(modules: readonly Address[]): { to: Ad
   }
 }
 
-export function revocationCalls(permissionIds: Hex[]): { to: Address; value: bigint; data: Hex }[] {
+export function revocationCalls(permissionIds: Hex[], registry: Registry = baseRegistry): { to: Address; value: bigint; data: Hex }[] {
   return permissionIds.map((id) => ({
-    to: address('SmartSession', baseRegistry),
+    to: address('SmartSession', registry),
     value: 0n,
     data: encodeFunctionData({ abi: smartSessionAbi, functionName: 'removeSession', args: [id] }),
   }))
@@ -420,8 +421,8 @@ export function draftUserOp(sender: Address, nonce: bigint, callData: Hex, gas: 
   }
 }
 
-export function userOpHash(userOp: UserOperation<'0.7'>, chainId: number): Hex {
-  return getUserOperationHash({ userOperation: userOp, entryPointAddress: address('EntryPointV07', baseRegistry), entryPointVersion: '0.7', chainId })
+export function userOpHash(userOp: UserOperation<'0.7'>, chainId: number, registry: Registry = baseRegistry): Hex {
+  return getUserOperationHash({ userOperation: userOp, entryPointAddress: address('EntryPointV07', registry), entryPointVersion: '0.7', chainId })
 }
 
 /** OwnableValidator checks an EIP-191 signature of the userOp hash by the session key. */
@@ -438,8 +439,9 @@ export async function signSessionUserOp(
   chainId: number,
   permissionId: Hex,
   sessionKey: LocalAccount,
+  registry: Registry = baseRegistry,
 ): Promise<UserOperation<'0.7'>> {
-  const hash = userOpHash({ ...userOp, signature: '0x' }, chainId)
+  const hash = userOpHash({ ...userOp, signature: '0x' }, chainId, registry)
   return { ...userOp, signature: useModeSignature(permissionId, await sessionKeySignature(sessionKey, hash)) }
 }
 

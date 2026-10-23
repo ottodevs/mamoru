@@ -1,6 +1,6 @@
 import { concat, decodeFunctionData, encodeFunctionData, encodePacked, getContractAddress, keccak256, pad } from 'viem'
 import type { Address, Hex } from '@mamoru/domain'
-import { baseRegistry, address, safeProxyFactoryAbi } from '@mamoru/registry'
+import { baseRegistry, address, safeProxyFactoryAbi, type Registry } from '@mamoru/registry'
 import { createProxyCall, safeInitializer, setupDelegate, type SafeSetup, type WebAuthnSigner } from '../safe/index.ts'
 
 /**
@@ -15,11 +15,11 @@ export const SAFE_PROXY_141_CREATION_CODE: Hex =
  * with no sessions. A passkey owner (SafeWebAuthnSharedSigner) is configured in
  * the same setup, so the address commits to its x, y and verifiers.
  */
-export function accountSetup(owners: Address[], saltNonce: bigint, webauthn: WebAuthnSigner | null): SafeSetup {
+export function accountSetup(owners: Address[], saltNonce: bigint, webauthn: WebAuthnSigner | null, registry: Registry = baseRegistry): SafeSetup {
   if (owners.length === 0) throw new Error('at least one owner')
-  const setup: SafeSetup = { owners, threshold: 1n, validators: [{ module: address('SmartSession', baseRegistry), initData: '0x' }], saltNonce }
+  const setup: SafeSetup = { owners, threshold: 1n, validators: [{ module: address('SmartSession', registry), initData: '0x' }], saltNonce }
   if (webauthn) setup.webauthn = { ...webauthn }
-  setupDelegate(setup)
+  setupDelegate(setup, registry)
   return setup
 }
 
@@ -27,8 +27,8 @@ export function accountSetup(owners: Address[], saltNonce: bigint, webauthn: Web
  * Address that SafeProxyFactory_141.createProxyWithNonce deploys for this
  * setup, read from the same call createProxyCall builds.
  */
-export function counterfactualAddress(setup: SafeSetup): Address {
-  const call = createProxyCall(setup)
+export function counterfactualAddress(setup: SafeSetup, registry: Registry = baseRegistry): Address {
+  const call = createProxyCall(setup, registry)
   const { args } = decodeFunctionData({ abi: safeProxyFactoryAbi, data: call.data })
   const [singleton, initializer, saltNonce] = args
   const salt = keccak256(encodePacked(['bytes32', 'uint256'], [keccak256(initializer), saltNonce]))

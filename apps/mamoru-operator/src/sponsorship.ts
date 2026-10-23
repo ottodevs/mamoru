@@ -42,6 +42,15 @@ export type SponsorPolicy = {
 /** activationWeiPerDay 0.02 ETH: ~30 activations a day at the live policy's 0.0003 ETH reserve plus margin and gas. */
 export const DEFAULT_SPONSOR: SponsorPolicy = { perAccount: 6, stopsPerAccount: 3, weiPerDay: 10_000_000_000_000_000n, reserveBps: 2_500, activationWeiPerDay: 20_000_000_000_000_000n }
 
+/**
+ * otto/mamoru#61: the sponsorship of an operator writing to Monad. The wei budgets above are Base ETH; on Monad they are
+ * MON, at about 100 gwei a gas and charged on the gas LIMIT: one activation reserves its deploy and exec gas at their
+ * full limits (about 1.8 MON) plus the Safe's 2 MON gas reserve, an owner transfer or stop about 0.4 MON. The same
+ * counts per account; the daily budgets sized so a few accounts a day can start and leave. Owner-set values, to be
+ * confirmed before real funds: nothing else in the operator reads them.
+ */
+export const MONAD_SPONSOR: SponsorPolicy = { perAccount: 6, stopsPerAccount: 3, weiPerDay: 20_000_000_000_000_000_000n, reserveBps: 2_500, activationWeiPerDay: 60_000_000_000_000_000_000n }
+
 /** `opId`: on an `activation` entry, the op it was reserved for (its retries reuse it). */
 export type SponsorEntry = { at: string; wei: string; kind: SponsorEntryKind; opId?: string }
 

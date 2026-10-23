@@ -30,6 +30,7 @@ import {
   nonfungiblePositionManagerAbi,
   uniswapV3FactoryAbi,
   uniswapV3PoolAbi,
+  type Registry,
   type RegistryName,
 } from '@mamoru/registry'
 
@@ -98,6 +99,11 @@ export type ObserveInput = {
   /** Shared by the accounts of one operator: the pool state of a block is read once. */
   poolCache?: PoolStateCache
   /**
+   * otto/mamoru#61: the registry of the chain observed: tokens, pools, the position manager, the EntryPoint and the
+   * factory come from it. Absent: Base's, as every observation before Monad.
+   */
+  registry?: Registry
+  /**
    * Reads of the caller that belong to this observation: added to the first batch, pinned to its block, at no
    * extra request. The function it returns runs after the final block-hash check and before `sessions` is
    * asked: an observation that fails applies nothing.
@@ -162,8 +168,16 @@ export function createDeployedChecker(): (client: PublicClient, account: Address
  */
 export const isDeployed = createDeployedChecker()
 
-const TOKENS = baseRegistry.entries.filter((e) => e.kind === 'token').map((e) => e.name)
-const POOLS = baseRegistry.entries.filter((e) => e.kind === 'pool').map((e) => e.name)
+const namesOf = new WeakMap<Registry, { tokens: RegistryName[]; pools: RegistryName[] }>()
+/** The token and pool names of `registry`, in registry order (Base's are what `observe` always read). */
+function registryNames(registry: Registry): { tokens: RegistryName[]; pools: RegistryName[] } {
+  let n = namesOf.get(registry)
+  if (!n) {
+    n = { tokens: registry.entries.filter((e) => e.kind === 'token').map((e) => e.name), pools: registry.entries.filter((e) => e.kind === 'pool').map((e) => e.name) }
+    namesOf.set(registry, n)
+  }
+  return n
+}
 /** Multicall3 of the registry in use, or null: reads are then made one by one. */
 export const MULTICALL3 = multicall3Of(baseRegistry)
 /** Position ids asked for in the first round, before the position count is known; the ones past the count fail and are ignored. */
@@ -206,20 +220,22 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const [block, safe] = await Promise.all([client.getBlock({ blockTag: 'latest' }), client.getBlock({ blockTag: 'safe' })])
   const blockNumber = block.number
   const acct = input.account
-  const npm = address('NonfungiblePositionManager', baseRegistry)
-  const multicall3 = input.multicall3 === undefined ? MULTICALL3 : input.multicall3
+  const reg = input.registry ?? baseRegistry
+  const { tokens: TOKENS, pools: POOLS } = registryNames(reg)
+  const npm = address('NonfungiblePositionManager', reg)
+  const multicall3 = input.multicall3 === undefined ? (input.registry ? multicall3Of(reg) : MULTICALL3) : input.multicall3
 
   // Round 1: the account's balances, nonce and position ids, and the pool state unless another account read it at this block.
   const first = new Batch(client, multicall3, blockNumber)
   const native = first.add(balanceRead(client, multicall3, acct, blockNumber))
-  const nonce = first.add(contractRead(client, { address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'getNonce', args: [acct, input.nonceKey], blockNumber }))
+  const nonce = first.add(contractRead(client, { address: address('EntryPointV07', reg), abi: entryPointV07Abi, functionName: 'getNonce', args: [acct, input.nonceKey], blockNumber }))
   const nftCount = first.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [acct], blockNumber }))
-  const balances = TOKENS.map((t) => first.add(contractRead(client, { address: address(t, baseRegistry), abi: erc20Abi, functionName: 'balanceOf', args: [acct], blockNumber })))
-  const idsOf = tokenIdReads(client, multicall3, first, acct, blockNumber)
+  const balances = TOKENS.map((t) => first.add(contractRead(client, { address: address(t, reg), abi: erc20Abi, functionName: 'balanceOf', args: [acct], blockNumber })))
+  const idsOf = tokenIdReads(client, multicall3, first, acct, blockNumber, npm)
   const poolKey = `${chainId}:${blockNumber}:${block.hash}:${input.twapWindowSeconds}`
   const shared = input.poolCache?.get(poolKey)
-  const own = shared ? null : POOLS.map((p) => poolReads(first, client, p, blockNumber, input.twapWindowSeconds))
-  const priceSlot0 = POOLS.includes(input.ethPricePool) ? null : first.add(contractRead(client, { address: address(input.ethPricePool, baseRegistry), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }))
+  const own = shared ? null : POOLS.map((p) => poolReads(first, client, p, blockNumber, input.twapWindowSeconds, reg))
+  const priceSlot0 = POOLS.includes(input.ethPricePool) ? null : first.add(contractRead(client, { address: address(input.ethPricePool, reg), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }))
   const afterFirst = input.firstBatch?.(first, blockNumber)
   const round = Promise.all([isDeployed(client, acct, blockNumber, safe.number), first.run()])
   const ownPools = own ? round.then(() => Promise.all(own.map((finish) => finish()))) : null
@@ -233,7 +249,7 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const [nativeBalance, accountNonce, tokenBalances] = await Promise.all([native.need(), nonce.need(), Promise.all(balances.map((b) => b.need()))])
   const readAlone = async () => {
     const batch = new Batch(client, multicall3, blockNumber)
-    const finish = POOLS.map((p) => poolReads(batch, client, p, blockNumber, input.twapWindowSeconds))
+    const finish = POOLS.map((p) => poolReads(batch, client, p, blockNumber, input.twapWindowSeconds, reg))
     await batch.run()
     return Promise.all(finish.map((f) => f()))
   }
@@ -250,9 +266,9 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
       throw e instanceof ReasonError ? e : new ReasonError('OBS_RPC_UNAVAILABLE', `logs: ${(e as { details?: string }).details ?? e.message.split('\n')[0]}`)
     })
   const cursorRead = input.historyCursor
-    ? await logs(readPositionHistoryFrom(client, input.historyCursor, input.allowedTokenIds, input.historyFromBlock, blockNumber, safe.number, safe.hash))
+    ? await logs(readPositionHistoryFrom(client, input.historyCursor, input.allowedTokenIds, input.historyFromBlock, blockNumber, safe.number, safe.hash, reg))
     : null
-  const history = cursorRead ? cursorRead.events : await logs(readPositionHistory(client, input.allowedTokenIds, input.historyFromBlock, blockNumber))
+  const history = cursorRead ? cursorRead.events : await logs(readPositionHistory(client, input.allowedTokenIds, input.historyFromBlock, blockNumber, reg))
   const owed = applyPrincipal(new Map(), history)
   const positions = await readPositions(client, multicall3, acct, tokenIds, blockNumber, input, owed, pools)
   const ethPricePool = pools.find((p) => p.name === input.ethPricePool)
@@ -281,11 +297,14 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
     balances: Object.fromEntries(TOKENS.map((t, i) => [t, tokenBalances[i]!])),
     positions,
     pools,
-    ethPrice: { pool: input.ethPricePool, sqrtPriceX96: ethSqrtPriceX96, token0: entry(input.ethPricePool, baseRegistry).token0! },
+    ethPrice: { pool: input.ethPricePool, sqrtPriceX96: ethSqrtPriceX96, token0: entry(input.ethPricePool, reg).token0! },
     gas: { maxFeePerGas: baseFee * 2n + input.maxPriorityFeePerGas, opGasUnits: input.opGasUnits },
     deposits,
     intents: input.intents,
     slot: input.slot,
+    // otto/mamoru#61: decide's gates compare pool identities with the observation's registry; a Base observation keeps
+    // leaving it out (the default), so its shape is the one it always had.
+    ...(reg !== baseRegistry ? { registry: reg } : {}),
   }
 }
 
@@ -325,7 +344,8 @@ async function readPositions(
   if (tokenIds.length === 0) return []
   const oneByOne = () => Promise.all(tokenIds.map((id) => readPosition(client, acct, id, blockNumber, input, principal)))
   if (multicall3 === null) return oneByOne()
-  const npm = address('NonfungiblePositionManager', baseRegistry)
+  const reg = input.registry ?? baseRegistry
+  const npm = address('NonfungiblePositionManager', reg)
   const calls = [
     ...tokenIds.map((tokenId) => ({ data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId] }) })),
     ...tokenIds.map((tokenId) => ({
@@ -355,22 +375,22 @@ async function readPositions(
   // A registry pool's factory address was read in round 1 for the same token pair and fee; anything else asks the factory.
   const known = (token0: Address, token1: Address, fee: number): Address | null => {
     const hit = pools.find((pool) => {
-      const [a, b] = [address(pool.token0, baseRegistry), address(pool.token1, baseRegistry)]
+      const [a, b] = [address(pool.token0, reg), address(pool.token1, reg)]
       return pool.fee === fee && ((isAddressEqual(a, token0) && isAddressEqual(b, token1)) || (isAddressEqual(a, token1) && isAddressEqual(b, token0)))
     })
     return hit && hit.identity.factoryPool !== zeroAddress ? hit.identity.factoryPool : null
   }
   const asked = new Batch(client, multicall3, blockNumber)
-  const poolAddrs = rows.map(({ p }) => known(p[2], p[3], p[4]) ?? asked.add(contractRead(client, { address: address('UniswapV3Factory', baseRegistry), abi: uniswapV3FactoryAbi, functionName: 'getPool', args: [p[2], p[3], p[4]], blockNumber })))
+  const poolAddrs = rows.map(({ p }) => known(p[2], p[3], p[4]) ?? asked.add(contractRead(client, { address: address('UniswapV3Factory', reg), abi: uniswapV3FactoryAbi, functionName: 'getPool', args: [p[2], p[3], p[4]], blockNumber })))
   if (asked.size > 0) await asked.run()
   return Promise.all(
     rows.map(async ({ tokenId, p, collectable }, i) => {
       const at = poolAddrs[i]!
-      const name = nameOf(typeof at === 'string' ? at : await at.need(), baseRegistry)
+      const name = nameOf(typeof at === 'string' ? at : await at.need(), reg)
       const owed = principal.get(tokenId) ?? [0n, 0n]
       return {
         tokenId,
-        pool: name && entry(name, baseRegistry).kind === 'pool' ? name : null,
+        pool: name && entry(name, reg).kind === 'pool' ? name : null,
         tickLower: p[5],
         tickUpper: p[6],
         liquidity: p[7],
@@ -386,11 +406,12 @@ async function readPositions(
 
 /** One position with unbatched reads: the path without Multicall3, and the one that reports a failing read. */
 async function readPosition(client: PublicClient, acct: Address, tokenId: bigint, blockNumber: bigint, input: ObserveInput, principal: ReadonlyMap<bigint, Pair>): Promise<PositionObs> {
-  const npm = address('NonfungiblePositionManager', baseRegistry)
+  const reg = input.registry ?? baseRegistry
+  const npm = address('NonfungiblePositionManager', reg)
   const p = await client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [tokenId], blockNumber })
-  const poolAddr = await client.readContract({ address: address('UniswapV3Factory', baseRegistry), abi: uniswapV3FactoryAbi, functionName: 'getPool', args: [p[2], p[3], p[4]], blockNumber })
-  const name = nameOf(poolAddr, baseRegistry)
-  const pool = name && entry(name, baseRegistry).kind === 'pool' ? name : null
+  const poolAddr = await client.readContract({ address: address('UniswapV3Factory', reg), abi: uniswapV3FactoryAbi, functionName: 'getPool', args: [p[2], p[3], p[4]], blockNumber })
+  const name = nameOf(poolAddr, reg)
+  const pool = name && entry(name, reg).kind === 'pool' ? name : null
   const collectData = encodeFunctionData({
     abi: nonfungiblePositionManagerAbi,
     functionName: 'collect',
@@ -414,8 +435,8 @@ async function readPosition(client: PublicClient, acct: Address, tokenId: bigint
 }
 
 /** Adds the reads of one pool to `batch`; the returned function builds the pool once the batch ran. */
-function poolReads(batch: Batch, client: PublicClient, name: RegistryName, blockNumber: bigint, windowSeconds: number): () => Promise<PoolObs> {
-  const e = entry(name, baseRegistry)
+function poolReads(batch: Batch, client: PublicClient, name: RegistryName, blockNumber: bigint, windowSeconds: number, registry: Registry): () => Promise<PoolObs> {
+  const e = entry(name, registry)
   const at = { address: e.address, abi: uniswapV3PoolAbi, blockNumber } as const
   const slot0 = batch.add(contractRead(client, { ...at, functionName: 'slot0' }))
   const liquidity = batch.add(contractRead(client, { ...at, functionName: 'liquidity' }))
@@ -424,7 +445,7 @@ function poolReads(batch: Batch, client: PublicClient, name: RegistryName, block
   const fee = batch.add(contractRead(client, { ...at, functionName: 'fee' }))
   const tickSpacing = batch.add(contractRead(client, { ...at, functionName: 'tickSpacing' }))
   const factoryPool = batch.add(
-    contractRead(client, { address: address('UniswapV3Factory', baseRegistry), abi: uniswapV3FactoryAbi, functionName: 'getPool', args: [address(e.token0!, baseRegistry), address(e.token1!, baseRegistry), e.fee!], blockNumber }),
+    contractRead(client, { address: address('UniswapV3Factory', registry), abi: uniswapV3FactoryAbi, functionName: 'getPool', args: [address(e.token0!, registry), address(e.token1!, registry), e.fee!], blockNumber }),
   )
   // FR-UNI-009: `observe` may fail when the pool cannot answer for the window; the TWAP is then null.
   const cumulatives = batch.add(contractRead(client, { address: e.address, abi: observeAbi, functionName: 'observe', args: [[windowSeconds, 0]], blockNumber }))
@@ -470,9 +491,10 @@ function twapTick(cumulatives: readonly bigint[] | undefined, windowSeconds: num
 
 async function readDeposits(client: PublicClient, acct: Address, input: ObserveInput, blockNumber: bigint, safeNumber: bigint): Promise<DepositObs[]> {
   if (input.depositsAfter >= blockNumber) return []
-  const logs = await client.getLogs({ address: address(input.savingsAsset, baseRegistry), event: transferEvent, args: { to: acct }, fromBlock: input.depositsAfter + 1n, toBlock: blockNumber })
-  const pools = new Set(POOLS.map((p) => address(p, baseRegistry).toLowerCase()))
-  const npm = address('NonfungiblePositionManager', baseRegistry).toLowerCase()
+  const reg = input.registry ?? baseRegistry
+  const logs = await client.getLogs({ address: address(input.savingsAsset, reg), event: transferEvent, args: { to: acct }, fromBlock: input.depositsAfter + 1n, toBlock: blockNumber })
+  const pools = new Set(registryNames(reg).pools.map((p) => address(p, reg).toLowerCase()))
+  const npm = address('NonfungiblePositionManager', reg).toLowerCase()
   return logs
     .filter((l) => !pools.has(l.args.from!.toLowerCase()) && l.args.from!.toLowerCase() !== npm)
     .map((l) => ({ token: input.savingsAsset, amount: l.args.value!, block: l.blockNumber!, txHash: l.transactionHash!, logIndex: l.logIndex!, safe: l.blockNumber! <= safeNumber }))
@@ -486,12 +508,12 @@ const POSITION_EVENT_TOPICS = positionEventsAbi.map((e) => toEventSelector(e))
  * FR-PRJ-003: every canonical DecreaseLiquidity and Collect of these
  * tokenIds in [fromBlock, toBlock], engine or not, in chain order.
  */
-export async function readPositionHistory(client: PublicClient, tokenIds: readonly bigint[], fromBlock: bigint, toBlock: bigint): Promise<ChainPositionEvent[]> {
+export async function readPositionHistory(client: PublicClient, tokenIds: readonly bigint[], fromBlock: bigint, toBlock: bigint, registry: Registry = baseRegistry): Promise<ChainPositionEvent[]> {
   if (tokenIds.length === 0 || fromBlock > toBlock) return []
   // Both events carry the tokenId as their first indexed topic: one eth_getLogs serves the two.
   const raw = await client.request({
     method: 'eth_getLogs',
-    params: [{ address: address('NonfungiblePositionManager', baseRegistry), topics: [POSITION_EVENT_TOPICS, tokenIds.map((id) => numberToHex(id, { size: 32 }))], fromBlock: numberToHex(fromBlock), toBlock: numberToHex(toBlock) }],
+    params: [{ address: address('NonfungiblePositionManager', registry), topics: [POSITION_EVENT_TOPICS, tokenIds.map((id) => numberToHex(id, { size: 32 }))], fromBlock: numberToHex(fromBlock), toBlock: numberToHex(toBlock) }],
   })
   const events = parseEventLogs({ abi: positionEventsAbi, logs: raw.map((l) => formatLog(l)) }).map((l) => ({
     kind: l.eventName === 'Collect' ? ('collect' as const) : ('decrease' as const),
@@ -533,12 +555,14 @@ export async function readPositionHistoryFrom(
   safeBlock: bigint,
   /** Hash of `safeBlock`, when the caller already read that block. */
   safeHash?: Hex,
+  /** otto/mamoru#61: the registry whose position manager is read; absent: Base's. */
+  registry: Registry = baseRegistry,
 ): Promise<{ events: ChainPositionEvent[]; next: HistoryCursor }> {
   const next: HistoryCursor = { ...cursor, ids: new Set(cursor.ids), events: [...cursor.events] }
   if (tokenIds.length === 0 || fromBlock > toBlock) return { events: [], next }
   if (next.fromBlock !== fromBlock) resetCursor(next, fromBlock)
   // A head behind the cursor (lagging node or rollback): its blocks cannot be checked here, so read in full and keep the cursor.
-  if (next.through > toBlock) return { events: await readPositionHistory(client, tokenIds, fromBlock, toBlock), next: cursor }
+  if (next.through > toBlock) return { events: await readPositionHistory(client, tokenIds, fromBlock, toBlock, registry), next: cursor }
   // The caller's read of the safe block answers for that height without another request.
   const hashAt = async (n: bigint) => (safeHash && n === safeBlock ? safeHash : (await client.getBlock({ blockNumber: n })).hash)
   if (next.hash && (await hashAt(next.through)) !== next.hash) resetCursor(next, fromBlock)
@@ -546,7 +570,7 @@ export async function readPositionHistoryFrom(
   const fresh = tokenIds.filter((id) => !next.ids.has(String(id)))
   if (fresh.length > 0) {
     if (next.through >= fromBlock && next.hash) {
-      const backfill = await historyEndingAt(client, fresh, fromBlock, next.through, next.hash)
+      const backfill = await historyEndingAt(client, fresh, fromBlock, next.through, next.hash, registry)
       if (backfill) next.events.push(...backfill)
       // The cursor block changed while its history was being read: start over, for every tokenId.
       else resetCursor(next, fromBlock)
@@ -557,7 +581,7 @@ export async function readPositionHistoryFrom(
   if (stable > next.through) {
     // The cursor only moves to a block whose hash is the same before the read and after it.
     const before = await hashAt(stable)
-    const events = await historyEndingAt(client, [...next.ids].map(BigInt), next.through + 1n, stable, before)
+    const events = await historyEndingAt(client, [...next.ids].map(BigInt), next.through + 1n, stable, before, registry)
     if (events) {
       next.events.push(...events)
       next.through = stable
@@ -567,7 +591,7 @@ export async function readPositionHistoryFrom(
   // The tail starts after the cursor, never below it: a safe head that moved back cannot read a block twice.
   // It ends at `toBlock`, whose hash the caller checks after this read (observe: the final block check).
   const tailFrom = next.through + 1n
-  const tail = tailFrom <= toBlock ? await readPositionHistory(client, tokenIds, tailFrom, toBlock) : []
+  const tail = tailFrom <= toBlock ? await readPositionHistory(client, tokenIds, tailFrom, toBlock, registry) : []
   const wanted = new Set(tokenIds.map(String))
   return { events: [...next.events.filter((e) => wanted.has(String(e.tokenId)) && e.blockNumber <= toBlock), ...tail].sort(byChainOrder), next }
 }
@@ -579,16 +603,16 @@ export async function readPositionHistoryFrom(
  * reads from one provider is accepted only when an independent provider witnesses the hash of its last block,
  * so the logs and this block read cannot both come from one provider that is behind or on another fork.
  */
-async function historyEndingAt(client: PublicClient, tokenIds: readonly bigint[], fromBlock: bigint, toBlock: bigint, expected: Hex): Promise<ChainPositionEvent[] | null> {
-  const events = await readPositionHistory(client, tokenIds, fromBlock, toBlock)
+async function historyEndingAt(client: PublicClient, tokenIds: readonly bigint[], fromBlock: bigint, toBlock: bigint, expected: Hex, registry: Registry = baseRegistry): Promise<ChainPositionEvent[] | null> {
+  const events = await readPositionHistory(client, tokenIds, fromBlock, toBlock, registry)
   const after = (await client.getBlock({ blockNumber: toBlock })).hash
   return after === expected ? events : null
 }
 
 /** Principal owed per tokenId just before (block, logIndex): the fold of the canonical history up to there. */
-export async function principalOwedBefore(client: PublicClient, tokenIds: readonly bigint[], fromBlock: bigint, at: { block: bigint; logIndex: number }): Promise<Map<bigint, Pair>> {
+export async function principalOwedBefore(client: PublicClient, tokenIds: readonly bigint[], fromBlock: bigint, at: { block: bigint; logIndex: number }, registry: Registry = baseRegistry): Promise<Map<bigint, Pair>> {
   // Nothing at or after (block, 0) is used: do not ask for a block that may not exist yet.
-  const history = await readPositionHistory(client, tokenIds, fromBlock, at.logIndex === 0 ? at.block - 1n : at.block)
+  const history = await readPositionHistory(client, tokenIds, fromBlock, at.logIndex === 0 ? at.block - 1n : at.block, registry)
   return applyPrincipal(new Map(), history.filter((e) => e.blockNumber < at.block || e.logIndex < at.logIndex))
 }
 
@@ -630,13 +654,14 @@ export type Simulation = {
  * rounds of balance reads, and returns the deltas per registry token and
  * the change in the account's position count.
  */
-export async function simulateFromEntryPoint(client: PublicClient, account: Address, callData: Hex, blockNumber: bigint): Promise<Simulation> {
-  const npm = address('NonfungiblePositionManager', baseRegistry)
+export async function simulateFromEntryPoint(client: PublicClient, account: Address, callData: Hex, blockNumber: bigint, registry: Registry = baseRegistry): Promise<Simulation> {
+  const npm = address('NonfungiblePositionManager', registry)
+  const TOKENS = registryNames(registry).tokens
   const reads: SimCall[] = [
-    ...TOKENS.map((t) => ({ to: address(t, baseRegistry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [account] }) })),
+    ...TOKENS.map((t) => ({ to: address(t, registry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [account] }) })),
     { to: npm, data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [account] }) },
   ]
-  const res = await simulateCalls(client, [...reads, { from: address('EntryPointV07', baseRegistry), to: account, data: callData }, ...reads], blockNumber)
+  const res = await simulateCalls(client, [...reads, { from: address('EntryPointV07', registry), to: account, data: callData }, ...reads], blockNumber)
   const n = reads.length
   const exec = res[n]!
   const word = (r: SimCallResult) => BigInt(r.returnData === '0x' ? 0 : r.returnData)
@@ -677,8 +702,8 @@ const USER_OPERATION_EVENT = toEventSelector(userOperationEvent)
  * closed by its UserOperationEvent. The logs of the op whose event sits at
  * `eventLogIndex` are the ones after the previous boundary and before it.
  */
-export function userOpLogs<L extends Log>(txLogs: readonly L[], eventLogIndex: number): L[] {
-  const ep = address('EntryPointV07', baseRegistry)
+export function userOpLogs<L extends Log>(txLogs: readonly L[], eventLogIndex: number, registry: Registry = baseRegistry): L[] {
+  const ep = address('EntryPointV07', registry)
   const ordered = [...txLogs].sort((a, b) => a.logIndex! - b.logIndex!)
   const boundary = (topic: Hex) => (l: L) => isAddressEqual(l.address, ep) && l.topics[0] === topic
   const event = ordered.find((l) => l.logIndex === eventLogIndex)
@@ -690,8 +715,8 @@ export function userOpLogs<L extends Log>(txLogs: readonly L[], eventLogIndex: n
 }
 
 /** FR-AA-004 and FR-ENG-008: the UserOperationEvent of a hash, read from the RPC, with the logs of that userOp only. */
-export async function readUserOpEvent(client: PublicClient, userOpHash: Hex, fromBlock: bigint): Promise<UserOpEventRead | null> {
-  const logs = await client.getLogs({ address: address('EntryPointV07', baseRegistry), event: userOperationEvent, args: { userOpHash }, fromBlock, toBlock: 'latest' })
+export async function readUserOpEvent(client: PublicClient, userOpHash: Hex, fromBlock: bigint, registry: Registry = baseRegistry): Promise<UserOpEventRead | null> {
+  const logs = await client.getLogs({ address: address('EntryPointV07', registry), event: userOperationEvent, args: { userOpHash }, fromBlock, toBlock: 'latest' })
   if (logs.length > 1) throw new Error(`${logs.length} UserOperationEvents for ${userOpHash}`)
   const ev = logs[0]
   if (!ev) return null
@@ -706,7 +731,7 @@ export async function readUserOpEvent(client: PublicClient, userOpHash: Hex, fro
     logIndex: ev.logIndex!,
     success: ev.args.success!,
     actualGasCost: ev.args.actualGasCost!,
-    logs: userOpLogs(receipt.logs, ev.logIndex!),
+    logs: userOpLogs(receipt.logs, ev.logIndex!, registry),
   }
 }
 

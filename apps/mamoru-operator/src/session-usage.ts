@@ -2,7 +2,7 @@
 // records: a userOp sent with the session key by anyone (another bundler, a leaked key) counts here too.
 import { encodeAbiParameters, encodePacked, hexToBigInt, keccak256, parseAbi, toHex, type Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { baseRegistry, address } from '@mamoru/registry'
+import { baseRegistry, address, type Registry } from '@mamoru/registry'
 import type { SessionGrant } from '@mamoru/policy'
 
 const USAGE_LIMIT_ABI = parseAbi(['function usageLimitConfigs(bytes32 id, address multiplexer, address account) view returns (uint128 limit, uint128 used)'])
@@ -44,20 +44,20 @@ export function cumulativeLimitSlot(configId: Hex, multiplexer: Address, account
  * whose read fails, or whose limit on chain is not the one it was signed with, is left out (the caller falls back
  * on its own count).
  */
-export async function readChainUsage(client: Reader, account: Address, grants: readonly { permissionId: Hex; grant: SessionGrant }[]): Promise<Map<string, ChainUsage>> {
-  const multiplexer = address('SmartSession', baseRegistry)
+export async function readChainUsage(client: Reader, account: Address, grants: readonly { permissionId: Hex; grant: SessionGrant }[], registry: Registry = baseRegistry): Promise<Map<string, ChainUsage>> {
+  const multiplexer = address('SmartSession', registry)
   const out = new Map<string, ChainUsage>()
   await Promise.all(
     grants.map(async (g) => {
       try {
-        const [limit, used] = await client.readContract({ address: address('UsageLimitPolicy', baseRegistry), abi: USAGE_LIMIT_ABI, functionName: 'usageLimitConfigs', args: [userOpConfigId(account, g.permissionId), multiplexer, account] })
+        const [limit, used] = await client.readContract({ address: address('UsageLimitPolicy', registry), abi: USAGE_LIMIT_ABI, functionName: 'usageLimitConfigs', args: [userOpConfigId(account, g.permissionId), multiplexer, account] })
         if (limit !== BigInt(g.grant.userOp.usageLimit)) return
         let spentBps: number | null = null
         for (const a of g.grant.actions) {
           for (const [ri, rule] of a.params.entries()) {
             if (rule.cumulativeLimit === undefined) continue
             const slot = cumulativeLimitSlot(actionConfigId(account, g.permissionId, a.targetAddress, a.selector), multiplexer, account, ri)
-            const [l, u] = await Promise.all([client.getStorageAt({ address: address('UniActionPolicy', baseRegistry), slot: toHex(slot, { size: 32 }) }), client.getStorageAt({ address: address('UniActionPolicy', baseRegistry), slot: toHex(slot + 1n, { size: 32 }) })])
+            const [l, u] = await Promise.all([client.getStorageAt({ address: address('UniActionPolicy', registry), slot: toHex(slot, { size: 32 }) }), client.getStorageAt({ address: address('UniActionPolicy', registry), slot: toHex(slot + 1n, { size: 32 }) })])
             if (!l || !u || hexToBigInt(l) !== rule.cumulativeLimit) return
             const bps = rule.cumulativeLimit === 0n ? 10_000 : Number((hexToBigInt(u) * 10_000n) / rule.cumulativeLimit)
             spentBps = Math.max(spentBps ?? 0, bps)

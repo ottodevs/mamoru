@@ -1,8 +1,8 @@
 import { concat, decodeAbiParameters, encodeAbiParameters, encodeFunctionData, hashTypedData, hexToBigInt, hexToBytes, numberToHex, pad, size, toHex, type PublicClient } from 'viem'
-import type { AccountContext, Address, Hex, OwnerSignature } from '@mamoru/domain'
-import { baseRegistry, address, erc20Abi, safeAbi } from '@mamoru/registry'
+import { chainOf, type AccountContext, type Address, type Hex, type OwnerSignature } from '@mamoru/domain'
+import { baseRegistry, address, erc20Abi, safeAbi, type Registry } from '@mamoru/registry'
 import type { SessionGrant } from '@mamoru/policy'
-import { approve, burn, collect, decreaseLiquidity, exactInputSingle, exactInputSingleTo, swapToEth } from '@mamoru/uniswap-v3'
+import { uniswapV3 } from '@mamoru/uniswap-v3'
 import {
   OPERATION_CALL,
   createProxyCall,
@@ -23,26 +23,37 @@ export const LIVE_CAP_USDC = 100_000_000n
 /** pool:USDC/cbBTC/500. token0 USDC, token1 cbBTC. */
 export const LIVE_POOL_FEE = 500
 
-export type LiveAccount = { safe: Address; chainId: number; owners: Address[]; saltNonce: bigint; webauthn: WebAuthnSigner }
+/**
+ * `registry` (otto/mamoru#61): the registry of the chain the account lives on; every builder below that takes the
+ * account reads its addresses from it. Absent: Base's, as every account before Monad (the field is left out of them).
+ */
+export type LiveAccount = { safe: Address; chainId: number; owners: Address[]; saltNonce: bigint; webauthn: WebAuthnSigner; registry?: Registry }
+
+const regOf = (a: { registry?: Registry }): Registry => a.registry ?? baseRegistry
 
 export type LivePosition = { tokenId: bigint; liquidity: bigint; amount0Min: bigint; amount1Min: bigint }
 export type LiveSwap = { amountIn: bigint; amountOutMinimum: bigint }
 /** What the recipient receives instead of USDC: a USDC swap on SwapRouter02 whose output goes straight to them. `asset` is the registry token out (the app's JPYC slot pays out JPYT). */
 export type LiveReceive = { asset: 'EURC' | 'ETH' | 'JPYT'; fee: number; amountOutMinimum: bigint }
 
-/** Rebuilds the account from the stored context and refuses it if the counterfactual address does not match. */
-export function liveAccountFromContext(ctx: AccountContext): LiveAccount {
+/**
+ * Rebuilds the account from the stored context and refuses it if the counterfactual address does not match.
+ * `registry` (otto/mamoru#61): the chain's registry, carried on the account for every builder; absent: Base.
+ */
+export function liveAccountFromContext(ctx: AccountContext, registry?: Registry): LiveAccount {
+  const reg = registry ?? baseRegistry
   const owners = ctx.owners as Address[]
   const saltNonce = BigInt(ctx.saltNonce)
-  const webauthn = webAuthnSigner(hexToBigInt(ctx.passkey.x), hexToBigInt(ctx.passkey.y))
-  const safe = counterfactualAddress(accountSetup(owners, saltNonce, webauthn))
+  const webauthn = webAuthnSigner(hexToBigInt(ctx.passkey.x), hexToBigInt(ctx.passkey.y), reg)
+  const safe = counterfactualAddress(accountSetup(owners, saltNonce, webauthn, reg), reg)
   if (safe.toLowerCase() !== ctx.address.toLowerCase()) throw new Error(`counterfactual address ${safe} does not match context ${ctx.address}`)
-  return { safe, chainId: ctx.chainId, owners, saltNonce, webauthn }
+  return { safe, chainId: ctx.chainId, owners, saltNonce, webauthn, ...(registry ? { registry } : {}) }
 }
 
 /** SafeProxyFactory.createProxyWithNonce for the account. Any EOA can send it. */
 export function deployCall(a: LiveAccount): { to: Address; data: Hex } {
-  return createProxyCall(accountSetup(a.owners, a.saltNonce, a.webauthn))
+  const reg = regOf(a)
+  return createProxyCall(accountSetup(a.owners, a.saltNonce, a.webauthn, reg), reg)
 }
 
 export async function readSafeNonce(client: PublicClient, safe: Address): Promise<{ deployed: boolean; nonce: bigint }> {
@@ -53,13 +64,13 @@ export async function readSafeNonce(client: PublicClient, safe: Address): Promis
 }
 
 /** One call is a plain CALL; several go through MultiSendCallOnly 1.4.1 (delegatecall). */
-export function ownerSafeTx(calls: MultiSendCall[], nonce: bigint): SafeTx {
+export function ownerSafeTx(calls: MultiSendCall[], nonce: bigint, registry: Registry = baseRegistry): SafeTx {
   if (calls.length === 0) throw new Error('no calls')
   if (calls.length === 1) {
     const c = calls[0]!
     return { to: c.to, value: c.value, data: c.data, operation: OPERATION_CALL, nonce }
   }
-  const b = multiSendCallOnly(calls)
+  const b = multiSendCallOnly(calls, registry)
   return { to: b.to, value: 0n, data: b.data, operation: b.operation, nonce }
 }
 
@@ -78,11 +89,12 @@ const strip = (c: { to: Address; value: bigint; data: Hex }): MultiSendCall => (
 export type LiveGasReserve = { fee: number; amountIn: bigint; amountOutMinimum: bigint; deadline: bigint }
 
 /** Exact USDC approve to SwapRouter02, USDC -> ETH paid to the Safe, approve 0. */
-export function gasReserveCalls(safe: Address, r: LiveGasReserve): MultiSendCall[] {
+export function gasReserveCalls(safe: Address, r: LiveGasReserve, registry: Registry = baseRegistry): MultiSendCall[] {
   if (r.amountIn <= 0n) throw new Error('amountIn must be positive')
+  const { approve, swapToNative } = uniswapV3(registry)
   return [
     approve('USDC', 'SwapRouter02', r.amountIn),
-    swapToEth({ recipient: safe, tokenIn: 'USDC', fee: r.fee, amountIn: r.amountIn, amountOutMinimum: r.amountOutMinimum, deadline: r.deadline }),
+    swapToNative({ recipient: safe, tokenIn: 'USDC', fee: r.fee, amountIn: r.amountIn, amountOutMinimum: r.amountOutMinimum, deadline: r.deadline, wrappedNative: chainOf(registry.chainId).wrappedNative }),
     approve('USDC', 'SwapRouter02', 0n),
   ].map(strip)
 }
@@ -99,18 +111,20 @@ export function activationBatch(
   revoked: Hex[],
   opts: { trust?: boolean; policiesFor?: (grant: SessionGrant, index: number) => SecondActionPolicy | undefined; attest?: readonly Address[]; reattest?: readonly Address[]; attestData?: Hex; reserve?: LiveGasReserve } = {},
 ): { calls: MultiSendCall[]; permissionIds: Hex[] } {
-  const act = activationCall(grants, revoked, opts.policiesFor)
-  const trust = opts.trust === false ? [] : registryTrustCalls(a.safe)
+  const reg = regOf(a)
+  const act = activationCall(grants, revoked, opts.policiesFor, reg)
+  const trust = opts.trust === false ? [] : registryTrustCalls(a.safe, reg)
   // Spec 007 T7: self-attest the v4 policies (after the trust calls, which make the account an attester it trusts).
   // An attestation that lapses before this approval ends is revoked first (the registry refuses to attest over an
   // unrevoked record), then made again with the others.
   const revoke = opts.reattest?.length ? [selfRevokeAttestationCall(opts.reattest)] : []
   const attest = opts.attest?.length ? [...revoke, selfAttestCall(opts.attest, opts.attestData)] : revoke
-  const reserve = opts.reserve ? gasReserveCalls(a.safe, opts.reserve) : []
+  const reserve = opts.reserve ? gasReserveCalls(a.safe, opts.reserve, reg) : []
   return { calls: [...[...trust, ...attest, { to: act.to, value: 0n, data: act.data }].map(strip), ...reserve], permissionIds: act.permissionIds }
 }
 
-function closeCalls(account: Address, p: LivePosition, deadline: bigint, burnIt: boolean): MultiSendCall[] {
+function closeCalls(account: Address, p: LivePosition, deadline: bigint, burnIt: boolean, registry: Registry): MultiSendCall[] {
+  const { burn, collect, decreaseLiquidity } = uniswapV3(registry)
   return [
     ...(p.liquidity > 0n ? [decreaseLiquidity({ tokenId: p.tokenId, liquidity: p.liquidity, amount0Min: p.amount0Min, amount1Min: p.amount1Min, deadline })] : []),
     collect({ account, tokenId: p.tokenId }),
@@ -119,8 +133,10 @@ function closeCalls(account: Address, p: LivePosition, deadline: bigint, burnIt:
 }
 
 /** cbBTC -> USDC on pool:USDC/cbBTC/500, exact approve then reset to 0. */
-function swapCbbtcCalls(account: Address, s: LiveSwap): MultiSendCall[] {
+function swapCbbtcCalls(account: Address, s: LiveSwap, registry: Registry): MultiSendCall[] {
   if (s.amountIn <= 0n) return []
+  // cbBTC is a Base token: on any other registry `approve` refuses it (POLICY_TARGET_NOT_IN_REGISTRY), never a Base address.
+  const { approve, exactInputSingle } = uniswapV3(registry)
   return [
     approve('cbBTC', 'SwapRouter02', s.amountIn),
     exactInputSingle({ account, tokenIn: 'cbBTC', tokenOut: 'USDC', fee: LIVE_POOL_FEE, amountIn: s.amountIn, amountOutMinimum: s.amountOutMinimum }),
@@ -132,7 +148,7 @@ function uniqueTokenIds(ps: { tokenId: bigint }[]): void {
   if (new Set(ps.map((p) => p.tokenId)).size !== ps.length) throw new Error('duplicate tokenId')
 }
 
-/** Owner transfer: free USDC from positions if needed, optional cbBTC -> USDC, then USDC.transfer(to). */
+/** Owner transfer: free USDC from positions if needed, optional cbBTC -> USDC, then USDC.transfer(to). `registry`: the chain's (otto/mamoru#61); absent: Base. */
 export function transferBatch(i: {
   account: Address
   to: Address
@@ -141,40 +157,45 @@ export function transferBatch(i: {
   swapCbbtc?: LiveSwap
   deadline: bigint
   receive?: LiveReceive
+  registry?: Registry
 }): MultiSendCall[] {
+  const reg = regOf(i)
   if (i.amountUsdc <= 0n) throw new Error('amountUsdc must be positive')
   if (i.to.toLowerCase() === i.account.toLowerCase()) throw new Error('recipient must not be the account')
   uniqueTokenIds(i.reduce)
   return [
-    ...i.reduce.flatMap((p) => closeCalls(i.account, p, i.deadline, false)),
-    ...(i.swapCbbtc ? swapCbbtcCalls(i.account, i.swapCbbtc) : []),
-    ...(i.receive ? receiveCalls(i.to, i.amountUsdc, i.receive, i.deadline) : [{ to: address('USDC', baseRegistry), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [i.to, i.amountUsdc] }) }]),
+    ...i.reduce.flatMap((p) => closeCalls(i.account, p, i.deadline, false, reg)),
+    ...(i.swapCbbtc ? swapCbbtcCalls(i.account, i.swapCbbtc, reg) : []),
+    ...(i.receive ? receiveCalls(i.to, i.amountUsdc, i.receive, i.deadline, reg) : [{ to: address('USDC', reg), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [i.to, i.amountUsdc] }) }]),
   ]
 }
 
 /** Exact USDC approve to SwapRouter02, the swap with `to` as the output recipient (ETH: unwrapped in the router), approve 0. */
-function receiveCalls(to: Address, amountUsdc: bigint, r: LiveReceive, deadline: bigint): MultiSendCall[] {
+function receiveCalls(to: Address, amountUsdc: bigint, r: LiveReceive, deadline: bigint, registry: Registry): MultiSendCall[] {
+  const { approve, exactInputSingleTo, swapToNative } = uniswapV3(registry)
   const swap =
     r.asset === 'ETH'
-      ? swapToEth({ recipient: to, tokenIn: 'USDC', fee: r.fee, amountIn: amountUsdc, amountOutMinimum: r.amountOutMinimum, deadline })
+      ? swapToNative({ recipient: to, tokenIn: 'USDC', fee: r.fee, amountIn: amountUsdc, amountOutMinimum: r.amountOutMinimum, deadline, wrappedNative: chainOf(registry.chainId).wrappedNative })
       : exactInputSingleTo({ recipient: to, tokenIn: 'USDC', tokenOut: r.asset, fee: r.fee, amountIn: amountUsdc, amountOutMinimum: r.amountOutMinimum })
   return [approve('USDC', 'SwapRouter02', amountUsdc), swap, approve('USDC', 'SwapRouter02', 0n)].map(strip)
 }
 
-/** Stop allocation: revoke every grant, close and burn every position, swap cbBTC -> USDC. USDC stays in the Safe. */
+/** Stop allocation: revoke every grant, close and burn every position, swap cbBTC -> USDC. USDC stays in the Safe. `registry`: the chain's (otto/mamoru#61); absent: Base. */
 export function stopBatch(i: {
   account: Address
   permissionIds: Hex[]
   positions: LivePosition[]
   swapCbbtc?: LiveSwap
   deadline: bigint
+  registry?: Registry
 }): MultiSendCall[] {
+  const reg = regOf(i)
   if (new Set(i.permissionIds.map((p) => p.toLowerCase())).size !== i.permissionIds.length) throw new Error('duplicate permissionId')
   uniqueTokenIds(i.positions)
   const calls = [
-    ...revocationCalls(i.permissionIds).map(strip),
-    ...i.positions.flatMap((p) => closeCalls(i.account, p, i.deadline, true)),
-    ...(i.swapCbbtc ? swapCbbtcCalls(i.account, i.swapCbbtc) : []),
+    ...revocationCalls(i.permissionIds, reg).map(strip),
+    ...i.positions.flatMap((p) => closeCalls(i.account, p, i.deadline, true, reg)),
+    ...(i.swapCbbtc ? swapCbbtcCalls(i.account, i.swapCbbtc, reg) : []),
   ]
   if (calls.length === 0) throw new Error('nothing to stop')
   return calls
@@ -332,13 +353,13 @@ export function safeContractSignature(signer: Address, data: Hex): Hex {
  * The Safe signature bytes for a browser assertion. With `safeTxHash`, also
  * checks that the assertion's challenge is that hash.
  */
-export function browserOwnerSignature(sig: OwnerSignature, safeTxHash?: Hex): Hex {
+export function browserOwnerSignature(sig: OwnerSignature, safeTxHash?: Hex, registry: Registry = baseRegistry): Hex {
   const authenticatorData = toHex(fromB64url(sig.authenticatorData))
   const clientDataJSON = new TextDecoder('utf-8', { fatal: true }).decode(fromB64url(sig.clientDataJSON))
   const { challenge, fields } = clientDataFieldsOf(clientDataJSON)
   if (safeTxHash && toHex(fromB64url(challenge)).toLowerCase() !== safeTxHash.toLowerCase()) throw new Error('assertion challenge is not the safeTxHash')
   const { r, s } = parseDerSignature(fromB64url(sig.signature))
-  return safeContractSignature(address('SafeWebAuthnSharedSigner', baseRegistry), encodeWebAuthnSignature({ authenticatorData, clientDataFields: fields, r, s }))
+  return safeContractSignature(address('SafeWebAuthnSharedSigner', registry), encodeWebAuthnSignature({ authenticatorData, clientDataFields: fields, r, s }))
 }
 
 /** authenticatorData flag SafeWebAuthnSharedSigner requires (WebAuthn.USER_VERIFICATION). */
@@ -351,12 +372,12 @@ function toB64url(bytes: Uint8Array): string {
 }
 
 /** The parts of a Safe contract signature built by safeContractSignature(SafeWebAuthnSharedSigner, encodeWebAuthnSignature(...)). */
-export function decodeOwnerSignature(signature: Hex): { authenticatorData: Hex; clientDataFields: string; r: bigint; s: bigint } {
+export function decodeOwnerSignature(signature: Hex, registry: Registry = baseRegistry): { authenticatorData: Hex; clientDataFields: string; r: bigint; s: bigint } {
   const bytes = hexToBytes(signature)
   if (bytes.length < 97) throw new Error('owner signature too short')
   const signer = toHex(bytes.subarray(12, 32))
   const padding = hexToBigInt(toHex(bytes.subarray(0, 12)))
-  if (padding !== 0n || signer.toLowerCase() !== address('SafeWebAuthnSharedSigner', baseRegistry).toLowerCase()) throw new Error('owner signature is not from SafeWebAuthnSharedSigner')
+  if (padding !== 0n || signer.toLowerCase() !== address('SafeWebAuthnSharedSigner', registry).toLowerCase()) throw new Error('owner signature is not from SafeWebAuthnSharedSigner')
   if (hexToBigInt(toHex(bytes.subarray(32, 64))) !== 65n || bytes[64] !== 0) throw new Error('owner signature is not one contract signature')
   if (hexToBigInt(toHex(bytes.subarray(65, 97))) !== BigInt(bytes.length - 97)) throw new Error('owner signature length mismatch')
   const [authenticatorData, clientDataFields, r, s] = decodeAbiParameters([{ type: 'bytes' }, { type: 'string' }, { type: 'uint256' }, { type: 'uint256' }], toHex(bytes.subarray(97)))
@@ -369,9 +390,9 @@ export function decodeOwnerSignature(signature: Hex): { authenticatorData: Hex; 
  * address, the chain id and the SafeTx with its nonce, so a true result means "this owner signed exactly this
  * transaction". Run it before the relayer spends anything: a forged signature must cost the relayer nothing.
  */
-export async function verifyOwnerSignature(signature: Hex, safeTxHash: Hex, key: { x: bigint; y: bigint }): Promise<boolean> {
+export async function verifyOwnerSignature(signature: Hex, safeTxHash: Hex, key: { x: bigint; y: bigint }, registry: Registry = baseRegistry): Promise<boolean> {
   try {
-    const { authenticatorData, clientDataFields, r, s } = decodeOwnerSignature(signature)
+    const { authenticatorData, clientDataFields, r, s } = decodeOwnerSignature(signature, registry)
     const auth = hexToBytes(authenticatorData)
     // WebAuthn.sol checks `authenticatorData.length > 32` and the flag bits, nothing about the sign counter: the
     // same here (otto/mamoru#140 part2 #5), so the mirror refuses nothing the chain accepts on this account.

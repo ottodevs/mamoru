@@ -57,3 +57,23 @@ export const labWmonUsdcMonadV1: PolicyVersion = {
 export const MONAD_LAB_POLICIES: Record<string, PolicyVersion> = {
   [labWmonUsdcMonadV1.policyId]: labWmonUsdcMonadV1,
 }
+
+/**
+ * otto/mamoru#61: the Monad MAINNET variant of `labWmonUsdcMonadV1`. Same pool, grants, caps and session as the lab
+ * policy; it differs in two things only: it signs for chain 143 itself (`chain: 'monad'`, never a fork id nor the
+ * testnet), and its gas reserve is in MON at Monad's gas price (about 100 gwei on 2026-10-23: a userOp's prefund at
+ * tight limits is a few tenths of a MON, so 2 MON keeps several in the EntryPoint deposit). The operator resolves it
+ * only with MAMORU_CHAIN_WRITES=143 (boot.ts), and only once TimeFramePolicy and UsageLimitPolicy are on Monad at
+ * their Base address with their Base code (boot.ts `writeRegistry`).
+ */
+export const liveWmonUsdcMonadV1: PolicyVersion = {
+  ...labWmonUsdcMonadV1,
+  policyId: 'live-wmon-usdc-monad-v1',
+  chain: 'monad',
+  gasReserveWei: 2_000_000_000_000_000_000n,
+}
+
+/** Monad mainnet policies by id: resolved by the operator only when it is opted into writing to Monad. */
+export const MONAD_LIVE_POLICIES: Record<string, PolicyVersion> = {
+  [liveWmonUsdcMonadV1.policyId]: liveWmonUsdcMonadV1,
+}

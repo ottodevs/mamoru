@@ -18,6 +18,7 @@ import {
   safeAbi,
   safeProxyFactoryAbi,
   safeWebAuthnSharedSignerAbi,
+  type Registry,
 } from '@mamoru/registry'
 
 export const OPERATION_CALL = 0
@@ -44,45 +45,45 @@ export type SafeSetup = {
  * Rhinestone attester, threshold 1. With a passkey owner, MultiSend 1.4.1
  * also delegatecalls SafeWebAuthnSharedSigner.configure in the same setup.
  */
-export function setupDelegate(setup: SafeSetup): { to: Address; data: Hex } {
-  const sharedSigner = address('SafeWebAuthnSharedSigner', baseRegistry).toLowerCase()
+export function setupDelegate(setup: SafeSetup, registry: Registry = baseRegistry): { to: Address; data: Hex } {
+  const sharedSigner = address('SafeWebAuthnSharedSigner', registry).toLowerCase()
   const ownsWithPasskey = setup.owners.some((o) => o.toLowerCase() === sharedSigner)
   if (ownsWithPasskey !== !!setup.webauthn) throw new Error('SafeWebAuthnSharedSigner is an owner exactly when the setup carries its passkey')
-  const safe7579 = address('Safe7579', baseRegistry)
+  const safe7579 = address('Safe7579', registry)
   const launch = {
-    to: address('Safe7579Launchpad', baseRegistry),
+    to: address('Safe7579Launchpad', registry),
     data: encodeFunctionData({
       abi: safe7579LaunchpadAbi,
       functionName: 'addSafe7579',
-      args: [safe7579, setup.validators, [], [], [], [address('RhinestoneAttester', baseRegistry)], 1],
+      args: [safe7579, setup.validators, [], [], [], [address('RhinestoneAttester', registry)], 1],
     }),
   }
   if (!setup.webauthn) return launch
-  const cfg = configureSharedSigner(setup.webauthn.x, setup.webauthn.y, setup.webauthn.verifiers)
+  const cfg = configureSharedSigner(setup.webauthn.x, setup.webauthn.y, setup.webauthn.verifiers, registry)
   const packed = concat(
     [launch, cfg].map((c) => encodePacked(['uint8', 'address', 'uint256', 'uint256', 'bytes'], [OPERATION_DELEGATECALL, c.to, 0n, BigInt(size(c.data)), c.data])),
   )
   // MultiSend 1.4.1 has the same multiSend(bytes) signature as MultiSendCallOnly, but allows delegatecall entries.
-  return { to: address('MultiSend_141', baseRegistry), data: encodeFunctionData({ abi: multiSendCallOnlyAbi, functionName: 'multiSend', args: [packed] }) }
+  return { to: address('MultiSend_141', registry), data: encodeFunctionData({ abi: multiSendCallOnlyAbi, functionName: 'multiSend', args: [packed] }) }
 }
 
 /** Safe.setup with Safe7579 as fallback handler and setupDelegate as the setup delegatecall. */
-export function safeInitializer(setup: SafeSetup): Hex {
-  const delegate = setupDelegate(setup)
+export function safeInitializer(setup: SafeSetup, registry: Registry = baseRegistry): Hex {
+  const delegate = setupDelegate(setup, registry)
   return encodeFunctionData({
     abi: safeAbi,
     functionName: 'setup',
-    args: [setup.owners, setup.threshold, delegate.to, delegate.data, address('Safe7579', baseRegistry), zeroAddress, 0n, zeroAddress],
+    args: [setup.owners, setup.threshold, delegate.to, delegate.data, address('Safe7579', registry), zeroAddress, 0n, zeroAddress],
   })
 }
 
-export function createProxyCall(setup: SafeSetup): { to: Address; data: Hex } {
+export function createProxyCall(setup: SafeSetup, registry: Registry = baseRegistry): { to: Address; data: Hex } {
   return {
-    to: address('SafeProxyFactory_141', baseRegistry),
+    to: address('SafeProxyFactory_141', registry),
     data: encodeFunctionData({
       abi: safeProxyFactoryAbi,
       functionName: 'createProxyWithNonce',
-      args: [address('SafeL2_141', baseRegistry), safeInitializer(setup), setup.saltNonce],
+      args: [address('SafeL2_141', registry), safeInitializer(setup, registry), setup.saltNonce],
     }),
   }
 }
@@ -153,23 +154,23 @@ export function execTransactionData(tx: SafeTx, signatures: Hex): Hex {
 export type MultiSendCall = { to: Address; value: bigint; data: Hex }
 
 /** Batch for MultiSendCallOnly 1.4.1, delegatecalled by the Safe. Only CALL entries. */
-export function multiSendCallOnly(calls: MultiSendCall[]): { to: Address; data: Hex; operation: 1 } {
+export function multiSendCallOnly(calls: MultiSendCall[], registry: Registry = baseRegistry): { to: Address; data: Hex; operation: 1 } {
   const packed = concat(
     calls.map((c) =>
       encodePacked(['uint8', 'address', 'uint256', 'uint256', 'bytes'], [OPERATION_CALL, c.to, c.value, BigInt(size(c.data)), c.data]),
     ),
   )
   return {
-    to: address('MultiSendCallOnly_141', baseRegistry),
+    to: address('MultiSendCallOnly_141', registry),
     data: encodeFunctionData({ abi: multiSendCallOnlyAbi, functionName: 'multiSend', args: [packed] }),
     operation: OPERATION_DELEGATECALL,
   }
 }
 
 /** Owner transaction that stores the passkey coordinates in SafeWebAuthnSharedSigner (delegatecall). */
-export function configureSharedSigner(x: bigint, y: bigint, verifiers: bigint): { to: Address; data: Hex; operation: 1 } {
+export function configureSharedSigner(x: bigint, y: bigint, verifiers: bigint, registry: Registry = baseRegistry): { to: Address; data: Hex; operation: 1 } {
   return {
-    to: address('SafeWebAuthnSharedSigner', baseRegistry),
+    to: address('SafeWebAuthnSharedSigner', registry),
     data: encodeFunctionData({ abi: safeWebAuthnSharedSignerAbi, functionName: 'configure', args: [{ x, y, verifiers }] }),
     operation: OPERATION_DELEGATECALL,
   }
@@ -187,8 +188,8 @@ export function packVerifiers(precompile: number, fallback: Address): bigint {
 export const P256_PRECOMPILE_ADDRESS = 0x100
 
 /** A passkey owner verified by the RIP-7212 precompile, with the pinned P256Verifier as fallback. */
-export function webAuthnSigner(x: bigint, y: bigint): WebAuthnSigner {
-  return { x, y, verifiers: packVerifiers(P256_PRECOMPILE_ADDRESS, address('P256Verifier', baseRegistry)) }
+export function webAuthnSigner(x: bigint, y: bigint, registry: Registry = baseRegistry): WebAuthnSigner {
+  return { x, y, verifiers: packVerifiers(P256_PRECOMPILE_ADDRESS, address('P256Verifier', registry)) }
 }
 
 // ERC-7579 execution modes (Safe7579.execute)

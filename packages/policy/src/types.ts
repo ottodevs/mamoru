@@ -96,7 +96,11 @@ export type PolicyVersion = {
   policyId: string
   version: string
   preset: 'conservador'
-  chain: 'base' | 'fork'
+  /**
+   * Where the policy may sign: 'base' on chain 8453 only, 'fork' on a lab chain id only (never a supported chain or
+   * its testnet), 'monad' (otto/mamoru#61) on Monad mainnet (143) only.
+   */
+  chain: 'base' | 'fork' | 'monad'
   /**
    * otto/mamoru#65: the chain whose registry resolves every name of this policy (pools, tokens, grant targets).
    * Absent: Base (8453), which every policy before Monad is; it is left out of them so their policyHash stays.

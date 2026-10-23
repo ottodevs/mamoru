@@ -1,7 +1,7 @@
 import { toHex, type Hex } from 'viem'
 import type { UserOperation } from 'viem/account-abstraction'
-import { BASE_CHAIN_ID, FORBIDDEN_LAB_CHAIN_IDS, ReasonError, type Address } from '@mamoru/domain'
-import { baseRegistry, address } from '@mamoru/registry'
+import { BASE_CHAIN_ID, FORBIDDEN_LAB_CHAIN_IDS, ReasonError, liveChainAllowed, type Address } from '@mamoru/domain'
+import { baseRegistry, address, type Registry } from '@mamoru/registry'
 
 /** FR-AA-002: the only bundler methods on the critical path. */
 export const STANDARD_METHODS = [
@@ -98,7 +98,14 @@ export function assertLabBundler(url: string): void {
   if (!LOOPBACK_HOSTS.has(new URL(url).hostname)) throw new ReasonError('LAB_BUNDLER_NOT_LOCAL', 'the lab bundler must listen on loopback')
 }
 
-export type BundlerConfig = { url: string; mode: 'production' | 'lab' | 'live'; chainId: number; signingChainIds: readonly number[] }
+export type BundlerConfig = {
+  url: string
+  mode: 'production' | 'lab' | 'live'
+  chainId: number
+  signingChainIds: readonly number[]
+  /** otto/mamoru#61: the registry whose EntryPoint the userOps name. Absent: Base's (the same CREATE2 address everywhere). */
+  registry?: Registry
+}
 
 /**
  * BundlerPort over JSON-RPC, standard methods only. Sending refuses
@@ -135,13 +142,14 @@ export class BundlerClient {
   async sendUserOperation(op: UserOperation<'0.7'>): Promise<Hex> {
     if (this.cfg.mode === 'production') throw new ReasonError('DRY_RUN_STOP', 'production never sends')
     if (this.cfg.mode === 'live') {
-      // Live sends only on Base, only with MAMORU_LIVE=1 in this process.
-      const allowed = this.cfg.chainId === BASE_CHAIN_ID && process.env.MAMORU_LIVE === '1' && this.cfg.signingChainIds.includes(this.cfg.chainId)
+      // Live sends only with MAMORU_LIVE=1 in this process, on Base or on a chain it was opted into (MAMORU_CHAIN_WRITES, otto/mamoru#61).
+      const onChain = this.cfg.chainId === BASE_CHAIN_ID ? process.env.MAMORU_LIVE === '1' : liveChainAllowed(this.cfg.chainId, process.env)
+      const allowed = onChain && this.cfg.signingChainIds.includes(this.cfg.chainId)
       if (!allowed) throw new ReasonError('SIGN_CHAIN_NOT_ALLOWED', `live send on chain ${this.cfg.chainId}`)
     } else if (FORBIDDEN_LAB_CHAIN_IDS.includes(this.cfg.chainId) || !this.cfg.signingChainIds.includes(this.cfg.chainId)) {
       throw new ReasonError('SIGN_CHAIN_NOT_ALLOWED', `chain ${this.cfg.chainId}`)
     }
-    return this.call('eth_sendUserOperation', [toRpcUserOp(op), address('EntryPointV07', baseRegistry)])
+    return this.call('eth_sendUserOperation', [toRpcUserOp(op), address('EntryPointV07', this.cfg.registry ?? baseRegistry)])
   }
 
   async getUserOperationReceipt(hash: Hex): Promise<BundlerReceipt | null> {

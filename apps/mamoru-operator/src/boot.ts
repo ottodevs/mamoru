@@ -3,14 +3,15 @@ import { join } from 'node:path'
 import { $ } from 'bun'
 import { TransactionReceiptNotFoundError, createPublicClient, getAddress, http, isAddress, type Hex } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
-import { BASE_CHAIN_ID, chainOf, isChainId, type Address } from '@mamoru/domain'
+import { BASE_CHAIN_ID, chainOf, chainWritesOptIn, isChainId, type Address } from '@mamoru/domain'
 import { entry, registryFor, type Registry } from '@mamoru/registry'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
-import { conservadorLabV4, conservadorLabV5, conservadorLiveV4, conservadorLiveV5, MONAD_LAB_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, type PolicyVersion } from '@mamoru/policy'
+import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLiveV4, conservadorLiveV5, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, type PolicyVersion } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
 import { livePool, writeRefusal } from './chain.ts'
+import { writeRegistry } from './chain-writes.ts'
 import { Operator, type OperatorConfig } from './operator.ts'
 import { Relayer } from './relayer.ts'
 import { BridgeOut, ETHEREUM_CHAIN_ID, L1_BUNDLER_TIMEOUT_MS, L1_HANDLE_OPS_GAS, L1_USDC } from './bridge-out.ts'
@@ -68,9 +69,11 @@ const V5_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV5.po
  * `checkAction` is still the real enforcement. Off, or the address unset: an unrecognized policyId throws exactly
  * the same `unknown policy` error it always has — nothing changes for any account while the flag is off.
  */
-export function resolveNamedPolicy(policyId: string, env: Record<string, string | undefined>): PolicyVersion | undefined {
+export function resolveNamedPolicy(policyId: string, env: Record<string, string | undefined>, opts: { chainWrites?: boolean } = {}): PolicyVersion | undefined {
   const named = POLICIES[policyId] ?? MONAD_LAB_POLICIES[policyId]
   if (named) return named
+  // otto/mamoru#61: a Monad mainnet policy resolves only for an operator opted into writing to Monad (chainWrites).
+  if (opts.chainWrites && MONAD_LIVE_POLICIES[policyId]) return MONAD_LIVE_POLICIES[policyId]
   if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1') return undefined
   const v5 = V5_POLICIES_BY_ID[policyId]
   if (v5) return env.MAMORU_ACTION_POLICY_V2_ADDRESS ? deployedV5(v5, env) : undefined
@@ -309,6 +312,31 @@ export function assertBaseOnlyFeatures(registry: Registry, env: Record<string, s
   if (o.l1RpcUrl) throw new Error(`MAMORU_L1_RPC_URL (bridge-out to Base) is Base only; this operator reads ${registry.chain}`)
 }
 
+/**
+ * otto/mamoru#61: whether this operator writes to a chain other than Base. MAMORU_CHAIN_WRITES (default unset: no)
+ * names the chain ids it is opted into; it applies only when the RPC answers that very chain id and the registry read
+ * is that chain's (never a lab fork id of it). A flag that names another chain than the one the RPC is refuses the boot
+ * instead of being ignored, so a stale or wrong value is seen at once. A malformed value refuses the boot too.
+ */
+export function chainWritesFor(chainId: number, registry: Registry, env: Record<string, string | undefined>): { on: boolean; optIn: readonly number[] } {
+  const optIn = chainWritesOptIn(env)
+  if (!optIn.length) return { on: false, optIn }
+  const on = registry.chainId === chainId && optIn.some((c) => c === chainId)
+  if (!on) throw new Error(`MAMORU_CHAIN_WRITES=${env.MAMORU_CHAIN_WRITES} but this operator reads ${registry.chain} (registry chain ${registry.chainId}) on chain ${chainId}`)
+  return { on, optIn }
+}
+
+/**
+ * otto/mamoru#61: what an operator writing off Base must run with: a policy made for that chain (`chain: 'monad'` for
+ * Monad mainnet, its names resolving in that chain's registry) and signing on exactly that chain id. Anything else
+ * (a Base policy, the fork-only lab policy) is refused at boot.
+ */
+export function assertWritePolicy(policy: PolicyVersion, registry: Registry, chainId: number): void {
+  if (registry.chainId === BASE_CHAIN_ID) return
+  if (policy.sourceChainId !== registry.chainId) throw new Error(`${policy.policyId} resolves its names on chain ${policy.sourceChainId ?? BASE_CHAIN_ID}, not ${registry.chain}`)
+  assertPolicyChain(policy, chainId)
+}
+
 /** Starts the operator: relayer key, state, loopback bundler, HTTP server, and the engine loops that were active. */
 export async function bootOperator(o: BootOptions) {
   const bootedAt = Date.now()
@@ -322,15 +350,21 @@ export async function bootOperator(o: BootOptions) {
   const client = createPublicClient({ transport: http(via('operator'), { batch: true, timeout: 60_000 }) })
   const watchClient = createPublicClient({ transport: http(via('watcher'), { batch: true, timeout: 60_000 }) })
   const chainId = await client.getChainId()
-  const registry = operatorRegistry(chainId, process.env)
-  assertBaseOnlyFeatures(registry, process.env, o)
-  // Live (owner transactions and engine loops) needs Base itself: chain id 8453, hence the Base registry.
-  const live = chainId === BASE_CHAIN_ID && process.env.MAMORU_LIVE === '1'
-  const named = resolveNamedPolicy(o.policyId ?? 'conservador-live-v2', process.env)
+  const readRegistry = operatorRegistry(chainId, process.env)
+  assertBaseOnlyFeatures(readRegistry, process.env, o)
+  // otto/mamoru#61: writing off Base is an explicit opt-in (MAMORU_CHAIN_WRITES), and only on a registry verified
+  // against the chain itself (writeRegistry). Without it, nothing below changes for any chain.
+  const writes = chainWritesFor(chainId, readRegistry, process.env)
+  const registry = writes.on ? await writeRegistry(client, readRegistry) : readRegistry
+  // Live (owner transactions and engine loops) needs Base itself: chain id 8453, hence the Base registry; or the chain
+  // this operator was opted into writing to (otto/mamoru#61), on its own chain id.
+  const live = (chainId === BASE_CHAIN_ID || writes.on) && process.env.MAMORU_LIVE === '1'
+  const named = resolveNamedPolicy(o.policyId ?? 'conservador-live-v2', process.env, { chainWrites: writes.on })
   if (!named) throw new Error(`unknown policy ${o.policyId}`)
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
   const policy = withTestOverrides(named, process.env)
   assertPolicyOnRegistry(policy, registry)
+  if (writes.on) assertWritePolicy(policy, registry, chainId)
   const store = new StateStore(o.stateDir)
   // Review round 2: an account already moved to the on-chain action policy needs that policy to resolve after a
   // restart (funding, engine, renewals and Stop all read it). Refused at boot, with the accounts named, rather than
@@ -339,10 +373,12 @@ export async function bootOperator(o: BootOptions) {
   // The relayer's own reads (gas estimate, nonce, the wait for a receipt) are counted as the relayer's, like its sends.
   const relayerClient = createPublicClient({ transport: http(via('relayer'), { batch: true, timeout: 60_000 }) })
   const relayerKey = loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey)
-  // otto/mamoru#63: off Base the relayer refuses every send and no loopback bundler starts (fail closed).
-  const refusal = writeRefusal(registry)
+  // otto/mamoru#63: off Base the relayer refuses every send and no loopback bundler starts (fail closed), unless this
+  // operator was opted into writing to that chain (otto/mamoru#61): then the bundler names its EntryPoint and, on a
+  // chain that charges the gas limit, sizes each handleOps from its own estimate.
+  const refusal = writeRefusal(registry, writes.on ? { chainId, optIn: writes.optIn } : undefined)
   const relayer = new Relayer(relayerKey, relayerClient, via('relayer'), chainId, refusal)
-  const bundler = refusal === null ? startLiveBundler(client, relayer, chainId) : null
+  const bundler = refusal === null ? startLiveBundler(client, relayer, chainId, writes.on ? { registry, gasModel: chainOf(registry.chainId).gasModel } : {}) : null
   const knobs = capAndDepth(o, policy)
   let retune = () => {}
   // otto/mamoru#129: reassigned once the snapshot loop exists (it needs `operator`, built below); the settings
@@ -356,6 +392,7 @@ export async function bootOperator(o: BootOptions) {
     {
       chainId,
       registry,
+      ...(writes.on ? { chainWrites: writes.optIn } : {}),
       live,
       rpcUrl: o.rpcUrl,
       bundlerUrl: bundler?.url ?? '',
@@ -461,7 +498,7 @@ export async function bootOperator(o: BootOptions) {
   const eth = await client.getBalance({ address: relayer.address })
   console.log(`[operator] chain ${chainId} live=${live} policy ${policy.policyId} relayer ${relayer.address} (${eth} wei) sha ${gitSha} on http://${server.hostname}:${server.port}`)
   // Base keeps its boot line byte for byte; any other chain says whose contracts it reads and the relayer's unit.
-  if (registry.chainId !== BASE_CHAIN_ID) console.log(`[operator] reads ${registry.chain} contracts (registry chain ${registry.chainId}, block ${registry.block}); relayer balance in ${chainOf(registry.chainId).native.symbol} wei; ${writeRefusal(registry)}`)
+  if (registry.chainId !== BASE_CHAIN_ID) console.log(`[operator] reads ${registry.chain} contracts (registry chain ${registry.chainId}, block ${registry.block}); relayer balance in ${chainOf(registry.chainId).native.symbol} wei; ${refusal ?? `writes on ${registry.chain} (MAMORU_CHAIN_WRITES=${process.env.MAMORU_CHAIN_WRITES}, live=${live})`}`)
   retune = () => operator.retuneEngines()
   // The first pull before any engine resumes, so a restart never runs a review or a prepare on stale settings when the
   // endpoint answers (bounded by the pull timeout; on failure the last-known-good or the defaults run, reported).

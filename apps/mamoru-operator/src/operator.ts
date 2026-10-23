@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { overCap, ReasonError, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
+import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
@@ -42,17 +42,17 @@ import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { Proposal } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
-import { MAX_INVENTORY, amountsForLiquidity, inUsdc, livePool, positionUsdc, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
+import { MAX_INVENTORY, amountsForLiquidity, inUsdc, livePool, nativePricePool, positionUsdc, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
-import { gasReserveAlertOverrideFromEnv, gasReserveAlertWei } from './gas-reserve.ts'
+import { ONE_ACTION_GAS_UNITS, gasReserveAlertOverrideFromEnv, gasReserveAlertWei } from './gas-reserve.ts'
 import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, GasReserveTracker, logErr, safeMetrics, type EngineHealthSnapshot, type GasReserveSnapshot } from './metrics.ts'
 import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
-import { DEFAULT_SPONSOR, activationRefusal, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
+import { DEFAULT_SPONSOR, MONAD_SPONSOR, activationRefusal, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
 
 /** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
@@ -370,6 +370,11 @@ export type OperatorConfig = {
    * live pool and every contract address come from it. On a lab fork it is the registry of the forked chain.
    */
   registry: Registry
+  /**
+   * otto/mamoru#61: the MAMORU_CHAIN_WRITES opt-in this operator runs with (boot.ts `chainWritesFor`), set only when it
+   * applies to `registry`'s chain on its own chain id. Absent: Base is the only chain written to, as always.
+   */
+  chainWrites?: readonly number[]
   live: boolean
   rpcUrl: string
   bundlerUrl: string
@@ -764,7 +769,10 @@ export class Operator {
    * signed activation waits armed instead of failing; a relayer short of ETH is ours to fix.
    */
   private async relayerCanActivate(acc: AccountState, selfFunded = false): Promise<boolean> {
-    const need = (selfFunded ? 0n : this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI) + ACTIVATION_GAS_WEI
+    // otto/mamoru#61: ACTIVATION_GAS_WEI is in Base ETH. Off Base the deploy and the exec are priced at the chain's gas
+    // price (twice it: the bound it may move to), at their full limits, as the chain charges them.
+    const gasWei = this.offBase() ? (DEPLOY_GAS + ACTIVATE_TX_GAS) * (await this.gasPrice()) * 2n : ACTIVATION_GAS_WEI
+    const need = (selfFunded ? 0n : this.cfg.policy.gasReserveWei + (await this.topUpMarginWei())) + gasWei
     const have = BigInt((await this.relayerBalance()).wei)
     if (have >= need) return true
     const at = Date.now()
@@ -844,7 +852,7 @@ export class Operator {
   /** Restarts the engine loop of every account that was active. */
   resume(): void {
     // otto/mamoru#63: off Base no engine loop, armed watcher or reconciliation starts: the operator only reads.
-    const refusal = writeRefusal(this.cfg.registry)
+    const refusal = this.writeRefusal()
     if (refusal) {
       const active = Object.values(this.store.state.accounts).filter((a) => a.active || a.armed).length
       console.log(`[operator] ${refusal}${active ? `; ${active} active or armed account(s) left untouched` : ''}`)
@@ -930,7 +938,7 @@ export class Operator {
     if (ctx.chainId !== this.cfg.chainId) throw new HttpError(400, 'CHAIN_MISMATCH', `account is on ${ctx.chainId}, operator on ${this.cfg.chainId}`)
     let live: LiveAccount
     try {
-      live = liveAccountFromContext(ctx)
+      live = liveAccountFromContext(ctx, this.cfg.registry)
     } catch (e) {
       logErr('[http] account context rejected:', e)
       throw safeHttpError(400, 'ACCOUNT_MISMATCH')
@@ -1238,7 +1246,7 @@ export class Operator {
     if (had && had.grants === ids && Date.now() - had.at < CHAIN_USAGE_TTL_MS) return
     // Taken before the read, so a slow or failing RPC is not asked again on every poll.
     this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant: had?.grants === ids ? had.byGrant : new Map() })
-    const byGrant = await readChainUsage(this.client as never, acc.ctx.address as Address, acc.grants)
+    const byGrant = await readChainUsage(this.client as never, acc.ctx.address as Address, acc.grants, this.cfg.registry)
     const budgets = await this.readBudgets(acc)
     const paused = (await this.readPaused(acc)) === true
     if (!byGrant.size && !budgets?.size && !paused) return
@@ -1426,10 +1434,41 @@ export class Operator {
   // ---- owner side: prepare -------------------------------------------------
 
   private assertLive(): void {
-    // otto/mamoru#63: off Base nothing is prepared or signed, live or not, fork or mainnet (fail closed).
-    const refusal = writeRefusal(this.cfg.registry)
+    // otto/mamoru#63: off Base nothing is prepared or signed, live or not, fork or mainnet (fail closed), unless this
+    // operator was opted into writing to that chain (otto/mamoru#61).
+    const refusal = this.writeRefusal()
     if (refusal) throw new HttpError(503, 'CHAIN_READ_ONLY', refusal)
     if (!this.cfg.live) throw new HttpError(503, 'DRY_RUN_STOP', 'operator is not live (MAMORU_LIVE=1 on chain 8453 required)')
+  }
+
+  /** otto/mamoru#63, #61: why this operator may not write (chain.ts `writeRefusal` with its opt-in), or null. */
+  private writeRefusal(): string | null {
+    return writeRefusal(this.cfg.registry, this.cfg.chainWrites ? { chainId: this.cfg.chainId, optIn: this.cfg.chainWrites } : undefined)
+  }
+
+  /** The name of the chain the operator writes to, for the summaries the owner signs ("Base" on Base). */
+  private chainName(): string {
+    return isChainId(this.cfg.registry.chainId) ? chainOf(this.cfg.registry.chainId).name : this.cfg.registry.chain
+  }
+
+  /** The symbol of the chain's native asset ("ETH" on Base, "MON" on Monad). */
+  private nativeSymbol(): string {
+    return isChainId(this.cfg.registry.chainId) ? chainOf(this.cfg.registry.chainId).native.symbol : 'ETH'
+  }
+
+  /**
+   * What the relayer's top-up adds over the policy reserve: the first userOp's prefund leaves the Safe for its EntryPoint
+   * deposit, and decide holds every operation while the Safe is under the reserve. On Base, TOP_UP_MARGIN_WEI as always.
+   * otto/mamoru#61: off Base (MON at ~100 gwei) that figure is nothing; it is one engine userOp's prefund at its largest
+   * (the engine's fixed limits, ONE_ACTION_GAS_UNITS) at twice the gas price read now.
+   */
+  private async topUpMarginWei(): Promise<bigint> {
+    return this.offBase() ? ONE_ACTION_GAS_UNITS * (await this.gasPrice()) * 2n : TOP_UP_MARGIN_WEI
+  }
+
+  /** Whether the operator writes to a chain other than Base (otto/mamoru#61): Base-only routes stay closed there. */
+  private offBase(): boolean {
+    return this.cfg.registry.chainId !== BASE_CHAIN_ID
   }
 
   private async hold(acc: AccountState, live: LiveAccount, kind: OwnerKind, calls: Parameters<typeof ownerSafeTx>[0], summary: string[], extra: Partial<Prepared> = {}): Promise<OwnerTxToSign> {
@@ -1457,7 +1496,7 @@ export class Operator {
     }
     // otto/mamoru#140 (part2 #6): past the sponsorship limits the Safe pays its own fee, and the summary says so.
     const fee = await this.feePlan(acc, live, kind, extra.revokeOnly === true, deployed)
-    const tx: SafeTx = fee.refund ? { ...ownerSafeTx(calls, nonce), refund: fee.refund } : ownerSafeTx(calls, nonce)
+    const tx: SafeTx = fee.refund ? { ...ownerSafeTx(calls, nonce, this.cfg.registry), refund: fee.refund } : ownerSafeTx(calls, nonce, this.cfg.registry)
     const safeTxHash = safeTxHashOf(live, tx)
     const prepareId = toHex(randomBytes(16)).slice(2)
     const expires = Date.now() + PREPARE_TTL_MS
@@ -1483,6 +1522,8 @@ export class Operator {
   // ---- owner side: who pays (otto/mamoru#140 part2 #6) -----------------------
 
   private sponsorPolicy(): SponsorPolicy {
+    // otto/mamoru#61: DEFAULT_SPONSOR and SPONSOR_BOUNDS are Base ETH; an operator writing to Monad counts in MON.
+    if (this.offBase()) return MONAD_SPONSOR
     return this.cfg.sponsor ? boundedSponsor(this.cfg.sponsor) : DEFAULT_SPONSOR
   }
 
@@ -1498,10 +1539,13 @@ export class Operator {
   private async gasPrice(): Promise<bigint> {
     try {
       const p = await this.client.getGasPrice()
-      return p > 0n ? p : FALLBACK_GAS_PRICE
-    } catch {
-      return FALLBACK_GAS_PRICE
+      if (p > 0n) return p
+    } catch (e) {
+      // otto/mamoru#61: FALLBACK_GAS_PRICE is a Base figure: off Base nothing is priced or sent on a guess.
+      if (this.offBase()) throw Object.assign(new HttpError(503, 'GAS_PRICE_UNAVAILABLE', 'the network fee could not be read just now: nothing was sent, try again in a minute'), { cause: e })
     }
+    if (this.offBase()) throw new HttpError(503, 'GAS_PRICE_UNAVAILABLE', 'the network fee could not be read just now: nothing was sent, try again in a minute')
+    return FALLBACK_GAS_PRICE
   }
 
   private gasOf(kind: OwnerKind | SponsoredKind): bigint {
@@ -1538,13 +1582,13 @@ export class Operator {
       return {
         refund: { safeTxGas: this.gasOf(kind), baseGas, gasPrice, refundReceiver: this.relayer.address as Address },
         feeWei,
-        line: `Your Safe pays this transaction's network fee to Mamoru's relayer, at most about ${fmtUnits(feeWei, 18)} ETH (sponsored transactions are used up until ${until})`,
+        line: `Your Safe pays this transaction's network fee to Mamoru's relayer, at most about ${fmtUnits(feeWei, 18)} ${this.nativeSymbol()} (sponsored transactions are used up until ${until})`,
       }
     }
     if (kind === 'stop' && revokeOnly && !sponsorRefusal(policy, own, all, 'revoke', 0n, at)) return { sponsorKind: 'revoke' }
     // Rounded up to what fmtUnits shows (6 decimals), so the amount named is always enough.
     const short = ((feeWei - eth + 999_999_999_999n) / 1_000_000_000_000n) * 1_000_000_000_000n
-    throw new HttpError(429, no.code, `Mamoru has paid for as many of this account's transactions as it can today. Send at least ${fmtUnits(short, 18)} ETH to your Safe ${live.safe} so it pays its own network fee, or try again after ${until}`)
+    throw new HttpError(429, no.code, `Mamoru has paid for as many of this account's transactions as it can today. Send at least ${fmtUnits(short, 18)} ${this.nativeSymbol()} to your Safe ${live.safe} so it pays its own network fee, or try again after ${until}`)
   }
 
   /**
@@ -1571,7 +1615,7 @@ export class Operator {
       // otto/mamoru#15: the static estimate counts the reserve swap too (the simulation sees it).
       const gas = await this.activationGas(live, batch.calls, grants.length, block, reserve ? 400_000n + BigInt(grants.length) * STATIC_GAS_PER_SESSION + STATIC_GAS_RESERVE_SWAP : undefined)
       if (gas <= ACTIVATION_GAS_BUDGET || i >= droppable.length) {
-        if (keys.length < allKeys.length) console.log(`[activate] ${live.safe} ~${gas} gas: dropped ${allKeys.filter((k) => !keys.includes(k)).join(', ')} to fit Base's per-tx gas cap`)
+        if (keys.length < allKeys.length) console.log(`[activate] ${live.safe} ~${gas} gas: dropped ${allKeys.filter((k) => !keys.includes(k)).join(', ')} to fit ${this.chainName()}'s per-tx gas cap`)
         return { keys, grants, batch }
       }
       keys = keys.filter((k) => !droppable[i]!.includes(k))
@@ -1597,7 +1641,7 @@ export class Operator {
     try {
       // One call or many, through MultiSendCallOnly: the same execution as the owner transaction (a single call is sent
       // to its target directly; through MultiSend it costs a little more, so the figure stays on the safe side).
-      const ms = multiSendCallOnly(calls.map((c) => ({ to: c.to, value: c.value ?? 0n, data: c.data })))
+      const ms = multiSendCallOnly(calls.map((c) => ({ to: c.to, value: c.value ?? 0n, data: c.data })), this.cfg.registry)
       const data = encodeFunctionData({ abi: storageAccessibleAbi, functionName: 'simulateAndRevert', args: [ms.to, ms.data] })
       const [res] = await simulateCalls(this.client, [{ from: this.relayer.address, to: live.safe, data }], block)
       if (!res || res.returnData.length < 2 + 64 * 2 || BigInt(res.returnData.slice(0, 66)) !== 1n) return null
@@ -1806,7 +1850,7 @@ export class Operator {
     const built = new Map<number, { a: Awaited<ReturnType<Operator['approval']>>; calls: ReturnType<typeof revocationCalls>; gas: bigint; simulated: boolean }>()
     const build = async (ks: string[]) => {
       const a = await this.approval(acc, live, policy, r, cap, ks, mode, reserve)
-      const calls = [...revocationCalls(revokes), ...a.batch.calls]
+      const calls = [...revocationCalls(revokes, this.cfg.registry), ...a.batch.calls]
       const fallback = overheadGas + a.stored.reduce((n, g) => n + estimateSessionGas(g.grant.actions.length), 0n)
       // The gas LIMIT the owner transaction needs, before refunds (a revoke clears storage: t8-fork measured
       // eth_estimateGas 13.78M against a receipt of 11.31M on the v5 move's first transaction), from one simulation of
@@ -1976,7 +2020,7 @@ export class Operator {
     let ks = keys
     for (let i = 0; ; i++) {
       const { sessionKey, stored, batch } = await this.approval(acc, live, policy, r, cap, ks)
-      const calls = [...revocationCalls(revokes), ...batch.calls]
+      const calls = [...revocationCalls(revokes, this.cfg.registry), ...batch.calls]
       const gas = stored.length ? await this.activationGas(live, calls, stored.length, r.block) : 0n
       if (stored.length && gas <= RENEW_GAS_BUDGET) {
         const dropped = keys.filter((k) => !ks.includes(k))
@@ -2532,7 +2576,7 @@ export class Operator {
     // value, so a settings pull in the middle cannot make them disagree.
     const cap = this.capFor(acc)
     if (r.usdc > cap) throw depositOverCap(r.usdc, cap)
-    if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
+    if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc, this.chainName())
     const policy = this.cfg.policy
     // otto/mamoru#15: a Safe holding enough USDC buys its own gas reserve in this very transaction (self-reserve.ts):
     // the relayer then sends no top-up. Any other start keeps the relayer's top-up, within the activation budget.
@@ -2548,7 +2592,7 @@ export class Operator {
       const days = Math.round(policy.session.validitySeconds / 86_400)
       const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!, this.cfg.registry)} ${b.preference / 100}%`)
       const summary = [
-        `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
+        `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on ${this.chainName()}`,
         ...reserveLine,
         r.usdc > 0n
           ? `Let Mamoru's engine keep your ${fmtUsdc(invested)} USDC invested across Uniswap v3 ${pools.join(', ')}`
@@ -2575,7 +2619,7 @@ export class Operator {
     const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!, this.cfg.registry)} ${b.preference / 100}%`)
     if (pools.length > 1) {
       const summary = [
-        `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
+        `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on ${this.chainName()}`,
         ...reserveLine,
         r.usdc > 0n
           ? `Let Mamoru's engine keep your ${fmtUsdc(invested)} USDC invested across Uniswap v3 ${pools.join(', ')}`
@@ -2589,15 +2633,22 @@ export class Operator {
       ]
       return this.hold(acc, live, 'activate', batch.calls, summary, { grants: stored, capUsdc: cap.toString(), ...bind })
     }
+    // One pool: its label and its token other than USDC, read from the registry ("USDC/cbBTC 0.05%" and "cbBTC" on Base,
+    // as these lines always said; "WMON/USDC 0.30%" and "WMON" on Monad, otto/mamoru#61).
+    const onePool = policy.buckets.find((b) => b.pools[0])?.pools[0]
+    if (!onePool) throw new Error(`${policy.policyId} allocates to no pool`)
+    const oneLabel = poolLabel(onePool, this.cfg.registry)
+    const oneEntry = entry(onePool, this.cfg.registry)
+    const volatile = oneEntry.token0 === 'USDC' ? oneEntry.token1! : oneEntry.token0!
     const summary = [
-      `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on Base`,
+      `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on ${this.chainName()}`,
       ...reserveLine,
       r.usdc > 0n
-        ? `Let Mamoru's engine allocate your ${fmtUsdc(invested)} USDC into Uniswap v3 USDC/cbBTC 0.05%`
-        : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(cap)} USDC) into Uniswap v3 USDC/cbBTC 0.05% as soon as it arrives`,
-      `Engine key ${sessionKey} may swap USDC->cbBTC (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap) and mint that pool`,
+        ? `Let Mamoru's engine allocate your ${fmtUsdc(invested)} USDC into Uniswap v3 ${oneLabel}`
+        : `Let Mamoru's engine allocate your deposit (up to ${fmtUsdc(cap)} USDC) into Uniswap v3 ${oneLabel} as soon as it arrives`,
+      `Engine key ${sessionKey} may swap USDC->${volatile} (max ${fmtUsdc(caps.usdcSwapPerCall ?? 0n)} per swap) and mint that pool`,
       ...(liveManage.length
-        ? [`It may also act on any Uniswap v3 position your Safe owns, in any pool: take liquidity out, collect fees, burn it once empty, and convert cbBTC back to USDC`]
+        ? [`It may also act on any Uniswap v3 position your Safe owns, in any pool: take liquidity out, collect fees, burn it once empty, and convert ${volatile} back to USDC`]
         : []),
       paidToSafe,
     ]
@@ -2610,6 +2661,8 @@ export class Operator {
    * rate wins), priced at that pool's TWAP, and confirmed by a quote of the exact amount.
    */
   private async selfReserve(safe: Address, r: SafeRead): Promise<{ reserve: LiveGasReserve; route: string } | null> {
+    // otto/mamoru#61: the reserve swap is priced and routed in WETH on Base's pools. Off Base the relayer tops the Safe up.
+    if (this.offBase()) return null
     const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
     let probe: { receive: LiveReceive; quoted: bigint; route: string; pool: string } | null = null
     if (r.eth < target && r.usdc > 0n) {
@@ -2669,13 +2722,15 @@ export class Operator {
     const avail = WITHDRAW_ASSETS.find((a) => a.asset === asset)
     if (!avail) throw new HttpError(400, 'BAD_REQUEST', 'asset must be USDC, EURC, ETH or JPYC')
     if (!avail.available) throw new HttpError(409, 'ASSET_UNAVAILABLE', avail.reason ?? `${asset} is not available`)
+    // otto/mamoru#61: payouts in another asset route through Base's pools; off Base a withdrawal pays USDC only.
+    if (asset !== 'USDC' && this.offBase()) throw new HttpError(409, 'ASSET_UNAVAILABLE', `${asset} payouts are not available on ${this.chainName()}: withdraw USDC`)
     const payoutCap = PAYOUT_CAP_USDC[asset]
     if (payoutCap !== undefined && amount > payoutCap) throw new HttpError(409, 'CAP_EXCEEDED', `${ASSET_LABEL[asset] ?? asset} payouts are capped at ${fmtUsdc(payoutCap)} USD each`)
     const to = getAddress(req.to)
     if (to.toLowerCase() === live.safe.toLowerCase()) throw new HttpError(400, 'BAD_REQUEST', 'recipient is the Safe itself')
     // An undeployed Safe can still pay out: the relayer deploys it right before the owner transfer (executeOwner).
     const r = await this.readOf(acc, live.safe)
-    if (!r.deployed && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc)
+    if (!r.deployed && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc, this.chainName())
     const slip = this.policyOf(acc).execution.slippageBps
     let reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[] = []
     let swaps: QuotedSwap[] = []
@@ -2689,7 +2744,7 @@ export class Operator {
     const calls = [
       ...closeCalls(live.safe, reduce.map((x) => x.lp), deadline, false, this.cfg.registry),
       ...swapBackCalls(live.safe, swaps, this.cfg.registry),
-      ...transferBatch({ account: live.safe, to, amountUsdc: amount, reduce: [], deadline, receive: out?.receive }),
+      ...transferBatch({ account: live.safe, to, amountUsdc: amount, reduce: [], deadline, receive: out?.receive, registry: this.cfg.registry }),
     ]
     const probe = out ? balanceProbe(asset, to, this.cfg.registry) : undefined
     const sim = await this.checkFromSafe(live.safe, calls, r.block, probe)
@@ -2699,7 +2754,7 @@ export class Operator {
     }
     const short = `${to.slice(0, 6)}…${to.slice(-4)}`
     const summary = [
-      ...(r.deployed ? [] : [`Create your Safe ${live.safe} on Base`]),
+      ...(r.deployed ? [] : [`Create your Safe ${live.safe} on ${this.chainName()}`]),
       ...reduce.map((x) => `Withdraw ${(x.bps / 100).toFixed(2)}% of position #${x.pos.tokenId} (${poolLabel(x.pos.pool, this.cfg.registry)})`),
       ...swaps.map((sw) => `Swap ${sw.amountIn} ${sw.token} units to at least ${fmtUsdc(sw.amountOutMinimum)} USDC`),
       ...(out
@@ -2729,6 +2784,7 @@ export class Operator {
     const assets = await Promise.all(
       WITHDRAW_ASSETS.map(async (a) => {
         if (!a.available || a.asset === 'USDC') return a
+        if (this.offBase()) return { asset: a.asset, available: false, reason: `Not available on ${this.chainName()}: withdraw USDC` }
         try {
           await this.receiveQuote(a.asset, 1_000_000n, block, this.cfg.policy.execution.slippageBps)
           return a
@@ -3263,7 +3319,7 @@ export class Operator {
     const { deployed } = await readSafeNonce(this.client, live.safe)
     if (!deployed) throw new HttpError(409, 'NOT_DEPLOYED', 'the Safe is not deployed yet')
     if (!revokes.length) throw new HttpError(409, 'NOTHING_TO_STOP', 'no grant to revoke')
-    const calls = stopBatch({ account: live.safe, permissionIds: revokes, positions: [], deadline: 0n })
+    const calls = stopBatch({ account: live.safe, permissionIds: revokes, positions: [], deadline: 0n, registry: this.cfg.registry })
     const summary = [
       `Revoke the engine's ${revokes.length} session grant(s)`,
       fallback ? 'Your positions could not be read just now: they stay in your Safe as they are, and Stop again closes them' : 'Your positions and tokens stay in your Safe as they are; Stop again closes them',
@@ -3294,7 +3350,7 @@ export class Operator {
     if (!revokes.length && !positions.length && !swaps.length) throw new HttpError(409, 'NOTHING_TO_STOP', 'no grant, no position and nothing to swap back')
     const deadline = (await this.client.getBlock()).timestamp + 1800n
     const calls = [
-      ...(revokes.length || positions.length ? stopBatch({ account: live.safe, permissionIds: revokes, positions, deadline }) : []),
+      ...(revokes.length || positions.length ? stopBatch({ account: live.safe, permissionIds: revokes, positions, deadline, registry: this.cfg.registry }) : []),
       ...swapBackCalls(live.safe, swaps, this.cfg.registry),
     ]
     await this.checkFromSafe(live.safe, calls, r.block, undefined)
@@ -3347,7 +3403,7 @@ export class Operator {
     }
     let signature: Hex
     try {
-      signature = browserOwnerSignature(body, p.safeTxHash)
+      signature = browserOwnerSignature(body, p.safeTxHash, this.cfg.registry)
     } catch (e) {
       // No Safe signature can be built from this body, so there is nothing to ask the chain about. The shape is kept for diagnosis.
       logErr(`[owner] OWNER_SIG_UNPARSEABLE ${acc.accountKey} ${kind} ${JSON.stringify(bodyShape(body))}:`, e)
@@ -3358,7 +3414,7 @@ export class Operator {
     // to anything): at least two independent providers of MAMORU_RPC_TRUSTED must each run the exact sequence the
     // relayer would send and see execTransaction return true, and none may see it revert. Without that pool the
     // signature is refused; a pool that cannot answer is a retryable 503.
-    if (!(await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn))) {
+    if (!(await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn, this.cfg.registry))) {
       const truth = await this.quorum(live, execData(p.tx, signature))
       if (truth.outcome === 'unavailable') {
         logErr(`[owner] ${acc.accountKey} ${kind} signature not verified off chain and not proven by the trusted providers, retryable:`, truth.why)
@@ -3605,7 +3661,7 @@ export class Operator {
     // The mirror of the on-chain verifier. When it says yes the signature is proven. When it says no, the trusted
     // providers decide (quorum): their agreement is the proof, any revert is the refusal, one provider alone is neither.
     const data = execData(p.tx, signature)
-    let proven = await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn)
+    let proven = await verifyOwnerSignature(signature, p.safeTxHash, live.webauthn, this.cfg.registry)
     if (!proven) {
       const truth = await this.quorum(live, data)
       if (truth.outcome === 'revert') return { code: 'BAD_SIGNATURE' }
@@ -3967,7 +4023,7 @@ export class Operator {
     // can hold it (the wait between tries, budget, cap, relayer short): an attempt that landed after all must reach
     // reconciliation while its transaction is still recent.
     const tried = a.execSent === true
-    const live = liveAccountFromContext(acc.ctx)
+    const live = liveAccountFromContext(acc.ctx, this.cfg.registry)
     if (tried) {
       const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
       if (deployed && nonce !== a.tx.nonce) return this.nonceMoved(acc, a, nonce)
@@ -4183,7 +4239,7 @@ export class Operator {
       // otto/mamoru#15: what the batch's own swap pays into the Safe (at least its minimum, or the whole transaction
       // reverts) counts as held: a self-funded activation reserves only its deploy and exec gas, never a top-up.
       const eth = (await this.client.getBalance({ address: live.safe })) + BigInt(p.reserveWei ?? 0)
-      const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
+      const target = this.cfg.policy.gasReserveWei + (await this.topUpMarginWei())
       const reserved = this.chargeActivation(acc, op.opId, ((deployed ? 0n : DEPLOY_GAS) + ACTIVATE_TX_GAS) * price + (eth < target ? target - eth : 0n))
       if ('code' in reserved) return this.failOwner(acc, op, reserved.code)
       activation = reserved
@@ -4248,7 +4304,7 @@ export class Operator {
       }
     }
     if (p.kind === 'activate') {
-      const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
+      const target = this.cfg.policy.gasReserveWei + (await this.topUpMarginWei())
       // otto/mamoru#15: the batch's own swap fills the reserve (or the whole activation reverts): no top-up for it.
       const own = BigInt(p.reserveWei ?? 0)
       if (own > 0n) console.log(`[owner] ${op.opId} the batch buys the gas reserve: at least ${own} wei into ${safe}`)
@@ -4668,7 +4724,7 @@ export class Operator {
       tokenId,
       admittedTokenIds: [tokenId],
     })
-    return { name: `manage:${tokenId}`, grant, permissionId: permissionIdOf(toSmartSession(grant)) }
+    return { name: `manage:${tokenId}`, grant, permissionId: permissionIdOf(toSmartSession(grant, undefined, this.cfg.registry)) }
   }
 
   /** The live demo does not enable manage grants: every manage session is known to the engine but revoked, so decide never harvests. */
@@ -4677,7 +4733,7 @@ export class Operator {
   }
 
   private startLoop(acc: AccountState): void {
-    const refusal = writeRefusal(this.cfg.registry)
+    const refusal = this.writeRefusal()
     if (refusal) throw new ReasonError('CHAIN_UNSUPPORTED', `${acc.accountKey} engine not started: ${refusal}`)
     this.stopLoop(acc.accountKey)
     if (!acc.sessionKey) throw new Error(`${acc.accountKey} has no session key`)
@@ -4704,6 +4760,9 @@ export class Operator {
         carried: acc.carried ?? [],
         maxWaitBlocks: this.cfg.maxWaitBlocks,
         poolCache: this.poolCache,
+        // otto/mamoru#61: off Base the engine reads the chain's registry, prices gas on its native pool and, where the
+        // chain charges the gas limit, sizes each userOp from its simulation. On Base none of these is set (as before).
+        ...(this.offBase() ? { registry: this.cfg.registry, nativePricePool: nativePricePool(this.cfg.registry), gasModel: chainOf(this.cfg.registry.chainId).gasModel } : {}),
         // The only owner intent the operator has today: a stop on its way pauses the engine (US6).
         intents: () => ({ paused: this.stopInFlight(acc), exitRequested: false }),
       },
@@ -5003,8 +5062,8 @@ function depositOverCap(usdc: bigint, cap: bigint): HttpError {
   return new HttpError(409, 'DEPOSIT_OVER_CAP', `this account holds ${fmtUsdc(usdc)} USDC, over the ${fmtUsdc(cap)} USDC cap; withdraw at least ${fmtUsdcUp(usdc - cap)} USDC to start`)
 }
 
-function belowDeployMinimum(usdc: bigint): HttpError {
-  return new HttpError(409, 'BELOW_DEPLOY_MINIMUM', `this account holds ${fmtUsdc(usdc)} USDC; Mamoru creates the account on Base from ${fmtUsdc(MIN_DEPLOY_USDC)} USDC`)
+function belowDeployMinimum(usdc: bigint, chain = 'Base'): HttpError {
+  return new HttpError(409, 'BELOW_DEPLOY_MINIMUM', `this account holds ${fmtUsdc(usdc)} USDC; Mamoru creates the account on ${chain} from ${fmtUsdc(MIN_DEPLOY_USDC)} USDC`)
 }
 
 const COLLECT_SELECTOR = toFunctionSelector('collect((uint256,address,uint128,uint128))')

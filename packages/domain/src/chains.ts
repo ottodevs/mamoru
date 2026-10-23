@@ -19,6 +19,8 @@ export type ChainDescriptor = {
   chainId: ChainId
   name: string
   native: { symbol: string; decimals: 18 }
+  /** Registry name of the ERC-20 wrapping the native asset (SwapRouter02's WETH9 on the chain). */
+  wrappedNative: string
   /** Reference block time, to convert seconds into blocks. */
   blockTimeMs: number
   /** Tag the chain serves as confirmation; `null` when none was verified (CONFIG_CHAIN_FINALITY_UNKNOWN). */
@@ -37,6 +39,7 @@ export const BASE_CHAIN: ChainDescriptor = {
   chainId: 8453,
   name: 'Base',
   native: { symbol: 'ETH', decimals: 18 },
+  wrappedNative: 'WETH',
   blockTimeMs: 2_000,
   finalityTag: 'safe',
   gasModel: 'gas_used',
@@ -58,6 +61,7 @@ export const MONAD_CHAIN: ChainDescriptor = {
   chainId: 143,
   name: 'Monad',
   native: { symbol: 'MON', decimals: 18 },
+  wrappedNative: 'WMON',
   blockTimeMs: 300,
   finalityTag: 'finalized',
   gasModel: 'gas_limit',
@@ -85,3 +89,45 @@ export function chainOf(chainId: number): ChainDescriptor {
  * each supported chain and each of its test networks. Never written by hand.
  */
 export const FORBIDDEN_LAB_CHAIN_IDS: readonly number[] = SUPPORTED_CHAINS.flatMap((c) => [c.chainId, ...c.testnetChainIds])
+
+/**
+ * otto/mamoru#61: the chains other than Base that an operator may be opted into writing to. Base is written to as it
+ * always was (MAMORU_LIVE=1 on chain 8453) and is never named here; a chain joins this list only once every
+ * Base-bound builder on its write path reads that chain's registry instead.
+ */
+export const OPT_IN_WRITE_CHAIN_IDS: readonly ChainId[] = [143]
+
+/** The env variable that opts an operator into writing to a chain of OPT_IN_WRITE_CHAIN_IDS. Unset: Base only. */
+export const CHAIN_WRITES_ENV = 'MAMORU_CHAIN_WRITES'
+
+/**
+ * otto/mamoru#61: the chain ids MAMORU_CHAIN_WRITES opts into, comma-separated. Unset or empty: none (default; Base
+ * behaviour unchanged). Anything that is not a chain of OPT_IN_WRITE_CHAIN_IDS (Base included, a typo, a testnet) is
+ * refused with CONFIG_INVALID rather than ignored, so a misconfigured flag stops the process instead of half applying.
+ */
+export function chainWritesOptIn(env: Record<string, string | undefined>): readonly ChainId[] {
+  const raw = env[CHAIN_WRITES_ENV]
+  if (raw === undefined || raw.trim() === '') return []
+  const out: ChainId[] = []
+  for (const part of raw.split(',').map((x) => x.trim())) {
+    const id = /^[0-9]+$/.test(part) ? Number(part) : Number.NaN
+    const found = OPT_IN_WRITE_CHAIN_IDS.find((c) => c === id)
+    if (found === undefined) throw new ReasonError('CONFIG_MODE_INVALID', `${CHAIN_WRITES_ENV}=${raw}: ${part} is not a chain that can be opted into (${OPT_IN_WRITE_CHAIN_IDS.join(', ')})`)
+    if (!out.includes(found)) out.push(found)
+  }
+  return out
+}
+
+/**
+ * Whether a live process (MAMORU_LIVE=1) may sign and send on `chainId`: Base, as always, or a chain this process
+ * was explicitly opted into (chainWritesOptIn). A malformed opt-in allows nothing beyond Base.
+ */
+export function liveChainAllowed(chainId: number, env: Record<string, string | undefined>): boolean {
+  if (env.MAMORU_LIVE !== '1') return false
+  if (chainId === BASE_CHAIN.chainId) return true
+  try {
+    return chainWritesOptIn(env).some((c) => c === chainId)
+  } catch {
+    return false
+  }
+}

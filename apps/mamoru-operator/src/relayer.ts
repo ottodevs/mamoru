@@ -1,6 +1,6 @@
 import { createWalletClient, defineChain, http, keccak256, parseAbi, type Chain, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
-import { ReasonError, type Address } from '@mamoru/domain'
+import { ReasonError, chainOf, isChainId, type Address } from '@mamoru/domain'
 import { Lock } from './lock.ts'
 import { logErr } from './metrics.ts'
 
@@ -13,12 +13,29 @@ const gasPriceOracleAbi = parseAbi(['function getL1Fee(bytes) view returns (uint
 const L1_FEE_FALLBACK_WEI = 100_000_000_000_000n
 /** How long the nonce of the last accepted send overrules a provider count that has not caught up with it. */
 const LAST_SENT_MS = 120_000
+/**
+ * otto/mamoru#61: the margin over eth_estimateGas on a chain that charges the gas LIMIT (Monad): every unit of margin is
+ * paid whether used or not, so 10% instead of 30%. Elsewhere 30%, as always.
+ */
+export const GAS_LIMIT_CHAIN_MARGIN = { num: 11n, den: 10n } as const
+
+/**
+ * How the relayer sizes and bounds a transaction on `chainId`. A supported chain that charges the gas limit (Monad)
+ * gets its own per-tx cap, the tight margin and no OP-stack L1 data fee; every other chain id (Base, Ethereum for
+ * bridge-out, a lab fork) keeps exactly what the relayer always did: Base's cap, 30%, and the L1 fee oracle.
+ */
+export function relayerGasProfile(chainId: number): { cap: bigint; margin: { num: bigint; den: bigint }; l1Fee: boolean; native: string } {
+  const d = isChainId(chainId) ? chainOf(chainId) : null
+  if (d && d.gasModel === 'gas_limit') return { cap: d.perTxGasCap ?? TX_GAS_CAP, margin: GAS_LIMIT_CHAIN_MARGIN, l1Fee: d.l1DataFee, native: d.native.symbol }
+  return { cap: TX_GAS_CAP, margin: { num: 13n, den: 10n }, l1Fee: true, native: 'ETH' }
+}
 
 /** The relayer EOA: pays gas for Safe deploys, owner execTransactions, top-ups and handleOps bundles. One send at a time. */
 export class Relayer {
   readonly account: PrivateKeyAccount
   private readonly lock = new Lock()
   private readonly chain: Chain
+  private readonly gas: ReturnType<typeof relayerGasProfile>
   /** Nonce and time of the last transaction a provider accepted from this process. */
   private lastSent: { nonce: number; at: number } | null = null
 
@@ -34,7 +51,8 @@ export class Relayer {
     private readonly refusal: string | null = null,
   ) {
     this.account = privateKeyToAccount(key)
-    this.chain = defineChain({ id: chainId, name: `chain-${chainId}`, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } })
+    this.gas = relayerGasProfile(chainId)
+    this.chain = defineChain({ id: chainId, name: `chain-${chainId}`, nativeCurrency: { name: this.gas.native === 'ETH' ? 'Ether' : this.gas.native, symbol: this.gas.native, decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } })
   }
 
   get address(): Address {
@@ -61,6 +79,8 @@ export class Relayer {
 
   /** The L1 data fee of `serialized` now, or a fixed bound above it when the oracle cannot answer. */
   private async l1Fee(serialized: Hex): Promise<bigint> {
+    // otto/mamoru#61: a chain without an L1 data fee (Monad) has no oracle to ask and nothing to add.
+    if (!this.gas.l1Fee) return 0n
     try {
       return await this.client.readContract({ address: GAS_PRICE_ORACLE, abi: gasPriceOracleAbi, functionName: 'getL1Fee', args: [serialized] })
     } catch (e) {
@@ -88,8 +108,9 @@ export class Relayer {
     return this.lock.run(async () => {
       const wallet = createWalletClient({ account: this.account, chain: this.chain, transport: http(this.rpcUrl, { timeout: 60_000 }) })
       // Base rejects a tx over 2^24 gas (EIP-7825): the 30% margin must not push a fitting estimate over the cap.
-      const est = tx.gas ?? ((await this.client.estimateGas({ account: this.account.address, to: tx.to, data: tx.data, value: tx.value })) * 13n) / 10n
-      const gas = est > TX_GAS_CAP ? TX_GAS_CAP : est
+      // otto/mamoru#61: on a gas-limit chain the margin is 10% and the cap is that chain's (relayerGasProfile).
+      const est = tx.gas ?? ((await this.client.estimateGas({ account: this.account.address, to: tx.to, data: tx.data, value: tx.value })) * this.gas.margin.num) / this.gas.margin.den
+      const gas = est > this.gas.cap ? this.gas.cap : est
       // A load-balanced provider can answer the count from a node that has not seen the previous transaction yet, and
       // the node that has would refuse the reused nonce. For LAST_SENT_MS after a send the count is never taken below
       // the one after it; later the count alone decides, so a transaction that was dropped cannot leave a gap for good.

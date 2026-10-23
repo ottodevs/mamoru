@@ -1,4 +1,4 @@
-import { BASE_CHAIN_ID, FORBIDDEN_LAB_CHAIN_IDS, type ReasonCode } from '@mamoru/domain'
+import { BASE_CHAIN_ID, FORBIDDEN_LAB_CHAIN_IDS, liveChainAllowed, type ReasonCode } from '@mamoru/domain'
 
 /** Plan §10: the states of one operation. */
 export const OP_STATES = [
@@ -82,11 +82,14 @@ export type SignContext = {
 
 /**
  * Live mode (sprint amendment 2026-09-26, owner-approved real-funds path):
- * signing is allowed only on Base and only when the process runs with
- * MAMORU_LIVE=1. Production stays DRY_RUN_STOP; the lab is unchanged.
+ * signing is allowed only when the process runs with MAMORU_LIVE=1, on Base or
+ * (otto/mamoru#61) on a chain the process was explicitly opted into with
+ * MAMORU_CHAIN_WRITES (`liveChainAllowed`). Production stays DRY_RUN_STOP; the lab is unchanged.
  */
 export function liveSigningAllowed(chainId: number): boolean {
-  return chainId === BASE_CHAIN_ID && typeof process !== 'undefined' && process.env?.MAMORU_LIVE === '1'
+  if (typeof process === 'undefined' || !process.env) return false
+  if (chainId === BASE_CHAIN_ID) return process.env.MAMORU_LIVE === '1'
+  return liveChainAllowed(chainId, process.env)
 }
 
 /**

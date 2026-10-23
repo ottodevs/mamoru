@@ -1,5 +1,5 @@
 import type { PublicClient } from 'viem'
-import { BASE_CHAIN_ID, ReasonError, type Address, type ChainId } from '@mamoru/domain'
+import { BASE_CHAIN_ID, ReasonError, chainOf, isChainId, type Address, type ChainId } from '@mamoru/domain'
 import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
 import { Batch, balanceRead, blockNumberRead, contractRead, createDeployedChecker, multicall3Of, tokenIdReads, type Handle } from '@mamoru/rpc'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
@@ -31,13 +31,37 @@ const Q96 = 1n << 96n
 const Q192 = 1n << 192n
 
 /**
- * otto/mamoru#63: why the operator may not sign or send on `registry`'s chain, or null when it may. Only Base is
- * written to: on any other registry (Monad mainnet, its testnet, or a lab fork of either) the relayer refuses every
- * send, the loopback bundler is not started, owner prepares and submits answer CHAIN_READ_ONLY and no engine or
- * armed loop starts. Reading and valuing a Safe stay open. A live path for another chain lifts this for it alone.
+ * otto/mamoru#63: why the operator may not sign or send on `registry`'s chain, or null when it may. Base is written
+ * to as always. Any other registry (Monad mainnet, its testnet, or a lab fork of either) is read only: the relayer
+ * refuses every send, the loopback bundler is not started, owner prepares and submits answer CHAIN_READ_ONLY and no
+ * engine or armed loop starts. Reading and valuing a Safe stay open.
+ *
+ * otto/mamoru#61: `writes` lifts this for one chain alone: its registry chain is in the MAMORU_CHAIN_WRITES opt-in
+ * (`writes.optIn`) AND the RPC answers that very chain id (`writes.chainId`), never a lab fork id of it. boot.ts only
+ * passes it once the chain's write registry is verified (`writeRegistry`).
  */
-export function writeRefusal(registry: Registry): string | null {
-  return registry.chainId === BASE_CHAIN_ID ? null : `read only on ${registry.chain} (registry chain ${registry.chainId}): the operator signs and sends nothing off Base`
+export function writeRefusal(registry: Registry, writes?: { chainId: number; optIn: readonly number[] }): string | null {
+  if (registry.chainId === BASE_CHAIN_ID) return null
+  if (writes && writes.chainId === registry.chainId && writes.optIn.includes(registry.chainId)) return null
+  return `read only on ${registry.chain} (registry chain ${registry.chainId}): the operator signs and sends nothing off Base${writes?.optIn.includes(registry.chainId) ? ' (MAMORU_CHAIN_WRITES names it, but the RPC is not that chain)' : ''}`
+}
+
+/**
+ * otto/mamoru#61: the pool that prices the chain's native asset in USDC for the engine's gas cost (decide). Absent for
+ * a chain: no engine runs there (`nativePricePool` throws).
+ */
+const NATIVE_PRICE_POOLS: Record<ChainId, string> = {
+  8453: 'pool:WETH/USDC/3000',
+  143: 'pool:WMON/USDC/3000',
+}
+
+/** The native price pool of `registry`'s chain, a USDC pool of that registry pairing its wrapped native; else CHAIN_UNSUPPORTED. */
+export function nativePricePool(registry: Registry): string {
+  const pool = (NATIVE_PRICE_POOLS as Record<number, string | undefined>)[registry.chainId]
+  const wrapped = isChainId(registry.chainId) ? chainOf(registry.chainId).wrappedNative : null
+  const e = pool && usdcPools(registry).includes(pool) ? entry(pool, registry) : null
+  if (!e || (e.token0 !== wrapped && e.token1 !== wrapped)) throw new ReasonError('CHAIN_UNSUPPORTED', `no native price pool for ${registry.chain}`)
+  return pool!
 }
 
 const usdcPoolsOf = new WeakMap<Registry, string[]>()

@@ -1,5 +1,5 @@
 import { keccak256, stringToHex, toFunctionSelector } from 'viem'
-import { FORBIDDEN_LAB_CHAIN_IDS, BASE_CHAIN_ID, ReasonError, type Address, type Hex } from '@mamoru/domain'
+import { FORBIDDEN_LAB_CHAIN_IDS, BASE_CHAIN_ID, MONAD_CHAIN, ReasonError, type Address, type Hex } from '@mamoru/domain'
 import { address, registryFor, type Registry } from '@mamoru/registry'
 import { grantKey } from './grants.ts'
 import { MAX_USAGE_LIMIT, type GrantName, type GrantTemplate, type PolicyVersion, type RefTemplate, type ResolvedActionRule, type SessionGrant } from './types.ts'
@@ -50,7 +50,7 @@ export function computeCaps(policy: PolicyVersion, depositUsdc: bigint, prices: 
 }
 
 export function assertPolicyChain(policy: PolicyVersion, chainId: number): void {
-  const ok = policy.chain === 'base' ? chainId === BASE_CHAIN_ID : !FORBIDDEN_LAB_CHAIN_IDS.includes(chainId)
+  const ok = policy.chain === 'base' ? chainId === BASE_CHAIN_ID : policy.chain === 'monad' ? chainId === MONAD_CHAIN.chainId : !FORBIDDEN_LAB_CHAIN_IDS.includes(chainId)
   if (!ok) throw new ReasonError('SIGN_CHAIN_NOT_ALLOWED', `${policy.policyId} on chain ${chainId}`)
 }
 
