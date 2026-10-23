@@ -1333,12 +1333,9 @@
   .rate-value {
     font-size: 2.1rem;
   }
-  .rate-what {
-    display: block;
-    margin-top: 0.2rem;
-  }
-  .rate-dot {
-    display: none;
+  .rate-sub {
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
   }
   .dash-title {
     font-size: 1.4rem;
