@@ -15,7 +15,7 @@ const UPSERT_TAIL = `ON CONFLICT(account_key, day) DO UPDATE SET hits = hits + 1
 
 /**
  * otto/mamoru#64: the row carries the chain of the account's sleeve (read from accounts, Base when the account is
- * gone), so DAU splits by chain. Before migrations/d1/XXXX_chain_keyed_sleeves.sql is applied the column is not
+ * gone), so DAU splits by chain. Before migrations/d1/0017_chain_keyed_sleeves.sql is applied the column is not
  * there yet: the write falls back to the exact statement it ran before, never a 500 or a lost row.
  */
 export async function upsertActivity(db: Db, accountKey: string, now: Date): Promise<void> {

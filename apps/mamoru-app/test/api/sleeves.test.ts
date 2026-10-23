@@ -217,7 +217,7 @@ describe('review of PR #115: a Monad sleeve only where someone can operate it, f
   })
 })
 
-describe('migrations/d1/XXXX_chain_keyed_sleeves.sql', () => {
+describe('migrations/d1/0017_chain_keyed_sleeves.sql', () => {
   const dir = join(import.meta.dir, '../../../../migrations/d1')
   const files = readdirSync(dir).filter((f) => f.endsWith('.sql')).sort()
   const mine = files.find((f) => f.endsWith('_chain_keyed_sleeves.sql'))!
