@@ -1,4 +1,4 @@
-# 008: Agent Lab, a chat that designs and runs Lab studies
+# 008: Strategy Lab in /ops, a bench with an agent inside
 
 Ticket: otto/mamoru#175. Status: spec. Research, thesis checks and both concept probes are done (links below);
 nothing here is built yet.
@@ -11,8 +11,11 @@ Lab 23/24", PR #67), and the fork harness holds 45 scenarios. But every study ne
 write CLI flags, read a text dump. Brais cannot run one. The public `/lab` replays three recorded tapes and is hard to
 read for anyone who does not already know what a tick, a gate trail or a block is.
 
-Ot (18-20 Oct): a new Lab, built from scratch, in the private `/ops`. A chat where you ask an agent for scenarios or
-tests; the agent designs them, runs them on the real engine, and shows the study visually. Built so that it can later
+Ot (18-22 Oct): a new Lab, built from scratch, in the private `/ops`: a full lab dashboard (the strategy bench), with a
+chat inside it as one panel, where you ask an agent for scenarios or tests; the agent designs them, runs them on the
+real engine, and the bench shows the study. The layout comes from the Strategy Lab study of 31 Jul (experiment on the
+left, the bench in the centre, "try a scenario" on the right, a timeline and Events / Compare / Diagnostics below),
+redrawn in Mamoru's language. Built so that it can later
 be sold as an agentic service over x402 and as part of a Mamoru premium tier, multichain, with a cost model we can
 quantify to set prices. The public `/lab` stays as it is.
 
@@ -27,12 +30,18 @@ quantify to set prices. The public `/lab` stays as it is.
 | A job is cheap enough to charge per job | Compute + data + infra < 0.01 USD per job (backtest ≈ 64 ms + 0.297 ms per sample); the floor is LLM tokens plus the x402 facilitator fee (0.001 USD per settlement past 1,000/month) | `cost-model-2026-10-18` |
 | Nobody offers this | No LP product has a chat-driven scenario simulator; Almanak is the nearest architecture; no published async x402 job pattern | `sota-2026-10-18` |
 | "Your money vs doing nothing" reads without LP vocabulary | Ot picked view A of the visual PoC (verdict sentence, Mamoru vs hold vs stay in USDC, fees/gas/price split, range band per pool) | PoC-1, artifact `Uh77nzDhLzTa4LbeZUThST` |
+| The bench layout works with real data | Ot approved the bench prototype (22 Oct): 3 windows × 3 strategies from the production engine; it already shows that a 2× range cuts the Feb-2025 loss vs hold from 16.44 to 3.26 USDC and costs 1.85 in the Sep-2026 calm | Prototype artifact `VsgFUusHzAnzes1pHT6juU` |
 
 ## Scope
 
-**v1 (this spec):** `/ops/lab`, Ot and Brais only (the existing `/ops` Google allowlist). Chat threads; the agent runs
-backtests, comparisons and sweeps over the dataset catalog with the policies in `POLICIES` and the overrides
-`PolicyVersion` already accepts; answers render as verified blocks and view-A charts; every job records its cost.
+**Phase 1, the bench (ship first, Ot 23 Oct: "something working now"):** `/ops/lab`, Ot and Brais only (the existing
+`/ops` Google allowlist). The bench of the prototype over every TRAIN window, with the strategies in the catalog
+below; "Run scenario" queues a bench job that the lady runner computes with the production engine and the bench shows
+when done. The chat panel is visible and says it arrives in phase 2. Requirements B-01…B-12.
+
+**Phase 2, the agent:** the chat panel. Threads; the agent runs backtests, comparisons and sweeps through the same
+job queue; answers render as verified blocks that open runs in the bench; every job records its cost. Requirements
+AL-01…AL-70.
 
 **Designed for, not built in v1:** x402 payment and an external endpoint; fork scenarios (anvil) as a tool; Monad
 datasets; a public or premium surface; exporting a study as an engine-settings draft template (006 phase 2 already
@@ -41,7 +50,49 @@ names the Lab as a source).
 **Never:** the agent does not write engine settings or touch the operator, a session key, an account, or any D1
 table outside the Lab tables. The Lab's numbers never appear in the production views (Constitution XVI).
 
-## Requirements
+## Phase 1: the bench (B-01…B-12)
+
+- **B-01 Strategy spec.** A run is `{windowId, base: 'live' | 'guard', widthTicks, deposit}`: `live` is
+  `conservador-live-v2`, `guard` is `conservador-lab-guards-v1`; `widthTicks` overrides `range.widthTicks` of the
+  volatile pools (500…8000, step 500; the stables pool keeps its own width); `deposit` is whole USDC (100…10000).
+  The runner validates the bounds again and refuses anything else (`LAB_SPEC_INVALID`). `windowId` must be a TRAIN
+  window of the dataset manifest (`LAB_HOLDOUT_DENIED` otherwise, AL-12a).
+- **B-02 Run result.** One JSON per run: spec, `policyId`, `resultHash`, `simVersion`, window `{id, label, regime,
+  from, to, market}`, `pools`, `metrics` (end, net, hodl, vsHodl, fees, gas, timeInRangeBps, maxDrawdownBps,
+  returnBps, operations, days), `reasons` (decide reason counts), `ops` (executed: t, kind, pool, gas, fees, code,
+  reason) and `series` (≤ 400 points: t, v, h, price per pool, active band per pool). Amounts in USDC as numbers
+  rounded to 4 decimals. The band comes from an `onSample` hook in `runBacktest` that does not change `resultHash`.
+- **B-03 Seed.** `mamoru-lab-runner seed` computes the catalog matrix (every TRAIN window × {live 2000, live 4000,
+  guard 2000} × 1000 USDC) and publishes it, so the bench opens full. Re-seeding the same spec is a no-op (same hash).
+- **B-04 Jobs.** "Run scenario" writes a `lab_jobs` row `{id, requester, kind: 'bench', spec, status: queued}`;
+  the runner claims, heartbeats and finishes it with the lease and fencing rules of AL-02/AL-02a; a spec whose run
+  already exists finishes at once with that run. Limit: 20 jobs per requester per day, 3 queued at a time.
+- **B-05 Runner API** on the landing Worker (it already serves `/ops` and binds D1 `mamoru` as `MAMORU_DB`):
+  `POST /ops/lab/runner/claim`, `/heartbeat`, `/result`, `/publish` (seed results without a job). Signed with HMAC as in
+  Architecture (method, path, timestamp, nonce, body hash), secret `LAB_RUNNER_SECRET`, never reachable with a session
+  cookie and never without the signature.
+- **B-06 Screen API** behind the `/ops` session: `GET /ops/lab/api/catalog` (windows and strategies present),
+  `GET /ops/lab/api/runs?window=` (summaries), `GET /ops/lab/api/run/:hash` (full run), `POST /ops/lab/api/jobs`
+  (CSRF as the rest of `/ops`), `GET /ops/lab/api/jobs/:id`.
+- **B-07 Bench screen.** The prototype, wired to B-06: window segment; experiment column (capital at the cursor,
+  strategies of the window with their result vs hold, assumptions); centre (verdict sentence written from the runs,
+  Strategy / Hold / USDC tiles, price and active band per pool with the live policy's band as a ghost when another
+  strategy is selected, "your money" sharing the cursor, the sentence for the moment, playback with event jumps);
+  Events / Compare (strategies × this window, strategies × all windows) / Diagnostics; right panel "Try" (window,
+  base, width, deposit, Run) and "Ask the Lab" (phase 2 notice).
+- **B-08 Job feedback.** A queued or running job shows in the experiment column with its state and elapsed time;
+  done adds the strategy to the list and selects it; failed shows the reason code in words.
+- **B-09 Verdict sentences** on the bench are written by code from two runs that pass AL-20c (same window, deposit,
+  `simVersion`); they never come from free text.
+- **B-10 Labels.** Every screen says it is a simulation over Base history with the window and `simVersion`; no Lab
+  number enters a production view.
+- **B-11 Responsive.** Desktop three columns, ≤ 1180 px two, ≤ 820 px one (experiment, bench, panel), light and dark;
+  screenshots at desktop and 390 px against the prototype before merge.
+- **B-12 Runner unit.** `mamoru-lab-runner` runs on lady as its own systemd user unit with `CPUQuota=50%` and
+  `Nice=10`, one job at a time, datasets from `~/.local/share/mamoru-lab/datasets`; env file holds only the landing
+  URL and `LAB_RUNNER_SECRET`.
+
+## Phase 2 requirements (the agent)
 
 ### Jobs and threads
 
@@ -172,9 +223,9 @@ table outside the Lab tables. The Lab's numbers never appear in the production v
 
 ```
 /ops/lab (landing Worker, Google allowlist)
-  │ write turn → D1 lab_jobs (queued)            read jobs, runs, answers ← D1
+  │ write job → D1 lab_jobs (queued)             read jobs, runs, answers ← D1
   ▼
-mamoru-app Worker  /api/lab/runner/{claim, heartbeat, runs, answer}   signed, same scheme as engine-settings pull
+landing Worker (mamoru-lol)  /ops/lab/runner/{claim, heartbeat, result, publish}   signed (body-bound HMAC)
   ▲
 lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ──► included models
   ├─ packages/lab-agent: loop, tools, catalog prompt, contract, verifier, cost meter
@@ -183,8 +234,9 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
 
 - The runner holds no wallet key, no RPC key and no D1 credential: only the runner signing secret and the model-plane
   route. Datasets are local files; a missing dataset is a tool error.
-- Runner requests are signed differently from the engine-settings pull (which signs method, path and minute and is a
-  read): the HMAC covers method, path, timestamp, a random nonce and the SHA-256 of the body. The Worker refuses a
+- The runner API lives on the landing Worker, next to `/ops`, so the Lab ships on the landing's release path and not
+  on the app's 24 h beta soak. Runner requests are signed differently from the engine-settings pull (which signs
+  method, path and minute and is a read): the HMAC covers method, path, timestamp, a random nonce and the SHA-256 of the body. The Worker refuses a
   timestamp older than 60 s, a nonce it has seen in the last 10 min (`lab_nonces`, pruned), and a body whose hash
   does not match. A captured request cannot be replayed or carry another body.
 - D1 is a projection for the screen (Constitution VII): the runner's run store is the record; D1 holds job rows,
@@ -193,15 +245,18 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
   set is already there, and fork scenarios (later) need anvil, which never runs on Cloudflare (Constitution XIII).
   A Worker or Container runner is the step when x402 traffic needs it.
 
-## Data (D1, `XXXX_agent_lab.sql`, additive)
+## Data (D1, additive)
 
-- `lab_threads (id, owner, title, created_at)`
-- `lab_jobs (id, thread_id, origin, requester, question, status, lease_id, lease_until, attempts, answer_json,
-  verifier_json, cost_json, error_code, quote_json, payer, created_at, updated_at)`
-- `lab_runs (result_hash PK, spec_json, metrics_json, series_json, sim_version, created_at)`
-- `lab_prices (resource, unit, usd, valid_from)` — shadow prices for AL-40.
-- `lab_job_runs (job_id, result_hash)` — the runs each job may cite (AL-21).
+Phase 1, `XXXX_lab_bench.sql` (in `ottodevs/mamoru` `migrations/d1/`, the owner of D1 `mamoru`):
+
+- `lab_runs (result_hash PK, window_id, spec_json, summary_json, run_json, sim_version, created_at)` — `summary_json`
+  holds spec + metrics for lists; `run_json` the full B-02 result (< 400 KB).
+- `lab_jobs (id PK, kind, origin, requester, spec_json, status, lease_id, lease_until, attempts, result_hash,
+  error_code, created_at, updated_at)` — phase 2 adds `thread_id, question, answer_json, verifier_json, cost_json,
+  quote_json, payer`.
 - `lab_nonces (nonce PK, seen_at)` — replay guard, rows older than 10 min pruned.
+
+Phase 2 adds `lab_threads`, `lab_job_runs (job_id, result_hash)` (AL-21) and `lab_prices` (AL-40).
 
 ## Threats and answers
 
@@ -254,26 +309,33 @@ lab runner on lady (systemd unit, bun)  ── model-plane route agent-lab ─�
 `LAB_JOB_LEASE_LOST`, `LAB_JOB_TIMEOUT`, `LAB_OVERRIDE_UNKNOWN`, `LAB_VERDICT_INCOMPARABLE`, `LAB_HOLDOUT_DENIED`, `LAB_DATASET_MISSING`, `LAB_ANSWER_PARTIAL`,
 `LAB_MODEL_UNAVAILABLE`.
 
-## Tasks (next sessions, in order)
+## Tasks (in order)
 
-1. `packages/backtest`: `onSample` hook + visual-series extractor; tests that a run's hash does not change with or
-   without the hook. (AL-52, AL-16) Not: change `decide` or metrics.
-2. `packages/lab-agent`: catalog prompt builder, tools over `packages/backtest` (TRAIN only, `LAB_HOLDOUT_DENIED`),
-   contract + metric enum + verdict writer + verifier with LAB-AL-05, 11, 14 and 15 fixtures, agent loop with round limit and repair, cost meter. Runs offline against recorded model replies.
-   (AL-10…AL-24, AL-40) Not: network beyond the model route.
-3. Migration `XXXX_agent_lab.sql` + `/api/lab/runner/*` in mamoru-app with body-bound signed requests, nonce store,
-   lease renewal and fencing. (AL-01, AL-02, AL-02a, data; LAB-AL-12, LAB-AL-13)
-   Not: any route reachable without the runner signature.
-4. Lab runner unit on lady (`apps/mamoru-lab-runner`), systemd with CPU quota, model-plane route `agent-lab`.
-   (AL-30…AL-32, AL-04) Not: wallet keys, RPC keys.
-5. `/ops/lab` in `ottodevs/mamoru-landing`: threads, chat, block renderer with view-A components, run panel, cost
-   page; screenshots desktop + 390 light/dark against PoC-1 before merge. (AL-50…AL-53, AL-41)
-6. Scenarios LAB-AL-01…16 green; Ot and Brais use it for a week; cost per archetype reported for pricing. (AL-42)
+Phase 1, the bench:
+
+1. `ottodevs/mamoru`: `onSample` hook in `packages/backtest` (hash unchanged with or without it), `packages/lab-bench`
+   (B-01 spec validation, B-02 result builder, TRAIN-only window resolution), `apps/mamoru-lab-runner` (claim /
+   heartbeat / result / publish client with the signing scheme, `seed`, `run`, systemd unit file) and migration
+   `XXXX_lab_bench.sql`. (B-01…B-04, B-12) Not: wallet keys, RPC keys, any network beyond the landing URL.
+2. `ottodevs/mamoru-landing`: runner API (signing, nonces, lease and fencing) and screen API, `/ops/lab` bench from
+   the prototype; screenshots desktop and 390, light and dark. (B-04…B-11; LAB-AL-12, LAB-AL-13) Not: any runner route
+   reachable without the signature; any Lab number in another `/ops` page.
+3. Release: migration, landing secret `LAB_RUNNER_SECRET`, landing deploy, runner unit on lady, `seed`; check a
+   "Run scenario" end to end in `/ops/lab`.
+
+Phase 2, the agent:
+
+4. `packages/lab-agent`: catalog prompt builder, tools over `packages/lab-bench` (TRAIN only), contract + metric enum
+   + verdict writer + verifier with LAB-AL-05, 11, 14 and 15 fixtures, agent loop with round limit and repair, cost
+   meter. Offline against recorded model replies. (AL-10…AL-24, AL-40)
+5. Runner: agent jobs through the model-plane route `agent-lab`. (AL-30…AL-32, AL-04)
+6. Landing: the "Ask the Lab" panel, threads, block renderer that opens runs in the bench, cost page. (AL-41, AL-50…AL-53)
+7. Scenarios LAB-AL-01…16 green; a week of use; cost per archetype reported for pricing. (AL-42)
 
 Later tickets: x402 endpoint (AL-60…62), a budgeted holdout check, fork scenarios as a tool, Ethereum windows backfill, Monad forward
 collector, export a study as a 006 draft template.
 
 ## Decisions for Ot
 
-None open. Approved 20-22 Oct: view A as the visual base; first version in `/ops` only; model via
-model-plane included resources (free pools are not a base).
+None open. Approved 20-23 Oct: the bench prototype as the visual base, with the chat as one panel inside it; first
+version in `/ops` only; the bench ships first; model via model-plane included resources (free pools are not a base).
