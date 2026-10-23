@@ -25,22 +25,22 @@ import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
 
 export const homeCopy = {
   total: 'Total balance',
-  // otto/mamoru#193: the three indicators. "Rate" is the label; APY and the source sit under the figure.
+  // otto/mamoru#198: two rates under the balance, figure over "APY · what"; sources behind (i). The names stay
+  // for screen readers and the per-position table.
   monthly: 'Monthly rate',
   current: 'Current rate',
-  earnedSoFar: 'Earned so far',
-  monthlySub: 'APY · 30-day mean',
-  monthlySubShort: 'APY · 30d',
-  currentSub: 'APY · today · on positions earning now',
-  currentSubShort: 'APY · today · earning now',
+  earnedSoFar: 'earned so far',
+  monthlyWhat: '30-day avg',
+  // Now, not "last 24h": the figure is the present state at today's pool rates, not the account's history (#112 review).
+  currentWhat: 'now',
+  sources: 'Rate sources',
+  monthlySource: 'Monthly',
+  currentSource: 'Today',
   planPools: 'plan pools, nothing placed yet',
-  profits: 'Profits become USDC.',
-  saves: 'Saves automatically.',
   na: 'n/a',
   gap: {
     loading: 'loading',
     'no-positions': 'no position earning now',
-    'all-paused': 'every position is paused',
     'no-data': 'no rate from the source today',
     'no-value': 'a position has no USDC value yet',
   } as Record<NonNullable<AccountRate['gap']>, string>,
@@ -112,7 +112,25 @@ function plural(n: number, one: string, many: string) {
 
 const pct = (v: number | null | undefined) => (v === null || v === undefined ? homeCopy.na : `${v.toFixed(1)}%`)
 
-export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () => void; onWithdraw: () => void }) {
+/**
+ * otto/mamoru#198: what the account has earned, under the balance as its gain (the Robinhood/Revolut pattern).
+ * Not measured yet says so, never a guess.
+ */
+function Earned({ usd: earned }: { usd: string | null | undefined }) {
+  const known = earned != null
+  return (
+    <p className="earned" data-testid="earned-so-far">
+      <span className={`earned-value${known ? '' : ' rate-na'}`}>
+        {known ? `+${usd(earned)}` : homeCopy.na}
+        {known ? <span className="earned-unit">USDC</span> : null}
+      </span>
+      <span className="earned-label">{homeCopy.earnedSoFar}</span>
+      {known ? null : <span className="earned-why">{homeCopy.earnedGap}</span>}
+    </p>
+  )
+}
+
+export function Balance({ s, earnedSoFarUsd, onAdd, onWithdraw }: { s: Split | null; earnedSoFarUsd?: string | null; onAdd: () => void; onWithdraw: () => void }) {
   return (
     <section className="balance" aria-labelledby="total-title">
       <div>
@@ -123,6 +141,7 @@ export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () =
           {s ? usd(s.total) : '0.00'}
           <span className="unit">USDC</span>
         </p>
+        <Earned usd={earnedSoFarUsd} />
       </div>
       <div className="balance-acts">
         <button type="button" className="act" onClick={onAdd}>
@@ -130,7 +149,7 @@ export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () =
         </button>
         {/* otto/mamoru#135: never disabled on the poll's balance, which can be 15-60 s behind a deposit. The
             operator's prepare reads the chain and refuses with a reason the dialog shows. */}
-        <button type="button" className="act" data-testid="withdraw-button" onClick={onWithdraw} disabled={!s}>
+        <button type="button" className="act quiet" data-testid="withdraw-button" onClick={onWithdraw} disabled={!s}>
           {homeCopy.withdraw}
         </button>
       </div>
@@ -138,54 +157,60 @@ export function Balance({ s, onAdd, onWithdraw }: { s: Split | null; onAdd: () =
   )
 }
 
-/** The line under a rate: what the figure is and where it comes from, or why there is none. */
-function RateSub({ long, short, tail }: { long: string; short: string; tail: string | null }) {
+/** The label under a rate: "APY · what", then why there is none or what it covers, never the source. */
+function RateSub({ name, what, tail }: { name: string; what: string; tail: string | null }) {
   return (
     <p className="rate-sub">
-      <span className="rate-long">{long}</span>
-      <span className="rate-short">{short}</span>
-      {tail ? ` · ${tail}` : null}
+      <span className="sr-only">{name} </span>
+      APY
+      <span className="rate-what">
+        <span className="rate-dot"> · </span>
+        {what}
+        {tail ? ` · ${tail}` : null}
+      </span>
     </p>
   )
 }
 
 /**
- * otto/mamoru#193: Monthly rate, Current rate and Earned so far, one row of the same size. Each rate says its
- * source under the figure (no info button). A figure that is not known says n/a and why, never a guess.
+ * otto/mamoru#198 (was #193's three indicators): Monthly rate and Current rate, one row under the balance, the
+ * figure over its label. The sources sit behind (i). A figure that is not known says n/a and why, never a guess.
  */
-export function Indicators({ f, apy, price, earnedSoFarUsd }: { f: FundingView | undefined; apy: ApyView | undefined; price: bigint | null; earnedSoFarUsd: string | null | undefined }) {
+export function Indicators({ f, apy, price }: { f: FundingView | undefined; apy: ApyView | undefined; price: bigint | null }) {
   const rows = f ? positionRates(f, apy, price) : []
   const monthly = f ? monthlyRate(rows, apy) : { pct: null, gap: 'loading' as const, covered: 0, of: 0, plan: false }
-  const current = f ? currentRate(rows, apy) : { pct: null, gap: 'loading' as const, covered: 0, of: 0 }
+  const current = f ? currentRate(rows, apy, split(f, price)) : { pct: null, gap: 'loading' as const, covered: 0, of: 0 }
   const partial = (r: AccountRate) => (r.pct !== null && r.covered < r.of ? `${r.covered} of ${r.of} positions with a rate` : null)
   const monthlySrc = sourceName(apy?.monthlySource)
   const currentSrc = sourceName(apy?.currentSource)
-  const monthlyTail = monthly.gap ? homeCopy.gap[monthly.gap] : [monthlySrc, monthly.plan ? homeCopy.planPools : null, partial(monthly)].filter(Boolean).join(' · ') || null
-  const currentTail = current.gap ? homeCopy.gap[current.gap] : [currentSrc, partial(current)].filter(Boolean).join(' · ') || null
+  const monthlyTail = monthly.gap ? homeCopy.gap[monthly.gap] : [monthly.plan ? homeCopy.planPools : null, partial(monthly)].filter(Boolean).join(' · ') || null
+  // otto/mamoru#198: the current rate is the whole balance's (paused and idle at 0%), so it needs no scope words.
+  const currentTail = current.gap ? homeCopy.gap[current.gap] : partial(current)
   return (
-    <section className="rates" aria-label="Rates and earnings">
+    <section className="rates" aria-label="Rates">
       <div className="rate">
-        <p className="rate-label">{homeCopy.monthly}</p>
         <p className={`rate-value${monthly.pct === null ? ' rate-na' : ''}`} data-testid="rate-monthly">
           {pct(monthly.pct)}
         </p>
-        <RateSub long={homeCopy.monthlySub} short={homeCopy.monthlySubShort} tail={monthlyTail} />
+        <RateSub name={homeCopy.monthly} what={homeCopy.monthlyWhat} tail={monthlyTail} />
       </div>
       <div className="rate">
-        <p className="rate-label">{homeCopy.current}</p>
         <p className={`rate-value${current.pct === null ? ' rate-na' : ''}`} data-testid="rate-current">
           {pct(current.pct)}
         </p>
-        <RateSub long={homeCopy.currentSub} short={homeCopy.currentSubShort} tail={currentTail} />
+        <RateSub name={homeCopy.current} what={homeCopy.currentWhat} tail={currentTail} />
       </div>
-      <div className="rate rate-earned">
-        <p className="rate-label">{homeCopy.earnedSoFar}</p>
-        <p className={`rate-value${earnedSoFarUsd == null ? ' rate-na' : ''}`} data-testid="earned-so-far">
-          {earnedSoFarUsd == null ? homeCopy.na : usd(earnedSoFarUsd)}
-          {earnedSoFarUsd == null ? null : <span className="rate-unit">USDC</span>}
-        </p>
-        <p className="rate-sub">{earnedSoFarUsd == null ? `${homeCopy.earnedGap} · ${homeCopy.profits}` : homeCopy.profits}</p>
-      </div>
+      {monthlySrc || currentSrc ? (
+        <details className="rate-info" data-testid="rate-sources">
+          <summary aria-label={homeCopy.sources}>
+            <span aria-hidden="true">i</span>
+          </summary>
+          <p className="rate-sources">
+            {monthlySrc ? <span>{homeCopy.monthlySource}: {monthlySrc}</span> : null}
+            {currentSrc ? <span>{homeCopy.currentSource}: {currentSrc}</span> : null}
+          </p>
+        </details>
+      ) : null}
     </section>
   )
 }
@@ -282,7 +307,7 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null }: { f
       <summary>
         <span className="wc-head">
           <span className="dash-title heavy">{homeCopy.working}</span>
-          <span className="dash-title heavy text-emerald">{usd(s.working)} USDC</span>
+          <span className="dash-title heavy">{usd(s.working)} USDC</span>
           <span className="wc-count">· {plural(n, 'position', 'positions')}</span>
         </span>
       </summary>
@@ -982,19 +1007,13 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   })
 
   return (
-    <main className="page enter">
+    <main className="page home enter">
       <title>Mamoru · Home</title>
       <header className="mb-7">
         <Brand />
       </header>
-      <Balance s={s} onAdd={addMoney} onWithdraw={() => withdraw()} />
-      <Indicators f={f} apy={apy.data} price={price} earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd} />
-      {f?.active ? (
-        <p className="saves">
-          <span aria-hidden="true" />
-          {homeCopy.saves}
-        </p>
-      ) : null}
+      <Balance s={s} earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd} onAdd={addMoney} onWithdraw={() => withdraw()} />
+      <Indicators f={f} apy={apy.data} price={price} />
       <WrongNetwork accountKey={accountKey} />
       {!f ? (
         funding.isError ? (
@@ -1037,7 +1056,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           <History ops={opList} onRetry={retry} />
         </>
       )}
-      <footer className="mt-auto flex flex-wrap gap-x-5 gap-y-2 border-t border-wash pt-5 text-[0.85rem] text-stone">
+      <footer className="mt-auto flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-wash pt-5 text-[0.85rem] text-stone">
         <button type="button" className="text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => kit.mutate()} disabled={!f || kit.isPending}>
           {kit.isSuccess ? 'Recovery kit saved' : 'Save recovery kit'}
         </button>
@@ -1047,6 +1066,11 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         <a className="underline decoration-wash underline-offset-4 hover:text-ink" href={GITHUB} target="_blank" rel="noreferrer">
           How Mamoru works
         </a>
+        {/* otto/mamoru#198: the seal signs the page, the only red besides Stop. */}
+        <span className="seal" aria-hidden="true">
+          <img src="/seal-mamoru.png" width={40} height={40} alt="" />
+          <span className="seal-word">MAMORU</span>
+        </span>
       </footer>
       <FeedbackDialog accountKey={accountKey} open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
 
