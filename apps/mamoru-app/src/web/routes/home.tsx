@@ -10,7 +10,7 @@ import { BasescanLink, Brand, Modal } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
-import { belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, overCapOf, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
+import { belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, MIN_ENTRY_USDC, overCapOf, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, poolTokens, positionAmounts, progressLine } from '../lib/positions.ts'
@@ -338,7 +338,7 @@ function tokenAmount(raw: string, token: string, decimals: number): string {
 export function engineLine(f: FundingView): string | null {
   if (!f.active || !f.engine) return null
   // Under the smallest entry (10 cents) a remainder is rounding, never named as money on its way (otto/mamoru#194).
-  if (f.engine.placing) return BigInt(f.usdc) >= 100_000n ? homeCopy.putting(usd(f.usdc)) : homeCopy.placing
+  if (f.engine.placing) return BigInt(f.usdc) >= MIN_ENTRY_USDC ? homeCopy.putting(usd(f.usdc)) : homeCopy.placing
   // otto/mamoru#128: money held back on purpose says why, so a still account never looks stopped.
   const waits = (f.engine.waiting ?? []).filter((w) => w.code === 'DECIDE_WAIT_DEPTH' || w.code === 'DECIDE_ENTRY_PAUSED_FALL')
   if (waits.length) {

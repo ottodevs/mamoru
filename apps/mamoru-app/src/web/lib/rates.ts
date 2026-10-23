@@ -1,6 +1,6 @@
 import type { ApyView, FundingView } from '@mamoru/domain'
 import { POLICIES, type BucketId } from '@mamoru/policy'
-import { cbbtcToUsdc, DUST_USDC, type Split } from './money.ts'
+import { cbbtcToUsdc, DUST_USDC, MIN_ENTRY_USDC, type Split } from './money.ts'
 import { poolName, poolTokens } from './positions.ts'
 
 // otto/mamoru#193: the dashboard's rates, per position and for the account, from data the app already has:
@@ -152,6 +152,8 @@ export function idleReason(f: FundingView, s: Split): string {
   // A listed token (unpriced cbBTC, say) is idle even when its USDC value is unknown.
   if (s.idle < DUST_USDC && s.idleTokens.length === 0) return 'nothing idle'
   if (!f.active) return f.positions.length > 0 ? 'Mamoru is stopped' : 'Mamoru is not running yet'
+  // otto/mamoru#194: under the smallest entry, what is outside is swap and mint rounding, not money on its way.
+  if (s.idle < MIN_ENTRY_USDC && !s.idleTokens.some((t) => t.unpriced)) return 'left over, under the 0.10 USDC minimum'
   if (f.engine?.placing || f.progress) return 'being placed'
   return 'waiting to be placed'
 }

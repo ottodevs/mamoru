@@ -207,4 +207,11 @@ describe('idle and working split', () => {
     const dust = { ...placed, usdc: '300', idle: [{ token: 'USDC', amount: '300', decimals: 6, valueUsdc: '300' }] }
     expect(idleReason(dust, split(dust, null))).toBe('nothing idle')
   })
+  // otto/mamoru#194 (Brais 21-oct): «Being placed 0.01» while the engine was mid-entry.
+  test('under the smallest entry, what is outside is left over, not being placed', () => {
+    const crumbs = { ...placed, usdc: '10000', idle: [{ token: 'USDC', amount: '10000', decimals: 6, valueUsdc: '10000' }], engine: { placing: true, nextReviewAt: null } }
+    expect(idleReason(crumbs, split(crumbs, null))).toBe('left over, under the 0.10 USDC minimum')
+    const idle = { ...crumbs, engine: { placing: false, nextReviewAt: null } }
+    expect(idleReason(idle, split(idle, null))).toBe('left over, under the 0.10 USDC minimum')
+  })
 })

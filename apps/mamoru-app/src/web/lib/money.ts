@@ -34,6 +34,8 @@ export type Split = {
 
 /** Under one cent a balance is what a swap or a mint rounds off: counted in the totals, not worth a line. */
 export const DUST_USDC = 10_000n
+/** The engine's smallest entry (DEFAULT_MIN_ENTRY, 0.10 USDC): less than this outside a position is never placed. */
+export const MIN_ENTRY_USDC = 100_000n
 
 /** An amount of one token (base units) and what it is worth in USDC base units. */
 export type Holding = { token: string; amount: bigint; decimals: number; valueUsdc: bigint; /** No USDC price in the view: `valueUsdc` is 0 and must not be shown. */ unpriced?: boolean }
