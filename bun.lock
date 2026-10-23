@@ -133,6 +133,14 @@
         "@mamoru/domain": "workspace:*",
       },
     },
+    "packages/lab-agent": {
+      "name": "@mamoru/lab-agent",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mamoru/domain": "workspace:*",
+        "@mamoru/lab-bench": "workspace:*",
+      },
+    },
     "packages/lab-bench": {
       "name": "@mamoru/lab-bench",
       "version": "0.0.0",
@@ -394,6 +402,8 @@
     "@mamoru/erc4337": ["@mamoru/erc4337@workspace:packages/erc4337"],
 
     "@mamoru/journal": ["@mamoru/journal@workspace:packages/journal"],
+
+    "@mamoru/lab-agent": ["@mamoru/lab-agent@workspace:packages/lab-agent"],
 
     "@mamoru/lab-bench": ["@mamoru/lab-bench@workspace:packages/lab-bench"],
 

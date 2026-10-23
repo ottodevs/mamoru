@@ -226,6 +226,11 @@ export const REASON_CODES = [
   'LAB_SPEC_INVALID',
   'LAB_HOLDOUT_DENIED',
   'LAB_DATASET_MISSING',
+  // Agent Lab agent (008, otto/mamoru#200): tool + answer-verifier reason codes. LAB_JOB_LEASE_LOST,
+  // LAB_JOB_TIMEOUT and LAB_MODEL_UNAVAILABLE are the runner's (task 5, otto/mamoru#201), not added here yet.
+  'LAB_OVERRIDE_UNKNOWN',
+  'LAB_VERDICT_INCOMPARABLE',
+  'LAB_ANSWER_PARTIAL',
 ] as const
 
 export type ReasonCode = (typeof REASON_CODES)[number]
