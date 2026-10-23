@@ -15,7 +15,13 @@
  */
 import { ReasonError } from '@mamoru/domain'
 import { basesForWindow, defaultDatasetsDir, parseSpecKey, runBench, specKey, trainWindows, type Base, type BenchSpec, type RunResult } from '@mamoru/lab-bench'
+import { runInWorker } from './run-in-worker.ts'
+import type { RunWorkerPayload, RunWorkerResult } from './run-worker.ts'
 import { signRequest } from './sign.ts'
+
+const RUN_WORKER_URL = new URL('./run-worker.ts', import.meta.url)
+/** AL-02's lease expiry is 120s ahead and renews every 30s; this matches the renewal cadence. */
+const HEARTBEAT_INTERVAL_MS = 30_000
 
 function requireEnv(name: string): string {
   const v = process.env[name]
@@ -69,9 +75,11 @@ async function postResult(jobId: string, leaseId: string, outcome: Outcome): Pro
   if (status !== 200 && status !== 409) console.error(`result ${jobId}: unexpected status ${status}`)
 }
 
+/** Review of #117 P2: a non-2xx used to be logged and swallowed, so `seed` reported a spec "published" that never
+ * actually landed. Throwing makes the caller's own accounting (published/skipped/failed) the only source of truth. */
 async function publish(run: RunResult): Promise<void> {
   const { status } = await signedPost('/ops/lab/runner/publish', { run })
-  if (status !== 200) console.error(`publish ${run.specKey}: unexpected status ${status}`)
+  if (status < 200 || status >= 300) throw new Error(`publish ${run.specKey}: status ${status}`)
 }
 
 /** A business refusal has a closed reason code; anything else is a bug, not a result to report. */
@@ -80,38 +88,30 @@ function reasonCodeOf(e: unknown): string | null {
 }
 
 /**
- * Runs one claimed job: computes its spec while a heartbeat ticks every 30s. If a heartbeat ever reports the lease
- * lost, the job's own result is never posted (AL-02/AL-02a) — even if it finishes, a fenced write from the server
- * side would refuse it anyway; this is the client staying quiet about it too.
+ * Runs one claimed job: computes its spec in a worker thread (review of #117 P1 — `runBench` is a long,
+ * synchronous call, and running it on the same thread as the heartbeat would starve the heartbeat) while a
+ * heartbeat ticks every 30s on this thread. The moment a heartbeat reports the lease lost, the worker is
+ * terminated at once and the job's own result is never posted (AL-02/AL-02a) — even if it had finished, a fenced
+ * write from the server side would refuse it anyway; this is the client staying quiet about it too.
  */
 async function runJob(job: ClaimedJob): Promise<void> {
-  let leaseLost = false
-  const ticker = setInterval(() => {
-    void heartbeat(job.id, job.leaseId).then((ok) => {
-      if (!ok) leaseLost = true
-    })
-  }, 30_000)
-  try {
-    let outcome: Outcome | undefined
-    try {
-      outcome = { run: runBench(job.spec, datasetsDir()) }
-    } catch (e) {
-      const code = reasonCodeOf(e)
-      if (!code) {
-        console.error(`job ${job.id} (${specKey(job.spec)}): unexpected error, leaving it to lease expiry`, e instanceof Error ? e.message : e)
-        return
-      }
-      outcome = { error: code }
-    }
-    if (leaseLost) {
-      console.error(`job ${job.id}: lease lost mid-flight, not posting`)
-      return
-    }
-    await postResult(job.id, job.leaseId, outcome)
-    console.log(`job ${job.id}: ${'run' in outcome ? outcome.run.specKey : outcome.error}`)
-  } finally {
-    clearInterval(ticker)
+  const outcome = await runInWorker<RunWorkerPayload, RunWorkerResult>(
+    RUN_WORKER_URL,
+    { spec: job.spec, datasetsDir: datasetsDir() },
+    { heartbeat: () => heartbeat(job.id, job.leaseId), intervalMs: HEARTBEAT_INTERVAL_MS },
+  )
+  if ('leaseLost' in outcome) {
+    console.error(`job ${job.id}: lease lost mid-flight, not posting`)
+    return
   }
+  const wr = outcome.result
+  if (wr.kind === 'bug') {
+    console.error(`job ${job.id} (${specKey(job.spec)}): unexpected error, leaving it to lease expiry: ${wr.message}`)
+    return
+  }
+  const toPost: Outcome = wr.kind === 'run' ? { run: wr.run } : { error: wr.code }
+  await postResult(job.id, job.leaseId, toPost)
+  console.log(`job ${job.id}: ${'run' in toPost ? toPost.run.specKey : toPost.error}`)
 }
 
 async function cmdRun(): Promise<void> {
@@ -135,12 +135,28 @@ async function cmdRun(): Promise<void> {
   }
 }
 
-async function cmdSeed(): Promise<void> {
+type SeedSummary = { published: number; skipped: number; failed: number }
+
+/** 1 if anything failed, so a cron/systemd run surfaces it instead of a silently short catalog; 0 otherwise. */
+function seedExitCode(summary: SeedSummary): number {
+  return summary.failed > 0 ? 1 : 0
+}
+
+/**
+ * B-03. Three disjoint outcomes per spec, counted apart (review of #117 P2):
+ * - `skipped`: known upfront — `basesForWindow` already says this (window, base) has no data (`LAB_DATASET_MISSING`).
+ * - `failed`: the compute or the publish itself did not succeed — a spec a reviewer or the coordinator must look at.
+ * - `published`: `publish` returned 2xx; nothing else counts as published.
+ * Returns the summary rather than touching `process.exitCode` itself: `main` decides (via `seedExitCode`) — kept
+ * separate so a test can assert on this function's own counts without mutating the real, process-wide exit code.
+ */
+async function cmdSeed(): Promise<SeedSummary> {
   const dir = datasetsDir()
   const windows = trainWindows(dir)
   if (windows.length === 0) throw new Error(`no TRAIN window in the manifest at ${dir}`)
   let published = 0
   let skipped = 0
+  let failed = 0
   for (const w of windows) {
     const available = basesForWindow(w.id, dir)
     for (const { base, widthTicks } of SEED_VARIANTS) {
@@ -157,12 +173,14 @@ async function cmdSeed(): Promise<void> {
         published++
       } catch (e) {
         const code = reasonCodeOf(e)
-        console.error(`seed ${specKey(spec)}: ${code ?? (e instanceof Error ? e.message : String(e))}`)
-        skipped++
+        console.error(`seed ${specKey(spec)}: failed — ${code ?? (e instanceof Error ? e.message : String(e))}`)
+        failed++
       }
     }
   }
-  console.log(`seed done: ${published} published, ${skipped} skipped`)
+  const summary: SeedSummary = { published, skipped, failed }
+  console.log(`seed done: ${summary.published} published, ${summary.skipped} skipped, ${summary.failed} failed`)
+  return summary
 }
 
 function cmdOnce(spec: BenchSpec): void {
@@ -183,16 +201,25 @@ function specFromArgs(args: string[]): BenchSpec {
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2)
   if (cmd === 'run') return cmdRun()
-  if (cmd === 'seed') return cmdSeed()
+  if (cmd === 'seed') {
+    process.exitCode = seedExitCode(await cmdSeed())
+    return
+  }
   if (cmd === 'once') return cmdOnce(specFromArgs(rest))
   console.error('usage: mamoru-lab-runner <run|seed|once>')
   process.exit(1)
 }
 
-try {
-  await main()
-} catch (e) {
-  const code = reasonCodeOf(e)
-  console.error(code ? `${code}: ${e instanceof ReasonError ? e.detail ?? e.message : ''}` : e instanceof Error ? e.message : e)
-  process.exit(1)
+// `import.meta.main` is only true when this file is bun's own entry point — never when a test imports it (review
+// of #117 P2 needs `cmdSeed`/`publish` importable against a mock server) — so the script only runs itself here.
+if (import.meta.main) {
+  try {
+    await main()
+  } catch (e) {
+    const code = reasonCodeOf(e)
+    console.error(code ? `${code}: ${e instanceof ReasonError ? e.detail ?? e.message : ''}` : e instanceof Error ? e.message : e)
+    process.exit(1)
+  }
 }
+
+export { cmdOnce, cmdRun, cmdSeed, publish, seedExitCode, signedPost }
