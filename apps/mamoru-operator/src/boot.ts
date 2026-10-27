@@ -6,7 +6,7 @@ import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, chainWritesOptIn, isChainId, type Address } from '@mamoru/domain'
 import { address as registryAddress, entry, isDeployed, registryFor, type Registry } from '@mamoru/registry'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
-import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLiveV4, conservadorLiveV5, labWmonUsdcMonadV5, liveWmonUsdcMonadV5, MONAD_GAS_CAPS, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V4_POOLS_MONAD, type PolicyVersion } from '@mamoru/policy'
+import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLabV6, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, labWmonUsdcMonadV5, liveWmonUsdcMonadV5, MONAD_GAS_CAPS, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V4_POOLS_MONAD, type PolicyVersion } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics, logErr } from './metrics.ts'
@@ -54,6 +54,8 @@ export function syncYieldLedgerFlag(loop: Pick<SnapshotLoop, 'start' | 'stop'>, 
 const V4_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV4.policyId]: conservadorLiveV4, [conservadorLabV4.policyId]: conservadorLabV4 }
 /** otto/mamoru#151: `conservadorLiveV5`/`conservadorLabV5`, the policy version for MamoruActionPolicyV2 — never in `POLICIES` either. */
 const V5_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV5.policyId]: conservadorLiveV5, [conservadorLabV5.policyId]: conservadorLabV5 }
+/** otto/mamoru#214: `conservadorLiveV6`/`conservadorLabV6` (Base + Monad growth, bridge-out behind MamoruPauseGate) — never in `POLICIES` either. */
+const V6_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV6.policyId]: conservadorLiveV6, [conservadorLabV6.policyId]: conservadorLabV6 }
 
 /**
  * Spec 007 (otto/mamoru#151) T7: a v2/v3 `policyId` (the only kind any live account names today) resolves exactly
@@ -82,6 +84,9 @@ export function resolveNamedPolicy(policyId: string, env: Record<string, string 
   if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1') return undefined
   const v5 = V5_POLICIES_BY_ID[policyId]
   if (v5) return env.MAMORU_ACTION_POLICY_V2_ADDRESS ? deployedV5(v5, env) : undefined
+  // otto/mamoru#214: v6 also needs MamoruPauseGate; without it (or V2) it is not offered and not a default.
+  const v6 = V6_POLICIES_BY_ID[policyId]
+  if (v6) return env.MAMORU_ACTION_POLICY_V2_ADDRESS && env.MAMORU_PAUSE_GATE_ADDRESS ? deployedV6(v6, env) : undefined
   const v4 = V4_POLICIES_BY_ID[policyId]
   if (!v4) return undefined
   return deployedV4(v4, env)
@@ -127,6 +132,24 @@ function deployedV5(v5: PolicyVersion, env: Record<string, string | undefined>, 
 }
 
 /**
+ * otto/mamoru#214: the v6 policy: v5's wiring (MamoruActionPolicyV2, MamoruGasPolicy, contractVersion 2) plus
+ * `MAMORU_PAUSE_GATE_ADDRESS`, the MamoruPauseGate its bridge-out grant is encoded with. Required: unset, malformed, zero
+ * or equal to the V2, V1 or gas policy address throws, so v6 is never built without a gate that stops a bridge while the
+ * guardian has the account paused.
+ */
+function deployedV6(v6: PolicyVersion, env: Record<string, string | undefined>): PolicyVersion {
+  const gate = env.MAMORU_PAUSE_GATE_ADDRESS
+  if (!gate) throw new Error('MAMORU_PAUSE_GATE_ADDRESS is not set')
+  if (!isAddress(gate, { strict: false }) || /^0x0{40}$/i.test(gate)) throw new Error('MAMORU_PAUSE_GATE_ADDRESS is not a contract address')
+  const base = deployedV5(v6, env)
+  const ap = base.actionPolicy!
+  for (const [name, other] of [['MAMORU_ACTION_POLICY_V2_ADDRESS', ap.address], ['MAMORU_GAS_POLICY_ADDRESS', ap.gasPolicy?.address], ['MAMORU_ACTION_POLICY_ADDRESS', env.MAMORU_ACTION_POLICY_ADDRESS]] as const) {
+    if (other && gate.toLowerCase() === other.toLowerCase()) throw new Error(`MAMORU_PAUSE_GATE_ADDRESS and ${name} are the same`)
+  }
+  return { ...base, actionPolicy: { ...ap, pauseGate: getAddress(gate) } }
+}
+
+/**
  * otto/mamoru#214: the Monad sleeve's v5 policy wired to MamoruActionPolicyV2 and MamoruGasPolicy on Monad (the same two
  * env names as Base's v5: an operator reads one chain, so they mean that chain's contracts), with Monad's pool and gas
  * caps (a Base cap would be 10,000x under Monad's gas price). Unset, malformed or equal: throws, never a policy without them.
@@ -145,6 +168,17 @@ export function resolveV5Policy(chain: PolicyVersion['chain'], env: Record<strin
   if (chain === 'monad') return undefined
   if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1' || !env.MAMORU_ACTION_POLICY_V2_ADDRESS) return undefined
   return deployedV5(chain === conservadorLiveV5.chain ? conservadorLiveV5 : conservadorLabV5, env)
+}
+
+/**
+ * otto/mamoru#214: the v6 policy the renew row may move this operator's v2-v5 accounts to, or undefined when the v4
+ * opt-in is off or `MAMORU_ACTION_POLICY_V2_ADDRESS` / `MAMORU_PAUSE_GATE_ADDRESS` is unset (fail closed: v6 is not
+ * offered). Whether an account is offered the move is the D1 flag `multichain_v6`, read on every view.
+ */
+export function resolveV6Policy(chain: PolicyVersion['chain'], env: Record<string, string | undefined>): PolicyVersion | undefined {
+  if (chain === 'monad') return undefined
+  if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1' || !env.MAMORU_ACTION_POLICY_V2_ADDRESS || !env.MAMORU_PAUSE_GATE_ADDRESS) return undefined
+  return deployedV6(chain === conservadorLiveV6.chain ? conservadorLiveV6 : conservadorLabV6, env)
 }
 
 /**
@@ -171,6 +205,17 @@ export function assertMonadV5Resolvable(accounts: readonly { accountKey: string;
 
 /** Accounts whose stored policy is a v4 one, when this operator was started without the v4 opt-in or its addresses. */
 export function assertV4Resolvable(accounts: readonly { accountKey: string; policyId?: string }[], env: Record<string, string | undefined>): void {
+  const v6Ids = new Set([conservadorLiveV6.policyId, conservadorLabV6.policyId])
+  const onV6 = accounts.filter((a) => a.policyId && v6Ids.has(a.policyId))
+  if (onV6.length) {
+    let v6: PolicyVersion | undefined
+    try {
+      v6 = resolveV6Policy(conservadorLiveV6.chain, env) ?? resolveV6Policy(conservadorLabV6.chain, env)
+    } catch {
+      v6 = undefined
+    }
+    if (!v6) throw new Error(`${onV6.length} account(s) run conservador-live-v6 (${onV6.map((a) => a.accountKey.slice(0, 8)).join(', ')}): start with MAMORU_ONCHAIN_POLICY_V4=1, MAMORU_ACTION_POLICY_V2_ADDRESS, MAMORU_GAS_POLICY_ADDRESS and MAMORU_PAUSE_GATE_ADDRESS set`)
+  }
   const v5Ids = new Set([conservadorLiveV5.policyId, conservadorLabV5.policyId])
   const onV5 = accounts.filter((a) => a.policyId && v5Ids.has(a.policyId))
   if (onV5.length) {
@@ -346,6 +391,7 @@ export function assertBaseOnlyFeatures(registry: Registry, env: Record<string, s
   // A lab fork (an RPC chain id that is no real chain) cannot carry MAMORU_CHAIN_WRITES, so it may hold the address for the
   // fork twin (lab-wmon-usdc-monad-v5), which never signs on a real chain.
   const onFork = chainId !== undefined && !isChainId(chainId)
+  if (env.MAMORU_PAUSE_GATE_ADDRESS) throw new Error(`MAMORU_PAUSE_GATE_ADDRESS is Base only (v6 bridge-out); this operator reads ${registry.chain}`)
   if (env.MAMORU_ACTION_POLICY_V2_ADDRESS && !onFork && !(chainWritesOptIn(env) as readonly number[]).includes(registry.chainId)) throw new Error(`MAMORU_ACTION_POLICY_V2_ADDRESS is Base only; this operator reads ${registry.chain}`)
   if (o.l1RpcUrl) throw new Error(`MAMORU_L1_RPC_URL (bridge-out to Base) is Base only; this operator reads ${registry.chain}`)
 }
@@ -366,6 +412,18 @@ export function assertActionPolicyOnRegistry(policy: PolicyVersion, registry: Re
     if (!isDeployed(name, registry)) throw new Error(`${name} is ${wired} in the environment but is not pinned in the ${registry.chain} registry (undeployed or absent): refusing to sign sessions for it`)
     if (registryAddress(name, registry).toLowerCase() !== wired.toLowerCase()) throw new Error(`${name} is ${wired} in the environment but ${registryAddress(name, registry)} in the ${registry.chain} registry`)
   }
+}
+
+/**
+ * otto/mamoru#214: once the registry pins MamoruPauseGate (base.json moves it from `undeployed` to `entries`), the env
+ * address v6 is wired to must be that entry: an operator never signs a bridge-out session for a gate the pinned registry
+ * does not name. While it is `undeployed` the env address stands alone. No pause gate on the policy: nothing to check.
+ */
+export function assertPauseGateOnRegistry(policy: PolicyVersion, registry: Registry): void {
+  const gate = policy.actionPolicy?.pauseGate
+  if (!gate || !isDeployed('MamoruPauseGate', registry)) return
+  const pinned = registryAddress('MamoruPauseGate', registry)
+  if (pinned.toLowerCase() !== gate.toLowerCase()) throw new Error(`MamoruPauseGate is ${gate} in the environment but ${pinned} in the ${registry.chain} registry`)
 }
 
 /**
@@ -423,6 +481,7 @@ export async function bootOperator(o: BootOptions) {
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
   const policy = withTestOverrides(named, process.env)
   assertPolicyOnRegistry(policy, registry)
+  assertPauseGateOnRegistry(policy, registry)
   if (writes.on) {
     assertWritePolicy(policy, registry, chainId)
     assertActionPolicyOnRegistry(policy, registry)
@@ -484,6 +543,7 @@ export async function bootOperator(o: BootOptions) {
       ...(settings ? { settings, opsFlags: () => settings.flags() } : {}),
       ...(resolveV4Policy(policy.chain, process.env) ? { v4Policy: resolveV4Policy(policy.chain, process.env) } : {}),
       ...(resolveV5Policy(policy.chain, process.env) ? { v5Policy: resolveV5Policy(policy.chain, process.env) } : {}),
+      ...(resolveV6Policy(policy.chain, process.env) ? { v6Policy: resolveV6Policy(policy.chain, process.env) } : {}),
       guardReadsState: new GuardReadsState(o.stateDir),
       ...(peers ? { peers } : {}),
     },

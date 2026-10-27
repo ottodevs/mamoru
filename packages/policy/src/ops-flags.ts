@@ -42,6 +42,16 @@ export const OPS_FLAGS = {
     label: 'Monad sleeves (beta only)',
     description: 'Beta only: owners can add a Monad (143) sleeve, deposit USDC there and see its WMON/USDC positions (otto/mamoru#67). Prod ignores it.',
   },
+  /**
+   * otto/mamoru#214, default off: offers running v2/v3/v4/v5 accounts on Base the renewal that moves them to
+   * conservadorLiveV6 (stables 50 / Balance 35 / BTC exit-only, growth 15 % on the owner's Monad sleeve). Only where
+   * the operator has `MAMORU_PAUSE_GATE_ADDRESS` as well; takes precedence over `onchain_action_policy_v5` while on.
+   * The Worker refuses the renewal until the owner's Monad sleeve is active.
+   */
+  multichain_v6: {
+    label: 'Multichain (v6: Base + Monad growth)',
+    description: 'Offers running Base accounts the renewal that moves them to conservadorLiveV6: growth 15 % on the owner\'s Monad sleeve, bridge-out behind MamoruPauseGate (otto/mamoru#214). Refused until the Monad sleeve is active.',
+  },
 } as const
 
 export type OpsFlagName = keyof typeof OPS_FLAGS
