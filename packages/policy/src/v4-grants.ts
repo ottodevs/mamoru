@@ -12,7 +12,8 @@
 // activation code at T7. Keeping that import direction one-way avoids a circular package dependency.
 import { decodeAbiParameters, encodeAbiParameters } from 'viem'
 import type { Address, Hex } from '@mamoru/domain'
-import { baseRegistry, address, type RegistryName } from '@mamoru/registry'
+import { BASE_CHAIN_ID } from '@mamoru/domain'
+import { baseRegistry, address, registryFor, type Registry, type RegistryName } from '@mamoru/registry'
 import { computeCaps } from './instantiate.ts'
 import type { ActionRuleTemplate, CapFormula, GasCaps, GrantName, GrantTemplate, ParamRuleTemplate, PolicyVersion, ResolvedActionRule, SessionGrant } from './types.ts'
 
@@ -149,6 +150,22 @@ export const V4_GAS_CAPS: GasCaps = {
   maxFeePerGas: 100_000_000n,
 }
 
+/**
+ * otto/mamoru#214: the gas caps of the Monad sleeve's sessions. V4_GAS_CAPS prices gas in Base's 0.005-0.05 gwei; Monad
+ * ran about 100 gwei on 2026-10-23, so under Base's 0.1 gwei cap the engine would wait forever (GAS_PRICE_OVER_CAP).
+ * Same limits as Base (3M / 2M / 200k) and the same 10x headroom over the usual price: maxFeePerGas 1,000 gwei,
+ * priority 1 gwei (the engine tips 1e6 wei). What a leaked key makes the Safe pay per op:
+ * `maxGasCostPerOp(MONAD_GAS_CAPS)` = 1,000 gwei x 5.2M gas = 5.2 MON (the gas reserve is 2 MON, so a cap hit is still
+ * bounded by what the Safe holds). Monad charges the gas limit, not gas used, which is why the limits stay tight.
+ */
+export const MONAD_GAS_CAPS: GasCaps = {
+  maxPriorityFeePerGas: 1_000_000_000n,
+  maxVerificationGasLimit: 3_000_000n,
+  maxCallGasLimit: 2_000_000n,
+  maxPreVerificationGas: 200_000n,
+  maxFeePerGas: 1_000_000_000_000n,
+}
+
 /** MamoruGasPolicy.maxCostPerOp: the EntryPoint prefund at the capped price and limits, the most one op takes. */
 export function maxGasCostPerOp(c: GasCaps): bigint {
   return c.maxFeePerGas * (c.maxVerificationGasLimit + c.maxCallGasLimit + c.maxPreVerificationGas)
@@ -162,6 +179,11 @@ export function validGasCaps(c: GasCaps): boolean {
 // ---------------------------------------------------------------- v4 pool table (spec 007 "Parameters")
 
 export type V4PoolSpec = {
+  /**
+   * otto/mamoru#214: the chain whose registry resolves this pool's names (the pool, its tokens, the position manager).
+   * Absent: Base (8453), which every pool before Monad is; left out of them so nothing about them changes.
+   */
+  sourceChainId?: number
   /** Registry name of the Uniswap v3 pool (multi-pool policies key the session by `name:pool`, see grants.ts grantKey). */
   pool: RegistryName
   stable: RegistryName
@@ -268,6 +290,26 @@ export const V4_POOLS = {
   risk: v4Pool('pool:WETH/USDC/3000', 'USDC', 'WETH', 'WETH', 'USDC', 3000, 100, 1000, 3, 10, undefined, 'risk'),
 } as const satisfies Record<string, V4PoolSpec>
 
+/**
+ * otto/mamoru#214: the Monad sleeve's pool, WMON/USDC 0.30 % (token0 WMON, token1 USDC: the budget unit is token1, as
+ * for WETH/USDC). The sleeve holds only the Growth bucket, 15 % of the account (v6, #201), and its caps are bps of the
+ * account cap the operator signs, like Base's:
+ * - capShareBps 1500: the pool's share of the account cap is the bucket's share, so W_p and T_p resolve against the
+ *   same cap the Base pools do.
+ * - windowMultiple 3, totalMultiple 10: the multiples of the volatile Base pool (WETH/USDC, risk), the closest pair the
+ *   Lab measured (#151 T5: peak day 2.38x its share, so 3x clears it; 10x per approval bounds a leaked key near the
+ *   spec's 13 % of the cap where 3x ran out within weeks). WMON is more volatile than WETH, so no lower multiple. What
+ *   caps the funds at risk is not this budget (it counts swap and mint value, which churns) but the bridge: v6 lets at
+ *   most 20 % of the cap cross per call and 50 % per approval, so the sleeve never holds more than that.
+ * - bandTicks 100 (1 % either side of the 30 and 5 minute averages, as WETH/USDC): the band bounds how far a swap or a
+ *   mint may sit from the market; the pool is the same fee tier and the engine's own max TWAP deviation is 100 ticks.
+ *   Nothing measured on Monad argues for a different one yet; a tighter band would stall the engine on WMON's gaps.
+ * - no anchor: WMON/USDC has no peg to clip to.
+ */
+export const V4_POOLS_MONAD = {
+  growth: { ...v4Pool('pool:WMON/USDC/3000', 'USDC', 'WMON', 'WMON', 'USDC', 3000, 100, 1500, 3, 10, undefined, 'growth'), sourceChainId: 143 },
+} as const satisfies Record<string, V4PoolSpec>
+
 export const TWAP_WINDOW_SECONDS = 1800 // spec 007 "Parameters": = execution.twapWindowSeconds
 export const TWAP_SHORT_WINDOW_SECONDS = 300 // T6 M-1: the short TWAP of the range
 export const BUDGET_WINDOW_SECONDS = 86_400 // spec 007 "Parameters": 1 day
@@ -291,13 +333,15 @@ export function mamoruInitFor(
   caps: Record<string, bigint>,
   opts: { twapWindow?: number; twapShortWindow?: number; budgetWindow?: number; admit?: readonly bigint[] } = {},
 ): MamoruInit {
+  // The pool address is read from the registry of the pool's own chain (Base unless the spec names another).
+  const registry = p.sourceChainId === undefined || p.sourceChainId === BASE_CHAIN_ID ? baseRegistry : registryFor(p.sourceChainId)
   const need = (name: string): bigint => {
     const v = caps[name]
     if (v === undefined) throw new Error(`mamoruInitFor: missing cap ${name} (pool ${p.pool})`)
     return v
   }
   return {
-    pool: address(p.pool, baseRegistry),
+    pool: address(p.pool, registry),
     twapWindow: opts.twapWindow ?? TWAP_WINDOW_SECONDS,
     twapShortWindow: opts.twapShortWindow ?? TWAP_SHORT_WINDOW_SECONDS,
     bandTicks: p.bandTicks,
@@ -606,10 +650,10 @@ export function budgetUsedBps(total: bigint, totalLeft: bigint): number {
  * enter-swap or the harvest leg of manage-any, left untouched). Spec 007: "`manage-any` names
  * `MamoruActionPolicy.mint` and approves the policy, not the NonfungiblePositionManager; `enter-mint` the same."
  */
-export function retargetToPolicy(grant: SessionGrant, mamoruPolicy: Address): SessionGrant {
+export function retargetToPolicy(grant: SessionGrant, mamoruPolicy: Address, registry: Registry = baseRegistry): SessionGrant {
   // otto/mamoru#213: bridge-out is not a Uniswap call; MamoruActionPolicy would refuse it, so it never gets one.
   if (grant.requiresPauseGate) throw new Error(`retargetToPolicy: ${grant.name} takes MamoruPauseGate, never MamoruActionPolicy`)
-  const npm = BigInt(address('NonfungiblePositionManager', baseRegistry))
+  const npm = BigInt(address('NonfungiblePositionManager', registry))
   const policyRef = BigInt(mamoruPolicy)
   const actions: ResolvedActionRule[] = grant.actions.map((a) => {
     if (a.signature === MINT_SIG || a.signature === POLICY_INCREASE_SIG) return { ...a, targetAddress: mamoruPolicy }
@@ -796,9 +840,15 @@ function grantKeyOf(t: { name: string; pool?: string }): string {
   return t.pool ? `${t.name}:${t.pool}` : t.name
 }
 
-/** The V4PoolSpec of a pool, by registry name (undefined for a pool the v4 table does not have). */
-export function v4PoolOf(pool: string | undefined): V4PoolSpec | undefined {
-  return Object.values(V4_POOLS).find((p) => p.pool === pool)
+/** The V4PoolSpec of a pool, by registry name and chain (Base unless `sourceChainId` says otherwise; undefined for a pool that chain's v4 table does not have). */
+export function v4PoolOf(pool: string | undefined, sourceChainId: number = BASE_CHAIN_ID): V4PoolSpec | undefined {
+  return v4PoolsOn(sourceChainId).find((p) => p.pool === pool)
+}
+
+/** Every v4 pool spec of a chain. */
+export function v4PoolsOn(sourceChainId: number = BASE_CHAIN_ID): V4PoolSpec[] {
+  const all: V4PoolSpec[] = [...Object.values(V4_POOLS), ...Object.values(V4_POOLS_MONAD)]
+  return all.filter((p) => (p.sourceChainId ?? BASE_CHAIN_ID) === sourceChainId)
 }
 
 // re-export so consumers that only need the param rule type don't have to reach into types.ts directly

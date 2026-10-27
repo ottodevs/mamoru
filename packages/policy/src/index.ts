@@ -31,7 +31,7 @@ export {
   type RerangeSetting,
 } from './engine-settings.ts'
 export { OPS_FLAGS, type OpsFlagName } from './ops-flags.ts'
-export { labWmonUsdcMonadV1, liveWmonUsdcMonadV1, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES } from './policies-monad.ts'
+export { labWmonUsdcMonadV1, labWmonUsdcMonadV5, liveWmonUsdcMonadV1, liveWmonUsdcMonadV5, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES } from './policies-monad.ts'
 export {
   conservadorLabV4,
   conservadorLabV5,
@@ -77,11 +77,14 @@ export {
   calibratedGasModel,
   V4_TX_GAS_TARGET,
   v4PoolOf,
+  v4PoolsOn,
   V4_GAS_CAPS,
+  MONAD_GAS_CAPS,
   v4BudgetCaps,
   validGasCaps,
   v4CapFormulas,
   V4_POOLS,
+  V4_POOLS_MONAD,
   withActionPolicy,
   type MamoruInit,
   type V4GasModel,

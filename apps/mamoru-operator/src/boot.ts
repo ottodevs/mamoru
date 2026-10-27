@@ -4,9 +4,9 @@ import { $ } from 'bun'
 import { TransactionReceiptNotFoundError, createPublicClient, getAddress, http, isAddress, type Hex } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, chainWritesOptIn, isChainId, type Address } from '@mamoru/domain'
-import { entry, registryFor, type Registry } from '@mamoru/registry'
+import { address as registryAddress, entry, isDeployed, registryFor, type Registry } from '@mamoru/registry'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
-import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLiveV4, conservadorLiveV5, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, type PolicyVersion } from '@mamoru/policy'
+import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLiveV4, conservadorLiveV5, labWmonUsdcMonadV5, liveWmonUsdcMonadV5, MONAD_GAS_CAPS, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V4_POOLS_MONAD, type PolicyVersion } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics } from './metrics.ts'
@@ -74,6 +74,10 @@ export function resolveNamedPolicy(policyId: string, env: Record<string, string 
   if (named) return named
   // otto/mamoru#61: a Monad mainnet policy resolves only for an operator opted into writing to Monad (chainWrites).
   if (opts.chainWrites && MONAD_LIVE_POLICIES[policyId]) return MONAD_LIVE_POLICIES[policyId]
+  // otto/mamoru#214: the Monad sleeve's v5 policy resolves only wired to the two Monad contracts, and throws without them.
+  // The live one also needs the chain-writes opt-in (as v1 above); the lab twin is the fork's.
+  const monadV5 = MONAD_V5_BY_ID[policyId]
+  if (monadV5 && (monadV5.chain !== 'monad' || opts.chainWrites)) return deployedMonadV5(monadV5, env)
   if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1') return undefined
   const v5 = V5_POLICIES_BY_ID[policyId]
   if (v5) return env.MAMORU_ACTION_POLICY_V2_ADDRESS ? deployedV5(v5, env) : undefined
@@ -81,6 +85,9 @@ export function resolveNamedPolicy(policyId: string, env: Record<string, string 
   if (!v4) return undefined
   return deployedV4(v4, env)
 }
+
+/** otto/mamoru#214: the Monad sleeve's v5 policies by id. Not in MONAD_LIVE_POLICIES / MONAD_LAB_POLICIES: those resolve without addresses. */
+const MONAD_V5_BY_ID: Record<string, PolicyVersion> = { [liveWmonUsdcMonadV5.policyId]: liveWmonUsdcMonadV5, [labWmonUsdcMonadV5.policyId]: labWmonUsdcMonadV5 }
 
 /**
  * Spec 007 T7 (GPT-6 review of #97, P1 2/3): the v4 policy wired to BOTH deployed contracts, MamoruActionPolicy
@@ -105,7 +112,7 @@ function deployedV4(v4: PolicyVersion, env: Record<string, string | undefined>):
  * the guardian pause). Needs the same opt-in as v4. Malformed, zero, or equal to the V1 or the gas policy address:
  * throws, so a V1 address can never stand in for V2 (V1 refuses increase and the deadline: the engine would stall).
  */
-function deployedV5(v5: PolicyVersion, env: Record<string, string | undefined>): PolicyVersion {
+function deployedV5(v5: PolicyVersion, env: Record<string, string | undefined>, on: { pools: typeof V4_POOLS | typeof V4_POOLS_MONAD; gasCaps: typeof V4_GAS_CAPS } = { pools: V4_POOLS, gasCaps: V4_GAS_CAPS }): PolicyVersion {
   const v2 = env.MAMORU_ACTION_POLICY_V2_ADDRESS
   if (!v2) throw new Error('MAMORU_ACTION_POLICY_V2_ADDRESS is not set')
   const gas = env.MAMORU_GAS_POLICY_ADDRESS
@@ -115,7 +122,16 @@ function deployedV5(v5: PolicyVersion, env: Record<string, string | undefined>):
   }
   if (v2.toLowerCase() === gas.toLowerCase()) throw new Error('MAMORU_ACTION_POLICY_V2_ADDRESS and MAMORU_GAS_POLICY_ADDRESS are the same')
   if (env.MAMORU_ACTION_POLICY_ADDRESS && v2.toLowerCase() === env.MAMORU_ACTION_POLICY_ADDRESS.toLowerCase()) throw new Error('MAMORU_ACTION_POLICY_V2_ADDRESS is the V1 address (MAMORU_ACTION_POLICY_ADDRESS)')
-  return withActionPolicy(v5, getAddress(v2), Object.values(V4_POOLS), { gasPolicy: { address: getAddress(gas), caps: V4_GAS_CAPS }, contractVersion: 2 })
+  return withActionPolicy(v5, getAddress(v2), Object.values(on.pools), { gasPolicy: { address: getAddress(gas), caps: on.gasCaps }, contractVersion: 2 })
+}
+
+/**
+ * otto/mamoru#214: the Monad sleeve's v5 policy wired to MamoruActionPolicyV2 and MamoruGasPolicy on Monad (the same two
+ * env names as Base's v5: an operator reads one chain, so they mean that chain's contracts), with Monad's pool and gas
+ * caps (a Base cap would be 10,000x under Monad's gas price). Unset, malformed or equal: throws, never a policy without them.
+ */
+function deployedMonadV5(p: PolicyVersion, env: Record<string, string | undefined>): PolicyVersion {
+  return deployedV5(p, env, { pools: V4_POOLS_MONAD, gasCaps: MONAD_GAS_CAPS })
 }
 
 /**
@@ -124,6 +140,8 @@ function deployedV5(v5: PolicyVersion, env: Record<string, string | undefined>):
  * exists). Whether an account is offered the move is the D1 flag `onchain_action_policy_v5`, read on every view.
  */
 export function resolveV5Policy(chain: PolicyVersion['chain'], env: Record<string, string | undefined>): PolicyVersion | undefined {
+  // otto/mamoru#214: a Monad operator has no Base policy to migrate accounts to; its V2 address is Monad's (deployedMonadV5).
+  if (chain === 'monad') return undefined
   if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1' || !env.MAMORU_ACTION_POLICY_V2_ADDRESS) return undefined
   return deployedV5(chain === conservadorLiveV5.chain ? conservadorLiveV5 : conservadorLabV5, env)
 }
@@ -134,6 +152,7 @@ export function resolveV5Policy(chain: PolicyVersion['chain'], env: Record<strin
  * account is offered the move is the D1 flag `onchain_action_policy_v4`, read on every view.
  */
 export function resolveV4Policy(chain: PolicyVersion['chain'], env: Record<string, string | undefined>): PolicyVersion | undefined {
+  if (chain === 'monad') return undefined
   if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1') return undefined
   return deployedV4(chain === conservadorLiveV4.chain ? conservadorLiveV4 : conservadorLabV4, env)
 }
@@ -308,8 +327,27 @@ export function assertBaseOnlyFeatures(registry: Registry, env: Record<string, s
   if (registry.chainId === BASE_CHAIN_ID) return
   if (env.MAMORU_ONCHAIN_POLICY_V4 === '1') throw new Error(`MAMORU_ONCHAIN_POLICY_V4 is Base only; this operator reads ${registry.chain}`)
   // v5 needs the v4 opt-in above; its deployed address alone is refused too, so no env turns it on off Base.
-  if (env.MAMORU_ACTION_POLICY_V2_ADDRESS) throw new Error(`MAMORU_ACTION_POLICY_V2_ADDRESS is Base only; this operator reads ${registry.chain}`)
+  // otto/mamoru#214: except on a chain the operator is opted into writing to (MAMORU_CHAIN_WRITES): there it is that chain's
+  // MamoruActionPolicyV2, read only by the sleeve's own policy (deployedMonadV5).
+  if (env.MAMORU_ACTION_POLICY_V2_ADDRESS && !(chainWritesOptIn(env) as readonly number[]).includes(registry.chainId)) throw new Error(`MAMORU_ACTION_POLICY_V2_ADDRESS is Base only; this operator reads ${registry.chain}`)
   if (o.l1RpcUrl) throw new Error(`MAMORU_L1_RPC_URL (bridge-out to Base) is Base only; this operator reads ${registry.chain}`)
+}
+
+/**
+ * otto/mamoru#214: on a chain whose registry already lists MamoruActionPolicyV2 / MamoruGasPolicy (they sit in `undeployed`
+ * until the contracts are pinned, and then join `entries`), the env addresses the policy is wired to must be those entries:
+ * an operator never signs a session for a contract the pinned registry does not name. While a name is `undeployed` the env
+ * address stands alone (the pin comes with the deployment); `writeRegistry` already checks every entry's code hash on chain.
+ * Base and policies without an action policy: nothing to check.
+ */
+export function assertActionPolicyOnRegistry(policy: PolicyVersion, registry: Registry): void {
+  const ap = policy.actionPolicy
+  if (!ap || registry.chainId === BASE_CHAIN_ID) return
+  const pairs: [string, string | undefined][] = [['MamoruActionPolicyV2', ap.address], ['MamoruGasPolicy', ap.gasPolicy?.address]]
+  for (const [name, wired] of pairs) {
+    if (!wired || !isDeployed(name, registry)) continue
+    if (registryAddress(name, registry).toLowerCase() !== wired.toLowerCase()) throw new Error(`${name} is ${wired} in the environment but ${registryAddress(name, registry)} in the ${registry.chain} registry`)
+  }
 }
 
 /**
@@ -367,7 +405,10 @@ export async function bootOperator(o: BootOptions) {
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
   const policy = withTestOverrides(named, process.env)
   assertPolicyOnRegistry(policy, registry)
-  if (writes.on) assertWritePolicy(policy, registry, chainId)
+  if (writes.on) {
+    assertWritePolicy(policy, registry, chainId)
+    assertActionPolicyOnRegistry(policy, registry)
+  }
   const store = new StateStore(o.stateDir)
   // Review round 2: an account already moved to the on-chain action policy needs that policy to resolve after a
   // restart (funding, engine, renewals and Stop all read it). Refused at boot, with the accounts named, rather than
