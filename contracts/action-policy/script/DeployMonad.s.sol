@@ -56,7 +56,11 @@ contract DeployMonad is Script {
         // Base nonces: 1 MamoruActionPolicy (V1, not deployed on Monad), 2 MamoruGasPolicy, 3 MamoruActionPolicyV2.
         uint96 gasNonce = uint96(vm.envOr("GAS_POLICY_SALT_NONCE", uint256(2)));
         uint96 nonce = uint96(vm.envOr("POLICY_V2_SALT_NONCE", uint256(3)));
-        uint16 target = uint16(vm.envOr("CARDINALITY_TARGET", uint256(12_000)));
+        // The policy's own floor (cardinalityNext >= twapWindow, 1,800), nothing more: measured 2026-10-27, the pool's 1,000
+        // slots held about 20 h of history (one observation per block with a swap, not per block), so a 30-minute TWAP
+        // already resolves. If trading ever fills the ring inside the window, observe() reverts and the policy and the
+        // engine refuse the action (a hold, never a loss); raise it then. 1,000 -> 1,800 is one ~17.8M-gas transaction.
+        uint16 target = uint16(vm.envOr("CARDINALITY_TARGET", uint256(1_800)));
         (gasPolicy, policy) =
             deploy(msg.sender, saltFor(msg.sender, gasNonce), saltFor(msg.sender, nonce), guardian, target);
     }

@@ -102,7 +102,7 @@ try {
   check(eq(await read('ROUTER'), regAddress('SwapRouter02', monadRegistry)), 'ROUTER immutable = monad.json SwapRouter02')
   check(eq(await read('FACTORY'), regAddress('UniswapV3Factory', monadRegistry)), 'FACTORY immutable = monad.json UniswapV3Factory')
   const s0 = await client.readContract({ address: regAddress('pool:WMON/USDC/3000', monadRegistry), abi, functionName: 'slot0' })
-  const target = Number(process.env.CARDINALITY_TARGET ?? 12000)
+  const target = Number(process.env.CARDINALITY_TARGET ?? 1800)
   check(s0[4] >= target, `WMON/USDC observationCardinalityNext = ${s0[4]} (>= ${target}; was 1000 on mainnet)`)
   console.log(`MONAD-DEPLOY ok: ${passed} checks`)
 } finally {
