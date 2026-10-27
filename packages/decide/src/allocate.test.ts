@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { conservadorLiveV2, grantKey } from '@mamoru/policy'
+import { conservadorLiveV2, conservadorLiveV6, grantKey } from '@mamoru/policy'
 import { baseRegistry, address, entry } from '@mamoru/registry'
 import { quoteMint, sqrtRatioAtTick, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
 import { allocate, decide, type Observation, type PoolObs, type PositionObs } from './index.ts'
@@ -379,5 +379,46 @@ describe('minimum entry by gas', () => {
   test('a deposit large enough for its gas enters as before', () => {
     const big = obs({ balances: { USDC: 20n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })
     expect(allocate(big, { ...V2, minEntryGasMultiple: 5 }, false).proposal).toMatchObject({ kind: 'enter_swap', pool: 'pool:USDC/USDT/100' })
+  })
+})
+
+describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#213)', () => {
+  const V6 = conservadorLiveV6
+  const v6Obs = (over: Partial<Observation> = {}) =>
+    obs({ sessions: V6.session.grants.filter((g) => !g.perPosition).map((g, i) => ({ grant: grantKey(g), permissionId: `0x${(i + 1).toString(16).padStart(2, '0').repeat(32)}` as const, validUntil: 10_000, active: true })), ...over })
+
+  test('1,000 USDC on Base: stables to 50 %, WETH/USDC to 35 %, the Growth 15 % waits as USDC, nothing to cbBTC', () => {
+    let o = v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })
+    let id = 1n
+    for (let i = 0; i < 12; i++) {
+      const p = decide(o, V6).proposal
+      if (!p || (p.kind !== 'enter_swap' && p.kind !== 'enter_mint')) break
+      o = apply(o, id++, V6)
+    }
+    const d = decide(o, V6)
+    expect(o.positions.map((p) => p.pool).sort()).toEqual(['pool:USDC/USDT/100', 'pool:WETH/USDC/3000'])
+    expect(o.positions.some((p) => p.pool === 'pool:USDC/cbBTC/500')).toBe(false)
+    expect(d.proposal).toBeNull()
+    const a = allocate(o, V6, false)
+    expect(a.buckets.map((b) => b.bucket)).toEqual(['stables', 'risk'])
+    const target = Object.fromEntries(a.buckets.map((b) => [b.bucket, b.target]))
+    const total = 1_000n * USDC
+    // Targets are shares of the whole account (the remote preference counts), not of the Base buckets alone.
+    expect(target.stables! > (total * 49n) / 100n && target.stables! < (total * 51n) / 100n).toBe(true)
+    expect(target.risk! > (total * 34n) / 100n && target.risk! < (total * 36n) / 100n).toBe(true)
+    const idle = o.balances.USDC!
+    expect(idle > 120n * USDC && idle < 180n * USDC).toBe(true)
+  })
+
+  test('without remote buckets the same Base buckets would take everything (the remote share is what holds 15 % back)', () => {
+    const local = { ...V6, remoteBuckets: undefined }
+    let o = v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })
+    let id = 1n
+    for (let i = 0; i < 12; i++) {
+      const p = decide(o, local).proposal
+      if (!p || (p.kind !== 'enter_swap' && p.kind !== 'enter_mint')) break
+      o = apply(o, id++, local)
+    }
+    expect(o.balances.USDC! < 60n * USDC).toBe(true)
   })
 })

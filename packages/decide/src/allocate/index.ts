@@ -160,7 +160,9 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   })
   const executable = rows.filter((r) => r.pool)
   const total = free + executable.reduce((s, r) => s + r.value, 0n)
-  const prefTotal = BigInt(executable.reduce((s, r) => s + r.b.preference, 0))
+  // otto/mamoru#213: a bucket on another chain keeps its share of the account; here it waits as savings until bridged.
+  const remote = (policy.remoteBuckets ?? []).reduce((s, b) => s + b.preference, 0)
+  const prefTotal = BigInt(executable.reduce((s, r) => s + r.b.preference, 0) + remote)
 
   const buckets: BucketValue[] = rows.map((r) => {
     const target = r.pool && prefTotal > 0n ? (total * BigInt(r.b.preference)) / prefTotal : 0n

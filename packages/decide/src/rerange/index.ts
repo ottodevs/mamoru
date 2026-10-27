@@ -1,5 +1,5 @@
 import type { ReasonCode } from '@mamoru/domain'
-import { grantKeyFor, hasManageAny, type PolicyVersion } from '@mamoru/policy'
+import { grantKeyFor, hasManageAny, preferenceTotal, type PolicyVersion } from '@mamoru/policy'
 import type { RegistryName } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { edgeBpsOf, widenEarly } from '../geometry/index.ts'
@@ -123,7 +123,7 @@ export function bucketValues(obs: Observation, policy: PolicyVersion, policyPool
     total += v
     byPool.set(pool.name, (byPool.get(pool.name) ?? 0n) + v)
   }
-  const totalPreference = BigInt(policy.buckets.reduce((s, b) => s + b.preference, 0))
+  const totalPreference = BigInt(preferenceTotal(policy))
   const buckets = policy.buckets.map((b) => {
     const pool = b.pools[0] ?? null
     const value = pool ? (byPool.get(pool) ?? 0n) : b.id === 'stables' ? free : 0n
@@ -175,7 +175,7 @@ export function ratioConvertOf(obs: Observation, policy: PolicyVersion, preferen
   const value = inSavings(pool, volatile, held, savings)
   const capital = free + value
   if (capital === 0n || value === 0n) return null
-  const totalPreference = policy.buckets.reduce((s, b) => s + b.preference, 0)
+  const totalPreference = preferenceTotal(policy)
   const half = (capital * BigInt(preference)) / BigInt(totalPreference) / 2n
   if (value * 2n <= half * 3n || free >= half) return null
   const amountIn = (held * (value - half)) / value

@@ -1,5 +1,6 @@
 export * from './types.ts'
-export { grantKey, grantKeyFor, manageAnyGrants, pairGrants, type PairSpec } from './grants.ts'
+export { bridgeOutGrant, CCTP_DOMAIN_MONAD, grantKey, grantKeyFor, manageAnyGrants, pairGrants, type BridgeOutSpec, type PairSpec } from './grants.ts'
+export { conservadorLabV6, conservadorLiveV6, preferenceTotal, V6_POOLS } from './policies-v6.ts'
 export { conservadorV1, conservadorLabV1, conservadorLabGuardsV1, conservadorLabGeometryV1, FALL_FREEZE_DEFAULTS, conservadorLiveV1, conservadorLiveV2, labWethUsdcV1, POLICIES, hasManageAny, withTestOverrides } from './policies.ts'
 export {
   assertPolicyChain,
