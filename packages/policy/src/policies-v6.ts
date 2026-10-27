@@ -21,13 +21,12 @@ export const V6_POOLS = {
 
 /**
  * Bridge caps, bps of the account cap: one call moves at most the Growth share plus room for a top-up (20 %); one
- * approval at most half the cap over its year (a deposit's 15 %, the top-ups and the rebalances after them); the CCTP
- * fee at most 0.05 % of the cap per call (Monad has Standard transfers only, fee 0 today).
+ * approval at most half the cap over its year (a deposit's 15 %, the top-ups and the rebalances after them). No fee
+ * cap: bridge-out pins the CCTP fee to 0.
  */
 const BRIDGE_CAPS: CapFormula[] = [
   { name: 'bridgePerCall', asset: 'USDC', bpsOfDeposit: 2000 },
   { name: 'bridgeTotal', asset: 'USDC', bpsOfDeposit: 5000 },
-  { name: 'bridgeMaxFee', asset: 'USDC', bpsOfDeposit: 5 },
 ]
 
 export const conservadorLiveV6: PolicyVersion = {
@@ -47,7 +46,7 @@ export const conservadorLiveV6: PolicyVersion = {
     grants: [
       ...grantsV5(V6_POOLS.stables, V6_USAGE),
       ...grantsV5(V6_POOLS.balance, V6_USAGE),
-      bridgeOutGrant({ destinationDomain: CCTP_DOMAIN_MONAD, caps: { perCall: 'bridgePerCall', total: 'bridgeTotal', maxFee: 'bridgeMaxFee' } }, 64),
+      bridgeOutGrant({ destinationDomain: CCTP_DOMAIN_MONAD, caps: { perCall: 'bridgePerCall', total: 'bridgeTotal' } }, 64),
     ],
   },
 }

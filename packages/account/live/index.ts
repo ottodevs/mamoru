@@ -15,7 +15,7 @@ import {
   type WebAuthnSigner,
 } from '../safe/index.ts'
 import { accountSetup, counterfactualAddress } from '../recovery/index.ts'
-import { activationCall, registryTrustCalls, revocationCalls, selfAttestCall, selfRevokeAttestationCall, type SecondActionPolicy } from '../sessions/index.ts'
+import { activationCall, registryTrustCalls, revocationCalls, selfAttestCall, selfRevokeAttestationCall, type SessionPolicies } from '../sessions/index.ts'
 
 /** Owner-authorized cap for the live happy path on Base: 100 USDC per account (6 decimals). */
 export const LIVE_CAP_USDC = 100_000_000n
@@ -109,7 +109,7 @@ export function activationBatch(
   a: LiveAccount,
   grants: SessionGrant[],
   revoked: Hex[],
-  opts: { trust?: boolean; policiesFor?: (grant: SessionGrant, index: number) => SecondActionPolicy | undefined; attest?: readonly Address[]; reattest?: readonly Address[]; attestData?: Hex; reserve?: LiveGasReserve } = {},
+  opts: { trust?: boolean; policiesFor?: (grant: SessionGrant, index: number) => SessionPolicies | undefined; attest?: readonly Address[]; reattest?: readonly Address[]; attestData?: Hex; reserve?: LiveGasReserve } = {},
 ): { calls: MultiSendCall[]; permissionIds: Hex[] } {
   const reg = regOf(a)
   const act = activationCall(grants, revoked, opts.policiesFor, reg)

@@ -70,6 +70,12 @@ export type GrantTemplate = {
    * set unless it is given a real `secondPolicy`. Absent (every v2/v3 grant): no change to today's behaviour.
    */
   requiresActionPolicy?: true
+  /**
+   * otto/mamoru#213: a grant outside MamoruActionPolicy (bridge-out) still pays its userOps under MamoruGasPolicy's
+   * owner-signed caps, so a leaked key cannot spend the Safe's gas reserve through it. `toSmartSession` refuses to
+   * encode it without that gas policy, and with an action policy (`retargetToPolicy` refuses it too).
+   */
+  requiresGasPolicy?: true
 }
 
 export type UsageTier = { upToUsdc: bigint; usageLimit: number }
@@ -378,4 +384,6 @@ export type SessionGrant = {
    * mint and approvals at. `toSmartSession` refuses a second policy at any other address. Absent on v2/v3 grants.
    */
   actionPolicy?: Address
+  /** See `GrantTemplate.requiresGasPolicy`. */
+  requiresGasPolicy?: true
 }

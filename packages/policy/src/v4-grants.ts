@@ -594,6 +594,8 @@ export function budgetUsedBps(total: bigint, totalLeft: bigint): number {
  * `MamoruActionPolicy.mint` and approves the policy, not the NonfungiblePositionManager; `enter-mint` the same."
  */
 export function retargetToPolicy(grant: SessionGrant, mamoruPolicy: Address): SessionGrant {
+  // otto/mamoru#213: bridge-out is not a Uniswap call; MamoruActionPolicy would refuse it, so it never gets one.
+  if (grant.requiresGasPolicy) throw new Error(`retargetToPolicy: ${grant.name} takes MamoruGasPolicy only, never MamoruActionPolicy`)
   const npm = BigInt(address('NonfungiblePositionManager', baseRegistry))
   const policyRef = BigInt(mamoruPolicy)
   const actions: ResolvedActionRule[] = grant.actions.map((a) => {

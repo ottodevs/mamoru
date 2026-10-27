@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { baseRegistry, address } from '@mamoru/registry'
-import { computeCaps, conservadorLiveV4, conservadorLiveV5, POLICY_INCREASE_SIG, conservadorV1, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, grantKey, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_GAS_CAPS, V4_POOLS, v4BudgetCaps, type SessionGrant } from '@mamoru/policy'
+import { computeCaps, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, POLICY_INCREASE_SIG, conservadorV1, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, grantKey, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_GAS_CAPS, V4_POOLS, v4BudgetCaps, type SessionGrant } from '@mamoru/policy'
 import { activationCall, selfAttestCall, selfRevokeAttestationCall, toSmartSession, v4PoliciesFor, type SecondActionPolicy } from './index.ts'
 
 const ctx = {
@@ -119,7 +119,7 @@ describe('T7 (GPT-6 review of #97): P1 1-3', () => {
   const keys = conservadorLiveV4.session.grants.map(grantKey)
   const grants = keys.map((k) => retargetToPolicy(instantiateGrant(conservadorLiveV4, k, v4Ctx), A))
   const btcSwap = grants.find((g) => g.name === 'enter-swap' && g.pool === 'pool:USDC/cbBTC/500')!
-  const ok = (g: SessionGrant): SecondActionPolicy => v4PoliciesFor([g], d, 1n, caps)(g, 0)!
+  const ok = (g: SessionGrant): SecondActionPolicy => v4PoliciesFor([g], d, 1n, caps)(g, 0) as SecondActionPolicy
 
   test('P1 1: activationCall encodes v4 grants with their policies; without them it still refuses', () => {
     expect(() => activationCall(grants, [])).toThrow('MamoruActionPolicy')
@@ -131,7 +131,7 @@ describe('T7 (GPT-6 review of #97): P1 1-3', () => {
     const admitByPool = { 'pool:USDC/cbBTC/500': [7n, 9n] }
     const f = v4PoliciesFor(grants, d, 1n, caps, admitByPool)
     const btc = grants.map((g, i) => [g, i] as const).filter(([g]) => g.pool === 'pool:USDC/cbBTC/500')
-    const inits = btc.map(([g, i]) => decodeMamoruInit(f(g, i)!.initData))
+    const inits = btc.map(([g, i]) => decodeMamoruInit((f(g, i) as SecondActionPolicy).initData))
     expect(inits[0]!.admit).toEqual([7n, 9n])
     for (const i of inits.slice(1)) expect(i.admit).toEqual([])
     expect(new Set(inits.map((i) => i.perWindow)).size).toBe(1)
@@ -184,7 +184,7 @@ describe('v5 grants (MamoruActionPolicyV2, otto/mamoru#151, #171): increase and 
   const keys = conservadorLiveV5.session.grants.map(grantKey)
   const grants = keys.map((k) => retargetToPolicy(instantiateGrant(conservadorLiveV5, k, v4Ctx), A))
   const manage = grants.find((g) => g.name === 'manage-any' && g.pool === 'pool:USDC/cbBTC/500')!
-  const ok = (g: SessionGrant): SecondActionPolicy => v4PoliciesFor([g], d, 1n, caps)(g, 0)!
+  const ok = (g: SessionGrant): SecondActionPolicy => v4PoliciesFor([g], d, 1n, caps)(g, 0) as SecondActionPolicy
 
   test('every v5 grant encodes with MamoruActionPolicyV2 on every action, the deadline and increase included', () => {
     const act = activationCall(grants, [], v4PoliciesFor(grants, d, 1n, caps))
@@ -229,5 +229,28 @@ describe('selfAttestCall data', () => {
     const b = selfAttestCall([m], '0x02')
     expect(a.data).not.toBe(b.data)
     expect(selfAttestCall([m]).data).toBe(selfAttestCall([m], '0x').data) // default unchanged for first attestations
+  })
+})
+
+describe('otto/mamoru#213: bridge-out takes MamoruGasPolicy only', () => {
+  const G = '0x00000000000000000000000000000000000000fd' as const
+  const A = '0x00000000000000000000000000000000000000fe' as const
+  const d = { actionPolicy: A, gasPolicy: G, gasCaps: V4_GAS_CAPS }
+  const caps = computeCaps(conservadorLiveV6, 10_000n * 1_000_000n, { USDT: { num: 1n, den: 1n }, WETH: { num: 1n, den: 3_000n } })
+  const bridge = instantiateGrant(conservadorLiveV6, 'bridge-out', { ...v4Ctx, caps })
+
+  test('encoded with the gas policy as a userOp policy and UniActionPolicy alone on its actions', () => {
+    const p = v4PoliciesFor([bridge], d, 1n, v4BudgetCaps(conservadorLiveV6, 10_000n * 1_000_000n))(bridge, 0)
+    expect(p).toEqual({ gas: { policy: G, initData: encodeGasCaps(V4_GAS_CAPS) }, expected: { gasPolicy: G } })
+    const s = toSmartSession(bridge, p)
+    expect(s.userOpPolicies.map((x) => x.policy.toLowerCase())).toEqual([address('TimeFramePolicy', baseRegistry), address('UsageLimitPolicy', baseRegistry), G].map((x) => x.toLowerCase()))
+    for (const a of s.actions) expect(a.actionPolicies.map((x) => x.policy.toLowerCase())).toEqual([address('UniActionPolicy', baseRegistry).toLowerCase()])
+  })
+
+  test('refused without the gas policy, with the wrong one, or with an action policy', () => {
+    expect(() => toSmartSession(bridge)).toThrow('MamoruGasPolicy')
+    expect(() => activationCall([bridge], [])).toThrow('MamoruGasPolicy')
+    expect(() => toSmartSession(bridge, { gas: { policy: A, initData: encodeGasCaps(V4_GAS_CAPS) }, expected: { gasPolicy: G } })).toThrow('not the configured')
+    expect(() => toSmartSession(bridge, { policy: A, initData: '0x', gas: { policy: G, initData: encodeGasCaps(V4_GAS_CAPS) }, expected: { actionPolicy: A, gasPolicy: G } })).toThrow('never takes MamoruActionPolicy')
   })
 })

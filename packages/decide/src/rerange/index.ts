@@ -106,7 +106,7 @@ export type BucketValue = { bucket: string; target: bigint; value: bigint; pool:
 export function bucketValues(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>): { total: bigint; buckets: BucketValue[] } {
   const savings = policy.savingsAsset
   const free = obs.balances[savings] ?? 0n
-  let total = free
+  let total = free + (obs.remote?.value ?? 0n)
   const counted = new Set<string>()
   for (const pool of obs.pools) {
     if (!policyPools.has(pool.name)) continue
