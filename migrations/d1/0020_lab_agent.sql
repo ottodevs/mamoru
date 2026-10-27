@@ -1,4 +1,4 @@
--- Agent Lab agent (spec 008 phase 2, otto/mamoru#204). Additive. XXXX left for the coordinator to number at merge.
+-- Agent Lab agent (spec 008 phase 2, otto/mamoru#204). Additive.
 -- SQLite needs one ALTER TABLE per statement — no multi-column ADD COLUMN.
 ALTER TABLE lab_jobs ADD COLUMN thread_id TEXT;
 ALTER TABLE lab_jobs ADD COLUMN question TEXT;
