@@ -63,6 +63,8 @@ export const MAX_ORACLE_GAP_BPS = 100n
 export const ORACLE_MAX_AGE_SEC = 4_200
 /** The swap's deadline after the prepare. */
 export const CONVERT_DEADLINE_SEC = 900
+/** Conversions one account may start per UTC day; counted apart from moves, so a conversion never uses up the move that follows it. */
+export const CONVERTS_PER_ACCOUNT_DAY = 3
 /** Gas limit of the owner transaction (the swap used ~130k on Ethereum), with margin. */
 export const CONVERT_GAS = 300_000n
 
@@ -238,7 +240,7 @@ type Reservation = { wei: string; tx?: Hex; nonce?: number; at: string; goneAt?:
 /** #211: a conversion as kept on disk. */
 type StoredConvert = EthConvert & { id: string; safe: Address; safeNonce: string; execStarted?: boolean }
 type PreparedConvert = { prepareId: string; accountKey: string; live: LiveAccount; tx: SafeTx; safeTxHash: Hex; amountIn: bigint; minOut: bigint; deployed: boolean; expires: number }
-type Journal = { converts?: Record<string, StoredConvert>; reservations?: Record<string, Reservation>; cctpBurns?: Record<string, string[]>; routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
+type Journal = { converts?: Record<string, StoredConvert>; convertDays?: Record<string, { day: string; n: number }>; reservations?: Record<string, Reservation>; cctpBurns?: Record<string, string[]>; routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
 
 const NON_TERMINAL = new Set<BridgeOutRoute['state']>(['sending', 'deposited', 'unconfirmed', 'expired'])
 
@@ -430,7 +432,7 @@ export class BridgeOut {
     // A reservation without a signed transaction was never broadcast (the hash is written before it): nothing to hold.
     const reservations = Object.fromEntries(Object.entries(j.reservations ?? {}).filter(([, r]) => !!r.tx))
     this.droppedReservations = Object.keys(j.reservations ?? {}).length - Object.keys(reservations).length
-    return { routes: j.routes ?? {}, converts: j.converts ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {}, cctpBurns: j.cctpBurns ?? {}, reservations }
+    return { routes: j.routes ?? {}, converts: j.converts ?? {}, convertDays: j.convertDays ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {}, cctpBurns: j.cctpBurns ?? {}, reservations }
   }
 
   private save(): void {
@@ -774,6 +776,7 @@ export class BridgeOut {
   /** #180: hands the signed userOp to the bundler, then follows it by its hash. Nothing is spent by Mamoru. */
   private async sendUserOp(ctx: AccountContext, p: Prepared, u: PreparedOp, signature: Hex, aa: AccountAbstraction): Promise<BridgeOutView> {
     if (await this.blocking(this.journal.routes[ctx.accountKey])) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
+    if (this.convertBlocking(ctx.accountKey)) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
     // Nothing changed on Ethereum since the prepare: same balance, same deploy state, same EntryPoint nonce.
     const [balance, code, nonce, head] = await Promise.all([
       this.usdcAt(p.live.safe),
@@ -1059,6 +1062,7 @@ export class BridgeOut {
 
   private async send(ctx: AccountContext, p: Prepared, signature: Hex): Promise<BridgeOutView> {
     if (await this.blocking(this.journal.routes[ctx.accountKey])) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
+    if (this.convertBlocking(ctx.accountKey)) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
     // Nothing changed on Ethereum since the prepare: same balance, same deploy state and nonce.
     const [amount, state, head] = await Promise.all([this.usdcAt(p.live.safe), readSafeNonce(this.l1, p.live.safe), this.l1.getBlockNumber({ cacheTime: 0 })])
     if (amount !== p.deposit.amount || state.deployed !== p.deployed || state.nonce !== p.tx.nonce) throw new HttpError(409, 'BRIDGE_STALE', 'the balance on Ethereum changed, tap again')
@@ -1147,6 +1151,11 @@ export class BridgeOut {
     return !!c && (c.state === 'sending' || c.state === 'unconfirmed')
   }
 
+  private convertsToday(accountKey: string): number {
+    const d = this.journal.convertDays?.[accountKey]
+    return d && d.day === this.day() ? d.n : 0
+  }
+
   private writeConvert(accountKey: string, c: StoredConvert): void {
     c.at = new Date(this.now()).toISOString()
     this.journal.converts = { ...(this.journal.converts ?? {}), [accountKey]: c }
@@ -1157,8 +1166,7 @@ export class BridgeOut {
     this.on(ctx.accountKey)
     const live = this.live(ctx)
     if (this.convertBlocking(ctx.accountKey) || (await this.blocking(this.journal.routes[ctx.accountKey]))) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
-    const moves = this.journal.moves[ctx.accountKey]
-    if (moves && moves.day === this.day() && moves.n >= MOVES_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
+    if (this.convertsToday(ctx.accountKey) >= CONVERTS_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
     const amountIn = await this.l1.getBalance({ address: live.safe })
     if (amountIn < MIN_CONVERT_WEI) throw new HttpError(409, 'CONVERT_NOTHING', 'there is no ETH on Ethereum to convert')
     let quoted: bigint
@@ -1220,12 +1228,11 @@ export class BridgeOut {
     // Nothing changed on Ethereum since the prepare: same ETH, same deploy state and Safe nonce.
     const [amount, state] = await Promise.all([this.l1.getBalance({ address: p.live.safe }), readSafeNonce(this.l1, p.live.safe)])
     if (amount !== p.amountIn || state.deployed !== p.deployed || state.nonce !== p.tx.nonce) throw new HttpError(409, 'BRIDGE_STALE', 'the balance on Ethereum changed, tap again')
-    const moves = this.journal.moves[ctx.accountKey]
-    if (moves && moves.day === this.day() && moves.n >= MOVES_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
+    if (this.convertsToday(ctx.accountKey) >= CONVERTS_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
     const exec = execTransactionData(p.tx, signature)
     if (p.deployed) await this.simulate(p.live.safe, exec)
     const day = this.day()
-    this.journal.moves[ctx.accountKey] = { day, n: moves && moves.day === day ? moves.n + 1 : 1 }
+    this.journal.convertDays = { ...(this.journal.convertDays ?? {}), [ctx.accountKey]: { day, n: this.convertsToday(ctx.accountKey) + 1 } }
     const c: StoredConvert = { id: p.prepareId, safe: p.live.safe, safeNonce: p.tx.nonce.toString(), state: 'sending', ethWei: p.amountIn.toString(), minUsdc: p.minOut.toString(), at: '' }
     this.writeConvert(ctx.accountKey, c)
     try {
@@ -1287,10 +1294,13 @@ export class BridgeOut {
       if (receipt) this.settleConvert(next, receipt)
       else if (!next.execStarted) next.state = 'failed'
       else if (this.now() - Date.parse(c.at) >= UNCONFIRMED_GIVEUP_MS) {
-        // No hash on disk and nothing found: failed only when the signed Safe nonce is still unspent.
-        const { nonce } = await readSafeNonce(this.l1, next.safe)
-        if (nonce === BigInt(next.safeNonce)) next.state = 'failed'
-        else if (next.state === 'sending') next.state = 'unconfirmed'
+        // No receipt to read after the wait. Signed Safe nonce still unspent: it did not run, and any later
+        // transaction of the account signs that same nonce, so at most one of them ever runs: failed. Nonce spent:
+        // the ETH decides. Still all there: another transaction took the nonce and this one can never run: failed.
+        // Gone: it ran (the swap only pays the account itself), done without a known amount.
+        const [{ nonce }, ethNow] = await Promise.all([readSafeNonce(this.l1, next.safe), this.l1.getBalance({ address: next.safe })])
+        if (nonce === BigInt(next.safeNonce) || ethNow >= BigInt(next.ethWei)) next.state = 'failed'
+        else next.state = 'done'
       } else if (next.state === 'sending') next.state = 'unconfirmed'
     } catch (e) {
       logErr(`[bridge-out] convert status ${accountKey.slice(0, 8)}:`, e)
