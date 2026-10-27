@@ -286,6 +286,20 @@ export function priorIncludedOf(ops: readonly StoredOp[], sessions: readonly { p
   return ops.filter((o) => o.opId.startsWith('eng-') && (o.state === 'confirmed' || o.lateIncluded) && o.permissionId && o.calls && active.has(o.permissionId.toLowerCase())).map((o) => ({ permissionId: o.permissionId!, calls: o.calls! }))
 }
 
+/**
+ * otto/mamoru#218: the confirmed re-ranges of the last 7 days from the account's stored ops, for a new engine's
+ * cooldown and weekly count. A stored op records the pool and the inclusion block, and `rerangeAt` its block
+ * timestamp, written when the engine confirmed it (no RPC at boot, and no clock guess). A row without one is skipped:
+ * it predates the field.
+ */
+export function rerangeHistoryOf(ops: readonly StoredOp[], nowSeconds: number): { pool: string; at: bigint }[] {
+  const since = BigInt(nowSeconds) - 7n * 86_400n
+  return ops
+    .filter((o) => o.rerange && o.state === 'confirmed' && o.pool && o.rerangeAt)
+    .map((o) => ({ pool: o.pool!, at: BigInt(o.rerangeAt!) }))
+    .filter((r) => r.at > since)
+}
+
 const ENGINE_UNSETTLED = new Set<OpRecord['state']>(['signed', 'submitted', 'included', 'pending_reconciliation'])
 /** What a retried activation meets when the Safe nonce it was signed for is already spent. */
 const SPENT_NONCE_CODES = new Set(['SAFE_NONCE_MOVED', 'OWNER_TX_REVERTS', 'OWNER_TX_FAILED', 'BAD_SIGNATURE'])
@@ -5023,6 +5037,7 @@ export class Operator {
         // otto/mamoru#212: new money is placed only within the cap, counted across chains.
         cap: () => this.engineCap(acc),
         ...this.remoteOf(acc),
+        rerangeHistory: rerangeHistoryOf(acc.ops, Math.floor(Date.now() / 1000)),
       },
       {
         waitBlock: () => Bun.sleep(this.cfg.waitBlockMs),
@@ -5031,6 +5046,12 @@ export class Operator {
           if (!acc.managedTokenIds.includes(tokenId.toString())) acc.managedTokenIds.push(tokenId.toString())
           this.store.save()
           return this.manageSession(acc, tokenId, pool)
+        },
+        onReranged: (pool, at, block) => {
+          const row = acc.ops.findLast((o) => o.rerange && o.block === Number(block) && o.pool === pool)
+          if (!row) return
+          row.rerangeAt = at.toString()
+          this.store.save()
         },
         onMinted: (tokenId, block) => {
           const id = tokenId.toString()
@@ -5321,12 +5342,14 @@ export class Operator {
         ...opIntentView(o.intent),
         ...((o.state === 'confirmed' || o.lateIncluded) && o.permissionId && o.calls ? { permissionId: o.permissionId, calls: o.calls } : {}),
         ...(o.lateIncluded ? { lateIncluded: true } : {}),
+        ...(o.intent.kind === 'rerange' ? { rerange: true as const } : {}),
       }
       const sig = `${view.state}|${view.code}|${view.txHash ?? ''}`
       if (runner.seen.get(own) === sig) continue
       runner.seen.set(own, sig)
       const existing = acc.ops.find((x) => x.opId === opId)
       if (existing) {
+        // #218: the timestamp is stored by `onReranged`; a later sync of the same row must not drop it.
         Object.assign(existing, view)
       } else {
         // An identical failure right after the last one (same kind and code, nothing in between) bumps its count instead of a new row.

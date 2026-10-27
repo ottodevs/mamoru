@@ -43,6 +43,13 @@ export type StoredOp = OpView & {
   spentBy?: Hex
   /** otto/mamoru#163: the last block the bounded range search for its ExecutionSuccess has covered (checkpoint). */
   scannedTo?: string
+  /**
+   * otto/mamoru#218: an engine op that closed a position to re-range it (`kind` is `reduce` for it, as for a harvest),
+   * and the block timestamp (unix seconds, decimal) it was included at. Both are set once it is confirmed; the operator
+   * seeds a new engine's cooldown and weekly count from the confirmed ones.
+   */
+  rerange?: true
+  rerangeAt?: string
   /** otto/mamoru#15: an activation whose batch buys its own gas reserve: the unix time its swap reverts after. */
   reserveDeadline?: string
 }

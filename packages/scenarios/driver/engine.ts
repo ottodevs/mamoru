@@ -247,6 +247,11 @@ export type EngineConfig = {
    * not yet landed there is still in the local balances read at it, and is not counted in flight a second time.
    */
   remote?: (block: bigint) => Promise<NonNullable<Observation['remote']>>
+  /**
+   * otto/mamoru#218: this account's confirmed re-ranges from before this engine started (block timestamp and pool),
+   * for the weekly cap and the cooldown across a restart. The newest also seeds `lastRerangeAt`. Absent: none.
+   */
+  rerangeHistory?: { pool: string; at: bigint }[]
 }
 
 /** Live op states whose signed bytes may still land or have landed without being settled here (Engine.carried). */
@@ -284,6 +289,8 @@ export type EngineHooks = {
    * review from the local entries. Called once per op; errors here are ignored.
    */
   bridgeFailed?: (opId: string, code: string) => void
+  /** otto/mamoru#218: a re-range was confirmed: its pool, block timestamp and block (the live operator stores it). */
+  onReranged?: (pool: string, at: bigint, block: bigint) => void
 }
 
 /** The block of the latest operation that reached the chain: no review may observe before it. */
@@ -380,6 +387,8 @@ export class Engine {
   private readonly backoff: { premiseHash: string; key: string; until: bigint }[] = []
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. */
   lastRerangeAt: bigint | null = null
+  /** otto/mamoru#218: confirmed re-ranges (seeded, then appended on inclusion); handed to `decide` only when not empty. */
+  readonly reranges: { pool: string; at: bigint }[] = []
   /**
    * otto/mamoru#172: since when each position has been out of range, as this engine saw it (`outOfRangeSinceOf`).
    * Kept at every review; handed to `decide` only under a policy with `range.lazy`, so an eager observation stays
@@ -416,6 +425,11 @@ export class Engine {
     for (const u of cfg.priorIncluded ?? []) this.ledger.recordIncluded(u.permissionId, u.calls)
     for (const op of cfg.carried ?? []) if (op.userOpHash && op.nonce !== undefined && op.prepareBlock !== undefined) this.released.push(op)
     for (const [name, series] of cfg.guardHistory?.series ?? []) this.guardSeries.set(name, series)
+    // #218: a restart keeps the cooldown and the weekly count.
+    for (const r of cfg.rerangeHistory ?? []) {
+      this.reranges.push({ pool: r.pool, at: r.at })
+      if (this.lastRerangeAt === null || r.at > this.lastRerangeAt) this.lastRerangeAt = r.at
+    }
   }
 
   /** Live: a session the owner removed on chain (SmartSession) is revoked in the ledger, so decide never proposes an op it cannot authorize. */
@@ -591,7 +605,9 @@ export class Engine {
       return { kind: 'observation-failed', code: 'EHG_OBSERVATION_STALE', detail: `observed at block ${obs.block.number}, the last operation is in block ${floor}` }
     }
     const cap = this.cfg.cap?.()
-    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...this.cfg.peerPositions?.(), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}) }
+    const weekAgo = obs.block.timestamp - 7n * 86_400n
+    const recent = this.reranges.filter((r) => r.at > weekAgo)
+    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}) }
     this.outOfRange = outOfRangeSinceOf(this.outOfRange, obs)
     if (this.cfg.policy.range.lazy) obs = withOutOfRangeSince(obs, this.outOfRange)
     this.lastObservation = obs
@@ -1003,6 +1019,8 @@ export class Engine {
     if (proposal.kind === 'rerange') {
       const inc = op.included!
       this.lastRerangeAt = (await this.client.getBlock({ blockNumber: inc.blockNumber })).timestamp
+      this.reranges.push({ pool: proposal.pool, at: this.lastRerangeAt })
+      this.hooks.onReranged?.(proposal.pool, this.lastRerangeAt, inc.blockNumber)
       const i = this.allowedTokenIds.indexOf(proposal.tokenId)
       if (i >= 0) this.allowedTokenIds.splice(i, 1)
     }
