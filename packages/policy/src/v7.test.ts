@@ -61,7 +61,7 @@ describe('conservador-live-v7 (otto/mamoru#225)', () => {
     expect(stables!.actions.map(sig)).toEqual(['approve', 'exactInputSingle', 'multicall', 'approve', 'mint', 'decreaseLiquidity', 'collect', 'burn', 'increase'])
     expect(balance!.actions).toHaveLength(9)
     expect(btc!.actions.map(sig)).toEqual(['decreaseLiquidity', 'collect', 'burn', 'approve', 'exactInputSingle', 'multicall'])
-    expect(bridge).toEqual(conservadorLiveV6.session.grants.at(-1))
+    expect(bridge).toEqual(conservadorLiveV6.session.grants.at(-1)!)
     const v2Only = (g: GrantTemplate) => g.actions.filter((a) => a.actionPolicyOnly).map(sig)
     for (const g of [stables!, balance!, btc!]) {
       expect(v2Only(g).sort()).toEqual(['burn', 'collect', 'decreaseLiquidity', 'multicall'])
