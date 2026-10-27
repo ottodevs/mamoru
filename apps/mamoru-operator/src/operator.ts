@@ -2100,12 +2100,16 @@ export class Operator {
   /**
    * otto/mamoru#225: a policy approved in ONE owner transaction (`session.oneTransaction`, v7): every key, every revoke and
    * attestation in one Safe transaction, never split. Its gas limit is simulated in the Safe's own context (as fitV4);
-   * over V4_TX_GAS_TARGET (or `budget`, when lower), or over `budget` by the static estimate when it cannot be simulated,
-   * it is refused (RENEWAL_TOO_LARGE) and nothing is held for signing: no silent second step.
+   * over `budget` it is refused (RENEWAL_TOO_LARGE) and nothing is held for signing: no silent second step.
+   * The bound is `budget` (RENEW_GAS_BUDGET 16.2M for a renewal or move, ACTIVATION_GAS_BUDGET 15M for a Start), not
+   * V4_TX_GAS_TARGET: that target only decides where fitV4 cuts a split, and a move must revoke the old set in the same
+   * transaction. Measured on a Base fork (t11): the limit ownerTxGasLimit computes is 15.6M for the move from a 9-session
+   * v5 account and 16.1M from a 12-session v2 one (eth_estimateGas with the passkey ~0.25M less, receipts 12.0M / 12.7M,
+   * the revokes' refunds), under 2^24 = 16.78M; the relayer sends at most 2^24.
    */
   private async oneTxV4(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, keys: string[], revokes: Hex[], mode: 'full' | 'extend', budget: bigint, reserve?: LiveGasReserve) {
     const ordered = orderV4Keys(policy, keys)
-    const target = budget < V4_TX_GAS_TARGET ? budget : V4_TX_GAS_TARGET
+    const target = budget
     const a = await this.approval(acc, live, policy, r, cap, ordered, mode, reserve)
     const calls = [...revocationCalls(revokes, this.cfg.registry), ...a.batch.calls]
     const limit = await this.ownerTxGasLimit(live, calls, r.block)

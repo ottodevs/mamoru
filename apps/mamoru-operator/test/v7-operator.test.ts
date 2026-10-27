@@ -158,16 +158,17 @@ describe('owner transactions of a v7 approval: one each', () => {
     expect(removed).toHaveLength(acc.grants.length)
   })
 
-  test('over V4_TX_GAS_TARGET by simulation: RENEWAL_TOO_LARGE, nothing held, never split', async () => {
+  test('over the renewal budget (16.2M) by simulation: RENEWAL_TOO_LARGE, nothing held, never split', async () => {
     const w = world(0n, cfg({ merged_grants_v7: true }))
     running(w, v5)
     ready(w)
     chain(w, 7n)
-    priv(w.op).ownerTxGasLimit = async () => V4_TX_GAS_TARGET + 1n
+    priv(w.op).ownerTxGasLimit = async () => 16_200_001n
     await expect(w.op.prepareRenew(ctx)).rejects.toMatchObject({ code: 'RENEWAL_TOO_LARGE' })
     expect(priv(w.op).prepared.size).toBe(0)
-    // At the target it goes, as one transaction.
-    priv(w.op).ownerTxGasLimit = async () => V4_TX_GAS_TARGET
+    // Over V4_TX_GAS_TARGET (where fitV4 would cut) but within the budget it goes, as one transaction: a move revokes the
+    // old set in the same transaction (t11: 15.6M from a 9-session v5 account, 16.1M from a 12-session v2 one).
+    priv(w.op).ownerTxGasLimit = async () => V4_TX_GAS_TARGET + 1_600_000n
     const t = await w.op.prepareRenew(ctx)
     expect(smartSessionCalls(priv(w.op).prepared.get(t.prepareId)!.tx).sessions).toHaveLength(4)
   })
