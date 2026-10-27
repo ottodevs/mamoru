@@ -1,0 +1,11 @@
+# SPIKE otto/mamoru#116 T0: throwaway prototype for fork measurements only. Not audited, not deployed anywhere.
+# No dependencies. Build: nix shell nixpkgs#foundry --command forge build --root packages/scenarios/setup-commit
+[profile.default]
+src = "src"
+out = "out"
+libs = []
+solc_version = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 10000
+via_ir = false
