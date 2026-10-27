@@ -119,7 +119,7 @@ export type FundingView = {
   approval?: {
     validUntil: number; renewDue: boolean; expired: boolean; missing?: number; upgrade?: boolean; upgradePolicy?: string; upgradeSplit?: { from: { bucket: string; bps: number }[]; to: { bucket: string; chainId: number; bps: number }[] }; paused?: boolean; policyId?: string
     capRaise?: { capUsdc: string; signedUsdc: string }
-    usage?: { action: 'collect' | 'rerange' | 'enter'; pool: string | null; usedBps: number; spent: boolean }
+    usage?: { action: 'collect' | 'rerange' | 'enter' | 'all'; pool: string | null; usedBps: number; spent: boolean }
   } | null
   positions: {
     tokenId: string; pool: string; liquidity: string; inRange: boolean; amountUsdc: string; amountCbbtc: string

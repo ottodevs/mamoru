@@ -52,6 +52,16 @@ export const OPS_FLAGS = {
     label: 'Multichain (v6: Base + Monad growth)',
     description: 'Offers running Base accounts the renewal that moves them to conservadorLiveV6: growth 15 % on the owner\'s Monad sleeve, bridge-out behind MamoruPauseGate (otto/mamoru#214). Refused until the Monad sleeve is active.',
   },
+  /**
+   * otto/mamoru#225, default off: offers running Base accounts (v2-v6) the renewal that moves them to conservadorLiveV7:
+   * v6 with one session per pool, so the move, every renewal and the activation are each ONE owner transaction (one
+   * passkey prompt). Same contracts and environment as `multichain_v6` (V2 and the pause gate), takes precedence over it
+   * while on, and the Worker refuses it, like v6, until the owner's Monad sleeve is active.
+   */
+  merged_grants_v7: {
+    label: 'One-prompt approvals (v7: one session per pool)',
+    description: "Offers running Base accounts the renewal that moves them to conservadorLiveV7: v6 with each pool's grants in one session, approved in one transaction (otto/mamoru#225). Refused until the Monad sleeve is active, like v6.",
+  },
 } as const
 
 export type OpsFlagName = keyof typeof OPS_FLAGS

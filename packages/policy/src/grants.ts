@@ -220,7 +220,11 @@ export function grantKey(t: { name: GrantName; pool?: string }): string {
 
 /** The key of the grant `name` that covers `pool` in this policy (plain `name` for single-pair policies). */
 export function grantKeyFor(policy: { session: { grants: GrantTemplate[] } }, name: GrantName, pool: string): string {
-  const t = policy.session.grants.find((g) => g.name === name && g.pool === pool) ?? policy.session.grants.find((g) => g.name === name && !g.pool)
+  const t =
+    policy.session.grants.find((g) => g.name === name && g.pool === pool) ??
+    policy.session.grants.find((g) => g.name === name && !g.pool) ??
+    // otto/mamoru#225: the pool's one merged session, when it stands for `name` (see `GrantTemplate.covers`).
+    policy.session.grants.find((g) => g.pool === pool && g.covers?.includes(name))
   if (!t) throw new Error(`no ${name} grant for ${pool}`)
   return grantKey(t)
 }

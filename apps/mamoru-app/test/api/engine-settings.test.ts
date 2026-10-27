@@ -78,7 +78,7 @@ describe('GET /api/internal/engine-settings (spec 006)', () => {
     const h = harness(() => NOW, { env: { OPERATOR_SECRET: OP } })
     insert(h, 'prod', today)
     const p = JSON.parse(await (await pull(h)).text()) as EngineSettingsPayload
-    expect(p.flags).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false, multichain_v6: false })
+    expect(p.flags).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false, multichain_v6: false, merged_grants_v7: false })
   })
 
   test('otto/mamoru#129: the payload carries the newest row for a flag that was turned on', async () => {
@@ -88,7 +88,7 @@ describe('GET /api/internal/engine-settings (spec 006)', () => {
       .query(`INSERT INTO ops_flag_changes (flag, enabled, author, reason, created_at) VALUES ('yield_ledger', 1, 'ot', 'turn on for canary', ?)`)
       .run(NOW.toISOString())
     const p = JSON.parse(await (await pull(h)).text()) as EngineSettingsPayload
-    expect(p.flags).toEqual({ yield_ledger: true, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false, multichain_v6: false })
+    expect(p.flags).toEqual({ yield_ledger: true, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false, multichain_v6: false, merged_grants_v7: false })
   })
   test('otto/mamoru#26: accountCaps carries the newest valid row per account; a removal and bad rows are left out', async () => {
     const h = harness(() => NOW, { env: { OPERATOR_SECRET: OP } })

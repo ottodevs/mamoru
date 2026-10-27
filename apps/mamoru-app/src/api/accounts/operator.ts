@@ -9,8 +9,8 @@ import { BASE, chainReady, ownedSleeve } from '../sleeves.ts'
 
 /** otto/mamoru#214: the policy a renewal of a Base account may move to only once the owner's Monad sleeve runs. */
 export const MULTICHAIN_POLICY = 'conservador-live-v6'
-/** Review of PR #141: its fork twin is guarded the same way. */
-const MULTICHAIN_POLICIES: ReadonlySet<string> = new Set([MULTICHAIN_POLICY, 'conservador-lab-v6'])
+/** Review of PR #141: its fork twin is guarded the same way; otto/mamoru#225: v7 (v6 in one session per pool) too. */
+const MULTICHAIN_POLICIES: ReadonlySet<string> = new Set([MULTICHAIN_POLICY, 'conservador-lab-v6', 'conservador-live-v7', 'conservador-lab-v7'])
 export const MONAD = 143
 
 // Live funds (sprint amendment 2026-09-26 21:40): after the device session proves it owns the account,
