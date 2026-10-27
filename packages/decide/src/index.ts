@@ -3,7 +3,7 @@ import type { ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, hasManageAny, policyHash, type PolicyVersion } from '@mamoru/policy'
 import { allocate, type Waiting } from './allocate/index.ts'
 import { enterBucket, safeSavings } from './enter/index.ts'
-import { ehgPreliminary, purgaIdentity, registryOf } from './gates/index.ts'
+import { ehgBridge, ehgPreliminary, purgaIdentity, registryOf } from './gates/index.ts'
 import { fallFreezeOf } from './guard/index.ts'
 import { depeggedPool, depegExitOf } from './guard/depeg.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
@@ -133,6 +133,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   // Target weights: pools whose idle volatile the allocation is about to mint.
   let pendingMint: ReadonlySet<string> | undefined
   let waiting: Waiting[] = []
+  // otto/mamoru#215: the local entry a bridge took the review from, used when the bridge cannot go.
+  let displaced: Proposal | undefined
   if (policy.allocation === 'target-weights') {
     const a = allocate(obs, policy, unsafeDeposit, frozen)
     // Only where the next step has a live session: without one it never goes and the token would wait for ever.
@@ -146,11 +148,12 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     trail.push(...a.trail)
     if (a.proposal) {
       enterEvaluated = true
-      // otto/mamoru#215: a bridge has no pool here; its remote pool is checked by that chain's engine.
-      const pool = a.proposal.kind === 'bridge_out' ? undefined : obs.pools.find((x) => x.name === a.proposal!.pool)!
-      if (pool) trail.push(purgaIdentity(pool, registryOf(obs)))
+      // otto/mamoru#215: a bridge has no pool here (its remote pool is checked by that chain's engine); every other
+      // proposal's pool is looked up exactly as before, so a missing one still fails closed.
+      if (a.proposal.kind !== 'bridge_out') trail.push(purgaIdentity(obs.pools.find((x) => x.name === a.proposal!.pool)!, registryOf(obs)))
       trail.push({ gate: 'strategy', verdict: 'GO', reason: 'STRATEGY_PREFERENCE_DEVIATION' }, { gate: 'eny', verdict: 'SKIP', reason: 'ENY_SHADOW' })
       entries.push(remint && a.proposal.kind === 'enter_mint' ? { ...a.proposal, grant: anyKey(policy, 'manage-any', a.proposal.pool) } : a.proposal)
+      displaced = a.displaced
     }
   } else for (const b of policy.buckets) {
     const poolName = b.pools[0]
@@ -215,9 +218,16 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
 
   // Plan §9, step 9: a preliminary NO GO drops the proposal with its code.
   if (proposal) {
-    const pool = proposal.kind === 'bridge_out' ? undefined : obs.pools.find((x) => x.name === proposal!.pool)!
-    const gate = ehgPreliminary(obs, policy, pool, proposal.grant)
+    const gateOf = (p: Proposal) => (p.kind === 'bridge_out' ? ehgBridge(obs, policy, p.grant) : ehgPreliminary(obs, policy, obs.pools.find((x) => x.name === p.pool)!, p.grant))
+    let gate = gateOf(proposal)
     trail.push(gate)
+    // otto/mamoru#215: a bridge that cannot go now never starves the Base buckets: the entry it displaced goes instead.
+    if (gate.verdict !== 'GO' && proposal.kind === 'bridge_out' && displaced) {
+      proposal = displaced
+      reason = PROPOSAL_CODE[proposal.kind]
+      gate = gateOf(proposal)
+      trail.push(gate)
+    }
     if (gate.verdict !== 'GO') {
       proposal = null
       reason = gate.reason
