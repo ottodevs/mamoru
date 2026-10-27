@@ -1,6 +1,6 @@
 import type { PublicClient } from 'viem'
 import { BASE_CHAIN_ID, ReasonError, chainOf, isChainId, type Address, type ChainId } from '@mamoru/domain'
-import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
+import { address, entry, erc20Abi, erc4626Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
 import { Batch, balanceRead, blockNumberRead, contractRead, createDeployedChecker, multicall3Of, tokenIdReads, type Handle } from '@mamoru/rpc'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 
@@ -120,6 +120,24 @@ export type SafeRead = {
   /** The admitted ids were read one by one (over MAX_INVENTORY); `ownedIds` are the ones still the Safe's. */
   byId?: boolean
   ownedIds?: bigint[]
+  /** otto/mamoru#210: the Safe's shares in every ERC-4626 vault of the registry (none off Base). Absent: none read. */
+  vaults?: VaultHolding[]
+}
+
+/** otto/mamoru#210: one vault as the Safe holds it, at the read's block. Amounts in raw USDC (the vaults' asset). */
+export type VaultHolding = {
+  name: string
+  shares: bigint
+  /** The shares at the vault's share price of the block. */
+  assets: bigint
+  /** What the vault can pay the Safe now, in USDC, and in shares. */
+  maxWithdraw: bigint
+  maxRedeem: bigint
+}
+
+/** Registry vaults whose asset is USDC: the ones a Safe's shares are read, valued and redeemed in. */
+export function usdcVaults(registry: Registry): string[] {
+  return registry.entries.filter((e) => e.kind === 'vault' && e.asset === 'USDC').map((e) => e.name)
 }
 
 /** Token amounts of `liquidity` between two ticks at `sqrtPriceX96`. */
@@ -166,7 +184,7 @@ export function positionUsdc(p: PoolPosition, sqrtPriceX96: bigint, registry: Re
  * call instead of a separate eth_blockNumber, and eth_getCode is asked only until the Safe's deployment is
  * confirmed (see `isDeployed`).
  */
-export async function readSafe(client: PublicClient, safe: Address, registry: Registry, opts: { admitted?: readonly bigint[] } = {}): Promise<SafeRead> {
+export async function readSafe(client: PublicClient, safe: Address, registry: Registry, opts: { admitted?: readonly bigint[]; vaults?: boolean } = {}): Promise<SafeRead> {
   const pools = usdcPools(registry)
   const live = livePool(registry)
   const npm = address('NonfungiblePositionManager', registry)
@@ -178,6 +196,14 @@ export async function readSafe(client: PublicClient, safe: Address, registry: Re
   const nftRead = first.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe] }))
   const balanceReads = tokenNames.map((t) => first.add(contractRead(client, { address: address(t, registry), abi: erc20Abi, functionName: 'balanceOf', args: [safe] })))
   const slotReads = pools.map((p) => first.add(contractRead(client, { address: address(p, registry), abi: uniswapV3PoolAbi, functionName: 'slot0' })))
+  // otto/mamoru#210: only for an account whose policy has a vault bucket (opts.vaults); no read for any other.
+  const vaultNames = opts.vaults ? usdcVaults(registry) : []
+  const vaultRead = (name: string, functionName: 'balanceOf' | 'convertToAssets' | 'maxWithdraw' | 'maxRedeem', arg: Address | bigint) =>
+    first.add(contractRead(client, { address: address(name, registry), abi: erc4626Abi, functionName, args: [arg as never] }))
+  const vaultReads = vaultNames.map((n) => {
+    const one = 10n ** BigInt(entry(n, registry).decimals ?? 18)
+    return { n, one, reads: [vaultRead(n, 'balanceOf', safe), vaultRead(n, 'convertToAssets', one), vaultRead(n, 'maxWithdraw', safe), vaultRead(n, 'maxRedeem', safe)] }
+  })
   // The block is known only once `first` has run: the speculative ids carry none (they resolve through
   // `.maybe()` only), the one-more-request round of an account with more positions is pinned to it below.
   const idsOf = tokenIdReads(client, multicall3, first, safe, undefined, npm)
@@ -206,6 +232,16 @@ export async function readSafe(client: PublicClient, safe: Address, registry: Re
     Promise.all(balanceReads.map((r, i) => needAt(r, () => client.readContract({ address: address(tokenNames[i]!, registry), abi: erc20Abi, functionName: 'balanceOf', args: [safe], blockNumber })))),
     Promise.all(slotReads.map((r, i) => needAt(r, () => client.readContract({ address: address(pools[i]!, registry), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber })))),
   ])
+  const vaults: VaultHolding[] = await Promise.all(
+    vaultReads.map(async ({ n, one, reads }) => {
+      const fns = ['balanceOf', 'convertToAssets', 'maxWithdraw', 'maxRedeem'] as const
+      const args = [safe, one, safe, safe] as const
+      const [shares, price, maxWithdraw, maxRedeem] = (await Promise.all(
+        reads.map((r, i) => needAt(r as Handle<bigint>, () => client.readContract({ address: address(n, registry), abi: erc4626Abi, functionName: fns[i]!, args: [args[i] as never], blockNumber }) as Promise<bigint>)),
+      )) as bigint[]
+      return { name: n, shares: shares!, assets: (shares! * price!) / one, maxWithdraw: maxWithdraw!, maxRedeem: maxRedeem! }
+    }),
+  )
   const tokens = Object.fromEntries(tokenNames.map((t, i) => [t, balances[i]!]))
   const prices: Record<string, PoolPrice> = Object.fromEntries(pools.map((p, i) => [p, { sqrtPriceX96: slots[i]![0], tick: slots[i]![1] }]))
   const count = Number(nfts)
@@ -246,5 +282,5 @@ export async function readSafe(client: PublicClient, safe: Address, registry: Re
     positions.push({ tokenId, pool, token0: e.token0!, token1: e.token1!, fee: e.fee!, liquidity, tickLower, tickUpper, inRange: price.tick >= tickLower && price.tick < tickUpper, amount0, amount1, tokensOwed0, tokensOwed1 })
   }
   const livePrice = prices[live]!
-  return { block: blockNumber, deployed, eth, usdc: tokens.USDC ?? 0n, sqrtPriceX96: livePrice.sqrtPriceX96, tick: livePrice.tick, tokens, prices, positions, positionCount: count, ...(byId ? { byId, ownedIds: ids } : {}) }
+  return { block: blockNumber, deployed, eth, usdc: tokens.USDC ?? 0n, sqrtPriceX96: livePrice.sqrtPriceX96, tick: livePrice.tick, tokens, prices, positions, positionCount: count, ...(byId ? { byId, ownedIds: ids } : {}), ...(opts.vaults ? { vaults } : {}) }
 }

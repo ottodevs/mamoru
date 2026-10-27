@@ -32,6 +32,8 @@ export type RegistryEntry = {
   tickSpacing?: number
   /** kind 'vault' (otto/mamoru#210): the ERC-4626 `asset()`, a token of the same registry. `decimals` are the share's. */
   asset?: string
+  /** kind 'vault': how the app and the owner's summaries name it ("Morpho · Gauntlet USDC Prime"). */
+  label?: string
   /** A proxy whose logic sits elsewhere (EIP-1967): the implementation pinned beside the proxy's own code hash. */
   implementation?: { address: Address; codeHash: Hex }
 }

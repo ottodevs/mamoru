@@ -16,10 +16,10 @@ export const SIM_VERSION = 'backtest-1'
  * and 835,285 gas, an L1 data fee near 3.1e9 wei. Harvest, re-range and reduce have no live receipt yet;
  * theirs are estimates between the two. increase_liquidity (#171) has none either: the same batch as a mint through the
  * policy less what only a mint pays in the position manager (the ERC-721 mint and the new position's storage, about
- * 200k), an estimate.
+ * 200k), an estimate. vault_deposit/vault_redeem (#210): gtUSDCp's in the #186 study (median direct receipt plus a userOp).
  */
 export const DEFAULT_GAS: GasModel = {
-  unitsByKind: { enter_swap: 470_000n, enter_mint: 835_000n, increase_liquidity: 635_000n, harvest: 650_000n, rerange: 700_000n, reduce: 600_000n, bridge_out: 0n },
+  unitsByKind: { enter_swap: 470_000n, enter_mint: 835_000n, increase_liquidity: 635_000n, harvest: 650_000n, rerange: 700_000n, reduce: 600_000n, bridge_out: 0n, vault_deposit: 797_000n, vault_redeem: 783_000n },
   priorityFeeWei: 1_000_000n,
   l1FeeWei: 3_100_000_000n,
 }

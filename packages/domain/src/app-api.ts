@@ -131,6 +131,9 @@ export type FundingView = {
     amounts?: { token: string; amount: string; decimals: number; valueUsdc?: string }[]   // both sides of any pool, base units, each with its value in USDC
     valueUsdc?: string                                                  // position value in USDC base units
     range?: { lower: number; upper: number; tick: number }              // otto/mamoru#233: its ticks and the pool's tick now, for the range gauge
+    // otto/mamoru#210: a row for USDC supplied to an ERC-4626 vault, not an LP position. `tokenId` and `pool` are the
+    // vault's registry name, `amounts` its one USDC leg; `vault` says how to name it and what it can pay out now.
+    vault?: { name: string; label: string; shares: string; withdrawableUsdc: string }
   }[]
   // What the engine is doing right now, for a subtle progress line in Working capital.
   // otto/mamoru#215: 'bridging' is savings on their way to the account's sleeve on another chain, with `bridge` saying how far.

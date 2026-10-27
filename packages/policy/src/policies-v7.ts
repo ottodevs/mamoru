@@ -26,6 +26,8 @@ export const conservadorLiveV7: PolicyVersion = {
   ...conservadorLiveV6,
   policyId: 'conservador-live-v7',
   version: '0.1.0',
+  // #186: at live relayer cost a deposit earns its two operations back in about a month from ~40 USDC.
+  vaultMinDeposit: 40_000_000n,
   buckets: [
     { id: 'stables', preference: 5000, pools: [], vaults: [...V7_VAULTS] },
     // Shown as Balance; the id stays 'risk' so the WETH pool keeps its caps, grant keys and fall-freeze rule (v6).

@@ -16,7 +16,7 @@ import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TE
 import { historyEntries, moveLine, moveState } from '../lib/moves.ts'
 import { detailHead, MoveDetail, OpDetail, Sheet } from '../components/activity-detail.tsx'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
-import { pairLabel, poolAddress, poolTokens, positionAmounts, progressLine } from '../lib/positions.ts'
+import { pairLabel, poolAddress, poolTokens, positionAmounts, progressLine, vaultAddress } from '../lib/positions.ts'
 import { activateLine, signatureCopy } from '../lib/signature.ts'
 import { currentRate, idleReason, monthlyRate, positionRates, sourceName, type AccountRate, type PositionRate } from '../lib/rates.ts'
 import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel } from '../lib/price-divergence.ts'
@@ -82,6 +82,8 @@ export const homeCopy = {
   colShare: 'Share',
   target: (pct: number) => (pct === 0 ? 'target 0%, closing' : `target ${pct}%`),
   inRange: 'In range',
+  // otto/mamoru#210: a row of USDC supplied to a lending vault.
+  lending: 'USDC lending',
   // otto/mamoru#297: next to the range gauge; the dust, cost and cooldown holds below keep their own, truer lines.
   paused: 'Temporarily out of range. Mamoru will put it back to work soon.',
   // otto/mamoru#238: no promise about what the engine will do while it cannot be reached.
@@ -339,16 +341,18 @@ export function rangeHoldCopy(code: string | undefined): string {
 
 function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView['positions'][number]; r: PositionRate; i: number; readFromChain?: boolean; hold?: string }) {
   const legs = positionAmounts(p).filter((l) => l.amount !== '0')
-  const addr = poolAddress(p.pool)
+  // otto/mamoru#210: USDC supplied to a lending vault: one token, the vault as venue, always earning.
+  const addr = p.vault ? vaultAddress(p.vault.name) : poolAddress(p.pool)
   const chain = useChain()
-  const venue = 'Uniswap v3'
+  const venue = p.vault ? p.vault.label : 'Uniswap v3'
+  const tokens = p.vault ? ['USDC'] : poolTokens(p.pool, p.amounts)
   // otto/mamoru#216: against a target, the share is of the whole account (the target's own base); otherwise of working capital.
   const shown = r.targetPct !== null && r.accountPct !== null ? r.accountPct : r.sharePct
   const share = shown === null ? null : Math.round(shown)
   return (
     <li data-testid="position" className="wc-row" style={{ ['--i' as string]: i }}>
       <span className="wc-marks" aria-hidden="true">
-        {poolTokens(p.pool, p.amounts).map((t, i) => (
+        {tokens.map((t, i) => (
           <span key={t} className={i > 0 ? '-ml-[0.55rem]' : undefined}>
             <TokenMark symbol={t} size={28} />
           </span>
@@ -356,7 +360,7 @@ function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView[
       </span>
       <span className="wc-name">
         <span className="wc-pair">
-          {r.bucket} · {pair(p)}
+          {r.bucket} · {p.vault ? homeCopy.lending : pair(p)}
         </span>
         <span className="wc-venue">
           {addr ? (
@@ -371,8 +375,8 @@ function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView[
             {chain.name}
           </span>
           {/* Out of range the gauge alone follows, and it is decorative: the separator is too. */}
-          {p.inRange ? ' · ' : p.range ? <span aria-hidden="true"> · </span> : null}
-          {p.inRange || p.range ? (
+          {p.vault ? null : p.inRange ? ' · ' : p.range ? <span aria-hidden="true"> · </span> : null}
+          {!p.vault && (p.inRange || p.range) ? (
             <span className={`seg${p.inRange ? ' text-emerald' : ''}`}>
               <RangeGauge range={p.range} inRange={p.inRange} />
               {p.inRange ? homeCopy.inRange : null}

@@ -5,10 +5,10 @@
 
 import { decodeFunctionResult, encodeFunctionData, parseAbi, type PublicClient } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { address, entry, erc20Abi, nonfungiblePositionManagerAbi, safeAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
+import { address, entry, erc20Abi, erc4626Abi, nonfungiblePositionManagerAbi, safeAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
 import { BATCH_MAX_CALLS, Batch, balanceRead, contractRead, type Handle, type Read } from '@mamoru/rpc'
 import { feeGrowthInside, positionFees } from '@mamoru/uniswap-v3/fees'
-import { amountsForLiquidity, inUsdc, usdcPools } from './chain.ts'
+import { amountsForLiquidity, inUsdc, usdcPools, usdcVaults } from './chain.ts'
 
 const enumerableAbi = parseAbi(['function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)'])
 
@@ -33,7 +33,8 @@ function deployedRead(client: PublicClient, safe: Address, blockNumber: bigint):
   }
 }
 
-export type SnapshotTarget = { accountKey: string; safe: Address; active: boolean; armed: boolean }
+/** `vaults` (otto/mamoru#210): the account's policy has a vault bucket, so its vault shares are read too. */
+export type SnapshotTarget = { accountKey: string; safe: Address; active: boolean; armed: boolean; vaults?: boolean }
 
 export type PoolState = { sqrtPriceX96: bigint; tick: number; feeGrowthGlobal0X128: bigint; feeGrowthGlobal1X128: bigint }
 
@@ -89,7 +90,11 @@ export type SafeSnapshot = {
   feesUsdc: bigint
   /** Owed amounts of all positions (may include principal). */
   owedUsdc: bigint
-  /** idle + lp + accrued + owed: everything the Safe would hold if it collected now. */
+  /** otto/mamoru#210: shares in the registry's USDC vaults, each at its share price of the block. Absent: none held. */
+  vaults?: { name: string; shares: bigint; valueUsdc: bigint }[]
+  /** otto/mamoru#210: the vaults' value, raw USDC. Absent: read before vaults existed (0). */
+  vaultUsdc?: bigint
+  /** idle + lp + accrued + owed + vaults: everything the Safe would hold if it collected now. */
   totalUsdc: bigint
 }
 
@@ -152,7 +157,15 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
     deployed: first.add(deployedRead(client, t.safe, block)),
     tokens: tokenNames.map((name) => ({ name, read: first.add(contractRead(client, { address: address(name, registry), abi: erc20Abi, functionName: 'balanceOf', args: [t.safe], ...at })) })),
   }))
+  // otto/mamoru#210: each vault's share price once, each Safe's shares.
+  const vaultNames = targets.some((t) => t.vaults) ? usdcVaults(registry) : []
+  const vaultPrices = vaultNames.map((name) => {
+    const one = 10n ** BigInt(entry(name, registry).decimals ?? 18)
+    return { name, one, read: first.add(contractRead(client, { address: address(name, registry), abi: erc4626Abi, functionName: 'convertToAssets', args: [one], ...at })) }
+  })
+  const vaultShares = targets.map((t) => (t.vaults ? vaultNames : []).map((name) => first.add(contractRead(client, { address: address(name, registry), abi: erc4626Abi, functionName: 'balanceOf', args: [t.safe], ...at }))))
   await run(first)
+  const priceOf = await Promise.all(vaultPrices.map((v) => v.read.need()))
 
   // A read that failed inside the batch is retried on its own at the same block (need()); if that fails too, the
   // whole snapshot fails and the loop keeps the previous one. No failed read is ever reported as a zero.
@@ -245,6 +258,9 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
     const lpUsdc = positions.reduce((n, p) => n + p.valueUsdc, 0n)
     const feesUsdc = positions.reduce((n, p) => n + p.feesUsdc, 0n)
     const owedUsdc = positions.reduce((n, p) => n + p.owedUsdc, 0n)
+    const shares = await Promise.all(vaultShares[i]!.map((h) => h.need()))
+    const vaults = shares.map((n, k) => ({ name: vaultPrices[k]!.name, shares: n, valueUsdc: (n * priceOf[k]!) / vaultPrices[k]!.one })).filter((v) => v.shares > 0n)
+    const vaultUsdc = vaults.reduce((n, v) => n + v.valueUsdc, 0n)
     safes.push({
       accountKey: s.t.accountKey,
       safe: s.t.safe,
@@ -259,7 +275,9 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
       lpUsdc,
       feesUsdc,
       owedUsdc,
-      totalUsdc: idleUsdc + lpUsdc + feesUsdc + owedUsdc,
+      ...(vaults.length ? { vaults } : {}),
+      vaultUsdc,
+      totalUsdc: idleUsdc + lpUsdc + feesUsdc + owedUsdc + vaultUsdc,
     })
   }
   return { chainId, block, readAt: new Date().toISOString(), pools, safes, calls }

@@ -40,6 +40,11 @@ export function poolName(pool: string | undefined): string | null {
   return poolEntry(pool)?.name ?? (pool && /^pool:/.test(pool) ? pool : null)
 }
 
+/** otto/mamoru#210: a vault's contract address for the explorer, by its registry name; null when unknown. */
+export function vaultAddress(vault: string): string | null {
+  return ENTRIES.find((e) => e.kind === 'vault' && e.name === vault)?.address ?? null
+}
+
 /** The pool's contract address for the explorer of its chain, whether the view carries the name or the address. */
 export function poolAddress(pool: string): string | null {
   return poolEntry(pool)?.address ?? (/^0x[0-9a-fA-F]{40}$/.test(pool) ? pool : null)
@@ -57,7 +62,7 @@ export function positionAmounts(p: Position): { token: string; amount: string; d
 /** Every token the positions hold, USDC first. */
 export function positionTokens(f: FundingView): string[] {
   const set = new Set<string>(['USDC'])
-  for (const p of f.positions) for (const t of poolTokens(p.pool, p.amounts)) set.add(t)
+  for (const p of f.positions) for (const t of p.vault ? ['USDC'] : poolTokens(p.pool, p.amounts)) set.add(t)
   return [...set]
 }
 

@@ -46,7 +46,8 @@ export function ehgPreliminary(obs: Observation, policy: PolicyVersion, pool: Po
 
 /**
  * otto/mamoru#215: the gate of a bridge-out, which touches no pool here (the remote engine checks its own pool's price
- * at its entry): the account's gas reserve and the grant's session, as for any other op.
+ * at its entry), and of a vault op (#210), which prices no pool either: the account's gas reserve and the grant's
+ * session, as for any other op.
  */
 export function ehgBridge(obs: Observation, policy: PolicyVersion, grant: string): GateStep {
   return ehgAccount(obs, policy, grant)
