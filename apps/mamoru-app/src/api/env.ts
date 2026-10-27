@@ -42,6 +42,11 @@ export type Env = {
   MATTERMOST_BOT_TOKEN?: string
   MATTERMOST_SUPPORT_CHANNEL_ID?: string
   MATTERMOST_FEEDBACK_CHANNEL_ID?: string
+  // Worker -> operator link watch (operator-link-watch.ts, otto/mamoru#207). Secrets, all optional: the alert goes to
+  // #mamoru-ops through the bot above, and to Telegram when both are set (the path that does not depend on lady).
+  MATTERMOST_OPS_CHANNEL_ID?: string
+  TELEGRAM_BOT_TOKEN?: string
+  TELEGRAM_ALERT_CHAT_ID?: string
 }
 
 /** The part of the Workers Rate Limiting binding the app uses. */
