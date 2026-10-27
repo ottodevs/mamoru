@@ -541,6 +541,8 @@ export class Engine {
       maxPriorityFeePerGas: MAX_PRIORITY_FEE_PER_GAS,
       savingsAsset: this.cfg.policy.savingsAsset,
       ethPricePool: this.cfg.nativePricePool ?? ETH_PRICE_POOL,
+      // otto/mamoru#101 (shadow): the pools' TVL is read, in the same batch, only for a policy that lists it.
+      ...(this.cfg.policy.shadow.includes('packaging:tvl') ? { poolTvl: true } : {}),
       ...(this.cfg.registry ? { registry: this.cfg.registry } : {}),
     })
     const gh = this.cfg.guardHistory

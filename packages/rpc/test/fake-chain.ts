@@ -60,6 +60,7 @@ export class FakeChain {
   readonly disabled = new Set<string>()
   /** `${contract}:${selector}` reads that revert, lowercase. */
   readonly reverting = new Set<string>()
+  private readonly failingBalances = new Set<string>()
   readonly requests: Recorded[] = []
   /** #172: pool calls of the guard history (its observe reads and the fee growth globals), inside multicalls or not. */
   guardCalls = 0
@@ -81,6 +82,11 @@ export class FakeChain {
 
   failRead(contract: Address, signature: string): void {
     this.reverting.add(`${contract.toLowerCase()}:${sel(signature)}`)
+  }
+
+  /** `token.balanceOf(holder)` reverts; the token's other balances still answer. */
+  failBalanceOf(token: string, holder: Address): void {
+    this.failingBalances.add(`${address(token, baseRegistry).toLowerCase()}:${holder.toLowerCase()}`)
   }
 
   setBalance(token: string, holder: Address, amount: bigint): void {
@@ -276,6 +282,7 @@ export class FakeChain {
     if (TOKENS.some((t) => address(t, baseRegistry).toLowerCase() === at)) {
       const call = decodeFunctionData({ abi: erc20Abi, data })
       if (call.functionName !== 'balanceOf') throw new Revert('unknown token call')
+      if (this.failingBalances.has(`${at}:${call.args[0].toLowerCase()}`)) throw new Revert('forced')
       return encodeFunctionResult({ abi: erc20Abi, functionName: 'balanceOf', result: this.erc20.get(`${at}:${call.args[0].toLowerCase()}`) ?? 0n })
     }
     // No contract here: a call succeeds with no data, as on a real chain.

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { decodeFunctionData, zeroAddress, type Hex } from 'viem'
 import { ReasonError, type Address } from '@mamoru/domain'
 import { address, baseRegistry, monadRegistry } from '@mamoru/registry'
+import { poolTvlInSavings } from '@mamoru/decide'
 import { BATCH_MAX_BYTES, BATCH_MAX_CALLS, chunkCalls, createDeployedChecker, historyCursor, multicall3Abi, multicall3Of, observe, poolStateCache, type ObserveInput, isDeployed } from '../src/index.ts'
 import { FakeChain, POOLS, Revert } from './fake-chain.ts'
 
@@ -487,5 +488,57 @@ describe('chunkCalls', () => {
     const obs = await observe(c.client, input())
     expect(obs.positions.length).toBe(123)
     expect(aggregates(c).every((a) => a.length <= BATCH_MAX_CALLS)).toBe(true)
+  })
+})
+
+describe('pool TVL (otto/mamoru#101, shadow)', () => {
+  const USDC_CBBTC = 'pool:USDC/cbBTC/500'
+
+  test('off by default: no pool carries `tvlSavings` and no balance of a pool is asked', async () => {
+    const c = chain()
+    const obs = await observe(c.client, input())
+    expect(obs.pools.some((p) => 'tvlSavings' in p)).toBe(false)
+    const poolsHeld = new Set(POOLS.map((p) => address(p, baseRegistry).toLowerCase()))
+    const asked = aggregates(c).flat().filter((x) => x.callData.startsWith('0x70a08231') && [...poolsHeld].some((a) => x.callData.toLowerCase().includes(a.slice(2))))
+    expect(asked.length).toBe(0)
+  })
+
+  test('on: both balances of every pool ride in the same aggregate3 and are priced at the TWAP', async () => {
+    const off = chain()
+    await observe(off.client, input())
+    const c = chain()
+    const pool = address(USDC_CBBTC, baseRegistry)
+    c.setBalance('USDC', pool, 1_500_000_000_000n)
+    c.setBalance('cbBTC', pool, 4_000n)
+    const obs = await observe(c.client, input({ poolTvl: true }))
+    // Same round trips: only the aggregate grows, by two reads per pool.
+    expect(c.count()).toBe(off.count())
+    expect(c.count('eth_call')).toBe(off.count('eth_call'))
+    expect(aggregates(c).flat().length).toBe(aggregates(off).flat().length + POOLS.length * 2)
+    const p = obs.pools.find((x) => x.name === USDC_CBBTC)!
+    expect(p.twapTick).not.toBeNull()
+    expect(p.tvlSavings).toBe(poolTvlInSavings(p, 1_500_000_000_000n, 4_000n, 'USDC'))
+    expect(typeof p.tvlSavings).toBe('bigint')
+    // Everything else is the observation of the run without it.
+    const strip = (o: typeof obs) => o.pools.map(({ tvlSavings: _t, ...rest }) => rest)
+    expect(strip(obs)).toEqual(strip(await observe(chain().client, input())))
+  })
+
+  test('a balance that cannot be read gives null, batched or not, and nothing else fails', async () => {
+    for (const multicall3 of [undefined, null]) {
+      const c = chain()
+      c.failBalanceOf('cbBTC', address(USDC_CBBTC, baseRegistry))
+      const obs = await observe(c.client, input({ poolTvl: true, multicall3 }))
+      expect(obs.pools.find((x) => x.name === USDC_CBBTC)!.tvlSavings).toBeNull()
+    }
+  })
+
+  test('the pool cache keeps the two kinds of read apart', async () => {
+    const c = chain()
+    const poolCache = poolStateCache()
+    const plain = await observe(c.client, input({ poolCache }))
+    const withTvl = await observe(c.client, input({ poolCache, poolTvl: true }))
+    expect(plain.pools.some((p) => 'tvlSavings' in p)).toBe(false)
+    expect(withTvl.pools.every((p) => 'tvlSavings' in p)).toBe(true)
   })
 })
