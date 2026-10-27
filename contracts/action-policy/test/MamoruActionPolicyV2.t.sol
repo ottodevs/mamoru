@@ -67,7 +67,7 @@ contract T6FixesTestOnV2 is T6FixesTest {
  * guardian, and the empty swap deadline `multicall(deadline, [])`.
  */
 contract MamoruActionPolicyV2Test is PolicyFixture {
-    function _newPolicy() internal override returns (MamoruActionPolicy) {
+    function _newPolicy() internal virtual override returns (MamoruActionPolicy) {
         return deployV2(SMART_SESSION, NPM, ROUTER, FACTORY);
     }
 

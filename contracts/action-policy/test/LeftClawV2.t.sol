@@ -27,7 +27,7 @@ abstract contract LeftClawFixture is PolicyFixture {
     ConfigId constant ID2 = ConfigId.wrap(bytes32(uint256(2)));
     ConfigId constant ID3 = ConfigId.wrap(bytes32(uint256(3)));
 
-    function _newPolicy() internal override returns (MamoruActionPolicy) {
+    function _newPolicy() internal virtual override returns (MamoruActionPolicy) {
         return deployV2(SMART_SESSION, NPM, ROUTER, FACTORY);
     }
 

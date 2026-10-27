@@ -20,5 +20,14 @@ remappings = [
 # same way: solc 0.8.28, cancun, 1,000 runs, viaIR true.
 # Only that file (and what imports it) gets this profile; MamoruActionPolicy (deployed, verified byte for byte by
 # packages/scenarios/action-policy/verify-deployed-policy.ts) keeps the default 10,000.
-additional_compiler_profiles = [{ name = "v2", optimizer_runs = 1000, via_ir = true }]
-compilation_restrictions = [{ paths = "src/MamoruActionPolicyV2.sol", optimizer_runs = 1000, via_ir = true }]
+# MamoruActionPolicyV3 (#116 T1) is V2 plus the ERC-4626 and CCTP families: at 1,000 runs it is 26,144 bytes, at 200
+# runs (viaIR) 24,491, 85 under EIP-170 (1 run saves only 6 more). Verify it with solc 0.8.28, cancun, 200 runs, viaIR.
+# Any further runtime addition to V3 needs a split (e.g. the vault and bridge checks in their own contract).
+additional_compiler_profiles = [
+  { name = "v2", optimizer_runs = 1000, via_ir = true },
+  { name = "v3", optimizer_runs = 200, via_ir = true },
+]
+compilation_restrictions = [
+  { paths = "src/MamoruActionPolicyV2.sol", optimizer_runs = 1000, via_ir = true },
+  { paths = "src/MamoruActionPolicyV3.sol", optimizer_runs = 200, via_ir = true },
+]
