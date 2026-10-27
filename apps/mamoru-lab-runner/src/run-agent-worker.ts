@@ -12,6 +12,7 @@
  * Holds no landing credential: `LAB_RUNNER_SECRET` and all network to the landing stay on the main thread
  * (`cli.ts`). This worker only talks to model-plane (loopback, no auth) and reads local dataset files.
  */
+import { ReasonError } from '@mamoru/domain'
 import { buildCatalogPrompt, LabBenchRunner, runAgentJob, type Answer, type BenchRunner, type BenchSpec, type CostMeter, type JobContext, type PriorTurn, type RunResult, type VerifierOutcome, type VerifyError } from '@mamoru/lab-agent'
 import { ModelPlaneClient } from './model-plane-client.ts'
 import type { WorkerBudgetControl, WorkerRunsProgress } from './run-in-worker.ts'
@@ -35,6 +36,7 @@ export type AgentWorkerResult =
       meter: CostMeter
     }
   | { kind: 'error'; code: string; message: string }
+  | { kind: 'bug'; message: string }
 
 declare const self: Worker
 
@@ -105,8 +107,12 @@ self.onmessage = async (ev: MessageEvent<AgentWorkerPayload>): Promise<void> => 
     // `ModelPlaneClient.complete()` throws `ReasonError('LAB_MODEL_UNAVAILABLE', ...)` when every configured
     // resource fails this job (AL-30) — that is a business outcome, not a bug, so it gets its own code instead
     // of falling into the generic branch `cli.ts` treats as "unexpected, leave it to lease expiry".
-    const code = e instanceof Error && 'code' in e && typeof (e as { code: unknown }).code === 'string' ? (e as { code: string }).code : null
-    const out: AgentWorkerResult = { kind: 'error', code: code ?? 'LAB_AGENT_BUG', message: e instanceof Error ? e.message : String(e) }
+    // Only a ReasonError is a business outcome to post (e.g. LAB_MODEL_UNAVAILABLE). Anything else (ENOENT, a
+    // bug) is left to lease expiry like the bench path does, so a system error code never reaches /result.
+    const out: AgentWorkerResult =
+      e instanceof ReasonError
+        ? { kind: 'error', code: e.code, message: e.message }
+        : { kind: 'bug', message: e instanceof Error ? e.message : String(e) }
     postMessage(out)
   }
 }

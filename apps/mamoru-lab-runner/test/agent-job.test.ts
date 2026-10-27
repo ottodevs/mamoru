@@ -44,6 +44,7 @@ type LandingState = {
   heartbeats: number
   published: { resultHash: string }[]
   results: Record<string, unknown>[]
+  failPublish?: boolean
 }
 
 function fakeLandingServer(state: LandingState): ReturnType<typeof Bun.serve> {
@@ -64,6 +65,7 @@ function fakeLandingServer(state: LandingState): ReturnType<typeof Bun.serve> {
       }
       if (path === '/ops/lab/runner/publish') {
         const body = (await req.json()) as { run: { resultHash: string } }
+        if (state.failPublish) return new Response('upstream down', { status: 503 })
         state.published.push({ resultHash: body.run.resultHash })
         return Response.json({ ok: true, resultHash: body.run.resultHash })
       }
@@ -154,6 +156,34 @@ describe('agent job, end to end: claim -> publish runs -> result', () => {
     expect(cost.modelCalls).toHaveLength(2) // one investigative round + one submit_answer round
     expect(cost.toolRounds).toBe(1)
   }, 10_000)
+
+  test('a run that never reaches /publish (after retries) keeps the answer from being posted', async () => {
+    const model = new RecordedModel([
+      { toolCalls: [toolCall('run_backtest', { windowId: 'fix-full', base: 'live', deposit: 1000 })] },
+      { toolCalls: [submitAnswerCall([{ type: 'caveat', md: 'corrida de prueba, sin reclamos.' }])] },
+    ])
+    modelPlane = fakeModelPlaneServer(model)
+    const state: LandingState = {
+      job: { kind: 'agent', id: 'job-p', leaseId: 'lease-p', threadId: 'thread-p', question: '¿fix-full con live?', history: [] },
+      claims: 0,
+      heartbeats: 0,
+      published: [],
+      results: [],
+      failPublish: true,
+    }
+    landing = fakeLandingServer(state)
+    process.env.LAB_RUNNER_URL = `http://127.0.0.1:${landing.port}`
+    process.env.LAB_RUNNER_SECRET = 'agent-job-test-secret'
+    process.env.LAB_DATASETS = FIXTURE_DIR
+    process.env.MODEL_PLANE_URL = `http://127.0.0.1:${modelPlane.port}`
+    process.env.LAB_AGENT_MODELS = 'fake-alias'
+    process.env.LAB_AGENT_BUDGET_STATE = join(budgetDir, 'budget.json')
+
+    const job = await claim()
+    await runJob(job!)
+    expect(state.published).toHaveLength(0)
+    expect(state.results).toHaveLength(0) // left to lease expiry, never an answer citing a missing run
+  }, 15_000)
 
   test('the daily budget guard refuses a job over the limit without running it — no publish, no model call', async () => {
     const model = new RecordedModel([]) // never consulted — a budget refusal must short-circuit before any model call

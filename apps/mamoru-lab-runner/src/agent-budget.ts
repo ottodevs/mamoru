@@ -8,7 +8,7 @@
  * A day is the UTC calendar date (`toISOString().slice(0, 10)`), independent of lady's local timezone, so the
  * budget resets at the same instant regardless of where the runner happens to run.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 export const DEFAULT_AGENT_DAILY_BUDGET = 30
@@ -44,7 +44,10 @@ function readState(path: string): AgentBudgetState | null {
 
 function writeState(path: string, state: AgentBudgetState): void {
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, JSON.stringify(state), 'utf8')
+  // temp + rename: a crash mid-write never leaves a half file that would read as a reset counter
+  const tmp = `${path}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify(state), 'utf8')
+  renameSync(tmp, path)
 }
 
 export type BudgetCheck = { ok: true; count: number; limit: number } | { ok: false; count: number; limit: number }

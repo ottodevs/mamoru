@@ -187,6 +187,18 @@ function priorTurnsFromHistory(history: AgentHistoryTurn[]): PriorTurn[] {
   return history.map((h) => ({ question: h.question, answer: h.answer, runs: [] as AgentRunResult[] }))
 }
 
+/** Publish is idempotent (same hash), so a transient 5xx or network blip is retried before giving up. */
+async function publishWithRetry(r: RunResult, attempts = 3): Promise<void> {
+  for (let i = 1; ; i++) {
+    try {
+      return await publish(r)
+    } catch (e) {
+      if (i >= attempts) throw e
+      await new Promise((ok) => setTimeout(ok, 1000 * i))
+    }
+  }
+}
+
 async function runAgentJobClaimed(job: AgentClaimedJob): Promise<void> {
   const budget = checkAndIncrementAgentBudget({ statePath: process.env.LAB_AGENT_BUDGET_STATE })
   if (!budget.ok) {
@@ -204,6 +216,7 @@ async function runAgentJobClaimed(job: AgentClaimedJob): Promise<void> {
   }
 
   const pendingPublishes: Promise<void>[] = []
+  const unpublished: string[] = []
   const outcome = await runInWorker<AgentWorkerPayload, AgentWorkerResult>(AGENT_WORKER_URL, payload, {
     heartbeat: () => heartbeat(job.id, job.leaseId),
     intervalMs: heartbeatIntervalMs(),
@@ -215,7 +228,12 @@ async function runAgentJobClaimed(job: AgentClaimedJob): Promise<void> {
     // publish failure must never crash the runner's claim/heartbeat loop.
     onRunsProduced: (runs) => {
       for (const r of runs as RunResult[]) {
-        pendingPublishes.push(publish(r).catch((e) => console.error(`job ${job.id}: publish ${r.resultHash} failed: ${e instanceof Error ? e.message : e}`)))
+        pendingPublishes.push(
+          publishWithRetry(r).catch((e) => {
+            unpublished.push(r.resultHash)
+            console.error(`job ${job.id}: publish ${r.resultHash} failed: ${e instanceof Error ? e.message : e}`)
+          }),
+        )
       }
     },
   })
@@ -233,9 +251,20 @@ async function runAgentJobClaimed(job: AgentClaimedJob): Promise<void> {
   }
 
   const wr = outcome.result
+  if (wr.kind === 'bug') {
+    console.error(`job ${job.id}: unexpected error, leaving it to lease expiry: ${wr.message}`)
+    return
+  }
   if (wr.kind === 'error') {
     await postResult(job.id, job.leaseId, { error: wr.code })
     console.log(`job ${job.id}: ${wr.code}`)
+    return
+  }
+
+  // Never post an answer that cites a run the store does not have: leave the job to lease expiry instead.
+  const missing = wr.runHashes.filter((h) => unpublished.includes(h))
+  if (missing.length > 0) {
+    console.error(`job ${job.id}: ${missing.length} cited run(s) not published, leaving it to lease expiry`)
     return
   }
 
