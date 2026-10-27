@@ -9,7 +9,7 @@ import { depeggedPool, depegExitOf } from './guard/depeg.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
 import { weightTargets } from './rebalance/weights.ts'
 import { anyKey, convertKey, idleConvertOf, isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
-import type { Decision, GateStep, GuardNote, Observation, Proposal, ShadowNote } from './types.ts'
+import type { Decision, GateStep, GuardNote, Observation, Proposal, ShadowMetric, ShadowNote } from './types.ts'
 import { withinCap } from './cap.ts'
 import { tvlShadowNotes } from './shadow-tvl.ts'
 
@@ -202,7 +202,12 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     shadow.push({ code: 'ENY_SHADOW', note: 'packaging:eny is not evaluated in v1 and has no effect on the decision' })
   }
   // otto/mamoru#101 phase 1: Packaging's pool TVL floor, shadow only. Notes are all it adds; nothing below reads them.
-  if (policy.shadow.includes('packaging:tvl')) shadow.push(...tvlShadowNotes(obs, policy, policyPools))
+  const shadowMetrics: ShadowMetric[] = []
+  if (policy.shadow.includes('packaging:tvl')) {
+    const t = tvlShadowNotes(obs, policy, policyPools)
+    shadow.push(...t.notes)
+    shadowMetrics.push(...t.metrics)
+  }
 
   // Plan §9, steps 2, 4 and 8: slot, pause, then one proposal in FR-DEC-011 order.
   let proposal: Proposal | null = null
@@ -262,5 +267,5 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   const observationRef = { block: obs.block.number, hash: obs.block.hash }
   const premiseHash = hashOf(body)
   // `waiting` moves with every price, so it is reported beside the decision and never part of its premise or id.
-  return { decisionId: hashOf({ observationRef, premiseHash }), premiseHash, observationRef, ...body, ...(waiting.length ? { waiting } : {}) } as Decision
+  return { decisionId: hashOf({ observationRef, premiseHash }), premiseHash, observationRef, ...body, ...(waiting.length ? { waiting } : {}), ...(shadowMetrics.length ? { shadowMetrics } : {}) } as Decision
 }

@@ -46,8 +46,16 @@ describe('packaging:tvl shadow (otto/mamoru#101)', () => {
   test('below the floor: a RISK_POOL_TVL_FLOOR note naming the pool, the value and the floor', () => {
     const tvl = 1_430_000n * USDC
     expect(tvlNotes(obs(pool({ tvlSavings: tvl })))).toEqual([
-      { code: 'RISK_POOL_TVL_FLOOR', note: `${POOL} TVL 1.43M < 2M floor: Packaging would exit`, pool: POOL, metric: tvl.toString(), threshold: FLOOR.toString() },
+      { code: 'RISK_POOL_TVL_FLOOR', note: `${POOL} TVL under the 2M floor: Packaging would exit`, pool: POOL, threshold: FLOOR.toString() },
     ])
+    expect(decide(obs(pool({ tvlSavings: tvl })), withTvl).shadowMetrics).toEqual([{ code: 'RISK_POOL_TVL_FLOOR', pool: POOL, metric: tvl.toString(), label: '1.43M' }])
+  })
+
+  test('a TVL that moves under the floor keeps the premise: dedupe and backoff key on it (engine.ts)', () => {
+    const a = decide(obs(pool({ tvlSavings: 1_430_000n * USDC })), withTvl)
+    const b = decide(obs(pool({ tvlSavings: 1_212_345n * USDC })), withTvl)
+    expect(b.premiseHash).toBe(a.premiseHash)
+    expect(b.shadowMetrics?.[0]?.metric).not.toBe(a.shadowMetrics?.[0]?.metric)
   })
 
   test('at or above the floor: no note', () => {
@@ -86,7 +94,7 @@ describe('packaging:tvl shadow (otto/mamoru#101)', () => {
     const b = decide(low, withTvl)
     expect(b.shadow.map((s) => s.code)).toContain('RISK_POOL_TVL_FLOOR')
     const { shadow: _s, premiseHash: _p, decisionId: _d, ...restA } = a
-    const { shadow: _s2, premiseHash: _p2, decisionId: _d2, ...restB } = b
+    const { shadow: _s2, premiseHash: _p2, decisionId: _d2, shadowMetrics: _m2, ...restB } = b
     expect(canonicalJson(restB)).toBe(canonicalJson(restA))
     expect(b.proposal).not.toBeNull()
     // The notes are part of the premise, as ENY_SHADOW is: the same notes give the same hashes.
