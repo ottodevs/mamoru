@@ -111,6 +111,8 @@ export const REASON_CODES = [
   'DECIDE_ENTER',
   'DECIDE_RANGE_ADJUST',
   'DECIDE_RANGE_COOLDOWN',
+  // otto/mamoru#218: the pool already had `range.maxPerWeek` re-ranges in the last 7 days.
+  'DECIDE_RANGE_WEEKLY_CAP',
   // Lab (#101): a re-range that would cost more (gas, swap, LVR) than the fees it earns over the policy horizon waits.
   'DECIDE_RANGE_BELOW_COST',
   // otto/mamoru#172: live lazy re-range without the fee or volatility history the cost test needs: it holds (fail closed).

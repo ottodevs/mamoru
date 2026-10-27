@@ -33,7 +33,8 @@ export type EngineSettings = {
   minEntry?: { gasMultiple: number }
 }
 
-export type RerangeSetting = ({ mode: 'eager' } & Partial<LazyRerange>) | ({ mode: 'lazy' } & LazyRerange)
+/** `maxPerWeek` (#218): at most this many re-ranges per pool in 7 days, either mode; absent = no cap. */
+export type RerangeSetting = (({ mode: 'eager' } & Partial<LazyRerange>) | ({ mode: 'lazy' } & LazyRerange)) & { maxPerWeek?: number }
 
 /** The cap the operator ran with before settings existed; above it, depth sizing must be on. */
 export const DEFAULT_CAP_USDC = 100
@@ -53,6 +54,8 @@ export const ENGINE_SETTINGS_BOUNDS = {
   lvrWeightBps: { min: 0, max: 20_000 },
   // #195: 1x is break-even on gas alone; past 50x a 2-cent entry gas would hold back a dollar.
   gasMultiple: { min: 1, max: 50 },
+  // #218: re-ranges per pool in 7 days.
+  maxPerWeek: { min: 1, max: 50 },
 } as const
 
 export const DEFAULT_ENGINE_SETTINGS: EngineSettings = {
@@ -156,10 +159,11 @@ export function validateEngineSettings(s: unknown): string[] {
     if (!o.rerange || typeof o.rerange !== 'object' || Array.isArray(o.rerange)) errors.push('rerange must be an object')
     else {
       const r = o.rerange as Record<string, unknown>
-      for (const k of Object.keys(r)) if (!['mode', ...LAZY_KEYS].includes(k)) errors.push(`unknown rerange setting ${k}`)
+      for (const k of Object.keys(r)) if (!['mode', 'maxPerWeek', ...LAZY_KEYS].includes(k)) errors.push(`unknown rerange setting ${k}`)
       if (r.mode !== 'eager' && r.mode !== 'lazy') errors.push("rerange.mode must be 'eager' or 'lazy'")
       // Lazy needs every number; eager may carry them, and then they must still be in bounds.
       for (const k of LAZY_KEYS) if (r.mode === 'lazy' || r[k] !== undefined) inRange(errors, `rerange.${k}`, r[k], B[k])
+      if (r.maxPerWeek !== undefined) inRange(errors, 'rerange.maxPerWeek', r.maxPerWeek, B.maxPerWeek)
     }
   }
   return errors
@@ -234,6 +238,10 @@ export function riskyChanges(from: EngineSettings, to: EngineSettings): string[]
   const lf = lazyOf(from)
   const lt = lazyOf(to)
   if (!lf && lt) out.push('re-ranges become lazy: an out-of-range position waits for the buffer, the dwell and the cost test, and may stay out of range')
+  // #218: a higher cap, or none, lets more re-ranges (each a gas cost and a swap) through in a week.
+  const cf = from.rerange?.maxPerWeek
+  const ct = to.rerange?.maxPerWeek
+  if (cf !== undefined && (ct === undefined || ct > cf)) out.push('more re-ranges per week are allowed')
   if (lf && lt) {
     if (lt.edgeBufferTicks > lf.edgeBufferTicks) out.push('a position must be further out of range before it is re-ranged')
     if (lt.minDwellSeconds > lf.minDwellSeconds) out.push('a position waits longer out of range before it is re-ranged')
@@ -270,6 +278,13 @@ export function withEngineSettings(p: PolicyVersion, s: EngineSettings): PolicyV
   const lazy = lazyOf(s)
   if (!lazy && out.range.lazy) {
     const { lazy: _drop, ...range } = out.range
+    out = { ...out, range }
+  }
+  // #218: the weekly cap rides on the range, in both modes; absent means none, even if a base policy carried one.
+  const cap = s.rerange?.maxPerWeek
+  if (cap !== undefined) out = { ...out, range: { ...out.range, maxPerWeek: cap } }
+  else if (out.range.maxPerWeek !== undefined) {
+    const { maxPerWeek: _cap, ...range } = out.range
     out = { ...out, range }
   }
   // Lazy replaces the near-edge trigger: `rerangeOf` reads `range.lazy` and never looks at the edge then.

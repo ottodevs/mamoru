@@ -267,3 +267,44 @@ describe('minEntry.gasMultiple', () => {
     expect(riskyChanges(DEFAULT_ENGINE_SETTINGS, on)).toEqual([])
   })
 })
+
+describe('rerange.maxPerWeek (#218)', () => {
+  const at = (r: unknown) => validateEngineSettings({ ...DEFAULT_ENGINE_SETTINGS, rerange: r })
+  const withCap = (n: number | undefined, mode: 'eager' | 'lazy' = 'eager'): EngineSettings => ({
+    ...DEFAULT_ENGINE_SETTINGS,
+    rerange: mode === 'lazy' ? { mode, ...lazyParams, ...(n === undefined ? {} : { maxPerWeek: n }) } : { mode, ...(n === undefined ? {} : { maxPerWeek: n }) },
+  })
+
+  test('validation: 1..50 whole numbers, in both modes', () => {
+    for (const n of [1, 3, 50]) {
+      expect(at({ mode: 'eager', maxPerWeek: n })).toEqual([])
+      expect(at({ mode: 'lazy', ...lazyParams, maxPerWeek: n })).toEqual([])
+    }
+    for (const n of [0, 51, -1, 2.5, '3', null]) expect(at({ mode: 'eager', maxPerWeek: n })).toContain('rerange.maxPerWeek must be a whole number from 1 to 50')
+  })
+
+  test('absent stays byte for byte: canonical JSON and policy are untouched', () => {
+    expect(canonicalSettingsJson(withCap(undefined))).not.toContain('maxPerWeek')
+    const p = withEngineSettings(conservadorLiveV2, withCap(undefined))
+    expect('maxPerWeek' in p.range).toBe(false)
+    expect(canonicalSettingsJson(withCap(3))).toContain('"maxPerWeek":3')
+  })
+
+  test('withEngineSettings puts it in policy.range.maxPerWeek, eager and lazy; removing it removes it', () => {
+    expect(withEngineSettings(conservadorLiveV2, withCap(3)).range.maxPerWeek).toBe(3)
+    expect(withEngineSettings(conservadorLiveV2, withCap(4, 'lazy')).range.maxPerWeek).toBe(4)
+    const capped = { ...conservadorLiveV2, range: { ...conservadorLiveV2.range, maxPerWeek: 2 } }
+    expect('maxPerWeek' in withEngineSettings(capped, DEFAULT_ENGINE_SETTINGS).range).toBe(false)
+  })
+
+  test('riskyChanges: raising or removing the cap is risky, lowering or adding one is not', () => {
+    const msg = 'more re-ranges per week are allowed'
+    expect(riskyChanges(withCap(3), withCap(4))).toEqual([msg])
+    expect(riskyChanges(withCap(3), withCap(undefined))).toEqual([msg])
+    expect(riskyChanges(withCap(3), DEFAULT_ENGINE_SETTINGS)).toEqual([msg])
+    expect(riskyChanges(withCap(3), withCap(3))).toEqual([])
+    expect(riskyChanges(withCap(3), withCap(2))).toEqual([])
+    expect(riskyChanges(DEFAULT_ENGINE_SETTINGS, withCap(3))).toEqual([])
+    expect(riskyChanges(withCap(undefined), withCap(3))).toEqual([])
+  })
+})

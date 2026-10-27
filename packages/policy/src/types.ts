@@ -132,6 +132,8 @@ export type PolicyVersion = {
     widthTicksByPool?: Record<RegistryName, number>
     /** Lab only (#101 experiment 4): re-range only when it pays. Absent: today's trigger byte for byte. */
     lazy?: LazyRerange
+    /** otto/mamoru#218: at most this many re-ranges per pool in any 7 days (both modes). Absent: no cap. */
+    maxPerWeek?: number
     /**
      * otto/mamoru#171, policies whose grants carry MamoruActionPolicyV2.increase (conservadorLiveV5): an entry adds to a
      * held, admitted position when each of its edges is within this share (bps) of the fresh range's width from that
