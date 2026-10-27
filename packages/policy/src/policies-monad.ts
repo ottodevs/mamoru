@@ -82,8 +82,8 @@ export const liveWmonUsdcMonadV1: PolicyVersion = {
  * increase tolerance. One bucket holds everything: the sleeve serves only the v6 Growth bucket, so inside it the whole
  * account is WMON/USDC. The id is 'risk' (the existing union has no 'growth' local bucket, and a WMON pool is the
  * volatile slot the engine already knows), preference 10000 (all of the sleeve's target; the Growth share of the whole
- * account, 15 %, lives in `conservadorLiveV6.remoteBuckets`). Caps are bps of the cap the operator signs for the sleeve
- * (`V4_POOLS_MONAD.growth`). Needs the two contracts of Monad (env: MAMORU_ACTION_POLICY_V2_ADDRESS,
+ * account, 15 %, lives in `conservadorLiveV6.remoteBuckets`). Caps are bps of the sleeve account's own cap, all of it
+ * (`V4_POOLS_MONAD.growth`, capShareBps 10000). Needs the two contracts of Monad (env: MAMORU_ACTION_POLICY_V2_ADDRESS,
  * MAMORU_GAS_POLICY_ADDRESS); `liveWmonUsdcMonadV1` stays for the sleeves already activated (its hash is pinned).
  */
 const V5_MONAD_USAGE: V4Usage = { enterSwap: 3_000, enterMint: 1_000, manageAny: 32_000 }
