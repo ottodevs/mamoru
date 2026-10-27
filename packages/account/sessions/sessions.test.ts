@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { baseRegistry, address } from '@mamoru/registry'
 import { computeCaps, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, POLICY_INCREASE_SIG, conservadorV1, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, grantKey, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_GAS_CAPS, V4_POOLS, v4BudgetCaps, type SessionGrant } from '@mamoru/policy'
-import { activationCall, selfAttestCall, selfRevokeAttestationCall, toSmartSession, v4PoliciesFor, type SecondActionPolicy } from './index.ts'
+import { activationCall, selfAttestCall, selfRevokeAttestationCall, toSmartSession, v4DeploymentOf, v4PoliciesFor, type SecondActionPolicy } from './index.ts'
 
 const ctx = {
   account: '0x00000000000000000000000000000000000000aa' as const,
@@ -270,5 +270,21 @@ describe('otto/mamoru#213: bridge-out takes MamoruPauseGate and MamoruGasPolicy,
     const s = toSmartSession(exit, v4PoliciesFor([exit], d, 1n, v4BudgetCaps(conservadorLiveV6, 10_000n * 1_000_000n))(exit, 0))
     expect(s.actions).toHaveLength(6)
     for (const a of s.actions) expect(a.actionPolicies.map((x) => x.policy.toLowerCase())).toEqual([address('UniActionPolicy', baseRegistry).toLowerCase(), A])
+  })
+
+  test('any CCTP burn entry point or call to TokenMessengerV2 without the flag is refused', () => {
+    const { requiresPauseGate: _, ...unflagged } = bridge
+    const withHook = { ...unflagged, actions: unflagged.actions.map((a) => (a.signature.startsWith('depositForBurn') ? { ...a, signature: 'depositForBurnWithHook(uint256,uint32,bytes32,address,bytes32,uint256,uint32,bytes)' } : a)) }
+    expect(() => toSmartSession(withHook as SessionGrant)).toThrow('needs requiresPauseGate')
+    const other = { ...unflagged, actions: unflagged.actions.map((a) => (a.signature.startsWith('depositForBurn') ? { ...a, signature: 'replaceDepositForBurn(bytes,bytes,bytes32,bytes32)' } : a)) }
+    expect(() => toSmartSession(other as SessionGrant)).toThrow('needs requiresPauseGate')
+  })
+
+  test('the gate is handed out only for MamoruActionPolicyV2 (contractVersion 2): otherwise bridge-out fails closed', () => {
+    const base = { ...conservadorLiveV6, actionPolicy: { address: A, bandTicksByPool: {}, gasPolicy: { address: G, caps: V4_GAS_CAPS }, pauseGate: P } }
+    expect(v4DeploymentOf(base)?.pauseGate).toBeUndefined()
+    expect(v4DeploymentOf({ ...base, actionPolicy: { ...base.actionPolicy, contractVersion: 2 } })?.pauseGate).toBe(P)
+    const d1 = v4DeploymentOf(base)!
+    expect(() => v4PoliciesFor([bridge], d1, 1n, {})(bridge, 0)).toThrow('no MamoruPauseGate')
   })
 })

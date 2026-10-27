@@ -13,7 +13,7 @@ import {
 } from 'viem'
 import { getUserOperationHash, toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import { ReasonError, type Address, type Hex } from '@mamoru/domain'
-import { baseRegistry, address, entry, entryPointV07Abi, moduleRegistryAbi, safe7579Abi, smartSessionAbi, type Registry } from '@mamoru/registry'
+import { baseRegistry, address, entry, isDeployed, entryPointV07Abi, moduleRegistryAbi, safe7579Abi, smartSessionAbi, type Registry } from '@mamoru/registry'
 import { PARAM_CONDITIONS, POLICY_INCREASE_SIG, decodeGasCaps, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, mamoruInitFor, v4PoolOf, validGasCaps, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   CALLTYPE_BATCH,
@@ -131,6 +131,15 @@ function isActionPolicy(p: SessionPolicies | undefined): p is SecondActionPolicy
   return !!p && 'policy' in p
 }
 
+/**
+ * otto/mamoru#213: an action that moves funds off the chain through CCTP: any `depositForBurn*` entry point (V2's
+ * `WithHook`, V1's `WithCaller`) or any call to the registry's TokenMessengerV2.
+ */
+function isBridgeAction(a: SessionGrant['actions'][number], registry: Registry): boolean {
+  if (a.signature.startsWith('depositForBurn')) return true
+  return isDeployed('TokenMessengerV2', registry) && isAddressEqual(a.targetAddress, address('TokenMessengerV2', registry))
+}
+
 /** otto/mamoru#213: a `requiresPauseGate` grant carries the configured MamoruPauseGate and MamoruGasPolicy, and no action policy. */
 export function assertGated(grant: SessionGrant, p: SessionPolicies | undefined): asserts p is GatedPolicies {
   if (grant.requiresActionPolicy || grant.actionPolicy || isActionPolicy(p)) mismatch(grant, 'a gated grant never takes MamoruActionPolicy')
@@ -232,7 +241,7 @@ export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, 
   // otto/mamoru#213 (review r3): the gate's protection rests on the flag; a grant that moves funds off the chain without
   // it (a stale or hand-built grant, the old `requiresGasPolicy` name) is refused rather than encoded ungated.
   if ('requiresGasPolicy' in grant) mismatch(grant, 'requiresGasPolicy is retired: rebuild the grant (requiresPauseGate)')
-  if (!grant.requiresPauseGate && grant.actions.some((a) => a.signature.startsWith('depositForBurn('))) mismatch(grant, 'a bridge action needs requiresPauseGate')
+  if (!grant.requiresPauseGate && grant.actions.some((a) => isBridgeAction(a, registry))) mismatch(grant, 'a bridge action needs requiresPauseGate')
   if (grant.requiresPauseGate) assertGated(grant, policies)
   else if (grant.requiresActionPolicy) assertV4Policies(grant, isActionPolicy(policies) ? policies : undefined)
   const second = isActionPolicy(policies) ? { policy: policies.policy, initData: policies.initData } : policies && 'gate' in policies ? policies.gate : undefined
