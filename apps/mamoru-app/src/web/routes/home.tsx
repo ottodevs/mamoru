@@ -981,7 +981,7 @@ function useFittingPrepared(approval: NonNullable<FundingView['approval']>, flow
   return fits ? flow.prepared : null
 }
 
-const USAGE_WHAT: Record<NonNullable<NonNullable<FundingView['approval']>['usage']>['action'], string> = { collect: 'collecting fees', rerange: 're-ranging', enter: 'adding money' }
+const USAGE_WHAT: Record<NonNullable<NonNullable<FundingView['approval']>['usage']>['action'], string> = { collect: 'collecting fees', rerange: 're-ranging', enter: 'adding money', all: 'working' }
 
 /** The row's title: an ended approval first, then a spent grant, a due renewal, a grant near its end, a missing grant. */
 export function approvalTitle(approval: NonNullable<FundingView['approval']>): string {

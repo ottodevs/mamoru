@@ -172,3 +172,13 @@ describe('owner transactions of a v7 approval: one each', () => {
     expect(smartSessionCalls(priv(w.op).prepared.get(t.prepareId)!.tx).sessions).toHaveLength(4)
   })
 })
+
+describe('the renew row on a v7 account', () => {
+  test("a spent pool session says the engine stopped working there (action 'all'), not only re-ranging", () => {
+    const w = world(0n, cfg({ merged_grants_v7: true }))
+    const acc = running(w, v7)
+    const g = (acc.grants as unknown as { name: string; permissionId: Hex }[])[1]!
+    ;(acc as unknown as { ops: unknown[] }).ops = [{ opId: 'eng-1', state: 'confirmed', permissionId: g.permissionId }]
+    expect(w.op.usageView(acc)).toEqual({ action: 'all', pool: 'pool:WETH/USDC/3000', usedBps: 10_000, spent: true })
+  })
+})

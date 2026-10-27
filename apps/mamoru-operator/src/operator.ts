@@ -1407,7 +1407,9 @@ export class Operator {
     if (!worst || worst.usedBps < USAGE_RENEW_BPS) return null
     const pool = worst.grant.split(':').slice(1).join(':')
     const name = worst.grant.split(':')[0]!
-    const action = name === 'convert-any' ? 'collect' : name === 'manage-any' ? 'rerange' : 'enter'
+    // otto/mamoru#225: a v7 pool session does everything in its pool; spent, the engine stops there altogether.
+    const merged = (this.policyOf(acc).session.grants.find((g) => grantKey(g) === worst!.grant)?.covers?.length ?? 0) > 1
+    const action = merged ? 'all' : name === 'convert-any' ? 'collect' : name === 'manage-any' ? 'rerange' : 'enter'
     return { action, pool: pool.startsWith('pool:') ? pool : null, usedBps: Math.min(worst.usedBps, 10_000), spent: worst.usedBps >= 10_000 }
   }
 
