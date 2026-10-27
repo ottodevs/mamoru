@@ -41,7 +41,7 @@ export type ActionRuleTemplate = {
   params: ParamRuleTemplate[]
 }
 
-export type GrantName = 'enter-swap' | 'enter-mint' | 'manage' | 'manage-any' | 'convert-any' | 'bridge-out'
+export type GrantName = 'enter-swap' | 'enter-mint' | 'manage' | 'manage-any' | 'convert-any' | 'bridge-out' | 'vault-supply'
 
 /** Grants that cover any position of the pair the account holds, enabled at activation. */
 export const MANAGE_ANY_GRANTS = ['manage-any', 'convert-any'] as const satisfies readonly GrantName[]
@@ -50,6 +50,8 @@ export type GrantTemplate = {
   name: GrantName
   /** Multi-pool policies: the pool this grant is for. The session key is `${name}:${pool}` (see `grantKey`). */
   pool?: RegistryName
+  /** otto/mamoru#210, `vault-supply`: the ERC-4626 vault this grant is for, never set with `pool`. Key `${name}:${vault}`. */
+  vault?: RegistryName
   /** Activated by the owner only for a tokenId already admitted from enter-mint. */
   perPosition: boolean
   /** userOps one approval allows under this grant. With `usageByCap`, the limit of an account cap under its first tier. */
@@ -113,7 +115,12 @@ export type PolicyVersion = {
    * Absent: Base (8453), which every policy before Monad is; it is left out of them so their policyHash stays.
    */
   sourceChainId?: ChainId
-  buckets: { id: 'stables' | 'btc-usdc' | 'risk'; preference: number; pools: RegistryName[] }[]
+  /**
+   * `vaults` (otto/mamoru#210): ERC-4626 vaults of the savings asset that serve the bucket instead of a pool, in order
+   * of preference; a vault bucket has no pools. `stables-lp` is the USDC/USDT pool kept as an exit only once the
+   * stables bucket moves to vaults (v7).
+   */
+  buckets: { id: 'stables' | 'stables-lp' | 'btc-usdc' | 'risk'; preference: number; pools: RegistryName[]; vaults?: RegistryName[] }[]
   /**
    * otto/mamoru#201/#213: buckets served on another chain, by the account's sleeve there (same Safe address, its own
    * policy). Their pools resolve in that chain's registry, never this one, so nothing that walks `buckets` sees them.
@@ -372,6 +379,8 @@ export type SessionGrant = {
   policyHash: Hex
   name: GrantName
   pool?: RegistryName
+  /** See `GrantTemplate.vault`. */
+  vault?: RegistryName
   salt: Hex
   chainId: number
   account: Address

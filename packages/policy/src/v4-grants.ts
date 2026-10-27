@@ -837,8 +837,9 @@ export function calibratedGasModel(gas: bigint, overheadGas: bigint, actions: nu
   return { perActionGas: per > 0n ? per : 1n, perSessionGas: 0n }
 }
 
-function grantKeyOf(t: { name: string; pool?: string }): string {
-  return t.pool ? `${t.name}:${t.pool}` : t.name
+function grantKeyOf(t: { name: string; pool?: string; vault?: string }): string {
+  const scope = t.pool ?? t.vault
+  return scope ? `${t.name}:${scope}` : t.name
 }
 
 /** The V4PoolSpec of a pool, by registry name and chain (Base unless `sourceChainId` says otherwise; undefined for a pool that chain's v4 table does not have). */

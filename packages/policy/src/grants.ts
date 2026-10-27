@@ -213,9 +213,10 @@ export function pairGrants(p: PairSpec, usage: { enterSwap: Usage; enterMint: Us
   return p.pool ? templates.map((t) => ({ ...t, pool: p.pool })) : templates
 }
 
-/** Session key of a grant: its name, or `name:pool` for the per-pair grants of a multi-pool policy. */
-export function grantKey(t: { name: GrantName; pool?: string }): string {
-  return t.pool ? `${t.name}:${t.pool}` : t.name
+/** Session key of a grant: its name, or `name:pool` for the per-pair grants of a multi-pool policy (`name:vault` for a vault's). */
+export function grantKey(t: { name: GrantName; pool?: string; vault?: string }): string {
+  const scope = t.pool ?? t.vault
+  return scope ? `${t.name}:${scope}` : t.name
 }
 
 /** The key of the grant `name` that covers `pool` in this policy (plain `name` for single-pair policies). */
@@ -373,6 +374,61 @@ export function bridgeOutGrant(p: BridgeOutSpec, usage: Usage): GrantTemplate {
           { field: 'destinationCaller', index: 4, condition: 'EQUAL', ref: 0n, denial: 'POLICY_DENIED_TARGET' },
           { field: 'maxFee', index: 5, condition: 'EQUAL', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
           { field: 'minFinalityThreshold', index: 6, condition: 'GREATER_THAN_OR_EQUAL', ref: CCTP_FINALITY_STANDARD, denial: 'POLICY_DENIED_AMOUNT' },
+        ],
+      },
+    ],
+  }
+}
+
+const VAULT_DEPOSIT = 'deposit(uint256,address)'
+const VAULT_REDEEM = 'redeem(uint256,address,address)'
+
+export type VaultSupplySpec = {
+  /** Registry name of the ERC-4626 vault (kind `vault`); its asset is the savings asset. */
+  vault: string
+  caps: { perCall: string; total: string }
+}
+
+/**
+ * otto/mamoru#210: the stables bucket supplies USDC to an ERC-4626 vault and takes it back, and nothing else. The
+ * deposit's shares go to this account (`receiver`), and a redeem pays this account from this account's own shares
+ * (`receiver`, `owner`), so a leaked key can only move savings from the Safe into the vault and back, at no cost but gas
+ * (MamoruGasPolicy). The deposit is capped per call and over the approval; the redeem is not, as it can only bring money
+ * home. The approval names the vault alone, so it is spendable only by `deposit`. MamoruPauseGate stops both while the
+ * guardian has the account paused (`requiresPauseGate`); MamoruActionPolicy knows only Uniswap and never takes it.
+ * `withdraw` and `mint` are not offered: one way in and one way out keep the rules to fixed-position words.
+ */
+export function vaultSupplyGrant(p: VaultSupplySpec, usage: Usage): GrantTemplate {
+  return {
+    name: 'vault-supply',
+    vault: p.vault,
+    perPosition: false,
+    ...usageOf(usage),
+    requiresPauseGate: true,
+    actions: [
+      {
+        target: 'USDC',
+        signature: APPROVE,
+        params: [
+          { field: 'spender', index: 0, condition: 'EQUAL', ref: p.vault, denial: 'POLICY_DENIED_APPROVAL' },
+          { field: 'amount', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.perCall}`, denial: 'POLICY_DENIED_APPROVAL' },
+        ],
+      },
+      {
+        target: p.vault,
+        signature: VAULT_DEPOSIT,
+        params: [
+          { field: 'assets', index: 0, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.perCall}`, cumulative: `cap:${p.caps.total}`, denial: 'POLICY_DENIED_AMOUNT' },
+          { field: 'receiver', index: 1, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },
+        ],
+      },
+      {
+        target: p.vault,
+        signature: VAULT_REDEEM,
+        params: [
+          { field: 'shares', index: 0, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
+          { field: 'receiver', index: 1, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },
+          { field: 'owner', index: 2, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },
         ],
       },
     ],
