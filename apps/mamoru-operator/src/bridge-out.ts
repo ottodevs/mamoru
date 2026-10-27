@@ -68,6 +68,10 @@ export const CONVERTS_PER_ACCOUNT_DAY = 3
 /** Gas limit of the owner transaction (the swap used ~130k on Ethereum), with margin. */
 export const CONVERT_GAS = 300_000n
 
+/** Safe 1.4.1: keccak256('ExecutionSuccess(bytes32,uint256)') and keccak256('ExecutionFailure(bytes32,uint256)'). */
+const EXECUTION_SUCCESS_TOPIC = '0x442e715f626346e8c54381002da614f62bee8d27386535b2521ec8540898556e'
+const EXECUTION_FAILURE_TOPIC = '0x23428b18acfb3ea64b08dc0c1d296ea9c09702c09083ca5272e64d115b687d23'
+
 export const swapRouter02Abi = parseAbi([
   'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
   'function exactInputSingle(ExactInputSingleParams params) payable returns (uint256 amountOut)',
@@ -238,7 +242,7 @@ type Stored = BridgeOutRoute & { id: string; safe: Address; safeNonce: string; f
  */
 type Reservation = { wei: string; tx?: Hex; nonce?: number; at: string; goneAt?: string }
 /** #211: a conversion as kept on disk. */
-type StoredConvert = EthConvert & { id: string; safe: Address; safeNonce: string; execStarted?: boolean }
+type StoredConvert = EthConvert & { id: string; safe: Address; safeNonce: string; safeTxHash?: Hex; fromBlock?: string; execStarted?: boolean }
 type PreparedConvert = { prepareId: string; accountKey: string; live: LiveAccount; tx: SafeTx; safeTxHash: Hex; amountIn: bigint; minOut: bigint; deployed: boolean; expires: number }
 type Journal = { converts?: Record<string, StoredConvert>; convertDays?: Record<string, { day: string; n: number }>; reservations?: Record<string, Reservation>; cctpBurns?: Record<string, string[]>; routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
 
@@ -381,7 +385,7 @@ const eth = (wei: bigint) => {
 /** The owner-facing part of a stored conversion (#211). */
 function convertView(c: StoredConvert | undefined): EthConvert | null {
   if (!c) return null
-  const { id: _id, safe: _safe, safeNonce: _n, execStarted: _e, ...rest } = c
+  const { id: _id, safe: _safe, safeNonce: _n, safeTxHash: _h, fromBlock: _b, execStarted: _e, ...rest } = c
   return rest
 }
 
@@ -1226,14 +1230,14 @@ export class BridgeOut {
   private async sendConvert(ctx: AccountContext, p: PreparedConvert, signature: Hex): Promise<BridgeOutView> {
     if (this.convertBlocking(ctx.accountKey) || (await this.blocking(this.journal.routes[ctx.accountKey]))) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
     // Nothing changed on Ethereum since the prepare: same ETH, same deploy state and Safe nonce.
-    const [amount, state] = await Promise.all([this.l1.getBalance({ address: p.live.safe }), readSafeNonce(this.l1, p.live.safe)])
+    const [amount, state, head] = await Promise.all([this.l1.getBalance({ address: p.live.safe }), readSafeNonce(this.l1, p.live.safe), this.l1.getBlockNumber({ cacheTime: 0 })])
     if (amount !== p.amountIn || state.deployed !== p.deployed || state.nonce !== p.tx.nonce) throw new HttpError(409, 'BRIDGE_STALE', 'the balance on Ethereum changed, tap again')
     if (this.convertsToday(ctx.accountKey) >= CONVERTS_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
     const exec = execTransactionData(p.tx, signature)
     if (p.deployed) await this.simulate(p.live.safe, exec)
     const day = this.day()
     this.journal.convertDays = { ...(this.journal.convertDays ?? {}), [ctx.accountKey]: { day, n: this.convertsToday(ctx.accountKey) + 1 } }
-    const c: StoredConvert = { id: p.prepareId, safe: p.live.safe, safeNonce: p.tx.nonce.toString(), state: 'sending', ethWei: p.amountIn.toString(), minUsdc: p.minOut.toString(), at: '' }
+    const c: StoredConvert = { id: p.prepareId, safe: p.live.safe, safeNonce: p.tx.nonce.toString(), safeTxHash: p.safeTxHash, fromBlock: head.toString(), state: 'sending', ethWei: p.amountIn.toString(), minUsdc: p.minOut.toString(), at: '' }
     this.writeConvert(ctx.accountKey, c)
     try {
       if (!p.deployed) {
@@ -1282,6 +1286,28 @@ export class BridgeOut {
     }
   }
 
+  /**
+   * The Safe's ExecutionSuccess / ExecutionFailure for `safeTxHash` from `from` on, in provider-sized chunks over
+   * LOG_WINDOW_BLOCKS (the signed swap's deadline is CONVERT_DEADLINE_SEC, ~75 blocks: it cannot run later). The hash
+   * is read from the indexed topic or, for a Safe build that does not index it, from the data. Null: not found.
+   */
+  private async findExecution(safe: Address, safeTxHash: Hex, from: bigint): Promise<{ tx: Hex; success: boolean } | null> {
+    const head = await this.l1.getBlockNumber({ cacheTime: 0 })
+    const end = head < from + LOG_WINDOW_BLOCKS ? head : from + LOG_WINDOW_BLOCKS
+    const want = safeTxHash.toLowerCase()
+    for (let lo = from; lo <= end; lo += LOG_CHUNK_BLOCKS) {
+      const hi = lo + LOG_CHUNK_BLOCKS - 1n < end ? lo + LOG_CHUNK_BLOCKS - 1n : end
+      const logs = await this.l1.getLogs({ address: safe, fromBlock: lo, toBlock: hi })
+      for (const l of logs) {
+        const t0 = l.topics[0]
+        if (t0 !== EXECUTION_SUCCESS_TOPIC && t0 !== EXECUTION_FAILURE_TOPIC) continue
+        const h = (l.topics[1] ?? `0x${l.data.slice(2, 66)}`).toLowerCase()
+        if (h === want && l.transactionHash) return { tx: l.transactionHash, success: t0 === EXECUTION_SUCCESS_TOPIC }
+      }
+    }
+    return null
+  }
+
   /** The account's last conversion, resolved from the chain when it is not proven yet. */
   private async convertStatus(accountKey: string): Promise<EthConvert | null> {
     const c = this.journal.converts?.[accountKey]
@@ -1296,11 +1322,22 @@ export class BridgeOut {
       else if (this.now() - Date.parse(c.at) >= UNCONFIRMED_GIVEUP_MS) {
         // No receipt to read after the wait. Signed Safe nonce still unspent: it did not run, and any later
         // transaction of the account signs that same nonce, so at most one of them ever runs: failed. Nonce spent:
-        // the ETH decides. Still all there: another transaction took the nonce and this one can never run: failed.
-        // Gone: it ran (the swap only pays the account itself), done without a known amount.
-        const [{ nonce }, ethNow] = await Promise.all([readSafeNonce(this.l1, next.safe), this.l1.getBalance({ address: next.safe })])
-        if (nonce === BigInt(next.safeNonce) || ethNow >= BigInt(next.ethWei)) next.state = 'failed'
-        else next.state = 'done'
+        // the Safe's own ExecutionSuccess/ExecutionFailure for the signed safeTxHash says whether this one ran; neither
+        // means another transaction took the nonce and this one can never run: failed. Unknown stays unconfirmed.
+        const { nonce } = await readSafeNonce(this.l1, next.safe)
+        if (nonce === BigInt(next.safeNonce)) next.state = 'failed'
+        else if (next.safeTxHash && next.fromBlock) {
+          const ran = await this.findExecution(next.safe, next.safeTxHash, BigInt(next.fromBlock))
+          if (ran === null) next.state = 'failed'
+          else if (ran.success) {
+            const receipt = await this.l1.getTransactionReceipt({ hash: ran.tx })
+            next.l1Tx = ran.tx
+            this.settleConvert(next, receipt)
+          } else {
+            next.l1Tx = ran.tx
+            next.state = 'failed'
+          }
+        } else if (next.state === 'sending') next.state = 'unconfirmed'
       } else if (next.state === 'sending') next.state = 'unconfirmed'
     } catch (e) {
       logErr(`[bridge-out] convert status ${accountKey.slice(0, 8)}:`, e)
