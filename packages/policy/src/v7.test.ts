@@ -8,6 +8,10 @@ import { conservadorLiveV6, V6_POOLS } from './policies-v6.ts'
 import { conservadorLabV7, conservadorLiveV7, oneTransaction } from './policies-v7.ts'
 import type { ActionRuleTemplate, GrantTemplate, ParamRuleTemplate } from './types.ts'
 import { exitOnlyV5Grant, grantsV5, mergeGrants, orderV4Keys, V4_POOLS } from './v4-grants.ts'
+import { POLICIES } from './policies.ts'
+import { conservadorLabV4, conservadorLabV5, conservadorLiveV4, conservadorLiveV5 } from './policies-v4.ts'
+import { conservadorLabV6 } from './policies-v6.ts'
+import { MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES } from './policies-monad.ts'
 
 const STABLES = 'pool:USDC/USDT/100'
 const BALANCE = 'pool:WETH/USDC/3000'
@@ -194,4 +198,20 @@ describe('conservador-live-v7 (otto/mamoru#225)', () => {
     expect(() => instantiateGrant(bad({ ...g, requiresActionPolicy: undefined }), grantKey(g), ctx())).toThrow('needs MamoruActionPolicy')
   })
 
+  test('the rule-less-action check holds for every policy: every grant of POLICIES, v4-v7 and the Monad sleeves instantiates', () => {
+    const all = [...Object.values(POLICIES), conservadorLiveV4, conservadorLabV4, conservadorLiveV5, conservadorLabV5, conservadorLiveV6, conservadorLabV6, conservadorLiveV7, conservadorLabV7, ...Object.values(MONAD_LIVE_POLICIES), ...Object.values(MONAD_LAB_POLICIES)]
+    const prices = { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n }, WMON: { num: 10n, den: 1n } }
+    let n = 0
+    for (const p of all) {
+      const chainId = p.chain === 'base' ? 8453 : p.chain === 'monad' ? 143 : 31337
+      const caps = computeCaps(p, CAP, prices)
+      for (const t of p.session.grants) {
+        const tokenId = t.perPosition ? 7n : undefined
+        const g = instantiateGrant(p, grantKey(t), { ...ctx(), chainId, caps, capUsdc: CAP, ...(tokenId ? { tokenId, admittedTokenIds: [tokenId] } : {}) })
+        for (const a of g.actions) expect({ policy: p.policyId, sig: a.signature, ruled: a.actionPolicyOnly === true || a.params.length > 0 }).toMatchObject({ ruled: true })
+        n++
+      }
+    }
+    expect(n).toBeGreaterThan(60)
+  })
 })
