@@ -334,7 +334,8 @@ function PositionRow({ p, r, i }: { p: FundingView['positions'][number]; r: Posi
           <span className="seg" data-testid="position-chain">
             {chain.name}
           </span>
-          {p.inRange || p.range ? ' · ' : null}
+          {/* Out of range the gauge alone follows, and it is decorative: the separator is too. */}
+          {p.inRange ? ' · ' : p.range ? <span aria-hidden="true"> · </span> : null}
           {p.inRange || p.range ? (
             <span className={`seg${p.inRange ? ' text-emerald' : ''}`}>
               <RangeGauge range={p.range} inRange={p.inRange} />
