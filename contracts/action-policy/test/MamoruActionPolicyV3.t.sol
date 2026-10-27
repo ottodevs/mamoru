@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test, console2} from "forge-std/Test.sol";
-import {MamoruActionPolicyV3, ConfigId} from "../src/MamoruActionPolicyV3.sol";
+import {MamoruActionPolicyV3, MamoruV3Routes, ConfigId} from "../src/MamoruActionPolicyV3.sol";
 
 // The vault and bridge families of MamoruActionPolicyV3 (otto/mamoru#116 T1), unit tests without a fork. The Uniswap
 // paths are V2's: MamoruActionPolicyV3Suites.t.sol runs every V1, T6, V2 and LeftClaw test against V3 on the Base fork.
@@ -101,29 +101,29 @@ contract MamoruActionPolicyV3UnitTest is Test {
     // ------------------------------------------------------------ construction
 
     function test_constructorListsVaultsWithTheirAsset() public view {
-        assertEq(policy.vaultAsset(vaultA), USDC);
-        assertEq(policy.vaultAsset(vaultB), OTHER_TOKEN);
-        assertEq(policy.vaultAsset(unlisted), address(0));
-        assertEq(policy.TOKEN_MESSENGER(), MESSENGER);
-        assertEq(policy.BURN_TOKEN(), USDC);
-        assertEq(policy.DESTINATION_DOMAIN(), DOMAIN);
+        assertEq(policy.ROUTES().vaultAsset(vaultA), USDC);
+        assertEq(policy.ROUTES().vaultAsset(vaultB), OTHER_TOKEN);
+        assertEq(policy.ROUTES().vaultAsset(unlisted), address(0));
+        assertEq(policy.ROUTES().TOKEN_MESSENGER(), MESSENGER);
+        assertEq(policy.ROUTES().BURN_TOKEN(), USDC);
+        assertEq(policy.ROUTES().DESTINATION_DOMAIN(), DOMAIN);
     }
 
     function test_constructorRefusesBadLists() public {
         address[] memory dup = new address[](2);
         (dup[0], dup[1]) = (vaultA, vaultA);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV3.BadVault.selector, vaultA));
+        vm.expectRevert(abi.encodeWithSelector(MamoruV3Routes.BadVault.selector, vaultA));
         new MamoruActionPolicyV3(SS, NPM, ROUTER, FACTORY, GUARDIAN, dup, MESSENGER, USDC, DOMAIN);
 
         address[] memory noAsset = new address[](1);
         noAsset[0] = address(new MockVault(address(0)));
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV3.BadVault.selector, noAsset[0]));
+        vm.expectRevert(abi.encodeWithSelector(MamoruV3Routes.BadVault.selector, noAsset[0]));
         new MamoruActionPolicyV3(SS, NPM, ROUTER, FACTORY, GUARDIAN, noAsset, MESSENGER, USDC, DOMAIN);
 
         address[] memory none = new address[](0);
-        vm.expectRevert(MamoruActionPolicyV3.BadBridge.selector);
+        vm.expectRevert(MamoruV3Routes.BadBridge.selector);
         new MamoruActionPolicyV3(SS, NPM, ROUTER, FACTORY, GUARDIAN, none, address(0), USDC, 0);
-        vm.expectRevert(MamoruActionPolicyV3.BadBridge.selector);
+        vm.expectRevert(MamoruV3Routes.BadBridge.selector);
         new MamoruActionPolicyV3(SS, NPM, ROUTER, FACTORY, GUARDIAN, none, MESSENGER, address(0), DOMAIN);
         // No vaults and no bridge: a Uniswap-only deployment (Monad today) is fine.
         new MamoruActionPolicyV3(SS, NPM, ROUTER, FACTORY, GUARDIAN, none, address(0), address(0), 0);
@@ -140,7 +140,7 @@ contract MamoruActionPolicyV3UnitTest is Test {
     function test_unknownFamilyRefused() public {
         vm.prank(SS);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV3.BadInit.selector, 12));
-        policy.initializeWithMultiplexer(account, VID, abi.encode(uint256(3), uint64(1)));
+        policy.initializeWithMultiplexer(account, VID, abi.encode(uint256(4), uint64(1))); // 3 is setup mode
     }
 
     function test_bridgeFamilyRefusedWithoutMessenger() public {

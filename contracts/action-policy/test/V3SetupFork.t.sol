@@ -272,9 +272,17 @@ abstract contract V3SetupBase is Test {
         uint128 total;
     }
 
-    function _uniInit(Pool memory p) internal pure returns (bytes memory) {
-        return abi.encode(
-            MamoruActionPolicyV3.Init({
+    /// Grants committed in the setup use V3's setup mode (FAMILY_UNISWAP_AT_SETUP): no live market state at enable.
+    /// False only for the V2 harness check, which knows V2's encoding alone.
+    bool setupMode = true;
+
+    function _uniInit(Pool memory p) internal view returns (bytes memory) {
+        MamoruActionPolicyV3.Init memory i = _initOf(p);
+        return setupMode ? abi.encode(uint256(3), i) : abi.encode(i);
+    }
+
+    function _initOf(Pool memory p) internal pure returns (MamoruActionPolicyV3.Init memory) {
+        return (MamoruActionPolicyV3.Init({
                 pool: p.pool,
                 twapWindow: 1800,
                 twapShortWindow: 300,
@@ -287,8 +295,7 @@ abstract contract V3SetupBase is Test {
                 perWindow: p.perWindow,
                 total: p.total,
                 admit: new uint256[](0)
-            })
-        );
+            }));
     }
 
     /// enter-swap: USDC approve, exactInputSingle, the empty multicall deadline.
@@ -634,6 +641,7 @@ contract V3SetupGasBase is BaseV3Fixture {
                 abi.encode(SMART_SESSION, NPM, ROUTER, FACTORY, GUARDIAN)
             )
         );
+        setupMode = false;
         _measure("Base: T0 V3-shaped 9 (Uniswap only), V2 (harness check)", _uniNine(), 12, true);
     }
 
@@ -917,5 +925,301 @@ contract V3SetupGasMonad is V3SetupBase {
         _measure(
             "Monad: WMON/USDC x3 (enter-swap, enter-mint, manage-any)", _uniTriple(_wmon(), NPM, ROUTER, 0x10), 2, true
         );
+    }
+}
+
+// ================================================================ setup mode (#116 T1 round 2)
+
+interface IPolicyDirect {
+    function initializeWithMultiplexer(address account, bytes32 configId, bytes calldata initData) external;
+    function checkAction(bytes32 id, address account, address target, uint256 value, bytes calldata data)
+        external
+        returns (uint256);
+}
+
+/// Setup mode on Base, called the way SmartSession calls the policy: the enable reads no live market state, and the
+/// checks it skipped run at the config's first priced action instead.
+contract V3SetupModeBase is BaseV3Fixture {
+    address account = makeAddr("account");
+
+    function setUp() public {
+        _setUpBase();
+    }
+
+    function _init(bytes32 id, bytes memory data) internal {
+        vm.prank(SMART_SESSION);
+        IPolicyDirect(address(v3)).initializeWithMultiplexer(account, id, data);
+    }
+
+    function _swapCheck(bytes32 id, uint256 amountIn) internal returns (uint256) {
+        (uint256 minOut, uint160 limit) = v3.swapBounds(account, POOL_ETH, USDC, amountIn);
+        bytes memory data = abi.encodeCall(
+            IRouter.exactInputSingle, (ExactInputSingleParams(USDC, WETH, 3000, account, amountIn, minOut, limit))
+        );
+        vm.prank(SMART_SESSION);
+        return IPolicyDirect(address(v3)).checkAction(id, account, ROUTER, 0, data);
+    }
+
+    /// A perWindow the pool's in-band depth cannot cover: refused at a normal enable (M-5), accepted in setup mode,
+    /// and then every swap is refused until a renewal, because the deferred M-5 runs at the first priced use.
+    function test_setupModeDefersM5ToFirstUse() public {
+        Pool memory p = _eth();
+        p.perWindow = type(uint128).max / 2;
+        p.total = type(uint128).max / 2;
+        MamoruActionPolicyV3.Init memory i = _initOf(p);
+        vm.prank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV3.BadInit.selector, 11));
+        IPolicyDirect(address(v3)).initializeWithMultiplexer(account, bytes32(uint256(1)), abi.encode(i));
+
+        _init(bytes32(uint256(1)), abi.encode(uint256(3), i));
+        assertEq(_swapCheck(bytes32(uint256(1)), 100e6), 1, "deferred M-5 refuses the first swap");
+        assertEq(_swapCheck(bytes32(uint256(1)), 100e6), 1, "and keeps refusing: nothing was cleared");
+    }
+
+    /// A normal config in setup mode: the first swap runs the deferred checks, passes, and clears them.
+    function test_setupModePassesAtFirstUseWhenLiveStateIsFine() public {
+        _init(bytes32(uint256(1)), abi.encode(uint256(3), _initOf(_eth())));
+        uint256 g = gasleft();
+        assertEq(_swapCheck(bytes32(uint256(1)), 100e6), 0, "first swap: deferred checks pass");
+        uint256 first = g - gasleft();
+        g = gasleft();
+        assertEq(_swapCheck(bytes32(uint256(1)), 100e6), 0, "second swap");
+        uint256 second = g - gasleft();
+        console2.log("checkAction(swap) gas, first use with the deferred checks / later:", first, second);
+        assertGt(first, second, "the deferred checks ran once");
+    }
+
+    function test_setupModeRefusesAdmit() public {
+        MamoruActionPolicyV3.Init memory i = _initOf(_eth());
+        i.admit = new uint256[](1);
+        i.admit[0] = 1;
+        vm.prank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV3.BadInit.selector, 13));
+        IPolicyDirect(address(v3)).initializeWithMultiplexer(account, bytes32(uint256(1)), abi.encode(uint256(3), i));
+    }
+
+    /// Decrease, collect and burn never wait on the deferred checks (exits are never locked, LeftClaw M-6).
+    function test_setupModeNeverBlocksCollect() public {
+        Pool memory p = _eth();
+        p.perWindow = type(uint128).max / 2;
+        p.total = type(uint128).max / 2;
+        _init(bytes32(uint256(1)), abi.encode(uint256(3), _initOf(p)));
+        // No admitted position: collect fails on admission, not on the deferred checks; a burn of an unadmitted
+        // tokenId likewise. The pending state is only consulted by swap, mint and increase (see _liveChecks).
+        bytes memory c = abi.encodeCall(INPMView.collect, (CollectParams(1, account, 1, 1)));
+        vm.prank(SMART_SESSION);
+        assertEq(IPolicyDirect(address(v3)).checkAction(bytes32(uint256(1)), account, NPM, 0, c), 1);
+    }
+}
+
+// ================================================================ the cross-chain property (review P1 of #158)
+
+/// Test-only stand-in for MamoruChainInit (strict, chain-switched): one byte-identical initializer for every chain,
+/// installing SmartSession with this chain's sessions, or empty when the chain is not listed.
+contract ChainSetupInit {
+    struct Entry {
+        uint256 chainId;
+        bytes sessions;
+    }
+
+    address public immutable SMART_SESSION;
+    address private immutable SELF;
+
+    constructor(address smartSession) {
+        SMART_SESSION = smartSession;
+        SELF = address(this);
+    }
+
+    function init(Entry[] calldata entries) external {
+        require(address(this) != SELF, "delegatecall only");
+        bytes memory data;
+        for (uint256 k; k < entries.length; k++) {
+            if (entries[k].chainId == block.chainid) data = abi.encodePacked(bytes1(0x02), entries[k].sessions);
+        }
+        ISafe7579(address(this)).installModule(1, SMART_SESSION, data);
+    }
+}
+
+/**
+ * The property the round-1 review asked for: an account onboarded on Base burns USDC to its own address on Monad;
+ * later, with Monad's pool drained of in-band liquidity (price pushed to the end of the curve), its observation ring
+ * still short, and weeks gone by, the Monad Safe deploys with the SAME initializer at the SAME address with its grants
+ * enabled, because V3's setup-mode enable reads no live market state. The same Init in V2's encoding, at that moment,
+ * reverts for both live checks: that is the frozen-initializer lock this mode removes.
+ *
+ * The rule this test assumes (DeployV3.s.sol, SECURITY.md): V3-Monad is live at its final address before the Base
+ * account embeds it. The test deploys it on the Monad fork first.
+ */
+contract V3CrossChainSetupFork is V3SetupBase {
+    address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+    // Base
+    address constant B_NPM = 0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1;
+    address constant B_ROUTER = 0x2626664c2603336E57B271c5C0b26F421741e481;
+    address constant B_FACTORY = 0x33128a8fC17869897dcE68Ed026d694621f6FDfD;
+    address constant B_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+    address constant B_WETH = 0x4200000000000000000000000000000000000006;
+    address constant B_POOL_ETH = 0x6c561B446416E1A00E8E93E221854d6eA4171372;
+    address constant TOKEN_MESSENGER = 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d;
+    // Monad
+    address constant M_NPM = 0x7197E214c0b767cFB76Fb734ab638E2c192F4E53;
+    address constant M_ROUTER = 0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900;
+    address constant M_FACTORY = 0x204FAca1764B154221e35c0d20aBb3c525710498;
+    address constant M_WMON = 0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A;
+    address constant M_USDC = 0x754704Bc059F8C67012fEd69BC8A327a5aafb603;
+    address constant M_POOL = 0x659bD0BC4167BA25c62E05656F78043E7eD4a9da; // WMON/USDC 0.3%
+    uint160 constant MIN_SQRT_RATIO = 4295128739;
+
+    uint256 baseFork;
+    uint256 monadFork;
+
+    function _create2(bytes32 salt, bytes memory code) internal returns (address a) {
+        a = vm.computeCreate2Address(salt, keccak256(code), CREATE2_DEPLOYER);
+        if (a.code.length == 0) {
+            (bool ok,) = CREATE2_DEPLOYER.call(abi.encodePacked(salt, code));
+            require(ok && a.code.length != 0, "create2");
+        }
+    }
+
+    function _chainInit() internal returns (address) {
+        return _create2(
+            bytes32(uint256(0x116)), abi.encodePacked(type(ChainSetupInit).creationCode, abi.encode(SMART_SESSION))
+        );
+    }
+
+    function _initializer(ChainSetupInit.Entry[] memory entries, address chainInit)
+        internal
+        view
+        returns (bytes memory)
+    {
+        ModuleInit[] memory none = new ModuleInit[](0);
+        address[] memory attesters = new address[](1);
+        attesters[0] = ATTESTER;
+        bytes memory launch =
+            abi.encodeCall(ISafe7579Launchpad.addSafe7579, (SAFE7579, none, none, none, none, attesters, 1));
+        bytes memory init = abi.encodeCall(ChainSetupInit.init, (entries));
+        bytes memory packed = abi.encodePacked(
+            abi.encodePacked(uint8(1), LAUNCHPAD, uint256(0), launch.length, launch),
+            abi.encodePacked(uint8(1), chainInit, uint256(0), init.length, init)
+        );
+        address[] memory owners = new address[](1);
+        owners[0] = vm.addr(ownerKey);
+        return abi.encodeCall(
+            ISafeSetup.setup,
+            (
+                owners,
+                1,
+                MULTISEND,
+                abi.encodeCall(IMultiSend.multiSend, (packed)),
+                SAFE7579,
+                address(0),
+                0,
+                payable(address(0))
+            )
+        );
+    }
+
+    function test_monadSafeDeploysAfterBridgeWhateverTheMarket() public {
+        baseFork = vm.createFork(vm.envOr("BASE_FORK_RPC_URL", string("https://mainnet.base.org")), 53_140_000);
+        monadFork = vm.createFork(vm.envOr("MONAD_FORK_RPC_URL", string("https://rpc.monad.xyz")), 116_980_000);
+
+        // 1. Monad first (the deployment rule): V3-Monad live at its final address, then the grants that embed it.
+        vm.selectFork(monadFork);
+        MamoruActionPolicyV3 v3m = new MamoruActionPolicyV3(
+            SMART_SESSION, M_NPM, M_ROUTER, M_FACTORY, address(0x6A2d1A9), new address[](0), address(0), address(0), 0
+        );
+        address chainInit = _chainInit();
+        _deployCommon();
+        v3 = v3m;
+        Pool memory wmon = Pool(M_POOL, M_WMON, M_USDC, M_USDC, 100, 0, true, 100e6, 500e6);
+        Session[] memory monadSessions = _uniTriple(wmon, M_NPM, M_ROUTER, 0x143);
+
+        // 2. Base: V3-Base, the same ChainSetupInit address, and one initializer naming both chains.
+        vm.selectFork(baseFork);
+        address[] memory vaults = new address[](0);
+        v3 = new MamoruActionPolicyV3(
+            SMART_SESSION, B_NPM, B_ROUTER, B_FACTORY, address(0x6A2d1A9), vaults, TOKEN_MESSENGER, B_USDC, 15
+        );
+        assertEq(_chainInit(), chainInit, "ChainSetupInit at the same address on both chains");
+        _deployCommon();
+        Session[] memory baseSessions = new Session[](2);
+        {
+            bytes memory bi = abi.encode(v3.FAMILY_BRIDGE(), uint64(1));
+            ActionData[] memory a = new ActionData[](2);
+            a[0] = _action(B_USDC, APPROVE, bi);
+            a[1] = _action(TOKEN_MESSENGER, ITokenMessengerV2.depositForBurn.selector, bi);
+            baseSessions[0] = _session(a, bytes32(uint256(0xb1)));
+            baseSessions[1] = _enterSwap(
+                Pool(B_POOL_ETH, B_WETH, B_USDC, B_USDC, 100, 0, true, 300e6, 1_000e6), B_ROUTER, bytes32(uint256(0xb2))
+            );
+        }
+        ChainSetupInit.Entry[] memory entries = new ChainSetupInit.Entry[](2);
+        entries[0] = ChainSetupInit.Entry(8453, abi.encode(baseSessions));
+        entries[1] = ChainSetupInit.Entry(143, abi.encode(monadSessions));
+        bytes memory initializer = _initializer(entries, chainInit);
+
+        address safe = ISafeProxyFactory(SAFE_FACTORY).createProxyWithNonce(SAFE_SINGLETON, initializer, 116);
+        assertEq(_allEnabled(safe, baseSessions), 2, "Base grants enabled at setup");
+        vm.deal(safe, 1 ether);
+        deal(B_USDC, safe, 1_000e6);
+        Execution[] memory xs = new Execution[](2);
+        xs[0] = Execution(B_USDC, 0, abi.encodeCall(IERC20.approve, (TOKEN_MESSENGER, 100e6)));
+        xs[1] = Execution(
+            TOKEN_MESSENGER,
+            0,
+            abi.encodeCall(
+                ITokenMessengerV2.depositForBurn,
+                (100e6, 15, bytes32(uint256(uint160(safe))), B_USDC, bytes32(0), 0, 2000)
+            )
+        );
+        _run(safe, _batch(xs), _pid(baseSessions[0]));
+        assertEq(IERC20(B_USDC).balanceOf(safe), 900e6, "100 USDC burned on Base to the same account on Monad");
+
+        // 3. Monad, weeks later: the CCTP mint has landed (simulated: no attestation on a fork) at an address with
+        // no code, and the WMON/USDC pool has been pushed to the end of its curve.
+        vm.selectFork(monadFork);
+        vm.warp(block.timestamp + 60 days);
+        vm.roll(block.number + 1_000_000);
+        assertEq(safe.code.length, 0, "no Safe on Monad yet");
+        deal(M_USDC, safe, 100e6);
+        _drain();
+
+        // The same Init in V2's encoding (a normal enable) now reverts on both live checks.
+        MamoruActionPolicyV3.Init memory i = _initOf(wmon);
+        uint16 ring = _cardinalityNext();
+        vm.prank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV3.ObservationCardinalityTooLow.selector, ring, 1800));
+        IPolicyDirect(address(v3m)).initializeWithMultiplexer(makeAddr("probe"), bytes32(uint256(1)), abi.encode(i));
+        for (uint16 n = _cardinalityNext(); n < 1800;) {
+            n = n + 500 > 1800 ? 1800 : n + 500;
+            IPool(M_POOL).increaseObservationCardinalityNext(n);
+        }
+        vm.prank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV3.BadInit.selector, 11));
+        IPolicyDirect(address(v3m)).initializeWithMultiplexer(makeAddr("probe"), bytes32(uint256(1)), abi.encode(i));
+
+        // 4. The frozen initializer still deploys, at the same address, with the Monad grants and the USDC.
+        address monadSafe = ISafeProxyFactory(SAFE_FACTORY).createProxyWithNonce(SAFE_SINGLETON, initializer, 116);
+        assertEq(monadSafe, safe, "same address on Monad");
+        assertTrue(ISafe7579(monadSafe).isModuleInstalled(1, SMART_SESSION, ""), "SmartSession installed");
+        assertEq(_allEnabled(monadSafe, monadSessions), 3, "Monad grants enabled at setup");
+        assertEq(_allEnabled(monadSafe, baseSessions), 0, "no Base grant on Monad");
+        assertEq(IERC20(M_USDC).balanceOf(monadSafe), 100e6, "the bridged USDC is the account's");
+    }
+
+    function _cardinalityNext() internal view returns (uint16 next) {
+        (,,,, next,,) = IPool(M_POOL).slot0();
+    }
+
+    /// Sells WMON into the pool down to the price limit: the band below the spot has no liquidity left.
+    function _drain() internal {
+        address whale = makeAddr("whale");
+        deal(M_WMON, whale, 1e36);
+        vm.startPrank(whale);
+        IERC20(M_WMON).approve(M_ROUTER, type(uint256).max);
+        IRouter(M_ROUTER)
+            .exactInputSingle(ExactInputSingleParams(M_WMON, M_USDC, 3000, whale, 1e36, 0, MIN_SQRT_RATIO + 1));
+        vm.stopPrank();
+        (, int24 tick,,,,,) = IPool(M_POOL).slot0();
+        console2.log("Monad WMON/USDC tick after the drain:", int256(tick));
     }
 }

@@ -12,12 +12,23 @@ import {IModuleRegistry, IOraclePool} from "./Deploy.s.sol";
  *   GUARDIAN=0x... forge script script/DeployV3.s.sol --rpc-url $BASE_RPC_URL --sender $DEPLOYER    # dry run, Base
  *   GUARDIAN=0x... forge script script/DeployV3.s.sol --rpc-url $MONAD_RPC_URL --sender $DEPLOYER   # dry run, Monad
  *
- * Deterministic: `ModuleRegistry.deployModule` creates the policy with CREATE2 from the registry (same address on both
- * chains) with a deployer-prefixed salt, and writes its ERC-7484 ModuleRecord in the same transaction. The address is
- * a function of (deployer, POLICY_V3_SALT_NONCE, init code), and the init code includes the constructor arguments. The
- * per-chain arguments below differ (the Uniswap v3 deployment, the vault list, the bridge), so Base and Monad get
- * different addresses; every chain where the arguments match gets the same one. A new vault or a new chain is a new
+ * Deterministic: `ModuleRegistry.deployModule` creates the policy with CREATE2 from the registry (the registry itself
+ * is at the same address on Base and Monad) with a deployer-prefixed salt, and writes its ERC-7484 ModuleRecord in the
+ * same transaction. The policy's address is a function of (deployer, salt nonce, init code), and the init code includes
+ * the creation code (with its metadata hash) and the constructor arguments, GUARDIAN among them. The per-chain
+ * arguments below differ (the Uniswap v3 deployment, the vault list, the bridge), so Base and Monad get DIFFERENT
+ * policy addresses; a chain with the same arguments would get the same one. A new vault or a new chain is a new
  * deployment with a new list, never a code change and never a setter.
+ *
+ * Pinned (#116 T1 round 2): `run()` deploys only with PINNED_DEPLOYER, PINNED_GUARDIAN and PINNED_NONCE, and only when
+ * the init code hash and the predicted address equal this chain's pins (`expected`). Design D embeds V3-Monad's
+ * address in every Base account's frozen initializer: a rebuild that changes the metadata hash, or another guardian,
+ * would move it, and USDC bridged to Monad would wait at a Safe address whose setup calls a policy that does not exist.
+ * test/DeployV3.t.sol fails on any such change; re-pinning is a deliberate edit of the constants below, made before
+ * any account embeds the address.
+ *
+ * Deployment rule: V3-Monad must be live at its pinned address before any Base account embeds it, and before any
+ * bridge-out grant is issued. Order: Monad deploy, check code at `expected(143)`, then Base deploy, then grants.
  *
  * Per-chain constructor arguments (block.chainid picks them; any other chain is refused):
  *
@@ -45,6 +56,46 @@ contract DeployMamoruActionPolicyV3 is Script {
     /// The resolver Mamoru's other session policies are registered under (TimeFramePolicy's record, both chains).
     address constant RESOLVER_REFERENCE = 0x8177451511dE0577b911C254E9551D981C26dc72;
     uint16 constant CARDINALITY_STEP = 500;
+
+    /// Who deploys (V2's ModuleRecord sender on Base) and which guardian (V2's GUARDIAN), at which salt nonce.
+    address public constant PINNED_DEPLOYER = 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0;
+    address public constant PINNED_GUARDIAN = 0xA8E6EF87e612fA5c54668Cc1fF0aC809e1321FdD;
+    uint96 public constant PINNED_NONCE = 4;
+
+    /// keccak256(init code) and the CREATE2 address for each chain, with the pinned deployer, guardian and nonce.
+    function expected(uint256 chainId) public pure returns (bytes32 initCodeHash, address policy) {
+        if (chainId == 8453) {
+            return (
+                0xaa6d97ba560085d28cc2c28e101db8f75ca9fa9516c4fbb6ef7b79d3c289a6d0,
+                0xb5799C0cCaaFECB641621F7e5a271B1DC829213A
+            );
+        }
+        if (chainId == 143) {
+            return (
+                0x8c1437c3f44b559dd1233eab25f4cf073ff8e95e3b056a3ac3c6535e831bdb8c,
+                0x009FFD70c0F9b4Aa8aC83Aaf38b2EB03651520ad
+            );
+        }
+        revert("DeployV3: Base (8453) or Monad (143) only");
+    }
+
+    /// The gate `run()` applies: refuses any deployer, guardian, nonce or init code that does not give the pinned
+    /// address on this chain.
+    function checkPinned(uint256 chainId, address deployer, address guardian, uint96 nonce)
+        public
+        pure
+        returns (address policy)
+    {
+        require(
+            deployer == PINNED_DEPLOYER && guardian == PINNED_GUARDIAN && nonce == PINNED_NONCE, "DeployV3: not pinned"
+        );
+        bytes32 h = keccak256(initCode(guardian, argsFor(chainId)));
+        (bytes32 wantHash, address want) = expected(chainId);
+        require(h == wantHash, "DeployV3: init code hash moved (rebuild or source change): re-pin deliberately");
+        policy =
+            address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), REGISTRY, saltFor(deployer, nonce), h)))));
+        require(policy == want, "DeployV3: predicted address is not the pinned one");
+    }
 
     struct Args {
         address npm;
@@ -87,9 +138,11 @@ contract DeployMamoruActionPolicyV3 is Script {
     function run() external returns (address policy) {
         address guardian = vm.envAddress("GUARDIAN");
         // Salt nonces 1 to 3 are V1, MamoruGasPolicy and V2 (Deploy.s.sol, DeployV2.s.sol).
-        uint96 nonce = uint96(vm.envOr("POLICY_V3_SALT_NONCE", uint256(4)));
+        uint96 nonce = uint96(vm.envOr("POLICY_V3_SALT_NONCE", uint256(PINNED_NONCE)));
         uint16 target = uint16(vm.envOr("CARDINALITY_TARGET", uint256(1_800)));
+        address want = checkPinned(block.chainid, msg.sender, guardian, nonce);
         policy = deploy(msg.sender, saltFor(msg.sender, nonce), guardian, argsFor(block.chainid), target);
+        require(policy == want, "DeployV3: deployed address is not the pinned one");
     }
 
     function saltFor(address deployer, uint96 nonce) public pure returns (bytes32) {
@@ -130,9 +183,12 @@ contract DeployMamoruActionPolicyV3 is Script {
         require(rec.sender == deployer, "ModuleRecord: registered by someone else");
         MamoruActionPolicyV3 p = MamoruActionPolicyV3(policy);
         require(p.GUARDIAN() == guardian, "GUARDIAN");
-        require(p.TOKEN_MESSENGER() == a.tokenMessenger && p.DESTINATION_DOMAIN() == a.destinationDomain, "bridge");
+        require(
+            p.ROUTES().TOKEN_MESSENGER() == a.tokenMessenger && p.ROUTES().DESTINATION_DOMAIN() == a.destinationDomain,
+            "bridge"
+        );
         for (uint256 i; i < a.vaults.length; i++) {
-            require(p.vaultAsset(a.vaults[i]) != address(0), "vault list");
+            require(p.ROUTES().vaultAsset(a.vaults[i]) != address(0), "vault list");
         }
         console2.log("MamoruActionPolicyV3:", policy);
         console2.log("GUARDIAN:", guardian);

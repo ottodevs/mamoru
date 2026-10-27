@@ -109,6 +109,125 @@ interface IERC4626Asset {
 }
 
 /**
+ * @title MamoruV3Routes (otto/mamoru#116 T1): the ERC-4626 and CCTP checks of MamoruActionPolicyV3, in their own
+ * contract so V3 stays under EIP-170. V3's constructor creates it (CREATE from V3's address, nonce 1), so its address
+ * and code follow from V3's own init code: one deployment, one set of constructor arguments. No owner, no setter:
+ * the vault list and the bridge are fixed here at construction. Views only; V3 calls them from `checkAction` for the
+ * actions it bound to the vault and bridge families. Threat model: contracts/action-policy/SECURITY.md.
+ */
+contract MamoruV3Routes {
+    uint256 internal constant VALIDATION_SUCCESS = 0;
+    uint256 internal constant VALIDATION_FAILED = 1;
+    bytes4 internal constant APPROVE = 0x095ea7b3; // approve(address,uint256)
+    bytes4 internal constant VAULT_DEPOSIT = 0x6e553f65; // ERC-4626 deposit(uint256,address)
+    bytes4 internal constant VAULT_MINT = 0x94bf804d; // ERC-4626 mint(uint256,address)
+    bytes4 internal constant VAULT_WITHDRAW = 0xb460af94; // ERC-4626 withdraw(uint256,address,address)
+    bytes4 internal constant VAULT_REDEEM = 0xba087652; // ERC-4626 redeem(uint256,address,address)
+    /// CCTP V2 TokenMessengerV2 depositForBurn(uint256,uint32,bytes32,address,bytes32,uint256,uint32)
+    bytes4 internal constant DEPOSIT_FOR_BURN = 0x8e0250ee;
+    /// CCTP V2 Standard transfer (attested at finality, no fee), as #213's bridge-out grant; Fast (1000) never.
+    uint32 public constant CCTP_MIN_FINALITY = 2000;
+
+    /// CCTP V2 TokenMessengerV2 of this chain; address(0) = no bridge family on this deployment.
+    address public immutable TOKEN_MESSENGER;
+    /// The only token the bridge family burns (native USDC of this chain).
+    address public immutable BURN_TOKEN;
+    /// The only CCTP domain the bridge family mints on (Monad: 15, read by #213 from MessageTransmitterV2.localDomain()).
+    uint32 public immutable DESTINATION_DOMAIN;
+
+    /// ERC-4626 vaults a session may use, with their asset, written by the constructor only: no owner, no setter. A new
+    /// vault or chain is a new deployment with a new list (a new address), and grants move to it at the owner's
+    /// renewal; a listed vault cannot be removed from a deployment, only left out of the next one.
+    mapping(address vault => address asset) public vaultAsset;
+
+    error BadVault(address vault);
+    error BadBridge();
+
+    event VaultListed(address indexed vault, address indexed asset);
+
+    /// @param vaults this chain's ERC-4626 allowlist (may be empty); each one's asset is read here and fixed.
+    /// @param tokenMessenger CCTP V2 TokenMessengerV2, or address(0) for a deployment without the bridge family (then
+    /// `burnToken` and `destinationDomain` must be 0).
+    constructor(
+        address[] memory vaults,
+        address tokenMessenger,
+        address burnToken,
+        uint32 destinationDomain,
+        address router,
+        address npm
+    ) {
+        for (uint256 k; k < vaults.length; k++) {
+            address v = vaults[k];
+            address a = IERC4626Asset(v).asset();
+            // A vault is never one of the addresses the other checks name (the router, the manager, the policy, the
+            // messenger): an approval or a call to it must mean "the vault family" and nothing else.
+            if (
+                a == address(0) || vaultAsset[v] != address(0) || v == router || v == npm || v == msg.sender
+                    || v == tokenMessenger
+            ) revert BadVault(v);
+            vaultAsset[v] = a;
+            emit VaultListed(v, a);
+        }
+        if (tokenMessenger == address(0) ? burnToken != address(0) || destinationDomain != 0 : burnToken == address(0))
+        {
+            revert BadBridge();
+        }
+        TOKEN_MESSENGER = tokenMessenger;
+        BURN_TOKEN = burnToken;
+        DESTINATION_DOMAIN = destinationDomain;
+    }
+
+    /// ERC-4626 on a listed vault: shares and assets only ever land on the account, and only the account's own shares
+    /// leave. An approval of a listed vault's asset only to that vault (the amount is not capped here, as V2 leaves
+    /// approval amounts to the grant: a listed vault pulls only from its caller, the account, inside deposit/mint).
+    function checkVault(address account, address target, bytes calldata data) external view returns (uint256) {
+        if (data.length < 4) return VALIDATION_FAILED;
+        bytes4 sel = bytes4(data[:4]);
+        if (sel == APPROVE) {
+            (address spender,) = abi.decode(data[4:], (address, uint256));
+            address a = vaultAsset[spender];
+            return a != address(0) && a == target ? VALIDATION_SUCCESS : VALIDATION_FAILED;
+        }
+        if (vaultAsset[target] == address(0)) return VALIDATION_FAILED;
+        if (sel == VAULT_DEPOSIT || sel == VAULT_MINT) {
+            (, address receiver) = abi.decode(data[4:], (uint256, address));
+            return receiver == account ? VALIDATION_SUCCESS : VALIDATION_FAILED;
+        }
+        if (sel == VAULT_WITHDRAW || sel == VAULT_REDEEM) {
+            (, address receiver, address owner) = abi.decode(data[4:], (uint256, address, address));
+            return receiver == account && owner == account ? VALIDATION_SUCCESS : VALIDATION_FAILED;
+        }
+        return VALIDATION_FAILED;
+    }
+
+    /// CCTP V2 `depositForBurn` to this same account on the pinned domain: every word of the call is fixed but the
+    /// amount (#213's bridge-out grant, the same rules, decided here instead of in UniActionPolicy param rules).
+    function checkBridge(address account, address target, bytes calldata data) external view returns (uint256) {
+        if (data.length < 4 || TOKEN_MESSENGER == address(0)) return VALIDATION_FAILED;
+        bytes4 sel = bytes4(data[:4]);
+        if (sel == APPROVE) {
+            (address spender,) = abi.decode(data[4:], (address, uint256));
+            return target == BURN_TOKEN && spender == TOKEN_MESSENGER ? VALIDATION_SUCCESS : VALIDATION_FAILED;
+        }
+        if (target != TOKEN_MESSENGER || sel != DEPOSIT_FOR_BURN) return VALIDATION_FAILED;
+        (
+            uint256 amount,
+            uint32 domain,
+            bytes32 mintRecipient,
+            address burnToken,
+            bytes32 destinationCaller,
+            uint256 maxFee,
+            uint32 minFinality
+        ) = abi.decode(data[4:], (uint256, uint32, bytes32, address, bytes32, uint256, uint32));
+        return amount != 0 && domain == DESTINATION_DOMAIN && mintRecipient == bytes32(uint256(uint160(account)))
+            && burnToken == BURN_TOKEN && destinationCaller == bytes32(0) && maxFee == 0
+            && minFinality >= CCTP_MIN_FINALITY
+            ? VALIDATION_SUCCESS
+            : VALIDATION_FAILED;
+    }
+}
+
+/**
  * @title MamoruActionPolicyV3 (otto/mamoru#116 T1). Not deployed.
  * @notice MamoruActionPolicyV2, unchanged on every Uniswap path, plus two action families, so that every grant of a
  * Mamoru account can carry this policy as its ONLY action policy and be enabled inside the Safe setup
@@ -128,6 +247,10 @@ interface IERC4626Asset {
  * Init (owner-signed, per session action): the Uniswap families take V2's `Init` unchanged (abi.encode of a struct
  * with a dynamic member, so its first word is always 0x20); the new families take `abi.encode(uint256 family,
  * uint64 generation)` with family FAMILY_VAULTS (1) or FAMILY_BRIDGE (2). The first word tells them apart.
+ * Setup mode, `abi.encode(FAMILY_UNISWAP_AT_SETUP (3), Init)`: the same Init, for grants committed in the Safe setup.
+ * Enabling then reads no live market state (no observation ring, no M-5 depth, no position manager: `admit` must be
+ * empty), only the pool's identity, so a frozen initializer deploys the same way on any later day; the two live
+ * checks run at the config's first swap, mint or increase instead. The vault and bridge inits read nothing live.
  * Threat model of every check: contracts/action-policy/SECURITY.md.
  *
  * What follows is V2's description, which still holds for the Uniswap paths.
@@ -188,21 +311,15 @@ contract MamoruActionPolicyV3 is IActionPolicy {
     bytes4 internal constant COLLECT = 0xfc6f7865; // collect((uint256,address,uint128,uint128))
     bytes4 internal constant BURN = 0x42966c68; // burn(uint256)
     bytes4 internal constant MULTICALL_DEADLINE = 0x5ae401dc; // SwapRouter02 multicall(uint256,bytes[])
-    bytes4 internal constant VAULT_DEPOSIT = 0x6e553f65; // ERC-4626 deposit(uint256,address)
-    bytes4 internal constant VAULT_MINT = 0x94bf804d; // ERC-4626 mint(uint256,address)
-    bytes4 internal constant VAULT_WITHDRAW = 0xb460af94; // ERC-4626 withdraw(uint256,address,address)
-    bytes4 internal constant VAULT_REDEEM = 0xba087652; // ERC-4626 redeem(uint256,address,address)
-    /// CCTP V2 TokenMessengerV2 depositForBurn(uint256,uint32,bytes32,address,bytes32,uint256,uint32)
-    bytes4 internal constant DEPOSIT_FOR_BURN = 0x8e0250ee;
 
-    /// First word of a non-Uniswap Init: `abi.encode(uint256 family, uint64 generation)`.
+    /// First word of a non-V2 Init: `abi.encode(uint256 family, uint64 generation)` for the vault and bridge families,
+    /// `abi.encode(uint256 FAMILY_UNISWAP_AT_SETUP, Init)` for a Uniswap action enabled inside the account's setup.
     uint256 public constant FAMILY_VAULTS = 1;
     uint256 public constant FAMILY_BRIDGE = 2;
+    uint256 public constant FAMILY_UNISWAP_AT_SETUP = 3;
     /// `Binding.pool` of a session action of the vault and bridge families: never a pool (no code), never REVOKED.
     address internal constant VAULTS = address(2);
     address internal constant BRIDGE = address(3);
-    /// CCTP V2 Standard transfer (attested at finality, no fee), as #213's bridge-out grant; Fast (1000) never.
-    uint32 public constant CCTP_MIN_FINALITY = 2000;
 
     /// Hard bounds on owner-signed Init values (T6 I-2): the owner taps a hash the operator built.
     uint32 public constant MIN_TWAP_WINDOW = 600;
@@ -234,17 +351,8 @@ contract MamoruActionPolicyV3 is IActionPolicy {
     INPM public immutable NPM;
     address public immutable ROUTER;
     IUniswapV3Factory public immutable FACTORY;
-    /// CCTP V2 TokenMessengerV2 of this chain; address(0) = no bridge family on this deployment.
-    address public immutable TOKEN_MESSENGER;
-    /// The only token the bridge family burns (native USDC of this chain).
-    address public immutable BURN_TOKEN;
-    /// The only CCTP domain the bridge family mints on (Monad: 15, read by #213 from MessageTransmitterV2.localDomain()).
-    uint32 public immutable DESTINATION_DOMAIN;
-
-    /// ERC-4626 vaults a session may use, with their asset, written by the constructor only: no owner, no setter. A new
-    /// vault or chain is a new deployment with a new list (a new address), and grants move to it at the owner's
-    /// renewal; a listed vault cannot be removed from a deployment, only left out of the next one.
-    mapping(address vault => address asset) public vaultAsset;
+    /// The vault allowlist and the bridge (MamoruV3Routes above), created by this constructor.
+    MamoruV3Routes public immutable ROUTES;
 
     /// Owner-signed init data of one session action (abi.encode of this struct). Every action of every session of a
     /// pool in one generation must carry the same values (only `admit` may differ); see `ConfigMismatch`.
@@ -311,6 +419,9 @@ contract MamoruActionPolicyV3 is IActionPolicy {
     mapping(address pool => PoolInfo) internal _pool;
     /// generation + 1 at the time of the pause; 0 = not paused. A renewal (a higher generation) ends it by itself.
     mapping(address account => uint64) public pausedAt;
+    /// generation + 1 of a config enabled at setup (FAMILY_UNISWAP_AT_SETUP) whose live checks (observation ring, M-5
+    /// depth) have not run yet; 0 = nothing pending. The first swap, mint or increase of that config runs them.
+    mapping(address account => mapping(address pool => uint64)) internal _pending;
 
     uint256 private _locked = 1;
 
@@ -337,14 +448,8 @@ contract MamoruActionPolicyV3 is IActionPolicy {
     error TransferFailed();
     error OnlyGuardian();
     error AccountPaused(address account);
-    error BadVault(address vault);
-    error BadBridge();
 
-    event VaultListed(address indexed vault, address indexed asset);
-
-    /// @param vaults this chain's ERC-4626 allowlist (may be empty); each one's asset is read here and fixed.
-    /// @param tokenMessenger CCTP V2 TokenMessengerV2, or address(0) for a deployment without the bridge family (then
-    /// `burnToken` and `destinationDomain` must be 0).
+    /// @param vaults, tokenMessenger, burnToken, destinationDomain: MamoruV3Routes' constructor arguments.
     constructor(
         address smartSession,
         address npm,
@@ -361,25 +466,7 @@ contract MamoruActionPolicyV3 is IActionPolicy {
         NPM = INPM(npm);
         ROUTER = router;
         FACTORY = IUniswapV3Factory(factory);
-        for (uint256 k; k < vaults.length; k++) {
-            address v = vaults[k];
-            address a = IERC4626Asset(v).asset();
-            // A vault is never one of the addresses the other checks name (a pool token, the router, the manager,
-            // this policy): an approval or a call to it must mean "the vault family" and nothing else.
-            if (
-                a == address(0) || vaultAsset[v] != address(0) || v == router || v == npm || v == address(this)
-                    || v == tokenMessenger
-            ) revert BadVault(v);
-            vaultAsset[v] = a;
-            emit VaultListed(v, a);
-        }
-        if (tokenMessenger == address(0) ? burnToken != address(0) || destinationDomain != 0 : burnToken == address(0))
-        {
-            revert BadBridge();
-        }
-        TOKEN_MESSENGER = tokenMessenger;
-        BURN_TOKEN = burnToken;
-        DESTINATION_DOMAIN = destinationDomain;
+        ROUTES = new MamoruV3Routes(vaults, tokenMessenger, burnToken, destinationDomain, router, npm);
     }
 
     function supportsInterface(bytes4 interfaceID) external pure returns (bool) {
@@ -396,13 +483,27 @@ contract MamoruActionPolicyV3 is IActionPolicy {
         // `enableSessions` (owner-executed) or an ENABLE-mode userOp (owner-signed enable data); account == msg.sender
         // of SmartSession there, so a session key can neither reach this nor add to `admit`.
         if (msg.sender != SMART_SESSION) revert OnlySmartSession();
-        if (initData.length >= 32 && uint256(bytes32(initData[:32])) != 0x20) {
+        uint256 w = initData.length >= 32 ? uint256(bytes32(initData[:32])) : 0;
+        Init memory i;
+        // #116 T1, setup mode: an Init enabled inside the account's setup must not depend on live market state, or a
+        // frozen initializer could become undeployable on a chain where funds already wait at its address (bridged
+        // there). The observation-ring and M-5 depth checks then run at the first priced use instead (`_liveChecks`),
+        // so the mode only moves them, it never skips them; the owner signs it like any other Init field.
+        bool atSetup = w == FAMILY_UNISWAP_AT_SETUP;
+        if (atSetup) {
+            (, i) = abi.decode(initData, (uint256, Init));
+            if (i.admit.length != 0) revert BadInit(13); // admission reads the position manager: never at setup
+        } else if (w != 0x20) {
             _initFamily(account, configId, initData);
             return;
+        } else {
+            i = abi.decode(initData, (Init));
         }
-        Init memory i = abi.decode(initData, (Init));
+        // Pool identity only (token0, token1, fee, the factory's mapping): immutable once the pool exists.
         PoolInfo memory p = _poolInfo(i.pool); // refuses a non-factory pool, caches token0/token1/fee
         _validate(i);
+        // T6 L-4 at enable, outside setup.
+        if (!atSetup) _requireCardinality(i.pool, i.twapWindow);
         _stepGeneration(account, i.generation);
 
         bytes32 h = _initHash(i);
@@ -414,7 +515,8 @@ contract MamoruActionPolicyV3 is IActionPolicy {
             // LeftClaw M-5, once per (account, pool, generation): selling `perWindow` of the budget unit into the pool
             // must not move its price `bandTicks`, so the session's own spend cannot walk the pool across its band
             // and the oracle is not a thin pool's.
-            if (_depthIn(i.pool, p, i.bandTicks, i.budgetIn1) < i.perWindow) revert BadInit(11);
+            if (atSetup) _pending[account][i.pool] = i.generation + 1;
+            else if (_depthIn(i.pool, p, i.bandTicks, i.budgetIn1) < i.perWindow) revert BadInit(11);
             Config memory old = c;
             _config[account][i.pool] = Config({
                 twapWindow: i.twapWindow,
@@ -470,7 +572,7 @@ contract MamoruActionPolicyV3 is IActionPolicy {
         (uint256 family, uint64 generation) = abi.decode(initData, (uint256, uint64));
         address kind;
         if (family == FAMILY_VAULTS) kind = VAULTS;
-        else if (family == FAMILY_BRIDGE && TOKEN_MESSENGER != address(0)) kind = BRIDGE;
+        else if (family == FAMILY_BRIDGE && ROUTES.TOKEN_MESSENGER() != address(0)) kind = BRIDGE;
         else revert BadInit(12);
         if (generation > MAX_GENERATION) revert BadInit(4);
         _stepGeneration(account, generation);
@@ -501,8 +603,8 @@ contract MamoruActionPolicyV3 is IActionPolicy {
         if (isPaused(account)) return VALIDATION_FAILED; // the guardian stopped this account's session actions
         if (value != 0 || data.length < 4) return VALIDATION_FAILED;
         bytes4 sel = bytes4(data[:4]);
-        if (b.pool == VAULTS) return _checkVault(account, target, sel, data);
-        if (b.pool == BRIDGE) return _checkBridge(account, target, sel, data);
+        if (b.pool == VAULTS) return ROUTES.checkVault(account, target, data);
+        if (b.pool == BRIDGE) return ROUTES.checkBridge(account, target, data);
         Config memory c = _config[account][b.pool];
         PoolInfo memory p = _pool[b.pool];
 
@@ -573,57 +675,15 @@ contract MamoruActionPolicyV3 is IActionPolicy {
         return VALIDATION_FAILED;
     }
 
-    /// ERC-4626 on a listed vault: shares and assets only ever land on the account, and only the account's own shares
-    /// leave. An approval of a listed vault's asset only to that vault (the amount is not capped here, as V2 leaves
-    /// approval amounts to the grant: a listed vault pulls only from its caller, the account, inside deposit/mint).
-    function _checkVault(address account, address target, bytes4 sel, bytes calldata data)
-        internal
-        view
-        returns (uint256)
-    {
-        if (sel == APPROVE) {
-            (address spender,) = abi.decode(data[4:], (address, uint256));
-            address a = vaultAsset[spender];
-            return a != address(0) && a == target ? VALIDATION_SUCCESS : VALIDATION_FAILED;
-        }
-        if (vaultAsset[target] == address(0)) return VALIDATION_FAILED;
-        if (sel == VAULT_DEPOSIT || sel == VAULT_MINT) {
-            (, address receiver) = abi.decode(data[4:], (uint256, address));
-            return receiver == account ? VALIDATION_SUCCESS : VALIDATION_FAILED;
-        }
-        if (sel == VAULT_WITHDRAW || sel == VAULT_REDEEM) {
-            (, address receiver, address owner) = abi.decode(data[4:], (uint256, address, address));
-            return receiver == account && owner == account ? VALIDATION_SUCCESS : VALIDATION_FAILED;
-        }
-        return VALIDATION_FAILED;
-    }
-
-    /// CCTP V2 `depositForBurn` to this same account on the pinned domain: every word of the call is fixed but the
-    /// amount (#213's bridge-out grant, the same rules, decided here instead of in UniActionPolicy param rules).
-    function _checkBridge(address account, address target, bytes4 sel, bytes calldata data)
-        internal
-        view
-        returns (uint256)
-    {
-        if (sel == APPROVE) {
-            (address spender,) = abi.decode(data[4:], (address, uint256));
-            return target == BURN_TOKEN && spender == TOKEN_MESSENGER ? VALIDATION_SUCCESS : VALIDATION_FAILED;
-        }
-        if (target != TOKEN_MESSENGER || sel != DEPOSIT_FOR_BURN) return VALIDATION_FAILED;
-        (
-            uint256 amount,
-            uint32 domain,
-            bytes32 mintRecipient,
-            address burnToken,
-            bytes32 destinationCaller,
-            uint256 maxFee,
-            uint32 minFinality
-        ) = abi.decode(data[4:], (uint256, uint32, bytes32, address, bytes32, uint256, uint32));
-        return amount != 0 && domain == DESTINATION_DOMAIN && mintRecipient == bytes32(uint256(uint160(account)))
-            && burnToken == BURN_TOKEN && destinationCaller == bytes32(0) && maxFee == 0
-            && minFinality >= CCTP_MIN_FINALITY
-            ? VALIDATION_SUCCESS
-            : VALIDATION_FAILED;
+    /// Setup mode's deferred checks (#116 T1), once per (account, pool, generation), at the first swap, mint or
+    /// increase: the observation ring (T6 L-4) and the M-5 depth, as `initializeWithMultiplexer` runs them outside setup.
+    /// False refuses the action and changes nothing, so a later one retries; decrease, collect and burn never wait on it.
+    function _liveChecks(address account, address pool, Config memory c, PoolInfo memory p) internal returns (bool) {
+        if (_pending[account][pool] != c.generation + 1) return true;
+        (,,,, uint16 next,,) = IUniswapV3Pool(pool).slot0();
+        if (next < c.twapWindow || _depthIn(pool, p, c.bandTicks, c.budgetIn1) < c.perWindow) return false;
+        delete _pending[account][pool];
+        return true;
     }
 
     function _checkSwap(
@@ -634,6 +694,7 @@ contract MamoruActionPolicyV3 is IActionPolicy {
         ExactInputSingleParams memory s
     ) internal returns (uint256) {
         if (s.recipient != account || s.fee != p.fee || s.amountIn == 0) return VALIDATION_FAILED; // 0: LeftClaw L-7
+        if (!_liveChecks(account, pool, c, p)) return VALIDATION_FAILED;
         bool zeroForOne = s.tokenIn == p.token0 && s.tokenOut == p.token1;
         if (!zeroForOne && !(s.tokenIn == p.token1 && s.tokenOut == p.token0)) return VALIDATION_FAILED;
         (bool ok, int24 lo, int24 hi) = _range(c, pool, true);
@@ -669,6 +730,7 @@ contract MamoruActionPolicyV3 is IActionPolicy {
         uint256 min0,
         uint256 min1
     ) internal returns (uint256) {
+        if (!_liveChecks(account, pool, c, p)) return VALIDATION_FAILED;
         (bool ok, int24 lo, int24 hi) = _range(c, pool, true);
         if (!ok || !_spotIn(pool, lo, hi)) return VALIDATION_FAILED;
         {
@@ -983,11 +1045,14 @@ contract MamoruActionPolicyV3 is IActionPolicy {
         if (i.budgetWindow < MIN_BUDGET_WINDOW) revert BadInit(7);
         if (i.perWindow == 0 || i.total < i.perWindow) revert BadInit(8);
         if (i.admit.length > MAX_ADMIT) revert BadInit(10);
-        // T6 L-4: at most one observation per block and blocks of at least 1 s, so the ring must hold at least
-        // `twapWindow` observations for the long window to survive a dust swap in every block. Deploy step:
-        // script/Deploy.s.sol raises `observationCardinalityNext` before any enable.
-        (,,,, uint16 cardinalityNext,,) = IUniswapV3Pool(i.pool).slot0();
-        if (cardinalityNext < i.twapWindow) revert ObservationCardinalityTooLow(cardinalityNext, i.twapWindow);
+    }
+
+    /// T6 L-4: at most one observation per block and blocks of at least 1 s, so the ring must hold at least
+    /// `twapWindow` observations for the long window to survive a dust swap in every block. Deploy step:
+    /// script/Deploy.s.sol raises `observationCardinalityNext` before any enable.
+    function _requireCardinality(address pool, uint32 twapWindow) internal view {
+        (,,,, uint16 cardinalityNext,,) = IUniswapV3Pool(pool).slot0();
+        if (cardinalityNext < twapWindow) revert ObservationCardinalityTooLow(cardinalityNext, twapWindow);
     }
 
     /// LeftClaw M-5: the smaller, in the budget unit, of what moving `pool`'s price `band` ticks takes in either

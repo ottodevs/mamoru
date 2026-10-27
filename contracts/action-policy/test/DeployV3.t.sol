@@ -34,11 +34,17 @@ contract DeployV3Test is Test {
         assertEq(R.findModule(policy).sender, deployer);
         MamoruActionPolicyV3 p = MamoruActionPolicyV3(policy);
         assertEq(p.GUARDIAN(), guardian);
-        assertEq(p.TOKEN_MESSENGER(), 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d);
-        assertEq(p.BURN_TOKEN(), 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
-        assertEq(p.DESTINATION_DOMAIN(), 15);
-        assertEq(p.vaultAsset(0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61), 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
-        assertEq(p.vaultAsset(0xC768c589647798a6EE01A91FdE98EF2ed046DBD6), 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
+        assertEq(p.ROUTES().TOKEN_MESSENGER(), 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d);
+        assertEq(p.ROUTES().BURN_TOKEN(), 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
+        assertEq(p.ROUTES().DESTINATION_DOMAIN(), 15);
+        assertEq(
+            p.ROUTES().vaultAsset(0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61),
+            0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+        );
+        assertEq(
+            p.ROUTES().vaultAsset(0xC768c589647798a6EE01A91FdE98EF2ed046DBD6),
+            0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+        );
         assertLe(policy.code.length, 24_576);
     }
 
@@ -52,5 +58,51 @@ contract DeployV3Test is Test {
         assertTrue(keccak256(d.initCode(guardian, m)) != keccak256(d.initCode(guardian, d.argsFor(8453))));
         vm.expectRevert(bytes("DeployV3: Base (8453) or Monad (143) only"));
         d.argsFor(1);
+    }
+
+    // ------------------------------------------------------------ pins (#116 T1 round 2)
+
+    /// Fails when the creation code (its metadata hash: any source or compiler-setting change), the per-chain
+    /// arguments, the pinned guardian or the pinned deployer change the predicted address of either chain. Re-pinning
+    /// in DeployV3.s.sol is then a deliberate edit, before any account embeds the address.
+    function test_pinnedAddressesHold() public {
+        DeployMamoruActionPolicyV3 d = new DeployMamoruActionPolicyV3();
+        uint256[2] memory chains = [uint256(8453), 143];
+        for (uint256 k; k < 2; k++) {
+            (bytes32 h, address want) = d.expected(chains[k]);
+            bytes memory code = d.initCode(d.PINNED_GUARDIAN(), d.argsFor(chains[k]));
+            assertEq(keccak256(code), h, "init code hash moved: re-pin deliberately");
+            assertEq(vm.computeCreate2Address(d.saltFor(d.PINNED_DEPLOYER(), d.PINNED_NONCE()), h, address(R)), want);
+            assertEq(d.checkPinned(chains[k], d.PINNED_DEPLOYER(), d.PINNED_GUARDIAN(), d.PINNED_NONCE()), want);
+        }
+    }
+
+    function test_unpinnedInputsRefused() public {
+        DeployMamoruActionPolicyV3 d = new DeployMamoruActionPolicyV3();
+        address g = d.PINNED_GUARDIAN();
+        address dep = d.PINNED_DEPLOYER();
+        uint96 nonce = d.PINNED_NONCE();
+        // Another guardian is other init code, so another address: refused before any broadcast.
+        assertTrue(keccak256(d.initCode(guardian, d.argsFor(143))) != keccak256(d.initCode(g, d.argsFor(143))));
+        vm.expectRevert(bytes("DeployV3: not pinned"));
+        d.checkPinned(143, dep, guardian, nonce);
+        vm.expectRevert(bytes("DeployV3: not pinned"));
+        d.checkPinned(143, deployer, g, nonce);
+        vm.expectRevert(bytes("DeployV3: not pinned"));
+        d.checkPinned(143, dep, g, 5);
+    }
+
+    /// The pinned Base deployment lands exactly at the pinned address.
+    function test_pinnedDeployOnBaseFork() public {
+        DeployMamoruActionPolicyV3 d = new DeployMamoruActionPolicyV3();
+        (, address want) = d.expected(8453);
+        address policy = d.deploy(
+            d.PINNED_DEPLOYER(),
+            d.saltFor(d.PINNED_DEPLOYER(), d.PINNED_NONCE()),
+            d.PINNED_GUARDIAN(),
+            d.argsFor(8453),
+            1_800
+        );
+        assertEq(policy, want);
     }
 }
