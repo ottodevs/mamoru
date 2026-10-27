@@ -432,6 +432,12 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     const held: PositionObs = { tokenId: 9n, pool: btc.name, tickLower: -69_080 - 1_000, tickUpper: -69_080 + 1_000, liquidity: 10n ** 12n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }
     const d = decide(v6Obs({ balances: { USDC: 0n, USDT: 0n, cbBTC: 0n, WETH: 0n }, positions: [held] }), V6)
     expect(d.proposal).toMatchObject({ kind: 'reduce', pool: 'pool:USDC/cbBTC/500', tokenId: 9n, grant: 'manage-any:pool:USDC/cbBTC/500' })
+    // Out of range it is still reduced, never re-ranged (a re-range would put its money back in).
+    const out = { ...held, tickLower: -69_080 + 2_000, tickUpper: -69_080 + 4_000 }
+    expect(decide(v6Obs({ balances: { USDC: 0n, USDT: 0n, cbBTC: 0n, WETH: 0n }, positions: [out] }), V6).proposal).toMatchObject({ kind: 'reduce', tokenId: 9n })
+    // Idle cbBTC (what a reduce frees) is sold back to USDC.
+    const idle = decide(v6Obs({ balances: { USDC: 0n, USDT: 0n, cbBTC: 100_000n, WETH: 0n } }), V6).proposal
+    expect(idle).toMatchObject({ tokenIn: 'cbBTC', tokenOut: 'USDC', pool: 'pool:USDC/cbBTC/500' })
     const fresh = decide(v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), V6)
     expect(fresh.proposal?.pool).not.toBe('pool:USDC/cbBTC/500')
   })

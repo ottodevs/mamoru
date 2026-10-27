@@ -66,6 +66,9 @@ export function positionValue(p: PositionObs, pool: PoolObs, savings: RegistryNa
 export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionObs, pool: PoolObs): { code: ReasonCode | null; proposal: RerangeProposal | null } {
   // A position with no liquidity has no range to keep: its tokens are only owed, not at risk of the price.
   if (!hasManageAny(policy) || policy.range.adjust !== 'on_out_of_range' || p.liquidity === 0n) return { code: null, proposal: null }
+  // otto/mamoru#213: a bucket at preference 0 is being left (v6's USDC/cbBTC): `reduce` empties it, a re-range would
+  // put its money back in (and its exit-only grant has no mint).
+  if (policy.buckets.find((b) => b.pools.includes(pool.name as never))?.preference === 0) return { code: null, proposal: null }
   // Built only when proposed: a pool without its own manage-any grant must not throw before the trigger says so.
   const proposal = (): RerangeProposal => ({ kind: 'rerange', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity: p.liquidity })
   const lazy = policy.range.lazy
@@ -201,7 +204,9 @@ export function idleConvertOf(obs: Observation, policy: PolicyVersion, policyPoo
     if (!b.pool || b.value * 10_000n + total * BigInt(DRIFT_BPS) < b.target * 10_000n) continue
     // Bought for a top-up and about to be minted: selling it back would undo the entry.
     if (keep?.has(b.pool)) continue
-    if (!obs.positions.some((p) => p.pool === b.pool && p.liquidity > 0n && isManaged(p, policy, policyPools))) continue
+    // otto/mamoru#213: a bucket being left (preference 0) sells its idle token even once its last position is gone.
+    const leaving = policy.buckets.find((x) => x.id === b.bucket)?.preference === 0
+    if (!leaving && !obs.positions.some((p) => p.pool === b.pool && p.liquidity > 0n && isManaged(p, policy, policyPools))) continue
     const pool = obs.pools.find((x) => x.name === b.pool)
     if (!pool) continue
     const volatile = volatileOf(pool, savings)

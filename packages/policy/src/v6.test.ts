@@ -65,4 +65,20 @@ describe('conservador-live-v6 (otto/mamoru#201, #213)', () => {
     expect(() => retargetToPolicy(g, '0x00000000000000000000000000000000000000Fe')).toThrow('MamoruPauseGate')
     expect(rule('amount')).toMatchObject({ index: 0, ref: (CAP * 2000n) / 10_000n, cumulativeLimit: (CAP * 5000n) / 10_000n })
   })
+
+  test('USDC/cbBTC is exit only: decrease, collect, burn and a cbBTC-to-USDC sale; no mint, no increase, no USDC approval', () => {
+    const t = conservadorLiveV6.session.grants.filter((g) => g.pool === 'pool:USDC/cbBTC/500')
+    expect(t.map((g) => g.name)).toEqual(['manage-any'])
+    const g = instantiateGrant(conservadorLiveV6, 'manage-any:pool:USDC/cbBTC/500', ctx())
+    const sigs = g.actions.map((a) => `${a.target}.${a.signature.split('(')[0]}`)
+    expect(sigs).toEqual(['NonfungiblePositionManager.decreaseLiquidity', 'NonfungiblePositionManager.collect', 'NonfungiblePositionManager.burn', 'cbBTC.approve', 'SwapRouter02.exactInputSingle', 'SwapRouter02.multicall'])
+    const swap = g.actions.find((a) => a.signature.startsWith('exactInputSingle'))!
+    expect(swap.params.find((p) => p.field === 'tokenIn')!.ref).toBe(BigInt(address('cbBTC', baseRegistry)))
+    expect(swap.params.find((p) => p.field === 'tokenOut')!.ref).toBe(BigInt(address('USDC', baseRegistry)))
+    expect(g.requiresActionPolicy).toBe(true)
+    // Its caps are v5's for the pool (40 % of the cap): enough to sell a whole held position, never zero.
+    const caps = computeCaps(conservadorLiveV6, CAP, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
+    expect(caps[V4_POOLS.btc.caps.volatileConvertPerCall]).toBe((CAP * 8000n) / 10_000n / 100_000n)
+    expect(caps[V4_POOLS.btc.caps.budgetTotal]).toBe((CAP * 40_000n) / 10_000n)
+  })
 })

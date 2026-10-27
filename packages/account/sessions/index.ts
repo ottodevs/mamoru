@@ -229,6 +229,10 @@ export function assertV4Policies(grant: SessionGrant, second: SecondActionPolicy
  * here, the one place every grant goes through on its way to an owner op (`activationCall` below included).
  */
 export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, registry: Registry = baseRegistry): SmartSessionStruct {
+  // otto/mamoru#213 (review r3): the gate's protection rests on the flag; a grant that moves funds off the chain without
+  // it (a stale or hand-built grant, the old `requiresGasPolicy` name) is refused rather than encoded ungated.
+  if ('requiresGasPolicy' in grant) mismatch(grant, 'requiresGasPolicy is retired: rebuild the grant (requiresPauseGate)')
+  if (!grant.requiresPauseGate && grant.actions.some((a) => a.signature.startsWith('depositForBurn('))) mismatch(grant, 'a bridge action needs requiresPauseGate')
   if (grant.requiresPauseGate) assertGated(grant, policies)
   else if (grant.requiresActionPolicy) assertV4Policies(grant, isActionPolicy(policies) ? policies : undefined)
   const second = isActionPolicy(policies) ? { policy: policies.policy, initData: policies.initData } : policies && 'gate' in policies ? policies.gate : undefined
@@ -263,7 +267,7 @@ export type V4Deployment = { actionPolicy: Address; gasPolicy: Address; gasCaps:
 export function v4DeploymentOf(policy: PolicyVersion): V4Deployment | null {
   const ap = policy.actionPolicy
   if (!ap?.gasPolicy) return null
-  return { actionPolicy: ap.address, gasPolicy: ap.gasPolicy.address, gasCaps: ap.gasPolicy.caps, ...(ap.pauseGate ? { pauseGate: ap.pauseGate } : {}) }
+  return { actionPolicy: ap.address, gasPolicy: ap.gasPolicy.address, gasCaps: ap.gasPolicy.caps, ...(ap.pauseGate && ap.contractVersion === 2 ? { pauseGate: ap.pauseGate } : {}) }
 }
 
 /**

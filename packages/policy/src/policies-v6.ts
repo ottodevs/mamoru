@@ -6,7 +6,7 @@ import { bridgeOutGrant, CCTP_DOMAIN_MONAD } from './grants.ts'
 import { INCREASE_TOLERANCE_BPS, conservadorLiveV5 } from './policies-v4.ts'
 import { liveWmonUsdcMonadV1 } from './policies-monad.ts'
 import type { CapFormula, PolicyVersion } from './types.ts'
-import { grantsV5, manageAnyV5Grant, v4CapFormulas, V4_POOLS, type V4PoolSpec, type V4Usage } from './v4-grants.ts'
+import { exitOnlyV5Grant, grantsV5, v4CapFormulas, V4_POOLS, type V4PoolSpec, type V4Usage } from './v4-grants.ts'
 
 const V6_USAGE: V4Usage = { enterSwap: 3_000, enterMint: 1_000, manageAny: 32_000 }
 
@@ -38,7 +38,8 @@ export const conservadorLiveV6: PolicyVersion = {
     // Shown as Balance; the id stays 'risk' so the WETH pool keeps its caps, grant keys and fall-freeze rule.
     { id: 'risk', preference: 3500, pools: ['pool:WETH/USDC/3000'] },
     // Exit only: an account moving from v2-v5 still holds USDC/cbBTC positions. Target 0, so `reduce` empties them and
-    // the idle cbBTC is sold back to savings; with manage-any alone (no enter-swap, no enter-mint) nothing new goes in.
+    // the idle cbBTC is sold back to savings. Its only grant is exit-only manage-any (no mint, no increase, no USDC
+    // approval) and `rerangeOf` never re-ranges a bucket at preference 0, so nothing new goes in.
     { id: 'btc-usdc', preference: 0, pools: ['pool:USDC/cbBTC/500'] },
   ],
   remoteBuckets: [{ id: 'growth', preference: 1500, chainId: 143, pools: ['pool:WMON/USDC/3000'], policyId: liveWmonUsdcMonadV1.policyId }],
@@ -49,7 +50,7 @@ export const conservadorLiveV6: PolicyVersion = {
     grants: [
       ...grantsV5(V6_POOLS.stables, V6_USAGE),
       ...grantsV5(V6_POOLS.balance, V6_USAGE),
-      manageAnyV5Grant(V4_POOLS.btc, V6_USAGE.manageAny),
+      exitOnlyV5Grant(V4_POOLS.btc, V6_USAGE.manageAny),
       bridgeOutGrant({ destinationDomain: CCTP_DOMAIN_MONAD, caps: { perCall: 'bridgePerCall', total: 'bridgeTotal' } }, 64),
     ],
   },

@@ -258,4 +258,17 @@ describe('otto/mamoru#213: bridge-out takes MamoruPauseGate and MamoruGasPolicy,
     expect(() => toSmartSession(bridge, { gate: { policy: P, initData: '0x' }, gas: { ...gas, policy: A }, expected: { pauseGate: P, gasPolicy: G } })).toThrow('not the configured MamoruGasPolicy')
     expect(() => toSmartSession(bridge, { policy: A, initData: '0x', gas, expected: { actionPolicy: A, gasPolicy: G } })).toThrow('never takes MamoruActionPolicy')
   })
+
+  test('a depositForBurn grant without the flag, or with the retired requiresGasPolicy, is refused', () => {
+    const { requiresPauseGate: _, ...unflagged } = bridge
+    expect(() => toSmartSession(unflagged as SessionGrant)).toThrow('needs requiresPauseGate')
+    expect(() => toSmartSession({ ...unflagged, requiresGasPolicy: true } as unknown as SessionGrant)).toThrow('retired')
+  })
+
+  test('the exit-only USDC/cbBTC grant encodes end to end with MamoruActionPolicy and the gas policy', () => {
+    const exit = retargetToPolicy(instantiateGrant(conservadorLiveV6, 'manage-any:pool:USDC/cbBTC/500', { ...v4Ctx, caps }), A)
+    const s = toSmartSession(exit, v4PoliciesFor([exit], d, 1n, v4BudgetCaps(conservadorLiveV6, 10_000n * 1_000_000n))(exit, 0))
+    expect(s.actions).toHaveLength(6)
+    for (const a of s.actions) expect(a.actionPolicies.map((x) => x.policy.toLowerCase())).toEqual([address('UniActionPolicy', baseRegistry).toLowerCase(), A])
+  })
 })
