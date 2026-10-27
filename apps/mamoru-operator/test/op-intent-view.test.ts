@@ -12,6 +12,11 @@ describe('opIntentView', () => {
     expect(opIntentView(intent)).toEqual({ pool: 'pool:USDC/cbBTC/500', tokenIn: 'USDC', tokenOut: 'cbBTC', amountIn: '10000000' })
   })
 
+  test('bridge_out (otto/mamoru#215): the remote pool, the amount, and a bridge to Monad that starts as sending', () => {
+    const intent: Proposal = { kind: 'bridge_out', grant: 'bridge-out', bucket: 'growth', chainId: 143, pool: 'pool:WMON/USDC/3000', amount: 1_500_000_000n }
+    expect(opIntentView(intent)).toEqual({ pool: 'pool:WMON/USDC/3000', amountIn: '1500000000', bridge: { chainId: 143, amountUsdc: '1500000000', state: 'sending' } })
+  })
+
   test('enter_mint: pool only', () => {
     const intent: Proposal = { kind: 'enter_mint', grant: 'enter-mint', pool: 'pool:USDC/cbBTC/500', tickLower: -100, tickUpper: 100, amount0Desired: 1n, amount1Desired: 1n }
     expect(opIntentView(intent)).toEqual({ pool: 'pool:USDC/cbBTC/500' })

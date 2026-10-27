@@ -235,3 +235,22 @@ export const mamoruActionPolicyV2Abi = parseAbi([
   'error OnlyGuardian()',
   'error NotAdmitted(uint256 tokenId)',
 ])
+
+/**
+ * otto/mamoru#215: Circle CCTP V2, what the engine's bridge-out builds (`depositForBurn`) and what the operator reads
+ * back from a burn (`DepositForBurn`, `MessageSent`) and calls on the destination chain (`receiveMessage`).
+ * TokenMessengerV2 and MessageTransmitterV2 sit at the same address on Ethereum, Base and Monad.
+ */
+export const tokenMessengerV2Abi = parseAbi([
+  'function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)',
+  'event DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)',
+])
+
+export const messageTransmitterV2Abi = parseAbi([
+  'function receiveMessage(bytes message, bytes attestation) returns (bool)',
+  'function usedNonces(bytes32 nonce) view returns (uint256)',
+  'function isEnabledAttester(address attester) view returns (bool)',
+  'function signatureThreshold() view returns (uint256)',
+  'function localDomain() view returns (uint32)',
+  'event MessageSent(bytes message)',
+])

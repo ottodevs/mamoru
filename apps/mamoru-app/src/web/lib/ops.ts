@@ -1,7 +1,7 @@
 import type { OpView } from '@mamoru/domain'
 import { formatAmount, shortHex } from './format.ts'
 import { usd, usdPlain } from './money.ts'
-import { pairLabel } from './positions.ts'
+import { bridgeLine, pairLabel } from './positions.ts'
 
 const owner = (op: OpView) => op.opId.startsWith('own-')
 /** "USDC/cbBTC": the pool's pair, no spaces, matching the style history lines used before pools were tagged. */
@@ -59,6 +59,7 @@ export function opLine(op: OpView): string {
       if (!op.pool) return done ? 'Closed a position' : 'Closing a position'
       return done ? `Closed ${pair(op.pool)} position` : `Closing ${pair(op.pool)} position`
     case 'enter':
+      if (op.bridge) return bridgeLine(op.bridge)
       if (engineKind(op) === 'enter_swap') {
         if (!op.tokenIn || !op.tokenOut) return done ? 'Swapped' : 'Swapping'
         const from = op.amountIn ? formatAmount(op.amountIn, op.tokenIn) : op.tokenIn

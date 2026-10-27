@@ -99,6 +99,8 @@ export const REASON_CODES = [
   'DECIDE_WAIT_BRIDGE',
   // otto/mamoru#215: savings go to the account's own sleeve on another chain (CCTP), for the bucket served there.
   'DECIDE_BRIDGE_OUT',
+  // otto/mamoru#215: a bridge-out is never signed before it is in the operator's bridge journal (it would be in flight unseen).
+  'BRIDGE_JOURNAL_UNAVAILABLE',
   // otto/mamoru#127: the quote of an entry swap is worse than the depth policy allows; refused before sending.
   'EHG_SWAP_IMPACT_OVER_LIMIT',
   'DECIDE_PAUSED',

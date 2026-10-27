@@ -35,8 +35,9 @@ import { permissionIdOf, revocationCalls, toSmartSession, v4DeploymentOf, v4Poli
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
-import { Engine, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
+import { Engine, type BridgeSigning, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
+import { BRIDGE_MONAD_CHAIN_ID, type MonadBridge } from './bridge-monad.ts'
 import type { GuardReadsState } from './guard-reads-state.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { Observation, PeerPositionObs, Proposal } from '@mamoru/decide'
@@ -441,6 +442,13 @@ export type OperatorConfig = {
    * counts what the account holds there too. Absent or empty: this chain alone.
    */
   peers?: Pick<PeerExposure, 'configured' | 'read'>
+
+  /**
+   * otto/mamoru#215: the bridge leg to the accounts' Monad sleeves (boot.ts, only with MAMORU_MONAD_RPC_URL on Base). A v6
+   * account's engine reads its remote value from it and records every bridge-out in it before signing. Absent: no
+   * account has a remote value, and no bridge-out is ever signed.
+   */
+  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'view' | 'pending'>
 }
 
 /** Spec 007 T7: the live policies whose accounts the renew row moves to v4 (same three pools and weights). */
@@ -583,7 +591,9 @@ function engineKind(k: OpRecord['kind']): OpView['kind'] {
  * `pool`, so this always has something to show the SPA, going from "the USDC/cbBTC pool" (hardcoded) to the
  * pool each history row actually acted on. otto/mamoru#131.
  */
-export function opIntentView(intent: Proposal): Pick<OpView, 'pool' | 'tokenIn' | 'tokenOut' | 'amountIn' | 'convert'> {
+export function opIntentView(intent: Proposal): Pick<OpView, 'pool' | 'tokenIn' | 'tokenOut' | 'amountIn' | 'convert' | 'bridge'> {
+  // otto/mamoru#215: savings on their way to the sleeve on another chain; the bridge journal updates its state (ops()).
+  if (intent.kind === 'bridge_out') return { pool: intent.pool, amountIn: intent.amount.toString(), bridge: { chainId: intent.chainId, amountUsdc: intent.amount.toString(), state: 'sending' } }
   if (intent.kind === 'enter_swap') return { pool: intent.pool, tokenIn: intent.tokenIn, tokenOut: intent.tokenOut, amountIn: intent.amountIn.toString() }
   if (intent.kind === 'harvest' && intent.convert) return { pool: intent.pool, convert: intent.convert.token }
   return { pool: intent.pool }
@@ -605,7 +615,7 @@ const ENGINE_STEP: Record<OpRecord['kind'], Progress['step']> = {
   rerange: 'reranging',
   reduce: 'rebalancing',
   // otto/mamoru#215: savings on their way to the account's sleeve on another chain.
-  bridge_out: 'rebalancing',
+  bridge_out: 'bridging',
 }
 
 /** Accounts activated before the operator stored a policy id per account ran this policy. */
@@ -1552,8 +1562,12 @@ export class Operator {
     const runner = this.runners.get(acc.accountKey)
     if (!runner) return null
     const o = runner.engine.journal.ops.findLast((x) => !isTerminal(x.state))
-    if (!o) return null
-    return { step: ENGINE_STEP[o.kind], pool: o.intent.pool, since: this.since(acc.accountKey, `${runner.epoch}-${runner.run}-${o.opId}`) }
+    if (!o) {
+      // otto/mamoru#215: a burn on its way to the Monad sleeve, until it is minted there.
+      const b = this.cfg.bridgeMonad?.pending(acc.accountKey)
+      return b ? { step: 'bridging', pool: b.pool, since: b.at, bridge: this.cfg.bridgeMonad!.view(b.id)! } : null
+    }
+    return { step: ENGINE_STEP[o.kind], pool: o.intent.pool, since: this.since(acc.accountKey, `${runner.epoch}-${runner.run}-${o.opId}`), ...(o.intent.kind === 'bridge_out' ? { bridge: opIntentView(o.intent).bridge! } : {}) }
   }
 
   /** First time this engine op was seen in flight (the journal keeps no timestamps). */
@@ -1579,7 +1593,12 @@ export class Operator {
     // call just built in memory, which always starts with ops: []) — but it is never run against one that is not
     // the store's own record, so it can never schedule work against an object a mutating call will later replace.
     if (this.store.state.accounts[acc.accountKey] === acc) this.reconcileSoon(acc)
-    const all = collapseFailed(includeFailedEngine ? acc.ops : acc.ops.filter((o) => !(o.opId.startsWith('eng-') && o.state === 'failed')))
+    const kept = collapseFailed(includeFailedEngine ? acc.ops : acc.ops.filter((o) => !(o.opId.startsWith('eng-') && o.state === 'failed')))
+    // otto/mamoru#215: a bridge row shows where its burn is now (burned on Base, minted on Monad), from the bridge journal.
+    const all = kept.map((o) => {
+      const b = o.bridge && this.cfg.bridgeMonad?.view((o as { userOpHash?: Hex }).userOpHash)
+      return b ? { ...o, bridge: b } : o
+    })
     if (!after) return { ops: all }
     const i = all.findIndex((o) => o.opId === after)
     if (i >= 0) return { ops: all.slice(i + 1) }
@@ -4942,6 +4961,20 @@ export class Operator {
     for (const s of engine.sessions) if (s.grant.name === 'manage') engine.ledger.revoke(s.permissionId)
   }
 
+  /**
+   * otto/mamoru#215: the engine's `remote` for an account whose policy has a bucket on Monad, when the bridge leg runs
+   * (MAMORU_MONAD_RPC_URL): its sleeve there (same Safe address) at the TWAP of the policy's window, plus in flight.
+   * Any other account, or no bridge leg: none (a remote bucket then waits, DECIDE_WAIT_BRIDGE).
+   */
+  private remoteOf(acc: AccountState): Pick<EngineConfig, 'remote'> {
+    const bridge = this.cfg.bridgeMonad
+    const policy = this.enginePolicyOf(acc)
+    if (!bridge || !(policy.remoteBuckets ?? []).some((b) => b.chainId === BRIDGE_MONAD_CHAIN_ID)) return {}
+    // Every remote bucket must be one this leg serves: a bucket on another chain would be counted as nothing.
+    if ((policy.remoteBuckets ?? []).some((b) => b.chainId !== BRIDGE_MONAD_CHAIN_ID)) return {}
+    return { remote: () => bridge.remote(acc.accountKey, acc.ctx.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds) }
+  }
+
   private startLoop(acc: AccountState): void {
     const refusal = this.writeRefusal()
     if (refusal) throw new ReasonError('CHAIN_UNSUPPORTED', `${acc.accountKey} engine not started: ${refusal}`)
@@ -4979,6 +5012,7 @@ export class Operator {
         onEntering: (pool) => this.markEntering(acc, pool),
         // otto/mamoru#212: new money is placed only within the cap, counted across chains.
         cap: () => this.engineCap(acc),
+        ...this.remoteOf(acc),
       },
       {
         waitBlock: () => Bun.sleep(this.cfg.waitBlockMs),
@@ -4998,6 +5032,8 @@ export class Operator {
         },
         // Sol review round 2 #4: never more admitted positions than one bounded read sees (chain.ts MAX_INVENTORY).
         mintAllowed: () => mintAllowed(acc.admittedTokenIds),
+        // otto/mamoru#215: a bridge-out is on disk in the bridge journal before it is signed; without one it is never signed.
+        ...(this.cfg.bridgeMonad ? { beforeBridgeSign: (b: BridgeSigning) => this.cfg.bridgeMonad!.recordSending(acc.accountKey, b) } : {}),
       },
     )
     // The journal of a restarted engine is empty: the block of the last operation stored for the account stands in

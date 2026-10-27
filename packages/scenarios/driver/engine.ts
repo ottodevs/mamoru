@@ -1,10 +1,10 @@
-import { encodeFunctionData, isAddressEqual, parseAbi, parseEventLogs, toFunctionSelector, type Hex, type Log, type PublicClient } from 'viem'
+import { encodeFunctionData, isAddressEqual, pad, parseAbi, parseEventLogs, toFunctionSelector, zeroHash, type Hex, type Log, type PublicClient } from 'viem'
 import type { LocalAccount } from 'viem/accounts'
 import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { amountsOf, decide, outOfRangeSinceOf, placedOf, safeSavings, twapFloor, withOutOfRangeSince, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
 import { hasIncrease, hasManageAny, TWAP_SHORT_WINDOW_SECONDS, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
-import { baseRegistry, address, entry, entryPointV07Abi, erc20Abi, mamoruActionPolicyV2Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type Registry, type RegistryName } from '@mamoru/registry'
+import { baseRegistry, address, entry, entryPointV07Abi, erc20Abi, isDeployed, mamoruActionPolicyV2Abi, nonfungiblePositionManagerAbi, smartSessionAbi, tokenMessengerV2Abi, uniswapV3PoolAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import {
   Batch,
   contractRead,
@@ -111,6 +111,33 @@ export function tightUserOpGas(op: { sender: Address; nonce: bigint; callData: H
   return { verificationGasLimit, callGasLimit, preVerificationGas, maxFeePerGas: op.maxFeePerGas, maxPriorityFeePerGas: op.maxPriorityFeePerGas }
 }
 const ETH_PRICE_POOL = 'pool:WETH/USDC/3000'
+
+/**
+ * otto/mamoru#215: the CCTP V2 domain of each chain a bridge-out may go to (MessageTransmitterV2.localDomain() there).
+ * Monad's is 15 (read on chain 143, 2026-10-27). A chain not listed here is never bridged to.
+ */
+export const CCTP_DOMAIN_BY_CHAIN: Readonly<Record<number, number>> = { 143: 15 }
+/** CCTP V2 Standard finality: attested at finality, no fee. The only threshold the bridge-out grant allows (>= 2000). */
+export const CCTP_STANDARD_FINALITY = 2000
+
+/**
+ * otto/mamoru#215: what the engine hands the operator's bridge journal right before it signs a bridge-out, so the burn
+ * is counted in flight from before it can exist on chain. `userOpHash`, `nonceKey`/`nonce` and `prepareBlock` are how
+ * the operator settles it from the chain later (its UserOperationEvent, or the nonce taken without it).
+ */
+export type BridgeSigning = {
+  opId: string
+  account: Address
+  chainId: number
+  pool: RegistryName
+  bucket: string
+  amount: bigint
+  destinationDomain: number
+  userOpHash: Hex
+  nonceKey: bigint
+  nonce: bigint
+  prepareBlock: bigint
+}
 /** Bounded waits for the bundler receipt and for `safe`, in blocks the lab lets pass. */
 const MAX_WAIT_BLOCKS = 32
 /** Live: after a bundler rejection that left the nonce unmoved, the same premise or kind+pool is not proposed again for this long. */
@@ -211,6 +238,14 @@ export type EngineConfig = {
    * review. Absent: no cap (backtest, lab); the operator always sets it.
    */
   cap?: () => Observation['cap']
+
+  /**
+   * otto/mamoru#215: the account's value on other chains for the policy's `remoteBuckets` (its sleeve there valued at the
+   * TWAP, plus every bridge burned here and not yet minted there), read at every review as `Observation.remote`. Throws
+   * (any error): the review holds as an observation failure. Absent: no `remote` (a remote bucket then waits with
+   * DECIDE_WAIT_BRIDGE and nothing is bridged).
+   */
+  remote?: () => Promise<NonNullable<Observation['remote']>>
 }
 
 /** Live op states whose signed bytes may still land or have landed without being settled here (Engine.carried). */
@@ -231,6 +266,12 @@ export type EngineHooks = {
   onMinted?: (tokenId: bigint, block?: bigint) => void
   /** Whether one more position may be minted (the live operator: under MAX_INVENTORY admitted). Absent: always. */
   mintAllowed?: () => boolean
+  /**
+   * otto/mamoru#215: a bridge-out is about to be signed. The operator records it in its bridge journal (state
+   * 'sending', on disk) before this returns; a throw discards the op unsigned (BRIDGE_JOURNAL_UNAVAILABLE). Absent: the
+   * engine never signs a bridge-out.
+   */
+  beforeBridgeSign?: (b: BridgeSigning) => void
 }
 
 /** The block of the latest operation that reached the chain: no review may observe before it. */
@@ -296,6 +337,8 @@ export function settleUnincluded(p: {
 
 /** Kind and pool of a proposal: the unit a live backoff holds back. */
 function proposalKey(p: Proposal): string {
+  // otto/mamoru#215: a bridge's pool is on the other chain; its chain keeps it apart from any pool of this one.
+  if (p.kind === 'bridge_out') return `${p.kind}|${p.chainId}|${p.pool}`
   return `${p.kind}|${p.pool}`
 }
 
@@ -516,6 +559,16 @@ export class Engine {
       if (e instanceof ReasonError) return { kind: 'observation-failed', code: e.code, detail: e.detail }
       throw e
     }
+    // otto/mamoru#215: what the account holds on its other chains. A hook that cannot answer holds the review: a
+    // decision without it would size the local buckets on part of the account.
+    if (this.cfg.remote) {
+      try {
+        obs = { ...obs, remote: await this.cfg.remote() }
+      } catch (e) {
+        if (e instanceof ReasonError) return { kind: 'observation-failed', code: e.code, detail: e.detail }
+        return { kind: 'observation-failed', code: 'OBS_RPC_UNAVAILABLE', detail: `remote value: ${(e as Error).message?.split('\n')[0] ?? String(e)}` }
+      }
+    }
     // Never decide on a view older than the engine's own last operation: a provider serving a head behind it shows
     // the account as it was before that operation, and the same step would be proposed again. The reviews used to be
     // minutes apart, which hid this; they can now follow each other in seconds.
@@ -608,7 +661,8 @@ export class Engine {
       throw e
     }
     const callData = executeCallData(prepared.calls)
-    await this.syncActionPolicyLedger(proposal.pool, block.number, 'tokenId' in proposal && typeof proposal.tokenId === 'bigint' ? proposal.tokenId : undefined)
+    // otto/mamoru#215: a bridge's pool is on the other chain; no MamoruActionPolicy of this one covers it.
+    if (proposal.kind !== 'bridge_out') await this.syncActionPolicyLedger(proposal.pool, block.number, 'tokenId' in proposal && typeof proposal.tokenId === 'bigint' ? proposal.tokenId : undefined)
     const pre = precheck(
       { sender: this.cfg.account, callData, signature: useModeSignature(session.permissionId, '0x') },
       { chainId: this.cfg.chainId, now: Number(block.timestamp), ledger: this.ledger },
@@ -672,8 +726,14 @@ export class Engine {
       chainNonce: await this.entryPointNonce(now.number),
     })
     if (blocker) return void j.move(op.opId, 'discarded', blocker)
-    const signed = await signSessionUserOp(userOp, this.cfg.chainId, session.permissionId, this.cfg.sessionKey, this.registry)
     const hash = userOpHash(userOp, this.cfg.chainId, this.registry)
+    // otto/mamoru#215: a bridge-out is in the operator's bridge journal (on disk, counted in flight) before it is signed;
+    // without the journal it is never signed.
+    if (proposal.kind === 'bridge_out') {
+      const refusal = this.journalBridge(op.opId, proposal, hash, nonce, block.number)
+      if (refusal) return void j.move(op.opId, 'discarded', 'BRIDGE_JOURNAL_UNAVAILABLE', {}, refusal)
+    }
+    const signed = await signSessionUserOp(userOp, this.cfg.chainId, session.permissionId, this.cfg.sessionKey, this.registry)
     j.move(op.opId, 'signed', 'OP_SIGNED', { userOp: signed, userOpHash: hash })
 
     // send: the same bytes to a standard ERC-4337 endpoint.
@@ -730,6 +790,22 @@ export class Engine {
       await this.hooks.waitBlock()
     }
     // Still above `safe`: stays `included`; the next review holds on the busy slot.
+  }
+
+  /**
+   * otto/mamoru#215: hands a bridge-out about to be signed to the operator's bridge journal (`beforeBridgeSign`). Returns
+   * why it may not be signed (no journal, or the journal refused or failed to write it), or null once it is recorded.
+   */
+  private journalBridge(opId: string, p: Extract<Proposal, { kind: 'bridge_out' }>, hash: Hex, nonce: bigint, prepareBlock: bigint): string | null {
+    if (!this.hooks.beforeBridgeSign) return 'no bridge journal: a bridge-out is never signed without one'
+    const destinationDomain = CCTP_DOMAIN_BY_CHAIN[p.chainId]
+    if (destinationDomain === undefined) return `no CCTP domain for chain ${p.chainId}`
+    try {
+      this.hooks.beforeBridgeSign({ opId, account: this.cfg.account, chainId: p.chainId, pool: p.pool, bucket: p.bucket, amount: p.amount, destinationDomain, userOpHash: hash, nonceKey: this.nonceKey, nonce, prepareBlock })
+      return null
+    } catch (e) {
+      return `bridge journal: ${(e as Error).message?.split('\n')[0] ?? String(e)}`
+    }
   }
 
   /** A live op left `pending_reconciliation` with signed bytes: settled from the chain when it can be (`settleUnincluded`). */
@@ -1217,6 +1293,34 @@ export class Engine {
     }
   }
 
+  /**
+   * otto/mamoru#215: savings to the account's own sleeve on another chain, exactly what the bridge-out grant allows:
+   * approve(TokenMessengerV2, amount) on the savings token, then depositForBurn(amount, the chain's CCTP domain, this
+   * account, the savings token, any caller, fee 0, Standard finality). The approval is spent in full by the burn. No
+   * on-chain expiry (CCTP has none): a late landing is a real burn, which the operator's bridge journal counts in flight
+   * from before signing until the chain settles it.
+   */
+  private prepareBridgeOut(p: Extract<Proposal, { kind: 'bridge_out' }>): Prepared {
+    const domain = CCTP_DOMAIN_BY_CHAIN[p.chainId]
+    if (domain === undefined) throw new ReasonError('POLICY_DENIED_TARGET', `bridge_out to chain ${p.chainId}: no CCTP domain known for it`)
+    if (p.amount <= 0n) throw new ReasonError('POLICY_DENIED_AMOUNT', `bridge_out of ${p.amount}`)
+    const savings = this.cfg.policy.savingsAsset
+    if (!isDeployed('TokenMessengerV2', this.registry) || !isDeployed(savings, this.registry)) throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', `bridge_out: TokenMessengerV2 or ${savings} is not in the ${this.registry.chain} registry`)
+    const token = address(savings, this.registry)
+    const messenger = address('TokenMessengerV2', this.registry)
+    return {
+      expiresAt: null,
+      calls: [
+        { target: token, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [messenger, p.amount] }) },
+        {
+          target: messenger,
+          value: 0n,
+          callData: encodeFunctionData({ abi: tokenMessengerV2Abi, functionName: 'depositForBurn', args: [p.amount, domain, pad(this.cfg.account, { size: 32 }), token, zeroHash, 0n, CCTP_STANDARD_FINALITY] }),
+        },
+      ],
+    }
+  }
+
   /** FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. */
   private async prepareCalls(p: Proposal, blockNumber: bigint, timestamp: bigint, session: EngineSession): Promise<Prepared> {
     const acct = this.cfg.account
@@ -1224,8 +1328,7 @@ export class Engine {
     // Every priced call of the batch expires on chain at the same time (NonfungiblePositionManager and SwapRouter02).
     const deadline = timestamp + BigInt(this.cfg.policy.execution.observationTtlSeconds)
     await this.refuseWhilePaused(blockNumber)
-    // otto/mamoru#215: built by the bridge leg (S3b); until it exists a bridge-out is refused here, never sent half-built.
-    if (p.kind === 'bridge_out') throw new ReasonError('POLICY_DENIED_TARGET', `bridge_out of ${p.amount} to chain ${p.chainId}: this engine does not build bridges yet`)
+    if (p.kind === 'bridge_out') return this.prepareBridgeOut(p)
     // MamoruActionPolicyV2 accounts (v5) quote their swaps with the price limit; the deployed V1's (v4) keep the path below.
     const v4Swap = p.kind === 'enter_swap' && this.cfg.policy.actionPolicy?.contractVersion === 2 ? this.v4PoolConfig(p.pool) : undefined
     if (p.kind === 'enter_swap' && v4Swap) return this.prepareV4Swap(p, blockNumber, session, deadline, v4Swap)
@@ -1363,6 +1466,34 @@ export class Engine {
     return c.amount0 > owed0 || c.amount1 > owed1
   }
 
+  /**
+   * otto/mamoru#215: a bridge-out moves the savings token by exactly -amount and nothing else (no position, no other
+   * token), and burns once: one DepositForBurn of TokenMessengerV2, from this account, of the amount, to this account
+   * on the chain's domain, any caller, no fee, Standard finality, no hook.
+   */
+  private bridgeMismatch(p: Extract<Proposal, { kind: 'bridge_out' }>, sim: Simulation): string | null {
+    const savings = this.cfg.policy.savingsAsset
+    const d = sim.deltas[savings] ?? 0n
+    if (d !== -p.amount) return `${savings} moved ${d}, intent ${-p.amount}`
+    if (sim.nftDelta !== 0n) return `positions changed by ${sim.nftDelta}`
+    for (const [t, v] of Object.entries(sim.deltas)) if (t !== savings && v !== 0n) return `${t} moved ${v} in a bridge`
+    const messenger = address('TokenMessengerV2', this.registry)
+    const burns = parseEventLogs({ abi: tokenMessengerV2Abi, eventName: 'DepositForBurn', logs: sim.logs.filter((l) => isAddressEqual(l.address, messenger)) })
+    if (burns.length !== 1) return `${burns.length} DepositForBurn events`
+    const a = burns[0]!.args
+    const ok =
+      isAddressEqual(a.burnToken, address(savings, this.registry)) &&
+      isAddressEqual(a.depositor, this.cfg.account) &&
+      a.amount === p.amount &&
+      a.mintRecipient.toLowerCase() === pad(this.cfg.account, { size: 32 }).toLowerCase() &&
+      a.destinationDomain === CCTP_DOMAIN_BY_CHAIN[p.chainId] &&
+      BigInt(a.destinationCaller) === 0n &&
+      a.maxFee === 0n &&
+      a.minFinalityThreshold === CCTP_STANDARD_FINALITY &&
+      a.hookData === '0x'
+    return ok ? null : 'the simulated DepositForBurn is not this account to itself on the bridge-out terms'
+  }
+
   /** FR-RPC-002: the simulated deltas must be the ones the intent expects. Returns why not, or null. */
   private deltaMismatch(p: Proposal, prepared: Prepared, sim: Simulation): string | null {
     const d = (t: string) => sim.deltas[t] ?? 0n
@@ -1396,7 +1527,7 @@ export class Engine {
       if (d(pool.token0!) < 0n || d(pool.token1!) < 0n) return `${pool.token0} moved ${d(pool.token0!)}, ${pool.token1} moved ${d(pool.token1!)}: a ${p.kind} only returns tokens to the account`
       return null
     }
-    if (p.kind === 'bridge_out') return 'bridge_out has no expected deltas in this engine'
+    if (p.kind === 'bridge_out') return this.bridgeMismatch(p, sim)
     if (sim.nftDelta !== 0n) return `positions changed by ${sim.nftDelta}`
     // FR-UNI-005, otto/mamoru#140: a harvest only collects to the account; nothing else moves.
     const pool = entry(p.pool, this.registry)
