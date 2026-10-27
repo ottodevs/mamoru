@@ -182,22 +182,21 @@
       "role": "solo lecturas",
       "address": "0xcA11bde05977b3631167028862bE2a173976CA11",
       "codeHash": "0xd5c15df687b16f2ff992fc8d767b4216323184a2bbc6ee2f9c398c318e770891"
-    }
-  ],
-  "undeployed": [
-    {
-      "name": "MamoruActionPolicyV2",
-      "kind": "smart-sessions-policy",
-      "role": "MamoruActionPolicy v2 (contracts/action-policy/src/MamoruActionPolicyV2.sol, spec 007, otto/mamoru#151, #171 y #214): los límites de v1 más increase a través de la política, la pausa del guardián y el deadline vacío del swap; sin desplegar en Monad: una política que lo use no se activa",
-      "address": null,
-      "codeHash": null
     },
     {
       "name": "MamoruGasPolicy",
       "kind": "smart-sessions-policy",
-      "role": "política de gas de userOp que lleva toda sesión v4 (contracts/action-policy/src/MamoruGasPolicy.sol, otto/mamoru#214); sin desplegar en Monad: una política que lo use no se activa",
-      "address": null,
-      "codeHash": null
+      "role": "política de gas de userOp que lleva toda sesión v4/v5 (contracts/action-policy/src/MamoruGasPolicy.sol, otto/mamoru#214); desplegado en Monad el 2026-10-27 por el relayer 0xE41175b9CEBD25b9F45B745C922002BC052B5C88 con ModuleRegistry.deployModule (script DeployMonad.s.sol)",
+      "address": "0xD62ab993c37A0b48E4593d83aF6C3555fc1B34fe",
+      "codeHash": "0x6537ce1d32524124ce4c9378262a502b75f9d98a38e4eb401ff154a7a01b5d06"
+    },
+    {
+      "name": "MamoruActionPolicyV2",
+      "kind": "smart-sessions-policy",
+      "role": "MamoruActionPolicy v2 en Monad (contracts/action-policy/src/MamoruActionPolicyV2.sol, otto/mamoru#214): mismos límites que en Base con el NonfungiblePositionManager, SwapRouter02 y factory de Monad; GUARDIAN inmutable 0xA8E6EF87e612fA5c54668Cc1fF0aC809e1321FdD; desplegado el 2026-10-27 por el relayer 0xE41175b9CEBD25b9F45B745C922002BC052B5C88 con ModuleRegistry.deployModule (script DeployMonad.s.sol); WMON/USDC observationCardinalityNext 1800",
+      "address": "0xc50408916C253B9E9EeBC0308813eD6B470466Ac",
+      "codeHash": "0x816722100ff48de176030206d129049c751e8164e76d55e44d03be06862e7717"
     }
-  ]
+  ],
+  "undeployed": []
 }

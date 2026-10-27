@@ -55,14 +55,16 @@ describe('live-wmon-usdc-monad-v5 at boot', () => {
 
 describe('the two contract names in monad.json', () => {
   const p = () => resolveNamedPolicy(ID, env, { chainWrites: true })!
+  // The pinned registry has both since 2026-10-27; these tests build the states around that from the rest of it.
+  const bare: Registry = { ...monadRegistry, entries: monadRegistry.entries.filter((e) => e.name !== 'MamoruActionPolicyV2' && e.name !== 'MamoruGasPolicy') }
   const withEntries = (addr2: string, addrGas: string): Registry => ({
-    ...monadRegistry,
-    entries: [...monadRegistry.entries, { name: 'MamoruActionPolicyV2', kind: 'smart-sessions-policy', role: 'x', address: addr2 as never, codeHash: null }, { name: 'MamoruGasPolicy', kind: 'smart-sessions-policy', role: 'x', address: addrGas as never, codeHash: null }],
+    ...bare,
+    entries: [...bare.entries, { name: 'MamoruActionPolicyV2', kind: 'smart-sessions-policy', role: 'x', address: addr2 as never, codeHash: null }, { name: 'MamoruGasPolicy', kind: 'smart-sessions-policy', role: 'x', address: addrGas as never, codeHash: null }],
   })
 
   test('undeployed or absent: refused (fail closed, peer review of #137 P1)', () => {
-    expect(() => assertActionPolicyOnRegistry(p(), monadRegistry)).toThrow('not pinned')
-    expect(() => assertActionPolicyOnRegistry(p(), { ...monadRegistry, undeployed: ['MamoruActionPolicyV2', 'MamoruGasPolicy'] })).toThrow('not pinned')
+    expect(() => assertActionPolicyOnRegistry(p(), bare)).toThrow('not pinned')
+    expect(() => assertActionPolicyOnRegistry(p(), { ...bare, undeployed: ['MamoruActionPolicyV2', 'MamoruGasPolicy'] })).toThrow('not pinned')
   })
 
   test('once entries, the environment must name them', () => {

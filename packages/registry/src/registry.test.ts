@@ -142,16 +142,18 @@ describe('MamoruActionPolicyV2 (spec 007, otto/mamoru#151)', () => {
     // otto/mamoru#213: MamoruPauseGate is named before its deployment (contracts/action-policy/script/DeployPauseGate.s.sol).
     expect(baseRegistry.undeployed).toEqual(['MamoruPauseGate'])
     expect(isDeployed('MamoruPauseGate', baseRegistry)).toBe(false)
-    expect(monadRegistry.undeployed).toEqual(['MamoruActionPolicyV2', 'MamoruGasPolicy']) // otto/mamoru#214: named, not deployed
-    expect(isDeployed('MamoruGasPolicy', monadRegistry)).toBe(false)
-    expect(code(() => address('MamoruGasPolicy', monadRegistry))).toBe('POLICY_TARGET_NOT_IN_REGISTRY')
+    // otto/mamoru#214: deployed on Monad 2026-10-27 (DeployMonad.s.sol) and pinned.
+    expect(monadRegistry.undeployed).toEqual([])
+    expect(isDeployed('MamoruGasPolicy', monadRegistry)).toBe(true)
+    expect(address('MamoruGasPolicy', monadRegistry)).toBe('0xD62ab993c37A0b48E4593d83aF6C3555fc1B34fe')
+    expect(address('MamoruActionPolicyV2', monadRegistry)).toBe('0xc50408916C253B9E9EeBC0308813eD6B470466Ac')
     expect(isDeployed('MamoruActionPolicyV2', baseRegistry)).toBe(true)
-    expect(isDeployed('MamoruActionPolicyV2', monadRegistry)).toBe(false)
+    expect(isDeployed('MamoruActionPolicyV2', monadRegistry)).toBe(true)
     expect(address('MamoruActionPolicyV2', baseRegistry)).toBe('0x9ef35e544C93A6722a13473AB9EF115f719bbE6B')
     expect(entry('MamoruActionPolicyV2', baseRegistry).codeHash).toBe('0x4a72ac333dd6c4b6fd81d586be5149dbea79aedd8aa28bb350f3600ab72570f9')
     expect(nameOf('0x9ef35e544C93A6722a13473AB9EF115f719bbE6B', baseRegistry)).toBe('MamoruActionPolicyV2')
     expect(isDeployed('MamoruGuardian', baseRegistry)).toBe(false)
-    expect(code(() => address('MamoruActionPolicyV2', monadRegistry))).toBe('POLICY_TARGET_NOT_IN_REGISTRY')
+    expect(entry('MamoruActionPolicyV2', monadRegistry).codeHash).toBe('0x816722100ff48de176030206d129049c751e8164e76d55e44d03be06862e7717')
     expect(isDeployed('UniActionPolicy', baseRegistry)).toBe(true)
   })
 })
