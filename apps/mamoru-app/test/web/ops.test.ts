@@ -55,10 +55,13 @@ describe('opLine', () => {
     expect(opLine(base({ opId: 'eng-1-1-op-3-harvest', kind: 'reduce', state: 'confirmed' }))).toBe('Collected fees')
   })
 
-  test('a rebalance (rerange/reduce, not harvest) names the pool', () => {
+  test('a range close and a trim say what they did (#219), not "Rebalanced"', () => {
     const op = base({ opId: 'eng-1-1-op-4-rerange', kind: 'reduce', state: 'confirmed', pool: 'pool:USDC/cbBTC/500' })
-    expect(opLine(op)).toBe('Rebalanced USDC/cbBTC')
-    expect(opLine(base({ opId: 'eng-1-1-op-4-rerange', kind: 'reduce', state: 'submitted' }))).toBe('Rebalancing')
+    expect(opLine(op)).toBe('Closed USDC/cbBTC position to move its range')
+    expect(opLine({ ...op, why: 'out' })).toBe('Closed out-of-range USDC/cbBTC position to move its range')
+    expect(opLine(base({ opId: 'eng-1-1-op-4-rerange', kind: 'reduce', state: 'submitted' }))).toBe('Closing a position to move its range')
+    expect(opLine(base({ opId: 'eng-1-1-op-4-reduce', kind: 'reduce', state: 'confirmed', pool: 'pool:USDC/cbBTC/500' }))).toBe('Trimmed USDC/cbBTC position back to your mix')
+    expect(opLine(base({ opId: 'eng-x', step: 'reduce', kind: 'reduce', state: 'confirmed' }))).toBe('Trimmed a position back to your mix')
   })
 
   test('owner exit (stop) is unchanged: no pool, it closes everything', () => {
