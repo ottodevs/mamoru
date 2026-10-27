@@ -97,10 +97,9 @@ author role never touches lady's live systemd state or secrets). To install it, 
    systemctl --user enable --now mamoru-lab-runner.service
    ```
 
-   The unit file now carries one `ReadWritePaths=%h/.local/state/mamoru-lab-runner` exception to its otherwise
-   read-only `$HOME` (the agent-job daily budget counter, otto/mamoru#204) — `systemctl --user daemon-reload`
-   picks it up from the copied unit file; no directory needs pre-creating, the runner's own
-   `checkAndIncrementAgentBudget` creates it on first use (`mkdirSync(..., {recursive: true})`).
+   The unit file now carries `StateDirectory=mamoru-lab-runner` (the agent-job daily budget counter,
+   otto/mamoru#204): systemd creates `~/.local/state/mamoru-lab-runner` and keeps it writable under the otherwise
+   read-only `$HOME`; `systemctl --user daemon-reload` picks it up from the copied unit file.
 3. Verify: `systemctl --user status mamoru-lab-runner.service` (active), `journalctl --user -u mamoru-lab-runner -f`
    while triggering a "Run scenario" in `/ops/lab`, or run `bun src/cli.ts seed` once by hand (with the same env) to
    populate the bench's catalog before anyone opens it.
