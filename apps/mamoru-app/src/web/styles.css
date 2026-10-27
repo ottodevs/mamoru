@@ -1954,6 +1954,9 @@
   25% {
     opacity: 1;
     transform: none;
+  }
+}
+
 /* #234: the line by "earned so far": drawn in once, its end breathing. */
 .spark {
   align-self: center;
