@@ -144,7 +144,10 @@ export async function watchOne(db: Db, chainId: number, probe: { up: true } | { 
   const row = await read()
   if (!row?.down_since) return
   if (now.getTime() - Date.parse(row.down_since) < DOWN_AFTER_MS) return
-  if (row.last_alert_at && now.getTime() - Date.parse(row.last_alert_at) < REMIND_EVERY_MS) return
+  // Until a "down" of this outage is delivered, a claim older than INFLIGHT_MAX_MS is a dead run's: retry it, do
+  // not wait REMIND_EVERY_MS for a warning nobody got.
+  const wait = row.alerted === 1 ? REMIND_EVERY_MS : INFLIGHT_MAX_MS
+  if (row.last_alert_at && now.getTime() - Date.parse(row.last_alert_at) < wait) return
   // Claim against the value just read (IS matches NULL too).
   const claimed = await db
     .prepare(`UPDATE operator_link_watch SET last_alert_at = ?, alert_inflight = ? WHERE chain_id = ? AND down_since = ? AND last_alert_at IS ? RETURNING chain_id`)
@@ -160,6 +163,11 @@ export async function watchOne(db: Db, chainId: number, probe: { up: true } | { 
     await db.prepare(`UPDATE operator_link_watch SET alerted = 1 WHERE chain_id = ? AND down_since = ?`).bind(chainId, row.down_since).run()
   } else {
     // Nothing delivered: give the claim back so the next tick tries again; `alerted` keeps any earlier delivery.
+    // If a concurrent recovery already turned this outage into a pending "recovered" on the strength of this send,
+    // and no earlier "down" of it was delivered, take that back too: no "recovered" for a "down" nobody got.
+    if (row.alerted !== 1) {
+      await db.prepare(`UPDATE operator_link_watch SET recovery_pending = NULL WHERE chain_id = ? AND recovery_pending = ? AND down_since IS NULL`).bind(chainId, row.down_since).run()
+    }
     await db.prepare(`UPDATE operator_link_watch SET last_alert_at = ? WHERE chain_id = ? AND last_alert_at = ?`).bind(row.last_alert_at, chainId, at).run()
   }
 }

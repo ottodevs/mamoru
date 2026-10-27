@@ -174,6 +174,34 @@ describe('watchOne races (review round 2 of PR #132)', () => {
   })
 })
 
+describe('watchOne lost sends (review round 4 of PR #132)', () => {
+  test('a run that dies after claiming the first "down" delays it by INFLIGHT_MAX_MS, not REMIND_EVERY_MS', async () => {
+    const db = memoryD1()
+    const ok = recorder()
+    await watchOne(db, 8453, DOWN, ok.notify, at(0))
+    void watchOne(db, 8453, DOWN, () => new Promise<boolean>(() => {}), at(DOWN_AFTER_MS))
+    await new Promise((r) => setTimeout(r, 0))
+    await watchOne(db, 8453, DOWN, ok.notify, at(DOWN_AFTER_MS + 10 * 60_000))
+    expect(ok.sent).toHaveLength(1)
+    expect(ok.sent[0]).toContain('cannot reach')
+  })
+
+  test('no "recovered" when the only "down" in flight during the recovery was not delivered', async () => {
+    const db = memoryD1()
+    const ok = recorder()
+    await watchOne(db, 8453, DOWN, ok.notify, at(0))
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const a = watchOne(db, 8453, DOWN, async () => (await gate, false), at(DOWN_AFTER_MS))
+    await new Promise((r) => setTimeout(r, 0))
+    await watchOne(db, 8453, UP, ok.notify, at(DOWN_AFTER_MS + 1))
+    release()
+    await a
+    await watchOne(db, 8453, UP, ok.notify, at(DOWN_AFTER_MS + 10 * 60_000))
+    expect(ok.sent).toEqual([])
+  })
+})
+
 describe('runOperatorLinkWatch (otto/mamoru#207)', () => {
   test('probes each configured chain and posts to Mattermost and Telegram without leaking the operator URL', async () => {
     const db = memoryD1()
