@@ -77,6 +77,8 @@ describe('lazy re-range (#101 experiment 4)', () => {
     const short = at(100_000n - 600n)
     expect(short.kind).toBe('hold')
     expect(short.positions[0]!.codes).toContain('DECIDE_RANGE_COOLDOWN')
+    // otto/mamoru#223: the hold names why the position waits.
+    expect(short.reason).toBe('DECIDE_RANGE_COOLDOWN')
     expect(at(100_000n - PAST_DWELL).kind).toBe('rerange')
     expect(at(null).kind).toBe('hold')
   })
@@ -87,6 +89,7 @@ describe('lazy re-range (#101 experiment 4)', () => {
     const poor = decide(make(1n), p)
     expect(poor.kind).toBe('hold')
     expect(poor.positions[0]!.codes).toContain('DECIDE_RANGE_BELOW_COST')
+    expect(poor.reason).toBe('DECIDE_RANGE_BELOW_COST')
     const rich = decide(make(1n << 120n), p)
     expect(rich.kind).toBe('rerange')
   })

@@ -3,7 +3,7 @@ import type { FundingView } from '@mamoru/domain'
 import { fixtureFunding } from '../../src/web/fixtures/client.ts'
 import { split } from '../../src/web/lib/money.ts'
 import { pairLabel, poolAddress, positionAmounts, positionTokens, progressLine } from '../../src/web/lib/positions.ts'
-import { Working } from '../../src/web/routes/home.tsx'
+import { engineLine, Working } from '../../src/web/routes/home.tsx'
 import { render } from './render.ts'
 
 const multi: FundingView = {
@@ -51,5 +51,15 @@ describe('positions of every pool', () => {
     expect(text).toContain('3.00 USDC')
     expect(text).toContain('Paused: out of range. Mamoru puts it back to work automatically.')
     expect(render(<Working f={{ ...multi, progress: null }} s={split(multi, null)} onStop={null} />).text).not.toContain('Swapping')
+  })
+  // otto/mamoru#223: the position and the status line say what the engine decided, by its re-range code.
+  test('an out-of-range position says why the engine leaves it', () => {
+    const held = (code: string): FundingView => ({ ...multi, progress: null, engine: { placing: false, nextReviewAt: '2026-10-27T10:00:00.000Z', rangeHolds: [{ tokenId: '2', code }] } })
+    const below = render(<Working f={held('DECIDE_RANGE_BELOW_COST')} s={split(multi, null)} onStop={null} />).text
+    expect(below).toContain('Too small to re-centre at a profit')
+    expect(below).not.toContain('puts it back to work automatically')
+    expect(render(<Working f={held('DECIDE_RANGE_COOLDOWN')} s={split(multi, null)} onStop={null} />).text).toContain('waits a little before re-centring')
+    expect(engineLine({ ...held('DECIDE_RANGE_BELOW_COST'), active: true })).toContain('too small to re-centre at a profit')
+    expect(engineLine({ ...held('DECIDE_RANGE_BELOW_COST'), active: true, engine: { placing: false, nextReviewAt: '2026-10-27T10:00:00.000Z' } })).toContain('Nothing to do right now')
   })
 })
