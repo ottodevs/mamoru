@@ -208,7 +208,8 @@ export function vaultRedeemOf(obs: Observation, policy: PolicyVersion, bucket: s
     // Never more shares than the vault redeems now (maxRedeem rounds the way the vault will): asked for more, the engine
     // would refuse it at prepare on every review and the available liquidity would never come out (review of #153).
     const sized = assets === v.assets ? v.shares : (v.shares * assets) / v.assets
-    const cap = v.maxRedeem ?? v.shares
+    // A vault short of liquidity is asked for 99 % of what it redeems, not its edge: a borrow before inclusion would revert it.
+    const cap = v.maxRedeem >= v.shares ? v.shares : (v.maxRedeem * 9_900n) / 10_000n
     const shares = sized < cap ? sized : cap
     if (shares === 0n) continue
     return { code: 'STRATEGY_PREFERENCE_DEVIATION', proposal: { kind: 'vault_redeem', grant: grantKeyFor(policy, 'vault-supply', v.name) as `vault-supply:${string}`, bucket, pool: v.name, vault: v.name, shares, assets } }

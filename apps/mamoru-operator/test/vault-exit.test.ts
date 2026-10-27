@@ -31,13 +31,22 @@ describe('planVaultExit', () => {
   test('review of #153: a vault short of liquidity is redeemed under its cap, never at the edge, and counted at the margin', () => {
     // maxWithdraw 120 of 500: redeem 99 % of maxRedeem, counted as 99 % of 120; the rest is short.
     const p = planVaultExit([holding('vault:gtUSDCp', 500n * USDC, { maxWithdraw: 120n * USDC, maxRedeem: 1_080n * USDC })], null, ORDER)
-    expect(p.exits).toEqual([{ vault: 'vault:gtUSDCp', mode: 'redeem', assets: 118_800_000n, shares: 1_069_200_000n, all: false }])
-    expect(p.short).toBe(500n * USDC - 118_800_000n)
+    // Counted at what those shares pay at the holding's rate, one unit under it.
+    expect(p.exits).toEqual([{ vault: 'vault:gtUSDCp', mode: 'redeem', assets: 118_799_999n, shares: 1_069_200_000n, all: false }])
+    expect(p.short).toBe(500n * USDC - 118_799_999n)
     // A part with less than 1 % of room above it is redeemed under the cap too, not withdrawn at the edge.
     const edge = planVaultExit([holding('vault:gtUSDCp', 500n * USDC, { maxWithdraw: 200n * USDC, maxRedeem: 1_800n * USDC })], 200n * USDC, ORDER)
-    expect(edge.exits[0]).toMatchObject({ mode: 'redeem', shares: 1_782n * USDC, assets: 198n * USDC })
-    expect(edge.short).toBe(2n * USDC)
+    expect(edge.exits[0]).toMatchObject({ mode: 'redeem', shares: 1_782n * USDC, assets: 197_999_999n })
+    expect(edge.short).toBe(2n * USDC + 1n)
     expect(planVaultExit([holding('vault:gtUSDCp', 500n * USDC, { maxWithdraw: 0n, maxRedeem: 0n })], 50n * USDC, ORDER)).toEqual({ exits: [], short: 50n * USDC })
+  })
+
+  test('review round 2 of #153: a 6-decimal share at 1.1 is never counted above what its redeem pays', () => {
+    // 120 USDC withdrawable, price 1.1: redeem floors twice; the count must stay at or under the payout.
+    const v = { name: 'vault:waBasUSDC', shares: 454_545_454n, assets: 499_999_999n, maxWithdraw: 120n * USDC, maxRedeem: 109_090_909n }
+    const x = planVaultExit([v], null, ORDER).exits[0]!
+    const paid = (x.shares * 11n) / 10n
+    expect(x.assets <= paid).toBe(true)
   })
 
   test('the calls: redeem(shares, safe, safe) and withdraw(assets, safe, safe), to the vault', () => {

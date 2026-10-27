@@ -1335,7 +1335,8 @@ export class Engine {
     // Review of #153: what the vault redeems now, never more than proposed. Liquidity that moved since the observation
     // shrinks the redeem rather than holding it back for ever; none at all waits for a later review.
     const max = await read<bigint>('maxRedeem', acct)
-    const shares = max < p.shares ? max : p.shares
+    // Short of liquidity at this block: 99 % of what it redeems, never its edge (review round 2 of #153).
+    const shares = max < p.shares ? (max * 9_900n) / 10_000n : p.shares
     if (shares === 0n) throw new ReasonError('DECIDE_WAIT_VAULT_LIQUIDITY', `${p.vault} redeems nothing now`)
     const assets = await read<bigint>('previewRedeem', shares)
     return {
