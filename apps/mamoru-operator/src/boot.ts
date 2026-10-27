@@ -24,6 +24,7 @@ import { StateStore, loadOrCreateKey } from './state.ts'
 import { EntryStore, withHoldValue } from './yield-entries.ts'
 import { withReceipts, type BlockTimeReader, type ReceiptReader, type ReceiptSource, type SafeBlockReader } from './yield-receipts.ts'
 import { EngineSettingsSource, type SettingsOverride } from './engine-settings.ts'
+import { PeerExposure, parsePeerOperators } from './exposure.ts'
 
 /**
  * Wraps a snapshot reader with #129's hold-value baseline, stored in its own file under `stateDir`, and the per-day
@@ -197,6 +198,8 @@ export type BootOptions = {
   settingsUrl?: string
   /** MAMORU_RPC_TRUSTED (otto/mamoru#140 part2 #5), see parseTrustedRpc. */
   trustedRpc?: string
+  /** MAMORU_PEER_OPERATORS (otto/mamoru#212), see parsePeerOperators. Unset: the cap counts this chain only. */
+  peerOperators?: string
 }
 
 /**
@@ -383,6 +386,10 @@ export async function bootOperator(o: BootOptions) {
   const relayer = new Relayer(relayerKey, relayerClient, via('relayer'), chainId, refusal)
   const bundler = refusal === null ? startLiveBundler(client, relayer, chainId, writes.on ? { registry, gasModel: chainOf(registry.chainId).gasModel } : {}) : null
   const knobs = capAndDepth(o, policy)
+  // otto/mamoru#212: the operators of the other chains, read for the account's total across chains.
+  const peerList = parsePeerOperators(o.peerOperators, chainId)
+  const peers = peerList.length ? new PeerExposure(peerList, o.secret) : null
+  if (peers) console.log(`[operator] cap counted across chains: ${peerList.map((p) => p.chainId).join(', ')} read from their operators`)
   let retune = () => {}
   // otto/mamoru#129: reassigned once the snapshot loop exists (it needs `operator`, built below); the settings
   // source is wired to call whatever this holds at the time, on every change it applies, not only the first.
@@ -411,6 +418,7 @@ export async function bootOperator(o: BootOptions) {
       ...(resolveV4Policy(policy.chain, process.env) ? { v4Policy: resolveV4Policy(policy.chain, process.env) } : {}),
       ...(resolveV5Policy(policy.chain, process.env) ? { v5Policy: resolveV5Policy(policy.chain, process.env) } : {}),
       guardReadsState: new GuardReadsState(o.stateDir),
+      ...(peers ? { peers } : {}),
     },
     client,
     relayer,
@@ -491,6 +499,8 @@ export async function bootOperator(o: BootOptions) {
     bridgeOut = new BridgeOut(l1, l1Relayer, o.stateDir, fetch, Date.now, process.env.ACROSS_API_KEY, enabledFor, aa, chainId === BASE_CHAIN_ID ? { client, relayer } : null)
     guard = bridgeOut.bundlerGuard()
     const bo = bridgeOut
+    // otto/mamoru#212: USDC on its way to Base counts toward the account's cap.
+    operator.bridgeInFlight = (accountKey) => bo.inFlightUsdc(accountKey)
     setInterval(() => void bo.tick(), 60_000)
     void bo.tick()
     if (aa) console.log(`[operator] bridge-out uses userOps on Ethereum: gas paid in USDC through the ${paymaster!.name} paymaster, bundled by the operator`)

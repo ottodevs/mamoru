@@ -35,6 +35,7 @@ const op = await bootOperator({
   depth: process.env.MAMORU_DEPTH,
   ...(process.env.MAMORU_SETTINGS_URL ? { settingsUrl: process.env.MAMORU_SETTINGS_URL } : {}),
   ...(process.env.MAMORU_RPC_TRUSTED ? { trustedRpc: process.env.MAMORU_RPC_TRUSTED } : {}),
+  ...(process.env.MAMORU_PEER_OPERATORS ? { peerOperators: process.env.MAMORU_PEER_OPERATORS } : {}),
   ...(process.env.MAMORU_L1_RPC_URL ? { l1RpcUrl: process.env.MAMORU_L1_RPC_URL } : {}),
   ...(process.env.MAMORU_L1_PAYMASTER ? { l1Paymaster: process.env.MAMORU_L1_PAYMASTER } : {}),
   ...(process.env.MAMORU_L1_PAYMASTER_URL ? { l1PaymasterUrl: process.env.MAMORU_L1_PAYMASTER_URL } : {}),

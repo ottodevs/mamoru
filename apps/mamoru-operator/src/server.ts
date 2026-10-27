@@ -8,6 +8,7 @@ import type { BridgeOut } from './bridge-out.ts'
 import { Admission, authFraming, boundedText, DEFAULT_ADMISSION, type AdmissionLimits, type Bucket } from './admission.ts'
 import type { RpcMetrics } from './metrics.ts'
 import { HttpError, type Operator } from './operator.ts'
+import { EXPOSURE_PATH } from './exposure.ts'
 
 /**
  * The old (pre-#140) 3-line payload has no `ts` segment, so it is just `${method} ${path}\n${header}\n${body}`
@@ -151,6 +152,23 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
         const snap = opts.snapshot.current
         if (!snap) return json(503, { error: 'no snapshot yet', lastError: opts.snapshot.lastError })
         return json(200, { ...snap, safes: snap.safes.map((x) => ({ ...x, accountKey: x.accountKey.slice(0, 8) })), lastError: opts.snapshot.lastError })
+      }
+      if (url.pathname.startsWith(EXPOSURE_PATH)) {
+        // otto/mamoru#212: a peer operator reads what this chain holds for one Safe, to hold the account's cap across
+        // chains. Read only, signed like /metrics (same OPERATOR_SECRET on every operator).
+        if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
+        if (!(await verifyMetricsSignature(opts.secret, 'GET', url.pathname, req.headers.get('x-mamoru-sig')))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+        const safe = url.pathname.slice(EXPOSURE_PATH.length)
+        if (!/^0x[0-9a-fA-F]{40}$/.test(safe)) return json(400, { error: 'not an address', code: 'BAD_REQUEST' })
+        if (!admission.enter('other')) return json(503, { error: 'the operator is busy, try again in a moment', code: 'OPERATOR_BUSY' })
+        try {
+          return json(200, await op.exposureFor(safe as `0x${string}`))
+        } catch (e) {
+          logErr('[http] exposure:', e)
+          return json(503, { error: 'the account could not be read right now', code: 'EXPOSURE_UNAVAILABLE' })
+        } finally {
+          admission.leave('other')
+        }
       }
       const m = ROUTE.exec(url.pathname)
       if (!m) return json(404, { error: 'not found' })

@@ -44,6 +44,7 @@ import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, amountsForLiquidity, inUsdc, livePool, nativePricePool, positionUsdc, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
+import { elsewhereOf, exposureOf, totalOf, type ChainExposure, type ExposureWire, type PeerExposure, type PeerRead } from './exposure.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
 import { ONE_ACTION_GAS_UNITS, gasReserveAlertOverrideFromEnv, gasReserveAlertWei } from './gas-reserve.ts'
@@ -101,6 +102,13 @@ const FUNDING_FRESH_MS = 15_000
 const CHAIN_USAGE_TTL_MS = 10 * 60_000
 const FUNDING_STALE_MS = 60_000
 const FUNDING_FRESH_READ_MS = 2_000
+/**
+ * otto/mamoru#212: how old the peer operators' read of an account may be: for a Start check (prepare, submit, the armed
+ * watcher, the send), for an engine review and for what funding shows. A peer that cannot be read fails closed.
+ */
+const PEER_START_MAX_AGE_MS = 10_000
+const PEER_ENGINE_MAX_AGE_MS = 30_000
+const PEER_FUNDING_MAX_AGE_MS = 30_000
 
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
 const EXECUTION_FAILURE = keccak256(stringToHex('ExecutionFailure(bytes32,uint256)'))
@@ -423,6 +431,11 @@ export type OperatorConfig = {
   opsFlags?: () => Partial<Record<OpsFlagName, boolean>>
   /** otto/mamoru#172: where the shared guard reads' fee history and fallback series survive a restart (`GuardReadsState`). Absent: memory only. */
   guardReadsState?: Pick<GuardReadsState, 'load' | 'update'>
+  /**
+   * otto/mamoru#212: the operators that run the same Safe address on the other chains (MAMORU_PEER_OPERATORS). The cap
+   * counts what the account holds there too. Absent or empty: this chain alone.
+   */
+  peers?: Pick<PeerExposure, 'configured' | 'read'>
 }
 
 /** Spec 007 T7: the live policies whose accounts the renew row moves to v4 (same three pools and weights). */
@@ -663,6 +676,10 @@ export class Operator {
   readonly guardReads: SharedGuardReads
   /** Uniswap V3 calls and quotes bound to `cfg.registry`. */
   private readonly v3: UniswapV3
+  /** otto/mamoru#212: USDC on its way to an account's Safe from Ethereum (bridge-out), counted in its exposure. Set at boot. */
+  bridgeInFlight: ((accountKey: string) => bigint) | null = null
+  /** otto/mamoru#212: the peer operators' read each running engine reviews with (taken right before the review). */
+  private readonly enginePeers = new Map<string, PeerRead>()
 
   constructor(
     readonly cfg: OperatorConfig,
@@ -1041,6 +1058,63 @@ export class Operator {
     return now === cap ? [] : [`Your plan now allows up to ${fmtUsdc(now)} USDC per account; this approval keeps the ${fmtUsdc(cap)} USDC limits you signed`]
   }
 
+  /**
+   * otto/mamoru#212: the cap the account's total across chains is held to. Before Start, the current cap (the
+   * activation then runs under the cap the owner signs). Running: the current cap, never above the one its grants were
+   * signed for; a higher cap takes a renewal, which funding offers (`approval.capRaise`).
+   */
+  effectiveCap(acc: AccountState): bigint {
+    return acc.active ? this.activationCap(acc, acc.signedCapUsdc) : this.capFor(acc)
+  }
+
+  /** otto/mamoru#212: this chain's share of the account's exposure, valued as funding shows it (idle tokens, positions). */
+  private localExposure(acc: Pick<AccountState, 'accountKey' | 'admittedTokenIds' | 'active'>, r: SafeRead): ChainExposure {
+    const reg = this.cfg.registry
+    const positions = this.sizingPositions(acc, r).map((p) => positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, reg))
+    return exposureOf(this.cfg.chainId, idleTokens(r, reg), positions, this.bridgeInFlight?.(acc.accountKey) ?? 0n, acc.active)
+  }
+
+  /** otto/mamoru#212: what the peer operators hold for this account's Safe. Never throws: a failure reads `ok: false`. */
+  private async peerRead(acc: AccountState, maxAgeMs: number): Promise<PeerRead> {
+    const peers = this.cfg.peers
+    if (!peers?.configured) return { ok: true, chains: [] }
+    try {
+      return await peers.read(acc.ctx.address, maxAgeMs)
+    } catch (e) {
+      logErr(`[peer] ${acc.accountKey} exposure read failed:`, e)
+      return { ok: false, chainId: 0 }
+    }
+  }
+
+  /**
+   * otto/mamoru#212: the account's total across chains for a Start check, `local` being what this chain holds. A peer
+   * that cannot be read refuses the Start (CAP_CHECK_UNAVAILABLE): nothing new is placed on a guess.
+   */
+  private async startTotal(acc: AccountState, local: bigint): Promise<{ total: bigint; across: boolean }> {
+    const peers = await this.peerRead(acc, PEER_START_MAX_AGE_MS)
+    if (!peers.ok) throw capCheckUnavailable()
+    const elsewhere = peers.chains.reduce((s, e) => s + totalOf(e), 0n)
+    return { total: local + elsewhere, across: elsewhere > 0n }
+  }
+
+  /** otto/mamoru#212: the cap an engine review places within (`Observation.cap`), from the read taken before it. */
+  private engineCap(acc: AccountState): NonNullable<Observation['cap']> {
+    const peers: PeerRead = this.cfg.peers?.configured ? (this.enginePeers.get(acc.accountKey) ?? { ok: false, chainId: 0 }) : { ok: true, chains: [] }
+    return { capUsdc: this.effectiveCap(acc), elsewhereUsdc: elsewhereOf(this.cfg.chainId, peers) }
+  }
+
+  /**
+   * otto/mamoru#212: GET /internal/exposure/<address>, what a peer operator counts of this Safe on this chain. Read only:
+   * an address no account here uses is read from the chain and stored nowhere.
+   */
+  async exposureFor(address: Address): Promise<ExposureWire> {
+    const safe = getAddress(address)
+    const acc = Object.values(this.store.state.accounts).find((a) => a.ctx.address.toLowerCase() === safe.toLowerCase())
+    const r = acc ? await this.readSafeCached(acc, safe, false) : await readSafe(this.client, safe, this.cfg.registry)
+    const e = this.localExposure(acc ?? { accountKey: '', admittedTokenIds: undefined, active: false }, r)
+    return { chainId: this.cfg.chainId, address: safe.toLowerCase(), block: r.block.toString(), idleUsdc: e.idleUsdc.toString(), placedUsdc: e.placedUsdc.toString(), active: e.active }
+  }
+
   settingsStatus(): (ReturnType<EngineSettingsSource['status']> & { capRefused: string[] }) | null {
     const s = this.cfg.settings?.status()
     return s ? { ...s, capRefused: [...this.capRefused].map((k) => k.slice(0, 8)) } : null
@@ -1179,7 +1253,11 @@ export class Operator {
     const target = this.v4Target(acc)
     const upgrade = target !== null
     const paused = this.chainUsage.get(acc.accountKey)?.paused === true
-    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, policyId: this.policyOf(acc).policyId, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}), ...(upgrade ? { upgrade, upgradePolicy: target.policyId } : {}), ...(paused ? { paused } : {}) }
+    // otto/mamoru#212: the cap was raised above the one these grants were signed for; a full renewal signs the new one.
+    const cap = this.capFor(acc)
+    const signed = this.signedCapOf(acc)
+    const capRaise = cap > signed ? { capUsdc: cap.toString(), signedUsdc: signed.toString() } : null
+    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, policyId: this.policyOf(acc).policyId, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}), ...(upgrade ? { upgrade, upgradePolicy: target.policyId } : {}), ...(paused ? { paused } : {}), ...(capRaise ? { capRaise } : {}) }
   }
 
   /**
@@ -1311,7 +1389,10 @@ export class Operator {
     void this.refreshChainUsage(acc).catch((e) => logErr(`[usage] ${acc.accountKey}`, e))
     // The app is open on this account: an armed activation is watched at full pace again.
     if (acc.armed) this.armSeen.set(acc.accountKey, Date.now())
-    const r = await this.readSafeCached(acc, live.safe, fresh)
+    const [r, peers] = await Promise.all([this.readSafeCached(acc, live.safe, fresh), this.peerRead(acc, PEER_FUNDING_MAX_AGE_MS)])
+    // otto/mamoru#212: the cap holds the account's total across every chain, idle and placed.
+    const total = totalOf(this.localExposure(acc, r)) + (peers.ok ? peers.chains.reduce((s, e) => s + totalOf(e), 0n) : 0n)
+    const cap = this.effectiveCap(acc)
     return {
       address: live.safe,
       deployed: r.deployed,
@@ -1320,7 +1401,8 @@ export class Operator {
       eth: r.eth.toString(),
       capUsdc: this.capFor(acc).toString(),
       // Only while the engine is off: that is when the cap refuses Start.
-      overCap: acc.active ? null : overCap(r.usdc, this.capFor(acc)),
+      overCap: acc.active ? null : overCap(total, cap),
+      exposure: { totalUsdc: total.toString(), capUsdc: cap.toString(), overUsdc: (total > cap ? total - cap : 0n).toString(), ...(peers.ok ? {} : { peerUnavailable: true }) },
       deployMinUsdc: MIN_DEPLOY_USDC.toString(),
       cbbtc: (r.tokens.cbBTC ?? 0n).toString(),
       gasReserveWei: this.policyOf(acc).gasReserveWei.toString(),
@@ -1920,7 +2002,7 @@ export class Operator {
     // #149: a grant near the end of its usage needs fresh counts, which only a full renewal gives (an extension keeps the
     // grants the account has): it goes first, like a due renewal.
     const view = this.approvalView(acc)
-    if (!target && missing.length && !view?.renewDue && !view?.usage && !this.unsettledRenewalGrants(acc).length) return this.planExtend(acc, live, policy, r, missing)
+    if (!target && missing.length && !view?.renewDue && !view?.usage && !view?.capRaise && !this.unsettledRenewalGrants(acc).length) return this.planExtend(acc, live, policy, r, missing)
     // The grants it replaces are revoked in the same Safe transaction, always: two sets are never enabled at once
     // and each limit exists once. Measured on Base: revoking eight grants is about 1.45M gas on top of the 12.7M that
     // enabling eight takes. When the whole does not fit the cap, manage-any/convert-any pairs are left out of the new
@@ -1928,9 +2010,11 @@ export class Operator {
     // The grants of a renewal whose outcome is still unknown go with them: if it ran unseen (a read behind the
     // chain), its grants are revoked here all the same; the removal of a session that is not there is taken.
     const old = [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? []), ...this.unsettledRenewalGrants(acc)])]
-    // A renewal keeps the limits the account signed for (spec 006): a raised cap never enlarges grants under a summary
-    // that says they stay the same. The summary names that cap, and says so when the plan now allows a different one.
-    const cap = this.signedCapOf(acc)
+    // otto/mamoru#212: a full renewal sizes the new grants for the account's cap now, raised or lowered from the one it
+    // signed before (spec 006 kept the old one, so a raised cap could never be used short of a stop and a new start).
+    // The summary names the cap and, when it changes, both figures: the owner signs the new limits knowingly.
+    const signed = this.signedCapOf(acc)
+    const cap = this.capFor(acc)
     if (isV4(policy)) {
       // The move to v4 enables every grant of the v4 policy; a v4 renewal the ones the account has, as before.
       // otto/mamoru#151: a renewal on MamoruActionPolicyV2 ends a guardian pause; the owner signs knowing it. Fails
@@ -1946,9 +2030,9 @@ export class Operator {
         target ? `Renew Mamoru's approval on your Safe ${live.safe} and move it to ${toV5 ? 'the new version of its on-chain limits' : 'on-chain limits'}` : `Renew Mamoru's approval on your Safe ${live.safe}`,
         ...(target ? ['Mamoru can now trade only near the market price, and only the positions it opened'] : []),
         ...(toV5 ? ['It can add to a position it already holds instead of opening another one', 'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause'] : []),
-        `Engine key ${f.sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero, sized for deposits up to ${fmtUsdc(cap)} USDC (the cap you signed):`,
+        `Engine key ${f.sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero, sized for deposits up to ${fmtUsdc(cap)} USDC (your cap):`,
         ...this.v4Lines(f.stored, policy, cap),
-        ...this.capNotice(acc, cap),
+        ...capChange(signed, cap),
         ...(f.v4?.admitted ? [`Your ${f.v4.admitted} open position${f.v4.admitted === 1 ? '' : 's'} stay under Mamoru's management`] : []),
         'The approval it replaces is revoked in the same transaction',
         ...this.stepLines(f.steps, f.rest),
@@ -1967,9 +2051,9 @@ export class Operator {
     const liveManage = stored.filter((g) => g.name.startsWith('manage-any') || g.name.startsWith('convert-any')).map((g) => g.name)
     const summary = [
       `Renew Mamoru's approval on your Safe ${live.safe}`,
-      `Engine key ${sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero, sized for deposits up to ${fmtUsdc(cap)} USDC (the cap you signed):`,
+      `Engine key ${sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero, sized for deposits up to ${fmtUsdc(cap)} USDC (your cap):`,
       ...this.limitLines(stored, policy),
-      ...this.capNotice(acc, cap),
+      ...capChange(signed, cap),
       'The approval it replaces is revoked in the same transaction',
       ...(dropped.length ? [`Re-ranging and collecting fees in ${this.poolsOf(dropped)} needs one more approval after this one`] : []),
       ...(liveManage.length
@@ -2586,7 +2670,9 @@ export class Operator {
     // One cap for the whole prepare (spec 006): the check, the grants, the summary and the stored ceiling all use this
     // value, so a settings pull in the middle cannot make them disagree.
     const cap = this.capFor(acc)
-    if (r.usdc > cap) throw depositOverCap(r.usdc, cap)
+    // otto/mamoru#212: what the account holds here and on every other chain, idle and placed.
+    const start = await this.startTotal(acc, totalOf(this.localExposure(acc, r)))
+    if (start.total > cap) throw depositOverCap(start.total, cap, start.across)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc, this.chainName())
     const policy = this.cfg.policy
     // otto/mamoru#15: a Safe holding enough USDC buys its own gas reserve in this very transaction (self-reserve.ts):
@@ -2917,7 +3003,7 @@ export class Operator {
    * before that record (`admittedTokenIds` absent) counts every position worth more than dust. Largest first, at
    * most MAX_SIZING_POSITIONS.
    */
-  private sizingPositions(acc: AccountState, r: SafeRead): PoolPosition[] {
+  private sizingPositions(acc: Pick<AccountState, 'admittedTokenIds'>, r: SafeRead): PoolPosition[] {
     const admitted = acc.admittedTokenIds ? new Set(acc.admittedTokenIds) : null
     return r.positions
       .filter((p) => (admitted ? admitted.has(p.tokenId.toString()) : positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry) >= POSITION_DUST_USDC))
@@ -3492,7 +3578,9 @@ export class Operator {
       this.assertBudget(acc)
       const usdc = await this.usdcOf(live.safe)
       if (usdc === 0n) return this.armFresh(acc, p, signature)
-      if (usdc > this.activationCap(acc, p.capUsdc)) throw depositOverCap(usdc, this.activationCap(acc, p.capUsdc))
+      // otto/mamoru#212: the total across chains, and USDC on its way here from Ethereum.
+      const start = await this.startTotal(acc, usdc + (this.bridgeInFlight?.(acc.accountKey) ?? 0n))
+      if (start.total > this.activationCap(acc, p.capUsdc)) throw depositOverCap(start.total, this.activationCap(acc, p.capUsdc), start.across)
       // The relayer cannot pay for it now: the signature waits armed and the watcher runs it once the relayer is funded.
       // A batch that buys its own gas reserve needs no top-up from it (otto/mamoru#15).
       if (!(await this.relayerCanActivate(acc, BigInt(p.reserveWei ?? 0) > 0n))) return this.armFresh(acc, p, signature)
@@ -3688,7 +3776,12 @@ export class Operator {
       const { deployed, nonce } = await readSafeNonce(this.client, live.safe)
       if (nonce !== p.tx.nonce) return { code: 'SAFE_NONCE_MOVED' }
       const usdc = await this.usdcOf(live.safe)
-      if (p.kind === 'activate' && usdc > this.activationCap(acc, p.capUsdc)) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: usdc.toString(), capUsdc: this.activationCap(acc, p.capUsdc).toString() } }
+      if (p.kind === 'activate') {
+        // otto/mamoru#212: the total across chains; a peer that cannot be read keeps it from running now.
+        const start = await this.startTotal(acc, usdc + (this.bridgeInFlight?.(acc.accountKey) ?? 0n)).catch(() => null)
+        if (!start) return { code: 'CAP_CHECK_UNAVAILABLE' }
+        if (start.total > this.activationCap(acc, p.capUsdc)) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: start.total.toString(), capUsdc: this.activationCap(acc, p.capUsdc).toString() } }
+      }
       if (!deployed && usdc < MIN_DEPLOY_USDC) return { code: 'BELOW_DEPLOY_MINIMUM' }
       // otto/mamoru#140 (part2 #6): a Safe-paid transaction needs the ETH its fee was quoted at, or the relayer pays a revert (GS011).
       if (p.tx.refund && p.feeWei && (await this.client.getBalance({ address: live.safe })) < BigInt(p.feeWei)) return { code: 'SAFE_FEE_UNFUNDED' }
@@ -4060,9 +4153,16 @@ export class Operator {
     // Over the cap the approval waits too: it runs if the excess leaves through a path that keeps the Safe nonce, or
     // the cap is raised. The app reads the excess from funding and offers the withdrawal.
     const cap = this.activationCap(acc, a.capUsdc)
-    if (usdc > cap) {
+    // otto/mamoru#212: counted across chains. The other chains unreadable: the approval waits, kept.
+    const peers = await this.peerRead(acc, PEER_START_MAX_AGE_MS)
+    if (!peers.ok) {
+      logErr(`[armed] ${acc.accountKey} ${a.opId} held: the other chains could not be read (CAP_CHECK_UNAVAILABLE)`, undefined)
+      return this.park(acc, ARM_RETRY_MS)
+    }
+    const total = usdc + (this.bridgeInFlight?.(acc.accountKey) ?? 0n) + peers.chains.reduce((s, e) => s + totalOf(e), 0n)
+    if (total > cap) {
       const shown = acc.ops.find((o) => o.opId === a.opId)
-      if (shown?.amountUsdc !== usdc.toString() || shown.capUsdc !== cap.toString()) this.patchOp(acc, a.opId, { amountUsdc: usdc.toString(), capUsdc: cap.toString() })
+      if (shown?.amountUsdc !== total.toString() || shown.capUsdc !== cap.toString()) this.patchOp(acc, a.opId, { amountUsdc: total.toString(), capUsdc: cap.toString() })
       return this.park(acc, ARM_CAP_HOLD_MS)
     }
     // The relayer cannot pay for it yet: stay armed, without using up a try. Waiting is not activity, so the watcher
@@ -4125,7 +4225,7 @@ export class Operator {
     const ended = acc.ops.find((o) => o.opId === op.opId)
     if (ended?.state !== 'failed') return
     // The cap was met inside the attempt (a deposit landed meanwhile): same wait as above, the approval is kept.
-    if (ended.code === 'DEPOSIT_OVER_CAP' && !ended.txHash) {
+    if ((ended.code === 'DEPOSIT_OVER_CAP' || ended.code === 'CAP_CHECK_UNAVAILABLE') && !ended.txHash) {
       this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
       return this.park(acc, ARM_CAP_HOLD_MS)
     }
@@ -4361,9 +4461,15 @@ export class Operator {
       // outside this check altogether (otto/mamoru#71).
       const usdc = await this.usdcOf(safe)
       const cap = this.activationCap(acc, p.capUsdc)
-      if (usdc > cap) {
-        logErr(`[owner] ${op.opId} deposit over cap at send time, not activating:`, { usdc: usdc.toString(), cap: cap.toString() })
-        return this.failOwner(acc, op, 'DEPOSIT_OVER_CAP', { amountUsdc: usdc.toString(), capUsdc: cap.toString() })
+      // otto/mamoru#212: the total across chains; a peer that cannot be read keeps it from running now.
+      const start = await this.startTotal(acc, usdc + (this.bridgeInFlight?.(acc.accountKey) ?? 0n)).catch(() => null)
+      if (!start) {
+        logErr(`[owner] ${op.opId} the other chains could not be read at send time, not activating`, undefined)
+        return this.failOwner(acc, op, 'CAP_CHECK_UNAVAILABLE')
+      }
+      if (start.total > cap) {
+        logErr(`[owner] ${op.opId} deposit over cap at send time, not activating:`, { usdc: start.total.toString(), cap: cap.toString() })
+        return this.failOwner(acc, op, 'DEPOSIT_OVER_CAP', { amountUsdc: start.total.toString(), capUsdc: cap.toString() })
       }
     }
     // otto/mamoru#15: checked again right before the exec leaves (the deploy and the simulation took time).
@@ -4780,6 +4886,8 @@ export class Operator {
         intents: () => ({ paused: this.stopInFlight(acc), exitRequested: false }),
         peerPositions: () => this.peerPositionsOf(acc.accountKey),
         onEntering: (pool) => this.markEntering(acc, pool),
+        // otto/mamoru#212: new money is placed only within the cap, counted across chains.
+        cap: () => this.engineCap(acc),
       },
       {
         waitBlock: () => Bun.sleep(this.cfg.waitBlockMs),
@@ -4864,6 +4972,9 @@ export class Operator {
             more = true
             return
           }
+          if (runner.stopped || !acc.active) return
+          // otto/mamoru#212: the other chains as this review counts them (a failed read: nothing new is placed).
+          if (this.cfg.peers?.configured) this.enginePeers.set(acc.accountKey, await this.peerRead(acc, PEER_ENGINE_MAX_AGE_MS))
           if (runner.stopped || !acc.active) return
           const startedAt = Date.now()
           const r = await engine.review()
@@ -5036,6 +5147,7 @@ export class Operator {
     if (r.timer) clearTimeout(r.timer)
     this.runners.delete(key)
     this.reviewHeldSince.delete(key)
+    this.enginePeers.delete(key)
     // otto/mamoru#8: a stopped (or about-to-restart, startLoop calls this first) account must not keep counting
     // towards gasReserveLowCount, nor hand its stale pre-stop balance to a restarted loop's first /metrics read.
     this.gasReserve.evict(key)
@@ -5130,8 +5242,18 @@ export function collapseFailed(ops: StoredOp[]): OpView[] {
 }
 
 /** Start refused: the Safe holds more USDC than the per-account cap. The message carries the amounts for the SPA. */
-function depositOverCap(usdc: bigint, cap: bigint): HttpError {
-  return new HttpError(409, 'DEPOSIT_OVER_CAP', `this account holds ${fmtUsdc(usdc)} USDC, over the ${fmtUsdc(cap)} USDC cap; withdraw at least ${fmtUsdcUp(usdc - cap)} USDC to start`)
+function depositOverCap(usdc: bigint, cap: bigint, across = false): HttpError {
+  return new HttpError(409, 'DEPOSIT_OVER_CAP', `this account holds ${fmtUsdc(usdc)} USDC${across ? ' across its networks' : ''}, over the ${fmtUsdc(cap)} USDC cap; withdraw at least ${fmtUsdcUp(usdc - cap)} USDC to start`)
+}
+
+/** otto/mamoru#212: the renewal line that names a cap change, or nothing when the cap is the one signed before. */
+function capChange(signed: bigint, cap: bigint): string[] {
+  return signed === cap ? [] : [`Your cap changes from ${fmtUsdc(signed)} to ${fmtUsdc(cap)} USDC: the limits above are sized for the new one`]
+}
+
+/** otto/mamoru#212: Start refused because the account's other chains could not be read (fail closed). */
+function capCheckUnavailable(): HttpError {
+  return new HttpError(503, 'CAP_CHECK_UNAVAILABLE', 'your balance on the other networks could not be read just now: nothing was changed, try again in a minute')
 }
 
 function belowDeployMinimum(usdc: bigint, chain = 'Base'): HttpError {

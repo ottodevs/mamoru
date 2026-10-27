@@ -1365,6 +1365,17 @@ export class BridgeOut {
   }
 
   /** CCTP moves not finished on Base (burned or possibly burned, not minted). */
+  /**
+   * otto/mamoru#212: USDC of this account's move from Ethereum still on its way to Base (sending, held by the bridge, or
+   * its outcome unknown), counted in the account's cap. Not an expired move: that one goes back to Ethereum.
+   */
+  inFlightUsdc(accountKey: string): bigint {
+    const r = this.journal.routes[accountKey]
+    if (!r || !(r.state === 'sending' || r.state === 'deposited' || r.state === 'unconfirmed')) return 0n
+    const v = r.outputUsdc || r.amountUsdc
+    return /^[0-9]+$/.test(v) ? BigInt(v) : 0n
+  }
+
   pendingCctp(): number {
     return Object.values(this.journal.routes).filter((r) => r.bridge === 'cctp' && NON_TERMINAL.has(r.state)).length
   }

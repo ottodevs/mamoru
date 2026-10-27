@@ -75,8 +75,14 @@ export type FundingView = {
   usdc: string            // base units
   eth: string             // wei
   capUsdc: string         // hard cap per account, base units
-  // Set while the engine is not running and the Safe holds more USDC than the cap: Start is refused until the excess leaves.
+  // Set while the engine is not running and the account holds more than the cap (otto/mamoru#212: its total across every
+  // chain, idle and placed): Start is refused until the excess leaves.
   overCap?: OverCap | null
+  // otto/mamoru#212: the account's total with Mamoru across every chain, idle and placed, against the cap it is held to
+  // (running: the current cap, never above the one its approval was signed for). `overUsdc`: how far the total is above
+  // it (0 within). A running account places nothing new past the cap; what is above it stays idle, and nothing is sold
+  // because positions gained. `peerUnavailable`: another chain could not be read, so nothing new is placed until it is.
+  exposure?: { totalUsdc: string; capUsdc: string; overUsdc: string; peerUnavailable?: boolean }
   // The relayer deploys the Safe only once it holds this much USDC (base units); below it nothing starts and nothing can be sent.
   deployMinUsdc?: string
   cbbtc: string           // base units
@@ -105,8 +111,11 @@ export type FundingView = {
   // (conservador-live-v4, or conservador-live-v5 on MamoruActionPolicyV2), so the row says what changes.
   // `paused` (otto/mamoru#151): MamoruActionPolicyV2's guardian has paused the account; a renewal would end that pause.
   // `policyId`: the account's own policy, what a renewal that moves nothing renews.
+  // `capRaise` (otto/mamoru#212): the account's cap is now above the one its approval was signed for; a renewal signs
+  // limits sized for the new cap. Until then the account is held to the signed one. Absent otherwise.
   approval?: {
     validUntil: number; renewDue: boolean; expired: boolean; missing?: number; upgrade?: boolean; upgradePolicy?: string; paused?: boolean; policyId?: string
+    capRaise?: { capUsdc: string; signedUsdc: string }
     usage?: { action: 'collect' | 'rerange' | 'enter'; pool: string | null; usedBps: number; spent: boolean }
   } | null
   positions: {
