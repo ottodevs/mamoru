@@ -2,7 +2,7 @@ import type { ApyView, FundingView, Hex0x, OpView, OverCap, PriceDivergenceWarni
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
-import { fundingInterval, queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
+import { fundingInterval, queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useSession, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { PriceDivergenceNotice } from '../components/price-divergence-notice.tsx'
 import { TokenMark } from '../components/token-mark.tsx'
@@ -25,6 +25,7 @@ import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { FeedbackDialog, feedbackCopy } from '../components/feedback-dialog.tsx'
 import { HowItWorks, howCopy } from '../components/how-it-works.tsx'
 import { Chevron, Fold, LiveSync, PullToRefresh, TweenPct, TweenUsd } from '../components/motion.tsx'
+import { isMultichainTarget, monadCopy, MonadConsentDialog, splitRows } from '../components/monad-consent.tsx'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
 
 export const homeCopy = {
@@ -106,6 +107,10 @@ export const homeCopy = {
   // otto/mamoru#151, #171: the move to MamoruActionPolicyV2 (conservador-live-v5), from v2/v3 or from v4.
   // otto/mamoru#151: the guardian paused the account; the owner's renewal would end the pause.
   pausedTitle: 'A guardian key has paused Mamoru on this account, so it is not acting. Renewing its approval ends that pause: renew only if you know why it was paused.',
+  // otto/mamoru#201, #216: the move to a mix that also works on Monad (conservador-live-v6).
+  upgradeMonadTitle: 'Mamoru now works on Monad too. See what changes in your mix, then approve it with two taps.',
+  upgradeMonadNote: 'Two taps with your passkey. Nothing moves until you approve both.',
+  upgradeMonad: 'See what changes',
   upgradeV5Title: "Mamoru's on-chain limits have a new version: it trades only near the market price and only the positions it opened, adds to a position it already holds instead of opening another, and a guardian key can pause it but never move funds. Renew its approval to turn this on.",
   // otto/mamoru#149: a grant that has used 80% or all of what the approval allows.
   usageSoon: (what: string, pair: string) => `Mamoru has used most of what this approval allows for ${what} in ${pair}. Renew it now so that does not stop.`,
@@ -907,6 +912,7 @@ export function approvalTitle(approval: NonNullable<FundingView['approval']>): s
   if (u?.spent) return usage!
   if (approval.renewDue) return homeCopy.renewSoon(approvalDay(approval.validUntil))
   if (usage) return usage
+  if (approval.upgrade && isMultichainTarget(approval.upgradePolicy)) return homeCopy.upgradeMonadTitle
   // otto/mamoru#212: grants still missing are added first, without accepting a raise; the raise is the next tap.
   if (approval.capRaise && !(approval.missing ?? 0)) return homeCopy.capRaiseTitle(usdPlain(approval.capRaise.capUsdc), usdPlain(approval.capRaise.signedUsdc))
   return approval.upgrade ? (approval.upgradePolicy?.includes('-v5') ? homeCopy.upgradeV5Title : homeCopy.upgradeTitle) : homeCopy.extendTitle
@@ -919,14 +925,15 @@ export function approvalTitle(approval: NonNullable<FundingView['approval']>): s
  * signed in the approval dialog, the same one Home opens on its own when a renewal is due (#176).
  */
 export function ApprovalRow({ approval, onOpen }: { approval: NonNullable<FundingView['approval']>; onOpen: () => void }) {
+  const monad = approval.upgrade === true && isMultichainTarget(approval.upgradePolicy) && !approval.renewDue && !approval.expired && !approval.usage && !approval.paused
   return (
     <section className="card flex flex-wrap items-center justify-between gap-3" data-testid="renew" role="status">
       <span className="max-w-[40rem]">
         <span className="title">{approvalTitle(approval)}</span>
-        <span className="sub">{homeCopy.renewNote}</span>
+        <span className="sub">{monad ? homeCopy.upgradeMonadNote : homeCopy.renewNote}</span>
       </span>
       <button type="button" className="act" onClick={onOpen}>
-        {approval.renewDue || approval.usage || approval.upgrade || approval.expired || (approval.capRaise && !(approval.missing ?? 0)) ? homeCopy.renew : homeCopy.extend}
+        {monad ? homeCopy.upgradeMonad : approval.renewDue || approval.usage || approval.upgrade || approval.expired || (approval.capRaise && !(approval.missing ?? 0)) ? homeCopy.renew : homeCopy.extend}
       </button>
     </section>
   )
@@ -997,6 +1004,66 @@ function RenewDialog({ accountKey, approval, open, onClose, onDone }: { accountK
     <ApprovalDialog title={title} open={open && !done} onClose={onClose}>
       <ApprovalBody lead={lead} summary={prepared?.tx.summary ?? null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void (prepared ? flow.approve() : flow.prepare())} onLater={onClose} />
     </ApprovalDialog>
+  )
+}
+
+/**
+ * otto/mamoru#216: the move to a mix with a share on Monad. Step 1 opens the owner's Safe on Monad (its sleeve: created
+ * here when it does not exist yet, then activated with the passkey on Monad's operator); step 2 is the usual renewal on
+ * Base, to the target policy. Step 2 is offered only once the Monad Safe runs, and the Worker refuses it otherwise.
+ */
+function MonadUpgradeDialog({ accountKey, approval, open, onClose, onDone }: { accountKey: string; approval: NonNullable<FundingView['approval']>; open: boolean; onClose: () => void; onDone: (signedKey: string, opId: string) => void }) {
+  const api = useApi()
+  const qc = useQueryClient()
+  const session = useSession()
+  const sleeve = (session.data?.sleeves ?? []).find((x) => x.chainId === 143)
+  const sleeveFunding = useFunding(sleeve?.accountKey, open && !!sleeve, 15_000)
+  const monadFlow = useOwnerAction(sleeve?.accountKey, 'activate')
+  const baseFlow = useOwnerAction(accountKey, 'renew')
+  const prepared = useFittingPrepared(approval, baseFlow)
+  const [opening, setOpening] = useState<string | null>(null)
+  const monadDone = sleeveFunding.data?.active === true || (!!monadFlow.result && monadFlow.result.state !== 'failed')
+  const done = !!baseFlow.result && baseFlow.result.state !== 'failed'
+  const doneOp = done ? baseFlow.result!.opId : null
+  useEffect(() => {
+    if (!doneOp) return
+    onDone(approvalRowKey(approval), doneOp)
+    onClose()
+  }, [doneOp, onClose, onDone, approval])
+  // No sleeve yet: create it (same passkey, same address), then prepare its activation.
+  const prepareMonad = async () => {
+    if (sleeve) return void monadFlow.prepare()
+    setOpening(monadCopy.opening)
+    try {
+      await api.addSleeve(143)
+      await qc.invalidateQueries({ queryKey: queryKeys.session })
+    } catch (e) {
+      setOpening(e instanceof Error ? e.message : String(e))
+      return
+    }
+    setOpening(null)
+  }
+  // Once the new sleeve shows up in the session, its activation is prepared without another tap.
+  useEffect(() => {
+    if (sleeve && opening === null && !monadFlow.prepared && !monadFlow.busy && !monadDone && monadFlow.error === null && open) void monadFlow.prepare()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sleeve?.accountKey])
+  const rows = splitRows(approval.policyId ?? '', approval.upgradePolicy ?? '')
+  return (
+    <MonadConsentDialog
+      open={open && !done}
+      rows={rows}
+      monadDone={monadDone}
+      onClose={onClose}
+      monad={{
+        busy: opening === monadCopy.opening ? 'preparing' : monadFlow.busy,
+        error: opening && opening !== monadCopy.opening ? opening : monadFlow.error,
+        summary: monadFlow.prepared?.tx.summary ?? null,
+        prepare: () => void prepareMonad(),
+        approve: () => void (monadFlow.prepared ? monadFlow.approve() : prepareMonad()),
+      }}
+      base={{ busy: baseFlow.busy, error: baseFlow.error, summary: prepared?.tx.summary ?? null, prepare: () => void baseFlow.prepare(), approve: () => void (prepared ? baseFlow.approve() : baseFlow.prepare()) }}
+    />
   )
 }
 
@@ -1279,7 +1346,11 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           <StopDialog accountKey={accountKey} s={s} open={dialog === 'stop'} onClose={() => setDialog(null)} />
           <StartDialog accountKey={accountKey} s={s} open={dialog === 'start'} onClose={() => setDialog(null)} />
           {f.approval && f.active && !renewing && approvalOpen && (renewAsk || f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade || f.approval.capRaise) ? (
-            <RenewDialog onDone={markSigned} key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null && !feedbackOpen} onClose={closeRenewAsk} />
+            f.approval.upgrade && isMultichainTarget(f.approval.upgradePolicy) && !f.approval.renewDue && !f.approval.expired && !f.approval.usage && !f.approval.paused ? (
+              <MonadUpgradeDialog onDone={markSigned} key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null && !feedbackOpen} onClose={closeRenewAsk} />
+            ) : (
+              <RenewDialog onDone={markSigned} key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null && !feedbackOpen} onClose={closeRenewAsk} />
+            )
           ) : null}
         </>
       ) : null}
