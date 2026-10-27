@@ -1,7 +1,7 @@
 import type { PublicClient } from 'viem'
 import { BASE_CHAIN_ID, ReasonError, chainOf, isChainId, type Address, type ChainId } from '@mamoru/domain'
 import { address, entry, erc20Abi, erc4626Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
-import { Batch, balanceRead, blockNumberRead, contractRead, createDeployedChecker, multicall3Of, tokenIdReads, type Handle } from '@mamoru/rpc'
+import { Batch, PRICE_SHARES, balanceRead, blockNumberRead, contractRead, createDeployedChecker, multicall3Of, tokenIdReads, type Handle } from '@mamoru/rpc'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 
 /**
@@ -201,7 +201,8 @@ export async function readSafe(client: PublicClient, safe: Address, registry: Re
   const vaultRead = (name: string, functionName: 'balanceOf' | 'convertToAssets' | 'maxWithdraw' | 'maxRedeem', arg: Address | bigint) =>
     first.add(contractRead(client, { address: address(name, registry), abi: erc4626Abi, functionName, args: [arg as never] }))
   const vaultReads = vaultNames.map((n) => {
-    const one = 10n ** BigInt(entry(n, registry).decimals ?? 18)
+    // Review of #153: the price of 10^12 whole shares, so the value keeps the share's extra digits (see rpc `observe`).
+    const one = PRICE_SHARES * 10n ** BigInt(entry(n, registry).decimals ?? 18)
     return { n, one, reads: [vaultRead(n, 'balanceOf', safe), vaultRead(n, 'convertToAssets', one), vaultRead(n, 'maxWithdraw', safe), vaultRead(n, 'maxRedeem', safe)] }
   })
   // The block is known only once `first` has run: the speculative ids carry none (they resolve through

@@ -32,7 +32,7 @@ const POOLS = [pool('pool:USDC/USDT/100', 1), pool('pool:USDC/cbBTC/500', -69_08
 
 function vault(name: string, assets: bigint, over: Partial<VaultObs> = {}): VaultObs {
   const shares = name === 'vault:gtUSDCp' ? (assets * ONE_SHARE) / PRICE : assets
-  return { name, shares, assets, maxWithdraw: assets, maxDeposit: 10n ** 30n, ...over }
+  return { name, shares, assets, maxWithdraw: assets, maxDeposit: 10n ** 30n, maxRedeem: shares, ...over }
 }
 
 function obs(over: Partial<Observation> = {}): Observation {
@@ -164,6 +164,30 @@ describe('conservador-live-v7: the stables bucket in vaults (otto/mamoru#210)', 
     // Part of it payable: that part goes now.
     const part = decide(obs({ vaults: [vault('vault:gtUSDCp', 900n * USDC, { maxWithdraw: 150n * USDC }), vault('vault:waBasUSDC', 0n)], balances: { USDC: 100n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), V7)
     expect(part.proposal).toMatchObject({ kind: 'vault_redeem', assets: 150n * USDC })
+  })
+
+  test('review of #153: a liquidity-capped redeem never asks for more shares than maxRedeem', () => {
+    const v = vault('vault:gtUSDCp', 900n * USDC)
+    // maxWithdraw 150, but the vault redeems one share fewer than 150 USDC's worth at its own rounding.
+    const capped = { ...v, maxWithdraw: 150n * USDC, maxRedeem: (v.shares * 150n) / 900n - 1n }
+    const d = decide(obs({ vaults: [capped, vault('vault:waBasUSDC', 0n)], balances: { USDC: 100n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), V7)
+    expect(d.proposal).toMatchObject({ kind: 'vault_redeem', shares: capped.maxRedeem })
+  })
+
+  test('review of #153: a vault waiting for liquidity does not hold back the USDC/USDT migration', () => {
+    const lp = POOLS[0]!
+    const held: PositionObs = { tokenId: 7n, pool: lp.name, tickLower: -10, tickUpper: 10, liquidity: 10n ** 9n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }
+    // The vault is over its target (900 of ~1,000) and pays nothing now; the old position must still leave.
+    const d = decide(obs({ positions: [held], vaults: [vault('vault:gtUSDCp', 900n * USDC, { maxWithdraw: 0n, maxRedeem: 0n }), vault('vault:waBasUSDC', 0n)], balances: { USDC: 100n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), V7)
+    expect(d.proposal).toMatchObject({ kind: 'reduce', pool: 'pool:USDC/USDT/100', tokenId: 7n })
+  })
+
+  test('review of #153: dust left in a bucket being left is skipped, never a block on the buckets after it', () => {
+    const lp = POOLS[0]!
+    // A few units of liquidity: worth far less than its op, so no reduce of it; the over-weight vault still redeems.
+    const dust: PositionObs = { tokenId: 8n, pool: lp.name, tickLower: -10, tickUpper: 10, liquidity: 1_000n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }
+    const d = decide(obs({ positions: [dust], vaults: [vault('vault:gtUSDCp', 900n * USDC), vault('vault:waBasUSDC', 0n)], balances: { USDC: 100n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), V7)
+    expect(d.proposal).toMatchObject({ kind: 'vault_redeem', vault: 'vault:gtUSDCp' })
   })
 
   test('within the drift band a vault bucket is left alone', () => {

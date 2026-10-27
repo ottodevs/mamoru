@@ -742,8 +742,12 @@ export class Operator {
       .map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, active: !!a.active, armed: !!a.armed, ...(this.hasVaults(a) ? { vaults: true } : {}) }))
   }
 
-  /** otto/mamoru#210: the account's policy has a vault bucket (false when its policy cannot be resolved). */
+  /**
+   * otto/mamoru#210: whether the account's vault shares are read: its policy has a vault bucket, or it once had one
+   * (`vaultsSeen`, review of #153: money left in a vault stays visible and exits after a policy change).
+   */
   private hasVaults(acc: AccountState): boolean {
+    if (acc.vaultsSeen) return true
     try {
       return this.bucketVaults(acc).length > 0
     } catch {
@@ -1450,6 +1454,10 @@ export class Operator {
     // for, and is never pruned on this read's word.
     const asked = acc.admittedTokenIds ? [...acc.admittedTokenIds] : undefined
     const vaults = this.hasVaults(acc)
+    if (vaults && !acc.vaultsSeen && this.store.state.accounts[acc.accountKey] === acc) {
+      acc.vaultsSeen = true
+      this.store.save()
+    }
     const r = await readSafe(this.client, safe, this.cfg.registry, { ...(asked ? { admitted: asked.map((id) => BigInt(id)) } : {}), ...(vaults ? { vaults } : {}) })
     // Sol review #6: the record holds what the Safe still owns, so it stays bounded. Pruned from a read that saw every
     // NFT (enumerated) or checked the admitted ids one by one (ownerOf), never from a capped enumeration.

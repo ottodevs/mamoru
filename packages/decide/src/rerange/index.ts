@@ -150,12 +150,16 @@ export function reduceOf(obs: Observation, policy: PolicyVersion, policyPools: R
   if (!hasManageAny(policy)) return { code: null, proposal: null }
   const { total, buckets } = bucketValues(obs, policy, policyPools)
   if (total === 0n) return { code: null, proposal: null }
+  // A vault bucket that cannot give back now (no liquidity, or below the op cost) says so, but never holds the other
+  // buckets' reduce back (the v7 USDC/USDT migration among them): its code is returned only when nothing else acts.
+  let vaultCode: ReasonCode | null = null
   for (const b of buckets) {
     if (b.vault) {
       const drift = BigInt(lab?.driftBps?.[b.bucket] ?? DRIFT_BPS)
       if (b.value * 10_000n <= b.target * 10_000n + total * drift) continue
       const r = vaultRedeemOf(obs, policy, b.bucket, b.value - b.target)
-      if (r.code || r.proposal) return r
+      if (r.proposal) return r
+      vaultCode ??= r.code
       continue
     }
     // Lab (#101 round 3): a depegged pool is left alone; a bucket under a staged exit is reduced at its own band.
@@ -169,13 +173,17 @@ export function reduceOf(obs: Observation, policy: PolicyVersion, policyPools: R
     const p = obs.positions.find((x) => x.pool === b.pool && x.liquidity > 0n && isManaged(x, policy, policyPools))
     if (!pool || !p) continue
     const excess = b.value - b.target
-    if (excess * 10_000n <= opCostInSavings(obs, policy.savingsAsset) * BigInt(policy.harvest.costFactorBps)) return { code: 'DECIDE_HARVEST_BELOW_COST', proposal: null }
+    if (excess * 10_000n <= opCostInSavings(obs, policy.savingsAsset) * BigInt(policy.harvest.costFactorBps)) {
+      // Dust left in a pool being left is not worth its op, and must not hold the other buckets back (review of #153).
+      if (leaving) continue
+      return { code: 'DECIDE_HARVEST_BELOW_COST', proposal: null }
+    }
     const pv = positionValue(p, pool, policy.savingsAsset)
     const liquidity = pv === 0n ? 0n : (p.liquidity * (excess < pv ? excess : pv)) / pv
     if (liquidity === 0n) continue
     return { code: 'STRATEGY_PREFERENCE_DEVIATION', proposal: { kind: 'reduce', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity } }
   }
-  return { code: null, proposal: null }
+  return { code: vaultCode, proposal: null }
 }
 
 /**
@@ -197,7 +205,11 @@ export function vaultRedeemOf(obs: Observation, policy: PolicyVersion, bucket: s
     const assets = want < v.maxWithdraw ? want : v.maxWithdraw
     if (assets < want) short = true
     if (assets * 10_000n <= floor) continue
-    const shares = assets === v.assets ? v.shares : (v.shares * assets) / v.assets
+    // Never more shares than the vault redeems now (maxRedeem rounds the way the vault will): asked for more, the engine
+    // would refuse it at prepare on every review and the available liquidity would never come out (review of #153).
+    const sized = assets === v.assets ? v.shares : (v.shares * assets) / v.assets
+    const cap = v.maxRedeem ?? v.shares
+    const shares = sized < cap ? sized : cap
     if (shares === 0n) continue
     return { code: 'STRATEGY_PREFERENCE_DEVIATION', proposal: { kind: 'vault_redeem', grant: grantKeyFor(policy, 'vault-supply', v.name) as `vault-supply:${string}`, bucket, pool: v.name, vault: v.name, shares, assets } }
   }

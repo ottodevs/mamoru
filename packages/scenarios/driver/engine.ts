@@ -1297,9 +1297,9 @@ export class Engine {
   /**
    * otto/mamoru#210: a vault bucket's op, exactly what the vault-supply grant allows. A deposit is approve(vault, assets)
    * on the savings token then deposit(assets, this account): the approval is spent in full. A redeem is redeem(shares,
-   * this account, this account). Both are read again at the prepare block: the vault must take the deposit
-   * (`maxDeposit`) or pay the redeem (`maxRedeem`), or the op waits for a later review (DECIDE_WAIT_VAULT_LIQUIDITY,
-   * never a half-built exit), and the quote is the vault's own preview at that block, which the simulation must meet.
+   * this account, this account). Both are read again at the prepare block: the vault must take the whole deposit
+   * (`maxDeposit`), and a redeem takes at most what it pays now (`maxRedeem`, nothing at all waits for a later review:
+   * DECIDE_WAIT_VAULT_LIQUIDITY). The quote is the vault's own preview at that block, which the simulation must meet.
    * A deposit also needs the vault's pinned code at that block (`assertPinnedCode`, LAB_REGISTRY_CODE_MISMATCH otherwise).
    * No on-chain expiry: ERC-4626 has no deadline and the share price only moves with the vault's interest, so a late
    * landing deposits or redeems at that later price, within the grant's caps.
@@ -1332,12 +1332,16 @@ export class Engine {
       }
     }
     if (p.shares <= 0n) throw new ReasonError('POLICY_DENIED_AMOUNT', `vault_redeem of ${p.shares} shares`)
-    if ((await read<bigint>('maxRedeem', acct)) < p.shares) throw new ReasonError('DECIDE_WAIT_VAULT_LIQUIDITY', `${p.vault} cannot pay ${p.shares} shares now`)
-    const assets = await read<bigint>('previewRedeem', p.shares)
+    // Review of #153: what the vault redeems now, never more than proposed. Liquidity that moved since the observation
+    // shrinks the redeem rather than holding it back for ever; none at all waits for a later review.
+    const max = await read<bigint>('maxRedeem', acct)
+    const shares = max < p.shares ? max : p.shares
+    if (shares === 0n) throw new ReasonError('DECIDE_WAIT_VAULT_LIQUIDITY', `${p.vault} redeems nothing now`)
+    const assets = await read<bigint>('previewRedeem', shares)
     return {
       expiresAt: null,
-      quote: { amountIn: p.shares, amountOut: assets, amountOutMinimum: assets },
-      calls: [{ target: e.address, value: 0n, callData: encodeFunctionData({ abi: erc4626Abi, functionName: 'redeem', args: [p.shares, acct, acct] }) }],
+      quote: { amountIn: shares, amountOut: assets, amountOutMinimum: assets },
+      calls: [{ target: e.address, value: 0n, callData: encodeFunctionData({ abi: erc4626Abi, functionName: 'redeem', args: [shares, acct, acct] }) }],
     }
   }
 
@@ -1356,7 +1360,8 @@ export class Engine {
       if (d(p.vault) < q.amountOutMinimum) return `${p.vault} shares rose ${d(p.vault)}, below the preview ${q.amountOutMinimum}`
       return null
     }
-    if (d(p.vault) !== -p.shares) return `${p.vault} shares moved ${d(p.vault)}, intent ${-p.shares}`
+    // The shares prepared (the proposal's, or fewer when the vault's maxRedeem fell: prepareVault).
+    if (d(p.vault) !== -q.amountIn || q.amountIn > p.shares) return `${p.vault} shares moved ${d(p.vault)}, prepared ${-q.amountIn}`
     if (d(savings) < q.amountOutMinimum) return `${savings} rose ${d(savings)}, below the preview ${q.amountOutMinimum}`
     return null
   }

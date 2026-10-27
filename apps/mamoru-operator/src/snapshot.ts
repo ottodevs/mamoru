@@ -6,7 +6,7 @@
 import { decodeFunctionResult, encodeFunctionData, parseAbi, type PublicClient } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { address, entry, erc20Abi, erc4626Abi, nonfungiblePositionManagerAbi, safeAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
-import { BATCH_MAX_CALLS, Batch, balanceRead, contractRead, type Handle, type Read } from '@mamoru/rpc'
+import { BATCH_MAX_CALLS, Batch, PRICE_SHARES, balanceRead, contractRead, type Handle, type Read } from '@mamoru/rpc'
 import { feeGrowthInside, positionFees } from '@mamoru/uniswap-v3/fees'
 import { amountsForLiquidity, inUsdc, usdcPools, usdcVaults } from './chain.ts'
 
@@ -160,7 +160,7 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
   // otto/mamoru#210: each vault's share price once, each Safe's shares.
   const vaultNames = targets.some((t) => t.vaults) ? usdcVaults(registry) : []
   const vaultPrices = vaultNames.map((name) => {
-    const one = 10n ** BigInt(entry(name, registry).decimals ?? 18)
+    const one = PRICE_SHARES * 10n ** BigInt(entry(name, registry).decimals ?? 18)
     return { name, one, read: first.add(contractRead(client, { address: address(name, registry), abi: erc4626Abi, functionName: 'convertToAssets', args: [one], ...at })) }
   })
   const vaultShares = targets.map((t) => (t.vaults ? vaultNames : []).map((name) => first.add(contractRead(client, { address: address(name, registry), abi: erc4626Abi, functionName: 'balanceOf', args: [t.safe], ...at }))))

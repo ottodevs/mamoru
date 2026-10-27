@@ -184,6 +184,8 @@ function registryNames(registry: Registry): { tokens: RegistryName[]; pools: Reg
   }
   return n
 }
+/** otto/mamoru#210: whole shares a vault's share price is read for (see `observe`). */
+export const PRICE_SHARES = 10n ** 12n
 /** Multicall3 of the registry in use, or null: reads are then made one by one. */
 export const MULTICALL3 = multicall3Of(baseRegistry)
 /** Position ids asked for in the first round, before the position count is known; the ones past the count fail and are ignored. */
@@ -245,9 +247,12 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const vaultReads = (input.vaults ?? []).map((name) => {
     const e = entry(name, reg)
     if (e.kind !== 'vault' || e.decimals === undefined) throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', `${name} is not a vault of the ${reg.chain} registry`)
-    const read = (functionName: 'balanceOf' | 'maxWithdraw' | 'maxDeposit' | 'convertToAssets', arg: Address | bigint) =>
+    const read = (functionName: 'balanceOf' | 'maxWithdraw' | 'maxDeposit' | 'maxRedeem' | 'convertToAssets', arg: Address | bigint) =>
       first.add(contractRead(client, { address: e.address, abi: erc4626Abi, functionName, args: [arg as never], blockNumber }))
-    return { name, one: 10n ** BigInt(e.decimals), shares: read('balanceOf', acct), maxWithdraw: read('maxWithdraw', acct), maxDeposit: read('maxDeposit', acct), price: read('convertToAssets', 10n ** BigInt(e.decimals)) }
+    // The price of 10^12 whole shares: an 18-decimal share over a 6-decimal asset keeps 12 more digits than the price of
+    // one share would (review of #153), so `assets` is within a unit of convertToAssets(shares).
+    const one = PRICE_SHARES * 10n ** BigInt(e.decimals)
+    return { name, one, shares: read('balanceOf', acct), maxWithdraw: read('maxWithdraw', acct), maxDeposit: read('maxDeposit', acct), maxRedeem: read('maxRedeem', acct), price: read('convertToAssets', one) }
   })
   const afterFirst = input.firstBatch?.(first, blockNumber)
   const round = Promise.all([isDeployed(client, acct, blockNumber, safe.number), first.run()])
@@ -263,8 +268,8 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   // otto/mamoru#210: assets at the vault's share price of this block (convertToAssets of one share, scaled).
   const vaults: VaultObs[] = await Promise.all(
     vaultReads.map(async (v) => {
-      const [shares, maxWithdraw, maxDeposit, price] = (await Promise.all([v.shares.need(), v.maxWithdraw.need(), v.maxDeposit.need(), v.price.need()])) as bigint[]
-      return { name: v.name, shares: shares!, assets: (shares! * price!) / v.one, maxWithdraw: maxWithdraw!, maxDeposit: maxDeposit! }
+      const [shares, maxWithdraw, maxDeposit, maxRedeem, price] = (await Promise.all([v.shares.need(), v.maxWithdraw.need(), v.maxDeposit.need(), v.maxRedeem.need(), v.price.need()])) as bigint[]
+      return { name: v.name, shares: shares!, assets: (shares! * price!) / v.one, maxWithdraw: maxWithdraw!, maxDeposit: maxDeposit!, maxRedeem: maxRedeem! }
     }),
   )
   const readAlone = async () => {

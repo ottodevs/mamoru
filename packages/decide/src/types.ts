@@ -118,6 +118,8 @@ export type VaultObs = {
   maxWithdraw: bigint
   /** `maxDeposit(account)`: what the vault takes now (0 when paused or at its cap). */
   maxDeposit: bigint
+  /** `maxRedeem(account)`: the shares the vault redeems now; a redeem never asks for more (review of #153). Absent: `shares`. */
+  maxRedeem?: bigint
 }
 
 export type SessionObs = {
