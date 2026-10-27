@@ -448,7 +448,7 @@ export type OperatorConfig = {
    * account's engine reads its remote value from it and records every bridge-out in it before signing. Absent: no
    * account has a remote value, and no bridge-out is ever signed.
    */
-  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'view' | 'pending'>
+  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending'>
 }
 
 /** Spec 007 T7: the live policies whose accounts the renew row moves to v4 (same three pools and weights). */
@@ -5033,7 +5033,7 @@ export class Operator {
         // Sol review round 2 #4: never more admitted positions than one bounded read sees (chain.ts MAX_INVENTORY).
         mintAllowed: () => mintAllowed(acc.admittedTokenIds),
         // otto/mamoru#215: a bridge-out is on disk in the bridge journal before it is signed; without one it is never signed.
-        ...(this.cfg.bridgeMonad ? { beforeBridgeSign: (b: BridgeSigning) => this.cfg.bridgeMonad!.recordSending(acc.accountKey, b), bridgeUnsigned: (h: Hex) => this.cfg.bridgeMonad!.discardUnsigned(h) } : {}),
+        ...(this.cfg.bridgeMonad ? { beforeBridgeSign: (b: BridgeSigning) => this.cfg.bridgeMonad!.recordSending(acc.accountKey, b), bridgeUnsigned: (h: Hex) => this.cfg.bridgeMonad!.discardUnsigned(h), bridgeFailed: (_opId: string, code: string) => this.cfg.bridgeMonad!.bridgeFailed(acc.accountKey, code) } : {}),
       },
     )
     // The journal of a restarted engine is empty: the block of the last operation stored for the account stands in

@@ -205,4 +205,23 @@ describe('a bridge-out is journaled before it is signed', () => {
       expect(unsigned).toEqual([hash])
     }, { bridgeUnsigned: (h) => void unsigned.push(h) })
   })
+
+  test('review round 2 of #144: every bridge-out that ends discarded or failed goes to bridgeFailed once; a nonce taken by another op does not', async () => {
+    const got: [string, string][] = []
+    await withEngine(conservadorLabV6, async (e) => {
+      const ops = e.journal.ops as unknown as { opId: string; intent: Proposal; state: string; stateCode: string }[]
+      ops.push({ opId: 'b1', intent: bridge(), state: 'discarded', stateCode: 'EHG_SIM_REVERT' })
+      ops.push({ opId: 'b2', intent: bridge(), state: 'failed', stateCode: 'RECON_NONCE_CONSUMED_BY_OTHER' })
+      ops.push({ opId: 'b3', intent: bridge(), state: 'submitted', stateCode: 'BUNDLER_ACCEPTED' })
+      ops.push({ opId: 'l1', intent: { kind: 'enter_swap' } as unknown as Proposal, state: 'failed', stateCode: 'EXEC_INNER_REVERT' })
+      const report = () => (e as unknown as { reportBridgeFailures: () => void }).reportBridgeFailures()
+      report()
+      report()
+      expect(got).toEqual([['b1', 'EHG_SIM_REVERT']])
+      ops[2]!.state = 'failed'
+      ops[2]!.stateCode = 'EXEC_INNER_REVERT'
+      report()
+      expect(got).toEqual([['b1', 'EHG_SIM_REVERT'], ['b3', 'EXEC_INNER_REVERT']])
+    }, { bridgeFailed: (id, code) => void got.push([id, code]) })
+  })
 })

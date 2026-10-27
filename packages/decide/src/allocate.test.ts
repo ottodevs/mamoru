@@ -487,6 +487,16 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     expect((d.waiting ?? []).some((x) => x.code === 'DECIDE_WAIT_BRIDGE')).toBe(true)
   })
 
+  test('otto/mamoru#215 (review round 2 of #144): a failed bridge holds the sleeve not ready; the next review picks the local entry', () => {
+    const o = v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 0n, inFlight: 0n, ready: true } })
+    expect(decide(o, V6).proposal?.kind).toBe('bridge_out')
+    // What the operator's remote reports during the cooldown after that bridge failed.
+    const cooling = decide({ ...o, remote: { ...o.remote!, ready: false } }, V6)
+    expect(cooling.proposal?.kind).not.toBe('bridge_out')
+    expect(cooling.proposal?.kind).toBe('enter_swap')
+    expect((cooling.waiting ?? []).some((x) => x.code === 'DECIDE_WAIT_BRIDGE')).toBe(true)
+  })
+
   test('otto/mamoru#215 (review): a policy with two remote buckets is refused, not half-served', () => {
     const two = { ...V6, remoteBuckets: [...V6.remoteBuckets!, { ...V6.remoteBuckets![0]!, chainId: 143 as const }] }
     expect(() => allocate(v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), two, false)).toThrow('more than one remote bucket')

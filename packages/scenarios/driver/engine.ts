@@ -278,6 +278,12 @@ export type EngineHooks = {
    * can never burn. The journal stops counting it in flight. Errors here are ignored (the chain settles it later).
    */
   bridgeUnsigned?: (userOpHash: Hex) => void
+  /**
+   * Review round 2 of #144: a bridge-out op ended discarded or failed (refusal, precheck, simulation, revert). The
+   * operator holds bridging for a while (the remote reads not ready), so the same failing bridge does not take every
+   * review from the local entries. Called once per op; errors here are ignored.
+   */
+  bridgeFailed?: (opId: string, code: string) => void
 }
 
 /** The block of the latest operation that reached the chain: no review may observe before it. */
@@ -558,6 +564,8 @@ export class Engine {
     await this.watchReleased()
     await this.resumePending()
     await this.resumeIncluded()
+    // A bridge-out settled failed by the resumes above (a late revert, unincludable) holds bridging before this review decides.
+    this.reportBridgeFailures()
     let obs: Observation
     try {
       obs = await this.observe()
@@ -600,7 +608,11 @@ export class Engine {
     this.capSpending = !this.capFreeing
     if (p.kind === 'enter_mint' || p.kind === 'increase_liquidity' || p.kind === 'rerange') this.cfg.onEntering?.(p.pool)
     // An op settled RECON_UNINCLUDABLE is backed off where it is settled (`settlePending`).
-    await this.run(op, obs, decision)
+    try {
+      await this.run(op, obs, decision)
+    } finally {
+      this.reportBridgeFailures()
+    }
     return { kind: 'decided', observation: obs, record, op }
   }
 
@@ -644,6 +656,25 @@ export class Engine {
     this.reinvest = 0n
     this.capPlaced = null
     this.capIdle = null
+  }
+
+  /** Bridge-out ops already handed to `bridgeFailed`. */
+  private readonly bridgeFailuresReported = new Set<string>()
+
+  /**
+   * Review round 2 of #144: every bridge-out op that ended discarded or failed, once, to `bridgeFailed`. Not one whose
+   * nonce another op took (nothing was wrong with the bridge).
+   */
+  private reportBridgeFailures(): void {
+    if (!this.hooks.bridgeFailed) return
+    for (const o of this.journal.ops) {
+      if (o.intent.kind !== 'bridge_out' || (o.state !== 'discarded' && o.state !== 'failed') || this.bridgeFailuresReported.has(o.opId)) continue
+      this.bridgeFailuresReported.add(o.opId)
+      if (o.stateCode === 'RECON_NONCE_CONSUMED_BY_OTHER') continue
+      try {
+        this.hooks.bridgeFailed(o.opId, o.stateCode ?? 'failed')
+      } catch {}
+    }
   }
 
   private session(name: string): EngineSession | undefined {

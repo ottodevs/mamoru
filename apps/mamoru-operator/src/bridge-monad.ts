@@ -50,6 +50,9 @@ export const MONAD_MINT_MAX_REVERTS = 3
 export const SETTLE_LOG_CHUNK = 2_000n
 /** Review of #144: chunks one settle pass reads at most; the cursor on disk (`scanFrom`) resumes from there on the next tick. */
 export const SETTLE_CHUNKS_PER_TICK = 5
+/** Review round 2 of #144: after a bridge-out fails the sleeve reads not ready this long, doubling per failure in a row up to the cap. */
+export const BRIDGE_FAIL_COOLDOWN_MS = 30 * 60_000
+export const BRIDGE_FAIL_COOLDOWN_MAX_MS = 24 * 3600_000
 /** Minted burns are kept this long for the ops history, then pruned. */
 export const MINTED_KEEP_MS = 30 * 24 * 3600_000
 /** Native USDC on Base: the token the session burns (the message's burnToken). */
@@ -100,6 +103,8 @@ type Journal = {
   mintDays: Record<string, { n: number; wei: string }>
   /** Last sleeve value read per account (raw USDC, without in flight), and its Monad block. */
   sleeves: Record<string, { value: string; block: string; at: string }>
+  /** Review round 2 of #144: per account, bridge-outs that failed in a row and until when the sleeve reads not ready. */
+  cooldowns: Record<string, { failures: number; until: string; code: string }>
 }
 
 /** What the ops view shows of a bridge. */
@@ -216,11 +221,11 @@ export class MonadBridge {
   }
 
   private load(): Journal {
-    const empty: Journal = { burns: {}, mintDays: {}, sleeves: {} }
+    const empty: Journal = { burns: {}, mintDays: {}, sleeves: {}, cooldowns: {} }
     if (!existsSync(this.file)) return empty
     // An unreadable journal stops the operator: starting empty would forget burns in flight and bridge them again.
     const j = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<Journal>
-    return { burns: j.burns ?? {}, mintDays: j.mintDays ?? {}, sleeves: j.sleeves ?? {} }
+    return { burns: j.burns ?? {}, mintDays: j.mintDays ?? {}, sleeves: j.sleeves ?? {}, cooldowns: j.cooldowns ?? {} }
   }
 
   private save(): void {
@@ -250,6 +255,21 @@ export class MonadBridge {
       if (existing.accountKey !== accountKey || BigInt(existing.amount) !== b.amount) throw new Error(`userOp ${id} already journaled for another burn`)
       // Recorded before (an earlier attempt or process): it may have been signed then, so it is never discarded as unsigned.
       this.unsigned.delete(id)
+      // Review round 2: a dropped entry signed again (e.g. after a signing failure) is a live burn once more: back to
+      // 'sending', on disk before this returns, so it is counted and settled. A dropped one whose nonce is spent is
+      // dropped again by the chain settlement; nothing is lost by restoring it.
+      if (existing.state === 'dropped') {
+        const before = { ...existing }
+        Object.assign(existing, { state: 'sending', updatedAt: this.iso(), note: `signed again after: ${existing.note ?? 'dropped'}` })
+        try {
+          this.save()
+        } catch (e) {
+          Object.assign(existing, before)
+          throw e
+        }
+        // A dropped entry has no bytes that can land (never signed, or its nonce spent): this attempt is the first signing.
+        this.unsigned.add(id)
+      }
       return
     }
     const at = this.iso()
@@ -301,10 +321,11 @@ export class MonadBridge {
    * two reads. A 'sending' burn whose EntryPoint nonce is unmoved at `baseBlock` has not landed there: its USDC is still
    * in the local balances read at that block. A burn minted at a block the journal only bounds from above (a mint by
    * someone else is seen at the head) whose CCTP nonce is already used at the sleeve's block: its USDC is in that read.
-   * A read that fails leaves the burn counted (never under the real value).
+   * A read that fails leaves the burn counted (never under the real value) and `unsure` set: the value may then count it
+   * twice, so the caller reports the sleeve not ready and no bridge is sized on it (review round 2 of #144).
    */
-  private async settledAt(accountKey: string, baseBlock: bigint | undefined, sleeveBlock: bigint | undefined): Promise<Set<string>> {
-    const out = new Set<string>()
+  private async settledAt(accountKey: string, baseBlock: bigint | undefined, sleeveBlock: bigint | undefined): Promise<Set<string> & { unsure?: boolean }> {
+    const out: Set<string> & { unsure?: boolean } = new Set<string>()
     for (const b of this.burns()) {
       if (b.accountKey !== accountKey) continue
       try {
@@ -316,7 +337,8 @@ export class MonadBridge {
           if (used !== 0n) out.add(b.id)
         }
       } catch {
-        // Counted in flight.
+        // Counted in flight, and the result is not trusted for a bridge.
+        out.unsure = true
       }
     }
     return out
@@ -337,7 +359,8 @@ export class MonadBridge {
       const last = this.journal.sleeves[accountKey]
       // The provider's error may quote its keyed URL: redacted before it reaches the engine's journal.
       if (!last) throw new ReasonError('OBS_RPC_UNAVAILABLE', `Monad sleeve of ${accountKey} unreadable and never read: ${redactSecrets((e as Error).message?.split('\n')[0] ?? String(e))}`)
-      const inFlight = this.inFlight(accountKey, BigInt(last.block), await this.settledAt(accountKey, baseBlock, undefined))
+      const settled = await this.settledAt(accountKey, baseBlock, undefined)
+      const inFlight = this.inFlight(accountKey, BigInt(last.block), settled)
       return { value: BigInt(last.value) + inFlight, inFlight, ready: false }
     }
     const last = this.journal.sleeves[accountKey]
@@ -352,8 +375,33 @@ export class MonadBridge {
         logErr('[bridge-monad] journal write failed:', e)
       }
     }
-    const inFlight = this.inFlight(accountKey, read.block, await this.settledAt(accountKey, baseBlock, read.block))
-    return { value: read.value + inFlight, inFlight, ready: read.ready }
+    const settled = await this.settledAt(accountKey, baseBlock, read.block)
+    const inFlight = this.inFlight(accountKey, read.block, settled)
+    return { value: read.value + inFlight, inFlight, ready: read.ready && !settled.unsure && !this.coolingDown(accountKey) }
+  }
+
+  /** Whether a recent bridge-out failure of the account still holds bridging (its sleeve reads not ready). */
+  private coolingDown(accountKey: string): boolean {
+    const c = this.journal.cooldowns[accountKey]
+    return !!c && Date.parse(c.until) > this.now()
+  }
+
+  /**
+   * Review round 2 of #144 (raised on #143): the engine's `bridgeFailed`. A bridge-out that failed (refused, precheck,
+   * simulation, revert) holds bridging for BRIDGE_FAIL_COOLDOWN_MS, doubling per failure in a row up to the cap, on disk:
+   * the sleeve reads not ready, so decide takes the local entries instead of proposing the same failing bridge every
+   * review. A burn that lands clears it.
+   */
+  bridgeFailed(accountKey: string, code: string): void {
+    const failures = (this.journal.cooldowns[accountKey]?.failures ?? 0) + 1
+    const wait = Math.min(BRIDGE_FAIL_COOLDOWN_MS * 2 ** (failures - 1), BRIDGE_FAIL_COOLDOWN_MAX_MS)
+    this.journal.cooldowns[accountKey] = { failures, until: new Date(this.now() + wait).toISOString(), code }
+    try {
+      this.save()
+    } catch (e) {
+      logErr('[bridge-monad] journal write failed (cooldown kept in memory):', e)
+    }
+    logErr(`[bridge-monad] ${accountKey}:`, `bridge-out failed (${code}); bridging held for ${Math.round(wait / 60_000)} min`)
   }
 
   /** The sleeve's value at the TWAP and its readiness on Monad, at one block. */
@@ -460,6 +508,7 @@ export class MonadBridge {
       logErr(`[bridge-monad] ${b.account.slice(0, 10)}:`, `userOp ${b.id.slice(0, 10)} landed without exactly this burn; kept in flight`)
       return
     }
+    delete this.journal.cooldowns[b.accountKey]
     this.update(b, { state: 'burned', txHash, burnBlock: blockNumber.toString(), burnedAt: this.iso(), messageKey: cctpMessageKey(burn.message) })
   }
 

@@ -10,7 +10,7 @@ import { address, baseRegistry, entry, messageTransmitterV2Abi, monadRegistry, t
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import type { BridgeSigning } from '@mamoru/scenarios/driver/engine.ts'
 import { afterAll } from 'bun:test'
-import { BASE_USDC, burnOf, inFlightOf, MONAD_MINT_PENDING_MS, MonadBridge, SETTLE_CHUNKS_PER_TICK, SETTLE_LOG_CHUNK, sleeveValueAtTwap, type BridgeBurn, type MonadSender } from '../src/bridge-monad.ts'
+import { BASE_USDC, BRIDGE_FAIL_COOLDOWN_MS, burnOf, inFlightOf, MONAD_MINT_PENDING_MS, MonadBridge, SETTLE_CHUNKS_PER_TICK, SETTLE_LOG_CHUNK, sleeveValueAtTwap, type BridgeBurn, type MonadSender } from '../src/bridge-monad.ts'
 import { Relayer } from '../src/relayer.ts'
 import { cctpMessageKey, MESSAGE_TRANSMITTER_V2, TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
 import type { SafeRead } from '../src/chain.ts'
@@ -81,7 +81,7 @@ const attester = privateKeyToAccount(generatePrivateKey())
 const attest = async (m: Hex) => ({ message: m, attestation: await attester.sign({ hash: keccak256(m) }) })
 
 /** `usedFrom`: the Monad block the used nonces are used from (a read at an earlier block sees them unused). `mintStatus`: how the relayer's mints end. */
-type MonadState = { used: Set<string>; usedFrom?: bigint; block: bigint; balance: bigint; gasPrice: bigint; receipts: Map<string, { status: 'success' | 'reverted'; blockNumber: bigint }>; mintStatus?: 'success' | 'reverted' }
+type MonadState = { used: Set<string>; usedFrom?: bigint; block: bigint; balance: bigint; gasPrice: bigint; receipts: Map<string, { status: 'success' | 'reverted'; blockNumber: bigint }>; mintStatus?: 'success' | 'reverted'; usedFails?: boolean }
 function monadClient(st: MonadState): PublicClient {
   return {
     getBlockNumber: async () => st.block,
@@ -92,6 +92,7 @@ function monadClient(st: MonadState): PublicClient {
     readContract: async ({ functionName, args, blockNumber }: { functionName: string; args?: unknown[]; blockNumber?: bigint }) => {
       if (functionName === 'signatureThreshold') return 1n
       if (functionName === 'isEnabledAttester') return (args![0] as string).toLowerCase() === attester.address.toLowerCase()
+      if (functionName === 'usedNonces' && st.usedFails) throw new Error('missing trie node')
       if (functionName === 'usedNonces') return st.used.has((args![0] as string).toLowerCase()) && (blockNumber ?? st.block) >= (st.usedFrom ?? 0n) ? 1n : 0n
       throw new Error(functionName)
     },
@@ -585,5 +586,66 @@ describe('review of #144: the real Relayer aborts the mint when onSending throws
     const j = JSON.parse(readFileSync(join(s.dir, 'bridge-monad.json'), 'utf8')) as { burns: Record<string, BridgeBurn>; mintDays: Record<string, { n: number; wei: string }> }
     expect(j.burns[UOP]!.mintTx).toBeUndefined()
     expect(Object.values(j.mintDays)[0]).toEqual({ n: 0, wei: '0' })
+  })
+})
+
+describe('review round 2 of #144 (GPT-6 Sol)', () => {
+  const WINDOW = 1_800
+  type Live = { readSleeve: () => Promise<{ value: bigint; block: bigint; ready: boolean }> }
+
+  test('a lagging read whose historical usedNonces check fails: counted, but the sleeve reads not ready (no bridge sized on it)', async () => {
+    let now = T0
+    const att = await attest(message({ nonce: 42n, executed: true }))
+    const s = setup({ now: () => now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }), iris: { [BURN_TX]: [att] } })
+    s.bridge.recordSending('acc-1', signing())
+    await s.bridge.tick()
+    s.st.used.add(u(42n, 32).toLowerCase())
+    s.st.usedFrom = 4_900n
+    s.st.block = 5_010n
+    now += 6 * 60_000
+    await s.bridge.tick()
+    const live = s.bridge as unknown as Live
+    live.readSleeve = async () => ({ value: AMOUNT, block: 5_008n, ready: true })
+    expect(await s.bridge.remote('acc-1', ACCOUNT, WINDOW)).toEqual({ value: AMOUNT, inFlight: 0n, ready: true })
+    // A lagging node at 5_000 (the cached 5_008 read stands) that cannot answer usedNonces at 5_008.
+    s.st.usedFails = true
+    live.readSleeve = async () => ({ value: 0n, block: 5_000n, ready: true })
+    expect(await s.bridge.remote('acc-1', ACCOUNT, WINDOW)).toEqual({ value: 2n * AMOUNT, inFlight: AMOUNT, ready: false })
+  })
+
+  test('a burn dropped as never signed and signed again is sending again, on disk, and counted', () => {
+    const s = setup()
+    s.bridge.recordSending('acc-1', signing())
+    s.bridge.discardUnsigned(UOP)
+    expect(s.bridge.inFlight('acc-1', 0n)).toBe(0n)
+    // The engine retries the same prepared userOp once the signer is back.
+    s.bridge.recordSending('acc-1', signing())
+    expect(s.j().burns[UOP]).toMatchObject({ state: 'sending' })
+    expect(s.bridge.inFlight('acc-1', 0n)).toBe(AMOUNT)
+    // A second signing failure of that retry may drop it again (it was recorded again by this process).
+    s.bridge.discardUnsigned(UOP)
+    expect(s.j().burns[UOP]!.state).toBe('dropped')
+  })
+
+  test('a failed bridge-out holds the sleeve not ready for a cooldown that doubles, survives a restart, and clears when a burn lands', async () => {
+    let now = T0
+    const s = setup({ now: () => now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }) })
+    const live = (b: MonadBridge) => ((b as unknown as Live).readSleeve = async () => ({ value: 0n, block: 7_000n, ready: true }))
+    live(s.bridge)
+    expect((await s.bridge.remote('acc-1', ACCOUNT, WINDOW)).ready).toBe(true)
+    s.bridge.bridgeFailed('acc-1', 'EHG_SIM_REVERT')
+    expect((await s.bridge.remote('acc-1', ACCOUNT, WINDOW)).ready).toBe(false)
+    expect((await s.bridge.remote('acc-2', ACCOUNT, WINDOW)).ready).toBe(true)
+    now += BRIDGE_FAIL_COOLDOWN_MS + 1
+    expect((await s.bridge.remote('acc-1', ACCOUNT, WINDOW)).ready).toBe(true)
+    s.bridge.bridgeFailed('acc-1', 'EXEC_INNER_REVERT')
+    const restarted = setup({ dir: s.dir, now: () => now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }) })
+    live(restarted.bridge)
+    now += BRIDGE_FAIL_COOLDOWN_MS + 1
+    expect((await restarted.bridge.remote('acc-1', ACCOUNT, WINDOW)).ready).toBe(false) // second failure: twice as long
+    restarted.bridge.recordSending('acc-1', signing())
+    await restarted.bridge.tick()
+    expect(restarted.j().burns[UOP]!.state).toBe('burned')
+    expect((await restarted.bridge.remote('acc-1', ACCOUNT, 7_000)).ready).toBe(true)
   })
 })
