@@ -2,7 +2,7 @@
 -- ~55 h and nothing said so). apps/mamoru-app/src/api/operator-link-watch.ts probes each configured operator's
 -- /health every cron tick and keeps one row per chain here. Prod and beta share this D1 and both run the cron:
 -- the conditional UPDATE ... RETURNING on these rows is what lets exactly one of them post each alert.
--- Additive. Apply before the Worker that reads it: bunx wrangler d1 execute mamoru --remote --file migrations/d1/XXXX_operator_link_watch.sql
+-- Additive. Apply before the Worker that reads it: bunx wrangler d1 execute mamoru --remote --file migrations/d1/0019_operator_link_watch.sql
 
 CREATE TABLE IF NOT EXISTS operator_link_watch (
   chain_id INTEGER PRIMARY KEY,

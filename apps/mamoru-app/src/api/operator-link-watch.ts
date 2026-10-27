@@ -2,7 +2,7 @@
 // the lady outage and the Worker could not reach it for ~55 h; every watch ran on lady, the host that failed, so
 // nothing said so. This one runs in the Worker cron (Cloudflare, not lady): each tick it probes the /health of
 // every configured operator (OPERATOR_URL for Base, OPERATOR_URL_143 for Monad) and keeps one row per chain in
-// operator_link_watch (migrations/d1/XXXX_operator_link_watch.sql).
+// operator_link_watch (migrations/d1/0019_operator_link_watch.sql).
 //
 // Prod and beta share D1 and both run the cron. Every transition is a conditional UPDATE ... RETURNING, so only
 // the run that wins the row posts: one "down" alert after DOWN_AFTER_MS of failed probes, a reminder every
