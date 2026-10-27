@@ -195,6 +195,15 @@ describe('idle breakdown without the operator list', () => {
     expect(html).toContain('class="wc-legs"')
     expect(html).toContain('In range')
   })
+  test('otto/mamoru#233: the range gauge shows where the price sits when the operator sends the ticks, and nothing when it does not', () => {
+    expect(render(<Working f={placed} s={split(placed, null)} apy={apy} onStop={null} />).html).not.toContain('class="gauge')
+    const ranged = { ...placed, positions: placed.positions.map((p) => ({ ...p, range: { lower: -100, upper: 100, tick: 0 } })) }
+    const { html } = render(<Working f={ranged} s={split(ranged, null)} apy={apy} onStop={null} />)
+    expect(html).toMatch(/class="gauge"[^>]*aria-hidden="true"/)
+    // The price at the middle of the range: the dot at the middle of the gauge (the range is its middle 60 %).
+    expect(html).toContain('left:50.0%')
+    expect(html).toContain('In range')
+  })
   test('a single non-USDC idle token is named on the line', () => {
     const only = { ...old, usdc: '0' }
     const { text, html } = render(<Idle f={only} s={split(only, 100_000_000_000n)} />)
