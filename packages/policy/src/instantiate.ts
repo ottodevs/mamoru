@@ -94,6 +94,8 @@ function resolveRef(ref: RefTemplate, ctx: GrantContext, registry: Registry): bi
   }
   if (ref.startsWith('cap:')) {
     // otto/mamoru#225: `cap:a|b` is the larger of caps a and b (a merged grant's one bound for what two grants capped).
+    // mergeGrants writes it only for caps of the same token (v4-grants.ts `amountToken`): raw numbers of two tokens are
+    // not comparable.
     let max: bigint | undefined
     for (const name of ref.slice(4).split('|')) {
       const v = ctx.caps[name]

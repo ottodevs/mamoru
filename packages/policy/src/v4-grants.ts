@@ -554,13 +554,32 @@ const V2_STRICT_SIGS = new Set([DECREASE_SIG, COLLECT_SIG, BURN_SIG, MULTICALL_D
 const sameRule = (a: ParamRuleTemplate, b: ParamRuleTemplate) => a.condition === b.condition && a.ref === b.ref && a.cumulative === b.cumulative
 
 /**
+ * The token whose base units a LESS_THAN_OR_EQUAL amount rule of `a` counts, or undefined when the action does not pin
+ * it: an approve's amount is in the approved token (the target); a swap's amountIn in its `tokenIn`, a mint's
+ * amount0/1Desired in its `token0`/`token1`, each only when the same action pins that token with an EQUAL rule.
+ */
+const AMOUNT_TOKEN_FIELD: Record<string, string> = { amountIn: 'tokenIn', amount0Desired: 'token0', amount1Desired: 'token1' }
+function amountToken(a: ActionRuleTemplate, r: ParamRuleTemplate): string | undefined {
+  if (a.signature === APPROVE_SIG && r.field === 'amount') return a.target
+  const field = AMOUNT_TOKEN_FIELD[r.field]
+  const pin = field ? a.params.find((x) => x.field === field && x.condition === 'EQUAL') : undefined
+  return typeof pin?.ref === 'string' ? pin.ref : undefined
+}
+
+/**
  * The rules of one (target, signature) that several grants each carried, merged so the one action allows every call
  * any of them did (as `t10-enable-gas-dd-fork.ts` `mergeRules`, on templates): a rule every grant has, identical, is
  * kept; a LESS_THAN_OR_EQUAL every grant has at that word keeps the larger bound (`cap:a|b`, see instantiateGrant) and
- * no cumulative limit; anything else (a rule only some grants pin, or rules that disagree: swap direction, approve
- * spender) is dropped and left to MamoruActionPolicyV2, which checks each of those itself.
+ * no cumulative limit, but ONLY when every one of those caps counts the same token (`amountToken`). Caps of different
+ * tokens are not comparable (a swap's amountIn is USDC base units in enter-swap and WETH base units in manage-any's
+ * harvest: the larger raw number is the WETH cap, ~1e8 times the USDC one), so that rule is dropped and the action's
+ * per-call amount is bounded by MamoruActionPolicyV2 alone: its per-pool value budget (`perWindow` refilling over
+ * `budgetWindow`, and `total` per generation), charged for every swap in either direction at the band edge, with
+ * minOut and the price limit from the band. Anything else (a rule only some grants pin, or rules that disagree: swap
+ * direction, approve spender) is dropped and left to V2 too, which checks each of those itself.
  */
-function mergeRules(sets: ParamRuleTemplate[][]): ParamRuleTemplate[] {
+function mergeRules(group: readonly ActionRuleTemplate[]): ParamRuleTemplate[] {
+  const sets = group.map((a) => a.params)
   const indices = [...new Set(sets.flat().map((r) => r.index))].sort((a, b) => a - b)
   const out: ParamRuleTemplate[] = []
   for (const index of indices) {
@@ -572,6 +591,8 @@ function mergeRules(sets: ParamRuleTemplate[][]): ParamRuleTemplate[] {
       continue
     }
     if (!rules.every((r) => r.condition === 'LESS_THAN_OR_EQUAL' && typeof r.ref === 'string' && r.ref.startsWith('cap:'))) continue
+    const tokens = new Set(rules.map((r, i) => amountToken(group[i]!, r)))
+    if (tokens.size !== 1 || tokens.has(undefined)) continue
     const caps = [...new Set(rules.flatMap((r) => (r.ref as string).slice(4).split('|')))]
     const { cumulative: _dropped, ...first } = rules[0]!
     out.push({ ...first, ref: `cap:${caps.join('|')}` })
@@ -598,7 +619,7 @@ export function mergeGrants(parts: readonly GrantTemplate[]): GrantTemplate {
   const actions: ActionRuleTemplate[] = [...groups.values()].map((group) => {
     const { target, signature } = group[0]!
     if (V2_STRICT_SIGS.has(signature)) return { target, signature, params: [], actionPolicyOnly: true }
-    const params = mergeRules(group.map((a) => a.params))
+    const params = mergeRules(group)
     if (!params.length) throw new Error(`mergeGrants: ${pool} ${signature} keeps no UniActionPolicy rule`)
     return { target, signature, params }
   })

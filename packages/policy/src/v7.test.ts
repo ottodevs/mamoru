@@ -103,8 +103,11 @@ describe('conservador-live-v7 (otto/mamoru#225)', () => {
       'NonfungiblePositionManager.mint.amount0Min: dropped',
       'NonfungiblePositionManager.mint.amount1Desired: cap:riskMint1 cum cap:riskMint1Total -> cap:riskMint1',
       'NonfungiblePositionManager.mint.amount1Min: dropped',
-      'SwapRouter02.exactInputSingle.amountIn: cap:riskConvertPerCall cum cap:riskConvertTotal -> cap:riskSwapPerCall|riskConvertPerCall',
-      'SwapRouter02.exactInputSingle.amountIn: cap:riskSwapPerCall cum cap:riskSwapTotal -> cap:riskSwapPerCall|riskConvertPerCall',
+      // Swap amountIn: enter-swap caps it in USDC (riskSwapPerCall, riskSwapTotal), the harvest in WETH
+      // (riskConvertPerCall, riskConvertTotal). Raw amounts of two tokens are not comparable, so no UniActionPolicy cap
+      // is kept: V2 bounds every swap, either direction, by the pool's value budget (perWindow per call and window,
+      // total per generation, both in USDC at the band edge) and minOut / price limit from the band.
+      'SwapRouter02.exactInputSingle.amountIn: dropped',
       // Swap direction: V2 _checkSwap takes only the pool's two tokens, either way, charging the budget both ways.
       'SwapRouter02.exactInputSingle.tokenIn: dropped',
       'SwapRouter02.exactInputSingle.tokenOut: dropped',
@@ -127,21 +130,52 @@ describe('conservador-live-v7 (otto/mamoru#225)', () => {
     }
   })
 
-  test('instantiated: `cap:a|b` resolves to the larger cap, V2-only actions carry no rule, no action repeats', () => {
+  test('instantiated: `cap:a|b` (same token only) resolves to the larger cap, the swap keeps no amount cap, V2-only actions carry no rule', () => {
     const c = ctx()
     const cap = (n: string) => c.caps[n]!
     const max = (a: string, b: string) => (cap(a) > cap(b) ? cap(a) : cap(b))
+    for (const pool of [STABLES, BALANCE]) {
+      const g = instantiateGrant(conservadorLiveV7, `manage-any:${pool}`, c)
+      const swap = g.actions.find((a) => a.signature.startsWith('exactInputSingle'))!
+      // amountIn was capped in the stable token by enter-swap and in the volatile one by the harvest: dropped, not max'd.
+      expect(swap.params.map((p) => p.field)).toEqual(['fee', 'recipient', 'amountOutMinimum'])
+      expect(swap.params.every((p) => p.cumulativeLimit === undefined)).toBe(true)
+    }
     const g = instantiateGrant(conservadorLiveV7, `manage-any:${BALANCE}`, c)
-    const swap = g.actions.find((a) => a.signature.startsWith('exactInputSingle'))!
-    const amountIn = swap.params.find((p) => p.field === 'amountIn')!
-    expect(amountIn.ref).toBe(max('riskSwapPerCall', 'riskConvertPerCall'))
-    expect(amountIn.cumulativeLimit).toBeUndefined()
-    const approve = g.actions.find((a) => a.target === 'USDC')!.params.find((p) => p.field === 'amount')!
-    expect(approve.ref).toBe(max('riskSwapPerCall', 'riskMint1'))
-    expect(approve.ref).toBe(cap('riskMint1')) // the mint cap (2x the share) over the swap cap (1x)
+    // Approvals: every merged cap counts the approved token itself, so the larger one is kept.
+    const approve = (t: string) => g.actions.find((a) => a.target === t)!.params.find((p) => p.field === 'amount')!
+    expect(approve('USDC').ref).toBe(max('riskSwapPerCall', 'riskMint1'))
+    expect(approve('USDC').ref).toBe(cap('riskMint1')) // the mint cap (2x the share) over the swap cap (1x)
+    expect(approve('WETH').ref).toBe(max('riskMint0', 'riskConvertPerCall'))
+    // Mint: both grants pin token0 / token1, same caps; only the cumulative goes.
+    const mint = g.actions.find((a) => a.signature.startsWith('mint'))!
+    expect(mint.params.find((p) => p.field === 'amount0Desired')).toMatchObject({ ref: cap('riskMint0'), cumulativeLimit: undefined })
+    expect(mint.params.find((p) => p.field === 'amount1Desired')).toMatchObject({ ref: cap('riskMint1'), cumulativeLimit: undefined })
     expect(g.actions.filter((a) => a.actionPolicyOnly).map((a) => a.params.length)).toEqual([0, 0, 0, 0])
     expect(g.userOp.usageLimit).toBe(36_000)
     expect(g.requiresActionPolicy).toBe(true)
+    // No v7 grant carries a cap merged across tokens.
+    for (const t of conservadorLiveV7.session.grants) {
+      for (const a of t.actions) {
+        for (const r of a.params) if (typeof r.ref === 'string' && r.ref.includes('|')) expect(a.signature === 'approve(address,uint256)' || a.signature.startsWith('mint(')).toBe(true)
+      }
+    }
+  })
+
+  test('mergeGrants: an amount cap merges only across grants that cap the same token', () => {
+    const s = grantsV5(V4_POOLS.stables, { enterSwap: 1, enterMint: 1, manageAny: 1 })
+    const swapOf = (g: GrantTemplate) => g.actions.find((a) => a.signature.startsWith('exactInputSingle'))!
+    const enterSwap = s[0]!
+    // Same direction (tokenIn USDC) with another cap: merged to the larger.
+    const other: GrantTemplate = { ...enterSwap, actions: enterSwap.actions.map((a) => (a === swapOf(enterSwap) ? { ...a, params: a.params.map((r) => (r.field === 'amountIn' ? { ...r, ref: 'cap:other', cumulative: undefined } : r)) } : a)) }
+    const same = swapOf(mergeGrants([enterSwap, other])).params.find((r) => r.field === 'amountIn')!
+    expect(same.ref).toBe(`cap:${V4_POOLS.stables.caps.stableSwapPerCall}|other`)
+    expect(same.cumulative).toBeUndefined()
+    // Opposite direction (the harvest's tokenIn USDT): dropped.
+    expect(swapOf(mergeGrants(s)).params.find((r) => r.field === 'amountIn')).toBeUndefined()
+    // An action that does not pin the token (no tokenIn rule): dropped too, never compared across units.
+    const unpinned: GrantTemplate = { ...other, actions: other.actions.map((a) => (a.signature.startsWith('exactInputSingle') ? { ...a, params: a.params.filter((r) => r.field !== 'tokenIn') } : a)) }
+    expect(swapOf(mergeGrants([enterSwap, unpinned])).params.find((r) => r.field === 'amountIn')).toBeUndefined()
   })
 
   test('mergeGrants refuses parts of two pools, gated or tiered grants', () => {
@@ -159,4 +193,5 @@ describe('conservador-live-v7 (otto/mamoru#225)', () => {
     expect(() => instantiateGrant(bad({ ...g, actions: [{ ...g.actions[5]!, params: g.actions[0]!.params }] }), grantKey(g), ctx())).toThrow('needs MamoruActionPolicy and no rules')
     expect(() => instantiateGrant(bad({ ...g, requiresActionPolicy: undefined }), grantKey(g), ctx())).toThrow('needs MamoruActionPolicy')
   })
+
 })
