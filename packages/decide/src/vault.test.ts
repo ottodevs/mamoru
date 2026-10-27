@@ -32,7 +32,7 @@ const POOLS = [pool('pool:USDC/USDT/100', 1), pool('pool:USDC/cbBTC/500', -69_08
 
 function vault(name: string, assets: bigint, over: Partial<VaultObs> = {}): VaultObs {
   const shares = name === 'vault:gtUSDCp' ? (assets * ONE_SHARE) / PRICE : assets
-  return { name, shares, assets, maxWithdraw: assets, maxDeposit: 10n ** 30n, maxRedeem: shares, ...over }
+  return { name, shares, assets, maxWithdraw: assets, maxDeposit: 10n ** 30n, maxRedeem: shares, ...over } as VaultObs
 }
 
 function obs(over: Partial<Observation> = {}): Observation {
@@ -171,7 +171,8 @@ describe('conservador-live-v7: the stables bucket in vaults (otto/mamoru#210)', 
     // maxWithdraw 150, but the vault redeems one share fewer than 150 USDC's worth at its own rounding.
     const capped = { ...v, maxWithdraw: 150n * USDC, maxRedeem: (v.shares * 150n) / 900n - 1n }
     const d = decide(obs({ vaults: [capped, vault('vault:waBasUSDC', 0n)], balances: { USDC: 100n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), V7)
-    expect(d.proposal).toMatchObject({ kind: 'vault_redeem', shares: capped.maxRedeem })
+    // 99 % of what it redeems: never its edge.
+    expect(d.proposal).toMatchObject({ kind: 'vault_redeem', shares: (capped.maxRedeem * 9_900n) / 10_000n })
   })
 
   test('review of #153: a vault waiting for liquidity does not hold back the USDC/USDT migration', () => {
@@ -212,7 +213,7 @@ describe('conservador-live-v7: the stables bucket in vaults (otto/mamoru#210)', 
   })
 
   test('shares in a vault the policy does not name count for nothing and get no op', () => {
-    const o = obs({ vaults: [vault('vault:gtUSDCp', 0n), vault('vault:waBasUSDC', 0n), { name: 'vault:other', shares: 10n ** 9n, assets: 10n ** 9n, maxWithdraw: 10n ** 9n, maxDeposit: 0n }] })
+    const o = obs({ vaults: [vault('vault:gtUSDCp', 0n), vault('vault:waBasUSDC', 0n), { name: 'vault:other', shares: 10n ** 9n, assets: 10n ** 9n, maxWithdraw: 10n ** 9n, maxDeposit: 0n, maxRedeem: 10n ** 9n }] })
     expect(allocate(o, V7, false).total).toBe(0n)
     expect(decide(o, V7).proposal).toBeNull()
   })

@@ -96,8 +96,10 @@ const CAPPED_REDEEM_BPS = 9_900n
  * without a swap), in `order` (the policy's), each only as far as still needed. `need` null: everything (Stop).
  * Review of #153: the batch is one MultiSend, so no vault call may sit at the edge of what the vault can pay at the
  * read block: a whole vault is `redeem(all)` only when it can pay all of it; a part is `withdraw(assets)` only with 1 %
- * of liquidity to spare; otherwise `redeem` of 99 % of `maxRedeem`, counted at 99 % of `maxWithdraw`. Returns the exits
- * and what of `need` (or of the holdings, for a Stop) the vaults cannot pay now.
+ * of liquidity to spare; otherwise `redeem` of 99 % of `maxRedeem`, counted at what those shares pay less a unit.
+ * Returns the exits and what of `need` (or of the holdings, for a Stop) the vaults cannot pay now.
+ * Known limit: `maxRedeem`/`maxWithdraw` are capped at the holding, so a whole-vault redeem cannot see liquidity just
+ * above it; a borrow landing first reverts the batch, and the next prepare reads the shortfall and takes the capped path.
  */
 export function planVaultExit(vaults: readonly VaultHolding[], need: bigint | null, order: readonly string[]): { exits: VaultExit[]; short: bigint } {
   const rank = (v: VaultHolding) => {
@@ -115,7 +117,10 @@ export function planVaultExit(vaults: readonly VaultHolding[], need: bigint | nu
     else if (v.maxWithdraw * 10_000n >= want * WITHDRAW_ROOM_BPS) exit = { vault: v.name, mode: 'withdraw', assets: want, shares: 0n, all: false }
     else {
       const shares = (v.maxRedeem * CAPPED_REDEEM_BPS) / 10_000n
-      const assets = (v.maxWithdraw * CAPPED_REDEEM_BPS) / 10_000n
+      // What those shares pay, from the holding's own rate and one unit under it: the vault floors the redeem again, and
+      // a later call of the batch that spends this exactly must never find less (review round 2 of #153).
+      const pays = (v.assets * shares) / v.shares
+      const assets = pays > 1n ? pays - 1n : 0n
       exit = shares > 0n && assets > 0n ? { vault: v.name, mode: 'redeem', assets: assets < want ? assets : want, shares, all: false } : null
     }
     const paid = exit?.assets ?? 0n
