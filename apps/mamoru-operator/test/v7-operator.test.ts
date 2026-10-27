@@ -7,9 +7,9 @@ import { decodeFunctionData, parseAbi, slice, type Hex } from 'viem'
 import { address as registryAddress, baseRegistry, smartSessionAbi } from '@mamoru/registry'
 import { POLICIES, V4_TX_GAS_TARGET, grantKey, type PolicyVersion } from '@mamoru/policy'
 import { resolveV4Policy, resolveV5Policy, resolveV6Policy, resolveV7Policy } from '../src/boot.ts'
-import type { Operator } from '../src/operator.ts'
+import { HttpError, type Operator } from '../src/operator.ts'
 import type { AccountState } from '../src/state.ts'
-import { ctx, world } from './owner-world.ts'
+import { ctx, SAFE, world } from './owner-world.ts'
 
 const V1 = `0x${'11'.repeat(20)}`
 const GAS = `0x${'22'.repeat(20)}`
@@ -59,13 +59,18 @@ function chain(w: ReturnType<typeof world>, generation: bigint) {
     if (a.functionName === 'generationOf') return generation
     if (a.functionName === 'configOf') return { generation }
     if (a.functionName === 'isPaused') return false
+    // Admitted positions: WETH/USDC 0.30 %, owned by the Safe.
+    if (a.functionName === 'ownerOf') return SAFE
+    if (a.functionName === 'positions') return [0n, `0x${'00'.repeat(20)}`, registryAddress('WETH', baseRegistry), registryAddress('USDC', baseRegistry), 3000, -100, 100, 1n, 0n, 0n, 0n, 0n]
     return base(a)
   }
 }
 
-function running(w: ReturnType<typeof world>, policy: PolicyVersion, only?: (name: string) => boolean): AccountState {
+/** `positions`: per-position `manage:<tokenId>` grants the account also holds (legacy v2/v3 accounts), each admitted. */
+function running(w: ReturnType<typeof world>, policy: PolicyVersion, only?: (name: string) => boolean, positions: bigint[] = []): AccountState {
   const grants = policy.session.grants.filter((g) => !g.perPosition).map((g, i) => ({ name: grantKey(g), permissionId: `0x${(i + 1).toString(16).padStart(64, '0')}`, grant: { policyId: policy.policyId, pool: g.pool, userOp: { validUntil: 2_000_000_000, validAfter: 0, usageLimit: 1 } } })).filter((g) => !only || only(g.name))
-  const acc = { accountKey: 'k', ctx, active: true, trusted: true, policyId: policy.policyId, grants, ops: [], revoked: [] } as unknown as AccountState
+  const manage = positions.map((id, i) => ({ name: `manage:${id}`, permissionId: `0x${(0x100 + i).toString(16).padStart(64, '0')}`, grant: { policyId: policy.policyId, userOp: { validUntil: 2_000_000_000, validAfter: 0, usageLimit: 1 } } }))
+  const acc = { accountKey: 'k', ctx, active: true, trusted: true, policyId: policy.policyId, grants: [...grants, ...manage], ops: [], revoked: [], ...(positions.length ? { admittedTokenIds: positions.map(String) } : {}) } as unknown as AccountState
   w.state.accounts.k = acc
   return acc
 }
@@ -75,6 +80,24 @@ function ready(w: ReturnType<typeof world>): void {
   p.settleRenewals = async () => {}
   p.assertRenewable = () => {}
   p.readOf = async () => ({ block: 100n, deployed: true, usdc: 0n, eth: 0n })
+}
+
+/**
+ * The owner transaction's gas limit as a function of what it carries, shaped like t11's measurements (enable ~0.5M per
+ * action, a removeSession ~0.3M before its refund, plus a fixed part): v7 from v6 (8 revokes) fits 16.2M, v7 from a v2
+ * account with 12 grants plus per-position ones does not; v6's own split always finds a prefix.
+ */
+function gasModel(w: ReturnType<typeof world>): { limits: bigint[] } {
+  const seen = { limits: [] as bigint[] }
+  priv(w.op).ownerTxGasLimit = async (...a: unknown[]) => {
+    const calls = (a[1] as { to: string; data: Hex }[]).filter((c) => c.to.toLowerCase() === SMART_SESSION).map((c) => decodeFunctionData({ abi: smartSessionAbi, data: c.data }))
+    const actions = calls.filter((d) => d.functionName === 'enableSessions').flatMap((e) => e.args![0] as unknown as { actions: unknown[] }[]).reduce((n, s) => n + s.actions.length, 0)
+    const removes = calls.filter((d) => d.functionName === 'removeSession').length
+    const gas = 500_000n + 500_000n * BigInt(actions) + 300_000n * BigInt(removes)
+    seen.limits.push(gas)
+    return gas
+  }
+  return seen
 }
 
 const cfg = (flags: Record<string, boolean>, scope: string[] | null = null) => ({ v4Policy: v4, v5Policy: v5, v6Policy: v6, v7Policy: v7, opsFlags: () => flags, opsScopedFlags: () => (flags.multichain_v6 ? { multichain_v6: scope } : {}) })
@@ -147,6 +170,8 @@ describe('owner transactions of a v7 approval: one each', () => {
       expect(text).toMatch(/In USDC\/cbBTC 0\.05%: wind down only \(take out, collect and close positions, sell cbBTC for USDC\); .*; sales worth at most .*; 32,000 transactions at most/)
       expect(text).not.toContain('instead of opening another one')
       expect(text).toContain('Bridge: it may burn USDC')
+      // #41: the move onto MamoruActionPolicyV2 names the guardian pause (toV5 is by contract version, not policy id).
+      expect(text).toContain('A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause')
       // The v6 clause about cbBTC is said once, in its pool's block.
       expect(text.match(/cbBTC/g)!.length).toBe(2)
     })
@@ -165,19 +190,138 @@ describe('owner transactions of a v7 approval: one each', () => {
     expect(removed).toHaveLength(acc.grants.length)
   })
 
-  test('over the renewal budget (16.2M) by simulation: RENEWAL_TOO_LARGE, nothing held, never split', async () => {
+  test('within the renewal budget (16.2M) but over V4_TX_GAS_TARGET: one transaction, not split', async () => {
     const w = world(0n, cfg({ merged_grants_v7: true, multichain_v6: true }))
     running(w, v5)
+    ready(w)
+    chain(w, 7n)
+    // Over V4_TX_GAS_TARGET (where fitV4 would cut) but within the budget it goes, as one transaction: a move revokes the
+    // old set in the same transaction (t11: 15.6M from a 9-session v5 account, 16.1M from a 12-session v2 one).
+    priv(w.op).ownerTxGasLimit = async () => V4_TX_GAS_TARGET + 1_600_000n
+    const t = await w.op.prepareRenew(ctx)
+    expect(t.policyId).toBe('conservador-live-v7')
+    expect(smartSessionCalls(priv(w.op).prepared.get(t.prepareId)!.tx).sessions).toHaveLength(4)
+  })
+
+  test("a v7 account's own renewal over the budget has nothing to fall back to: RENEWAL_TOO_LARGE, nothing held", async () => {
+    const w = world(0n, cfg({ merged_grants_v7: true, multichain_v6: true }))
+    running(w, v7)
     ready(w)
     chain(w, 7n)
     priv(w.op).ownerTxGasLimit = async () => 16_200_001n
     await expect(w.op.prepareRenew(ctx)).rejects.toMatchObject({ code: 'RENEWAL_TOO_LARGE' })
     expect(priv(w.op).prepared.size).toBe(0)
-    // Over V4_TX_GAS_TARGET (where fitV4 would cut) but within the budget it goes, as one transaction: a move revokes the
-    // old set in the same transaction (t11: 15.6M from a 9-session v5 account, 16.1M from a 12-session v2 one).
-    priv(w.op).ownerTxGasLimit = async () => V4_TX_GAS_TARGET + 1_600_000n
+  })
+})
+
+describe('a v7 move that does not fit one transaction falls back, never leaves the account stuck', () => {
+  const v2 = POLICIES['conservador-live-v2']!
+
+  test('legacy v2 with per-position manage grants and admitted positions: the v6 move instead, every old grant revoked, split as v6 is', async () => {
+    const w = world(0n, cfg({ merged_grants_v7: true, multichain_v6: true }))
+    const acc = running(w, v2, undefined, [101n, 102n])
+    ready(w)
+    chain(w, 7n)
+    const seen = gasModel(w)
     const t = await w.op.prepareRenew(ctx)
-    expect(smartSessionCalls(priv(w.op).prepared.get(t.prepareId)!.tx).sessions).toHaveLength(4)
+    // The v7 attempt was simulated and refused (over 16.2M), then v6 was planned.
+    expect(seen.limits[0]!).toBeGreaterThan(16_200_000n)
+    expect(t.policyId).toBe('conservador-live-v6')
+    expect(t.move).toBe(true)
+    const held = priv(w.op).prepared.get(t.prepareId)!
+    // The first v6 transaction revokes the whole old set, the per-position grants included.
+    expect(new Set(smartSessionCalls(held.tx).removed.map((r) => r.toLowerCase()))).toEqual(new Set(acc.grants.map((g) => g.permissionId.toLowerCase())))
+    expect(held.revokes!.length).toBe(acc.grants.length)
+    const text = t.summary.join('\n')
+    expect(text).toMatch(/takes \d steps/)
+    expect(text).toContain('Your 2 open positions stay')
+    // The row offers what is signed: renewTarget and the approval view now say v6, and the next tap plans v6 again
+    // without trying v7 (no more refused simulations).
+    expect(w.op.renewTarget(acc)).toBe('conservador-live-v6')
+    const p = priv(w.op) as unknown as Record<string, (...a: unknown[]) => unknown>
+    const oneTx = p.oneTxV4!.bind(w.op)
+    let v7Tries = 0
+    p.oneTxV4 = (...a: unknown[]) => {
+      v7Tries++
+      return oneTx(...a)
+    }
+    const again = await w.op.prepareRenew(ctx)
+    expect(again.policyId).toBe('conservador-live-v6')
+    expect(v7Tries).toBe(0)
+  })
+
+  test('the same account without the extra grants fits and moves to v7; a changed grant set tries v7 again', async () => {
+    const w = world(0n, cfg({ merged_grants_v7: true, multichain_v6: true }))
+    const acc = running(w, v6)
+    ready(w)
+    chain(w, 7n)
+    gasModel(w)
+    expect((await w.op.prepareRenew(ctx)).policyId).toBe('conservador-live-v7')
+    // A v6 account marked refused (its set then) is offered v7 again once its grants change.
+    const big = running(w, v2, undefined, [101n, 102n])
+    await w.op.prepareRenew(ctx)
+    expect(w.op.renewTarget(big)).toBe('conservador-live-v6')
+    big.grants = big.grants.slice(0, 3)
+    expect(w.op.renewTarget(big)).toBe('conservador-live-v7')
+  })
+
+  test('a v6 account whose v7 move does not fit renews as v6 (its own policy), in as many prompts as v6 takes', async () => {
+    const w = world(0n, cfg({ merged_grants_v7: true, multichain_v6: true }))
+    const acc = running(w, v6)
+    ready(w)
+    chain(w, 7n)
+    let first = true
+    priv(w.op).ownerTxGasLimit = async () => {
+      if (first) {
+        first = false
+        return 16_200_001n
+      }
+      return 10_000_000n
+    }
+    const t = await w.op.prepareRenew(ctx)
+    expect(t.policyId).toBe('conservador-live-v6')
+    expect(t.move).toBe(false)
+    expect(w.op.renewTarget(acc)).toBe('conservador-live-v6')
+  })
+
+  test('the static estimate (the Safe cannot be simulated) refusing v7 falls back the same way', async () => {
+    const w = world(0n, cfg({ merged_grants_v7: true, multichain_v6: true }))
+    running(w, v2, undefined, [101n, 102n])
+    ready(w)
+    chain(w, 7n)
+    priv(w.op).ownerTxGasLimit = async () => null
+    // activationGasOf: the per-call simulation fails too, so both v7 and v6 are sized by the static model.
+    ;(priv(w.op) as unknown as Record<string, unknown>).activationGasOf = async (_l: unknown, _c: unknown, sessions: number) => ({ gas: sessions === 4 ? 17_000_000n : 1_000_000n + BigInt(sessions) * 1_500_000n, simulated: false })
+    const t = await w.op.prepareRenew(ctx).catch((e) => {
+      if (e instanceof HttpError) throw new Error(`${e.code}: ${e.message}`)
+      throw e
+    })
+    expect(t.policyId).toBe('conservador-live-v6')
+  })
+})
+
+describe('a fresh activation on v7 (default policy) that does not fit one transaction', () => {
+  test('starts on v6 instead, in as many prompts as v6 takes', async () => {
+    const w = world(0n, { ...cfg({ merged_grants_v7: true, multichain_v6: true }), policy: v7 })
+    w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
+    chain(w, 0n)
+    const seen = gasModel(w)
+    // Above the activation budget (15M) for v7's 26 actions; v6's split fits.
+    priv(w.op).ownerTxGasLimit = async (...a: unknown[]) => {
+      const calls = (a[1] as { to: string; data: Hex }[]).filter((c) => c.to.toLowerCase() === SMART_SESSION).map((c) => decodeFunctionData({ abi: smartSessionAbi, data: c.data }))
+      const actions = calls.filter((d) => d.functionName === 'enableSessions').flatMap((e) => e.args![0] as unknown as { actions: unknown[] }[]).reduce((n, s) => n + s.actions.length, 0)
+      const gas = 2_000_000n + 550_000n * BigInt(actions)
+      seen.limits.push(gas)
+      return gas
+    }
+    const t = await w.op.prepareActivate(ctx).catch((e) => {
+      if (e instanceof HttpError) throw new Error(`${e.code}: ${e.message}`)
+      throw e
+    })
+    expect(seen.limits[0]!).toBeGreaterThan(15_000_000n)
+    // v6's grant names (enter-swap / enter-mint per pool), not v7's merged sessions.
+    expect(priv(w.op).prepared.get(t.prepareId)!.grants!.some((g) => g.name.startsWith('enter-'))).toBe(true)
+    expect(t.summary.join('\n')).toMatch(/takes \d steps/)
   })
 })
 

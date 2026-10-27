@@ -512,6 +512,11 @@ export function renewPolicyOf(grants: readonly Pick<StoredGrant, 'grant'>[]): st
   return ids[0]
 }
 
+/** otto/mamoru#225: the grant set a refused one-transaction move was sized for (policy and every grant it would revoke). */
+export function oneTxFingerprint(acc: Pick<AccountState, 'policyId' | 'grants' | 'superseded'>): string {
+  return [acc.policyId ?? '', ...acc.grants.map((g) => g.permissionId.toLowerCase()), ...(acc.superseded ?? []).map((id) => id.toLowerCase())].join(',')
+}
+
 /**
  * otto/mamoru#214: what a move to `target` changes in the split of the account, for the renew row to draw before -> after.
  * Only when the target has buckets on another chain (v6); every other move changes no split worth drawing. `from` is the
@@ -716,6 +721,14 @@ export class Operator {
   private readonly fundingCache = new FundingCache<SafeRead>(Date.now, FUNDING_STALE_MS)
   /** #149: usage counters read from the chain per account (readChainUsage), keyed by lower-case permission id. */
   private readonly chainUsage = new Map<string, { at: number; grants: string; byGrant: Map<string, ChainUsage>; budgets?: Map<string, number>; paused?: boolean }>()
+  /**
+   * otto/mamoru#225: accounts whose move to a one-transaction policy (v7) did not fit one owner transaction, with the
+   * grant set it was refused for (`oneTxFingerprint`). While that set is the account's, v4Target offers what it would
+   * have without v7 (the v6/v5 move or the account's own renewal, in as many prompts as those take), so the account is
+   * never left with an approval it cannot renew. A different set (a landed renewal, a new position grant) tries v7 again,
+   * and so does a restart (memory only: one refused simulation, then the same fallback).
+   */
+  private readonly oneTxRefused = new Map<string, string>()
   /** Ops whose execTransaction went to the provider in this attempt: only then can a refusal be about a copy already out. */
   private readonly execTried = new Set<string>()
   /** Armed ops being sent again after a failed attempt: an earlier copy may have landed although its reply said no. */
@@ -1309,7 +1322,7 @@ export class Operator {
     // otto/mamoru#225: v7 (v6 in one session per pool, one owner transaction) configured and offered: v2-v6 move to it.
     // It bridges like v6, so it needs the account in v6's scope as well as its own flag.
     const v7 = this.cfg.v7Policy
-    if (v7 && inV6Scope && flags?.merged_grants_v7 === true && V7_MIGRATES_FROM.has(cur.policyId) && cur.chain === v7.chain) return v7
+    if (v7 && inV6Scope && flags?.merged_grants_v7 === true && V7_MIGRATES_FROM.has(cur.policyId) && cur.chain === v7.chain && this.oneTxRefused.get(acc.accountKey) !== oneTxFingerprint(acc)) return v7
     // otto/mamoru#214: v6 (Base + Monad growth) configured and offered: v2-v5 accounts move to it, ahead of v5.
     const v6 = this.cfg.v6Policy
     if (v6 && inV6Scope && V6_MIGRATES_FROM.has(cur.policyId) && cur.chain === v6.chain) return v6
@@ -2101,7 +2114,9 @@ export class Operator {
   /**
    * otto/mamoru#225: a policy approved in ONE owner transaction (`session.oneTransaction`, v7): every key, every revoke and
    * attestation in one Safe transaction, never split. Its gas limit is simulated in the Safe's own context (as fitV4);
-   * over `budget` it is refused (RENEWAL_TOO_LARGE) and nothing is held for signing: no silent second step.
+   * over `budget` it is refused (RENEWAL_TOO_LARGE) and nothing is held for signing: no silent second step. A refused
+   * move or Start falls back to the target it would have had without v7 (planRenewOrFallBack, planActivate), which the
+   * owner then reads and signs as that policy's own (split) approval.
    * The bound is `budget` (RENEW_GAS_BUDGET 16.2M for a renewal or move, ACTIVATION_GAS_BUDGET 15M for a Start), not
    * V4_TX_GAS_TARGET: that target only decides where fitV4 cuts a split, and a move must revoke the old set in the same
    * transaction. Measured on a Base fork (t11): the limit ownerTxGasLimit computes is 15.6M for the move from a 9-session
@@ -2134,7 +2149,30 @@ export class Operator {
    */
   /** Planned under the account lock: nothing else of the account (an engine review, another owner action) runs in between. */
   prepareRenew(ctx: AccountContext): Promise<OwnerTxToSign> {
-    return this.lock(ctx.accountKey).run(() => this.planRenew(ctx))
+    return this.lock(ctx.accountKey).run(() => this.planRenewOrFallBack(ctx))
+  }
+
+  /**
+   * otto/mamoru#225: a move to a one-transaction policy (v7) that does not fit one owner transaction (RENEWAL_TOO_LARGE,
+   * by simulation or by the static estimate when the Safe cannot be simulated) is not the end of the renew row: the
+   * account is marked (`oneTxRefused`) and the renewal is planned again for the target it would have had without v7:
+   * the v6/v5 move or its own policy's renewal, split as those are today. Without this every later tap would compute
+   * the same v7 move and fail, and the approval would lapse. A renewal of an account already on v7 has no other target
+   * and stays refused.
+   */
+  private async planRenewOrFallBack(ctx: AccountContext): Promise<OwnerTxToSign> {
+    try {
+      return await this.planRenew(ctx)
+    } catch (e) {
+      if (!(e instanceof HttpError) || e.code !== 'RENEWAL_TOO_LARGE') throw e
+      const { acc } = this.account(ctx, { readOnly: true })
+      const target = this.v4Target(acc)
+      if (!target || !oneTransaction(target) || target.policyId === acc.policyId) throw e
+      this.oneTxRefused.set(acc.accountKey, oneTxFingerprint(acc))
+      const instead = this.v4Target(acc)
+      console.log(`[v4] ${acc.accountKey} the move to ${target.policyId} does not fit one owner transaction (${acc.grants.length} grants to revoke, ${acc.admittedTokenIds?.length ?? 0} admitted positions): offering ${instead ? `the move to ${instead.policyId}` : `the renewal of ${acc.policyId ?? LEGACY_POLICY}`} instead`)
+      return this.planRenew(ctx)
+    }
   }
 
   private async planRenew(ctx: AccountContext): Promise<OwnerTxToSign> {
@@ -2871,7 +2909,7 @@ export class Operator {
     const start = await this.startTotal(acc, totalOf(this.localExposure(acc, r)))
     if (start.total > cap) throw depositOverCap(start.total, cap, start.across)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc, this.chainName())
-    const policy = this.cfg.policy
+    let policy = this.cfg.policy
     // otto/mamoru#15: a Safe holding enough USDC buys its own gas reserve in this very transaction (self-reserve.ts):
     // the relayer then sends no top-up. Any other start keeps the relayer's top-up, within the activation budget.
     const self = r.usdc > 0n ? await this.selfReserve(live.safe, r) : null
@@ -2881,8 +2919,19 @@ export class Operator {
     const own = reserve ? { reserveWei: reserve.amountOutMinimum.toString(), reserveDeadline: reserve.deadline.toString() } : {}
     if (isV4(policy)) {
       // Spec 007 T7 (c): a v4 Start enables what fits one Base transaction; the rest follows as one more approval each.
-      const keys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
-      const f = await this.fitV4(acc, live, policy, r, cap, keys, [], 'full', ACTIVATION_GAS_BUDGET, reserve)
+      // otto/mamoru#225: a one-transaction policy (v7) that does not fit one activation transaction starts on the v6 it
+      // merges instead (same pools, buckets and contracts), in as many prompts as v6 takes; its renew row offers v7 later.
+      const fit = (p: PolicyVersion) => this.fitV4(acc, live, p, r, cap, p.session.grants.filter((g) => !g.perPosition).map(grantKey), [], 'full', ACTIVATION_GAS_BUDGET, reserve)
+      let f: Awaited<ReturnType<typeof fit>>
+      try {
+        f = await fit(policy)
+      } catch (e) {
+        const v6 = this.cfg.v6Policy
+        if (!(e instanceof HttpError) || e.code !== 'RENEWAL_TOO_LARGE' || !oneTransaction(policy) || !v6 || oneTransaction(v6) || v6.chain !== policy.chain) throw e
+        console.log(`[v4] ${acc.accountKey} activation on ${policy.policyId} does not fit one owner transaction: activating ${v6.policyId} instead`)
+        policy = v6
+        f = await fit(policy)
+      }
       const days = Math.round(policy.session.validitySeconds / 86_400)
       const pools = policy.buckets.filter((b) => b.pools[0] && b.preference > 0).map((b) => `${poolLabel(b.pools[0]!, this.cfg.registry)} ${b.preference / 100}%`)
       const summary = [
