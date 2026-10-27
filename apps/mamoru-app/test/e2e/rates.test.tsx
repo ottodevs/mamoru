@@ -269,11 +269,11 @@ describe('past reading when the live balance cannot be read', () => {
     expect(text).toContain('no live read')
     expect(text).not.toContain('loading')
   })
-  test('a live read always wins over a past one', () => {
+  test('no past given: the live balance, no past marking', () => {
     const s = split(fixtureFunding, null)
-    const { text } = render(<Balance s={s} past={past} onAdd={() => {}} onWithdraw={() => {}} />)
+    const { text, html } = render(<Balance s={s} onAdd={() => {}} onWithdraw={() => {}} />)
     expect(text).not.toContain('Last reading')
-    expect(text).not.toContain('6.00 USDC')
+    expect(html).not.toContain('sum past')
   })
 })
 
@@ -283,6 +283,7 @@ describe('agoText', () => {
     expect(agoText('2026-10-26T09:55:00.000Z', now)).toBe('5 min')
     expect(agoText('2026-10-26T07:00:00.000Z', now)).toBe('3 h')
     expect(agoText('2026-10-24T01:30:00.000Z', now)).toBe('2 days')
-    expect(agoText('2026-10-26T10:05:00.000Z', now)).toBe('0 min')
+    expect(agoText('2026-10-26T10:05:00.000Z', now)).toBe('under a minute')
+    expect(agoText('2026-10-26T09:59:30.000Z', now)).toBe('under a minute')
   })
 })

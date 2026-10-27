@@ -139,9 +139,10 @@ function Earned({ usd: earned }: { usd: string | null | undefined }) {
   )
 }
 
-/** How long ago an ISO time was, in the largest whole unit: "4 min", "3 h", "2 days". */
+/** How long ago an ISO time was, in the largest whole unit: "under a minute", "4 min", "3 h", "2 days". */
 export function agoText(iso: string, now: number = Date.now()): string {
   const min = Math.max(0, Math.floor((now - Date.parse(iso)) / 60_000))
+  if (min < 1) return 'under a minute'
   if (min < 60) return `${min} min`
   const h = Math.floor(min / 60)
   if (h < 48) return `${h} h`
@@ -159,10 +160,10 @@ export function Balance({
   earnedSoFarUsd?: string | null
   onAdd: () => void
   onWithdraw: () => void
-  /** otto/mamoru#208: shown, marked as a past reading, only while there is no live read (`s` null). */
+  /** otto/mamoru#208: set only while the live read fails; then it is what the balance shows, marked as past. */
   past?: { totalUsd: string; readAt: string } | null
 }) {
-  const shownPast = s ? null : past
+  const shownPast = past
   return (
     <section className="balance" aria-labelledby="total-title">
       <div>
@@ -170,7 +171,7 @@ export function Balance({
           {homeCopy.total}
         </p>
         <p className={`sum${shownPast ? ' past' : ''}`} data-testid="total">
-          {s ? usd(s.total) : shownPast ? usd(shownPast.totalUsd) : '0.00'}
+          {shownPast ? usd(shownPast.totalUsd) : s ? usd(s.total) : '0.00'}
           <span className="unit">USDC</span>
         </p>
         {shownPast ? (
@@ -187,7 +188,7 @@ export function Balance({
         </button>
         {/* otto/mamoru#135: never disabled on the poll's balance, which can be 15-60 s behind a deposit. The
             operator's prepare reads the chain and refuses with a reason the dialog shows. */}
-        <button type="button" className="act quiet" data-testid="withdraw-button" onClick={onWithdraw} disabled={!s}>
+        <button type="button" className="act quiet" data-testid="withdraw-button" onClick={onWithdraw} disabled={!s || !!shownPast}>
           {homeCopy.withdraw}
         </button>
       </div>
@@ -999,6 +1000,15 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   }, [signedOut, qc])
   const price = cbbtcPrice(pools.data)
   const s = f ? split(f, price) : null
+  // otto/mamoru#208 (review of PR #133): the live read is down whenever the last poll failed, cached data or not —
+  // TanStack keeps the last good `data` next to the error. The past reading is then that last good read, or, with
+  // none in this tab, the last snapshot in D1. A 401 is a signed-out session, not an outage.
+  const liveDown = funding.isError && !signedOut
+  const past = !liveDown
+    ? null
+    : s
+      ? { totalUsd: s.total.toString(), readAt: new Date(funding.dataUpdatedAt).toISOString() }
+      : (yieldLedger.data?.lastBalance ?? null)
   const apy = useApy()
   const armed = activationLive(opList)
   // A renewal the owner signed is on its way: the row that asks for it steps aside until it settles.
@@ -1086,20 +1096,19 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd}
         onAdd={addMoney}
         onWithdraw={() => withdraw()}
-        past={funding.isError ? (yieldLedger.data?.lastBalance ?? null) : null}
+        past={past}
       />
-      <Indicators f={f} apy={apy.data} price={price} noRead={!f && funding.isError} />
+      <Indicators f={f} apy={apy.data} price={price} noRead={!f && liveDown} />
       <WrongNetwork accountKey={accountKey} />
+      {past ? (
+        <section className="card" data-testid="past-notice" role="status">
+          <span className="title">{homeCopy.pastTitle}</span>
+          <span className="sub">{homeCopy.pastBody}</span>
+        </section>
+      ) : null}
       {!f ? (
-        funding.isError ? (
-          yieldLedger.data?.lastBalance ? (
-            <section className="card" data-testid="past-notice" role="status">
-              <span className="title">{homeCopy.pastTitle}</span>
-              <span className="sub">{homeCopy.pastBody}</span>
-            </section>
-          ) : (
-            <p className="err card">{homeCopy.noReading}</p>
-          )
+        liveDown ? (
+          past ? null : <p className="err card">{homeCopy.noReading}</p>
         ) : (
           <div className="card h-40 animate-pulse" aria-hidden="true" />
         )

@@ -153,6 +153,9 @@ const renewdue = param('renewdue')
 const divergenceOn = param('divergence')
 // ?operatordown (dev only, otto/mamoru#208): /funding answers OPERATOR_UNAVAILABLE; the last snapshot is 3 h old.
 const operatorDown = param('operatordown')
+// ?operatorlate (dev only, otto/mamoru#208 review): the first /funding read works, every later one fails.
+const operatorLate = param('operatorlate')
+let fundingReads = 0
 const dueApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 86_400_000) * 86_400 + 10 * 86_400, renewDue: true, expired: false } })
 const liveState = {
   funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}), ...(renewdue ? dueApproval() : {}), ...(dashboard ? placedThree() : {}) } as FundingView,
@@ -270,7 +273,7 @@ export const fixtureClient: ApiClient = {
   recoveryKit: () => delay({ chainId: 8453, address: FIXTURE_ADDRESS, fixture: true }),
   ackRecovery: () => delay({ ok: true as const }),
   funding: (k) =>
-    operatorDown
+    operatorDown || (operatorLate && fundingReads++ > 0)
       ? new Promise((_, reject) => setTimeout(() => reject(new ApiRequestError(503, { error: 'The operator is not reachable. Nothing was sent. Try again.', code: 'OPERATOR_UNAVAILABLE' })), 150))
       : delay(isMonad(k) ? monadState.funding : liveState.funding),
   // ?wrongchain (dev only): 150 USDC was sent on Ethereum to the Base address.

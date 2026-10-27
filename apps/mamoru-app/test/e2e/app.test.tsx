@@ -29,12 +29,26 @@ const funded: FundingView = {
   positions: [{ tokenId: '1', pool: `0x${'a'.repeat(40)}`, liquidity: '1', inRange: true, amountUsdc: '5000000', amountCbbtc: '10000' }],
 }
 
-async function renderRoute(path: string, session: SessionView | null, funding?: FundingView, more: { ops?: OpView[]; config?: AppConfig; apy?: ApyView } = {}) {
+async function renderRoute(
+  path: string,
+  session: SessionView | null,
+  funding?: FundingView,
+  more: { ops?: OpView[]; config?: AppConfig; apy?: ApyView; fundingDown?: boolean; lastBalance?: { totalUsd: string; readAt: string } } = {},
+) {
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   qc.setQueryData(queryKeys.config, more.config ?? fixtureConfig)
   qc.setQueryData(queryKeys.session, session)
   qc.setQueryData(queryKeys.pools, poolsResponse)
-  if (funding) qc.setQueryData(queryKeys.funding(FIXTURE_ACCOUNT_KEY), funding)
+  if (funding) qc.setQueryData(queryKeys.funding(FIXTURE_ACCOUNT_KEY), funding, { updatedAt: Date.now() - 5 * 60_000 })
+  // otto/mamoru#208: the last poll failed. TanStack keeps any earlier `data` next to the error.
+  if (more.fundingDown) {
+    const err = new ApiRequestError(503, { error: 'The operator is not reachable.', code: 'OPERATOR_UNAVAILABLE' })
+    // A static render cannot run the retry a mount would start; the error state is what the poll leaves between tries.
+    qc.setQueryDefaults(queryKeys.funding(FIXTURE_ACCOUNT_KEY), { retryOnMount: false })
+    const q = qc.getQueryCache().build(qc, { queryKey: queryKeys.funding(FIXTURE_ACCOUNT_KEY) })
+    q.setState({ status: 'error', error: err, errorUpdatedAt: Date.now(), fetchStatus: 'idle' })
+  }
+  if (more.lastBalance) qc.setQueryData(queryKeys.yieldLedger(FIXTURE_ACCOUNT_KEY), { asOf: null, accruedUsd: null, collectedUsd: null, earnedSoFarUsd: null, gasPaidWei: null, valueVsHoldUsd: null, feeAccruedUsd: null, lastBalance: more.lastBalance })
   qc.setQueryData(queryKeys.ops(FIXTURE_ACCOUNT_KEY), { ops: more.ops ?? [] })
   if (more.apy) qc.setQueryData(queryKeys.apy, more.apy)
   const router = buildRouter(createMemoryHistory({ initialEntries: [path] }))
@@ -733,5 +747,34 @@ describe('funds by token and what Mamoru is doing', () => {
   test('an account with nothing in progress keeps the plain label', async () => {
     const { text } = await renderRoute('/', fixtureSession, { ...midEntry, engine: { placing: false, nextReviewAt: null } })
     expect(text).toContain('Idle capital 5.00 USDC · waiting to be placed')
+  })
+})
+
+// otto/mamoru#208 (review of PR #133): an outage while Home is open keeps the last good read in the cache; it must
+// still read as past, with the notice and both actions off, and go back to live when a poll succeeds.
+describe('live balance down', () => {
+  const lastBalance = { totalUsd: '6001234', readAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString() }
+  test('loaded, then the poll fails: the cached read is shown as past, notice up, Add and Withdraw off', async () => {
+    const { text, html } = await renderRoute('/', fixtureSession, funded, { fundingDown: true, lastBalance })
+    expect(text).toContain('Last reading 5 min ago')
+    expect(text).toContain('Mamoru cannot read your account right now.')
+    expect(html).toMatch(/data-testid="withdraw-button"[^>]*disabled/)
+    expect(html).toContain('sum past')
+  })
+  test('never loaded in this tab: the D1 snapshot is the past reading', async () => {
+    const { text } = await renderRoute('/', fixtureSession, undefined, { fundingDown: true, lastBalance })
+    expect(text).toContain('6.00')
+    expect(text).toContain('Last reading 3 h ago')
+    expect(text).toContain('no live read')
+  })
+  test('never loaded and no snapshot: the error says the money stays on-chain', async () => {
+    const { text } = await renderRoute('/', fixtureSession, undefined, { fundingDown: true })
+    expect(text).toContain('Could not load your balance. Your money stays in your account on-chain.')
+  })
+  test('the poll succeeds again: live, no past marking, no notice', async () => {
+    const { text, html } = await renderRoute('/', fixtureSession, funded, { lastBalance })
+    expect(text).not.toContain('Last reading')
+    expect(text).not.toContain('cannot read your account')
+    expect(html).not.toContain('sum past')
   })
 })
