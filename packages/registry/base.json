@@ -293,7 +293,8 @@
       "address": "0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61",
       "asset": "USDC",
       "decimals": 18,
-      "codeHash": "0x904289f0cca9814e4440e741e0d56aafc656f5889f3f032462a96e72df4eb9ad"
+      "codeHash": "0x904289f0cca9814e4440e741e0d56aafc656f5889f3f032462a96e72df4eb9ad",
+      "label": "Morpho · Gauntlet USDC Prime"
     },
     {
       "name": "vault:waBasUSDC",
@@ -306,7 +307,8 @@
       "implementation": {
         "address": "0xbCb167bDCF14a8F791d6f4A6EDd964aed2F8813B",
         "codeHash": "0xa3445aa71780dcc4130aa745163660eb37cb5602bba8147f008192bf3777c6df"
-      }
+      },
+      "label": "Aave · USDC"
     }
   ],
   "undeployed": [

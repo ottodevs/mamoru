@@ -14,7 +14,7 @@ import type { Decision, GateStep, GuardNote, Observation, Proposal, ShadowNote }
 export type * from './types.ts'
 export { estimateFees } from './harvest/index.ts'
 export { safeSavings } from './enter/index.ts'
-export { amountsForLiquidity, inSavings, volatileOf } from './value.ts'
+export { amountsForLiquidity, bucketVaults, inSavings, vaultValue, volatileOf } from './value.ts'
 export { fallBpsOf, fallFreezeOf, marketOf, type CumulativePoint } from './guard/index.ts'
 export { belowShareOf, edgeBpsOf, meanTickAt, rangeFor, realizedVolOf, regimeOf, skewedRange, spiking, volWidthTicks, widenEarly, widthFor, type Regime } from './geometry/index.ts'
 export { allocate, reusablePosition, DEFAULT_INCREASE_TOLERANCE_BPS, widthOf, type Allocation, type BucketValue, type Waiting } from './allocate/index.ts'
@@ -23,7 +23,7 @@ export { MAX_FEE_APR_BPS, outOfRangeSinceOf, rerangeWorth, RERANGE_OPS, withOutO
 export { weightTargets } from './rebalance/weights.ts'
 export { depegExitOf, depeggedPool, pegDeviationBps, pegStep, PEG_CLEAR, type PegState } from './guard/depeg.ts'
 export { fallFromBps, stageStep, thirdsOut, type StageInput, type StageState } from './rebalance/staged.ts'
-export { amountsOf, bucketValues, positionValue, rerangeOf, reduceOf, EDGE_BPS, DRIFT_BPS } from './rerange/index.ts'
+export { amountsOf, bucketValues, positionValue, rerangeOf, reduceOf, vaultRedeemOf, EDGE_BPS, DRIFT_BPS } from './rerange/index.ts'
 
 /** Lab (#101 round 3): drift band of a bucket under a staged exit, so the risk bucket's third (3.3 points) is reduced. */
 const STAGED_DRIFT_BPS = 100
@@ -36,6 +36,8 @@ const PROPOSAL_CODE = {
   rerange: 'DECIDE_RANGE_ADJUST',
   reduce: 'STRATEGY_PREFERENCE_DEVIATION',
   bridge_out: 'DECIDE_BRIDGE_OUT',
+  vault_deposit: 'DECIDE_ENTER',
+  vault_redeem: 'STRATEGY_PREFERENCE_DEVIATION',
 } as const
 
 /** Deterministic JSON: sorted keys, bigints as decimal strings. */
@@ -148,9 +150,9 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     trail.push(...a.trail)
     if (a.proposal) {
       enterEvaluated = true
-      // otto/mamoru#215: a bridge has no pool here (its remote pool is checked by that chain's engine); every other
-      // proposal's pool is looked up exactly as before, so a missing one still fails closed.
-      if (a.proposal.kind !== 'bridge_out') trail.push(purgaIdentity(obs.pools.find((x) => x.name === a.proposal!.pool)!, registryOf(obs)))
+      // otto/mamoru#215: a bridge has no pool here (its remote pool is checked by that chain's engine), nor a vault op
+      // (#210); every other proposal's pool is looked up exactly as before, so a missing one still fails closed.
+      if (!poolless(a.proposal)) trail.push(purgaIdentity(obs.pools.find((x) => x.name === a.proposal!.pool)!, registryOf(obs)))
       trail.push({ gate: 'strategy', verdict: 'GO', reason: 'STRATEGY_PREFERENCE_DEVIATION' }, { gate: 'eny', verdict: 'SKIP', reason: 'ENY_SHADOW' })
       entries.push(remint && a.proposal.kind === 'enter_mint' ? { ...a.proposal, grant: anyKey(policy, 'manage-any', a.proposal.pool) } : a.proposal)
       displaced = a.displaced
@@ -207,6 +209,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     const exit = depegged ? depegExitOf(obs, policy, depegged) : null
     const lab = depegged || policy.stagedExit ? { ...(depegged ? { skip: new Set([depegged.name]) } : {}), driftBps: stagedDrift } : undefined
     const reduce = exit || reranges.length || harvests.length ? null : reduceOf(obs, policy, policyPools, lab)
+    // otto/mamoru#210: a vault that cannot pay out its excess yet says so on its bucket.
+    if (reduce?.code === 'DECIDE_WAIT_VAULT_LIQUIDITY') buckets.push({ bucket: 'stables', code: reduce.code })
     // A frozen bucket's idle token waits where it is: the guard never turns a pause into a sell-back.
     const frozenPools = guards.filter((g) => frozen.has(g.bucket)).map((g) => g.pool)
     if (depegged) frozenPools.push(depegged.name)
@@ -218,7 +222,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
 
   // Plan §9, step 9: a preliminary NO GO drops the proposal with its code.
   if (proposal) {
-    const gateOf = (p: Proposal) => (p.kind === 'bridge_out' ? ehgBridge(obs, policy, p.grant) : ehgPreliminary(obs, policy, obs.pools.find((x) => x.name === p.pool)!, p.grant))
+    const gateOf = (p: Proposal) => (poolless(p) ? ehgBridge(obs, policy, p.grant) : ehgPreliminary(obs, policy, obs.pools.find((x) => x.name === p.pool)!, p.grant))
     let gate = gateOf(proposal)
     trail.push(gate)
     // otto/mamoru#215: a bridge that cannot go now never starves the Base buckets: the entry it displaced goes instead.
@@ -232,6 +236,11 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
       proposal = null
       reason = gate.reason
     }
+  }
+
+  /** Proposals that act on no pool of this chain: a bridge (its pool is on the other chain) and a vault op (#210). */
+  function poolless(p: Proposal): p is Extract<Proposal, { kind: 'bridge_out' | 'vault_deposit' | 'vault_redeem' }> {
+    return p.kind === 'bridge_out' || p.kind === 'vault_deposit' || p.kind === 'vault_redeem'
   }
 
   function holdReason(): ReasonCode {

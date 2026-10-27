@@ -7,7 +7,7 @@ import { depthOf } from '../depth/index.ts'
 import { rangeFor, widthFor, widthOf } from '../geometry/index.ts'
 import { purgaIdentity, registryOf } from '../gates/index.ts'
 import type { GateStep, Observation, PoolObs, PositionObs, Proposal } from '../types.ts'
-import { amountsForLiquidity, inSavings, opCostInSavings, volatileOf } from '../value.ts'
+import { amountsForLiquidity, bucketVaults, inSavings, opCostInSavings, vaultValue, volatileOf } from '../value.ts'
 
 /** Default smallest entry when the policy sets none: 0.10 of a 6-decimal savings asset. */
 export const DEFAULT_MIN_ENTRY = 100_000n
@@ -37,7 +37,7 @@ export type BucketValue = {
 }
 
 /** otto/mamoru#127, #128: savings a bucket is short of its target and holds back on purpose, and why. */
-export type Waiting = { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE'; amount: bigint }
+export type Waiting = { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY'; amount: bigint }
 
 export type Allocation = {
   total: bigint
@@ -138,11 +138,18 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   // entry keep `minEntry`, so a gas price never strands a conversion an entry or a re-range needs.
   const byGas = policy.minEntryGasMultiple ? BigInt(policy.minEntryGasMultiple) * ENTRY_OPS * opCostInSavings(obs, savings) : 0n
   const entryMin = byGas > minEntry ? byGas : minEntry
+  // otto/mamoru#210: a vault deposit also has to earn its own two operations back (#186 condition 4).
+  const vaultMin = policy.vaultMinDeposit !== undefined && policy.vaultMinDeposit > entryMin ? policy.vaultMinDeposit : entryMin
   const free = safeSavings(obs, policy)
   const trail: GateStep[] = []
   const rows = policy.buckets.map((b) => {
+    // otto/mamoru#210: a vault bucket is worth its shares at the vault's own rate; it has no pool, no volatile and no fall.
+    if (b.vaults?.length) {
+      const value = vaultValue(obs, b)
+      return { b, pool: undefined, vault: true, value, deployed: value, idleVolatile: 0n, blocked: null as ReasonCode | null }
+    }
     const pool = b.pools[0] ? obs.pools.find((x) => x.name === b.pools[0]) : undefined
-    if (!pool) return { b, pool: undefined, value: 0n, deployed: 0n, idleVolatile: 0n, blocked: 'PLAN_BUCKET_NO_EXECUTABLE_POOL' as ReasonCode }
+    if (!pool) return { b, pool: undefined, vault: false, value: 0n, deployed: 0n, idleVolatile: 0n, blocked: 'PLAN_BUCKET_NO_EXECUTABLE_POOL' as ReasonCode }
     const p = atTwap(pool)
     const volatile = volatileOf(pool, savings)
     let value = 0n
@@ -158,16 +165,16 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     if (purga.verdict !== 'GO') trail.push(purga)
     // Spec 004 FREEZE (#101): a bucket whose pool is in a fast fall gets no entry; its share waits where it is.
     const blocked = purga.verdict !== 'GO' ? purga.reason : frozen?.has(b.id) ? ('DECIDE_ENTRY_PAUSED_FALL' as ReasonCode) : null
-    return { b, pool, value, deployed, idleVolatile, blocked }
+    return { b, pool, vault: false, value, deployed, idleVolatile, blocked }
   })
-  const executable = rows.filter((r) => r.pool)
+  const executable = rows.filter((r) => r.pool || r.vault)
   const total = free + executable.reduce((s, r) => s + r.value, 0n) + (obs.remote?.value ?? 0n)
   // otto/mamoru#213: a bucket on another chain keeps its share of the account; here it waits as savings until bridged.
   const remote = (policy.remoteBuckets ?? []).reduce((s, b) => s + b.preference, 0)
   const prefTotal = BigInt(executable.reduce((s, r) => s + r.b.preference, 0) + remote)
 
   const buckets: BucketValue[] = rows.map((r) => {
-    const target = r.pool && prefTotal > 0n ? (total * BigInt(r.b.preference)) / prefTotal : 0n
+    const target = (r.pool || r.vault) && prefTotal > 0n ? (total * BigInt(r.b.preference)) / prefTotal : 0n
     return { bucket: r.b.id, pool: r.pool?.name ?? null, value: r.value, target, weightBps: total > 0n ? Number((r.value * 10_000n) / total) : 0, code: r.blocked ?? 'STRATEGY_PREFERENCE' }
   })
   // A frozen bucket is one more reason savings wait (otto/mamoru#127, #128), shown the same way as a pool short of depth.
@@ -177,7 +184,8 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     if (r.blocked === 'DECIDE_ENTRY_PAUSED_FALL' && gap >= minEntry && free > 0n) waiting.push({ bucket: r.b.id, code: 'DECIDE_ENTRY_PAUSED_FALL', amount: gap < free ? gap : free })
     // A bucket short by more than the floor but not by enough to pay for its gas waits, and says so (#195).
     const band = gap * 10_000n > buckets[i]!.target * BigInt(policy.rebalanceBandBps ?? 0)
-    if (r.pool && !r.blocked && gap >= minEntry && gap < entryMin && band && free > 0n) {
+    const floor = r.vault ? vaultMin : entryMin
+    if ((r.pool || r.vault) && !r.blocked && gap >= minEntry && gap < floor && band && free > 0n) {
       waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_GAS', amount: gap < free ? gap : free })
       buckets[i]!.code = 'DECIDE_WAIT_GAS'
     }
@@ -186,7 +194,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   // Short buckets, most under-weight first (relative deficit), policy order on ties.
   const order = rows
     .map((r, i) => ({ r, i, deficit: buckets[i]!.target - r.value, gap: buckets[i]!.target - r.deployed, target: buckets[i]!.target }))
-    .filter((x) => x.r.pool && !x.r.blocked && x.gap >= entryMin && x.gap * 10_000n > x.target * BigInt(policy.rebalanceBandBps ?? 0))
+    .filter((x) => (x.r.pool || x.r.vault) && !x.r.blocked && x.gap >= (x.r.vault ? vaultMin : entryMin) && x.gap * 10_000n > x.target * BigInt(policy.rebalanceBandBps ?? 0))
     .sort((x, y) => {
       const dx = (x.deficit * 1_000_000n) / x.target
       const dy = (y.deficit * 1_000_000n) / y.target
@@ -205,6 +213,28 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     const row = proposal ? null : buckets[i]!
     if (unsafeDeposit) {
       if (row) row.code = 'OBS_DEPOSIT_UNSAFE'
+      continue
+    }
+    if (r.vault) {
+      // otto/mamoru#210: the gap goes to the first vault, in the bucket's order, that takes it now, preferring one with
+      // a live session (without any, the EHG says which session is missing). Less than the vault floor waits as savings.
+      const assets = gap < free ? gap : free
+      if (assets < vaultMin) {
+        if (assets >= minEntry) waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_GAS', amount: assets })
+        if (row) row.code = assets >= minEntry ? 'DECIDE_WAIT_GAS' : 'DECIDE_NO_CAPITAL'
+        continue
+      }
+      const open = bucketVaults(obs, r.b).filter((v) => v.maxDeposit >= assets)
+      const v = open.find((x) => liveSession(obs, grantKeyFor(policy, 'vault-supply', x.name))) ?? open[0]
+      if (!v) {
+        waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_VAULT_LIQUIDITY', amount: assets })
+        if (row) row.code = 'DECIDE_WAIT_VAULT_LIQUIDITY'
+        continue
+      }
+      if (!row) continue
+      row.code = 'STRATEGY_PREFERENCE_DEVIATION'
+      picked = i
+      proposal = { kind: 'vault_deposit', grant: grantKeyFor(policy, 'vault-supply', v.name) as `vault-supply:${string}`, bucket: r.b.id, pool: v.name, vault: v.name, assets }
       continue
     }
     const pool = r.pool!
@@ -343,7 +373,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   if (total === 0n) for (const row of buckets) if (row.code === 'STRATEGY_PREFERENCE') row.code = 'DECIDE_NO_CAPITAL'
   // Each bucket's wait was measured against the same free savings: together they cannot hold more than what is free
   // once this review's entry has taken its savings. Clipped in the order they were found.
-  const spent = !proposal ? 0n : proposal.kind === 'bridge_out' ? proposal.amount : proposal.kind === 'enter_swap' && proposal.tokenIn === savings ? proposal.amountIn : proposal.kind === 'enter_mint' || proposal.kind === 'increase_liquidity' ? (savingsSide(proposal) === 0 ? proposal.amount0Desired : proposal.amount1Desired) : 0n
+  const spent = !proposal ? 0n : proposal.kind === 'bridge_out' ? proposal.amount : proposal.kind === 'vault_deposit' ? proposal.assets : proposal.kind === 'enter_swap' && proposal.tokenIn === savings ? proposal.amountIn : proposal.kind === 'enter_mint' || proposal.kind === 'increase_liquidity' ? (savingsSide(proposal) === 0 ? proposal.amount0Desired : proposal.amount1Desired) : 0n
   let left = free > spent ? free - spent : 0n
   const clipped: Waiting[] = []
   for (const w of waiting) {

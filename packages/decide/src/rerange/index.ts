@@ -3,8 +3,8 @@ import { grantKeyFor, hasManageAny, preferenceTotal, type PolicyVersion } from '
 import type { RegistryName } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { edgeBpsOf, widenEarly } from '../geometry/index.ts'
-import type { EnterSwapProposal, Observation, PoolObs, PositionObs, RerangeProposal, ReduceProposal } from '../types.ts'
-import { inSavings, opCostInSavings, volatileOf } from '../value.ts'
+import type { EnterSwapProposal, Observation, PoolObs, PositionObs, RerangeProposal, ReduceProposal, VaultRedeemProposal } from '../types.ts'
+import { bucketVaults, inSavings, opCostInSavings, vaultValue, volatileOf } from '../value.ts'
 import { rerangeWorth } from '../rebalance/lazy.ts'
 
 const Q96 = 1n << 96n
@@ -99,11 +99,12 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
   return { code: 'DECIDE_RANGE_ADJUST', proposal: proposal() }
 }
 
-export type BucketValue = { bucket: string; target: bigint; value: bigint; pool: RegistryName | null }
+export type BucketValue = { bucket: string; target: bigint; value: bigint; pool: RegistryName | null; vault?: true }
 
 /**
  * Bucket values against their targets. A bucket's value is its managed
- * positions; a bucket with no pool holds the free savings asset. Idle
+ * positions; a vault bucket's, its shares at the vault's rate (otto/mamoru#210);
+ * a bucket with no pool and no vault holds the free savings asset. Idle
  * volatile tokens count only in the total.
  */
 export function bucketValues(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>): { total: bigint; buckets: BucketValue[] } {
@@ -126,11 +127,14 @@ export function bucketValues(obs: Observation, policy: PolicyVersion, policyPool
     total += v
     byPool.set(pool.name, (byPool.get(pool.name) ?? 0n) + v)
   }
+  for (const b of policy.buckets) total += vaultValue(obs, b)
   const totalPreference = BigInt(preferenceTotal(policy))
-  const buckets = policy.buckets.map((b) => {
+  const buckets = policy.buckets.map((b): BucketValue => {
+    const target = (total * BigInt(b.preference)) / totalPreference
+    if (b.vaults?.length) return { bucket: b.id, target, value: vaultValue(obs, b), pool: null, vault: true }
     const pool = b.pools[0] ?? null
     const value = pool ? (byPool.get(pool) ?? 0n) : b.id === 'stables' ? free : 0n
-    return { bucket: b.id, target: (total * BigInt(b.preference)) / totalPreference, value, pool }
+    return { bucket: b.id, target, value, pool }
   })
   return { total, buckets }
 }
@@ -142,26 +146,75 @@ export function bucketValues(obs: Observation, policy: PolicyVersion, policyPool
  * Safe. The freed savings flow to the under-weight buckets through the
  * normal entries. Below the op cost times the harvest factor it holds.
  */
-export function reduceOf(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>, lab?: { skip?: ReadonlySet<string>; driftBps?: Partial<Record<string, number>> }): { code: ReasonCode | null; proposal: ReduceProposal | null } {
+export function reduceOf(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>, lab?: { skip?: ReadonlySet<string>; driftBps?: Partial<Record<string, number>> }): { code: ReasonCode | null; proposal: ReduceProposal | VaultRedeemProposal | null } {
   if (!hasManageAny(policy)) return { code: null, proposal: null }
   const { total, buckets } = bucketValues(obs, policy, policyPools)
   if (total === 0n) return { code: null, proposal: null }
+  // A vault bucket that cannot give back now (no liquidity, or below the op cost) says so, but never holds the other
+  // buckets' reduce back (the v7 USDC/USDT migration among them): its code is returned only when nothing else acts.
+  let vaultCode: ReasonCode | null = null
   for (const b of buckets) {
+    if (b.vault) {
+      const drift = BigInt(lab?.driftBps?.[b.bucket] ?? DRIFT_BPS)
+      if (b.value * 10_000n <= b.target * 10_000n + total * drift) continue
+      const r = vaultRedeemOf(obs, policy, b.bucket, b.value - b.target)
+      if (r.proposal) return r
+      vaultCode ??= r.code
+      continue
+    }
     // Lab (#101 round 3): a depegged pool is left alone; a bucket under a staged exit is reduced at its own band.
     if (b.pool && lab?.skip?.has(b.pool)) continue
     const drift = BigInt(lab?.driftBps?.[b.bucket] ?? DRIFT_BPS)
-    if (!b.pool || b.value * 10_000n <= b.target * 10_000n + total * drift) continue
+    // otto/mamoru#210: a bucket being left (preference 0: v6's USDC/cbBTC, v7's USDC/USDT) is emptied whatever its size;
+    // under the drift band its last few percent would stay in a pool no policy enters any more.
+    const leaving = policy.buckets.find((x) => x.id === b.bucket)?.preference === 0
+    if (!b.pool || (leaving ? b.value === 0n : b.value * 10_000n <= b.target * 10_000n + total * drift)) continue
     const pool = obs.pools.find((x) => x.name === b.pool)
     const p = obs.positions.find((x) => x.pool === b.pool && x.liquidity > 0n && isManaged(x, policy, policyPools))
     if (!pool || !p) continue
     const excess = b.value - b.target
-    if (excess * 10_000n <= opCostInSavings(obs, policy.savingsAsset) * BigInt(policy.harvest.costFactorBps)) return { code: 'DECIDE_HARVEST_BELOW_COST', proposal: null }
+    if (excess * 10_000n <= opCostInSavings(obs, policy.savingsAsset) * BigInt(policy.harvest.costFactorBps)) {
+      // Dust left in a pool being left is not worth its op, and must not hold the other buckets back (review of #153).
+      if (leaving) continue
+      return { code: 'DECIDE_HARVEST_BELOW_COST', proposal: null }
+    }
     const pv = positionValue(p, pool, policy.savingsAsset)
     const liquidity = pv === 0n ? 0n : (p.liquidity * (excess < pv ? excess : pv)) / pv
     if (liquidity === 0n) continue
     return { code: 'STRATEGY_PREFERENCE_DEVIATION', proposal: { kind: 'reduce', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity } }
   }
-  return { code: null, proposal: null }
+  return { code: vaultCode, proposal: null }
+}
+
+/**
+ * otto/mamoru#210: `excess` (raw savings units) of a vault bucket back to the account, from its last vault first so
+ * the first one keeps the bucket. One vault per op, never more than that vault can pay now (`maxWithdraw`): what it
+ * cannot pay waits for a later review (DECIDE_WAIT_VAULT_LIQUIDITY), so an exit is never left half built. Below the
+ * op cost times the harvest factor it holds, like a reduce. The redeem amount is in shares: the excess at the vault's
+ * own rate, or every share when the excess is the whole holding.
+ */
+export function vaultRedeemOf(obs: Observation, policy: PolicyVersion, bucket: string, excess: bigint): { code: ReasonCode | null; proposal: VaultRedeemProposal | null } {
+  const b = policy.buckets.find((x) => x.id === bucket)
+  if (!b) return { code: null, proposal: null }
+  const floor = opCostInSavings(obs, policy.savingsAsset) * BigInt(policy.harvest.costFactorBps)
+  if (excess * 10_000n <= floor) return { code: 'DECIDE_HARVEST_BELOW_COST', proposal: null }
+  let short = false
+  for (const v of bucketVaults(obs, b).reverse()) {
+    if (v.shares === 0n || v.assets === 0n) continue
+    const want = excess < v.assets ? excess : v.assets
+    const assets = want < v.maxWithdraw ? want : v.maxWithdraw
+    if (assets < want) short = true
+    if (assets * 10_000n <= floor) continue
+    // Never more shares than the vault redeems now (maxRedeem rounds the way the vault will): asked for more, the engine
+    // would refuse it at prepare on every review and the available liquidity would never come out (review of #153).
+    const sized = assets === v.assets ? v.shares : (v.shares * assets) / v.assets
+    // A vault short of liquidity is asked for 99 % of what it redeems, not its edge: a borrow before inclusion would revert it.
+    const cap = v.maxRedeem >= v.shares ? v.shares : (v.maxRedeem * 9_900n) / 10_000n
+    const shares = sized < cap ? sized : cap
+    if (shares === 0n) continue
+    return { code: 'STRATEGY_PREFERENCE_DEVIATION', proposal: { kind: 'vault_redeem', grant: grantKeyFor(policy, 'vault-supply', v.name) as `vault-supply:${string}`, bucket, pool: v.name, vault: v.name, shares, assets } }
+  }
+  return { code: short ? 'DECIDE_WAIT_VAULT_LIQUIDITY' : null, proposal: null }
 }
 
 /**

@@ -157,6 +157,12 @@ export type PolicyVersion = {
   /** target-weights: smallest entry, in raw savings units. */
   minEntry?: bigint
   /**
+   * otto/mamoru#210 (#186 condition 4): the smallest supply to a vault bucket, raw savings units. A vault pays in share
+   * price, so a deposit smaller than this would not earn its own deposit and redeem gas back within about a month at
+   * live relayer cost; below it the share waits as savings (DECIDE_WAIT_GAS). Absent: `minEntry` and its gas floor only.
+   */
+  vaultMinDeposit?: bigint
+  /**
    * otto/mamoru#195, target-weights: the smallest entry also covers this many times the gas of the entry's swap and
    * mint, priced at the review's fee. Absent: only `minEntry`. Set from engine settings (`withEngineSettings`); grants never read it.
    */

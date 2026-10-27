@@ -97,6 +97,8 @@ export const REASON_CODES = [
   'DECIDE_WAIT_GAS',
   // otto/mamoru#215: savings for a bucket on another chain wait here: its sleeve is not ready yet, or a bridge is still in flight.
   'DECIDE_WAIT_BRIDGE',
+  // otto/mamoru#210: the stables bucket's vault cannot pay out what it should give back right now (utilization near 100 %); retried each review.
+  'DECIDE_WAIT_VAULT_LIQUIDITY',
   // otto/mamoru#215: savings go to the account's own sleeve on another chain (CCTP), for the bucket served there.
   'DECIDE_BRIDGE_OUT',
   // otto/mamoru#215: a bridge-out is never signed before it is in the operator's bridge journal (it would be in flight unseen).

@@ -73,13 +73,14 @@ export function positionRates(f: FundingView, apy: ApyView | undefined, price: b
   const known = values.every((v) => v !== null)
   const total = known ? values.reduce<bigint>((a, v) => a + v!, 0n) : 0n
   return f.positions.map((p, i) => {
-    const name = poolName(p.pool)
+    // otto/mamoru#210: a vault row is rated under its own registry name.
+    const name = p.vault?.name ?? poolName(p.pool)
     const src = name ? apy?.byPool?.find((b) => b.pool === name) : undefined
     const value = values[i]!
     return {
       tokenId: p.tokenId,
       pool: p.pool,
-      bucket: bucketOf(p.pool, p.amounts),
+      bucket: p.vault ? 'Stable' : bucketOf(p.pool, p.amounts),
       inRange: p.inRange,
       valueUsdc: value,
       unpriced: valued[i]!.unpriced,

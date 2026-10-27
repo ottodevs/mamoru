@@ -1,9 +1,10 @@
 import type { Address } from '@mamoru/domain'
 import type { MultiSendCall } from '@mamoru/account/safe'
 import type { LivePosition } from '@mamoru/account/live'
-import { entry, type Registry } from '@mamoru/registry'
+import { address, entry, erc4626Abi, type Registry } from '@mamoru/registry'
+import { encodeFunctionData } from 'viem'
 import { uniswapV3 } from '@mamoru/uniswap-v3'
-import { positionUsdc, type PoolPosition, type PoolPrice } from './chain.ts'
+import { positionUsdc, type PoolPosition, type PoolPrice, type VaultHolding } from './chain.ts'
 
 /** A swap of `token` back to USDC on `pool`. */
 export type SwapBack = { token: string; pool: string; amountIn: bigint; amountOutMinimum: bigint }
@@ -76,4 +77,67 @@ export function swapBackCalls(account: Address, swaps: SwapBack[], registry: Reg
 export function routeOf(token: string, bucketPools: string[], usdcPools: string[], registry: Registry): string | undefined {
   const has = (p: string) => entry(p, registry).token0 === token || entry(p, registry).token1 === token
   return bucketPools.find(has) ?? usdcPools.find(has)
+}
+
+/**
+ * otto/mamoru#210: what an owner exit takes out of the Safe's vaults. `redeem` burns `shares` (every share for a whole
+ * vault, or a margin under `maxRedeem` when the vault is short of liquidity); `withdraw` takes exactly `assets` out of a
+ * vault with room to spare. `assets` is the least the call pays the Safe, what the rest of the batch may count on.
+ */
+export type VaultExit = { vault: string; mode: 'redeem' | 'withdraw'; assets: bigint; shares: bigint; all: boolean }
+
+/** A partial `withdraw` needs this much more liquidity than it takes (bps); with less, the exit redeems under the cap. */
+const WITHDRAW_ROOM_BPS = 10_100n
+/** Share of `maxRedeem` a liquidity-capped redeem takes, so a borrow landing before the owner's tx does not revert it. */
+const CAPPED_REDEEM_BPS = 9_900n
+
+/**
+ * otto/mamoru#210: the vault part of a withdrawal or a Stop. Vaults first (they are the stables bucket and pay out
+ * without a swap), in `order` (the policy's), each only as far as still needed. `need` null: everything (Stop).
+ * Review of #153: the batch is one MultiSend, so no vault call may sit at the edge of what the vault can pay at the
+ * read block: a whole vault is `redeem(all)` only when it can pay all of it; a part is `withdraw(assets)` only with 1 %
+ * of liquidity to spare; otherwise `redeem` of 99 % of `maxRedeem`, counted at what those shares pay less a unit.
+ * Returns the exits and what of `need` (or of the holdings, for a Stop) the vaults cannot pay now.
+ * Known limit: `maxRedeem`/`maxWithdraw` are capped at the holding, so a whole-vault redeem cannot see liquidity just
+ * above it; a borrow landing first reverts the batch, and the next prepare reads the shortfall and takes the capped path.
+ */
+export function planVaultExit(vaults: readonly VaultHolding[], need: bigint | null, order: readonly string[]): { exits: VaultExit[]; short: bigint } {
+  const rank = (v: VaultHolding) => {
+    const i = order.indexOf(v.name)
+    return i < 0 ? order.length : i
+  }
+  const exits: VaultExit[] = []
+  let remaining = need
+  let short = 0n
+  for (const v of [...vaults].filter((x) => x.shares > 0n).sort((a, b) => rank(a) - rank(b))) {
+    if (remaining !== null && remaining <= 0n) break
+    const want = remaining === null || remaining >= v.assets ? v.assets : remaining
+    let exit: VaultExit | null
+    if (want === v.assets && v.maxRedeem >= v.shares && v.maxWithdraw >= v.assets) exit = { vault: v.name, mode: 'redeem', assets: v.assets, shares: v.shares, all: true }
+    else if (v.maxWithdraw * 10_000n >= want * WITHDRAW_ROOM_BPS) exit = { vault: v.name, mode: 'withdraw', assets: want, shares: 0n, all: false }
+    else {
+      const shares = (v.maxRedeem * CAPPED_REDEEM_BPS) / 10_000n
+      // What those shares pay, from the holding's own rate and one unit under it: the vault floors the redeem again, and
+      // a later call of the batch that spends this exactly must never find less (review round 2 of #153).
+      const pays = (v.assets * shares) / v.shares
+      const assets = pays > 1n ? pays - 1n : 0n
+      exit = shares > 0n && assets > 0n ? { vault: v.name, mode: 'redeem', assets: assets < want ? assets : want, shares, all: false } : null
+    }
+    const paid = exit?.assets ?? 0n
+    if (exit) exits.push(exit)
+    short += want - paid
+    if (remaining !== null) remaining -= paid
+  }
+  return { exits, short: remaining !== null && remaining > short ? remaining : short }
+}
+
+export function vaultExitCalls(account: Address, exits: readonly VaultExit[], registry: Registry): MultiSendCall[] {
+  return exits.map((x) => ({
+    to: address(x.vault, registry),
+    value: 0n,
+    data:
+      x.mode === 'redeem'
+        ? encodeFunctionData({ abi: erc4626Abi, functionName: 'redeem', args: [x.shares, account, account] })
+        : encodeFunctionData({ abi: erc4626Abi, functionName: 'withdraw', args: [x.assets, account, account] }),
+  }))
 }

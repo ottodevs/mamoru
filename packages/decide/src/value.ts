@@ -1,6 +1,6 @@
 import type { RegistryName } from '@mamoru/registry'
 import { sqrtRatioAtTick, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
-import type { Observation, PoolObs } from './types.ts'
+import type { Observation, PoolObs, VaultObs } from './types.ts'
 
 /** Raw units of the savings asset worth `amount` of `token`, at the pool's slot0. The pool must pair the two. */
 export function inSavings(pool: PoolObs, token: RegistryName, amount: bigint, savings: RegistryName): bigint {
@@ -33,4 +33,17 @@ export function amountsForLiquidity(sqrtPriceX96: bigint, tickLower: number, tic
   const amount0 = s < b ? ((liquidity << 96n) * (b - s)) / b / s : 0n
   const amount1 = s > a ? (liquidity * (s - a)) / Q96 : 0n
   return { amount0, amount1 }
+}
+
+/**
+ * otto/mamoru#210: the vaults of a bucket as the observation holds them, in the bucket's order. A vault the observation
+ * did not read is left out: it holds nothing as far as this review knows, and gets no op.
+ */
+export function bucketVaults(obs: Pick<Observation, 'vaults'>, b: { vaults?: readonly RegistryName[] }): VaultObs[] {
+  return (b.vaults ?? []).flatMap((name) => obs.vaults?.find((v) => v.name === name) ?? [])
+}
+
+/** What a vault bucket's shares are worth now, raw savings units. */
+export function vaultValue(obs: Pick<Observation, 'vaults'>, b: { vaults?: readonly RegistryName[] }): bigint {
+  return bucketVaults(obs, b).reduce((s, v) => s + v.assets, 0n)
 }

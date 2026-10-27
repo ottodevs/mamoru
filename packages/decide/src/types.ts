@@ -38,6 +38,11 @@ export type Observation = {
     /** The sleeve on the other chain exists and runs (deployed, activated): only then may savings be bridged to it. */
     ready?: boolean
   }
+  /**
+   * otto/mamoru#210: the account's shares in each ERC-4626 vault the policy names (`buckets[].vaults`), read at
+   * `block`. Absent: the policy has no vault bucket, or nothing was read (the bucket then holds nothing and gets no op).
+   */
+  vaults?: VaultObs[]
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. Absent or null: none yet. */
   lastRerangeAt?: bigint | null
   /**
@@ -99,6 +104,22 @@ export type GuardNote = {
   code: ReasonCode
   metric: { fallBps: number; volBps: number } | null
   threshold: { fallBps: number; volBps: number }
+}
+
+/** otto/mamoru#210: one ERC-4626 vault, as the account holds it. Amounts in raw units of the vault's asset (savings). */
+export type VaultObs = {
+  /** Registry name (kind `vault`). */
+  name: RegistryName
+  /** The account's shares, raw share units. */
+  shares: bigint
+  /** `convertToAssets(shares)`: what the shares are worth now. */
+  assets: bigint
+  /** `maxWithdraw(account)`: what the vault can pay the account now (less than `assets` when its markets are lent out). */
+  maxWithdraw: bigint
+  /** `maxDeposit(account)`: what the vault takes now (0 when paused or at its cap). */
+  maxDeposit: bigint
+  /** `maxRedeem(account)`: the shares the vault redeems now; a redeem never asks for more (review of #153). */
+  maxRedeem: bigint
 }
 
 export type SessionObs = {
@@ -251,7 +272,35 @@ export type BridgeOutProposal = {
   amount: bigint
 }
 
-export type Proposal = EnterSwapProposal | EnterMintProposal | IncreaseLiquidityProposal | HarvestProposal | RerangeProposal | ReduceProposal | BridgeOutProposal
+/**
+ * otto/mamoru#210: savings supplied to an ERC-4626 vault of a vault bucket: USDC.approve(vault) + vault.deposit(assets,
+ * account). `pool` names the vault (a registry entry of kind `vault`, never one of `obs.pools`), so code that reads
+ * `proposal.pool` for a label keeps working; nothing may price it as a pool.
+ */
+export type VaultDepositProposal = {
+  kind: 'vault_deposit'
+  grant: `vault-supply:${string}`
+  bucket: string
+  pool: RegistryName
+  vault: RegistryName
+  /** Raw savings units. */
+  assets: bigint
+}
+
+/** otto/mamoru#210: shares of a vault bucket redeemed to the account: vault.redeem(shares, account, account). */
+export type VaultRedeemProposal = {
+  kind: 'vault_redeem'
+  grant: `vault-supply:${string}`
+  bucket: string
+  /** The vault, as in VaultDepositProposal. */
+  pool: RegistryName
+  vault: RegistryName
+  shares: bigint
+  /** What the shares are worth at the observation (raw savings units), for the journal and the app. */
+  assets: bigint
+}
+
+export type Proposal = EnterSwapProposal | EnterMintProposal | IncreaseLiquidityProposal | HarvestProposal | RerangeProposal | ReduceProposal | BridgeOutProposal | VaultDepositProposal | VaultRedeemProposal
 
 export type DecisionKind = 'hold' | Proposal['kind']
 
@@ -284,5 +333,5 @@ export type Decision = {
    * otto/mamoru#127, #128: savings held back on purpose, per bucket, with why. Outside the premise hash and the id
    * (the amounts move with every price). Absent when nothing waits.
    */
-  waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE'; amount: bigint }[]
+  waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY'; amount: bigint }[]
 }

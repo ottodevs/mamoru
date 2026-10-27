@@ -79,6 +79,7 @@ const midEntry = (): Partial<FundingView> => ({
 // ?dashboard (dev only, otto/mamoru#193): a running account placed in three positions, the Growth one out of
 // range, a few cents idle. The shape of the beta dashboard mockup; the rates come from the APY fixture below.
 const dashboard = param('dashboard')
+const dashboardV7 = dashboard && new URLSearchParams(location.search).get('dashboard') === 'v7'
 const placedThree = (): Partial<FundingView> => ({
   deployed: true,
   active: true,
@@ -107,6 +108,25 @@ const placedThree = (): Partial<FundingView> => ({
       amounts: [
         { token: 'WETH', amount: '2600000000000000', decimals: 18, valueUsdc: '9970000' },
         { token: 'USDC', amount: '0', decimals: 6, valueUsdc: '0' },
+      ],
+    },
+  ],
+})
+// ?dashboard=v7 (dev only, otto/mamoru#210): conservador-live-v7, the Stable half supplied to Morpho gtUSDCp, Balance in
+// WETH/USDC, a few cents idle.
+const placedV7 = (): Partial<FundingView> => ({
+  ...placedThree(),
+  positions: [
+    {
+      tokenId: 'vault:gtUSDCp', pool: 'vault:gtUSDCp', liquidity: '44750000000000000000', inRange: true, amountUsdc: '50020000', amountCbbtc: '0', valueUsdc: '50020000',
+      amounts: [{ token: 'USDC', amount: '50020000', decimals: 6, valueUsdc: '50020000' }],
+      vault: { name: 'vault:gtUSDCp', label: 'Morpho · Gauntlet USDC Prime', shares: '44750000000000000000', withdrawableUsdc: '50020000' },
+    },
+    {
+      tokenId: '5203', pool: 'pool:WETH/USDC/3000', liquidity: '1', inRange: true, amountUsdc: '17400000', amountCbbtc: '0', valueUsdc: '34950000',
+      amounts: [
+        { token: 'WETH', amount: '4560000000000000', decimals: 18, valueUsdc: '17550000' },
+        { token: 'USDC', amount: '17400000', decimals: 6, valueUsdc: '17400000' },
       ],
     },
   ],
@@ -153,7 +173,7 @@ const renewdue = param('renewdue')
 const divergenceOn = param('divergence')
 const dueApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 86_400_000) * 86_400 + 10 * 86_400, renewDue: true, expired: false } })
 const liveState = {
-  funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}), ...(renewdue ? dueApproval() : {}), ...(dashboard ? placedThree() : {}) } as FundingView,
+  funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}), ...(renewdue ? dueApproval() : {}), ...(dashboard ? (dashboardV7 ? placedV7() : placedThree()) : {}) } as FundingView,
   ops: (overcap
     ? [{ opId: 'own-1-activate', kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: OVER_CAP_USDC, capUsdc: fixtureFunding.capUsdc, updatedAt: new Date().toISOString() }]
     : []) as OpView[],
@@ -252,6 +272,7 @@ export const fixtureClient: ApiClient = {
         { pool: 'pool:USDC/USDT/100', weight: 5000, currentPct: 3.1, monthlyPct: 2.8 },
         { pool: 'pool:USDC/cbBTC/500', weight: 4000, currentPct: 9.2, monthlyPct: 8.1 },
         { pool: 'pool:WETH/USDC/3000', weight: 1000, currentPct: 14.6, monthlyPct: 12.9 },
+        { pool: 'vault:gtUSDCp', weight: 0, currentPct: 4.84, monthlyPct: 4.61 },
       ],
       asOf: new Date().toISOString(),
     }),

@@ -13,7 +13,7 @@ import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
 import { belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, MIN_ENTRY_USDC, overCapOf, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
-import { pairLabel, poolAddress, poolTokens, positionAmounts, progressLine } from '../lib/positions.ts'
+import { pairLabel, poolAddress, poolTokens, positionAmounts, progressLine, vaultAddress } from '../lib/positions.ts'
 import { activateLine, signatureCopy } from '../lib/signature.ts'
 import { currentRate, idleReason, monthlyRate, positionRates, sourceName, type AccountRate, type PositionRate } from '../lib/rates.ts'
 import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel } from '../lib/price-divergence.ts'
@@ -62,6 +62,8 @@ export const homeCopy = {
   colAmount: 'Amount',
   colShare: 'Share',
   inRange: 'In range',
+  // otto/mamoru#210: a row of USDC supplied to a lending vault.
+  lending: 'USDC lending',
   paused: 'Paused: out of range. Mamoru puts it back to work automatically.',
   noRate: 'n/a: no rate source for this pool yet.',
   unpriced: (tokens: string) => `n/a: no USDC price for ${tokens} in this view yet, so its value, its share and the account rates show n/a.`,
@@ -230,14 +232,16 @@ function pair(p: FundingView['positions'][number]): string {
 
 function PositionRow({ p, r }: { p: FundingView['positions'][number]; r: PositionRate }) {
   const legs = positionAmounts(p).filter((l) => l.amount !== '0')
-  const addr = poolAddress(p.pool)
+  // otto/mamoru#210: USDC supplied to a lending vault: one token, the vault as venue, always earning.
+  const addr = p.vault ? vaultAddress(p.vault.name) : poolAddress(p.pool)
   const chain = useChain()
-  const venue = 'Uniswap v3'
+  const venue = p.vault ? p.vault.label : 'Uniswap v3'
+  const tokens = p.vault ? ['USDC'] : poolTokens(p.pool, p.amounts)
   const share = r.sharePct === null ? null : Math.round(r.sharePct)
   return (
     <li data-testid="position" className="wc-row">
       <span className="wc-marks" aria-hidden="true">
-        {poolTokens(p.pool, p.amounts).map((t, i) => (
+        {tokens.map((t, i) => (
           <span key={t} className={i > 0 ? '-ml-[0.55rem]' : undefined}>
             <TokenMark symbol={t} size={30} />
           </span>
@@ -245,7 +249,7 @@ function PositionRow({ p, r }: { p: FundingView['positions'][number]; r: Positio
       </span>
       <span className="wc-name">
         <span className="wc-pair">
-          {r.bucket} · {pair(p)}
+          {r.bucket} · {p.vault ? homeCopy.lending : pair(p)}
         </span>
         <span className="wc-venue">
           {addr ? (
@@ -256,7 +260,7 @@ function PositionRow({ p, r }: { p: FundingView['positions'][number]; r: Positio
             venue
           )}
           <span data-testid="position-chain"> · {chain.name}</span>
-          {p.inRange ? <span className="text-emerald"> · {homeCopy.inRange}</span> : null}
+          {p.inRange && !p.vault ? <span className="text-emerald"> · {homeCopy.inRange}</span> : null}
         </span>
       </span>
       <span className="wc-amount">

@@ -142,6 +142,11 @@ export type AccountState = {
    * (every non-dust position counts until it is seeded at boot or the next activation).
    */
   admittedTokenIds?: string[]
+  /**
+   * otto/mamoru#210 (review of #153): the account has run a policy with a vault bucket. Its vault shares are read from
+   * then on whatever policy it runs later, so funding, withdraw and Stop never lose sight of money left in a vault.
+   */
+  vaultsSeen?: true
   /** Sol review round 2 #3: the block each admitted id was minted in; a read from before it never prunes the id. */
   admittedAt?: Record<string, string>
   /**

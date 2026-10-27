@@ -17,7 +17,7 @@ import {
   type PublicClient,
 } from 'viem'
 import { ReasonError, type Address } from '@mamoru/domain'
-import type { DepositObs, Observation, PoolObs, PositionObs, SessionObs } from '@mamoru/decide'
+import type { DepositObs, Observation, PoolObs, PositionObs, SessionObs, VaultObs } from '@mamoru/decide'
 import { Batch, balanceRead, chunkCalls, contractRead, multicall3Of } from './multicall.ts'
 import { applyPrincipal, positionEventsAbi, type Pair, type PositionEvent } from '@mamoru/projector'
 import {
@@ -26,6 +26,7 @@ import {
   entry,
   entryPointV07Abi,
   erc20Abi,
+  erc4626Abi,
   nameOf,
   nonfungiblePositionManagerAbi,
   uniswapV3FactoryAbi,
@@ -109,6 +110,11 @@ export type ObserveInput = {
    * asked: an observation that fails applies nothing.
    */
   firstBatch?: (batch: Batch, blockNumber: bigint) => (() => Promise<void>) | void
+  /**
+   * otto/mamoru#210: ERC-4626 vaults (registry kind `vault`) of the account's policy, read in the first batch: shares,
+   * share price, `maxWithdraw` and `maxDeposit`. Absent or empty: no vault read, and the observation has no `vaults`.
+   */
+  vaults?: readonly RegistryName[]
 }
 
 /**
@@ -178,6 +184,8 @@ function registryNames(registry: Registry): { tokens: RegistryName[]; pools: Reg
   }
   return n
 }
+/** otto/mamoru#210: whole shares a vault's share price is read for (see `observe`). */
+export const PRICE_SHARES = 10n ** 12n
 /** Multicall3 of the registry in use, or null: reads are then made one by one. */
 export const MULTICALL3 = multicall3Of(baseRegistry)
 /** Position ids asked for in the first round, before the position count is known; the ones past the count fail and are ignored. */
@@ -236,6 +244,16 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const shared = input.poolCache?.get(poolKey)
   const own = shared ? null : POOLS.map((p) => poolReads(first, client, p, blockNumber, input.twapWindowSeconds, reg))
   const priceSlot0 = POOLS.includes(input.ethPricePool) ? null : first.add(contractRead(client, { address: address(input.ethPricePool, reg), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }))
+  const vaultReads = (input.vaults ?? []).map((name) => {
+    const e = entry(name, reg)
+    if (e.kind !== 'vault' || e.decimals === undefined) throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', `${name} is not a vault of the ${reg.chain} registry`)
+    const read = (functionName: 'balanceOf' | 'maxWithdraw' | 'maxDeposit' | 'maxRedeem' | 'convertToAssets', arg: Address | bigint) =>
+      first.add(contractRead(client, { address: e.address, abi: erc4626Abi, functionName, args: [arg as never], blockNumber }))
+    // The price of 10^12 whole shares: an 18-decimal share over a 6-decimal asset keeps 12 more digits than the price of
+    // one share would (review of #153), so `assets` is within a unit of convertToAssets(shares).
+    const one = PRICE_SHARES * 10n ** BigInt(e.decimals)
+    return { name, one, shares: read('balanceOf', acct), maxWithdraw: read('maxWithdraw', acct), maxDeposit: read('maxDeposit', acct), maxRedeem: read('maxRedeem', acct), price: read('convertToAssets', one) }
+  })
   const afterFirst = input.firstBatch?.(first, blockNumber)
   const round = Promise.all([isDeployed(client, acct, blockNumber, safe.number), first.run()])
   const ownPools = own ? round.then(() => Promise.all(own.map((finish) => finish()))) : null
@@ -247,6 +265,13 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const [accountDeployed] = await round
   // Settled here, inside the block-hash bracket: a read that failed in the batch is asked again on its own.
   const [nativeBalance, accountNonce, tokenBalances] = await Promise.all([native.need(), nonce.need(), Promise.all(balances.map((b) => b.need()))])
+  // otto/mamoru#210: assets at the vault's share price of this block (convertToAssets of one share, scaled).
+  const vaults: VaultObs[] = await Promise.all(
+    vaultReads.map(async (v) => {
+      const [shares, maxWithdraw, maxDeposit, maxRedeem, price] = (await Promise.all([v.shares.need(), v.maxWithdraw.need(), v.maxDeposit.need(), v.maxRedeem.need(), v.price.need()])) as bigint[]
+      return { name: v.name, shares: shares!, assets: (shares! * price!) / v.one, maxWithdraw: maxWithdraw!, maxDeposit: maxDeposit!, maxRedeem: maxRedeem! }
+    }),
+  )
   const readAlone = async () => {
     const batch = new Batch(client, multicall3, blockNumber)
     const finish = POOLS.map((p) => poolReads(batch, client, p, blockNumber, input.twapWindowSeconds, reg))
@@ -302,6 +327,7 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
     deposits,
     intents: input.intents,
     slot: input.slot,
+    ...(vaults.length ? { vaults } : {}),
     // otto/mamoru#61: decide's gates compare pool identities with the observation's registry; a Base observation keeps
     // leaving it out (the default), so its shape is the one it always had.
     ...(reg !== baseRegistry ? { registry: reg } : {}),
@@ -656,7 +682,8 @@ export type Simulation = {
  */
 export async function simulateFromEntryPoint(client: PublicClient, account: Address, callData: Hex, blockNumber: bigint, registry: Registry = baseRegistry): Promise<Simulation> {
   const npm = address('NonfungiblePositionManager', registry)
-  const TOKENS = registryNames(registry).tokens
+  // otto/mamoru#210: vault shares are ERC-20 balances too, so a deposit or redeem shows its share delta.
+  const TOKENS = [...registryNames(registry).tokens, ...registry.entries.filter((e) => e.kind === 'vault').map((e) => e.name)]
   const reads: SimCall[] = [
     ...TOKENS.map((t) => ({ to: address(t, registry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [account] }) })),
     { to: npm, data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [account] }) },
