@@ -52,6 +52,8 @@ export type Allocation = {
   pendingMint: { pool: string; grant: string }[]
   /** Not part of the decision's premise (it moves with every price): reported beside it. */
   waiting: Waiting[]
+  /** otto/mamoru#215: the local proposal a bridge-out took the review from, for when the bridge cannot go. */
+  displaced?: Proposal
 }
 
 /** The pool priced at its TWAP tick (slot0 when the TWAP is unavailable; the EHG then refuses to act on it). */
@@ -311,13 +313,19 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   // value there (and what is still in flight) is `obs.remote`; with no sleeve ready, or a bridge not yet minted, its
   // share waits here and says so. A bridge goes before an entry that spends savings (it takes a finality to land),
   // never before the sale of idle volatile.
+  // `obs.remote` describes one sleeve (no chain key): a policy with more than one remote bucket would compare each
+  // against the others' value and readiness. Refused until it is keyed by chain.
+  if ((policy.remoteBuckets?.length ?? 0) > 1) throw new Error(`${policy.policyId}: more than one remote bucket is not supported (obs.remote has no chain key)`)
+  let displaced: Proposal | undefined
+  // A bridge needs a live bridge-out session; without one its share waits instead of taking the review.
+  const bridgeLive = obs.sessions.some((s) => s.grant === 'bridge-out' && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
   for (const rb of policy.remoteBuckets ?? []) {
     if (unsafeDeposit || free === 0n) break
     const target = prefTotal > 0n ? (total * BigInt(rb.preference)) / prefTotal : 0n
     const gap = target - (obs.remote?.value ?? 0n)
     if (gap < minEntry || gap * 10_000n <= target * BigInt(policy.rebalanceBandBps ?? 0)) continue
     const amount = gap < free ? gap : free
-    if (!obs.remote?.ready || (obs.remote.inFlight ?? 0n) > 0n) {
+    if (!obs.remote?.ready || (obs.remote.inFlight ?? 0n) > 0n || !bridgeLive) {
       waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_BRIDGE', amount })
       continue
     }
@@ -327,6 +335,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     }
     if (proposal && pickedSale > 0n) continue
     if (picked !== null) buckets[picked]!.code = 'STRATEGY_PREFERENCE'
+    displaced = proposal ?? undefined
     proposal = { kind: 'bridge_out', grant: 'bridge-out', bucket: rb.id, chainId: rb.chainId, pool: rb.pools[0]!, amount }
     picked = null
     break
@@ -342,5 +351,5 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     if (amount >= minEntry) clipped.push({ ...w, amount })
     left -= amount
   }
-  return { total, free, buckets, proposal, trail, pendingMint, waiting: clipped }
+  return { total, free, buckets, proposal, trail, pendingMint, waiting: clipped, ...(displaced ? { displaced } : {}) }
 }

@@ -479,6 +479,19 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     expect(d.proposal).toMatchObject({ kind: 'enter_swap', tokenIn: 'cbBTC', tokenOut: 'USDC' })
   })
 
+  test('otto/mamoru#215 (review): no live bridge-out session, the share waits and the Base buckets still fill', () => {
+    const o = v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 0n, inFlight: 0n, ready: true } })
+    const noBridge = { ...o, sessions: o.sessions.filter((x) => x.grant !== 'bridge-out') }
+    const d = decide(noBridge, V6)
+    expect(d.proposal?.kind).toBe('enter_swap')
+    expect((d.waiting ?? []).some((x) => x.code === 'DECIDE_WAIT_BRIDGE')).toBe(true)
+  })
+
+  test('otto/mamoru#215 (review): a policy with two remote buckets is refused, not half-served', () => {
+    const two = { ...V6, remoteBuckets: [...V6.remoteBuckets!, { ...V6.remoteBuckets![0]!, chainId: 143 as const }] }
+    expect(() => allocate(v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), two, false)).toThrow('more than one remote bucket')
+  })
+
   test('without remote buckets the same Base buckets would take everything (the remote share is what holds 15 % back)', () => {
     const local = { ...V6, remoteBuckets: undefined }
     let o = v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })
