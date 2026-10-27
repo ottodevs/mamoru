@@ -1999,6 +1999,9 @@
   .spark-end {
     opacity: 1;
     animation: none !important;
+  }
+}
+
 /* #233: the range gauge by "In range": a hairline, the range as its middle 60 %, the price as a dot that slides. */
 .gauge {
   position: relative;
