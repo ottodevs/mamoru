@@ -6,6 +6,7 @@ import type {
   AppConfig,
   BridgeOutToSign,
   BridgeOutView,
+  EthConvertToSign,
   DashboardPayload,
   FeedbackRequest,
   FeedbackResponse,
@@ -64,6 +65,9 @@ export type ApiClient = {
   bridgeOutPrepare(accountKey: string): Promise<BridgeOutToSign>
   bridgeOut(accountKey: string, sig: OwnerSignature): Promise<BridgeOutView>
   bridgeOutStatus(accountKey: string): Promise<BridgeOutView>
+  /** #211: swap the ETH found on Ethereum to USDC in the same account there, so it can be moved. */
+  ethConvertPrepare(accountKey: string): Promise<EthConvertToSign>
+  ethConvert(accountKey: string, sig: OwnerSignature): Promise<BridgeOutView>
   /** Works with or without a session. */
   feedback(body: FeedbackRequest): Promise<FeedbackResponse>
   /** otto/mamoru#67: open (or find) the owner's sleeve on `chainId`. Only where the session lists `addableChains`. */
@@ -149,6 +153,8 @@ export const httpClient: ApiClient = {
   bridgeOutPrepare: (k) => post<BridgeOutToSign>(acct(k, 'bridge-out/prepare')),
   bridgeOut: (k, sig) => post<BridgeOutView>(acct(k, 'bridge-out'), sig),
   bridgeOutStatus: (k) => request<BridgeOutView>(acct(k, 'bridge-out')),
+  ethConvertPrepare: (k) => post<EthConvertToSign>(acct(k, 'eth-convert/prepare')),
+  ethConvert: (k, sig) => post<BridgeOutView>(acct(k, 'eth-convert'), sig),
   feedback: (body) => post<FeedbackResponse>('/api/feedback', body),
   addSleeve: (chainId) => post<SleeveView>('/api/sleeves', { chainId }),
 }

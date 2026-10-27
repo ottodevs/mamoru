@@ -24,6 +24,7 @@ export const signatureCopy = {
   withdraw,
   stop: "This signature ends Mamoru's permission to act, closes every position and swaps what they held to USDC, which stays in your account. Only your passkey can do this.",
   move: 'This signature moves your USDC from Ethereum to this same account on Base. Only your passkey can do this.',
+  convert: 'This signature swaps your ETH on Ethereum to USDC, kept in this same account on Ethereum. Only your passkey can do this.',
 }
 
 /** Everything a withdrawal signs, in order: the Safe first if it is not on chain yet, the pool, the swap, the send. */

@@ -166,8 +166,24 @@ export type BridgeOutRoute = {
   /** cctp: the operator's receiveMessage on Base, once sent. fillTx is set when it minted. */
   mintTx?: Hex0x
 }
+// ETH found at the account's address on Ethereum (otto/mamoru#211): one owner transaction there swaps all of it to
+// native USDC in the same account (Uniswap v3), which Move to Base then takes. Mamoru pays the Ethereum gas.
+// sending: the relayer is on it. done: the USDC is at the address on Ethereum. failed: the ETH did not move.
+// unconfirmed: sent, outcome not known yet. ethWei in wei; minUsdc, usdcOut in USDC base units.
+export type EthConvert = {
+  state: 'sending' | 'done' | 'failed' | 'unconfirmed'
+  ethWei: string
+  minUsdc: string
+  usdcOut?: string
+  deployTx?: Hex0x
+  l1Tx?: Hex0x
+  at: string
+}
 // enabled: the /ops flag (engine settings bridgeOut) is on for this account and the operator has an Ethereum RPC.
-export type BridgeOutView = { route: BridgeOutRoute | null; enabled: boolean }
+// convert (#211): the account's last ETH-to-USDC conversion on Ethereum, if any.
+export type BridgeOutView = { route: BridgeOutRoute | null; enabled: boolean; convert?: EthConvert | null }
+// #211: quotedUsdc is what the pool pays now; minUsdc is the least the swap accepts (it reverts below it).
+export type EthConvertToSign = OwnerTxToSign & { convert: { ethWei: string; quotedUsdc: string; minUsdc: string } }
 // gasUsdc (userOp path, #180): the most the account pays for Ethereum gas, in USDC. Absent: Mamoru pays it.
 export type BridgeOutToSign = OwnerTxToSign & { route: { outputUsdc: string; feeUsdc: string; fillSec: number; gasUsdc?: string; bridge?: 'across' | 'cctp' } }
 

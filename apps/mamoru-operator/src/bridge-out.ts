@@ -3,7 +3,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { encodeFunctionData, getAddress, pad, parseAbi, parseAbiItem, parseEventLogs, TransactionNotFoundError, TransactionReceiptNotFoundError, toHex, zeroAddress, type Hex, type Log, type PublicClient, type TransactionReceipt } from 'viem'
 import type { UserOperation } from 'viem/account-abstraction'
-import type { AccountContext, Address, BridgeOutRoute, BridgeOutToSign, BridgeOutView, OwnerSignature } from '@mamoru/domain'
+import type { AccountContext, Address, BridgeOutRoute, BridgeOutToSign, BridgeOutView, EthConvert, EthConvertToSign, OwnerSignature } from '@mamoru/domain'
 import { address, baseRegistry, entryPointV07Abi, erc20Abi } from '@mamoru/registry'
 import { browserOwnerSignature, deployCall, encodeWebAuthnSignature, liveAccountFromContext, ownerSafeTx, readSafeNonce, safeContractSignature, safeTxHashOf, verifyOwnerSignature, type LiveAccount } from '@mamoru/account/live'
 import { execTransactionData, type SafeTx } from '@mamoru/account/safe'
@@ -42,6 +42,72 @@ export const BASE_USDC: Address = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 /** Across SpokePool on Ethereum. A quote naming any other contract is refused. */
 export const ACROSS_SPOKE_POOL: Address = '0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5'
 export const ACROSS_API = 'https://app.across.to/api'
+
+// ETH at the account's address on Ethereum (otto/mamoru#211). Move to Base takes USDC only, so the owner first swaps
+// all of the ETH to native USDC in the same account: one Safe transaction, SwapRouter02.multicall(deadline,
+// [exactInputSingle]) with the ETH as value (the router wraps it), WETH/USDC 0.05%, recipient the account itself.
+// The relayer deploys the account if needed and pays the gas, as on the relayer path of the move.
+export const L1_WETH: Address = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
+export const SWAP_ROUTER_02: Address = '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45'
+export const QUOTER_V2: Address = '0x61fFE014bA17989E743c5F6cB21bF9697530B21e'
+/** Chainlink ETH/USD on Ethereum (8 decimals, 1 h heartbeat): the pool's quote must agree with it. */
+export const CHAINLINK_ETH_USD: Address = '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419'
+export const WETH_USDC_FEE = 500
+/** Below this the conversion is not offered: 0.002 ETH. */
+export const MIN_CONVERT_WEI = 2_000_000_000_000_000n
+/** The swap reverts if it pays less than the quote minus this (0.5%). */
+export const CONVERT_SLIPPAGE_BPS = 50n
+/** A quote further than this from Chainlink is refused (1%). */
+export const MAX_ORACLE_GAP_BPS = 100n
+/** A Chainlink answer older than this is refused (heartbeat 1 h, plus margin). */
+export const ORACLE_MAX_AGE_SEC = 4_200
+/** The swap's deadline after the prepare. */
+export const CONVERT_DEADLINE_SEC = 900
+/** Gas limit of the owner transaction (the swap used ~130k on Ethereum), with margin. */
+export const CONVERT_GAS = 300_000n
+
+export const swapRouter02Abi = parseAbi([
+  'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
+  'function exactInputSingle(ExactInputSingleParams params) payable returns (uint256 amountOut)',
+  'function multicall(uint256 deadline, bytes[] data) payable returns (bytes[] results)',
+])
+export const quoterV2Abi = parseAbi([
+  'struct QuoteExactInputSingleParams { address tokenIn; address tokenOut; uint256 amountIn; uint24 fee; uint160 sqrtPriceLimitX96; }',
+  'function quoteExactInputSingle(QuoteExactInputSingleParams params) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
+])
+export const aggregatorAbi = parseAbi(['function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)'])
+
+/** The swap as the owner signs it: all of `amountIn` ETH to USDC at `safe`, at least `minOut`, before `deadline`. */
+export function convertCall(safe: Address, amountIn: bigint, minOut: bigint, deadline: number): { to: Address; value: bigint; data: Hex } {
+  const swap = encodeFunctionData({
+    abi: swapRouter02Abi,
+    functionName: 'exactInputSingle',
+    args: [{ tokenIn: L1_WETH, tokenOut: L1_USDC, fee: WETH_USDC_FEE, recipient: safe, amountIn, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n }],
+  })
+  return { to: SWAP_ROUTER_02, value: amountIn, data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'multicall', args: [BigInt(deadline), [swap]] }) }
+}
+
+/**
+ * The least the swap accepts, from the pool's quote, after checking the quote against Chainlink: within
+ * MAX_ORACLE_GAP_BPS of the oracle's value for the same ETH, the oracle answer positive and fresh. Throws otherwise.
+ */
+export function convertMinOut(amountIn: bigint, quoted: bigint, oracle: { answer: bigint; updatedAt: bigint }, nowSec: number): bigint {
+  if (oracle.answer <= 0n || BigInt(nowSec) - oracle.updatedAt > BigInt(ORACLE_MAX_AGE_SEC)) throw new HttpError(503, 'CONVERT_PRICE_UNAVAILABLE', 'the ETH price could not be checked right now, try later')
+  // wei × USD(8 decimals) → USDC (6 decimals)
+  const fair = (amountIn * oracle.answer) / 10n ** 20n
+  const gap = quoted > fair ? quoted - fair : fair - quoted
+  if (fair === 0n || gap * 10_000n > fair * MAX_ORACLE_GAP_BPS) throw new HttpError(503, 'CONVERT_PRICE_UNAVAILABLE', 'the ETH price could not be checked right now, try later')
+  return (quoted * (10_000n - CONVERT_SLIPPAGE_BPS)) / 10_000n
+}
+
+/** USDC the receipt shows arriving at `safe` (Transfer events of native USDC). */
+export function usdcInto(receipt: { logs: Log[] }, safe: Address): bigint {
+  let n = 0n
+  for (const ev of parseEventLogs({ abi: erc20Abi, eventName: 'Transfer', logs: receipt.logs.filter((l) => getAddress(l.address) === L1_USDC) })) {
+    if (getAddress(ev.args.to) === getAddress(safe)) n += ev.args.value
+  }
+  return n
+}
 
 /** Below this the move is not offered: 1 USDC. */
 export const MIN_USDC = 1_000_000n
@@ -169,7 +235,10 @@ type Stored = BridgeOutRoute & { id: string; safe: Address; safeNonce: string; f
  * with no receipt for it (it can never land: released). `tx`/`nonce` are written before the broadcast.
  */
 type Reservation = { wei: string; tx?: Hex; nonce?: number; at: string; goneAt?: string }
-type Journal = { reservations?: Record<string, Reservation>; cctpBurns?: Record<string, string[]>; routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
+/** #211: a conversion as kept on disk. */
+type StoredConvert = EthConvert & { id: string; safe: Address; safeNonce: string; execStarted?: boolean }
+type PreparedConvert = { prepareId: string; accountKey: string; live: LiveAccount; tx: SafeTx; safeTxHash: Hex; amountIn: bigint; minOut: bigint; deployed: boolean; expires: number }
+type Journal = { converts?: Record<string, StoredConvert>; reservations?: Record<string, Reservation>; cctpBurns?: Record<string, string[]>; routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
 
 const NON_TERMINAL = new Set<BridgeOutRoute['state']>(['sending', 'deposited', 'unconfirmed', 'expired'])
 
@@ -301,6 +370,19 @@ const usdc = (raw: bigint) => {
   return `${s.slice(0, -6)}.${s.slice(-6).replace(/0+$/, '').padEnd(2, '0')}`
 }
 
+const eth = (wei: bigint) => {
+  const s = wei.toString().padStart(19, '0')
+  const frac = s.slice(-18, -10).replace(/0+$/, '')
+  return `${s.slice(0, -18)}${frac ? `.${frac}` : ''}`
+}
+
+/** The owner-facing part of a stored conversion (#211). */
+function convertView(c: StoredConvert | undefined): EthConvert | null {
+  if (!c) return null
+  const { id: _id, safe: _safe, safeNonce: _n, execStarted: _e, ...rest } = c
+  return rest
+}
+
 /** The owner-facing part of a stored route. */
 function view(r: Stored | undefined, enabled: boolean): BridgeOutView {
   if (!r) return { route: null, enabled }
@@ -348,7 +430,7 @@ export class BridgeOut {
     // A reservation without a signed transaction was never broadcast (the hash is written before it): nothing to hold.
     const reservations = Object.fromEntries(Object.entries(j.reservations ?? {}).filter(([, r]) => !!r.tx))
     this.droppedReservations = Object.keys(j.reservations ?? {}).length - Object.keys(reservations).length
-    return { routes: j.routes ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {}, cctpBurns: j.cctpBurns ?? {}, reservations }
+    return { routes: j.routes ?? {}, converts: j.converts ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {}, cctpBurns: j.cctpBurns ?? {}, reservations }
   }
 
   private save(): void {
@@ -469,6 +551,7 @@ export class BridgeOut {
     this.on(ctx.accountKey)
     const live = this.live(ctx)
     if (await this.blocking(this.journal.routes[ctx.accountKey])) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
+    if (this.convertBlocking(ctx.accountKey)) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
     const moves = this.journal.moves[ctx.accountKey]
     if (moves && moves.day === this.day() && moves.n >= MOVES_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
     const amount = await this.usdcAt(live.safe)
@@ -1050,7 +1133,171 @@ export class BridgeOut {
 
   /** The last move of the account, brought up to date from the chain and from Across. */
   async status(ctx: AccountContext): Promise<BridgeOutView> {
-    return this.refresh(ctx.accountKey)
+    const v = await this.refresh(ctx.accountKey)
+    return { ...v, convert: await this.convertStatus(ctx.accountKey) }
+  }
+
+  // ---- #211: ETH on Ethereum to USDC in the same account -------------------------------------------------------
+
+  private readonly preparedConvert = new Map<string, PreparedConvert>()
+
+  /** A conversion being sent or not proven blocks another one and a move (they would sign the same Safe nonce). */
+  private convertBlocking(accountKey: string): boolean {
+    const c = this.journal.converts?.[accountKey]
+    return !!c && (c.state === 'sending' || c.state === 'unconfirmed')
+  }
+
+  private writeConvert(accountKey: string, c: StoredConvert): void {
+    c.at = new Date(this.now()).toISOString()
+    this.journal.converts = { ...(this.journal.converts ?? {}), [accountKey]: c }
+    this.save()
+  }
+
+  async prepareConvert(ctx: AccountContext): Promise<EthConvertToSign> {
+    this.on(ctx.accountKey)
+    const live = this.live(ctx)
+    if (this.convertBlocking(ctx.accountKey) || (await this.blocking(this.journal.routes[ctx.accountKey]))) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
+    const moves = this.journal.moves[ctx.accountKey]
+    if (moves && moves.day === this.day() && moves.n >= MOVES_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
+    const amountIn = await this.l1.getBalance({ address: live.safe })
+    if (amountIn < MIN_CONVERT_WEI) throw new HttpError(409, 'CONVERT_NOTHING', 'there is no ETH on Ethereum to convert')
+    let quoted: bigint
+    let oracle: { answer: bigint; updatedAt: bigint }
+    try {
+      const [q, round] = await Promise.all([
+        this.l1.simulateContract({ address: QUOTER_V2, abi: quoterV2Abi, functionName: 'quoteExactInputSingle', args: [{ tokenIn: L1_WETH, tokenOut: L1_USDC, amountIn, fee: WETH_USDC_FEE, sqrtPriceLimitX96: 0n }] }),
+        this.l1.readContract({ address: CHAINLINK_ETH_USD, abi: aggregatorAbi, functionName: 'latestRoundData' }),
+      ])
+      quoted = q.result[0]
+      oracle = { answer: round[1], updatedAt: round[3] }
+    } catch (e) {
+      logErr('[bridge-out] convert quote:', e instanceof Error ? e.message : 'failed')
+      throw new HttpError(503, 'CONVERT_PRICE_UNAVAILABLE', 'the ETH price could not be checked right now, try later')
+    }
+    const nowSec = Math.floor(this.now() / 1000)
+    const minOut = convertMinOut(amountIn, quoted, oracle, nowSec)
+    const { deployed, nonce } = await readSafeNonce(this.l1, live.safe)
+    const tx = ownerSafeTx([convertCall(live.safe, amountIn, minOut, nowSec + CONVERT_DEADLINE_SEC)], nonce)
+    const safeTxHash = safeTxHashOf(live, tx)
+    const prepareId = toHex(randomBytes(16)).slice(2)
+    const expires = this.now() + PREPARE_TTL_MS
+    const p: PreparedConvert = { prepareId, accountKey: ctx.accountKey, live, tx, safeTxHash, amountIn, minOut, deployed, expires }
+    if (!admitPrepare(this.preparedConvert, p, MAX_PREPARED, this.now())) throw new HttpError(503, 'BRIDGE_BUSY', 'too many moves are waiting for approval, try again in a minute')
+    return {
+      safe: live.safe,
+      chainId: ETHEREUM_CHAIN_ID,
+      safeTxHash,
+      summary: [
+        `Convert ${eth(amountIn)} ETH to USDC, in this same account on Ethereum`,
+        `You get about ${usdc(quoted)} USDC, at least ${usdc(minOut)} or nothing changes`,
+        `Swap: Uniswap, ETH/USDC 0.05% pool. Mamoru pays the Ethereum gas. Then Move to Base takes the USDC`,
+      ],
+      expiresAt: new Date(expires).toISOString(),
+      prepareId,
+      convert: { ethWei: amountIn.toString(), quotedUsdc: quoted.toString(), minUsdc: minOut.toString() },
+    }
+  }
+
+  async submitConvert(ctx: AccountContext, body: OwnerSignature): Promise<BridgeOutView> {
+    if (this.inFlight || this.bundling.size > 0) throw new HttpError(503, 'BRIDGE_BUSY', 'another move from Ethereum is being sent, try again in a minute')
+    const p = body && typeof body.prepareId === 'string' ? this.preparedConvert.get(body.prepareId) : undefined
+    if (!p || p.accountKey !== ctx.accountKey) throw new HttpError(404, 'PREPARE_NOT_FOUND', 'that approval is not known, tap again')
+    this.preparedConvert.delete(p.prepareId)
+    if (p.expires < this.now()) throw new HttpError(410, 'PREPARE_EXPIRED', 'that approval expired, tap again')
+    let signature: Hex
+    try {
+      signature = browserOwnerSignature(body, p.safeTxHash)
+    } catch {
+      throw new HttpError(400, 'BAD_SIGNATURE', 'the passkey signature could not be read')
+    }
+    if (!(await verifyOwnerSignature(signature, p.safeTxHash, p.live.webauthn))) throw new HttpError(400, 'BAD_SIGNATURE', 'the passkey signature does not match this account')
+    this.on(ctx.accountKey)
+    return this.exclusive(() => this.sendConvert(ctx, p, signature))
+  }
+
+  private async sendConvert(ctx: AccountContext, p: PreparedConvert, signature: Hex): Promise<BridgeOutView> {
+    if (this.convertBlocking(ctx.accountKey) || (await this.blocking(this.journal.routes[ctx.accountKey]))) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
+    // Nothing changed on Ethereum since the prepare: same ETH, same deploy state and Safe nonce.
+    const [amount, state] = await Promise.all([this.l1.getBalance({ address: p.live.safe }), readSafeNonce(this.l1, p.live.safe)])
+    if (amount !== p.amountIn || state.deployed !== p.deployed || state.nonce !== p.tx.nonce) throw new HttpError(409, 'BRIDGE_STALE', 'the balance on Ethereum changed, tap again')
+    const moves = this.journal.moves[ctx.accountKey]
+    if (moves && moves.day === this.day() && moves.n >= MOVES_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
+    const exec = execTransactionData(p.tx, signature)
+    if (p.deployed) await this.simulate(p.live.safe, exec)
+    const day = this.day()
+    this.journal.moves[ctx.accountKey] = { day, n: moves && moves.day === day ? moves.n + 1 : 1 }
+    const c: StoredConvert = { id: p.prepareId, safe: p.live.safe, safeNonce: p.tx.nonce.toString(), state: 'sending', ethWei: p.amountIn.toString(), minUsdc: p.minOut.toString(), at: '' }
+    this.writeConvert(ctx.accountKey, c)
+    try {
+      if (!p.deployed) {
+        const d = deployCall(p.live)
+        const r = await this.charged({ to: d.to, data: d.data, gas: DEPLOY_GAS }, (h) => {
+          c.deployTx = h
+          this.writeConvert(ctx.accountKey, c)
+        })
+        if (r.receipt.status !== 'success') throw new Error('deploy reverted')
+        await this.simulate(p.live.safe, exec)
+      }
+      c.execStarted = true
+      this.writeConvert(ctx.accountKey, c)
+      const r = await this.charged({ to: p.live.safe, data: exec, gas: CONVERT_GAS }, (h) => {
+        c.l1Tx = h
+        this.writeConvert(ctx.accountKey, c)
+      })
+      this.settleConvert(c, r.receipt)
+    } catch (e) {
+      logErr(`[bridge-out] convert ${ctx.accountKey.slice(0, 8)}:`, e)
+      c.state = c.execStarted ? 'unconfirmed' : 'failed'
+    }
+    this.writeConvert(ctx.accountKey, c)
+    if (c.state === 'failed') throw new HttpError(502, 'CONVERT_FAILED', 'the conversion did not go through; the ETH is still at your address on Ethereum')
+    return { ...view(this.journal.routes[ctx.accountKey], true), convert: convertView(c) }
+  }
+
+  /**
+   * From the owner transaction's receipt. Safe's execTransaction does not revert when the inner call fails: it emits
+   * ExecutionFailure. The USDC that arrived decides: at least the signed minimum is done, none is failed.
+   */
+  private settleConvert(c: StoredConvert, receipt: TransactionReceipt): void {
+    if (receipt.status !== 'success') {
+      c.state = 'failed'
+      return
+    }
+    const got = usdcInto(receipt, c.safe)
+    if (got >= BigInt(c.minUsdc)) {
+      c.state = 'done'
+      c.usdcOut = got.toString()
+    } else if (got === 0n) {
+      c.state = 'failed'
+    } else {
+      logErr(`[bridge-out] convert ${c.safe.slice(0, 10)}: less USDC than the signed minimum`, receipt.transactionHash)
+      c.state = 'unconfirmed'
+    }
+  }
+
+  /** The account's last conversion, resolved from the chain when it is not proven yet. */
+  private async convertStatus(accountKey: string): Promise<EthConvert | null> {
+    const c = this.journal.converts?.[accountKey]
+    if (!c) return null
+    if (c.state !== 'sending' && c.state !== 'unconfirmed') return convertView(c)
+    if (this.inFlight || (c.state === 'sending' && this.now() - Date.parse(c.at) < SENDING_STALE_MS)) return convertView(c)
+    const next: StoredConvert = { ...c }
+    try {
+      const receipt = next.l1Tx ? await this.l1.getTransactionReceipt({ hash: next.l1Tx }).catch(() => null) : null
+      if (receipt) this.settleConvert(next, receipt)
+      else if (!next.execStarted) next.state = 'failed'
+      else if (this.now() - Date.parse(c.at) >= UNCONFIRMED_GIVEUP_MS) {
+        // No hash on disk and nothing found: failed only when the signed Safe nonce is still unspent.
+        const { nonce } = await readSafeNonce(this.l1, next.safe)
+        if (nonce === BigInt(next.safeNonce)) next.state = 'failed'
+        else if (next.state === 'sending') next.state = 'unconfirmed'
+      } else if (next.state === 'sending') next.state = 'unconfirmed'
+    } catch (e) {
+      logErr(`[bridge-out] convert status ${accountKey.slice(0, 8)}:`, e)
+      return convertView(c)
+    }
+    if (next.state !== c.state || next.usdcOut !== c.usdcOut) this.writeConvert(accountKey, next)
+    return convertView(this.journal.converts?.[accountKey])
   }
 
   /**

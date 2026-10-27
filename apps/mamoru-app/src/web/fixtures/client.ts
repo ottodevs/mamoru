@@ -160,6 +160,8 @@ const liveState = {
   n: 0,
   // ?wrongchain: the 150 USDC on Ethereum until the owner moves it (#133).
   ethereumUsdc: '150000000',
+  // ?wrongchaineth (#211): 0.05537835 ETH on Ethereum until the owner converts it.
+  ethereumEth: param('wrongchaineth') ? '55378350000000000' : '0',
   bridge: { route: null, enabled: true } as BridgeOutView,
   owner: !fresh,
   transferUsdc: 0n,
@@ -273,8 +275,8 @@ export const fixtureClient: ApiClient = {
     delay({
       address: FIXTURE_ADDRESS,
       accountChainId: 8453,
-      chains: param('wrongchain')
-        ? [{ chainId: 1, name: 'Ethereum', status: 'observed' as const, block: 21_000_000, usdc: liveState.ethereumUsdc, eth: '0', observedAt: new Date().toISOString() }]
+      chains: param('wrongchain') || param('wrongchaineth')
+        ? [{ chainId: 1, name: 'Ethereum', status: 'observed' as const, block: 21_000_000, usdc: param('wrongchain') ? liveState.ethereumUsdc : liveState.ethereumUsdc === '150000000' ? '0' : liveState.ethereumUsdc, eth: liveState.ethereumEth, observedAt: new Date().toISOString() }]
         : [{ chainId: 1, name: 'Ethereum', status: 'not_observed' as const, observedAt: new Date().toISOString() }],
     }),
   // otto/mamoru#129: a few cents of uncollected fees, nothing collected yet (true of every live account on 15 Oct).
@@ -369,6 +371,18 @@ export const fixtureClient: ApiClient = {
     return delay(liveState.bridge)
   },
   bridgeOutStatus: () => delay(liveState.bridge),
+  ethConvertPrepare: () =>
+    delay({
+      ...fixtureTx(['Convert 0.05537835 ETH to USDC, in this same account on Ethereum', 'You get about 128.14 USDC, at least 127.50 or nothing changes', 'Swap: Uniswap, ETH/USDC 0.05% pool. Mamoru pays the Ethereum gas. Then Move to Base takes the USDC']),
+      chainId: 1,
+      convert: { ethWei: '55378350000000000', quotedUsdc: '128145513', minUsdc: '127504785' },
+    }),
+  ethConvert: () => {
+    liveState.ethereumEth = '0'
+    liveState.ethereumUsdc = '128145513'
+    liveState.bridge = { ...liveState.bridge, convert: { state: 'done', ethWei: '55378350000000000', minUsdc: '127504785', usdcOut: '128145513', l1Tx: `0x${'3'.repeat(64)}`, at: new Date().toISOString() } }
+    return delay(liveState.bridge)
+  },
   // The shape of a real three-pool renewal (operator planRenew), so the dialog is reviewed on text as long as the real one.
   renewPrepare: () =>
     delay(
