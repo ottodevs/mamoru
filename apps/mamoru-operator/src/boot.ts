@@ -432,12 +432,19 @@ export function assertPauseGateOnRegistry(policy: PolicyVersion, registry: Regis
  * sleeve on that chain runs (only the Worker's renewal guard does), so a fresh account would bridge to a sleeve nobody
  * runs. The v6 renew target gets the same registry checks as the default policy, the pause-gate pin included, so a
  * stale `MAMORU_PAUSE_GATE_ADDRESS` refuses the boot even while the default policy is v5.
+ * Round 2 (GPT-6 Sol P1): an operator that signs (`live`, or writes off Base) never offers a pause gate the registry
+ * has not pinned: while MamoruPauseGate is `undeployed` such a boot is refused, so v6 goes live only with base.json's
+ * pin. With writes off Base, the v6 target also gets `assertActionPolicyOnRegistry`, like the default policy.
  */
-export function assertBootPolicies(policy: PolicyVersion, v6Policy: PolicyVersion | undefined, registry: Registry): void {
+export function assertBootPolicies(policy: PolicyVersion, v6Policy: PolicyVersion | undefined, registry: Registry, mode: { live?: boolean; writes?: boolean } = {}): void {
   if (policy.remoteBuckets?.length) throw new Error(`${policy.policyId} has a bucket on another chain: it is a renewal target only, never the default policy (an activation does not check the owner's sleeve)`)
   for (const p of [policy, ...(v6Policy ? [v6Policy] : [])]) {
     assertPolicyOnRegistry(p, registry)
     assertPauseGateOnRegistry(p, registry)
+    if ((mode.live || mode.writes) && p.actionPolicy?.pauseGate && !isDeployed('MamoruPauseGate', registry)) {
+      throw new Error(`${p.policyId} names MamoruPauseGate ${p.actionPolicy.pauseGate}, which the ${registry.chain} registry has not pinned: a signing operator never offers it (unset MAMORU_PAUSE_GATE_ADDRESS or pin the gate)`)
+    }
+    if (mode.writes) assertActionPolicyOnRegistry(p, registry)
   }
 }
 
@@ -496,11 +503,8 @@ export async function bootOperator(o: BootOptions) {
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
   const policy = withTestOverrides(named, process.env)
   const v6Policy = resolveV6Policy(policy.chain, process.env)
-  assertBootPolicies(policy, v6Policy, registry)
-  if (writes.on) {
-    assertWritePolicy(policy, registry, chainId)
-    assertActionPolicyOnRegistry(policy, registry)
-  }
+  assertBootPolicies(policy, v6Policy, registry, { live, writes: writes.on })
+  if (writes.on) assertWritePolicy(policy, registry, chainId)
   const store = new StateStore(o.stateDir)
   // Review round 2: an account already moved to the on-chain action policy needs that policy to resolve after a
   // restart (funding, engine, renewals and Stop all read it). Refused at boot, with the accounts named, rather than
