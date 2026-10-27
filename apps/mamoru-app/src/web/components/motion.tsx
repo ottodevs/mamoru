@@ -45,9 +45,10 @@ function useDirection(value: number): { dir: 'up' | 'down' | null; n: number } {
   const prev = useRef(value)
   const [tick, setTick] = useState<{ dir: 'up' | 'down' | null; n: number }>({ dir: null, n: 0 })
   useEffect(() => {
-    if (value === prev.current) return
-    setTick((t) => ({ dir: value > prev.current ? 'up' : 'down', n: t.n + 1 }))
+    const prior = prev.current
+    if (value === prior) return
     prev.current = value
+    setTick((t) => ({ dir: value > prior ? 'up' : 'down', n: t.n + 1 }))
   }, [value])
   return tick
 }
@@ -111,10 +112,18 @@ export function Fold({
   testId?: string
 }) {
   const [open, setOpen] = useState(defaultOpen)
+  // The default follows the data (History opens once its few events arrive) until the owner taps the head.
+  const touched = useRef(false)
+  useEffect(() => {
+    if (!touched.current) setOpen(defaultOpen)
+  }, [defaultOpen])
   const id = useId()
   return (
     <section className={`panel${open ? ' is-open' : ''} ${className}`.trim()} data-testid={testId} data-open={open ? 'true' : 'false'}>
-      <button type="button" className="panel-head" aria-expanded={open} aria-controls={id} onClick={() => setOpen((o) => !o)}>
+      <button type="button" className="panel-head" aria-expanded={open} aria-controls={id} onClick={() => {
+          touched.current = true
+          setOpen((o) => !o)
+        }}>
         <span className="panel-head-main">{head}</span>
         <Chevron open={open} />
       </button>
