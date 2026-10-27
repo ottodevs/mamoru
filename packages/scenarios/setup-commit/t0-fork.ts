@@ -379,7 +379,8 @@ try {
     const full = await deploy(B, relayer, call, 60_000_000n, expected)
     const lo0 = intrinsic(call.data)
     const lo = (lo0.standard > lo0.floor ? lo0.standard : lo0.floor) + 1n
-    const hi = full.gasUsed + full.gasUsed / 10n
+    // The gas LIMIT a deploy needs is well above its gasUsed (EIP-150 keeps 1/64 back at every nested call): scan to +40%.
+    const hi = (full.gasUsed * 14n) / 10n
     const seen: Record<string, { min: bigint; max: bigint; count: number }> = {}
     const add = (g: bigint, o: Outcome) => {
       const s = (seen[o] ??= { min: g, max: g, count: 0 })
@@ -395,7 +396,7 @@ try {
       add(g, r.outcome)
       return r.outcome
     }
-    const steps = 48n
+    const steps = 28n
     for (let k = 0n; k <= steps; k++) await probe(hi - ((hi - lo) * k) / steps)
     // Fine scan around every boundary between neighbouring outcomes of the coarse scan.
     const coarse = [...at.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
@@ -408,7 +409,7 @@ try {
         if ((await probe(m)) === oa) a = m
         else b = m
       }
-      for (let g = a - 20_000n; g <= b + 20_000n; g += 2_000n) await probe(g)
+      for (let g = a - 30_000n; g <= b + 30_000n; g += 5_000n) await probe(g)
     }
     const boundaries = [...at.entries()].sort((x, y) => (x[0] < y[0] ? -1 : 1)).reduce<string[]>((acc, [g, o], i, arr) => (i > 0 && arr[i - 1]![1] !== o ? [...acc, `${arr[i - 1]![1]}@${arr[i - 1]![0]} -> ${o}@${g}`] : acc), [])
     sweepRows[label] = { gasUsedAtFullLimit: full.gasUsed, probes: at.size, ranges: seen, boundaries }
