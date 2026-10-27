@@ -12,6 +12,9 @@ export type ChatMessage = {
   /** Required for system/user; assistant may have `null` with only tool_calls; tool carries the call's result. */
   content?: string | null
   tool_calls?: ToolCall[]
+  /** Opaque reasoning blocks some providers return (model-plane `thinking_blocks`); echoed back unchanged on the next
+   * request, never read, rendered or counted. */
+  thinking_blocks?: unknown[]
   /** Required when role is 'tool': the ToolCall.id this message answers. */
   tool_call_id?: string
   /** The tool name, carried on a 'tool' message for providers that want it (OpenAI ignores it; harmless either way). */

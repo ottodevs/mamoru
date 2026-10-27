@@ -6,12 +6,16 @@
 # (`/ops/lab/runner/*`) and computes them with the production engine. Holds no wallet key, no RPC key and no D1
 # credential — only LAB_RUNNER_SECRET (the env file below) and local dataset files.
 #
+# otto/mamoru#204, spec 008 phase 2 (task 5): also runs AGENT jobs (packages/lab-agent over model-plane, loopback,
+# no credential of its own). The one thing this adds that writes under $HOME: the daily agent-job budget counter
+# (contract: max 30 agent jobs/day across requesters, enforced here) — see the `StateDirectory=` line below.
+#
 # WorkingDirectory/ExecStart point at a literal placeholder, REPLACE_WITH_MAMORU_CHECKOUT: a durable checkout of
 # ottodevs/mamoru on lady, never a Cursor worktree (this must survive the worktree it was built in being removed).
 # README.md documents creating it and keeping it on `main`.
 
 [Unit]
-Description=Mamoru Agent Lab bench runner (spec 008 phase 1, otto/mamoru#199)
+Description=Mamoru Agent Lab bench + agent runner (spec 008 phase 1+2, otto/mamoru#199, #204)
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
@@ -29,12 +33,16 @@ CPUQuota=50%
 Nice=10
 UMask=0077
 
-# Hardening: no privilege escalation, a private /tmp, and the whole home directory read-only — this unit writes
-# nothing under $HOME (no state dir, no generated secret) and nothing under the checkout; it only reads the env
-# file (systemd, before exec) and the dataset files.
+# Hardening: no privilege escalation, a private /tmp, and the whole home directory read-only except one narrow
+# exception — this unit writes nothing else under $HOME (no generated secret, nothing under the checkout) and
+# only reads the env file (systemd, before exec) and the dataset files otherwise.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only
+# otto/mamoru#204: the agent-job daily budget counter (LAB_AGENT_BUDGET_STATE's default path) — the one state
+# this unit persists across runs. StateDirectory= makes systemd create ~/.local/state/mamoru-lab-runner and keep
+# it writable under ProtectHome=read-only (a bare ReadWritePaths= on a missing path fails with 226/NAMESPACE).
+StateDirectory=mamoru-lab-runner
 
 [Install]
 WantedBy=default.target

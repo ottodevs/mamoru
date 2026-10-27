@@ -199,7 +199,7 @@ describe('idle breakdown without the operator list', () => {
     const only = { ...old, usdc: '0' }
     const { text, html } = render(<Idle f={only} s={split(only, 100_000_000_000n)} />)
     expect(html).not.toContain('data-testid="idle-tokens"')
-    expect(text).toContain('Idle capital 5.00 USDC · 0.00005 cbBTC')
+    expect(text).toContain('Idle capital 5.00 USDC 0.00005 cbBTC')
   })
 })
 
