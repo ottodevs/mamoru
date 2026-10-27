@@ -182,7 +182,7 @@ const same = (a: Address | bigint, b: Address) => BigInt(a) === BigInt(b)
  * - the Init's pool is the grant's pool, and every token/fee the grant's rules pin (and every approved token) belongs
  *   to that pool.
  */
-export function assertV4Policies(grant: SessionGrant, second: SecondActionPolicy | undefined): asserts second is SecondActionPolicy & { gas: NonNullable<SecondActionPolicy['gas']>; expected: NonNullable<SecondActionPolicy['expected']> } {
+export function assertV4Policies(grant: SessionGrant, second: SecondActionPolicy | undefined, registry: Registry = baseRegistry): asserts second is SecondActionPolicy & { gas: NonNullable<SecondActionPolicy['gas']>; expected: NonNullable<SecondActionPolicy['expected']> } {
   const label = `${grant.name}${grant.pool ? `:${grant.pool}` : ''}`
   if (!second || isAddressEqual(second.policy, zeroAddress)) throw new ReasonError('SESSION_ACTION_POLICY_MISSING', `${label}: a v4 grant needs MamoruActionPolicy as its second action policy`)
   if (!second.gas || isAddressEqual(second.gas.policy, zeroAddress)) throw new ReasonError('SESSION_ACTION_POLICY_MISSING', `${label}: a v4 grant needs MamoruGasPolicy as a userOp policy`)
@@ -193,7 +193,7 @@ export function assertV4Policies(grant: SessionGrant, second: SecondActionPolicy
   if (!isAddressEqual(second.gas.policy, gasPolicy)) mismatch(grant, `gas policy ${second.gas.policy} is not the configured MamoruGasPolicy ${gasPolicy}`)
   if (isAddressEqual(actionPolicy, gasPolicy)) mismatch(grant, 'action and gas policy are the same address')
   if (!grant.actionPolicy || !isAddressEqual(grant.actionPolicy, second.policy)) mismatch(grant, `grant retargeted to ${grant.actionPolicy ?? 'nothing'}, not ${second.policy}`)
-  const npm = address('NonfungiblePositionManager', baseRegistry)
+  const npm = address('NonfungiblePositionManager', registry)
   for (const a of grant.actions) {
     if (a.signature === MINT_SIG && !isAddressEqual(a.targetAddress, second.policy)) mismatch(grant, `mint targets ${a.targetAddress}, not the policy`)
     // otto/mamoru#171: the policy's increase only at the policy; the manager's increaseLiquidity never (it funds any tokenId).
@@ -209,7 +209,7 @@ export function assertV4Policies(grant: SessionGrant, second: SecondActionPolicy
   }
   if (!validGasCaps(caps)) mismatch(grant, 'gas caps MamoruGasPolicy would refuse (a zero cap, or maxFeePerGas under the priority cap)')
   if (!grant.pool) mismatch(grant, 'a v4 grant names its pool')
-  const pool = entry(grant.pool, baseRegistry)
+  const pool = entry(grant.pool, registry)
   let init
   try {
     init = decodeMamoruInit(second.initData)
@@ -217,7 +217,7 @@ export function assertV4Policies(grant: SessionGrant, second: SecondActionPolicy
     mismatch(grant, 'action policy init data is not MamoruActionPolicy.Init')
   }
   if (!isAddressEqual(init.pool, getAddress(pool.address))) mismatch(grant, `Init pool ${init.pool} is not the grant's pool ${pool.address}`)
-  const tokens = [pool.token0, pool.token1].map((t) => address(t as never, baseRegistry))
+  const tokens = [pool.token0, pool.token1].map((t) => address(t as never, registry))
   for (const a of grant.actions) {
     if (a.signature === APPROVE_SIG && !tokens.some((t) => isAddressEqual(t, a.targetAddress))) mismatch(grant, `approves ${a.targetAddress}, not a token of the pool`)
     for (const p of a.params) {
@@ -243,7 +243,7 @@ export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, 
   if ('requiresGasPolicy' in grant) mismatch(grant, 'requiresGasPolicy is retired: rebuild the grant (requiresPauseGate)')
   if (!grant.requiresPauseGate && grant.actions.some((a) => isBridgeAction(a, registry))) mismatch(grant, 'a bridge action needs requiresPauseGate')
   if (grant.requiresPauseGate) assertGated(grant, policies)
-  else if (grant.requiresActionPolicy) assertV4Policies(grant, isActionPolicy(policies) ? policies : undefined)
+  else if (grant.requiresActionPolicy) assertV4Policies(grant, isActionPolicy(policies) ? policies : undefined, registry)
   const second = isActionPolicy(policies) ? { policy: policies.policy, initData: policies.initData } : policies && 'gate' in policies ? policies.gate : undefined
   return {
     sessionValidator: address('OwnableValidator', registry),
@@ -293,6 +293,7 @@ export function v4PoliciesFor(
   generation: bigint,
   budgetCaps: Record<string, bigint>,
   admitByPool: Partial<Record<string, readonly bigint[]>> = {},
+  registry: Registry = baseRegistry,
 ): (grant: SessionGrant, index: number) => SessionPolicies | undefined {
   const firstOfPool = new Map<string, number>()
   grants.forEach((g, i) => {
@@ -305,7 +306,7 @@ export function v4PoliciesFor(
       return { gate: { policy: d.pauseGate, initData: '0x' }, gas, expected: { pauseGate: d.pauseGate, gasPolicy: d.gasPolicy } }
     }
     if (!g.requiresActionPolicy) return undefined
-    const spec = v4PoolOf(g.pool)
+    const spec = v4PoolOf(g.pool, registry.chainId)
     if (!spec) mismatch(g, 'no v4 pool parameters for this pool')
     const admit = firstOfPool.get(g.pool!) === i ? [...(admitByPool[g.pool!] ?? [])] : []
     return { policy: d.actionPolicy, initData: encodeMamoruInit(mamoruInitFor(spec, generation, budgetCaps, { admit })), gas, expected: { actionPolicy: d.actionPolicy, gasPolicy: d.gasPolicy } }

@@ -1,6 +1,8 @@
 import { pairGrants } from './grants.ts'
 import { conservadorV1 } from './policies.ts'
+import { INCREASE_TOLERANCE_BPS, conservadorLiveV5 } from './policies-v4.ts'
 import type { PolicyVersion } from './types.ts'
+import { grantsV5, v4CapFormulas, V4_POOLS_MONAD, type V4Usage } from './v4-grants.ts'
 
 /**
  * otto/mamoru#65: the Monad lab policy. One pair, WMON/USDC 0.30% on Uniswap V3 (the sleeve of
@@ -73,7 +75,41 @@ export const liveWmonUsdcMonadV1: PolicyVersion = {
   gasReserveWei: 2_000_000_000_000_000_000n,
 }
 
-/** Monad mainnet policies by id: resolved by the operator only when it is opted into writing to Monad. */
+/**
+ * otto/mamoru#214: the sleeve's v5-shaped policy, so a paused account is paused on Monad too. Same pool, MON gas reserve
+ * and range as `liveWmonUsdcMonadV1` (the range, 3000 ticks / 24 h cooldown, is the Monad lab policy's), with
+ * `conservadorLiveV5`'s grants (MamoruActionPolicyV2 and MamoruGasPolicy on every action: guardian pause, budgets) and
+ * increase tolerance. One bucket holds everything: the sleeve serves only the v6 Growth bucket, so inside it the whole
+ * account is WMON/USDC. The id is 'risk' (the existing union has no 'growth' local bucket, and a WMON pool is the
+ * volatile slot the engine already knows), preference 10000 (all of the sleeve's target; the Growth share of the whole
+ * account, 15 %, lives in `conservadorLiveV6.remoteBuckets`). Caps are bps of the cap the operator signs for the sleeve
+ * (`V4_POOLS_MONAD.growth`). Needs the two contracts of Monad (env: MAMORU_ACTION_POLICY_V2_ADDRESS,
+ * MAMORU_GAS_POLICY_ADDRESS); `liveWmonUsdcMonadV1` stays for the sleeves already activated (its hash is pinned).
+ */
+const V5_MONAD_USAGE: V4Usage = { enterSwap: 3_000, enterMint: 1_000, manageAny: 32_000 }
+
+export const liveWmonUsdcMonadV5: PolicyVersion = {
+  ...liveWmonUsdcMonadV1,
+  policyId: 'live-wmon-usdc-monad-v5',
+  version: '0.1.0',
+  buckets: [{ id: 'risk', preference: 10_000, pools: [V4_POOLS_MONAD.growth.pool] }],
+  harvest: conservadorLiveV5.harvest,
+  execution: conservadorLiveV5.execution,
+  range: { ...labWmonUsdcMonadV1.range, increaseToleranceBps: INCREASE_TOLERANCE_BPS },
+  session: {
+    ...conservadorLiveV5.session,
+    caps: v4CapFormulas('growth', V4_POOLS_MONAD.growth),
+    grants: grantsV5(V4_POOLS_MONAD.growth, V5_MONAD_USAGE),
+  },
+}
+
+/** Fork-only twin of liveWmonUsdcMonadV5 (signs for a lab fork chain id; names still resolve in Monad's registry). */
+export const labWmonUsdcMonadV5: PolicyVersion = { ...liveWmonUsdcMonadV5, policyId: 'lab-wmon-usdc-monad-v5', chain: 'fork' }
+
+/**
+ * Monad mainnet policies by id: resolved by the operator only when it is opted into writing to Monad. The v5 sleeve
+ * policy is deliberately not here: it needs the two Monad contract addresses, so boot.ts resolves it itself and fails closed.
+ */
 export const MONAD_LIVE_POLICIES: Record<string, PolicyVersion> = {
   [liveWmonUsdcMonadV1.policyId]: liveWmonUsdcMonadV1,
 }
