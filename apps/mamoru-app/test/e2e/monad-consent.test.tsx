@@ -67,3 +67,23 @@ describe('the dialog and the row', () => {
     expect(render(<ApprovalRow approval={due} onOpen={() => {}} />).text).toContain('Renew approval')
   })
 })
+
+describe('share against target (otto/mamoru#216)', () => {
+  test("each position's bucket target comes from the account's policy, as a share of the whole account", async () => {
+    const { poolTargets } = await import('../../src/web/lib/policies.ts')
+    const v5 = poolTargets('conservador-live-v5')
+    expect([v5.get('pool:USDC/USDT/100'), v5.get('pool:USDC/cbBTC/500'), v5.get('pool:WETH/USDC/3000')]).toEqual([50, 40, 10])
+    const v6 = poolTargets('conservador-live-v6')
+    expect([v6.get('pool:USDC/USDT/100'), v6.get('pool:WETH/USDC/3000'), v6.get('pool:WMON/USDC/3000'), v6.get('pool:USDC/cbBTC/500')]).toEqual([50, 35, 15, 0])
+    expect(poolTargets('nope').size).toBe(0)
+  })
+
+  test('in the mix with Monad, WETH/USDC is Balance and WMON/USDC is Growth; other mixes keep their labels', async () => {
+    const { bucketOf } = await import('../../src/web/lib/rates.ts')
+    expect(bucketOf('pool:WETH/USDC/3000', undefined, 'conservador-live-v6')).toBe('Balanced')
+    expect(bucketOf('pool:WMON/USDC/3000', undefined, 'conservador-live-v6')).toBe('Growth')
+    expect(bucketOf('pool:USDC/USDT/100', undefined, 'conservador-live-v6')).toBe('Stable')
+    expect(bucketOf('pool:WETH/USDC/3000', undefined, 'conservador-live-v5')).toBe('Growth')
+    expect(bucketOf('pool:WETH/USDC/3000')).toBe('Growth')
+  })
+})

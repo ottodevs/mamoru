@@ -1,13 +1,11 @@
 import { useState, type ReactNode } from 'react'
-import { conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, POLICIES, type PolicyVersion } from '@mamoru/policy'
+import type { PolicyVersion } from '@mamoru/policy'
 import { sleeveChain } from '../lib/chain.tsx'
+import { KNOWN_POLICIES as KNOWN, isMultichainTarget } from '../lib/policies.ts'
 import { pairLabel } from '../lib/positions.ts'
 import { ApprovalBody, ApprovalDialog } from './approval-dialog.tsx'
 
-/** The live policies an account may run, by id, for the before/after mix. */
-const KNOWN: Record<string, PolicyVersion> = { ...POLICIES, ...Object.fromEntries([conservadorLiveV4, conservadorLiveV5, conservadorLiveV6].map((p) => [p.policyId, p])) }
-
-export const isMultichainTarget = (policyId: string | undefined) => !!policyId && !!KNOWN[policyId]?.remoteBuckets?.length
+export { isMultichainTarget }
 
 /**
  * The mix before and after, from the two policies themselves (never a number typed here): every pool of either, its

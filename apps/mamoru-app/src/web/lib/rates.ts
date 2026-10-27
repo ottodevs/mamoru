@@ -1,6 +1,7 @@
 import type { ApyView, FundingView } from '@mamoru/domain'
 import { POLICIES, type BucketId } from '@mamoru/policy'
 import { cbbtcToUsdc, DUST_USDC, MIN_ENTRY_USDC, type Split } from './money.ts'
+import { isMultichainTarget, poolTargets } from './policies.ts'
 import { poolName, poolTokens } from './positions.ts'
 
 // otto/mamoru#193: the dashboard's rates, per position and for the account, from data the app already has:
@@ -15,8 +16,14 @@ const BUCKET_LABEL: Record<BucketId, Bucket> = { stables: 'Stable', 'btc-usdc': 
 const STABLES = new Set(['USDC', 'USDT', 'EURC', 'DAI'])
 
 /** The bucket a pool belongs to in Mamoru's plans; a pool no plan names is sorted by its tokens. */
-export function bucketOf(pool: string | undefined, amounts?: Position['amounts']): Bucket {
+export function bucketOf(pool: string | undefined, amounts?: Position['amounts'], policyId?: string): Bucket {
   const name = poolName(pool)
+  // otto/mamoru#201: in the mix with Monad (v6), WETH/USDC is the Balance bucket and Growth lives on Monad.
+  if (isMultichainTarget(policyId)) {
+    const [a, b] = poolTokens(pool, amounts)
+    if (STABLES.has(a) && STABLES.has(b)) return 'Stable'
+    return a === 'WMON' || b === 'WMON' ? 'Growth' : 'Balanced'
+  }
   if (name) {
     for (const p of Object.values(POLICIES)) {
       const b = p.buckets.find((x) => x.pools.includes(name as never))
@@ -39,6 +46,10 @@ export type PositionRate = {
   unpriced: string[]
   /** Share of working capital, 0..100; null when any position cannot be valued (a share of a partial total would be wrong). */
   sharePct: number | null
+  /** otto/mamoru#216: share of the whole account (`totalUsdc`), 0..100; null without a total or a value. */
+  accountPct: number | null
+  /** otto/mamoru#216: the target of this position's bucket in the account's policy, 0..100; null when unknown. */
+  targetPct: number | null
   /** Today's rate: 0 while out of range (it earns nothing), null when its pool has no rate today. */
   currentPct: number | null
   /** The pool's 30-day mean; null when the pool has no history. */
@@ -67,7 +78,9 @@ export function valueOf(p: Position, price: bigint | null): { value: bigint | nu
   return { value: unpriced.length ? null : sum, unpriced }
 }
 
-export function positionRates(f: FundingView, apy: ApyView | undefined, price: bigint | null = null): PositionRate[] {
+export function positionRates(f: FundingView, apy: ApyView | undefined, price: bigint | null = null, totalUsdc: bigint | null = null): PositionRate[] {
+  const policyId = f.approval?.policyId
+  const targets = poolTargets(policyId)
   const valued = f.positions.map((p) => valueOf(p, price))
   const values = valued.map((v) => v.value)
   const known = values.every((v) => v !== null)
@@ -79,11 +92,13 @@ export function positionRates(f: FundingView, apy: ApyView | undefined, price: b
     return {
       tokenId: p.tokenId,
       pool: p.pool,
-      bucket: bucketOf(p.pool, p.amounts),
+      bucket: bucketOf(p.pool, p.amounts, policyId),
       inRange: p.inRange,
       valueUsdc: value,
       unpriced: valued[i]!.unpriced,
       sharePct: known && total > 0n ? Number((value! * 10_000n) / total) / 100 : null,
+      accountPct: value !== null && totalUsdc !== null && totalUsdc > 0n ? Number((value * 10_000n) / totalUsdc) / 100 : null,
+      targetPct: name ? (targets.get(name) ?? null) : null,
       currentPct: !p.inRange ? 0 : src?.currentPct ?? null,
       monthlyPct: src?.monthlyPct ?? null,
     }
