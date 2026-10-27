@@ -83,7 +83,7 @@ export function resolveNamedPolicy(policyId: string, env: Record<string, string 
   if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1') return undefined
   const v5 = V5_POLICIES_BY_ID[policyId]
   if (v5) return env.MAMORU_ACTION_POLICY_V2_ADDRESS ? deployedV5(v5, env) : undefined
-  // otto/mamoru#214: v6 also needs MamoruPauseGate; without it (or V2) it is not offered and not a default.
+  // otto/mamoru#214: v6 also needs MamoruPauseGate; without it (or V2) it is not offered. Boot refuses it as the default (assertBootPolicies).
   const v6 = V6_POLICIES_BY_ID[policyId]
   if (v6) return env.MAMORU_ACTION_POLICY_V2_ADDRESS && env.MAMORU_PAUSE_GATE_ADDRESS ? deployedV6(v6, env) : undefined
   const v4 = V4_POLICIES_BY_ID[policyId]
@@ -424,6 +424,21 @@ export function assertPauseGateOnRegistry(policy: PolicyVersion, registry: Regis
 }
 
 /**
+ * otto/mamoru#214, review of PR #141 (P1 2, P1 3): what boot checks of the process-wide policy and of the v6 renew target.
+ * A policy with a bucket on another chain (v6) is never the default: an activation does not check that the owner's
+ * sleeve on that chain runs (only the Worker's renewal guard does), so a fresh account would bridge to a sleeve nobody
+ * runs. The v6 renew target gets the same registry checks as the default policy, the pause-gate pin included, so a
+ * stale `MAMORU_PAUSE_GATE_ADDRESS` refuses the boot even while the default policy is v5.
+ */
+export function assertBootPolicies(policy: PolicyVersion, v6Policy: PolicyVersion | undefined, registry: Registry): void {
+  if (policy.remoteBuckets?.length) throw new Error(`${policy.policyId} has a bucket on another chain: it is a renewal target only, never the default policy (an activation does not check the owner's sleeve)`)
+  for (const p of [policy, ...(v6Policy ? [v6Policy] : [])]) {
+    assertPolicyOnRegistry(p, registry)
+    assertPauseGateOnRegistry(p, registry)
+  }
+}
+
+/**
  * otto/mamoru#61: whether this operator writes to a chain other than Base. MAMORU_CHAIN_WRITES (default unset: no)
  * names the chain ids it is opted into; it applies only when the RPC answers that very chain id and the registry read
  * is that chain's (never a lab fork id of it). A flag that names another chain than the one the RPC is refuses the boot
@@ -477,8 +492,8 @@ export async function bootOperator(o: BootOptions) {
   if (!named) throw new Error(`unknown policy ${o.policyId}`)
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
   const policy = withTestOverrides(named, process.env)
-  assertPolicyOnRegistry(policy, registry)
-  assertPauseGateOnRegistry(policy, registry)
+  const v6Policy = resolveV6Policy(policy.chain, process.env)
+  assertBootPolicies(policy, v6Policy, registry)
   if (writes.on) {
     assertWritePolicy(policy, registry, chainId)
     assertActionPolicyOnRegistry(policy, registry)
@@ -526,7 +541,7 @@ export async function bootOperator(o: BootOptions) {
       ...(settings ? { settings, opsFlags: () => settings.flags() } : {}),
       ...(resolveV4Policy(policy.chain, process.env) ? { v4Policy: resolveV4Policy(policy.chain, process.env) } : {}),
       ...(resolveV5Policy(policy.chain, process.env) ? { v5Policy: resolveV5Policy(policy.chain, process.env) } : {}),
-      ...(resolveV6Policy(policy.chain, process.env) ? { v6Policy: resolveV6Policy(policy.chain, process.env) } : {}),
+      ...(v6Policy ? { v6Policy } : {}),
       guardReadsState: new GuardReadsState(o.stateDir),
     },
     client,
