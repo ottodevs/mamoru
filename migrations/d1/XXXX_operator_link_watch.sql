@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS operator_link_watch (
   last_error TEXT,        -- short reason of the last failed probe (never a URL or a secret)
   last_alert_at TEXT,     -- ISO: last "down" alert claimed for this outage (put back when nothing delivered it)
   alerted INTEGER NOT NULL DEFAULT 0,  -- 1 once any "down" alert of this outage was delivered
+  alert_inflight TEXT,    -- ISO claim of a "down" whose send has not returned yet; a "recovered" waits for it (60 s cap)
   recovery_pending TEXT,  -- ISO down_since of an outage that ended with alerted = 1 and whose "recovered" is not delivered yet
   checked_at TEXT NOT NULL
 );

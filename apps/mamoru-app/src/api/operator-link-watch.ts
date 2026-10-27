@@ -90,7 +90,11 @@ function minutes(ms: number): string {
   return m < 120 ? `${m} min` : `${(m / 60).toFixed(1)} h`
 }
 
-type WatchRow = { down_since: string | null; last_alert_at: string | null; alerted: number; recovery_pending: string | null }
+type WatchRow = { down_since: string | null; last_alert_at: string | null; alerted: number; alert_inflight: string | null; recovery_pending: string | null }
+
+// A "recovered" waits this long at most for an in-flight "down" (POST_TIMEOUT_MS per channel, two channels) before
+// it treats that send's run as dead.
+const INFLIGHT_MAX_MS = 60_000
 
 /**
  * One chain, one tick. Exported for tests. Every send is claimed first with a conditional UPDATE on the value just
@@ -102,18 +106,18 @@ export async function watchOne(db: Db, chainId: number, probe: { up: true } | { 
   const name = chainName(chainId)
   const at = now.toISOString()
   await db.prepare(`INSERT INTO operator_link_watch (chain_id, checked_at) VALUES (?, ?) ON CONFLICT(chain_id) DO UPDATE SET checked_at = excluded.checked_at`).bind(chainId, at).run()
-  const read = () => db.prepare(`SELECT down_since, last_alert_at, alerted, recovery_pending FROM operator_link_watch WHERE chain_id = ?`).bind(chainId).first<WatchRow>()
+  const read = () => db.prepare(`SELECT down_since, last_alert_at, alerted, alert_inflight, recovery_pending FROM operator_link_watch WHERE chain_id = ?`).bind(chainId).first<WatchRow>()
 
   if (probe.up) {
     let row = await read()
     if (row?.down_since) {
       // The outage ends here. One run clears it; it carries a pending "recovered" if a "down" was delivered or is
-      // in flight on a concurrent run (last_alert_at claimed, alerted not set yet): a spare "recovered" beats a lost
+      // in flight on a concurrent run (alert_inflight set, alerted not yet): a spare "recovered" beats a lost
       // one. An older pending "recovered" is kept, never replaced, so its message counts from the first outage.
       await db
         .prepare(
           `UPDATE operator_link_watch SET down_since = NULL, last_error = NULL, last_alert_at = NULL, alerted = 0,
-             recovery_pending = CASE WHEN alerted = 1 OR last_alert_at IS NOT NULL THEN COALESCE(recovery_pending, down_since) ELSE recovery_pending END
+             recovery_pending = CASE WHEN alerted = 1 OR alert_inflight IS NOT NULL THEN COALESCE(recovery_pending, down_since) ELSE recovery_pending END
            WHERE chain_id = ? AND down_since = ?`,
         )
         .bind(chainId, row.down_since)
@@ -122,7 +126,11 @@ export async function watchOne(db: Db, chainId: number, probe: { up: true } | { 
     }
     const pending = row?.recovery_pending
     if (!pending) return
-    const claimed = await db.prepare(`UPDATE operator_link_watch SET recovery_pending = NULL WHERE chain_id = ? AND recovery_pending = ? RETURNING chain_id`).bind(chainId, pending).first()
+    // Never ahead of an in-flight "down": the "recovered" must be the last word. It waits for the next tick.
+    const claimed = await db
+      .prepare(`UPDATE operator_link_watch SET recovery_pending = NULL WHERE chain_id = ? AND recovery_pending = ? AND (alert_inflight IS NULL OR alert_inflight <= ?) RETURNING chain_id`)
+      .bind(chainId, pending, new Date(now.getTime() - INFLIGHT_MAX_MS).toISOString())
+      .first()
     if (!claimed) return
     const sent = await notify(`:white_check_mark: Mamoru: the Worker reaches the ${name} operator again (the outage began ${minutes(now.getTime() - Date.parse(pending))} ago).`)
     if (!sent) await db.prepare(`UPDATE operator_link_watch SET recovery_pending = ? WHERE chain_id = ? AND recovery_pending IS NULL`).bind(pending, chainId).run()
@@ -139,14 +147,16 @@ export async function watchOne(db: Db, chainId: number, probe: { up: true } | { 
   if (row.last_alert_at && now.getTime() - Date.parse(row.last_alert_at) < REMIND_EVERY_MS) return
   // Claim against the value just read (IS matches NULL too).
   const claimed = await db
-    .prepare(`UPDATE operator_link_watch SET last_alert_at = ? WHERE chain_id = ? AND down_since = ? AND last_alert_at IS ? RETURNING chain_id`)
-    .bind(at, chainId, row.down_since, row.last_alert_at)
+    .prepare(`UPDATE operator_link_watch SET last_alert_at = ?, alert_inflight = ? WHERE chain_id = ? AND down_since = ? AND last_alert_at IS ? RETURNING chain_id`)
+    .bind(at, at, chainId, row.down_since, row.last_alert_at)
     .first()
   if (!claimed) return
   const text =
     `:rotating_light: Mamoru: the Worker cannot reach the ${name} operator for ${minutes(now.getTime() - Date.parse(row.down_since))} ` +
     `(last probe: ${probe.reason}). Users see "Could not load your balance". Check the operator tunnel on lady (otto/mamoru#205).`
-  if (await notify(text)) {
+  const delivered = await notify(text)
+  await db.prepare(`UPDATE operator_link_watch SET alert_inflight = NULL WHERE chain_id = ? AND alert_inflight = ?`).bind(chainId, at).run()
+  if (delivered) {
     await db.prepare(`UPDATE operator_link_watch SET alerted = 1 WHERE chain_id = ? AND down_since = ?`).bind(chainId, row.down_since).run()
   } else {
     // Nothing delivered: give the claim back so the next tick tries again; `alerted` keeps any earlier delivery.

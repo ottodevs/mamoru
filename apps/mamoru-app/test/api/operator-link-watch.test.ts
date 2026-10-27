@@ -128,14 +128,31 @@ describe('watchOne races (review round 2 of PR #132)', () => {
     // Run A claims the alert; before its send returns, run B sees the operator healthy.
     let release!: () => void
     const gate = new Promise<void>((r) => (release = r))
-    const slow = async (t: string) => (ok.sent.push(t), await gate, true)
+    // The "down" counts as delivered only when its send returns, so the order in `sent` is the order users see.
+    const slow = async (t: string) => (await gate, ok.sent.push(t), true)
     const a = watchOne(db, 8453, DOWN, slow, at(DOWN_AFTER_MS))
     await new Promise((r) => setTimeout(r, 0))
     await watchOne(db, 8453, UP, ok.notify, at(DOWN_AFTER_MS + 1))
+    expect(ok.sent).toEqual([])
     release()
     await a
-    await watchOne(db, 8453, UP, ok.notify, at(DOWN_AFTER_MS + 60_000))
-    expect(ok.sent.filter((t) => t.includes('again'))).toHaveLength(1)
+    await watchOne(db, 8453, UP, ok.notify, at(DOWN_AFTER_MS + 10 * 60_000))
+    expect(ok.sent).toHaveLength(2)
+    expect(ok.sent[0]).toContain('cannot reach')
+    expect(ok.sent[1]).toContain('again')
+  })
+
+  test('a "down" whose run died mid-send holds a "recovered" back for at most INFLIGHT_MAX_MS', async () => {
+    const db = memoryD1()
+    const ok = recorder()
+    await watchOne(db, 8453, DOWN, ok.notify, at(0))
+    void watchOne(db, 8453, DOWN, () => new Promise<boolean>(() => {}), at(DOWN_AFTER_MS))
+    await new Promise((r) => setTimeout(r, 0))
+    await watchOne(db, 8453, UP, ok.notify, at(DOWN_AFTER_MS + 1))
+    expect(ok.sent).toEqual([])
+    await watchOne(db, 8453, UP, ok.notify, at(DOWN_AFTER_MS + 10 * 60_000))
+    expect(ok.sent).toHaveLength(1)
+    expect(ok.sent[0]).toContain('again')
   })
 
   test('a later outage does not replace an undelivered recovery', async () => {
