@@ -2,7 +2,7 @@
 // addresses, pinned against the registry once MamoruPauseGate is deployed, and Base only.
 import { describe, expect, test } from 'bun:test'
 import { baseRegistry, monadRegistry, type Registry } from '@mamoru/registry'
-import { assertBaseOnlyFeatures, assertPauseGateOnRegistry, assertV4Resolvable, resolveNamedPolicy, resolveV6Policy } from '../src/boot.ts'
+import { assertBaseOnlyFeatures, assertBootPolicies, assertPauseGateOnRegistry, assertV4Resolvable, resolveNamedPolicy, resolveV5Policy, resolveV6Policy } from '../src/boot.ts'
 
 const V1 = '0x00000000000000000000000000000000000000f1'
 const V2 = '0x00000000000000000000000000000000000000fe'
@@ -12,7 +12,7 @@ const env = { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_V2_ADDRESS: V2
 const ID = 'conservador-live-v6'
 
 describe('conservador-live-v6 at boot', () => {
-  test('wired to V2, the gas policy and the pause gate; resolves as the default policy and as the renew target', () => {
+  test('wired to V2, the gas policy and the pause gate; resolves by name and as the renew target', () => {
     const p = resolveNamedPolicy(ID, env)!
     expect(p.actionPolicy).toMatchObject({ address: V2, contractVersion: 2, pauseGate: GATE, gasPolicy: { address: GAS } })
     expect(resolveV6Policy('base', env)!.policyId).toBe(ID)
@@ -48,6 +48,21 @@ describe('conservador-live-v6 at boot', () => {
     const pinned = (address: string): Registry => ({ ...baseRegistry, entries: [...baseRegistry.entries, { name: 'MamoruPauseGate', kind: 'policy', role: 'test', address, codeHash: `0x${'00'.repeat(32)}` } as never], undeployed: [] })
     expect(() => assertPauseGateOnRegistry(p, pinned(GATE))).not.toThrow()
     expect(() => assertPauseGateOnRegistry(p, pinned(V1))).toThrow('registry')
+  })
+
+  test('review of PR #141 (P1 2): v6 (a bucket on another chain) is refused as the default policy at boot', () => {
+    expect(() => assertBootPolicies(resolveNamedPolicy(ID, env)!, resolveV6Policy('base', env), baseRegistry)).toThrow('renewal target only')
+    expect(() => assertBootPolicies(resolveNamedPolicy('conservador-lab-v6', env)!, undefined, baseRegistry)).toThrow('renewal target only')
+    expect(() => assertBootPolicies(resolveV5Policy('base', env)!, resolveV6Policy('base', env), baseRegistry)).not.toThrow()
+  })
+
+  test('review of PR #141 (P1 3): the v6 renew target is pinned to the registry even when the default policy is v5', () => {
+    const pinned = (address: string): Registry => ({ ...baseRegistry, entries: [...baseRegistry.entries, { name: 'MamoruPauseGate', kind: 'policy', role: 'test', address, codeHash: `0x${'00'.repeat(32)}` } as never], undeployed: [] })
+    const v5 = resolveV5Policy('base', env)!
+    const v6 = resolveV6Policy('base', env)!
+    expect(() => assertBootPolicies(v5, v6, pinned(GATE))).not.toThrow()
+    expect(() => assertBootPolicies(v5, v6, pinned('0x00000000000000000000000000000000000000f1'))).toThrow('MamoruPauseGate')
+    expect(() => assertBootPolicies(v5, undefined, pinned('0x00000000000000000000000000000000000000f1'))).not.toThrow()
   })
 
   test('Base only: the pause gate address is refused on a Monad operator', () => {

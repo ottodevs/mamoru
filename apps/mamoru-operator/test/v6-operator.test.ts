@@ -182,6 +182,11 @@ describe('owner transactions of a v6 approval', () => {
     // The exit-only btc grant is enabled with V2 for its pool (so the old positions can be wound down).
     expect(names.some((n) => n.includes('USDC/cbBTC'))).toBe(true)
     expect(t.summary.join('\n')).toContain('Circle')
+    // Review of PR #141: the bridge consent line reads the policy's real cap names (bridgePerCall, bridgeTotal), never 0.
+    const bridge = t.summary.find((l) => l.startsWith('Bridge:'))!
+    expect(bridge).toBeDefined()
+    expect(bridge).not.toMatch(/at most 0(\.0+)? USDC/)
+    expect(bridge).not.toMatch(/and 0(\.0+)? USDC in total/)
   })
 
   test('extension: a v6 account missing only bridge-out gets just that session, with the gate', async () => {
@@ -208,6 +213,7 @@ describe('owner transactions of a v6 approval', () => {
   })
 })
 
+// Boot refuses v6 as the default policy (assertBootPolicies, review of PR #141): this checks only the encoding.
 describe('a fresh activation on v6 (default policy)', () => {
   test('Start enables the bridge-out grant with the gate and the others with V2, and names the Monad share', async () => {
     const w = world(0n, { policy: v6, v4Policy: v4, v5Policy: v5, v6Policy: v6 })
