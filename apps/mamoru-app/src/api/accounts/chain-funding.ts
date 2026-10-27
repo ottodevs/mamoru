@@ -22,7 +22,8 @@ export const MAX_LISTED_POSITIONS = 64
 export const FUNDING_CACHE_MS = 30_000
 /** A read that failed is not repeated before this. */
 export const FUNDING_FAIL_MS = 10_000
-export const FUNDING_PENDING_MS = FUNDING_RPC_TIMEOUT_MS * MAX_PROVIDERS + 2_000
+// Two requests per provider (the call and the code), each with its own timeout.
+export const FUNDING_PENDING_MS = 2 * FUNDING_RPC_TIMEOUT_MS * MAX_PROVIDERS + 2_000
 export const FUNDING_GATE_MAX = 500
 
 const Q96 = 1n << 96n
@@ -163,7 +164,12 @@ export type ChainRead = {
   prices: Record<string, PoolPrice>
   /** Listed ids that are the Safe's now and sit in a USDC pool of the registry. */
   positions: ChainPosition[]
-  /** False when a listed id is the Safe's but could not be valued (a pool outside the registry's USDC pools). */
+  /**
+   * False when the listed ids cannot be trusted as the Safe's whole set of positions: one is the Safe's but could not be
+   * valued (a pool outside the registry's USDC pools), one is no longer the Safe's (the snapshot is behind: a position was
+   * closed or moved, and its replacement is not listed), or the Safe holds more position NFTs than the ones listed and
+   * owned (opened since the snapshot, or sent to it unasked: not told apart, so not counted and not claimed complete).
+   */
   valued: boolean
 }
 
@@ -187,6 +193,7 @@ export async function readProvider(fetcher: ChainFetch, url: string, registry: R
     { target: multicall3, allowFailure: true, callData: encodeFunctionData({ abi: multicallAbi, functionName: 'getEthBalance', args: [safe] }) },
     ...tokenNames.map((t): Call => ({ target: addressOf(t, registry), allowFailure: true, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [safe] }) })),
     ...pools.map((p): Call => ({ target: addressOf(p, registry), allowFailure: true, callData: encodeFunctionData({ abi: uniswapV3PoolAbi, functionName: 'slot0' }) })),
+    { target: npm, allowFailure: true, callData: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe] }) },
     ...ids.flatMap((id): Call[] => [
       { target: npm, allowFailure: true, callData: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'positions', args: [id] }) },
       { target: npm, allowFailure: true, callData: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', args: [id] }) },
@@ -237,20 +244,29 @@ export async function readProvider(fetcher: ChainFetch, url: string, registry: R
 
   const positions: ChainPosition[] = []
   let valued = true
+  let owned = 0
   const safeLower = safe.toLowerCase()
-  const listAt = slotAt + pools.length
+  const held = word(slotAt + pools.length)
+  const listAt = slotAt + pools.length + 1
   ids.forEach((tokenId, i) => {
     const pos = results[listAt + 2 * i]!
     const owner = results[listAt + 2 * i + 1]!
     // ownerOf reverts for a burned id: not the Safe's. Anything else but the Safe's own address is not its position.
-    if (!owner.success) return
+    if (!owner.success) {
+      valued = false
+      return
+    }
     let ownerAddr: string
     try {
       ownerAddr = (decodeFunctionResult({ abi: nonfungiblePositionManagerAbi, functionName: 'ownerOf', data: owner.returnData }) as string).toLowerCase()
     } catch {
       throw new ReadError('ownerOf is not readable')
     }
-    if (ownerAddr !== safeLower) return
+    if (ownerAddr !== safeLower) {
+      valued = false
+      return
+    }
+    owned++
     if (!pos.success) throw new ReadError('a position could not be read')
     let p: readonly unknown[]
     try {
@@ -274,6 +290,7 @@ export async function readProvider(fetcher: ChainFetch, url: string, registry: R
     positions.push({ tokenId, pool, token0: e.token0!, token1: e.token1!, fee: e.fee!, liquidity, tickLower, tickUpper, inRange: price.tick >= tickLower && price.tick < tickUpper, amount0, amount1, tokensOwed0, tokensOwed1 })
   })
 
+  if (held !== BigInt(owned)) valued = false
   // Same block as everything above, from the same provider.
   const code = await rpc(fetcher, url, 'eth_getCode', [safe, `0x${block.toString(16)}`])
   return { block, deployed: code !== '0x', eth, tokens, prices, positions, valued }
@@ -298,7 +315,10 @@ export async function readChain(fetcher: ChainFetch, urls: readonly string[], re
  */
 export function fundingFromRead(read: ChainRead, registry: Registry, safe: Address, capUsdc: string, listed: { at: string } | null): FundingView {
   const usdc = read.tokens.USDC ?? 0n
-  const positions = [...read.positions]
+  const known = listed !== null && read.valued
+  // Positions are shown only when the list is whole: the app adds them into the total, and a partial set under an
+  // "idle only" notice (or as a complete total) would misstate the balance.
+  const positions = (known ? [...read.positions] : [])
     .map((p) => ({ p, v: positionUsdc(p, read.prices[p.pool]!.sqrtPriceX96, registry) }))
     .sort((a, b) => (a.v === b.v ? 0 : a.v > b.v ? -1 : 1))
     .map(({ p, v }) => {
@@ -318,7 +338,6 @@ export function fundingFromRead(read: ChainRead, registry: Registry, safe: Addre
         valueUsdc: v.toString(),
       }
     })
-  const known = listed !== null && read.valued
   return {
     address: getAddress(safe),
     deployed: read.deployed,

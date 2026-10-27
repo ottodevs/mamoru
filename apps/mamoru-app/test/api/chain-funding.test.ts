@@ -114,6 +114,7 @@ function chain(over: Partial<Node> = {}) {
       }
       if (target === NPM.toLowerCase()) {
         const d = decodeFunctionData({ abi: nonfungiblePositionManagerAbi, data: call.callData })
+        if (d.functionName === 'balanceOf') return ok(word(Object.values(n.positions).filter((x) => x.owner.toLowerCase() === String((d.args as readonly string[])[0]).toLowerCase()).length))
         const id = String((d.args as readonly [bigint])[0])
         const p = n.positions[id]
         if (d.functionName === 'ownerOf') return !p || p.owner === 'burned' ? revert : ok(encodeAbiParameters([{ type: 'address' }], [p.owner as `0x${string}`]))
@@ -338,30 +339,55 @@ describe('funding from the chain: what counts', () => {
     expect(idleSum + f.positions.reduce((a, p) => a + BigInt(p.valueUsdc!), 0n)).toBe(3_000_000n + 2_000_000n + 500_000n + valueOf(p1, 101n) + valueOf(p2, 102n))
   })
 
-  test('an NFT the Safe holds that is not in the snapshot is ignored, and never even read', async () => {
+  test('an NFT the Safe holds that is not in the snapshot is never counted nor even read; the total is not claimed whole', async () => {
     const node = chain({ balances: { USDC: 1_000_000n } })
     const { h } = setup({ node })
     const { cookie, owner } = await onboard(h)
     node.positions = { '101': { ...pos(owner.address) }, '999': { ...pos(owner.address), liquidity: 10n ** 18n } }
     snapshot(h, owner, ['101'])
     const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
-    expect(f.positions.map((p) => p.tokenId)).toEqual(['101'])
-    // 999 was not asked for: positions(999) / ownerOf(999) are not among the calls
+    // it could be spam or a position opened after the snapshot: not told apart, so positions are unknown, idle only
+    expect(f.positions).toEqual([])
+    expect(f.chainRead).toEqual({ positions: 'unknown', listedAt: null })
     const asked = node.requests[0]!.params[0] as { data: string }
     const calls = decodeFunctionData({ abi: multicallAbi, data: asked.data as `0x${string}` }).args[0]
     const npmCalls = calls.filter((c) => c.target.toLowerCase() === NPM.toLowerCase()).map((c) => decodeFunctionData({ abi: nonfungiblePositionManagerAbi, data: c.callData }))
-    expect(npmCalls.map((c) => String((c.args as readonly bigint[])[0]))).toEqual(['101', '101'])
+    const ids = npmCalls.filter((c) => c.functionName !== 'balanceOf').map((c) => String((c.args as readonly bigint[])[0]))
+    expect(ids).toEqual(['101', '101'])
   })
 
-  test('a listed id whose ownerOf is not the Safe is ignored; so is a burned one', async () => {
+  test('a stale snapshot (the engine closed #101 and opened #205 since) is not a complete total', async () => {
+    const node = chain({ balances: { USDC: 1_000_000n } })
+    const { h } = setup({ node })
+    const { cookie, owner } = await onboard(h)
+    node.positions = { '101': { ...pos(owner.address), owner: 'burned' }, '205': pos(owner.address) }
+    snapshot(h, owner, ['101'])
+    const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
+    expect(f.positions).toEqual([])
+    expect(f.chainRead?.positions).toBe('unknown')
+  })
+
+  test('one valued and one unvalued position: no partial set is returned under the idle-only flag', async () => {
+    const node = chain({ balances: { USDC: 1_000_000n } })
+    const { h } = setup({ node })
+    const { cookie, owner } = await onboard(h)
+    node.positions = { '101': pos(owner.address), '102': { ...pos(owner.address), token1: 'WETH', fee: 100 } }
+    snapshot(h, owner, ['101', '102'])
+    const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
+    expect(f.positions).toEqual([])
+    expect(f.chainRead?.positions).toBe('unknown')
+  })
+
+  test('a listed id whose ownerOf is not the Safe, or a burned one, is never counted', async () => {
     const node = chain({ balances: { USDC: 1_000_000n } })
     const { h } = setup({ node })
     const { cookie, owner } = await onboard(h)
     node.positions = { '101': pos(owner.address), '102': pos('0x000000000000000000000000000000000000dEaD'), '103': { ...pos(owner.address), owner: 'burned' } }
     snapshot(h, owner, ['101', '102', '103'])
     const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
-    expect(f.positions.map((p) => p.tokenId)).toEqual(['101'])
-    expect(f.chainRead?.positions).toBe('listed')
+    // a listed id that is no longer the Safe's means the snapshot is behind: not claimed whole
+    expect(f.positions).toEqual([])
+    expect(f.chainRead?.positions).toBe('unknown')
   })
 
   test('ownerOf is compared without regard to case', async () => {

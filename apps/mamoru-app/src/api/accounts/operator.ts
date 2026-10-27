@@ -6,13 +6,13 @@ import { accountNotFound, apiError } from '../errors.ts'
 import { ACCOUNT_KEY } from '../onboarding/account.ts'
 import { ownersOf, sleevesOfUser, type AccountRow } from './store.ts'
 import { BASE, chainReady, ownedSleeve } from '../sleeves.ts'
+import { chainFundingResponse, fundingRpcUrls, type ChainFunding } from './chain-funding.ts'
 
 /** otto/mamoru#214: the policy a renewal of a Base account may move to only once the owner's Monad sleeve runs. */
 export const MULTICHAIN_POLICY = 'conservador-live-v6'
 /** Review of PR #141: its fork twin is guarded the same way. */
 const MULTICHAIN_POLICIES: ReadonlySet<string> = new Set([MULTICHAIN_POLICY, 'conservador-lab-v6'])
 export const MONAD = 143
-import { chainFundingResponse, type ChainFunding } from './chain-funding.ts'
 
 // Live funds (sprint amendment 2026-09-26 21:40): after the device session proves it owns the account,
 // the Worker forwards the same route to the operator with a signed account context (app-api.ts AccountContext).
@@ -23,7 +23,8 @@ export const MAX_BODY_BYTES = 8 * 1024
 export const OPERATOR_TIMEOUT_MS = 90_000
 /**
  * otto/mamoru#238: the funding read is a poll, and when the operator does not answer it the Worker has the chain to
- * ask instead, so it does not wait the 90 s a signed owner action may need.
+ * ask instead, so it does not wait the 90 s a signed owner action may need. Only where an RPC pool is configured:
+ * without one there is nothing to fall back to and the read keeps the full time.
  */
 export const FUNDING_TIMEOUT_MS = 20_000
 
@@ -123,7 +124,7 @@ const operatorFailed = (status: number) => status >= 500
 export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFunding) {
   const routes = new Hono<AppEnv>()
 
-  const forwardWith = (opts: { timeoutMs?: number; fallback?: (c: Context<AppEnv>, row: AccountRow) => Promise<Response | null> } = {}) => async (c: Context<AppEnv>) => {
+  const forwardWith = (opts: { timeoutMs?: (c: Context<AppEnv>, row: AccountRow) => number; fallback?: (c: Context<AppEnv>, row: AccountRow) => Promise<Response | null> } = {}) => async (c: Context<AppEnv>) => {
     const session = await c.var.auth.current(c)
     if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
     const accountKey = c.req.param('accountKey') ?? ''
@@ -167,7 +168,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
         method,
         headers,
         ...(method !== 'GET' ? { body } : {}),
-        signal: AbortSignal.timeout(opts.timeoutMs ?? OPERATOR_TIMEOUT_MS),
+        signal: AbortSignal.timeout(opts.timeoutMs?.(c, row) ?? OPERATOR_TIMEOUT_MS),
       })
       text = await res.text()
     } catch (e) {
@@ -185,7 +186,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
   }
 
   const forward = forwardWith()
-  routes.get('/:accountKey/funding', forwardWith({ timeoutMs: FUNDING_TIMEOUT_MS, ...(chain ? { fallback: (c: Context<AppEnv>, row: AccountRow) => chainFundingResponse(c, row, chain) } : {}) }))
+  routes.get('/:accountKey/funding', forwardWith(chain ? { timeoutMs: (c, row) => (fundingRpcUrls(c.env, row.chain_id).length > 0 ? FUNDING_TIMEOUT_MS : OPERATOR_TIMEOUT_MS), fallback: (c, row) => chainFundingResponse(c, row, chain) } : {}))
   routes.get('/:accountKey/ops', forward)
   routes.get('/:accountKey/withdraw-assets', forward)
   routes.get('/:accountKey/bridge-out', forward)

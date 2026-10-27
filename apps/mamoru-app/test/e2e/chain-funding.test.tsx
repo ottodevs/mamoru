@@ -55,7 +55,7 @@ describe('Home on a balance read from chain', () => {
     expect(text).toContain('Read from chain')
     // the pill does not call it Live, and the engine is promised nothing
     expect(text).toContain('On-chain')
-    expect(text).not.toContain('LIVE')
+    expect(text).not.toContain('Live ·')
     expect(text).toContain('Engine unreachable: balance read from chain, actions paused.')
     expect(text).toContain('positions Mamoru recorded 40 min ago')
     // live, not a "past" reading
