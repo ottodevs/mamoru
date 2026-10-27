@@ -236,7 +236,7 @@ describe('otto/mamoru#213: bridge-out takes MamoruGasPolicy only', () => {
   const G = '0x00000000000000000000000000000000000000fd' as const
   const A = '0x00000000000000000000000000000000000000fe' as const
   const d = { actionPolicy: A, gasPolicy: G, gasCaps: V4_GAS_CAPS }
-  const caps = computeCaps(conservadorLiveV6, 10_000n * 1_000_000n, { USDT: { num: 1n, den: 1n }, WETH: { num: 1n, den: 3_000n } })
+  const caps = computeCaps(conservadorLiveV6, 10_000n * 1_000_000n, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
   const bridge = instantiateGrant(conservadorLiveV6, 'bridge-out', { ...v4Ctx, caps })
 
   test('encoded with the gas policy as a userOp policy and UniActionPolicy alone on its actions', () => {

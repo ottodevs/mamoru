@@ -400,7 +400,7 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     expect(o.positions.some((p) => p.pool === 'pool:USDC/cbBTC/500')).toBe(false)
     expect(d.proposal).toBeNull()
     const a = allocate(o, V6, false)
-    expect(a.buckets.map((b) => b.bucket)).toEqual(['stables', 'risk'])
+    expect(a.buckets.map((b) => b.bucket)).toEqual(['stables', 'risk', 'btc-usdc'])
     const target = Object.fromEntries(a.buckets.map((b) => [b.bucket, b.target]))
     const total = 1_000n * USDC
     // Targets are shares of the whole account (the remote preference counts), not of the Base buckets alone.
@@ -425,6 +425,15 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     const total = 1_000n * USDC
     expect(t.stables! > (total * 49n) / 100n && t.stables! < (total * 51n) / 100n).toBe(true)
     expect(t.risk! > (total * 34n) / 100n && t.risk! < (total * 36n) / 100n).toBe(true)
+  })
+
+  test('an account moving in with a USDC/cbBTC position: v6 reduces it and never enters cbBTC again', () => {
+    const btc = POOLS.find((x) => x.name === 'pool:USDC/cbBTC/500')!
+    const held: PositionObs = { tokenId: 9n, pool: btc.name, tickLower: -69_080 - 1_000, tickUpper: -69_080 + 1_000, liquidity: 10n ** 12n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }
+    const d = decide(v6Obs({ balances: { USDC: 0n, USDT: 0n, cbBTC: 0n, WETH: 0n }, positions: [held] }), V6)
+    expect(d.proposal).toMatchObject({ kind: 'reduce', pool: 'pool:USDC/cbBTC/500', tokenId: 9n, grant: 'manage-any:pool:USDC/cbBTC/500' })
+    const fresh = decide(v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), V6)
+    expect(fresh.proposal?.pool).not.toBe('pool:USDC/cbBTC/500')
   })
 
   test('without remote buckets the same Base buckets would take everything (the remote share is what holds 15 % back)', () => {
