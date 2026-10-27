@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util'
 import { createPublicClient, http, isHash, parseAbi, type Address, type PublicClient } from 'viem'
-import { address, readCodeHash, type Registry, type RegistryEntry } from '../src/index.ts'
+import { address, EIP1967_IMPLEMENTATION_SLOT, readCodeHash, type Registry, type RegistryEntry } from '../src/index.ts'
 
 /**
  * Pins or verifies a chain registry against a public RPC. Read-only: no key, no signing.
@@ -11,7 +11,8 @@ import { address, readCodeHash, type Registry, type RegistryEntry } from '../src
  * Verify reads every entry's code at the pinned block and compares it with the stored codeHash.
  * Pin picks a block (--block N, else latest - 64), reads every code hash there and rewrites the file.
  * Both modes refuse a RPC on another chain id and run the shape checks: symbol()/decimals() on tokens,
- * factory()/WETH9() on the Uniswap periphery, token0/token1/fee/tickSpacing and factory.getPool on pools.
+ * factory()/WETH9() on the Uniswap periphery, token0/token1/fee/tickSpacing and factory.getPool on pools, asset()/decimals()
+ * and the EIP-1967 implementation on vaults.
  * No address enters a registry without these reads.
  */
 
@@ -25,6 +26,7 @@ const abi = parseAbi([
   'function token1() view returns (address)',
   'function fee() view returns (uint24)',
   'function tickSpacing() view returns (int24)',
+  'function asset() view returns (address)',
 ])
 
 type Problem = { name: string; check: string; expected: string; actual: string }
@@ -51,6 +53,18 @@ async function checkShape(client: PublicClient, registry: Registry, e: RegistryE
     const weth9 = await read<Address>(client, e.address, 'WETH9', block)
     const wrapped = registry.entries.find((t) => t.kind === 'token' && t.decimals === 18 && same(t.address, weth9))
     if (!wrapped) problems.push({ name: e.name, check: 'WETH9()', expected: 'a wrapped-native token entry with 18 decimals', actual: weth9 })
+  }
+  if (e.kind === 'vault') {
+    // otto/mamoru#210: an ERC-4626 vault of the registry's own asset, and, behind a proxy, the implementation pinned.
+    expect('asset()', address(e.asset ?? '', registry), await read<Address>(client, e.address, 'asset', block))
+    expect('decimals()', e.decimals ?? NaN, await read<number>(client, e.address, 'decimals', block))
+    const slot = await client.getStorageAt({ address: e.address, slot: EIP1967_IMPLEMENTATION_SLOT, blockNumber: block })
+    const impl = slot && BigInt(slot) !== 0n ? (`0x${slot.slice(-40)}` as Address) : undefined
+    if (impl || e.implementation) {
+      expect('implementation', e.implementation?.address ?? 'none', impl ?? 'none')
+      const hash = impl ? await readCodeHash(client, impl, block) : null
+      expect('implementation codeHash', e.implementation?.codeHash ?? 'none', hash ?? 'none')
+    }
   }
   if (e.kind === 'pool') {
     const token0 = address(e.token0 ?? '', registry)

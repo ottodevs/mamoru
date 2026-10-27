@@ -17,6 +17,7 @@ export type RegistryKind =
   | 'smart-sessions-policy'
   | 'read'
   | 'cctp'
+  | 'vault'
 
 export type RegistryEntry = {
   name: string
@@ -29,6 +30,10 @@ export type RegistryEntry = {
   token1?: string
   fee?: number
   tickSpacing?: number
+  /** kind 'vault' (otto/mamoru#210): the ERC-4626 `asset()`, a token of the same registry. `decimals` are the share's. */
+  asset?: string
+  /** A proxy whose logic sits elsewhere (EIP-1967): the implementation pinned beside the proxy's own code hash. */
+  implementation?: { address: Address; codeHash: Hex }
 }
 
 export type Registry = {
@@ -139,6 +144,20 @@ export async function readCodeHash(
   return keccak256(code)
 }
 
+/** EIP-1967 implementation slot: keccak256('eip1967.proxy.implementation') - 1. */
+export const EIP1967_IMPLEMENTATION_SLOT: Hex = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc'
+
+/**
+ * otto/mamoru#210: a proxy entry (waBasUSDC) still points at its pinned implementation, and that code is unchanged. The
+ * proxy's own code hash never moves on an upgrade, so this is the check that sees one. True for an entry without one.
+ */
+async function implementationHolds(client: PublicClient, e: RegistryEntry): Promise<boolean> {
+  if (!e.implementation) return true
+  const slot = await client.getStorageAt({ address: e.address, slot: EIP1967_IMPLEMENTATION_SLOT })
+  if (!slot || `0x${slot.slice(-40)}`.toLowerCase() !== e.implementation.address.toLowerCase()) return false
+  return (await readCodeHash(client, e.implementation.address)) === e.implementation.codeHash
+}
+
 /** LAB-05: every registry entry must carry a pinned code hash and match it on the connected chain. */
 export function checkCodeHashes(client: PublicClient, registry: Registry): Promise<CodeHashCheck[]>
 /** @deprecated Omitting `registry` checks `baseRegistry`. Pass the registry of the chain. */
@@ -150,7 +169,8 @@ export async function checkCodeHashes(
   const checks = await Promise.all(
     registry.entries.map(async (e) => {
       const actual = await readCodeHash(client, e.address)
-      return { name: e.name, address: e.address, expected: e.codeHash, actual, ok: e.codeHash !== null && actual === e.codeHash }
+      const ok = e.codeHash !== null && actual === e.codeHash && (await implementationHolds(client, e))
+      return { name: e.name, address: e.address, expected: e.codeHash, actual, ok }
     }),
   )
   return checks

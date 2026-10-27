@@ -299,6 +299,28 @@
       "role": "MamoruPauseGate (contracts/action-policy/src/MamoruPauseGate.sol, otto/mamoru#213, #251): action policy sin estado que rechaza toda acción de sesión mientras MamoruActionPolicyV3 (ACTION_POLICY inmutable 0xDD2E387B748420C6501EC96Ec48F87cDEdf16749) tiene la cuenta pausada; lo lleva el grant bridge-out de conservador-live-v6; desplegado el 2026-11-01 por el relayer 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0 con ModuleRegistry.deployModule (DeployPauseGate.s.sol, salt nonce 5, tx 0x12e7f983ac2eb4b33e5f3cb733ab57b96fed499f98852f2c92ece31beb97789a, bloque 53366810). Sustituye al gate ligado a V2 (0x4b48237E9eab8464b680800bB96a810e5D19099B, 2026-10-27), que ninguna cuenta usa",
       "address": "0xf939c0FF7F095BA2ED7DDaaCD2D75da9A8cdF4e7",
       "codeHash": "0xd429f2b7c29d0267d26fe8cbfe6abdd72e4769ec26707c6e92ce7ee87449694c"
+    },
+    {
+      "name": "vault:gtUSDCp",
+      "kind": "vault",
+      "role": "Morpho MetaMorpho v1 Gauntlet USDC Prime (curator 0x9E33faAE38ff641094fa68c65c2cE600b3410585, fee 0, timelock 7 d al añadirlo): bucket stables de conservador-live-v7, primera bóveda (otto/mamoru#186, #210)",
+      "address": "0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61",
+      "asset": "USDC",
+      "decimals": 18,
+      "codeHash": "0x904289f0cca9814e4440e741e0d56aafc656f5889f3f032462a96e72df4eb9ad"
+    },
+    {
+      "name": "vault:waBasUSDC",
+      "kind": "vault",
+      "role": "Aave v3 static aToken v2 sobre aBasUSDC, proxy (admin 0xc85b1E333aecc99340b2320493Fe2d22b8734795): bucket stables de conservador-live-v7, segunda bóveda, protocolo y colateral distintos de Morpho (otto/mamoru#186, #210)",
+      "address": "0xC768c589647798a6EE01A91FdE98EF2ed046DBD6",
+      "asset": "USDC",
+      "decimals": 6,
+      "codeHash": "0x523783adc3d7b1f946a55d313891aa5da2c119a9c5b5cd701f91780795d62438",
+      "implementation": {
+        "address": "0xbCb167bDCF14a8F791d6f4A6EDd964aed2F8813B",
+        "codeHash": "0xa3445aa71780dcc4130aa745163660eb37cb5602bba8147f008192bf3777c6df"
+      }
     }
   ],
   "undeployed": [
