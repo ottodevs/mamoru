@@ -527,7 +527,7 @@ export function withActionPolicy(
   policy: PolicyVersion,
   mamoruPolicy: Address,
   pools: readonly V4PoolSpec[],
-  opts: { bandFactorBps?: number; caps?: Record<string, bigint>; budgetWindowSeconds?: number; twapShortWindowSeconds?: number; gasPolicy?: { address: Address; caps: GasCaps }; contractVersion?: 2 } = {},
+  opts: { bandFactorBps?: number; caps?: Record<string, bigint>; budgetWindowSeconds?: number; twapShortWindowSeconds?: number; gasPolicy?: { address: Address; caps: GasCaps }; contractVersion?: 2; pauseGate?: Address } = {},
 ): PolicyVersion {
   const bandTicksByPool: Partial<Record<RegistryName, number>> = {}
   const anchorByPool: Partial<Record<RegistryName, { tick: number; band: number }>> = {}
@@ -560,6 +560,7 @@ export function withActionPolicy(
       ...(opts.caps ? { budgetsByPool } : {}),
       ...(opts.gasPolicy ? { gasPolicy: opts.gasPolicy } : {}),
       ...(opts.contractVersion ? { contractVersion: opts.contractVersion } : {}),
+      ...(opts.pauseGate ? { pauseGate: opts.pauseGate } : {}),
     },
   }
 }
@@ -595,7 +596,7 @@ export function budgetUsedBps(total: bigint, totalLeft: bigint): number {
  */
 export function retargetToPolicy(grant: SessionGrant, mamoruPolicy: Address): SessionGrant {
   // otto/mamoru#213: bridge-out is not a Uniswap call; MamoruActionPolicy would refuse it, so it never gets one.
-  if (grant.requiresGasPolicy) throw new Error(`retargetToPolicy: ${grant.name} takes MamoruGasPolicy only, never MamoruActionPolicy`)
+  if (grant.requiresPauseGate) throw new Error(`retargetToPolicy: ${grant.name} takes MamoruPauseGate, never MamoruActionPolicy`)
   const npm = BigInt(address('NonfungiblePositionManager', baseRegistry))
   const policyRef = BigInt(mamoruPolicy)
   const actions: ResolvedActionRule[] = grant.actions.map((a) => {

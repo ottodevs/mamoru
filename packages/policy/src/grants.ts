@@ -343,16 +343,16 @@ export type BridgeOutSpec = {
  * `destinationCaller` (anyone may relay the mint; a pinned caller could only stall it), no fee and Standard finality
  * (the only transfer Circle offers to Monad). Across `depositV3` is not offered to the key: its `outputAmount` is a
  * separate word no rule can tie to `inputAmount`, so a leaked key could hand a relayer the difference.
- * A leaked key, even on an account the guardian paused (the pause lives in MamoruActionPolicy, which cannot check this
- * call), can only move up to the cumulative cap from the account to the same account on the destination chain, at no
- * cost but gas, which MamoruGasPolicy caps (`requiresGasPolicy`). Never retargeted to MamoruActionPolicy.
+ * A leaked key can only move up to the cumulative cap from the account to the same account on the destination chain,
+ * at no cost but gas, which MamoruGasPolicy caps; MamoruPauseGate stops it while the guardian has the account paused
+ * (`requiresPauseGate`). Never retargeted to MamoruActionPolicy, which knows only the Uniswap calls.
  */
 export function bridgeOutGrant(p: BridgeOutSpec, usage: Usage): GrantTemplate {
   return {
     name: 'bridge-out',
     perPosition: false,
     ...usageOf(usage),
-    requiresGasPolicy: true,
+    requiresPauseGate: true,
     actions: [
       {
         target: 'USDC',

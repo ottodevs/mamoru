@@ -139,7 +139,9 @@ describe('monad registry', () => {
 
 describe('MamoruActionPolicyV2 (spec 007, otto/mamoru#151)', () => {
   test('is deployed on Base at the address and code hash read on chain; the guardian is an EOA, not an entry', () => {
-    expect(baseRegistry.undeployed).toEqual([])
+    // otto/mamoru#213: MamoruPauseGate is named before its deployment (contracts/action-policy/script/DeployPauseGate.s.sol).
+    expect(baseRegistry.undeployed).toEqual(['MamoruPauseGate'])
+    expect(isDeployed('MamoruPauseGate', baseRegistry)).toBe(false)
     expect(monadRegistry.undeployed).toEqual([])
     expect(isDeployed('MamoruActionPolicyV2', baseRegistry)).toBe(true)
     expect(isDeployed('MamoruActionPolicyV2', monadRegistry)).toBe(false)

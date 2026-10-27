@@ -232,25 +232,30 @@ describe('selfAttestCall data', () => {
   })
 })
 
-describe('otto/mamoru#213: bridge-out takes MamoruGasPolicy only', () => {
+describe('otto/mamoru#213: bridge-out takes MamoruPauseGate and MamoruGasPolicy, never MamoruActionPolicy', () => {
   const G = '0x00000000000000000000000000000000000000fd' as const
   const A = '0x00000000000000000000000000000000000000fe' as const
-  const d = { actionPolicy: A, gasPolicy: G, gasCaps: V4_GAS_CAPS }
+  const P = '0x00000000000000000000000000000000000000fb' as const
+  const d = { actionPolicy: A, gasPolicy: G, gasCaps: V4_GAS_CAPS, pauseGate: P }
   const caps = computeCaps(conservadorLiveV6, 10_000n * 1_000_000n, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
   const bridge = instantiateGrant(conservadorLiveV6, 'bridge-out', { ...v4Ctx, caps })
+  const gas = { policy: G, initData: encodeGasCaps(V4_GAS_CAPS) }
 
-  test('encoded with the gas policy as a userOp policy and UniActionPolicy alone on its actions', () => {
+  test('encoded with the gas policy as a userOp policy and the pause gate after UniActionPolicy on every action', () => {
     const p = v4PoliciesFor([bridge], d, 1n, v4BudgetCaps(conservadorLiveV6, 10_000n * 1_000_000n))(bridge, 0)
-    expect(p).toEqual({ gas: { policy: G, initData: encodeGasCaps(V4_GAS_CAPS) }, expected: { gasPolicy: G } })
+    expect(p).toEqual({ gate: { policy: P, initData: '0x' }, gas, expected: { pauseGate: P, gasPolicy: G } })
     const s = toSmartSession(bridge, p)
     expect(s.userOpPolicies.map((x) => x.policy.toLowerCase())).toEqual([address('TimeFramePolicy', baseRegistry), address('UsageLimitPolicy', baseRegistry), G].map((x) => x.toLowerCase()))
-    for (const a of s.actions) expect(a.actionPolicies.map((x) => x.policy.toLowerCase())).toEqual([address('UniActionPolicy', baseRegistry).toLowerCase()])
+    for (const a of s.actions) expect(a.actionPolicies.map((x) => x.policy.toLowerCase())).toEqual([address('UniActionPolicy', baseRegistry).toLowerCase(), P])
   })
 
-  test('refused without the gas policy, with the wrong one, or with an action policy', () => {
-    expect(() => toSmartSession(bridge)).toThrow('MamoruGasPolicy')
-    expect(() => activationCall([bridge], [])).toThrow('MamoruGasPolicy')
-    expect(() => toSmartSession(bridge, { gas: { policy: A, initData: encodeGasCaps(V4_GAS_CAPS) }, expected: { gasPolicy: G } })).toThrow('not the configured')
-    expect(() => toSmartSession(bridge, { policy: A, initData: '0x', gas: { policy: G, initData: encodeGasCaps(V4_GAS_CAPS) }, expected: { actionPolicy: A, gasPolicy: G } })).toThrow('never takes MamoruActionPolicy')
+  test('refused without the gate or the gas policy, with wrong addresses, or with an action policy', () => {
+    expect(() => toSmartSession(bridge)).toThrow('MamoruPauseGate')
+    expect(() => activationCall([bridge], [])).toThrow('MamoruPauseGate')
+    expect(() => v4PoliciesFor([bridge], { actionPolicy: A, gasPolicy: G, gasCaps: V4_GAS_CAPS }, 1n, {})(bridge, 0)).toThrow('no MamoruPauseGate')
+    expect(() => toSmartSession(bridge, { gate: { policy: A, initData: '0x' }, gas, expected: { pauseGate: P, gasPolicy: G } })).toThrow('not the configured MamoruPauseGate')
+    expect(() => toSmartSession(bridge, { gate: { policy: P, initData: '0x01' }, gas, expected: { pauseGate: P, gasPolicy: G } })).toThrow('no init data')
+    expect(() => toSmartSession(bridge, { gate: { policy: P, initData: '0x' }, gas: { ...gas, policy: A }, expected: { pauseGate: P, gasPolicy: G } })).toThrow('not the configured MamoruGasPolicy')
+    expect(() => toSmartSession(bridge, { policy: A, initData: '0x', gas, expected: { actionPolicy: A, gasPolicy: G } })).toThrow('never takes MamoruActionPolicy')
   })
 })
