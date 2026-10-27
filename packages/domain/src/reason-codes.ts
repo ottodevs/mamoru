@@ -74,8 +74,6 @@ export const REASON_CODES = [
   'RISK_ACCOUNT_BLOCKLISTED',
   'RISK_SHADOW',
   'RISK_DATA_INSUFFICIENT',
-  // otto/mamoru#101 phase 1 (shadow): the pool's TVL is under Packaging's entry/monitor floor. Never changes a decision.
-  'RISK_POOL_TVL_FLOOR',
   'EHG_OK',
   'EHG_QUOTE_UNAVAILABLE',
   'EHG_TWAP_UNAVAILABLE',
@@ -250,6 +248,9 @@ export const REASON_CODES = [
   // Not in spec 008's own "New reason codes" list — the daily cap this task's contract adds on top of it
   // (max 30 agent jobs/day across requesters, enforced on the runner side).
   'LAB_AGENT_BUDGET',
+  // otto/mamoru#101 phase 1 (shadow, Decision.shadowRisk only): the pool's TVL is under Packaging's 2M floor, or could not be read.
+  'RISK_POOL_TVL_FLOOR',
+  'RISK_POOL_TVL_UNREAD',
 ] as const
 
 export type ReasonCode = (typeof REASON_CODES)[number]

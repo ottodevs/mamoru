@@ -539,6 +539,15 @@ describe('pool TVL (otto/mamoru#101, shadow)', () => {
     const plain = await observe(c.client, input({ poolCache }))
     const withTvl = await observe(c.client, input({ poolCache, poolTvl: true }))
     expect(plain.pools.some((p) => 'tvlSavings' in p)).toBe(false)
-    expect(withTvl.pools.every((p) => 'tvlSavings' in p)).toBe(true)
+    // Every pool that pairs the savings asset is priced; one that does not has no TVL in it and is left out (not null).
+    for (const p of withTvl.pools) expect('tvlSavings' in p).toBe(p.token0 === 'USDC' || p.token1 === 'USDC')
+  })
+
+  test('the pool cache keeps savings assets apart: a TVL is never read in the units of another account', async () => {
+    const c = chain()
+    const poolCache = poolStateCache()
+    await observe(c.client, input({ poolCache, poolTvl: true }))
+    await observe(c.client, input({ poolCache, poolTvl: true, savingsAsset: 'WETH' }))
+    expect(poolCache.size).toBe(2)
   })
 })

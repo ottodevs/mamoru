@@ -9,16 +9,16 @@ import { depeggedPool, depegExitOf } from './guard/depeg.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
 import { weightTargets } from './rebalance/weights.ts'
 import { anyKey, convertKey, idleConvertOf, isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
-import type { Decision, GateStep, GuardNote, Observation, Proposal, ShadowMetric, ShadowNote } from './types.ts'
+import type { Decision, GateStep, GuardNote, Observation, Proposal, ShadowNote, ShadowRisk } from './types.ts'
 import { withinCap } from './cap.ts'
-import { tvlShadowNotes } from './shadow-tvl.ts'
+import { tvlShadowRisk } from './shadow-tvl.ts'
 
 export type * from './types.ts'
 export { capRoomOf, placedOf, withinCap } from './cap.ts'
 export { estimateFees } from './harvest/index.ts'
 export { safeSavings } from './enter/index.ts'
 export { amountsForLiquidity, inSavings, poolTvlInSavings, volatileOf } from './value.ts'
-export { PACKAGING_TVL_FLOOR_USDC, tvlShadowNotes } from './shadow-tvl.ts'
+export { PACKAGING_TVL_FLOOR_USDC, tvlShadowRisk } from './shadow-tvl.ts'
 export { fallBpsOf, fallFreezeOf, marketOf, type CumulativePoint } from './guard/index.ts'
 export { belowShareOf, edgeBpsOf, meanTickAt, rangeFor, realizedVolOf, regimeOf, skewedRange, spiking, volWidthTicks, widenEarly, widthFor, type Regime } from './geometry/index.ts'
 export { allocate, reusablePosition, DEFAULT_INCREASE_TOLERANCE_BPS, widthOf, type Allocation, type BucketValue, type Waiting } from './allocate/index.ts'
@@ -201,13 +201,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   if (enterEvaluated && policy.shadow.includes('packaging:eny')) {
     shadow.push({ code: 'ENY_SHADOW', note: 'packaging:eny is not evaluated in v1 and has no effect on the decision' })
   }
-  // otto/mamoru#101 phase 1: Packaging's pool TVL floor, shadow only. Notes are all it adds; nothing below reads them.
-  const shadowMetrics: ShadowMetric[] = []
-  if (policy.shadow.includes('packaging:tvl')) {
-    const t = tvlShadowNotes(obs, policy, policyPools)
-    shadow.push(...t.notes)
-    shadowMetrics.push(...t.metrics)
-  }
+  // otto/mamoru#101 phase 1: Packaging's pool TVL floor, shadow only, outside the hashed body (Decision.shadowRisk).
+  const shadowRisk: ShadowRisk[] = policy.shadow.includes('packaging:tvl') ? tvlShadowRisk(obs, policy, policyPools) : []
 
   // Plan §9, steps 2, 4 and 8: slot, pause, then one proposal in FR-DEC-011 order.
   let proposal: Proposal | null = null
@@ -267,5 +262,5 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   const observationRef = { block: obs.block.number, hash: obs.block.hash }
   const premiseHash = hashOf(body)
   // `waiting` moves with every price, so it is reported beside the decision and never part of its premise or id.
-  return { decisionId: hashOf({ observationRef, premiseHash }), premiseHash, observationRef, ...body, ...(waiting.length ? { waiting } : {}), ...(shadowMetrics.length ? { shadowMetrics } : {}) } as Decision
+  return { decisionId: hashOf({ observationRef, premiseHash }), premiseHash, observationRef, ...body, ...(waiting.length ? { waiting } : {}), ...(shadowRisk.length ? { shadowRisk } : {}) } as Decision
 }

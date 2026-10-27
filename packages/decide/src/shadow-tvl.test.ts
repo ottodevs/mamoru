@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { conservadorLabV1, type PolicyVersion } from '@mamoru/policy'
 import { address, baseRegistry, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { canonicalJson, decide, PACKAGING_TVL_FLOOR_USDC, poolTvlInSavings, type Observation, type PoolObs } from './index.ts'
+import { canonicalJson, decide, PACKAGING_TVL_FLOOR_USDC, poolTvlInSavings, tvlShadowRisk, type Observation, type PoolObs } from './index.ts'
 
 const POOL = 'pool:USDC/cbBTC/500'
 const TICK = 69_000
@@ -40,48 +40,51 @@ function obs(p: PoolObs): Observation {
 
 const withTvl: PolicyVersion = { ...conservadorLabV1, shadow: [...new Set([...conservadorLabV1.shadow, 'packaging:tvl'])] }
 const withoutTvl: PolicyVersion = { ...conservadorLabV1, shadow: conservadorLabV1.shadow.filter((s) => s !== 'packaging:tvl') }
-const tvlNotes = (o: Observation, policy = withTvl) => decide(o, policy).shadow.filter((s) => s.code !== 'ENY_SHADOW')
+const risk = (o: Observation, policy = withTvl) => decide(o, policy).shadowRisk ?? []
 
 describe('packaging:tvl shadow (otto/mamoru#101)', () => {
-  test('below the floor: a RISK_POOL_TVL_FLOOR note naming the pool, the value and the floor', () => {
+  test('below the floor: a RISK_POOL_TVL_FLOOR entry naming the pool, the value and the floor', () => {
     const tvl = 1_430_000n * USDC
-    expect(tvlNotes(obs(pool({ tvlSavings: tvl })))).toEqual([
-      { code: 'RISK_POOL_TVL_FLOOR', note: `${POOL} TVL under the 2M floor: Packaging would exit`, pool: POOL, threshold: FLOOR.toString() },
-    ])
-    expect(decide(obs(pool({ tvlSavings: tvl })), withTvl).shadowMetrics).toEqual([{ code: 'RISK_POOL_TVL_FLOOR', pool: POOL, metric: tvl.toString(), label: '1.43M' }])
+    expect(risk(obs(pool({ tvlSavings: tvl })))).toEqual([{ code: 'RISK_POOL_TVL_FLOOR', pool: POOL, threshold: FLOOR.toString(), metric: tvl.toString(), label: '1.43M' }])
   })
 
-  test('a TVL that moves under the floor keeps the premise: dedupe and backoff key on it (engine.ts)', () => {
-    const a = decide(obs(pool({ tvlSavings: 1_430_000n * USDC })), withTvl)
-    const b = decide(obs(pool({ tvlSavings: 1_212_345n * USDC })), withTvl)
-    expect(b.premiseHash).toBe(a.premiseHash)
-    expect(b.shadowMetrics?.[0]?.metric).not.toBe(a.shadowMetrics?.[0]?.metric)
+  test('at or above the floor, or not asked for (absent): nothing', () => {
+    expect(risk(obs(pool({ tvlSavings: FLOOR })))).toEqual([])
+    expect(risk(obs(pool({ tvlSavings: FLOOR * 3n })))).toEqual([])
+    expect(risk(obs(pool()))).toEqual([])
+    expect(decide(obs(pool()), withTvl).shadowRisk).toBeUndefined()
   })
 
-  test('at or above the floor: no note', () => {
-    expect(tvlNotes(obs(pool({ tvlSavings: FLOOR })))).toEqual([])
-    expect(tvlNotes(obs(pool({ tvlSavings: FLOOR * 3n })))).toEqual([])
+  test('unread (null): RISK_POOL_TVL_UNREAD, its own code (RISK_DATA_INSUFFICIENT stays for live guards)', () => {
+    expect(risk(obs(pool({ tvlSavings: null })))).toEqual([{ code: 'RISK_POOL_TVL_UNREAD', pool: POOL, threshold: FLOOR.toString() }])
   })
 
-  test('unread (null): RISK_DATA_INSUFFICIENT', () => {
-    expect(tvlNotes(obs(pool({ tvlSavings: null })))).toEqual([
-      { code: 'RISK_DATA_INSUFFICIENT', note: `${POOL} TVL unread`, pool: POOL, threshold: FLOOR.toString() },
-    ])
-  })
-
-  test('not asked for by the observation (absent): no note', () => {
-    expect(tvlNotes(obs(pool()))).toEqual([])
-  })
-
-  test('a policy without packaging:tvl: no note, and the decision is the one it was', () => {
+  test('a policy whose savings asset is not USDC: nothing (the floor is in dollars)', () => {
     const o = obs(pool({ tvlSavings: 1n }))
+    expect(tvlShadowRisk(o, { ...withTvl, savingsAsset: 'WETH' } as PolicyVersion, new Set([POOL]))).toEqual([])
+    expect(tvlShadowRisk(o, withTvl, new Set([POOL])).map((r) => r.code)).toEqual(['RISK_POOL_TVL_FLOOR'])
+  })
+
+  test('a policy without packaging:tvl: nothing, and the decision is the one it was', () => {
     const plain = decide(obs(pool()), withoutTvl)
-    const d = decide(o, withoutTvl)
-    expect(d.shadow.map((s) => s.code)).toEqual([])
+    const d = decide(obs(pool({ tvlSavings: 1n })), withoutTvl)
+    expect(d.shadowRisk).toBeUndefined()
     expect(canonicalJson(d)).toBe(canonicalJson(plain))
   })
 
-  test('shadow only: proposal, code, reason, buckets and trail do not move', () => {
+  test('the premise never moves with the TVL: below, hovering across the floor, unread (dedupe and bundler backoff key on it)', () => {
+    const at = (tvlSavings: bigint | null | undefined) => decide(obs(pool(tvlSavings === undefined ? {} : { tvlSavings })), withTvl)
+    const ref = at(undefined)
+    for (const v of [1_430_000n * USDC, 1_212_345n * USDC, FLOOR - 1n, FLOOR, FLOOR + 1n, null]) {
+      const d = at(v)
+      expect(d.premiseHash).toBe(ref.premiseHash)
+      expect(d.decisionId).toBe(ref.decisionId)
+      const { shadowRisk: _r, ...rest } = d
+      expect(canonicalJson(rest)).toBe(canonicalJson(ref))
+    }
+  })
+
+  test('shadow only: with a proposal on the table nothing but shadowRisk differs', () => {
     const base = obs(pool())
     base.balances = { USDC: 10_000_000_000n, cbBTC: 0n }
     base.deposits = [{ token: 'USDC', amount: 10_000_000_000n, block: 99n, txHash: `0x${'33'.repeat(32)}`, logIndex: 0, safe: true }]
@@ -89,16 +92,12 @@ describe('packaging:tvl shadow (otto/mamoru#101)', () => {
       { grant: 'enter-swap', permissionId: `0x${'01'.repeat(32)}`, validUntil: 10_000, active: true },
       { grant: 'enter-mint', permissionId: `0x${'02'.repeat(32)}`, validUntil: 10_000, active: true },
     ]
-    const low = { ...base, pools: [pool({ tvlSavings: 1n })] }
     const a = decide(base, withTvl)
-    const b = decide(low, withTvl)
-    expect(b.shadow.map((s) => s.code)).toContain('RISK_POOL_TVL_FLOOR')
-    const { shadow: _s, premiseHash: _p, decisionId: _d, ...restA } = a
-    const { shadow: _s2, premiseHash: _p2, decisionId: _d2, shadowMetrics: _m2, ...restB } = b
-    expect(canonicalJson(restB)).toBe(canonicalJson(restA))
+    const b = decide({ ...base, pools: [pool({ tvlSavings: 1n })] }, withTvl)
+    expect(b.shadowRisk?.map((r) => r.code)).toEqual(['RISK_POOL_TVL_FLOOR'])
+    const { shadowRisk: _r, ...rest } = b
+    expect(canonicalJson(rest)).toBe(canonicalJson(a))
     expect(b.proposal).not.toBeNull()
-    // The notes are part of the premise, as ENY_SHADOW is: the same notes give the same hashes.
-    expect(decide(structuredClone(low), withTvl).premiseHash).toBe(b.premiseHash)
   })
 })
 

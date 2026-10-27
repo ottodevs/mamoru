@@ -291,6 +291,8 @@ export type EngineHooks = {
   bridgeFailed?: (opId: string, code: string) => void
   /** otto/mamoru#218: a re-range was confirmed: its pool, block timestamp and block (the live operator stores it). */
   onReranged?: (pool: string, at: bigint, block: bigint) => void
+  /** otto/mamoru#101: the shadow risk entries changed (rule, pool), with their latest values; the operator logs it. Never acts. */
+  onShadowRisk?: (risk: NonNullable<Decision['shadowRisk']>) => void
 }
 
 /** The block of the latest operation that reached the chain: no review may observe before it. */
@@ -395,6 +397,8 @@ export class Engine {
    * byte for byte what it was, and a switch to lazy already knows how long a position has been out.
    */
   private outOfRange = new Map<bigint, bigint>()
+  /** otto/mamoru#101: rules and pools of the last shadow risk reported (`onShadowRisk`). */
+  private shadowSig = ''
   /**
    * Spec 004 (#101) LC-T6: the rolling fallback series `cfg.guardHistory` feeds from each review (per pool),
    * updated after every `observe()`. Read this after a review and persist it (`state.ts`-style, atomic write)
@@ -614,6 +618,12 @@ export class Engine {
     if (this.cfg.policy.range.lazy) obs = withOutOfRangeSince(obs, this.outOfRange)
     this.lastObservation = obs
     const decision = decide(obs, this.cfg.policy)
+    // #101: report only when the set of rules that would fire changes, not on every review.
+    const shadowSig = (decision.shadowRisk ?? []).map((r) => `${r.code}:${r.pool}`).join(',')
+    if (shadowSig !== this.shadowSig) {
+      this.shadowSig = shadowSig
+      this.hooks.onShadowRisk?.(decision.shadowRisk ?? [])
+    }
     this.depositsAfter = obs.safeBlock.number > this.depositsAfter ? obs.safeBlock.number : this.depositsAfter
     const key = decision.proposal ? proposalKey(decision.proposal) : ''
     const backedOff = !!decision.proposal && this.backoff.some((b) => b.until > obs.block.timestamp && (b.premiseHash === decision.premiseHash || b.key === key))

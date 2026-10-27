@@ -238,7 +238,7 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const balances = TOKENS.map((t) => first.add(contractRead(client, { address: address(t, reg), abi: erc20Abi, functionName: 'balanceOf', args: [acct], blockNumber })))
   const idsOf = tokenIdReads(client, multicall3, first, acct, blockNumber, npm)
   const tvl = input.poolTvl === true
-  const poolKey = `${chainId}:${blockNumber}:${block.hash}:${input.twapWindowSeconds}${tvl ? ':tvl' : ''}`
+  const poolKey = `${chainId}:${blockNumber}:${block.hash}:${input.twapWindowSeconds}${tvl ? `:tvl:${input.savingsAsset}` : ''}`
   const shared = input.poolCache?.get(poolKey)
   const own = shared ? null : POOLS.map((p) => poolReads(first, client, p, blockNumber, input.twapWindowSeconds, reg, tvl, input.savingsAsset))
   const priceSlot0 = POOLS.includes(input.ethPricePool) ? null : first.add(contractRead(client, { address: address(input.ethPricePool, reg), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }))
@@ -478,7 +478,16 @@ function poolReads(batch: Batch, client: PublicClient, name: RegistryName, block
     if (!bal0 || !bal1) return pool
     const b0 = bal0.maybe()
     const b1 = bal1.maybe()
-    return { ...pool, tvlSavings: b0 === null || b1 === null || !savings ? null : poolTvlInSavings(pool, b0, b1, savings) }
+    // A pool that does not pair the savings asset has no TVL in it: left out, not "unread". Pricing never fails the observation.
+    if (!savings || (pool.token0 !== savings && pool.token1 !== savings)) return pool
+    if (b0 === null || b1 === null) return { ...pool, tvlSavings: null }
+    let tvlSavings: bigint | null = null
+    try {
+      tvlSavings = poolTvlInSavings(pool, b0, b1, savings)
+    } catch {
+      tvlSavings = null
+    }
+    return { ...pool, tvlSavings }
   }
 }
 

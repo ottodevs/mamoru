@@ -184,9 +184,12 @@ export type DepositObs = { token: RegistryName; amount: bigint; block: bigint; t
 export type GateVerdict = 'GO' | 'NO_GO' | 'EXIT' | 'SKIP'
 export type GateStep = { gate: string; verdict: GateVerdict; reason: ReasonCode }
 /** `pool`, `metric` and `threshold` (decimal strings in raw units) are set by the shadow notes that measure something. */
-export type ShadowNote = { code: ReasonCode; note: string; pool?: string; threshold?: string }
-/** otto/mamoru#101: the measured value behind a shadow note (raw units, plus a short label); outside the premise hash. */
-export type ShadowMetric = { code: ReasonCode; pool: string; metric: string; label: string }
+export type ShadowNote = { code: ReasonCode; note: string }
+/**
+ * otto/mamoru#101 phase 1: a Packaging risk rule that would have fired, shadow only. `metric` and `threshold` in raw savings
+ * units, `label` short for logs. Lives outside the premise hash (see Decision.shadowRisk).
+ */
+export type ShadowRisk = { code: ReasonCode; pool: string; threshold: string; metric?: string; label?: string }
 
 export type EnterSwapProposal = {
   kind: 'enter_swap'
@@ -292,8 +295,12 @@ export type Decision = {
   trail: GateStep[]
   proposal: Proposal | null
   shadow: ShadowNote[]
-  /** otto/mamoru#101: values behind `shadow` notes. Not hashed (see tvlShadowNotes); present only when there are some. */
-  shadowMetrics?: ShadowMetric[]
+  /**
+   * otto/mamoru#101 phase 1: Packaging risk rules that would have fired, shadow only. Deliberately outside the hashed body:
+   * the premise hash keys the dedupe of a discarded premise and the bundler backoff (engine.ts), and a pool TVL that moves
+   * or hovers around a floor must never change it. Nothing in decide or the engine reads it. Present only when non-empty.
+   */
+  shadowRisk?: ShadowRisk[]
   buckets: { bucket: string; code: ReasonCode }[]
   positions: { tokenId: bigint; codes: ReasonCode[] }[]
   /** Present only when the policy sets `guards` (FR-LC-001: absent, the decision is byte-identical). */

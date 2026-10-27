@@ -5053,6 +5053,8 @@ export class Operator {
           row.rerangeAt = at.toString()
           this.store.save()
         },
+        // otto/mamoru#101: shadow only, logged when the set of Packaging rules that would fire changes.
+        onShadowRisk: (risk) => console.log(`[shadow] ${acc.accountKey} ${risk.length ? risk.map((r) => `${r.code} ${r.pool}${r.label ? ` ${r.label}` : ''}`).join('; ') : 'clear'}`),
         onMinted: (tokenId, block) => {
           const id = tokenId.toString()
           // An account from before the record counts every position until seedAdmitted has read them.

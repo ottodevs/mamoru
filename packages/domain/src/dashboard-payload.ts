@@ -40,7 +40,7 @@ export type PoolRef = {
 }
 
 export type GateStep = { gate: string; verdict: 'GO' | 'NO_GO' | 'EXIT' | 'SKIP'; reason: ReasonCode }
-export type ShadowNote = { code: ReasonCode; note: string; pool?: string; metric?: string; threshold?: string }
+export type ShadowNote = { code: ReasonCode; note: string }
 
 // History rows (§9 closing paragraph). Amounts are integer strings in token base units.
 export type HistoryRowBase = {
