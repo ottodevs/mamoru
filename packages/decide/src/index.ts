@@ -37,6 +37,7 @@ const PROPOSAL_CODE = {
   harvest: 'DECIDE_HARVEST',
   rerange: 'DECIDE_RANGE_ADJUST',
   reduce: 'STRATEGY_PREFERENCE_DEVIATION',
+  bridge_out: 'DECIDE_BRIDGE_OUT',
 } as const
 
 /** Deterministic JSON: sorted keys, bigints as decimal strings. */
@@ -150,8 +151,10 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     trail.push(...a.trail)
     if (a.proposal) {
       enterEvaluated = true
-      const pool = obs.pools.find((x) => x.name === a.proposal!.pool)!
-      trail.push(purgaIdentity(pool, registryOf(obs)), { gate: 'strategy', verdict: 'GO', reason: 'STRATEGY_PREFERENCE_DEVIATION' }, { gate: 'eny', verdict: 'SKIP', reason: 'ENY_SHADOW' })
+      // otto/mamoru#215: a bridge has no pool here; its remote pool is checked by that chain's engine.
+      const pool = a.proposal.kind === 'bridge_out' ? undefined : obs.pools.find((x) => x.name === a.proposal!.pool)!
+      if (pool) trail.push(purgaIdentity(pool, registryOf(obs)))
+      trail.push({ gate: 'strategy', verdict: 'GO', reason: 'STRATEGY_PREFERENCE_DEVIATION' }, { gate: 'eny', verdict: 'SKIP', reason: 'ENY_SHADOW' })
       entries.push(remint && a.proposal.kind === 'enter_mint' ? { ...a.proposal, grant: anyKey(policy, 'manage-any', a.proposal.pool) } : a.proposal)
     }
   } else for (const b of policy.buckets) {
@@ -217,7 +220,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
 
   // Plan §9, step 9: a preliminary NO GO drops the proposal with its code.
   if (proposal) {
-    const pool = obs.pools.find((x) => x.name === proposal!.pool)!
+    const pool = proposal.kind === 'bridge_out' ? undefined : obs.pools.find((x) => x.name === proposal!.pool)!
     const gate = ehgPreliminary(obs, policy, pool, proposal.grant)
     trail.push(gate)
     if (gate.verdict !== 'GO') {

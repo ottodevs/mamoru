@@ -95,6 +95,10 @@ export const REASON_CODES = [
   'DECIDE_WAIT_DEPTH',
   // otto/mamoru#195: the entry would be under k times what its swap and mint cost in gas; it waits as USDC until it grows.
   'DECIDE_WAIT_GAS',
+  // otto/mamoru#215: savings for a bucket on another chain wait here: its sleeve is not ready yet, or a bridge is still in flight.
+  'DECIDE_WAIT_BRIDGE',
+  // otto/mamoru#215: savings go to the account's own sleeve on another chain (CCTP), for the bucket served there.
+  'DECIDE_BRIDGE_OUT',
   // otto/mamoru#127: the quote of an entry swap is worse than the depth policy allows; refused before sending.
   'EHG_SWAP_IMPACT_OVER_LIMIT',
   'DECIDE_PAUSED',

@@ -1,4 +1,4 @@
-import type { Address, Hex, ReasonCode } from '@mamoru/domain'
+import type { Address, ChainId, Hex, ReasonCode } from '@mamoru/domain'
 import type { Registry, RegistryName } from '@mamoru/registry'
 
 /** Plan §8.1. Every chain read is pinned to `block`. */
@@ -30,7 +30,14 @@ export type Observation = {
    * in raw savings units. It counts in the account total, so the local buckets keep their share of the whole account
    * after a bridge instead of shrinking to it. Absent: nothing remote (every one-chain policy).
    */
-  remote?: { value: bigint }
+  remote?: {
+    /** Sleeve value plus `inFlight`, in raw savings units, valued at the TWAP. */
+    value: bigint
+    /** Burned here and not yet minted there: counted in `value`, and no new bridge leaves while it is above 0. */
+    inFlight?: bigint
+    /** The sleeve on the other chain exists and runs (deployed, activated): only then may savings be bridged to it. */
+    ready?: boolean
+  }
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. Absent or null: none yet. */
   lastRerangeAt?: bigint | null
   /**
@@ -237,7 +244,22 @@ export type ReduceProposal = {
   liquidity: bigint
 }
 
-export type Proposal = EnterSwapProposal | EnterMintProposal | IncreaseLiquidityProposal | HarvestProposal | RerangeProposal | ReduceProposal
+/**
+ * otto/mamoru#215: savings to the account's own sleeve on another chain, for a remote bucket (CCTP V2 burn here, mint
+ * there to the same address). No pool on this chain: the remote bucket's pool is entered there by that chain's engine.
+ */
+export type BridgeOutProposal = {
+  kind: 'bridge_out'
+  grant: 'bridge-out'
+  bucket: string
+  chainId: ChainId
+  /** The remote bucket's pool, a registry name on `chainId`: never one of `obs.pools`, never acted on here. */
+  pool: RegistryName
+  /** Raw savings units. */
+  amount: bigint
+}
+
+export type Proposal = EnterSwapProposal | EnterMintProposal | IncreaseLiquidityProposal | HarvestProposal | RerangeProposal | ReduceProposal | BridgeOutProposal
 
 export type DecisionKind = 'hold' | Proposal['kind']
 
@@ -250,7 +272,7 @@ export type Decision = {
   policyRef: { policyId: string; version: string; hash: Hex }
   observationCodes: ReasonCode[]
   kind: DecisionKind
-  code: 'DECIDE_HOLD' | 'DECIDE_ENTER' | 'DECIDE_HARVEST' | 'DECIDE_RANGE_ADJUST' | 'STRATEGY_PREFERENCE_DEVIATION'
+  code: 'DECIDE_HOLD' | 'DECIDE_ENTER' | 'DECIDE_HARVEST' | 'DECIDE_RANGE_ADJUST' | 'STRATEGY_PREFERENCE_DEVIATION' | 'DECIDE_BRIDGE_OUT'
   reason: ReasonCode
   trail: GateStep[]
   proposal: Proposal | null
@@ -270,5 +292,5 @@ export type Decision = {
    * otto/mamoru#127, #128: savings held back on purpose, per bucket, with why. Outside the premise hash and the id
    * (the amounts move with every price). Absent when nothing waits.
    */
-  waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL'; amount: bigint }[]
+  waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE'; amount: bigint }[]
 }

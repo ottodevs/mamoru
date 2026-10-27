@@ -442,6 +442,43 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     expect(fresh.proposal?.pool).not.toBe('pool:USDC/cbBTC/500')
   })
 
+  test('otto/mamoru#215: no sleeve ready yet, the Growth share waits here as DECIDE_WAIT_BRIDGE and nothing is bridged', () => {
+    const d = decide(v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), V6)
+    expect(d.proposal?.kind).not.toBe('bridge_out')
+    const w = (d.waiting ?? []).find((x) => x.code === 'DECIDE_WAIT_BRIDGE')
+    expect(w?.bucket).toBe('growth')
+    expect(w!.amount > 140n * USDC && w!.amount <= 150n * USDC).toBe(true)
+  })
+
+  test('otto/mamoru#215: sleeve ready, nothing there: the first proposal bridges the Growth share, before any entry', () => {
+    const d = decide(v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 0n, inFlight: 0n, ready: true } }), V6)
+    expect(d.code).toBe('DECIDE_BRIDGE_OUT')
+    expect(d.proposal).toMatchObject({ kind: 'bridge_out', grant: 'bridge-out', bucket: 'growth', chainId: 143, pool: 'pool:WMON/USDC/3000' })
+    const amount = (d.proposal as { amount: bigint }).amount
+    expect(amount > 140n * USDC && amount <= 150n * USDC).toBe(true)
+  })
+
+  test('otto/mamoru#215: a bridge in flight counts as there and blocks a second one; the Base buckets still fill', () => {
+    const o = v6Obs({ balances: { USDC: 850n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 150n * USDC, inFlight: 150n * USDC, ready: true } })
+    const d = decide(o, V6)
+    expect(d.proposal?.kind).not.toBe('bridge_out')
+    expect(d.proposal?.pool).toBe('pool:USDC/USDT/100')
+    // Short again while the first is in flight (a top-up): it waits, never a second bridge.
+    const more = decide({ ...o, balances: { ...o.balances, USDC: 1_850n * USDC } }, V6)
+    expect(more.proposal?.kind).not.toBe('bridge_out')
+    expect((more.waiting ?? []).some((x) => x.code === 'DECIDE_WAIT_BRIDGE')).toBe(true)
+  })
+
+  test('otto/mamoru#215: Growth at its target on the sleeve: no bridge', () => {
+    const d = decide(v6Obs({ balances: { USDC: 850n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 150n * USDC, inFlight: 0n, ready: true } }), V6)
+    expect(d.proposal?.kind).not.toBe('bridge_out')
+  })
+
+  test('otto/mamoru#215: a bridge never outranks the sale of idle volatile', () => {
+    const d = decide(v6Obs({ balances: { USDC: 0n, USDT: 0n, cbBTC: 100_000n, WETH: 0n }, remote: { value: 0n, inFlight: 0n, ready: true } }), V6)
+    expect(d.proposal).toMatchObject({ kind: 'enter_swap', tokenIn: 'cbBTC', tokenOut: 'USDC' })
+  })
+
   test('without remote buckets the same Base buckets would take everything (the remote share is what holds 15 % back)', () => {
     const local = { ...V6, remoteBuckets: undefined }
     let o = v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })

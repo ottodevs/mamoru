@@ -604,6 +604,8 @@ const ENGINE_STEP: Record<OpRecord['kind'], Progress['step']> = {
   convert: 'rebalancing',
   rerange: 'reranging',
   reduce: 'rebalancing',
+  // otto/mamoru#215: savings on their way to the account's sleeve on another chain.
+  bridge_out: 'rebalancing',
 }
 
 /** Accounts activated before the operator stored a policy id per account ran this policy. */

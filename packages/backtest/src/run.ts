@@ -19,7 +19,7 @@ export const SIM_VERSION = 'backtest-1'
  * 200k), an estimate.
  */
 export const DEFAULT_GAS: GasModel = {
-  unitsByKind: { enter_swap: 470_000n, enter_mint: 835_000n, increase_liquidity: 635_000n, harvest: 650_000n, rerange: 700_000n, reduce: 600_000n },
+  unitsByKind: { enter_swap: 470_000n, enter_mint: 835_000n, increase_liquidity: 635_000n, harvest: 650_000n, rerange: 700_000n, reduce: 600_000n, bridge_out: 0n },
   priorityFeeWei: 1_000_000n,
   l1FeeWei: 3_100_000_000n,
 }

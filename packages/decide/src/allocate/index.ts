@@ -37,7 +37,7 @@ export type BucketValue = {
 }
 
 /** otto/mamoru#127, #128: savings a bucket is short of its target and holds back on purpose, and why. */
-export type Waiting = { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL'; amount: bigint }
+export type Waiting = { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE'; amount: bigint }
 
 export type Allocation = {
   total: bigint
@@ -307,10 +307,34 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       ? { kind: 'increase_liquidity', grant: mintGrant as `manage-any:${string}`, pool: pool.name, tokenId: reuse.tokenId, ...range, ...amounts }
       : { kind: 'enter_mint', grant: mintGrant as `enter-mint:${string}`, pool: pool.name, ...range, ...amounts }
   }
+  // otto/mamoru#215: a bucket on another chain is filled by moving savings to the account's own sleeve there. Its
+  // value there (and what is still in flight) is `obs.remote`; with no sleeve ready, or a bridge not yet minted, its
+  // share waits here and says so. A bridge goes before an entry that spends savings (it takes a finality to land),
+  // never before the sale of idle volatile.
+  for (const rb of policy.remoteBuckets ?? []) {
+    if (unsafeDeposit || free === 0n) break
+    const target = prefTotal > 0n ? (total * BigInt(rb.preference)) / prefTotal : 0n
+    const gap = target - (obs.remote?.value ?? 0n)
+    if (gap < minEntry || gap * 10_000n <= target * BigInt(policy.rebalanceBandBps ?? 0)) continue
+    const amount = gap < free ? gap : free
+    if (!obs.remote?.ready || (obs.remote.inFlight ?? 0n) > 0n) {
+      waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_BRIDGE', amount })
+      continue
+    }
+    if (amount < entryMin) {
+      waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_GAS', amount })
+      continue
+    }
+    if (proposal && pickedSale > 0n) continue
+    if (picked !== null) buckets[picked]!.code = 'STRATEGY_PREFERENCE'
+    proposal = { kind: 'bridge_out', grant: 'bridge-out', bucket: rb.id, chainId: rb.chainId, pool: rb.pools[0]!, amount }
+    picked = null
+    break
+  }
   if (total === 0n) for (const row of buckets) if (row.code === 'STRATEGY_PREFERENCE') row.code = 'DECIDE_NO_CAPITAL'
   // Each bucket's wait was measured against the same free savings: together they cannot hold more than what is free
   // once this review's entry has taken its savings. Clipped in the order they were found.
-  const spent = !proposal ? 0n : proposal.kind === 'enter_swap' && proposal.tokenIn === savings ? proposal.amountIn : proposal.kind === 'enter_mint' || proposal.kind === 'increase_liquidity' ? (savingsSide(proposal) === 0 ? proposal.amount0Desired : proposal.amount1Desired) : 0n
+  const spent = !proposal ? 0n : proposal.kind === 'bridge_out' ? proposal.amount : proposal.kind === 'enter_swap' && proposal.tokenIn === savings ? proposal.amountIn : proposal.kind === 'enter_mint' || proposal.kind === 'increase_liquidity' ? (savingsSide(proposal) === 0 ? proposal.amount0Desired : proposal.amount1Desired) : 0n
   let left = free > spent ? free - spent : 0n
   const clipped: Waiting[] = []
   for (const w of waiting) {
