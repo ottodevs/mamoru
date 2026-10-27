@@ -116,6 +116,8 @@ const placedThree = (): Partial<FundingView> => ({
 export const MONAD_FIXTURE_KEY = 'acct_fixture_monad'
 const monadOn = param('monad')
 const monadAdd = param('monadadd')
+// ?monadupgrade (dev only, otto/mamoru#216): a running v5 account offered the mix with Monad (v6), no Monad Safe yet.
+const monadUpgrade = param('monadupgrade')
 const sleeveOf = (accountKey: string, chainId: number): SleeveView => ({ accountKey, chainId, chain: chainId === 143 ? 'Monad' : 'Base', address: FIXTURE_ADDRESS })
 const monadState = {
   funding: {
@@ -143,7 +145,7 @@ const monadState = {
     { opId: 'eng-m1-enter_mint', kind: 'enter', state: 'confirmed', pool: 'pool:WMON/USDC/3000', txHash: `0x${'5'.repeat(64)}`, updatedAt: new Date(Date.now() - 48 * 60_000).toISOString() },
   ] as OpView[],
 }
-const sleeveState = { sleeves: monadOn ? [sleeveOf(FIXTURE_ACCOUNT_KEY, 8453), sleeveOf(MONAD_FIXTURE_KEY, 143)] : monadAdd ? [sleeveOf(FIXTURE_ACCOUNT_KEY, 8453)] : null }
+const sleeveState = { sleeves: monadOn ? [sleeveOf(FIXTURE_ACCOUNT_KEY, 8453), sleeveOf(MONAD_FIXTURE_KEY, 143)] : monadAdd || monadUpgrade ? [sleeveOf(FIXTURE_ACCOUNT_KEY, 8453)] : null }
 const sessionNow = (): SessionView =>
   sleeveState.sleeves ? { ...fixtureSession, sleeves: sleeveState.sleeves, addableChains: sleeveState.sleeves.some((x) => x.chainId === 143) ? [] : [143] } : fixtureSession
 const isMonad = (k: string | undefined) => k === MONAD_FIXTURE_KEY
@@ -156,9 +158,10 @@ const operatorDown = param('operatordown')
 // ?operatorlate (dev only, otto/mamoru#208 review): the first /funding read works, every later one fails.
 const operatorLate = param('operatorlate')
 let fundingReads = 0
+const upgradeApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 1000) + 300 * 86_400, renewDue: false, expired: false, policyId: 'conservador-live-v5', upgrade: true, upgradePolicy: 'conservador-live-v6' } })
 const dueApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 86_400_000) * 86_400 + 10 * 86_400, renewDue: true, expired: false } })
 const liveState = {
-  funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}), ...(renewdue ? dueApproval() : {}), ...(dashboard ? placedThree() : {}) } as FundingView,
+  funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}), ...(renewdue ? dueApproval() : {}), ...(monadUpgrade ? upgradeApproval() : {}), ...(dashboard ? placedThree() : {}) } as FundingView,
   ops: (overcap
     ? [{ opId: 'own-1-activate', kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: OVER_CAP_USDC, capUsdc: fixtureFunding.capUsdc, updatedAt: new Date().toISOString() }]
     : []) as OpView[],
@@ -300,8 +303,23 @@ export const fixtureClient: ApiClient = {
       lastBalance: { totalUsd: '24873120', readAt: new Date(Date.now() - (operatorDown ? 3 * 60 : 1) * 60_000).toISOString() },
     }),
   ops: (k) => delay({ ops: isMonad(k) ? monadState.ops : liveState.ops }),
-  activatePrepare: () => delay(fixtureTx(['Deploy your Safe on Base', 'Enable the engine session for up to 20 USDC', 'Top up gas reserve to 0.0003 ETH'])),
-  activate: () => {
+  activatePrepare: (k) =>
+    delay(
+      fixtureTx(
+        isMonad(k)
+          ? [
+              `Create your Safe on Monad at ${FIXTURE_ADDRESS}, the same address as on Base, owned by the same passkey`,
+              'Engine key 0x7d3E1bA2c4F5a6B7c8D9e0F1a2B3c4D5e6F7a8B9 may act for 365 days, sized for deposits up to 1,000.00 USDC:',
+              'In WMON/USDC 0.3%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 450.00 USDC a day and 1,500.00 USDC in total on this approval',
+              'A guardian key can pause it, never move funds',
+              'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
+              'Nothing is moved now',
+            ]
+          : ['Deploy your Safe on Base', 'Enable the engine session for up to 20 USDC', 'Top up gas reserve to 0.0003 ETH'],
+      ),
+    ),
+  activate: (k) => {
+    if (isMonad(k)) return delay(fixtureOp('activate', () => Object.assign(monadState.funding, { deployed: true, active: true })))
     if (fresh && BigInt(liveState.funding.usdc) === 0n) {
       liveState.n += 1
       const op: OpView = { opId: `op_fixture_${liveState.n}`, kind: 'activate', state: 'proposed', code: 'ARMED', updatedAt: new Date().toISOString() }
