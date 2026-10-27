@@ -2,7 +2,14 @@
 pragma solidity ^0.8.28;
 
 import {Test, Vm, console2} from "forge-std/Test.sol";
-import {MamoruActionPolicyV3, ExactInputSingleParams, MintParams, CollectParams} from "../src/MamoruActionPolicyV3.sol";
+import {
+    MamoruActionPolicyV3,
+    ExactInputSingleParams,
+    MintParams,
+    CollectParams,
+    IncreaseLiquidityParams,
+    DecreaseLiquidityParams
+} from "../src/MamoruActionPolicyV3.sol";
 
 /**
  * otto/mamoru#116 T1 on forks (anvil semantics, never a live chain): MamoruActionPolicyV3 grants enabled INSIDE the
@@ -275,6 +282,8 @@ abstract contract V3SetupBase is Test {
     /// Grants committed in the setup use V3's setup mode (FAMILY_UNISWAP_AT_SETUP): no live market state at enable.
     /// False only for the V2 harness check, which knows V2's encoding alone.
     bool setupMode = true;
+    /// The ERC-7484 attester the launchpad makes the Safe trust (vector (c) swaps it for one with no attestations).
+    address setupAttester = ATTESTER;
 
     function _uniInit(Pool memory p) internal view returns (bytes memory) {
         MamoruActionPolicyV3.Init memory i = _initOf(p);
@@ -370,7 +379,7 @@ abstract contract V3SetupBase is Test {
     function _deployCall(Session[] memory sessions, uint256 saltNonce) internal view returns (bytes memory) {
         ModuleInit[] memory none = new ModuleInit[](0);
         address[] memory attesters = new address[](1);
-        attesters[0] = ATTESTER;
+        attesters[0] = setupAttester;
         bytes memory launch =
             abi.encodeCall(ISafe7579Launchpad.addSafe7579, (SAFE7579, none, none, none, none, attesters, 1));
         bytes memory init = abi.encodeCall(SetupInit.init, (abi.encode(sessions)));
@@ -998,17 +1007,169 @@ contract V3SetupModeBase is BaseV3Fixture {
         IPolicyDirect(address(v3)).initializeWithMultiplexer(account, bytes32(uint256(1)), abi.encode(uint256(3), i));
     }
 
-    /// Decrease, collect and burn never wait on the deferred checks (exits are never locked, LeftClaw M-6).
-    function test_setupModeNeverBlocksCollect() public {
+    // ------------------------------------------------------------ round 3: the mode is bound, and every priced path
+
+    function _cfg(uint128 perWindow) internal pure returns (MamoruActionPolicyV3.Init memory i) {
         Pool memory p = _eth();
-        p.perWindow = type(uint128).max / 2;
-        p.total = type(uint128).max / 2;
-        _init(bytes32(uint256(1)), abi.encode(uint256(3), _initOf(p)));
-        // No admitted position: collect fails on admission, not on the deferred checks; a burn of an unadmitted
-        // tokenId likewise. The pending state is only consulted by swap, mint and increase (see _liveChecks).
-        bytes memory c = abi.encodeCall(INPMView.collect, (CollectParams(1, account, 1, 1)));
+        p.perWindow = perWindow;
+        p.total = perWindow > 1_000e6 ? perWindow : 1_000e6;
+        i = _initOf(p);
+    }
+
+    function _setupInit(bytes32 id, MamoruActionPolicyV3.Init memory i) internal {
+        _init(id, abi.encode(uint256(3), i));
+    }
+
+    function _mintParams() internal view returns (MintParams memory) {
+        (, int24 tick,,,,,) = IPool(POOL_ETH).slot0();
+        int24 sp = IPool(POOL_ETH).tickSpacing();
+        return MintParams(
+            WETH,
+            USDC,
+            3000,
+            (tick / sp - 10) * sp,
+            (tick / sp + 10) * sp,
+            0.01e18,
+            40e6,
+            0,
+            0,
+            account,
+            block.timestamp
+        );
+    }
+
+    /// A position minted by the account itself (the owner's path: `mint` called by the account, no session), so the
+    /// exits below have something admitted to act on while the deferred checks are still pending.
+    function _ownerMint() internal returns (uint256 tokenId, uint128 liquidity) {
+        deal(WETH, account, 1e18);
+        deal(USDC, account, 10_000e6);
+        vm.startPrank(account);
+        IERC20(WETH).approve(address(v3), type(uint256).max);
+        IERC20(USDC).approve(address(v3), type(uint256).max);
+        (tokenId, liquidity,,) = v3.mint(_mintParams());
+        vm.stopPrank();
+    }
+
+    function _check(address target, bytes memory data) internal returns (uint256) {
         vm.prank(SMART_SESSION);
-        assertEq(IPolicyDirect(address(v3)).checkAction(bytes32(uint256(1)), account, NPM, 0, c), 1);
+        return IPolicyDirect(address(v3)).checkAction(bytes32(uint256(1)), account, target, 0, data);
+    }
+
+    function _increaseData(uint256 tokenId) internal view returns (bytes memory) {
+        return abi.encodeCall(
+            MamoruActionPolicyV3.increase, (IncreaseLiquidityParams(tokenId, 0.01e18, 40e6, 0, 0, block.timestamp))
+        );
+    }
+
+    /// While the deferred checks fail (perWindow over the pool's depth): swap, mint and increase are refused; decrease
+    /// and collect of an admitted position pass (exits are never locked, LeftClaw M-6).
+    function test_deferredRefusesSwapMintIncreaseNeverExits() public {
+        _setupInit(bytes32(uint256(1)), _cfg(type(uint128).max / 2));
+        (uint256 tokenId, uint128 liq) = _ownerMint();
+        assertEq(_swapCheck(bytes32(uint256(1)), 100e6), 1, "swap waits");
+        assertEq(_check(address(v3), abi.encodeCall(MamoruActionPolicyV3.mint, (_mintParams()))), 1, "mint waits");
+        assertEq(_check(address(v3), _increaseData(tokenId)), 1, "increase waits");
+        assertEq(
+            _check(NPM, abi.encodeCall(INPMView.collect, (CollectParams(tokenId, account, 1, 1)))),
+            0,
+            "collect of an admitted position does not wait"
+        );
+        (uint256 m0, uint256 m1) = v3.decreaseMins(account, POOL_ETH, tokenId, liq);
+        bytes memory dec =
+            abi.encodeWithSelector(bytes4(0x0c49ccbe), DecreaseLiquidityParams(tokenId, liq, m0, m1, block.timestamp));
+        assertEq(_check(NPM, dec), 0, "decrease does not wait");
+    }
+
+    /// When the live state is fine: the first mint runs the deferred checks and clears them; increase then passes.
+    function test_firstMintClearsDeferralThenIncreasePasses() public {
+        _setupInit(bytes32(uint256(1)), _cfg(300e6));
+        (uint256 tokenId,) = _ownerMint();
+        uint256 g = gasleft();
+        assertEq(_check(address(v3), abi.encodeCall(MamoruActionPolicyV3.mint, (_mintParams()))), 0, "first mint");
+        uint256 first = g - gasleft();
+        g = gasleft();
+        assertEq(_check(address(v3), _increaseData(tokenId)), 0, "increase after the checks cleared");
+        console2.log("checkAction gas: first mint (deferred checks run) / increase after:", first, g - gasleft());
+    }
+
+    /// Argon P1 (round 2): one generation cannot mix the modes, in either order.
+    function test_mixedModesInOneGenerationRevert() public {
+        MamoruActionPolicyV3.Init memory i = _cfg(300e6);
+        _setupInit(bytes32(uint256(1)), i);
+        vm.prank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV3.ConfigMismatch.selector, POOL_ETH, uint64(1)));
+        IPolicyDirect(address(v3)).initializeWithMultiplexer(account, bytes32(uint256(2)), abi.encode(i));
+
+        address other = makeAddr("other");
+        vm.prank(SMART_SESSION);
+        IPolicyDirect(address(v3)).initializeWithMultiplexer(other, bytes32(uint256(1)), abi.encode(i));
+        vm.prank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV3.ConfigMismatch.selector, POOL_ETH, uint64(1)));
+        IPolicyDirect(address(v3)).initializeWithMultiplexer(other, bytes32(uint256(2)), abi.encode(uint256(3), i));
+    }
+
+    /// Siblings at setup (the same Init on other actions and sessions of the same generation) share the config.
+    function test_setupModeSiblingsShareOneConfig() public {
+        MamoruActionPolicyV3.Init memory i = _cfg(300e6);
+        _setupInit(bytes32(uint256(1)), i);
+        _setupInit(bytes32(uint256(2)), i);
+        _setupInit(bytes32(uint256(3)), i);
+        assertEq(_swapCheck(bytes32(uint256(3)), 100e6), 0);
+    }
+
+    /// A renewal always runs the live checks at enable: setup mode is refused once the account has a config of the
+    /// pool, whichever mode that config was enabled in.
+    function test_setupModeRefusedOnRenewal() public {
+        MamoruActionPolicyV3.Init memory i = _cfg(300e6);
+        _setupInit(bytes32(uint256(1)), i);
+        i.generation = 2;
+        vm.prank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV3.BadInit.selector, 14));
+        IPolicyDirect(address(v3)).initializeWithMultiplexer(account, bytes32(uint256(2)), abi.encode(uint256(3), i));
+        _init(bytes32(uint256(2)), abi.encode(i)); // the normal renewal is fine
+
+        address other = makeAddr("other");
+        i.generation = 1;
+        vm.prank(SMART_SESSION);
+        IPolicyDirect(address(v3)).initializeWithMultiplexer(other, bytes32(uint256(1)), abi.encode(i));
+        i.generation = 2;
+        vm.prank(SMART_SESSION);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV3.BadInit.selector, 14));
+        IPolicyDirect(address(v3)).initializeWithMultiplexer(other, bytes32(uint256(2)), abi.encode(uint256(3), i));
+    }
+}
+
+/**
+ * The frozen-initializer vectors outside V3 (round-2 review), measured on the Base fork. What T2's best-effort
+ * non-signup branch must cover is whatever these show can revert a setup.
+ */
+contract V3SetupVectorsBase is BaseV3Fixture {
+    function setUp() public {
+        _setUpBase();
+    }
+
+    /// (a) TimeFramePolicy 0x8177…dc72: a frozen initializer deployed after its grants' validUntil has passed.
+    function test_vectorA_timeFrameEnableAfterExpiry() public {
+        Session[] memory s = _one(_bridgeSession(bytes32(uint256(1))));
+        bytes memory call = _deployCall(s, 501);
+        console2.log("TimeFramePolicy codehash:");
+        console2.logBytes32(TIME_FRAME.codehash);
+        vm.warp(nowTs + 400 days); // validUntil = nowTs + 365 days
+        (address safe,) = _deploy(call, 40_000_000);
+        assertTrue(safe != address(0), "setup after validUntil still deploys");
+        assertEq(_allEnabled(safe, s), 1, "and the expired grant is enabled (it validates nothing past its window)");
+    }
+
+    /// (c) Safe7579's installModule runs the ERC-7484 registry check: with an attester that has attested nothing,
+    /// the same setup reverts. An attester revoking SmartSession on a chain, or its attestation expiring, would do
+    /// the same to every not-yet-deployed account there.
+    function test_vectorC_installModuleChecksTheRegistry() public {
+        Session[] memory s = _one(_bridgeSession(bytes32(uint256(1))));
+        (address ok,) = _deploy(_deployCall(s, 502), 40_000_000);
+        assertTrue(ok != address(0), "with Rhinestone's attester");
+        setupAttester = makeAddr("attesterWithNoAttestations");
+        (address bad,) = _deploy(_deployCall(s, 503), 40_000_000);
+        assertEq(bad, address(0), "registry check refuses SmartSession: the whole setup reverts");
     }
 }
 

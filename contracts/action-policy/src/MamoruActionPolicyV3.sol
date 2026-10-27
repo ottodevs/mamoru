@@ -251,6 +251,8 @@ contract MamoruV3Routes {
  * Enabling then reads no live market state (no observation ring, no M-5 depth, no position manager: `admit` must be
  * empty), only the pool's identity, so a frozen initializer deploys the same way on any later day; the two live
  * checks run at the config's first swap, mint or increase instead. The vault and bridge inits read nothing live.
+ * The mode is accepted only for the account's first config of a pool (renewals always check at enable, BadInit(14))
+ * and is part of the config hash (one generation never mixes modes, ConfigMismatch).
  * Threat model of every check: contracts/action-policy/SECURITY.md.
  *
  * What follows is V2's description, which still holds for the Uniswap paths.
@@ -421,7 +423,9 @@ contract MamoruActionPolicyV3 is IActionPolicy {
     mapping(address account => uint64) public pausedAt;
     /// generation + 1 of a config enabled at setup (FAMILY_UNISWAP_AT_SETUP) whose live checks (observation ring, M-5
     /// depth) have not run yet; 0 = nothing pending. The first swap, mint or increase of that config runs them.
-    mapping(address account => mapping(address pool => uint64)) internal _pending;
+    /// Keyed pool first, account last: slot keccak(account ‖ keccak(pool ‖ n)), associated with the account under
+    /// ERC-7562 (V2's `_spend`, written at validation too, is account first and is not; see spec 007 "ERC-7562").
+    mapping(address pool => mapping(address account => uint64)) internal _pending;
 
     uint256 private _locked = 1;
 
@@ -502,20 +506,24 @@ contract MamoruActionPolicyV3 is IActionPolicy {
         // Pool identity only (token0, token1, fee, the factory's mapping): immutable once the pool exists.
         PoolInfo memory p = _poolInfo(i.pool); // refuses a non-factory pool, caches token0/token1/fee
         _validate(i);
-        // T6 L-4 at enable, outside setup.
-        if (!atSetup) _requireCardinality(i.pool, i.twapWindow);
         _stepGeneration(account, i.generation);
 
-        bytes32 h = _initHash(i);
+        // The mode is part of the config's hash: one (account, pool, generation) is either all setup mode or all
+        // normal, so a second enable with the other tag reverts (ConfigMismatch), whatever the market.
+        bytes32 h = keccak256(abi.encode(_initHash(i), atSetup));
         Config storage c = _config[account][i.pool];
-        if (c.twapWindow != 0 && c.generation == i.generation) {
-            // T6 I-1: one config per (account, pool, generation), whatever ConfigId it arrives under.
-            if (c.initHash != h) revert ConfigMismatch(i.pool, i.generation);
-        } else {
+        bool same = c.twapWindow != 0 && c.generation == i.generation;
+        // Setup mode only for the account's first config of this pool (and its same-generation siblings, which the
+        // hash then binds to setup mode too): a renewal always runs the live checks at enable.
+        if (atSetup && c.twapWindow != 0 && !same) revert BadInit(14);
+        // T6 L-4 at enable, outside setup; after the mode check, so a mixed list fails the same way on any day.
+        if (same && c.initHash != h) revert ConfigMismatch(i.pool, i.generation);
+        if (!atSetup) _requireCardinality(i.pool, i.twapWindow);
+        if (!same) {
             // LeftClaw M-5, once per (account, pool, generation): selling `perWindow` of the budget unit into the pool
             // must not move its price `bandTicks`, so the session's own spend cannot walk the pool across its band
             // and the oracle is not a thin pool's.
-            if (atSetup) _pending[account][i.pool] = i.generation + 1;
+            if (atSetup) _pending[i.pool][account] = i.generation + 1;
             else if (_depthIn(i.pool, p, i.bandTicks, i.budgetIn1) < i.perWindow) revert BadInit(11);
             Config memory old = c;
             _config[account][i.pool] = Config({
@@ -679,10 +687,10 @@ contract MamoruActionPolicyV3 is IActionPolicy {
     /// increase: the observation ring (T6 L-4) and the M-5 depth, as `initializeWithMultiplexer` runs them outside setup.
     /// False refuses the action and changes nothing, so a later one retries; decrease, collect and burn never wait on it.
     function _liveChecks(address account, address pool, Config memory c, PoolInfo memory p) internal returns (bool) {
-        if (_pending[account][pool] != c.generation + 1) return true;
+        if (_pending[pool][account] != c.generation + 1) return true;
         (,,,, uint16 next,,) = IUniswapV3Pool(pool).slot0();
         if (next < c.twapWindow || _depthIn(pool, p, c.bandTicks, c.budgetIn1) < c.perWindow) return false;
-        delete _pending[account][pool];
+        delete _pending[pool][account];
         return true;
     }
 

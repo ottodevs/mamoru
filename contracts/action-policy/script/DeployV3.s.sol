@@ -66,14 +66,14 @@ contract DeployMamoruActionPolicyV3 is Script {
     function expected(uint256 chainId) public pure returns (bytes32 initCodeHash, address policy) {
         if (chainId == 8453) {
             return (
-                0xaa6d97ba560085d28cc2c28e101db8f75ca9fa9516c4fbb6ef7b79d3c289a6d0,
-                0xb5799C0cCaaFECB641621F7e5a271B1DC829213A
+                0x73a0d406977c0a089fbe6aca95fa87b3dd2d983e4b242f84a519c045e7e38118,
+                0xDD2E387B748420C6501EC96Ec48F87cDEdf16749
             );
         }
         if (chainId == 143) {
             return (
-                0x8c1437c3f44b559dd1233eab25f4cf073ff8e95e3b056a3ac3c6535e831bdb8c,
-                0x009FFD70c0F9b4Aa8aC83Aaf38b2EB03651520ad
+                0x43c69f57564f400c0851ef06155e7bf657071512493c1766d23a66a80d1fa35a,
+                0xd660610193851b0EF85bB526eea35A942cc4F934
             );
         }
         revert("DeployV3: Base (8453) or Monad (143) only");
