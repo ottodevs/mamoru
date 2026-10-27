@@ -4,4 +4,5 @@ Description=Mamoru standby: fence watch
 
 [Service]
 Type=oneshot
+TimeoutStartSec=180
 ExecStart=%h/.local/share/mamoru-standby/fence-watch.sh watch

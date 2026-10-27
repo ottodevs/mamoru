@@ -4,4 +4,5 @@ Description=Mamoru standby: push encrypted operator state to the VPS
 
 [Service]
 Type=oneshot
+TimeoutStartSec=600
 ExecStart=%h/.local/share/mamoru-standby/push-bundle.sh

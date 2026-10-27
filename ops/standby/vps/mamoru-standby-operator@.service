@@ -8,8 +8,8 @@ Wants=network-online.target
 [Service]
 User=mamoru-op
 Group=mamoru-op
-WorkingDirectory=/srv/mamoru-op/current-%i
-EnvironmentFile=/srv/mamoru-op/run/%i/unit.env
+WorkingDirectory=/var/lib/mamoru-failover/units/current-%i
+EnvironmentFile=/var/lib/mamoru-failover/units/%i.env
 ExecStart=/usr/local/bin/bun run operator
 Restart=on-failure
 RestartSec=5

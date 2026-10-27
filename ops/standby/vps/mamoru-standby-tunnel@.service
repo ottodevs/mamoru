@@ -7,7 +7,7 @@ After=mamoru-standby-operator@%i.service
 [Service]
 User=mamoru-op
 Group=mamoru-op
-EnvironmentFile=/srv/mamoru-op/run/%i/port.env
+EnvironmentFile=/var/lib/mamoru-failover/units/%i.port
 ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:${PORT}
 Restart=always
 RestartSec=5
