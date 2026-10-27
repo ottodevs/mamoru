@@ -115,7 +115,8 @@ export type SecondActionPolicy = {
   policy: Address
   initData: Hex
   gas?: { policy: Address; initData: Hex }
-  expected?: { actionPolicy: Address; gasPolicy: Address }
+  /** `contractVersion` 2: the configured action policy is MamoruActionPolicyV2 (`PolicyVersion.actionPolicy.contractVersion`). */
+  expected?: { actionPolicy: Address; gasPolicy: Address; contractVersion?: 2 }
 }
 
 /**
@@ -250,6 +251,9 @@ export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, 
   for (const a of grant.actions) {
     if (!a.actionPolicyOnly) continue
     if (!grant.requiresActionPolicy || !isActionPolicy(policies)) mismatch(grant, `${a.signature} without UniActionPolicy needs MamoruActionPolicy`)
+    // Only V2 checks decrease minimums, the collect recipient and the deadline's empty encoding itself; V1 (the deployed
+    // v4 policy) would leave such an action bounded by its position check alone.
+    if (policies.expected?.contractVersion !== 2) mismatch(grant, `${a.signature} without UniActionPolicy needs MamoruActionPolicyV2 (contractVersion 2)`)
     if (a.params.length) mismatch(grant, `${a.signature} without UniActionPolicy carries rules nothing would check`)
   }
   const uni = (a: SessionGrant['actions'][number]) => ({ policy: address('UniActionPolicy', registry), initData: uniActionInitData(a) })
@@ -276,13 +280,13 @@ export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, 
 }
 
 /** Spec 007 T7: the two deployed policies and the gas caps a v4 approval enables its sessions with. */
-export type V4Deployment = { actionPolicy: Address; gasPolicy: Address; gasCaps: GasCaps; pauseGate?: Address }
+export type V4Deployment = { actionPolicy: Address; gasPolicy: Address; gasCaps: GasCaps; pauseGate?: Address; contractVersion?: 2 }
 
 /** The deployment a v4 PolicyVersion names (`withActionPolicy(..., { gasPolicy })`), or null (v2/v3, or no gas policy). */
 export function v4DeploymentOf(policy: PolicyVersion): V4Deployment | null {
   const ap = policy.actionPolicy
   if (!ap?.gasPolicy) return null
-  return { actionPolicy: ap.address, gasPolicy: ap.gasPolicy.address, gasCaps: ap.gasPolicy.caps, ...(ap.pauseGate && ap.contractVersion === 2 ? { pauseGate: ap.pauseGate } : {}) }
+  return { actionPolicy: ap.address, gasPolicy: ap.gasPolicy.address, gasCaps: ap.gasPolicy.caps, ...(ap.pauseGate && ap.contractVersion === 2 ? { pauseGate: ap.pauseGate } : {}), ...(ap.contractVersion === 2 ? { contractVersion: 2 as const } : {}) }
 }
 
 /**
@@ -315,7 +319,7 @@ export function v4PoliciesFor(
     const spec = v4PoolOf(g.pool, registry.chainId)
     if (!spec) mismatch(g, 'no v4 pool parameters for this pool')
     const admit = firstOfPool.get(g.pool!) === i ? [...(admitByPool[g.pool!] ?? [])] : []
-    return { policy: d.actionPolicy, initData: encodeMamoruInit(mamoruInitFor(spec, generation, budgetCaps, { admit })), gas, expected: { actionPolicy: d.actionPolicy, gasPolicy: d.gasPolicy } }
+    return { policy: d.actionPolicy, initData: encodeMamoruInit(mamoruInitFor(spec, generation, budgetCaps, { admit })), gas, expected: { actionPolicy: d.actionPolicy, gasPolicy: d.gasPolicy, ...(d.contractVersion === 2 ? { contractVersion: 2 as const } : {}) } }
   }
 }
 

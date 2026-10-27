@@ -293,7 +293,7 @@ describe('otto/mamoru#225: v7 pool sessions, decrease / collect / burn / deadlin
   const G = '0x00000000000000000000000000000000000000fd' as const
   const A = '0x00000000000000000000000000000000000000fe' as const
   const P = '0x00000000000000000000000000000000000000fb' as const
-  const d = { actionPolicy: A, gasPolicy: G, gasCaps: V4_GAS_CAPS, pauseGate: P }
+  const d = { actionPolicy: A, gasPolicy: G, gasCaps: V4_GAS_CAPS, pauseGate: P, contractVersion: 2 as const }
   const caps = computeCaps(conservadorLiveV7, 10_000n * 1_000_000n, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
   const grants = conservadorLiveV7.session.grants.map((t) => {
     const g = instantiateGrant(conservadorLiveV7, grantKey(t), { ...v4Ctx, caps })
@@ -324,5 +324,12 @@ describe('otto/mamoru#225: v7 pool sessions, decrease / collect / burn / deadlin
     expect(() => toSmartSession(plain as SessionGrant)).toThrow('without UniActionPolicy needs MamoruActionPolicy')
     const ruled: SessionGrant = { ...pool, actions: pool.actions.map((a) => (a.actionPolicyOnly ? { ...a, params: pool.actions[0]!.params } : a)) }
     expect(() => toSmartSession(ruled, policies(pool, 0))).toThrow('carries rules nothing would check')
+  })
+
+  test('a V2-only action is refused when the configured action policy is not V2 (contractVersion 2)', () => {
+    const pool = grants[0]!
+    const v1 = v4PoliciesFor(grants, { ...d, contractVersion: undefined }, 1n, v4BudgetCaps(conservadorLiveV7, 10_000n * 1_000_000n))
+    expect(() => toSmartSession(pool, v1(pool, 0))).toThrow('needs MamoruActionPolicyV2')
+    expect(() => toSmartSession(pool, policies(pool, 0))).not.toThrow()
   })
 })
