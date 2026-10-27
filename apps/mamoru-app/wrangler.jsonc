@@ -41,6 +41,7 @@
   "triggers": { "crons": ["*/10 * * * *"] },
   "ratelimits": [
     { "name": "OTHER_CHAINS_LIMIT", "namespace_id": "117001", "simple": { "limit": 6, "period": 60 } },
+    { "name": "FUNDING_CHAIN_LIMIT", "namespace_id": "238001", "simple": { "limit": 6, "period": 60 } },
     { "name": "FEEDBACK_LIMIT", "namespace_id": "72001", "simple": { "limit": 3, "period": 60 } }
   ],
   "observability": { "enabled": true },
@@ -82,6 +83,7 @@
       "triggers": { "crons": ["*/10 * * * *"] },
       "ratelimits": [
         { "name": "OTHER_CHAINS_LIMIT", "namespace_id": "117002", "simple": { "limit": 6, "period": 60 } },
+        { "name": "FUNDING_CHAIN_LIMIT", "namespace_id": "238002", "simple": { "limit": 6, "period": 60 } },
         { "name": "FEEDBACK_LIMIT", "namespace_id": "72002", "simple": { "limit": 3, "period": 60 } }
       ],
       "observability": { "enabled": true }

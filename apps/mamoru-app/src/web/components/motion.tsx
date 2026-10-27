@@ -148,14 +148,15 @@ function since(ms: number): string {
  * The page is live (#226): a pill by the brand with a ring that fills until the next reading, how long ago the
  * last one landed, and a tap to read now. While the read is down it says so instead.
  */
-export function LiveSync({ updatedAt, intervalMs, fetching, down, onRefresh }: { updatedAt: number; intervalMs: number; fetching: boolean; down: boolean; onRefresh: () => void }) {
+/** `chain` (otto/mamoru#238): the reading is the Worker's read of the chain, the engine is out of reach: not called Live. */
+export function LiveSync({ updatedAt, intervalMs, fetching, down, chain = false, onRefresh }: { updatedAt: number; intervalMs: number; fetching: boolean; down: boolean; chain?: boolean; onRefresh: () => void }) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(t)
   }, [])
   const age = updatedAt ? now - updatedAt : 0
-  const label = down ? 'Offline · retrying' : fetching || !updatedAt ? 'Updating' : `Live · ${since(age)} ago`
+  const label = down ? 'Offline · retrying' : fetching || !updatedAt ? 'Updating' : `${chain ? 'On-chain' : 'Live'} · ${since(age)} ago`
   return (
     <button type="button" className={`live${down ? ' is-down' : ''}${fetching ? ' is-fetching' : ''}`} onClick={onRefresh} aria-label={`${label}. Refresh now`} data-testid="live-sync">
       <svg className="live-ring" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">

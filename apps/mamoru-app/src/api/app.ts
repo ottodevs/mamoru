@@ -13,6 +13,7 @@ import { accounts } from './accounts/routes.ts'
 import { pools } from './pools/routes.ts'
 import { operatorRoutes, type OperatorFetch } from './accounts/operator.ts'
 import { otherChainRoutes, type ChainFetch, type ReadGate } from './accounts/other-chains.ts'
+import { FundingGate } from './accounts/chain-funding.ts'
 import { apyRoutes } from './apy/routes.ts'
 import { ens } from './ens/routes.ts'
 import { feedbackRoutes, type MattermostFetch } from './feedback.ts'
@@ -27,6 +28,7 @@ export type AppOptions = {
   apyCache?: () => ApyCache | null
   chainFetch?: ChainFetch
   chainGate?: ReadGate
+  fundingGate?: FundingGate
   mattermostFetch?: MattermostFetch
 }
 
@@ -84,9 +86,11 @@ export function createApp(options: AppOptions = {}) {
 
   app.route('/api/auth', signIn)
   app.route('/api/onboarding', onboarding)
-  app.route('/api/accounts', operatorRoutes(operatorFetch))
+  // otto/mamoru#238: the chain read the funding route answers with when the operator cannot (same fetch as other-chains).
+  const chainFetch: ChainFetch = options.chainFetch ?? ((input, init) => fetch(input, init))
+  app.route('/api/accounts', operatorRoutes(operatorFetch, { fetch: chainFetch, gate: options.fundingGate ?? new FundingGate(), capUsdc: LIVE_CAP_USDC }))
   app.route('/api/accounts', accounts)
-  app.route('/api/accounts', otherChainRoutes(options.chainFetch ?? ((input, init) => fetch(input, init)), options.chainGate))
+  app.route('/api/accounts', otherChainRoutes(chainFetch, options.chainGate))
   app.route('/api/sleeves', sleeves)
   app.route('/api/pools', pools)
   app.route('/api/ens', ens)

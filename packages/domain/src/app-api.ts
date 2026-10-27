@@ -130,6 +130,16 @@ export type FundingView = {
   // What the engine is doing right now, for a subtle progress line in Working capital.
   // otto/mamoru#215: 'bridging' is savings on their way to the account's sleeve on another chain, with `bridge` saying how far.
   progress?: { step: 'deploying' | 'activating' | 'swapping' | 'opening' | 'rebalancing' | 'reranging' | 'closing' | 'withdrawing' | 'bridging'; pool?: string; since: string; bridge?: BridgeProgress } | null
+  // otto/mamoru#238: set only when the operator could not be reached and the Worker read the balance on chain instead.
+  // Then `active` is false and means "not known", never "stopped"; `approval`, `engine`, `progress`, `overCap` (null),
+  // `exposure` and `deployMinUsdc` are not set, `capUsdc` is the default cap and `gasReserveWei` is '0' (neither is read), and the app keeps every action off.
+  // The total counts idle tokens and the positions the engine last recorded (D1 snapshot), each read on chain at
+  // `block`; it leaves out ETH and fees a position has accrued but not yet settled (tokensOwed is counted).
+  source?: 'chain'
+  // `positions`: 'listed' when the ids come from the snapshot taken at `listedAt` (a position opened after it is not
+  // in the total); 'unknown' when there was no usable snapshot, or a listed position could not be valued, and the
+  // total is then idle money only (understated, and the app says so).
+  chainRead?: { positions: 'listed' | 'unknown'; listedAt: string | null }
 }
 
 // GET /api/accounts/:accountKey/yield -> YieldLedgerView (otto/mamoru#129): what the yield ledger knows so far,

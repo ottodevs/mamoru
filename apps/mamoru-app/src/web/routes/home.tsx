@@ -34,6 +34,12 @@ export const homeCopy = {
   pastReading: (ago: string) => `Last reading ${ago} ago`,
   pastTitle: 'Mamoru cannot read your account right now.',
   pastBody: 'Your money stays in your account on-chain. The balance above is the last reading; actions return when the live read does. Retrying.',
+  // otto/mamoru#238: the operator does not answer, so the Worker read the account on-chain. Nothing about the engine is known.
+  chainTitle: 'Engine unreachable: balance read from chain, actions paused.',
+  chainBodyListed: (ago: string) => `Your money stays in your account. The total is read on-chain now: your idle money and the positions Mamoru recorded ${ago} ago. Fees not yet settled are left out. Retrying.`,
+  chainBodyUnknown: 'Your money stays in your account. Positions could not be read, so the total shows only the money sitting idle and may be less than your account holds. Retrying.',
+  chainReading: 'Read from chain',
+  chainIdleOnly: 'Idle money only, positions not read',
   noReading: 'Could not load your balance. Your money stays in your account on-chain. Retrying.',
   // otto/mamoru#198: two rates under the balance, figure over "APY · what"; sources behind (i). The names stay
   // for screen readers and the per-position table.
@@ -73,6 +79,8 @@ export const homeCopy = {
   target: (pct: number) => (pct === 0 ? 'target 0%, closing' : `target ${pct}%`),
   inRange: 'In range',
   paused: 'Paused: out of range. Mamoru puts it back to work automatically.',
+  // otto/mamoru#238: no promise about what the engine will do while it cannot be reached.
+  pausedChain: 'Paused: out of range.',
   noRate: 'n/a: no rate source for this pool yet.',
   unpriced: (tokens: string) => `n/a: no USDC price for ${tokens} in this view yet, so its value, its share and the account rates show n/a.`,
   unpricedIdle: (tokens: string) => `${tokens} not priced yet, not counted in the total`,
@@ -172,6 +180,7 @@ export function Balance({
   onWithdraw,
   past = null,
   down = false,
+  chain = null,
 }: {
   s: Split | null
   earnedSoFarUsd?: string | null
@@ -182,6 +191,8 @@ export function Balance({
   past?: { totalUsd: string; readAt: string } | null
   /** The live read is failing: both actions are off (their dialogs need it), past reading or not. */
   down?: boolean
+  /** otto/mamoru#238: the balance is a read from chain (the operator is down): the total is live, every action is off. */
+  chain?: FundingView['chainRead'] | null
 }) {
   const shownPast = past
   return (
@@ -199,16 +210,21 @@ export function Balance({
             {homeCopy.pastReading(agoText(shownPast.readAt))}
           </p>
         ) : null}
+        {chain ? (
+          <p className="past-reading" data-testid="chain-reading">
+            {chain.positions === 'listed' ? homeCopy.chainReading : homeCopy.chainIdleOnly}
+          </p>
+        ) : null}
         <Earned usd={earnedSoFarUsd} daily={earnedDaily} />
       </div>
       <div className="balance-acts">
         {/* otto/mamoru#208: the add dialog needs the live read (address, cap); off while only a past one shows. */}
-        <button type="button" className="act" onClick={onAdd} disabled={down || !!shownPast}>
+        <button type="button" className="act" onClick={onAdd} disabled={down || !!shownPast || !!chain}>
           {homeCopy.add}
         </button>
         {/* otto/mamoru#135: never disabled on the poll's balance, which can be 15-60 s behind a deposit. The
             operator's prepare reads the chain and refuses with a reason the dialog shows. */}
-        <button type="button" className="act quiet" data-testid="withdraw-button" onClick={onWithdraw} disabled={!s || down || !!shownPast}>
+        <button type="button" className="act quiet" data-testid="withdraw-button" onClick={onWithdraw} disabled={!s || down || !!shownPast || !!chain}>
           {homeCopy.withdraw}
         </button>
       </div>
@@ -301,7 +317,7 @@ function pair(p: FundingView['positions'][number]): string {
   return poolTokens(p.pool, p.amounts).join('/')
 }
 
-function PositionRow({ p, r, i }: { p: FundingView['positions'][number]; r: PositionRate; i: number }) {
+function PositionRow({ p, r, i, readFromChain = false }: { p: FundingView['positions'][number]; r: PositionRate; i: number; readFromChain?: boolean }) {
   const legs = positionAmounts(p).filter((l) => l.amount !== '0')
   const addr = poolAddress(p.pool)
   const chain = useChain()
@@ -404,7 +420,7 @@ function PositionRow({ p, r, i }: { p: FundingView['positions'][number]; r: Posi
           {homeCopy.unpriced(r.unpriced.join(', '))}
         </span>
       ) : null}
-      {p.inRange ? null : <span className="wc-paused">{homeCopy.paused}</span>}
+      {p.inRange ? null : <span className="wc-paused">{readFromChain ? homeCopy.pausedChain : homeCopy.paused}</span>}
     </li>
   )
 }
@@ -462,7 +478,7 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
           </div>
           <ul className="m-0 list-none p-0">
             {f.positions.map((p, i) => (
-              <PositionRow key={p.tokenId} p={p} r={rows[i]!} i={i} />
+              <PositionRow key={p.tokenId} p={p} r={rows[i]!} i={i} readFromChain={f.source === 'chain'} />
             ))}
           </ul>
           {noRate ? <p className="m-0 pt-2 font-mono text-[0.72rem] text-stone">{homeCopy.noRate}</p> : null}
@@ -1267,7 +1283,11 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // is true); ops history, not the funding poll, so this is never behind it.
   const ranBefore = everStarted(opList)
   // Stopped after running: the Working card offers the restart where Stop was, so no Start row too.
-  const stopped = !!f && !f.active && f.positions.length === 0 && !inFlight && ranBefore
+  // otto/mamoru#238: a chain read knows nothing of the engine (`active` false is "not known"): no Start, no Stop, no restart.
+  const fromChain = f?.source === 'chain'
+  // Positions not read: no Working card ("nothing placed" would be a claim) and no rates, only the idle money.
+  const noPositions = fromChain && f?.chainRead?.positions !== 'listed'
+  const stopped = !!f && !fromChain && !f.active && f.positions.length === 0 && !inFlight && ranBefore
   // Over the cap, the withdraw that clears it is the one notice-worthy thing (a Start would refuse anyway); this
   // state wins over an armed activation. Only a withdraw already on its way hides it. Start itself stays offered
   // next to it (otto/mamoru#135 review): the notice is a read on the same poll as everything else here, up to
@@ -1280,15 +1300,15 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // deposit that makes a restart possible, or the withdraw that clears a cap; the start's prepare reads the
   // chain and says why when it cannot.
   const canRestart = stopped
-  const canStart = !!f && !f.active && !inFlight && !armed && !stopped
+  const canStart = !!f && !fromChain && !f.active && !inFlight && !armed && !stopped
   // otto/mamoru#135 review: whether this card offers Stop or a restart turns on f.positions, part of the
   // operator's cache (up to 60 s behind) — never invalidated by an engine move this client did not just submit
   // itself (another tab's stop, say). The moment the account looks idle, ask for a fresh (<=2 s) read instead
   // of waiting on the regular poll, so a stale zero positions can never hide Stop behind one that is still
   // really there; the Working card below rereads `f` once this lands.
   useEffect(() => {
-    if (f && !f.active && !inFlight && ranBefore) void refreshFunding()
-  }, [f?.active, inFlight, ranBefore, refreshFunding])
+    if (f && !fromChain && !f.active && !inFlight && ranBefore) void refreshFunding()
+  }, [f?.active, fromChain, inFlight, ranBefore, refreshFunding])
   const addMoney = () => {
     void refreshFunding()
     setDialog('add')
@@ -1332,7 +1352,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       <PullToRefresh onRefresh={refreshAll} />
       <header className="mb-7 flex items-center justify-between gap-3">
         <Brand />
-        <LiveSync updatedAt={funding.dataUpdatedAt} intervalMs={fundingInterval(funding.data, inFlight, 30_000)} fetching={funding.isFetching} down={liveDown} onRefresh={() => void refreshAll().catch(() => undefined)} />
+        <LiveSync chain={fromChain} updatedAt={funding.dataUpdatedAt} intervalMs={fundingInterval(funding.data, inFlight, 30_000)} fetching={funding.isFetching} down={liveDown} onRefresh={() => void refreshAll().catch(() => undefined)} />
       </header>
       <Balance
         s={s}
@@ -1342,13 +1362,20 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         onWithdraw={() => withdraw()}
         past={past}
         down={liveDown}
+        chain={fromChain ? (f?.chainRead ?? { positions: 'unknown', listedAt: null }) : null}
       />
-      <Indicators f={f} apy={apy.data} price={price} noRead={!f && liveDown} />
+      <Indicators f={noPositions ? undefined : f} apy={apy.data} price={price} noRead={(!f && liveDown) || noPositions} />
       <WrongNetwork accountKey={accountKey} />
       {past ? (
         <section className="card" data-testid="past-notice" role="status">
           <span className="title">{homeCopy.pastTitle}</span>
           <span className="sub">{homeCopy.pastBody}</span>
+        </section>
+      ) : null}
+      {f?.source === 'chain' ? (
+        <section className="card" data-testid="chain-notice" role="status">
+          <span className="title">{homeCopy.chainTitle}</span>
+          <span className="sub">{f.chainRead?.positions === 'listed' && f.chainRead.listedAt ? homeCopy.chainBodyListed(agoText(f.chainRead.listedAt)) : homeCopy.chainBodyUnknown}</span>
         </section>
       ) : null}
       {!f ? (
@@ -1387,7 +1414,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           ) : f.active && f.approval && approvalOpen && (f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade || f.approval.capRaise) && !renewing ? (
             <ApprovalRow key={approvalRowKey(f.approval)} approval={f.approval} onOpen={openApproval} />
           ) : null}
-          <Working f={f} s={s as Split} apy={apy.data} price={price} otherChainsUsdc={otherChainsUsdc} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />
+          {noPositions ? null : <Working f={f} s={s as Split} apy={apy.data} price={price} otherChainsUsdc={otherChainsUsdc} onStop={!fromChain && (f.active || f.positions.length > 0) ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />}
           <Idle f={f} s={s as Split} />
           <History ops={opList} onRetry={retry} loaded={ops.isSuccess} />
         </>

@@ -157,6 +157,17 @@ const divergenceOn = param('divergence')
 const operatorDown = param('operatordown')
 // ?operatorlate (dev only, otto/mamoru#208 review): the first /funding read works, every later one fails.
 const operatorLate = param('operatorlate')
+// ?operatorchain / ?operatorchainidle (dev only, otto/mamoru#238): the operator is down and the Worker answers /funding from
+// the chain. With three positions the engine had recorded 40 min ago; or, for `idle`, no snapshot: idle money only.
+const operatorChain = param('operatorchain')
+const operatorChainIdle = param('operatorchainidle')
+const chainView = (): FundingView => {
+  const listed = { ...structuredClone(fixtureFunding), ...(operatorChainIdle ? {} : placedThree()) } as FundingView
+  delete listed.engine
+  delete listed.approval
+  delete listed.progress
+  return { ...listed, active: false, overCap: null, source: 'chain', chainRead: operatorChainIdle ? { positions: 'unknown', listedAt: null } : { positions: 'listed', listedAt: new Date(Date.now() - 40 * 60_000).toISOString() } }
+}
 let fundingReads = 0
 const upgradeApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 1000) + 300 * 86_400, renewDue: false, expired: false, policyId: 'conservador-live-v5', upgrade: true, upgradePolicy: 'conservador-live-v6' } })
 const dueApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 86_400_000) * 86_400 + 10 * 86_400, renewDue: true, expired: false } })
@@ -295,7 +306,9 @@ export const fixtureClient: ApiClient = {
   funding: (k) =>
     operatorDown || (operatorLate && fundingReads++ > 0)
       ? new Promise((_, reject) => setTimeout(() => reject(new ApiRequestError(503, { error: 'The operator is not reachable. Nothing was sent. Try again.', code: 'OPERATOR_UNAVAILABLE' })), 150))
-      : delay(isMonad(k) ? monadState.funding : liveState.funding),
+      : operatorChain || operatorChainIdle
+        ? delay(chainView())
+        : delay(isMonad(k) ? monadState.funding : liveState.funding),
   // ?wrongchain (dev only): 150 USDC was sent on Ethereum to the Base address.
   otherChains: () =>
     delay({

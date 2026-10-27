@@ -12,6 +12,7 @@ export const MULTICHAIN_POLICY = 'conservador-live-v6'
 /** Review of PR #141: its fork twin is guarded the same way. */
 const MULTICHAIN_POLICIES: ReadonlySet<string> = new Set([MULTICHAIN_POLICY, 'conservador-lab-v6'])
 export const MONAD = 143
+import { chainFundingResponse, type ChainFunding } from './chain-funding.ts'
 
 // Live funds (sprint amendment 2026-09-26 21:40): after the device session proves it owns the account,
 // the Worker forwards the same route to the operator with a signed account context (app-api.ts AccountContext).
@@ -20,6 +21,11 @@ export type OperatorFetch = (input: string, init: RequestInit) => Promise<Respon
 
 export const MAX_BODY_BYTES = 8 * 1024
 export const OPERATOR_TIMEOUT_MS = 90_000
+/**
+ * otto/mamoru#238: the funding read is a poll, and when the operator does not answer it the Worker has the chain to
+ * ask instead, so it does not wait the 90 s a signed owner action may need.
+ */
+export const FUNDING_TIMEOUT_MS = 20_000
 
 export function accountContext(row: AccountRow): AccountContext {
   return {
@@ -108,10 +114,16 @@ async function guardV6Renewal(c: Context<AppEnv>, operatorFetch: OperatorFetch, 
 const unavailable = (c: Context) => apiError(c, 503, 'The operator is not reachable. Nothing was sent. Try again.', 'OPERATOR_UNAVAILABLE')
 const tooLarge = (c: Context) => apiError(c, 413, 'Request body too large.', 'BODY_TOO_LARGE')
 
-export function operatorRoutes(operatorFetch: OperatorFetch) {
+/**
+ * What the funding route does when the operator could not give funding (otto/mamoru#238): not reachable, timed out,
+ * or answering 5xx. A 4xx (sign-in, ownership, a refusal of the operator) never falls back: it says something true.
+ */
+const operatorFailed = (status: number) => status >= 500
+
+export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFunding) {
   const routes = new Hono<AppEnv>()
 
-  const forward = async (c: Context<AppEnv>) => {
+  const forwardWith = (opts: { timeoutMs?: number; fallback?: (c: Context<AppEnv>, row: AccountRow) => Promise<Response | null> } = {}) => async (c: Context<AppEnv>) => {
     const session = await c.var.auth.current(c)
     if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
     const accountKey = c.req.param('accountKey') ?? ''
@@ -155,12 +167,16 @@ export function operatorRoutes(operatorFetch: OperatorFetch) {
         method,
         headers,
         ...(method !== 'GET' ? { body } : {}),
-        signal: AbortSignal.timeout(OPERATOR_TIMEOUT_MS),
+        signal: AbortSignal.timeout(opts.timeoutMs ?? OPERATOR_TIMEOUT_MS),
       })
       text = await res.text()
     } catch (e) {
       console.error('operator unreachable', e instanceof Error ? e.message : String(e))
-      return unavailable(c)
+      return (await opts.fallback?.(c, row)) ?? unavailable(c)
+    }
+    if (opts.fallback && operatorFailed(res.status)) {
+      const answer = await opts.fallback(c, row)
+      if (answer) return answer
     }
     return new Response(text, {
       status: res.status,
@@ -168,7 +184,8 @@ export function operatorRoutes(operatorFetch: OperatorFetch) {
     })
   }
 
-  routes.get('/:accountKey/funding', forward)
+  const forward = forwardWith()
+  routes.get('/:accountKey/funding', forwardWith({ timeoutMs: FUNDING_TIMEOUT_MS, ...(chain ? { fallback: (c: Context<AppEnv>, row: AccountRow) => chainFundingResponse(c, row, chain) } : {}) }))
   routes.get('/:accountKey/ops', forward)
   routes.get('/:accountKey/withdraw-assets', forward)
   routes.get('/:accountKey/bridge-out', forward)

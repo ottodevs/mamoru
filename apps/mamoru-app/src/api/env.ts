@@ -30,6 +30,13 @@ export type Env = {
   // Secret. Read-only Ethereum Mainnet RPC pool for the wrong-network notice (accounts/other-chains.ts): https URLs
   // separated by commas, tried in order (docs/process/rpc-providers.md). Unset: nothing is read.
   ETHEREUM_RPC_URLS?: string
+  // Secrets, optional (otto/mamoru#238): read-only RPC pools of Base and Monad, same format as ETHEREUM_RPC_URLS (https
+  // URLs separated by commas or spaces, at most three, tried in order). Used only for the balance read the funding route
+  // answers with while the operator is unreachable (accounts/chain-funding.ts). Unset: that route answers as before.
+  BASE_RPC_URLS?: string
+  MONAD_RPC_URLS?: string
+  // Rate Limiting binding for those reads, per account (wrangler.jsonc `ratelimits`). Absent in tests and local runs.
+  FUNDING_CHAIN_LIMIT?: RateLimiter
   // Workers Rate Limiting binding (wrangler.jsonc `ratelimits`): reads of the Ethereum RPC per account, counted per
   // Cloudflare location and not per isolate. Absent in tests and local runs.
   OTHER_CHAINS_LIMIT?: RateLimiter

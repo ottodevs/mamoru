@@ -178,6 +178,8 @@ export function sourceName(line: string | undefined): string | null {
 export function idleReason(f: FundingView, s: Split): string {
   // A listed token (unpriced cbBTC, say) is idle even when its USDC value is unknown.
   if (s.idle < DUST_USDC && s.idleTokens.length === 0) return 'nothing idle'
+  // otto/mamoru#238: a read from chain knows nothing of the engine.
+  if (f.source === 'chain') return 'engine status not known'
   if (!f.active) return f.positions.length > 0 ? 'Mamoru is stopped' : 'Mamoru is not running yet'
   // otto/mamoru#194: under the smallest entry, what is outside is swap and mint rounding, not money on its way.
   if (s.idle < MIN_ENTRY_USDC && !s.idleTokens.some((t) => t.unpriced)) return 'left over, under the 0.10 USDC minimum'
