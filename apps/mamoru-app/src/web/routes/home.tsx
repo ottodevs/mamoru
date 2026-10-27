@@ -385,9 +385,11 @@ function PositionRow({ p, r, i }: { p: FundingView['positions'][number]; r: Posi
  * range, value in USDC with each token, share of working capital and the pool's current and monthly rates. A
  * paused (out-of-range) position earns 0% today and says Mamoru puts it back to work.
  */
-export function Working({ f, s, apy, price = null, onStop, onStart = null }: { f: FundingView; s: Split; apy?: ApyView; price?: bigint | null; onStop: (() => void) | null; onStart?: (() => void) | null }) {
+export function Working({ f, s, apy, price = null, onStop, onStart = null, otherChainsUsdc = 0n }: { f: FundingView; s: Split; apy?: ApyView; price?: bigint | null; onStop: (() => void) | null; onStart?: (() => void) | null; otherChainsUsdc?: bigint | null }) {
   const n = f.positions.length
-  const rows = positionRates(f, apy, price, s.priced ? s.total : null)
+  // otto/mamoru#216: targets are shares of the whole account, sleeves on other chains included; while their value is
+  // unknown (null) no share is set against a target.
+  const rows = positionRates(f, apy, price, s.priced && otherChainsUsdc !== null ? s.total + otherChainsUsdc : null)
   const inRange = f.positions.filter((p) => p.inRange).length
   // An operation in flight says what it is; between operations the engine says whether more is coming and when it looks next.
   const line = progressLine(f.progress) ?? engineLine(f)
@@ -1031,38 +1033,39 @@ function MonadUpgradeDialog({ accountKey, approval, open, onClose, onDone }: { a
   const baseFlow = useOwnerAction(accountKey, 'renew')
   const prepared = useFittingPrepared(approval, baseFlow)
   const [opening, setOpening] = useState<string | null>(null)
-  const monadDone = sleeveFunding.data?.active === true || (!!monadFlow.result && monadFlow.result.state !== 'failed')
+  // Step 2 opens only on what the chain shows: the Monad Safe running, or its activation confirmed. A submitted or armed
+  // op is not enough (it may still fail), and the renewal it unlocks lets Mamoru bridge to that Safe (#142 review).
+  const monadDone = sleeveFunding.data?.active === true || monadFlow.result?.state === 'confirmed'
+  const monadPending = !monadDone && !!monadFlow.result && monadFlow.result.state !== 'failed'
   const done = !!baseFlow.result && baseFlow.result.state !== 'failed'
   const doneOp = done ? baseFlow.result!.opId : null
+  const reported = useRef<string | null>(null)
   useEffect(() => {
-    if (!doneOp) return
+    if (!doneOp || reported.current === doneOp) return
+    reported.current = doneOp
     onDone(approvalRowKey(approval), doneOp)
     onClose()
   }, [doneOp, onClose, onDone, approval])
-  // No sleeve yet: create it (same passkey, same address), then prepare its activation.
+  // No sleeve yet: create it (same passkey, same address); the next tap prepares its activation.
   const prepareMonad = async () => {
+    setOpening(null)
     if (sleeve) return void monadFlow.prepare()
     setOpening(monadCopy.opening)
     try {
       await api.addSleeve(143)
       await qc.invalidateQueries({ queryKey: queryKeys.session })
+      setOpening(null)
     } catch (e) {
       setOpening(e instanceof Error ? e.message : String(e))
-      return
     }
-    setOpening(null)
   }
-  // Once the new sleeve shows up in the session, its activation is prepared without another tap.
-  useEffect(() => {
-    if (sleeve && opening === null && !monadFlow.prepared && !monadFlow.busy && !monadDone && monadFlow.error === null && open) void monadFlow.prepare()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sleeve?.accountKey])
   const rows = splitRows(approval.policyId ?? '', approval.upgradePolicy ?? '')
   return (
     <MonadConsentDialog
       open={open && !done}
       rows={rows}
       monadDone={monadDone}
+      monadPending={monadPending}
       onClose={onClose}
       monad={{
         busy: opening === monadCopy.opening ? 'preparing' : monadFlow.busy,
@@ -1120,6 +1123,9 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // read at most 2 s old; nothing waits on it, and nothing is decided on it (prepare reads the chain).
   const refreshFunding = useFreshFunding(accountKey)
   const pools = usePools()
+  // otto/mamoru#216: the Monad sleeve's balance, for shares of the whole account against a multichain target.
+  const monadSleeve = (useSession().data?.sleeves ?? []).find((x) => x.chainId === 143 && x.accountKey !== accountKey)
+  const monadFunding = useFunding(monadSleeve?.accountKey, !!monadSleeve, 60_000)
   const [dialog, setDialog] = useState<null | 'add' | 'withdraw' | 'stop' | 'start'>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [howOpen, setHowOpen] = useState(false)
@@ -1140,6 +1146,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // unmounted by an outage; it keeps the cached read until it is closed, and its own request reports what happened.
   const keepOpen = dialog !== null || renewAsked
   const f = liveDown && !keepOpen ? undefined : cached
+  const multichain = isMultichainTarget(f?.approval?.policyId)
+  const otherChainsUsdc = !multichain ? 0n : !monadSleeve ? 0n : monadFunding.data ? split(monadFunding.data, null).total : null
   // The session ended while Home was open: ask again, and the first screen offers the sign-in.
   const qc = useQueryClient()
   const signedOut = funding.error instanceof ApiRequestError && funding.error.status === 401
@@ -1307,7 +1315,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           ) : f.active && f.approval && approvalOpen && (f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade || f.approval.capRaise) && !renewing ? (
             <ApprovalRow key={approvalRowKey(f.approval)} approval={f.approval} onOpen={openApproval} />
           ) : null}
-          <Working f={f} s={s as Split} apy={apy.data} price={price} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />
+          <Working f={f} s={s as Split} apy={apy.data} price={price} otherChainsUsdc={otherChainsUsdc} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />
           <Idle f={f} s={s as Split} />
           <History ops={opList} onRetry={retry} />
         </>
@@ -1355,7 +1363,9 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           <StopDialog accountKey={accountKey} s={s} open={dialog === 'stop'} onClose={() => setDialog(null)} />
           <StartDialog accountKey={accountKey} s={s} open={dialog === 'start'} onClose={() => setDialog(null)} />
           {f.approval && f.active && !renewing && approvalOpen && (renewAsk || f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade || f.approval.capRaise) ? (
-            f.approval.upgrade && isMultichainTarget(f.approval.upgradePolicy) && !f.approval.renewDue && !f.approval.expired && !f.approval.usage && !f.approval.paused ? (
+            // otto/mamoru#142 review: a renewal that moves to the mix with Monad always goes through its consent and the
+            // Monad step, due, expired or paused alike: never a one-tap renewal to it, never one the Worker must refuse.
+            f.approval.upgrade && isMultichainTarget(f.approval.upgradePolicy) ? (
               <MonadUpgradeDialog onDone={markSigned} key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null && !feedbackOpen} onClose={closeRenewAsk} />
             ) : (
               <RenewDialog onDone={markSigned} key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null && !feedbackOpen} onClose={closeRenewAsk} />

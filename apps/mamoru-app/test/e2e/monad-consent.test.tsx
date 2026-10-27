@@ -27,6 +27,15 @@ describe('the mix before and after (conservador-live-v5 to v6)', () => {
     ])
   })
 
+  test('a pool at preference 0 is not part of a mix: from v6 to v6 nothing shows as closed', () => {
+    expect(splitRows('conservador-live-v6', 'conservador-live-v6').some((r) => r.pool === 'USDC / cbBTC')).toBe(false)
+  })
+
+  test('the step 2 text is the target mix read from the rows', async () => {
+    const { mixLine } = await import('../../src/web/components/monad-consent.tsx')
+    expect(mixLine(splitRows('conservador-live-v5', 'conservador-live-v6'))).toBe('50% USDC / USDT on Base, 35% USDC / WETH on Base, 15% USDC / WMON on Monad')
+  })
+
   test('an unknown policy gives no rows rather than guessed ones', () => {
     expect(splitRows('conservador-live-v5', 'nope')).toEqual([])
   })
@@ -41,7 +50,10 @@ describe('the mix before and after (conservador-live-v5 to v6)', () => {
 describe('the dialog and the row', () => {
   test('the intro shows the mix, says nothing moves before approval, and asks to continue', () => {
     const { text } = render(<MonadIntro rows={splitRows('conservador-live-v5', 'conservador-live-v6')} onContinue={() => {}} onLater={() => {}} />)
-    expect(text).toContain(monadCopy.lead)
+    expect(text).toContain('a USDC / WMON pool on Monad')
+    expect(text).toContain('moves 15% there')
+    expect(text).toContain('a pool marked closed is unwound into the others')
+    expect(text).not.toContain('keep your proportions')
     expect(text).toContain('USDC / WMON Monad — 15%')
     expect(text).toContain('USDC / cbBTC Base 40% closed')
     expect(text).toContain('Nothing moves until you approve')

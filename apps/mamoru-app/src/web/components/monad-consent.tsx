@@ -18,7 +18,8 @@ export function splitRows(fromId: string, toId: string): SplitRow[] {
   type Share = { pool: string; chainId: number; bps: number }
   const shares = (p: PolicyVersion): Share[] => {
     const total = p.buckets.reduce((s, b) => s + b.preference, 0) + (p.remoteBuckets ?? []).reduce((s, b) => s + b.preference, 0)
-    const local = p.buckets.filter((b) => b.pools[0]).map((b) => ({ pool: b.pools[0]!, chainId: 8453, bps: Math.round((b.preference * 10_000) / total) }))
+    // A bucket at preference 0 is one being left (v6's USDC/cbBTC): not part of that mix.
+    const local = p.buckets.filter((b) => b.pools[0] && b.preference > 0).map((b) => ({ pool: b.pools[0]!, chainId: 8453, bps: Math.round((b.preference * 10_000) / total) }))
     const remote = (p.remoteBuckets ?? []).map((b) => ({ pool: b.pools[0]!, chainId: b.chainId as number, bps: Math.round((b.preference * 10_000) / total) }))
     return [...local, ...remote]
   }
@@ -42,7 +43,7 @@ export function splitRows(fromId: string, toId: string): SplitRow[] {
  */
 export const monadCopy = {
   title: 'Mamoru now works on Monad too',
-  lead: 'Your savings get a third home: a WMON/USDC pool on Monad, the Growth part of your mix. If you approve, Mamoru moves 15% there and rebalances the rest to keep your proportions.',
+  lead: (pool: string, chain: string, pct: string) => `Your savings get a third home: a ${pool} pool on ${chain}. If you approve, Mamoru moves ${pct} there and rebalances the rest to the new mix below; a pool marked closed is unwound into the others.`,
   split: 'Your mix',
   now: 'Now',
   after: 'After',
@@ -58,7 +59,8 @@ export const monadCopy = {
   monadTitle: 'Open your Safe on Monad',
   monadLead: 'Same address, same passkey. Mamoru may then manage the Growth pool there, within these limits.',
   baseTitle: 'Renew the approval on Base',
-  baseLead: 'The new mix: 50% Stable and 35% Balance on Base, 15% Growth on Monad. Mamoru may move the Growth share to your own Safe on Monad, and nowhere else.',
+  baseLead: (mix: string, chain: string) => `The new mix: ${mix}. Mamoru may move the share on ${chain} to your own Safe there, and nowhere else.`,
+  pending: 'Opening your Safe on Monad. Step 2 opens by itself once it is open on chain.',
   opening: 'Opening your Safe on Monad',
 }
 
@@ -117,11 +119,22 @@ function Points() {
   )
 }
 
+/** The pool opening on another chain and its share, read from the rows (never typed). */
+export function remoteOf(rows: SplitRow[]): SplitRow | undefined {
+  return rows.find((r) => r.fromBps === null && r.toBps > 0 && r.chain !== 'Base')
+}
+
+/** "50% USDC / USDT on Base, 35% USDC / WETH on Base, 15% USDC / WMON on Monad", from the rows. */
+export function mixLine(rows: SplitRow[]): string {
+  return rows.filter((r) => r.toBps > 0).map((r) => `${pct(r.toBps)} ${r.pool} on ${r.chain}`).join(', ')
+}
+
 /** The first screen: what changes, before anything is prepared or signed. */
 export function MonadIntro({ rows, onContinue, onLater }: { rows: SplitRow[]; onContinue: () => void; onLater: () => void }) {
+  const remote = remoteOf(rows)
   return (
     <div className="approve" data-testid="monad-intro">
-      <p className="approve-lead">{monadCopy.lead}</p>
+      <p className="approve-lead">{remote ? monadCopy.lead(remote.pool, remote.chain, pct(remote.toBps)) : mixLine(rows)}</p>
       <SplitTable rows={rows} />
       <Points />
       <div className="approve-actions">
@@ -159,8 +172,9 @@ export type MonadFlow = {
  * every other approval uses. Step 2 opens only once step 1 is done (`monadDone`), so the renewal that lets Mamoru
  * bridge is never signed before the Safe it bridges to is open.
  */
-export function MonadConsentDialog({ open, rows, monad, base, monadDone, onClose }: { open: boolean; rows: SplitRow[]; monad: MonadFlow; base: MonadFlow; monadDone: boolean; onClose: () => void }) {
+export function MonadConsentDialog({ open, rows, monad, base, monadDone, monadPending = false, onClose }: { open: boolean; rows: SplitRow[]; monad: MonadFlow; base: MonadFlow; monadDone: boolean; monadPending?: boolean; onClose: () => void }) {
   const [started, setStarted] = useState(false)
+  const remote = remoteOf(rows)
   const title = !started ? monadCopy.title : monadDone ? monadCopy.baseTitle : monadCopy.monadTitle
   return (
     <ApprovalDialog title={title} open={open} onClose={onClose}>
@@ -168,10 +182,20 @@ export function MonadConsentDialog({ open, rows, monad, base, monadDone, onClose
         <MonadIntro rows={rows} onContinue={() => setStarted(true)} onLater={onClose} />
       ) : !monadDone ? (
         <MonadStep n={1} lead={monadCopy.monadLead}>
-          {(lead) => <ApprovalBody lead={lead} summary={monad.summary} busy={monad.busy} error={monad.error} onPrepare={monad.prepare} onApprove={monad.approve} onLater={onClose} />}
+          {(lead) => (
+            <>
+              {monadPending ? (
+                <p className="progress mono-label text-stone" role="status" aria-live="polite" data-testid="monad-pending">
+                  <span className="progress-dot" aria-hidden="true" />
+                  {monadCopy.pending}
+                </p>
+              ) : null}
+              <ApprovalBody lead={lead} summary={monad.summary} busy={monadPending ? 'pending' : monad.busy} error={monad.error} onPrepare={monad.prepare} onApprove={monad.approve} onLater={onClose} />
+            </>
+          )}
         </MonadStep>
       ) : (
-        <MonadStep n={2} lead={monadCopy.baseLead}>
+        <MonadStep n={2} lead={monadCopy.baseLead(mixLine(rows), remote?.chain ?? 'the other chain')}>
           {(lead) => <ApprovalBody lead={lead} summary={base.summary} busy={base.busy} error={base.error} onPrepare={base.prepare} onApprove={base.approve} onLater={onClose} />}
         </MonadStep>
       )}
