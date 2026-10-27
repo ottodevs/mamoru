@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router'
 import { ApiContext } from '../../src/web/api/client.ts'
 import { queryKeys } from '../../src/web/api/queries.ts'
-import { BridgeStatus, exact, fundsElsewhere, movable, OtherChainNotice, otherChainCopy, WrongNetwork } from '../../src/web/components/other-chain-notice.tsx'
+import { BridgeStatus, exact, fundsElsewhere, movable, convertible, OtherChainNotice, otherChainCopy, WrongNetwork } from '../../src/web/components/other-chain-notice.tsx'
 import { fixtureClient, fixtureConfig, fixtureFunding, fixtureSession } from '../../src/web/fixtures/client.ts'
 import { FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from '../../src/web/fixtures/empty-account.ts'
 import { poolsResponse } from '../../src/web/fixtures/pools.ts'
@@ -154,13 +154,27 @@ describe('move to Base (#133)', () => {
     expect(text).toContain(otherChainCopy.move)
   })
 
-  test('below 1 USDC, or only ETH: no button, and the notice says it cannot be moved yet', () => {
-    for (const v of [eth('999999'), eth('0', '20000000000000000')]) {
+  test('below 1 USDC, or under 0.002 ETH: no button, and the notice says it cannot be moved yet', () => {
+    for (const v of [eth('999999'), eth('0', '1999999999999999')]) {
       expect(movable(fundsElsewhere(v)[0]!)).toBe(false)
       const { text, html } = mount(flag(client({ ...fixtureFunding, usdc: '0' }, v), true))
       expect(html).not.toContain('data-testid="bridge-out"')
+      expect(html).not.toContain('data-testid="eth-convert"')
       expect(text).toContain('cannot move it from Ethereum yet')
     }
+  })
+
+  test('#211: only ETH, from 0.002: Convert to USDC, and the notice says two approvals take it to Base', () => {
+    const v = eth('0', '55378350000000000')
+    expect(convertible(fundsElsewhere(v)[0]!)).toBe(true)
+    const { text, html } = mount(flag(client({ ...fixtureFunding, usdc: '0' }, v), true))
+    expect(html).toContain('data-testid="eth-convert"')
+    expect(html).not.toContain('data-testid="bridge-out"')
+    expect(text).toContain(otherChainCopy.convert)
+    expect(text).toContain('Two passkey approvals take it there')
+    // Flag off on /ops: no button.
+    const off = mount(flag(client({ ...fixtureFunding, usdc: '0' }, v), false))
+    expect(off.html).not.toContain('data-testid="eth-convert"')
   })
 
   test('USDC and ETH: the USDC can move, the ETH is said to stay', () => {

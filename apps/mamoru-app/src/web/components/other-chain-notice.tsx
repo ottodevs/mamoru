@@ -1,4 +1,4 @@
-import type { BridgeOutRoute, BridgeOutToSign, OtherChainFunds, OtherChainsView } from '@mamoru/domain'
+import type { BridgeOutRoute, BridgeOutToSign, EthConvert, EthConvertToSign, OtherChainFunds, OtherChainsView } from '@mamoru/domain'
 import { useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 import { useApi } from '../api/client.ts'
@@ -36,14 +36,26 @@ function amount(c: Found): string {
 export const BRIDGE_CHAIN_ID = 1
 export const BRIDGE_MIN_USDC = 1_000_000n
 export const movable = (c: Found) => c.chainId === BRIDGE_CHAIN_ID && BigInt(c.usdc) >= BRIDGE_MIN_USDC
+/** #211: ETH on Ethereum from 0.002 up, with no USDC to move first, can be swapped to USDC there and then moved. */
+export const CONVERT_MIN_WEI = 2_000_000_000_000_000n
+export const convertible = (c: Found) => c.chainId === BRIDGE_CHAIN_ID && BigInt(c.eth) >= CONVERT_MIN_WEI && !movable(c)
 
 export const otherChainCopy = {
   title: (c: Found) => `${amount(c)} at your address on ${c.name}, not on Base`,
   body: (c: Found, canMove = false) =>
-    canMove && movable(c)
+    canMove && convertible(c)
+      ? `This is not part of your Mamoru balance and Mamoru has not moved it: when last checked it was at your address on ${c.name}. Mamoru works with USDC on Base. Two passkey approvals take it there: first the ETH becomes USDC in this same account on ${c.name}, then that USDC moves to Base. Mamoru pays the ${c.name} gas. Do not send more on ${c.name}.`
+      : canMove && movable(c)
       ? `This is not part of your Mamoru balance and Mamoru has not moved it: when last checked it was at your address on ${c.name}. You can move the USDC to this same account on Base with one passkey approval, which shows what the move costs, ${c.name} gas included.${BigInt(c.eth) > 0n ? ` The ETH stays on ${c.name}.` : ''} Do not send more on ${c.name}.`
       : `Mamoru works on Base. This is not part of your Mamoru balance and Mamoru has not moved it: when last checked it was at your address on ${c.name}. It has to reach Base before Mamoru can use it, and Mamoru cannot move it from ${c.name} yet. Do not send more on ${c.name}.`,
   move: 'Move to Base',
+  convert: 'Convert to USDC',
+  convertState: {
+    sending: 'Converting on Ethereum…',
+    done: 'Converted. The USDC is at your address on Ethereum: move it to Base below.',
+    failed: 'The conversion did not go through. The ETH is still at your address on Ethereum.',
+    unconfirmed: 'Sent on Ethereum; Mamoru is checking the result. Do not send it again.',
+  } satisfies Record<EthConvert['state'], string>,
   preparing: 'Preparing',
   signing: 'Waiting for passkey',
   approve: 'Approve with passkey',
@@ -77,7 +89,7 @@ export function OtherChainNotice({ view, action, canMove = false }: { view: Othe
             <span className="mt-1 block font-mono text-[0.72rem] text-stone">
               {c.name} block {c.block} · Checked {localTime(c.observedAt)}
             </span>
-            {action && canMove && movable(c) ? action(c) : null}
+            {action && canMove && (movable(c) || convertible(c)) ? action(c) : null}
           </span>
         </section>
       ))}
@@ -177,6 +189,91 @@ export function BridgeOutAction({ accountKey }: { accountKey: string }) {
   )
 }
 
+/**
+ * Convert to USDC (#211): the operator prepares one Safe transaction on Ethereum (a Uniswap swap of all the ETH to
+ * USDC, to this same account, with a minimum it must pay or revert), the passkey signs it, the relayer sends it and
+ * pays the gas. The USDC then shows in the notice with Move to Base. Two taps, so the passkey prompt runs inside a
+ * user gesture.
+ */
+export function EthConvertAction({ accountKey }: { accountKey: string }) {
+  const api = useApi()
+  const qc = useQueryClient()
+  const status = useBridgeOut(accountKey)
+  const [prepared, setPrepared] = useState<EthConvertToSign | null>(null)
+  const [busy, setBusy] = useState<null | 'preparing' | 'signing'>(null)
+  const [error, setError] = useState<string | null>(null)
+  const convert = status.isError ? null : (status.data?.convert ?? null)
+  const underway = convert !== null && (convert.state === 'sending' || convert.state === 'unconfirmed')
+
+  async function prepare() {
+    setError(null)
+    setBusy('preparing')
+    try {
+      setPrepared(await api.ethConvertPrepare(accountKey))
+    } catch (e) {
+      setError(errorText(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function approve() {
+    if (!prepared) return
+    if (Date.parse(prepared.expiresAt) < Date.now()) {
+      setPrepared(null)
+      setError('That approval expired. Tap again to refresh it.')
+      return
+    }
+    setError(null)
+    setBusy('signing')
+    try {
+      const sig = await signOwnerTx(prepared, storedCredential(accountKey))
+      const view = await api.ethConvert(accountKey, sig)
+      setPrepared(null)
+      qc.setQueryData(queryKeys.bridgeOut(accountKey), view)
+    } catch (e) {
+      setError(errorText(e))
+    } finally {
+      setBusy(null)
+      await Promise.all([qc.invalidateQueries({ queryKey: queryKeys.bridgeOut(accountKey) }), qc.invalidateQueries({ queryKey: queryKeys.otherChains(accountKey) })])
+    }
+  }
+
+  return (
+    <span className="mt-3 grid gap-2" data-testid="eth-convert">
+      {convert && convert.state !== 'done' ? (
+        <span className={convert.state === 'failed' ? 'err block' : 'sub block'} data-testid="eth-convert-state">
+          {otherChainCopy.convertState[convert.state]}
+        </span>
+      ) : null}
+      {prepared ? (
+        <span className="grid gap-2" data-testid="convert-review">
+          <span className="text-[0.95rem]" data-testid="sign-scope">
+            {signatureCopy.convert}
+          </span>
+          <ul className="m-0 grid gap-1 pl-5 text-[0.9rem]">
+            {prepared.summary.map((l) => (
+              <li key={l}>{l}</li>
+            ))}
+          </ul>
+          <span className="flex justify-end">
+            <button type="button" className="cta" onClick={() => void approve()} disabled={busy !== null}>
+              {busy === 'signing' ? otherChainCopy.signing : otherChainCopy.approve}
+            </button>
+          </span>
+        </span>
+      ) : underway ? null : (
+        <span className="flex justify-end">
+          <button type="button" className="cta" onClick={() => void prepare()} disabled={busy !== null}>
+            {busy === 'preparing' ? otherChainCopy.preparing : otherChainCopy.convert}
+          </button>
+        </span>
+      )}
+      {error ? <span className="err block">{error}</span> : null}
+    </span>
+  )
+}
+
 /** The notice for the signed-in account. A check that failed shows nothing: an amount seen earlier is not claimed to be there now. */
 export function WrongNetwork({ accountKey: sleeveKey }: { accountKey: string | undefined }) {
   // otto/mamoru#67: the notice and its move are about reaching Base; a Monad sleeve reads nothing here.
@@ -189,7 +286,7 @@ export function WrongNetwork({ accountKey: sleeveKey }: { accountKey: string | u
   const recent = route !== null && (UNDERWAY.includes(route.state) || (route.state === 'filled' && Date.now() - Date.parse(route.at) < 86_400_000))
   return (
     <>
-      <OtherChainNotice view={other.isError ? undefined : other.data} canMove={canMove} action={accountKey ? () => <BridgeOutAction accountKey={accountKey} /> : undefined} />
+      <OtherChainNotice view={other.isError ? undefined : other.data} canMove={canMove} action={accountKey ? (c) => (movable(c) ? <BridgeOutAction accountKey={accountKey} /> : <EthConvertAction accountKey={accountKey} />) : undefined} />
       {/* Once the USDC has left Ethereum the notice above is gone; the move's state stays in view until it lands. */}
       {route && recent && fundsElsewhere(other.data).every((c) => !movable(c)) ? (
         <section className="card" data-testid="bridge-route" role="status">

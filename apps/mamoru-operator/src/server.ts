@@ -261,6 +261,10 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
           return json(200, await bridge().submit(ctx, parse()))
         case 'GET bridge-out':
           return json(200, await bridge().status(ctx))
+        case 'POST eth-convert/prepare':
+          return json(200, await bridge().prepareConvert(ctx))
+        case 'POST eth-convert':
+          return json(200, await bridge().submitConvert(ctx, parse()))
         default:
           return json(405, { error: 'method not allowed' })
       }
