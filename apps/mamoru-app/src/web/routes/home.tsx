@@ -280,6 +280,22 @@ export function Indicators({ f, apy, price, noRead = false }: { f: FundingView |
   )
 }
 
+/**
+ * otto/mamoru#233: where the pool's price sits in the position's range: a hairline, the range as its middle, a dot
+ * for the price now that slides as it moves; past the range's end, in stone, when out of range. Decorative: "In
+ * range" and the paused note say it in words. Nothing when the operator does not send the ticks.
+ */
+function RangeGauge({ range, inRange }: { range?: { lower: number; upper: number; tick: number }; inRange: boolean }) {
+  if (!range || range.upper <= range.lower) return null
+  const at = Math.min(1.25, Math.max(-0.25, (range.tick - range.lower) / (range.upper - range.lower)))
+  return (
+    <span className={`gauge${inRange ? '' : ' is-out'}`} aria-hidden="true">
+      <span className="gauge-band" />
+      <span className="gauge-dot" style={{ left: `${(20 + at * 60).toFixed(1)}%` }} />
+    </span>
+  )
+}
+
 /** The pool's pair in pool order, as the venue names it: "USDC/USDT", "WETH/USDC". */
 function pair(p: FundingView['positions'][number]): string {
   return poolTokens(p.pool, p.amounts).join('/')
@@ -318,8 +334,13 @@ function PositionRow({ p, r, i }: { p: FundingView['positions'][number]; r: Posi
           <span className="seg" data-testid="position-chain">
             {chain.name}
           </span>
-          {p.inRange ? ' · ' : null}
-          {p.inRange ? <span className="seg text-emerald">{homeCopy.inRange}</span> : null}
+          {p.inRange || p.range ? ' · ' : null}
+          {p.inRange || p.range ? (
+            <span className={`seg${p.inRange ? ' text-emerald' : ''}`}>
+              <RangeGauge range={p.range} inRange={p.inRange} />
+              {p.inRange ? homeCopy.inRange : null}
+            </span>
+          ) : null}
         </span>
       </span>
       <span className="wc-amount">

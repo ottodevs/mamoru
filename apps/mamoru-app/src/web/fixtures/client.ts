@@ -89,21 +89,21 @@ const placedThree = (): Partial<FundingView> => ({
   engine: { placing: false, nextReviewAt: null },
   positions: [
     {
-      tokenId: '5101', pool: 'pool:USDC/USDT/100', liquidity: '1', inRange: true, amountUsdc: '25100000', amountCbbtc: '0', valueUsdc: '50120000',
+      tokenId: '5101', range: { lower: -10, upper: 10, tick: 3 }, pool: 'pool:USDC/USDT/100', liquidity: '1', inRange: true, amountUsdc: '25100000', amountCbbtc: '0', valueUsdc: '50120000',
       amounts: [
         { token: 'USDC', amount: '25100000', decimals: 6, valueUsdc: '25100000' },
         { token: 'USDT', amount: '25020000', decimals: 6, valueUsdc: '25020000' },
       ],
     },
     {
-      tokenId: '5102', pool: 'pool:USDC/cbBTC/500', liquidity: '1', inRange: true, amountUsdc: '19920000', amountCbbtc: '17000', valueUsdc: '39800000',
+      tokenId: '5102', range: { lower: -66000, upper: -64000, tick: -65400 }, pool: 'pool:USDC/cbBTC/500', liquidity: '1', inRange: true, amountUsdc: '19920000', amountCbbtc: '17000', valueUsdc: '39800000',
       amounts: [
         { token: 'USDC', amount: '19920000', decimals: 6, valueUsdc: '19920000' },
         { token: 'cbBTC', amount: '17000', decimals: 8, valueUsdc: '19880000' },
       ],
     },
     {
-      tokenId: '5103', pool: 'pool:WETH/USDC/3000', liquidity: '1', inRange: false, amountUsdc: '0', amountCbbtc: '0', valueUsdc: '9970000',
+      tokenId: '5103', range: { lower: -199000, upper: -197000, tick: -196500 }, pool: 'pool:WETH/USDC/3000', liquidity: '1', inRange: false, amountUsdc: '0', amountCbbtc: '0', valueUsdc: '9970000',
       amounts: [
         { token: 'WETH', amount: '2600000000000000', decimals: 18, valueUsdc: '9970000' },
         { token: 'USDC', amount: '0', decimals: 6, valueUsdc: '0' },

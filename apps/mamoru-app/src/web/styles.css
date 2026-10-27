@@ -1999,5 +1999,53 @@
   .spark-end {
     opacity: 1;
     animation: none !important;
+/* #233: the range gauge by "In range": a hairline, the range as its middle 60 %, the price as a dot that slides. */
+.gauge {
+  position: relative;
+  display: inline-block;
+  width: 1.9rem;
+  height: 0.5rem;
+  margin-right: 0.4rem;
+  vertical-align: -0.02rem;
+}
+.gauge::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--color-wash);
+}
+.gauge-band {
+  position: absolute;
+  top: calc(50% - 1px);
+  left: 20%;
+  width: 60%;
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--color-emerald) 35%, transparent);
+}
+.gauge-dot {
+  position: absolute;
+  top: 50%;
+  width: 0.4rem;
+  height: 0.4rem;
+  margin: -0.2rem 0 0 -0.2rem;
+  border-radius: 999px;
+  background: var(--color-emerald);
+  transition: left 900ms var(--ease-out);
+  animation: gauge-in 900ms var(--ease-out) 300ms both;
+}
+.gauge.is-out .gauge-band {
+  background: color-mix(in srgb, var(--color-stone) 30%, transparent);
+}
+.gauge.is-out .gauge-dot {
+  background: var(--color-stone);
+}
+@keyframes gauge-in {
+  from {
+    left: 50%;
+    opacity: 0;
   }
 }

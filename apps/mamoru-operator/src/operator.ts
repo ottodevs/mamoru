@@ -1504,6 +1504,8 @@ export class Operator {
           { token: p.token1, amount: p.amount1.toString(), decimals: entry(p.token1, this.cfg.registry).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token1, p.amount1, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry).toString() },
         ],
         valueUsdc: positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry).toString(),
+        // otto/mamoru#233: where the pool's price sits in the position's range, for the gauge by "In range".
+        range: { lower: p.tickLower, upper: p.tickUpper, tick: r.prices[p.pool]!.tick },
       })),
       progress: this.progressOf(acc),
     }

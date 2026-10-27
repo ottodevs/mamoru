@@ -125,6 +125,7 @@ export type FundingView = {
     tokenId: string; pool: string; liquidity: string; inRange: boolean; amountUsdc: string; amountCbbtc: string
     amounts?: { token: string; amount: string; decimals: number; valueUsdc?: string }[]   // both sides of any pool, base units, each with its value in USDC
     valueUsdc?: string                                                  // position value in USDC base units
+    range?: { lower: number; upper: number; tick: number }              // otto/mamoru#233: its ticks and the pool's tick now, for the range gauge
   }[]
   // What the engine is doing right now, for a subtle progress line in Working capital.
   // otto/mamoru#215: 'bridging' is savings on their way to the account's sleeve on another chain, with `bridge` saying how far.
