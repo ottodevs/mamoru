@@ -1,9 +1,10 @@
 import type { Address } from '@mamoru/domain'
 import type { MultiSendCall } from '@mamoru/account/safe'
 import type { LivePosition } from '@mamoru/account/live'
-import { entry, type Registry } from '@mamoru/registry'
+import { address, entry, erc4626Abi, type Registry } from '@mamoru/registry'
+import { encodeFunctionData } from 'viem'
 import { uniswapV3 } from '@mamoru/uniswap-v3'
-import { positionUsdc, type PoolPosition, type PoolPrice } from './chain.ts'
+import { positionUsdc, type PoolPosition, type PoolPrice, type VaultHolding } from './chain.ts'
 
 /** A swap of `token` back to USDC on `pool`. */
 export type SwapBack = { token: string; pool: string; amountIn: bigint; amountOutMinimum: bigint }
@@ -76,4 +77,49 @@ export function swapBackCalls(account: Address, swaps: SwapBack[], registry: Reg
 export function routeOf(token: string, bucketPools: string[], usdcPools: string[], registry: Registry): string | undefined {
   const has = (p: string) => entry(p, registry).token0 === token || entry(p, registry).token1 === token
   return bucketPools.find(has) ?? usdcPools.find(has)
+}
+
+/**
+ * otto/mamoru#210: what an owner exit takes out of the Safe's vaults: `withdraw(assets)` for part of a vault, `redeem`
+ * of every share when the whole vault goes (no share dust left behind). `all`: every share (Stop).
+ */
+export type VaultExit = { vault: string; assets: bigint; shares: bigint; all: boolean }
+
+/**
+ * otto/mamoru#210: the vault part of a withdrawal or a Stop. Vaults first (they are the stables bucket and pay out
+ * without a swap), in `order` (the policy's), each only as far as still needed and never past what it can pay now
+ * (`maxWithdraw`). `need` null: everything (Stop). Returns the exits and what of `need` the vaults cannot pay now.
+ */
+export function planVaultExit(vaults: readonly VaultHolding[], need: bigint | null, order: readonly string[]): { exits: VaultExit[]; short: bigint } {
+  const rank = (v: VaultHolding) => {
+    const i = order.indexOf(v.name)
+    return i < 0 ? order.length : i
+  }
+  const exits: VaultExit[] = []
+  let remaining = need
+  let short = 0n
+  for (const v of [...vaults].filter((x) => x.shares > 0n).sort((a, b) => rank(a) - rank(b))) {
+    if (remaining !== null && remaining <= 0n) break
+    const want = remaining === null || remaining >= v.assets ? v.assets : remaining
+    const payable = want < v.maxWithdraw ? want : v.maxWithdraw
+    if (payable < want) short += want - payable
+    if (payable > 0n) {
+      // The whole holding, payable in full: redeem every share. Otherwise withdraw the assets (the vault rounds up the shares).
+      const all = payable === v.assets && v.maxRedeem >= v.shares
+      exits.push({ vault: v.name, assets: payable, shares: all ? v.shares : 0n, all })
+    }
+    if (remaining !== null) remaining -= payable
+  }
+  if (remaining !== null && remaining > 0n) short = remaining > short ? remaining : short
+  return { exits, short }
+}
+
+export function vaultExitCalls(account: Address, exits: readonly VaultExit[], registry: Registry): MultiSendCall[] {
+  return exits.map((x) => ({
+    to: address(x.vault, registry),
+    value: 0n,
+    data: x.all
+      ? encodeFunctionData({ abi: erc4626Abi, functionName: 'redeem', args: [x.shares, account, account] })
+      : encodeFunctionData({ abi: erc4626Abi, functionName: 'withdraw', args: [x.assets, account, account] }),
+  }))
 }

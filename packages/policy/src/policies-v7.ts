@@ -31,6 +31,8 @@ export const conservadorLiveV7: PolicyVersion = {
   ...conservadorLiveV6,
   policyId: 'conservador-live-v7',
   version: '0.1.0',
+  // #186: at live relayer cost a deposit earns its two operations back in about a month from ~40 USDC.
+  vaultMinDeposit: 40_000_000n,
   buckets: [
     { id: 'stables', preference: 5000, pools: [], vaults: [...V7_VAULTS] },
     { id: 'risk', preference: 3500, pools: ['pool:WETH/USDC/3000'] },

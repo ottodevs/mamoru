@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { ApyView } from '@mamoru/domain'
-import { LLAMA_POOL_IDS, planPools, type ApyCache, type Fetcher } from '../../src/api/apy/source.ts'
+import { LLAMA_POOL_IDS, LLAMA_VAULT_IDS, planPools, type ApyCache, type Fetcher } from '../../src/api/apy/source.ts'
 import { harness } from './helpers.ts'
 
 // conservador-live-v2: 50% USDC/USDT 0.01%, 40% USDC/cbBTC 0.05%, 10% WETH/USDC 0.3%.
@@ -9,6 +9,12 @@ const BTC = '0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef'
 const RISK = '0x6c561B446416E1A00E8E93E221854d6eA4171372'
 const ID = { [STABLE]: LLAMA_POOL_IDS['pool:USDC/USDT/100']!, [BTC]: LLAMA_POOL_IDS['pool:USDC/cbBTC/500']!, [RISK]: LLAMA_POOL_IDS['pool:WETH/USDC/3000']! }
 const NOW = new Date('2026-09-26T18:00:00Z')
+// otto/mamoru#210: the stables vaults, rated at their base APY (rewards on top must not count).
+const VAULTS = { [LLAMA_VAULT_IDS['vault:gtUSDCp']!]: { status: 'success', data: [{ timestamp: new Date(NOW.getTime() - 86_400_000).toISOString(), apy: 6, apyBase: 4.8 }] }, [LLAMA_VAULT_IDS['vault:waBasUSDC']!]: { status: 'success', data: [{ timestamp: new Date(NOW.getTime() - 86_400_000).toISOString(), apy: 5.9, apyBase: 4.5 }] } }
+const NO_VAULT_RATES = [
+  { pool: 'vault:gtUSDCp', weight: 0, currentPct: null, monthlyPct: null },
+  { pool: 'vault:waBasUSDC', weight: 0, currentPct: null, monthlyPct: null },
+]
 const day = (d: number) => new Date(NOW.getTime() - d * 86_400_000).toISOString()
 
 /** GeckoTerminal body whose 24h fee APR is exactly `pct` for a pool with the given fee tier. */
@@ -65,6 +71,7 @@ describe('GET /api/apy', () => {
       [ID[STABLE]]: llama({ d: 40, apy: 99 }, { d: 20, apy: 2 }, { d: 1, apy: 4 }),
       [ID[BTC]]: llama({ d: 1, apy: 10 }),
       [ID[RISK]]: llama({ d: 2, apy: 30 }),
+      ...VAULTS,
     })
     const { res, view } = await getApy(fetcher)
     expect(res.status).toBe(200)
@@ -81,6 +88,9 @@ describe('GET /api/apy', () => {
         { pool: 'pool:USDC/USDT/100', weight: 5000, currentPct: 2, monthlyPct: 3 },
         { pool: 'pool:USDC/cbBTC/500', weight: 4000, currentPct: 5, monthlyPct: 10 },
         { pool: 'pool:WETH/USDC/3000', weight: 1000, currentPct: 20, monthlyPct: 30 },
+        // Weight 0: a vault rates its own position, never the reference blend above (5 and 8.5 without them).
+        { pool: 'vault:gtUSDCp', weight: 0, currentPct: 4.8, monthlyPct: 4.8 },
+        { pool: 'vault:waBasUSDC', weight: 0, currentPct: 4.5, monthlyPct: 4.5 },
       ],
       asOf: NOW.toISOString(),
     })
@@ -101,6 +111,7 @@ describe('GET /api/apy', () => {
       { pool: 'pool:USDC/cbBTC/500', weight: 4000, currentPct: 7, monthlyPct: 9 },
       // RISK has no GeckoTerminal data either; its current falls back to DefiLlama's latest apyBase (50).
       { pool: 'pool:WETH/USDC/3000', weight: 1000, currentPct: 50, monthlyPct: 50 },
+      ...NO_VAULT_RATES,
     ])
   })
 
@@ -153,19 +164,21 @@ describe('GET /api/apy', () => {
       [ID[STABLE]]: llama({ d: 1, apy: 2 }),
       [ID[BTC]]: llama({ d: 1, apy: 5 }),
       [ID[RISK]]: llama({ d: 1, apy: 20 }),
+      ...VAULTS,
     }
     const cache = memoryCache()
     const ok = fakeFetch(all)
     await getApy(ok.fetcher, cache)
     await getApy(ok.fetcher, cache)
-    expect(ok.calls.length).toBe(6)
+    // Three pools (GeckoTerminal + DefiLlama monthly) and two vaults (DefiLlama current + monthly), then all from cache.
+    expect(ok.calls.length).toBe(10)
 
     const down = fakeFetch({})
     const cold = memoryCache()
     await getApy(down.fetcher, cold)
     await getApy(down.fetcher, cold)
-    // Per pool and request: GeckoTerminal, DefiLlama for the current fallback, DefiLlama for the monthly mean.
-    expect(down.calls.length).toBe(18)
+    // Per pool and request: GeckoTerminal, DefiLlama for the current fallback, DefiLlama for the monthly mean; per vault two.
+    expect(down.calls.length).toBe(26)
 
     // Fresh current entries expire but last-good survives: GeckoTerminal down, value still served.
     const stale = memoryCache()

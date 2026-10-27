@@ -219,9 +219,9 @@ export function grantKey(t: { name: GrantName; pool?: string; vault?: string }):
   return scope ? `${t.name}:${scope}` : t.name
 }
 
-/** The key of the grant `name` that covers `pool` in this policy (plain `name` for single-pair policies). */
+/** The key of the grant `name` that covers `pool` (or vault) in this policy (plain `name` for single-pair policies). */
 export function grantKeyFor(policy: { session: { grants: GrantTemplate[] } }, name: GrantName, pool: string): string {
-  const t = policy.session.grants.find((g) => g.name === name && g.pool === pool) ?? policy.session.grants.find((g) => g.name === name && !g.pool)
+  const t = policy.session.grants.find((g) => g.name === name && (g.pool === pool || g.vault === pool)) ?? policy.session.grants.find((g) => g.name === name && !g.pool && !g.vault)
   if (!t) throw new Error(`no ${name} grant for ${pool}`)
   return grantKey(t)
 }

@@ -212,11 +212,13 @@ export const multiSendCallOnlyAbi = parseAbi(['function multiSend(bytes transact
 export const erc4626Abi = parseAbi([
   'function deposit(uint256 assets, address receiver) returns (uint256 shares)',
   'function redeem(uint256 shares, address receiver, address owner) returns (uint256 assets)',
+  'function withdraw(uint256 assets, address receiver, address owner) returns (uint256 shares)',
   'function asset() view returns (address)',
   'function decimals() view returns (uint8)',
   'function balanceOf(address owner) view returns (uint256)',
   'function totalAssets() view returns (uint256)',
   'function convertToAssets(uint256 shares) view returns (uint256)',
+  'function previewDeposit(uint256 assets) view returns (uint256)',
   'function previewRedeem(uint256 shares) view returns (uint256)',
   'function maxDeposit(address receiver) view returns (uint256)',
   'function maxRedeem(address owner) view returns (uint256)',

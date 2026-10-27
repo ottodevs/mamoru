@@ -4,7 +4,7 @@ import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { amountsOf, decide, outOfRangeSinceOf, twapFloor, withOutOfRangeSince, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
 import { hasIncrease, hasManageAny, TWAP_SHORT_WINDOW_SECONDS, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
-import { baseRegistry, address, entry, entryPointV07Abi, erc20Abi, isDeployed, mamoruActionPolicyV2Abi, nonfungiblePositionManagerAbi, smartSessionAbi, tokenMessengerV2Abi, uniswapV3PoolAbi, type Registry, type RegistryName } from '@mamoru/registry'
+import { baseRegistry, address, entry, entryPointV07Abi, erc20Abi, erc4626Abi, isDeployed, mamoruActionPolicyV2Abi, nonfungiblePositionManagerAbi, smartSessionAbi, tokenMessengerV2Abi, uniswapV3PoolAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import {
   Batch,
   contractRead,
@@ -516,6 +516,8 @@ export class Engine {
       savingsAsset: this.cfg.policy.savingsAsset,
       ethPricePool: this.cfg.nativePricePool ?? ETH_PRICE_POOL,
       ...(this.cfg.registry ? { registry: this.cfg.registry } : {}),
+      // otto/mamoru#210: the vaults of a vault bucket; a policy without one reads none.
+      ...(this.cfg.policy.buckets.some((b) => b.vaults?.length) ? { vaults: this.cfg.policy.buckets.flatMap((b) => b.vaults ?? []) } : {}),
     })
     const gh = this.cfg.guardHistory
     if (!gh || gh.pools.length === 0) return obs
@@ -617,7 +619,8 @@ export class Engine {
     }
     const callData = executeCallData(prepared.calls)
     // otto/mamoru#215: a bridge's pool is on the other chain; no MamoruActionPolicy of this one covers it.
-    if (proposal.kind !== 'bridge_out') await this.syncActionPolicyLedger(proposal.pool, block.number, 'tokenId' in proposal && typeof proposal.tokenId === 'bigint' ? proposal.tokenId : undefined)
+    // otto/mamoru#210: a vault op touches no pool either.
+    if (proposal.kind !== 'bridge_out' && proposal.kind !== 'vault_deposit' && proposal.kind !== 'vault_redeem') await this.syncActionPolicyLedger(proposal.pool, block.number, 'tokenId' in proposal && typeof proposal.tokenId === 'bigint' ? proposal.tokenId : undefined)
     const pre = precheck(
       { sender: this.cfg.account, callData, signature: useModeSignature(session.permissionId, '0x') },
       { chainId: this.cfg.chainId, now: Number(block.timestamp), ledger: this.ledger },
@@ -1291,6 +1294,69 @@ export class Engine {
     }
   }
 
+  /**
+   * otto/mamoru#210: a vault bucket's op, exactly what the vault-supply grant allows. A deposit is approve(vault, assets)
+   * on the savings token then deposit(assets, this account): the approval is spent in full. A redeem is redeem(shares,
+   * this account, this account). Both are read again at the prepare block: the vault must take the deposit
+   * (`maxDeposit`) or pay the redeem (`maxRedeem`), or the op waits for a later review (DECIDE_WAIT_VAULT_LIQUIDITY,
+   * never a half-built exit), and the quote is the vault's own preview at that block, which the simulation must meet.
+   * No on-chain expiry: ERC-4626 has no deadline and the share price only moves with the vault's interest, so a late
+   * landing deposits or redeems at that later price, within the grant's caps.
+   */
+  private async prepareVault(p: Extract<Proposal, { kind: 'vault_deposit' | 'vault_redeem' }>, blockNumber: bigint): Promise<Prepared> {
+    const e = entry(p.vault, this.registry)
+    if (e.kind !== 'vault') throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', `${p.vault} is not a vault of the ${this.registry.chain} registry`)
+    if (!this.cfg.policy.buckets.some((b) => b.vaults?.includes(p.vault))) throw new ReasonError('POLICY_DENIED_TARGET', `${p.vault} is not a vault of ${this.cfg.policy.policyId}`)
+    const read = <T>(functionName: 'maxDeposit' | 'maxRedeem' | 'previewDeposit' | 'previewRedeem', arg: Address | bigint) =>
+      this.client.readContract({ address: e.address, abi: erc4626Abi, functionName, args: [arg as never], blockNumber }).catch((err: Error) => {
+        throw new ReasonError('OBS_RPC_UNAVAILABLE', `${p.vault}.${functionName} at ${blockNumber}: ${err.message.split('\n')[0]}`)
+      }) as Promise<T>
+    const acct = this.cfg.account
+    if (p.kind === 'vault_deposit') {
+      if (p.assets <= 0n) throw new ReasonError('POLICY_DENIED_AMOUNT', `vault_deposit of ${p.assets}`)
+      if ((await read<bigint>('maxDeposit', acct)) < p.assets) throw new ReasonError('DECIDE_WAIT_VAULT_LIQUIDITY', `${p.vault} takes less than ${p.assets} now`)
+      const shares = await read<bigint>('previewDeposit', p.assets)
+      if (shares === 0n) throw new ReasonError('POLICY_DENIED_AMOUNT', `${p.vault} gives no shares for ${p.assets}`)
+      const token = address(this.cfg.policy.savingsAsset, this.registry)
+      return {
+        expiresAt: null,
+        quote: { amountIn: p.assets, amountOut: shares, amountOutMinimum: shares },
+        calls: [
+          { target: token, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [e.address, p.assets] }) },
+          { target: e.address, value: 0n, callData: encodeFunctionData({ abi: erc4626Abi, functionName: 'deposit', args: [p.assets, acct] }) },
+        ],
+      }
+    }
+    if (p.shares <= 0n) throw new ReasonError('POLICY_DENIED_AMOUNT', `vault_redeem of ${p.shares} shares`)
+    if ((await read<bigint>('maxRedeem', acct)) < p.shares) throw new ReasonError('DECIDE_WAIT_VAULT_LIQUIDITY', `${p.vault} cannot pay ${p.shares} shares now`)
+    const assets = await read<bigint>('previewRedeem', p.shares)
+    return {
+      expiresAt: null,
+      quote: { amountIn: p.shares, amountOut: assets, amountOutMinimum: assets },
+      calls: [{ target: e.address, value: 0n, callData: encodeFunctionData({ abi: erc4626Abi, functionName: 'redeem', args: [p.shares, acct, acct] }) }],
+    }
+  }
+
+  /**
+   * otto/mamoru#210: a deposit moves the savings token by exactly -assets and gives at least the previewed shares; a
+   * redeem takes exactly -shares and pays at least the previewed assets. No position and no other token moves.
+   */
+  private vaultMismatch(p: Extract<Proposal, { kind: 'vault_deposit' | 'vault_redeem' }>, prepared: Prepared, sim: Simulation): string | null {
+    const savings = this.cfg.policy.savingsAsset
+    const d = (t: string) => sim.deltas[t] ?? 0n
+    if (sim.nftDelta !== 0n) return `positions changed by ${sim.nftDelta}`
+    for (const [t, v] of Object.entries(sim.deltas)) if (t !== savings && t !== p.vault && v !== 0n) return `${t} moved ${v} in a vault op`
+    const q = prepared.quote!
+    if (p.kind === 'vault_deposit') {
+      if (d(savings) !== -p.assets) return `${savings} moved ${d(savings)}, intent ${-p.assets}`
+      if (d(p.vault) < q.amountOutMinimum) return `${p.vault} shares rose ${d(p.vault)}, below the preview ${q.amountOutMinimum}`
+      return null
+    }
+    if (d(p.vault) !== -p.shares) return `${p.vault} shares moved ${d(p.vault)}, intent ${-p.shares}`
+    if (d(savings) < q.amountOutMinimum) return `${savings} rose ${d(savings)}, below the preview ${q.amountOutMinimum}`
+    return null
+  }
+
   /** FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. */
   private async prepareCalls(p: Proposal, blockNumber: bigint, timestamp: bigint, session: EngineSession): Promise<Prepared> {
     const acct = this.cfg.account
@@ -1299,6 +1365,7 @@ export class Engine {
     const deadline = timestamp + BigInt(this.cfg.policy.execution.observationTtlSeconds)
     await this.refuseWhilePaused(blockNumber)
     if (p.kind === 'bridge_out') return this.prepareBridgeOut(p)
+    if (p.kind === 'vault_deposit' || p.kind === 'vault_redeem') return this.prepareVault(p, blockNumber)
     // MamoruActionPolicyV2 accounts (v5) quote their swaps with the price limit; the deployed V1's (v4) keep the path below.
     const v4Swap = p.kind === 'enter_swap' && this.cfg.policy.actionPolicy?.contractVersion === 2 ? this.v4PoolConfig(p.pool) : undefined
     if (p.kind === 'enter_swap' && v4Swap) return this.prepareV4Swap(p, blockNumber, session, deadline, v4Swap)
@@ -1498,6 +1565,7 @@ export class Engine {
       return null
     }
     if (p.kind === 'bridge_out') return this.bridgeMismatch(p, sim)
+    if (p.kind === 'vault_deposit' || p.kind === 'vault_redeem') return this.vaultMismatch(p, prepared, sim)
     if (sim.nftDelta !== 0n) return `positions changed by ${sim.nftDelta}`
     // FR-UNI-005, otto/mamoru#140: a harvest only collects to the account; nothing else moves.
     const pool = entry(p.pool, this.registry)

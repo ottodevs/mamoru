@@ -45,7 +45,7 @@ import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, amountsForLiquidity, inUsdc, livePool, nativePricePool, positionUsdc, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
-import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
+import { closeCalls, planReduce, planVaultExit, routeOf, swapBackCalls, vaultExitCalls, type SwapBack, type VaultExit } from './unwind.ts'
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
 import { ONE_ACTION_GAS_UNITS, gasReserveAlertOverrideFromEnv, gasReserveAlertWei } from './gas-reserve.ts'
 import { Lock } from './lock.ts'
@@ -569,7 +569,7 @@ const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
 }
 
 function engineKind(k: OpRecord['kind']): OpView['kind'] {
-  return k === 'close_position' ? 'exit' : k === 'harvest' || k === 'convert' || k === 'rerange' || k === 'reduce' ? 'reduce' : 'enter'
+  return k === 'close_position' ? 'exit' : k === 'harvest' || k === 'convert' || k === 'rerange' || k === 'reduce' || k === 'vault_redeem' ? 'reduce' : 'enter'
 }
 
 /**
@@ -582,6 +582,9 @@ export function opIntentView(intent: Proposal): Pick<OpView, 'pool' | 'tokenIn' 
   if (intent.kind === 'bridge_out') return { pool: intent.pool, amountIn: intent.amount.toString(), bridge: { chainId: intent.chainId, amountUsdc: intent.amount.toString(), state: 'sending' } }
   if (intent.kind === 'enter_swap') return { pool: intent.pool, tokenIn: intent.tokenIn, tokenOut: intent.tokenOut, amountIn: intent.amountIn.toString() }
   if (intent.kind === 'harvest' && intent.convert) return { pool: intent.pool, convert: intent.convert.token }
+  // otto/mamoru#210: `pool` is the vault's registry name; the amount is USDC for a deposit and shares for a redeem.
+  if (intent.kind === 'vault_deposit') return { pool: intent.pool, tokenIn: 'USDC', tokenOut: intent.vault, amountIn: intent.assets.toString() }
+  if (intent.kind === 'vault_redeem') return { pool: intent.pool, tokenIn: intent.vault, tokenOut: 'USDC', amountIn: intent.shares.toString() }
   return { pool: intent.pool }
 }
 
@@ -602,6 +605,9 @@ const ENGINE_STEP: Record<OpRecord['kind'], Progress['step']> = {
   reduce: 'rebalancing',
   // otto/mamoru#215: savings on their way to the account's sleeve on another chain.
   bridge_out: 'bridging',
+  // otto/mamoru#210: savings into the stables bucket's vault, and back out of it.
+  vault_deposit: 'opening',
+  vault_redeem: 'rebalancing',
 }
 
 /** Accounts activated before the operator stored a policy id per account ran this policy. */
@@ -630,6 +636,11 @@ function unrevoked(acc: AccountState, revokes: Hex[]): Hex[] {
 function unrevokedIds(ids: Hex[], gone: Hex[]): Hex[] {
   const g = new Set(gone.map((id) => id.toLowerCase()))
   return ids.filter((id) => !g.has(id.toLowerCase()))
+}
+
+/** otto/mamoru#210: "Morpho · Gauntlet USDC Prime" for vault:gtUSDCp (the registry's label, else the name). */
+function vaultLabel(vault: string, registry: Registry): string {
+  return entry(vault, registry).label ?? vault.replace(/^vault:/, '')
 }
 
 /** "USDC/cbBTC 0.05%" for pool:USDC/cbBTC/500. */
@@ -728,7 +739,16 @@ export class Operator {
   snapshotTargets(): SnapshotTarget[] {
     return Object.values(this.store.state.accounts)
       .filter((a) => a.active || !!a.armed)
-      .map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, active: !!a.active, armed: !!a.armed }))
+      .map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, active: !!a.active, armed: !!a.armed, ...(this.hasVaults(a) ? { vaults: true } : {}) }))
+  }
+
+  /** otto/mamoru#210: the account's policy has a vault bucket (false when its policy cannot be resolved). */
+  private hasVaults(acc: AccountState): boolean {
+    try {
+      return this.bucketVaults(acc).length > 0
+    } catch {
+      return false
+    }
   }
 
   /** GET /metrics: engine health of every account with a running loop, newest-first. */
@@ -1206,6 +1226,16 @@ export class Operator {
   }
 
   /**
+   * otto/mamoru#210: the order an owner exit takes the vaults in: the policy's, last first (as the engine's own redeem,
+   * so the first vault keeps the bucket); a vault the policy does not name after them.
+   */
+  private bucketVaults(acc: AccountState): string[] {
+    return this.policyOf(acc)
+      .buckets.flatMap((b) => b.vaults ?? [])
+      .reverse()
+  }
+
+  /**
    * Until when the engine's grants of a running account are valid (the earliest of them), and whether the renewal
    * is due: inside the policy's renewal window, or already lapsed. Null when the account is not running.
    */
@@ -1370,7 +1400,8 @@ export class Operator {
       approval: this.approvalView(acc),
       idle: idleTokens(r, this.cfg.registry),
       engine: this.engineView(acc),
-      positions: this.sizingPositions(acc, r).map((p) => ({
+      positions: [
+        ...this.sizingPositions(acc, r).map((p) => ({
         tokenId: p.tokenId.toString(),
         pool: p.pool,
         liquidity: p.liquidity.toString(),
@@ -1383,6 +1414,21 @@ export class Operator {
         ],
         valueUsdc: positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry).toString(),
       })),
+        // otto/mamoru#210: USDC supplied to a vault is working capital too, one row per vault held.
+        ...(r.vaults ?? [])
+          .filter((v) => v.shares > 0n)
+          .map((v) => ({
+            tokenId: v.name,
+            pool: v.name,
+            liquidity: v.shares.toString(),
+            inRange: true,
+            amountUsdc: v.assets.toString(),
+            amountCbbtc: '0',
+            amounts: [{ token: 'USDC', amount: v.assets.toString(), decimals: 6, valueUsdc: v.assets.toString() }],
+            valueUsdc: v.assets.toString(),
+            vault: { name: v.name, label: vaultLabel(v.name, this.cfg.registry), shares: v.shares.toString(), withdrawableUsdc: v.maxWithdraw.toString() },
+          })),
+      ],
       progress: this.progressOf(acc),
     }
   }
@@ -1403,7 +1449,8 @@ export class Operator {
     // The ids as they were when the read started: an id admitted while it was in flight (onMinted) was not looked
     // for, and is never pruned on this read's word.
     const asked = acc.admittedTokenIds ? [...acc.admittedTokenIds] : undefined
-    const r = await readSafe(this.client, safe, this.cfg.registry, asked ? { admitted: asked.map((id) => BigInt(id)) } : {})
+    const vaults = this.hasVaults(acc)
+    const r = await readSafe(this.client, safe, this.cfg.registry, { ...(asked ? { admitted: asked.map((id) => BigInt(id)) } : {}), ...(vaults ? { vaults } : {}) })
     // Sol review #6: the record holds what the Safe still owns, so it stays bounded. Pruned from a read that saw every
     // NFT (enumerated) or checked the admitted ids one by one (ownerOf), never from a capped enumeration.
     const sawAll = r.byId ? (asked?.length ?? 0) <= MAX_INVENTORY : (r.positionCount ?? 0) <= MAX_INVENTORY
@@ -2803,14 +2850,22 @@ export class Operator {
     const slip = this.policyOf(acc).execution.slippageBps
     let reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[] = []
     let swaps: QuotedSwap[] = []
-    if (r.usdc < amount) {
-      const plan = await this.reducePlan(acc, live.safe, r, amount, slip)
+    // otto/mamoru#210: the stables bucket's vaults pay first (no swap, no price risk); positions only for what they cannot.
+    let vaultExits: VaultExit[] = []
+    let fromVaults = 0n
+    if (r.usdc < amount && r.vaults?.length) {
+      vaultExits = planVaultExit(r.vaults, amount - r.usdc, this.bucketVaults(acc)).exits
+      fromVaults = vaultExits.reduce((s, x) => s + x.assets, 0n)
+    }
+    if (r.usdc + fromVaults < amount) {
+      const plan = await this.reducePlan(acc, live.safe, { ...r, usdc: r.usdc + fromVaults }, amount, slip)
       reduce = plan.reduce
       swaps = plan.swaps
     }
     const out = asset === 'USDC' ? undefined : await this.receiveQuote(asset, amount, r.block, slip)
     const deadline = (await this.client.getBlock()).timestamp + 1800n
     const calls = [
+      ...vaultExitCalls(live.safe, vaultExits, this.cfg.registry),
       ...closeCalls(live.safe, reduce.map((x) => x.lp), deadline, false, this.cfg.registry),
       ...swapBackCalls(live.safe, swaps, this.cfg.registry),
       ...transferBatch({ account: live.safe, to, amountUsdc: amount, reduce: [], deadline, receive: out?.receive, registry: this.cfg.registry }),
@@ -2824,6 +2879,7 @@ export class Operator {
     const short = `${to.slice(0, 6)}…${to.slice(-4)}`
     const summary = [
       ...(r.deployed ? [] : [`Create your Safe ${live.safe} on ${this.chainName()}`]),
+      ...vaultExits.map((x) => `Take ${fmtUsdc(x.assets)} USDC out of ${vaultLabel(x.vault, this.cfg.registry)}${x.all ? ' (all of it)' : ''}`),
       ...reduce.map((x) => `Withdraw ${(x.bps / 100).toFixed(2)}% of position #${x.pos.tokenId} (${poolLabel(x.pos.pool, this.cfg.registry)})`),
       ...swaps.map((sw) => `Swap ${sw.amountIn} ${sw.token} units to at least ${fmtUsdc(sw.amountOutMinimum)} USDC`),
       ...(out
@@ -2964,7 +3020,12 @@ export class Operator {
       const swaps = await this.swapQuotes(acc, got, r.block, slip)
       const freed = (got.USDC ?? 0n) + swaps.reduce((s, x) => s + x.amountOutMinimum, 0n)
       if (r.usdc + freed >= amount) return { reduce, swaps }
-      if (target >= value) throw new HttpError(409, 'INSUFFICIENT_FUNDS', `the Safe can free about ${fmtUsdc(r.usdc + freed)} USDC, less than ${fmtUsdc(amount)}`)
+      if (target >= value) {
+        // otto/mamoru#210: savings a vault holds but cannot pay right now (its markets lent out) are said apart.
+        const locked = (r.vaults ?? []).reduce((s, v) => s + (v.assets > v.maxWithdraw ? v.assets - v.maxWithdraw : 0n), 0n)
+        const wait = locked > 0n ? `; ${fmtUsdc(locked)} USDC more sits in a lending vault that cannot pay it out right now, try again later` : ''
+        throw new HttpError(409, 'INSUFFICIENT_FUNDS', `the Safe can free about ${fmtUsdc(r.usdc + freed)} USDC, less than ${fmtUsdc(amount)}${wait}`)
+      }
       margin = (margin * 120n) / 100n
     }
   }
@@ -3416,16 +3477,21 @@ export class Operator {
     for (const [t, v] of Object.entries(r.tokens)) if (t !== 'USDC' && v > 0n) held[t] = v + 1n
     for (const [t, v] of Object.entries(got)) if (t !== 'USDC') held[t] = (held[t] ?? 1n) + v
     const swaps = await this.swapQuotes(acc, held, r.block, slip)
-    if (!revokes.length && !positions.length && !swaps.length) throw new HttpError(409, 'NOTHING_TO_STOP', 'no grant, no position and nothing to swap back')
+    // otto/mamoru#210: Stop takes every vault share back to USDC, as far as each vault can pay now.
+    const vault = planVaultExit(r.vaults ?? [], null, this.bucketVaults(acc))
+    if (!revokes.length && !positions.length && !swaps.length && !vault.exits.length) throw new HttpError(409, 'NOTHING_TO_STOP', 'no grant, no position and nothing to swap back')
     const deadline = (await this.client.getBlock()).timestamp + 1800n
     const calls = [
       ...(revokes.length || positions.length ? stopBatch({ account: live.safe, permissionIds: revokes, positions, deadline, registry: this.cfg.registry }) : []),
+      ...vaultExitCalls(live.safe, vault.exits, this.cfg.registry),
       ...swapBackCalls(live.safe, swaps, this.cfg.registry),
     ]
     await this.checkFromSafe(live.safe, calls, r.block, undefined)
     const summary = [
       ...(revokes.length ? [`Revoke the engine's ${revokes.length} session grant(s)`] : []),
       ...chosen.map((p) => `Close and burn position #${p.tokenId} (${poolLabel(p.pool, this.cfg.registry)})`),
+      ...vault.exits.map((x) => `Take ${fmtUsdc(x.assets)} USDC out of ${vaultLabel(x.vault, this.cfg.registry)}`),
+      ...(vault.short > 0n ? [`${fmtUsdc(vault.short)} USDC stays in a lending vault that cannot pay it out right now: Stop again later to take it`] : []),
       ...swaps.map((sw) => `Swap ${sw.amountIn} ${sw.token} units to at least ${fmtUsdc(sw.amountOutMinimum)} USDC`),
       'Everything stays in your Safe as USDC',
       ...(left > 0 ? [`${left} more position(s) stay in your Safe: Stop again to close them`] : []),

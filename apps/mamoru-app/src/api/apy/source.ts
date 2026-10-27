@@ -19,6 +19,16 @@ export const LLAMA_POOL_IDS: Record<string, string> = {
   'pool:WETH/USDC/3000': 'b99bcdf5-1350-4269-981e-0e9b5cccb007', // WETH-USDC 0.3%
 }
 
+/**
+ * otto/mamoru#210: DefiLlama yields ids of the stables bucket's vaults, found 2026-10-27 in yields.llama.fi/pools
+ * (chain Base; gtUSDCp by its TVL, 412.5M, equal to the vault's totalAssets read on chain; Aave v3 USDC is the reserve
+ * waBasUSDC wraps). A vault pays in share price, so only the base APY counts, never rewards (#186).
+ */
+export const LLAMA_VAULT_IDS: Record<string, string> = {
+  'vault:gtUSDCp': 'e0672197-9f3e-4414-bca5-e6b4c90aa469', // Morpho, Gauntlet USDC Prime
+  'vault:waBasUSDC': '7e0661bf-8cf3-45e6-9424-31916d4c7b84', // Aave v3 USDC on Base
+}
+
 export type PlanPool = { name: string; address: string; fee: number; llamaId: string; weight: number }
 
 /** One pool per bucket, weighted by the bucket's preference (bps). */
@@ -85,14 +95,14 @@ export async function llamaSpot(fetcher: Fetcher, poolId: string): Promise<numbe
   return num(last?.apyBase) ?? num(last?.apy)
 }
 
-/** Mean of DefiLlama's daily APY points over the last 30 days. */
-export async function llamaMonthly(fetcher: Fetcher, poolId: string, now: Date): Promise<number | null> {
+/** Mean of DefiLlama's daily APY points over the last 30 days. `baseOnly` (a vault, #210): the base APY, never rewards. */
+export async function llamaMonthly(fetcher: Fetcher, poolId: string, now: Date, baseOnly = false): Promise<number | null> {
   const points = await llamaChart(fetcher, poolId)
   if (!points) return null
   const since = now.getTime() - 30 * DAY_MS
   const window = points
     .filter((p) => p.timestamp !== undefined && Date.parse(p.timestamp) >= since)
-    .map((p) => num(p.apy) ?? num(p.apyBase))
+    .map((p) => (baseOnly ? num(p.apyBase) : (num(p.apy) ?? num(p.apyBase))))
     .filter((v): v is number => v !== null)
   return window.length > 0 ? window.reduce((s, v) => s + v, 0) / window.length : null
 }
@@ -139,6 +149,17 @@ function poolMonthly(fetcher: Fetcher, cache: ApyCache | null, p: PlanPool, now:
   return cached(cache, `${KEY}/monthly/${p.llamaId}`, MONTHLY_TTL, () => llamaMonthly(fetcher, p.llamaId, now))
 }
 
+/** otto/mamoru#210: a vault's rates: DefiLlama's latest base APY and its 30-day mean of base APY. */
+function vaultRates(fetcher: Fetcher, cache: ApyCache | null, vault: string, llamaId: string, now: Date) {
+  return Promise.all([
+    cached(cache, `${KEY}/vault-current/${llamaId}`, CURRENT_TTL, async () => {
+      const last = (await llamaChart(fetcher, llamaId))?.at(-1)
+      return num(last?.apyBase)
+    }),
+    cached(cache, `${KEY}/vault-monthly/${llamaId}`, MONTHLY_TTL, () => llamaMonthly(fetcher, llamaId, now, true)),
+  ]).then(([currentPct, monthlyPct]) => ({ pool: vault, weight: 0, currentPct: round(currentPct), monthlyPct: round(monthlyPct) }))
+}
+
 /** Weighted mean over the pools that have data; weights renormalize over those. */
 export function combine(values: (number | null)[], weights: number[]): { pct: number | null; covered: number } {
   let sum = 0
@@ -166,9 +187,11 @@ function source(label: string, covered: number, total: number): string {
  */
 export async function apyView(fetcher: Fetcher, cache: ApyCache | null, now: Date, pools: PlanPool[] = planPools()): Promise<ApyView> {
   const weights = pools.map((p) => p.weight)
-  const [current, monthly] = await Promise.all([
+  const [current, monthly, vaults] = await Promise.all([
     Promise.all(pools.map((p) => poolCurrent(fetcher, cache, p))),
     Promise.all(pools.map((p) => poolMonthly(fetcher, cache, p, now))),
+    // Rated beside the plan pools, at weight 0: they name a position's rate, never the reference APY's mix.
+    Promise.all(Object.entries(LLAMA_VAULT_IDS).map(([vault, id]) => vaultRates(fetcher, cache, vault, id, now))),
   ])
   const c = combine(current, weights)
   const m = combine(monthly, weights)
@@ -179,7 +202,7 @@ export async function apyView(fetcher: Fetcher, cache: ApyCache | null, now: Dat
     currentSource: source(CURRENT_SOURCE, c.covered, pools.length),
     monthlyPct: m.pct,
     monthlySource: source(MONTHLY_SOURCE, m.covered, pools.length),
-    byPool: pools.map((p, i) => ({ pool: p.name, weight: p.weight, currentPct: round(current[i]), monthlyPct: round(monthly[i]) })),
+    byPool: [...pools.map((p, i) => ({ pool: p.name, weight: p.weight, currentPct: round(current[i]), monthlyPct: round(monthly[i]) })), ...vaults],
     asOf: now.toISOString(),
   }
 }
