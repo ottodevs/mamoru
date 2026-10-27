@@ -74,6 +74,8 @@ export const REASON_CODES = [
   'RISK_ACCOUNT_BLOCKLISTED',
   'RISK_SHADOW',
   'RISK_DATA_INSUFFICIENT',
+  // otto/mamoru#101 phase 1 (shadow): the pool's TVL is under Packaging's entry/monitor floor. Never changes a decision.
+  'RISK_POOL_TVL_FLOOR',
   'EHG_OK',
   'EHG_QUOTE_UNAVAILABLE',
   'EHG_TWAP_UNAVAILABLE',
