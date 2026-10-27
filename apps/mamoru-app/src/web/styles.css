@@ -1942,7 +1942,7 @@
 .op-tx:hover svg {
   transform: translate(1px, -1px);
 }
-.op-row.is-new {
+.panel.is-open .op-row.is-new {
   animation: op-new 1800ms ease-out both;
 }
 @keyframes op-new {

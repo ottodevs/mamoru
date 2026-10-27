@@ -543,16 +543,21 @@ export function Idle({ f, s }: { f: FundingView; s: Split }) {
   )
 }
 
-export function History({ ops, onRetry }: { ops: OpView[]; onRetry?: (kind: OpView['kind']) => void }) {
+export function History({ ops, onRetry, loaded = true }: { ops: OpView[]; onRetry?: (kind: OpView['kind']) => void; loaded?: boolean }) {
   const sorted = historyOps(ops)
   const chain = useChain()
-  // #235: an event that lands while the page is open glows once; what was there on the first read does not.
+  // #235: an event that lands while the page is open glows once; what the first completed read returned does not.
+  // The baseline waits for that read (`loaded`), so an account's past events never arrive as new ones.
   const seen = useRef<Set<string> | null>(null)
-  const fresh = new Set<string>()
-  if (seen.current === null) seen.current = new Set(sorted.map((o) => o.opId))
-  else for (const o of sorted) if (!seen.current.has(o.opId)) fresh.add(o.opId)
+  // Until when each arrival glows: the class outlives the render that found it, or the next poll would cut it short.
+  const glowUntil = useRef(new Map<string, number>())
+  const now = Date.now()
+  if (seen.current === null) {
+    if (loaded) seen.current = new Set(sorted.map((o) => o.opId))
+  } else for (const o of sorted) if (!seen.current.has(o.opId) && !glowUntil.current.has(o.opId)) glowUntil.current.set(o.opId, now + 2000)
+  const fresh = new Set([...glowUntil.current].filter(([, until]) => until > now).map(([id]) => id))
   useEffect(() => {
-    for (const o of sorted) seen.current!.add(o.opId)
+    if (seen.current) for (const o of sorted) seen.current.add(o.opId)
   })
   // Nothing to list yet: the same head, with nothing to open.
   if (!sorted.length)
@@ -1354,7 +1359,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           ) : null}
           <Working f={f} s={s as Split} apy={apy.data} price={price} otherChainsUsdc={otherChainsUsdc} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />
           <Idle f={f} s={s as Split} />
-          <History ops={opList} onRetry={retry} />
+          <History ops={opList} onRetry={retry} loaded={ops.isSuccess} />
         </>
       )}
       <footer className="foot">
