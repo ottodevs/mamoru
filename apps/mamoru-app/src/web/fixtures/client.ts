@@ -157,11 +157,26 @@ const operatorDown = param('operatordown')
 const operatorLate = param('operatorlate')
 let fundingReads = 0
 const dueApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 86_400_000) * 86_400 + 10 * 86_400, renewDue: true, expired: false } })
+// ?moves (dev only, otto/mamoru#219): the 26-oct USDC/USDT range move of c23e94e1 (close, swap, open) plus a harvest.
+const movesOn = param('moves')
+const movedRange = (): OpView[] => {
+  const at = (min: number) => new Date(Date.now() - min * 60_000).toISOString()
+  const pool = 'pool:USDC/USDT/100'
+  return [
+    { opId: 'own-1-activate', kind: 'activate', state: 'confirmed', txHash: `0x${'4'.repeat(64)}`, updatedAt: at(3000) },
+    { opId: 'eng-1-1-h-harvest', kind: 'reduce', step: 'harvest', state: 'confirmed', pool: 'pool:USDC/cbBTC/500', txHash: `0x${'7'.repeat(64)}`, updatedAt: at(900), facts: { at: at(900), gasWei: '9000000000000', gasUsdc: '21000', fees: [] } },
+    { opId: 'eng-1-1-a-rerange', kind: 'reduce', step: 'rerange', why: 'out', state: 'confirmed', pool, tokenId: '6291325', tickLower: -20, tickUpper: 20, txHash: '0x883bfeee77b6a34a1169a97d0a598a111e8292d974b67dcbc66c56d761d7e621', updatedAt: at(620), facts: { at: at(620), gasWei: '5686883820360', gasUsdc: '13125', fees: [{ tokenId: '6291325', pool, fee0: '14166', fee1: '14620', usdc: '28700' }] } },
+    { opId: 'eng-1-1-b-enter_swap', kind: 'enter', step: 'enter_swap', state: 'confirmed', pool, tokenIn: 'USDT', tokenOut: 'USDC', amountIn: '5756781', amountOut: '5738297', txHash: '0xee6398156ac6bb56cc30c9aa428afbd5516443d33b2dad1ed5ddc1f6736ba5e7', updatedAt: at(604), facts: { at: at(604), gasWei: '5415984000000', gasUsdc: '12500', fees: [] } },
+    { opId: 'eng-1-1-c-enter_mint', kind: 'enter', step: 'enter_mint', state: 'confirmed', pool, tokenId: '6358057', tickLower: 11, tickUpper: 52, txHash: '0xc1c079edf6d1c92509198cb2fb755d149dbd8dd23a02fff3d5e49f66c9541bea', updatedAt: at(603), facts: { at: at(603), gasWei: '7740558000000', gasUsdc: '17865', fees: [] } },
+  ] as OpView[]
+}
 const liveState = {
   funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}), ...(renewdue ? dueApproval() : {}), ...(dashboard ? placedThree() : {}) } as FundingView,
   ops: (overcap
     ? [{ opId: 'own-1-activate', kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: OVER_CAP_USDC, capUsdc: fixtureFunding.capUsdc, updatedAt: new Date().toISOString() }]
-    : []) as OpView[],
+    : movesOn
+      ? movedRange()
+      : []) as OpView[],
   n: 0,
   // ?wrongchain: the 150 USDC on Ethereum until the owner moves it (#133).
   ethereumUsdc: '150000000',
