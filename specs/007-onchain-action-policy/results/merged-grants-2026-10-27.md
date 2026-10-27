@@ -47,8 +47,8 @@ account's grant set (`oneTxRefused`) and plans the renewal again for the target 
 (t11 sends it: 2 prompts, 14 revoked in the first), the v5 move, or the account's own renewal for a v6 account. While the
 set holds, `v4Target`/`renewTarget` and the renew row say the fallback, so what is signed is what the row shows; once the
 set changes (the fallback landed) v7 is offered again, now from v6 (8 revokes, fits). A v7 Start over 15M activates v6
-instead. The refusal by the static estimate (no in-Safe simulation: 26 x 590k + 190k per revoke + overheads, ~16.5M for a
-fresh Start and ~18M for a move, both of which fit when simulated) takes the same fallback, so it costs prompts, never a
+instead. The refusal by the static estimate (no in-Safe simulation: 26 x 590k = 15.3M for the actions alone, plus 190k per revoke and
+the fixed overheads, so over both budgets for a Start or a move that fit when simulated) takes the same fallback, so it costs prompts, never a
 stuck account. A v7 account's own renewal (13.7M) has no other target and stays refused if it ever grows over 16.2M.
 
 ## Security: what the merge drops and what still enforces it
