@@ -1,4 +1,5 @@
-import type { FundingView } from '@mamoru/domain'
+import type { BridgeProgress, FundingView } from '@mamoru/domain'
+import { usd } from './money.ts'
 import registry from '@mamoru/registry/base.json'
 import monad from '@mamoru/registry/monad.json'
 
@@ -60,6 +61,19 @@ export function positionTokens(f: FundingView): string[] {
   return [...set]
 }
 
+/** otto/mamoru#215: the chain a bridge goes to, by name. */
+export function chainLabel(chainId: number): string {
+  return chainId === 143 ? 'Monad' : chainId === 8453 ? 'Base' : `chain ${chainId}`
+}
+
+/** otto/mamoru#215: savings moving to the account's sleeve on another chain, and how far they got. */
+export function bridgeLine(b: BridgeProgress): string {
+  const what = `${usd(b.amountUsdc)} USDC to ${chainLabel(b.chainId)}`
+  if (b.state === 'minted') return `Moved ${what}`
+  if (b.state === 'failed') return `Did not move ${what}`
+  return b.state === 'burned' ? `Moving ${what} (arrives in about 20 minutes)` : `Moving ${what}`
+}
+
 /** The subtle one-line state under Working capital while the engine or an owner tx is in flight. */
 export function progressLine(p: Progress | null | undefined): string | null {
   if (!p) return null
@@ -81,5 +95,8 @@ export function progressLine(p: Progress | null | undefined): string | null {
       return 'Closing positions'
     case 'withdrawing':
       return 'Sending your withdrawal'
+    case 'bridging':
+      // otto/mamoru#215: savings on their way to the account's sleeve on another chain.
+      return p.bridge ? bridgeLine(p.bridge) : 'Moving USDC to Monad'
   }
 }

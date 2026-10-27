@@ -1,6 +1,6 @@
-import { concat, encodeFunctionData, getAddress, hexToBigInt, keccak256, pad, recoverAddress, type PublicClient, parseAbi, parseEventLogs, sliceHex, type Hex, type Log } from 'viem'
+import { concat, encodeFunctionData, getAddress, hexToBigInt, keccak256, pad, recoverAddress, type PublicClient, parseEventLogs, sliceHex, type Hex, type Log } from 'viem'
 import type { Address } from '@mamoru/domain'
-import { erc20Abi } from '@mamoru/registry'
+import { erc20Abi, messageTransmitterV2Abi, tokenMessengerV2Abi } from '@mamoru/registry'
 
 // CCTP V2 as a route of the L1 userOp (otto/mamoru#180). Native USDC burned on Ethereum, minted to the same Safe on
 // Base. destinationCaller is open (zero) and there is no hook: once Circle attests the burn, the operator submits
@@ -12,6 +12,8 @@ import { erc20Abi } from '@mamoru/registry'
 export const TOKEN_MESSENGER_V2: Address = '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d'
 export const CCTP_DOMAIN_ETHEREUM = 0
 export const CCTP_DOMAIN_BASE = 6
+/** otto/mamoru#215: MessageTransmitterV2.localDomain() on Monad (chain 143), read 2026-10-27. */
+export const CCTP_DOMAIN_MONAD = 15
 /** Standard transfer (finalized, ~15 min from Ethereum, no fee); 1000 is Fast (fee from Circle's fee API). */
 export const FINALITY_STANDARD = 2000
 export const FINALITY_FAST = 1000
@@ -22,18 +24,8 @@ export const MESSAGE_TRANSMITTER_V2: Address = '0x81D40F21F12A8F0E3252Bccb954D72
 export const STANDARD_FILL_SEC = 1_200
 export const FAST_FILL_SEC = 30
 
-export const messageTransmitterV2Abi = parseAbi([
-  'function receiveMessage(bytes message, bytes attestation) returns (bool)',
-  'function usedNonces(bytes32 nonce) view returns (uint256)',
-  'function isEnabledAttester(address attester) view returns (bool)',
-  'function signatureThreshold() view returns (uint256)',
-  'event MessageSent(bytes message)',
-])
-
-export const tokenMessengerV2Abi = parseAbi([
-  'function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)',
-  'event DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)',
-])
+// The ABIs live in the registry package (otto/mamoru#215: the engine builds Base -> Monad burns from them too).
+export { messageTransmitterV2Abi, tokenMessengerV2Abi }
 
 export type Burn = { amount: bigint; maxFee: bigint; minFinality: number }
 
@@ -50,8 +42,11 @@ export function cctpCalls(usdc: Address, safe: Address, b: Burn): { to: Address;
   ]
 }
 
-/** True when the logs hold exactly one burn of the signed amount from the Safe to itself on Base, open caller, no hook. */
-export function burnMatches(logs: Log[], usdc: Address, safe: Address, b: Burn): boolean {
+/**
+ * True when the logs hold exactly one burn of the signed amount from the Safe to itself on `destinationDomain` (Base
+ * unless said), open caller, no hook.
+ */
+export function burnMatches(logs: Log[], usdc: Address, safe: Address, b: Burn, destinationDomain: number = CCTP_DOMAIN_BASE): boolean {
   const evs = parseEventLogs({ abi: tokenMessengerV2Abi, eventName: 'DepositForBurn', logs: logs.filter((l) => getAddress(l.address) === TOKEN_MESSENGER_V2) })
   if (evs.length !== 1) return false
   const a = evs[0]!.args
@@ -60,7 +55,7 @@ export function burnMatches(logs: Log[], usdc: Address, safe: Address, b: Burn):
     getAddress(a.depositor) === getAddress(safe) &&
     a.amount === b.amount &&
     a.mintRecipient.toLowerCase() === pad(safe, { size: 32 }).toLowerCase() &&
-    a.destinationDomain === CCTP_DOMAIN_BASE &&
+    a.destinationDomain === destinationDomain &&
     BigInt(a.destinationCaller) === 0n &&
     a.maxFee === b.maxFee &&
     a.minFinalityThreshold === b.minFinality &&
@@ -70,10 +65,11 @@ export function burnMatches(logs: Log[], usdc: Address, safe: Address, b: Burn):
 
 /**
  * Circle's complete attestations for the burn transaction (empty while pending), each with the message to mint.
- * Null when Circle did not answer. The caller picks the one that is its burn.
+ * Null when Circle did not answer. The caller picks the one that is its burn. `sourceDomain`: where the burn was
+ * (Ethereum unless said; otto/mamoru#215 asks for Base's, 6).
  */
-export async function cctpAttestation(txHash: Hex, fetcher: (input: string, init?: RequestInit) => Promise<Response> = fetch): Promise<{ message: Hex; attestation: Hex }[] | null> {
-  const res = await fetcher(`${IRIS_API}/v2/messages/${CCTP_DOMAIN_ETHEREUM}?transactionHash=${txHash}`, { signal: AbortSignal.timeout(8_000) })
+export async function cctpAttestation(txHash: Hex, fetcher: (input: string, init?: RequestInit) => Promise<Response> = fetch, sourceDomain: number = CCTP_DOMAIN_ETHEREUM): Promise<{ message: Hex; attestation: Hex }[] | null> {
+  const res = await fetcher(`${IRIS_API}/v2/messages/${sourceDomain}?transactionHash=${txHash}`, { signal: AbortSignal.timeout(8_000) })
   if (res.status === 404) return []
   if (!res.ok) return null
   const j = (await res.json()) as { messages?: { status?: string; message?: string; attestation?: string }[] }
@@ -118,14 +114,15 @@ export function decodeCctpMessage(m: Hex): CctpMessage {
 }
 
 /**
- * The operator pays Base gas for a mint only when the attested message is this account's burn: Ethereum to Base,
- * from and to the TokenMessengerV2, USDC, the Safe as recipient, the amount burned, open caller.
+ * The operator pays gas for a mint only when the attested message is this account's burn: Ethereum to Base unless
+ * `route` says otherwise (otto/mamoru#215: Base to Monad), from and to the TokenMessengerV2, the burned USDC (`usdc`,
+ * the SOURCE chain's), the Safe as recipient, the amount burned, open caller.
  */
-export function mintIsFor(m: CctpMessage, usdc: Address, safe: Address, amount: bigint): boolean {
+export function mintIsFor(m: CctpMessage, usdc: Address, safe: Address, amount: bigint, route: { source: number; destination: number } = { source: CCTP_DOMAIN_ETHEREUM, destination: CCTP_DOMAIN_BASE }): boolean {
   const w = (a: Address) => pad(a, { size: 32 }).toLowerCase()
   return (
-    m.sourceDomain === CCTP_DOMAIN_ETHEREUM &&
-    m.destinationDomain === CCTP_DOMAIN_BASE &&
+    m.sourceDomain === route.source &&
+    m.destinationDomain === route.destination &&
     m.sender.toLowerCase() === w(TOKEN_MESSENGER_V2) &&
     m.recipient.toLowerCase() === w(TOKEN_MESSENGER_V2) &&
     BigInt(m.destinationCaller) === 0n &&
@@ -156,8 +153,9 @@ export function cctpMessageKey(m: Hex): Hex {
 
 /**
  * Whether `attestation` is Circle's for `message`, checked the way MessageTransmitterV2 checks it, against the
- * attesters enabled on Base: 65-byte signatures over keccak256(message), signers in strictly ascending order, each
- * enabled, at least signatureThreshold of them. Only then are the message's fields (its nonce among them) trusted.
+ * attesters enabled on the chain `client` reads (the destination: Base, or Monad for otto/mamoru#215): 65-byte
+ * signatures over keccak256(message), signers in strictly ascending order, each enabled, at least signatureThreshold
+ * of them. Only then are the message's fields (its nonce among them) trusted.
  */
 export async function attestationValid(client: PublicClient, message: Hex, attestation: Hex): Promise<boolean> {
   const n = (attestation.length - 2) / 2

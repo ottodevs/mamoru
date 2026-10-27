@@ -118,7 +118,8 @@ export type FundingView = {
     valueUsdc?: string                                                  // position value in USDC base units
   }[]
   // What the engine is doing right now, for a subtle progress line in Working capital.
-  progress?: { step: 'deploying' | 'activating' | 'swapping' | 'opening' | 'rebalancing' | 'reranging' | 'closing' | 'withdrawing'; pool?: string; since: string } | null
+  // otto/mamoru#215: 'bridging' is savings on their way to the account's sleeve on another chain, with `bridge` saying how far.
+  progress?: { step: 'deploying' | 'activating' | 'swapping' | 'opening' | 'rebalancing' | 'reranging' | 'closing' | 'withdrawing' | 'bridging'; pool?: string; since: string; bridge?: BridgeProgress } | null
 }
 
 // GET /api/accounts/:accountKey/yield -> YieldLedgerView (otto/mamoru#129): what the yield ledger knows so far,
@@ -332,7 +333,16 @@ export type OpView = {
   amountIn?: string
   /** harvest only: the fee token a convert step swapped back to the savings asset, when the harvest did that. */
   convert?: string
+  /** otto/mamoru#215: a bridge-out (engine row): where its USDC is going and how far it got. */
+  bridge?: BridgeProgress
 }
+
+/**
+ * otto/mamoru#215: a bridge of savings to the account's own sleeve on another chain (CCTP): the chain, the USDC amount
+ * (base units) and how far it got: 'sending' (signed, not yet seen on Base), 'burned' (burned on Base, waiting for
+ * Circle's attestation and the mint), 'minted' (arrived), 'failed' (nothing left the account).
+ */
+export type BridgeProgress = { chainId: number; amountUsdc: string; state: 'sending' | 'burned' | 'minted' | 'failed' }
 
 // Live operator (sprint amendment 2026-09-26 21:40). The Worker authenticates the device session, then
 // forwards the same route to the operator with this context in `x-mamoru-account` (base64url JSON)

@@ -1,10 +1,10 @@
 import { GuardReadsState } from './guard-reads-state.ts'
 import { join } from 'node:path'
 import { $ } from 'bun'
-import { TransactionReceiptNotFoundError, createPublicClient, getAddress, http, isAddress, type Hex } from 'viem'
+import { TransactionReceiptNotFoundError, createPublicClient, getAddress, http, isAddress, type Hex, type PublicClient } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, chainWritesOptIn, isChainId, type Address } from '@mamoru/domain'
-import { address as registryAddress, entry, isDeployed, registryFor, type Registry } from '@mamoru/registry'
+import { address as registryAddress, entry, isDeployed, messageTransmitterV2Abi, registryFor, type Registry } from '@mamoru/registry'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
 import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLabV6, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, labWmonUsdcMonadV5, liveWmonUsdcMonadV5, MONAD_GAS_CAPS, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V4_POOLS_MONAD, type PolicyVersion } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
@@ -14,6 +14,8 @@ import { livePool, writeRefusal } from './chain.ts'
 import { writeRegistry } from './chain-writes.ts'
 import { Operator, type OperatorConfig } from './operator.ts'
 import { Relayer } from './relayer.ts'
+import { BRIDGE_MONAD_CHAIN_ID, MonadBridge } from './bridge-monad.ts'
+import { CCTP_DOMAIN_MONAD, MESSAGE_TRANSMITTER_V2 } from './cctp.ts'
 import { BridgeOut, ETHEREUM_CHAIN_ID, L1_BUNDLER_TIMEOUT_MS, L1_HANDLE_OPS_GAS, L1_USDC } from './bridge-out.ts'
 import { L1Bundler, paymasterFromEnv } from './paymaster.ts'
 import { startRpcProxy } from './rpc-proxy.ts'
@@ -253,6 +255,11 @@ export type BootOptions = {
   rpcUrl: string
   /** Ethereum Mainnet RPC for bridge-out (#133). Unset: bridge-out off. */
   l1RpcUrl?: string
+  /**
+   * otto/mamoru#215: Monad mainnet RPC (MAMORU_MONAD_RPC_URL) for the bridge leg of v6 accounts, on the Base operator
+   * only: their sleeves' value and readiness on Monad, and the CCTP mints there. Unset: no remote value, no bridge.
+   */
+  monadRpcUrl?: string
   /** #180: ERC-20 paymaster on Ethereum (keyed URL, never logged) and its kind (pimlico | candide; else from the host). Set: moves are userOps paid in USDC, bundled by the operator itself. */
   l1PaymasterUrl?: string
   l1Paymaster?: string
@@ -379,7 +386,7 @@ export function assertPolicyOnRegistry(policy: PolicyVersion, registry: Registry
  * otto/mamoru#63: what only exists on Base is refused on any other chain at boot: the v4/v5 on-chain action policies
  * (deployed on Base only; v5 through its V2 address as well) and bridge-out (moves USDC from Ethereum to Base).
  */
-export function assertBaseOnlyFeatures(registry: Registry, env: Record<string, string | undefined>, o: Pick<BootOptions, 'l1RpcUrl'>, chainId?: number): void {
+export function assertBaseOnlyFeatures(registry: Registry, env: Record<string, string | undefined>, o: Pick<BootOptions, 'l1RpcUrl' | 'monadRpcUrl'>, chainId?: number): void {
   if (registry.chainId === BASE_CHAIN_ID) return
   if (env.MAMORU_ONCHAIN_POLICY_V4 === '1') throw new Error(`MAMORU_ONCHAIN_POLICY_V4 is Base only; this operator reads ${registry.chain}`)
   // v5 needs the v4 opt-in above; its deployed address alone is refused too, so no env turns it on off Base.
@@ -391,6 +398,24 @@ export function assertBaseOnlyFeatures(registry: Registry, env: Record<string, s
   if (env.MAMORU_PAUSE_GATE_ADDRESS) throw new Error(`MAMORU_PAUSE_GATE_ADDRESS is Base only (v6 bridge-out); this operator reads ${registry.chain}`)
   if (env.MAMORU_ACTION_POLICY_V2_ADDRESS && !onFork && !(chainWritesOptIn(env) as readonly number[]).includes(registry.chainId)) throw new Error(`MAMORU_ACTION_POLICY_V2_ADDRESS is Base only; this operator reads ${registry.chain}`)
   if (o.l1RpcUrl) throw new Error(`MAMORU_L1_RPC_URL (bridge-out to Base) is Base only; this operator reads ${registry.chain}`)
+  if (o.monadRpcUrl) throw new Error(`MAMORU_MONAD_RPC_URL (the v6 bridge leg to Monad) is Base only; this operator reads ${registry.chain}`)
+}
+
+/**
+ * otto/mamoru#215: the Monad RPC of the bridge leg must answer chain 143, and CCTP's MessageTransmitterV2 there must be
+ * domain 15; anything else refuses the boot. viem errors quote the URL (it may carry a key): only fixed text leaves.
+ */
+export async function checkMonadRpc(monad: Pick<PublicClient, 'getChainId' | 'readContract'>): Promise<void> {
+  let chainId: number
+  let domain: number
+  try {
+    chainId = await monad.getChainId()
+    domain = chainId === BRIDGE_MONAD_CHAIN_ID ? await monad.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: messageTransmitterV2Abi, functionName: 'localDomain' }) : -1
+  } catch {
+    throw new Error('MAMORU_MONAD_RPC_URL is not a reachable Monad RPC (unreachable)')
+  }
+  if (chainId !== BRIDGE_MONAD_CHAIN_ID) throw new Error(`MAMORU_MONAD_RPC_URL is not a Monad Mainnet RPC (chain ${chainId}, want ${BRIDGE_MONAD_CHAIN_ID})`)
+  if (domain !== CCTP_DOMAIN_MONAD) throw new Error(`MAMORU_MONAD_RPC_URL: MessageTransmitterV2 answers domain ${domain}, not Monad's ${CCTP_DOMAIN_MONAD}`)
 }
 
 /**
@@ -512,6 +537,20 @@ export async function bootOperator(o: BootOptions) {
   // chain that charges the gas limit, sizes each handleOps from its own estimate.
   const refusal = writeRefusal(registry, writes.on ? { chainId, optIn: writes.optIn } : undefined)
   const relayer = new Relayer(relayerKey, relayerClient, via('relayer'), chainId, refusal)
+  // otto/mamoru#215: the bridge leg of v6 accounts (Base operator only, assertBaseOnlyFeatures). The mints on Monad are
+  // sent by this same relayer key in its own nonce space there (as on Ethereum for bridge-out): not the Monad
+  // operator's relayer, which is another key in another process. Fund its address with MON for the mints.
+  let bridgeMonad: MonadBridge | null = null
+  if (o.monadRpcUrl) {
+    const monad = createPublicClient({ transport: http(o.monadRpcUrl, { batch: true, timeout: 30_000 }) })
+    await checkMonadRpc(monad)
+    const monadRelayer = new Relayer(relayerKey, monad, o.monadRpcUrl, BRIDGE_MONAD_CHAIN_ID)
+    bridgeMonad = new MonadBridge(o.stateDir, client, monad, monadRelayer)
+    const bm = bridgeMonad
+    setInterval(() => void bm.tick(), 60_000)
+    void bm.tick()
+    console.log(`[operator] bridge leg to Monad on (v6 accounts): ${bm.pendingCount()} burn(s) in flight, mints from relayer ${monadRelayer.address} on Monad`)
+  }
   const bundler = refusal === null ? startLiveBundler(client, relayer, chainId, writes.on ? { registry, gasModel: chainOf(registry.chainId).gasModel } : {}) : null
   const knobs = capAndDepth(o, policy)
   let retune = () => {}
@@ -543,6 +582,7 @@ export async function bootOperator(o: BootOptions) {
       ...(resolveV5Policy(policy.chain, process.env) ? { v5Policy: resolveV5Policy(policy.chain, process.env) } : {}),
       ...(v6Policy ? { v6Policy } : {}),
       guardReadsState: new GuardReadsState(o.stateDir),
+      ...(bridgeMonad ? { bridgeMonad } : {}),
     },
     client,
     relayer,

@@ -103,3 +103,14 @@ describe('historyOps', () => {
     expect(historyOps(ops).map((o) => o.opId)).toEqual(['own-2-activate'])
   })
 })
+
+describe('a bridge to the Monad sleeve (otto/mamoru#215)', () => {
+  const { progressLine } = require('../../src/web/lib/positions.ts') as typeof import('../../src/web/lib/positions.ts')
+  const bridge = (state: 'sending' | 'burned' | 'minted' | 'failed') => base({ opId: 'eng-1-1-op-1-bridge_out', kind: 'enter', state: 'confirmed', pool: 'pool:WMON/USDC/3000', amountIn: '1500000000', bridge: { chainId: 143, amountUsdc: '1500000000', state } })
+  test('names the amount, the chain and how far it got', () => {
+    expect(opLine(bridge('sending'))).toBe('Moving 1,500.00 USDC to Monad')
+    expect(opLine(bridge('burned'))).toBe('Moving 1,500.00 USDC to Monad (arrives in about 20 minutes)')
+    expect(opLine(bridge('minted'))).toBe('Moved 1,500.00 USDC to Monad')
+    expect(progressLine({ step: 'bridging', pool: 'pool:WMON/USDC/3000', since: AT, bridge: { chainId: 143, amountUsdc: '1500000000', state: 'burned' } })).toBe('Moving 1,500.00 USDC to Monad (arrives in about 20 minutes)')
+  })
+})
