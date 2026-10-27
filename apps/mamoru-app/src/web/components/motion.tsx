@@ -103,6 +103,7 @@ export function Fold({
   defaultOpen = false,
   className = '',
   testId,
+  labelledBy,
 }: {
   head: ReactNode
   status?: ReactNode
@@ -110,6 +111,7 @@ export function Fold({
   defaultOpen?: boolean
   className?: string
   testId?: string
+  labelledBy?: string
 }) {
   const [open, setOpen] = useState(defaultOpen)
   // The default follows the data (History opens once its few events arrive) until the owner taps the head.
@@ -119,7 +121,7 @@ export function Fold({
   }, [defaultOpen])
   const id = useId()
   return (
-    <section className={`panel${open ? ' is-open' : ''} ${className}`.trim()} data-testid={testId} data-open={open ? 'true' : 'false'}>
+    <section className={`panel${open ? ' is-open' : ''} ${className}`.trim()} data-testid={testId} data-open={open ? 'true' : 'false'} aria-labelledby={labelledBy}>
       <button type="button" className="panel-head" aria-expanded={open} aria-controls={id} onClick={() => {
           touched.current = true
           setOpen((o) => !o)
@@ -189,10 +191,18 @@ export function PullToRefresh({ onRefresh }: { onRefresh: () => Promise<unknown>
   useEffect(() => {
     if (!standalone()) return
     const down = (e: TouchEvent) => {
-      start.current = window.scrollY <= 0 && !busyRef.current ? e.touches[0]!.clientY : null
+      // Not while a dialog is open: its own scroll must never reload the page behind it.
+      start.current = window.scrollY <= 0 && !busyRef.current && !document.querySelector('dialog[open]') ? e.touches[0]!.clientY : null
     }
     const move = (e: TouchEvent) => {
       if (start.current === null) return
+      // The gesture scrolled the page first: it is a scroll, not a pull.
+      if (window.scrollY > 0) {
+        start.current = null
+        pulled.current = 0
+        setPull(0)
+        return
+      }
       const dy = e.touches[0]!.clientY - start.current
       // Resistance: the indicator moves less than the finger, and never past twice the trigger.
       pulled.current = dy > 0 ? Math.min(PULL_AT * 2, dy * 0.55) : 0
@@ -205,7 +215,7 @@ export function PullToRefresh({ onRefresh }: { onRefresh: () => Promise<unknown>
         busyRef.current = true
         setBusy(true)
         navigator.vibrate?.(8)
-        void refresh.current().finally(() => {
+        void refresh.current().catch(() => undefined).finally(() => {
           busyRef.current = false
           setBusy(false)
         })

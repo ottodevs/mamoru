@@ -7,8 +7,8 @@ export const howCopy = {
   steps: [
     { title: 'Your account, your passkey', body: 'Your money sits in a Safe smart account on chain. Only your passkey owns it, and Mamoru never holds it.' },
     { title: 'A permission with limits', body: `When you start, you sign what Mamoru may do: open, adjust and close positions with your USDC, in the pools and up to the amount you approved, until a set date. ${signatureCopy.activate.never}` },
-    { title: 'Your USDC at work', body: 'Mamoru spreads your USDC across Uniswap pools, from Stable to Growth, where trades pay fees. It watches each position, moves it back when the price leaves its range, and collects what it earns.' },
-    { title: 'Leave whenever you want', body: 'Withdraw or stop with your passkey at any time. Stop closes every position and keeps the USDC in your account. The recovery kit lets you reach your account without Mamoru.' },
+    { title: 'Your USDC at work', body: 'Mamoru spreads your USDC across Uniswap pools, from Stable to Growth, where trades pay fees. Part of each position is held as the pool’s other token, so its value moves with that price. Mamoru watches each position, moves it back when the price leaves its range, and collects what it earns.' },
+    { title: 'Leave whenever you want', body: 'Withdraw or stop with your passkey at any time. Stop closes every position and swaps what they held back to USDC, which stays in your account. The recovery kit lets you reach your account without Mamoru.' },
   ],
   more: 'Learn more',
   links: [

@@ -1418,6 +1418,9 @@
 .panel-inner {
   min-height: 0;
   overflow: hidden;
+  /* Room for focus rings on the edge controls (Stop), which the clip would cut. */
+  margin: 0 -6px;
+  padding: 0 6px 6px;
   opacity: 0;
   transform: translateY(-6px);
   transition:

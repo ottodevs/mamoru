@@ -511,7 +511,7 @@ export function Idle({ f, s }: { f: FundingView; s: Split }) {
     )
   }
   return (
-    <Fold testId="idle" head={head}>
+    <Fold testId="idle" head={head} labelledBy="idle-title">
       <ul className="idle-list" data-testid="idle-tokens">
         {s.idleTokens.map((t, i) => (
           <li key={t.token} style={{ ['--i' as string]: i }}>
@@ -1177,7 +1177,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       <PullToRefresh onRefresh={refreshAll} />
       <header className="mb-7 flex items-center justify-between gap-3">
         <Brand />
-        <LiveSync updatedAt={funding.dataUpdatedAt} intervalMs={fundingInterval(funding.data, inFlight, 30_000)} fetching={funding.isFetching} down={liveDown} onRefresh={() => void refreshAll()} />
+        <LiveSync updatedAt={funding.dataUpdatedAt} intervalMs={fundingInterval(funding.data, inFlight, 30_000)} fetching={funding.isFetching} down={liveDown} onRefresh={() => void refreshAll().catch(() => undefined)} />
       </header>
       <Balance
         s={s}
