@@ -9,7 +9,9 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { address, baseRegistry, entry, messageTransmitterV2Abi, monadRegistry, tokenMessengerV2Abi } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import type { BridgeSigning } from '@mamoru/scenarios/driver/engine.ts'
-import { BASE_USDC, burnOf, inFlightOf, MonadBridge, sleeveValueAtTwap, type BridgeBurn, type MonadSender } from '../src/bridge-monad.ts'
+import { afterAll } from 'bun:test'
+import { BASE_USDC, burnOf, inFlightOf, MONAD_MINT_PENDING_MS, MonadBridge, SETTLE_CHUNKS_PER_TICK, SETTLE_LOG_CHUNK, sleeveValueAtTwap, type BridgeBurn, type MonadSender } from '../src/bridge-monad.ts'
+import { Relayer } from '../src/relayer.ts'
 import { cctpMessageKey, MESSAGE_TRANSMITTER_V2, TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
 import type { SafeRead } from '../src/chain.ts'
 
@@ -55,14 +57,21 @@ function burnReceiptLogs(o: { recipient?: Hex; amount?: bigint; success?: boolea
   ]
 }
 
-/** Base: the safe head, the UserOperationEvent of the burn (or none) and the EntryPoint nonce at safe. */
-function baseClient(o: { safe: bigint; landed?: { block: bigint; success?: boolean; recipient?: Hex; amount?: bigint }; nonceAtSafe?: bigint }): PublicClient {
+/**
+ * Base: the safe head, the UserOperationEvent of the burn (or none, only inside the range asked) and the EntryPoint
+ * nonce at a block: 8 from the block the burn landed in (inclusion spends it), else `nonceAtSafe` or 7. `ranges`
+ * records every getLogs range.
+ */
+function baseClient(o: { safe: bigint; landed?: { block: bigint; success?: boolean; recipient?: Hex; amount?: bigint }; nonceAtSafe?: bigint; ranges?: [bigint, bigint][] }): PublicClient {
   return {
     getBlock: async () => ({ number: o.safe }),
-    getLogs: async () => (o.landed ? [{ args: { userOpHash: UOP, sender: ACCOUNT, nonce: 7n, success: o.landed.success ?? true, actualGasCost: 1n }, blockNumber: o.landed.block, blockHash: zeroHash, transactionHash: BURN_TX, logIndex: 3 }] : []),
+    getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
+      o.ranges?.push([fromBlock, toBlock])
+      return o.landed && o.landed.block >= fromBlock && o.landed.block <= toBlock ? [{ args: { userOpHash: UOP, sender: ACCOUNT, nonce: 7n, success: o.landed.success ?? true, actualGasCost: 1n }, blockNumber: o.landed.block, blockHash: zeroHash, transactionHash: BURN_TX, logIndex: 3 }] : []
+    },
     getTransactionReceipt: async () => ({ logs: burnReceiptLogs(o.landed ?? {}) }),
-    readContract: async ({ functionName }: { functionName: string }) => {
-      if (functionName === 'getNonce') return o.nonceAtSafe ?? 7n
+    readContract: async ({ functionName, blockNumber }: { functionName: string; blockNumber?: bigint }) => {
+      if (functionName === 'getNonce') return o.landed && (blockNumber ?? o.safe) >= o.landed.block ? 8n : (o.nonceAtSafe ?? 7n)
       throw new Error(functionName)
     },
   } as unknown as PublicClient
@@ -71,7 +80,8 @@ function baseClient(o: { safe: bigint; landed?: { block: bigint; success?: boole
 const attester = privateKeyToAccount(generatePrivateKey())
 const attest = async (m: Hex) => ({ message: m, attestation: await attester.sign({ hash: keccak256(m) }) })
 
-type MonadState = { used: Set<string>; block: bigint; balance: bigint; gasPrice: bigint; receipts: Map<string, { status: 'success' | 'reverted'; blockNumber: bigint }> }
+/** `usedFrom`: the Monad block the used nonces are used from (a read at an earlier block sees them unused). `mintStatus`: how the relayer's mints end. */
+type MonadState = { used: Set<string>; usedFrom?: bigint; block: bigint; balance: bigint; gasPrice: bigint; receipts: Map<string, { status: 'success' | 'reverted'; blockNumber: bigint }>; mintStatus?: 'success' | 'reverted' }
 function monadClient(st: MonadState): PublicClient {
   return {
     getBlockNumber: async () => st.block,
@@ -79,10 +89,10 @@ function monadClient(st: MonadState): PublicClient {
     getBalance: async () => st.balance,
     estimateGas: async () => 150_000n,
     getTransactionReceipt: async ({ hash }: { hash: Hex }) => st.receipts.get(hash) ?? null,
-    readContract: async ({ functionName, args }: { functionName: string; args?: unknown[] }) => {
+    readContract: async ({ functionName, args, blockNumber }: { functionName: string; args?: unknown[]; blockNumber?: bigint }) => {
       if (functionName === 'signatureThreshold') return 1n
       if (functionName === 'isEnabledAttester') return (args![0] as string).toLowerCase() === attester.address.toLowerCase()
-      if (functionName === 'usedNonces') return st.used.has((args![0] as string).toLowerCase()) ? 1n : 0n
+      if (functionName === 'usedNonces') return st.used.has((args![0] as string).toLowerCase()) && (blockNumber ?? st.block) >= (st.usedFrom ?? 0n) ? 1n : 0n
       throw new Error(functionName)
     },
   } as unknown as PublicClient
@@ -100,12 +110,14 @@ function relayerMock(st: MonadState, onSend?: () => void): MonadSender & { sent:
       onSigned?.(hash, n)
       sent.push(tx.data!)
       onSend?.()
-      return { hash, receipt: { status: 'success', blockNumber: st.block + 1n, gasUsed: 150_000n, effectiveGasPrice: 100_000_000_000n, logs: [] } as never }
+      const status = st.mintStatus ?? 'success'
+      st.receipts.set(hash, { status, blockNumber: st.block + 1n })
+      return { hash, receipt: { status, blockNumber: st.block + 1n, gasUsed: 150_000n, effectiveGasPrice: 100_000_000_000n, logs: [] } as never }
     },
   }
 }
 
-function setup(o: { dir?: string; base?: PublicClient; monad?: MonadState; iris?: Record<string, { message: Hex; attestation: Hex }[]>; now?: () => number; relayer?: boolean } = {}) {
+function setup(o: { dir?: string; base?: PublicClient; monad?: MonadState; iris?: Record<string, { message: Hex; attestation: Hex }[]>; now?: () => number; relayer?: boolean; verify?: () => Promise<void> } = {}) {
   const dir = o.dir ?? mkdtempSync(join(tmpdir(), 'mamoru-bridge-monad-'))
   const st: MonadState = o.monad ?? { used: new Set(), block: 5_000n, balance: 10n ** 18n, gasPrice: 100_000_000_000n, receipts: new Map() }
   const urls: string[] = []
@@ -116,7 +128,7 @@ function setup(o: { dir?: string; base?: PublicClient; monad?: MonadState; iris?
     return new Response('{}', { status: 404 })
   }
   const relayer = o.relayer === false ? null : relayerMock(st)
-  const bridge = new MonadBridge(dir, o.base ?? baseClient({ safe: 900n }), monadClient(st), relayer, fetcher as typeof fetch, o.now ?? (() => T0))
+  const bridge = new MonadBridge(dir, o.base ?? baseClient({ safe: 900n }), monadClient(st), relayer, fetcher as typeof fetch, o.now ?? (() => T0), baseRegistry, monadRegistry, o.verify)
   const j = () => JSON.parse(readFileSync(join(dir, 'bridge-monad.json'), 'utf8')) as { burns: Record<string, BridgeBurn> }
   return { dir, bridge, st, relayer, urls, j }
 }
@@ -330,5 +342,248 @@ describe('the remote value of a v6 account', () => {
     const again = setup({ dir: (bridge as unknown as { stateDir: string }).stateDir })
     ;(again.bridge as unknown as typeof live).readSleeve = live.readSleeve
     expect(await again.bridge.remote('acc-1', ACCOUNT, WINDOW)).toEqual({ value: 3_000_000n + AMOUNT, inFlight: AMOUNT, ready: false })
+  })
+})
+
+// ---- Review of PR #144 (Claude Opus 5.5 + Gemini Argon): one regression test per finding fixed. ----
+
+describe('review of #144: settling a sending burn reads a bounded range', () => {
+  test('nonce unmoved at safe: no eth_getLogs at all, and the cursor moves past safe', async () => {
+    const ranges: [bigint, bigint][] = []
+    const { bridge, j } = setup({ base: baseClient({ safe: 500_000n, ranges }) })
+    bridge.recordSending('acc-1', signing())
+    await bridge.tick()
+    expect(ranges).toHaveLength(0)
+    expect(j().burns[UOP]).toMatchObject({ state: 'sending', scanFrom: '500001' })
+  })
+
+  test('nonce moved after a long outage: chunks of SETTLE_LOG_CHUNK, at most SETTLE_CHUNKS_PER_TICK a pass, resumed from the cursor on disk', async () => {
+    const ranges: [bigint, bigint][] = []
+    const far = 1_000n + SETTLE_LOG_CHUNK * BigInt(SETTLE_CHUNKS_PER_TICK) + 500n
+    const first = setup({ base: baseClient({ safe: far + 10_000n, landed: { block: far }, ranges }) })
+    first.bridge.recordSending('acc-1', signing())
+    await first.bridge.tick()
+    expect(ranges).toHaveLength(SETTLE_CHUNKS_PER_TICK)
+    for (const [a, b] of ranges) expect(b - a + 1n <= SETTLE_LOG_CHUNK).toBe(true)
+    expect(first.j().burns[UOP]).toMatchObject({ state: 'sending', scanFrom: (1_000n + SETTLE_LOG_CHUNK * BigInt(SETTLE_CHUNKS_PER_TICK)).toString() })
+    // A new process resumes from the cursor, not from the prepare block.
+    ranges.length = 0
+    const again = setup({ dir: first.dir, base: baseClient({ safe: far + 10_000n, landed: { block: far }, ranges }) })
+    await again.bridge.tick()
+    expect(ranges[0]![0]).toBe(1_000n + SETTLE_LOG_CHUNK * BigInt(SETTLE_CHUNKS_PER_TICK))
+    expect(again.j().burns[UOP]).toMatchObject({ state: 'burned', burnBlock: far.toString() })
+  })
+
+  test('nonce moved and no event anywhere up to safe: dropped once the whole range is read', async () => {
+    const d = setup({ base: baseClient({ safe: 1_000n + SETTLE_LOG_CHUNK + 10n, nonceAtSafe: 8n }) })
+    d.bridge.recordSending('acc-1', signing())
+    await d.bridge.tick()
+    expect(d.j().burns[UOP]!.state).toBe('dropped')
+  })
+})
+
+describe('review of #144: the remote value never counts the same USDC twice', () => {
+  const WINDOW = 1_800
+  type Live = { readSleeve: () => Promise<{ value: bigint; block: bigint; ready: boolean }> }
+
+  test('a lagging Monad provider: a read older than the last one recorded is not used', async () => {
+    const { bridge } = setup()
+    const live = bridge as unknown as Live
+    live.readSleeve = async () => ({ value: AMOUNT, block: 5_002n, ready: true })
+    expect(await bridge.remote('acc-1', ACCOUNT, WINDOW)).toEqual({ value: AMOUNT, inFlight: 0n, ready: true })
+    // A node at 5000 (before a mint the journal places at 5001) answers 0: the last read (5002) stands.
+    const b = { ...(signing() as unknown as object), id: UOP, accountKey: 'acc-1', account: ACCOUNT, amount: AMOUNT.toString(), state: 'minted', mintedBlock: '5001' } as unknown as BridgeBurn
+    ;(bridge as unknown as { journal: { burns: Record<string, BridgeBurn> } }).journal.burns[UOP] = b
+    live.readSleeve = async () => ({ value: 0n, block: 5_000n, ready: true })
+    expect(await bridge.remote('acc-1', ACCOUNT, WINDOW)).toEqual({ value: AMOUNT, inFlight: 0n, ready: true })
+  })
+
+  test('minted by someone else, seen at the head: a sleeve read at an earlier block where the nonce is already used counts it once', async () => {
+    let now = T0
+    const att = await attest(message({ nonce: 42n, executed: true }))
+    const s = setup({ now: () => now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }), iris: { [BURN_TX]: [att] } })
+    s.bridge.recordSending('acc-1', signing())
+    await s.bridge.tick()
+    // Minted at Monad block 4_900 by another relayer; the journal sees it at the head, 5_010.
+    s.st.used.add(u(42n, 32).toLowerCase())
+    s.st.usedFrom = 4_900n
+    s.st.block = 5_010n
+    now += 6 * 60_000
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]).toMatchObject({ state: 'minted', mintedBlock: '5010' })
+    const live = s.bridge as unknown as Live
+    // A read from before the real mint counts it in flight, exactly once.
+    live.readSleeve = async () => ({ value: 0n, block: 4_800n, ready: true })
+    expect(await s.bridge.remote('acc-1', ACCOUNT, WINDOW)).toEqual({ value: AMOUNT, inFlight: AMOUNT, ready: true })
+    // A read between the real mint (4_900) and the head the journal saw it at (5_010) has the USDC: not in flight too.
+    live.readSleeve = async () => ({ value: AMOUNT, block: 5_008n, ready: true })
+    expect(await s.bridge.remote('acc-1', ACCOUNT, WINDOW)).toEqual({ value: AMOUNT, inFlight: 0n, ready: true })
+  })
+
+  test('a bridge signed but not landed at the local read block is still in the local balances: not in flight; landed: in flight', async () => {
+    const s = setup({ base: baseClient({ safe: 1_000n, landed: { block: 1_010n } }) })
+    s.bridge.recordSending('acc-1', signing())
+    ;(s.bridge as unknown as Live).readSleeve = async () => ({ value: 0n, block: 7_000n, ready: true })
+    expect(await s.bridge.remote('acc-1', ACCOUNT, WINDOW, 1_005n)).toEqual({ value: 0n, inFlight: 0n, ready: true })
+    expect(await s.bridge.remote('acc-1', ACCOUNT, WINDOW, 1_010n)).toEqual({ value: AMOUNT, inFlight: AMOUNT, ready: true })
+    // No local block (or the nonce unreadable): counted, never under the real value.
+    expect((await s.bridge.remote('acc-1', ACCOUNT, WINDOW)).inFlight).toBe(AMOUNT)
+  })
+
+  test('journaled and then never signed: dropped, out of flight; a burn recorded by an earlier process is never discarded', () => {
+    const s = setup()
+    s.bridge.recordSending('acc-1', signing())
+    s.bridge.discardUnsigned(UOP)
+    expect(s.j().burns[UOP]).toMatchObject({ state: 'dropped' })
+    expect(s.bridge.inFlight('acc-1', 0n)).toBe(0n)
+    const other = setup()
+    other.bridge.recordSending('acc-1', signing())
+    const restarted = setup({ dir: other.dir })
+    restarted.bridge.recordSending('acc-1', signing())
+    restarted.bridge.discardUnsigned(UOP)
+    expect(restarted.j().burns[UOP]!.state).toBe('sending')
+  })
+
+  test('the provider error quoted in the review detail has no keyed URL', async () => {
+    const { bridge } = setup()
+    ;(bridge as unknown as Live).readSleeve = async () => {
+      throw new Error('HTTP request failed. URL: https://monad.example/v2/testkeyZZ0123456789abcdef0123456789abcdef')
+    }
+    const e = await bridge.remote('acc-1', ACCOUNT, WINDOW).catch((x: unknown) => x as Error)
+    expect(String((e as { detail?: string }).detail ?? (e as Error).message)).not.toContain('testkeyZZ')
+  })
+})
+
+describe('review of #144: the mint relay persists what it learns and does not hammer a reverting mint', () => {
+  const burnedAt = async (now: () => number, iris: Record<string, { message: Hex; attestation: Hex }[]>, o: { dir?: string } = {}) => {
+    const s = setup({ ...o, now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }), iris })
+    s.bridge.recordSending('acc-1', signing())
+    await s.bridge.tick()
+    return s
+  }
+
+  test('attestPolledAt is on disk: a restart does not poll Iris again before ATTEST_POLL_MS', async () => {
+    let now = T0
+    const s = await burnedAt(() => now, {})
+    now += 6 * 60_000
+    await s.bridge.tick()
+    expect(s.urls).toHaveLength(1)
+    expect(s.j().burns[UOP]!.attestPolledAt).toBe(new Date(now).toISOString())
+    const restarted = setup({ dir: s.dir, now: () => now + 10_000, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }) })
+    await restarted.bridge.tick()
+    expect(restarted.urls).toHaveLength(0)
+  })
+
+  test('the CCTP nonce is on disk before the relayer is called, and stays there when the send fails', async () => {
+    let now = T0
+    const att = await attest(message({ nonce: 42n, executed: true }))
+    const s = await burnedAt(() => now, { [BURN_TX]: [att] })
+    let onDisk: string | undefined
+    ;(s.bridge as unknown as { relayer: MonadSender }).relayer = {
+      address: '0x0000000000000000000000000000000000000002',
+      send: async () => {
+        onDisk = s.j().burns[UOP]!.cctpNonce
+        throw new Error('nonce too low')
+      },
+    }
+    now += 6 * 60_000
+    await s.bridge.tick()
+    expect(onDisk).toBe(u(42n, 32))
+    expect(s.j().burns[UOP]).toMatchObject({ state: 'burned', cctpNonce: u(42n, 32) })
+  })
+
+  test('a reverting receiveMessage waits longer after each revert and stops after MONAD_MINT_MAX_REVERTS', async () => {
+    let now = T0
+    const att = await attest(message({ nonce: 42n, executed: true }))
+    const s = await burnedAt(() => now, { [BURN_TX]: [att] })
+    s.st.mintStatus = 'reverted'
+    const step = async (ms: number) => {
+      now += ms
+      await s.bridge.tick()
+      return s.relayer!.sent.length
+    }
+    expect(await step(6 * 60_000)).toBe(1)
+    expect(await step(60_000)).toBe(1) // reverted: not sent again a minute later
+    expect(await step(MONAD_MINT_PENDING_MS)).toBe(2)
+    expect(await step(60_000)).toBe(2)
+    expect(await step(MONAD_MINT_PENDING_MS)).toBe(2) // the second wait is twice as long
+    expect(await step(MONAD_MINT_PENDING_MS)).toBe(3)
+    for (let i = 0; i < 20; i++) await step(MONAD_MINT_PENDING_MS)
+    expect(s.relayer!.sent).toHaveLength(3)
+    expect(s.j().burns[UOP]).toMatchObject({ state: 'burned', mintReverts: 3 })
+    // Someone else mints it meanwhile: still recorded.
+    s.st.used.add(u(42n, 32).toLowerCase())
+    await step(60_000)
+    expect(s.j().burns[UOP]!.state).toBe('minted')
+  })
+})
+
+describe('review of #144: Monad unreachable at boot', () => {
+  test('until the check passes nothing is read on Monad nor minted; then the leg runs', async () => {
+    let now = T0
+    let reachable = false
+    const att = await attest(message({ nonce: 42n, executed: true }))
+    const s = setup({
+      now: () => now,
+      base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }),
+      iris: { [BURN_TX]: [att] },
+      verify: async () => {
+        if (!reachable) throw new Error('unreachable')
+      },
+    })
+    s.bridge.recordSending('acc-1', signing())
+    let reads = 0
+    ;(s.bridge as unknown as { readSleeve: () => Promise<unknown> }).readSleeve = async () => (reads++, { value: 0n, block: 7_000n, ready: true })
+    now += 6 * 60_000
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.state).toBe('burned') // Base side settles regardless
+    expect(s.urls).toHaveLength(0)
+    expect(s.relayer!.sent).toHaveLength(0)
+    await expect(s.bridge.remote('acc-1', ACCOUNT, 1_800)).rejects.toThrow('never read')
+    expect(reads).toBe(0)
+    reachable = true
+    now += 6 * 60_000
+    await s.bridge.tick()
+    expect(s.relayer!.sent).toHaveLength(1)
+    expect((await s.bridge.remote('acc-1', ACCOUNT, 1_800)).ready).toBe(true)
+  })
+})
+
+// The real Relayer (not relayerMock): a throw from onSending stops the send before anything is broadcast, so the mint's
+// gas ceiling and daily budget hold, and the day's charge is given back.
+const broadcasts: string[] = []
+const stub = Bun.serve({
+  port: 0,
+  hostname: '127.0.0.1',
+  fetch: async (req) => {
+    const body = (await req.json()) as { id: number; method: string } | { id: number; method: string }[]
+    const one = (m: { id: number; method: string }) => (broadcasts.push(m.method), { jsonrpc: '2.0', id: m.id, result: null })
+    return Response.json(Array.isArray(body) ? body.map(one) : one(body))
+  },
+})
+afterAll(() => stub.stop(true))
+
+describe('review of #144: the real Relayer aborts the mint when onSending throws', () => {
+  test('signed above the gas ceiling: no eth_sendRawTransaction, nothing on disk as sent, the budget refunded', async () => {
+    let now = T0
+    const att = await attest(message({ nonce: 42n, executed: true }))
+    const s = setup({ now: () => now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }), iris: { [BURN_TX]: [att] } })
+    s.bridge.recordSending('acc-1', signing())
+    await s.bridge.tick()
+    const relayerClient = {
+      estimateGas: async () => 150_000n,
+      getTransactionCount: async () => 0,
+      // The pre-check read 100 gwei; the fees the transaction is signed with come in at 600 gwei.
+      estimateFeesPerGas: async () => ({ maxFeePerGas: 600_000_000_000n, maxPriorityFeePerGas: 1_000_000_000n }),
+      readContract: async () => 0n,
+    } as unknown as PublicClient
+    ;(s.bridge as unknown as { relayer: MonadSender }).relayer = new Relayer(`0x${'11'.repeat(32)}`, relayerClient, `http://127.0.0.1:${stub.port}`, 143)
+    broadcasts.length = 0
+    now += 6 * 60_000
+    await s.bridge.tick()
+    expect(broadcasts).not.toContain('eth_sendRawTransaction')
+    const j = JSON.parse(readFileSync(join(s.dir, 'bridge-monad.json'), 'utf8')) as { burns: Record<string, BridgeBurn>; mintDays: Record<string, { n: number; wei: string }> }
+    expect(j.burns[UOP]!.mintTx).toBeUndefined()
+    expect(Object.values(j.mintDays)[0]).toEqual({ n: 0, wei: '0' })
   })
 })

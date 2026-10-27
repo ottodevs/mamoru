@@ -192,4 +192,17 @@ describe('a bridge-out is journaled before it is signed', () => {
       expect(journal(e, bridge())).toContain('disk full')
     }, { beforeBridgeSign: () => { throw new Error('disk full') } })
   })
+
+  test('review of #144: a bridge-out whose signing fails is handed back to the journal as never signed', async () => {
+    const unsigned: Hex[] = []
+    await withEngine(conservadorLabV6, async (e) => {
+      const boom = () => {
+        throw new Error('signer unavailable')
+      }
+      ;(e as unknown as { cfg: { sessionKey: unknown } }).cfg.sessionKey = { ...sessionKey, sign: boom, signMessage: boom, signTypedData: boom, signTransaction: boom }
+      const sign = (p: Proposal) => (e as unknown as { signUserOp: (p: Proposal, u: unknown, h: Hex, id: Hex) => Promise<unknown> }).signUserOp(p, { sender: ACCOUNT, nonce: 5n, callData: '0x', callGasLimit: 1n, verificationGasLimit: 1n, preVerificationGas: 1n, maxFeePerGas: 1n, maxPriorityFeePerGas: 1n, signature: '0x' }, hash, PERMISSION)
+      await expect(sign(bridge())).rejects.toThrow()
+      expect(unsigned).toEqual([hash])
+    }, { bridgeUnsigned: (h) => void unsigned.push(h) })
+  })
 })

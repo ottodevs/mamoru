@@ -434,7 +434,7 @@ export type OperatorConfig = {
    * account's engine reads its remote value from it and records every bridge-out in it before signing. Absent: no
    * account has a remote value, and no bridge-out is ever signed.
    */
-  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'view' | 'pending'>
+  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'view' | 'pending'>
 }
 
 /** Spec 007 T7: the live policies whose accounts the renew row moves to v4 (same three pools and weights). */
@@ -4814,7 +4814,7 @@ export class Operator {
     if (!bridge || !(policy.remoteBuckets ?? []).some((b) => b.chainId === BRIDGE_MONAD_CHAIN_ID)) return {}
     // Every remote bucket must be one this leg serves: a bucket on another chain would be counted as nothing.
     if ((policy.remoteBuckets ?? []).some((b) => b.chainId !== BRIDGE_MONAD_CHAIN_ID)) return {}
-    return { remote: () => bridge.remote(acc.accountKey, acc.ctx.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds) }
+    return { remote: (block: bigint) => bridge.remote(acc.accountKey, acc.ctx.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block) }
   }
 
   private startLoop(acc: AccountState): void {
@@ -4873,7 +4873,7 @@ export class Operator {
         // Sol review round 2 #4: never more admitted positions than one bounded read sees (chain.ts MAX_INVENTORY).
         mintAllowed: () => mintAllowed(acc.admittedTokenIds),
         // otto/mamoru#215: a bridge-out is on disk in the bridge journal before it is signed; without one it is never signed.
-        ...(this.cfg.bridgeMonad ? { beforeBridgeSign: (b: BridgeSigning) => this.cfg.bridgeMonad!.recordSending(acc.accountKey, b) } : {}),
+        ...(this.cfg.bridgeMonad ? { beforeBridgeSign: (b: BridgeSigning) => this.cfg.bridgeMonad!.recordSending(acc.accountKey, b), bridgeUnsigned: (h: Hex) => this.cfg.bridgeMonad!.discardUnsigned(h) } : {}),
       },
     )
     // The journal of a restarted engine is empty: the block of the last operation stored for the account stands in
