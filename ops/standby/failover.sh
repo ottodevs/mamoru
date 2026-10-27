@@ -33,25 +33,35 @@ unit_re='^mamoru-operator(-monad)?$'
 say() { printf '%s\n' "$*" >&2 || true; logger -t mamoru-failover -- "$*" || true; }
 die() { say "mamoru-failover: $*"; exit 1; }
 now_ts() { date -u +%Y%m%dT%H%M%SZ; }
-age_s() { echo $(( $(date +%s) - $(stat -c %Y "$1") )); }
 std_units() { for u in mamoru-operator mamoru-operator-monad; do echo "mamoru-standby-operator@$u" "mamoru-standby-tunnel@$u"; done; }
 set_fence() { local t; t="$(mktemp "$fdir/.fence.XXXXXX")"; echo "$1" >"$t"; chmod 644 "$t"; mv "$t" "$fence"; }
 as_op() { runuser -u mamoru-op -- "$@"; }
 # Everything under $srv belongs to mamoru-op (the operator's own user): root never creates, chowns, reads or
 # deletes there by path; it acts as mamoru-op, so a link planted there cannot point root anywhere.
-wipe() { as_op find "$1" -type f -exec shred -u {} + 2>/dev/null || true; as_op rm -rf "$1" 2>/dev/null || true; }
+wipe() { as_op find "$1" -type f -exec shred -fu {} + 2>/dev/null || true; as_op rm -rf "$1" 2>/dev/null || true; }
 
-# Newest signed state bundle by arrival time (mtime), not by the name lady gave it.
+# A file of the inbox is usable only through its manifest ("<name> <sha256> <unix time>") signed by lady. Prints
+# "<sha256> <time>" of a verified manifest of $1, nothing otherwise. The manifest is copied before it is checked, so
+# the mamoru-standby account cannot swap it between the check and the use.
+manifest_of() {
+  local f="$1" t out="" n sum when
+  t="$(mktemp -d "$fdir/tmp.XXXXXX")"
+  if cp "$inbox/$f.manifest" "$t/m" 2>/dev/null && cp "$inbox/$f.manifest.sig" "$t/s" 2>/dev/null \
+    && ssh-keygen -Y verify -f "$signers" -I lady -n mamoru-standby -s "$t/s" <"$t/m" >/dev/null 2>&1 \
+    && read -r n sum when <"$t/m" && [ "$n" = "$f" ] && [[ $sum =~ ^[0-9a-f]{64}$ && $when =~ ^[0-9]{10}$ ]]; then
+    out="$sum $when"
+  fi
+  rm -rf "$t"
+  if [ -n "$out" ]; then echo "$out"; fi
+}
+# Newest state bundle by the time lady signed into its manifest. Prints "<name> <sha256> <time>".
 newest_state() {
-  local f
-  while read -r _ f; do
-    signed "$inbox/$f" && { echo "$f"; return 0; }
-  done < <(find "$inbox" -maxdepth 1 -name 'state-*.tar.zst.age' -printf '%T@ %f\n' | sort -rn)
-  return 0
+  local m f v
+  find "$inbox" -maxdepth 1 -name 'state-*.tar.zst.age.manifest' -printf '%f\n' | while read -r m; do
+    f="${m%.manifest}"; v="$(manifest_of "$f")"; if [ -n "$v" ]; then echo "$f $v"; fi
+  done | sort -k3,3nr | head -1 || true
 }
-signed() {
-  [ -f "$1.sig" ] && ssh-keygen -Y verify -f "$signers" -I lady -n mamoru-standby -s "$1.sig" <"$1" >/dev/null 2>&1
-}
+signed_age_s() { echo $(( $(date +%s) - $1 )); }
 
 read_identity() {
   [ -t 0 ] && die "pipe the standby identity on stdin (ssh root@vps mamoru-failover $1 < ~/.config/mamoru-standby/identity)"
@@ -59,28 +69,32 @@ read_identity() {
   [ "$(grep -c '^AGE-SECRET-KEY-' <<<"$identity")" = 1 ] || die "stdin must hold exactly one age identity"
 }
 
-# Decrypts a signed age'd tar.zst into $2 (created by mamoru-op). The plain tar lives in a root-only directory;
-# only regular files and directories are accepted; tar runs as mamoru-op reading it from a descriptor root opened.
+# Decrypts inbox file $1, whose verified manifest says sha256 $3, into $2 (created by mamoru-op). The ciphertext is
+# copied into a root-only directory and checked there; the plain tar stays there; only regular files and
+# directories are accepted; tar runs as mamoru-op reading it from a descriptor root opened.
 unpack() {
-  local src="$1" dest="$2" tmpd listing
-  signed "$src" || { say "$src is not signed by lady"; return 1; }
+  local src="$1" dest="$2" want="$3" tmpd listing
   tmpd="$(mktemp -d "$fdir/tmp.XXXXXX")"
-  age -d -i <(printf '%s\n' "$identity") "$src" | zstd -dq >"$tmpd/plain" || { shred -u "$tmpd/plain"; rmdir "$tmpd"; return 1; }
-  listing="$(tar -tvf "$tmpd/plain")" || { shred -u "$tmpd/plain"; rmdir "$tmpd"; return 1; }
-  if [ -n "$(cut -c1 <<<"$listing" | grep -v '^[-d]$' || true)" ]; then
-    shred -u "$tmpd/plain"; rmdir "$tmpd"; say "$src holds a link or device"; return 1
+  if ! cp "$inbox/$src" "$tmpd/c" || [ "$(sha256sum "$tmpd/c" | cut -d' ' -f1)" != "$want" ]; then
+    rm -rf "$tmpd"; say "$src does not match its signed manifest"; return 1
   fi
-  as_op tar --no-same-owner --no-same-permissions -C "$dest" -xf - <"$tmpd/plain" || { shred -u "$tmpd/plain"; rmdir "$tmpd"; return 1; }
-  shred -u "$tmpd/plain"; rmdir "$tmpd"
+  age -d -i <(printf '%s\n' "$identity") "$tmpd/c" | zstd -dq >"$tmpd/plain" || { shred -u "$tmpd/plain"; rm -rf "$tmpd"; return 1; }
+  listing="$(tar -tvf "$tmpd/plain")" || { shred -u "$tmpd/plain"; rm -rf "$tmpd"; return 1; }
+  if [ -z "$listing" ] || [ -n "$(cut -c1 <<<"$listing" | grep -v '^[-d]$' || true)" ]; then
+    shred -u "$tmpd/plain"; rm -rf "$tmpd"; say "$src is empty or holds a link or device"; return 1
+  fi
+  as_op tar --no-same-owner --no-same-permissions -C "$dest" -xf - <"$tmpd/plain" || { shred -u "$tmpd/plain"; rm -rf "$tmpd"; return 1; }
+  shred -u "$tmpd/plain"; rm -rf "$tmpd"
 }
 meta() { as_op cat "$1/meta.json"; }
 
 # Decrypts bundle $1 into $2 and installs the code of every sha it names (cached per sha). Every step checks
 # itself: this runs where errexit may be off.
 prepare() {
-  local bundle="$1" dest="$2" u sha
+  local bundle="$1" want="$2" dest="$3" u sha code
   wipe "$dest"; as_op mkdir -m 700 "$dest" || return 1
-  unpack "$inbox/$bundle" "$dest" || { say "cannot verify, decrypt or unpack $bundle"; return 1; }
+  unpack "$bundle" "$dest" "$want" || { say "cannot verify, decrypt or unpack $bundle"; return 1; }
+  [ "$(meta "$dest" | jq -r '.name // empty')" = "$bundle" ] || { say "$bundle: its signed content names another bundle"; return 1; }
   meta "$dest" | jq -e '.units | length > 0' >/dev/null || { say "$bundle has no units"; return 1; }
   for u in $(meta "$dest" | jq -r '.units | keys[]'); do
     [[ $u =~ $unit_re ]] || { say "$bundle names an unknown unit"; return 1; }
@@ -89,9 +103,10 @@ prepare() {
     sha="$(meta "$dest" | jq -r --arg u "$u" '.units[$u].sha')"
     [[ $sha =~ ^[0-9a-f]{40}$ ]] || { say "$bundle: $u has no sha"; return 1; }
     [ -f "$fdir/installed/$sha" ] && continue
-    [ -f "$inbox/code-$sha.tar.zst.age" ] || { say "no code archive for $sha"; return 1; }
+    code="$(manifest_of "code-$sha.tar.zst.age")"
+    [ -n "$code" ] || { say "no signed code archive for $sha"; return 1; }
     wipe "$srv/code/$sha"; as_op mkdir -p -m 700 "$srv/code/$sha" || return 1
-    unpack "$inbox/code-$sha.tar.zst.age" "$srv/code/$sha" || { say "cannot verify or unpack the code of $sha"; return 1; }
+    unpack "code-$sha.tar.zst.age" "$srv/code/$sha" "${code%% *}" || { say "cannot verify or unpack the code of $sha"; return 1; }
     (cd "$srv/code/$sha" && as_op env HOME="$srv" bun install --frozen-lockfile >/dev/null) || { say "bun install failed for $sha"; return 1; }
     touch "$fdir/installed/$sha" || return 1
   done
@@ -123,17 +138,19 @@ fi
 case "${1:-}" in
   status)
     if [ -f "$fence" ]; then echo "fence $(cat "$fence")"; else echo "fence none"; fi
-    b="$(newest_state)"; [ -n "$b" ] && echo "newest signed bundle $b, $(age_s "$inbox/$b") s old" || echo "no signed bundle"
+    read -r b _ when <<<"$(newest_state)" || true
+    if [ -n "${b:-}" ]; then echo "newest signed bundle $b, signed $(signed_age_s "$when") s ago"; else echo "no signed bundle"; fi
     for u in $(std_units); do printf '%s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || true)"; done
     ;;
 
   drill)
     [ -f "$fence" ] && die "fence set: no drill during a failover"
     read_identity drill
-    b="$(newest_state)"; [ -n "$b" ] || die "no signed state bundle in $inbox"
-    hb="$(age_s "$inbox/$b")"
+    read -r b want when <<<"$(newest_state)" || true
+    [ -n "${b:-}" ] || die "no signed state bundle in $inbox"
+    hb="$(signed_age_s "$when")"
     trap 'wipe "$srv/drill"' EXIT
-    prepare "$b" "$srv/drill" || die "drill failed on $b (decrypted state erased)"
+    prepare "$b" "$want" "$srv/drill" || die "drill failed on $b (decrypted state erased)"
     say "drill ok: $b (${hb}s old) is signed, decrypts, every unit has env and state, its JSON parses, code installed:"
     meta "$srv/drill" | jq -r '.units | to_entries[] | "  \(.key) \(.value.sha[:7]) (lady: \(.value.active), \(.value.enabled // "?"))"' >&2 || true
     [ "$hb" -lt "$heartbeat_fresh_s" ] || say "WARNING: the newest bundle is ${hb}s old: lady's push is failing (journalctl --user -u mamoru-standby-push on lady)"
@@ -146,12 +163,16 @@ case "${1:-}" in
     read_identity activate
     [ -f "$fence" ] && die "fence already set ($(cat "$fence"))"
     for u in $(std_units); do systemctl is-active --quiet "$u" && die "$u already runs"; done
-    b="$(newest_state)"; [ -n "$b" ] || die "no signed state bundle: nothing to run"
-    hb="$(age_s "$inbox/$b")"
+    read -r b want when <<<"$(newest_state)" || true
+    [ -n "${b:-}" ] || die "no signed state bundle: nothing to run"
+    hb="$(signed_age_s "$when")"
+    # Never older than what ran here last: a replayed bundle cannot roll the state back.
+    last="$(cat "$fdir/last-run" 2>/dev/null || echo 0)"
+    [ "$when" -gt "$last" ] || die "the newest signed bundle ($b) is not newer than the state this VPS last ran; lady has not pushed since the hand back"
     [ "$hb" -lt "$max_age_s" ] || [ "$accept_old" = 1 ] \
       || die "the newest bundle is ${hb}s old: running it would replay old session and relayer state. --accept-old only if nothing newer exists anywhere."
     trap 'wipe "$srv/run"' EXIT
-    prepare "$b" "$srv/run" || die "could not prepare $b; nothing started, decrypted state erased"
+    prepare "$b" "$want" "$srv/run" || die "could not prepare $b; nothing started, decrypted state erased"
     m="$(meta "$srv/run")"
     if [ "$hb" -lt "$heartbeat_fresh_s" ]; then
       # lady is alive: it must have stood down, and the bundle names what it stopped.
@@ -169,6 +190,7 @@ case "${1:-}" in
     fi
     for u in "${start[@]}"; do [[ $u =~ $unit_re ]] || die "unknown unit $u"; done
     set_fence "active $(now_ts) $b"
+    echo "$when" >"$fdir/last-run"
     trap - EXIT
     for u in "${start[@]}"; do
       write_unit_env "$srv/run" "$u"

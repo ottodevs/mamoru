@@ -39,7 +39,7 @@ running_units() { local u; for u in "${units[@]}"; do systemctl --user is-active
 case "${1:-}" in
   pre)
     unit="${2:?unit name}"
-    [ -f "$st/fenced" ] && { echo "refusing to start $unit: local fence ($st/fenced). After the hand back: fence-watch.sh resume" >&2; exit 1; }
+    [ -f "$st/fenced" ] || [ -f "$st/fenced.resuming" ] && { echo "refusing to start $unit: local fence ($st/fenced). After the hand back: fence-watch.sh resume" >&2; exit 1; }
     for _ in 1 2 3; do
       s="$(vps_status)"
       case "$s" in
@@ -69,7 +69,7 @@ case "${1:-}" in
         if [ -n "$run" ]; then echo "the VPS runs the operator ($s): stopping lady's"; stop_all; fi
         ;;
       "fence none")
-        [ -f "$st/fenced" ] && exit 0
+        [ -f "$st/fenced" ] || [ -f "$st/fenced.resuming" ] && exit 0
         for u in "${units[@]}"; do
           if [ -f "$st/blocked-$u" ]; then
             echo "the VPS answers 'fence none': starting $u, refused earlier while it was unreachable"

@@ -21,14 +21,18 @@ units=(mamoru-operator mamoru-operator-monad)
 recipient="$(tr -d '[:space:]' <"$conf/recipient")"
 [[ $recipient =~ ^age1[0-9a-z]{58}$ ]] || { echo "$conf/recipient is not one age public key" >&2; exit 1; }
 ssh_vps() { timeout 300 ssh -i "$key" -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o IdentitiesOnly=yes "$host" "$@"; }
-# Seals stdin into a file, signs it with lady's signing key (the VPS uses only what this key signed: age alone does
-# not say who encrypted) and uploads both with their sha256, which receive.sh checks before keeping them.
+# Seals stdin into a file and uploads it with a manifest ("<name> <sha256> <unix time>") signed by lady's signing key.
+# The VPS uses a file only through a manifest that verifies: age alone does not say who encrypted, and the signed
+# name and time are what it orders and ages bundles by (an inbox file's name and mtime can be changed there).
 send() {
-  local name="$1" file="$work/$1"
+  local name="$1" file="$work/$1" sum
   age -r "$recipient" >"$file"
-  ssh-keygen -q -Y sign -f "$conf/sign" -n mamoru-standby "$file" </dev/null
-  ssh_vps put "$name" "$(sha256sum "$file" | cut -d' ' -f1)" <"$file" >/dev/null
-  ssh_vps put "$name.sig" "$(sha256sum "$file.sig" | cut -d' ' -f1)" <"$file.sig" >/dev/null
+  sum="$(sha256sum "$file" | cut -d' ' -f1)"
+  printf '%s %s %s\n' "$name" "$sum" "$(date +%s)" >"$file.manifest"
+  ssh-keygen -q -Y sign -f "$conf/sign" -n mamoru-standby "$file.manifest" </dev/null
+  ssh_vps put "$name" "$sum" <"$file" >/dev/null
+  ssh_vps put "$name.manifest" "$(sha256sum "$file.manifest" | cut -d' ' -f1)" <"$file.manifest" >/dev/null
+  ssh_vps put "$name.manifest.sig" "$(sha256sum "$file.manifest.sig" | cut -d' ' -f1)" <"$file.manifest.sig" >/dev/null
 }
 
 mkdir -p "$st"
@@ -94,8 +98,8 @@ done
 standdown='[]'
 [ -f "$st/fenced" ] && standdown="$(jq -R . <"$st/fenced" | jq -sc 'map(select(length > 0))')"
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
-jq -n --arg ts "$ts" --arg host "$(hostname)" --argjson units "$meta_units" --argjson standdown "$standdown" \
-  '{createdAt: $ts, host: $host, units: $units, standdown: $standdown}' >"$work/bundle/meta.json"
+jq -n --arg ts "$ts" --arg name "state-$ts.tar.zst.age" --arg host "$(hostname)" --argjson units "$meta_units" --argjson standdown "$standdown" \
+  '{createdAt: $ts, name: $name, host: $host, units: $units, standdown: $standdown}' >"$work/bundle/meta.json"
 
 tar -C "$work/bundle" -cf - . | zstd -q -10 | send "state-$ts.tar.zst.age"
 echo "$ts" >"$st/last-push"
