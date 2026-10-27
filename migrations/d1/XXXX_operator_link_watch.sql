@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS operator_link_watch (
   chain_id INTEGER PRIMARY KEY,
   down_since TEXT,        -- ISO, Worker clock: first failed probe of the current outage; NULL while the link is up
   last_error TEXT,        -- short reason of the last failed probe (never a URL or a secret)
-  last_alert_at TEXT,     -- ISO: last "down" alert actually delivered for this outage; NULL when none was
+  last_alert_at TEXT,     -- ISO: last "down" alert claimed for this outage (put back when nothing delivered it)
+  alerted INTEGER NOT NULL DEFAULT 0,  -- 1 once any "down" alert of this outage was delivered
+  recovery_pending TEXT,  -- ISO down_since of an outage that ended with alerted = 1 and whose "recovered" is not delivered yet
   checked_at TEXT NOT NULL
 );

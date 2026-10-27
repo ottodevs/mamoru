@@ -90,51 +90,65 @@ function minutes(ms: number): string {
   return m < 120 ? `${m} min` : `${(m / 60).toFixed(1)} h`
 }
 
-/** One chain, one tick. Exported for tests. */
+type WatchRow = { down_since: string | null; last_alert_at: string | null; alerted: number; recovery_pending: string | null }
+
+/**
+ * One chain, one tick. Exported for tests. Every send is claimed first with a conditional UPDATE on the value just
+ * read (so one of two concurrent runs wins) and handed back when no channel delivered it, so the next tick retries:
+ * a "down" puts last_alert_at back to what it was, a "recovered" puts recovery_pending back. `alerted` only ever
+ * goes to 1 on a delivery, so a failed reminder never hides that the first alert went out.
+ */
 export async function watchOne(db: Db, chainId: number, probe: { up: true } | { up: false; reason: string }, notify: Notify, now: Date): Promise<void> {
   const name = chainName(chainId)
   const at = now.toISOString()
+  await db.prepare(`INSERT INTO operator_link_watch (chain_id, checked_at) VALUES (?, ?) ON CONFLICT(chain_id) DO UPDATE SET checked_at = excluded.checked_at`).bind(chainId, at).run()
+  const read = () => db.prepare(`SELECT down_since, last_alert_at, alerted, recovery_pending FROM operator_link_watch WHERE chain_id = ?`).bind(chainId).first<WatchRow>()
+
   if (probe.up) {
-    const row = await db.prepare(`SELECT down_since, last_alert_at FROM operator_link_watch WHERE chain_id = ?`).bind(chainId).first<{ down_since: string | null; last_alert_at: string | null }>()
-    if (!row?.down_since) {
-      await db.prepare(`INSERT INTO operator_link_watch (chain_id, checked_at) VALUES (?, ?) ON CONFLICT(chain_id) DO UPDATE SET checked_at = excluded.checked_at`).bind(chainId, at).run()
-      return
+    let row = await read()
+    if (row?.down_since) {
+      // The outage ends here. One run clears it; it carries a pending "recovered" only if a "down" was delivered.
+      await db
+        .prepare(
+          `UPDATE operator_link_watch SET down_since = NULL, last_error = NULL, last_alert_at = NULL, alerted = 0,
+             recovery_pending = CASE WHEN alerted = 1 THEN down_since ELSE recovery_pending END
+           WHERE chain_id = ? AND down_since = ?`,
+        )
+        .bind(chainId, row.down_since)
+        .run()
+      row = await read()
     }
-    // RETURNING gives the values after the update, so the old ones come from the read above; the WHERE on the old
-    // down_since makes exactly one of two concurrent runs (prod and beta) the one that clears it.
-    const cleared = await db
-      .prepare(`UPDATE operator_link_watch SET down_since = NULL, last_error = NULL, last_alert_at = NULL, checked_at = ? WHERE chain_id = ? AND down_since = ? RETURNING chain_id`)
-      .bind(at, chainId, row.down_since)
-      .first<{ chain_id: number }>()
-    if (cleared && row.last_alert_at) {
-      await notify(`:white_check_mark: Mamoru: the Worker reaches the ${name} operator again (down ${minutes(now.getTime() - Date.parse(row.down_since))}).`)
-    }
+    const pending = row?.recovery_pending
+    if (!pending) return
+    const claimed = await db.prepare(`UPDATE operator_link_watch SET recovery_pending = NULL WHERE chain_id = ? AND recovery_pending = ? RETURNING chain_id`).bind(chainId, pending).first()
+    if (!claimed) return
+    const sent = await notify(`:white_check_mark: Mamoru: the Worker reaches the ${name} operator again (down ${minutes(now.getTime() - Date.parse(pending))}).`)
+    if (!sent) await db.prepare(`UPDATE operator_link_watch SET recovery_pending = ? WHERE chain_id = ? AND recovery_pending IS NULL`).bind(pending, chainId).run()
     return
   }
+
   await db
-    .prepare(
-      `INSERT INTO operator_link_watch (chain_id, down_since, last_error, checked_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT(chain_id) DO UPDATE SET down_since = COALESCE(operator_link_watch.down_since, excluded.down_since),
-         last_error = excluded.last_error, checked_at = excluded.checked_at`,
-    )
-    .bind(chainId, at, probe.reason, at)
+    .prepare(`UPDATE operator_link_watch SET down_since = COALESCE(down_since, ?), last_error = ? WHERE chain_id = ?`)
+    .bind(at, probe.reason, chainId)
     .run()
-  // Claim the alert: past DOWN_AFTER_MS, and either none sent yet in this outage or the last one is REMIND_EVERY_MS old.
+  const row = await read()
+  if (!row?.down_since) return
+  if (now.getTime() - Date.parse(row.down_since) < DOWN_AFTER_MS) return
+  if (row.last_alert_at && now.getTime() - Date.parse(row.last_alert_at) < REMIND_EVERY_MS) return
+  // Claim against the value just read (IS matches NULL too).
   const claimed = await db
-    .prepare(
-      `UPDATE operator_link_watch SET last_alert_at = ?
-       WHERE chain_id = ? AND down_since IS NOT NULL AND down_since <= ? AND (last_alert_at IS NULL OR last_alert_at <= ?)
-       RETURNING down_since, last_alert_at`,
-    )
-    .bind(at, chainId, new Date(now.getTime() - DOWN_AFTER_MS).toISOString(), new Date(now.getTime() - REMIND_EVERY_MS).toISOString())
-    .first<{ down_since: string }>()
+    .prepare(`UPDATE operator_link_watch SET last_alert_at = ? WHERE chain_id = ? AND down_since = ? AND last_alert_at IS ? RETURNING chain_id`)
+    .bind(at, chainId, row.down_since, row.last_alert_at)
+    .first()
   if (!claimed) return
   const text =
-    `:rotating_light: Mamoru: the Worker cannot reach the ${name} operator for ${minutes(now.getTime() - Date.parse(claimed.down_since))} ` +
+    `:rotating_light: Mamoru: the Worker cannot reach the ${name} operator for ${minutes(now.getTime() - Date.parse(row.down_since))} ` +
     `(last probe: ${probe.reason}). Users see "Could not load your balance". Check the operator tunnel on lady (otto/mamoru#205).`
-  if (!(await notify(text))) {
-    // Nothing delivered: give the claim back so the next tick tries again.
-    await db.prepare(`UPDATE operator_link_watch SET last_alert_at = NULL WHERE chain_id = ? AND last_alert_at = ?`).bind(chainId, at).run()
+  if (await notify(text)) {
+    await db.prepare(`UPDATE operator_link_watch SET alerted = 1 WHERE chain_id = ? AND down_since = ?`).bind(chainId, row.down_since).run()
+  } else {
+    // Nothing delivered: give the claim back so the next tick tries again; `alerted` keeps any earlier delivery.
+    await db.prepare(`UPDATE operator_link_watch SET last_alert_at = ? WHERE chain_id = ? AND last_alert_at = ?`).bind(row.last_alert_at, chainId, at).run()
   }
 }
 

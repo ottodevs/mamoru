@@ -78,6 +78,48 @@ describe('watchOne (otto/mamoru#207)', () => {
   })
 })
 
+describe('watchOne delivery failures (review of PR #132)', () => {
+  test('a "recovered" no channel took is retried on the next healthy tick, once', async () => {
+    const db = memoryD1()
+    const ok = recorder()
+    await watchOne(db, 8453, DOWN, ok.notify, at(0))
+    await watchOne(db, 8453, DOWN, ok.notify, at(DOWN_AFTER_MS))
+    const failing = recorder(false)
+    await watchOne(db, 8453, UP, failing.notify, at(DOWN_AFTER_MS + 60_000))
+    expect(failing.sent).toHaveLength(1)
+    await watchOne(db, 8453, UP, ok.notify, at(DOWN_AFTER_MS + 120_000))
+    await watchOne(db, 8453, UP, ok.notify, at(DOWN_AFTER_MS + 180_000))
+    expect(ok.sent).toHaveLength(2)
+    expect(ok.sent[1]).toContain('reaches the Base operator again')
+  })
+
+  test('a failed reminder keeps the first delivery: the recovery is still sent and the reminder retried', async () => {
+    const db = memoryD1()
+    const ok = recorder()
+    await watchOne(db, 8453, DOWN, ok.notify, at(0))
+    await watchOne(db, 8453, DOWN, ok.notify, at(DOWN_AFTER_MS))
+    const failing = recorder(false)
+    await watchOne(db, 8453, DOWN, failing.notify, at(DOWN_AFTER_MS + REMIND_EVERY_MS))
+    expect(failing.sent).toHaveLength(1)
+    await watchOne(db, 8453, DOWN, ok.notify, at(DOWN_AFTER_MS + REMIND_EVERY_MS + 10 * 60_000))
+    expect(ok.sent).toHaveLength(2)
+    await watchOne(db, 8453, UP, ok.notify, at(DOWN_AFTER_MS + REMIND_EVERY_MS + 20 * 60_000))
+    expect(ok.sent).toHaveLength(3)
+    expect(ok.sent[2]).toContain('again')
+  })
+
+  test('a failed reminder followed by recovery still sends the recovery', async () => {
+    const db = memoryD1()
+    const ok = recorder()
+    await watchOne(db, 8453, DOWN, ok.notify, at(0))
+    await watchOne(db, 8453, DOWN, ok.notify, at(DOWN_AFTER_MS))
+    await watchOne(db, 8453, DOWN, recorder(false).notify, at(DOWN_AFTER_MS + REMIND_EVERY_MS))
+    await watchOne(db, 8453, UP, ok.notify, at(DOWN_AFTER_MS + REMIND_EVERY_MS + 60_000))
+    expect(ok.sent).toHaveLength(2)
+    expect(ok.sent[1]).toContain('again')
+  })
+})
+
 describe('runOperatorLinkWatch (otto/mamoru#207)', () => {
   test('probes each configured chain and posts to Mattermost and Telegram without leaking the operator URL', async () => {
     const db = memoryD1()
