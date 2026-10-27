@@ -332,24 +332,6 @@
     border-top: 1px solid var(--color-wash);
     padding: 1.5rem 0;
   }
-  .fold > summary {
-    list-style: none;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-  }
-  .fold > summary::-webkit-details-marker {
-    display: none;
-  }
-  .fold > summary::after {
-    content: "▾";
-    color: var(--color-stone);
-  }
-  .fold[open] > summary::after {
-    content: "▴";
-  }
   .cta {
     font-family: var(--font-mono);
     font-size: 0.75rem;
@@ -1058,67 +1040,10 @@
   letter-spacing: 0.04em;
   color: var(--color-muted);
 }
-.seal {
-  display: flex;
-  align-items: center;
-  gap: 0.9rem;
-  margin-left: auto;
-}
-.seal-word {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.4em;
-  color: var(--color-muted);
-}
-.dash-fold {
-  border-top: 1px solid var(--color-wash);
-  padding: 1.75rem 0;
-}
-.dash-fold > summary,
-.dash-summary {
-  list-style: none;
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 1rem;
-}
-.dash-fold > summary {
-  cursor: pointer;
-}
-.dash-fold > summary::-webkit-details-marker {
-  display: none;
-}
-.dash-fold > summary::after {
-  content: "Show +";
-  flex-shrink: 0;
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--color-stone);
-}
-.dash-fold[open] > summary::after {
-  content: "Hide \2212";
-}
 .dash-title {
   font-size: 1.65rem;
   line-height: 1.2;
   letter-spacing: -0.005em;
-}
-.wc-head,
-.idle-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.2rem 1rem;
-  min-width: 0;
-}
-.wc-count {
-  font-size: 1.05rem;
-  color: var(--color-stone);
-}
-.dash-fold .progress {
-  margin: 0.6rem 0 0;
 }
 .wc-row {
   display: grid;
@@ -1229,9 +1154,6 @@
   font-size: 1rem;
   line-height: 1.4;
 }
-.dash-flat {
-  padding: 1.75rem 0;
-}
 .wc-why {
   grid-column: 1 / -1;
   margin-top: 0.5rem;
@@ -1261,71 +1183,106 @@
   }
 }
 
-/* The table goes compact before its columns run out of room (otto/mamoru#193 review). */
+/* The table goes compact before its columns run out of room (otto/mamoru#193 review). #226: a card per position
+   that never cuts a line: marks on the left, the pair and its venue wrap inside their column, the value and share
+   hold the right edge, token amounts and rates share the last row and wrap when they must. */
 @media (max-width: 900px) {
   .wc-cols {
     display: none;
   }
   .wc-cols + ul {
-    margin-top: 1rem;
+    margin-top: 0.75rem;
   }
   .wc-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-    row-gap: 0.35rem;
-    padding: 0.95rem 0;
+    grid-template-columns: 2.3rem minmax(0, 1fr) auto;
+    column-gap: 0.75rem;
+    row-gap: 0.3rem;
+    padding: 1rem 0;
   }
   .wc-cols + ul > .wc-row:first-child {
     border-top: 1px solid var(--color-wash);
   }
-  /* Token amounts and range stay visible: with no separate token card they are the only per-token view. */
-  .wc-marks,
-  .wc-bar,
+  .wc-marks {
+    display: flex;
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    padding-top: 0.15rem;
+  }
+  .wc-marks img,
+  .wc-marks svg {
+    width: 22px;
+    height: 22px;
+  }
   .wc-rate {
     display: none;
   }
-  .wc-venue,
-  .wc-legs {
-    font-size: 0.72rem;
-  }
-  .wc-legs {
-    white-space: normal;
-  }
   .wc-name {
-    grid-column: 1;
-    grid-row: 1;
+    grid-column: 2;
+    grid-row: 1 / span 2;
   }
   .wc-pair {
-    font-size: 1.1rem;
+    font-size: 1.05rem;
+    line-height: 1.3;
   }
-  .wc-share {
-    grid-column: 2;
-    grid-row: 1;
+  .wc-venue {
+    font-size: 0.7rem;
+    line-height: 1.5;
   }
+  /* The value and its legs are placed on their own, so the legs sit under the name. */
   .wc-amount {
-    grid-column: 1;
-    grid-row: 2;
-    align-items: flex-start;
+    display: contents;
+  }
+  .wc-amount > .wc-num {
+    grid-column: 3;
+    grid-row: 1;
+    text-align: right;
+    font-size: 1.1rem;
+    white-space: nowrap;
+  }
+  .wc-legs {
+    grid-column: 2;
+    grid-row: 3;
+    font-size: 0.7rem;
+    white-space: normal;
     text-align: left;
   }
-  .wc-amount .wc-num {
+  .wc-share {
+    grid-column: 3;
+    grid-row: 2;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.45rem;
+  }
+  .wc-share > .wc-num {
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: 0.78rem;
     letter-spacing: 0.04em;
+  }
+  .wc-bar {
+    width: 2.6rem;
+    margin-top: 0;
+    height: 0.22rem;
   }
   .wc-rates-m {
     display: block;
-    grid-column: 2;
-    grid-row: 2;
+    grid-column: 3;
+    grid-row: 3;
+    align-self: end;
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: 0.72rem;
     letter-spacing: 0.04em;
     text-align: right;
-    white-space: nowrap;
+  }
+  .wc-paused,
+  .wc-why {
+    grid-column: 2 / -1;
   }
   .wc-paused {
     justify-self: stretch;
     margin-top: 0.5rem;
-    font-size: 0.95rem;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.9rem;
   }
 }
 
@@ -1356,32 +1313,490 @@
     letter-spacing: 0.08em;
   }
   .dash-title {
-    font-size: 1.4rem;
+    font-size: 1.3rem;
   }
-  .wc-head {
-    flex-direction: column;
-    gap: 0;
+}
+
+/* ---------- #226: panels, live state, motion ---------- */
+
+/* Shared easing: quick to start, long soft landing (an "expo out"). */
+:root {
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* A panel: the whole head is the button. A soft wash under it on hover and a slight press on tap say it opens. */
+.panel {
+  border-top: 1px solid var(--color-wash);
+  padding: 0.6rem 0 0.9rem;
+}
+.panel-head {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  width: calc(100% + 1.5rem);
+  margin: 0 -0.75rem;
+  padding: 1rem 0.75rem;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background-color 220ms var(--ease-out),
+    transform 220ms var(--ease-out);
+}
+.panel-head:hover {
+  background: color-mix(in srgb, var(--color-wash) 32%, transparent);
+}
+.panel-head:active {
+  background: color-mix(in srgb, var(--color-wash) 50%, transparent);
+  transform: scale(0.992);
+}
+.panel-head:focus-visible {
+  outline: 2px solid var(--color-emerald);
+  outline-offset: 2px;
+}
+.panel-head-main {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "title sum"
+    "meta sum";
+  align-items: center;
+  gap: 0.3rem 1.25rem;
+  min-width: 0;
+}
+.panel-head-main > .dash-title {
+  grid-area: title;
+}
+.panel-head-main > .panel-meta {
+  grid-area: meta;
+}
+.panel-head-main > .panel-sum {
+  grid-area: sum;
+}
+/* A panel with nothing to open keeps the same head, without the button's hover or chevron. */
+.panel-static .panel-head {
+  cursor: default;
+}
+.panel-static .panel-head:hover,
+.panel-static .panel-head:active {
+  background: none;
+  transform: none;
+}
+.panel-meta {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  color: var(--color-stone);
+  overflow-wrap: anywhere;
+}
+.panel-sum {
+  flex: none;
+  font-size: 1.65rem;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.panel-unit {
+  font-size: 0.55em;
+  letter-spacing: 0.12em;
+  color: var(--color-stone);
+}
+.panel .progress {
+  margin: 0.15rem 0 0.35rem;
+}
+/* The body opens on a grid track, so its real height animates; the content fades and settles a beat later. */
+.panel-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 460ms var(--ease-out);
+}
+.panel.is-open > .panel-body {
+  grid-template-rows: 1fr;
+}
+.panel-inner {
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(-6px);
+  transition:
+    opacity 240ms ease-out,
+    transform 460ms var(--ease-out);
+}
+.panel.is-open .panel-inner {
+  opacity: 1;
+  transform: none;
+  transition-delay: 70ms;
+}
+/* Rows arrive one after another when the panel opens (and on first paint, when it starts open). */
+.panel.is-open .wc-row:not(.wc-cols),
+.panel.is-open .idle-list > li {
+  animation: row-in 520ms var(--ease-out) both;
+  animation-delay: calc(90ms + var(--i, 0) * 55ms);
+}
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
   }
-  .wc-head .wc-count {
-    display: none;
+}
+
+/* One chevron everywhere: thin stroke in a hairline ring; half a turn when open, ink ring on hover. */
+.chev {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid var(--color-wash);
+  border-radius: 999px;
+  color: var(--color-ink);
+  transition:
+    transform 460ms var(--ease-out),
+    border-color 220ms ease-out,
+    background-color 220ms ease-out;
+}
+.chev.is-open {
+  transform: rotate(180deg);
+}
+.chev-right {
+  width: 1.6rem;
+  height: 1.6rem;
+  transform: rotate(-90deg);
+}
+.panel-head:hover .chev,
+.foot-link:hover .chev {
+  border-color: var(--color-ink);
+}
+.foot-link:hover .chev-right {
+  transform: rotate(-90deg) translateY(2px);
+}
+
+/* Share bars grow in from the left the first time they show. */
+.wc-bar > span {
+  transform-origin: left;
+  transition: width 900ms var(--ease-out);
+}
+.panel.is-open .wc-bar > span {
+  animation: bar-in 900ms var(--ease-out) both;
+  animation-delay: calc(180ms + var(--i, 0) * 55ms);
+}
+@keyframes bar-in {
+  from {
+    transform: scaleX(0);
   }
-  .dash-fold > summary::after {
-    content: "+";
-    letter-spacing: 0;
-    font-size: 1.1rem;
+}
+.wc-unit {
+  font-size: 0.75em;
+  letter-spacing: 0.08em;
+  color: var(--color-stone);
+}
+
+.idle-list {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0.4rem 0 0;
+  list-style: none;
+}
+.idle-list > li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+/* A figure that just changed glows briefly: emerald when it grew, ink when it fell. */
+.num-tick {
+  display: inline-block;
+}
+.num-up {
+  animation: num-up 1400ms ease-out;
+}
+.num-down {
+  animation: num-down 1400ms ease-out;
+}
+@keyframes num-up {
+  0% {
+    color: var(--color-emerald);
+    text-shadow: 0 0 18px color-mix(in srgb, var(--color-emerald) 45%, transparent);
   }
-  .dash-fold[open] > summary::after {
-    content: "\2212";
+}
+@keyframes num-down {
+  0% {
+    color: var(--color-muted);
   }
-  .idle-head {
-    flex: 1;
-    justify-content: space-between;
+}
+
+/* The live pill by the brand: ring fills until the next reading, core breathes; tap reads now. */
+.live {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.25rem;
+  padding: 0.35rem 0.75rem 0.35rem 0.55rem;
+  border: 1px solid var(--color-wash);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-stone);
+  cursor: pointer;
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    border-color 220ms ease-out,
+    transform 220ms var(--ease-out);
+}
+.live:hover {
+  border-color: var(--color-ink);
+  color: var(--color-ink);
+}
+.live:active {
+  transform: scale(0.96);
+}
+.live:focus-visible {
+  outline: 2px solid var(--color-emerald);
+  outline-offset: 2px;
+}
+.live-ring {
+  transform: rotate(-90deg);
+}
+.live-track {
+  fill: none;
+  stroke: var(--color-wash);
+  stroke-width: 1.5;
+}
+.live-fill {
+  fill: none;
+  stroke: var(--color-emerald);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: live-fill linear forwards;
+}
+.live-core {
+  fill: var(--color-emerald);
+  transform-origin: 8px 8px;
+  animation: live-core 2.4s ease-in-out infinite;
+}
+.live.is-fetching .live-ring {
+  animation: spin 900ms linear infinite;
+}
+.live.is-fetching .live-fill {
+  stroke-dashoffset: 0.7;
+  animation: none;
+}
+.live.is-down {
+  color: var(--color-alert-ink);
+  border-color: color-mix(in srgb, var(--color-alert) 45%, var(--color-wash));
+}
+.live.is-down .live-fill {
+  display: none;
+}
+.live.is-down .live-core {
+  fill: var(--color-alert);
+}
+@keyframes live-fill {
+  to {
+    stroke-dashoffset: 0;
   }
-  .idle-head .dash-title:first-child {
-    font-weight: 700;
+}
+@keyframes live-core {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.8);
   }
-  .idle-head .wc-count {
-    flex-basis: 100%;
-    font-size: 0.9rem;
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
   }
+}
+@keyframes spin {
+  to {
+    transform: rotate(270deg);
+  }
+}
+
+/* Pull to refresh (home-screen app only): the mark drops in from the top and spins while the reads run. */
+.ptr {
+  position: fixed;
+  top: env(safe-area-inset-top, 0px);
+  left: 50%;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border: 1px solid var(--color-wash);
+  border-radius: 999px;
+  background: var(--color-paper);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--color-ink) 10%, transparent);
+  pointer-events: none;
+}
+.ptr img {
+  opacity: 0.55;
+  transition: opacity 160ms ease-out;
+}
+.ptr.is-ready img,
+.ptr.is-busy img {
+  opacity: 1;
+}
+.ptr.is-busy img {
+  animation: spin-full 800ms linear infinite;
+}
+@keyframes spin-full {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Footer (#226): three tappable rows, three columns on wide screens; the seal signs off centred under them. */
+.foot {
+  margin-top: auto;
+  padding-top: 1.25rem;
+}
+.foot-links {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 1.5rem;
+  border-top: 1px solid var(--color-wash);
+}
+.foot-link {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 3.25rem;
+  padding: 0.85rem 0;
+  border-bottom: 1px solid var(--color-wash);
+  font-size: 0.95rem;
+  color: var(--color-ink);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: color 200ms ease-out;
+}
+.foot-link:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.foot-link:focus-visible {
+  outline: 2px solid var(--color-emerald);
+  outline-offset: 2px;
+}
+.foot-sign {
+  display: flex;
+  justify-content: center;
+  padding: 2.25rem 0 0.5rem;
+}
+.seal {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+.seal-word {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.4em;
+  color: var(--color-muted);
+}
+@media (max-width: 760px) {
+  .foot-links {
+    grid-template-columns: 1fr;
+  }
+  .panel-sum {
+    font-size: 1.3rem;
+  }
+  .panel-head {
+    width: calc(100% + 1rem);
+    margin: 0 -0.5rem;
+    padding: 0.9rem 0.5rem;
+    gap: 0.7rem;
+  }
+}
+
+/* How Mamoru works: numbered steps, then where to read more. */
+.how-steps {
+  display: grid;
+  gap: 1.1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.how-steps > li {
+  display: grid;
+  grid-template-columns: 2.1rem minmax(0, 1fr);
+  gap: 0.6rem;
+  animation: row-in 520ms var(--ease-out) both;
+  animation-delay: calc(80ms + var(--i, 0) * 70ms);
+}
+.how-n {
+  padding-top: 0.2rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  color: var(--color-emerald);
+}
+.how-title {
+  display: block;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+.how-body {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--color-muted);
+}
+.how-links {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--color-wash);
+}
+.how-links a {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.8rem 0;
+  border-bottom: 1px solid var(--color-wash);
+  text-decoration: none;
+}
+.how-links a:hover {
+  color: var(--color-emerald);
+}
+.how-where {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-core,
+  .live.is-fetching .live-ring,
+  .ptr.is-busy img {
+    animation: none !important;
+  }
+  .panel-body,
+  .panel-inner,
+  .chev {
+    transition: none !important;
+  }
+}
+
+/* A segment of a "·" line wraps as a whole, never inside its figure and token. */
+.seg {
+  white-space: nowrap;
 }

@@ -1,8 +1,8 @@
 import type { ApyView, FundingView, Hex0x, OpView, OverCap, PriceDivergenceWarning, WithdrawAsset } from '@mamoru/domain'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
-import { queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
+import { fundingInterval, queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { PriceDivergenceNotice } from '../components/price-divergence-notice.tsx'
 import { TokenMark } from '../components/token-mark.tsx'
@@ -23,6 +23,8 @@ import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-asse
 import { DepositDetails, hasMoney } from './add-money.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { FeedbackDialog, feedbackCopy } from '../components/feedback-dialog.tsx'
+import { HowItWorks, howCopy } from '../components/how-it-works.tsx'
+import { Chevron, Fold, LiveSync, PullToRefresh, TweenPct, TweenUsd } from '../components/motion.tsx'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
 
 export const homeCopy = {
@@ -115,8 +117,6 @@ export const homeCopy = {
   overCapAct: (o: OverCap) => `Withdraw ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC`,
 }
 
-const GITHUB = 'https://github.com/ottodevs/mamoru#readme'
-
 const KIND: Record<OpView['kind'], string> = { activate: 'Start', enter: 'Position', reduce: 'Position', transfer: 'Withdraw', exit: 'Stop', renew: 'Approval' }
 
 function plural(n: number, one: string, many: string) {
@@ -134,7 +134,7 @@ function Earned({ usd: earned }: { usd: string | null | undefined }) {
   return (
     <p className="earned" data-testid="earned-so-far">
       <span className={`earned-value${known ? '' : ' rate-na'}`}>
-        {known ? `+${usd(earned)}` : homeCopy.na}
+        {known ? <TweenUsd raw={earned} prefix="+" countUp /> : homeCopy.na}
         {known ? <span className="earned-unit">USDC</span> : null}
       </span>
       <span className="earned-label">{homeCopy.earnedSoFar}</span>
@@ -178,7 +178,7 @@ export function Balance({
           {homeCopy.total}
         </p>
         <p className={`sum${shownPast ? ' past' : ''}`} data-testid="total">
-          {shownPast ? usd(shownPast.totalUsd) : s ? usd(s.total) : '0.00'}
+          {shownPast ? usd(shownPast.totalUsd) : s ? <TweenUsd raw={s.total} countUp /> : '0.00'}
           <span className="unit">USDC</span>
         </p>
         {shownPast ? (
@@ -253,13 +253,13 @@ export function Indicators({ f, apy, price, noRead = false }: { f: FundingView |
     <section className="rates" aria-label="Rates">
       <div className="rate">
         <p className={`rate-value${monthly.pct === null ? ' rate-na' : ''}`} data-testid="rate-monthly">
-          {pct(monthly.pct)}
+          {monthly.pct === null ? homeCopy.na : <TweenPct value={monthly.pct} countUp />}
         </p>
         <RateSub name={homeCopy.monthly} what={homeCopy.monthlyWhat} tail={monthlyTail} />
       </div>
       <div className="rate">
         <p className={`rate-value${current.pct === null ? ' rate-na' : ''}`} data-testid="rate-current">
-          {pct(current.pct)}
+          {current.pct === null ? homeCopy.na : <TweenPct value={current.pct} countUp />}
         </p>
         <RateSub name={homeCopy.current} what={homeCopy.currentWhat} tail={currentTail} info={info} />
       </div>
@@ -272,18 +272,18 @@ function pair(p: FundingView['positions'][number]): string {
   return poolTokens(p.pool, p.amounts).join('/')
 }
 
-function PositionRow({ p, r }: { p: FundingView['positions'][number]; r: PositionRate }) {
+function PositionRow({ p, r, i }: { p: FundingView['positions'][number]; r: PositionRate; i: number }) {
   const legs = positionAmounts(p).filter((l) => l.amount !== '0')
   const addr = poolAddress(p.pool)
   const chain = useChain()
   const venue = 'Uniswap v3'
   const share = r.sharePct === null ? null : Math.round(r.sharePct)
   return (
-    <li data-testid="position" className="wc-row">
+    <li data-testid="position" className="wc-row" style={{ ['--i' as string]: i }}>
       <span className="wc-marks" aria-hidden="true">
         {poolTokens(p.pool, p.amounts).map((t, i) => (
           <span key={t} className={i > 0 ? '-ml-[0.55rem]' : undefined}>
-            <TokenMark symbol={t} size={30} />
+            <TokenMark symbol={t} size={28} />
           </span>
         ))}
       </span>
@@ -293,19 +293,40 @@ function PositionRow({ p, r }: { p: FundingView['positions'][number]; r: Positio
         </span>
         <span className="wc-venue">
           {addr ? (
-            <a href={explorerAddress(chain, addr)} target="_blank" rel="noreferrer">
+            <a className="seg" href={explorerAddress(chain, addr)} target="_blank" rel="noreferrer">
               {venue}
             </a>
           ) : (
-            venue
+            <span className="seg">{venue}</span>
           )}
-          <span data-testid="position-chain"> · {chain.name}</span>
-          {p.inRange ? <span className="text-emerald"> · {homeCopy.inRange}</span> : null}
+          {' · '}
+          <span className="seg" data-testid="position-chain">
+            {chain.name}
+          </span>
+          {p.inRange ? ' · ' : null}
+          {p.inRange ? <span className="seg text-emerald">{homeCopy.inRange}</span> : null}
         </span>
       </span>
       <span className="wc-amount">
-        <span className="wc-num">{r.valueUsdc === null ? homeCopy.na : `${usd(r.valueUsdc)} USDC`}</span>
-        <span className="wc-legs">{legs.map((l) => `${tokenAmount(l.amount, l.token, l.decimals)} ${l.token}`).join(' · ')}</span>
+        <span className="wc-num">
+          {r.valueUsdc === null ? (
+            homeCopy.na
+          ) : (
+            <>
+              <TweenUsd raw={r.valueUsdc} /> <span className="wc-unit">USDC</span>
+            </>
+          )}
+        </span>
+        <span className="wc-legs">
+          {legs.map((l, i) => (
+            <Fragment key={l.token}>
+              {i ? ' · ' : ''}
+              <span className="seg">
+                {tokenAmount(l.amount, l.token, l.decimals)} {l.token}
+              </span>
+            </Fragment>
+          ))}
+        </span>
       </span>
       <span className="wc-share">
         <span className="wc-num">
@@ -353,24 +374,36 @@ function PositionRow({ p, r }: { p: FundingView['positions'][number]; r: Positio
 export function Working({ f, s, apy, price = null, onStop, onStart = null }: { f: FundingView; s: Split; apy?: ApyView; price?: bigint | null; onStop: (() => void) | null; onStart?: (() => void) | null }) {
   const n = f.positions.length
   const rows = positionRates(f, apy, price)
+  const inRange = f.positions.filter((p) => p.inRange).length
   // An operation in flight says what it is; between operations the engine says whether more is coming and when it looks next.
   const line = progressLine(f.progress) ?? engineLine(f)
   const noRate = apy !== undefined && rows.some((r) => r.monthlyPct === null || (r.inRange && r.currentPct === null))
   return (
-    <details className="dash-fold" open>
-      <summary>
-        <span className="wc-head">
+    <Fold
+      defaultOpen
+      testId="working"
+      head={
+        <>
           <span className="dash-title heavy">{homeCopy.working}</span>
-          <span className="dash-title heavy">{usd(s.working)} USDC</span>
-          <span className="wc-count">· {plural(n, 'position', 'positions')}</span>
-        </span>
-      </summary>
-      {line ? (
-        <p className="progress mono-label text-stone" role="status" aria-live="polite" data-testid="progress">
-          <span className="progress-dot" aria-hidden="true" />
-          {line}
-        </p>
-      ) : null}
+          <span className="panel-sum">
+            <TweenUsd raw={s.working} /> <span className="panel-unit">USDC</span>
+          </span>
+          <span className="panel-meta">
+            <span className="seg">{plural(n, 'position', 'positions')}</span>
+            {n ? ' · ' : null}
+            {n ? <span className="seg">{`${inRange} ${homeCopy.inRange.toLowerCase()}`}</span> : null}
+          </span>
+        </>
+      }
+      status={
+        line ? (
+          <p className="progress mono-label text-stone" role="status" aria-live="polite" data-testid="progress">
+            <span className="progress-dot" aria-hidden="true" />
+            {line}
+          </p>
+        ) : null
+      }
+    >
       {n === 0 ? (
         <p className="m-0 pt-3 text-[0.95rem] text-stone">{homeCopy.nothingPlaced}</p>
       ) : (
@@ -384,7 +417,7 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null }: { f
           </div>
           <ul className="m-0 list-none p-0">
             {f.positions.map((p, i) => (
-              <PositionRow key={p.tokenId} p={p} r={rows[i]!} />
+              <PositionRow key={p.tokenId} p={p} r={rows[i]!} i={i} />
             ))}
           </ul>
           {noRate ? <p className="m-0 pt-2 font-mono text-[0.72rem] text-stone">{homeCopy.noRate}</p> : null}
@@ -397,7 +430,7 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null }: { f
           </button>
         </div>
       ) : null}
-    </details>
+    </Fold>
   )
 }
 
@@ -446,36 +479,43 @@ export function Idle({ f, s }: { f: FundingView; s: Split }) {
   const only = s.idleTokens.length === 1 && s.idleTokens[0]!.token !== 'USDC' ? s.idleTokens[0]! : null
   const unpriced = s.idleTokens.filter((t) => t.unpriced).map((t) => t.token)
   const head = (
-    <span className="idle-head">
-      <span className="dash-title" id="idle-title">
+    <>
+      <span className="dash-title heavy" id="idle-title">
         {homeCopy.idle}
       </span>
-      <span className="dash-title">{usd(s.idle)} USDC</span>
-      {only ? (
-        <span className="wc-count" data-testid="idle-only">
-          · {tokenAmount(String(only.amount), only.token, only.decimals)} {only.token}
-        </span>
-      ) : null}
-      <span className="wc-count" data-testid="idle-reason">
-        · {idleReason(f, s)}
+      <span className="panel-sum">
+        <TweenUsd raw={s.idle} /> <span className="panel-unit">USDC</span>
+      </span>
+      <span className="panel-meta" data-testid="idle-reason">
+        {only ? (
+          <>
+            <span className="seg" data-testid="idle-only">
+              {tokenAmount(String(only.amount), only.token, only.decimals)} {only.token}
+            </span>
+            {' · '}
+          </>
+        ) : null}
+        {idleReason(f, s)}
         {unpriced.length ? ` · ${homeCopy.unpricedIdle(unpriced.join(', '))}` : ''}
       </span>
-    </span>
+    </>
   )
+  // #226: the same head as every panel; it opens only when there is more than one token to list.
   if (s.idleTokens.length <= 1) {
     return (
-      <section className="dash-fold dash-flat" aria-labelledby="idle-title">
-        <div className="dash-summary">{head}</div>
+      <section className="panel panel-static" aria-labelledby="idle-title" data-testid="idle">
+        <div className="panel-head">
+          <span className="panel-head-main">{head}</span>
+        </div>
       </section>
     )
   }
   return (
-    <details className="dash-fold" aria-labelledby="idle-title">
-      <summary>{head}</summary>
-      <ul className="m-0 grid list-none gap-[0.45rem] p-0 pt-3" data-testid="idle-tokens">
-        {s.idleTokens.map((t) => (
-          <li key={t.token} className="flex items-center gap-[0.55rem] font-mono text-[0.85rem]">
-            <TokenMark symbol={t.token} size={20} />
+    <Fold testId="idle" head={head}>
+      <ul className="idle-list" data-testid="idle-tokens">
+        {s.idleTokens.map((t, i) => (
+          <li key={t.token} style={{ ['--i' as string]: i }}>
+            <TokenMark symbol={t.token} size={22} />
             <span>
               {tokenAmount(String(t.amount), t.token, t.decimals)} {t.token}
             </span>
@@ -483,21 +523,23 @@ export function Idle({ f, s }: { f: FundingView; s: Split }) {
           </li>
         ))}
       </ul>
-    </details>
+    </Fold>
   )
 }
-
 
 export function History({ ops, onRetry }: { ops: OpView[]; onRetry?: (kind: OpView['kind']) => void }) {
   const sorted = historyOps(ops)
   return (
-    <details className="card fold" open={sorted.length > 0 && sorted.length <= 4}>
-      <summary>
-        <span>
-          <span className="title">{homeCopy.history}</span>
-          <span className="sub">{plural(sorted.length, 'event', 'events')}</span>
-        </span>
-      </summary>
+    <Fold
+      testId="history"
+      defaultOpen={sorted.length > 0 && sorted.length <= 4}
+      head={
+        <>
+          <span className="dash-title heavy">{homeCopy.history}</span>
+          <span className="panel-meta">{plural(sorted.length, 'event', 'events')}</span>
+        </>
+      }
+    >
       <ol className="m-0 mt-[0.7rem] grid list-none gap-[0.3rem] p-0">
         {sorted.map((op) => {
           const tone = opTone(op)
@@ -526,7 +568,7 @@ export function History({ ops, onRetry }: { ops: OpView[]; onRetry?: (kind: OpVi
           )
         })}
       </ol>
-    </details>
+    </Fold>
   )
 }
 
@@ -1004,6 +1046,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const pools = usePools()
   const [dialog, setDialog] = useState<null | 'add' | 'withdraw' | 'stop' | 'start'>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
+  const [howOpen, setHowOpen] = useState(false)
   const [renewAsked, setRenewAsked] = useState(false)
   // Amount the withdraw form opens with; a new value remounts the dialog.
   const [withdrawSeed, setWithdrawSeed] = useState('')
@@ -1106,6 +1149,18 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   }
   // A renewal is retried from its own row at the top, which is back as soon as the failed one settles.
   const retry = (kind: OpView['kind']) => (kind === 'renew' ? window.scrollTo({ top: 0, behavior: 'smooth' }) : kind === 'transfer' ? withdraw() : kind === 'exit' ? setDialog('stop') : start())
+  // #226: pull down (home-screen app) or tap the live pill: every read on the page again, the balance at most 2 s old.
+  const refreshAll = useCallback(
+    () =>
+      Promise.all([
+        refreshFunding(),
+        qc.invalidateQueries({ queryKey: queryKeys.ops(accountKey) }),
+        qc.invalidateQueries({ queryKey: queryKeys.yieldLedger(accountKey) }),
+        qc.invalidateQueries({ queryKey: queryKeys.apy }),
+        qc.invalidateQueries({ queryKey: queryKeys.pools }),
+      ]),
+    [refreshFunding, qc, accountKey],
+  )
   const kit = useMutation({
     mutationFn: async () => {
       // The kit is built from stored account data, not the operator (review round 3 of #133): any read of the
@@ -1118,9 +1173,11 @@ export function HomeView({ accountKey }: { accountKey: string }) {
 
   return (
     <main className="page home enter">
-      <title>Mamoru · Home</title>
-      <header className="mb-7">
+      <title>Mamoru</title>
+      <PullToRefresh onRefresh={refreshAll} />
+      <header className="mb-7 flex items-center justify-between gap-3">
         <Brand />
+        <LiveSync updatedAt={funding.dataUpdatedAt} intervalMs={fundingInterval(funding.data, inFlight, 30_000)} fetching={funding.isFetching} down={liveDown} onRefresh={() => void refreshAll()} />
       </header>
       <Balance
         s={s}
@@ -1179,22 +1236,30 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           <History ops={opList} onRetry={retry} />
         </>
       )}
-      <footer className="mt-auto flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-wash pt-5 text-[0.85rem] text-stone">
-        <button type="button" className="text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => kit.mutate()} disabled={!cached || kit.isPending}>
-          {kit.isSuccess ? 'Recovery kit saved' : 'Save recovery kit'}
-        </button>
-        <button type="button" className="text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => setFeedbackOpen(true)}>
-          {feedbackCopy.trigger}
-        </button>
-        <a className="underline decoration-wash underline-offset-4 hover:text-ink" href={GITHUB} target="_blank" rel="noreferrer">
-          How Mamoru works
-        </a>
-        {/* otto/mamoru#198: the seal signs the page, the only red besides Stop. */}
-        <span className="seal" aria-hidden="true">
-          <img src="/seal-mamoru.png" width={40} height={40} alt="" />
-          <span className="seal-word">MAMORU</span>
-        </span>
+      <footer className="foot">
+        <nav className="foot-links" aria-label="Account and help">
+          <button type="button" className="foot-link" onClick={() => kit.mutate()} disabled={!cached || kit.isPending}>
+            {kit.isSuccess ? 'Recovery kit saved' : 'Save recovery kit'}
+            <Chevron dir="right" />
+          </button>
+          <button type="button" className="foot-link" onClick={() => setFeedbackOpen(true)}>
+            {feedbackCopy.trigger}
+            <Chevron dir="right" />
+          </button>
+          <button type="button" className="foot-link" onClick={() => setHowOpen(true)}>
+            {howCopy.trigger}
+            <Chevron dir="right" />
+          </button>
+        </nav>
+        {/* otto/mamoru#198: the seal signs the page, the only red besides Stop. #226: centred under the links, not squeezed beside them. */}
+        <div className="foot-sign">
+          <span className="seal" aria-hidden="true">
+            <img src="/seal-mamoru.png" width={36} height={36} alt="" />
+            <span className="seal-word">MAMORU</span>
+          </span>
+        </div>
       </footer>
+      <HowItWorks open={howOpen} onClose={() => setHowOpen(false)} />
       <FeedbackDialog accountKey={accountKey} open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
 
       {f && s ? (
