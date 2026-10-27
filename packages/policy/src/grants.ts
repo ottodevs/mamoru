@@ -321,3 +321,54 @@ export function manageAnyGrants(p: PairSpec, usage: { manage: Usage; convert: Us
   ]
   return p.pool ? templates.map((t) => ({ ...t, pool: p.pool })) : templates
 }
+
+const DEPOSIT_FOR_BURN = 'depositForBurn(uint256,uint32,bytes32,address,bytes32,uint256,uint32)'
+
+/** Circle CCTP V2 domain of Monad (MessageTransmitterV2.localDomain() on chain 143, read 2026-10-27). */
+export const CCTP_DOMAIN_MONAD = 15n
+
+export type BridgeOutSpec = {
+  /** CCTP V2 domain the USDC is minted on. */
+  destinationDomain: bigint
+  caps: { perCall: string; total: string; maxFee: string }
+}
+
+/**
+ * otto/mamoru#213: the session key may move savings to the account's sleeve on another chain, and nowhere else. CCTP
+ * V2 burns USDC here and mints the same amount there, less at most `maxFee`, so every rule is a fixed-position word:
+ * the minted USDC goes to this same account address (`mintRecipient`, the sleeve shares the Safe address), to one
+ * domain, with no hook and an open `destinationCaller` (anyone may relay the mint; a pinned caller could only stall
+ * it). Across `depositV3` is not offered to the key: its `outputAmount` is a separate word no rule can tie to
+ * `inputAmount`, so a leaked key could hand a relayer the difference. A leaked key here can at most pay `maxFee` per
+ * call, within the usage limit, and every burned cent lands on the account's own address on the destination chain.
+ * Plain UniActionPolicy: MamoruActionPolicy knows only the Uniswap calls, so this grant is never retargeted to it.
+ */
+export function bridgeOutGrant(p: BridgeOutSpec, usage: Usage): GrantTemplate {
+  return {
+    name: 'bridge-out',
+    perPosition: false,
+    ...usageOf(usage),
+    actions: [
+      {
+        target: 'USDC',
+        signature: APPROVE,
+        params: [
+          { field: 'spender', index: 0, condition: 'EQUAL', ref: 'TokenMessengerV2', denial: 'POLICY_DENIED_APPROVAL' },
+          { field: 'amount', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.perCall}`, denial: 'POLICY_DENIED_APPROVAL' },
+        ],
+      },
+      {
+        target: 'TokenMessengerV2',
+        signature: DEPOSIT_FOR_BURN,
+        params: [
+          { field: 'amount', index: 0, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.perCall}`, cumulative: `cap:${p.caps.total}`, denial: 'POLICY_DENIED_AMOUNT' },
+          { field: 'destinationDomain', index: 1, condition: 'EQUAL', ref: p.destinationDomain, denial: 'POLICY_DENIED_TARGET' },
+          { field: 'mintRecipient', index: 2, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },
+          { field: 'burnToken', index: 3, condition: 'EQUAL', ref: 'USDC', denial: 'POLICY_DENIED_TARGET' },
+          { field: 'destinationCaller', index: 4, condition: 'EQUAL', ref: 0n, denial: 'POLICY_DENIED_TARGET' },
+          { field: 'maxFee', index: 5, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.maxFee}`, denial: 'POLICY_DENIED_AMOUNT' },
+        ],
+      },
+    ],
+  }
+}

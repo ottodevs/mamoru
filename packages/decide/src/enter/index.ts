@@ -1,5 +1,5 @@
 import type { ReasonCode } from '@mamoru/domain'
-import type { PolicyVersion } from '@mamoru/policy'
+import { preferenceTotal, type PolicyVersion } from '@mamoru/policy'
 import { rangeAround } from '@mamoru/uniswap-v3/quote'
 import type { Observation, PoolObs, Proposal } from '../types.ts'
 import { inSavings, volatileOf } from '../value.ts'
@@ -25,7 +25,7 @@ export function enterBucket(obs: Observation, policy: PolicyVersion, preference:
   const volatileValue = inSavings(pool, volatile, volatileHeld, savings)
   const capital = free + volatileValue
   if (capital === 0n) return { code: 'DECIDE_NO_CAPITAL', proposal: null }
-  const totalPreference = policy.buckets.reduce((s, b) => s + b.preference, 0)
+  const totalPreference = preferenceTotal(policy)
   const target = (capital * BigInt(preference)) / BigInt(totalPreference)
   const half = target / 2n
   if (half === 0n) return { code: 'DECIDE_NO_CAPITAL', proposal: null }

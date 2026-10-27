@@ -278,6 +278,13 @@
       "role": "MamoruActionPolicy v2 (contracts/action-policy/src/MamoruActionPolicyV2.sol, spec 007, otto/mamoru#151 y #171): los límites de v1 más increase a través de la política, la pausa del guardián y el deadline vacío del swap; desplegado en Base (tx 0x375c9e2675a008d959fa52c37a2d91eb3c949dd6d0be4b60b7de2e2dc1e20b00, Sourcify exact_match, solc 0.8.28 cancun 1000 runs viaIR, CARDINALITY_TARGET 2000); GUARDIAN inmutable 0xA8E6EF87e612fA5c54668Cc1fF0aC809e1321FdD, una clave EOA sin código (no es entrada del registro: el registro fija un codeHash por contrato): solo pausa y reanuda las sesiones de una cuenta, nunca habilita, amplía ni mueve fondos; vive fuera del operador",
       "address": "0x9ef35e544C93A6722a13473AB9EF115f719bbE6B",
       "codeHash": "0x4a72ac333dd6c4b6fd81d586be5149dbea79aedd8aa28bb350f3600ab72570f9"
+    },
+    {
+      "name": "TokenMessengerV2",
+      "kind": "cctp",
+      "role": "Circle CCTP V2, proxy (implementación 0x555E272506C06e7E559d57418563742AFE363ec8 al añadirlo): bridge del bucket growth a la misma Safe en Monad (dominio 15), grant bridge-out de conservador-live-v6 (otto/mamoru#213); codeHash del proxy leído en el último bloque el 2026-10-27, no en el bloque del pin",
+      "address": "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d",
+      "codeHash": "0xd2c8d48075d832fb7d07f6db5545a1bee37fdf886325c441a8dd1cef4c9dae99"
     }
   ],
   "undeployed": []

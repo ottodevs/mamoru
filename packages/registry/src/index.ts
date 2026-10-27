@@ -16,6 +16,7 @@ export type RegistryKind =
   | 'smart-sessions'
   | 'smart-sessions-policy'
   | 'read'
+  | 'cctp'
 
 export type RegistryEntry = {
   name: string

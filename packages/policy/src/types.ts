@@ -41,7 +41,7 @@ export type ActionRuleTemplate = {
   params: ParamRuleTemplate[]
 }
 
-export type GrantName = 'enter-swap' | 'enter-mint' | 'manage' | 'manage-any' | 'convert-any'
+export type GrantName = 'enter-swap' | 'enter-mint' | 'manage' | 'manage-any' | 'convert-any' | 'bridge-out'
 
 /** Grants that cover any position of the pair the account holds, enabled at activation. */
 export const MANAGE_ANY_GRANTS = ['manage-any', 'convert-any'] as const satisfies readonly GrantName[]
@@ -107,6 +107,13 @@ export type PolicyVersion = {
    */
   sourceChainId?: ChainId
   buckets: { id: 'stables' | 'btc-usdc' | 'risk'; preference: number; pools: RegistryName[] }[]
+  /**
+   * otto/mamoru#201/#213: buckets served on another chain, by the account's sleeve there (same Safe address, its own
+   * policy). Their pools resolve in that chain's registry, never this one, so nothing that walks `buckets` sees them.
+   * Their preference counts in the total (`preferenceTotal`): a local bucket's target is its share of the whole
+   * account, and a remote bucket's share waits here as savings until it is bridged. Absent: one chain, as before.
+   */
+  remoteBuckets?: RemoteBucket[]
   savingsAsset: RegistryName
   gasReserveWei: bigint
   harvest: { costFactorBps: number }
@@ -310,6 +317,17 @@ export type VolTarget = { targetVolBps: number; bandBps: number; stepBps: number
 export type Cppi = { floorBps: number; multiplier: number }
 
 export type BucketId = PolicyVersion['buckets'][number]['id']
+
+/** A bucket served on another chain (see `PolicyVersion.remoteBuckets`). */
+export type RemoteBucket = {
+  id: 'growth'
+  preference: number
+  chainId: ChainId
+  /** Registry names on `chainId`. */
+  pools: RegistryName[]
+  /** The policy the sleeve on `chainId` runs. */
+  policyId: string
+}
 
 /**
  * No new money into a fall (spec 004 FREEZE, #101): while the 24 h TWAP change of the bucket's pool is a fall of at

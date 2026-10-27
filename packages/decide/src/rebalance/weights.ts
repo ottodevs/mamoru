@@ -1,6 +1,6 @@
 // Lab (#101, experiment 6): bucket preferences after a volatility target or CPPI. Pure; read only by a policy with
 // `volTarget` or `cppi`.
-import type { PolicyVersion } from '@mamoru/policy'
+import { preferenceTotal, type PolicyVersion } from '@mamoru/policy'
 import { bucketValues } from '../rerange/index.ts'
 import type { Observation } from '../types.ts'
 import { inSavings, volatileOf } from '../value.ts'
@@ -36,7 +36,7 @@ export function weightTargets(obs: Observation, policy: PolicyVersion): PolicyVe
   if (!policy.buckets.some((b) => b.id === 'stables')) return null
   let cppiScale = SCALE
   const values = bucketValues(obs, policy, new Set(policy.buckets.flatMap((b) => b.pools)))
-  const prefTotal = policy.buckets.reduce((s, b) => s + b.preference, 0)
+  const prefTotal = preferenceTotal(policy)
   if (policy.cppi) {
     const total = values.total
     const volPref = policy.buckets.filter((b) => b.id !== 'stables' && b.pools[0]).reduce((s, b) => s + b.preference, 0)
