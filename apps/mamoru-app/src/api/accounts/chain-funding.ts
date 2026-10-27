@@ -179,7 +179,9 @@ export type ChainRead = {
  * gateway that sends this call to another chain answers another chain id and is refused. `ids` that are not the
  * Safe's (moved, burned) are dropped here, never counted.
  */
-export async function readProvider(fetcher: ChainFetch, url: string, registry: Registry, safe: Address, ids: readonly bigint[]): Promise<ChainRead> {
+export async function readProvider(fetcher: ChainFetch, url: string, registry: Registry, safe: Address, listedIds: readonly bigint[]): Promise<ChainRead> {
+  // Distinct ids: the completeness check below counts them against NPM.balanceOf, so a repeated id must not count twice.
+  const ids = [...new Set(listedIds)]
   const multicall3 = registry.entries.find((e) => e.name === 'Multicall3')?.address
   if (!multicall3) throw new ReadError('no multicall3 in the registry')
   const npm = addressOf('NonfungiblePositionManager', registry)

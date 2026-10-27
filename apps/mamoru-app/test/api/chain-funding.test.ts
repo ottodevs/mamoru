@@ -356,6 +356,17 @@ describe('funding from the chain: what counts', () => {
     expect(ids).toEqual(['101', '101'])
   })
 
+  test('a repeated id in the snapshot is counted once, so it cannot hide a position the Safe holds', async () => {
+    const node = chain({ balances: { USDC: 1_000_000n } })
+    const { h } = setup({ node })
+    const { cookie, owner } = await onboard(h)
+    node.positions = { '101': pos(owner.address), '205': pos(owner.address) }
+    snapshot(h, owner, [], JSON.stringify([{ tokenId: '101' }, { tokenId: '101' }]))
+    const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
+    expect(f.positions).toEqual([])
+    expect(f.chainRead?.positions).toBe('unknown')
+  })
+
   test('a stale snapshot (the engine closed #101 and opened #205 since) is not a complete total', async () => {
     const node = chain({ balances: { USDC: 1_000_000n } })
     const { h } = setup({ node })
