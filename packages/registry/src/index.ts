@@ -151,11 +151,29 @@ export const EIP1967_IMPLEMENTATION_SLOT: Hex = '0x360894a13ba1a3210667c828492db
  * otto/mamoru#210: a proxy entry (waBasUSDC) still points at its pinned implementation, and that code is unchanged. The
  * proxy's own code hash never moves on an upgrade, so this is the check that sees one. True for an entry without one.
  */
-async function implementationHolds(client: PublicClient, e: RegistryEntry): Promise<boolean> {
+async function implementationHolds(client: PublicClient, e: RegistryEntry, blockNumber?: bigint): Promise<boolean> {
   if (!e.implementation) return true
-  const slot = await client.getStorageAt({ address: e.address, slot: EIP1967_IMPLEMENTATION_SLOT })
+  const at = blockNumber === undefined ? {} : { blockNumber }
+  const slot = await client.getStorageAt({ address: e.address, slot: EIP1967_IMPLEMENTATION_SLOT, ...at })
   if (!slot || `0x${slot.slice(-40)}`.toLowerCase() !== e.implementation.address.toLowerCase()) return false
-  return (await readCodeHash(client, e.implementation.address)) === e.implementation.codeHash
+  return (await readCodeHash(client, e.implementation.address, blockNumber)) === e.implementation.codeHash
+}
+
+/**
+ * otto/mamoru#210 (review of #152): the code an op is about to send money to is the pinned one, read at `blockNumber`:
+ * the vault's own code hash and, behind a proxy, the implementation slot and that code's hash. The boot check runs once;
+ * an upgrade after it must still stop every later deposit, so the engine calls this at every vault op's prepare.
+ * Throws LAB_REGISTRY_CODE_MISMATCH (or OBS_RPC_UNAVAILABLE when the chain cannot answer).
+ */
+export async function assertPinnedCode(client: PublicClient, registry: Registry, name: RegistryName, blockNumber: bigint): Promise<void> {
+  const e = entry(name, registry)
+  let ok: boolean
+  try {
+    ok = e.codeHash !== null && (await readCodeHash(client, e.address, blockNumber)) === e.codeHash && (await implementationHolds(client, e, blockNumber))
+  } catch (err) {
+    throw new ReasonError('OBS_RPC_UNAVAILABLE', `${name} code at ${blockNumber}: ${(err as Error).message.split('\n')[0]}`)
+  }
+  if (!ok) throw new ReasonError('LAB_REGISTRY_CODE_MISMATCH', `${name} at ${blockNumber} is not the pinned code${e.implementation ? ' (or its proxy implementation changed)' : ''}`)
 }
 
 /** LAB-05: every registry entry must carry a pinned code hash and match it on the connected chain. */

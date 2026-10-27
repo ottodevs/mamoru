@@ -309,5 +309,9 @@ describe('otto/mamoru#210: vault-supply takes MamoruPauseGate and MamoruGasPolic
     expect(() => toSmartSession(vault, { policy: A, initData: '0x', gas: { policy: G, initData: encodeGasCaps(V4_GAS_CAPS) }, expected: { actionPolicy: A, gasPolicy: G } })).toThrow('never takes MamoruActionPolicy')
     const { requiresPauseGate: _, ...unflagged } = vault
     expect(() => toSmartSession(unflagged as SessionGrant)).toThrow('a vault action needs requiresPauseGate')
+    // Review of #152: the approval alone (it targets USDC, its spender rule names the vault) is refused as well.
+    const approveOnly = { ...unflagged, actions: unflagged.actions.filter((a) => a.signature.startsWith('approve')) }
+    expect(approveOnly.actions).toHaveLength(1)
+    expect(() => toSmartSession(approveOnly as SessionGrant)).toThrow('a vault action needs requiresPauseGate')
   })
 })
