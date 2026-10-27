@@ -242,7 +242,7 @@ type Stored = BridgeOutRoute & { id: string; safe: Address; safeNonce: string; f
  */
 type Reservation = { wei: string; tx?: Hex; nonce?: number; at: string; goneAt?: string }
 /** #211: a conversion as kept on disk. */
-type StoredConvert = EthConvert & { id: string; safe: Address; safeNonce: string; safeTxHash?: Hex; fromBlock?: string; execStarted?: boolean }
+type StoredConvert = EthConvert & { id: string; safe: Address; safeNonce: string; safeTxHash: Hex; fromBlock: string; execStarted?: boolean }
 type PreparedConvert = { prepareId: string; accountKey: string; live: LiveAccount; tx: SafeTx; safeTxHash: Hex; amountIn: bigint; minOut: bigint; deployed: boolean; expires: number }
 type Journal = { converts?: Record<string, StoredConvert>; convertDays?: Record<string, { day: string; n: number }>; reservations?: Record<string, Reservation>; cctpBurns?: Record<string, string[]>; routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
 
@@ -436,7 +436,7 @@ export class BridgeOut {
     // A reservation without a signed transaction was never broadcast (the hash is written before it): nothing to hold.
     const reservations = Object.fromEntries(Object.entries(j.reservations ?? {}).filter(([, r]) => !!r.tx))
     this.droppedReservations = Object.keys(j.reservations ?? {}).length - Object.keys(reservations).length
-    return { routes: j.routes ?? {}, converts: j.converts ?? {}, convertDays: j.convertDays ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {}, cctpBurns: j.cctpBurns ?? {}, reservations }
+    return { routes: j.routes ?? {}, converts: Object.fromEntries(Object.entries(j.converts ?? {}).filter(([, c]) => !!c.safeTxHash && !!c.fromBlock)), convertDays: j.convertDays ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {}, cctpBurns: j.cctpBurns ?? {}, reservations }
   }
 
   private save(): void {
@@ -1326,7 +1326,8 @@ export class BridgeOut {
         // means another transaction took the nonce and this one can never run: failed. Unknown stays unconfirmed.
         const { nonce } = await readSafeNonce(this.l1, next.safe)
         if (nonce === BigInt(next.safeNonce)) next.state = 'failed'
-        else if (next.safeTxHash && next.fromBlock) {
+        else {
+          // Every stored conversion carries the signed safeTxHash and its send block (written before any send).
           const ran = await this.findExecution(next.safe, next.safeTxHash, BigInt(next.fromBlock))
           if (ran === null) next.state = 'failed'
           else if (ran.success) {
@@ -1337,7 +1338,7 @@ export class BridgeOut {
             next.l1Tx = ran.tx
             next.state = 'failed'
           }
-        } else if (next.state === 'sending') next.state = 'unconfirmed'
+        }
       } else if (next.state === 'sending') next.state = 'unconfirmed'
     } catch (e) {
       logErr(`[bridge-out] convert status ${accountKey.slice(0, 8)}:`, e)
