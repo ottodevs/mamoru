@@ -137,8 +137,10 @@ const pct = (v: number | null | undefined) => (v === null || v === undefined ? h
  */
 function Earned({ usd: earned, daily }: { usd: string | null | undefined; daily?: { day: string; earnedUsd: string }[] | null }) {
   const known = earned != null
-  // otto/mamoru#234: the days the ledger closed, then where it stands now.
-  const series = known && daily?.length ? [...daily.map((d) => Number(d.earnedUsd)), Number(earned)] : []
+  // otto/mamoru#234: the days the ledger closed, then where it stands now; today's close so far is the live figure.
+  const today = new Date().toISOString().slice(0, 10)
+  const closed = (daily ?? []).filter((d) => d.day < today)
+  const series = known && closed.length ? [...closed.map((d) => Number(d.earnedUsd)), Number(earned)] : []
   return (
     <p className="earned" data-testid="earned-so-far">
       <span className={`earned-value${known ? '' : ' rate-na'}`}>

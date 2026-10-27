@@ -1988,3 +1988,13 @@
     opacity: 1;
   }
 }
+@media (prefers-reduced-motion: reduce) {
+  .spark-line {
+    stroke-dashoffset: 0;
+    animation: none !important;
+  }
+  .spark-end {
+    opacity: 1;
+    animation: none !important;
+  }
+}

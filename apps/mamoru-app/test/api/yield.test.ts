@@ -112,23 +112,23 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
     expect(view.valueVsHoldUsd).toBeNull()
   })
-  test('otto/mamoru#234: earnedDaily is each day close: accrued fees plus everything collected up to that day, oldest first, last 30', async () => {
-    const day = (n: number) => `2026-09-${String(n).padStart(2, '0')}`
-    for (let n = 1; n <= 31 - 1; n++) {
+  test('otto/mamoru#234: earnedDaily is each day close of the last 30 days, accrued plus every receipt collected up to that day', async () => {
+    const dailyRow = (day: string, fees: number) =>
       db.raw.exec(
         `INSERT INTO account_daily (day, chain_id, address, account_key, env, block_open, block_close, total_open_usdc, total_close_usdc, idle_close_usdc, lp_close_usdc, fees_open_usdc, fees_close_usdc, collected_usdc, gas_paid_wei)
-         VALUES ('${day(n)}', ${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1, 2, 0, 0, 0, 0, 0, ${n * 10}, ${n === 5 ? 1000 : 'NULL'}, NULL)`,
+         VALUES ('${day}', ${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1, 2, 0, 0, 0, 0, 0, ${fees}, NULL, NULL)`,
       )
-    }
-    db.raw.exec(
-      `INSERT INTO account_daily (day, chain_id, address, account_key, env, block_open, block_close, total_open_usdc, total_close_usdc, idle_close_usdc, lp_close_usdc, fees_open_usdc, fees_close_usdc, collected_usdc, gas_paid_wei)
-       VALUES ('2026-10-01', ${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1, 2, 0, 0, 0, 0, 0, 7, NULL, NULL)`,
-    )
-    const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
-    expect(view.earnedDaily).toHaveLength(30)
-    // 1 Sep fell out of the 30; 2-4 Sep have nothing collected yet, 5 Sep on carry the 1000 collected that day.
-    expect(view.earnedDaily![0]).toEqual({ day: day(2), earnedUsd: '20' })
-    expect(view.earnedDaily![3]).toEqual({ day: day(5), earnedUsd: '1050' })
-    expect(view.earnedDaily!.at(-1)).toEqual({ day: '2026-10-01', earnedUsd: '1007' })
+    dailyRow('2026-09-01', 5) // 31 days before "today": outside the window
+    dailyRow('2026-09-02', 20)
+    dailyRow('2026-09-10', 40)
+    dailyRow('2026-10-01', 7)
+    // Collected on 5 Sep, a day with no account_daily row (stopped before its close): still counted from then on.
+    seedReceipts(db, '2026-09-05', 1000, '1')
+    const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY, new Date('2026-10-01T12:00:00.000Z'))
+    expect(view.earnedDaily).toEqual([
+      { day: '2026-09-02', earnedUsd: '20' },
+      { day: '2026-09-10', earnedUsd: '1040' },
+      { day: '2026-10-01', earnedUsd: '1007' },
+    ])
   })
 })

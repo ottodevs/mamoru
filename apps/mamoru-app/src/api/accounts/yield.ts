@@ -7,23 +7,25 @@ import type { Db } from '../env.ts'
 import { feeReadinessUsd } from '../yield-ledger.ts'
 
 type LatestRow = { fees_usdc: number; total_usdc: number; read_at: string; positions_json: string; updated_at: string }
-type DailyRow = { collected_usdc: number | null; gas_paid_wei: string | null; updated_at: string }
+type DailyRow = { day: string; collected_usdc: number | null; gas_paid_wei: string | null; updated_at: string }
 type PositionRow = { value_usd: number; accrued_usd_close: number; hold_value_usd: number }
-type EarnedDayRow = { day: string; fees_close_usdc: number; collected_usdc: number | null }
+type EarnedDayRow = { day: string; fees_close_usdc: number }
 
-/** otto/mamoru#234: earned at each day's close: that day's accrued fees plus what was collected up to and on it. */
-async function earnedDaily(db: Db, chainId: number, accountKey: string): Promise<{ day: string; earnedUsd: string }[] | null> {
+/**
+ * otto/mamoru#234: earned at each of the last 30 UTC days' close: that day's accrued fees plus everything collected
+ * up to and on it. Collected comes from the receipts, the same rows `earnedSoFarUsd` sums (account_daily misses a
+ * day an account stopped before its close), so the line and the figure beside it agree. The window is a range on
+ * account_daily's primary key (`day` first), never a scan of every account's history.
+ */
+async function earnedDaily(db: Db, chainId: number, accountKey: string, receipts: DailyRow[], today: string): Promise<{ day: string; earnedUsd: string }[] | null> {
+  const from = new Date(Date.parse(`${today}T00:00:00.000Z`) - 29 * 86_400_000).toISOString().slice(0, 10)
   const rows = await db
-    .prepare('SELECT day, fees_close_usdc, collected_usdc FROM account_daily WHERE chain_id = ? AND account_key = ? ORDER BY day ASC')
-    .bind(chainId, accountKey)
+    .prepare('SELECT day, fees_close_usdc FROM account_daily WHERE day >= ? AND chain_id = ? AND account_key = ? ORDER BY day ASC')
+    .bind(from, chainId, accountKey)
     .all<EarnedDayRow>()
   if (rows.results.length === 0) return null
-  let collected = 0n
-  const all = rows.results.map((r) => {
-    collected += BigInt(r.collected_usdc ?? 0)
-    return { day: r.day, earnedUsd: (BigInt(r.fees_close_usdc) + collected).toString() }
-  })
-  return all.slice(-30)
+  const collectedBy = (day: string) => receipts.reduce((n, r) => (r.day <= day && r.collected_usdc != null ? n + BigInt(r.collected_usdc) : n), 0n)
+  return rows.results.map((r) => ({ day: r.day, earnedUsd: (BigInt(r.fees_close_usdc) + collectedBy(r.day)).toString() }))
 }
 
 const dayOf = (iso: string): string => iso.slice(0, 10)
@@ -49,14 +51,14 @@ async function openPositionsValueVsHold(db: Db, chainId: number, accountKey: str
   return rows.results.reduce((n, p) => n + BigInt(p.value_usd) + BigInt(p.accrued_usd_close) - BigInt(p.hold_value_usd), 0n)
 }
 
-export async function loadYieldLedger(db: Db, chainId: number, accountKey: string): Promise<YieldLedgerView> {
-  const [latest, daily, earned] = await Promise.all([
+export async function loadYieldLedger(db: Db, chainId: number, accountKey: string, now: Date = new Date()): Promise<YieldLedgerView> {
+  const [latest, daily] = await Promise.all([
     db.prepare('SELECT fees_usdc, total_usdc, read_at, positions_json, updated_at FROM account_snapshot_latest WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).first<LatestRow>(),
     // migrations/d1/0015_yield_ledger_receipts.sql: written for every day an op reached the chain, with or without
     // an account_daily row for that day (an account stopped right after an op has none).
-    db.prepare('SELECT collected_usdc, gas_paid_wei, updated_at FROM yield_ledger_account_receipts WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<DailyRow>(),
-    earnedDaily(db, chainId, accountKey),
+    db.prepare('SELECT day, collected_usdc, gas_paid_wei, updated_at FROM yield_ledger_account_receipts WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<DailyRow>(),
   ])
+  const earned = await earnedDaily(db, chainId, accountKey, daily.results, now.toISOString().slice(0, 10))
 
   let collected = 0n
   let anyCollected = false
