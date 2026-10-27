@@ -5,6 +5,7 @@ import { feesOf, gasLabel, gasOf, moveLine, moveReason, moveState, rangeLabel, s
 import { opLine } from '../lib/ops.ts'
 import { pairLabel } from '../lib/positions.ts'
 import { localTime } from '../lib/time.ts'
+import { useChain } from '../lib/chain.tsx'
 import { BasescanLink } from './ui.tsx'
 
 /**
@@ -28,7 +29,7 @@ export function Sheet({ open, onClose, kicker, title, children }: { open: boolea
   return (
     <dialog
       ref={ref}
-      className="sheet"
+      className="drawer"
       aria-labelledby={titleId}
       onClose={onClose}
       onClick={(e) => {
@@ -36,8 +37,8 @@ export function Sheet({ open, onClose, kicker, title, children }: { open: boolea
       }}
     >
       {open ? (
-        <div className="sheet-in">
-          <span className="sheet-grip" aria-hidden="true" />
+        <div className="drawer-in">
+          <span className="drawer-grip" aria-hidden="true" />
           <header className="flex items-start justify-between gap-4">
             <div className="grid gap-1">
               <span className="font-mono text-[0.72rem] uppercase tracking-[0.06em] text-emerald">{kicker}</span>
@@ -60,7 +61,7 @@ export function Sheet({ open, onClose, kicker, title, children }: { open: boolea
 
 function Fact({ label, value, note }: { label: string; value: string; note?: string }) {
   return (
-    <div className="sheet-fact">
+    <div className="drawer-fact">
       <dt>{label}</dt>
       <dd>
         {value}
@@ -84,6 +85,7 @@ const STATE: Record<OpView['state'], string> = { proposed: 'Prepared', submitted
 
 /** A range move: why, what it cost, what the closed range earned, old → new range, and each transaction. */
 export function MoveDetail({ move }: { move: Move }) {
+  const native = useChain().native
   const gas = gasOf(move.ops)
   const fees = feesOf(move.close)
   const from = rangeLabel(move.pool, move.close.tickLower, move.close.tickUpper)
@@ -92,9 +94,9 @@ export function MoveDetail({ move }: { move: Move }) {
   return (
     <div className="grid gap-5">
       <p className="m-0 text-[1rem] leading-[1.55]">{moveReason(move.why)}</p>
-      <dl className="sheet-facts">
-        <Fact label="Status" value={state === 'done' ? 'Done' : state === 'failed' ? 'Stopped: a step did not go through' : 'In progress'} />
-        {gas ? <Fact label="Network fees" value={gasLabel(gas)} note={`${gas.count} transaction${gas.count === 1 ? '' : 's'}, paid from this account`} /> : <Fact label="Network fees" value="Not read yet" />}
+      <dl className="drawer-facts">
+        <Fact label="Status" value={state === 'done' ? 'Done' : state === 'stalled' ? 'Not reopened yet' : 'In progress'} note={state === 'stalled' ? 'The tokens are back in this account. Mamoru places them again on a later review.' : undefined} />
+        {gas ? <Fact label="Network fees" value={gasLabel(gas, native)} note={`${gas.count} transaction${gas.count === 1 ? '' : 's'}, paid from this account`} /> : <Fact label="Network fees" value="Not read yet" />}
         {fees !== null ? <Fact label="Earned by the closed range" value={`${small(fees)} USDC`} note="Fees collected when it closed" /> : null}
         {from ? <Fact label="Previous range" value={from} /> : null}
         {to ? <Fact label="New range" value={to} /> : null}
@@ -105,8 +107,8 @@ export function MoveDetail({ move }: { move: Move }) {
           {move.ops.map((op, i) => {
             const g = gasOf([op])
             return (
-              <li key={op.opId} className="sheet-step">
-                <span className="sheet-step-n" aria-hidden="true">
+              <li key={op.opId} className="drawer-step">
+                <span className="drawer-step-n" aria-hidden="true">
                   {i + 1}
                 </span>
                 <div className="grid gap-[0.15rem]">
@@ -114,7 +116,7 @@ export function MoveDetail({ move }: { move: Move }) {
                   <span className="text-[0.8rem] text-muted">
                     <time dateTime={op.updatedAt}>{localTime(op.updatedAt)}</time>
                     {op.state === 'confirmed' ? '' : ` · ${STATE[op.state]}`}
-                    {g ? ` · gas ${gasLabel(g)}` : ''}
+                    {g ? ` · gas ${gasLabel(g, native)}` : ''}
                   </span>
                 </div>
                 <TxLink op={op} />
@@ -122,8 +124,8 @@ export function MoveDetail({ move }: { move: Move }) {
             )
           })}
           {move.open ? null : (
-            <li className="sheet-step text-stone">
-              <span className="sheet-step-n" aria-hidden="true">
+            <li className="drawer-step text-stone">
+              <span className="drawer-step-n" aria-hidden="true">
                 {move.ops.length + 1}
               </span>
               <span>Open a position in range</span>
@@ -138,17 +140,18 @@ export function MoveDetail({ move }: { move: Move }) {
 
 /** Any other entry: what happened, when, its cost and its transaction. */
 export function OpDetail({ op }: { op: OpView }) {
+  const native = useChain().native
   const gas = gasOf([op])
   const fees = feesOf(op)
   const range = rangeLabel(op.pool, op.tickLower, op.tickUpper)
   return (
     <div className="grid gap-5">
-      <dl className="sheet-facts">
+      <dl className="drawer-facts">
         <Fact label="When" value={localTime(op.updatedAt)} />
         <Fact label="Status" value={STATE[op.state]} />
         {op.pool ? <Fact label="Pool" value={pairLabel(op.pool)} /> : null}
         {range ? <Fact label="Range" value={range} /> : null}
-        {gas ? <Fact label="Network fees" value={gasLabel(gas)} /> : null}
+        {gas ? <Fact label="Network fees" value={gasLabel(gas, native)} /> : null}
         {fees !== null && fees > 0n ? <Fact label="Fees collected" value={`${small(fees)} USDC`} /> : null}
       </dl>
       <div className="flex items-center justify-between gap-3 border-t border-wash pt-3">

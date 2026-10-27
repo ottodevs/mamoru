@@ -32,7 +32,7 @@ describe('historyEntries (#219)', () => {
   })
 
   test('a move still waiting for its open is in progress', () => {
-    const m = (historyEntries([close, swap])[0] as { type: 'move'; move: Move }).move
+    const m = (historyEntries([close, swap], Date.parse(swap.updatedAt) + 60_000)[0] as { type: 'move'; move: Move }).move
     expect(m.open).toBeNull()
     expect(moveState(m)).toBe('pending')
     expect(moveLine(m)).toBe('Moving your USDC/USDT range')
@@ -41,6 +41,27 @@ describe('historyEntries (#219)', () => {
   test('an open long after the close is a separate entry, not part of the move', () => {
     const late = { ...mint, updatedAt: '2026-10-27T02:00:00.000Z' }
     expect(historyEntries([close, late]).map((e) => e.type)).toEqual(['op', 'move'])
+  })
+
+  test('no open within the window, or a newer close in the pool: the move is stalled, not pending forever', () => {
+    const late = historyEntries([close, swap], Date.parse(close.updatedAt) + 7 * 3_600_000)
+    expect(moveState((late[0] as { type: 'move'; move: Move }).move)).toBe('stalled')
+    const again = { ...close, opId: 'eng-1-1-z-rerange', updatedAt: '2026-10-26T14:05:00.000Z' }
+    const both = historyEntries([close, again, mint], Date.parse(again.updatedAt) + 60_000).filter((e) => e.type === 'move').map((e) => (e as { type: 'move'; move: Move }).move)
+    expect(both.map((m) => [m.id, moveState(m)])).toEqual([[again.opId, 'done'], [close.opId, 'stalled']])
+    expect(moveLine(both[1]!)).toBe('Closed your USDC/USDT range, not reopened yet')
+  })
+
+  test('chain order wins over updatedAt: a close re-stamped after its swap still leads the move', () => {
+    const entries = historyEntries([{ ...close, block: 1, updatedAt: '2026-10-26T14:30:00.000Z' }, { ...swap, block: 2 }, { ...mint, block: 3, updatedAt: '2026-10-26T14:31:00.000Z' }])
+    expect(entries).toHaveLength(1)
+    expect((entries[0] as { type: 'move'; move: Move }).move.ops.map((o) => stepOf(o))).toEqual(['rerange', 'enter_swap', 'enter_mint'])
+  })
+
+  test('pool-less rows (before #131) are never grouped', () => {
+    const { pool: _a, ...c } = close
+    const { pool: _b, ...w } = swap
+    expect(historyEntries([c, w]).map((e) => e.type)).toEqual(['op', 'op'])
   })
 
   test('rows stored before `step` existed are read from the opId suffix', () => {
@@ -78,6 +99,7 @@ describe('move detail (#219)', () => {
     const g = gasOf([close, { ...swap, facts: { at: 'x', gasWei: '1000000000000', fees: [] } }])!
     expect(g.usdc).toBeNull()
     expect(gasLabel(g)).toBe('0.000001 ETH')
+    expect(gasLabel(g, 'MON')).toBe('0.000001 MON')
   })
 
   test('ranges read as the other token in USDC', () => {

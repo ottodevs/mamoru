@@ -28,6 +28,8 @@ export type Move = {
   why: OpView['why']
   /** The newest step's time: where the entry sorts. */
   updatedAt: string
+  /** No open came: a newer close in the pool took over, or the window passed. Failed steps never reach the history. */
+  stalled?: boolean
 }
 
 export type Entry = { type: 'op'; op: OpView } | { type: 'move'; move: Move }
@@ -40,15 +42,22 @@ export const MOVE_WINDOW_MS = 6 * 60 * 60 * 1000
  * MOVE_WINDOW_MS, the swaps that follow it and the open (mint or add) that ends it. Input in any order, output
  * newest first like historyOps.
  */
-export function historyEntries(ops: readonly OpView[]): Entry[] {
-  const asc = [...ops].sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+export function historyEntries(ops: readonly OpView[], now: number = Date.now()): Entry[] {
+  // Chain order first (block), then time: `updatedAt` is rewritten on every state change and can reorder steps.
+  const asc = [...ops].sort((a, b) => (a.block !== undefined && b.block !== undefined && a.block !== b.block ? a.block - b.block : a.updatedAt.localeCompare(b.updatedAt)))
   const open = new Map<string, Move>()
   const taken = new Set<string>()
   const moves: Move[] = []
+  const stall = (m: Move | undefined) => {
+    if (m && !m.open) m.stalled = true
+  }
   for (const op of asc) {
     const step = stepOf(op)
-    const key = op.pool ?? ''
+    // Rows stored before pools were tagged (#131) cannot be told apart: they stay single rows.
+    if (!op.pool) continue
+    const key = op.pool
     if (step === 'rerange') {
+      stall(open.get(key))
       const m: Move = { id: op.opId, pool: op.pool, ops: [op], close: op, open: null, why: op.why, updatedAt: op.updatedAt }
       moves.push(m)
       taken.add(op.opId)
@@ -58,6 +67,7 @@ export function historyEntries(ops: readonly OpView[]): Entry[] {
     const m = open.get(key)
     if (!m || (step !== 'enter_swap' && step !== 'enter_mint' && step !== 'increase_liquidity')) continue
     if (Date.parse(op.updatedAt) - Date.parse(m.close.updatedAt) > MOVE_WINDOW_MS) {
+      stall(m)
       open.delete(key)
       continue
     }
@@ -69,6 +79,7 @@ export function historyEntries(ops: readonly OpView[]): Entry[] {
       open.delete(key)
     }
   }
+  for (const m of open.values()) if (now - Date.parse(m.close.updatedAt) > MOVE_WINDOW_MS) stall(m)
   const entries: Entry[] = [...ops.filter((o) => !taken.has(o.opId)).map((op): Entry => ({ type: 'op', op })), ...moves.map((move): Entry => ({ type: 'move', move }))]
   const at = (e: Entry) => (e.type === 'op' ? e.op.updatedAt : e.move.updatedAt)
   return entries.sort((a, b) => at(b).localeCompare(at(a)))
@@ -76,16 +87,17 @@ export function historyEntries(ops: readonly OpView[]): Entry[] {
 
 const pair = (pool: string | undefined) => pairLabel(pool).replace(/ /g, '')
 
-/** Settled when its open is confirmed; failed when any step failed; else still moving. */
-export function moveState(m: Move): 'done' | 'pending' | 'failed' {
-  if (m.ops.some((o) => o.state === 'failed')) return 'failed'
-  return m.open?.state === 'confirmed' ? 'done' : 'pending'
+/** Settled when its open is confirmed; stalled when a step failed or no open came in time; else still moving. */
+export function moveState(m: Move): 'done' | 'pending' | 'stalled' {
+  if (m.open?.state === 'confirmed') return 'done'
+  if (m.stalled || m.ops.some((o) => o.state === 'failed')) return 'stalled'
+  return 'pending'
 }
 
 /** The history line of a move. */
 export function moveLine(m: Move): string {
   const s = moveState(m)
-  if (s === 'failed') return `Moving your ${pair(m.pool)} range stopped`
+  if (s === 'stalled') return `Closed your ${pair(m.pool)} range, not reopened yet`
   return s === 'done' ? `Moved your ${pair(m.pool)} range` : `Moving your ${pair(m.pool)} range`
 }
 
@@ -129,8 +141,9 @@ export function gasOf(ops: readonly OpView[]): { usdc: bigint | null; wei: bigin
 }
 
 /** "0.044 USDC" under a dime (gas is cents: two decimals would hide it), "1.20 USDC" above; the ETH amount when unpriced. */
-export function gasLabel(g: NonNullable<ReturnType<typeof gasOf>>): string {
-  if (g.usdc === null) return formatAmount(g.wei.toString(), 'ETH')
+export function gasLabel(g: NonNullable<ReturnType<typeof gasOf>>, native: 'ETH' | 'MON' | string = 'ETH'): string {
+  // MON is 18 decimals like ETH; formatAmount knows ETH's, so format as ETH and name the chain's own asset.
+  if (g.usdc === null) return `${formatAmount(g.wei.toString(), 'ETH').replace(/ ETH$/, '')} ${native}`
   return `${small(g.usdc)} USDC`
 }
 
