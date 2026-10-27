@@ -1302,15 +1302,16 @@ export class Operator {
       return null
     }
     const flags = this.cfg.opsFlags?.()
-    // otto/mamoru#225: v7 (v6 in one session per pool, one owner transaction) configured and offered: v2-v6 move to it.
-    const v7 = this.cfg.v7Policy
-    if (v7 && flags?.merged_grants_v7 === true && V7_MIGRATES_FROM.has(cur.policyId) && cur.chain === v7.chain) return v7
-    // otto/mamoru#214: v6 (Base + Monad growth) configured and offered: v2-v5 accounts move to it, ahead of v5.
-    const v6 = this.cfg.v6Policy
     // otto/mamoru#217: v6 needs the explicit signal of the scoped-flags field. null = everyone (and the boolean agrees);
     // a list = only those accounts (key or Safe address); malformed reached us as [] = nobody; missing = nobody.
     const v6Scope = this.cfg.opsScopedFlags?.().multichain_v6
     const inV6Scope = v6Scope === null ? flags?.multichain_v6 === true : Array.isArray(v6Scope) && (v6Scope.includes(acc.accountKey.toLowerCase()) || v6Scope.includes(String(acc.ctx.address).toLowerCase()))
+    // otto/mamoru#225: v7 (v6 in one session per pool, one owner transaction) configured and offered: v2-v6 move to it.
+    // It bridges like v6, so it needs the account in v6's scope as well as its own flag.
+    const v7 = this.cfg.v7Policy
+    if (v7 && inV6Scope && flags?.merged_grants_v7 === true && V7_MIGRATES_FROM.has(cur.policyId) && cur.chain === v7.chain) return v7
+    // otto/mamoru#214: v6 (Base + Monad growth) configured and offered: v2-v5 accounts move to it, ahead of v5.
+    const v6 = this.cfg.v6Policy
     if (v6 && inV6Scope && V6_MIGRATES_FROM.has(cur.policyId) && cur.chain === v6.chain) return v6
     // otto/mamoru#151: MamoruActionPolicyV2 deployed and offered: v2/v3 and v4 accounts move to v5.
     const v5 = this.cfg.v5Policy

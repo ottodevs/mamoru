@@ -77,7 +77,7 @@ function ready(w: ReturnType<typeof world>): void {
   p.readOf = async () => ({ block: 100n, deployed: true, usdc: 0n, eth: 0n })
 }
 
-const cfg = (flags: Record<string, boolean>) => ({ v4Policy: v4, v5Policy: v5, v6Policy: v6, v7Policy: v7, opsFlags: () => flags })
+const cfg = (flags: Record<string, boolean>, scope: string[] | null = null) => ({ v4Policy: v4, v5Policy: v5, v6Policy: v6, v7Policy: v7, opsFlags: () => flags, opsScopedFlags: () => (flags.multichain_v6 ? { multichain_v6: scope } : {}) })
 
 describe('boot wiring', () => {
   test('v7 is wired exactly like v6 (V2, gas policy, gate) and needs the same environment', () => {
@@ -100,10 +100,17 @@ describe('the renew row offers v7 only behind merged_grants_v7', () => {
     }
   })
 
+  test('v7 bridges like v6: its flag alone offers nothing outside the multichain_v6 scope (#217)', () => {
+    const none = world(0n, cfg({ merged_grants_v7: true, onchain_action_policy_v5: true }))
+    expect(none.op.renewTarget(running(none, v5))).toBe('conservador-live-v5')
+    const other = world(0n, cfg({ merged_grants_v7: true, multichain_v6: true, onchain_action_policy_v5: true }, ['0x0000000000000000000000000000000000000001']))
+    expect(other.op.renewTarget(running(other, v5))).toBe('conservador-live-v5')
+  })
+
   test('v7 not configured: never offered; an account on v7 renews as v7', () => {
     const w = world(0n, { v4Policy: v4, v5Policy: v5, v6Policy: v6, opsFlags: () => ({ merged_grants_v7: true }) })
     expect(w.op.renewTarget(running(w, v5))).toBe('conservador-live-v5')
-    const on = world(0n, cfg({ merged_grants_v7: true }))
+    const on = world(0n, cfg({ merged_grants_v7: true, multichain_v6: true }))
     expect(on.op.renewTarget(running(on, v7))).toBe('conservador-live-v7')
   })
 })
@@ -111,7 +118,7 @@ describe('the renew row offers v7 only behind merged_grants_v7', () => {
 describe('owner transactions of a v7 approval: one each', () => {
   for (const [label, from] of [['v6 (8 sessions)', v6], ['v5 (9 sessions)', v5], ['v2 (12 sessions)', POLICIES['conservador-live-v2']!]] as const) {
     test(`the move from ${label}: every old grant revoked and every v7 session enabled in ONE transaction, no later step`, async () => {
-      const w = world(0n, cfg({ merged_grants_v7: true }))
+      const w = world(0n, cfg({ merged_grants_v7: true, multichain_v6: true }))
       const acc = running(w, from)
       ready(w)
       chain(w, 7n)
@@ -146,7 +153,7 @@ describe('owner transactions of a v7 approval: one each', () => {
   }
 
   test("a v7 account's renewal: its four grants, revoked and enabled again in one transaction", async () => {
-    const w = world(0n, cfg({ merged_grants_v7: true }))
+    const w = world(0n, cfg({ merged_grants_v7: true, multichain_v6: true }))
     const acc = running(w, v7)
     ready(w)
     chain(w, 7n)
@@ -159,7 +166,7 @@ describe('owner transactions of a v7 approval: one each', () => {
   })
 
   test('over the renewal budget (16.2M) by simulation: RENEWAL_TOO_LARGE, nothing held, never split', async () => {
-    const w = world(0n, cfg({ merged_grants_v7: true }))
+    const w = world(0n, cfg({ merged_grants_v7: true, multichain_v6: true }))
     running(w, v5)
     ready(w)
     chain(w, 7n)
@@ -176,7 +183,7 @@ describe('owner transactions of a v7 approval: one each', () => {
 
 describe('the renew row on a v7 account', () => {
   test("a spent pool session says the engine stopped working there (action 'all'), not only re-ranging", () => {
-    const w = world(0n, cfg({ merged_grants_v7: true }))
+    const w = world(0n, cfg({ merged_grants_v7: true, multichain_v6: true }))
     const acc = running(w, v7)
     const g = (acc.grants as unknown as { name: string; permissionId: Hex }[])[1]!
     ;(acc as unknown as { ops: unknown[] }).ops = [{ opId: 'eng-1', state: 'confirmed', permissionId: g.permissionId }]
