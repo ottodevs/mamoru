@@ -6,6 +6,7 @@ import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import type { AppEnv } from '../context.ts'
 import type { Db, Env, RateLimiter } from '../env.ts'
 import type { AccountRow } from './store.ts'
+import { accountCaps } from '../engine-settings.ts'
 import { MAX_PROVIDERS, providerUrls, type ChainFetch } from './other-chains.ts'
 
 // otto/mamoru#238: when the Worker cannot get funding from the operator, GET /funding answers with the balance read
@@ -315,7 +316,7 @@ export async function readChain(fetcher: ChainFetch, urls: readonly string[], re
  * The FundingView of a chain read. `listed`: what the snapshot said (null: nothing usable). Positions are 'listed'
  * only when the snapshot was there and every position of it that is still the Safe's could be valued.
  */
-export function fundingFromRead(read: ChainRead, registry: Registry, safe: Address, capUsdc: string, listed: { at: string } | null): FundingView {
+export function fundingFromRead(read: ChainRead, registry: Registry, safe: Address, cap: { usdc: string; known: boolean }, listed: { at: string } | null): FundingView {
   const usdc = read.tokens.USDC ?? 0n
   const known = listed !== null && read.valued
   // Positions are shown only when the list is whole: the app adds them into the total, and a partial set under an
@@ -346,7 +347,7 @@ export function fundingFromRead(read: ChainRead, registry: Registry, safe: Addre
     block: Number(read.block),
     usdc: usdc.toString(),
     eth: read.eth.toString(),
-    capUsdc,
+    capUsdc: cap.usdc,
     overCap: null,
     cbbtc: (read.tokens.cbBTC ?? 0n).toString(),
     gasReserveWei: '0',
@@ -354,7 +355,7 @@ export function fundingFromRead(read: ChainRead, registry: Registry, safe: Addre
     idle: idleTokens(read.tokens, read.prices, registry),
     positions,
     source: 'chain',
-    chainRead: { positions: known ? 'listed' : 'unknown', listedAt: known ? listed!.at : null },
+    chainRead: { positions: known ? 'listed' : 'unknown', listedAt: known ? listed!.at : null, capKnown: cap.known },
   }
 }
 
@@ -419,6 +420,21 @@ async function allowed(limiter: RateLimiter | undefined, key: string): Promise<b
 }
 
 /**
+ * The cap the operator would hold the account to, as far as the D1 says: its valid override (the reader the operator's
+ * settings pull uses, engine-settings.ts), else the default. `known` false when the read failed: the default is then only
+ * a placeholder and the app shows no cap.
+ */
+export async function capOf(db: Db, row: AccountRow, fallback: string): Promise<{ usdc: string; known: boolean }> {
+  try {
+    const override = (await accountCaps(db))[row.account_key.toLowerCase()]
+    // account_cap_overrides holds whole USDC; the view carries base units (6 decimals).
+    return { usdc: override === undefined ? fallback : (BigInt(override) * 1_000_000n).toString(), known: true }
+  } catch {
+    return { usdc: fallback, known: false }
+  }
+}
+
+/**
  * The chain-read answer for an account whose operator did not give funding, or null when there is none to give (no
  * RPC secret, every provider failed, a read under way, rate limited): the caller then answers as it did before.
  */
@@ -449,7 +465,7 @@ export async function chainFundingResponse(c: Context<AppEnv>, row: AccountRow, 
     const ids = listed && listed.ids.length <= MAX_LISTED_POSITIONS ? listed.ids : []
     const usable = listed && listed.ids.length <= MAX_LISTED_POSITIONS ? listed : null
     const read = await readChain(deps.fetch, urls, registry, row.address, ids)
-    if (read) view = fundingFromRead(read, registry, row.address, deps.capUsdc, usable)
+    if (read) view = fundingFromRead(read, registry, row.address, await capOf(c.env.DB, row, deps.capUsdc), usable)
   } catch (e) {
     console.error('funding chain read failed', e instanceof Error ? e.name : 'unexpected error')
   }

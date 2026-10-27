@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router'
 import { ApiContext } from '../../src/web/api/client.ts'
 import { queryKeys } from '../../src/web/api/queries.ts'
+import { DepositDetails } from '../../src/web/routes/add-money.tsx'
 import { fixtureClient, fixtureConfig, fixtureFunding, fixtureSession } from '../../src/web/fixtures/client.ts'
 import { FIXTURE_ACCOUNT_KEY } from '../../src/web/fixtures/empty-account.ts'
 import { poolsResponse } from '../../src/web/fixtures/pools.ts'
@@ -82,5 +83,20 @@ describe('Home on a balance read from chain', () => {
     expect(text).not.toContain('Working capital')
     expect(text).not.toContain('Nothing in a position right now')
     expect(text).not.toContain('Start allocation')
+  })
+
+  test('an out-of-range position says only "Out of range."; nothing on the page claims engine state', async () => {
+    const oor: FundingView = { ...fromChain, positions: [{ ...fromChain.positions[0]!, inRange: false }] }
+    const { text } = await home(oor)
+    expect(text).toContain('Out of range.')
+    for (const claim of ['Paused', 'puts it back to work', 'Placing', 'waiting to be placed', 'being placed', 'Mamoru looks again', 'Nothing to do right now', 'next review']) expect(text).not.toContain(claim)
+    // and with the operator answering, the old wording stays
+    const live = await home({ ...oor, source: undefined, chainRead: undefined, active: true })
+    expect(live.text).toContain('Paused: out of range. Mamoru puts it back to work automatically.')
+  })
+
+  test('the cap is shown only when it is known', () => {
+    expect(render(<DepositDetails address={fromChain.address} capUsdc="250000000" />).text).toContain('Up to 250 USDC per account')
+    expect(render(<DepositDetails address={fromChain.address} />).text).not.toContain('per account')
   })
 })

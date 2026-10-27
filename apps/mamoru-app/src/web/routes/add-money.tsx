@@ -120,7 +120,7 @@ export function AddMoneyPage() {
         {f ? (
           <DepositDetails
             address={f.address}
-            capUsdc={f.capUsdc}
+            capUsdc={f.source === 'chain' && !f.chainRead?.capKnown ? undefined : f.capUsdc}
             onConfirmed={() => void navigate({ to: '/', replace: true })}
           />
         ) : <div className="h-44 animate-pulse bg-wash/40" aria-hidden="true" />}

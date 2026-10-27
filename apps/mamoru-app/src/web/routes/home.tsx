@@ -80,7 +80,7 @@ export const homeCopy = {
   inRange: 'In range',
   paused: 'Paused: out of range. Mamoru puts it back to work automatically.',
   // otto/mamoru#238: no promise about what the engine will do while it cannot be reached.
-  pausedChain: 'Paused: out of range.',
+  pausedChain: 'Out of range.',
   noRate: 'n/a: no rate source for this pool yet.',
   unpriced: (tokens: string) => `n/a: no USDC price for ${tokens} in this view yet, so its value, its share and the account rates show n/a.`,
   unpricedIdle: (tokens: string) => `${tokens} not priced yet, not counted in the total`,
@@ -1450,7 +1450,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           <Modal open={dialog === 'add'} onClose={() => setDialog(null)} title={homeCopy.add}>
             <DepositDetails
               address={f.address}
-              capUsdc={f.capUsdc}
+              capUsdc={f.source === 'chain' && !f.chainRead?.capKnown ? undefined : f.capUsdc}
               onConfirmed={() => {
                 // otto/mamoru#191: no Sent screen to close by hand. Base confirmed (and said so): close, read the balance now.
                 setDialog(null)

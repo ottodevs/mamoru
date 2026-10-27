@@ -241,7 +241,7 @@ describe('funding: the fallback trigger', () => {
       expect(f.exposure).toBeUndefined()
       expect(f.positions).toEqual([])
       // no snapshot: idle only, and it says so
-      expect(f.chainRead).toEqual({ positions: 'unknown', listedAt: null })
+      expect(f.chainRead).toEqual({ positions: 'unknown', listedAt: null, capKnown: true })
     }
   })
 
@@ -318,7 +318,7 @@ describe('funding from the chain: what counts', () => {
     snapshot(h, owner, ['101', '102'])
     const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
 
-    expect(f.chainRead).toEqual({ positions: 'listed', listedAt: '2026-10-07T09:20:00.000Z' })
+    expect(f.chainRead).toEqual({ positions: 'listed', listedAt: '2026-10-07T09:20:00.000Z', capKnown: true })
     expect(f.positions.map((p) => p.tokenId).sort()).toEqual(['101', '102'])
     expect(BigInt(f.positions.find((p) => p.tokenId === '101')!.valueUsdc!)).toBe(valueOf(p1, 101n))
     expect(BigInt(f.positions.find((p) => p.tokenId === '102')!.valueUsdc!)).toBe(valueOf(p2, 102n))
@@ -348,7 +348,7 @@ describe('funding from the chain: what counts', () => {
     const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
     // it could be spam or a position opened after the snapshot: not told apart, so positions are unknown, idle only
     expect(f.positions).toEqual([])
-    expect(f.chainRead).toEqual({ positions: 'unknown', listedAt: null })
+    expect(f.chainRead).toEqual({ positions: 'unknown', listedAt: null, capKnown: true })
     const asked = node.requests[0]!.params[0] as { data: string }
     const calls = decodeFunctionData({ abi: multicallAbi, data: asked.data as `0x${string}` }).args[0]
     const npmCalls = calls.filter((c) => c.target.toLowerCase() === NPM.toLowerCase()).map((c) => decodeFunctionData({ abi: nonfungiblePositionManagerAbi, data: c.callData }))
@@ -419,7 +419,7 @@ describe('funding from the chain: what counts', () => {
     const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
     expect(f.positions).toEqual([])
     expect(f.usdc).toBe('4000000')
-    expect(f.chainRead).toEqual({ positions: 'unknown', listedAt: null })
+    expect(f.chainRead).toEqual({ positions: 'unknown', listedAt: null, capKnown: true })
   })
 
   test('an unreadable snapshot (bad JSON, a bad id, too many ids) is no snapshot', async () => {
@@ -441,7 +441,7 @@ describe('funding from the chain: what counts', () => {
     const { cookie, owner } = await onboard(h)
     snapshot(h, owner, [])
     const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
-    expect(f.chainRead).toEqual({ positions: 'listed', listedAt: '2026-10-07T09:20:00.000Z' })
+    expect(f.chainRead).toEqual({ positions: 'listed', listedAt: '2026-10-07T09:20:00.000Z', capKnown: true })
   })
 
   test('the snapshot of another address is not used', async () => {
@@ -474,6 +474,39 @@ describe('funding from the chain: what counts', () => {
     const { cookie, owner } = await onboard(h)
     const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
     expect(f.deployed).toBe(false)
+  })
+})
+
+describe('funding from the chain: the cap', () => {
+  const override = (h: ReturnType<typeof harness>, key: string, usdc: number | null) =>
+    h.db.raw.query(`INSERT INTO account_cap_overrides (env, account_key, cap_usdc, author, reason, created_at) VALUES ('prod', ?, ?, 'ot', 'test', ?)`).run(key, usdc, T0.toISOString())
+
+  test('no override: the default cap, known', async () => {
+    const { h } = setup({ node: chain({ balances: { USDC: 1_000_000n } }) })
+    const { cookie, owner } = await onboard(h)
+    const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
+    expect(f.capUsdc).toBe('100000000')
+    expect(f.chainRead?.capKnown).toBe(true)
+  })
+
+  test('the account\'s valid override is its cap, known', async () => {
+    const { h } = setup({ node: chain({ balances: { USDC: 1_000_000n } }) })
+    const { cookie, owner } = await onboard(h)
+    override(h, owner.accountKey, 250)
+    const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
+    expect(f.capUsdc).toBe('250000000')
+    expect(f.chainRead?.capKnown).toBe(true)
+  })
+
+  test('the D1 read failing: the default as placeholder, cap not known (the app shows none)', async () => {
+    const { h } = setup({ node: chain({ balances: { USDC: 1_000_000n } }) })
+    const { cookie, owner } = await onboard(h)
+    const real = h.env.DB
+    h.env.DB = { prepare: (sql: string) => { if (sql.includes('account_cap_overrides')) throw new Error('D1 is down'); return real.prepare(sql) } }
+    const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
+    expect(f.source).toBe('chain')
+    expect(f.capUsdc).toBe('100000000')
+    expect(f.chainRead?.capKnown).toBe(false)
   })
 })
 

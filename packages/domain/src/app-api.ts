@@ -139,7 +139,9 @@ export type FundingView = {
   // `positions`: 'listed' when the ids come from the snapshot taken at `listedAt` (a position opened after it is not
   // in the total); 'unknown' when there was no usable snapshot, or a listed position could not be valued, and the
   // total is then idle money only (understated, and the app says so).
-  chainRead?: { positions: 'listed' | 'unknown'; listedAt: string | null }
+  // `capKnown`: `capUsdc` is the account's cap per the D1 (its override, else the default); false when that could not be
+  // read, and the app then shows no cap.
+  chainRead?: { positions: 'listed' | 'unknown'; listedAt: string | null; capKnown?: boolean }
 }
 
 // GET /api/accounts/:accountKey/yield -> YieldLedgerView (otto/mamoru#129): what the yield ledger knows so far,
