@@ -4,133 +4,167 @@
 # else). The identity stays in memory; it is never written to this disk.
 #
 #   mamoru-failover status
-#   mamoru-failover drill                          < identity   decrypt the newest bundle, install its code, start
-#                                                               nothing, shred the decrypted state
-#   mamoru-failover activate [--confirm-lady-down] < identity
-#   mamoru-failover handback                                    stop the operators here, seal their state for lady
-#   mamoru-failover clear [--discard]                           drop the fence once lady has the hand-back state
+#   mamoru-failover drill                                         < identity   decrypt, check, install the code,
+#                                                                              start nothing, shred the state
+#   mamoru-failover activate [--confirm-lady-down] [--accept-old] < identity
+#   mamoru-failover handback                                      stop the operators here, seal their state for lady
+#   mamoru-failover clear [--discard]                             drop the fence once lady has the hand-back state
 #
-# Never two operators. activate starts only when the newest bundle says lady's operators are stopped (lady ran
-# `fence-watch.sh standdown`, which also keeps a local fence there), or, when lady has been silent for 10 min, on
+# Never two operators. activate starts only when the newest bundle says lady stood down (fence-watch.sh standdown:
+# its operators stopped, a local fence kept there), or, when lady has been silent for 10 min, on
 # --confirm-lady-down: Ot's word that lady's operators are not running. lady fails closed: while this fence is set,
-# or while lady cannot read it, its operators do not start. See ops/standby/README.md.
+# or while lady cannot read it, its operators do not start. Every bundle is signed by lady's signing key; anything
+# else in the inbox is ignored. See ops/standby/README.md.
 set -euo pipefail
 umask 077
 trap '' HUP PIPE   # a dropped ssh session does not stop a failover half way
+cd /               # commands run as mamoru-op must not inherit root's cwd
 
 inbox=/var/lib/mamoru-standby/inbox
 fdir=/var/lib/mamoru-failover
 fence="$fdir/fence"
 srv=/srv/mamoru-op
 recipient_file=/etc/mamoru-standby/recipient
+signers=/etc/mamoru-standby/allowed_signers
 heartbeat_fresh_s=600
+max_age_s=3600
 unit_re='^mamoru-operator(-monad)?$'
 
 say() { printf '%s\n' "$*" >&2 || true; logger -t mamoru-failover -- "$*" || true; }
 die() { say "mamoru-failover: $*"; exit 1; }
 now_ts() { date -u +%Y%m%dT%H%M%SZ; }
-newest_state() { find "$inbox" -maxdepth 1 -name 'state-*.tar.zst.age' -printf '%f\n' | sort | tail -1; }
 age_s() { echo $(( $(date +%s) - $(stat -c %Y "$1") )); }
 std_units() { for u in mamoru-operator mamoru-operator-monad; do echo "mamoru-standby-operator@$u" "mamoru-standby-tunnel@$u"; done; }
 set_fence() { local t; t="$(mktemp "$fdir/.fence.XXXXXX")"; echo "$1" >"$t"; chmod 644 "$t"; mv "$t" "$fence"; }
-wipe() { [ -e "$1" ] || return 0; find "$1" -type f -exec shred -u {} + 2>/dev/null || true; rm -rf "$1"; }
+as_op() { runuser -u mamoru-op -- "$@"; }
+# Everything under $srv belongs to mamoru-op (the operator's own user): root never creates, chowns, reads or
+# deletes there by path; it acts as mamoru-op, so a link planted there cannot point root anywhere.
+wipe() { as_op find "$1" -type f -exec shred -u {} + 2>/dev/null || true; as_op rm -rf "$1" 2>/dev/null || true; }
+
+# Newest signed state bundle by arrival time (mtime), not by the name lady gave it.
+newest_state() {
+  local f
+  while read -r _ f; do
+    signed "$inbox/$f" && { echo "$f"; return 0; }
+  done < <(find "$inbox" -maxdepth 1 -name 'state-*.tar.zst.age' -printf '%T@ %f\n' | sort -rn)
+  return 0
+}
+signed() {
+  [ -f "$1.sig" ] && ssh-keygen -Y verify -f "$signers" -I lady -n mamoru-standby -s "$1.sig" <"$1" >/dev/null 2>&1
+}
 
 read_identity() {
   [ -t 0 ] && die "pipe the standby identity on stdin (ssh root@vps mamoru-failover $1 < ~/.config/mamoru-standby/identity)"
   identity="$(cat)"
   [ "$(grep -c '^AGE-SECRET-KEY-' <<<"$identity")" = 1 ] || die "stdin must hold exactly one age identity"
 }
-open_age() { age -d -i <(printf '%s\n' "$identity") "$1"; }
 
-# Decrypts an age'd tar.zst into $2 as mamoru-op. Only regular files and directories are accepted: no symlink,
-# hard link or device can make root (or anyone) write outside $2.
+# Decrypts a signed age'd tar.zst into $2 (created by mamoru-op). The plain tar lives in a root-only directory;
+# only regular files and directories are accepted; tar runs as mamoru-op reading it from a descriptor root opened.
 unpack() {
-  local src="$1" dest="$2" plain
-  plain="$(mktemp "$srv/.plain.XXXXXX")"
-  open_age "$src" | zstd -dq >"$plain" || { shred -u "$plain"; return 1; }
-  if tar -tvf "$plain" | cut -c1 | grep -qv '^[-d]$'; then shred -u "$plain"; say "$src holds a link or device"; return 1; fi
-  chown mamoru-op:mamoru-op "$plain"
-  runuser -u mamoru-op -- tar --no-same-owner --no-same-permissions -C "$dest" -xf "$plain" || { shred -u "$plain"; return 1; }
-  shred -u "$plain"
+  local src="$1" dest="$2" tmpd listing
+  signed "$src" || { say "$src is not signed by lady"; return 1; }
+  tmpd="$(mktemp -d "$fdir/tmp.XXXXXX")"
+  age -d -i <(printf '%s\n' "$identity") "$src" | zstd -dq >"$tmpd/plain" || { shred -u "$tmpd/plain"; rmdir "$tmpd"; return 1; }
+  listing="$(tar -tvf "$tmpd/plain")" || { shred -u "$tmpd/plain"; rmdir "$tmpd"; return 1; }
+  if [ -n "$(cut -c1 <<<"$listing" | grep -v '^[-d]$' || true)" ]; then
+    shred -u "$tmpd/plain"; rmdir "$tmpd"; say "$src holds a link or device"; return 1
+  fi
+  as_op tar --no-same-owner --no-same-permissions -C "$dest" -xf - <"$tmpd/plain" || { shred -u "$tmpd/plain"; rmdir "$tmpd"; return 1; }
+  shred -u "$tmpd/plain"; rmdir "$tmpd"
 }
+meta() { as_op cat "$1/meta.json"; }
 
 # Decrypts bundle $1 into $2 and installs the code of every sha it names (cached per sha). Every step checks
 # itself: this runs where errexit may be off.
 prepare() {
   local bundle="$1" dest="$2" u sha
-  wipe "$dest"; install -d -o mamoru-op -g mamoru-op -m 700 "$dest" || return 1
-  unpack "$inbox/$bundle" "$dest" || { say "cannot decrypt or unpack $bundle (wrong identity?)"; return 1; }
-  jq -e '.units | length > 0' "$dest/meta.json" >/dev/null || { say "$bundle has no units"; return 1; }
-  for u in $(jq -r '.units | keys[]' "$dest/meta.json"); do
+  wipe "$dest"; as_op mkdir -m 700 "$dest" || return 1
+  unpack "$inbox/$bundle" "$dest" || { say "cannot verify, decrypt or unpack $bundle"; return 1; }
+  meta "$dest" | jq -e '.units | length > 0' >/dev/null || { say "$bundle has no units"; return 1; }
+  for u in $(meta "$dest" | jq -r '.units | keys[]'); do
     [[ $u =~ $unit_re ]] || { say "$bundle names an unknown unit"; return 1; }
-    [ -f "$dest/$u/env" ] && [ -n "$(ls -A "$dest/$u/state" 2>/dev/null)" ] || { say "$bundle: $u has no env or an empty state"; return 1; }
-    while IFS= read -r -d '' f; do jq -e . "$f" >/dev/null || { say "$bundle: ${f##*/} is not JSON"; return 1; }; done \
-      < <(find "$dest/$u/state" -type f -name '*.json' -print0)
-    sha="$(jq -r --arg u "$u" '.units[$u].sha' "$dest/meta.json")"
+    as_op bash -c '[ -f "$1/env" ] && [ -n "$(ls -A "$1/state")" ] && find "$1/state" -type f -name "*.json" -exec jq -e . {} + >/dev/null' _ "$dest/$u" \
+      || { say "$bundle: $u has no env, an empty state or a JSON file that does not parse"; return 1; }
+    sha="$(meta "$dest" | jq -r --arg u "$u" '.units[$u].sha')"
     [[ $sha =~ ^[0-9a-f]{40}$ ]] || { say "$bundle: $u has no sha"; return 1; }
     [ -f "$fdir/installed/$sha" ] && continue
     [ -f "$inbox/code-$sha.tar.zst.age" ] || { say "no code archive for $sha"; return 1; }
-    rm -rf "$srv/code/$sha"; install -d -o mamoru-op -g mamoru-op -m 700 "$srv/code/$sha" || return 1
-    unpack "$inbox/code-$sha.tar.zst.age" "$srv/code/$sha" || { say "cannot unpack the code of $sha"; return 1; }
-    (cd "$srv/code/$sha" && runuser -u mamoru-op -- env HOME="$srv" bun install --frozen-lockfile >/dev/null) \
-      || { say "bun install failed for $sha"; return 1; }
-    install -d -m 700 "$fdir/installed" && touch "$fdir/installed/$sha" || return 1
+    wipe "$srv/code/$sha"; as_op mkdir -p -m 700 "$srv/code/$sha" || return 1
+    unpack "$inbox/code-$sha.tar.zst.age" "$srv/code/$sha" || { say "cannot verify or unpack the code of $sha"; return 1; }
+    (cd "$srv/code/$sha" && as_op env HOME="$srv" bun install --frozen-lockfile >/dev/null) || { say "bun install failed for $sha"; return 1; }
+    touch "$fdir/installed/$sha" || return 1
   done
 }
 
-# Unit environment, written by root into its own directory: lady's Environment= of that unit plus the two paths.
+# Unit environment, written by root into its own directory from files read as mamoru-op.
 write_unit_env() {
   local run="$1" u="$2" sha port
-  sha="$(jq -r --arg u "$u" '.units[$u].sha' "$run/meta.json")"
+  sha="$(meta "$run" | jq -r --arg u "$u" '.units[$u].sha')"
   # Root's directory, traversable so the unit (User=mamoru-op) can chdir through current-<unit>; the env files
   # inside stay 0600 (systemd reads EnvironmentFile as root).
   install -d -m 755 "$fdir/units"
   ln -sfn "$srv/code/$sha" "$fdir/units/current-$u"
   {
-    grep -E '^[A-Z0-9_]+=' "$run/$u/unit-environment" || true
+    as_op cat "$run/$u/unit-environment" | grep -E '^[A-Z0-9_]+=[^ ]*$' || true
     echo "MAMORU_OPERATOR_ENV=$run/$u/env"
     echo "MAMORU_OPERATOR_STATE_DIR=$run/$u/state"
   } >"$fdir/units/$u.env"
-  port="$(sed -n 's/^PORT=\([0-9]\{2,5\}\)$/\1/p' "$run/$u/env" | tail -1)"
+  port="$(as_op cat "$run/$u/env" | sed -n 's/^PORT=\([0-9]\{2,5\}\)$/\1/p' | tail -1)"
   echo "PORT=${port:-8787}" >"$fdir/units/$u.port"
 }
+
+if [ "${1:-}" != status ]; then
+  exec 8>"$fdir/lock"; flock -n 8 || die "another mamoru-failover is running"
+  # A run killed mid-unpack can leave a plain tar behind; holding the lock, none of these is in use.
+  for d in "$fdir"/tmp.*; do [ -d "$d" ] && { shred -u "$d"/* 2>/dev/null || true; rm -rf "$d"; }; done
+fi
 
 case "${1:-}" in
   status)
     if [ -f "$fence" ]; then echo "fence $(cat "$fence")"; else echo "fence none"; fi
-    b="$(newest_state)"; [ -n "$b" ] && echo "newest bundle $b, $(age_s "$inbox/$b") s old" || echo "no bundle"
+    b="$(newest_state)"; [ -n "$b" ] && echo "newest signed bundle $b, $(age_s "$inbox/$b") s old" || echo "no signed bundle"
     for u in $(std_units); do printf '%s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || true)"; done
     ;;
 
   drill)
+    [ -f "$fence" ] && die "fence set: no drill during a failover"
     read_identity drill
-    b="$(newest_state)"; [ -n "$b" ] || die "no state bundle in $inbox"
+    b="$(newest_state)"; [ -n "$b" ] || die "no signed state bundle in $inbox"
+    hb="$(age_s "$inbox/$b")"
     trap 'wipe "$srv/drill"' EXIT
     prepare "$b" "$srv/drill" || die "drill failed on $b (decrypted state erased)"
-    say "drill ok: $b decrypts, every unit has env and state, its JSON parses, code installed:"
-    jq -r '.units | to_entries[] | "  \(.key) \(.value.sha[:7]) (lady: \(.value.active))"' "$srv/drill/meta.json" >&2 || true
+    say "drill ok: $b (${hb}s old) is signed, decrypts, every unit has env and state, its JSON parses, code installed:"
+    meta "$srv/drill" | jq -r '.units | to_entries[] | "  \(.key) \(.value.sha[:7]) (lady: \(.value.active), \(.value.enabled // "?"))"' >&2 || true
+    [ "$hb" -lt "$heartbeat_fresh_s" ] || say "WARNING: the newest bundle is ${hb}s old: lady's push is failing (journalctl --user -u mamoru-standby-push on lady)"
     say "nothing was started; decrypted state erased"
     ;;
 
   activate)
-    confirm=0; [ "${2:-}" = "--confirm-lady-down" ] && confirm=1
+    confirm=0; accept_old=0
+    for a in "${@:2}"; do case "$a" in --confirm-lady-down) confirm=1 ;; --accept-old) accept_old=1 ;; *) die "unknown flag $a" ;; esac; done
     read_identity activate
     [ -f "$fence" ] && die "fence already set ($(cat "$fence"))"
     for u in $(std_units); do systemctl is-active --quiet "$u" && die "$u already runs"; done
-    b="$(newest_state)"; [ -n "$b" ] || die "no state bundle: nothing to run"
+    b="$(newest_state)"; [ -n "$b" ] || die "no signed state bundle: nothing to run"
     hb="$(age_s "$inbox/$b")"
+    [ "$hb" -lt "$max_age_s" ] || [ "$accept_old" = 1 ] \
+      || die "the newest bundle is ${hb}s old: running it would replay old session and relayer state. --accept-old only if nothing newer exists anywhere."
     trap 'wipe "$srv/run"' EXIT
     prepare "$b" "$srv/run" || die "could not prepare $b; nothing started, decrypted state erased"
+    m="$(meta "$srv/run")"
     if [ "$hb" -lt "$heartbeat_fresh_s" ]; then
       # lady is alive: it must have stood down, and the bundle names what it stopped.
-      jq -e '[.units[] | select(.active == "active" or .active == "activating" or .active == "reloading")] | length == 0' "$srv/run/meta.json" >/dev/null \
-        || die "lady is up (bundle ${hb}s old) and runs its operators. On lady: ~/.local/share/mamoru-standby/fence-watch.sh standdown, then run this again."
-      mapfile -t start < <(jq -r '.standdown[]' "$srv/run/meta.json")
+      jq -e '[.units[] | select(.active != "inactive" and .active != "failed")] | length == 0' <<<"$m" >/dev/null \
+        || die "lady is up (bundle ${hb}s old) and its operators are not stopped. On lady: ~/.local/share/mamoru-standby/fence-watch.sh standdown, then run this again."
+      mapfile -t start < <(jq -r '.standdown[]' <<<"$m")
       [ "${#start[@]}" -gt 0 ] || die "lady's operators are stopped but not by standdown; run standdown on lady so it keeps a fence"
     else
       [ "$confirm" = 1 ] || die "lady has been silent for ${hb}s. Check that its operators are not running, then run again with --confirm-lady-down."
-      mapfile -t start < <(jq -r '.units | to_entries[] | select(.value.active == "active") | .key' "$srv/run/meta.json")
-      [ "${#start[@]}" -gt 0 ] || die "the last bundle has no running operator to stand in for"
+      # What lady stood down for, or else what was meant to run there: enabled units that were up or crashing.
+      mapfile -t start < <(jq -r 'if (.standdown | length) > 0 then .standdown[]
+        else .units | to_entries[] | select(.value.enabled == "enabled" and (.value.active == "active" or .value.active == "activating" or .value.active == "failed")) | .key end' <<<"$m")
+      [ "${#start[@]}" -gt 0 ] || die "the last bundle names no operator that lady was running"
       say "lady silent for ${hb}s; going ahead on --confirm-lady-down. What lady did after $b is not in this state."
     fi
     for u in "${start[@]}"; do [[ $u =~ $unit_re ]] || die "unknown unit $u"; done
@@ -158,10 +192,9 @@ case "${1:-}" in
     for u in $(std_units); do systemctl is-active --quiet "$u" && die "$u did not stop; nothing sealed"; done
     [ -d "$srv/run" ] || die "no running state in $srv/run"
     recipient="$(tr -d '[:space:]' <"$recipient_file")"
-    install -d -m 700 "$fdir/handback"
     out="$fdir/handback/handback-$(now_ts).tar.zst.age"
-    tar -C "$srv/run" -cf - . | zstd -q -10 | age -r "$recipient" >"$out" || die "sealing failed; state left in $srv/run"
-    age_header="$(head -c 21 "$out")"; [ "$age_header" = "age-encryption.org/v1" ] || die "sealed file looks wrong; state left in $srv/run"
+    as_op tar -C "$srv/run" -cf - . | zstd -q -10 | age -r "$recipient" >"$out" || die "sealing failed; state left in $srv/run"
+    [ "$(head -c 21 "$out")" = "age-encryption.org/v1" ] || die "sealed file looks wrong; state left in $srv/run"
     wipe "$srv/run"
     echo "$out" >"$fdir/handback/LATEST"
     say "operators stopped here, state sealed for lady: $out"
@@ -170,7 +203,7 @@ case "${1:-}" in
 
   clear)
     for u in $(std_units); do systemctl is-active --quiet "$u" && die "$u still runs here; handback first"; done
-    [ -d "$srv/run" ] && die "$srv/run still holds state; handback first"
+    [ -e "$srv/run" ] && die "$srv/run still holds state; handback first"
     if [ "${2:-}" != "--discard" ]; then
       [ -f "$fdir/handback/LATEST" ] && [ "$(cat "$fdir/handback/LATEST")" -nt "$fence" ] \
         || die "no hand-back newer than the fence. Hand back first, or --discard if this failover never ran an operator."
@@ -179,5 +212,5 @@ case "${1:-}" in
     say "fence cleared: on lady, after restoring the state, fence-watch.sh resume"
     ;;
 
-  *) sed -n '2,16p' "$0" >&2; exit 2 ;;
+  *) sed -n '2,18p' "$0" >&2; exit 2 ;;
 esac

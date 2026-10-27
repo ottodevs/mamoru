@@ -1,0 +1,7 @@
+# Posts a failure of a standby unit to ops-mamoru (otto/mamoru#237).
+[Unit]
+Description=Mamoru standby: alert on %i failure
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/mamoru-standby/mamoru-standby-alert.sh %i

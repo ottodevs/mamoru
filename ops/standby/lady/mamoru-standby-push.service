@@ -1,6 +1,7 @@
 # Cold standby (otto/mamoru#237): send the operators' encrypted state to the VPS.
 [Unit]
 Description=Mamoru standby: push encrypted operator state to the VPS
+OnFailure=mamoru-standby-alert@%N.service
 
 [Service]
 Type=oneshot

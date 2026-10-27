@@ -21,11 +21,14 @@ units=(mamoru-operator mamoru-operator-monad)
 recipient="$(tr -d '[:space:]' <"$conf/recipient")"
 [[ $recipient =~ ^age1[0-9a-z]{58}$ ]] || { echo "$conf/recipient is not one age public key" >&2; exit 1; }
 ssh_vps() { timeout 300 ssh -i "$key" -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o IdentitiesOnly=yes "$host" "$@"; }
-# Seals stdin into a file and uploads it with its sha256, which receive.sh checks before keeping it.
+# Seals stdin into a file, signs it with lady's signing key (the VPS uses only what this key signed: age alone does
+# not say who encrypted) and uploads both with their sha256, which receive.sh checks before keeping them.
 send() {
   local name="$1" file="$work/$1"
   age -r "$recipient" >"$file"
+  ssh-keygen -q -Y sign -f "$conf/sign" -n mamoru-standby "$file" </dev/null
   ssh_vps put "$name" "$(sha256sum "$file" | cut -d' ' -f1)" <"$file" >/dev/null
+  ssh_vps put "$name.sig" "$(sha256sum "$file.sig" | cut -d' ' -f1)" <"$file.sig" >/dev/null
 }
 
 mkdir -p "$st"
@@ -42,6 +45,7 @@ for unit in "${units[@]}"; do
   workdir="$(systemctl --user show "$unit" -p WorkingDirectory --value)"
   [ -n "$workdir" ] && [ -d "$workdir" ] || { echo "$unit: no WorkingDirectory, skipped" >&2; continue; }
   active="$(systemctl --user show "$unit" -p ActiveState --value)"
+  enabled="$(systemctl --user is-enabled "$unit" 2>/dev/null || true)"
   # The VPS runs `bun run operator`; a unit that runs anything else is not something it can stand in for.
   argv="$(systemctl --user show "$unit" -p ExecStart --value | sed -n 's/.*argv\[\]=\([^;]*\);.*/\1/p' | head -1)"
   [[ $argv =~ /bun\ run\ operator\ *$ ]] || { echo "$unit: ExecStart is not 'bun run operator'; bundle aborted" >&2; exit 1; }
@@ -75,7 +79,8 @@ for unit in "${units[@]}"; do
   cp -p "$env_file" "$dest/env"
   mv "$work/env-$unit" "$dest/unit-environment"
 
-  meta_units="$(jq -c --arg u "$unit" --arg sha "$sha" --arg active "$active" '. + {($u): {sha: $sha, active: $active}}' <<<"$meta_units")"
+  meta_units="$(jq -c --arg u "$unit" --arg sha "$sha" --arg active "$active" --arg enabled "$enabled" \
+    '. + {($u): {sha: $sha, active: $active, enabled: $enabled}}' <<<"$meta_units")"
 
   # The code of this sha, once per sha (the VPS keeps every code archive).
   if ! grep -qx "$sha" "$st/code-pushed" 2>/dev/null; then

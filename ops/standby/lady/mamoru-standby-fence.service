@@ -1,6 +1,7 @@
 # Cold standby (otto/mamoru#237): stand lady's operators down while the VPS holds the fence.
 [Unit]
 Description=Mamoru standby: fence watch
+OnFailure=mamoru-standby-alert@%N.service
 
 [Service]
 Type=oneshot

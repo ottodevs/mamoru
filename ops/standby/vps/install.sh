@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 # Installs the cold standby on the edge VPS (otto/mamoru#237). Run as root from a checkout of ops/standby:
-#   sudo ./vps/install.sh <lady upload public key file> <age recipient file>
+#   sudo ./vps/install.sh <lady upload public key> <age recipient> <lady signing public key>
 # Idempotent. Adds two users and a few files; touches nothing the VPS already runs (the hs.ot2.me edge).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 upload_pub="${1:?lady upload public key file}"
 recipient_file="${2:?age recipient file}"
+sign_pub="${3:?lady signing public key file}"
 bun_version=1.3.13   # baseline build: this VPS has no AVX2
 cloudflared_version=2026.2.0
 
 # Exactly one line each: a second line in the .pub would become an unrestricted key for mamoru-standby.
-[ "$(wc -l <"$upload_pub")" -le 1 ] && grep -Eq '^ssh-ed25519 [A-Za-z0-9+/=]+( [^ ]+)?$' "$upload_pub" \
-  || { echo "$upload_pub is not one ed25519 public key" >&2; exit 1; }
-[ "$(wc -l <"$recipient_file")" -le 1 ] && grep -Eq '^age1[0-9a-z]{58}$' "$recipient_file" \
-  || { echo "$recipient_file is not one age recipient" >&2; exit 1; }
+# grep -c '' counts a last line without a newline too (wc -l does not).
+one_line() { [ "$(grep -c '' "$1")" -eq 1 ] && grep -Eq "$2" "$1"; }
+one_line "$upload_pub" '^ssh-ed25519 [A-Za-z0-9+/=]+( [^ ]+)?$' || { echo "$upload_pub is not one ed25519 public key" >&2; exit 1; }
+one_line "$sign_pub" '^ssh-ed25519 [A-Za-z0-9+/=]+( [^ ]+)?$' || { echo "$sign_pub is not one ed25519 public key" >&2; exit 1; }
+one_line "$recipient_file" '^age1[0-9a-z]{58}$' || { echo "$recipient_file is not one age recipient" >&2; exit 1; }
+cmp -s <(cut -d' ' -f2 "$upload_pub") <(cut -d' ' -f2 "$sign_pub") && { echo "the signing key must not be the upload key" >&2; exit 1; }
 
 apt-get install -y -qq age jq zstd curl unzip >/dev/null
 
@@ -25,6 +28,9 @@ install -d -o root -g root -m 700 /var/lib/mamoru-failover/installed /var/lib/ma
 install -d -o mamoru-op -g mamoru-op -m 700 /srv/mamoru-op /srv/mamoru-op/code
 install -d -m 755 /etc/mamoru-standby /usr/local/lib/mamoru-standby
 install -m 644 "$recipient_file" /etc/mamoru-standby/recipient
+# Only bundles this key signed are used (the upload key alone cannot make one).
+printf 'lady namespaces="mamoru-standby" %s\n' "$(cut -d' ' -f1,2 "$sign_pub")" >/etc/mamoru-standby/allowed_signers
+chmod 644 /etc/mamoru-standby/allowed_signers
 
 install -m 755 receive.sh /usr/local/lib/mamoru-standby/receive.sh
 install -m 750 failover.sh /usr/local/sbin/mamoru-failover
