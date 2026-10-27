@@ -436,7 +436,11 @@ export class BridgeOut {
     // A reservation without a signed transaction was never broadcast (the hash is written before it): nothing to hold.
     const reservations = Object.fromEntries(Object.entries(j.reservations ?? {}).filter(([, r]) => !!r.tx))
     this.droppedReservations = Object.keys(j.reservations ?? {}).length - Object.keys(reservations).length
-    return { routes: j.routes ?? {}, converts: Object.fromEntries(Object.entries(j.converts ?? {}).filter(([, c]) => !!c.safeTxHash && !!c.fromBlock)), convertDays: j.convertDays ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {}, cctpBurns: j.cctpBurns ?? {}, reservations }
+    const converts = Object.fromEntries(Object.entries(j.converts ?? {}).filter(([, c]) => !!c.safeTxHash && !!c.fromBlock))
+    const dropped = Object.keys(j.converts ?? {}).length - Object.keys(converts).length
+    // None should ever be dropped (every conversion is written with both): say so if one is.
+    if (dropped > 0) logErr('[bridge-out] conversions without safeTxHash/fromBlock dropped from the journal:', dropped)
+    return { routes: j.routes ?? {}, converts, convertDays: j.convertDays ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {}, cctpBurns: j.cctpBurns ?? {}, reservations }
   }
 
   private save(): void {
