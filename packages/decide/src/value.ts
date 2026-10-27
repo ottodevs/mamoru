@@ -10,6 +10,16 @@ export function inSavings(pool: PoolObs, token: RegistryName, amount: bigint, sa
   throw new Error(`${pool.name} does not price ${token} in ${savings}`)
 }
 
+/**
+ * otto/mamoru#101: TVL of `pool` in raw units of `savings`: both token balances held by the pool, each valued at the
+ * pool's TWAP price (`twapTick`), or at slot0 when it has none. null when the pool does not pair the savings asset.
+ */
+export function poolTvlInSavings(pool: PoolObs, balance0: bigint, balance1: bigint, savings: RegistryName): bigint | null {
+  if (pool.token0 !== savings && pool.token1 !== savings) return null
+  const priced: PoolObs = pool.twapTick === null ? pool : { ...pool, sqrtPriceX96: sqrtRatioAtTick(pool.twapTick) }
+  return inSavings(priced, pool.token0, balance0, savings) + inSavings(priced, pool.token1, balance1, savings)
+}
+
 /** Estimated cost of one userOp in the savings asset: gas budget times the bid, priced with the ETH price pool. */
 export function opCostInSavings(obs: Observation, savings: RegistryName): bigint {
   const wei = obs.gas.opGasUnits * obs.gas.maxFeePerGas

@@ -11,12 +11,14 @@ import { weightTargets } from './rebalance/weights.ts'
 import { anyKey, convertKey, idleConvertOf, isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
 import type { Decision, GateStep, GuardNote, Observation, Proposal, ShadowNote } from './types.ts'
 import { withinCap } from './cap.ts'
+import { tvlShadowNotes } from './shadow-tvl.ts'
 
 export type * from './types.ts'
 export { capRoomOf, placedOf, withinCap } from './cap.ts'
 export { estimateFees } from './harvest/index.ts'
 export { safeSavings } from './enter/index.ts'
-export { amountsForLiquidity, inSavings, volatileOf } from './value.ts'
+export { amountsForLiquidity, inSavings, poolTvlInSavings, volatileOf } from './value.ts'
+export { PACKAGING_TVL_FLOOR_USDC, tvlShadowNotes } from './shadow-tvl.ts'
 export { fallBpsOf, fallFreezeOf, marketOf, type CumulativePoint } from './guard/index.ts'
 export { belowShareOf, edgeBpsOf, meanTickAt, rangeFor, realizedVolOf, regimeOf, skewedRange, spiking, volWidthTicks, widenEarly, widthFor, type Regime } from './geometry/index.ts'
 export { allocate, reusablePosition, DEFAULT_INCREASE_TOLERANCE_BPS, widthOf, type Allocation, type BucketValue, type Waiting } from './allocate/index.ts'
@@ -199,6 +201,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   if (enterEvaluated && policy.shadow.includes('packaging:eny')) {
     shadow.push({ code: 'ENY_SHADOW', note: 'packaging:eny is not evaluated in v1 and has no effect on the decision' })
   }
+  // otto/mamoru#101 phase 1: Packaging's pool TVL floor, shadow only. Notes are all it adds; nothing below reads them.
+  if (policy.shadow.includes('packaging:tvl')) shadow.push(...tvlShadowNotes(obs, policy, policyPools))
 
   // Plan §9, steps 2, 4 and 8: slot, pause, then one proposal in FR-DEC-011 order.
   let proposal: Proposal | null = null

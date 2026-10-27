@@ -168,6 +168,13 @@ export type PoolObs = {
    * `observe` cannot answer. Not movable inside one block, unlike `liquidity`: depth sizing reads the smaller of the two.
    */
   twapLiquidity?: bigint | null
+  /**
+   * otto/mamoru#101 (shadow): pool TVL in raw savings units, token0.balanceOf(pool) + token1.balanceOf(pool), each valued
+   * at the pool's TWAP price (spot when the pool has no TWAP). Read only for a policy whose `shadow` lists `packaging:tvl`
+   * (absent otherwise, so other observations stay as they were); null when a balance could not be read or the pool does
+   * not pair the savings asset.
+   */
+  tvlSavings?: bigint | null
   /** What the chain says about the pool, for Purga's identity check. */
   identity: { factoryPool: Address; token0: Address; token1: Address; fee: number; tickSpacing: number }
 }
@@ -176,7 +183,8 @@ export type DepositObs = { token: RegistryName; amount: bigint; block: bigint; t
 
 export type GateVerdict = 'GO' | 'NO_GO' | 'EXIT' | 'SKIP'
 export type GateStep = { gate: string; verdict: GateVerdict; reason: ReasonCode }
-export type ShadowNote = { code: ReasonCode; note: string }
+/** `pool`, `metric` and `threshold` (decimal strings in raw units) are set by the shadow notes that measure something. */
+export type ShadowNote = { code: ReasonCode; note: string; pool?: string; metric?: string; threshold?: string }
 
 export type EnterSwapProposal = {
   kind: 'enter_swap'

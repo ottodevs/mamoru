@@ -17,7 +17,7 @@ import {
   type PublicClient,
 } from 'viem'
 import { ReasonError, type Address } from '@mamoru/domain'
-import type { DepositObs, Observation, PoolObs, PositionObs, SessionObs } from '@mamoru/decide'
+import { poolTvlInSavings, type DepositObs, type Observation, type PoolObs, type PositionObs, type SessionObs } from '@mamoru/decide'
 import { Batch, balanceRead, chunkCalls, contractRead, multicall3Of } from './multicall.ts'
 import { applyPrincipal, positionEventsAbi, type Pair, type PositionEvent } from '@mamoru/projector'
 import {
@@ -96,6 +96,11 @@ export type ObserveInput = {
   ethPricePool: RegistryName
   /** Multicall3 to batch through; null reads one by one. Default: the registry's. */
   multicall3?: Address | null
+  /**
+   * otto/mamoru#101 (shadow): also read both token balances of every pool, in the same batch as the pool state, and set
+   * `PoolObs.tvlSavings`. Off by default: an observation without it is byte-identical to before.
+   */
+  poolTvl?: boolean
   /** Shared by the accounts of one operator: the pool state of a block is read once. */
   poolCache?: PoolStateCache
   /**
@@ -232,9 +237,10 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const nftCount = first.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [acct], blockNumber }))
   const balances = TOKENS.map((t) => first.add(contractRead(client, { address: address(t, reg), abi: erc20Abi, functionName: 'balanceOf', args: [acct], blockNumber })))
   const idsOf = tokenIdReads(client, multicall3, first, acct, blockNumber, npm)
-  const poolKey = `${chainId}:${blockNumber}:${block.hash}:${input.twapWindowSeconds}`
+  const tvl = input.poolTvl === true
+  const poolKey = `${chainId}:${blockNumber}:${block.hash}:${input.twapWindowSeconds}${tvl ? ':tvl' : ''}`
   const shared = input.poolCache?.get(poolKey)
-  const own = shared ? null : POOLS.map((p) => poolReads(first, client, p, blockNumber, input.twapWindowSeconds, reg))
+  const own = shared ? null : POOLS.map((p) => poolReads(first, client, p, blockNumber, input.twapWindowSeconds, reg, tvl, input.savingsAsset))
   const priceSlot0 = POOLS.includes(input.ethPricePool) ? null : first.add(contractRead(client, { address: address(input.ethPricePool, reg), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }))
   const afterFirst = input.firstBatch?.(first, blockNumber)
   const round = Promise.all([isDeployed(client, acct, blockNumber, safe.number), first.run()])
@@ -249,7 +255,7 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   const [nativeBalance, accountNonce, tokenBalances] = await Promise.all([native.need(), nonce.need(), Promise.all(balances.map((b) => b.need()))])
   const readAlone = async () => {
     const batch = new Batch(client, multicall3, blockNumber)
-    const finish = POOLS.map((p) => poolReads(batch, client, p, blockNumber, input.twapWindowSeconds, reg))
+    const finish = POOLS.map((p) => poolReads(batch, client, p, blockNumber, input.twapWindowSeconds, reg, tvl, input.savingsAsset))
     await batch.run()
     return Promise.all(finish.map((f) => f()))
   }
@@ -435,7 +441,7 @@ async function readPosition(client: PublicClient, acct: Address, tokenId: bigint
 }
 
 /** Adds the reads of one pool to `batch`; the returned function builds the pool once the batch ran. */
-function poolReads(batch: Batch, client: PublicClient, name: RegistryName, blockNumber: bigint, windowSeconds: number, registry: Registry): () => Promise<PoolObs> {
+function poolReads(batch: Batch, client: PublicClient, name: RegistryName, blockNumber: bigint, windowSeconds: number, registry: Registry, tvl = false, savings?: RegistryName): () => Promise<PoolObs> {
   const e = entry(name, registry)
   const at = { address: e.address, abi: uniswapV3PoolAbi, blockNumber } as const
   const slot0 = batch.add(contractRead(client, { ...at, functionName: 'slot0' }))
@@ -449,9 +455,13 @@ function poolReads(batch: Batch, client: PublicClient, name: RegistryName, block
   )
   // FR-UNI-009: `observe` may fail when the pool cannot answer for the window; the TWAP is then null.
   const cumulatives = batch.add(contractRead(client, { address: e.address, abi: observeAbi, functionName: 'observe', args: [[windowSeconds, 0]], blockNumber }))
+  // otto/mamoru#101: the pool's own balance of each token, in this batch. A failed read leaves the TVL null.
+  const balanceOfPool = (token: RegistryName) => batch.add(contractRead(client, { address: address(token, registry), abi: erc20Abi, functionName: 'balanceOf', args: [e.address], blockNumber }))
+  const bal0 = tvl ? balanceOfPool(e.token0!) : null
+  const bal1 = tvl ? balanceOfPool(e.token1!) : null
   return async () => {
     const s0 = await slot0.need()
-    return {
+    const pool: PoolObs = {
       name,
       address: e.address,
       token0: e.token0!,
@@ -465,6 +475,10 @@ function poolReads(batch: Batch, client: PublicClient, name: RegistryName, block
       twapLiquidity: twapLiquidity(cumulatives.maybe()?.[1], windowSeconds),
       identity: { factoryPool: factoryPool.maybe() ?? zeroAddress, token0: await token0.need(), token1: await token1.need(), fee: await fee.need(), tickSpacing: await tickSpacing.need() },
     }
+    if (!bal0 || !bal1) return pool
+    const b0 = bal0.maybe()
+    const b1 = bal1.maybe()
+    return { ...pool, tvlSavings: b0 === null || b1 === null || !savings ? null : poolTvlInSavings(pool, b0, b1, savings) }
   }
 }
 
