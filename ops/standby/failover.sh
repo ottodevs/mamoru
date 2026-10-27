@@ -48,7 +48,8 @@ manifest_of() {
   t="$(mktemp -d "$fdir/tmp.XXXXXX")"
   if cp "$inbox/$f.manifest" "$t/m" 2>/dev/null && cp "$inbox/$f.manifest.sig" "$t/s" 2>/dev/null \
     && ssh-keygen -Y verify -f "$signers" -I lady -n mamoru-standby -s "$t/s" <"$t/m" >/dev/null 2>&1 \
-    && read -r n sum when <"$t/m" && [ "$n" = "$f" ] && [[ $sum =~ ^[0-9a-f]{64}$ && $when =~ ^[0-9]{10}$ ]]; then
+    && read -r n sum when <"$t/m" && [ "$n" = "$f" ] && [[ $sum =~ ^[0-9a-f]{64}$ && $when =~ ^[0-9]{10}$ ]] \
+    && [ "$when" -le $(( $(date +%s) + 300 )) ]; then   # a time ahead of this clock would stay "newest" for ever
     out="$sum $when"
   fi
   rm -rf "$t"
@@ -58,7 +59,9 @@ manifest_of() {
 newest_state() {
   local m f v
   find "$inbox" -maxdepth 1 -name 'state-*.tar.zst.age.manifest' -printf '%f\n' | while read -r m; do
-    f="${m%.manifest}"; v="$(manifest_of "$f")"; if [ -n "$v" ]; then echo "$f $v"; fi
+    f="${m%.manifest}"; v="$(manifest_of "$f")"
+    # Only a bundle whose ciphertext is here and matches counts (unpack checks it again on a copy).
+    if [ -n "$v" ] && [ -f "$inbox/$f" ] && [ "$(sha256sum <"$inbox/$f" | cut -d' ' -f1)" = "${v%% *}" ]; then echo "$f $v"; fi
   done | sort -k3,3nr | head -1 || true
 }
 signed_age_s() { echo $(( $(date +%s) - $1 )); }

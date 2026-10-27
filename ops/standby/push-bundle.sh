@@ -39,6 +39,11 @@ mkdir -p "$st"
 # One push at a time; fence-watch.sh standdown takes the same lock so its bundle is the last one.
 exec 9>"$st/push.lock"
 flock -w 120 9 || { echo "another push holds the lock" >&2; exit 1; }
+# While lady is fenced, its one stand-down bundle is the last word: later pushes of the same stopped state, with a
+# newer signed time, would let a second activate on the VPS roll back what the VPS operator did since.
+if { [ -f "$st/fenced" ] || [ -f "$st/fenced.resuming" ]; } && [ "${MAMORU_STANDBY_FINAL:-}" != 1 ]; then
+  echo "lady is fenced: no push (resume pushes again)"; exit 0
+fi
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

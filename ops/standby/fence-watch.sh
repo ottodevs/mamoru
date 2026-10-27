@@ -91,7 +91,7 @@ case "${1:-}" in
     printf '%s\n' "$run" >"$st/fenced"
     stop_all
     flock -u 9
-    "$(dirname "$(readlink -f "$0")")/push-bundle.sh"
+    MAMORU_STANDBY_FINAL=1 "$(dirname "$(readlink -f "$0")")/push-bundle.sh"
     echo "stood down: $(tr '\n' ' ' <"$st/fenced")— last bundle sent. On ghost3: ssh root@23.94.151.198 mamoru-failover activate < ~/.config/mamoru-standby/identity"
     ;;
   resume)
@@ -101,7 +101,7 @@ case "${1:-}" in
     mapfile -t back < <(grep -E '^mamoru-operator(-monad)?$' "$st/fenced" || true)
     mv "$st/fenced" "$st/fenced.resuming"
     # The VPS must not see an old "stood down" bundle as newest once lady runs again: push one first.
-    if ! "$(dirname "$(readlink -f "$0")")/push-bundle.sh"; then
+    if ! MAMORU_STANDBY_FINAL=1 "$(dirname "$(readlink -f "$0")")/push-bundle.sh"; then
       mv "$st/fenced.resuming" "$st/fenced"
       echo "could not push a bundle that says lady runs again; local fence kept, nothing started" >&2; exit 1
     fi

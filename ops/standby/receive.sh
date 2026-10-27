@@ -43,7 +43,12 @@ case "$verb" in
     [ "$(sha_of "$tmp")" = "$sum" ] || { echo "refused: sha256 mismatch (truncated upload?)" >&2; exit 2; }
     # The same content again is a success (a retry after a lost answer), never a wedge.
     if [ -f "$inbox/$name" ] && [ "$(sha_of "$inbox/$name")" = "$sum" ]; then echo "stored $name (unchanged)"; exit 0; fi
-    covered "$inbox/$base" && { echo "refused: $base is signed; it is never replaced" >&2; exit 2; }
+    if covered "$inbox/$base"; then
+      # A code archive is named by its git sha: a signed copy is the same code, so a re-send (new ciphertext after a
+      # lost answer) is a success, never a wedge. A signed state bundle is never replaced.
+      [[ $base == code-* ]] && { echo "stored $name (code already signed here)"; exit 0; }
+      echo "refused: $base is signed; it is never replaced" >&2; exit 2
+    fi
     case "$name" in
       *.manifest.sig)
         [ -f "$inbox/$base.manifest" ] || { echo "refused: no manifest for this signature" >&2; exit 2; }
@@ -53,6 +58,7 @@ case "$verb" in
       *.manifest)
         grep -Eqx "${base//./\\.} [0-9a-f]{64} [0-9]{10}" "$tmp" && [ "$(grep -c '' "$tmp")" -eq 1 ] \
           || { echo "refused: bad manifest" >&2; exit 2; }
+        [ "$(cut -d' ' -f3 "$tmp")" -le $(( $(date +%s) + 300 )) ] || { echo "refused: manifest time is ahead of this clock" >&2; exit 2; }
         rm -f "$inbox/$base.manifest.sig"
         ;;
       *)
@@ -69,8 +75,9 @@ case "$verb" in
       find "$inbox" -maxdepth 1 -name 'state-*.tar.zst.age.manifest' -printf '%f\n' | while read -r m; do
         f="$inbox/${m%.manifest}"; covered "$f" && echo "$(cut -d' ' -f3 "$f.manifest") $f"
       done | sort -rn | tail -n +$((keep_state + 1)) | while read -r _ f; do rm -f "$f" "$f.manifest" "$f.manifest.sig"; done
-      find "$inbox" -maxdepth 1 -name 'state-*.tar.zst.age' -mmin +60 -print | while read -r f; do
-        covered "$f" || rm -f "$f" "$f.manifest" "$f.manifest.sig"
+      find "$inbox" -maxdepth 1 -name 'state-*.tar.zst.age*' -mmin +60 -printf '%f\n' \
+        | sed -E 's/\.manifest(\.sig)?$//' | sort -u | while read -r b; do
+        covered "$inbox/$b" || rm -f "$inbox/$b" "$inbox/$b.manifest" "$inbox/$b.manifest.sig"
       done
     fi
     ;;
