@@ -44,6 +44,8 @@ export type OpFacts = {
   /** Block timestamp, ISO: the UTC day the op counts on. */
   at: string
   gasWei: string
+  /** otto/mamoru#219: gasWei in raw USDC, set once by the first snapshot that prices the native asset (WETH/USDC). */
+  gasUsdc?: string
   fees: FeeFact[]
 }
 
@@ -112,9 +114,17 @@ export function needsFacts(op: StoredOp): boolean {
   return (op.opId.startsWith('eng-') || op.opId.startsWith('own-')) && !!op.txHash && op.facts?.txHash?.toLowerCase() !== op.txHash.toLowerCase()
 }
 
-/** Sets `usdc` on every fee the snapshot can price. Returns whether anything changed (the caller saves). */
+/** The pool that prices Base gas (chain.ts NATIVE_PRICE_POOLS): ETH and WETH share 18 decimals. */
+const NATIVE_POOL = 'pool:WETH/USDC/3000'
+
+/** Sets `gasUsdc`, and `usdc` on every fee, when the snapshot can price them. Returns whether anything changed (the caller saves). */
 export function priceFees(facts: OpFacts, pools: Snapshot['pools']): boolean {
   let changed = false
+  const native = pools[NATIVE_POOL]
+  if (facts.gasUsdc === undefined && native) {
+    facts.gasUsdc = inUsdc(NATIVE_POOL, 'WETH', BigInt(facts.gasWei), native.sqrtPriceX96, baseRegistry).toString()
+    changed = true
+  }
   for (const f of facts.fees) {
     if (f.usdc !== undefined) continue
     const state = pools[f.pool]

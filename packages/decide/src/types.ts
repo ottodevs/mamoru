@@ -220,6 +220,13 @@ export type RerangeProposal = {
   pool: RegistryName
   tokenId: bigint
   liquidity: bigint
+  /**
+   * otto/mamoru#219: why the range moves, for the owner's history: the price left the range (`out`), sat near an
+   * edge (`edge`), or volatility widened it early (`widen`); and the range it leaves. Not part of any call.
+   */
+  why?: 'out' | 'edge' | 'widen'
+  tickLower?: number
+  tickUpper?: number
 }
 
 /** Part of an over-weight bucket's position back to the Safe: decreaseLiquidity(part) + collect(to the Safe). */

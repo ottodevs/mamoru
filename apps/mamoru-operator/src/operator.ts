@@ -561,10 +561,24 @@ function engineKind(k: OpRecord['kind']): OpView['kind'] {
  * `pool`, so this always has something to show the SPA, going from "the USDC/cbBTC pool" (hardcoded) to the
  * pool each history row actually acted on. otto/mamoru#131.
  */
-export function opIntentView(intent: Proposal): Pick<OpView, 'pool' | 'tokenIn' | 'tokenOut' | 'amountIn' | 'convert'> {
+export function opIntentView(intent: Proposal): Pick<OpView, 'pool' | 'tokenIn' | 'tokenOut' | 'amountIn' | 'convert' | 'tokenId' | 'tickLower' | 'tickUpper' | 'why'> {
   if (intent.kind === 'enter_swap') return { pool: intent.pool, tokenIn: intent.tokenIn, tokenOut: intent.tokenOut, amountIn: intent.amountIn.toString() }
-  if (intent.kind === 'harvest' && intent.convert) return { pool: intent.pool, convert: intent.convert.token }
-  return { pool: intent.pool }
+  // otto/mamoru#219: the range a mint opens, the position an op acts on, and why a range moves.
+  if (intent.kind === 'enter_mint') return { pool: intent.pool, tickLower: intent.tickLower, tickUpper: intent.tickUpper }
+  if (intent.kind === 'increase_liquidity') return { pool: intent.pool, tokenId: intent.tokenId.toString(), tickLower: intent.tickLower, tickUpper: intent.tickUpper }
+  if (intent.kind === 'rerange') return { pool: intent.pool, tokenId: intent.tokenId.toString(), ...(intent.why ? { why: intent.why } : {}), ...(intent.tickLower !== undefined && intent.tickUpper !== undefined ? { tickLower: intent.tickLower, tickUpper: intent.tickUpper } : {}) }
+  if (intent.kind === 'harvest') return { pool: intent.pool, tokenId: intent.tokenId.toString(), ...(intent.convert ? { convert: intent.convert.token } : {}) }
+  return { pool: intent.pool, tokenId: intent.tokenId.toString() }
+}
+
+/** otto/mamoru#219: the engine's op kind, its reason, what a swap expected and the tokenId a mint got, for the history. */
+export function opStepView(o: Pick<OpRecord, 'kind' | 'causeCode' | 'quote' | 'mintedTokenId'>): Pick<OpView, 'step' | 'cause' | 'amountOut' | 'tokenId'> {
+  return {
+    step: o.kind,
+    cause: o.causeCode,
+    ...(o.kind === 'enter_swap' && o.quote ? { amountOut: o.quote.amountOut.toString() } : {}),
+    ...(o.mintedTokenId !== undefined ? { tokenId: o.mintedTokenId.toString() } : {}),
+  }
 }
 
 const now = () => new Date().toISOString()
@@ -5233,10 +5247,12 @@ export class Operator {
         ...(o.userOpHash ? { userOpHash: o.userOpHash } : {}),
         updatedAt: now(),
         ...opIntentView(o.intent),
+        ...opStepView(o),
         ...((o.state === 'confirmed' || o.lateIncluded) && o.permissionId && o.calls ? { permissionId: o.permissionId, calls: o.calls } : {}),
         ...(o.lateIncluded ? { lateIncluded: true } : {}),
       }
-      const sig = `${view.state}|${view.code}|${view.txHash ?? ''}`
+      // #219: a mint's tokenId lands after the move to confirmed (afterConfirmed): it re-syncs the row when it does.
+      const sig = `${view.state}|${view.code}|${view.txHash ?? ''}|${o.mintedTokenId ?? ''}`
       if (runner.seen.get(own) === sig) continue
       runner.seen.set(own, sig)
       const existing = acc.ops.find((x) => x.opId === opId)

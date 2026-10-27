@@ -60,7 +60,7 @@ describe('rerange (manage-any)', () => {
     const d = decide(obs({ balances: BALANCED, positions: [position()], pools: [pool(TICK + 1500)] }), live)
     expect(d.kind).toBe('rerange')
     expect(d.code).toBe('DECIDE_RANGE_ADJUST')
-    expect(d.proposal).toEqual({ kind: 'rerange', grant: 'manage-any', pool: POOL, tokenId: 7n, liquidity: 10n ** 12n })
+    expect(d.proposal).toEqual({ kind: 'rerange', grant: 'manage-any', pool: POOL, tokenId: 7n, liquidity: 10n ** 12n, why: 'out', tickLower: TICK - 1000, tickUpper: TICK + 1000 })
     expect(d.positions[0]!.codes).toContain('OBS_POSITION_OUT_OF_RANGE')
     expect(d.trail.at(-1)).toEqual({ gate: 'ehg', verdict: 'GO', reason: 'EHG_OK' })
   })
@@ -68,6 +68,7 @@ describe('rerange (manage-any)', () => {
   test('in range but within 10% of the width from an edge: rerange', () => {
     const d = decide(obs({ balances: BALANCED, positions: [position()], pools: [pool(TICK + 850)] }), live)
     expect(d.kind).toBe('rerange')
+    expect(d.proposal).toMatchObject({ why: 'edge' })
     expect(d.positions[0]!.codes).not.toContain('OBS_POSITION_OUT_OF_RANGE')
   })
 

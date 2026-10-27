@@ -9,7 +9,7 @@ import { depeggedPool, depegExitOf } from './guard/depeg.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
 import { weightTargets } from './rebalance/weights.ts'
 import { anyKey, convertKey, idleConvertOf, isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
-import type { Decision, GateStep, GuardNote, Observation, Proposal, ShadowNote } from './types.ts'
+import type { Decision, GateStep, GuardNote, Observation, Proposal, RerangeProposal, ShadowNote } from './types.ts'
 import { withinCap } from './cap.ts'
 
 export type * from './types.ts'
@@ -243,7 +243,14 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   // FR-LC-001: without `policy.guards` the body, and so every hash, is the one of today.
   const body = { policyRef, observationCodes, kind, code, reason, trail, proposal, shadow, buckets, positions, ...(policy.guards ? { guards } : {}), ...(targets ? { targets: targets.map((b) => ({ bucket: b.id, preference: b.preference })) } : {}), ...(labGuards.length ? { labGuards } : {}) } as const
   const observationRef = { block: obs.block.number, hash: obs.block.hash }
-  const premiseHash = hashOf(body)
+  // otto/mamoru#219: a rerange's `why` and old range are for the owner's history only; the premise stays today's.
+  const premiseHash = hashOf(proposal?.kind === 'rerange' ? { ...body, proposal: premiseOf(proposal) } : body)
   // `waiting` moves with every price, so it is reported beside the decision and never part of its premise or id.
   return { decisionId: hashOf({ observationRef, premiseHash }), premiseHash, observationRef, ...body, ...(waiting.length ? { waiting } : {}) } as Decision
+}
+
+/** A rerange proposal without its display-only fields (otto/mamoru#219), as FR-LC-001 hashed it before them. */
+function premiseOf(p: RerangeProposal): RerangeProposal {
+  const { why: _why, tickLower: _lower, tickUpper: _upper, ...rest } = p
+  return rest
 }
