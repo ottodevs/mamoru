@@ -2180,7 +2180,8 @@ export class Operator {
         ...(target ? ['Mamoru can now trade only near the market price, and only the positions it opened'] : []),
         // otto/mamoru#225: v7 says what goes on in USDC/cbBTC in that pool's own block (approvalLines), not here again.
         ...(target?.remoteBuckets?.length ? [`Mamoru can also move part of your savings, as USDC through Circle's bridge, to your own address on Monad, where your Monad sleeve holds the Growth share${oneTransaction(target) ? '' : '; USDC/cbBTC is only wound down, nothing new goes into it'}`] : []),
-        ...(toV5 ? ['It can add to a position it already holds instead of opening another one', 'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause'] : []),
+        // otto/mamoru#225: v7's pool blocks say "add to" themselves.
+        ...(toV5 ? [...(oneTransaction(target!) ? [] : ['It can add to a position it already holds instead of opening another one']), 'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause'] : []),
         `Engine key ${f.sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero, sized for deposits up to ${fmtUsdc(cap)} USDC (your cap):`,
         ...this.approvalLines(f.stored, policy, cap),
         ...capChange(signed, cap),
@@ -2360,13 +2361,14 @@ export class Operator {
       const label = poolLabel(pool, this.cfg.registry)
       const spec = v4PoolOf(pool, policy.sourceChainId)
       if (!spec) return `In ${label}: no on-chain limits`
+      // A session without mint (USDC/cbBTC in v7) has no way in: it only winds the pool down, and its budget only sells.
       const enters = g.grant.actions.some((a) => a.signature.startsWith('mint('))
-      const what = enters ? `swap ${spec.stable} and ${spec.volatile}, open, add to, take out, collect and close positions` : `only take out, collect and close positions and sell ${spec.volatile} for ${spec.stable}; nothing new goes in`
+      const what = enters ? `swap ${spec.stable} and ${spec.volatile}; open, add to, take out, collect and close positions` : `wind down only (take out, collect and close positions, sell ${spec.volatile} for ${spec.stable})`
       const band = `${(spec.bandTicks / 100).toFixed(2)}%`
       const anchor = spec.anchor ? ` and ${(spec.anchor.band / 100).toFixed(2)}% of 1:1` : ''
       const day = budgets[spec.caps.budgetWindow] ?? 0n
       const total = budgets[spec.caps.budgetTotal] ?? 0n
-      return `In ${label}: ${what}; only within ${band} of the 30- and 5-minute average price${anchor}; swaps and new positions worth at most ${fmtUsdc(day)} USDC a day and ${fmtUsdc(total)} USDC in total; at most ${g.grant.userOp.usageLimit.toLocaleString('en-US')} transactions`
+      return `In ${label}: ${what}; within ${band} of the 30- and 5-minute average price${anchor}; ${enters ? 'swaps and new positions' : 'sales'} worth at most ${fmtUsdc(day)} USDC a day and ${fmtUsdc(total)} USDC in total; ${g.grant.userOp.usageLimit.toLocaleString('en-US')} transactions at most`
     })
     if (stored.some((g) => g.name === 'bridge-out')) {
       lines.push(`Bridge: it may burn USDC with Circle's CCTP only to your own address on Monad (never to another address, never any fee), at most ${fmtUsdc(budgets.bridgePerCall ?? 0n)} USDC a time and ${fmtUsdc(budgets.bridgeTotal ?? 0n)} USDC in total on this approval; a guardian pause stops it`)

@@ -135,9 +135,10 @@ describe('owner transactions of a v7 approval: one each', () => {
       }
       const text = t.summary.join('\n')
       expect(text).not.toMatch(/steps/)
-      expect(text).toContain('In USDC/USDT 0.01%: swap USDC and USDT, open, add to, take out, collect and close positions; only within 0.10% of the 30- and 5-minute average price and 0.40% of 1:1')
-      expect(text).toMatch(/In WETH\/USDC 0\.30%: swap USDC and WETH, .*; at most 36,000 transactions/)
-      expect(text).toMatch(/In USDC\/cbBTC 0\.05%: only take out, collect and close positions and sell cbBTC for USDC; nothing new goes in; .*; at most 32,000 transactions/)
+      expect(text).toContain('In USDC/USDT 0.01%: swap USDC and USDT; open, add to, take out, collect and close positions; within 0.10% of the 30- and 5-minute average price and 0.40% of 1:1; swaps and new positions worth at most')
+      expect(text).toMatch(/In WETH\/USDC 0\.30%: swap USDC and WETH; .*; 36,000 transactions at most/)
+      expect(text).toMatch(/In USDC\/cbBTC 0\.05%: wind down only \(take out, collect and close positions, sell cbBTC for USDC\); .*; sales worth at most .*; 32,000 transactions at most/)
+      expect(text).not.toContain('instead of opening another one')
       expect(text).toContain('Bridge: it may burn USDC')
       // The v6 clause about cbBTC is said once, in its pool's block.
       expect(text.match(/cbBTC/g)!.length).toBe(2)
