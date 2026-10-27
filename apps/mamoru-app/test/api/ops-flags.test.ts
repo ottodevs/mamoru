@@ -35,7 +35,7 @@ describe('readOpsFlags (otto/mamoru#129, migrations/d1/0012_ops_flags.sql)', () 
   })
 })
 
-describe('scoped flags (otto/mamoru#217, migrations/d1/XXXX_ops_flag_accounts.sql)', () => {
+describe('scoped flags (otto/mamoru#217, migrations/d1/0021_ops_flag_accounts.sql)', () => {
   let t = 0
   const row = (db: ReturnType<typeof memoryD1>, flag: string, enabled: 0 | 1, accounts: string | null) =>
     db.raw.query(`INSERT INTO ops_flag_changes (flag, enabled, author, reason, created_at, accounts) VALUES (?, ?, 'ot', 'test', ?, ?)`).run(flag, enabled, `2026-10-27T00:00:${String(t++ % 60).padStart(2, '0')}Z`, accounts)

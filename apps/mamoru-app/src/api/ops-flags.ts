@@ -31,7 +31,7 @@ const allOff = (): OpsFlagState => ({ flags: Object.fromEntries(Object.keys(OPS_
 
 /**
  * Every known flag, defaulted off; missing table (migration 0012 not applied yet) answers the same as no rows.
- * Missing `accounts` column (XXXX_ops_flag_accounts.sql not applied yet): no scopes, flags read as before, never an error.
+ * Missing `accounts` column (0021_ops_flag_accounts.sql not applied yet): no scopes, flags read as before, never an error.
  *
  * Scope of a scopable flag (otto/mamoru#217), from its rows in id order: the newest row's `accounts` when set (`*` =
  * everyone, else a list); when NULL it INHERITS the previous non-NULL scope, so an /ops flip (which writes NULL)
