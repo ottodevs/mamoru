@@ -1124,7 +1124,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const refreshFunding = useFreshFunding(accountKey)
   const pools = usePools()
   // otto/mamoru#216: the Monad sleeve's balance, for shares of the whole account against a multichain target.
-  const monadSleeve = (useSession().data?.sleeves ?? []).find((x) => x.chainId === 143 && x.accountKey !== accountKey)
+  const sessionData = useSession().data
+  const monadSleeve = (sessionData?.sleeves ?? []).find((x) => x.chainId === 143 && x.accountKey !== accountKey)
   const monadFunding = useFunding(monadSleeve?.accountKey, !!monadSleeve, 60_000)
   const [dialog, setDialog] = useState<null | 'add' | 'withdraw' | 'stop' | 'start'>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
@@ -1147,7 +1148,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const keepOpen = dialog !== null || renewAsked
   const f = liveDown && !keepOpen ? undefined : cached
   const multichain = isMultichainTarget(f?.approval?.policyId)
-  const otherChainsUsdc = !multichain ? 0n : !monadSleeve ? 0n : monadFunding.data ? split(monadFunding.data, null).total : null
+  // Unknown until the session has said whether a Monad sleeve exists and, if so, its balance has loaded (#142 review).
+  const otherChainsUsdc = !multichain ? 0n : !sessionData ? null : !monadSleeve ? 0n : monadFunding.data ? split(monadFunding.data, null).total : null
   // The session ended while Home was open: ask again, and the first screen offers the sign-in.
   const qc = useQueryClient()
   const signedOut = funding.error instanceof ApiRequestError && funding.error.status === 401
