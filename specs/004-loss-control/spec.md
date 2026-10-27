@@ -136,6 +136,59 @@ points for the Lab sweep, chosen so that the September 2026 window produces zero
 | `RISK_PRICE_IMPACT` | all | QuoterV2 quote for the exit swap against the TWAP price | impact over X | volatile 100 bps, stables 20 bps | not a trigger: splits the exit convert over reviews (`EXIT_PARTIAL_IMPACT`) |
 | `RISK_DATA_INSUFFICIENT` | all | history for a rule is missing (fewer than N samples in the window) | missing | n/a | that rule abstains, the bucket cannot leave `PARKED` on it; never an exit |
 
+### Packaging stops (shadow)
+
+Rules from the Titan 26 Packaging Risk Monitor (sections A-E) and its per-bucket exit rules (§5.3) that the table above
+does not cover (review on #101, 27 Oct). Bucket mapping: Packaging stables → `stables`, bluechip → `btc-usdc`,
+mercenary → `risk`. Every value below is a Packaging number, so constitution VI keeps the whole group in shadow until
+#56: the rules are computed and written to `Decision.shadow` with their code, metric and threshold, and they change no
+bucket state, even with `guards.mode = 'enforce'`.
+
+Data: the snapshot loop of spec 003 and the backtest `PoolSample` record neither volume nor QuoterV2 quotes today, and
+pool balances arrive with LC-T2. Task LC-T2b adds the rest: volume from the pool's `Swap` logs (live collector and
+`backfill.ts`), and EEL from QuoterV2 at each snapshot (live) or by archive `eth_call` at the sample block (backfill).
+EEL does not depend on the account, so it can be stored per sample. The exit slippage does: it is quoted for the
+amount the bucket would convert at that review, live at the review block and in the Lab by archive `eth_call` at the
+sample block with the replayed amount (cached by block and amount), never from a stored per-sample quote. Every
+dataset carries 30 days of TVL and volume history before its first sample, so the 30 d TVL and 4-week volume rules can
+be evaluated from the window's start. Until a rule has the history its window needs, it abstains with
+`RISK_DATA_INSUFFICIENT`, and the shadow log counts those abstentions apart from "did not fire".
+
+| Code (shadow) | Bucket | Metric | Fires | Packaging value | Would-be action |
+|---|---|---|---|---|---|
+| `RISK_POOL_TVL_TREND` | all | pool TVL against 1 d, 7 d and 30 d ago | fall over X on any horizon | 1 d 12%, 7 d 20%, 30 d 30% | `EXIT` |
+| `RISK_POOL_TVL_FLOOR` | all | pool TVL in USDC; and against the pool TVL at the bucket's entry, held for T | under the absolute floor, or under X% of entry for T | floor 2M (the Purga entry threshold); vs entry: stables 25% / 72 h, btc-usdc 70% / 72 h, risk 60% / 24 h | `EXIT` |
+| `RISK_POOL_DEPTH` | all | effective executable liquidity (EEL: the largest swap whose QuoterV2 impact stays under the bucket's impact limit) | under X | stables 600k, btc-usdc 350k, risk 75k | `EXIT` |
+| `RISK_POSITION_RATIO` | all | Q / EEL, Q = the bucket's value in the pool | over X | stables 10%, btc-usdc 10%, risk 5% | `EXIT` |
+| `RISK_EXIT_SLIPPAGE` | all | QuoterV2 quote for converting the whole bucket to USDC against the TWAP price | over X | stables 3%, btc-usdc 3%, risk 6% | `EXIT` |
+| `RISK_POOL_VOLUME` | all | V/TVL over 7 d; volume over 7 d; volume over 7 d against its 4-week average | V/TVL under X, or volume under the floor, or the 4-week ratio under Y (stables) | V/TVL 0.35x / 0.25x / 0.05x; floor 1M / 300k / 20k; stables Y = 30% | `EXIT` |
+
+Notes on this group:
+
+- The absolute floors (TVL 2M, EEL, volume) are sized for the Packaging's pool universe. The Lab first checks the
+  registry pools against them on the calm windows: a floor that fires on day one of `sep2026` for a pool the registry
+  approves means the floor or the pool is wrong, and that goes to Ot before the shadow log is read.
+- `RISK_POOL_DEPTH`, `RISK_POSITION_RATIO` and `RISK_EXIT_SLIPPAGE` share the pool-health module of #127 (same quotes,
+  same numbers in `/ops`). They are distinct from `RISK_PRICE_IMPACT`, which only splits an exit already decided.
+- `RISK_POOL_TVL_TREND` overlaps `RISK_POOL_TVL_DROP` on the 24 h horizon. The shadow log shows both; the Lab keeps one.
+- Packaging section F (exit when a metric cannot be refreshed in time) contradicts FR-LC-007 and is not in this group:
+  decision D8.
+
+### Rotation limits
+
+The Packaging caps activity per pool and per portfolio (§5.3): at most 1 re-entry attempt per pool per cooldown, at
+most 2 rebalances per week, at most 5 portfolio actions per month, exits not counted. On the October 2025 replay the
+live policy made 12 re-ranges in one week, each one selling the fall (see "Measured exposure"). A re-range budget is
+the cheapest form of "do not chase".
+
+| Code | Scope | Counts | Limit | Action when spent |
+|---|---|---|---|---|
+| `RISK_RERANGE_BUDGET_SPENT` | bucket | re-ranges (`close_position` with `DECIDE_RANGE_ADJUST` and its re-mint) in the last 7 d | 2 per bucket per 7 d (Packaging value, shadow) | the out-of-range position is left as it is; the bucket goes to `FREEZE` until the oldest counted re-range leaves the window |
+| `RISK_ACTION_BUDGET_SPENT` | account | entries, re-ranges, reduces, idle and ratio converts in the last 30 d; exit legs and harvests do not count | 5 per account per 30 d (Packaging value, shadow) | non-exit proposals wait (#128 record) until the window frees a slot |
+
+Both limits are Packaging numbers and stay in shadow (constitution VI). They are counted from the journal, so a
+re-mint after a restart is not counted twice.
+
 Notes:
 
 - **Cost basis is per bucket, not per tokenId.** A re-range burns the position and mints a new tokenId. A basis per
@@ -211,6 +264,16 @@ EHG on an exit (constitution V, spec 001 FR-DEC-005):
 Whipsaw bound: at most 2 automatic exits per bucket in 30 days; the third trigger parks the bucket until the owner
 resumes it (`RISK_EXIT_BUDGET_SPENT`). Re-entry is an ordinary target-weights entry from the parked USDC.
 
+Packaging re-entry (shadow, constitution VI): the Packaging asks two things the table above does not.
+
+- **Cooldown per bucket**, counted from the bucket reaching `PARKED`: stables 7 d, btc-usdc 4 d, risk 10 d. The
+  shadow log records, for each automatic re-entry, whether it would have happened inside this cooldown
+  (`REENTRY_COOLDOWN_SHADOW`).
+- **Full re-validation**: a re-entry passes Purga, Risk Monitor, EHG, ENY and Strategy again, not only the condition of
+  its own cause. In particular every rule of this spec, the Packaging stops included, must be clear for the pool at the
+  re-entry review. The shadow log records which rule would have blocked it (`REENTRY_REVALIDATION_SHADOW`, with that
+  rule's code).
+
 ### Observation and policy additions (no code here)
 
 `Observation.guard` (built by the engine from the journal, the D1 ledger of #129 and the snapshot loop of spec 003):
@@ -219,6 +282,9 @@ resumes it (`RISK_EXIT_BUDGET_SPENT`). Re-entry is an ordinary target-weights en
   per position: `mintAmounts` (for vs-hold);
 - account: `netDepositsUsdc`;
 - per pool: `twap24hAgoTick`, `realizedVol24hBps` (from TWAP samples), `tvlUsdc` and `tvl24hAgoUsdc`, `samples24h`;
+  for the Packaging stops also `tvl7dAgoUsdc`, `tvl30dAgoUsdc`, `volume7dUsdc`, `volume28dAvgUsdc` and `eelUsdc`;
+- per bucket, for the Packaging stops: `entryPoolTvlUsdc`, `exitQuoteSlippageBps` (quoted at the bucket's own amount); per bucket and account, from the
+  journal: `reranges7d`, `actions30d`;
 - per token: oracle answer and `updatedAt` (Chainlink USDC/USD, USDT/USD, BTC/USD or cbBTC/USD, ETH/USD on Base;
   registry entries with pinned code hashes, read-only);
 - per bucket: `{ state, cause, since, exits30d }` persisted by the engine DO.
@@ -233,6 +299,13 @@ guards: {
                                reentry: { minParkedS, trendAboveBps, peg: { bps, holdS } } }>
   account: { lossBps?, ownerResume: true }
   exitsPer30d: 2
+  packaging?: {            // shadow (constitution VI), whatever `mode` says
+    byBucket: Record<BucketId, { tvlFallBps: { d1, d7, d30 }, tvlFloorUsdc, tvlVsEntryBps, tvlVsEntryHoldS,
+                                 eelMinUsdc, eelImpactBps, positionRatioBps, exitSlippageBps,
+                                 vtvl7dMinBps, volume7dFloorUsdc, volume4wRatioBps?, cooldownS }>
+    reranges7dPerBucket: 2
+    actions30dPerAccount: 5
+  }
 }
 execution.exitMaxTwapDeviationTicks
 ```
@@ -310,6 +383,12 @@ The risk page states the gap: the limit is a target and a fast move can pass it.
 - **FR-LC-015.** The convert leg's `amountOutMinimum` comes from a quote at the execution block, never from the TWAP.
 - **FR-LC-012.** Every amount waiting because of a guard is visible to the owner with a reason and the condition it
   waits for (#128).
+- **FR-LC-016.** The Packaging stops, the rotation limits and the Packaging re-entry checks are evaluated on every review
+  when `policy.guards.packaging` is present and only ever write to `Decision.shadow`; they change no bucket state and
+  no proposal until #56 or a constitution VI amendment moves them out of shadow. This holds in Lab policies too: no
+  acceptance row depends on a Packaging number changing behaviour.
+- **FR-LC-017.** Re-range and action budgets are counted from the journal, so a restart or a replayed review never
+  counts one operation twice.
 
 ## New reason codes
 
@@ -318,6 +397,10 @@ The risk page states the gap: the limit is a target and a fast move can pass it.
 `RISK_PRICE_IMPACT`, `RISK_DATA_INSUFFICIENT`, `RISK_EXIT_BUDGET_SPENT`, `SESSION_USAGE_SPENT` (used by the
 simulator today, not yet in the domain list), `EXIT_LOSS_CONTROL` (ExitRequest cause),
 `EXIT_PARTIAL_IMPACT`, `EXIT_SWAP_WAIT_TWAP`, `BUCKET_FROZEN`, `BUCKET_PARKED`, `BUCKET_REENTERED`.
+
+Packaging group (shadow only): `RISK_POOL_TVL_TREND`, `RISK_POOL_TVL_FLOOR`, `RISK_POOL_DEPTH`, `RISK_POSITION_RATIO`,
+`RISK_EXIT_SLIPPAGE`, `RISK_POOL_VOLUME`, `RISK_RERANGE_BUDGET_SPENT`, `RISK_ACTION_BUDGET_SPENT`,
+`REENTRY_COOLDOWN_SHADOW`, `REENTRY_REVALIDATION_SHADOW`.
 
 ## Lab plan
 
@@ -343,6 +426,9 @@ pool in the window.
 | LC-L7 TVL drain | Sep window, stables pool balances -85% held 2 h | `FREEZE` after the 50% drop has held 30 min; `EXIT` after 80% has held 30 min; no convert leg with quoted impact > `exitImpactBps`; same drain held 10 min: no state change |
 | LC-L8 no session | LC-L2 with `sessionRenewal: 'once'` past expiry, and LC-L2 with `convert-any` uses at 0 | `EXIT_PENDING` with `SESSION_EXPIRED` / `SESSION_USAGE_SPENT` at every review until the window ends; zero operations |
 | LC-L9 whipsaw | LC-L2 + LC-L3 with thresholds at half | <= 2 automatic exits per bucket per 30 days; the next trigger yields `RISK_EXIT_BUDGET_SPENT` |
+| LC-L10 Packaging floors on calm data | every calm TRAIN window, registry pools, after LC-T2b; each rule needs its full window of history at >= 95% of samples, or the row reports it as not evaluated | the shadow log lists, per pool and rule, the first sample where a Packaging stop would fire; any firing on `sep2026` goes to Ot with the pool and the value (see "Packaging stops") |
+| LC-L11 re-range budget | `base-2025-10-crash-10m`, `base-2025-02-crash-10m`, `sep2026` | shadow only: per bucket, the re-ranges that `RISK_RERANGE_BUDGET_SPENT` would have held, with their time, price and gas; reported beside the baseline's drawdown and gas. Measuring the effect of holding them needs #56 or a constitution VI amendment and is not part of this row |
+| LC-L12 Packaging stops on crashes | LC-L7 drain, LC-L2, LC-L3, after LC-T2b, with the 30-day pre-window history; a rule still without full history is reported as not evaluated, not as silent | would-be `RISK_POOL_TVL_*`, `RISK_POOL_DEPTH`, `RISK_POSITION_RATIO`, `RISK_EXIT_SLIPPAGE` and `RISK_POOL_VOLUME` codes with first firing time, compared with the first firing of the enforced rules of the main table |
 
 Then, per #101 acceptance: a tape scenario where the rule fires and the position ends as USDC in the Safe, and a fork
 e2e of the same tape on a policy version that enables it.
@@ -389,6 +475,11 @@ A variant: `bun packages/backtest/cli/sweep.ts --policy conservador-lab-guards-v
 | LC-T7 | `conservador-live-v3` with `guards.mode = 'shadow'`; two weeks of would-be codes on live | `/ops` shows them |
 | LC-T8 | App: bucket state lines, history with trigger and threshold, risk page copy (#58) | UI scenario per state |
 | LC-T9 | `guards.mode = 'enforce'` after Ot's GO on the Lab table and the shadow log, and only once D5 is resolved | Ot GO |
+| LC-T2b | Data for the Packaging stops: volume from `Swap` logs and EEL from QuoterV2 per sample, in the live snapshot loop and in `backfill.ts` (archive `eth_call` at the sample block), with 30 days of pre-window history; exit-slippage quote at the replayed amount (cached archive `eth_call`); fields in `PoolSample` and `mamoru-dataset-v1` | dataset ids with coverage per field, pre-window history included, in the Lab note |
+| LC-T10 | Packaging stops, rotation limits and Packaging re-entry checks in `packages/decide/src/guard/`, shadow only; `Observation.guard` additions; journal counters | decide unit tests per code; FR-LC-016 tests: no state or proposal change with the group present |
+| LC-T11 | Lab: LC-L10..L12 | Lab note with the would-be firings per pool and window |
+| LC-T12 | Monad: datasets for the MON pool, oracle choice, thresholds for its bucket. None of the rules here has Monad data yet | dataset id and a filled LC-L1/L2 row for Monad |
+| LC-T13 | Incident exits: a producer for `RISK_INCIDENT_EXIT` (spec 001) from pool pause, oracle pause, bridge or admin change, upgrade and exploit feeds (Packaging section F), plus the manual `IncidentFlag` | own ticket |
 
 ## Decisions for Ot
 
@@ -404,3 +495,16 @@ A variant: `bun packages/backtest/cli/sweep.ts --policy conservador-lab-guards-v
   V (swap at any price when the session is valid), or the 100 ticks of every other operation (exits later in a crash).
 - **D7.** Oracle: Chainlink feeds on Base as a new read-only registry dependency (proposed), or pool-only rules
   (no depeg direction, no divergence rule).
+- **D8.** Stale data. The Packaging exits when a metric cannot be refreshed in time (30 min for peg, pause, oracle,
+  bridge and admin; 1 h for volume; 3 h for TVL, depth and slippage; 48 h for protocol TVL and trends). FR-LC-007 says
+  missing data never exits, it only freezes. Keep FR-LC-007 (proposed: an outage of our own reads would empty every
+  account), or exit after the Packaging delays.
+- **D9.** IL as an exit. The Packaging exits btc-usdc at IL >= 10% for 48 h when fees do not cover it, and risk at
+  IL >= 18%. This spec reports IL and exits only on drawdown against basis, which sees falls and not rallies. Keep
+  drawdown only (proposed), or add an IL rule in shadow so that a strong rally in WETH or MON also shows.
+- **D10.** Economic exit. The Packaging exits when net ENY stays under a floor (stables < 0 for 7 d, btc-usdc < 4% for
+  5 d, risk < 0 for 2 d) or stables APY drops 1 pt for 72 h. ENY is shadow-only (FR-DEC-006). Add these as shadow codes
+  now (proposed), or wait until ENY leaves shadow.
+- **D11.** Safety Score. The Packaging exits on SS < 85 / 70 / 50 but never defines SS. Define it as the Purga checks
+  re-run with the capital inside plus the incident flags (LC-T13), or drop it (proposed: drop it, the incident exit
+  and the Packaging stops cover what it named).
