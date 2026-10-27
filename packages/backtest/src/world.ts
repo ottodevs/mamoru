@@ -129,6 +129,8 @@ export type Applied = { ok: true; fees0: bigint; fees1: bigint } | { ok: false; 
 
 /** One proposal of `decide`, executed the way the engine builds its calls. */
 export function apply(w: World, p: Proposal, s: PoolSample, time: number, slippageBps: number): Applied {
+  // otto/mamoru#215: the Lab runs one chain; a bridge to another is not simulated here.
+  if (p.kind === 'bridge_out') return { ok: false, detail: 'bridge_out is not simulated by the one-chain Lab' }
   const e = entry(p.pool, baseRegistry)
   const none = { ok: true as const, fees0: 0n, fees1: 0n }
   if (p.kind === 'enter_swap') {

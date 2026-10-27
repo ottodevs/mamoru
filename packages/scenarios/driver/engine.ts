@@ -1174,6 +1174,8 @@ export class Engine {
     // Every priced call of the batch expires on chain at the same time (NonfungiblePositionManager and SwapRouter02).
     const deadline = timestamp + BigInt(this.cfg.policy.execution.observationTtlSeconds)
     await this.refuseWhilePaused(blockNumber)
+    // otto/mamoru#215: built by the bridge leg (S3b); until it exists a bridge-out is refused here, never sent half-built.
+    if (p.kind === 'bridge_out') throw new ReasonError('POLICY_DENIED_TARGET', `bridge_out of ${p.amount} to chain ${p.chainId}: this engine does not build bridges yet`)
     // MamoruActionPolicyV2 accounts (v5) quote their swaps with the price limit; the deployed V1's (v4) keep the path below.
     const v4Swap = p.kind === 'enter_swap' && this.cfg.policy.actionPolicy?.contractVersion === 2 ? this.v4PoolConfig(p.pool) : undefined
     if (p.kind === 'enter_swap' && v4Swap) return this.prepareV4Swap(p, blockNumber, session, deadline, v4Swap)
@@ -1344,6 +1346,7 @@ export class Engine {
       if (d(pool.token0!) < 0n || d(pool.token1!) < 0n) return `${pool.token0} moved ${d(pool.token0!)}, ${pool.token1} moved ${d(pool.token1!)}: a ${p.kind} only returns tokens to the account`
       return null
     }
+    if (p.kind === 'bridge_out') return 'bridge_out has no expected deltas in this engine'
     if (sim.nftDelta !== 0n) return `positions changed by ${sim.nftDelta}`
     // FR-UNI-005, otto/mamoru#140: a harvest only collects to the account; nothing else moves.
     const pool = entry(p.pool, this.registry)

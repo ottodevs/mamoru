@@ -38,9 +38,10 @@ export function purgaIdentity(pool: PoolObs, registry?: Registry): GateStep {
  * Preliminary Execution Health Gate on the observation (plan §9, step 9):
  * TWAP guard, gas reserve and a live session for the grant.
  */
-export function ehgPreliminary(obs: Observation, policy: PolicyVersion, pool: PoolObs, grant: string): GateStep {
-  if (pool.twapTick === null) return { gate: 'ehg', verdict: 'NO_GO', reason: 'EHG_TWAP_UNAVAILABLE' }
-  if (Math.abs(pool.tick - pool.twapTick) > policy.execution.maxTwapDeviationTicks) return { gate: 'ehg', verdict: 'NO_GO', reason: 'EHG_PRICE_DIVERGENCE' }
+export function ehgPreliminary(obs: Observation, policy: PolicyVersion, pool: PoolObs | undefined, grant: string): GateStep {
+  // otto/mamoru#215: a bridge-out touches no pool here; the price checks are the remote engine's, at its entry.
+  if (pool && pool.twapTick === null) return { gate: 'ehg', verdict: 'NO_GO', reason: 'EHG_TWAP_UNAVAILABLE' }
+  if (pool && Math.abs(pool.tick - pool.twapTick!) > policy.execution.maxTwapDeviationTicks) return { gate: 'ehg', verdict: 'NO_GO', reason: 'EHG_PRICE_DIVERGENCE' }
   if (obs.native < policy.gasReserveWei) return { gate: 'ehg', verdict: 'NO_GO', reason: 'ACCT_GAS_RESERVE_LOW' }
   const session = obs.sessions.find((s) => s.grant === grant && s.active)
   if (!session) return { gate: 'ehg', verdict: 'NO_GO', reason: 'SESSION_MISSING' }
