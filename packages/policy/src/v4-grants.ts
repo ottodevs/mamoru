@@ -293,9 +293,10 @@ export const V4_POOLS = {
 /**
  * otto/mamoru#214: the Monad sleeve's pool, WMON/USDC 0.30 % (token0 WMON, token1 USDC: the budget unit is token1, as
  * for WETH/USDC). The sleeve holds only the Growth bucket, 15 % of the account (v6, #201), and its caps are bps of the
- * account cap the operator signs, like Base's:
- * - capShareBps 1500: the pool's share of the account cap is the bucket's share, so W_p and T_p resolve against the
- *   same cap the Base pools do.
+ * cap of the sleeve account (its own Safe; the operator signs `capOf(sleeve)`), like Base's are of the account's:
+ * - capShareBps 10000: the pool's share of the cap it is signed against is the bucket's share, and inside the sleeve
+ *   the one bucket is all of it. The Growth 15 % of the user's account lives in the v6 remote bucket and the bridge caps,
+ *   not here: 1500 would apply it twice and stall the first entry (swap about half, mint all) under a 15 % swap cap.
  * - windowMultiple 3, totalMultiple 10: the multiples of the volatile Base pool (WETH/USDC, risk), the closest pair the
  *   Lab measured (#151 T5: peak day 2.38x its share, so 3x clears it; 10x per approval bounds a leaked key near the
  *   spec's 13 % of the cap where 3x ran out within weeks). WMON is more volatile than WETH, so no lower multiple. What
@@ -307,7 +308,7 @@ export const V4_POOLS = {
  * - no anchor: WMON/USDC has no peg to clip to.
  */
 export const V4_POOLS_MONAD = {
-  growth: { ...v4Pool('pool:WMON/USDC/3000', 'USDC', 'WMON', 'WMON', 'USDC', 3000, 100, 1500, 3, 10, undefined, 'growth'), sourceChainId: 143 },
+  growth: { ...v4Pool('pool:WMON/USDC/3000', 'USDC', 'WMON', 'WMON', 'USDC', 3000, 100, 10_000, 3, 10, undefined, 'growth'), sourceChainId: 143 },
 } as const satisfies Record<string, V4PoolSpec>
 
 export const TWAP_WINDOW_SECONDS = 1800 // spec 007 "Parameters": = execution.twapWindowSeconds
