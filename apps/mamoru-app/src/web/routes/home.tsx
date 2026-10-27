@@ -12,6 +12,8 @@ import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
 import { belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, MIN_ENTRY_USDC, overCapOf, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
+import { historyEntries, moveLine, moveState } from '../lib/moves.ts'
+import { detailHead, MoveDetail, OpDetail, Sheet } from '../components/activity-detail.tsx'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, poolTokens, positionAmounts, progressLine } from '../lib/positions.ts'
 import { activateLine, signatureCopy } from '../lib/signature.ts'
@@ -489,32 +491,45 @@ export function Idle({ f, s }: { f: FundingView; s: Split }) {
 
 
 export function History({ ops, onRetry }: { ops: OpView[]; onRetry?: (kind: OpView['kind']) => void }) {
-  const sorted = historyOps(ops)
+  // otto/mamoru#219: a range move is one entry, and any entry opens its detail (reason, cost, range, transactions).
+  const entries = historyEntries(historyOps(ops))
+  const [openId, setOpenId] = useState<string | null>(null)
+  const opened = openId ? entries.find((e) => (e.type === 'op' ? e.op.opId : e.move.id) === openId) : undefined
+  const head = opened ? detailHead(opened) : null
   return (
-    <details className="card fold" open={sorted.length > 0 && sorted.length <= 4}>
+    <>
+    <details className="card fold" open={entries.length > 0 && entries.length <= 4}>
       <summary>
         <span>
           <span className="title">{homeCopy.history}</span>
-          <span className="sub">{plural(sorted.length, 'event', 'events')}</span>
+          <span className="sub">{plural(entries.length, 'event', 'events')}</span>
         </span>
       </summary>
       <ol className="m-0 mt-[0.7rem] grid list-none gap-[0.3rem] p-0">
-        {sorted.map((op) => {
-          const tone = opTone(op)
+        {entries.map((e) => {
+          const id = e.type === 'op' ? e.op.opId : e.move.id
+          const at = e.type === 'op' ? e.op.updatedAt : e.move.updatedAt
+          const tone = e.type === 'op' ? opTone(e.op) : moveState(e.move) === 'done' ? 'done' : 'pending'
+          const op = e.type === 'op' ? e.op : null
           return (
             <li
-              key={op.opId}
-              data-testid="op"
+              key={id}
+              data-testid={e.type === 'op' ? 'op' : 'move'}
               className="grid grid-cols-1 items-baseline gap-1 border-t border-wash pt-[0.35rem] min-[761px]:grid-cols-[9rem_5.5rem_minmax(0,1fr)_auto] min-[761px]:gap-[0.6rem]"
             >
-              <time dateTime={op.updatedAt}>{localTime(op.updatedAt)}</time>
-              <span className="font-mono text-[0.78rem] uppercase tracking-[0.04em] text-emerald">{KIND[op.kind]}</span>
-              <span className={tone === 'done' ? undefined : 'text-stone'}>{opLine(op)}</span>
-              {needsRetry(op) && onRetry ? (
+              <time dateTime={at}>{localTime(at)}</time>
+              <span className="font-mono text-[0.78rem] uppercase tracking-[0.04em] text-emerald">{e.type === 'op' ? KIND[e.op.kind] : 'Range'}</span>
+              <button type="button" className={`row-open ${tone === 'done' ? '' : 'text-stone'}`} onClick={() => setOpenId(id)} aria-haspopup="dialog">
+                {e.type === 'op' ? opLine(e.op) : moveLine(e.move)}
+                <span className="row-open-more" aria-hidden="true">
+                  {e.type === 'move' ? ` · ${e.move.ops.length} step${e.move.ops.length === 1 ? '' : 's'}` : ''} ›
+                </span>
+              </button>
+              {op && needsRetry(op) && onRetry ? (
                 <button type="button" className="chipbtn min-[761px]:justify-self-end" onClick={() => onRetry(op.kind)}>
                   {homeCopy.retry}
                 </button>
-              ) : op.txHash ? (
+              ) : op?.txHash ? (
                 <span className="flex items-center gap-1 font-mono text-[0.8rem] text-emerald min-[761px]:justify-self-end">
                   {shortHex(op.txHash)}
                   <BasescanLink tx={op.txHash} />
@@ -527,6 +542,10 @@ export function History({ ops, onRetry }: { ops: OpView[]; onRetry?: (kind: OpVi
         })}
       </ol>
     </details>
+    <Sheet open={!!opened} onClose={() => setOpenId(null)} kicker={head?.kicker ?? ''} title={head?.title ?? ''}>
+      {opened ? opened.type === 'move' ? <MoveDetail move={opened.move} /> : <OpDetail op={opened.op} /> : null}
+    </Sheet>
+    </>
   )
 }
 

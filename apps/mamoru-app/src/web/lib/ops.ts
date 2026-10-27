@@ -7,7 +7,7 @@ const owner = (op: OpView) => op.opId.startsWith('own-')
 /** "USDC/cbBTC": the pool's pair, no spaces, matching the style history lines used before pools were tagged. */
 const pair = (pool: string) => pairLabel(pool).replace(/ /g, '')
 /** Engine op kind from its id (eng-…-enter_swap), or null for an owner op. */
-const engineKind = (op: OpView) => (owner(op) ? null : (/(enter_swap|enter_mint|increase_liquidity|harvest|close_position|convert)$/.exec(op.opId)?.[1] ?? null))
+const engineKind = (op: OpView) => (owner(op) ? null : (op.step ?? /(enter_swap|enter_mint|increase_liquidity|harvest|close_position|convert|rerange|reduce)$/.exec(op.opId)?.[1] ?? null))
 
 /** Failures that only mean another op took over (a newer approval, a stop): nothing for the user to do. */
 const INTERNAL_FAILURES = new Set(['ARMED_SUPERSEDED', 'STOPPED', 'ALREADY_ACTIVE'])
@@ -76,6 +76,16 @@ export function opLine(op: OpView): string {
         const where = op.pool ? ` from ${pair(op.pool)}` : ''
         if (op.convert) return done ? `Collected fees${where}, converted ${op.convert} to USDC` : `Collecting fees${where}, converting ${op.convert} to USDC`
         return done ? `Collected fees${where}` : `Collecting fees${where}`
+      }
+      // otto/mamoru#219: a range move's close and a trim of an over-weight bucket used to share "Rebalanced".
+      if (engineKind(op) === 'rerange') {
+        const out = op.why === 'out' ? ' out-of-range' : ''
+        if (!op.pool) return done ? 'Closed a position to move its range' : 'Closing a position to move its range'
+        return done ? `Closed${out} ${pair(op.pool)} position to move its range` : `Closing${out} ${pair(op.pool)} position to move its range`
+      }
+      if (engineKind(op) === 'reduce') {
+        if (!op.pool) return done ? 'Trimmed a position back to your mix' : 'Trimming a position back to your mix'
+        return done ? `Trimmed ${pair(op.pool)} position back to your mix` : `Trimming ${pair(op.pool)} position back to your mix`
       }
       if (!op.pool) return done ? 'Rebalanced' : 'Rebalancing'
       return done ? `Rebalanced ${pair(op.pool)}` : `Rebalancing ${pair(op.pool)}`
