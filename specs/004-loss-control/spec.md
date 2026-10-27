@@ -142,8 +142,13 @@ Rules from the Titan 26 Packaging Risk Monitor (sections A-E) and its per-bucket
 does not cover (review on #101, 27 Oct). Bucket mapping: Packaging stables → `stables`, bluechip → `btc-usdc`,
 mercenary → `risk`. Every value below is a Packaging number, so constitution VI keeps the whole group in shadow until
 #56: the rules are computed and written to `Decision.shadow` with their code, metric and threshold, and they change no
-bucket state, even with `guards.mode = 'enforce'`. Each rule reads only what the snapshot loop of spec 003 already
-records (pool token balances, TWAP, volume, QuoterV2 quotes) plus the journal; none needs a new data source.
+bucket state, even with `guards.mode = 'enforce'`.
+
+Data: the snapshot loop of spec 003 and the backtest `PoolSample` record neither volume nor QuoterV2 quotes today, and
+pool balances arrive with LC-T2. Task LC-T2b adds the rest: volume from the pool's `Swap` logs (live collector and
+`backfill.ts`), and EEL plus the whole-bucket exit quote from QuoterV2 at each snapshot (live) or by archive `eth_call`
+at the sample block (backfill). Until a rule has the history its window needs, it abstains with
+`RISK_DATA_INSUFFICIENT`, and the shadow log counts those abstentions apart from "did not fire".
 
 | Code (shadow) | Bucket | Metric | Fires | Packaging value | Would-be action |
 |---|---|---|---|---|---|
@@ -290,7 +295,8 @@ guards: {
                                reentry: { minParkedS, trendAboveBps, peg: { bps, holdS } } }>
   account: { lossBps?, ownerResume: true }
   exitsPer30d: 2
-  packaging?: {            // always shadow (constitution VI), whatever `mode` says
+  packaging?: {            // shadow (constitution VI), whatever `mode` says
+    enforce?: true         // Lab (`chain: 'fork'`) only, for the #56 calibration (FR-LC-016)
     byBucket: Record<BucketId, { tvlFallBps: { d1, d7, d30 }, tvlFloorUsdc, tvlVsEntryBps, tvlVsEntryHoldS,
                                  eelMinUsdc, eelImpactBps, positionRatioBps, exitSlippageBps,
                                  vtvl7dMinBps, volume7dFloorUsdc, volume4wRatioBps?, cooldownS }>
@@ -376,7 +382,10 @@ The risk page states the gap: the limit is a target and a fast move can pass it.
   waits for (#128).
 - **FR-LC-016.** The Packaging stops, the rotation limits and the Packaging re-entry checks are evaluated on every review
   when `policy.guards.packaging` is present and only ever write to `Decision.shadow`; they change no bucket state and
-  no proposal until #56 or a constitution VI amendment moves them out of shadow.
+  no proposal until #56 or a constitution VI amendment moves them out of shadow. The one exception is the #56
+  calibration itself: a Lab policy (`chain: 'fork'`, never on beta or production) may set `packaging.enforce: true` so
+  that the simulator measures what a rule would have done. A policy with `chain` other than `'fork'` that sets it is
+  rejected when the policy is loaded.
 - **FR-LC-017.** Re-range and action budgets are counted from the journal, so a restart or a replayed review never
   counts one operation twice.
 
@@ -416,9 +425,9 @@ pool in the window.
 | LC-L7 TVL drain | Sep window, stables pool balances -85% held 2 h | `FREEZE` after the 50% drop has held 30 min; `EXIT` after 80% has held 30 min; no convert leg with quoted impact > `exitImpactBps`; same drain held 10 min: no state change |
 | LC-L8 no session | LC-L2 with `sessionRenewal: 'once'` past expiry, and LC-L2 with `convert-any` uses at 0 | `EXIT_PENDING` with `SESSION_EXPIRED` / `SESSION_USAGE_SPENT` at every review until the window ends; zero operations |
 | LC-L9 whipsaw | LC-L2 + LC-L3 with thresholds at half | <= 2 automatic exits per bucket per 30 days; the next trigger yields `RISK_EXIT_BUDGET_SPENT` |
-| LC-L10 Packaging floors on calm data | every calm TRAIN window, registry pools | the shadow log lists, per pool and rule, the first sample where a Packaging stop would fire; any firing on `sep2026` goes to Ot with the pool and the value (see "Packaging stops") |
-| LC-L11 re-range budget | `base-2025-10-crash-10m`, `base-2025-02-crash-10m`, `sep2026` | with the budget enforced in a Lab-only policy: re-ranges per bucket per 7 d <= 2; account max drawdown and gas against baseline reported; `sep2026` return >= baseline - 0.10 pp |
-| LC-L12 Packaging stops on crashes | LC-L7 drain, LC-L2, LC-L3 | would-be `RISK_POOL_TVL_*`, `RISK_POOL_DEPTH`, `RISK_POSITION_RATIO`, `RISK_EXIT_SLIPPAGE` and `RISK_POOL_VOLUME` codes with first firing time, compared with the first firing of the enforced rules of the main table |
+| LC-L10 Packaging floors on calm data | every calm TRAIN window, registry pools, after LC-T2b; each rule needs its full window of history at >= 95% of samples, or the row reports it as not evaluated | the shadow log lists, per pool and rule, the first sample where a Packaging stop would fire; any firing on `sep2026` goes to Ot with the pool and the value (see "Packaging stops") |
+| LC-L11 re-range budget | `base-2025-10-crash-10m`, `base-2025-02-crash-10m`, `sep2026` | with the budget enforced in a Lab policy (`chain: 'fork'`, `packaging.enforce: true`, FR-LC-016): re-ranges per bucket per 7 d <= 2; account max drawdown and gas against baseline reported; `sep2026` return >= baseline - 0.10 pp |
+| LC-L12 Packaging stops on crashes | LC-L7 drain, LC-L2, LC-L3, after LC-T2b, same history condition as LC-L10 | would-be `RISK_POOL_TVL_*`, `RISK_POOL_DEPTH`, `RISK_POSITION_RATIO`, `RISK_EXIT_SLIPPAGE` and `RISK_POOL_VOLUME` codes with first firing time, compared with the first firing of the enforced rules of the main table |
 
 Then, per #101 acceptance: a tape scenario where the rule fires and the position ends as USDC in the Safe, and a fork
 e2e of the same tape on a policy version that enables it.
@@ -465,7 +474,8 @@ A variant: `bun packages/backtest/cli/sweep.ts --policy conservador-lab-guards-v
 | LC-T7 | `conservador-live-v3` with `guards.mode = 'shadow'`; two weeks of would-be codes on live | `/ops` shows them |
 | LC-T8 | App: bucket state lines, history with trigger and threshold, risk page copy (#58) | UI scenario per state |
 | LC-T9 | `guards.mode = 'enforce'` after Ot's GO on the Lab table and the shadow log, and only once D5 is resolved | Ot GO |
-| LC-T10 | Packaging stops, rotation limits and Packaging re-entry checks in `packages/decide/src/guard/`, shadow only; `Observation.guard` additions; journal counters | decide unit tests per code; FR-LC-016 test: no state or proposal change with the group present |
+| LC-T2b | Data for the Packaging stops: volume from `Swap` logs, EEL and whole-bucket exit quote from QuoterV2, in the live snapshot loop and in `backfill.ts` (archive `eth_call` at the sample block); fields in `PoolSample` and `mamoru-dataset-v1` | dataset ids with coverage per field in the Lab note |
+| LC-T10 | Packaging stops, rotation limits and Packaging re-entry checks in `packages/decide/src/guard/`, shadow only; `Observation.guard` additions; journal counters | decide unit tests per code; FR-LC-016 tests: no state or proposal change with the group present; `packaging.enforce` rejected outside `chain: 'fork'` |
 | LC-T11 | Lab: LC-L10..L12 | Lab note with the would-be firings per pool and window |
 | LC-T12 | Monad: datasets for the MON pool, oracle choice, thresholds for its bucket. None of the rules here has Monad data yet | dataset id and a filled LC-L1/L2 row for Monad |
 | LC-T13 | Incident exits: a producer for `RISK_INCIDENT_EXIT` (spec 001) from pool pause, oracle pause, bridge or admin change, upgrade and exploit feeds (Packaging section F), plus the manual `IncidentFlag` | own ticket |
