@@ -760,6 +760,9 @@ describe('live balance down', () => {
     expect(text).toContain('Mamoru cannot read your account right now.')
     expect(html).toMatch(/data-testid="withdraw-button"[^>]*disabled/)
     expect(html).toContain('sum past')
+    // Review round 2: nothing below reads the cached funding as current — no cards with actions, no rates from it.
+    expect(text).not.toContain('Working capital')
+    expect(text).toContain('no live read')
   })
   test('never loaded in this tab: the D1 snapshot is the past reading', async () => {
     const { text } = await renderRoute('/', fixtureSession, undefined, { fundingDown: true, lastBalance })
@@ -776,5 +779,7 @@ describe('live balance down', () => {
     expect(text).not.toContain('Last reading')
     expect(text).not.toContain('cannot read your account')
     expect(html).not.toContain('sum past')
+    expect(text).toContain('Working capital')
+    expect(text).not.toContain('no live read')
   })
 })

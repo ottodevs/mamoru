@@ -991,7 +991,13 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const [renewAsked, setRenewAsked] = useState(false)
   // Amount the withdraw form opens with; a new value remounts the dialog.
   const [withdrawSeed, setWithdrawSeed] = useState('')
-  const f = funding.data
+  // otto/mamoru#208 (reviews of PR #133): the live read is down whenever the last poll failed, cached data or not —
+  // TanStack keeps the last good `data` next to the error. While it is down the page shows no cached read as current:
+  // `f` is undefined (no cards, no actions, rates say "no live read") and the balance shows a past reading instead.
+  // A 401 is a signed-out session, not an outage.
+  const liveDown = funding.isError && !(funding.error instanceof ApiRequestError && funding.error.status === 401)
+  const cached = funding.data
+  const f = liveDown ? undefined : cached
   // The session ended while Home was open: ask again, and the first screen offers the sign-in.
   const qc = useQueryClient()
   const signedOut = funding.error instanceof ApiRequestError && funding.error.status === 401
@@ -1000,14 +1006,11 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   }, [signedOut, qc])
   const price = cbbtcPrice(pools.data)
   const s = f ? split(f, price) : null
-  // otto/mamoru#208 (review of PR #133): the live read is down whenever the last poll failed, cached data or not —
-  // TanStack keeps the last good `data` next to the error. The past reading is then that last good read, or, with
-  // none in this tab, the last snapshot in D1. A 401 is a signed-out session, not an outage.
-  const liveDown = funding.isError && !signedOut
+  // The past reading: this tab's last good read, or, with none, the last snapshot in D1.
   const past = !liveDown
     ? null
-    : s
-      ? { totalUsd: s.total.toString(), readAt: new Date(funding.dataUpdatedAt).toISOString() }
+    : cached
+      ? { totalUsd: split(cached, price).total.toString(), readAt: new Date(funding.dataUpdatedAt).toISOString() }
       : (yieldLedger.data?.lastBalance ?? null)
   const apy = useApy()
   const armed = activationLive(opList)
