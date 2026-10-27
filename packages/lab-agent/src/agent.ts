@@ -16,7 +16,7 @@ import {
 } from './contract.ts'
 import { newCostMeter, recordModelCall, recordToolRound, type CostMeter, type VerifierOutcome as MeterVerifierOutcome } from './cost-meter.ts'
 import { AGENT_TOOL_SCHEMAS, compareTool, LAB_TOOL_UNAVAILABLE, runBacktestTool, sweepTool, type RunStore, type ToolOutcome } from './tools.ts'
-import { fallbackAnswer, verify, type VerifyError } from './verifier.ts'
+import { fallbackAnswer, verify } from './verifier.ts'
 import type { BenchRunner, ChatMessage, ModelClient, RunResult, ToolSchema } from './types.ts'
 
 /** AL-15: max 4 tool rounds per job; then the agent must answer with what it has. */
@@ -41,14 +41,6 @@ export type JobContext = {
   maxToolRounds?: number
   /** Only `sweep` needs this (it resolves a TRAIN window list independent of `runner`) — pass the same value given to `buildCatalogPrompt`/`LabBenchRunner`. Omit for the real datasets dir. */
   datasetsDir?: string
-  /**
-   * otto/mamoru#204 (task 5): an optional observability hook, fired once per investigative tool call, before it
-   * is dispatched — never for a call that gets skipped (round cap, sequence violation, or a `submit_answer`
-   * mixed into the same turn). Purely additive: omitting it changes nothing. The runner uses it to detect a
-   * `sweep` call starting (AL-04's wall-clock budget is 120s normally, 15 min once a job starts a sweep) without
-   * this package needing to know anything about leases, workers or budgets itself.
-   */
-  onToolCall?: (name: string) => void
 }
 
 export type VerifierOutcome = MeterVerifierOutcome
@@ -56,13 +48,6 @@ export type VerifierOutcome = MeterVerifierOutcome
 export type JobResult = {
   answer: Answer
   verifierOutcome: VerifierOutcome
-  /**
-   * otto/mamoru#204 (task 5): the FIRST verify's errors — empty on `'ok'`; on `'repaired'` this is what the
-   * repair turn fixed, on `'partial'` this is what it failed to fix (never the repair's own second check: a
-   * caller always sees the original defect, not just "it tried again and still failed"). The runner's own
-   * result contract posts this as `verifier.errors` alongside `verifier.outcome`.
-   */
-  verifierErrors: VerifyError[]
   flagged: 'LAB_ANSWER_PARTIAL' | null
   /** AL-21: this job's own citable run list — every run a tool call produced, in production order. */
   runs: RunResult[]
@@ -293,7 +278,6 @@ export async function runAgentJob(input: JobInput, ctx: JobContext): Promise<Job
         messages.push(skipMessage(call, LAB_TOOL_SKIPPED, 'skipped: a previous tool call in this round already failed'))
         continue
       }
-      ctx.onToolCall?.(call.function.name)
       const args = safeJsonParse(call.function.arguments) ?? {}
       const outcome = dispatchTool(call.function.name, args, ctx.runner, runStore, meter, ctx.datasetsDir)
       messages.push({
@@ -379,14 +363,5 @@ export async function runAgentJob(input: JobInput, ctx: JobContext): Promise<Job
   meter.wallMs = Math.round(performance.now() - wallStart)
   meter.verifierOutcome = outcome
 
-  return {
-    answer: finalAnswer,
-    verifierOutcome: outcome,
-    verifierErrors: firstVerify.ok ? [] : firstVerify.errors,
-    flagged,
-    runs: [...runStore.values()],
-    toolRounds: investigativeRounds,
-    meter,
-    messages,
-  }
+  return { answer: finalAnswer, verifierOutcome: outcome, flagged, runs: [...runStore.values()], toolRounds: investigativeRounds, meter, messages }
 }

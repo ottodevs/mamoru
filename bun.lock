@@ -58,7 +58,6 @@
       "version": "0.0.0",
       "dependencies": {
         "@mamoru/domain": "workspace:*",
-        "@mamoru/lab-agent": "workspace:*",
         "@mamoru/lab-bench": "workspace:*",
       },
     },

@@ -85,7 +85,7 @@ describe('routes', () => {
     expect(text).toContain('Total balance')
     expect(text).toContain('Working capital')
     expect(text).toContain('1 position')
-    expect(text).toContain('Idle capital 10.00 USDC waiting to be placed')
+    expect(text).toContain('Idle capital 10.00 USDC · waiting to be placed')
     expect(text).toContain('Stop allocation')
     // Rates not loaded: n/a with the reason, never a figure.
     expect(text).toContain('Current rate n/a')
@@ -116,7 +116,7 @@ describe('routes', () => {
     expect(text).not.toContain('Saves automatically')
     expect(text).toContain('Balanced · USDC/cbBTC')
     expect(html).not.toContain('aria-label="Sources and method"')
-    expect(html).toMatch(/<section class="panel is-open"[^>]*data-testid="working"/)
+    expect(html).toMatch(/<details class="dash-fold" open/)
   })
   test('funds present but not running: one Start button', async () => {
     const { text } = await renderRoute('/', fixtureSession, { ...fixtureFunding, active: false })
@@ -672,7 +672,7 @@ describe('funds by token and what Mamoru is doing', () => {
   test('Home says the money is being placed and lists each idle token when there is more than one', async () => {
     const { text, html } = await renderRoute('/', fixtureSession, midEntry)
     expect(text).toContain('Total balance 5.00 USDC')
-    expect(text).toContain('Idle capital 5.00 USDC being placed')
+    expect(text).toContain('Idle capital 5.00 USDC · being placed')
     expect(html).toContain('data-testid="idle-tokens"')
     expect(text).toContain('3.74 USDC')
     expect(text).toContain('1.25 USDT')
@@ -763,12 +763,12 @@ describe('funds by token and what Mamoru is doing', () => {
     expect(holdings(placed)!.map((h) => h.token)).toEqual(['USDT', 'USDC'])
     const { text, html } = await renderRoute('/', fixtureSession, placed)
     expect(html).not.toContain('data-testid="idle-tokens"')
-    expect(text).toContain('Idle capital 0.00 USDC nothing idle')
+    expect(text).toContain('Idle capital 0.00 USDC · nothing idle')
   })
 
   test('an account with nothing in progress keeps the plain label', async () => {
     const { text } = await renderRoute('/', fixtureSession, { ...midEntry, engine: { placing: false, nextReviewAt: null } })
-    expect(text).toContain('Idle capital 5.00 USDC waiting to be placed')
+    expect(text).toContain('Idle capital 5.00 USDC · waiting to be placed')
   })
 })
 
