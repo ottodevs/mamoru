@@ -95,29 +95,60 @@ async function betaAccounts(db: Db): Promise<string[]> {
   }
 }
 
-type CapRow = { account_key: string; cap_usdc: number | null }
+type CapRow = { id: number; account_key: string; cap_usdc: number | null; env: string; account_env: string | null; user_id: string | null }
 
 /**
  * otto/mamoru#26: the newest row of every account in `account_cap_overrides`, removals left out. A row the code would
  * refuse is skipped (the account keeps what its previous valid row said), as for versions. No table yet (the migration
  * is not applied): an empty map, every account on its environment's cap.
+ *
+ * otto/mamoru#212: a row counts only for an account of the environment it was written for (`env`): a beta override
+ * never reaches a prod account, nor the other way round. And the cap is the owner's total across chains, so it holds
+ * every sleeve of the owner in that environment (the Base account and its Monad sleeve, #67): the newest row written
+ * for any of them is the cap of all of them. A row for an account the D1 does not know keeps to its own key.
  */
 export async function accountCaps(db: Db): Promise<Record<string, number>> {
   let rows: CapRow[]
   try {
-    rows = (await db.prepare(`SELECT account_key, cap_usdc FROM account_cap_overrides ORDER BY id`).all<CapRow>()).results
+    rows = (
+      await db
+        .prepare(
+          `SELECT o.id, o.account_key, o.cap_usdc, o.env, a.env AS account_env, a.user_id FROM account_cap_overrides o LEFT JOIN accounts a ON lower(a.account_key) = lower(o.account_key) ORDER BY o.id`,
+        )
+        .all<CapRow>()
+    ).results
   } catch (e) {
     if (missingTable(e)) return {}
     throw e
   }
+  // Per owner and environment (or per key when the account is unknown): the newest valid row.
   const latest = new Map<string, number | null>()
+  const owners = new Map<string, { userId: string; env: string }>()
   for (const r of rows) {
     if (validateAccountCapOverride({ accountKey: r.account_key, capUsdc: r.cap_usdc }).length) continue
-    latest.set(r.account_key.toLowerCase(), r.cap_usdc)
+    if (r.account_env !== null && r.account_env !== r.env) continue
+    const group = r.user_id !== null && r.account_env !== null ? `u:${r.user_id}|${r.account_env}` : `k:${r.account_key.toLowerCase()}`
+    if (r.user_id !== null && r.account_env !== null) owners.set(group, { userId: r.user_id, env: r.account_env })
+    latest.set(group, r.cap_usdc)
+  }
+  const sleeves = new Map<string, string[]>()
+  if (owners.size) {
+    const users = [...new Set([...owners.values()].map((o) => o.userId))]
+    const { results } = await db
+      .prepare(`SELECT account_key, user_id, env FROM accounts WHERE user_id IN (${users.map(() => '?').join(', ')})`)
+      .bind(...users)
+      .all<{ account_key: string; user_id: string; env: string }>()
+    for (const a of results) {
+      const g = `u:${a.user_id}|${a.env}`
+      sleeves.set(g, [...(sleeves.get(g) ?? []), a.account_key.toLowerCase()])
+    }
   }
   const out: Record<string, number> = {}
-  for (const [k, cap] of [...latest].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) if (cap !== null) out[k] = cap
-  return out
+  for (const [group, cap] of latest) {
+    if (cap === null) continue
+    for (const key of group.startsWith('u:') ? (sleeves.get(group) ?? []) : [group.slice(2)]) out[key] = cap
+  }
+  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
 }
 
 export function engineSettingsRoutes(now: () => Date) {

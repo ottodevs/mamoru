@@ -107,6 +107,41 @@ describe('GET /api/internal/engine-settings (spec 006)', () => {
     expect(p.accountCaps).toEqual({ 'aaaa-1': 3000, 'cccc-3': 5000 })
   })
 
+  test('otto/mamoru#212: an override counts only in the environment it was written for, and holds every sleeve of the owner', async () => {
+    const h = harness(() => NOW, { env: { OPERATOR_SECRET: OP } })
+    insert(h, 'prod', depth)
+    const user = (id: string) => h.db.raw.query(`INSERT INTO users (user_id, created_at) VALUES (?, '2026-10-23')`).run(id)
+    const account = (key: string, userId: string, chainId: number, addr: string, cred: string, env: 'prod' | 'beta' = 'prod') =>
+      h.db.raw
+        .query(`INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at, env) VALUES (?, ?, ?, ?, '[]', ?, '0x1', '0x2', '1', 'v', '2026-10-23', ?)`)
+        .run(key, userId, chainId, addr, cred, env)
+    const cap = (key: string, usdc: number | null, env: 'prod' | 'beta' = 'prod') =>
+      h.db.raw.query(`INSERT INTO account_cap_overrides (env, account_key, cap_usdc, author, reason, created_at) VALUES (?, ?, ?, 'ot', 'test', ?)`).run(env, key, usdc, NOW.toISOString())
+    user('u1')
+    user('u2')
+    user('u3')
+    // u1: a Base account and its Monad sleeve (same Safe address), prod.
+    account('base-1', 'u1', 8453, '0x00000000000000000000000000000000000000a1', 'c1')
+    account('monad-1', 'u1', 143, '0x00000000000000000000000000000000000000a1', 'c2')
+    // u2: a beta account; u3: a prod one.
+    account('beta-2', 'u2', 8453, '0x00000000000000000000000000000000000000b2', 'c3', 'beta')
+    account('prod-3', 'u3', 8453, '0x00000000000000000000000000000000000000c3', 'c4')
+    cap('base-1', 2000)
+    cap('beta-2', 9000, 'prod') // written for prod, the account is beta: no effect
+    cap('prod-3', 7000, 'beta') // written for beta, the account is prod: no effect
+    cap('prod-3', 3000)
+    let p = JSON.parse(await (await pull(h)).text()) as EngineSettingsPayload
+    expect(p.accountCaps).toEqual({ 'base-1': 2000, 'monad-1': 2000, 'prod-3': 3000 })
+    // The newest row of either sleeve is the owner's cap; a removal on one removes it for both.
+    cap('monad-1', 4000)
+    cap('beta-2', 1500, 'beta')
+    p = JSON.parse(await (await pull(h)).text()) as EngineSettingsPayload
+    expect(p.accountCaps).toEqual({ 'base-1': 4000, 'beta-2': 1500, 'monad-1': 4000, 'prod-3': 3000 })
+    cap('base-1', null)
+    p = JSON.parse(await (await pull(h)).text()) as EngineSettingsPayload
+    expect(p.accountCaps).toEqual({ 'beta-2': 1500, 'prod-3': 3000 })
+  })
+
   test('otto/mamoru#26: without the account_cap_overrides table (migration not applied) the map is empty', async () => {
     const h = harness(() => NOW, { env: { OPERATOR_SECRET: OP } })
     insert(h, 'prod', depth)
