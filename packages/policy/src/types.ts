@@ -39,6 +39,13 @@ export type ActionRuleTemplate = {
   /** Full function signature, static arguments only. */
   signature: string
   params: ParamRuleTemplate[]
+  /**
+   * otto/mamoru#225: no UniActionPolicy on this action; MamoruActionPolicyV2 alone checks it (`params` is empty). Only on
+   * actions V2's `checkAction` bounds more strictly than any UniActionPolicy rule could (decrease, collect and burn: an
+   * admitted position the account owns, recipient the account, decrease minimums from the band; the swap deadline: the
+   * exact empty encoding). `toSmartSession` refuses it on a grant without MamoruActionPolicy.
+   */
+  actionPolicyOnly?: true
 }
 
 export type GrantName = 'enter-swap' | 'enter-mint' | 'manage' | 'manage-any' | 'convert-any' | 'bridge-out'
@@ -77,6 +84,12 @@ export type GrantTemplate = {
    * (`retargetToPolicy` refuses it too).
    */
   requiresPauseGate?: true
+  /**
+   * otto/mamoru#225: the grants this one session stands for (a pool's enter-swap, enter-mint and manage-any merged by
+   * target and selector, `mergeGrants` in v4-grants.ts). `grantKeyFor` resolves any of these names in the pool to this
+   * grant, so the engine's proposals keep their role names and use the one session. Absent: the grant is only itself.
+   */
+  covers?: GrantName[]
 }
 
 export type UsageTier = { upToUsdc: bigint; usageLimit: number }
@@ -171,6 +184,12 @@ export type PolicyVersion = {
     renewalWindowSeconds: number
     caps: CapFormula[]
     grants: GrantTemplate[]
+    /**
+     * otto/mamoru#225: the whole grant set is approved in ONE owner transaction, never split into steps: the operator
+     * builds every grant (revokes and attestations included) into one Safe transaction and refuses the approval
+     * (RENEWAL_TOO_LARGE) when its simulated gas is over V4_TX_GAS_TARGET. Absent: v4/v5/v6 split by gas as before.
+     */
+    oneTransaction?: true
   }
   shadow: string[]
   /** Spec 004 loss control. Absent: today's behaviour byte for byte (FR-LC-001). */
@@ -366,6 +385,8 @@ export type ResolvedActionRule = {
   selector: Hex
   nativeValue: 0n
   params: ResolvedParamRule[]
+  /** See `ActionRuleTemplate.actionPolicyOnly`. */
+  actionPolicyOnly?: true
 }
 
 /** Plan section 12.1, with `tokenId` in place of the unexpressible `allowedTokenIds` set. */

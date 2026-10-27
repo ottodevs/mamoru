@@ -93,9 +93,14 @@ function resolveRef(ref: RefTemplate, ctx: GrantContext, registry: Registry): bi
     return ctx.tokenId
   }
   if (ref.startsWith('cap:')) {
-    const v = ctx.caps[ref.slice(4)]
-    if (v === undefined) throw new Error(`missing cap ${ref}`)
-    return v
+    // otto/mamoru#225: `cap:a|b` is the larger of caps a and b (a merged grant's one bound for what two grants capped).
+    let max: bigint | undefined
+    for (const name of ref.slice(4).split('|')) {
+      const v = ctx.caps[name]
+      if (v === undefined) throw new Error(`missing cap cap:${name}`)
+      if (max === undefined || v > max) max = v
+    }
+    return max!
   }
   return BigInt(address(ref, registry))
 }
@@ -109,6 +114,10 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
   const registry = policyRegistry(policy)
   if (template.perPosition !== (ctx.tokenId !== undefined)) {
     throw new Error(`grant ${name} ${template.perPosition ? 'needs' : 'does not take'} a tokenId`)
+  }
+  for (const a of template.actions) {
+    if (a.actionPolicyOnly && (!template.requiresActionPolicy || a.params.length)) throw new Error(`grant ${name}: ${a.signature} without UniActionPolicy needs MamoruActionPolicy and no rules`)
+    if (!a.actionPolicyOnly && !a.params.length) throw new Error(`grant ${name}: ${a.signature} has no rule (UniActionPolicy refuses an action without one)`)
   }
   if (template.perPosition && !ctx.admittedTokenIds?.some((id) => id === ctx.tokenId)) {
     throw new ReasonError('POLICY_DENIED_POSITION', 'tokenId was not minted by enter-mint')
@@ -127,6 +136,7 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
       cumulativeLimit: p.cumulative ? resolveRef(p.cumulative, ctx, registry) : undefined,
       denial: p.denial,
     })),
+    ...(a.actionPolicyOnly ? { actionPolicyOnly: true as const } : {}),
   }))
   const seen = new Set<string>()
   for (const a of actions) {

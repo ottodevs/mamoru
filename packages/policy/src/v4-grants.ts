@@ -541,6 +541,81 @@ export function exitOnlyV5Grant(p: V4PoolSpec, usageLimit: number): GrantTemplat
   return { ...g, actions: g.actions.filter((a) => !enters(a)) }
 }
 
+// ---------------------------------------------------------------- v7: one session per pool (otto/mamoru#225)
+// Enabling costs ~595k gas per action, most of it SmartSession bookkeeping that cannot be shared between actions
+// (specs/007-onchain-action-policy/results/enable-mode-dd-2026-10-27.md). A pool's enter-swap, enter-mint and
+// manage-any repeat the same (target, selector) five times over (approvals, swap, mint, deadline); merged into one
+// session the v6 Base set is 3 pool sessions instead of 7, and the whole approval fits ONE owner transaction.
+
+/** Actions MamoruActionPolicyV2 bounds more strictly than any UniActionPolicy rule (admitted + owned position, recipient,
+ * decrease minimums from the band; the deadline's exact empty encoding): they carry V2 alone. */
+const V2_STRICT_SIGS = new Set([DECREASE_SIG, COLLECT_SIG, BURN_SIG, MULTICALL_DEADLINE_SIG])
+
+const sameRule = (a: ParamRuleTemplate, b: ParamRuleTemplate) => a.condition === b.condition && a.ref === b.ref && a.cumulative === b.cumulative
+
+/**
+ * The rules of one (target, signature) that several grants each carried, merged so the one action allows every call
+ * any of them did (as `t10-enable-gas-dd-fork.ts` `mergeRules`, on templates): a rule every grant has, identical, is
+ * kept; a LESS_THAN_OR_EQUAL every grant has at that word keeps the larger bound (`cap:a|b`, see instantiateGrant) and
+ * no cumulative limit; anything else (a rule only some grants pin, or rules that disagree: swap direction, approve
+ * spender) is dropped and left to MamoruActionPolicyV2, which checks each of those itself.
+ */
+function mergeRules(sets: ParamRuleTemplate[][]): ParamRuleTemplate[] {
+  const indices = [...new Set(sets.flat().map((r) => r.index))].sort((a, b) => a - b)
+  const out: ParamRuleTemplate[] = []
+  for (const index of indices) {
+    const at = sets.map((s) => s.find((r) => r.index === index))
+    if (at.some((r) => !r)) continue
+    const rules = at as ParamRuleTemplate[]
+    if (rules.every((r) => sameRule(r, rules[0]!))) {
+      out.push(rules[0]!)
+      continue
+    }
+    if (!rules.every((r) => r.condition === 'LESS_THAN_OR_EQUAL' && typeof r.ref === 'string' && r.ref.startsWith('cap:'))) continue
+    const caps = [...new Set(rules.flatMap((r) => (r.ref as string).slice(4).split('|')))]
+    const { cumulative: _dropped, ...first } = rules[0]!
+    out.push({ ...first, ref: `cap:${caps.join('|')}` })
+  }
+  return out
+}
+
+/**
+ * otto/mamoru#225: `parts` (grants of ONE pool, all under MamoruActionPolicy) as one session named `manage-any` that
+ * covers every part's name (`grantKeyFor` sends the engine's enter-swap and enter-mint of the pool to it). Actions merge
+ * by (target, signature), in order of first appearance; their UniActionPolicy rules as `mergeRules`; V2-strict actions
+ * (decrease, collect, burn, deadline) carry MamoruActionPolicyV2 alone. The usage limit is the sum of the parts'.
+ * What each dropped rule leaves to V2 is in specs/007-onchain-action-policy/results/merged-grants-2026-10-27.md.
+ */
+export function mergeGrants(parts: readonly GrantTemplate[]): GrantTemplate {
+  const pool = parts[0]?.pool
+  if (!pool || parts.some((g) => g.pool !== pool)) throw new Error('mergeGrants: every part names the same pool')
+  if (parts.some((g) => !g.requiresActionPolicy || g.requiresPauseGate || g.perPosition || g.usageByCap)) throw new Error(`mergeGrants: ${pool}: only MamoruActionPolicy grants with a fixed usage limit merge`)
+  const groups = new Map<string, ActionRuleTemplate[]>()
+  for (const a of parts.flatMap((g) => g.actions)) {
+    const k = `${a.target}:${a.signature}`
+    groups.set(k, [...(groups.get(k) ?? []), a])
+  }
+  const actions: ActionRuleTemplate[] = [...groups.values()].map((group) => {
+    const { target, signature } = group[0]!
+    if (V2_STRICT_SIGS.has(signature)) return { target, signature, params: [], actionPolicyOnly: true }
+    const params = mergeRules(group.map((a) => a.params))
+    if (!params.length) throw new Error(`mergeGrants: ${pool} ${signature} keeps no UniActionPolicy rule`)
+    return { target, signature, params }
+  })
+  const usageLimit = parts.reduce((n, g) => n + g.usageLimit, 0)
+  return { name: 'manage-any', pool, perPosition: false, usageLimit, actions, requiresActionPolicy: true, covers: [...new Set(parts.map((g) => g.name))] }
+}
+
+/** v7: the pool's three v5 grants as one session. */
+export function poolGrantV7(p: V4PoolSpec, usage: V4Usage): GrantTemplate {
+  return mergeGrants(grantsV5(p, usage))
+}
+
+/** v7: v6's exit-only grant, its decrease, collect, burn and deadline under MamoruActionPolicyV2 alone. */
+export function exitOnlyV7Grant(p: V4PoolSpec, usageLimit: number): GrantTemplate {
+  return mergeGrants([exitOnlyV5Grant(p, usageLimit)])
+}
+
 /** The policy can add to a held position in `pool` (otto/mamoru#171): its manage-any there carries the policy's increase. */
 export function hasIncrease(policy: { session: { grants: readonly GrantTemplate[] } }, pool: string): boolean {
   return policy.session.grants.some((g) => g.name === 'manage-any' && g.pool === pool && g.actions.some((a) => a.signature === POLICY_INCREASE_SIG))
