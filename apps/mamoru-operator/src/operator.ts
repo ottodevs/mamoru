@@ -6,7 +6,7 @@ import { address, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, n
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
-import { MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, oneTransaction, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -447,6 +447,11 @@ export type OperatorConfig = {
    * `resolveV6Policy`), set only with the v4 opt-in and both V2 and pause gate addresses. Absent: v6 is not offered.
    */
   v6Policy?: PolicyVersion
+  /**
+   * otto/mamoru#225: the deployed v7 policy (conservadorLiveV7: v6 with one session per pool, wired like v6, boot.ts
+   * `resolveV7Policy`). Absent: v7 is not offered.
+   */
+  v7Policy?: PolicyVersion
   /** otto/mamoru#129 runtime flags from the settings pull; `onchain_action_policy_v4` offers the v4 renewal per account. Absent: every flag off. */
   opsFlags?: () => Partial<Record<OpsFlagName, boolean>>
   /** otto/mamoru#217: enabled scopable flags from the settings pull: null = everyone (explicit), list = those accounts
@@ -475,6 +480,8 @@ const V4_MIGRATES_FROM = new Set(['conservador-live-v2', 'conservador-live-v3'])
 const V5_MIGRATES_FROM = new Set(['conservador-live-v2', 'conservador-live-v3', 'conservador-live-v4', 'conservador-lab-v4'])
 /** otto/mamoru#214: the policies whose accounts the renew row moves to v6 (`multichain_v6`): everything v5 takes, and v5 itself. */
 const V6_MIGRATES_FROM = new Set([...V5_MIGRATES_FROM, 'conservador-live-v5', 'conservador-lab-v5'])
+/** otto/mamoru#225: the policies whose accounts the renew row moves to v7 (`merged_grants_v7`): everything v6 takes, and v6 itself. */
+const V7_MIGRATES_FROM = new Set([...V6_MIGRATES_FROM, 'conservador-live-v6', 'conservador-lab-v6'])
 /** Gas a v4 approval's first transaction carries besides enableSessions, per removeSession (measured: ~1.45M for 8). */
 const REVOKE_GAS_EACH = 190_000n
 /** The registry trust calls of a first activation, and one self-attestation call, with margin. */
@@ -1272,6 +1279,7 @@ export class Operator {
     if (this.cfg.v4Policy?.policyId === acc.policyId) return this.cfg.v4Policy
     if (this.cfg.v5Policy?.policyId === acc.policyId) return this.cfg.v5Policy
     if (this.cfg.v6Policy?.policyId === acc.policyId) return this.cfg.v6Policy
+    if (this.cfg.v7Policy?.policyId === acc.policyId) return this.cfg.v7Policy
     if (this.cfg.policy.policyId === acc.policyId) return this.cfg.policy
     // otto/mamoru#214: a Monad operator on the v5 sleeve policy still serves the sleeves activated with v1.
     if (this.cfg.chainWrites?.length && MONAD_LIVE_POLICIES[acc.policyId]) return MONAD_LIVE_POLICIES[acc.policyId]!
@@ -1294,6 +1302,9 @@ export class Operator {
       return null
     }
     const flags = this.cfg.opsFlags?.()
+    // otto/mamoru#225: v7 (v6 in one session per pool, one owner transaction) configured and offered: v2-v6 move to it.
+    const v7 = this.cfg.v7Policy
+    if (v7 && flags?.merged_grants_v7 === true && V7_MIGRATES_FROM.has(cur.policyId) && cur.chain === v7.chain) return v7
     // otto/mamoru#214: v6 (Base + Monad growth) configured and offered: v2-v5 accounts move to it, ahead of v5.
     const v6 = this.cfg.v6Policy
     // otto/mamoru#217: v6 needs the explicit signal of the scoped-flags field. null = everyone (and the boolean agrees);
@@ -2044,6 +2055,7 @@ export class Operator {
    * owner transaction at a time, through planExtend (fitted the same way), once this one has landed.
    */
   private async fitV4(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, keys: string[], revokes: Hex[], mode: 'full' | 'extend', budget: bigint, reserve?: LiveGasReserve) {
+    if (oneTransaction(policy)) return this.oneTxV4(acc, live, policy, r, cap, keys, revokes, mode, budget, reserve)
     // otto/mamoru#15: a self-funded activation's reserve swap rides in the same transaction, after the grants.
     const overheadGas = BigInt(revokes.length) * REVOKE_GAS_EACH + (acc.trusted ? 0n : TRUST_GAS) + ATTEST_GAS + (reserve ? STATIC_GAS_RESERVE_SWAP : 0n)
     const ordered = orderV4Keys(policy, keys)
@@ -2081,6 +2093,31 @@ export class Operator {
     const steps = 1 + (rest.length ? splitV4Keys(policy, rest, { ...(model ? { model } : {}), ceiling: target }).length : 0)
     console.log(`[v4] ${live.safe} ~${gas} gas${simulated ? ' (simulated)' : ' (estimated)'}: ${a.stored.length} sessions now (generation ${a.v4?.generation}), ${rest.length} in ${steps - 1} later step(s)`)
     return { ...a, calls, rest, steps }
+  }
+
+  /**
+   * otto/mamoru#225: a policy approved in ONE owner transaction (`session.oneTransaction`, v7): every key, every revoke and
+   * attestation in one Safe transaction, never split. Its gas limit is simulated in the Safe's own context (as fitV4);
+   * over V4_TX_GAS_TARGET (or `budget`, when lower), or over `budget` by the static estimate when it cannot be simulated,
+   * it is refused (RENEWAL_TOO_LARGE) and nothing is held for signing: no silent second step.
+   */
+  private async oneTxV4(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, keys: string[], revokes: Hex[], mode: 'full' | 'extend', budget: bigint, reserve?: LiveGasReserve) {
+    const ordered = orderV4Keys(policy, keys)
+    const target = budget < V4_TX_GAS_TARGET ? budget : V4_TX_GAS_TARGET
+    const a = await this.approval(acc, live, policy, r, cap, ordered, mode, reserve)
+    const calls = [...revocationCalls(revokes, this.cfg.registry), ...a.batch.calls]
+    const limit = await this.ownerTxGasLimit(live, calls, r.block)
+    const overheadGas = BigInt(revokes.length) * REVOKE_GAS_EACH + (acc.trusted ? 0n : TRUST_GAS) + ATTEST_GAS + (reserve ? STATIC_GAS_RESERVE_SWAP : 0n)
+    const fallback = overheadGas + a.stored.reduce((n, g) => n + estimateSessionGas(g.grant.actions.length), 0n)
+    const sim = limit === null ? await this.activationGasOf(live, calls, a.stored.length, r.block, fallback) : { gas: limit, simulated: true }
+    // As fitV4: the per-call simulation is bounded up by 5/4 for the refunds a revoke nets out of it.
+    const gas = limit !== null || !sim.simulated ? sim.gas : (sim.gas * 5n) / 4n
+    if (gas > (sim.simulated ? target : budget)) {
+      logErr(`[v4] ${acc.accountKey} one-transaction approval ~${gas} gas${sim.simulated ? ' (simulated)' : ' (estimated)'} over ${sim.simulated ? target : budget}:`, { sessions: a.stored.length, revokes: revokes.length })
+      throw new HttpError(409, 'RENEWAL_TOO_LARGE', 'this approval does not fit one transaction on Base: nothing was changed, Mamoru keeps running')
+    }
+    console.log(`[v4] ${live.safe} ~${gas} gas${sim.simulated ? ' (simulated)' : ' (estimated)'}: ${a.stored.length} sessions in one transaction (generation ${a.v4?.generation}), ${revokes.length} revoked`)
+    return { ...a, calls, rest: [] as string[], steps: 1 }
   }
 
   /**
@@ -2141,10 +2178,11 @@ export class Operator {
         ...(paused ? ['A guardian key has paused Mamoru on this Safe. This renewal ends that pause: approve it only if you know why it was paused'] : []),
         target ? `Renew Mamoru's approval on your Safe ${live.safe} and move it to ${toV5 ? 'the new version of its on-chain limits' : 'on-chain limits'}` : `Renew Mamoru's approval on your Safe ${live.safe}`,
         ...(target ? ['Mamoru can now trade only near the market price, and only the positions it opened'] : []),
-        ...(target?.remoteBuckets?.length ? [`Mamoru can also move part of your savings, as USDC through Circle's bridge, to your own address on Monad, where your Monad sleeve holds the Growth share; USDC/cbBTC is only wound down, nothing new goes into it`] : []),
+        // otto/mamoru#225: v7 says what goes on in USDC/cbBTC in that pool's own block (approvalLines), not here again.
+        ...(target?.remoteBuckets?.length ? [`Mamoru can also move part of your savings, as USDC through Circle's bridge, to your own address on Monad, where your Monad sleeve holds the Growth share${oneTransaction(target) ? '' : '; USDC/cbBTC is only wound down, nothing new goes into it'}`] : []),
         ...(toV5 ? ['It can add to a position it already holds instead of opening another one', 'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause'] : []),
         `Engine key ${f.sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero, sized for deposits up to ${fmtUsdc(cap)} USDC (your cap):`,
-        ...this.v4Lines(f.stored, policy, cap),
+        ...this.approvalLines(f.stored, policy, cap),
         ...capChange(signed, cap),
         ...(f.v4?.admitted ? [`Your ${f.v4.admitted} open position${f.v4.admitted === 1 ? '' : 's'} stay under Mamoru's management`] : []),
         'The approval it replaces is revoked in the same transaction',
@@ -2194,7 +2232,7 @@ export class Operator {
       const summary = [
         `Finish Mamoru's approval on your Safe ${live.safe}: ${this.poolsOf(f.stored.map((g) => g.name))}`,
         `Engine key ${f.sessionKey} may, for the rest of this approval and within limits sized for deposits up to ${fmtUsdc(cap)} USDC:`,
-        ...this.v4Lines(f.stored, policy, cap),
+        ...this.approvalLines(f.stored, policy, cap),
         ...(f.v4?.admitted ? [`Your ${f.v4.admitted} open position${f.v4.admitted === 1 ? '' : 's'} there stay under Mamoru's management`] : []),
         ...this.stepLines(f.steps, f.rest),
         ...this.capNotice(acc, cap),
@@ -2301,6 +2339,40 @@ export class Operator {
       const ops = stored.reduce((n, g) => n + BigInt(g.grant.userOp.usageLimit), 0n)
       lines.push(`Each engine transaction pays at most ${fmtUnits(per, 18)} ETH of network fee (at most ${fmtUnits(caps.maxFeePerGas, 9)} gwei per gas), from your Safe's ETH; these grants allow ${ops.toLocaleString('en-US')} transactions in all`)
     }
+    return lines
+  }
+
+  /** The limits lines of a v4 approval: one block per pool for a one-transaction policy (v7), else v4Lines. */
+  private approvalLines(stored: StoredGrant[], policy: PolicyVersion, cap: bigint): string[] {
+    return oneTransaction(policy) ? this.v7Lines(stored, policy, cap) : this.v4Lines(stored, policy, cap)
+  }
+
+  /**
+   * otto/mamoru#225 (#41: the meaning must match what is signed): one line per pool session of a v7 approval, read from
+   * the grants and Inits being enabled: what that session lets the engine do in the pool (a session without mint is an
+   * exit only, said so), the price band and budget MamoruActionPolicyV2 holds it to, and how many transactions it allows.
+   * Then bridge-out and the gas cap as v4Lines. Validity is the summary's own line (the same for every grant).
+   */
+  private v7Lines(stored: StoredGrant[], policy: PolicyVersion, cap: bigint): string[] {
+    const budgets = v4BudgetCaps(policy, cap)
+    const lines = stored.filter((g) => g.grant.pool && !g.grant.requiresPauseGate).map((g) => {
+      const pool = g.grant.pool!
+      const label = poolLabel(pool, this.cfg.registry)
+      const spec = v4PoolOf(pool, policy.sourceChainId)
+      if (!spec) return `In ${label}: no on-chain limits`
+      const enters = g.grant.actions.some((a) => a.signature.startsWith('mint('))
+      const what = enters ? `swap ${spec.stable} and ${spec.volatile}, open, add to, take out, collect and close positions` : `only take out, collect and close positions and sell ${spec.volatile} for ${spec.stable}; nothing new goes in`
+      const band = `${(spec.bandTicks / 100).toFixed(2)}%`
+      const anchor = spec.anchor ? ` and ${(spec.anchor.band / 100).toFixed(2)}% of 1:1` : ''
+      const day = budgets[spec.caps.budgetWindow] ?? 0n
+      const total = budgets[spec.caps.budgetTotal] ?? 0n
+      return `In ${label}: ${what}; only within ${band} of the 30- and 5-minute average price${anchor}; swaps and new positions worth at most ${fmtUsdc(day)} USDC a day and ${fmtUsdc(total)} USDC in total; at most ${g.grant.userOp.usageLimit.toLocaleString('en-US')} transactions`
+    })
+    if (stored.some((g) => g.name === 'bridge-out')) {
+      lines.push(`Bridge: it may burn USDC with Circle's CCTP only to your own address on Monad (never to another address, never any fee), at most ${fmtUsdc(budgets.bridgePerCall ?? 0n)} USDC a time and ${fmtUsdc(budgets.bridgeTotal ?? 0n)} USDC in total on this approval; a guardian pause stops it`)
+    }
+    const caps = policy.actionPolicy?.gasPolicy?.caps
+    if (caps) lines.push(`Each engine transaction pays at most ${fmtUnits(maxGasCostPerOp(caps), 18)} ETH of network fee (at most ${fmtUnits(caps.maxFeePerGas, 9)} gwei per gas), from your Safe's ETH`)
     return lines
   }
 
@@ -2812,7 +2884,7 @@ export class Operator {
           : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(cap)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
         ...(policy.remoteBuckets ?? []).map((b) => `${b.preference / 100}% of your savings goes to Growth on ${chainOf(b.chainId).name}, to your own address there, through Circle's bridge; your ${chainOf(b.chainId).name} sleeve runs it`),
         `Engine key ${f.sessionKey} may swap USDC into those pools' tokens, open positions there, and take out, collect and close only the positions it opened, only near the market price, for ${days} days:`,
-        ...this.v4Lines(f.stored, policy, cap),
+        ...this.approvalLines(f.stored, policy, cap),
         ...this.stepLines(f.steps, f.rest),
         `Whatever it collects, mints or swaps is paid to your Safe, never to anyone else. Cap ${fmtUsdc(cap)} USDC`,
       ]

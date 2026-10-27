@@ -6,7 +6,7 @@ import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, chainWritesOptIn, isChainId, type Address } from '@mamoru/domain'
 import { address as registryAddress, baseRegistry, entry, isDeployed, messageTransmitterV2Abi, monadRegistry, registryFor, type Registry } from '@mamoru/registry'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
-import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLabV6, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, labWmonUsdcMonadV5, liveWmonUsdcMonadV5, MONAD_GAS_CAPS, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V4_POOLS_MONAD, type PolicyVersion } from '@mamoru/policy'
+import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLabV6, conservadorLabV7, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, conservadorLiveV7, labWmonUsdcMonadV5, liveWmonUsdcMonadV5, MONAD_GAS_CAPS, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V4_POOLS_MONAD, type PolicyVersion } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics, logErr } from './metrics.ts'
@@ -58,6 +58,8 @@ const V4_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV4.po
 const V5_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV5.policyId]: conservadorLiveV5, [conservadorLabV5.policyId]: conservadorLabV5 }
 /** otto/mamoru#214: `conservadorLiveV6`/`conservadorLabV6` (Base + Monad growth, bridge-out behind MamoruPauseGate) — never in `POLICIES` either. */
 const V6_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV6.policyId]: conservadorLiveV6, [conservadorLabV6.policyId]: conservadorLabV6 }
+/** otto/mamoru#225: `conservadorLiveV7`/`conservadorLabV7` (v6 in one session per pool), wired exactly like v6 — never in `POLICIES` either. */
+const V7_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV7.policyId]: conservadorLiveV7, [conservadorLabV7.policyId]: conservadorLabV7 }
 
 /**
  * Spec 007 (otto/mamoru#151) T7: a v2/v3 `policyId` (the only kind any live account names today) resolves exactly
@@ -87,7 +89,7 @@ export function resolveNamedPolicy(policyId: string, env: Record<string, string 
   const v5 = V5_POLICIES_BY_ID[policyId]
   if (v5) return env.MAMORU_ACTION_POLICY_V2_ADDRESS ? deployedV5(v5, env) : undefined
   // otto/mamoru#214: v6 also needs MamoruPauseGate; without it (or V2) it is not offered. Boot refuses it as the default (assertBootPolicies).
-  const v6 = V6_POLICIES_BY_ID[policyId]
+  const v6 = V6_POLICIES_BY_ID[policyId] ?? V7_POLICIES_BY_ID[policyId]
   if (v6) return env.MAMORU_ACTION_POLICY_V2_ADDRESS && env.MAMORU_PAUSE_GATE_ADDRESS ? deployedV6(v6, env) : undefined
   const v4 = V4_POLICIES_BY_ID[policyId]
   if (!v4) return undefined
@@ -184,6 +186,17 @@ export function resolveV6Policy(chain: PolicyVersion['chain'], env: Record<strin
 }
 
 /**
+ * otto/mamoru#225: the v7 policy (v6 with one session per pool, one owner transaction) the renew row may move this
+ * operator's v2-v6 accounts to, under exactly v6's conditions (the v4 opt-in, V2 and the pause gate; fail closed).
+ * Whether an account is offered the move is the D1 flag `merged_grants_v7`, read on every view.
+ */
+export function resolveV7Policy(chain: PolicyVersion['chain'], env: Record<string, string | undefined>): PolicyVersion | undefined {
+  if (chain === 'monad') return undefined
+  if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1' || !env.MAMORU_ACTION_POLICY_V2_ADDRESS || !env.MAMORU_PAUSE_GATE_ADDRESS) return undefined
+  return deployedV6(chain === conservadorLiveV7.chain ? conservadorLiveV7 : conservadorLabV7, env)
+}
+
+/**
  * Spec 007 T7 (d): the v4 policy the renew row may move this operator's v2/v3 accounts to (same chain as the
  * operator's own policy), or undefined when the opt-in is off. Read at boot like `resolveNamedPolicy`; whether an
  * account is offered the move is the D1 flag `onchain_action_policy_v4`, read on every view.
@@ -207,7 +220,8 @@ export function assertMonadV5Resolvable(accounts: readonly { accountKey: string;
 
 /** Accounts whose stored policy is a v4 one, when this operator was started without the v4 opt-in or its addresses. */
 export function assertV4Resolvable(accounts: readonly { accountKey: string; policyId?: string }[], env: Record<string, string | undefined>): void {
-  const v6Ids = new Set([conservadorLiveV6.policyId, conservadorLabV6.policyId])
+  // otto/mamoru#225: v7 needs exactly what v6 needs.
+  const v6Ids = new Set([conservadorLiveV6.policyId, conservadorLabV6.policyId, conservadorLiveV7.policyId, conservadorLabV7.policyId])
   const onV6 = accounts.filter((a) => a.policyId && v6Ids.has(a.policyId))
   if (onV6.length) {
     let v6: PolicyVersion | undefined
@@ -216,7 +230,7 @@ export function assertV4Resolvable(accounts: readonly { accountKey: string; poli
     } catch {
       v6 = undefined
     }
-    if (!v6) throw new Error(`${onV6.length} account(s) run conservador-live-v6 (${onV6.map((a) => a.accountKey.slice(0, 8)).join(', ')}): start with MAMORU_ONCHAIN_POLICY_V4=1, MAMORU_ACTION_POLICY_V2_ADDRESS, MAMORU_GAS_POLICY_ADDRESS and MAMORU_PAUSE_GATE_ADDRESS set`)
+    if (!v6) throw new Error(`${onV6.length} account(s) run ${onV6[0]!.policyId} (${onV6.map((a) => a.accountKey.slice(0, 8)).join(', ')}): start with MAMORU_ONCHAIN_POLICY_V4=1, MAMORU_ACTION_POLICY_V2_ADDRESS, MAMORU_GAS_POLICY_ADDRESS and MAMORU_PAUSE_GATE_ADDRESS set`)
   }
   const v5Ids = new Set([conservadorLiveV5.policyId, conservadorLabV5.policyId])
   const onV5 = accounts.filter((a) => a.policyId && v5Ids.has(a.policyId))
@@ -475,9 +489,11 @@ export function assertPauseGateOnRegistry(policy: PolicyVersion, registry: Regis
  * has not pinned: while MamoruPauseGate is `undeployed` such a boot is refused, so v6 goes live only with base.json's
  * pin. With writes off Base, the v6 target also gets `assertActionPolicyOnRegistry`, like the default policy.
  */
-export function assertBootPolicies(policy: PolicyVersion, v6Policy: PolicyVersion | undefined, registry: Registry, mode: { live?: boolean; writes?: boolean } = {}): void {
+export function assertBootPolicies(policy: PolicyVersion, targets: PolicyVersion | readonly (PolicyVersion | undefined)[] | undefined, registry: Registry, mode: { live?: boolean; writes?: boolean } = {}): void {
   if (policy.remoteBuckets?.length) throw new Error(`${policy.policyId} has a bucket on another chain: it is a renewal target only, never the default policy (an activation does not check the owner's sleeve)`)
-  for (const p of [policy, ...(v6Policy ? [v6Policy] : [])]) {
+  // otto/mamoru#225: the v7 renew target is checked like v6's.
+  const extra = (Array.isArray(targets) ? targets : [targets]).filter((p): p is PolicyVersion => !!p)
+  for (const p of [policy, ...extra]) {
     assertPolicyOnRegistry(p, registry)
     assertPauseGateOnRegistry(p, registry)
     if ((mode.live || mode.writes) && p.actionPolicy?.pauseGate && !isDeployed('MamoruPauseGate', registry)) {
@@ -542,7 +558,8 @@ export async function bootOperator(o: BootOptions) {
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
   const policy = withTestOverrides(named, process.env)
   const v6Policy = resolveV6Policy(policy.chain, process.env)
-  assertBootPolicies(policy, v6Policy, registry, { live, writes: writes.on })
+  const v7Policy = resolveV7Policy(policy.chain, process.env)
+  assertBootPolicies(policy, [v6Policy, v7Policy], registry, { live, writes: writes.on })
   if (writes.on) assertWritePolicy(policy, registry, chainId)
   const store = new StateStore(o.stateDir)
   // Review round 2: an account already moved to the on-chain action policy needs that policy to resolve after a
@@ -627,6 +644,7 @@ export async function bootOperator(o: BootOptions) {
       ...(resolveV4Policy(policy.chain, process.env) ? { v4Policy: resolveV4Policy(policy.chain, process.env) } : {}),
       ...(resolveV5Policy(policy.chain, process.env) ? { v5Policy: resolveV5Policy(policy.chain, process.env) } : {}),
       ...(v6Policy ? { v6Policy } : {}),
+      ...(v7Policy ? { v7Policy } : {}),
       guardReadsState: new GuardReadsState(o.stateDir),
       ...(peers ? { peers } : {}),
       ...(bridgeMonad ? { bridgeMonad } : {}),
