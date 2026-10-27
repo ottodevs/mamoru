@@ -25,6 +25,21 @@ describe('ModelPlaneClient (AL-30/AL-31/AL-32)', () => {
     server = null
   })
 
+  test('keeps the thinking_blocks model-plane returns, so the next turn can replay them unchanged', async () => {
+    const blocks = [{ type: 'thinking', thinking: '', signature: 'sig-1' }]
+    server = Bun.serve({
+      port: 0,
+      fetch: () =>
+        Response.json({
+          choices: [{ index: 0, message: { role: 'assistant', content: null, thinking_blocks: blocks }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+    })
+    const client = new ModelPlaneClient({ baseUrl: `http://127.0.0.1:${server.port}`, models: ['alias-a'] })
+    const reply = await client.complete({ messages: MESSAGES, tools: TOOLS })
+    expect(reply.message.thinking_blocks).toEqual(blocks)
+  })
+
   test('calls the first configured model and parses its reply, including which resource answered', async () => {
     server = Bun.serve({
       port: 0,

@@ -129,6 +129,9 @@ export class ModelPlaneClient implements ModelClient {
         content: choice.message.content ?? null,
         tool_calls: choice.message.tool_calls as ChatMessage['tool_calls'],
       }
+      // Claude 5.5 needs its thinking blocks replayed unchanged in the next turn (model-plane carries them here).
+      const thinking = (choice.message as { thinking_blocks?: unknown }).thinking_blocks
+      if (Array.isArray(thinking) && thinking.length > 0) message.thinking_blocks = thinking
       return {
         message,
         usage: { prompt_tokens: json.usage?.prompt_tokens ?? 0, completion_tokens: json.usage?.completion_tokens ?? 0 },
