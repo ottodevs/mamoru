@@ -2,7 +2,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { PublicClient } from 'viem'
 import { baseRegistry, monadRegistry } from '@mamoru/registry'
-import { assertBaseOnlyFeatures, checkMonadRpc } from '../src/boot.ts'
+import { assertBaseOnlyFeatures, checkMonadRpc, monadMintRefusal, MonadRpcUnreachable } from '../src/boot.ts'
 
 const rpc = (chainId: number, domain: number | Error) =>
   ({
@@ -25,5 +25,18 @@ describe('the Monad bridge leg at boot', () => {
     await expect(checkMonadRpc(rpc(143, 6))).rejects.toThrow('domain 6')
     await expect(checkMonadRpc(rpc(143, new Error('https://key@monad.example failed')))).rejects.toThrow('(unreachable)')
     await expect(checkMonadRpc(rpc(143, new Error('https://key@monad.example failed')))).rejects.not.toThrow('key@')
+  })
+
+  test('review of #144: Monad unreachable is its own error (the boot goes on, the leg waits); a wrong chain still refuses', async () => {
+    const e = await checkMonadRpc(rpc(143, new Error('down'))).catch((x: unknown) => x)
+    expect(e).toBeInstanceOf(MonadRpcUnreachable)
+    const wrong = await checkMonadRpc(rpc(8453, 15)).catch((x: unknown) => x)
+    expect(wrong).not.toBeInstanceOf(MonadRpcUnreachable)
+  })
+
+  test('review of #144: mints on Monad only from a live Base operator', () => {
+    expect(monadMintRefusal({ chainId: 8453, live: true })).toBeNull()
+    expect(monadMintRefusal({ chainId: 8453, live: false })).toContain('MAMORU_LIVE')
+    expect(monadMintRefusal({ chainId: 143, live: true })).toContain('Base operator only')
   })
 })

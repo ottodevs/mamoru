@@ -243,9 +243,10 @@ export type EngineConfig = {
    * otto/mamoru#215: the account's value on other chains for the policy's `remoteBuckets` (its sleeve there valued at the
    * TWAP, plus every bridge burned here and not yet minted there), read at every review as `Observation.remote`. Throws
    * (any error): the review holds as an observation failure. Absent: no `remote` (a remote bucket then waits with
-   * DECIDE_WAIT_BRIDGE and nothing is bridged).
+   * DECIDE_WAIT_BRIDGE and nothing is bridged). `block` is the observation's block on this chain: a bridge signed but
+   * not yet landed there is still in the local balances read at it, and is not counted in flight a second time.
    */
-  remote?: () => Promise<NonNullable<Observation['remote']>>
+  remote?: (block: bigint) => Promise<NonNullable<Observation['remote']>>
 }
 
 /** Live op states whose signed bytes may still land or have landed without being settled here (Engine.carried). */
@@ -272,6 +273,11 @@ export type EngineHooks = {
    * engine never signs a bridge-out.
    */
   beforeBridgeSign?: (b: BridgeSigning) => void
+  /**
+   * Review of #144: a bridge-out journaled by `beforeBridgeSign` whose signing then failed: no signed bytes exist, so it
+   * can never burn. The journal stops counting it in flight. Errors here are ignored (the chain settles it later).
+   */
+  bridgeUnsigned?: (userOpHash: Hex) => void
 }
 
 /** The block of the latest operation that reached the chain: no review may observe before it. */
@@ -563,7 +569,7 @@ export class Engine {
     // decision without it would size the local buckets on part of the account.
     if (this.cfg.remote) {
       try {
-        obs = { ...obs, remote: await this.cfg.remote() }
+        obs = { ...obs, remote: await this.cfg.remote(obs.block.number) }
       } catch (e) {
         if (e instanceof ReasonError) return { kind: 'observation-failed', code: e.code, detail: e.detail }
         return { kind: 'observation-failed', code: 'OBS_RPC_UNAVAILABLE', detail: `remote value: ${(e as Error).message?.split('\n')[0] ?? String(e)}` }
@@ -733,7 +739,7 @@ export class Engine {
       const refusal = this.journalBridge(op.opId, proposal, hash, nonce, block.number)
       if (refusal) return void j.move(op.opId, 'discarded', 'BRIDGE_JOURNAL_UNAVAILABLE', {}, refusal)
     }
-    const signed = await signSessionUserOp(userOp, this.cfg.chainId, session.permissionId, this.cfg.sessionKey, this.registry)
+    const signed = await this.signUserOp(proposal, userOp, hash, session.permissionId)
     j.move(op.opId, 'signed', 'OP_SIGNED', { userOp: signed, userOpHash: hash })
 
     // send: the same bytes to a standard ERC-4337 endpoint.
@@ -790,6 +796,21 @@ export class Engine {
       await this.hooks.waitBlock()
     }
     // Still above `safe`: stays `included`; the next review holds on the busy slot.
+  }
+
+  /** Signs the userOp; a bridge-out whose signing fails is handed back to the journal as never signed (review of #144). */
+  private async signUserOp(proposal: Proposal, userOp: Parameters<typeof signSessionUserOp>[0], hash: Hex, permissionId: Hex): ReturnType<typeof signSessionUserOp> {
+    try {
+      return await signSessionUserOp(userOp, this.cfg.chainId, permissionId, this.cfg.sessionKey, this.registry)
+    } catch (e) {
+      // Journaled but never signed: nothing can land, so the journal must not keep it in flight.
+      if (proposal.kind === 'bridge_out') {
+        try {
+          this.hooks.bridgeUnsigned?.(hash)
+        } catch {}
+      }
+      throw e
+    }
   }
 
   /**

@@ -4,7 +4,7 @@ import { $ } from 'bun'
 import { TransactionReceiptNotFoundError, createPublicClient, getAddress, http, isAddress, type Hex, type PublicClient } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, chainWritesOptIn, isChainId, type Address } from '@mamoru/domain'
-import { address as registryAddress, entry, isDeployed, messageTransmitterV2Abi, registryFor, type Registry } from '@mamoru/registry'
+import { address as registryAddress, baseRegistry, entry, isDeployed, messageTransmitterV2Abi, monadRegistry, registryFor, type Registry } from '@mamoru/registry'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
 import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLabV6, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, labWmonUsdcMonadV5, liveWmonUsdcMonadV5, MONAD_GAS_CAPS, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V4_POOLS_MONAD, type PolicyVersion } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
@@ -407,7 +407,21 @@ export function assertBaseOnlyFeatures(registry: Registry, env: Record<string, s
 /**
  * otto/mamoru#215: the Monad RPC of the bridge leg must answer chain 143, and CCTP's MessageTransmitterV2 there must be
  * domain 15; anything else refuses the boot. viem errors quote the URL (it may carry a key): only fixed text leaves.
+ * Unreachable is its own error (MonadRpcUnreachable): the boot goes on with the bridge leg waiting for Monad (review of #144).
  */
+export class MonadRpcUnreachable extends Error {}
+
+/**
+ * Review of #144: why the Base operator's relayer key may not send mints on Monad, or null when it may: only a live
+ * operator (MAMORU_LIVE=1) on Base, the same switch that lets it write on Base. Refused, the bridge leg gets no relayer
+ * (a mint by anyone else is still recorded) and the Relayer itself carries the refusal.
+ */
+export function monadMintRefusal(o: { chainId: number; live: boolean }): string | null {
+  if (o.chainId !== BASE_CHAIN_ID) return `the bridge leg runs on the Base operator only (chain ${o.chainId})`
+  if (!o.live) return 'read only (MAMORU_LIVE is not 1): no mint is sent on Monad'
+  return null
+}
+
 export async function checkMonadRpc(monad: Pick<PublicClient, 'getChainId' | 'readContract'>): Promise<void> {
   let chainId: number
   let domain: number
@@ -415,7 +429,7 @@ export async function checkMonadRpc(monad: Pick<PublicClient, 'getChainId' | 're
     chainId = await monad.getChainId()
     domain = chainId === BRIDGE_MONAD_CHAIN_ID ? await monad.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: messageTransmitterV2Abi, functionName: 'localDomain' }) : -1
   } catch {
-    throw new Error('MAMORU_MONAD_RPC_URL is not a reachable Monad RPC (unreachable)')
+    throw new MonadRpcUnreachable('MAMORU_MONAD_RPC_URL is not a reachable Monad RPC (unreachable)')
   }
   if (chainId !== BRIDGE_MONAD_CHAIN_ID) throw new Error(`MAMORU_MONAD_RPC_URL is not a Monad Mainnet RPC (chain ${chainId}, want ${BRIDGE_MONAD_CHAIN_ID})`)
   if (domain !== CCTP_DOMAIN_MONAD) throw new Error(`MAMORU_MONAD_RPC_URL: MessageTransmitterV2 answers domain ${domain}, not Monad's ${CCTP_DOMAIN_MONAD}`)
@@ -550,13 +564,24 @@ export async function bootOperator(o: BootOptions) {
   let bridgeMonad: MonadBridge | null = null
   if (o.monadRpcUrl) {
     const monad = createPublicClient({ transport: http(o.monadRpcUrl, { batch: true, timeout: 30_000 }) })
-    await checkMonadRpc(monad)
-    const monadRelayer = new Relayer(relayerKey, monad, o.monadRpcUrl, BRIDGE_MONAD_CHAIN_ID)
-    bridgeMonad = new MonadBridge(o.stateDir, client, monad, monadRelayer)
+    // Review of #144: a wrong chain or domain refuses the boot; Monad unreachable does not stop the Base operator: the
+    // leg starts without reading or sending anything on Monad until the same check passes.
+    let checked = true
+    try {
+      await checkMonadRpc(monad)
+    } catch (e) {
+      if (!(e instanceof MonadRpcUnreachable)) throw e
+      checked = false
+      console.error('[operator] MAMORU_MONAD_RPC_URL unreachable at boot: the bridge leg waits for it (no Monad read, no mint)')
+    }
+    // Review of #144: mints are writes; only a live Base operator sends them, and its relayer carries the same refusal.
+    const mintRefusal = monadMintRefusal({ chainId, live })
+    const monadRelayer = mintRefusal === null ? new Relayer(relayerKey, monad, o.monadRpcUrl, BRIDGE_MONAD_CHAIN_ID, mintRefusal) : null
+    bridgeMonad = new MonadBridge(o.stateDir, client, monad, monadRelayer, fetch, Date.now, baseRegistry, monadRegistry, checked ? undefined : () => checkMonadRpc(monad))
     const bm = bridgeMonad
     setInterval(() => void bm.tick(), 60_000)
     void bm.tick()
-    console.log(`[operator] bridge leg to Monad on (v6 accounts): ${bm.pendingCount()} burn(s) in flight, mints from relayer ${monadRelayer.address} on Monad`)
+    console.log(`[operator] bridge leg to Monad on (v6 accounts): ${bm.pendingCount()} burn(s) in flight, ${monadRelayer ? `mints from relayer ${monadRelayer.address} on Monad` : `no mints (${mintRefusal})`}`)
   }
   const bundler = refusal === null ? startLiveBundler(client, relayer, chainId, writes.on ? { registry, gasModel: chainOf(registry.chainId).gasModel } : {}) : null
   const knobs = capAndDepth(o, policy)
