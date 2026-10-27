@@ -553,6 +553,11 @@ describe('renewing the approval', () => {
     expect(up.text).toContain('it would trade only near the market price, and only the positions it opened')
     expect(up.text).toContain('Renew approval')
     expect(approvalTitle({ ...year, renewDue: true, upgrade: true })).toContain('approval ends on')
+    // otto/mamoru#212: a raised cap is offered as a renewal, with both figures.
+    const raised = { ...year, capRaise: { capUsdc: '5000000000', signedUsdc: '1000000000' } }
+    expect(approvalTitle(raised)).toMatch(/^Your limit is now 5,?000(\.00)? USDC\. Mamoru keeps to the 1,?000(\.00)? USDC you approved until you renew its approval\.$/)
+    expect(approvalHeading(raised).lead).toBe(approvalTitle(raised))
+    expect(approvalRowKey(raised)).not.toBe(approvalRowKey(year))
     expect(approvalRowKey({ ...year, upgrade: true })).not.toBe(approvalRowKey(year))
     // otto/mamoru#151: the move to MamoruActionPolicyV2 (v5) says what it adds.
     expect(approvalTitle({ ...year, upgrade: true, upgradePolicy: 'conservador-live-v5' })).toContain('adds to a position it already holds instead of opening another')
@@ -704,6 +709,17 @@ describe('funds by token and what Mamoru is doing', () => {
     expect(engineLine({ ...midEntry, usdc: '10000', engine: { placing: true, nextReviewAt: at } })).toBe('Placing your money. The next step starts in a few seconds.')
     expect(engineLine({ ...midEntry, active: false })).toBeNull()
     expect(engineLine({ ...midEntry, engine: null })).toBeNull()
+  })
+
+  test('otto/mamoru#212: past the cap new money stays idle and says so; another network unread says so', () => {
+    const at = new Date('2026-10-27T10:00:00Z').toISOString()
+    const engine = { placing: false, nextReviewAt: at }
+    const over = engineLine({ ...midEntry, usdc: '500000000', exposure: { totalUsdc: '1500000000', capUsdc: '1000000000', overUsdc: '500000000' }, engine })!
+    expect(over).toMatch(/^500\.00 USDC above your 1,?000(\.00)? USDC limit stays idle\.$/)
+    // Over only by what the positions gained: the idle USDC is what stays idle, nothing is sold.
+    expect(engineLine({ ...midEntry, usdc: '20000000', exposure: { totalUsdc: '1500000000', capUsdc: '1000000000', overUsdc: '500000000' }, engine })).toMatch(/^20\.00 USDC above your/)
+    expect(engineLine({ ...midEntry, exposure: { totalUsdc: '900000000', capUsdc: '1000000000', overUsdc: '0' }, engine })!.startsWith('Nothing to do right now.')).toBe(true)
+    expect(engineLine({ ...midEntry, exposure: { totalUsdc: '900000000', capUsdc: '1000000000', overUsdc: '0', peerUnavailable: true }, engine })).toBe('Mamoru is adding nothing new right now: your balance on the other network could not be read. It tries again shortly.')
   })
 
   test('money held back on purpose says why and when it was checked (otto/mamoru#128)', () => {

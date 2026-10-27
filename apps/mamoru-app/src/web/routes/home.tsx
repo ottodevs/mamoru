@@ -80,6 +80,10 @@ export const homeCopy = {
   waitDepth: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: the ${pair} pool is not deep enough for more right now. Checked at ${time}.`,
   waitFall: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: ${pair} is falling fast, so Mamoru adds nothing there until it settles. Checked at ${time}.`,
   waitMany: (amount: string, n: number, why: string, time: string) => `${amount} USDC is waiting in ${n} pools: ${why}. Checked at ${time}.`,
+  // otto/mamoru#212: the cap holds the account's total across every network; above it, new money stays idle.
+  overLimit: (amount: string, cap: string) => `${amount} USDC above your ${cap} USDC limit stays idle.`,
+  peerUnread: 'Mamoru is adding nothing new right now: your balance on the other network could not be read. It tries again shortly.',
+  capRaiseTitle: (cap: string, signed: string) => `Your limit is now ${cap} USDC. Mamoru keeps to the ${signed} USDC you approved until you renew its approval.`,
   whyDepth: 'they are not deep enough for more right now',
   whyFall: 'their markets are falling fast',
   whyBoth: 'some are not deep enough for more right now, some are falling fast',
@@ -410,6 +414,11 @@ export function engineLine(f: FundingView): string | null {
   if (!f.active || !f.engine) return null
   // Under the smallest entry (10 cents) a remainder is rounding, never named as money on its way (otto/mamoru#194).
   if (f.engine.placing) return BigInt(f.usdc) >= MIN_ENTRY_USDC ? homeCopy.putting(usd(f.usdc)) : homeCopy.placing
+  // otto/mamoru#212: past the cap (counted across networks) new money stays idle; gains on what is placed are kept.
+  if (f.exposure?.peerUnavailable) return homeCopy.peerUnread
+  const over = BigInt(f.exposure?.overUsdc ?? '0')
+  const held = over < BigInt(f.usdc) ? over : BigInt(f.usdc)
+  if (held >= MIN_ENTRY_USDC) return homeCopy.overLimit(usd(held), usdPlain(f.exposure!.capUsdc))
   // otto/mamoru#128: money held back on purpose says why, so a still account never looks stopped.
   const waits = (f.engine.waiting ?? []).filter((w) => w.code === 'DECIDE_WAIT_DEPTH' || w.code === 'DECIDE_ENTRY_PAUSED_FALL')
   if (waits.length) {
@@ -817,7 +826,7 @@ export function approvalDay(validUntil: number): string {
  * grants missing), so the row mounts afresh and offers the next approval instead of staying hidden on the last result.
  */
 export function approvalRowKey(approval: NonNullable<FundingView['approval']>): string {
-  return `${approval.validUntil}-${approval.missing ?? 0}${approval.usage ? `-${approval.usage.spent ? 'spent' : 'used'}` : ''}${approval.upgrade ? `-upgrade-${approval.upgradePolicy ?? ''}` : ''}${approval.paused ? '-paused' : ''}`
+  return `${approval.validUntil}-${approval.missing ?? 0}${approval.usage ? `-${approval.usage.spent ? 'spent' : 'used'}` : ''}${approval.upgrade ? `-upgrade-${approval.upgradePolicy ?? ''}` : ''}${approval.paused ? '-paused' : ''}${approval.capRaise ? `-cap-${approval.capRaise.capUsdc}` : ''}`
 }
 
 /**
@@ -855,7 +864,9 @@ export function approvalTitle(approval: NonNullable<FundingView['approval']>): s
   if (approval.expired) return homeCopy.renewEnded
   if (u?.spent) return usage!
   if (approval.renewDue) return homeCopy.renewSoon(approvalDay(approval.validUntil))
-  return usage ?? (approval.upgrade ? (approval.upgradePolicy?.includes('-v5') ? homeCopy.upgradeV5Title : homeCopy.upgradeTitle) : homeCopy.extendTitle)
+  if (usage) return usage
+  if (approval.capRaise) return homeCopy.capRaiseTitle(usdPlain(approval.capRaise.capUsdc), usdPlain(approval.capRaise.signedUsdc))
+  return approval.upgrade ? (approval.upgradePolicy?.includes('-v5') ? homeCopy.upgradeV5Title : homeCopy.upgradeTitle) : homeCopy.extendTitle
 }
 
 /**
@@ -872,7 +883,7 @@ export function ApprovalRow({ approval, onOpen }: { approval: NonNullable<Fundin
         <span className="sub">{homeCopy.renewNote}</span>
       </span>
       <button type="button" className="act" onClick={onOpen}>
-        {approval.renewDue || approval.usage || approval.upgrade || approval.expired ? homeCopy.renew : homeCopy.extend}
+        {approval.renewDue || approval.usage || approval.upgrade || approval.expired || approval.capRaise ? homeCopy.renew : homeCopy.extend}
       </button>
     </section>
   )
@@ -887,6 +898,7 @@ export function approvalHeading(approval: NonNullable<FundingView['approval']>):
   if (u?.spent) return { title: `Mamoru has stopped ${what}`, lead: 'It used all that this approval allows. Renewing restores its limits, counted from zero.' }
   if (approval.renewDue) return { title: homeCopy.renewAskTitle, lead: `It ends on ${approvalDay(approval.validUntil)}. Renewing keeps Mamoru working for you.` }
   if (u) return { title: 'Renew before a limit runs out', lead: `Mamoru has used most of what this approval allows for ${what}. Renew now so that does not stop.` }
+  if (approval.capRaise) return { title: homeCopy.renewAskTitle, lead: homeCopy.capRaiseTitle(usdPlain(approval.capRaise.capUsdc), usdPlain(approval.capRaise.signedUsdc)) }
   if (approval.upgrade) return { title: homeCopy.renewAskTitle, lead: approval.upgradePolicy?.includes('-v5') ? homeCopy.upgradeV5Title : homeCopy.upgradeTitle }
   return { title: 'Let Mamoru work in every pool', lead: 'Part of the approval is missing: in some pools Mamoru cannot re-range or collect fees until you add it.' }
 }
@@ -1158,7 +1170,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
             </>
           ) : canStart ? (
             <StartRow accountKey={accountKey} funded={hasMoney(f)} />
-          ) : f.active && f.approval && approvalOpen && (f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade) && !renewing ? (
+          ) : f.active && f.approval && approvalOpen && (f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade || f.approval.capRaise) && !renewing ? (
             <ApprovalRow key={approvalRowKey(f.approval)} approval={f.approval} onOpen={openApproval} />
           ) : null}
           <Working f={f} s={s as Split} apy={apy.data} price={price} onStop={f.active || f.positions.length > 0 ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />
@@ -1200,7 +1212,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           <WithdrawDialog key={withdrawSeed} accountKey={accountKey} s={s} open={dialog === 'withdraw'} onClose={() => setDialog(null)} initialAmount={withdrawSeed} deployed={f.deployed} />
           <StopDialog accountKey={accountKey} s={s} open={dialog === 'stop'} onClose={() => setDialog(null)} />
           <StartDialog accountKey={accountKey} s={s} open={dialog === 'start'} onClose={() => setDialog(null)} />
-          {f.approval && f.active && !renewing && approvalOpen && (renewAsk || f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade) ? (
+          {f.approval && f.active && !renewing && approvalOpen && (renewAsk || f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade || f.approval.capRaise) ? (
             <RenewDialog onDone={markSigned} key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null && !feedbackOpen} onClose={closeRenewAsk} />
           ) : null}
         </>
