@@ -70,6 +70,7 @@ export const homeCopy = {
   colPosition: 'Position',
   colAmount: 'Amount',
   colShare: 'Share',
+  target: (pct: number) => (pct === 0 ? 'target 0%, closing' : `target ${pct}%`),
   inRange: 'In range',
   paused: 'Paused: out of range. Mamoru puts it back to work automatically.',
   noRate: 'n/a: no rate source for this pool yet.',
@@ -282,7 +283,9 @@ function PositionRow({ p, r, i }: { p: FundingView['positions'][number]; r: Posi
   const addr = poolAddress(p.pool)
   const chain = useChain()
   const venue = 'Uniswap v3'
-  const share = r.sharePct === null ? null : Math.round(r.sharePct)
+  // otto/mamoru#216: against a target, the share is of the whole account (the target's own base); otherwise of working capital.
+  const shown = r.targetPct !== null && r.accountPct !== null ? r.accountPct : r.sharePct
+  const share = shown === null ? null : Math.round(shown)
   return (
     <li data-testid="position" className="wc-row" style={{ ['--i' as string]: i }}>
       <span className="wc-marks" aria-hidden="true">
@@ -338,8 +341,14 @@ function PositionRow({ p, r, i }: { p: FundingView['positions'][number]; r: Posi
           <span className="sr-only">{homeCopy.colShare} </span>
           {share === null ? homeCopy.na : `${share}%`}
         </span>
+        {r.targetPct !== null && r.accountPct !== null ? (
+          <span className="wc-target" data-testid="position-target">
+            {homeCopy.target(Math.round(r.targetPct))}
+          </span>
+        ) : null}
         <span className="wc-bar" aria-hidden="true">
-          <span style={{ width: `${Math.min(100, Math.max(0, r.sharePct ?? 0))}%` }} />
+          <span style={{ width: `${Math.min(100, Math.max(0, shown ?? 0))}%` }} />
+          {r.targetPct !== null && r.accountPct !== null ? <i className="wc-bar-target" style={{ left: `${Math.min(100, r.targetPct)}%` }} /> : null}
         </span>
       </span>
       {/* Desktop cells and the compact mobile line are never shown together (CSS), so each carries its own
@@ -378,7 +387,7 @@ function PositionRow({ p, r, i }: { p: FundingView['positions'][number]; r: Posi
  */
 export function Working({ f, s, apy, price = null, onStop, onStart = null }: { f: FundingView; s: Split; apy?: ApyView; price?: bigint | null; onStop: (() => void) | null; onStart?: (() => void) | null }) {
   const n = f.positions.length
-  const rows = positionRates(f, apy, price)
+  const rows = positionRates(f, apy, price, s.priced ? s.total : null)
   const inRange = f.positions.filter((p) => p.inRange).length
   // An operation in flight says what it is; between operations the engine says whether more is coming and when it looks next.
   const line = progressLine(f.progress) ?? engineLine(f)

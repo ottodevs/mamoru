@@ -1206,10 +1206,29 @@
   margin-top: 0.35rem;
   background: var(--color-wash);
 }
+.wc-bar {
+  position: relative;
+}
 .wc-bar > span {
   display: block;
   height: 100%;
   background: var(--color-emerald);
+}
+/* otto/mamoru#216: the bucket's target, a tick on the bar. */
+.wc-bar-target {
+  position: absolute;
+  top: -0.2rem;
+  bottom: -0.2rem;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--color-ink);
+}
+.wc-target {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  color: color-mix(in srgb, var(--color-ink) 62%, var(--color-paper));
 }
 .wc-rate {
   text-align: right;
