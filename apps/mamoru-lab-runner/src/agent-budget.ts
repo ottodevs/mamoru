@@ -17,6 +17,9 @@ export const LAB_AGENT_BUDGET = 'LAB_AGENT_BUDGET'
 export type AgentBudgetState = { date: string; count: number }
 
 export function defaultAgentBudgetStatePath(): string {
+  // Under systemd, StateDirectory= exports the exact writable directory it created; use it first.
+  const stateDir = process.env.STATE_DIRECTORY?.split(':')[0]
+  if (stateDir) return `${stateDir}/agent-budget.json`
   const stateHome = process.env.XDG_STATE_HOME || `${process.env.HOME}/.local/state`
   return `${stateHome}/mamoru-lab-runner/agent-budget.json`
 }

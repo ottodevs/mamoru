@@ -1,10 +1,10 @@
 // Agent Lab runner (008 task 5, otto/mamoru#204): the daily budget guard — max N agent jobs/day across requesters,
 // enforced on the runner side, a plain local JSON file (one writer, one job at a time, no locking needed).
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'bun:test'
-import { agentDailyBudget, checkAndIncrementAgentBudget, DEFAULT_AGENT_DAILY_BUDGET, peekAgentBudget } from '../src/agent-budget.ts'
+import { defaultAgentBudgetStatePath, mkdtempSync, rmSync } from 'node:fs'
+import { defaultAgentBudgetStatePath, tmpdir } from 'node:os'
+import { defaultAgentBudgetStatePath, join } from 'node:path'
+import { defaultAgentBudgetStatePath, afterEach, describe, expect, test } from 'bun:test'
+import { defaultAgentBudgetStatePath, agentDailyBudget, checkAndIncrementAgentBudget, DEFAULT_AGENT_DAILY_BUDGET, peekAgentBudget } from '../src/agent-budget.ts'
 
 describe('checkAndIncrementAgentBudget', () => {
   let dir: string
@@ -62,4 +62,15 @@ describe('agentDailyBudget', () => {
     expect(agentDailyBudget({ LAB_AGENT_DAILY_BUDGET: '0' })).toBe(30)
     expect(agentDailyBudget({ LAB_AGENT_DAILY_BUDGET: 'nope' })).toBe(30)
   })
+})
+
+test('the default budget path follows systemd STATE_DIRECTORY when set', () => {
+  const prev = process.env.STATE_DIRECTORY
+  process.env.STATE_DIRECTORY = '/run/x/state-a:/run/x/state-b'
+  try {
+    expect(defaultAgentBudgetStatePath()).toBe('/run/x/state-a/agent-budget.json')
+  } finally {
+    if (prev === undefined) delete process.env.STATE_DIRECTORY
+    else process.env.STATE_DIRECTORY = prev
+  }
 })
