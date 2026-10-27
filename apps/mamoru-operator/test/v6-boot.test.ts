@@ -11,6 +11,8 @@ const GATE = '0x00000000000000000000000000000000000000fc'
 const env = { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_V2_ADDRESS: V2, MAMORU_GAS_POLICY_ADDRESS: GAS, MAMORU_PAUSE_GATE_ADDRESS: GATE }
 const ID = 'conservador-live-v6'
 
+const pinnedGate = (address: string): Registry => ({ ...baseRegistry, entries: [...baseRegistry.entries, { name: 'MamoruPauseGate', kind: 'policy', role: 'test', address, codeHash: `0x${'00'.repeat(32)}` } as never], undeployed: [] })
+
 describe('conservador-live-v6 at boot', () => {
   test('wired to V2, the gas policy and the pause gate; resolves by name and as the renew target', () => {
     const p = resolveNamedPolicy(ID, env)!
@@ -53,7 +55,21 @@ describe('conservador-live-v6 at boot', () => {
   test('review of PR #141 (P1 2): v6 (a bucket on another chain) is refused as the default policy at boot', () => {
     expect(() => assertBootPolicies(resolveNamedPolicy(ID, env)!, resolveV6Policy('base', env), baseRegistry)).toThrow('renewal target only')
     expect(() => assertBootPolicies(resolveNamedPolicy('conservador-lab-v6', env)!, undefined, baseRegistry)).toThrow('renewal target only')
-    expect(() => assertBootPolicies(resolveV5Policy('base', env)!, resolveV6Policy('base', env), baseRegistry)).not.toThrow()
+    expect(() => assertBootPolicies(resolveV5Policy('base', env)!, resolveV6Policy('base', env), pinnedGate(GATE))).not.toThrow()
+  })
+
+  test('round 2 of PR #141 (GPT-6 Sol P1): a signing operator refuses a v6 target whose gate the registry has not pinned', () => {
+    const v5 = resolveV5Policy('base', env)!
+    const v6 = resolveV6Policy('base', env)!
+    // baseRegistry lists MamoruPauseGate as undeployed today.
+    for (const mode of [{ live: true }, { writes: true }]) {
+      expect(() => assertBootPolicies(v5, v6, baseRegistry, mode)).toThrow('has not pinned')
+      expect(() => assertBootPolicies(v5, v6, pinnedGate(GATE), mode)).not.toThrow()
+      // No v6 offered: nothing names the gate, nothing to refuse.
+      expect(() => assertBootPolicies(v5, undefined, baseRegistry, mode)).not.toThrow()
+    }
+    // A read-only operator signs nothing: the env address may stand until the pin.
+    expect(() => assertBootPolicies(v5, v6, baseRegistry)).not.toThrow()
   })
 
   test('review of PR #141 (P1 3): the v6 renew target is pinned to the registry even when the default policy is v5', () => {
