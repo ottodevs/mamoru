@@ -120,6 +120,43 @@ describe('watchOne delivery failures (review of PR #132)', () => {
   })
 })
 
+describe('watchOne races (review round 2 of PR #132)', () => {
+  test('a recovery seen while another run is still sending the "down" still produces a "recovered"', async () => {
+    const db = memoryD1()
+    const ok = recorder()
+    await watchOne(db, 8453, DOWN, ok.notify, at(0))
+    // Run A claims the alert; before its send returns, run B sees the operator healthy.
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const slow = async (t: string) => (ok.sent.push(t), await gate, true)
+    const a = watchOne(db, 8453, DOWN, slow, at(DOWN_AFTER_MS))
+    await new Promise((r) => setTimeout(r, 0))
+    await watchOne(db, 8453, UP, ok.notify, at(DOWN_AFTER_MS + 1))
+    release()
+    await a
+    await watchOne(db, 8453, UP, ok.notify, at(DOWN_AFTER_MS + 60_000))
+    expect(ok.sent.filter((t) => t.includes('again'))).toHaveLength(1)
+  })
+
+  test('a later outage does not replace an undelivered recovery', async () => {
+    const db = memoryD1()
+    const ok = recorder()
+    const failing = recorder(false)
+    await watchOne(db, 8453, DOWN, ok.notify, at(0))
+    await watchOne(db, 8453, DOWN, ok.notify, at(DOWN_AFTER_MS))
+    await watchOne(db, 8453, UP, failing.notify, at(DOWN_AFTER_MS + 60_000))
+    const t1 = DOWN_AFTER_MS + 2 * 60_000
+    await watchOne(db, 8453, DOWN, ok.notify, at(t1))
+    await watchOne(db, 8453, DOWN, ok.notify, at(t1 + DOWN_AFTER_MS))
+    await watchOne(db, 8453, UP, ok.notify, at(t1 + DOWN_AFTER_MS + 60_000))
+    const pending = db.raw.query('SELECT recovery_pending FROM operator_link_watch WHERE chain_id = 8453').get() as { recovery_pending: string | null }
+    expect(pending.recovery_pending).toBeNull()
+    const recovered = ok.sent.filter((t) => t.includes('again'))
+    expect(recovered).toHaveLength(1)
+    expect(recovered[0]).toContain('began 33 min ago')
+  })
+})
+
 describe('runOperatorLinkWatch (otto/mamoru#207)', () => {
   test('probes each configured chain and posts to Mattermost and Telegram without leaking the operator URL', async () => {
     const db = memoryD1()

@@ -107,11 +107,13 @@ export async function watchOne(db: Db, chainId: number, probe: { up: true } | { 
   if (probe.up) {
     let row = await read()
     if (row?.down_since) {
-      // The outage ends here. One run clears it; it carries a pending "recovered" only if a "down" was delivered.
+      // The outage ends here. One run clears it; it carries a pending "recovered" if a "down" was delivered or is
+      // in flight on a concurrent run (last_alert_at claimed, alerted not set yet): a spare "recovered" beats a lost
+      // one. An older pending "recovered" is kept, never replaced, so its message counts from the first outage.
       await db
         .prepare(
           `UPDATE operator_link_watch SET down_since = NULL, last_error = NULL, last_alert_at = NULL, alerted = 0,
-             recovery_pending = CASE WHEN alerted = 1 THEN down_since ELSE recovery_pending END
+             recovery_pending = CASE WHEN alerted = 1 OR last_alert_at IS NOT NULL THEN COALESCE(recovery_pending, down_since) ELSE recovery_pending END
            WHERE chain_id = ? AND down_since = ?`,
         )
         .bind(chainId, row.down_since)
@@ -122,7 +124,7 @@ export async function watchOne(db: Db, chainId: number, probe: { up: true } | { 
     if (!pending) return
     const claimed = await db.prepare(`UPDATE operator_link_watch SET recovery_pending = NULL WHERE chain_id = ? AND recovery_pending = ? RETURNING chain_id`).bind(chainId, pending).first()
     if (!claimed) return
-    const sent = await notify(`:white_check_mark: Mamoru: the Worker reaches the ${name} operator again (down ${minutes(now.getTime() - Date.parse(pending))}).`)
+    const sent = await notify(`:white_check_mark: Mamoru: the Worker reaches the ${name} operator again (the outage began ${minutes(now.getTime() - Date.parse(pending))} ago).`)
     if (!sent) await db.prepare(`UPDATE operator_link_watch SET recovery_pending = ? WHERE chain_id = ? AND recovery_pending IS NULL`).bind(pending, chainId).run()
     return
   }
