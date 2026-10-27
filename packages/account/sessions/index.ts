@@ -119,23 +119,28 @@ export type SecondActionPolicy = {
 }
 
 /**
- * otto/mamoru#213: the policies of a grant outside MamoruActionPolicy (`requiresGasPolicy`, bridge-out): MamoruGasPolicy
- * as a userOp policy and nothing after UniActionPolicy on its actions.
+ * otto/mamoru#213: the policies of a grant outside MamoruActionPolicy (`requiresPauseGate`, bridge-out): MamoruPauseGate
+ * after UniActionPolicy on every action (the guardian's pause stops it), MamoruGasPolicy as a userOp policy.
  */
-export type GasOnlyPolicy = { gas: { policy: Address; initData: Hex }; expected: { gasPolicy: Address } }
+export type GatedPolicies = { gate: { policy: Address; initData: Hex }; gas: { policy: Address; initData: Hex }; expected: { pauseGate: Address; gasPolicy: Address } }
 
-/** What `policiesFor` gives a grant: MamoruActionPolicy and MamoruGasPolicy (v4/v5), the gas policy alone, or nothing. */
-export type SessionPolicies = SecondActionPolicy | GasOnlyPolicy
+/** What `policiesFor` gives a grant: MamoruActionPolicy and MamoruGasPolicy (v4/v5), the pause gate and gas policy, or nothing. */
+export type SessionPolicies = SecondActionPolicy | GatedPolicies
 
 function isActionPolicy(p: SessionPolicies | undefined): p is SecondActionPolicy {
   return !!p && 'policy' in p
 }
 
-/** otto/mamoru#213: a `requiresGasPolicy` grant carries MamoruGasPolicy with caps it accepts, and no action policy. */
-export function assertGasOnly(grant: SessionGrant, p: SessionPolicies | undefined): void {
-  if (grant.requiresActionPolicy || grant.actionPolicy || isActionPolicy(p)) mismatch(grant, 'a gas-only grant never takes MamoruActionPolicy')
-  if (!p || isAddressEqual(p.gas.policy, zeroAddress)) throw new ReasonError('SESSION_ACTION_POLICY_MISSING', `${grant.name}: needs MamoruGasPolicy as a userOp policy`)
-  if (isAddressEqual(p.expected.gasPolicy, zeroAddress) || !isAddressEqual(p.gas.policy, p.expected.gasPolicy)) mismatch(grant, `gas policy ${p.gas.policy} is not the configured MamoruGasPolicy ${p.expected.gasPolicy}`)
+/** otto/mamoru#213: a `requiresPauseGate` grant carries the configured MamoruPauseGate and MamoruGasPolicy, and no action policy. */
+export function assertGated(grant: SessionGrant, p: SessionPolicies | undefined): asserts p is GatedPolicies {
+  if (grant.requiresActionPolicy || grant.actionPolicy || isActionPolicy(p)) mismatch(grant, 'a gated grant never takes MamoruActionPolicy')
+  if (!p || !p.gate || isAddressEqual(p.gate.policy, zeroAddress)) throw new ReasonError('SESSION_ACTION_POLICY_MISSING', `${grant.name}: needs MamoruPauseGate as its second action policy`)
+  if (!p.gas || isAddressEqual(p.gas.policy, zeroAddress)) throw new ReasonError('SESSION_ACTION_POLICY_MISSING', `${grant.name}: needs MamoruGasPolicy as a userOp policy`)
+  const { pauseGate, gasPolicy } = p.expected
+  if (isAddressEqual(pauseGate, zeroAddress) || !isAddressEqual(p.gate.policy, pauseGate)) mismatch(grant, `pause gate ${p.gate.policy} is not the configured MamoruPauseGate ${pauseGate}`)
+  if (p.gate.initData !== '0x') mismatch(grant, 'MamoruPauseGate takes no init data')
+  if (isAddressEqual(gasPolicy, zeroAddress) || !isAddressEqual(p.gas.policy, gasPolicy)) mismatch(grant, `gas policy ${p.gas.policy} is not the configured MamoruGasPolicy ${gasPolicy}`)
+  if (isAddressEqual(pauseGate, gasPolicy)) mismatch(grant, 'pause gate and gas policy are the same address')
   let caps
   try {
     caps = decodeGasCaps(p.gas.initData)
@@ -224,9 +229,9 @@ export function assertV4Policies(grant: SessionGrant, second: SecondActionPolicy
  * here, the one place every grant goes through on its way to an owner op (`activationCall` below included).
  */
 export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, registry: Registry = baseRegistry): SmartSessionStruct {
-  if (grant.requiresGasPolicy) assertGasOnly(grant, policies)
+  if (grant.requiresPauseGate) assertGated(grant, policies)
   else if (grant.requiresActionPolicy) assertV4Policies(grant, isActionPolicy(policies) ? policies : undefined)
-  const secondPolicy = isActionPolicy(policies) ? policies : undefined
+  const second = isActionPolicy(policies) ? { policy: policies.policy, initData: policies.initData } : policies && 'gate' in policies ? policies.gate : undefined
   return {
     sessionValidator: address('OwnableValidator', registry),
     sessionValidatorInitData: ownableValidatorInitData(grant.sessionKey),
@@ -243,8 +248,8 @@ export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, 
     actions: grant.actions.map((a) => ({
       actionTargetSelector: a.selector,
       actionTarget: a.targetAddress,
-      actionPolicies: secondPolicy
-        ? [{ policy: address('UniActionPolicy', registry), initData: uniActionInitData(a) }, { policy: secondPolicy.policy, initData: secondPolicy.initData }]
+      actionPolicies: second
+        ? [{ policy: address('UniActionPolicy', registry), initData: uniActionInitData(a) }, { policy: second.policy, initData: second.initData }]
         : [{ policy: address('UniActionPolicy', registry), initData: uniActionInitData(a) }],
     })),
     permitERC4337Paymaster: grant.permitERC4337Paymaster,
@@ -252,13 +257,13 @@ export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, 
 }
 
 /** Spec 007 T7: the two deployed policies and the gas caps a v4 approval enables its sessions with. */
-export type V4Deployment = { actionPolicy: Address; gasPolicy: Address; gasCaps: GasCaps }
+export type V4Deployment = { actionPolicy: Address; gasPolicy: Address; gasCaps: GasCaps; pauseGate?: Address }
 
 /** The deployment a v4 PolicyVersion names (`withActionPolicy(..., { gasPolicy })`), or null (v2/v3, or no gas policy). */
 export function v4DeploymentOf(policy: PolicyVersion): V4Deployment | null {
   const ap = policy.actionPolicy
   if (!ap?.gasPolicy) return null
-  return { actionPolicy: ap.address, gasPolicy: ap.gasPolicy.address, gasCaps: ap.gasPolicy.caps }
+  return { actionPolicy: ap.address, gasPolicy: ap.gasPolicy.address, gasCaps: ap.gasPolicy.caps, ...(ap.pauseGate ? { pauseGate: ap.pauseGate } : {}) }
 }
 
 /**
@@ -282,7 +287,10 @@ export function v4PoliciesFor(
   })
   const gas = { policy: d.gasPolicy, initData: encodeGasCaps(d.gasCaps) }
   return (g, i) => {
-    if (g.requiresGasPolicy) return { gas, expected: { gasPolicy: d.gasPolicy } }
+    if (g.requiresPauseGate) {
+      if (!d.pauseGate) mismatch(g, 'no MamoruPauseGate configured for this deployment')
+      return { gate: { policy: d.pauseGate, initData: '0x' }, gas, expected: { pauseGate: d.pauseGate, gasPolicy: d.gasPolicy } }
+    }
     if (!g.requiresActionPolicy) return undefined
     const spec = v4PoolOf(g.pool)
     if (!spec) mismatch(g, 'no v4 pool parameters for this pool')

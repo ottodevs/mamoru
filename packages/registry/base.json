@@ -287,5 +287,10 @@
       "codeHash": "0xd2c8d48075d832fb7d07f6db5545a1bee37fdf886325c441a8dd1cef4c9dae99"
     }
   ],
-  "undeployed": []
+  "undeployed": [
+    {
+      "name": "MamoruPauseGate",
+      "address": null
+    }
+  ]
 }

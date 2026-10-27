@@ -151,6 +151,6 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
     tokenId: ctx.tokenId,
     actions,
     ...(template.requiresActionPolicy ? { requiresActionPolicy: true as const } : {}),
-    ...(template.requiresGasPolicy ? { requiresGasPolicy: true as const } : {}),
+    ...(template.requiresPauseGate ? { requiresPauseGate: true as const } : {}),
   }
 }

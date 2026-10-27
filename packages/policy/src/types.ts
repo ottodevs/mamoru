@@ -71,11 +71,12 @@ export type GrantTemplate = {
    */
   requiresActionPolicy?: true
   /**
-   * otto/mamoru#213: a grant outside MamoruActionPolicy (bridge-out) still pays its userOps under MamoruGasPolicy's
-   * owner-signed caps, so a leaked key cannot spend the Safe's gas reserve through it. `toSmartSession` refuses to
-   * encode it without that gas policy, and with an action policy (`retargetToPolicy` refuses it too).
+   * otto/mamoru#213: a grant outside MamoruActionPolicy (bridge-out). Its actions carry MamoruPauseGate after
+   * UniActionPolicy, so the guardian's pause in MamoruActionPolicyV2 stops them too, and its userOps pay under
+   * MamoruGasPolicy's owner-signed caps. `toSmartSession` refuses it without both, or with an action policy
+   * (`retargetToPolicy` refuses it too).
    */
-  requiresGasPolicy?: true
+  requiresPauseGate?: true
 }
 
 export type UsageTier = { upToUsdc: bigint; usageLimit: number }
@@ -240,6 +241,11 @@ export type PolicyVersion = {
      * of sending one the policy refuses. Absent: the deployed V1, which has no pause.
      */
     contractVersion?: 2
+    /**
+     * otto/mamoru#213: the deployed MamoruPauseGate (bound to this `address`, MamoruActionPolicyV2), the second action
+     * policy of every `requiresPauseGate` grant. Never a registry entry or a constant (same discipline as `address`).
+     */
+    pauseGate?: Address
   }
 }
 
@@ -384,6 +390,6 @@ export type SessionGrant = {
    * mint and approvals at. `toSmartSession` refuses a second policy at any other address. Absent on v2/v3 grants.
    */
   actionPolicy?: Address
-  /** See `GrantTemplate.requiresGasPolicy`. */
-  requiresGasPolicy?: true
+  /** See `GrantTemplate.requiresPauseGate`. */
+  requiresPauseGate?: true
 }

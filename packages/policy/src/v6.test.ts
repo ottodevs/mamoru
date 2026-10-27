@@ -46,7 +46,7 @@ describe('conservador-live-v6 (otto/mamoru#201, #213)', () => {
   test('bridge-out: CCTP V2 burn to this same account on Monad, USDC only, open caller, no fee, Standard finality', () => {
     const t = conservadorLiveV6.session.grants.find((g) => g.name === 'bridge-out')!
     expect(t.requiresActionPolicy).toBeUndefined()
-    expect(t.requiresGasPolicy).toBe(true)
+    expect(t.requiresPauseGate).toBe(true)
     const g = instantiateGrant(conservadorLiveV6, 'bridge-out', ctx())
     const [approve, burn] = g.actions
     const messenger = address('TokenMessengerV2', baseRegistry)
@@ -61,8 +61,8 @@ describe('conservador-live-v6 (otto/mamoru#201, #213)', () => {
     expect(rule('destinationCaller')).toMatchObject({ index: 4, condition: 'EQUAL', ref: 0n })
     expect(rule('maxFee')).toMatchObject({ index: 5, condition: 'EQUAL', ref: 0n })
     expect(rule('minFinalityThreshold')).toMatchObject({ index: 6, condition: 'GREATER_THAN_OR_EQUAL', ref: CCTP_FINALITY_STANDARD })
-    expect(g.requiresGasPolicy).toBe(true)
-    expect(() => retargetToPolicy(g, '0x00000000000000000000000000000000000000Fe')).toThrow('MamoruGasPolicy only')
+    expect(g.requiresPauseGate).toBe(true)
+    expect(() => retargetToPolicy(g, '0x00000000000000000000000000000000000000Fe')).toThrow('MamoruPauseGate')
     expect(rule('amount')).toMatchObject({ index: 0, ref: (CAP * 2000n) / 10_000n, cumulativeLimit: (CAP * 5000n) / 10_000n })
   })
 })
