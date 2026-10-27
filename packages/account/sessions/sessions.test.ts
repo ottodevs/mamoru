@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { baseRegistry, address } from '@mamoru/registry'
-import { computeCaps, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, POLICY_INCREASE_SIG, conservadorV1, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, grantKey, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_GAS_CAPS, V4_POOLS, v4BudgetCaps, type SessionGrant } from '@mamoru/policy'
+import { computeCaps, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, conservadorLiveV7, POLICY_INCREASE_SIG, conservadorV1, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, grantKey, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_GAS_CAPS, V4_POOLS, v4BudgetCaps, type SessionGrant } from '@mamoru/policy'
 import { activationCall, selfAttestCall, selfRevokeAttestationCall, toSmartSession, v4DeploymentOf, v4PoliciesFor, type SecondActionPolicy } from './index.ts'
 
 const ctx = {
@@ -286,5 +286,43 @@ describe('otto/mamoru#213: bridge-out takes MamoruPauseGate and MamoruGasPolicy,
     expect(v4DeploymentOf({ ...base, actionPolicy: { ...base.actionPolicy, contractVersion: 2 } })?.pauseGate).toBe(P)
     const d1 = v4DeploymentOf(base)!
     expect(() => v4PoliciesFor([bridge], d1, 1n, {})(bridge, 0)).toThrow('no MamoruPauseGate')
+  })
+})
+
+describe('otto/mamoru#225: v7 pool sessions, decrease / collect / burn / deadline under MamoruActionPolicyV2 alone', () => {
+  const G = '0x00000000000000000000000000000000000000fd' as const
+  const A = '0x00000000000000000000000000000000000000fe' as const
+  const P = '0x00000000000000000000000000000000000000fb' as const
+  const d = { actionPolicy: A, gasPolicy: G, gasCaps: V4_GAS_CAPS, pauseGate: P }
+  const caps = computeCaps(conservadorLiveV7, 10_000n * 1_000_000n, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
+  const grants = conservadorLiveV7.session.grants.map((t) => {
+    const g = instantiateGrant(conservadorLiveV7, grantKey(t), { ...v4Ctx, caps })
+    return g.requiresPauseGate ? g : retargetToPolicy(g, A)
+  })
+  const policies = v4PoliciesFor(grants, d, 1n, v4BudgetCaps(conservadorLiveV7, 10_000n * 1_000_000n))
+  const uni = address('UniActionPolicy', baseRegistry).toLowerCase()
+  const V2_ONLY = new Set(['0x0c49ccbe', '0xfc6f7865', '0x42966c68', '0x5ae401dc']) // decreaseLiquidity, collect, burn, multicall(uint256,bytes[])
+
+  test('one activation call enables the 4 sessions; V2-only actions carry V2 alone, the rest UniActionPolicy then V2', () => {
+    const act = activationCall(grants, [], policies)
+    expect(act.permissionIds).toHaveLength(4)
+    grants.forEach((g, i) => {
+      const s = toSmartSession(g, policies(g, i))
+      if (g.requiresPauseGate) return
+      for (const a of s.actions) {
+        const named = a.actionPolicies.map((p) => p.policy.toLowerCase())
+        expect(named).toEqual(V2_ONLY.has(a.actionTargetSelector) ? [A] : [uni, A])
+      }
+    })
+    const actions = grants.reduce((n, g) => n + g.actions.length, 0)
+    expect(actions).toBe(26)
+  })
+
+  test('a V2-only action is refused without MamoruActionPolicy, or with rules nothing would check', () => {
+    const pool = grants[0]!
+    const { requiresActionPolicy: _r, actionPolicy: _a, ...plain } = pool
+    expect(() => toSmartSession(plain as SessionGrant)).toThrow('without UniActionPolicy needs MamoruActionPolicy')
+    const ruled: SessionGrant = { ...pool, actions: pool.actions.map((a) => (a.actionPolicyOnly ? { ...a, params: pool.actions[0]!.params } : a)) }
+    expect(() => toSmartSession(ruled, policies(pool, 0))).toThrow('carries rules nothing would check')
   })
 })

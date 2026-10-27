@@ -245,6 +245,14 @@ export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, 
   if (grant.requiresPauseGate) assertGated(grant, policies)
   else if (grant.requiresActionPolicy) assertV4Policies(grant, isActionPolicy(policies) ? policies : undefined, registry)
   const second = isActionPolicy(policies) ? { policy: policies.policy, initData: policies.initData } : policies && 'gate' in policies ? policies.gate : undefined
+  // otto/mamoru#225: an action without UniActionPolicy is checked by MamoruActionPolicy alone: only on a grant that has
+  // it (assertV4Policies above), never with a rule left over (it would not be enforced), never on a gated grant.
+  for (const a of grant.actions) {
+    if (!a.actionPolicyOnly) continue
+    if (!grant.requiresActionPolicy || !isActionPolicy(policies)) mismatch(grant, `${a.signature} without UniActionPolicy needs MamoruActionPolicy`)
+    if (a.params.length) mismatch(grant, `${a.signature} without UniActionPolicy carries rules nothing would check`)
+  }
+  const uni = (a: SessionGrant['actions'][number]) => ({ policy: address('UniActionPolicy', registry), initData: uniActionInitData(a) })
   return {
     sessionValidator: address('OwnableValidator', registry),
     sessionValidatorInitData: ownableValidatorInitData(grant.sessionKey),
@@ -261,9 +269,7 @@ export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, 
     actions: grant.actions.map((a) => ({
       actionTargetSelector: a.selector,
       actionTarget: a.targetAddress,
-      actionPolicies: second
-        ? [{ policy: address('UniActionPolicy', registry), initData: uniActionInitData(a) }, { policy: second.policy, initData: second.initData }]
-        : [{ policy: address('UniActionPolicy', registry), initData: uniActionInitData(a) }],
+      actionPolicies: a.actionPolicyOnly && second ? [{ policy: second.policy, initData: second.initData }] : second ? [uni(a), { policy: second.policy, initData: second.initData }] : [uni(a)],
     })),
     permitERC4337Paymaster: grant.permitERC4337Paymaster,
   }
