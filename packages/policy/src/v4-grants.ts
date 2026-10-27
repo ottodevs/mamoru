@@ -484,6 +484,18 @@ export function grantsV5(p: V4PoolSpec, usage: V4Usage): GrantTemplate[] {
   return [enterSwapV5Grant(p, usage.enterSwap), enterMintV4Grant(p, usage.enterMint), manageAnyV5Grant(p, usage.manageAny)]
 }
 
+/**
+ * otto/mamoru#213: manage-any without a way in, for a pool a policy keeps only so its accounts can leave it (v6's
+ * USDC/cbBTC at preference 0). It decreases, collects, burns and sells the volatile token for the stable one; it has no
+ * mint, no increase and no approval of the stable token, so neither the engine nor a leaked key can put money into
+ * the pool through it. Same key and caps as manage-any, under MamoruActionPolicy as every v5 grant.
+ */
+export function exitOnlyV5Grant(p: V4PoolSpec, usageLimit: number): GrantTemplate {
+  const g = manageAnyV5Grant(p, usageLimit)
+  const enters = (a: GrantTemplate['actions'][number]) => a.signature === MINT_SIG || a.signature === POLICY_INCREASE_SIG || (a.signature === APPROVE_SIG && a.target === p.stable)
+  return { ...g, actions: g.actions.filter((a) => !enters(a)) }
+}
+
 /** The policy can add to a held position in `pool` (otto/mamoru#171): its manage-any there carries the policy's increase. */
 export function hasIncrease(policy: { session: { grants: readonly GrantTemplate[] } }, pool: string): boolean {
   return policy.session.grants.some((g) => g.name === 'manage-any' && g.pool === pool && g.actions.some((a) => a.signature === POLICY_INCREASE_SIG))

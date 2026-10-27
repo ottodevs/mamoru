@@ -45,6 +45,7 @@ export {
   enterMintV4Grant,
   enterSwapV4Grant,
   enterSwapV5Grant,
+  exitOnlyV5Grant,
   encodeMamoruInit,
   estimateSessionGas,
   grantsV4,
