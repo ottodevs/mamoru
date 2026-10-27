@@ -100,7 +100,7 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
   // put its money back in (and its exit-only grant has no mint).
   if (policy.buckets.find((b) => b.pools.includes(pool.name as never))?.preference === 0) return { code: null, proposal: null }
   // Built only when proposed: a pool without its own manage-any grant must not throw before the trigger says so.
-  const proposal = (): RerangeProposal => ({ kind: 'rerange', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity: p.liquidity })
+  const proposal = (why: NonNullable<RerangeProposal['why']>): RerangeProposal => ({ kind: 'rerange', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity: p.liquidity, why, tickLower: p.tickLower, tickUpper: p.tickUpper })
   const lazy = policy.range.lazy
   if (lazy) {
     // Lab (#101 experiment 4): past the edge by the buffer, out long enough, and worth its cost; no near-edge trigger.
@@ -120,7 +120,7 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
     // Live (#172): no estimate is no re-range. The Lab keeps its measured rule (abstain) unless a variant sets the flag.
     if (!w && lazy.requireCostEstimate) return { code: 'DECIDE_RANGE_NO_FEE_HISTORY', proposal: null }
     if (w && !w.worth) return { code: 'DECIDE_RANGE_BELOW_COST', proposal: null }
-    return { code: 'DECIDE_RANGE_ADJUST', proposal: proposal() }
+    return { code: 'DECIDE_RANGE_ADJUST', proposal: proposal('out') }
   }
   const width = p.tickUpper - p.tickLower
   const outside = pool.tick < p.tickLower || pool.tick >= p.tickUpper
@@ -136,7 +136,7 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
   // otto/mamoru#218: eager pays for itself too; no fee history keeps today's behaviour (re-range).
   const w = rerangeWorth(obs, policy, p, pool, EAGER_COST_TEST)
   if (w && !w.worth) return { code: 'DECIDE_RANGE_BELOW_COST', proposal: null }
-  return { code: 'DECIDE_RANGE_ADJUST', proposal: proposal() }
+  return { code: 'DECIDE_RANGE_ADJUST', proposal: proposal(outside ? 'out' : near ? 'edge' : 'widen') }
 }
 
 export type BucketValue = { bucket: string; target: bigint; value: bigint; pool: RegistryName | null }

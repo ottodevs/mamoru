@@ -387,6 +387,21 @@ export type OpView = {
   convert?: string
   /** otto/mamoru#215: a bridge-out (engine row): where its USDC is going and how far it got. */
   bridge?: BridgeProgress
+  /**
+   * otto/mamoru#219, engine ops only, absent on rows stored before it: the engine's own op kind (`kind` folds a
+   * range move, a trim and a harvest into 'reduce'), the decision's reason code, and for a range move why it moved.
+   */
+  step?: 'enter_swap' | 'enter_mint' | 'increase_liquidity' | 'harvest' | 'convert' | 'rerange' | 'reduce' | 'close_position'
+  cause?: string
+  why?: 'out' | 'edge' | 'widen'
+  /** The position acted on (rerange/reduce/harvest/increase) or minted (enter_mint), and its range. */
+  tokenId?: string
+  tickLower?: number
+  tickUpper?: number
+  /** enter_swap: the amount of tokenOut the quote expected (base units). */
+  amountOut?: string
+  /** What the receipt says this op paid in gas and collected in fees; `usdc` values once a snapshot priced them. */
+  facts?: { at: string; gasWei: string; gasUsdc?: string; fees: { tokenId: string; pool: string; fee0: string; fee1: string; usdc?: string }[] }
 }
 
 /**

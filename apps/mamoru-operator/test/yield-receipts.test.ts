@@ -66,6 +66,15 @@ describe('factsFromLogs (otto/mamoru#129)', () => {
 describe('priceFees and dayReceipts', () => {
   const pools = { [LIVE_POOL]: { sqrtPriceX96: 2n ** 96n, tick: 0, feeGrowthGlobal0X128: 0n, feeGrowthGlobal1X128: 0n } } as unknown as Snapshot['pools']
 
+  test('prices gas once from the WETH/USDC pool (#219)', () => {
+    const weth = { 'pool:WETH/USDC/3000': { sqrtPriceX96: 2n ** 96n, tick: 0, feeGrowthGlobal0X128: 0n, feeGrowthGlobal1X128: 0n } } as unknown as Snapshot['pools']
+    const facts: OpFacts = { at: '2026-10-26T21:01:00.000Z', gasWei: '1000', fees: [] }
+    expect(priceFees(facts, {} as Snapshot['pools'])).toBe(false)
+    expect(priceFees(facts, weth)).toBe(true)
+    expect(facts.gasUsdc).toBe('1000')
+    expect(priceFees(facts, weth)).toBe(false)
+  })
+
   test('prices once and never again; an unpriceable pool leaves the day without collectedUsdc', () => {
     const facts: OpFacts = { at: '2026-10-21T10:00:00.000Z', gasWei: '5', fees: [{ tokenId: '1', pool: LIVE_POOL, fee0: '10', fee1: '0' }] }
     expect(priceFees(facts, pools)).toBe(true)
