@@ -46,13 +46,13 @@ describe('live-wmon-usdc-monad-v5', () => {
     expect(conservadorLiveV6.remoteBuckets![0]!.policyId).toBe(liveWmonUsdcMonadV5.policyId)
   })
 
-  test('the pool spec: WMON/USDC 0.30 %, USDC the budget unit (token1), 15 % of the cap, Monad only', () => {
+  test('the pool spec: WMON/USDC 0.30 %, USDC the budget unit (token1), the whole sleeve cap (not 15 % twice), Monad only', () => {
     const s = V4_POOLS_MONAD.growth
-    expect(s).toMatchObject({ pool: 'pool:WMON/USDC/3000', stable: 'USDC', volatile: 'WMON', token0: 'WMON', token1: 'USDC', fee: 3000, bandTicks: 100, capShareBps: 1500, windowMultiple: 3, totalMultiple: 10, sourceChainId: 143 })
+    expect(s).toMatchObject({ pool: 'pool:WMON/USDC/3000', stable: 'USDC', volatile: 'WMON', token0: 'WMON', token1: 'USDC', fee: 3000, bandTicks: 100, capShareBps: 10_000, windowMultiple: 3, totalMultiple: 10, sourceChainId: 143 })
     const e = monadRegistry.entries.find((x) => x.name === s.pool)!
     expect([e.token0, e.token1, e.fee]).toEqual(['WMON', 'USDC', 3000])
-    expect(caps[s.caps.budgetWindow]).toBe((CAP * 4500n) / 10_000n)
-    expect(caps[s.caps.budgetTotal]).toBe((CAP * 15_000n) / 10_000n)
+    expect(caps[s.caps.budgetWindow]).toBe(CAP * 3n)
+    expect(caps[s.caps.budgetTotal]).toBe(CAP * 10n)
   })
 
   test('v4PoolOf finds it on Monad only, and never a Base pool there', () => {
@@ -98,5 +98,14 @@ describe('live-wmon-usdc-monad-v5', () => {
   test('Monad gas caps: priced for ~100 gwei, valid for MamoruGasPolicy', () => {
     expect(MONAD_GAS_CAPS.maxFeePerGas).toBeGreaterThanOrEqual(10n * 100_000_000_000n)
     expect(MONAD_GAS_CAPS.maxFeePerGas).toBeGreaterThanOrEqual(MONAD_GAS_CAPS.maxPriorityFeePerGas)
+  })
+})
+
+describe('review of #137: the first entry fits the caps', () => {
+  test('swapping half the sleeve cap fits the per-call swap cap, and minting all of it fits the mint caps', () => {
+    const swap = liveWmonUsdcMonadV5.session.caps.find((c) => c.name === V4_POOLS_MONAD.growth.caps.stableSwapPerCall)!
+    expect(swap.bpsOfDeposit).toBeGreaterThanOrEqual(5000)
+    const mint = liveWmonUsdcMonadV5.session.caps.find((c) => c.name === V4_POOLS_MONAD.growth.caps.mint1)!
+    expect(mint.bpsOfDeposit).toBeGreaterThanOrEqual(10_000)
   })
 })

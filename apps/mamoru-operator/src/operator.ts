@@ -6,7 +6,7 @@ import { address, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, n
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
-import { MONAD_LIVE_POLICIES, POLICIES, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -1117,6 +1117,8 @@ export class Operator {
     if (this.cfg.policy.policyId === acc.policyId) return this.cfg.policy
     // otto/mamoru#214: a Monad operator on the v5 sleeve policy still serves the sleeves activated with v1.
     if (this.cfg.chainWrites?.length && MONAD_LIVE_POLICIES[acc.policyId]) return MONAD_LIVE_POLICIES[acc.policyId]!
+    // The lab twin on a fork serves lab v1 sleeves the same way (no chain-writes opt-in on a fork).
+    if (MONAD_LAB_POLICIES[acc.policyId] && this.cfg.policy.chain === 'fork') return MONAD_LAB_POLICIES[acc.policyId]!
     throw new Error(`${acc.accountKey}: unknown policy ${acc.policyId}`)
   }
 

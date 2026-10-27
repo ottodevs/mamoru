@@ -2,7 +2,7 @@
 import { describe, expect, test } from 'bun:test'
 import { baseRegistry, monadRegistry, type Registry } from '@mamoru/registry'
 import { labWmonUsdcMonadV5, liveWmonUsdcMonadV1, liveWmonUsdcMonadV5, MONAD_GAS_CAPS, V4_POOLS_MONAD } from '@mamoru/policy'
-import { assertActionPolicyOnRegistry, assertBaseOnlyFeatures, assertWritePolicy, resolveNamedPolicy, resolveV4Policy, resolveV5Policy } from '../src/boot.ts'
+import { assertActionPolicyOnRegistry, assertMonadV5Resolvable, assertBaseOnlyFeatures, assertWritePolicy, resolveNamedPolicy, resolveV4Policy, resolveV5Policy } from '../src/boot.ts'
 
 const V2 = '0x00000000000000000000000000000000000000fe'
 const GAS = '0x00000000000000000000000000000000000000fd'
@@ -60,9 +60,9 @@ describe('the two contract names in monad.json', () => {
     entries: [...monadRegistry.entries, { name: 'MamoruActionPolicyV2', kind: 'smart-sessions-policy', role: 'x', address: addr2 as never, codeHash: null }, { name: 'MamoruGasPolicy', kind: 'smart-sessions-policy', role: 'x', address: addrGas as never, codeHash: null }],
   })
 
-  test('undeployed or absent: the environment addresses stand alone', () => {
-    expect(() => assertActionPolicyOnRegistry(p(), monadRegistry)).not.toThrow()
-    expect(() => assertActionPolicyOnRegistry(p(), { ...monadRegistry, undeployed: ['MamoruActionPolicyV2', 'MamoruGasPolicy'] })).not.toThrow()
+  test('undeployed or absent: refused (fail closed, peer review of #137 P1)', () => {
+    expect(() => assertActionPolicyOnRegistry(p(), monadRegistry)).toThrow('not pinned')
+    expect(() => assertActionPolicyOnRegistry(p(), { ...monadRegistry, undeployed: ['MamoruActionPolicyV2', 'MamoruGasPolicy'] })).toThrow('not pinned')
   })
 
   test('once entries, the environment must name them', () => {
@@ -73,5 +73,19 @@ describe('the two contract names in monad.json', () => {
 
   test('Base is never checked', () => {
     expect(() => assertActionPolicyOnRegistry(p(), baseRegistry)).not.toThrow()
+  })
+})
+
+describe('review of #137', () => {
+  const acc = (policyId: string) => [{ accountKey: 'abcdef012345', policyId }]
+  test('an account on the v5 sleeve policy refuses a restart on v1 (rollback), naming it', () => {
+    expect(() => assertMonadV5Resolvable(acc(ID), liveWmonUsdcMonadV1)).toThrow('abcdef01')
+    expect(() => assertMonadV5Resolvable(acc(ID), resolveNamedPolicy(ID, env, { chainWrites: true })!)).not.toThrow()
+    expect(() => assertMonadV5Resolvable(acc('live-wmon-usdc-monad-v1'), liveWmonUsdcMonadV1)).not.toThrow()
+  })
+
+  test('the lab twin holds the V2 address on a fork rpc without chain writes; a real chain still needs the opt-in', () => {
+    expect(() => assertBaseOnlyFeatures(monadRegistry, { MAMORU_ACTION_POLICY_V2_ADDRESS: V2 }, {}, 31337)).not.toThrow()
+    expect(() => assertBaseOnlyFeatures(monadRegistry, { MAMORU_ACTION_POLICY_V2_ADDRESS: V2 }, {}, 143)).toThrow('Base only')
   })
 })

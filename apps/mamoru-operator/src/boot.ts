@@ -157,6 +157,17 @@ export function resolveV4Policy(chain: PolicyVersion['chain'], env: Record<strin
   return deployedV4(chain === conservadorLiveV4.chain ? conservadorLiveV4 : conservadorLabV4, env)
 }
 
+/**
+ * otto/mamoru#214 (peer review of #137): accounts activated on the Monad v5 sleeve policy need that same policy to be this
+ * operator's own after a restart (it is wired from the environment, so no table resolves it). Refused at boot with the
+ * accounts named, rather than throwing "unknown policy" on each of them while their Safes hold positions.
+ */
+export function assertMonadV5Resolvable(accounts: readonly { accountKey: string; policyId?: string }[], policy: PolicyVersion): void {
+  const ids = new Set([liveWmonUsdcMonadV5.policyId, labWmonUsdcMonadV5.policyId])
+  const stranded = accounts.filter((a) => a.policyId && ids.has(a.policyId) && a.policyId !== policy.policyId)
+  if (stranded.length) throw new Error(`${stranded.length} account(s) run ${stranded[0]!.policyId} (${stranded.map((a) => a.accountKey.slice(0, 8)).join(', ')}) but this operator runs ${policy.policyId}: start it on that policy with MAMORU_ACTION_POLICY_V2_ADDRESS and MAMORU_GAS_POLICY_ADDRESS set`)
+}
+
 /** Accounts whose stored policy is a v4 one, when this operator was started without the v4 opt-in or its addresses. */
 export function assertV4Resolvable(accounts: readonly { accountKey: string; policyId?: string }[], env: Record<string, string | undefined>): void {
   const v5Ids = new Set([conservadorLiveV5.policyId, conservadorLabV5.policyId])
@@ -323,29 +334,33 @@ export function assertPolicyOnRegistry(policy: PolicyVersion, registry: Registry
  * otto/mamoru#63: what only exists on Base is refused on any other chain at boot: the v4/v5 on-chain action policies
  * (deployed on Base only; v5 through its V2 address as well) and bridge-out (moves USDC from Ethereum to Base).
  */
-export function assertBaseOnlyFeatures(registry: Registry, env: Record<string, string | undefined>, o: Pick<BootOptions, 'l1RpcUrl'>): void {
+export function assertBaseOnlyFeatures(registry: Registry, env: Record<string, string | undefined>, o: Pick<BootOptions, 'l1RpcUrl'>, chainId?: number): void {
   if (registry.chainId === BASE_CHAIN_ID) return
   if (env.MAMORU_ONCHAIN_POLICY_V4 === '1') throw new Error(`MAMORU_ONCHAIN_POLICY_V4 is Base only; this operator reads ${registry.chain}`)
   // v5 needs the v4 opt-in above; its deployed address alone is refused too, so no env turns it on off Base.
   // otto/mamoru#214: except on a chain the operator is opted into writing to (MAMORU_CHAIN_WRITES): there it is that chain's
   // MamoruActionPolicyV2, read only by the sleeve's own policy (deployedMonadV5).
-  if (env.MAMORU_ACTION_POLICY_V2_ADDRESS && !(chainWritesOptIn(env) as readonly number[]).includes(registry.chainId)) throw new Error(`MAMORU_ACTION_POLICY_V2_ADDRESS is Base only; this operator reads ${registry.chain}`)
+  // A lab fork (an RPC chain id that is no real chain) cannot carry MAMORU_CHAIN_WRITES, so it may hold the address for the
+  // fork twin (lab-wmon-usdc-monad-v5), which never signs on a real chain.
+  const onFork = chainId !== undefined && !isChainId(chainId)
+  if (env.MAMORU_ACTION_POLICY_V2_ADDRESS && !onFork && !(chainWritesOptIn(env) as readonly number[]).includes(registry.chainId)) throw new Error(`MAMORU_ACTION_POLICY_V2_ADDRESS is Base only; this operator reads ${registry.chain}`)
   if (o.l1RpcUrl) throw new Error(`MAMORU_L1_RPC_URL (bridge-out to Base) is Base only; this operator reads ${registry.chain}`)
 }
 
 /**
- * otto/mamoru#214: on a chain whose registry already lists MamoruActionPolicyV2 / MamoruGasPolicy (they sit in `undeployed`
- * until the contracts are pinned, and then join `entries`), the env addresses the policy is wired to must be those entries:
- * an operator never signs a session for a contract the pinned registry does not name. While a name is `undeployed` the env
- * address stands alone (the pin comes with the deployment); `writeRegistry` already checks every entry's code hash on chain.
- * Base and policies without an action policy: nothing to check.
+ * otto/mamoru#214 (peer review of #137, P1): off Base, the env addresses the policy is wired to must be entries of the
+ * pinned registry: an operator never signs a session for a contract the registry does not name. A name that is
+ * `undeployed` or absent refuses the boot (fail closed): the sleeve cannot go live before MamoruActionPolicyV2 and
+ * MamoruGasPolicy are pinned, and `writeRegistry` has then checked every entry's code hash on chain. Base and policies
+ * without an action policy: nothing to check.
  */
 export function assertActionPolicyOnRegistry(policy: PolicyVersion, registry: Registry): void {
   const ap = policy.actionPolicy
   if (!ap || registry.chainId === BASE_CHAIN_ID) return
   const pairs: [string, string | undefined][] = [['MamoruActionPolicyV2', ap.address], ['MamoruGasPolicy', ap.gasPolicy?.address]]
   for (const [name, wired] of pairs) {
-    if (!wired || !isDeployed(name, registry)) continue
+    if (!wired) continue
+    if (!isDeployed(name, registry)) throw new Error(`${name} is ${wired} in the environment but is not pinned in the ${registry.chain} registry (undeployed or absent): refusing to sign sessions for it`)
     if (registryAddress(name, registry).toLowerCase() !== wired.toLowerCase()) throw new Error(`${name} is ${wired} in the environment but ${registryAddress(name, registry)} in the ${registry.chain} registry`)
   }
 }
@@ -389,7 +404,7 @@ export async function bootOperator(o: BootOptions) {
   const watchClient = createPublicClient({ transport: http(via('watcher'), { batch: true, timeout: 60_000 }) })
   const chainId = await client.getChainId()
   const readRegistry = operatorRegistry(chainId, process.env)
-  assertBaseOnlyFeatures(readRegistry, process.env, o)
+  assertBaseOnlyFeatures(readRegistry, process.env, o, chainId)
   // otto/mamoru#61: writing off Base is an explicit opt-in (MAMORU_CHAIN_WRITES), and only on a registry verified
   // against the chain itself (writeRegistry). Without it, nothing below changes for any chain.
   // Writes off Base need BOTH the opt-in and MAMORU_LIVE=1 (review of #116, P1-1): the flag alone, without live, leaves
@@ -414,6 +429,7 @@ export async function bootOperator(o: BootOptions) {
   // restart (funding, engine, renewals and Stop all read it). Refused at boot, with the accounts named, rather than
   // failing on each of them later while their Safes hold positions.
   assertV4Resolvable(Object.values(store.state.accounts), process.env)
+  assertMonadV5Resolvable(Object.values(store.state.accounts), policy)
   // The relayer's own reads (gas estimate, nonce, the wait for a receipt) are counted as the relayer's, like its sends.
   const relayerClient = createPublicClient({ transport: http(via('relayer'), { batch: true, timeout: 60_000 }) })
   const relayerKey = loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey)
