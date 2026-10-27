@@ -97,6 +97,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   const remint = manageAny && (obs.lastRerangeAt ?? null) !== null
   let managedInRange = 0
   let managedOutOfRange = 0
+  // otto/mamoru#223: why a managed out-of-range position is not re-ranged (cooldown, below cost, no fee history); the first one names the hold.
+  let rangeHold: ReasonCode | null = null
   for (const p of obs.positions) {
     const codes: ReasonCode[] = []
     const pool = p.pool ? obs.pools.find((x) => x.name === p.pool) : undefined
@@ -117,6 +119,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
         else managedOutOfRange++
         const r = rerangeOf(obs, policy, p, pool)
         if (r.code) codes.push(r.code)
+        if (!within && !r.proposal && !rangeHold && r.code && RANGE_HOLD_CODES.has(r.code)) rangeHold = r.code
         if (r.proposal) reranges.push(r.proposal)
         const h = harvestOf(p, pool, policy, est)
         codes.push(h.code)
@@ -229,7 +232,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   function holdReason(): ReasonCode {
     if (unsafeDeposit) return 'OBS_DEPOSIT_UNSAFE'
     if (depegged) return 'RISK_DEPEG_PAIRED'
-    if (managedOutOfRange > 0) return 'OBS_POSITION_OUT_OF_RANGE'
+    if (managedOutOfRange > 0) return rangeHold ?? 'OBS_POSITION_OUT_OF_RANGE'
     // Spec 004: the app and /ops show that money waits because of a fall, not that nothing is to do.
     if (frozen.size > 0) return 'DECIDE_ENTRY_PAUSED_FALL'
     if (managedInRange > 0) return 'DECIDE_IN_RANGE'
@@ -248,6 +251,9 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   // `waiting` moves with every price, so it is reported beside the decision and never part of its premise or id.
   return { decisionId: hashOf({ observationRef, premiseHash }), premiseHash, observationRef, ...body, ...(waiting.length ? { waiting } : {}) } as Decision
 }
+
+/** otto/mamoru#223: the re-range codes that say why an out-of-range position waits. */
+const RANGE_HOLD_CODES: ReadonlySet<ReasonCode> = new Set(['DECIDE_RANGE_COOLDOWN', 'DECIDE_RANGE_BELOW_COST', 'DECIDE_RANGE_NO_FEE_HISTORY'])
 
 /** A rerange proposal without its display-only fields (otto/mamoru#219), as FR-LC-001 hashed it before them. */
 function premiseOf(p: RerangeProposal): RerangeProposal {

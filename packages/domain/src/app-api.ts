@@ -97,7 +97,8 @@ export type FundingView = {
   // `waiting` (otto/mamoru#127, #128): money the engine is holding back as USDC on purpose, per bucket, with the reason
   // code of the last review (DECIDE_WAIT_DEPTH: the pool cannot take more now; DECIDE_ENTRY_PAUSED_FALL: its market is
   // falling fast) and when that review ran. Absent when nothing waits.
-  engine?: { placing: boolean; nextReviewAt: string | null; waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; reviewedAt?: string | null } | null
+  // `rangeHolds` (otto/mamoru#223): out-of-range positions the engine leaves where they are, with the re-range code (DECIDE_RANGE_COOLDOWN / _BELOW_COST / _NO_FEE_HISTORY).
+  engine?: { placing: boolean; nextReviewAt: string | null; waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; reviewedAt?: string | null; rangeHolds?: { tokenId: string; code: string }[] } | null
   // The owner's approval of a running account: until when (unix seconds) the engine's grants are valid, whether the
   // renewal is due (inside the renewal window) and whether they already lapsed. Null or absent when not running.
   // `missing`: how many grants of its policy the account lacks (left out to fit Base's per-tx gas cap); the renew

@@ -69,6 +69,10 @@ export const homeCopy = {
   colShare: 'Share',
   inRange: 'In range',
   paused: 'Paused: out of range. Mamoru puts it back to work automatically.',
+  // otto/mamoru#223: what the engine decided about an out-of-range position, by its re-range code.
+  heldBelowCost: 'Out of range. Too small to re-centre at a profit: moving it would cost more than it earns. It earns again if the price comes back.',
+  heldCooldown: 'Out of range. Mamoru waits a little before re-centring it, to avoid paying for a short swing.',
+  heldNoHistory: 'Out of range. Mamoru has not measured this pool\'s fees yet, so it does not move the position for now. It earns again if the price comes back.',
   noRate: 'n/a: no rate source for this pool yet.',
   unpriced: (tokens: string) => `n/a: no USDC price for ${tokens} in this view yet, so its value, its share and the account rates show n/a.`,
   unpricedIdle: (tokens: string) => `${tokens} not priced yet, not counted in the total`,
@@ -77,6 +81,9 @@ export const homeCopy = {
   // otto/mamoru#191: right after a deposit the dashboard names the amount on its way in.
   putting: (amount: string) => `Putting ${amount} USDC to work. This takes a few seconds.`,
   upToDate: (time: string) => `Nothing to do right now. Mamoru looks again at ${time}.`,
+  // otto/mamoru#223: the status line when the only thing held is an out-of-range position, by its re-range code.
+  upToDateHeld: (code: string, time: string) =>
+    `${code === 'DECIDE_RANGE_BELOW_COST' ? 'An out-of-range position is too small to re-centre at a profit, so Mamoru leaves it.' : code === 'DECIDE_RANGE_COOLDOWN' ? 'An out-of-range position waits a little before it is re-centred.' : 'An out-of-range position is left for now: its pool fees are not measured yet.'} Mamoru looks again at ${time}.`,
   waitDepth: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: the ${pair} pool is not deep enough for more right now. Checked at ${time}.`,
   waitFall: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: ${pair} is falling fast, so Mamoru adds nothing there until it settles. Checked at ${time}.`,
   waitMany: (amount: string, n: number, why: string, time: string) => `${amount} USDC is waiting in ${n} pools: ${why}. Checked at ${time}.`,
@@ -272,7 +279,15 @@ function pair(p: FundingView['positions'][number]): string {
   return poolTokens(p.pool, p.amounts).join('/')
 }
 
-function PositionRow({ p, r }: { p: FundingView['positions'][number]; r: PositionRate }) {
+/** otto/mamoru#223: the truth about an out-of-range position, from the engine's re-range code; the generic line when it says none. */
+export function rangeHoldCopy(code: string | undefined): string {
+  if (code === 'DECIDE_RANGE_BELOW_COST') return homeCopy.heldBelowCost
+  if (code === 'DECIDE_RANGE_COOLDOWN') return homeCopy.heldCooldown
+  if (code === 'DECIDE_RANGE_NO_FEE_HISTORY') return homeCopy.heldNoHistory
+  return homeCopy.paused
+}
+
+function PositionRow({ p, r, hold }: { p: FundingView['positions'][number]; r: PositionRate; hold?: string }) {
   const legs = positionAmounts(p).filter((l) => l.amount !== '0')
   const addr = poolAddress(p.pool)
   const chain = useChain()
@@ -340,7 +355,7 @@ function PositionRow({ p, r }: { p: FundingView['positions'][number]; r: Positio
           {homeCopy.unpriced(r.unpriced.join(', '))}
         </span>
       ) : null}
-      {p.inRange ? null : <span className="wc-paused">{homeCopy.paused}</span>}
+      {p.inRange ? null : <span className="wc-paused" data-testid="position-hold">{rangeHoldCopy(hold)}</span>}
     </li>
   )
 }
@@ -384,7 +399,7 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null }: { f
           </div>
           <ul className="m-0 list-none p-0">
             {f.positions.map((p, i) => (
-              <PositionRow key={p.tokenId} p={p} r={rows[i]!} />
+              <PositionRow key={p.tokenId} p={p} r={rows[i]!} hold={f.engine?.rangeHolds?.find((h) => h.tokenId === p.tokenId)?.code} />
             ))}
           </ul>
           {noRate ? <p className="m-0 pt-2 font-mono text-[0.72rem] text-stone">{homeCopy.noRate}</p> : null}
@@ -433,7 +448,9 @@ export function engineLine(f: FundingView): string | null {
     return w.code === 'DECIDE_WAIT_DEPTH' ? homeCopy.waitDepth(usd(w.amountUsdc), pair, time) : homeCopy.waitFall(usd(w.amountUsdc), pair, time)
   }
   if (!f.engine.nextReviewAt) return null
-  return homeCopy.upToDate(new Date(f.engine.nextReviewAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
+  const next = new Date(f.engine.nextReviewAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  const hold = f.engine.rangeHolds?.[0]
+  return hold ? homeCopy.upToDateHeld(hold.code, next) : homeCopy.upToDate(next)
 }
 
 /**

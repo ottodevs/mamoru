@@ -537,7 +537,7 @@ type Prepared = {
   pausedWarned?: boolean
 }
 
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** otto/mamoru#223: out-of-range positions the last decision does not re-range, with the re-range code. */ rangeHolds?: { tokenId: string; code: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -1523,7 +1523,8 @@ export class Operator {
     const runner = acc.active ? this.runners.get(acc.accountKey) : undefined
     if (!runner || runner.stopped) return null
     const waiting = runner.waiting?.length ? { waiting: runner.waiting, reviewedAt: runner.reviewedAt === undefined ? null : new Date(runner.reviewedAt).toISOString() } : {}
-    return { placing: (runner.followUps ?? 0) > 0, nextReviewAt: runner.nextAt === undefined ? null : new Date(runner.nextAt).toISOString(), ...waiting }
+    const holds = runner.rangeHolds?.length ? { rangeHolds: runner.rangeHolds } : {}
+    return { placing: (runner.followUps ?? 0) > 0, nextReviewAt: runner.nextAt === undefined ? null : new Date(runner.nextAt).toISOString(), ...holds, ...waiting }
   }
 
   /** What is in flight for this account: an owner transaction the operator is executing, else a live engine op. */
@@ -5059,6 +5060,10 @@ export class Operator {
             // this, that fresh decision could be paired with a balance /funding still answers from before it.
             if (!sameWaiting(runner.waiting, waiting)) this.fundingMoved(acc)
             runner.waiting = waiting
+            // otto/mamoru#223: why an out-of-range position is left where it is, for the app to say so.
+            const rangeHolds = d.positions.flatMap((x) => (x.codes.includes('OBS_POSITION_OUT_OF_RANGE') ? x.codes.filter((c) => c === 'DECIDE_RANGE_COOLDOWN' || c === 'DECIDE_RANGE_BELOW_COST' || c === 'DECIDE_RANGE_NO_FEE_HISTORY').map((code) => ({ tokenId: x.tokenId.toString(), code })) : []))
+            if (JSON.stringify(rangeHolds) !== JSON.stringify(runner.rangeHolds ?? [])) this.fundingMoved(acc)
+            runner.rangeHolds = rangeHolds
             const o = r.op ? engine.journal.op(r.op.opId) : null
             const last = o ? engine.journal.transitions.filter((t) => t.opId === o.opId).at(-1) : null
             // `last.detail` is free text (unlike d.reason/o.state/o.stateCode, all closed enums): redact it.
