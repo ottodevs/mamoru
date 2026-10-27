@@ -140,9 +140,13 @@ function isBridgeAction(a: SessionGrant['actions'][number], registry: Registry):
   return isDeployed('TokenMessengerV2', registry) && isAddressEqual(a.targetAddress, address('TokenMessengerV2', registry))
 }
 
-/** otto/mamoru#210: an action on an ERC-4626 vault of the registry (a `vault-supply` deposit or redeem). */
+/**
+ * otto/mamoru#210: an action on an ERC-4626 vault of the registry (a `vault-supply` deposit or redeem), or any rule that
+ * names one (the USDC approval whose spender is the vault: review of #152, it targets the token, not the vault).
+ */
 function isVaultAction(a: SessionGrant['actions'][number], registry: Registry): boolean {
-  return registry.entries.some((e) => e.kind === 'vault' && isAddressEqual(e.address, a.targetAddress))
+  const vaults = registry.entries.filter((e) => e.kind === 'vault')
+  return vaults.some((e) => isAddressEqual(e.address, a.targetAddress) || a.params.some((p) => p.ref === BigInt(e.address)))
 }
 
 /** otto/mamoru#213: a `requiresPauseGate` grant carries the configured MamoruPauseGate and MamoruGasPolicy, and no action policy. */
