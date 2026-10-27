@@ -150,11 +150,29 @@ try {
   const j = JSON.parse(readFileSync(file, 'utf8'))
   j.converts[ctx.accountKey] = { ...j.converts[ctx.accountKey], state: 'unconfirmed', usdcOut: undefined, at: new Date(Date.now() - 60_000).toISOString() }
   writeFileSync(file, JSON.stringify(j))
-  const reborn = make()
-  const rs = await reborn.status(ctx)
+  const rs = await make().status(ctx)
   check(rs.convert?.state === 'done' && rs.convert.usdcOut === got.toString(), 'unconfirmed resolved from the receipt after a restart')
 
+  // No hash at all, past the wait: nonce spent and the ETH gone, so it ran.
+  const j2 = JSON.parse(readFileSync(file, 'utf8'))
+  j2.converts[ctx.accountKey] = { ...j2.converts[ctx.accountKey], state: 'unconfirmed', usdcOut: undefined, l1Tx: undefined, at: new Date(Date.now() - 16 * 60_000).toISOString() }
+  writeFileSync(file, JSON.stringify(j2))
+  check((await make().status(ctx)).convert?.state === 'done', 'unconfirmed without a hash: nonce spent, ETH gone, done')
+  // Same, but the ETH is all still there: another transaction took the nonce, this one can never run.
+  await lab.setBalance(safe, ETH)
+  writeFileSync(file, JSON.stringify(j2))
+  const stuck = make()
+  check((await stuck.status(ctx)).convert?.state === 'failed', 'unconfirmed without a hash, ETH untouched: failed, not stuck')
+  await lab.setBalance(safe, 0n)
+  // A conversion under way blocks a Move to Base whose approval was prepared before it.
+  const pre = await stuck.prepare(ctx)
+  const j3 = JSON.parse(readFileSync(file, 'utf8'))
+  j3.converts[ctx.accountKey] = { ...j3.converts[ctx.accountKey], state: 'unconfirmed', at: new Date().toISOString() }
+  ;(stuck as unknown as { journal: typeof j3 }).journal.converts = j3.converts
+  check((await code(stuck.submit(ctx, browserSign(pre)))) === 'BRIDGE_IN_PROGRESS', 'move approved before a conversion, submitted while it is unconfirmed: refused')
+
   // Then Move to Base takes the USDC (Across, live quote).
+  const reborn = make()
   const pmv = await reborn.prepare(ctx)
   check(pmv.summary[0]!.startsWith(`Move ${(Number(got) / 1e6).toFixed(2).replace(/0$/, '')}`) || pmv.summary[0]!.includes('USDC from Ethereum'), `move: ${pmv.summary[0]}`)
   const moved = await reborn.submit(ctx, browserSign(pmv))
