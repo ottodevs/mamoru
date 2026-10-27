@@ -103,10 +103,13 @@ export type FundingView = {
   // `upgrade` (spec 007 T7): the renew route moves this account's approval to the on-chain action policy (v4): one
   // more tap, nothing moved. Absent when not offered. `upgradePolicy` (otto/mamoru#151): the policy id it moves to
   // (conservador-live-v4, or conservador-live-v5 on MamoruActionPolicyV2), so the row says what changes.
+  // `upgradeSplit` (otto/mamoru#214): with `upgrade`, when the target policy spans two chains (conservador-live-v6), the
+  // account's split before and after, in bps: `from` the current policy's buckets that hold a share, `to` every bucket of
+  // the target with the chain that serves it (a bucket at 0 is leaving, e.g. cbBTC). Absent for every other move.
   // `paused` (otto/mamoru#151): MamoruActionPolicyV2's guardian has paused the account; a renewal would end that pause.
   // `policyId`: the account's own policy, what a renewal that moves nothing renews.
   approval?: {
-    validUntil: number; renewDue: boolean; expired: boolean; missing?: number; upgrade?: boolean; upgradePolicy?: string; paused?: boolean; policyId?: string
+    validUntil: number; renewDue: boolean; expired: boolean; missing?: number; upgrade?: boolean; upgradePolicy?: string; upgradeSplit?: { from: { bucket: string; bps: number }[]; to: { bucket: string; chainId: number; bps: number }[] }; paused?: boolean; policyId?: string
     usage?: { action: 'collect' | 'rerange' | 'enter'; pool: string | null; usedBps: number; spent: boolean }
   } | null
   positions: {

@@ -419,6 +419,11 @@ export type OperatorConfig = {
    * `resolveV5Policy`), set only with the v4 opt-in and MAMORU_ACTION_POLICY_V2_ADDRESS. Absent: nothing of v5 exists.
    */
   v5Policy?: PolicyVersion
+  /**
+   * otto/mamoru#214: the deployed v6 policy (conservadorLiveV6 with V2, the gas policy and MamoruPauseGate, boot.ts
+   * `resolveV6Policy`), set only with the v4 opt-in and both V2 and pause gate addresses. Absent: v6 is not offered.
+   */
+  v6Policy?: PolicyVersion
   /** otto/mamoru#129 runtime flags from the settings pull; `onchain_action_policy_v4` offers the v4 renewal per account. Absent: every flag off. */
   opsFlags?: () => Partial<Record<OpsFlagName, boolean>>
   /** otto/mamoru#172: where the shared guard reads' fee history and fallback series survive a restart (`GuardReadsState`). Absent: memory only. */
@@ -429,6 +434,8 @@ export type OperatorConfig = {
 const V4_MIGRATES_FROM = new Set(['conservador-live-v2', 'conservador-live-v3'])
 /** otto/mamoru#151: the policies whose accounts the renew row moves to v5 (MamoruActionPolicyV2): v2/v3, and v4 (V1). */
 const V5_MIGRATES_FROM = new Set(['conservador-live-v2', 'conservador-live-v3', 'conservador-live-v4', 'conservador-lab-v4'])
+/** otto/mamoru#214: the policies whose accounts the renew row moves to v6 (`multichain_v6`): everything v5 takes, and v5 itself. */
+const V6_MIGRATES_FROM = new Set([...V5_MIGRATES_FROM, 'conservador-live-v5', 'conservador-lab-v5'])
 /** Gas a v4 approval's first transaction carries besides enableSessions, per removeSession (measured: ~1.45M for 8). */
 const REVOKE_GAS_EACH = 190_000n
 /** The registry trust calls of a first activation, and one self-attestation call, with margin. */
@@ -457,6 +464,21 @@ export function renewPolicyOf(grants: readonly Pick<StoredGrant, 'grant'>[]): st
   const ids = [...new Set(grants.map((g) => g.grant.policyId))]
   if (ids.length > 1) throw new Error(`a renewal mixes policies ${ids.join(', ')}`)
   return ids[0]
+}
+
+/**
+ * otto/mamoru#214: what a move to `target` changes in the split of the account, for the renew row to draw before -> after.
+ * Only when the target has buckets on another chain (v6); every other move changes no split worth drawing. `from` is the
+ * current policy's buckets that hold a share; `to` all of the target's, a bucket at 0 (cbBTC, exit only) included so the
+ * row can show it leaving. Preferences as the policies state them (bps of the account), local buckets on the target's chain.
+ */
+export function upgradeSplitOf(current: PolicyVersion, target: PolicyVersion): NonNullable<NonNullable<FundingView['approval']>['upgradeSplit']> | undefined {
+  if (!target.remoteBuckets?.length) return undefined
+  const chainId = target.sourceChainId ?? BASE_CHAIN_ID
+  return {
+    from: [...current.buckets, ...(current.remoteBuckets ?? [])].filter((b) => b.preference > 0).map((b) => ({ bucket: b.id, bps: b.preference })),
+    to: [...target.buckets.map((b) => ({ bucket: b.id as string, chainId: chainId as number, bps: b.preference })), ...target.remoteBuckets.map((b) => ({ bucket: b.id as string, chainId: b.chainId as number, bps: b.preference }))],
+  }
 }
 
 /** A policy whose grants need MamoruActionPolicy (v4). */
@@ -1114,6 +1136,7 @@ export class Operator {
     // Spec 007 T7: a v4 account resolves only to the deployed v4 policy this operator was configured with.
     if (this.cfg.v4Policy?.policyId === acc.policyId) return this.cfg.v4Policy
     if (this.cfg.v5Policy?.policyId === acc.policyId) return this.cfg.v5Policy
+    if (this.cfg.v6Policy?.policyId === acc.policyId) return this.cfg.v6Policy
     if (this.cfg.policy.policyId === acc.policyId) return this.cfg.policy
     // otto/mamoru#214: a Monad operator on the v5 sleeve policy still serves the sleeves activated with v1.
     if (this.cfg.chainWrites?.length && MONAD_LIVE_POLICIES[acc.policyId]) return MONAD_LIVE_POLICIES[acc.policyId]!
@@ -1136,6 +1159,9 @@ export class Operator {
       return null
     }
     const flags = this.cfg.opsFlags?.()
+    // otto/mamoru#214: v6 (Base + Monad growth) configured and offered: v2-v5 accounts move to it, ahead of v5.
+    const v6 = this.cfg.v6Policy
+    if (v6 && flags?.multichain_v6 === true && V6_MIGRATES_FROM.has(cur.policyId) && cur.chain === v6.chain) return v6
     // otto/mamoru#151: MamoruActionPolicyV2 deployed and offered: v2/v3 and v4 accounts move to v5.
     const v5 = this.cfg.v5Policy
     if (v5 && flags?.onchain_action_policy_v5 === true && V5_MIGRATES_FROM.has(cur.policyId) && cur.chain === v5.chain) return v5
@@ -1158,7 +1184,7 @@ export class Operator {
     let sized = this.v4Sized.get(key)
     if (!sized) {
       const pools = v4PoolsOn(p.sourceChainId).filter((v) => p.buckets.some((b) => b.pools.includes(v.pool)))
-      sized = withActionPolicy(p, ap.address, pools, { caps: v4BudgetCaps(p, cap), ...(ap.gasPolicy ? { gasPolicy: ap.gasPolicy } : {}), ...(ap.bandFactorBps !== undefined ? { bandFactorBps: ap.bandFactorBps } : {}), ...(ap.twapShortWindowSeconds !== undefined ? { twapShortWindowSeconds: ap.twapShortWindowSeconds } : {}), ...(ap.contractVersion ? { contractVersion: ap.contractVersion } : {}) })
+      sized = withActionPolicy(p, ap.address, pools, { caps: v4BudgetCaps(p, cap), ...(ap.gasPolicy ? { gasPolicy: ap.gasPolicy } : {}), ...(ap.bandFactorBps !== undefined ? { bandFactorBps: ap.bandFactorBps } : {}), ...(ap.twapShortWindowSeconds !== undefined ? { twapShortWindowSeconds: ap.twapShortWindowSeconds } : {}), ...(ap.contractVersion ? { contractVersion: ap.contractVersion } : {}), ...(ap.pauseGate ? { pauseGate: ap.pauseGate } : {}) })
       this.v4Sized.set(key, sized)
     }
     return sized
@@ -1182,8 +1208,9 @@ export class Operator {
     const usage = this.usageView(acc)
     const target = this.v4Target(acc)
     const upgrade = target !== null
+    const split = target ? upgradeSplitOf(this.policyOf(acc), target) : undefined
     const paused = this.chainUsage.get(acc.accountKey)?.paused === true
-    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, policyId: this.policyOf(acc).policyId, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}), ...(upgrade ? { upgrade, upgradePolicy: target.policyId } : {}), ...(paused ? { paused } : {}) }
+    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, policyId: this.policyOf(acc).policyId, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}), ...(upgrade ? { upgrade, upgradePolicy: target.policyId } : {}), ...(split ? { upgradeSplit: split } : {}), ...(paused ? { paused } : {}) }
   }
 
   /**
@@ -1769,7 +1796,9 @@ export class Operator {
     if (!d) throw new HttpError(503, 'ACTION_POLICY_UNCONFIGURED', 'the on-chain action policy is not configured on this operator')
     const read = <T,>(args: Parameters<PublicClient['readContract']>[0]) => this.client.readContract({ ...args, blockNumber: block } as never) as Promise<T>
     const reference = await read<{ resolverUID: Hex; sender: Address }>({ address: address('ModuleRegistry', this.cfg.registry), abi: moduleRegistryAbi, functionName: 'findModule', args: [address('TimeFramePolicy', this.cfg.registry)] })
-    for (const m of [d.actionPolicy, d.gasPolicy]) {
+    // otto/mamoru#214: v6's bridge-out grant also names MamoruPauseGate: registered and attested like the other two.
+    const modules = [d.actionPolicy, d.gasPolicy, ...(d.pauseGate ? [d.pauseGate] : [])]
+    for (const m of modules) {
       const rec = await read<{ resolverUID: Hex; sender: Address }>({ address: address('ModuleRegistry', this.cfg.registry), abi: moduleRegistryAbi, functionName: 'findModule', args: [m] })
       if (BigInt(rec.sender) === 0n || rec.resolverUID !== reference.resolverUID) {
         logErr(`[v4] ${m} has no ModuleRecord under Mamoru's resolver (sender ${rec.sender}): not attested`, undefined)
@@ -1784,7 +1813,7 @@ export class Operator {
     const attest: Address[] = []
     // Unrevoked but lapsing: the registry refuses a new attestation over it (AlreadyAttested), so it is revoked first.
     const reattest: Address[] = []
-    for (const m of [d.actionPolicy, d.gasPolicy]) {
+    for (const m of modules) {
       const a = await read<{ time: number; expirationTime: number; revocationTime: number; attester: Address }>({ address: address('ModuleRegistry', this.cfg.registry), abi: moduleRegistryAbi, functionName: 'findAttestation', args: [m, live.safe] })
       const lapses = Number(a.expirationTime) !== 0 && Number(a.expirationTime) <= approvalEnd
       const inForce = Number(a.time) !== 0 && Number(a.revocationTime) === 0
@@ -1949,6 +1978,7 @@ export class Operator {
         ...(paused ? ['A guardian key has paused Mamoru on this Safe. This renewal ends that pause: approve it only if you know why it was paused'] : []),
         target ? `Renew Mamoru's approval on your Safe ${live.safe} and move it to ${toV5 ? 'the new version of its on-chain limits' : 'on-chain limits'}` : `Renew Mamoru's approval on your Safe ${live.safe}`,
         ...(target ? ['Mamoru can now trade only near the market price, and only the positions it opened'] : []),
+        ...(target?.remoteBuckets?.length ? [`Mamoru can also move part of your savings, as USDC through Circle's bridge, to your own address on Monad, where your Monad sleeve holds the Growth share; USDC/cbBTC is only wound down, nothing new goes into it`] : []),
         ...(toV5 ? ['It can add to a position it already holds instead of opening another one', 'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause'] : []),
         `Engine key ${f.sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero, sized for deposits up to ${fmtUsdc(cap)} USDC (the cap you signed):`,
         ...this.v4Lines(f.stored, policy, cap),
@@ -2099,6 +2129,9 @@ export class Operator {
       const total = budgets[spec.caps.budgetTotal] ?? 0n
       return `In ${poolLabel(pool, this.cfg.registry)}: swaps, new positions and withdrawals only within ${band} of the 30- and 5-minute average price${anchor}; swaps and new positions worth at most ${fmtUsdc(day)} USDC a day and ${fmtUsdc(total)} USDC in total on this approval`
     })
+    if (stored.some((g) => g.name === 'bridge-out')) {
+      lines.push(`Bridge: it may burn USDC with Circle's CCTP only to your own address on Monad (never to another address, never any fee), at most ${fmtUsdc(budgets.bridgePerCall ?? 0n)} USDC a time and ${fmtUsdc(budgets.bridgeTotal ?? 0n)} USDC in total on this approval; a guardian pause stops it`)
+    }
     const caps = policy.actionPolicy?.gasPolicy?.caps
     if (caps) {
       const per = maxGasCostPerOp(caps)
@@ -2605,13 +2638,14 @@ export class Operator {
       const keys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
       const f = await this.fitV4(acc, live, policy, r, cap, keys, [], 'full', ACTIVATION_GAS_BUDGET, reserve)
       const days = Math.round(policy.session.validitySeconds / 86_400)
-      const pools = policy.buckets.filter((b) => b.pools[0]).map((b) => `${poolLabel(b.pools[0]!, this.cfg.registry)} ${b.preference / 100}%`)
+      const pools = policy.buckets.filter((b) => b.pools[0] && b.preference > 0).map((b) => `${poolLabel(b.pools[0]!, this.cfg.registry)} ${b.preference / 100}%`)
       const summary = [
         `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on ${this.chainName()}`,
         ...reserveLine,
         r.usdc > 0n
           ? `Let Mamoru's engine keep your ${fmtUsdc(invested)} USDC invested across Uniswap v3 ${pools.join(', ')}`
           : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(cap)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
+        ...(policy.remoteBuckets ?? []).map((b) => `${b.preference / 100}% of your savings goes to Growth on ${chainOf(b.chainId).name}, to your own address there, through Circle's bridge; your ${chainOf(b.chainId).name} sleeve runs it`),
         `Engine key ${f.sessionKey} may swap USDC into those pools' tokens, open positions there, and take out, collect and close only the positions it opened, only near the market price, for ${days} days:`,
         ...this.v4Lines(f.stored, policy, cap),
         ...this.stepLines(f.steps, f.rest),
