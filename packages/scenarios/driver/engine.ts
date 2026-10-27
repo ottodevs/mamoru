@@ -538,34 +538,53 @@ export class Engine {
     const op = this.journal.propose(record, decision.proposal.grant)
     const p = decision.proposal
     this.capFreeing = p.kind === 'rerange' || p.kind === 'reduce' || p.kind === 'harvest' || (p.kind === 'enter_swap' && p.tokenIn !== this.cfg.policy.savingsAsset)
+    this.capSpending = !this.capFreeing
     if (p.kind === 'enter_mint' || p.kind === 'increase_liquidity' || p.kind === 'rerange') this.cfg.onEntering?.(p.pool)
     // An op settled RECON_UNINCLUDABLE is backed off where it is settled (`settlePending`).
     await this.run(op, obs, decision)
     return { kind: 'decided', observation: obs, record, op }
   }
 
-  /** otto/mamoru#212: what this account had placed at the last review, whether the operation since took money out, and what it may put back. */
+  /**
+   * otto/mamoru#212: what was placed and idle at the last review, what the operation since did (took money out of the
+   * positions, or spent savings on an entry), and what may be put back.
+   */
   private capPlaced: bigint | null = null
+  private capIdle: bigint | null = null
   private capFreeing = false
+  private capSpending = false
   private reinvest = 0n
 
   /**
-   * otto/mamoru#212: savings the engine's own operations took out of what was placed (a re-range, a reduce, a sale of
-   * idle volatile, a converting harvest), which it may put back whatever the cap says: completing a re-range is not new
-   * money. What is placed again uses it up; it never exceeds the idle savings. In memory: a restart forgets it.
+   * otto/mamoru#212: savings the engine's own operation freed (a re-range, a reduce, a sale of idle volatile, a
+   * converting harvest), which it may put back whatever the cap says: completing a re-range is not new money. Credited
+   * only with the idle savings that operation actually added, never more than what left the positions: a price drop,
+   * a deposit or an owner operation credits nothing. Placing uses it up; idle savings that fall without an entry (the
+   * owner took money out) clear it, and so does any owner operation (resetCapReinvest). In memory: a restart forgets it.
    */
   private reinvestOf(obs: Observation): bigint {
     const placed = placedOf(obs, this.cfg.policy)
-    if (this.capPlaced !== null) {
-      const d = placed - this.capPlaced
-      if (d < 0n && this.capFreeing) this.reinvest += -d
-      else if (d > 0n) this.reinvest = this.reinvest > d ? this.reinvest - d : 0n
+    const idle = safeSavings(obs, this.cfg.policy)
+    if (this.capPlaced !== null && this.capIdle !== null) {
+      const dPlaced = placed - this.capPlaced
+      const dIdle = idle - this.capIdle
+      if (this.capFreeing && dIdle > 0n && dPlaced < 0n) this.reinvest += dIdle < -dPlaced ? dIdle : -dPlaced
+      else if (dPlaced > 0n) this.reinvest = this.reinvest > dPlaced ? this.reinvest - dPlaced : 0n
+      if (dIdle < 0n && !this.capSpending && !this.capFreeing) this.reinvest = 0n
     }
     this.capPlaced = placed
+    this.capIdle = idle
     this.capFreeing = false
-    const idle = safeSavings(obs, this.cfg.policy)
+    this.capSpending = false
     if (this.reinvest > idle) this.reinvest = idle
     return this.reinvest
+  }
+
+  /** otto/mamoru#212: an owner operation (a withdrawal, a stop) ran: nothing it moved is the engine's to put back. */
+  resetCapReinvest(): void {
+    this.reinvest = 0n
+    this.capPlaced = null
+    this.capIdle = null
   }
 
   private session(name: string): EngineSession | undefined {

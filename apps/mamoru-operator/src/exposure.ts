@@ -31,27 +31,24 @@ export function exposureOf(chainId: number, idle: readonly { token: string; valu
 }
 
 /**
- * Who goes first when two chains both run the account and both hold savings to place: Base, then the lower chain id.
- * The other one leaves room for what the first may still place, so both together never place past the cap.
+ * What an engine on this chain counts as taken elsewhere: everything the other chains hold for the account, placed
+ * and idle (USDC in flight included). Idle money on another chain counts as committed to that chain, whether or not
+ * its engine runs: two chains reading each other can then never both place the same headroom, however their reviews
+ * interleave. A chain's own deposit is in the other's read from the moment it lands, before anything places it, and a
+ * chain places only its own money. The price is conservative: when the idle money across chains is above the cap,
+ * less than the cap may end up placed (a soft cap; the app shows the excess). Null when another chain could not be
+ * read: nothing new is placed.
  */
-export function placesFirst(a: number, b: number): boolean {
-  if (a === 8453) return true
-  if (b === 8453) return false
-  return a < b
+export function elsewhereOf(peers: PeerRead): bigint | null {
+  if (!peers.ok) return null
+  return peers.chains.reduce((s, e) => s + totalOf(e), 0n)
 }
 
-/**
- * What an engine on chain `own` counts as placed elsewhere: what every other chain has placed, plus the savings a chain
- * that places first could still place there (it is running). Null when another chain could not be read.
- */
-export function elsewhereOf(own: number, peers: PeerRead): bigint | null {
-  if (!peers.ok) return null
-  let sum = 0n
-  for (const e of peers.chains) {
-    sum += e.placedUsdc
-    if (e.active && placesFirst(e.chainId, own)) sum += e.idleUsdc
-  }
-  return sum
+/** Two reads of the account's other Safes and chains, as one: failed when either failed. */
+export function joinReads(a: PeerRead, b: PeerRead): PeerRead {
+  if (!a.ok) return a
+  if (!b.ok) return b
+  return { ok: true, chains: [...a.chains, ...b.chains] }
 }
 
 export type PeerOperator = { chainId: number; url: string }
@@ -125,7 +122,7 @@ export class PeerExposure {
     const c = this.cache.get(address.toLowerCase())
     if (!c) return undefined
     const age = this.now() - c.at
-    return age <= (c.value.ok ? maxAgeMs : Math.min(maxAgeMs, FAILED_TTL_MS)) ? c.value : undefined
+    return age < (c.value.ok ? maxAgeMs : Math.min(maxAgeMs, FAILED_TTL_MS)) ? c.value : undefined
   }
 
   /** Every peer's exposure for `address`, at most `maxAgeMs` old. No peers: an empty, successful read. */
@@ -139,6 +136,31 @@ export class PeerExposure {
     const p = this.readAll(key).finally(() => this.inFlight.delete(key))
     this.inFlight.set(key, p)
     return p
+  }
+
+  /**
+   * Boot check: every peer answers a signed read (of the zero address) with its own chain id. One line per peer that
+   * does not, saying why: unreachable, refused (401: OPERATOR_SECRET differs, or the peer runs code without the route:
+   * 404), or another chain. Never throws and never blocks the boot: reads fail closed on their own.
+   */
+  async check(): Promise<{ chainId: number; ok: boolean; why?: string }[]> {
+    const zero = `0x${'0'.repeat(40)}`
+    return Promise.all(
+      this.peers.map(async (peer) => {
+        const path = `${EXPOSURE_PATH}${zero}`
+        try {
+          const sig = await metricsSignature(this.secret, 'GET', path, Math.floor(this.now() / 60_000))
+          const res = await this.fetchFn(`${peer.url}${path}`, { method: 'GET', headers: { 'x-mamoru-sig': sig, accept: 'application/json' }, signal: AbortSignal.timeout(this.timeoutMs * 3) })
+          if (res.status === 401) return { chainId: peer.chainId, ok: false, why: 'refused (401): OPERATOR_SECRET differs' }
+          if (res.status === 404) return { chainId: peer.chainId, ok: false, why: 'no /internal/exposure route (404): the peer runs older code' }
+          if (!res.ok) return { chainId: peer.chainId, ok: false, why: `answered ${res.status}` }
+          const w = (await res.json()) as Partial<ExposureWire>
+          return w.chainId === peer.chainId ? { chainId: peer.chainId, ok: true } : { chainId: peer.chainId, ok: false, why: `answers for chain ${String(w.chainId)}` }
+        } catch {
+          return { chainId: peer.chainId, ok: false, why: 'unreachable' }
+        }
+      }),
+    )
   }
 
   private async readAll(address: string): Promise<PeerRead> {

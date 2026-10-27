@@ -35,6 +35,8 @@ export type EngineSettingsPayload = {
   /** otto/mamoru#26: per-account cap overrides, lowercase account key to whole USDC (newest row per account; a removal
    * or no row: absent, the account runs its environment's cap). Older operators ignore it. */
   accountCaps: Record<string, number>
+  /** otto/mamoru#212: an owner's other Safe addresses in its environment, per account key (see ownerSafes). Older operators ignore it. */
+  ownerSafes: Record<string, string[]>
   servedAt: string
 }
 
@@ -95,17 +97,18 @@ async function betaAccounts(db: Db): Promise<string[]> {
   }
 }
 
-type CapRow = { id: number; account_key: string; cap_usdc: number | null; env: string; account_env: string | null; user_id: string | null }
+type CapRow = { id: number; account_key: string; cap_usdc: number | null; env: string; account_env: string | null; user_id: string | null; sleeve_key: string | null }
 
 /**
  * otto/mamoru#26: the newest row of every account in `account_cap_overrides`, removals left out. A row the code would
  * refuse is skipped (the account keeps what its previous valid row said), as for versions. No table yet (the migration
  * is not applied): an empty map, every account on its environment's cap.
  *
- * otto/mamoru#212: a row counts only for an account of the environment it was written for (`env`): a beta override
- * never reaches a prod account, nor the other way round. And the cap is the owner's total across chains, so it holds
- * every sleeve of the owner in that environment (the Base account and its Monad sleeve, #67): the newest row written
- * for any of them is the cap of all of them. A row for an account the D1 does not know keeps to its own key.
+ * otto/mamoru#212: a row counts only for an account of the environment it was written for (`env`, NOT NULL since 0016
+ * created the table): a beta override never reaches a prod account, nor the other way round. And the cap is the owner's
+ * total across chains, so it holds every account of the owner in that environment (the Base account and its Monad
+ * sleeve, #67): the newest row written for any of them is the cap of all of them. A row for an account the D1 does not
+ * know keeps to its own key. One query, the owner's accounts by a self-join: no bound parameters at all.
  */
 export async function accountCaps(db: Db): Promise<Record<string, number>> {
   let rows: CapRow[]
@@ -113,7 +116,11 @@ export async function accountCaps(db: Db): Promise<Record<string, number>> {
     rows = (
       await db
         .prepare(
-          `SELECT o.id, o.account_key, o.cap_usdc, o.env, a.env AS account_env, a.user_id FROM account_cap_overrides o LEFT JOIN accounts a ON lower(a.account_key) = lower(o.account_key) ORDER BY o.id`,
+          `SELECT o.id, o.account_key, o.cap_usdc, o.env, a.env AS account_env, a.user_id, s.account_key AS sleeve_key
+           FROM account_cap_overrides o
+           LEFT JOIN accounts a ON lower(a.account_key) = lower(o.account_key)
+           LEFT JOIN accounts s ON s.user_id = a.user_id AND s.env = a.env
+           ORDER BY o.id`,
         )
         .all<CapRow>()
     ).results
@@ -121,34 +128,42 @@ export async function accountCaps(db: Db): Promise<Record<string, number>> {
     if (missingTable(e)) return {}
     throw e
   }
-  // Per owner and environment (or per key when the account is unknown): the newest valid row.
+  // Per owner and environment (or per key when the account is unknown): the newest valid row, and its accounts.
   const latest = new Map<string, number | null>()
-  const owners = new Map<string, { userId: string; env: string }>()
+  const members = new Map<string, Set<string>>()
   for (const r of rows) {
     if (validateAccountCapOverride({ accountKey: r.account_key, capUsdc: r.cap_usdc }).length) continue
     if (r.account_env !== null && r.account_env !== r.env) continue
-    const group = r.user_id !== null && r.account_env !== null ? `u:${r.user_id}|${r.account_env}` : `k:${r.account_key.toLowerCase()}`
-    if (r.user_id !== null && r.account_env !== null) owners.set(group, { userId: r.user_id, env: r.account_env })
+    const owned = r.user_id !== null && r.account_env !== null
+    const group = owned ? `u:${r.user_id}|${r.account_env}` : `k:${r.account_key.toLowerCase()}`
+    // Rows come once per account of the owner (the join): the same id again only adds a member.
+    latest.delete(group)
     latest.set(group, r.cap_usdc)
-  }
-  const sleeves = new Map<string, string[]>()
-  if (owners.size) {
-    const users = [...new Set([...owners.values()].map((o) => o.userId))]
-    const { results } = await db
-      .prepare(`SELECT account_key, user_id, env FROM accounts WHERE user_id IN (${users.map(() => '?').join(', ')})`)
-      .bind(...users)
-      .all<{ account_key: string; user_id: string; env: string }>()
-    for (const a of results) {
-      const g = `u:${a.user_id}|${a.env}`
-      sleeves.set(g, [...(sleeves.get(g) ?? []), a.account_key.toLowerCase()])
-    }
+    const m = members.get(group) ?? new Set<string>()
+    m.add(owned && r.sleeve_key ? r.sleeve_key.toLowerCase() : r.account_key.toLowerCase())
+    members.set(group, m)
   }
   const out: Record<string, number> = {}
-  for (const [group, cap] of latest) {
-    if (cap === null) continue
-    for (const key of group.startsWith('u:') ? (sleeves.get(group) ?? []) : [group.slice(2)]) out[key] = cap
-  }
+  for (const [group, cap] of latest) if (cap !== null) for (const key of members.get(group) ?? []) out[key] = cap
   return Object.fromEntries(Object.entries(out).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+}
+
+/**
+ * otto/mamoru#212: for an owner holding more than one Safe address in an environment (the D1 does not forbid a second
+ * Base account; onboarding only refuses one per session), each of its account keys to the owner's other addresses, so
+ * the operator counts them in the cap. Normally empty: a Base account and its sleeves share one address.
+ */
+export async function ownerSafes(db: Db): Promise<Record<string, string[]>> {
+  const { results } = await db
+    .prepare(
+      `SELECT DISTINCT a.account_key, lower(b.address) AS address FROM accounts a
+       JOIN accounts b ON b.user_id = a.user_id AND b.env = a.env AND lower(b.address) <> lower(a.address)
+       ORDER BY a.account_key, address`,
+    )
+    .all<{ account_key: string; address: string }>()
+  const out: Record<string, string[]> = {}
+  for (const r of results) (out[r.account_key.toLowerCase()] ??= []).push(r.address)
+  return out
 }
 
 export function engineSettingsRoutes(now: () => Date) {
@@ -160,7 +175,7 @@ export function engineSettingsRoutes(now: () => Date) {
     if (!(await verifyMetricsSignature(secret, 'GET', ENGINE_SETTINGS_PATH, c.req.header('x-mamoru-sig'), at))) return c.json({ error: 'unauthorized' }, 401)
     const versions = await activeVersions(c.env.DB)
     if (versions === null) return c.json({ error: 'engine settings are not set up' }, 404)
-    const payload: EngineSettingsPayload = { versions, betaAccounts: await betaAccounts(c.env.DB), flags: await readOpsFlags(c.env.DB), accountCaps: await accountCaps(c.env.DB), servedAt: new Date(at).toISOString() }
+    const payload: EngineSettingsPayload = { versions, betaAccounts: await betaAccounts(c.env.DB), flags: await readOpsFlags(c.env.DB), accountCaps: await accountCaps(c.env.DB), ownerSafes: await ownerSafes(c.env.DB), servedAt: new Date(at).toISOString() }
     const body = JSON.stringify(payload)
     const sig = await settingsResponseSignature(secret, body, Math.floor(at / 60_000))
     return new Response(body, { status: 200, headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-mamoru-sig': sig } })

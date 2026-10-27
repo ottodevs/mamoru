@@ -303,3 +303,13 @@ describe('per-account cap overrides (otto/mamoru#26)', () => {
     expect(describeAccountCaps({ 'zz-123456789': 5, '00a7a1df-0000': 2000 })).toBe('00a7a1df=2000, zz-12345=5')
   })
 })
+
+describe('otto/mamoru#212: ownerSafes', () => {
+  test('an owner\'s other Safes are carried lowercase; malformed refuses the pull; absent is none', () => {
+    const base = { versions: [], betaAccounts: [], servedAt: '2026-10-16T12:00:00.000Z' }
+    expect(checkPayload({ ...base, ownerSafes: { 'ACCT-1': ['0x00000000000000000000000000000000000000AB'] } }, null).ownerSafes).toEqual({ 'acct-1': ['0x00000000000000000000000000000000000000ab'] })
+    expect(checkPayload(base, null).ownerSafes).toEqual({})
+    expect(() => checkPayload({ ...base, ownerSafes: { a: ['nope'] } }, null)).toThrow('bad ownerSafes')
+    expect(() => checkPayload({ ...base, ownerSafes: [] }, null)).toThrow('ownerSafes must be an object')
+  })
+})

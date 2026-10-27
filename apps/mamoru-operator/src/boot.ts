@@ -9,7 +9,7 @@ import { LIVE_CAP_USDC } from '@mamoru/account/live'
 import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLiveV4, conservadorLiveV5, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, type PolicyVersion } from '@mamoru/policy'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
-import { RpcMetrics } from './metrics.ts'
+import { RpcMetrics, logErr } from './metrics.ts'
 import { livePool, writeRefusal } from './chain.ts'
 import { writeRegistry } from './chain-writes.ts'
 import { Operator, type OperatorConfig } from './operator.ts'
@@ -389,7 +389,17 @@ export async function bootOperator(o: BootOptions) {
   // otto/mamoru#212: the operators of the other chains, read for the account's total across chains.
   const peerList = parsePeerOperators(o.peerOperators, chainId)
   const peers = peerList.length ? new PeerExposure(peerList, o.secret) : null
-  if (peers) console.log(`[operator] cap counted across chains: ${peerList.map((p) => p.chainId).join(', ')} read from their operators`)
+  if (peers) {
+    console.log(`[operator] cap counted across chains: ${peerList.map((p) => p.chainId).join(', ')} read from their operators`)
+    // otto/mamoru#212: a peer that cannot be read stops new placements and Starts here: said loudly at boot (and again
+    // in a minute, for a peer restarting at the same time), never silently.
+    const checkPeers = () =>
+      void peers.check().then((rs) => {
+        for (const r of rs) if (!r.ok) logErr('[alert]', `peer operator of chain ${r.chainId} ${r.why}: new placements and Starts wait until it answers (MAMORU_PEER_OPERATORS)`)
+      })
+    checkPeers()
+    setTimeout(checkPeers, 60_000).unref?.()
+  }
   let retune = () => {}
   // otto/mamoru#129: reassigned once the snapshot loop exists (it needs `operator`, built below); the settings
   // source is wired to call whatever this holds at the time, on every change it applies, not only the first.

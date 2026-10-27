@@ -60,9 +60,10 @@ function inRange(tick: number, lower: number, upper: number): boolean {
  * FR-DEC-001: pure and deterministic. The same observation and policy give
  * the same decision, codes and trail, byte for byte.
  */
-export function decide(seen: Observation, given: PolicyVersion): Decision {
-  // otto/mamoru#212: savings above the account's room under its cap are not there to place.
-  const obs = withinCap(seen, given)
+export function decide(obs: Observation, given: PolicyVersion): Decision {
+  // otto/mamoru#212: for the sizing of new money only (the entries below), savings above the account's room under its
+  // cap are not there to place. Re-range, harvest, reduce and idle sales read the observation as it is.
+  const entryObs = withinCap(obs, given)
   // Lab (#101 experiment 6): every step reads the scaled preferences; the decision still names the policy as given.
   const targets = weightTargets(obs, given)
   const policy: PolicyVersion = targets ? { ...given, buckets: targets } : given
@@ -137,7 +138,7 @@ export function decide(seen: Observation, given: PolicyVersion): Decision {
   let pendingMint: ReadonlySet<string> | undefined
   let waiting: Waiting[] = []
   if (policy.allocation === 'target-weights') {
-    const a = allocate(obs, policy, unsafeDeposit, frozen)
+    const a = allocate(entryObs, policy, unsafeDeposit, frozen)
     // Only where the next step has a live session: without one it never goes and the token would wait for ever.
     // A mint after a re-range runs under manage-any, as below.
     const live = (grant: string) => obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
@@ -179,8 +180,8 @@ export function decide(seen: Observation, given: PolicyVersion): Decision {
       buckets.push({ bucket: b.id, code: 'OBS_DEPOSIT_UNSAFE' })
       continue
     }
-    const convert = ratioConvertOf(obs, policy, b.preference, pool, safeSavings(obs, policy))
-    const e = convert ? { code: 'DECIDE_CONVERT' as const, proposal: convert } : enterBucket(obs, policy, b.preference, pool)
+    const convert = ratioConvertOf(entryObs, policy, b.preference, pool, safeSavings(entryObs, policy))
+    const e = convert ? { code: 'DECIDE_CONVERT' as const, proposal: convert } : enterBucket(entryObs, policy, b.preference, pool)
     if (remint && e.proposal?.kind === 'enter_mint') e.proposal = { ...e.proposal, grant: anyKey(policy, 'manage-any', pool.name) }
     buckets.push({ bucket: b.id, code: e.code })
     if (e.proposal) {

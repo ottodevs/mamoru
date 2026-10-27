@@ -23,7 +23,11 @@ export const LOCAL_OVERRIDE_FILE = 'engine-settings.local.json'
 
 export type SettingsVersion = { id: number; env: 'prod' | 'beta'; accountKeys: string[] | null; template: string; settings: EngineSettings; hash: string; createdAt: string }
 /** `accountCaps` (otto/mamoru#26): lowercase account key to whole USDC, over the environment's cap. */
-type Payload = { versions: SettingsVersion[]; betaAccounts: string[]; flags: Record<OpsFlagName, boolean>; accountCaps: Record<string, number>; servedAt: string }
+/**
+ * `ownerSafes` (otto/mamoru#212): lowercase account key to the other Safe addresses its owner holds in its environment,
+ * only for an owner with more than one address (normally none). Optional: older Workers do not serve it.
+ */
+type Payload = { versions: SettingsVersion[]; betaAccounts: string[]; flags: Record<OpsFlagName, boolean>; accountCaps: Record<string, number>; ownerSafes?: Record<string, string[]>; servedAt: string }
 
 export type ResolvedSettings = {
   settings: EngineSettings
@@ -86,6 +90,18 @@ function parseAccountCaps(raw: unknown): Record<string, number> {
   return { ...(raw as Record<string, number>) }
 }
 
+/** otto/mamoru#212: the `ownerSafes` field. Absent or null: none. Present: every entry must be addresses, else the pull is refused. */
+function parseOwnerSafes(raw: unknown): Record<string, string[]> {
+  if (raw === undefined || raw === null) return {}
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('ownerSafes must be an object')
+  const out: Record<string, string[]> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(v) || !v.every((a) => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a))) throw new Error(`bad ownerSafes for ${k.slice(0, 8)}`)
+    out[k.toLowerCase()] = (v as string[]).map((a) => a.toLowerCase())
+  }
+  return out
+}
+
 /** One line for the log: 8-character keys and caps, sorted, or `none`. */
 export function describeAccountCaps(m: Record<string, number>): string {
   const keys = Object.keys(m).sort()
@@ -99,6 +115,7 @@ export function checkPayload(raw: unknown, applied: Payload | null, opts: { allo
   if (!Array.isArray(p.versions) || !Array.isArray(p.betaAccounts) || !p.betaAccounts.every((k) => typeof k === 'string')) throw new Error('body has the wrong shape')
   const flags = parseOpsFlags((raw as { flags?: unknown }).flags)
   const accountCaps = parseAccountCaps((raw as { accountCaps?: unknown }).accountCaps)
+  const ownerSafes = parseOwnerSafes((raw as { ownerSafes?: unknown }).ownerSafes)
   const versions: SettingsVersion[] = []
   for (const v of p.versions) {
     if (!v || !Number.isSafeInteger(v.id) || v.id < 1 || (v.env !== 'prod' && v.env !== 'beta')) throw new Error('a version has the wrong shape')
@@ -124,7 +141,7 @@ export function checkPayload(raw: unknown, applied: Payload | null, opts: { allo
   const servedAt = typeof p.servedAt === 'string' ? p.servedAt : ''
   if (!Number.isFinite(Date.parse(servedAt))) throw new Error('body has no valid servedAt')
   if (applied?.servedAt && Date.parse(servedAt) < Date.parse(applied.servedAt)) throw new Error(`stale: served at ${servedAt}, before the applied ${applied.servedAt}`)
-  return { versions, betaAccounts: p.betaAccounts.map((k) => k.toLowerCase()), flags, accountCaps, servedAt }
+  return { versions, betaAccounts: p.betaAccounts.map((k) => k.toLowerCase()), flags, accountCaps, ownerSafes, servedAt }
 }
 
 /**
@@ -313,6 +330,11 @@ export class EngineSettingsSource {
     // Not merged into `settings`: whether it may run (depth sizing, target-weights) is the operator's capFor rule.
     const own = o.capUsdc === undefined ? this.payload?.accountCaps[accountKey.toLowerCase()] ?? null : null
     return { settings, versionId: r.versionId, source: r.versionId === null ? 'default' : this.source, override: this.overrideKeys(), accountCapUsdc: own, canary: r.canary }
+  }
+
+  /** otto/mamoru#212: the other Safe addresses of this account's owner (its cap counts them too); normally none. */
+  otherSafes(accountKey: string): string[] {
+    return this.payload?.ownerSafes?.[accountKey.toLowerCase()] ?? []
   }
 
   status(): SettingsStatus {

@@ -865,7 +865,8 @@ export function approvalTitle(approval: NonNullable<FundingView['approval']>): s
   if (u?.spent) return usage!
   if (approval.renewDue) return homeCopy.renewSoon(approvalDay(approval.validUntil))
   if (usage) return usage
-  if (approval.capRaise) return homeCopy.capRaiseTitle(usdPlain(approval.capRaise.capUsdc), usdPlain(approval.capRaise.signedUsdc))
+  // otto/mamoru#212: grants still missing are added first, without accepting a raise; the raise is the next tap.
+  if (approval.capRaise && !(approval.missing ?? 0)) return homeCopy.capRaiseTitle(usdPlain(approval.capRaise.capUsdc), usdPlain(approval.capRaise.signedUsdc))
   return approval.upgrade ? (approval.upgradePolicy?.includes('-v5') ? homeCopy.upgradeV5Title : homeCopy.upgradeTitle) : homeCopy.extendTitle
 }
 
@@ -883,7 +884,7 @@ export function ApprovalRow({ approval, onOpen }: { approval: NonNullable<Fundin
         <span className="sub">{homeCopy.renewNote}</span>
       </span>
       <button type="button" className="act" onClick={onOpen}>
-        {approval.renewDue || approval.usage || approval.upgrade || approval.expired || approval.capRaise ? homeCopy.renew : homeCopy.extend}
+        {approval.renewDue || approval.usage || approval.upgrade || approval.expired || (approval.capRaise && !(approval.missing ?? 0)) ? homeCopy.renew : homeCopy.extend}
       </button>
     </section>
   )
@@ -898,7 +899,7 @@ export function approvalHeading(approval: NonNullable<FundingView['approval']>):
   if (u?.spent) return { title: `Mamoru has stopped ${what}`, lead: 'It used all that this approval allows. Renewing restores its limits, counted from zero.' }
   if (approval.renewDue) return { title: homeCopy.renewAskTitle, lead: `It ends on ${approvalDay(approval.validUntil)}. Renewing keeps Mamoru working for you.` }
   if (u) return { title: 'Renew before a limit runs out', lead: `Mamoru has used most of what this approval allows for ${what}. Renew now so that does not stop.` }
-  if (approval.capRaise) return { title: homeCopy.renewAskTitle, lead: homeCopy.capRaiseTitle(usdPlain(approval.capRaise.capUsdc), usdPlain(approval.capRaise.signedUsdc)) }
+  if (approval.capRaise && !(approval.missing ?? 0)) return { title: homeCopy.renewAskTitle, lead: homeCopy.capRaiseTitle(usdPlain(approval.capRaise.capUsdc), usdPlain(approval.capRaise.signedUsdc)) }
   if (approval.upgrade) return { title: homeCopy.renewAskTitle, lead: approval.upgradePolicy?.includes('-v5') ? homeCopy.upgradeV5Title : homeCopy.upgradeTitle }
   return { title: 'Let Mamoru work in every pool', lead: 'Part of the approval is missing: in some pools Mamoru cannot re-range or collect fees until you add it.' }
 }

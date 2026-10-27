@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { baseRegistry } from '@mamoru/registry'
-import { EXPOSURE_PATH, PeerExposure, elsewhereOf, exposureOf, parsePeerOperators, placesFirst, totalOf, type ExposureWire } from '../src/exposure.ts'
+import { EXPOSURE_PATH, PeerExposure, elsewhereOf, exposureOf, joinReads, parsePeerOperators, totalOf, type ExposureWire, type PeerRead } from '../src/exposure.ts'
 import { RpcMetrics } from '../src/metrics.ts'
 import type { Operator } from '../src/operator.ts'
 import { startServer } from '../src/server.ts'
@@ -46,18 +46,71 @@ describe('one chain\'s exposure', () => {
     expect(totalOf(e)).toBe(495n * USDC)
   })
 
-  test('what an engine counts elsewhere: placed money, plus the savings of a running chain that places first', () => {
+  test('what an engine counts elsewhere: everything the other chains hold, idle and placed, whoever runs', () => {
     const base = { chainId: 8453, idleUsdc: 400n * USDC, placedUsdc: 600n * USDC, active: true }
-    const monad = { chainId: 143, idleUsdc: 900n * USDC, placedUsdc: 0n, active: true }
-    expect(placesFirst(8453, 143)).toBe(true)
-    expect(placesFirst(143, 8453)).toBe(false)
-    // Monad leaves room for the 400 Base may still place; Base does not wait for Monad's savings.
-    expect(elsewhereOf(143, { ok: true, chains: [base] })).toBe(1_000n * USDC)
-    expect(elsewhereOf(8453, { ok: true, chains: [monad] })).toBe(0n)
-    // Base stopped: its savings are not about to be placed.
-    expect(elsewhereOf(143, { ok: true, chains: [{ ...base, active: false }] })).toBe(600n * USDC)
-    expect(elsewhereOf(143, { ok: false, chainId: 8453 })).toBeNull()
-    expect(elsewhereOf(143, { ok: true, chains: [] })).toBe(0n)
+    const monad = { chainId: 143, idleUsdc: 900n * USDC, placedUsdc: 0n, active: false }
+    expect(elsewhereOf({ ok: true, chains: [base] })).toBe(1_000n * USDC)
+    expect(elsewhereOf({ ok: true, chains: [monad] })).toBe(900n * USDC)
+    expect(elsewhereOf({ ok: true, chains: [base, monad] })).toBe(1_900n * USDC)
+    expect(elsewhereOf({ ok: false, chainId: 8453 })).toBeNull()
+    expect(elsewhereOf({ ok: true, chains: [] })).toBe(0n)
+    expect(joinReads({ ok: true, chains: [base] }, { ok: false, chainId: 143 })).toEqual({ ok: false, chainId: 143 })
+  })
+})
+
+/**
+ * Merge gate round 1 (Opus, Argon): two chains reviewing from cached reads of each other. Each chain's room for new
+ * money is cap - its own placed - everything the other holds; a chain places only its own idle money.
+ */
+describe('two chains placing from stale reads never place past the cap together', () => {
+  const CAP = 1_000n * USDC
+  const room = (ownPlaced: bigint, ownIdle: bigint, peer: PeerRead) => {
+    const elsewhere = elsewhereOf(peer)
+    if (elsewhere === null) return 0n
+    const r = CAP - ownPlaced - elsewhere
+    const left = r > 0n ? r : 0n
+    return left < ownIdle ? left : ownIdle
+  }
+  const read = (chainId: number, idleUsdc: bigint, placedUsdc: bigint): PeerRead => ({ ok: true, chains: [{ chainId, idleUsdc, placedUsdc, active: true }] })
+
+  test('Argon: Base holds a read of Monad (1,000 idle) from before Monad placed it; Base then gets a deposit', () => {
+    // t=0 Base reads Monad: 1,000 idle. t=2 Monad reads Base (0, 0) and places its 1,000. t=5 Base gets 1,000 and
+    // reviews on the t=0 read: Monad's idle money counts as committed to Monad, so Base places nothing.
+    const monadPlaces = room(0n, 1_000n * USDC, read(8453, 0n, 0n))
+    expect(monadPlaces).toBe(1_000n * USDC)
+    const basePlaces = room(0n, 1_000n * USDC, read(143, 1_000n * USDC, 0n))
+    expect(basePlaces).toBe(0n)
+    expect(monadPlaces + basePlaces <= CAP).toBe(true)
+  })
+
+  test('Opus: Monad places on a read of Base (0, 0); a deposit on Base is placed on a read of Monad taken after the Monad deposit landed', () => {
+    // A chain only places its own deposit, so that deposit landed before its review; the other chain's read, taken after
+    // its own deposit landed, already shows it, idle or placed. Either order, the sum stays within the cap.
+    for (const [first, second] of [[1_000n, 1_000n], [600n, 700n], [300n, 200n]] as const) {
+      const a = room(0n, first * USDC, read(8453, 0n, 0n))
+      const b = room(0n, second * USDC, read(143, first * USDC - a, a))
+      expect(a + b <= CAP).toBe(true)
+    }
+  })
+
+  test('what a stale read could still miss is bounded: an engine review never uses a read of the peer older than 2 s', async () => {
+    // The residual window: both deposits landing and one being placed inside the age of the other's read (2 s here,
+    // plus the peer's own read at most 2 s old). Outside it, the cases above hold.
+    let now = Date.now()
+    let n = 0
+    const p = peer(() => wire({ idleUsdc: String(n++) }))
+    const reader = new PeerExposure([{ chainId: 143, url: p.url }], SECRET, fetch, () => now)
+    await reader.read(SAFE, 2_000)
+    now += 1_999
+    await reader.read(SAFE, 2_000)
+    expect(p.asked).toHaveLength(1)
+    now += 2
+    await reader.read(SAFE, 2_000)
+    expect(p.asked).toHaveLength(2)
+  })
+
+  test('the peer could not be read: no new money on either side', () => {
+    expect(room(0n, 1_000n * USDC, { ok: false, chainId: 143 })).toBe(0n)
   })
 })
 

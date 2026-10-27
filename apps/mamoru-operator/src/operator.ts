@@ -44,7 +44,7 @@ import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, amountsForLiquidity, inUsdc, livePool, nativePricePool, positionUsdc, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
-import { elsewhereOf, exposureOf, totalOf, type ChainExposure, type ExposureWire, type PeerExposure, type PeerRead } from './exposure.ts'
+import { elsewhereOf, exposureOf, joinReads, totalOf, type ChainExposure, type ExposureWire, type PeerExposure, type PeerRead } from './exposure.ts'
 import { closeCalls, planReduce, routeOf, swapBackCalls, type SwapBack } from './unwind.ts'
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
 import { ONE_ACTION_GAS_UNITS, gasReserveAlertOverrideFromEnv, gasReserveAlertWei } from './gas-reserve.ts'
@@ -107,7 +107,7 @@ const FUNDING_FRESH_READ_MS = 2_000
  * watcher, the send), for an engine review and for what funding shows. A peer that cannot be read fails closed.
  */
 const PEER_START_MAX_AGE_MS = 10_000
-const PEER_ENGINE_MAX_AGE_MS = 30_000
+const PEER_ENGINE_MAX_AGE_MS = 2_000
 const PEER_FUNDING_MAX_AGE_MS = 30_000
 
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
@@ -407,7 +407,7 @@ export type OperatorConfig = {
   /** Depth sizing of entries for the engine (otto/mamoru#127); absent: entries are sized as before. */
   depth?: NonNullable<PolicyVersion['depth']>
   /** Spec 006 (otto/mamoru#147): engine settings per account, pulled from D1. Absent: capUsdc and depth above, as before. */
-  settings?: Pick<EngineSettingsSource, 'forAccount' | 'status'>
+  settings?: Pick<EngineSettingsSource, 'forAccount' | 'status'> & Partial<Pick<EngineSettingsSource, 'otherSafes'>>
   /**
    * otto/mamoru#140 (part2 #5): independent providers (MAMORU_RPC_TRUSTED) that must agree, at least two of them,
    * before an owner signature the off-chain verifier refused is ever paid for. Absent or fewer than two: such a
@@ -1075,27 +1075,51 @@ export class Operator {
     return exposureOf(this.cfg.chainId, idleTokens(r, reg), positions, this.bridgeInFlight?.(acc.accountKey) ?? 0n, acc.active)
   }
 
-  /** otto/mamoru#212: what the peer operators hold for this account's Safe. Never throws: a failure reads `ok: false`. */
+  /**
+   * otto/mamoru#212: the owner's other Safes (an owner holding more than one address in its environment, from the
+   * settings pull). Normally none: a Base account and its sleeves share one address.
+   */
+  private otherSafes(acc: AccountState): Address[] {
+    const own = acc.ctx.address.toLowerCase()
+    return [...new Set((this.cfg.settings?.otherSafes?.(acc.accountKey) ?? []).map((a) => a.toLowerCase()))].filter((a) => a !== own) as Address[]
+  }
+
+  /** Whether the cap of this account needs anything read beyond this chain's Safe. */
+  private readsElsewhere(acc: AccountState): boolean {
+    return !!this.cfg.peers?.configured || this.otherSafes(acc).length > 0
+  }
+
+  /**
+   * otto/mamoru#212: everything the account's owner holds outside this chain's Safe: the same address on the peer
+   * chains, and any other Safe of the owner here and on the peer chains. Never throws: a failure reads `ok: false`.
+   */
   private async peerRead(acc: AccountState, maxAgeMs: number): Promise<PeerRead> {
     const peers = this.cfg.peers
-    if (!peers?.configured) return { ok: true, chains: [] }
+    const others = this.otherSafes(acc)
+    let out: PeerRead = { ok: true, chains: [] }
     try {
-      return await peers.read(acc.ctx.address, maxAgeMs)
+      for (const address of peers?.configured ? [acc.ctx.address as Address, ...others] : []) out = joinReads(out, await peers!.read(address, maxAgeMs))
+      for (const address of others) {
+        const sibling = Object.values(this.store.state.accounts).find((a) => a.ctx.address.toLowerCase() === address)
+        const r = sibling ? await this.readSafeCached(sibling, getAddress(address), maxAgeMs <= PEER_START_MAX_AGE_MS) : await readSafe(this.client, getAddress(address), this.cfg.registry)
+        out = joinReads(out, { ok: true, chains: [this.localExposure(sibling ?? { accountKey: '', admittedTokenIds: undefined, active: false }, r)] })
+      }
+      return out
     } catch (e) {
       logErr(`[peer] ${acc.accountKey} exposure read failed:`, e)
       return { ok: false, chainId: 0 }
     }
   }
 
-  /**
-   * otto/mamoru#212: the account's total across chains for a Start check, `local` being what this chain holds. A peer
-   * that cannot be read refuses the Start (CAP_CHECK_UNAVAILABLE): nothing new is placed on a guess.
-   */
   /** otto/mamoru#212: what this chain holds for the account now (a live read), for the Start checks after prepare. */
   private async localTotal(acc: AccountState, safe: Address): Promise<bigint> {
     return totalOf(this.localExposure(acc, await this.readOf(acc, safe)))
   }
 
+  /**
+   * otto/mamoru#212: the account's total across chains for a Start check, `local` being what this chain holds. A peer
+   * that cannot be read refuses the Start (CAP_CHECK_UNAVAILABLE): nothing new is placed on a guess.
+   */
   private async startTotal(acc: AccountState, local: bigint): Promise<{ total: bigint; across: boolean }> {
     const peers = await this.peerRead(acc, PEER_START_MAX_AGE_MS)
     if (!peers.ok) throw capCheckUnavailable()
@@ -1105,8 +1129,8 @@ export class Operator {
 
   /** otto/mamoru#212: the cap an engine review places within (`Observation.cap`), from the read taken before it. */
   private engineCap(acc: AccountState): NonNullable<Observation['cap']> {
-    const peers: PeerRead = this.cfg.peers?.configured ? (this.enginePeers.get(acc.accountKey) ?? { ok: false, chainId: 0 }) : { ok: true, chains: [] }
-    return { capUsdc: this.effectiveCap(acc), elsewhereUsdc: elsewhereOf(this.cfg.chainId, peers) }
+    const peers: PeerRead = this.readsElsewhere(acc) ? (this.enginePeers.get(acc.accountKey) ?? { ok: false, chainId: 0 }) : { ok: true, chains: [] }
+    return { capUsdc: this.effectiveCap(acc), elsewhereUsdc: elsewhereOf(peers) }
   }
 
   /**
@@ -2009,7 +2033,7 @@ export class Operator {
     // #149: a grant near the end of its usage needs fresh counts, which only a full renewal gives (an extension keeps the
     // grants the account has): it goes first, like a due renewal.
     const view = this.approvalView(acc)
-    if (!target && missing.length && !view?.renewDue && !view?.usage && !view?.capRaise && !this.unsettledRenewalGrants(acc).length) return this.planExtend(acc, live, policy, r, missing)
+    if (!target && missing.length && !view?.renewDue && !view?.usage && !this.unsettledRenewalGrants(acc).length) return this.planExtend(acc, live, policy, r, missing)
     // The grants it replaces are revoked in the same Safe transaction, always: two sets are never enabled at once
     // and each limit exists once. Measured on Base: revoking eight grants is about 1.45M gas on top of the 12.7M that
     // enabling eight takes. When the whole does not fit the cap, manage-any/convert-any pairs are left out of the new
@@ -2021,7 +2045,10 @@ export class Operator {
     // signed before (spec 006 kept the old one, so a raised cap could never be used short of a stop and a new start).
     // The summary names the cap and, when it changes, both figures: the owner signs the new limits knowingly.
     const signed = this.signedCapOf(acc)
-    const cap = this.capFor(acc)
+    // Never below the signed cap (coordinator, merge gate round 1): a lowered cap holds the engine (effectiveCap) but
+    // never shrinks the grants that manage what is already placed.
+    const now = this.capFor(acc)
+    const cap = now > signed ? now : signed
     if (isV4(policy)) {
       // The move to v4 enables every grant of the v4 policy; a v4 renewal the ones the account has, as before.
       // otto/mamoru#151: a renewal on MamoruActionPolicyV2 ends a guardian pause; the owner signs knowing it. Fails
@@ -3591,6 +3618,8 @@ export class Operator {
       this.assertBudget(acc)
       const usdc = await this.usdcOf(live.safe)
       if (usdc === 0n) return this.armFresh(acc, p, signature)
+      // The relayer deploys a Safe only for USDC on this chain, whatever the account holds elsewhere (otto/mamoru#212).
+      if (!(await readSafeNonce(this.client, live.safe)).deployed && usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(usdc, this.chainName())
       // otto/mamoru#212: the total across chains, and USDC on its way here from Ethereum.
       const start = await this.startTotal(acc, await this.localTotal(acc, live.safe))
       if (start.total > this.activationCap(acc, p.capUsdc)) throw depositOverCap(start.total, this.activationCap(acc, p.capUsdc), start.across)
@@ -4165,6 +4194,8 @@ export class Operator {
     if (this.overBudget(acc)) return this.park(acc, ARM_BUDGET_HOLD_MS)
     // Over the cap the approval waits too: it runs if the excess leaves through a path that keeps the Safe nonce, or
     // the cap is raised. The app reads the excess from funding and offers the withdrawal.
+    // otto/mamoru#212: the relayer deploys a Safe only for USDC on this chain; money elsewhere never stands in for it.
+    if (usdc < MIN_DEPLOY_USDC && !(await readSafeNonce(this.client, live.safe)).deployed) return
     const cap = this.activationCap(acc, a.capUsdc)
     // otto/mamoru#212: counted across chains. The other chains unreadable: the approval waits, kept.
     const peers = await this.peerRead(acc, PEER_START_MAX_AGE_MS)
@@ -4292,6 +4323,8 @@ export class Operator {
       await this.executeOwner(acc, live, p, signature, op)
     } finally {
       this.busy.delete(acc.accountKey)
+      // otto/mamoru#212: whatever an owner transfer or stop moved is not the engine's to put back above the cap.
+      if (p.kind === 'transfer' || p.kind === 'stop') this.runners.get(acc.accountKey)?.engine.resetCapReinvest()
       this.fundingMoved(acc)
     }
   }
@@ -4476,6 +4509,8 @@ export class Operator {
       // gets through, and the chain itself enforces no account cap. Deposits to an account that is already running are
       // outside this check altogether (otto/mamoru#71).
       const usdc = await this.usdcOf(safe)
+      // The relayer deploys a Safe only for USDC on this chain, whatever the account holds elsewhere (otto/mamoru#212).
+      if (!(await readSafeNonce(this.client, safe)).deployed && usdc < MIN_DEPLOY_USDC) return this.failOwner(acc, op, 'BELOW_DEPLOY_MINIMUM')
       const cap = this.activationCap(acc, p.capUsdc)
       // otto/mamoru#212: the total across chains; a peer that cannot be read keeps it from running now.
       const start = await this.localTotal(acc, safe).then((local) => this.startTotal(acc, local)).catch(() => null)
@@ -4990,7 +5025,7 @@ export class Operator {
           }
           if (runner.stopped || !acc.active) return
           // otto/mamoru#212: the other chains as this review counts them (a failed read: nothing new is placed).
-          if (this.cfg.peers?.configured) this.enginePeers.set(acc.accountKey, await this.peerRead(acc, PEER_ENGINE_MAX_AGE_MS))
+          if (this.readsElsewhere(acc)) this.enginePeers.set(acc.accountKey, await this.peerRead(acc, PEER_ENGINE_MAX_AGE_MS))
           if (runner.stopped || !acc.active) return
           const startedAt = Date.now()
           const r = await engine.review()

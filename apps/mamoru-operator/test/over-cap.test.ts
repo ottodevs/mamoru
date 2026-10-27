@@ -3419,6 +3419,44 @@ describe('spec 006: one cap per prepare; otto/mamoru#212: a renewal signs the ca
     expect(lines(tx)).toEqual(lines(await steady.op.prepareActivate(ctx)))
   })
 
+  /** The amount limits of every rule of a prepared approval's grants, by grant (what the chain enforces). */
+  const limitsOf = (w: ReturnType<typeof world>, prepareId: string) => {
+    const p = (w.op as unknown as { prepared: Map<string, { grants?: { name: string; grant: { userOp: { usageLimit: number }; actions: { signature: string; params: { field: string; ref: bigint; cumulativeLimit?: bigint }[] }[] } }[] }> }).prepared.get(prepareId)!
+    return p.grants!.flatMap((g) => [`${g.name} uses ${g.grant.userOp.usageLimit}`, ...g.grant.actions.flatMap((a) => a.params.filter((r) => r.field.startsWith('amount')).map((r) => `${g.name} ${a.signature.split('(')[0]} ${r.field} ${r.ref} ${r.cumulativeLimit ?? ''}`))]).sort()
+  }
+  const activeAt = async (cap: number) => {
+    const w = world(20_000_000n)
+    ;(w.op as unknown as Internals).startLoop = () => {}
+    ;(w.op.cfg as { settings?: unknown }).settings = settingsWith([cap])
+    const tx = await w.op.prepareActivate(ctx)
+    const limits = limitsOf(w, tx.prepareId)
+    await w.op.submit(ctx, 'activate', sign(tx))
+    const acc = w.state.accounts.k!
+    acc.grants = acc.grants.map((g) => ({ ...g, grant: { ...g.grant, userOp: { ...g.grant.userOp, validUntil: Math.floor(Date.now() / 1000) + 15 * 86_400 } } }))
+    return { w, acc, limits }
+  }
+
+  test('merge gate round 1: the renewal grants carry the limits of the raised cap, the same as a Start at that cap', async () => {
+    const at1000 = await activeAt(1000)
+    const { w } = await activeAt(100)
+    ;(w.op.cfg as { settings?: unknown }).settings = settingsWith([1000])
+    const tx = await w.op.prepareRenew(ctx)
+    expect(limitsOf(w, tx.prepareId)).toEqual(at1000.limits)
+  })
+
+  test('merge gate round 1: a lowered cap never shrinks the grants a renewal signs; the engine is held to it all the same', async () => {
+    const { w, acc, limits } = await activeAt(1000)
+    expect(acc.signedCapUsdc).toBe('1000000000')
+    ;(w.op.cfg as { settings?: unknown }).settings = settingsWith([500])
+    const tx = await w.op.prepareRenew(ctx)
+    expect(limitsOf(w, tx.prepareId)).toEqual(limits)
+    expect(tx.summary.join(' ')).toContain('sized for deposits up to 1000.00 USDC (your cap)')
+    expect(tx.summary.join(' ')).not.toContain('Your cap changes')
+    expect([...(w.op as unknown as Internals).prepared.values()].find((x) => x.kind === 'renew')!.capUsdc).toBe('1000000000')
+    expect((await w.op.funding(ctx)).exposure?.capUsdc).toBe('500000000')
+    expect((await w.op.funding(ctx)).approval?.capRaise).toBeUndefined()
+  })
+
   test('otto/mamoru#212: a cap raise is offered as a renewal, and the renewal sizes the grants for the new cap and names both', async () => {
     const w = world(20_000_000n)
     ;(w.op as unknown as Internals).startLoop = () => {}
@@ -3566,6 +3604,35 @@ describe('otto/mamoru#212: the cap counts what the account holds on every chain'
     expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ code: 'ARMED', amountUsdc: '105000000', capUsdc: '100000000' })
   })
 
+  test('merge gate round 1: an undeployed Safe needs the deploy minimum in USDC here, whatever the other chain holds', async () => {
+    const w = world(500_000n)
+    withPeer(w, () => monad(50_000_000n))
+    expect(await w.op.prepareActivate(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'BELOW_DEPLOY_MINIMUM' })
+    // Signed while empty here (armed), then dust lands: submit refuses, and the armed watcher sends nothing.
+    w.chain.usdc = 0n
+    const tx = await w.op.prepareActivate(ctx)
+    w.chain.usdc = 500_000n
+    expect(await w.op.submit(ctx, 'activate', sign(tx)).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'BELOW_DEPLOY_MINIMUM' })
+    const { acc } = w.op.account(ctx)
+    acc.ops.push({ opId: 'own-9-activate', kind: 'activate', state: 'proposed', code: 'ARMED', updatedAt: '2026-10-01T10:00:00.000Z' })
+    acc.armed = { opId: 'own-9-activate', tx: { nonce: 0n } as ArmedActivation['tx'], safeTxHash: '0x', signature: '0x', grants: [], armedAt: '2026-10-01T10:00:00.000Z' }
+    await (w.op as unknown as { fireArmed(a: AccountState, usdc: bigint): Promise<void> }).fireArmed(acc, 500_000n)
+    expect(w.sent).toHaveLength(0)
+    expect(acc.armed?.opId).toBe('own-9-activate')
+  })
+
+  test('merge gate round 1: an owner with a second Safe in its environment has both counted', async () => {
+    const w = world(60_000_000n)
+    const other = '0x00000000000000000000000000000000000000b2'
+    ;(w.op.cfg as { settings?: unknown }).settings = { forAccount: () => ({ settings: { depth: null, capUsdc: null, guard: { enabled: false, btc: { fallBps: 700, volBps: 8000 }, eth: { fallBps: 900, volBps: 10000 } } }, versionId: 1, source: 'd1', override: [] }), status: () => ({}), otherSafes: () => [other] }
+    // The other Safe holds 60 USDC too (the fake chain answers the same balance for every Safe): 120 against 100.
+    expect(await w.op.prepareActivate(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'DEPOSIT_OVER_CAP' })
+    const asked = withPeer(w, () => monad(0n))
+    expect(await w.op.prepareActivate(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'DEPOSIT_OVER_CAP' })
+    // Both Safes are read on the peer chain too.
+    expect(asked.map((a) => a.toLowerCase()).sort()).toEqual([SAFE.toLowerCase(), other].sort())
+  })
+
   test('a running engine places within the cap less what the other chains placed; unread, it places nothing new', async () => {
     const w = world(20_000_000n)
     withPeer(w, () => monad(900_000_000n, 40_000_000n, true))
@@ -3576,8 +3643,8 @@ describe('otto/mamoru#212: the cap counts what the account holds on every chain'
     // No read taken before a review yet: fail closed.
     expect(op.engineCap(acc)).toEqual({ capUsdc: 100_000_000n, elsewhereUsdc: null })
     op.enginePeers.set(acc.accountKey, monad(900_000_000n, 40_000_000n, true))
-    // Base places first: Monad's idle savings do not hold Base back, its positions do.
-    expect(op.engineCap(acc)).toEqual({ capUsdc: 100_000_000n, elsewhereUsdc: 40_000_000n })
+    // Everything Monad holds counts, idle (committed to Monad) and placed.
+    expect(op.engineCap(acc)).toEqual({ capUsdc: 100_000_000n, elsewhereUsdc: 940_000_000n })
     op.enginePeers.set(acc.accountKey, { ok: false, chainId: 143 })
     expect(op.engineCap(acc).elsewhereUsdc).toBeNull()
     // Funding says how far over the cap the account is, so the app can say what stays idle.

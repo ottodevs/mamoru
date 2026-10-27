@@ -142,6 +142,28 @@ describe('GET /api/internal/engine-settings (spec 006)', () => {
     expect(p.accountCaps).toEqual({ 'beta-2': 1500, 'prod-3': 3000 })
   })
 
+  test('merge gate round 1: overrides for 150 owners, and an owner with a second Safe, in one pull with no bound list', async () => {
+    const h = harness(() => NOW, { env: { OPERATOR_SECRET: OP } })
+    insert(h, 'prod', depth)
+    const addr = (n: number) => `0x${n.toString(16).padStart(40, '0')}`
+    for (let i = 1; i <= 150; i++) {
+      h.db.raw.query(`INSERT INTO users (user_id, created_at) VALUES (?, '2026-10-23')`).run(`u${i}`)
+      h.db.raw
+        .query(`INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at) VALUES (?, ?, 8453, ?, '[]', ?, '0x1', '0x2', '1', 'v', '2026-10-23')`)
+        .run(`acct-${i}`, `u${i}`, addr(i), `cred-${i}`)
+      h.db.raw.query(`INSERT INTO account_cap_overrides (env, account_key, cap_usdc, author, reason, created_at) VALUES ('prod', ?, ?, 'ot', 'test', ?)`).run(`acct-${i}`, 1000 + i, NOW.toISOString())
+    }
+    // u1 also holds a second Base Safe (the D1 does not forbid it): its override holds both, and each names the other.
+    h.db.raw
+      .query(`INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at) VALUES ('acct-1b', 'u1', 8453, ?, '[]', 'cred-1b', '0x1', '0x2', '2', 'v', '2026-10-24')`)
+      .run(addr(9999))
+    const p = JSON.parse(await (await pull(h)).text()) as EngineSettingsPayload
+    expect(Object.keys(p.accountCaps)).toHaveLength(151)
+    expect(p.accountCaps['acct-150']).toBe(1150)
+    expect(p.accountCaps['acct-1b']).toBe(1001)
+    expect(p.ownerSafes).toEqual({ 'acct-1': [addr(9999)], 'acct-1b': [addr(1)] })
+  })
+
   test('otto/mamoru#26: without the account_cap_overrides table (migration not applied) the map is empty', async () => {
     const h = harness(() => NOW, { env: { OPERATOR_SECRET: OP } })
     insert(h, 'prod', depth)
