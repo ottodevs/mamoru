@@ -4,8 +4,13 @@ import type { AppEnv } from '../context.ts'
 import { liveFunds, operatorUrlFor } from '../env.ts'
 import { accountNotFound, apiError } from '../errors.ts'
 import { ACCOUNT_KEY } from '../onboarding/account.ts'
-import { ownersOf, type AccountRow } from './store.ts'
-import { ownedSleeve } from '../sleeves.ts'
+import { ownersOf, sleevesOfUser, type AccountRow } from './store.ts'
+import { BASE, chainReady, ownedSleeve } from '../sleeves.ts'
+import { readOpsFlags } from '../ops-flags.ts'
+
+/** otto/mamoru#214: the policy a renewal of a Base account may move to only once the owner's Monad sleeve runs. */
+export const MULTICHAIN_POLICY = 'conservador-live-v6'
+export const MONAD = 143
 
 // Live funds (sprint amendment 2026-09-26 21:40): after the device session proves it owns the account,
 // the Worker forwards the same route to the operator with a signed account context (app-api.ts AccountContext).
@@ -59,6 +64,43 @@ export async function operatorSignature(secret: string, method: string, path: st
   return Array.from(mac, (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
+/** A signed GET of `/api/accounts/<key>/<what>` at the operator of `row`'s chain; null when it cannot be had (unset, unreachable, not OK). */
+async function operatorGet(c: Context<AppEnv>, operatorFetch: OperatorFetch, row: AccountRow, what: string): Promise<unknown | null> {
+  const env = c.env
+  const operatorUrl = operatorUrlFor(env, row.chain_id)
+  if (!liveFunds(env) || !env.OPERATOR_SECRET || !operatorUrl) return null
+  const path = `/api/accounts/${row.account_key}/${what}`
+  const header = base64url(JSON.stringify(accountContext(row)))
+  const ts = Math.floor(Date.now() / 1000).toString()
+  const sig = await operatorSignature(env.OPERATOR_SECRET, 'GET', path, header, '', ts)
+  try {
+    const res = await operatorFetch(operatorUrl + path, { method: 'GET', headers: { 'x-mamoru-account': header, 'x-mamoru-sig': sig, 'x-mamoru-ts': ts, accept: 'application/json' }, signal: AbortSignal.timeout(OPERATOR_TIMEOUT_MS) })
+    return res.ok ? await res.json() : null
+  } catch (e) {
+    console.error('operator unreachable', e instanceof Error ? e.message : String(e))
+    return null
+  }
+}
+
+/**
+ * otto/mamoru#214: a Base account's renewal that targets conservador-live-v6 (its funding view's `upgradePolicy`, or the
+ * policy it already runs) is refused unless the owner's Monad sleeve exists and its operator reports it active: v6 sends
+ * part of the savings to that sleeve, and funds bridged to a sleeve nobody runs would sit idle. Checked only while the
+ * `multichain_v6` ops flag is on (it is what makes the operator offer v6). `null`: nothing to refuse; else the response.
+ */
+async function guardV6Renewal(c: Context<AppEnv>, operatorFetch: OperatorFetch, userId: string, row: AccountRow): Promise<Response | null> {
+  if (row.chain_id !== BASE || !(await readOpsFlags(c.env.DB)).multichain_v6) return null
+  const funding = (await operatorGet(c, operatorFetch, row, 'funding')) as { approval?: { upgradePolicy?: string; policyId?: string } | null } | null
+  if (!funding) return unavailable(c)
+  if ((funding.approval?.upgradePolicy ?? funding.approval?.policyId) !== MULTICHAIN_POLICY) return null
+  const notActive = () => apiError(c, 409, 'Open and start your Monad sleeve first: this version sends part of your savings to it. Nothing was changed.', 'SLEEVE_NOT_ACTIVE')
+  const sleeve = (await sleevesOfUser(c.env.DB, userId)).find((r) => r.chain_id === MONAD)
+  if (!sleeve || !(await chainReady(c, MONAD))) return notActive()
+  const view = (await operatorGet(c, operatorFetch, sleeve, 'funding')) as { active?: unknown } | null
+  if (!view) return unavailable(c)
+  return view.active === true ? null : notActive()
+}
+
 const unavailable = (c: Context) => apiError(c, 503, 'The operator is not reachable. Nothing was sent. Try again.', 'OPERATOR_UNAVAILABLE')
 const tooLarge = (c: Context) => apiError(c, 413, 'Request body too large.', 'BODY_TOO_LARGE')
 
@@ -83,6 +125,12 @@ export function operatorRoutes(operatorFetch: OperatorFetch) {
       if (declared > MAX_BODY_BYTES) return tooLarge(c)
       body = await c.req.text()
       if (new TextEncoder().encode(body).byteLength > MAX_BODY_BYTES) return tooLarge(c)
+    }
+
+    // otto/mamoru#214: before the operator prepares or accepts a renewal, a v6 target needs a running Monad sleeve.
+    if (method === 'POST' && (c.req.path.endsWith(`/${accountKey}/renew/prepare`) || c.req.path.endsWith(`/${accountKey}/renew`))) {
+      const refused = await guardV6Renewal(c, operatorFetch, session.userId, row)
+      if (refused) return refused
     }
 
     const env = c.env

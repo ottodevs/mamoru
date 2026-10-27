@@ -10,12 +10,12 @@ describe('readOpsFlags (otto/mamoru#129, migrations/d1/0012_ops_flags.sql)', () 
   test('migration not applied (no table): every flag off, not an error', async () => {
     const db = memoryD1()
     db.raw.exec('DROP TABLE ops_flag_changes')
-    expect(await readOpsFlags(db)).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false })
+    expect(await readOpsFlags(db)).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false, multichain_v6: false })
   })
 
   test('table applied, no row for a flag: off', async () => {
     const db = memoryD1()
-    expect(await readOpsFlags(db)).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false })
+    expect(await readOpsFlags(db)).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false, multichain_v6: false })
   })
 
   test('the newest row wins, whichever way it flips', async () => {
@@ -31,6 +31,6 @@ describe('readOpsFlags (otto/mamoru#129, migrations/d1/0012_ops_flags.sql)', () 
   test('a name this code does not know is ignored, not a crash', async () => {
     const db = memoryD1()
     insert(db, 'some_future_flag', 1)
-    expect(await readOpsFlags(db)).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false })
+    expect(await readOpsFlags(db)).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false, multichain_v6: false })
   })
 })
