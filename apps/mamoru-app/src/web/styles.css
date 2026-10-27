@@ -1532,7 +1532,8 @@
 }
 /* Rows arrive one after another when the panel opens (and on first paint, when it starts open). */
 .panel.is-open .wc-row:not(.wc-cols),
-.panel.is-open .idle-list > li {
+.panel.is-open .idle-list > li,
+.panel.is-open .op-row {
   animation: row-in 520ms var(--ease-out) both;
   animation-delay: calc(90ms + var(--i, 0) * 55ms);
 }
@@ -1900,4 +1901,58 @@
 /* A segment of a "·" line wraps as a whole, never inside its figure and token. */
 .seg {
   white-space: nowrap;
+}
+
+/* #235 Savings history: a dot carries each event's state (done, on its way, needs a retry), the hash itself is the
+   link, and an event that lands while the page is open glows once. */
+.op-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.op-dot {
+  flex: none;
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: var(--color-emerald);
+  transition: background-color 600ms ease-out;
+}
+.op-row[data-tone="pending"] .op-dot {
+  background: var(--color-stone);
+  animation: progress-pulse 1.6s ease-in-out infinite;
+}
+.op-row[data-tone="retry"] .op-dot {
+  background: var(--color-alert);
+}
+.op-tx {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color 200ms ease-out;
+}
+.op-tx:hover {
+  border-bottom-color: currentColor;
+}
+.op-tx svg {
+  transition: transform 220ms var(--ease-out);
+}
+.op-tx:hover svg {
+  transform: translate(1px, -1px);
+}
+.op-row.is-new {
+  animation: op-new 1800ms ease-out both;
+}
+@keyframes op-new {
+  0% {
+    opacity: 0;
+    transform: translateY(-6px);
+    background: color-mix(in srgb, var(--color-emerald) 14%, transparent);
+  }
+  25% {
+    opacity: 1;
+    transform: none;
+  }
 }

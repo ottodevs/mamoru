@@ -6,7 +6,7 @@ import { fundingInterval, queryKeys, useApy, useFreshFunding, useFunding, useOps
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { PriceDivergenceNotice } from '../components/price-divergence-notice.tsx'
 import { TokenMark } from '../components/token-mark.tsx'
-import { BasescanLink, Brand, Modal } from '../components/ui.tsx'
+import { Brand, Modal } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
@@ -18,7 +18,7 @@ import { activateLine, signatureCopy } from '../lib/signature.ts'
 import { currentRate, idleReason, monthlyRate, positionRates, sourceName, type AccountRate, type PositionRate } from '../lib/rates.ts'
 import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel } from '../lib/price-divergence.ts'
 import { localTime } from '../lib/time.ts'
-import { explorerAddress, useChain } from '../lib/chain.tsx'
+import { explorerAddress, explorerTx, useChain } from '../lib/chain.tsx'
 import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
 import { DepositDetails, hasMoney } from './add-money.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
@@ -545,6 +545,27 @@ export function Idle({ f, s }: { f: FundingView; s: Split }) {
 
 export function History({ ops, onRetry }: { ops: OpView[]; onRetry?: (kind: OpView['kind']) => void }) {
   const sorted = historyOps(ops)
+  const chain = useChain()
+  // #235: an event that lands while the page is open glows once; what was there on the first read does not.
+  const seen = useRef<Set<string> | null>(null)
+  const fresh = new Set<string>()
+  if (seen.current === null) seen.current = new Set(sorted.map((o) => o.opId))
+  else for (const o of sorted) if (!seen.current.has(o.opId)) fresh.add(o.opId)
+  useEffect(() => {
+    for (const o of sorted) seen.current!.add(o.opId)
+  })
+  // Nothing to list yet: the same head, with nothing to open.
+  if (!sorted.length)
+    return (
+      <section className="panel panel-static" data-testid="history">
+        <div className="panel-head">
+          <span className="panel-head-main">
+            <span className="dash-title heavy">{homeCopy.history}</span>
+            <span className="panel-meta">{plural(0, 'event', 'events')}</span>
+          </span>
+        </div>
+      </section>
+    )
   return (
     <Fold
       testId="history"
@@ -557,26 +578,40 @@ export function History({ ops, onRetry }: { ops: OpView[]; onRetry?: (kind: OpVi
       }
     >
       <ol className="m-0 mt-[0.7rem] grid list-none gap-[0.3rem] p-0">
-        {sorted.map((op) => {
+        {sorted.map((op, i) => {
           const tone = opTone(op)
           return (
             <li
               key={op.opId}
               data-testid="op"
-              className="grid grid-cols-1 items-baseline gap-1 border-t border-wash pt-[0.35rem] min-[761px]:grid-cols-[9rem_5.5rem_minmax(0,1fr)_auto] min-[761px]:gap-[0.6rem]"
+              data-tone={tone}
+              style={{ ['--i' as string]: Math.min(i, 8) }}
+              className={`op-row grid grid-cols-1 items-baseline gap-1 border-t border-wash pt-[0.35rem] min-[761px]:grid-cols-[9rem_5.5rem_minmax(0,1fr)_auto] min-[761px]:gap-[0.6rem]${fresh.has(op.opId) ? ' is-new' : ''}`}
             >
               <time dateTime={op.updatedAt}>{localTime(op.updatedAt)}</time>
-              <span className="font-mono text-[0.78rem] uppercase tracking-[0.04em] text-emerald">{KIND[op.kind]}</span>
+              <span className="op-kind font-mono text-[0.78rem] uppercase tracking-[0.04em] text-emerald">
+                <span className="op-dot" aria-hidden="true" />
+                {KIND[op.kind]}
+              </span>
               <span className={tone === 'done' ? undefined : 'text-stone'}>{opLine(op)}</span>
               {needsRetry(op) && onRetry ? (
                 <button type="button" className="chipbtn min-[761px]:justify-self-end" onClick={() => onRetry(op.kind)}>
                   {homeCopy.retry}
                 </button>
               ) : op.txHash ? (
-                <span className="flex items-center gap-1 font-mono text-[0.8rem] text-emerald min-[761px]:justify-self-end">
+                <a
+                  className="op-tx font-mono text-[0.8rem] text-emerald min-[761px]:justify-self-end"
+                  href={explorerTx(chain, op.txHash)}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={`View on ${chain.explorer.name}`}
+                >
                   {shortHex(op.txHash)}
-                  <BasescanLink tx={op.txHash} />
-                </span>
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                    <path d="M9 2h5v5M14 2 7 9M12 10v4H2V4h4" />
+                  </svg>
+                  <span className="sr-only"> on {chain.explorer.name}</span>
+                </a>
               ) : (
                 <span />
               )}

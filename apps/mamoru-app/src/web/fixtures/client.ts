@@ -160,11 +160,21 @@ const operatorLate = param('operatorlate')
 let fundingReads = 0
 const upgradeApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 1000) + 300 * 86_400, renewDue: false, expired: false, policyId: 'conservador-live-v5', upgrade: true, upgradePolicy: 'conservador-live-v6' } })
 const dueApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 86_400_000) * 86_400 + 10 * 86_400, renewDue: true, expired: false } })
+// ?history (dev only, otto/mamoru#235): a running account with events in each state, and one more landing 4 s in.
+const historyOn = param('history')
+const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString()
+const historyOps = (): OpView[] => [
+  { opId: 'h-activate', kind: 'activate', state: 'confirmed', txHash: `0x${'1'.repeat(64)}`, updatedAt: ago(180) },
+  { opId: 'h-enter', kind: 'enter', state: 'confirmed', pool: 'pool:USDC/cbBTC/500', txHash: `0x${'2'.repeat(64)}`, updatedAt: ago(170) },
+  { opId: 'h-transfer', kind: 'transfer', state: 'submitted', updatedAt: ago(1) },
+] as OpView[]
 const liveState = {
   funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}), ...(renewdue ? dueApproval() : {}), ...(monadUpgrade ? upgradeApproval() : {}), ...(dashboard ? placedThree() : {}) } as FundingView,
   ops: (overcap
     ? [{ opId: 'own-1-activate', kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: OVER_CAP_USDC, capUsdc: fixtureFunding.capUsdc, updatedAt: new Date().toISOString() }]
-    : []) as OpView[],
+    : historyOn
+      ? historyOps()
+      : []) as OpView[],
   n: 0,
   // ?wrongchain: the 150 USDC on Ethereum until the owner moves it (#133).
   ethereumUsdc: '150000000',
@@ -174,6 +184,11 @@ const liveState = {
   owner: !fresh,
   transferUsdc: 0n,
 }
+
+if (historyOn)
+  setTimeout(() => {
+    liveState.ops.push({ opId: 'h-enter-2', kind: 'enter', state: 'confirmed', pool: 'pool:USDC/USDT/100', txHash: `0x${'3'.repeat(64)}`, updatedAt: new Date().toISOString() } as OpView)
+  }, 4000)
 
 function fixtureTx(summary: string[]): OwnerTxToSign {
   liveState.n += 1
