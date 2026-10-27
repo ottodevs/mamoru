@@ -142,7 +142,9 @@ describe('MamoruActionPolicyV2 (spec 007, otto/mamoru#151)', () => {
     // otto/mamoru#213: MamoruPauseGate is named before its deployment (contracts/action-policy/script/DeployPauseGate.s.sol).
     expect(baseRegistry.undeployed).toEqual(['MamoruPauseGate'])
     expect(isDeployed('MamoruPauseGate', baseRegistry)).toBe(false)
-    expect(monadRegistry.undeployed).toEqual([])
+    expect(monadRegistry.undeployed).toEqual(['MamoruActionPolicyV2', 'MamoruGasPolicy']) // otto/mamoru#214: named, not deployed
+    expect(isDeployed('MamoruGasPolicy', monadRegistry)).toBe(false)
+    expect(code(() => address('MamoruGasPolicy', monadRegistry))).toBe('POLICY_TARGET_NOT_IN_REGISTRY')
     expect(isDeployed('MamoruActionPolicyV2', baseRegistry)).toBe(true)
     expect(isDeployed('MamoruActionPolicyV2', monadRegistry)).toBe(false)
     expect(address('MamoruActionPolicyV2', baseRegistry)).toBe('0x9ef35e544C93A6722a13473AB9EF115f719bbE6B')
