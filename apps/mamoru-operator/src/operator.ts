@@ -5671,7 +5671,8 @@ export class Operator {
         const r = runner.engine.reranges.find((x) => x.block === o.included!.blockNumber && x.pool === view.pool)
         if (r) view.rerangeAt = r.at.toString()
       }
-      const sig = `${view.state}|${view.code}|${view.txHash ?? ''}`
+      // #219: a mint's tokenId lands after the move to confirmed (afterConfirmed): it re-syncs the row when it does.
+      const sig = `${view.state}|${view.code}|${view.txHash ?? ''}|${o.mintedTokenId ?? ''}`
       if (runner.seen.get(own) === sig) continue
       runner.seen.set(own, sig)
       const existing = acc.ops.find((x) => x.opId === opId)
