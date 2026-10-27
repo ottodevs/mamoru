@@ -23,7 +23,7 @@ describe('conservador-live-v6 (otto/mamoru#201, #213)', () => {
       { id: 'risk', preference: 3500, pools: ['pool:WETH/USDC/3000'] },
       { id: 'btc-usdc', preference: 0, pools: ['pool:USDC/cbBTC/500'] },
     ])
-    expect(conservadorLiveV6.remoteBuckets).toEqual([{ id: 'growth', preference: 1500, chainId: 143, pools: ['pool:WMON/USDC/3000'], policyId: 'live-wmon-usdc-monad-v1' }])
+    expect(conservadorLiveV6.remoteBuckets).toEqual([{ id: 'growth', preference: 1500, chainId: 143, pools: ['pool:WMON/USDC/3000'], policyId: 'live-wmon-usdc-monad-v5' }])
     expect(preferenceTotal(conservadorLiveV6)).toBe(10_000)
     const btc = conservadorLiveV6.session.grants.filter((g) => g.pool === 'pool:USDC/cbBTC/500')
     expect(btc.map((g) => g.name)).toEqual(['manage-any'])

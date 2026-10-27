@@ -6,7 +6,7 @@ import { address, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, n
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
-import { POLICIES, USAGE_RENEW_BPS, V4_POOLS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { MONAD_LIVE_POLICIES, POLICIES, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -1220,6 +1220,8 @@ export class Operator {
     if (this.cfg.v4Policy?.policyId === acc.policyId) return this.cfg.v4Policy
     if (this.cfg.v5Policy?.policyId === acc.policyId) return this.cfg.v5Policy
     if (this.cfg.policy.policyId === acc.policyId) return this.cfg.policy
+    // otto/mamoru#214: a Monad operator on the v5 sleeve policy still serves the sleeves activated with v1.
+    if (this.cfg.chainWrites?.length && MONAD_LIVE_POLICIES[acc.policyId]) return MONAD_LIVE_POLICIES[acc.policyId]!
     throw new Error(`${acc.accountKey}: unknown policy ${acc.policyId}`)
   }
 
@@ -1258,7 +1260,7 @@ export class Operator {
     const key = `${p.policyId}@${p.version} ${ap.address} ${cap}`
     let sized = this.v4Sized.get(key)
     if (!sized) {
-      const pools = Object.values(V4_POOLS).filter((v) => p.buckets.some((b) => b.pools.includes(v.pool)))
+      const pools = v4PoolsOn(p.sourceChainId).filter((v) => p.buckets.some((b) => b.pools.includes(v.pool)))
       sized = withActionPolicy(p, ap.address, pools, { caps: v4BudgetCaps(p, cap), ...(ap.gasPolicy ? { gasPolicy: ap.gasPolicy } : {}), ...(ap.bandFactorBps !== undefined ? { bandFactorBps: ap.bandFactorBps } : {}), ...(ap.twapShortWindowSeconds !== undefined ? { twapShortWindowSeconds: ap.twapShortWindowSeconds } : {}), ...(ap.contractVersion ? { contractVersion: ap.contractVersion } : {}) })
       this.v4Sized.set(key, sized)
     }
@@ -1832,12 +1834,12 @@ export class Operator {
         // for this prepare, the same one the caps above, the summary and the stored ceiling use.
         capUsdc: cap,
       })
-      return v4 && g.requiresActionPolicy ? retargetToPolicy(g, v4.d.actionPolicy) : g
+      return v4 && g.requiresActionPolicy ? retargetToPolicy(g, v4.d.actionPolicy, this.cfg.registry) : g
     })
     const batchOf = (grants: SessionGrant[]) =>
       activationBatch(live, grants, acc.revoked, {
         trust: !acc.trusted,
-        ...(v4 ? { policiesFor: v4PoliciesFor(grants, v4.d, v4.generation, v4BudgetCaps(policy, cap), v4.admitByPool), attest: v4.attest, reattest: v4.reattest, attestData: v4.attestData } : {}),
+        ...(v4 ? { policiesFor: v4PoliciesFor(grants, v4.d, v4.generation, v4BudgetCaps(policy, cap), v4.admitByPool, this.cfg.registry), attest: v4.attest, reattest: v4.reattest, attestData: v4.attestData } : {}),
         ...(reserve ? { reserve } : {}),
       })
     // A first approval takes as many grants as fit the gas cap. A renewal takes exactly the ones the account has
@@ -1932,7 +1934,7 @@ export class Operator {
       }
       if (owner.toLowerCase() !== live.safe.toLowerCase()) continue
       const [t0, t1, fee] = [String(pos[2]).toLowerCase(), String(pos[3]).toLowerCase(), Number(pos[4])]
-      const spec = Object.values(V4_POOLS).find((v) => policy.buckets.some((b) => b.pools.includes(v.pool)) && address(v.token0, this.cfg.registry).toLowerCase() === t0 && address(v.token1, this.cfg.registry).toLowerCase() === t1 && v.fee === fee)
+      const spec = v4PoolsOn(policy.sourceChainId).find((v) => policy.buckets.some((b) => b.pools.includes(v.pool)) && address(v.token0, this.cfg.registry).toLowerCase() === t0 && address(v.token1, this.cfg.registry).toLowerCase() === t1 && v.fee === fee)
       if (!spec) continue
       ;(admitByPool[spec.pool] ??= []).push(tokenId)
     }
@@ -2205,7 +2207,7 @@ export class Operator {
     const budgets = v4BudgetCaps(policy, cap)
     const pools = [...new Set(stored.map((g) => g.grant.pool).filter((x): x is NonNullable<typeof x> => !!x))]
     const lines = pools.map((pool) => {
-      const spec = v4PoolOf(pool)
+      const spec = v4PoolOf(pool, policy.sourceChainId)
       if (!spec) return `In ${poolLabel(pool, this.cfg.registry)}: no on-chain limits`
       const band = `${(spec.bandTicks / 100).toFixed(2)}%`
       const anchor = spec.anchor ? ` and within ${(spec.anchor.band / 100).toFixed(2)}% of 1:1` : ''

@@ -4,7 +4,7 @@
 // sleeve activation (#214) and the cross-chain allocator (#215) exist.
 import { bridgeOutGrant, CCTP_DOMAIN_MONAD } from './grants.ts'
 import { INCREASE_TOLERANCE_BPS, conservadorLiveV5 } from './policies-v4.ts'
-import { liveWmonUsdcMonadV1 } from './policies-monad.ts'
+import { liveWmonUsdcMonadV5 } from './policies-monad.ts'
 import type { CapFormula, PolicyVersion } from './types.ts'
 import { exitOnlyV5Grant, grantsV5, v4CapFormulas, V4_POOLS, type V4PoolSpec, type V4Usage } from './v4-grants.ts'
 
@@ -42,7 +42,7 @@ export const conservadorLiveV6: PolicyVersion = {
     // approval) and `rerangeOf` never re-ranges a bucket at preference 0, so nothing new goes in.
     { id: 'btc-usdc', preference: 0, pools: ['pool:USDC/cbBTC/500'] },
   ],
-  remoteBuckets: [{ id: 'growth', preference: 1500, chainId: 143, pools: ['pool:WMON/USDC/3000'], policyId: liveWmonUsdcMonadV1.policyId }],
+  remoteBuckets: [{ id: 'growth', preference: 1500, chainId: 143, pools: ['pool:WMON/USDC/3000'], policyId: liveWmonUsdcMonadV5.policyId }],
   range: { ...conservadorLiveV5.range, increaseToleranceBps: INCREASE_TOLERANCE_BPS },
   session: {
     ...conservadorLiveV5.session,
