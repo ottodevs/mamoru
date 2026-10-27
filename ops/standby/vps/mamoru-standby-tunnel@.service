@@ -1,0 +1,17 @@
+# Quick tunnel in front of a standby operator (otto/mamoru#237). Started only by mamoru-failover activate. Its URL is
+# printed by activate and goes into the Worker's OPERATOR_URL secrets by hand, until the named tunnel (#206) exists.
+[Unit]
+Description=Mamoru standby tunnel %i
+After=mamoru-standby-operator@%i.service
+
+[Service]
+User=mamoru-op
+Group=mamoru-op
+EnvironmentFile=/srv/mamoru-op/run/%i/port.env
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:${PORT}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

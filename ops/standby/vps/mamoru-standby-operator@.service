@@ -1,0 +1,23 @@
+# Cold standby operator on the VPS (otto/mamoru#237). Started only by mamoru-failover activate, never enabled:
+# it must not come back by itself after a VPS reboot while lady may be running.
+[Unit]
+Description=Mamoru standby operator %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mamoru-op
+Group=mamoru-op
+WorkingDirectory=/srv/mamoru-op/current-%i
+EnvironmentFile=/srv/mamoru-op/run/%i/unit.env
+ExecStart=/usr/local/bin/bun run operator
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/mamoru-op
+PrivateTmp=true
+
+[Install]
+# none: started by hand only

@@ -1,0 +1,7 @@
+# Cold standby (otto/mamoru#237): send the operators' encrypted state to the VPS.
+[Unit]
+Description=Mamoru standby: push encrypted operator state to the VPS
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/mamoru-standby/push-bundle.sh

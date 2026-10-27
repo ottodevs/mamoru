@@ -1,0 +1,7 @@
+# Cold standby (otto/mamoru#237): stand lady's operators down while the VPS holds the fence.
+[Unit]
+Description=Mamoru standby: fence watch
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/mamoru-standby/fence-watch.sh watch
