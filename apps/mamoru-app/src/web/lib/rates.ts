@@ -91,7 +91,8 @@ export function positionRates(f: FundingView, apy: ApyView | undefined, price: b
 }
 
 /** Why a rate is n/a; null when there is a figure. */
-export type RateGap = 'loading' | 'no-positions' | 'no-data' | 'no-value'
+// 'no-read' (otto/mamoru#208): the live balance read failed, so there is nothing to rate.
+export type RateGap = 'loading' | 'no-read' | 'no-positions' | 'no-data' | 'no-value'
 
 export type AccountRate = { pct: number | null; gap: RateGap | null; covered: number; of: number }
 

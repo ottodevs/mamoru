@@ -6,7 +6,7 @@ import type { YieldLedgerView } from '@mamoru/domain'
 import type { Db } from '../env.ts'
 import { feeReadinessUsd } from '../yield-ledger.ts'
 
-type LatestRow = { fees_usdc: number; read_at: string; positions_json: string; updated_at: string }
+type LatestRow = { fees_usdc: number; total_usdc: number; read_at: string; positions_json: string; updated_at: string }
 type DailyRow = { collected_usdc: number | null; gas_paid_wei: string | null; updated_at: string }
 type PositionRow = { value_usd: number; accrued_usd_close: number; hold_value_usd: number }
 
@@ -35,7 +35,7 @@ async function openPositionsValueVsHold(db: Db, chainId: number, accountKey: str
 
 export async function loadYieldLedger(db: Db, chainId: number, accountKey: string): Promise<YieldLedgerView> {
   const [latest, daily] = await Promise.all([
-    db.prepare('SELECT fees_usdc, read_at, positions_json, updated_at FROM account_snapshot_latest WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).first<LatestRow>(),
+    db.prepare('SELECT fees_usdc, total_usdc, read_at, positions_json, updated_at FROM account_snapshot_latest WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).first<LatestRow>(),
     // migrations/d1/0015_yield_ledger_receipts.sql: written for every day an op reached the chain, with or without
     // an account_daily row for that day (an account stopped right after an op has none).
     db.prepare('SELECT collected_usdc, gas_paid_wei, updated_at FROM yield_ledger_account_receipts WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<DailyRow>(),
@@ -84,5 +84,7 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
     gasPaidWei: anyGas ? gas.toString() : null,
     valueVsHoldUsd: valueVsHold !== null ? valueVsHold.toString() : null,
     feeAccruedUsd: anyFeeAccrued ? feeAccrued.toString() : null,
+    // Not withheld when `stale`: that is about fees a receipt may already have collected, not about the total.
+    lastBalance: latest ? { totalUsd: BigInt(latest.total_usdc).toString(), readAt: latest.read_at } : null,
   }
 }

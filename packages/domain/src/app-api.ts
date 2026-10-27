@@ -133,6 +133,10 @@ export type YieldLedgerView = {
   gasPaidWei: string | null // lifetime gas Mamoru paid for this account's ops, wei; shown separately, never subtracted from earnedSoFarUsd
   valueVsHoldUsd: string | null // today's (position value + accrued) minus the hold baseline, summed over positions, USDC base units; can be negative
   feeAccruedUsd: string | null // #108 readiness: 10% of collectedUsd, stored, never charged by anything that reads this
+  // otto/mamoru#208: the account's total value at the latest pulled snapshot (idle + positions + fees + owed, USDC
+  // base units, gas ETH left out) and when the operator read it. What Home shows, marked as a past reading, when the
+  // live /funding read fails (the operator unreachable, incident #205). Null until any snapshot exists.
+  lastBalance?: { totalUsd: string; readAt: string } | null
 }
 
 // GET /api/accounts/:accountKey/other-chains -> OtherChainsView

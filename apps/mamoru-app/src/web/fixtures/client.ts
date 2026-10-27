@@ -1,5 +1,5 @@
 import { overCap, PRODUCTION_BANNER, type AppConfig, type BridgeOutView, type FundingView, type OpView, type OwnerResponse, type OwnerTxToSign, type PriceDivergenceWarning, type SessionView, type SleeveView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
-import type { ApiClient } from '../api/client.ts'
+import { ApiRequestError, type ApiClient } from '../api/client.ts'
 import { emptyAccount, FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from './empty-account.ts'
 import { poolsResponse } from './pools.ts'
 
@@ -151,6 +151,8 @@ const isMonad = (k: string | undefined) => k === MONAD_FIXTURE_KEY
 const renewdue = param('renewdue')
 // ?divergence (dev only, otto/mamoru#155): every withdraw prepare returns a PriceDivergenceWarning.
 const divergenceOn = param('divergence')
+// ?operatordown (dev only, otto/mamoru#208): /funding answers OPERATOR_UNAVAILABLE; the last snapshot is 3 h old.
+const operatorDown = param('operatordown')
 const dueApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 86_400_000) * 86_400 + 10 * 86_400, renewDue: true, expired: false } })
 const liveState = {
   funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}), ...(renewdue ? dueApproval() : {}), ...(dashboard ? placedThree() : {}) } as FundingView,
@@ -267,7 +269,10 @@ export const fixtureClient: ApiClient = {
   },
   recoveryKit: () => delay({ chainId: 8453, address: FIXTURE_ADDRESS, fixture: true }),
   ackRecovery: () => delay({ ok: true as const }),
-  funding: (k) => delay(isMonad(k) ? monadState.funding : liveState.funding),
+  funding: (k) =>
+    operatorDown
+      ? new Promise((_, reject) => setTimeout(() => reject(new ApiRequestError(503, { error: 'The operator is not reachable. Nothing was sent. Try again.', code: 'OPERATOR_UNAVAILABLE' })), 150))
+      : delay(isMonad(k) ? monadState.funding : liveState.funding),
   // ?wrongchain (dev only): 150 USDC was sent on Ethereum to the Base address.
   otherChains: () =>
     delay({
@@ -287,6 +292,7 @@ export const fixtureClient: ApiClient = {
       gasPaidWei: null,
       valueVsHoldUsd: '15000',
       feeAccruedUsd: null,
+      lastBalance: { totalUsd: '24873120', readAt: new Date(Date.now() - (operatorDown ? 3 * 60 : 1) * 60_000).toISOString() },
     }),
   ops: (k) => delay({ ops: isMonad(k) ? monadState.ops : liveState.ops }),
   activatePrepare: () => delay(fixtureTx(['Deploy your Safe on Base', 'Enable the engine session for up to 20 USDC', 'Top up gas reserve to 0.0003 ETH'])),

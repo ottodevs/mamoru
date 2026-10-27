@@ -3,7 +3,7 @@ import type { ApyView, FundingView } from '@mamoru/domain'
 import { fixtureFunding } from '../../src/web/fixtures/client.ts'
 import { split } from '../../src/web/lib/money.ts'
 import { bucketOf, currentRate, idleReason, monthlyRate, positionRates, sourceName, valueOf } from '../../src/web/lib/rates.ts'
-import { Balance, Idle, Indicators, Working } from '../../src/web/routes/home.tsx'
+import { agoText, Balance, Idle, Indicators, Working } from '../../src/web/routes/home.tsx'
 import { render } from './render.ts'
 
 // otto/mamoru#193: the dashboard's rates and the idle/working split.
@@ -249,5 +249,40 @@ describe('rate labels', () => {
     expect(text).toContain('Current rate APY · 24h avg')
     expect(text).toContain('Monthly rate APY · 30-day avg')
     expect(text).not.toContain('earning now')
+  })
+})
+
+// otto/mamoru#208: with no live read (the operator unreachable, incident #205), the last snapshot stands in, marked as past.
+describe('past reading when the live balance cannot be read', () => {
+  const past = { totalUsd: '6001234', readAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString() }
+  test('no live read: the last reading, how old it is, and Withdraw stays off', () => {
+    const { text, html } = render(<Balance s={null} past={past} onAdd={() => {}} onWithdraw={() => {}} />)
+    expect(text).toContain('6.00 USDC')
+    expect(text).toContain('Last reading 3 h ago')
+    expect(html).toContain('sum past')
+    expect(html).toMatch(/data-testid="withdraw-button"[^>]*disabled/)
+    // The add dialog needs the live read, so Add is off too while only a past reading shows.
+    expect(html).toMatch(/<button type="button" class="act" disabled/)
+  })
+  test('the rates say there is no live read instead of loading forever', () => {
+    const { text } = render(<Indicators f={undefined} apy={undefined} price={null} noRead />)
+    expect(text).toContain('no live read')
+    expect(text).not.toContain('loading')
+  })
+  test('a live read always wins over a past one', () => {
+    const s = split(fixtureFunding, null)
+    const { text } = render(<Balance s={s} past={past} onAdd={() => {}} onWithdraw={() => {}} />)
+    expect(text).not.toContain('Last reading')
+    expect(text).not.toContain('6.00 USDC')
+  })
+})
+
+describe('agoText', () => {
+  const now = Date.parse('2026-10-26T10:00:00.000Z')
+  test('minutes, hours under two days, then days', () => {
+    expect(agoText('2026-10-26T09:55:00.000Z', now)).toBe('5 min')
+    expect(agoText('2026-10-26T07:00:00.000Z', now)).toBe('3 h')
+    expect(agoText('2026-10-24T01:30:00.000Z', now)).toBe('2 days')
+    expect(agoText('2026-10-26T10:05:00.000Z', now)).toBe('0 min')
   })
 })

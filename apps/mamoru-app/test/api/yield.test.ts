@@ -13,7 +13,7 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
 
   test('every field is null before the cron has ever pulled a snapshot for this account', async () => {
     const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
-    expect(view).toEqual({ asOf: null, accruedUsd: null, collectedUsd: null, earnedSoFarUsd: null, gasPaidWei: null, valueVsHoldUsd: null, feeAccruedUsd: null })
+    expect(view).toEqual({ asOf: null, accruedUsd: null, collectedUsd: null, earnedSoFarUsd: null, gasPaidWei: null, valueVsHoldUsd: null, feeAccruedUsd: null, lastBalance: null })
   })
 
   test('accruedUsd and earnedSoFarUsd come from account_snapshot_latest once it has a row, collected folded in as 0 when none is known', async () => {
@@ -27,6 +27,8 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     expect(view.earnedSoFarUsd).toBe('1234')
     expect(view.collectedUsd).toBeNull()
     expect(view.gasPaidWei).toBeNull()
+    // otto/mamoru#208: what Home shows, as a past reading, when the live /funding read fails.
+    expect(view.lastBalance).toEqual({ totalUsd: '6001234', readAt: '2026-10-16T09:00:00.000Z' })
   })
 
   function seedReceipts(db: ReturnType<typeof memoryD1>, day: string, collected: number | null, gasWei: string) {

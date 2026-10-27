@@ -27,6 +27,11 @@ import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
 
 export const homeCopy = {
   total: 'Total balance',
+  // otto/mamoru#208: the live read failed (the operator unreachable, incident #205); the last snapshot stands in.
+  pastReading: (ago: string) => `Last reading ${ago} ago`,
+  pastTitle: 'Mamoru cannot read your account right now.',
+  pastBody: 'Your money stays in your account on-chain. The balance above is the last reading; actions return when the live read does. Retrying.',
+  noReading: 'Could not load your balance. Your money stays in your account on-chain. Retrying.',
   // otto/mamoru#198: two rates under the balance, figure over "APY · what"; sources behind (i). The names stay
   // for screen readers and the per-position table.
   monthly: 'Monthly rate',
@@ -42,6 +47,7 @@ export const homeCopy = {
   na: 'n/a',
   gap: {
     loading: 'loading',
+    'no-read': 'no live read',
     'no-positions': 'no position earning now',
     'no-data': 'no rate from the source today',
     'no-value': 'a position has no USDC value yet',
@@ -133,21 +139,50 @@ function Earned({ usd: earned }: { usd: string | null | undefined }) {
   )
 }
 
-export function Balance({ s, earnedSoFarUsd, onAdd, onWithdraw }: { s: Split | null; earnedSoFarUsd?: string | null; onAdd: () => void; onWithdraw: () => void }) {
+/** How long ago an ISO time was, in the largest whole unit: "4 min", "3 h", "2 days". */
+export function agoText(iso: string, now: number = Date.now()): string {
+  const min = Math.max(0, Math.floor((now - Date.parse(iso)) / 60_000))
+  if (min < 60) return `${min} min`
+  const h = Math.floor(min / 60)
+  if (h < 48) return `${h} h`
+  return `${Math.floor(h / 24)} days`
+}
+
+export function Balance({
+  s,
+  earnedSoFarUsd,
+  onAdd,
+  onWithdraw,
+  past = null,
+}: {
+  s: Split | null
+  earnedSoFarUsd?: string | null
+  onAdd: () => void
+  onWithdraw: () => void
+  /** otto/mamoru#208: shown, marked as a past reading, only while there is no live read (`s` null). */
+  past?: { totalUsd: string; readAt: string } | null
+}) {
+  const shownPast = s ? null : past
   return (
     <section className="balance" aria-labelledby="total-title">
       <div>
         <p className="kicker text-[0.86rem]! font-bold tracking-[0.14em]! text-ink!" id="total-title">
           {homeCopy.total}
         </p>
-        <p className="sum" data-testid="total">
-          {s ? usd(s.total) : '0.00'}
+        <p className={`sum${shownPast ? ' past' : ''}`} data-testid="total">
+          {s ? usd(s.total) : shownPast ? usd(shownPast.totalUsd) : '0.00'}
           <span className="unit">USDC</span>
         </p>
+        {shownPast ? (
+          <p className="past-reading" data-testid="past-reading">
+            {homeCopy.pastReading(agoText(shownPast.readAt))}
+          </p>
+        ) : null}
         <Earned usd={earnedSoFarUsd} />
       </div>
       <div className="balance-acts">
-        <button type="button" className="act" onClick={onAdd}>
+        {/* otto/mamoru#208: the add dialog needs the live read (address, cap); off while only a past one shows. */}
+        <button type="button" className="act" onClick={onAdd} disabled={!!shownPast}>
           {homeCopy.add}
         </button>
         {/* otto/mamoru#135: never disabled on the poll's balance, which can be 15-60 s behind a deposit. The
@@ -182,10 +217,11 @@ function RateSub({ name, what, tail, info = null }: { name: string; what: string
  * otto/mamoru#198 (was #193's three indicators): Monthly rate and Current rate, one row under the balance, the
  * figure over its label. The sources sit behind (i). A figure that is not known says n/a and why, never a guess.
  */
-export function Indicators({ f, apy, price }: { f: FundingView | undefined; apy: ApyView | undefined; price: bigint | null }) {
+export function Indicators({ f, apy, price, noRead = false }: { f: FundingView | undefined; apy: ApyView | undefined; price: bigint | null; noRead?: boolean }) {
   const rows = f ? positionRates(f, apy, price) : []
-  const monthly = f ? monthlyRate(rows, apy) : { pct: null, gap: 'loading' as const, covered: 0, of: 0, plan: false }
-  const current = f ? currentRate(rows, apy, split(f, price)) : { pct: null, gap: 'loading' as const, covered: 0, of: 0 }
+  const waiting = noRead ? ('no-read' as const) : ('loading' as const)
+  const monthly = f ? monthlyRate(rows, apy) : { pct: null, gap: waiting, covered: 0, of: 0, plan: false }
+  const current = f ? currentRate(rows, apy, split(f, price)) : { pct: null, gap: waiting, covered: 0, of: 0 }
   const partial = (r: AccountRate) => (r.pct !== null && r.covered < r.of ? `${r.covered} of ${r.of} positions with a rate` : null)
   const monthlySrc = sourceName(apy?.monthlySource)
   const currentSrc = sourceName(apy?.currentSource)
@@ -1045,12 +1081,25 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       <header className="mb-7">
         <Brand />
       </header>
-      <Balance s={s} earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd} onAdd={addMoney} onWithdraw={() => withdraw()} />
-      <Indicators f={f} apy={apy.data} price={price} />
+      <Balance
+        s={s}
+        earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd}
+        onAdd={addMoney}
+        onWithdraw={() => withdraw()}
+        past={funding.isError ? (yieldLedger.data?.lastBalance ?? null) : null}
+      />
+      <Indicators f={f} apy={apy.data} price={price} noRead={!f && funding.isError} />
       <WrongNetwork accountKey={accountKey} />
       {!f ? (
         funding.isError ? (
-          <p className="err card">Could not load your balance. Retrying.</p>
+          yieldLedger.data?.lastBalance ? (
+            <section className="card" data-testid="past-notice" role="status">
+              <span className="title">{homeCopy.pastTitle}</span>
+              <span className="sub">{homeCopy.pastBody}</span>
+            </section>
+          ) : (
+            <p className="err card">{homeCopy.noReading}</p>
+          )
         ) : (
           <div className="card h-40 animate-pulse" aria-hidden="true" />
         )

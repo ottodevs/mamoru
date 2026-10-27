@@ -935,6 +935,17 @@
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
+/* otto/mamoru#208: a past reading stands in for the live balance; muted so it never reads as live. */
+.balance .sum.past {
+  color: var(--color-muted);
+}
+.past-reading {
+  margin: 0.2rem 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  color: var(--color-muted);
+}
 .earned-why {
   font-family: var(--font-mono);
   font-size: 0.72rem;
