@@ -285,12 +285,14 @@
       "role": "Circle CCTP V2, proxy (implementación 0x555E272506C06e7E559d57418563742AFE363ec8 al añadirlo): bridge del bucket growth a la misma Safe en Monad (dominio 15), grant bridge-out de conservador-live-v6 (otto/mamoru#213); codeHash del proxy leído en el último bloque el 2026-10-27, no en el bloque del pin",
       "address": "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d",
       "codeHash": "0xd2c8d48075d832fb7d07f6db5545a1bee37fdf886325c441a8dd1cef4c9dae99"
-    }
-  ],
-  "undeployed": [
+    },
     {
       "name": "MamoruPauseGate",
-      "address": null
+      "kind": "smart-sessions-policy",
+      "role": "MamoruPauseGate (contracts/action-policy/src/MamoruPauseGate.sol, otto/mamoru#213): action policy sin estado que rechaza toda acción de sesión mientras MamoruActionPolicyV2 (ACTION_POLICY inmutable 0x9ef35e544C93A6722a13473AB9EF115f719bbE6B) tiene la cuenta pausada; lo lleva el grant bridge-out de conservador-live-v6; desplegado el 2026-10-27 por el relayer 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0 con ModuleRegistry.deployModule (DeployPauseGate.s.sol, tx 0x286b755bd3fdac7742ed2b14552f30c9c53d798a135c40b6ab1bcd9df741b494)",
+      "address": "0x4b48237E9eab8464b680800bB96a810e5D19099B",
+      "codeHash": "0xc6ef68ad94d6bb56a92037ed830e6498f35c95d87e00affb68132395190000ef"
     }
-  ]
+  ],
+  "undeployed": []
 }
