@@ -153,16 +153,20 @@ try {
   const rs = await make().status(ctx)
   check(rs.convert?.state === 'done' && rs.convert.usdcOut === got.toString(), 'unconfirmed resolved from the receipt after a restart')
 
-  // No hash at all, past the wait: nonce spent and the ETH gone, so it ran.
+  // No transaction hash, past the wait, nonce spent: the Safe's ExecutionSuccess for the signed safeTxHash proves it
+  // ran, and the amount comes from that receipt, even with ETH sent to the account again since.
   const j2 = JSON.parse(readFileSync(file, 'utf8'))
   j2.converts[ctx.accountKey] = { ...j2.converts[ctx.accountKey], state: 'unconfirmed', usdcOut: undefined, l1Tx: undefined, at: new Date(Date.now() - 16 * 60_000).toISOString() }
   writeFileSync(file, JSON.stringify(j2))
-  check((await make().status(ctx)).convert?.state === 'done', 'unconfirmed without a hash: nonce spent, ETH gone, done')
-  // Same, but the ETH is all still there: another transaction took the nonce, this one can never run.
   await lab.setBalance(safe, ETH)
-  writeFileSync(file, JSON.stringify(j2))
+  const found = await make().status(ctx)
+  check(found.convert?.state === 'done' && found.convert.usdcOut === got.toString() && !!found.convert.l1Tx, 'unconfirmed without a hash: found by the Safe event, done with its amount')
+  // Another safeTxHash took that nonce (none of ours in the events): this one can never run.
+  const j4 = JSON.parse(readFileSync(file, 'utf8'))
+  j4.converts[ctx.accountKey] = { ...j4.converts[ctx.accountKey], state: 'unconfirmed', usdcOut: undefined, l1Tx: undefined, safeTxHash: `0x${'77'.repeat(32)}`, at: new Date(Date.now() - 16 * 60_000).toISOString() }
+  writeFileSync(file, JSON.stringify(j4))
   const stuck = make()
-  check((await stuck.status(ctx)).convert?.state === 'failed', 'unconfirmed without a hash, ETH untouched: failed, not stuck')
+  check((await stuck.status(ctx)).convert?.state === 'failed', 'nonce taken by another transaction: failed, not stuck')
   await lab.setBalance(safe, 0n)
   // A conversion under way blocks a Move to Base whose approval was prepared before it.
   const pre = await stuck.prepare(ctx)
