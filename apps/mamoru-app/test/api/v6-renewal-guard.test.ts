@@ -97,10 +97,39 @@ describe('v6 renewal needs a running Monad sleeve', () => {
     }
   })
 
-  test('multichain_v6 off: no lookup at all, the route forwards as before', async () => {
+  test('review of PR #141 (P1 1): multichain_v6 off in D1 but the operator still offers v6 (stale pull) -> still 409', async () => {
     const t = await world({ baseApproval: V6_MOVE, sleeveActive: false }, { v6: false })
+    const res = await t.post(`/api/accounts/${t.base.accountKey}/renew/prepare`)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { code: string }).code).toBe('SLEEVE_NOT_ACTIVE')
+    expect(t.forwarded('/renew/prepare')).toEqual([])
+  })
+
+  test('review of PR #141 (P1 1): an account already on v6 with the flag off is still guarded', async () => {
+    const t = await world({ baseApproval: { ...V6_MOVE, upgrade: undefined, upgradePolicy: undefined, policyId: 'conservador-live-v6' }, sleeveActive: false }, { v6: false })
+    expect((await t.post(`/api/accounts/${t.base.accountKey}/renew`)).status).toBe(409)
+    expect(t.forwarded('/renew')).toEqual([])
+  })
+
+  test('multichain_v6 off and a v5 renewal: one funding read, then forwarded as before', async () => {
+    const t = await world({ baseApproval: { validUntil: 1, renewDue: true, expired: false, policyId: 'conservador-live-v5' }, sleeveActive: false }, { v6: false })
     expect((await t.post(`/api/accounts/${t.base.accountKey}/renew/prepare`)).status).toBe(200)
-    expect(t.calls.filter((c) => c.endsWith('/funding'))).toEqual([])
+    expect(t.calls.filter((c) => c.endsWith('/funding'))).toHaveLength(1)
+  })
+
+  test('review of PR #141: the fork twin conservador-lab-v6 is guarded too', async () => {
+    const t = await world({ baseApproval: { ...V6_MOVE, upgradePolicy: 'conservador-lab-v6' }, sleeveActive: false })
+    expect((await t.post(`/api/accounts/${t.base.accountKey}/renew/prepare`)).status).toBe(409)
+  })
+
+  test('review of PR #141: a Monad sleeve at another address than the Base Safe (where bridge-out mints) -> 409', async () => {
+    const t = await world({ baseApproval: V6_MOVE, sleeveActive: true })
+    await t.openSleeve()
+    t.h.db.raw.query(`UPDATE accounts SET address = ? WHERE chain_id = 143`).run(`0x${'99'.repeat(20)}`)
+    const res = await t.post(`/api/accounts/${t.base.accountKey}/renew/prepare`)
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { code: string }).code).toBe('SLEEVE_NOT_ACTIVE')
+    expect(t.forwarded('/renew/prepare')).toEqual([])
   })
 
   test('other owner routes (stop, transfer) never ask', async () => {
