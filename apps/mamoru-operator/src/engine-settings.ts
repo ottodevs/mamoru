@@ -27,7 +27,7 @@ export type SettingsVersion = { id: number; env: 'prod' | 'beta'; accountKeys: s
  * `ownerSafes` (otto/mamoru#212): lowercase account key to the other Safe addresses its owner holds in its environment,
  * only for an owner with more than one address (normally none). Optional: older Workers do not serve it.
  */
-type Payload = { versions: SettingsVersion[]; betaAccounts: string[]; flags: Record<OpsFlagName, boolean>; accountCaps: Record<string, number>; ownerSafes?: Record<string, string[]>; servedAt: string }
+type Payload = { versions: SettingsVersion[]; betaAccounts: string[]; flags: Record<OpsFlagName, boolean>; scopedFlags: Partial<Record<OpsFlagName, string[] | null>>; accountCaps: Record<string, number>; ownerSafes?: Record<string, string[]>; servedAt: string }
 
 export type ResolvedSettings = {
   settings: EngineSettings
@@ -80,6 +80,25 @@ function parseOpsFlags(raw: unknown): Record<OpsFlagName, boolean> {
 }
 
 /**
+ * otto/mamoru#217: the `scopedFlags` field, enabled scopable flag to null (everyone, explicit) or the accounts it is
+ * offered to. Absent or null (an older Worker): no entries, so nothing scoped is offered at all (fail closed: an old
+ * Worker's `flags.multichain_v6 === true` alone offers nobody v6). Not a plain object: the pull is refused. An entry
+ * that is neither null nor a list of strings reads as an empty list (nobody). Unknown names are dropped.
+ */
+function parseScopedFlags(raw: unknown): Partial<Record<OpsFlagName, string[] | null>> {
+  if (raw === undefined || raw === null) return {}
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('scopedFlags must be an object')
+  const o = raw as Record<string, unknown>
+  const out: Partial<Record<OpsFlagName, string[] | null>> = {}
+  for (const k of Object.keys(OPS_FLAGS)) {
+    if (!(k in o) || o[k] === undefined) continue
+    const v = o[k]
+    out[k as OpsFlagName] = v === null ? null : Array.isArray(v) && v.every((x) => typeof x === 'string') ? (v as string[]).map((x) => x.trim().toLowerCase()).filter(Boolean) : []
+  }
+  return out
+}
+
+/**
  * otto/mamoru#26: the `accountCaps` field. Absent or null (an app Worker that does not serve it yet): no override.
  * Present: every entry must be valid (validateAccountCaps), else the whole pull is refused, as for a bad version.
  */
@@ -114,6 +133,7 @@ export function checkPayload(raw: unknown, applied: Payload | null, opts: { allo
   const p = raw as Payload
   if (!Array.isArray(p.versions) || !Array.isArray(p.betaAccounts) || !p.betaAccounts.every((k) => typeof k === 'string')) throw new Error('body has the wrong shape')
   const flags = parseOpsFlags((raw as { flags?: unknown }).flags)
+  const scopedFlags = parseScopedFlags((raw as { scopedFlags?: unknown }).scopedFlags)
   const accountCaps = parseAccountCaps((raw as { accountCaps?: unknown }).accountCaps)
   const ownerSafes = parseOwnerSafes((raw as { ownerSafes?: unknown }).ownerSafes)
   const versions: SettingsVersion[] = []
@@ -141,7 +161,7 @@ export function checkPayload(raw: unknown, applied: Payload | null, opts: { allo
   const servedAt = typeof p.servedAt === 'string' ? p.servedAt : ''
   if (!Number.isFinite(Date.parse(servedAt))) throw new Error('body has no valid servedAt')
   if (applied?.servedAt && Date.parse(servedAt) < Date.parse(applied.servedAt)) throw new Error(`stale: served at ${servedAt}, before the applied ${applied.servedAt}`)
-  return { versions, betaAccounts: p.betaAccounts.map((k) => k.toLowerCase()), flags, accountCaps, ownerSafes, servedAt }
+  return { versions, betaAccounts: p.betaAccounts.map((k) => k.toLowerCase()), flags, scopedFlags, accountCaps, ownerSafes, servedAt }
 }
 
 /**
@@ -253,8 +273,8 @@ export class EngineSettingsSource {
       // onChange (boot.ts's syncYieldLedger) and is written to the last-known-good file.
       // otto/mamoru#26: account caps too, compared on full keys (the log line's 8-character keys could collide).
       const capsChanged = canonicalCaps(next.accountCaps) !== canonicalCaps(this.payload?.accountCaps ?? {})
-      const changed = capsChanged || JSON.stringify(next.versions.map((v) => [v.id, canonicalSettingsJson(v.settings), v.accountKeys])) + next.betaAccounts.join() + JSON.stringify(next.flags) !==
-        JSON.stringify((this.payload?.versions ?? []).map((v) => [v.id, canonicalSettingsJson(v.settings), v.accountKeys])) + (this.payload?.betaAccounts ?? []).join() + JSON.stringify(this.payload?.flags ?? {})
+      const changed = capsChanged || JSON.stringify(next.versions.map((v) => [v.id, canonicalSettingsJson(v.settings), v.accountKeys])) + next.betaAccounts.join() + JSON.stringify(next.flags) + JSON.stringify(next.scopedFlags) !==
+        JSON.stringify((this.payload?.versions ?? []).map((v) => [v.id, canonicalSettingsJson(v.settings), v.accountKeys])) + (this.payload?.betaAccounts ?? []).join() + JSON.stringify(this.payload?.flags ?? {}) + JSON.stringify(this.payload?.scopedFlags ?? {})
       this.payload = next
       this.source = 'd1'
       this.lastPullAt = new Date(at).toISOString()
@@ -309,6 +329,11 @@ export class EngineSettingsSource {
    * is engine settings only); no successful pull yet: every flag off. */
   flags(): Record<OpsFlagName, boolean> {
     return this.payload?.flags ?? parseOpsFlags(undefined)
+  }
+
+  /** otto/mamoru#217: scopable flags of the latest applied pull (null = everyone, list = those accounts); none before a pull. */
+  scopedFlags(): Partial<Record<OpsFlagName, string[] | null>> {
+    return this.payload?.scopedFlags ?? {}
   }
 
   forAccount(accountKey: string): ResolvedSettings {

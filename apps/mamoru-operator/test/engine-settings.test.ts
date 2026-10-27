@@ -313,3 +313,19 @@ describe('otto/mamoru#212: ownerSafes', () => {
     expect(() => checkPayload({ ...base, ownerSafes: [] }, null)).toThrow('ownerSafes must be an object')
   })
 })
+
+describe('operator scopedFlags (otto/mamoru#217)', () => {
+  const base = { versions: [v(1, 'prod')], betaAccounts: [], servedAt: '2026-10-27T12:00:00.000Z' }
+  test('absent or null (old Worker): no entries', () => {
+    expect(checkPayload(base, null).scopedFlags).toEqual({})
+    expect(checkPayload({ ...base, scopedFlags: null }, null).scopedFlags).toEqual({})
+  })
+  test('null is everyone; a list is lowercased; a malformed entry is [] (nobody); unknown names are dropped', () => {
+    const p = checkPayload({ ...base, scopedFlags: { multichain_v6: [' K ', '0xAB'], monad_sleeves: 'x', yield_ledger: null, nope: ['a'] } }, null)
+    expect(p.scopedFlags).toEqual({ multichain_v6: ['k', '0xab'], monad_sleeves: [], yield_ledger: null })
+    expect(checkPayload({ ...base, scopedFlags: { multichain_v6: null } }, null).scopedFlags).toEqual({ multichain_v6: null })
+  })
+  test('a non-object field refuses the pull', () => {
+    expect(() => checkPayload({ ...base, scopedFlags: 'k' }, null)).toThrow('scopedFlags must be an object')
+  })
+})

@@ -435,6 +435,10 @@ export type OperatorConfig = {
   v6Policy?: PolicyVersion
   /** otto/mamoru#129 runtime flags from the settings pull; `onchain_action_policy_v4` offers the v4 renewal per account. Absent: every flag off. */
   opsFlags?: () => Partial<Record<OpsFlagName, boolean>>
+  /** otto/mamoru#217: enabled scopable flags from the settings pull: null = everyone (explicit), list = those accounts
+   * (lowercase keys / Safe addresses). `multichain_v6` is offered ONLY through this: no entry (flag off, an older Worker
+   * that sends none, or no source wired) offers nobody v6. */
+  opsScopedFlags?: () => Partial<Record<OpsFlagName, string[] | null>>
   /** otto/mamoru#172: where the shared guard reads' fee history and fallback series survive a restart (`GuardReadsState`). Absent: memory only. */
   guardReadsState?: Pick<GuardReadsState, 'load' | 'update'>
   /**
@@ -1278,7 +1282,11 @@ export class Operator {
     const flags = this.cfg.opsFlags?.()
     // otto/mamoru#214: v6 (Base + Monad growth) configured and offered: v2-v5 accounts move to it, ahead of v5.
     const v6 = this.cfg.v6Policy
-    if (v6 && flags?.multichain_v6 === true && V6_MIGRATES_FROM.has(cur.policyId) && cur.chain === v6.chain) return v6
+    // otto/mamoru#217: v6 needs the explicit signal of the scoped-flags field. null = everyone (and the boolean agrees);
+    // a list = only those accounts (key or Safe address); malformed reached us as [] = nobody; missing = nobody.
+    const v6Scope = this.cfg.opsScopedFlags?.().multichain_v6
+    const inV6Scope = v6Scope === null ? flags?.multichain_v6 === true : Array.isArray(v6Scope) && (v6Scope.includes(acc.accountKey.toLowerCase()) || v6Scope.includes(String(acc.ctx.address).toLowerCase()))
+    if (v6 && inV6Scope && V6_MIGRATES_FROM.has(cur.policyId) && cur.chain === v6.chain) return v6
     // otto/mamoru#151: MamoruActionPolicyV2 deployed and offered: v2/v3 and v4 accounts move to v5.
     const v5 = this.cfg.v5Policy
     if (v5 && flags?.onchain_action_policy_v5 === true && V5_MIGRATES_FROM.has(cur.policyId) && cur.chain === v5.chain) return v5

@@ -3,7 +3,7 @@ import { settingsResponseSignature, verifyMetricsSignature } from '@mamoru/opera
 import { validateAccountCapOverride, validateEngineSettings, type EngineSettings, type OpsFlagName } from '@mamoru/policy'
 import type { AppEnv } from './context.ts'
 import type { Db } from './env.ts'
-import { readOpsFlags } from './ops-flags.ts'
+import { readOpsFlagState } from './ops-flags.ts'
 
 /**
  * Spec 006 (otto/mamoru#147): the operator pulls the active engine settings from here. Read-only: versions are
@@ -32,6 +32,10 @@ export type EngineSettingsPayload = {
   /** otto/mamoru#129: runtime flags set from /ops, D1-backed (readOpsFlags). Older operators that do not parse this
    * field yet simply ignore it; it is additive, never required to make sense of `versions`. */
   flags: Record<OpsFlagName, boolean>
+  /** otto/mamoru#217: enabled scopable flags (`multichain_v6`): null = everyone (explicit), a list = only those
+   * accounts (lowercase keys / Safe addresses). A scoped flag reads false in `flags`, so an older operator sees it off;
+   * an operator that finds no entry here offers nothing. Additive. */
+  scopedFlags: Partial<Record<OpsFlagName, string[] | null>>
   /** otto/mamoru#26: per-account cap overrides, lowercase account key to whole USDC (newest row per account; a removal
    * or no row: absent, the account runs its environment's cap). Older operators ignore it. */
   accountCaps: Record<string, number>
@@ -175,7 +179,8 @@ export function engineSettingsRoutes(now: () => Date) {
     if (!(await verifyMetricsSignature(secret, 'GET', ENGINE_SETTINGS_PATH, c.req.header('x-mamoru-sig'), at))) return c.json({ error: 'unauthorized' }, 401)
     const versions = await activeVersions(c.env.DB)
     if (versions === null) return c.json({ error: 'engine settings are not set up' }, 404)
-    const payload: EngineSettingsPayload = { versions, betaAccounts: await betaAccounts(c.env.DB), flags: await readOpsFlags(c.env.DB), accountCaps: await accountCaps(c.env.DB), ownerSafes: await ownerSafes(c.env.DB), servedAt: new Date(at).toISOString() }
+    const opsState = await readOpsFlagState(c.env.DB)
+    const payload: EngineSettingsPayload = { versions, betaAccounts: await betaAccounts(c.env.DB), flags: opsState.flags, scopedFlags: opsState.scopedFlags, accountCaps: await accountCaps(c.env.DB), ownerSafes: await ownerSafes(c.env.DB), servedAt: new Date(at).toISOString() }
     const body = JSON.stringify(payload)
     const sig = await settingsResponseSignature(secret, body, Math.floor(at / 60_000))
     return new Response(body, { status: 200, headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-mamoru-sig': sig } })

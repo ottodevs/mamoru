@@ -623,7 +623,7 @@ export async function bootOperator(o: BootOptions) {
       watchClient,
       ...knobs,
       trustedClients: parseTrustedRpc(o.trustedRpc).map((t) => ({ label: t.label, client: createPublicClient({ transport: http(t.url, { timeout: 15_000 }) }) })),
-      ...(settings ? { settings, opsFlags: () => settings.flags() } : {}),
+      ...(settings ? { settings, opsFlags: () => settings.flags(), opsScopedFlags: () => settings.scopedFlags() } : {}),
       ...(resolveV4Policy(policy.chain, process.env) ? { v4Policy: resolveV4Policy(policy.chain, process.env) } : {}),
       ...(resolveV5Policy(policy.chain, process.env) ? { v5Policy: resolveV5Policy(policy.chain, process.env) } : {}),
       ...(v6Policy ? { v6Policy } : {}),

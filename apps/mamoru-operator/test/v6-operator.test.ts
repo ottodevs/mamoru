@@ -93,7 +93,7 @@ describe('boot wiring', () => {
 
 describe('the renew row offers v6 only behind multichain_v6', () => {
   const acc = (w: ReturnType<typeof world>, id: string) => running(w, id === 'conservador-live-v4' ? v4 : v5)
-  const cfg = (flags: Record<string, boolean>) => ({ v4Policy: v4, v5Policy: v5, v6Policy: v6, opsFlags: () => flags })
+  const cfg = (flags: Record<string, boolean>) => ({ v4Policy: v4, v5Policy: v5, v6Policy: v6, opsFlags: () => flags, opsScopedFlags: () => (flags.multichain_v6 ? { multichain_v6: null } : {}) })
 
   test('flag on: v4 and v5 accounts go to v6, ahead of v5; flag off: v4 -> v5 and v5 stays (unchanged)', () => {
     for (const from of ['conservador-live-v4', 'conservador-live-v5']) {
@@ -107,6 +107,40 @@ describe('the renew row offers v6 only behind multichain_v6', () => {
   test('v6 not configured (no gate): never offered, flag or not', () => {
     const w = world(0n, { v4Policy: v4, v5Policy: v5, opsFlags: () => ({ multichain_v6: true }) })
     expect(w.op.renewTarget(running(w, v5))).toBe('conservador-live-v5')
+  })
+
+  describe('otto/mamoru#217 per-account scope on multichain_v6', () => {
+    // The Worker serves a scoped flag as flags false + scopedFlags list; unscoped as flags true + scopedFlags null.
+    const world6 = (flags: Record<string, boolean>, scoped?: Record<string, string[] | null>) =>
+      world(0n, { v4Policy: v4, v5Policy: v5, v6Policy: v6, opsFlags: () => flags, ...(scoped ? { opsScopedFlags: () => scoped } : {}) })
+    const on = { multichain_v6: true, onchain_action_policy_v5: true }
+    const target = (w: ReturnType<typeof world>) => w.op.renewTarget(running(w, v5))
+
+    test('explicit everyone (null): v6, as today', () => {
+      expect(target(world6(on, { multichain_v6: null }))).toBe('conservador-live-v6')
+    })
+    test('list: the account key or the Safe address gets v6; anyone else keeps v5', () => {
+      const off = { ...on, multichain_v6: false }
+      expect(target(world6(off, { multichain_v6: ['k'] }))).toBe('conservador-live-v6')
+      expect(target(world6(off, { multichain_v6: [String(ctx.address).toLowerCase()] }))).toBe('conservador-live-v6')
+      expect(target(world6(off, { multichain_v6: ['other', '0xabc'] }))).toBe('conservador-live-v5')
+    })
+    test('a v4 account outside the scope falls to v5, or stays v4 with v5 off', () => {
+      const w = world6({ onchain_action_policy_v5: true }, { multichain_v6: ['other'] })
+      expect(w.op.renewTarget(running(w, v4))).toBe('conservador-live-v5')
+      const w2 = world6({}, { multichain_v6: ['other'] })
+      expect(w2.op.renewTarget(running(w2, v4))).toBe('conservador-live-v4')
+    })
+    test('malformed or empty scope (reaches the operator as []): nobody', () => {
+      expect(target(world6({ onchain_action_policy_v5: true }, { multichain_v6: [] }))).toBe('conservador-live-v5')
+    })
+    test('old Worker: flags.multichain_v6 true with no scope information offers nobody v6', () => {
+      expect(target(world6(on))).toBe('conservador-live-v5')
+      expect(target(world6(on, {}))).toBe('conservador-live-v5')
+    })
+    test('flag off: nothing offered even with a list', () => {
+      expect(target(world6({ onchain_action_policy_v5: true }, {}))).toBe('conservador-live-v5')
+    })
   })
 
   test('an account already on v6 renews as v6', () => {
@@ -155,7 +189,7 @@ describe('owner transactions of a v6 approval', () => {
   })
 
   test('renewal v5 -> v6: every session encodes; bridge-out with the gate, the rest with V2; all with the gas policy', async () => {
-    const w = world(0n, { v4Policy: v4, v5Policy: v5, v6Policy: v6, opsFlags: () => ({ multichain_v6: true }) })
+    const w = world(0n, { v4Policy: v4, v5Policy: v5, v6Policy: v6, opsFlags: () => ({ multichain_v6: true }), opsScopedFlags: () => ({ multichain_v6: null }) })
     running(w, v5)
     ready(w)
     chain(w, 7n)
@@ -190,7 +224,7 @@ describe('owner transactions of a v6 approval', () => {
   })
 
   test('extension: a v6 account missing only bridge-out gets just that session, with the gate', async () => {
-    const w = world(0n, { v4Policy: v4, v5Policy: v5, v6Policy: v6, opsFlags: () => ({ multichain_v6: true }) })
+    const w = world(0n, { v4Policy: v4, v5Policy: v5, v6Policy: v6, opsFlags: () => ({ multichain_v6: true }), opsScopedFlags: () => ({ multichain_v6: null }) })
     running(w, v6, (n) => n !== 'bridge-out')
     ready(w)
     chain(w, 7n)
@@ -205,7 +239,7 @@ describe('owner transactions of a v6 approval', () => {
 
   test('a v6 renewal without a configured gate cannot be built', async () => {
     const noGate = { ...v6, actionPolicy: { ...v6.actionPolicy!, pauseGate: undefined } }
-    const w = world(0n, { v4Policy: v4, v5Policy: v5, v6Policy: noGate, opsFlags: () => ({ multichain_v6: true }) })
+    const w = world(0n, { v4Policy: v4, v5Policy: v5, v6Policy: noGate, opsFlags: () => ({ multichain_v6: true }), opsScopedFlags: () => ({ multichain_v6: null }) })
     running(w, v5)
     ready(w)
     chain(w, 7n)
