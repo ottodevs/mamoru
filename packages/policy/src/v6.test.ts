@@ -12,19 +12,21 @@ const ACCOUNT = '0x00000000000000000000000000000000000000aa' as const
 const CAP = 10_000n * 1_000_000n
 
 function ctx(): GrantContext {
-  const caps = computeCaps(conservadorLiveV6, CAP, { USDT: { num: 1n, den: 1n }, WETH: { num: 1n, den: 3_000n } })
+  const caps = computeCaps(conservadorLiveV6, CAP, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
   return { account: ACCOUNT, sessionKey: '0x00000000000000000000000000000000000000bb', chainId: 8453, salt: `0x${'00'.repeat(32)}`, validAfter: 0, validUntil: 1, caps }
 }
 
 describe('conservador-live-v6 (otto/mamoru#201, #213)', () => {
-  test('50 Stable + 35 Balance on Base, 15 Growth on Monad, no cbBTC anywhere', () => {
+  test('50 Stable + 35 Balance on Base, 15 Growth on Monad, USDC/cbBTC as an exit only', () => {
     expect(conservadorLiveV6.buckets).toEqual([
       { id: 'stables', preference: 5000, pools: ['pool:USDC/USDT/100'] },
       { id: 'risk', preference: 3500, pools: ['pool:WETH/USDC/3000'] },
+      { id: 'btc-usdc', preference: 0, pools: ['pool:USDC/cbBTC/500'] },
     ])
     expect(conservadorLiveV6.remoteBuckets).toEqual([{ id: 'growth', preference: 1500, chainId: 143, pools: ['pool:WMON/USDC/3000'], policyId: 'live-wmon-usdc-monad-v1' }])
     expect(preferenceTotal(conservadorLiveV6)).toBe(10_000)
-    expect(JSON.stringify(conservadorLiveV6.session, (_, v) => (typeof v === 'bigint' ? v.toString() : v))).not.toContain('cbBTC')
+    const btc = conservadorLiveV6.session.grants.filter((g) => g.pool === 'pool:USDC/cbBTC/500')
+    expect(btc.map((g) => g.name)).toEqual(['manage-any'])
   })
 
   test('a new id and hash, signed for Base only, not in POLICIES until #214 and #215 ship', () => {
@@ -35,7 +37,7 @@ describe('conservador-live-v6 (otto/mamoru#201, #213)', () => {
   })
 
   test('the WETH/USDC caps follow its 35 % share; stables keep v5', () => {
-    const caps = computeCaps(conservadorLiveV6, CAP, { USDT: { num: 1n, den: 1n }, WETH: { num: 1n, den: 3_000n } })
+    const caps = computeCaps(conservadorLiveV6, CAP, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
     expect(caps[V6_POOLS.balance.caps.stableSwapPerCall]).toBe((CAP * 3500n) / 10_000n)
     expect(caps[V6_POOLS.balance.caps.budgetWindow]).toBe((CAP * 7000n) / 10_000n)
     expect(caps[V4_POOLS.stables.caps.stableSwapPerCall]).toBe((CAP * 5000n) / 10_000n)

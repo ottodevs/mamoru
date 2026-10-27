@@ -1,12 +1,12 @@
 // otto/mamoru#201, #213: the first policy whose account spans two chains. Owner decisions of 26-27 Oct 2026: 50 % Stable
 // (USDC/USDT on Base; lending replaces it in a later version), 35 % Balance (WETH/USDC on Base, no cbBTC), 15 % Growth
-// (WMON/USDC on Monad, served by the account's Monad sleeve). Not in POLICIES: no account can activate it until the
+// (WMON/USDC on Monad, served by the account's Monad sleeve). USDC/cbBTC stays only as an exit for accounts moving in. Not in POLICIES: no account can activate it until the
 // sleeve activation (#214) and the cross-chain allocator (#215) exist.
 import { bridgeOutGrant, CCTP_DOMAIN_MONAD } from './grants.ts'
 import { INCREASE_TOLERANCE_BPS, conservadorLiveV5 } from './policies-v4.ts'
 import { liveWmonUsdcMonadV1 } from './policies-monad.ts'
 import type { CapFormula, PolicyVersion } from './types.ts'
-import { grantsV5, v4CapFormulas, V4_POOLS, type V4PoolSpec, type V4Usage } from './v4-grants.ts'
+import { grantsV5, manageAnyV5Grant, v4CapFormulas, V4_POOLS, type V4PoolSpec, type V4Usage } from './v4-grants.ts'
 
 const V6_USAGE: V4Usage = { enterSwap: 3_000, enterMint: 1_000, manageAny: 32_000 }
 
@@ -37,15 +37,19 @@ export const conservadorLiveV6: PolicyVersion = {
     { id: 'stables', preference: 5000, pools: ['pool:USDC/USDT/100'] },
     // Shown as Balance; the id stays 'risk' so the WETH pool keeps its caps, grant keys and fall-freeze rule.
     { id: 'risk', preference: 3500, pools: ['pool:WETH/USDC/3000'] },
+    // Exit only: an account moving from v2-v5 still holds USDC/cbBTC positions. Target 0, so `reduce` empties them and
+    // the idle cbBTC is sold back to savings; with manage-any alone (no enter-swap, no enter-mint) nothing new goes in.
+    { id: 'btc-usdc', preference: 0, pools: ['pool:USDC/cbBTC/500'] },
   ],
   remoteBuckets: [{ id: 'growth', preference: 1500, chainId: 143, pools: ['pool:WMON/USDC/3000'], policyId: liveWmonUsdcMonadV1.policyId }],
   range: { ...conservadorLiveV5.range, increaseToleranceBps: INCREASE_TOLERANCE_BPS },
   session: {
     ...conservadorLiveV5.session,
-    caps: [...v4CapFormulas('stables', V6_POOLS.stables), ...v4CapFormulas('risk', V6_POOLS.balance), ...BRIDGE_CAPS],
+    caps: [...v4CapFormulas('stables', V6_POOLS.stables), ...v4CapFormulas('risk', V6_POOLS.balance), ...v4CapFormulas('btc', V4_POOLS.btc), ...BRIDGE_CAPS],
     grants: [
       ...grantsV5(V6_POOLS.stables, V6_USAGE),
       ...grantsV5(V6_POOLS.balance, V6_USAGE),
+      manageAnyV5Grant(V4_POOLS.btc, V6_USAGE.manageAny),
       bridgeOutGrant({ destinationDomain: CCTP_DOMAIN_MONAD, caps: { perCall: 'bridgePerCall', total: 'bridgeTotal' } }, 64),
     ],
   },
