@@ -8,7 +8,9 @@
 //   2. ONE owner transaction each, gas recorded, each checked against the operator's own measure (simulateAndRevert in
 //      the Safe x 9/8 + passkey margin, fitV4/oneTxV4) and V4_TX_GAS_TARGET: a fresh v7 activation; the move from a v5
 //      account (9 sessions) and from a legacy v2 account (12 sessions) (each set up as today, in the transactions today's
-//      split takes);
+//      split takes); then the same moves from accounts holding positions (2 admitted in the Init; a legacy account also
+//      revoking 1 or 2 per-position `manage` grants): over the budget the operator falls back to the v6 move, sent as
+//      today's split;
 //   3. main line: a v6 account as today (its split counted), the engine's swap and mint under v6, the owner's own
 //      positions; the move v6 -> v7 in ONE transaction (8 sessions revoked, 4 enabled, the owner's btc position
 //      admitted); a v6 session refused afterwards;
@@ -252,7 +254,11 @@ try {
    * (fitV4), the static model seeding the search; v7 (`session.oneTransaction`) in ONE transaction, refused when over
    * the target (oneTxV4). Every transaction is sent; returns them, with the operator's limit and the receipt's gas.
    */
-  async function approveAll(label: string, policy: PolicyVersion, generation: bigint, sessionKey: Address, admitByPool: Partial<Record<string, bigint[]>>, attest: Address[], revokes: Hex[]): Promise<Built[]> {
+  /**
+   * `fallback` (otto/mamoru#225, review P1-2): a one-transaction approval over the operator's budget is not sent; the
+   * operator offers this policy's approval instead (planRenewOrFallBack), which is then sent as today and must land.
+   */
+  async function approveAll(label: string, policy: PolicyVersion, generation: bigint, sessionKey: Address, admitByPool: Partial<Record<string, bigint[]>>, attest: Address[], revokes: Hex[], fallback?: { policy: PolicyVersion; attest: Address[] }): Promise<Built[]> {
     let remaining = orderV4Keys(policy, policy.session.grants.map(grantKey))
     const out: Built[] = []
     for (let i = 0; remaining.length; i++) {
@@ -271,7 +277,14 @@ try {
       const est = await estimated(b.calls)
       // oneTxV4's bound: RENEW_GAS_BUDGET for a renewal or move, ACTIVATION_GAS_BUDGET for a Start (operator.ts).
       const budget = revokes.length ? 16_200_000n : 15_000_000n
-      if (policy.session.oneTransaction && (limit === null || limit > budget)) note(`${label}: the operator would refuse it (RENEWAL_TOO_LARGE)`, false, `limit ${limit} > ${budget}`)
+      if (policy.session.oneTransaction && (limit === null || limit > budget)) {
+        if (fallback) {
+          note(`${label}: over the budget, the operator falls back to ${fallback.policy.policyId}`, true, `limit ${limit} > ${budget}, estimateGas+passkey ${est}`)
+          gas[`${label} (refused)`] = `${est} estimate+passkey, ${limit} operator limit`
+          return approveAll(`${label}: fallback ${fallback.policy.policyId}`, fallback.policy, generation, sessionKey, admitByPool, fallback.attest, revokes)
+        }
+        note(`${label}: the operator would refuse it (RENEWAL_TOO_LARGE)`, false, `limit ${limit} > ${budget}`)
+      }
       const r = await ownerTx(b.calls)
       const actions = b.grants.reduce((m, g) => m + g.actions.length, 0)
       note(`${label}: owner tx ${i + 1}`, r.ok && r.receipt.gasUsed <= V4_TX_GAS_TARGET && est < BASE_PER_TX_GAS_CAP && (limit ?? 0n) < BASE_PER_TX_GAS_CAP, `${r.receipt.gasUsed} gas used, estimateGas+passkey ${est}, operator limit ${limit} (target ${V4_TX_GAS_TARGET}, 2^24 = ${BASE_PER_TX_GAS_CAP}): ${b.keys.length} sessions / ${actions} actions${first && revokes.length ? `, ${revokes.length} revoked` : ''}${first && attest.length ? `, ${attest.length} attested` : ''}`)
@@ -300,6 +313,28 @@ try {
       out.push(b)
     }
     return out
+  }
+
+  /** Two positions the owner holds before a move: one in WETH/USDC, one in USDC/USDT, minted by the owner's own transactions. */
+  async function ownerPositions(): Promise<{ ids: bigint[]; admit: Partial<Record<string, bigint[]>> }> {
+    const buy = (tokenOut: string, fee: number, amountIn: bigint) => ({ to: address('SwapRouter02', baseRegistry), data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: tokenOf('USDC'), tokenOut: tokenOf(tokenOut), fee, recipient: safe, amountIn, amountOutMinimum: 1n, sqrtPriceLimitX96: 0n }] }), value: 0n })
+    const r = await ownerTx([{ ...approve('USDC', 'SwapRouter02', 100_000_000n), value: 0n }, buy('WETH', 3000, 50_000_000n), buy('USDT', 100, 50_000_000n)])
+    if (!r.ok) throw new Error('owner swaps for the positions reverted')
+    const inBalance = await ownerMintOutside(V6_POOLS.balance, (await lab.balanceOf('WETH', safe)) / 2n, 20_000_000n)
+    const inStables = await ownerMintOutside(V6_POOLS.stables, 20_000_000n, (await lab.balanceOf('USDT', safe)) / 2n)
+    return { ids: [inBalance, inStables], admit: { [BALANCE]: [inBalance], [STABLES]: [inStables] } }
+  }
+
+  /** A legacy account's per-position `manage` grant for each of `tokenIds` (v2: one per position, enabled after its mint). */
+  async function enableManage(policy: PolicyVersion, sessionKey: Address, tokenIds: bigint[]): Promise<Hex[]> {
+    const pools = [BALANCE, STABLES]
+    const now = await engineNow()
+    const caps = computeCaps(policy, CAP_USDC, prices)
+    const grants = tokenIds.map((tokenId, i) => instantiateGrant(policy, `manage:${pools[i]}`, { account: safe, sessionKey, chainId: lab.chainId, salt: nextSalt(), validAfter: now - 60, validUntil: now + policy.session.validitySeconds, caps, capUsdc: CAP_USDC, tokenId, admittedTokenIds: [tokenId] }))
+    const batch = activationBatch({ safe } as LiveAccount, grants, [], { trust: false })
+    const r = await ownerTx(batch.calls)
+    if (!r.ok) throw new Error('legacy manage enable reverted')
+    return batch.permissionIds
   }
 
   function session(parts: Built[], key: string): Session {
@@ -394,6 +429,34 @@ try {
     const ids = legacy.flatMap((b) => b.permissionIds)
     note('legacy v2 account: sessions enabled', ids.length === 12, `${ids.length} in ${legacy.length} owner txs`)
     await approveAll('move legacy v2 (12 sessions) -> v7', p7, 1n, key.address, {}, [v2, gasPolicy, gate], ids)
+    await lab.revert(S)
+  }
+  // otto/mamoru#225 (review P1-2): the same moves from accounts that hold positions, as real ones do. The operator's
+  // v4Context admits every position the Safe still owns in the move's Init (the first session of each pool carries it),
+  // and a legacy account also revokes the per-position `manage` grant of each one.
+  {
+    const S = await lab.snapshot()
+    const today = await approveAll('v5 activation, as today (then 2 positions)', p5, 1n, key.address, {}, [v2, gasPolicy], [])
+    const held = await ownerPositions()
+    await approveAll('move v5 (9 sessions, 2 positions admitted) -> v7', p7, 2n, key.address, held.admit, [gate], today.flatMap((b) => b.permissionIds), { policy: p6, attest: [gate] })
+    await lab.revert(S)
+  }
+  {
+    const S = await lab.snapshot()
+    const legacy = await enableLegacy(p2, key.address)
+    const held = await ownerPositions()
+    const manage = await enableManage(p2, key.address, held.ids)
+    const ids = [...legacy.flatMap((b) => b.permissionIds), ...manage]
+    note('legacy v2 account with 2 positions: sessions enabled', ids.length === 14, `${ids.length} (12 + ${manage.length} per-position manage)`)
+    await approveAll('move legacy v2 (12 sessions + 2 manage, 2 positions admitted) -> v7', p7, 1n, key.address, held.admit, [v2, gasPolicy, gate], ids, { policy: p6, attest: [v2, gasPolicy, gate] })
+    await lab.revert(S)
+  }
+  {
+    const S = await lab.snapshot()
+    const legacy = await enableLegacy(p2, key.address)
+    const held = await ownerPositions()
+    const manage = await enableManage(p2, key.address, held.ids.slice(0, 1))
+    await approveAll('move legacy v2 (12 sessions + 1 manage, 1 position admitted) -> v7', p7, 1n, key.address, { [BALANCE]: held.ids.slice(0, 1) }, [v2, gasPolicy, gate], [...legacy.flatMap((b) => b.permissionIds), ...manage], { policy: p6, attest: [v2, gasPolicy, gate] })
     await lab.revert(S)
   }
 

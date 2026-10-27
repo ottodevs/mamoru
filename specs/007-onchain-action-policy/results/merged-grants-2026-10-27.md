@@ -20,21 +20,36 @@ ordinary owner Safe transaction. No ENABLE mode, no gas-cap change, same session
 
 ## Gas (t11, receipt gas used / eth_estimateGas + passkey check / the operator's ownerTxGasLimit)
 
+Re-measured after the review's P1-2 with realistic admissions: each moved account holds positions, admitted in the move's
+Init as the operator's v4Context does, and a legacy account also revokes the per-position `manage` grant of each one.
+
 | Approval | Prompts | Used | Estimate | Operator limit |
 |---|---|---|---|---|
-| v7 activation (attests V2, gas policy, gate) | 1 | 12.05M | 12.86M | 13.14M |
-| v7 renewal (4 revoked) | 1 | 11.59M | 13.48M | 13.82M |
-| move v6 (8 sessions) -> v7 | 1 | 11.87M | 14.63M | 15.07M |
-| move v5 (9 sessions) -> v7 (+ gate attest) | 1 | 12.05M | 15.14M | 15.63M |
-| move legacy v2 (12 sessions) -> v7 (+ 3 attests) | 1 | 12.69M | 15.57M | 16.08M |
+| v7 activation (attests V2, gas policy, gate) | 1 | 11.96M | 12.76M | 13.03M |
+| v7 renewal (4 revoked) | 1 | 11.50M | 13.38M | 13.71M |
+| move v6 (8 sessions, 1 position admitted) -> v7 | 1 | 11.77M | 14.53M | 14.95M |
+| move v5 (9 sessions) -> v7 (+ gate attest) | 1 | 11.95M | 15.04M | 15.52M |
+| move v5 (9 sessions, 2 positions admitted) -> v7 | 1 | 12.17M | 15.27M | 15.76M |
+| move legacy v2 (12 sessions) -> v7 (+ 3 attests) | 1 | 12.59M | 15.47M | 15.97M |
+| move legacy v2 (12 + 1 manage, 1 position) -> v7 | refused | (12.78M) | 15.88M | **16.42M** > 16.2M |
+| move legacy v2 (12 + 2 manage, 2 positions) -> v7 | refused | (12.96M) | 16.30M | **16.86M** > 2^24 |
+| -> its fallback, the v6 move (as today) | 2 | 10.07M + 13.21M | 13.28M + 13.87M | 13.67M + 14.22M |
 | today: v5 activation | 2 | 13.29M + 12.83M | | |
 | today: v6 activation | 2 | 13.27M + 9.17M | | |
 
-The due diligence's 11.3-11.75M are receipt figures. Each `removeSession` is ~0.3M before its refund, so a move's gas
-LIMIT is 3-4M above its receipt. Against V4_TX_GAS_TARGET (14.5M) the v5 and v2 moves would be refused; the operator bounds
-a one-transaction approval by its gas budget instead (RENEW_GAS_BUDGET 16.2M, ACTIVATION_GAS_BUDGET 15M) and refuses above
-it (RENEWAL_TOO_LARGE), never splits. The legacy v2 move leaves ~1.2M to Base's 2^24 by estimate; an account with more
-than ~13 sessions to revoke does not fit.
+Each `removeSession` is ~0.3M before its refund, so a move's gas LIMIT is 3-4M above its receipt. The operator bounds a
+one-transaction approval by its gas budget (RENEW_GAS_BUDGET 16.2M, ACTIVATION_GAS_BUDGET 15M), not V4_TX_GAS_TARGET
+(14.5M). An admitted position adds ~0.12M to the limit; a per-position grant to revoke ~0.45M. A legacy v2 account with
+even one per-position grant does not fit (the second case is over Base's 2^24 itself), so a v7 move is never guaranteed.
+
+What the operator does then (review P1-2): `planRenewOrFallBack` catches RENEWAL_TOO_LARGE on a v7 move, marks the
+account's grant set (`oneTxRefused`) and plans the renewal again for the target it would have had without v7: the v6 move
+(t11 sends it: 2 prompts, 14 revoked in the first), the v5 move, or the account's own renewal for a v6 account. While the
+set holds, `v4Target`/`renewTarget` and the renew row say the fallback, so what is signed is what the row shows; once the
+set changes (the fallback landed) v7 is offered again, now from v6 (8 revokes, fits). A v7 Start over 15M activates v6
+instead. The refusal by the static estimate (no in-Safe simulation: 26 x 590k + 190k per revoke + overheads, ~16.5M for a
+fresh Start and ~18M for a move, both of which fit when simulated) takes the same fallback, so it costs prompts, never a
+stuck account. A v7 account's own renewal (13.7M) has no other target and stays refused if it ever grows over 16.2M.
 
 ## Security: what the merge drops and what still enforces it
 
