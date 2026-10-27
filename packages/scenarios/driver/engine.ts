@@ -4,7 +4,7 @@ import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { amountsOf, decide, outOfRangeSinceOf, twapFloor, withOutOfRangeSince, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
 import { hasIncrease, hasManageAny, TWAP_SHORT_WINDOW_SECONDS, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
-import { baseRegistry, address, entry, entryPointV07Abi, erc20Abi, erc4626Abi, isDeployed, mamoruActionPolicyV2Abi, nonfungiblePositionManagerAbi, smartSessionAbi, tokenMessengerV2Abi, uniswapV3PoolAbi, type Registry, type RegistryName } from '@mamoru/registry'
+import { assertPinnedCode, baseRegistry, address, entry, entryPointV07Abi, erc20Abi, erc4626Abi, isDeployed, mamoruActionPolicyV2Abi, nonfungiblePositionManagerAbi, smartSessionAbi, tokenMessengerV2Abi, uniswapV3PoolAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import {
   Batch,
   contractRead,
@@ -1300,6 +1300,7 @@ export class Engine {
    * this account, this account). Both are read again at the prepare block: the vault must take the deposit
    * (`maxDeposit`) or pay the redeem (`maxRedeem`), or the op waits for a later review (DECIDE_WAIT_VAULT_LIQUIDITY,
    * never a half-built exit), and the quote is the vault's own preview at that block, which the simulation must meet.
+   * A deposit also needs the vault's pinned code at that block (`assertPinnedCode`, LAB_REGISTRY_CODE_MISMATCH otherwise).
    * No on-chain expiry: ERC-4626 has no deadline and the share price only moves with the vault's interest, so a late
    * landing deposits or redeems at that later price, within the grant's caps.
    */
@@ -1314,6 +1315,9 @@ export class Engine {
     const acct = this.cfg.account
     if (p.kind === 'vault_deposit') {
       if (p.assets <= 0n) throw new ReasonError('POLICY_DENIED_AMOUNT', `vault_deposit of ${p.assets}`)
+      // Review of #152: no money into code other than the pinned one (an upgraded proxy included), read at this block.
+      // A redeem is not held back by it: taking the money out of a vault whose code changed is what the owner wants.
+      await assertPinnedCode(this.client, this.registry, p.vault, blockNumber)
       if ((await read<bigint>('maxDeposit', acct)) < p.assets) throw new ReasonError('DECIDE_WAIT_VAULT_LIQUIDITY', `${p.vault} takes less than ${p.assets} now`)
       const shares = await read<bigint>('previewDeposit', p.assets)
       if (shares === 0n) throw new ReasonError('POLICY_DENIED_AMOUNT', `${p.vault} gives no shares for ${p.assets}`)
