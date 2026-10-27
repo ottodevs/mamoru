@@ -1070,7 +1070,8 @@ export class Operator {
   /** otto/mamoru#212: this chain's share of the account's exposure, valued as funding shows it (idle tokens, positions). */
   private localExposure(acc: Pick<AccountState, 'accountKey' | 'admittedTokenIds' | 'active'>, r: SafeRead): ChainExposure {
     const reg = this.cfg.registry
-    const positions = this.sizingPositions(acc, r).map((p) => positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, reg))
+    // Every position Mamoru admitted (up to MAX_INVENTORY), not only the MAX_SIZING_POSITIONS largest a withdrawal plans from.
+    const positions = this.heldPositions(acc, r).map((p) => positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, reg))
     return exposureOf(this.cfg.chainId, idleTokens(r, reg), positions, this.bridgeInFlight?.(acc.accountKey) ?? 0n, acc.active)
   }
 
@@ -1090,6 +1091,11 @@ export class Operator {
    * otto/mamoru#212: the account's total across chains for a Start check, `local` being what this chain holds. A peer
    * that cannot be read refuses the Start (CAP_CHECK_UNAVAILABLE): nothing new is placed on a guess.
    */
+  /** otto/mamoru#212: what this chain holds for the account now (a live read), for the Start checks after prepare. */
+  private async localTotal(acc: AccountState, safe: Address): Promise<bigint> {
+    return totalOf(this.localExposure(acc, await this.readOf(acc, safe)))
+  }
+
   private async startTotal(acc: AccountState, local: bigint): Promise<{ total: bigint; across: boolean }> {
     const peers = await this.peerRead(acc, PEER_START_MAX_AGE_MS)
     if (!peers.ok) throw capCheckUnavailable()
@@ -1110,7 +1116,8 @@ export class Operator {
   async exposureFor(address: Address): Promise<ExposureWire> {
     const safe = getAddress(address)
     const acc = Object.values(this.store.state.accounts).find((a) => a.ctx.address.toLowerCase() === safe.toLowerCase())
-    const r = acc ? await this.readSafeCached(acc, safe, false) : await readSafe(this.client, safe, this.cfg.registry)
+    // A read at most FUNDING_FRESH_READ_MS old: the caller's own cache age then bounds how old the balances are.
+    const r = acc ? await this.readSafeCached(acc, safe, true) : await readSafe(this.client, safe, this.cfg.registry)
     const e = this.localExposure(acc ?? { accountKey: '', admittedTokenIds: undefined, active: false }, r)
     return { chainId: this.cfg.chainId, address: safe.toLowerCase(), block: r.block.toString(), idleUsdc: e.idleUsdc.toString(), placedUsdc: e.placedUsdc.toString(), active: e.active }
   }
@@ -3003,6 +3010,12 @@ export class Operator {
    * before that record (`admittedTokenIds` absent) counts every position worth more than dust. Largest first, at
    * most MAX_SIZING_POSITIONS.
    */
+  /** otto/mamoru#212: the positions the cap counts: every admitted one (an account from before the record: every one above dust). */
+  private heldPositions(acc: Pick<AccountState, 'admittedTokenIds'>, r: SafeRead): PoolPosition[] {
+    const admitted = acc.admittedTokenIds ? new Set(acc.admittedTokenIds) : null
+    return r.positions.filter((p) => (admitted ? admitted.has(p.tokenId.toString()) : positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry) >= POSITION_DUST_USDC))
+  }
+
   private sizingPositions(acc: Pick<AccountState, 'admittedTokenIds'>, r: SafeRead): PoolPosition[] {
     const admitted = acc.admittedTokenIds ? new Set(acc.admittedTokenIds) : null
     return r.positions
@@ -3579,7 +3592,7 @@ export class Operator {
       const usdc = await this.usdcOf(live.safe)
       if (usdc === 0n) return this.armFresh(acc, p, signature)
       // otto/mamoru#212: the total across chains, and USDC on its way here from Ethereum.
-      const start = await this.startTotal(acc, usdc + (this.bridgeInFlight?.(acc.accountKey) ?? 0n))
+      const start = await this.startTotal(acc, await this.localTotal(acc, live.safe))
       if (start.total > this.activationCap(acc, p.capUsdc)) throw depositOverCap(start.total, this.activationCap(acc, p.capUsdc), start.across)
       // The relayer cannot pay for it now: the signature waits armed and the watcher runs it once the relayer is funded.
       // A batch that buys its own gas reserve needs no top-up from it (otto/mamoru#15).
@@ -3778,7 +3791,7 @@ export class Operator {
       const usdc = await this.usdcOf(live.safe)
       if (p.kind === 'activate') {
         // otto/mamoru#212: the total across chains; a peer that cannot be read keeps it from running now.
-        const start = await this.startTotal(acc, usdc + (this.bridgeInFlight?.(acc.accountKey) ?? 0n)).catch(() => null)
+        const start = await this.localTotal(acc, live.safe).then((local) => this.startTotal(acc, local)).catch(() => null)
         if (!start) return { code: 'CAP_CHECK_UNAVAILABLE' }
         if (start.total > this.activationCap(acc, p.capUsdc)) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: start.total.toString(), capUsdc: this.activationCap(acc, p.capUsdc).toString() } }
       }
@@ -4159,7 +4172,10 @@ export class Operator {
       logErr(`[armed] ${acc.accountKey} ${a.opId} held: the other chains could not be read (CAP_CHECK_UNAVAILABLE)`, undefined)
       return this.park(acc, ARM_RETRY_MS)
     }
-    const total = usdc + (this.bridgeInFlight?.(acc.accountKey) ?? 0n) + peers.chains.reduce((s, e) => s + totalOf(e), 0n)
+    // The whole of this chain (other tokens, positions, USDC in flight), read now; unreadable: the approval waits.
+    const local = await this.localTotal(acc, live.safe).catch((e: unknown) => (logErr(`[armed] ${acc.accountKey} ${a.opId} held: Safe unreadable for the cap check`, e), null))
+    if (local === null) return this.park(acc, ARM_RETRY_MS)
+    const total = local + peers.chains.reduce((s, e) => s + totalOf(e), 0n)
     if (total > cap) {
       const shown = acc.ops.find((o) => o.opId === a.opId)
       if (shown?.amountUsdc !== total.toString() || shown.capUsdc !== cap.toString()) this.patchOp(acc, a.opId, { amountUsdc: total.toString(), capUsdc: cap.toString() })
@@ -4462,7 +4478,7 @@ export class Operator {
       const usdc = await this.usdcOf(safe)
       const cap = this.activationCap(acc, p.capUsdc)
       // otto/mamoru#212: the total across chains; a peer that cannot be read keeps it from running now.
-      const start = await this.startTotal(acc, usdc + (this.bridgeInFlight?.(acc.accountKey) ?? 0n)).catch(() => null)
+      const start = await this.localTotal(acc, safe).then((local) => this.startTotal(acc, local)).catch(() => null)
       if (!start) {
         logErr(`[owner] ${op.opId} the other chains could not be read at send time, not activating`, undefined)
         return this.failOwner(acc, op, 'CAP_CHECK_UNAVAILABLE')

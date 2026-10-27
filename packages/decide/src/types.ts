@@ -43,8 +43,10 @@ export type Observation = {
    * otto/mamoru#212: the account's cap (raw savings units) and what it has placed on its other chains. The engine places
    * new savings only up to the cap minus everything placed across chains (`withinCap`); the rest stays idle. Absent: no
    * cap (backtest, lab). `elsewhereUsdc` null: another chain could not be read, so nothing new is placed.
+   * `reinvestUsdc`: savings the engine's own re-range, reduce or conversion took out of what was placed, which it may
+   * put back whatever the cap and the other chains say (finishing a re-range is not new money). Absent: none.
    */
-  cap?: { capUsdc: bigint; elsewhereUsdc: bigint | null }
+  cap?: { capUsdc: bigint; elsewhereUsdc: bigint | null; reinvestUsdc?: bigint }
   /**
    * Spec 004: 24 h history per pool, from TWAP samples (see `marketOf`). Read only by a policy with `guards`;
    * absent or null fields make the guard rules abstain.

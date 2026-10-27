@@ -1,7 +1,7 @@
 import { encodeFunctionData, isAddressEqual, parseAbi, parseEventLogs, toFunctionSelector, type Hex, type Log, type PublicClient } from 'viem'
 import type { LocalAccount } from 'viem/accounts'
 import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
-import { amountsOf, decide, outOfRangeSinceOf, twapFloor, withOutOfRangeSince, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
+import { amountsOf, decide, outOfRangeSinceOf, placedOf, safeSavings, twapFloor, withOutOfRangeSince, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
 import { hasIncrease, hasManageAny, TWAP_SHORT_WINDOW_SECONDS, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import { baseRegistry, address, entry, entryPointV07Abi, erc20Abi, mamoruActionPolicyV2Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3PoolAbi, type Registry, type RegistryName } from '@mamoru/registry'
@@ -524,7 +524,7 @@ export class Engine {
       return { kind: 'observation-failed', code: 'EHG_OBSERVATION_STALE', detail: `observed at block ${obs.block.number}, the last operation is in block ${floor}` }
     }
     const cap = this.cfg.cap?.()
-    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...this.cfg.peerPositions?.(), ...(cap ? { cap } : {}) }
+    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...this.cfg.peerPositions?.(), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}) }
     this.outOfRange = outOfRangeSinceOf(this.outOfRange, obs)
     if (this.cfg.policy.range.lazy) obs = withOutOfRangeSince(obs, this.outOfRange)
     this.lastObservation = obs
@@ -537,10 +537,35 @@ export class Engine {
     if (!decision.proposal || deduped) return { kind: 'decided', observation: obs, record, op: null }
     const op = this.journal.propose(record, decision.proposal.grant)
     const p = decision.proposal
+    this.capFreeing = p.kind === 'rerange' || p.kind === 'reduce' || p.kind === 'harvest' || (p.kind === 'enter_swap' && p.tokenIn !== this.cfg.policy.savingsAsset)
     if (p.kind === 'enter_mint' || p.kind === 'increase_liquidity' || p.kind === 'rerange') this.cfg.onEntering?.(p.pool)
     // An op settled RECON_UNINCLUDABLE is backed off where it is settled (`settlePending`).
     await this.run(op, obs, decision)
     return { kind: 'decided', observation: obs, record, op }
+  }
+
+  /** otto/mamoru#212: what this account had placed at the last review, whether the operation since took money out, and what it may put back. */
+  private capPlaced: bigint | null = null
+  private capFreeing = false
+  private reinvest = 0n
+
+  /**
+   * otto/mamoru#212: savings the engine's own operations took out of what was placed (a re-range, a reduce, a sale of
+   * idle volatile, a converting harvest), which it may put back whatever the cap says: completing a re-range is not new
+   * money. What is placed again uses it up; it never exceeds the idle savings. In memory: a restart forgets it.
+   */
+  private reinvestOf(obs: Observation): bigint {
+    const placed = placedOf(obs, this.cfg.policy)
+    if (this.capPlaced !== null) {
+      const d = placed - this.capPlaced
+      if (d < 0n && this.capFreeing) this.reinvest += -d
+      else if (d > 0n) this.reinvest = this.reinvest > d ? this.reinvest - d : 0n
+    }
+    this.capPlaced = placed
+    this.capFreeing = false
+    const idle = safeSavings(obs, this.cfg.policy)
+    if (this.reinvest > idle) this.reinvest = idle
+    return this.reinvest
   }
 
   private session(name: string): EngineSession | undefined {

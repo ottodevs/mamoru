@@ -1360,11 +1360,12 @@ export class BridgeOut {
     await this.settleReservations().catch((e) => logErr('[bridge-out] tick reservations:', e instanceof Error ? e.message : e))
     for (const [accountKey, r] of Object.entries(this.journal.routes)) {
       // Every unfinished CCTP move, so a burn left 'sending' or 'unconfirmed' by a crash is reconciled and minted too.
-      if (r.bridge === 'cctp' && NON_TERMINAL.has(r.state)) await this.refresh(accountKey).catch((e) => logErr('[bridge-out] tick:', e instanceof Error ? e.message : e))
+      // otto/mamoru#212: and every unfinished Across move, so a fill nobody polls for stops counting as in flight (the
+      // cap would count it twice, in flight and in the Safe). Each account is throttled as status() is.
+      if (NON_TERMINAL.has(r.state)) await this.refresh(accountKey).catch((e) => logErr('[bridge-out] tick:', e instanceof Error ? e.message : e))
     }
   }
 
-  /** CCTP moves not finished on Base (burned or possibly burned, not minted). */
   /**
    * otto/mamoru#212: USDC of this account's move from Ethereum still on its way to Base (sending, held by the bridge, or
    * its outcome unknown), counted in the account's cap. Not an expired move: that one goes back to Ethereum.
@@ -1376,6 +1377,7 @@ export class BridgeOut {
     return /^[0-9]+$/.test(v) ? BigInt(v) : 0n
   }
 
+  /** CCTP moves not finished on Base (burned or possibly burned, not minted). */
   pendingCctp(): number {
     return Object.values(this.journal.routes).filter((r) => r.bridge === 'cctp' && NON_TERMINAL.has(r.state)).length
   }

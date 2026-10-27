@@ -22,9 +22,10 @@ export function placedOf(obs: Observation, policy: PolicyVersion): bigint {
 export function capRoomOf(obs: Observation, policy: PolicyVersion): bigint | null {
   const cap = obs.cap
   if (!cap) return null
-  if (cap.elsewhereUsdc === null) return 0n
-  const room = cap.capUsdc - cap.elsewhereUsdc - placedOf(obs, policy)
-  return room > 0n ? room : 0n
+  const reinvest = cap.reinvestUsdc ?? 0n
+  const left = cap.elsewhereUsdc === null ? 0n : cap.capUsdc - cap.elsewhereUsdc - placedOf(obs, policy)
+  // What the engine's own re-range or reduce took out goes back in, even above the cap or with a chain unread.
+  return left > reinvest ? left : reinvest
 }
 
 /**

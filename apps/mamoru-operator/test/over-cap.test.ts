@@ -3529,6 +3529,15 @@ describe('otto/mamoru#212: the cap counts what the account holds on every chain'
     expect(w.sent).toHaveLength(0)
   })
 
+  test('other tokens that land here after the passkey count at submit too (the whole chain is read again)', async () => {
+    const w = world(20_000_000n)
+    const tx = await w.op.prepareActivate(ctx)
+    // 90 USDT (at 1.0) arrives: 110 in all on this chain.
+    w.knobs.usdt = 90_000_000n
+    expect(await w.op.submit(ctx, 'activate', sign(tx)).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'DEPOSIT_OVER_CAP' })
+    expect(w.sent).toHaveLength(0)
+  })
+
   test('the other chain cannot be read: Start fails closed, funding still answers and says so', async () => {
     const w = world(20_000_000n)
     withPeer(w, () => ({ ok: false, chainId: 143 }))

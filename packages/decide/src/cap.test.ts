@@ -137,4 +137,16 @@ describe('otto/mamoru#212: placing within the cap', () => {
     const moved = { ...over, pools: over.pools.map((p) => (p.name === btc.pool ? { ...p, tick: btc.tickUpper + 500, twapTick: btc.tickUpper + 500, sqrtPriceX96: sqrtRatioAtTick(btc.tickUpper + 500) } : p)) }
     expect(decide(moved, V2).proposal).toMatchObject({ kind: 'rerange', pool: 'pool:USDC/cbBTC/500', tokenId: btc.tokenId })
   })
+
+  test('what the engine took out of its own positions goes back in, above the cap or with a chain unread', () => {
+    // A chain unread: nothing new, but the 300 a re-range freed is placed again.
+    const unread = obs({ balances: { USDC: 300n * USDC }, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: null, reinvestUsdc: 300n * USDC } })
+    expect(capRoomOf(unread, V2)).toBe(300n * USDC)
+    expect(decide(unread, V2).proposal).toEqual(decide(obs({ balances: { USDC: 300n * USDC } }), V2).proposal)
+    // A position that gained past the cap, closed by a re-range: all of it goes back, not only what fits under the cap.
+    const gained = obs({ balances: { USDC: 1_500n * USDC }, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 0n, reinvestUsdc: 1_500n * USDC } })
+    expect(capRoomOf(gained, V2)).toBe(1_500n * USDC)
+    // Without it, the cap holds.
+    expect(capRoomOf({ ...gained, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 0n } }, V2)).toBe(1_000n * USDC)
+  })
 })
