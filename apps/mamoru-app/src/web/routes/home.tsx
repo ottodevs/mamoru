@@ -1,6 +1,6 @@
 import type { ApyView, FundingView, Hex0x, OpView, OverCap, PriceDivergenceWarning, WithdrawAsset } from '@mamoru/domain'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
 import { queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
@@ -994,8 +994,12 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // otto/mamoru#208 (reviews of PR #133): the live read is down whenever the last poll failed, cached data or not —
   // TanStack keeps the last good `data` next to the error. While it is down the page shows no cached read as current:
   // `f` is undefined (no cards, no actions, rates say "no live read") and the balance shows a past reading instead.
-  // A 401 is a signed-out session, not an outage.
-  const liveDown = funding.isError && !(funding.error instanceof ApiRequestError && funding.error.status === 401)
+  // A 401 is a signed-out session, not an outage. Sticky through retries (review round 3): a refetch with no data yet
+  // puts the query back to `pending` and clears `error`, so "down" is "the last outcome was a failure", from the two
+  // timestamps TanStack keeps, and the last failure's status is remembered across the retry.
+  const lastFailure401 = useRef(false)
+  if (funding.error) lastFailure401.current = funding.error instanceof ApiRequestError && funding.error.status === 401
+  const liveDown = funding.errorUpdatedAt > funding.dataUpdatedAt && !lastFailure401.current
   const cached = funding.data
   const f = liveDown ? undefined : cached
   // The session ended while Home was open: ask again, and the first screen offers the sign-in.
@@ -1082,8 +1086,10 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const retry = (kind: OpView['kind']) => (kind === 'renew' ? window.scrollTo({ top: 0, behavior: 'smooth' }) : kind === 'transfer' ? withdraw() : kind === 'exit' ? setDialog('stop') : start())
   const kit = useMutation({
     mutationFn: async () => {
-      if (!f) return
-      downloadJson(kitFilename(f.address), await api.recoveryKit(accountKey))
+      // The kit is built from stored account data, not the operator (review round 3 of #133): any read of the
+      // address will do, so it stays available while the live read is down.
+      if (!cached) return
+      downloadJson(kitFilename(cached.address), await api.recoveryKit(accountKey))
       await api.ackRecovery(accountKey).catch(() => undefined)
     },
   })
@@ -1151,7 +1157,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         </>
       )}
       <footer className="mt-auto flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-wash pt-5 text-[0.85rem] text-stone">
-        <button type="button" className="text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => kit.mutate()} disabled={!f || kit.isPending}>
+        <button type="button" className="text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => kit.mutate()} disabled={!cached || kit.isPending}>
           {kit.isSuccess ? 'Recovery kit saved' : 'Save recovery kit'}
         </button>
         <button type="button" className="text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => setFeedbackOpen(true)}>

@@ -33,7 +33,7 @@ async function renderRoute(
   path: string,
   session: SessionView | null,
   funding?: FundingView,
-  more: { ops?: OpView[]; config?: AppConfig; apy?: ApyView; fundingDown?: boolean; lastBalance?: { totalUsd: string; readAt: string } } = {},
+  more: { ops?: OpView[]; config?: AppConfig; apy?: ApyView; fundingDown?: boolean | 'retrying'; lastBalance?: { totalUsd: string; readAt: string } } = {},
 ) {
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   qc.setQueryData(queryKeys.config, more.config ?? fixtureConfig)
@@ -46,7 +46,13 @@ async function renderRoute(
     // A static render cannot run the retry a mount would start; the error state is what the poll leaves between tries.
     qc.setQueryDefaults(queryKeys.funding(FIXTURE_ACCOUNT_KEY), { retryOnMount: false })
     const q = qc.getQueryCache().build(qc, { queryKey: queryKeys.funding(FIXTURE_ACCOUNT_KEY) })
-    q.setState({ status: 'error', error: err, errorUpdatedAt: Date.now(), fetchStatus: 'idle' })
+    // 'retrying': what TanStack leaves while a retry with no data yet is in flight — back to pending, error cleared,
+    // only errorUpdatedAt says the last outcome failed.
+    q.setState(
+      more.fundingDown === 'retrying'
+        ? { status: 'pending', error: null, errorUpdatedAt: Date.now(), fetchStatus: 'fetching' }
+        : { status: 'error', error: err, errorUpdatedAt: Date.now(), fetchStatus: 'idle' },
+    )
   }
   if (more.lastBalance) qc.setQueryData(queryKeys.yieldLedger(FIXTURE_ACCOUNT_KEY), { asOf: null, accruedUsd: null, collectedUsd: null, earnedSoFarUsd: null, gasPaidWei: null, valueVsHoldUsd: null, feeAccruedUsd: null, lastBalance: more.lastBalance })
   qc.setQueryData(queryKeys.ops(FIXTURE_ACCOUNT_KEY), { ops: more.ops ?? [] })
@@ -769,6 +775,18 @@ describe('live balance down', () => {
     expect(text).toContain('6.00')
     expect(text).toContain('Last reading 3 h ago')
     expect(text).toContain('no live read')
+  })
+  test('never loaded, a retry in flight: still the past reading and the notice, never 0.00 with Add on', async () => {
+    const { text, html } = await renderRoute('/', fixtureSession, undefined, { fundingDown: 'retrying', lastBalance })
+    expect(text).toContain('Last reading 3 h ago')
+    expect(text).toContain('Mamoru cannot read your account right now.')
+    expect(text).not.toContain('0.00 USDC')
+    expect(html).toMatch(/<button type="button" class="act" disabled/)
+  })
+  test('loaded, then down: Save recovery kit stays available (it does not need the operator)', async () => {
+    const { html } = await renderRoute('/', fixtureSession, funded, { fundingDown: true, lastBalance })
+    expect(html).not.toMatch(/disabled[^>]*>Save recovery kit/)
+    expect(html).toContain('Save recovery kit')
   })
   test('never loaded and no snapshot: the error says the money stays on-chain', async () => {
     const { text } = await renderRoute('/', fixtureSession, undefined, { fundingDown: true })
