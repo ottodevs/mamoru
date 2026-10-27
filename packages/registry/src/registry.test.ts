@@ -154,6 +154,24 @@ describe('MamoruActionPolicyV2 (spec 007, otto/mamoru#151)', () => {
   })
 })
 
+describe('ERC-4626 vaults of the stables bucket (otto/mamoru#186, #210)', () => {
+  test('Morpho gtUSDCp and Aave waBasUSDC, both of Base USDC, the Aave proxy with its implementation pinned', () => {
+    expect(entry('vault:gtUSDCp', baseRegistry)).toMatchObject({ kind: 'vault', asset: 'USDC', decimals: 18, address: '0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61' })
+    expect(entry('vault:gtUSDCp', baseRegistry).implementation).toBeUndefined()
+    expect(entry('vault:waBasUSDC', baseRegistry)).toMatchObject({
+      kind: 'vault',
+      asset: 'USDC',
+      decimals: 6,
+      address: '0xC768c589647798a6EE01A91FdE98EF2ed046DBD6',
+      implementation: { address: '0xbCb167bDCF14a8F791d6f4A6EDd964aed2F8813B', codeHash: '0xa3445aa71780dcc4130aa745163660eb37cb5602bba8147f008192bf3777c6df' },
+    })
+    for (const r of registries) for (const e of r.entries.filter((x) => x.kind === 'vault')) expect(entry(e.asset ?? '', r).kind, e.name).toBe('token')
+    // SESS-10's "venue Mamoru never calls" (steakUSDC) stays out of the registry.
+    expect(nameOf('0xbeeF010f9cb27031ad51e3333f9aF9C6B1228183', baseRegistry)).toBeUndefined()
+    expect(monadRegistry.entries.filter((e) => e.kind === 'vault')).toEqual([])
+  })
+})
+
 describe('base defaults', () => {
   test('entry(), address() and nameOf() without a registry still resolve Base', () => {
     expect(address('USDC')).toBe(address('USDC', baseRegistry))

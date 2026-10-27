@@ -140,6 +140,11 @@ function isBridgeAction(a: SessionGrant['actions'][number], registry: Registry):
   return isDeployed('TokenMessengerV2', registry) && isAddressEqual(a.targetAddress, address('TokenMessengerV2', registry))
 }
 
+/** otto/mamoru#210: an action on an ERC-4626 vault of the registry (a `vault-supply` deposit or redeem). */
+function isVaultAction(a: SessionGrant['actions'][number], registry: Registry): boolean {
+  return registry.entries.some((e) => e.kind === 'vault' && isAddressEqual(e.address, a.targetAddress))
+}
+
 /** otto/mamoru#213: a `requiresPauseGate` grant carries the configured MamoruPauseGate and MamoruGasPolicy, and no action policy. */
 export function assertGated(grant: SessionGrant, p: SessionPolicies | undefined): asserts p is GatedPolicies {
   if (grant.requiresActionPolicy || grant.actionPolicy || isActionPolicy(p)) mismatch(grant, 'a gated grant never takes MamoruActionPolicy')
@@ -166,7 +171,8 @@ const APPROVE_SIG = 'approve(address,uint256)'
 const TOKEN_FIELDS = new Set(['token0', 'token1', 'tokenIn', 'tokenOut'])
 
 function mismatch(grant: SessionGrant, why: string): never {
-  throw new ReasonError('SESSION_ACTION_POLICY_MISMATCH', `${grant.name}${grant.pool ? `:${grant.pool}` : ''}: ${why}`)
+  const scope = grant.pool ?? grant.vault
+  throw new ReasonError('SESSION_ACTION_POLICY_MISMATCH', `${grant.name}${scope ? `:${scope}` : ''}: ${why}`)
 }
 
 const same = (a: Address | bigint, b: Address) => BigInt(a) === BigInt(b)
@@ -242,6 +248,7 @@ export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, 
   // it (a stale or hand-built grant, the old `requiresGasPolicy` name) is refused rather than encoded ungated.
   if ('requiresGasPolicy' in grant) mismatch(grant, 'requiresGasPolicy is retired: rebuild the grant (requiresPauseGate)')
   if (!grant.requiresPauseGate && grant.actions.some((a) => isBridgeAction(a, registry))) mismatch(grant, 'a bridge action needs requiresPauseGate')
+  if (!grant.requiresPauseGate && grant.actions.some((a) => isVaultAction(a, registry))) mismatch(grant, 'a vault action needs requiresPauseGate')
   if (grant.requiresPauseGate) assertGated(grant, policies)
   else if (grant.requiresActionPolicy) assertV4Policies(grant, isActionPolicy(policies) ? policies : undefined, registry)
   const second = isActionPolicy(policies) ? { policy: policies.policy, initData: policies.initData } : policies && 'gate' in policies ? policies.gate : undefined

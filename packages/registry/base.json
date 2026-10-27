@@ -285,6 +285,28 @@
       "role": "Circle CCTP V2, proxy (implementación 0x555E272506C06e7E559d57418563742AFE363ec8 al añadirlo): bridge del bucket growth a la misma Safe en Monad (dominio 15), grant bridge-out de conservador-live-v6 (otto/mamoru#213); codeHash del proxy leído en el último bloque el 2026-10-27, no en el bloque del pin",
       "address": "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d",
       "codeHash": "0xd2c8d48075d832fb7d07f6db5545a1bee37fdf886325c441a8dd1cef4c9dae99"
+    },
+    {
+      "name": "vault:gtUSDCp",
+      "kind": "vault",
+      "role": "Morpho MetaMorpho v1 Gauntlet USDC Prime (curator 0x9E33faAE38ff641094fa68c65c2cE600b3410585, fee 0, timelock 7 d al añadirlo): bucket stables de conservador-live-v7, primera bóveda (otto/mamoru#186, #210)",
+      "address": "0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61",
+      "asset": "USDC",
+      "decimals": 18,
+      "codeHash": "0x904289f0cca9814e4440e741e0d56aafc656f5889f3f032462a96e72df4eb9ad"
+    },
+    {
+      "name": "vault:waBasUSDC",
+      "kind": "vault",
+      "role": "Aave v3 static aToken v2 sobre aBasUSDC, proxy (admin 0xc85b1E333aecc99340b2320493Fe2d22b8734795): bucket stables de conservador-live-v7, segunda bóveda, protocolo y colateral distintos de Morpho (otto/mamoru#186, #210)",
+      "address": "0xC768c589647798a6EE01A91FdE98EF2ed046DBD6",
+      "asset": "USDC",
+      "decimals": 6,
+      "codeHash": "0x523783adc3d7b1f946a55d313891aa5da2c119a9c5b5cd701f91780795d62438",
+      "implementation": {
+        "address": "0xbCb167bDCF14a8F791d6f4A6EDd964aed2F8813B",
+        "codeHash": "0xa3445aa71780dcc4130aa745163660eb37cb5602bba8147f008192bf3777c6df"
+      }
     }
   ],
   "undeployed": [
