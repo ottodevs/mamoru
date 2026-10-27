@@ -388,7 +388,7 @@ export class Engine {
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. */
   lastRerangeAt: bigint | null = null
   /** otto/mamoru#218: confirmed re-ranges (seeded, then appended on inclusion); handed to `decide` only when not empty. */
-  readonly reranges: { pool: string; at: bigint }[] = []
+  readonly reranges: { pool: string; at: bigint; block?: bigint }[] = []
   /**
    * otto/mamoru#172: since when each position has been out of range, as this engine saw it (`outOfRangeSinceOf`).
    * Kept at every review; handed to `decide` only under a policy with `range.lazy`, so an eager observation stays
@@ -1019,7 +1019,7 @@ export class Engine {
     if (proposal.kind === 'rerange') {
       const inc = op.included!
       this.lastRerangeAt = (await this.client.getBlock({ blockNumber: inc.blockNumber })).timestamp
-      this.reranges.push({ pool: proposal.pool, at: this.lastRerangeAt })
+      this.reranges.push({ pool: proposal.pool, at: this.lastRerangeAt, block: inc.blockNumber })
       this.hooks.onReranged?.(proposal.pool, this.lastRerangeAt, inc.blockNumber)
       const i = this.allowedTokenIds.indexOf(proposal.tokenId)
       if (i >= 0) this.allowedTokenIds.splice(i, 1)

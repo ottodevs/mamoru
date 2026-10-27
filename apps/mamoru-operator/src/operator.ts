@@ -5344,6 +5344,11 @@ export class Operator {
         ...(o.lateIncluded ? { lateIncluded: true } : {}),
         ...(o.intent.kind === 'rerange' ? { rerange: true as const } : {}),
       }
+      // #218 (Sol r1): the confirmation may reach `onReranged` before this row exists; the engine's own list has the time.
+      if (view.rerange && state === 'confirmed' && o.included) {
+        const r = runner.engine.reranges.find((x) => x.block === o.included!.blockNumber && x.pool === view.pool)
+        if (r) view.rerangeAt = r.at.toString()
+      }
       const sig = `${view.state}|${view.code}|${view.txHash ?? ''}`
       if (runner.seen.get(own) === sig) continue
       runner.seen.set(own, sig)
