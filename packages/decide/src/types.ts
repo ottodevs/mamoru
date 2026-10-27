@@ -40,6 +40,12 @@ export type Observation = {
    */
   peerEntering?: RegistryName[]
   /**
+   * otto/mamoru#212: the account's cap (raw savings units) and what it has placed on its other chains. The engine places
+   * new savings only up to the cap minus everything placed across chains (`withinCap`); the rest stays idle. Absent: no
+   * cap (backtest, lab). `elsewhereUsdc` null: another chain could not be read, so nothing new is placed.
+   */
+  cap?: { capUsdc: bigint; elsewhereUsdc: bigint | null }
+  /**
    * Spec 004: 24 h history per pool, from TWAP samples (see `marketOf`). Read only by a policy with `guards`;
    * absent or null fields make the guard rules abstain.
    */

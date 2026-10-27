@@ -206,6 +206,11 @@ export type EngineConfig = {
    * against the room this one is taking.
    */
   onEntering?: (pool: RegistryName) => void
+  /**
+   * otto/mamoru#212: the account's cap and what it has placed on its other chains (`Observation.cap`), read at every
+   * review. Absent: no cap (backtest, lab); the operator always sets it.
+   */
+  cap?: () => Observation['cap']
 }
 
 /** Live op states whose signed bytes may still land or have landed without being settled here (Engine.carried). */
@@ -518,7 +523,8 @@ export class Engine {
     if (obs.block.number < floor) {
       return { kind: 'observation-failed', code: 'EHG_OBSERVATION_STALE', detail: `observed at block ${obs.block.number}, the last operation is in block ${floor}` }
     }
-    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...this.cfg.peerPositions?.() }
+    const cap = this.cfg.cap?.()
+    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...this.cfg.peerPositions?.(), ...(cap ? { cap } : {}) }
     this.outOfRange = outOfRangeSinceOf(this.outOfRange, obs)
     if (this.cfg.policy.range.lazy) obs = withOutOfRangeSince(obs, this.outOfRange)
     this.lastObservation = obs

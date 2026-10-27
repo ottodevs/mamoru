@@ -10,8 +10,10 @@ import { estimateFees, harvestOf } from './harvest/index.ts'
 import { weightTargets } from './rebalance/weights.ts'
 import { anyKey, convertKey, idleConvertOf, isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
 import type { Decision, GateStep, GuardNote, Observation, Proposal, ShadowNote } from './types.ts'
+import { withinCap } from './cap.ts'
 
 export type * from './types.ts'
+export { capRoomOf, placedOf, withinCap } from './cap.ts'
 export { estimateFees } from './harvest/index.ts'
 export { safeSavings } from './enter/index.ts'
 export { amountsForLiquidity, inSavings, volatileOf } from './value.ts'
@@ -58,7 +60,9 @@ function inRange(tick: number, lower: number, upper: number): boolean {
  * FR-DEC-001: pure and deterministic. The same observation and policy give
  * the same decision, codes and trail, byte for byte.
  */
-export function decide(obs: Observation, given: PolicyVersion): Decision {
+export function decide(seen: Observation, given: PolicyVersion): Decision {
+  // otto/mamoru#212: savings above the account's room under its cap are not there to place.
+  const obs = withinCap(seen, given)
   // Lab (#101 experiment 6): every step reads the scaled preferences; the decision still names the policy as given.
   const targets = weightTargets(obs, given)
   const policy: PolicyVersion = targets ? { ...given, buckets: targets } : given
