@@ -58,7 +58,8 @@ function decodeContext(header: string): AccountContext {
   return ctx
 }
 
-const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop|renew\/prepare|renew)$/
+// bridge-out and eth-convert (#133, #211): answered by BridgeOut, 404 when the operator has no Ethereum RPC.
+const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop|renew\/prepare|renew|bridge-out\/prepare|bridge-out|eth-convert\/prepare|eth-convert)$/
 
 // Amounts are base-unit strings on the wire; a bigint that slips into a view is sent as its decimal string.
 const wire = (_k: string, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)
