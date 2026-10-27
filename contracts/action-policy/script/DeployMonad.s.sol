@@ -18,19 +18,26 @@ import {IModuleRegistry, IOraclePool} from "./Deploy.s.sol";
  * 1. `ModuleRegistry.deployModule` creates each policy with CREATE2 and writes its ERC-7484 ModuleRecord in the same
  *    transaction (deployer-prefixed salt, resolver of TimeFramePolicy's record, which Monad has since #62 under the same
  *    resolverUID as Base). Both records are checked (resolver and sender) before the script goes on.
- * 2. `observationCardinalityNext` of the WMON/USDC 0.3% pool is raised to CARDINALITY_TARGET, in steps that keep each
- *    transaction well under a 30M per-transaction gas limit. `initializeWithMultiplexer` refuses a pool whose
+ * 2. `observationCardinalityNext` of the WMON/USDC 0.3% pool is raised to CARDINALITY_TARGET (default 1,800, the policy's
+ *    own floor), in steps of CARDINALITY_STEP slots. `initializeWithMultiplexer` refuses a pool whose
  *    `observationCardinalityNext` is under `twapWindow`; the pool stands at 1,000 slots, under the 1,800 s long window.
+ *
+ * Re-runnable: a module already deployed under the same salt is skipped, and the raise continues from the pool's
+ * current `observationCardinalityNext`. After any partial broadcast (out of MON, RPC drop) run the same command again.
+ * Broadcast with `--slow` so each transaction waits for the previous one: without it forge may send the later nonces
+ * even after an earlier step failed.
  *
  * GUARDIAN is required, so a deploy never picks "no guardian" by omission: the revoke-only pause key's address (on Base,
  * 0xA8E6EF87e612fA5c54668Cc1fF0aC809e1321FdD), or the zero address for a V2 without one. It is an immutable.
  *
- * Cardinality target, 12,000. A pool writes at most one observation per block. Monad's block time measured on mainnet
- * (100,000 blocks, 2026-10-27) is 0.30 s, so the long TWAP window (1,800 s) spans up to ~6,000 blocks and the short
- * one (300 s) up to ~1,000; a ring under ~6,000 slots can lose the start of the long window to a swap in every block
- * (`observe` reverts OLD). 12,000 is 2x that worst case (Base: 3,600 slots for 900 blocks of 2 s, 4x). Each new slot
- * costs ~22.3k gas (measured on a fork: 1,000 slots = 22.27M), so the raise from 1,000 is ~245M gas over fourteen
- * transactions, paid in MON at gas LIMIT (Monad charges the limit, not the use): ~25 MON at the 100 gwei base fee.
+ * Cardinality target, 1,800 (Ot's cost decision): measured 2026-10-27, the pool's 1,000 slots held ~20 h of history
+ * (one observation per block with a swap, not per block), so a 30-minute TWAP already resolves. If trading ever fills
+ * the ring inside the window, observe() reverts and the policy and the engine refuse the action (a hold, never a
+ * loss); raise it then. Each new slot costs ~22.3k gas measured on an anvil fork (Ethereum gas schedule; Monad
+ * reprices cold state access, UNVERIFIED). Funding: Monad charges the gas LIMIT (forge sets ~30% above the estimate),
+ * not the use, so budget on limits: two deployModule transactions plus the raise (two transactions, 500 + 300 slots).
+ * The fork run prints the sum of limits; at a 100 gwei fee that is a few MON. Fund the deployer with at least 10 MON.
+ * The fork funds 100 MON and charges gas used, so it cannot prove the budget.
  */
 contract DeployMonad is Script {
     uint256 constant MONAD_CHAIN_ID = 143;
@@ -46,9 +53,9 @@ contract DeployMonad is Script {
     /// pool:WMON/USDC/3000
     address public constant POOL_WMON_USDC = 0x659bD0BC4167BA25c62E05656F78043E7eD4a9da;
 
-    /// ~22.3k gas per new ring slot: 800 slots is ~17.8M gas per transaction (forge sets a limit ~30% above, ~23M), so a
-    /// per-transaction cap of 30M would still fit. 1,000 slots measured 22.27M used, 28.9M limit: too close.
-    uint16 constant CARDINALITY_STEP = 800;
+    /// 500 slots per transaction: ~11M gas used on the fork's schedule, ~14M limit. Leaves 2x under a 30M per-transaction
+    /// cap even if Monad's cold-slot cost were well above Ethereum's (unverified); total gas is the same as bigger steps.
+    uint16 constant CARDINALITY_STEP = 500;
 
     function run() external returns (address gasPolicy, address policy) {
         require(block.chainid == MONAD_CHAIN_ID, "not Monad (143)");
@@ -56,10 +63,7 @@ contract DeployMonad is Script {
         // Base nonces: 1 MamoruActionPolicy (V1, not deployed on Monad), 2 MamoruGasPolicy, 3 MamoruActionPolicyV2.
         uint96 gasNonce = uint96(vm.envOr("GAS_POLICY_SALT_NONCE", uint256(2)));
         uint96 nonce = uint96(vm.envOr("POLICY_V2_SALT_NONCE", uint256(3)));
-        // The policy's own floor (cardinalityNext >= twapWindow, 1,800), nothing more: measured 2026-10-27, the pool's 1,000
-        // slots held about 20 h of history (one observation per block with a swap, not per block), so a 30-minute TWAP
-        // already resolves. If trading ever fills the ring inside the window, observe() reverts and the policy and the
-        // engine refuse the action (a hold, never a loss); raise it then. 1,000 -> 1,800 is one ~17.8M-gas transaction.
+        // The policy's own floor (cardinalityNext >= twapWindow, 1,800); see the header.
         uint16 target = uint16(vm.envOr("CARDINALITY_TARGET", uint256(1_800)));
         (gasPolicy, policy) =
             deploy(msg.sender, saltFor(msg.sender, gasNonce), saltFor(msg.sender, nonce), guardian, target);
@@ -87,8 +91,8 @@ contract DeployMonad is Script {
         bytes32 resolverUID = r.findModule(RESOLVER_REFERENCE).resolverUID;
         require(resolverUID != bytes32(0), "no resolver: TimeFramePolicy not registered on this chain");
         vm.startBroadcast(deployer);
-        gasPolicy = r.deployModule(gasSalt, resolverUID, gasPolicyInitCode(), "", "");
-        policy = r.deployModule(salt, resolverUID, initCode(guardian), "", "");
+        gasPolicy = deployOnce(r, gasSalt, resolverUID, gasPolicyInitCode());
+        policy = deployOnce(r, salt, resolverUID, initCode(guardian));
         raiseCardinality(POOL_WMON_USDC, cardinalityTarget);
         vm.stopBroadcast();
         checkRecord(r, gasPolicy, resolverUID, deployer);
@@ -100,6 +104,16 @@ contract DeployMonad is Script {
         console2.log("MamoruActionPolicyV2:", policy);
         console2.log("GUARDIAN:", guardian);
         console2.log("WMON/USDC observationCardinalityNext:", next);
+    }
+
+    /// Deploys through the registry unless the module is already there (a rerun after a partial broadcast).
+    function deployOnce(IModuleRegistry r, bytes32 salt, bytes32 resolverUID, bytes memory code)
+        internal
+        returns (address module)
+    {
+        module = r.calcModuleAddress(salt, code);
+        if (module.code.length == 0) return r.deployModule(salt, resolverUID, code, "", "");
+        console2.log("already deployed, skipped:", module);
     }
 
     function checkRecord(IModuleRegistry r, address module, bytes32 resolverUID, address deployer) internal view {

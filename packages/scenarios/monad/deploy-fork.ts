@@ -6,7 +6,7 @@
 //
 // Needs foundry (forge, anvil: PATH=$HOME/.foundry/bin:$PATH) and contracts/action-policy/install.sh run once. Env:
 //   GUARDIAN        guardian address (default: Base's, 0xA8E6EF87e612fA5c54668Cc1fF0aC809e1321FdD)
-//   CARDINALITY_TARGET   passed to the script (default: the script's 12,000)
+//   CARDINALITY_TARGET   passed to the script (default: the script's 1,800)
 import { createPublicClient, http, keccak256, parseAbi, type Address, type Hex } from 'viem'
 import { monadRegistry, address as regAddress } from '@mamoru/registry'
 import { repoPath } from '../runner/manifest.ts'
@@ -43,9 +43,9 @@ try {
   check((await client.getChainId()) === 143, 'fork reports chain id 143')
   const forkBlock = await client.getBlockNumber()
   console.log(`forked ${new URL(UPSTREAM).hostname} at block ${forkBlock}`)
-  await client.request({ method: 'anvil_setBalance' as never, params: [DEPLOYER, '0x56BC75E2D63100000'] as never }) // ~1,600 MON
+  await client.request({ method: 'anvil_setBalance' as never, params: [DEPLOYER, '0x56BC75E2D63100000'] as never }) // 100 MON; Monad charges the gas limit, anvil the gas used: the budget is not proven here
 
-  const forge = Bun.spawn(['forge', 'script', 'script/DeployMonad.s.sol', '--rpc-url', LOCAL, '--sender', DEPLOYER, '--unlocked', '--broadcast', '--non-interactive'], {
+  const forge = Bun.spawn(['forge', 'script', 'script/DeployMonad.s.sol', '--rpc-url', LOCAL, '--sender', DEPLOYER, '--unlocked', '--broadcast', '--slow', '--non-interactive'], {
     cwd: repoPath('contracts/action-policy'),
     env: { ...env, GUARDIAN, ...(process.env.CARDINALITY_TARGET ? { CARDINALITY_TARGET: process.env.CARDINALITY_TARGET } : {}) },
     stdout: 'pipe',
@@ -73,7 +73,20 @@ try {
   const cardSteps = gas.filter((g) => g.to.toLowerCase() === regAddress('pool:WMON/USDC/3000', monadRegistry).toLowerCase())
   console.log(`  txs: ${gas.length}; deployModule gas used: ${gas.filter((g) => g.to.toLowerCase() === REGISTRY.toLowerCase()).map((g) => g.used).join(', ')}`)
   console.log(`  cardinality steps: ${cardSteps.length}, gas used each: ${cardSteps.map((g) => g.used).join(', ')}; max gas limit set: ${cardSteps.reduce((m, g) => (g.limit > m ? g.limit : m), 0n)}`)
-  check(cardSteps.every((g) => g.limit < 30_000_000n), 'every cardinality step has a gas limit under 30M')
+  check(cardSteps.every((g) => g.limit < 20_000_000n), 'every cardinality step has a gas limit under 20M (Ethereum schedule; Monad cold-slot cost unverified)')
+  const limitSum = gas.reduce((m, g) => m + g.limit, 0n)
+  console.log(`  sum of gas limits: ${limitSum} (x 100 gwei = ${Number(limitSum) / 1e7} MON upper bound at that fee, since Monad charges the limit)`)
+
+  // Resume: the same command again (as after a partial broadcast) skips both modules, raises nothing, sends nothing.
+  const rerun = Bun.spawn(['forge', 'script', 'script/DeployMonad.s.sol', '--rpc-url', LOCAL, '--sender', DEPLOYER, '--unlocked', '--broadcast', '--slow', '--non-interactive'], {
+    cwd: repoPath('contracts/action-policy'),
+    env: { ...env, GUARDIAN, ...(process.env.CARDINALITY_TARGET ? { CARDINALITY_TARGET: process.env.CARDINALITY_TARGET } : {}) },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const [rout, rerr] = await Promise.all([new Response(rerun.stdout).text(), new Response(rerun.stderr).text(), rerun.exited])
+  if (rerun.exitCode !== 0) throw new Error(`rerun exited ${rerun.exitCode}\n${rout.slice(-1500)}\n${rerr.slice(-1500)}`)
+  check(rout.includes('already deployed, skipped') && (await client.getBlockNumber()) === last, 'rerun skips both modules and sends no transaction')
 
   // Bytecode, record, immutables, cardinality.
   const abi = parseAbi([

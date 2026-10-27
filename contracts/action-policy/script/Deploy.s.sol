@@ -14,6 +14,7 @@ interface IModuleRegistry {
     }
 
     function findModule(address moduleAddress) external view returns (ModuleRecord memory);
+    function calcModuleAddress(bytes32 salt, bytes calldata initCode) external view returns (address);
     function deployModule(
         bytes32 salt,
         bytes32 resolverUID,
