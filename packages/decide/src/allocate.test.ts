@@ -410,6 +410,23 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     expect(idle > 120n * USDC && idle < 180n * USDC).toBe(true)
   })
 
+  test('after the bridge: the 150 USDC now on Monad counts in the total, so Base keeps 500/350 and reduces nothing', () => {
+    let o = v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })
+    let id = 1n
+    for (let i = 0; i < 12; i++) {
+      const p = decide(o, V6).proposal
+      if (!p || (p.kind !== 'enter_swap' && p.kind !== 'enter_mint')) break
+      o = apply(o, id++, V6)
+    }
+    const bridged = o.balances.USDC!
+    const after = { ...o, balances: { ...o.balances, USDC: 0n }, remote: { value: bridged } }
+    expect(decide(after, V6).proposal).toBeNull()
+    const t = Object.fromEntries(allocate(after, V6, false).buckets.map((b) => [b.bucket, b.target]))
+    const total = 1_000n * USDC
+    expect(t.stables! > (total * 49n) / 100n && t.stables! < (total * 51n) / 100n).toBe(true)
+    expect(t.risk! > (total * 34n) / 100n && t.risk! < (total * 36n) / 100n).toBe(true)
+  })
+
   test('without remote buckets the same Base buckets would take everything (the remote share is what holds 15 % back)', () => {
     const local = { ...V6, remoteBuckets: undefined }
     let o = v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })

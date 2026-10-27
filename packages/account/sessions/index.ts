@@ -118,6 +118,33 @@ export type SecondActionPolicy = {
   expected?: { actionPolicy: Address; gasPolicy: Address }
 }
 
+/**
+ * otto/mamoru#213: the policies of a grant outside MamoruActionPolicy (`requiresGasPolicy`, bridge-out): MamoruGasPolicy
+ * as a userOp policy and nothing after UniActionPolicy on its actions.
+ */
+export type GasOnlyPolicy = { gas: { policy: Address; initData: Hex }; expected: { gasPolicy: Address } }
+
+/** What `policiesFor` gives a grant: MamoruActionPolicy and MamoruGasPolicy (v4/v5), the gas policy alone, or nothing. */
+export type SessionPolicies = SecondActionPolicy | GasOnlyPolicy
+
+function isActionPolicy(p: SessionPolicies | undefined): p is SecondActionPolicy {
+  return !!p && 'policy' in p
+}
+
+/** otto/mamoru#213: a `requiresGasPolicy` grant carries MamoruGasPolicy with caps it accepts, and no action policy. */
+export function assertGasOnly(grant: SessionGrant, p: SessionPolicies | undefined): void {
+  if (grant.requiresActionPolicy || grant.actionPolicy || isActionPolicy(p)) mismatch(grant, 'a gas-only grant never takes MamoruActionPolicy')
+  if (!p || isAddressEqual(p.gas.policy, zeroAddress)) throw new ReasonError('SESSION_ACTION_POLICY_MISSING', `${grant.name}: needs MamoruGasPolicy as a userOp policy`)
+  if (isAddressEqual(p.expected.gasPolicy, zeroAddress) || !isAddressEqual(p.gas.policy, p.expected.gasPolicy)) mismatch(grant, `gas policy ${p.gas.policy} is not the configured MamoruGasPolicy ${p.expected.gasPolicy}`)
+  let caps
+  try {
+    caps = decodeGasCaps(p.gas.initData)
+  } catch {
+    mismatch(grant, 'gas policy init data is not MamoruGasPolicy.Caps')
+  }
+  if (!validGasCaps(caps)) mismatch(grant, 'gas caps MamoruGasPolicy would refuse (a zero cap, or maxFeePerGas under the priority cap)')
+}
+
 const MINT_SIG = 'mint((address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256))'
 /** The position manager's own increaseLiquidity: never a session action of a v4 grant (otto/mamoru#171). */
 const NPM_INCREASE_SIG = 'increaseLiquidity((uint256,uint256,uint256,uint256,uint256,uint256))'
@@ -196,8 +223,10 @@ export function assertV4Policies(grant: SessionGrant, second: SecondActionPolicy
  * strict as v2/v3 WITH MamoruActionPolicy (and MamoruGasPolicy) in the same session — see `assertV4Policies`, run
  * here, the one place every grant goes through on its way to an owner op (`activationCall` below included).
  */
-export function toSmartSession(grant: SessionGrant, secondPolicy?: SecondActionPolicy, registry: Registry = baseRegistry): SmartSessionStruct {
-  if (grant.requiresActionPolicy) assertV4Policies(grant, secondPolicy)
+export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, registry: Registry = baseRegistry): SmartSessionStruct {
+  if (grant.requiresGasPolicy) assertGasOnly(grant, policies)
+  else if (grant.requiresActionPolicy) assertV4Policies(grant, isActionPolicy(policies) ? policies : undefined)
+  const secondPolicy = isActionPolicy(policies) ? policies : undefined
   return {
     sessionValidator: address('OwnableValidator', registry),
     sessionValidatorInitData: ownableValidatorInitData(grant.sessionKey),
@@ -208,7 +237,7 @@ export function toSmartSession(grant: SessionGrant, secondPolicy?: SecondActionP
         initData: encodePacked(['uint128', 'uint128'], [BigInt(grant.userOp.validUntil), BigInt(grant.userOp.validAfter)]),
       },
       { policy: address('UsageLimitPolicy', registry), initData: encodePacked(['uint128'], [BigInt(grant.userOp.usageLimit)]) },
-      ...(secondPolicy?.gas ? [{ policy: secondPolicy.gas.policy, initData: secondPolicy.gas.initData }] : []),
+      ...(policies?.gas ? [{ policy: policies.gas.policy, initData: policies.gas.initData }] : []),
     ],
     erc7739Policies: { allowedERC7739Content: [], erc1271Policies: [] },
     actions: grant.actions.map((a) => ({
@@ -246,13 +275,14 @@ export function v4PoliciesFor(
   generation: bigint,
   budgetCaps: Record<string, bigint>,
   admitByPool: Partial<Record<string, readonly bigint[]>> = {},
-): (grant: SessionGrant, index: number) => SecondActionPolicy | undefined {
+): (grant: SessionGrant, index: number) => SessionPolicies | undefined {
   const firstOfPool = new Map<string, number>()
   grants.forEach((g, i) => {
     if (g.pool && !firstOfPool.has(g.pool)) firstOfPool.set(g.pool, i)
   })
   const gas = { policy: d.gasPolicy, initData: encodeGasCaps(d.gasCaps) }
   return (g, i) => {
+    if (g.requiresGasPolicy) return { gas, expected: { gasPolicy: d.gasPolicy } }
     if (!g.requiresActionPolicy) return undefined
     const spec = v4PoolOf(g.pool)
     if (!spec) mismatch(g, 'no v4 pool parameters for this pool')
@@ -278,7 +308,7 @@ export function permissionIdOf(session: SmartSessionStruct): Hex {
 export function activationCall(
   grants: SessionGrant[],
   revokedPermissionIds: readonly Hex[],
-  policiesFor?: (grant: SessionGrant, index: number) => SecondActionPolicy | undefined,
+  policiesFor?: (grant: SessionGrant, index: number) => SessionPolicies | undefined,
   registry: Registry = baseRegistry,
 ): { to: Address; data: Hex; permissionIds: Hex[] } {
   // T7 (GPT-6 review of #97, P1 1): a v4 grant is encoded with its policies; without `policiesFor` it is refused

@@ -5,8 +5,8 @@ import { computeCaps, instantiateGrant, policyHash, type GrantContext } from './
 import { POLICIES } from './policies.ts'
 import { conservadorLiveV5 } from './policies-v4.ts'
 import { conservadorLabV6, conservadorLiveV6, preferenceTotal, V6_POOLS } from './policies-v6.ts'
-import { CCTP_DOMAIN_MONAD } from './grants.ts'
-import { V4_POOLS } from './v4-grants.ts'
+import { CCTP_DOMAIN_MONAD, CCTP_FINALITY_STANDARD } from './grants.ts'
+import { retargetToPolicy, V4_POOLS } from './v4-grants.ts'
 
 const ACCOUNT = '0x00000000000000000000000000000000000000aa' as const
 const CAP = 10_000n * 1_000_000n
@@ -41,9 +41,10 @@ describe('conservador-live-v6 (otto/mamoru#201, #213)', () => {
     expect(caps[V4_POOLS.stables.caps.stableSwapPerCall]).toBe((CAP * 5000n) / 10_000n)
   })
 
-  test('bridge-out: CCTP V2 burn to this same account on Monad, USDC only, no hook caller, capped fee', () => {
+  test('bridge-out: CCTP V2 burn to this same account on Monad, USDC only, open caller, no fee, Standard finality', () => {
     const t = conservadorLiveV6.session.grants.find((g) => g.name === 'bridge-out')!
     expect(t.requiresActionPolicy).toBeUndefined()
+    expect(t.requiresGasPolicy).toBe(true)
     const g = instantiateGrant(conservadorLiveV6, 'bridge-out', ctx())
     const [approve, burn] = g.actions
     const messenger = address('TokenMessengerV2', baseRegistry)
@@ -56,7 +57,10 @@ describe('conservador-live-v6 (otto/mamoru#201, #213)', () => {
     expect(rule('destinationDomain')).toMatchObject({ index: 1, condition: 'EQUAL', ref: CCTP_DOMAIN_MONAD })
     expect(rule('burnToken')).toMatchObject({ index: 3, condition: 'EQUAL', ref: BigInt(address('USDC', baseRegistry)) })
     expect(rule('destinationCaller')).toMatchObject({ index: 4, condition: 'EQUAL', ref: 0n })
-    expect(rule('maxFee')).toMatchObject({ index: 5, condition: 'LESS_THAN_OR_EQUAL', ref: (CAP * 5n) / 10_000n })
+    expect(rule('maxFee')).toMatchObject({ index: 5, condition: 'EQUAL', ref: 0n })
+    expect(rule('minFinalityThreshold')).toMatchObject({ index: 6, condition: 'GREATER_THAN_OR_EQUAL', ref: CCTP_FINALITY_STANDARD })
+    expect(g.requiresGasPolicy).toBe(true)
+    expect(() => retargetToPolicy(g, '0x00000000000000000000000000000000000000Fe')).toThrow('MamoruGasPolicy only')
     expect(rule('amount')).toMatchObject({ index: 0, ref: (CAP * 2000n) / 10_000n, cumulativeLimit: (CAP * 5000n) / 10_000n })
   })
 })

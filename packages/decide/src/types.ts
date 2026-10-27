@@ -25,6 +25,12 @@ export type Observation = {
   deposits: DepositObs[]
   intents: { paused: boolean; exitRequested: boolean }
   slot: { opId: string; state: string } | null
+  /**
+   * otto/mamoru#213: what the account holds for its `remoteBuckets` (its sleeves on other chains and bridges in flight),
+   * in raw savings units. It counts in the account total, so the local buckets keep their share of the whole account
+   * after a bridge instead of shrinking to it. Absent: nothing remote (every one-chain policy).
+   */
+  remote?: { value: bigint }
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. Absent or null: none yet. */
   lastRerangeAt?: bigint | null
   /**
