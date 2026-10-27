@@ -315,6 +315,8 @@ export const fixtureClient: ApiClient = {
       gasPaidWei: null,
       valueVsHoldUsd: '15000',
       feeAccruedUsd: null,
+      // otto/mamoru#234: two weeks of closes, rising with a flat weekend, for the line by "earned so far".
+      earnedDaily: Array.from({ length: 14 }, (_, i) => ({ day: new Date(Date.now() - (14 - i) * 86_400_000).toISOString().slice(0, 10), earnedUsd: String(Math.round(2800 * i + (i > 6 && i < 9 ? -1200 : 0) + 300 * Math.sin(i))) })),
       lastBalance: { totalUsd: '24873120', readAt: new Date(Date.now() - (operatorDown ? 3 * 60 : 1) * 60_000).toISOString() },
     }),
   ops: (k) => delay({ ops: isMonad(k) ? monadState.ops : liveState.ops }),

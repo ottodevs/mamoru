@@ -150,6 +150,10 @@ export type YieldLedgerView = {
   // base units, gas ETH left out) and when the operator read it. What Home shows, marked as a past reading, when the
   // live /funding read fails (the operator unreachable, incident #205). Null until any snapshot exists.
   lastBalance?: { totalUsd: string; readAt: string } | null
+  // otto/mamoru#234: what the account had earned at the close of each UTC day, oldest first, at most the last 30
+  // days (account_daily: that day's accrued fees plus everything collected up to it). For the line by "earned so
+  // far". Null until the cron has written a day for this account.
+  earnedDaily?: { day: string; earnedUsd: string }[] | null
 }
 
 // GET /api/accounts/:accountKey/other-chains -> OtherChainsView

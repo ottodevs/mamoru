@@ -24,7 +24,7 @@ import { DepositDetails, hasMoney } from './add-money.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { FeedbackDialog, feedbackCopy } from '../components/feedback-dialog.tsx'
 import { HowItWorks, howCopy } from '../components/how-it-works.tsx'
-import { Chevron, Fold, LiveSync, PullToRefresh, TweenPct, TweenUsd } from '../components/motion.tsx'
+import { Chevron, Fold, LiveSync, PullToRefresh, Spark, TweenPct, TweenUsd } from '../components/motion.tsx'
 import { isMultichainTarget, monadCopy, MonadConsentDialog, splitRows } from '../components/monad-consent.tsx'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
 
@@ -135,14 +135,17 @@ const pct = (v: number | null | undefined) => (v === null || v === undefined ? h
  * otto/mamoru#198: what the account has earned, under the balance as its gain (the Robinhood/Revolut pattern).
  * Not measured yet says so, never a guess.
  */
-function Earned({ usd: earned }: { usd: string | null | undefined }) {
+function Earned({ usd: earned, daily }: { usd: string | null | undefined; daily?: { day: string; earnedUsd: string }[] | null }) {
   const known = earned != null
+  // otto/mamoru#234: the days the ledger closed, then where it stands now.
+  const series = known && daily?.length ? [...daily.map((d) => Number(d.earnedUsd)), Number(earned)] : []
   return (
     <p className="earned" data-testid="earned-so-far">
       <span className={`earned-value${known ? '' : ' rate-na'}`}>
         {known ? <TweenUsd raw={earned} prefix="+" countUp /> : homeCopy.na}
         {known ? <span className="earned-unit">USDC</span> : null}
       </span>
+      <Spark values={series} />
       <span className="earned-label">{homeCopy.earnedSoFar}</span>
       {known ? null : <span className="earned-why">{homeCopy.earnedGap}</span>}
     </p>
@@ -162,6 +165,7 @@ export function agoText(iso: string, now: number = Date.now()): string {
 export function Balance({
   s,
   earnedSoFarUsd,
+  earnedDaily = null,
   onAdd,
   onWithdraw,
   past = null,
@@ -169,6 +173,7 @@ export function Balance({
 }: {
   s: Split | null
   earnedSoFarUsd?: string | null
+  earnedDaily?: { day: string; earnedUsd: string }[] | null
   onAdd: () => void
   onWithdraw: () => void
   /** otto/mamoru#208: set only while the live read fails; then it is what the balance shows, marked as past. */
@@ -192,7 +197,7 @@ export function Balance({
             {homeCopy.pastReading(agoText(shownPast.readAt))}
           </p>
         ) : null}
-        <Earned usd={earnedSoFarUsd} />
+        <Earned usd={earnedSoFarUsd} daily={earnedDaily} />
       </div>
       <div className="balance-acts">
         {/* otto/mamoru#208: the add dialog needs the live read (address, cap); off while only a past one shows. */}
@@ -1308,6 +1313,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       <Balance
         s={s}
         earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd}
+        earnedDaily={yieldLedger.data?.earnedDaily}
         onAdd={addMoney}
         onWithdraw={() => withdraw()}
         past={past}

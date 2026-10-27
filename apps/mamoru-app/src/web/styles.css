@@ -1954,5 +1954,37 @@
   25% {
     opacity: 1;
     transform: none;
+/* #234: the line by "earned so far": drawn in once, its end breathing. */
+.spark {
+  align-self: center;
+  overflow: visible;
+}
+.spark-line {
+  fill: none;
+  stroke: var(--color-emerald);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: spark-draw 1400ms var(--ease-out) 200ms forwards;
+}
+.spark-end {
+  fill: var(--color-emerald);
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation:
+    spark-end-in 300ms ease-out 1400ms forwards,
+    live-core 2.4s ease-in-out 1700ms infinite;
+}
+@keyframes spark-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes spark-end-in {
+  to {
+    opacity: 1;
   }
 }

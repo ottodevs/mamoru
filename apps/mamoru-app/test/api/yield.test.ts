@@ -13,7 +13,7 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
 
   test('every field is null before the cron has ever pulled a snapshot for this account', async () => {
     const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
-    expect(view).toEqual({ asOf: null, accruedUsd: null, collectedUsd: null, earnedSoFarUsd: null, gasPaidWei: null, valueVsHoldUsd: null, feeAccruedUsd: null, lastBalance: null })
+    expect(view).toEqual({ asOf: null, accruedUsd: null, collectedUsd: null, earnedSoFarUsd: null, gasPaidWei: null, valueVsHoldUsd: null, feeAccruedUsd: null, lastBalance: null, earnedDaily: null })
   })
 
   test('accruedUsd and earnedSoFarUsd come from account_snapshot_latest once it has a row, collected folded in as 0 when none is known', async () => {
@@ -111,5 +111,24 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     seedLatest(db, '2026-10-16T09:00:00.000Z', [])
     const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
     expect(view.valueVsHoldUsd).toBeNull()
+  })
+  test('otto/mamoru#234: earnedDaily is each day close: accrued fees plus everything collected up to that day, oldest first, last 30', async () => {
+    const day = (n: number) => `2026-09-${String(n).padStart(2, '0')}`
+    for (let n = 1; n <= 31 - 1; n++) {
+      db.raw.exec(
+        `INSERT INTO account_daily (day, chain_id, address, account_key, env, block_open, block_close, total_open_usdc, total_close_usdc, idle_close_usdc, lp_close_usdc, fees_open_usdc, fees_close_usdc, collected_usdc, gas_paid_wei)
+         VALUES ('${day(n)}', ${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1, 2, 0, 0, 0, 0, 0, ${n * 10}, ${n === 5 ? 1000 : 'NULL'}, NULL)`,
+      )
+    }
+    db.raw.exec(
+      `INSERT INTO account_daily (day, chain_id, address, account_key, env, block_open, block_close, total_open_usdc, total_close_usdc, idle_close_usdc, lp_close_usdc, fees_open_usdc, fees_close_usdc, collected_usdc, gas_paid_wei)
+       VALUES ('2026-10-01', ${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1, 2, 0, 0, 0, 0, 0, 7, NULL, NULL)`,
+    )
+    const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
+    expect(view.earnedDaily).toHaveLength(30)
+    // 1 Sep fell out of the 30; 2-4 Sep have nothing collected yet, 5 Sep on carry the 1000 collected that day.
+    expect(view.earnedDaily![0]).toEqual({ day: day(2), earnedUsd: '20' })
+    expect(view.earnedDaily![3]).toEqual({ day: day(5), earnedUsd: '1050' })
+    expect(view.earnedDaily!.at(-1)).toEqual({ day: '2026-10-01', earnedUsd: '1007' })
   })
 })

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { OwnerResponse, YieldLedgerView } from '@mamoru/domain'
 import { harness, register, PASSKEY_A, PASSKEY_B, sessionCookie } from './helpers.ts'
 
-const EMPTY: YieldLedgerView = { asOf: null, accruedUsd: null, collectedUsd: null, earnedSoFarUsd: null, gasPaidWei: null, valueVsHoldUsd: null, feeAccruedUsd: null, lastBalance: null }
+const EMPTY: YieldLedgerView = { asOf: null, accruedUsd: null, collectedUsd: null, earnedSoFarUsd: null, gasPaidWei: null, valueVsHoldUsd: null, feeAccruedUsd: null, lastBalance: null, earnedDaily: null }
 
 async function onboard(h: ReturnType<typeof harness>, passkey = PASSKEY_A) {
   const res = await register(h, passkey)

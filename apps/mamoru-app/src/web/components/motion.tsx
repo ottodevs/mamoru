@@ -243,3 +243,24 @@ export function PullToRefresh({ onRefresh }: { onRefresh: () => Promise<unknown>
     </div>
   )
 }
+
+/**
+ * A thin line of how a figure moved (#234), drawn in once when it appears, its last point breathing like the live
+ * pill's core. Decorative: the figure beside it is what is read. Nothing under two points.
+ */
+export function Spark({ values, width = 72, height = 20 }: { values: number[]; width?: number; height?: number }) {
+  if (values.length < 2) return null
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const pad = 2.5
+  const x = (i: number) => pad + (i * (width - 2 * pad)) / (values.length - 1)
+  const y = (v: number) => (max === min ? height / 2 : height - pad - ((v - min) * (height - 2 * pad)) / (max - min))
+  const d = values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ')
+  const last = values.length - 1
+  return (
+    <svg className="spark" width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden="true">
+      <path d={d} pathLength={1} className="spark-line" />
+      <circle cx={x(last)} cy={y(values[last]!)} r={2} className="spark-end" />
+    </svg>
+  )
+}

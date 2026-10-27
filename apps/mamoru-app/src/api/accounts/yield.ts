@@ -9,6 +9,22 @@ import { feeReadinessUsd } from '../yield-ledger.ts'
 type LatestRow = { fees_usdc: number; total_usdc: number; read_at: string; positions_json: string; updated_at: string }
 type DailyRow = { collected_usdc: number | null; gas_paid_wei: string | null; updated_at: string }
 type PositionRow = { value_usd: number; accrued_usd_close: number; hold_value_usd: number }
+type EarnedDayRow = { day: string; fees_close_usdc: number; collected_usdc: number | null }
+
+/** otto/mamoru#234: earned at each day's close: that day's accrued fees plus what was collected up to and on it. */
+async function earnedDaily(db: Db, chainId: number, accountKey: string): Promise<{ day: string; earnedUsd: string }[] | null> {
+  const rows = await db
+    .prepare('SELECT day, fees_close_usdc, collected_usdc FROM account_daily WHERE chain_id = ? AND account_key = ? ORDER BY day ASC')
+    .bind(chainId, accountKey)
+    .all<EarnedDayRow>()
+  if (rows.results.length === 0) return null
+  let collected = 0n
+  const all = rows.results.map((r) => {
+    collected += BigInt(r.collected_usdc ?? 0)
+    return { day: r.day, earnedUsd: (BigInt(r.fees_close_usdc) + collected).toString() }
+  })
+  return all.slice(-30)
+}
 
 const dayOf = (iso: string): string => iso.slice(0, 10)
 
@@ -34,11 +50,12 @@ async function openPositionsValueVsHold(db: Db, chainId: number, accountKey: str
 }
 
 export async function loadYieldLedger(db: Db, chainId: number, accountKey: string): Promise<YieldLedgerView> {
-  const [latest, daily] = await Promise.all([
+  const [latest, daily, earned] = await Promise.all([
     db.prepare('SELECT fees_usdc, total_usdc, read_at, positions_json, updated_at FROM account_snapshot_latest WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).first<LatestRow>(),
     // migrations/d1/0015_yield_ledger_receipts.sql: written for every day an op reached the chain, with or without
     // an account_daily row for that day (an account stopped right after an op has none).
     db.prepare('SELECT collected_usdc, gas_paid_wei, updated_at FROM yield_ledger_account_receipts WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<DailyRow>(),
+    earnedDaily(db, chainId, accountKey),
   ])
 
   let collected = 0n
@@ -86,5 +103,6 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
     feeAccruedUsd: anyFeeAccrued ? feeAccrued.toString() : null,
     // Not withheld when `stale`: that is about fees a receipt may already have collected, not about the total.
     lastBalance: latest ? { totalUsd: BigInt(latest.total_usdc).toString(), readAt: latest.read_at } : null,
+    earnedDaily: earned,
   }
 }
