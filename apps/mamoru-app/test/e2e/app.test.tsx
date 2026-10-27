@@ -789,8 +789,10 @@ describe('live balance down', () => {
     expect(html).toContain('Save recovery kit')
   })
   test('never loaded and no snapshot: the error says the money stays on-chain', async () => {
-    const { text } = await renderRoute('/', fixtureSession, undefined, { fundingDown: true })
+    const { text, html } = await renderRoute('/', fixtureSession, undefined, { fundingDown: true })
     expect(text).toContain('Could not load your balance. Your money stays in your account on-chain.')
+    // Review round 4: Add is off too, past reading or not; its dialog needs the live read.
+    expect(html).toMatch(/<button type="button" class="act" disabled/)
   })
   test('the poll succeeds again: live, no past marking, no notice', async () => {
     const { text, html } = await renderRoute('/', fixtureSession, funded, { lastBalance })

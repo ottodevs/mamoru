@@ -155,6 +155,7 @@ export function Balance({
   onAdd,
   onWithdraw,
   past = null,
+  down = false,
 }: {
   s: Split | null
   earnedSoFarUsd?: string | null
@@ -162,6 +163,8 @@ export function Balance({
   onWithdraw: () => void
   /** otto/mamoru#208: set only while the live read fails; then it is what the balance shows, marked as past. */
   past?: { totalUsd: string; readAt: string } | null
+  /** The live read is failing: both actions are off (their dialogs need it), past reading or not. */
+  down?: boolean
 }) {
   const shownPast = past
   return (
@@ -183,12 +186,12 @@ export function Balance({
       </div>
       <div className="balance-acts">
         {/* otto/mamoru#208: the add dialog needs the live read (address, cap); off while only a past one shows. */}
-        <button type="button" className="act" onClick={onAdd} disabled={!!shownPast}>
+        <button type="button" className="act" onClick={onAdd} disabled={down || !!shownPast}>
           {homeCopy.add}
         </button>
         {/* otto/mamoru#135: never disabled on the poll's balance, which can be 15-60 s behind a deposit. The
             operator's prepare reads the chain and refuses with a reason the dialog shows. */}
-        <button type="button" className="act quiet" data-testid="withdraw-button" onClick={onWithdraw} disabled={!s || !!shownPast}>
+        <button type="button" className="act quiet" data-testid="withdraw-button" onClick={onWithdraw} disabled={!s || down || !!shownPast}>
           {homeCopy.withdraw}
         </button>
       </div>
@@ -1001,7 +1004,10 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   if (funding.error) lastFailure401.current = funding.error instanceof ApiRequestError && funding.error.status === 401
   const liveDown = funding.errorUpdatedAt > funding.dataUpdatedAt && !lastFailure401.current
   const cached = funding.data
-  const f = liveDown ? undefined : cached
+  // Review round 4: a dialog the owner has open (a signed withdraw, stop, start or renewal may be on its way) is never
+  // unmounted by an outage; it keeps the cached read until it is closed, and its own request reports what happened.
+  const keepOpen = dialog !== null || renewAsked
+  const f = liveDown && !keepOpen ? undefined : cached
   // The session ended while Home was open: ask again, and the first screen offers the sign-in.
   const qc = useQueryClient()
   const signedOut = funding.error instanceof ApiRequestError && funding.error.status === 401
@@ -1010,11 +1016,14 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   }, [signedOut, qc])
   const price = cbbtcPrice(pools.data)
   const s = f ? split(f, price) : null
-  // The past reading: this tab's last good read, or, with none, the last snapshot in D1.
+  // The past reading: this tab's last good read, or, with none, the last snapshot in D1. Its total is the one shown
+  // while the read was live (review round 4): re-pricing it with a newer pool price would move a "last reading".
+  const lastLiveTotal = useRef<bigint | null>(null)
+  if (!liveDown && s) lastLiveTotal.current = s.total
   const past = !liveDown
     ? null
     : cached
-      ? { totalUsd: split(cached, price).total.toString(), readAt: new Date(funding.dataUpdatedAt).toISOString() }
+      ? { totalUsd: (lastLiveTotal.current ?? split(cached, price).total).toString(), readAt: new Date(funding.dataUpdatedAt).toISOString() }
       : (yieldLedger.data?.lastBalance ?? null)
   const apy = useApy()
   const armed = activationLive(opList)
@@ -1106,6 +1115,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         onAdd={addMoney}
         onWithdraw={() => withdraw()}
         past={past}
+        down={liveDown}
       />
       <Indicators f={f} apy={apy.data} price={price} noRead={!f && liveDown} />
       <WrongNetwork accountKey={accountKey} />
