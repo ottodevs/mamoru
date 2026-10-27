@@ -1,6 +1,7 @@
 import type { ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, hasManageAny, preferenceTotal, type PolicyVersion } from '@mamoru/policy'
 import type { RegistryName } from '@mamoru/registry'
+import { keccak256 } from 'viem'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { edgeBpsOf, widenEarly } from '../geometry/index.ts'
 import type { EnterSwapProposal, Observation, PoolObs, PositionObs, RerangeProposal, ReduceProposal } from '../types.ts'
@@ -8,6 +9,29 @@ import { inSavings, opCostInSavings, volatileOf } from '../value.ts'
 import { rerangeWorth } from '../rebalance/lazy.ts'
 
 const Q96 = 1n << 96n
+const WEEK = 7n * 86_400n
+
+/** Eager (#218): the cost test with no buffer, no dwell, a day of fees and LVR at full weight; no estimate = no test. */
+const EAGER_COST_TEST = { edgeBufferTicks: 0, minDwellSeconds: 0, horizonSeconds: 86_400, lvrWeightBps: 10_000, requireCostEstimate: false } as const
+
+/**
+ * otto/mamoru#218: seconds added to the lazy dwell for this account, so accounts that cross an edge in the same block do
+ * not all close in the same block. Deterministic in the address: the first 4 bytes of keccak256(address) modulo
+ * `minDwellSeconds / 2 + 1`; 0 when there is no dwell.
+ */
+export function dwellJitterSeconds(address: string, minDwellSeconds: number): number {
+  if (minDwellSeconds <= 0) return 0
+  const h = keccak256(address.toLowerCase() as `0x${string}`)
+  return Number(BigInt(h.slice(0, 10)) % BigInt(Math.floor(minDwellSeconds / 2) + 1))
+}
+
+/** Whether `pool` already had `policy.range.maxPerWeek` re-ranges in the 7 days before `obs.block.timestamp`. */
+function atWeeklyCap(obs: Observation, policy: PolicyVersion, pool: PoolObs): boolean {
+  const max = policy.range.maxPerWeek
+  if (max === undefined) return false
+  const since = obs.block.timestamp - WEEK
+  return (obs.recentReranges ?? []).filter((r) => r.pool === pool.name && r.at > since).length >= max
+}
 
 /** Session key of a live manage grant for `pool`: `name`, or `name:<pool>` on a multi-pool policy. */
 export function anyKey<N extends 'manage-any' | 'convert-any'>(policy: PolicyVersion, name: N, pool: string): N | `${N}:${string}` {
@@ -78,8 +102,10 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
     if (!past) return { code: null, proposal: null }
     const lastAt = obs.lastRerangeAt ?? null
     if (lastAt !== null && obs.block.timestamp - lastAt < BigInt(policy.range.cooldownSeconds)) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
+    if (atWeeklyCap(obs, policy, pool)) return { code: 'DECIDE_RANGE_WEEKLY_CAP', proposal: null }
     const since = p.outOfRangeSince ?? null
-    if (lazy.minDwellSeconds > 0 && (since === null || obs.block.timestamp - since < BigInt(lazy.minDwellSeconds))) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
+    const dwell = BigInt(lazy.minDwellSeconds + dwellJitterSeconds(obs.account.address, lazy.minDwellSeconds))
+    if (lazy.minDwellSeconds > 0 && (since === null || obs.block.timestamp - since < dwell)) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
     const w = rerangeWorth(obs, policy, p, pool, lazy)
     // Live (#172): no estimate is no re-range. The Lab keeps its measured rule (abstain) unless a variant sets the flag.
     if (!w && lazy.requireCostEstimate) return { code: 'DECIDE_RANGE_NO_FEE_HISTORY', proposal: null }
@@ -96,6 +122,10 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
   if (!outside && !near && !widen) return { code: null, proposal: null }
   const last = obs.lastRerangeAt ?? null
   if (last !== null && obs.block.timestamp - last < BigInt(policy.range.cooldownSeconds)) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
+  if (atWeeklyCap(obs, policy, pool)) return { code: 'DECIDE_RANGE_WEEKLY_CAP', proposal: null }
+  // otto/mamoru#218: eager pays for itself too; no fee history keeps today's behaviour (re-range).
+  const w = rerangeWorth(obs, policy, p, pool, EAGER_COST_TEST)
+  if (w && !w.worth) return { code: 'DECIDE_RANGE_BELOW_COST', proposal: null }
   return { code: 'DECIDE_RANGE_ADJUST', proposal: proposal() }
 }
 

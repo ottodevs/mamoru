@@ -41,6 +41,11 @@ export type Observation = {
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. Absent or null: none yet. */
   lastRerangeAt?: bigint | null
   /**
+   * otto/mamoru#218: block timestamps of this account's confirmed re-ranges in the last 7 days, with the pool, for the
+   * weekly cap (`policy.range.maxPerWeek`). Absent when there are none, so such an observation hashes as before.
+   */
+  recentReranges?: { pool: string; at: bigint }[]
+  /**
    * otto/mamoru#184: the positions every other Mamoru account holds on this chain, as the operator last observed them.
    * Depth sizing counts them with the account's own, so Mamoru as a whole stays under the share limit of a pool.
    * Absent: a single-account run (backtest, lab), nothing else to count. Null: the operator has not yet observed every
