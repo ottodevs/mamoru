@@ -5,7 +5,7 @@
 
 ## 1. Summary
 
-Two execution chains and one entry chain, one operator process per chain, one Safe address per account on every chain.
+Two execution chains and one entry chain, one operator process per execution chain, one Safe address per account on every chain.
 The Base operator owns the allocation: it values both chains, decides a `bridge_out` when Growth is short, burns USDC
 with CCTP V2 under a session grant, and finishes the transfer on Monad from its relayer once Circle attests. The Monad
 operator then enters WMON/USDC with the USDC that arrived, under the Monad sleeve's own policy. Ethereum has no
@@ -232,16 +232,17 @@ path? Until a verdict, two signatures, Monad first (a Base renewal to v6 refuses
 
 Built and fork-proven; not active on production. Activation is Ot's and the coordinator's: a paymaster key, a little
 ETH on the relayer on Ethereum, `MAMORU_L1_PAYMASTER_URL` on the operator, one operator redeploy, then the switch in
-`/ops`. Every entry move writes a ledger row like §10 (source 1, destination 8453).
+`/ops`. Today an entry move keeps its gas and fee in `BridgeOutRoute` only; once T034 lands it also writes a ledger row
+like §10 (source 1, destination 8453).
 
 ## 15. Providers and failure
 
 | Dependency | Fails how | What Mamoru does |
 |---|---|---|
 | Circle Iris (attestation) | Slow, down, wrong | Polls on; deadline then `BRIDGE_STUCK`; every attestation checked against the burn and the destination's attesters |
-| CCTP contracts | Paused, upgraded (proxy) | Burn reverts → `failed`, cooldown. Code hash pinned in the registry; a change stops the route (registry check at boot) |
+| CCTP contracts | Paused, upgraded (proxy) | Burn reverts → `failed`, cooldown. Today the addresses are constants and boot checks Monad's `localDomain()`; once T020 pins TokenMessengerV2 and MessageTransmitterV2 by code hash in both registries, a change stops the route at boot |
 | Monad RPC | Down, lagging | Sleeve not ready, last value plus in flight; a lagging read is not used |
 | Relayer on Monad | Out of MON, over budget | No mint; deadline then `BRIDGE_STUCK`; the owner can mint |
 | Across | Unfilled | Refund after `fillDeadline` to the account; shown as hours |
 | Quote APIs | Down, wrong | That adapter drops out of `quoteAll`; with none left the move waits (`ROUTE_NO_SAFE_QUOTE`) |
-| Paymaster (entry) | Down | Relayer path fallback |
+| Paymaster (entry) | Down | With account abstraction configured the move is refused with `BRIDGE_GAS_UNAVAILABLE` until it is back; the relayer path serves only when account abstraction is not configured |

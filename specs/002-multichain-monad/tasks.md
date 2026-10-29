@@ -198,12 +198,12 @@ T038. T020, T022 and T024 run in parallel in their own units. T039 and T041 are 
 
 - **Ticket:** #230. **Requirements:** FR-ACC-017.
 - **Files:** a research note under `specs/007-onchain-action-policy/results/` or `docs/`, and a fork probe.
-- **Accepted by:** a written verdict checked against the deployed SmartSession on Base and Monad.
+- **Accepted by:** a written verdict checked against the deployed SmartSession on Base and Monad; if yes, SIG-01.
 - **Must not:** change the owner flow before the verdict; propose upgradeable policies or Permit2.
 
 ## T040 · Monad sleeve on production, both Safes at onboarding
 
-- **Tickets:** #240, #231. **Requirements:** FR-ACC-016, FR-ACC-017.
+- **Tickets:** #240, #231. **Requirements:** FR-ACC-016.
 - **Files:** `apps/mamoru-app/src/api/sleeves.ts`, `ops-flags.ts`, onboarding route, tests.
 - **Accepted by:** XCH-10.
 - **Must not:** drop the Safe derivation check; turn on `multichain_v6` for anyone.

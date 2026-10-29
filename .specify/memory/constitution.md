@@ -40,7 +40,7 @@ La lista de chains es cerrada y explícita: no hay chain por defecto, y una piez
 - Monad (chain id 143) es chain de ejecución: Mamoru opera posiciones allí con la misma cuenta, el mismo `decide` y las mismas puertas.
 - Ethereum (chain id 1) es chain de entrada: Mamoru detecta fondos de la cuenta allí y los lleva a Base. No ejecuta estrategia en Ethereum mientras el Lab no demuestre que gana después de gas.
 
-Cada chain tiene su registro de direcciones con sus code hashes, su política, su operador, y su Durable Object y su proyección por cuenta y chain. El tope por cuenta y la puerta de fondos se aplican en cada chain.
+Cada chain tiene su registro de direcciones con sus code hashes. Cada chain de ejecución tiene además su política, su proceso de operador y su proyección por cuenta y chain. La chain de entrada no tiene operador propio: la sirve el operador de Base, con movimientos firmados por el owner. El tope por cuenta es el total de todas las chains y la puerta de fondos se aplica en cada chain de ejecución.
 
 El fork del laboratorio no usa el chain id de ninguna chain soportada ni el de sus redes de prueba, para que ninguna firma de escenario valga en ninguna red.
 
