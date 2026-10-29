@@ -7,6 +7,8 @@
 
 ## 1. What changes
 
+Controls marked **planned** are open work with their task and ticket; the rest are on `main`.
+
 **Protected, in addition:** money between chains (it belongs to the account at every moment, and is counted once),
 the independence of each chain's sleeve, and the truth of the chain on screen.
 
@@ -55,7 +57,7 @@ Added to the five of 001:
   - owner-only quotes are decoded and the recipient checked before they are shown; `recipientCheck: 'none'` is never
     executable (FR-XCH-005);
   - the quote only chooses among routes already granted; a bad quote can at worst pick a worse granted route, capped by
-    the ceiling (FR-XCH-006);
+    the ceiling once it exists (FR-XCH-006, #188). Today the engine does not quote at all (one fixed route);
   - the record keeps quote and realised cost, so a lying provider shows up in cost per move (FR-COST-001).
 - **Detection.** `ROUTE_NO_SAFE_QUOTE`; realised cost far from quoted in the ledger and the daily report.
 - **Scenarios.** XCH-03, XCH-04.
@@ -72,7 +74,9 @@ Added to the five of 001:
   - MessageTransmitterV2 itself refuses a used nonce and a bad attestation: a spoofed message cannot mint;
   - "minted" is read from `usedNonces` on the destination, not from the attestation service;
   - only burns journaled before signing count in flight (FR-XCH-008);
-  - the CCTP contracts are pinned by code hash in each chain's registry (FR-CHN-004).
+  - planned (T020, #60): the CCTP contracts pinned by code hash in each chain's registry (FR-CHN-004). Today
+    TokenMessengerV2 is pinned only in `base.json`, MessageTransmitterV2 is a constant, and boot checks only Monad's
+    `localDomain()`.
 - **Detection.** A burn whose attestation never verifies goes stuck (THR-23).
 - **Scenarios.** XCH-01, XCH-02, XCH-07.
 - **Residual risk.** A compromise of Circle's attesters themselves is outside Mamoru's control; it is the stablecoin
@@ -84,12 +88,14 @@ Added to the five of 001:
   its daily budget, an Across deposit is never filled. The money leaves Base and does not arrive; the account's next
   bridges block behind it.
 - **Controls:**
-  - deadline per state, `BRIDGE_STUCK`, an ops alert and the reason on the move (FR-XCH-010);
+  - planned (T033, #245): deadline per state, `BRIDGE_STUCK`, an ops alert and the reason on the move (FR-XCH-010).
+    Until then a stuck burn retries forever, only logs, and blocks the account's later bridges;
   - the money stays counted once in flight, never zero, never twice (FR-XCH-008, `INV-ONCE-IN-FLIGHT`);
   - owner recovery without Mamoru: anyone, the owner included, can mint with the public attestation
     (`destinationCaller` 0); an Across refund returns to the account after `fillDeadline`;
   - one move in flight per account bounds what can be stuck to one move's caps.
-- **Detection.** `BRIDGE_STUCK`; the daily report's stuck count (FR-COST-005).
+- **Detection.** Today the operator log and the account's move stuck in `burned`. Planned: `BRIDGE_STUCK` and the
+  daily report's stuck count (FR-COST-005, #246).
 - **Scenarios.** XCH-07.
 - **Residual risk.** Time: money stuck earns nothing. Bounded by per-call caps. R-11.
 
@@ -101,7 +107,8 @@ Added to the five of 001:
 - **Controls:**
   - entry minimum and rebalance band before any `bridge_out`; one move in flight per account (FR-XCH-002);
   - the remote value is at the TWAP of each pool, never `slot0`;
-  - the cost ceiling with wait and batch, and the maximum wait that leaves the money on Base (FR-XCH-006);
+  - planned (T031, #188): the cost ceiling with wait and batch, and the maximum wait that leaves the money on Base
+    (FR-XCH-006). Today CCTP Standard has no bridge fee, so the exposure is gas on both chains per move;
   - the failure cooldown that doubles to 24 hours (FR-XCH-011);
   - per-call and total caps in the grant, and the guardian's pause (FR-XCH-004, FR-XCH-016).
 - **Detection.** Cost per move and moves per account in the daily report; cooldowns in the operator log.
@@ -127,7 +134,7 @@ Added to the five of 001:
 
 - **Vector.** The Monad sleeve's sessions are revoked or expired while SmartSession stays installed; the money arrives
   and sits idle in the owner's Safe on Monad, not lost but not working, and the engine keeps sending more.
-- **Controls:** readiness reads the grants (FR-XCH-007); one move in flight; the cooldown.
+- **Controls:** planned (T032, #243): readiness reads the grants (FR-XCH-007). Built: one move in flight; the cooldown.
 - **Scenarios.** XCH-06.
 - **Residual risk.** Revocation between the readiness read and the arrival: that one move lands idle; the next one
   waits.

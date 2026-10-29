@@ -50,7 +50,7 @@ exists and what is open, with the ticket) or **Open** (the ticket). Tasks (`task
 | Dashboard | One balance over both chains; each position names its chain; actual vs target per bucket; bridge progress on the move | app | `51482f5e`, `9a8b6f9b` (#201, #216) |
 | Account cap | Total across chains, idle plus placed | operator | `120a390c` (#135, #212) |
 | Routing library | Normalised quotes (provider, route, out, fee, ETA, target, calldata, `recipientCheck`, signing mode); adapters CCTP V2, Across, Relay, LI.FI, deBridge, canonical; ranking by net output | `packages/routing` | #181 |
-| Ethereum entry | Read-only notice of USDC on Ethereum; owner-signed move to Base (Across or CCTP V2, ranked by output); ETH converted to USDC first; one ERC-4337 userOp with an ERC-20 paymaster (built, not active: needs a paymaster key) | `apps/mamoru-app/src/api/accounts/other-chains.ts`, `apps/mamoru-operator/src/bridge-out.ts`, `paymaster.ts` | `c189fbc5` (#133), #211, `c1073300` (#180 open) |
+| Ethereum entry | Read-only notice of USDC on Ethereum; owner-signed move to Base (Across or CCTP V2, ranked by output); ETH converted to USDC first by a separate owner signature; one ERC-4337 userOp with an ERC-20 paymaster (built, not active: needs a paymaster key) | `apps/mamoru-app/src/api/accounts/other-chains.ts`, `apps/mamoru-operator/src/bridge-out.ts`, `paymaster.ts` | `c189fbc5` (#133), #211, `c1073300` (#180 open) |
 | Yield ledger | Daily gas per account and chain from `UserOperationEvent.actualGasCost`; nothing bridge-specific | `migrations/d1/0010`, `0015`, `yield-receipts.ts` | #129 |
 
 ## Facts this pack uses
@@ -133,8 +133,9 @@ the user choosing a chain.
 
 ### US17 · Funds on Ethereum (P1)
 
-- Given USDC or ETH at the account's address on Ethereum, then the app says so, and one owner signature converts and
-  routes it to the same account on Base, with gas paid in USDC when no ETH is there (FR-XCH-015).
+- Given USDC at the account's address on Ethereum, then the app says so, and one owner signature moves it to the same
+  account on Base, with gas paid in USDC when a paymaster is configured. Given ETH, the owner first converts it to USDC
+  with its own signature, then moves the USDC (FR-XCH-015).
 
 ### US18 · Cost per move goes down over time (P1)
 
@@ -274,10 +275,11 @@ named is where the open part lives. Ids FR-CHN-001 to FR-CHN-003 keep the meanin
   harvest. *Built* by construction: the allocator only bridges toward the remote bucket.
 - **FR-XCH-014.** Moving value back from Monad to Base outside a withdrawal (Growth over target, a Monad pool that
   stops paying, a risk exit) is NEEDS CLARIFICATION 1.
-- **FR-XCH-015.** Funds at the account's address on Ethereum MUST be shown, and one owner signature converts ETH to
-  USDC if needed and moves the USDC to the same account on Base, by the best ranked route; with a bundler and an
-  ERC-20 paymaster, as one ERC-4337 v0.7 userOp that deploys the Safe, pays its gas in USDC and bridges; the relayer
-  path is the fallback. *Built:* `c189fbc5`, #211, `c1073300`. Open (#180): activation (paymaster key, relayer ETH on
+- **FR-XCH-015.** Funds at the account's address on Ethereum MUST be shown. ETH is converted to USDC in the same
+  account by one owner signature (`prepareConvert`/`submitConvert`); USDC moves to the same account on Base by another
+  owner signature, by the best ranked route. With a bundler and an ERC-20 paymaster configured the move is one
+  ERC-4337 v0.7 userOp that deploys the Safe, pays its gas in USDC and bridges, and a paymaster outage refuses the move
+  with `BRIDGE_GAS_UNAVAILABLE` (try later); without them the relayer deploys and pays the gas. *Built:* `c189fbc5`, #211, `c1073300`. Open (#180): activation (paymaster key, relayer ETH on
   Ethereum, operator config), owned by Ot and the coordinator.
 - **FR-XCH-016.** The guardian MUST be able to stop every session-key move with one pause, without stopping exits.
   *Built:* MamoruPauseGate (`d003e250`).
