@@ -62,7 +62,7 @@ newest_state() {
     f="${m%.manifest}"; v="$(manifest_of "$f")"
     # Only a bundle whose ciphertext is here and matches counts (unpack checks it again on a copy).
     if [ -n "$v" ] && [ -f "$inbox/$f" ] && [ "$(sha256sum <"$inbox/$f" | cut -d' ' -f1)" = "${v%% *}" ]; then echo "$f $v"; fi
-  done | sort -k3,3nr | head -1 || true
+  done | sort -k3,3nr | awk 'NR == 1'   # awk reads it all: SIGPIPE is ignored here, so head would make sort fail loudly
 }
 signed_age_s() { echo $(( $(date +%s) - $1 )); }
 
