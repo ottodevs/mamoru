@@ -555,14 +555,32 @@ export function grantsV5(p: V4PoolSpec, usage: V4Usage): GrantTemplate[] {
 }
 
 /**
- * otto/mamoru#251: the three v5 grants of one pool with MamoruActionPolicyV3 as their only action policy, for a Safe
- * whose sessions are committed in its setup (the account's Safe on Monad). Same actions as `grantsV5`; no UniActionPolicy
- * rules: V3 itself pins every recipient to the account, the tokens, fee and approval spenders to the pool, mint and
- * increase to itself, and the value to the pool's budget (contracts/action-policy/src/MamoruActionPolicyV3.sol). The
- * per-call amount rules of v5 are dropped with UniActionPolicy; the budget (W_p, T_p) binds as before.
+ * otto/mamoru#251: one pool's grant under MamoruActionPolicyV3 alone: a single manage-any carrying every action of v5's
+ * enter-swap, enter-mint and manage-any (each target and selector once), with no UniActionPolicy rule. V3 itself pins every
+ * recipient to the account, the tokens, fee and approval spenders to the pool (the router or V3), mint and increase to
+ * itself, and the value to the pool's budget (contracts/action-policy/src/MamoruActionPolicyV3.sol), so the three grants'
+ * rules no longer tell them apart: one session per pool, whose usage is theirs together. Measured on a Base fork, one such
+ * session takes ~2.7M gas to enable against ~6.7M for a v5 session (V3SetupFork.t.sol, operator logs of 29 Oct 2026),
+ * which is what lets a whole v6 approval fit one owner transaction. `grantKeyFor` hands it out for enter-swap and enter-mint.
  */
-export function grantsV3Only(p: V4PoolSpec, usage: V4Usage): GrantTemplate[] {
-  return grantsV5(p, usage).map((g) => ({ ...g, actions: g.actions.map((a) => ({ ...a, params: [] })), actionPolicyOnly: true as const }))
+export function manageAnyV3Only(p: V4PoolSpec, usage: V4Usage): GrantTemplate {
+  const seen = new Set<string>()
+  const actions = grantsV5(p, usage)
+    .flatMap((g) => g.actions)
+    .filter((a) => {
+      const k = `${a.target}|${a.signature}`
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    })
+    .map((a) => ({ ...a, params: [] }))
+  return { name: 'manage-any', pool: p.pool, perPosition: false, usageLimit: usage.enterSwap + usage.enterMint + usage.manageAny, actions, requiresActionPolicy: true, actionPolicyOnly: true }
+}
+
+/** otto/mamoru#251: `exitOnlyV5Grant` under V3 alone: no mint, no increase, no approval of the stable token, no param rule. */
+export function exitOnlyV3Only(p: V4PoolSpec, usageLimit: number): GrantTemplate {
+  const g = exitOnlyV5Grant(p, usageLimit)
+  return { ...g, actions: g.actions.map((a) => ({ ...a, params: [] })), actionPolicyOnly: true }
 }
 
 /**

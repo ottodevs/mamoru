@@ -3,12 +3,12 @@
 // setup mode), so the address is a function of the owner's keys AND those sessions, and the Base bridge-out grant the owner
 // signs names that address as the only mint recipient. The relayer deploys it later with exactly this initializer; no owner
 // signature on the remote chain, no intermediate contract. The app, the Worker and the operator all build it here.
-import { encodePacked, isAddressEqual, keccak256, zeroAddress } from 'viem'
-import { ReasonError, type Address, type Hex } from '@mamoru/domain'
+import { encodePacked, hexToBigInt, isAddressEqual, keccak256, zeroAddress } from 'viem'
+import { ReasonError, type AccountContext, type Address, type Hex, type RemoteSpec } from '@mamoru/domain'
 import { address, monadRegistry, type Registry } from '@mamoru/registry'
 import { computeCaps, grantKey, instantiateGrant, MONAD_GAS_CAPS, policyHash, policyRegistry, retargetToPolicy, V4_POOLS_MONAD, v4BudgetCaps, withActionPolicy, liveWmonUsdcMonadV6, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress } from '../recovery/index.ts'
-import type { SafeSetup, WebAuthnSigner } from '../safe/index.ts'
+import { webAuthnSigner, type SafeSetup, type WebAuthnSigner } from '../safe/index.ts'
 import { permissionIdOf, toSmartSession, v4DeploymentOf, v4PoliciesFor, type SmartSessionStruct } from '../sessions/index.ts'
 
 /** The generation of a remote Safe's first config: its policy state starts empty (MamoruActionPolicyV3 H-1 bounds the first jump). */
@@ -89,4 +89,26 @@ export function assertRemoteSafe(input: RemoteSafeInput, expected: Address): Rem
   const r = remoteSafe(input)
   if (!isAddressEqual(r.address, expected)) throw new ReasonError('REMOTE_SAFE_MISMATCH', `remote Safe ${expected} is not the one these keys and sessions give (${r.address})`)
   return r
+}
+
+/** The remote policies a spec may name, wired to the chain's pinned contracts. Any other id is refused. */
+export function remotePolicyFor(spec: Pick<RemoteSpec, 'chainId' | 'policyId'>, registry: Registry = monadRegistry): PolicyVersion {
+  if (spec.chainId !== registry.chainId) throw new ReasonError('REMOTE_SAFE_MISMATCH', `remote spec for chain ${spec.chainId}, registry of ${registry.chainId}`)
+  if (spec.chainId === 143 && spec.policyId === liveWmonUsdcMonadV6.policyId) return monadV6Deployed(registry)
+  throw new ReasonError('REMOTE_SAFE_MISMATCH', `no remote policy ${spec.policyId} on chain ${spec.chainId}`)
+}
+
+/** `remoteSafe`'s input from an account context (the Base account's keys) and a remote spec. */
+export function remoteInput(ctx: Pick<AccountContext, 'owners' | 'saltNonce' | 'passkey'>, spec: RemoteSpec, registry: Registry = monadRegistry): RemoteSafeInput {
+  const capUsdc = BigInt(spec.capUsdc)
+  return {
+    owners: ctx.owners as Address[],
+    saltNonce: BigInt(ctx.saltNonce),
+    webauthn: webAuthnSigner(hexToBigInt(ctx.passkey.x), hexToBigInt(ctx.passkey.y), registry),
+    policy: remotePolicyFor(spec, registry),
+    sessionKey: spec.sessionKey as Address,
+    validAfter: spec.validAfter,
+    validUntil: spec.validUntil,
+    capUsdc,
+  }
 }

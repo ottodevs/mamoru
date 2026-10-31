@@ -221,8 +221,11 @@ export function grantKey(t: { name: GrantName; pool?: string }): string {
 /** The key of the grant `name` that covers `pool` in this policy (plain `name` for single-pair policies). */
 export function grantKeyFor(policy: { session: { grants: GrantTemplate[] } }, name: GrantName, pool: string): string {
   const t = policy.session.grants.find((g) => g.name === name && g.pool === pool) ?? policy.session.grants.find((g) => g.name === name && !g.pool)
-  if (!t) throw new Error(`no ${name} grant for ${pool}`)
-  return grantKey(t)
+  if (t) return grantKey(t)
+  // otto/mamoru#251: under MamoruActionPolicyV3 alone, the pool's one manage-any carries the entry actions too.
+  const any = name === 'enter-swap' || name === 'enter-mint' ? policy.session.grants.find((g) => g.name === 'manage-any' && g.pool === pool && g.actionPolicyOnly) : undefined
+  if (!any) throw new Error(`no ${name} grant for ${pool}`)
+  return grantKey(any)
 }
 
 /**

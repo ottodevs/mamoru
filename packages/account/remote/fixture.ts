@@ -3,6 +3,7 @@
 // always checks the current encoders. Regenerate: bun packages/account/remote/fixture.ts --write
 import { writeFileSync } from 'node:fs'
 import { getAddress } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import { address, monadRegistry, type Registry } from '@mamoru/registry'
 import { createProxyCall, webAuthnSigner } from '../safe/index.ts'
@@ -10,6 +11,9 @@ import { monadV6Deployed, remoteSafe, type RemoteSafeInput } from './index.ts'
 
 /** DeployV3.s.sol `expected(143)`: MamoruActionPolicyV3's pinned address on Monad. */
 export const V3_MONAD_PINNED: Address = getAddress('0xd660610193851b0EF85bB526eea35A942cc4F934')
+
+/** The fork test's session key (vm.addr of this key signs its userOps). A test key, never a live one. */
+export const FIXTURE_SESSION_KEY = `0x${'00'.repeat(30)}5e55` as const
 
 export const FIXTURE_PATH = new URL('../../../contracts/action-policy/test/fixtures/remote-safe-monad.json', import.meta.url)
 
@@ -26,7 +30,7 @@ export function fixtureInput(): RemoteSafeInput {
     saltNonce: 46809589425428679530331588158637142457078508681393392316145456181889366683276n,
     webauthn: webAuthnSigner(0x1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00n, 0x0a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeffn, monadRegistry),
     policy: monadV6Deployed(withPinnedV3()),
-    sessionKey: '0x00000000000000000000000000000000005e5510',
+    sessionKey: privateKeyToAccount(FIXTURE_SESSION_KEY).address,
     validAfter: 1_790_000_000,
     validUntil: 1_821_536_000,
     capUsdc: 1_500_000_000n,
@@ -43,6 +47,10 @@ export function fixture() {
     createProxy: call.data,
     expected: r.address,
     owners: input.owners,
+    sessionKeyPrivate: FIXTURE_SESSION_KEY,
+    validAfter: input.validAfter,
+    validUntil: input.validUntil,
+    capUsdc: input.capUsdc.toString(),
     actionPolicy: V3_MONAD_PINNED,
     gasPolicy: address('MamoruGasPolicy', monadRegistry),
     permissionIds: r.permissionIds,

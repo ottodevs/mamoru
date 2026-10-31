@@ -2,7 +2,7 @@ import { pairGrants } from './grants.ts'
 import { conservadorV1 } from './policies.ts'
 import { INCREASE_TOLERANCE_BPS, conservadorLiveV5 } from './policies-v4.ts'
 import type { PolicyVersion } from './types.ts'
-import { grantsV3Only, grantsV5, v4CapFormulas, V4_POOLS_MONAD, type V4Usage } from './v4-grants.ts'
+import { manageAnyV3Only, grantsV5, v4CapFormulas, V4_POOLS_MONAD, type V4Usage } from './v4-grants.ts'
 
 /**
  * otto/mamoru#65: the Monad lab policy. One pair, WMON/USDC 0.30% on Uniswap V3 (the sleeve of
@@ -106,8 +106,8 @@ export const liveWmonUsdcMonadV5: PolicyVersion = {
 /**
  * otto/mamoru#251: the policy of the account's own Safe on Monad, whose sessions are committed in its setup (one Base
  * approval provisions it; no owner signature on Monad). `liveWmonUsdcMonadV5`'s pool, range, budgets and usage, with
- * MamoruActionPolicyV3 as the only action policy of every grant (`grantsV3Only`): no UniActionPolicy rule names the
- * account, whose address is a function of these sessions. Caps are the budget pair only, both in USDC, so the setup is
+ * MamoruActionPolicyV3 as the only action policy (`manageAnyV3Only`: one session for the pool): no UniActionPolicy
+ * rule names the account, whose address is a function of this session. Caps are the budget pair only, both in USDC, so the setup is
  * a function of the cap it is sized at and nothing else (no price): the Base approval commits to the Safe's address,
  * and the operator deploys that exact initializer later. Needs MamoruActionPolicyV3 on Monad (contractVersion 3).
  */
@@ -118,7 +118,7 @@ export const liveWmonUsdcMonadV6: PolicyVersion = {
   session: {
     ...liveWmonUsdcMonadV5.session,
     caps: v4CapFormulas('growth', V4_POOLS_MONAD.growth).filter((f) => f.name === V4_POOLS_MONAD.growth.caps.budgetWindow || f.name === V4_POOLS_MONAD.growth.caps.budgetTotal),
-    grants: grantsV3Only(V4_POOLS_MONAD.growth, V5_MONAD_USAGE),
+    grants: [manageAnyV3Only(V4_POOLS_MONAD.growth, V5_MONAD_USAGE)],
   },
 }
 

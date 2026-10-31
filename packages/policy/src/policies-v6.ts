@@ -6,7 +6,7 @@ import { bridgeOutGrant, CCTP_DOMAIN_MONAD } from './grants.ts'
 import { INCREASE_TOLERANCE_BPS, conservadorLiveV5 } from './policies-v4.ts'
 import { liveWmonUsdcMonadV6 } from './policies-monad.ts'
 import type { CapFormula, PolicyVersion } from './types.ts'
-import { exitOnlyV5Grant, grantsV5, v4CapFormulas, V4_POOLS, type V4PoolSpec, type V4Usage } from './v4-grants.ts'
+import { exitOnlyV3Only, manageAnyV3Only, v4CapFormulas, V4_POOLS, type V4PoolSpec, type V4Usage } from './v4-grants.ts'
 
 const V6_USAGE: V4Usage = { enterSwap: 3_000, enterMint: 1_000, manageAny: 32_000 }
 
@@ -47,10 +47,13 @@ export const conservadorLiveV6: PolicyVersion = {
   session: {
     ...conservadorLiveV5.session,
     caps: [...v4CapFormulas('stables', V6_POOLS.stables), ...v4CapFormulas('risk', V6_POOLS.balance), ...v4CapFormulas('btc', V4_POOLS.btc), ...BRIDGE_CAPS],
+    // otto/mamoru#251: MamoruActionPolicyV3 the only action policy of every Uniswap grant, one manage-any per pool: the
+    // whole approval is one owner transaction (v5's grants took four on 29 Oct 2026). Bridge-out keeps UniActionPolicy
+    // (its recipient is the account's Safe on Monad, another address) and MamoruPauseGate, bound to V3's guardian pause.
     grants: [
-      ...grantsV5(V6_POOLS.stables, V6_USAGE),
-      ...grantsV5(V6_POOLS.balance, V6_USAGE),
-      exitOnlyV5Grant(V4_POOLS.btc, V6_USAGE.manageAny),
+      manageAnyV3Only(V6_POOLS.stables, V6_USAGE),
+      manageAnyV3Only(V6_POOLS.balance, V6_USAGE),
+      exitOnlyV3Only(V4_POOLS.btc, V6_USAGE.manageAny),
       bridgeOutGrant({ destinationDomain: CCTP_DOMAIN_MONAD, caps: { perCall: 'bridgePerCall', total: 'bridgeTotal' } }, 64),
     ],
   },

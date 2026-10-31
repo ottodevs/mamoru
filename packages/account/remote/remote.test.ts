@@ -6,8 +6,10 @@ import { address, monadRegistry } from '@mamoru/registry'
 import { decodeMamoruInitAny, liveWmonUsdcMonadV5, MONAD_GAS_CAPS, V4_POOLS_MONAD, withActionPolicy } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress, smartSessionInstallData } from '../recovery/index.ts'
 import { toSmartSession, v4PoliciesFor, v4DeploymentOf } from '../sessions/index.ts'
-import { assertRemoteSafe, monadV6Deployed, remoteSafe } from './index.ts'
-import { FIXTURE_PATH, fixtureInput, fixtureJson, V3_MONAD_PINNED, withPinnedV3 } from './fixture.ts'
+import { assertRemoteSafe, monadV6Deployed, remoteInput, remotePolicyFor, remoteSafe } from './index.ts'
+import { deployCall, liveAccountFromContext } from '../live/index.ts'
+import { toHex } from 'viem'
+import { FIXTURE_PATH, fixture, fixtureInput, fixtureJson, V3_MONAD_PINNED, withPinnedV3 } from './fixture.ts'
 
 const code = (f: () => unknown): string | undefined => {
   try {
@@ -44,9 +46,9 @@ describe('remoteSafe (otto/mamoru#251)', () => {
     expect(slice(v[0]!.initData, 0, 1)).toBe('0x02')
     expect(v[0]!.initData).toBe(smartSessionInstallData(r.sessions))
     expect(smartSessionInstallData([])).toBe('0x')
-    expect(r.grants.map((g) => g.name)).toEqual(['enter-swap', 'enter-mint', 'manage-any'])
+    expect(r.grants.map((g) => g.name)).toEqual(['manage-any'])
     expect(r.grants.every((g) => g.account === r.address && g.chainId === 143)).toBe(true)
-    expect(new Set(r.permissionIds).size).toBe(3)
+    expect(r.permissionIds).toHaveLength(1)
   })
 
   test('every action: MamoruActionPolicyV3 alone, in setup mode at generation 1; userOps under TimeFrame, UsageLimit and MamoruGasPolicy', () => {
@@ -105,5 +107,31 @@ describe('toSmartSession guards for V3-only grants (otto/mamoru#251)', () => {
     const data = r.sessions[0]!.actions[0]!.actionPolicies[0]!.initData
     const [family] = decodeAbiParameters([{ type: 'uint256' }], slice(data, 0, 32))
     expect(family).toBe(3n)
+  })
+})
+
+describe('an account context with `remote` (otto/mamoru#251)', () => {
+  const input = fixtureInput()
+  const r = remoteSafe(input)
+  const spec = { chainId: 143, policyId: 'live-wmon-usdc-monad-v6', sessionKey: input.sessionKey, validAfter: input.validAfter, validUntil: input.validUntil, capUsdc: input.capUsdc.toString() }
+  const ctx = { accountKey: 'k@143', chainId: 143, address: r.address, owners: input.owners, saltNonce: input.saltNonce.toString(), passkey: { credentialId: 'c', x: toHex(input.webauthn!.x, { size: 32 }), y: toHex(input.webauthn!.y, { size: 32 }) }, remote: spec }
+
+  test('is rebuilt with its sessions, and its deploy call is the fixture the fork test sends', () => {
+    const reg = withPinnedV3()
+    expect(remoteSafe(remoteInput(ctx, spec, reg)).address).toBe(r.address)
+    const live = liveAccountFromContext(ctx, reg)
+    expect(live.safe).toBe(r.address)
+    expect(deployCall(live).data).toBe(fixture().createProxy)
+  })
+
+  test('a context whose spec or keys do not give its address is refused', () => {
+    const reg = withPinnedV3()
+    expect(() => liveAccountFromContext({ ...ctx, remote: { ...spec, capUsdc: '1' } }, reg)).toThrow('does not match')
+    expect(() => liveAccountFromContext({ ...ctx, remote: undefined }, reg)).toThrow('does not match')
+  })
+
+  test('only a known remote policy on its own chain', () => {
+    expect(code(() => remotePolicyFor({ chainId: 143, policyId: 'live-wmon-usdc-monad-v5' }, withPinnedV3()))).toBe('REMOTE_SAFE_MISMATCH')
+    expect(code(() => remotePolicyFor({ chainId: 8453, policyId: 'live-wmon-usdc-monad-v6' }, withPinnedV3()))).toBe('REMOTE_SAFE_MISMATCH')
   })
 })

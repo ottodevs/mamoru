@@ -1,18 +1,13 @@
 import { Hono, type Context } from 'hono'
-import type { AccountContext } from '@mamoru/domain'
+import type { AccountContext, RemoteSpec } from '@mamoru/domain'
 import type { AppEnv } from '../context.ts'
 import { liveFunds, operatorUrlFor } from '../env.ts'
 import { accountNotFound, apiError } from '../errors.ts'
 import { ACCOUNT_KEY } from '../onboarding/account.ts'
-import { ownersOf, sleevesOfUser, type AccountRow } from './store.ts'
-import { BASE, chainReady, ownedSleeve } from '../sleeves.ts'
+import { ownersOf, type AccountRow } from './store.ts'
+import { BASE, ownedSleeve } from '../sleeves.ts'
+import { defaultRemoteRegistry, remoteOf, upsertRemoteSleeve, verifyRemote, type RemoteRegistry } from '../remote.ts'
 import { chainFundingResponse, fundingRpcUrls, type ChainFunding } from './chain-funding.ts'
-
-/** otto/mamoru#214: the policy a renewal of a Base account may move to only once the owner's Monad sleeve runs. */
-export const MULTICHAIN_POLICY = 'conservador-live-v6'
-/** Review of PR #141: its fork twin is guarded the same way. */
-const MULTICHAIN_POLICIES: ReadonlySet<string> = new Set([MULTICHAIN_POLICY, 'conservador-lab-v6'])
-export const MONAD = 143
 
 // Live funds (sprint amendment 2026-09-26 21:40): after the device session proves it owns the account,
 // the Worker forwards the same route to the operator with a signed account context (app-api.ts AccountContext).
@@ -36,6 +31,7 @@ export function accountContext(row: AccountRow): AccountContext {
     owners: ownersOf(row),
     saltNonce: row.salt_nonce,
     passkey: { credentialId: row.passkey_credential_id, x: row.passkey_x, y: row.passkey_y },
+    ...(row.remote_json ? { remote: JSON.parse(row.remote_json) as RemoteSpec } : {}),
   }
 }
 
@@ -90,28 +86,6 @@ async function operatorGet(c: Context<AppEnv>, operatorFetch: OperatorFetch, row
   }
 }
 
-/**
- * otto/mamoru#214: a Base account's renewal that targets conservador-live-v6 (its funding view's `upgradePolicy`, or the
- * policy it already runs) is refused unless the owner's Monad sleeve exists at the same address as the Base Safe (the
- * bridge-out grant mints only to that address) and its operator reports it active: v6 sends part of the savings to that
- * sleeve, and funds bridged to a sleeve nobody runs would sit idle. Review of PR #141 (P1 1): checked whatever the
- * `multichain_v6` ops flag says here, since the operator decides the target from its own pulled copy of it (which can
- * lag) and an account already on v6 renews as v6 either way. `null`: nothing to refuse; else the response.
- */
-async function guardV6Renewal(c: Context<AppEnv>, operatorFetch: OperatorFetch, userId: string, row: AccountRow): Promise<Response | null> {
-  if (row.chain_id !== BASE) return null
-  const funding = (await operatorGet(c, operatorFetch, row, 'funding')) as { approval?: { upgradePolicy?: string; policyId?: string } | null } | null
-  if (!funding) return unavailable(c)
-  const a = funding.approval
-  if (![a?.upgradePolicy, a?.policyId].some((id) => id !== undefined && MULTICHAIN_POLICIES.has(id))) return null
-  const notActive = () => apiError(c, 409, 'Open and start your Monad sleeve first: this version sends part of your savings to it. Nothing was changed.', 'SLEEVE_NOT_ACTIVE')
-  const sleeve = (await sleevesOfUser(c.env.DB, userId)).find((r) => r.chain_id === MONAD)
-  if (!sleeve || sleeve.address.toLowerCase() !== row.address.toLowerCase() || !(await chainReady(c, MONAD))) return notActive()
-  const view = (await operatorGet(c, operatorFetch, sleeve, 'funding')) as { active?: unknown } | null
-  if (!view) return unavailable(c)
-  return view.active === true ? null : notActive()
-}
-
 const unavailable = (c: Context) => apiError(c, 503, 'The operator is not reachable. Nothing was sent. Try again.', 'OPERATOR_UNAVAILABLE')
 const tooLarge = (c: Context) => apiError(c, 413, 'Request body too large.', 'BODY_TOO_LARGE')
 
@@ -121,8 +95,35 @@ const tooLarge = (c: Context) => apiError(c, 413, 'Request body too large.', 'BO
  */
 const operatorFailed = (status: number) => status >= 500
 
-export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFunding) {
+export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFunding, remoteRegistry: RemoteRegistry = defaultRemoteRegistry) {
   const routes = new Hono<AppEnv>()
+
+  /**
+   * otto/mamoru#251: the Base operator may offer the account's own Safe on another chain. In a prepare the owner is about to
+   * sign a bridge-out that mints only there, so an offer that is not the Safe the owner's own keys give is never passed on
+   * (502 REMOTE_SAFE_MISMATCH). In the funding read it is the Worker's record of that Safe: stored if it checks out, ignored if not.
+   */
+  const checkRemote = async (c: Context<AppEnv>, row: AccountRow, method: string, path: string, text: string): Promise<Response | null> => {
+    const prepare = method === 'POST' && path.endsWith('/prepare')
+    const funding = method === 'GET' && path.endsWith('/funding')
+    if (!prepare && !funding) return null
+    let body: unknown
+    try {
+      body = JSON.parse(text)
+    } catch {
+      return null
+    }
+    const offer = remoteOf(body)
+    if (!offer) return null
+    try {
+      verifyRemote(accountContext(row), offer, remoteRegistry)
+      if (funding) await upsertRemoteSleeve(c.env.DB, row, offer, c.var.now())
+      return null
+    } catch (e) {
+      console.error(`remote Safe offer refused for ${row.account_key}`, e instanceof Error ? e.message : String(e))
+      return prepare ? apiError(c, 502, 'Mamoru could not confirm the address of your account on the other chain. Nothing was signed.', 'REMOTE_SAFE_MISMATCH') : null
+    }
+  }
 
   const forwardWith = (opts: { timeoutMs?: (c: Context<AppEnv>, row: AccountRow) => number; fallback?: (c: Context<AppEnv>, row: AccountRow) => Promise<Response | null> } = {}) => async (c: Context<AppEnv>) => {
     const session = await c.var.auth.current(c)
@@ -142,12 +143,6 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
       if (declared > MAX_BODY_BYTES) return tooLarge(c)
       body = await c.req.text()
       if (new TextEncoder().encode(body).byteLength > MAX_BODY_BYTES) return tooLarge(c)
-    }
-
-    // otto/mamoru#214: before the operator prepares or accepts a renewal, a v6 target needs a running Monad sleeve.
-    if (method === 'POST' && (c.req.path.endsWith(`/${accountKey}/renew/prepare`) || c.req.path.endsWith(`/${accountKey}/renew`))) {
-      const refused = await guardV6Renewal(c, operatorFetch, session.userId, row)
-      if (refused) return refused
     }
 
     const env = c.env
@@ -178,6 +173,10 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     if (opts.fallback && operatorFailed(res.status)) {
       const answer = await opts.fallback(c, row)
       if (answer) return answer
+    }
+    if (res.ok && row.chain_id === BASE) {
+      const refused = await checkRemote(c, row, method, c.req.path, text)
+      if (refused) return refused
     }
     return new Response(text, {
       status: res.status,

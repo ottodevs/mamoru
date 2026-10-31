@@ -2,9 +2,10 @@ import { describe, expect, test } from 'bun:test'
 import { encodeAbiParameters } from 'viem'
 import { address, monadRegistry } from '@mamoru/registry'
 import { computeCaps, instantiateGrant, policyHash, type GrantContext } from './instantiate.ts'
+import { grantKeyFor } from './grants.ts'
 import { liveWmonUsdcMonadV5, liveWmonUsdcMonadV6, labWmonUsdcMonadV6 } from './policies-monad.ts'
 import { conservadorLiveV6 } from './policies-v6.ts'
-import { decodeMamoruInitAny, encodeMamoruInit, encodeMamoruInitAtSetup, FAMILY_UNISWAP_AT_SETUP, grantsV3Only, grantsV5, MAMORU_INIT_TUPLE, mamoruInitFor, V4_POOLS_MONAD } from './v4-grants.ts'
+import { decodeMamoruInitAny, encodeMamoruInit, encodeMamoruInitAtSetup, FAMILY_UNISWAP_AT_SETUP, exitOnlyV3Only, exitOnlyV5Grant, grantsV5, manageAnyV3Only, MAMORU_INIT_TUPLE, mamoruInitFor, V4_POOLS_MONAD } from './v4-grants.ts'
 
 const CAP = 1_500n * 1_000_000n
 
@@ -24,13 +25,25 @@ describe('live-wmon-usdc-monad-v6 (otto/mamoru#251)', () => {
     expect(liveWmonUsdcMonadV6.buckets).toEqual(liveWmonUsdcMonadV5.buckets)
     expect(liveWmonUsdcMonadV6.range).toEqual(liveWmonUsdcMonadV5.range)
     expect(policyHash(liveWmonUsdcMonadV6)).not.toBe(policyHash(liveWmonUsdcMonadV5))
-    expect(liveWmonUsdcMonadV6.session.grants.map((g) => [g.name, g.usageLimit])).toEqual(liveWmonUsdcMonadV5.session.grants.map((g) => [g.name, g.usageLimit]))
+    // One session carries v5's three: their usage together.
+    expect(liveWmonUsdcMonadV6.session.grants.map((g) => [g.name, g.usageLimit])).toEqual([['manage-any', liveWmonUsdcMonadV5.session.grants.reduce((n, g) => n + g.usageLimit, 0)]])
   })
 
-  test('every grant: v5 actions, no param rule, V3 its only action policy', () => {
-    const v5 = grantsV5(V4_POOLS_MONAD.growth, { enterSwap: 1, enterMint: 1, manageAny: 1 })
-    const v3 = grantsV3Only(V4_POOLS_MONAD.growth, { enterSwap: 1, enterMint: 1, manageAny: 1 })
-    expect(v3.map((g) => g.actions.map((a) => `${a.target}.${a.signature}`))).toEqual(v5.map((g) => g.actions.map((a) => `${a.target}.${a.signature}`)))
+  test('one manage-any: every action of v5\'s three grants once, no param rule, V3 its only action policy', () => {
+    const usage = { enterSwap: 1, enterMint: 1, manageAny: 1 }
+    const v5 = new Set(grantsV5(V4_POOLS_MONAD.growth, usage).flatMap((g) => g.actions.map((a) => `${a.target}.${a.signature}`)))
+    const v3 = manageAnyV3Only(V4_POOLS_MONAD.growth, usage)
+    const got = v3.actions.map((a) => `${a.target}.${a.signature}`)
+    expect(new Set(got)).toEqual(v5)
+    expect(got.length).toBe(v5.size)
+    // The entries are handed to it: decide asks for enter-swap / enter-mint and gets this session.
+    expect(grantKeyFor(liveWmonUsdcMonadV6, 'enter-swap', 'pool:WMON/USDC/3000')).toBe('manage-any:pool:WMON/USDC/3000')
+    expect(grantKeyFor(liveWmonUsdcMonadV6, 'enter-mint', 'pool:WMON/USDC/3000')).toBe('manage-any:pool:WMON/USDC/3000')
+    expect(() => grantKeyFor(liveWmonUsdcMonadV6, 'enter-swap', 'pool:EURW/USDC/100')).toThrow('no enter-swap')
+    // Exit only stays exit only under V3 alone: no mint, no increase, no approval of the stable token.
+    const exit = exitOnlyV3Only(V4_POOLS_MONAD.growth, 1)
+    expect(exit.actions.map((a) => `${a.target}.${a.signature}`)).toEqual(exitOnlyV5Grant(V4_POOLS_MONAD.growth, 1).actions.map((a) => `${a.target}.${a.signature}`))
+    expect(exit.actions.every((a) => a.params.length === 0) && exit.actionPolicyOnly).toBe(true)
     for (const g of liveWmonUsdcMonadV6.session.grants) {
       expect(g.actionPolicyOnly).toBe(true)
       expect(g.requiresActionPolicy).toBe(true)

@@ -2,19 +2,20 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
-import {MamoruActionPolicyV2} from "../src/MamoruActionPolicyV2.sol";
+import {MamoruActionPolicyV3} from "../src/MamoruActionPolicyV3.sol";
 import {MamoruPauseGate} from "../src/MamoruPauseGate.sol";
 import {ConfigId} from "../src/MamoruActionPolicy.sol";
 
-/// otto/mamoru#213: against the real MamoruActionPolicyV2, the guardian's pause and unpause reach the gate.
-contract MamoruPauseGateV2Test is Test {
+/// otto/mamoru#213, #251: against the real MamoruActionPolicyV3 (the policy v6's grants carry), the guardian's pause and
+/// unpause reach the gate.
+contract MamoruPauseGateV3Test is Test {
     address smartSession = makeAddr("smartSession");
     address guardian = makeAddr("guardian");
     address safe = makeAddr("safe");
     ConfigId constant ID = ConfigId.wrap(bytes32(uint256(1)));
 
     function test_guardianPauseStopsTheGate() public {
-        MamoruActionPolicyV2 v2 = new MamoruActionPolicyV2(smartSession, address(1), address(2), address(3), guardian);
+        MamoruActionPolicyV3 v2 = new MamoruActionPolicyV3(smartSession, address(1), address(2), address(3), guardian, new address[](0), address(0), address(0), 0);
         MamoruPauseGate gate = new MamoruPauseGate(smartSession, address(v2));
         vm.startPrank(smartSession);
         assertEq(gate.checkAction(ID, safe, address(0xC0FFEE), 0, ""), 0, "not paused");

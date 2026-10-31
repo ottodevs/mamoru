@@ -11,10 +11,12 @@ import {
   safeTxTypedData,
   webAuthnSigner,
   type MultiSendCall,
+  type SafeSetup,
   type SafeTx,
   type WebAuthnSigner,
 } from '../safe/index.ts'
 import { accountSetup, counterfactualAddress } from '../recovery/index.ts'
+import { remoteInput, remoteSafe } from '../remote/index.ts'
 import { activationCall, registryTrustCalls, revocationCalls, selfAttestCall, selfRevokeAttestationCall, type SessionPolicies } from '../sessions/index.ts'
 
 /** Owner-authorized cap for the live happy path on Base: 100 USDC per account (6 decimals). */
@@ -27,7 +29,16 @@ export const LIVE_POOL_FEE = 500
  * `registry` (otto/mamoru#61): the registry of the chain the account lives on; every builder below that takes the
  * account reads its addresses from it. Absent: Base's, as every account before Monad (the field is left out of them).
  */
-export type LiveAccount = { safe: Address; chainId: number; owners: Address[]; saltNonce: bigint; webauthn: WebAuthnSigner; registry?: Registry }
+export type LiveAccount = {
+  safe: Address
+  chainId: number
+  owners: Address[]
+  saltNonce: bigint
+  webauthn: WebAuthnSigner
+  registry?: Registry
+  /** otto/mamoru#251: a Safe whose setup carries sessions (`AccountContext.remote`): that setup, which `deployCall` sends. */
+  setup?: SafeSetup
+}
 
 const regOf = (a: { registry?: Registry }): Registry => a.registry ?? baseRegistry
 
@@ -45,15 +56,17 @@ export function liveAccountFromContext(ctx: AccountContext, registry?: Registry)
   const owners = ctx.owners as Address[]
   const saltNonce = BigInt(ctx.saltNonce)
   const webauthn = webAuthnSigner(hexToBigInt(ctx.passkey.x), hexToBigInt(ctx.passkey.y), reg)
-  const safe = counterfactualAddress(accountSetup(owners, saltNonce, webauthn, reg), reg)
+  // otto/mamoru#251: the account's own Safe on a remote chain is rebuilt with its sessions, from the same keys.
+  const setup = ctx.remote ? remoteSafe(remoteInput(ctx, ctx.remote, reg)).setup : accountSetup(owners, saltNonce, webauthn, reg)
+  const safe = counterfactualAddress(setup, reg)
   if (safe.toLowerCase() !== ctx.address.toLowerCase()) throw new Error(`counterfactual address ${safe} does not match context ${ctx.address}`)
-  return { safe, chainId: ctx.chainId, owners, saltNonce, webauthn, ...(registry ? { registry } : {}) }
+  return { safe, chainId: ctx.chainId, owners, saltNonce, webauthn, ...(registry ? { registry } : {}), ...(ctx.remote ? { setup } : {}) }
 }
 
 /** SafeProxyFactory.createProxyWithNonce for the account. Any EOA can send it. */
 export function deployCall(a: LiveAccount): { to: Address; data: Hex } {
   const reg = regOf(a)
-  return createProxyCall(accountSetup(a.owners, a.saltNonce, a.webauthn, reg), reg)
+  return createProxyCall(a.setup ?? accountSetup(a.owners, a.saltNonce, a.webauthn, reg), reg)
 }
 
 export async function readSafeNonce(client: PublicClient, safe: Address): Promise<{ deployed: boolean; nonce: bigint }> {

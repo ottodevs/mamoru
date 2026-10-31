@@ -76,9 +76,11 @@ describe('conservador-live-v6 (otto/mamoru#201, #213)', () => {
     const g = instantiateGrant(conservadorLiveV6, 'manage-any:pool:USDC/cbBTC/500', ctx())
     const sigs = g.actions.map((a) => `${a.target}.${a.signature.split('(')[0]}`)
     expect(sigs).toEqual(['NonfungiblePositionManager.decreaseLiquidity', 'NonfungiblePositionManager.collect', 'NonfungiblePositionManager.burn', 'cbBTC.approve', 'SwapRouter02.exactInputSingle', 'SwapRouter02.multicall'])
-    const swap = g.actions.find((a) => a.signature.startsWith('exactInputSingle'))!
-    expect(swap.params.find((p) => p.field === 'tokenIn')!.ref).toBe(BigInt(address('cbBTC', baseRegistry)))
-    expect(swap.params.find((p) => p.field === 'tokenOut')!.ref).toBe(BigInt(address('USDC', baseRegistry)))
+    // otto/mamoru#251: under MamoruActionPolicyV3 alone (no param rule), the way in is closed by what is absent: no USDC
+    // approval, no mint, no increase. V3 bounds the sale (pool, recipient, price, budget). A USDC allowance another pool's
+    // session left on the router could still be spent buying cbBTC at V3's bounds: a swap into the account, not a loss.
+    expect(g.actions.every((a) => a.params.length === 0)).toBe(true)
+    expect(g.actionPolicyOnly).toBe(true)
     expect(g.requiresActionPolicy).toBe(true)
     // Its caps are v5's for the pool (40 % of the cap): enough to sell a whole held position, never zero.
     const caps = computeCaps(conservadorLiveV6, CAP, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })

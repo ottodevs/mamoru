@@ -283,7 +283,7 @@ describe('registration proof', () => {
     // No user row is left behind by a refused registration.
     expect(h.db.raw.query('SELECT count(*) AS n FROM users').get()).toEqual({ n: 1 })
     // The database itself refuses a second row, whatever the code above it does.
-    expect(() => h.db.raw.exec(`INSERT INTO accounts SELECT '${crypto.randomUUID()}', user_id, chain_id, '0x00000000000000000000000000000000000000bb', owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, preset, policy_version, recovery_ack_at, created_at, 0, env, is_test FROM accounts`)).toThrow(/UNIQUE/)
+    expect(() => h.db.raw.exec(`INSERT INTO accounts SELECT '${crypto.randomUUID()}', user_id, chain_id, '0x00000000000000000000000000000000000000bb', owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, preset, policy_version, recovery_ack_at, created_at, 0, env, is_test, remote_json FROM accounts`)).toThrow(/UNIQUE/)
   })
 
   test('the session that owns the account is answered again without a new proof', async () => {

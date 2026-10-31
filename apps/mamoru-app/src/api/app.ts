@@ -18,7 +18,8 @@ import { apyRoutes } from './apy/routes.ts'
 import { ens } from './ens/routes.ts'
 import { feedbackRoutes, type MattermostFetch } from './feedback.ts'
 import { engineSettingsRoutes } from './engine-settings.ts'
-import { sessionSleeves, sleeves } from './sleeves.ts'
+import { sessionSleeves } from './sleeves.ts'
+import type { RemoteRegistry } from './remote.ts'
 import type { ApyCache, Fetcher } from './apy/source.ts'
 
 export type AppOptions = {
@@ -30,6 +31,8 @@ export type AppOptions = {
   chainGate?: ReadGate
   fundingGate?: FundingGate
   mattermostFetch?: MattermostFetch
+  /** otto/mamoru#251: the registry a remote Safe is rebuilt against (default: the pinned one of its chain). */
+  remoteRegistry?: RemoteRegistry
 }
 
 /** Hard cap per account in live mode, USDC base units (100 USDC). */
@@ -88,10 +91,9 @@ export function createApp(options: AppOptions = {}) {
   app.route('/api/onboarding', onboarding)
   // otto/mamoru#238: the chain read the funding route answers with when the operator cannot (same fetch as other-chains).
   const chainFetch: ChainFetch = options.chainFetch ?? ((input, init) => fetch(input, init))
-  app.route('/api/accounts', operatorRoutes(operatorFetch, { fetch: chainFetch, gate: options.fundingGate ?? new FundingGate(), capUsdc: LIVE_CAP_USDC }))
+  app.route('/api/accounts', operatorRoutes(operatorFetch, { fetch: chainFetch, gate: options.fundingGate ?? new FundingGate(), capUsdc: LIVE_CAP_USDC }, options.remoteRegistry))
   app.route('/api/accounts', accounts)
   app.route('/api/accounts', otherChainRoutes(chainFetch, options.chainGate))
-  app.route('/api/sleeves', sleeves)
   app.route('/api/pools', pools)
   app.route('/api/ens', ens)
   app.route('/api/apy', apyRoutes(options.apyFetch ?? ((input, init) => fetch(input, init)), options.apyCache))

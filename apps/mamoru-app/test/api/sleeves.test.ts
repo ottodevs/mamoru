@@ -3,8 +3,7 @@ import { Database } from 'bun:sqlite'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { SessionView, SleeveView } from '@mamoru/domain'
-import { baseRegistry, monadRegistry, type Registry } from '@mamoru/registry'
-import { resetOperatorHealth, safeDerivationDiff, SAFE_DERIVATION_NAMES } from '../../src/api/sleeves.ts'
+import { resetOperatorHealth } from '../../src/api/sleeves.ts'
 import { upsertActivity } from '../../src/api/accounts/activity.ts'
 import { harness, ORIGIN, PASSKEY_A, register, sessionCookie } from './helpers.ts'
 
@@ -43,6 +42,16 @@ async function owner(h: ReturnType<typeof harness>) {
   return { cookie: sessionCookie(res), base: (await res.json()) as { accountKey: string; address: string } }
 }
 
+/** The row the Worker upserts once the Base operator reports the owner's remote Safe (remote.ts), written straight to D1. */
+function seedSleeve(h: ReturnType<typeof harness>, base: { accountKey: string }, address = `0x${'77'.repeat(20)}`): SleeveView {
+  const accountKey = crypto.randomUUID()
+  h.db.raw
+    .query(`INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, preset, policy_version, created_at, env, is_test, remote_json)
+      SELECT ?, user_id, 143, ?, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, preset, policy_version, created_at, env, is_test, '{"chainId":143}' FROM accounts WHERE account_key = ?`)
+    .run(accountKey, address, base.accountKey)
+  return { accountKey, chainId: 143, chain: 'Monad', address: address as SleeveView['address'] }
+}
+
 const at = (h: ReturnType<typeof harness>, origin: string, path: string, cookie: string, init: RequestInit = {}) => {
   const headers = new Headers(init.headers)
   headers.set('cookie', cookie)
@@ -53,24 +62,8 @@ const at = (h: ReturnType<typeof harness>, origin: string, path: string, cookie:
   return h.app.request(`${origin}${path}`, { ...init, headers }, h.env)
 }
 
-describe('Safe address across chains', () => {
-  test('every contract the counterfactual address reads is the same, with the same pinned code, on Base and Monad', () => {
-    expect(safeDerivationDiff(baseRegistry, monadRegistry)).toEqual([])
-  })
-
-  test('a contract that differs (address or code hash) is named, so no address is claimed on that chain', () => {
-    const moved: Registry = { ...monadRegistry, entries: monadRegistry.entries.map((e) => (e.name === 'Safe7579Launchpad' ? { ...e, address: '0x0000000000000000000000000000000000000001' } : e)) }
-    expect(safeDerivationDiff(baseRegistry, moved)).toEqual(['Safe7579Launchpad'])
-    const recompiled: Registry = { ...monadRegistry, entries: monadRegistry.entries.map((e) => (e.name === 'SafeL2_141' ? { ...e, codeHash: `0x${'00'.repeat(32)}` } : e)) }
-    expect(safeDerivationDiff(baseRegistry, recompiled)).toEqual(['SafeL2_141'])
-    const missing: Registry = { ...monadRegistry, entries: monadRegistry.entries.filter((e) => e.name !== 'SafeProxyFactory_141') }
-    expect(safeDerivationDiff(baseRegistry, missing)).toEqual(['SafeProxyFactory_141'])
-    expect(SAFE_DERIVATION_NAMES).toContain('SafeProxyFactory_141')
-  })
-})
-
 describe('the monad_sleeves gate', () => {
-  test('flag off on beta: the session is what it was and POST /api/sleeves is 404', async () => {
+  test('flag off on beta: the session is what it was', async () => {
     const h = harness()
     const { cookie, base } = await owner(h)
     const session = (await (await at(h, BETA, '/api/session', cookie)).json()) as SessionView
@@ -89,42 +82,22 @@ describe('the monad_sleeves gate', () => {
 })
 
 describe('a Monad sleeve on beta', () => {
-  test('opens with the same address on chain 143, its own key, Base stays the default; a second POST returns it', async () => {
+  test('the session lists the Monad sleeve beside Base, Base stays the default, and POST /api/sleeves is gone', async () => {
     const { h } = monadHarness()
     flag(h, 1)
     const { cookie, base } = await owner(h)
     const before = (await (await at(h, BETA, '/api/session', cookie)).json()) as SessionView
     expect(before.sleeves).toEqual([{ accountKey: base.accountKey, chainId: 8453, chain: 'Base', address: base.address as SleeveView['address'] }])
-    expect(before.addableChains).toEqual([143])
+    expect(before.addableChains).toBeUndefined()
 
-    const created = await at(h, BETA, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })
-    expect(created.status).toBe(201)
-    const sleeve = (await created.json()) as SleeveView
-    expect(sleeve).toMatchObject({ chainId: 143, chain: 'Monad', address: base.address })
-    expect(sleeve.accountKey).not.toBe(base.accountKey)
+    expect((await at(h, BETA, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })).status).toBe(404)
+    expect(h.db.raw.query('SELECT COUNT(*) AS n FROM accounts WHERE chain_id = 143').get()).toEqual({ n: 0 })
 
-    const again = await at(h, BETA, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })
-    expect(again.status).toBe(200)
-    expect(((await again.json()) as SleeveView).accountKey).toBe(sleeve.accountKey)
-
+    const sleeve = seedSleeve(h, base)
     const after = (await (await at(h, BETA, '/api/session', cookie)).json()) as SessionView
     expect(after.accountKey).toBe(base.accountKey)
-    expect(after.sleeves!.map((s) => s.chainId)).toEqual([8453, 143])
-    expect(after.addableChains).toEqual([])
-    const rows = h.db.raw.query('SELECT chain_id, address, salt_nonce, passkey_credential_id FROM accounts ORDER BY chain_id DESC').all() as Record<string, unknown>[]
-    expect(rows).toHaveLength(2)
-    expect(rows[1]).toMatchObject({ chain_id: 143, address: rows[0]!.address, salt_nonce: rows[0]!.salt_nonce, passkey_credential_id: rows[0]!.passkey_credential_id })
-  })
-
-  test('a chain outside the sleeve set is refused, and Base cannot be opened twice', async () => {
-    const { h } = monadHarness()
-    flag(h, 1)
-    const { cookie } = await owner(h)
-    for (const chainId of [8453, 1, 10143]) {
-      const res = await at(h, BETA, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId }) })
-      expect(res.status).toBe(400)
-      expect(((await res.json()) as { code: string }).code).toBe('CHAIN_UNSUPPORTED')
-    }
+    expect(after.sleeves).toEqual([{ accountKey: base.accountKey, chainId: 8453, chain: 'Base', address: base.address as SleeveView['address'] }, sleeve])
+    expect(after.addableChains).toBeUndefined()
   })
 
   test('the database holds one sleeve per owner off Base', () => {
@@ -142,7 +115,7 @@ describe('a Monad sleeve on beta', () => {
     const { h, calls } = monadHarness()
     flag(h, 1)
     const { cookie, base } = await owner(h)
-    const sleeve = (await (await at(h, BETA, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })).json()) as SleeveView
+    const sleeve = seedSleeve(h, base)
     calls.length = 0
     expect((await at(h, BETA, `/api/accounts/${sleeve.accountKey}/funding`, cookie)).status).toBe(200)
     expect((await at(h, BETA, `/api/accounts/${base.accountKey}/funding`, cookie)).status).toBe(200)
@@ -154,8 +127,8 @@ describe('a Monad sleeve on beta', () => {
   test('activity carries the chain of the sleeve it was recorded for', async () => {
     const { h } = monadHarness()
     flag(h, 1)
-    const { cookie } = await owner(h)
-    const sleeve = (await (await at(h, BETA, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })).json()) as SleeveView
+    const { base } = await owner(h)
+    const sleeve = seedSleeve(h, base)
     await upsertActivity(h.db, sleeve.accountKey, new Date('2026-10-23T08:00:00Z'))
     expect(h.db.raw.query('SELECT chain_id, hits FROM account_activity WHERE account_key = ? AND day = ?').get(sleeve.accountKey, '2026-10-23')).toEqual({ chain_id: 143, hits: 1 })
   })
@@ -167,7 +140,7 @@ describe('review of PR #115: a Monad sleeve only where someone can operate it, f
     const ready = monadHarness()
     flag(ready.h, 1)
     const { cookie, base } = await owner(ready.h)
-    const sleeve = (await (await at(ready.h, BETA, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })).json()) as SleeveView
+    const sleeve = seedSleeve(ready.h, base)
     const broken = monadHarness(opts)
     broken.h.env.DB = ready.h.env.DB
     return { ...broken, db: ready.h.db, cookie, base, sleeve }
@@ -185,7 +158,6 @@ describe('review of PR #115: a Monad sleeve only where someone can operate it, f
     const session = (await (await at(h, origin, '/api/session', cookie)).json()) as SessionView
     expect(session.accountKey).toBe(base.accountKey)
     expect((session.sleeves ?? []).map((s) => s.chainId)).not.toContain(143)
-    expect(session.addableChains ?? []).toEqual([])
   }
 
   test('prod host: the Monad account is hidden on every route, and nothing is forwarded', async () => {
@@ -199,15 +171,9 @@ describe('review of PR #115: a Monad sleeve only where someone can operate it, f
     await hidden(t.h, t.calls, BETA, t.cookie, t.base, t.sleeve)
   })
 
-  test('OPERATOR_URL_143 unset: not offered, not opened (503, no row), an existing one hidden', async () => {
+  test('OPERATOR_URL_143 unset: an existing sleeve is hidden', async () => {
     const t = await withSleeve({ monadUrl: null })
     await hidden(t.h, t.calls, BETA, t.cookie, t.base, t.sleeve)
-    const fresh = monadHarness({ monadUrl: null })
-    flag(fresh.h, 1)
-    const o = await owner(fresh.h)
-    const res = await at(fresh.h, BETA, '/api/sleeves', o.cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })
-    expect(res.status).toBe(503)
-    expect(fresh.h.db.raw.query('SELECT COUNT(*) AS n FROM accounts WHERE chain_id = 143').get()).toEqual({ n: 0 })
   })
 
   test('an operator at OPERATOR_URL_143 that reports another chain (or no health) is not ready', async () => {
@@ -246,5 +212,33 @@ describe('migrations/d1/0017_chain_keyed_sleeves.sql', () => {
     await upsertActivity(h.db, 'k9', new Date('2026-10-23T08:00:00Z'))
     await upsertActivity(h.db, 'k9', new Date('2026-10-23T09:00:00Z'))
     expect(h.db.raw.query('SELECT hits FROM account_activity').get()).toEqual({ hits: 2 })
+  })
+})
+
+describe('migrations/d1/*_remote_safe.sql', () => {
+  const dir = join(import.meta.dir, '../../../../migrations/d1')
+  const files = readdirSync(dir).filter((f) => f.endsWith('.sql')).sort()
+  const mine = files.find((f) => f.endsWith('_remote_safe.sql'))!
+
+  test('the same-address sleeve rows and what hangs off them go; Base rows and their data stay', () => {
+    const db = new Database(':memory:', { strict: true })
+    db.exec('PRAGMA foreign_keys = ON')
+    for (const f of files) if (f !== mine) db.exec(readFileSync(join(dir, f), 'utf8'))
+    db.exec(`INSERT INTO users (user_id, created_at) VALUES ('u1', '2026-10-01')`)
+    const acc = (key: string, chain: number, addr: string) => db.exec(`INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at) VALUES ('${key}', 'u1', ${chain}, '${addr}', '[]', 'c1', '0x1', '0x2', '1', 'v', '2026-10-01')`)
+    acc('base', 8453, '0xa')
+    acc('sleeve', 143, '0xa')
+    for (const k of ['base', 'sleeve']) {
+      db.exec(`INSERT INTO proj_account_state (account_key, chain_id, block, block_hash, observed_at, deployed, tokens_json, total_value) VALUES ('${k}', 1, 10, '0xh', 't', 1, '[]', '5')`)
+      db.exec(`INSERT INTO account_activity (account_key, day, hits, first_at, last_at) VALUES ('${k}', '2026-10-01', 1, 'a', 'b')`)
+    }
+    db.exec(readFileSync(join(dir, mine), 'utf8'))
+    expect(db.query('SELECT account_key FROM accounts').all()).toEqual([{ account_key: 'base' }])
+    expect(db.query('SELECT account_key FROM proj_account_state').all()).toEqual([{ account_key: 'base' }])
+    expect(db.query('SELECT account_key FROM account_activity').all()).toEqual([{ account_key: 'base' }])
+    // A remote row written after the migration survives a second run (it carries its remote_json).
+    db.exec(`INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at, remote_json) VALUES ('remote', 'u1', 143, '0xb', '[]', 'c1', '0x1', '0x2', '1', 'v', '2026-10-02', '{}')`)
+    db.exec(`DELETE FROM accounts WHERE chain_id <> 8453 AND remote_json IS NULL`)
+    expect(db.query('SELECT account_key FROM accounts ORDER BY account_key').all()).toEqual([{ account_key: 'base' }, { account_key: 'remote' }])
   })
 })

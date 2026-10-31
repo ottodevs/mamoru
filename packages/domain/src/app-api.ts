@@ -334,6 +334,9 @@ export type OwnerTxToSign = {
   prepareId: string
   policyId?: string        // renew (otto/mamoru#151): the policy the summary describes; the row shows it only while it is still the offered one
   move?: boolean           // renew: it moves the account to another policy (true) or renews the account's own (false)
+  // otto/mamoru#251: this approval also provisions the account's own Safe on another chain, at `address`, whose setup
+  // carries `spec`'s sessions; the bridge-out grant it signs mints only there. The Worker recomputes the address.
+  remote?: { chainId: number; address: Hex0x; spec: RemoteSpec }
 }
 // WebAuthn assertion for SafeWebAuthnSharedSigner (base64url fields as returned by the browser).
 export type OwnerSignature = {
@@ -400,7 +403,16 @@ export type AccountContext = {
   owners: Hex0x[]
   saltNonce: string       // decimal
   passkey: { credentialId: string; x: Hex0x; y: Hex0x }
+  /** otto/mamoru#251: the Safe's setup carries these sessions (the account's own Safe on a remote bucket's chain). */
+  remote?: RemoteSpec
 }
+
+/**
+ * otto/mamoru#251: what fixes the account's own Safe on the chain of a v6 remote bucket (Monad), besides the owner's keys:
+ * the remote policy, the remote operator's session key, the validity and the cap its sessions are sized at (raw USDC).
+ * `remoteSafe` (packages/account/remote) turns keys + spec into the setup and the address; the Base approval commits to it.
+ */
+export type RemoteSpec = { chainId: number; policyId: string; sessionKey: Hex0x; validAfter: number; validUntil: number; capUsdc: string }
 
 // One current and one monthly APY for the account (public, no session). Until positions earn
 // fees: the plan's pools' APYs weighted by the policy bucket weights. `pool` = the plan's policyId.

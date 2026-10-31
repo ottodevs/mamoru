@@ -21,6 +21,8 @@ export type AccountRow = {
   env: 'prod' | 'beta'
   /** 1 for Ot's test account and any coordinator smoke-test account; 0 for a real signup (same migration). */
   is_test: number
+  /** otto/mamoru#251: the RemoteSpec (JSON) of an account that is the remote Safe of a Base account; null on Base and on every account before the migration. */
+  remote_json?: string | null
 }
 
 /** The owner's default sleeve: the Base account (otto/mamoru#67: a Monad sleeve is never the one a session opens on). */
