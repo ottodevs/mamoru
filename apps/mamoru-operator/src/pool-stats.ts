@@ -91,17 +91,22 @@ export class PoolStatsCache {
   private readonly refreshMs: number
   private readonly staleMs: number
   private readonly timeoutMs: number
+  private readonly gapMs: number
+  private readonly retryMs: number
   private readonly stateFile: string | undefined
 
   constructor(
     private readonly pools: PoolStatsPool[],
-    opts: { fetch?: Fetch; now?: () => number; refreshMs?: number; staleMs?: number; timeoutMs?: number; stateFile?: string } = {},
+    opts: { fetch?: Fetch; now?: () => number; refreshMs?: number; staleMs?: number; timeoutMs?: number; gapMs?: number; retryMs?: number; stateFile?: string } = {},
   ) {
     this.fetchFn = opts.fetch ?? ((url, init) => fetch(url, init))
     this.now = opts.now ?? Date.now
     this.refreshMs = opts.refreshMs ?? 3_600_000
     this.staleMs = opts.staleMs ?? 6 * 3_600_000
     this.timeoutMs = opts.timeoutMs ?? 10_000
+    // GeckoTerminal's free tier answers a burst of calls with 429: space them. A source that failed is tried again sooner.
+    this.gapMs = opts.gapMs ?? 7_000
+    this.retryMs = opts.retryMs ?? 300_000
     this.stateFile = opts.stateFile
     this.load()
   }
@@ -161,8 +166,11 @@ export class PoolStatsCache {
         const part = parseLlamaChart(llama, nowSec)
         if (part.tvl1dAgoUsd !== null || part.tvl7dAgoUsd !== null || part.tvl30dAgoUsd !== null) entryOf.llama = { at: now, part }
       }
+      await this.pause()
       const pool = await this.getJson(`${GECKO}${p.address}`)
+      await this.pause()
       const ohlcv = await this.getJson(`${GECKO}${p.address}/ohlcv/day?limit=29`)
+      await this.pause()
       const tvlUsd = pool === undefined ? null : parseGeckoPool(pool)
       const vols = ohlcv === undefined ? null : parseGeckoOhlcv(ohlcv, nowSec)
       if (tvlUsd !== null || vols) {
@@ -180,8 +188,15 @@ export class PoolStatsCache {
       }
       this.cache.set(p.name, entryOf)
       this.attempted.add(p.name)
+      const g = entryOf.gecko?.part
+      const complete = llama !== undefined && pool !== undefined && ohlcv !== undefined && g?.volume7dUsd != null && g.tvlUsd != null
+      if (!complete) this.lastTry.set(p.name, now - this.refreshMs + this.retryMs)
     }
     this.persist()
+  }
+
+  private pause(): Promise<void> {
+    return this.gapMs > 0 ? new Promise((r) => setTimeout(r, this.gapMs)) : Promise.resolve()
   }
 
   /** undefined on any failure (timeout, HTTP error, bad JSON). */

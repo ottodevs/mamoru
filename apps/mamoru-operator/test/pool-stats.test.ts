@@ -83,7 +83,7 @@ describe('parsers on real payloads', () => {
 describe('PoolStatsCache', () => {
   test('first read starts a refresh; stats arrive from memory; User-Agent set, no keys', async () => {
     const { f, urls, headers } = fetcher()
-    const c = new PoolStatsCache([P], { fetch: f, now: () => NOW })
+    const c = new PoolStatsCache([P], { fetch: f, now: () => NOW, gapMs: 0 })
     expect(c.get()).toEqual({}) // nothing yet: no entry, so no "unread" noise at boot
     await c.settled()
     const s = c.get()[P.name]!
@@ -98,7 +98,7 @@ describe('PoolStatsCache', () => {
   test('at most one refresh per hour per pool', async () => {
     let t = NOW
     const { f, urls } = fetcher()
-    const c = new PoolStatsCache([P], { fetch: f, now: () => t })
+    const c = new PoolStatsCache([P], { fetch: f, now: () => t, gapMs: 0 })
     await c.settled()
     t += 59 * 60_000
     c.get()
@@ -114,7 +114,7 @@ describe('PoolStatsCache', () => {
     let mode: { fail?: boolean } = {}
     const good = fetcher()
     const bad = fetcher({ fail: true })
-    const c = new PoolStatsCache([P], { fetch: (u, i) => (mode.fail ? bad.f(u, i) : good.f(u, i)), now: () => t, staleMs: 6 * 3_600_000 })
+    const c = new PoolStatsCache([P], { fetch: (u, i) => (mode.fail ? bad.f(u, i) : good.f(u, i)), now: () => t, gapMs: 0, staleMs: 6 * 3_600_000 })
     await c.settled()
     const before = c.get()[P.name]!
     mode = { fail: true }
@@ -137,7 +137,7 @@ describe('PoolStatsCache', () => {
     let hang = false
     const good = fetcher()
     const slow = fetcher({ hang: true })
-    const c = new PoolStatsCache([P], { fetch: (u, i) => (hang ? slow.f(u, i) : good.f(u, i)), now: () => t, timeoutMs: 20 })
+    const c = new PoolStatsCache([P], { fetch: (u, i) => (hang ? slow.f(u, i) : good.f(u, i)), now: () => t, gapMs: 0, timeoutMs: 20 })
     await c.settled()
     const before = c.get()[P.name]!
     hang = true
@@ -147,13 +147,29 @@ describe('PoolStatsCache', () => {
   })
 
   test('first fetch fails: nothing cached, then a null entry (unread) rather than silence', async () => {
-    const c = new PoolStatsCache([P], { fetch: fetcher({ fail: true }).f, now: () => NOW })
+    const c = new PoolStatsCache([P], { fetch: fetcher({ fail: true }).f, now: () => NOW, gapMs: 0 })
     await c.settled()
     expect(c.get()[P.name]).toMatchObject({ tvlUsd: null, volume7dUsd: null, tvl30dAgoUsd: null })
   })
 
+  test('a source that failed is tried again after retryMs, not after the hour', async () => {
+    let t = NOW
+    let fail = true
+    const good = fetcher()
+    const bad = fetcher({ fail: true })
+    const c = new PoolStatsCache([P], { fetch: (u, i) => (fail ? bad.f(u, i) : good.f(u, i)), now: () => t, gapMs: 0, retryMs: 300_000 })
+    await c.settled()
+    fail = false
+    t += 200_000
+    await c.settled()
+    expect(c.get()[P.name]!.tvlUsd).toBeNull()
+    t += 150_000
+    await c.settled()
+    expect(c.get()[P.name]!.tvlUsd).toBeGreaterThan(0)
+  })
+
   test('a throwing fetch function is contained', async () => {
-    const c = new PoolStatsCache([P], { fetch: () => { throw new Error('boom') }, now: () => NOW })
+    const c = new PoolStatsCache([P], { fetch: () => { throw new Error('boom') }, now: () => NOW, gapMs: 0 })
     await c.settled()
     expect(() => c.get()).not.toThrow()
   })
@@ -161,12 +177,12 @@ describe('PoolStatsCache', () => {
   test('state file: written atomically, a new cache resumes from it without fetching inside the hour', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'pool-stats-'))
     const stateFile = join(dir, 'pool-stats.json')
-    const a = new PoolStatsCache([P], { fetch: fetcher().f, now: () => NOW, stateFile })
+    const a = new PoolStatsCache([P], { fetch: fetcher().f, now: () => NOW, gapMs: 0, stateFile })
     await a.settled()
     expect(existsSync(stateFile)).toBe(true)
     expect(existsSync(`${stateFile}.tmp`)).toBe(false)
     const { f, urls } = fetcher()
-    const b = new PoolStatsCache([P], { fetch: f, now: () => NOW + 60_000, stateFile })
+    const b = new PoolStatsCache([P], { fetch: f, now: () => NOW + 60_000, gapMs: 0, stateFile })
     expect(b.get()[P.name]).toEqual(a.get()[P.name])
     await b.settled()
     expect(urls).toHaveLength(0)
