@@ -32,7 +32,7 @@ function fetcher(mode: { fail?: boolean; hang?: boolean } = {}) {
 }
 
 describe('parsers on real payloads', () => {
-  test('DefiLlama chart: TVL 1d / 7d / 30d before the latest point', () => {
+  test('DefiLlama chart: TVL 1d / 7d / 30d before now', () => {
     const p = parseLlamaChart(LLAMA, NOW_S)
     expect(p.tvl1dAgoUsd).toBeGreaterThan(0)
     expect(p.tvl7dAgoUsd).toBeGreaterThan(0)
@@ -48,8 +48,11 @@ describe('parsers on real payloads', () => {
     expect(p.tvl30dAgoUsd).toBe(near(30))
   })
 
-  test('DefiLlama chart: a series older than two days, or no data, is null', () => {
-    expect(parseLlamaChart(LLAMA, NOW_S + 3 * 86_400)).toEqual({ tvl1dAgoUsd: null, tvl7dAgoUsd: null, tvl30dAgoUsd: null })
+  test('DefiLlama chart: anchored on now, so a series that stopped days ago has no 1d value (never an older point labelled 1d); no data is null', () => {
+    const late = parseLlamaChart(LLAMA, NOW_S + 3 * 86_400)
+    expect(late.tvl1dAgoUsd).toBeNull()
+    // 7d before (now + 3d) is 4 days before the fixture's day: that point exists and is the one used.
+    expect(late.tvl7dAgoUsd).toBeGreaterThan(0)
     expect(parseLlamaChart({ data: [] }, NOW_S).tvl7dAgoUsd).toBeNull()
     expect(parseLlamaChart('x', NOW_S).tvl7dAgoUsd).toBeNull()
   })
@@ -72,6 +75,12 @@ describe('parsers on real payloads', () => {
     // yesterday missing: the last day is unknown, not shifted
     const gap = { data: { attributes: { ohlcv_list: (OHLCV as { data: { attributes: { ohlcv_list: number[][] } } }).data.attributes.ohlcv_list.filter((_, i) => i !== 1) } } }
     expect(parseGeckoOhlcv(gap, NOW_S).volumeLastDayUsd).toBeNull()
+    // a day missing inside the 7d window: unread, never summed as zero volume
+    const inner = { data: { attributes: { ohlcv_list: (OHLCV as { data: { attributes: { ohlcv_list: number[][] } } }).data.attributes.ohlcv_list.filter((_, i) => i !== 4) } } }
+    const v4 = parseGeckoOhlcv(inner, NOW_S)
+    expect(v4.volumeLastDayUsd).not.toBeNull()
+    expect(v4.volume7dUsd).toBeNull()
+    expect(v4.volume28dAvgUsd).toBeNull()
   })
 
   test('GeckoTerminal pool: reserve_in_usd as a number', () => {
@@ -84,7 +93,8 @@ describe('PoolStatsCache', () => {
   test('first read starts a refresh; stats arrive from memory; User-Agent set, no keys', async () => {
     const { f, urls, headers } = fetcher()
     const c = new PoolStatsCache([P], { fetch: f, now: () => NOW, gapMs: 0 })
-    expect(c.get()).toEqual({}) // nothing yet: no entry, so no "unread" noise at boot
+    // nothing yet: an all-null entry, so the rule reports the pool unread instead of staying silent
+    expect(c.get()[P.name]).toMatchObject({ tvlUsd: null, tvl7dAgoUsd: null, volume7dUsd: null, asOf: 0 })
     await c.settled()
     const s = c.get()[P.name]!
     expect(s.tvlUsd).toBeGreaterThan(0)
@@ -130,6 +140,29 @@ describe('PoolStatsCache', () => {
     expect(stale.tvlUsd).toBeNull()
     expect(stale.volume7dUsd).toBeNull()
     expect(stale.tvl7dAgoUsd).toBeNull()
+  })
+
+  test('each source goes stale on its own: OHLCV failing every hour does not keep old volumes alive behind a fresh pool read', async () => {
+    let t = NOW
+    let ohlcvFails = false
+    const good = fetcher()
+    const c = new PoolStatsCache([P], {
+      fetch: (u, i) => (ohlcvFails && u.endsWith('/ohlcv/day?limit=29') ? Promise.resolve({ ok: false, status: 429, json: async () => ({}) }) : good.f(u, i)),
+      now: () => t,
+      gapMs: 0,
+      staleMs: 6 * 3_600_000,
+    })
+    await c.settled()
+    ohlcvFails = true
+    for (let h = 0; h < 7; h++) {
+      t += 3_700_000
+      await c.settled()
+    }
+    const s = c.get()[P.name]!
+    expect(s.tvlUsd).toBeGreaterThan(0)
+    expect(s.tvl7dAgoUsd).toBeGreaterThan(0)
+    expect(s.volume7dUsd).toBeNull()
+    expect(s.volumeLastDayUsd).toBeNull()
   })
 
   test('a timeout keeps the last good value and never throws', async () => {

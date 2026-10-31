@@ -29,7 +29,7 @@ const num = (v: unknown): number | null => {
 export type LlamaPart = { tvl1dAgoUsd: number | null; tvl7dAgoUsd: number | null; tvl30dAgoUsd: number | null }
 export type GeckoPart = { tvlUsd: number | null; volume7dUsd: number | null; volumeLastDayUsd: number | null; volume28dAvgUsd: number | null }
 
-/** TVL N days before the series' own latest point: the nearest point, within 36 h of the target; null when the series is older than 2 days. */
+/** TVL N days before now: the nearest daily point, within 12 h of the target (null otherwise, never a point from another day). */
 export function parseLlamaChart(json: unknown, nowSec: number): LlamaPart {
   const none: LlamaPart = { tvl1dAgoUsd: null, tvl7dAgoUsd: null, tvl30dAgoUsd: null }
   const data = (json as { data?: unknown })?.data
@@ -40,12 +40,10 @@ export function parseLlamaChart(json: unknown, nowSec: number): LlamaPart {
     return Number.isFinite(t) && v !== null ? [{ t, v }] : []
   })
   if (!pts.length) return none
-  const last = pts.reduce((a, b) => (b.t > a.t ? b : a))
-  if (nowSec - last.t > 2 * DAY) return none
   const at = (days: number): number | null => {
-    const target = last.t - days * DAY
+    const target = nowSec - days * DAY
     const best = pts.reduce((a, b) => (Math.abs(b.t - target) < Math.abs(a.t - target) ? b : a))
-    return Math.abs(best.t - target) <= 1.5 * DAY ? best.v : null
+    return Math.abs(best.t - target) <= DAY / 2 ? best.v : null
   }
   return { tvl1dAgoUsd: at(1), tvl7dAgoUsd: at(7), tvl30dAgoUsd: at(30) }
 }
@@ -60,15 +58,14 @@ export function parseGeckoOhlcv(json: unknown, nowSec: number): Pick<GeckoPart, 
     .flatMap((r) => (Array.isArray(r) && typeof r[0] === 'number' && num(r[5]) !== null ? [{ t: r[0] as number, v: r[5] as number }] : []))
     .filter((r) => r.t < today)
     .sort((a, b) => b.t - a.t)
-  // Consecutive days only: a gap (no trades that day are omitted by the API) would otherwise shift the windows.
-  const days: number[] = []
-  for (let i = 0; i < 28; i++) days.push(rows.find((r) => r.t === today - (i + 1) * DAY)?.v ?? 0)
-  const have = new Set(rows.map((r) => r.t))
-  const covered = (n: number) => rows.length > 0 && rows[0]!.t === today - DAY && [...Array(n).keys()].filter((i) => have.has(today - (i + 1) * DAY)).length >= n - 1
-  const sum = (n: number) => days.slice(0, n).reduce((a, b) => a + b, 0)
+  // Every day of the window must be there: a missing row is unread data (D8), never counted as zero volume.
+  const byDay = new Map(rows.map((r) => [r.t, r.v]))
+  const days = [...Array(28).keys()].map((i) => byDay.get(today - (i + 1) * DAY))
+  const covered = (n: number) => days.slice(0, n).every((v) => v !== undefined)
+  const sum = (n: number) => days.slice(0, n).reduce<number>((a, b) => a + (b ?? 0), 0)
   return {
     volume7dUsd: covered(7) ? sum(7) : null,
-    volumeLastDayUsd: rows.length && rows[0]!.t === today - DAY ? days[0]! : null,
+    volumeLastDayUsd: days[0] ?? null,
     volume28dAvgUsd: covered(28) ? sum(28) / 28 : null,
   }
 }
@@ -78,13 +75,13 @@ export function parseGeckoPool(json: unknown): number | null {
 }
 
 type Cached<T> = { at: number; part: T }
-type PoolCache = { llama?: Cached<LlamaPart>; gecko?: Cached<GeckoPart> }
+type Vols = Pick<GeckoPart, 'volume7dUsd' | 'volumeLastDayUsd' | 'volume28dAvgUsd'>
+/** One timestamp per source: a source that keeps failing goes stale on its own while the others stay fresh. */
+type PoolCache = { llama?: Cached<LlamaPart>; tvl?: Cached<number>; vols?: Cached<Vols> }
 
 export class PoolStatsCache {
   private readonly cache = new Map<string, PoolCache>()
   private lastTry = new Map<string, number>()
-  /** Pools whose first attempt has finished (success or not): only then does missing data mean unread. */
-  private readonly attempted = new Set<string>()
   private inFlight: Promise<void> | null = null
   private readonly fetchFn: Fetch
   private readonly now: () => number
@@ -118,22 +115,20 @@ export class PoolStatsCache {
     const now = this.now()
     for (const p of this.pools) {
       const c = this.cache.get(p.name)
-      const llama = c?.llama && now - c.llama.at <= this.staleMs ? c.llama : undefined
-      const gecko = c?.gecko && now - c.gecko.at <= this.staleMs ? c.gecko : undefined
-      if (!llama && !gecko) {
-        // Tried at least once and nothing fresh: say so (the rule reports it unread) instead of staying silent.
-        if (this.attempted.has(p.name)) out[p.name] = { tvlUsd: null, tvl1dAgoUsd: null, tvl7dAgoUsd: null, tvl30dAgoUsd: null, volume7dUsd: null, volumeLastDayUsd: null, volume28dAvgUsd: null, asOf: 0 }
-        continue
-      }
+      const fresh = <T>(x: Cached<T> | undefined) => (x && now - x.at <= this.staleMs ? x : undefined)
+      const llama = fresh(c?.llama)
+      const tvl = fresh(c?.tvl)
+      const vols = fresh(c?.vols)
+      // Every pool gets an entry, also before the first fetch ends: missing fields are reported unread, never silent.
       out[p.name] = {
-        tvlUsd: gecko?.part.tvlUsd ?? null,
+        tvlUsd: tvl?.part ?? null,
         tvl1dAgoUsd: llama?.part.tvl1dAgoUsd ?? null,
         tvl7dAgoUsd: llama?.part.tvl7dAgoUsd ?? null,
         tvl30dAgoUsd: llama?.part.tvl30dAgoUsd ?? null,
-        volume7dUsd: gecko?.part.volume7dUsd ?? null,
-        volumeLastDayUsd: gecko?.part.volumeLastDayUsd ?? null,
-        volume28dAvgUsd: gecko?.part.volume28dAvgUsd ?? null,
-        asOf: Math.floor(Math.max(llama?.at ?? 0, gecko?.at ?? 0) / 1000),
+        volume7dUsd: vols?.part.volume7dUsd ?? null,
+        volumeLastDayUsd: vols?.part.volumeLastDayUsd ?? null,
+        volume28dAvgUsd: vols?.part.volume28dAvgUsd ?? null,
+        asOf: Math.floor(Math.max(llama?.at ?? 0, tvl?.at ?? 0, vols?.at ?? 0) / 1000),
       } satisfies Stats
     }
     return out
@@ -171,25 +166,13 @@ export class PoolStatsCache {
       await this.pause()
       const ohlcv = await this.getJson(`${GECKO}${p.address}/ohlcv/day?limit=29`)
       await this.pause()
+      // Each source keeps its last good value and its own timestamp: a failure never refreshes another source's data.
       const tvlUsd = pool === undefined ? null : parseGeckoPool(pool)
+      if (tvlUsd !== null) entryOf.tvl = { at: now, part: tvlUsd }
       const vols = ohlcv === undefined ? null : parseGeckoOhlcv(ohlcv, nowSec)
-      if (tvlUsd !== null || vols) {
-        // Keep the last good value of each half; the other half still moves forward.
-        const prev = entryOf.gecko?.part
-        entryOf.gecko = {
-          at: now,
-          part: {
-            tvlUsd: tvlUsd ?? prev?.tvlUsd ?? null,
-            volume7dUsd: vols?.volume7dUsd ?? prev?.volume7dUsd ?? null,
-            volumeLastDayUsd: vols?.volumeLastDayUsd ?? prev?.volumeLastDayUsd ?? null,
-            volume28dAvgUsd: vols?.volume28dAvgUsd ?? prev?.volume28dAvgUsd ?? null,
-          },
-        }
-      }
+      if (vols && vols.volume7dUsd !== null) entryOf.vols = { at: now, part: vols }
       this.cache.set(p.name, entryOf)
-      this.attempted.add(p.name)
-      const g = entryOf.gecko?.part
-      const complete = llama !== undefined && pool !== undefined && ohlcv !== undefined && g?.volume7dUsd != null && g.tvlUsd != null
+      const complete = entryOf.llama?.at === now && entryOf.tvl?.at === now && entryOf.vols?.at === now
       if (!complete) this.lastTry.set(p.name, now - this.refreshMs + this.retryMs)
     }
     this.persist()
@@ -218,10 +201,7 @@ export class PoolStatsCache {
         const c = raw.cache?.[p.name]
         if (c && typeof c === 'object') this.cache.set(p.name, c)
         const t = raw.lastTry?.[p.name]
-        if (typeof t === 'number' && Number.isFinite(t)) {
-          this.lastTry.set(p.name, t)
-          this.attempted.add(p.name)
-        }
+        if (typeof t === 'number' && Number.isFinite(t)) this.lastTry.set(p.name, t)
       }
     } catch {
       /* a corrupt file is a cold start */
