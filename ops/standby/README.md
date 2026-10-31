@@ -76,11 +76,12 @@ each sha (`bun install --frozen-lockfile`, cached per sha), starts nothing and s
    (add `--confirm-lady-down` only in the second case of step 2).
 4. It prints each operator's health and quick tunnel URL. The named tunnel (#206: `op.mamoru.lol`,
    `op-monad.mamoru.lol`) ends on lady and its credentials never leave it, so point the Worker at the quick tunnels
-   from a machine with wrangler, beta first:
+   from a checkout with wrangler, at the repository root, beta first:
    ```sh
-   printf %s <base url>  | bunx wrangler secret put OPERATOR_URL --env beta
-   printf %s <monad url> | bunx wrangler secret put OPERATOR_URL_143 --env beta
-   printf %s <base url>  | bunx wrangler secret put OPERATOR_URL               # prod, once beta answers
+   w() { env -u CLOUDFLARE_ENV bunx wrangler --config apps/mamoru-app/wrangler.jsonc "$@"; }
+   printf %s <base url>  | w secret put OPERATOR_URL --env beta
+   printf %s <monad url> | w secret put OPERATOR_URL_143 --env beta
+   printf %s <base url>  | w secret put OPERATOR_URL              # prod (no --env), once beta answers
    ```
    Each `secret put` makes a new Worker version with the same code. During the drill of 2026-10-31 (#247) prod was
    left on lady's hostname: it showed the balance read on chain (#238) and could not move funds.
@@ -100,11 +101,16 @@ each sha (`bun install --frozen-lockfile`, cached per sha), starts nothing and s
    ```
    The state dir is replaced, not merged: files the VPS operator removed must not come back. The bundles leave out
    `*.bak*` and `*.log`, so the restored dir has only the live files (8 for Base instead of about 40 on 2026-10-31).
-   The history stays in `$d.pre-handback-*`; copying it back without overwriting is safe:
-   `cp -an "$d".pre-handback-*/{accounts.json.bak-*,operator.log} "$d"/`.
+   The history stays in the `.pre-handback-*` dirs; copying it back without overwriting is safe:
+   ```sh
+   for u in mamoru-operator mamoru-operator-monad; do
+     d=~/.local/state/$u; p="$(ls -d "$d".pre-handback-* 2>/dev/null | tail -1)"; [ -n "$p" ] || continue
+     find "$p" -maxdepth 1 -type f \( -name '*.bak*' -o -name '*.log' \) -exec cp -an {} "$d"/ \;
+   done
+   ```
 3. `ssh root@23.94.151.198 mamoru-failover clear`, then on lady `~/.local/share/mamoru-standby/fence-watch.sh resume`
    (it first pushes a bundle saying lady runs again, so an old "stood down" bundle can never start the VPS).
-   Put the Worker back on lady's named tunnel (`OPERATOR_URL=https://op.mamoru.lol` on prod and beta,
-   `OPERATOR_URL_143=https://op-monad.mamoru.lol` on beta). Shred `/tmp/handback*` (`find /tmp/handback -type f -exec
+   Put the Worker back on lady's named tunnel with the `w` of Failover step 4 (`OPERATOR_URL=https://op.mamoru.lol`
+   on prod and beta, `OPERATOR_URL_143=https://op-monad.mamoru.lol` on beta). Shred `/tmp/handback*` (`find /tmp/handback -type f -exec
    shred -u {} +`, then `shred -u /tmp/handback.age` and `rm -r /tmp/handback`).
 4. Log it on #83.
