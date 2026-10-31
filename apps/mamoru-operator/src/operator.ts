@@ -1,12 +1,12 @@
 import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
-import { address, baseRegistry, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
+import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
+import { address, baseRegistry, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
-import { MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { MONAD_LAB_POLICIES, POLICIES, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -31,6 +31,8 @@ import {
   type SafeTx,
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
+import { baseKeyOf, remoteAccountKey, remoteInput, remoteSafe } from '@mamoru/account/remote'
+import type { RemotePeer } from './remote-peer.ts'
 import { permissionIdOf, revocationCalls, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
@@ -55,7 +57,7 @@ import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
 import { DEFAULT_SPONSOR, activationRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
-import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
+import type { AccountState, ArmedActivation, RemoteSafeRecord, StateStore, StoredGrant, StoredOp } from './state.ts'
 import { livePoolStats, type PoolStatsCache } from './pool-stats.ts'
 
 /** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
@@ -470,6 +472,14 @@ export type OperatorConfig = {
    * account has a remote value, and no bridge-out is ever signed.
    */
   bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending'>
+  /**
+   * otto/mamoru#251, Base side: the operators that run the accounts' own Safes on the chains of v6's remote buckets
+   * (remote-peer.ts), by chain id. A v6 approval asks the remote one for its session key, commits to the Safe that gives,
+   * and once it lands asks it to provision that Safe. Absent for a chain: no v6 approval is built for it.
+   */
+  remotePeers?: Partial<Record<number, Pick<RemotePeer, 'key' | 'provision'>>>
+  /** otto/mamoru#251: the registry a remote Safe is derived against, by chain. Absent: the pinned one (`registryFor`). */
+  remoteRegistry?: (chainId: number) => Registry
 }
 
 /** Spec 007 T7: the live policies whose accounts the renew row moves to v4 (same three pools and weights). */
@@ -586,6 +596,8 @@ type Prepared = {
    */
   pauseChecked?: boolean
   pausedWarned?: boolean
+  /** activate/renew (otto/mamoru#251): the account's own Safe on another chain this approval provisions (its bridge-out mints only there). */
+  remote?: RemoteSafeRecord
 }
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
@@ -1283,8 +1295,6 @@ export class Operator {
     if (this.cfg.v5Policy?.policyId === acc.policyId) return this.cfg.v5Policy
     if (this.cfg.v6Policy?.policyId === acc.policyId) return this.cfg.v6Policy
     if (this.cfg.policy.policyId === acc.policyId) return this.cfg.policy
-    // otto/mamoru#214: a Monad operator on the v5 sleeve policy still serves the sleeves activated with v1.
-    if (this.cfg.chainWrites?.length && MONAD_LIVE_POLICIES[acc.policyId]) return MONAD_LIVE_POLICIES[acc.policyId]!
     // The lab twin on a fork serves lab v1 sleeves the same way (no chain-writes opt-in on a fork).
     if (MONAD_LAB_POLICIES[acc.policyId] && this.cfg.policy.chain === 'fork') return MONAD_LAB_POLICIES[acc.policyId]!
     throw new Error(`${acc.accountKey}: unknown policy ${acc.policyId}`)
@@ -1510,6 +1520,7 @@ export class Operator {
       overCap: acc.active ? null : overCap(total, cap),
       exposure: { totalUsdc: total.toString(), capUsdc: cap.toString(), overUsdc: (total > cap ? total - cap : 0n).toString(), ...(peers.ok ? {} : { peerUnavailable: true }) },
       deployMinUsdc: MIN_DEPLOY_USDC.toString(),
+      ...(acc.remote ? { remote: { chainId: acc.remote.chainId, address: acc.remote.address, spec: acc.remote.spec, ready: acc.remote.ready === true } } : {}),
       cbbtc: (r.tokens.cbBTC ?? 0n).toString(),
       gasReserveWei: this.policyOf(acc).gasReserveWei.toString(),
       active: acc.active,
@@ -1720,7 +1731,7 @@ export class Operator {
     // otto/mamoru#151: a renewal's grants are all of one policy, the one its summary was built from (renewPolicyOf).
     const policyId = kind === 'renew' ? renewPolicyOf(extra.grants ?? []) : undefined
     this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, ...(policyId ? { policyId } : {}), safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
-    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}) }
+    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}) }
   }
 
   /** The policy a renewal of `acc` targets now: the move's target when one is offered, else the account's own. */
@@ -1879,7 +1890,7 @@ export class Operator {
    * validity, with the Safe transaction that enables them. A first approval and a renewal sign the same thing.
    */
   /** `reserve`: a first activation that buys the Safe's own gas reserve in the same transaction (otto/mamoru#15, self-reserve.ts). */
-  private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, only?: string[], mode: 'full' | 'extend' = 'full', reserve?: LiveGasReserve) {
+  private async approval(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, only?: string[], mode: 'full' | 'extend' = 'full', reserve?: LiveGasReserve, remote?: RemoteSafeRecord) {
     // otto/mamoru#140 (part2 #7): a new key stays with the prepare (Prepared.sessionKey) until the owner's signature
     // over these grants is proven; nothing is written for an account that only prepares.
     const newKey = acc.sessionKey ? undefined : generatePrivateKey()
@@ -1917,6 +1928,9 @@ export class Operator {
         // #149: usage limits sized for the approval's validity at this account cap; spec 006: the one cap captured
         // for this prepare, the same one the caps above, the summary and the stored ceiling use.
         capUsdc: cap,
+        // otto/mamoru#251: bridge-out mints only to the account's own Safe on the remote chain, derived by remoteFor from
+        // this account's keys (never an address taken from a caller).
+        ...(remote ? { remoteAccount: remote.address } : {}),
       })
       return v4 && g.requiresActionPolicy ? retargetToPolicy(g, v4.d.actionPolicy, this.cfg.registry) : g
     })
@@ -2053,7 +2067,7 @@ export class Operator {
    * and must fit `budget` as before. What is left over is the account's missing grants: the renew row offers them, one
    * owner transaction at a time, through planExtend (fitted the same way), once this one has landed.
    */
-  private async fitV4(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, keys: string[], revokes: Hex[], mode: 'full' | 'extend', budget: bigint, reserve?: LiveGasReserve) {
+  private async fitV4(acc: AccountState, live: LiveAccount, policy: PolicyVersion, r: Awaited<ReturnType<typeof readSafe>>, cap: bigint, keys: string[], revokes: Hex[], mode: 'full' | 'extend', budget: bigint, reserve?: LiveGasReserve, remote?: RemoteSafeRecord) {
     // otto/mamoru#15: a self-funded activation's reserve swap rides in the same transaction, after the grants.
     const overheadGas = BigInt(revokes.length) * REVOKE_GAS_EACH + (acc.trusted ? 0n : TRUST_GAS) + ATTEST_GAS + (reserve ? STATIC_GAS_RESERVE_SWAP : 0n)
     const ordered = orderV4Keys(policy, keys)
@@ -2061,7 +2075,7 @@ export class Operator {
     const guess = splitV4Keys(policy, ordered, { overheadGas, ceiling: target })[0]?.length ?? 0
     const built = new Map<number, { a: Awaited<ReturnType<Operator['approval']>>; calls: ReturnType<typeof revocationCalls>; gas: bigint; simulated: boolean }>()
     const build = async (ks: string[]) => {
-      const a = await this.approval(acc, live, policy, r, cap, ks, mode, reserve)
+      const a = await this.approval(acc, live, policy, r, cap, ks, mode, reserve, remote)
       const calls = [...revocationCalls(revokes, this.cfg.registry), ...a.batch.calls]
       const fallback = overheadGas + a.stored.reduce((n, g) => n + estimateSessionGas(g.grant.actions.length), 0n)
       // The gas LIMIT the owner transaction needs, before refunds (a revoke clears storage: t8-fork measured
@@ -2144,14 +2158,17 @@ export class Operator {
       const paused = await this.readPaused(acc, r.block)
       if (paused === null) throw new HttpError(503, 'PAUSE_STATE_UNAVAILABLE', "whether a guardian has paused Mamoru on your Safe could not be read just now: nothing was changed, try again in a minute")
       const keys = target ? policy.session.grants.filter((g) => !g.perPosition).map(grantKey) : acc.grants.map((g) => g.name)
-      const f = await this.fitV4(acc, live, policy, r, cap, keys, old, 'full', RENEW_GAS_BUDGET)
+      // otto/mamoru#251: v6 provisions the account's own Safe on Monad in this same approval.
+      const remote = await this.remoteFor(acc, policy, cap, r.block)
+      const f = await this.fitV4(acc, live, policy, r, cap, keys, old, 'full', RENEW_GAS_BUDGET, undefined, remote)
       // otto/mamoru#151: the move to MamoruActionPolicyV2 (v5) names what it adds besides the on-chain limits.
       const toV5 = !!target && !!target.actionPolicy && target.actionPolicy.contractVersion === 2
       const summary = [
         ...(paused ? ['A guardian key has paused Mamoru on this Safe. This renewal ends that pause: approve it only if you know why it was paused'] : []),
         target ? `Renew Mamoru's approval on your Safe ${live.safe} and move it to ${toV5 ? 'the new version of its on-chain limits' : 'on-chain limits'}` : `Renew Mamoru's approval on your Safe ${live.safe}`,
         ...(target ? ['Mamoru can now trade only near the market price, and only the positions it opened'] : []),
-        ...(target?.remoteBuckets?.length ? [`Mamoru can also move part of your savings, as USDC through Circle's bridge, to your own address on Monad, where your Monad sleeve holds the Growth share; USDC/cbBTC is only wound down, nothing new goes into it`] : []),
+        ...this.remoteLines(policy, remote),
+        ...(target?.remoteBuckets?.length ? ['USDC/cbBTC is only wound down, nothing new goes into it'] : []),
         ...(toV5 ? ['It can add to a position it already holds instead of opening another one', 'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause'] : []),
         `Engine key ${f.sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero, sized for deposits up to ${fmtUsdc(cap)} USDC (your cap):`,
         ...this.v4Lines(f.stored, policy, cap),
@@ -2162,7 +2179,7 @@ export class Operator {
         'Nothing is moved: your positions stay as they are',
         'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
       ]
-      return this.hold(acc, live, 'renew', f.calls, summary, { grants: f.stored, revokes: old, capUsdc: cap.toString(), move: !!target, pauseChecked: true, pausedWarned: paused })
+      return this.hold(acc, live, 'renew', f.calls, summary, { grants: f.stored, revokes: old, capUsdc: cap.toString(), move: !!target, pauseChecked: true, pausedWarned: paused, ...(remote ? { remote } : {}) })
     }
     const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, acc.grants.map((g) => g.name), old, cap)
     // Named so the renewal says, every time, exactly what the engine keeps doing without asking again: not every
@@ -2200,7 +2217,8 @@ export class Operator {
     const cap = this.signedCapOf(acc)
     if (isV4(policy)) {
       // Spec 007 T7 (c): the next transaction of a v4 approval, at the generation the earlier ones enabled.
-      const f = await this.fitV4(acc, live, policy, r, cap, missing, old, 'extend', RENEW_GAS_BUDGET)
+      const remote = await this.remoteFor(acc, policy, cap, r.block)
+      const f = await this.fitV4(acc, live, policy, r, cap, missing, old, 'extend', RENEW_GAS_BUDGET, undefined, remote)
       const summary = [
         `Finish Mamoru's approval on your Safe ${live.safe}: ${this.poolsOf(f.stored.map((g) => g.name))}`,
         `Engine key ${f.sessionKey} may, for the rest of this approval and within limits sized for deposits up to ${fmtUsdc(cap)} USDC:`,
@@ -2211,7 +2229,7 @@ export class Operator {
         'Nothing is moved now: your positions stay as they are',
         'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
       ]
-      return this.hold(acc, live, 'renew', f.calls, summary, { grants: f.stored, revokes: old, extend: true, base: acc.grants.map((g) => g.permissionId), capUsdc: cap.toString() })
+      return this.hold(acc, live, 'renew', f.calls, summary, { grants: f.stored, revokes: old, extend: true, base: acc.grants.map((g) => g.permissionId), capUsdc: cap.toString(), ...(remote ? { remote } : {}) })
     }
     const { sessionKey, stored, calls, dropped } = await this.fitGrants(acc, live, policy, r, missing, old, cap)
     const added = stored.map((g) => g.name)
@@ -2811,7 +2829,8 @@ export class Operator {
     if (isV4(policy)) {
       // Spec 007 T7 (c): a v4 Start enables what fits one Base transaction; the rest follows as one more approval each.
       const keys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
-      const f = await this.fitV4(acc, live, policy, r, cap, keys, [], 'full', ACTIVATION_GAS_BUDGET, reserve)
+      const remote = await this.remoteFor(acc, policy, cap, r.block)
+      const f = await this.fitV4(acc, live, policy, r, cap, keys, [], 'full', ACTIVATION_GAS_BUDGET, reserve, remote)
       const days = Math.round(policy.session.validitySeconds / 86_400)
       const pools = policy.buckets.filter((b) => b.pools[0] && b.preference > 0).map((b) => `${poolLabel(b.pools[0]!, this.cfg.registry)} ${b.preference / 100}%`)
       const summary = [
@@ -2820,13 +2839,13 @@ export class Operator {
         r.usdc > 0n
           ? `Let Mamoru's engine keep your ${fmtUsdc(invested)} USDC invested across Uniswap v3 ${pools.join(', ')}`
           : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(cap)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
-        ...(policy.remoteBuckets ?? []).map((b) => `${b.preference / 100}% of your savings goes to Growth on ${chainOf(b.chainId).name}, to your own address there, through Circle's bridge; your ${chainOf(b.chainId).name} sleeve runs it`),
+        ...this.remoteLines(policy, remote),
         `Engine key ${f.sessionKey} may swap USDC into those pools' tokens, open positions there, and take out, collect and close only the positions it opened, only near the market price, for ${days} days:`,
         ...this.v4Lines(f.stored, policy, cap),
         ...this.stepLines(f.steps, f.rest),
         `Whatever it collects, mints or swaps is paid to your Safe, never to anyone else. Cap ${fmtUsdc(cap)} USDC`,
       ]
-      return this.hold(acc, live, 'activate', f.calls, summary, { grants: f.stored, capUsdc: cap.toString(), gen, ...(f.newKey ? { sessionKey: f.newKey } : {}), ...own })
+      return this.hold(acc, live, 'activate', f.calls, summary, { grants: f.stored, capUsdc: cap.toString(), gen, ...(f.newKey ? { sessionKey: f.newKey } : {}), ...own, ...(remote ? { remote } : {}) })
     }
     const { sessionKey, caps, stored, batch, newKey } = await this.approval(acc, live, policy, r, cap, undefined, 'full', reserve)
     const bind = { gen, ...(newKey ? { sessionKey: newKey } : {}), ...own }
@@ -4708,6 +4727,7 @@ export class Operator {
       acc.depositsAfter = (depositsFrom ?? receipt.blockNumber).toString()
       acc.historyFromBlock = receipt.blockNumber.toString()
       acc.epoch++
+      this.recordRemote(acc, p)
       this.store.save()
       this.startLoop(acc)
     } else if (p.kind === 'stop') {
@@ -4744,6 +4764,7 @@ export class Operator {
         // The engine restarts on these grants and must not look at the chain from before they were enabled.
         acc.grantsFromBlock = receipt.blockNumber.toString()
         acc.epoch++
+        this.recordRemote(acc, p)
         this.store.save()
         this.startLoop(acc)
       } else {
@@ -5006,7 +5027,216 @@ export class Operator {
     if (!bridge || !(policy.remoteBuckets ?? []).some((b) => b.chainId === BRIDGE_MONAD_CHAIN_ID)) return {}
     // Every remote bucket must be one this leg serves: a bucket on another chain would be counted as nothing.
     if ((policy.remoteBuckets ?? []).some((b) => b.chainId !== BRIDGE_MONAD_CHAIN_ID)) return {}
-    return { remote: (block: bigint) => bridge.remote(acc.accountKey, acc.ctx.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block) }
+    // otto/mamoru#251: the account's own Safe there, fixed by its approval; none yet: no remote (the bucket waits).
+    const rs = acc.remote
+    if (!rs || rs.chainId !== BRIDGE_MONAD_CHAIN_ID) return {}
+    return { remote: (block: bigint) => bridge.remote(acc.accountKey, rs.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, rs.permissionIds) }
+  }
+
+  // ---- the account's own Safe on another chain (otto/mamoru#251) ----------------------------------------
+
+  private remoteRegistryOf(chainId: number): Registry {
+    return this.cfg.remoteRegistry?.(chainId) ?? registryFor(chainId)
+  }
+
+  /**
+   * Base side: the account's own Safe on the chain of `policy`'s remote bucket that this approval commits to, or undefined
+   * for a policy without one. Once an approval has fixed it, the same Safe (re-derived from this account's keys, never
+   * read back on trust); before that, a new one: the remote operator's session key for the account, the validity of the
+   * remote policy from this block, and the cap its sessions are sized at, the most the bridge-out grant lets cross. The
+   * address comes only from `remoteSafe` over this account's verified context: the mint recipient the owner signs is the
+   * Safe of the owner's own keys (GPT-6 review of #251, P1). Fails closed: no remote operator, no approval.
+   */
+  private async remoteFor(acc: AccountState, policy: PolicyVersion, cap: bigint, block: bigint): Promise<RemoteSafeRecord | undefined> {
+    const buckets = policy.remoteBuckets ?? []
+    if (!buckets.length) return undefined
+    if (buckets.length !== 1) throw new Error(`${policy.policyId}: one remote bucket per policy`)
+    const b = buckets[0]!
+    const registry = this.remoteRegistryOf(b.chainId)
+    if (acc.remote) {
+      if (acc.remote.chainId !== b.chainId || acc.remote.spec.policyId !== b.policyId) throw new HttpError(409, 'REMOTE_SAFE_MISMATCH', "this account's Safe on the other chain runs another policy: nothing was changed")
+      const again = remoteSafe(remoteInput(acc.ctx, acc.remote.spec, registry))
+      if (again.address.toLowerCase() !== acc.remote.address.toLowerCase()) throw new Error(`${acc.accountKey}: stored remote Safe ${acc.remote.address} is not what its keys give (${again.address})`)
+      return acc.remote
+    }
+    const peer = this.cfg.remotePeers?.[b.chainId]
+    if (!peer) throw new HttpError(503, 'REMOTE_UNAVAILABLE', `Mamoru on ${chainOf(b.chainId).name} is not reachable right now: nothing was changed, try again in a few minutes`)
+    let sessionKey: Address
+    try {
+      sessionKey = await peer.key(acc.ctx)
+    } catch (e) {
+      logErr(`[remote] ${acc.accountKey} session key from chain ${b.chainId}:`, e)
+      throw new HttpError(503, 'REMOTE_UNAVAILABLE', `Mamoru on ${chainOf(b.chainId).name} is not reachable right now: nothing was changed, try again in a few minutes`)
+    }
+    const t = Number((await this.client.getBlock({ blockNumber: block })).timestamp)
+    const remotePolicy = remoteInput(acc.ctx, { chainId: b.chainId, policyId: b.policyId, sessionKey, validAfter: 0, validUntil: 0, capUsdc: '1' }, registry).policy
+    const bridgeTotal = policy.session.grants.find((g) => g.name === 'bridge-out')?.actions.flatMap((a) => a.params).find((r) => r.cumulative)?.cumulative
+    const capUsdc = bridgeTotal ? v4BudgetCaps(policy, cap)[bridgeTotal.slice(4)] : undefined
+    if (!capUsdc || capUsdc <= 0n) throw new Error(`${policy.policyId}: no bridge total to size the remote Safe at`)
+    const spec: RemoteSpec = { chainId: b.chainId, policyId: b.policyId, sessionKey, validAfter: t - 60, validUntil: t + remotePolicy.session.validitySeconds, capUsdc: capUsdc.toString() }
+    const r = remoteSafe(remoteInput(acc.ctx, spec, registry))
+    return { chainId: b.chainId, address: r.address, spec, permissionIds: r.permissionIds }
+  }
+
+  /** Base side, a confirmed approval that provisions a remote Safe: fixed on the account, and its provisioning starts. */
+  private recordRemote(acc: AccountState, p: Prepared): void {
+    if (!p.remote || !p.grants?.some((g) => g.grant.name === 'bridge-out')) return
+    if (acc.remote && acc.remote.address.toLowerCase() !== p.remote.address.toLowerCase()) {
+      logErr(`[remote] ${acc.accountKey}: confirmed approval names ${p.remote.address}, the account has ${acc.remote.address}; kept`, undefined)
+      return
+    }
+    acc.remote = { ...p.remote, ready: acc.remote?.ready === true }
+    queueMicrotask(() => void this.provisionRemote(acc).catch((e) => logErr(`[remote] ${acc.accountKey} provision:`, e)))
+  }
+
+  /** The remote Safe's account context: the Base account's keys, its own address and spec, its own account key. */
+  private remoteContext(acc: AccountState, rs: RemoteSafeRecord): AccountContext {
+    return { accountKey: remoteAccountKey(acc.accountKey, rs.chainId), chainId: rs.chainId, address: rs.address, owners: acc.ctx.owners, saltNonce: acc.ctx.saltNonce, passkey: acc.ctx.passkey, remote: rs.spec }
+  }
+
+  /**
+   * Base side: asks the remote operator to provision the account's Safe there (deploy, check, run) until it reports it
+   * running. Called when the approval lands and by `tickRemotes`; never throws to its caller's flow (the bridge reads the
+   * Safe on chain itself and sends nothing to it before it is ready).
+   */
+  async provisionRemote(acc: AccountState): Promise<void> {
+    const rs = acc.remote
+    if (!rs || rs.ready || !acc.active) return
+    const peer = this.cfg.remotePeers?.[rs.chainId]
+    if (!peer) return
+    const res = await peer.provision(this.remoteContext(acc, rs))
+    rs.checkedAt = now()
+    if (res.state === 'active') {
+      if (res.address.toLowerCase() !== rs.address.toLowerCase()) throw new Error(`remote operator provisioned ${res.address}, not ${rs.address}`)
+      rs.ready = true
+      rs.lastCode = undefined
+      console.log(`[remote] ${acc.accountKey} Safe ${rs.address} on chain ${rs.chainId} runs`)
+    } else {
+      rs.lastCode = res.code
+      logErr(`[remote] ${acc.accountKey} Safe ${rs.address} on chain ${rs.chainId} not provisioned yet:`, res.code)
+    }
+    this.store.save()
+  }
+
+  /** Base side, on a timer: every running account whose remote Safe is not running yet is provisioned again. */
+  async tickRemotes(): Promise<void> {
+    for (const acc of Object.values(this.store.state.accounts)) {
+      if (!acc.remote || acc.remote.ready || !acc.active) continue
+      await this.lock(acc.accountKey)
+        .run(() => this.provisionRemote(acc))
+        .catch((e) => logErr(`[remote] ${acc.accountKey} provision:`, e))
+    }
+  }
+
+  /**
+   * Remote side (`POST remote-key`, from the Base operator): the session key this operator signs the userOps of the
+   * Base account's own Safe here with. Generated once and kept (0600 state); the Base approval commits to its address.
+   * The context is the Base account's, checked the way the Base operator checks it.
+   */
+  remoteKey(base: AccountContext): { sessionKey: Address } {
+    if (base.chainId !== BASE_CHAIN_ID || base.remote || base.accountKey.includes('@')) throw new HttpError(400, 'BAD_REQUEST', 'a remote key is asked for a Base account')
+    try {
+      liveAccountFromContext(base, baseRegistry)
+    } catch (e) {
+      logErr('[remote] remote-key context rejected:', e)
+      throw safeHttpError(400, 'ACCOUNT_MISMATCH')
+    }
+    const keys = (this.store.state.remoteKeys ??= {})
+    if (!keys[base.accountKey]) {
+      keys[base.accountKey] = generatePrivateKey()
+      this.store.save()
+    }
+    return { sessionKey: privateKeyToAccount(keys[base.accountKey]!).address }
+  }
+
+  /**
+   * Remote side (`POST provision`, from the Base operator once the owner's approval landed): deploys the account's own
+   * Safe here with the relayer if it has no code (its setup is the owner's act: sessions and owners are in it), checks
+   * on chain that it is that Safe (owners, threshold 1, SmartSession installed, every session of the spec enabled), tops
+   * up its gas reserve, and runs it. Idempotent. Refused: a context without a spec, a spec whose session key is not the
+   * one this operator gave, a Safe that does not check out (nothing is run on it).
+   */
+  provision(ctx: AccountContext): Promise<{ state: 'active'; address: Address }> {
+    return this.lock(ctx.accountKey).run(() => this.provisionNow(ctx))
+  }
+
+  private async provisionNow(ctx: AccountContext): Promise<{ state: 'active'; address: Address }> {
+    const spec = ctx.remote
+    if (!spec || spec.chainId !== this.cfg.chainId) throw new HttpError(400, 'BAD_REQUEST', 'not a remote Safe of this chain')
+    const baseKey = baseKeyOf(ctx.accountKey, this.cfg.chainId)
+    const priv = baseKey ? this.store.state.remoteKeys?.[baseKey] : undefined
+    if (!priv || privateKeyToAccount(priv).address.toLowerCase() !== spec.sessionKey.toLowerCase()) throw new HttpError(409, 'REMOTE_KEY_UNKNOWN', 'this Safe names a session key this operator did not give')
+    const { acc, live } = this.account(ctx, { readOnly: true })
+    if (acc.active) return { state: 'active', address: live.safe }
+    const refusal = this.writeRefusal()
+    if (refusal) throw new HttpError(503, 'CHAIN_UNSUPPORTED', refusal)
+    const r = remoteSafe(remoteInput(ctx, spec, this.cfg.registry))
+    if (r.address.toLowerCase() !== live.safe.toLowerCase()) throw safeHttpError(400, 'ACCOUNT_MISMATCH')
+    if (!(await readSafeNonce(this.client, live.safe)).deployed) {
+      const { hash, receipt } = await this.relayer.send(deployCall(live))
+      console.log(`[remote] deploy ${live.safe} tx ${hash} ${receipt.status}`)
+      if (receipt.status !== 'success') throw new HttpError(502, 'DEPLOY_FAILED', 'the Safe could not be created just now: it is retried')
+    }
+    const block = await this.client.getBlockNumber()
+    const checked = await this.remoteChecks(live.safe, ctx.owners as Address[], r.permissionIds, block)
+    if (checked) {
+      logErr(`[remote] ${ctx.accountKey} ${live.safe} does not check out:`, checked)
+      throw new HttpError(409, 'REMOTE_SAFE_UNVERIFIED', 'the Safe on chain is not the one the approval committed to: nothing runs on it')
+    }
+    const policy = this.policyOf({ ...acc, policyId: spec.policyId })
+    const eth = await this.client.getBalance({ address: live.safe })
+    const target = policy.gasReserveWei + (await this.topUpMarginWei())
+    if (eth < target) {
+      const { hash, receipt } = await this.relayer.send({ to: live.safe, value: target - eth, gas: 50_000n })
+      console.log(`[remote] gas reserve ${live.safe} tx ${hash} ${receipt.status}`)
+    }
+    const stored: StoredGrant[] = r.grants.map((g, i) => ({ name: r.keys[i]!, grant: g, permissionId: r.permissionIds[i]! }))
+    Object.assign(acc, {
+      trusted: true,
+      active: true,
+      deactivated: undefined,
+      sessionKey: priv,
+      grants: stored,
+      policyId: spec.policyId,
+      signedCapUsdc: spec.capUsdc,
+      managedTokenIds: [],
+      admittedTokenIds: acc.admittedTokenIds ?? [],
+      depositsAfter: block.toString(),
+      historyFromBlock: block.toString(),
+      epoch: acc.epoch + 1,
+      gen: (acc.gen ?? 0) + 1,
+    })
+    this.persist(acc)
+    this.store.save()
+    this.startLoop(acc)
+    console.log(`[remote] ${ctx.accountKey} ${live.safe} provisioned and running (${stored.length} session${stored.length === 1 ? '' : 's'})`)
+    return { state: 'active', address: live.safe }
+  }
+
+  /** Why `safe` is not the committed Safe at `block`, or null: owners, threshold 1, SmartSession, every session enabled. */
+  private async remoteChecks(safe: Address, owners: Address[], permissionIds: readonly Hex[], block: bigint): Promise<string | null> {
+    const read = <T,>(args: Parameters<PublicClient['readContract']>[0]) => this.client.readContract({ ...args, blockNumber: block } as never) as Promise<T>
+    const got = await read<Address[]>({ address: safe, abi: safeAbi, functionName: 'getOwners' })
+    const want = new Set(owners.map((o) => o.toLowerCase()))
+    if (got.length !== want.size || !got.every((o) => want.has(o.toLowerCase()))) return `owners ${got.join(',')}`
+    if ((await read<bigint>({ address: safe, abi: safeAbi, functionName: 'getThreshold' })) !== 1n) return 'threshold'
+    if (!(await read<boolean>({ address: safe, abi: safe7579Abi, functionName: 'isModuleInstalled', args: [1n, address('SmartSession', this.cfg.registry), '0x'] }))) return 'SmartSession not installed'
+    for (const id of permissionIds) {
+      if (!(await read<boolean>({ address: address('SmartSession', this.cfg.registry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [id, safe] }))) return `session ${id} not enabled`
+    }
+    return null
+  }
+
+  /** The summary lines of an approval that provisions the account's own Safe on another chain. */
+  private remoteLines(policy: PolicyVersion, remote: RemoteSafeRecord | undefined): string[] {
+    if (!remote) return []
+    const b = (policy.remoteBuckets ?? []).find((x) => x.chainId === remote.chainId)
+    const name = chainOf(remote.chainId).name
+    return [
+      `${b ? `${b.preference / 100}% of your savings (Growth)` : 'Part of your savings'} goes to your own Safe on ${name}, ${remote.address}: same owner (your passkey), created by Mamoru with no other signature`,
+      `On ${name} Mamoru may only swap and provide liquidity in ${(b?.pools ?? []).map((p) => poolLabel(p, this.remoteRegistryOf(remote.chainId))).join(', ')}, near the market price, paid only to that Safe, until ${new Date(remote.spec.validUntil * 1000).toISOString().slice(0, 10)}`,
+      `USDC crosses only to that Safe, through Circle's bridge (CCTP), at no fee`,
+    ]
   }
 
   private startLoop(acc: AccountState): void {

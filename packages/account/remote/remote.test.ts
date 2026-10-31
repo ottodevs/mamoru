@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { decodeAbiParameters, slice } from 'viem'
 import { ReasonError } from '@mamoru/domain'
 import { address, monadRegistry } from '@mamoru/registry'
-import { decodeMamoruInitAny, liveWmonUsdcMonadV5, MONAD_GAS_CAPS, V4_POOLS_MONAD, withActionPolicy } from '@mamoru/policy'
+import { decodeMamoruInitAny, labWmonUsdcMonadV1, MONAD_GAS_CAPS, V4_POOLS_MONAD, withActionPolicy } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress, smartSessionInstallData } from '../recovery/index.ts'
 import { toSmartSession, v4PoliciesFor, v4DeploymentOf } from '../sessions/index.ts'
 import { assertRemoteSafe, monadV6Deployed, remoteInput, remotePolicyFor, remoteSafe } from './index.ts'
@@ -78,7 +78,7 @@ describe('remoteSafe (otto/mamoru#251)', () => {
   })
 
   test('refuses a policy that is not V3-only, a non-positive cap, and an unpinned V3', () => {
-    const v5 = withActionPolicy(liveWmonUsdcMonadV5, V3_MONAD_PINNED, [V4_POOLS_MONAD.growth], { gasPolicy: { address: address('MamoruGasPolicy', monadRegistry), caps: MONAD_GAS_CAPS }, contractVersion: 3 })
+    const v5 = withActionPolicy({ ...labWmonUsdcMonadV1, chain: 'monad' }, V3_MONAD_PINNED, [V4_POOLS_MONAD.growth], { gasPolicy: { address: address('MamoruGasPolicy', monadRegistry), caps: MONAD_GAS_CAPS }, contractVersion: 3 })
     expect(code(() => remoteSafe({ ...input, policy: v5 }))).toBe('SESSION_ACTION_POLICY_MISMATCH')
     const v2 = withActionPolicy(input.policy, V3_MONAD_PINNED, [V4_POOLS_MONAD.growth], { gasPolicy: { address: address('MamoruGasPolicy', monadRegistry), caps: MONAD_GAS_CAPS }, contractVersion: 2 })
     expect(code(() => remoteSafe({ ...input, policy: v2 }))).toBe('SESSION_ACTION_POLICY_MISSING')
@@ -131,7 +131,7 @@ describe('an account context with `remote` (otto/mamoru#251)', () => {
   })
 
   test('only a known remote policy on its own chain', () => {
-    expect(code(() => remotePolicyFor({ chainId: 143, policyId: 'live-wmon-usdc-monad-v5' }, withPinnedV3()))).toBe('REMOTE_SAFE_MISMATCH')
+    expect(code(() => remotePolicyFor({ chainId: 143, policyId: 'lab-wmon-usdc-monad-v1' }, withPinnedV3()))).toBe('REMOTE_SAFE_MISMATCH')
     expect(code(() => remotePolicyFor({ chainId: 8453, policyId: 'live-wmon-usdc-monad-v6' }, withPinnedV3()))).toBe('REMOTE_SAFE_MISMATCH')
   })
 })

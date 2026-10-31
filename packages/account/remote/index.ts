@@ -45,6 +45,8 @@ export type RemoteSafe = {
   chainId: number
   address: Address
   setup: SafeSetup
+  /** The policy's grant keys (`grantKey`), in the order of `grants`, `sessions` and `permissionIds`. */
+  keys: string[]
   grants: SessionGrant[]
   sessions: SmartSessionStruct[]
   permissionIds: Hex[]
@@ -72,6 +74,7 @@ export function remoteSafe(input: RemoteSafeInput): RemoteSafe {
   const caps = computeCaps(policy, input.capUsdc, {})
   // No rule names the account (actionPolicyOnly), so the grants do not depend on the address they are for: built against
   // the zero address, then stamped with the address they produce.
+  const keys = policy.session.grants.map(grantKey)
   const draft = policy.session.grants.map((t) => {
     const key = grantKey(t)
     const g = instantiateGrant(policy, key, { account: zeroAddress, sessionKey: input.sessionKey, chainId: registry.chainId, salt: saltOf(policy, key), validAfter: input.validAfter, validUntil: input.validUntil, caps, capUsdc: input.capUsdc })
@@ -81,7 +84,7 @@ export function remoteSafe(input: RemoteSafeInput): RemoteSafe {
   const sessions = draft.map((g, i) => toSmartSession(g, policiesFor(g, i), registry))
   const setup = accountSetup(input.owners, input.saltNonce, input.webauthn, registry, sessions)
   const at = counterfactualAddress(setup, registry)
-  return { chainId: registry.chainId, address: at, setup, grants: draft.map((g) => ({ ...g, account: at })), sessions, permissionIds: sessions.map(permissionIdOf) }
+  return { chainId: registry.chainId, address: at, setup, keys, grants: draft.map((g) => ({ ...g, account: at })), sessions, permissionIds: sessions.map(permissionIdOf) }
 }
 
 /** The remote Safe of `input` is `expected`: what the app checks against the operator's offer before the owner signs. */
@@ -89,6 +92,23 @@ export function assertRemoteSafe(input: RemoteSafeInput, expected: Address): Rem
   const r = remoteSafe(input)
   if (!isAddressEqual(r.address, expected)) throw new ReasonError('REMOTE_SAFE_MISMATCH', `remote Safe ${expected} is not the one these keys and sessions give (${r.address})`)
   return r
+}
+
+/**
+ * The account key of the Base account `baseKey`'s own Safe on `chainId`: one name the Worker's row, the Base operator and
+ * the remote operator all use for it, derived, never stored apart.
+ */
+export function remoteAccountKey(baseKey: string, chainId: number): string {
+  if (!baseKey || baseKey.includes('@')) throw new Error(`remoteAccountKey: ${baseKey} is not a Base account key`)
+  return `${baseKey}@${chainId}`
+}
+
+/** The Base account key of a remote account key, or null when it is not one for `chainId`. */
+export function baseKeyOf(remoteKey: string, chainId: number): string | null {
+  const suffix = `@${chainId}`
+  if (!remoteKey.endsWith(suffix)) return null
+  const base = remoteKey.slice(0, -suffix.length)
+  return base && !base.includes('@') ? base : null
 }
 
 /** The remote policies a spec may name, wired to the chain's pinned contracts. Any other id is refused. */

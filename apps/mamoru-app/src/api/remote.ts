@@ -1,6 +1,6 @@
 import { ReasonError, type AccountContext, type Address, type Hex0x, type RemoteSpec } from '@mamoru/domain'
 import { registryFor, type Registry } from '@mamoru/registry'
-import { assertRemoteSafe, remoteInput } from '@mamoru/account/remote'
+import { assertRemoteSafe, remoteAccountKey, remoteInput } from '@mamoru/account/remote'
 import type { Db } from './env.ts'
 import { BASE } from './sleeves.ts'
 import type { AccountRow } from './accounts/store.ts'
@@ -38,14 +38,15 @@ export function remoteOf(body: unknown): RemoteOffer | undefined {
 const SPEC_KEYS: readonly (keyof RemoteSpec)[] = ['chainId', 'policyId', 'sessionKey', 'validAfter', 'validUntil', 'capUsdc']
 const sameSpec = (a: RemoteSpec, b: RemoteSpec) => SPEC_KEYS.every((k) => String(a[k]).toLowerCase() === String(b[k]).toLowerCase())
 
-export type RemoteUpsert = 'inserted' | 'updated' | 'unchanged' | 'kept'
+export type RemoteUpsert = 'inserted' | 'unchanged' | 'kept'
 
 /**
  * The owner's account row on `offer.chainId`, from the Base row `base` and a remote Safe already verified against it
- * (verifyRemote). Absent: inserted. Present with the same address and spec: nothing. Present from the old flow (no
- * `remote_json`): repointed. Present with another remote Safe: left as it is and logged, never silently repointed.
+ * (verifyRemote), under `remoteAccountKey`. Absent: inserted. Present with the same address and spec: nothing. Any other
+ * row (another remote Safe, or one of the old same-address rows the migration removes): left as it is and logged, never
+ * silently repointed.
  */
-export async function upsertRemoteSleeve(db: Db, base: AccountRow, offer: RemoteOffer, now: Date, newKey: () => string = () => crypto.randomUUID()): Promise<RemoteUpsert> {
+export async function upsertRemoteSleeve(db: Db, base: AccountRow, offer: RemoteOffer, now: Date): Promise<RemoteUpsert> {
   if (base.chain_id !== BASE) throw new Error('upsertRemoteSleeve: needs the Base account row')
   const existing = () => db.prepare('SELECT * FROM accounts WHERE user_id = ? AND chain_id = ?').bind(base.user_id, offer.chainId).first<AccountRow>()
   const found = await existing()
@@ -57,7 +58,8 @@ export async function upsertRemoteSleeve(db: Db, base: AccountRow, offer: Remote
           salt_nonce, preset, policy_version, recovery_ack_at, created_at, env, is_test, remote_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
-        newKey(), base.user_id, offer.chainId, offer.address, base.owners_json, base.passkey_credential_id, base.passkey_x, base.passkey_y,
+        // The key the Base and remote operators name this Safe by (remoteAccountKey): derived, so all three agree.
+        remoteAccountKey(base.account_key, offer.chainId), base.user_id, offer.chainId, offer.address, base.owners_json, base.passkey_credential_id, base.passkey_x, base.passkey_y,
         base.salt_nonce, base.preset, base.policy_version, null, now.toISOString(), base.env, base.is_test, JSON.stringify(offer.spec),
       )
       .run()
@@ -74,13 +76,9 @@ export async function upsertRemoteSleeve(db: Db, base: AccountRow, offer: Remote
   }
 }
 
-async function reconcile(db: Db, found: AccountRow, offer: RemoteOffer): Promise<RemoteUpsert> {
+async function reconcile(_db: Db, found: AccountRow, offer: RemoteOffer): Promise<RemoteUpsert> {
   const stored = found.remote_json ? (JSON.parse(found.remote_json) as RemoteSpec) : null
   if (stored && found.address.toLowerCase() === offer.address.toLowerCase() && sameSpec(stored, offer.spec)) return 'unchanged'
-  if (stored) {
-    console.error(`remote Safe on ${offer.chainId} for ${found.account_key} not repointed: stored ${found.address}, offered ${offer.address}`)
-    return 'kept'
-  }
-  await db.prepare('UPDATE accounts SET address = ?, remote_json = ? WHERE account_key = ? AND remote_json IS NULL').bind(offer.address, JSON.stringify(offer.spec), found.account_key).run()
-  return 'updated'
+  console.error(`remote Safe on ${offer.chainId} for ${found.account_key} not repointed: stored ${found.address}${stored ? '' : ' (no remote_json)'}, offered ${offer.address}`)
+  return 'kept'
 }

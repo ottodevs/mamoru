@@ -3,7 +3,8 @@ import { encodeAbiParameters } from 'viem'
 import { address, monadRegistry } from '@mamoru/registry'
 import { computeCaps, instantiateGrant, policyHash, type GrantContext } from './instantiate.ts'
 import { grantKeyFor } from './grants.ts'
-import { liveWmonUsdcMonadV5, liveWmonUsdcMonadV6, labWmonUsdcMonadV6 } from './policies-monad.ts'
+import { labWmonUsdcMonadV1, liveWmonUsdcMonadV6, labWmonUsdcMonadV6 } from './policies-monad.ts'
+import { conservadorLiveV5, INCREASE_TOLERANCE_BPS } from './policies-v4.ts'
 import { conservadorLiveV6 } from './policies-v6.ts'
 import { decodeMamoruInitAny, encodeMamoruInit, encodeMamoruInitAtSetup, FAMILY_UNISWAP_AT_SETUP, exitOnlyV3Only, exitOnlyV5Grant, grantsV5, manageAnyV3Only, MAMORU_INIT_TUPLE, mamoruInitFor, V4_POOLS_MONAD } from './v4-grants.ts'
 
@@ -18,15 +19,18 @@ describe('live-wmon-usdc-monad-v6 (otto/mamoru#251)', () => {
     expect(conservadorLiveV6.remoteBuckets![0]!.policyId).toBe(liveWmonUsdcMonadV6.policyId)
   })
 
-  test("v5's pool, range, budgets and usage on Monad mainnet, under a new id and hash", () => {
+  test('WMON/USDC on Monad mainnet: the lab range, v5 harvest, execution and session, a MON gas reserve', () => {
     expect(liveWmonUsdcMonadV6.chain).toBe('monad')
     expect(liveWmonUsdcMonadV6.sourceChainId).toBe(143)
     expect(labWmonUsdcMonadV6.chain).toBe('fork')
-    expect(liveWmonUsdcMonadV6.buckets).toEqual(liveWmonUsdcMonadV5.buckets)
-    expect(liveWmonUsdcMonadV6.range).toEqual(liveWmonUsdcMonadV5.range)
-    expect(policyHash(liveWmonUsdcMonadV6)).not.toBe(policyHash(liveWmonUsdcMonadV5))
+    expect(liveWmonUsdcMonadV6.buckets).toEqual([{ id: 'risk', preference: 10_000, pools: ['pool:WMON/USDC/3000'] }])
+    expect(liveWmonUsdcMonadV6.range).toEqual({ ...labWmonUsdcMonadV1.range, increaseToleranceBps: INCREASE_TOLERANCE_BPS })
+    expect(liveWmonUsdcMonadV6.execution).toEqual(conservadorLiveV5.execution)
+    expect(liveWmonUsdcMonadV6.session.validitySeconds).toBe(conservadorLiveV5.session.validitySeconds)
+    expect(liveWmonUsdcMonadV6.gasReserveWei).toBe(2_000_000_000_000_000_000n)
+    expect(policyHash(liveWmonUsdcMonadV6)).not.toBe(policyHash(labWmonUsdcMonadV6))
     // One session carries v5's three: their usage together.
-    expect(liveWmonUsdcMonadV6.session.grants.map((g) => [g.name, g.usageLimit])).toEqual([['manage-any', liveWmonUsdcMonadV5.session.grants.reduce((n, g) => n + g.usageLimit, 0)]])
+    expect(liveWmonUsdcMonadV6.session.grants.map((g) => [g.name, g.usageLimit])).toEqual([['manage-any', 36_000]])
   })
 
   test('one manage-any: every action of v5\'s three grants once, no param rule, V3 its only action policy', () => {

@@ -1,3 +1,4 @@
+import { remoteAccountKey } from '@mamoru/account/remote'
 import { describe, expect, spyOn, test } from 'bun:test'
 import type { AccountContext, RemoteSpec } from '@mamoru/domain'
 import { liveWmonUsdcMonadV6 } from '@mamoru/policy'
@@ -121,7 +122,7 @@ describe('funding: the remote Safe the Base operator reports becomes the ownerâ€
     expect((await t.call('/funding')).status).toBe(200)
     const [row] = t.sleeves()
     expect(row).toMatchObject({ chain_id: 143, user_id: t.base.user_id, address: offerFor(t.base).address, owners_json: t.base.owners_json, salt_nonce: t.base.salt_nonce, passkey_credential_id: t.base.passkey_credential_id, passkey_x: t.base.passkey_x, passkey_y: t.base.passkey_y, env: t.base.env, is_test: t.base.is_test })
-    expect(row!.account_key).not.toBe(t.base.account_key)
+    expect(row!.account_key).toBe(remoteAccountKey(t.base.account_key, 143))
     expect(JSON.parse(row!.remote_json!)).toEqual(SPEC)
     const ctx: AccountContext = accountContext(row!)
     expect(ctx).toMatchObject({ chainId: 143, address: offerFor(t.base).address, remote: SPEC, owners: ownersOf(t.base) })
@@ -146,7 +147,7 @@ describe('funding: the remote Safe the Base operator reports becomes the ownerâ€
     expect(t.sleeves()).toEqual([])
   })
 
-  test('an existing remote row is never repointed; an old-style row (no remote_json) is', async () => {
+  test('an existing row is never repointed: another remote Safe, or an old same-address row (no remote_json)', async () => {
     const err = spyOn(console, 'error').mockImplementation(() => {})
     const t = await world()
     const now = new Date('2026-10-31T00:00:00Z')
@@ -160,10 +161,8 @@ describe('funding: the remote Safe the Base operator reports becomes the ownerâ€
     expect(t.sleeves().map((r) => r.address)).toEqual([first.address])
 
     t.h.db.raw.query('UPDATE accounts SET remote_json = NULL, address = ? WHERE chain_id = 143').run(t.base.address)
-    expect(await upsertRemoteSleeve(t.h.db, t.base, other, now)).toBe('updated')
-    const [row] = t.sleeves()
-    expect(row).toMatchObject({ address: other.address })
-    expect(JSON.parse(row!.remote_json!)).toEqual(other.spec)
+    expect(await upsertRemoteSleeve(t.h.db, t.base, other, now)).toBe('kept')
+    expect(t.sleeves().map((r) => r.address)).toEqual([t.base.address])
     err.mockRestore()
   })
 })

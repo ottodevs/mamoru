@@ -60,7 +60,7 @@ function decodeContext(header: string): AccountContext {
 }
 
 // bridge-out and eth-convert (#133, #211): answered by BridgeOut, 404 when the operator has no Ethereum RPC.
-const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop|renew\/prepare|renew|bridge-out\/prepare|bridge-out|eth-convert\/prepare|eth-convert)$/
+const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop|renew\/prepare|renew|bridge-out\/prepare|bridge-out|eth-convert\/prepare|eth-convert|remote-key|provision)$/
 
 // Amounts are base-unit strings on the wire; a bigint that slips into a view is sent as its decimal string.
 const wire = (_k: string, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)
@@ -284,6 +284,12 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
           return json(200, await bridge().prepareConvert(ctx))
         case 'POST eth-convert':
           return json(200, await bridge().submitConvert(ctx, parse()))
+        // otto/mamoru#251: the Base operator asks the operator of the account's own Safe on this chain for its session
+        // key, then to provision that Safe once the owner's Base approval has landed (remote-peer.ts).
+        case 'POST remote-key':
+          return json(200, op.remoteKey(ctx))
+        case 'POST provision':
+          return json(200, await op.provision(ctx))
         default:
           return json(405, { error: 'method not allowed' })
       }

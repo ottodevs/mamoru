@@ -17,6 +17,8 @@ import type { SafeRead } from '../src/chain.ts'
 
 const ACCOUNT = '0x00000000000000000000000000000000000000aa' as const
 const OTHER = '0x00000000000000000000000000000000000000cc' as const
+/** otto/mamoru#251: the account's own Safe on Monad, the mint recipient. */
+const MONAD_SAFE = '0x00000000000000000000000000000000000000ee' as const
 const AMOUNT = 1_500_000_000n
 const UOP = `0x${'11'.repeat(32)}` as Hex
 const BURN_TX = `0x${'22'.repeat(32)}` as Hex
@@ -24,16 +26,16 @@ const T0 = Date.parse('2026-10-27T10:00:00Z')
 const EP = address('EntryPointV07', baseRegistry)
 
 const signing = (over: Partial<BridgeSigning> = {}): BridgeSigning => ({
-  opId: 'op-1', account: ACCOUNT, chainId: 143, pool: 'pool:WMON/USDC/3000', bucket: 'growth', amount: AMOUNT, destinationDomain: 15,
+  opId: 'op-1', account: ACCOUNT, recipient: MONAD_SAFE, chainId: 143, pool: 'pool:WMON/USDC/3000', bucket: 'growth', amount: AMOUNT, destinationDomain: 15,
   userOpHash: UOP, nonceKey: 0n, nonce: 7n, prepareBlock: 1_000n, ...over,
 })
 
 const u = (v: bigint | number, n: number) => pad(toHex(v), { size: n })
 /** A CCTP V2 message of a Base -> Monad burn of this account; `nonce` 0 and zeroed executed fields as MessageSent has it. */
-const message = (o: { nonce?: bigint; amount?: bigint; recipient?: Hex; source?: number; destination?: number; executed?: boolean } = {}): Hex =>
+const message = (o: { nonce?: bigint; amount?: bigint; recipient?: Hex; sender?: Hex; source?: number; destination?: number; executed?: boolean } = {}): Hex =>
   concat([
     u(1, 4), u(o.source ?? 6, 4), u(o.destination ?? 15, 4), u(o.nonce ?? 0n, 32), pad(TOKEN_MESSENGER_V2, { size: 32 }), pad(TOKEN_MESSENGER_V2, { size: 32 }), u(0, 32), u(2000, 4), u(o.executed ? 2000 : 0, 4),
-    u(1, 4), pad(BASE_USDC, { size: 32 }), pad(o.recipient ?? ACCOUNT, { size: 32 }), u(o.amount ?? AMOUNT, 32), pad(o.recipient ?? ACCOUNT, { size: 32 }), u(0, 32), u(0, 32), u(o.executed ? 99 : 0, 32),
+    u(1, 4), pad(BASE_USDC, { size: 32 }), pad(o.recipient ?? MONAD_SAFE, { size: 32 }), u(o.amount ?? AMOUNT, 32), pad(o.sender ?? ACCOUNT, { size: 32 }), u(0, 32), u(0, 32), u(o.executed ? 99 : 0, 32),
   ])
 
 const log = (addr: Hex, topics: Hex[], data: Hex, logIndex: number): Log => ({ address: addr, topics: topics as [Hex, ...Hex[]], data, logIndex, blockNumber: 1_010n, blockHash: zeroHash, transactionHash: BURN_TX, transactionIndex: 0, removed: false }) as Log
@@ -45,7 +47,7 @@ function burnReceiptLogs(o: { recipient?: Hex; amount?: bigint; success?: boolea
   const dfb = encodeEventTopics({ abi: tokenMessengerV2Abi, eventName: 'DepositForBurn', args: { burnToken: BASE_USDC, depositor: ACCOUNT, minFinalityThreshold: 2000 } }) as Hex[]
   const dfbData = encodeAbiParameters(
     [{ type: 'uint256' }, { type: 'bytes32' }, { type: 'uint32' }, { type: 'bytes32' }, { type: 'bytes32' }, { type: 'uint256' }, { type: 'bytes' }],
-    [o.amount ?? AMOUNT, pad(o.recipient ?? ACCOUNT, { size: 32 }), 15, pad(TOKEN_MESSENGER_V2, { size: 32 }), zeroHash, 0n, '0x'],
+    [o.amount ?? AMOUNT, pad(o.recipient ?? MONAD_SAFE, { size: 32 }), 15, pad(TOKEN_MESSENGER_V2, { size: 32 }), zeroHash, 0n, '0x'],
   )
   const sent = encodeEventTopics({ abi: messageTransmitterV2Abi, eventName: 'MessageSent' }) as Hex[]
   const uoe = encodeEventTopics({ abi: [userOpEvent], eventName: 'UserOperationEvent', args: { userOpHash: UOP, sender: ACCOUNT, paymaster: '0x0000000000000000000000000000000000000000' } }) as Hex[]
@@ -204,7 +206,7 @@ describe('settling a sending burn from Base', () => {
     await bridge.tick()
     expect(j().burns[UOP]!.state).toBe('sending')
     expect(bridge.inFlight('acc-1', 0n)).toBe(AMOUNT)
-    expect(burnOf(burnReceiptLogs({ amount: AMOUNT - 1n }), { account: ACCOUNT, amount: AMOUNT.toString(), destinationDomain: 15 })).toBeNull()
+    expect(burnOf(burnReceiptLogs({ amount: AMOUNT - 1n }), { account: ACCOUNT, recipient: MONAD_SAFE, amount: AMOUNT.toString(), destinationDomain: 15 })).toBeNull()
   })
 })
 

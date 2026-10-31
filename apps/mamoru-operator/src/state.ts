@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { AccountContext, Hex, OpView } from '@mamoru/domain'
+import type { AccountContext, Hex, OpView, RemoteSpec } from '@mamoru/domain'
 import type { SessionGrant } from '@mamoru/policy'
 import type { SafeTx } from '@mamoru/account/live'
 import type { Execution } from '@mamoru/account/safe'
@@ -160,9 +160,25 @@ export type AccountState = {
   peerView?: { positions: { pool: string | null; tickLower: number; tickUpper: number; liquidity: string }[] | null; entering: string | null }
   /** otto/mamoru#140 (part2 #6): owner transactions of this account the relayer paid for, last 24 h (sponsorship limits). */
   sponsored?: SponsorEntry[]
+  /**
+   * otto/mamoru#251, Base side: the account's own Safe on its remote bucket's chain, fixed by the confirmed approval that
+   * provisions it (its bridge-out grant mints only there). `permissionIds`: the sessions its setup enables, which the
+   * bridge checks on chain before it sends anything. `ready`: the remote operator reported it deployed, checked and running.
+   */
+  remote?: RemoteSafeRecord
 }
 
-export type OperatorState = { accounts: Record<string, AccountState> }
+export type RemoteSafeRecord = { chainId: number; address: Hex; spec: RemoteSpec; permissionIds: Hex[]; ready?: boolean; lastCode?: string; checkedAt?: string }
+
+export type OperatorState = {
+  accounts: Record<string, AccountState>
+  /**
+   * otto/mamoru#251, remote side: the session key of each Base account's own Safe on this chain, by Base account key.
+   * Generated when the Base operator first asks (`remote-key`), before the owner signs; the Safe's setup commits to its
+   * address. Private, 0600 state file only, never logged.
+   */
+  remoteKeys?: Record<string, Hex>
+}
 
 const BIG = '$big'
 

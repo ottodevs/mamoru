@@ -31,7 +31,7 @@ export {
   type RerangeSetting,
 } from './engine-settings.ts'
 export { OPS_FLAGS, type OpsFlagName } from './ops-flags.ts'
-export { labWmonUsdcMonadV1, labWmonUsdcMonadV5, labWmonUsdcMonadV6, liveWmonUsdcMonadV1, liveWmonUsdcMonadV5, liveWmonUsdcMonadV6, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES } from './policies-monad.ts'
+export { labWmonUsdcMonadV1, labWmonUsdcMonadV6, liveWmonUsdcMonadV6, MONAD_LAB_POLICIES } from './policies-monad.ts'
 export {
   conservadorLabV4,
   conservadorLabV5,

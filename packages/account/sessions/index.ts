@@ -283,7 +283,7 @@ export type V4Deployment = { actionPolicy: Address; gasPolicy: Address; gasCaps:
 export function v4DeploymentOf(policy: PolicyVersion): V4Deployment | null {
   const ap = policy.actionPolicy
   if (!ap?.gasPolicy) return null
-  return { actionPolicy: ap.address, gasPolicy: ap.gasPolicy.address, gasCaps: ap.gasPolicy.caps, ...(ap.pauseGate && ap.contractVersion === 2 ? { pauseGate: ap.pauseGate } : {}) }
+  return { actionPolicy: ap.address, gasPolicy: ap.gasPolicy.address, gasCaps: ap.gasPolicy.caps, ...(ap.pauseGate && (ap.contractVersion === 2 || ap.contractVersion === 3) ? { pauseGate: ap.pauseGate } : {}) }
 }
 
 /**

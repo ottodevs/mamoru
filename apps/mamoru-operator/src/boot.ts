@@ -6,7 +6,9 @@ import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, chainWritesOptIn, isChainId, type Address } from '@mamoru/domain'
 import { address as registryAddress, baseRegistry, entry, isDeployed, messageTransmitterV2Abi, monadRegistry, registryFor, type Registry } from '@mamoru/registry'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
-import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLabV6, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, labWmonUsdcMonadV5, liveWmonUsdcMonadV5, MONAD_GAS_CAPS, MONAD_LAB_POLICIES, MONAD_LIVE_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V4_POOLS_MONAD, type PolicyVersion } from '@mamoru/policy'
+import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLabV6, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, liveWmonUsdcMonadV6, MONAD_LAB_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V6_POOLS, type PolicyVersion } from '@mamoru/policy'
+import { monadV6Deployed } from '@mamoru/account/remote'
+import { RemotePeer } from './remote-peer.ts'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
 import { RpcMetrics, logErr } from './metrics.ts'
@@ -74,28 +76,24 @@ const V6_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV6.po
  * `checkAction` is still the real enforcement. Off, or the address unset: an unrecognized policyId throws exactly
  * the same `unknown policy` error it always has — nothing changes for any account while the flag is off.
  */
-export function resolveNamedPolicy(policyId: string, env: Record<string, string | undefined>, opts: { chainWrites?: boolean } = {}): PolicyVersion | undefined {
+export function resolveNamedPolicy(policyId: string, env: Record<string, string | undefined>, opts: { chainWrites?: boolean; registry?: Registry } = {}): PolicyVersion | undefined {
   const named = POLICIES[policyId] ?? MONAD_LAB_POLICIES[policyId]
   if (named) return named
-  // otto/mamoru#61: a Monad mainnet policy resolves only for an operator opted into writing to Monad (chainWrites).
-  if (opts.chainWrites && MONAD_LIVE_POLICIES[policyId]) return MONAD_LIVE_POLICIES[policyId]
-  // otto/mamoru#214: the Monad sleeve's v5 policy resolves only wired to the two Monad contracts, and throws without them.
-  // The live one also needs the chain-writes opt-in (as v1 above); the lab twin is the fork's.
-  const monadV5 = MONAD_V5_BY_ID[policyId]
-  if (monadV5 && (monadV5.chain !== 'monad' || opts.chainWrites)) return deployedMonadV5(monadV5, env)
+  // otto/mamoru#251: the policy of the accounts' own Safes on Monad, wired to the contracts the Monad registry pins
+  // (MamoruActionPolicyV3, MamoruGasPolicy); only for an operator opted into writing to Monad (otto/mamoru#61).
+  if (policyId === liveWmonUsdcMonadV6.policyId) return opts.chainWrites ? monadV6Deployed(opts.registry?.chainId === monadRegistry.chainId ? opts.registry : monadRegistry) : undefined
   if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1') return undefined
   const v5 = V5_POLICIES_BY_ID[policyId]
   if (v5) return env.MAMORU_ACTION_POLICY_V2_ADDRESS ? deployedV5(v5, env) : undefined
-  // otto/mamoru#214: v6 also needs MamoruPauseGate; without it (or V2) it is not offered. Boot refuses it as the default (assertBootPolicies).
+  // otto/mamoru#251: v6 needs MamoruActionPolicyV3 and its MamoruPauseGate pinned in the registry; without them it is not
+  // offered. Boot refuses it as the default (assertBootPolicies).
   const v6 = V6_POLICIES_BY_ID[policyId]
-  if (v6) return env.MAMORU_ACTION_POLICY_V2_ADDRESS && env.MAMORU_PAUSE_GATE_ADDRESS ? deployedV6(v6, env) : undefined
+  const reg = opts.registry?.chainId === BASE_CHAIN_ID ? opts.registry : baseRegistry
+  if (v6) return v6Deployable(env, reg) ? deployedV6(v6, env, reg) : undefined
   const v4 = V4_POLICIES_BY_ID[policyId]
   if (!v4) return undefined
   return deployedV4(v4, env)
 }
-
-/** otto/mamoru#214: the Monad sleeve's v5 policies by id. Not in MONAD_LIVE_POLICIES / MONAD_LAB_POLICIES: those resolve without addresses. */
-const MONAD_V5_BY_ID: Record<string, PolicyVersion> = { [liveWmonUsdcMonadV5.policyId]: liveWmonUsdcMonadV5, [labWmonUsdcMonadV5.policyId]: labWmonUsdcMonadV5 }
 
 /**
  * Spec 007 T7 (GPT-6 review of #97, P1 2/3): the v4 policy wired to BOTH deployed contracts, MamoruActionPolicy
@@ -120,7 +118,7 @@ function deployedV4(v4: PolicyVersion, env: Record<string, string | undefined>):
  * the guardian pause). Needs the same opt-in as v4. Malformed, zero, or equal to the V1 or the gas policy address:
  * throws, so a V1 address can never stand in for V2 (V1 refuses increase and the deadline: the engine would stall).
  */
-function deployedV5(v5: PolicyVersion, env: Record<string, string | undefined>, on: { pools: typeof V4_POOLS | typeof V4_POOLS_MONAD; gasCaps: typeof V4_GAS_CAPS } = { pools: V4_POOLS, gasCaps: V4_GAS_CAPS }): PolicyVersion {
+function deployedV5(v5: PolicyVersion, env: Record<string, string | undefined>): PolicyVersion {
   const v2 = env.MAMORU_ACTION_POLICY_V2_ADDRESS
   if (!v2) throw new Error('MAMORU_ACTION_POLICY_V2_ADDRESS is not set')
   const gas = env.MAMORU_GAS_POLICY_ADDRESS
@@ -130,34 +128,35 @@ function deployedV5(v5: PolicyVersion, env: Record<string, string | undefined>, 
   }
   if (v2.toLowerCase() === gas.toLowerCase()) throw new Error('MAMORU_ACTION_POLICY_V2_ADDRESS and MAMORU_GAS_POLICY_ADDRESS are the same')
   if (env.MAMORU_ACTION_POLICY_ADDRESS && v2.toLowerCase() === env.MAMORU_ACTION_POLICY_ADDRESS.toLowerCase()) throw new Error('MAMORU_ACTION_POLICY_V2_ADDRESS is the V1 address (MAMORU_ACTION_POLICY_ADDRESS)')
-  return withActionPolicy(v5, getAddress(v2), Object.values(on.pools), { gasPolicy: { address: getAddress(gas), caps: on.gasCaps }, contractVersion: 2 })
+  return withActionPolicy(v5, getAddress(v2), Object.values(V4_POOLS), { gasPolicy: { address: getAddress(gas), caps: V4_GAS_CAPS }, contractVersion: 2 })
+}
+
+/** otto/mamoru#251: v6's contracts are pinned in the Base registry and its gas policy is set (the same MamoruGasPolicy as v4/v5). */
+function v6Deployable(env: Record<string, string | undefined>, registry: Registry = baseRegistry): boolean {
+  return !!env.MAMORU_GAS_POLICY_ADDRESS && isDeployed('MamoruActionPolicyV3', registry) && isDeployed('MamoruPauseGate', registry)
 }
 
 /**
- * otto/mamoru#214: the v6 policy: v5's wiring (MamoruActionPolicyV2, MamoruGasPolicy, contractVersion 2) plus
- * `MAMORU_PAUSE_GATE_ADDRESS`, the MamoruPauseGate its bridge-out grant is encoded with. Required: unset, malformed, zero
- * or equal to the V2, V1 or gas policy address throws, so v6 is never built without a gate that stops a bridge while the
- * guardian has the account paused.
+ * otto/mamoru#251: the v6 policy wired to MamoruActionPolicyV3 (the only action policy of its Uniswap grants, one
+ * manage-any per pool, so one approval is one owner transaction), MamoruPauseGate bound to V3 (bridge-out stops while the
+ * guardian has the account paused there; boot checks the binding on chain, `assertV6Gate`), both from the Base registry,
+ * and MamoruGasPolicy (`MAMORU_GAS_POLICY_ADDRESS`). Unset, malformed or one address standing for another: throws.
  */
-function deployedV6(v6: PolicyVersion, env: Record<string, string | undefined>): PolicyVersion {
-  const gate = env.MAMORU_PAUSE_GATE_ADDRESS
-  if (!gate) throw new Error('MAMORU_PAUSE_GATE_ADDRESS is not set')
-  if (!isAddress(gate, { strict: false }) || /^0x0{40}$/i.test(gate)) throw new Error('MAMORU_PAUSE_GATE_ADDRESS is not a contract address')
-  const base = deployedV5(v6, env)
-  const ap = base.actionPolicy!
-  for (const [name, other] of [['MAMORU_ACTION_POLICY_V2_ADDRESS', ap.address], ['MAMORU_GAS_POLICY_ADDRESS', ap.gasPolicy?.address], ['MAMORU_ACTION_POLICY_ADDRESS', env.MAMORU_ACTION_POLICY_ADDRESS]] as const) {
-    if (other && gate.toLowerCase() === other.toLowerCase()) throw new Error(`MAMORU_PAUSE_GATE_ADDRESS and ${name} are the same`)
-  }
-  return { ...base, actionPolicy: { ...ap, pauseGate: getAddress(gate) } }
+function deployedV6(v6: PolicyVersion, env: Record<string, string | undefined>, registry: Registry = baseRegistry): PolicyVersion {
+  const gas = env.MAMORU_GAS_POLICY_ADDRESS
+  if (!gas || !isAddress(gas, { strict: false }) || /^0x0{40}$/i.test(gas)) throw new Error('MAMORU_GAS_POLICY_ADDRESS is not a contract address')
+  const v3 = registryAddress('MamoruActionPolicyV3', registry)
+  const gate = registryAddress('MamoruPauseGate', registry)
+  if (new Set([v3, gate, gas].map((a) => a.toLowerCase())).size !== 3) throw new Error('MamoruActionPolicyV3, MamoruPauseGate and MAMORU_GAS_POLICY_ADDRESS must be three contracts')
+  return withActionPolicy(v6, v3, [V6_POOLS.stables, V6_POOLS.balance, V4_POOLS.btc], { gasPolicy: { address: getAddress(gas), caps: V4_GAS_CAPS }, contractVersion: 3, pauseGate: gate })
 }
 
-/**
- * otto/mamoru#214: the Monad sleeve's v5 policy wired to MamoruActionPolicyV2 and MamoruGasPolicy on Monad (the same two
- * env names as Base's v5: an operator reads one chain, so they mean that chain's contracts), with Monad's pool and gas
- * caps (a Base cap would be 10,000x under Monad's gas price). Unset, malformed or equal: throws, never a policy without them.
- */
-function deployedMonadV5(p: PolicyVersion, env: Record<string, string | undefined>): PolicyVersion {
-  return deployedV5(p, env, { pools: V4_POOLS_MONAD, gasCaps: MONAD_GAS_CAPS })
+/** otto/mamoru#251: the v6 pause gate reads MamoruActionPolicyV3's pause, on chain: a gate bound to another policy is refused. */
+export async function assertV6Gate(client: PublicClient, v6: PolicyVersion): Promise<void> {
+  const ap = v6.actionPolicy
+  if (!ap?.pauseGate) throw new Error(`${v6.policyId} has no MamoruPauseGate`)
+  const bound = await client.readContract({ address: ap.pauseGate, abi: [{ type: 'function', name: 'ACTION_POLICY', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] }], functionName: 'ACTION_POLICY' })
+  if ((bound as string).toLowerCase() !== ap.address.toLowerCase()) throw new Error(`MamoruPauseGate ${ap.pauseGate} reads ${bound}, not MamoruActionPolicyV3 ${ap.address}: v6 is not offered`)
 }
 
 /**
@@ -166,7 +165,7 @@ function deployedMonadV5(p: PolicyVersion, env: Record<string, string | undefine
  * exists). Whether an account is offered the move is the D1 flag `onchain_action_policy_v5`, read on every view.
  */
 export function resolveV5Policy(chain: PolicyVersion['chain'], env: Record<string, string | undefined>): PolicyVersion | undefined {
-  // otto/mamoru#214: a Monad operator has no Base policy to migrate accounts to; its V2 address is Monad's (deployedMonadV5).
+  // otto/mamoru#214: a Monad operator has no Base policy to migrate accounts to.
   if (chain === 'monad') return undefined
   if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1' || !env.MAMORU_ACTION_POLICY_V2_ADDRESS) return undefined
   return deployedV5(chain === conservadorLiveV5.chain ? conservadorLiveV5 : conservadorLabV5, env)
@@ -177,10 +176,10 @@ export function resolveV5Policy(chain: PolicyVersion['chain'], env: Record<strin
  * opt-in is off or `MAMORU_ACTION_POLICY_V2_ADDRESS` / `MAMORU_PAUSE_GATE_ADDRESS` is unset (fail closed: v6 is not
  * offered). Whether an account is offered the move is the D1 flag `multichain_v6`, read on every view.
  */
-export function resolveV6Policy(chain: PolicyVersion['chain'], env: Record<string, string | undefined>): PolicyVersion | undefined {
+export function resolveV6Policy(chain: PolicyVersion['chain'], env: Record<string, string | undefined>, registry: Registry = baseRegistry): PolicyVersion | undefined {
   if (chain === 'monad') return undefined
-  if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1' || !env.MAMORU_ACTION_POLICY_V2_ADDRESS || !env.MAMORU_PAUSE_GATE_ADDRESS) return undefined
-  return deployedV6(chain === conservadorLiveV6.chain ? conservadorLiveV6 : conservadorLabV6, env)
+  if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1' || !v6Deployable(env, registry)) return undefined
+  return deployedV6(chain === conservadorLiveV6.chain ? conservadorLiveV6 : conservadorLabV6, env, registry)
 }
 
 /**
@@ -194,17 +193,6 @@ export function resolveV4Policy(chain: PolicyVersion['chain'], env: Record<strin
   return deployedV4(chain === conservadorLiveV4.chain ? conservadorLiveV4 : conservadorLabV4, env)
 }
 
-/**
- * otto/mamoru#214 (peer review of #137): accounts activated on the Monad v5 sleeve policy need that same policy to be this
- * operator's own after a restart (it is wired from the environment, so no table resolves it). Refused at boot with the
- * accounts named, rather than throwing "unknown policy" on each of them while their Safes hold positions.
- */
-export function assertMonadV5Resolvable(accounts: readonly { accountKey: string; policyId?: string }[], policy: PolicyVersion): void {
-  const ids = new Set([liveWmonUsdcMonadV5.policyId, labWmonUsdcMonadV5.policyId])
-  const stranded = accounts.filter((a) => a.policyId && ids.has(a.policyId) && a.policyId !== policy.policyId)
-  if (stranded.length) throw new Error(`${stranded.length} account(s) run ${stranded[0]!.policyId} (${stranded.map((a) => a.accountKey.slice(0, 8)).join(', ')}) but this operator runs ${policy.policyId}: start it on that policy with MAMORU_ACTION_POLICY_V2_ADDRESS and MAMORU_GAS_POLICY_ADDRESS set`)
-}
-
 /** Accounts whose stored policy is a v4 one, when this operator was started without the v4 opt-in or its addresses. */
 export function assertV4Resolvable(accounts: readonly { accountKey: string; policyId?: string }[], env: Record<string, string | undefined>): void {
   const v6Ids = new Set([conservadorLiveV6.policyId, conservadorLabV6.policyId])
@@ -216,7 +204,7 @@ export function assertV4Resolvable(accounts: readonly { accountKey: string; poli
     } catch {
       v6 = undefined
     }
-    if (!v6) throw new Error(`${onV6.length} account(s) run conservador-live-v6 (${onV6.map((a) => a.accountKey.slice(0, 8)).join(', ')}): start with MAMORU_ONCHAIN_POLICY_V4=1, MAMORU_ACTION_POLICY_V2_ADDRESS, MAMORU_GAS_POLICY_ADDRESS and MAMORU_PAUSE_GATE_ADDRESS set`)
+    if (!v6) throw new Error(`${onV6.length} account(s) run conservador-live-v6 (${onV6.map((a) => a.accountKey.slice(0, 8)).join(', ')}): start with MAMORU_ONCHAIN_POLICY_V4=1 and MAMORU_GAS_POLICY_ADDRESS set, MamoruActionPolicyV3 and MamoruPauseGate pinned in the registry`)
   }
   const v5Ids = new Set([conservadorLiveV5.policyId, conservadorLabV5.policyId])
   const onV5 = accounts.filter((a) => a.policyId && v5Ids.has(a.policyId))
@@ -396,14 +384,10 @@ export function assertPolicyOnRegistry(policy: PolicyVersion, registry: Registry
 export function assertBaseOnlyFeatures(registry: Registry, env: Record<string, string | undefined>, o: Pick<BootOptions, 'l1RpcUrl' | 'monadRpcUrl'>, chainId?: number): void {
   if (registry.chainId === BASE_CHAIN_ID) return
   if (env.MAMORU_ONCHAIN_POLICY_V4 === '1') throw new Error(`MAMORU_ONCHAIN_POLICY_V4 is Base only; this operator reads ${registry.chain}`)
-  // v5 needs the v4 opt-in above; its deployed address alone is refused too, so no env turns it on off Base.
-  // otto/mamoru#214: except on a chain the operator is opted into writing to (MAMORU_CHAIN_WRITES): there it is that chain's
-  // MamoruActionPolicyV2, read only by the sleeve's own policy (deployedMonadV5).
-  // A lab fork (an RPC chain id that is no real chain) cannot carry MAMORU_CHAIN_WRITES, so it may hold the address for the
-  // fork twin (lab-wmon-usdc-monad-v5), which never signs on a real chain.
-  const onFork = chainId !== undefined && !isChainId(chainId)
-  if (env.MAMORU_PAUSE_GATE_ADDRESS) throw new Error(`MAMORU_PAUSE_GATE_ADDRESS is Base only (v6 bridge-out); this operator reads ${registry.chain}`)
-  if (env.MAMORU_ACTION_POLICY_V2_ADDRESS && !onFork && !(chainWritesOptIn(env) as readonly number[]).includes(registry.chainId)) throw new Error(`MAMORU_ACTION_POLICY_V2_ADDRESS is Base only; this operator reads ${registry.chain}`)
+  // v5 needs the v4 opt-in above; its deployed address alone is refused too, so no env turns it on off Base. A remote
+  // chain's contracts come from its registry (otto/mamoru#251), never from these.
+  if (env.MAMORU_PAUSE_GATE_ADDRESS) throw new Error(`MAMORU_PAUSE_GATE_ADDRESS is retired (v6 reads MamoruPauseGate from the registry); this operator reads ${registry.chain}`)
+  if (env.MAMORU_ACTION_POLICY_V2_ADDRESS) throw new Error(`MAMORU_ACTION_POLICY_V2_ADDRESS is Base only; this operator reads ${registry.chain}`)
   if (o.l1RpcUrl) throw new Error(`MAMORU_L1_RPC_URL (bridge-out to Base) is Base only; this operator reads ${registry.chain}`)
   if (o.monadRpcUrl) throw new Error(`MAMORU_MONAD_RPC_URL (the v6 bridge leg to Monad) is Base only; this operator reads ${registry.chain}`)
 }
@@ -545,7 +529,16 @@ export async function bootOperator(o: BootOptions) {
   if (!named) throw new Error(`unknown policy ${o.policyId}`)
   // Test-only (MAMORU_TEST_OVERRIDES=1): the fork E2E may shorten the re-range cooldown.
   const policy = withTestOverrides(named, process.env)
-  const v6Policy = resolveV6Policy(policy.chain, process.env)
+  let v6Policy = resolveV6Policy(policy.chain, process.env)
+  // otto/mamoru#251: the gate must read V3's pause on chain; otherwise v6 is not offered (said loudly, never silently).
+  if (v6Policy && live) {
+    try {
+      await assertV6Gate(client, v6Policy)
+    } catch (e) {
+      logErr('[alert]', `${(e as Error).message}`)
+      v6Policy = undefined
+    }
+  }
   assertBootPolicies(policy, v6Policy, registry, { live, writes: writes.on })
   if (writes.on) assertWritePolicy(policy, registry, chainId)
   const store = new StateStore(o.stateDir)
@@ -553,7 +546,6 @@ export async function bootOperator(o: BootOptions) {
   // restart (funding, engine, renewals and Stop all read it). Refused at boot, with the accounts named, rather than
   // failing on each of them later while their Safes hold positions.
   assertV4Resolvable(Object.values(store.state.accounts), process.env)
-  assertMonadV5Resolvable(Object.values(store.state.accounts), policy)
   // The relayer's own reads (gas estimate, nonce, the wait for a receipt) are counted as the relayer's, like its sends.
   const relayerClient = createPublicClient({ transport: http(via('relayer'), { batch: true, timeout: 60_000 }) })
   const relayerKey = loadOrCreateKey(join(o.stateDir, 'relayer.key'), generatePrivateKey)
@@ -592,6 +584,14 @@ export async function bootOperator(o: BootOptions) {
   // otto/mamoru#212: the operators of the other chains, read for the account's total across chains.
   const peerList = parsePeerOperators(o.peerOperators, chainId)
   const peers = peerList.length ? new PeerExposure(peerList, o.secret) : null
+  // otto/mamoru#251: the operators of v6's remote chains provision each account's own Safe there (Base only, v6 offered).
+  const remotePeers = Object.fromEntries(
+    chainId === BASE_CHAIN_ID && v6Policy ? peerList.filter((p) => (v6Policy.remoteBuckets ?? []).some((b) => b.chainId === p.chainId)).map((p) => [p.chainId, new RemotePeer(p.chainId, p.url, o.secret)]) : [],
+  )
+  if (v6Policy && chainId === BASE_CHAIN_ID) {
+    const missing = (v6Policy.remoteBuckets ?? []).filter((b) => !remotePeers[b.chainId])
+    if (missing.length) logErr('[alert]', `v6 is configured but no operator of chain ${missing.map((b) => b.chainId).join(', ')} is in MAMORU_PEER_OPERATORS: no v6 approval can be built`)
+  }
   if (peers) {
     console.log(`[operator] cap counted across chains: ${peerList.map((p) => p.chainId).join(', ')} read from their operators`)
     // otto/mamoru#212: a peer that cannot be read stops new placements and Starts here: said loudly at boot (and again
@@ -635,11 +635,15 @@ export async function bootOperator(o: BootOptions) {
       poolStatsStateFile: join(o.stateDir, 'pool-stats.json'),
       ...(peers ? { peers } : {}),
       ...(bridgeMonad ? { bridgeMonad } : {}),
+      ...(Object.keys(remotePeers).length ? { remotePeers } : {}),
     },
     client,
     relayer,
     store,
   )
+  // otto/mamoru#251: an account's own Safe on a remote chain is provisioned when its approval lands, and again every
+  // minute until its operator reports it running (a deploy that failed, a peer that was down).
+  if (Object.keys(remotePeers).length) setInterval(() => void operator.tickRemotes(), 60_000).unref?.()
   // otto/mamoru#136 phase 1 + otto/mamoru#129: one read of every served Safe and its pools, with the yield-ledger
   // hold-value baseline always folded in, served on GET /snapshot. Always built when the chain supports it;
   // started and stopped by the `yield_ledger` ops flag (D1, set from /ops), not MAMORU_SNAPSHOT / MAMORU_YIELD_LEDGER

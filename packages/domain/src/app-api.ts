@@ -69,6 +69,11 @@ export type ApiError = { error: string; code?: string }
 
 // GET /api/accounts/:accountKey/funding -> FundingView (what the Safe holds now, at a block)
 export type FundingView = {
+  /**
+   * otto/mamoru#251: the account's own Safe on another chain, provisioned by its confirmed approval (the Worker stores it
+   * as that chain's account once it has recomputed the address); `ready` once it runs there. Absent: none.
+   */
+  remote?: { chainId: number; address: Hex0x; spec: RemoteSpec; ready: boolean }
   address: Hex0x
   deployed: boolean
   block: number

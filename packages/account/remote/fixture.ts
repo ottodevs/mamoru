@@ -5,7 +5,7 @@ import { writeFileSync } from 'node:fs'
 import { getAddress } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
-import { address, monadRegistry, type Registry } from '@mamoru/registry'
+import { address, baseRegistry, monadRegistry, type Registry } from '@mamoru/registry'
 import { createProxyCall, webAuthnSigner } from '../safe/index.ts'
 import { monadV6Deployed, remoteSafe, type RemoteSafeInput } from './index.ts'
 
@@ -21,6 +21,20 @@ export const FIXTURE_PATH = new URL('../../../contracts/action-policy/test/fixtu
 export function withPinnedV3(registry: Registry = monadRegistry): Registry {
   if (registry.entries.some((e) => e.name === 'MamoruActionPolicyV3')) return registry
   return { ...registry, entries: [...registry.entries, { name: 'MamoruActionPolicyV3', kind: 'smart-sessions-policy', role: 'fixture', address: V3_MONAD_PINNED, codeHash: `0x${'00'.repeat(32)}` } as never] }
+}
+
+/** DeployV3.s.sol `expected(8453)` and DeployPauseGate.s.sol's gate bound to it (salt nonce 5), predicted with CREATE2. */
+export const V3_BASE_PINNED: Address = getAddress('0xDD2E387B748420C6501EC96Ec48F87cDEdf16749')
+export const GATE_V3_BASE_PINNED: Address = getAddress('0xf939c0FF7F095BA2ED7DDaaCD2D75da9A8cdF4e7')
+
+/** The Base registry with V3 and its pause gate at their pinned addresses (until base.json pins them after the deploys). */
+export function withPinnedV6Base(registry: Registry = baseRegistry): Registry {
+  const pins = [
+    { name: 'MamoruActionPolicyV3', address: V3_BASE_PINNED },
+    { name: 'MamoruPauseGate', address: GATE_V3_BASE_PINNED },
+  ]
+  const entries = registry.entries.filter((e) => !pins.some((p) => p.name === e.name))
+  return { ...registry, entries: [...entries, ...pins.map((p) => ({ ...p, kind: 'smart-sessions-policy', role: 'fixture', codeHash: `0x${'00'.repeat(32)}` }) as never)] }
 }
 
 export function fixtureInput(): RemoteSafeInput {

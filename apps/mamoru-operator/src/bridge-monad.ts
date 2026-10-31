@@ -2,7 +2,7 @@ import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from '
 import { join } from 'node:path'
 import { getAddress, isAddressEqual, pad, parseAbiItem, parseEventLogs, type Hex, type Log, type PublicClient, type TransactionReceipt } from 'viem'
 import { ReasonError, type Address, type BridgeProgress } from '@mamoru/domain'
-import { address, baseRegistry, entry, entryPointV07Abi, messageTransmitterV2Abi, monadRegistry, safe7579Abi, tokenMessengerV2Abi, type Registry } from '@mamoru/registry'
+import { address, baseRegistry, entry, entryPointV07Abi, messageTransmitterV2Abi, monadRegistry, safe7579Abi, smartSessionAbi, tokenMessengerV2Abi, type Registry } from '@mamoru/registry'
 import { userOpLogs } from '@mamoru/rpc'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
@@ -22,10 +22,11 @@ import { logErr, redactSecrets } from './metrics.ts'
 //   new bridge (decide's DECIDE_WAIT_BRIDGE). A 'sending' burn whose outcome is unknown stays in flight until the chain
 //   settles it: its UserOperationEvent (burned, or reverted: 'failed'), or its nonce taken at `safe` without it
 //   ('dropped');
-// - the account's sleeve value on Monad, valued at the TWAP of each pool it holds (never slot0), plus in flight;
-//   `ready` when the sleeve's Safe has code on Monad and SmartSession is installed on it;
+// - the value of the account's own Safe on Monad (otto/mamoru#251: its own address, fixed by its approval), at the TWAP
+//   of each pool it holds (never slot0), plus in flight; `ready` when that Safe has code on Monad, SmartSession is
+//   installed on it and every session its setup committed to is enabled;
 // - the mint: Circle's attestation for source domain 6 (Base) and the burn's Base transaction, checked to be this
-//   burn (message key, Base to Monad, the account as recipient and sender, the amount) and signed by the attesters
+//   burn (message key, Base to Monad, the account as sender, its own Safe on Monad as recipient, the amount) and signed by the attesters
 //   enabled on Monad, then receiveMessage on Monad from the operator's relayer key (its own nonce space on Monad, as
 //   on Ethereum for bridge-out), under a MON gas ceiling and a daily MON budget, the mint's hash on disk before the
 //   broadcast. Anyone may mint (destinationCaller 0): a nonce already used is marked minted without a transaction.
@@ -65,6 +66,8 @@ export type BridgeBurn = {
   id: Hex
   accountKey: string
   account: Address
+  /** otto/mamoru#251: the account's own Safe on Monad, the burn's mint recipient (the bridge-out grant allows no other). */
+  recipient: Address
   opId: string
   chainId: number
   destinationDomain: number
@@ -277,6 +280,7 @@ export class MonadBridge {
       id,
       accountKey,
       account: getAddress(b.account),
+      recipient: getAddress(b.recipient),
       opId: b.opId,
       chainId: b.chainId,
       destinationDomain: b.destinationDomain,
@@ -350,11 +354,11 @@ export class MonadBridge {
    * holds rather than size the account without its sleeve). A read from a block older than the last one recorded (a
    * lagging provider) is not used: the last one is. `baseBlock`: the block the engine read the local balances at.
    */
-  async remote(accountKey: string, safe: Address, twapWindowSeconds: number, baseBlock?: bigint): Promise<{ value: bigint; inFlight: bigint; ready: boolean }> {
+  async remote(accountKey: string, safe: Address, twapWindowSeconds: number, baseBlock?: bigint, permissionIds: readonly Hex[] = []): Promise<{ value: bigint; inFlight: bigint; ready: boolean }> {
     let read: { value: bigint; block: bigint; ready: boolean }
     try {
       if (!(await this.monadVerified())) throw new Error('Monad RPC not checked yet')
-      read = await this.readSleeve(safe, twapWindowSeconds)
+      read = await this.readSleeve(safe, twapWindowSeconds, permissionIds)
     } catch (e) {
       const last = this.journal.sleeves[accountKey]
       // The provider's error may quote its keyed URL: redacted before it reaches the engine's journal.
@@ -405,13 +409,17 @@ export class MonadBridge {
   }
 
   /** The sleeve's value at the TWAP and its readiness on Monad, at one block. */
-  async readSleeve(safe: Address, twapWindowSeconds: number): Promise<{ value: bigint; block: bigint; ready: boolean }> {
+  async readSleeve(safe: Address, twapWindowSeconds: number, permissionIds: readonly Hex[]): Promise<{ value: bigint; block: bigint; ready: boolean }> {
     const r = await readSafe(this.monad, safe, this.monadRegistryOf)
     const value = await sleeveValueAtTwap(this.monad, r, this.monadRegistryOf, twapWindowSeconds)
-    // Ready: the Safe is deployed on Monad and SmartSession is installed on it. The sleeve's activation installs
-    // SmartSession and enables its v5 sessions in the same owner transaction; the permission ids themselves are the Monad
-    // operator's and not known here.
-    const ready = r.deployed && (await this.monad.readContract({ address: safe, abi: safe7579Abi, functionName: 'isModuleInstalled', args: [1n, address('SmartSession', this.monadRegistryOf), '0x'], blockNumber: r.block }))
+    // Ready (otto/mamoru#251): the Safe is deployed on Monad, SmartSession is installed on it, and every session its setup
+    // committed to (`permissionIds`, from the approval) is enabled: nothing is bridged to a Safe that could not use it.
+    const smartSession = address('SmartSession', this.monadRegistryOf)
+    let ready = permissionIds.length > 0 && r.deployed && (await this.monad.readContract({ address: safe, abi: safe7579Abi, functionName: 'isModuleInstalled', args: [1n, smartSession, '0x'], blockNumber: r.block }))
+    for (const id of permissionIds) {
+      if (!ready) break
+      ready = await this.monad.readContract({ address: smartSession, abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [id, safe], blockNumber: r.block })
+    }
     return { value, block: r.block, ready }
   }
 
@@ -557,7 +565,7 @@ export class MonadBridge {
     const amount = BigInt(b.amount)
     const att = atts.find((a) => {
       try {
-        return cctpMessageKey(a.message) === b.messageKey && mintIsFor(decodeCctpMessage(a.message), BASE_USDC, b.account, amount, { source: CCTP_DOMAIN_BASE, destination: CCTP_DOMAIN_MONAD })
+        return cctpMessageKey(a.message) === b.messageKey && mintIsFor(decodeCctpMessage(a.message), BASE_USDC, b.recipient, amount, { source: CCTP_DOMAIN_BASE, destination: CCTP_DOMAIN_MONAD }, b.account)
       } catch {
         return false
       }
@@ -657,7 +665,7 @@ export class MonadBridge {
 }
 
 /** The one DepositForBurn of this burn in a userOp's logs, and the MessageSent next to it; null unless exactly that. */
-export function burnOf(logs: Log[], b: Pick<BridgeBurn, 'account' | 'amount' | 'destinationDomain'>, registry: Registry = baseRegistry): { message: Hex } | null {
+export function burnOf(logs: Log[], b: Pick<BridgeBurn, 'account' | 'recipient' | 'amount' | 'destinationDomain'>, registry: Registry = baseRegistry): { message: Hex } | null {
   const messenger = address('TokenMessengerV2', registry)
   const burns = parseEventLogs({ abi: tokenMessengerV2Abi, eventName: 'DepositForBurn', logs: logs.filter((l) => isAddressEqual(l.address, messenger)) })
   const sent = parseEventLogs({ abi: messageTransmitterV2Abi, eventName: 'MessageSent', logs: logs.filter((l) => isAddressEqual(l.address, MESSAGE_TRANSMITTER_V2)) })
@@ -667,7 +675,7 @@ export function burnOf(logs: Log[], b: Pick<BridgeBurn, 'account' | 'amount' | '
     isAddressEqual(a.burnToken, address('USDC', registry)) &&
     isAddressEqual(a.depositor, b.account) &&
     a.amount === BigInt(b.amount) &&
-    a.mintRecipient.toLowerCase() === pad(b.account, { size: 32 }).toLowerCase() &&
+    a.mintRecipient.toLowerCase() === pad(b.recipient, { size: 32 }).toLowerCase() &&
     a.destinationDomain === b.destinationDomain &&
     BigInt(a.destinationCaller) === 0n &&
     a.maxFee === 0n &&

@@ -118,7 +118,8 @@ export function decodeCctpMessage(m: Hex): CctpMessage {
  * `route` says otherwise (otto/mamoru#215: Base to Monad), from and to the TokenMessengerV2, the burned USDC (`usdc`,
  * the SOURCE chain's), the Safe as recipient, the amount burned, open caller.
  */
-export function mintIsFor(m: CctpMessage, usdc: Address, safe: Address, amount: bigint, route: { source: number; destination: number } = { source: CCTP_DOMAIN_ETHEREUM, destination: CCTP_DOMAIN_BASE }): boolean {
+/** `sender`: who burned (otto/mamoru#251: the Base account, when it mints to its own Safe on Monad); the same Safe by default. */
+export function mintIsFor(m: CctpMessage, usdc: Address, safe: Address, amount: bigint, route: { source: number; destination: number } = { source: CCTP_DOMAIN_ETHEREUM, destination: CCTP_DOMAIN_BASE }, sender: Address = safe): boolean {
   const w = (a: Address) => pad(a, { size: 32 }).toLowerCase()
   return (
     m.sourceDomain === route.source &&
@@ -128,7 +129,7 @@ export function mintIsFor(m: CctpMessage, usdc: Address, safe: Address, amount: 
     BigInt(m.destinationCaller) === 0n &&
     m.burnToken.toLowerCase() === w(usdc) &&
     m.mintRecipient.toLowerCase() === w(safe) &&
-    m.messageSender.toLowerCase() === w(safe) &&
+    m.messageSender.toLowerCase() === w(sender) &&
     m.amount === amount
   )
 }
