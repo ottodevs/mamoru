@@ -315,7 +315,7 @@ The risk page states the gap: the limit is a target and a fast move can pass it.
 
 `RISK_DEPEG_PAIRED`, `RISK_DEPEG_SAVINGS`, `RISK_DRAWDOWN_POSITION`, `RISK_DRAWDOWN_ACCOUNT`, `RISK_REGIME_TREND`,
 `RISK_REGIME_VOL`, `RISK_EXIT_NOT_RERANGE`, `RISK_POOL_TVL_DROP`, `RISK_ORACLE_DIVERGENCE`, `RISK_ORACLE_STALE`,
-`RISK_PRICE_IMPACT`, `RISK_DATA_INSUFFICIENT`, `RISK_EXIT_BUDGET_SPENT`, `SESSION_USAGE_SPENT` (used by the
+`RISK_PRICE_IMPACT`, `RISK_POOL_TVL_FLOOR`, `RISK_POOL_TVL_UNREAD`, `RISK_POOL_VOLUME_LOW`, `RISK_POOL_STATS_UNREAD`, `RISK_DATA_INSUFFICIENT`, `RISK_EXIT_BUDGET_SPENT`, `SESSION_USAGE_SPENT` (used by the
 simulator today, not yet in the domain list), `EXIT_LOSS_CONTROL` (ExitRequest cause),
 `EXIT_PARTIAL_IMPACT`, `EXIT_SWAP_WAIT_TWAP`, `BUCKET_FROZEN`, `BUCKET_PARKED`, `BUCKET_REENTERED`.
 
@@ -390,6 +390,33 @@ A variant: `bun packages/backtest/cli/sweep.ts --policy conservador-lab-guards-v
 | LC-T8 | App: bucket state lines, history with trigger and threshold, risk page copy (#58) | UI scenario per state |
 | LC-T9 | `guards.mode = 'enforce'` after Ot's GO on the Lab table and the shadow log, and only once D5 is resolved | Ot GO |
 
+## Packaging shadow rules (phase 1, otto/mamoru#101)
+
+Source: Brais's Packaging document (pool monitor sections A and C, entry gate). Shadow only: every row writes to
+`Decision.shadowRisk`, outside the premise hash (`premiseHash` and `decisionId` never move with any value here), and the
+engine logs `[shadow]` when the set of firing rules changes. Gate: the policy lists `packaging:tvl`. No policy object
+changes, so no `policyHash` changes. Nothing acts: a row says what would have exited.
+
+| Rule | Condition (would EXIT) | Code | `window` |
+|---|---|---|---|
+| PR1 floor | pool TVL (on-chain, token balances at TWAP) under 2,000,000 USDC | `RISK_POOL_TVL_FLOOR` | none |
+| A. TVL change | TVL now vs 1 day ago at or under -12% | `RISK_POOL_TVL_DROP` | `1d` |
+| A. TVL change | vs 7 days ago at or under -20% | `RISK_POOL_TVL_DROP` | `7d` |
+| A. TVL change | vs 30 days ago at or under -30% | `RISK_POOL_TVL_DROP` | `30d` |
+| B. Activity | `Volume7d` under `max(TVL * ratio, floor)` by bucket: stables 0.35x / 1,000,000, btc-usdc 0.25x / 300,000, risk 0.05x / 20,000 (USD) | `RISK_POOL_VOLUME_LOW` | `7d` |
+| B. Activity, stables only | volume of the last full day under 30% of the 28 day daily average | `RISK_POOL_VOLUME_LOW` | `28d` |
+| C. Unreadable | a figure a rule needs is missing, stale or not a number; the rules that can be computed still are | `RISK_POOL_STATS_UNREAD` | none |
+| PR1 unreadable | on-chain pool balance not readable | `RISK_POOL_TVL_UNREAD` | none |
+
+Units in an entry: `RISK_POOL_TVL_DROP` carries basis points (`threshold` -1200, `metric` the measured change);
+`RISK_POOL_VOLUME_LOW` carries raw savings units (USDC, 6 decimals).
+
+Data (operator, not `decide`): DefiLlama `yields.llama.fi/chart/<id>` for the TVL 1d/7d/30d ago, GeckoTerminal
+`/pools/<address>` (`reserve_in_usd`, current TVL) and `/pools/<address>/ohlcv/day?limit=29` (complete days only; the day
+in progress is dropped) for the volumes. Refreshed at most hourly per pool, no API keys; a failed fetch keeps the last good
+value for 6 h, then the fields are null and the rule reports `RISK_POOL_STATS_UNREAD`. Reaches `decide` as
+`Observation.poolStats`, read only by the shadow rule.
+
 ## Decisions for Ot
 
 - **D1.** Account loss limit default: 10% of net deposits, owner resumes by hand. Or user-chosen at Start (#56).
@@ -404,3 +431,11 @@ A variant: `bun packages/backtest/cli/sweep.ts --policy conservador-lab-guards-v
   V (swap at any price when the session is valid), or the 100 ticks of every other operation (exits later in a crash).
 - **D7.** Oracle: Chainlink feeds on Base as a new read-only registry dependency (proposed), or pool-only rules
   (no depeg direction, no divergence rule).
+
+Provisional defaults for the Packaging rules (Ot, 27 Oct; discussion open with Brais). Shadow only until D5 resolves.
+
+- **D8.** Stale or missing data: FREEZE the bucket and alert, never exit on missing data (keeps FR-LC-007). Shadow today:
+  `RISK_POOL_STATS_UNREAD` and `RISK_POOL_TVL_UNREAD`.
+- **D9.** IL / rally exit (Packaging's price rules): shadow only.
+- **D10.** ENY / APY exit: only once ENY leaves shadow.
+- **D11.** Safety Score: dropped. Covered by incidents plus the Purga re-run.
