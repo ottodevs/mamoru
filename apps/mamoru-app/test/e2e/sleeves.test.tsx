@@ -52,7 +52,7 @@ function client(session: SessionView) {
   return qc
 }
 
-const wrap = (el: React.ReactElement, session: SessionView = { ...fixtureSession, sleeves, addableChains: [] }) => (
+const wrap = (el: React.ReactElement, session: SessionView = { ...fixtureSession, sleeves }) => (
   <ApiContext.Provider value={fixtureClient}>
     <QueryClientProvider client={client(session)}>{el}</QueryClientProvider>
   </ApiContext.Provider>

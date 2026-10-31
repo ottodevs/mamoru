@@ -88,7 +88,7 @@ describe('a Monad sleeve on beta', () => {
     const { cookie, base } = await owner(h)
     const before = (await (await at(h, BETA, '/api/session', cookie)).json()) as SessionView
     expect(before.sleeves).toEqual([{ accountKey: base.accountKey, chainId: 8453, chain: 'Base', address: base.address as SleeveView['address'] }])
-    expect(before.addableChains).toBeUndefined()
+    expect('addableChains' in before).toBe(false)
 
     expect((await at(h, BETA, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })).status).toBe(404)
     expect(h.db.raw.query('SELECT COUNT(*) AS n FROM accounts WHERE chain_id = 143').get()).toEqual({ n: 0 })
@@ -97,7 +97,7 @@ describe('a Monad sleeve on beta', () => {
     const after = (await (await at(h, BETA, '/api/session', cookie)).json()) as SessionView
     expect(after.accountKey).toBe(base.accountKey)
     expect(after.sleeves).toEqual([{ accountKey: base.accountKey, chainId: 8453, chain: 'Base', address: base.address as SleeveView['address'] }, sleeve])
-    expect(after.addableChains).toBeUndefined()
+    expect('addableChains' in after).toBe(false)
   })
 
   test('the database holds one sleeve per owner off Base', () => {

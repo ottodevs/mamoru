@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { isMultichainTarget, MonadIntro, monadCopy, SplitTable, splitRows } from '../../src/web/components/monad-consent.tsx'
+import { isMultichainTarget, MonadConsentDialog, SplitTable, splitRows } from '../../src/web/components/monad-consent.tsx'
 import { ApprovalRow, approvalTitle } from '../../src/web/routes/home.tsx'
 import { render } from './render.ts'
 
@@ -31,7 +31,7 @@ describe('the mix before and after (conservador-live-v5 to v6)', () => {
     expect(splitRows('conservador-live-v6', 'conservador-live-v6').some((r) => r.pool === 'USDC / cbBTC')).toBe(false)
   })
 
-  test('the step 2 text is the target mix read from the rows', async () => {
+  test('the mix line is the target mix read from the rows', async () => {
     const { mixLine } = await import('../../src/web/components/monad-consent.tsx')
     expect(mixLine(splitRows('conservador-live-v5', 'conservador-live-v6'))).toBe('50% USDC / USDT on Base, 35% USDC / WETH on Base, 15% USDC / WMON on Monad')
   })
@@ -48,8 +48,9 @@ describe('the mix before and after (conservador-live-v5 to v6)', () => {
 })
 
 describe('the dialog and the row', () => {
-  test('the intro shows the mix, says nothing moves before approval, and asks to continue', () => {
-    const { text } = render(<MonadIntro rows={splitRows('conservador-live-v5', 'conservador-live-v6')} onContinue={() => {}} onLater={() => {}} />)
+  test('one screen: the mix, nothing moves before approval, one signature for all of it (#251)', () => {
+    const flow = { busy: null, error: null, summary: null, prepare: () => {}, approve: () => {} }
+    const { text } = render(<MonadConsentDialog open rows={splitRows('conservador-live-v5', 'conservador-live-v6')} flow={flow} onClose={() => {}} />)
     expect(text).toContain('a USDC / WMON pool on Monad')
     expect(text).toContain('moves 15% there')
     expect(text).toContain('a pool marked closed is unwound into the others')
@@ -57,8 +58,10 @@ describe('the dialog and the row', () => {
     expect(text).toContain('USDC / WMON Monad — 15%')
     expect(text).toContain('USDC / cbBTC Base 40% closed')
     expect(text).toContain('Nothing moves until you approve')
-    expect(text).toContain('Two signatures')
-    expect(text).toContain(monadCopy.continue)
+    expect(text).toContain('One signature')
+    expect(text).toContain('Your own Safe on Monad')
+    expect(text).not.toContain('Two signatures')
+    expect(text).not.toContain('Step 1')
   })
 
   test('the table marks every row that changes', () => {
@@ -69,7 +72,7 @@ describe('the dialog and the row', () => {
   test('the row offers the Monad move in its own words, never "one tap, nothing is moved"', () => {
     expect(approvalTitle(v6Upgrade)).toContain('Monad')
     const { text } = render(<ApprovalRow approval={v6Upgrade} onOpen={() => {}} />)
-    expect(text).toContain('Two taps with your passkey')
+    expect(text).toContain('One tap with your passkey')
     expect(text).toContain('See what changes')
     expect(text).not.toContain('Nothing is moved')
   })

@@ -70,8 +70,6 @@ export type ApiClient = {
   ethConvert(accountKey: string, sig: OwnerSignature): Promise<BridgeOutView>
   /** Works with or without a session. */
   feedback(body: FeedbackRequest): Promise<FeedbackResponse>
-  /** otto/mamoru#67: open (or find) the owner's sleeve on `chainId`. Only where the session lists `addableChains`. */
-  addSleeve(chainId: number): Promise<SleeveView>
 }
 
 export class ApiRequestError extends Error {
@@ -156,7 +154,6 @@ export const httpClient: ApiClient = {
   ethConvertPrepare: (k) => post<EthConvertToSign>(acct(k, 'eth-convert/prepare')),
   ethConvert: (k, sig) => post<BridgeOutView>(acct(k, 'eth-convert'), sig),
   feedback: (body) => post<FeedbackResponse>('/api/feedback', body),
-  addSleeve: (chainId) => post<SleeveView>('/api/sleeves', { chainId }),
 }
 
 export const ApiContext = createContext<ApiClient>(httpClient)

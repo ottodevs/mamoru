@@ -1,4 +1,4 @@
-import { overCap, PRODUCTION_BANNER, type AppConfig, type BridgeOutView, type FundingView, type OpView, type OwnerResponse, type OwnerTxToSign, type PriceDivergenceWarning, type SessionView, type SleeveView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
+import { overCap, PRODUCTION_BANNER, type AppConfig, type BridgeOutView, type FundingView, type Hex0x, type OpView, type OwnerResponse, type OwnerTxToSign, type PriceDivergenceWarning, type SessionView, type SleeveView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
 import { ApiRequestError, type ApiClient } from '../api/client.ts'
 import { emptyAccount, FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from './empty-account.ts'
 import { poolsResponse } from './pools.ts'
@@ -111,14 +111,15 @@ const placedThree = (): Partial<FundingView> => ({
     },
   ],
 })
-// ?monad (dev only, otto/mamoru#67): the owner also has a Monad sleeve, same address, running in WMON/USDC 0.30%. With
-// ?monadadd instead, the Monad sleeve is not there yet and Home offers to add it.
-export const MONAD_FIXTURE_KEY = 'acct_fixture_monad'
+// ?monad (dev only, otto/mamoru#67, #251): the owner also has their own Safe on Monad (its own address, created by the
+// approval that moved the account to v6), running in WMON/USDC 0.30%.
+export const MONAD_FIXTURE_KEY = `${FIXTURE_ACCOUNT_KEY}@143`
+/** The owner's own Safe on Monad: another address than the Base Safe (its setup carries the Monad sessions). */
+export const FIXTURE_MONAD_SAFE: Hex0x = '0x74d6086DbC072ff22774A2A8bE98324E1eaF084c'
 const monadOn = param('monad')
-const monadAdd = param('monadadd')
 // ?monadupgrade (dev only, otto/mamoru#216): a running v5 account offered the mix with Monad (v6), no Monad Safe yet.
 const monadUpgrade = param('monadupgrade')
-const sleeveOf = (accountKey: string, chainId: number): SleeveView => ({ accountKey, chainId, chain: chainId === 143 ? 'Monad' : 'Base', address: FIXTURE_ADDRESS })
+const sleeveOf = (accountKey: string, chainId: number): SleeveView => ({ accountKey, chainId, chain: chainId === 143 ? 'Monad' : 'Base', address: chainId === 143 ? FIXTURE_MONAD_SAFE : FIXTURE_ADDRESS })
 const monadState = {
   funding: {
     ...structuredClone(fixtureFunding),
@@ -145,9 +146,8 @@ const monadState = {
     { opId: 'eng-m1-enter_mint', kind: 'enter', state: 'confirmed', pool: 'pool:WMON/USDC/3000', txHash: `0x${'5'.repeat(64)}`, updatedAt: new Date(Date.now() - 48 * 60_000).toISOString() },
   ] as OpView[],
 }
-const sleeveState = { sleeves: monadOn ? [sleeveOf(FIXTURE_ACCOUNT_KEY, 8453), sleeveOf(MONAD_FIXTURE_KEY, 143)] : monadAdd || monadUpgrade ? [sleeveOf(FIXTURE_ACCOUNT_KEY, 8453)] : null }
-const sessionNow = (): SessionView =>
-  sleeveState.sleeves ? { ...fixtureSession, sleeves: sleeveState.sleeves, addableChains: sleeveState.sleeves.some((x) => x.chainId === 143) ? [] : [143] } : fixtureSession
+const sleeveState = { sleeves: monadOn ? [sleeveOf(FIXTURE_ACCOUNT_KEY, 8453), sleeveOf(MONAD_FIXTURE_KEY, 143)] : monadUpgrade ? [sleeveOf(FIXTURE_ACCOUNT_KEY, 8453)] : null }
+const sessionNow = (): SessionView => (sleeveState.sleeves ? { ...fixtureSession, sleeves: sleeveState.sleeves } : fixtureSession)
 const isMonad = (k: string | undefined) => k === MONAD_FIXTURE_KEY
 // ?renewdue (dev only): a running account whose approval ends in 10 days. Home asks for the renewal on arrival (#148).
 const renewdue = param('renewdue')
@@ -336,20 +336,10 @@ export const fixtureClient: ApiClient = {
   activatePrepare: (k) =>
     delay(
       fixtureTx(
-        isMonad(k)
-          ? [
-              `Create your Safe on Monad at ${FIXTURE_ADDRESS}, the same address as on Base, owned by the same passkey`,
-              'Engine key 0x7d3E1bA2c4F5a6B7c8D9e0F1a2B3c4D5e6F7a8B9 may act for 365 days, sized for deposits up to 1,000.00 USDC:',
-              'In WMON/USDC 0.3%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 450.00 USDC a day and 1,500.00 USDC in total on this approval',
-              'A guardian key can pause it, never move funds',
-              'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
-              'Nothing is moved now',
-            ]
-          : ['Deploy your Safe on Base', 'Enable the engine session for up to 20 USDC', 'Top up gas reserve to 0.0003 ETH'],
+        ['Deploy your Safe on Base', 'Enable the engine session for up to 20 USDC', 'Top up gas reserve to 0.0003 ETH'],
       ),
     ),
   activate: (k) => {
-    if (isMonad(k)) return delay(fixtureOp('activate', () => Object.assign(monadState.funding, { deployed: true, active: true })))
     if (fresh && BigInt(liveState.funding.usdc) === 0n) {
       liveState.n += 1
       const op: OpView = { opId: `op_fixture_${liveState.n}`, kind: 'activate', state: 'proposed', code: 'ARMED', updatedAt: new Date().toISOString() }
@@ -443,7 +433,28 @@ export const fixtureClient: ApiClient = {
   // The shape of a real three-pool renewal (operator planRenew), so the dialog is reviewed on text as long as the real one.
   renewPrepare: () =>
     delay(
-      fixtureTx([
+      monadUpgrade
+        ? {
+            // The shape of a real v5 -> v6 move (operator planRenew with remoteLines, #251): one approval, one transaction.
+            ...fixtureTx([
+              `Renew Mamoru's approval on your Safe ${FIXTURE_ADDRESS} and move it to on-chain limits`,
+              'Mamoru can now trade only near the market price, and only the positions it opened',
+              `15% of your savings (Growth) goes to your own Safe on Monad, ${FIXTURE_MONAD_SAFE}: same owner (your passkey), created by Mamoru with no other signature`,
+              'On Monad Mamoru may only swap and provide liquidity in WMON/USDC 0.3%, near the market price, paid only to that Safe, until 2027-10-31',
+              "USDC crosses only to that Safe, through Circle's bridge (CCTP), at no fee",
+              'USDC/cbBTC is only wound down, nothing new goes into it',
+              'Engine key 0x7d3E1bA2c4F5a6B7c8D9e0F1a2B3c4D5e6F7a8B9 may keep doing the same kinds of actions for 365 more days, within new limits counted from zero, sized for deposits up to 1,000.00 USDC (your cap):',
+              'In USDC/USDT 0.01%: swaps, new positions and withdrawals only within 0.10% of the 30- and 5-minute average price; worth at most 2,500.00 USDC a day and 5,000.00 USDC in total on this approval',
+              'In WETH/USDC 0.3%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; worth at most 700.00 USDC a day and 3,500.00 USDC in total on this approval',
+              'The approval it replaces is revoked in the same transaction',
+              'Nothing is moved: your positions stay as they are',
+              'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
+            ]),
+            policyId: 'conservador-live-v6',
+            move: true,
+            remote: { chainId: 143, address: FIXTURE_MONAD_SAFE, spec: { chainId: 143, policyId: 'live-wmon-usdc-monad-v6', sessionKey: '0x00000000000000000000000000000000005e5510', validAfter: 1_790_000_000, validUntil: 1_821_536_000, capUsdc: '500000000' } },
+          }
+        : fixtureTx([
         `Renew Mamoru's approval on your Safe ${FIXTURE_ADDRESS}`,
         'Engine key 0x7d3E1bA2c4F5a6B7c8D9e0F1a2B3c4D5e6F7a8B9 may keep doing the same kinds of actions for 365 more days, within new limits counted from zero, sized for deposits up to 1,000.00 USDC (the cap you signed):',
         'In USDC/USDT 0.01%: USDC swapped in at most 166.67 per swap and 333.33 in total, so at most 333.33 in one transaction, which can hold several swaps; at most 8 transactions to swap USDC in, 8 to open a position, 256 to take liquidity out, burn or re-open a position, 64 to collect fees and swap them to USDC (one transaction can hold several of these steps)',
@@ -462,11 +473,5 @@ export const fixtureClient: ApiClient = {
       }),
     ),
   feedback: () => delay({ id: `fixture_fb_${liveState.n++}`, received: true as const }),
-  addSleeve: (chainId) => {
-    const s = sleeveOf(MONAD_FIXTURE_KEY, chainId)
-    // A sleeve just opened: counterfactual, nothing in it yet.
-    if (!monadOn) Object.assign(monadState, { funding: { ...structuredClone(fixtureFunding), usdc: '0', capUsdc: '100000000' }, ops: [] })
-    sleeveState.sleeves = [...(sleeveState.sleeves ?? [sleeveOf(FIXTURE_ACCOUNT_KEY, 8453)]).filter((x) => x.chainId !== chainId), s]
-    return delay(s)
-  },
+
 }

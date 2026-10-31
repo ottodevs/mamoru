@@ -1,4 +1,3 @@
-import { useState, type ReactNode } from 'react'
 import type { PolicyVersion } from '@mamoru/policy'
 import { sleeveChain } from '../lib/chain.tsx'
 import { KNOWN_POLICIES as KNOWN, isMultichainTarget } from '../lib/policies.ts'
@@ -37,9 +36,9 @@ export function splitRows(fromId: string, toId: string): SplitRow[] {
 }
 
 /**
- * otto/mamoru#201, #216: an account that runs on Base is asked, once, to let Mamoru also work on Monad. The dialog
- * explains first (what changes in the mix, what does not), then asks for the two passkey signatures in order: open the
- * Safe on Monad, then renew the approval on Base with the new mix. Nothing moves before both are signed.
+ * otto/mamoru#201, #251: an account that runs on Base is asked, once, to let Mamoru also work on Monad. One screen says
+ * what changes in the mix and what does not, and one passkey signature approves all of it: the new mix on Base, the
+ * move of the Monad share, and the Monad pool, in a Safe of the owner's own that Mamoru creates there.
  */
 export const monadCopy = {
   title: 'Mamoru now works on Monad too',
@@ -49,19 +48,10 @@ export const monadCopy = {
   after: 'After',
   leaving: 'closed',
   points: [
-    { title: 'Same Safe, same passkey', body: 'Your Safe has the same address on Monad. Only you can withdraw, on either chain.' },
+    { title: 'Your own Safe on Monad', body: 'Mamoru creates it for you, owned by the same passkey. Only you can withdraw, on either chain.' },
     { title: 'Step by step, inside limits', body: 'Mamoru closes and opens positions gradually, within the limits you sign. Nothing moves until you approve.' },
-    { title: 'Two signatures', body: 'One opens your Safe on Monad. The other renews Mamoru\'s approval on Base with the new mix.' },
+    { title: 'One signature', body: 'This one approval covers the new mix on Base, the move to Monad and the pool there. Nothing else to sign.' },
   ],
-  continue: 'Continue',
-  later: 'Not now',
-  step: (n: number) => `Step ${n} of 2`,
-  monadTitle: 'Open your Safe on Monad',
-  monadLead: 'Same address, same passkey. Mamoru may then manage the Growth pool there, within these limits.',
-  baseTitle: 'Renew the approval on Base',
-  baseLead: (mix: string, chain: string) => `The new mix: ${mix}. Mamoru may move the share on ${chain} to your own Safe there, and nowhere else.`,
-  pending: 'Opening your Safe on Monad. Step 2 opens by itself once it is open on chain.',
-  opening: 'Opening your Safe on Monad',
 }
 
 /** One row of the before/after mix: a pool on a chain and its share of the account, in basis points. */
@@ -129,36 +119,6 @@ export function mixLine(rows: SplitRow[]): string {
   return rows.filter((r) => r.toBps > 0).map((r) => `${pct(r.toBps)} ${r.pool} on ${r.chain}`).join(', ')
 }
 
-/** The first screen: what changes, before anything is prepared or signed. */
-export function MonadIntro({ rows, onContinue, onLater }: { rows: SplitRow[]; onContinue: () => void; onLater: () => void }) {
-  const remote = remoteOf(rows)
-  return (
-    <div className="approve" data-testid="monad-intro">
-      <p className="approve-lead">{remote ? monadCopy.lead(remote.pool, remote.chain, pct(remote.toBps)) : mixLine(rows)}</p>
-      <SplitTable rows={rows} />
-      <Points />
-      <div className="approve-actions">
-        <button type="button" className="approve-later" onClick={onLater}>
-          {monadCopy.later}
-        </button>
-        <button type="button" className="cta" onClick={onContinue}>
-          {monadCopy.continue}
-        </button>
-      </div>
-    </div>
-  )
-}
-
-/** A signing step: its number, then the usual approval body (brief, signed lines, passkey). */
-export function MonadStep({ n, lead, children }: { n: 1 | 2; lead: string; children: (lead: ReactNode) => ReactNode }) {
-  return (
-    <div className="monad-step" data-testid={`monad-step-${n}`}>
-      <p className="monad-step-n">{monadCopy.step(n)}</p>
-      {children(lead)}
-    </div>
-  )
-}
-
 export type MonadFlow = {
   busy: string | null
   error: string | null
@@ -168,37 +128,26 @@ export type MonadFlow = {
 }
 
 /**
- * The whole dialog. `monad` signs the Monad Safe's activation, `base` the renewal on Base; each is the same owner flow
- * every other approval uses. Step 2 opens only once step 1 is done (`monadDone`), so the renewal that lets Mamoru
- * bridge is never signed before the Safe it bridges to is open.
+ * The whole dialog, one screen: what changes (lead, mix, the three points), then the approval itself, the same owner flow
+ * every other approval uses (its signed lines name the Monad Safe's address), and one passkey tap.
  */
-export function MonadConsentDialog({ open, rows, monad, base, monadDone, monadPending = false, onClose }: { open: boolean; rows: SplitRow[]; monad: MonadFlow; base: MonadFlow; monadDone: boolean; monadPending?: boolean; onClose: () => void }) {
-  const [started, setStarted] = useState(false)
+export function MonadConsentDialog({ open, rows, flow, onClose }: { open: boolean; rows: SplitRow[]; flow: MonadFlow; onClose: () => void }) {
   const remote = remoteOf(rows)
-  const title = !started ? monadCopy.title : monadDone ? monadCopy.baseTitle : monadCopy.monadTitle
   return (
-    <ApprovalDialog title={title} open={open} onClose={onClose}>
-      {!started ? (
-        <MonadIntro rows={rows} onContinue={() => setStarted(true)} onLater={onClose} />
-      ) : !monadDone ? (
-        <MonadStep n={1} lead={monadCopy.monadLead}>
-          {(lead) => (
-            <>
-              {monadPending ? (
-                <p className="progress mono-label text-stone" role="status" aria-live="polite" data-testid="monad-pending">
-                  <span className="progress-dot" aria-hidden="true" />
-                  {monadCopy.pending}
-                </p>
-              ) : null}
-              <ApprovalBody lead={lead} summary={monad.summary} busy={monadPending ? 'pending' : monad.busy} error={monad.error} onPrepare={monad.prepare} onApprove={monad.approve} onLater={onClose} />
-            </>
-          )}
-        </MonadStep>
-      ) : (
-        <MonadStep n={2} lead={monadCopy.baseLead(mixLine(rows), remote?.chain ?? 'the other chain')}>
-          {(lead) => <ApprovalBody lead={lead} summary={base.summary} busy={base.busy} error={base.error} onPrepare={base.prepare} onApprove={base.approve} onLater={onClose} />}
-        </MonadStep>
-      )}
+    <ApprovalDialog title={monadCopy.title} open={open} onClose={onClose}>
+      <div data-testid="monad-intro">
+        <ApprovalBody
+          lead={remote ? monadCopy.lead(remote.pool, remote.chain, pct(remote.toBps)) : mixLine(rows)}
+          context={<SplitTable rows={rows} />}
+          points={<Points />}
+          summary={flow.summary}
+          busy={flow.busy}
+          error={flow.error}
+          onPrepare={flow.prepare}
+          onApprove={flow.approve}
+          onLater={onClose}
+        />
+      </div>
     </ApprovalDialog>
   )
 }

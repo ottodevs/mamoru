@@ -117,8 +117,8 @@ export const homeCopy = {
   // otto/mamoru#151: the guardian paused the account; the owner's renewal would end the pause.
   pausedTitle: 'A guardian key has paused Mamoru on this account, so it is not acting. Renewing its approval ends that pause: renew only if you know why it was paused.',
   // otto/mamoru#201, #216: the move to a mix that also works on Monad (conservador-live-v6).
-  upgradeMonadTitle: 'Mamoru now works on Monad too. See what changes in your mix, then approve it with two taps.',
-  upgradeMonadNote: 'Two taps with your passkey. Nothing moves until you approve both.',
+  upgradeMonadTitle: 'Mamoru now works on Monad too. See what changes in your mix, then approve it once.',
+  upgradeMonadNote: 'One tap with your passkey. Nothing moves until you approve.',
   upgradeMonad: 'See what changes',
   upgradeV5Title: "Mamoru's on-chain limits have a new version: it trades only near the market price and only the positions it opened, adds to a position it already holds instead of opening another, and a guardian key can pause it but never move funds. Renew its approval to turn this on.",
   // otto/mamoru#149: a grant that has used 80% or all of what the approval allows.
@@ -1104,26 +1104,15 @@ function RenewDialog({ accountKey, approval, open, onClose, onDone }: { accountK
 }
 
 /**
- * otto/mamoru#216: the move to a mix with a share on Monad. Step 1 opens the owner's Safe on Monad (its sleeve: created
- * here when it does not exist yet, then activated with the passkey on Monad's operator); step 2 is the usual renewal on
- * Base, to the target policy. Step 2 is offered only once the Monad Safe runs, and the Worker refuses it otherwise.
+ * otto/mamoru#216, #251: the move to a mix with a share on Monad: the renewal on Base to the target policy, one signature.
+ * The approval also provisions the owner's own Safe on Monad (the operator creates it from the same passkey after the
+ * renewal lands; the Worker checks its address against the owner's keys before this dialog ever sees it).
  */
 function MonadUpgradeDialog({ accountKey, approval, open, onClose, onDone }: { accountKey: string; approval: NonNullable<FundingView['approval']>; open: boolean; onClose: () => void; onDone: (signedKey: string, opId: string) => void }) {
-  const api = useApi()
-  const qc = useQueryClient()
-  const session = useSession()
-  const sleeve = (session.data?.sleeves ?? []).find((x) => x.chainId === 143)
-  const sleeveFunding = useFunding(sleeve?.accountKey, open && !!sleeve, 15_000)
-  const monadFlow = useOwnerAction(sleeve?.accountKey, 'activate')
-  const baseFlow = useOwnerAction(accountKey, 'renew')
-  const prepared = useFittingPrepared(approval, baseFlow)
-  const [opening, setOpening] = useState<string | null>(null)
-  // Step 2 opens only on what the chain shows: the Monad Safe running, or its activation confirmed. A submitted or armed
-  // op is not enough (it may still fail), and the renewal it unlocks lets Mamoru bridge to that Safe (#142 review).
-  const monadDone = sleeveFunding.data?.active === true || monadFlow.result?.state === 'confirmed'
-  const monadPending = !monadDone && !!monadFlow.result && monadFlow.result.state !== 'failed'
-  const done = !!baseFlow.result && baseFlow.result.state !== 'failed'
-  const doneOp = done ? baseFlow.result!.opId : null
+  const flow = useOwnerAction(accountKey, 'renew')
+  const prepared = useFittingPrepared(approval, flow)
+  const done = !!flow.result && flow.result.state !== 'failed'
+  const doneOp = done ? flow.result!.opId : null
   const reported = useRef<string | null>(null)
   useEffect(() => {
     if (!doneOp || reported.current === doneOp) return
@@ -1131,35 +1120,13 @@ function MonadUpgradeDialog({ accountKey, approval, open, onClose, onDone }: { a
     onDone(approvalRowKey(approval), doneOp)
     onClose()
   }, [doneOp, onClose, onDone, approval])
-  // No sleeve yet: create it (same passkey, same address); the next tap prepares its activation.
-  const prepareMonad = async () => {
-    setOpening(null)
-    if (sleeve) return void monadFlow.prepare()
-    setOpening(monadCopy.opening)
-    try {
-      await api.addSleeve(143)
-      await qc.invalidateQueries({ queryKey: queryKeys.session })
-      setOpening(null)
-    } catch (e) {
-      setOpening(e instanceof Error ? e.message : String(e))
-    }
-  }
   const rows = splitRows(approval.policyId ?? '', approval.upgradePolicy ?? '')
   return (
     <MonadConsentDialog
       open={open && !done}
       rows={rows}
-      monadDone={monadDone}
-      monadPending={monadPending}
       onClose={onClose}
-      monad={{
-        busy: opening === monadCopy.opening ? 'preparing' : monadFlow.busy,
-        error: opening && opening !== monadCopy.opening ? opening : monadFlow.error,
-        summary: monadFlow.prepared?.tx.summary ?? null,
-        prepare: () => void prepareMonad(),
-        approve: () => void (monadFlow.prepared ? monadFlow.approve() : prepareMonad()),
-      }}
-      base={{ busy: baseFlow.busy, error: baseFlow.error, summary: prepared?.tx.summary ?? null, prepare: () => void baseFlow.prepare(), approve: () => void (prepared ? baseFlow.approve() : baseFlow.prepare()) }}
+      flow={{ busy: flow.busy, error: flow.error, summary: prepared?.tx.summary ?? null, prepare: () => void flow.prepare(), approve: () => void (prepared ? flow.approve() : flow.prepare()) }}
     />
   )
 }

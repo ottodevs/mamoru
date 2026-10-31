@@ -23,14 +23,12 @@ export type SessionView = {
    * on (the `monad_sleeves` ops flag, beta host only); absent, the SPA behaves exactly as with Base alone.
    */
   sleeves?: SleeveView[]
-  /** Chain ids the owner may open a sleeve on now (POST /api/sleeves). Same gate as `sleeves`. */
-  addableChains?: number[]
 }
 
 /** One sleeve: the account of an owner on one chain. The address is never shown without its chain. */
 export type SleeveView = { accountKey: string; chainId: number; chain: string; address: Hex0x }
-// POST /api/sleeves  body: { chainId } -> 201 SleeveView | 200 SleeveView (already there) | 404 when the gate is off
-//   | 409 CHAIN_ADDRESS_UNVERIFIED (the chain's Safe contracts differ from Base's: no address is claimed)
+// otto/mamoru#251: a sleeve off Base is the owner's own Safe on that chain, provisioned by the Base approval that moves the
+// account to a policy with a share there; the Worker stores it once it has recomputed its address from the owner's keys.
 
 // Returning owner: sign in with the passkey that owns the account. Grants what the device session grants, nothing more.
 // POST /api/auth/challenge -> SignInChallenge (single use, 5 minutes, bound to this host)

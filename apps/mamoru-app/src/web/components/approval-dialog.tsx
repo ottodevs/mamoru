@@ -156,12 +156,14 @@ export function SignedLines({ lines }: { lines: string[] }) {
 }
 
 /** The dialog's body for one approval: the brief, then (once prepared) the facts and every signed line. */
-export function ApprovalBody({ lead, summary, busy, error, onPrepare, onApprove, onLater }: { lead: ReactNode; summary: string[] | null; busy: string | null; error: string | null; onPrepare: () => void; onApprove: () => void; onLater: () => void }) {
+/** `context`: shown under the lead (the Monad move's mix); `points`: in place of the usual key points. */
+export function ApprovalBody({ lead, summary, busy, error, onPrepare, onApprove, onLater, context, points }: { lead: ReactNode; summary: string[] | null; busy: string | null; error: string | null; onPrepare: () => void; onApprove: () => void; onLater: () => void; context?: ReactNode; points?: ReactNode }) {
   return (
     <div className="approve" data-testid="renew-body">
       <p className="approve-lead">{lead}</p>
+      {context}
       {summary ? <Facts facts={signedFacts(summary)} /> : null}
-      <KeyPoints />
+      {points ?? <KeyPoints />}
       {summary ? <SignedLines lines={summary} /> : null}
       {error ? (
         <p className="err" role="alert">
