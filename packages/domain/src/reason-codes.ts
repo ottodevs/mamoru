@@ -251,6 +251,10 @@ export const REASON_CODES = [
   // otto/mamoru#101 phase 1 (shadow, Decision.shadowRisk only): the pool's TVL is under Packaging's 2M floor, or could not be read.
   'RISK_POOL_TVL_FLOOR',
   'RISK_POOL_TVL_UNREAD',
+  // otto/mamoru#101 phase 1b (shadow): Packaging's TVL change (1d/7d/30d), activity (V/TVL 7d, floors, stables 28d) and unreadable pool stats.
+  'RISK_POOL_TVL_DROP',
+  'RISK_POOL_VOLUME_LOW',
+  'RISK_POOL_STATS_UNREAD',
 ] as const
 
 export type ReasonCode = (typeof REASON_CODES)[number]

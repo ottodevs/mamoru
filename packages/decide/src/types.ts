@@ -53,6 +53,12 @@ export type Observation = {
    */
   peerPositions?: PeerPositionObs[] | null
   /**
+   * otto/mamoru#101 phase 1b (shadow only): off-chain pool statistics by pool name, supplied by the operator for a policy
+   * that lists `packaging:tvl`. Read only by `poolStatsShadowRisk`, which writes to Decision.shadowRisk (outside the
+   * premise hash); the premise body never sees it, so no value here can move premiseHash or decisionId. Absent: not supplied.
+   */
+  poolStats?: Record<string, PoolStatsObs>
+  /**
    * otto/mamoru#184 (Sol review): pools where another account has an entry decided whose liquidity no observation
    * shows yet. Depth gives no share room in them until that account observes again. Absent: none.
    */
@@ -189,7 +195,22 @@ export type ShadowNote = { code: ReasonCode; note: string }
  * otto/mamoru#101 phase 1: a Packaging risk rule that would have fired, shadow only. `metric` and `threshold` in raw savings
  * units, `label` short for logs. Lives outside the premise hash (see Decision.shadowRisk).
  */
-export type ShadowRisk = { code: ReasonCode; pool: string; threshold: string; metric?: string; label?: string }
+export type ShadowRisk = { code: ReasonCode; pool: string; threshold: string; metric?: string; label?: string; window?: '1d' | '7d' | '30d' | '28d' }
+
+/**
+ * otto/mamoru#101 phase 1b (shadow): off-chain pool statistics for Packaging's TVL change and activity rules, in USD.
+ * null: the source did not give it. `asOf` is the unix second of the fetch. Never hashed (see Observation.poolStats).
+ */
+export type PoolStatsObs = {
+  tvlUsd: number | null
+  tvl1dAgoUsd: number | null
+  tvl7dAgoUsd: number | null
+  tvl30dAgoUsd: number | null
+  volume7dUsd: number | null
+  volumeLastDayUsd: number | null
+  volume28dAvgUsd: number | null
+  asOf: number
+}
 
 export type EnterSwapProposal = {
   kind: 'enter_swap'
