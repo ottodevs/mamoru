@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { POLICIES } from '@mamoru/policy'
-import { assertV4Resolvable, resolveNamedPolicy, resolveV4Policy, resolveV5Policy, syncYieldLedgerFlag } from '../src/boot.ts'
+import { assertV4Resolvable, gitShaOnce, resolveNamedPolicy, resolveV4Policy, resolveV5Policy, syncYieldLedgerFlag } from '../src/boot.ts'
 
 function fakeLoop() {
   const calls: string[] = []
@@ -161,3 +161,16 @@ describe('v5 (MamoruActionPolicyV2): resolved only with the v4 opt-in and MAMORU
   })
 })
 
+
+describe('gitShaOnce (otto/mamoru#249): the standby VPS runs a code archive, not a git checkout', () => {
+  const sha = 'dafdc83c27e7ff9aeb0fc4b668e547b1d8ecf07c'
+  test('MAMORU_GIT_SHA wins, cut to the short form lady reports', async () => {
+    expect(await gitShaOnce('/', sha)).toBe('dafdc83c')
+  })
+  test('outside a checkout and without the variable: unknown', async () => {
+    expect(await gitShaOnce('/', undefined)).toBe('unknown')
+  })
+  test('a value that is not a sha is ignored', async () => {
+    expect(await gitShaOnce('/', 'main; rm -rf /')).toBe('unknown')
+  })
+})

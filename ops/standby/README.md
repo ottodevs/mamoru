@@ -74,9 +74,16 @@ each sha (`bun install --frozen-lockfile`, cached per sha), starts nothing and s
    lady unreachable: make sure its operators are not running (power, console, the host is down).
 3. From ghost3: `ssh root@23.94.151.198 mamoru-failover activate < ~/.config/mamoru-standby/identity`
    (add `--confirm-lady-down` only in the second case of step 2).
-4. It prints each operator's health and quick tunnel URL. Point the Worker at them from a machine with wrangler:
-   `OPERATOR_URL` on prod and beta, `OPERATOR_URL_143` on beta. With the named tunnel (#206) this step changes;
-   update this README when #206 lands.
+4. It prints each operator's health and quick tunnel URL. The named tunnel (#206: `op.mamoru.lol`,
+   `op-monad.mamoru.lol`) ends on lady and its credentials never leave it, so point the Worker at the quick tunnels
+   from a machine with wrangler, beta first:
+   ```sh
+   printf %s <base url>  | bunx wrangler secret put OPERATOR_URL --env beta
+   printf %s <monad url> | bunx wrangler secret put OPERATOR_URL_143 --env beta
+   printf %s <base url>  | bunx wrangler secret put OPERATOR_URL               # prod, once beta answers
+   ```
+   Each `secret put` makes a new Worker version with the same code. During the drill of 2026-10-31 (#247) prod was
+   left on lady's hostname: it showed the balance read on chain (#238) and could not move funds.
 5. Log it on otto/mamoru#83: it is an operator move.
 
 ## Hand back
@@ -91,8 +98,13 @@ each sha (`bun install --frozen-lockfile`, cached per sha), starts nothing and s
      mv "$d" "$d.pre-handback-$(date +%s)" && cp -a /tmp/handback/$u/state "$d"
    done
    ```
-   The state dir is replaced, not merged: files the VPS operator removed must not come back.
+   The state dir is replaced, not merged: files the VPS operator removed must not come back. The bundles leave out
+   `*.bak*` and `*.log`, so the restored dir has only the live files (8 for Base instead of about 40 on 2026-10-31).
+   The history stays in `$d.pre-handback-*`; copying it back without overwriting is safe:
+   `cp -an "$d".pre-handback-*/{accounts.json.bak-*,operator.log} "$d"/`.
 3. `ssh root@23.94.151.198 mamoru-failover clear`, then on lady `~/.local/share/mamoru-standby/fence-watch.sh resume`
    (it first pushes a bundle saying lady runs again, so an old "stood down" bundle can never start the VPS).
-   Put lady's tunnel URLs back in the Worker. Shred `/tmp/handback*`.
+   Put the Worker back on lady's named tunnel (`OPERATOR_URL=https://op.mamoru.lol` on prod and beta,
+   `OPERATOR_URL_143=https://op-monad.mamoru.lol` on beta). Shred `/tmp/handback*` (`find /tmp/handback -type f -exec
+   shred -u {} +`, then `shred -u /tmp/handback.age` and `rm -r /tmp/handback`).
 4. Log it on #83.

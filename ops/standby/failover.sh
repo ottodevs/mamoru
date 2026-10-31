@@ -127,6 +127,7 @@ write_unit_env() {
     as_op cat "$run/$u/unit-environment" | grep -E '^[A-Z0-9_]+=[^ ]*$' || true
     echo "MAMORU_OPERATOR_ENV=$run/$u/env"
     echo "MAMORU_OPERATOR_STATE_DIR=$run/$u/state"
+    echo "MAMORU_GIT_SHA=$sha"   # a code archive has no .git: without it /metrics says "unknown" (#249)
   } >"$fdir/units/$u.env"
   port="$(as_op cat "$run/$u/env" | sed -n 's/^PORT=\([0-9]\{2,5\}\)$/\1/p' | tail -1)"
   echo "PORT=${port:-8787}" >"$fdir/units/$u.port"
@@ -208,7 +209,7 @@ case "${1:-}" in
       say "$u: port $port, health: $health"
       say "  tunnel: ${url:-not up yet (journalctl -u mamoru-standby-tunnel@$u)}"
     done
-    say "Point the Worker at these URLs from a machine with wrangler (OPERATOR_URL on prod and beta, OPERATOR_URL_143 on beta), unless the named tunnel (#206) serves them."
+    say "Point the Worker at these URLs from a machine with wrangler (OPERATOR_URL on prod and beta, OPERATOR_URL_143 on beta): op.mamoru.lol and op-monad.mamoru.lol (#206) end on lady."
     ;;
 
   handback)

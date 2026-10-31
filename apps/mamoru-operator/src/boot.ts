@@ -243,8 +243,12 @@ export function assertV4Resolvable(accounts: readonly { accountKey: string; poli
   }
 }
 
-/** `git rev-parse --short HEAD` at the operator's cwd, read once at boot. 'unknown' outside a git checkout. */
-async function gitShaOnce(cwd: string): Promise<string> {
+/**
+ * The operator's commit, read once at boot. MAMORU_GIT_SHA when set: the standby VPS runs a code archive, not a git
+ * checkout (otto/mamoru#249). Otherwise `git rev-parse --short HEAD` at the operator's cwd; 'unknown' when neither.
+ */
+export async function gitShaOnce(cwd: string, fromEnv = process.env.MAMORU_GIT_SHA): Promise<string> {
+  if (fromEnv && /^[0-9a-f]{7,40}$/.test(fromEnv)) return fromEnv.slice(0, 8)
   try {
     return (await $`git rev-parse --short HEAD`.cwd(cwd).quiet().text()).trim() || 'unknown'
   } catch {
