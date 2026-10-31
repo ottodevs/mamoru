@@ -83,7 +83,7 @@ export type GrantTemplate = {
    * otto/mamoru#251: MamoruActionPolicyV3 is the grant's ONLY action policy (no UniActionPolicy), so the session can be
    * committed in the Safe setup before the Safe's address exists: V3 checks every recipient against the account itself,
    * the tokens, fee and spenders against its pool, and the value against its budget. The template's actions carry no
-   * param rules (`instantiateGrant` refuses any). Set only by `manageAnyV3Only` and `exitOnlyV3Only` (v4-grants.ts).
+   * param rules (`instantiateGrant` refuses any). Set only by `manageAnyV3Only` (v4-grants.ts).
    */
   actionPolicyOnly?: true
 }

@@ -228,12 +228,15 @@ describe('migrations/d1/*_remote_safe.sql', () => {
     const acc = (key: string, chain: number, addr: string) => db.exec(`INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at) VALUES ('${key}', 'u1', ${chain}, '${addr}', '[]', 'c1', '0x1', '0x2', '1', 'v', '2026-10-01')`)
     acc('base', 8453, '0xa')
     acc('sleeve', 143, '0xa')
+    // Any other row off Base (another address) is not one the old flow wrote: it stays.
+    db.exec(`INSERT INTO users (user_id, created_at) VALUES ('u2', '2026-10-01')`)
+    db.exec(`INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at) VALUES ('other', 'u2', 143, '0xc', '[]', 'c2', '0x1', '0x2', '1', 'v', '2026-10-01')`)
     for (const k of ['base', 'sleeve']) {
       db.exec(`INSERT INTO proj_account_state (account_key, chain_id, block, block_hash, observed_at, deployed, tokens_json, total_value) VALUES ('${k}', 1, 10, '0xh', 't', 1, '[]', '5')`)
       db.exec(`INSERT INTO account_activity (account_key, day, hits, first_at, last_at) VALUES ('${k}', '2026-10-01', 1, 'a', 'b')`)
     }
     db.exec(readFileSync(join(dir, mine), 'utf8'))
-    expect(db.query('SELECT account_key FROM accounts').all()).toEqual([{ account_key: 'base' }])
+    expect(db.query('SELECT account_key FROM accounts ORDER BY account_key').all()).toEqual([{ account_key: 'base' }, { account_key: 'other' }])
     expect(db.query('SELECT account_key FROM proj_account_state').all()).toEqual([{ account_key: 'base' }])
     expect(db.query('SELECT account_key FROM account_activity').all()).toEqual([{ account_key: 'base' }])
     // A remote row written after the migration survives a second run (it carries its remote_json).

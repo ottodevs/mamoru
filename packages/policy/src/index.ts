@@ -69,7 +69,6 @@ export {
   decodeMamoruInitAny,
   encodeMamoruInitAtSetup,
   FAMILY_UNISWAP_AT_SETUP,
-  exitOnlyV3Only,
   manageAnyV3Only,
   encodeGasCaps,
   GAS_CAPS_TUPLE,

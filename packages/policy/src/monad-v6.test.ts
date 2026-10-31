@@ -6,7 +6,7 @@ import { grantKeyFor } from './grants.ts'
 import { labWmonUsdcMonadV1, liveWmonUsdcMonadV6, labWmonUsdcMonadV6 } from './policies-monad.ts'
 import { conservadorLiveV5, INCREASE_TOLERANCE_BPS } from './policies-v4.ts'
 import { conservadorLiveV6 } from './policies-v6.ts'
-import { decodeMamoruInitAny, encodeMamoruInit, encodeMamoruInitAtSetup, FAMILY_UNISWAP_AT_SETUP, exitOnlyV3Only, exitOnlyV5Grant, grantsV5, manageAnyV3Only, MAMORU_INIT_TUPLE, mamoruInitFor, V4_POOLS_MONAD } from './v4-grants.ts'
+import { decodeMamoruInitAny, encodeMamoruInit, encodeMamoruInitAtSetup, FAMILY_UNISWAP_AT_SETUP, grantsV5, manageAnyV3Only, MAMORU_INIT_TUPLE, mamoruInitFor, V4_POOLS_MONAD } from './v4-grants.ts'
 
 const CAP = 1_500n * 1_000_000n
 
@@ -44,10 +44,6 @@ describe('live-wmon-usdc-monad-v6 (otto/mamoru#251)', () => {
     expect(grantKeyFor(liveWmonUsdcMonadV6, 'enter-swap', 'pool:WMON/USDC/3000')).toBe('manage-any:pool:WMON/USDC/3000')
     expect(grantKeyFor(liveWmonUsdcMonadV6, 'enter-mint', 'pool:WMON/USDC/3000')).toBe('manage-any:pool:WMON/USDC/3000')
     expect(() => grantKeyFor(liveWmonUsdcMonadV6, 'enter-swap', 'pool:EURW/USDC/100')).toThrow('no enter-swap')
-    // Exit only stays exit only under V3 alone: no mint, no increase, no approval of the stable token.
-    const exit = exitOnlyV3Only(V4_POOLS_MONAD.growth, 1)
-    expect(exit.actions.map((a) => `${a.target}.${a.signature}`)).toEqual(exitOnlyV5Grant(V4_POOLS_MONAD.growth, 1).actions.map((a) => `${a.target}.${a.signature}`))
-    expect(exit.actions.every((a) => a.params.length === 0) && exit.actionPolicyOnly).toBe(true)
     for (const g of liveWmonUsdcMonadV6.session.grants) {
       expect(g.actionPolicyOnly).toBe(true)
       expect(g.requiresActionPolicy).toBe(true)

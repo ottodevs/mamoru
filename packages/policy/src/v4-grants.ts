@@ -577,12 +577,6 @@ export function manageAnyV3Only(p: V4PoolSpec, usage: V4Usage): GrantTemplate {
   return { name: 'manage-any', pool: p.pool, perPosition: false, usageLimit: usage.enterSwap + usage.enterMint + usage.manageAny, actions, requiresActionPolicy: true, actionPolicyOnly: true }
 }
 
-/** otto/mamoru#251: `exitOnlyV5Grant` under V3 alone: no mint, no increase, no approval of the stable token, no param rule. */
-export function exitOnlyV3Only(p: V4PoolSpec, usageLimit: number): GrantTemplate {
-  const g = exitOnlyV5Grant(p, usageLimit)
-  return { ...g, actions: g.actions.map((a) => ({ ...a, params: [] })), actionPolicyOnly: true }
-}
-
 /**
  * otto/mamoru#213: manage-any without a way in, for a pool a policy keeps only so its accounts can leave it (v6's
  * USDC/cbBTC at preference 0). It decreases, collects, burns and sells the volatile token for the stable one; it has no

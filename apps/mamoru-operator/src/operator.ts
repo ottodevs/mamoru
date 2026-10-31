@@ -489,6 +489,8 @@ const V5_MIGRATES_FROM = new Set(['conservador-live-v2', 'conservador-live-v3', 
 /** otto/mamoru#214: the policies whose accounts the renew row moves to v6 (`multichain_v6`): everything v5 takes, and v5 itself. */
 const V6_MIGRATES_FROM = new Set([...V5_MIGRATES_FROM, 'conservador-live-v5', 'conservador-lab-v5'])
 /** Gas a v4 approval's first transaction carries besides enableSessions, per removeSession (measured: ~1.45M for 8). */
+/** otto/mamoru#251: no bridge to an account's remote Safe in the last 30 days of its sessions. */
+const REMOTE_BRIDGE_STOP_SECONDS = 30 * 86_400
 const REVOKE_GAS_EACH = 190_000n
 /** The registry trust calls of a first activation, and one self-attestation call, with margin. */
 const TRUST_GAS = 400_000n
@@ -5030,7 +5032,11 @@ export class Operator {
     // otto/mamoru#251: the account's own Safe there, fixed by its approval; none yet: no remote (the bucket waits).
     const rs = acc.remote
     if (!rs || rs.chainId !== BRIDGE_MONAD_CHAIN_ID) return {}
-    return { remote: (block: bigint) => bridge.remote(acc.accountKey, rs.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, rs.permissionIds) }
+    // GPT-6 r2 P1 2: the remote Safe's sessions end at its spec's validUntil (fixed in its setup); nothing more is bridged
+    // to it from REMOTE_BRIDGE_STOP_SECONDS before then, so no USDC lands where Mamoru can no longer act. What is there
+    // stays counted; renewing the remote sessions is otto/mamoru#253.
+    const open = Math.floor(Date.now() / 1000) < rs.spec.validUntil - REMOTE_BRIDGE_STOP_SECONDS
+    return { remote: (block: bigint) => bridge.remote(acc.accountKey, rs.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, open ? rs.permissionIds : []) }
   }
 
   // ---- the account's own Safe on another chain (otto/mamoru#251) ----------------------------------------
@@ -5189,6 +5195,8 @@ export class Operator {
     if (eth < target) {
       const { hash, receipt } = await this.relayer.send({ to: live.safe, value: target - eth, gas: 50_000n })
       console.log(`[remote] gas reserve ${live.safe} tx ${hash} ${receipt.status}`)
+      // GPT-6 r2 P1 3: a Safe without its gas reserve cannot pay its userOps; it is not reported running (retried).
+      if (receipt.status !== 'success') throw new HttpError(502, 'GAS_TOPUP_FAILED', 'the Safe could not be funded for gas just now: it is retried')
     }
     const stored: StoredGrant[] = r.grants.map((g, i) => ({ name: r.keys[i]!, grant: g, permissionId: r.permissionIds[i]! }))
     Object.assign(acc, {

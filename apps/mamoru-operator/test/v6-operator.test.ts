@@ -248,6 +248,9 @@ describe('owner transactions of a v6 approval', () => {
       if (name === 'bridge-out') {
         // UniActionPolicy (the CCTP burn rules) and the pause gate; V3 is not on it.
         expect(sessions[i]!.action).toEqual(new Set([UNI, GATE]))
+      } else if (name.endsWith('USDC/cbBTC/500')) {
+        // The cbBTC exit keeps UniActionPolicy beside V3: its swap sells cbBTC for USDC only (review r2 P1 4).
+        for (const policies of sessions[i]!.perAction) expect(policies).toEqual([UNI, V3])
       } else {
         // Every Uniswap action has exactly one action policy: MamoruActionPolicyV3 (no UniActionPolicy param rules).
         expect(sessions[i]!.perAction.length).toBeGreaterThan(0)
@@ -388,7 +391,7 @@ describe('a fresh activation on v6 (default policy)', () => {
     names.forEach((name, i) => {
       expect(sessions[i]!.userOp.has(GAS)).toBe(true)
       if (name === 'bridge-out') expect(sessions[i]!.action).toEqual(new Set([UNI, GATE]))
-      else for (const policies of sessions[i]!.perAction) expect(policies).toEqual([V3])
+      else for (const policies of sessions[i]!.perAction) expect(policies).toEqual(name.endsWith('USDC/cbBTC/500') ? [UNI, V3] : [V3])
     })
     expect(t.remote!.address).toBe(remoteSafe(remoteInput(ctx, t.remote!.spec, pinnedV3)).address)
     expect(t.summary.join('\n')).toContain(t.remote!.address)
