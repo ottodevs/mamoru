@@ -10,7 +10,8 @@
     "./owner": "./owner/index.ts",
     "./recovery": "./recovery/index.ts",
     "./live": "./live/index.ts",
-    "./userop": "./userop/index.ts"
+    "./userop": "./userop/index.ts",
+    "./remote": "./remote/index.ts"
   },
   "dependencies": {
     "@mamoru/domain": "workspace:*",

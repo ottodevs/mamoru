@@ -1,10 +1,10 @@
 // otto/mamoru#201, #213: the first policy whose account spans two chains. Owner decisions of 26-27 Oct 2026: 50 % Stable
 // (USDC/USDT on Base; lending replaces it in a later version), 35 % Balance (WETH/USDC on Base, no cbBTC), 15 % Growth
-// (WMON/USDC on Monad, served by the account's Monad sleeve). USDC/cbBTC stays only as an exit for accounts moving in. Not in POLICIES: no account can activate it until the
+// (WMON/USDC on Monad, served by the account's own Safe on Monad, #251). USDC/cbBTC stays only as an exit for accounts moving in. Not in POLICIES: no account can activate it until the
 // sleeve activation (#214) and the cross-chain allocator (#215) exist.
 import { bridgeOutGrant, CCTP_DOMAIN_MONAD } from './grants.ts'
 import { INCREASE_TOLERANCE_BPS, conservadorLiveV5 } from './policies-v4.ts'
-import { liveWmonUsdcMonadV5 } from './policies-monad.ts'
+import { liveWmonUsdcMonadV6 } from './policies-monad.ts'
 import type { CapFormula, PolicyVersion } from './types.ts'
 import { exitOnlyV5Grant, grantsV5, v4CapFormulas, V4_POOLS, type V4PoolSpec, type V4Usage } from './v4-grants.ts'
 
@@ -42,7 +42,7 @@ export const conservadorLiveV6: PolicyVersion = {
     // approval) and `rerangeOf` never re-ranges a bucket at preference 0, so nothing new goes in.
     { id: 'btc-usdc', preference: 0, pools: ['pool:USDC/cbBTC/500'] },
   ],
-  remoteBuckets: [{ id: 'growth', preference: 1500, chainId: 143, pools: ['pool:WMON/USDC/3000'], policyId: liveWmonUsdcMonadV5.policyId }],
+  remoteBuckets: [{ id: 'growth', preference: 1500, chainId: 143, pools: ['pool:WMON/USDC/3000'], policyId: liveWmonUsdcMonadV6.policyId }],
   range: { ...conservadorLiveV5.range, increaseToleranceBps: INCREASE_TOLERANCE_BPS },
   session: {
     ...conservadorLiveV5.session,

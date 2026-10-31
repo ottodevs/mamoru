@@ -67,6 +67,8 @@ export type GrantContext = {
   admittedTokenIds?: readonly bigint[]
   /** Account cap the grant is sized at (raw savings units): picks the usage tier (#149). Absent: the template's `usageLimit`. */
   capUsdc?: bigint
+  /** otto/mamoru#251: the account's Safe on the remote bucket's chain, for `REMOTE_ACCOUNT` refs (bridge-out's mintRecipient). */
+  remoteAccount?: Address
 }
 
 /**
@@ -88,6 +90,11 @@ export function policyRegistry(policy: Pick<PolicyVersion, 'sourceChainId'>): Re
 function resolveRef(ref: RefTemplate, ctx: GrantContext, registry: Registry): bigint {
   if (typeof ref === 'bigint') return ref
   if (ref === 'ACCOUNT') return BigInt(ctx.account)
+  if (ref === 'REMOTE_ACCOUNT') {
+    if (!ctx.remoteAccount || BigInt(ctx.remoteAccount) === 0n) throw new Error('grant needs the account\'s remote Safe (remoteAccount)')
+    if (BigInt(ctx.remoteAccount) === BigInt(ctx.account)) throw new Error('remoteAccount is the account itself')
+    return BigInt(ctx.remoteAccount)
+  }
   if (ref === 'tokenId') {
     if (ctx.tokenId === undefined) throw new Error('per-position grant needs a tokenId')
     return ctx.tokenId
@@ -113,6 +120,7 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
   if (template.perPosition && !ctx.admittedTokenIds?.some((id) => id === ctx.tokenId)) {
     throw new ReasonError('POLICY_DENIED_POSITION', 'tokenId was not minted by enter-mint')
   }
+  if (template.actionPolicyOnly && template.actions.some((a) => a.params.length)) throw new Error(`grant ${name}: an actionPolicyOnly grant carries no param rules`)
   const actions: ResolvedActionRule[] = template.actions.map((a) => ({
     target: a.target,
     targetAddress: address(a.target, registry),
@@ -152,5 +160,6 @@ export function instantiateGrant(policy: PolicyVersion, key: GrantName | string,
     actions,
     ...(template.requiresActionPolicy ? { requiresActionPolicy: true as const } : {}),
     ...(template.requiresPauseGate ? { requiresPauseGate: true as const } : {}),
+    ...(template.actionPolicyOnly ? { actionPolicyOnly: true as const } : {}),
   }
 }

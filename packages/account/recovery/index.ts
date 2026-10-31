@@ -1,7 +1,23 @@
-import { concat, decodeFunctionData, encodeFunctionData, encodePacked, getContractAddress, keccak256, pad } from 'viem'
+import { concat, decodeFunctionData, encodeAbiParameters, encodeFunctionData, encodePacked, getContractAddress, keccak256, pad } from 'viem'
 import type { Address, Hex } from '@mamoru/domain'
-import { baseRegistry, address, safeProxyFactoryAbi, type Registry } from '@mamoru/registry'
+import { baseRegistry, address, safeProxyFactoryAbi, smartSessionAbi, type Registry } from '@mamoru/registry'
 import { createProxyCall, safeInitializer, setupDelegate, type SafeSetup, type WebAuthnSigner } from '../safe/index.ts'
+import type { SmartSessionStruct } from '../sessions/index.ts'
+
+/** SmartSession's install mode that enables the sessions in its init data with no owner signature (the Safe's setup is the owner's act). */
+export const SMART_SESSION_UNSAFE_ENABLE: Hex = '0x02'
+
+const SESSIONS_PARAM = smartSessionAbi.find((f) => f.type === 'function' && f.name === 'enableSessions')!.inputs
+
+/**
+ * otto/mamoru#251: SmartSession's `onInstall` data. Empty: installed with no session. Otherwise `mode ‖ abi.encode(Session[])`
+ * with UNSAFE_ENABLE, so the sessions are enabled in the Safe setup itself and the address commits to them
+ * (contracts/action-policy/test/V3SetupFork.t.sol deploys this exact shape through the launchpad).
+ */
+export function smartSessionInstallData(sessions: readonly SmartSessionStruct[]): Hex {
+  if (!sessions.length) return '0x'
+  return concat([SMART_SESSION_UNSAFE_ENABLE, encodeAbiParameters(SESSIONS_PARAM, [sessions as never])])
+}
 
 /**
  * type(SafeProxy).creationCode of Safe 1.4.1, as embedded in the
@@ -14,10 +30,12 @@ export const SAFE_PROXY_141_CREATION_CODE: Hex =
  * FR-ONB-005: the given owners, threshold 1, Safe7579, Smart Sessions installed
  * with no sessions. A passkey owner (SafeWebAuthnSharedSigner) is configured in
  * the same setup, so the address commits to its x, y and verifiers.
+ * otto/mamoru#251: with `sessions`, Smart Sessions is installed with them enabled (`smartSessionInstallData`), and the
+ * address commits to them too: the account's Safe on another chain (`remoteSafe`, ../remote).
  */
-export function accountSetup(owners: Address[], saltNonce: bigint, webauthn: WebAuthnSigner | null, registry: Registry = baseRegistry): SafeSetup {
+export function accountSetup(owners: Address[], saltNonce: bigint, webauthn: WebAuthnSigner | null, registry: Registry = baseRegistry, sessions: readonly SmartSessionStruct[] = []): SafeSetup {
   if (owners.length === 0) throw new Error('at least one owner')
-  const setup: SafeSetup = { owners, threshold: 1n, validators: [{ module: address('SmartSession', registry), initData: '0x' }], saltNonce }
+  const setup: SafeSetup = { owners, threshold: 1n, validators: [{ module: address('SmartSession', registry), initData: smartSessionInstallData(sessions) }], saltNonce }
   if (webauthn) setup.webauthn = { ...webauthn }
   setupDelegate(setup, registry)
   return setup

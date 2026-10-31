@@ -42,10 +42,6 @@ describe('live-wmon-usdc-monad-v5', () => {
     expect(labWmonUsdcMonadV5.session).toBe(p.session)
   })
 
-  test('conservador-live-v6 points its Growth bucket at it', () => {
-    expect(conservadorLiveV6.remoteBuckets![0]!.policyId).toBe(liveWmonUsdcMonadV5.policyId)
-  })
-
   test('the pool spec: WMON/USDC 0.30 %, USDC the budget unit (token1), the whole sleeve cap (not 15 % twice), Monad only', () => {
     const s = V4_POOLS_MONAD.growth
     expect(s).toMatchObject({ pool: 'pool:WMON/USDC/3000', stable: 'USDC', volatile: 'WMON', token0: 'WMON', token1: 'USDC', fee: 3000, bandTicks: 100, capShareBps: 10_000, windowMultiple: 3, totalMultiple: 10, sourceChainId: 143 })

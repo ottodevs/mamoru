@@ -1,4 +1,4 @@
-import { encodeFunctionData, isAddressEqual, pad, parseAbi, parseEventLogs, toFunctionSelector, zeroHash, type Hex, type Log, type PublicClient } from 'viem'
+import { encodeFunctionData, getAddress, isAddressEqual, pad, parseAbi, parseEventLogs, toFunctionSelector, toHex, zeroHash, type Hex, type Log, type PublicClient } from 'viem'
 import type { LocalAccount } from 'viem/accounts'
 import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
 import { amountsOf, decide, outOfRangeSinceOf, placedOf, safeSavings, twapFloor, withOutOfRangeSince, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
@@ -117,6 +117,14 @@ const ETH_PRICE_POOL = 'pool:WETH/USDC/3000'
  * Monad's is 15 (read on chain 143, 2026-10-27). A chain not listed here is never bridged to.
  */
 export const CCTP_DOMAIN_BY_CHAIN: Readonly<Record<number, number>> = { 143: 15 }
+/**
+ * otto/mamoru#251: MamoruActionPolicyV3 keeps every V2 path as it is (increase, the guardian pause, the swap deadline, the
+ * exit range without the anchor), so whatever the engine does for V2 it does for V3.
+ */
+function atLeastV2(ap: PolicyVersion['actionPolicy'] | undefined): ap is NonNullable<PolicyVersion['actionPolicy']> {
+  return ap?.contractVersion === 2 || ap?.contractVersion === 3
+}
+
 /** CCTP V2 Standard finality: attested at finality, no fee. The only threshold the bridge-out grant allows (>= 2000). */
 export const CCTP_STANDARD_FINALITY = 2000
 
@@ -128,6 +136,8 @@ export const CCTP_STANDARD_FINALITY = 2000
 export type BridgeSigning = {
   opId: string
   account: Address
+  /** otto/mamoru#251: the account's own Safe on `chainId`, the only mint recipient its bridge-out grant allows. */
+  recipient: Address
   chainId: number
   pool: RegistryName
   bucket: string
@@ -897,7 +907,7 @@ export class Engine {
     const destinationDomain = CCTP_DOMAIN_BY_CHAIN[p.chainId]
     if (destinationDomain === undefined) return `no CCTP domain for chain ${p.chainId}`
     try {
-      this.hooks.beforeBridgeSign({ opId, account: this.cfg.account, chainId: p.chainId, pool: p.pool, bucket: p.bucket, amount: p.amount, destinationDomain, userOpHash: hash, nonceKey: this.nonceKey, nonce, prepareBlock })
+      this.hooks.beforeBridgeSign({ opId, account: this.cfg.account, recipient: this.bridgeRecipient(), chainId: p.chainId, pool: p.pool, bucket: p.bucket, amount: p.amount, destinationDomain, userOpHash: hash, nonceKey: this.nonceKey, nonce, prepareBlock })
       return null
     } catch (e) {
       return `bridge journal: ${(e as Error).message?.split('\n')[0] ?? String(e)}`
@@ -1269,7 +1279,7 @@ export class Engine {
       feePips: e.fee,
       bandTicks,
       ...(anchor ? { anchor } : {}),
-      ...(ap.contractVersion === 2 ? { exitIgnoresAnchor: true } : {}),
+      ...(atLeastV2(ap) ? { exitIgnoresAnchor: true } : {}),
       budgetIn1: budget.in1,
       budgetWindowSeconds: budget.windowSeconds,
       perWindow: budget.perWindow,
@@ -1311,7 +1321,7 @@ export class Engine {
    */
   private async refuseWhilePaused(blockNumber: bigint): Promise<void> {
     const ap = this.cfg.policy.actionPolicy
-    if (ap?.contractVersion !== 2) return
+    if (!atLeastV2(ap)) return
     let paused: boolean
     try {
       paused = await this.client.readContract({ address: ap.address, abi: mamoruActionPolicyV2Abi, functionName: 'isPaused', args: [this.cfg.account], blockNumber })
@@ -1364,7 +1374,7 @@ export class Engine {
    */
   private async prepareIncrease(p: Extract<Proposal, { kind: 'increase_liquidity' }>, blockNumber: bigint, deadline: bigint): Promise<Prepared> {
     const v4 = this.v4PoolConfig(p.pool)
-    if (!v4 || this.cfg.policy.actionPolicy?.contractVersion !== 2) throw new ReasonError('SESSION_MISSING', `${p.grant}: no MamoruActionPolicyV2 covers ${p.pool}; no session may call the position manager's increaseLiquidity`)
+    if (!v4 || !atLeastV2(this.cfg.policy.actionPolicy)) throw new ReasonError('SESSION_MISSING', `${p.grant}: no MamoruActionPolicyV2 covers ${p.pool}; no session may call the position manager's increaseLiquidity`)
     const oracle = await this.priceGuardV4(p.pool, blockNumber, v4.twapShortSeconds)
     this.v4Range(p.pool, v4, oracle)
     const pool = entry(p.pool, this.registry)
@@ -1392,9 +1402,23 @@ export class Engine {
   }
 
   /**
-   * otto/mamoru#215: savings to the account's own sleeve on another chain, exactly what the bridge-out grant allows:
-   * approve(TokenMessengerV2, amount) on the savings token, then depositForBurn(amount, the chain's CCTP domain, this
-   * account, the savings token, any caller, fee 0, Standard finality). The approval is spent in full by the burn. No
+   * otto/mamoru#251: the mint recipient the owner signed into the bridge-out grant (its `mintRecipient EQUAL` rule): the
+   * account's own Safe on the remote chain. Read from the session itself, so the engine never builds a burn its grant
+   * would refuse, and never falls back to this account's address.
+   */
+  private bridgeRecipient(): Address {
+    const s = this.session('bridge-out')
+    const rule = s?.grant.actions.find((a) => a.signature.startsWith('depositForBurn'))?.params.find((r) => r.field === 'mintRecipient' && r.condition === 'EQUAL')
+    if (!rule || rule.ref === 0n || rule.ref >= 1n << 160n) throw new ReasonError('POLICY_DENIED_RECIPIENT', 'bridge_out: no bridge-out session names a mint recipient')
+    const to = getAddress(pad(toHex(rule.ref), { size: 20 }))
+    if (isAddressEqual(to, this.cfg.account)) throw new ReasonError('POLICY_DENIED_RECIPIENT', 'bridge_out: the mint recipient is this account itself, not its Safe on the other chain')
+    return to
+  }
+
+  /**
+   * otto/mamoru#215: savings to the account's own Safe on another chain, exactly what the bridge-out grant allows:
+   * approve(TokenMessengerV2, amount) on the savings token, then depositForBurn(amount, the chain's CCTP domain, that
+   * Safe (#251, `bridgeRecipient`), the savings token, any caller, fee 0, Standard finality). The approval is spent in full by the burn. No
    * on-chain expiry (CCTP has none): a late landing is a real burn, which the operator's bridge journal counts in flight
    * from before signing until the chain settles it.
    */
@@ -1413,7 +1437,7 @@ export class Engine {
         {
           target: messenger,
           value: 0n,
-          callData: encodeFunctionData({ abi: tokenMessengerV2Abi, functionName: 'depositForBurn', args: [p.amount, domain, pad(this.cfg.account, { size: 32 }), token, zeroHash, 0n, CCTP_STANDARD_FINALITY] }),
+          callData: encodeFunctionData({ abi: tokenMessengerV2Abi, functionName: 'depositForBurn', args: [p.amount, domain, pad(this.bridgeRecipient(), { size: 32 }), token, zeroHash, 0n, CCTP_STANDARD_FINALITY] }),
         },
       ],
     }
@@ -1428,7 +1452,7 @@ export class Engine {
     await this.refuseWhilePaused(blockNumber)
     if (p.kind === 'bridge_out') return this.prepareBridgeOut(p)
     // MamoruActionPolicyV2 accounts (v5) quote their swaps with the price limit; the deployed V1's (v4) keep the path below.
-    const v4Swap = p.kind === 'enter_swap' && this.cfg.policy.actionPolicy?.contractVersion === 2 ? this.v4PoolConfig(p.pool) : undefined
+    const v4Swap = p.kind === 'enter_swap' && atLeastV2(this.cfg.policy.actionPolicy) ? this.v4PoolConfig(p.pool) : undefined
     if (p.kind === 'enter_swap' && v4Swap) return this.prepareV4Swap(p, blockNumber, session, deadline, v4Swap)
     if (p.kind === 'enter_swap') {
       const amountOut = await this.v3.quoteExactInputSingle(this.client, { tokenIn: address(p.tokenIn, this.registry), tokenOut: address(p.tokenOut, this.registry), fee: p.fee, amountIn: p.amountIn, blockNumber })
@@ -1533,7 +1557,7 @@ export class Engine {
           const oracle = await this.poolOracle(p.pool, this.cfg.policy.execution.twapWindowSeconds, v4.twapShortSeconds, blockNumber)
           // LeftClaw M-6: MamoruActionPolicyV2 prices a decrease off the TWAP range alone, so a depeg past the anchor
           // does not lock the exit; V1 still clips it to the anchor.
-          const exitRange = this.cfg.policy.actionPolicy?.contractVersion === 2 ? { bandTicks: v4.bandTicks } : v4
+          const exitRange = atLeastV2(this.cfg.policy.actionPolicy) ? { bandTicks: v4.bandTicks } : v4
           const bound = decreaseMinsInRange({ range: this.v4Range(p.pool, exitRange, oracle), tickLower: pos[5], tickUpper: pos[6], liquidity })
           if (bound.amount0Min > amount0Min) amount0Min = bound.amount0Min
           if (bound.amount1Min > amount1Min) amount1Min = bound.amount1Min
@@ -1583,13 +1607,13 @@ export class Engine {
       isAddressEqual(a.burnToken, address(savings, this.registry)) &&
       isAddressEqual(a.depositor, this.cfg.account) &&
       a.amount === p.amount &&
-      a.mintRecipient.toLowerCase() === pad(this.cfg.account, { size: 32 }).toLowerCase() &&
+      a.mintRecipient.toLowerCase() === pad(this.bridgeRecipient(), { size: 32 }).toLowerCase() &&
       a.destinationDomain === CCTP_DOMAIN_BY_CHAIN[p.chainId] &&
       BigInt(a.destinationCaller) === 0n &&
       a.maxFee === 0n &&
       a.minFinalityThreshold === CCTP_STANDARD_FINALITY &&
       a.hookData === '0x'
-    return ok ? null : 'the simulated DepositForBurn is not this account to itself on the bridge-out terms'
+    return ok ? null : 'the simulated DepositForBurn is not this account to its own Safe on the bridge-out terms'
   }
 
   /** FR-RPC-002: the simulated deltas must be the ones the intent expects. Returns why not, or null. */

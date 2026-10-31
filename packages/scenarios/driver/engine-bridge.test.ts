@@ -4,7 +4,7 @@
 // signed without the operator's bridge journal. `prepareCalls`/`deltaMismatch`/`journalBridge` are private; reached
 // with a cast, like engine-v5.test.ts.
 import { describe, expect, test } from 'bun:test'
-import { decodeFunctionData, encodeAbiParameters, encodeEventTopics, encodeFunctionData, encodeFunctionResult, pad, zeroHash, type Hex, type Log } from 'viem'
+import { decodeFunctionData, encodeAbiParameters, encodeEventTopics, encodeFunctionData, encodeFunctionResult, getAddress, pad, zeroHash, type Hex, type Log } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { ReasonError, type Address } from '@mamoru/domain'
 import type { Proposal } from '@mamoru/decide'
@@ -18,6 +18,8 @@ import { FakeChain, Revert } from '../../rpc/test/fake-chain.ts'
 import { CCTP_DOMAIN_BY_CHAIN, Engine, type BridgeSigning, type EngineHooks, type EngineSession } from './engine.ts'
 
 const ACCOUNT = '0x00000000000000000000000000000000000000aa' as Address
+/** otto/mamoru#251: the account's own Safe on Monad, the bridge-out grant's only mint recipient. */
+const MONAD_SAFE = '0x00000000000000000000000000000000000000ee' as Address
 const OTHER = '0x00000000000000000000000000000000000000cc' as Address
 const POLICY_V2 = '0x00000000000000000000000000000000000000b2' as Address
 const CAP = 10_000n * 1_000_000n
@@ -31,7 +33,7 @@ const bridge = (over: Partial<Extract<Proposal, { kind: 'bridge_out' }>> = {}): 
 
 function grantCtx(): GrantContext {
   const caps = computeCaps(conservadorLiveV6, CAP, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
-  return { account: ACCOUNT, sessionKey: sessionKey.address, chainId: 8453, salt: `0x${'00'.repeat(32)}`, validAfter: 0, validUntil: 2_000_000_000, caps }
+  return { account: ACCOUNT, sessionKey: sessionKey.address, chainId: 8453, salt: `0x${'00'.repeat(32)}`, validAfter: 0, validUntil: 2_000_000_000, caps, remoteAccount: MONAD_SAFE }
 }
 
 function session(): EngineSession {
@@ -40,7 +42,7 @@ function session(): EngineSession {
 
 type Prepared = { calls: Execution[]; expiresAt: bigint | null }
 
-async function withEngine<T>(policy: PolicyVersion, fn: (e: Engine, state: { paused: boolean }) => Promise<T>, hooks: Partial<EngineHooks> = {}): Promise<T> {
+async function withEngine<T>(policy: PolicyVersion, fn: (e: Engine, state: { paused: boolean }) => Promise<T>, hooks: Partial<EngineHooks> = {}, opts: { sessions?: EngineSession[] } = {}): Promise<T> {
   const chain = new FakeChain()
   chain.code.set(ACCOUNT.toLowerCase(), '0x6001')
   const state = { paused: false }
@@ -52,7 +54,7 @@ async function withEngine<T>(policy: PolicyVersion, fn: (e: Engine, state: { pau
   const rpc = chain.serve()
   try {
     const e = new Engine(
-      { mode: 'live', chainId: 8453, signingChainIds: [8453], rpcUrl: rpc.url, bundlerUrl: 'http://127.0.0.1:9/', policy, account: ACCOUNT, sessionKey, nonceLane: 0, depositsAfter: 800n, historyFromBlock: 800n, sessions: [] },
+      { mode: 'live', chainId: 8453, signingChainIds: [8453], rpcUrl: rpc.url, bundlerUrl: 'http://127.0.0.1:9/', policy, account: ACCOUNT, sessionKey, nonceLane: 0, depositsAfter: 800n, historyFromBlock: 800n, sessions: opts.sessions ?? [session()] },
       { waitBlock: async () => {}, ...hooks },
     )
     return await fn(e, state)
@@ -91,7 +93,7 @@ const burnCall = (args: { amount?: bigint; domain?: number; recipient?: Address;
   callData: encodeFunctionData({
     abi: tokenMessengerV2Abi,
     functionName: 'depositForBurn',
-    args: [args.amount ?? AMOUNT, args.domain ?? 15, pad(args.recipient ?? ACCOUNT, { size: 32 }), args.token ?? USDC, args.caller ?? zeroHash, args.maxFee ?? 0n, args.finality ?? 2000],
+    args: [args.amount ?? AMOUNT, args.domain ?? 15, pad(args.recipient ?? MONAD_SAFE, { size: 32 }), args.token ?? USDC, args.caller ?? zeroHash, args.maxFee ?? 0n, args.finality ?? 2000],
   }),
 })
 const approveCall = (spender: Address = MESSENGER, amount: bigint = AMOUNT): Execution => ({ target: USDC, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [spender, amount] }) })
@@ -101,14 +103,14 @@ function burnLog(over: { depositor?: Address; amount?: bigint; recipient?: Addre
   const topics = encodeEventTopics({ abi: tokenMessengerV2Abi, eventName: 'DepositForBurn', args: { burnToken: USDC, depositor: over.depositor ?? ACCOUNT, minFinalityThreshold: over.finality ?? 2000 } })
   const data = encodeAbiParameters(
     [{ type: 'uint256' }, { type: 'bytes32' }, { type: 'uint32' }, { type: 'bytes32' }, { type: 'bytes32' }, { type: 'uint256' }, { type: 'bytes' }],
-    [over.amount ?? AMOUNT, pad(over.recipient ?? ACCOUNT, { size: 32 }), over.domain ?? 15, pad(MESSENGER, { size: 32 }), over.caller ?? zeroHash, over.maxFee ?? 0n, over.hookData ?? '0x'],
+    [over.amount ?? AMOUNT, pad(over.recipient ?? MONAD_SAFE, { size: 32 }), over.domain ?? 15, pad(MESSENGER, { size: 32 }), over.caller ?? zeroHash, over.maxFee ?? 0n, over.hookData ?? '0x'],
   )
   return { address: MESSENGER, topics: topics as [Hex, ...Hex[]], data, blockNumber: 1n, blockHash: zeroHash, transactionHash: zeroHash, transactionIndex: 0, logIndex: 0, removed: false } as Log
 }
 const sim = (over: Partial<Simulation> = {}): Simulation => ({ block: 1000n, ok: true, deltas: { USDC: -AMOUNT, USDT: 0n, WETH: 0n, cbBTC: 0n }, nftDelta: 0n, gasUsed: 200_000n, logs: [burnLog()], ...over })
 
 describe('bridge-out calls (otto/mamoru#215)', () => {
-  test('approve TokenMessengerV2 for the amount, then depositForBurn to this account on Monad: any caller, no fee, Standard finality', async () => {
+  test("approve TokenMessengerV2 for the amount, then depositForBurn to the account's own Safe on Monad (#251): any caller, no fee, Standard finality", async () => {
     await withEngine(conservadorLabV6, async (e) => {
       const out = await prepare(e, bridge())
       expect(out.expiresAt).toBeNull()
@@ -117,7 +119,7 @@ describe('bridge-out calls (otto/mamoru#215)', () => {
       expect(decodeFunctionData({ abi: erc20Abi, data: out.calls[0]!.callData }).args).toEqual([MESSENGER, AMOUNT])
       const burn = decodeFunctionData({ abi: tokenMessengerV2Abi, data: out.calls[1]!.callData })
       expect(burn.functionName).toBe('depositForBurn')
-      expect(burn.args).toEqual([AMOUNT, 15, pad(ACCOUNT, { size: 32 }), USDC, zeroHash, 0n, 2000])
+      expect(burn.args).toEqual([AMOUNT, 15, pad(MONAD_SAFE, { size: 32 }), USDC, zeroHash, 0n, 2000])
       expect(CCTP_DOMAIN_BY_CHAIN[143]).toBe(15)
       // Exactly what the grant allows.
       expect(check(out.calls)).toBe('OK')
@@ -135,6 +137,17 @@ describe('bridge-out calls (otto/mamoru#215)', () => {
       state.paused = true
       expect(await code(() => prepare(e, bridge()))).toBe('POLICY_PAUSED')
     })
+  })
+
+  test('#251: the recipient is the one the bridge-out session names; none, or the account itself, builds nothing', async () => {
+    await withEngine(conservadorLabV6, async (e) => {
+      expect(await code(() => prepare(e, bridge()))).toBe('POLICY_DENIED_RECIPIENT')
+    }, {}, { sessions: [] })
+    const self = { ...session(), grant: instantiateGrant(conservadorLiveV6, 'bridge-out', { ...grantCtx(), remoteAccount: '0x00000000000000000000000000000000000000dd' as Address }) }
+    self.grant.actions[1]!.params.find((r) => r.field === 'mintRecipient')!.ref = BigInt(ACCOUNT)
+    await withEngine(conservadorLabV6, async (e) => {
+      expect(await code(() => prepare(e, bridge()))).toBe('POLICY_DENIED_RECIPIENT')
+    }, {}, { sessions: [self] })
   })
 })
 
@@ -165,7 +178,7 @@ describe('bridge-out simulated deltas', () => {
       expect(mismatch(e, bridge(), sim({ logs: [] }))).toContain('0 DepositForBurn')
       expect(mismatch(e, bridge(), sim({ logs: [burnLog(), burnLog()] }))).toContain('2 DepositForBurn')
       for (const bad of [{ recipient: OTHER }, { depositor: OTHER }, { domain: 6 }, { maxFee: 1n }, { finality: 1000 }, { amount: AMOUNT - 1n }, { hookData: '0x01' as Hex }, { caller: pad(OTHER, { size: 32 }) }]) {
-        expect(mismatch(e, bridge(), sim({ logs: [burnLog(bad)] }))).toContain('not this account to itself')
+        expect(mismatch(e, bridge(), sim({ logs: [burnLog(bad)] }))).toContain('not this account to its own Safe')
       }
     })
   })
@@ -186,7 +199,7 @@ describe('a bridge-out is journaled before it is signed', () => {
     await withEngine(conservadorLabV6, async (e) => {
       expect(journal(e, bridge())).toBeNull()
       expect(got).toHaveLength(1)
-      expect(got[0]).toMatchObject({ opId: 'op-1', account: ACCOUNT, chainId: 143, destinationDomain: 15, amount: AMOUNT, userOpHash: hash, nonce: 5n, prepareBlock: 1000n, bucket: 'growth' })
+      expect(got[0]).toMatchObject({ opId: 'op-1', account: ACCOUNT, recipient: getAddress(MONAD_SAFE), chainId: 143, destinationDomain: 15, amount: AMOUNT, userOpHash: hash, nonce: 5n, prepareBlock: 1000n, bucket: 'growth' })
     }, { beforeBridgeSign: (b) => void got.push(b) })
     await withEngine(conservadorLabV6, async (e) => {
       expect(journal(e, bridge())).toContain('disk full')

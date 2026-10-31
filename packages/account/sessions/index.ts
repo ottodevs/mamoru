@@ -14,7 +14,7 @@ import {
 import { getUserOperationHash, toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import { ReasonError, type Address, type Hex } from '@mamoru/domain'
 import { baseRegistry, address, entry, isDeployed, entryPointV07Abi, moduleRegistryAbi, safe7579Abi, smartSessionAbi, type Registry } from '@mamoru/registry'
-import { PARAM_CONDITIONS, POLICY_INCREASE_SIG, decodeGasCaps, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, mamoruInitFor, v4PoolOf, validGasCaps, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { PARAM_CONDITIONS, POLICY_INCREASE_SIG, decodeGasCaps, decodeMamoruInitAny, encodeGasCaps, encodeMamoruInit, encodeMamoruInitAtSetup, mamoruInitFor, v4PoolOf, validGasCaps, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   CALLTYPE_BATCH,
   CALLTYPE_SINGLE,
@@ -210,12 +210,15 @@ export function assertV4Policies(grant: SessionGrant, second: SecondActionPolicy
   if (!validGasCaps(caps)) mismatch(grant, 'gas caps MamoruGasPolicy would refuse (a zero cap, or maxFeePerGas under the priority cap)')
   if (!grant.pool) mismatch(grant, 'a v4 grant names its pool')
   const pool = entry(grant.pool, registry)
-  let init
+  let init, atSetup
   try {
-    init = decodeMamoruInit(second.initData)
+    ;({ init, atSetup } = decodeMamoruInitAny(second.initData))
   } catch {
     mismatch(grant, 'action policy init data is not MamoruActionPolicy.Init')
   }
+  // otto/mamoru#251: setup mode is MamoruActionPolicyV3's, for a session committed in the Safe setup (V2 refuses it).
+  if (atSetup && !grant.actionPolicyOnly) mismatch(grant, 'a setup-mode Init is only for a grant with MamoruActionPolicyV3 as its only action policy')
+  if (grant.actionPolicyOnly && grant.actions.some((a) => a.params.length)) mismatch(grant, 'an actionPolicyOnly grant carries no UniActionPolicy rules')
   if (!isAddressEqual(init.pool, getAddress(pool.address))) mismatch(grant, `Init pool ${init.pool} is not the grant's pool ${pool.address}`)
   const tokens = [pool.token0, pool.token1].map((t) => address(t as never, registry))
   for (const a of grant.actions) {
@@ -242,6 +245,7 @@ export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, 
   // it (a stale or hand-built grant, the old `requiresGasPolicy` name) is refused rather than encoded ungated.
   if ('requiresGasPolicy' in grant) mismatch(grant, 'requiresGasPolicy is retired: rebuild the grant (requiresPauseGate)')
   if (!grant.requiresPauseGate && grant.actions.some((a) => isBridgeAction(a, registry))) mismatch(grant, 'a bridge action needs requiresPauseGate')
+  if (grant.actionPolicyOnly && (!grant.requiresActionPolicy || grant.requiresPauseGate)) mismatch(grant, 'an actionPolicyOnly grant is a MamoruActionPolicy grant')
   if (grant.requiresPauseGate) assertGated(grant, policies)
   else if (grant.requiresActionPolicy) assertV4Policies(grant, isActionPolicy(policies) ? policies : undefined, registry)
   const second = isActionPolicy(policies) ? { policy: policies.policy, initData: policies.initData } : policies && 'gate' in policies ? policies.gate : undefined
@@ -261,9 +265,12 @@ export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, 
     actions: grant.actions.map((a) => ({
       actionTargetSelector: a.selector,
       actionTarget: a.targetAddress,
-      actionPolicies: second
-        ? [{ policy: address('UniActionPolicy', registry), initData: uniActionInitData(a) }, { policy: second.policy, initData: second.initData }]
-        : [{ policy: address('UniActionPolicy', registry), initData: uniActionInitData(a) }],
+      // otto/mamoru#251: MamoruActionPolicyV3 alone (checked by assertV4Policies above), no UniActionPolicy.
+      actionPolicies: grant.actionPolicyOnly
+        ? [{ policy: second!.policy, initData: second!.initData }]
+        : second
+          ? [{ policy: address('UniActionPolicy', registry), initData: uniActionInitData(a) }, { policy: second.policy, initData: second.initData }]
+          : [{ policy: address('UniActionPolicy', registry), initData: uniActionInitData(a) }],
     })),
     permitERC4337Paymaster: grant.permitERC4337Paymaster,
   }
@@ -294,6 +301,7 @@ export function v4PoliciesFor(
   budgetCaps: Record<string, bigint>,
   admitByPool: Partial<Record<string, readonly bigint[]>> = {},
   registry: Registry = baseRegistry,
+  opts: { atSetup?: boolean } = {},
 ): (grant: SessionGrant, index: number) => SessionPolicies | undefined {
   const firstOfPool = new Map<string, number>()
   grants.forEach((g, i) => {
@@ -309,7 +317,9 @@ export function v4PoliciesFor(
     const spec = v4PoolOf(g.pool, registry.chainId)
     if (!spec) mismatch(g, 'no v4 pool parameters for this pool')
     const admit = firstOfPool.get(g.pool!) === i ? [...(admitByPool[g.pool!] ?? [])] : []
-    return { policy: d.actionPolicy, initData: encodeMamoruInit(mamoruInitFor(spec, generation, budgetCaps, { admit })), gas, expected: { actionPolicy: d.actionPolicy, gasPolicy: d.gasPolicy } }
+    const init = mamoruInitFor(spec, generation, budgetCaps, { admit })
+    // otto/mamoru#251: sessions committed in a Safe setup take V3's setup mode (no live reads at the enable).
+    return { policy: d.actionPolicy, initData: opts.atSetup ? encodeMamoruInitAtSetup(init) : encodeMamoruInit(init), gas, expected: { actionPolicy: d.actionPolicy, gasPolicy: d.gasPolicy } }
   }
 }
 

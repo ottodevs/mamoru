@@ -5,6 +5,7 @@ src = "src"
 test = "test"
 libs = ["lib"]
 solc_version = "0.8.28"
+fs_permissions = [{ access = "read", path = "./test/fixtures" }]
 evm_version = "cancun"
 optimizer = true
 optimizer_runs = 10000

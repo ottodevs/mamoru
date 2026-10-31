@@ -39,6 +39,7 @@ export const REASON_CODES = [
   // T7 (GPT-6 review of #97, P1 3): the second policy, the gas policy or the Init is not the one the policy config
   // names (deployed address, the address the grant was retargeted to, the grant's pool and tokens).
   'SESSION_ACTION_POLICY_MISMATCH',
+  'REMOTE_SAFE_MISMATCH',
   // T7: basefee leaves no room under a v4 session's MamoruGasPolicy maxFeePerGas cap; the engine waits.
   'GAS_PRICE_OVER_CAP',
   // Pre-chequeo de política en el motor

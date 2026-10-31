@@ -16,12 +16,14 @@ export type ParamCondition = (typeof PARAM_CONDITIONS)[number]
 /**
  * Reference of a rule, as written in the policy:
  * - `ACCOUNT`: the smart account itself;
+ * - `REMOTE_ACCOUNT`: the account's own Safe on the chain a remote bucket runs on (otto/mamoru#251: a separate Safe at its
+ *   own address, whose setup already holds that chain's sessions), fixed when the approval is built;
  * - a registry name, compared as an address;
  * - `cap:<name>`: an engineering cap fixed at activation;
  * - `tokenId`: the position of a per-position grant;
  * - a bigint literal.
  */
-export type RefTemplate = 'ACCOUNT' | 'tokenId' | `cap:${string}` | RegistryName | bigint
+export type RefTemplate = 'ACCOUNT' | 'REMOTE_ACCOUNT' | 'tokenId' | `cap:${string}` | RegistryName | bigint
 
 export type ParamRuleTemplate = {
   field: string
@@ -77,6 +79,13 @@ export type GrantTemplate = {
    * (`retargetToPolicy` refuses it too).
    */
   requiresPauseGate?: true
+  /**
+   * otto/mamoru#251: MamoruActionPolicyV3 is the grant's ONLY action policy (no UniActionPolicy), so the session can be
+   * committed in the Safe setup before the Safe's address exists: V3 checks every recipient against the account itself,
+   * the tokens, fee and spenders against its pool, and the value against its budget. The template's actions carry no
+   * param rules (`instantiateGrant` refuses any). Set only by `grantsV3Only` (v4-grants.ts).
+   */
+  actionPolicyOnly?: true
 }
 
 export type UsageTier = { upToUsdc: bigint; usageLimit: number }
@@ -242,7 +251,7 @@ export type PolicyVersion = {
      * pause, the swap deadline): the engine reads `isPaused` before it prepares an op and waits (POLICY_PAUSED) instead
      * of sending one the policy refuses. Absent: the deployed V1, which has no pause.
      */
-    contractVersion?: 2
+    contractVersion?: 2 | 3
     /**
      * otto/mamoru#213: the deployed MamoruPauseGate (bound to this `address`, MamoruActionPolicyV2), the second action
      * policy of every `requiresPauseGate` grant. Never a registry entry or a constant (same discipline as `address`).
@@ -394,4 +403,6 @@ export type SessionGrant = {
   actionPolicy?: Address
   /** See `GrantTemplate.requiresPauseGate`. */
   requiresPauseGate?: true
+  /** See `GrantTemplate.actionPolicyOnly`. */
+  actionPolicyOnly?: true
 }

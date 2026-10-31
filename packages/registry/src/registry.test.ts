@@ -14,6 +14,8 @@ const ACCOUNT_STACK = [
   'SmartSession',
   'OwnableValidator',
   'UniActionPolicy',
+  'TimeFramePolicy',
+  'UsageLimitPolicy',
   'SafeWebAuthnSharedSigner',
   'P256Verifier',
   'MultiSendCallOnly_141',
@@ -22,7 +24,7 @@ const ACCOUNT_STACK = [
 ]
 
 /** Not deployed on Monad: a lookup must fail loudly, never fall back to Base. */
-const MISSING_ON_MONAD = ['TimeFramePolicy', 'UsageLimitPolicy', 'SafeWebAuthnSignerFactory']
+const MISSING_ON_MONAD = ['SafeWebAuthnSignerFactory']
 
 function code(fn: () => unknown): string | undefined {
   try {

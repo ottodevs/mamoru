@@ -97,6 +97,31 @@ export function decodeMamoruInit(data: Hex): MamoruInit {
   return i
 }
 
+/** MamoruActionPolicyV3.FAMILY_UNISWAP_AT_SETUP: the first word of a setup-mode Init. */
+export const FAMILY_UNISWAP_AT_SETUP = 3n
+
+const SETUP_INIT_PARAMS = [{ type: 'uint256' }, ...MAMORU_INIT_TUPLE] as const
+
+/**
+ * otto/mamoru#251: MamoruActionPolicyV3's setup mode, `abi.encode(FAMILY_UNISWAP_AT_SETUP, Init)`, for a session
+ * committed in the Safe setup. The enable reads no live market state (the ring and the M-5 depth run at the first
+ * priced action instead), so the initializer deploys the same way on any later day. Only for the account's first
+ * config of a pool, and never with `admit` (the contract refuses both: BadInit 14, 13).
+ */
+export function encodeMamoruInitAtSetup(i: MamoruInit): Hex {
+  if (i.admit.length) throw new Error('encodeMamoruInitAtSetup: setup mode admits no position')
+  return encodeAbiParameters(SETUP_INIT_PARAMS, [FAMILY_UNISWAP_AT_SETUP, i])
+}
+
+/** The Init in either encoding (`abi.encode(Init)`, whose first word is 0x20, or setup mode). */
+export function decodeMamoruInitAny(data: Hex): { init: MamoruInit; atSetup: boolean } {
+  if (BigInt(data.slice(0, 66)) === FAMILY_UNISWAP_AT_SETUP) {
+    const [, init] = decodeAbiParameters(SETUP_INIT_PARAMS, data)
+    return { init, atSetup: true }
+  }
+  return { init: decodeMamoruInit(data), atSetup: false }
+}
+
 // ---------------------------------------------------------------- MamoruGasPolicy.Caps (T6 L-1, T7 P1 2 and 4)
 
 export const GAS_CAPS_TUPLE = [
@@ -530,6 +555,17 @@ export function grantsV5(p: V4PoolSpec, usage: V4Usage): GrantTemplate[] {
 }
 
 /**
+ * otto/mamoru#251: the three v5 grants of one pool with MamoruActionPolicyV3 as their only action policy, for a Safe
+ * whose sessions are committed in its setup (the account's Safe on Monad). Same actions as `grantsV5`; no UniActionPolicy
+ * rules: V3 itself pins every recipient to the account, the tokens, fee and approval spenders to the pool, mint and
+ * increase to itself, and the value to the pool's budget (contracts/action-policy/src/MamoruActionPolicyV3.sol). The
+ * per-call amount rules of v5 are dropped with UniActionPolicy; the budget (W_p, T_p) binds as before.
+ */
+export function grantsV3Only(p: V4PoolSpec, usage: V4Usage): GrantTemplate[] {
+  return grantsV5(p, usage).map((g) => ({ ...g, actions: g.actions.map((a) => ({ ...a, params: [] })), actionPolicyOnly: true as const }))
+}
+
+/**
  * otto/mamoru#213: manage-any without a way in, for a pool a policy keeps only so its accounts can leave it (v6's
  * USDC/cbBTC at preference 0). It decreases, collects, burns and sells the volatile token for the stable one; it has no
  * mint, no increase and no approval of the stable token, so neither the engine nor a leaked key can put money into
@@ -584,7 +620,7 @@ export function withActionPolicy(
   policy: PolicyVersion,
   mamoruPolicy: Address,
   pools: readonly V4PoolSpec[],
-  opts: { bandFactorBps?: number; caps?: Record<string, bigint>; budgetWindowSeconds?: number; twapShortWindowSeconds?: number; gasPolicy?: { address: Address; caps: GasCaps }; contractVersion?: 2; pauseGate?: Address } = {},
+  opts: { bandFactorBps?: number; caps?: Record<string, bigint>; budgetWindowSeconds?: number; twapShortWindowSeconds?: number; gasPolicy?: { address: Address; caps: GasCaps }; contractVersion?: 2 | 3; pauseGate?: Address } = {},
 ): PolicyVersion {
   const bandTicksByPool: Partial<Record<RegistryName, number>> = {}
   const anchorByPool: Partial<Record<RegistryName, { tick: number; band: number }>> = {}

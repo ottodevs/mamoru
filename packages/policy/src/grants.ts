@@ -337,13 +337,14 @@ export type BridgeOutSpec = {
 }
 
 /**
- * otto/mamoru#213: the session key may move savings to the account's sleeve on another chain, and nowhere else. CCTP
+ * otto/mamoru#213: the session key may move savings to the account's own Safe on another chain, and nowhere else. CCTP
  * V2 burns USDC here and mints the same amount there, so every rule is a fixed-position word: the minted USDC goes to
- * this same account address (`mintRecipient`, the sleeve shares the Safe address), to one domain, with an open
+ * the account's Safe there (`mintRecipient` = `REMOTE_ACCOUNT`, #251: its own address, fixed in the approval the owner
+ * signs; the operator bridges only once that Safe is deployed with its sessions), to one domain, with an open
  * `destinationCaller` (anyone may relay the mint; a pinned caller could only stall it), no fee and Standard finality
  * (the only transfer Circle offers to Monad). Across `depositV3` is not offered to the key: its `outputAmount` is a
  * separate word no rule can tie to `inputAmount`, so a leaked key could hand a relayer the difference.
- * A leaked key can only move up to the cumulative cap from the account to the same account on the destination chain,
+ * A leaked key can only move up to the cumulative cap from the account to the owner's own Safe on the destination chain,
  * at no cost but gas, which MamoruGasPolicy caps; MamoruPauseGate stops it while the guardian has the account paused
  * (`requiresPauseGate`). Never retargeted to MamoruActionPolicy, which knows only the Uniswap calls.
  */
@@ -368,7 +369,7 @@ export function bridgeOutGrant(p: BridgeOutSpec, usage: Usage): GrantTemplate {
         params: [
           { field: 'amount', index: 0, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.perCall}`, cumulative: `cap:${p.caps.total}`, denial: 'POLICY_DENIED_AMOUNT' },
           { field: 'destinationDomain', index: 1, condition: 'EQUAL', ref: p.destinationDomain, denial: 'POLICY_DENIED_TARGET' },
-          { field: 'mintRecipient', index: 2, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },
+          { field: 'mintRecipient', index: 2, condition: 'EQUAL', ref: 'REMOTE_ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },
           { field: 'burnToken', index: 3, condition: 'EQUAL', ref: 'USDC', denial: 'POLICY_DENIED_TARGET' },
           { field: 'destinationCaller', index: 4, condition: 'EQUAL', ref: 0n, denial: 'POLICY_DENIED_TARGET' },
           { field: 'maxFee', index: 5, condition: 'EQUAL', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
