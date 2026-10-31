@@ -56,6 +56,7 @@ import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
 import { DEFAULT_SPONSOR, activationRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
+import { livePoolStats } from './pool-stats.ts'
 
 /** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
 export type AccountsSummary = { known: number; active: number; armed: number }
@@ -721,6 +722,8 @@ export class Operator {
   private readonly relayerLowLogged = new Map<string, number>()
   /** Pool state of the last few blocks: accounts reviewed at the same block read it once. */
   private readonly poolCache = poolStateCache()
+  /** otto/mamoru#101 (shadow): hourly off-chain pool stats (TVL change, volume); only read for a policy that lists packaging:tvl. */
+  private readonly poolStats = livePoolStats()
   /**
    * #172: guard history of lazy accounts, read once per pool per minute for every engine (see `SharedGuardReads`),
    * with the fee history and fallback series the cost test needs, restored from and saved to `cfg.guardReadsState`.
@@ -5033,6 +5036,7 @@ export class Operator {
         // The only owner intent the operator has today: a stop on its way pauses the engine (US6).
         intents: () => ({ paused: this.stopInFlight(acc), exitRequested: false }),
         peerPositions: () => this.peerPositionsOf(acc.accountKey),
+        poolStats: () => this.poolStats.get(),
         onEntering: (pool) => this.markEntering(acc, pool),
         // otto/mamoru#212: new money is placed only within the cap, counted across chains.
         cap: () => this.engineCap(acc),
@@ -5054,7 +5058,7 @@ export class Operator {
           this.store.save()
         },
         // otto/mamoru#101: shadow only, logged when the set of Packaging rules that would fire changes.
-        onShadowRisk: (risk) => console.log(`[shadow] ${acc.accountKey} ${risk.length ? risk.map((r) => `${r.code} ${r.pool}${r.label ? ` ${r.label}` : ''}`).join('; ') : 'clear'}`),
+        onShadowRisk: (risk) => console.log(`[shadow] ${acc.accountKey} ${risk.length ? risk.map((r) => `${r.code} ${r.pool}${r.window ? ` ${r.window}` : ''}${r.label ? ` ${r.label}` : ''}`).join('; ') : 'clear'}`),
         onMinted: (tokenId, block) => {
           const id = tokenId.toString()
           // An account from before the record counts every position until seedAdmitted has read them.

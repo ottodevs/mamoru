@@ -252,6 +252,11 @@ export type EngineConfig = {
    * for the weekly cap and the cooldown across a restart. The newest also seeds `lastRerangeAt`. Absent: none.
    */
   rerangeHistory?: { pool: string; at: bigint }[]
+  /**
+   * otto/mamoru#101 phase 1b (shadow): the latest off-chain pool statistics, by pool name (`Observation.poolStats`). Used
+   * only for a policy that lists `packaging:tvl`. Must not throw or wait: the operator answers from its cache.
+   */
+  poolStats?: () => Observation['poolStats']
 }
 
 /** Live op states whose signed bytes may still land or have landed without being settled here (Engine.carried). */
@@ -293,6 +298,16 @@ export type EngineHooks = {
   onReranged?: (pool: string, at: bigint, block: bigint) => void
   /** otto/mamoru#101: the shadow risk entries changed (rule, pool), with their latest values; the operator logs it. Never acts. */
   onShadowRisk?: (risk: NonNullable<Decision['shadowRisk']>) => void
+}
+
+/** #101: a stats callback that throws is the same as no stats; a review never fails on shadow data. */
+function safePoolStats(f: (() => Observation['poolStats']) | undefined): Observation['poolStats'] {
+  try {
+    const v = f?.()
+    return v && Object.keys(v).length ? v : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** The block of the latest operation that reached the chain: no review may observe before it. */
@@ -613,13 +628,14 @@ export class Engine {
     const cap = this.cfg.cap?.()
     const weekAgo = obs.block.timestamp - 7n * 86_400n
     const recent = this.reranges.filter((r) => r.at > weekAgo)
-    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}) }
+    const poolStats = this.cfg.policy.shadow.includes('packaging:tvl') ? safePoolStats(this.cfg.poolStats) : undefined
+    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...(poolStats ? { poolStats } : {}), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}) }
     this.outOfRange = outOfRangeSinceOf(this.outOfRange, obs)
     if (this.cfg.policy.range.lazy) obs = withOutOfRangeSince(obs, this.outOfRange)
     this.lastObservation = obs
     const decision = decide(obs, this.cfg.policy)
     // #101: report only when the set of rules that would fire changes, not on every review.
-    const shadowSig = (decision.shadowRisk ?? []).map((r) => `${r.code}:${r.pool}`).join(',')
+    const shadowSig = (decision.shadowRisk ?? []).map((r) => `${r.code}:${r.pool}:${r.window ?? ''}`).join(',')
     if (shadowSig !== this.shadowSig) {
       this.shadowSig = shadowSig
       this.hooks.onShadowRisk?.(decision.shadowRisk ?? [])
