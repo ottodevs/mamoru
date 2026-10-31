@@ -28,6 +28,7 @@ function monadWorld(opts: { writes?: boolean } = {}) {
     /** Permission ids that are not enabled on the Safe. */
     notEnabled: new Set<string>(),
     eth: 0n,
+    topUpReverts: false,
   }
   const sent: { to: string; data?: Hex; value?: bigint }[] = []
   const started: string[] = []
@@ -52,6 +53,10 @@ function monadWorld(opts: { writes?: boolean } = {}) {
     address: `0x${'7'.repeat(40)}`,
     send: async (tx: { to: string; data?: Hex; value?: bigint }) => {
       sent.push(tx)
+      if (tx.to.toLowerCase() === safe.toLowerCase() && chain.topUpReverts) {
+        const hash = toHex(sent.length, { size: 32 })
+        return { hash, receipt: { transactionHash: hash, status: 'reverted', blockNumber: 499n, logs: [], gasUsed: 50_000n, effectiveGasPrice: 1n } as unknown as TransactionReceipt }
+      }
       if (tx.to.toLowerCase() === safe.toLowerCase()) chain.eth += tx.value ?? 0n
       else chain.deployed = true
       const hash = toHex(sent.length, { size: 32 })
@@ -229,5 +234,16 @@ describe('provision (Monad side)', () => {
     expect(m.sent).toHaveLength(sent)
     expect(m.started).toHaveLength(1)
     expect(Object.keys(m.state.accounts)).toEqual([m.rctx.accountKey])
+  })
+
+  test('a reverted gas top-up fails the provisioning (502 GAS_TOPUP_FAILED): not active, no engine, retried next time', async () => {
+    const m = keyed()
+    m.chain.topUpReverts = true
+    expect(await code(m.op.provision(m.rctx))).toEqual({ status: 502, code: 'GAS_TOPUP_FAILED' })
+    expect(m.state.accounts[m.rctx.accountKey]?.active).not.toBe(true)
+    expect(m.started).toEqual([])
+    m.chain.topUpReverts = false
+    expect(await m.op.provision(m.rctx)).toEqual({ state: 'active', address: m.r.address })
+    expect(m.started).toEqual([m.rctx.accountKey])
   })
 })

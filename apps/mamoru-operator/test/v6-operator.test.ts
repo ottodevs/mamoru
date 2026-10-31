@@ -439,6 +439,20 @@ describe('after a confirmed v6 approval the account\'s own Safe on Monad is prov
     expect(p.provisioned).toHaveLength(1)
   })
 
+  test('review r2 P1 2: no bridge to the remote Safe in the last 30 days of its sessions (its permissions are not handed over)', async () => {
+    const { w, t } = await started(undefined)
+    await confirm(w, t)
+    const acc = w.state.accounts.k!
+    const seen: (readonly Hex[] | undefined)[] = []
+    const o = w.op as unknown as { cfg: { bridgeMonad?: unknown }; remoteOf(a: AccountState): { remote?: (b: bigint) => Promise<unknown> } }
+    o.cfg.bridgeMonad = { remote: async (...a: unknown[]) => (seen.push(a[4] as readonly Hex[]), { value: 0n, inFlight: 0n, ready: true }) }
+    await o.remoteOf(acc).remote!(1n)
+    expect(seen[0]).toEqual(acc.remote!.permissionIds)
+    acc.remote!.spec = { ...acc.remote!.spec, validUntil: Math.floor(Date.now() / 1000) + 29 * 86_400 }
+    await o.remoteOf(acc).remote!(1n)
+    expect(seen[1]).toEqual([])
+  })
+
   test('a pending answer keeps it not ready, and tickRemotes asks again until the Monad operator says active', async () => {
     const { w, p, t } = await started({ provision: { state: 'pending', code: 'REMOTE_SAFE_UNVERIFIED' } })
     await quiet(async () => {
