@@ -83,8 +83,10 @@ describe('remoteSafe (otto/mamoru#251)', () => {
     const v2 = withActionPolicy(input.policy, V3_MONAD_PINNED, [V4_POOLS_MONAD.growth], { gasPolicy: { address: address('MamoruGasPolicy', monadRegistry), caps: MONAD_GAS_CAPS }, contractVersion: 2 })
     expect(code(() => remoteSafe({ ...input, policy: v2 }))).toBe('SESSION_ACTION_POLICY_MISSING')
     expect(code(() => remoteSafe({ ...input, capUsdc: 0n }))).toContain('capUsdc')
-    expect(code(() => monadV6Deployed(monadRegistry))).toBe('POLICY_TARGET_NOT_IN_REGISTRY')
+    // Pinned in monad.json since the deploy of 2026-10-31 (the fixture's pin is the same address); without it, refused.
+    expect(monadV6Deployed(monadRegistry).actionPolicy?.address).toBe(V3_MONAD_PINNED)
     expect(monadV6Deployed(withPinnedV3()).actionPolicy?.address).toBe(V3_MONAD_PINNED)
+    expect(code(() => monadV6Deployed({ ...monadRegistry, entries: monadRegistry.entries.filter((e) => e.name !== 'MamoruActionPolicyV3') }))).toBe('POLICY_TARGET_NOT_IN_REGISTRY')
   })
 })
 

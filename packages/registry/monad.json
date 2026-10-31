@@ -210,6 +210,13 @@
       "role": "MamoruActionPolicy v2 en Monad (contracts/action-policy/src/MamoruActionPolicyV2.sol, otto/mamoru#214): mismos límites que en Base con el NonfungiblePositionManager, SwapRouter02 y factory de Monad; GUARDIAN inmutable 0xA8E6EF87e612fA5c54668Cc1fF0aC809e1321FdD; desplegado el 2026-10-27 por el relayer 0xE41175b9CEBD25b9F45B745C922002BC052B5C88 con ModuleRegistry.deployModule (script DeployMonad.s.sol); WMON/USDC observationCardinalityNext 1800",
       "address": "0xc50408916C253B9E9EeBC0308813eD6B470466Ac",
       "codeHash": "0x816722100ff48de176030206d129049c751e8164e76d55e44d03be06862e7717"
+    },
+    {
+      "name": "MamoruActionPolicyV3",
+      "kind": "smart-sessions-policy",
+      "role": "política de acción de las Safes propias en Monad (contracts/action-policy/src/MamoruActionPolicyV3.sol, otto/mamoru#251); desplegada en Monad el 2026-10-31 por 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0 con ModuleRegistry.deployModule (script DeployV3.s.sol, pinned), tx 0xebe22a443b42cd6ca2c030dd56e15682ed154caef5039204419f2983e373ef88, bloque 118179730",
+      "address": "0xd660610193851b0EF85bB526eea35A942cc4F934",
+      "codeHash": "0xeda33ac759687545901552fcd408d9f592fdef9edb1693ad26971fcfcf4a053a"
     }
   ],
   "undeployed": []
