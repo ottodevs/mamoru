@@ -628,6 +628,7 @@ export async function bootOperator(o: BootOptions) {
       ...(resolveV5Policy(policy.chain, process.env) ? { v5Policy: resolveV5Policy(policy.chain, process.env) } : {}),
       ...(v6Policy ? { v6Policy } : {}),
       guardReadsState: new GuardReadsState(o.stateDir),
+      poolStatsStateFile: join(o.stateDir, 'pool-stats.json'),
       ...(peers ? { peers } : {}),
       ...(bridgeMonad ? { bridgeMonad } : {}),
     },

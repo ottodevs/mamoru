@@ -1,11 +1,13 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { Observation } from '@mamoru/decide'
 import { baseRegistry, entry } from '@mamoru/registry'
 
 /**
  * otto/mamoru#101 phase 1b (shadow only): off-chain pool statistics for Packaging's TVL change and activity rules.
- * - DefiLlama `yields.llama.fi/chart/<id>`: daily tvlUsd history -> TVL 1d / 7d / 30d ago.
+ * - TVL 1d / 7d / 30d ago: first from our own hourly samples of GeckoTerminal's current TVL (kept 31 days in the state
+ *   file), else from DefiLlama `yields.llama.fi/chart/<id>` (daily tvlUsd). DefiLlama's yield endpoints need a paid plan
+ *   from 2026-11-13: after that the fallback fails quietly and the own series alone carries the rule (no paid API).
  * - GeckoTerminal `/pools/<address>` (reserve_in_usd = current TVL) and `/pools/<address>/ohlcv/day?limit=29` (daily USD
  *   volume, newest first, the first row is the day in progress) -> 7d volume, last full day, 28d daily average.
  * No API keys. Refreshed at most once an hour per pool; a failed fetch keeps the last good value until `staleMs`, then the
@@ -20,6 +22,12 @@ const DAY = 86_400
 const LLAMA = 'https://yields.llama.fi/chart/'
 const GECKO = 'https://api.geckoterminal.com/api/v2/networks/base/pools/'
 const UA = 'mamoru-operator/1.0 (+https://mamoru.lol)'
+
+/** Own TVL samples: kept 31 days, at most this many points per pool. */
+const OWN_KEEP_S = 31 * DAY
+const OWN_MAX = 1_000
+/** An own sample counts for "N days ago" within 2 h of the target (they are hourly). */
+const OWN_TOL_S = 2 * 3_600
 
 const num = (v: unknown): number | null => {
   const n = typeof v === 'string' ? Number(v) : v
@@ -40,10 +48,16 @@ export function parseLlamaChart(json: unknown, nowSec: number): LlamaPart {
     return Number.isFinite(t) && v !== null ? [{ t, v }] : []
   })
   if (!pts.length) return none
+  return lookbacksOf(pts, nowSec, DAY / 2)
+}
+
+/** The value nearest to `nowSec - N days` for N = 1, 7, 30; null when no point is within `tolS` of that target. */
+export function lookbacksOf(pts: readonly { t: number; v: number }[], nowSec: number, tolS: number): LlamaPart {
   const at = (days: number): number | null => {
+    if (!pts.length) return null
     const target = nowSec - days * DAY
     const best = pts.reduce((a, b) => (Math.abs(b.t - target) < Math.abs(a.t - target) ? b : a))
-    return Math.abs(best.t - target) <= DAY / 2 ? best.v : null
+    return Math.abs(best.t - target) <= tolS ? best.v : null
   }
   return { tvl1dAgoUsd: at(1), tvl7dAgoUsd: at(7), tvl30dAgoUsd: at(30) }
 }
@@ -77,7 +91,7 @@ export function parseGeckoPool(json: unknown): number | null {
 type Cached<T> = { at: number; part: T }
 type Vols = Pick<GeckoPart, 'volume7dUsd' | 'volumeLastDayUsd' | 'volume28dAvgUsd'>
 /** One timestamp per source: a source that keeps failing goes stale on its own while the others stay fresh. */
-type PoolCache = { llama?: Cached<LlamaPart>; tvl?: Cached<number>; vols?: Cached<Vols> }
+type PoolCache = { llama?: Cached<LlamaPart>; tvl?: Cached<number>; vols?: Cached<Vols>; own?: { t: number; v: number }[] }
 
 export class PoolStatsCache {
   private readonly cache = new Map<string, PoolCache>()
@@ -119,12 +133,13 @@ export class PoolStatsCache {
       const llama = fresh(c?.llama)
       const tvl = fresh(c?.tvl)
       const vols = fresh(c?.vols)
+      const own = lookbacksOf(c?.own ?? [], Math.floor(now / 1000), OWN_TOL_S)
       // Every pool gets an entry, also before the first fetch ends: missing fields are reported unread, never silent.
       out[p.name] = {
         tvlUsd: tvl?.part ?? null,
-        tvl1dAgoUsd: llama?.part.tvl1dAgoUsd ?? null,
-        tvl7dAgoUsd: llama?.part.tvl7dAgoUsd ?? null,
-        tvl30dAgoUsd: llama?.part.tvl30dAgoUsd ?? null,
+        tvl1dAgoUsd: own.tvl1dAgoUsd ?? llama?.part.tvl1dAgoUsd ?? null,
+        tvl7dAgoUsd: own.tvl7dAgoUsd ?? llama?.part.tvl7dAgoUsd ?? null,
+        tvl30dAgoUsd: own.tvl30dAgoUsd ?? llama?.part.tvl30dAgoUsd ?? null,
         volume7dUsd: vols?.part.volume7dUsd ?? null,
         volumeLastDayUsd: vols?.part.volumeLastDayUsd ?? null,
         volume28dAvgUsd: vols?.part.volume28dAvgUsd ?? null,
@@ -168,11 +183,15 @@ export class PoolStatsCache {
       await this.pause()
       // Each source keeps its last good value and its own timestamp: a failure never refreshes another source's data.
       const tvlUsd = pool === undefined ? null : parseGeckoPool(pool)
-      if (tvlUsd !== null) entryOf.tvl = { at: now, part: tvlUsd }
-      const vols = ohlcv === undefined ? null : parseGeckoOhlcv(ohlcv, nowSec)
-      if (vols && vols.volume7dUsd !== null) entryOf.vols = { at: now, part: vols }
+      if (tvlUsd !== null) {
+        entryOf.tvl = { at: now, part: tvlUsd }
+        entryOf.own = [...(entryOf.own ?? []).filter((x) => x.t > nowSec - OWN_KEEP_S), { t: nowSec, v: tvlUsd }].slice(-OWN_MAX)
+      }
+      // A payload that arrived is the truth now, gaps included (its missing fields are unread): never older values.
+      if (ohlcv !== undefined) entryOf.vols = { at: now, part: parseGeckoOhlcv(ohlcv, nowSec) }
       this.cache.set(p.name, entryOf)
-      const complete = entryOf.llama?.at === now && entryOf.tvl?.at === now && entryOf.vols?.at === now
+      // Llama is only a fallback (and paid from 2026-11-13): its failure alone does not bring the retry forward.
+      const complete = entryOf.tvl?.at === now && entryOf.vols?.at === now
       if (!complete) this.lastTry.set(p.name, now - this.refreshMs + this.retryMs)
     }
     this.persist()
@@ -196,10 +215,24 @@ export class PoolStatsCache {
   private load(): void {
     if (!this.stateFile || !existsSync(this.stateFile)) return
     try {
+      const st = statSync(this.stateFile)
+      if (!st.isFile() || st.size > 2_000_000) {
+        console.error(`[pool-stats] ${this.stateFile} is not a regular file under 2 MB: not read, starting empty`)
+        return
+      }
       const raw = JSON.parse(readFileSync(this.stateFile, 'utf8')) as { cache?: Record<string, PoolCache>; lastTry?: Record<string, number> }
+      const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
       for (const p of this.pools) {
         const c = raw.cache?.[p.name]
-        if (c && typeof c === 'object') this.cache.set(p.name, c)
+        if (c && typeof c === 'object') {
+          const own = Array.isArray(c.own) ? c.own.filter((x) => fin(x?.t) && fin(x?.v) && x.v >= 0).slice(-OWN_MAX) : []
+          this.cache.set(p.name, {
+            ...(c.llama && fin(c.llama.at) ? { llama: c.llama } : {}),
+            ...(c.tvl && fin(c.tvl.at) && fin(c.tvl.part) ? { tvl: c.tvl } : {}),
+            ...(c.vols && fin(c.vols.at) ? { vols: c.vols } : {}),
+            ...(own.length ? { own } : {}),
+          })
+        }
         const t = raw.lastTry?.[p.name]
         if (typeof t === 'number' && Number.isFinite(t)) this.lastTry.set(p.name, t)
       }
@@ -230,7 +263,10 @@ export const LLAMA_POOL_IDS: Record<string, string> = {
   'pool:WETH/USDC/3000': 'b99bcdf5-1350-4269-981e-0e9b5cccb007',
 }
 
-/** The cache for the Base live pools. Memory only in the operator for now (a restart refetches within seconds). */
-export function livePoolStats(): PoolStatsCache {
-  return new PoolStatsCache(Object.entries(LLAMA_POOL_IDS).map(([name, llamaId]) => ({ name, llamaId, address: entry(name as never, baseRegistry).address })))
+/** The cache for the Base live pools, kept in `stateFile` (the own TVL series survives a restart). Absent: memory only. */
+export function livePoolStats(stateFile?: string): PoolStatsCache {
+  return new PoolStatsCache(
+    Object.entries(LLAMA_POOL_IDS).map(([name, llamaId]) => ({ name, llamaId, address: entry(name as never, baseRegistry).address })),
+    stateFile ? { stateFile } : {},
+  )
 }

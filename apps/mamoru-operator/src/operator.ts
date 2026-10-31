@@ -56,7 +56,7 @@ import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
 import { DEFAULT_SPONSOR, activationRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, StateStore, StoredGrant, StoredOp } from './state.ts'
-import { livePoolStats } from './pool-stats.ts'
+import { livePoolStats, type PoolStatsCache } from './pool-stats.ts'
 
 /** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
 export type AccountsSummary = { known: number; active: number; armed: number }
@@ -456,6 +456,8 @@ export type OperatorConfig = {
   opsScopedFlags?: () => Partial<Record<OpsFlagName, string[] | null>>
   /** otto/mamoru#172: where the shared guard reads' fee history and fallback series survive a restart (`GuardReadsState`). Absent: memory only. */
   guardReadsState?: Pick<GuardReadsState, 'load' | 'update'>
+  /** otto/mamoru#101 (shadow): file for the pool stats cache and its own 31-day TVL series. Absent: memory only. */
+  poolStatsStateFile?: string
   /**
    * otto/mamoru#212: the operators that run the same Safe address on the other chains (MAMORU_PEER_OPERATORS). The cap
    * counts what the account holds there too. Absent or empty: this chain alone.
@@ -723,7 +725,7 @@ export class Operator {
   /** Pool state of the last few blocks: accounts reviewed at the same block read it once. */
   private readonly poolCache = poolStateCache()
   /** otto/mamoru#101 (shadow): hourly off-chain pool stats (TVL change, volume); only read for a policy that lists packaging:tvl. */
-  private readonly poolStats = livePoolStats()
+  private readonly poolStats: PoolStatsCache
   /**
    * #172: guard history of lazy accounts, read once per pool per minute for every engine (see `SharedGuardReads`),
    * with the fee history and fallback series the cost test needs, restored from and saved to `cfg.guardReadsState`.
@@ -746,6 +748,7 @@ export class Operator {
     const saved = cfg.guardReadsState
     const restored = saved?.load()
     this.guardReads = new SharedGuardReads({ fees: restored?.fees, series: restored?.series, onUpdate: saved ? (s) => saved.update(s) : undefined })
+    this.poolStats = livePoolStats(cfg.poolStatsStateFile)
   }
 
   /** GET /metrics: accounts known / active / armed. */

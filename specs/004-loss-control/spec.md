@@ -411,10 +411,13 @@ changes, so no `policyHash` changes. Nothing acts: a row says what would have ex
 Units in an entry: `RISK_POOL_TVL_DROP` carries basis points (`threshold` -1200, `metric` the measured change);
 `RISK_POOL_VOLUME_LOW` carries raw savings units (USDC, 6 decimals).
 
-Data (operator, not `decide`): DefiLlama `yields.llama.fi/chart/<id>` for the TVL 1d/7d/30d ago, GeckoTerminal
-`/pools/<address>` (`reserve_in_usd`, current TVL) and `/pools/<address>/ohlcv/day?limit=29` (complete days only; the day
-in progress is dropped) for the volumes. Refreshed at most hourly per pool, no API keys; a failed fetch keeps the last good
-value for 6 h, then the fields are null and the rule reports `RISK_POOL_STATS_UNREAD`. Reaches `decide` as
+Data (operator, not `decide`): GeckoTerminal `/pools/<address>` (`reserve_in_usd`, current TVL) and
+`/pools/<address>/ohlcv/day?limit=29` (complete days only; the day in progress is dropped; a missing day inside a window
+makes that window unread, never zero volume) for the volumes. TVL 1d/7d/30d ago comes from the operator's own hourly
+samples of that current TVL, kept 31 days in `stateDir/pool-stats.json`; until that series is long enough, DefiLlama
+`yields.llama.fi/chart/<id>` fills in. DefiLlama's yield endpoints need a paid plan from 2026-11-13, so after that date
+the 30d rule is unread until the own series reaches 30 days. Refreshed at most hourly per pool, no API keys; each source
+keeps its last good value for 6 h, then its fields are null and the rule reports `RISK_POOL_STATS_UNREAD`. Reaches `decide` as
 `Observation.poolStats`, read only by the shadow rule.
 
 ## Decisions for Ot

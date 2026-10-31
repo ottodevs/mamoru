@@ -165,6 +165,54 @@ describe('PoolStatsCache', () => {
     expect(s.volumeLastDayUsd).toBeNull()
   })
 
+  test('own TVL series: with DefiLlama gone (paid from 2026-11-13), hourly samples carry the 1d and 7d lookbacks', async () => {
+    let t = NOW
+    let tvl = 300_000
+    const good = fetcher()
+    const c = new PoolStatsCache([P], {
+      fetch: (u, i) => {
+        if (u.startsWith('https://yields.llama.fi/')) return Promise.resolve({ ok: false, status: 402, json: async () => ({}) })
+        if (!u.endsWith('/ohlcv/day?limit=29')) return Promise.resolve(okRes({ data: { attributes: { reserve_in_usd: String(tvl) } } }))
+        return good.f(u, i)
+      },
+      now: () => t,
+      gapMs: 0,
+      staleMs: 6 * 3_600_000,
+    })
+    await c.settled()
+    expect(c.get()[P.name]!.tvl1dAgoUsd).toBeNull() // no history yet
+    for (let h = 0; h < 7 * 24; h++) {
+      t += 3_600_000
+      tvl -= 1_000
+      await c.settled()
+    }
+    const s = c.get()[P.name]!
+    expect(s.tvlUsd).toBe(tvl)
+    expect(s.tvl1dAgoUsd).toBe(tvl + 24_000)
+    expect(s.tvl7dAgoUsd).toBe(300_000)
+    expect(s.tvl30dAgoUsd).toBeNull()
+  })
+
+  test('an OHLCV payload with a gap replaces older volumes: the gap reads unread, yesterday still counts', async () => {
+    let t = NOW
+    let gap = false
+    const good = fetcher()
+    const rows = (OHLCV as { data: { attributes: { ohlcv_list: number[][] } } }).data.attributes.ohlcv_list
+    const c = new PoolStatsCache([P], {
+      fetch: (u, i) => (gap && u.endsWith('/ohlcv/day?limit=29') ? Promise.resolve(okRes({ data: { attributes: { ohlcv_list: rows.filter((_, k) => k !== 4) } } })) : good.f(u, i)),
+      now: () => t,
+      gapMs: 0,
+    })
+    await c.settled()
+    expect(c.get()[P.name]!.volume7dUsd).not.toBeNull()
+    gap = true
+    t += 3_700_000
+    await c.settled()
+    const s = c.get()[P.name]!
+    expect(s.volume7dUsd).toBeNull()
+    expect(s.volumeLastDayUsd).not.toBeNull()
+  })
+
   test('a timeout keeps the last good value and never throws', async () => {
     let t = NOW
     let hang = false
@@ -217,6 +265,7 @@ describe('PoolStatsCache', () => {
     const { f, urls } = fetcher()
     const b = new PoolStatsCache([P], { fetch: f, now: () => NOW + 60_000, gapMs: 0, stateFile })
     expect(b.get()[P.name]).toEqual(a.get()[P.name])
+    expect((JSON.parse(readFileSync(stateFile, 'utf8')) as { cache: Record<string, { own?: unknown[] }> }).cache[P.name]!.own).toHaveLength(1)
     await b.settled()
     expect(urls).toHaveLength(0)
   })
