@@ -1,25 +1,35 @@
-// otto/mamoru#214: conservador-live-v6 on the Base operator. The renew row offers it behind `multichain_v6`; its owner
-// transactions encode the bridge-out grant with MamoruPauseGate + MamoruGasPolicy and every other grant with
-// MamoruActionPolicyV2 (+ gas policy); the gas split handles the pool-less bridge-out grant. Fake deployed addresses.
+// otto/mamoru#251: conservador-live-v6 on the Base operator. The renew row offers it behind `multichain_v6`. One approval is
+// ONE owner transaction: every Uniswap grant has MamoruActionPolicyV3 as its only action policy (one manage-any per pool,
+// cbBTC exit-only), bridge-out has UniActionPolicy + MamoruPauseGate and mints only to the account's own Safe on Monad,
+// which the Base operator derives from the Monad operator's session key (remoteFor) and provisions once the approval lands.
+// Fake deployed addresses; V3 and the gate are the registry pins withPinnedV6Base() gives.
 import { describe, expect, test } from 'bun:test'
-import { decodeFunctionData, parseAbi, slice, type Hex } from 'viem'
+import { decodeFunctionData, getAddress, pad, parseAbi, slice, type Hex } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
+import type { AccountContext, Address } from '@mamoru/domain'
 import { address as registryAddress, baseRegistry, smartSessionAbi } from '@mamoru/registry'
 import { V4_TX_GAS_TARGET, conservadorLiveV5, conservadorLiveV6, grantKey, orderV4Keys, splitV4Keys } from '@mamoru/policy'
+import { remoteInput, remoteSafe } from '@mamoru/account/remote'
 import { resolveV4Policy, resolveV5Policy, resolveV6Policy } from '../src/boot.ts'
-import { HttpError, upgradeSplitOf, type Operator } from '../src/operator.ts'
-import type { AccountState } from '../src/state.ts'
-import { ctx, world } from './owner-world.ts'
+import { HttpError, upgradeSplitOf, type Operator, type OperatorConfig } from '../src/operator.ts'
+import type { RemoteProvision } from '../src/remote-peer.ts'
+import type { AccountState, StoredGrant } from '../src/state.ts'
+import { FIXTURE_SESSION_KEY, GATE_V3_BASE_PINNED, V3_BASE_PINNED, withPinnedV3, withPinnedV6Base } from '../../../packages/account/remote/fixture.ts'
+import { ctx, quiet, sign, world } from './owner-world.ts'
 
 const V1 = `0x${'11'.repeat(20)}`
 const GAS = `0x${'22'.repeat(20)}`
 const V2 = `0x${'33'.repeat(20)}`
-const GATE = `0x${'44'.repeat(20)}`
-const env = { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: V1, MAMORU_ACTION_POLICY_V2_ADDRESS: V2, MAMORU_GAS_POLICY_ADDRESS: GAS, MAMORU_PAUSE_GATE_ADDRESS: GATE }
+const env = { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: V1, MAMORU_ACTION_POLICY_V2_ADDRESS: V2, MAMORU_GAS_POLICY_ADDRESS: GAS }
+const reg6 = withPinnedV6Base()
+const V3 = V3_BASE_PINNED.toLowerCase()
+const GATE = GATE_V3_BASE_PINNED.toLowerCase()
+const UNI = registryAddress('UniActionPolicy', baseRegistry).toLowerCase()
 const v4 = resolveV4Policy('base', env)!
 const v5 = resolveV5Policy('base', env)!
-const v6 = resolveV6Policy('base', env)!
+const v6 = resolveV6Policy('base', env, reg6)!
 
-type Privates = { settleRenewals(a: AccountState): Promise<void>; assertRenewable(a: AccountState): void; readOf(a: AccountState, safe: Hex): Promise<{ block: bigint }>; prepared: Map<string, { grants?: { name: string; permissionId: Hex }[]; tx: { to: string; data: Hex } }>; client: { readContract: (a: { functionName: string; args?: readonly unknown[] }) => Promise<unknown> } }
+type Privates = { settleRenewals(a: AccountState): Promise<void>; assertRenewable(a: AccountState): void; readOf(a: AccountState, safe: Hex): Promise<{ block: bigint }>; prepared: Map<string, { grants?: StoredGrant[]; revokes?: Hex[]; extend?: boolean; tx: { to: string; data: Hex } }>; client: { readContract: (a: { functionName: string; args?: readonly unknown[] }) => Promise<unknown> } }
 const priv = (op: Operator) => op as unknown as Privates
 
 /** MultiSend (packed) -> its calls. */
@@ -37,7 +47,7 @@ function unpack(data: Hex): { to: string; data: Hex }[] {
   return out
 }
 
-/** Every session the owner transaction enables, with the set of policy contracts it names. */
+/** Every session the owner transaction enables, with the policy contracts it names (per action, and as sets). */
 function sessionsOf(tx: { to: string; data: Hex }) {
   const smartSession = registryAddress('SmartSession', baseRegistry).toLowerCase()
   const calls = tx.data.startsWith('0x8d80ff0a') ? unpack(tx.data) : [tx]
@@ -46,6 +56,7 @@ function sessionsOf(tx: { to: string; data: Hex }) {
   const sessions = enable[0]!.args![0] as unknown as { userOpPolicies: { policy: string }[]; actions: { actionPolicies: { policy: string }[] }[] }[]
   return sessions.map((s) => ({
     userOp: new Set(s.userOpPolicies.map((p) => p.policy.toLowerCase())),
+    perAction: s.actions.map((a) => a.actionPolicies.map((p) => p.policy.toLowerCase())),
     action: new Set(s.actions.flatMap((a) => a.actionPolicies.map((p) => p.policy.toLowerCase()))),
   }))
 }
@@ -83,10 +94,45 @@ function ready(w: ReturnType<typeof world>): void {
   ;(p as unknown as { readOf: () => Promise<unknown> }).readOf = async () => ({ block: 100n, deployed: false, usdc: 0n, eth: 0n })
 }
 
+const SESSION_KEY = privateKeyToAccount(FIXTURE_SESSION_KEY).address
+const pinnedV3 = withPinnedV3()
+
+/** The Monad operator as the Base one sees it: gives the session key, records what it was asked, answers `provision`. */
+function fakePeer(answer: { provision: RemoteProvision; keyFails?: boolean } = { provision: { state: 'active', address: SESSION_KEY } }) {
+  const keyAsked: AccountContext[] = []
+  const provisioned: AccountContext[] = []
+  const peer = {
+    key: async (c: AccountContext): Promise<Address> => {
+      keyAsked.push(c)
+      if (answer.keyFails) throw new Error('remote operator of chain 143 gave no session key (502 )')
+      return SESSION_KEY
+    },
+    provision: async (c: AccountContext): Promise<RemoteProvision> => {
+      provisioned.push(c)
+      return answer.provision.state === 'active' ? { state: 'active', address: c.address as Address } : answer.provision
+    },
+  }
+  return { peer, keyAsked, provisioned, answer }
+}
+
+const scopedOn = { multichain_v6: null }
+/** A Base operator offering v6 (flag on for everyone) with the Monad operator `peer`; V3 on Monad is the pinned fixture one. */
+const cfg6 = (peer?: ReturnType<typeof fakePeer>['peer'], extra: Partial<OperatorConfig> = {}): Partial<OperatorConfig> => ({
+  registry: reg6,
+  v4Policy: v4,
+  v5Policy: v5,
+  v6Policy: v6,
+  opsFlags: () => ({ multichain_v6: true }),
+  opsScopedFlags: () => scopedOn,
+  remoteRegistry: () => pinnedV3,
+  ...(peer ? { remotePeers: { 143: peer } } : {}),
+  ...extra,
+})
+
 describe('boot wiring', () => {
-  test('v6 carries the gate beside V2 and the gas policy, contractVersion 2', () => {
+  test('v6 carries V3 as its action policy (contractVersion 3), the registry gate and the gas policy', () => {
     expect(v6.policyId).toBe('conservador-live-v6')
-    expect(v6.actionPolicy).toMatchObject({ address: V2, contractVersion: 2, gasPolicy: { address: GAS } })
+    expect(v6.actionPolicy).toMatchObject({ address: V3_BASE_PINNED, contractVersion: 3, gasPolicy: { address: GAS } })
     expect(v6.actionPolicy!.pauseGate!.toLowerCase()).toBe(GATE)
   })
 })
@@ -104,7 +150,7 @@ describe('the renew row offers v6 only behind multichain_v6', () => {
     }
   })
 
-  test('v6 not configured (no gate): never offered, flag or not', () => {
+  test('v6 not configured (V3 or the gate not pinned): never offered, flag or not', () => {
     const w = world(0n, { v4Policy: v4, v5Policy: v5, opsFlags: () => ({ multichain_v6: true }) })
     expect(w.op.renewTarget(running(w, v5))).toBe('conservador-live-v5')
   })
@@ -188,8 +234,32 @@ describe('owner transactions of a v6 approval', () => {
     expect(splitV4Keys(v6, ['bridge-out'], { ceiling: V4_TX_GAS_TARGET })).toEqual([['bridge-out']])
   })
 
-  test('renewal v5 -> v6: every session encodes; bridge-out with the gate, the rest with V2; all with the gas policy', async () => {
-    const w = world(0n, { v4Policy: v4, v5Policy: v5, v6Policy: v6, opsFlags: () => ({ multichain_v6: true }), opsScopedFlags: () => ({ multichain_v6: null }) })
+  /** What a v6 prepare (renewal from v5, or a Start on v6) holds, checked the same for both. */
+  function expectOneV6Transaction(w: ReturnType<typeof world>, t: Awaited<ReturnType<Operator['prepareRenew']>>) {
+    const held = priv(w.op).prepared.get(t.prepareId)!
+    const sessions = sessionsOf(held.tx)
+    const names = held.grants!.map((g) => g.name)
+    // One owner transaction carries every grant: the stables and balance manage-any, cbBTC exit-only, bridge-out. No later step.
+    expect(names).toEqual(['manage-any:pool:USDC/USDT/100', 'manage-any:pool:WETH/USDC/3000', 'manage-any:pool:USDC/cbBTC/500', 'bridge-out'])
+    expect(held.extend).toBeUndefined()
+    expect(sessions).toHaveLength(names.length)
+    names.forEach((name, i) => {
+      expect(sessions[i]!.userOp.has(GAS)).toBe(true)
+      if (name === 'bridge-out') {
+        // UniActionPolicy (the CCTP burn rules) and the pause gate; V3 is not on it.
+        expect(sessions[i]!.action).toEqual(new Set([UNI, GATE]))
+      } else {
+        // Every Uniswap action has exactly one action policy: MamoruActionPolicyV3 (no UniActionPolicy param rules).
+        expect(sessions[i]!.perAction.length).toBeGreaterThan(0)
+        for (const policies of sessions[i]!.perAction) expect(policies).toEqual([V3])
+      }
+    })
+    return held
+  }
+
+  test('renewal v5 -> v6: ONE owner transaction; V3 alone on the manage-any grants, UniActionPolicy + gate on bridge-out', async () => {
+    const p = fakePeer()
+    const w = world(0n, cfg6(p.peer))
     running(w, v5)
     ready(w)
     chain(w, 7n)
@@ -197,34 +267,87 @@ describe('owner transactions of a v6 approval', () => {
     const t = await w.op.prepareRenew(ctx)
     expect(t.policyId).toBe('conservador-live-v6')
     expect(t.move).toBe(true)
-    // The gate is registered like the other two policies before anything is signed.
-    expect(asked).toEqual(expect.arrayContaining([V2, GAS, GATE]))
-    const held = priv(w.op).prepared.get(t.prepareId)!
-    const sessions = sessionsOf(held.tx)
-    const names = held.grants!.map((g) => g.name)
-    expect(sessions).toHaveLength(names.length)
-    names.forEach((name, i) => {
-      expect(sessions[i]!.userOp.has(GAS)).toBe(true)
-      if (name === 'bridge-out') {
-        expect(sessions[i]!.action.has(GATE)).toBe(true)
-        expect(sessions[i]!.action.has(V2)).toBe(false)
-      } else {
-        expect(sessions[i]!.action.has(V2)).toBe(true)
-        expect(sessions[i]!.action.has(GATE)).toBe(false)
-      }
-    })
-    // The exit-only btc grant is enabled with V2 for its pool (so the old positions can be wound down).
-    expect(names.some((n) => n.includes('USDC/cbBTC'))).toBe(true)
+    // V3, the gas policy and the gate are registered like the other policies before anything is signed.
+    expect(asked).toEqual(expect.arrayContaining([V3, GAS, GATE]))
+    const held = expectOneV6Transaction(w, t)
+    // The old v5 sessions are revoked in the same transaction.
+    expect(held.revokes!.length).toBeGreaterThan(0)
     expect(t.summary.join('\n')).toContain('Circle')
     // Review of PR #141: the bridge consent line reads the policy's real cap names (bridgePerCall, bridgeTotal), never 0.
     const bridge = t.summary.find((l) => l.startsWith('Bridge:'))!
     expect(bridge).toBeDefined()
     expect(bridge).not.toMatch(/at most 0(\.0+)? USDC/)
     expect(bridge).not.toMatch(/and 0(\.0+)? USDC in total/)
+    expect(p.provisioned).toEqual([])
   })
 
-  test('extension: a v6 account missing only bridge-out gets just that session, with the gate', async () => {
-    const w = world(0n, { v4Policy: v4, v5Policy: v5, v6Policy: v6, opsFlags: () => ({ multichain_v6: true }), opsScopedFlags: () => ({ multichain_v6: null }) })
+  test('renewal: the mint recipient of bridge-out is the remote Safe the owner is shown, and that is the Safe these keys and the Monad session key give', async () => {
+    const p = fakePeer()
+    const w = world(0n, cfg6(p.peer))
+    running(w, v5)
+    ready(w)
+    chain(w, 7n)
+    const t = await w.op.prepareRenew(ctx)
+    const remote = t.remote!
+    expect(remote.chainId).toBe(143)
+    expect(remote.spec).toMatchObject({ chainId: 143, policyId: 'live-wmon-usdc-monad-v6', sessionKey: SESSION_KEY })
+    // The Base operator asked the Monad one for the key of THIS account, once.
+    expect(p.keyAsked.map((c) => c.accountKey)).toEqual([ctx.accountKey])
+    // The address is a function of the account's keys, the session key and the spec: nothing a caller could pick.
+    const again = remoteSafe(remoteInput(ctx, remote.spec, pinnedV3))
+    expect(remote.address).toBe(again.address)
+    expect(remote.address.toLowerCase()).not.toBe(String(ctx.address).toLowerCase())
+    const held = priv(w.op).prepared.get(t.prepareId)!
+    const burn = held.grants!.find((g) => g.name === 'bridge-out')!.grant.actions.find((a) => a.params.some((r) => r.field === 'mintRecipient'))!
+    expect(burn.params.find((r) => r.field === 'mintRecipient')).toMatchObject({ condition: 'EQUAL', ref: BigInt(remote.address) })
+    // And it is the word the owner signs over: the Safe transaction carries the recipient (as a policy parameter).
+    expect(held.tx.data.toLowerCase()).toContain(pad(remote.address, { size: 32 }).slice(2).toLowerCase())
+    // The summary names the Safe and the move of savings to it.
+    expect(t.summary.join('\n')).toContain(remote.address)
+  })
+
+  test('no Monad operator configured, or one that gives no key: 503 REMOTE_UNAVAILABLE and nothing is prepared', async () => {
+    for (const p of [undefined, fakePeer({ provision: { state: 'pending', code: 'X' }, keyFails: true })]) {
+      const w = world(0n, cfg6(p?.peer))
+      running(w, v5)
+      ready(w)
+      chain(w, 7n)
+      const { out } = await quiet(() => w.op.prepareRenew(ctx).catch((e: unknown) => e))
+      expect(out).toBeInstanceOf(HttpError)
+      expect(out).toMatchObject({ status: 503, code: 'REMOTE_UNAVAILABLE' })
+      expect(priv(w.op).prepared.size).toBe(0)
+      expect(w.sent).toEqual([])
+    }
+    // A fresh Start on v6 is refused the same way.
+    const w = world(0n, { policy: v6, ...cfg6() })
+    w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
+    chain(w, 0n)
+    const { out } = await quiet(() => w.op.prepareActivate(ctx).catch((e: unknown) => e))
+    expect(out).toMatchObject({ status: 503, code: 'REMOTE_UNAVAILABLE' })
+    expect(priv(w.op).prepared.size).toBe(0)
+  })
+
+  test('a v6 account that already has its remote Safe re-derives it instead of asking the Monad operator again', async () => {
+    const p = fakePeer()
+    const w = world(0n, cfg6(p.peer))
+    const a = running(w, v6)
+    ready(w)
+    chain(w, 7n)
+    const first = await w.op.prepareRenew(ctx)
+    a.remote = { chainId: 143, address: first.remote!.address as never, spec: first.remote!.spec, permissionIds: [] }
+    p.keyAsked.length = 0
+    const second = await w.op.prepareRenew(ctx)
+    expect(p.keyAsked).toEqual([])
+    expect(second.remote!.address).toBe(first.remote!.address)
+    // A stored address that is not what the keys give is never signed over.
+    a.remote = { ...a.remote, address: `0x${'ab'.repeat(20)}` as never }
+    const { out } = await quiet(() => w.op.prepareRenew(ctx).catch((e: unknown) => e))
+    expect(String((out as Error).message)).toContain('is not what its keys give')
+  })
+
+  test('extension: a v6 account missing only bridge-out gets just that session, with the gate and the same remote Safe', async () => {
+    const p = fakePeer()
+    const w = world(0n, cfg6(p.peer))
     running(w, v6, (n) => n !== 'bridge-out')
     ready(w)
     chain(w, 7n)
@@ -232,14 +355,14 @@ describe('owner transactions of a v6 approval', () => {
     const held = priv(w.op).prepared.get(t.prepareId)!
     expect(held.grants!.map((g) => g.name)).toEqual(['bridge-out'])
     const [s] = sessionsOf(held.tx)
-    expect([...s!.action]).toContain(GATE)
-    expect(s!.action.has(V2)).toBe(false)
+    expect(s!.action).toEqual(new Set([UNI, GATE]))
     expect(s!.userOp.has(GAS)).toBe(true)
+    expect(t.remote!.address).toBe(remoteSafe(remoteInput(ctx, t.remote!.spec, pinnedV3)).address)
   })
 
   test('a v6 renewal without a configured gate cannot be built', async () => {
     const noGate = { ...v6, actionPolicy: { ...v6.actionPolicy!, pauseGate: undefined } }
-    const w = world(0n, { v4Policy: v4, v5Policy: v5, v6Policy: noGate, opsFlags: () => ({ multichain_v6: true }), opsScopedFlags: () => ({ multichain_v6: null }) })
+    const w = world(0n, cfg6(fakePeer().peer, { v6Policy: noGate }))
     running(w, v5)
     ready(w)
     chain(w, 7n)
@@ -249,8 +372,9 @@ describe('owner transactions of a v6 approval', () => {
 
 // Boot refuses v6 as the default policy (assertBootPolicies, review of PR #141): this checks only the encoding.
 describe('a fresh activation on v6 (default policy)', () => {
-  test('Start enables the bridge-out grant with the gate and the others with V2, and names the Monad share', async () => {
-    const w = world(0n, { policy: v6, v4Policy: v4, v5Policy: v5, v6Policy: v6 })
+  test('Start enables the stables, balance, cbBTC exit-only and bridge-out grants in one transaction, and names the remote Safe', async () => {
+    const p = fakePeer()
+    const w = world(0n, { policy: v6, ...cfg6(p.peer) })
     w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
     chain(w, 0n)
     const t = await w.op.prepareActivate(ctx).catch((e) => {
@@ -258,14 +382,95 @@ describe('a fresh activation on v6 (default policy)', () => {
       throw e
     })
     const held = priv(w.op).prepared.get(t.prepareId)!
-    const names = held.grants!.map((g) => g.name)
     const sessions = sessionsOf(held.tx)
-    expect(sessions).toHaveLength(names.length)
+    const names = held.grants!.map((g) => g.name)
+    expect(names).toEqual(['manage-any:pool:USDC/USDT/100', 'manage-any:pool:WETH/USDC/3000', 'manage-any:pool:USDC/cbBTC/500', 'bridge-out'])
     names.forEach((name, i) => {
       expect(sessions[i]!.userOp.has(GAS)).toBe(true)
-      expect(sessions[i]!.action.has(name === 'bridge-out' ? GATE : V2)).toBe(true)
-      expect(sessions[i]!.action.has(name === 'bridge-out' ? V2 : GATE)).toBe(false)
+      if (name === 'bridge-out') expect(sessions[i]!.action).toEqual(new Set([UNI, GATE]))
+      else for (const policies of sessions[i]!.perAction) expect(policies).toEqual([V3])
     })
-    expect(t.summary.join('\n')).toContain('Growth on Monad')
+    expect(t.remote!.address).toBe(remoteSafe(remoteInput(ctx, t.remote!.spec, pinnedV3)).address)
+    expect(t.summary.join('\n')).toContain(t.remote!.address)
+  })
+})
+
+describe('after a confirmed v6 approval the account\'s own Safe on Monad is provisioned', () => {
+  const settle = () => new Promise((r) => setTimeout(r, 10))
+
+  /** A Start on v6 prepared and signed; returns the world, the peer and what the owner was shown. */
+  async function started(answer: Parameters<typeof fakePeer>[0]) {
+    const p = fakePeer(answer)
+    // Funded, so the Start is not armed to wait for a deposit.
+    const w = world(10_000_000n, { policy: v6, ...cfg6(p.peer) })
+    w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
+    chain(w, 0n)
+    const t = await w.op.prepareActivate(ctx)
+    return { w, p, t }
+  }
+  const confirm = async (w: ReturnType<typeof world>, t: Awaited<ReturnType<Operator['prepareActivate']>>) => {
+    await quiet(() => w.op.submit(ctx, 'activate', sign(t)))
+    await settle()
+  }
+
+  test('nothing is recorded or provisioned before the approval lands', async () => {
+    const { w, p, t } = await started(undefined)
+    expect(w.state.accounts.k!.remote).toBeUndefined()
+    expect(p.provisioned).toEqual([])
+    expect(t.remote).toBeDefined()
+  })
+
+  test('the Monad operator is asked with the remote Safe\'s own context; ready flips when it answers active', async () => {
+    const { w, p, t } = await started(undefined)
+    await confirm(w, t)
+    const acc = w.state.accounts.k!
+    expect(acc.active).toBe(true)
+    expect(acc.remote).toMatchObject({ chainId: 143, address: t.remote!.address, spec: t.remote!.spec, ready: true })
+    expect(acc.remote!.permissionIds.length).toBe(remoteSafe(remoteInput(ctx, t.remote!.spec, pinnedV3)).permissionIds.length)
+    expect(p.provisioned).toHaveLength(1)
+    const c = p.provisioned[0]!
+    expect(c).toMatchObject({ accountKey: `${ctx.accountKey}@143`, chainId: 143, address: t.remote!.address, remote: t.remote!.spec, owners: ctx.owners, saltNonce: ctx.saltNonce })
+    expect(c.passkey).toEqual(ctx.passkey)
+    // Once ready it is not asked again, and the funding view carries it.
+    await w.op.tickRemotes()
+    expect(p.provisioned).toHaveLength(1)
+  })
+
+  test('a pending answer keeps it not ready, and tickRemotes asks again until the Monad operator says active', async () => {
+    const { w, p, t } = await started({ provision: { state: 'pending', code: 'REMOTE_SAFE_UNVERIFIED' } })
+    await quiet(async () => {
+      await confirm(w, t)
+      const acc = w.state.accounts.k!
+      expect(acc.remote).toMatchObject({ address: t.remote!.address, ready: false, lastCode: 'REMOTE_SAFE_UNVERIFIED' })
+      expect(p.provisioned).toHaveLength(1)
+      await w.op.tickRemotes()
+      expect(p.provisioned).toHaveLength(2)
+      expect(acc.remote!.ready).toBe(false)
+      p.answer.provision = { state: 'active', address: SESSION_KEY }
+      await w.op.tickRemotes()
+      expect(p.provisioned).toHaveLength(3)
+      expect(acc.remote).toMatchObject({ ready: true, lastCode: undefined })
+    })
+  })
+
+  test('a Monad operator that provisions another address than the committed one is never taken as ready', async () => {
+    const { w, p, t } = await started({ provision: { state: 'pending', code: 'X' } })
+    p.peer.provision = async (c) => {
+      p.provisioned.push(c)
+      return { state: 'active', address: `0x${'ab'.repeat(20)}` as Address }
+    }
+    await quiet(async () => {
+      await confirm(w, t)
+      expect(w.state.accounts.k!.remote!.ready).not.toBe(true)
+    })
+  })
+
+  test('the funding view of an account with a remote Safe carries it, ready or not', async () => {
+    const { w, t } = await started({ provision: { state: 'pending', code: 'X' } })
+    await quiet(async () => {
+      await confirm(w, t)
+      const view = await w.op.funding(ctx)
+      expect(view.remote).toEqual({ chainId: 143, address: t.remote!.address, spec: t.remote!.spec, ready: false })
+    })
   })
 })

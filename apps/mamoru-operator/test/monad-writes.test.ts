@@ -9,8 +9,10 @@ import { join } from 'node:path'
 import { decodeFunctionData, toHex } from 'viem'
 import { chainWritesOptIn, liveChainAllowed, ReasonError } from '@mamoru/domain'
 import { address, baseRegistry, erc20Abi, monadRegistry } from '@mamoru/registry'
-import { assertPolicyChain, labWmonUsdcMonadV1, liveWmonUsdcMonadV1, POLICIES, instantiateGrant } from '@mamoru/policy'
+import { assertPolicyChain, labWmonUsdcMonadV1, liveWmonUsdcMonadV6, POLICIES, instantiateGrant } from '@mamoru/policy'
 import { activationBatch, liveAccountFromContext, stopBatch, transferBatch } from '@mamoru/account/live'
+import { monadV6Deployed } from '@mamoru/account/remote'
+import { withPinnedV3 } from '../../../packages/account/remote/fixture.ts'
 import { toSmartSession } from '@mamoru/account/sessions'
 import { liveSigningAllowed } from '@mamoru/journal'
 import { LAB_GAS_LIMITS, TIGHT_CALL_GAS, tightUserOpGas } from '@mamoru/scenarios/driver/engine.ts'
@@ -77,24 +79,30 @@ describe('MAMORU_CHAIN_WRITES', () => {
   })
 })
 
+// otto/mamoru#251: the only Monad mainnet policy is the account's own Safe's (live-wmon-usdc-monad-v6), wired to the
+// contracts the Monad registry pins; the registry here is monad.json plus MamoruActionPolicyV3 at its predicted address.
 describe('the Monad mainnet policy', () => {
+  const monadV6 = monadV6Deployed(withPinnedV3())
+
   test('resolves only for an operator writing to Monad', () => {
-    expect(resolveNamedPolicy('live-wmon-usdc-monad-v1', {})).toBeUndefined()
-    expect(resolveNamedPolicy('live-wmon-usdc-monad-v1', {}, { chainWrites: true })).toBe(liveWmonUsdcMonadV1)
-    expect(Object.keys(POLICIES)).not.toContain(liveWmonUsdcMonadV1.policyId)
+    expect(resolveNamedPolicy('live-wmon-usdc-monad-v6', {})).toBeUndefined()
+    expect(resolveNamedPolicy('live-wmon-usdc-monad-v6', {}, { chainWrites: true, registry: withPinnedV3() })).toEqual(monadV6)
+    expect(Object.keys(POLICIES)).not.toContain(liveWmonUsdcMonadV6.policyId)
+    // The sleeve policies of v1 and v5 are gone: nothing resolves them any more, flag or not.
+    for (const id of ['live-wmon-usdc-monad-v1', 'live-wmon-usdc-monad-v5', 'lab-wmon-usdc-monad-v5']) expect(resolveNamedPolicy(id, {}, { chainWrites: true, registry: withPinnedV3() })).toBeUndefined()
   })
 
   test('signs on chain 143 only; the lab policy never does', () => {
-    expect(() => assertPolicyChain(liveWmonUsdcMonadV1, 143)).not.toThrow()
-    for (const id of [8453, 10143, 314143, 31337]) expect(code(() => assertPolicyChain(liveWmonUsdcMonadV1, id))).toBe('SIGN_CHAIN_NOT_ALLOWED')
+    expect(() => assertPolicyChain(monadV6, 143)).not.toThrow()
+    for (const id of [8453, 10143, 314143, 31337]) expect(code(() => assertPolicyChain(monadV6, id))).toBe('SIGN_CHAIN_NOT_ALLOWED')
     expect(code(() => assertPolicyChain(labWmonUsdcMonadV1, 143))).toBe('SIGN_CHAIN_NOT_ALLOWED')
-    expect(() => assertWritePolicy(liveWmonUsdcMonadV1, monadRegistry, 143)).not.toThrow()
+    expect(() => assertWritePolicy(monadV6, monadRegistry, 143)).not.toThrow()
     expect(() => assertWritePolicy(labWmonUsdcMonadV1, monadRegistry, 143)).toThrow()
     expect(() => assertWritePolicy(POLICIES['conservador-live-v2']!, monadRegistry, 143)).toThrow('not monad')
   })
 
   test('its gas reserve is in MON and its native price pool is WMON/USDC', () => {
-    expect(liveWmonUsdcMonadV1.gasReserveWei).toBe(2n * 10n ** 18n)
+    expect(liveWmonUsdcMonadV6.gasReserveWei).toBe(2n * 10n ** 18n)
     expect(nativePricePool(monadRegistry)).toBe('pool:WMON/USDC/3000')
     expect(nativePricePool(baseRegistry)).toBe('pool:WETH/USDC/3000')
   })
@@ -144,12 +152,13 @@ describe('the builders read the chain registry; Base output is unchanged', () =>
     expect(code(() => stopBatch({ account: live.safe, permissionIds: [], positions: [], swapCbbtc: { amountIn: 1n, amountOutMinimum: 1n }, deadline: 1n, registry: monadRegistry }))).toBe('POLICY_TARGET_NOT_IN_REGISTRY')
   })
 
-  test('sessions on Monad need TimeFramePolicy in the registry: refused on monad.json as pinned', () => {
-    const g = instantiateGrant(liveWmonUsdcMonadV1, 'enter-swap', { account: live.safe, sessionKey: live.safe, chainId: 143, salt: toHex(1n, { size: 32 }), validAfter: 1, validUntil: 2, caps: { usdcSwapPerCall: 1n, usdcSwapTotal: 2n } })
-    expect(code(() => toSmartSession(g, undefined, monadRegistry))).toBe('POLICY_TARGET_NOT_IN_REGISTRY')
-    const withPolicies = { ...monadRegistry, entries: [...monadRegistry.entries, ...baseRegistry.entries.filter((e) => e.name === 'TimeFramePolicy' || e.name === 'UsageLimitPolicy')] }
-    expect(toSmartSession(g, undefined, withPolicies)).toEqual(toSmartSession(g))
-    expect(activationBatch({ ...onMonad, registry: withPolicies }, [g], []).calls).toEqual(activationBatch(live, [g], []).calls)
+  test('sessions on Monad need TimeFramePolicy in the registry: encoded with the pins monad.json has, refused without them', () => {
+    const g = instantiateGrant({ ...labWmonUsdcMonadV1, chain: 'monad' }, 'enter-swap', { account: live.safe, sessionKey: live.safe, chainId: 143, salt: toHex(1n, { size: 32 }), validAfter: 1, validUntil: 2, caps: { usdcSwapPerCall: 1n, usdcSwapTotal: 2n } })
+    // monad.json pins both (same address and code hash as Base, otto/mamoru#251): the session is Base's, byte for byte.
+    expect(toSmartSession(g, undefined, monadRegistry)).toEqual(toSmartSession(g))
+    const without = { ...monadRegistry, entries: monadRegistry.entries.filter((e) => e.name !== 'TimeFramePolicy' && e.name !== 'UsageLimitPolicy') }
+    expect(code(() => toSmartSession(g, undefined, without))).toBe('POLICY_TARGET_NOT_IN_REGISTRY')
+    expect(activationBatch({ ...onMonad, registry: monadRegistry }, [g], []).calls).toEqual(activationBatch(live, [g], []).calls)
   })
 })
 
@@ -208,7 +217,7 @@ describe('boot on chain 143', () => {
     const saved = { ...process.env }
     delete process.env.MAMORU_CHAIN_WRITES
     try {
-      await expect(bootOperator({ rpcUrl, secret, stateDir: mkdtempSync(join(tmpdir(), 'mamoru-143-nopolicy-')), port: 0, policyId: 'live-wmon-usdc-monad-v1' })).rejects.toThrow('unknown policy')
+      await expect(bootOperator({ rpcUrl, secret, stateDir: mkdtempSync(join(tmpdir(), 'mamoru-143-nopolicy-')), port: 0, policyId: 'live-wmon-usdc-monad-v6' })).rejects.toThrow('unknown policy')
     } finally {
       process.env = saved
     }
@@ -222,7 +231,7 @@ describe('boot on chain 143', () => {
     let op: Awaited<ReturnType<typeof bootOperator>> | null = null
     try {
       // The Monad mainnet policy does not resolve: writes are not on.
-      await expect(bootOperator({ rpcUrl, secret, stateDir: mkdtempSync(join(tmpdir(), 'mamoru-143-flag-nolive-p-')), port: 0, policyId: 'live-wmon-usdc-monad-v1' })).rejects.toThrow('unknown policy')
+      await expect(bootOperator({ rpcUrl, secret, stateDir: mkdtempSync(join(tmpdir(), 'mamoru-143-flag-nolive-p-')), port: 0, policyId: 'live-wmon-usdc-monad-v6' })).rejects.toThrow('unknown policy')
       op = await bootOperator({ rpcUrl, secret, stateDir: mkdtempSync(join(tmpdir(), 'mamoru-143-flag-nolive-')), port: 0, policyId: 'lab-wmon-usdc-monad-v1' })
     } finally {
       process.env = saved
@@ -264,13 +273,14 @@ describe('boot on chain 143', () => {
     expect(monadSponsor({ perAccount: -1, stopsPerAccount: 1.5, weiPerDay: -1n, reserveBps: 20_000 }).perAccount).toBe(MONAD_SPONSOR.perAccount)
   })
 
-  test('flag on, but the session policies are not on the chain: the boot is refused, nothing sent', async () => {
+  test('flag on, but the pinned session policies have no code on the chain: the boot is refused, nothing sent', async () => {
     const saved = { ...process.env }
     process.env.MAMORU_LIVE = '1'
     process.env.MAMORU_CHAIN_WRITES = '143'
     try {
-      const e = (await bootOperator({ rpcUrl, secret, stateDir: mkdtempSync(join(tmpdir(), 'mamoru-143-on-')), port: 0, policyId: 'live-wmon-usdc-monad-v1' }).catch((x: unknown) => x)) as { code?: string }
-      expect(e.code).toBe('SESSION_POLICY_UNAVAILABLE_ON_CHAIN')
+      const e = (await bootOperator({ rpcUrl, secret, stateDir: mkdtempSync(join(tmpdir(), 'mamoru-143-on-')), port: 0, policyId: 'live-wmon-usdc-monad-v6' }).catch((x: unknown) => x)) as { code?: string }
+      // monad.json pins TimeFramePolicy and UsageLimitPolicy now, so the first refusal is their missing code (writeRegistry step 3).
+      expect(e.code).toBe('LAB_REGISTRY_CODE_MISMATCH')
     } finally {
       process.env = saved
     }

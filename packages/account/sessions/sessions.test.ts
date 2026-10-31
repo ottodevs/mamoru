@@ -238,7 +238,7 @@ describe('otto/mamoru#213: bridge-out takes MamoruPauseGate and MamoruGasPolicy,
   const P = '0x00000000000000000000000000000000000000fb' as const
   const d = { actionPolicy: A, gasPolicy: G, gasCaps: V4_GAS_CAPS, pauseGate: P }
   const caps = computeCaps(conservadorLiveV6, 10_000n * 1_000_000n, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
-  const bridge = instantiateGrant(conservadorLiveV6, 'bridge-out', { ...v4Ctx, caps })
+  const bridge = instantiateGrant(conservadorLiveV6, 'bridge-out', { ...v4Ctx, caps, remoteAccount: '0x00000000000000000000000000000000000000ee' })
   const gas = { policy: G, initData: encodeGasCaps(V4_GAS_CAPS) }
 
   test('encoded with the gas policy as a userOp policy and the pause gate after UniActionPolicy on every action', () => {
@@ -265,11 +265,12 @@ describe('otto/mamoru#213: bridge-out takes MamoruPauseGate and MamoruGasPolicy,
     expect(() => toSmartSession({ ...unflagged, requiresGasPolicy: true } as unknown as SessionGrant)).toThrow('retired')
   })
 
-  test('the exit-only USDC/cbBTC grant encodes end to end with MamoruActionPolicy and the gas policy', () => {
+  test('the exit-only USDC/cbBTC grant encodes end to end with MamoruActionPolicy alone (#251) and the gas policy', () => {
     const exit = retargetToPolicy(instantiateGrant(conservadorLiveV6, 'manage-any:pool:USDC/cbBTC/500', { ...v4Ctx, caps }), A)
     const s = toSmartSession(exit, v4PoliciesFor([exit], d, 1n, v4BudgetCaps(conservadorLiveV6, 10_000n * 1_000_000n))(exit, 0))
     expect(s.actions).toHaveLength(6)
-    for (const a of s.actions) expect(a.actionPolicies.map((x) => x.policy.toLowerCase())).toEqual([address('UniActionPolicy', baseRegistry).toLowerCase(), A])
+    for (const a of s.actions) expect(a.actionPolicies.map((x) => x.policy.toLowerCase())).toEqual([A])
+    expect(s.userOpPolicies.map((x) => x.policy.toLowerCase())).toContain(G)
   })
 
   test('any CCTP burn entry point or call to TokenMessengerV2 without the flag is refused', () => {

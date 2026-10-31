@@ -51,3 +51,32 @@ describe('bridge-out and eth-convert routes (#133, #211)', () => {
     })
   }
 })
+
+// otto/mamoru#251: the Base operator reaches the Monad operator's remote-key and provision routes (remote-peer.ts), signed
+// like the Worker's requests.
+describe('remote-key and provision routes (#251)', () => {
+  test('both reach the operator with the context of the request', async () => {
+    const seen: string[] = []
+    const op = {
+      remoteKey: (c: AccountContext) => (seen.push(`key:${c.accountKey}`), { sessionKey: '0x00000000000000000000000000000000000000aa' }),
+      provision: async (c: AccountContext) => (seen.push(`provision:${c.accountKey}`), { state: 'active', address: c.address }),
+    } as unknown as Operator
+    const server = startServer(op, { secret: SECRET, hostname: '127.0.0.1', port: 0, rpcMetrics: { snapshot: () => ({ cumulative: {}, cuEstimateTotal: 0, last48h: [] }) } as never, gitSha: 'abc', bootedAt: Date.now(), bridgeOut: null })
+    const base = `http://127.0.0.1:${server.port}`
+    try {
+      const key = await call(base, 'POST', '/api/accounts/acc-1/remote-key', '{}')
+      expect(key.status).toBe(200)
+      expect(await key.json()).toEqual({ sessionKey: '0x00000000000000000000000000000000000000aa' })
+      const prov = await call(base, 'POST', '/api/accounts/acc-1/provision', '{}')
+      expect(prov.status).toBe(200)
+      expect(await prov.json()).toEqual({ state: 'active', address: CTX.address })
+      expect(seen).toEqual(['key:acc-1', 'provision:acc-1'])
+      // Unsigned: refused before the operator is reached.
+      const bad = await fetch(`${base}/api/accounts/acc-1/provision`, { method: 'POST', headers: { 'x-mamoru-account': header, 'x-mamoru-ts': '1', 'x-mamoru-sig': 'nope' }, body: '{}' })
+      expect(bad.status).toBeGreaterThanOrEqual(400)
+      expect(seen).toHaveLength(2)
+    } finally {
+      server.stop(true)
+    }
+  })
+})

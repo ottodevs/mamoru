@@ -4,9 +4,9 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { concat, encodeAbiParameters, encodeEventTopics, keccak256, pad, parseAbiItem, toHex, zeroHash, type Hex, type Log, type PublicClient } from 'viem'
+import { concat, encodeAbiParameters, encodeEventTopics, encodeFunctionResult, keccak256, pad, parseAbiItem, toHex, zeroHash, type Hex, type Log, type PublicClient } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { address, baseRegistry, entry, messageTransmitterV2Abi, monadRegistry, tokenMessengerV2Abi } from '@mamoru/registry'
+import { address, baseRegistry, entry, messageTransmitterV2Abi, monadRegistry, tokenMessengerV2Abi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import type { BridgeSigning } from '@mamoru/scenarios/driver/engine.ts'
 import { afterAll } from 'bun:test'
@@ -14,6 +14,7 @@ import { BASE_USDC, BRIDGE_FAIL_COOLDOWN_MS, burnOf, inFlightOf, MONAD_MINT_PEND
 import { Relayer } from '../src/relayer.ts'
 import { cctpMessageKey, MESSAGE_TRANSMITTER_V2, TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
 import type { SafeRead } from '../src/chain.ts'
+import { answerAggregate3 } from './fake-multicall.ts'
 
 const ACCOUNT = '0x00000000000000000000000000000000000000aa' as const
 const OTHER = '0x00000000000000000000000000000000000000cc' as const
@@ -649,5 +650,63 @@ describe('review round 2 of #144 (GPT-6 Sol)', () => {
     await restarted.bridge.tick()
     expect(restarted.j().burns[UOP]!.state).toBe('burned')
     expect((await restarted.bridge.remote('acc-1', ACCOUNT, 7_000)).ready).toBe(true)
+  })
+})
+
+// otto/mamoru#251: the bridge sends nothing to the account's own Safe on Monad until it can use it: deployed, SmartSession
+// installed, and every session its approval committed to (`permissionIds`) enabled on it.
+describe('the remote Safe is ready only when every committed session is enabled (otto/mamoru#251)', () => {
+  const WINDOW = 1_800
+  const IDS = [`0x${'a1'.repeat(32)}`, `0x${'a2'.repeat(32)}`] as Hex[]
+  const word = (v: bigint) => pad(toHex(v), { size: 32 })
+
+  /** A Monad that holds the Safe (deployed or not) with nothing in it; `module` and `enabled` say what is installed on it. */
+  function monadSafe(o: { deployed?: boolean; module?: boolean; enabled?: Hex[] } = {}) {
+    const asked: { fn: string; id?: string }[] = []
+    const client = {
+      getCode: async () => (o.deployed === false ? undefined : '0x01'),
+      getBalance: async () => 10n ** 18n,
+      readContract: async ({ functionName, args }: { functionName: string; args?: readonly unknown[] }) => {
+        asked.push({ fn: functionName, id: String(args?.[0]) })
+        if (functionName === 'isModuleInstalled') return o.module !== false
+        if (functionName === 'isPermissionEnabled') return (o.enabled ?? IDS).some((i) => i.toLowerCase() === String(args![0]).toLowerCase())
+        throw new Error(functionName)
+      },
+      call: async ({ data }: { data: Hex }) => ({
+        data: answerAggregate3(data, (_target, callData) => {
+          if (callData.startsWith('0x70a08231')) return word(0n)
+          if (callData.startsWith('0x4d2301cc')) return word(10n ** 18n)
+          if (callData.startsWith('0x42cbb15c')) return word(7_000n)
+          if (callData.startsWith('0x3850c7bd')) return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [sqrtRatioAtTick(0), 0, 0, 0, 0, 0, true] })
+          throw new Error('execution reverted')
+        }),
+      }),
+    } as unknown as PublicClient
+    return { client, asked }
+  }
+  const bridgeOn = (client: PublicClient) => new MonadBridge(mkdtempSync(join(tmpdir(), 'mamoru-bridge-monad-')), baseClient({ safe: 900n }), client, null, fetch, () => T0, baseRegistry, monadRegistry)
+
+  test('every permission enabled: ready', async () => {
+    const m = monadSafe()
+    expect(await bridgeOn(m.client).remote('acc-1', MONAD_SAFE, WINDOW, undefined, IDS)).toMatchObject({ value: 0n, ready: true })
+    expect(m.asked.filter((a) => a.fn === 'isPermissionEnabled').map((a) => a.id)).toEqual(IDS)
+  })
+
+  test('any permission not enabled: not ready', async () => {
+    for (const enabled of [[IDS[0]!], [IDS[1]!], []]) {
+      expect((await bridgeOn(monadSafe({ enabled }).client).remote('acc-1', MONAD_SAFE, WINDOW, undefined, IDS)).ready).toBe(false)
+    }
+  })
+
+  test('SmartSession not installed, or the Safe not deployed: not ready, and no permission is asked', async () => {
+    const noModule = monadSafe({ module: false })
+    expect((await bridgeOn(noModule.client).remote('acc-1', MONAD_SAFE, WINDOW, undefined, IDS)).ready).toBe(false)
+    expect(noModule.asked.some((a) => a.fn === 'isPermissionEnabled')).toBe(false)
+    expect((await bridgeOn(monadSafe({ deployed: false }).client).remote('acc-1', MONAD_SAFE, WINDOW, undefined, IDS)).ready).toBe(false)
+  })
+
+  test('no permission ids given (a record from before the approval named them): never ready', async () => {
+    expect((await bridgeOn(monadSafe().client).remote('acc-1', MONAD_SAFE, WINDOW)).ready).toBe(false)
+    expect((await bridgeOn(monadSafe().client).remote('acc-1', MONAD_SAFE, WINDOW, undefined, [])).ready).toBe(false)
   })
 })
