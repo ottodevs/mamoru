@@ -1197,6 +1197,9 @@ export class Operator {
    */
   async exposureFor(address: Address): Promise<ExposureWire> {
     const safe = getAddress(address)
+    // otto/mamoru#250: PeerExposure.check() probes with the zero address, which is no Safe and holds nothing; reading
+    // it reverts (the position manager is ERC-721: balanceOf(0) reverts). The block read still proves this chain's RPC.
+    if (/^0x0{40}$/.test(safe)) return { chainId: this.cfg.chainId, address: safe.toLowerCase(), block: (await this.client.getBlockNumber()).toString(), idleUsdc: '0', placedUsdc: '0', active: false }
     const acc = Object.values(this.store.state.accounts).find((a) => a.ctx.address.toLowerCase() === safe.toLowerCase())
     // A read at most FUNDING_FRESH_READ_MS old: the caller's own cache age then bounds how old the balances are.
     const r = acc ? await this.readSafeCached(acc, safe, true) : await readSafe(this.client, safe, this.cfg.registry)
