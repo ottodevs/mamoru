@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PoolStatsCache, parseGeckoOhlcv, parseGeckoPool, parseLlamaChart } from '../src/pool-stats.ts'
@@ -211,6 +211,34 @@ describe('PoolStatsCache', () => {
     const s = c.get()[P.name]!
     expect(s.volume7dUsd).toBeNull()
     expect(s.volumeLastDayUsd).not.toBeNull()
+  })
+
+  test('own TVL series: 5 min retries add no samples, so the cap never evicts the 30d history', async () => {
+    let t = NOW
+    const good = fetcher()
+    const c = new PoolStatsCache([P], {
+      fetch: (u, i) => (u.endsWith('/ohlcv/day?limit=29') ? Promise.resolve({ ok: false, status: 429, json: async () => ({}) }) : good.f(u, i)),
+      now: () => t,
+      gapMs: 0,
+      retryMs: 300_000,
+    })
+    await c.settled()
+    for (let k = 0; k < 12 * 24 * 31; k++) {
+      t += 300_000
+      await c.settled()
+    }
+    const s = c.get()[P.name]!
+    expect(s.tvl30dAgoUsd).toBeGreaterThan(0)
+    expect(s.tvl7dAgoUsd).toBeGreaterThan(0)
+  })
+
+  test('state file: a malformed part is dropped on load, never thrown in get()', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pool-stats-'))
+    const stateFile = join(dir, 'pool-stats.json')
+    writeFileSync(stateFile, JSON.stringify({ cache: { [P.name]: { vols: { at: NOW, part: null }, llama: { at: NOW, part: { tvl1dAgoUsd: 'x' } }, own: [{ t: 1, v: 'y' }] } }, lastTry: { [P.name]: NOW } }))
+    const c = new PoolStatsCache([P], { fetch: fetcher().f, now: () => NOW + 60_000, gapMs: 0, stateFile })
+    expect(() => c.get()).not.toThrow()
+    expect(c.get()[P.name]).toMatchObject({ volume7dUsd: null, tvl1dAgoUsd: null })
   })
 
   test('a timeout keeps the last good value and never throws', async () => {

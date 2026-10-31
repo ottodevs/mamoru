@@ -28,6 +28,8 @@ const OWN_KEEP_S = 31 * DAY
 const OWN_MAX = 1_000
 /** An own sample counts for "N days ago" within 2 h of the target (they are hourly). */
 const OWN_TOL_S = 2 * 3_600
+/** At most one own sample per this spacing: the 5 min retries must not evict the hourly history from the cap. */
+const OWN_SPACING_S = 50 * 60
 
 const num = (v: unknown): number | null => {
   const n = typeof v === 'string' ? Number(v) : v
@@ -185,7 +187,9 @@ export class PoolStatsCache {
       const tvlUsd = pool === undefined ? null : parseGeckoPool(pool)
       if (tvlUsd !== null) {
         entryOf.tvl = { at: now, part: tvlUsd }
-        entryOf.own = [...(entryOf.own ?? []).filter((x) => x.t > nowSec - OWN_KEEP_S), { t: nowSec, v: tvlUsd }].slice(-OWN_MAX)
+        const kept = (entryOf.own ?? []).filter((x) => x.t > nowSec - OWN_KEEP_S)
+        const last = kept[kept.length - 1]
+        entryOf.own = (last && nowSec - last.t < OWN_SPACING_S ? kept : [...kept, { t: nowSec, v: tvlUsd }]).slice(-OWN_MAX)
       }
       // A payload that arrived is the truth now, gaps included (its missing fields are unread): never older values.
       if (ohlcv !== undefined) entryOf.vols = { at: now, part: parseGeckoOhlcv(ohlcv, nowSec) }
@@ -222,14 +226,16 @@ export class PoolStatsCache {
       }
       const raw = JSON.parse(readFileSync(this.stateFile, 'utf8')) as { cache?: Record<string, PoolCache>; lastTry?: Record<string, number> }
       const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+      // Every field a number or null: a malformed part would throw in get().
+      const partOk = (x: unknown, keys: readonly string[]): boolean => !!x && typeof x === 'object' && keys.every((k) => (x as Record<string, unknown>)[k] === null || fin((x as Record<string, unknown>)[k]))
       for (const p of this.pools) {
         const c = raw.cache?.[p.name]
         if (c && typeof c === 'object') {
           const own = Array.isArray(c.own) ? c.own.filter((x) => fin(x?.t) && fin(x?.v) && x.v >= 0).slice(-OWN_MAX) : []
           this.cache.set(p.name, {
-            ...(c.llama && fin(c.llama.at) ? { llama: c.llama } : {}),
+            ...(c.llama && fin(c.llama.at) && partOk(c.llama.part, ['tvl1dAgoUsd', 'tvl7dAgoUsd', 'tvl30dAgoUsd']) ? { llama: c.llama } : {}),
             ...(c.tvl && fin(c.tvl.at) && fin(c.tvl.part) ? { tvl: c.tvl } : {}),
-            ...(c.vols && fin(c.vols.at) ? { vols: c.vols } : {}),
+            ...(c.vols && fin(c.vols.at) && partOk(c.vols.part, ['volume7dUsd', 'volumeLastDayUsd', 'volume28dAvgUsd']) ? { vols: c.vols } : {}),
             ...(own.length ? { own } : {}),
           })
         }
