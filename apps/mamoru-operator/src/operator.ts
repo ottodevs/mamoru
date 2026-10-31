@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
-import { address, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
+import { address, baseRegistry, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, safeAbi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
@@ -725,7 +725,7 @@ export class Operator {
   /** Pool state of the last few blocks: accounts reviewed at the same block read it once. */
   private readonly poolCache = poolStateCache()
   /** otto/mamoru#101 (shadow): hourly off-chain pool stats (TVL change, volume); only read for a policy that lists packaging:tvl. */
-  private readonly poolStats: PoolStatsCache
+  private readonly poolStats: PoolStatsCache | undefined
   /**
    * #172: guard history of lazy accounts, read once per pool per minute for every engine (see `SharedGuardReads`),
    * with the fee history and fallback series the cost test needs, restored from and saved to `cfg.guardReadsState`.
@@ -748,7 +748,8 @@ export class Operator {
     const saved = cfg.guardReadsState
     const restored = saved?.load()
     this.guardReads = new SharedGuardReads({ fees: restored?.fees, series: restored?.series, onUpdate: saved ? (s) => saved.update(s) : undefined })
-    this.poolStats = livePoolStats(cfg.poolStatsStateFile)
+    // The sources know only the Base pools: another chain gets no stats (no fetches, no "unread" lines for its pools).
+    this.poolStats = cfg.registry?.chainId === baseRegistry.chainId ? livePoolStats(cfg.poolStatsStateFile) : undefined
   }
 
   /** GET /metrics: accounts known / active / armed. */
@@ -5042,7 +5043,7 @@ export class Operator {
         // The only owner intent the operator has today: a stop on its way pauses the engine (US6).
         intents: () => ({ paused: this.stopInFlight(acc), exitRequested: false }),
         peerPositions: () => this.peerPositionsOf(acc.accountKey),
-        poolStats: () => this.poolStats.get(),
+        ...(this.poolStats ? { poolStats: () => this.poolStats!.get() } : {}),
         onEntering: (pool) => this.markEntering(acc, pool),
         // otto/mamoru#212: new money is placed only within the cap, counted across chains.
         cap: () => this.engineCap(acc),
