@@ -446,10 +446,12 @@ describe('after a confirmed v6 approval the account\'s own Safe on Monad is prov
     const seen: (readonly Hex[] | undefined)[] = []
     const o = w.op as unknown as { cfg: { bridgeMonad?: unknown }; remoteOf(a: AccountState): { remote?: (b: bigint) => Promise<unknown> } }
     o.cfg.bridgeMonad = { remote: async (...a: unknown[]) => (seen.push(a[4] as readonly Hex[]), { value: 0n, inFlight: 0n, ready: true }) }
-    await o.remoteOf(acc).remote!(1n)
+    // One engine's `remote`, kept across reviews: the cutoff is judged at each call, not when the engine was built.
+    const remote = o.remoteOf(acc).remote!
+    await remote(1n)
     expect(seen[0]).toEqual(acc.remote!.permissionIds)
     acc.remote!.spec = { ...acc.remote!.spec, validUntil: Math.floor(Date.now() / 1000) + 29 * 86_400 }
-    await o.remoteOf(acc).remote!(1n)
+    await remote(2n)
     expect(seen[1]).toEqual([])
   })
 

@@ -5035,8 +5035,13 @@ export class Operator {
     // GPT-6 r2 P1 2: the remote Safe's sessions end at its spec's validUntil (fixed in its setup); nothing more is bridged
     // to it from REMOTE_BRIDGE_STOP_SECONDS before then, so no USDC lands where Mamoru can no longer act. What is there
     // stays counted; renewing the remote sessions is otto/mamoru#253.
-    const open = Math.floor(Date.now() / 1000) < rs.spec.validUntil - REMOTE_BRIDGE_STOP_SECONDS
-    return { remote: (block: bigint) => bridge.remote(acc.accountKey, rs.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, open ? rs.permissionIds : []) }
+    // Judged at every review, not when the engine starts: an engine runs for months.
+    return {
+      remote: (block: bigint) => {
+        const open = Math.floor(Date.now() / 1000) < rs.spec.validUntil - REMOTE_BRIDGE_STOP_SECONDS
+        return bridge.remote(acc.accountKey, rs.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, open ? rs.permissionIds : [])
+      },
+    }
   }
 
   // ---- the account's own Safe on another chain (otto/mamoru#251) ----------------------------------------
