@@ -95,6 +95,21 @@ const LABELS: Record<MetricBaseKey, MetricLabel> = {
   days: { es: 'Días', en: 'Days' },
 }
 
+const UNITS: Record<MetricBaseKey, MetricUnit> = {
+  end: 'USDC', net: 'USDC', vsHodl: 'USDC', vsUsdc: 'USDC', fees: 'USDC', gas: 'USDC',
+  priceMove: '%', timeInRange: '%', maxDrawdown: '%', return: '%', days: 'days',
+}
+
+/** A metric's label and unit without a run (thread history only has the verified claim block, not its run). */
+export function metricMeta(metric: string): { label: MetricLabel; unit: MetricUnit } | undefined {
+  if (Object.hasOwn(LABELS, metric)) return { label: LABELS[metric as MetricBaseKey], unit: UNITS[metric as MetricBaseKey] }
+  if (typeof metric === 'string' && metric.startsWith('operations.')) {
+    const kind = metric.slice('operations.'.length)
+    return { label: { es: `Operaciones: ${kind}`, en: `Operations: ${kind}` }, unit: 'ops' }
+  }
+  return undefined
+}
+
 /** `window.market`'s real shape (dataset manifest, not shipped to CI): fractions, not already in a unit. */
 type MarketMove = { move?: unknown }
 type Market = { btc?: MarketMove }

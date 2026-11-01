@@ -407,12 +407,12 @@ describe('runAgentJob — loop mechanics (AL-15, AL-03)', () => {
       ],
     }
     const text = renderAnswerForHistory(answer, [], { '0xaaa': 'mar2025|live|1000|1000' })
-    expect(text).toContain('vsHodl: -8.46 (run 0xaaa, spec mar2025|live|1000|1000)')
+    expect(text).toContain('Vs. mantener la mezcla: -8.46 USDC (run 0xaaa, spec mar2025|live|1000|1000)')
     expect(text).toContain('Veredicto verificado (run 0xaaa, spec mar2025|live|1000|1000) vs hold')
     expect(text).toContain('[gráfico equity: (run 0xaaa, spec mar2025|live|1000|1000)]')
-    expect(text).toContain('Frente a mantener: vsHodl: -8.46')
+    expect(text).toContain('Frente a mantener: Vs. mantener la mezcla: -8.46 USDC')
     // an older landing sends no runs at all: the value and run id still reach the follow-up
-    expect(renderAnswerForHistory(answer, [])).toContain('vsHodl: -8.46 (run 0xaaa)')
+    expect(renderAnswerForHistory(answer, [])).toContain('Vs. mantener la mezcla: -8.46 USDC (run 0xaaa)')
   })
 
   test('review finding (P2, agent.ts:127): history carries each cited run\'s specKey and runId, not just its label/value', () => {

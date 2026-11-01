@@ -5,6 +5,7 @@
 import {
   displayValue,
   isVerdictBaseline,
+  metricMeta,
   resolveMetric,
   SUBMIT_ANSWER_TOOL_SCHEMA,
   writeVerdictSentence,
@@ -12,6 +13,7 @@ import {
   type Block,
   type ChartBlock,
   type ClaimBlock,
+  type MetricUnit,
   type VerdictBlock,
 } from './contract.ts'
 import { newCostMeter, recordModelCall, recordToolRound, type CostMeter, type VerifierOutcome as MeterVerifierOutcome } from './cost-meter.ts'
@@ -163,14 +165,21 @@ function renderVerdictText(block: VerdictBlock, h: HistoryRuns): string {
   return `${sentence} ${runTag(run)} vs ${other ? runTag(other) : block.against}`
 }
 
+function unitSuffix(unit: MetricUnit): string {
+  return unit === 'USDC' ? ' USDC' : unit === '%' ? '%' : unit === 'days' ? ' días' : ' ops'
+}
+
 function renderClaimText(block: ClaimBlock, h: HistoryRuns): string {
   const run = h.runStore.get(block.runId)
   // Prod history (runner) carries no full runs: the claim already matched its run exactly when its own job
   // verified it, so its value is rendered as-is. Dropping it left a follow-up blind to the figures it was about.
-  if (!run) return `${block.metric}: ${block.value} ${idTag(block.runId, h)}`
+  if (!run) {
+    const meta = metricMeta(block.metric)
+    return meta ? `${meta.label.es}: ${block.value}${unitSuffix(meta.unit)} ${idTag(block.runId, h)}` : ''
+  }
   const info = resolveMetric(run, block.metric)
   if (!info) return ''
-  const suffix = info.unit === 'USDC' ? ' USDC' : info.unit === '%' ? '%' : info.unit === 'days' ? ' días' : ' ops'
+  const suffix = unitSuffix(info.unit)
   return `${info.label.es}: ${displayValue(info)}${suffix} ${runTag(run)}`
 }
 
