@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { claimValueMatches, displayValue, resolveMetric } from './contract.ts'
 import { newCostMeter } from './cost-meter.ts'
 import { compareTool, COMPARE_MAX_RUNS, KNOWN_OVERRIDE_KEYS, LabBenchRunner, runBacktestTool, sweepTool, type RunStore } from './tools.ts'
 import type { BenchRunner } from './types.ts'
@@ -18,6 +19,20 @@ describe('runBacktestTool (AL-10, AL-13)', () => {
     expect(runStore.has(outcome.result.runId)).toBe(true)
     expect(meter.runs).toHaveLength(1)
     expect(meter.runs[0]!.resultHash).toBe(outcome.result.runId)
+  })
+
+  test('claimValues carries each claimable metric at display precision — exactly what the verifier accepts (AL-21)', () => {
+    const runner = new LabBenchRunner(FIXTURE_DIR)
+    const runStore: RunStore = new Map()
+    const outcome = runBacktestTool({ windowId: 'fix-full', base: 'live', deposit: 1000 }, runner, runStore)
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    const run = runStore.get(outcome.result.runId)!
+    for (const metric of ['end', 'net', 'vsHodl', 'vsUsdc', 'fees', 'gas', 'return', 'maxDrawdown', 'timeInRange'] as const) {
+      const info = resolveMetric(run, metric)!
+      expect(outcome.result.claimValues[metric]).toBe(displayValue(info))
+      expect(claimValueMatches(outcome.result.claimValues[metric]!, info)).toBe(true)
+    }
   })
 
   test('the only known override key is widthTicks; any other key is LAB_OVERRIDE_UNKNOWN (AL-13), never ignored', () => {
