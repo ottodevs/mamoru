@@ -5,6 +5,7 @@ import { describe, expect, test } from 'bun:test'
 import type { PublicClient } from 'viem'
 import { baseRegistry, isDeployed, monadRegistry, type Registry } from '@mamoru/registry'
 import { assertBaseOnlyFeatures, assertBootPolicies, assertPauseGateOnRegistry, assertV4Resolvable, assertV6Gate, resolveNamedPolicy, resolveV5Policy, resolveV6Policy } from '../src/boot.ts'
+import { monadV6Deployed } from '@mamoru/account/remote'
 import { GATE_V3_BASE_PINNED, V3_BASE_PINNED, withPinnedV6Base } from '../../../packages/account/remote/fixture.ts'
 
 const V1 = '0x00000000000000000000000000000000000000f1'
@@ -106,5 +107,21 @@ describe('conservador-live-v6 at boot', () => {
     expect(() => assertBaseOnlyFeatures(monadRegistry, { MAMORU_PAUSE_GATE_ADDRESS: V1 }, {})).toThrow('retired')
     expect(() => assertBaseOnlyFeatures(monadRegistry, { MAMORU_ACTION_POLICY_V2_ADDRESS: V2 }, {})).toThrow('Base only')
     expect(() => assertBaseOnlyFeatures(reg, { MAMORU_PAUSE_GATE_ADDRESS: V1 }, {})).not.toThrow()
+  })
+})
+
+// The two-chain e2e caught it: the Monad operator in writes mode checked a V3 policy against the V2 entry and refused
+// to boot with live-wmon-usdc-monad-v6.
+describe('live-wmon-usdc-monad-v6 at a Monad writes boot', () => {
+  test('boots against the pinned MamoruActionPolicyV3 entry, not V2', () => {
+    const p = monadV6Deployed(monadRegistry)
+    expect(p.actionPolicy?.contractVersion).toBe(3)
+    expect(() => assertBootPolicies(p, undefined, monadRegistry, { writes: true })).not.toThrow()
+  })
+
+  test('a V3 address other than the pinned one refuses the boot', () => {
+    const p = monadV6Deployed(monadRegistry)
+    const wrong = { ...p, actionPolicy: { ...p.actionPolicy!, address: V2 as `0x${string}` } }
+    expect(() => assertBootPolicies(wrong, undefined, monadRegistry, { writes: true })).toThrow(/MamoruActionPolicyV3/)
   })
 })

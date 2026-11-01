@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { conservadorLabV1, conservadorV1, type PolicyVersion } from '@mamoru/policy'
+import { conservadorLabV1, conservadorV1, grantKeyFor, liveWmonUsdcMonadV6, type PolicyVersion } from '@mamoru/policy'
 import { address, baseRegistry, entry, monadRegistry, type Registry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { purgaIdentity, registryOf } from './gates/index.ts'
@@ -245,5 +245,26 @@ describe('the registry of the observation', () => {
     expect(a.proposal).toBeNull()
     expect(a.trail).toEqual([{ gate: 'purga', verdict: 'NO_GO', reason: 'PURGA_IDENTITY_MISMATCH' }])
     expect(a.buckets.find((b) => b.pool === MONAD_POOL)?.code).toBe('PURGA_IDENTITY_MISMATCH')
+  })
+})
+
+// otto/mamoru#251, found by the two-chain e2e: the Monad v6 Safe has one session, the pool's manage-any under
+// MamoruActionPolicyV3 alone, and no enter-swap/enter-mint grants. Its entries must ask for that session, not for a
+// plain 'enter-swap' no session carries (the engine held SESSION_MISSING for ever with the bridged USDC on the Safe).
+describe('the Monad v6 Safe enters under its one manage-any session', () => {
+  const anyGrant = grantKeyFor(liveWmonUsdcMonadV6, 'manage-any', MONAD_POOL)
+  const session = { grant: anyGrant, permissionId: `0x${'03'.repeat(32)}` as const, validUntil: 10_000, active: true }
+
+  test('the entry swap names the manage-any key and passes the gate', () => {
+    expect(grantKeyFor(liveWmonUsdcMonadV6, 'enter-swap', MONAD_POOL)).toBe(anyGrant)
+    const d = decide(monadObs({ sessions: [session], native: 3n * 10n ** 18n, balances: { USDC: 1_880_874n, WMON: 0n } }), liveWmonUsdcMonadV6)
+    expect(d.proposal).toMatchObject({ kind: 'enter_swap', grant: anyGrant, pool: MONAD_POOL })
+    expect(d.reason).not.toBe('SESSION_MISSING')
+  })
+
+  test('without that session it still holds on SESSION_MISSING', () => {
+    const d = decide(monadObs({ sessions: [], native: 3n * 10n ** 18n, balances: { USDC: 1_880_874n, WMON: 0n } }), liveWmonUsdcMonadV6)
+    expect(d.proposal).toBeNull()
+    expect(d.reason).toBe('SESSION_MISSING')
   })
 })

@@ -1,5 +1,5 @@
 import type { ReasonCode } from '@mamoru/domain'
-import { preferenceTotal, type PolicyVersion } from '@mamoru/policy'
+import { grantKeyFor, preferenceTotal, type PolicyVersion } from '@mamoru/policy'
 import { rangeAround } from '@mamoru/uniswap-v3/quote'
 import type { Observation, PoolObs, Proposal } from '../types.ts'
 import { inSavings, volatileOf } from '../value.ts'
@@ -10,6 +10,19 @@ export function safeSavings(obs: Observation, policy: PolicyVersion): bigint {
   const unsafe = obs.deposits.filter((d) => d.token === savings && !d.safe).reduce((s, d) => s + d.amount, 0n)
   const held = obs.balances[savings] ?? 0n
   return held > unsafe ? held - unsafe : 0n
+}
+
+/**
+ * otto/mamoru#251: the session key of an entry grant for `pool`, as allocate takes it: the plain name for a single-pair
+ * policy, the pool's key otherwise, and under MamoruActionPolicyV3 alone (the Monad v6 Safe) the pool's manage-any. No
+ * grant at all: the plain name, which no session carries, so the gate refuses it (SESSION_MISSING) as before.
+ */
+function entryKey<N extends 'enter-swap' | 'enter-mint'>(policy: PolicyVersion, name: N, pool: string): N {
+  try {
+    return grantKeyFor(policy, name, pool) as N
+  } catch {
+    return name
+  }
 }
 
 /**
@@ -33,7 +46,7 @@ export function enterBucket(obs: Observation, policy: PolicyVersion, preference:
     const amountIn = half < free ? half : free
     return {
       code: 'STRATEGY_PREFERENCE',
-      proposal: { kind: 'enter_swap', grant: 'enter-swap', pool: pool.name, tokenIn: savings, tokenOut: volatile, fee: pool.fee, amountIn },
+      proposal: { kind: 'enter_swap', grant: entryKey(policy, 'enter-swap', pool.name), pool: pool.name, tokenIn: savings, tokenOut: volatile, fee: pool.fee, amountIn },
     }
   }
   const savingsIn = half < free ? half : free
@@ -43,7 +56,7 @@ export function enterBucket(obs: Observation, policy: PolicyVersion, preference:
     code: 'STRATEGY_PREFERENCE',
     proposal: {
       kind: 'enter_mint',
-      grant: 'enter-mint',
+      grant: entryKey(policy, 'enter-mint', pool.name),
       pool: pool.name,
       ...range,
       amount0Desired: savingsIs0 ? savingsIn : volatileHeld,

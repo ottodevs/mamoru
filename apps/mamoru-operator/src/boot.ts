@@ -433,7 +433,9 @@ export async function checkMonadRpc(monad: Pick<PublicClient, 'getChainId' | 're
 export function assertActionPolicyOnRegistry(policy: PolicyVersion, registry: Registry): void {
   const ap = policy.actionPolicy
   if (!ap || registry.chainId === BASE_CHAIN_ID) return
-  const pairs: [string, string | undefined][] = [['MamoruActionPolicyV2', ap.address], ['MamoruGasPolicy', ap.gasPolicy?.address]]
+  // otto/mamoru#251: the entry is the contract the policy says it is (V3 for the Monad v6 Safes), never V2 by default.
+  const actionName = ap.contractVersion === 3 ? 'MamoruActionPolicyV3' : 'MamoruActionPolicyV2'
+  const pairs: [string, string | undefined][] = [[actionName, ap.address], ['MamoruGasPolicy', ap.gasPolicy?.address]]
   for (const [name, wired] of pairs) {
     if (!wired) continue
     if (!isDeployed(name, registry)) throw new Error(`${name} is ${wired} in the environment but is not pinned in the ${registry.chain} registry (undeployed or absent): refusing to sign sessions for it`)
