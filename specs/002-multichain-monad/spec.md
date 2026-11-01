@@ -385,8 +385,9 @@ Brais answered in `chat-mamoru` (thread `[spec-002]`), with Ot's positions writt
 1. **Moving value back to Base (FR-XCH-014).** Yes, in the three cases; harvest stays on Monad until Growth is over
    target. After a stop or a risk exit the USDC waits idle on Monad under spec 004; never in a volatile pool; a risk to
    Monad or its USDC goes to Base at once. No fixed term: a 48 h hold was proposed and dropped, since spec 004 already
-   parks a risk exit for at least 72 h. Parking in the Base Stable vault was weighed and left out for simplicity (it
-   saves cents at today's sizes and needs #210); the Lab revisits it with measured costs.
+   parks a risk exit for at least 72 h. Parking in the Base Stable vault is not decided either way: Brais's OK to it
+   was conditional on the vault being integrated (#210) and on measured costs, and the October figures were
+   estimates. It stays out until both exist; then the Lab measures it and the decision is taken on those numbers.
 2. **Cost ceiling (FR-XCH-006).** Modelled in the Lab, dynamic, no hand-set number. Ot gives the GO on the defaults.
 3. **Release band (FR-COST-006).** Units: share of the yield the moves take, and USDC per month. The band comes from
    the Lab's numbers.
