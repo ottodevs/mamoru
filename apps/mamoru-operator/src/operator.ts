@@ -2435,7 +2435,7 @@ export class Operator {
       if (proof) {
         if (on.every(Boolean)) {
           console.log(`[renew] ${acc.accountKey} ${op.opId} executed on chain (tx ${proof.hash}), every grant enabled at block ${block}: applied`)
-          this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, extend: op.extend, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, { blockNumber: BigInt(proof.block) } as TransactionReceipt)
+          this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, ...(op.ownerRemote ? { remote: op.ownerRemote } : {}), revokes: op.revokes, extend: op.extend, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, { blockNumber: BigInt(proof.block) } as TransactionReceipt)
           this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', txHash: proof.hash, block: proof.block })
         } else {
           this.partlyRevoked(acc, op, ids, on, block)
@@ -4425,6 +4425,7 @@ export class Operator {
   private stash(acc: AccountState, op: OpView, p: Prepared): void {
     const o = op as StoredOp
     if ((p.kind === 'activate' || p.kind === 'renew') && p.grants) o.ownerGrants = p.grants
+    if ((p.kind === 'activate' || p.kind === 'renew') && p.remote) o.ownerRemote = p.remote
     if ((p.kind === 'activate' || p.kind === 'renew') && p.capUsdc) o.capUsdc = p.capUsdc
     if ((p.kind === 'stop' || p.kind === 'renew') && p.revokes) o.revokes = p.revokes
     if (p.kind === 'renew' && p.extend) o.extend = true
@@ -4910,7 +4911,7 @@ export class Operator {
         }
         if (!later('exit') && !acc.active) {
           const r = receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt)
-          this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'activate', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, r)
+          this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'activate', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, ...(op.ownerRemote ? { remote: op.ownerRemote } : {}), ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, r)
         } else {
           // It ran but is not the account's approval: its grants are enabled with no engine using them. Remembered, so a stop revokes them.
           const known = new Set([...acc.revoked, ...acc.grants.map((g) => g.permissionId)].map((id) => id.toLowerCase()))
@@ -4940,7 +4941,7 @@ export class Operator {
           this.patchOp(acc, op.opId, { state: 'failed', code: 'RENEWAL_PARTLY_REVOKED', txHash: hash, block })
           continue
         }
-        this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, extend: op.extend, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt))
+        this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'renew', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, ...(op.ownerRemote ? { remote: op.ownerRemote } : {}), revokes: op.revokes, extend: op.extend, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt))
       }
       console.log(`[reconcile] ${op.opId} tx ${hash} landed at block ${block}, confirmed`)
       this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', txHash: hash, block })

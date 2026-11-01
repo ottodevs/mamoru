@@ -17,6 +17,8 @@ export type StoredOp = OpView & {
   calls?: Execution[]
   /** Owner activate: the grants its tx enables, so a late receipt can still start the engine. */
   ownerGrants?: StoredGrant[]
+  /** activate/renew (otto/mamoru#251): the account's own Safe on another chain the approval provisions, so a receipt only reconciliation sees still records and provisions it. */
+  ownerRemote?: RemoteSafeRecord
   /** activate/renew (spec 006): the cap, in base units, its grants were sized for and its summary named. */
   capUsdc?: string
   /** Owner stop: the permissionIds its tx revokes. */

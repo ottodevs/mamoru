@@ -398,6 +398,33 @@ describe('a fresh activation on v6 (default policy)', () => {
   })
 })
 
+describe('a v6 approval whose receipt only reconciliation sees still records and provisions its Monad Safe', () => {
+  test('reverted on our relay, relayed later by anyone: reconcileOwner applies it with the remote Safe', async () => {
+    const p = fakePeer()
+    const w = world(10_000_000n, { policy: v6, ...cfg6(p.peer) })
+    w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
+    chain(w, 0n)
+    ;(w.op as unknown as { startLoop(a: AccountState): void }).startLoop = () => {}
+    w.knobs.execOk = false
+    const t = await w.op.prepareActivate(ctx)
+    const first = (await quiet(() => w.op.submit(ctx, 'activate', sign(t)))).out
+    const acc = w.state.accounts.k!
+    const old = acc.ops.find((o) => o.opId === first.opId) as unknown as { safeTxHash: Hex; signedTxs: { hash: Hex }[]; ownerRemote?: unknown }
+    expect(old.ownerRemote).toMatchObject({ chainId: 143, address: t.remote!.address })
+    w.knobs.execOk = true
+    w.knobs.receipts.set(old.signedTxs[0]!.hash.toLowerCase(), { transactionHash: old.signedTxs[0]!.hash, status: 'reverted', blockNumber: 99n, logs: [] } as never)
+    // A third party relays the same signature: the Safe nonce moves and the Safe logs its ExecutionSuccess.
+    w.chain.nonce = 1n
+    w.knobs.safeLogs = [{ topics: ['0x442e715f626346e8c54381002da614f62bee8d27386535b2521ec8540898556e', old.safeTxHash], data: `0x${'0'.repeat(64)}`, transactionHash: `0x${'cd'.repeat(32)}`, blockNumber: 150n }]
+    w.knobs.blockHead = 170n
+    await quiet(() => w.op.reconcileOwner(acc))
+    await new Promise((r) => setTimeout(r, 10))
+    expect(acc.active).toBe(true)
+    expect(acc.remote).toMatchObject({ chainId: 143, address: t.remote!.address, ready: true })
+    expect(p.provisioned).toHaveLength(1)
+  })
+})
+
 describe('after a confirmed v6 approval the account\'s own Safe on Monad is provisioned', () => {
   const settle = () => new Promise((r) => setTimeout(r, 10))
 
