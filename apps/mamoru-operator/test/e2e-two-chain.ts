@@ -28,7 +28,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { concat, decodeErrorResult, encodeFunctionData, keccak256, numberToHex, pad, parseAbi, parseEventLogs, sliceHex, toHex, type Hex } from 'viem'
+import { concat, decodeErrorResult, encodeFunctionData, parseAbiItem, keccak256, numberToHex, pad, parseAbi, parseEventLogs, sliceHex, toHex, type Hex } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { AccountContext, Address, FundingView, OpView, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
 import { address, baseRegistry, entryPointV07Abi, erc20Abi, messageTransmitterV2Abi, monadRegistry, nonfungiblePositionManagerAbi, readCodeHash, safeAbi, tokenMessengerV2Abi } from '@mamoru/registry'
@@ -442,17 +442,26 @@ try {
       const data = typeof j.error.data === 'string' ? (j.error.data as Hex) : undefined
       if (!data || !/^0x(220266b6|65c8fd4d)/.test(data)) return `reverted: ${j.error.message ?? ''} ${String(data ?? '').slice(0, 80)}`
       const d = decodeErrorResult({ abi: failedOp, data })
+      // r2 note 2: SmartSession reverts in validation (PolicyViolation), and Safe7579 wraps that revert as
+      // ExecutionFailed() (0xacfdb444) inside AA23, so the policy is not named here. What proves the refusal is the
+      // control: the same op, same nonce/gas/signature scheme, only mintRecipient changed, validates.
+      if (d.errorName === 'FailedOpWithRevert') return `${d.args[1]}: ${String(d.args[2]).slice(0, 10)}`
       return `${d.errorName}: ${d.args[1]}`
     }
     const control = await simulate(remote)
     check(control === 'included', 'Base: the same bridge-out userOp to the remote Safe validates and executes (control)', control)
     const other = await simulate(privateKeyToAccount(generatePrivateKey()).address)
-    check(other === 'FailedOp: AA24 signature error', 'Base: the same userOp to another recipient is refused by the session policy (AA24)', other)
+    check(control === 'included' && other === 'AA23 reverted: 0xacfdb444', 'Base: the same userOp to another recipient is refused in validation (AA23, the control passes)', other)
   }
 
   // --- 6. Circle attests, the Base operator mints on Monad -----------------------------------------------------------------
-  const usdcRemote0 = await monad.balanceOf('USDC', remote)
-  await until('the burn is minted on Monad to the remote Safe', 900_000, async () => (await monad.balanceOf('USDC', remote)) - usdcRemote0 >= burned, 10_000)
+  // The mint itself (USDC Transfer from 0x0 to the remote Safe), not the Safe's balance: the Monad engine may already
+  // have swapped and minted it into the LP by the time this reads (#272, run of 1 Nov 14:2x).
+  const mintedTo = async () => {
+    const logs = await monad.client.getLogs({ address: address('USDC', monadRegistry), event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)'), args: { from: '0x0000000000000000000000000000000000000000', to: remote }, fromBlock: monadStart, toBlock: 'latest' })
+    return logs.reduce((n, l) => n + (l.args.value ?? 0n), 0n)
+  }
+  await until('the burn is minted on Monad to the remote Safe', 900_000, async () => (await mintedTo()) >= burned, 10_000)
   check(irisCalls.length > 0, 'the Base operator asked Iris for the burn', `${irisCalls.length} poll(s)`)
   check(true, 'Monad: the USDC landed on the remote Safe (receiveMessage by the Base operator\'s relayer)', `${burned} units`)
 
