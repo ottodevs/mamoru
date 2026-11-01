@@ -613,21 +613,37 @@ describe('renewing the approval', () => {
     expect(approvalRowKey({ ...year, paused: true })).not.toBe(approvalRowKey(year))
   })
 
-    test('#176: once prepared, the approval dialog lays out every line the passkey signs, word for word, behind a brief', () => {
+    /** Markup to the text it reads as, without the spaces a text dump puts between elements. */
+    const plain = (html: string) => html.replace(/<[^>]+>/g, '').replace(/&#x27;|&#39;/g, "'").replace(/&amp;/g, '&')
+
+    test('#176, #225: once prepared, the dialog shows every signed line read or word for word, and the exact text one tap away', () => {
     const summary = [
       "Renew Mamoru's approval on your Safe 0x5af19C48077D38F10B4245a6B2D92478aaEFAcD0",
       'Engine key 0x1111111111111111111111111111111111111111 may keep doing the same kinds of actions for 365 more days, within new limits counted from zero, sized for deposits up to 1,000.00 USDC (the cap you signed):',
+      'In WETH/USDC 0.30%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 70.00 USDC a day and 350.00 USDC in total on this approval',
       'In USDC/cbBTC 0.05%: USDC swapped in at most 25.00 per swap and 50.00 in total',
+      'The approval it replaces is revoked in the same transaction',
       'Nothing is moved: your positions stay as they are',
     ]
-    const { text, html } = render(<ApprovalBody lead="It ends soon." summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} />)
+    const { text, html } = render(<ApprovalBody lead="It ends soon." summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} locale="en" />)
+    // #41: the exact text, every line in its order, under a disclosure next to Approve.
     expect(html).toContain('data-testid="review"')
-    // #41 / #176 review: the signed lines are open next to Approve, never folded away by default.
-    expect(html).toMatch(/<details[^>]*data-testid="review"[^>]*\bopen/)
-    for (const line of summary) expect(text).toContain(line)
-    expect(signedFacts(summary)).toEqual({ days: 365, capUsdc: '1,000.00', pools: ['USDC/cbBTC 0.05%'] })
+    const signed = [...html.slice(html.indexOf('data-testid="review"')).matchAll(/<li>(.*?)<\/li>/g)].map((m) => plain(m[1]!))
+    expect(signed).toEqual(summary)
+    // #225: the read view. A pool line it knows becomes a card with each of its figures.
+    expect(text).toContain('Limits per pool')
+    expect(html).toContain('±1.00%')
+    expect(text).toContain('70.00')
+    expect(text).toContain('350.00')
+    expect(text).toContain('What changes')
+    expect(text).toContain('Your current approval is revoked in the same transaction.')
+    expect(text).toContain('Nothing moves now: your positions stay as they are.')
+    // A line no reader knows stays in the view itself, word for word: nothing signed is only folded away.
+    const also = html.slice(html.indexOf('data-testid="also-signed"'))
+    expect(also).toContain('USDC swapped in at most <strong class="signed-num">25.00</strong> per swap')
+    expect(signedFacts(summary)).toEqual({ days: 365, capUsdc: '1,000.00', pools: ['WETH/USDC 0.30%', 'USDC/cbBTC 0.05%'] })
     expect(text).toContain('Approve with passkey')
-    expect(text).toContain('Nothing moves now')
+    expect(text).toContain('One passkey signature')
     // Figures are emphasized, never rewritten: the text reads as signed, and "v3" stays plain.
     const line = 'It also keeps acting on any Uniswap v3 position: at most 256 transactions, 1,000.00 USDC'
     const emph = render(<Emph text={line} />)
@@ -636,9 +652,21 @@ describe('renewing the approval', () => {
     expect(emph.html).toContain('<strong class="signed-num">1,000.00</strong>')
     expect(emph.html).not.toContain('<strong class="signed-num">3</strong>')
     // Before it is prepared: the brief and one action to review it, no signed lines yet.
-    const before = render(<ApprovalBody lead="It ends soon." summary={null} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} />)
+    const before = render(<ApprovalBody lead="It ends soon." summary={null} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} locale="en" />)
     expect(before.html).not.toContain('data-testid="review"')
     expect(before.text).toContain('Review')
+    expect(before.text).toContain('Nothing moves now')
+  })
+
+    test('#225: the dialog speaks Spanish and Japanese; the signed text stays as signed', () => {
+    const summary = ['In WETH/USDC 0.30%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 70.00 USDC a day and 350.00 USDC in total on this approval']
+    const es = render(<ApprovalBody lead="x" summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} locale="es" />)
+    expect(es.text).toContain('Límites por pool')
+    expect(es.text).toContain('Aprobar con passkey')
+    expect(plain(es.html)).toContain(summary[0]!)
+    const ja = render(<ApprovalBody lead="x" summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} locale="ja" />)
+    expect(ja.text).toContain('プールごとの上限')
+    expect(plain(ja.html)).toContain(summary[0]!)
   })
 
     test('history reads an extension in its own words', () => {

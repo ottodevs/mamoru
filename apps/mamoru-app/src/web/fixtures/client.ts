@@ -488,7 +488,7 @@ export const fixtureClient: ApiClient = {
     liveState.bridge = { ...liveState.bridge, convert: { state: 'done', ethWei: '55378350000000000', minUsdc: '127504785', usdcOut: '128145513', l1Tx: `0x${'3'.repeat(64)}`, at: new Date().toISOString() } }
     return delay(liveState.bridge)
   },
-  // The shape of a real three-pool renewal (operator planRenew), so the dialog is reviewed on text as long as the real one.
+  // The real lines of a v6 renewal and a v5 -> v6 move (operator planRenew on main, #225), so the dialog is reviewed on the text it gets.
   renewPrepare: () =>
     delay(
       monadUpgrade
@@ -496,32 +496,39 @@ export const fixtureClient: ApiClient = {
             // The shape of a real v5 -> v6 move (operator planRenew with remoteLines, #251): one approval, one transaction.
             ...fixtureTx([
               `Renew Mamoru's approval on your Safe ${FIXTURE_ADDRESS} and move it to on-chain limits`,
-              'Mamoru can now trade only near the market price, and only the positions it opened',
+              `Mamoru can now trade only near the market price, and only the positions it opened`,
               `15% of your savings (Growth) goes to your own Safe on Monad, ${FIXTURE_MONAD_SAFE}: same owner (your passkey), created by Mamoru with no other signature`,
-              'On Monad Mamoru may only swap and provide liquidity in WMON/USDC 0.3%, near the market price, paid only to that Safe, until 2027-10-31',
-              "USDC crosses only to that Safe, through Circle's bridge (CCTP), at no fee",
-              'USDC/cbBTC is only wound down, nothing new goes into it',
-              'Engine key 0x7d3E1bA2c4F5a6B7c8D9e0F1a2B3c4D5e6F7a8B9 may keep doing the same kinds of actions for 365 more days, within new limits counted from zero, sized for deposits up to 1,000.00 USDC (your cap):',
-              'In USDC/USDT 0.01%: swaps, new positions and withdrawals only within 0.10% of the 30- and 5-minute average price; worth at most 2,500.00 USDC a day and 5,000.00 USDC in total on this approval',
-              'In WETH/USDC 0.3%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; worth at most 700.00 USDC a day and 3,500.00 USDC in total on this approval',
-              'The approval it replaces is revoked in the same transaction',
-              'Nothing is moved: your positions stay as they are',
-              'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
+              `On Monad Mamoru may only swap and provide liquidity in WMON/USDC 0.30%, near the market price, paid only to that Safe, until 2027-09-21`,
+              `USDC crosses only to that Safe, through Circle's bridge (CCTP), at no fee`,
+              `USDC/cbBTC is only wound down, nothing new goes into it`,
+              `Engine key 0x7d3E1bA2c4F5a6B7c8D9e0F1a2B3c4D5e6F7a8B9 may keep doing the same kinds of actions for 365 more days, within new limits counted from zero, sized for deposits up to 100.00 USDC (your cap):`,
+              `In USDC/USDT 0.01%: swaps, new positions and withdrawals only within 0.10% of the 30- and 5-minute average price and within 0.40% of 1:1; swaps and new positions worth at most 250.00 USDC a day and 500.00 USDC in total on this approval`,
+              `In WETH/USDC 0.30%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 70.00 USDC a day and 350.00 USDC in total on this approval`,
+              `In USDC/cbBTC 0.05%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 80.00 USDC a day and 400.00 USDC in total on this approval`,
+              `Bridge: it may burn USDC with Circle's CCTP only to your own address on Monad (never to another address, never any fee), at most 20.00 USDC a time and 50.00 USDC in total on this approval; a guardian pause stops it`,
+              `Each engine transaction pays at most 0.00052 ETH of network fee (at most 0.1 gwei per gas), from your Safe's ETH; these grants allow 104,064 transactions in all`,
+              `The approval it replaces is revoked in the same transaction`,
+              `Nothing is moved: your positions stay as they are`,
+              `Whatever it collects, mints or swaps is paid to your Safe, never to anyone else`,
             ]),
             policyId: 'conservador-live-v6',
             move: true,
             remote: { chainId: 143, address: FIXTURE_MONAD_SAFE, spec: { chainId: 143, policyId: 'live-wmon-usdc-monad-v6', sessionKey: '0x00000000000000000000000000000000005e5510', validAfter: 1_790_000_000, validUntil: 1_821_536_000, capUsdc: '500000000' } },
           }
         : fixtureTx([
-        `Renew Mamoru's approval on your Safe ${FIXTURE_ADDRESS}`,
-        'Engine key 0x7d3E1bA2c4F5a6B7c8D9e0F1a2B3c4D5e6F7a8B9 may keep doing the same kinds of actions for 365 more days, within new limits counted from zero, sized for deposits up to 1,000.00 USDC (the cap you signed):',
-        'In USDC/USDT 0.01%: USDC swapped in at most 166.67 per swap and 333.33 in total, so at most 333.33 in one transaction, which can hold several swaps; at most 8 transactions to swap USDC in, 8 to open a position, 256 to take liquidity out, burn or re-open a position, 64 to collect fees and swap them to USDC (one transaction can hold several of these steps)',
-        'In USDC/cbBTC 0.05%: USDC swapped in at most 116.67 per swap and 233.33 in total, so at most 233.33 in one transaction, which can hold several swaps; at most 8 transactions to swap USDC in, 8 to open a position, 256 to take liquidity out, burn or re-open a position, 64 to collect fees and swap them to USDC (one transaction can hold several of these steps)',
-        'In WETH/USDC 0.3%: USDC swapped in at most 50.00 per swap and 100.00 in total, so at most 100.00 in one transaction, which can hold several swaps; at most 8 transactions to swap USDC in, 8 to open a position, 256 to take liquidity out, burn or re-open a position, 64 to collect fees and swap them to USDC (one transaction can hold several of these steps)',
-        'The approval it replaces is revoked in the same transaction',
-        'It also keeps acting, without asking again, on any Uniswap v3 position your Safe owns, in any pool: take liquidity out, collect fees, burn it once empty, and convert cbBTC and WETH back to USDC',
-        'Nothing is moved: your positions stay as they are',
-        'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
+          `Renew Mamoru's approval on your Safe ${FIXTURE_ADDRESS}`,
+          `15% of your savings (Growth) goes to your own Safe on Monad, ${FIXTURE_MONAD_SAFE}: same owner (your passkey), created by Mamoru with no other signature`,
+          `On Monad Mamoru may only swap and provide liquidity in WMON/USDC 0.30%, near the market price, paid only to that Safe, until 2027-09-21`,
+          `USDC crosses only to that Safe, through Circle's bridge (CCTP), at no fee`,
+          `Engine key 0x7d3E1bA2c4F5a6B7c8D9e0F1a2B3c4D5e6F7a8B9 may keep doing the same kinds of actions for 365 more days, within new limits counted from zero, sized for deposits up to 100.00 USDC (your cap):`,
+          `In USDC/USDT 0.01%: swaps, new positions and withdrawals only within 0.10% of the 30- and 5-minute average price and within 0.40% of 1:1; swaps and new positions worth at most 250.00 USDC a day and 500.00 USDC in total on this approval`,
+          `In WETH/USDC 0.30%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 70.00 USDC a day and 350.00 USDC in total on this approval`,
+          `In USDC/cbBTC 0.05%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 80.00 USDC a day and 400.00 USDC in total on this approval`,
+          `Bridge: it may burn USDC with Circle's CCTP only to your own address on Monad (never to another address, never any fee), at most 20.00 USDC a time and 50.00 USDC in total on this approval; a guardian pause stops it`,
+          `Each engine transaction pays at most 0.00052 ETH of network fee (at most 0.1 gwei per gas), from your Safe's ETH; these grants allow 104,064 transactions in all`,
+          `The approval it replaces is revoked in the same transaction`,
+          `Nothing is moved: your positions stay as they are`,
+          `Whatever it collects, mints or swaps is paid to your Safe, never to anyone else`,
       ]),
     ),
   renew: () =>

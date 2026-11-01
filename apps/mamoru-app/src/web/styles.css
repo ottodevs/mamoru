@@ -790,6 +790,197 @@
     font-size: 0.8rem;
     word-break: break-all;
   }
+  /* #225: the read approval. Sections with a small mono heading; colour says what kind of change a row is. */
+  .approve-section {
+    display: grid;
+    gap: 0.55rem;
+    min-width: 0;
+  }
+  .approve-h {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: color-mix(in srgb, var(--color-ink) 62%, var(--color-paper));
+  }
+  .approve-changes,
+  .approve-promises {
+    display: grid;
+    gap: 0.45rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .chg {
+    display: grid;
+    grid-template-columns: 6.6rem 1fr;
+    gap: 0.65rem;
+    align-items: baseline;
+    padding: 0.55rem 0.75rem;
+    border-left: 3px solid var(--chg, var(--color-stone));
+    background: color-mix(in srgb, var(--chg, var(--color-stone)) 7%, var(--color-rice));
+    font-size: 0.92rem;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+  .chg-new,
+  .chg-cap {
+    --chg: var(--color-emerald);
+  }
+  .chg-safer {
+    --chg: #3d6b8a;
+  }
+  .chg-wound {
+    --chg: #96641a;
+  }
+  .chg-replaced {
+    --chg: var(--color-stone);
+  }
+  .chg-paused {
+    --chg: var(--color-alert);
+  }
+  .chg-tag {
+    justify-self: start;
+    padding: 0.08rem 0.45rem;
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    color: var(--color-rice);
+    background: var(--chg, var(--color-stone));
+  }
+  .chg-paused .chg-text {
+    font-weight: 700;
+    color: var(--color-alert-ink);
+  }
+  .approve-engine {
+    margin: 0;
+    font-size: 0.92rem;
+    line-height: 1.45;
+  }
+  .approve-engine-key {
+    display: block;
+    margin-top: 0.15rem;
+    font-size: 0.78rem;
+    color: color-mix(in srgb, var(--color-ink) 62%, var(--color-paper));
+  }
+  .pool-cards {
+    display: grid;
+    gap: 0.6rem;
+    min-width: 0;
+  }
+  .pool-card {
+    display: grid;
+    gap: 0.6rem;
+    padding: 0.8rem 0.9rem;
+    border: 1px solid var(--color-wash);
+    background: color-mix(in srgb, var(--color-rice) 80%, transparent);
+    min-width: 0;
+  }
+  .pool-card-remote {
+    border-style: dashed;
+  }
+  .pool-card-head {
+    display: grid;
+    gap: 0.2rem;
+  }
+  .pool-card-name {
+    font-size: 1rem;
+    font-weight: 700;
+  }
+  .pool-card-scope,
+  .pool-card-body {
+    margin: 0;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    color: color-mix(in srgb, var(--color-ink) 70%, var(--color-paper));
+  }
+  .pool-card-body {
+    font-size: 0.9rem;
+    color: var(--color-ink);
+  }
+  .pool-card-metrics {
+    display: grid;
+    grid-template-columns: 1.25fr 1fr 1fr;
+    gap: 0.75rem;
+  }
+  .pool-card-metrics-2 {
+    grid-template-columns: 1fr 1fr;
+  }
+  .metric {
+    display: grid;
+    gap: 0.1rem;
+    align-content: start;
+    min-width: 0;
+  }
+  .metric-label {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: color-mix(in srgb, var(--color-ink) 62%, var(--color-paper));
+  }
+  .metric-value {
+    font-size: 1.2rem;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-emerald);
+    white-space: nowrap;
+  }
+  .metric-note {
+    font-size: 0.74rem;
+    line-height: 1.35;
+    color: color-mix(in srgb, var(--color-ink) 62%, var(--color-paper));
+  }
+  .approve-fee {
+    margin: 0;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: color-mix(in srgb, var(--color-ink) 66%, var(--color-paper));
+  }
+  .approve-promises li {
+    position: relative;
+    padding-left: 1.5rem;
+    font-size: 0.92rem;
+    line-height: 1.45;
+  }
+  .approve-promises li::before {
+    content: "";
+    position: absolute;
+    left: 0.2rem;
+    top: 0.3rem;
+    width: 0.55rem;
+    height: 0.3rem;
+    border-left: 1.6px solid var(--color-emerald);
+    border-bottom: 1.6px solid var(--color-emerald);
+    transform: rotate(-45deg);
+  }
+  .approve-once {
+    margin-right: auto;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    color: var(--color-emerald);
+  }
+  @media (max-width: 30rem) {
+    .chg {
+      grid-template-columns: 1fr;
+      gap: 0.3rem;
+    }
+    .pool-card-metrics {
+      grid-template-columns: 1fr 1fr;
+    }
+    .pool-card-metrics:not(.pool-card-metrics-2) > .metric:first-child {
+      grid-column: 1 / -1;
+    }
+    .approve-once {
+      flex-basis: 100%;
+      text-align: right;
+    }
+  }
   .approve-actions {
     display: flex;
     flex-wrap: wrap;
