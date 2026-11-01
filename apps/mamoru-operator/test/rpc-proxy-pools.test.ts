@@ -156,4 +156,29 @@ describe('per-chain pools (otto/mamoru#285)', () => {
       proxy.stop()
     }
   })
+
+  test('headLag 0 serves latest at the tip, not three blocks behind', async () => {
+    const blocks: unknown[] = []
+    const proxy = startRpcProxy('https://upstream.example/k', {
+      trusted: [],
+      fallbacks: [],
+      logRanges: {},
+      chunkLogs: false,
+      headLag: 0n,
+      idleTimeoutSec: 70,
+      fetch: async (_url: string, init: RequestInit) => {
+        const { method, params } = JSON.parse(String(init.body))
+        if (method === 'eth_blockNumber') return Response.json({ jsonrpc: '2.0', id: 1, result: '0x100' })
+        blocks.push(params?.[1])
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '0x0' })
+      },
+    })
+    try {
+      await fetch(`${proxy.url}c/bridge-out`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getBalance', params: ['0x0000000000000000000000000000000000000001', 'latest'] }) })
+      expect(blocks.every((b) => b === 'latest' || b === '0x100')).toBe(true)
+      expect(blocks).not.toContain('0xfd')
+    } finally {
+      proxy.stop()
+    }
+  })
 })

@@ -510,6 +510,8 @@ export function assertWritePolicy(policy: PolicyVersion, registry: Registry, cha
  */
 const SIDE_PROVIDER_TIMEOUT_MS = 8_000
 const SIDE_CLIENT_TIMEOUT_MS = 60_000
+/** Their loopback servers keep a connection open while its failover runs (a little over the client's budget). */
+const SIDE_IDLE_TIMEOUT_SEC = 70
 
 /** Starts the operator: relayer key, state, loopback bundler, HTTP server, and the engine loops that were active. */
 export async function bootOperator(o: BootOptions) {
@@ -580,6 +582,8 @@ export async function bootOperator(o: BootOptions) {
       chunkLogs: false,
       trustedLogsOnly: true,
       providerTimeoutMs: SIDE_PROVIDER_TIMEOUT_MS,
+      headLag: 0n,
+      idleTimeoutSec: SIDE_IDLE_TIMEOUT_SEC,
       chainId: BRIDGE_MONAD_CHAIN_ID,
     })
     const monadUrl = `${monadProxy.url}c/bridge-monad`
@@ -716,6 +720,8 @@ export async function bootOperator(o: BootOptions) {
       chunkLogs: false,
       trustedLogsOnly: true,
       providerTimeoutMs: SIDE_PROVIDER_TIMEOUT_MS,
+      headLag: 0n,
+      idleTimeoutSec: SIDE_IDLE_TIMEOUT_SEC,
       chainId: ETHEREUM_CHAIN_ID,
     })
     const l1Url = `${l1Proxy.url}c/bridge-out`

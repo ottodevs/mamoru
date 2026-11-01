@@ -170,6 +170,13 @@ export type RpcProxyOptions = {
    * ExecutionSuccess would mark a conversion that ran as failed.
    */
   trustedLogsOnly?: boolean
+  /**
+   * Blocks behind the tip that `latest` is served at; default MAMORU_HEAD_LAG or 3. 0 for Ethereum and Monad
+   * (otto/mamoru#285): their reconciliation reads Safe nonces at latest and must scan logs up to the same state.
+   */
+  headLag?: bigint
+  /** Bun's idle timeout for the loopback server, in seconds (default Bun's 10). Must outlast the request's failover. */
+  idleTimeoutSec?: number
   /** Every provider must answer this chain id before it is used (otto/mamoru#285); unset: no check (Base, as before). */
   chainId?: number
   /** Per provider attempt; default 30 s. Shorter than the caller's budget, so a hung provider leaves time for the next (otto/mamoru#285). */
@@ -473,7 +480,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   }
   // A load-balanced provider answers from nodes a block or two apart: a head read from one node and a call pinned
   // to it on another gives "0x", null fields or "block not found". Serve `latest` a few blocks behind the tip.
-  const lag = BigInt(process.env.MAMORU_HEAD_LAG ?? 3)
+  const lag = opts.headLag ?? BigInt(process.env.MAMORU_HEAD_LAG ?? 3)
   async function head(): Promise<bigint> {
     const n = BigInt(await one('eth_blockNumber', [])) - lag
     return n
@@ -514,6 +521,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const server: Server<undefined> = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
+    // Bun closes a connection idle this long, a pending handler included: it must outlast the request's whole failover.
+    ...(opts.idleTimeoutSec !== undefined ? { idleTimeout: opts.idleTimeoutSec } : {}),
     async fetch(req) {
       if (req.method !== 'POST') return new Response('method not allowed', { status: 405 })
       const payload = (await req.json()) as Req | Req[]
