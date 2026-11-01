@@ -483,10 +483,11 @@ Notes:
 - The action budget is per account across chains, as the Packaging counts the portfolio. Each operator has its own
   journal, and the D1 yield ledger holds gas and fees, not op kinds or times. Data path: each operator answers a new
   signed, read-only route `GET /accounts/<key>/engine-ops?since=<unix>` with its confirmed ops
-  `{ chain, opId, kind, includedAt }` (the operator's existing signed API, same keys); each engine reads the peer
-  operator's list once per hour per account (peer URL in the operator config, cached for the hour) and counts the
-  union of both lists, deduplicated by `chain` + `opId`. Peer unreachable, or its answer older than 2 h: the row is
-  `RISK_ACTION_BUDGET_UNREAD`, never a local-only count reported as the account's.
+  `{ chain, opId, kind, includedAt }` (the operator's existing signed API, same keys); when a review proposes an op that counts,
+  the engine reads the peer operator's list for that account fresh, at that review (peer URL in the operator config,
+  5 s timeout, no cache), and counts the union of both lists, deduplicated by `chain` + `opId`. Peer unreachable, slow
+  or malformed: the row is `RISK_ACTION_BUDGET_UNREAD`, never a local-only count reported as the account's. Reviews
+  that propose nothing countable read nothing.
 - The action budget can be computed on live once `includedAt` ships. The re-entry rows have nothing to read until the exit path exists
   (LC-T4): before that, no bucket ever leaves a pool on a rule, so they stay silent.
 - After the stables bucket moves to an ERC-4626 vault (#210, PR #152) it has no range and makes no re-range; its
