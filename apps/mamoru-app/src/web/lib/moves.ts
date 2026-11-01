@@ -40,6 +40,9 @@ export const MOVE_WINDOW_MS = 6 * 60 * 60 * 1000
 /** Closes this close together in one pool are siblings (two positions in the pool moved by one review), not a takeover. */
 export const SIBLING_CLOSE_MS = 30 * 60 * 1000
 
+/** How far before its close a step's `updatedAt` may read (re-stamps): earlier than that, it is not this move's. */
+const RESTAMP_SLACK_MS = 10 * 60 * 1000
+
 /**
  * Chain order as a total order (a mixed block/time comparator is not one): rows stored before `block` existed come
  * first by time, then rows on chain by block, then rows not included yet by time. `updatedAt` is rewritten on every
@@ -66,6 +69,18 @@ export function historyEntries(ops: readonly OpView[], now: number = Date.now())
   const taken = new Set<string>()
   const moves: Move[] = []
   const later = (a: string, b: string) => (a.localeCompare(b) >= 0 ? a : b)
+  const ms = (o: OpView) => Date.parse(o.updatedAt)
+  // A step belongs to a close only if it comes after it: by block when both are on chain; a step not on chain yet
+  // follows an included close (its re-stamped time says nothing); an included step never follows a close that is
+  // not; without blocks, not clearly before it in time. Always within the window either way, so a stale row that
+  // never resolved cannot attach to a move days apart.
+  const follows = (op: OpView, close: OpView) => {
+    if (Math.abs(ms(op) - ms(close)) > MOVE_WINDOW_MS) return false
+    if (op.block !== undefined && close.block !== undefined) return op.block > close.block
+    if (close.block !== undefined) return true
+    if (op.block !== undefined) return false
+    return ms(op) >= ms(close) - RESTAMP_SLACK_MS
+  }
   for (const op of asc) {
     const step = stepOf(op)
     // Rows stored before pools were tagged (#131) cannot be told apart: they stay single rows.
@@ -75,21 +90,23 @@ export function historyEntries(ops: readonly OpView[], now: number = Date.now())
     if (step === 'rerange') {
       // A newer close takes over a move that never reopened; a sibling close of the same review waits its turn.
       const kept = queue.filter((m) => {
-        if (Date.parse(op.updatedAt) - Date.parse(m.close.updatedAt) <= SIBLING_CLOSE_MS) return true
+        if (Math.abs(ms(op) - ms(m.close)) <= SIBLING_CLOSE_MS) return true
         m.stalled = true
         return false
       })
       const m: Move = { id: op.opId, pool: op.pool, ops: [op], close: op, open: null, why: op.why, updatedAt: op.updatedAt }
       moves.push(m)
       taken.add(op.opId)
-      open.set(key, [...kept, m])
+      // A close that did not go through never opens: it takes no steps (its retry is a close of its own).
+      if (op.state === 'failed') m.stalled = true
+      open.set(key, op.state === 'failed' ? kept : [...kept, m])
       continue
     }
     if (step !== 'enter_swap' && step !== 'enter_mint' && step !== 'increase_liquidity') continue
     // Past the window a move is over: its later steps belong to another decision.
-    while (queue.length && Date.parse(op.updatedAt) - Date.parse(queue[0]!.close.updatedAt) > MOVE_WINDOW_MS) queue.shift()!.stalled = true
+    while (queue.length && ms(op) - ms(queue[0]!.close) > MOVE_WINDOW_MS) queue.shift()!.stalled = true
     const m = queue[0]
-    if (!m) continue
+    if (!m || !follows(op, m.close)) continue
     m.ops.push(op)
     m.updatedAt = later(m.updatedAt, op.updatedAt)
     taken.add(op.opId)

@@ -82,6 +82,23 @@ describe('historyEntries (#219)', () => {
     expect(moveState(b)).toBe('done')
   })
 
+  test('a failed close takes no steps: its retry minutes later gets the swap and the open (review r2)', () => {
+    const failed = { ...close, opId: 'eng-1-1-f-rerange', state: 'failed' as const, updatedAt: '2026-10-26T13:45:00.000Z' }
+    const moves = historyEntries([failed, close, swap, mint]).filter((e): e is { type: 'move'; move: Move } => e.type === 'move').map((e) => e.move)
+    expect(moves.find((m) => m.close === close)!.ops).toEqual([close, swap, mint])
+    expect(moveState(moves.find((m) => m.close === failed)!)).toBe('stalled')
+  })
+
+  test('a step clearly older than the open close is not taken by it (review r2)', () => {
+    // A close with no block yet sorts after yesterday's swap on chain; the swap stays its own row.
+    const today = { ...close, state: 'submitted' as const, updatedAt: '2026-10-27T14:00:00.000Z' }
+    const oldSwap = { ...swap, state: 'submitted' as const, updatedAt: '2026-10-27T13:00:00.000Z' }
+    const entries = historyEntries([today, oldSwap])
+    expect(entries.map((e) => e.type).sort()).toEqual(['move', 'op'])
+    const byBlock = historyEntries([{ ...close, block: 10 }, { ...swap, block: 9 }])
+    expect(byBlock.map((e) => e.type).sort()).toEqual(['move', 'op'])
+  })
+
   test('a close long after one that never reopened stalls it', () => {
     const later = eng('e', 'rerange', '2026-10-26T15:00:00.000Z', { why: 'edge' })
     const entries = historyEntries([close, later], Date.parse('2026-10-26T15:05:00.000Z'))
