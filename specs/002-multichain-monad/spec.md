@@ -111,7 +111,7 @@ the user choosing a chain.
 ### US12b · Money comes back to Base (P1)
 
 - Given Growth over its target across both chains, then the excess moves from Monad to Base (FR-XCH-014).
-- Given a Monad pool that stops paying, or a risk exit on Monad, then the exit follows spec 004 and its USDC waits idle
+- Given a risk exit on Monad, then the exit follows spec 004 and its USDC waits idle
   on Monad until re-entry is allowed; Base does not refill Growth meanwhile (FR-XCH-014). A risk to Monad or its USDC
   sends the USDC to Base at once. The user is not asked first.
 
@@ -288,15 +288,17 @@ named is where the open part lives. Ids FR-CHN-001 to FR-CHN-003 keep the meanin
   and Ot, 2026-11-01; kept simple per Ot's rule of the same day: one sentence per case):
   (a) Growth over its target across both chains, outside the rebalance band: the excess goes to Base as an ordinary
   move under FR-XCH-006.
-  (b) A Monad pool that stops paying, or a risk exit on Monad: the exit runs exactly as spec 004 says (its conversion
+  (b) A risk exit on Monad (a spec 004 cause): the exit runs exactly as spec 004 says (its conversion
   rules and re-entry minimum); the USDC it leaves stays idle on Monad, Growth keeps its bucket and its exit state, and
   Base does not refill Growth while that state lasts; it re-enters on Monad when spec 004 allows. No bridge.
   (c) A risk to Monad itself or to its USDC: the available USDC moves to Base at once, skipping the ceiling and wait of
   FR-XCH-006 but never the route checks and caps (FR-XCH-004, FR-XCH-007, FR-XCH-009). Tokens spec 004 forbids
   converting stay where they are. If the risk is the bridge itself, no move runs in either direction until it clears.
   A parked amount never waits in a volatile pool. The user is not asked first; the move shows in the app like any
-  other (FR-XCH-017). Parking in the Base Stable vault is out for now: on October's numbers it saves cents, and it
-  waits for the vault integration (#210); the Lab revisits it with measured costs (FR-COST-001). *Open* (#201): the
+  other (FR-XCH-017). A pool that stops paying is not a trigger of its own: on WMON/USDC it has not happened since
+  July (lowest daily APY 7.8 %); if the Lab sees it, it becomes a spec 004 cause with its own recovery condition.
+  Parking in the Base Stable vault is undecided: it waits for the vault integration (#210) and Lab-measured costs
+  (FR-COST-001), and is decided on those numbers. *Open* (#201): the
   Monad → Base grant on the Monad session, the relayer mint on Base, the allocator's return gap, reason codes.
 - **FR-XCH-015.** Funds at the account's address on Ethereum MUST be shown. ETH is converted to USDC in the same
   account by one owner signature (`prepareConvert`/`submitConvert`); USDC moves to the same account on Base by another
@@ -382,8 +384,9 @@ New, added by the task that needs them:
 
 Brais answered in `chat-mamoru` (thread `[spec-002]`), with Ot's positions written in the question.
 
-1. **Moving value back to Base (FR-XCH-014).** Yes, in the three cases; harvest stays on Monad until Growth is over
-   target. After a stop or a risk exit the USDC waits idle on Monad under spec 004; never in a volatile pool; a risk to
+1. **Moving value back to Base (FR-XCH-014).** Yes: Growth over target, a risk exit, a risk to Monad itself; harvest
+   stays on Monad until Growth is over target. A pool that stops paying has no rule of its own until the Lab sees it
+   happen (never since July). After a risk exit the USDC waits idle on Monad under spec 004; never in a volatile pool; a risk to
    Monad or its USDC goes to Base at once. No fixed term: a 48 h hold was proposed and dropped, since spec 004 already
    parks a risk exit for at least 72 h. Parking in the Base Stable vault is not decided either way: Brais's OK to it
    was conditional on the vault being integrated (#210) and on measured costs, and the October figures were
