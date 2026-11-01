@@ -121,7 +121,10 @@ describe('gas on a chain that charges the gas limit', () => {
     expect(t.verificationGasLimit).toBeLessThan(LAB_GAS_LIMITS.verificationGasLimit)
     expect(t.preVerificationGas).toBeGreaterThan(21_000n + 900n * 16n)
     expect(t.preVerificationGas).toBeLessThan(LAB_GAS_LIMITS.preVerificationGas)
-    expect(t.verificationGasLimit + t.callGasLimit + t.preVerificationGas).toBeLessThan(1_200_000n)
+    // 1 Nov, Brais's first swap of his Monad Safe: 500k of verification was AA23 (out of gas) on Monad's real node,
+    // 600k passed. The tight limit must stay above what Monad charges, not what a local fork measures.
+    expect(t.verificationGasLimit).toBeGreaterThanOrEqual(600_000n)
+    expect(t.verificationGasLimit + t.callGasLimit + t.preVerificationGas).toBeLessThan(1_700_000n)
     expect(tightUserOpGas(op, 0n)).toBeNull()
     expect(tightUserOpGas(op, 1_700_000n)).toBeNull()
   })

@@ -247,6 +247,9 @@ try {
   Object.assign(process.env, { MAMORU_LIVE: '1', MAMORU_HEAD_LAG: '0', MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: V1_BASE, MAMORU_GAS_POLICY_ADDRESS: GAS_POLICY_BASE, MAMORU_ACTION_POLICY_V2_ADDRESS: V2_BASE })
   const baseOp = await bootOperator({ rpcUrl: B.port.url, monadRpcUrl: M.port.url, secret, stateDir: join(dir, 'state-base'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, peerOperators: `143=${monadOp.url}` })
   stops.unshift(() => baseOp.stop())
+  // Both operators share this process's env, and the Monad engine's signBlocker reads MAMORU_CHAIN_WRITES when it signs:
+  // without it every Monad op was discarded SIGN_CHAIN_NOT_ALLOWED (the harness, not prod, which runs one per process).
+  process.env.MAMORU_CHAIN_WRITES = '143'
   baseOpUrl = baseOp.url
   const bo = baseOp.operator
   check(bo.cfg.v6Policy?.policyId === 'conservador-live-v6' && bo.cfg.v6Policy.actionPolicy?.address.toLowerCase() === V3_BASE.toLowerCase() && bo.cfg.v6Policy.actionPolicy?.pauseGate?.toLowerCase() === GATE_V3_BASE.toLowerCase(), 'Base operator: v6 wired to V3 and the V3 gate from the registry', `${bo.cfg.v6Policy?.policyId}`)

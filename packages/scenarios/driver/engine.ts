@@ -78,17 +78,19 @@ const OP_GAS_UNITS = LAB_GAS_LIMITS.verificationGasLimit + LAB_GAS_LIMITS.callGa
  * limits come from the simulation the engine already runs, plus this stated margin, never from LAB_GAS_LIMITS:
  * - callGasLimit: the gas the account's execute used from the EntryPoint (`simulateFromEntryPoint`), x 5/4 + 30,000
  *   (the 63/64 rule over the nested calls of a mint or a swap, and state that moves between simulation and inclusion);
- * - verificationGasLimit: TIGHT_VERIFICATION_GAS, the SmartSession use-mode validation of one Mamoru session (UniAction,
- *   TimeFrame and UsageLimit policies, OwnableValidator) plus the prefund transfer: 310k-330k gas for an account's
- *   first userOp on the Monad fork (e2e-monad-writes.ts prints the figures), so 500k is a 60% margin. It only bounds
- *   the prefund: the bundle's own gas comes from its estimate (the operator's bundler), not from this limit;
+ * - verificationGasLimit: TIGHT_VERIFICATION_GAS, the SmartSession use-mode validation of one Mamoru session plus the
+ *   prefund transfer. A local fork (revm, Ethereum's gas schedule) under-measures Monad: Brais's first swap of his own
+ *   Monad Safe (1 Nov, MamoruActionPolicyV3 setup mode, whose first swap reads slot0, ticks and observe in validation)
+ *   used 395,733 in revm but needs between 500k and 600k on Monad's real node (eth_call of the same handleOps: 500k
+ *   AA23 out of gas, 600k accepted). 1M is a ~1.8x margin over that measure. It only bounds the prefund (about 0.1 MON
+ *   more per op at 200 gwei): the bundle's own gas comes from its estimate (the operator's bundler), not from this limit;
  * - preVerificationGas: what the EntryPoint does not meter, from the bytes of the packed userOp: 21,000 intrinsic, the
  *   calldata at 16 gas a byte (4 for a zero byte) of a handleOps carrying this op, and 30,000 for handleOps' own loop,
  *   the UserOperationEvent and the beneficiary payment.
  * Never above LAB_GAS_LIMITS: a limit that would be is refused (AA_GAS_MARGIN_EXCEEDED), not raised.
  */
 export const TIGHT_CALL_GAS = { num: 5n, den: 4n, plus: 30_000n } as const
-export const TIGHT_VERIFICATION_GAS = 500_000n
+export const TIGHT_VERIFICATION_GAS = 1_000_000n
 export const TIGHT_PRE_VERIFICATION_OVERHEAD = 21_000n + 30_000n
 
 /** Calldata gas of `data` at the pre-EIP-7623 schedule: 16 per non-zero byte, 4 per zero byte. */

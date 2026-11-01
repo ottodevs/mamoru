@@ -357,11 +357,13 @@ describe('a log range needs an independent witness', () => {
 })
 
 describe('log range per provider', () => {
-  test('the table: Alchemy free 10, publicnode and mainnet.base.org 2000, drpc 10000, anything else unlimited', () => {
+  test('the table: Alchemy free 10, publicnode and mainnet.base.org 2000, drpc 10000, Monad public 100, anything else unlimited', () => {
     expect(logRangeOf(ALCHEMY)).toBe(10)
     expect(logRangeOf(PUBLICNODE)).toBe(2_000)
     expect(logRangeOf(BASE_ORG)).toBe(2_000)
     expect(logRangeOf(DRPC)).toBe(10_000)
+    // Monad's public RPCs refuse an eth_getLogs over more than 100 blocks (1 Nov: the Monad engine's reviews all failed).
+    for (const u of ['https://rpc.monad.xyz', 'https://rpc1.monad.xyz', 'https://rpc3.monad.xyz', 'https://rpc-mainnet.monadinfra.com']) expect(logRangeOf(u)).toBe(100)
     expect(logRangeOf('http://127.0.0.1:8545/')).toBe(Number.POSITIVE_INFINITY)
     expect(logRangeOf('https://notalchemy.com.example/rpc')).toBe(Number.POSITIVE_INFINITY)
   })
