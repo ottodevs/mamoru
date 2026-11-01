@@ -20,7 +20,7 @@ import { BRIDGE_MONAD_CHAIN_ID, MonadBridge } from './bridge-monad.ts'
 import { CCTP_DOMAIN_MONAD, MESSAGE_TRANSMITTER_V2 } from './cctp.ts'
 import { BridgeOut, ETHEREUM_CHAIN_ID, L1_BUNDLER_TIMEOUT_MS, L1_HANDLE_OPS_GAS, L1_USDC } from './bridge-out.ts'
 import { L1Bundler, paymasterFromEnv } from './paymaster.ts'
-import { startRpcProxy } from './rpc-proxy.ts'
+import { L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, startRpcProxy, urlsFromEnv } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
 import { readSnapshot, SnapshotLoop, snapshotIntervalMs, type Snapshot } from './snapshot.ts'
 import { MULTICALL3 } from '@mamoru/rpc'
@@ -562,8 +562,18 @@ export async function bootOperator(o: BootOptions) {
   // sent by this same relayer key in its own nonce space there (as on Ethereum for bridge-out): not the Monad
   // operator's relayer, which is another key in another process. Fund its address with MON for the mints.
   let bridgeMonad: MonadBridge | null = null
+  // otto/mamoru#285: the Monad leg goes through its own proxy, like Base: MAMORU_MONAD_RPC_URL and any
+  // MAMORU_MONAD_RPC_TRUSTED for reads, public RPCs only for sends and log witnesses. Never one RPC alone.
+  let monadProxy: { url: string; stop: () => void } | null = null
   if (o.monadRpcUrl) {
-    const monad = createPublicClient({ transport: http(o.monadRpcUrl, { batch: true, timeout: 30_000 }) })
+    monadProxy = startRpcProxy(o.monadRpcUrl, {
+      trusted: urlsFromEnv('MAMORU_MONAD_RPC_TRUSTED', ''),
+      fallbacks: urlsFromEnv('MAMORU_MONAD_RPC_FALLBACKS', MONAD_PUBLIC_FALLBACKS),
+      logRanges: {},
+      chunkLogs: false,
+    })
+    const monadUrl = `${monadProxy.url}c/bridge-monad`
+    const monad = createPublicClient({ transport: http(monadUrl, { batch: true, timeout: 30_000 }) })
     // Review of #144: a wrong chain or domain refuses the boot; Monad unreachable does not stop the Base operator: the
     // leg starts without reading or sending anything on Monad until the same check passes.
     let checked = true
@@ -576,7 +586,7 @@ export async function bootOperator(o: BootOptions) {
     }
     // Review of #144: mints are writes; only a live Base operator sends them, and its relayer carries the same refusal.
     const mintRefusal = monadMintRefusal({ chainId, live })
-    const monadRelayer = mintRefusal === null ? new Relayer(relayerKey, monad, o.monadRpcUrl, BRIDGE_MONAD_CHAIN_ID, mintRefusal) : null
+    const monadRelayer = mintRefusal === null ? new Relayer(relayerKey, monad, monadUrl, BRIDGE_MONAD_CHAIN_ID, mintRefusal) : null
     bridgeMonad = new MonadBridge(o.stateDir, client, monad, monadRelayer, fetch, Date.now, baseRegistry, monadRegistry, checked ? undefined : () => checkMonadRpc(monad))
     const bm = bridgeMonad
     setInterval(() => void bm.tick(), 60_000)
@@ -683,18 +693,35 @@ export async function bootOperator(o: BootOptions) {
   // The RPC URL is a credential: env, like BASE_RPC_URL. Whether owners may use it is the /ops flag (engine settings
   // bridgeOut), per account, off by default and without a settings source.
   let bridgeOut: BridgeOut | null = null
+  // otto/mamoru#285: Ethereum goes through its own proxy, like Base: MAMORU_L1_RPC_URL and any MAMORU_L1_RPC_TRUSTED
+  // (keyed, another provider) for reads, public RPCs only for sends and log witnesses. Unreachable at boot turns
+  // bridge-out off with an alert; it never stops the Base operator. A wrong chain still refuses the boot.
+  let l1Proxy: { url: string; stop: () => void } | null = null
+  const l1Client = (url: string) => createPublicClient({ transport: http(url, { timeout: 30_000 }) })
+  let l1Ready: { l1: ReturnType<typeof l1Client>; l1Url: string; wei: bigint } | null = null
   if (o.l1RpcUrl) {
-    const l1 = createPublicClient({ transport: http(o.l1RpcUrl, { timeout: 30_000 }) })
+    l1Proxy = startRpcProxy(o.l1RpcUrl, {
+      trusted: urlsFromEnv('MAMORU_L1_RPC_TRUSTED', ''),
+      fallbacks: urlsFromEnv('MAMORU_L1_RPC_FALLBACKS', L1_PUBLIC_FALLBACKS),
+      logRanges: {},
+      chunkLogs: false,
+    })
+    const l1Url = `${l1Proxy.url}c/bridge-out`
+    const l1 = l1Client(l1Url)
     // viem errors quote the request URL, which carries the provider key: only fixed text leaves this block.
-    let wei: bigint
+    let chain: number | null = null
     try {
-      if ((await l1.getChainId()) !== ETHEREUM_CHAIN_ID) throw new Error('wrong chain')
-      wei = await l1.getBalance({ address: relayer.address })
-    } catch (e) {
-      throw new Error(`MAMORU_L1_RPC_URL is not a reachable Ethereum Mainnet RPC (${e instanceof Error && e.message === 'wrong chain' ? 'wrong chain' : 'unreachable'})`)
+      chain = await l1.getChainId()
+      if (chain === ETHEREUM_CHAIN_ID) l1Ready = { l1, l1Url, wei: await l1.getBalance({ address: relayer.address }) }
+    } catch {
+      logErr('[alert]', 'MAMORU_L1_RPC_URL and its trusted RPCs are unreachable: moves from Ethereum are off until the operator restarts')
     }
+    if (chain !== null && chain !== ETHEREUM_CHAIN_ID) throw new Error('MAMORU_L1_RPC_URL is not an Ethereum Mainnet RPC (wrong chain)')
+  }
+  if (l1Ready) {
+    const { l1, l1Url, wei } = l1Ready
     const enabledFor = (accountKey: string) => settings?.forAccount(accountKey).settings.bridgeOut?.enabled === true
-    const l1Relayer = new Relayer(relayerKey, l1, o.l1RpcUrl, ETHEREUM_CHAIN_ID)
+    const l1Relayer = new Relayer(relayerKey, l1, l1Url, ETHEREUM_CHAIN_ID)
     // #180: with an ERC-20 paymaster the account pays its own gas in USDC. The operator bundles the userOp itself on a
     // second loopback bundler (no ERC-7562 factory-stake rule, so the Safe deploys in initCode): the relayer fronts
     // handleOps within the bridge-out gas guard and the EntryPoint refunds it from the paymaster's deposit.
@@ -753,6 +780,8 @@ export async function bootOperator(o: BootOptions) {
       server.stop(true)
       bundler?.stop()
       proxy.stop()
+      l1Proxy?.stop()
+      monadProxy?.stop()
       rpcMetrics.persist()
     },
   }

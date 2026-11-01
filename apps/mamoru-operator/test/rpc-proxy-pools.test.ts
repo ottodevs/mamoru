@@ -1,0 +1,68 @@
+import { describe, expect, test } from 'bun:test'
+import { L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, startRpcProxy, urlsFromEnv } from '../src/rpc-proxy.ts'
+
+// otto/mamoru#285: Ethereum and the Monad leg are never served by one RPC alone.
+describe('per-chain pools (otto/mamoru#285)', () => {
+  test('urlsFromEnv reads the named list, else the default; blanks dropped', () => {
+    expect(urlsFromEnv('X', 'https://a,https://b', { X: ' https://c , ,https://d' })).toEqual(['https://c', 'https://d'])
+    expect(urlsFromEnv('X', 'https://a,https://b', {})).toEqual(['https://a', 'https://b'])
+    expect(urlsFromEnv('X', '', {})).toEqual([])
+  })
+
+  test('the public defaults are several distinct https hosts per chain, with no key in them', () => {
+    for (const list of [L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS]) {
+      const urls = list.split(',')
+      expect(urls.length).toBeGreaterThanOrEqual(5)
+      expect(new Set(urls.map((u) => new URL(u).host)).size).toBe(urls.length)
+      for (const u of urls) {
+        expect(u.startsWith('https://')).toBe(true)
+        expect(u).not.toMatch(/key|token|demo/i)
+      }
+    }
+  })
+
+  test('a decision read fails over from the upstream to a trusted provider, never to a public one', async () => {
+    const seen: string[] = []
+    const proxy = startRpcProxy('https://upstream.example/k', {
+      trusted: ['https://trusted.example/k'],
+      fallbacks: ['https://public.example'],
+      logRanges: {},
+      chunkLogs: false,
+      fetch: async (url: string) => {
+        seen.push(new URL(url).host)
+        if (url.startsWith('https://upstream')) return new Response('slow down', { status: 429 })
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '0x1' })
+      },
+    })
+    try {
+      const res = await fetch(`${proxy.url}c/bridge-out`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getBalance', params: ['0x0000000000000000000000000000000000000001', 'latest'] }) })
+      expect(((await res.json()) as { result: string }).result).toBe('0x1')
+      expect(seen).toContain('trusted.example')
+      expect(seen).not.toContain('public.example')
+    } finally {
+      proxy.stop()
+    }
+  })
+
+  test('a send may go to a public provider when the upstream and trusted refuse', async () => {
+    const seen: string[] = []
+    const proxy = startRpcProxy('https://upstream.example/k', {
+      trusted: [],
+      fallbacks: ['https://public.example'],
+      logRanges: {},
+      chunkLogs: false,
+      fetch: async (url: string) => {
+        seen.push(new URL(url).host)
+        if (url.startsWith('https://upstream')) return new Response('down', { status: 503 })
+        return Response.json({ jsonrpc: '2.0', id: 1, result: `0x${'ab'.repeat(32)}` })
+      },
+    })
+    try {
+      const res = await fetch(`${proxy.url}c/bridge-out`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_sendRawTransaction', params: ['0x02'] }) })
+      expect(((await res.json()) as { result: string }).result).toBe(`0x${'ab'.repeat(32)}`)
+      expect(seen).toContain('public.example')
+    } finally {
+      proxy.stop()
+    }
+  })
+})

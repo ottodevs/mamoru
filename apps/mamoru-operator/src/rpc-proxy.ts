@@ -16,6 +16,19 @@ const DEFAULT_FALLBACKS = 'https://base-rpc.publicnode.com,https://base.drpc.org
 
 type Env = Record<string, string | undefined>
 
+/**
+ * otto/mamoru#285: public RPCs for the chains the Base operator also touches (Ethereum for bridge-out, Monad for the v6
+ * bridge leg). Probed 2026-11-01 (otto/mamoru-astro#42): each answered chain id, balance and Multicall3. Through the
+ * proxy they carry only sends and log witnesses, never a read that decides what to sign.
+ */
+export const L1_PUBLIC_FALLBACKS = 'https://rpc.mevblocker.io,https://ethereum-rpc.publicnode.com,https://public.1rpc.io/eth,https://eth.drpc.org,https://eth-mainnet.public.blastapi.io'
+export const MONAD_PUBLIC_FALLBACKS = 'https://rpc.monad.xyz,https://rpc2.monad.xyz,https://rpc3.monad.xyz,https://monad-mainnet.rpc.sentio.xyz,https://monad-mainnet.drpc.org'
+
+/** A comma separated URL list from `name`, or `fallback` when unset. Read when called, like the two below. */
+export function urlsFromEnv(name: string, fallback: string, env: Env = process.env): string[] {
+  return (env[name] ?? fallback).split(',').map((u) => u.trim()).filter(Boolean)
+}
+
 /** Read when the proxy starts, never at module load: main.ts fills process.env from the env file after its imports ran. */
 export function fallbacksFromEnv(env: Env = process.env): string[] {
   return (env.MAMORU_RPC_FALLBACKS ?? DEFAULT_FALLBACKS).split(',').map((u) => u.trim()).filter(Boolean)
@@ -149,6 +162,8 @@ export type RpcProxyOptions = {
   logRanges?: Record<string, number>
   /** Keyed fallbacks trusted like the upstream; default MAMORU_RPC_TRUSTED, read now. */
   trusted?: string[]
+  /** Split eth_getLogs into maxLogRange chunks on the upstream; default: Alchemy upstream or MAMORU_LOG_RANGE set (a Base setting). */
+  chunkLogs?: boolean
   /** How long a trusted block hash may witness a log range; default WITNESS_TTL_MS. Tests shorten it. */
   witnessTtlMs?: number
   /** Tests: the upstream transport. */
@@ -194,7 +209,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   let id = 0
   const local = isLoopback(upstream)
   // Chunk getLogs for Alchemy (free tier: 10 blocks) or when MAMORU_LOG_RANGE is set; otherwise the range goes as is.
-  const chunkLogs = /alchemy/i.test(new URL(upstream).hostname) || !!process.env.MAMORU_LOG_RANGE
+  const chunkLogs = opts.chunkLogs ?? (/alchemy/i.test(new URL(upstream).hostname) || !!process.env.MAMORU_LOG_RANGE)
   const trustedFallbacks = (opts.trusted ?? trustedFromEnv()).filter((t) => t !== upstream)
   /** The upstream and the trusted keyed providers: the only ones a decision read may come from. */
   const trusted = local ? [upstream] : [upstream, ...trustedFallbacks]
