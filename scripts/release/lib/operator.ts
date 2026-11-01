@@ -63,3 +63,36 @@ export function newEnv(before: string[], after: string[], envFile: string): { na
 export function loopsStarted(journal: string): number {
   return new Set([...journal.matchAll(/^\[engine ([^\]]+)\] loop started/gm)].map((m) => m[1])).size
 }
+
+export type UnitTarget = { dir: string; envFile: string; metricsUrl: string }
+
+/** `systemctl show -p Environment --value`: space-separated K=V pairs (a value may be "quoted"). */
+export function unitEnvironment(value: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const m of value.matchAll(/(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=("([^"]*)"|\S*)/g)) out[m[1]!] = m[3] ?? m[2]!
+  return out
+}
+
+/**
+ * otto/mamoru#241: the dir, env file and metrics URL of the unit being redeployed, read from the unit itself
+ * (WorkingDirectory, Environment=MAMORU_OPERATOR_ENV, PORT in that env file), so naming a unit can never check out
+ * or verify another operator's. A given override must agree with the unit; a string is the reason to refuse.
+ */
+export function unitTarget(
+  unit: string,
+  facts: { workingDirectory: string; environment: string; envFileText: (path: string) => string | null; realpath: (p: string) => string },
+  given: { dir?: string; envFile?: string; metricsUrl?: string },
+  defaultEnvFile: string,
+): UnitTarget | string {
+  if (!facts.workingDirectory) return `unit ${unit} has no WorkingDirectory (is it installed?)`
+  const dir = facts.realpath(facts.workingDirectory)
+  const envFile = unitEnvironment(facts.environment).MAMORU_OPERATOR_ENV ?? defaultEnvFile
+  const text = facts.envFileText(envFile)
+  if (text === null) return `unit ${unit}: env file ${envFile} not readable`
+  const port = text.match(/^PORT=["']?(\d+)["']?\s*$/m)?.[1] ?? '8787'
+  const metricsUrl = `http://127.0.0.1:${port}/metrics`
+  if (given.dir !== undefined && facts.realpath(given.dir) !== dir) return `MAMORU_OPERATOR_DIR=${given.dir} is not unit ${unit}'s WorkingDirectory ${dir}`
+  if (given.envFile !== undefined && given.envFile !== envFile) return `MAMORU_OPERATOR_ENV=${given.envFile} is not unit ${unit}'s env file ${envFile}`
+  if (given.metricsUrl !== undefined && given.metricsUrl.replace(/\/+$/, '') !== metricsUrl) return `MAMORU_OPERATOR_METRICS=${given.metricsUrl} is not unit ${unit}'s ${metricsUrl} (PORT in ${envFile})`
+  return { dir, envFile, metricsUrl }
+}

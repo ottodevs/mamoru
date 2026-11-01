@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-// `bun run operator:deploy <sha> --as <session> [--check] [--rollback] [--reason "<why>"]` — moves the live operator to ONE
+// `bun run operator:deploy <sha> --as <session> [--unit <systemd unit>] [--check] [--rollback] [--reason "<why>"]` — moves the
+// live operator (default unit mamoru-operator; mamoru-operator-monad for Monad) to ONE
 // named commit of origin/main. Coordinator only (lib/lease.ts). One redeploy at a time (a lock beside the lease).
 // Refuses a sha that would drop work the operator already runs, unless --rollback. Checks out the sha in the
 // operator's worktree, installs dependencies when the lockfile changed, restarts the unit, and waits for the signed
@@ -10,28 +11,55 @@ import { appendFileSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { metricsSignature } from '../../packages/operator-auth/src/index.ts'
 import { fetchRefs, isAncestor } from './lib/git.ts'
 import { OP_LOCK, refuseLeftoverWork, requireLease, sessionName, underFlock, WORK_LOCK } from './lib/lease.ts'
-import { envReads, fatalLines, healthy, loopsStarted, newEnv, refuseDeploy, signedOk, type MetricsView } from './lib/operator.ts'
+import { envReads, fatalLines, healthy, loopsStarted, newEnv, refuseDeploy, signedOk, unitTarget, type MetricsView } from './lib/operator.ts'
 
 const HOME = process.env.HOME!
 const root = new URL('../../', import.meta.url).pathname
-const opDir = realpathSync(process.env.MAMORU_OPERATOR_DIR ?? `${HOME}/.local/share/mamoru-operator/current`)
-const envFile = process.env.MAMORU_OPERATOR_ENV ?? `${HOME}/.config/mamoru-operator/env`
-const unit = process.env.MAMORU_OPERATOR_UNIT ?? 'mamoru-operator'
-const metricsUrl = process.env.MAMORU_OPERATOR_METRICS ?? 'http://127.0.0.1:8787/metrics'
+const argv = process.argv.slice(2)
+function refuse(why: string): never {
+  console.error(`refusing: ${why}`)
+  process.exit(1)
+}
+const unitArg = (() => {
+  const i = argv.indexOf('--unit')
+  return i >= 0 ? argv[i + 1] : undefined
+})()
+if (unitArg !== undefined && process.env.MAMORU_OPERATOR_UNIT !== undefined && unitArg !== process.env.MAMORU_OPERATOR_UNIT) refuse(`--unit ${unitArg} and MAMORU_OPERATOR_UNIT=${process.env.MAMORU_OPERATOR_UNIT} disagree`)
+const unit = unitArg ?? process.env.MAMORU_OPERATOR_UNIT ?? 'mamoru-operator'
+// otto/mamoru#241: dir, env file and metrics come from the unit; the MAMORU_OPERATOR_* overrides may only agree with it.
+const target = (() => {
+  const show = (p: string) => Bun.spawnSync(['systemctl', '--user', 'show', unit, '-p', p, '--value'], { stdout: 'pipe' }).stdout.toString().trim()
+  const t = unitTarget(
+    unit,
+    {
+      workingDirectory: show('WorkingDirectory'),
+      environment: show('Environment'),
+      envFileText: (path) => {
+        try {
+          return readFileSync(path, 'utf8')
+        } catch {
+          return null
+        }
+      },
+      realpath: (p) => realpathSync(p.replace(/^~(?=\/)/, HOME)),
+    },
+    { dir: process.env.MAMORU_OPERATOR_DIR, envFile: process.env.MAMORU_OPERATOR_ENV, metricsUrl: process.env.MAMORU_OPERATOR_METRICS },
+    `${HOME}/.config/mamoru-operator/env`,
+  )
+  return typeof t === 'string' ? refuse(t) : t
+})()
+const opDir = target.dir
+const envFile = target.envFile
+const metricsUrl = target.metricsUrl
 const logFile = `${HOME}/.local/state/mamoru-operator/deploys.jsonl`
 const BOOT_TIMEOUT_MS = 120_000
 
-const argv = process.argv.slice(2)
 const sha = argv.find((a) => /^[0-9a-f]{7,40}$/.test(a)) ?? ''
 const rollback = argv.includes('--rollback')
 const reason = (() => {
   const i = argv.indexOf('--reason')
   return i >= 0 ? (argv[i + 1] ?? '') : ''
 })()
-function refuse(why: string): never {
-  console.error(`refusing: ${why}`)
-  process.exit(1)
-}
 
 // The whole redeploy (change, verification and any restore) runs as its own transient systemd unit, so it finishes
 // even when the session that started it is killed: the caller only waits for it and prints its log.
