@@ -8,11 +8,14 @@ import { SIM_CALL_GAS, simulateFromEntryPoint } from './index.ts'
 const SAFE = '0xD72A7cB9773Dc58a9B944f9737996F45dBD1F108'
 const EP = address('EntryPointV07', monadRegistry)
 
-function fakeClient(gasUsed: bigint, estimate = 176_081n) {
-  const seen: { params?: unknown; estimate?: unknown } = {}
+function fakeClient(gasUsed: bigint, estimate = 176_081n, refusesContractSender = false) {
+  const seen: { params?: unknown; estimate?: unknown; requests: number } = { requests: 0 }
   const client = {
     request: async ({ params }: { params: unknown }) => {
+      seen.requests++
       seen.params = params
+      const block = (params as [{ blockStateCalls: [{ stateOverrides?: unknown }] }])[0].blockStateCalls[0]
+      if (refusesContractSender && !block.stateOverrides) throw Object.assign(new Error('Missing or invalid parameters.\nDetails: sender not eoa'), { details: 'sender not eoa' })
       const calls = (params as [{ blockStateCalls: [{ calls: unknown[] }] }])[0].blockStateCalls[0].calls
       return [{ calls: calls.map(() => ({ status: '0x1', returnData: '0x' + '00'.repeat(32), gasUsed: `0x${gasUsed.toString(16)}`, logs: [] })) }]
     },
@@ -25,11 +28,21 @@ function fakeClient(gasUsed: bigint, estimate = 176_081n) {
 }
 
 describe('simulateFromEntryPoint on a gas_limit chain (Monad)', () => {
-  test('no explicit validation flag, and the EntryPoint is given no code in the simulated block', async () => {
+  test('no explicit validation flag, and no state override where the plain call is accepted (Base)', async () => {
     const { client, seen } = fakeClient(90_000n)
     await simulateFromEntryPoint(client, SAFE, '0x', 1n, monadRegistry)
-    const [opts] = seen.params as [{ validation?: unknown; blockStateCalls: [{ stateOverrides?: Record<string, { code: string }> }] }]
+    const [opts] = seen.params as [{ validation?: unknown; blockStateCalls: [{ stateOverrides?: unknown }] }]
     expect('validation' in opts).toBe(false)
+    expect(opts.blockStateCalls[0].stateOverrides).toBeUndefined()
+    expect(seen.requests).toBe(1)
+  })
+
+  test('"sender not eoa" (Monad): retried once with the EntryPoint given no code in the simulated block', async () => {
+    const { client, seen } = fakeClient(90_000n, 0n, true)
+    const sim = await simulateFromEntryPoint(client, SAFE, '0x', 1n, monadRegistry)
+    expect(sim.ok).toBe(true)
+    expect(seen.requests).toBe(2)
+    const [opts] = seen.params as [{ blockStateCalls: [{ stateOverrides?: Record<string, { code: string }> }] }]
     expect(opts.blockStateCalls[0].stateOverrides).toEqual({ [EP]: { code: '0x' } })
   })
 
@@ -37,7 +50,7 @@ describe('simulateFromEntryPoint on a gas_limit chain (Monad)', () => {
     const { client, seen } = fakeClient(SIM_CALL_GAS)
     const sim = await simulateFromEntryPoint(client, SAFE, '0x1234', 7n, monadRegistry)
     expect(sim.gasUsed).toBe(176_081n)
-    expect(seen.estimate).toMatchObject({ account: EP, to: SAFE, data: '0x1234', blockNumber: 7n })
+    expect(seen.estimate).toMatchObject({ account: EP, to: SAFE, data: '0x1234', blockTag: 'latest' })
   })
 
   test('a real gasUsed (Base) is kept, with no estimate', async () => {

@@ -657,7 +657,11 @@ export async function simulateCalls(client: PublicClient, calls: SimCall[], bloc
       params: [{ blockStateCalls: [{ ...(stateOverrides ? { stateOverrides } : {}), calls: calls.map((c) => ({ ...c, gas: `0x${SIM_CALL_GAS.toString(16)}` })) }] }, `0x${blockNumber.toString(16)}`] as never,
     })) as typeof out
   } catch (e) {
-    throw new ReasonError('EHG_SIM_UNAVAILABLE', (e as Error).message.split('\n')[0])
+    // The provider's own words (viem's `details`), not only viem's first line: "Missing or invalid parameters." alone
+    // does not say which (otto/mamoru#260: Monad's "sender not eoa").
+    const { details } = e as { details?: string }
+    const first = (e as Error).message.split('\n')[0] ?? ''
+    throw new ReasonError('EHG_SIM_UNAVAILABLE', details && !first.includes(details) ? `${first} (${details})` : first)
   }
   return out[0]!.calls.map((c) => ({
     status: c.status === '0x1' ? 'success' : 'reverted',
@@ -690,10 +694,19 @@ export async function simulateFromEntryPoint(client: PublicClient, account: Addr
     ...TOKENS.map((t) => ({ to: address(t, registry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [account] }) })),
     { to: npm, data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [account] }) },
   ]
-  // otto/mamoru#260: Monad's eth_simulateV1 refuses a sender with code ("sender not eoa"). The EntryPoint's code never runs
-  // in this call (it is only msg.sender), so the simulated block gives it none; the account's checks see the same sender.
   const ep = address('EntryPointV07', registry)
-  const res = await simulateCalls(client, [...reads, { from: ep, to: account, data: callData }, ...reads], blockNumber, { [ep]: { code: '0x' } })
+  const batch = [...reads, { from: ep, to: account, data: callData }, ...reads]
+  // otto/mamoru#260: Monad's eth_simulateV1 refuses a sender with code ("sender not eoa"). Only then, and only for that
+  // provider's answer, the simulated block gives the EntryPoint no code (it is only msg.sender here; every target a grant
+  // allows is a pinned token, the position manager, the router or the action policy, none of which reads it). Base and any
+  // provider that accepts the plain call keep the exact simulation they had (review of #260, P1).
+  let res: SimCallResult[]
+  try {
+    res = await simulateCalls(client, batch, blockNumber)
+  } catch (e) {
+    if (!(e instanceof ReasonError) || !/sender not eoa/i.test(e.detail ?? e.message)) throw e
+    res = await simulateCalls(client, batch, blockNumber, { [ep]: { code: '0x' } })
+  }
   const n = reads.length
   const exec = res[n]!
   const word = (r: SimCallResult) => BigInt(r.returnData === '0x' ? 0 : r.returnData)
@@ -707,7 +720,9 @@ export async function simulateFromEntryPoint(client: PublicClient, account: Addr
   let gasUsed = exec.gasUsed
   if (exec.status === 'success' && gasUsed >= SIM_CALL_GAS) {
     try {
-      gasUsed = await client.estimateGas({ account: address('EntryPointV07', registry), to: account, data: callData, blockNumber })
+      // At the head, not at `blockNumber`: eth_simulateV1 ran the call in the block after it (review of #260, P1), and the
+      // head is the state the userOp lands on. The tight limits add their own margin on top (tightUserOpGas).
+      gasUsed = await client.estimateGas({ account: ep, to: account, data: callData, blockTag: 'latest' })
     } catch (e) {
       throw new ReasonError('EHG_SIM_UNAVAILABLE', `gas estimate: ${(e as Error).message.split('\n')[0]}`)
     }
