@@ -128,8 +128,11 @@ export type PolicyVersion = {
    * `vaults` (otto/mamoru#210): ERC-4626 vaults of the savings asset that serve the bucket instead of a pool, in order
    * of preference; a vault bucket has no pools. `stables-lp` is the USDC/USDT pool kept as an exit only once the
    * stables bucket moves to vaults (v7).
+   * `exitOptIn` (otto/mamoru#210, only on a bucket at preference 0): its positions are held, not wound down, until the
+   * account opts in to the exit (decide's `exitPreferenceZero`, from the per-account `stables_lp_exit` flag); then they
+   * are emptied whatever their size. Absent: a bucket at 0 is reduced as before (v6's USDC/cbBTC).
    */
-  buckets: { id: 'stables' | 'stables-lp' | 'btc-usdc' | 'risk'; preference: number; pools: RegistryName[]; vaults?: RegistryName[] }[]
+  buckets: { id: 'stables' | 'stables-lp' | 'btc-usdc' | 'risk'; preference: number; pools: RegistryName[]; vaults?: RegistryName[]; exitOptIn?: true }[]
   /**
    * otto/mamoru#201/#213: buckets served on another chain, by the account's sleeve there (same Safe address, its own
    * policy). Their pools resolve in that chain's registry, never this one, so nothing that walks `buckets` sees them.

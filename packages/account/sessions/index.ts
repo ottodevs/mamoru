@@ -14,7 +14,7 @@ import {
 import { getUserOperationHash, toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import { ReasonError, type Address, type Hex } from '@mamoru/domain'
 import { baseRegistry, address, entry, isDeployed, entryPointV07Abi, moduleRegistryAbi, safe7579Abi, smartSessionAbi, type Registry } from '@mamoru/registry'
-import { PARAM_CONDITIONS, POLICY_INCREASE_SIG, decodeGasCaps, decodeMamoruInitAny, encodeGasCaps, encodeMamoruInit, encodeMamoruInitAtSetup, mamoruInitFor, v4PoolOf, validGasCaps, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { PARAM_CONDITIONS, POLICY_INCREASE_SIG, decodeGasCaps, decodeMamoruInitAny, decodeVaultFamilyInit, encodeGasCaps, encodeMamoruInit, encodeMamoruInitAtSetup, encodeVaultFamilyInit, mamoruInitFor, v4PoolOf, validGasCaps, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   CALLTYPE_BATCH,
   CALLTYPE_SINGLE,
@@ -141,12 +141,53 @@ function isBridgeAction(a: SessionGrant['actions'][number], registry: Registry):
 }
 
 /**
- * otto/mamoru#210: an action on an ERC-4626 vault of the registry (a `vault-supply` deposit or redeem), or any rule that
- * names one (the USDC approval whose spender is the vault: review of #152, it targets the token, not the vault).
+ * otto/mamoru#210: an action on an ERC-4626 vault of the registry, or any rule that names one (a USDC approval whose
+ * spender rule is the vault: it targets the token, not the vault).
  */
 function isVaultAction(a: SessionGrant['actions'][number], registry: Registry): boolean {
   const vaults = registry.entries.filter((e) => e.kind === 'vault')
   return vaults.some((e) => isAddressEqual(e.address, a.targetAddress) || a.params.some((p) => p.ref === BigInt(e.address)))
+}
+
+const VAULT_DEPOSIT_SIG = 'deposit(uint256,address)'
+const VAULT_REDEEM_SIG = 'redeem(uint256,address,address)'
+
+/**
+ * otto/mamoru#210: what a `vault-supply` grant must be encoded with: MamoruActionPolicyV3 as its ONLY action policy, with
+ * the vault-family Init (`abi.encode(1, generation)`), and MamoruGasPolicy, both the configured ones. Its actions are the
+ * vault's asset `approve`, the vault's `deposit` and `redeem`, with no param rule: V3 decides every recipient, owner,
+ * spender and the allowlist (contracts/action-policy/SECURITY.md, FAMILY_VAULTS). Never MamoruPauseGate.
+ */
+export function assertVaultPolicies(grant: SessionGrant, second: SecondActionPolicy | undefined, registry: Registry = baseRegistry): void {
+  if (!grant.vault || grant.pool) mismatch(grant, 'a vault-supply grant names one vault and no pool')
+  if (!grant.actionPolicyOnly || !grant.requiresActionPolicy || grant.requiresPauseGate) mismatch(grant, 'a vault-supply grant runs on MamoruActionPolicyV3 alone')
+  if (!second || isAddressEqual(second.policy, zeroAddress)) throw new ReasonError('SESSION_ACTION_POLICY_MISSING', `${grant.name}:${grant.vault}: needs MamoruActionPolicyV3 as its action policy`)
+  if (!second.gas || isAddressEqual(second.gas.policy, zeroAddress)) throw new ReasonError('SESSION_ACTION_POLICY_MISSING', `${grant.name}:${grant.vault}: needs MamoruGasPolicy as a userOp policy`)
+  if (!second.expected) mismatch(grant, 'no configured policy addresses to check against')
+  const { actionPolicy, gasPolicy } = second.expected
+  if (isAddressEqual(actionPolicy, zeroAddress) || isAddressEqual(gasPolicy, zeroAddress)) mismatch(grant, 'configured policy address is zero')
+  if (!isAddressEqual(second.policy, actionPolicy)) mismatch(grant, `action policy ${second.policy} is not the configured MamoruActionPolicyV3 ${actionPolicy}`)
+  if (!isAddressEqual(second.gas.policy, gasPolicy)) mismatch(grant, `gas policy ${second.gas.policy} is not the configured MamoruGasPolicy ${gasPolicy}`)
+  if (isAddressEqual(actionPolicy, gasPolicy)) mismatch(grant, 'action and gas policy are the same address')
+  if (!grant.actionPolicy || !isAddressEqual(grant.actionPolicy, second.policy)) mismatch(grant, `grant bound to ${grant.actionPolicy ?? 'nothing'}, not ${second.policy}`)
+  let caps
+  try {
+    caps = decodeGasCaps(second.gas.initData)
+  } catch {
+    mismatch(grant, 'gas policy init data is not MamoruGasPolicy.Caps')
+  }
+  if (!validGasCaps(caps)) mismatch(grant, 'gas caps MamoruGasPolicy would refuse (a zero cap, or maxFeePerGas under the priority cap)')
+  if (decodeVaultFamilyInit(second.initData) === null) mismatch(grant, 'action policy init data is not the vault-family Init')
+  const vault = entry(grant.vault, registry)
+  if (vault.kind !== 'vault' || !vault.asset) mismatch(grant, `${grant.vault} is not a registry vault`)
+  const vaultAt = getAddress(vault.address)
+  const asset = address(vault.asset as never, registry)
+  if (!grant.actions.length) mismatch(grant, 'no action')
+  for (const a of grant.actions) {
+    if (a.params.length) mismatch(grant, 'a vault-supply grant carries no UniActionPolicy rules')
+    const ok = (a.signature === APPROVE_SIG && isAddressEqual(a.targetAddress, asset)) || ((a.signature === VAULT_DEPOSIT_SIG || a.signature === VAULT_REDEEM_SIG) && isAddressEqual(a.targetAddress, vaultAt))
+    if (!ok) mismatch(grant, `${a.signature} on ${a.targetAddress} is not the vault's approve, deposit or redeem`)
+  }
 }
 
 /** otto/mamoru#213: a `requiresPauseGate` grant carries the configured MamoruPauseGate and MamoruGasPolicy, and no action policy. */
@@ -256,8 +297,11 @@ export function toSmartSession(grant: SessionGrant, policies?: SessionPolicies, 
   if ('requiresGasPolicy' in grant) mismatch(grant, 'requiresGasPolicy is retired: rebuild the grant (requiresPauseGate)')
   if (!grant.requiresPauseGate && grant.actions.some((a) => isBridgeAction(a, registry))) mismatch(grant, 'a bridge action needs requiresPauseGate')
   if (grant.actionPolicyOnly && (!grant.requiresActionPolicy || grant.requiresPauseGate)) mismatch(grant, 'an actionPolicyOnly grant is a MamoruActionPolicy grant')
-  if (!grant.requiresPauseGate && grant.actions.some((a) => isVaultAction(a, registry))) mismatch(grant, 'a vault action needs requiresPauseGate')
-  if (grant.requiresPauseGate) assertGated(grant, policies)
+  // otto/mamoru#210: a vault is reached only through a vault-supply grant (MamoruActionPolicyV3's vault family), and a
+  // vault-supply grant reaches nothing else; a stripped or hand-built grant is refused rather than encoded.
+  if (!grant.vault && grant.actions.some((a) => isVaultAction(a, registry))) mismatch(grant, 'a vault action is only in a vault-supply grant')
+  if (grant.vault) assertVaultPolicies(grant, isActionPolicy(policies) ? policies : undefined, registry)
+  else if (grant.requiresPauseGate) assertGated(grant, policies)
   else if (grant.requiresActionPolicy) assertV4Policies(grant, isActionPolicy(policies) ? policies : undefined, registry)
   const second = isActionPolicy(policies) ? { policy: policies.policy, initData: policies.initData } : policies && 'gate' in policies ? policies.gate : undefined
   return {
@@ -325,6 +369,8 @@ export function v4PoliciesFor(
       return { gate: { policy: d.pauseGate, initData: '0x' }, gas, expected: { pauseGate: d.pauseGate, gasPolicy: d.gasPolicy } }
     }
     if (!g.requiresActionPolicy) return undefined
+    // otto/mamoru#210: a vault-supply grant takes V3's vault-family Init (no pool, nothing live read at the enable).
+    if (g.vault) return { policy: d.actionPolicy, initData: encodeVaultFamilyInit(generation), gas, expected: { actionPolicy: d.actionPolicy, gasPolicy: d.gasPolicy } }
     const spec = v4PoolOf(g.pool, registry.chainId)
     if (!spec) mismatch(g, 'no v4 pool parameters for this pool')
     const admit = firstOfPool.get(g.pool!) === i ? [...(admitByPool[g.pool!] ?? [])] : []

@@ -390,17 +390,21 @@ const VAULT_REDEEM = 'redeem(uint256,address,address)'
 export type VaultSupplySpec = {
   /** Registry name of the ERC-4626 vault (kind `vault`); its asset is the savings asset. */
   vault: string
-  caps: { perCall: string; total: string }
 }
 
 /**
- * otto/mamoru#210: the stables bucket supplies USDC to an ERC-4626 vault and takes it back, and nothing else. The
- * deposit's shares go to this account (`receiver`), and a redeem pays this account from this account's own shares
- * (`receiver`, `owner`), so a leaked key can only move savings from the Safe into the vault and back, at no cost but gas
- * (MamoruGasPolicy). The deposit is capped per call and over the approval; the redeem is not, as it can only bring money
- * home. The approval names the vault alone, so it is spendable only by `deposit`. MamoruPauseGate stops both while the
- * guardian has the account paused (`requiresPauseGate`); MamoruActionPolicy knows only Uniswap and never takes it.
- * `withdraw` and `mint` are not offered: one way in and one way out keep the rules to fixed-position words.
+ * otto/mamoru#210: the stables bucket supplies USDC to an ERC-4626 vault and takes it back, and nothing else, under
+ * MamoruActionPolicyV3 alone (its FAMILY_VAULTS routes, `encodeVaultFamilyInit`), as v6's Uniswap grants run since #251.
+ * V3 decides every rule, so the actions carry no UniActionPolicy param rule:
+ * - `deposit`: `receiver == account`; `redeem`: `receiver == account` and `owner == account`, so a leaked key can only
+ *   move savings from the Safe into the vault and back;
+ * - the vault must be on V3's allowlist (constructor only: gtUSDCp and waBasUSDC on Base), and the grant names it as the
+ *   action target, a second, owner-signed list;
+ * - `approve` only of a listed vault's asset, only to that vault;
+ * - the guardian's pause and the generation (renewal) stop it as every V3 grant. No MamoruPauseGate.
+ * There is no amount cap on chain (contracts/action-policy/SECURITY.md, "No amount cap": deposits and redeems keep the
+ * value in the account's own position); the engine sizes each deposit to the bucket's gap and approves that exact amount.
+ * `withdraw` and `mint` are not offered: one way in and one way out.
  */
 export function vaultSupplyGrant(p: VaultSupplySpec, usage: Usage): GrantTemplate {
   return {
@@ -408,33 +412,12 @@ export function vaultSupplyGrant(p: VaultSupplySpec, usage: Usage): GrantTemplat
     vault: p.vault,
     perPosition: false,
     ...usageOf(usage),
-    requiresPauseGate: true,
+    requiresActionPolicy: true,
+    actionPolicyOnly: true,
     actions: [
-      {
-        target: 'USDC',
-        signature: APPROVE,
-        params: [
-          { field: 'spender', index: 0, condition: 'EQUAL', ref: p.vault, denial: 'POLICY_DENIED_APPROVAL' },
-          { field: 'amount', index: 1, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.perCall}`, denial: 'POLICY_DENIED_APPROVAL' },
-        ],
-      },
-      {
-        target: p.vault,
-        signature: VAULT_DEPOSIT,
-        params: [
-          { field: 'assets', index: 0, condition: 'LESS_THAN_OR_EQUAL', ref: `cap:${p.caps.perCall}`, cumulative: `cap:${p.caps.total}`, denial: 'POLICY_DENIED_AMOUNT' },
-          { field: 'receiver', index: 1, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },
-        ],
-      },
-      {
-        target: p.vault,
-        signature: VAULT_REDEEM,
-        params: [
-          { field: 'shares', index: 0, condition: 'GREATER_THAN', ref: 0n, denial: 'POLICY_DENIED_AMOUNT' },
-          { field: 'receiver', index: 1, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },
-          { field: 'owner', index: 2, condition: 'EQUAL', ref: 'ACCOUNT', denial: 'POLICY_DENIED_RECIPIENT' },
-        ],
-      },
+      { target: 'USDC', signature: APPROVE, params: [] },
+      { target: p.vault, signature: VAULT_DEPOSIT, params: [] },
+      { target: p.vault, signature: VAULT_REDEEM, params: [] },
     ],
   }
 }

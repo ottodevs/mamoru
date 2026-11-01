@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { baseRegistry, address } from '@mamoru/registry'
-import { computeCaps, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, conservadorLiveV7, POLICY_INCREASE_SIG, conservadorV1, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, grantKey, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_GAS_CAPS, V4_POOLS, v4BudgetCaps, type SessionGrant } from '@mamoru/policy'
+import { computeCaps, encodeVaultFamilyInit, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, conservadorLiveV7, POLICY_INCREASE_SIG, conservadorV1, decodeMamoruInit, encodeGasCaps, encodeMamoruInit, grantKey, instantiateGrant, mamoruInitFor, retargetToPolicy, V4_GAS_CAPS, V4_POOLS, v4BudgetCaps, type SessionGrant } from '@mamoru/policy'
 import { activationCall, selfAttestCall, selfRevokeAttestationCall, toSmartSession, v4DeploymentOf, v4PoliciesFor, type SecondActionPolicy } from './index.ts'
 
 const ctx = {
@@ -290,29 +290,39 @@ describe('otto/mamoru#213: bridge-out takes MamoruPauseGate and MamoruGasPolicy,
   })
 })
 
-describe('otto/mamoru#210: vault-supply takes MamoruPauseGate and MamoruGasPolicy, never MamoruActionPolicy', () => {
+describe('otto/mamoru#210: vault-supply runs on MamoruActionPolicyV3 alone (vault family) with MamoruGasPolicy', () => {
   const G = '0x00000000000000000000000000000000000000fd' as const
   const A = '0x00000000000000000000000000000000000000fe' as const
   const P = '0x00000000000000000000000000000000000000fb' as const
   const d = { actionPolicy: A, gasPolicy: G, gasCaps: V4_GAS_CAPS, pauseGate: P }
   const caps = computeCaps(conservadorLiveV7, 10_000n * 1_000_000n, { USDT: { num: 1n, den: 1n }, cbBTC: { num: 1n, den: 100_000n }, WETH: { num: 1n, den: 3_000n } })
-  const vault = instantiateGrant(conservadorLiveV7, 'vault-supply:vault:gtUSDCp', { ...v4Ctx, caps })
+  const vault = retargetToPolicy(instantiateGrant(conservadorLiveV7, 'vault-supply:vault:gtUSDCp', { ...v4Ctx, caps }), A)
+  const budget = v4BudgetCaps(conservadorLiveV7, 10_000n * 1_000_000n)
+  const policies = () => v4PoliciesFor([vault], d, 3n, budget)(vault, 0) as SecondActionPolicy
 
-  test('encoded with the gas policy and the pause gate after UniActionPolicy on approve, deposit and redeem', () => {
-    const p = v4PoliciesFor([vault], d, 1n, v4BudgetCaps(conservadorLiveV7, 10_000n * 1_000_000n))(vault, 0)
+  test('V3 alone on approve, deposit and redeem, with the vault-family Init at the generation; the gas policy as a userOp policy', () => {
+    const p = policies()
+    expect(p.initData).toBe(encodeVaultFamilyInit(3n))
     const s = toSmartSession(vault, p)
     expect(s.actions.map((a) => a.actionTarget.toLowerCase())).toEqual(['USDC', 'vault:gtUSDCp', 'vault:gtUSDCp'].map((n) => address(n, baseRegistry).toLowerCase()))
-    for (const a of s.actions) expect(a.actionPolicies.map((x) => x.policy.toLowerCase())).toEqual([address('UniActionPolicy', baseRegistry).toLowerCase(), P])
+    for (const a of s.actions) expect(a.actionPolicies).toEqual([{ policy: A, initData: encodeVaultFamilyInit(3n) }])
+    expect(s.userOpPolicies.map((x) => x.policy)).toContain(G)
   })
 
-  test('refused without the gate, with an action policy, or with the flag stripped', () => {
-    expect(() => toSmartSession(vault)).toThrow('MamoruPauseGate')
-    expect(() => toSmartSession(vault, { policy: A, initData: '0x', gas: { policy: G, initData: encodeGasCaps(V4_GAS_CAPS) }, expected: { actionPolicy: A, gasPolicy: G } })).toThrow('never takes MamoruActionPolicy')
-    const { requiresPauseGate: _, ...unflagged } = vault
-    expect(() => toSmartSession(unflagged as SessionGrant)).toThrow('a vault action needs requiresPauseGate')
-    // Review of #152: the approval alone (it targets USDC, its spender rule names the vault) is refused as well.
-    const approveOnly = { ...unflagged, actions: unflagged.actions.filter((a) => a.signature.startsWith('approve')) }
-    expect(approveOnly.actions).toHaveLength(1)
-    expect(() => toSmartSession(approveOnly as SessionGrant)).toThrow('a vault action needs requiresPauseGate')
+  test('refused: no policy, the pause gate, a Uniswap Init, another policy, a param rule, another target, the vault in another grant', () => {
+    const p = policies()
+    expect(() => toSmartSession(vault)).toThrow('MamoruActionPolicyV3')
+    expect(() => toSmartSession(vault, { gate: { policy: P, initData: '0x' }, gas: p.gas!, expected: { pauseGate: P, gasPolicy: G } })).toThrow('MamoruActionPolicyV3')
+    const uni = mamoruInitFor(V4_POOLS.stables, 3n, budget)
+    expect(() => toSmartSession(vault, { ...p, initData: encodeMamoruInit(uni) })).toThrow('vault-family Init')
+    expect(() => toSmartSession(vault, { ...p, policy: P })).toThrow('not the configured')
+    expect(() => toSmartSession({ ...vault, requiresPauseGate: true } as SessionGrant, p)).toThrow('is a MamoruActionPolicy grant')
+    const withRule = { ...vault, actions: vault.actions.map((a, i) => (i === 1 ? { ...a, params: [{ ...a.params[0], field: 'receiver', index: 1, condition: 'EQUAL', ref: 1n } as never] } : a)) }
+    expect(() => toSmartSession(withRule as SessionGrant, p)).toThrow('no UniActionPolicy rules')
+    const other = { ...vault, actions: [...vault.actions, { ...vault.actions[1]!, targetAddress: address('vault:waBasUSDC', baseRegistry) }] }
+    expect(() => toSmartSession(other as SessionGrant, p)).toThrow('not the vault')
+    // A vault action outside a vault-supply grant (the vault name stripped) is refused before any policy check.
+    const { vault: _, ...stripped } = vault
+    expect(() => toSmartSession(stripped as SessionGrant, p)).toThrow('only in a vault-supply grant')
   })
 })

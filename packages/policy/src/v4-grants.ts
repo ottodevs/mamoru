@@ -122,6 +122,31 @@ export function decodeMamoruInitAny(data: Hex): { init: MamoruInit; atSetup: boo
   return { init: decodeMamoruInit(data), atSetup: false }
 }
 
+/** MamoruActionPolicyV3.FAMILY_VAULTS: the first word of a vault-family Init (otto/mamoru#210). */
+export const FAMILY_VAULTS = 1n
+
+const FAMILY_INIT_PARAMS = [{ type: 'uint256' }, { type: 'uint64' }] as const
+
+/**
+ * otto/mamoru#210: MamoruActionPolicyV3's vault-family Init, `abi.encode(FAMILY_VAULTS, generation)`. Nothing else to
+ * configure: the vault allowlist is V3's constructor (gtUSDCp, waBasUSDC on Base), and the grant's own actions name
+ * which vaults the session may call. It reads nothing live at the enable.
+ */
+export function encodeVaultFamilyInit(generation: bigint): Hex {
+  return encodeAbiParameters(FAMILY_INIT_PARAMS, [FAMILY_VAULTS, generation])
+}
+
+/** The generation of a vault-family Init, or null when `data` is not exactly one (another family, extra bytes). */
+export function decodeVaultFamilyInit(data: Hex): bigint | null {
+  if (data.length !== 2 + 128) return null
+  try {
+    const [family, generation] = decodeAbiParameters(FAMILY_INIT_PARAMS, data)
+    return family === FAMILY_VAULTS ? generation : null
+  } catch {
+    return null
+  }
+}
+
 // ---------------------------------------------------------------- MamoruGasPolicy.Caps (T6 L-1, T7 P1 2 and 4)
 
 export const GAS_CAPS_TUPLE = [
@@ -587,6 +612,22 @@ export function exitOnlyV5Grant(p: V4PoolSpec, usageLimit: number): GrantTemplat
   const g = manageAnyV5Grant(p, usageLimit)
   const enters = (a: GrantTemplate['actions'][number]) => a.signature === MINT_SIG || a.signature === POLICY_INCREASE_SIG || (a.signature === APPROVE_SIG && a.target === p.stable)
   return { ...g, actions: g.actions.filter((a) => !enters(a)) }
+}
+
+/**
+ * otto/mamoru#210: v6's manage-any of `p` under MamoruActionPolicyV3 alone (`manageAnyV3Only`) without a way in: no mint,
+ * no increase, no approval of the stable token. For a pool a V3 policy keeps only so its accounts can leave it (v7's
+ * USDC/USDT at preference 0): it decreases, collects, burns and swaps, with V3 pinning every recipient to the account, the
+ * tokens and spenders to the pool, the price to the pool's band (and USDC/USDT's anchor at 1:1) and the value to its
+ * budget. Unlike `exitOnlyV5Grant` its swap is not held to one direction by a UniActionPolicy rule: a key could buy the
+ * volatile token only with an allowance another session left on the router, at the anchored price; for USDT that moves
+ * no value out of the account. It costs about 1.8M gas less to enable than the V5 exit (t10-fork.ts), which is what keeps a
+ * v5 -> v7 move inside one owner transaction.
+ */
+export function exitOnlyV3Grant(p: V4PoolSpec, usage: V4Usage): GrantTemplate {
+  const g = manageAnyV3Only(p, usage)
+  const enters = (a: GrantTemplate['actions'][number]) => a.signature === MINT_SIG || a.signature === POLICY_INCREASE_SIG || (a.signature === APPROVE_SIG && a.target === p.stable)
+  return { ...g, usageLimit: usage.manageAny, actions: g.actions.filter((a) => !enters(a)) }
 }
 
 /** The policy can add to a held position in `pool` (otto/mamoru#171): its manage-any there carries the policy's increase. */
