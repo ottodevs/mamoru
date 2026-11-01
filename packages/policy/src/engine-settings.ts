@@ -88,12 +88,6 @@ export const ENGINE_SETTINGS_TEMPLATES: Record<string, EngineSettings> = {
     ...DEFAULT_ENGINE_SETTINGS,
     rerange: { mode: 'lazy', edgeBufferTicks: 100, minDwellSeconds: 1800, horizonSeconds: 86_400, lvrWeightBps: 10_000 },
   },
-  // Live wait rule (Ot, 1 Nov 2026): out of range earns nothing. Past a quarter of the width for 30 min, or out at all
-  // for 6 h, the position is moved back; the cooldown and two per pool a week stop it chasing every swing.
-  'lazy wait: 25% width / 30 min, any distance after 6 h, no cost veto, 2 a week': {
-    ...DEFAULT_ENGINE_SETTINGS,
-    rerange: { mode: 'lazy', edgeBufferTicks: 100, edgeBufferBps: 2500, minDwellSeconds: 1800, maxWaitSeconds: 21_600, costTest: 'off', horizonSeconds: 86_400, lvrWeightBps: 10_000, maxPerWeek: 2 },
-  },
 }
 
 const LAZY_KEYS = ['edgeBufferTicks', 'minDwellSeconds', 'horizonSeconds', 'lvrWeightBps'] as const

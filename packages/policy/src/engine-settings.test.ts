@@ -321,8 +321,8 @@ describe('lazy wait rule (Ot, 1 Nov 2026)', () => {
     expect(at({ mode: 'lazy', ...lazyParams, costTest: 'maybe' })).toContain("rerange.costTest must be 'veto' or 'off'")
   })
 
-  test('the template validates, and lazyOf hands the wait keys to decide (still fail closed on the veto path)', () => {
-    const t = ENGINE_SETTINGS_TEMPLATES['lazy wait: 25% width / 30 min, any distance after 6 h, no cost veto, 2 a week']!
+  test('the live version validates, and lazyOf hands the wait keys to decide (still fail closed on the veto path)', () => {
+    const t: EngineSettings = { ...DEFAULT_ENGINE_SETTINGS, rerange: { mode: 'lazy', ...lazyParams, ...wait, maxPerWeek: 2 } }
     expect(validateEngineSettings(t)).toEqual([])
     expect(lazyOf(t)).toMatchObject({ edgeBufferBps: 2500, maxWaitSeconds: 21_600, costTest: 'off', requireCostEstimate: true })
   })
