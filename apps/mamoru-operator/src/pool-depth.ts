@@ -12,10 +12,10 @@ import { quoterV2, token0InToken1, token1InToken0, type QuoteRequest } from '@ma
  * - impactBps = round((1 - amountOut / expectedOut) * 10_000), clamped at 0, where expectedOut = amountIn at mid * (1 - fee):
  *   the pool fee is not in the impact (the rule adds it).
  * - A revert or a zero output means "too large / no liquidity": that size and every larger one are null; the ladder stops.
- *   Any other failure (timeout, transport, budget) is not liquidity: the refresh of that pool is dropped, the last good
+ *   Any other failure (gas or time allowance, transport, spent budget) is not liquidity: the refresh of that pool is dropped, the last good
  *   curve is kept until `staleMs`, and it is retried after `retryMs`.
  * - Cost: per refresh one eth_blockNumber, then per pool one slot0 read and at most 9 quotes, sequential, each with a
- *   timeout; hourly. Skipped while the keyed RPC budget (`over`) is spent. Memory only: a restart reads again at the first
+ *   timeout; hourly. The keyed RPC budget (`over`) is asked before every call (head, slot0, each quote). Memory only: a restart reads again at the first
  *   review (11 calls per pool), so there is no state file.
  * Nothing here throws into a review.
  */
@@ -46,8 +46,27 @@ export function impactBpsOf(amountOut: bigint, expectedOut: bigint): number | nu
   return Number(((expectedOut - amountOut) * 10_000n * 2n + expectedOut) / (expectedOut * 2n))
 }
 
-/** A call that reverted: the pool cannot fill the size. Everything else (network, timeout) is an unread, not a depth. */
-const reverted = (e: unknown): boolean => /revert|execution reverted|out of gas|STF|SPL/i.test((e as Error)?.message ?? '')
+/**
+ * Errors that say nothing about liquidity: the call never ran to a result, or ran out of its gas or time allowance. The
+ * ladder is not read further and the old curve stays.
+ */
+const NOT_A_RESULT = /out of gas|gas (limit|cap|required|too)|exceeds? (the )?(block )?gas|intrinsic gas|time(d)? ?out|deadline|abort|rate.?limit|too many requests|status:? ?(429|5\d\d)|http request failed|fetch failed|network|econn|enotfound|socket|unreachable|budget/i
+
+/**
+ * A quote the pool could not fill: an actual revert from the quoter (viem: "execution reverted", 'The contract function
+ * ... reverted'). Anything that also looks like a gas, time or transport failure is excluded first. A zero output is
+ * handled by the caller, not here. Everything else is a failed read, not a depth.
+ */
+export const isRevert = (e: unknown): boolean => {
+  const m = (e as Error)?.message ?? ''
+  return !NOT_A_RESULT.test(m) && /\brevert(ed)?\b/i.test(m)
+}
+
+class BudgetSpent extends Error {
+  constructor() {
+    super('rpc budget spent')
+  }
+}
 
 export class PoolDepthCache {
   private readonly cache = new Map<string, { at: number; sizesUsd: number[]; impactBps: (number | null)[]; feeBps: number }>()
@@ -116,7 +135,7 @@ export class PoolDepthCache {
       // Marked before the calls: a failing pool is retried soon (below), never on every review.
       this.lastTry.set(p.name, now)
       try {
-        block ??= await this.timed(this.io.block())
+        block ??= await this.timed(this.guarded(() => this.io.block()))
         const curve = await this.curveOf(p, block)
         this.cache.set(p.name, { at: now, ...curve })
       } catch {
@@ -128,7 +147,7 @@ export class PoolDepthCache {
   }
 
   private async curveOf(p: DepthPool, block: bigint): Promise<{ sizesUsd: number[]; impactBps: (number | null)[]; feeBps: number }> {
-    const sqrt = await this.timed(this.io.sqrtPrice(p.address, block))
+    const sqrt = await this.timed(this.guarded(() => this.io.sqrtPrice(p.address, block)))
     if (sqrt <= 0n) throw new Error('slot0 price is zero')
     const sellIsToken0 = p.token0Address.toLowerCase() !== p.usdcAddress.toLowerCase()
     const tokenIn = sellIsToken0 ? p.token0Address : p.token1Address
@@ -146,9 +165,10 @@ export class PoolDepthCache {
       const expected = (midOut(amountIn, sqrt, sellIsToken0) * BigInt(1_000_000 - p.fee)) / 1_000_000n
       let out: bigint
       try {
-        out = await this.timed(this.io.quote({ tokenIn, tokenOut: p.usdcAddress, fee: p.fee, amountIn, blockNumber: block }))
+        out = await this.timed(this.guarded(() => this.io.quote({ tokenIn, tokenOut: p.usdcAddress, fee: p.fee, amountIn, blockNumber: block })))
       } catch (e) {
-        if (!reverted(e)) throw e
+        // Only a revert is "the pool cannot fill this size"; the rest (gas, time, transport, budget) drops the whole pool read.
+        if (!isRevert(e)) throw e
         out = 0n
       }
       const bps = out > 0n ? impactBpsOf(out, expected) : null
@@ -156,6 +176,11 @@ export class PoolDepthCache {
       if (bps === null) stopped = true
     }
     return { sizesUsd: [...DEPTH_LADDER_USD], impactBps, feeBps: p.fee / 100 }
+  }
+
+  /** The keyed RPC budget is asked before every call: when spent, this pool's read ends and its old curve stays. */
+  private guarded<T>(call: () => Promise<T>): Promise<T> {
+    return this.over() ? Promise.reject(new BudgetSpent()) : call()
   }
 
   private timed<T>(p: Promise<T>): Promise<T> {

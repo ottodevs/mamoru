@@ -121,22 +121,42 @@ describe('packaging:eel shadow (otto/mamoru#101 phase 1c)', () => {
     })
   })
 
-  test('a ladder that ends in nulls: EEL is the last good size; all nine within reads >=10M', () => {
-    const cut = run(STABLES, ladder((s) => (s <= 100_000 ? s / 10_000_000 : null)))
+  test('a null after good points is a point of 10,000 bps: EEL interpolates up to it; all nine within reads >=10M', () => {
+    // 100k good at 1 bps, 300k null: the 200 bps limit is reached at 100k + (199/9999) * 200k, about 103,980
+    const cut = run(STABLES, ladder((s) => (s <= 100_000 ? 1 : null)))
     expect(cut.map((x) => x.code)).toEqual(['RISK_POOL_EEL_LOW'])
-    expect(cut[0]!.metric).toBe('100000000000')
-    expect(cut[0]!.label).toContain('100k')
-    // sell leg beyond the last read point exceeds
-    const big = run(STABLES, ladder((s) => (s <= 100_000 ? 1 : null)), [position(STABLES, 500_000)])
-    expect(codes(big)).toContain('RISK_EXIT_SLIPPAGE')
-    const all = run(RISK, ladder(() => 1))
-    expect(all).toEqual([])
+    expect(Number(cut[0]!.metric) / 1e6).toBeCloseTo(100_000 + (199 / 9_999) * 200_000, 0)
+    // same curve above the minimum: a 5M-good / 10M-null stables pool has EEL near 5M, no entry
+    expect(run(STABLES, ladder((s) => (s <= 3_000_000 ? 1 : null)))).toEqual([])
+    expect(run(RISK, ladder(() => 1))).toEqual([])
     // all nine within and a position: the ratio reads against 10M
-    const q = run(RISK, ladder(() => 1), [position(RISK, 400_000)])
-    expect(q).toEqual([]) // 400k / 10M = 400 bps < 500
+    expect(run(RISK, ladder(() => 1), [position(RISK, 400_000)])).toEqual([]) // 400k / 10M = 400 bps < 500
     const q2 = run(RISK, ladder(() => 1), [position(RISK, 600_000)])
     expect(q2.map((x) => x.code)).toEqual(['RISK_POSITION_RATIO'])
     expect(q2[0]!.label).toContain('>=10.00M')
+  })
+
+  test('exit slippage and EEL share the null point: a sell between the last good size and the null interpolates toward 10,000 bps', () => {
+    const d = ladder((s) => (s <= 100_000 ? 1 : null)) // null at 300k
+    // 200k exit: impact 1 + (9999 * 100k / 200k) = 5000.5, plus the 5 bps fee
+    const r = run(BTC, d, [position(BTC, 200_000)]).filter((x) => x.code === 'RISK_EXIT_SLIPPAGE')
+    expect(r).toHaveLength(1)
+    expect(Number(r[0]!.metric)).toBeGreaterThan(4900)
+    expect(Number(r[0]!.metric)).toBeLessThan(5100)
+    // beyond the null point the pool cannot fill either: 10,000 bps
+    const far = run(BTC, d, [position(BTC, 2_000_000)]).filter((x) => x.code === 'RISK_EXIT_SLIPPAGE')
+    expect(far[0]!.metric).toBe('10005')
+    // a null right after the first point: the exit is interpolated from it as well
+    expect(codes(run(BTC, D([1_000, 3_000], [0, null]), [position(BTC, 2_000)]))).toContain('RISK_EXIT_SLIPPAGE')
+  })
+
+  test('a size beyond the last ladder point with every quote good is RISK_POOL_DEPTH_UNREAD "beyond ladder", never an exit', () => {
+    const r = run(BTC, ladder(() => 1), [position(BTC, 20_000_000)])
+    expect(codes(r)).not.toContain('RISK_EXIT_SLIPPAGE')
+    expect(r.filter((x) => x.code === 'RISK_POOL_DEPTH_UNREAD').map((x) => [x.pool, x.threshold])).toEqual([[BTC, '0']])
+    expect(r.find((x) => x.code === 'RISK_POOL_DEPTH_UNREAD')!.label).toContain('beyond ladder')
+    // still inside the ladder (10M): a normal slippage reading
+    expect(codes(run(BTC, ladder(() => 1), [position(BTC, 9_000_000)]))).not.toContain('RISK_POOL_DEPTH_UNREAD')
   })
 
   test('E. exit slippage = interpolated impact + pool fee: at the limit fires, one bps under does not (each bucket)', () => {
@@ -165,11 +185,18 @@ describe('packaging:eel shadow (otto/mamoru#101 phase 1c)', () => {
     expect(Number(one[0]!.metric)).toBeGreaterThan(350) // the 90k position's interpolated impact (about 360) plus the fee; the 5k one alone would not fire
   })
 
-  test('E. a sell size past the last read point fires and is labelled; no metric (it is not a number)', () => {
-    const r = run(BTC, D([1_000, 10_000], [1, 2]), [position(BTC, 100_000)]).filter((x) => x.code === 'RISK_EXIT_SLIPPAGE')
+  test('E. a full exit sells every position of the account in the pool: the legs are summed before the curve is read', () => {
+    // 5 bps impact at 1k, 330 at 100k (linear): neither 30k alone reaches 300 with the fee, but 3 x 30k = 90k does
+    const d = D([1_000, 100_000, 10_000_000], [5, 330, 900], 5)
+    const one = position(BTC, 30_000, 1n)
+    expect(run(BTC, d, [one]).filter((x) => x.code === 'RISK_EXIT_SLIPPAGE')).toEqual([])
+    const three = [one, position(BTC, 30_000, 2n), position(BTC, 30_000, 3n)]
+    const r = run(BTC, d, three).filter((x) => x.code === 'RISK_EXIT_SLIPPAGE')
     expect(r).toHaveLength(1)
-    expect(r[0]!.metric).toBeUndefined()
-    expect(r[0]!.label).toContain('beyond ladder')
+    expect(Number(r[0]!.metric)).toBeGreaterThanOrEqual(300)
+    expect(r[0]!.label).toContain('90k')
+    // a position of another pool is not part of this exit
+    expect(run(BTC, d, [one, { ...position(BTC, 30_000, 2n), pool: STABLES }, { ...position(BTC, 30_000, 3n), pool: STABLES }]).filter((x) => x.code === 'RISK_EXIT_SLIPPAGE')).toEqual([])
   })
 
   test('Position ratio Q/EEL: over the limit fires, at it does not (each bucket)', () => {

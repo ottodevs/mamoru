@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { encodeFunctionResult, type PublicClient } from 'viem'
 import { address, baseRegistry, monadRegistry } from '@mamoru/registry'
 import { quoterV2Abi, sqrtRatioAtTick, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
-import { DEPTH_LADDER_USD, DEPTH_POOL_NAMES, PoolDepthCache, depthIoOf, depthPoolsOf, impactBpsOf, poolDepthFor, type DepthIo } from '../src/pool-depth.ts'
+import { DEPTH_LADDER_USD, DEPTH_POOL_NAMES, PoolDepthCache, depthIoOf, depthPoolsOf, impactBpsOf, isRevert, poolDepthFor, type DepthIo } from '../src/pool-depth.ts'
 
 const BTC = 'pool:USDC/cbBTC/500' // USDC is token0: the sell token is token1
 const WETH = 'pool:WETH/USDC/3000' // USDC is token1: the sell token is token0
@@ -186,6 +186,55 @@ describe('PoolDepthCache', () => {
     over = false
     await cache.settled()
     expect(f.quotes()).toHaveLength(9)
+  })
+})
+
+describe('RPC budget and error classes (otto/mamoru#101 review)', () => {
+  test('the budget is asked before every call: tripping mid-ladder keeps the old curve, never a partial one', async () => {
+    const k = clock()
+    const f = fakeIo([4])
+    let calls = 0
+    let allow = Infinity
+    const io: DepthIo = { block: (...a) => (calls++, f.io.block(...a)), sqrtPrice: (...a) => (calls++, f.io.sqrtPrice(...a)), quote: (...a) => (calls++, f.io.quote(...a)) }
+    const cache = new PoolDepthCache(pools([BTC]), io, { now: k.now, over: () => calls >= allow })
+    await cache.settled()
+    expect(cache.get()[BTC]!.impactBps).toEqual(Array(9).fill(4))
+    // next hour: the budget trips after head, slot0 and 3 quotes
+    k.c.t += 3_600_000 + 1
+    allow = calls + 5
+    await cache.settled()
+    expect(calls).toBe(11 + 5) // not one call past the trip
+    expect(cache.get()[BTC]!.impactBps).toEqual(Array(9).fill(4)) // the good curve is untouched, no null tail
+    expect(cache.get()[BTC]!.asOf).toBe(Math.floor(T0 / 1000))
+  })
+
+  test('the budget tripping before the head read makes no call at all, also for the second pool', async () => {
+    const f = fakeIo([0])
+    let n = 0
+    const cache = new PoolDepthCache(pools([BTC, WETH]), f.io, { now: clock().now, over: () => n++ >= 11 + 1 })
+    await cache.settled()
+    expect(f.calls.length).toBeLessThanOrEqual(11)
+    expect(cache.get()[WETH]!.impactBps.every((x) => x === null)).toBe(true)
+  })
+
+  test('isRevert: only an actual quoter revert is a liquidity stop; gas, time, transport and budget errors are not', () => {
+    const e = (m: string) => new Error(m)
+    for (const m of ['EHG_QUOTE_UNAVAILABLE: Execution reverted for an unknown reason.', 'The contract function "quoteExactInputSingle" reverted.', 'execution reverted: SPL', 'EHG_QUOTE_UNAVAILABLE: execution reverted (fee 500)']) expect(isRevert(e(m))).toBe(true)
+    for (const m of ['out of gas', 'execution reverted: out of gas', 'EHG_QUOTE_UNAVAILABLE: call exceeds gas limit', 'intrinsic gas too low', 'gas required exceeds allowance (50000000)', 'execution timeout', 'The request timed out', 'HTTP request failed. Status: 503', 'status: 429 rate limit', 'fetch failed', 'rpc budget spent', 'timeout', 'socket hang up']) expect(isRevert(e(m))).toBe(false)
+    expect(isRevert('nope')).toBe(false)
+  })
+
+  test('an out-of-gas quote is a failed read: the old curve stays and the pool is retried, not read as no liquidity', async () => {
+    const k = clock()
+    const ok = fakeIo([7])
+    let mode: 'ok' | 'gas' = 'ok'
+    const io: DepthIo = { ...ok.io, quote: async (q) => { if (mode === 'gas') throw new Error('EHG_QUOTE_UNAVAILABLE: out of gas'); return ok.io.quote(q) } }
+    const cache = new PoolDepthCache(pools([BTC]), io, { now: k.now })
+    await cache.settled()
+    mode = 'gas'
+    k.c.t += 3_600_000 + 1
+    await cache.settled()
+    expect(cache.get()[BTC]!.impactBps).toEqual(Array(9).fill(7))
   })
 })
 

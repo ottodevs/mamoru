@@ -315,7 +315,20 @@ export type EngineHooks = {
   onShadowRisk?: (risk: NonNullable<Decision['shadowRisk']>) => void
 }
 
-/** #101: a stats callback that throws is the same as no stats; a review never fails on shadow data. */
+/**
+ * #101: the answer of a shadow-input callback. No callback: undefined (the chain has none, e.g. Monad, deliberately silent,
+ * #171). A callback that throws or answers nothing is "supplied, nothing read": `{}`, so decide reports every pool
+ * unread instead of staying silent. A review never fails on shadow data.
+ */
+function safeShadow<T extends object>(f: (() => T | undefined) | undefined): T | undefined {
+  if (!f) return undefined
+  try {
+    return f() ?? ({} as T)
+  } catch {
+    return {} as T
+  }
+}
+
 function safePoolStats(f: (() => Observation['poolStats']) | undefined): Observation['poolStats'] {
   return safeShadow(f)
 }
@@ -323,15 +336,6 @@ function safePoolStats(f: (() => Observation['poolStats']) | undefined): Observa
 /** #101: same for the depth curves. */
 export function safePoolDepth(f: (() => Observation['poolDepth']) | undefined): Observation['poolDepth'] {
   return safeShadow(f)
-}
-
-function safeShadow<T extends object>(f: (() => T | undefined) | undefined): T | undefined {
-  try {
-    const v = f?.()
-    return v && Object.keys(v).length ? v : undefined
-  } catch {
-    return undefined
-  }
 }
 
 /** #101: the shadow inputs one review reads, each only for the policy that lists its gate (the callbacks are not called otherwise). */

@@ -408,9 +408,9 @@ changes, so no `policyHash` changes. Nothing acts: a row says what would have ex
 | C. Unreadable | a figure a rule needs is missing, stale or not a number; the rules that can be computed still are | `RISK_POOL_STATS_UNREAD` | none |
 | PR1 unreadable | on-chain pool balance not readable | `RISK_POOL_TVL_UNREAD` | none |
 | B. EEL (gate `packaging:eel`) | EEL under the bucket minimum (USD): stables 600,000, btc-usdc 350,000, risk 75,000. EEL = largest sell size whose price impact is within the bucket limit: stables 200 bps, btc-usdc 200, risk 500 | `RISK_POOL_EEL_LOW` | none |
-| E. Exit slippage | quoted slippage (impact at the size of the position's non-USDC leg, plus the pool fee) at or over: stables 300 bps, btc-usdc 300, risk 600; a size past the last quoted point counts as over | `RISK_EXIT_SLIPPAGE` | none |
+| E. Exit slippage | quoted slippage (impact at the combined size of the account's non-USDC legs in the pool, which a full exit sells, plus the pool fee) at or over: stables 300 bps, btc-usdc 300, risk 600 | `RISK_EXIT_SLIPPAGE` | none |
 | E. Position ratio | account value in the pool (both legs) over EEL above: stables 1000 bps, btc-usdc 1000, risk 500 | `RISK_POSITION_RATIO` | none |
-| Depth unreadable | no curve, an all-null or malformed one, or older than 6 h; no depth rule is evaluated for that pool | `RISK_POOL_DEPTH_UNREAD` | none |
+| Depth unreadable | no curve, an all-null or malformed one, older than 6 h, or an exit size past the last ladder point with every quote good ("beyond ladder"); the callback present but failing gives an empty object, so every USDC pool is unread (no callback, as on Monad, stays silent, #171) | `RISK_POOL_DEPTH_UNREAD` | none |
 
 Units in an entry: `RISK_POOL_TVL_DROP` carries basis points (`threshold` -1200, `metric` the measured change);
 `RISK_POOL_VOLUME_LOW` carries raw savings units (USDC, 6 decimals). `RISK_POOL_EEL_LOW` carries raw savings units
@@ -431,13 +431,12 @@ Depth data (operator): per live pool that pairs USDC, the price impact of sellin
 exit direction) at 1k, 3k, 10k, 30k, 100k, 300k, 1M, 3M and 10M USD. Each size is converted to the sell token at the pool's
 slot0 mid price and quoted with QuoterV2 `quoteExactInputSingle` (eth_call at one block); `impactBps = round((1 - out /
 (in at mid x (1 - fee))) x 10,000)`, at least 0, so the pool fee is not in it (the exit slippage rule adds it). A revert or
-a zero output is null, and the ladder stops there (larger sizes are null). EEL interpolates linearly in size between ladder
-points, with impact 0 at size 0; every point within the limit and the ladder ended by a null gives the last good size, and
-all nine within gives 10M (">=10M"). The position's exit size is the USD value of its non-USDC leg at slot0; the worst
-position of the account in the pool counts for slippage, and the ratio uses its whole value in the pool (principal, no
-uncollected fees). Refreshed hourly in the background (one block read, then one slot0 and at most nine quotes per pool, in
-sequence, each with a timeout; none while the keyed RPC budget is spent), kept in memory only, null after 6 h. A transport
-failure is not depth: the curve is not overwritten and the pool is retried after 5 min. Base operator only; Monad pools
+a zero output is null (the pool cannot fill that size), and the ladder stops there. Such a null after good points is
+treated as a point of 10,000 bps, and EEL and exit slippage interpolate linearly in size over the same curve (impact 0 at
+size 0), also above the null point; all nine within the limit gives 10M (">=10M"). The exit size is the USD value of the non-USDC legs of all the account's positions in the pool at slot0, summed; the ratio
+uses their whole value (principal, no uncollected fees). Refreshed hourly in the background (one block read, then one slot0 and at most nine quotes per pool, in
+sequence, each with a timeout; the keyed RPC budget is asked before every call, and when it trips that pool's read ends and its old curve stays), kept in memory only, null after 6 h. Only a quoter revert or a zero output is a null; out of gas, gas-limit, timeout and transport errors are not depth: the
+curve is not overwritten and the pool is retried after 5 min. Base operator only; Monad pools
 are not read. Reaches `decide` as `Observation.poolDepth`, read only by the shadow rules.
 
 ## Decisions for Ot

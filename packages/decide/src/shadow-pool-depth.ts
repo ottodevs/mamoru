@@ -23,23 +23,36 @@ export const PACKAGING_EEL_CAP_USD = 10_000_000
 
 type Point = { s: number; i: number }
 
-/** The curve up to its first null (a null stops the ladder), or null when it is not usable (malformed, or no point at all). */
+/** Impact assigned to the size where the ladder stopped (QuoterV2 reverted or gave nothing): the pool cannot fill it. */
+export const PACKAGING_NULL_IMPACT_BPS = 10_000
+
+/**
+ * The curve up to its first null (a null stops the ladder), or null when it is not usable (malformed, or no good point).
+ * A null after good points means the pool could not fill that size: it enters the curve as a point of 10,000 bps, so EEL and
+ * exit slippage interpolate between the last good point and it. `complete`: all sizes were read (no null).
+ */
 function curveOf(d: PoolDepthObs | undefined): { pts: Point[]; complete: boolean } | null {
   if (!d || !Array.isArray(d.sizesUsd) || !Array.isArray(d.impactBps) || d.sizesUsd.length === 0 || d.sizesUsd.length !== d.impactBps.length) return null
   if (!Number.isFinite(d.feeBps) || d.feeBps < 0) return null
   const pts: Point[] = []
   let prev = 0
+  let ended = false
   for (let k = 0; k < d.sizesUsd.length; k++) {
     const s = d.sizesUsd[k]!
     const i = d.impactBps[k]
     if (typeof s !== 'number' || !Number.isFinite(s) || s <= prev) return null
     prev = s
-    if (i === null || i === undefined) break
+    if (i === null || i === undefined) {
+      if (pts.length) pts.push({ s, i: PACKAGING_NULL_IMPACT_BPS })
+      ended = true
+      break
+    }
     if (typeof i !== 'number' || !Number.isFinite(i) || i < 0) return null
     pts.push({ s, i })
   }
+  // A first size that is already null leaves nothing to interpolate from: unread.
   if (!pts.length) return null
-  return { pts, complete: pts.length === d.sizesUsd.length }
+  return { pts, complete: !ended }
 }
 
 /** EEL in USD: the largest size whose impact is within `limitBps`, linear in size between ladder points, impact 0 at size 0. */
@@ -53,14 +66,14 @@ export function eelOf(pts: readonly Point[], complete: boolean, limitBps: number
   return complete ? { usd: Math.max(prev.s, PACKAGING_EEL_CAP_USD), atCap: true } : { usd: prev.s, atCap: false }
 }
 
-/** Impact (bps) of selling `usd`, linear between ladder points from (0, 0); null beyond the last read point. */
-export function impactAt(pts: readonly Point[], usd: number): number | null {
+/** Impact (bps) of selling `usd`, linear between curve points from (0, 0); `beyond` past the last point: the caller passes 10,000 when that point is a null (a size larger than one the pool cannot fill), null when it is real data (nothing is known above it). */
+export function impactAt(pts: readonly Point[], usd: number, beyond: number | null = null): number | null {
   let prev: Point = { s: 0, i: 0 }
   for (const p of pts) {
     if (usd <= p.s) return prev.i + ((p.i - prev.i) * (usd - prev.s)) / (p.s - prev.s)
     prev = p
   }
-  return null
+  return beyond
 }
 
 const money = (usd: number): string => (usd >= 1_000_000 ? `${(usd / 1_000_000).toFixed(2)}M` : `${Math.round(usd / 1000).toLocaleString('en-US')}k`)
@@ -71,9 +84,11 @@ const money = (usd: number): string => (usd >= 1_000_000 ? `${(usd / 1_000_000).
  * (not supplied) or the policy's savings asset is not USDC (sizes are dollars). A pool with no usable curve gets
  * RISK_POOL_DEPTH_UNREAD and nothing else (D8, FR-LC-007: never an exit on missing data).
  *
- * Exit sell size of a position = the USD value, at the pool's slot0, of its non-USDC leg (the USDC leg needs no swap). The
- * slippage rule takes the worst position of the account in the pool; the ratio uses the account's whole value in the pool
- * (both legs of every position, principal at slot0, no uncollected fees) over the EEL.
+ * Exit sell size = the USD value, at the pool's slot0, of the non-USDC legs of all the account's positions in the pool (the
+ * USDC leg needs no swap): what a full exit sells at once. Slippage is read at that combined size. The ratio uses the
+ * account's whole value in the pool (both legs, principal at slot0, no uncollected fees) over the EEL. A null in the ladder
+ * after good points is a size the pool cannot fill: a point of 10,000 bps, shared by EEL and slippage. A size past the last
+ * point with no null to interpolate to is RISK_POOL_DEPTH_UNREAD ("beyond ladder"), never an exit.
  */
 export function poolDepthShadowRisk(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>): ShadowRisk[] {
   if (!obs.poolDepth || policy.savingsAsset !== 'USDC') return []
@@ -99,26 +114,25 @@ export function poolDepthShadowRisk(obs: Observation, policy: PolicyVersion, pol
     if (eel.usd < rule.eelMinUsd) {
       out.push({ code: 'RISK_POOL_EEL_LOW', pool: name, threshold: raw(rule.eelMinUsd), metric: raw(eel.usd), label: `EEL ${eelLabel} at ${rule.impactLimitBps} bps` })
     }
-    // The account's positions in this pool, valued at slot0.
+    // The account's positions in this pool, valued at slot0. A full exit sells the non-USDC legs of all of them together.
     let total = 0
-    let worst: { slip: number; label: string } | null = null
+    let sellUsd = 0
+    const sellToken = pool.token0 === policy.savingsAsset ? pool.token1 : pool.token0
     for (const pos of obs.positions) {
       if (pos.pool !== name || pos.liquidity <= 0n) continue
       const { amount0, amount1 } = amountsForLiquidity(pool.sqrtPriceX96, pos.tickLower, pos.tickUpper, pos.liquidity)
-      const valueRaw = inSavings(pool, pool.token0, amount0, policy.savingsAsset) + inSavings(pool, pool.token1, amount1, policy.savingsAsset)
-      total += Number(valueRaw) / scale
-      const sellToken = pool.token0 === policy.savingsAsset ? pool.token1 : pool.token0
-      const sellRaw = inSavings(pool, sellToken, sellToken === pool.token0 ? amount0 : amount1, policy.savingsAsset)
-      const sellUsd = Number(sellRaw) / scale
-      if (sellUsd <= 0) continue
-      const impact = impactAt(curve.pts, sellUsd)
-      // Past the last point the curve was read to (liquidity ran out there): the exit would cost more than any limit.
-      const slip = impact === null ? Number.POSITIVE_INFINITY : Math.round(impact + depth.feeBps)
-      const label = impact === null ? `exit ${money(sellUsd)} beyond ladder` : `exit ${money(sellUsd)}: ${slip} bps`
-      if (!worst || slip > worst.slip) worst = { slip, label }
+      total += Number(inSavings(pool, pool.token0, amount0, policy.savingsAsset) + inSavings(pool, pool.token1, amount1, policy.savingsAsset)) / scale
+      sellUsd += Number(inSavings(pool, sellToken, sellToken === pool.token0 ? amount0 : amount1, policy.savingsAsset)) / scale
     }
-    if (worst && worst.slip >= rule.exitSlippageBps) {
-      out.push({ code: 'RISK_EXIT_SLIPPAGE', pool: name, threshold: String(rule.exitSlippageBps), ...(Number.isFinite(worst.slip) ? { metric: String(worst.slip) } : {}), label: worst.label })
+    if (sellUsd > 0) {
+      const impact = impactAt(curve.pts, sellUsd, curve.complete ? null : PACKAGING_NULL_IMPACT_BPS)
+      if (impact === null) {
+        // Past every point the curve has, with no null point to say the pool cannot fill it: unknown, never an exit (D8).
+        out.push({ code: 'RISK_POOL_DEPTH_UNREAD', pool: name, threshold: '0', label: `exit ${money(sellUsd)} beyond ladder` })
+      } else {
+        const slip = Math.round(impact + depth.feeBps)
+        if (slip >= rule.exitSlippageBps) out.push({ code: 'RISK_EXIT_SLIPPAGE', pool: name, threshold: String(rule.exitSlippageBps), metric: String(slip), label: `exit ${money(sellUsd)}: ${slip} bps` })
+      }
     }
     if (total > 0 && eel.usd > 0 && total * 10_000 > rule.positionRatioBps * eel.usd) {
       const bps = Math.round((total / eel.usd) * 10_000)
