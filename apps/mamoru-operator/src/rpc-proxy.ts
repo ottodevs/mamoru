@@ -170,6 +170,8 @@ export type RpcProxyOptions = {
    * ExecutionSuccess would mark a conversion that ran as failed.
    */
   trustedLogsOnly?: boolean
+  /** Every provider must answer this chain id before it is used (otto/mamoru#285); unset: no check (Base, as before). */
+  chainId?: number
   /** Per provider attempt; default 30 s. Shorter than the caller's budget, so a hung provider leaves time for the next (otto/mamoru#285). */
   providerTimeoutMs?: number
   /** How long a trusted block hash may witness a log range; default WITNESS_TTL_MS. Tests shorten it. */
@@ -208,8 +210,33 @@ export function providerWords(message: unknown): string {
 }
 
 export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { url: string; stop: () => void } {
-  const send = opts.fetch ?? fetch
   const providerTimeoutMs = opts.providerTimeoutMs ?? 30_000
+  const rawSend = opts.fetch ?? fetch
+  // otto/mamoru#285: with `chainId`, every provider proves its chain before its first use. Another chain shuts it
+  // out for good (the proxy fails over as for an outage); no answer leaves it unproven, to be asked again next time.
+  const proven = new Map<string, Promise<boolean>>()
+  const onChain = (url: string): Promise<boolean> => {
+    if (opts.chainId === undefined) return Promise.resolve(true)
+    let p = proven.get(url)
+    if (!p) {
+      p = rawSend(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_chainId', params: [] }), signal: AbortSignal.timeout(providerTimeoutMs) })
+        .then((r) => r.json() as Promise<{ result?: unknown }>)
+        .then((j) => {
+          if (typeof j?.result !== 'string') throw new Error('no chain id')
+          const ok = Number(j.result) === opts.chainId
+          if (!ok) console.error(`[rpc] a provider answered chain ${Number(j.result)}, not ${opts.chainId}: never used`)
+          return ok
+        })
+        .catch(() => {
+          proven.delete(url)
+          return false
+        })
+      proven.set(url, p)
+    }
+    return p
+  }
+  const send = async (url: string, init: RequestInit): Promise<Response> =>
+    (await onChain(url)) ? rawSend(url, init) : Response.json({ jsonrpc: '2.0', id: null, error: { code: -32603, message: 'provider not on this chain' } }, { status: 503 })
   const fallbacks = opts.fallbacks ?? fallbacksFromEnv()
   const maxLogRange = opts.maxLogRange ?? Number(process.env.MAMORU_LOG_RANGE ?? 10)
   const metrics = opts.metrics

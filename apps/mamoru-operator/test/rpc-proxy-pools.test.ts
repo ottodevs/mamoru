@@ -120,4 +120,40 @@ describe('per-chain pools (otto/mamoru#285)', () => {
       proxy.stop()
     }
   })
+
+  test('with chainId, a provider on another chain is never used, and one that did not answer is asked again', async () => {
+    const reads: string[] = []
+    let flaky = 0
+    const proxy = startRpcProxy('https://upstream.example/k', {
+      trusted: ['https://wrong.example/k', 'https://flaky.example/k'],
+      fallbacks: [],
+      logRanges: {},
+      chunkLogs: false,
+      chainId: 1,
+      fetch: async (url: string, init: RequestInit) => {
+        const host = new URL(url).host
+        const { method } = JSON.parse(String(init.body))
+        if (host === 'upstream.example') return new Response('down', { status: 503 })
+        if (method === 'eth_chainId') {
+          if (host === 'flaky.example' && flaky++ === 0) throw new Error('unreachable')
+          return Response.json({ jsonrpc: '2.0', id: 0, result: host === 'wrong.example' ? '0x2105' : '0x1' })
+        }
+        reads.push(host)
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '0x5' })
+      },
+    })
+    const ask = async () => {
+      const res = await fetch(`${proxy.url}c/bridge-out`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getBalance', params: ['0x0000000000000000000000000000000000000001', 'latest'] }) })
+      return (await res.json()) as { result?: string }
+    }
+    try {
+      // flaky did not answer its first chain check, then did in the proxy's second pass.
+      expect((await ask()).result).toBe('0x5')
+      expect((await ask()).result).toBe('0x5')
+      expect(reads).not.toContain('wrong.example')
+      expect(reads).toContain('flaky.example')
+    } finally {
+      proxy.stop()
+    }
+  })
 })

@@ -580,6 +580,7 @@ export async function bootOperator(o: BootOptions) {
       chunkLogs: false,
       trustedLogsOnly: true,
       providerTimeoutMs: SIDE_PROVIDER_TIMEOUT_MS,
+      chainId: BRIDGE_MONAD_CHAIN_ID,
     })
     const monadUrl = `${monadProxy.url}c/bridge-monad`
     const monad = createPublicClient({ transport: http(monadUrl, { batch: true, timeout: SIDE_CLIENT_TIMEOUT_MS }) })
@@ -715,6 +716,7 @@ export async function bootOperator(o: BootOptions) {
       chunkLogs: false,
       trustedLogsOnly: true,
       providerTimeoutMs: SIDE_PROVIDER_TIMEOUT_MS,
+      chainId: ETHEREUM_CHAIN_ID,
     })
     const l1Url = `${l1Proxy.url}c/bridge-out`
     // Nothing reaches Ethereum before the RPC said it is Ethereum: the check runs before the first request and again
