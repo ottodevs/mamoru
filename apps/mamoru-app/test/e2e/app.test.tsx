@@ -692,6 +692,16 @@ describe('renewing the approval', () => {
         expect(h.lead).not.toBe(en.lead)
       }
     }
+    // Each case maps to its own copy, in the English order (peer review round 1).
+    const es = (x: Parameters<typeof approvalHeading>[0]) => approvalHeading(x, 'es')
+    expect(es({ ...year, paused: true, expired: true }).title).toBe('Una clave guardiana ha pausado Mamoru')
+    expect(es({ ...year, expired: true, renewDue: true }).title).toBe('La aprobación de Mamoru ha terminado')
+    expect(es({ ...year, usage: { action: 'rerange', pool: null, usedBps: 10_000, spent: true }, renewDue: true }).title).toBe('Mamoru ha dejado de recentrar en sus pools')
+    expect(es({ ...year, renewDue: true, usage: { action: 'enter', pool: null, usedBps: 8_000, spent: false } }).lead).toMatch(/^Termina el /)
+    expect(es({ ...year, usage: { action: 'enter', pool: null, usedBps: 8_000, spent: false }, upgrade: true }).title).toBe('Renueva antes de que se agote un límite')
+    expect(es({ ...year, capRaise: { capUsdc: '1000000000', signedUsdc: '350000000' }, upgrade: true }).lead).toMatch(/^Tu límite ahora es 1,000(\.00)? USDC/)
+    expect(es({ ...year, upgrade: true }).lead).toMatch(/^Ahora puedes limitar a Mamoru on-chain/)
+    expect(approvalHeading({ ...year, capRaise: { capUsdc: '1000000000', signedUsdc: '350000000' } }, 'ja').lead).toContain('の上限内にとどまります')
     expect(approvalHeading({ ...year, paused: true }, 'es').lead).toContain('solo si sabes por qué se pausó')
     expect(approvalHeading({ ...year, upgrade: true, upgradePolicy: 'conservador-live-v5' }, 'ja').lead).toContain('ガーディアン鍵')
   })

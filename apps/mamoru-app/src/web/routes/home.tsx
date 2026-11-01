@@ -1132,7 +1132,7 @@ const headingCopy = {
     near: (what: string, where: string) => ({ title: 'Renueva antes de que se agote un límite', lead: `Mamoru ha usado casi todo lo que esta aprobación permite para ${what} ${where}. Renueva ahora para que no se detenga.` }),
     capRaise: (cap: string, signed: string) => `Tu límite ahora es ${cap} USDC. Mamoru se mantiene en los ${signed} USDC que aprobaste hasta que renueves su aprobación.`,
     upgradeV5: 'Los límites on-chain de Mamoru tienen una versión nueva: solo opera cerca del precio de mercado y solo con las posiciones que abrió, amplía una posición que ya tiene en vez de abrir otra, y una clave guardiana puede pausarlo pero nunca mover fondos. Renueva su aprobación para activarlo.',
-    upgrade: 'Ahora Mamoru puede limitarse on-chain: solo operaría cerca del precio de mercado y solo con las posiciones que abrió. Renueva su aprobación para activarlo.',
+    upgrade: 'Ahora puedes limitar a Mamoru on-chain: solo operaría cerca del precio de mercado y solo con las posiciones que abrió. Renueva su aprobación para activarlo.',
     missing: { title: 'Deja que Mamoru trabaje en todos los pools', lead: 'Falta parte de la aprobación: en algunos pools Mamoru no puede recentrar ni cobrar comisiones hasta que la añadas.' },
   },
   ja: {
@@ -1144,9 +1144,9 @@ const headingCopy = {
     renew: 'Mamoru の承認を更新',
     due: (day: string) => `${day}に終了します。更新すると Mamoru は引き続き働きます。`,
     near: (what: string, where: string) => ({ title: '上限に達する前に更新', lead: `Mamoru は${where}${what}について、この承認で許される分の大半を使いました。止まらないよう、今すぐ更新してください。` }),
-    capRaise: (cap: string, signed: string) => `上限が ${cap} USDC になりました。承認を更新するまで、Mamoru は承認済みの ${signed} USDC を守ります。`,
-    upgradeV5: 'Mamoru のオンチェーン上限に新しいバージョンがあります。市場価格の近くで Mamoru が開いたポジションだけを取引し、新しく開く代わりに Mamoru がすでに保有しているポジションに追加します。ガーディアン鍵は一時停止できますが、資金を動かすことはできません。承認を更新すると有効になります。',
-    upgrade: 'Mamoru をオンチェーンで制限できるようになりました。市場価格の近くで、Mamoru が開いたポジションだけを取引します。承認を更新すると有効になります。',
+    capRaise: (cap: string, signed: string) => `上限が ${cap} USDC になりました。承認を更新するまで、Mamoru は承認済みの ${signed} USDC の上限内にとどまります。`,
+    upgradeV5: 'Mamoru のオンチェーン上限に新しいバージョンがあります。市場価格の近くでのみ取引し、取引できるのは Mamoru が開いたポジションだけです。新しく開く代わりに Mamoru がすでに保有しているポジションに追加します。ガーディアン鍵は一時停止できますが、資金を動かすことはできません。承認を更新すると有効になります。',
+    upgrade: 'Mamoru をオンチェーンで制限できるようになりました。市場価格の近くでのみ取引し、取引できるのは Mamoru が開いたポジションだけになります。承認を更新すると有効になります。',
     missing: { title: 'すべてのプールで Mamoru を動かす', lead: '承認の一部が不足しています。一部のプールでは、追加するまで Mamoru はレンジの再調整や手数料の回収ができません。' },
   },
 }
