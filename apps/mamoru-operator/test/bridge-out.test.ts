@@ -353,7 +353,8 @@ describe('convert reconciliation at a stale head (otto/mamoru#285)', () => {
       // A node behind: the Safe looks undeployed and no log is there yet.
       getCode: async () => '0x',
       getLogs: async () => [],
-      getBlock: async ({ blockNumber }: { blockNumber: bigint }) => (blocksRead++, { timestamp: blockNumber === 100n ? T0 : headTime }),
+      getBlock: async ({ blockNumber, blockTag }: { blockNumber?: bigint; blockTag?: string }) =>
+        blockTag === 'finalized' ? { number: 105n, timestamp: headTime } : (blocksRead++, { number: blockNumber, timestamp: blockNumber === 100n ? T0 : headTime }),
       getTransactionReceipt: async ({ hash }: { hash: Hex }) => Promise.reject(new TransactionReceiptNotFoundError({ hash })),
     } as unknown as import('viem').PublicClient
     const relayer = { address: '0x0000000000000000000000000000000000000001' as const, send: async () => Promise.reject(new Error('unused')) }
@@ -368,7 +369,7 @@ describe('convert reconciliation at a stale head (otto/mamoru#285)', () => {
     expect(blocksRead).toBe(2)
   })
 
-  test('the same past the swap deadline is failed', async () => {
+  test('the same past the swap deadline, at the finalized block, is failed', async () => {
     expect(await status(T0 + 3_600n)).toBe('failed')
   })
 })

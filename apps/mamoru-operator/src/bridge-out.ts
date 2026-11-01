@@ -1331,10 +1331,11 @@ export class BridgeOut {
         // transaction of the account signs that same nonce, so at most one of them ever runs: failed. Nonce spent:
         // the Safe's own ExecutionSuccess/ExecutionFailure for the signed safeTxHash says whether this one ran; neither
         // means another transaction took the nonce and this one can never run: failed. Unknown stays unconfirmed.
-        // otto/mamoru#285: the nonce and the log scan read the same block. Through several providers a head can come
-        // from a node a block behind the one that answered the nonce; pinned to one block, a spent nonce always has
-        // its execution inside the scan, so "spent and not found" really means another transaction took it.
-        const head = await this.l1.getBlockNumber({ cacheTime: 0 })
+        // otto/mamoru#285: a terminal answer is read at Ethereum's finalized block, nonce and logs alike. Through
+        // several providers, a recent block number can be a node behind or another fork; the finalized block is the
+        // same block for every honest node, so "spent and not found" and "unspent past the deadline" are both final.
+        // Until finality covers the send (about 13 minutes) the conversion stays unconfirmed.
+        const head = (await this.l1.getBlock({ blockTag: 'finalized' })).number
         const code = await this.l1.getCode({ address: next.safe, blockNumber: head })
         const nonce = !code || code === '0x' ? 0n : await this.l1.readContract({ address: next.safe, abi: safeNonceAbi, functionName: 'nonce', blockNumber: head })
         // The execution is looked for in every case, so an empty code from a node that is behind never reads as
