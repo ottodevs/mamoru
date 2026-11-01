@@ -140,6 +140,15 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
         if (!(await verifyMetricsSignature(opts.secret, 'GET', '/metrics', sig))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
         return json(200, await buildMetricsPayload(op, opts.rpcMetrics, opts.gitSha, opts.bootedAt))
       }
+      if (url.pathname === '/pool-stats') {
+        // otto/mamoru#248: the hourly pool stats (TVL, daily volumes) the app turns into the plan APY. Signed like
+        // /metrics; served from the cache as it is (each field null until read, with asOf). 404 where there is none.
+        if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
+        if (!(await verifyMetricsSignature(opts.secret, 'GET', '/pool-stats', req.headers.get('x-mamoru-sig')))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+        const stats = op.poolStatsView()
+        if (!stats) return json(404, { error: 'no pool stats on this chain' })
+        return json(200, { chainId: op.cfg.chainId, pools: stats })
+      }
       if (url.pathname === '/snapshot') {
         // otto/mamoru#136: the latest snapshot, signed like /metrics. 404 while the loop is off: either this
         // operator never constructs one (not Base, or no MULTICALL3), or it does but the `yield_ledger` ops flag

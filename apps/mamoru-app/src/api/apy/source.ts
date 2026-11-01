@@ -43,6 +43,14 @@ const KEY = 'https://apy.mamoru.internal'
 
 export const CURRENT_SOURCE = 'fee APR · GeckoTerminal/DefiLlama'
 export const MONTHLY_SOURCE = '30-day mean · DefiLlama'
+/** otto/mamoru#248: figures from the operator's hourly GeckoTerminal stats (GeckoTerminal answers 429 to Cloudflare). */
+export const OPERATOR_CURRENT_SOURCE = 'last-day fee APR · GeckoTerminal'
+export const OPERATOR_MONTHLY_SOURCE = '28-day fee APR · GeckoTerminal'
+
+/** One pool of the operator's GET /pool-stats; every field null until read (unread is never zero). */
+export type OperatorPoolStats = { tvlUsd: number | null; volumeLastDayUsd: number | null; volume28dAvgUsd: number | null }
+/** The operator's pool stats by pool name, or null when it is not configured or not reachable. */
+export type OperatorStats = () => Promise<Record<string, OperatorPoolStats> | null>
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 const num = (v: unknown): number | null => {
@@ -97,6 +105,12 @@ export async function llamaMonthly(fetcher: Fetcher, poolId: string, now: Date):
   return window.length > 0 ? window.reduce((s, v) => s + v, 0) / window.length : null
 }
 
+/** Fee APR of a daily USD volume over a reserve; null unless both are read and the reserve is positive. */
+export function feeApr(dailyVolume: number | null | undefined, feeTier: number, reserve: number | null | undefined): number | null {
+  if (typeof dailyVolume !== 'number' || typeof reserve !== 'number' || !Number.isFinite(dailyVolume) || !(reserve > 0) || dailyVolume < 0) return null
+  return ((dailyVolume * (feeTier / 1_000_000) * 365) / reserve) * 100
+}
+
 async function put(cache: ApyCache | null, key: string, ttl: number, value: unknown): Promise<void> {
   if (!cache) return
   const res = new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${ttl}` } })
@@ -123,8 +137,10 @@ async function cached(cache: ApyCache | null, key: string, ttl: number, load: ()
 }
 
 /** Per-pool current: GeckoTerminal 24h fee APR, then the last good value (1 day), then DefiLlama's latest daily figure. */
-function poolCurrent(fetcher: Fetcher, cache: ApyCache | null, p: PlanPool) {
-  return cached(cache, `${KEY}/current/${p.address}`, CURRENT_TTL, async () => {
+function poolCurrent(fetcher: Fetcher, cache: ApyCache | null, p: PlanPool, op: OperatorPoolStats | undefined) {
+  const own = feeApr(op?.volumeLastDayUsd, p.fee, op?.tvlUsd)
+  if (own !== null) return Promise.resolve({ v: own, operator: true })
+  return cachedFallback(cache, `${KEY}/current/${p.address}`, CURRENT_TTL, async () => {
     const gecko = await geckoApr(fetcher, p.address, p.fee)
     if (gecko !== null) {
       await put(cache, `${KEY}/last-current/${p.address}`, STALE_TTL, gecko)
@@ -135,8 +151,15 @@ function poolCurrent(fetcher: Fetcher, cache: ApyCache | null, p: PlanPool) {
   })
 }
 
-function poolMonthly(fetcher: Fetcher, cache: ApyCache | null, p: PlanPool, now: Date) {
-  return cached(cache, `${KEY}/monthly/${p.llamaId}`, MONTHLY_TTL, () => llamaMonthly(fetcher, p.llamaId, now))
+function poolMonthly(fetcher: Fetcher, cache: ApyCache | null, p: PlanPool, now: Date, op: OperatorPoolStats | undefined) {
+  const own = feeApr(op?.volume28dAvgUsd, p.fee, op?.tvlUsd)
+  if (own !== null) return Promise.resolve({ v: own, operator: true })
+  return cached(cache, `${KEY}/monthly/${p.llamaId}`, MONTHLY_TTL, () => llamaMonthly(fetcher, p.llamaId, now)).then((v) => ({ v, operator: false }))
+}
+
+/** The upstream path of a pool's current figure, tagged as not the operator's. */
+function cachedFallback(cache: ApyCache | null, key: string, ttl: number, load: () => Promise<number | null>) {
+  return cached(cache, key, ttl, load).then((v) => ({ v, operator: false }))
 }
 
 /** Weighted mean over the pools that have data; weights renormalize over those. */
@@ -164,23 +187,62 @@ function source(label: string, covered: number, total: number): string {
  * One current and one monthly APY for the account. Before our positions earn fees this is a
  * reference: the plan's pools' APYs weighted by the policy's bucket weights.
  */
-export async function apyView(fetcher: Fetcher, cache: ApyCache | null, now: Date, pools: PlanPool[] = planPools()): Promise<ApyView> {
+export async function apyView(fetcher: Fetcher, cache: ApyCache | null, now: Date, pools: PlanPool[] = planPools(), operator: OperatorStats = async () => null): Promise<ApyView> {
   const weights = pools.map((p) => p.weight)
+  const stats = await operator().catch(() => null)
   const [current, monthly] = await Promise.all([
-    Promise.all(pools.map((p) => poolCurrent(fetcher, cache, p))),
-    Promise.all(pools.map((p) => poolMonthly(fetcher, cache, p, now))),
+    Promise.all(pools.map((p) => poolCurrent(fetcher, cache, p, stats?.[p.name]))),
+    Promise.all(pools.map((p) => poolMonthly(fetcher, cache, p, now, stats?.[p.name]))),
   ])
-  const c = combine(current, weights)
-  const m = combine(monthly, weights)
+  const c = combine(current.map((x) => x.v), weights)
+  const m = combine(monthly.map((x) => x.v), weights)
   return {
     pool: APY_POLICY.policyId,
     currentPct: c.pct,
     currentWindow: '24h',
-    currentSource: source(CURRENT_SOURCE, c.covered, pools.length),
+    currentSource: source(labelOf(current, OPERATOR_CURRENT_SOURCE, CURRENT_SOURCE, CURRENT_SOURCE), c.covered, pools.length),
     monthlyPct: m.pct,
-    monthlySource: source(MONTHLY_SOURCE, m.covered, pools.length),
-    byPool: pools.map((p, i) => ({ pool: p.name, weight: p.weight, currentPct: round(current[i]), monthlyPct: round(monthly[i]) })),
+    monthlySource: source(labelOf(monthly, OPERATOR_MONTHLY_SOURCE, MONTHLY_SOURCE, '28/30-day mean · GeckoTerminal/DefiLlama'), m.covered, pools.length),
+    byPool: pools.map((p, i) => ({ pool: p.name, weight: p.weight, currentPct: round(current[i]?.v), monthlyPct: round(monthly[i]?.v) })),
     asOf: now.toISOString(),
+  }
+}
+
+/** The source line names what the shown figures came from: the operator's stats, upstream, or both. */
+function labelOf(xs: { v: number | null; operator: boolean }[], own: string, upstream: string, mixed: string): string {
+  const read = xs.filter((x) => x.v !== null)
+  if (read.length > 0 && read.every((x) => x.operator)) return own
+  return read.some((x) => x.operator) ? mixed : upstream
+}
+
+const OPERATOR_TTL = 300
+export const OPERATOR_TIMEOUT_MS = 5_000
+
+/**
+ * otto/mamoru#248: the Base operator's GET /pool-stats, signed like /metrics, kept 5 minutes in the Workers Cache (the
+ * operator itself refreshes hourly). Null when unsigned, unreachable or malformed: the upstream path takes over.
+ */
+export function operatorPoolStats(url: string | undefined, secret: string | undefined, fetcher: Fetcher, cache: ApyCache | null, sign: (secret: string, path: string) => Promise<string>): OperatorStats {
+  return async () => {
+    if (!url || !secret) return null
+    const key = `${KEY}/operator-pool-stats`
+    const hit = await get<Record<string, OperatorPoolStats>>(cache, key)
+    if (hit && typeof hit === 'object') return hit
+    try {
+      const res = await fetcher(url.replace(/\/+$/, '') + '/pool-stats', { headers: { 'x-mamoru-sig': await sign(secret, '/pool-stats'), accept: 'application/json' }, signal: AbortSignal.timeout(OPERATOR_TIMEOUT_MS) })
+      if (res.status !== 200) return null
+      const body = (await res.json()) as { chainId?: unknown; pools?: unknown }
+      if (body.chainId !== 8453 || !body.pools || typeof body.pools !== 'object') return null
+      const pools: Record<string, OperatorPoolStats> = {}
+      for (const [name, v] of Object.entries(body.pools as Record<string, Record<string, unknown>>)) {
+        if (!v || typeof v !== 'object') continue
+        pools[name] = { tvlUsd: num(v.tvlUsd), volumeLastDayUsd: num(v.volumeLastDayUsd), volume28dAvgUsd: num(v.volume28dAvgUsd) }
+      }
+      await put(cache, key, OPERATOR_TTL, pools)
+      return pools
+    } catch {
+      return null
+    }
   }
 }
 

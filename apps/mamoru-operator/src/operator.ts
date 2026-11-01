@@ -753,6 +753,13 @@ export class Operator {
   private readonly poolCache = poolStateCache()
   /** otto/mamoru#101 (shadow): hourly off-chain pool stats (TVL change, volume); only read for a policy that lists packaging:tvl. */
   private readonly poolStats: PoolStatsCache | undefined
+  /**
+   * otto/mamoru#248: the hourly pool stats as cached (never a fetch per call), for the app's plan APY: GeckoTerminal
+   * answers 429 to Cloudflare's egress. Null where there is no cache (not Base).
+   */
+  poolStatsView(): NonNullable<Observation['poolStats']> | null {
+    return this.poolStats ? this.poolStats.get() : null
+  }
   /** otto/mamoru#101 (shadow): hourly exit-direction impact curve of the Base pools (QuoterV2 eth_calls, memory only); only read for a policy that lists packaging:eel. */
   private readonly poolDepth: PoolDepthCache | undefined
   /**

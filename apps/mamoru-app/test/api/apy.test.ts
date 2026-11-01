@@ -42,8 +42,12 @@ function memoryCache(): ApyCache {
   }
 }
 
-async function getApy(fetcher: Fetcher, cache?: ApyCache) {
-  const h = harness(() => NOW, { apyFetch: fetcher, ...(cache ? { apyCache: () => cache } : {}) })
+async function getApy(fetcher: Fetcher, cache?: ApyCache, operator?: { fetch: NonNullable<Parameters<typeof harness>[1]>['operatorFetch'] }) {
+  const h = harness(() => NOW, {
+    apyFetch: fetcher,
+    ...(cache ? { apyCache: () => cache } : {}),
+    ...(operator ? { operatorFetch: operator.fetch, env: { OPERATOR_URL: 'https://op.test/', OPERATOR_SECRET: 'op-secret' } } : {}),
+  })
   const res = await h.request('/api/apy')
   return { res, view: (await res.json()) as ApyView }
 }
@@ -173,5 +177,65 @@ describe('GET /api/apy', () => {
     for (const a of [STABLE, BTC, RISK]) await stale.put(`https://apy.mamoru.internal/current/${a}`, new Response('null'))
     const { view } = await getApy(fakeFetch({}).fetcher, stale)
     expect(view.currentPct).toBe(5)
+  })
+
+  describe('from the Base operator\'s pool stats (otto/mamoru#248)', () => {
+    /** Operator stats whose last-day and 28-day fee APRs are `cur` and `month` on a 1M reserve. */
+    const opPool = (cur: number | null, month: number | null, feeTier: number) => {
+      const vol = (pct: number) => ((pct / 100) * 1_000_000) / ((feeTier / 1_000_000) * 365)
+      return { tvlUsd: 1_000_000, tvl1dAgoUsd: null, tvl7dAgoUsd: null, tvl30dAgoUsd: null, volume7dUsd: null, volumeLastDayUsd: cur === null ? null : vol(cur), volume28dAvgUsd: month === null ? null : vol(month), asOf: 1 }
+    }
+    function fakeOperator(body: unknown, status = 200) {
+      const calls: { url: string; sig: string | null }[] = []
+      const fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(url), sig: new Headers(init?.headers).get('x-mamoru-sig') })
+        return Response.json(body, { status })
+      }) as NonNullable<Parameters<typeof harness>[1]>['operatorFetch']
+      return { fetch, calls }
+    }
+    const ALL = { chainId: 8453, pools: { 'pool:USDC/USDT/100': opPool(2, 3, 100), 'pool:USDC/cbBTC/500': opPool(5, 10, 500), 'pool:WETH/USDC/3000': opPool(20, 30, 3000) } }
+
+    test('every pool read by the operator: no upstream call, its own source line', async () => {
+      const up = fakeFetch({})
+      const op = fakeOperator(ALL)
+      const { view } = await getApy(up.fetcher, undefined, op)
+      expect(view.currentPct).toBe(5)
+      expect(view.monthlyPct).toBe(8.5)
+      expect(view.currentSource).toBe('Plan pools, last-day fee APR · GeckoTerminal')
+      expect(view.monthlySource).toBe('Plan pools, 28-day fee APR · GeckoTerminal')
+      expect(up.calls).toEqual([])
+      expect(op.calls.map((c) => c.url)).toEqual(['https://op.test/pool-stats'])
+      expect(op.calls[0]!.sig).toBeTruthy()
+    })
+
+    test('an unread field falls back to upstream for that pool only, never to 0 %', async () => {
+      const body = { chainId: 8453, pools: { ...ALL.pools, 'pool:WETH/USDC/3000': opPool(null, null, 3000) } }
+      const up = fakeFetch({ [RISK]: gecko(40, 3000), [ID[RISK]]: llama({ d: 1, apy: 60 }) })
+      const { view } = await getApy(up.fetcher, undefined, fakeOperator(body))
+      expect(view.byPool?.[2]).toEqual({ pool: 'pool:WETH/USDC/3000', weight: 1000, currentPct: 40, monthlyPct: 60 })
+      expect(view.currentSource).toBe('Plan pools, fee APR · GeckoTerminal/DefiLlama')
+      expect(view.monthlySource).toBe('Plan pools, 28/30-day mean · GeckoTerminal/DefiLlama')
+      expect(up.calls.some((u) => u.includes(STABLE))).toBe(false)
+    })
+
+    test('operator down, wrong chain or no secret: the upstream path as before', async () => {
+      const upstream = { [STABLE]: gecko(2, 100), [ID[STABLE]]: llama({ d: 1, apy: 3 }) }
+      for (const op of [fakeOperator({ error: 'x' }, 503), fakeOperator({ chainId: 143, pools: ALL.pools })]) {
+        const { view } = await getApy(fakeFetch(upstream).fetcher, undefined, op)
+        expect(view.byPool?.[0]).toEqual({ pool: 'pool:USDC/USDT/100', weight: 5000, currentPct: 2, monthlyPct: 3 })
+      }
+      const op = fakeOperator(ALL)
+      const h = harness(() => NOW, { apyFetch: fakeFetch(upstream).fetcher, operatorFetch: op.fetch, env: { OPERATOR_URL: 'https://op.test' } })
+      await h.request('/api/apy')
+      expect(op.calls).toEqual([])
+    })
+
+    test('the operator\'s stats are kept 5 minutes in the cache', async () => {
+      const cache = memoryCache()
+      const op = fakeOperator(ALL)
+      await getApy(fakeFetch({}).fetcher, cache, op)
+      await getApy(fakeFetch({}).fetcher, cache, op)
+      expect(op.calls.length).toBe(1)
+    })
   })
 })
