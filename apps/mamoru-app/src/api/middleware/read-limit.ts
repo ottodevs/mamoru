@@ -6,7 +6,7 @@ import { sha256 } from '../auth/webauthn.ts'
 /**
  * #255: reads of one account, counted per account and client address (ACCOUNT_READ_LIMIT, wrangler.jsonc: 600 per
  * minute). A visible tab reads about 50 a minute at its fastest (an op in flight) and a hidden one does not poll, so
- * a dozen windows open side by side stay under it, with room for the limiter being approximate; a script reading in
+ * ten windows open side by side stay under it, with room for the limiter being approximate; a script reading in
  * a loop gets 429 instead of an operator or D1 read each time. Keyed by address too, so nobody can spend another
  * owner's allowance. Reads are GET and HEAD (Hono answers HEAD with the GET handler); an owner action is never
  * refused here. No binding (tests, local runs) or a limiter that does not answer: let through.
