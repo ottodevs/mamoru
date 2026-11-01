@@ -12,7 +12,7 @@ const pools = (names: string[]) => depthPoolsOf(names, baseRegistry)
 type Q = { tokenIn: string; tokenOut: string; fee: number; amountIn: bigint; blockNumber: bigint }
 
 /** A chain whose k-th quote of a pool answers `impacts[k]` bps under the fee-adjusted mid output (null: revert; 'zero'; 'fail': transport error). */
-function fakeIo(impacts: (number | null | 'zero' | 'fail' | 'hang')[], opts: { head?: bigint } = {}) {
+function fakeIo(impacts: (number | null | 'zero' | 'fail' | 'hang')[], opts: { head?: bigint; liquidity?: bigint } = {}) {
   const calls: { kind: string; q?: Q; at?: number }[] = []
   let n = 0
   const io: DepthIo = {
@@ -23,6 +23,7 @@ function fakeIo(impacts: (number | null | 'zero' | 'fail' | 'hang')[], opts: { h
       const name = [BTC, WETH, 'pool:USDC/USDT/100'].find((x) => depthPoolsOf([x], baseRegistry)[0]!.address === pool)!
       return sqrtRatioAtTick(TICK[name]!)
     },
+    liquidity: async () => (calls.push({ kind: 'liquidity' }), opts.liquidity ?? 10n ** 18n),
     quote: async (q) => {
       calls.push({ kind: 'quote', q })
       const k = n++
@@ -100,7 +101,7 @@ describe('PoolDepthCache', () => {
     const good = fakeIo([3, 6, 9, 12, 15, 18, 21, 24, 27])
     const reverting = fakeIo([3, 6, 9, 12, null])
     let failing = false
-    const io: DepthIo = { block: good.io.block, sqrtPrice: (pool, b) => (failing ? reverting : good).io.sqrtPrice(pool, b), quote: (q) => (failing ? reverting : good).io.quote(q) }
+    const io: DepthIo = { block: good.io.block, sqrtPrice: (pool, b) => (failing ? reverting : good).io.sqrtPrice(pool, b), quote: (q) => (failing ? reverting : good).io.quote(q), liquidity: (pool, b) => (failing ? reverting : good).io.liquidity(pool, b) }
     const cache = new PoolDepthCache(pools([BTC]), io, { now: k.now })
     await cache.settled()
     const before = cache.get()[BTC]!.impactBps
@@ -110,6 +111,21 @@ describe('PoolDepthCache', () => {
     await cache.settled()
     expect(reverting.quotes()).toHaveLength(5)
     expect(cache.get()[BTC]!.impactBps).toEqual(before)
+  })
+
+  test('a drained pool (in-range liquidity 0) turns the failed quote into a null: the healthy old curve does not survive it', async () => {
+    const k = clock()
+    let drained = false
+    const good = fakeIo([3, 6, 9, 12, 15, 18, 21, 24, 27])
+    const empty = fakeIo([null], { liquidity: 0n })
+    const io: DepthIo = { block: good.io.block, sqrtPrice: (pool, b) => (drained ? empty : good).io.sqrtPrice(pool, b), quote: (q) => (drained ? empty : good).io.quote(q), liquidity: (pool, b) => (drained ? empty : good).io.liquidity(pool, b) }
+    const cache = new PoolDepthCache(pools([BTC]), io, { now: k.now })
+    await cache.settled()
+    drained = true
+    k.c.t += 61 * 60_000
+    await cache.settled()
+    expect(cache.get()[BTC]!.impactBps.every((x) => x === null)).toBe(true)
+    expect(empty.quotes()).toHaveLength(1)
   })
 
   test('a first read that reverts leaves the pool unread, not "too large"', async () => {
@@ -179,7 +195,7 @@ describe('PoolDepthCache', () => {
   })
 
   test('a throwing or hanging chain read is contained: get() never throws and a review is never held', async () => {
-    const io: DepthIo = { block: () => { throw new Error('sync boom') }, sqrtPrice: async () => 1n, quote: async () => 1n }
+    const io: DepthIo = { block: () => { throw new Error('sync boom') }, sqrtPrice: async () => 1n, quote: async () => 1n, liquidity: async () => 1n }
     const cache = new PoolDepthCache(pools([BTC]), io, { now: clock().now })
     expect(() => cache.get()).not.toThrow()
     await cache.settled()
@@ -210,7 +226,7 @@ describe('RPC budget and error classes (otto/mamoru#101 review)', () => {
     const f = fakeIo([4])
     let calls = 0
     let allow = Infinity
-    const io: DepthIo = { block: (...a) => (calls++, f.io.block(...a)), sqrtPrice: (...a) => (calls++, f.io.sqrtPrice(...a)), quote: (...a) => (calls++, f.io.quote(...a)) }
+    const io: DepthIo = { block: (...a) => (calls++, f.io.block(...a)), sqrtPrice: (...a) => (calls++, f.io.sqrtPrice(...a)), quote: (...a) => (calls++, f.io.quote(...a)), liquidity: (...a) => (calls++, f.io.liquidity(...a)) }
     const cache = new PoolDepthCache(pools([BTC]), io, { now: k.now, over: () => calls >= allow })
     await cache.settled()
     expect(cache.get()[BTC]!.impactBps).toEqual(Array(9).fill(4))

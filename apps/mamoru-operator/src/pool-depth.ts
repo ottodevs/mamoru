@@ -32,6 +32,8 @@ export type DepthIo = {
   block(): Promise<bigint>
   sqrtPrice(pool: Address, block: bigint): Promise<bigint>
   quote(q: QuoteRequest): Promise<bigint>
+  /** The pool's in-range liquidity: asked only when a quote fails, to tell a drained pool from a failed read. */
+  liquidity(pool: Address, block: bigint): Promise<bigint>
 }
 
 /** Raw output of the pool fee-free mid price for `amountIn` of the sell token, in raw USDC. */
@@ -49,8 +51,10 @@ export function impactBpsOf(amountOut: bigint, expectedOut: bigint): number | nu
 /**
  * QuoterV2 never reverts because a size is too large: with no price limit it swaps to the edge of the price range and
  * answers the partial output, which reads here as a high impact. It reverts only in a zero-liquidity region or on a
- * failure, and an RPC error can come wrapped as a revert, so no error is read as depth (peer review round 2): any
- * error ends this pool's read and the old curve stays. Only a zero output is a null.
+ * failure, and an RPC error can come wrapped as a revert, so no error text is read as depth (peer review round 2). A
+ * failed quote is told apart by the pool's own state: in-range liquidity 0 means drained (a null, so a healthy old curve
+ * never outlives the pool, review round 3); anything else, or a failed liquidity read, ends this pool's read and the old
+ * curve stays. A zero output is a null too.
  */
 class BudgetSpent extends Error {
   constructor() {
@@ -153,8 +157,15 @@ export class PoolDepthCache {
       const amountIn = sellIsToken0 ? token1InToken0(usdcRaw, sqrt) : token0InToken1(usdcRaw, sqrt)
       if (amountIn <= 0n) throw new Error('size rounds to zero')
       const expected = (midOut(amountIn, sqrt, sellIsToken0) * BigInt(1_000_000 - p.fee)) / 1_000_000n
-      // Any error (revert, gas, time, transport, budget) drops the whole pool read: see the note above BudgetSpent.
-      const out = await this.timed(this.guarded(() => this.io.quote({ tokenIn, tokenOut: p.usdcAddress, fee: p.fee, amountIn, blockNumber: block })))
+      let out: bigint
+      try {
+        out = await this.timed(this.guarded(() => this.io.quote({ tokenIn, tokenOut: p.usdcAddress, fee: p.fee, amountIn, blockNumber: block })))
+      } catch (e) {
+        // See the note above BudgetSpent: only a drained pool turns a failed quote into a null.
+        const inRange = await this.timed(this.guarded(() => this.io.liquidity(p.address, block)))
+        if (inRange !== 0n) throw e
+        out = 0n
+      }
       const bps = out > 0n ? impactBpsOf(out, expected) : null
       impactBps.push(bps)
       if (bps === null) stopped = true
@@ -199,6 +210,7 @@ export function depthIoOf(client: PublicClient, registry: Registry): DepthIo {
       return sqrtPriceX96
     },
     quote: (r) => q.quoteExactInputSingle(client, r),
+    liquidity: (pool, blockNumber) => client.readContract({ address: pool, abi: uniswapV3PoolAbi, functionName: 'liquidity', blockNumber }),
   }
 }
 
