@@ -319,7 +319,7 @@ The risk page states the gap: the limit is a target and a fast move can pass it.
 simulator today, not yet in the domain list), `EXIT_LOSS_CONTROL` (ExitRequest cause),
 `EXIT_PARTIAL_IMPACT`, `EXIT_SWAP_WAIT_TWAP`, `BUCKET_FROZEN`, `BUCKET_PARKED`, `BUCKET_REENTERED`.
 
-Phase 3 (shadow only): `RISK_ACTION_BUDGET_SPENT`, `REENTRY_COOLDOWN_SHADOW`,
+Phase 3 (shadow only): `RISK_RERANGE_BUDGET_SPENT`, `RISK_ACTION_BUDGET_SPENT`, `REENTRY_COOLDOWN_SHADOW`,
 `REENTRY_REVALIDATION_SHADOW`.
 
 ## Lab plan
@@ -392,7 +392,7 @@ A variant: `bun packages/backtest/cli/sweep.ts --policy conservador-lab-guards-v
 | LC-T7 | `conservador-live-v3` with `guards.mode = 'shadow'`; two weeks of would-be codes on live | `/ops` shows them |
 | LC-T8 | App: bucket state lines, history with trigger and threshold, risk page copy (#58) | UI scenario per state |
 | LC-T9 | `guards.mode = 'enforce'` after Ot's GO on the Lab table and the shadow log, and only once D5 is resolved | Ot GO |
-| LC-T10 | Phase 3 shadow rows: `includedAt` on every engine op kind and the action budget from it; cooldown and re-validation rows wired to the exit path once LC-T4 lands | decide unit tests per code; a restart or replayed review counts nothing twice; a row without `includedAt` is skipped; no state or proposal change with the rows present |
+| LC-T10 | Phase 3 shadow rows: `includedAt` on every engine op kind, the action budget summed across both operators from D1 (partial `scope: 'chain'` until then), the re-range row while `maxPerWeek` is unset, re-entry attempt records; cooldown and re-validation rows wired to the exit path once LC-T4 lands | decide unit tests per code; a restart or replayed review counts nothing twice; a row without `includedAt` is skipped; no state or proposal change with the rows present |
 | LC-T11 | Lab: replay `base-2025-10-crash-10m`, `base-2025-02-crash-10m` and `sep2026` with the phase 3 rows; `range.maxPerWeek` = 2 against no cap (an engineering setting, so the Lab may enforce it), and the would-be `RISK_ACTION_BUDGET_SPENT` codes in shadow; drawdown, gas and return per window | Lab note |
 | LC-T12 | Monad: a data source for WMON/USDC (GeckoTerminal does not cover it, #171), datasets, oracle choice; then the phase 1 and 2 rows on the Monad operator | dataset id; phase 1-2 rows readable on Monad |
 | LC-T13 | Incident exits: a producer for `RISK_INCIDENT_EXIT` (spec 001) from pool pause, oracle pause, bridge or admin change, upgrade and exploit feeds (Packaging section F), plus the manual `IncidentFlag` | own ticket |
@@ -461,25 +461,34 @@ week, each one selling the fall ("Measured exposure"): a re-range budget is the 
 | Rule | Condition (would hold the operation) | Code | `window` |
 |---|---|---|---|
 | Action budget | the proposal is an engine operation of kind entry, `rerange`, reduce, idle convert or ratio convert, and the account already has 5 confirmed ones in the window; exit legs and harvests do not count | `RISK_ACTION_BUDGET_SPENT` | `30d` |
-| Cooldown | an automatic re-entry into a pool that the bucket left less than the cooldown ago: stables 7 d, btc-usdc 4 d, risk 10 d | `REENTRY_COOLDOWN_SHADOW` | per bucket |
+| Re-range budget, cap unset | `range.maxPerWeek` absent or above 2 for the pool, and the pool already has 2 confirmed re-ranges in the window (`rerangeHistoryOf`, #218) when a re-range is proposed | `RISK_RERANGE_BUDGET_SPENT` | `7d` |
+| Cooldown | an automatic re-entry attempt into a pool less than the cooldown after the bucket left it, or less than the cooldown after the previous attempt into that pool: stables 7 d, btc-usdc 4 d, risk 10 d | `REENTRY_COOLDOWN_SHADOW` | per bucket |
 | Re-validation | an automatic re-entry while any Purga check or any rule of this spec (shadow rows included) does not pass for the pool; the entry carries the blocking rule's code | `REENTRY_REVALIDATION_SHADOW` | none |
 
 Notes:
 
 - **Re-range budget: already built.** The Packaging's "2 rebalances per week" is the weekly re-range cap of #218
   (`range.maxPerWeek` in the engine settings, per pool, enforced, `DECIDE_RANGE_WEEKLY_CAP`). It is an engineering
-  setting set from `/ops`, so no Packaging shadow row is added; the Packaging value for it is 2.
+  setting set from `/ops`; the Packaging value for it is 2. The live engine settings do not set it today, so the
+  shadow row above reports what a cap of 2 would have held until `/ops` sets it.
+- **Re-entry attempt.** An attempt is a decision that proposes an entry into a pool the bucket left on a rule, whether
+  the entry later confirms, fails or is refused. The engine records `{ pool, at }` per attempt (block timestamp of the
+  review) next to the bucket state, so a run of failed attempts is limited by the same cooldown as the first.
 - **Action budget counting.** Same mechanism as #218's `rerangeHistoryOf`: a stored op counts only when `confirmed`,
   dated by the block timestamp of its inclusion, written when the engine confirms it (no clock guess, survives a
   restart). Today only re-ranges carry that timestamp (`rerangeAt`); LC-T10 adds `includedAt` to every engine op kind
   above, with the op kind kept as the decision produced it. A row without `includedAt` predates the field and is
   skipped, so the budget under-counts for 30 days after the field ships, never over-counts. A pre-empted, refused or
   failed op never counts.
+- The action budget is per account across chains, as the Packaging counts the portfolio. Each operator has its own
+  journal, so the count is the sum of the confirmed ops of both operators for the account, read from the app's
+  account ledger (D1), not from the local journal alone. Until that read exists, the row carries `scope: 'chain'` and
+  is reported as partial in `/ops`, never as a full count.
 - The action budget can be computed on live once `includedAt` ships. The re-entry rows have nothing to read until the exit path exists
   (LC-T4): before that, no bucket ever leaves a pool on a rule, so they stay silent.
 - After the stables bucket moves to an ERC-4626 vault (#210, PR #152) it has no range and makes no re-range; its
   deposits and withdrawals count in the action budget as entries and reduces.
-- Monad: the counters need no outside source, so they run on both operators. The pool rules of phases 1 and 2 stay
+- Monad: the counters need no outside source, so they run on both operators (the action budget summed as above). The pool rules of phases 1 and 2 stay
   Base-only until LC-T12.
 
 ## Decisions for Ot
