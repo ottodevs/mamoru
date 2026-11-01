@@ -24,6 +24,22 @@ type Env = Record<string, string | undefined>
 export const L1_PUBLIC_FALLBACKS = 'https://rpc.mevblocker.io,https://ethereum-rpc.publicnode.com,https://public.1rpc.io/eth,https://eth.drpc.org,https://eth-mainnet.public.blastapi.io'
 export const MONAD_PUBLIC_FALLBACKS = 'https://rpc.monad.xyz,https://rpc2.monad.xyz,https://rpc3.monad.xyz,https://monad-mainnet.rpc.sentio.xyz,https://monad-mainnet.drpc.org'
 
+/**
+ * otto/mamoru#285: how many of these configured RPCs answer a chain id other than `chainId`. One that does not answer
+ * does not count (an outage is not a misconfiguration). Never throws, never names a URL.
+ */
+export async function wrongChainCount(urls: readonly string[], chainId: number, send: (url: string, init: RequestInit) => Promise<Response> = fetch, timeoutMs = 8_000): Promise<number> {
+  const answers = await Promise.all(
+    urls.map((url) =>
+      send(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_chainId', params: [] }), signal: AbortSignal.timeout(timeoutMs) })
+        .then((r) => r.json() as Promise<{ result?: unknown }>)
+        .then((j) => (typeof j?.result === 'string' ? Number(j.result) : null))
+        .catch(() => null),
+    ),
+  )
+  return answers.filter((n) => n !== null && n !== chainId).length
+}
+
 /** A comma separated URL list from `name`, or `fallback` when unset. Read when called, like the two below. */
 export function urlsFromEnv(name: string, fallback: string, env: Env = process.env): string[] {
   return (env[name] ?? fallback).split(',').map((u) => u.trim()).filter(Boolean)

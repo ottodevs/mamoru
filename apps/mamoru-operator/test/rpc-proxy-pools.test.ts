@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, startRpcProxy, urlsFromEnv } from '../src/rpc-proxy.ts'
+import { L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, startRpcProxy, urlsFromEnv, wrongChainCount } from '../src/rpc-proxy.ts'
 
 // otto/mamoru#285: Ethereum and the Monad leg are never served by one RPC alone.
 describe('per-chain pools (otto/mamoru#285)', () => {
@@ -180,5 +180,14 @@ describe('per-chain pools (otto/mamoru#285)', () => {
     } finally {
       proxy.stop()
     }
+  })
+
+  test('wrongChainCount counts RPCs on another chain, not ones that are down', async () => {
+    const send = async (url: string) => {
+      if (url.includes('down')) throw new Error('unreachable')
+      return Response.json({ jsonrpc: '2.0', id: 0, result: url.includes('base') ? '0x2105' : '0x1' })
+    }
+    expect(await wrongChainCount(['https://eth.example', 'https://down.example'], 1, send)).toBe(0)
+    expect(await wrongChainCount(['https://eth.example', 'https://base.example'], 1, send)).toBe(1)
   })
 })

@@ -20,7 +20,7 @@ import { BRIDGE_MONAD_CHAIN_ID, MonadBridge } from './bridge-monad.ts'
 import { CCTP_DOMAIN_MONAD, MESSAGE_TRANSMITTER_V2 } from './cctp.ts'
 import { BridgeOut, ETHEREUM_CHAIN_ID, L1_BUNDLER_TIMEOUT_MS, L1_HANDLE_OPS_GAS, L1_USDC } from './bridge-out.ts'
 import { L1Bundler, paymasterFromEnv } from './paymaster.ts'
-import { L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, startRpcProxy, urlsFromEnv } from './rpc-proxy.ts'
+import { L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, startRpcProxy, urlsFromEnv, wrongChainCount } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
 import { readSnapshot, SnapshotLoop, snapshotIntervalMs, type Snapshot } from './snapshot.ts'
 import { MULTICALL3 } from '@mamoru/rpc'
@@ -575,6 +575,9 @@ export async function bootOperator(o: BootOptions) {
   // MAMORU_MONAD_RPC_TRUSTED for reads, public RPCs only for sends and log witnesses. Never one RPC alone.
   let monadProxy: { url: string; stop: () => void } | null = null
   if (o.monadRpcUrl) {
+    // A configured RPC on another chain is a misconfiguration and refuses the boot; one that is down is not.
+    if ((await wrongChainCount([o.monadRpcUrl, ...urlsFromEnv('MAMORU_MONAD_RPC_TRUSTED', '')], BRIDGE_MONAD_CHAIN_ID)) > 0)
+      throw new Error('MAMORU_MONAD_RPC_URL or MAMORU_MONAD_RPC_TRUSTED names an RPC that is not on Monad')
     monadProxy = startRpcProxy(o.monadRpcUrl, {
       trusted: urlsFromEnv('MAMORU_MONAD_RPC_TRUSTED', ''),
       fallbacks: urlsFromEnv('MAMORU_MONAD_RPC_FALLBACKS', MONAD_PUBLIC_FALLBACKS),
@@ -713,6 +716,9 @@ export async function bootOperator(o: BootOptions) {
   // minute tick finishes them once Ethereum answers again. A wrong chain still refuses the boot.
   let l1Proxy: { url: string; stop: () => void } | null = null
   if (o.l1RpcUrl) {
+    // A configured RPC on another chain is a misconfiguration and refuses the boot; one that is down is not.
+    if ((await wrongChainCount([o.l1RpcUrl, ...urlsFromEnv('MAMORU_L1_RPC_TRUSTED', '')], ETHEREUM_CHAIN_ID)) > 0)
+      throw new Error('MAMORU_L1_RPC_URL or MAMORU_L1_RPC_TRUSTED names an RPC that is not on Ethereum Mainnet')
     l1Proxy = startRpcProxy(o.l1RpcUrl, {
       trusted: urlsFromEnv('MAMORU_L1_RPC_TRUSTED', ''),
       fallbacks: urlsFromEnv('MAMORU_L1_RPC_FALLBACKS', L1_PUBLIC_FALLBACKS),

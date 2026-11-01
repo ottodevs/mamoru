@@ -35,6 +35,9 @@ import { logErr } from './metrics.ts'
 // never handed to the provider, or when its receipt says it reverted. Anything else that is not proven is
 // 'unconfirmed', and status() resolves it from the chain.
 
+/** The Safe's nonce, read at a pinned block in convert reconciliation (otto/mamoru#285). */
+const safeNonceAbi = parseAbi(['function nonce() view returns (uint256)'])
+
 export const ETHEREUM_CHAIN_ID = 1
 export const BASE_CHAIN_ID = 8453
 export const L1_USDC: Address = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
@@ -1295,8 +1298,8 @@ export class BridgeOut {
    * LOG_WINDOW_BLOCKS (the signed swap's deadline is CONVERT_DEADLINE_SEC, ~75 blocks: it cannot run later). The hash
    * is read from the indexed topic or, for a Safe build that does not index it, from the data. Null: not found.
    */
-  private async findExecution(safe: Address, safeTxHash: Hex, from: bigint): Promise<{ tx: Hex; success: boolean } | null> {
-    const head = await this.l1.getBlockNumber({ cacheTime: 0 })
+  private async findExecution(safe: Address, safeTxHash: Hex, from: bigint, upTo?: bigint): Promise<{ tx: Hex; success: boolean } | null> {
+    const head = upTo ?? (await this.l1.getBlockNumber({ cacheTime: 0 }))
     const end = head < from + LOG_WINDOW_BLOCKS ? head : from + LOG_WINDOW_BLOCKS
     const want = safeTxHash.toLowerCase()
     for (let lo = from; lo <= end; lo += LOG_CHUNK_BLOCKS) {
@@ -1328,11 +1331,18 @@ export class BridgeOut {
         // transaction of the account signs that same nonce, so at most one of them ever runs: failed. Nonce spent:
         // the Safe's own ExecutionSuccess/ExecutionFailure for the signed safeTxHash says whether this one ran; neither
         // means another transaction took the nonce and this one can never run: failed. Unknown stays unconfirmed.
-        const { nonce } = await readSafeNonce(this.l1, next.safe)
-        if (nonce === BigInt(next.safeNonce)) next.state = 'failed'
+        // otto/mamoru#285: the nonce and the log scan read the same block. Through several providers a head can come
+        // from a node a block behind the one that answered the nonce; pinned to one block, a spent nonce always has
+        // its execution inside the scan, so "spent and not found" really means another transaction took it.
+        const head = await this.l1.getBlockNumber({ cacheTime: 0 })
+        const code = await this.l1.getCode({ address: next.safe, blockNumber: head })
+        const nonce = !code || code === '0x' ? 0n : await this.l1.readContract({ address: next.safe, abi: safeNonceAbi, functionName: 'nonce', blockNumber: head })
+        // The execution is looked for in every case, so an empty code from a node that is behind never reads as
+        // "never ran": failed only when the logs up to `head` have no execution of the signed hash.
+        const ran = await this.findExecution(next.safe, next.safeTxHash, BigInt(next.fromBlock), head)
+        if (ran === null && nonce === BigInt(next.safeNonce)) next.state = 'failed'
         else {
           // Every stored conversion carries the signed safeTxHash and its send block (written before any send).
-          const ran = await this.findExecution(next.safe, next.safeTxHash, BigInt(next.fromBlock))
           if (ran === null) next.state = 'failed'
           else if (ran.success) {
             const receipt = await this.l1.getTransactionReceipt({ hash: ran.tx })
