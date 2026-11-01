@@ -22,13 +22,19 @@ function refuse(why: string): never {
 }
 const unitArg = (() => {
   const i = argv.indexOf('--unit')
-  return i >= 0 ? argv[i + 1] : undefined
+  if (i < 0) return undefined
+  const v = argv[i + 1]
+  return v && !v.startsWith('-') ? v : refuse('--unit needs a unit name (mamoru-operator or mamoru-operator-monad)')
 })()
 if (unitArg !== undefined && process.env.MAMORU_OPERATOR_UNIT !== undefined && unitArg !== process.env.MAMORU_OPERATOR_UNIT) refuse(`--unit ${unitArg} and MAMORU_OPERATOR_UNIT=${process.env.MAMORU_OPERATOR_UNIT} disagree`)
 const unit = unitArg ?? process.env.MAMORU_OPERATOR_UNIT ?? 'mamoru-operator'
 // otto/mamoru#241: dir, env file and metrics come from the unit; the MAMORU_OPERATOR_* overrides may only agree with it.
 const target = (() => {
-  const show = (p: string) => Bun.spawnSync(['systemctl', '--user', 'show', unit, '-p', p, '--value'], { stdout: 'pipe' }).stdout.toString().trim()
+  const show = (p: string) => {
+    const r = Bun.spawnSync(['systemctl', '--user', 'show', unit, '-p', p, '--value'], { stdout: 'pipe', stderr: 'pipe' })
+    if (r.exitCode !== 0) refuse(`systemctl show ${unit} -p ${p} failed: ${r.stderr.toString().trim()}`)
+    return r.stdout.toString().trim()
+  }
   const t = unitTarget(
     unit,
     {

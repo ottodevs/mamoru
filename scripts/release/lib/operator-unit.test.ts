@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { unitEnvironment, unitTarget } from './operator.ts'
+import { envFileValue, unitEnvironment, unitTarget } from './operator.ts'
 
 const HOME = '/home/otto'
 const DEFAULT_ENV = `${HOME}/.config/mamoru-operator/env`
@@ -38,5 +38,21 @@ describe('unitTarget (otto/mamoru#241)', () => {
 
   test('Environment= values, quoted or not', () => {
     expect(unitEnvironment('A=1 B="two words" C=')).toEqual({ A: '1', B: 'two words', C: '' })
+  })
+
+  test('a non-default unit that names no env file is refused, never pointed at Base\'s', () => {
+    expect(unitTarget('mamoru-operator-monad', facts(`${HOME}/.cursor/worktrees/mamoru/op-monad`, ''), {}, DEFAULT_ENV)).toContain('sets no Environment=MAMORU_OPERATOR_ENV')
+  })
+
+  test('an assignment quoted whole by systemd, path with a space', () => {
+    files['/srv/op env/env'] = 'PORT=8790\n'
+    expect(unitEnvironment('"MAMORU_OPERATOR_ENV=/srv/op env/env" X=1')).toEqual({ MAMORU_OPERATOR_ENV: '/srv/op env/env', X: '1' })
+    expect(unitTarget('u', facts('/d', '"MAMORU_OPERATOR_ENV=/srv/op env/env"'), {}, DEFAULT_ENV)).toEqual({ dir: '/d', envFile: '/srv/op env/env', metricsUrl: 'http://127.0.0.1:8790/metrics' })
+  })
+
+  test('the last PORT line wins; a PORT that is not a number is refused', () => {
+    expect(envFileValue('PORT=8787\nX=1\nPORT="8788"\n', 'PORT')).toBe('8788')
+    files['/e/bad'] = 'PORT=eighty\n'
+    expect(unitTarget('u', facts('/d', 'MAMORU_OPERATOR_ENV=/e/bad'), {}, DEFAULT_ENV)).toContain('is not a port')
   })
 })

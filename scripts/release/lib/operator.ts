@@ -66,11 +66,25 @@ export function loopsStarted(journal: string): number {
 
 export type UnitTarget = { dir: string; envFile: string; metricsUrl: string }
 
-/** `systemctl show -p Environment --value`: space-separated K=V pairs (a value may be "quoted"). */
+/**
+ * `systemctl show -p Environment --value`: space-separated assignments; systemd quotes a whole assignment that holds a
+ * space or a special character ("K=a b"), and a quote may also follow the `=`. A later assignment wins, as in systemd.
+ */
 export function unitEnvironment(value: string): Record<string, string> {
   const out: Record<string, string> = {}
-  for (const m of value.matchAll(/(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=("([^"]*)"|\S*)/g)) out[m[1]!] = m[3] ?? m[2]!
+  for (const m of value.matchAll(/"((?:[^"\\]|\\.)*)"|([A-Za-z_][A-Za-z0-9_]*="(?:[^"\\]|\\.)*")|(\S+)/g)) {
+    const raw = (m[1] ?? m[2] ?? m[3]!).replace(/\\(.)/g, '$1')
+    const eq = raw.indexOf('=')
+    if (eq <= 0 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(raw.slice(0, eq))) continue
+    out[raw.slice(0, eq)] = raw.slice(eq + 1).replace(/^"(.*)"$/, '$1')
+  }
   return out
+}
+
+/** The value of the last `KEY=` line of an env file (the one that wins), unquoted. */
+export function envFileValue(text: string, key: string): string | undefined {
+  const all = [...text.matchAll(new RegExp(`^\\s*(?:export\\s+)?${key}=(.*)$`, 'gm'))]
+  return all.at(-1)?.[1]?.trim().replace(/^["']|["']$/g, '')
 }
 
 /**
@@ -83,13 +97,19 @@ export function unitTarget(
   facts: { workingDirectory: string; environment: string; envFileText: (path: string) => string | null; realpath: (p: string) => string },
   given: { dir?: string; envFile?: string; metricsUrl?: string },
   defaultEnvFile: string,
+  defaultUnit = 'mamoru-operator',
 ): UnitTarget | string {
   if (!facts.workingDirectory) return `unit ${unit} has no WorkingDirectory (is it installed?)`
   const dir = facts.realpath(facts.workingDirectory)
-  const envFile = unitEnvironment(facts.environment).MAMORU_OPERATOR_ENV ?? defaultEnvFile
+  const declared = unitEnvironment(facts.environment).MAMORU_OPERATOR_ENV
+  // Only the default (Base) unit may use the default env file: any other unit names its own, or nothing is assumed.
+  if (declared === undefined && unit !== defaultUnit) return `unit ${unit} sets no Environment=MAMORU_OPERATOR_ENV; refusing to assume ${defaultEnvFile}`
+  const envFile = declared ?? defaultEnvFile
   const text = facts.envFileText(envFile)
   if (text === null) return `unit ${unit}: env file ${envFile} not readable`
-  const port = text.match(/^PORT=["']?(\d+)["']?\s*$/m)?.[1] ?? '8787'
+  const portValue = envFileValue(text, 'PORT')
+  if (portValue !== undefined && !/^\d+$/.test(portValue)) return `unit ${unit}: PORT=${portValue} in ${envFile} is not a port`
+  const port = portValue ?? '8787'
   const metricsUrl = `http://127.0.0.1:${port}/metrics`
   if (given.dir !== undefined && facts.realpath(given.dir) !== dir) return `MAMORU_OPERATOR_DIR=${given.dir} is not unit ${unit}'s WorkingDirectory ${dir}`
   if (given.envFile !== undefined && given.envFile !== envFile) return `MAMORU_OPERATOR_ENV=${given.envFile} is not unit ${unit}'s env file ${envFile}`
