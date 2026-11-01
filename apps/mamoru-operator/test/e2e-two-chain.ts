@@ -461,7 +461,9 @@ try {
     const logs = await monad.client.getLogs({ address: address('USDC', monadRegistry), event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)'), args: { from: '0x0000000000000000000000000000000000000000', to: remote }, fromBlock: monadStart, toBlock: 'latest' })
     return logs.reduce((n, l) => n + (l.args.value ?? 0n), 0n)
   }
-  await until('the burn is minted on Monad to the remote Safe', 900_000, async () => (await mintedTo()) >= burned, 10_000)
+  // Baseline first (review of #194): only a mint after this point, of at least the burned amount, counts.
+  const minted0 = await mintedTo()
+  await until('the burn is minted on Monad to the remote Safe', 900_000, async () => (await mintedTo()) - minted0 >= burned, 10_000)
   check(irisCalls.length > 0, 'the Base operator asked Iris for the burn', `${irisCalls.length} poll(s)`)
   check(true, 'Monad: the USDC landed on the remote Safe (receiveMessage by the Base operator\'s relayer)', `${burned} units`)
 
