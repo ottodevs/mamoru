@@ -319,7 +319,7 @@ The risk page states the gap: the limit is a target and a fast move can pass it.
 simulator today, not yet in the domain list), `EXIT_LOSS_CONTROL` (ExitRequest cause),
 `EXIT_PARTIAL_IMPACT`, `EXIT_SWAP_WAIT_TWAP`, `BUCKET_FROZEN`, `BUCKET_PARKED`, `BUCKET_REENTERED`.
 
-Phase 3 (shadow only): `RISK_RERANGE_BUDGET_SPENT`, `RISK_ACTION_BUDGET_SPENT`, `REENTRY_COOLDOWN_SHADOW`,
+Phase 3 (shadow only): `RISK_RERANGE_BUDGET_SPENT`, `RISK_ACTION_BUDGET_SPENT`, `RISK_ACTION_BUDGET_UNREAD`, `REENTRY_COOLDOWN_SHADOW`,
 `REENTRY_REVALIDATION_SHADOW`.
 
 ## Lab plan
@@ -392,7 +392,7 @@ A variant: `bun packages/backtest/cli/sweep.ts --policy conservador-lab-guards-v
 | LC-T7 | `conservador-live-v3` with `guards.mode = 'shadow'`; two weeks of would-be codes on live | `/ops` shows them |
 | LC-T8 | App: bucket state lines, history with trigger and threshold, risk page copy (#58) | UI scenario per state |
 | LC-T9 | `guards.mode = 'enforce'` after Ot's GO on the Lab table and the shadow log, and only once D5 is resolved | Ot GO |
-| LC-T10 | Phase 3 shadow rows: `includedAt` on every engine op kind, the action budget summed across both operators from D1 (partial `scope: 'chain'` until then), the re-range row while `maxPerWeek` is unset, re-entry attempt records; cooldown and re-validation rows wired to the exit path once LC-T4 lands | decide unit tests per code; a restart or replayed review counts nothing twice; a row without `includedAt` is skipped; no state or proposal change with the rows present |
+| LC-T10 | Phase 3 shadow rows: `includedAt` on every engine op kind, the `engine-ops` route on both operators and the action budget over the union (`RISK_ACTION_BUDGET_UNREAD` when the peer cannot be read), the re-range row while `maxPerWeek` is unset, re-entry attempt records; cooldown and re-validation rows wired to the exit path once LC-T4 lands | decide unit tests per code; a restart or replayed review counts nothing twice; a row without `includedAt` is skipped; no state or proposal change with the rows present |
 | LC-T11 | Lab: replay `base-2025-10-crash-10m`, `base-2025-02-crash-10m` and `sep2026` with the phase 3 rows; `range.maxPerWeek` = 2 against no cap (an engineering setting, so the Lab may enforce it), and the would-be `RISK_ACTION_BUDGET_SPENT` codes in shadow; drawdown, gas and return per window | Lab note |
 | LC-T12 | Monad: a data source for WMON/USDC (GeckoTerminal does not cover it, #171), datasets, oracle choice; then the phase 1 and 2 rows on the Monad operator | dataset id; phase 1-2 rows readable on Monad |
 | LC-T13 | Incident exits: a producer for `RISK_INCIDENT_EXIT` (spec 001) from pool pause, oracle pause, bridge or admin change, upgrade and exploit feeds (Packaging section F), plus the manual `IncidentFlag` | own ticket |
@@ -481,14 +481,17 @@ Notes:
   skipped, so the budget under-counts for 30 days after the field ships, never over-counts. A pre-empted, refused or
   failed op never counts.
 - The action budget is per account across chains, as the Packaging counts the portfolio. Each operator has its own
-  journal, so the count is the sum of the confirmed ops of both operators for the account, read from the app's
-  account ledger (D1), not from the local journal alone. Until that read exists, the row carries `scope: 'chain'` and
-  is reported as partial in `/ops`, never as a full count.
+  journal, and the D1 yield ledger holds gas and fees, not op kinds or times. Data path: each operator answers a new
+  signed, read-only route `GET /accounts/<key>/engine-ops?since=<unix>` with its confirmed ops
+  `{ chain, opId, kind, includedAt }` (the operator's existing signed API, same keys); each engine reads the peer
+  operator's list once per hour per account (peer URL in the operator config, cached for the hour) and counts the
+  union of both lists, deduplicated by `chain` + `opId`. Peer unreachable, or its answer older than 2 h: the row is
+  `RISK_ACTION_BUDGET_UNREAD`, never a local-only count reported as the account's.
 - The action budget can be computed on live once `includedAt` ships. The re-entry rows have nothing to read until the exit path exists
   (LC-T4): before that, no bucket ever leaves a pool on a rule, so they stay silent.
 - After the stables bucket moves to an ERC-4626 vault (#210, PR #152) it has no range and makes no re-range; its
   deposits and withdrawals count in the action budget as entries and reduces.
-- Monad: the counters need no outside source, so they run on both operators (the action budget summed as above). The pool rules of phases 1 and 2 stay
+- Monad: the counters need no outside source, so they run on both operators (the action budget over the union above). The pool rules of phases 1 and 2 stay
   Base-only until LC-T12.
 
 ## Decisions for Ot
