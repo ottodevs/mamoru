@@ -137,7 +137,7 @@ T038. T020, T022 and T024 run in parallel in their own units. T039 and T041 are 
   waiting copy, tests.
 - **Accepted by:** XCH-05.
 - **Must not:** hard-code the ceiling; show amounts in the waiting state; drop an allocation without a reason code.
-  Defaults wait for a week of logged quotes and Ot's GO (NEEDS CLARIFICATION 2).
+  Defaults come from the Lab's model of when a move pays, and Ot's GO (decided 2026-11-01).
 
 ## T032 · Destination readiness reads the grants
 
@@ -176,7 +176,7 @@ T038. T020, T022 and T024 run in parallel in their own units. T039 and T041 are 
 - **Ticket:** #246. **Requirements:** FR-COST-005, FR-COST-006, FR-COST-007.
 - **Files:** `mamoru-ops-report` (report block), the Lab sweep's output, the release check's gate line.
 - **Accepted by:** COST-02 b, COST-03, COST-04.
-- **Must not:** block a release on a band Ot has not set (NEEDS CLARIFICATION 3); report "0" on a day with no moves.
+- **Must not:** block a release on a band not derived from the Lab (decided 2026-11-01); report "0" on a day with no moves.
 
 ## T037 · Two-chain Lab and the v6 vs v2 run
 

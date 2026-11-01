@@ -91,7 +91,7 @@ the user choosing a chain.
   account on Monad (FR-XCH-001, FR-XCH-002, FR-XCH-008).
 - Given money in flight, when the engine reviews again, then `DECIDE_WAIT_BRIDGE` and the money counts once in Growth
   (FR-XCH-008).
-- Given a harvest on Monad, then its USDC stays on Monad (FR-XCH-013).
+- Given a harvest on Monad, then its USDC stays on Monad (FR-XCH-013) until Growth is over target (FR-XCH-014).
 
 ### US11 · The cheapest safe route, shown (P1)
 
@@ -107,6 +107,12 @@ the user choosing a chain.
   account go out as one; after the maximum wait the money stays on Base with a reason, never silently (FR-XCH-006).
 - Given the waiting state, then the app says Mamoru waits for a better moment to enter Growth, with no amounts; the
   cost breakdown is in the details (FR-XCH-017).
+
+### US12b · Money comes back to Base (P1)
+
+- Given Growth over its target across both chains, then the excess moves from Monad to Base (FR-XCH-014).
+- Given a Monad pool that stops paying, or a risk exit on Monad, then the USDC waits on Monad for a Monad entry up to
+  the maximum idle time, and past it moves to Base (FR-XCH-014). The user is not asked first.
 
 ### US13 · The destination must be able to work (P1)
 
@@ -242,10 +248,13 @@ named is where the open part lives. Ids FR-CHN-001 to FR-CHN-003 keep the meanin
   quote whose recipient cannot be decoded and checked is not offered. *Built* in `packages/routing` (`recipientCheck`,
   `mode`) and the entry path.
 - **FR-XCH-006.** Before a session-key move, the total cost (bridge fee + gas on both chains + spread) MUST be under a
-  ceiling `min(absolute, bps of amount)` from engine settings. Over it: wait and quote again at a set interval, money
+  ceiling `min(absolute, bps of amount)` from engine settings, in both directions. Over it: wait and quote again at a set interval, money
   keeps earning on Base; small moves of one account are batched; after the maximum wait the allocation stays on Base
-  with `DECIDE_BRIDGE_SKIPPED`, logged per account. Defaults come from a week of measured Base → Monad quotes. *Open*
-  (#188).
+  with `DECIDE_BRIDGE_SKIPPED`, logged per account. No value is set by hand (2026-11-01): the Lab models when a move
+  pays (the move's cost against what the money earns at the destination over the time gained) and the ceiling, the
+  wait and the batching follow from it and change with conditions. The 50/35/15 floor of 150 USDC sends about 22 USDC
+  to Monad; at October's prices that move costs about 0.01 USDC (estimate, not measured), well under a day of Growth
+  yield. *Open* (#188).
 - **FR-XCH-007.** A move MUST leave only when the destination can work: the account's Safe has code there,
   SmartSession is installed, and the destination grants are enabled, not expired and have usage left. Otherwise
   `DECIDE_WAIT_BRIDGE` with the reason in `detail`. *Partial:* deployed and installed checks built
@@ -271,10 +280,18 @@ named is where the open part lives. Ids FR-CHN-001 to FR-CHN-003 keep the meanin
   both chains by a fixed priority; before signing a preview lists the steps (unwind, swap, bridge, send) and what
   arrives; a move that needs a bridge or swap shows a countdown; no lock and no float held by Mamoru on the
   destination. *Open* (#202). Today each chain withdraws on its own.
-- **FR-XCH-013.** Fees harvested on an execution chain MUST stay on that chain as USDC; there is no bridge back on
-  harvest. *Built* by construction: the allocator only bridges toward the remote bucket.
-- **FR-XCH-014.** Moving value back from Monad to Base outside a withdrawal (Growth over target, a Monad pool that
-  stops paying, a risk exit) is NEEDS CLARIFICATION 1.
+- **FR-XCH-013.** Fees harvested on an execution chain MUST stay on that chain as USDC; a harvest alone never
+  bridges. They count in the remote bucket, so they reach Base only through FR-XCH-014. *Built* by construction: the
+  allocator only bridges toward the remote bucket.
+- **FR-XCH-014.** Value MUST move back from Monad to Base outside a withdrawal in three cases (Brais and Ot,
+  2026-11-01): (a) Growth over its target across both chains, outside the rebalance band: the excess goes to Base;
+  (b) a Monad pool that stops paying, and (c) a risk exit on Monad: the USDC first waits on Monad for a Monad entry,
+  to save the round trip, up to a maximum idle time, and past it goes to Base. The user is not asked first; the move
+  shows in the app like any other (FR-XCH-017). The bucket split is measured over both chains. The maximum idle time
+  starts at 48 h and is set from the Lab against the pool's history; it applies only to (b) and (c), never to Base →
+  Monad, which follows FR-XCH-006. A USDC holding venue on Monad, kept until withdrawal, is out until TVL justifies
+  it. *Open* (#201): the Monad → Base grant on the Monad session, the relayer mint on Base, the allocator's return
+  gap, reason codes.
 - **FR-XCH-015.** Funds at the account's address on Ethereum MUST be shown. ETH is converted to USDC in the same
   account by one owner signature (`prepareConvert`/`submitConvert`); USDC moves to the same account on Base by another
   owner signature, by the best ranked route. With a bundler and an ERC-20 paymaster configured the move is one
@@ -303,9 +320,12 @@ named is where the open part lives. Ids FR-CHN-001 to FR-CHN-003 keep the meanin
 - **FR-COST-004.** Cost per move MUST be visible in `/ops` (by env, chain, route and account, per day) and in the
   account's move details. *Open* (#97 for `/ops`, #133 for the move).
 - **FR-COST-005.** The daily report MUST carry the moves of the day and to date, cost per move in USDC and in bps of
-  the amount (median and worst), time in flight, by route, and moves stuck or failed. *Open* (#246).
+  the amount (median and worst), time in flight, by route, and moves stuck or failed. The headline units, chosen by
+  Brais on 2026-11-01, are **share of the yield the moves take** (move cost over the yield of the money moved, same
+  period) and **USDC per month**. *Open* (#246).
 - **FR-COST-006.** A release that changes routing, the bridge decision, the cost ceiling or a bridge grant MUST state
-  cost per move before and after from the Lab; a rise beyond a stated band blocks it until Ot accepts it. *Open*
+  cost per move before and after from the Lab, in the units of FR-COST-005; a rise beyond a band set from the Lab's
+  numbers, not by hand, blocks it until Ot accepts it. *Open*
   (#246).
 - **FR-COST-007.** A new route, or a cheaper variant of one (CCTP Fast vs Standard, Across vs CCTP for Base → Monad),
   MUST enter through the Lab before it moves live funds: a fork scenario with the recipient pinned and its failure
@@ -352,19 +372,19 @@ New, added by the task that needs them:
 | SC-033 | A route not proven in the Lab cannot move live funds | COST-04 |
 | SC-034 | A signature for one chain is refused on the other | SESS-27 |
 
-## NEEDS CLARIFICATION
+## Decided 2026-11-01
 
-The constitution does not decide these; Ot does.
+Brais answered in `chat-mamoru` (thread `[spec-002]`), with Ot's positions written in the question.
 
-1. **Moving value back to Base outside a withdrawal (FR-XCH-014).** #201 says harvested fees stay on Monad. It does not
-   say whether Growth above target, a Monad pool whose APR falls, or a Risk Monitor exit on Monad brings money back to
-   Base, or stays on Monad as USDC. Brais's written Happy Path (pending in `chat-mamoru`) was to cover "when a pool's
-   APR falls".
-2. **The cost ceiling's defaults (FR-XCH-006).** #188 is "proposed by Brais, needs Ot's GO". The mechanism is
-   specified; the absolute value, the bps and the maximum wait come after a week of measured quotes, and Ot gives the
-   GO.
-3. **The band of the release gate (FR-COST-006).** How much may cost per move rise before a release is blocked, and in
-   what unit (USDC per move or bps of the amount).
+1. **Moving value back to Base (FR-XCH-014).** Yes, in the three cases; harvest stays on Monad until Growth is over
+   target. After a stop or a risk exit the USDC waits on Monad up to the maximum idle time (48 h to start).
+2. **Cost ceiling (FR-XCH-006).** Modelled in the Lab, dynamic, no hand-set number. Ot gives the GO on the defaults.
+3. **Release band (FR-COST-006).** Units: share of the yield the moves take, and USDC per month. The band comes from
+   the Lab's numbers.
+
+Evidence given with the answers: in WMON/USDC 0.3 % (`0x659b…a9da`) the lowest 48 h of volume since 2026-08-09 was
+about 221k USD and no hour since then lacked trades for 6 h (GeckoTerminal OHLCV, read 2026-11-01). The pool has not
+stopped paying for 48 h; a position can, when the price leaves its band, and that is a re-range on Monad, not a move.
 
 ## Out of scope
 

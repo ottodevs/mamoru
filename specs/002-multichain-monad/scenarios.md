@@ -89,6 +89,7 @@ results are reason codes, states and invariants, never Packaging thresholds or t
 | XCH-08 | FR-XCH-003, FR-XCH-017, FR-COST-001 | both forks, `fx-quotes` | XCH-01 with two session routes granted (after T030 unit 3) | The move's record names the chosen route and the runner-up; the app's move detail shows route, cost and time | to write (T030, #133) |
 | XCH-09 | FR-XCH-012 | both forks, positions on both | Withdraw 50 USDC worth to Base as USDC; then to Monad as USDC | Stable first, then unwinds by priority across chains; the preview lists the steps and the amount that arrives; bridge steps toward the destination only, recipient the account; no float | to write (T038, #202) |
 | XCH-10 | FR-ACC-016 | none: Worker test | `POST /api/sleeves {chainId: 143}` on the production host with the flag on; with a derivation mismatch | Row created; `CHAIN_ADDRESS_UNVERIFIED` on the mismatch | to write (T040, #240) |
+| XCH-11 | FR-XCH-013, FR-XCH-014 | both forks, `fx-two-chains`, `fx-cctp-local-attester` | (a) Growth over target after a Monad harvest; (b) the Monad pool stops paying, then resumes inside the idle time; (c) the same held past the idle time | (a) the excess moves to Base, the harvest alone never bridges; (b) the USDC waits on Monad and re-enters there, no move; (c) the USDC moves to Base with a reason code | to write (#201) |
 
 Ethereum entry (FR-XCH-015) is accepted by the existing fork runs `apps/mamoru-operator/test/e2e-bridge-out.ts` and
 `e2e-l1-userop.ts` (`packages/scenarios/l1/`); a ledger row per entry move is added to them by T034.
@@ -143,7 +144,7 @@ Ethereum entry (FR-XCH-015) is accepted by the existing fork runs `apps/mamoru-o
 | FR-XCH-011 | `bridge-monad.test.ts` (built) |
 | FR-XCH-012 | XCH-09 |
 | FR-XCH-013 | XCH-01 (harvest on Monad stays) |
-| FR-XCH-014 | none until NEEDS CLARIFICATION 1 is answered |
+| FR-XCH-014 | XCH-11 |
 | FR-XCH-015 | `e2e-bridge-out.ts`, `e2e-l1-userop.ts` |
 | FR-XCH-016 | `d003e250` tests (built) |
 | FR-XCH-017 | XCH-06, XCH-07, XCH-08 |
