@@ -345,16 +345,17 @@ describe('convert reconciliation at a stale head (otto/mamoru#285)', () => {
     at: '2026-10-20T09:00:00.000Z',
   }
   let blocksRead = 0
-  const status = async (headTime: bigint) => {
+  const status = async (headTime: bigint, o: { signed?: string; nonce?: bigint; finalized?: bigint } = {}) => {
     const dir = mkdtempSync(join(tmpdir(), 'mamoru-convert-'))
-    writeFileSync(join(dir, 'bridge-out.json'), JSON.stringify({ routes: {}, spent: { day: '', wei: '0' }, moves: {}, converts: { a: convert } }))
+    writeFileSync(join(dir, 'bridge-out.json'), JSON.stringify({ routes: {}, spent: { day: '', wei: '0' }, moves: {}, converts: { a: { ...convert, safeNonce: o.signed ?? '0' } } }))
     const l1 = {
       getBlockNumber: async () => 105n,
-      // A node behind: the Safe looks undeployed and no log is there yet.
-      getCode: async () => '0x',
+      // By default a node behind: the Safe looks undeployed and no log is there yet.
+      getCode: async () => (o.nonce === undefined ? '0x' : '0x60'),
+      readContract: async () => o.nonce,
       getLogs: async () => [],
       getBlock: async ({ blockNumber, blockTag }: { blockNumber?: bigint; blockTag?: string }) =>
-        blockTag === 'finalized' ? { number: 105n, timestamp: headTime } : (blocksRead++, { number: blockNumber, timestamp: blockNumber === 100n ? T0 : headTime }),
+        blockTag === 'finalized' ? { number: o.finalized ?? 105n, timestamp: headTime } : (blocksRead++, { number: blockNumber, timestamp: blockNumber === 100n ? T0 : headTime }),
       getTransactionReceipt: async ({ hash }: { hash: Hex }) => Promise.reject(new TransactionReceiptNotFoundError({ hash })),
     } as unknown as import('viem').PublicClient
     const relayer = { address: '0x0000000000000000000000000000000000000001' as const, send: async () => Promise.reject(new Error('unused')) }
@@ -371,5 +372,17 @@ describe('convert reconciliation at a stale head (otto/mamoru#285)', () => {
 
   test('the same past the swap deadline, at the finalized block, is failed', async () => {
     expect(await status(T0 + 3_600n)).toBe('failed')
+  })
+
+  test('a finalized nonce below the signed one proves nothing: unconfirmed, even past the deadline', async () => {
+    expect(await status(T0 + 3_600n, { signed: '1', nonce: 0n })).toBe('unconfirmed')
+  })
+
+  test('a finalized block before the send proves nothing: unconfirmed', async () => {
+    expect(await status(T0 + 3_600n, { finalized: 99n })).toBe('unconfirmed')
+  })
+
+  test('a finalized nonce above the signed one with no execution of it is failed (another transaction took it)', async () => {
+    expect(await status(T0 + 60n, { signed: '1', nonce: 2n })).toBe('failed')
   })
 })

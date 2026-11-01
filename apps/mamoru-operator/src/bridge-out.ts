@@ -1315,6 +1315,12 @@ export class BridgeOut {
     return null
   }
 
+  /** Whether block `at` is past the deadline of a swap sent in block `sent` (signed at most PREPARE_TTL_MS before). */
+  private async pastDeadline(at: bigint, sent: bigint): Promise<boolean> {
+    const [a, b] = await Promise.all([this.l1.getBlock({ blockNumber: at }), this.l1.getBlock({ blockNumber: sent })])
+    return a.timestamp > b.timestamp + BigInt(CONVERT_DEADLINE_SEC) + BigInt(Math.ceil(PREPARE_TTL_MS / 1000))
+  }
+
   /** The account's last conversion, resolved from the chain when it is not proven yet. */
   private async convertStatus(accountKey: string): Promise<EthConvert | null> {
     const c = this.journal.converts?.[accountKey]
@@ -1336,30 +1342,26 @@ export class BridgeOut {
         // same block for every honest node, so "spent and not found" and "unspent past the deadline" are both final.
         // Until finality covers the send (about 13 minutes) the conversion stays unconfirmed.
         const head = (await this.l1.getBlock({ blockTag: 'finalized' })).number
-        const code = await this.l1.getCode({ address: next.safe, blockNumber: head })
-        const nonce = !code || code === '0x' ? 0n : await this.l1.readContract({ address: next.safe, abi: safeNonceAbi, functionName: 'nonce', blockNumber: head })
-        // The execution is looked for in every case, so an empty code from a node that is behind never reads as
-        // "never ran": failed only when the logs up to `head` have no execution of the signed hash.
-        const ran = await this.findExecution(next.safe, next.safeTxHash, BigInt(next.fromBlock), head)
-        if (ran === null && nonce === BigInt(next.safeNonce)) {
-          // Unspent at `head` is final only once `head` is past the signed swap's deadline (set at the prepare, at most
-          // PREPARE_TTL_MS before the send block): until then a head a block behind could miss an execution in the
-          // next block, so the conversion stays unconfirmed and is looked at again.
-          const [at, sent] = await Promise.all([this.l1.getBlock({ blockNumber: head }), this.l1.getBlock({ blockNumber: BigInt(next.fromBlock) })])
-          if (at.timestamp > sent.timestamp + BigInt(CONVERT_DEADLINE_SEC) + BigInt(Math.ceil(PREPARE_TTL_MS / 1000))) next.state = 'failed'
+        const signed = BigInt(next.safeNonce)
+        const ran = head < BigInt(next.fromBlock) ? null : await this.findExecution(next.safe, next.safeTxHash, BigInt(next.fromBlock), head)
+        if (ran?.success) {
+          const receipt = await this.l1.getTransactionReceipt({ hash: ran.tx })
+          next.l1Tx = ran.tx
+          this.settleConvert(next, receipt)
+        } else if (ran) {
+          next.l1Tx = ran.tx
+          next.state = 'failed'
+        } else if (head >= BigInt(next.fromBlock)) {
+          // No execution of the signed hash up to `head`. Failed only on proof at that block: a nonce above the signed
+          // one (another transaction took it, this one can never run), or the signed nonce still unspent once `head` is
+          // past the swap's deadline (set at the prepare, at most PREPARE_TTL_MS before the send block). An empty code
+          // or a lower nonce proves nothing (a node behind): unconfirmed, looked at again.
+          const code = await this.l1.getCode({ address: next.safe, blockNumber: head })
+          const nonce = !code || code === '0x' ? null : await this.l1.readContract({ address: next.safe, abi: safeNonceAbi, functionName: 'nonce', blockNumber: head })
+          if (nonce !== null && nonce > signed) next.state = 'failed'
+          else if ((nonce === signed || (nonce === null && signed === 0n)) && (await this.pastDeadline(head, BigInt(next.fromBlock)))) next.state = 'failed'
           else next.state = 'unconfirmed'
-        } else {
-          // Every stored conversion carries the signed safeTxHash and its send block (written before any send).
-          if (ran === null) next.state = 'failed'
-          else if (ran.success) {
-            const receipt = await this.l1.getTransactionReceipt({ hash: ran.tx })
-            next.l1Tx = ran.tx
-            this.settleConvert(next, receipt)
-          } else {
-            next.l1Tx = ran.tx
-            next.state = 'failed'
-          }
-        }
+        } else next.state = 'unconfirmed'
       } else if (next.state === 'sending') next.state = 'unconfirmed'
     } catch (e) {
       logErr(`[bridge-out] convert status ${accountKey.slice(0, 8)}:`, e)
