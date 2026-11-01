@@ -61,5 +61,8 @@ describe('positions of every pool', () => {
     expect(render(<Working f={held('DECIDE_RANGE_COOLDOWN')} s={split(multi, null)} onStop={null} />).text).toContain('waits a little before re-centring')
     expect(engineLine({ ...held('DECIDE_RANGE_BELOW_COST'), active: true })).toContain('too small to re-centre at a profit')
     expect(engineLine({ ...held('DECIDE_RANGE_BELOW_COST'), active: true, engine: { placing: false, nextReviewAt: '2026-10-27T10:00:00.000Z' } })).toContain('Nothing to do right now')
+    // The price came back since the last review: the row is in range, so the status line no longer names the hold.
+    const back = held('DECIDE_RANGE_BELOW_COST')
+    expect(engineLine({ ...back, active: true, positions: back.positions.map((p) => ({ ...p, inRange: true })) })).toContain('Nothing to do right now')
   })
 })

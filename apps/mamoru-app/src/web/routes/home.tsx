@@ -544,7 +544,8 @@ export function engineLine(f: FundingView): string | null {
   }
   if (!f.engine.nextReviewAt) return null
   const next = new Date(f.engine.nextReviewAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-  const hold = f.engine.rangeHolds?.[0]
+  // Only a hold whose position is still out of range now: the price may have come back since the last review.
+  const hold = f.engine.rangeHolds?.find((h) => f.positions.some((p) => p.tokenId === h.tokenId && !p.inRange))
   return hold ? homeCopy.upToDateHeld(hold.code, next) : homeCopy.upToDate(next)
 }
 
