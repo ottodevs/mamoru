@@ -268,6 +268,11 @@ export type EngineConfig = {
    * review. Absent: no cap (backtest, lab); the operator always sets it.
    */
   cap?: () => Observation['cap']
+  /**
+   * otto/mamoru#210: whether the account opted in to the exit of its policy's `exitOptIn` buckets (v7's USDC/USDT), read
+   * at every review (`Observation.exitOptIn`). Absent: never, those buckets are held.
+   */
+  exitOptIn?: () => boolean
 
   /**
    * otto/mamoru#215: the account's value on other chains for the policy's `remoteBuckets` (its sleeve there valued at the
@@ -736,7 +741,7 @@ export class Engine {
     const cap = this.cfg.cap?.()
     const weekAgo = obs.block.timestamp - 7n * 86_400n
     const recent = this.reranges.filter((r) => r.at > weekAgo)
-    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...shadowInputsOf(this.cfg.policy, this.cfg), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}) }
+    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...shadowInputsOf(this.cfg.policy, this.cfg), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}), ...(this.cfg.exitOptIn?.() === true ? { exitOptIn: true } : {}) }
     if (this.outOfRangeSeed) {
       const seed = this.outOfRangeSeed
       this.outOfRangeSeed = undefined

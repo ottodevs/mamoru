@@ -246,9 +246,13 @@ export function reduceOf(obs: Observation, policy: PolicyVersion, policyPools: R
     // Lab (#101 round 3): a depegged pool is left alone; a bucket under a staged exit is reduced at its own band.
     if (b.pool && lab?.skip?.has(b.pool)) continue
     const drift = BigInt(lab?.driftBps?.[b.bucket] ?? DRIFT_BPS)
-    // otto/mamoru#210: a bucket being left (preference 0: v6's USDC/cbBTC, v7's USDC/USDT) is emptied whatever its size;
-    // under the drift band its last few percent would stay in a pool no policy enters any more.
-    const leaving = policy.buckets.find((x) => x.id === b.bucket)?.preference === 0
+    // otto/mamoru#210: a bucket being left by opt-in (`exitOptIn`, preference 0: v7's USDC/USDT) is held until the account
+    // opts in (`obs.exitOptIn`), then emptied whatever its size: under the drift band its last few percent would stay in
+    // a pool no policy enters any more. Any other bucket at 0 (v6's USDC/cbBTC) is reduced as before, at the drift band.
+    const def = policy.buckets.find((x) => x.id === b.bucket)
+    const optIn = def?.preference === 0 && def.exitOptIn === true
+    if (optIn && obs.exitOptIn !== true) continue
+    const leaving = optIn
     if (!b.pool || (leaving ? b.value === 0n : b.value * 10_000n <= b.target * 10_000n + total * drift)) continue
     const pool = obs.pools.find((x) => x.name === b.pool)
     const p = obs.positions.find((x) => x.pool === b.pool && x.liquidity > 0n && isManaged(x, policy, policyPools))

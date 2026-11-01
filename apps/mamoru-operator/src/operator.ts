@@ -474,6 +474,11 @@ export type OperatorConfig = {
    * `resolveV6Policy`), set only with the v4 opt-in and both V2 and pause gate addresses. Absent: v6 is not offered.
    */
   v6Policy?: PolicyVersion
+  /**
+   * otto/mamoru#210: the deployed v7 policy (conservadorLiveV7 on v6's contracts, boot.ts `resolveV7Policy`), set only
+   * where v6 is. Offered only through the scoped flag `vaults_v7`. Absent: v7 is not offered.
+   */
+  v7Policy?: PolicyVersion
   /** otto/mamoru#129 runtime flags from the settings pull; `onchain_action_policy_v4` offers the v4 renewal per account. Absent: every flag off. */
   opsFlags?: () => Partial<Record<OpsFlagName, boolean>>
   /** otto/mamoru#217: enabled scopable flags from the settings pull: null = everyone (explicit), list = those accounts
@@ -588,6 +593,8 @@ const V4_MIGRATES_FROM = new Set(['conservador-live-v2', 'conservador-live-v3'])
 const V5_MIGRATES_FROM = new Set(['conservador-live-v2', 'conservador-live-v3', 'conservador-live-v4', 'conservador-lab-v4'])
 /** otto/mamoru#214: the policies whose accounts the renew row moves to v6 (`multichain_v6`): everything v5 takes, and v5 itself. */
 const V6_MIGRATES_FROM = new Set([...V5_MIGRATES_FROM, 'conservador-live-v5', 'conservador-lab-v5'])
+/** otto/mamoru#210: the policies whose accounts the renew row moves to v7 (`vaults_v7`): everything v6 takes, and v6 itself. */
+const V7_MIGRATES_FROM = new Set([...V6_MIGRATES_FROM, 'conservador-live-v6', 'conservador-lab-v6'])
 /** Gas a v4 approval's first transaction carries besides enableSessions, per removeSession (measured: ~1.45M for 8). */
 /** otto/mamoru#251: no bridge to an account's remote Safe in the last 30 days of its sessions. */
 const REMOTE_BRIDGE_STOP_SECONDS = 30 * 86_400
@@ -1460,6 +1467,7 @@ export class Operator {
     if (this.cfg.v4Policy?.policyId === acc.policyId) return this.cfg.v4Policy
     if (this.cfg.v5Policy?.policyId === acc.policyId) return this.cfg.v5Policy
     if (this.cfg.v6Policy?.policyId === acc.policyId) return this.cfg.v6Policy
+    if (this.cfg.v7Policy?.policyId === acc.policyId) return this.cfg.v7Policy
     if (this.cfg.policy.policyId === acc.policyId) return this.cfg.policy
     // The lab twin on a fork serves lab v1 sleeves the same way (no chain-writes opt-in on a fork).
     if (MONAD_LAB_POLICIES[acc.policyId] && this.cfg.policy.chain === 'fork') return MONAD_LAB_POLICIES[acc.policyId]!
@@ -1502,6 +1510,10 @@ export class Operator {
       return null
     }
     const flags = this.cfg.opsFlags?.()
+    // otto/mamoru#210: v7 (v6 with Stable in lending vaults) configured and offered through its own scoped flag: v2-v6
+    // accounts move to it, ahead of v6. Same scope rules as v6 (#217): only the scoped-flags field offers it.
+    const v7 = this.cfg.v7Policy
+    if (v7 && this.inScope(acc, 'vaults_v7') && V7_MIGRATES_FROM.has(cur.policyId) && cur.chain === v7.chain) return v7
     // otto/mamoru#214: v6 (Base + Monad growth) configured and offered: v2-v5 accounts move to it, ahead of v5.
     const v6 = this.cfg.v6Policy
     // otto/mamoru#217: v6 needs the explicit signal of the scoped-flags field (inScope).
@@ -1512,6 +1524,16 @@ export class Operator {
     const v4 = this.cfg.v4Policy
     if (!v4 || flags?.onchain_action_policy_v4 !== true) return null
     return V4_MIGRATES_FROM.has(cur.policyId) && cur.chain === v4.chain ? v4 : null
+  }
+
+  /**
+   * otto/mamoru#210: a scopable flag (#217) is on for this account: null = everyone (and the boolean agrees), a list =
+   * only those accounts (key or Safe address); malformed reached us as [] = nobody; missing = nobody.
+   */
+  private inScope(acc: AccountState, flag: 'vaults_v7' | 'stables_lp_exit'): boolean {
+    const scope = this.cfg.opsScopedFlags?.()[flag]
+    if (scope === null) return this.cfg.opsFlags?.()[flag] === true
+    return Array.isArray(scope) && (scope.includes(acc.accountKey.toLowerCase()) || scope.includes(String(acc.ctx.address).toLowerCase()))
   }
 
   private readonly v4Sized = new Map<string, PolicyVersion>()
@@ -2405,6 +2427,8 @@ export class Operator {
         ...(target ? ['Mamoru can now trade only near the market price, and only the positions it opened'] : []),
         ...this.remoteLines(policy, remote),
         ...(target?.remoteBuckets?.length ? ['USDC/cbBTC is only wound down, nothing new goes into it'] : []),
+        // otto/mamoru#210: v7 moves Stable to lending; the old USDC/USDT positions stay until the owner opts in to their exit.
+        ...(target?.buckets.some((b) => b.vaults?.length) ? [`Stable (${(target.buckets.find((b) => b.vaults?.length)!.preference / 100).toFixed(0)}%) is now USDC lent through ${target.buckets.flatMap((b) => b.vaults ?? []).map((v) => vaultLabel(v, this.cfg.registry)).join(', then ')}; nothing new goes into USDC/USDT, and positions you hold there stay as they are until you ask Mamoru to move them`] : []),
         ...(toV5 ? ['It can add to a position it already holds instead of opening another one', 'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause'] : []),
         `Engine key ${f.sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero, sized for deposits up to ${fmtUsdc(cap)} USDC (your cap):`,
         ...this.v4Lines(f.stored, policy, cap),
@@ -2556,6 +2580,11 @@ export class Operator {
       const total = budgets[spec.caps.budgetTotal] ?? 0n
       return `In ${poolLabel(pool, this.cfg.registry)}: swaps, new positions and withdrawals only within ${band} of the 30- and 5-minute average price${anchor}; swaps and new positions worth at most ${fmtUsdc(day)} USDC a day and ${fmtUsdc(total)} USDC in total on this approval`
     })
+    // otto/mamoru#210: the vault-family grants (MamoruActionPolicyV3 decides every rule, the vaults are its constructor's).
+    const vaults = [...new Set(stored.map((g) => g.grant.vault).filter((x): x is NonNullable<typeof x> => !!x))]
+    if (vaults.length) {
+      lines.push(`Lending: it may supply USDC to ${vaults.map((v) => vaultLabel(v, this.cfg.registry)).join(' and ')} and take it back, the shares and the USDC always to and from your Safe; no other vault (the list is fixed in the on-chain limits), no transfer of the shares; a guardian pause stops it`)
+    }
     if (stored.some((g) => g.name === 'bridge-out')) {
       lines.push(`Bridge: it may burn USDC with Circle's CCTP only to your own address on Monad (never to another address, never any fee), at most ${fmtUsdc(budgets.bridgePerCall ?? 0n)} USDC a time and ${fmtUsdc(budgets.bridgeTotal ?? 0n)} USDC in total on this approval; a guardian pause stops it`)
     }
@@ -6431,6 +6460,8 @@ export class Operator {
         onEntering: (pool) => this.markEntering(acc, pool),
         // otto/mamoru#212: new money is placed only within the cap, counted across chains.
         cap: () => this.engineCap(acc),
+        // otto/mamoru#210: v7's USDC/USDT is wound down only for an account in the `stables_lp_exit` scope (opt-in).
+        exitOptIn: () => this.inScope(acc, 'stables_lp_exit'),
         ...this.remoteOf(acc),
         rerangeHistory: rerangeHistoryOf(acc.ops, Math.floor(Date.now() / 1000)),
         ...(outOfRangeSeedOf(acc.outOfRange) ? { outOfRangeSeed: outOfRangeSeedOf(acc.outOfRange)! } : {}),

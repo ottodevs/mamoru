@@ -48,6 +48,11 @@ export type Observation = {
    * `block`. Absent: the policy has no vault bucket, or nothing was read (the bucket then holds nothing and gets no op).
    */
   vaults?: VaultObs[]
+  /**
+   * otto/mamoru#210: the account opted in to the exit of its `exitOptIn` buckets (v7's USDC/USDT), from the per-account
+   * `stables_lp_exit` flag. Absent or false: those buckets are held, nothing of them is reduced.
+   */
+  exitOptIn?: boolean
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. Absent or null: none yet. */
   lastRerangeAt?: bigint | null
   /**

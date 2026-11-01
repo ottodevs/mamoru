@@ -179,7 +179,7 @@ describe('conservador-live-v7: the stables bucket in vaults (otto/mamoru#210)', 
     const lp = POOLS[0]!
     const held: PositionObs = { tokenId: 7n, pool: lp.name, tickLower: -10, tickUpper: 10, liquidity: 10n ** 9n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }
     // The vault is over its target (900 of ~1,000) and pays nothing now; the old position must still leave.
-    const d = decide(obs({ positions: [held], vaults: [vault('vault:gtUSDCp', 900n * USDC, { maxWithdraw: 0n, maxRedeem: 0n }), vault('vault:waBasUSDC', 0n)], balances: { USDC: 100n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), V7)
+    const d = decide(obs({ exitOptIn: true, positions: [held], vaults: [vault('vault:gtUSDCp', 900n * USDC, { maxWithdraw: 0n, maxRedeem: 0n }), vault('vault:waBasUSDC', 0n)], balances: { USDC: 100n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), V7)
     expect(d.proposal).toMatchObject({ kind: 'reduce', pool: 'pool:USDC/USDT/100', tokenId: 7n })
   })
 
@@ -187,7 +187,7 @@ describe('conservador-live-v7: the stables bucket in vaults (otto/mamoru#210)', 
     const lp = POOLS[0]!
     // A few units of liquidity: worth far less than its op, so no reduce of it; the over-weight vault still redeems.
     const dust: PositionObs = { tokenId: 8n, pool: lp.name, tickLower: -10, tickUpper: 10, liquidity: 1_000n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }
-    const d = decide(obs({ positions: [dust], vaults: [vault('vault:gtUSDCp', 900n * USDC), vault('vault:waBasUSDC', 0n)], balances: { USDC: 100n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), V7)
+    const d = decide(obs({ exitOptIn: true, positions: [dust], vaults: [vault('vault:gtUSDCp', 900n * USDC), vault('vault:waBasUSDC', 0n)], balances: { USDC: 100n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), V7)
     expect(d.proposal).toMatchObject({ kind: 'vault_redeem', vault: 'vault:gtUSDCp' })
   })
 
@@ -196,11 +196,11 @@ describe('conservador-live-v7: the stables bucket in vaults (otto/mamoru#210)', 
     expect(d.proposal?.kind).not.toBe('vault_redeem')
   })
 
-  test('migration: an old USDC/USDT position (stables-lp, target 0) is reduced in full, however small, and USDT sold back', () => {
+  test('migration, opted in: an old USDC/USDT position (stables-lp, target 0) is reduced in full, however small, and USDT sold back', () => {
     const lp = POOLS[0]!
     const small: PositionObs = { tokenId: 7n, pool: lp.name, tickLower: -10, tickUpper: 10, liquidity: 10n ** 9n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }
     // The position is a few percent of the account: under v6's drift band it would never leave.
-    const o = obs({ positions: [small], vaults: [vault('vault:gtUSDCp', 500n * USDC), vault('vault:waBasUSDC', 0n)], balances: { USDC: 500n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })
+    const o = obs({ exitOptIn: true, positions: [small], vaults: [vault('vault:gtUSDCp', 500n * USDC), vault('vault:waBasUSDC', 0n)], balances: { USDC: 500n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })
     const b = bucketValues(o, V7, new Set(V7.buckets.flatMap((x) => x.pools))).buckets.find((x) => x.bucket === 'stables-lp')!
     expect(b.value > 0n && b.value * 100n < 1_000n * USDC * 5n).toBe(true)
     const d = decide(o, V7)
@@ -210,6 +210,29 @@ describe('conservador-live-v7: the stables bucket in vaults (otto/mamoru#210)', 
     // And no new money ever goes into USDC/USDT.
     const fresh = run(obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }))
     expect(fresh.positions.some((p) => p.pool === 'pool:USDC/USDT/100')).toBe(false)
+  })
+
+  test('migration, not opted in (the default): USDC/USDT is held whatever its size, nothing of it is reduced', () => {
+    const lp = POOLS[0]!
+    // Half the account in the old stables LP: far over the drift band, and still held until the account opts in.
+    const big: PositionObs = { tokenId: 7n, pool: lp.name, tickLower: -10, tickUpper: 10, liquidity: 10n ** 15n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }
+    for (const exitOptIn of [undefined, false]) {
+      const o = obs({ ...(exitOptIn === undefined ? {} : { exitOptIn }), positions: [big], vaults: [vault('vault:gtUSDCp', 500n * USDC), vault('vault:waBasUSDC', 0n)], balances: { USDC: 0n, USDT: 0n, cbBTC: 0n, WETH: 0n } })
+      const b = bucketValues(o, V7, new Set(V7.buckets.flatMap((x) => x.pools))).buckets.find((x) => x.bucket === 'stables-lp')!
+      expect(b.value > 300n * USDC).toBe(true)
+      const d = decide(o, V7)
+      expect(d.proposal?.kind === 'reduce' && d.proposal.pool === 'pool:USDC/USDT/100').toBe(false)
+    }
+  })
+
+  test("v6's USDC/cbBTC exit is unchanged: reduced at the drift band, a small remainder stays", () => {
+    const btc = POOLS[1]!
+    const tiny: PositionObs = { tokenId: 9n, pool: btc.name, tickLower: -69_200, tickUpper: -68_960, liquidity: 10n ** 6n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }
+    const o = obs({ exitOptIn: true, positions: [tiny], vaults: [vault('vault:gtUSDCp', 500n * USDC), vault('vault:waBasUSDC', 0n)], balances: { USDC: 500n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })
+    const v = bucketValues(o, V7, new Set(V7.buckets.flatMap((x) => x.pools))).buckets.find((x) => x.bucket === 'btc-usdc')!.value
+    expect(v > 0n && v * 100n < 1_000n * USDC).toBe(true)
+    const d = decide(o, V7)
+    expect(d.proposal?.kind === 'reduce' && d.proposal.pool === 'pool:USDC/cbBTC/500').toBe(false)
   })
 
   test('shares in a vault the policy does not name count for nothing and get no op', () => {

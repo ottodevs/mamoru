@@ -10,12 +10,12 @@ describe('readOpsFlags (otto/mamoru#129, migrations/d1/0012_ops_flags.sql)', () 
   test('migration not applied (no table): every flag off, not an error', async () => {
     const db = memoryD1()
     db.raw.exec('DROP TABLE ops_flag_changes')
-    expect(await readOpsFlags(db)).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false, multichain_v6: false, multichain_v6_new: false, one_auth_v4: false })
+    expect(await readOpsFlags(db)).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false, multichain_v6: false, multichain_v6_new: false, one_auth_v4: false, vaults_v7: false, stables_lp_exit: false })
   })
 
   test('table applied, no row for a flag: off', async () => {
     const db = memoryD1()
-    expect(await readOpsFlags(db)).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false, multichain_v6: false, multichain_v6_new: false, one_auth_v4: false })
+    expect(await readOpsFlags(db)).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false, multichain_v6: false, multichain_v6_new: false, one_auth_v4: false, vaults_v7: false, stables_lp_exit: false })
   })
 
   test('the newest row wins, whichever way it flips', async () => {
@@ -31,7 +31,7 @@ describe('readOpsFlags (otto/mamoru#129, migrations/d1/0012_ops_flags.sql)', () 
   test('a name this code does not know is ignored, not a crash', async () => {
     const db = memoryD1()
     insert(db, 'some_future_flag', 1)
-    expect(await readOpsFlags(db)).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false, multichain_v6: false, multichain_v6_new: false, one_auth_v4: false })
+    expect(await readOpsFlags(db)).toEqual({ yield_ledger: false, onchain_action_policy_v4: false, onchain_action_policy_v5: false, monad_sleeves: false, multichain_v6: false, multichain_v6_new: false, one_auth_v4: false, vaults_v7: false, stables_lp_exit: false })
   })
 })
 
@@ -63,13 +63,13 @@ describe('scoped flags (otto/mamoru#217, migrations/d1/0021_ops_flag_accounts.sq
     const db = memoryD1()
     row(db, 'multichain_v6', 1, 'acct_x')
     row(db, 'multichain_v6', 0, null)
-    expect(await readOpsFlagState(db)).toMatchObject({ flags: { multichain_v6: false }, scopedFlags: {} })
+    expect(await readOpsFlagState(db)).toMatchObject({ flags: { multichain_v6: false, vaults_v7: false, stables_lp_exit: false }, scopedFlags: {} })
     row(db, 'multichain_v6', 1, null)
     const s = await readOpsFlagState(db)
     expect(s.flags.multichain_v6).toBe(false)
     expect(s.scopedFlags).toEqual({ multichain_v6: ['acct_x'] })
     row(db, 'multichain_v6', 1, '*')
-    expect(await readOpsFlagState(db)).toMatchObject({ flags: { multichain_v6: true }, scopedFlags: { multichain_v6: null } })
+    expect(await readOpsFlagState(db)).toMatchObject({ flags: { multichain_v6: true, vaults_v7: false, stables_lp_exit: false }, scopedFlags: { multichain_v6: null } })
     row(db, 'multichain_v6', 1, null)
     expect((await readOpsFlagState(db)).scopedFlags).toEqual({ multichain_v6: null })
   })
@@ -78,7 +78,7 @@ describe('scoped flags (otto/mamoru#217, migrations/d1/0021_ops_flag_accounts.sq
     for (const bad of ['', '  ', '[oops', '{"a":1}', '[1,2]']) expect(parseScope(bad)).toEqual([])
     const db = memoryD1()
     row(db, 'multichain_v6', 1, '[oops')
-    expect(await readOpsFlagState(db)).toMatchObject({ flags: { multichain_v6: false }, scopedFlags: { multichain_v6: [] } })
+    expect(await readOpsFlagState(db)).toMatchObject({ flags: { multichain_v6: false, vaults_v7: false, stables_lp_exit: false }, scopedFlags: { multichain_v6: [] } })
   })
 
   test('other flags ignore the column and keep their boolean', async () => {

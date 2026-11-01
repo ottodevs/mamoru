@@ -18,7 +18,8 @@ export function splitRows(fromId: string, toId: string): SplitRow[] {
   const shares = (p: PolicyVersion): Share[] => {
     const total = p.buckets.reduce((s, b) => s + b.preference, 0) + (p.remoteBuckets ?? []).reduce((s, b) => s + b.preference, 0)
     // A bucket at preference 0 is one being left (v6's USDC/cbBTC): not part of that mix.
-    const local = p.buckets.filter((b) => b.pools[0] && b.preference > 0).map((b) => ({ pool: b.pools[0]!, chainId: 8453, bps: Math.round((b.preference * 10_000) / total) }))
+    // otto/mamoru#210: a vault bucket (v7's Stable) shows as one row, its lending.
+    const local = p.buckets.filter((b) => (b.pools[0] || b.vaults?.[0]) && b.preference > 0).map((b) => ({ pool: b.pools[0] ?? b.vaults![0]!, chainId: 8453, bps: Math.round((b.preference * 10_000) / total) }))
     const remote = (p.remoteBuckets ?? []).map((b) => ({ pool: b.pools[0]!, chainId: b.chainId as number, bps: Math.round((b.preference * 10_000) / total) }))
     return [...local, ...remote]
   }
@@ -30,7 +31,7 @@ export function splitRows(fromId: string, toId: string): SplitRow[] {
       const [chainId, pool] = [Number(k.split('|')[0]), k.split('|')[1]!]
       const was = before.find((x) => x.chainId === chainId && x.pool === pool)
       const will = after.find((x) => x.chainId === chainId && x.pool === pool)
-      return { pool: pairLabel(pool), chain: sleeveChain(chainId).name, fromBps: was ? was.bps : null, toBps: will ? will.bps : 0 }
+      return { pool: pool.startsWith('vault:') ? 'USDC lending' : pairLabel(pool), chain: sleeveChain(chainId).name, fromBps: was ? was.bps : null, toBps: will ? will.bps : 0 }
     })
     .sort((a, b) => b.toBps - a.toBps || (b.fromBps ?? 0) - (a.fromBps ?? 0))
 }

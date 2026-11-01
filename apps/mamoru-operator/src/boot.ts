@@ -6,7 +6,7 @@ import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, chainWritesOptIn, isChainId, type Address } from '@mamoru/domain'
 import { address as registryAddress, baseRegistry, entry, isDeployed, messageTransmitterV2Abi, monadRegistry, registryFor, type Registry } from '@mamoru/registry'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
-import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLabV6, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, liveWmonUsdcMonadV6, MONAD_LAB_POLICIES, oneAuthV4Deployment, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V6_POOLS, type PolicyVersion } from '@mamoru/policy'
+import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLabV6, conservadorLabV7, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, conservadorLiveV7, liveWmonUsdcMonadV6, MONAD_LAB_POLICIES, oneAuthV4Deployment, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V6_POOLS, type PolicyVersion } from '@mamoru/policy'
 import { monadV6Deployed } from '@mamoru/account/remote'
 import { RemotePeer } from './remote-peer.ts'
 import { rpcBudget } from './budget.ts'
@@ -60,6 +60,8 @@ const V4_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV4.po
 const V5_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV5.policyId]: conservadorLiveV5, [conservadorLabV5.policyId]: conservadorLabV5 }
 /** otto/mamoru#214: `conservadorLiveV6`/`conservadorLabV6` (Base + Monad growth, bridge-out behind MamoruPauseGate) — never in `POLICIES` either. */
 const V6_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV6.policyId]: conservadorLiveV6, [conservadorLabV6.policyId]: conservadorLabV6 }
+/** otto/mamoru#210: `conservadorLiveV7`/`conservadorLabV7` (v6 with Stable in ERC-4626 vaults, on v6's contracts) — never in `POLICIES` either. */
+const V7_POLICIES_BY_ID: Record<string, PolicyVersion> = { [conservadorLiveV7.policyId]: conservadorLiveV7, [conservadorLabV7.policyId]: conservadorLabV7 }
 
 /**
  * Spec 007 (otto/mamoru#151) T7: a v2/v3 `policyId` (the only kind any live account names today) resolves exactly
@@ -90,6 +92,9 @@ export function resolveNamedPolicy(policyId: string, env: Record<string, string 
   const v6 = V6_POLICIES_BY_ID[policyId]
   const reg = opts.registry?.chainId === BASE_CHAIN_ID ? opts.registry : baseRegistry
   if (v6) return v6Deployable(env, reg) ? deployedV6(v6, env, reg) : undefined
+  // otto/mamoru#210: v7 runs on exactly v6's contracts; without them it is not offered either.
+  const v7 = V7_POLICIES_BY_ID[policyId]
+  if (v7) return v6Deployable(env, reg) ? deployedV7(v7, env, reg) : undefined
   const v4 = V4_POLICIES_BY_ID[policyId]
   if (!v4) return undefined
   return deployedV4(v4, env)
@@ -151,6 +156,16 @@ function deployedV6(v6: PolicyVersion, env: Record<string, string | undefined>, 
   return withActionPolicy(v6, v3, [V6_POOLS.stables, V6_POOLS.balance, V4_POOLS.btc], { gasPolicy: { address: getAddress(gas), caps: V4_GAS_CAPS }, contractVersion: 3, pauseGate: gate })
 }
 
+/**
+ * otto/mamoru#210: the v7 policy on v6's contracts: MamoruActionPolicyV3 (its Uniswap grants and, new, the vault-family
+ * grants of the Stable bucket: V3's own vault allowlist, gtUSDCp and waBasUSDC on Base), MamoruPauseGate bound to V3 for
+ * v6's bridge-out, and MamoruGasPolicy. The same checks as deployedV6; v6 itself is not touched.
+ */
+function deployedV7(v7: PolicyVersion, env: Record<string, string | undefined>, registry: Registry = baseRegistry): PolicyVersion {
+  const v6 = deployedV6(conservadorLiveV6, env, registry)
+  return withActionPolicy(v7, v6.actionPolicy!.address, [V4_POOLS.stables, V6_POOLS.balance, V4_POOLS.btc], { gasPolicy: v6.actionPolicy!.gasPolicy!, contractVersion: 3, pauseGate: v6.actionPolicy!.pauseGate! })
+}
+
 /** otto/mamoru#251: the v6 pause gate reads MamoruActionPolicyV3's pause, on chain: a gate bound to another policy is refused. */
 export async function assertV6Gate(client: PublicClient, v6: PolicyVersion): Promise<void> {
   const ap = v6.actionPolicy
@@ -183,6 +198,17 @@ export function resolveV6Policy(chain: PolicyVersion['chain'], env: Record<strin
 }
 
 /**
+ * otto/mamoru#210: the v7 policy the renew row may move this operator's v2-v6 accounts to, on the same conditions as v6
+ * (the v4 opt-in, MamoruActionPolicyV3 and MamoruPauseGate pinned, the gas policy set), or undefined. Whether an account
+ * is offered the move is the D1 flag `vaults_v7`, scoped per account and read on every view.
+ */
+export function resolveV7Policy(chain: PolicyVersion['chain'], env: Record<string, string | undefined>, registry: Registry = baseRegistry): PolicyVersion | undefined {
+  if (chain === 'monad') return undefined
+  if (env.MAMORU_ONCHAIN_POLICY_V4 !== '1' || !v6Deployable(env, registry)) return undefined
+  return deployedV7(chain === conservadorLiveV7.chain ? conservadorLiveV7 : conservadorLabV7, env, registry)
+}
+
+/**
  * Spec 007 T7 (d): the v4 policy the renew row may move this operator's v2/v3 accounts to (same chain as the
  * operator's own policy), or undefined when the opt-in is off. Read at boot like `resolveNamedPolicy`; whether an
  * account is offered the move is the D1 flag `onchain_action_policy_v4`, read on every view.
@@ -195,6 +221,18 @@ export function resolveV4Policy(chain: PolicyVersion['chain'], env: Record<strin
 
 /** Accounts whose stored policy is a v4 one, when this operator was started without the v4 opt-in or its addresses. */
 export function assertV4Resolvable(accounts: readonly { accountKey: string; policyId?: string }[], env: Record<string, string | undefined>): void {
+  // otto/mamoru#210: v7 accounts need v6's contracts too.
+  const v7Ids = new Set([conservadorLiveV7.policyId, conservadorLabV7.policyId])
+  const onV7 = accounts.filter((a) => a.policyId && v7Ids.has(a.policyId))
+  if (onV7.length) {
+    let v7: PolicyVersion | undefined
+    try {
+      v7 = resolveV7Policy(conservadorLiveV7.chain, env) ?? resolveV7Policy(conservadorLabV7.chain, env)
+    } catch {
+      v7 = undefined
+    }
+    if (!v7) throw new Error(`${onV7.length} account(s) run conservador-live-v7 (${onV7.map((a) => a.accountKey.slice(0, 8)).join(', ')}): start with MAMORU_ONCHAIN_POLICY_V4=1 and MAMORU_GAS_POLICY_ADDRESS set, MamoruActionPolicyV3 and MamoruPauseGate pinned in the registry`)
+  }
   const v6Ids = new Set([conservadorLiveV6.policyId, conservadorLabV6.policyId])
   const onV6 = accounts.filter((a) => a.policyId && v6Ids.has(a.policyId))
   if (onV6.length) {
@@ -553,6 +591,10 @@ export async function bootOperator(o: BootOptions) {
     }
   }
   assertBootPolicies(policy, v6Policy, registry, { live, writes: writes.on })
+  // otto/mamoru#210: v7 runs on v6's contracts, so it is offered only where v6 is (its gate checked above), behind
+  // `vaults_v7`. It also gets the same boot checks. An account already on v7 resolves through resolveNamedPolicy.
+  const v7Policy = v6Policy ? resolveV7Policy(policy.chain, process.env) : undefined
+  if (v7Policy) assertBootPolicies(policy, v7Policy, registry, { live, writes: writes.on })
   if (writes.on) assertWritePolicy(policy, registry, chainId)
   const store = new StateStore(o.stateDir)
   // Review round 2: an account already moved to the on-chain action policy needs that policy to resolve after a
@@ -668,6 +710,7 @@ export async function bootOperator(o: BootOptions) {
       ...(resolveV4Policy(policy.chain, process.env) ? { v4Policy: resolveV4Policy(policy.chain, process.env) } : {}),
       ...(resolveV5Policy(policy.chain, process.env) ? { v5Policy: resolveV5Policy(policy.chain, process.env) } : {}),
       ...(v6Policy ? { v6Policy } : {}),
+      ...(v7Policy ? { v7Policy } : {}),
       guardReadsState: new GuardReadsState(o.stateDir),
       poolStatsStateFile: join(o.stateDir, 'pool-stats.json'),
       ...(peers ? { peers } : {}),

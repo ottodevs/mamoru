@@ -73,6 +73,25 @@ export const OPS_FLAGS = {
     label: 'One authorization (V4)',
     description: 'Offers accounts in scope the move to MamoruActionPolicyV4: the owner signs once, no renewals, new pools and chains from the timelocked MamoruRegistry (otto/mamoru#293, spec 010). Inert until the four V4 contracts are pinned in the registry.',
   },
+  /**
+   * otto/mamoru#210, default off: offers running Base accounts (v2-v6) the renewal that moves them to conservadorLiveV7: v6
+   * with the Stable 50 % supplied to ERC-4626 vaults (Morpho gtUSDCp, then Aave waBasUSDC) on MamoruActionPolicyV3's
+   * vault family. Scopable to accounts like `multichain_v6`; only where v6's contracts are configured. Takes precedence
+   * over `multichain_v6` for an account in both scopes. Not in any default offer.
+   */
+  vaults_v7: {
+    label: 'Stable in lending vaults (v7)',
+    description: 'Offers running Base accounts the renewal that moves them to conservadorLiveV7: Stable 50 % in Morpho gtUSDCp / Aave waBasUSDC on MamoruActionPolicyV3, USDC/USDT exit only (otto/mamoru#210). Scopable to accounts.',
+  },
+  /**
+   * otto/mamoru#210, default off: for a v7 account in scope, the engine winds down its old USDC/USDT positions (the
+   * exit-only `stables-lp` bucket) in full; out of scope they are held as they are. Ot has not decided between an
+   * automatic and an opt-in migration: until then it is opt-in, per account.
+   */
+  stables_lp_exit: {
+    label: 'v7: wind down USDC/USDT (opt-in)',
+    description: 'For v7 accounts in scope, the engine exits the old USDC/USDT positions in full and the USDC goes to the lending vaults; out of scope they stay as they are (otto/mamoru#210). Scopable to accounts.',
+  },
 } as const
 
 export type OpsFlagName = keyof typeof OPS_FLAGS

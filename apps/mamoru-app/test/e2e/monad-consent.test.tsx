@@ -102,3 +102,24 @@ describe('share against target (otto/mamoru#216)', () => {
     expect(bucketOf('pool:WETH/USDC/3000')).toBe('Growth')
   })
 })
+
+describe('otto/mamoru#210: the move to conservador-live-v7 (Stable in lending vaults)', () => {
+  test('v6 -> v7: the same mix, Stable now as USDC lending; USDC/USDT shows as closed', () => {
+    expect(splitRows('conservador-live-v6', 'conservador-live-v7').map((r) => [r.pool, r.fromBps, r.toBps])).toEqual([
+      ['USDC lending', null, 5000],
+      ['USDC / WETH', 3500, 3500],
+      ['USDC / WMON', 1500, 1500],
+      ['USDC / USDT', 5000, 0],
+    ])
+  })
+
+  test('from v6 it is a plain renewal in its own words, not the Monad screen; from v5 it takes the Monad screen like v6', () => {
+    const fromV6 = { validUntil: 2_000_000_000, renewDue: false, expired: false, policyId: 'conservador-live-v6', upgrade: true, upgradePolicy: 'conservador-live-v7' }
+    expect(approvalTitle(fromV6)).toContain('lend your Stable share')
+    const { text } = render(<ApprovalRow approval={fromV6} onOpen={() => {}} />)
+    expect(text).toContain('Renew approval')
+    expect(text).not.toContain('See what changes')
+    const fromV5 = { ...fromV6, policyId: 'conservador-live-v5' }
+    expect(approvalTitle(fromV5)).toContain('Monad')
+  })
+})

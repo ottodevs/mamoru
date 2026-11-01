@@ -30,6 +30,7 @@ import { HowItWorks, howCopy } from '../components/how-it-works.tsx'
 import { Chevron, Fold, LiveSync, PullToRefresh, Spark, TweenPct, TweenUsd } from '../components/motion.tsx'
 import { useThrottledRefresh } from '../lib/refresh-throttle.ts'
 import { isMultichainTarget, monadCopy, MonadConsentDialog, splitRows } from '../components/monad-consent.tsx'
+import { isVaultTarget } from '../lib/policies.ts'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
 
 export const homeCopy = {
@@ -134,6 +135,8 @@ export const homeCopy = {
   upgradeMonadTitle: 'Mamoru now works on Monad too. See what changes in your mix, then approve it once.',
   upgradeMonadNote: 'One tap with your passkey. Nothing moves until you approve.',
   upgradeMonad: 'See what changes',
+  // otto/mamoru#210: the move of a running v6 account to conservador-live-v7 (Stable in lending vaults).
+  upgradeVaultsTitle: "Mamoru can now lend your Stable share instead of keeping it in a USDC/USDT pool: USDC supplied to Morpho, then Aave, always to and from your Safe. Your USDC/USDT positions stay as they are. Renew its approval to turn this on.",
   upgradeV5Title: "Mamoru's on-chain limits have a new version: it trades only near the market price and only the positions it opened, adds to a position it already holds instead of opening another, and a guardian key can pause it but never move funds. Renew its approval to turn this on.",
   // otto/mamoru#149: a grant that has used 80% or all of what the approval allows.
   usageSoon: (what: string, pair: string) => `Mamoru has used most of what this approval allows for ${what} in ${pair}. Renew it now so that does not stop.`,
@@ -1038,6 +1041,14 @@ function useFittingPrepared(approval: NonNullable<FundingView['approval']>, flow
 
 const USAGE_WHAT: Record<NonNullable<NonNullable<FundingView['approval']>['usage']>['action'], string> = { collect: 'collecting fees', rerange: 're-ranging', enter: 'adding money' }
 
+/**
+ * otto/mamoru#210: a move to v7 from an account already on Monad (v6): only Stable changes, so it is a plain renewal, not
+ * the Monad screen. From v2-v5 the move to v7 also brings Monad, and takes the Monad screen like v6.
+ */
+function isVaultMove(approval: NonNullable<FundingView['approval']>): boolean {
+  return isVaultTarget(approval.upgradePolicy) && isMultichainTarget(approval.policyId)
+}
+
 /** The row's title: an ended approval first, then a spent grant, a due renewal, a grant near its end, a missing grant. */
 export function approvalTitle(approval: NonNullable<FundingView['approval']>): string {
   const u = approval.usage
@@ -1047,6 +1058,7 @@ export function approvalTitle(approval: NonNullable<FundingView['approval']>): s
   if (u?.spent) return usage!
   if (approval.renewDue) return homeCopy.renewSoon(approvalDay(approval.validUntil))
   if (usage) return usage
+  if (approval.upgrade && isVaultMove(approval)) return homeCopy.upgradeVaultsTitle
   if (approval.upgrade && isMultichainTarget(approval.upgradePolicy)) return homeCopy.upgradeMonadTitle
   // otto/mamoru#212: grants still missing are added first, without accepting a raise; the raise is the next tap.
   if (approval.capRaise && !(approval.missing ?? 0)) return homeCopy.capRaiseTitle(usdPlain(approval.capRaise.capUsdc), usdPlain(approval.capRaise.signedUsdc))
@@ -1060,7 +1072,7 @@ export function approvalTitle(approval: NonNullable<FundingView['approval']>): s
  * signed in the approval dialog, the same one Home opens on its own when a renewal is due (#176).
  */
 export function ApprovalRow({ approval, onOpen }: { approval: NonNullable<FundingView['approval']>; onOpen: () => void }) {
-  const monad = approval.upgrade === true && isMultichainTarget(approval.upgradePolicy) && !approval.renewDue && !approval.expired && !approval.usage && !approval.paused
+  const monad = approval.upgrade === true && isMultichainTarget(approval.upgradePolicy) && !isVaultMove(approval) && !approval.renewDue && !approval.expired && !approval.usage && !approval.paused
   return (
     <section className="card flex flex-wrap items-center justify-between gap-3" data-testid="renew" role="status">
       <span className="max-w-[40rem]">
@@ -1472,7 +1484,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           {f.approval && f.active && !renewing && approvalOpen && (renewAsk || f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade || f.approval.capRaise) ? (
             // otto/mamoru#142 review: a renewal that moves to the mix with Monad always goes through its consent and the
             // Monad step, due, expired or paused alike: never a one-tap renewal to it, never one the Worker must refuse.
-            f.approval.upgrade && isMultichainTarget(f.approval.upgradePolicy) ? (
+            f.approval.upgrade && isMultichainTarget(f.approval.upgradePolicy) && !isVaultMove(f.approval) ? (
               <MonadUpgradeDialog onDone={markSigned} key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null && !feedbackOpen} onClose={closeRenewAsk} />
             ) : (
               <RenewDialog onDone={markSigned} key={approvalRowKey(f.approval)} accountKey={accountKey} approval={f.approval} open={renewAsked && dialog === null && !feedbackOpen} onClose={closeRenewAsk} />
