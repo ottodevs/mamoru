@@ -19,7 +19,7 @@ import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { chainLabel, pairLabel, poolAddress, poolTokens, positionAmounts, progressLine, vaultAddress } from '../lib/positions.ts'
 import { activateLine, signatureCopy } from '../lib/signature.ts'
 import { currentRate, idleReason, monthlyRate, positionRates, sourceName, type AccountRate, type PositionRate } from '../lib/rates.ts'
-import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel } from '../lib/price-divergence.ts'
+import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel, type Locale } from '../lib/price-divergence.ts'
 import { localTime } from '../lib/time.ts'
 import { BASE_SLEEVE, explorerAddress, explorerTx, knownChain, sleeveChain, useChain } from '../lib/chain.tsx'
 import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
@@ -1119,7 +1119,40 @@ export function ApprovalRow({ approval, onOpen }: { approval: NonNullable<Fundin
 }
 
 /** The dialog's title and one sentence under it, in the same order of precedence as the row's title. */
-export function approvalHeading(approval: NonNullable<FundingView['approval']>): { title: string; lead: string } {
+/** otto/mamoru#225: the approval dialog's title and lead in Spanish and Japanese; English is approvalHeading's own text. */
+const headingCopy = {
+  es: {
+    what: { collect: 'cobrar comisiones', rerange: 'recentrar', enter: 'añadir dinero' },
+    where: (pool: string | null) => (pool ? `en ${pool}` : 'en sus pools'),
+    paused: { title: 'Una clave guardiana ha pausado Mamoru', lead: 'No está actuando en esta cuenta. Renovar su aprobación quita esa pausa: renueva solo si sabes por qué se pausó.' },
+    expired: { title: 'La aprobación de Mamoru ha terminado', lead: 'Tu dinero sigue donde estaba. Renuévala para que Mamoru siga trabajando.' },
+    spent: (what: string, where: string) => ({ title: `Mamoru ha dejado de ${what} ${where}`, lead: 'Ha usado todo lo que permite esta aprobación. Renovarla restablece sus límites, contando desde cero.' }),
+    renew: "Renueva la aprobación de Mamoru",
+    due: (day: string) => `Termina el ${day}. Renovarla mantiene a Mamoru trabajando para ti.`,
+    near: (what: string, where: string) => ({ title: 'Renueva antes de que se agote un límite', lead: `Mamoru ha usado casi todo lo que esta aprobación permite para ${what} ${where}. Renueva ahora para que no se detenga.` }),
+    capRaise: (cap: string, signed: string) => `Tu límite ahora es ${cap} USDC. Mamoru se mantiene en los ${signed} USDC que aprobaste hasta que renueves su aprobación.`,
+    upgradeV5: 'Los límites on-chain de Mamoru tienen una versión nueva: solo opera cerca del precio de mercado y solo con las posiciones que abrió, amplía una posición que ya tiene en vez de abrir otra, y una clave guardiana puede pausarlo pero nunca mover fondos. Renueva su aprobación para activarlo.',
+    upgrade: 'Ahora Mamoru puede limitarse on-chain: solo operaría cerca del precio de mercado y solo con las posiciones que abrió. Renueva su aprobación para activarlo.',
+    missing: { title: 'Deja que Mamoru trabaje en todos los pools', lead: 'Falta parte de la aprobación: en algunos pools Mamoru no puede recentrar ni cobrar comisiones hasta que la añadas.' },
+  },
+  ja: {
+    what: { collect: '手数料の回収', rerange: 'レンジの再調整', enter: '資金の追加' },
+    where: (pool: string | null) => (pool ? `${pool} での` : '各プールでの'),
+    paused: { title: 'ガーディアン鍵が Mamoru を一時停止しています', lead: 'このアカウントでは動いていません。承認を更新すると一時停止は解除されます。理由が分かっている場合のみ更新してください。' },
+    expired: { title: 'Mamoru の承認が終了しました', lead: '資金は元の場所にあります。Mamoru が動き続けられるよう、承認を更新してください。' },
+    spent: (what: string, where: string) => ({ title: `Mamoru は${where}${what}を停止しました`, lead: 'この承認で許される分をすべて使いました。更新すると上限がゼロから数え直されます。' }),
+    renew: 'Mamoru の承認を更新',
+    due: (day: string) => `${day}に終了します。更新すると Mamoru は引き続き働きます。`,
+    near: (what: string, where: string) => ({ title: '上限に達する前に更新', lead: `Mamoru は${where}${what}について、この承認で許される分の大半を使いました。止まらないよう、今すぐ更新してください。` }),
+    capRaise: (cap: string, signed: string) => `上限が ${cap} USDC になりました。承認を更新するまで、Mamoru は承認済みの ${signed} USDC を守ります。`,
+    upgradeV5: 'Mamoru のオンチェーン上限に新しいバージョンがあります。市場価格の近くで Mamoru が開いたポジションだけを取引し、新しく開く代わりに Mamoru がすでに保有しているポジションに追加します。ガーディアン鍵は一時停止できますが、資金を動かすことはできません。承認を更新すると有効になります。',
+    upgrade: 'Mamoru をオンチェーンで制限できるようになりました。市場価格の近くで、Mamoru が開いたポジションだけを取引します。承認を更新すると有効になります。',
+    missing: { title: 'すべてのプールで Mamoru を動かす', lead: '承認の一部が不足しています。一部のプールでは、追加するまで Mamoru はレンジの再調整や手数料の回収ができません。' },
+  },
+}
+
+export function approvalHeading(approval: NonNullable<FundingView['approval']>, locale: Locale = 'en'): { title: string; lead: string } {
+  if (locale !== 'en') return approvalHeadingIn(headingCopy[locale], approval)
   const u = approval.usage
   const what = u ? `${USAGE_WHAT[u.action]} in ${u.pool ? pairLabel(u.pool) : 'its pools'}` : ''
   if (approval.paused) return { title: 'A guardian key has paused Mamoru', lead: 'It is not acting on this account. Renewing its approval ends that pause: renew only if you know why it was paused.' }
@@ -1130,6 +1163,21 @@ export function approvalHeading(approval: NonNullable<FundingView['approval']>):
   if (approval.capRaise && !(approval.missing ?? 0)) return { title: homeCopy.renewAskTitle, lead: homeCopy.capRaiseTitle(usdPlain(approval.capRaise.capUsdc), usdPlain(approval.capRaise.signedUsdc)) }
   if (approval.upgrade) return { title: homeCopy.renewAskTitle, lead: approval.upgradePolicy?.includes('-v5') ? homeCopy.upgradeV5Title : homeCopy.upgradeTitle }
   return { title: 'Let Mamoru work in every pool', lead: 'Part of the approval is missing: in some pools Mamoru cannot re-range or collect fees until you add it.' }
+}
+
+/** The same order of cases as approvalHeading, in another language. */
+function approvalHeadingIn(c: (typeof headingCopy)['es'], approval: NonNullable<FundingView['approval']>): { title: string; lead: string } {
+  const u = approval.usage
+  const what = u ? c.what[u.action] : ''
+  const where = u ? c.where(u.pool ? pairLabel(u.pool) : null) : ''
+  if (approval.paused) return c.paused
+  if (approval.expired) return c.expired
+  if (u?.spent) return c.spent(what, where)
+  if (approval.renewDue) return { title: c.renew, lead: c.due(approvalDay(approval.validUntil)) }
+  if (u) return c.near(what, where)
+  if (approval.capRaise && !(approval.missing ?? 0)) return { title: c.renew, lead: c.capRaise(usdPlain(approval.capRaise.capUsdc), usdPlain(approval.capRaise.signedUsdc)) }
+  if (approval.upgrade) return { title: c.renew, lead: approval.upgradePolicy?.includes('-v5') ? c.upgradeV5 : c.upgrade }
+  return c.missing
 }
 
 /**
@@ -1178,7 +1226,7 @@ function RenewDialog({ accountKey, approval, open, onClose, onDone }: { accountK
     onDone(approvalRowKey(approval), doneOp)
     onClose()
   }, [doneOp, onClose, onDone, approval])
-  const { title, lead } = approvalHeading(approval)
+  const { title, lead } = approvalHeading(approval, detectLocale())
   return (
     <ApprovalDialog title={title} open={open && !done} onClose={onClose}>
       <ApprovalBody lead={lead} summary={prepared?.tx.summary ?? null} busy={flow.busy} error={flow.error} onPrepare={() => void flow.prepare()} onApprove={() => void (prepared ? flow.approve() : flow.prepare())} onLater={onClose} />

@@ -3,6 +3,7 @@ import { sleeveChain } from '../lib/chain.tsx'
 import { KNOWN_POLICIES as KNOWN, isMultichainTarget } from '../lib/policies.ts'
 import { pairLabel } from '../lib/positions.ts'
 import { ApprovalBody, ApprovalDialog } from './approval-dialog.tsx'
+import { detectLocale, type Locale } from '../lib/price-divergence.ts'
 
 export { isMultichainTarget }
 
@@ -41,26 +42,63 @@ export function splitRows(fromId: string, toId: string): SplitRow[] {
  * what changes in the mix and what does not, and one passkey signature approves all of it: the new mix on Base, the
  * move of the Monad share, and the Monad pool, in a Safe of the owner's own that Mamoru creates there.
  */
-export const monadCopy = {
-  title: 'Mamoru now works on Monad too',
-  lead: (pool: string, chain: string, pct: string) => `Your savings get a third home: a ${pool} pool on ${chain}. If you approve, Mamoru moves ${pct} there and rebalances the rest to the new mix below; a pool marked closed is unwound into the others.`,
-  split: 'Your mix',
-  now: 'Now',
-  after: 'After',
-  leaving: 'closed',
-  points: [
-    { title: 'Your own Safe on Monad', body: 'Mamoru creates it for you, owned by the same passkey. Only you can withdraw, on either chain.' },
-    { title: 'Step by step, inside limits', body: 'Mamoru closes and opens positions gradually, within the limits you sign. Nothing moves until you approve.' },
-    { title: 'One signature', body: 'This one approval covers the new mix on Base, the move to Monad and the pool there. Nothing else to sign.' },
-  ],
-}
+const copies = {
+  en: {
+    title: 'Mamoru now works on Monad too',
+    lead: (pool: string, chain: string, pct: string) => `Your savings get a third home: a ${pool} pool on ${chain}. If you approve, Mamoru moves ${pct} there and rebalances the rest to the new mix below; a pool marked closed is unwound into the others.`,
+    split: 'Your mix',
+    now: 'Now',
+    after: 'After',
+    leaving: 'closed',
+    points: [
+      { title: 'Your own Safe on Monad', body: 'Mamoru creates it for you, owned by the same passkey. Only you can withdraw, on either chain.' },
+      { title: 'Step by step, inside limits', body: 'Mamoru closes and opens positions gradually, within the limits you sign. Nothing moves until you approve.' },
+      { title: 'One signature', body: 'This one approval covers the new mix on Base, the move to Monad and the pool there. Nothing else to sign.' },
+    ],
+    at: (pool: string, chain: string) => `${pool} on ${chain}`,
+  },
+  es: {
+    title: 'Mamoru ahora también trabaja en Monad',
+    lead: (pool: string, chain: string, pct: string) => `Tus ahorros tienen un tercer sitio: un pool ${pool} en ${chain}. Si apruebas, Mamoru mueve allí el ${pct} y reparte el resto según la nueva mezcla de abajo; un pool marcado como cerrado se deshace en los demás.`,
+    split: 'Tu mezcla',
+    now: 'Ahora',
+    after: 'Después',
+    leaving: 'cerrado',
+    points: [
+      { title: 'Tu propia Safe en Monad', body: 'Mamoru la crea para ti, con la misma passkey como dueña. Solo tú puedes retirar, en cualquiera de las dos redes.' },
+      { title: 'Paso a paso, dentro de límites', body: 'Mamoru cierra y abre posiciones poco a poco, dentro de los límites que firmas. No se mueve nada hasta que apruebes.' },
+      { title: 'Una sola firma', body: 'Esta aprobación cubre la nueva mezcla en Base, el paso a Monad y el pool de allí. No hay nada más que firmar.' },
+    ],
+    at: (pool: string, chain: string) => `${pool} en ${chain}`,
+  },
+  ja: {
+    title: 'Mamoru は Monad でも動くようになりました',
+    lead: (pool: string, chain: string, pct: string) => `貯蓄の置き場所が 3 つ目に増えます：${chain} 上の ${pool} プールです。承認すると、Mamoru は ${pct} をそこへ移し、残りを下の新しい配分に組み直します。「終了」のプールは他のプールへ解消されます。`,
+    split: 'あなたの配分',
+    now: '現在',
+    after: '変更後',
+    leaving: '終了',
+    points: [
+      { title: 'Monad 上のあなた自身の Safe', body: 'Mamoru があなたのために作成し、所有者は同じパスキーです。引き出せるのはあなただけで、どちらのチェーンでも可能です。' },
+      { title: '上限の内側で少しずつ', body: 'Mamoru は署名した上限の内側で、ポジションを少しずつ閉じたり開いたりします。承認するまで何も動きません。' },
+      { title: '署名は 1 回だけ', body: 'この 1 つの承認で、Base の新しい配分、Monad への移動、そこでのプールをすべてカバーします。他に署名するものはありません。' },
+    ],
+    at: (pool: string, chain: string) => `${chain} の ${pool}`,
+  },
+} satisfies Record<Locale, unknown>
+
+/** The English copy, as before: tests and other modules read the labels from here. */
+export const monadCopy = copies.en
+const copyOf = (locale: Locale): typeof monadCopy => copies[locale] as typeof monadCopy
+
 
 /** One row of the before/after mix: a pool on a chain and its share of the account, in basis points. */
 export type SplitRow = { pool: string; chain: string; fromBps: number | null; toBps: number }
 
 const pct = (bps: number) => `${Math.round(bps / 100)}%`
 
-export function SplitTable({ rows }: { rows: SplitRow[] }) {
+export function SplitTable({ rows, locale = detectLocale() }: { rows: SplitRow[]; locale?: Locale }) {
+  const monadCopy = copyOf(locale)
   return (
     <table className="split" data-testid="monad-split">
       <caption className="split-caption">{monadCopy.split}</caption>
@@ -92,7 +130,8 @@ export function SplitTable({ rows }: { rows: SplitRow[] }) {
   )
 }
 
-function Points() {
+function Points({ locale }: { locale: Locale }) {
+  const monadCopy = copyOf(locale)
   return (
     <ul className="approve-points" aria-label="In short">
       {monadCopy.points.map((p, i) => (
@@ -116,8 +155,9 @@ export function remoteOf(rows: SplitRow[]): SplitRow | undefined {
 }
 
 /** "50% USDC / USDT on Base, 35% USDC / WETH on Base, 15% USDC / WMON on Monad", from the rows. */
-export function mixLine(rows: SplitRow[]): string {
-  return rows.filter((r) => r.toBps > 0).map((r) => `${pct(r.toBps)} ${r.pool} on ${r.chain}`).join(', ')
+export function mixLine(rows: SplitRow[], locale: Locale = 'en'): string {
+  const at = copyOf(locale).at
+  return rows.filter((r) => r.toBps > 0).map((r) => `${pct(r.toBps)} ${at(r.pool, r.chain)}`).join(locale === 'ja' ? '、' : ', ')
 }
 
 export type MonadFlow = {
@@ -132,15 +172,17 @@ export type MonadFlow = {
  * The whole dialog, one screen: what changes (lead, mix, the three points), then the approval itself, the same owner flow
  * every other approval uses (its signed lines name the Monad Safe's address), and one passkey tap.
  */
-export function MonadConsentDialog({ open, rows, flow, onClose }: { open: boolean; rows: SplitRow[]; flow: MonadFlow; onClose: () => void }) {
+export function MonadConsentDialog({ open, rows, flow, onClose, locale = detectLocale() }: { open: boolean; rows: SplitRow[]; flow: MonadFlow; onClose: () => void; locale?: Locale }) {
   const remote = remoteOf(rows)
+  const monadCopy = copyOf(locale)
   return (
     <ApprovalDialog title={monadCopy.title} open={open} onClose={onClose}>
       <div data-testid="monad-intro">
         <ApprovalBody
-          lead={remote ? monadCopy.lead(remote.pool, remote.chain, pct(remote.toBps)) : mixLine(rows)}
-          context={<SplitTable rows={rows} />}
-          points={<Points />}
+          lead={remote ? monadCopy.lead(remote.pool, remote.chain, pct(remote.toBps)) : mixLine(rows, locale)}
+          context={<SplitTable rows={rows} locale={locale} />}
+          points={<Points locale={locale} />}
+          locale={locale}
           summary={flow.summary}
           busy={flow.busy}
           error={flow.error}

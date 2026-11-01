@@ -672,6 +672,30 @@ describe('renewing the approval', () => {
     expect(text).not.toContain('One passkey signature')
   })
 
+    test('#225: the dialog title and lead follow the reader language, case by case as in English', () => {
+    const now = Math.floor(Date.now() / 1000)
+    const year = { validUntil: now + 300 * 86_400, renewDue: false, expired: false }
+    const cases = [
+      { ...year, paused: true },
+      { ...year, expired: true },
+      { ...year, usage: { action: 'collect' as const, pool: null, usedBps: 10_000, spent: true } },
+      { ...year, renewDue: true },
+      { ...year, upgrade: true, upgradePolicy: 'conservador-live-v5' },
+      year,
+    ]
+    for (const a of cases) {
+      const en = approvalHeading(a)
+      expect(approvalHeading(a, 'en')).toEqual(en)
+      for (const locale of ['es', 'ja'] as const) {
+        const h = approvalHeading(a, locale)
+        expect(h.title).not.toBe(en.title)
+        expect(h.lead).not.toBe(en.lead)
+      }
+    }
+    expect(approvalHeading({ ...year, paused: true }, 'es').lead).toContain('solo si sabes por qué se pausó')
+    expect(approvalHeading({ ...year, upgrade: true, upgradePolicy: 'conservador-live-v5' }, 'ja').lead).toContain('ガーディアン鍵')
+  })
+
     test('#225: the dialog speaks Spanish and Japanese; the signed text stays as signed', () => {
     const summary = ['In WETH/USDC 0.30%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 70.00 USDC a day and 350.00 USDC in total on this approval']
     const es = render(<ApprovalBody lead="x" summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} locale="es" />)
