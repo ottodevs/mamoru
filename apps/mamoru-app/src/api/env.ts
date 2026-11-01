@@ -43,6 +43,8 @@ export type Env = {
   // In-app feedback (feedback.ts, otto/mamoru#72). Workers Rate Limiting binding, keyed by device session when
   // there is one, else a hash of the connecting IP. Absent in tests and local runs.
   FEEDBACK_LIMIT?: RateLimiter
+  // otto/mamoru#255: reads of one account per client address (middleware/read-limit.ts). Absent in tests and local runs.
+  ACCOUNT_READ_LIMIT?: RateLimiter
   // Mattermost fan-out for feedback (feedback.ts). All secrets, all optional: unset, a row is still stored and
   // nothing is posted. MATTERMOST_BOT_TOKEN is never logged.
   MATTERMOST_URL?: string

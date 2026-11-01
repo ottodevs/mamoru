@@ -6,6 +6,7 @@ import { apiError } from './errors.ts'
 import { DeviceSessionAuth } from './auth/device-session.ts'
 import { signIn } from './auth/routes.ts'
 import { sameOrigin } from './middleware/origin.ts'
+import { accountReadLimit } from './middleware/read-limit.ts'
 import { onboarding } from './onboarding/routes.ts'
 import { accountOfUser } from './accounts/store.ts'
 import { recordActivity } from './accounts/activity.ts'
@@ -64,6 +65,7 @@ export function createApp(options: AppOptions = {}) {
     }
   })
   app.use('/api/*', sameOrigin)
+  app.use('/api/accounts/:accountKey/*', accountReadLimit)
 
   app.get('/api/config', (c) => {
     const base: AppConfig = {

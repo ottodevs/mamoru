@@ -137,7 +137,7 @@ export function Fold({
   )
 }
 
-/** "4 s", "1 min": how long ago the last reading landed, short enough for a pill. */
+/** "4 s", "1 min": how long ago the last reading landed. */
 function since(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000))
   if (s < 60) return `${s} s`
@@ -145,27 +145,33 @@ function since(ms: number): string {
 }
 
 /**
- * The page is live (#226): a pill by the brand with a ring that fills until the next reading, how long ago the
- * last one landed, and a tap to read now. While the read is down it says so instead.
+ * The page is live (#226): a ring by the brand that fills until the next reading, its core breathing; a tap reads
+ * now. #255: no words while all is well, only the ring (how long ago is in its label and title); "Offline" while the
+ * read is down, and `note` (a refused refresh: "Up to date") for a moment after a tap.
  */
 /** `chain` (otto/mamoru#238): the reading is the Worker's read of the chain, the engine is out of reach: not called Live. */
-export function LiveSync({ updatedAt, intervalMs, fetching, down, chain = false, onRefresh }: { updatedAt: number; intervalMs: number; fetching: boolean; down: boolean; chain?: boolean; onRefresh: () => void }) {
+export function LiveSync({ updatedAt, intervalMs, fetching, down, chain = false, note = null, onRefresh }: { updatedAt: number; intervalMs: number; fetching: boolean; down: boolean; chain?: boolean; note?: string | null; onRefresh: () => void }) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000)
+    const t = setInterval(() => setNow(Date.now()), 5000)
     return () => clearInterval(t)
   }, [])
   const age = updatedAt ? now - updatedAt : 0
-  const label = down ? 'Offline · retrying' : fetching || !updatedAt ? 'Updating' : `${chain ? 'On-chain' : 'Live'} · ${since(age)} ago`
+  const label = down ? 'Offline, retrying' : fetching || !updatedAt ? 'Updating' : `${chain ? 'Read on-chain' : 'Live'}, updated ${since(age)} ago`
+  const shown = down ? 'Offline' : note
   return (
-    <button type="button" className={`live${down ? ' is-down' : ''}${fetching ? ' is-fetching' : ''}`} onClick={onRefresh} aria-label={`${label}. Refresh now`} data-testid="live-sync">
-      <svg className="live-ring" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+    <button type="button" className={`live${down ? ' is-down' : ''}${fetching ? ' is-fetching' : ''}`} onClick={onRefresh} aria-label={`${label}. Refresh now`} title={label} data-testid="live-sync">
+      {shown ? (
+        <span key={shown} className="live-label" role="status">
+          {shown}
+        </span>
+      ) : null}
+      <svg className="live-ring" width="18" height="18" viewBox="0 0 16 16" aria-hidden="true">
         <circle cx="8" cy="8" r="6" className="live-track" />
         {/* Restarted on every reading: the ring fills over the poll interval, so the wait for the next one shows. */}
         <circle key={updatedAt} cx="8" cy="8" r="6" className="live-fill" pathLength={1} style={{ animationDuration: `${intervalMs}ms` }} />
         <circle cx="8" cy="8" r="2.2" className="live-core" />
       </svg>
-      <span className="live-label">{label}</span>
     </button>
   )
 }
@@ -175,72 +181,90 @@ function standalone(): boolean {
   return matchMedia('(display-mode: standalone)').matches || (navigator as Navigator & { standalone?: boolean }).standalone === true
 }
 
-const PULL_AT = 72
+// #255: the finger travels past SLACK before anything shows, then the indicator follows at RESIST of its pace and
+// triggers at PULL_AT: about 190 px of finger, near the platform's own pull.
+const SLACK = 24
+const RESIST = 0.45
+const PULL_AT = 76
 
 /**
  * Pull down from the top to read everything again (#226). Only where the browser has no pull-to-refresh of its own:
  * the app added to the home screen (standalone). The mark turns with the pull and spins while the reads run.
+ * `onRefresh` resolves false when the throttle refused it (#255): the mark then says "Up to date" for a moment.
  */
-export function PullToRefresh({ onRefresh }: { onRefresh: () => Promise<unknown> }) {
+export function PullToRefresh({ onRefresh }: { onRefresh: () => Promise<boolean> }) {
   const [pull, setPull] = useState(0)
   const [busy, setBusy] = useState(false)
-  const start = useRef<number | null>(null)
+  const [settled, setSettled] = useState(false)
+  const start = useRef<{ x: number; y: number } | null>(null)
   const pulled = useRef(0)
   const busyRef = useRef(false)
   const refresh = useRef(onRefresh)
   refresh.current = onRefresh
   useEffect(() => {
     if (!standalone()) return
+    let hide: ReturnType<typeof setTimeout> | undefined
+    const reset = () => {
+      start.current = null
+      pulled.current = 0
+      setPull(0)
+    }
     const down = (e: TouchEvent) => {
-      // Not while a dialog is open: its own scroll must never reload the page behind it.
-      start.current = window.scrollY <= 0 && !busyRef.current && !document.querySelector('dialog[open]') ? e.touches[0]!.clientY : null
+      // Not while a dialog is open: its own scroll must never reload the page behind it. One finger only.
+      const t = e.touches[0]!
+      start.current = e.touches.length === 1 && window.scrollY <= 0 && !busyRef.current && !document.querySelector('dialog[open]') ? { x: t.clientX, y: t.clientY } : null
     }
     const move = (e: TouchEvent) => {
       if (start.current === null) return
-      // The gesture scrolled the page first: it is a scroll, not a pull.
-      if (window.scrollY > 0) {
-        start.current = null
-        pulled.current = 0
-        setPull(0)
-        return
-      }
-      const dy = e.touches[0]!.clientY - start.current
-      // Resistance: the indicator moves less than the finger, and never past twice the trigger.
-      pulled.current = dy > 0 ? Math.min(PULL_AT * 2, dy * 0.55) : 0
+      const t = e.touches[0]!
+      const dy = t.clientY - start.current.y
+      const dx = t.clientX - start.current.x
+      // The page scrolled first, a second finger, or a sideways swipe: not a pull.
+      if (window.scrollY > 0 || e.touches.length > 1 || (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 10)) return reset()
+      pulled.current = dy > SLACK ? Math.min(PULL_AT * 1.6, (dy - SLACK) * RESIST) : 0
       setPull(pulled.current)
     }
     const up = () => {
       if (start.current === null) return
-      start.current = null
-      if (pulled.current >= PULL_AT) {
-        busyRef.current = true
-        setBusy(true)
-        navigator.vibrate?.(8)
-        void refresh.current().catch(() => undefined).finally(() => {
+      const fire = pulled.current >= PULL_AT
+      reset()
+      if (!fire) return
+      busyRef.current = true
+      setBusy(true)
+      void refresh
+        .current()
+        .catch(() => true)
+        .then((read) => {
+          if (!read) {
+            setSettled(true)
+            clearTimeout(hide)
+            hide = setTimeout(() => setSettled(false), 1200)
+          }
+        })
+        .finally(() => {
           busyRef.current = false
           setBusy(false)
         })
-      }
-      pulled.current = 0
-      setPull(0)
     }
     window.addEventListener('touchstart', down, { passive: true })
     window.addEventListener('touchmove', move, { passive: true })
     window.addEventListener('touchend', up)
-    window.addEventListener('touchcancel', up)
+    window.addEventListener('touchcancel', reset)
     return () => {
+      clearTimeout(hide)
       window.removeEventListener('touchstart', down)
       window.removeEventListener('touchmove', move)
       window.removeEventListener('touchend', up)
-      window.removeEventListener('touchcancel', up)
+      window.removeEventListener('touchcancel', reset)
     }
   }, [])
-  const shown = busy ? PULL_AT : pull
+  const shown = busy || settled ? PULL_AT : pull
   if (!shown) return null
   const ready = pull >= PULL_AT
   return (
-    <div className={`ptr${busy ? ' is-busy' : ''}${ready ? ' is-ready' : ''}`} style={{ transform: `translate(-50%, ${shown - 44}px)` }} role="status" aria-label={busy ? 'Refreshing' : 'Pull to refresh'}>
-      <img src="/mark-two-stones.png" width={22} height={22} alt="" style={busy ? undefined : { transform: `rotate(${(pull / PULL_AT) * 300}deg)` }} />
+    <div className={`ptr${busy ? ' is-busy' : ''}${ready || settled ? ' is-ready' : ''}`} style={{ transform: `translate(-50%, ${shown - 44}px)`, opacity: busy || settled ? 1 : Math.min(1, pull / (PULL_AT * 0.6)) }} role="status" aria-label={busy ? 'Refreshing' : settled ? 'Up to date' : 'Pull to refresh'}>
+      <img src="/mark-two-stones.png" width={22} height={22} alt="" style={busy || settled ? undefined : { transform: `rotate(${(pull / PULL_AT) * 300}deg)` }} />
+      {settled ? <span className="ptr-note">Up to date</span> : null}
     </div>
   )
 }

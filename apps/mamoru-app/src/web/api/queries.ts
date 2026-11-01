@@ -66,24 +66,30 @@ export function useApy() {
 }
 
 /**
- * otto/mamoru#135: the next funding poll. `fastMs` while the engine is mid-entry (`progress`, or `engine.placing`
- * between steps) or the caller says something of the account's own is in flight (an owner op just submitted, an
- * entry starting); `intervalMs` otherwise. Pure so the cadence can be checked without a running query.
+ * otto/mamoru#135: the next funding poll. `fastMs` while the caller says something of the owner's own is in flight
+ * (an op just submitted, an entry starting): the owner is watching for it. `engineMs` while the engine is mid-entry on
+ * its own (`progress`, or `engine.placing` between steps), #255: an entry takes minutes, so a reading every 10 s
+ * follows it without polling at the owner's pace. `intervalMs` otherwise. Pure so the cadence can be checked without
+ * a running query.
  */
-export function fundingInterval(data: Pick<FundingView, 'progress' | 'engine'> | undefined, inFlight: boolean, intervalMs: number, fastMs = 4_000): number {
-  const fast = inFlight || !!data?.progress || data?.engine?.placing === true
-  return fast ? Math.min(fastMs, intervalMs) : intervalMs
+export function fundingInterval(data: Pick<FundingView, 'progress' | 'engine'> | undefined, inFlight: boolean, intervalMs: number, fastMs = 4_000, engineMs = 10_000): number {
+  if (inFlight) return Math.min(fastMs, intervalMs)
+  if (data?.progress || data?.engine?.placing === true) return Math.min(engineMs, intervalMs)
+  return intervalMs
 }
 
+/** #255: the funding poll when nothing is moving, in step with the page's other 60 s reads. */
+export const FUNDING_IDLE_MS = 60_000
+
 /**
- * What the Safe holds now. 30 s by default; 4 s while `inFlight` (an owner op the caller is watching, or an
- * entry it already knows is starting) or while the engine reports progress on its own. The add-money screen
+ * What the Safe holds now. FUNDING_IDLE_MS by default; 4 s while `inFlight` (an owner op the caller is watching, or an
+ * entry it already knows is starting), 10 s while the engine reports progress on its own. The add-money screen
  * passes a 4 s `intervalMs` outright and `fresh` too (otto/mamoru#135): it is open only to watch a deposit
  * land, which moves nothing of the account, so without `fresh` those polls would answer from the operator's
  * 15-60 s cache; with it each gets a read at most 2 s old, under the 4 s gap, so none is wasted. Paused while the tab is hidden (react-query's default
  * `refetchIntervalInBackground: false`).
  */
-export function useFunding(accountKey: string | undefined, enabled: boolean, intervalMs = 30_000, inFlight = false, fresh = false) {
+export function useFunding(accountKey: string | undefined, enabled: boolean, intervalMs = FUNDING_IDLE_MS, inFlight = false, fresh = false) {
   const api = useApi()
   return useQuery({
     queryKey: queryKeys.funding(accountKey ?? ''),

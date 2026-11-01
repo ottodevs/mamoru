@@ -19,12 +19,20 @@ describe('fundingInterval', () => {
     expect(fundingInterval(undefined, true, 30_000)).toBe(4_000)
   })
 
-  test('the engine reports progress on its own: the fast interval, with nothing in flight', () => {
-    expect(fundingInterval({ progress: { step: 'opening', since: 'now' }, engine: null }, false, 30_000)).toBe(4_000)
+  test('the engine reports progress on its own (#255): the engine interval, with nothing in flight', () => {
+    expect(fundingInterval({ progress: { step: 'opening', since: 'now' }, engine: null }, false, 60_000)).toBe(10_000)
   })
 
-  test('the engine is placing between steps, no progress line yet: still the fast interval', () => {
-    expect(fundingInterval({ progress: null, engine: { placing: true, nextReviewAt: null } }, false, 30_000)).toBe(4_000)
+  test('the engine is placing between steps, no progress line yet: still the engine interval', () => {
+    expect(fundingInterval({ progress: null, engine: { placing: true, nextReviewAt: null } }, false, 60_000)).toBe(10_000)
+  })
+
+  test('an owner op in flight while the engine moves: the owner pace wins', () => {
+    expect(fundingInterval({ progress: { step: 'opening', since: 'now' }, engine: null }, true, 60_000)).toBe(4_000)
+  })
+
+  test('the engine interval never exceeds the slow one', () => {
+    expect(fundingInterval({ progress: null, engine: { placing: true, nextReviewAt: null } }, false, 4_000)).toBe(4_000)
   })
 
   test('the fast interval never exceeds the slow one (add-money passes a 4 s intervalMs outright)', () => {

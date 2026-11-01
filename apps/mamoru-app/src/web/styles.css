@@ -1632,39 +1632,48 @@
   }
 }
 
-/* The live pill by the brand: ring fills until the next reading, core breathes; tap reads now. */
+/* The live mark by the brand (#255: a ring alone, no pill): it fills until the next reading, its core breathes; a tap
+   reads now. Words only when there is something to say: "Offline", or a refused refresh's "Up to date". */
 .live {
   all: unset;
   box-sizing: border-box;
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 0.45rem;
+  min-width: 2.25rem;
   min-height: 2.25rem;
-  padding: 0.35rem 0.75rem 0.35rem 0.55rem;
-  border: 1px solid var(--color-wash);
+  padding: 0 0.5rem;
+  margin-right: -0.5rem;
   border-radius: 999px;
   font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-size: 0.66rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--color-stone);
   cursor: pointer;
   white-space: nowrap;
   -webkit-tap-highlight-color: transparent;
-  transition:
-    border-color 220ms ease-out,
-    transform 220ms var(--ease-out);
+  transition: transform 220ms var(--ease-out);
 }
-.live:hover {
-  border-color: var(--color-ink);
-  color: var(--color-ink);
+.live:hover .live-track {
+  stroke: var(--color-stone);
 }
 .live:active {
-  transform: scale(0.96);
+  transform: scale(0.92);
 }
 .live:focus-visible {
   outline: 2px solid var(--color-emerald);
   outline-offset: 2px;
+}
+.live-label {
+  animation: live-note 260ms var(--ease-out) both;
+}
+@keyframes live-note {
+  from {
+    opacity: 0;
+    transform: translateX(4px);
+  }
 }
 .live-ring {
   transform: rotate(-90deg);
@@ -1697,7 +1706,6 @@
 }
 .live.is-down {
   color: var(--color-alert-ink);
-  border-color: color-mix(in srgb, var(--color-alert) 45%, var(--color-wash));
 }
 .live.is-down .live-fill {
   display: none;
@@ -1753,6 +1761,20 @@
 }
 .ptr.is-busy img {
   animation: spin-full 800ms linear infinite;
+}
+.ptr-note {
+  position: absolute;
+  top: calc(100% + 0.45rem);
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: var(--color-paper);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--color-stone);
+  animation: live-note 260ms var(--ease-out) both;
 }
 @keyframes spin-full {
   to {
@@ -1887,6 +1909,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   .live-core,
+  .live-label,
+  .ptr-note,
   .live.is-fetching .live-ring,
   .ptr.is-busy img {
     animation: none !important;

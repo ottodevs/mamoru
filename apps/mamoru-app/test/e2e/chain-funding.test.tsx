@@ -54,9 +54,9 @@ describe('Home on a balance read from chain', () => {
     const { text, html } = await home(fromChain)
     expect(text).toContain('23.00')
     expect(text).toContain('Read from chain')
-    // the pill does not call it Live, and the engine is promised nothing
-    expect(text).toContain('On-chain')
-    expect(text).not.toContain('Live ·')
+    // the live mark does not call it Live (#255: it says so in its label, no words on the page), and the engine is promised nothing
+    expect(html).toContain('aria-label="Read on-chain, updated')
+    expect(html).not.toContain('aria-label="Live,')
     expect(text).toContain('Engine unreachable: balance read from chain, actions paused.')
     expect(text).toContain('positions Mamoru recorded 40 min ago')
     // live, not a "past" reading

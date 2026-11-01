@@ -2,7 +2,7 @@ import type { ApyView, FundingView, Hex0x, OpView, OverCap, PriceDivergenceWarni
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
-import { fundingInterval, queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useSession, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
+import { FUNDING_IDLE_MS, fundingInterval, queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useSession, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { PriceDivergenceNotice } from '../components/price-divergence-notice.tsx'
 import { TokenMark } from '../components/token-mark.tsx'
@@ -25,6 +25,7 @@ import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { FeedbackDialog, feedbackCopy } from '../components/feedback-dialog.tsx'
 import { HowItWorks, howCopy } from '../components/how-it-works.tsx'
 import { Chevron, Fold, LiveSync, PullToRefresh, Spark, TweenPct, TweenUsd } from '../components/motion.tsx'
+import { useThrottledRefresh } from '../lib/refresh-throttle.ts'
 import { isMultichainTarget, monadCopy, MonadConsentDialog, splitRows } from '../components/monad-consent.tsx'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
 
@@ -1170,7 +1171,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // An owner prepare that was never signed is not in flight; only armed or sent ops are. Keeps funding polling
   // fast (otto/mamoru#135) while one is on its way: an activation, renewal, transfer or stop.
   const inFlight = opList.some((o) => !TERMINAL.has(o.state) && !(o.state === 'proposed' && o.code !== 'ARMED' && !o.txHash))
-  const funding = useFunding(accountKey, true, 30_000, inFlight)
+  const funding = useFunding(accountKey, true, FUNDING_IDLE_MS, inFlight)
   // otto/mamoru#135: the poll can be 15-60 s behind a deposit. Opening a dialog that shows an amount asks for a
   // read at most 2 s old; nothing waits on it, and nothing is decided on it (prepare reads the chain).
   const refreshFunding = useFreshFunding(accountKey)
@@ -1303,6 +1304,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       ]),
     [refreshFunding, qc, accountKey],
   )
+  // #255: through the throttle; a refused one reads nothing and says "Up to date".
+  const manual = useThrottledRefresh(refreshAll, funding.dataUpdatedAt)
   const kit = useMutation({
     mutationFn: async () => {
       // The kit is built from stored account data, not the operator (review round 3 of #133): any read of the
@@ -1316,10 +1319,10 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   return (
     <main className="page home enter">
       <title>Mamoru</title>
-      <PullToRefresh onRefresh={refreshAll} />
+      <PullToRefresh onRefresh={() => manual.run({ note: false })} />
       <header className="mb-7 flex items-center justify-between gap-3">
         <Brand />
-        <LiveSync chain={fromChain} updatedAt={funding.dataUpdatedAt} intervalMs={fundingInterval(funding.data, inFlight, 30_000)} fetching={funding.isFetching} down={liveDown} onRefresh={() => void refreshAll().catch(() => undefined)} />
+        <LiveSync chain={fromChain} updatedAt={funding.dataUpdatedAt} intervalMs={fundingInterval(funding.data, inFlight, FUNDING_IDLE_MS)} fetching={funding.isFetching} down={liveDown} note={manual.note} onRefresh={() => void manual.run()} />
       </header>
       <Balance
         s={s}
