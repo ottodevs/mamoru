@@ -37,49 +37,68 @@ export type Entry = { type: 'op'; op: OpView } | { type: 'move'; move: Move }
 /** Steps of a move that follow its close: later than this, a swap or an open in the pool is a different decision. */
 export const MOVE_WINDOW_MS = 6 * 60 * 60 * 1000
 
+/** Closes this close together in one pool are siblings (two positions in the pool moved by one review), not a takeover. */
+export const SIBLING_CLOSE_MS = 30 * 60 * 1000
+
+/**
+ * Chain order as a total order (a mixed block/time comparator is not one): rows stored before `block` existed come
+ * first by time, then rows on chain by block, then rows not included yet by time. `updatedAt` is rewritten on every
+ * state change, so it only orders rows that have no block.
+ */
+function chainOrder(a: OpView, b: OpView): number {
+  const tier = (o: OpView) => (o.block !== undefined ? 1 : o.state === 'confirmed' || o.state === 'failed' ? 0 : 2)
+  const ta = tier(a)
+  const tb = tier(b)
+  if (ta !== tb) return ta - tb
+  if (ta === 1 && a.block !== b.block) return a.block! - b.block!
+  return a.updatedAt.localeCompare(b.updatedAt)
+}
+
 /**
  * Folds every range move into one entry. A move starts at a `rerange` and takes, in the same pool and within
- * MOVE_WINDOW_MS, the swaps that follow it and the open (mint or add) that ends it. Input in any order, output
- * newest first like historyOps.
+ * MOVE_WINDOW_MS, the swaps that follow it and the open (mint or add) that ends it. Two moves open in one pool take
+ * steps oldest first. The ops are one account's on one chain (one sleeve's GET /ops), so the pool name is the key.
+ * Input in any order, output newest first like historyOps.
  */
 export function historyEntries(ops: readonly OpView[], now: number = Date.now()): Entry[] {
-  // Chain order first (block), then time: `updatedAt` is rewritten on every state change and can reorder steps.
-  const asc = [...ops].sort((a, b) => (a.block !== undefined && b.block !== undefined && a.block !== b.block ? a.block - b.block : a.updatedAt.localeCompare(b.updatedAt)))
-  const open = new Map<string, Move>()
+  const asc = [...ops].sort(chainOrder)
+  const open = new Map<string, Move[]>()
   const taken = new Set<string>()
   const moves: Move[] = []
-  const stall = (m: Move | undefined) => {
-    if (m && !m.open) m.stalled = true
-  }
+  const later = (a: string, b: string) => (a.localeCompare(b) >= 0 ? a : b)
   for (const op of asc) {
     const step = stepOf(op)
     // Rows stored before pools were tagged (#131) cannot be told apart: they stay single rows.
     if (!op.pool) continue
     const key = op.pool
+    const queue = open.get(key) ?? []
     if (step === 'rerange') {
-      stall(open.get(key))
+      // A newer close takes over a move that never reopened; a sibling close of the same review waits its turn.
+      const kept = queue.filter((m) => {
+        if (Date.parse(op.updatedAt) - Date.parse(m.close.updatedAt) <= SIBLING_CLOSE_MS) return true
+        m.stalled = true
+        return false
+      })
       const m: Move = { id: op.opId, pool: op.pool, ops: [op], close: op, open: null, why: op.why, updatedAt: op.updatedAt }
       moves.push(m)
       taken.add(op.opId)
-      open.set(key, m)
+      open.set(key, [...kept, m])
       continue
     }
-    const m = open.get(key)
-    if (!m || (step !== 'enter_swap' && step !== 'enter_mint' && step !== 'increase_liquidity')) continue
-    if (Date.parse(op.updatedAt) - Date.parse(m.close.updatedAt) > MOVE_WINDOW_MS) {
-      stall(m)
-      open.delete(key)
-      continue
-    }
+    if (step !== 'enter_swap' && step !== 'enter_mint' && step !== 'increase_liquidity') continue
+    // Past the window a move is over: its later steps belong to another decision.
+    while (queue.length && Date.parse(op.updatedAt) - Date.parse(queue[0]!.close.updatedAt) > MOVE_WINDOW_MS) queue.shift()!.stalled = true
+    const m = queue[0]
+    if (!m) continue
     m.ops.push(op)
-    m.updatedAt = op.updatedAt
+    m.updatedAt = later(m.updatedAt, op.updatedAt)
     taken.add(op.opId)
     if (step !== 'enter_swap') {
       m.open = op
-      open.delete(key)
+      queue.shift()
     }
   }
-  for (const m of open.values()) if (now - Date.parse(m.close.updatedAt) > MOVE_WINDOW_MS) stall(m)
+  for (const queue of open.values()) for (const m of queue) if (!m.open && now - Date.parse(m.close.updatedAt) > MOVE_WINDOW_MS) m.stalled = true
   const entries: Entry[] = [...ops.filter((o) => !taken.has(o.opId)).map((op): Entry => ({ type: 'op', op })), ...moves.map((move): Entry => ({ type: 'move', move }))]
   const at = (e: Entry) => (e.type === 'op' ? e.op.updatedAt : e.move.updatedAt)
   return entries.sort((a, b) => at(b).localeCompare(at(a)))
@@ -154,10 +173,11 @@ export function small(raw: bigint): string {
   return `0.${(raw / 1_000n).toString().padStart(3, '0')}`
 }
 
-/** Fees the closing op collected, in USDC, when every fee of it is priced. */
+/** Fees the closing op collected, in USDC, when it has fees and every one is priced. */
 export function feesOf(op: OpView): bigint | null {
   const fees = op.facts?.fees
-  if (!fees) return null
+  // No fee read for this op (or none collected): say nothing rather than "0.000 USDC earned".
+  if (!fees?.length) return null
   if (fees.some((f) => f.usdc === undefined)) return null
   return fees.reduce((s, f) => s + BigInt(f.usdc!), 0n)
 }

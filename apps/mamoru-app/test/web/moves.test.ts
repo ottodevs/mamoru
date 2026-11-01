@@ -46,8 +46,8 @@ describe('historyEntries (#219)', () => {
   test('no open within the window, or a newer close in the pool: the move is stalled, not pending forever', () => {
     const late = historyEntries([close, swap], Date.parse(close.updatedAt) + 7 * 3_600_000)
     expect(moveState((late[0] as { type: 'move'; move: Move }).move)).toBe('stalled')
-    const again = { ...close, opId: 'eng-1-1-z-rerange', updatedAt: '2026-10-26T14:05:00.000Z' }
-    const both = historyEntries([close, again, mint], Date.parse(again.updatedAt) + 60_000).filter((e) => e.type === 'move').map((e) => (e as { type: 'move'; move: Move }).move)
+    const again = { ...close, opId: 'eng-1-1-z-rerange', updatedAt: '2026-10-26T14:45:00.000Z' }
+    const both = historyEntries([close, again, { ...mint, updatedAt: '2026-10-26T14:50:00.000Z' }], Date.parse(again.updatedAt) + 60_000).filter((e) => e.type === 'move').map((e) => (e as { type: 'move'; move: Move }).move)
     expect(both.map((m) => [m.id, moveState(m)])).toEqual([[again.opId, 'done'], [close.opId, 'stalled']])
     expect(moveLine(both[1]!)).toBe('Closed your USDC/USDT range, not reopened yet')
   })
@@ -56,6 +56,37 @@ describe('historyEntries (#219)', () => {
     const entries = historyEntries([{ ...close, block: 1, updatedAt: '2026-10-26T14:30:00.000Z' }, { ...swap, block: 2 }, { ...mint, block: 3, updatedAt: '2026-10-26T14:31:00.000Z' }])
     expect(entries).toHaveLength(1)
     expect((entries[0] as { type: 'move'; move: Move }).move.ops.map((o) => stepOf(o))).toEqual(['rerange', 'enter_swap', 'enter_mint'])
+  })
+
+  test('a swap not on chain yet still follows its confirmed close (review r1: mixed block/time order)', () => {
+    const pending = { ...swap, state: 'submitted' as const, updatedAt: '2026-10-26T14:17:00.000Z' }
+    const entries = historyEntries([{ ...close, block: 100, updatedAt: '2026-10-26T14:30:00.000Z' }, pending])
+    expect(entries).toHaveLength(1)
+    const m = (entries[0] as { type: 'move'; move: Move }).move
+    expect(m.ops.map((o) => stepOf(o))).toEqual(['rerange', 'enter_swap'])
+    // The entry sorts by its newest step, never back to an older one.
+    expect(m.updatedAt).toBe('2026-10-26T14:30:00.000Z')
+  })
+
+  test('two closes in one pool from the same review take their opens oldest first (review r1)', () => {
+    const closeB = eng('a2', 'rerange', '2026-10-26T14:02:00.000Z', { why: 'out' })
+    const mintB = eng('c2', 'enter_mint', '2026-10-26T14:19:00.000Z', { tickLower: 12, tickUpper: 53 })
+    const entries = historyEntries([close, closeB, swap, mint, mintB])
+    const moves = entries.filter((e): e is { type: 'move'; move: Move } => e.type === 'move').map((e) => e.move)
+    expect(moves).toHaveLength(2)
+    const a = moves.find((m) => m.close === close)!
+    const b = moves.find((m) => m.close === closeB)!
+    expect(a.ops).toEqual([close, swap, mint])
+    expect(b.ops).toEqual([closeB, mintB])
+    expect(moveState(a)).toBe('done')
+    expect(moveState(b)).toBe('done')
+  })
+
+  test('a close long after one that never reopened stalls it', () => {
+    const later = eng('e', 'rerange', '2026-10-26T15:00:00.000Z', { why: 'edge' })
+    const entries = historyEntries([close, later], Date.parse('2026-10-26T15:05:00.000Z'))
+    const first = entries.map((e) => (e as { type: 'move'; move: Move }).move).find((m) => m.close === close)!
+    expect(moveState(first)).toBe('stalled')
   })
 
   test('pool-less rows (before #131) are never grouped', () => {
@@ -93,6 +124,8 @@ describe('move detail (#219)', () => {
     expect(gasLabel({ usdc: 1_200_000n, wei: 1n, count: 1 })).toBe('1.20 USDC')
     expect(gasOf([{ ...owner }])).toBeNull()
     expect(feesOf(close)).toBe(12_000n)
+    // No fee read is not "earned 0".
+    expect(feesOf(swap)).toBeNull()
   })
 
   test('an unpriced step shows gas in ETH', () => {
