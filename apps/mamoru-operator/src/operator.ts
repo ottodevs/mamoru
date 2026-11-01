@@ -58,6 +58,7 @@ import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
 import { DEFAULT_SPONSOR, activationRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, RemoteSafeRecord, StateStore, StoredGrant, StoredOp } from './state.ts'
+import { poolDepthFor, type PoolDepthCache } from './pool-depth.ts'
 import { livePoolStats, type PoolStatsCache } from './pool-stats.ts'
 
 /** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
@@ -740,6 +741,8 @@ export class Operator {
   private readonly poolCache = poolStateCache()
   /** otto/mamoru#101 (shadow): hourly off-chain pool stats (TVL change, volume); only read for a policy that lists packaging:tvl. */
   private readonly poolStats: PoolStatsCache | undefined
+  /** otto/mamoru#101 (shadow): hourly exit-direction impact curve of the Base pools (QuoterV2 eth_calls, memory only); only read for a policy that lists packaging:eel. */
+  private readonly poolDepth: PoolDepthCache | undefined
   /**
    * #172: guard history of lazy accounts, read once per pool per minute for every engine (see `SharedGuardReads`),
    * with the fee history and fallback series the cost test needs, restored from and saved to `cfg.guardReadsState`.
@@ -764,6 +767,8 @@ export class Operator {
     this.guardReads = new SharedGuardReads({ fees: restored?.fees, series: restored?.series, onUpdate: saved ? (s) => saved.update(s) : undefined })
     // The sources know only the Base pools: another chain gets no stats (no fetches, no "unread" lines for its pools).
     this.poolStats = cfg.registry?.chainId === baseRegistry.chainId ? livePoolStats(cfg.poolStatsStateFile) : undefined
+    // Base only, like the stats: the curve reads the Base pools and their QuoterV2. Monad pools are not in the ladder's list.
+    this.poolDepth = poolDepthFor(cfg.registry, client, { over: () => cfg.rpcBudget?.over() ?? false })
   }
 
   /** GET /metrics: accounts known / active / armed. */
@@ -5287,6 +5292,7 @@ export class Operator {
         intents: () => ({ paused: this.stopInFlight(acc), exitRequested: false }),
         peerPositions: () => this.peerPositionsOf(acc.accountKey),
         ...(this.poolStats ? { poolStats: () => this.poolStats!.get() } : {}),
+        ...(this.poolDepth ? { poolDepth: () => this.poolDepth!.get() } : {}),
         onEntering: (pool) => this.markEntering(acc, pool),
         // otto/mamoru#212: new money is placed only within the cap, counted across chains.
         cap: () => this.engineCap(acc),

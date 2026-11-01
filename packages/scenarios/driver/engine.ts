@@ -267,6 +267,11 @@ export type EngineConfig = {
    * only for a policy that lists `packaging:tvl`. Must not throw or wait: the operator answers from its cache.
    */
   poolStats?: () => Observation['poolStats']
+  /**
+   * otto/mamoru#101 phase 1c (shadow): the latest exit-direction impact curves, by pool name (`Observation.poolDepth`). Used
+   * only for a policy that lists `packaging:eel`. Must not throw or wait: the operator answers from its cache.
+   */
+  poolDepth?: () => Observation['poolDepth']
 }
 
 /** Live op states whose signed bytes may still land or have landed without being settled here (Engine.carried). */
@@ -312,12 +317,28 @@ export type EngineHooks = {
 
 /** #101: a stats callback that throws is the same as no stats; a review never fails on shadow data. */
 function safePoolStats(f: (() => Observation['poolStats']) | undefined): Observation['poolStats'] {
+  return safeShadow(f)
+}
+
+/** #101: same for the depth curves. */
+export function safePoolDepth(f: (() => Observation['poolDepth']) | undefined): Observation['poolDepth'] {
+  return safeShadow(f)
+}
+
+function safeShadow<T extends object>(f: (() => T | undefined) | undefined): T | undefined {
   try {
     const v = f?.()
     return v && Object.keys(v).length ? v : undefined
   } catch {
     return undefined
   }
+}
+
+/** #101: the shadow inputs one review reads, each only for the policy that lists its gate (the callbacks are not called otherwise). */
+export function shadowInputsOf(policy: Pick<EngineConfig['policy'], 'shadow'>, cfg: Pick<EngineConfig, 'poolStats' | 'poolDepth'>): Pick<Observation, 'poolStats' | 'poolDepth'> {
+  const poolStats = policy.shadow.includes('packaging:tvl') ? safePoolStats(cfg.poolStats) : undefined
+  const poolDepth = policy.shadow.includes('packaging:eel') ? safePoolDepth(cfg.poolDepth) : undefined
+  return { ...(poolStats ? { poolStats } : {}), ...(poolDepth ? { poolDepth } : {}) }
 }
 
 /** The block of the latest operation that reached the chain: no review may observe before it. */
@@ -638,8 +659,7 @@ export class Engine {
     const cap = this.cfg.cap?.()
     const weekAgo = obs.block.timestamp - 7n * 86_400n
     const recent = this.reranges.filter((r) => r.at > weekAgo)
-    const poolStats = this.cfg.policy.shadow.includes('packaging:tvl') ? safePoolStats(this.cfg.poolStats) : undefined
-    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...(poolStats ? { poolStats } : {}), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}) }
+    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...shadowInputsOf(this.cfg.policy, this.cfg), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}) }
     this.outOfRange = outOfRangeSinceOf(this.outOfRange, obs)
     if (this.cfg.policy.range.lazy) obs = withOutOfRangeSince(obs, this.outOfRange)
     this.lastObservation = obs

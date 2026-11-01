@@ -256,6 +256,12 @@ export const REASON_CODES = [
   'RISK_POOL_TVL_DROP',
   'RISK_POOL_VOLUME_LOW',
   'RISK_POOL_STATS_UNREAD',
+  // otto/mamoru#101 phase 1c (shadow): Packaging's exit-direction depth: EEL under the bucket minimum (B), quoted exit slippage (E),
+  // position size over the EEL ratio, and an unreadable depth curve.
+  'RISK_POOL_EEL_LOW',
+  'RISK_EXIT_SLIPPAGE',
+  'RISK_POSITION_RATIO',
+  'RISK_POOL_DEPTH_UNREAD',
 ] as const
 
 export type ReasonCode = (typeof REASON_CODES)[number]

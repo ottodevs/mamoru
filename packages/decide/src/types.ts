@@ -59,6 +59,12 @@ export type Observation = {
    */
   poolStats?: Record<string, PoolStatsObs>
   /**
+   * otto/mamoru#101 phase 1c (shadow only): the exit-direction price impact curve by pool name, supplied by the operator
+   * for a policy that lists `packaging:eel`. Read only by `poolDepthShadowRisk`, which writes to Decision.shadowRisk
+   * (outside the premise hash); no value here can move premiseHash or decisionId. Absent: not supplied.
+   */
+  poolDepth?: Record<string, PoolDepthObs>
+  /**
    * otto/mamoru#184 (Sol review): pools where another account has an entry decided whose liquidity no observation
    * shows yet. Depth gives no share room in them until that account observes again. Absent: none.
    */
@@ -209,6 +215,19 @@ export type PoolStatsObs = {
   volume7dUsd: number | null
   volumeLastDayUsd: number | null
   volume28dAvgUsd: number | null
+  asOf: number
+}
+
+/**
+ * otto/mamoru#101 phase 1c (shadow): the impact of selling the pool's non-USDC token for USDC, by USD size. `impactBps[i]`
+ * is the price impact at `sizesUsd[i]` against the pool's mid price, after the pool fee (so it excludes `feeBps`); null:
+ * QuoterV2 reverted or returned nothing there, or the curve is not fresh (a null stops the ladder: larger sizes are null
+ * too). `asOf` is the unix second of the read (0: never read). Never hashed (see Observation.poolDepth).
+ */
+export type PoolDepthObs = {
+  sizesUsd: number[]
+  impactBps: (number | null)[]
+  feeBps: number
   asOf: number
 }
 

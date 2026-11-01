@@ -407,9 +407,16 @@ changes, so no `policyHash` changes. Nothing acts: a row says what would have ex
 | B. Activity, stables only | volume of the last full day under 30% of the 28 day daily average | `RISK_POOL_VOLUME_LOW` | `28d` |
 | C. Unreadable | a figure a rule needs is missing, stale or not a number; the rules that can be computed still are | `RISK_POOL_STATS_UNREAD` | none |
 | PR1 unreadable | on-chain pool balance not readable | `RISK_POOL_TVL_UNREAD` | none |
+| B. EEL (gate `packaging:eel`) | EEL under the bucket minimum (USD): stables 600,000, btc-usdc 350,000, risk 75,000. EEL = largest sell size whose price impact is within the bucket limit: stables 200 bps, btc-usdc 200, risk 500 | `RISK_POOL_EEL_LOW` | none |
+| E. Exit slippage | quoted slippage (impact at the size of the position's non-USDC leg, plus the pool fee) at or over: stables 300 bps, btc-usdc 300, risk 600; a size past the last quoted point counts as over | `RISK_EXIT_SLIPPAGE` | none |
+| E. Position ratio | account value in the pool (both legs) over EEL above: stables 1000 bps, btc-usdc 1000, risk 500 | `RISK_POSITION_RATIO` | none |
+| Depth unreadable | no curve, an all-null or malformed one, or older than 6 h; no depth rule is evaluated for that pool | `RISK_POOL_DEPTH_UNREAD` | none |
 
 Units in an entry: `RISK_POOL_TVL_DROP` carries basis points (`threshold` -1200, `metric` the measured change);
-`RISK_POOL_VOLUME_LOW` carries raw savings units (USDC, 6 decimals).
+`RISK_POOL_VOLUME_LOW` carries raw savings units (USDC, 6 decimals). `RISK_POOL_EEL_LOW` carries raw savings units
+(`threshold` the bucket minimum, `metric` the EEL); `RISK_EXIT_SLIPPAGE` and `RISK_POSITION_RATIO` carry basis points
+(no `metric` on a size past the ladder). Bucket mapping of Brais's names: stables = Stables, btc-usdc = Bluechip, risk =
+Mercenary. Only pools that pair USDC, only USDC-savings policies.
 
 Data (operator, not `decide`): GeckoTerminal `/pools/<address>` (`reserve_in_usd`, current TVL) and
 `/pools/<address>/ohlcv/day?limit=29` (complete days only; the day in progress is dropped; a missing day inside a window
@@ -419,6 +426,19 @@ samples of that current TVL, kept 31 days in `stateDir/pool-stats.json`; until t
 the 30d rule is unread until the own series reaches 30 days. Refreshed at most hourly per pool, no API keys; each source
 keeps its last good value for 6 h, then its fields are null and the rule reports `RISK_POOL_STATS_UNREAD`. Reaches `decide` as
 `Observation.poolStats`, read only by the shadow rule.
+
+Depth data (operator): per live pool that pairs USDC, the price impact of selling the pool's non-USDC token for USDC (the
+exit direction) at 1k, 3k, 10k, 30k, 100k, 300k, 1M, 3M and 10M USD. Each size is converted to the sell token at the pool's
+slot0 mid price and quoted with QuoterV2 `quoteExactInputSingle` (eth_call at one block); `impactBps = round((1 - out /
+(in at mid x (1 - fee))) x 10,000)`, at least 0, so the pool fee is not in it (the exit slippage rule adds it). A revert or
+a zero output is null, and the ladder stops there (larger sizes are null). EEL interpolates linearly in size between ladder
+points, with impact 0 at size 0; every point within the limit and the ladder ended by a null gives the last good size, and
+all nine within gives 10M (">=10M"). The position's exit size is the USD value of its non-USDC leg at slot0; the worst
+position of the account in the pool counts for slippage, and the ratio uses its whole value in the pool (principal, no
+uncollected fees). Refreshed hourly in the background (one block read, then one slot0 and at most nine quotes per pool, in
+sequence, each with a timeout; none while the keyed RPC budget is spent), kept in memory only, null after 6 h. A transport
+failure is not depth: the curve is not overwritten and the pool is retried after 5 min. Base operator only; Monad pools
+are not read. Reaches `decide` as `Observation.poolDepth`, read only by the shadow rules.
 
 ## Decisions for Ot
 
