@@ -428,15 +428,18 @@ try {
       const gas = engineGas((await base.client.getBlock()).baseFeePerGas ?? 0n, V4_GAS_CAPS)!
       let op = draftUserOp(ctx.address, nonce, executeCallData(calls), gas)
       op = { ...op, signature: useModeSignature(g.permissionId, await sessionKeySignature(privateKeyToAccount(acc.sessionKey!), userOpHash(op, 8453))) }
-      return base.client.call({ account: bo.relayer.address, to: address('EntryPointV07', baseRegistry), data: handleOpsData([op], bo.relayer.address) }).then(
-        () => 'included',
-        (e: Error) => {
-          const data = /0x(220266b6|65c8fd4d)[0-9a-fA-F]*/.exec(`${e.message} ${JSON.stringify((e as { cause?: unknown }).cause ?? '')}`)?.[0]
-          if (!data) return `reverted: ${e.message.slice(0, 200)}`
-          const d = decodeErrorResult({ abi: failedOp, data: data as Hex })
-          return `${d.errorName}: ${d.args[1]}`
-        },
-      )
+      // Raw eth_call (r2 note 3): viem's error may carry only the selector; the node's JSON-RPC error has the full data.
+      const res = await realFetch(B.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ from: bo.relayer.address, to: address('EntryPointV07', baseRegistry), data: handleOpsData([op], bo.relayer.address) }, 'latest'] }),
+      })
+      const j = (await res.json()) as { result?: Hex; error?: { message?: string; data?: unknown } }
+      if (!j.error) return 'included'
+      const data = typeof j.error.data === 'string' ? (j.error.data as Hex) : undefined
+      if (!data || !/^0x(220266b6|65c8fd4d)/.test(data)) return `reverted: ${j.error.message ?? ''} ${String(data ?? '').slice(0, 80)}`
+      const d = decodeErrorResult({ abi: failedOp, data })
+      return `${d.errorName}: ${d.args[1]}`
     }
     const control = await simulate(remote)
     check(control === 'included', 'Base: the same bridge-out userOp to the remote Safe validates and executes (control)', control)
