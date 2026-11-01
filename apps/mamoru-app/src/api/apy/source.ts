@@ -225,25 +225,33 @@ export const OPERATOR_MAX_AGE_S = 7 * 3600
  * operator itself refreshes hourly). Null when unsigned, unreachable or malformed: the upstream path takes over.
  */
 export function operatorPoolStats(url: string | undefined, secret: string | undefined, fetcher: Fetcher, cache: ApyCache | null, sign: (secret: string, path: string) => Promise<string>, now: Date): OperatorStats {
+  // The age check runs on every read, cached or not: a cached pool keeps its asOf.
+  const fresh = (pools: Record<string, OperatorPoolStats & { asOf: number }>) => {
+    const out: Record<string, OperatorPoolStats> = {}
+    for (const [name, p] of Object.entries(pools)) {
+      if (now.getTime() / 1000 - p.asOf <= OPERATOR_MAX_AGE_S) out[name] = { tvlUsd: p.tvlUsd, volumeLastDayUsd: p.volumeLastDayUsd, volume28dAvgUsd: p.volume28dAvgUsd }
+    }
+    return out
+  }
   return async () => {
     if (!url || !secret) return null
     const key = `${KEY}/operator-pool-stats`
-    const hit = await get<Record<string, OperatorPoolStats>>(cache, key)
-    if (hit && typeof hit === 'object') return hit
+    const hit = await get<Record<string, OperatorPoolStats & { asOf: number }>>(cache, key)
+    if (hit && typeof hit === 'object') return fresh(hit)
     try {
       const res = await fetcher(url.replace(/\/+$/, '') + '/pool-stats', { headers: { 'x-mamoru-sig': await sign(secret, '/pool-stats'), accept: 'application/json' }, signal: AbortSignal.timeout(OPERATOR_TIMEOUT_MS) })
       if (res.status !== 200) return null
       const body = (await res.json()) as { chainId?: unknown; pools?: unknown }
       if (body.chainId !== 8453 || !body.pools || typeof body.pools !== 'object') return null
-      const pools: Record<string, OperatorPoolStats> = {}
+      const pools: Record<string, OperatorPoolStats & { asOf: number }> = {}
       for (const [name, v] of Object.entries(body.pools as Record<string, Record<string, unknown>>)) {
         if (!v || typeof v !== 'object') continue
         const asOf = num(v.asOf)
-        if (asOf === null || now.getTime() / 1000 - asOf > OPERATOR_MAX_AGE_S) continue
-        pools[name] = { tvlUsd: num(v.tvlUsd), volumeLastDayUsd: num(v.volumeLastDayUsd), volume28dAvgUsd: num(v.volume28dAvgUsd) }
+        if (asOf === null) continue
+        pools[name] = { tvlUsd: num(v.tvlUsd), volumeLastDayUsd: num(v.volumeLastDayUsd), volume28dAvgUsd: num(v.volume28dAvgUsd), asOf }
       }
       await put(cache, key, OPERATOR_TTL, pools)
-      return pools
+      return fresh(pools)
     } catch {
       return null
     }

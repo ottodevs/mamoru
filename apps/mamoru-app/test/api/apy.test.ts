@@ -238,6 +238,17 @@ describe('GET /api/apy', () => {
       expect(view.byPool?.[1]?.currentPct).toBe(5)
     })
 
+    test('a cached pool that ages past 7 h is dropped on the cache hit too', async () => {
+      const cache = memoryCache()
+      const edge = { ...opPool(2, 3, 100), asOf: NOW.getTime() / 1000 - 7 * 3600 + 60 }
+      await getApy(fakeFetch({}).fetcher, cache, fakeOperator({ chainId: 8453, pools: { ...ALL.pools, 'pool:USDC/USDT/100': edge } }))
+      const later = new Date(NOW.getTime() + 120_000)
+      const h = harness(() => later, { apyFetch: fakeFetch({ [STABLE]: gecko(7, 100) }).fetcher, apyCache: () => cache, operatorFetch: fakeOperator(ALL).fetch, env: { OPERATOR_URL: 'https://op.test', OPERATOR_SECRET: 's' } })
+      const view = (await (await h.request('/api/apy')).json()) as ApyView
+      expect(view.byPool?.[0]?.currentPct).toBe(7)
+      expect(view.byPool?.[1]?.currentPct).toBe(5)
+    })
+
     test('the operator\'s stats are kept 5 minutes in the cache', async () => {
       const cache = memoryCache()
       const op = fakeOperator(ALL)
