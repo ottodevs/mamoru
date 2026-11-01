@@ -111,9 +111,9 @@ the user choosing a chain.
 ### US12b · Money comes back to Base (P1)
 
 - Given Growth over its target across both chains, then the excess moves from Monad to Base (FR-XCH-014).
-- Given a Monad pool that stops paying, or a risk exit on Monad, then the USDC holds on Monad up to
-  the maximum idle time, open to any Monad entry the policy allows (not a fixed pool), and past it moves to Base
-  (FR-XCH-014). The user is not asked first.
+- Given a Monad pool that stops paying, or a risk exit on Monad, then the USDC parks where it costs least over the
+  parked time: idle on Monad, or in the Base Stable vault when what the vault earns beats the round trip; never in a
+  volatile pool (FR-XCH-014). A risk to the chain itself sends it to Base at once. The user is not asked first.
 
 ### US13 · The destination must be able to work (P1)
 
@@ -286,12 +286,17 @@ named is where the open part lives. Ids FR-CHN-001 to FR-CHN-003 keep the meanin
   allocator only bridges toward the remote bucket.
 - **FR-XCH-014.** Value MUST move back from Monad to Base outside a withdrawal in three cases (Brais and Ot,
   2026-11-01): (a) Growth over its target across both chains, outside the rebalance band: the excess goes to Base;
-  (b) a Monad pool that stops paying, and (c) a risk exit on Monad: the USDC holds on Monad, open to any Monad entry
-  the policy allows (not a fixed pool), to save the round trip, up to a maximum idle time, and past it goes to Base. The user is not asked first; the move
-  shows in the app like any other (FR-XCH-017). The bucket split is measured over both chains. The maximum idle time
-  starts at 48 h and is set from the Lab against the pool's history; it applies only to (b) and (c), never to Base →
-  Monad, which follows FR-XCH-006. A USDC holding venue on Monad, kept until withdrawal, is out until TVL justifies
-  it. *Open* (#201): the Monad → Base grant on the Monad session, the relayer mint on Base, the allocator's return
+  (b) a Monad pool that stops paying, and (c) a risk exit on Monad: the exit leaves USDC, and where it parks follows
+  one comparison, with no fixed term: the round trip (bridge both ways plus the Stable vault's deposit and withdrawal)
+  against what the vault earns over the expected parked time. The parked time is the re-entry minimum of the exit's
+  cause in spec 004 (72 h for trend, drawdown and TVL drop; 24 h for oracle divergence), or the Lab's estimate when a
+  pool stops paying. If the vault wins, the USDC goes to the Base Stable vault; otherwise it stays idle on Monad until
+  a Monad entry the policy allows (not a fixed pool) re-validates. A parked amount never enters a volatile pool (WETH/USDC
+  or another) while it waits. A risk to the chain itself (Monad, its USDC or the bridge) skips the comparison and
+  moves the USDC to Base as soon as it can. The user is not asked first; the move shows in the app like any other
+  (FR-XCH-017). The bucket split is measured over both chains. The comparison uses the measured costs of FR-COST-001,
+  the same primitive as FR-XCH-006; it never applies to Base → Monad entries, which follow FR-XCH-006. A USDC holding
+  venue on Monad, kept until withdrawal, is out until TVL justifies it. *Open* (#201): the Monad → Base grant on the Monad session, the relayer mint on Base, the allocator's return
   gap, reason codes.
 - **FR-XCH-015.** Funds at the account's address on Ethereum MUST be shown. ETH is converted to USDC in the same
   account by one owner signature (`prepareConvert`/`submitConvert`); USDC moves to the same account on Base by another
@@ -378,7 +383,9 @@ New, added by the task that needs them:
 Brais answered in `chat-mamoru` (thread `[spec-002]`), with Ot's positions written in the question.
 
 1. **Moving value back to Base (FR-XCH-014).** Yes, in the three cases; harvest stays on Monad until Growth is over
-   target. After a stop or a risk exit the USDC waits on Monad up to the maximum idle time (48 h to start).
+   target. After a stop or a risk exit the USDC parks idle on Monad or in the Base Stable vault, whichever costs less
+   over the parked time; never in a volatile pool; a chain risk goes to Base at once. No fixed term: a 48 h hold was
+   proposed and dropped, since spec 004 already parks a risk exit for at least 72 h.
 2. **Cost ceiling (FR-XCH-006).** Modelled in the Lab, dynamic, no hand-set number. Ot gives the GO on the defaults.
 3. **Release band (FR-COST-006).** Units: share of the yield the moves take, and USDC per month. The band comes from
    the Lab's numbers.
@@ -386,6 +393,14 @@ Brais answered in `chat-mamoru` (thread `[spec-002]`), with Ot's positions writt
 Evidence given with the answers: in WMON/USDC 0.3 % (`0x659b…a9da`) the lowest 48 h of volume since 2026-08-09 was
 about 221k USD and no hour since then lacked trades for 6 h (GeckoTerminal OHLCV, read 2026-11-01). The pool has not
 stopped paying for 48 h; a position can, when the price leaves its band, and that is a re-range on Monad, not a move.
+Since 2026-07-13 its daily APY never fell under 7.8 % and its TVL stayed between 0.95 and 1.8 M USD (DefiLlama). From
+2026-06-29 to 2026-11-01 WMON fell 9 % or more in 24 h ten times (hourly, GeckoTerminal), so a `risk` trend exit on
+Monad is not rare; the 24 h signal recovered in 10 to 25 h (once 81 h), under the 72 h minimum.
+
+Parking cost over 72 h at October's prices (estimates, not measured; vault Gauntlet USDC Prime, 4.9 % 30 d mean, no
+fee): idle on Monad costs and earns nothing; the vault round trip costs about 0.04 USDC and earns about 0.01 on 22 USDC,
+0.07 on 150 and 0.45 on 1,000, so the break-even is about 90 USDC; parking in WETH/USDC 0.3 % costs about 0.3 % in
+swaps (0.13, 0.51 and 3.06 USDC) and adds ETH exposure after a risk exit.
 
 ## Out of scope
 
