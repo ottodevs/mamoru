@@ -391,7 +391,7 @@ export type OpView = {
    * otto/mamoru#219, engine ops only, absent on rows stored before it: the engine's own op kind (`kind` folds a
    * range move, a trim and a harvest into 'reduce'), the decision's reason code, and for a range move why it moved.
    */
-  step?: 'enter_swap' | 'enter_mint' | 'increase_liquidity' | 'harvest' | 'convert' | 'rerange' | 'reduce' | 'close_position'
+  step?: 'enter_swap' | 'enter_mint' | 'increase_liquidity' | 'harvest' | 'convert' | 'rerange' | 'reduce' | 'close_position' | 'bridge_out'
   cause?: string
   why?: 'out' | 'edge' | 'widen'
   /** The position acted on (rerange/reduce/harvest/increase) or minted (enter_mint), and its range. */
