@@ -225,6 +225,31 @@ describe('conservador-live-v7: the stables bucket in vaults (otto/mamoru#210)', 
     }
   })
 
+  test('review of #174 P1: a held USDC/USDT position counts toward the Stable share; new money fills only the rest of it', () => {
+    const lp = POOLS[0]!
+    const big: PositionObs = { tokenId: 7n, pool: lp.name, tickLower: -10, tickUpper: 10, liquidity: 5n * 10n ** 11n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }
+    const o = obs({ positions: [big], balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })
+    const held = bucketValues(o, V7, new Set(V7.buckets.flatMap((x) => x.pools))).buckets.find((x) => x.bucket === 'stables-lp')!.value
+    const total = 1_000n * USDC + held
+    // Every op new money gets, to the end: the vaults end with the Stable share less what the LP still holds.
+    const end = run(o, 20)
+    const inVaults = end.vaults!.reduce((n, v) => n + v.assets, 0n)
+    expect(held > 300n * USDC).toBe(true)
+    expect(inVaults > 0n && inVaults + held <= total / 2n + USDC).toBe(true)
+    // Opted in, the LP is being emptied: it no longer stands in for the vaults.
+    const optedIn = decide({ ...o, exitOptIn: true }, V7)
+    expect(optedIn.proposal?.kind === 'reduce' || (optedIn.proposal?.kind === 'vault_deposit' && optedIn.proposal.assets > (total / 2n - held))).toBe(true)
+  })
+
+  test('review of #174 P1: a vault that takes part of the gap gets that part; the rest goes to the next vault later', () => {
+    const o = obs({ vaults: [vault('vault:gtUSDCp', 0n, { maxDeposit: 400n * USDC }), vault('vault:waBasUSDC', 0n, { maxDeposit: 300n * USDC })], balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })
+    const d = decide(o, V7)
+    expect(d.proposal).toMatchObject({ kind: 'vault_deposit', vault: 'vault:gtUSDCp', assets: 400n * USDC })
+    // Morpho full: Aave takes what it can.
+    const full = decide(obs({ vaults: [vault('vault:gtUSDCp', 0n, { maxDeposit: 0n }), vault('vault:waBasUSDC', 0n, { maxDeposit: 300n * USDC })], balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }), V7)
+    expect(full.proposal).toMatchObject({ kind: 'vault_deposit', vault: 'vault:waBasUSDC', assets: 300n * USDC })
+  })
+
   test("v6's USDC/cbBTC exit is unchanged: reduced at the drift band, a small remainder stays", () => {
     const btc = POOLS[1]!
     const tiny: PositionObs = { tokenId: 9n, pool: btc.name, tickLower: -69_200, tickUpper: -68_960, liquidity: 10n ** 6n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }

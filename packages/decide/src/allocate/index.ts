@@ -181,6 +181,12 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     const target = (r.pool || r.vault) && prefTotal > 0n ? (total * BigInt(r.b.preference)) / prefTotal : 0n
     return { bucket: r.b.id, pool: r.pool?.name ?? null, value: r.value, target, weightBps: total > 0n ? Number((r.value * 10_000n) / total) : 0, code: r.blocked ?? 'STRATEGY_PREFERENCE' }
   })
+  // otto/mamoru#210 (review of #174, P1): an `exitOptIn` bucket the account has not opted out of yet (v7's USDC/USDT, held)
+  // is still Stable money: it counts toward the vault bucket's share, so new money never puts a second Stable share in the
+  // vaults beside it. Only for sizing the gap: the total and the rows shown above are unchanged.
+  const held = obs.exitOptIn === true ? 0n : rows.filter((r) => r.b.preference === 0 && r.b.exitOptIn).reduce((s, r) => s + r.value, 0n)
+  const creditTo = held > 0n ? rows.findIndex((r) => r.vault) : -1
+  if (creditTo >= 0) rows[creditTo] = { ...rows[creditTo]!, value: rows[creditTo]!.value + held, deployed: rows[creditTo]!.deployed + held }
   // A frozen bucket is one more reason savings wait (otto/mamoru#127, #128), shown the same way as a pool short of depth.
   const waiting: Waiting[] = []
   rows.forEach((r, i) => {
@@ -220,21 +226,23 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       continue
     }
     if (r.vault) {
-      // otto/mamoru#210: the gap goes to the first vault, in the bucket's order, that takes it now, preferring one with
-      // a live session (without any, the EHG says which session is missing). Less than the vault floor waits as savings.
-      const assets = gap < free ? gap : free
-      if (assets < vaultMin) {
-        if (assets >= minEntry) waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_GAS', amount: assets })
-        if (row) row.code = assets >= minEntry ? 'DECIDE_WAIT_GAS' : 'DECIDE_NO_CAPITAL'
+      // otto/mamoru#210: the gap goes to the first vault, in the bucket's order, that takes at least the vault floor now,
+      // preferring one with a live session (without any, the EHG says which session is missing), up to what that vault takes
+      // (review of #174, P1: the rest goes to the next vault on a later review). Less than the floor waits as savings.
+      const want = gap < free ? gap : free
+      if (want < vaultMin) {
+        if (want >= minEntry) waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_GAS', amount: want })
+        if (row) row.code = want >= minEntry ? 'DECIDE_WAIT_GAS' : 'DECIDE_NO_CAPITAL'
         continue
       }
-      const open = bucketVaults(obs, r.b).filter((v) => v.maxDeposit >= assets)
+      const open = bucketVaults(obs, r.b).filter((v) => v.maxDeposit >= vaultMin)
       const v = open.find((x) => liveSession(obs, grantKeyFor(policy, 'vault-supply', x.name))) ?? open[0]
       if (!v) {
-        waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_VAULT_LIQUIDITY', amount: assets })
+        waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_VAULT_LIQUIDITY', amount: want })
         if (row) row.code = 'DECIDE_WAIT_VAULT_LIQUIDITY'
         continue
       }
+      const assets = want < v.maxDeposit ? want : v.maxDeposit
       if (!row) continue
       row.code = 'STRATEGY_PREFERENCE_DEVIATION'
       picked = i

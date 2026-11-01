@@ -234,11 +234,19 @@ export function reduceOf(obs: Observation, policy: PolicyVersion, policyPools: R
   // A vault bucket that cannot give back now (no liquidity, or below the op cost) says so, but never holds the other
   // buckets' reduce back (the v7 USDC/USDT migration among them): its code is returned only when nothing else acts.
   let vaultCode: ReasonCode | null = null
+  // otto/mamoru#210 (review of #174): a held `exitOptIn` bucket (v7's USDC/USDT, not opted in) counts toward the vault
+  // bucket's share, as in allocate, so the Stable share is one share whichever form it is in.
+  const held = obs.exitOptIn === true ? 0n : buckets.filter((b) => policy.buckets.some((x) => x.id === b.bucket && x.preference === 0 && x.exitOptIn)).reduce((s, b) => s + b.value, 0n)
+  let credited = false
   for (const b of buckets) {
     if (b.vault) {
       const drift = BigInt(lab?.driftBps?.[b.bucket] ?? DRIFT_BPS)
-      if (b.value * 10_000n <= b.target * 10_000n + total * drift) continue
-      const r = vaultRedeemOf(obs, policy, b.bucket, b.value - b.target)
+      const credit = credited ? 0n : held
+      credited = true
+      const stable = b.value + credit
+      if (stable * 10_000n <= b.target * 10_000n + total * drift) continue
+      const over = stable - b.target
+      const r = vaultRedeemOf(obs, policy, b.bucket, over < b.value ? over : b.value)
       if (r.proposal) return r
       vaultCode ??= r.code
       continue
