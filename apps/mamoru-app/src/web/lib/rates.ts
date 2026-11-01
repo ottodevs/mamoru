@@ -167,7 +167,7 @@ export function monthlyRate(rows: PositionRate[], apy: ApyView | undefined): Acc
   return { pct, gap: pct === null ? 'no-data' : null, covered, of: rows.length, plan: false }
 }
 
-/** The data source named in an ApyView source line ("Plan pools, 30-day mean · DefiLlama" -> "DefiLlama"). */
+/** The data source named in an ApyView source line ("Plan pools, 30-day fee APR · GeckoTerminal" -> "GeckoTerminal"). */
 export function sourceName(line: string | undefined): string | null {
   if (!line) return null
   const i = line.lastIndexOf('·')

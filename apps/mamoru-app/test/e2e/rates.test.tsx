@@ -12,9 +12,9 @@ const apy: ApyView = {
   pool: 'conservador-live-v2',
   currentPct: 6.4,
   currentWindow: '24h',
-  currentSource: 'Plan pools, fee APR · GeckoTerminal/DefiLlama',
+  currentSource: 'Plan pools, fee APR · GeckoTerminal',
   monthlyPct: 5.9,
-  monthlySource: 'Plan pools, 30-day mean · DefiLlama',
+  monthlySource: 'Plan pools, 30-day fee APR · GeckoTerminal',
   byPool: [
     { pool: 'pool:USDC/USDT/100', weight: 5000, currentPct: 3.0, monthlyPct: 4.5 },
     { pool: 'pool:USDC/cbBTC/500', weight: 4000, currentPct: 7.3, monthlyPct: 18.9 },
@@ -151,8 +151,8 @@ describe('monthly rate', () => {
     expect(monthlyRate([], apy)).toMatchObject({ pct: 5.9, plan: true, gap: null })
   })
   test('the source is the name after the last dot', () => {
-    expect(sourceName(apy.monthlySource)).toBe('DefiLlama')
-    expect(sourceName(apy.currentSource)).toBe('GeckoTerminal/DefiLlama')
+    expect(sourceName(apy.monthlySource)).toBe('GeckoTerminal')
+    expect(sourceName(apy.currentSource)).toBe('GeckoTerminal')
     expect(sourceName(undefined)).toBeNull()
   })
 })
