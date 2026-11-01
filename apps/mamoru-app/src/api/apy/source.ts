@@ -40,34 +40,36 @@ const num = (v: unknown): number | null => {
   return Number.isFinite(n) ? n : null
 }
 
-/** Fee APR from the last 24h of volume: volume * fee * 365 / reserve. The last hour is too noisy. */
-export async function geckoApr(fetcher: Fetcher, address: string, feeTier: number): Promise<number | null> {
+type GeckoPool = { reserve: number; h24: number | null }
+/** One read of a pool per request, shared by the current and the monthly figure (GeckoTerminal's free tier is ~10 calls/min). */
+export type PoolReader = (address: string) => Promise<GeckoPool | null>
+
+/** GeckoTerminal `/pools/<address>`: current reserve (TVL) and 24h USD volume. */
+async function geckoPool(fetcher: Fetcher, address: string): Promise<GeckoPool | null> {
   try {
     const res = await fetcher(GECKO + address, { headers: UA })
     if (!res.ok) return null
     const body = (await res.json()) as { data?: { attributes?: { volume_usd?: { h24?: unknown }; reserve_in_usd?: unknown } } }
     const a = body.data?.attributes
     const reserve = num(a?.reserve_in_usd)
-    const h24 = num(a?.volume_usd?.h24)
-    if (!reserve || reserve <= 0 || h24 === null) return null
-    return ((h24 * (feeTier / 1_000_000) * 365) / reserve) * 100
+    if (!reserve || reserve <= 0) return null
+    return { reserve, h24: num(a?.volume_usd?.h24) }
   } catch {
     return null
   }
 }
 
-/** Current TVL of the pool (GeckoTerminal reserve_in_usd). */
-async function geckoReserve(fetcher: Fetcher, address: string): Promise<number | null> {
-  try {
-    const res = await fetcher(GECKO + address, { headers: UA })
-    if (!res.ok) return null
-    const body = (await res.json()) as { data?: { attributes?: { reserve_in_usd?: unknown } } }
-    const reserve = num(body.data?.attributes?.reserve_in_usd)
-    return reserve && reserve > 0 ? reserve : null
-  } catch {
-    return null
+export function poolReader(fetcher: Fetcher): PoolReader {
+  const reads = new Map<string, Promise<GeckoPool | null>>()
+  return (address) => {
+    let r = reads.get(address)
+    if (!r) reads.set(address, (r = geckoPool(fetcher, address)))
+    return r
   }
 }
+
+/** Fee APR of a daily volume: volume * fee * 365 / reserve. */
+const feeApr = (dailyVolume: number, feeTier: number, reserve: number) => ((dailyVolume * (feeTier / 1_000_000) * 365) / reserve) * 100
 
 /**
  * Mean daily USD volume over the last 30 complete UTC days, from GeckoTerminal `ohlcv/day` (row: [t, o, h, l, c, volume]).
@@ -98,16 +100,6 @@ export async function geckoMonthlyVolume(fetcher: Fetcher, address: string, now:
   }
 }
 
-/**
- * 30-day fee APR: mean daily volume of the last 30 days * fee * 365 / current reserve. DefiLlama's yields chart goes
- * paid on 2026-11-13 (otto/mamoru#248); the reserve is today's, GeckoTerminal keeps no free TVL history.
- */
-export async function geckoMonthly(fetcher: Fetcher, address: string, feeTier: number, now: Date): Promise<number | null> {
-  const [volume, reserve] = await Promise.all([geckoMonthlyVolume(fetcher, address, now), geckoReserve(fetcher, address)])
-  if (volume === null || reserve === null) return null
-  return ((volume * (feeTier / 1_000_000) * 365) / reserve) * 100
-}
-
 async function put(cache: ApyCache | null, key: string, ttl: number, value: unknown): Promise<void> {
   if (!cache) return
   const res = new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${ttl}` } })
@@ -133,21 +125,38 @@ async function cached(cache: ApyCache | null, key: string, ttl: number, load: ()
   return value
 }
 
-/** Per-pool current: GeckoTerminal 24h fee APR, then the last good value (1 day). */
-function poolCurrent(fetcher: Fetcher, cache: ApyCache | null, p: PlanPool) {
+/** Per-pool current: GeckoTerminal 24h fee APR (the last hour is too noisy), then the last good value (1 day). */
+function poolCurrent(read: PoolReader, cache: ApyCache | null, p: PlanPool) {
   return cached(cache, `${KEY}/current/${p.address}`, CURRENT_TTL, async () => {
-    const gecko = await geckoApr(fetcher, p.address, p.fee)
-    if (gecko !== null) {
-      await put(cache, `${KEY}/last-current/${p.address}`, STALE_TTL, gecko)
-      return gecko
+    const pool = await read(p.address)
+    if (pool) await put(cache, `${KEY}/last-reserve/${p.address}`, STALE_TTL, pool.reserve)
+    if (pool && pool.h24 !== null) {
+      const apr = feeApr(pool.h24, p.fee, pool.reserve)
+      await put(cache, `${KEY}/last-current/${p.address}`, STALE_TTL, apr)
+      return apr
     }
     const last = await get<number>(cache, `${KEY}/last-current/${p.address}`)
     return typeof last === 'number' ? last : null
   })
 }
 
-function poolMonthly(fetcher: Fetcher, cache: ApyCache | null, p: PlanPool, now: Date) {
-  return cached(cache, `${KEY}/monthly/${p.address}`, MONTHLY_TTL, () => geckoMonthly(fetcher, p.address, p.fee, now))
+/**
+ * Per-pool 30-day fee APR: mean daily volume of the last 30 complete days * fee * 365 / today's reserve (GeckoTerminal
+ * keeps no free TVL history), then the last good value (1 day). DefiLlama's yields chart, the old source, goes paid on
+ * 2026-11-13 (otto/mamoru#248).
+ */
+function poolMonthly(fetcher: Fetcher, read: PoolReader, cache: ApyCache | null, p: PlanPool, now: Date) {
+  return cached(cache, `${KEY}/monthly/${p.address}`, MONTHLY_TTL, async () => {
+    const volume = await geckoMonthlyVolume(fetcher, p.address, now)
+    const reserve = volume === null ? null : ((await read(p.address))?.reserve ?? (await get<number>(cache, `${KEY}/last-reserve/${p.address}`)))
+    if (volume !== null && typeof reserve === 'number' && reserve > 0) {
+      const apr = feeApr(volume, p.fee, reserve)
+      await put(cache, `${KEY}/last-monthly/${p.address}`, STALE_TTL, apr)
+      return apr
+    }
+    const last = await get<number>(cache, `${KEY}/last-monthly/${p.address}`)
+    return typeof last === 'number' ? last : null
+  })
 }
 
 /** Weighted mean over the pools that have data; weights renormalize over those. */
@@ -177,9 +186,10 @@ function source(label: string, covered: number, total: number): string {
  */
 export async function apyView(fetcher: Fetcher, cache: ApyCache | null, now: Date, pools: PlanPool[] = planPools()): Promise<ApyView> {
   const weights = pools.map((p) => p.weight)
+  const read = poolReader(fetcher)
   const [current, monthly] = await Promise.all([
-    Promise.all(pools.map((p) => poolCurrent(fetcher, cache, p))),
-    Promise.all(pools.map((p) => poolMonthly(fetcher, cache, p, now))),
+    Promise.all(pools.map((p) => poolCurrent(read, cache, p))),
+    Promise.all(pools.map((p) => poolMonthly(fetcher, read, cache, p, now))),
   ])
   const c = combine(current, weights)
   const m = combine(monthly, weights)
