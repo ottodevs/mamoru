@@ -17,6 +17,7 @@ import {
   WIDTH_TICKS_STEP,
   type Base,
 } from '@mamoru/lab-bench'
+import { displayValue, resolveMetric, type MetricBaseKey } from './contract.ts'
 import { measureCpuMs, recordRun, type CostMeter } from './cost-meter.ts'
 import type { BenchRunner, RunResult, ToolSchema } from './types.ts'
 
@@ -49,11 +50,28 @@ export const KNOWN_OVERRIDE_KEYS = ['widthTicks'] as const
 export type ToolError = { code: string; message: string }
 export type ToolOutcome<T> = { ok: true; result: T } | { ok: false; error: ToolError }
 
-/** The public, token-frugal view a tool call hands back to the model — never the ~400-point series (AL-10). */
-export type RunPublicView = { runId: string; metrics: RunResult['metrics']; window: RunResult['window']; opsCount: number }
+/**
+ * The public, token-frugal view a tool call hands back to the model — never the ~400-point series (AL-10).
+ * `claimValues` is each claimable metric already rounded to its display precision (AL-21): the raw `metrics`
+ * carry 4+ decimals, and a model copying those into a claim failed the exact-match check on every answer,
+ * spending the one repair turn on rounding instead of on real errors.
+ */
+export type RunPublicView = { runId: string; metrics: RunResult['metrics']; claimValues: ClaimValues; window: RunResult['window']; opsCount: number }
+
+export type ClaimValues = Partial<Record<MetricBaseKey, number>>
+const CLAIM_VALUE_METRICS = ['end', 'net', 'vsHodl', 'vsUsdc', 'fees', 'gas', 'return', 'maxDrawdown', 'timeInRange'] as const satisfies readonly MetricBaseKey[]
+
+export function claimValuesOf(r: RunResult): ClaimValues {
+  const out: ClaimValues = {}
+  for (const k of CLAIM_VALUE_METRICS) {
+    const info = resolveMetric(r, k)
+    if (info) out[k] = displayValue(info)
+  }
+  return out
+}
 
 function toPublicView(r: RunResult): RunPublicView {
-  return { runId: r.resultHash, metrics: r.metrics, window: r.window, opsCount: r.ops.length }
+  return { runId: r.resultHash, metrics: r.metrics, claimValues: claimValuesOf(r), window: r.window, opsCount: r.ops.length }
 }
 
 function reasonToolError(e: unknown): ToolError {
@@ -241,7 +259,7 @@ export const SWEEP_MAX_ROWS = 24
 export type SweepArgs = { base: Base; widthTicks: number[]; deposit: number; windows?: string[] }
 
 export type SweepRowMetrics = { end: number; vsHodl: number; fees: number; gas: number; returnBps: number; maxDrawdownBps: number }
-export type SweepRow = { windowId: string; widthTicks: number } & ({ runId: string; metrics: SweepRowMetrics } | { error: ToolError })
+export type SweepRow = { windowId: string; widthTicks: number } & ({ runId: string; metrics: SweepRowMetrics; claimValues: ClaimValues } | { error: ToolError })
 export type SweepResult = { rows: SweepRow[] }
 
 function isValidWidthTicks(w: unknown): w is number {
@@ -319,7 +337,7 @@ export function sweepTool(raw: unknown, runner: BenchRunner, runStore: RunStore,
   for (const windowId of windowIds) {
     for (const widthTicks of parsed.widthTicks) {
       const outcome = runBacktestTool({ windowId, base: parsed.base, deposit: parsed.deposit, overrides: { widthTicks } }, runner, runStore, meter)
-      rows.push(outcome.ok ? { windowId, widthTicks, runId: outcome.result.runId, metrics: subsetOf(outcome.result.metrics) } : { windowId, widthTicks, error: outcome.error })
+      rows.push(outcome.ok ? { windowId, widthTicks, runId: outcome.result.runId, metrics: subsetOf(outcome.result.metrics), claimValues: outcome.result.claimValues } : { windowId, widthTicks, error: outcome.error })
     }
   }
   return { ok: true, result: { rows } }

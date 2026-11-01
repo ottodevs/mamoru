@@ -11,6 +11,15 @@ const FIX_TEST_DATASET_ID = '0x6669782d746573742d686f6c646f75742d666978747572652
 const FIXTURE_DIR = `${import.meta.dir}/../../lab-bench/src/__fixtures__`
 
 describe('buildCatalogPrompt (AL-14)', () => {
+  test('rules: a window outside the catalog is a caveat, comparisons only in verdicts, a sweep cited in full, claims from claimValues', () => {
+    const { systemPrompt } = buildCatalogPrompt(FIXTURE_DIR)
+    expect(systemPrompt).toContain('nombra un periodo o una ventana que no está en el catálogo')
+    expect(systemPrompt).toContain('nunca repitas runs o cifras de un turno anterior')
+    expect(systemPrompt).toContain('Toda comparación de rendimiento va en un bloque "verdict"')
+    expect(systemPrompt).toContain('incluye un "claim" de vsHodl por cada fila con runId')
+    expect(systemPrompt).toContain('claimValues[metric]')
+  })
+
   test('lists every TRAIN window and never the TEST one (AL-12a, LAB-AL-16)', () => {
     const catalog = buildCatalogPrompt(FIXTURE_DIR)
     expect(catalog.windowIds.sort()).toEqual(['fix-full', 'fix-nobtc'])

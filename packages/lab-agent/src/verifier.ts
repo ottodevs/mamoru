@@ -213,6 +213,14 @@ const DIRECTIONAL_TERMS = [
   'protegió',
   'protegieron',
   'protegimos',
+  'mejora',
+  'mejoró',
+  'empeora',
+  'empeoró',
+  'por encima',
+  'por debajo',
+  'por delante',
+  'por detrás',
 ] as const
 
 /**

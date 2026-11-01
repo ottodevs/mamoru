@@ -194,6 +194,14 @@ describe('buildAllowedTokenRegex / findUntraceableDigits / findDirectionalTerm',
     expect(findDirectionalTerm('el resultado total fue positivo')).toBeNull()
   })
 
+  test('positional comparisons are directional too: "por encima"/"por debajo"/"por delante"/"por detrás", "mejora"/"empeora"', () => {
+    expect(findDirectionalTerm('el ancho estrecho termina por encima en calm-2026-04')).toBe('por encima')
+    expect(findDirectionalTerm('queda por delante en oct2025')).toBe('por delante')
+    expect(findDirectionalTerm('Termina POR DEBAJO del hold')).toBe('POR DEBAJO')
+    expect(findDirectionalTerm('la guarda mejoró el resultado')).toBe('mejoró')
+    expect(findDirectionalTerm('el porcentaje de encima')).toBeNull()
+  })
+
   test('review finding (P2-6): accented conjugations are detected — plain ASCII \\b silently missed these', () => {
     // `\bganó\b` never matched at all: ASCII `\w` doesn't include `ó`, so there is no word/non-word transition
     // right after it, and `\b` only fires at a transition. Unicode-aware boundaries fix this for every
