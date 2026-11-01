@@ -84,7 +84,7 @@ async function signedPost(path: string, body: unknown): Promise<{ status: number
 // ---------------------------------------------------------------------------
 
 type BenchClaimedJob = { kind: 'bench'; id: string; spec: BenchSpec; leaseId: string }
-type AgentHistoryTurn = { question: string; answer: Answer }
+type AgentHistoryTurn = { question: string; answer: Answer; runs?: { resultHash: string; specKey: string }[] }
 type AgentClaimedJob = { kind: 'agent'; id: string; leaseId: string; threadId: string; question: string; history: AgentHistoryTurn[] }
 type ClaimedJob = BenchClaimedJob | AgentClaimedJob
 
@@ -174,17 +174,19 @@ async function runBenchJob(job: BenchClaimedJob): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /** AL-03's own words: history carries questions and verified answers, never raw tool output. The claim response
- * (CONTRACT, shared with the landing session building task 6) carries only `{question, answer}` per turn — no
- * run records at all — so a prior turn's `runs` is always `[]` here. `renderAnswerForHistory` (packages/lab-agent)
- * already treats a missing run as "drop this line", never a crash, so this degrades gracefully: a follow-up
- * still sees the prior QUESTION and whatever prose had no run-backed claim/verdict, but loses the concrete
- * numbers of any claim/verdict the prior turn made (its run isn't in this job's store to resolve the tag). This
- * is a real gap in the given claim-response shape, not something this runner can fix on its own — flagged in the
- * PR body with the two ways to close it (the claim response also carrying each cited run, or a landing endpoint
- * to fetch a run by hash on demand).
+ * carries no full run records (up to 400 KB each), only each turn's cited runs as `{resultHash, specKey}`, so a
+ * prior turn's `runs` is `[]` and `runSpecs` names them: `renderAnswerForHistory` then renders every prior claim
+ * with its verified value, run id and spec. Before the landing sent `runs`, prior claims rendered as nothing and
+ * a follow-up ("¿Y en abril 2025?") could not see the figures it followed up on. Older landings omit `runs`.
  */
 function priorTurnsFromHistory(history: AgentHistoryTurn[]): PriorTurn[] {
-  return history.map((h) => ({ question: h.question, answer: h.answer, runs: [] as AgentRunResult[] }))
+  return history.map((h) => {
+    const runSpecs: Record<string, string> = {}
+    for (const r of Array.isArray(h.runs) ? h.runs : []) {
+      if (r && typeof r.resultHash === 'string' && typeof r.specKey === 'string') runSpecs[r.resultHash] = r.specKey
+    }
+    return { question: h.question, answer: h.answer, runs: [] as AgentRunResult[], runSpecs }
+  })
 }
 
 /** Publish is idempotent (same hash), so a transient 5xx or network blip is retried before giving up. */
