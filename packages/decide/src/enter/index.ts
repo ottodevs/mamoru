@@ -20,8 +20,10 @@ export function safeSavings(obs: Observation, policy: PolicyVersion): bigint {
 function entryKey<N extends 'enter-swap' | 'enter-mint'>(policy: PolicyVersion, name: N, pool: string): N {
   try {
     return grantKeyFor(policy, name, pool) as N
-  } catch {
-    return name
+  } catch (e) {
+    // Only the lookup's own miss (grantKeyFor: `no <name> grant for <pool>`); anything else is a bug and surfaces.
+    if (e instanceof Error && e.message === `no ${name} grant for ${pool}`) return name
+    throw e
   }
 }
 

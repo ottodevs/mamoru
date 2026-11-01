@@ -28,7 +28,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { concat, encodeFunctionData, keccak256, numberToHex, pad, parseAbi, parseEventLogs, sliceHex, toHex, type Hex } from 'viem'
+import { concat, decodeErrorResult, encodeFunctionData, keccak256, numberToHex, pad, parseAbi, parseEventLogs, sliceHex, toHex, type Hex } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { AccountContext, Address, FundingView, OpView, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
 import { address, baseRegistry, entryPointV07Abi, erc20Abi, messageTransmitterV2Abi, monadRegistry, nonfungiblePositionManagerAbi, readCodeHash, safeAbi, tokenMessengerV2Abi } from '@mamoru/registry'
@@ -395,26 +395,38 @@ try {
   gasReport.push(`bridge_out userOp (Base): handleOps ${burnRc.gasUsed}, userOp actualGasUsed ${ue?.args.actualGasUsed}`)
 
   // A bridge-out userOp from the same session to another recipient: refused at validation (SmartSession + UniActionPolicy).
+  // GPT-6 Sol r1 (P1): any FailedOp is not proof, a bad nonce or prefund fails the same way. So the very same userOp,
+  // only the mintRecipient changed, must pass with the remote Safe (control), and fail with the policy's AA24 otherwise.
   {
     const acc = accState()
     const g = acc.grants!.find((x) => x.name === 'bridge-out')!
     const tm = address('TokenMessengerV2', baseRegistry)
     const usdc = address('USDC', baseRegistry)
-    const other = privateKeyToAccount(generatePrivateKey()).address
-    const calls = [
-      { target: usdc, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [tm, 1_000n] }) },
-      { target: tm, value: 0n, callData: encodeFunctionData({ abi: tokenMessengerV2Abi, functionName: 'depositForBurn', args: [1_000n, CCTP_DOMAIN_MONAD, pad(other, { size: 32 }), usdc, pad('0x00', { size: 32 }), 0n, 2000] }) },
-    ]
-    const key = sessionNonceKey(7)
-    const nonce = await base.client.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'getNonce', args: [ctx.address, key] })
-    const gas = engineGas((await base.client.getBlock()).baseFeePerGas ?? 0n, V4_GAS_CAPS)!
-    let op = draftUserOp(ctx.address, nonce, executeCallData(calls), gas)
-    op = { ...op, signature: useModeSignature(g.permissionId, await sessionKeySignature(privateKeyToAccount(acc.sessionKey!), userOpHash(op, 8453))) }
-    const sim = await base.client.call({ account: bo.relayer.address, to: address('EntryPointV07', baseRegistry), data: handleOpsData([op], bo.relayer.address) }).then(
-      () => 'included',
-      (e: Error) => (/FailedOp|AA2|AA3|0x220266b6|0x65c8fd4d/.test(`${e.message}`) ? 'refused at validation' : `reverted: ${e.message.slice(0, 200)}`),
-    )
-    check(sim === 'refused at validation', 'Base: a bridge-out userOp to another recipient is refused at validation', sim)
+    const failedOp = parseAbi(['error FailedOp(uint256 opIndex, string reason)', 'error FailedOpWithRevert(uint256 opIndex, string reason, bytes inner)'])
+    const simulate = async (recipient: Address): Promise<string> => {
+      const calls = [
+        { target: usdc, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [tm, 1_000n] }) },
+        { target: tm, value: 0n, callData: encodeFunctionData({ abi: tokenMessengerV2Abi, functionName: 'depositForBurn', args: [1_000n, CCTP_DOMAIN_MONAD, pad(recipient, { size: 32 }), usdc, pad('0x00', { size: 32 }), 0n, 2000] }) },
+      ]
+      const key = sessionNonceKey(7)
+      const nonce = await base.client.readContract({ address: address('EntryPointV07', baseRegistry), abi: entryPointV07Abi, functionName: 'getNonce', args: [ctx.address, key] })
+      const gas = engineGas((await base.client.getBlock()).baseFeePerGas ?? 0n, V4_GAS_CAPS)!
+      let op = draftUserOp(ctx.address, nonce, executeCallData(calls), gas)
+      op = { ...op, signature: useModeSignature(g.permissionId, await sessionKeySignature(privateKeyToAccount(acc.sessionKey!), userOpHash(op, 8453))) }
+      return base.client.call({ account: bo.relayer.address, to: address('EntryPointV07', baseRegistry), data: handleOpsData([op], bo.relayer.address) }).then(
+        () => 'included',
+        (e: Error) => {
+          const data = /0x(220266b6|65c8fd4d)[0-9a-fA-F]*/.exec(`${e.message} ${JSON.stringify((e as { cause?: unknown }).cause ?? '')}`)?.[0]
+          if (!data) return `reverted: ${e.message.slice(0, 200)}`
+          const d = decodeErrorResult({ abi: failedOp, data: data as Hex })
+          return `${d.errorName}: ${d.args[1]}`
+        },
+      )
+    }
+    const control = await simulate(remote)
+    check(control === 'included', 'Base: the same bridge-out userOp to the remote Safe validates and executes (control)', control)
+    const other = await simulate(privateKeyToAccount(generatePrivateKey()).address)
+    check(other === 'FailedOp: AA24 signature error', 'Base: the same userOp to another recipient is refused by the session policy (AA24)', other)
   }
 
   // --- 6. Circle attests, the Base operator mints on Monad -----------------------------------------------------------------
