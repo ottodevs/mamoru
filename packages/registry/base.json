@@ -128,7 +128,7 @@
       "name": "pool:USDC/JPYT/3000",
       "kind": "pool",
       "role": "retirada USDC->JPYT",
-      "address": "0x951c97B306EEe55c82ADab79a83bB2397cd1A8C9",
+      "address": "0x951c97b306eee55C82adaB79a83Bb2397Cd1A8c9",
       "token0": "USDC",
       "token1": "JPYT",
       "fee": 3000,

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { getAddress, isHash } from 'viem'
+import { readFileSync } from 'node:fs'
+import { getAddress, isAddress, isHash } from 'viem'
 import { ReasonError } from '@mamoru/domain'
 import { address, assertRegistryChain, baseRegistry, entry, isDeployed, monadRegistry, nameOf, registries, registryFor, type Registry } from './index.ts'
 
@@ -84,6 +85,15 @@ describe.each(registries.map((r) => [r.chain, r] as const))('%s registry', (_cha
     expect(new Set(registry.entries.map((e) => e.name)).size).toBe(registry.entries.length)
     expect(new Set(registry.entries.map((e) => e.address.toLowerCase())).size).toBe(registry.entries.length)
     for (const e of registry.entries) expect(e.address, e.name).toBe(getAddress(e.address))
+  })
+
+  // otto/mamoru#221: the loader re-checksums, so the test above passed while base.json held a bad EIP-55 checksum and
+  // scripts/pin.ts --pin (strict) threw. Every address in the raw files is valid as written.
+  test('every address in the raw registry files has a valid checksum as written', () => {
+    for (const f of ['base.json', 'monad.json']) {
+      const raw = readFileSync(new URL(`../${f}`, import.meta.url), 'utf8')
+      for (const a of raw.match(/0x[0-9a-fA-F]{40}(?![0-9a-fA-F])/g) ?? []) expect(isAddress(a, { strict: true }), `${f} ${a}`).toBe(true)
+    }
   })
 
   test('tokens carry decimals and pools point at tokens of the same registry', () => {
