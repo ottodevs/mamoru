@@ -571,6 +571,7 @@ export async function bootOperator(o: BootOptions) {
       fallbacks: urlsFromEnv('MAMORU_MONAD_RPC_FALLBACKS', MONAD_PUBLIC_FALLBACKS),
       logRanges: {},
       chunkLogs: false,
+      trustedLogsOnly: true,
     })
     const monadUrl = `${monadProxy.url}c/bridge-monad`
     const monad = createPublicClient({ transport: http(monadUrl, { batch: true, timeout: 30_000 }) })
@@ -694,32 +695,30 @@ export async function bootOperator(o: BootOptions) {
   // bridgeOut), per account, off by default and without a settings source.
   let bridgeOut: BridgeOut | null = null
   // otto/mamoru#285: Ethereum goes through its own proxy, like Base: MAMORU_L1_RPC_URL and any MAMORU_L1_RPC_TRUSTED
-  // (keyed, another provider) for reads, public RPCs only for sends and log witnesses. Unreachable at boot turns
-  // bridge-out off with an alert; it never stops the Base operator. A wrong chain still refuses the boot.
+  // (keyed, another provider) for reads and logs, public RPCs only for sends and log witnesses. Unreachable at boot is
+  // an alert, not a stop: bridge-out is built all the same, so moves in flight keep counting toward the cap and its
+  // minute tick finishes them once Ethereum answers again. A wrong chain still refuses the boot.
   let l1Proxy: { url: string; stop: () => void } | null = null
-  const l1Client = (url: string) => createPublicClient({ transport: http(url, { timeout: 30_000 }) })
-  let l1Ready: { l1: ReturnType<typeof l1Client>; l1Url: string; wei: bigint } | null = null
   if (o.l1RpcUrl) {
     l1Proxy = startRpcProxy(o.l1RpcUrl, {
       trusted: urlsFromEnv('MAMORU_L1_RPC_TRUSTED', ''),
       fallbacks: urlsFromEnv('MAMORU_L1_RPC_FALLBACKS', L1_PUBLIC_FALLBACKS),
       logRanges: {},
       chunkLogs: false,
+      trustedLogsOnly: true,
     })
     const l1Url = `${l1Proxy.url}c/bridge-out`
-    const l1 = l1Client(l1Url)
+    const l1 = createPublicClient({ transport: http(l1Url, { timeout: 30_000 }) })
     // viem errors quote the request URL, which carries the provider key: only fixed text leaves this block.
     let chain: number | null = null
+    let wei: bigint | null = null
     try {
       chain = await l1.getChainId()
-      if (chain === ETHEREUM_CHAIN_ID) l1Ready = { l1, l1Url, wei: await l1.getBalance({ address: relayer.address }) }
+      if (chain === ETHEREUM_CHAIN_ID) wei = await l1.getBalance({ address: relayer.address })
     } catch {
-      logErr('[alert]', 'MAMORU_L1_RPC_URL and its trusted RPCs are unreachable: moves from Ethereum are off until the operator restarts')
+      logErr('[alert]', 'MAMORU_L1_RPC_URL and its trusted RPCs are unreachable at boot: moves from Ethereum fail until Ethereum answers')
     }
     if (chain !== null && chain !== ETHEREUM_CHAIN_ID) throw new Error('MAMORU_L1_RPC_URL is not an Ethereum Mainnet RPC (wrong chain)')
-  }
-  if (l1Ready) {
-    const { l1, l1Url, wei } = l1Ready
     const enabledFor = (accountKey: string) => settings?.forAccount(accountKey).settings.bridgeOut?.enabled === true
     const l1Relayer = new Relayer(relayerKey, l1, l1Url, ETHEREUM_CHAIN_ID)
     // #180: with an ERC-20 paymaster the account pays its own gas in USDC. The operator bundles the userOp itself on a
@@ -756,7 +755,7 @@ export async function bootOperator(o: BootOptions) {
     void bo.tick()
     if (aa) console.log(`[operator] bridge-out uses userOps on Ethereum: gas paid in USDC through the ${paymaster!.name} paymaster, bundled by the operator`)
     if (bo.pendingCctp() > 0) console.log(`[operator] bridge-out: ${bo.pendingCctp()} CCTP move(s) to finish on Base`)
-    console.log(`[operator] bridge-out from Ethereum available (on per account from /ops), relayer ${relayer.address} (${wei} wei on Ethereum)`)
+    console.log(`[operator] bridge-out from Ethereum available (on per account from /ops), relayer ${relayer.address} (${wei ?? 'unknown'} wei on Ethereum)`)
   }
   const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot, bridgeOut })
   const eth = await client.getBalance({ address: relayer.address })

@@ -164,6 +164,12 @@ export type RpcProxyOptions = {
   trusted?: string[]
   /** Split eth_getLogs into maxLogRange chunks on the upstream; default: Alchemy upstream or MAMORU_LOG_RANGE set (a Base setting). */
   chunkLogs?: boolean
+  /**
+   * otto/mamoru#285: eth_getLogs over a range is served only by the upstream and the trusted providers; public ones only
+   * witness. A public node can leave a row out while returning the right block hash, and on Ethereum a missing Safe
+   * ExecutionSuccess would mark a conversion that ran as failed.
+   */
+  trustedLogsOnly?: boolean
   /** How long a trusted block hash may witness a log range; default WITNESS_TTL_MS. Tests shorten it. */
   witnessTtlMs?: number
   /** Tests: the upstream transport. */
@@ -411,6 +417,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const requests = (p: LogProvider) => (Number.isFinite(p.logRange) ? (span + BigInt(p.logRange) - 1n) / BigInt(p.logRange) : 1n)
     const tier = (p: LogProvider, n: bigint) => (trusted.includes(p.url) && n <= TRUSTED_LOG_MAX_REQUESTS ? 0 : 1)
     const order = logProviders
+      .filter((p) => !opts.trustedLogsOnly || trusted.includes(p.url))
       .map((p, i) => { const n = requests(p); return { p, i, n, t: tier(p, n) } })
       .sort((a, b) => a.t - b.t || (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
     let last: any = null

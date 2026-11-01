@@ -65,4 +65,35 @@ describe('per-chain pools (otto/mamoru#285)', () => {
       proxy.stop()
     }
   })
+
+  test('with trustedLogsOnly a public provider never serves eth_getLogs, it only witnesses', async () => {
+    const served: string[] = []
+    const hash = `0x${'11'.repeat(32)}`
+    const proxy = startRpcProxy('https://upstream.example/k', {
+      trusted: [],
+      fallbacks: ['https://public.example'],
+      logRanges: {},
+      chunkLogs: false,
+      trustedLogsOnly: true,
+      fetch: async (url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body))
+        const one = (b: { method: string; id: number }) => {
+          if (b.method === 'eth_getLogs') served.push(new URL(url).host)
+          if (url.startsWith('https://upstream') && b.method === 'eth_getLogs') return { jsonrpc: '2.0', id: b.id, error: { code: -32005, message: 'limit exceeded' } }
+          if (b.method === 'eth_getLogs') return { jsonrpc: '2.0', id: b.id, result: [] }
+          if (b.method === 'eth_blockNumber') return { jsonrpc: '2.0', id: b.id, result: '0x100' }
+          return { jsonrpc: '2.0', id: b.id, result: { hash, number: '0x100' } }
+        }
+        return Response.json(Array.isArray(body) ? body.map(one) : one(body))
+      },
+    })
+    try {
+      const res = await fetch(`${proxy.url}c/bridge-out`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ fromBlock: '0xf0', toBlock: '0x100' }] }) })
+      const out = (await res.json()) as { result?: unknown; error?: unknown }
+      expect(out.result).toBeUndefined()
+      expect(served).not.toContain('public.example')
+    } finally {
+      proxy.stop()
+    }
+  })
 })
