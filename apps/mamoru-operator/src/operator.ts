@@ -1331,6 +1331,28 @@ export class Operator {
    * deployed addresses), the `onchain_action_policy_v4` ops flag on, the account running on a v2/v3 policy of the
    * same chain. Accounts that never tap keep their grants.
    */
+  /**
+   * otto/mamoru#217: whether a scopable ops flag is offered to this account. Only the explicit signal of the scoped-flags
+   * field counts: null = everyone (and the boolean agrees); a list = only those accounts (key or Safe address);
+   * malformed reached us as [] = nobody; missing (an older Worker) = nobody.
+   */
+  private inScope(acc: AccountState, flag: 'multichain_v6' | 'multichain_v6_new'): boolean {
+    const scope = this.cfg.opsScopedFlags?.()[flag]
+    if (scope === null) return this.cfg.opsFlags?.()[flag] === true
+    return Array.isArray(scope) && (scope.includes(acc.accountKey.toLowerCase()) || scope.includes(String(acc.ctx.address).toLowerCase()))
+  }
+
+  /**
+   * otto/mamoru#231: the policy a Start activates. v6 (Base + the account's own Safe on Monad, provisioned by this same
+   * approval, the bridge held until it runs) for an account in the `multichain_v6_new` scope where this operator offers
+   * v6 on the same chain; the operator's default policy otherwise. v6 is never the process default (assertBootPolicies).
+   */
+  activationPolicy(acc: AccountState): PolicyVersion {
+    const v6 = this.cfg.v6Policy
+    if (v6 && v6.chain === this.cfg.policy.chain && this.inScope(acc, 'multichain_v6_new')) return v6
+    return this.cfg.policy
+  }
+
   v4Target(acc: AccountState): PolicyVersion | null {
     if (!acc.active) return null
     let cur: PolicyVersion
@@ -1342,11 +1364,8 @@ export class Operator {
     const flags = this.cfg.opsFlags?.()
     // otto/mamoru#214: v6 (Base + Monad growth) configured and offered: v2-v5 accounts move to it, ahead of v5.
     const v6 = this.cfg.v6Policy
-    // otto/mamoru#217: v6 needs the explicit signal of the scoped-flags field. null = everyone (and the boolean agrees);
-    // a list = only those accounts (key or Safe address); malformed reached us as [] = nobody; missing = nobody.
-    const v6Scope = this.cfg.opsScopedFlags?.().multichain_v6
-    const inV6Scope = v6Scope === null ? flags?.multichain_v6 === true : Array.isArray(v6Scope) && (v6Scope.includes(acc.accountKey.toLowerCase()) || v6Scope.includes(String(acc.ctx.address).toLowerCase()))
-    if (v6 && inV6Scope && V6_MIGRATES_FROM.has(cur.policyId) && cur.chain === v6.chain) return v6
+    // otto/mamoru#217: v6 needs the explicit signal of the scoped-flags field (inScope).
+    if (v6 && this.inScope(acc, 'multichain_v6') && V6_MIGRATES_FROM.has(cur.policyId) && cur.chain === v6.chain) return v6
     // otto/mamoru#151: MamoruActionPolicyV2 deployed and offered: v2/v3 and v4 accounts move to v5.
     const v5 = this.cfg.v5Policy
     if (v5 && flags?.onchain_action_policy_v5 === true && V5_MIGRATES_FROM.has(cur.policyId) && cur.chain === v5.chain) return v5
@@ -2844,7 +2863,7 @@ export class Operator {
     const start = await this.startTotal(acc, totalOf(this.localExposure(acc, r)))
     if (start.total > cap) throw depositOverCap(start.total, cap, start.across)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc, this.chainName())
-    const policy = this.cfg.policy
+    const policy = this.activationPolicy(acc)
     // otto/mamoru#15: a Safe holding enough USDC buys its own gas reserve in this very transaction (self-reserve.ts):
     // the relayer then sends no top-up. Any other start keeps the relayer's top-up, within the activation budget.
     const self = r.usdc > 0n ? await this.selfReserve(live.safe, r) : null

@@ -422,6 +422,60 @@ describe('a v6 approval whose receipt only reconciliation sees still records and
     expect(acc.active).toBe(true)
     expect(acc.remote).toMatchObject({ chainId: 143, address: t.remote!.address, ready: true })
     expect(p.provisioned).toHaveLength(1)
+describe('otto/mamoru#231: a Start activates on v6 for accounts in the multichain_v6_new scope', () => {
+  /** A Base operator whose default policy is v5, offering v6; what a Start of a fresh account `k` prepares. */
+  async function start(flags: Record<string, boolean>, scoped: Record<string, string[] | null>, extra: Partial<OperatorConfig> = {}) {
+    const p = fakePeer()
+    const w = world(0n, { policy: v5, ...cfg6(p.peer, { opsFlags: () => flags, opsScopedFlags: () => scoped, ...extra }) })
+    w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
+    chain(w, 0n)
+    const t = await w.op.prepareActivate(ctx)
+    const held = priv(w.op).prepared.get(t.prepareId)!
+    return { t, names: held.grants!.map((g) => g.name), policyIds: new Set(held.grants!.map((g) => g.grant.policyId)), peer: p }
+  }
+
+  test('in scope by account key: the Start is v6 (bridge-out to its own Safe on Monad, one approval)', async () => {
+    const r = await start({ multichain_v6_new: false }, { multichain_v6_new: ['k'] })
+    expect(r.policyIds).toEqual(new Set([v6.policyId]))
+    expect(r.names).toContain('bridge-out')
+    expect(r.t.remote!.address).toBe(remoteSafe(remoteInput(ctx, r.t.remote!.spec, pinnedV3)).address)
+    expect(r.peer.keyAsked.length).toBe(1)
+  })
+
+  test('in scope by Safe address, and everyone (null) with the boolean on', async () => {
+    expect((await start({}, { multichain_v6_new: [String(ctx.address).toLowerCase()] })).policyIds).toEqual(new Set([v6.policyId]))
+    expect((await start({ multichain_v6_new: true }, { multichain_v6_new: null })).policyIds).toEqual(new Set([v6.policyId]))
+  })
+
+  test('out of scope, empty or malformed scope, no scope information (older Worker), boolean off: the default policy', async () => {
+    for (const [flags, scoped] of [
+      [{ multichain_v6_new: true }, { multichain_v6_new: ['someone-else'] }],
+      [{ multichain_v6_new: true }, { multichain_v6_new: [] }],
+      [{ multichain_v6_new: true }, {}],
+      [{ multichain_v6_new: false }, { multichain_v6_new: null }],
+    ] as [Record<string, boolean>, Record<string, string[] | null>][]) {
+      const r = await start(flags, scoped)
+      expect(r.policyIds).toEqual(new Set([v5.policyId]))
+      expect(r.names).not.toContain('bridge-out')
+      expect(r.t.remote).toBeUndefined()
+      expect(r.peer.keyAsked.length).toBe(0)
+    }
+  })
+
+  test('the renewal flag (multichain_v6) alone never makes a Start v6', async () => {
+    expect((await start({ multichain_v6: true }, { multichain_v6: null })).policyIds).toEqual(new Set([v5.policyId]))
+  })
+
+  test('v6 not configured on this operator: the default policy, whatever the flag', async () => {
+    expect((await start({ multichain_v6_new: true }, { multichain_v6_new: null }, { v6Policy: undefined })).policyIds).toEqual(new Set([v5.policyId]))
+  })
+
+  test('no Monad operator reachable: the v6 Start is refused (503), never quietly started on another policy', async () => {
+    const w = world(0n, { policy: v5, ...cfg6(undefined, { opsFlags: () => ({}), opsScopedFlags: () => ({ multichain_v6_new: ['k'] }) }) })
+    w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
+    chain(w, 0n)
+    const e = await w.op.prepareActivate(ctx).catch((x: unknown) => x)
+    expect(e instanceof HttpError && e.code).toBe('REMOTE_UNAVAILABLE')
   })
 })
 

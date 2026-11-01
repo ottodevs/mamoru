@@ -464,6 +464,8 @@ export function assertPauseGateOnRegistry(policy: PolicyVersion, registry: Regis
  * Round 2 (GPT-6 Sol P1): an operator that signs (`live`, or writes off Base) never offers a pause gate the registry
  * has not pinned: while MamoruPauseGate is `undeployed` such a boot is refused, so v6 goes live only with base.json's
  * pin. With writes off Base, the v6 target also gets `assertActionPolicyOnRegistry`, like the default policy.
+ * otto/mamoru#231: a Start may still activate on v6 per account (`multichain_v6_new`, Operator.activationPolicy): that
+ * approval provisions the account's own Safe on Monad and the bridge waits until it runs (#251).
  */
 export function assertBootPolicies(policy: PolicyVersion, v6Policy: PolicyVersion | undefined, registry: Registry, mode: { live?: boolean; writes?: boolean } = {}): void {
   if (policy.remoteBuckets?.length) throw new Error(`${policy.policyId} has a bucket on another chain: it is a renewal target only, never the default policy (an activation does not check the owner's sleeve)`)

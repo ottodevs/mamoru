@@ -52,6 +52,16 @@ export const OPS_FLAGS = {
     label: 'Multichain (v6: Base + Monad growth)',
     description: 'Offers running Base accounts the renewal that moves them to conservadorLiveV6: growth 15 % on the owner\'s Monad sleeve, bridge-out behind MamoruPauseGate (otto/mamoru#214). Refused until the Monad sleeve is active.',
   },
+  /**
+   * otto/mamoru#231, default off, scoped like multichain_v6: a Start of an account in scope activates it directly on
+   * conservadorLiveV6 (Base + its own Safe on Monad, one approval) instead of the operator's default policy. Only where
+   * the operator offers v6 at all (MAMORU_PAUSE_GATE_ADDRESS, V3 pinned, a Monad peer). Not for everyone until the one
+   * approval fits its gas (#259), the two-chain e2e reaches the Monad LP (#272) and the return leg exists (#278).
+   */
+  multichain_v6_new: {
+    label: 'Multichain for new accounts (v6 on Start)',
+    description: 'A Start activates the account directly on conservadorLiveV6 (Base + its own Safe on Monad, growth 15 %) instead of the default policy (otto/mamoru#231). Scope it to test accounts until #259, #272 and #278 are done.',
+  },
 } as const
 
 export type OpsFlagName = keyof typeof OPS_FLAGS
