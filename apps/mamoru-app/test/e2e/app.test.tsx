@@ -664,6 +664,14 @@ describe('renewing the approval', () => {
     expect(before.text).toContain('Nothing moves now')
   })
 
+    test("#225 review round 2: a split approval's Finish head is not read, so it is in the view word for word", () => {
+    const finish = "Finish Mamoru's approval on your Safe 0x5af19C48077D38F10B4245a6B2D92478aaEFAcD0: WETH/USDC 0.30%"
+    const { html, text } = render(<ApprovalBody lead="x" summary={[finish, 'Nothing is moved now: your positions stay as they are']} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} locale="en" />)
+    const also = html.slice(html.indexOf('data-testid="also-signed"'), html.indexOf('data-testid="review"'))
+    expect(plain(also)).toContain(finish)
+    expect(text).not.toContain('One passkey signature')
+  })
+
     test('#225: the dialog speaks Spanish and Japanese; the signed text stays as signed', () => {
     const summary = ['In WETH/USDC 0.30%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 70.00 USDC a day and 350.00 USDC in total on this approval']
     const es = render(<ApprovalBody lead="x" summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} locale="es" />)
