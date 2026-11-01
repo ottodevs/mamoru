@@ -99,9 +99,9 @@ describe('routes', () => {
       pool: 'conservador-live-v2',
       currentPct: 6.4,
       currentWindow: '24h',
-      currentSource: 'Plan pools, fee APR · GeckoTerminal',
+      currentSource: 'Plan pools, fee APR · GeckoTerminal/DefiLlama',
       monthlyPct: 5.9,
-      monthlySource: 'Plan pools, 30-day fee APR · GeckoTerminal',
+      monthlySource: 'Plan pools, 30-day mean · DefiLlama',
       byPool: [{ pool: 'pool:USDC/cbBTC/500', weight: 10000, currentPct: 6.4, monthlyPct: 5.9 }],
       asOf: '2026-10-10T00:00:00.000Z',
     }
@@ -109,8 +109,8 @@ describe('routes', () => {
     const { text, html } = await renderRoute('/', fixtureSession, one, { apy })
     expect(text).toContain('5.9% Monthly rate APY · 30-day avg')
     expect(text).toContain('Current rate APY · 24h avg')
-    expect(text).toContain('Monthly: GeckoTerminal')
-    expect(text).toContain('24h avg: GeckoTerminal')
+    expect(text).toContain('Monthly: DefiLlama')
+    expect(text).toContain('24h avg: GeckoTerminal/DefiLlama')
     expect(html).toContain('aria-label="Rate sources"')
     expect(text).toContain('earned so far')
     expect(text).not.toContain('Saves automatically')

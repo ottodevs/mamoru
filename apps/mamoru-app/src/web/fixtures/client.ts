@@ -281,9 +281,9 @@ export const fixtureClient: ApiClient = {
       pool: 'conservador-live-v2',
       currentPct: 6.4,
       currentWindow: '24h' as const,
-      currentSource: 'Plan pools, fee APR · GeckoTerminal',
+      currentSource: 'Plan pools, fee APR · GeckoTerminal/DefiLlama',
       monthlyPct: 5.9,
-      monthlySource: 'Plan pools, 30-day fee APR · GeckoTerminal',
+      monthlySource: 'Plan pools, 30-day mean · DefiLlama',
       byPool: [
         { pool: 'pool:USDC/USDT/100', weight: 5000, currentPct: 3.1, monthlyPct: 2.8 },
         { pool: 'pool:USDC/cbBTC/500', weight: 4000, currentPct: 9.2, monthlyPct: 8.1 },
