@@ -1340,8 +1340,14 @@ export class BridgeOut {
         // The execution is looked for in every case, so an empty code from a node that is behind never reads as
         // "never ran": failed only when the logs up to `head` have no execution of the signed hash.
         const ran = await this.findExecution(next.safe, next.safeTxHash, BigInt(next.fromBlock), head)
-        if (ran === null && nonce === BigInt(next.safeNonce)) next.state = 'failed'
-        else {
+        if (ran === null && nonce === BigInt(next.safeNonce)) {
+          // Unspent at `head` is final only once `head` is past the signed swap's deadline (set at the prepare, at most
+          // PREPARE_TTL_MS before the send block): until then a head a block behind could miss an execution in the
+          // next block, so the conversion stays unconfirmed and is looked at again.
+          const [at, sent] = await Promise.all([this.l1.getBlock({ blockNumber: head }), this.l1.getBlock({ blockNumber: BigInt(next.fromBlock) })])
+          if (at.timestamp > sent.timestamp + BigInt(CONVERT_DEADLINE_SEC) + BigInt(Math.ceil(PREPARE_TTL_MS / 1000))) next.state = 'failed'
+          else next.state = 'unconfirmed'
+        } else {
           // Every stored conversion carries the signed safeTxHash and its send block (written before any send).
           if (ran === null) next.state = 'failed'
           else if (ran.success) {

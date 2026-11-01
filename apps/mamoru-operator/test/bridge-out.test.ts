@@ -325,3 +325,50 @@ describe('the CCTP mint on Base (#180): replayed attestations and the admission-
     expect(j().mintDays['2026-10-21']).toEqual({ n: 0, wei: '0' })
   })
 })
+
+describe('convert reconciliation at a stale head (otto/mamoru#285)', () => {
+  const { mkdtempSync, writeFileSync } = require('node:fs') as typeof import('node:fs')
+  const { tmpdir } = require('node:os') as typeof import('node:os')
+  const { join } = require('node:path') as typeof import('node:path')
+  type Hex = `0x${string}`
+  const T0 = 1_800_000_000n
+  const convert = {
+    id: 'c1',
+    safe: '0x0000000000000000000000000000000000000aaa',
+    safeNonce: '0',
+    safeTxHash: `0x${'c1'.repeat(32)}`,
+    fromBlock: '100',
+    state: 'unconfirmed',
+    execStarted: true,
+    ethWei: '1',
+    minUsdc: '1',
+    at: '2026-10-20T09:00:00.000Z',
+  }
+  let blocksRead = 0
+  const status = async (headTime: bigint) => {
+    const dir = mkdtempSync(join(tmpdir(), 'mamoru-convert-'))
+    writeFileSync(join(dir, 'bridge-out.json'), JSON.stringify({ routes: {}, spent: { day: '', wei: '0' }, moves: {}, converts: { a: convert } }))
+    const l1 = {
+      getBlockNumber: async () => 105n,
+      // A node behind: the Safe looks undeployed and no log is there yet.
+      getCode: async () => '0x',
+      getLogs: async () => [],
+      getBlock: async ({ blockNumber }: { blockNumber: bigint }) => (blocksRead++, { timestamp: blockNumber === 100n ? T0 : headTime }),
+      getTransactionReceipt: async ({ hash }: { hash: Hex }) => Promise.reject(new TransactionReceiptNotFoundError({ hash })),
+    } as unknown as import('viem').PublicClient
+    const relayer = { address: '0x0000000000000000000000000000000000000001' as const, send: async () => Promise.reject(new Error('unused')) }
+    const bo = new BridgeOut(l1, relayer, dir, fetch, () => Date.parse('2026-10-20T10:00:00Z'), undefined, () => true)
+    return ((await (bo as unknown as { convertStatus: (k: string) => Promise<{ state: string } | null> }).convertStatus('a')) ?? { state: 'none' }).state
+  }
+
+  test('an unspent nonce and no execution before the swap deadline stays unconfirmed', async () => {
+    blocksRead = 0
+    expect(await status(T0 + 60n)).toBe('unconfirmed')
+    // It reached the deadline check (not an early return or a swallowed error).
+    expect(blocksRead).toBe(2)
+  })
+
+  test('the same past the swap deadline is failed', async () => {
+    expect(await status(T0 + 3_600n)).toBe('failed')
+  })
+})
