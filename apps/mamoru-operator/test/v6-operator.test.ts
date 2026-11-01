@@ -422,6 +422,9 @@ describe('a v6 approval whose receipt only reconciliation sees still records and
     expect(acc.active).toBe(true)
     expect(acc.remote).toMatchObject({ chainId: 143, address: t.remote!.address, ready: true })
     expect(p.provisioned).toHaveLength(1)
+  })
+})
+
 describe('otto/mamoru#231: a Start activates on v6 for accounts in the multichain_v6_new scope', () => {
   /** A Base operator whose default policy is v5, offering v6; what a Start of a fresh account `k` prepares. */
   async function start(flags: Record<string, boolean>, scoped: Record<string, string[] | null>, extra: Partial<OperatorConfig> = {}) {
@@ -489,6 +492,26 @@ describe('otto/mamoru#231: a Start activates on v6 for accounts in the multichai
     // The account's own policy decides from now on: v6, never the operator's default, with or without the Start scope.
     expect(w.op.policyOf(acc).policyId).toBe(v6.policyId)
     expect(w.op.v4Target(acc)).toBeNull()
+  })
+
+  test('security review: a v6 Start armed for its deposit keeps the remote Safe, and records and provisions it when it fires', async () => {
+    const p = fakePeer()
+    const w = world(0n, { policy: v5, ...cfg6(p.peer, { opsFlags: () => ({}), opsScopedFlags: () => ({ multichain_v6_new: ['k'] }) }) })
+    w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
+    chain(w, 0n)
+    const t = await w.op.prepareActivate(ctx)
+    expect(await w.op.submit(ctx, 'activate', sign(t))).toMatchObject({ code: 'ARMED' })
+    const acc = w.state.accounts.k!
+    expect(acc.armed?.remote).toMatchObject({ ...t.remote, permissionIds: expect.any(Array) })
+    // The stored op keeps it too, for a receipt that only reconciliation sees.
+    expect((acc.ops.find((o) => o.kind === 'activate') as { ownerRemote?: unknown }).ownerRemote).toMatchObject({ address: t.remote!.address, chainId: 143 })
+    w.chain.usdc = 10_000_000n
+    await quiet(() => (w.op as unknown as { fireArmed(a: AccountState, u: bigint): Promise<void> }).fireArmed(acc, 10_000_000n))
+    await new Promise((r) => setTimeout(r, 10))
+    expect(acc.active).toBe(true)
+    expect(acc.policyId).toBe(v6.policyId)
+    expect(acc.remote).toMatchObject({ chainId: 143, address: t.remote!.address, ready: true })
+    expect(p.provisioned).toHaveLength(1)
   })
 
   test('no Monad operator reachable: the v6 Start is refused (503), never quietly started on another policy', async () => {

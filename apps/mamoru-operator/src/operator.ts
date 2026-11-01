@@ -4118,7 +4118,7 @@ export class Operator {
     const op = this.newOp(acc, 'activate')
     op.code = 'ARMED'
     this.stash(acc, op, p)
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}), ...(p.gen !== undefined ? { gen: p.gen } : {}), ...(p.reserveWei ? { reserveWei: p.reserveWei, reserveDeadline: p.reserveDeadline } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], ...(p.remote ? { remote: p.remote } : {}), armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}), ...(p.gen !== undefined ? { gen: p.gen } : {}), ...(p.reserveWei ? { reserveWei: p.reserveWei, reserveDeadline: p.reserveDeadline } : {}) }
     this.store.save()
     console.log(`[armed] ${acc.accountKey} ${op.opId} armed for ${acc.ctx.address} at Safe nonce ${p.tx.nonce}`)
     return { ...op }
@@ -4134,7 +4134,7 @@ export class Operator {
     const current = acc.ops.find((o) => o.opId === op.opId)
     if (current?.txHash) return this.failOwner(acc, op, 'OWNER_TX_ERROR')
     if (acc.active || acc.armed) return this.patchOp(acc, op.opId, { state: 'failed', code: 'ARMED_SUPERSEDED' })
-    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}), ...(p.gen !== undefined ? { gen: p.gen } : {}), ...(p.reserveWei ? { reserveWei: p.reserveWei, reserveDeadline: p.reserveDeadline } : {}), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
+    acc.armed = { opId: op.opId, tx: p.tx, safeTxHash: p.safeTxHash, signature, grants: p.grants ?? [], ...(p.remote ? { remote: p.remote } : {}), armedAt: now(), ...(p.capUsdc ? { capUsdc: p.capUsdc } : {}), ...(p.gen !== undefined ? { gen: p.gen } : {}), ...(p.reserveWei ? { reserveWei: p.reserveWei, reserveDeadline: p.reserveDeadline } : {}), ...(tries || this.execTried.has(opKey(acc, op)) ? { tries, retryAt: retryAt(tries, this.execTried.has(opKey(acc, op))) } : {}), ...(this.execTried.has(opKey(acc, op)) ? { execSent: true } : {}) }
     this.armHold.delete(acc.accountKey)
     this.patchOp(acc, op.opId, { state: 'proposed', code: 'ARMED' })
     this.execTried.delete(opKey(acc, op))
@@ -4308,7 +4308,7 @@ export class Operator {
         }
         if (acc.armed?.opId !== a.opId) return
         console.log(`[armed] ${acc.accountKey} ${a.opId} executed on chain at block ${block} (ExecutionSuccess of its Safe tx hash): account started`)
-        this.afterOwner(acc, { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: 0, grants: a.grants, ...(a.capUsdc ? { capUsdc: a.capUsdc } : {}) }, { blockNumber: block } as TransactionReceipt, depositsFrom)
+        this.afterOwner(acc, { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: 0, grants: a.grants, ...(a.remote ? { remote: a.remote } : {}), ...(a.capUsdc ? { capUsdc: a.capUsdc } : {}) }, { blockNumber: block } as TransactionReceipt, depositsFrom)
         return this.patchOp(acc, op.opId, { state: 'confirmed', code: 'EXEC_OK', block: Number(block) })
       }
     }
@@ -4395,7 +4395,7 @@ export class Operator {
     // cleared when the account starts, or when the attempt ends in a failure that is final.
     this.patchOp(acc, a.opId, { code: undefined })
     console.log(`[armed] ${acc.accountKey} ${a.opId} deposit ${usdc} landed, executing`)
-    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants, ...(a.capUsdc ? { capUsdc: a.capUsdc } : {}), ...(a.gen !== undefined ? { gen: a.gen } : {}), ...(a.reserveWei ? { reserveWei: a.reserveWei, reserveDeadline: a.reserveDeadline } : {}) }
+    const p: Prepared = { prepareId: `armed-${a.opId}`, accountKey: acc.accountKey, kind: 'activate', tx: a.tx, safeTxHash: a.safeTxHash, expires: Number.MAX_SAFE_INTEGER, grants: a.grants, ...(a.remote ? { remote: a.remote } : {}), ...(a.capUsdc ? { capUsdc: a.capUsdc } : {}), ...(a.gen !== undefined ? { gen: a.gen } : {}), ...(a.reserveWei ? { reserveWei: a.reserveWei, reserveDeadline: a.reserveDeadline } : {}) }
     const op = acc.ops.find((o) => o.opId === a.opId)!
     if (a.execSent) this.retried.add(opKey(acc, op))
     try {

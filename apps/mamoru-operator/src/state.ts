@@ -74,6 +74,8 @@ export type ArmedActivation = {
   signature: Hex
   /** The grants this tx enables, with their permissionIds. */
   grants: StoredGrant[]
+  /** otto/mamoru#231: the account's own Safe on another chain this activation provisions (a v6 Start armed for its deposit). */
+  remote?: RemoteSafeRecord
   armedAt: string
   /** Failed execution attempts so far; the watcher retries until ARM_MAX_TRIES. */
   tries?: number
