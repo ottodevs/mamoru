@@ -188,7 +188,8 @@ export type RpcProxyOptions = {
   trustedLogsOnly?: boolean
   /**
    * Blocks behind the tip that `latest` is served at; default MAMORU_HEAD_LAG or 3. 0 for Ethereum and Monad
-   * (otto/mamoru#285): their reconciliation reads Safe nonces at latest and must scan logs up to the same state.
+   * (otto/mamoru#285): a move's send block (`fromBlock`) is read at the tip, so its log scans start where the send is.
+   * Terminal decisions on Ethereum read the `finalized` tag, which this proxy passes through unchanged.
    */
   headLag?: bigint
   /** Bun's idle timeout for the loopback server, in seconds (default Bun's 10). Must outlast the request's failover. */
