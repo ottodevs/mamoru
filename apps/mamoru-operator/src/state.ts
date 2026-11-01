@@ -158,6 +158,11 @@ export type AccountState = {
    * the pool of an entry (mint, increase, re-range) decided then and not yet observed.
    */
   peerView?: { positions: { pool: string | null; tickLower: number; tickUpper: number; liquidity: string }[] | null; entering: string | null }
+  /**
+   * Live wait rule (lazy re-range): since when each position (tokenId) has been out of range, as block times, and the
+   * block time of the review that saw it (`seenAt`). Seeds the engine's clock after a restart (EngineConfig.outOfRangeSeed).
+   */
+  outOfRange?: { since: Record<string, string>; seenAt: string }
   /** otto/mamoru#140 (part2 #6): owner transactions of this account the relayer paid for, last 24 h (sponsorship limits). */
   sponsored?: SponsorEntry[]
   /**

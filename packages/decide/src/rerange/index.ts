@@ -1,5 +1,5 @@
 import type { ReasonCode } from '@mamoru/domain'
-import { grantKeyFor, hasManageAny, preferenceTotal, type PolicyVersion } from '@mamoru/policy'
+import { grantKeyFor, hasManageAny, preferenceTotal, type LazyRerange, type PolicyVersion } from '@mamoru/policy'
 import type { RegistryName } from '@mamoru/registry'
 import { keccak256 } from 'viem'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
@@ -80,6 +80,12 @@ export function positionValue(p: PositionObs, pool: PoolObs, savings: RegistryNa
   return inSavings(pool, pool.token0, amount0 + p.collectable0, savings) + inSavings(pool, pool.token1, amount1 + p.collectable1, savings)
 }
 
+/** The lazy buffer for a range of `width` ticks: `edgeBufferTicks`, capped at `edgeBufferBps` of the width when set. */
+export function lazyBufferTicks(lazy: LazyRerange, width: number): number {
+  if (lazy.edgeBufferBps === undefined) return lazy.edgeBufferTicks
+  return Math.min(lazy.edgeBufferTicks, Math.ceil((width * lazy.edgeBufferBps) / 10_000))
+}
+
 /**
  * Re-range (policy.range.adjust = on_out_of_range, live grant manage-any):
  * the price left the range, or sits within 10% of the width from an edge,
@@ -98,14 +104,18 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
   const lazy = policy.range.lazy
   if (lazy) {
     // Lab (#101 experiment 4): past the edge by the buffer, out long enough, and worth its cost; no near-edge trigger.
-    const past = pool.tick < p.tickLower - lazy.edgeBufferTicks || pool.tick >= p.tickUpper + lazy.edgeBufferTicks
-    if (!past) return { code: null, proposal: null }
+    const buffer = lazyBufferTicks(lazy, p.tickUpper - p.tickLower)
+    const past = pool.tick < p.tickLower - buffer || pool.tick >= p.tickUpper + buffer
+    const since = p.outOfRangeSince ?? null
+    // Live wait rule: out this long, any distance past the edge is no passing swing.
+    const waited = lazy.maxWaitSeconds !== undefined && since !== null && (pool.tick < p.tickLower || pool.tick >= p.tickUpper) && obs.block.timestamp - since >= BigInt(lazy.maxWaitSeconds)
+    if (!past && !waited) return { code: null, proposal: null }
     const lastAt = obs.lastRerangeAt ?? null
     if (lastAt !== null && obs.block.timestamp - lastAt < BigInt(policy.range.cooldownSeconds)) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
     if (atWeeklyCap(obs, policy, pool)) return { code: 'DECIDE_RANGE_WEEKLY_CAP', proposal: null }
-    const since = p.outOfRangeSince ?? null
     const dwell = BigInt(lazy.minDwellSeconds + dwellJitterSeconds(obs.account.address, lazy.minDwellSeconds))
     if (lazy.minDwellSeconds > 0 && (since === null || obs.block.timestamp - since < dwell)) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
+    if (lazy.costTest === 'off') return { code: 'DECIDE_RANGE_ADJUST', proposal: proposal() }
     const w = rerangeWorth(obs, policy, p, pool, lazy)
     // Live (#172): no estimate is no re-range. The Lab keeps its measured rule (abstain) unless a variant sets the flag.
     if (!w && lazy.requireCostEstimate) return { code: 'DECIDE_RANGE_NO_FEE_HISTORY', proposal: null }

@@ -91,6 +91,38 @@ describe('lazy re-range (#101 experiment 4)', () => {
     expect(rich.kind).toBe('rerange')
   })
 
+  // Live wait rule (Ot, 1 Nov 2026): out of range earns nothing; a passing swing is waited out, nothing else.
+  test('wait rule: costTest off moves a position the cost test would hold; no fee history does not hold it', () => {
+    const p = lazy({ costTest: 'off', requireCostEstimate: true })
+    const make = (guard?: Observation['guard']) => obs(p, { balances: BALANCED, positions: [position()], pools: [pool(BTC_POOL, TICK + 1500)], ...(guard ? { guard } : {}) })
+    expect(decide(make(market(1n)), p).kind).toBe('rerange')
+    expect(decide(make(), p).kind).toBe('rerange')
+  })
+
+  test('wait rule: edgeBufferBps caps the buffer at a share of a narrow range', () => {
+    // Range of 2000 ticks; the buffer of 400 ticks is capped at 25% of it = 500, so 400 stays; at 1000 bps it is 200.
+    const wide = lazy({ edgeBufferTicks: 400, edgeBufferBps: 1000, costTest: 'off' })
+    const at = (t: number) => decide(obs(wide, { balances: BALANCED, positions: [position()], pools: [pool(BTC_POOL, t)] }), wide).kind
+    expect(at(TICK + 1000 + 150)).toBe('hold')
+    expect(at(TICK + 1000 + 250)).toBe('rerange')
+    // Without edgeBufferBps the same 250 ticks out waits for the 400-tick buffer.
+    const fixed = lazy({ edgeBufferTicks: 400, costTest: 'off' })
+    expect(decide(obs(fixed, { balances: BALANCED, positions: [position()], pools: [pool(BTC_POOL, TICK + 1250)] }), fixed).kind).toBe('hold')
+  })
+
+  test('wait rule: out for maxWaitSeconds moves it at any distance; shorter, a near-edge drift waits', () => {
+    const p = lazy({ edgeBufferTicks: 400, minDwellSeconds: 1800, maxWaitSeconds: 21_600, costTest: 'off' })
+    // One tick below the range: inside the buffer.
+    const at = (since: bigint | null) => decide(obs(p, { balances: BALANCED, positions: [position({ outOfRangeSince: since })], pools: [pool(BTC_POOL, TICK - 1001)] }), p)
+    expect(at(100_000n - 3_600n).kind).toBe('hold')
+    expect(at(null).kind).toBe('hold')
+    expect(at(100_000n - 21_600n).kind).toBe('rerange')
+    // Cooldown and the weekly cap still hold it.
+    const cooled = decide(obs(p, { balances: BALANCED, positions: [position({ outOfRangeSince: 100_000n - 21_600n })], pools: [pool(BTC_POOL, TICK - 1001)], lastRerangeAt: 100_000n - 60n }), p)
+    expect(cooled.kind).toBe('hold')
+    expect(cooled.positions[0]!.codes).toContain('DECIDE_RANGE_COOLDOWN')
+  })
+
   test('a position in range in a pool without its own manage-any grant does not throw', () => {
     const p: PolicyVersion = { ...V2, range: { ...V2.range, lazy: { edgeBufferTicks: 0, minDwellSeconds: 0, horizonSeconds: 86_400, lvrWeightBps: 10_000 } }, session: { ...V2.session, grants: V2.session.grants.filter((g) => !(g.name === 'manage-any' && g.pool === BTC_POOL)) } }
     const o = obs(p, { balances: BALANCED, positions: [position()], pools: [pool(BTC_POOL, TICK)] })

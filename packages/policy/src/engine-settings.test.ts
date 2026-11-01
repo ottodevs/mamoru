@@ -308,3 +308,38 @@ describe('rerange.maxPerWeek (#218)', () => {
     expect(riskyChanges(withCap(undefined), withCap(3))).toEqual([])
   })
 })
+
+describe('lazy wait rule (Ot, 1 Nov 2026)', () => {
+  const at = (r: unknown) => validateEngineSettings({ ...DEFAULT_ENGINE_SETTINGS, rerange: r })
+  const wait = { edgeBufferBps: 2500, maxWaitSeconds: 21_600, costTest: 'off' as const }
+
+  test('validation: optional keys in bounds; the wait is never shorter than the dwell; costTest veto | off', () => {
+    expect(at({ mode: 'lazy', ...lazyParams, ...wait })).toEqual([])
+    expect(at({ mode: 'lazy', ...lazyParams, edgeBufferBps: 10_001 })).toContain('rerange.edgeBufferBps must be a whole number from 0 to 10000')
+    expect(at({ mode: 'lazy', ...lazyParams, maxWaitSeconds: 600 })).toContain('rerange.maxWaitSeconds must be a whole number from 1800 to 604800')
+    expect(at({ mode: 'lazy', ...lazyParams, minDwellSeconds: 7200, maxWaitSeconds: 3600 })).toContain('rerange.maxWaitSeconds must be at least rerange.minDwellSeconds')
+    expect(at({ mode: 'lazy', ...lazyParams, costTest: 'maybe' })).toContain("rerange.costTest must be 'veto' or 'off'")
+  })
+
+  test('the template validates, and lazyOf hands the wait keys to decide (still fail closed on the veto path)', () => {
+    const t = ENGINE_SETTINGS_TEMPLATES['lazy wait: 25% width / 30 min, any distance after 6 h, no cost veto, 2 a week']!
+    expect(validateEngineSettings(t)).toEqual([])
+    expect(lazyOf(t)).toMatchObject({ edgeBufferBps: 2500, maxWaitSeconds: 21_600, costTest: 'off', requireCostEstimate: true })
+  })
+
+  test('absent keys stay out of the canonical JSON and of lazyOf', () => {
+    const plain: EngineSettings = { ...DEFAULT_ENGINE_SETTINGS, rerange: { mode: 'lazy', ...lazyParams } }
+    expect(canonicalSettingsJson(plain)).not.toMatch(/edgeBufferBps|maxWaitSeconds|costTest/)
+    expect(Object.keys(lazyOf(plain)!)).not.toContain('costTest')
+  })
+
+  test('riskyChanges names each step towards moving sooner', () => {
+    const from: EngineSettings = { ...DEFAULT_ENGINE_SETTINGS, rerange: { mode: 'lazy', ...lazyParams } }
+    const to: EngineSettings = { ...DEFAULT_ENGINE_SETTINGS, rerange: { mode: 'lazy', ...lazyParams, ...wait } }
+    const out = riskyChanges(from, to)
+    expect(out).toContain('re-ranges no longer wait for the cost test: an out-of-range position is moved even when the next day of fees does not pay the gas')
+    expect(out).toContain('a position out of range for a while is moved at any distance from the edge')
+    expect(out).toContain('narrow ranges are moved closer to their edge')
+    expect(riskyChanges(to, from)).toEqual([])
+  })
+})

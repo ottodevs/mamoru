@@ -263,6 +263,12 @@ export type EngineConfig = {
    */
   rerangeHistory?: { pool: string; at: bigint }[]
   /**
+   * Live wait rule: since when each position was out of range at this account's last review before a restart, and the
+   * block time of that review (`seenAt`). Kept only when the first review comes within OUT_OF_RANGE_SEED_GAP_S of it:
+   * across a longer gap the price may have come back and left again, and the clock restarts as before. Absent: none.
+   */
+  outOfRangeSeed?: { since: ReadonlyMap<bigint, bigint>; seenAt: bigint }
+  /**
    * otto/mamoru#101 phase 1b (shadow): the latest off-chain pool statistics, by pool name (`Observation.poolStats`). Used
    * only for a policy that lists `packaging:tvl`. Must not throw or wait: the operator answers from its cache.
    */
@@ -272,6 +278,17 @@ export type EngineConfig = {
    * only for a policy that lists `packaging:eel`. Must not throw or wait: the operator answers from its cache.
    */
   poolDepth?: () => Observation['poolDepth']
+}
+
+/** Live wait rule: the longest gap between the last review before a restart and the first after it that keeps the clock. */
+export const OUT_OF_RANGE_SEED_GAP_S = 5_400n
+/** Live wait rule: how often an unchanged out-of-range clock is handed out again, so its `seenAt` stays recent. */
+export const OUT_OF_RANGE_SAVE_S = 1_800n
+
+/** Live wait rule: the clock a restarted engine starts from: the stored one when its review is recent enough, else empty. */
+export function outOfRangeFromSeed(seed: NonNullable<EngineConfig['outOfRangeSeed']>, now: bigint): Map<bigint, bigint> {
+  const gap = now - seed.seenAt
+  return gap >= 0n && gap <= OUT_OF_RANGE_SEED_GAP_S ? new Map(seed.since) : new Map()
 }
 
 /** Live op states whose signed bytes may still land or have landed without being settled here (Engine.carried). */
@@ -311,6 +328,11 @@ export type EngineHooks = {
   bridgeFailed?: (opId: string, code: string) => void
   /** otto/mamoru#218: a re-range was confirmed: its pool, block timestamp and block (the live operator stores it). */
   onReranged?: (pool: string, at: bigint, block: bigint) => void
+  /**
+   * Live wait rule: the out-of-range clock changed (a position left or came back), or OUT_OF_RANGE_SAVE_S passed since it
+   * was last handed out; `seenAt` is the review's block time. The live operator stores it for `outOfRangeSeed`.
+   */
+  onOutOfRange?: (since: ReadonlyMap<bigint, bigint>, seenAt: bigint) => void
   /** otto/mamoru#101: the shadow risk entries changed (rule, pool), with their latest values; the operator logs it. Never acts. */
   onShadowRisk?: (risk: NonNullable<Decision['shadowRisk']>) => void
 }
@@ -447,6 +469,10 @@ export class Engine {
    * byte for byte what it was, and a switch to lazy already knows how long a position has been out.
    */
   private outOfRange = new Map<bigint, bigint>()
+  /** Live wait rule: the clock from before a restart, until the first review decides whether it still holds. */
+  private outOfRangeSeed: EngineConfig['outOfRangeSeed']
+  /** Block time the clock was last handed to `onOutOfRange`. */
+  private outOfRangeSavedAt: bigint | null = null
   /** otto/mamoru#101: rules and pools of the last shadow risk reported (`onShadowRisk`). */
   private shadowSig = ''
   /**
@@ -479,6 +505,7 @@ export class Engine {
     for (const u of cfg.priorIncluded ?? []) this.ledger.recordIncluded(u.permissionId, u.calls)
     for (const op of cfg.carried ?? []) if (op.userOpHash && op.nonce !== undefined && op.prepareBlock !== undefined) this.released.push(op)
     for (const [name, series] of cfg.guardHistory?.series ?? []) this.guardSeries.set(name, series)
+    this.outOfRangeSeed = cfg.outOfRangeSeed
     // #218: a restart keeps the cooldown and the weekly count.
     for (const r of cfg.rerangeHistory ?? []) {
       this.reranges.push({ pool: r.pool, at: r.at })
@@ -664,7 +691,19 @@ export class Engine {
     const weekAgo = obs.block.timestamp - 7n * 86_400n
     const recent = this.reranges.filter((r) => r.at > weekAgo)
     obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...shadowInputsOf(this.cfg.policy, this.cfg), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}) }
-    this.outOfRange = outOfRangeSinceOf(this.outOfRange, obs)
+    if (this.outOfRangeSeed) {
+      const seed = this.outOfRangeSeed
+      this.outOfRangeSeed = undefined
+      this.outOfRange = outOfRangeFromSeed(seed, obs.block.timestamp)
+    }
+    const before = this.outOfRange
+    this.outOfRange = outOfRangeSinceOf(before, obs)
+    const changed = before.size !== this.outOfRange.size || [...this.outOfRange].some(([id, at]) => before.get(id) !== at)
+    // An empty clock that stays empty is never handed out: nothing to keep, and no write for every in-range account.
+    if (changed || (this.outOfRange.size > 0 && (this.outOfRangeSavedAt === null || obs.block.timestamp - this.outOfRangeSavedAt >= OUT_OF_RANGE_SAVE_S))) {
+      this.outOfRangeSavedAt = obs.block.timestamp
+      this.hooks.onOutOfRange?.(this.outOfRange, obs.block.timestamp)
+    }
     if (this.cfg.policy.range.lazy) obs = withOutOfRangeSince(obs, this.outOfRange)
     this.lastObservation = obs
     const decision = decide(obs, this.cfg.policy)

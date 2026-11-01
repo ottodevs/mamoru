@@ -56,6 +56,9 @@ export const ENGINE_SETTINGS_BOUNDS = {
   gasMultiple: { min: 1, max: 50 },
   // #218: re-ranges per pool in 7 days.
   maxPerWeek: { min: 1, max: 50 },
+  // Live wait rule (Ot, 1 Nov): the buffer as a share of the range width, and the longest a position waits out of range.
+  edgeBufferBps: { min: 0, max: 10_000 },
+  maxWaitSeconds: { min: 1_800, max: 604_800 },
 } as const
 
 export const DEFAULT_ENGINE_SETTINGS: EngineSettings = {
@@ -85,9 +88,17 @@ export const ENGINE_SETTINGS_TEMPLATES: Record<string, EngineSettings> = {
     ...DEFAULT_ENGINE_SETTINGS,
     rerange: { mode: 'lazy', edgeBufferTicks: 100, minDwellSeconds: 1800, horizonSeconds: 86_400, lvrWeightBps: 10_000 },
   },
+  // Live wait rule (Ot, 1 Nov 2026): out of range earns nothing. Past a quarter of the width for 30 min, or out at all
+  // for 6 h, the position is moved back; the cooldown and two per pool a week stop it chasing every swing.
+  'lazy wait: 25% width / 30 min, any distance after 6 h, no cost veto, 2 a week': {
+    ...DEFAULT_ENGINE_SETTINGS,
+    rerange: { mode: 'lazy', edgeBufferTicks: 100, edgeBufferBps: 2500, minDwellSeconds: 1800, maxWaitSeconds: 21_600, costTest: 'off', horizonSeconds: 86_400, lvrWeightBps: 10_000, maxPerWeek: 2 },
+  },
 }
 
 const LAZY_KEYS = ['edgeBufferTicks', 'minDwellSeconds', 'horizonSeconds', 'lvrWeightBps'] as const
+/** Optional lazy keys (live wait rule): absent keeps a version's canonical JSON and hash. */
+const LAZY_OPTIONAL = ['edgeBufferBps', 'maxWaitSeconds'] as const
 
 /**
  * The `range.lazy` these settings ask for, or null for the eager trigger. Always fail closed (`requireCostEstimate`):
@@ -96,7 +107,16 @@ const LAZY_KEYS = ['edgeBufferTicks', 'minDwellSeconds', 'horizonSeconds', 'lvrW
 export function lazyOf(s: EngineSettings): LazyRerange | null {
   const r = s.rerange
   if (!r || r.mode !== 'lazy') return null
-  return { edgeBufferTicks: r.edgeBufferTicks, minDwellSeconds: r.minDwellSeconds, horizonSeconds: r.horizonSeconds, lvrWeightBps: r.lvrWeightBps, requireCostEstimate: true }
+  return {
+    edgeBufferTicks: r.edgeBufferTicks,
+    minDwellSeconds: r.minDwellSeconds,
+    horizonSeconds: r.horizonSeconds,
+    lvrWeightBps: r.lvrWeightBps,
+    requireCostEstimate: true,
+    ...(r.edgeBufferBps !== undefined ? { edgeBufferBps: r.edgeBufferBps } : {}),
+    ...(r.maxWaitSeconds !== undefined ? { maxWaitSeconds: r.maxWaitSeconds } : {}),
+    ...(r.costTest !== undefined ? { costTest: r.costTest } : {}),
+  }
 }
 
 const isInt = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n)
@@ -159,11 +179,15 @@ export function validateEngineSettings(s: unknown): string[] {
     if (!o.rerange || typeof o.rerange !== 'object' || Array.isArray(o.rerange)) errors.push('rerange must be an object')
     else {
       const r = o.rerange as Record<string, unknown>
-      for (const k of Object.keys(r)) if (!['mode', 'maxPerWeek', ...LAZY_KEYS].includes(k)) errors.push(`unknown rerange setting ${k}`)
+      for (const k of Object.keys(r)) if (!['mode', 'maxPerWeek', 'costTest', ...LAZY_KEYS, ...LAZY_OPTIONAL].includes(k)) errors.push(`unknown rerange setting ${k}`)
       if (r.mode !== 'eager' && r.mode !== 'lazy') errors.push("rerange.mode must be 'eager' or 'lazy'")
       // Lazy needs every number; eager may carry them, and then they must still be in bounds.
       for (const k of LAZY_KEYS) if (r.mode === 'lazy' || r[k] !== undefined) inRange(errors, `rerange.${k}`, r[k], B[k])
       if (r.maxPerWeek !== undefined) inRange(errors, 'rerange.maxPerWeek', r.maxPerWeek, B.maxPerWeek)
+      for (const k of LAZY_OPTIONAL) if (r[k] !== undefined) inRange(errors, `rerange.${k}`, r[k], B[k])
+      if (r.costTest !== undefined && r.costTest !== 'veto' && r.costTest !== 'off') errors.push("rerange.costTest must be 'veto' or 'off'")
+      // The wait is a dwell too: never shorter than the dwell a far move waits.
+      if (isInt(r.maxWaitSeconds) && isInt(r.minDwellSeconds) && r.maxWaitSeconds < r.minDwellSeconds) errors.push('rerange.maxWaitSeconds must be at least rerange.minDwellSeconds')
     }
   }
   return errors
@@ -248,6 +272,10 @@ export function riskyChanges(from: EngineSettings, to: EngineSettings): string[]
     // Fees and LVR both scale with the horizon and gas does not: a shorter horizon passes the cost test less often.
     if (lt.horizonSeconds < lf.horizonSeconds) out.push('the cost test counts fewer hours of fees, so it lets fewer re-ranges through')
     if (lt.lvrWeightBps > lf.lvrWeightBps) out.push('the cost test weighs LVR more, so it lets fewer re-ranges through')
+    // Live wait rule: each of these moves positions back into range sooner, spending gas more often.
+    if (lf.costTest !== 'off' && lt.costTest === 'off') out.push('re-ranges no longer wait for the cost test: an out-of-range position is moved even when the next day of fees does not pay the gas')
+    if (lt.maxWaitSeconds !== undefined && (lf.maxWaitSeconds === undefined || lt.maxWaitSeconds < lf.maxWaitSeconds)) out.push('a position out of range for a while is moved at any distance from the edge')
+    if (lt.edgeBufferBps !== undefined && (lf.edgeBufferBps === undefined || lt.edgeBufferBps < lf.edgeBufferBps)) out.push('narrow ranges are moved closer to their edge')
   }
   return out
 }

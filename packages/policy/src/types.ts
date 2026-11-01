@@ -318,8 +318,25 @@ export type VolWidthRule = { k: number; horizonSeconds: number; minTicks: number
  * Missing fee or volatility history: the cost test abstains and the first two conditions decide alone, unless
  * `requireCostEstimate` (set by the live engine setting, otto/mamoru#172): then the position holds with
  * DECIDE_RANGE_NO_FEE_HISTORY, so a cold history never lets a re-range through untested. Lab variants leave it unset.
+ *
+ * Live wait rule (Ot, 1 Nov 2026): out of range a position earns nothing, so it is moved back once the move is not a
+ * passing swing, whatever the next day's fees say. Each optional, absent = the rule above unchanged:
+ * - `edgeBufferBps`: the buffer is also at most this share of the range's width (a 41-tick stables range waits 11
+ *   ticks at 2500, not the 100 a 2000-tick range wants), so a narrow range is not held out of range for good;
+ * - `maxWaitSeconds`: out of range this long without coming back, it is moved at any distance past the edge;
+ * - `costTest: 'off'`: no fee-against-cost veto and no hold on a missing fee history; the cooldown, the dwell and the
+ *   weekly cap (`maxPerWeek`) are what keeps gas from being spent on every swing.
  */
-export type LazyRerange = { edgeBufferTicks: number; minDwellSeconds: number; horizonSeconds: number; lvrWeightBps: number; requireCostEstimate?: boolean }
+export type LazyRerange = {
+  edgeBufferTicks: number
+  minDwellSeconds: number
+  horizonSeconds: number
+  lvrWeightBps: number
+  requireCostEstimate?: boolean
+  edgeBufferBps?: number
+  maxWaitSeconds?: number
+  costTest?: 'veto' | 'off'
+}
 
 /**
  * Volatility target (#101, experiment 6): a volatile bucket's weight is its preference times

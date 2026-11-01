@@ -290,6 +290,18 @@ export function priorIncludedOf(ops: readonly StoredOp[], sessions: readonly { p
   return ops.filter((o) => o.opId.startsWith('eng-') && (o.state === 'confirmed' || o.lateIncluded) && o.permissionId && o.calls && active.has(o.permissionId.toLowerCase())).map((o) => ({ permissionId: o.permissionId!, calls: o.calls! }))
 }
 
+/** Live wait rule: the stored out-of-range clock as the engine's seed; undefined when there is none or it does not parse. */
+export function outOfRangeSeedOf(o: AccountState['outOfRange']): EngineConfig['outOfRangeSeed'] {
+  if (!o || typeof o !== 'object' || typeof o.seenAt !== 'string' || !o.since || typeof o.since !== 'object') return undefined
+  try {
+    const since = new Map<bigint, bigint>()
+    for (const [id, at] of Object.entries(o.since)) since.set(BigInt(id), BigInt(at))
+    return { since, seenAt: BigInt(o.seenAt) }
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * otto/mamoru#218: the confirmed re-ranges of the last 7 days from the account's stored ops, for a new engine's
  * cooldown and weekly count. A stored op records the pool and the inclusion block, and `rerangeAt` its block
@@ -5298,6 +5310,7 @@ export class Operator {
         cap: () => this.engineCap(acc),
         ...this.remoteOf(acc),
         rerangeHistory: rerangeHistoryOf(acc.ops, Math.floor(Date.now() / 1000)),
+        ...(outOfRangeSeedOf(acc.outOfRange) ? { outOfRangeSeed: outOfRangeSeedOf(acc.outOfRange)! } : {}),
       },
       {
         waitBlock: () => Bun.sleep(this.cfg.waitBlockMs),
@@ -5306,6 +5319,11 @@ export class Operator {
           if (!acc.managedTokenIds.includes(tokenId.toString())) acc.managedTokenIds.push(tokenId.toString())
           this.store.save()
           return this.manageSession(acc, tokenId, pool)
+        },
+        // Live wait rule: the out-of-range clock survives a restart (the engine drops it after a long gap).
+        onOutOfRange: (since, seenAt) => {
+          acc.outOfRange = { since: Object.fromEntries([...since].map(([id, at]) => [id.toString(), at.toString()])), seenAt: seenAt.toString() }
+          this.store.save()
         },
         onReranged: (pool, at, block) => {
           const row = acc.ops.findLast((o) => o.rerange && o.block === Number(block) && o.pool === pool)
