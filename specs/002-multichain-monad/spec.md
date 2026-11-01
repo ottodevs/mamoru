@@ -111,8 +111,9 @@ the user choosing a chain.
 ### US12b · Money comes back to Base (P1)
 
 - Given Growth over its target across both chains, then the excess moves from Monad to Base (FR-XCH-014).
-- Given a Monad pool that stops paying, or a risk exit on Monad, then the USDC waits on Monad for a Monad entry up to
-  the maximum idle time, and past it moves to Base (FR-XCH-014). The user is not asked first.
+- Given a Monad pool that stops paying, or a risk exit on Monad, then the USDC holds on Monad up to
+  the maximum idle time, open to any Monad entry the policy allows (not a fixed pool), and past it moves to Base
+  (FR-XCH-014). The user is not asked first.
 
 ### US13 · The destination must be able to work (P1)
 
@@ -285,8 +286,8 @@ named is where the open part lives. Ids FR-CHN-001 to FR-CHN-003 keep the meanin
   allocator only bridges toward the remote bucket.
 - **FR-XCH-014.** Value MUST move back from Monad to Base outside a withdrawal in three cases (Brais and Ot,
   2026-11-01): (a) Growth over its target across both chains, outside the rebalance band: the excess goes to Base;
-  (b) a Monad pool that stops paying, and (c) a risk exit on Monad: the USDC first waits on Monad for a Monad entry,
-  to save the round trip, up to a maximum idle time, and past it goes to Base. The user is not asked first; the move
+  (b) a Monad pool that stops paying, and (c) a risk exit on Monad: the USDC holds on Monad, open to any Monad entry
+  the policy allows (not a fixed pool), to save the round trip, up to a maximum idle time, and past it goes to Base. The user is not asked first; the move
   shows in the app like any other (FR-XCH-017). The bucket split is measured over both chains. The maximum idle time
   starts at 48 h and is set from the Lab against the pool's history; it applies only to (b) and (c), never to Base →
   Monad, which follows FR-XCH-006. A USDC holding venue on Monad, kept until withdrawal, is out until TVL justifies
