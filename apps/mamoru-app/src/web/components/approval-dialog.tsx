@@ -36,11 +36,12 @@ const copy = {
       revoked: 'Your current approval is revoked in the same transaction.',
       paused: 'A guardian key has paused Mamoru on this Safe. Approving ends that pause: do it only if you know why.',
       wound: (pool: string) => `${pool}: only wound down. Nothing new goes in.`,
-      remote: (share: string, bucket: string, chain: string) => `${share} of your savings (${bucket}) moves to your own Safe on ${chain}. Same owner: your passkey.`,
+      remote: (share: string, bucket: string, chain: string) => `${share} of your savings (${bucket}) moves to your own Safe on ${chain}, which Mamoru creates with no other signature. Same owner: your passkey.`,
       capChange: (from: string, to: string) => `Your cap goes from ${from} to ${to} USDC. The limits below are sized for the new one.`,
     },
+    head: (move: boolean) => (move ? "Renews Mamoru's approval on your Safe and moves it to on-chain limits:" : "Renews Mamoru's approval on your Safe:"),
     sameActions: 'The same kinds of actions as now. Limits start again from zero.',
-    finish: 'Finishes this approval, within the same cap.',
+    finish: (cap: string | null) => `May keep acting for the rest of this approval${cap ? `, within limits sized for deposits up to ${cap} USDC` : ''}.`,
     engineKey: 'Engine key',
     limits: 'Limits per pool',
     band: 'Price band',
@@ -60,7 +61,7 @@ const copy = {
     promise: {
       nothingMoves: 'Nothing moves now: your positions stay as they are.',
       paidToSafe: 'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else.',
-      noAsking: 'It acts without asking you again, only inside these limits.',
+      noAsking: 'It acts without asking you again, only inside these limits, and whatever it collects, mints or swaps is paid to your Safe, never to anyone else.',
       positionsStay: (n: number) => `Your ${n} open position${n === 1 ? '' : 's'} stay${n === 1 ? 's' : ''} under Mamoru's management.`,
     },
     alsoSigned: 'Also in this approval',
@@ -92,11 +93,12 @@ const copy = {
       revoked: 'Tu aprobación actual se revoca en la misma transacción.',
       paused: 'Una clave guardiana ha pausado Mamoru en esta Safe. Aprobar quita esa pausa: hazlo solo si sabes por qué se pausó.',
       wound: (pool: string) => `${pool}: solo se va cerrando. No entra nada nuevo.`,
-      remote: (share: string, bucket: string, chain: string) => `El ${share} de tus ahorros (${bucket}) pasa a tu propia Safe en ${chain}. Mismo dueño: tu passkey.`,
+      remote: (share: string, bucket: string, chain: string) => `El ${share} de tus ahorros (${bucket}) pasa a tu propia Safe en ${chain}, que Mamoru crea sin ninguna otra firma. Mismo dueño: tu passkey.`,
       capChange: (from: string, to: string) => `Tu límite pasa de ${from} a ${to} USDC. Los límites de abajo están pensados para el nuevo.`,
     },
+    head: (move: boolean) => (move ? 'Renueva la aprobación de Mamoru en tu Safe y la pasa a límites on-chain:' : 'Renueva la aprobación de Mamoru en tu Safe:'),
     sameActions: 'Las mismas acciones que ahora. Los límites vuelven a contar desde cero.',
-    finish: 'Completa esta aprobación, con el mismo límite.',
+    finish: (cap: string | null) => `Puede seguir actuando el resto de esta aprobación${cap ? `, con límites pensados para depósitos de hasta ${cap} USDC` : ''}.`,
     engineKey: 'Clave del motor',
     limits: 'Límites por pool',
     band: 'Banda de precio',
@@ -116,7 +118,7 @@ const copy = {
     promise: {
       nothingMoves: 'Ahora no se mueve nada: tus posiciones siguen como están.',
       paidToSafe: 'Lo que cobre, acuñe o cambie se paga a tu Safe, nunca a nadie más.',
-      noAsking: 'Actúa sin volver a preguntarte, solo dentro de estos límites.',
+      noAsking: 'Actúa sin volver a preguntarte, solo dentro de estos límites, y lo que cobre, acuñe o cambie se paga a tu Safe, nunca a nadie más.',
       positionsStay: (n: number) => (n === 1 ? 'Tu posición abierta sigue gestionada por Mamoru.' : `Tus ${n} posiciones abiertas siguen gestionadas por Mamoru.`),
     },
     alsoSigned: 'También en esta aprobación (en inglés)',
@@ -144,15 +146,16 @@ const copy = {
     change: {
       onchain: '市場価格の近くでのみ取引し、Mamoru が開いたポジションだけを扱います。',
       guardian: 'ガーディアン鍵はいつでも Mamoru を一時停止できます。その鍵が資金を動かすことはできず、次の更新で一時停止は解除されます。',
-      add: '新しく開く代わりに、既存のポジションに追加できます。',
+      add: '新しく開く代わりに、Mamoru がすでに保有しているポジションに追加できます。',
       revoked: '現在の承認は同じトランザクションで取り消されます。',
       paused: 'ガーディアン鍵がこの Safe で Mamoru を一時停止しています。承認すると解除されます。理由が分かっている場合のみ承認してください。',
       wound: (pool: string) => `${pool}：縮小のみ。新たな資金は入りません。`,
-      remote: (share: string, bucket: string, chain: string) => `貯蓄の ${share}（${bucket}）を ${chain} 上のあなた自身の Safe に移します。所有者は同じ（あなたのパスキー）です。`,
+      remote: (share: string, bucket: string, chain: string) => `貯蓄の ${share}（${bucket}）を ${chain} 上のあなた自身の Safe に移します。この Safe は Mamoru が他の署名なしで作成します。所有者は同じ（あなたのパスキー）です。`,
       capChange: (from: string, to: string) => `上限が ${from} から ${to} USDC に変わります。下の上限は新しい値に合わせています。`,
     },
+    head: (move: boolean) => (move ? 'あなたの Safe での Mamoru の承認を更新し、オンチェーンの上限に移行します：' : 'あなたの Safe での Mamoru の承認を更新します：'),
     sameActions: '今と同じ種類の操作です。上限はゼロから数え直します。',
-    finish: '同じ上限のまま、この承認を完了します。',
+    finish: (cap: string | null) => `この承認の残りの期間、引き続き操作できます${cap ? `（${cap} USDC までの入金に合わせた上限内）` : ''}。`,
     engineKey: 'エンジン鍵',
     limits: 'プールごとの上限',
     band: '価格帯',
@@ -172,7 +175,7 @@ const copy = {
     promise: {
       nothingMoves: '今は何も動きません。ポジションはそのままです。',
       paidToSafe: '回収・発行・交換したものはすべてあなたの Safe に支払われ、他の誰にも渡りません。',
-      noAsking: '再確認なしで動きますが、この上限の内側だけです。',
+      noAsking: '再確認なしで動きますが、この上限の内側だけです。回収・発行・交換したものはすべてあなたの Safe に支払われ、他の誰にも渡りません。',
       positionsStay: (n: number) => `${n} 件の保有ポジションは引き続き Mamoru が管理します。`,
     },
     alsoSigned: 'この承認に含まれるその他の内容（英語）',
@@ -343,7 +346,7 @@ function Limits({ read, t }: { read: ApprovalRead; t: Copy }) {
       {read.pools.length ? <p className="pool-card-scope">{t.scope}</p> : null}
       {engine ? (
         <p className="approve-engine">
-          {engine === 'renew' ? t.sameActions : t.finish}{' '}
+          {engine === 'renew' ? t.sameActions : t.finish(read.engine!.capUsdc)}{' '}
           <span className="approve-engine-key">
             {t.engineKey} <code className="signed-addr">{read.engine!.key}</code>
           </span>
@@ -370,16 +373,24 @@ function Limits({ read, t }: { read: ApprovalRead; t: Copy }) {
 function Elsewhere({ read, t }: { read: ApprovalRead; t: Copy }) {
   const { remote, bridge } = read
   if (!remote && !bridge) return null
-  const own = read.changes.find((c) => c.key === 'remote')
+  const own = remoteIsNew(read) ? [] : read.changes.filter((c) => c.key === 'remote')
   return (
     <div className="pool-cards">
-      {remote && (remote.pools || remote.crosses || (own && !remoteIsNew(read))) ? (
+      {remote && (remote.grants.length || remote.crosses || own.length) ? (
         <article className="pool-card pool-card-remote">
           <header className="pool-card-head">
             <span className="pool-card-name">{t.on(remote.chain ?? read.bridge?.chain ?? '')}</span>
           </header>
-          {own && !remoteIsNew(read) ? <p className="pool-card-body">{changeText(own, t)}</p> : null}
-          {remote.pools ? <p className="pool-card-body">{t.remoteBody(remote.pools, remote.until)}</p> : null}
+          {own.map((c) => (
+            <p key={c.line} className="pool-card-body">
+              {changeText(c, t)}
+            </p>
+          ))}
+          {remote.grants.map((g) => (
+            <p key={g.line} className="pool-card-body">
+              {t.remoteBody(g.pools, g.until)}
+            </p>
+          ))}
           {remote.crosses ? <p className="pool-card-body">{t.remoteBridge}</p> : null}
         </article>
       ) : null}
@@ -464,6 +475,11 @@ export function ApprovalView({ lines, locale = detectLocale() }: { lines: string
   const read = readApproval(lines)
   return (
     <>
+      {read.head ? (
+        <p className="approve-engine">
+          {t.head(read.head.move)} <code className="signed-addr">{read.head.safe}</code>
+        </p>
+      ) : null}
       <Facts facts={signedFacts(lines)} t={t} />
       <Changes read={read} t={t} />
       <Limits read={read} t={t} />
@@ -474,6 +490,10 @@ export function ApprovalView({ lines, locale = detectLocale() }: { lines: string
     </>
   )
 }
+
+/** "One passkey signature" only when every signed line is read and none speaks of further steps: a line the reader does
+ * not know could be a split approval's step in other words, so its presence withholds the claim. */
+const oneSignature = (read: ApprovalRead) => !read.steps && !read.text.length
 
 /** The dialog's body for one approval: the brief, then (once prepared) the read approval and its exact text. */
 /** `context`: shown under the lead (the Monad move's mix); `points`: in place of the usual key points. */
@@ -491,7 +511,7 @@ export function ApprovalBody({ lead, summary, busy, error, onPrepare, onApprove,
         </p>
       ) : null}
       <div className="approve-actions">
-        {summary && !readApproval(summary).steps ? <span className="approve-once">{t.oneSignature}</span> : null}
+        {summary && oneSignature(readApproval(summary)) ? <span className="approve-once">{t.oneSignature}</span> : null}
         <button type="button" className="approve-later" onClick={onLater} disabled={busy === 'signing'}>
           {t.later}
         </button>

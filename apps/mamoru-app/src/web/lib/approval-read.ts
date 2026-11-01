@@ -29,7 +29,7 @@ export type PoolLimits = {
 export type Promise_ = { key: 'nothingMoves' | 'paidToSafe' | 'noAsking' | 'positionsStay'; count?: number; line: number }
 
 export type ApprovalRead = {
-  /** The first line ("Renew Mamoru's approval on your Safe 0x…"): `move` when it also moves to another policy. */
+  /** The first line, exactly "Renew Mamoru's approval on your Safe 0x…" (and "… and move it to on-chain limits": `move`). */
   head: { line: number; move: boolean; safe: string | null } | null
   /**
    * The engine key's line. `form` names the sentence when it is one of the two short known ones (a renewal: the same
@@ -39,7 +39,7 @@ export type ApprovalRead = {
   engine: { line: number; key: string; days: number | null; capUsdc: string | null; form: 'renew' | 'finish' | null } | null
   changes: Change[]
   pools: PoolLimits[]
-  remote: { lines: number[]; chain: string | null; pools: string | null; until: string | null; crosses: boolean } | null
+  remote: { lines: number[]; chain: string | null; grants: { pools: string; until: string; line: number }[]; crosses: boolean } | null
   bridge: { line: number; chain: string; perTxUsdc: string; totalUsdc: string; pause: boolean } | null
   gas: { line: number; perTxEth: string; gwei: string; txs: string } | null
   steps: { line: number; text: string } | null
@@ -51,7 +51,7 @@ export type ApprovalRead = {
 const ADDR = '(0x[0-9a-fA-F]{40})'
 const NUM = '(\\d[\\d,]*(?:\\.\\d+)?)'
 
-const HEAD = new RegExp(`^(?:Renew|Finish) Mamoru's approval on your Safe ${ADDR}( and move it to on-chain limits)?`)
+const HEAD = new RegExp(`^Renew Mamoru's approval on your Safe ${ADDR}( and move it to on-chain limits)?$`)
 const ENGINE = new RegExp(`^Engine key ${ADDR} may\\b`)
 const ENGINE_DAYS = /for (\d+) (?:more )?days/
 const ENGINE_CAP = new RegExp(`deposits up to ${NUM} USDC`)
@@ -81,7 +81,7 @@ const FIXED: Record<string, { change: Extract<Change, { key: 'onchain' | 'guardi
 
 export function readApproval(lines: readonly string[]): ApprovalRead {
   const r: ApprovalRead = { head: null, engine: null, changes: [], pools: [], remote: null, bridge: null, gas: null, steps: null, promises: [], text: [] }
-  const remote = () => (r.remote ??= { lines: [], chain: null, pools: null, until: null, crosses: false })
+  const remote = () => (r.remote ??= { lines: [], chain: null, grants: [], crosses: false })
   lines.forEach((l, line) => {
     const fixed = FIXED[l]
     if (fixed) {
@@ -110,7 +110,8 @@ export function readApproval(lines: readonly string[]): ApprovalRead {
       return
     }
     if ((m = l.match(REMOTE_POOLS))) {
-      Object.assign(remote(), { chain: m[1]!, pools: m[2]!, until: m[3]! })
+      remote().chain ??= m[1]!
+      remote().grants.push({ pools: m[2]!, until: m[3]!, line })
       remote().lines.push(line)
       return
     }

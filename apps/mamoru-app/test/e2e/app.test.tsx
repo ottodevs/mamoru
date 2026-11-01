@@ -643,7 +643,13 @@ describe('renewing the approval', () => {
     expect(also).toContain('USDC swapped in at most <strong class="signed-num">25.00</strong> per swap')
     expect(signedFacts(summary)).toEqual({ days: 365, capUsdc: '1,000.00', pools: ['WETH/USDC 0.30%', 'USDC/cbBTC 0.05%'] })
     expect(text).toContain('Approve with passkey')
-    expect(text).toContain('One passkey signature')
+    // A line the reader does not know could be a split approval's step: no "one signature" claim then (GPT-6 review).
+    expect(text).not.toContain('One passkey signature')
+    const known = render(<ApprovalBody lead="x" summary={[summary[0]!, summary[2]!, summary[5]!]} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} locale="en" />)
+    expect(known.text).toContain('One passkey signature')
+    // The head is in the view: what is renewed, on which Safe.
+    expect(text).toContain("Renews Mamoru's approval on your Safe:")
+    expect(text).toContain('0x5af19C48077D38F10B4245a6B2D92478aaEFAcD0')
     // Figures are emphasized, never rewritten: the text reads as signed, and "v3" stays plain.
     const line = 'It also keeps acting on any Uniswap v3 position: at most 256 transactions, 1,000.00 USDC'
     const emph = render(<Emph text={line} />)

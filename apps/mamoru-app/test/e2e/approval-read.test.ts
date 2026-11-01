@@ -36,7 +36,7 @@ describe('readApproval', () => {
     ])
     expect(r.changes.map((c) => c.key)).toEqual(['onchain', 'remote', 'wound', 'revoked'])
     expect(r.changes.find((c) => c.key === 'remote')).toMatchObject({ share: '15%', bucket: 'Growth', chain: 'Monad', safe: MONAD })
-    expect(r.remote).toEqual({ lines: [2, 3, 4], chain: 'Monad', pools: 'WMON/USDC 0.30%', until: '2027-09-21', crosses: true })
+    expect(r.remote).toEqual({ lines: [2, 3, 4], chain: 'Monad', grants: [{ pools: 'WMON/USDC 0.30%', until: '2027-09-21', line: 3 }], crosses: true })
     expect(r.bridge).toEqual({ line: 9, chain: 'Monad', perTxUsdc: '20.00', totalUsdc: '50.00', pause: true })
     expect(r.gas).toEqual({ line: 10, perTxEth: '0.00052', gwei: '0.1', txs: '104,064' })
     expect(r.promises.map((p) => p.key)).toEqual(['nothingMoves', 'paidToSafe'])
@@ -58,6 +58,22 @@ describe('readApproval', () => {
     expect(r.engine).toMatchObject({ days: 365, capUsdc: '25.00', form: null })
     expect(r.text).toEqual([{ line: 0, text: l }])
     expect(linesOf(r)).toEqual([0])
+  })
+
+  test('a head with anything after it is not the head (GPT-6 review): kept whole', () => {
+    const l = `Renew Mamoru's approval on your Safe ${SAFE} and move it to on-chain limits and raise the cap to 5,000 USDC`
+    const r = readApproval([l])
+    expect(r.head).toBeNull()
+    expect(r.text).toEqual([{ line: 0, text: l }])
+  })
+
+  test('two signed pools on Monad are both kept', () => {
+    const r = readApproval([
+      'On Monad Mamoru may only swap and provide liquidity in WMON/USDC 0.30%, near the market price, paid only to that Safe, until 2027-09-21',
+      'On Monad Mamoru may only swap and provide liquidity in WETH/USDC 0.05%, near the market price, paid only to that Safe, until 2027-09-21',
+    ])
+    expect(r.remote!.grants.map((g) => g.pools)).toEqual(['WMON/USDC 0.30%', 'WETH/USDC 0.05%'])
+    expect(linesOf(r)).toEqual([0, 1])
   })
 
   test('the head is only the first line', () => {
