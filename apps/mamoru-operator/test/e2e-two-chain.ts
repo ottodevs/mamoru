@@ -139,17 +139,32 @@ try {
     if (code !== 0) throw new Error(`forge script ${script} failed (${code}):\n${`${out}\n${err}`.slice(-3000)}`)
     return out
   }
-  await base.rpc('anvil_impersonateAccount', [PINNED_DEPLOYER])
-  const deployerBefore = await base.client.getBalance({ address: PINNED_DEPLOYER })
-  const deployerNonce0 = await base.client.getTransactionCount({ address: PINNED_DEPLOYER })
-  const outV3 = await forge('script/DeployV3.s.sol', { GUARDIAN: PINNED_GUARDIAN })
-  const outGate = await forge('script/DeployPauseGate.s.sol', {})
-  await base.rpc('anvil_stopImpersonatingAccount', [PINNED_DEPLOYER])
-  const deployerAfter = await base.client.getBalance({ address: PINNED_DEPLOYER })
-  const v3Printed = /MamoruActionPolicyV3:\s*(0x[0-9a-fA-F]{40})/.exec(outV3)?.[1]
-  const gatePrinted = /MamoruPauseGate:\s*(0x[0-9a-fA-F]{40})/.exec(outGate)?.[1]
-  check(v3Printed?.toLowerCase() === V3_BASE.toLowerCase() && gatePrinted?.toLowerCase() === GATE_V3_BASE.toLowerCase(), 'Base fork: DeployV3.s.sol and DeployPauseGate.s.sol from the pinned deployer give the pinned addresses', `V3 ${v3Printed}, gate ${gatePrinted}`)
-  gasReport.push(`Base deploys (V3 + ring raises + gate): ${await base.client.getTransactionCount({ address: PINNED_DEPLOYER }) - deployerNonce0} tx, ${deployerBefore - deployerAfter} wei ETH at the fork's gas price`)
+  // Since 2026-11-01 both are live on Base mainnet (pinned in base.json): a fork past that block already has them, so
+  // the check is their code against the registry's pins; an older fork block still deploys them as the coordinator did.
+  const deployed = async (a: Address) => ((await base.client.getCode({ address: a })) ?? '0x') !== '0x'
+  if ((await deployed(V3_BASE)) && (await deployed(GATE_V3_BASE))) {
+    const hashOf = async (a: Address) => keccak256((await base.client.getCode({ address: a }))!)
+    const pinned = (n: string) => baseRegistry.entries.find((e) => e.name === n) as { address: string; codeHash: string } | undefined
+    const v3 = pinned('MamoruActionPolicyV3')
+    const gate = pinned('MamoruPauseGate')
+    check(
+      v3?.address.toLowerCase() === V3_BASE.toLowerCase() && gate?.address.toLowerCase() === GATE_V3_BASE.toLowerCase() && (await hashOf(V3_BASE)) === v3.codeHash && (await hashOf(GATE_V3_BASE)) === gate.codeHash,
+      'Base: V3 and the V3-bound gate are live at the pinned addresses with the pinned code hashes',
+      `V3 ${V3_BASE}, gate ${GATE_V3_BASE}`,
+    )
+  } else {
+    await base.rpc('anvil_impersonateAccount', [PINNED_DEPLOYER])
+    const deployerBefore = await base.client.getBalance({ address: PINNED_DEPLOYER })
+    const deployerNonce0 = await base.client.getTransactionCount({ address: PINNED_DEPLOYER })
+    const outV3 = await forge('script/DeployV3.s.sol', { GUARDIAN: PINNED_GUARDIAN })
+    const outGate = await forge('script/DeployPauseGate.s.sol', {})
+    await base.rpc('anvil_stopImpersonatingAccount', [PINNED_DEPLOYER])
+    const deployerAfter = await base.client.getBalance({ address: PINNED_DEPLOYER })
+    const v3Printed = /MamoruActionPolicyV3:\s*(0x[0-9a-fA-F]{40})/.exec(outV3)?.[1]
+    const gatePrinted = /MamoruPauseGate:\s*(0x[0-9a-fA-F]{40})/.exec(outGate)?.[1]
+    check(v3Printed?.toLowerCase() === V3_BASE.toLowerCase() && gatePrinted?.toLowerCase() === GATE_V3_BASE.toLowerCase(), 'Base fork: DeployV3.s.sol and DeployPauseGate.s.sol from the pinned deployer give the pinned addresses', `V3 ${v3Printed}, gate ${gatePrinted}`)
+    gasReport.push(`Base deploys (V3 + ring raises + gate): ${await base.client.getTransactionCount({ address: PINNED_DEPLOYER }) - deployerNonce0} tx, ${deployerBefore - deployerAfter} wei ETH at the fork's gas price`)
+  }
   // What the base.json pin PR does: V3 and the V3-bound gate in the Base registry (the V2-bound gate entry replaced).
   {
     const pins = [
@@ -169,7 +184,7 @@ try {
   const attestableAbi = parseAbi(['function attesterManager() view returns (address)', 'function enableAttester(address newAttester)', 'function setSignatureThreshold(uint256 newSignatureThreshold)'])
   {
     const manager = await monad.client.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: attestableAbi, functionName: 'attesterManager' })
-    await monad.setBalance(manager, 10n ** 18n)
+    await monad.setBalance(manager, 10n ** 20n) // 15M gas at Monad's ~80 gwei is over 1 MON
     const en = await monad.sendAs(manager, MESSAGE_TRANSMITTER_V2, encodeFunctionData({ abi: attestableAbi, functionName: 'enableAttester', args: [attester.address] }))
     const th = await monad.sendAs(manager, MESSAGE_TRANSMITTER_V2, encodeFunctionData({ abi: attestableAbi, functionName: 'setSignatureThreshold', args: [1n] }))
     check(en.ok && th.ok, 'Monad fork: a fork attester enabled in MessageTransmitterV2, threshold 1')
