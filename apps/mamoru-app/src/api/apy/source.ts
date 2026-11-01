@@ -217,12 +217,14 @@ function labelOf(xs: { v: number | null; operator: boolean }[], own: string, ups
 
 const OPERATOR_TTL = 300
 export const OPERATOR_TIMEOUT_MS = 5_000
+/** The operator drops a source after 6 h without a read (PoolStatsCache staleMs); a pool older than 7 h is refused here too. */
+export const OPERATOR_MAX_AGE_S = 7 * 3600
 
 /**
  * otto/mamoru#248: the Base operator's GET /pool-stats, signed like /metrics, kept 5 minutes in the Workers Cache (the
  * operator itself refreshes hourly). Null when unsigned, unreachable or malformed: the upstream path takes over.
  */
-export function operatorPoolStats(url: string | undefined, secret: string | undefined, fetcher: Fetcher, cache: ApyCache | null, sign: (secret: string, path: string) => Promise<string>): OperatorStats {
+export function operatorPoolStats(url: string | undefined, secret: string | undefined, fetcher: Fetcher, cache: ApyCache | null, sign: (secret: string, path: string) => Promise<string>, now: Date): OperatorStats {
   return async () => {
     if (!url || !secret) return null
     const key = `${KEY}/operator-pool-stats`
@@ -236,6 +238,8 @@ export function operatorPoolStats(url: string | undefined, secret: string | unde
       const pools: Record<string, OperatorPoolStats> = {}
       for (const [name, v] of Object.entries(body.pools as Record<string, Record<string, unknown>>)) {
         if (!v || typeof v !== 'object') continue
+        const asOf = num(v.asOf)
+        if (asOf === null || now.getTime() / 1000 - asOf > OPERATOR_MAX_AGE_S) continue
         pools[name] = { tvlUsd: num(v.tvlUsd), volumeLastDayUsd: num(v.volumeLastDayUsd), volume28dAvgUsd: num(v.volume28dAvgUsd) }
       }
       await put(cache, key, OPERATOR_TTL, pools)

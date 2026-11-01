@@ -183,7 +183,7 @@ describe('GET /api/apy', () => {
     /** Operator stats whose last-day and 28-day fee APRs are `cur` and `month` on a 1M reserve. */
     const opPool = (cur: number | null, month: number | null, feeTier: number) => {
       const vol = (pct: number) => ((pct / 100) * 1_000_000) / ((feeTier / 1_000_000) * 365)
-      return { tvlUsd: 1_000_000, tvl1dAgoUsd: null, tvl7dAgoUsd: null, tvl30dAgoUsd: null, volume7dUsd: null, volumeLastDayUsd: cur === null ? null : vol(cur), volume28dAvgUsd: month === null ? null : vol(month), asOf: 1 }
+      return { tvlUsd: 1_000_000, tvl1dAgoUsd: null, tvl7dAgoUsd: null, tvl30dAgoUsd: null, volume7dUsd: null, volumeLastDayUsd: cur === null ? null : vol(cur), volume28dAvgUsd: month === null ? null : vol(month), asOf: NOW.getTime() / 1000 - 3600 }
     }
     function fakeOperator(body: unknown, status = 200) {
       const calls: { url: string; sig: string | null }[] = []
@@ -228,6 +228,14 @@ describe('GET /api/apy', () => {
       const h = harness(() => NOW, { apyFetch: fakeFetch(upstream).fetcher, operatorFetch: op.fetch, env: { OPERATOR_URL: 'https://op.test' } })
       await h.request('/api/apy')
       expect(op.calls).toEqual([])
+    })
+
+    test('a pool whose stats are older than 7 h is not used: upstream takes over for it', async () => {
+      const old = { ...opPool(2, 3, 100), asOf: NOW.getTime() / 1000 - 8 * 3600 }
+      const body = { chainId: 8453, pools: { ...ALL.pools, 'pool:USDC/USDT/100': old } }
+      const { view } = await getApy(fakeFetch({ [STABLE]: gecko(7, 100), [ID[STABLE]]: llama({ d: 1, apy: 9 }) }).fetcher, undefined, fakeOperator(body))
+      expect(view.byPool?.[0]).toEqual({ pool: 'pool:USDC/USDT/100', weight: 5000, currentPct: 7, monthlyPct: 9 })
+      expect(view.byPool?.[1]?.currentPct).toBe(5)
     })
 
     test('the operator\'s stats are kept 5 minutes in the cache', async () => {

@@ -16,8 +16,9 @@ export function apyRoutes(fetcher: Fetcher, cache: () => ApyCache | null = worke
   const apy = new Hono<AppEnv>()
   apy.get('/', async (c) => {
     const store = cache()
-    const op = operatorPoolStats(c.env.OPERATOR_URL, c.env.OPERATOR_SECRET, c.var.operatorFetch as Fetcher, store, signPath)
-    return c.json(await apyView(fetcher, store, c.var.now(), planPools(), op))
+    const now = c.var.now()
+    const op = operatorPoolStats(c.env.OPERATOR_URL, c.env.OPERATOR_SECRET, c.var.operatorFetch as Fetcher, store, signPath, now)
+    return c.json(await apyView(fetcher, store, now, planPools(), op))
   })
   return apy
 }
