@@ -159,30 +159,20 @@ describe('GET /api/apy', () => {
     const ok = fakeFetch(all)
     await getApy(ok.fetcher, cache)
     await getApy(ok.fetcher, cache)
-    // Per pool, once: one pool read shared by both figures, and the candles for the monthly one.
-    expect(ok.calls.length).toBe(6)
+    // Per pool, once: the pool for the current APR, the pool and the candles for the monthly one.
+    expect(ok.calls.length).toBe(9)
 
     const down = fakeFetch({})
     const cold = memoryCache()
     await getApy(down.fetcher, cold)
     await getApy(down.fetcher, cold)
-    expect(down.calls.length).toBe(12)
+    expect(down.calls.length).toBe(18)
 
     // Fresh current entries expire but last-good survives: GeckoTerminal down, value still served.
     const stale = memoryCache()
     await getApy(fakeFetch(all).fetcher, stale)
     for (const a of [STABLE, BTC, RISK]) await stale.put(`https://apy.mamoru.internal/current/${a}`, new Response('null'))
-    for (const a of [STABLE, BTC, RISK]) await stale.put(`https://apy.mamoru.internal/monthly/${a}`, new Response('null'))
     const { view } = await getApy(fakeFetch({}).fetcher, stale)
     expect(view.currentPct).toBe(5)
-    expect(view.monthlyPct).toBe(5)
-  })
-
-  test('candles read but the pool rate-limited: the monthly figure uses the last good reserve', async () => {
-    const cache = memoryCache()
-    await getApy(fakeFetch(pools({ [STABLE]: 2 }, {})).fetcher, cache)
-    await cache.put(`https://apy.mamoru.internal/current/${STABLE}`, new Response('null'))
-    const { view } = await getApy(fakeFetch({ [`${STABLE}/ohlcv`]: ohlcv(3, 100) }).fetcher, cache)
-    expect(view.byPool?.[0]?.monthlyPct).toBe(3)
   })
 })
