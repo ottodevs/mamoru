@@ -12,6 +12,8 @@ import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
 import { belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, MIN_ENTRY_USDC, overCapOf, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
+import { historyEntries, moveLine, moveState } from '../lib/moves.ts'
+import { detailHead, MoveDetail, OpDetail, Sheet } from '../components/activity-detail.tsx'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, poolTokens, positionAmounts, progressLine } from '../lib/positions.ts'
 import { activateLine, signatureCopy } from '../lib/signature.ts'
@@ -608,8 +610,13 @@ export function Idle({ f, s }: { f: FundingView; s: Split }) {
 }
 
 export function History({ ops, onRetry, loaded = true }: { ops: OpView[]; onRetry?: (kind: OpView['kind']) => void; loaded?: boolean }) {
-  const sorted = historyOps(ops)
+  // otto/mamoru#219: a range move is one entry, and any entry opens its detail (reason, cost, range, transactions).
+  const entries = historyEntries(historyOps(ops))
   const chain = useChain()
+  const [openId, setOpenId] = useState<string | null>(null)
+  const idOf = (e: (typeof entries)[number]) => (e.type === 'op' ? e.op.opId : e.move.id)
+  const opened = openId ? entries.find((e) => idOf(e) === openId) : undefined
+  const head = opened ? detailHead(opened) : null
   // #235: an event that lands while the page is open glows once; what the first completed read returned does not.
   // The baseline waits for that read (`loaded`), so an account's past events never arrive as new ones.
   const seen = useRef<Set<string> | null>(null)
@@ -617,14 +624,14 @@ export function History({ ops, onRetry, loaded = true }: { ops: OpView[]; onRetr
   const glowUntil = useRef(new Map<string, number>())
   const now = Date.now()
   if (seen.current === null) {
-    if (loaded) seen.current = new Set(sorted.map((o) => o.opId))
-  } else for (const o of sorted) if (!seen.current.has(o.opId) && !glowUntil.current.has(o.opId)) glowUntil.current.set(o.opId, now + 2000)
+    if (loaded) seen.current = new Set(entries.map(idOf))
+  } else for (const e of entries) if (!seen.current.has(idOf(e)) && !glowUntil.current.has(idOf(e))) glowUntil.current.set(idOf(e), now + 2000)
   const fresh = new Set([...glowUntil.current].filter(([, until]) => until > now).map(([id]) => id))
   useEffect(() => {
-    if (seen.current) for (const o of sorted) seen.current.add(o.opId)
+    if (seen.current) for (const e of entries) seen.current.add(idOf(e))
   })
   // Nothing to list yet: the same head, with nothing to open.
-  if (!sorted.length)
+  if (!entries.length)
     return (
       <section className="panel panel-static" data-testid="history">
         <div className="panel-head">
@@ -636,38 +643,47 @@ export function History({ ops, onRetry, loaded = true }: { ops: OpView[]; onRetr
       </section>
     )
   return (
+    <>
     <Fold
       testId="history"
-      defaultOpen={sorted.length > 0 && sorted.length <= 4}
+      defaultOpen={entries.length > 0 && entries.length <= 4}
       head={
         <>
           <span className="dash-title heavy">{homeCopy.history}</span>
-          <span className="panel-meta">{plural(sorted.length, 'event', 'events')}</span>
+          <span className="panel-meta">{plural(entries.length, 'event', 'events')}</span>
         </>
       }
     >
       <ol className="m-0 mt-[0.7rem] grid list-none gap-[0.3rem] p-0">
-        {sorted.map((op, i) => {
-          const tone = opTone(op)
+        {entries.map((e, i) => {
+          const id = idOf(e)
+          const at = e.type === 'op' ? e.op.updatedAt : e.move.updatedAt
+          const tone = e.type === 'op' ? opTone(e.op) : moveState(e.move) === 'done' ? 'done' : 'pending'
+          const op = e.type === 'op' ? e.op : null
           return (
             <li
-              key={op.opId}
-              data-testid="op"
+              key={id}
+              data-testid={e.type === 'op' ? 'op' : 'move'}
               data-tone={tone}
               style={{ ['--i' as string]: Math.min(i, 8) }}
-              className={`op-row grid grid-cols-1 items-baseline gap-1 border-t border-wash pt-[0.35rem] min-[761px]:grid-cols-[9rem_5.5rem_minmax(0,1fr)_auto] min-[761px]:gap-[0.6rem]${fresh.has(op.opId) ? ' is-new' : ''}`}
+              className={`op-row grid grid-cols-1 items-baseline gap-1 border-t border-wash pt-[0.35rem] min-[761px]:grid-cols-[9rem_5.5rem_minmax(0,1fr)_auto] min-[761px]:gap-[0.6rem]${fresh.has(id) ? ' is-new' : ''}`}
             >
-              <time dateTime={op.updatedAt}>{localTime(op.updatedAt)}</time>
+              <time dateTime={at}>{localTime(at)}</time>
               <span className="op-kind font-mono text-[0.78rem] uppercase tracking-[0.04em] text-emerald">
                 <span className="op-dot" aria-hidden="true" />
-                {KIND[op.kind]}
+                {e.type === 'op' ? KIND[e.op.kind] : 'Range'}
               </span>
-              <span className={tone === 'done' ? undefined : 'text-stone'}>{opLine(op)}</span>
-              {needsRetry(op) && onRetry ? (
+              <button type="button" className={`row-open ${tone === 'done' ? '' : 'text-stone'}`} onClick={() => setOpenId(id)} aria-haspopup="dialog">
+                {e.type === 'op' ? opLine(e.op) : moveLine(e.move)}
+                <span className="row-open-more" aria-hidden="true">
+                  {e.type === 'move' ? ` · ${e.move.ops.length} step${e.move.ops.length === 1 ? '' : 's'}` : ''} ›
+                </span>
+              </button>
+              {op && needsRetry(op) && onRetry ? (
                 <button type="button" className="chipbtn min-[761px]:justify-self-end" onClick={() => onRetry(op.kind)}>
                   {homeCopy.retry}
                 </button>
-              ) : op.txHash ? (
+              ) : op?.txHash ? (
                 <a
                   className="op-tx font-mono text-[0.8rem] text-emerald min-[761px]:justify-self-end"
                   href={explorerTx(chain, op.txHash)}
@@ -689,6 +705,10 @@ export function History({ ops, onRetry, loaded = true }: { ops: OpView[]; onRetr
         })}
       </ol>
     </Fold>
+    <Sheet open={!!opened} onClose={() => setOpenId(null)} kicker={head?.kicker ?? ''} title={head?.title ?? ''}>
+      {opened ? opened.type === 'move' ? <MoveDetail move={opened.move} /> : <OpDetail op={opened.op} /> : null}
+    </Sheet>
+    </>
   )
 }
 
