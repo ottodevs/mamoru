@@ -45,6 +45,7 @@ release:check` green, a pull request, an independent review, merge by the coordi
 | T039 | #230 | One signature for both chains (spike) |
 | T040 | #240, #231 | Monad sleeve on production, both Safes at onboarding |
 | T041 | #244 | Lab: Ethereum pools vs routing to Base |
+| T042 | #201 | Money back to Base: excess Growth, exits stay on Monad, chain-risk return |
 
 ```mermaid
 flowchart TD
@@ -214,6 +215,15 @@ T038. T020, T022 and T024 run in parallel in their own units. T039 and T041 are 
 - **Files:** a Lab run and its result note.
 - **Accepted by:** COST-06.
 - **Must not:** add an Ethereum strategy or grant.
+
+## T042 · Money back to Base: excess Growth, exits stay on Monad, chain-risk return
+
+- **Ticket:** #201. **Requirements:** FR-XCH-014, FR-XCH-006, FR-XCH-013, FR-XCH-017.
+- **Files:** `packages/decide/src/allocate/index.ts` (return gap, no refill while Growth is in an exit state), the
+  Monad → Base CCTP grant on the Monad session, relayer mint on Base, reason codes, app copy, tests.
+- **Accepted by:** XCH-11.
+- **Must not:** park in a Base vault or a volatile pool; convert what spec 004 says to keep; skip route checks or
+  caps on the chain-risk return; add a rule that does not fit in one sentence.
 
 ## Not tasks: actions of Ot and the coordinator
 
