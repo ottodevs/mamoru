@@ -47,21 +47,11 @@ export function impactBpsOf(amountOut: bigint, expectedOut: bigint): number | nu
 }
 
 /**
- * Errors that say nothing about liquidity: the call never ran to a result, or ran out of its gas or time allowance. The
- * ladder is not read further and the old curve stays.
+ * QuoterV2 never reverts because a size is too large: with no price limit it swaps to the edge of the price range and
+ * answers the partial output, which reads here as a high impact. It reverts only in a zero-liquidity region or on a
+ * failure, and an RPC error can come wrapped as a revert, so no error is read as depth (peer review round 2): any
+ * error ends this pool's read and the old curve stays. Only a zero output is a null.
  */
-const NOT_A_RESULT = /out of gas|gas (limit|cap|required|too)|exceeds? (the )?(block )?gas|intrinsic gas|time(d)? ?out|deadline|abort|rate.?limit|too many requests|status:? ?(429|5\d\d)|http request failed|fetch failed|network|econn|enotfound|socket|unreachable|budget/i
-
-/**
- * A quote the pool could not fill: an actual revert from the quoter (viem: "execution reverted", 'The contract function
- * ... reverted'). Anything that also looks like a gas, time or transport failure is excluded first. A zero output is
- * handled by the caller, not here. Everything else is a failed read, not a depth.
- */
-export const isRevert = (e: unknown): boolean => {
-  const m = (e as Error)?.message ?? ''
-  return !NOT_A_RESULT.test(m) && /\brevert(ed)?\b/i.test(m)
-}
-
 class BudgetSpent extends Error {
   constructor() {
     super('rpc budget spent')
@@ -163,14 +153,8 @@ export class PoolDepthCache {
       const amountIn = sellIsToken0 ? token1InToken0(usdcRaw, sqrt) : token0InToken1(usdcRaw, sqrt)
       if (amountIn <= 0n) throw new Error('size rounds to zero')
       const expected = (midOut(amountIn, sqrt, sellIsToken0) * BigInt(1_000_000 - p.fee)) / 1_000_000n
-      let out: bigint
-      try {
-        out = await this.timed(this.guarded(() => this.io.quote({ tokenIn, tokenOut: p.usdcAddress, fee: p.fee, amountIn, blockNumber: block })))
-      } catch (e) {
-        // Only a revert is "the pool cannot fill this size"; the rest (gas, time, transport, budget) drops the whole pool read.
-        if (!isRevert(e)) throw e
-        out = 0n
-      }
+      // Any error (revert, gas, time, transport, budget) drops the whole pool read: see the note above BudgetSpent.
+      const out = await this.timed(this.guarded(() => this.io.quote({ tokenIn, tokenOut: p.usdcAddress, fee: p.fee, amountIn, blockNumber: block })))
       const bps = out > 0n ? impactBpsOf(out, expected) : null
       impactBps.push(bps)
       if (bps === null) stopped = true

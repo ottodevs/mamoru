@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { encodeFunctionResult, type PublicClient } from 'viem'
 import { address, baseRegistry, monadRegistry } from '@mamoru/registry'
 import { quoterV2Abi, sqrtRatioAtTick, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
-import { DEPTH_LADDER_USD, DEPTH_POOL_NAMES, PoolDepthCache, depthIoOf, depthPoolsOf, impactBpsOf, isRevert, poolDepthFor, type DepthIo } from '../src/pool-depth.ts'
+import { DEPTH_LADDER_USD, DEPTH_POOL_NAMES, PoolDepthCache, depthIoOf, depthPoolsOf, impactBpsOf, poolDepthFor, type DepthIo } from '../src/pool-depth.ts'
 
 const BTC = 'pool:USDC/cbBTC/500' // USDC is token0: the sell token is token1
 const WETH = 'pool:WETH/USDC/3000' // USDC is token1: the sell token is token0
@@ -95,12 +95,27 @@ describe('PoolDepthCache', () => {
     expect(usd(weth[3]!, false)).toBeCloseTo(30_000, 2)
   })
 
-  test('a revert stops the ladder: that size and every larger one are null, and no more quotes are made', async () => {
-    const f = fakeIo([3, 6, 9, 12, null])
-    const cache = new PoolDepthCache(pools([BTC]), f.io, { now: clock().now })
+  test('a revert is never depth (an RPC error can come wrapped as one): the read ends and the old curve stays', async () => {
+    const k = clock()
+    const good = fakeIo([3, 6, 9, 12, 15, 18, 21, 24, 27])
+    const reverting = fakeIo([3, 6, 9, 12, null])
+    let failing = false
+    const io: DepthIo = { block: good.io.block, sqrtPrice: (pool, b) => (failing ? reverting : good).io.sqrtPrice(pool, b), quote: (q) => (failing ? reverting : good).io.quote(q) }
+    const cache = new PoolDepthCache(pools([BTC]), io, { now: k.now })
     await cache.settled()
-    expect(cache.get()[BTC]!.impactBps).toEqual([3, 6, 9, 12, null, null, null, null, null])
-    expect(f.quotes()).toHaveLength(5)
+    const before = cache.get()[BTC]!.impactBps
+    expect(before).toEqual([3, 6, 9, 12, 15, 18, 21, 24, 27])
+    failing = true
+    k.c.t += 61 * 60_000
+    await cache.settled()
+    expect(reverting.quotes()).toHaveLength(5)
+    expect(cache.get()[BTC]!.impactBps).toEqual(before)
+  })
+
+  test('a first read that reverts leaves the pool unread, not "too large"', async () => {
+    const cache = new PoolDepthCache(pools([BTC]), fakeIo([3, null]).io, { now: clock().now })
+    await cache.settled()
+    expect(cache.get()[BTC]!.impactBps.every((x) => x === null)).toBe(true)
   })
 
   test('a zero output is also null and stops the ladder', async () => {
@@ -217,12 +232,6 @@ describe('RPC budget and error classes (otto/mamoru#101 review)', () => {
     expect(cache.get()[WETH]!.impactBps.every((x) => x === null)).toBe(true)
   })
 
-  test('isRevert: only an actual quoter revert is a liquidity stop; gas, time, transport and budget errors are not', () => {
-    const e = (m: string) => new Error(m)
-    for (const m of ['EHG_QUOTE_UNAVAILABLE: Execution reverted for an unknown reason.', 'The contract function "quoteExactInputSingle" reverted.', 'execution reverted: SPL', 'EHG_QUOTE_UNAVAILABLE: execution reverted (fee 500)']) expect(isRevert(e(m))).toBe(true)
-    for (const m of ['out of gas', 'execution reverted: out of gas', 'EHG_QUOTE_UNAVAILABLE: call exceeds gas limit', 'intrinsic gas too low', 'gas required exceeds allowance (50000000)', 'execution timeout', 'The request timed out', 'HTTP request failed. Status: 503', 'status: 429 rate limit', 'fetch failed', 'rpc budget spent', 'timeout', 'socket hang up']) expect(isRevert(e(m))).toBe(false)
-    expect(isRevert('nope')).toBe(false)
-  })
 
   test('an out-of-gas quote is a failed read: the old curve stays and the pool is retried, not read as no liquidity', async () => {
     const k = clock()

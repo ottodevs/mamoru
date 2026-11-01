@@ -430,12 +430,13 @@ keeps its last good value for 6 h, then its fields are null and the rule reports
 Depth data (operator): per live pool that pairs USDC, the price impact of selling the pool's non-USDC token for USDC (the
 exit direction) at 1k, 3k, 10k, 30k, 100k, 300k, 1M, 3M and 10M USD. Each size is converted to the sell token at the pool's
 slot0 mid price and quoted with QuoterV2 `quoteExactInputSingle` (eth_call at one block); `impactBps = round((1 - out /
-(in at mid x (1 - fee))) x 10,000)`, at least 0, so the pool fee is not in it (the exit slippage rule adds it). A revert or
-a zero output is null (the pool cannot fill that size), and the ladder stops there. Such a null after good points is
+(in at mid x (1 - fee))) x 10,000)`, at least 0, so the pool fee is not in it (the exit slippage rule adds it). QuoterV2 never
+reverts on a size too large (it answers the partial fill, read as a high impact); a zero output is null (nothing to sell
+into), and the ladder stops there. Such a null after good points is
 treated as a point of 10,000 bps, and EEL and exit slippage interpolate linearly in size over the same curve (impact 0 at
 size 0), also above the null point; all nine within the limit gives 10M (">=10M"). The exit size is the USD value of the non-USDC legs of all the account's positions in the pool at slot0, summed; the ratio
 uses their whole value (principal, no uncollected fees). Refreshed hourly in the background (one block read, then one slot0 and at most nine quotes per pool, in
-sequence, each with a timeout; the keyed RPC budget is asked before every call, and when it trips that pool's read ends and its old curve stays), kept in memory only, null after 6 h. Only a quoter revert or a zero output is a null; out of gas, gas-limit, timeout and transport errors are not depth: the
+sequence, each with a timeout; the keyed RPC budget is asked before every call, and when it trips that pool's read ends and its old curve stays), kept in memory only, null after 6 h. Any error, a revert included (an RPC failure can come wrapped as one), is not depth: the
 curve is not overwritten and the pool is retried after 5 min. Base operator only; Monad pools
 are not read. Reaches `decide` as `Observation.poolDepth`, read only by the shadow rules.
 
