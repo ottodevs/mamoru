@@ -29,6 +29,14 @@ describe('account reads limit (#255)', () => {
     expect(keys[0]).toBe(keys[1]!)
   })
 
+  test('HEAD is a read too: counted and refused like GET', async () => {
+    let asked = 0
+    const h = harness(undefined, { env: { ACCOUNT_READ_LIMIT: { limit: async () => (asked++, { success: false }) } } })
+    const { cookie, owner } = await onboard(h)
+    expect((await h.request(`/api/accounts/${owner.accountKey}/dashboard`, { method: 'HEAD', cookie })).status).toBe(429)
+    expect(asked).toBe(1)
+  })
+
   test('another address has its own count', async () => {
     const keys: string[] = []
     const h = harness(undefined, { env: { ACCOUNT_READ_LIMIT: { limit: async ({ key }) => (keys.push(key), { success: true }) } } })

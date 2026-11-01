@@ -4,15 +4,16 @@ import { apiError } from '../errors.ts'
 import { sha256 } from '../auth/webauthn.ts'
 
 /**
- * #255: reads of one account, counted per account and client address (ACCOUNT_READ_LIMIT, wrangler.jsonc: 180 per
- * minute). The page reads far less than that, even with a few tabs open and an op in flight (about 50 a minute per
- * tab at its fastest), and its own refresh is throttled; a script reading in a loop gets 429 instead of an operator
- * or D1 read each time. Keyed by address too, so nobody can spend another owner's allowance. Only GETs: an owner
- * action is never refused here. No binding (tests, local runs) or a limiter that does not answer: let through.
+ * #255: reads of one account, counted per account and client address (ACCOUNT_READ_LIMIT, wrangler.jsonc: 600 per
+ * minute). A visible tab reads about 50 a minute at its fastest (an op in flight) and a hidden one does not poll, so
+ * a dozen windows open side by side stay under it, with room for the limiter being approximate; a script reading in
+ * a loop gets 429 instead of an operator or D1 read each time. Keyed by address too, so nobody can spend another
+ * owner's allowance. Reads are GET and HEAD (Hono answers HEAD with the GET handler); an owner action is never
+ * refused here. No binding (tests, local runs) or a limiter that does not answer: let through.
  */
 export const accountReadLimit: MiddlewareHandler<AppEnv> = async (c, next) => {
   const limiter = c.env.ACCOUNT_READ_LIMIT
-  if (c.req.method !== 'GET' || !limiter) return next()
+  if ((c.req.method !== 'GET' && c.req.method !== 'HEAD') || !limiter) return next()
   const h = await sha256(`mamoru:account-read:v1\n${c.var.settings.sessionSecret}\n${c.req.header('cf-connecting-ip') ?? 'unknown'}`)
   const ip = Array.from(h.slice(0, 12), (b) => b.toString(16).padStart(2, '0')).join('')
   let ok = true
