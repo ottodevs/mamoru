@@ -470,6 +470,27 @@ describe('otto/mamoru#231: a Start activates on v6 for accounts in the multichai
     expect((await start({ multichain_v6_new: true }, { multichain_v6_new: null }, { v6Policy: undefined })).policyIds).toEqual(new Set([v5.policyId]))
   })
 
+  test('confirmed under a v5 default: the account runs v6, its Monad Safe is provisioned, and it stays v6 when the scope is lifted', async () => {
+    let scoped: Record<string, string[] | null> = { multichain_v6_new: ['k'] }
+    const p = fakePeer()
+    // Funded, so the Start is not armed to wait for a deposit.
+    const w = world(10_000_000n, { policy: v5, ...cfg6(p.peer, { opsFlags: () => ({ multichain_v6: false }), opsScopedFlags: () => scoped }) })
+    w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
+    chain(w, 0n)
+    const t = await w.op.prepareActivate(ctx)
+    await quiet(() => w.op.submit(ctx, 'activate', sign(t)))
+    await new Promise((r) => setTimeout(r, 10))
+    const acc = w.state.accounts.k!
+    expect(acc.active).toBe(true)
+    expect(acc.policyId).toBe(v6.policyId)
+    expect(acc.remote).toMatchObject({ chainId: 143, address: t.remote!.address, ready: true })
+    expect(p.provisioned).toHaveLength(1)
+    scoped = {}
+    // The account's own policy decides from now on: v6, never the operator's default, with or without the Start scope.
+    expect(w.op.policyOf(acc).policyId).toBe(v6.policyId)
+    expect(w.op.v4Target(acc)).toBeNull()
+  })
+
   test('no Monad operator reachable: the v6 Start is refused (503), never quietly started on another policy', async () => {
     const w = world(0n, { policy: v5, ...cfg6(undefined, { opsFlags: () => ({}), opsScopedFlags: () => ({ multichain_v6_new: ['k'] }) }) })
     w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
