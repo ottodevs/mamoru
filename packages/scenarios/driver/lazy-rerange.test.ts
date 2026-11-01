@@ -7,7 +7,7 @@ import { DEFAULT_ENGINE_SETTINGS, ENGINE_SETTINGS_TEMPLATES, grantKey, instantia
 import { GUARD_CALLS_PER_POOL, SharedGuardReads } from '@mamoru/rpc'
 import { permissionIdOf, toSmartSession } from '@mamoru/account/sessions'
 import { FakeChain } from '../../rpc/test/fake-chain.ts'
-import { Engine, type EngineSession } from './engine.ts'
+import { Engine, type EngineConfig, type EngineHooks, type EngineSession } from './engine.ts'
 
 const ACCOUNT = '0x00000000000000000000000000000000000000aa' as Address
 const V2 = POLICIES['conservador-live-v2']!
@@ -32,11 +32,11 @@ Object.assign(chain.positions[0]!, { tickLower: 200, tickUpper: 800 })
 const rpc = chain.serve()
 afterAll(() => rpc.stop())
 
-function engine(policy: PolicyVersion, shared?: SharedGuardReads): Engine {
+function engine(policy: PolicyVersion, shared?: SharedGuardReads, extra: Partial<EngineConfig> = {}, hooks: Partial<EngineHooks> = {}): Engine {
   const guardHistory = shared ? { pools: policy.buckets.flatMap((b) => b.pools), shared } : undefined
   const e = new Engine(
-    { mode: 'live', chainId: 8453, signingChainIds: [8453], rpcUrl: rpc.url, bundlerUrl: 'http://127.0.0.1:9/', policy, account: ACCOUNT, sessionKey, nonceLane: 0, depositsAfter: 800n, historyFromBlock: 800n, sessions: sessions(), ...(guardHistory ? { guardHistory } : {}) },
-    { waitBlock: async () => {} },
+    { mode: 'live', chainId: 8453, signingChainIds: [8453], rpcUrl: rpc.url, bundlerUrl: 'http://127.0.0.1:9/', policy, account: ACCOUNT, sessionKey, nonceLane: 0, depositsAfter: 800n, historyFromBlock: 800n, sessions: sessions(), ...extra, ...(guardHistory ? { guardHistory } : {}) },
+    { waitBlock: async () => {}, ...hooks },
   )
   e.allowedTokenIds.push(11n)
   return e
@@ -91,5 +91,36 @@ describe('engine: lazy re-range history (otto/mamoru#172)', () => {
     const obs = await e.observe()
     expect('outOfRangeSince' in obs.positions[0]!).toBe(false)
     expect(obs.guard).toBeUndefined()
+  })
+})
+
+// Live wait rule (otto/mamoru#268): the clock survives a restart only under a version that uses it, and never a long gap.
+describe('engine: out-of-range clock across restarts and gaps (otto/mamoru#268)', () => {
+  const WAIT = withEngineSettings(V2, { ...DEFAULT_ENGINE_SETTINGS, rerange: { mode: 'lazy', edgeBufferTicks: 100, edgeBufferBps: 2500, minDwellSeconds: 1800, maxWaitSeconds: 21_600, costTest: 'off', horizonSeconds: 86_400, lvrWeightBps: 10_000 } })
+
+  test('a seed from a recent review is kept under the wait rule, ignored under a version without it', async () => {
+    const now = (await engine(WAIT).observe()).block.timestamp
+    const seed = { since: new Map([[11n, now - 30_000n]]), seenAt: now - 60n }
+    const kept = await engine(WAIT, undefined, { outOfRangeSeed: seed }).review()
+    if (kept.kind !== 'decided') throw new Error(kept.code)
+    expect(kept.observation.positions[0]!.outOfRangeSince).toBe(now - 30_000n)
+    const plain = await engine(LAZY, undefined, { outOfRangeSeed: seed }).review()
+    if (plain.kind !== 'decided') throw new Error(plain.code)
+    expect(plain.observation.positions[0]!.outOfRangeSince).toBe(plain.observation.block.timestamp)
+  })
+
+  test('reviews that stop for longer than the gap restart the clock; the clock is handed to the operator', async () => {
+    const saved: bigint[] = []
+    const e = engine(WAIT, undefined, {}, { onOutOfRange: (since) => void saved.push(since.get(11n)!) })
+    const r1 = await e.review()
+    if (r1.kind !== 'decided') throw new Error(r1.code)
+    const t1 = r1.observation.block.timestamp
+    expect(saved).toEqual([t1])
+    // Two hours of blocks (2 s each) with no review: the price may have come back in between.
+    chain.head += 3_600n
+    const r2 = await e.review()
+    if (r2.kind !== 'decided') throw new Error(r2.code)
+    expect(r2.observation.positions[0]!.outOfRangeSince).toBe(r2.observation.block.timestamp)
+    expect(saved.at(-1)).toBe(r2.observation.block.timestamp)
   })
 })

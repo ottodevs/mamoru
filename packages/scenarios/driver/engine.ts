@@ -280,7 +280,7 @@ export type EngineConfig = {
   poolDepth?: () => Observation['poolDepth']
 }
 
-/** Live wait rule: the longest gap between the last review before a restart and the first after it that keeps the clock. */
+/** Live wait rule: the longest gap between two reviews (across a restart or not) that keeps the out-of-range clock. */
 export const OUT_OF_RANGE_SEED_GAP_S = 5_400n
 /** Live wait rule: how often an unchanged out-of-range clock is handed out again, so its `seenAt` stays recent. */
 export const OUT_OF_RANGE_SAVE_S = 1_800n
@@ -473,6 +473,8 @@ export class Engine {
   private outOfRangeSeed: EngineConfig['outOfRangeSeed']
   /** Block time the clock was last handed to `onOutOfRange`. */
   private outOfRangeSavedAt: bigint | null = null
+  /** Block time of the last review that kept the clock. */
+  private outOfRangeReviewedAt: bigint | null = null
   /** otto/mamoru#101: rules and pools of the last shadow risk reported (`onShadowRisk`). */
   private shadowSig = ''
   /**
@@ -694,8 +696,13 @@ export class Engine {
     if (this.outOfRangeSeed) {
       const seed = this.outOfRangeSeed
       this.outOfRangeSeed = undefined
-      this.outOfRange = outOfRangeFromSeed(seed, obs.block.timestamp)
+      // Only the wait rule reads time from before this engine: any other version keeps the dwell it had (it restarts).
+      if (this.cfg.policy.range.lazy?.maxWaitSeconds !== undefined) this.outOfRange = outOfRangeFromSeed(seed, obs.block.timestamp)
     }
+    // The same freshness while running: reviews that stopped for longer than the gap (no restart) may have missed the
+    // price coming back, so the clock starts again.
+    if (this.outOfRangeReviewedAt !== null && obs.block.timestamp - this.outOfRangeReviewedAt > OUT_OF_RANGE_SEED_GAP_S) this.outOfRange = new Map()
+    this.outOfRangeReviewedAt = obs.block.timestamp
     const before = this.outOfRange
     this.outOfRange = outOfRangeSinceOf(before, obs)
     const changed = before.size !== this.outOfRange.size || [...this.outOfRange].some(([id, at]) => before.get(id) !== at)
