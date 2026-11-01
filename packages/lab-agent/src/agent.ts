@@ -22,7 +22,12 @@ import type { BenchRunner, ChatMessage, ModelClient, RunResult, ToolSchema } fro
 /** AL-15: max 4 tool rounds per job; then the agent must answer with what it has. */
 export const MAX_TOOL_ROUNDS = 4
 
-export type PriorTurn = { question: string; answer: Answer; runs: RunResult[] }
+/**
+ * `runs` are full results when the caller has them (tests, the CLI); the runner gets only `runSpecs` (runId →
+ * specKey) from the landing's claim response, since full runs are up to 400 KB each. Either is enough for history:
+ * the answer already passed the verifier in its own job, so a claim's value is rendered from the block itself.
+ */
+export type PriorTurn = { question: string; answer: Answer; runs: RunResult[]; runSpecs?: Record<string, string> }
 
 export type JobInput = {
   question: string
@@ -129,9 +134,21 @@ function runTag(run: RunResult): string {
   return `(run ${run.resultHash}, spec ${run.specKey})`
 }
 
-function renderVerdictText(block: VerdictBlock, runStore: RunStore): string {
+type HistoryRuns = { runStore: RunStore; runSpecs: Record<string, string> }
+
+/** The tag for a run this job has no full result for: its id, and its spec when the claim response carried it. */
+function idTag(runId: string, h: HistoryRuns): string {
+  const spec = Object.hasOwn(h.runSpecs, runId) ? h.runSpecs[runId] : undefined
+  return spec ? `(run ${runId}, spec ${spec})` : `(run ${runId})`
+}
+
+function renderVerdictText(block: VerdictBlock, h: HistoryRuns): string {
+  const runStore = h.runStore
   const run = runStore.get(block.runId)
-  if (!run) return ''
+  if (!run) {
+    const against = isVerdictBaseline(block.against) ? block.against : idTag(block.against, h)
+    return `Veredicto verificado ${idTag(block.runId, h)} vs ${against}`
+  }
   if (isVerdictBaseline(block.against)) {
     const sentence = writeVerdictSentence(run, block.against)
     return `${sentence} ${runTag(run)} vs ${block.against}`
@@ -146,31 +163,34 @@ function renderVerdictText(block: VerdictBlock, runStore: RunStore): string {
   return `${sentence} ${runTag(run)} vs ${other ? runTag(other) : block.against}`
 }
 
-function renderClaimText(block: ClaimBlock, runStore: RunStore): string {
-  const run = runStore.get(block.runId)
-  const info = run ? resolveMetric(run, block.metric) : undefined
-  if (!run || !info) return ''
+function renderClaimText(block: ClaimBlock, h: HistoryRuns): string {
+  const run = h.runStore.get(block.runId)
+  // Prod history (runner) carries no full runs: the claim already matched its run exactly when its own job
+  // verified it, so its value is rendered as-is. Dropping it left a follow-up blind to the figures it was about.
+  if (!run) return `${block.metric}: ${block.value} ${idTag(block.runId, h)}`
+  const info = resolveMetric(run, block.metric)
+  if (!info) return ''
   const suffix = info.unit === 'USDC' ? ' USDC' : info.unit === '%' ? '%' : info.unit === 'days' ? ' días' : ' ops'
   return `${info.label.es}: ${displayValue(info)}${suffix} ${runTag(run)}`
 }
 
-function renderChartText(block: ChartBlock, runStore: RunStore): string {
+function renderChartText(block: ChartBlock, h: HistoryRuns): string {
   const refs = block.runIds.map((id) => {
-    const run = runStore.get(id)
-    return run ? runTag(run) : id
+    const run = h.runStore.get(id)
+    return run ? runTag(run) : idTag(id, h)
   })
   return `[gráfico ${block.kind}: ${refs.join(', ')}]`
 }
 
-function substituteRefs(md: string, claims: ClaimBlock[], verdicts: VerdictBlock[], runStore: RunStore): string {
+function substituteRefs(md: string, claims: ClaimBlock[], verdicts: VerdictBlock[], h: HistoryRuns): string {
   return md
     .replace(/\{\{c(\d+)\}\}/g, (whole, n: string) => {
       const c = claims[Number(n)]
-      return c ? renderClaimText(c, runStore) || whole : whole
+      return c ? renderClaimText(c, h) || whole : whole
     })
     .replace(/\{\{v(\d+)\}\}/g, (whole, n: string) => {
       const v = verdicts[Number(n)]
-      return v ? renderVerdictText(v, runStore) || whole : whole
+      return v ? renderVerdictText(v, h) || whole : whole
     })
 }
 
@@ -179,16 +199,16 @@ function substituteRefs(md: string, claims: ClaimBlock[], verdicts: VerdictBlock
  * claim/verdict/chart line carries the run(s) it cites, by `resultHash` and `specKey`, so a follow-up question
  * can resolve "that run"/"double that width" against a concrete spec instead of just a rendered number.
  */
-export function renderAnswerForHistory(answer: Answer, runs: RunResult[]): string {
-  const runStore = runsMapOf(runs)
+export function renderAnswerForHistory(answer: Answer, runs: RunResult[], runSpecs: Record<string, string> = {}): string {
+  const h: HistoryRuns = { runStore: runsMapOf(runs), runSpecs }
   const claims = answer.blocks.filter((b): b is ClaimBlock => b.type === 'claim')
   const verdicts = answer.blocks.filter((b): b is VerdictBlock => b.type === 'verdict')
   const lines = answer.blocks
     .map((b: Block): string => {
-      if (b.type === 'text' || b.type === 'caveat') return substituteRefs(b.md, claims, verdicts, runStore)
-      if (b.type === 'claim') return renderClaimText(b, runStore)
-      if (b.type === 'verdict') return renderVerdictText(b, runStore)
-      return renderChartText(b, runStore)
+      if (b.type === 'text' || b.type === 'caveat') return substituteRefs(b.md, claims, verdicts, h)
+      if (b.type === 'claim') return renderClaimText(b, h)
+      if (b.type === 'verdict') return renderVerdictText(b, h)
+      return renderChartText(b, h)
     })
     .filter((s) => s.length > 0)
   return lines.length > 0 ? lines.join('\n') : '(respuesta verificada previa sin texto)'
@@ -198,7 +218,7 @@ function buildMessages(systemPrompt: string, priorTurns: PriorTurn[] | undefined
   const messages: ChatMessage[] = [{ role: 'system', content: systemPrompt }]
   for (const turn of priorTurns ?? []) {
     messages.push({ role: 'user', content: turn.question })
-    messages.push({ role: 'assistant', content: renderAnswerForHistory(turn.answer, turn.runs) })
+    messages.push({ role: 'assistant', content: renderAnswerForHistory(turn.answer, turn.runs, turn.runSpecs) })
   }
   messages.push({ role: 'user', content: question })
   return messages

@@ -397,6 +397,24 @@ describe('runAgentJob — loop mechanics (AL-15, AL-03)', () => {
     expect(text).toContain('mantener la mezcla')
   })
 
+  test('prod history (no full runs, only runId → specKey): every prior claim keeps its verified value, run and spec', () => {
+    const answer: Answer = {
+      blocks: [
+        { type: 'claim', metric: 'vsHodl', runId: '0xaaa', value: -8.46 },
+        { type: 'verdict', runId: '0xaaa', against: 'hold' },
+        { type: 'chart', kind: 'equity', runIds: ['0xaaa'] },
+        { type: 'text', md: 'Frente a mantener: {{c0}}' },
+      ],
+    }
+    const text = renderAnswerForHistory(answer, [], { '0xaaa': 'mar2025|live|1000|1000' })
+    expect(text).toContain('vsHodl: -8.46 (run 0xaaa, spec mar2025|live|1000|1000)')
+    expect(text).toContain('Veredicto verificado (run 0xaaa, spec mar2025|live|1000|1000) vs hold')
+    expect(text).toContain('[gráfico equity: (run 0xaaa, spec mar2025|live|1000|1000)]')
+    expect(text).toContain('Frente a mantener: vsHodl: -8.46')
+    // an older landing sends no runs at all: the value and run id still reach the follow-up
+    expect(renderAnswerForHistory(answer, [])).toContain('vsHodl: -8.46 (run 0xaaa)')
+  })
+
   test('review finding (P2, agent.ts:127): history carries each cited run\'s specKey and runId, not just its label/value', () => {
     const answer: Answer = {
       blocks: [
