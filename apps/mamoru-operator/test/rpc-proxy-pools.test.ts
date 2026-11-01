@@ -96,4 +96,28 @@ describe('per-chain pools (otto/mamoru#285)', () => {
       proxy.stop()
     }
   })
+
+  test('a hung upstream costs providerTimeoutMs, then the trusted provider answers', async () => {
+    const proxy = startRpcProxy('https://upstream.example/k', {
+      trusted: ['https://trusted.example/k'],
+      fallbacks: ['https://public.example'],
+      logRanges: {},
+      chunkLogs: false,
+      providerTimeoutMs: 300,
+      fetch: async (url: string, init: RequestInit) => {
+        if (url.startsWith('https://upstream')) {
+          return new Promise<Response>((_, reject) => init.signal?.addEventListener('abort', () => reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' }))))
+        }
+        return Response.json({ jsonrpc: '2.0', id: 1, result: '0x1' })
+      },
+    })
+    try {
+      const t = Date.now()
+      const res = await fetch(`${proxy.url}c/bridge-out`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }) })
+      expect(((await res.json()) as { result: string }).result).toBe('0x1')
+      expect(Date.now() - t).toBeLessThan(2_000)
+    } finally {
+      proxy.stop()
+    }
+  })
 })

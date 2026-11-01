@@ -170,6 +170,8 @@ export type RpcProxyOptions = {
    * ExecutionSuccess would mark a conversion that ran as failed.
    */
   trustedLogsOnly?: boolean
+  /** Per provider attempt; default 30 s. Shorter than the caller's budget, so a hung provider leaves time for the next (otto/mamoru#285). */
+  providerTimeoutMs?: number
   /** How long a trusted block hash may witness a log range; default WITNESS_TTL_MS. Tests shorten it. */
   witnessTtlMs?: number
   /** Tests: the upstream transport. */
@@ -207,6 +209,7 @@ export function providerWords(message: unknown): string {
 
 export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { url: string; stop: () => void } {
   const send = opts.fetch ?? fetch
+  const providerTimeoutMs = opts.providerTimeoutMs ?? 30_000
   const fallbacks = opts.fallbacks ?? fallbacksFromEnv()
   const maxLogRange = opts.maxLogRange ?? Number(process.env.MAMORU_LOG_RANGE ?? 10)
   const metrics = opts.metrics
@@ -230,7 +233,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   // The upstream keeps its setting (Alchemy or MAMORU_LOG_RANGE: chunks of maxLogRange); every other provider has its own range.
   const logProviders = providers.map((url, i) => ({ url, logRange: i === 0 && chunkLogs ? maxLogRange : logRangeOf(url, logRanges) }))
   async function post(url: string, body: unknown): Promise<{ status: number; json: any }> {
-    const res = await send(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) })
+    const res = await send(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(providerTimeoutMs) })
     let json: any = null
     try {
       json = await res.json()

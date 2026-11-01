@@ -1,7 +1,7 @@
 import { GuardReadsState } from './guard-reads-state.ts'
 import { join } from 'node:path'
 import { $ } from 'bun'
-import { TransactionReceiptNotFoundError, createPublicClient, getAddress, http, isAddress, type Hex, type PublicClient } from 'viem'
+import { TransactionReceiptNotFoundError, createPublicClient, custom, getAddress, http, isAddress, type Hex, type PublicClient } from 'viem'
 import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, chainWritesOptIn, isChainId, type Address } from '@mamoru/domain'
 import { address as registryAddress, baseRegistry, entry, isDeployed, messageTransmitterV2Abi, monadRegistry, registryFor, type Registry } from '@mamoru/registry'
@@ -504,6 +504,13 @@ export function assertWritePolicy(policy: PolicyVersion, registry: Registry, cha
   assertPolicyChain(policy, chainId)
 }
 
+/**
+ * otto/mamoru#285: the Ethereum and Monad proxies give each provider this long, and their clients wait this long in all:
+ * a hung provider leaves time for the next one (two passes over the upstream and a trusted provider fit).
+ */
+const SIDE_PROVIDER_TIMEOUT_MS = 8_000
+const SIDE_CLIENT_TIMEOUT_MS = 60_000
+
 /** Starts the operator: relayer key, state, loopback bundler, HTTP server, and the engine loops that were active. */
 export async function bootOperator(o: BootOptions) {
   const bootedAt = Date.now()
@@ -572,9 +579,10 @@ export async function bootOperator(o: BootOptions) {
       logRanges: {},
       chunkLogs: false,
       trustedLogsOnly: true,
+      providerTimeoutMs: SIDE_PROVIDER_TIMEOUT_MS,
     })
     const monadUrl = `${monadProxy.url}c/bridge-monad`
-    const monad = createPublicClient({ transport: http(monadUrl, { batch: true, timeout: 30_000 }) })
+    const monad = createPublicClient({ transport: http(monadUrl, { batch: true, timeout: SIDE_CLIENT_TIMEOUT_MS }) })
     // Review of #144: a wrong chain or domain refuses the boot; Monad unreachable does not stop the Base operator: the
     // leg starts without reading or sending anything on Monad until the same check passes.
     let checked = true
@@ -706,19 +714,30 @@ export async function bootOperator(o: BootOptions) {
       logRanges: {},
       chunkLogs: false,
       trustedLogsOnly: true,
+      providerTimeoutMs: SIDE_PROVIDER_TIMEOUT_MS,
     })
     const l1Url = `${l1Proxy.url}c/bridge-out`
-    const l1 = createPublicClient({ transport: http(l1Url, { timeout: 30_000 }) })
+    // Nothing reaches Ethereum before the RPC said it is Ethereum: the check runs before the first request and again
+    // until it passes (an RPC down at boot), and a wrong chain answers every request with an error, for good.
+    const raw = http(l1Url, { timeout: SIDE_CLIENT_TIMEOUT_MS })({})
+    let onChain: 'yes' | 'wrong' | null = null
+    const gate = async () => {
+      if (onChain === 'yes') return
+      if (onChain === null) onChain = Number(await raw.request({ method: 'eth_chainId' })) === ETHEREUM_CHAIN_ID ? 'yes' : 'wrong'
+      if (onChain === 'wrong') throw new Error('MAMORU_L1_RPC_URL is not an Ethereum Mainnet RPC (wrong chain)')
+    }
+    const l1 = createPublicClient({
+      transport: custom({ request: async (args: { method: string; params?: unknown }) => (await gate(), raw.request(args as never)) }, { retryCount: 0 }),
+    })
     // viem errors quote the request URL, which carries the provider key: only fixed text leaves this block.
-    let chain: number | null = null
     let wei: bigint | null = null
     try {
-      chain = await l1.getChainId()
-      if (chain === ETHEREUM_CHAIN_ID) wei = await l1.getBalance({ address: relayer.address })
+      await gate()
+      wei = await l1.getBalance({ address: relayer.address })
     } catch {
-      logErr('[alert]', 'MAMORU_L1_RPC_URL and its trusted RPCs are unreachable at boot: moves from Ethereum fail until Ethereum answers')
+      if (onChain === 'wrong') throw new Error('MAMORU_L1_RPC_URL is not an Ethereum Mainnet RPC (wrong chain)')
+      logErr('[alert]', 'MAMORU_L1_RPC_URL and its trusted RPCs are unreachable at boot: moves from Ethereum wait until Ethereum answers and proves its chain')
     }
-    if (chain !== null && chain !== ETHEREUM_CHAIN_ID) throw new Error('MAMORU_L1_RPC_URL is not an Ethereum Mainnet RPC (wrong chain)')
     const enabledFor = (accountKey: string) => settings?.forAccount(accountKey).settings.bridgeOut?.enabled === true
     const l1Relayer = new Relayer(relayerKey, l1, l1Url, ETHEREUM_CHAIN_ID)
     // #180: with an ERC-20 paymaster the account pays its own gas in USDC. The operator bundles the userOp itself on a
