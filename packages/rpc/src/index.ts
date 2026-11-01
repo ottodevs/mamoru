@@ -642,13 +642,19 @@ export async function principalOwedBefore(client: PublicClient, tokenIds: readon
 export type SimCall = { from?: Address; to: Address; data: Hex }
 export type SimCallResult = { status: 'success' | 'reverted'; returnData: Hex; gasUsed: bigint; logs: Log[]; error?: string }
 
-/** One eth_simulateV1 block on top of `blockNumber`, without validation. */
-export async function simulateCalls(client: PublicClient, calls: SimCall[], blockNumber: bigint): Promise<SimCallResult[]> {
+/** The gas each simulated call is given (30M). */
+export const SIM_CALL_GAS = 30_000_000n
+
+/**
+ * One eth_simulateV1 block on top of `blockNumber`, without validation. otto/mamoru#260: `validation` is left out (false
+ * is the spec default) because Monad's RPC refuses an explicit `"validation": false` ("not supported yet").
+ */
+export async function simulateCalls(client: PublicClient, calls: SimCall[], blockNumber: bigint, stateOverrides?: Record<Address, { code: Hex }>): Promise<SimCallResult[]> {
   let out: { calls: { status: Hex; returnData: Hex; gasUsed: Hex; logs: Log[]; error?: { message: string } }[] }[]
   try {
     out = (await client.request({
       method: 'eth_simulateV1' as never,
-      params: [{ blockStateCalls: [{ calls: calls.map((c) => ({ ...c, gas: '0x1c9c380' })) }], validation: false }, `0x${blockNumber.toString(16)}`] as never,
+      params: [{ blockStateCalls: [{ ...(stateOverrides ? { stateOverrides } : {}), calls: calls.map((c) => ({ ...c, gas: `0x${SIM_CALL_GAS.toString(16)}` })) }] }, `0x${blockNumber.toString(16)}`] as never,
     })) as typeof out
   } catch (e) {
     throw new ReasonError('EHG_SIM_UNAVAILABLE', (e as Error).message.split('\n')[0])
@@ -684,7 +690,10 @@ export async function simulateFromEntryPoint(client: PublicClient, account: Addr
     ...TOKENS.map((t) => ({ to: address(t, registry), data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [account] }) })),
     { to: npm, data: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [account] }) },
   ]
-  const res = await simulateCalls(client, [...reads, { from: address('EntryPointV07', registry), to: account, data: callData }, ...reads], blockNumber)
+  // otto/mamoru#260: Monad's eth_simulateV1 refuses a sender with code ("sender not eoa"). The EntryPoint's code never runs
+  // in this call (it is only msg.sender), so the simulated block gives it none; the account's checks see the same sender.
+  const ep = address('EntryPointV07', registry)
+  const res = await simulateCalls(client, [...reads, { from: ep, to: account, data: callData }, ...reads], blockNumber, { [ep]: { code: '0x' } })
   const n = reads.length
   const exec = res[n]!
   const word = (r: SimCallResult) => BigInt(r.returnData === '0x' ? 0 : r.returnData)
@@ -692,13 +701,24 @@ export async function simulateFromEntryPoint(client: PublicClient, account: Addr
   TOKENS.forEach((t, i) => {
     deltas[t] = word(res[n + 1 + i]!) - word(res[i]!)
   })
+  // otto/mamoru#260: Monad charges the gas limit, and its eth_simulateV1 reports the call's whole limit as gasUsed. A
+  // success that "used" exactly the limit it was given measured nothing: the execution's gas is read with
+  // eth_estimateGas instead (same call, same block), which is what the tight limits of a gas_limit chain need.
+  let gasUsed = exec.gasUsed
+  if (exec.status === 'success' && gasUsed >= SIM_CALL_GAS) {
+    try {
+      gasUsed = await client.estimateGas({ account: address('EntryPointV07', registry), to: account, data: callData, blockNumber })
+    } catch (e) {
+      throw new ReasonError('EHG_SIM_UNAVAILABLE', `gas estimate: ${(e as Error).message.split('\n')[0]}`)
+    }
+  }
   return {
     block: blockNumber,
     ok: exec.status === 'success',
     revert: exec.status === 'success' ? undefined : (exec.error ?? exec.returnData),
     deltas,
     nftDelta: word(res[2 * n]!) - word(res[n - 1]!),
-    gasUsed: exec.gasUsed,
+    gasUsed,
     logs: exec.logs,
   }
 }
