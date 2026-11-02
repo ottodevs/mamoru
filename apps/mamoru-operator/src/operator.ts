@@ -1484,7 +1484,7 @@ export class Operator {
    * field counts: null = everyone (and the boolean agrees); a list = only those accounts (key or Safe address);
    * malformed reached us as [] = nobody; missing (an older Worker) = nobody.
    */
-  private inScope(acc: AccountState, flag: 'multichain_v6' | 'multichain_v6_new' | 'one_auth_v4'): boolean {
+  private inScope(acc: AccountState, flag: 'multichain_v6' | 'multichain_v6_new' | 'one_auth_v4' | 'vaults_v7' | 'stables_lp_exit'): boolean {
     const scope = this.cfg.opsScopedFlags?.()[flag]
     if (scope === null) return this.cfg.opsFlags?.()[flag] === true
     return Array.isArray(scope) && (scope.includes(acc.accountKey.toLowerCase()) || scope.includes(String(acc.ctx.address).toLowerCase()))
@@ -1524,16 +1524,6 @@ export class Operator {
     const v4 = this.cfg.v4Policy
     if (!v4 || flags?.onchain_action_policy_v4 !== true) return null
     return V4_MIGRATES_FROM.has(cur.policyId) && cur.chain === v4.chain ? v4 : null
-  }
-
-  /**
-   * otto/mamoru#210: a scopable flag (#217) is on for this account: null = everyone (and the boolean agrees), a list =
-   * only those accounts (key or Safe address); malformed reached us as [] = nobody; missing = nobody.
-   */
-  private inScope(acc: AccountState, flag: 'vaults_v7' | 'stables_lp_exit'): boolean {
-    const scope = this.cfg.opsScopedFlags?.()[flag]
-    if (scope === null) return this.cfg.opsFlags?.()[flag] === true
-    return Array.isArray(scope) && (scope.includes(acc.accountKey.toLowerCase()) || scope.includes(String(acc.ctx.address).toLowerCase()))
   }
 
   private readonly v4Sized = new Map<string, PolicyVersion>()

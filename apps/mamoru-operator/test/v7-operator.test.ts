@@ -127,8 +127,9 @@ describe('boot wiring', () => {
     expect(v7.buckets.find((b) => b.id === 'stables')!.vaults).toEqual(['vault:gtUSDCp', 'vault:waBasUSDC'])
   })
 
-  test('not configured where v6 is not (V3 or the gate not pinned, or no v4 opt-in)', () => {
-    expect(resolveV7Policy('base', env)).toBeUndefined()
+  test('not configured where v6 is not (V3 not pinned, or no v4 opt-in)', () => {
+    const unpinned = { ...baseRegistry, entries: baseRegistry.entries.filter((e) => e.name !== 'MamoruActionPolicyV3') }
+    expect(resolveV7Policy('base', env, unpinned)).toBeUndefined()
     expect(resolveV7Policy('base', { ...env, MAMORU_ONCHAIN_POLICY_V4: undefined }, reg6)).toBeUndefined()
     expect(resolveV7Policy('monad', env, reg6)).toBeUndefined()
   })

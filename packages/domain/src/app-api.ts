@@ -425,7 +425,7 @@ export type OpView = {
    * otto/mamoru#219, engine ops only, absent on rows stored before it: the engine's own op kind (`kind` folds a
    * range move, a trim and a harvest into 'reduce'), the decision's reason code, and for a range move why it moved.
    */
-  step?: 'enter_swap' | 'enter_mint' | 'increase_liquidity' | 'harvest' | 'convert' | 'rerange' | 'reduce' | 'close_position' | 'bridge_out'
+  step?: 'enter_swap' | 'enter_mint' | 'increase_liquidity' | 'harvest' | 'convert' | 'rerange' | 'reduce' | 'close_position' | 'bridge_out' | 'vault_deposit' | 'vault_redeem'
   /** otto/mamoru#293: set on every migrate-v4 op, the step it runs (0 Base, 1 the design-C Safe on Monad). */
   migrateStep?: number
   cause?: string

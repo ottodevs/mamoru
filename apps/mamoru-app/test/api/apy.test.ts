@@ -216,7 +216,9 @@ describe('GET /api/apy', () => {
       expect(view.monthlyPct).toBe(8.5)
       expect(view.currentSource).toBe('Plan pools, last-day fee APR · GeckoTerminal')
       expect(view.monthlySource).toBe('Plan pools, 28-day fee APR · GeckoTerminal')
-      expect(up.calls).toEqual([])
+      // No pool goes upstream; only the lending vaults' DefiLlama rates (otto/mamoru#210), which the operator does not read.
+      const vaultIds = Object.values(LLAMA_VAULT_IDS)
+      expect(up.calls.filter((u) => !vaultIds.some((id) => u.endsWith(id)))).toEqual([])
       expect(op.calls.map((c) => c.url)).toEqual(['https://op.test/pool-stats'])
       expect(op.calls[0]!.sig).toBeTruthy()
     })
