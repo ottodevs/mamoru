@@ -331,4 +331,17 @@ describe('release: the remote Safe sends savings home', () => {
     expect(d.proposal).toBeNull()
     expect(d.reason).toBe('SESSION_MISSING')
   })
+
+  test('review r2: a remainder below one op with nothing free holds on DECIDE_RELEASE_EMPTY, no dust sale', () => {
+    const d = decide(live({ balances: { USDC: 0n, WMON: 10n ** 30n }, release: { amount: 1n, chainId: 8453 } }), liveWmonUsdcMonadV6)
+    expect(d.proposal).toBeNull()
+    expect(d.reason).toBe('DECIDE_RELEASE_EMPTY')
+  })
+
+  test('review r2: a frozen pool is neither sold into nor reduced; what is free goes home', async () => {
+    const { releaseOf } = await import('./release/index.ts')
+    const o = live({ balances: { USDC: 500_000n, WMON: 10n ** 22n }, positions: [held], release: { amount: 4_000_000n, chainId: 8453 } })
+    const r = releaseOf(o, liveWmonUsdcMonadV6, new Set([MONAD_POOL]), new Set([MONAD_POOL]))
+    expect(r?.proposal).toMatchObject({ kind: 'bridge_out', amount: 500_000n })
+  })
 })

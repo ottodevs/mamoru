@@ -13,7 +13,7 @@ export const RELEASE_MARGIN_BPS = 100n
  * there (bridge them), idle volatile (sell what is missing, 1 % more for the fee), a position (reduce what is missing, 1 % more),
  * nothing left to free (bridge what there is). Null when there is no release.
  */
-export function releaseOf(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>): { code: ReasonCode; proposal: BridgeOutProposal | EnterSwapProposal | ReduceProposal | null } | null {
+export function releaseOf(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>, frozen: ReadonlySet<string> = new Set()): { code: ReasonCode; proposal: BridgeOutProposal | EnterSwapProposal | ReduceProposal | null } | null {
   const r = obs.release
   if (!r || r.amount <= 0n) return null
   if (!hasManageAny(policy)) return { code: 'DECIDE_RELEASE_EMPTY', proposal: null }
@@ -25,10 +25,12 @@ export function releaseOf(obs: Observation, policy: PolicyVersion, policyPools: 
   const floor = opCostInSavings(obs, savings) * BigInt(policy.harvest.costFactorBps)
   // What is missing, with the margin: a sale or a reduce frees this much, never the whole holding when less will do.
   const missing = ((r.amount - free) * (10_000n + RELEASE_MARGIN_BPS)) / 10_000n
-  // Missing less than one op is worth: what is there goes now instead of a sale or a reduce that costs more than it frees.
-  if (free > 0n && missing * 10_000n <= floor) return { code: 'DECIDE_RELEASE', proposal: home(free) }
+  // Missing less than one op is worth: what is there goes now (or nothing is left to do) instead of a sale or a reduce
+  // that costs more than it frees.
+  if (missing * 10_000n <= floor) return free > 0n ? { code: 'DECIDE_RELEASE', proposal: home(free) } : { code: 'DECIDE_RELEASE_EMPTY', proposal: null }
+  // A frozen pool (fall freeze, depeg) is never sold into nor reduced: the release sends what the others free.
   for (const pool of obs.pools) {
-    if (!policyPools.has(pool.name)) continue
+    if (!policyPools.has(pool.name) || frozen.has(pool.name)) continue
     const volatile = volatileOf(pool, savings)
     const held = obs.balances[volatile] ?? 0n
     const value = held === 0n ? 0n : inSavings(pool, volatile, held, savings)
@@ -38,7 +40,7 @@ export function releaseOf(obs: Observation, policy: PolicyVersion, policyPools: 
   }
   for (const p of obs.positions) {
     const pool = p.pool ? obs.pools.find((x) => x.name === p.pool) : undefined
-    if (!pool || p.liquidity === 0n || !isManaged(p, policy, policyPools)) continue
+    if (!pool || p.liquidity === 0n || frozen.has(pool.name) || !isManaged(p, policy, policyPools)) continue
     const pv = positionValue(p, pool, savings)
     const liquidity = pv === 0n || missing >= pv ? p.liquidity : (p.liquidity * missing) / pv + 1n
     return { code: 'DECIDE_RELEASE', proposal: { kind: 'reduce', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity: liquidity > p.liquidity ? p.liquidity : liquidity } }
