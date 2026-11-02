@@ -46,6 +46,9 @@ type Fake = {
   pending: boolean
   /** An op with the leg's nonce ran elsewhere: its UserOperationEvent in the logs. */
   ranElsewhere: boolean
+  /** WETH held, and V4's room (USD units) for a swap. */
+  weth?: bigint
+  room?: bigint
 }
 
 function make(fake: Fake, now: () => number, leg?: Partial<SiblingLeg>, extra: Partial<StoredSibling> = {}) {
@@ -84,8 +87,16 @@ function make(fake: Fake, now: () => number, leg?: Partial<SiblingLeg>, extra: P
     getGasPrice: async () => fake.baseFee,
     getBalance: async () => fake.eth,
     call: async () => ({ data: '0x' }),
+    // QuoterV2 at 2,500 USD per ETH
+    simulateContract: async ({ args }: { args: [{ amountIn: bigint }] }) => ({ result: [(args[0].amountIn * 2_500n * 10n ** 6n) / 10n ** 18n] }),
     readContract: async ({ functionName, address: at }: { functionName: string; address: string }) => {
-      if (functionName === 'balanceOf') return at.toLowerCase() === L1_USDC.toLowerCase() ? fake.usdc : 0n
+      if (functionName === 'balanceOf' && at.toLowerCase() === EP.toLowerCase()) return 0n
+      if (functionName === 'balanceOf') return at.toLowerCase() === L1_USDC.toLowerCase() ? fake.usdc : (fake.weth ?? 0n)
+      if (functionName === 'HELPER') return '0x00000000000000000000000000000000000000e1'
+      if (functionName === 'poolOf') return { ratioBps: 10_000 }
+      if (functionName === 'budgetLeft') return [fake.room ?? 10n ** 12n, 10n ** 12n, 10n ** 12n, 10n ** 12n, 10n ** 12n]
+      if (functionName === 'swapBounds') return [1n, 0n]
+      if (functionName === 'latestRoundData') return [0n, 2_500n * 10n ** 8n, 0n, BigInt(Math.floor(now() / 1000)), 0n]
       if (functionName === 'isReady') return fake.ready
       if (functionName === 'isPaused') return fake.paused
       if (functionName === 'getNonce') return fake.nonce
@@ -234,4 +245,50 @@ describe('the sibling engine (#309 c)', () => {
     await m.bo.tick()
     expect(m.sent.length).toBe(1)
   })
+
+  test("review r1 of #238: a swap is sized to V4's room (never a revert nor its breaker)", async () => {
+    const m = make({ ...ready, ready: false, usdc: 0n, eth: 10n ** 17n, room: 50_000_000n }, () => T0)
+    await m.bo.tick()
+    const leg = m.journal().siblings.k.leg
+    expect(leg?.kind).toBe('swap')
+    // $50 less the 3% margin at $2,500: 0.0194 ETH, not the 0.09 ETH beyond the reserve
+    expect(BigInt(leg!.amount)).toBe(19_400_000_000_000_000n)
+  })
+
+  test('review r1 of #238: the reserve covers the bridge at the highest fee a sibling op pays', async () => {
+    const m = make({ ...ready, ready: false, usdc: 0n, eth: 10n ** 17n }, () => T0)
+    await m.bo.tick()
+    const leg = m.journal().siblings.k.leg!
+    const swapGas = 600_000n + 1_300_000n + 80_000n
+    const bridgeGas = 600_000n + 450_000n + 80_000n
+    expect(BigInt(leg.amount)).toBe(10n ** 17n - swapGas * (2n * 1_000_000_000n + 100_000_000n) - bridgeGas * 3_000_000_000n)
+  })
+
+  test('review r1 of #238: a send refused before signing gives the day its bound back and keeps the previous leg', async () => {
+    const prevLeg = { state: 'failed' as const, l1Tx: OTHER_TX }
+    const m = make({ ...ready, send: 'refusedBeforeSign' }, () => T0 + SIBLING_LEG_RETRY_MS * 2, prevLeg, { legAt: new Date(T0).toISOString() })
+    await m.bo.tick()
+    const j = m.journal()
+    expect(BigInt(j.spent.wei)).toBe(0n)
+    expect(j.siblings.k.leg?.l1Tx).toBe(OTHER_TX)
+  })
+
+  test('review r1 of #238: the nonce spent and its op not found yet: nothing new is signed, the search goes on from where it stopped', async () => {
+    const m = make({ ...ready, nonce: 1n }, () => T0, undefined, { opNonce: { nonce: '0', from: '90', scan: '90' } })
+    await m.bo.tick()
+    const j = m.journal()
+    expect(m.sent).toEqual([])
+    expect(j.siblings.k.opNonce?.scan).toBe('101')
+    expect(j.siblings.k.leg?.state).toBeUndefined()
+  })
+
+  test('review r1 of #238: an old op of the outstanding nonce that ran late is settled before anything new (its burn minted)', async () => {
+    const m = make({ ...ready, nonce: 1n, ranElsewhere: true }, () => T0 + SIBLING_LEG_RETRY_MS * 2, { state: 'failed' }, { legAt: new Date(T0).toISOString(), opNonce: { nonce: '0', from: '90', scan: '90' } })
+    await m.bo.tick()
+    const j = m.journal()
+    expect(m.sent).toEqual([])
+    expect(j.routes.k?.state).toBe('deposited')
+    expect(j.siblings.k.opNonce).toBeUndefined()
+  })
 })
+

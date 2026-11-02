@@ -5,7 +5,7 @@ import { encodeFunctionData, getAddress, pad, parseAbi, parseAbiItem, parseEvent
 import type { UserOperation } from 'viem/account-abstraction'
 import type { AccountContext, Address, BridgeOutRoute, BridgeOutToSign, BridgeOutView, EthConvert, EthConvertToSign, MigrateV4Input, OwnerSignature } from '@mamoru/domain'
 import { address, baseRegistry, entryPointV07Abi, erc20Abi, ethereumRegistry } from '@mamoru/registry'
-import { buildMigrateV4, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi } from '@mamoru/account/one-auth'
+import { buildMigrateV4, mamoruActionPolicyV4Abi, mamoruRegistryAbi, mamoruV4HelperAbi, smartSessionV4Abi } from '@mamoru/account/one-auth'
 import { GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment } from '@mamoru/policy'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { chmodSync, closeSync, fsyncSync, openSync, writeSync } from 'node:fs'
@@ -94,12 +94,23 @@ export const SIBLING_STUCK_POLL_MS = 10 * 60_000
 
 // #309 (c): the sibling's own session userOps on Ethereum, bundled by the relayer (handleOps, beneficiary itself).
 /**
- * The op's limits, under GasPolicyV2's Ethereum caps. Measured on the fork (e2e-ethereum-sibling): the wrap + approve +
- * V4.swap batch takes ~0.91M from the EntryPoint (cold), validation (SmartSession, V4.checkAction, gas policy) ~0.3M.
+ * Each op's limits, under GasPolicyV2's Ethereum caps. Measured on the fork (e2e-ethereum-sibling): the wrap + approve +
+ * V4.swap batch takes ~0.91M from the EntryPoint (cold), the approve + V4.bridge ~0.15M, validation (SmartSession,
+ * V4.checkAction, gas policy) ~0.3M.
  */
-export const SIBLING_OP_GAS = { verificationGasLimit: 600_000n, callGasLimit: 1_300_000n, preVerificationGas: 80_000n }
-/** The relayer's handleOps for one sibling op: the op's limits and the EntryPoint's own work. */
-export const SIBLING_HANDLE_OPS_GAS = 2_300_000n
+export const SIBLING_GAS = {
+  swap: { verificationGasLimit: 600_000n, callGasLimit: 1_300_000n, preVerificationGas: 80_000n },
+  bridge: { verificationGasLimit: 600_000n, callGasLimit: 450_000n, preVerificationGas: 80_000n },
+} as const
+const opGasOf = (k: keyof typeof SIBLING_GAS) => SIBLING_GAS[k].verificationGasLimit + SIBLING_GAS[k].callGasLimit + SIBLING_GAS[k].preVerificationGas
+/** The relayer's handleOps for one sibling op: the op's limits plus the EntryPoint's own work. */
+export const SIBLING_HANDLE_OPS_OVERHEAD = 200_000n
+/** The highest fee a sibling op signs (its maxFeePerGas): the relayer's own ceiling, under GasPolicyV2's 5 gwei. */
+export const SIBLING_MAX_FEE = 3_000_000_000n // = MAX_GAS_PRICE_WEI (declared below)
+/** A swap stays this far (bps) under V4's room: the quote and V4's own valuation differ a little. */
+export const SIBLING_ROOM_MARGIN_BPS = 300n
+/** The outstanding nonce's op is searched SIBLING_SCAN_CHUNKS log chunks a pass, from where the last pass stopped. */
+export const SIBLING_SCAN_CHUNKS = 20
 /** Less than this of ETH (beyond the gas reserve) or of USDC is left where it is: not worth its gas. */
 export const SIBLING_MIN_SWAP_WEI = 2_000_000_000_000_000n
 export const SIBLING_MIN_BRIDGE_USDC = 1_000_000n
@@ -331,6 +342,11 @@ export type StoredSibling = {
   leg?: SiblingLeg
   legAt?: string
   legFails?: { day: string; n: number }
+  /**
+   * Review r1 of #238: the outstanding EntryPoint nonce (lane 0): some op signed with it may still run. `from` is the
+   * first block an op with it was signed, `scan` where the search for what ran with it continues. Cleared once read.
+   */
+  opNonce?: { nonce: string; from: string; scan: string }
   at: string
 }
 
@@ -1435,7 +1451,9 @@ export class BridgeOut {
   async siblingHoldingsUsdc(ctx: AccountContext): Promise<bigint> {
     if (!this.enabledFor(ctx.accountKey) || !oneAuthV4Deployment(ethereumRegistry)) return 0n
     const safe = this.live(ctx).safe
-    const [usdcHeld, wei, round] = await Promise.all([this.usdcAt(safe), this.l1.getBalance({ address: safe }), this.l1.readContract({ address: CHAINLINK_ETH_USD, abi: aggregatorAbi, functionName: 'latestRoundData' })])
+    // Review r1 of #238: WETH too (a swap V4 left undone keeps it wrapped).
+    const [usdcHeld, eth, weth, round] = await Promise.all([this.usdcAt(safe), this.l1.getBalance({ address: safe }), this.l1.readContract({ address: L1_WETH, abi: erc20Abi, functionName: 'balanceOf', args: [safe] }), this.l1.readContract({ address: CHAINLINK_ETH_USD, abi: aggregatorAbi, functionName: 'latestRoundData' })])
+    const wei = eth + weth
     const answer = round[1]
     if (answer <= 0n || BigInt(Math.floor(this.now() / 1000)) - round[3] > BigInt(ORACLE_MAX_AGE_SEC)) throw new Error('ETH/USD price stale or unusable')
     return usdcHeld + (wei * answer) / 10n ** 20n
@@ -1819,13 +1837,15 @@ export class BridgeOut {
   /**
    * The sibling's engine, one session userOp at a time, signed by its V4 session key (never the owner) and bounded by V4
    * on chain:
-   * - ETH beyond its gas reserve (two ops' prefund) is wrapped and swapped to USDC on the listed WETH/USDC pool, at no
-   *   less than V4's own bound nor the Chainlink-checked quote (convertMinOut);
+   * - ETH beyond its gas reserve is wrapped and swapped to USDC on the listed WETH/USDC pool, sized to V4's room (so its
+   *   budget never reverts and its breaker never trips), at no less than V4's own bound nor the Chainlink-checked quote;
    * - once the guardian has read the Base home back (V4.isReady), all its USDC is bridged home by V4.bridge (CCTP, the
    *   account itself the recipient), and the burn becomes an ordinary CCTP route that tick() mints on Base.
    * The relayer bundles it (EntryPoint.handleOps, beneficiary the relayer): the account pays its gas from its own ETH, no
-   * paymaster. Simulated before anything is signed for broadcast; one op of the account at a time, never beside another
-   * send, a move to Base still being minted, or V4's pause.
+   * paymaster. Its nonce (SmartSession lane 0) is the ledger: nothing new is signed while an op with the outstanding
+   * nonce ran and was not read yet (review r1 of #238), so no op that ran, a late copy included, goes unsettled.
+   * Simulated before anything is signed for broadcast; never beside another send, a move to Base still being minted, or
+   * V4's pause.
    */
   private async driveSibling(accountKey: string): Promise<void> {
     const c = this.journal.siblings?.[accountKey]
@@ -1842,30 +1862,29 @@ export class BridgeOut {
     this.save()
     const safe = c.safe
     const ep = address('EntryPointV07', ethereumRegistry)
-    const nonceKey = sessionNonceKey(0, address('SmartSession', ethereumRegistry))
-    const [eth, weth, usdcHeld, ready, paused, nonce, deposit, block] = await Promise.all([
+    const nonce = await this.siblingNonce(safe)
+    // An op with the outstanding nonce ran (ours, an earlier one with that nonce, or a copy): read it first.
+    if (c.opNonce && nonce > BigInt(c.opNonce.nonce)) return this.recoverNonce(accountKey, c)
+    const [eth, weth, usdcHeld, ready, paused, deposit, block] = await Promise.all([
       this.l1.getBalance({ address: safe }),
       this.l1.readContract({ address: L1_WETH, abi: erc20Abi, functionName: 'balanceOf', args: [safe] }),
       this.usdcAt(safe),
       this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isReady', args: [safe, CCTP_DOMAIN_BASE] }),
       this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isPaused', args: [safe] }),
-      this.l1.readContract({ address: ep, abi: entryPointV07Abi, functionName: 'getNonce', args: [safe, nonceKey] }),
       this.l1.readContract({ address: ep, abi: entryPointV07Abi, functionName: 'balanceOf', args: [safe] }),
       this.l1.getBlock({ blockTag: 'latest' }),
     ])
     if (paused) return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: V4 has ${safe} paused, nothing sent`, undefined)
-    const caps = GAS_CAPS_V2_BY_CHAIN[ETHEREUM_CHAIN_ID]!
-    const prio = caps.maxPriorityFeePerGas
+    const prio = GAS_CAPS_V2_BY_CHAIN[ETHEREUM_CHAIN_ID]!.maxPriorityFeePerGas
     const base = block.baseFeePerGas ?? 0n
-    if (base + prio > caps.maxFeePerGas || base + prio > MAX_GAS_PRICE_WEI) return
-    const maxFee = 2n * base + prio < caps.maxFeePerGas ? 2n * base + prio : caps.maxFeePerGas
-    const prefund = (SIBLING_OP_GAS.verificationGasLimit + SIBLING_OP_GAS.callGasLimit + SIBLING_OP_GAS.preVerificationGas) * maxFee
+    if (base + prio > SIBLING_MAX_FEE) return
+    const maxFee = 2n * base + prio < SIBLING_MAX_FEE ? 2n * base + prio : SIBLING_MAX_FEE
     let kind: SiblingLeg['kind']
     let amount: bigint
     let calls: Execution[]
     if (ready && usdcHeld >= SIBLING_MIN_BRIDGE_USDC) {
       // The bridge leaves the account its ETH: only the op's prefund, less what it holds at the EntryPoint.
-      if (eth + deposit < prefund) return
+      if (eth + deposit < opGasOf('bridge') * maxFee) return
       kind = 'bridge'
       amount = usdcHeld
       calls = [
@@ -1873,11 +1892,10 @@ export class BridgeOut {
         { target: d.policy, value: 0n, callData: encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'bridge', args: [CCTP_DOMAIN_BASE, L1_USDC, amount] }) },
       ]
     } else {
-      // Two ops' prefund stays as ETH (this one and the bridge home after it), and never less than the bridge's prefund at
-      // the highest price the relayer sends at: a later rise in gas only delays the bridge, never strands the USDC.
-      const floor = (SIBLING_OP_GAS.verificationGasLimit + SIBLING_OP_GAS.callGasLimit + SIBLING_OP_GAS.preVerificationGas) * MAX_GAS_PRICE_WEI
-      const reserve = 2n * prefund > floor ? 2n * prefund : floor
-      const wrap = eth > reserve ? eth - reserve : 0n
+      // This op's prefund, and the bridge home's at the highest fee a sibling op ever pays (review r1 of #238: a rise in
+      // gas after the swap can never leave the USDC without the ETH to bridge it).
+      const reserve = opGasOf('swap') * maxFee + opGasOf('bridge') * SIBLING_MAX_FEE
+      let wrap = eth > reserve ? eth - reserve : 0n
       amount = weth + wrap
       if (amount < SIBLING_MIN_SWAP_WEI) return
       kind = 'swap'
@@ -1886,12 +1904,24 @@ export class BridgeOut {
       let limit: bigint
       try {
         const helper = (await this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'HELPER' })) as Address
-        const [bound, q, round] = await Promise.all([
+        // Review r1 of #238: never more value than V4's room (account bucket, the pool's sub-bucket, 30 days, the 24 h
+        // breaker, the review threshold): over it, V4 reverts or trips its breaker and pauses the account.
+        const entry = (await this.l1.readContract({ address: d.registry, abi: mamoruRegistryAbi, functionName: 'poolOf', args: [SIBLING_POOL] })) as { ratioBps: number }
+        const left = (await this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'budgetLeft', args: [safe, SIBLING_POOL, entry.ratioBps] })) as readonly bigint[]
+        const room = (left.reduce((m, x) => (x < m ? x : m)) * (10_000n - SIBLING_ROOM_MARGIN_BPS)) / 10_000n
+        const quote = async (a: bigint) => (await this.l1.simulateContract({ address: QUOTER_V2, abi: quoterV2Abi, functionName: 'quoteExactInputSingle', args: [{ tokenIn: L1_WETH, tokenOut: L1_USDC, amountIn: a, fee: WETH_USDC_FEE, sqrtPriceLimitX96: 0n }] })).result[0]
+        let q = await quote(amount)
+        if (q > room) {
+          amount = (amount * room) / q
+          if (amount < SIBLING_MIN_SWAP_WEI) return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: V4's room is ${room} USD units, no swap now`, undefined)
+          q = await quote(amount)
+        }
+        wrap = amount > weth ? amount - weth : 0n
+        const [bound, round] = await Promise.all([
           this.l1.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'swapBounds', args: [SIBLING_POOL, L1_WETH, amount] }),
-          this.l1.simulateContract({ address: QUOTER_V2, abi: quoterV2Abi, functionName: 'quoteExactInputSingle', args: [{ tokenIn: L1_WETH, tokenOut: L1_USDC, amountIn: amount, fee: WETH_USDC_FEE, sqrtPriceLimitX96: 0n }] }),
           this.l1.readContract({ address: CHAINLINK_ETH_USD, abi: aggregatorAbi, functionName: 'latestRoundData' }),
         ])
-        const checked = convertMinOut(amount, q.result[0], { answer: round[1], updatedAt: round[3] }, nowSec)
+        const checked = convertMinOut(amount, q, { answer: round[1], updatedAt: round[3] }, nowSec)
         minOut = bound[0] > checked ? bound[0] : checked
         limit = bound[1]
       } catch (e) {
@@ -1904,26 +1934,29 @@ export class BridgeOut {
         { target: d.policy, value: 0n, callData: encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'swap', args: [{ pool: SIBLING_POOL, tokenIn: L1_WETH, amountIn: amount, amountOutMinimum: minOut, sqrtPriceLimitX96: limit, deadline: BigInt(nowSec + SIBLING_SWAP_DEADLINE_SEC) }] }) },
       ]
     }
-    const draft = draftUserOp(safe, nonce, executeCallData(calls), { ...SIBLING_OP_GAS, maxFeePerGas: maxFee, maxPriorityFeePerGas: prio })
+    const gas = SIBLING_GAS[kind]
+    const draft = draftUserOp(safe, nonce, executeCallData(calls), { ...gas, maxFeePerGas: maxFee, maxPriorityFeePerGas: prio })
     const op = await signSessionUserOp(draft, ETHEREUM_CHAIN_ID, c.permissionId, privateKeyToAccount(key), ethereumRegistry)
     const hash = userOpHash(op, ETHEREUM_CHAIN_ID, ethereumRegistry)
     const data = handleOpsData([op], this.relayer.address)
+    const txGas = opGasOf(kind) + SIBLING_HANDLE_OPS_OVERHEAD
     try {
       // The calls as the account would run them, then the whole op through the EntryPoint (validation, V4's checks).
       await this.l1.call({ account: ep, to: safe, data: op.callData })
-      await this.l1.call({ account: this.relayer.address, to: ep, data, gas: SIBLING_HANDLE_OPS_GAS })
+      await this.l1.call({ account: this.relayer.address, to: ep, data, gas: txGas })
     } catch (e) {
       return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} simulation refused, nothing sent:`, e instanceof Error ? e.message.split('\n')[0] : e)
     }
-    // A failed op that never ran leaves its nonce to this one: the search for what ran with it starts at the first.
-    const prior = c.leg && c.leg.nonce === nonce.toString() ? c.leg.nonceFrom : undefined
-    const leg: SiblingLeg = { kind, userOpHash: hash, nonce: nonce.toString(), nonceFrom: prior ?? block.number!.toString(), amount: amount.toString(), state: 'sending', at: new Date(now).toISOString() }
+    // The nonce's ledger entry, from the first op ever signed with it (a later one with the same nonce keeps it).
+    if (!c.opNonce || c.opNonce.nonce !== nonce.toString()) c.opNonce = { nonce: nonce.toString(), from: block.number!.toString(), scan: block.number!.toString() }
+    const prev = c.leg
+    const leg: SiblingLeg = { kind, userOpHash: hash, nonce: nonce.toString(), nonceFrom: c.opNonce.from, amount: amount.toString(), state: 'sending', at: new Date(now).toISOString() }
     c.leg = leg
     this.save()
     try {
       await this.exclusive(async () => {
         const { receipt } = await this.chargedOp(
-          { to: ep, data, gas: SIBLING_HANDLE_OPS_GAS },
+          { to: ep, data, gas: txGas },
           hash,
           (h) => {
             leg.l1Tx = h
@@ -1938,20 +1971,24 @@ export class BridgeOut {
         await this.settleLeg(accountKey, c, leg, receipt)
       })
     } catch (e) {
-      // Refused before a transaction was signed (gas price, the day's budget, the relayer short, busy): the op never left
-      // this host, nothing can run it, it is dropped and tried again later. Signed: unconfirmed, resolveLeg decides.
-      if (!leg.l1Tx) c.leg = undefined
+      // Refused before a transaction was signed (gas price, the day's budget, the relayer short, busy): this op never left
+      // this host; the previous leg stays as it was (its nonce's ledger entry is c.opNonce). Signed: unconfirmed.
+      if (!leg.l1Tx) c.leg = prev
       else if (leg.state === 'sending') leg.state = 'unconfirmed'
       this.save()
       logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} send:`, e instanceof Error ? e.message.split('\n')[0] : e)
     }
   }
 
+  private async siblingNonce(safe: Address): Promise<bigint> {
+    return this.l1.readContract({ address: address('EntryPointV07', ethereumRegistry), abi: entryPointV07Abi, functionName: 'getNonce', args: [safe, sessionNonceKey(0, address('SmartSession', ethereumRegistry))] })
+  }
+
   /**
-   * An op whose outcome is not proven yet, from the chain. What ran with its nonce decides, whichever op it was (an
-   * earlier one with the same nonce, or a copy someone else bundled): its UserOperationEvent and that transaction's logs.
-   * Nonce unspent: still pending in the mempool waits; otherwise, past UNCONFIRMED_GIVEUP_MS, failed (the next op signs
-   * the same nonce, so at most one of them runs). Provider errors decide nothing.
+   * An op whose outcome is not proven yet, from the chain: its own receipt when it carries it; once the nonce is spent,
+   * whatever ran with it (recoverNonce). Nonce unspent: still pending in the mempool waits; a receipt without it (our
+   * bundle reverted) or past UNCONFIRMED_GIVEUP_MS, failed: the next op signs that same nonce, so at most one of them
+   * ever runs, and c.opNonce keeps the nonce outstanding until whichever does is read. Provider errors decide nothing.
    */
   private async resolveLeg(accountKey: string, c: StoredSibling): Promise<void> {
     const leg = c.leg!
@@ -1965,13 +2002,7 @@ export class BridgeOut {
       }
       if (receipt && userOpLogs(receipt, leg.userOpHash)) return this.settleLeg(accountKey, c, leg, receipt)
     }
-    const ep = address('EntryPointV07', ethereumRegistry)
-    const nonceNow = await this.l1.readContract({ address: ep, abi: entryPointV07Abi, functionName: 'getNonce', args: [c.safe, sessionNonceKey(0, address('SmartSession', ethereumRegistry))] })
-    if (nonceNow > BigInt(leg.nonce)) {
-      const ran = await this.findNonceOp(c.safe, BigInt(leg.nonce), BigInt(leg.nonceFrom))
-      if (!ran) return logErr(`[alert] bridge-out sibling ${accountKey.slice(0, 8)}: the nonce of ${c.safe}'s ${leg.kind} op is spent but its UserOperationEvent is not found yet`, undefined)
-      return this.settleLeg(accountKey, c, leg, await this.l1.getTransactionReceipt({ hash: ran.tx }), ran.userOpHash)
-    }
+    if ((await this.siblingNonce(c.safe)) > BigInt(leg.nonce)) return this.recoverNonce(accountKey, c)
     if (leg.l1Tx && !receipt && (await this.pending(leg.l1Tx))) return
     if (receipt || this.now() - Date.parse(leg.at) > UNCONFIRMED_GIVEUP_MS) {
       leg.state = 'failed'
@@ -1980,23 +2011,39 @@ export class BridgeOut {
     }
   }
 
-  /** The UserOperationEvent of the account's op with `nonce` (SmartSession lane 0), from `from` on, in provider-sized chunks. */
-  private async findNonceOp(safe: Address, nonce: bigint, from: bigint): Promise<{ tx: Hex; userOpHash: Hex } | null> {
+  /**
+   * The outstanding nonce is spent: the UserOperationEvent of the op that ran with it (the account's lane-0 nonce,
+   * whichever op it was), searched from the first block an op with it was signed, SIBLING_SCAN_CHUNKS chunks a pass with
+   * a cursor kept on disk (no window: a copy that lands days later is still found), then settled from its logs. Until it
+   * is found nothing new is signed and the account stays in flight (fail closed), alerted.
+   */
+  private async recoverNonce(accountKey: string, c: StoredSibling): Promise<void> {
+    const o = c.opNonce
+    if (!o) return
     const head = await this.l1.getBlockNumber({ cacheTime: 0 })
-    const end = head < from + LOG_WINDOW_BLOCKS ? head : from + LOG_WINDOW_BLOCKS
-    for (let lo = from; lo <= end; lo += LOG_CHUNK_BLOCKS) {
-      const hi = lo + LOG_CHUNK_BLOCKS - 1n < end ? lo + LOG_CHUNK_BLOCKS - 1n : end
-      const logs = await this.l1.getLogs({ address: address('EntryPointV07', ethereumRegistry), event: USER_OPERATION_EVENT, args: { sender: safe }, fromBlock: lo, toBlock: hi })
-      const l = logs.find((x) => x.args.nonce === nonce)
-      if (l?.transactionHash && l.args.userOpHash) return { tx: l.transactionHash, userOpHash: l.args.userOpHash }
+    let lo = BigInt(o.scan)
+    for (let i = 0; i < SIBLING_SCAN_CHUNKS && lo <= head; i++) {
+      const hi = lo + LOG_CHUNK_BLOCKS - 1n < head ? lo + LOG_CHUNK_BLOCKS - 1n : head
+      const logs = await this.l1.getLogs({ address: address('EntryPointV07', ethereumRegistry), event: USER_OPERATION_EVENT, args: { sender: c.safe }, fromBlock: lo, toBlock: hi })
+      const l = logs.find((x) => x.args.nonce === BigInt(o.nonce))
+      if (l?.transactionHash && l.args.userOpHash) {
+        const leg = c.leg ?? { kind: 'bridge', userOpHash: l.args.userOpHash, nonce: o.nonce, nonceFrom: o.from, amount: '0', state: 'unconfirmed', at: new Date(this.now()).toISOString() }
+        c.leg = leg
+        return this.settleLeg(accountKey, c, leg, await this.l1.getTransactionReceipt({ hash: l.transactionHash }), l.args.userOpHash)
+      }
+      lo = hi + 1n
     }
-    return null
+    o.scan = lo.toString()
+    if (c.leg && (c.leg.state === 'failed' || c.leg.state === 'done')) c.leg.state = 'unconfirmed' // in flight until read
+    this.save()
+    if (lo > head) logErr(`[alert] bridge-out sibling ${accountKey.slice(0, 8)}: nonce ${o.nonce} of ${c.safe} spent, its op not found up to block ${head}: nothing new is signed`, undefined)
   }
 
   /**
-   * The op that ran with the leg's nonce (`ran`, the leg's own by default), from its logs: failed when it reverted; done
-   * otherwise, and a burn home in it (V4's Bridged for this account, home domain, its own address, USDC, and exactly one
-   * CCTP message that is that burn) becomes the account's CCTP route, minted on Base by tick().
+   * The op that ran with the outstanding nonce (`ran`, the leg's own by default), from its logs: failed when its calls
+   * reverted; done otherwise, and a burn home in it (V4's Bridged for this account, home domain, its own address, USDC, and
+   * exactly one CCTP message that is that burn) becomes the account's CCTP route, minted on Base by tick(). Either way the
+   * nonce is settled (c.opNonce cleared).
    */
   private async settleLeg(accountKey: string, c: StoredSibling, leg: SiblingLeg, receipt: TransactionReceipt, ran: Hex = leg.userOpHash): Promise<void> {
     const mine = userOpLogs(receipt, ran)
@@ -2006,6 +2053,7 @@ export class BridgeOut {
       this.save()
       return
     }
+    c.opNonce = undefined
     if (!mine.success) {
       leg.state = 'failed'
       this.legFailed(accountKey, c)
@@ -2025,7 +2073,7 @@ export class BridgeOut {
         getAddress(b.recipient) === getAddress(c.safe) &&
         getAddress(b.token) === L1_USDC &&
         mintIsFor(decodeCctpMessage(sent[0]!.args.message), L1_USDC, c.safe, b.amount, undefined, d.policy)
-      if (!ok) logErr(`[alert] bridge-out sibling ${accountKey.slice(0, 8)}: ${c.safe} burned in ${receipt.transactionHash} without the expected CCTP message: not minted, ops looks`, undefined)
+      if (!ok) logErr(`[alert] bridge-out sibling ${accountKey.slice(0, 8)}: ${c.safe} burned in ${receipt.transactionHash} without the expected CCTP message: not minted, for ops to look at`, undefined)
       else {
         const route: Stored = {
           id: `sibling-${ran.slice(2, 18)}`,
@@ -2051,8 +2099,8 @@ export class BridgeOut {
   /**
    * The relayer's handleOps of one sibling op, charged to the day at its NET cost: the EntryPoint pays the beneficiary
    * (the relayer) the op's gas from the account's own ETH, whether the op's calls succeed or not, so only the difference
-   * stays charged. Before the send the bound is one transaction at today's price (written first, as charged()); the
-   * relayer must hold twice it. A handleOps that reverts (validation, simulated just before) is charged in full.
+   * stays charged. Before the send the bound is one transaction at today's price (written first, as charged()), returned
+   * when the send is refused before anything is signed (review r1 of #238); the relayer must hold twice it.
    */
   private async chargedOp(tx: { to: Address; data: Hex; gas: bigint }, op: Hex, onSent: (hash: Hex) => void, onSigned: (hash: Hex) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     const price = await this.l1.getGasPrice()
@@ -2061,7 +2109,17 @@ export class BridgeOut {
     if (this.committed() + bound > DAILY_BUDGET_WEI) throw new HttpError(503, 'BRIDGE_BUDGET', 'moves from Ethereum are paused for today, try tomorrow')
     if ((await this.l1.getBalance({ address: this.relayer.address })) < 2n * bound) throw new HttpError(503, 'BRIDGE_RELAYER_EMPTY', 'moves from Ethereum are paused, try later')
     this.spend(bound)
-    const r = await this.relayer.send(tx, onSent, undefined, (h) => onSigned(h))
+    let signed = false
+    let r: { hash: Hex; receipt: TransactionReceipt }
+    try {
+      r = await this.relayer.send(tx, onSent, undefined, (h) => {
+        signed = true
+        onSigned(h)
+      })
+    } catch (e) {
+      if (!signed) this.spend(-bound)
+      throw e
+    }
     const cost = r.receipt.gasUsed * r.receipt.effectiveGasPrice
     const paid = userOpLogs(r.receipt, op)?.actualGasCost ?? 0n
     this.spend((cost > paid ? cost - paid : 0n) - bound)

@@ -64,6 +64,7 @@ export const mamoruActionPolicyV4Abi = parseAbi([
   'function readyOf(address account, uint32 domain) view returns (Ready)',
   'function isReady(address account, uint32 domain) view returns (bool)',
   'function isPaused(address account) view returns (bool)',
+  'function budgetLeft(address account, address key, uint16 ratioBps) view returns (uint256 bucket, uint256 sub, uint256 cap30, uint256 breaker, uint256 untilReview)',
   'function configOf(address account) view returns (Config)',
   'function generationOf(address account) view returns (uint64)',
   'function admittedPool(address account, uint256 tokenId) view returns (address)',
