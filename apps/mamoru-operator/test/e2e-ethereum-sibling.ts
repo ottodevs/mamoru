@@ -10,7 +10,7 @@ import { randomBytes } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createPublicClient, http, toHex, type Hex } from 'viem'
+import { createPublicClient, encodeFunctionData, http, parseAbi, parseAbiItem, toHex, type Hex } from 'viem'
 import type { AccountContext, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
 import { address, baseRegistry, ethereumRegistry } from '@mamoru/registry'
 import { buildMigrateV4, mamoruActionPolicyV4Abi, smartSessionV4Abi } from '@mamoru/account/one-auth'
@@ -22,7 +22,7 @@ import { anvilBinary, assertNoKeyInArgv, sanitizedEnv } from '../../../packages/
 import { startForkProxy } from '../../../packages/scenarios/proxy/index.ts'
 import { Lab } from '../../../packages/scenarios/fixtures/lab.ts'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
-import { BridgeOut, type Fetch } from '../src/bridge-out.ts'
+import { BridgeOut, CHAINLINK_ETH_USD, L1_USDC, L1_WETH, type Fetch } from '../src/bridge-out.ts'
 import { HttpError } from '../src/operator.ts'
 import { Relayer } from '../src/relayer.ts'
 
@@ -148,6 +148,66 @@ try {
   check((await code(bo.prepareSibling(ctx))) === 'SIBLING_IN_PROGRESS', 'set up once: a second prepare is refused')
   await bo.tick()
   check(make().siblingView(ctx.accountKey).state === 'done', 'the journal survives a restart, tick leaves it done')
+
+  // ---- #309 (c): the sibling at work, on its own session key, bounded by V4 ----
+  const erc20 = parseAbi(['function balanceOf(address) view returns (uint256)'])
+  const journal = () => JSON.parse(readFileSync(join(dir, 'bridge-out.json'), 'utf8')) as { siblings: Record<string, { leg?: { kind: string; state: string; l1Tx?: Hex; amount: string } }>; routes: Record<string, { state: string; bridge?: string; amountUsdc: string; cctp?: { message?: Hex; sender?: string } }> }
+  let clock = Number(await lab.timestamp()) * 1000
+  const eng = make(() => clock)
+  await eng.tick()
+  check(!journal().siblings[ctx.accountKey]!.leg, 'before the listings are executed (V4 registry delay): no op signed, nothing sent')
+
+  // The listings T7 queued, executed after the 72 h delay by the admin Safe (as executeListings on 5 Nov).
+  const registry = d.registry
+  const regAbi = parseAbi(['function ADMIN() view returns (address)', 'function execute(uint8 kind, bytes32 key, bytes params, uint256 n)'])
+  const queued = await l1.getLogs({ address: registry, event: parseAbiItem('event Queued(bytes32 indexed id, uint8 indexed kind, bytes32 indexed key, bytes params, uint256 nonce, uint256 eta)'), fromBlock: 26_328_000n, toBlock: 'latest' })
+  const [, answer] = await l1.readContract({ address: CHAINLINK_ETH_USD, abi: parseAbi(['function latestRoundData() view returns (uint80, int256, uint256, uint256, uint80)']), functionName: 'latestRoundData' })
+  await lab.warp(3 * 86_400 + 60)
+  const admin = await l1.readContract({ address: registry, abi: regAbi, functionName: 'ADMIN' })
+  await lab.setBalance(admin, 10n ** 18n)
+  let executed = 0
+  for (const q of queued) executed += (await lab.sendAs(admin, registry, encodeFunctionData({ abi: regAbi, functionName: 'execute', args: [q.args.kind!, q.args.key!, q.args.params!, q.args.nonce!] }))).ok ? 1 : 0
+  check(queued.length > 0 && executed === queued.length, `the ${queued.length} queued listings executed after the delay`)
+  // Chainlink stops updating on a fork: its answer from before the warp, fresh (answer, updatedAt = now).
+  const word = (v: bigint) => v.toString(16).padStart(64, '0')
+  const mock = `0x60016000527f${word(answer)}6020524260405242606052600160805260a06000f3` as Hex
+  await (lab as unknown as { rpc: (m: string, p: unknown[]) => Promise<unknown> }).rpc('anvil_setCode', [CHAINLINK_ETH_USD, mock])
+  clock = Number(await lab.timestamp()) * 1000
+
+  const eth0 = await l1.getBalance({ address: safe })
+  await eng.tick()
+  const leg1 = journal().siblings[ctx.accountKey]!.leg
+  check(leg1?.kind === 'swap' && leg1.state === 'done', `the engine swapped on its session key: ${leg1?.kind} ${leg1?.state}`)
+  const usdc1 = await l1.readContract({ address: L1_USDC, abi: erc20, functionName: 'balanceOf', args: [safe] })
+  const weth1 = await l1.readContract({ address: L1_WETH, abi: erc20, functionName: 'balanceOf', args: [safe] })
+  const eth1 = await l1.getBalance({ address: safe })
+  console.log(`  swap: ${eth0} wei -> ${usdc1} USDC units, ETH left ${eth1}, WETH ${weth1}`)
+  check(usdc1 > 50_000_000n && weth1 === 0n && eth1 > 0n && eth1 < 10n ** 16n, 'ETH became USDC under V4; the gas reserve stays as ETH')
+  if (leg1?.l1Tx) {
+    const rc = await l1.getTransactionReceipt({ hash: leg1.l1Tx })
+    console.log(`  swap handleOps gasUsed ${rc.gasUsed}`)
+    for (const l of rc.logs) if (l.topics[0] === '0x1c4fada7374c0a9ee8841fc38afe82932dc0f8e69012e927f061a8bae611a201') console.log(`  revert reason: ${l.data.slice(0, 400)}`)
+    for (const l of rc.logs) if (l.topics[0] === '0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f') console.log(`  UserOperationEvent data: ${l.data}`)
+  }
+
+  clock += 6 * 60_000
+  await eng.tick()
+  check(journal().siblings[ctx.accountKey]!.leg?.l1Tx === leg1?.l1Tx, 'not ready on Base yet and only the reserve left: no bridge, no second swap')
+
+  const guardian = (await l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'GUARDIAN' })) as `0x${string}`
+  await lab.setBalance(guardian, 10n ** 18n)
+  check((await lab.sendAs(guardian, d.policy, encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'setReady', args: [safe, 6, safe] }))).ok, 'the guardian marks the sibling ready (it read the Base home back)')
+  clock += 6 * 60_000
+  await eng.tick()
+  const leg2 = journal().siblings[ctx.accountKey]!.leg
+  const route = journal().routes[ctx.accountKey]
+  const usdc2 = await l1.readContract({ address: L1_USDC, abi: erc20, functionName: 'balanceOf', args: [safe] })
+  check(leg2?.kind === 'bridge' && leg2.state === 'done' && usdc2 === 0n, `the engine bridged all the USDC home: ${leg2?.kind} ${leg2?.state}`)
+  check(route?.state === 'deposited' && route.bridge === 'cctp' && route.amountUsdc === usdc1.toString() && !!route.cctp?.message && route.cctp.sender?.toLowerCase() === d.policy.toLowerCase(), "the burn is the account's CCTP route, V4 the burner, waiting for its mint on Base")
+  if (leg2?.l1Tx) console.log(`  bridge handleOps gasUsed ${(await l1.getTransactionReceipt({ hash: leg2.l1Tx })).gasUsed}`)
+  clock += 6 * 60_000
+  await eng.tick()
+  check(journal().siblings[ctx.accountKey]!.leg?.l1Tx === leg2?.l1Tx, 'while the move to Base is not minted, the engine waits')
 } finally {
   anvil.kill()
   proxy.stop()

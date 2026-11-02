@@ -81,6 +81,7 @@ export const mamoruV4HelperAbi = parseAbi([
   'function remote(address account, uint32 domain, address sessionKey, uint128 capUsd, uint32 homeDomain) view returns (address at, bytes32 ownersHash, bytes createCall)',
   'function remoteDeployment(address account, uint32 domain) view returns (address at, bytes createCall)',
   'function ownersHashOf(address account) view returns (bytes32)',
+  'function swapBounds(address pool, address tokenIn, uint256 amountIn) view returns (uint256 minOut, uint160 sqrtPriceLimitX96)',
 ])
 
 export const mamoruRegistryAbi = parseAbi([

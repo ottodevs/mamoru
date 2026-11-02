@@ -288,6 +288,11 @@ export function reviewHold(pending: boolean, since: number | undefined, now: num
 /** The relayer does not pay to deploy a Safe that holds less than this (1 USDC). */
 export const MIN_DEPLOY_USDC = 1_000_000n
 /**
+ * Review r2 of #235 (Opus P2-3): a Base deploy backed only by funds at the account's own address on Ethereum (#309) needs
+ * this much there: less would never come home at a profit (the sibling's swap and bridge cost Ethereum gas).
+ */
+export const MIN_SIBLING_DEPLOY_USDC = 20_000_000n
+/**
  * Activations the relayer paid for and that failed, per account, in 24 hours. Only a new activation is refused once
  * the budget is spent. A withdrawal or a stop whose signature verified is always attempted: the guards protect the
  * relayer's gas, never at the price of an owner reaching their own funds.
@@ -1276,6 +1281,11 @@ export class Operator {
   /** otto/mamoru#309 (a): what the account holds at its own address on Ethereum, in USDC units (BridgeOut, set by boot): 0 when it does not apply, throws when it cannot be read. */
   siblingHoldingsUsdc: (ctx: AccountContext) => Promise<bigint> = async () => 0n
 
+  /** #333: the account is in the one-authorization scope: V4 is the only grant set it may run from now on. */
+  private oneAuthOnly(acc: AccountState): boolean {
+    return !!this.cfg.oneAuth && this.inScope(acc, 'one_auth_v4')
+  }
+
   /** For a CAP check: the account's funds on Ethereum, or CAP_CHECK_UNAVAILABLE when they apply and cannot be read (fail closed). */
   private async siblingForCap(acc: AccountState): Promise<bigint | null> {
     try {
@@ -2220,8 +2230,10 @@ export class Operator {
     if (kind === 'migrate-v4' && (!extra.built || extra.built.safeTxHash.toLowerCase() !== safeTxHash.toLowerCase() || extra.built.input.safeNonce !== nonce.toString() || fee.refund)) {
       throw new HttpError(409, 'ONE_AUTH_STALE', 'your Safe changed while the update was prepared: prepare it again')
     }
-    // #309 (a): a V4 activation is the builder's tx too, unless the Safe pays its own fee (a refund changes the hash).
-    if (kind === 'activate' && extra.built && !fee.refund && (extra.built.safeTxHash.toLowerCase() !== safeTxHash.toLowerCase() || extra.built.input.safeNonce !== nonce.toString())) {
+    // #309 (a): a V4 activation is the builder's tx too. Review r2 of #235 (Opus P2-2): never one the Safe pays itself (a
+    // refund changes the hash, the Worker could not rebuild what the owner signs): as a migration, it waits for Mamoru to pay.
+    if (kind === 'activate' && extra.built && fee.refund) throw new HttpError(503, 'SPONSOR_UNAVAILABLE', 'Mamoru cannot pay for this Start right now: nothing was changed, try again later')
+    if (kind === 'activate' && extra.built && (extra.built.safeTxHash.toLowerCase() !== safeTxHash.toLowerCase() || extra.built.input.safeNonce !== nonce.toString())) {
       throw new HttpError(409, 'ONE_AUTH_STALE', 'your Safe changed while the Start was prepared: prepare it again')
     }
     const prepareId = toHex(randomBytes(16)).slice(2)
@@ -2237,7 +2249,7 @@ export class Operator {
     // otto/mamoru#151: a renewal's grants are all of one policy, the one its summary was built from (renewPolicyOf).
     const policyId = kind === 'renew' ? renewPolicyOf(extra.grants ?? []) : undefined
     this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, ...(policyId ? { policyId } : {}), safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
-    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? { ...migrateFields(tx, extra.step ?? 0, movedTo(calls)), ...(extra.built ? { input: extra.built.input } : {}) } : {}), ...(kind === 'activate' && extra.built && !fee.refund ? { input: extra.built.input } : {}) }
+    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? { ...migrateFields(tx, extra.step ?? 0, movedTo(calls)), ...(extra.built ? { input: extra.built.input } : {}) } : {}), ...(kind === 'activate' && extra.built ? { input: extra.built.input } : {}) }
   }
 
   /** The policy a renewal of `acc` targets now: the move's target when one is offered, else the account's own. */
@@ -3367,7 +3379,7 @@ export class Operator {
     if (sib === null) throw capCheckUnavailable()
     const elsewhere = sib
     if (start.total + elsewhere > cap) throw depositOverCap(start.total + elsewhere, cap, start.across)
-    if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC && elsewhere < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc, this.chainName())
+    if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC && elsewhere < MIN_SIBLING_DEPLOY_USDC) throw belowDeployMinimum(r.usdc, this.chainName())
     if (v4) return this.planV4Activation(acc, live, r, cap, gen)
     const policy = this.activationPolicy(acc)
     // otto/mamoru#15: a Safe holding enough USDC buys its own gas reserve in this very transaction (self-reserve.ts):
@@ -4312,8 +4324,8 @@ export class Operator {
       // sibling. That USDC reaches Base only through the sibling's bridge, which needs this Safe deployed (#310): waiting
       // for USDC here would never end. Read on chain (BridgeOut.siblingHoldingsUsdc).
       const elsewhere = p.grants?.[0]?.grant.oneAuthV4 && usdc < MIN_DEPLOY_USDC ? ((await this.siblingHoldingsUsdc(acc.ctx).catch(() => null)) ?? 0n) : 0n
-      if (usdc === 0n && elsewhere < MIN_DEPLOY_USDC) return this.armFresh(acc, p, signature)
-      if (!(await readSafeNonce(this.client, live.safe)).deployed && usdc < MIN_DEPLOY_USDC && elsewhere < MIN_DEPLOY_USDC) throw belowDeployMinimum(usdc, this.chainName())
+      if (usdc === 0n && elsewhere < MIN_SIBLING_DEPLOY_USDC) return this.armFresh(acc, p, signature)
+      if (!(await readSafeNonce(this.client, live.safe)).deployed && usdc < MIN_DEPLOY_USDC && elsewhere < MIN_SIBLING_DEPLOY_USDC) throw belowDeployMinimum(usdc, this.chainName())
       // otto/mamoru#212: the total across chains, and USDC on its way here from Ethereum.
       const start = await this.startTotal(acc, await this.localTotal(acc, live.safe))
       // #309 (a), review r1 of #235: a V4 activation counts the account's funds at its own address on Ethereum too.
@@ -4567,6 +4579,8 @@ export class Operator {
    */
   private async preflight(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex): Promise<{ code: string; detail?: Partial<OpView> } | null> {
     if (safeTxHashOf(live, p.tx).toLowerCase() !== p.safeTxHash.toLowerCase()) return { code: 'BAD_SIGNATURE' }
+    // #333, review r2 of #235 (Opus P2-1): a v1-v6 Start prepared before the account entered the one-authorization scope.
+    if (p.kind === 'activate' && this.oneAuthOnly(acc) && !p.grants?.[0]?.grant.oneAuthV4) return { code: 'ONE_AUTH_REQUIRED' }
     // The mirror of the on-chain verifier. When it says yes the signature is proven. When it says no, the trusted
     // providers decide (quorum): their agreement is the proof, any revert is the refusal, one provider alone is neither.
     const data = execData(p.tx, signature)
@@ -4597,7 +4611,7 @@ export class Operator {
       // otto/mamoru#309 (a): a V4 activation whose funds sit at the account's own address on Ethereum (its sibling, #307)
       // deploys on Base without USDC there yet: the USDC arrives only through the sibling's bridge home, which needs this
       // Safe deployed (the guardian reads it back, #310). Counted from Ethereum, read on chain (siblingHoldingsUsdc).
-      if (!deployed && usdc < MIN_DEPLOY_USDC && !(p.kind === 'activate' && p.grants?.[0]?.grant.oneAuthV4 && ((await this.siblingHoldingsUsdc(acc.ctx).catch(() => null)) ?? 0n) >= MIN_DEPLOY_USDC)) return { code: 'BELOW_DEPLOY_MINIMUM' }
+      if (!deployed && usdc < MIN_DEPLOY_USDC && !(p.kind === 'activate' && p.grants?.[0]?.grant.oneAuthV4 && ((await this.siblingHoldingsUsdc(acc.ctx).catch(() => null)) ?? 0n) >= MIN_SIBLING_DEPLOY_USDC)) return { code: 'BELOW_DEPLOY_MINIMUM' }
       // otto/mamoru#140 (part2 #6): a Safe-paid transaction needs the ETH its fee was quoted at, or the relayer pays a revert (GS011).
       if (p.tx.refund && p.feeWei && (await this.client.getBalance({ address: live.safe })) < BigInt(p.feeWei)) return { code: 'SAFE_FEE_UNFUNDED' }
       let sim = await this.simulateOwner(this.client, live, deployed, data)
@@ -4938,6 +4952,10 @@ export class Operator {
     if (!a || acc.active) return this.disarm(acc, 'ALREADY_ACTIVE')
     // otto/mamoru#140 (part2 #3): armed before the account's last activation, stop or renewal: never run.
     if (this.staleActivation(acc, a) === 'ACTIVATION_STALE') return this.disarm(acc, 'ACTIVATION_STALE')
+    // #333, review r2 of #235 (Opus P2-1): an account in the one-authorization scope runs only V4. A v1-v6 Start armed
+    // before it entered the scope never runs (unless its approval was already sent once: that one goes to reconciliation);
+    // the owner approves the V4 one, which replaces it.
+    if (!a.execSent && this.oneAuthOnly(acc) && !a.grants[0]?.grant.oneAuthV4) return this.disarm(acc, 'ONE_AUTH_REQUIRED')
     // An op whose execTransaction went to a provider once reads its Safe nonce first, on every pass, before anything
     // can hold it (the wait between tries, budget, cap, relayer short): an attempt that landed after all must reach
     // reconciliation while its transaction is still recent.
@@ -5301,9 +5319,12 @@ export class Operator {
         logErr(`[owner] ${op.opId} the other chains could not be read at send time, not activating`, undefined)
         return this.failOwner(acc, op, 'CAP_CHECK_UNAVAILABLE')
       }
-      if (start.total > cap) {
-        logErr(`[owner] ${op.opId} deposit over cap at send time, not activating:`, { usdc: start.total.toString(), cap: cap.toString() })
-        return this.failOwner(acc, op, 'DEPOSIT_OVER_CAP', { amountUsdc: start.total.toString(), capUsdc: cap.toString() })
+      // #309 (c), review r2 of #235: a V4 activation counts its funds on Ethereum here too, read or not run.
+      const there = p.grants?.[0]?.grant.oneAuthV4 ? await this.siblingForCap(acc) : 0n
+      if (there === null) return this.failOwner(acc, op, 'CAP_CHECK_UNAVAILABLE')
+      if (start.total + there > cap) {
+        logErr(`[owner] ${op.opId} deposit over cap at send time, not activating:`, { usdc: (start.total + there).toString(), cap: cap.toString() })
+        return this.failOwner(acc, op, 'DEPOSIT_OVER_CAP', { amountUsdc: (start.total + there).toString(), capUsdc: cap.toString() })
       }
     }
     // otto/mamoru#15: checked again right before the exec leaves (the deploy and the simulation took time).

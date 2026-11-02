@@ -93,5 +93,41 @@ describe('V4 activation of a never-activated account (#309 a)', () => {
     const err = await w.op.prepareActivate(ctx).then(() => null, (e) => e as { code?: string })
     expect(err?.code).toBe('CAP_CHECK_UNAVAILABLE')
   })
+
+  test('#333, review r2 of #235: a v1-v6 Start armed before the account entered the scope never runs, nor one prepared before', async () => {
+    let scope: string[] = []
+    const w = world(0n, { ...scoped, opsScopedFlags: () => ({ one_auth_v4: scope }) })
+    inactive(w)
+    ;(w.op as unknown as { startLoop(a: AccountState): void }).startLoop = () => {}
+    const old = await w.op.prepareActivate(ctx)
+    expect((old as unknown as { input?: unknown }).input).toBeUndefined()
+    expect((await quiet(() => w.op.submit(ctx, 'activate', sign(old)))).out.code).toBe('ARMED')
+    const acc = w.state.accounts.k!
+    expect(acc.armed).toBeDefined()
+    scope = ['k']
+    await (w.op as unknown as { fireArmed(a: AccountState, usdc: bigint): Promise<void> }).fireArmed(acc, 5_000_000n)
+    expect(acc.armed).toBeUndefined()
+    expect(acc.active).toBe(false)
+    expect(acc.ops.some((o) => o.code === 'ONE_AUTH_REQUIRED')).toBe(true)
+    // prepared out of the scope, submitted in it: refused before anything is sent
+    scope = []
+    const w2 = world(5_000_000n, { ...scoped, opsScopedFlags: () => ({ one_auth_v4: scope }) })
+    inactive(w2)
+    ;(w2.op as unknown as { startLoop(a: AccountState): void }).startLoop = () => {}
+    const t = await w2.op.prepareActivate(ctx)
+    scope = ['k']
+    const r = (await quiet(() => w2.op.submit(ctx, 'activate', sign(t)))).out
+    expect(r.code).toBe('ONE_AUTH_REQUIRED')
+    expect(w2.state.accounts.k!.active).toBe(false)
+  })
+
+  test('review r2 of #235 (P2-3): under MIN_SIBLING_DEPLOY_USDC on Ethereum, no Base deploy: it waits armed', async () => {
+    const w = world(0n, scoped)
+    inactive(w)
+    ;(w.op as unknown as { startLoop(a: AccountState): void }).startLoop = () => {}
+    w.op.siblingHoldingsUsdc = async () => 10_000_000n
+    const t = await w.op.prepareActivate(ctx)
+    expect((await quiet(() => w.op.submit(ctx, 'activate', sign(t)))).out.code).toBe('ARMED')
+  })
 })
 
