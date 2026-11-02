@@ -133,3 +133,7 @@ reads `~/.config/mamoru-guardian/env` (names in `apps/mamoru-guardian/README.md`
 file, never in that env file) and writes only `~/.local/state/mamoru-guardian`. It holds the guardian key, which the
 operator never does. Nothing installs or starts it; to apply: copy or symlink to `~/.config/systemd/user/`, then
 `systemctl --user daemon-reload && systemctl --user enable --now mamoru-guardian` (try `--dry-run` first).
+
+It restarts forever with a growing backoff (`Restart=always`, 30 s up to 1 h, no start limit). The guardian pages its own
+startup failures (an RPC down or on the wrong chain), at most once an hour, before it exits. `mamoru-guardian-alert@.service`
+is its `OnFailure=` unit (copy it beside it): a fixed line through the same webhook file if the unit ever ends `failed`.

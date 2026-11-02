@@ -293,10 +293,27 @@ export function withRegistryPools(policy: PolicyVersion, deployment: Pick<OneAut
     named.push({ name: e.name, pool: p, stablePair })
   }
   const extended: Registry = { ...registry, entries }
-  const local = policy.buckets.filter((b) => b.id === 'stables' || b.id === 'risk')
-  // A bucket the registry lists no pool for keeps its weight (decide's denominator is preferenceTotal on every side): its
-  // share waits as savings, and no other bucket grows past its own preference.
-  const buckets = local.map((b) => ({ ...b, pools: named.filter((n) => (b.id === 'stables' ? n.stablePair : !n.stablePair)).map((n) => n.name) }))
+  // Review of #202 r3 (Sol 1): every bucket the policy declares is kept, whatever its id. A registry pool joins the bucket that
+  // declares a pool of the same token pair (any fee tier), else the first bucket of its kind (a pair of pinned stables, or
+  // a stable and an asset); a bucket with no listed pool keeps its weight (decide's denominator under V4 is preferenceTotal).
+  const pairOf = (t0: string, t1: string) => [t0, t1].sort().join('/')
+  const declared = policy.buckets.map((b) => {
+    const pairs = new Set<string>()
+    let stableKind: boolean | null = null
+    for (const name of b.pools) {
+      const e = registry.entries.find((x) => x.name === name)
+      if (!e?.token0 || !e.token1) continue
+      pairs.add(pairOf(e.token0, e.token1))
+      stableKind = pinned.stables.includes(e.token0) && pinned.stables.includes(e.token1)
+    }
+    return { b, pairs, stableKind }
+  })
+  const home = (n: (typeof named)[number]) => {
+    const e = entries.find((x) => x.name === n.name)!
+    const byPair = declared.find((d) => d.pairs.has(pairOf(e.token0!, e.token1!)))
+    return (byPair ?? declared.find((d) => d.stableKind === n.stablePair))?.b.id
+  }
+  const buckets = policy.buckets.map((b) => ({ ...b, pools: named.filter((n) => home(n) === b.id).map((n) => n.name) }))
   const bandTicksByPool: Record<RegistryName, number> = {}
   const anchorByPool: Record<RegistryName, { tick: number; band: number }> = {}
   const twapByPool: Record<RegistryName, { long: number; short: number }> = {}

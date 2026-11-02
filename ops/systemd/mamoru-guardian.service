@@ -10,16 +10,21 @@
 Description=Mamoru guardian watcher (setReady readback, registry and remote Safe alerts)
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# Review of #202 r3 (Sol 2): never give up. systemd restarts it with a growing backoff (30 s up to 1 h); the guardian
+# itself pages a startup failure (once an hour, src/main.ts pageStartupFailure). OnFailure= also pages if the unit ever
+# lands in `failed` (an operator stop with an error, or a systemd that cannot restart it).
+StartLimitIntervalSec=0
+OnFailure=mamoru-guardian-alert@%N.service
 
 [Service]
 Type=simple
 WorkingDirectory=%h/box/src/mamoru.workspace/mamoru
 EnvironmentFile=%h/.config/mamoru-guardian/env
 ExecStart=/etc/profiles/per-user/otto/bin/bun apps/mamoru-guardian/src/main.ts
-Restart=on-failure
-RestartSec=10
+Restart=always
+RestartSec=30
+RestartSteps=8
+RestartMaxDelaySec=1h
 # State file, key and webhook files are 0600; never create anything group/other-readable.
 UMask=0077
 
